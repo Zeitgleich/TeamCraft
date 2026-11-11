@@ -198,6 +198,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.request_device_addition(conversation).await?;
       return Ok(MemberDeviceJoin::Unjoinable);
     }
+    if let Err(refusal) = self.admit_anchor_entering(conversation, &group).await? {
+      // The group information's anchor is stripped, replaced or below the floor of what this
+      // user's devices saw (an old `GroupInfo`): nothing was sent, and the device stays out
+      // (e2ee.md §4.6.5).
+      tracing::warn!(conversation_id = %conversation, %refusal, "refused the group information against the channel's anchor");
+      group.delete(&self.provider)?;
+      return Ok(MemberDeviceJoin::Unjoinable);
+    }
     if self.is_direct(conversation)? && !holds_everybody(&group, &users)? {
       // A DM's group that doesn't hold all its participants yet may be a founder's group of one
       // that still loses the founding race (e2ee.md §4.6): the members add this device instead.

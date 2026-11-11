@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use rand_core::OsRng;
+use teamcraft_crypto::channel_anchor::ChannelAnchor;
 use teamcraft_crypto::content_key::{ContentKey, ContentKeyId};
 use teamcraft_crypto::identity::VerifiedDevice;
 use teamcraft_crypto::membership::{
@@ -14,6 +15,7 @@ use teamcraft_crypto::mls::{
   CommitOutput, ContentKeyBundle, ConversationGroup, GroupEvent, GroupMember, MembershipUpdate, MlsError,
   RejoinRequest, SignedRejoinRequest, VerifiedWelcome,
 };
+use teamcraft_proto::channel_name::checked_channel_name;
 use teamcraft_proto::{
   AddConversationMemberRequest, Base64Bytes, ClaimKeyPackagesRequest, ConversationId, ConversationKind,
   CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest, DeviceId, HistoryPolicy, Id, IdempotencyKey,
@@ -33,7 +35,8 @@ use crate::mls_storage::adopt_mls_entries;
 use crate::records;
 use crate::retry::{RetryPolicy, millis};
 use crate::store::{ConversationEvent, LocalStore, Table};
-use crate::trust::{PinnedDirectory, WorkspaceAuthority};
+use crate::trust::{PinnedDirectory, RosterStanding, WorkspaceAuthority};
+use crate::workspace::WorkspaceState;
 
 /// Who signs a membership change this device commits.
 #[derive(Clone, Debug)]
@@ -66,7 +69,7 @@ const GROUP_INFO_PUBLISHED_PREFIX: &str = "group-info-published/";
 const MEETING_REMOVALS_PREFIX: &str = "meeting-removals/";
 
 /// This device's commit, merged: what it did and when the server stored it.
-struct OwnCommit {
+pub(super) struct OwnCommit {
   update: MembershipUpdate,
   at_ms: i64,
 }
@@ -205,6 +208,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     space: SpaceId,
     request: &CreateChannelRequest,
   ) -> Result<ConversationId, CoreError> {
+    // NFC and no invisible, bidi or control characters (e2ee.md §4.6.5): the name is sent, stored
+    // and signed byte for byte as checked here. The field checks it first.
+    let name = checked_channel_name(&request.name)?;
+    let normalized;
+    let request = if name == request.name {
+      request
+    } else {
+      normalized = CreateChannelRequest {
+        name,
+        ..request.clone()
+      };
+      &normalized
+    };
     let mut attempt = 1;
     // A lost answer is retried with the same request, hence the same idempotency key: the server
     // returns the channel it already made instead of a second one.
@@ -224,7 +240,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )?;
     // A repeated create (idempotency key) returns the channel we already founded.
     if !self.has_group(conversation.id)? {
-      self.found_group(conversation.id)?;
+      // What this device asked for, never the server's answer (e2ee.md §4.6.5, "Founding").
+      let maybe_anchor = self
+        .anchor_for_new_channel(conversation.id, space, &request.name)
+        .await;
+      self.found_group_anchored(conversation.id, maybe_anchor.as_ref())?;
+      if maybe_anchor.is_some() {
+        self.pin_own_founding(conversation.id).await;
+      }
       // The creator is the channel's first admin, signed so members don't take the server's word
       // for it (e2ee.md §4.6.1).
       self.found_channel_roles(conversation.id).await;
@@ -1527,6 +1550,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         // This device's commit, whose answer was lost: the server took it.
         let update = self.merge_own_commit(conversation, message)?;
         self.remember_member_keys(conversation, &directory, at_ms)?;
+        if update.maybe_properties_change.is_some() {
+          self.note_anchor_inside(conversation, &directory)?;
+        }
         if let Some(share) = self.after_own_commit(conversation, &update, at_ms)? {
           self.queue_pending(PendingChange::ShareHistory {
             conversation_id: conversation,
@@ -1605,6 +1631,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           // Somebody answered that device's request already.
           self.note_device_readded(conversation, device, at_ms)?;
         }
+        if update.maybe_properties_change.is_some() {
+          // A move or rename: the floor rises with it (e2ee.md §4.6.5).
+          self.note_anchor_inside(conversation, &directory)?;
+        }
         self.note_member_changes(conversation, &before, &update)?;
         // Never silent (admin.md §2.4): told from the commit just verified, not from a message.
         let after = self.group_or_error(conversation)?.members()?;
@@ -1660,24 +1690,47 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(MlsProgress::Done)
   }
 
-  /// Founds the MLS group of a conversation this device created, with a first content key.
-  fn found_group(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
-    self.found_group_with_key(conversation, None)
+  /// Founds the MLS group of a channel this device created, with a first content key, and with
+  /// its signed anchor in the group context if there is one (e2ee.md §4.6.5).
+  fn found_group_anchored(
+    &mut self,
+    conversation: ConversationId,
+    maybe_anchor: Option<&ChannelAnchor>,
+  ) -> Result<(), CoreError> {
+    self.found_group_from(conversation, None, maybe_anchor)
   }
 
-  /// Like [`Self::found_group`], with `maybe_key` as the first content key; without one, a new
+  /// Founds a conversation's group with `maybe_key` as the first content key; without one, a new
   /// key is made unless the conversation has a current key already.
   fn found_group_with_key(
     &mut self,
     conversation: ConversationId,
     maybe_key: Option<ContentKey>,
   ) -> Result<(), CoreError> {
-    let group = ConversationGroup::create(
-      &self.provider,
-      &self.account.device,
-      &self.account.certificate,
-      convert::conversation(conversation),
-    )?;
+    self.found_group_from(conversation, maybe_key, None)
+  }
+
+  fn found_group_from(
+    &mut self,
+    conversation: ConversationId,
+    maybe_key: Option<ContentKey>,
+    maybe_anchor: Option<&ChannelAnchor>,
+  ) -> Result<(), CoreError> {
+    let group = match maybe_anchor {
+      Some(anchor) => ConversationGroup::create_anchored(
+        &self.provider,
+        &self.account.device,
+        &self.account.certificate,
+        convert::conversation(conversation),
+        anchor,
+      )?,
+      None => ConversationGroup::create(
+        &self.provider,
+        &self.account.device,
+        &self.account.certificate,
+        convert::conversation(conversation),
+      )?,
+    };
     self.groups.insert(conversation, group);
     let ring = self.account.key_bag.ring_mut(convert::conversation(conversation));
     match maybe_key {
@@ -1877,7 +1930,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// the epoch (the commit is discarded). If the outcome is unknown (the answer was lost), the
   /// commit stays pending and is merged when it shows up in the group's queue
   /// ([`Self::sync_mls`]), so the device never falls an epoch behind its own commit (e2ee.md §4.6).
-  async fn post_commit(
+  pub(super) async fn post_commit(
     &mut self,
     conversation: ConversationId,
     output: CommitOutput,
@@ -1940,7 +1993,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Settles a commit whose answer was lost before this device commits again: merged if the queue
   /// shows it, discarded if another commit won, sent again if the server never got it.
-  async fn resolve_pending_commit(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+  pub(super) async fn resolve_pending_commit(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<(), CoreError> {
     let _step = crate::timing::step("resolve_pending_commit");
     if !self.has_pending_commit(conversation)? {
       return Ok(());
@@ -1970,6 +2026,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         let directory = self.member_directory(conversation).await?;
         let at_ms = response.commit.id.snowflake().unix_millis();
         self.remember_member_keys(conversation, &directory, at_ms)?;
+        if update.maybe_properties_change.is_some() {
+          self.note_anchor_inside(conversation, &directory)?;
+        }
         if let Some(share) = self.after_own_commit(conversation, &update, at_ms)? {
           self.queue_pending(PendingChange::ShareHistory {
             conversation_id: conversation,
@@ -2935,6 +2994,27 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Ok(group) => group,
       Err(error) => return Ok(WelcomeJoin::Rejected(error)),
     };
+    // A welcome or add-back into a group without the pinned anchor, with another founding or
+    // below the floor: the device stays out (e2ee.md §4.6.5, "Stripping and replacing").
+    match self.admit_anchor_entering(conversation, &group).await {
+      Ok(Ok(())) => {},
+      Ok(Err(refusal)) => {
+        group.delete(&self.provider)?;
+        tracing::warn!(conversation_id = %conversation, %refusal, "welcome refused against the channel's anchor");
+        return Ok(WelcomeJoin::Rejected(MlsError::UnexpectedMessage(
+          "welcome into a group the channel's anchor pin refuses",
+        )));
+      },
+      // Opened already: be added back once the network is there, as for a failed pin.
+      Err(error) if error.is_transient() => {
+        group.delete(&self.provider)?;
+        return Ok(WelcomeJoin::KeyPackageSpent);
+      },
+      Err(error) => {
+        group.delete(&self.provider)?;
+        return Err(error);
+      },
+    }
     match self
       .is_founded_by_organizer(conversation, &group, &directory, Some(welcome_sender))
       .await
@@ -3016,6 +3096,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     let usable = self.usable_key_packages(conversation, user, claimed.packages, directory)?;
     match usable.maybe_first_error {
+      // An app from before the channel anchor can't be in an anchored channel (e2ee.md §4.6.5):
+      // the adder is told that person has to update, before anything is sent.
+      Some(MlsError::MustUpdate(_)) if usable.key_packages.is_empty() => Err(CoreError::MustUpdate {
+        user,
+        name: self.display_name(user)?,
+      }),
       // Not one device of the user can be added: say why instead of doing nothing.
       Some(error) if usable.key_packages.is_empty() => Err(error.into()),
       _ => Ok((usable.key_packages, usable.recipients)),
@@ -3122,7 +3208,25 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .await
   }
 
-  fn group_authority(
+  /// The admins of the verified roster, none while it is too old to trust (an owner's re-signing
+  /// is overdue), and which roster that is.
+  pub(super) fn fresh_admins(&self, workspace: &WorkspaceState, at_ms: i64) -> (Vec<UserId>, RosterStanding) {
+    let max_age_ms = i64::try_from(self.settings.workspace_max_age.as_millis()).unwrap_or(i64::MAX);
+    let is_fresh = workspace.is_roster_fresh(at_ms, max_age_ms);
+    let admins = if is_fresh {
+      workspace.admins().collect()
+    } else {
+      tracing::warn!("the signed roster is stale; admins have no authority until an owner re-signs it");
+      Vec::new()
+    };
+    let roster = RosterStanding {
+      version: workspace.roster.version,
+      is_fresh,
+    };
+    (admins, roster)
+  }
+
+  pub(super) fn group_authority(
     &mut self,
     conversation: ConversationId,
     at_ms: i64,
@@ -3153,18 +3257,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         && response.visibility == teamcraft_proto::ConversationVisibility::Public
         && !response.is_archived
     });
-    // A roster too old to trust (an owner's re-signing is overdue) grants no admin authority.
-    let max_age_ms = i64::try_from(self.settings.workspace_max_age.as_millis()).unwrap_or(i64::MAX);
-    let admins: Vec<UserId> = if workspace.is_roster_fresh(at_ms, max_age_ms) {
-      workspace.admins().collect()
-    } else {
-      tracing::warn!("the signed roster is stale; admins have no authority until an owner re-signs it");
-      Vec::new()
-    };
+    let (admins, roster) = self.fresh_admins(&workspace, at_ms);
     // Signed channel roles, once the channel has any (e2ee.md §4.6.1); never the server's list.
     let role_state = self.channel_role_state(conversation)?;
     let maybe_signed_admins = role_state.is_signed().then(|| role_state.admins());
     let mut authority = WorkspaceAuthority::new(members, admins, workspace.policy.admin_self_join.clone())
+      .with_roster(roster)
       .with_guests(guests)
       .with_signed_channel_admins(maybe_signed_admins)
       .for_public_channel(is_public_channel)

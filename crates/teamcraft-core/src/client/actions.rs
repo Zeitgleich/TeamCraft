@@ -157,7 +157,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     })
   }
 
-  fn display_name(&self, user: UserId) -> Result<String, CoreError> {
+  pub(super) fn display_name(&self, user: UserId) -> Result<String, CoreError> {
     Ok(
       crate::records::get_json::<teamcraft_proto::UserSummary>(
         &self.store,

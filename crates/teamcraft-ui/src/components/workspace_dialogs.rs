@@ -19,6 +19,7 @@ use teamcraft_client_api::role_review::{
 use teamcraft_client_api::role_rules::{
   RoleTarget, SpaceStanding, assignable_roles, can_manage_channel_roles,
 };
+use teamcraft_proto::channel_name::{ChannelNameError, checked_channel_name};
 use teamcraft_proto::{CategoryId, HistoryPolicy, IdempotencyKey, Permission};
 use wasm_bindgen::JsCast;
 
@@ -168,6 +169,23 @@ fn name_errors(i18n: I18n, field_id: &'static str, name: &str) -> FieldErrors {
   found
 }
 
+/// A channel's name keeps the rules every client checks (e2ee.md §4.6.5): no bidi, control or
+/// invisible characters. The core brings it to NFC; a name that breaks them is said at the field.
+fn channel_name_errors(i18n: I18n, field_id: &'static str, name: &str) -> FieldErrors {
+  let mut found = FieldErrors::new();
+  let maybe_key = match checked_channel_name(name) {
+    Ok(_) => None,
+    Err(ChannelNameError::Empty) => Some("form-error-name"),
+    Err(ChannelNameError::BidiControl) => Some("channel-name-error-bidi"),
+    Err(ChannelNameError::ControlCharacter) => Some("channel-name-error-control"),
+    Err(ChannelNameError::InvisibleCharacter) => Some("channel-name-error-invisible"),
+  };
+  if let Some(key) = maybe_key {
+    found.push(field_id, i18n.t(key));
+  }
+  found
+}
+
 fn non_empty(text: &str) -> Option<String> {
   let trimmed = text.trim();
   (!trimmed.is_empty()).then(|| trimmed.to_owned())
@@ -234,13 +252,17 @@ pub fn NewChannelDialog(space: SpaceId) -> impl IntoView {
   let history = RwSignal::new(HistoryChoice::WorkspaceDefault);
   let categories = Memo::new(move |_| state.read(|backend| backend.categories(space)));
   let errors = FormErrors::new();
-  Effect::new(move |_| errors.follow(name_errors(i18n, "channel-name", &name.get())));
+  Effect::new(move |_| errors.follow(channel_name_errors(i18n, "channel-name", &name.get())));
   // One key per opened dialog: every submit of it is the same user action.
   let key = IdempotencyKey::random();
   let submit = move |ev: leptos::ev::SubmitEvent| {
     ev.prevent_default();
+    let found = channel_name_errors(i18n, "channel-name", &name.get_untracked());
+    if !found.is_empty() {
+      errors.refuse("channel-new-form", found);
+      return;
+    }
     let Some(name) = non_empty(&name.get_untracked()) else {
-      errors.refuse("channel-new-form", name_errors(i18n, "channel-name", ""));
       return;
     };
     let maybe_category = category
@@ -526,8 +548,15 @@ fn ChannelGeneral(conversation: ConversationId, name: String, topic: String) -> 
   let topic = RwSignal::new(topic);
   let pending = PendingAction::new();
   let has_saved = RwSignal::new(false);
+  let errors = FormErrors::new();
+  Effect::new(move |_| errors.follow(channel_name_errors(i18n, "cs-name", &name.get())));
   let save = move |ev: leptos::ev::SubmitEvent| {
     ev.prevent_default();
+    let found = channel_name_errors(i18n, "cs-name", &name.get_untracked());
+    if !found.is_empty() {
+      errors.refuse("channel-general-form", found);
+      return;
+    }
     has_saved.set(true);
     pending.run(|| {
       state.write(|backend| {
@@ -546,10 +575,13 @@ fn ChannelGeneral(conversation: ConversationId, name: String, topic: String) -> 
     <Show when=move || !can_edit.get() fallback=|| ()>
       <p class="hint">{move || i18n.t("channel-settings-read-only")}</p>
     </Show>
-    <form class="settings-form" on:submit=save>
+    <form id="channel-general-form" class="settings-form" on:submit=save>
       <fieldset class="plain-fieldset" prop:disabled=move || !can_edit.get()>
         <label for="cs-name">{move || i18n.t("channel-name")}</label>
-        <input id="cs-name" class="input" data-autofocus required maxlength="80" prop:value=move || name.get() on:input=move |ev| { has_saved.set(false); name.set(event_target_value(&ev)) } />
+        <input id="cs-name" class="input" data-autofocus aria-required="true" maxlength="80"
+          aria-invalid=errors.invalid("cs-name") aria-describedby=errors.described("cs-name")
+          prop:value=move || name.get() on:input=move |ev| { has_saved.set(false); name.set(event_target_value(&ev)) } />
+        <FieldError errors=errors field="cs-name" />
         <label for="cs-topic">{move || i18n.t("channel-topic")}</label>
         <input id="cs-topic" class="input" maxlength="250" prop:value=move || topic.get() on:input=move |ev| { has_saved.set(false); topic.set(event_target_value(&ev)) } />
       </fieldset>

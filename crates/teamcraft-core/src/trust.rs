@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+use teamcraft_crypto::channel_anchor::{Judged, Standing};
 use teamcraft_crypto::device_list::VerifiedDeviceList;
 use teamcraft_crypto::identity::{IdentityPublicKey, VerifiedDevice};
 use teamcraft_crypto::ids as crypto;
@@ -55,6 +56,17 @@ pub(crate) struct WorkspaceAuthority {
   /// Decides like clients before v1.0.9, which held only an admin's own self-join to the policy.
   /// Only for tests of how this version takes such members' commits.
   is_before_v1_0_9: bool,
+  /// The version of the verified roster `admins` comes from, and whether it is fresh: what a
+  /// workspace signer of a channel anchor is judged on (e2ee.md §4.6.5, check 4, D4).
+  maybe_roster: Option<RosterStanding>,
+}
+
+/// The verified roster behind [`WorkspaceAuthority`]'s admins.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RosterStanding {
+  pub(crate) version: u64,
+  /// The roster is younger than `workspace_max_age` (a stale one grants no admin authority).
+  pub(crate) is_fresh: bool,
 }
 
 impl PinnedDirectory {
@@ -117,6 +129,25 @@ impl IdentityDirectory for PinnedDirectory {
   fn is_guest(&self, user_id: crypto::UserId) -> bool {
     self.guests.contains(&user_id)
   }
+
+  /// This device holds only the newest verified list of each user. `Newest`: that list, which must
+  /// be at least `list_version` (`0`: any). `AsNamed`: a device the newest list still names was on
+  /// the named one too; a revoked one may have been revoked before it, which this device can't
+  /// tell, so it grants nothing (the anchor only grants).
+  fn device_listing(&self, device: &VerifiedDevice, list_version: u64, judged: Judged) -> Standing {
+    let Some(list) = self.device_lists.get(&device.user_id()) else {
+      return Standing::Unknown;
+    };
+    if list.sequence() < list_version {
+      return Standing::Unknown;
+    }
+    let is_revoked = list.is_revoked(device.device_id());
+    match (list.is_active(device), is_revoked, judged) {
+      (true, false, _) => Standing::Confirmed,
+      (_, true, Judged::Newest) => Standing::Refused,
+      _ => Standing::Unknown,
+    }
+  }
 }
 
 impl WorkspaceAuthority {
@@ -135,7 +166,15 @@ impl WorkspaceAuthority {
       is_public_channel: false,
       maybe_signed_channel_admins: None,
       is_before_v1_0_9: false,
+      maybe_roster: None,
     }
+  }
+
+  /// The verified roster the admins come from. Without one, nobody is a workspace signer of an
+  /// anchor (`Unknown`).
+  pub(crate) fn with_roster(mut self, roster: RosterStanding) -> Self {
+    self.maybe_roster = Some(roster);
+    self
   }
 
   /// The group's meeting guests: they are not allowed to change anybody's membership but their own.
@@ -236,6 +275,24 @@ impl MembershipAuthority for WorkspaceAuthority {
       _ => true,
     }
   }
+
+  /// A workspace owner or admin of the verified roster (e2ee.md §4.6.5, check 4, D4). This device
+  /// holds the newest roster only: `Newest` asks that it is fresh and names them, at or above
+  /// `roster_version`; `AsNamed` takes a signer the newest roster still names (a demoted one may
+  /// have been an admin then, which this device can't tell: `Unknown`, granting nothing).
+  fn workspace_signer(&self, user_id: crypto::UserId, roster_version: u64, judged: Judged) -> Standing {
+    let Some(roster) = self.maybe_roster else {
+      return Standing::Unknown;
+    };
+    if roster.version < roster_version || !roster.is_fresh {
+      return Standing::Unknown;
+    }
+    match (self.admins.contains(&user_id), judged) {
+      (true, _) => Standing::Confirmed,
+      (false, Judged::Newest) => Standing::Refused,
+      (false, Judged::AsNamed) => Standing::Unknown,
+    }
+  }
 }
 
 impl WorkspaceAuthority {
@@ -272,6 +329,54 @@ mod tests {
   use teamcraft_proto::{Id, Snowflake};
 
   use super::*;
+
+  /// e2ee.md §4.6.5, check 4 and D4: a workspace signer of an anchor is an admin of a fresh roster
+  /// at least as new as the one named; nothing is known without a roster.
+  #[test]
+  fn a_workspace_signer_needs_a_fresh_roster_that_names_them() {
+    let admin = UserId::from_snowflake(Snowflake::new(1).unwrap());
+    let (admin_id, member) = (convert::user(admin), crypto::UserId::new(2));
+    let fresh = RosterStanding {
+      version: 5,
+      is_fresh: true,
+    };
+    let authority = WorkspaceAuthority::new([member], [admin], AdminSelfJoin::Visible);
+    assert_eq!(
+      authority.workspace_signer(admin_id, 5, Judged::Newest),
+      Standing::Unknown
+    );
+    let authority = authority.with_roster(fresh);
+    assert_eq!(
+      authority.workspace_signer(admin_id, 5, Judged::Newest),
+      Standing::Confirmed
+    );
+    assert_eq!(
+      authority.workspace_signer(admin_id, 0, Judged::AsNamed),
+      Standing::Confirmed
+    );
+    assert_eq!(
+      authority.workspace_signer(member, 5, Judged::Newest),
+      Standing::Refused
+    );
+    assert_eq!(
+      authority.workspace_signer(member, 3, Judged::AsNamed),
+      Standing::Unknown
+    );
+    // A roster newer than this device's can't be checked yet.
+    assert_eq!(
+      authority.workspace_signer(admin_id, 6, Judged::Newest),
+      Standing::Unknown
+    );
+    let stale =
+      WorkspaceAuthority::new([member], [admin], AdminSelfJoin::Visible).with_roster(RosterStanding {
+        version: 5,
+        is_fresh: false,
+      });
+    assert_eq!(
+      stale.workspace_signer(admin_id, 5, Judged::Newest),
+      Standing::Unknown
+    );
+  }
 
   /// Issue #380: under `owner_approval` in a channel with signed roles, only a signed admin lets
   /// an admin in; everything else a member does is unchanged. Nothing signed: every member, as before.

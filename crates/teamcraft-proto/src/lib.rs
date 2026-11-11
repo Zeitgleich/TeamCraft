@@ -8,6 +8,7 @@ mod bytes;
 mod call_fallback;
 mod call_media;
 mod calls;
+pub mod channel_name;
 mod conversation;
 pub mod custom_emoji_set;
 mod error;

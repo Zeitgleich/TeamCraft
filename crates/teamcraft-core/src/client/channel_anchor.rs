@@ -1,0 +1,471 @@
+//! The channel anchor on this device (e2ee.md §4.6.5): founding new channels anchored, checking
+//! the anchor against the pin and the floor whenever the device enters a group state or a commit
+//! changes it, and signing moves and renames.
+//!
+//! The pure decisions are `crate::anchoring`'s; this module reads the device's state for them and
+//! records the outcome in the account data. Meeting chats (D10) aren't anchored yet: the apps
+//! don't hand the meeting's ID to the chat's founding.
+
+use teamcraft_crypto::channel_anchor::{
+  AnchorExpectation, AnchorKind, ChannelAnchor, ChannelProperties, DEFAULT_MAX_ANCHOR_BYTES, ExpectedKind,
+  FloorError, Founding, NameAuthority, PropertiesChangeError, PropertiesTarget, VerifiedAnchor, name_hash,
+};
+use teamcraft_crypto::membership::IdentityDirectory;
+use teamcraft_crypto::mls::{ConversationGroup, MlsError};
+use teamcraft_proto::{ConversationId, ConversationKind, ConversationResponse, SpaceId, UserId};
+
+use super::Client;
+use crate::anchoring::{self, AnchorOutcome, AnchorVerdict, ReleaseVersion};
+use crate::api::ServerApi;
+use crate::convert;
+use crate::error::CoreError;
+use crate::records;
+use crate::signed_deletion::AnchorFacts;
+use crate::store::{LocalStore, Table};
+use crate::trust::{PinnedDirectory, WorkspaceAuthority};
+
+/// Where the highest `minimum_client_version` this device has seen is kept (D2: monotonic).
+const MINIMUM_VERSION_KEY: &str = "highest_minimum_client_version";
+
+/// The channel's anchor as this device holds it now, for decisions that rest on it.
+pub(crate) enum HeldAnchor {
+  Unanchored,
+  /// Pinned, but the anchor doesn't verify on this device right now.
+  Unverifiable,
+  Anchored {
+    anchor: Box<VerifiedAnchor>,
+    floor_grants: bool,
+  },
+}
+
+/// A move or rename to sign after the server took it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PropertiesWish<'a> {
+  /// `None`: the space stays as the anchor has it (a move always names a space).
+  pub(crate) maybe_space: Option<SpaceId>,
+  /// `None`: the name stays as the anchor has it (the listed name must match it).
+  pub(crate) maybe_name: Option<&'a str>,
+}
+
+impl HeldAnchor {
+  pub(crate) fn facts<'a>(&'a self, maybe_listed_name: Option<&'a str>) -> AnchorFacts<'a> {
+    match self {
+      Self::Unanchored => AnchorFacts::Unanchored,
+      Self::Unverifiable => AnchorFacts::Unverifiable,
+      Self::Anchored { anchor, floor_grants } => AnchorFacts::Anchored {
+        anchor,
+        floor_grants: *floor_grants,
+        maybe_listed_name,
+      },
+    }
+  }
+}
+
+impl<A: ServerApi, S: LocalStore> Client<A, S> {
+  /// Notes the server's `minimum_client_version`; only a higher one than seen before counts, so a
+  /// server can't turn anchoring off again for this device (D2). The apps may also pass what they
+  /// read from `GET /client-compatibility` or the server info.
+  pub fn note_minimum_client_version(&mut self, version: &str) -> Result<(), CoreError> {
+    let Some(seen) = ReleaseVersion::parse(version) else {
+      tracing::debug!(version, "ignored a minimum client version that doesn't parse");
+      return Ok(());
+    };
+    if self
+      .highest_minimum_client_version()?
+      .is_some_and(|highest| highest >= seen)
+    {
+      return Ok(());
+    }
+    records::put_json(&self.store, Table::SyncState, MINIMUM_VERSION_KEY, &seen)
+  }
+
+  pub(crate) fn highest_minimum_client_version(&self) -> Result<Option<ReleaseVersion>, CoreError> {
+    records::get_json(&self.store, Table::SyncState, MINIMUM_VERSION_KEY)
+  }
+
+  /// The signed anchor for a channel this device is about to found, or `None` to found it as
+  /// before (D2 not reached yet, or this device's own device list isn't known: an anchor it signs
+  /// then would verify nowhere). What it signs is what it asked the server for.
+  pub(crate) async fn anchor_for_new_channel(
+    &mut self,
+    conversation: ConversationId,
+    space: SpaceId,
+    name: &str,
+  ) -> Option<ChannelAnchor> {
+    match self.api.client_compatibility().await {
+      Ok(compatibility) => {
+        if let Err(error) = self.note_minimum_client_version(&compatibility.minimum_client_version) {
+          tracing::warn!(%error, "could not keep the minimum client version");
+        }
+      },
+      Err(error) => tracing::debug!(%error, "founding on the minimum client version seen before"),
+    }
+    if !anchoring::founds_anchored(self.highest_minimum_client_version().ok().flatten()) {
+      return None;
+    }
+    let me = self.user_id();
+    let identity = self.account.identity_public_key();
+    let maybe_list = match self.stored_device_list(me, &identity) {
+      Ok(Some(list)) => Some(list),
+      _ => self.fetch_device_list(me, &identity).await.ok().flatten(),
+    };
+    let is_listed = |list: &teamcraft_crypto::device_list::VerifiedDeviceList| {
+      self
+        .account
+        .certificate
+        .verify(&identity)
+        .is_ok_and(|device| list.is_active(&device))
+    };
+    let Some(list) = maybe_list.filter(is_listed) else {
+      tracing::warn!(conversation_id = %conversation, "this device isn't on its own device list yet; the channel is founded unanchored");
+      return None;
+    };
+    let founding = Founding {
+      conversation_id: convert::conversation(conversation),
+      kind: AnchorKind::Channel,
+      device_list_version: list.sequence(),
+      signed_at_ms: u64::try_from(self.now_ms()).unwrap_or(0),
+      maybe_space_id: Some(convert::space(space)),
+      name,
+    };
+    match ChannelAnchor::found(&self.account.device, &self.account.certificate, &founding) {
+      Ok(anchor) => Some(anchor),
+      Err(error) => {
+        tracing::warn!(conversation_id = %conversation, %error, "could not sign the channel's anchor; founded unanchored");
+        None
+      },
+    }
+  }
+
+  /// Check 6 for a group state this device enters (a welcome, an add-back, an external commit, its
+  /// own founding): records the pin and floor it accepts. `Err` with the reason if refused; the
+  /// caller then drops the group (deletes it before anything is sent) and stays out.
+  pub(crate) async fn admit_anchor_entering(
+    &mut self,
+    conversation: ConversationId,
+    group: &ConversationGroup,
+  ) -> Result<Result<(), FloorError>, CoreError> {
+    let Some(expected) = self.anchor_expectation(conversation)? else {
+      return Ok(Ok(()));
+    };
+    let maybe_floor = self.account_data().anchor_floor(conversation);
+    if maybe_floor.is_none() && group.anchor_bytes().is_none() {
+      return Ok(Ok(()));
+    }
+    let tree_users = users_of(group)?;
+    let directory = self.anchor_directory(group.anchor_bytes(), tree_users).await?;
+    let authority = self.anchor_authority()?;
+    let outcome = AnchorOutcome::of(
+      group.verified_anchor(&expected, &directory, &authority),
+      group.anchor_bytes(),
+    );
+    let verdict = anchoring::judge_entering(maybe_floor.as_ref(), &outcome, group.epoch());
+    self.apply_anchor_verdict(conversation, verdict)
+  }
+
+  /// Pins the anchor of a channel this device just founded (its own founding is entered like any
+  /// group state). A failure only leaves the channel unpinned here; the members pin it.
+  pub(crate) async fn pin_own_founding(&mut self, conversation: ConversationId) {
+    let Some(group) = self.groups.remove(&conversation) else {
+      return;
+    };
+    let admitted = self.admit_anchor_entering(conversation, &group).await;
+    self.groups.insert(conversation, group);
+    match admitted {
+      Ok(Ok(())) => {},
+      Ok(Err(refusal)) => {
+        tracing::warn!(conversation_id = %conversation, %refusal, "this device's own founding doesn't match the pin");
+      },
+      Err(error) => {
+        tracing::warn!(conversation_id = %conversation, %error, "could not pin the new channel's anchor");
+      },
+    }
+  }
+
+  /// Check 6 at a commit inside a group state this device holds that changed the anchor (a move or
+  /// rename, its own included): the pinned founding, and the floor only rises. `directory` is the
+  /// one the commit was verified with.
+  pub(crate) fn note_anchor_inside(
+    &mut self,
+    conversation: ConversationId,
+    directory: &PinnedDirectory,
+  ) -> Result<(), CoreError> {
+    let Some(expected) = self.anchor_expectation(conversation)? else {
+      return Ok(());
+    };
+    let authority = self.anchor_authority()?;
+    let group = self.group_or_error(conversation)?;
+    let outcome = AnchorOutcome::of(
+      group.verified_anchor(&expected, directory, &authority),
+      group.anchor_bytes(),
+    );
+    let epoch = group.epoch();
+    let maybe_floor = self.account_data().anchor_floor(conversation);
+    let verdict = anchoring::judge_inside(maybe_floor.as_ref(), &outcome, epoch);
+    if let Err(error) = self.apply_anchor_verdict(conversation, verdict)? {
+      // The commit is merged already, and the crypto layer refuses any commit that touches the
+      // founding: another device of the user pinned another founding. Granting nothing is all
+      // that is left; the floor shows the fork.
+      tracing::warn!(conversation_id = %conversation, %error, "the channel's anchor differs from the one the user's devices pinned");
+    }
+    Ok(())
+  }
+
+  /// The channel's anchor as this device holds it, verified now (for a deletion, D3).
+  pub(crate) async fn held_anchor(&mut self, conversation: ConversationId) -> Result<HeldAnchor, CoreError> {
+    let Some(expected) = self.anchor_expectation(conversation)? else {
+      return Ok(HeldAnchor::Unanchored);
+    };
+    let maybe_floor = self.account_data().anchor_floor(conversation);
+    let Some(group) = self.group(conversation)? else {
+      return Ok(HeldAnchor::Unanchored);
+    };
+    let maybe_bytes = group.anchor_bytes().map(<[u8]>::to_vec);
+    if maybe_bytes.is_none() && maybe_floor.is_none() {
+      return Ok(HeldAnchor::Unanchored);
+    }
+    let tree_users = users_of(self.group_or_error(conversation)?)?;
+    let directory = self.anchor_directory(maybe_bytes.as_deref(), tree_users).await?;
+    let authority = self.anchor_authority()?;
+    let group = self.group_or_error(conversation)?;
+    let outcome = AnchorOutcome::of(
+      group.verified_anchor(&expected, &directory, &authority),
+      maybe_bytes.as_deref(),
+    );
+    Ok(match (outcome, maybe_floor) {
+      (AnchorOutcome::Verified(anchor), maybe_floor) => {
+        // A floor of another founding is a fork: the anchor grants nothing.
+        let floor_grants =
+          maybe_floor.is_none_or(|floor| floor.grants() && floor.founding_hash == anchor.founding_hash());
+        HeldAnchor::Anchored { anchor, floor_grants }
+      },
+      (_, Some(_)) => HeldAnchor::Unverifiable,
+      (_, None) => HeldAnchor::Unanchored,
+    })
+  }
+
+  /// Signs and commits a move or rename the server took (e2ee.md §4.6.5, D4, D5), so members' apps
+  /// hold it in the anchor: as a workspace signer if this user is an admin of a fresh roster, else
+  /// a rename as a member. A move by anybody else, or a change this device can't sign, leaves the
+  /// property stale (the server and the anchor differ), which only costs a deletion's speed.
+  pub(crate) async fn sign_channel_properties(
+    &mut self,
+    conversation: ConversationId,
+    wish: PropertiesWish<'_>,
+  ) -> Result<(), CoreError> {
+    let attempts = self.settings.max_commit_attempts.max(1);
+    for _ in 0..attempts {
+      if !self.has_group(conversation)? || self.group_or_error(conversation)?.anchor_bytes().is_none() {
+        return Ok(());
+      }
+      self.resolve_pending_commit(conversation).await?;
+      let HeldAnchor::Anchored { anchor, .. } = self.held_anchor(conversation).await? else {
+        tracing::info!(conversation_id = %conversation, "the channel's anchor doesn't verify here; the change stays the server's word");
+        return Ok(());
+      };
+      let Some(listed_name) = self.listed_name(conversation)? else {
+        return Ok(());
+      };
+      let current = *anchor.properties();
+      let Some(target) = target_of(&current, wish, &listed_name) else {
+        tracing::info!(conversation_id = %conversation, "the listed name isn't the anchor's; a move leaves the anchor as it is");
+        return Ok(());
+      };
+      let new_hash = name_hash(target.name);
+      if target.maybe_space_id == current.maybe_space_id && new_hash == current.name_hash {
+        return Ok(());
+      }
+      let is_move = target.maybe_space_id != current.maybe_space_id;
+      let (class, roster_version) = self.properties_signer_class()?;
+      if is_move && class != NameAuthority::Workspace {
+        tracing::info!(conversation_id = %conversation, "only a workspace signer moves an anchored channel; the space stays stale");
+        return Ok(());
+      }
+      let tree_users = users_of(self.group_or_error(conversation)?)?;
+      let maybe_bytes = self
+        .group_or_error(conversation)?
+        .anchor_bytes()
+        .map(<[u8]>::to_vec);
+      let directory = self.anchor_directory(maybe_bytes.as_deref(), tree_users).await?;
+      let authority = self.group_authority(conversation, self.now_ms())?;
+      let epoch = self.group_or_error(conversation)?.epoch();
+      let signed = anchor
+        .anchor()
+        .sign_change(
+          &self.account.device,
+          &self.account.certificate,
+          class,
+          &target,
+          epoch,
+          roster_version,
+        )
+        .map_err(MlsError::from)?;
+      let group = self
+        .groups
+        .get_mut(&conversation)
+        .ok_or(CoreError::NoGroup(conversation))?;
+      let output = match group.commit_properties_change(
+        &self.provider,
+        &self.account.device,
+        &signed,
+        &directory,
+        &authority,
+      ) {
+        Ok(output) => output,
+        Err(MlsError::PropertiesChange(error @ PropertiesChangeError::NotAllowed(_))) => {
+          tracing::info!(conversation_id = %conversation, %error, "the members wouldn't take this change; it stays the server's word");
+          return Ok(());
+        },
+        Err(error) => return Err(error.into()),
+      };
+      if self.post_commit(conversation, output, &[]).await?.is_some() {
+        // The committer raises its floor like every other member.
+        return self.note_anchor_inside(conversation, &directory);
+      }
+      self.sync_mls(conversation).await?;
+    }
+    Err(CoreError::GaveUp {
+      attempts,
+      reason: "other commits kept winning the epoch".into(),
+    })
+  }
+
+  /// What an anchor of `conversation` must name: a channel the server lists as one. `None` for any
+  /// other conversation (DMs and the notes get no anchor; meeting chats not yet, D10).
+  fn anchor_expectation(&self, conversation: ConversationId) -> Result<Option<AnchorExpectation>, CoreError> {
+    let maybe_known: Option<ConversationResponse> =
+      records::get_json(&self.store, Table::Conversations, &conversation.to_string())?;
+    Ok(
+      maybe_known
+        .filter(|known| known.kind == ConversationKind::Channel)
+        .map(|_| AnchorExpectation {
+          conversation_id: convert::conversation(conversation),
+          kind: ExpectedKind::Channel,
+        }),
+    )
+  }
+
+  fn listed_name(&self, conversation: ConversationId) -> Result<Option<String>, CoreError> {
+    let maybe_known: Option<ConversationResponse> =
+      records::get_json(&self.store, Table::Conversations, &conversation.to_string())?;
+    Ok(maybe_known.and_then(|known| known.maybe_name))
+  }
+
+  /// The directory an anchor is verified with: the group's users, plus the founder and the last
+  /// change's signer with their newest device lists fetched (check 3; a list never fetched grants
+  /// nothing). Only those two lists are read, never every member's.
+  async fn anchor_directory(
+    &mut self,
+    maybe_bytes: Option<&[u8]>,
+    mut users: Vec<UserId>,
+  ) -> Result<PinnedDirectory, CoreError> {
+    let signers = anchor_signers(maybe_bytes);
+    users.extend(signers.iter().copied());
+    let directory = self.pin_identities(users.iter().copied()).await?;
+    for signer in signers {
+      let Some(identity) = directory.pinned_identity(convert::user(signer)) else {
+        continue;
+      };
+      if let Err(error) = self.fetch_device_list(signer, &identity).await {
+        if error.is_transient() {
+          return Err(error);
+        }
+        tracing::warn!(user_id = %signer, %error, "refused a device list of an anchor's signer");
+      }
+    }
+    self.pin_identities(users).await
+  }
+
+  /// Who is a workspace signer of an anchor: the admins of the fresh verified roster (check 4, D4).
+  fn anchor_authority(&self) -> Result<WorkspaceAuthority, CoreError> {
+    let workspace = self.workspace()?;
+    let (admins, roster) = self.fresh_admins(&workspace, self.now_ms());
+    Ok(
+      WorkspaceAuthority::new(
+        std::iter::empty(),
+        admins,
+        workspace.policy.admin_self_join.clone(),
+      )
+      .with_roster(roster),
+    )
+  }
+
+  /// This user's role for a move or rename: a workspace signer with the roster's version, else a
+  /// member.
+  fn properties_signer_class(&self) -> Result<(NameAuthority, u64), CoreError> {
+    let workspace = self.workspace()?;
+    let (admins, roster) = self.fresh_admins(&workspace, self.now_ms());
+    Ok(if admins.contains(&self.user_id()) {
+      (NameAuthority::Workspace, roster.version)
+    } else {
+      (NameAuthority::Member, 0)
+    })
+  }
+
+  /// Records an accepted pin and floor; returns the reason of a refusal.
+  fn apply_anchor_verdict(
+    &mut self,
+    conversation: ConversationId,
+    verdict: AnchorVerdict,
+  ) -> Result<Result<(), FloorError>, CoreError> {
+    match verdict {
+      AnchorVerdict::Unanchored | AnchorVerdict::KeepPin => Ok(Ok(())),
+      AnchorVerdict::Record(floor) => {
+        self.update_account_data(|data, _| data.note_anchor_floor(conversation, &floor))?;
+        Ok(Ok(()))
+      },
+      AnchorVerdict::Refuse(error) => {
+        tracing::warn!(conversation_id = %conversation, %error, "refused a group state against the channel's anchor pin; staying out");
+        Ok(Err(error))
+      },
+    }
+  }
+}
+
+/// The users with a leaf in the group.
+fn users_of(group: &ConversationGroup) -> Result<Vec<UserId>, CoreError> {
+  group
+    .members()?
+    .into_iter()
+    .map(|member| convert::user_from_crypto(member.user_id))
+    .collect()
+}
+
+/// The founder (or reviewer) and the last change's claimed signer of an anchor, unverified: whose
+/// device lists to fetch before verifying it.
+fn anchor_signers(maybe_bytes: Option<&[u8]>) -> Vec<UserId> {
+  let Some(anchor) =
+    maybe_bytes.and_then(|bytes| ChannelAnchor::from_bytes(bytes, DEFAULT_MAX_ANCHOR_BYTES).ok())
+  else {
+    return Vec::new();
+  };
+  let founder = anchor.founding().origin.signer().0;
+  let maybe_changer = anchor
+    .last_change()
+    .and_then(|change| change.claimed_signer().ok())
+    .filter(|changer| *changer != founder);
+  [Some(founder), maybe_changer]
+    .into_iter()
+    .flatten()
+    .filter_map(|user| convert::user_from_crypto(user).ok())
+    .collect()
+}
+
+/// The full new properties of a wish: what it names, the rest as the anchor has it. `None` if the
+/// name stays but the listed name isn't the anchor's (signing it would rename the channel).
+fn target_of<'a>(
+  current: &ChannelProperties,
+  wish: PropertiesWish<'a>,
+  listed_name: &'a str,
+) -> Option<PropertiesTarget<'a>> {
+  let maybe_space_id = match wish.maybe_space {
+    Some(space) => Some(convert::space(space)),
+    None => current.maybe_space_id,
+  };
+  let name = match wish.maybe_name {
+    Some(name) => name,
+    None if name_hash(listed_name) == current.name_hash => listed_name,
+    None => return None,
+  };
+  Some(PropertiesTarget { maybe_space_id, name })
+}

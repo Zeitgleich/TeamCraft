@@ -174,6 +174,15 @@ pub enum CoreError {
   CallEncryptionPending(ConversationId),
   #[error("conversation {0} is not a meeting chat")]
   NotAMeetingChat(ConversationId),
+  /// A channel name breaks the rules every client checks (e2ee.md §4.6.5): the field shows it
+  /// first, this is the backstop. The message starts with a stable code the UI localizes.
+  #[error("channel_name_invalid: {0}")]
+  ChannelName(#[from] teamcraft_proto::channel_name::ChannelNameError),
+  /// Every device of the user runs an app from before the channel anchor, which can't be in an
+  /// anchored channel (e2ee.md §4.6.5): they have to update first. Nothing was sent. The message
+  /// starts with a stable code the UI localizes.
+  #[error("must_update: the app of user {user} has to be updated before they can be added here")]
+  MustUpdate { user: UserId, name: String },
   /// Asked for a DM or group DM, the server answered with another kind of conversation (a
   /// channel, a meeting chat): a hostile or broken server. Nothing is set up or sent there.
   #[error("conversation {0} is no DM or group DM")]
@@ -329,6 +338,8 @@ impl CoreError {
         None => FailureKind::Other,
       },
       Self::JoinRequestNotApprovable(JoinRequestRefusal::RolesDisputed) => FailureKind::ChannelRolesDisputed,
+      // The message names the person: the detail is their name.
+      Self::MustUpdate { name, .. } => return ActionFailure::new(FailureKind::MustUpdate, name.clone()),
       _ => FailureKind::Other,
     };
     ActionFailure::new(kind, self.to_string())

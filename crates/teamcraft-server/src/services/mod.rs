@@ -96,6 +96,23 @@ pub fn validate_name(value: &str, what: &str, max_chars: usize) -> Result<String
   Ok(trimmed.to_owned())
 }
 
+/// Checks a channel's name and keeps it **byte for byte** (e2ee.md §4.6.5): members hash the name
+/// they are listed against the anchor the founder signed, so trimming or normalizing it here would
+/// make it stale for deletions. Clients send it trimmed and in NFC.
+pub fn validate_channel_name(value: &str, max_chars: usize) -> Result<String, ApiError> {
+  let what = "channel name";
+  if value.trim().is_empty() {
+    return Err(ApiError::InvalidRequest(format!("{what} must not be empty")));
+  }
+  validate_text(value, what, max_chars)?;
+  if value.chars().any(char::is_control) {
+    return Err(ApiError::InvalidRequest(format!(
+      "{what} must not contain control characters"
+    )));
+  }
+  Ok(value.to_owned())
+}
+
 /// Checks the length of optional free text (an empty string is allowed: it clears the field).
 pub fn validate_text(value: &str, what: &str, max_chars: usize) -> Result<(), ApiError> {
   if value.chars().count() > max_chars {
@@ -109,6 +126,18 @@ pub fn validate_text(value: &str, what: &str, max_chars: usize) -> Result<(), Ap
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// e2ee.md §4.6.5: a channel's name is stored exactly as sent, unlike other names.
+  #[test]
+  fn a_channel_name_is_kept_byte_for_byte() {
+    assert_eq!(
+      validate_channel_name(" Caf\u{0065}\u{0301} ", 80).unwrap(),
+      " Caf\u{0065}\u{0301} "
+    );
+    assert!(validate_channel_name("  ", 80).is_err());
+    assert!(validate_channel_name("a\nb", 80).is_err());
+    assert!(validate_channel_name(&"x".repeat(81), 80).is_err());
+  }
 
   #[test]
   fn names_are_trimmed_and_validated() {

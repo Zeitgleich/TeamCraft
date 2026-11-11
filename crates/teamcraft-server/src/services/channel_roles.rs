@@ -268,6 +268,7 @@ mod tests {
         conversation_id: ConversationId::from_snowflake(Snowflake::new(conversation).unwrap()),
         epoch,
         signed_at_ms: 1,
+        maybe_name_hash: None,
       })
       .unwrap()
     }
