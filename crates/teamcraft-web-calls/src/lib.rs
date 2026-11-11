@@ -1902,7 +1902,10 @@ fn failure(error: WebCallError) -> ActionFailure {
     WebCallError::Unsupported(_) => FailureKind::Call(CallFailure::Unsupported),
     // e2ee.md §8: media stops when a member's key doesn't check out or a DAVE change fails.
     WebCallError::Engine(
-      CallEngineError::Dave(_) | CallEngineError::CallKey(_) | CallEngineError::UnverifiedMember(_),
+      CallEngineError::Dave(_)
+      | CallEngineError::CallKey(_)
+      | CallEngineError::UnverifiedMember(_)
+      | CallEngineError::RetiredKey(_),
     ) => FailureKind::Call(CallFailure::EncryptionFailed),
     // The page's own failure text (a refused join token, offline), already in wire form.
     WebCallError::Ticket(error) => return ActionFailure::from_wire(&error.reason),
