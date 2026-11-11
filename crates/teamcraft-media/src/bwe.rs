@@ -44,8 +44,11 @@ use web_time::Instant;
 
 use crate::datagram::TransportSeq;
 
-/// Packets sent within this interval are one group for the delay detector (GCC: 5 ms).
+/// Packets sent within this interval are one group for the delay detector (GCC: 5 ms); so are
+/// packets that arrive within it of each other in a burst ([`PacketGroup::takes`]).
 const BURST_INTERVAL: Duration = Duration::from_millis(5);
+/// The longest a burst of arrivals counts as one group (GCC: 100 ms).
+const MAX_BURST_DURATION: Duration = Duration::from_millis(100);
 /// Packet groups kept in the trendline regression.
 const TRENDLINE_WINDOW: usize = 20;
 /// Smoothing of the accumulated delay before the regression.
@@ -200,6 +203,7 @@ pub enum BandwidthUsage {
 struct PacketGroup {
   first_sent: Instant,
   last_sent: Instant,
+  first_arrival: Instant,
   last_arrival: Instant,
 }
 
@@ -657,6 +661,29 @@ impl SendSideEstimator {
   }
 }
 
+impl PacketGroup {
+  /// Whether a packet sent at `sent_at` that arrived at `arrived_at` belongs to this group: sent
+  /// within [`BURST_INTERVAL`] of its first packet, or part of a burst that arrived at once after
+  /// the link held packets sent apart (GCC's `BelongsToBurst`): arriving within
+  /// [`BURST_INTERVAL`] of the group's last packet, sooner after it than it was sent, and no more
+  /// than [`MAX_BURST_DURATION`] after the group's first arrival. A Wi-Fi link that holds its
+  /// packets for a moment (a scan, power save, another channel) and then hands them over at once
+  /// loses nothing and queues nothing, but each held packet compared on its own showed a delay that
+  /// rose steeply and stayed high in the smoothed trend: overuse, and a cut of the estimate, on a
+  /// clean link (#1719).
+  fn takes(&self, sent_at: Instant, arrived_at: Instant) -> bool {
+    if sent_at.saturating_duration_since(self.first_sent) <= BURST_INTERVAL {
+      return true;
+    }
+    let arrival_delta_ms = signed_ms(arrived_at, self.last_arrival);
+    let send_delta_ms = signed_ms(sent_at, self.last_sent);
+    let burst_ms = BURST_INTERVAL.as_secs_f64() * 1000.0;
+    arrival_delta_ms - send_delta_ms < 0.0
+      && arrival_delta_ms <= burst_ms
+      && arrived_at.saturating_duration_since(self.first_arrival) < MAX_BURST_DURATION
+  }
+}
+
 impl DelayDetector {
   fn new() -> Self {
     Self {
@@ -675,7 +702,7 @@ impl DelayDetector {
 
   fn on_packet(&mut self, sent_at: Instant, arrived_at: Instant, now: Instant) {
     match &mut self.maybe_group {
-      Some(group) if sent_at.saturating_duration_since(group.first_sent) <= BURST_INTERVAL => {
+      Some(group) if group.takes(sent_at, arrived_at) => {
         group.last_sent = group.last_sent.max(sent_at);
         group.last_arrival = group.last_arrival.max(arrived_at);
       },
@@ -686,6 +713,7 @@ impl DelayDetector {
         self.maybe_group = Some(PacketGroup {
           first_sent: sent_at,
           last_sent: sent_at,
+          first_arrival: arrived_at,
           last_arrival: arrived_at,
         });
       },
@@ -931,6 +959,42 @@ mod tests {
       let settled = sim.estimator.estimate_bps();
       assert!((350_000..=600_000).contains(&settled), "settled at {settled}");
       assert!(sim.link.queue_delay(sim.now) < Duration::from_millis(100));
+    }
+  }
+
+  mod wifi {
+    use super::*;
+
+    const DEMAND_BPS: u32 = 2_500_000;
+
+    /// Issue #1719: a Wi-Fi link holds its packets now and then (a scan, power save, another
+    /// channel) and hands them over at once, losing nothing. Compared one by one, the held packets
+    /// showed a steep rise of the delay: overuse, and a cut of the estimate every time, on a link
+    /// with room to spare. As one burst (GCC's arrival grouping) they are no congestion.
+    #[test]
+    fn a_link_that_holds_packets_and_hands_them_over_at_once_is_not_congested() {
+      let mut sim = Simulation::new(Link::new(50_000_000, 28, 0));
+      sim.link.maybe_hold = Some(Hold {
+        since: sim.now,
+        every: Duration::from_secs(1),
+        length: Duration::from_millis(100),
+      });
+      sim.link.jitter = Duration::from_millis(15);
+      // A camera's 360p layer and its sound: application-limited, with room to grow to the demand.
+      sim.sending = Sending::Frames {
+        bps: 400_000,
+        per_second: 30,
+        keyframe_every: 60,
+      };
+      sim.estimator.set_demand_bps(Some(DEMAND_BPS));
+      sim.run(Duration::from_secs(10));
+      assert_eq!(sim.estimator.estimate_bps(), DEMAND_BPS);
+      let mut lowest = u32::MAX;
+      for _ in 0..(60_000 / TICK.as_millis()) {
+        sim.run(TICK);
+        lowest = lowest.min(sim.estimator.estimate_bps());
+      }
+      assert_eq!(lowest, DEMAND_BPS, "cut on a link that loses and queues nothing");
     }
   }
 
@@ -1336,6 +1400,32 @@ mod tests {
     queue_limit: Duration,
     maybe_free_at: Option<Instant>,
     rng: XorShift,
+    /// Packets that would arrive while the link holds them arrive when it lets go.
+    maybe_hold: Option<Hold>,
+    /// Random extra delay up to this; arrivals stay in order.
+    jitter: Duration,
+    maybe_last_arrival: Option<Instant>,
+  }
+
+  /// A link that holds its packets for `length` every `every` from `since` (Wi-Fi).
+  #[derive(Clone, Copy)]
+  struct Hold {
+    since: Instant,
+    every: Duration,
+    length: Duration,
+  }
+
+  impl Hold {
+    /// When something due at `at` gets through.
+    fn release(&self, at: Instant) -> Instant {
+      let into_ns = at.saturating_duration_since(self.since).as_nanos() % self.every.as_nanos();
+      let into = Duration::from_nanos(u64::try_from(into_ns).unwrap_or(u64::MAX));
+      if into < self.length {
+        at + (self.length - into)
+      } else {
+        at
+      }
+    }
   }
 
   impl Link {
@@ -1347,6 +1437,9 @@ mod tests {
         queue_limit: Duration::from_millis(500),
         maybe_free_at: None,
         rng: XorShift(0x9E37_79B9_7F4A_7C15),
+        maybe_hold: None,
+        jitter: Duration::ZERO,
+        maybe_last_arrival: None,
       }
     }
 
@@ -1361,7 +1454,17 @@ mod tests {
       let start = self.maybe_free_at.map_or(now, |free| free.max(now));
       let transmission = Duration::from_secs_f64(bytes as f64 * 8.0 / self.capacity_bps as f64);
       self.maybe_free_at = Some(start + transmission);
-      Some(start + transmission + self.base_delay)
+      let jitter = if self.jitter.is_zero() {
+        Duration::ZERO
+      } else {
+        let jitter_us = u64::try_from(self.jitter.as_micros()).unwrap_or(u64::MAX);
+        Duration::from_micros(self.rng.next() % jitter_us)
+      };
+      let arrival = start + transmission + self.base_delay + jitter;
+      let arrival = self.maybe_last_arrival.map_or(arrival, |last| arrival.max(last));
+      let arrival = self.maybe_hold.map_or(arrival, |hold| hold.release(arrival));
+      self.maybe_last_arrival = Some(arrival);
+      Some(arrival)
     }
 
     fn queue_delay(&self, now: Instant) -> Duration {
@@ -1391,6 +1494,13 @@ mod tests {
     Estimate,
     /// A camera's encoders: a fixed rate, whatever the estimate.
     Fixed(u32),
+    /// A camera's frames: `per_second` of them at `bps`, each sent back to back, every
+    /// `keyframe_every`th ten times as large.
+    Frames {
+      bps: u32,
+      per_second: u32,
+      keyframe_every: u32,
+    },
   }
 
   impl Simulation {
@@ -1421,9 +1531,40 @@ mod tests {
     }
 
     fn send_paced(&mut self) {
+      if let Sending::Frames {
+        bps,
+        per_second,
+        keyframe_every,
+      } = self.sending
+      {
+        self.send_frame(bps, per_second, keyframe_every);
+        return;
+      }
       self.budget_bytes += f64::from(self.sending_bps()) / 8.0 * TICK.as_secs_f64();
       while self.budget_bytes >= PACKET_BYTES as f64 {
         self.budget_bytes -= PACKET_BYTES as f64;
+        let seq = self.estimator.on_send(PACKET_BYTES, self.now);
+        if let Some(arrival) = self.link.send(PACKET_BYTES, self.now) {
+          self.in_flight.push_back((arrival, seq));
+        }
+      }
+    }
+
+    /// Sends a frame when one is due this tick.
+    fn send_frame(&mut self, bps: u32, per_second: u32, keyframe_every: u32) {
+      let tick = self.now.saturating_duration_since(self.epoch).as_micros() / TICK.as_micros();
+      let ticks_per_frame = (1_000_000 / u128::from(per_second) / TICK.as_micros()).max(1);
+      if !tick.is_multiple_of(ticks_per_frame) {
+        return;
+      }
+      let frame = tick / ticks_per_frame;
+      let scale = if frame.is_multiple_of(u128::from(keyframe_every)) {
+        10.0
+      } else {
+        1.0
+      };
+      let bytes = scale * f64::from(bps) / f64::from(per_second) / 8.0;
+      for _ in 0..(bytes / PACKET_BYTES as f64).ceil() as usize {
         let seq = self.estimator.on_send(PACKET_BYTES, self.now);
         if let Some(arrival) = self.link.send(PACKET_BYTES, self.now) {
           self.in_flight.push_back((arrival, seq));
@@ -1435,6 +1576,7 @@ mod tests {
       match self.sending {
         Sending::Estimate => self.estimator.estimate_bps(),
         Sending::Fixed(bps) => bps,
+        Sending::Frames { bps, .. } => bps,
       }
     }
 
@@ -1454,9 +1596,10 @@ mod tests {
       if self.now >= self.next_feedback_at {
         self.next_feedback_at += FEEDBACK_INTERVAL;
         if let Some(feedback) = self.recorder.take_feedback(self.now) {
-          self
-            .feedback_in_flight
-            .push_back((self.now + self.link.base_delay, feedback));
+          // The way back holds as well.
+          let at = self.now + self.link.base_delay;
+          let at = self.link.maybe_hold.map_or(at, |hold| hold.release(at));
+          self.feedback_in_flight.push_back((at, feedback));
         }
       }
       while self
