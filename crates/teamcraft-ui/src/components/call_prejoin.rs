@@ -113,8 +113,9 @@ pub fn PreJoinScreen(request: CallRequest) -> impl IntoView {
   let preview_camera = Memo::new(move |_| state.read(|backend| backend.call_preview_camera()));
 
   let title = move || {
-    let maybe_meeting_title = maybe_meetings.and_then(|hub| hub.title_for(request.conversation));
     let name = conversation.get().map(|conv| conv.name).unwrap_or_default();
+    let maybe_meeting_title =
+      crate::meetings::MeetingsHub::heading_title(maybe_meetings, request.conversation, &name);
     call_heading(i18n, request.kind, maybe_meeting_title.as_deref(), &name)
   };
 

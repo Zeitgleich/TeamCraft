@@ -114,7 +114,10 @@ fn GuestShell(
   let change_source = backend.clone();
   let state = AppState::new(backend, settings, None);
   provide_context(state);
-  provide_context(MeetingsHub::new(MeetingsClient::new(auth.clone())));
+  provide_context(MeetingsHub::for_guest(
+    MeetingsClient::new(auth.clone()),
+    conversation,
+  ));
   provide_context(crate::channel_policy::ChannelPolicyHub::new(
     crate::rest::RestClient::new(auth.clone()),
   ));
@@ -169,17 +172,15 @@ fn GuestShell(
 
   view! {
     <div class="app guest-meeting">
-      <header class="guest-meeting-bar">
+      // The call screen has its own title and hang-up: while the guest is in the call, this bar
+      // would only repeat the title and offer a second way out.
+      <header class="guest-meeting-bar" prop:hidden=move || state.call.phase.get() != CallPhase::Idle>
         <h1 class="guest-meeting-title" translate="no">{title}</h1>
         <span class="grow"></span>
-        // Only while the guest isn't in the call (or about to join it): in it, the call screen has
-        // its own controls.
-        {move || (state.call.phase.get() == CallPhase::Idle).then(|| view! {
-          <button class="btn btn-primary" on:click=move |_| join_meeting(state, i18n, conversation)>
-            {move || i18n.t("guest-join-call")}
-          </button>
-        })}
-        <button class="btn" prop:disabled=move || is_leaving.get() on:click=leave>
+        <button class="btn btn-primary" on:click=move |_| join_meeting(state, i18n, conversation)>
+          {move || i18n.t("guest-join-call")}
+        </button>
+        <button class="btn" prop:disabled=move || is_leaving.get() on:click=leave.clone()>
           {move || i18n.t("guest-leave")}
         </button>
       </header>

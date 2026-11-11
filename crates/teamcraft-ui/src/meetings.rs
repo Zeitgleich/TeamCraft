@@ -383,6 +383,8 @@ pub struct MeetingsHub {
   pub key_codes: RwSignal<HashMap<UserId, String>>,
   /// Guests whose key code is being made.
   pub coding: StoredValue<HashSet<UserId>, LocalStorage>,
+  /// A meeting guest's one chat, which is the meeting's (the guest can't list meetings).
+  maybe_guest_chat: Option<ConversationId>,
 }
 
 impl MeetingsHub {
@@ -401,6 +403,7 @@ impl MeetingsHub {
       verifying: StoredValue::new_local(HashSet::new()),
       key_codes: RwSignal::new(HashMap::new()),
       coding: StoredValue::new_local(HashSet::new()),
+      maybe_guest_chat: None,
     }
   }
 
@@ -431,6 +434,29 @@ impl MeetingsHub {
   }
 
   /// The title of the meeting whose chat is `conversation`, if it is one of the user's. Reactive.
+  /// The title of the meeting whose chat `conversation` is, as the call screens show it: from the
+  /// meeting list, or for a meeting guest (who can't list meetings) the chat's own name, which is
+  /// the meeting's title.
+  pub fn heading_title(
+    maybe_hub: Option<MeetingsHub>,
+    conversation: ConversationId,
+    name: &str,
+  ) -> Option<String> {
+    maybe_hub.and_then(|hub| {
+      hub.title_for(conversation).or_else(|| {
+        (hub.maybe_guest_chat == Some(conversation) && !name.trim().is_empty()).then(|| name.to_owned())
+      })
+    })
+  }
+
+  /// A meeting guest's hub: its one chat is the meeting's.
+  pub fn for_guest(client: MeetingsClient, chat: ConversationId) -> Self {
+    Self {
+      maybe_guest_chat: Some(chat),
+      ..Self::new(client)
+    }
+  }
+
   pub fn title_for(&self, conversation: ConversationId) -> Option<String> {
     self.meetings.with(|all| {
       all

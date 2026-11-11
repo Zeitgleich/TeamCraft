@@ -111,6 +111,10 @@
   color: var(--chrome-text);
 }
 
+.guest-meeting-bar[hidden] {
+  display: none;
+}
+
 .guest-meeting-title {
   margin: 0;
   font-size: var(--text-lg);
