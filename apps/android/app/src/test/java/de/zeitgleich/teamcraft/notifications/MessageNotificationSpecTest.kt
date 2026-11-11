@@ -400,6 +400,23 @@ class MessageNotificationSpecTest {
     assertEquals(listOf(alert, alert, alert, NotificationAlerting.SILENT, alert), specs.map { it.alerting })
   }
 
+  @Test
+  fun aDirectMessageBubblesOnlyWhenOptedInAndAllowedAndShowingContent() {
+    val entry = direct(line("1000", "Alice", "lunch?"))
+    fun isBubble(entry: ConversationNotification, privacy: MessagePrivacy, canBubble: Boolean) =
+      MessageNotificationSpecs.conversation(entry, privacy, true, LABELS, canBubble)!!.isBubble
+    assertTrue(isBubble(entry, content(), canBubble = true))
+    // Not opted in, or the system does not allow it: the caller passes false.
+    assertFalse(isBubble(entry, content(), canBubble = false))
+    // Content hidden by the setting, or by the app lock: the bubble would show what the shade hides.
+    val senderOnly = MessagePrivacy.of(NotificationContent.SENDER_ONLY, isAppLockOn = false, isVerified = true)
+    val nothing = MessagePrivacy.of(NotificationContent.NOTHING, isAppLockOn = false, isVerified = true)
+    val locked = MessagePrivacy.of(NotificationContent.CONTENT, isAppLockOn = true, isVerified = true)
+    for (hidden in listOf(senderOnly, nothing, locked)) assertFalse(isBubble(entry, hidden, canBubble = true))
+    // Channels never bubble, even when asked.
+    assertFalse(isBubble(channel(line("1000", "Alice", "first")), content(), canBubble = true))
+  }
+
   private fun assertNoText(spec: MessageNotificationSpec) {
     for (shown in listOf(spec.title, spec.text, spec.publicTitle, spec.publicText)) assertFalse(shown.contains("secret"))
   }

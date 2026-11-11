@@ -34,15 +34,19 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ConversationNotificationSettings
 import de.zeitgleich.teamcraft.core.NotificationSettings
+import de.zeitgleich.teamcraft.TeamCraftApplication
+import de.zeitgleich.teamcraft.notifications.BubblePrefs
 import de.zeitgleich.teamcraft.notifications.ChannelMentions
 import de.zeitgleich.teamcraft.notifications.DndRange
 import de.zeitgleich.teamcraft.notifications.QuietHoursEditor
 import de.zeitgleich.teamcraft.security.AppLockPrefs
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import de.zeitgleich.teamcraft.ui.isDirect
 import uniffi.teamcraft_ffi.NotificationContent
 
 private val LEVELS = listOf("all" to R.string.notify_all, "mentions" to R.string.notify_mentions, "none" to R.string.notify_none)
@@ -72,7 +76,13 @@ fun ConversationNotificationsDialog(viewModel: MainViewModel, conversationId: St
   val scope = rememberCoroutineScope()
   var settings by remember { mutableStateOf<ConversationNotificationSettings?>(null) }
   var quiet by remember { mutableStateOf(QuietHoursEditor()) }
+  // Bubbles are a device setting of direct messages (Android 11+, #591), kept apart from the server's.
+  val context = LocalContext.current
+  val bubbles = remember { BubblePrefs(context) }
+  var isBubble by remember(conversationId) { mutableStateOf(bubbles.isEnabled(conversationId)) }
+  var canBubble by remember(conversationId) { mutableStateOf(false) }
   LaunchedEffect(conversationId) {
+    canBubble = BubblePrefs.isSupported && viewModel.conversations().firstOrNull { it.id == conversationId }?.isDirect == true
     val loaded = viewModel.readChat { conversationNotifications(conversationId) } ?: ConversationNotificationSettings()
     settings = loaded
     quiet = QuietHoursEditor.from(loaded.quietHours)
@@ -90,6 +100,17 @@ fun ConversationNotificationsDialog(viewModel: MainViewModel, conversationId: St
           }
         }
         MutePresets(current) { settings = it }
+        if (canBubble) {
+          val isAllowed = remember { bubbles.isAllowedBySystem() }
+          Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(stringResource(R.string.bubble_setting), style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+            Switch(checked = isBubble, onCheckedChange = { isBubble = it })
+          }
+          Text(
+            stringResource(if (isAllowed) R.string.bubble_setting_hint else R.string.bubble_setting_system_off),
+            style = MaterialTheme.typography.bodySmall,
+          )
+        }
         Text(stringResource(R.string.notify_channel_mentions), style = MaterialTheme.typography.titleSmall)
         for ((choice, label) in CHANNEL_MENTION_CHOICES) {
           Row(verticalAlignment = Alignment.CenterVertically) {
@@ -127,6 +148,12 @@ fun ConversationNotificationsDialog(viewModel: MainViewModel, conversationId: St
               quietHours = quiet.toQuietHours(ZoneId.systemDefault(), Instant.now()),
             )
             scope.launch { viewModel.readChat { setConversationNotifications(conversationId, chosen) } }
+          }
+          if (canBubble && isBubble != bubbles.isEnabled(conversationId)) {
+            bubbles.setEnabled(conversationId, isBubble)
+            // The notification on screen gains or loses its bubble now, without sounding again.
+            val notifier = TeamCraftApplication.graph(context).notifier
+            scope.launch(Dispatchers.Default) { notifier.repostAll() }
           }
           onDismiss()
         },
