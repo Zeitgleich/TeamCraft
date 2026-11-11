@@ -3,7 +3,10 @@
 //!
 //! The sender numbers every datagram with a [`TransportSeq`] (datagram header) and remembers when it
 //! sent it. The receiver records arrival times ([`FeedbackRecorder`]) and reports them about every
-//! 100 ms over the signaling stream. The sender then combines two signals:
+//! 100 ms over the signaling stream. A datagram missing while later ones arrived is reported lost
+//! only once it stayed missing for [`REORDER_WINDOW`]: the send queues hand audio over before the
+//! video waiting there (`crate::send_queue`), so datagrams leave out of order by design. The sender
+//! then combines two signals:
 //!
 //! - **Delay:** if packets arrive increasingly later than they were sent (a queue builds up), a
 //!   trendline over the one-way delay variation turns positive. Overuse cuts the rate a step, to
@@ -80,6 +83,16 @@ const MAX_RECOVERY_WAIT: Duration = Duration::from_secs(32);
 const RECOVERED_SHARE: f64 = 1.1;
 /// Largest feedback the recorder produces in one message.
 const MAX_FEEDBACK_ENTRIES: usize = 1000;
+/// How long a datagram may arrive after a later-numbered one and still count as arrived (#1719).
+/// The send queues in front of QUIC (`crate::send_queue`) hand audio over before the video and the
+/// SFU's probe padding waiting there, which were numbered before it, and on a link where QUIC's
+/// window holds a keyframe's burst back for a round trip that is every keyframe. Reported lost
+/// as soon as the feedback after the audio went out, the video counted as loss although every
+/// datagram arrived (2 to 4 % at a call's start with nothing dropped on the way, through a test
+/// relay of 56 ms round trip): enough to end the estimate's fast start and hold its growth, and
+/// one padding datagram reported lost makes a probe fall short and limits the estimate. A gap
+/// still open after the window is a loss, as before (also the send queue's own drops).
+pub const REORDER_WINDOW: Duration = Duration::from_millis(150);
 
 /// Settings of the estimator.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -763,13 +776,32 @@ impl FeedbackRecorder {
       .insert(extended, u64::try_from(micros).unwrap_or(u64::MAX));
   }
 
-  /// Feedback for everything since the last call, or `None` when nothing arrived.
-  pub fn take_feedback(&mut self) -> Option<TransportFeedback> {
+  /// Feedback at `now` for everything since the last call, or `None` when nothing arrived. A gap
+  /// is reported as lost once a later datagram arrived [`REORDER_WINDOW`] ago or longer; until
+  /// then the feedback ends before it, and the datagrams after it wait for the next one.
+  pub fn take_feedback(&mut self, now: Instant) -> Option<TransportFeedback> {
     let start = self.maybe_next_to_report?;
     if self.arrivals.is_empty() {
       return None;
     }
-    let end = self.highest_received.min(start + MAX_FEEDBACK_ENTRIES as u64 - 1);
+    let settled_us = u64::try_from(now.saturating_duration_since(self.epoch).as_micros())
+      .unwrap_or(u64::MAX)
+      .saturating_sub(u64::try_from(REORDER_WINDOW.as_micros()).unwrap_or(u64::MAX));
+    // Gaps below the highest datagram that arrived before the window are losses.
+    let maybe_settled = self
+      .arrivals
+      .iter()
+      .filter(|(_, arrival_us)| **arrival_us <= settled_us)
+      .map(|(seq, _)| *seq)
+      .max();
+    let limit = self.highest_received.min(start + MAX_FEEDBACK_ENTRIES as u64 - 1);
+    let maybe_open_gap = (start..=limit)
+      .find(|seq| !self.arrivals.contains_key(seq) && maybe_settled.is_none_or(|settled| *seq > settled));
+    let end = match maybe_open_gap {
+      Some(gap) if gap == start => return None,
+      Some(gap) => gap - 1,
+      None => limit,
+    };
     let arrivals_us = (start..=end).map(|seq| self.arrivals.remove(&seq)).collect();
     self.arrivals.retain(|&seq, _| seq > end);
     self.maybe_next_to_report = Some(end + 1);
@@ -939,13 +971,20 @@ mod tests {
     #[test]
     fn heavy_loss_reduces_the_rate() {
       let mut sim = Simulation::new(Link::new(3_000_000, 40, 250));
-      sim.run(Duration::from_secs(10));
+      sim.run(Duration::from_secs(8));
+      // The loss seen over the last seconds: right after a cut to what got through it starts
+      // anew, and gaps are reported once the reordering window passed.
+      let mut most_loss: f64 = 0.0;
+      for _ in 0..20 {
+        sim.run(Duration::from_millis(100));
+        most_loss = most_loss.max(sim.estimator.loss_ratio());
+      }
       assert!(
         sim.estimator.estimate_bps() < 300_000,
         "{}",
         sim.estimator.estimate_bps()
       );
-      assert!(sim.estimator.loss_ratio() > 0.15);
+      assert!(most_loss > 0.15, "{most_loss}");
     }
 
     /// Issue #935: about to send far more (a camera in a call that sent only sound), the estimate
@@ -1232,13 +1271,36 @@ mod tests {
       let mut recorder = FeedbackRecorder::new(epoch);
       recorder.on_arrival(TransportSeq(10), epoch + Duration::from_millis(1));
       recorder.on_arrival(TransportSeq(12), epoch + Duration::from_millis(3));
-      let feedback = recorder.take_feedback().unwrap();
+      // 12 arrived a reordering's while ago: 11 is lost.
+      let later = epoch + Duration::from_millis(3) + REORDER_WINDOW;
+      let feedback = recorder.take_feedback(later).unwrap();
       assert_eq!(feedback.base_seq, 10);
       assert_eq!(feedback.arrivals_us, vec![Some(1000), None, Some(3000)]);
-      assert_eq!(recorder.take_feedback(), None);
+      assert_eq!(recorder.take_feedback(later), None);
       // 11 arrives late: it was already reported lost.
-      recorder.on_arrival(TransportSeq(11), epoch + Duration::from_millis(4));
-      assert_eq!(recorder.take_feedback(), None);
+      recorder.on_arrival(TransportSeq(11), later);
+      assert_eq!(recorder.take_feedback(later + REORDER_WINDOW), None);
+    }
+
+    /// #1719: a datagram overtaken by a later one (the send queues hand sound over first) is
+    /// reported as arrived when it comes within the reordering window: the feedback stops before
+    /// the gap until then.
+    #[test]
+    fn a_datagram_overtaken_by_a_later_one_is_not_reported_lost() {
+      let epoch = Instant::now();
+      let mut recorder = FeedbackRecorder::new(epoch);
+      let at = |millis: u64| epoch + Duration::from_millis(millis);
+      recorder.on_arrival(TransportSeq(10), at(1));
+      recorder.on_arrival(TransportSeq(12), at(3));
+      let first = recorder.take_feedback(at(50)).unwrap();
+      assert_eq!((first.base_seq, first.arrivals_us), (10, vec![Some(1000)]));
+      assert_eq!(recorder.take_feedback(at(60)), None, "11 may still come");
+      recorder.on_arrival(TransportSeq(11), at(90));
+      let second = recorder.take_feedback(at(100)).unwrap();
+      assert_eq!(
+        (second.base_seq, second.arrivals_us),
+        (11, vec![Some(90_000), Some(3000)])
+      );
     }
 
     #[test]
@@ -1247,7 +1309,7 @@ mod tests {
       let mut recorder = FeedbackRecorder::new(epoch);
       recorder.on_arrival(TransportSeq(u16::MAX), epoch);
       recorder.on_arrival(TransportSeq(0), epoch);
-      let feedback = recorder.take_feedback().unwrap();
+      let feedback = recorder.take_feedback(epoch).unwrap();
       assert_eq!((feedback.base_seq, feedback.arrivals_us.len()), (u16::MAX, 2));
     }
 
@@ -1391,7 +1453,7 @@ mod tests {
     fn exchange_feedback(&mut self) {
       if self.now >= self.next_feedback_at {
         self.next_feedback_at += FEEDBACK_INTERVAL;
-        if let Some(feedback) = self.recorder.take_feedback() {
+        if let Some(feedback) = self.recorder.take_feedback(self.now) {
           self
             .feedback_in_flight
             .push_back((self.now + self.link.base_delay, feedback));

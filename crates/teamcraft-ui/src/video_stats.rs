@@ -302,16 +302,14 @@ fn received_rows(
       .find(|offered| offered.layer == current)
       .map(|offered| offered.size)
   });
+  // Nothing expected, nothing to tell: a track that gets no packets at all lost none of them,
+  // and "0.0 %" next to 0 kbit/s read as a link without loss (#1719).
   let loss = sample
     .growth(|stats| stats.packets_lost)
     .zip(sample.growth(|stats| stats.packets))
-    .map(|(lost, arrived)| {
+    .and_then(|(lost, arrived)| {
       let expected = lost + arrived;
-      if expected == 0 {
-        0.0
-      } else {
-        lost as f64 * 100.0 / expected as f64
-      }
+      (expected > 0).then(|| lost as f64 * 100.0 / expected as f64)
     });
   vec![
     row(
@@ -538,6 +536,17 @@ mod tests {
       assert_eq!(value(&rows, "stats-loss"), "1.0 %");
       assert_eq!(value(&rows, "stats-network"), "RTT 34 ms · jitter 4.5 ms");
       assert_eq!(value(&rows, "stats-frames"), "dropped 3 · black –");
+    }
+
+    /// #1719: a track that got no packet between two reports has no loss to show, not 0 %.
+    #[test]
+    fn a_received_track_without_packets_shows_no_loss() {
+      let mut window = StatsWindow::default();
+      window.push(report(1_000, None, Some(received(1_000, 300, 2, 100))));
+      window.push(report(3_000, None, Some(received(1_000, 300, 2, 100))));
+      let rows = english(&window, StatsTarget::Received(REMOTE));
+      assert_eq!(value(&rows, "stats-bitrate"), "0 kbit/s");
+      assert_eq!(value(&rows, "stats-loss"), MISSING);
     }
 
     #[test]

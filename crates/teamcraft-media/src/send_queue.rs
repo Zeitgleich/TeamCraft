@@ -469,6 +469,72 @@ mod tests {
       assert_eq!(queue.queued_bytes(), 0);
     }
 
+    /// #1719: audio that overtakes the video waiting here (numbered before it) is no loss to the
+    /// bandwidth estimator: every datagram arrives. Reported lost by the first feedback after the
+    /// audio arrived, a keyframe's ten datagrams were ten lost of twelve, and the estimate was
+    /// cut to what got through although nothing was lost.
+    #[test]
+    fn overtaking_audio_is_no_loss_to_the_estimator() {
+      use crate::bwe::{BweConfig, FeedbackRecorder, SendSideEstimator};
+
+      let start = Instant::now();
+      let mut estimator = SendSideEstimator::new(BweConfig::default());
+      let mut recorder = FeedbackRecorder::new(start);
+      let mut queue = queue(1 << 20, ms(250), LayersPerStream::All);
+      let push = |queue: &mut SendQueue, estimator: &mut SendSideEstimator, bytes: Vec<u8>, at: Instant| {
+        let seq = estimator.on_send(bytes.len(), at);
+        queue.push(DatagramHeader::restamp(&bytes, seq).unwrap(), at);
+      };
+      // QUIC takes the first sound at once, then holds a keyframe's burst back for a round trip;
+      // the sound after it goes first.
+      push(&mut queue, &mut estimator, audio(1), start);
+      let mut sent: Vec<(Vec<u8>, Instant)> = vec![(queue.pop(start).unwrap(), start)];
+      for index in 0..10 {
+        push(
+          &mut queue,
+          &mut estimator,
+          video(STREAM, 0, 1, (index, 10), true, 2),
+          start + ms(1),
+        );
+      }
+      push(&mut queue, &mut estimator, audio(3), start + ms(20));
+      sent.push((queue.pop(start + ms(20)).unwrap(), start + ms(20)));
+      while let Some(bytes) = queue.pop(start + ms(60)) {
+        sent.push((bytes, start + ms(60)));
+      }
+      assert_eq!(*sent[1].0.last().unwrap(), 3, "the sound overtook the keyframe");
+      // 28 ms on the way, feedback every 100 ms from 50 ms on.
+      let arrivals: Vec<(TransportSeq, Instant)> = sent
+        .iter()
+        .map(|(bytes, at)| {
+          let seq = DatagramHeader::parse(bytes).unwrap().maybe_transport_seq.unwrap();
+          (seq, *at + ms(28))
+        })
+        .collect();
+      for feedback_at in [50, 150, 250, 350].map(|millis| start + ms(millis)) {
+        for (seq, _) in arrivals
+          .iter()
+          .filter(|(_, arrival)| *arrival <= feedback_at && *arrival > feedback_at - ms(100))
+        {
+          let arrival = arrivals.iter().find(|(other, _)| other == seq).unwrap().1;
+          recorder.on_arrival(*seq, arrival);
+        }
+        if let Some(feedback) = recorder.take_feedback(feedback_at) {
+          assert!(
+            feedback.arrivals_us.iter().all(Option::is_some),
+            "reported lost: {feedback:?}"
+          );
+          estimator.on_feedback(&feedback, feedback_at, start);
+        }
+      }
+      assert_eq!(estimator.loss_ratio(), 0.0);
+      assert!(
+        estimator.estimate_bps() >= BweConfig::default().start_bps,
+        "cut to {}",
+        estimator.estimate_bps()
+      );
+    }
+
     #[test]
     fn video_keeps_its_order() {
       let start = Instant::now();
