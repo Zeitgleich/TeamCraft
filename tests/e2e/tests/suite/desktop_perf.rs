@@ -35,8 +35,10 @@ use crate::perf::{Scale, Seeded, mib, percentile, seed};
 const CATCH_UP_WAIT_LARGE: Duration = Duration::from_secs(900);
 const CATCH_UP_WAIT: Duration = Duration::from_secs(180);
 /// The app's process group below this much CPU (percent of one core) over [`SETTLE_WINDOW`] counts
-/// as settled: the catch-up and what it left behind are done.
-const SETTLED_CPU_PERCENT: f64 = 3.0;
+/// as settled: the catch-up and what it left behind are done. The catch-up runs at 70 % and more;
+/// the visible, untouched window rests at 0.4 % here and at 4 % on a two-core CI runner (WebKit's
+/// web process, no animation running), so the line sits well above both.
+const SETTLED_CPU_PERCENT: f64 = 10.0;
 const SETTLE_WINDOW: Duration = Duration::from_secs(10);
 /// Channel switches before memory is read: a user's day, not a fresh start.
 const SWITCHES: usize = 40;
