@@ -41,43 +41,44 @@ staticClients:
       - https://demo.example.com/ # web
       - http://127.0.0.1:9/callback # dev/dev-token.py, the seeding run
 
-# Roles come from `groups` ([oidc] roles_claim = "groups" in teamcraft.demo.toml). The seeding run
+# Roles come from `groups` ([oidc] roles_claim = "groups" and the [oidc.roles] names in
+# teamcraft.demo.toml). Only static users here, no upstream connector: the groups are ours. The seeding run
 # (tests/e2e/src/bin/demo-seed.rs) signs in every one of these users.
 staticPasswords:
   - email: owner@example.com
     username: owner
     name: Demo Owner
     userID: 6f0c1d7e-0000-4000-8000-000000000001
-    groups: ["owner"]
+    groups: ["teamcraft-owner"]
     hashFromEnv: DEX_HASH_OWNER
   - email: alex@example.com
     username: alex
     name: Alex Example
     userID: 6f0c1d7e-0000-4000-8000-000000000002
-    groups: ["member"]
+    groups: ["teamcraft-member"]
     hashFromEnv: DEX_HASH_SEED
   - email: sam@example.com
     username: sam
     name: Sam Sample
     userID: 6f0c1d7e-0000-4000-8000-000000000003
-    groups: ["member"]
+    groups: ["teamcraft-member"]
     hashFromEnv: DEX_HASH_SEED
   - email: robin@example.com
     username: robin
     name: Robin Placeholder
     userID: 6f0c1d7e-0000-4000-8000-000000000004
-    groups: ["member"]
+    groups: ["teamcraft-member"]
     hashFromEnv: DEX_HASH_SEED
   # One reviewer account per store.
   - email: reviewer-1@example.com
     username: reviewer-1
     name: Review Account 1
     userID: 6f0c1d7e-0000-4000-8000-000000000011
-    groups: ["member"]
+    groups: ["teamcraft-member"]
     hashFromEnv: DEX_HASH_REVIEWER_1
   - email: reviewer-2@example.com
     username: reviewer-2
     name: Review Account 2
     userID: 6f0c1d7e-0000-4000-8000-000000000012
-    groups: ["member"]
+    groups: ["teamcraft-member"]
     hashFromEnv: DEX_HASH_REVIEWER_2

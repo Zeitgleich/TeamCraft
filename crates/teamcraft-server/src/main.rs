@@ -123,6 +123,11 @@ async fn run() -> anyhow::Result<()> {
     .map_err(anyhow::Error::msg)
     .context("checking [security]")?;
   config
+    .oidc
+    .validate()
+    .map_err(anyhow::Error::msg)
+    .context("checking [oidc]")?;
+  config
     .limits
     .validate()
     .map_err(anyhow::Error::msg)
@@ -958,10 +963,18 @@ fn build_oidc_sync(config: &Config) -> anyhow::Result<Option<OidcSyncSettings>> 
       warn!(
         "the identity provider sync is switched off (oidc.sync.is_enabled = false): deactivated users keep access until their tokens end; required for production (admin.md 3.2.3)"
       );
-    } else {
+    } else if oidc.sync.maybe_is_enabled == Some(false) {
       // A provider without an admin API (operations.md, "Demo instance") runs like this on purpose.
       info!(
-        "the identity provider sync is off (no oidc.sync.client_secret): no admin API, group sync, pre-created accounts or leaver events; deactivated users keep access until their tokens end"
+        "the identity provider sync is off (oidc.sync.is_enabled = false): no admin API, group sync, pre-created accounts or leaver events; deactivated users keep access until their tokens end"
+      );
+    } else {
+      // Unset and no secret: likely a missing or misspelled secret on a production server.
+      let maybe_hint = teamcraft_server::services::oidc::admin_url_from_issuer(&oidc.issuer)
+        .map(|_| "; the issuer looks like a Keycloak realm, whose admin API the sync would use")
+        .unwrap_or_default();
+      warn!(
+        "the identity provider sync is off: oidc.sync.client_secret is not set, so deactivated users keep access until their tokens end, and group sync, pre-created accounts and leaver events are off; required for production (admin.md 3.2.3), set is_enabled = false where that is intended{maybe_hint}"
       );
     }
     return Ok(None);

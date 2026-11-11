@@ -12,7 +12,9 @@
 # twice gives the same result; a second run while one is in progress waits for it (flock).
 #
 # Settings (environment):
-#   DEMO_DATABASE_URL        required. postgres://... of the owner of the demo database
+#   DEMO_DATABASE_URL        required. postgres://user@host/db of the owner of the demo database,
+#                            without the password: it is on the command line of psql, pg_dump and
+#                            pg_restore. Put the password in ~/.pgpass (or the file PGPASSFILE names).
 #   DEMO_BUCKET              required. rclone remote and bucket, e.g. demo-s3:teamcraft-demo
 #                            (the remote configured through RCLONE_CONFIG_DEMO_S3_* variables)
 #   DEMO_STOP_CMD            required. Stops teamcraft-server, e.g. "systemctl --user stop teamcraft-server"
@@ -22,8 +24,9 @@
 #   DEMO_SEED_DIR            default /var/lib/teamcraft-demo/seed (database.dump, bucket/, seed-info)
 #   DEMO_LOG_FILE            optional, appended to
 #
-# Safety: the database's schema `public` is emptied before the restore. The script
-# refuses a database whose name doesn't contain "demo", unless DEMO_ALLOW_ANY_DATABASE=1.
+# Safety: the database's schema `public` is emptied and the bucket made equal to the seed's copy.
+# The script refuses a database whose name doesn't contain "demo" (unless DEMO_ALLOW_ANY_DATABASE=1)
+# and a bucket whose name doesn't (the part after the remote's ":", unless DEMO_ALLOW_ANY_BUCKET=1).
 set -Eeuo pipefail
 
 readonly SEED_DIR="${DEMO_SEED_DIR:-/var/lib/teamcraft-demo/seed}"
@@ -77,6 +80,10 @@ check_settings() {
   for name in psql pg_dump pg_restore rclone curl flock; do
     command -v "$name" >/dev/null || fail "$name is not installed"
   done
+  local bucket="${DEMO_BUCKET#*:}"
+  if [[ "$bucket" != *demo* && "${DEMO_ALLOW_ANY_BUCKET:-0}" != 1 ]]; then
+    fail "refusing bucket '$bucket': its name has no 'demo' (DEMO_ALLOW_ANY_BUCKET=1 overrides)"
+  fi
   local database
   database="$(psql "$DEMO_DATABASE_URL" -XAtqc 'SELECT current_database()')" ||
     fail "the database does not answer"

@@ -1429,16 +1429,22 @@ Files in this repository:
 The demo uses Dex with a static user list instead of Keycloak: about 30 MB of memory instead of
 400. What TeamCraft takes from Keycloak specifically, and how it runs without it:
 
-| Keycloak specific                              | On the demo                                                                                                                            |
-|------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------|
-| Roles in `resource_access.<client_id>.roles`   | `[oidc] roles_claim = "groups"`: the server also reads role names from Dex's `groups` claim                                            |
-| `azp` names the app's client                   | Dex leaves `azp` out; a token whose only audience is `client_id` counts as issued to it (any provider)                                 |
-| Admin API: sync, group sync, pre-made accounts | Off (`[oidc.sync] is_enabled = false`, no secret); the server logs at start that the sync is off and what that means                   |
-| Provider events (leavers, provisioning.md §4)  | Off: nothing posts them                                                                                                                |
-| Back-channel logout                            | Dex doesn't send it; sessions end with their tokens                                                                                    |
-| Account API for identity key attestation       | Missing: the apps get 404 and enroll with trust on first use, without a prompt (e2ee.md §3.1)                                          |
-| Client roles in the ID token (role signing)    | Missing: the apps log `the identity provider's ID tokens carry no client roles`; the seed's owner signed the roster once, and it stays |
-| DPoP                                           | Dex doesn't advertise it; tokens stay unbound (the default policy `optional`)                                                          |
+| Keycloak specific                              | On the demo                                                                                                                              |
+|------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------|
+| Roles in `resource_access.<client_id>.roles`   | `[oidc] roles_claim = "groups"` with distinctive `[oidc.roles]` names (`teamcraft-owner`, …): the server also reads Dex's `groups` claim |
+| `azp` names the app's client                   | Dex leaves `azp` out; a token whose only audience is `client_id` counts as issued to it (any provider)                                   |
+| Admin API: sync, group sync, pre-made accounts | Off (`[oidc.sync] is_enabled = false`, no secret); the server logs at start that the sync is off and what that means                     |
+| Provider events (leavers, provisioning.md §4)  | Off: nothing posts them                                                                                                                  |
+| Back-channel logout                            | Dex doesn't send it; sessions end with their tokens                                                                                      |
+| Account API for identity key attestation       | Missing: the apps get 404 and enroll with trust on first use, without a prompt (e2ee.md §3.1)                                            |
+| Client roles in the ID token (role signing)    | Missing: the apps log `the identity provider's ID tokens carry no client roles`; the seed's owner signed the roster once, and it stays   |
+| DPoP                                           | Dex doesn't advertise it; tokens stay unbound (the default policy `optional`)                                                            |
+
+`roles_claim` grants a role to every name in the claim that equals an `[oidc.roles]` name, so the
+claim must be fully controlled by the provider. On the demo the groups are Dex's static ones; with
+an upstream connector (LDAP, GitHub, another OIDC provider) a group named `admin` would make an
+admin, hence the distinctive names. The server refuses claims people set themselves (`name`,
+`preferred_username`, `email`, …).
 
 The users are a fixed list in Dex's configuration, so nobody joins or leaves; the nightly reset
 undoes everything else. Production keeps Keycloak and the sync.
@@ -1477,6 +1483,11 @@ undoes everything else. Production keeps Keycloak and the sync.
    files are readable.
 
 ### Nightly reset
+
+The reset refuses a database whose name has no `demo`, and a bucket (`DEMO_BUCKET`, the part after
+the rclone remote's `:`) without `demo` in its name, so a wrong setting can't wipe production. Give
+it a database URL without the password and the password in `~/.pgpass` (or `PGPASSFILE`): the URL
+is passed on the command line of `psql`, `pg_dump` and `pg_restore`, where other users can see it.
 
 `dev/demo/demo-reset.sh restore` stops the server, empties the schema `public` and restores the
 dump, makes the bucket equal to the seed's copy (`rclone sync`: uploads since are deleted), starts
@@ -1525,7 +1536,7 @@ attachments are at most 10 MB each and 100 MB per user (`[storage]` and `[limits
 ### Changing the seed
 
 Edit `tests/e2e/src/bin/demo-seed.rs` (users, space, channels, messages, files, policy); a new user
-also goes into Dex's static users with their group (`owner` or `member`). Then, on the instance:
+also goes into Dex's static users with their group (`teamcraft-owner` or `teamcraft-member`). Then, on the instance:
 stop the reset timer, empty the instance (`restore` won't do, it brings back the old seed: stop the
 server, drop and create the schema `public`, empty the bucket, start the server), run the seeding run,
 take a new snapshot, and start the timer again. Placeholder names only (`Project A`, `example.com`).

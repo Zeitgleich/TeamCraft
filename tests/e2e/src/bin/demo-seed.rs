@@ -40,8 +40,8 @@ const PASSPHRASE_VAR: &str = "DEMO_RECOVERY_PASSPHRASE";
 /// with the e-mail address).
 const LOGIN_SUFFIX_VAR: &str = "DEMO_LOGIN_SUFFIX";
 const DEFAULT_LOGIN_SUFFIX: &str = "@example.com";
-/// The owner signs the workspace policy and creates the space; it has the role `owner` at the
-/// provider.
+/// The owner signs the workspace policy and creates the space; it has the group `teamcraft-owner`
+/// at the provider.
 const OWNER: &str = "owner";
 const MEMBERS: [&str; 3] = ["alex", "sam", "robin"];
 /// One account per store, so two reviews at the same time don't meet.

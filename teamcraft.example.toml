@@ -84,7 +84,11 @@ http_timeout_secs = 10
 
 # Optional: a top-level access-token claim with role names (a list, or one string), read besides the
 # client roles, for providers that can't nest client roles: Dex puts its users' groups in `groups`
-# (add "groups" to app_scopes). See docs/operations.md, "Demo instance".
+# (add "groups" to app_scopes). Every name in it that equals a name of [oidc.roles] grants that role,
+# so the claim must be fully controlled by the provider: with an upstream connector (LDAP, GitHub,
+# another OIDC provider) a group called "admin" would make admins. Use distinctive role names then,
+# e.g. owner = "teamcraft-owner". Claims people set themselves (name, email, ...) are refused.
+# See docs/operations.md, "Demo instance".
 # roles_claim = "groups"
 
 # TeamCraft role = client role of `client_id` in the provider. Users with several roles get the

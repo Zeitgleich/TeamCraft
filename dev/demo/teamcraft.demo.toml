@@ -7,7 +7,7 @@
 listen_addr = "127.0.0.1:8080"
 
 [database]
-url = "postgres://teamcraft@127.0.0.1:5432/teamcraft"
+url = "postgres://teamcraft@127.0.0.1:5432/teamcraft_demo"
 # Postgres runs with a small config next to it (shared_buffers 32 MB, max_connections 20).
 max_connections = 5
 
@@ -20,6 +20,13 @@ client_id = "teamcraft"
 app_scopes = ["openid", "profile", "email", "offline_access", "groups"]
 roles_claim = "groups"
 app_redirect_uris = ["de.zeitgleich.teamcraft:/oauth/callback"]
+
+# Distinctive names: every group name in `groups` that equals one of these grants the role.
+[oidc.roles]
+owner = "teamcraft-owner"
+admin = "teamcraft-admin"
+member = "teamcraft-member"
+guest = "teamcraft-guest"
 
 [oidc.sync]
 # Dex has no admin API: no provider sync, group sync, pre-created accounts or leaver events. The
