@@ -1019,10 +1019,13 @@ impl ChannelRoleState {
     // they looked, whether or not it anchors here.
     if was_reviewed {
       self.review_requests.clear();
+      // The server's date, never later than this device's now: a list dated ahead would silence
+      // every request until then.
+      let reviewed_at = entry.created_at.0.min(verifier.now_ms);
       self.maybe_reviewed_at_ms = Some(
         self
           .maybe_reviewed_at_ms
-          .map_or(entry.created_at.0, |at| at.max(entry.created_at.0)),
+          .map_or(reviewed_at, |at| at.max(reviewed_at)),
       );
     }
     match maybe_authority {
@@ -2838,6 +2841,24 @@ mod tests {
       let stored: ChannelRoleState = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
       assert_eq!(stored.review_requests, state.review_requests);
       assert_eq!(stored.maybe_reviewed_at_ms, Some(reviewed_at));
+    }
+
+    /// A server dating a reviewed list ahead can't silence the requests after it: the date is
+    /// capped at this device's clock.
+    #[test]
+    fn a_reviewed_list_dated_ahead_counts_from_this_devices_now() {
+      let (alice, admin) = (Person::new(1), Person::new(9));
+      let world = World::new(&[&alice], &[&admin]);
+      let mut state = founded(&world, &admin, &[(&alice, ChannelRole::Admin)]);
+      let mut reviewed = admin.reviewed(
+        &state,
+        &[(&admin, ChannelRole::Admin), (&alice, ChannelRole::Admin)],
+      );
+      reviewed.created_at = UnixMillis(world.now_ms + 365 * DAY_MS);
+      assert!(world.apply(&mut state, reviewed).is_empty());
+      assert_eq!(state.maybe_reviewed_at_ms, Some(world.now_ms));
+      state.note_review_request(alice.user_id, world.now_ms + 1);
+      assert!(state.is_review_asked());
     }
 
     /// One standing request per sender, the newest; a bounded list however many ask.
