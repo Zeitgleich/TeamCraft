@@ -5,8 +5,8 @@ use openmls::prelude::{Capabilities, KeyPackage, LeafNodeParameters, MlsGroup, M
 
 use super::*;
 use crate::channel_anchor::{
-  AnchorExpectation, AnchorKind, ChannelAnchor, ExpectedKind, Founding, NameAuthority, NameSetter,
-  PropertiesChangeError, PropertiesTarget, SignedPropertiesChange,
+  AnchorExpectation, AnchorKind, ChannelAnchor, ExpectedKind, Founding, Judged, NameAuthority, NameSetter,
+  PropertiesChangeError, PropertiesTarget, SignedPropertiesChange, Standing,
 };
 use crate::ids::SpaceId;
 
@@ -269,6 +269,37 @@ mod changes {
     // The honest commit still goes through afterwards.
     let output = world.alice_commits_change(&signed);
     world.carol_processes(&output.commit).unwrap();
+  }
+
+  #[test]
+  fn a_guest_committing_a_members_signed_rename_is_refused() {
+    let mut world = AnchoredWorld::new();
+    // Alice signs a rename; Carol commits it. Carol's own app takes her for a member, Alice's
+    // knows her as a meeting guest: a guest manages nothing, not even somebody else's change.
+    let signed = world.alice_change(Some(SPACE), "renamed");
+    let output = world
+      .carol_group
+      .commit_properties_change(
+        &world.carol.provider,
+        &world.carol.user.device,
+        &signed,
+        &world.directory,
+        &world.authority,
+      )
+      .unwrap();
+    let guest_aware = GuestDirectory {
+      inner: &world.directory,
+      guest: UserId::new(CAROL),
+    };
+    let epoch = world.alice_group.epoch();
+    let result = world.alice_group.process_message(
+      &world.alice.provider,
+      &output.commit,
+      &guest_aware,
+      &world.authority,
+    );
+    assert!(matches!(result, Err(MlsError::GuestOverreach)), "{result:?}");
+    assert_eq!(world.alice_group.epoch(), epoch);
   }
 
   #[test]
@@ -801,6 +832,30 @@ impl AnchoredWorld {
     assert!(is_expected(&error), "unexpected error: {error}");
     assert_eq!(self.carol_group.epoch(), epoch);
     assert_eq!(self.carol_group.anchor_bytes().map(<[u8]>::to_vec), anchor);
+  }
+}
+
+/// A directory that knows one user as a meeting guest.
+struct GuestDirectory<'a> {
+  inner: &'a TestDirectory,
+  guest: UserId,
+}
+
+impl IdentityDirectory for GuestDirectory<'_> {
+  fn pinned_identity(&self, user_id: UserId) -> Option<crate::identity::IdentityPublicKey> {
+    self.inner.pinned_identity(user_id)
+  }
+
+  fn is_listed_device(&self, device: &VerifiedDevice) -> bool {
+    self.inner.is_listed_device(device)
+  }
+
+  fn device_listing(&self, device: &VerifiedDevice, list_version: u64, judged: Judged) -> Standing {
+    self.inner.device_listing(device, list_version, judged)
+  }
+
+  fn is_guest(&self, user_id: UserId) -> bool {
+    user_id == self.guest
   }
 }
 

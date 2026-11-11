@@ -53,9 +53,16 @@ pub trait IdentityDirectory {
   }
 
   /// Whether the user's signed device list names this device and doesn't revoke it (e2ee.md
-  /// §4.6.5, check 3): the list at `list_version`, or with [`Judged::Newest`] also no newer list
-  /// that revokes it. `Unknown` while the list isn't fetched or verified: the anchor grants nothing
-  /// until it is.
+  /// §4.6.5, check 3).
+  ///
+  /// - [`Judged::AsNamed`]: the list at `list_version` names it; later lists don't count.
+  /// - [`Judged::Newest`]: the newest list this device holds names it unrevoked, and that list is
+  ///   at least `list_version` (an older one can't name a device added later: `Unknown`). Here
+  ///   `list_version` is only a lower bound: `0` asks "on the newest list", which is how a
+  ///   properties change, naming no list version, is judged. An implementation must not look up
+  ///   a list *at* version 0, or it refuses every move and rename.
+  ///
+  /// `Unknown` while the list isn't fetched or verified: the anchor grants nothing until it is.
   fn device_listing(&self, device: &VerifiedDevice, list_version: u64, judged: Judged) -> Standing {
     let _ = (device, list_version, judged);
     Standing::Unknown

@@ -1141,7 +1141,8 @@ fn signer_class(
 
 /// Whether the device that signed a properties change is on its user's newest signed device list.
 /// A change names no list version, so it is judged on the newest one: a revoked device's change
-/// counts for nothing.
+/// counts for nothing. `list_version` 0 with [`Judged::Newest`] means "on the newest list, of any
+/// version" ([`IdentityDirectory::device_listing`]).
 fn is_listed_signer(device: &VerifiedDevice, directory: &impl IdentityDirectory) -> bool {
   directory.device_listing(device, 0, Judged::Newest) == Standing::Confirmed
 }
