@@ -820,7 +820,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Ok(None);
     }
     let workspace = self.workspace()?;
-    let authorities = state.signing_authorities(me, &workspace, self.now_ms(), self.roster_max_age_ms());
+    let mut authorities = state.signing_authorities(me, &workspace, self.now_ms(), self.roster_max_age_ms());
+    // While an anchored channel's founding is open, members take only the founder's founding
+    // (e2ee.md §4.6.5): a workspace admin's entry, the founder's own included, would be junk on every
+    // device and take the version the founding needs.
+    if !state.is_signed() && self.is_anchored_channel(conversation)? {
+      authorities.retain(|authority| *authority == SignerAuthority::Founder);
+    }
     // Every member takes this user's signature as a workspace admin's, whatever authority it is
     // signed on, and it would vouch for the whole snapshot. Nobody asked for that here, and a device
     // that nobody is looking at (an import) has nobody to ask: it stays unsigned.
@@ -1139,8 +1145,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       is_read_to_end,
       roster_at_read,
     } = read;
-    let mut founding = RoleFounding::Claimed;
-    if entries.iter().any(|entry| entry.version > state.cursor) {
+    // Without new entries the anchor isn't asked (it fetches device lists): an anchored channel
+    // still counts as one whose founding may be open, so the read isn't marked at the roster.
+    let mut founding = if self.is_anchored_channel(conversation)? {
+      RoleFounding::Withheld
+    } else {
+      RoleFounding::Claimed
+    };
+    let has_new_entries = entries.iter().any(|entry| entry.version > state.cursor);
+    if has_new_entries {
       founding = self.founding_for(conversation, &state).await?;
       // A founder must hold the key this device pins for them; pin before verifying, or the
       // entry would be skipped for good.
@@ -1164,6 +1177,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // Entries left unread for the anchor weren't seen at this roster.
     if is_read_to_end && !state.is_founding_open(founding) {
       state.note_read(roster_at_read);
+    }
+    if founding != RoleFounding::Claimed {
+      if !state.is_founding_open(founding) {
+        self.clear_founding_wait(conversation)?;
+      } else if has_new_entries && matches!(founding, RoleFounding::Anchored { .. }) {
+        // The log shows entries but no founding this device takes: reading it again from its start
+        // waits too, or a server could have every sync verify the whole log anew.
+        self.note_founding_wait(conversation)?;
+      }
     }
     state.check_ahead();
     if let Some(alarm) = &state.maybe_alarm {
@@ -1218,7 +1240,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         RoleFounding::Withheld
       },
     };
-    self.note_founding_wait(conversation, founding)?;
+    if founding == RoleFounding::Withheld {
+      self.note_founding_wait(conversation)?;
+    }
     Ok(founding)
   }
 
@@ -1227,26 +1251,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   fn is_founding_waiting(&self, conversation: ConversationId) -> Result<bool, CoreError> {
     let maybe_wait: Option<FoundingWait> =
       records::get_json(&self.store, Table::Workspace, &founding_wait_key(conversation))?;
+    let now = self.now_ms();
     Ok(maybe_wait.is_some_and(|wait| {
-      wait.not_before_ms > self.now_ms() && wait.maybe_floor == self.account_data().anchor_floor(conversation)
+      // A wait set while this clock was ahead lasts no longer than the longest one.
+      let not_before_ms = wait
+        .not_before_ms
+        .min(now.saturating_add(ROLE_LOG_READ_RETRY_MAX_MS));
+      not_before_ms > now && wait.maybe_floor == self.account_data().anchor_floor(conversation)
     }))
   }
 
-  /// Records when to ask the anchor again after it gave no founder (later and later), or forgets
-  /// that once it gives one.
-  fn note_founding_wait(
-    &self,
-    conversation: ConversationId,
-    founding: RoleFounding,
-  ) -> Result<(), CoreError> {
+  /// Records when to ask the anchor and read the log again after this device found no founding to
+  /// take (later and later).
+  fn note_founding_wait(&self, conversation: ConversationId) -> Result<(), CoreError> {
     let key = founding_wait_key(conversation);
     let maybe_wait: Option<FoundingWait> = records::get_json(&self.store, Table::Workspace, &key)?;
-    if founding != RoleFounding::Withheld {
-      if maybe_wait.is_some() {
-        self.store.delete(Table::Workspace, &key)?;
-      }
-      return Ok(());
-    }
     let failures = maybe_wait.map_or(0, |wait| wait.failures).saturating_add(1);
     let wait = FoundingWait {
       not_before_ms: self.now_ms().saturating_add(role_read_retry_ms(failures)),
@@ -1254,6 +1273,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_floor: self.account_data().anchor_floor(conversation),
     };
     records::put_json(&self.store, Table::Workspace, &key, &wait)
+  }
+
+  /// Forgets the wait once the founding is accepted.
+  fn clear_founding_wait(&self, conversation: ConversationId) -> Result<(), CoreError> {
+    let key = founding_wait_key(conversation);
+    if self.store.get(Table::Workspace, &key)?.is_some() {
+      self.store.delete(Table::Workspace, &key)?;
+    }
+    Ok(())
   }
 
   async fn fetch_role_log(

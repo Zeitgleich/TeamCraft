@@ -3655,20 +3655,33 @@ and couldn't count for a purge.
     **Nothing refused before the founding moves the cursor**, under `Anchored` or `Withheld`: the log is read from
     its start until the founding is accepted, and no such read is marked as at the roster. A server that hides the
     founding and shows what came after can't push a device past it for good; read and refused, it would be lost
-    when it shows. Under `Withheld` nothing is read at all; the anchor is asked again only after a wait (five
-    minutes, doubling up to six hours, `FoundingWait`) or at once when the pin or floor changes, and the log isn't
-    fetched in between. Meanwhile the channel counts as unsigned on that device, as on one that never read the log.
+    when it shows. Under `Withheld` nothing is read at all. Either way, a read that leaves the founding open (the
+    anchor gave no founder, or the log showed entries but no founding this device takes) waits before the next:
+    the anchor is asked and the log read again only after five minutes, doubling up to six hours
+    (`FoundingWait`; a wait set while the clock was ahead lasts no longer than that), or at once when the pin or
+    floor changes. So a server can't have every sync (`ChannelRolesUpdate`) fetch and verify the whole log and the
+    anchor's device lists anew. Meanwhile the channel counts as unsigned on that device, as on one that never read
+    the log, and a read without new entries isn't marked as at the roster.
     **Who signs the founding:** nobody at first sight on a channel whose group carries an anchor or which is pinned,
     whether in the upkeep (`found_listed_channels`) or with a role change. Only the anchor's founder, under their own
     key (`may_found_roles`): at creation, and again, if it never reached the server, in their upkeep (whatever the
     server lists) or with their next role change, naming themselves admin and that change, nothing the server lists.
+    It signs only as founder while the founding is open, never as a workspace admin it may also be: members take no
+    other authority then. **The server's part:** the creator's app says the channel is anchored when creating it
+    (`CreateChannelRequest::is_anchored`), and the server keeps the creator (`anchored_channel_founders`) and takes
+    the role log's version 1 only from them. Nobody else it lets append (a channel admin it lists, a workspace
+    admin, an older or modified app) can take the version the founding needs. Members never rely on this.
     What a server gets from showing a founder's other device an empty log: a second founding by the same founder,
     naming only them, on a fork only devices at cursor 0 can join. It reinstates no demoted founder for a purge:
     D8 keeps §4.6.3's time limit, and on such a fork nobody else signed. A channel admin's deletion on a
     member-founded channel purges at once only while somebody else's entry (the founder appointing them, say) is
     younger than `channel_roles_max_age`; the founder alone purges nothing at once.
-    Residuals: a server that plants entries before the founding keeps the founder's device, at cursor 0, from
-    appending it (`409`), as it could refuse the append anyway. A device outside the channel's group with no pin
+    Residuals: **a server-side denial of service, permanent until #1728's re-founding.** Any entry at version 1
+    that isn't the founder's founding (planted by a malicious server, or appended by anybody a server lets append,
+    which an honest server since this change refuses) keeps the founding from ever getting its version: members
+    skip the entry, the founder's device stays at cursor 0 and its append gets `409`, and a workspace admin's
+    reviewed list doesn't count while the founding is open. The roles then stay the server's word on every
+    member's device. A malicious server can do as much by refusing the append. A device outside the channel's group with no pin
     (a workspace admin who never joined) can't tell the channel is anchored and reads its log as before anchors; a
     deletion asks for a group anyway.
 - **The name hash's known answer:** `name_hash("general")` is

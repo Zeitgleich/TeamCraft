@@ -105,6 +105,15 @@ pub struct NewConversation<'a> {
   pub is_integration: bool,
 }
 
+/// How a channel's role log is founded (e2ee.md §4.6.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoleLogFounding {
+  /// By whoever signs the first entry, as before anchors.
+  Open,
+  /// The creator's app founded the channel with an anchor: its first role entry only from them.
+  Anchored,
+}
+
 /// Fields to change; `None` keeps the stored value. Empty strings clear topic and description.
 #[derive(Debug, Clone, Default)]
 pub struct ConversationChanges<'a> {
@@ -147,6 +156,7 @@ impl Database {
     &self,
     new: &NewConversation<'_>,
     creator: UserId,
+    founding: RoleLogFounding,
     maybe_key: Option<&IdempotencyKey>,
   ) -> Result<Created<ConversationId>, DbError> {
     let mut tx = self.pool().begin().await?;
@@ -161,6 +171,15 @@ impl Database {
     }
     insert_conversation(&mut tx, new).await?;
     insert_membership(&mut tx, new.id, creator, ChannelRole::Admin).await?;
+    if founding == RoleLogFounding::Anchored {
+      sqlx::query!(
+        "INSERT INTO anchored_channel_founders (conversation_id, founder_id) VALUES ($1, $2)",
+        to_db(new.id),
+        to_db(creator),
+      )
+      .execute(&mut *tx)
+      .await?;
+    }
     tx.commit().await?;
     Ok(Created {
       id: new.id,

@@ -292,25 +292,56 @@ mod roles {
   }
 
   /// Review of #1748: Alice's founding entry never reached the server at creation. Her own upkeep
-  /// signs it later, as the anchor's founder; it is no founding at first sight.
+  /// signs it later, as the anchor's founder; it is no founding at first sight. Also where she is
+  /// the workspace's owner: while the founding is open only the founder's entry counts, never a
+  /// workspace admin's, and that is what she signs.
   #[tokio::test]
   async fn a_founding_lost_at_creation_is_signed_by_the_founders_upkeep() {
-    let server = anchoring_server();
-    let (mut alice, mut bob) = two(&server).await;
-    server.set_role_log_lacking(true);
-    let channel = shared_channel(&mut alice, &mut bob, "general").await;
-    server.set_role_log_lacking(false);
-    assert_eq!(server.role_log(channel).len(), 0);
+    for is_workspace_owner in [false, true] {
+      let server = anchoring_server();
+      let (mut alice, mut bob) = two(&server).await;
+      let alice_id = alice.client.user_id();
+      if is_workspace_owner {
+        alice
+          .client
+          .publish_roster(&[(alice_id, RosterRole::Owner)])
+          .await
+          .unwrap();
+        bob.client.full_sync().await.unwrap();
+      }
+      server.set_role_log_lacking(true);
+      let channel = shared_channel(&mut alice, &mut bob, "general").await;
+      server.set_role_log_lacking(false);
+      assert_eq!(server.role_log(channel).len(), 0);
 
-    bob.client.found_listed_channels().await.unwrap();
-    assert_eq!(server.role_log(channel).len(), 0, "Bob isn't the founder");
-    alice.client.found_listed_channels().await.unwrap();
-    assert_eq!(server.role_log(channel).len(), 1);
-    bob.client.sync_channel_roles(channel).await.unwrap();
-    let state = bob.client.channel_role_state(channel).unwrap();
-    assert_eq!(state.role_of(alice.client.user_id()), ChannelRole::Admin);
-    assert!(state.is_workspace_anchored);
-    assert!(!state.has_server_listed_roles);
+      bob.client.found_listed_channels().await.unwrap();
+      assert_eq!(server.role_log(channel).len(), 0, "Bob isn't the founder");
+      let bob_id = bob.client.user_id();
+      if is_workspace_owner {
+        // Her next role change founds on the way: as founder, never as the workspace's owner.
+        let signing = alice
+          .client
+          .set_channel_role(channel, bob_id, ChannelRole::Admin)
+          .await
+          .unwrap();
+        assert_eq!(signing, RoleSigning::Signed);
+      } else {
+        alice.client.found_listed_channels().await.unwrap();
+      }
+      assert_eq!(server.role_log(channel).len(), 1, "owner: {is_workspace_owner}");
+      bob.client.sync_channel_roles(channel).await.unwrap();
+      let state = bob.client.channel_role_state(channel).unwrap();
+      assert_eq!(
+        state.role_of(alice_id),
+        ChannelRole::Admin,
+        "owner: {is_workspace_owner}"
+      );
+      if is_workspace_owner {
+        assert_eq!(state.role_of(bob_id), ChannelRole::Admin);
+      }
+      assert!(state.is_workspace_anchored);
+      assert!(!state.has_server_listed_roles);
+    }
   }
 
   /// The server lists Bob as the channel's admin and shows his device an empty log: neither his

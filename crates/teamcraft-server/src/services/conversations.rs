@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::json;
 use teamcraft_db::{
-  ConversationChanges, ConversationFilter, ConversationView, NewConversation, StoredRetention,
-  participants_key,
+  ConversationChanges, ConversationFilter, ConversationView, NewConversation, RoleLogFounding,
+  StoredRetention, participants_key,
 };
 use teamcraft_proto::{
   ConversationId, ConversationKind, ConversationResponse, ConversationVisibility, ConvertChannelRequest,
@@ -184,6 +184,11 @@ pub async fn create_channel(
         is_integration: request.is_integration,
       },
       caller.user.id,
+      if request.is_anchored {
+        RoleLogFounding::Anchored
+      } else {
+        RoleLogFounding::Open
+      },
       request.maybe_idempotency_key.as_ref(),
     )
     .await?;

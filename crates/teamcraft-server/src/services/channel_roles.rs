@@ -51,6 +51,16 @@ pub async fn append(
     return Err(ApiError::device_not_found());
   }
   check_payload(request.payload.as_slice(), id, request.expected_version + 1)?;
+  // e2ee.md §4.6.5: an anchored channel's first entry only from its creator, so nobody else this
+  // server lets append takes the version the founding needs. Members don't rely on it.
+  if request.expected_version == 0
+    && let Some(founder) = state.database.anchored_channel_founder(id).await?
+    && founder != caller.user.id
+  {
+    return Err(ApiError::Forbidden(
+      "only the channel's founder signs its first role entry".into(),
+    ));
+  }
 
   let outcome = state
     .database

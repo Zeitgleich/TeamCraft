@@ -198,6 +198,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_topic: None,
       maybe_description: None,
       is_integration: false,
+      is_anchored: false,
       maybe_idempotency_key: Some(IdempotencyKey::random()),
     };
     self.create_channel_from(space, &request).await
@@ -224,6 +225,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // Before the server creates anything: once anchoring is on, a channel this device can't anchor
     // isn't created at all (e2ee.md §4.6.5, D2).
     let maybe_list_version = Box::pin(self.prepare_anchored_founding()).await?;
+    // Tells the server who alone may sign the role log's first entry (e2ee.md §4.6.5).
+    let anchored;
+    let request = if maybe_list_version.is_some() && !request.is_anchored {
+      anchored = CreateChannelRequest {
+        is_anchored: true,
+        ..request.clone()
+      };
+      &anchored
+    } else {
+      request
+    };
     let mut attempt = 1;
     // A lost answer is retried with the same request, hence the same idempotency key: the server
     // returns the channel it already made instead of a second one.

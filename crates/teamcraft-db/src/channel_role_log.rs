@@ -1,12 +1,12 @@
 //! Each channel's signed role log (issue #380, e2ee.md §4.6.1). Payload and signature are opaque
 //! bytes here; clients verify them.
 
-use teamcraft_proto::{ConversationId, DeviceId};
+use teamcraft_proto::{ConversationId, DeviceId, UserId};
 use time::OffsetDateTime;
 
 use crate::database::Database;
 use crate::error::DbError;
-use crate::ids::{from_db_opt, to_db};
+use crate::ids::{from_db, from_db_opt, to_db};
 use crate::workspace_log::AppendOutcome;
 
 /// One entry of a channel's role log.
@@ -52,6 +52,21 @@ impl Database {
     Ok(AppendOutcome::VersionConflict {
       current_version: current,
     })
+  }
+
+  /// The creator of a channel created anchored, the only one whose first role entry the server
+  /// takes (e2ee.md §4.6.5); `None` for any other channel.
+  pub async fn anchored_channel_founder(
+    &self,
+    conversation: ConversationId,
+  ) -> Result<Option<UserId>, DbError> {
+    let maybe_founder = sqlx::query_scalar!(
+      "SELECT founder_id FROM anchored_channel_founders WHERE conversation_id = $1",
+      to_db(conversation),
+    )
+    .fetch_optional(self.pool())
+    .await?;
+    maybe_founder.map(from_db).transpose()
   }
 
   pub async fn channel_role_log_version(&self, conversation: ConversationId) -> Result<u64, DbError> {

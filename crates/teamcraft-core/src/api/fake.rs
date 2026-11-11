@@ -546,6 +546,8 @@ struct Conversation {
   maybe_group_info: Option<(u64, Base64Bytes)>,
   /// The signed channel role log (issue #380), oldest first.
   role_log: Vec<teamcraft_proto::ChannelRoleLogEntryResponse>,
+  /// The creator of a channel created anchored: the only one whose first role entry is taken.
+  maybe_anchored_founder: Option<UserId>,
 }
 
 struct Session {
@@ -3298,6 +3300,9 @@ impl ServerApi for FakeServerApi {
       entry.response.visibility = request.visibility.clone();
       entry.response.maybe_topic = request.maybe_topic.clone();
       entry.response.maybe_category_id = request.maybe_category_id;
+      if request.is_anchored {
+        entry.maybe_anchored_founder = Some(me);
+      }
       if let Some(key) = request.maybe_idempotency_key {
         state.created_channels.insert((me, key), id);
       }
@@ -5953,6 +5958,14 @@ impl ServerApi for FakeServerApi {
           "the document names another channel or version",
         ));
       }
+      // Like the server: an anchored channel's first entry only from its creator.
+      if request.expected_version == 0 && entry.maybe_anchored_founder.is_some_and(|founder| founder != me) {
+        return Err(ApiError::status(
+          403,
+          ErrorCode::Forbidden,
+          "only the channel's founder signs its first role entry",
+        ));
+      }
       if is_in_conflict || request.expected_version != current {
         return Err(ApiError::status(
           409,
@@ -7521,6 +7534,7 @@ impl State {
         pinned: HashSet::new(),
         maybe_group_info: None,
         role_log: Vec::new(),
+        maybe_anchored_founder: None,
       },
     );
     id
