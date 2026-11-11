@@ -1816,6 +1816,7 @@ impl Core {
       return Ok(());
     }
     let store = self.store.clone().ok_or("the local database is not open")?;
+    let was_org_recovery = matches!(request.secret, EnrollSecret::OrgRecovery { .. });
     let secret = match request.secret {
       EnrollSecret::OrgRecovery { recovery_key } => self
         .org_recovery
@@ -1840,7 +1841,7 @@ impl Core {
       )
       .await
       .map_err(describe_failure)?;
-    self.org_recovery.finished();
+    self.org_recovery.settle(&self.api(), was_org_recovery).await;
     self.status = self.adopt(client);
     Ok(())
   }
@@ -1905,6 +1906,7 @@ impl Core {
       )
       .await
       .map_err(describe)?;
+    self.org_recovery.settle(&self.api(), false).await;
     self.status = self.adopt(client);
     Ok(())
   }

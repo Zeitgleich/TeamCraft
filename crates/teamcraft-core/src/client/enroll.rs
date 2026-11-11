@@ -716,6 +716,23 @@ fn unwrap_any(
   Err(last_error.map_or(CoreError::NotEnrolled, CoreError::from))
 }
 
+/// Whether one of `wrapped_keys` (as stored with the key bag) opens with `recovery_key`.
+pub(crate) fn is_wrapped_with(
+  user: UserId,
+  recovery_key: &RecoveryKey,
+  wrapped_keys: &[u8],
+) -> Result<bool, CoreError> {
+  let wraps = decode_wrapped_keys(wrapped_keys)?;
+  Ok(
+    unwrap_any(
+      convert::user(user),
+      &RecoveryKeyWrapper::new(recovery_key),
+      &wraps,
+    )
+    .is_ok(),
+  )
+}
+
 /// Opens the key bag the server stores, checking it against the wraps stored next to it.
 async fn open_stored(
   api: &impl ServerApi,

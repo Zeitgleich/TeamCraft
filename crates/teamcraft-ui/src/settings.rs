@@ -570,6 +570,12 @@ pub fn store_json<T: serde::Serialize>(key: &str, value: &T) {
   }
 }
 
+/// Where the first run keeps the ID of an open organization recovery request of `user` (not
+/// secret), so a reloaded page can resume or withdraw it (e2ee.md §6.3.1).
+pub fn org_recovery_request_key(user: impl std::fmt::Display) -> String {
+  format!("teamcraft.onboarding.org-recovery.{user}")
+}
+
 /// Writes a raw string setting to `localStorage`; failures only mean it will not persist.
 pub fn store_string(key: &str, value: &str) {
   if let Some(storage) = local_storage()

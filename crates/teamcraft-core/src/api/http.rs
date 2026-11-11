@@ -2959,6 +2959,11 @@ impl<T: AccessTokenSource> OrgRecoveryRequestApi for HttpServerApi<T> {
       .send_without_response::<()>(Method::DELETE, &format!("/org-recovery/requests/{id}"), None)
       .await
   }
+
+  async fn stored_wrapped_keys(&self) -> Result<Vec<u8>, ApiError> {
+    let key_bag = ServerApi::key_bag(self).await?;
+    Ok(key_bag.wrapped_backup_keys.into_vec())
+  }
 }
 
 /// The JSON of an API answer, read by [`read_api_body`].

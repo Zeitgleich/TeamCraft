@@ -3948,10 +3948,15 @@ sharing); nothing below is a new primitive.
   shows the code, has the person save and check a new recovery kit while the admins decide, and
   finishes once the sealed key arrived. All clients run the same `OrgRecoveryAttempt` in
   `teamcraft-core` (the phones through teamcraft-ffi, the desktop core and the browser's in-page
-  core through `OrgRecoveryFlow`). The request key lives only in the core's memory: a restart loses
-  it, so the device asks again with a new key and code and withdraws the old request (`DELETE`);
-  web and desktop keep the request ID (not secret) in `localStorage` for that. A sign-out before
-  the end withdraws the request too. The device has no device keys yet, so no gateway event reaches
+  core through `OrgRecoveryFlow`). The request key lives only in the core's memory. A reloaded page
+  asks the core first and resumes a request it still holds (on desktop the core outlives the
+  webview); a restarted core lost it, so the device asks again with a new key and code and
+  withdraws the old request (`DELETE`, only the person's own); web and desktop keep the request ID
+  (not secret) in `localStorage` for that. A sign-out before the end, or setting the device up
+  another way (kit, link), withdraws the request too. Enrollment switches the account to the new
+  kit before it stores the account: when a finish failed after that, the stored key bag opens only
+  with the new kit, so a retry with that kit enrolls as a plain recovery kit (and after a restart,
+  *Use my recovery kit* with the saved kit does). The device has no device keys yet, so no gateway event reaches
   it: it reads `GET /requests/{id}` every 5 s while the code or the finish step is on screen (and the
   page is visible), not otherwise.
 

@@ -2209,9 +2209,7 @@ impl Core {
       argon2: Argon2Settings::default(),
       maybe_attestation: None,
     };
-    self.complete_enrollment(options).await?;
-    self.org_recovery.finished();
-    Ok(())
+    self.complete_enrollment(options).await
   }
 
   /// A meeting guest's ephemeral device: no passphrase, no backup (e2ee.md §4.6, "Meeting guests").
@@ -2264,6 +2262,7 @@ impl Core {
 
   async fn complete_enrollment(&mut self, options: EnrollmentOptions) -> Result<(), String> {
     let store = self.store.clone().ok_or("the local database is not open")?;
+    let was_org_recovery = matches!(options.secret, EnrollmentSecret::OrgRecovery { .. });
     tracing::info!("enrolling this device");
     let client = PendingEnrollment::new()
       .complete(
@@ -2279,6 +2278,7 @@ impl Core {
       .await
       .map_err(describe_failure)?;
     tracing::info!("device enrolled");
+    self.org_recovery.settle(&self.api(), was_org_recovery).await;
     self.status = self.adopt(client);
     Ok(())
   }

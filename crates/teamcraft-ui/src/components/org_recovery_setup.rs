@@ -4,9 +4,12 @@
 //! read the code to an admin → save a new recovery kit → check it → finish once the admins
 //! approved. Without it, the explanation says that only a reset is left.
 //!
-//! The request's one-time key lives in the core's memory only. A reload loses it: the page keeps
-//! the request's ID (not secret) in `localStorage`, says that the old code no longer works, and
-//! withdraws that request when the person asks again. The kit's key is made afresh then as well.
+//! The request's one-time key lives in the core's memory only. The page keeps the request's ID
+//! (not secret) in `localStorage`. Mounted again (a reload; on desktop the core outlives the
+//! webview), it asks the core first: a request the core still holds is resumed at its code. Only
+//! when the core lost it does the page say that the old code no longer works; the stored request
+//! is withdrawn when the person asks again. The kit's key is made afresh either way: nothing used
+//! it yet unless a finish got far enough, and then that kit is the way back (e2ee.md §6.3.1).
 //!
 //! The recovering device has no device keys yet, so no gateway tells it about approvals: it asks
 //! the server every [`STATUS_POLL_MS`] while the code or the finish step is on screen and the page
@@ -29,13 +32,11 @@ use crate::model::UserId;
 use crate::reactive::{SetIfAlive, use_interval_while, use_page_visible};
 use crate::remote_backend;
 use crate::session::SessionControl;
-use crate::settings::{load_string, store_string};
+use crate::settings::{load_string, org_recovery_request_key, store_string};
 
 /// How often the open request's state is asked while the person looks at it. Approvals take
 /// minutes (a phone call with an admin); five seconds is quick enough to feel live.
 const STATUS_POLL_MS: u64 = 5_000;
-/// The open request's ID per account, so a reloaded page withdraws it (never a key).
-const REQUEST_PREFIX: &str = "teamcraft.onboarding.org-recovery.";
 /// The step before this flow (the choice of ways) counts as step 1.
 const STEPS_BEFORE: u8 = 1;
 const STEP_COUNT: u8 = 5;
@@ -51,6 +52,17 @@ enum ItStep {
   Check,
   /// Wait for the approvals, name the device, finish.
   Finish,
+}
+
+/// Where a mounted page starts, from what the core still holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mount {
+  /// The core still holds a request: show its code again.
+  Resume,
+  /// A request was open but the core lost its key: say so, ask again.
+  Restarted,
+  /// Nothing was asked yet.
+  Fresh,
 }
 
 /// What a request's state means on screen.
@@ -75,17 +87,18 @@ pub(crate) fn AskTheItDepartment(
   on_back: Callback<()>,
 ) -> impl IntoView {
   let i18n = use_i18n();
-  let maybe_marker = StoredValue::new(maybe_user.map(|user| format!("{REQUEST_PREFIX}{user}")));
-  // A request from before a reload: its key is gone, the code shown then doesn't work any more.
+  let maybe_marker = StoredValue::new(maybe_user.map(org_recovery_request_key));
+  // A request from before a reload or a restart of the page.
   let maybe_previous = StoredValue::new(
     maybe_marker
       .with_value(|marker| marker.as_deref().and_then(load_string))
       .and_then(|id| id.parse::<RecoveryRequestId>().ok()),
   );
-  let was_restarted = maybe_previous.with_value(Option::is_some);
+  let was_restarted = RwSignal::new(false);
   let step = RwSignal::new(ItStep::Explain);
   let status = RwSignal::new(OrgRecoveryStatus::NotStarted);
-  let is_starting = RwSignal::new(false);
+  // Asking again before the core answered could withdraw a request it still holds.
+  let is_starting = RwSignal::new(true);
   let maybe_start_error = RwSignal::new(None::<String>);
   let is_offline = RwSignal::new(false);
   let key = new_kit_key();
@@ -125,7 +138,47 @@ pub(crate) fn AskTheItDepartment(
       is_starting.set_if_alive(false);
     });
   };
+  // What the core still holds decides where the page starts.
+  spawn_local(async move {
+    let maybe_held = remote_backend::org_recovery_status().await.ok();
+    let has_marker = maybe_previous.try_with_value(Option::is_some).unwrap_or(false);
+    match mount_from(maybe_held.as_ref(), has_marker) {
+      Mount::Resume => {
+        if let Some(held) = maybe_held {
+          if let OrgRecoveryStatus::Requested { request_id, .. } = &held {
+            remember(Some(*request_id));
+            maybe_previous.try_set_value(Some(*request_id));
+          }
+          status.set_if_alive(held);
+          step.set_if_alive(ItStep::Code);
+        }
+      },
+      Mount::Restarted => was_restarted.set_if_alive(true),
+      Mount::Fresh => {},
+    }
+    is_starting.set_if_alive(false);
+  });
+  // Set up: the request is done, the marker goes (signing out clears it too, session.rs).
+  Effect::new(move |was_enrolling: Option<bool>| {
+    let is_enrolling = control.is_enrolling.get();
+    if was_enrolling == Some(true) && !is_enrolling {
+      if control.enroll_error.with_untracked(Option::is_none) {
+        remember(None);
+      } else {
+        // A failed finish: the core may have lost the request (restarted); the status says so.
+        spawn_local(async move {
+          if let Ok(latest) = remote_backend::org_recovery_status().await {
+            status.set_if_alive(latest);
+          }
+        });
+      }
+    }
+    is_enrolling
+  });
   let back = move || {
+    if is_starting.get_untracked() {
+      return;
+    }
     if matches!(status.get_untracked(), OrgRecoveryStatus::Requested { .. }) {
       spawn_local(async { drop(remote_backend::org_recovery_cancel().await) });
       remember(None);
@@ -177,12 +230,12 @@ pub(crate) fn AskTheItDepartment(
       let body = match current {
         ItStep::Explain => view! {
           <StepTitle text=Signal::derive(move || i18n.t("onboarding-it-title")) />
-          {was_restarted.then(|| view! {
+          <Show when=move || was_restarted.get() fallback=|| ()>
             <div class="auth-alert" role="status">
               <Icon name=IconName::Info />
               <p>{move || i18n.t("org-recovery-restarted")}</p>
             </div>
-          })}
+          </Show>
           <p class="step-lead">{move || i18n.t("onboarding-it-lead")}</p>
           <ul class="step-points">
             <StepPoint icon=IconName::Users title="org-recovery-point-decide" text="org-recovery-point-decide-text" />
@@ -207,7 +260,9 @@ pub(crate) fn AskTheItDepartment(
               </Show>
               {move || i18n.t("org-recovery-show-code")}
             </button>
-            <button type="button" class="btn" on:click=move |_| back()>{move || i18n.t("onboarding-back")}</button>
+            <button type="button" class="btn" prop:disabled=move || is_starting.get() on:click=move |_| back()>
+              {move || i18n.t("onboarding-back")}
+            </button>
           </div>
         }
         .into_any(),
@@ -241,7 +296,10 @@ pub(crate) fn AskTheItDepartment(
           <RequestState status=status is_offline=is_offline is_starting=is_starting on_ask=Callback::new(move |()| ask()) />
           <form class="auth-form" novalidate on:submit=finish>
             <DeviceNameField device_name=device_name />
-            <EnrollError message_key="org-recovery-finish-failed" control=control />
+            // A lost request is said by the status above, with the way to ask again.
+            <Show when=move || matches!(status.get(), OrgRecoveryStatus::Requested { .. }) fallback=|| ()>
+              <EnrollError message_key="org-recovery-finish-failed" control=control />
+            </Show>
             <div class="step-actions">
               <button
                 type="submit"
@@ -398,6 +456,16 @@ fn ClosedRequest(text_key: &'static str, is_starting: RwSignal<bool>, on_ask: Ca
   }
 }
 
+/// Where the page starts: `maybe_held` is what the core answered (`None`: no answer), with a
+/// request ID kept from before (`has_marker`).
+fn mount_from(maybe_held: Option<&OrgRecoveryStatus>, has_marker: bool) -> Mount {
+  match maybe_held {
+    Some(OrgRecoveryStatus::Requested { .. }) => Mount::Resume,
+    _ if has_marker => Mount::Restarted,
+    _ => Mount::Fresh,
+  }
+}
+
 fn step_number(step: ItStep) -> u8 {
   match step {
     ItStep::Explain => 1,
@@ -473,6 +541,37 @@ mod tests {
     }
     assert_eq!(stage_view(&OrgRecoveryStage::Unknown), StageView::Pending);
     assert_eq!(stage_view(&OrgRecoveryStage::Approved), StageView::Pending);
+  }
+
+  #[test]
+  fn a_request_the_core_still_holds_is_resumed() {
+    let held = OrgRecoveryStatus::Requested {
+      request_id: "7".parse().unwrap(),
+      code: "ab12".into(),
+      stage: OrgRecoveryStage::Ready,
+    };
+    assert_eq!(mount_from(Some(&held), true), Mount::Resume);
+    assert_eq!(mount_from(Some(&held), false), Mount::Resume);
+  }
+
+  #[test]
+  fn a_lost_request_says_so_only_when_one_was_open() {
+    assert_eq!(
+      mount_from(Some(&OrgRecoveryStatus::NotStarted), true),
+      Mount::Restarted
+    );
+    assert_eq!(mount_from(None, true), Mount::Restarted);
+    assert_eq!(
+      mount_from(Some(&OrgRecoveryStatus::NotStarted), false),
+      Mount::Fresh
+    );
+    assert_eq!(mount_from(None, false), Mount::Fresh);
+  }
+
+  #[test]
+  fn the_marker_is_per_account() {
+    assert_eq!(org_recovery_request_key(5), "teamcraft.onboarding.org-recovery.5");
+    assert_ne!(org_recovery_request_key(5), org_recovery_request_key(6));
   }
 
   #[test]

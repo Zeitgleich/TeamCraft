@@ -76,6 +76,8 @@ pub trait OrgRecoveryRequestApi {
   ) -> impl Future<Output = Result<RecoveryResultPayload, ApiError>>;
   /// `DELETE /org-recovery/requests/{id}`
   fn cancel_recovery_request(&self, id: RecoveryRequestId) -> impl Future<Output = Result<(), ApiError>>;
+  /// The wrapped backup keys stored with the person's key bag (`GET /key-bag`).
+  fn stored_wrapped_keys(&self) -> impl Future<Output = Result<Vec<u8>, ApiError>>;
 }
 
 impl OrgRecoveryAttempt {
@@ -115,6 +117,10 @@ impl OrgRecoveryAttempt {
   /// Once the admins answered: what enrolls this device, protecting the account with
   /// `new_secret` from then on (the admins saw the old backup key). `None` while the key is not
   /// there yet. The attempt stays, so a failed enrollment can be tried again.
+  ///
+  /// An earlier try may have switched the account to the new kit's key already and failed after
+  /// that (enrollment rotates the backup key before it stores the account): the stored key bag
+  /// then opens only with the new kit, so that try's kit enrolls as a plain recovery kit.
   pub async fn enrollment_secret(
     &self,
     api: &impl OrgRecoveryRequestApi,
@@ -125,6 +131,16 @@ impl OrgRecoveryAttempt {
       Err(error) if error.is_conflict() => return Ok(None),
       Err(error) => return Err(error.into()),
     };
+    if let NewBackupSecret::RecoveryKey(recovery_key) = &new_secret {
+      let wraps = api.stored_wrapped_keys().await?;
+      if super::enroll::is_wrapped_with(self.user, recovery_key, &wraps)? {
+        let NewBackupSecret::RecoveryKey(recovery_key) = new_secret else {
+          // Invariant: matched as a recovery key just above.
+          return Ok(None);
+        };
+        return Ok(Some(EnrollmentSecret::RecoveryKey(recovery_key)));
+      }
+    }
     Ok(Some(EnrollmentSecret::OrgRecovery {
       unlock: OrgRecoveryUnlock {
         key: Arc::clone(&self.key),
@@ -210,10 +226,7 @@ impl OrgRecoveryFlow {
     api: &impl OrgRecoveryRequestApi,
     recovery_key: &str,
   ) -> Result<EnrollmentSecret, CoreError> {
-    let attempt = self
-      .maybe_attempt
-      .as_ref()
-      .ok_or_else(|| CoreError::InvalidRequest("no recovery request is open on this device".into()))?;
+    let attempt = self.maybe_attempt.as_ref().ok_or(CoreError::OrgRecoveryLost)?;
     let new_secret = NewBackupSecret::RecoveryKey(super::enroll::parse_recovery_key(recovery_key)?);
     attempt
       .enrollment_secret(api, new_secret)
@@ -221,9 +234,14 @@ impl OrgRecoveryFlow {
       .ok_or_else(|| CoreError::InvalidRequest("the admins have not approved the recovery yet".into()))
   }
 
-  /// The device is set up: the request is done.
-  pub fn finished(&mut self) {
-    self.maybe_attempt = None;
+  /// The device is set up. Through the organization (`was_org_recovery`) the request is done;
+  /// set up another way (kit, link) while one was open, it is withdrawn, so no admin approves it.
+  pub async fn settle(&mut self, api: &impl OrgRecoveryRequestApi, was_org_recovery: bool) {
+    if was_org_recovery {
+      self.maybe_attempt = None;
+    } else if let Err(error) = self.cancel(api).await {
+      tracing::info!(%error, "could not withdraw the recovery request");
+    }
   }
 }
 
@@ -413,6 +431,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_kit_that_already_protects_the_account_enrolls_as_a_kit() {
+      use teamcraft_crypto::backup::{
+        BackupKey, BackupKeyWrapper as _, RecoveryKeyWrapper, encode_wrapped_key_list,
+      };
+
+      let api = FakeRecoveryApi::answering_start(Ok(request_json("pending", 0, false)));
+      let attempt = started(&api).await;
+      // An earlier finish switched the account to this kit and failed before storing the account.
+      let kit = RecoveryKey::generate(&mut OsRng);
+      let wrapped = RecoveryKeyWrapper::new(&kit)
+        .wrap_key(
+          crate::convert::user(USER.parse().unwrap()),
+          &BackupKey::generate(&mut OsRng),
+          &mut OsRng,
+        )
+        .unwrap();
+      *api.wraps.borrow_mut() = encode_wrapped_key_list(&[wrapped]).unwrap();
+      api.results.borrow_mut().push_back(Ok(vec![1, 2, 3]));
+      let same_kit = RecoveryKey::parse(kit.to_display().as_ref()).unwrap();
+      assert!(matches!(
+        attempt
+          .enrollment_secret(&api, NewBackupSecret::RecoveryKey(same_kit))
+          .await
+          .unwrap(),
+        Some(EnrollmentSecret::RecoveryKey(_))
+      ));
+      // Another kit still recovers through the organization.
+      api.results.borrow_mut().push_back(Ok(vec![1, 2, 3]));
+      assert!(matches!(
+        attempt.enrollment_secret(&api, new_secret()).await.unwrap(),
+        Some(EnrollmentSecret::OrgRecovery { .. })
+      ));
+    }
+
+    #[tokio::test]
     async fn a_network_failure_is_an_error() {
       let api = FakeRecoveryApi::answering_start(Ok(request_json("pending", 0, false)));
       let attempt = started(&api).await;
@@ -468,7 +521,10 @@ mod tests {
       let flow = OrgRecoveryFlow::default();
       assert_eq!(flow.status(&api).await.unwrap(), OrgRecoveryStatus::NotStarted);
       let key = RecoveryKey::generate(&mut OsRng).to_display().to_string();
-      assert!(flow.enrollment_secret(&api, &key).await.is_err());
+      assert!(matches!(
+        flow.enrollment_secret(&api, &key).await,
+        Err(CoreError::OrgRecoveryLost)
+      ));
     }
 
     #[tokio::test]
@@ -492,6 +548,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn setting_up_another_way_withdraws_the_request() {
+      let api = FakeRecoveryApi::answering_start(Ok(request_json("pending", 0, false)));
+      let mut flow = OrgRecoveryFlow::default();
+      flow.start(&api, None).await.unwrap();
+      flow.settle(&api, false).await;
+      assert_eq!(api.cancelled.borrow().len(), 1);
+      *api.start.borrow_mut() = Some(Ok(request_json("pending", 0, false)));
+      flow.start(&api, None).await.unwrap();
+      flow.settle(&api, true).await;
+      assert_eq!(api.cancelled.borrow().len(), 1);
+      assert_eq!(flow.status(&api).await.unwrap(), OrgRecoveryStatus::NotStarted);
+    }
+
+    #[tokio::test]
     async fn going_back_withdraws_the_request() {
       let api = FakeRecoveryApi::answering_start(Ok(request_json("pending", 0, false)));
       let mut flow = OrgRecoveryFlow::default();
@@ -509,6 +579,8 @@ mod tests {
     results: RefCell<VecDeque<Result<Vec<u8>, u16>>>,
     cancel_answer: RefCell<Option<u16>>,
     cancelled: RefCell<Vec<RecoveryRequestId>>,
+    /// The wrapped backup keys stored with the key bag (an empty list by default).
+    wraps: RefCell<Vec<u8>>,
   }
 
   impl FakeRecoveryApi {
@@ -519,6 +591,7 @@ mod tests {
         results: RefCell::new(VecDeque::new()),
         cancel_answer: RefCell::new(None),
         cancelled: RefCell::new(Vec::new()),
+        wraps: RefCell::new(vec![0]),
       }
     }
   }
@@ -543,6 +616,10 @@ mod tests {
           sealed_backup_key: Base64Bytes::new(sealed),
         })
         .map_err(refusal)
+    }
+
+    async fn stored_wrapped_keys(&self) -> Result<Vec<u8>, ApiError> {
+      Ok(self.wraps.borrow().clone())
     }
 
     async fn cancel_recovery_request(&self, id: RecoveryRequestId) -> Result<(), ApiError> {
