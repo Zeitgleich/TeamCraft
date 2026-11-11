@@ -1895,11 +1895,12 @@ never by the server's member list:
     open, unless it is the guest's own address coming back. *Reloading* (meetings.md, "Guests in the
     browser"): after the lobby entry the page seals the session token, the meeting, the chat, the
     guest's user and the organizer's fingerprint with a fresh random key (XChaCha20-Poly1305, label
-    `TeamCraft-v1 guest resume`), keeps the ciphertext in local storage and puts the key only into
-    the address fragment (`#r=`), which never reaches a server. A reload of that address opens the
-    session and the device's database again and asks the server for the lobby state; the server
-    alone decides whether the token still counts. Leaving, a refusal or a turned-away guest forget the
-    copy. Without the address the copy can't be opened; the address is no use in another browser.
+    `TeamCraft-v1 guest resume`), keeps the ciphertext in the tab's session storage and puts the key
+    only into the address fragment (`#r=`), which never reaches a server. A reload of the tab opens
+    the session and the device's database again and asks the server for the lobby state; the server
+    alone decides whether the token still counts. Session storage goes with the tab, so a stolen
+    browser profile or history holds the key at most next to a copy a tab still has open (session
+    restore). Leaving, a refusal, any 401 and a turned-away guest forget the copy.
     Otherwise the encrypted data stays in the browser until the next guest page; nothing reuses it,
     and the server deactivates the account when access ends. No push, no search index, no account data sync.
   - *The meeting link* (#987). A meeting has one link for members and guests alike,

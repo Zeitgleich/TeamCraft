@@ -200,7 +200,7 @@ pub fn detect(config: AppConfig) -> Rc<dyn Authenticator> {
     let auth: Rc<dyn Authenticator> = Rc::new(AccountGate::new(Rc::new(browser::BrowserAuth::new(config))));
     // The page runs the client core itself (web_core), signing with the page's session.
     #[cfg(target_arch = "wasm32")]
-    crate::web_core::configure(auth.clone(), &server_url);
+    crate::web_core::configure(auth.clone(), &server_url, crate::web_core::PageKind::Member);
     #[cfg(not(target_arch = "wasm32"))]
     drop(server_url);
     auth

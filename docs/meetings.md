@@ -463,15 +463,18 @@ copies nothing: a link with the server's fingerprint is never handed out from th
 **Reloading.** Once the server let the guest into the lobby, the page seals what it needs to
 carry on (the session token, the meeting, the chat, the guest's user and the organizer's
 fingerprint) with a fresh random key (XChaCha20-Poly1305, `teamcraft_crypto::guest_resume`), keeps
-only the ciphertext in this browser's local storage and moves to the guest's own address,
-`/meeting/<link>#r=<key>`. The key is in the fragment only, so it never reaches a server, and the
-address opens nothing in another browser. A reload (or the address opened again in this browser)
-opens the session, keeps the device's database instead of deleting it, and asks the server for the
-lobby state: admitted goes straight into the meeting, waiting keeps the place, a turned-away guest or
-a refused token (left, removed, the meeting's access over) forgets the copy and ends the page. The
-server decides each time; the stored copy proves nothing it doesn't accept. "Leave" forgets it too.
-Somebody with access to this browser's storage and history has what the guest has; that is the
-same for any open guest page. A call the guest was in is joined again with "Join call".
+only the ciphertext in the tab's **session storage** and moves to the guest's own address,
+`/meeting/<link>#r=<key>&v=<fingerprint>`. The key is in the fragment only, so it never reaches a
+server. Session storage belongs to the tab: a reload (F5, the panic overlay's "Reload") or the
+browser restoring the tab brings the guest back; a closed tab, the address in another tab or
+another browser opens nothing and knocks anew (with `v`, so the organizer's key is still checked). A
+reload opens the session, keeps the device's database instead of deleting it, and asks the server
+for the lobby state: admitted goes straight into the meeting, waiting keeps the place, a
+turned-away guest or a refused token forgets the copy and ends the page. The server decides each
+time; the stored copy proves nothing it doesn't accept. Any guest request the server answers with
+401 (the meeting's access over, the guest removed) forgets the copy too, and so do "Leave" and a new
+knock in the tab. A reload whose device database is gone (site data cleared) forgets the copy and
+starts over at the plain link. A call the guest was in is joined again with "Join call".
 
 Not done yet: a host the organizer's list doesn't name (not in the chat's group when the organizer's device
 last signed it) lets nobody's device in, and the guest waits for another; the size of

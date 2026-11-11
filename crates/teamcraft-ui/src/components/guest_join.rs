@@ -57,6 +57,15 @@ enum FailureKind {
   /// The page could not set up its encryption.
   SetupFailed,
   Network,
+  /// A resumed session whose device database is gone; the page starts over.
+  DeviceLost,
+}
+
+/// Whether the page's session is new or a reloaded one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionOrigin {
+  Joined,
+  Resumed,
 }
 
 /// The page's state that the join, a resumed session and the lobby poll share.
@@ -91,7 +100,7 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
   let maybe_resumed = link
     .maybe_resume_key
     .as_deref()
-    .and_then(StoredGuestSession::load);
+    .and_then(|key| StoredGuestSession::load(key));
   let phase = RwSignal::new(if maybe_resumed.is_some() {
     GuestPhase::Waiting
   } else {
@@ -130,12 +139,15 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
   } = page;
   crate::startup::first_view();
   match maybe_resumed {
-    Some(session) => spawn_local(enter(session, client.clone(), config.clone(), page)),
-    None => {
-      StoredGuestSession::forget();
-      // What an earlier guest page left in this browser (closed without "Leave") goes now.
-      spawn_local(delete_stale_guest_store());
-    },
+    Some(session) => spawn_local(enter(
+      session,
+      SessionOrigin::Resumed,
+      client.clone(),
+      config.clone(),
+      page,
+    )),
+    // What an earlier guest page left in this browser (closed without "Leave") goes now.
+    None => spawn_local(delete_stale_guest_store()),
   }
 
   let join: StoredValue<Rc<dyn Fn(leptos::ev::SubmitEvent)>, LocalStorage> = StoredValue::new_local({
@@ -149,6 +161,8 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
       }
       let parts = link.get_value();
       phase.set(GuestPhase::Joining);
+      // A new knock in this tab replaces whatever session it kept.
+      StoredGuestSession::forget();
       // A one-time token stays in memory from here on, not in the address bar, the history or a
       // bookmark made later.
       strip_link_fragment();
@@ -181,7 +195,7 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
         if let Some(address) = session.keep(&parts.handle) {
           replace_address(&address);
         }
-        enter(session, client, config, page).await;
+        enter(session, SessionOrigin::Joined, client, config, page).await;
       });
     }) as Rc<dyn Fn(leptos::ev::SubmitEvent)>
   });
@@ -278,7 +292,7 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
             GuestPhase::Failed(kind) => {
               let key = match kind {
                 FailureKind::LinkUnusable => "guest-link-unusable",
-                FailureKind::SetupFailed => "guest-setup-failed",
+                FailureKind::SetupFailed | FailureKind::DeviceLost => "guest-setup-failed",
                 FailureKind::Network => "guest-network",
               };
               view! {
@@ -298,7 +312,13 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
 /// Carries the guest on from the lobby entry, after joining or after a reload: the page's session
 /// signs with the guest's token, the device is set up (or opened again), and the lobby is asked
 /// at once whether the guest was let in meanwhile.
-async fn enter(session: StoredGuestSession, client: GuestClient, config: AppConfig, page: LobbyPage) {
+async fn enter(
+  session: StoredGuestSession,
+  origin: SessionOrigin,
+  client: GuestClient,
+  config: AppConfig,
+  page: LobbyPage,
+) {
   let auth: Rc<dyn Authenticator> = Rc::new(GuestAuth::new(config.clone(), session.guest_token.clone()));
   let is_gone = page
     .joined
@@ -323,6 +343,7 @@ async fn enter(session: StoredGuestSession, client: GuestClient, config: AppConf
     session.conversation,
     session.meeting,
     organizer_fingerprint,
+    origin,
   )
   .await;
   match setup {
@@ -332,6 +353,12 @@ async fn enter(session: StoredGuestSession, client: GuestClient, config: AppConf
       page.codes.set_if_alive(Some((own_code, organizer_code)));
       page.is_device_ready.set_if_alive(true);
       check_lobby(client, page).await;
+    },
+    // The device's database is gone (site data cleared): its knock can't be completed, so the
+    // page starts over at the plain link and the guest knocks as new.
+    Err(FailureKind::DeviceLost) => {
+      StoredGuestSession::forget();
+      start_over();
     },
     Err(kind) => page.phase.set_if_alive(GuestPhase::Failed(kind)),
   }
@@ -392,6 +419,7 @@ async fn prepare_device(
   conversation: ConversationId,
   meeting: MeetingId,
   maybe_organizer_fingerprint: Option<&str>,
+  origin: SessionOrigin,
 ) -> Result<(String, Option<String>), FailureKind> {
   configure_core(auth, config);
   let failed = |step: &str, error: String| {
@@ -401,6 +429,9 @@ async fn prepare_device(
   let mut waited = Duration::ZERO;
   loop {
     match remote_backend::core_status(user_id).await {
+      Ok(CoreStatus::NeedsEnrollment { .. }) if origin == SessionOrigin::Resumed => {
+        return Err(FailureKind::DeviceLost);
+      },
       Ok(CoreStatus::NeedsEnrollment { .. }) => {
         remote_backend::enroll_guest(DEVICE_NAME)
           .await
@@ -447,6 +478,17 @@ async fn report_device(
   }
 }
 
+/// Loads the plain meeting link again (without the resume key), so the guest knocks as new.
+fn start_over() {
+  let Some(location) = web_sys::window().map(|window| window.location()) else {
+    return;
+  };
+  if let Ok(path) = location.pathname() {
+    // A failure leaves the page as it is; the guest can reload by hand.
+    let _ = location.replace(&path);
+  }
+}
+
 /// Moves the page to `address` (history entry replaced, nothing reloads).
 fn replace_address(address: &str) {
   let Some(history) = web_sys::window().and_then(|window| window.history().ok()) else {
@@ -471,7 +513,7 @@ fn strip_link_fragment() {
 /// The page runs the guest's client core itself, signing with the guest's session token.
 #[cfg(target_arch = "wasm32")]
 fn configure_core(auth: Rc<dyn Authenticator>, config: &AppConfig) {
-  crate::web_core::configure(auth, &config.server_url);
+  crate::web_core::configure(auth, &config.server_url, crate::web_core::PageKind::Guest);
 }
 
 #[cfg(target_arch = "wasm32")]

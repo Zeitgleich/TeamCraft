@@ -14,6 +14,7 @@ use std::fmt;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand_core::CryptoRngCore;
+use zeroize::Zeroizing;
 
 use crate::aead::{self, NONCE_LEN, TAG_LEN};
 use crate::domain::{self, GUEST_RESUME};
@@ -41,9 +42,11 @@ impl GuestResumeKey {
 
   /// Reads the key as [`Self::to_fragment`] wrote it.
   pub fn from_fragment(text: &str) -> Result<Self, GuestResumeError> {
-    let bytes = URL_SAFE_NO_PAD
-      .decode(text)
-      .map_err(|_| GuestResumeError::BadKey)?;
+    let bytes = Zeroizing::new(
+      URL_SAFE_NO_PAD
+        .decode(text)
+        .map_err(|_| GuestResumeError::BadKey)?,
+    );
     if bytes.len() != SYMMETRIC_KEY_LEN {
       return Err(GuestResumeError::BadKey);
     }
@@ -53,8 +56,8 @@ impl GuestResumeKey {
   }
 
   /// The key as it goes into the address fragment (base64url, no padding).
-  pub fn to_fragment(&self) -> String {
-    URL_SAFE_NO_PAD.encode(self.0.expose_secret())
+  pub fn to_fragment(&self) -> Zeroizing<String> {
+    Zeroizing::new(URL_SAFE_NO_PAD.encode(self.0.expose_secret()))
   }
 
   /// Seals the session. A fresh random nonce is drawn per call.
@@ -158,7 +161,7 @@ mod tests {
     #[test]
     fn debug_does_not_show_the_key() {
       let key = GuestResumeKey::generate(&mut OsRng);
-      assert!(!format!("{key:?}").contains(&key.to_fragment()));
+      assert!(!format!("{key:?}").contains(key.to_fragment().as_str()));
     }
   }
 }
