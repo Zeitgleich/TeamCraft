@@ -5178,7 +5178,7 @@ mod tests {
       );
       drain(&mut alice);
 
-      alice.connection_lost();
+      alice.connection_lost(now);
       alice.rejoin("fresh".into(), now);
       drain(&mut alice);
       alice
@@ -5217,7 +5217,7 @@ mod tests {
     fn a_share_the_sfu_lost_is_published_again() {
       let now = Instant::now();
       let mut alice = sharing(now);
-      alice.connection_lost();
+      alice.connection_lost(now);
       alice.rejoin("fresh".into(), now);
       drain(&mut alice);
       alice
