@@ -2542,23 +2542,34 @@ workspace roster (admin.md §2.3):
     passed under (a workspace admin who is also a channel admin, or on a roster too old to vouch for them, alike). A list
     they looked at and their own founding still count: they name what that admin chose, not a snapshot handed to them.
     So the demoted admin's purge on those devices takes the retention, and the part that can't be repaired is closed. No
-    format changes; older clients still count such an entry. **Residual:** the old anchor itself carries on there, so the
+    format changes; older clients still count such an entry. A state stored before this drops, once, every signer it
+    recorded whom the roster names as owner or admin or the admin history holds a tenure of
+    (`forget_legacy_recent_signers`, marked by `has_legacy_recent_signers`): it can't tell their ordinary entries from
+    their lists, and a reviewed list's signer dropped costs only a purge's speed until the next entry. **Residual:** the old anchor itself carries on there, so the
     appointer line can name an appointment the demotion ended, until a member's head or a reviewed list reaches those
     devices. A workspace admin's own purge is unaffected (it never asked for another signer).
   - **A member's stuck device asks in its messages** (issue #1264, the owner chose option A). A stretch, a snapshot resting
     on somebody who left (the anchor lost on a late read) or an alarm is known only to the device it happened on
     (`ChannelRoleState::needs_review`). Such a device marks the head its text messages already carry (`needs_review: true`
     in `ChannelRolesHead`, left out when false). A newer head not read yet doesn't count: the next read settles it, and an
-    honest concurrent change would raise it everywhere for a moment. A workspace admin's device in the channel that reads
-    such a head records the request (`is_review_asked`) and its members section says the roles need a look, in the
-    existing words, with "Check roles" as before: no new dialog, line or notification (issue #1276). Nobody else sees
-    anything. A reviewed list the device accepts ends the request, and a request from a head below that list's version
-    (`reviewed_version`), a message sent before it, doesn't raise it again. It is a member's claim and changes nothing
-    else: a member can make a workspace admin's panel say "look" for a channel, as any member's head can raise the alarm
-    already. **Limits:** it reaches only workspace admins in the channel's group, since it travels in messages; an admin
-    outside the group, or a channel nobody writes in, hears nothing, and the member's own app stays the way to know
-    (it refuses what needs a signed role, with words). A device that never accepted an entry sends no head, so it can't
-    ask. Older clients neither send nor read the mark; their heads compare as before.
+    honest concurrent change would raise it everywhere for a moment. A device that reads such a head in a member's
+    message records the request with the sender and the message's server time (`review_requests`, one per sender, the
+    newest, at most 64). A workspace admin's members section then says the roles need a look, in the existing words,
+    names who asked ("Asked for by", desktop and web; the phones show the hint without the names for now), and offers
+    "Check roles" as before: no new dialog, line or notification (issue #1276). Any reviewed list the device accepts ends
+    every request: only a workspace admin's passes, and they looked, whether or not it anchors on this device. A request in
+    a message the server dated no later than that list (`maybe_reviewed_at_ms`, the entry's server time) was sent before
+    it and stays answered; a later one asks again. The order is the server's, as with the list itself, so it can only
+    show or hide the hint. A stuck device whose server keeps the list from it asks again with its next message, though its
+    head stays below the list. It is a member's claim and changes nothing else: a member can make a workspace admin's
+    panel say "look" for a channel, as any member's head can raise the alarm already, and the panel says who. **Limits:**
+    it reaches only workspace admins in the channel's group, since it travels in messages; an admin outside the group, or
+    a channel nobody writes in, hears nothing, and the member's own app stays the way to know (it refuses what needs a
+    signed role, with words). A device that never accepted an entry sends no head, so it can't ask. **What members
+    learn:** the mark is inside every message's ciphertext, so every member's device reads it, and a modified client can
+    tell that somebody's device sees a different log than its own; only the UI shows it to workspace admins alone. A
+    member's head told as much before (an alarm needs only the version and hash). Older clients neither send nor read the
+    mark; their heads compare as before.
 
   **Compatibility.** No signed format and nothing on the server changes; the new state is local and additive, and a reviewed
   entry is an ordinary checkpoint to older clients. A state from before this looks once more at what it skipped, and since

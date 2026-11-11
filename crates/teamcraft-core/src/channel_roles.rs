@@ -140,6 +140,8 @@ const MAX_SKIPPED_HASHES: usize = 64;
 const MAX_UNCONFIRMED: usize = 64;
 /// Signers a device remembers for the purge's time limit, the most recent ones.
 const MAX_RECENT_SIGNERS: usize = 16;
+/// Members whose review requests a channel's state keeps (issue #1264, option 2A), the newest.
+const MAX_REVIEW_REQUESTS: usize = 64;
 
 /// What this device verified of one channel's role log.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,14 +222,28 @@ pub struct ChannelRoleState {
   /// Who signed the last accepted entry, to name both signers of a fork.
   #[serde(rename = "head_signer", default, skip_serializing_if = "Option::is_none")]
   pub maybe_head_signer: Option<UserId>,
-  /// A member's message said their device is stuck on this channel's roles (issue #1264, option
-  /// 2A): a workspace admin's device offers the review for it. Until a reviewed list is accepted.
-  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-  pub is_review_asked: bool,
-  /// The version of the last reviewed list this device accepted (0: none known). A request from a
-  /// head below it was sent before that list and is answered by it.
-  #[serde(default, skip_serializing_if = "is_zero")]
-  pub reviewed_version: u64,
+  /// Members whose messages said their device is stuck on this channel's roles (issue #1264,
+  /// option 2A), one per sender, newest kept: a workspace admin's device offers the review for
+  /// them and names who asked. Until a reviewed list is accepted.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub review_requests: Vec<ReviewRequest>,
+  /// The server's time of the last reviewed list this device accepted. A request in a message the
+  /// server dated no later was sent before that list and is answered by it.
+  #[serde(rename = "reviewed_at_ms", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_reviewed_at_ms: Option<i64>,
+  /// Whether `recent_signers` may still hold entries recorded before a workspace admin's ordinary
+  /// entry stopped counting (issue #1264, option 1B). True for a state stored before that, which
+  /// lacks the field; [`Self::forget_legacy_recent_signers`] clears it once.
+  #[serde(default = "is_legacy_state")]
+  pub has_legacy_recent_signers: bool,
+}
+
+/// A member's message asked for a review of the channel's roles: who, and the server's time of
+/// the newest such message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewRequest {
+  pub user_id: UserId,
+  pub sent_at_ms: i64,
 }
 
 /// Somebody who signed an entry this device accepted. `from_ms` is the entry's signing time, capped
@@ -501,6 +517,56 @@ impl ChannelRoleState {
     self.has_unverified_stretch() || self.has_former_admin_entry || self.maybe_alarm.is_some()
   }
 
+  /// Takes `sender`'s request for a review from a message the server dated `sent_at_ms` (issue
+  /// #1264, option 2A). One request per sender, so a member can't fill the list; one in a message
+  /// from before the last reviewed list this device accepted is answered by it. A stuck device's
+  /// later messages ask again, also when the server keeps that list from it.
+  pub fn note_review_request(&mut self, sender: UserId, sent_at_ms: i64) {
+    if self
+      .maybe_reviewed_at_ms
+      .is_some_and(|reviewed_at| sent_at_ms <= reviewed_at)
+    {
+      return;
+    }
+    match self
+      .review_requests
+      .iter_mut()
+      .find(|request| request.user_id == sender)
+    {
+      Some(request) => request.sent_at_ms = request.sent_at_ms.max(sent_at_ms),
+      None => self.review_requests.push(ReviewRequest {
+        user_id: sender,
+        sent_at_ms,
+      }),
+    }
+    if self.review_requests.len() > MAX_REVIEW_REQUESTS {
+      self
+        .review_requests
+        .sort_by_key(|request| std::cmp::Reverse(request.sent_at_ms));
+      self.review_requests.truncate(MAX_REVIEW_REQUESTS);
+    }
+  }
+
+  /// Whether a member's device asked for a review that no reviewed list has answered yet.
+  pub fn is_review_asked(&self) -> bool {
+    !self.review_requests.is_empty()
+  }
+
+  /// Once, for a state stored before a workspace admin's ordinary entry stopped counting as a
+  /// recent other signer (issue #1264, option 1B): drops every recorded signer the roster names as
+  /// owner or admin, or who held such a tenure. That may drop a reviewed list's signer too, which
+  /// costs only a purge's speed until the next entry; keeping them could keep a demoted admin's
+  /// purge open for `channel_roles_max_age`.
+  pub fn forget_legacy_recent_signers(&mut self, workspace: &WorkspaceState) {
+    if !self.has_legacy_recent_signers {
+      return;
+    }
+    self
+      .recent_signers
+      .retain(|recent| !is_or_was_workspace_admin(workspace, recent.user_id));
+    self.has_legacy_recent_signers = false;
+  }
+
   /// Verifies and applies new entries in version order. Each one is accepted or skipped; the
   /// reasons of the skipped ones are returned (and the last one kept).
   pub fn apply_entries<D: IdentityDirectory>(
@@ -543,9 +609,6 @@ impl ChannelRoleState {
   /// Compares a member's head with ours: the same version with another hash means the server
   /// showed us different entries; a newer one is checked after the next sync.
   pub fn note_head(&mut self, other: &ChannelRolesHead) {
-    if other.needs_review && other.version >= self.reviewed_version {
-      self.is_review_asked = true;
-    }
     if other.version == self.version && self.maybe_head_hash.as_ref() != Some(&other.hash) {
       self.maybe_alarm = Some(format!(
         "another member verified a different entry {} of this channel's roles: the server shows members different logs",
@@ -952,6 +1015,16 @@ impl ChannelRoleState {
     let previous_assignments = std::mem::replace(&mut self.assignments, document.assignments);
     let has_server_listed_roles = document.has_server_listed_roles;
     let was_reviewed = is_reviewed_hash(&document.prev_hash);
+    // Any reviewed list answers what stuck devices asked for: only a workspace admin's passes, and
+    // they looked, whether or not it anchors here.
+    if was_reviewed {
+      self.review_requests.clear();
+      self.maybe_reviewed_at_ms = Some(
+        self
+          .maybe_reviewed_at_ms
+          .map_or(entry.created_at.0, |at| at.max(entry.created_at.0)),
+      );
+    }
     match maybe_authority {
       _ if is_by_workspace_admin => self.is_workspace_anchored = true,
       // A claim, a roster admin on a roster too old to anchor anything, or somebody who left and
@@ -974,13 +1047,10 @@ impl ChannelRoleState {
       self.maybe_unverified_from = None;
       self.has_former_admin_entry = false;
       self.has_server_listed_roles = false;
-      // Somebody who can look looked: what the members disagreed about is settled by this list,
-      // and so is what a stuck device asked for.
+      // Somebody who can look looked: what the members disagreed about is settled by this list.
       if was_reviewed {
         self.maybe_alarm = None;
         self.is_alarm_proven = false;
-        self.is_review_asked = false;
-        self.reviewed_version = version;
       }
     } else if matches!(maybe_authority, Some(SignerAuthority::FormerWorkspace { .. })) {
       self.has_former_admin_entry = true;
@@ -1398,8 +1468,25 @@ fn is_reviewed_hash(prev_hash: &Base64Bytes) -> bool {
   prev_hash.as_slice() == REVIEWED_PREV_HASH.as_slice()
 }
 
-fn is_zero(value: &u64) -> bool {
-  *value == 0
+/// Whether the roster names `user` as owner or admin, however old it is, or the admin history
+/// holds a tenure of theirs.
+fn is_or_was_workspace_admin(workspace: &WorkspaceState, user: UserId) -> bool {
+  workspace
+    .roster
+    .members
+    .iter()
+    .any(|member| member.user_id == user && matches!(member.role, RosterRole::Owner | RosterRole::Admin))
+    || workspace
+      .admin_history
+      .tenures
+      .iter()
+      .any(|tenure| tenure.user_id == user)
+}
+
+/// The serde default of [`ChannelRoleState::has_legacy_recent_signers`]: a stored state without the
+/// field is from before it.
+fn is_legacy_state() -> bool {
+  true
 }
 
 /// The role to act on: the verified one, but never more than the server lists (the server can
@@ -2722,44 +2809,129 @@ mod tests {
       assert!(late.needs_review());
     }
 
-    /// A workspace admin's device takes the request until a reviewed list, and a request sent
-    /// before that list doesn't come back with a late message.
+    /// A workspace admin's device takes a request until a reviewed list; a request in a message the
+    /// server dated before that list stays answered, one after it asks again (also when the server
+    /// keeps the list from the stuck device, whose head then stays below it).
     #[test]
-    fn a_request_stands_until_a_reviewed_list_and_older_ones_stay_answered() {
+    fn a_request_stands_until_a_reviewed_list_and_a_later_message_asks_again() {
       let (alice, bob, admin) = (Person::new(1), Person::new(2), Person::new(9));
       let world = World::new(&[&alice, &bob], &[&admin]);
       let mut state = founded(&world, &admin, &[(&alice, ChannelRole::Admin)]);
-      let stuck_at = state.version;
-      let request = |version| ChannelRolesHead {
-        version,
-        hash: Base64Bytes::new(vec![7; 32]),
-        needs_review: true,
-      };
-      state.note_head(&request(stuck_at));
-      assert!(state.is_review_asked);
-      assert!(
-        state.maybe_alarm.is_some(),
-        "another hash at our version is the alarm as before"
-      );
+      state.note_review_request(bob.user_id, NOW_MS - 10);
+      assert!(state.is_review_asked());
 
       let reviewed = admin.reviewed(
         &state,
         &[(&admin, ChannelRole::Admin), (&alice, ChannelRole::Admin)],
       );
+      let reviewed_at = reviewed.created_at.0;
       assert!(world.apply(&mut state, reviewed).is_empty());
-      assert!(!state.is_review_asked);
-      assert_eq!(state.reviewed_version, state.version);
+      assert!(!state.is_review_asked());
+      assert_eq!(state.maybe_reviewed_at_ms, Some(reviewed_at));
 
-      state.note_head(&request(stuck_at));
-      assert!(!state.is_review_asked, "sent before the list");
-      state.note_head(&request(state.version));
-      assert!(state.is_review_asked, "stuck again after it");
+      state.note_review_request(bob.user_id, reviewed_at - 5);
+      state.note_review_request(bob.user_id, reviewed_at);
+      assert!(!state.is_review_asked(), "sent before the list");
+      state.note_review_request(bob.user_id, reviewed_at + 1);
+      assert!(state.is_review_asked(), "still stuck after it");
 
       let stored: ChannelRoleState = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+      assert_eq!(stored.review_requests, state.review_requests);
+      assert_eq!(stored.maybe_reviewed_at_ms, Some(reviewed_at));
+    }
+
+    /// One standing request per sender, the newest; a bounded list however many ask.
+    #[test]
+    fn requests_are_one_per_sender_and_bounded() {
+      let mut state = ChannelRoleState::default();
+      state.note_review_request(user(2), NOW_MS);
+      state.note_review_request(user(2), NOW_MS + 5);
+      state.note_review_request(user(2), NOW_MS + 1);
       assert_eq!(
-        (stored.is_review_asked, stored.reviewed_version),
-        (true, state.version)
+        state.review_requests,
+        vec![ReviewRequest {
+          user_id: user(2),
+          sent_at_ms: NOW_MS + 5,
+        }]
       );
+      for raw in 10..(10 + MAX_REVIEW_REQUESTS as i64 + 6) {
+        state.note_review_request(user(raw), NOW_MS + raw);
+      }
+      assert_eq!(state.review_requests.len(), MAX_REVIEW_REQUESTS);
+      assert!(
+        !state
+          .review_requests
+          .iter()
+          .any(|request| request.user_id == user(2)),
+        "the oldest go"
+      );
+    }
+
+    /// A head's flag alone changes nothing in the state: the client takes it with the message's
+    /// sender and server time.
+    #[test]
+    fn a_flagged_head_is_compared_as_any_head() {
+      let (alice, bob) = (Person::new(1), Person::new(2));
+      let world = World::new(&[&alice, &bob], &[]);
+      let mut state = founded(&world, &alice, &[]);
+      let before = state.clone();
+      let mut head = state.head().unwrap();
+      head.needs_review = true;
+      state.note_head(&head);
+      assert_eq!(state, before);
+    }
+  }
+
+  mod legacy_recent_signers {
+    use super::*;
+
+    /// Issue #1264, option 1B, for a state stored before it: workspace admins it recorded, current
+    /// or former, are dropped once; others stay, and nothing is dropped again.
+    #[test]
+    fn a_state_from_before_drops_workspace_admins_once() {
+      let story = Story::new();
+      let mut world = story.world();
+      story.eve_leaves(&mut world);
+      let state = ChannelRoleState {
+        recent_signers: [&story.frank, &story.eve, &story.bob]
+          .iter()
+          .map(|person| RecentSigner {
+            user_id: person.user_id,
+            from_ms: NOW_MS,
+          })
+          .collect(),
+        ..ChannelRoleState::default()
+      };
+      let mut stored = serde_json::to_value(&state).unwrap();
+      stored
+        .as_object_mut()
+        .unwrap()
+        .remove("has_legacy_recent_signers");
+      let mut legacy: ChannelRoleState = serde_json::from_value(stored).unwrap();
+      assert!(legacy.has_legacy_recent_signers);
+
+      legacy.forget_legacy_recent_signers(&world.workspace);
+      let kept: Vec<UserId> = legacy
+        .recent_signers
+        .iter()
+        .map(|recent| recent.user_id)
+        .collect();
+      assert_eq!(kept, vec![story.bob.user_id], "Frank is an admin, Eve was one");
+      assert!(!legacy.has_legacy_recent_signers);
+
+      legacy.recent_signers = state.recent_signers.clone();
+      legacy.forget_legacy_recent_signers(&world.workspace);
+      assert_eq!(legacy.recent_signers.len(), 3, "once only");
+      let reread: ChannelRoleState = serde_json::from_value(serde_json::to_value(&legacy).unwrap()).unwrap();
+      assert!(!reread.has_legacy_recent_signers);
+    }
+
+    #[test]
+    fn a_new_state_is_no_legacy_state() {
+      let state = ChannelRoleState::default();
+      assert!(!state.has_legacy_recent_signers);
+      let reread: ChannelRoleState = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+      assert!(!reread.has_legacy_recent_signers);
     }
   }
 
@@ -3131,6 +3303,28 @@ mod tests {
         "the same log as a device that was there"
       );
       assert!(!reader.is_workspace_anchored, "nothing it can justify today");
+    }
+
+    /// Issue #1264, option 1B: an ordinary entry by a workspace admin who has left, taken on their
+    /// tenure, keeps no channel admin's purge open either; the channel admin carrying on does.
+    #[test]
+    fn a_departed_workspace_admins_entry_is_no_recent_signer() {
+      let story = Story::new();
+      let mut world = story.world();
+      let mut reader = story.first_read(&world);
+      reader.recent_signers.clear();
+      let (demotion, carried_on, _) = story.demotion(&world, &reader);
+      story.eve_leaves(&mut world);
+      assert!(world.apply(&mut reader, demotion).is_empty());
+      assert!(reader.has_former_admin_entry, "taken as a former admin's");
+      assert!(reader.recent_signers.is_empty(), "{:?}", reader.recent_signers);
+      assert!(world.apply(&mut reader, carried_on).is_empty());
+      let signers: Vec<UserId> = reader
+        .recent_signers
+        .iter()
+        .map(|recent| recent.user_id)
+        .collect();
+      assert_eq!(signers, vec![story.bob.user_id]);
     }
 
     #[test]

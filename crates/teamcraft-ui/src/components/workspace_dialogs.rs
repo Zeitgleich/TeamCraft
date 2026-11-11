@@ -13,8 +13,8 @@ use teamcraft_client_api::model::{
   AppointerAuthority, ChannelMember, ChannelRole, ChannelRolesReview, RoleKeyMark,
 };
 use teamcraft_client_api::role_review::{
-  RoleReviewRefusal, RoleReviewRow, dropped_role_names, has_review_changed, role_review_refusal,
-  role_review_rows,
+  RoleReviewRefusal, RoleReviewRow, dropped_role_names, has_review_changed, review_asker_names,
+  role_review_refusal, role_review_rows,
 };
 use teamcraft_client_api::role_rules::{
   RoleTarget, SpaceStanding, assignable_roles, can_manage_channel_roles,
@@ -734,6 +734,18 @@ fn ChannelRolesReviewPanel(
     });
     names.join(", ")
   });
+  // Members whose devices asked for a look (issue #1264): their word, so the panel names them.
+  let askers = Memo::new(move |_| {
+    let asked_by = review.with(|maybe| {
+      maybe
+        .as_ref()
+        .map(|found| found.review_asked_by.clone())
+        .unwrap_or_default()
+    });
+    users
+      .with(|known| review_asker_names(&asked_by, known, &i18n.t("channel-roles-review-unknown")))
+      .join(", ")
+  });
   // The button that opened the list is gone: the focus goes with the content.
   let list_ref = NodeRef::<leptos::html::Ul>::new();
   Effect::new(move |_| {
@@ -750,6 +762,9 @@ fn ChannelRolesReviewPanel(
           i18n.t(if needs_a_look { "channel-roles-review-hint" } else { "channel-roles-review-hint-quiet" })
         }}
       </p>
+      <Show when=move || askers.with(|names| !names.is_empty()) fallback=|| ()>
+        <p class="hint">{move || i18n.t_with("channel-roles-review-asked", &[("names", askers.get().as_str())])}</p>
+      </Show>
       <Show
         when=move || is_reviewing.get()
         fallback=move || view! {

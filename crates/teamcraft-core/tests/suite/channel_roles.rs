@@ -2047,10 +2047,11 @@ async fn a_stuck_members_message_offers_the_workspace_admin_the_review() {
   world.bob.client.send_text(channel, None, "hi").await.unwrap();
   settle(&mut [&mut world.alice, &mut world.bob]).await;
   let state = world.alice.client.channel_role_state(channel).unwrap();
-  assert!(state.is_review_asked);
+  assert!(state.is_review_asked());
   assert!(state.maybe_alarm.is_none(), "a request is no alarm: {state:?}");
   let review = world.ui_of_alice().channel_roles_review(channel).unwrap();
   assert!(review.needs_a_look);
+  assert_eq!(review.review_asked_by, vec![bob_id], "she sees who asked");
 
   let reviewed = [
     (alice_id, ChannelRole::Admin),
@@ -2072,10 +2073,37 @@ async fn a_stuck_members_message_offers_the_workspace_admin_the_review() {
       .client
       .channel_role_state(channel)
       .unwrap()
-      .is_review_asked
+      .is_review_asked()
   );
   assert!(
     !world
+      .ui_of_alice()
+      .channel_roles_review(channel)
+      .unwrap()
+      .needs_a_look
+  );
+
+  // The server keeps her list from Bob's device too: still stuck, his next message asks again,
+  // though his head stays below her list.
+  server.advance_clock(std::time::Duration::from_secs(1));
+  world
+    .bob
+    .client
+    .send_text(channel, None, "still stuck")
+    .await
+    .unwrap();
+  settle(&mut [&mut world.alice, &mut world.bob]).await;
+  let state = world.alice.client.channel_role_state(channel).unwrap();
+  assert_eq!(
+    state
+      .review_requests
+      .iter()
+      .map(|request| request.user_id)
+      .collect::<Vec<_>>(),
+    vec![bob_id]
+  );
+  assert!(
+    world
       .ui_of_alice()
       .channel_roles_review(channel)
       .unwrap()

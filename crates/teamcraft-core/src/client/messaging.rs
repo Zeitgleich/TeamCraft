@@ -744,7 +744,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
             self.note_workspace_head(&head)?;
           }
           if let Some(head) = meta.maybe_channel_roles_head.take() {
-            self.note_channel_roles_head(conversation, &head)?;
+            self.note_channel_roles_head(
+              conversation,
+              &head,
+              message.sender_user_id,
+              message.id.snowflake().unix_millis(),
+            )?;
           }
           crate::integration_sources::take_message_source(
             &self.store,

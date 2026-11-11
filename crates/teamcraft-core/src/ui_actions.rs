@@ -589,7 +589,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       });
     let needs_a_look = signed.must_review_before_vouching()
       // A member's device said it is stuck here (issue #1264, option 2A).
-      || signed.is_review_asked
+      || signed.is_review_asked()
       || lists_a_role_nobody_confirmed
       || signed.maybe_alarm.is_some()
       // A log this device took nothing from: only such a list gets it out.
@@ -605,6 +605,11 @@ impl<S: LocalStore> CoreChatBackend<S> {
     is_vouching.then(|| teamcraft_client_api::model::ChannelRolesReview {
       log_cursor: signed.cursor,
       needs_a_look,
+      review_asked_by: signed
+        .review_requests
+        .iter()
+        .map(|request| request.user_id)
+        .collect(),
       key_marks: standings
         .into_iter()
         .map(|(user, standing)| {

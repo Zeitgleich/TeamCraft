@@ -127,9 +127,14 @@ pub enum RoleSigning {
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// The channel's roles as this device verified them (nothing signed yet: the default).
   pub fn channel_role_state(&self, conversation: ConversationId) -> Result<ChannelRoleState, CoreError> {
-    Ok(
-      records::get_json(&self.store, Table::Workspace, &channel_roles_key(conversation))?.unwrap_or_default(),
-    )
+    let mut state: ChannelRoleState =
+      records::get_json(&self.store, Table::Workspace, &channel_roles_key(conversation))?.unwrap_or_default();
+    // Once per channel after the update (issue #1264, option 1B); stored, so never again.
+    if state.has_legacy_recent_signers {
+      state.forget_legacy_recent_signers(&self.workspace()?);
+      self.put_channel_role_state(conversation, &state)?;
+    }
+    Ok(state)
   }
 
   /// The signed role of `user` in the channel (member when nothing signed names them). Decisions
@@ -476,15 +481,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(self.channel_role_state(conversation)?.head_to_send())
   }
 
-  /// Compares a member's head of the channel's roles (from a message) with this device's.
+  /// Compares a member's head of the channel's roles (from a message the server dated
+  /// `sent_at_ms`) with this device's, and takes the sender's request for a review if it carries
+  /// one (issue #1264, option 2A).
   pub(crate) fn note_channel_roles_head(
     &self,
     conversation: ConversationId,
     head: &ChannelRolesHead,
+    sender: UserId,
+    sent_at_ms: i64,
   ) -> Result<(), CoreError> {
     let mut state = self.channel_role_state(conversation)?;
     let before = state.clone();
     state.note_head(head);
+    // This device knows of its own state; its echo asks nobody.
+    if head.needs_review && sender != self.account.user_id {
+      state.note_review_request(sender, sent_at_ms);
+    }
     if state == before {
       return Ok(());
     }

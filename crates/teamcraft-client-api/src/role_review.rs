@@ -120,6 +120,21 @@ pub fn dropped_role_names(
     .collect()
 }
 
+/// The names of members whose devices asked for a review (issue #1264), in the order given, with
+/// `unknown` for somebody the directory doesn't name. Their own claim: the panel says who asked,
+/// so a member who keeps asking for no reason can be told.
+pub fn review_asker_names(asked_by: &[UserId], users: &[User], unknown: &str) -> Vec<String> {
+  asked_by
+    .iter()
+    .map(|asker| {
+      users
+        .iter()
+        .find(|known| known.id == *asker)
+        .map_or_else(|| unknown.to_owned(), |known| known.display_name.clone())
+    })
+    .collect()
+}
+
 /// Why this list can't be confirmed: nobody confirms a role for somebody they can't see, nor a key
 /// this device can't check, and a channel keeps an admin.
 pub fn role_review_refusal(rows: &[RoleReviewRow]) -> Option<RoleReviewRefusal> {
@@ -190,6 +205,16 @@ mod tests {
       is_new: false,
       key_mark: RoleKeyMark::Checked,
     }
+  }
+
+  #[test]
+  fn askers_are_named_and_an_unknown_one_is_said_so() {
+    let users = [named(1, "Alice"), named(2, "Bob")];
+    assert_eq!(
+      review_asker_names(&[id(2), id(9)], &users, "someone"),
+      vec!["Bob".to_owned(), "someone".to_owned()]
+    );
+    assert!(review_asker_names(&[], &users, "someone").is_empty());
   }
 
   #[test]

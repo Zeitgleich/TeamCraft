@@ -415,6 +415,57 @@ mod false_claims {
     assert_hidden_with_history(&bob, channel);
   }
 
+  /// Issue #1264, option 1B: a month after Alice founded the channel, Eve, a workspace admin, makes
+  /// Mallory an admin with an ordinary entry. It anchors as ever, but Eve's device may have been
+  /// shown an old log, so it keeps no channel admin's purge open: Mallory's deletion takes the
+  /// retention on Bob's device.
+  #[tokio::test]
+  async fn a_workspace_admins_ordinary_entry_keeps_no_channel_admins_purge_open() {
+    let server = FakeServer::new();
+    let (mut alice, mut eve, mut bob, mallory, channel, clock) = late_reader_world(&server).await;
+    let (alice_id, eve_id, mallory_id) = (
+      alice.client.user_id(),
+      eve.client.user_id(),
+      mallory.client.user_id(),
+    );
+    let month = std::time::Duration::from_secs(31 * 24 * 60 * 60);
+    clock.advance(i64::try_from(month.as_millis()).unwrap());
+    server.advance_clock(month);
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner), (eve_id, RosterRole::Admin)])
+      .await
+      .unwrap();
+    eve.client.full_sync().await.unwrap();
+    eve.client.sync_channel_roles(channel).await.unwrap();
+    assert_eq!(
+      eve
+        .client
+        .sign_channel_roles(channel, &[(mallory_id, ChannelRole::Admin)], false)
+        .await
+        .unwrap(),
+      RoleSigning::Signed
+    );
+    bob.client.full_sync().await.unwrap();
+    bob.client.sync_channel_roles(channel).await.unwrap();
+    let roles = bob.client.channel_role_state(channel).unwrap();
+    assert_eq!(roles.role_of(mallory_id), ChannelRole::Admin);
+    assert!(roles.is_workspace_anchored, "Eve's entry anchors as before");
+    assert!(
+      !roles.recent_signers.iter().any(|recent| recent.user_id == eve_id),
+      "{:?}",
+      roles.recent_signers
+    );
+
+    let epoch = epoch_of(&mut bob, channel);
+    let signed = mallory.client.sign_channel_deletion(channel, epoch).unwrap();
+    server.claim_signed_deletion(channel, signed);
+    server.hide_from(bob.client.user_id(), channel);
+    bob.client.full_sync().await.unwrap();
+
+    assert_hidden_with_history(&bob, channel);
+  }
+
   /// Bob can't place Eve's entry at all. The channel's admins count for nothing on his device, but
   /// a workspace admin's signature doesn't rest on them: Alice's deletion still purges.
   #[tokio::test]

@@ -174,6 +174,7 @@ channel-roles-read-only = Nur Kanal-Admins ändern Rollen.
 channel-roles-review-title = Rollen dieses Kanals prüfen
 channel-roles-review-hint = Dieses Gerät oder das eines Mitglieds kann nicht für jede Rolle hier einstehen, oder die Mitgliederliste zeigt eine, die niemand bestätigt hat. Du kannst sie prüfen, wenn du möchtest: Was du bestätigst, gilt auf den Geräten aller Mitglieder. Der Chat ist davon nicht betroffen.
 channel-roles-review-hint-quiet = Du kannst die Rollen dieses Kanals prüfen, wenn du möchtest: Was du bestätigst, gilt auf den Geräten aller Mitglieder.
+channel-roles-review-asked = Angefragt von: { $names }. Ihre App sagt, dass sie für diese Rollen nicht einstehen kann.
 channel-roles-review-action = Rollen prüfen
 channel-roles-review-confirm = Genau diese Rollen bestätigen
 channel-roles-review-new = Neu
