@@ -1,10 +1,9 @@
 //! The pre-join check's microphone in the browser (#442): the microphone, as the call would open
 //! it, into an `AnalyserNode` that the level meter reads. Nothing is encoded or sent.
 
-use wasm_bindgen::JsCast;
-use web_sys::{AnalyserNode, AudioContext, MediaStream, MediaStreamAudioSourceNode, MediaStreamTrack};
+use web_sys::{AnalyserNode, AudioContext, MediaStream, MediaStreamAudioSourceNode};
 
-use super::{WebCallError, browser, capture_microphone};
+use super::{WebCallError, browser, capture_microphone, stop_tracks};
 use crate::audio_io::AudioDeviceChoice;
 use crate::audio_level::meter_level;
 
@@ -67,11 +66,5 @@ impl Drop for MicrophoneMeter {
     stop_tracks(&self.stream);
     // Closing releases the audio hardware; the promise only says when that finished.
     let _ = self.context.close();
-  }
-}
-
-fn stop_tracks(stream: &MediaStream) {
-  for track in stream.get_tracks().iter() {
-    track.unchecked_into::<MediaStreamTrack>().stop();
   }
 }

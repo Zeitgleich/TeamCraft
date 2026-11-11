@@ -39,6 +39,8 @@ mod guest_domains;
 mod guests;
 mod long_absence;
 mod meetings;
+#[cfg(feature = "browser")]
+mod meetings_firefox;
 mod membership;
 mod messaging;
 mod mfa;

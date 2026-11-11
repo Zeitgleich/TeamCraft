@@ -13,6 +13,8 @@ pub mod browser;
 pub mod call;
 #[cfg(feature = "desktop")]
 pub mod desktop;
+#[cfg(feature = "browser")]
+pub mod firefox;
 pub mod mail;
 pub mod netem;
 pub mod peer;
