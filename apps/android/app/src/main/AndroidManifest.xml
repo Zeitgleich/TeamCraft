@@ -73,6 +73,15 @@
         android:resource="@xml/shortcuts" />
     </activity>
 
+    <!-- The expanded conversation bubble of a direct message (Android 11+, issue #591). -->
+    <activity
+      android:name=".ui.BubbleActivity"
+      android:exported="false"
+      android:allowEmbedded="true"
+      android:documentLaunchMode="always"
+      android:resizeableActivity="true"
+      android:windowSoftInputMode="adjustResize" />
+
     <!-- Reply and mark-as-read from notifications, phone and Android Auto alike. -->
     <receiver
       android:name=".notifications.NotificationActionReceiver"
