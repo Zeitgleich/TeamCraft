@@ -163,6 +163,7 @@ fn active_call(request: CallRequest, carol: UserId) -> ActiveCall {
     screen_sound: ScreenShareSound::Off,
     is_reconnecting: false,
     reconnecting: Vec::new(),
+    unverified: Vec::new(),
     is_on_limited_network: false,
     maybe_moved_to: None,
     maybe_joined_at: None,

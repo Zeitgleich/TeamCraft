@@ -5452,7 +5452,7 @@ keys.
    bound keys of the group's members only. Once a device leaves the call its bound key is retired
    for the rest of the call on every member that saw it leave: a proposal that brings that device
    back with the same key (the SFU replaying its old binding and key package) is refused there
-   (`RetiredKey`, which still ends that member's call, #1753); a device that really comes back joins
+   (`RetiredKey`); a device that really comes back joins
    with a fresh DAVE key and binding. A member that was reconnecting meanwhile retires the keys of
    the devices missing from the participant list of its rejoin. Each engine remembers at most
    `MAX_RETIRED_CALL_KEYS` (4096) retired keys, the oldest evicted first. **Limits:** a device that
@@ -5469,6 +5469,38 @@ keys.
    member without a verified binding stops media for the call (no unencrypted fallback).
 4. Members only accept proposed devices that are on the call roster they trust (from the server,
    verified like chat membership); the SFU's own list of expected members is not trusted.
+
+**Short reconnects** (#1762). A member whose connection drops keeps its DAVE leaf, and its device
+keeps its MLS state, for `TEAMCRAFT_SFU_DAVE_RESUME_GRACE_SECS` (default 10). Back within it, the
+rejoin's `join` names the epoch the device holds; when the group is still at that epoch and no
+change is under way, the SFU answers `dave_resumed` and the device carries on with its keys, so
+nobody re-keys. Otherwise (it came back late, somebody joined or left meanwhile, a transition was in
+flight) the leaf goes and the device joins with a fresh key package and binding, as before. Before,
+every lost connection removed the leaf at once and the rejoin added a new one: two epochs for
+everybody per flap, and on a lossy link a member flapping every few seconds kept the whole call
+re-keying and left other members without keys for some senders. The trade-off: a device whose
+connection dropped can still decrypt, for the grace at most, what the others send meanwhile, which
+the SFU doesn't forward to it; it was admitted and nothing about its membership changed. Leaving the
+call, being removed by a host, and the end of the grace still take its leaf (and the key) at once.
+On a resume the device checks the group's leaves against the bindings it verified before the loss;
+a key of a device that left meanwhile stays retired. `0` turns resumes off; the SFU refuses a grace
+above 30 s at startup.
+
+What the device checks itself, since the grace is the SFU's word:
+
+- **Nothing flows on the held group until the resume is checked.** From the loss until
+  `dave_resumed` (which the SFU sends right after `joined`) the device encrypts and decrypts nothing
+  with it and doesn't count as secured. Anything else after `joined` means the group wasn't resumed:
+  the device drops it, answers an external sender with a fresh key package, and otherwise joins again
+  on a new connection without asking to resume.
+- **The signed roster decides, not the SFU's participant list.** A resumed group whose leaves include
+  a device off the trusted roster, or one the rejoin's list no longer has (it left meanwhile), is
+  dropped the same way and the device joins afresh. That isn't a compromise: an honest SFU would
+  never resume such a group, so the device just doesn't carry on in it.
+- **The client bounds the window.** The device asks to resume only within 30 s of the loss
+  (`MAX_DAVE_RESUME_AFTER`), whatever grace the SFU applies. Within that a hostile SFU can still
+  keep a lost device's leaf longer than configured, as it can already delay forwarding a removal; it
+  can't extend it past the client's bound, or bring the device back into a group that changed.
 
 This way the SFU can neither add a device of its own choosing nor swap a member's DAVE key: the
 calls are verified with no extra prompts, and the DAVE privacy code and per-member verification codes
@@ -5540,6 +5572,10 @@ SFU starts the group over when no commit arrived within `TEAMCRAFT_SFU_DAVE_COMM
   A key package of a refused device within the window is answered with `dave_refused` (the time
   left), and restarts nothing. A joiner that gets in loses its strikes. A call remembers at most
   256 such devices; beyond that the one whose strikes expire first goes.
+- A removal that came in the same proposals as a refused joiner (a member left while the joiner
+  waited) waits for that restart too: the leaver keeps the epoch's key for up to the commit
+  deadline (10 s by default). Members whose engine refused a joiner mark its tile as not verified
+  (`MemberRefused`), so nobody takes it for an ordinary participant.
 - The refused device stays in the call without media keys, and its user sees why: "Your device
   couldn't be added to the call's encryption", with Leave, and Try again once the window passed
   (web and desktop; the Android app says when calling back may work). An SFU that never says so

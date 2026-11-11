@@ -160,6 +160,14 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         .unwrap_or_default()
     })
   });
+  let unverified = Memo::new(move |_| {
+    state.read(|backend| {
+      backend
+        .active_call()
+        .map(|active| active.unverified)
+        .unwrap_or_default()
+    })
+  });
   let rotation = Cell::new(0_usize);
   use_interval(SPEAKER_ROTATE_MS, move || {
     if is_real {
@@ -363,6 +371,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
           has_hand_raised=participant_flag(id, |participant| participant.has_hand_raised, false)
           is_speaking=Signal::derive(move || speaking.get() == Some(id))
           is_reconnecting=Signal::derive(move || reconnecting.get().contains(&id))
+          is_unverified=Signal::derive(move || unverified.get().contains(&id))
           video=Memo::new(move |_| track_of(id, VideoTrackKind::Camera))
         />
       }

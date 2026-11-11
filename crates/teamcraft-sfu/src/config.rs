@@ -76,6 +76,12 @@ pub struct SfuConfig {
   /// refused, reconnects included (#1555): a device nobody accepts costs the call two restarts
   /// per window, not per reconnect.
   pub dave_refusal_window: Duration,
+  /// How long a member whose connection dropped keeps its DAVE leaf (e2ee.md §8): back within it
+  /// with the group as it was, nobody re-keys, so a flapping link doesn't rotate everybody's media
+  /// key every few seconds. Zero leaves the group at once.
+  pub dave_resume_grace: Duration,
+  /// Congestion control of the SFU's QUIC connections (towards its receivers).
+  pub quic_congestion: QuicCongestion,
   /// The UDP socket's receive buffer. A big keyframe arrives as a burst of half a megabyte: a
   /// socket with the system's default buffer loses part of it while the SFU is busy, and with it
   /// the whole picture, for everyone watching.
@@ -198,6 +204,25 @@ impl Default for FallbackConfig {
   }
 }
 
+/// Congestion control of the SFU's QUIC connections (`TEAMCRAFT_SFU_QUIC_CONGESTION`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuicCongestion {
+  /// Paces by measured bandwidth and round trip; random loss doesn't stall it (#1762).
+  Bbr,
+  /// quinn's default, loss-based.
+  Cubic,
+}
+
+impl QuicCongestion {
+  pub fn parse(value: &str) -> Option<Self> {
+    match value.trim().to_ascii_lowercase().as_str() {
+      "bbr" => Some(Self::Bbr),
+      "cubic" => Some(Self::Cubic),
+      _ => None,
+    }
+  }
+}
+
 impl Default for SfuConfig {
   fn default() -> Self {
     Self {
@@ -222,6 +247,8 @@ impl Default for SfuConfig {
       dave_transition_deadline: Duration::from_secs(2),
       dave_commit_deadline: Duration::from_secs(10),
       dave_refusal_window: Duration::from_secs(300),
+      dave_resume_grace: Duration::from_secs(10),
+      quic_congestion: QuicCongestion::Bbr,
       udp_receive_buffer_bytes: 4 * 1024 * 1024,
       fallback: FallbackConfig::default(),
     }

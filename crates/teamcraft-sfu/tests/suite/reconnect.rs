@@ -681,7 +681,7 @@ impl Network {
     let client = self.client_mut(id);
     let connection = client.maybe_connection.take().unwrap();
     connection.link.is_dead.store(true, Ordering::Relaxed);
-    client.engine.connection_lost();
+    client.engine.connection_lost(Instant::now());
     client
       .lost_sessions
       .push((Arc::clone(&connection.room), connection.session));
@@ -1025,7 +1025,7 @@ impl Network {
     };
     let (room, session, outcome) = self
       .rooms
-      .join(grant, capabilities, dave_transition_mode, handle, None)
+      .join(grant, capabilities, dave_transition_mode, None, handle, None)
       .unwrap();
     self.client_mut(id).maybe_connection = Some(MemoryConnection {
       link,

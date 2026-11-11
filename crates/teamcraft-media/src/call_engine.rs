@@ -42,7 +42,7 @@ use crate::call_resilience::CallTransport;
 use crate::call_video::{IncomingVideo, OutgoingVideo, ReceivedVideoFrame};
 use crate::datagram::{DatagramHeader, MediaDatagram, SimulcastLayer, StreamId};
 use crate::dave::{
-  DaveCallId, DaveError, DaveFrameStats, DaveParticipant, DaveParticipantId, FrameCodec, MediaKind,
+  DaveCallId, DaveEpoch, DaveError, DaveFrameStats, DaveParticipant, DaveParticipantId, FrameCodec, MediaKind,
 };
 use crate::rtp::{PayloadType, RtpHeader, RtpPacket, RtpTimestamp, SequenceNumber, Ssrc};
 use crate::uplink_layers::{OwnTrack, UplinkLayers, UplinkPolicy, probe_demand_bps};
@@ -72,6 +72,10 @@ const DAVE_TRANSITION_TIMEOUT: Duration = Duration::from_secs(5);
 /// SFU allows a joiner whose proposals stalled once: two commit deadlines (10 s each), the members
 /// coming back in between (up to 10 s) and the execution (2 s).
 const ENCRYPTION_SETUP_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long after a lost connection this device still asks to carry on in the DAVE group it held
+/// (e2ee.md §8, "Short reconnects"). The SFU's grace is shorter; this bounds the window even
+/// against an SFU that would stretch it.
+const MAX_DAVE_RESUME_AFTER: Duration = Duration::from_secs(30);
 
 /// One call from this device's point of view.
 pub struct CallEngine {
@@ -143,6 +147,11 @@ pub struct CallEngine {
   /// The verified keys from before a reconnect, until the rejoin's participant list says who left
   /// meanwhile; their keys are retired then.
   keys_before_reconnect: HashMap<DeviceId, Vec<u8>>,
+  /// The DAVE group held across a lost connection, until the SFU resumed it and the resume passed
+  /// the checks: no media is encrypted or decrypted with it meanwhile.
+  resume: DaveResume,
+  /// When the connection was lost, for [`MAX_DAVE_RESUME_AFTER`].
+  maybe_lost_at: Option<Instant>,
   /// The driver can bring the trusted roster up to date during the call
   /// ([`Self::enable_roster_refresh`]).
   refreshes_roster: bool,
@@ -156,8 +165,9 @@ pub struct CallEngine {
   /// The call is over for this device whatever happens to the connection: the SFU refused the
   /// join, a host removed the user or ended the call, or the device joined on another connection.
   is_over: bool,
-  /// The SFU turned the last join away for now (this device joins the call too often, #1227) and
-  /// asked to wait this long: the driver retries ([`Self::take_join_refusal`]).
+  /// The connection is of no use any more and the driver joins again after this long
+  /// ([`Self::take_join_refusal`]): the SFU turned the last join away for now (this device joins
+  /// the call too often, #1227), or a resumed DAVE group failed its checks.
   maybe_join_retry_after: Option<Duration>,
   has_reported_unauthenticated_keys: bool,
   uplink: SendSideEstimator,
@@ -216,6 +226,9 @@ pub enum CallEngineEvent {
   /// Another device's connection was lost; it keeps its place while it reconnects.
   ParticipantReconnecting(DeviceId),
   ParticipantReconnected(DeviceId),
+  /// Another device's call key binding didn't verify (forged, another device's, or one that left
+  /// the call): it isn't let into the DAVE group and gets no media key (e2ee.md §8, #1753).
+  MemberRefused(DeviceId),
   ActiveSpeakers(Vec<DeviceId>),
   /// Another device muted or unmuted its microphone.
   ParticipantMuted {
@@ -418,6 +431,17 @@ enum Phase {
   },
 }
 
+/// A DAVE group held across a lost connection (e2ee.md §8, "Short reconnects").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DaveResume {
+  /// Nothing held: media runs on the current group as usual.
+  None,
+  /// Kept while away, for the rejoin to ask the SFU to carry on in it.
+  Held,
+  /// Back in the call; the SFU's next word must be `dave_resumed`. Anything else drops the group.
+  AwaitingResumed,
+}
+
 /// Which of a device's audio streams a frame belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AudioOrigin {
@@ -548,6 +572,8 @@ impl CallEngine {
       verified_keys: HashMap::new(),
       retired_keys: RetiredKeys::default(),
       keys_before_reconnect: HashMap::new(),
+      resume: DaveResume::None,
+      maybe_lost_at: None,
       refreshes_roster: false,
       held_dave: Vec::new(),
       is_roster_requested: false,
@@ -573,27 +599,33 @@ impl CallEngine {
   pub fn join(&mut self, token: String) {
     self.phase = Phase::Joining;
     self.signal(CallClientMessage::Join {
+      maybe_dave_resume_epoch: None,
       token,
       capabilities: self.config.capabilities.clone(),
       dave_transition_mode: DaveTransitionMode::Coordinated,
     });
   }
 
-  /// The connection to the SFU is gone. Media pauses (the others' DAVE group re-keys without
-  /// this device) until [`Self::rejoin`] brings the device back into its slot. Also call it when
-  /// a rejoin attempt's connection fails.
-  pub fn connection_lost(&mut self) {
+  /// The connection to the SFU is gone. Media pauses until [`Self::rejoin`] brings the device
+  /// back into its slot. The device keeps its DAVE group, so a rejoin soon enough carries on in it
+  /// and nobody re-keys (e2ee.md §8); one in the middle of a transition starts over. Also call it
+  /// when a rejoin attempt's connection fails.
+  pub fn connection_lost(&mut self, now: Instant) {
     // The session it moves is gone with the connection; the rejoin's `joined` brings a new one.
     self.maybe_switch_secret = None;
+    // A failed rejoin attempt doesn't restart the clock: the group was held since the first loss.
+    if !matches!(self.phase, Phase::Rejoining { .. }) {
+      self.maybe_lost_at = Some(now);
+    }
     match self.phase {
       Phase::Joined { call_id, .. } => {
         self.phase = Phase::Reconnecting { call_id };
-        self.replace_dave(None);
+        self.keep_dave_for_resume();
         self.event(CallEngineEvent::Reconnecting);
       },
       Phase::Rejoining { call_id } => {
         self.phase = Phase::Reconnecting { call_id };
-        self.replace_dave(None);
+        self.keep_dave_for_resume();
       },
       Phase::Idle | Phase::Joining | Phase::Reconnecting { .. } => {},
     }
@@ -601,8 +633,8 @@ impl CallEngine {
 
   /// Joins the call again on a new connection after [`Self::connection_lost`], with a fresh
   /// join token. The RTP numbering continues and own tracks and subscriptions are kept or
-  /// renewed; DAVE starts over with a new key package. [`CallEngineEvent::Reconnected`] follows
-  /// the SFU's answer.
+  /// renewed; DAVE carries on in the group the device held, if the SFU says so, or starts over
+  /// with a new key package. [`CallEngineEvent::Reconnected`] follows the SFU's answer.
   pub fn rejoin(&mut self, token: String, now: Instant) {
     match self.phase {
       Phase::Reconnecting { call_id } => self.phase = Phase::Rejoining { call_id },
@@ -623,7 +655,23 @@ impl CallEngine {
     self.update_uplink_demand();
     self.downlink_feedback = FeedbackRecorder::new(now);
     self.uplink_feedback_epoch = now;
+    let is_resume_too_late = self
+      .maybe_lost_at
+      .is_some_and(|lost_at| now.saturating_duration_since(lost_at) > MAX_DAVE_RESUME_AFTER);
+    if self.resume == DaveResume::Held && is_resume_too_late {
+      debug!("away too long to carry on in the DAVE group: joining it afresh");
+      self.drop_held_dave();
+    }
+    let maybe_dave_resume_epoch = match self.resume {
+      DaveResume::Held => self
+        .maybe_dave
+        .as_ref()
+        .and_then(DaveParticipant::maybe_epoch)
+        .map(|epoch| epoch.0),
+      DaveResume::None | DaveResume::AwaitingResumed => None,
+    };
     self.signal(CallClientMessage::Join {
+      maybe_dave_resume_epoch,
       token,
       capabilities: self.config.capabilities.clone(),
       dave_transition_mode: DaveTransitionMode::Coordinated,
@@ -790,8 +838,13 @@ impl CallEngine {
   }
 
   /// Whether media is end-to-end encrypted and can flow.
+  /// Media is end-to-end encrypted and flowing: in the call (a group held across a lost connection
+  /// counts again once the SFU resumes it), with DAVE keys, and not compromised.
   pub fn is_secured(&self) -> bool {
-    !self.is_compromised && self.maybe_dave.as_ref().is_some_and(DaveParticipant::is_ready)
+    matches!(self.phase, Phase::Joined { .. })
+      && self.resume == DaveResume::None
+      && !self.is_compromised
+      && self.maybe_dave.as_ref().is_some_and(DaveParticipant::is_ready)
   }
 
   /// Code to compare with `other` out of band (DAVE verification code).
@@ -1066,7 +1119,7 @@ impl CallEngine {
     if !is_layer_sent {
       return VideoSendOutcome::LayerPaused;
     }
-    let Some(dave) = self.maybe_dave.as_mut().filter(|dave| dave.is_ready()) else {
+    let Some(dave) = self.media_dave() else {
       self.count_dropped_video(stream);
       return VideoSendOutcome::NotSecured;
     };
@@ -1253,6 +1306,9 @@ impl CallEngine {
   }
 
   fn handle_event(&mut self, event: CallEvent, now: Instant) -> Result<(), CallEngineError> {
+    if self.resume == DaveResume::AwaitingResumed && !matches!(event, CallEvent::DaveResumed { .. }) {
+      self.give_up_resume(&event);
+    }
     match event {
       CallEvent::Joined {
         call_id,
@@ -1315,6 +1371,7 @@ impl CallEngine {
         Ok(())
       },
       CallEvent::DaveExternalSender { package } => self.on_external_sender(package.as_slice()),
+      CallEvent::DaveResumed { epoch } => self.on_dave_resumed(DaveEpoch(epoch)),
       CallEvent::DaveRefused { retry_after_secs } => {
         self.report_encryption_failure(Duration::from_secs(u64::from(retry_after_secs)));
         Ok(())
@@ -1461,10 +1518,17 @@ impl CallEngine {
       self.is_mute_announced = !self.is_muted;
       self.announce_mute();
     }
-    self.replace_dave(Some(DaveParticipant::new(
-      DaveParticipantId::from_device(self.config.device_id),
-      DaveCallId::from_call(call_id),
-    )?));
+    // A group held across the loss waits for the SFU's word, which comes right after `joined`:
+    // `dave_resumed` keeps it, anything else drops it.
+    if self.resume == DaveResume::Held {
+      self.resume = DaveResume::AwaitingResumed;
+    }
+    if self.maybe_dave.is_none() {
+      self.replace_dave(Some(DaveParticipant::new(
+        DaveParticipantId::from_device(self.config.device_id),
+        DaveCallId::from_call(call_id),
+      )?));
+    }
     self.reconcile_participants(state.participants);
     self.reconcile_remote_video(&state.video_tracks);
     // A share replaced while away is not one the SFU lost: it is not published again, and neither
@@ -1504,12 +1568,11 @@ impl CallEngine {
       .map(|participant| (participant.device_id, participant))
       .collect();
     let known: Vec<DeviceId> = self.participants.keys().copied().collect();
-    let before_reconnect = std::mem::take(&mut self.keys_before_reconnect);
     for device_id in known {
       // Gone, or back with another audio stream (it rejoined without a slot): left, then joined.
       if current.get(&device_id) != self.participants.get(&device_id) {
-        if let Some(key) = before_reconnect.get(&device_id) {
-          self.retired_keys.retire(device_id, key.clone());
+        if let Some(key) = self.keys_before_reconnect.remove(&device_id) {
+          self.retired_keys.retire(device_id, key);
         }
         self.remove_participant(device_id);
       }
@@ -1841,6 +1904,8 @@ impl CallEngine {
     let Some(call_id) = self.call_id() else {
       return Err(CallEngineError::Protocol("DAVE message before joined"));
     };
+    // Joining with a new key package: what was verified for the group held before goes.
+    self.keys_before_reconnect.clear();
     if self.dave()?.has_external_sender() {
       debug!("the SFU starts the DAVE group over");
       self.held_dave.clear();
@@ -1926,6 +1991,19 @@ impl CallEngine {
       .any(|binding| binding.device_id != self.config.device_id && !roster.contains(&binding.device_id))
   }
 
+  /// The joiners of refused proposals: devices they bind that aren't members verified already.
+  /// Several joiners in one round are all left out, so all are named.
+  fn report_refused_joiners(&mut self, bindings: &[DaveKeyBinding]) {
+    let refused: BTreeSet<DeviceId> = bindings
+      .iter()
+      .map(|binding| binding.device_id)
+      .filter(|device| *device != self.config.device_id && !self.verified_keys.contains_key(device))
+      .collect();
+    for device in refused {
+      self.event(CallEngineEvent::MemberRefused(device));
+    }
+  }
+
   fn apply_dave_change(&mut self, change: CallEvent) -> Result<(), CallEngineError> {
     match change {
       CallEvent::DaveProposals {
@@ -1934,7 +2012,19 @@ impl CallEngine {
         expected_participants,
         key_bindings,
       } => {
-        let joiner_keys = self.verify_bindings(&key_bindings, BindingRole::Joiner)?;
+        // A joiner whose binding doesn't verify (forged, another device's, replayed after it left)
+        // is refused by not committing: nobody honest commits it, the SFU starts the group over
+        // without it after its commit deadline and strikes it (#1555), and this member stays in
+        // the call (#1753). Its proposals aren't queued, so nothing of them reaches this group.
+        let joiner_keys = match self.verify_bindings(&key_bindings, BindingRole::Joiner) {
+          Ok(keys) => keys,
+          Err(error @ (CallEngineError::CallKey(_) | CallEngineError::RetiredKey(_))) => {
+            warn!(%error, epoch, "not committing proposals whose joiner doesn't verify");
+            self.report_refused_joiners(&key_bindings);
+            return Ok(());
+          },
+          Err(error) => return Err(error),
+        };
         self.on_proposals(epoch, proposals.as_slice(), &expected_participants, &joiner_keys)
       },
       CallEvent::DaveAnnounceCommit {
@@ -2027,6 +2117,102 @@ impl CallEngine {
       .chain(std::iter::once(self.config.device_id))
       .map(DaveParticipantId::from_device)
       .collect()
+  }
+
+  /// After a lost connection: keeps the DAVE group for a resume unless a transition is under way
+  /// (its keys may be half switched) or there is no group yet; then the rejoin starts over.
+  fn keep_dave_for_resume(&mut self) {
+    let is_resumable = self.maybe_pending_transition.is_none()
+      && self
+        .maybe_dave
+        .as_ref()
+        .is_some_and(|dave| dave.maybe_epoch().is_some());
+    if is_resumable {
+      self.resume = DaveResume::Held;
+    } else {
+      self.drop_held_dave();
+    }
+  }
+
+  /// No group is carried across the loss: the rejoin joins the call's group with a new key
+  /// package, and what was verified for the old one goes with it.
+  fn drop_held_dave(&mut self) {
+    self.resume = DaveResume::None;
+    self.keys_before_reconnect.clear();
+    self.replace_dave(None);
+  }
+
+  /// `joined` after a rejoin wasn't followed by `dave_resumed`: the held group is dropped. The
+  /// external sender (the SFU starts over) is answered with a fresh session; anything else from
+  /// an SFU that took the resume means it doesn't keep the group, so this connection is dropped
+  /// and the device joins again without one.
+  fn give_up_resume(&mut self, event: &CallEvent) {
+    debug!("the SFU didn't resume the DAVE group held: joining it afresh");
+    let call_id = self.call_id();
+    self.drop_held_dave();
+    match (event, call_id) {
+      (CallEvent::DaveExternalSender { .. }, Some(call_id)) => {
+        match DaveParticipant::new(
+          DaveParticipantId::from_device(self.config.device_id),
+          DaveCallId::from_call(call_id),
+        ) {
+          Ok(dave) => self.replace_dave(Some(dave)),
+          Err(error) => warn!(%error, "no DAVE session for the call"),
+        }
+      },
+      _ => self.maybe_join_retry_after = Some(Duration::ZERO),
+    }
+  }
+
+  /// The SFU says this device carries on in its DAVE group at `epoch` after a rejoin: the keys
+  /// verified for its members before the loss are verified again against the group's leaves.
+  fn on_dave_resumed(&mut self, epoch: DaveEpoch) -> Result<(), CallEngineError> {
+    let held = self.maybe_dave.as_ref().and_then(DaveParticipant::maybe_epoch);
+    if self.resume != DaveResume::AwaitingResumed || held != Some(epoch) {
+      return Err(CallEngineError::Protocol(
+        "resumed a DAVE group this device doesn't hold",
+      ));
+    }
+    if let Some(device) = self.member_off_the_roster()? {
+      // The SFU's participant list said the device is still here; the signed roster decides.
+      warn!(%device, "a resumed DAVE group has a member off the call's roster: joining afresh");
+      self.drop_held_dave();
+      self.maybe_join_retry_after = Some(Duration::ZERO);
+      return Ok(());
+    }
+    debug!(epoch = epoch.0, "carrying on in the DAVE group after the rejoin");
+    self.resume = DaveResume::None;
+    let before = std::mem::take(&mut self.keys_before_reconnect);
+    self.verified_keys.extend(before);
+    self.verify_members()?;
+    self.keep_member_keys_only()?;
+    // Secured again: the app hears it, and own tracks start their receivers with keyframes.
+    self.report_secured();
+    Ok(())
+  }
+
+  /// A member of the group held that has no business in it any more: one the trusted roster (if
+  /// any) doesn't have, or one that left the call while this device was away.
+  fn member_off_the_roster(&mut self) -> Result<Option<DeviceId>, CallEngineError> {
+    let maybe_roster = self.maybe_trusted_roster.clone();
+    let own = DaveParticipantId::from_device(self.config.device_id);
+    for (member, _) in self.dave()?.member_signature_keys() {
+      if member == own {
+        continue;
+      }
+      let device = member
+        .to_device()
+        .map_err(|_| CallEngineError::Protocol("member id"))?;
+      // Without call key bindings nothing was verified to know who left by.
+      let has_left = self.maybe_authenticator.is_some() && !self.keys_before_reconnect.contains_key(&device);
+      let is_off_roster = maybe_roster
+        .as_ref()
+        .is_some_and(|roster| !roster.contains(&device));
+      if is_off_roster || has_left {
+        return Ok(Some(device));
+      }
+    }
+    Ok(None)
   }
 
   /// A new DAVE session (or none while away): what the old one counted is kept for the call's
@@ -2200,6 +2386,10 @@ impl CallEngine {
       return Ok(());
     }
     let packet = RtpPacket::parse(datagram.rtp).map_err(|_| CallEngineError::Protocol("bad RTP"))?;
+    // A held group waits for the resume's checks; until then nothing it decrypts is played.
+    if self.resume != DaveResume::None {
+      return Ok(());
+    }
     let opus = self.dave()?.decrypt_frame(
       DaveParticipantId::from_device(sender),
       MediaKind::Audio,
@@ -2267,6 +2457,9 @@ impl CallEngine {
     let Some(complete) = maybe_frame else {
       return Ok(());
     };
+    if self.resume != DaveResume::None {
+      return Ok(());
+    }
     let decrypted = self.dave()?.decrypt_frame(
       DaveParticipantId::from_device(sender),
       MediaKind::Video,
@@ -2491,7 +2684,7 @@ impl CallEngine {
     if self.is_compromised {
       return;
     }
-    let Some(dave) = self.maybe_dave.as_mut().filter(|dave| dave.is_ready()) else {
+    let Some(dave) = self.media_dave() else {
       return;
     };
     let encrypted = match dave.encrypt_frame(MediaKind::Audio, FrameCodec::Opus, &frame.opus) {
@@ -2656,6 +2849,15 @@ impl CallEngine {
         self.request_own_keyframes(stream_id, &layers);
       }
     }
+  }
+
+  /// The DAVE session media is encrypted with: ready, and not a group held across a lost
+  /// connection that the SFU hasn't resumed yet.
+  fn media_dave(&mut self) -> Option<&mut DaveParticipant> {
+    if self.resume != DaveResume::None {
+      return None;
+    }
+    self.maybe_dave.as_mut().filter(|dave| dave.is_ready())
   }
 
   fn dave(&mut self) -> Result<&mut DaveParticipant, CallEngineError> {
@@ -2874,7 +3076,7 @@ mod tests {
     fn a_join_that_came_too_soon_is_retried_not_over() {
       let now = Instant::now();
       let mut rejoining = engine_joined(1, now);
-      rejoining.connection_lost();
+      rejoining.connection_lost(now);
       rejoining.rejoin("t2".into(), now);
       let too_soon = CallServerMessage::Error {
         error: ErrorBody::new(teamcraft_proto::ErrorCode::RateLimited, "too often").with_retry_after_secs(7),
@@ -2884,7 +3086,7 @@ mod tests {
       assert_eq!(rejoining.take_join_refusal(), Some(Duration::from_secs(7)));
       assert_eq!(rejoining.take_join_refusal(), None);
       // The driver retries on a new connection; the engine takes it as any rejoin.
-      rejoining.connection_lost();
+      rejoining.connection_lost(now);
       assert!(rejoining.is_reconnecting());
       // Also for the first join; without a time, a second.
       let mut joining = engine(2, now);
@@ -3777,7 +3979,7 @@ mod tests {
       );
 
       // Lost: the session the secret moves is gone, and the rejoin's `joined` brings another.
-      engine.connection_lost();
+      engine.connection_lost(now);
       assert!(engine.maybe_switch_secret().is_none());
       engine.rejoin("t2".into(), now);
       assert!(engine.maybe_switch_secret().is_none(), "not back yet");
@@ -3872,7 +4074,7 @@ mod tests {
       take_datagram(&mut alice);
       let sequence = alice.microphone_rtp.sequence;
 
-      alice.connection_lost();
+      alice.connection_lost(now);
       assert_eq!(
         drain(&mut alice),
         vec![EngineOutput::Event(CallEngineEvent::Reconnecting)]
@@ -3937,7 +4139,7 @@ mod tests {
         .unwrap();
       drain(&mut alice);
 
-      alice.connection_lost();
+      alice.connection_lost(now);
       alice.rejoin("fresh".into(), now);
       drain(&mut alice);
       // The SFU lost the slot: 3 left, 4 came, nothing is published any more.
@@ -3996,7 +4198,7 @@ mod tests {
       alice.subscribe_video(MediaStreamId(60), Some(0));
       drain(&mut alice);
 
-      alice.connection_lost();
+      alice.connection_lost(now);
       alice.rejoin("fresh".into(), now);
       drain(&mut alice);
       let CallEvent::Joined {
@@ -4078,7 +4280,7 @@ mod tests {
         })]
       );
 
-      alice.connection_lost();
+      alice.connection_lost(now);
       alice.rejoin("fresh".into(), now);
       drain(&mut alice);
       let CallEvent::Joined {
@@ -4135,7 +4337,7 @@ mod tests {
         VideoSendOutcome::LayerPaused
       );
 
-      alice.connection_lost();
+      alice.connection_lost(now);
       alice.rejoin("fresh".into(), now);
       drain(&mut alice);
       let CallEvent::Joined {
@@ -4200,7 +4402,7 @@ mod tests {
       let mut alice = engine(1, now);
       alice.join("first".into());
       drain(&mut alice);
-      alice.connection_lost();
+      alice.connection_lost(now);
       assert!(drain(&mut alice).is_empty());
       alice.rejoin("second".into(), now);
       assert!(matches!(
@@ -4216,7 +4418,7 @@ mod tests {
       let now = Instant::now();
       let gateway = DaveExternalSender::new().unwrap();
       let mut alice = joined_engine(1, &[], &gateway, None, now);
-      alice.connection_lost();
+      alice.connection_lost(now);
       alice.rejoin("fresh".into(), now);
       let CallEvent::Joined {
         participant,
@@ -4252,10 +4454,10 @@ mod tests {
       let now = Instant::now();
       let gateway = DaveExternalSender::new().unwrap();
       let mut alice = joined_engine(1, &[], &gateway, None, now);
-      alice.connection_lost();
+      alice.connection_lost(now);
       alice.rejoin("first".into(), now);
       drain(&mut alice);
-      alice.connection_lost();
+      alice.connection_lost(now);
       assert!(drain(&mut alice).is_empty(), "Reconnecting is reported once");
       alice.rejoin("second".into(), now);
       assert!(matches!(
@@ -4750,7 +4952,7 @@ mod tests {
         );
         // Asked for just before the loss; the SFU answered, but the answer was lost.
         alice.publish_video(first, VideoTrackKind::Camera, VideoCodec::H264, layers(1));
-        alice.connection_lost();
+        alice.connection_lost(now);
         // Off and on, twice, while away.
         alice.withdraw_video(first);
         alice.publish_video(second, VideoTrackKind::Camera, VideoCodec::H264, layers(1));
@@ -4979,7 +5181,7 @@ mod tests {
       );
       drain(&mut alice);
 
-      alice.connection_lost();
+      alice.connection_lost(now);
       alice.rejoin("fresh".into(), now);
       drain(&mut alice);
       alice
@@ -5018,7 +5220,7 @@ mod tests {
     fn a_share_the_sfu_lost_is_published_again() {
       let now = Instant::now();
       let mut alice = sharing(now);
-      alice.connection_lost();
+      alice.connection_lost(now);
       alice.rejoin("fresh".into(), now);
       drain(&mut alice);
       alice
@@ -5417,8 +5619,10 @@ mod tests {
       let (_, mallory_binding) = key_package_of(&mut mallory);
       // Mallory's binding relayed as if it were device 2's.
       let bindings = vec![binding(2, mallory_binding.unwrap())];
-      let result = alice.handle_signal(event(3, dave_proposals(0, Vec::new(), &[1, 2], bindings)), now);
-      assert!(matches!(result, Err(CallEngineError::CallKey(_))));
+      alice
+        .handle_signal(event(3, dave_proposals(0, Vec::new(), &[1, 2], bindings)), now)
+        .unwrap();
+      assert_no_commit(&mut alice);
     }
 
     #[test]
@@ -5506,8 +5710,17 @@ mod tests {
         )
         .unwrap();
       let replayed = vec![binding(3, carol_binding)];
-      let result = alice.handle_signal(event(10, dave_proposals(2, proposals, &[1, 2, 3], replayed)), now);
-      assert!(matches!(result, Err(CallEngineError::RetiredKey(member)) if member == device(3)));
+      // Refused by not committing; Alice stays in the call (#1753), and her UI hears who.
+      alice
+        .handle_signal(event(10, dave_proposals(2, proposals, &[1, 2, 3], replayed)), now)
+        .unwrap();
+      let outputs = drain(&mut alice);
+      assert!(outputs.contains(&EngineOutput::Event(CallEngineEvent::MemberRefused(device(3)))));
+      assert!(
+        outputs
+          .iter()
+          .all(|output| !matches!(output, EngineOutput::Signal(CallClientMessage::DaveCommit { .. })))
+      );
     }
 
     /// Alice and Bob paired, Carol added by Alice's commit (events up to 8); Carol's binding, and
@@ -5571,19 +5784,21 @@ mod tests {
     fn device_that_left_during_a_reconnect_is_not_added_again_with_its_old_key() {
       let now = Instant::now();
       let (mut alice, carol_binding, _) = alice_with_carol_added(now);
-      alice.connection_lost();
+      alice.connection_lost(now);
       alice.rejoin("fresh".into(), now);
       drain(&mut alice);
       // Carol left while Alice was away: the rejoin's list no longer has her.
       alice.handle_signal(event(1, joined(1, &[2])), now).unwrap();
-      let result = alice.handle_signal(
-        event(
-          2,
-          dave_proposals(0, Vec::new(), &[1, 2, 3], vec![binding(3, carol_binding)]),
-        ),
-        now,
-      );
-      assert!(matches!(result, Err(CallEngineError::RetiredKey(member)) if member == device(3)));
+      alice
+        .handle_signal(
+          event(
+            2,
+            dave_proposals(0, Vec::new(), &[1, 2, 3], vec![binding(3, carol_binding)]),
+          ),
+          now,
+        )
+        .unwrap();
+      assert_no_commit(&mut alice);
     }
 
     #[test]
@@ -5844,6 +6059,202 @@ mod tests {
       assert!(drain(&mut alice).is_empty());
     }
 
+    /// A short loss: the device keeps its group, asks to carry on in it, and the SFU says so.
+    /// Media flows again with the keys it had; nobody re-keyed (e2ee.md §8, #1762).
+    #[test]
+    fn a_rejoin_the_sfu_resumes_keeps_the_group_and_its_keys() {
+      let now = Instant::now();
+      let (mut alice, mut bob) = secured_pair(now);
+      let epoch = alice
+        .maybe_dave
+        .as_ref()
+        .and_then(DaveParticipant::maybe_epoch)
+        .unwrap();
+      alice.connection_lost(now);
+      alice.rejoin("fresh".into(), now);
+      let asked = drain(&mut alice).into_iter().find_map(|output| match output {
+        EngineOutput::Signal(CallClientMessage::Join {
+          maybe_dave_resume_epoch,
+          ..
+        }) => Some(maybe_dave_resume_epoch),
+        _ => None,
+      });
+      assert_eq!(asked, Some(Some(epoch.0)));
+      alice.handle_signal(event(1, joined(1, &[2])), now).unwrap();
+      alice
+        .handle_signal(event(2, CallEvent::DaveResumed { epoch: epoch.0 }), now)
+        .unwrap();
+      assert!(alice.is_secured());
+      drain(&mut alice);
+      assert_audio_flows(&mut alice, &mut bob, now);
+      assert_audio_flows(&mut bob, &mut alice, now);
+    }
+
+    /// The SFU doesn't resume it (the group moved on): the external sender starts it over with a
+    /// fresh key package, as before resumes.
+    #[test]
+    fn a_rejoin_the_sfu_doesnt_resume_starts_over() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      alice.connection_lost(now);
+      alice.rejoin("fresh".into(), now);
+      drain(&mut alice);
+      alice.handle_signal(event(1, joined(1, &[2])), now).unwrap();
+      let package = Base64Bytes::new(DaveExternalSender::new().unwrap().package().unwrap());
+      alice
+        .handle_signal(event(2, CallEvent::DaveExternalSender { package }), now)
+        .unwrap();
+      let (key_package, maybe_binding) = key_package_of(&mut alice);
+      assert!(!key_package.is_empty() && maybe_binding.is_some());
+      assert!(!alice.is_secured());
+    }
+
+    /// A resume for a group the device doesn't hold is the SFU's mistake, not a key to trust.
+    #[test]
+    fn a_resume_of_another_epoch_is_refused() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      let epoch = alice
+        .maybe_dave
+        .as_ref()
+        .and_then(DaveParticipant::maybe_epoch)
+        .unwrap();
+      alice.connection_lost(now);
+      alice.rejoin("fresh".into(), now);
+      alice.handle_signal(event(1, joined(1, &[2])), now).unwrap();
+      let result = alice.handle_signal(event(2, CallEvent::DaveResumed { epoch: epoch.0 + 1 }), now);
+      assert!(matches!(result, Err(CallEngineError::Protocol(_))));
+    }
+
+    /// Between `joined` and the SFU's word on the held group nothing is encrypted with it and the
+    /// call isn't secured; an SFU that says something else instead didn't resume it.
+    #[test]
+    fn a_held_group_carries_no_media_until_resumed() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      alice.connection_lost(now);
+      alice.rejoin("fresh".into(), now);
+      alice.handle_signal(event(1, joined(1, &[2])), now).unwrap();
+      drain(&mut alice);
+      assert!(!alice.is_secured());
+      alice.send_audio(&frame(), now);
+      assert!(datagrams_of(&mut alice).is_empty());
+
+      let muted = CallEvent::ParticipantMuted {
+        device_id: device(2),
+        is_muted: true,
+      };
+      alice.handle_signal(event(2, muted), now).unwrap();
+      assert_eq!(alice.take_join_refusal(), Some(Duration::ZERO));
+      assert!(alice.maybe_dave.is_none() && !alice.is_compromised);
+      alice.send_audio(&frame(), now);
+      assert!(datagrams_of(&mut alice).is_empty());
+    }
+
+    mod hostile_resume {
+      use super::*;
+
+      /// The SFU resumes a group with a device the signed roster doesn't have (removed from the
+      /// conversation while this device was away): the device joins afresh instead.
+      #[test]
+      fn a_member_off_the_roster_starts_over() {
+        let now = Instant::now();
+        let (mut alice, _bob) = secured_pair(now);
+        let epoch = held_epoch(&alice);
+        alice.set_trusted_roster([device(1)]);
+        alice.connection_lost(now);
+        alice.rejoin("fresh".into(), now);
+        alice.handle_signal(event(1, joined(1, &[2])), now).unwrap();
+        alice
+          .handle_signal(event(2, CallEvent::DaveResumed { epoch: epoch.0 }), now)
+          .unwrap();
+        assert_starts_over(&mut alice);
+      }
+
+      /// The rejoin's participant list says Bob left while Alice was away, yet the SFU resumes a
+      /// group with his leaf: his key is retired, and Alice joins afresh.
+      #[test]
+      fn a_member_that_left_meanwhile_starts_over() {
+        assert_left_meanwhile_starts_over(Some([device(1), device(2)]));
+      }
+
+      /// The same without a trusted roster (a call before the roster arrived): starting over, not
+      /// a compromised call.
+      #[test]
+      fn a_member_that_left_meanwhile_starts_over_without_a_roster() {
+        assert_left_meanwhile_starts_over(None);
+      }
+
+      fn assert_left_meanwhile_starts_over(maybe_roster: Option<[DeviceId; 2]>) {
+        let now = Instant::now();
+        let (mut alice, _bob) = secured_pair(now);
+        let epoch = held_epoch(&alice);
+        match maybe_roster {
+          Some(roster) => alice.set_trusted_roster(roster),
+          None => alice.maybe_trusted_roster = None,
+        }
+        alice.connection_lost(now);
+        alice.rejoin("fresh".into(), now);
+        alice.handle_signal(event(1, joined(1, &[])), now).unwrap();
+        alice
+          .handle_signal(event(2, CallEvent::DaveResumed { epoch: epoch.0 }), now)
+          .unwrap();
+        assert_starts_over(&mut alice);
+      }
+
+      /// Away longer than the client allows: the rejoin doesn't ask to carry on in the group,
+      /// whatever grace the SFU would give.
+      #[test]
+      fn a_rejoin_after_the_client_limit_asks_for_no_resume() {
+        let now = Instant::now();
+        let (mut alice, _bob) = secured_pair(now);
+        alice.connection_lost(now);
+        // A failed attempt in between doesn't restart the clock.
+        alice.rejoin("first".into(), now + Duration::from_secs(5));
+        alice.connection_lost(now + Duration::from_secs(6));
+        drain(&mut alice);
+        alice.rejoin(
+          "fresh".into(),
+          now + MAX_DAVE_RESUME_AFTER + Duration::from_secs(1),
+        );
+        let asked = drain(&mut alice).into_iter().find_map(|output| match output {
+          EngineOutput::Signal(CallClientMessage::Join {
+            maybe_dave_resume_epoch,
+            ..
+          }) => Some(maybe_dave_resume_epoch),
+          _ => None,
+        });
+        assert_eq!(asked, Some(None));
+        assert!(alice.maybe_dave.is_none());
+      }
+
+      fn assert_starts_over(alice: &mut CallEngine) {
+        assert_eq!(alice.take_join_refusal(), Some(Duration::ZERO));
+        assert!(!alice.is_secured() && !alice.is_compromised);
+        assert!(alice.maybe_dave.is_none());
+        alice.send_audio(&frame(), Instant::now());
+        assert!(datagrams_of(alice).is_empty());
+      }
+    }
+
+    fn held_epoch(engine: &CallEngine) -> DaveEpoch {
+      engine
+        .maybe_dave
+        .as_ref()
+        .and_then(DaveParticipant::maybe_epoch)
+        .unwrap()
+    }
+
+    fn datagrams_of(engine: &mut CallEngine) -> Vec<Vec<u8>> {
+      drain(engine)
+        .into_iter()
+        .filter_map(|output| match output {
+          EngineOutput::Datagram(bytes) => Some(bytes),
+          _ => None,
+        })
+        .collect()
+    }
+
     fn assert_audio_flows(sender: &mut CallEngine, receiver: &mut CallEngine, now: Instant) {
       sender.send_audio(&frame(), now);
       let datagrams: Vec<Vec<u8>> = drain(sender)
@@ -6049,6 +6460,15 @@ mod tests {
         _ => None,
       })
       .unwrap()
+  }
+
+  fn assert_no_commit(engine: &mut CallEngine) {
+    assert!(
+      drain(engine)
+        .iter()
+        .all(|output| !matches!(output, EngineOutput::Signal(CallClientMessage::DaveCommit { .. }))),
+      "no commit for a joiner whose binding doesn't verify"
+    );
   }
 
   fn take_commit(engine: &mut CallEngine) -> (Base64Bytes, Base64Bytes) {

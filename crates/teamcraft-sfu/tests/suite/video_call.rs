@@ -191,6 +191,7 @@ impl Client {
     };
     client
       .send(CallClientMessage::Join {
+        maybe_dave_resume_epoch: None,
         token: format!("dev:{CALL_ID}:{device}:{device}"),
         capabilities,
         dave_transition_mode: DaveTransitionMode::AtOnce,

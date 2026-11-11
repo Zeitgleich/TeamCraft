@@ -105,6 +105,16 @@ pub enum CallClientMessage {
     /// How the client applies DAVE transitions. Older clients omit it: [`DaveTransitionMode::AtOnce`].
     #[serde(default)]
     dave_transition_mode: DaveTransitionMode,
+    /// A rejoin after a lost connection: the epoch of the DAVE group the device still holds. The SFU
+    /// answers [`CallEvent::DaveResumed`] when the device carries on in it (nobody re-keys), and
+    /// [`CallEvent::DaveExternalSender`] when it must join with a new key package (e2ee.md §8).
+    /// Older clients and fresh joins omit it.
+    #[serde(
+      rename = "dave_resume_epoch",
+      default,
+      skip_serializing_if = "Option::is_none"
+    )]
+    maybe_dave_resume_epoch: Option<u64>,
   },
   /// The client's DAVE key package, sent after [`CallEvent::DaveExternalSender`].
   DaveKeyPackage {
@@ -285,6 +295,11 @@ pub enum CallEvent {
   DaveExternalSender {
     package: Base64Bytes,
   },
+  /// Answers a rejoin's `dave_resume_epoch`: the device carries on in its DAVE group at `epoch`,
+  /// keys included, and sends no key package. Sent instead of [`CallEvent::DaveExternalSender`].
+  DaveResumed {
+    epoch: u64,
+  },
   /// Proposals for `epoch`. Every member commits; the SFU announces the first commit. Clients
   /// must check `expected_participants` against the roster they trust (e2ee.md §3).
   DaveProposals {
@@ -451,12 +466,14 @@ impl fmt::Debug for CallClientMessage {
       Self::Join {
         capabilities,
         dave_transition_mode,
+        maybe_dave_resume_epoch,
         ..
       } => f
         .debug_struct("Join")
         .field("token", &"[redacted]")
         .field("capabilities", capabilities)
         .field("dave_transition_mode", dave_transition_mode)
+        .field("maybe_dave_resume_epoch", maybe_dave_resume_epoch)
         .finish(),
       Self::DaveKeyPackage {
         key_package,
@@ -543,6 +560,7 @@ mod tests {
     assert_eq!(
       join,
       CallClientMessage::Join {
+        maybe_dave_resume_epoch: None,
         token: "t".into(),
         capabilities: MediaCapabilities::default(),
         dave_transition_mode: DaveTransitionMode::AtOnce,
@@ -1014,6 +1032,7 @@ mod tests {
   #[test]
   fn join_token_is_redacted_in_debug_output() {
     let join = CallClientMessage::Join {
+      maybe_dave_resume_epoch: None,
       token: "secret-token".into(),
       capabilities: MediaCapabilities::default(),
       dave_transition_mode: DaveTransitionMode::Coordinated,

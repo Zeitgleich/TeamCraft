@@ -1767,8 +1767,8 @@ impl CallState<'_> {
     if !engine.is_in_call() {
       self.lost_before_joining += 1;
     }
-    engine.connection_lost();
     let now = Instant::now();
+    engine.connection_lost(now);
     let is_new_loss = self.maybe_lost_at.is_none();
     let lost_at = *self.maybe_lost_at.get_or_insert(now);
     let grace = engine
@@ -1801,9 +1801,10 @@ impl CallState<'_> {
     self.watch.on_heard(now);
     engine.handle_signal(message, now)?;
     if let Some(retry_after) = engine.take_join_refusal() {
-      // Joined this call too often (#1227): this session is of no use, the next attempt waits as
-      // asked, and the call goes on.
-      info!(?retry_after, "the SFU asks to join again later");
+      // Joined this call too often (#1227), or a resumed DAVE group failed its checks: this session
+      // is of no use, the next attempt waits as asked (at once after a failed resume), and the call
+      // goes on.
+      info!(?retry_after, "joining the call again on a new connection");
       self.maybe_refused_retry_after = Some(retry_after);
       return Ok(self.on_session_lost(engine, SessionEnd::Lost));
     }
@@ -4116,7 +4117,7 @@ mod tests {
       assert_eq!(publications[0].own.maybe_stream_id, Some(MediaStreamId(50)));
 
       // The SFU restarted and lost the slot: the engine unpublishes and publishes again.
-      engine.connection_lost();
+      engine.connection_lost(now);
       engine.rejoin("fresh".into(), now);
       follow(&mut engine, &mut publications);
       engine.handle_signal(event(1, joined(&[2])), now).unwrap();

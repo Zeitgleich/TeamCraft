@@ -184,6 +184,8 @@ struct Joining {
   grant: JoinGrant,
   capabilities: MediaCapabilities,
   dave_transition_mode: DaveTransitionMode,
+  /// A rejoin's epoch of the DAVE group the device still holds.
+  maybe_dave_resume_epoch: Option<DaveEpoch>,
   handle: ParticipantHandle,
   session: SessionId,
   maybe_switch_secret: Option<Base64Bytes>,
@@ -191,9 +193,17 @@ struct Joining {
 
 /// What a (re)joined participant's `joined` says besides the call's state.
 struct Welcome {
-  package: Vec<u8>,
+  dave: WelcomeDave,
   reconnect_grace: Duration,
   maybe_switch_secret: Option<Base64Bytes>,
+}
+
+/// How a joined device gets into the call's DAVE group.
+enum WelcomeDave {
+  /// The external sender, for a new key package.
+  ExternalSender(Vec<u8>),
+  /// It carries on in the group it holds, at this epoch.
+  Resumed(DaveEpoch),
 }
 
 struct Participant {
@@ -454,6 +464,7 @@ impl Rooms {
     grant: JoinGrant,
     capabilities: MediaCapabilities,
     dave_transition_mode: DaveTransitionMode,
+    maybe_dave_resume_epoch: Option<DaveEpoch>,
     handle: ParticipantHandle,
     maybe_switch_secret: Option<Base64Bytes>,
   ) -> Result<(Arc<Room>, SessionId, JoinOutcome), RoomError> {
@@ -504,6 +515,7 @@ impl Rooms {
       grant,
       capabilities,
       dave_transition_mode,
+      maybe_dave_resume_epoch,
       handle,
       session,
       maybe_switch_secret,
@@ -575,6 +587,7 @@ impl Room {
           transition: config.dave_transition_deadline,
           commit: config.dave_commit_deadline,
           refusal: config.dave_refusal_window,
+          resume: config.dave_resume_grace,
         },
       )?,
       next_stream_id: 1,
@@ -897,6 +910,7 @@ impl Room {
       grant,
       capabilities,
       dave_transition_mode,
+      maybe_dave_resume_epoch,
       handle,
       session,
       maybe_switch_secret,
@@ -913,8 +927,15 @@ impl Room {
         if let Some(participant) = state.participants.get_mut(&participant_id) {
           participant.dave_transition_mode = dave_transition_mode;
         }
+        // Back with the group as it was: it carries on and nobody re-keys (e2ee.md §8).
+        let (is_dave_resumed, outbound) = state.dave.on_resume(participant_id, maybe_dave_resume_epoch, now);
+        state.dispatch(outbound);
+        let dave = match maybe_dave_resume_epoch {
+          Some(epoch) if is_dave_resumed => WelcomeDave::Resumed(epoch),
+          _ => WelcomeDave::ExternalSender(package),
+        };
         let welcome = Welcome {
-          package,
+          dave,
           reconnect_grace: self.reconnect_grace,
           maybe_switch_secret,
         };
@@ -960,7 +981,7 @@ impl Room {
           },
         );
         let welcome = Welcome {
-          package,
+          dave: WelcomeDave::ExternalSender(package),
           reconnect_grace: self.reconnect_grace,
           maybe_switch_secret,
         };
@@ -1066,9 +1087,9 @@ impl Room {
     participant.presence = Presence::Reconnecting;
     let effects = state.forwarder.suspend(participant_id, now);
     state.apply(effects);
-    // The device comes back with a new DAVE key package; until then the group re-keys without it
-    // (e2ee.md §8: a lost device must not hold a current media key).
-    let outbound = state.dave.on_leave(participant_id, now);
+    // The device keeps its DAVE leaf for a short while: back with the group as it was, nobody
+    // re-keys; otherwise it leaves the group then (e2ee.md §8).
+    let outbound = state.dave.on_lost(participant_id, now);
     state.dispatch(outbound);
     state.broadcast(CallEvent::ParticipantReconnecting {
       device_id: participant_id,
@@ -1245,7 +1266,7 @@ impl RoomState {
   /// sender, the current speakers and who of the others is reconnecting.
   fn welcome(&self, call_id: CallId, participant_id: DeviceId, welcome: Welcome) {
     let Welcome {
-      package,
+      dave,
       reconnect_grace,
       maybe_switch_secret,
     } = welcome;
@@ -1272,6 +1293,15 @@ impl RoomState {
         maybe_screen_share_taken_over: self.screen_shares_taken_over.get(&participant_id).copied(),
       },
     );
+    // Right after `joined`: a device that rejoins with a group held takes anything else as "not
+    // resumed" (e2ee.md §8, "Short reconnects").
+    let dave_event = match dave {
+      WelcomeDave::ExternalSender(package) => CallEvent::DaveExternalSender {
+        package: Base64Bytes::new(package),
+      },
+      WelcomeDave::Resumed(epoch) => CallEvent::DaveResumed { epoch: epoch.0 },
+    };
+    self.send_to(participant_id, dave_event);
     for (device_id, other) in &self.participants {
       if *device_id != participant_id && other.is_muted {
         self.send_to(
@@ -1283,12 +1313,6 @@ impl RoomState {
         );
       }
     }
-    self.send_to(
-      participant_id,
-      CallEvent::DaveExternalSender {
-        package: Base64Bytes::new(package),
-      },
-    );
     let active_speakers = self.forwarder.active_speakers().to_vec();
     if !active_speakers.is_empty() {
       self.send_to(
@@ -1333,8 +1357,8 @@ impl RoomState {
           REPLACED_BY_NEW_CONNECTION,
           b"replaced by a new connection",
         );
-        // The new connection brings a new DAVE key package: the old leaf goes.
-        let outbound = self.dave.on_leave(participant_id, now);
+        // The new connection may carry on in the group (`Room::join` asks the coordinator).
+        let outbound = self.dave.on_lost(participant_id, now);
         self.dispatch(outbound);
         false
       },
@@ -1931,6 +1955,7 @@ mod tests {
           grant(CALL, Some(CONVERSATION), 1, 10),
           MediaCapabilities::default(),
           DaveTransitionMode::Coordinated,
+          None,
           handle,
           None,
         )
@@ -1956,6 +1981,7 @@ mod tests {
           grant(CALL, Some(CONVERSATION), 1, 10),
           MediaCapabilities::default(),
           DaveTransitionMode::Coordinated,
+          None,
           handle,
           Some(Base64Bytes::new(vec![3; 32])),
         )
@@ -2049,6 +2075,7 @@ mod tests {
         grant(CALL, Some(CONVERSATION), user, device),
         capabilities,
         DaveTransitionMode::Coordinated,
+        None,
         handle,
         None,
       )
@@ -2076,6 +2103,7 @@ mod tests {
       grant,
       MediaCapabilities::default(),
       DaveTransitionMode::Coordinated,
+      None,
       handle,
       None,
     )?;

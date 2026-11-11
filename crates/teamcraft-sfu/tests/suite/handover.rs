@@ -120,18 +120,26 @@ async fn network_gone_after_a_change_rejoins_on_a_fresh_ticket() {
     matches!(event, CallEngineEvent::Secured { .. })
   })
   .await;
-  wait_for(&mut bob, |event| matches!(event, CallEngineEvent::Secured { .. })).await;
+  let bob_secured = wait_for(&mut bob, |event| matches!(event, CallEngineEvent::Secured { .. })).await;
 
   relay.black_hole();
   alice.network_changed();
   wait_for(&mut alice, |event| *event == CallEngineEvent::Reconnecting).await;
   wait_for(&mut alice, |event| *event == CallEngineEvent::Reconnected).await;
   assert_eq!(tickets.issued.load(Ordering::Relaxed), 1);
-  // Bob stays in the call with Alice; the group re-keyed.
-  let mut bob_events = wait_for_same_epoch(&mut alice, &mut bob).await;
-  bob_events.extend(collect(&mut bob, Duration::from_secs(1)).await);
+  // Alice carries on in the group she held: secured again on Bob's epoch, with his code, and
+  // nobody re-keyed (#1762). Bob stays in the call with her and hears of no new epoch.
+  let alice_secured = wait_for(&mut alice, |event| {
+    matches!(event, CallEngineEvent::Secured { .. })
+  })
+  .await;
+  assert_eq!(alice_secured, bob_secured);
+  let bob_events = collect(&mut bob, Duration::from_secs(1)).await;
   assert!(
-    !bob_events.contains(&CallEngineEvent::ParticipantLeft(id_of::<DeviceId>(ALICE))),
+    !bob_events.contains(&CallEngineEvent::ParticipantLeft(id_of::<DeviceId>(ALICE)))
+      && !bob_events
+        .iter()
+        .any(|event| matches!(event, CallEngineEvent::Secured { .. })),
     "{bob_events:?}"
   );
   alice.leave().await.unwrap();

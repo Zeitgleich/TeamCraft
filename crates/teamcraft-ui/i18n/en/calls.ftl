@@ -116,6 +116,7 @@ tile-muted = muted
 tile-hand = hand raised
 tile-speaking = speaking
 tile-reconnecting = reconnecting
+tile-unverified = not verified, gets no audio or video
 tile-notetaker = Notetaker – transcribing
 tile-host = Host
 tile-co-host = Co-host

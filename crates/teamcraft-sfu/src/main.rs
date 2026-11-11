@@ -63,7 +63,7 @@ use teamcraft_ops::metrics::{bind_metrics, spawn_metrics_endpoint};
 use teamcraft_ops::{DEFAULT_TIMEOUT, probe, probe_target, shutdown_signal};
 use teamcraft_sfu::{
   auth::{DevTokenVerifier, JoinTokenVerifier, JwtJoinTokenConfig, JwtJoinTokenVerifier, RejectAllVerifier},
-  config::{FallbackConfig, SfuConfig, parse_trusted_proxies},
+  config::{FallbackConfig, QuicCongestion, SfuConfig, parse_trusted_proxies},
   control::control_router,
   dev_page::serve_dev_page,
   health::{DEFAULT_HEALTH_ADDR, serve_health},
@@ -79,6 +79,9 @@ use wtransport::Identity;
 const DEFAULT_FALLBACK_ADDR: &str = "127.0.0.1:8082";
 /// Upper bound for `TEAMCRAFT_SFU_DAVE_TRANSITION_DEADLINE_MS`, below the clients' 5 s fallback.
 const MAX_DAVE_TRANSITION_DEADLINE: Duration = Duration::from_secs(4);
+/// The longest DAVE resume grace: a member away keeps its leaf, and with it the media key, no
+/// longer than this (clients stop asking to resume after 30 s anyway; e2ee.md §8).
+const MAX_DAVE_RESUME_GRACE: Duration = Duration::from_secs(30);
 
 fn main() -> ExitCode {
   if std::env::args().nth(1).as_deref() == Some("healthcheck") {
@@ -148,6 +151,18 @@ async fn run() -> anyhow::Result<()> {
   }
   if let Some(window) = env_duration_secs("TEAMCRAFT_SFU_DAVE_REFUSAL_WINDOW_SECS")? {
     config.dave_refusal_window = window;
+  }
+  if let Some(grace) = env_duration_secs("TEAMCRAFT_SFU_DAVE_RESUME_GRACE_SECS")? {
+    anyhow::ensure!(
+      grace <= MAX_DAVE_RESUME_GRACE,
+      "TEAMCRAFT_SFU_DAVE_RESUME_GRACE_SECS must be at most {}",
+      MAX_DAVE_RESUME_GRACE.as_secs()
+    );
+    config.dave_resume_grace = grace;
+  }
+  if let Ok(value) = std::env::var("TEAMCRAFT_SFU_QUIC_CONGESTION") {
+    config.quic_congestion = QuicCongestion::parse(&value)
+      .ok_or_else(|| anyhow::anyhow!("TEAMCRAFT_SFU_QUIC_CONGESTION must be bbr or cubic"))?;
   }
   if let Some(bytes) = env_count("TEAMCRAFT_SFU_UDP_RECEIVE_BUFFER_BYTES")? {
     config.udp_receive_buffer_bytes = bytes;

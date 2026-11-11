@@ -41,6 +41,9 @@ pub fn VideoTile(
   /// The person's connection was lost and they are rejoining.
   #[prop(into, default = Signal::stored(false))]
   is_reconnecting: Signal<bool>,
+  /// A device of the person failed key verification: it is kept out of the call's encryption.
+  #[prop(into, default = Signal::stored(false))]
+  is_unverified: Signal<bool>,
   #[prop(into, default = Signal::stored(BackgroundEffect::None))] effect: Signal<BackgroundEffect>,
   #[prop(into, default = Signal::stored(false))] is_mirrored: Signal<bool>,
   #[prop(default = false)] is_large: bool,
@@ -92,6 +95,9 @@ pub fn VideoTile(
         if is_reconnecting.get() {
           parts.push(i18n.t("tile-reconnecting"));
         }
+        if is_unverified.get() {
+          parts.push(i18n.t("tile-unverified"));
+        }
         parts.join(", ")
         }
       }
@@ -134,6 +140,12 @@ pub fn VideoTile(
       </div>
       <Show when=move || is_reconnecting.get() fallback=|| ()>
         <span class="tile-status" aria-hidden="true">{move || i18n.t("tile-reconnecting")}</span>
+      </Show>
+      <Show when=move || is_unverified.get() && !is_reconnecting.get() fallback=|| ()>
+        <span class="tile-status tile-status-warning" aria-hidden="true">
+          <Icon name=IconName::Alert />
+          {move || i18n.t("tile-unverified")}
+        </span>
       </Show>
       <Show when=move || has_hand_raised.get() fallback=|| ()>
         <span class="tile-hand" aria-hidden="true">

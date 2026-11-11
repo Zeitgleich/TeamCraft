@@ -524,6 +524,13 @@ depend on any of it.
   short gap; a joiner whose proposals stall twice is refused, and told so, for
   `TEAMCRAFT_SFU_DAVE_REFUSAL_WINDOW_SECS` (default 300), reconnects included. Repeated lines
   for one call point at a broken or hostile client, or a device the others can't verify.
+- A member whose connection drops keeps its DAVE leaf for `TEAMCRAFT_SFU_DAVE_RESUME_GRACE_SECS`
+  (default 10): back within it with the group unchanged, nobody re-keys (docs/e2ee.md §8, #1762).
+  `0` makes every lost connection re-key the call, as before.
+- `TEAMCRAFT_SFU_QUIC_CONGESTION` (`bbr`, the default, or `cubic`): congestion control towards the
+  SFU's receivers. BBR keeps audio and the low layers flowing on lossy links (hotel Wi-Fi, mobile);
+  with the loss-based `cubic` a few percent of loss on a long link could stop all sending for
+  seconds and make clients rejoin (#1762).
 - The SFU reports its whole call roster to the server at start and every
   `TEAMCRAFT_SFU_ROSTER_INTERVAL_SECS` (default 30); the server drops participants the SFU no
   longer has (after `[calls] roster_grace_secs`, default 60, while the SFU is fresh from a restart)

@@ -139,6 +139,7 @@ impl CallView {
       screen_sound: ScreenShareSound::Off,
       is_reconnecting: false,
       reconnecting: Vec::new(),
+      unverified: Vec::new(),
       is_on_limited_network: false,
       maybe_moved_to: None,
       maybe_joined_at: Some(joined_at),
