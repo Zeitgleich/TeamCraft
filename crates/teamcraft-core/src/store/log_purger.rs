@@ -315,6 +315,12 @@ impl LogPurge {
     }
   }
 
+  /// Whether [`Self::wait_before_writes`] would wait now.
+  pub(crate) fn holds_writes(&self) -> bool {
+    let schedule = self.lock();
+    schedule.is_holding_writes && !schedule.is_closing && !schedule.is_held_by(thread::current().id())
+  }
+
   /// Waits until no purge is due, at most `max_wait`; whether none is.
   pub(crate) fn wait_until_purged(&self, max_wait: Duration) -> bool {
     let (schedule, _) = self

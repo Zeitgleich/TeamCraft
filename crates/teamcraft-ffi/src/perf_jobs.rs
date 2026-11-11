@@ -155,11 +155,18 @@ pub(crate) fn queued_for_query(type_name: &'static str) -> Queued {
   queued_on(PerfJobKind::ReadQueue, Lane::Query, type_name)
 }
 
+/// [`queued`] on the actions' thread (issue #1756): an action that waits for the store's write lock
+/// is named there, never on a read thread.
+pub(crate) fn queued_for_action(type_name: &'static str) -> Queued {
+  queued_on(PerfJobKind::ReadQueue, Lane::Act, type_name)
+}
+
 /// Which thread of its kind a job runs on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Lane {
   Main,
   Query,
+  Act,
 }
 
 fn queued_on(kind: PerfJobKind, lane: Lane, type_name: &'static str) -> Queued {
@@ -168,6 +175,7 @@ fn queued_on(kind: PerfJobKind, lane: Lane, type_name: &'static str) -> Queued {
   let span = match (kind, lane) {
     (PerfJobKind::ReadQueue, Lane::Main) => tracing::trace_span!("queue.read", name, depth),
     (PerfJobKind::ReadQueue, Lane::Query) => tracing::trace_span!("queue.query", name, depth),
+    (PerfJobKind::ReadQueue, Lane::Act) => tracing::trace_span!("queue.act", name, depth),
     (PerfJobKind::EngineQueue, _) => tracing::trace_span!("queue.engine", name, depth),
     _ => tracing::Span::none(),
   };

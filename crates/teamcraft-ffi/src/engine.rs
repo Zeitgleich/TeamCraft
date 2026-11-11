@@ -2229,6 +2229,9 @@ impl LaneOpener {
     ReadLanes {
       main: self.open(SealedStoreLimits::default()),
       query: self.open(READ_LANE_LIMITS),
+      // No read connection: an action reads inside its group, which goes to the writer anyway.
+      // A view of its own, so its groups never send the main read thread's reads to the writer.
+      act: self.engine.sharing(LaneStore::writer(Arc::clone(&self.writer))),
     }
   }
 
