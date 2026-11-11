@@ -347,11 +347,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     );
     let mut entries = roster?;
     entries.extend(policy?);
-    let ended_before = state.admin_history.ended_count();
+    let departures_before = state.admin_departures;
     if let Err(error) = state.apply_entries(entries) {
       tracing::error!(%error, "rejected workspace log entry");
     }
-    let has_an_admin_left = state.admin_history.ended_count() > ended_before;
+    // Counted on every device, also one whose admin history is incomplete (issue #1264).
+    let has_an_admin_left = state.admin_departures != departures_before;
     state.check_ahead();
     if let Some(alarm) = &state.maybe_alarm {
       tracing::error!(%alarm, "workspace log alarm");

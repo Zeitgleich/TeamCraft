@@ -2456,7 +2456,10 @@ workspace roster (admin.md §2.3):
   - **A workspace admin's signature doesn't pass it on unseen.** Every member takes a workspace admin's entry as
     vouching for each role it lists, and it anchors them. Normally a device signs its snapshot with one change, so a
     workspace admin whose device holds a snapshot resting on somebody who left, or is in a stretch, would launder what
-    it holds into an anchor on every device: an appointee of a demoted admin, or a demoted owner, could then purge. Such
+    it holds into an anchor on every device: an appointee of a demoted admin, or a demoted owner, could then purge. The
+    same goes for a device a member told of another entry for its version or a newer one it isn't shown (an alarm, or a
+    head not read yet, issue #1264): it may have been shown an old log, a withheld demotion (§4.6.3), and its signature
+    would carry the old snapshot's anchor on to every device shown the same. Such
     a device (`must_review_before_vouching`) signs no ordinary entry, in whatever role this user acts: the role select
     doesn't sign, the server's change stands unsigned, and they are told so where they changed it. A workspace admin's
     channel members section says so in a few words and offers "Check roles"; nobody else sees any of it, and nothing asks
@@ -2495,7 +2498,10 @@ workspace roster (admin.md §2.3):
   - **After a removal** each device reads every channel's log it knows, a few per upkeep pass, so an entry the server shows
     later can't pass for one from before: it closes the window below for devices online then. A failed read waits five
     minutes, doubling up to six hours, and holds up no other channel. A local read while nothing is due, which is nearly
-    always.
+    always. A removal is noticed by comparing each verified roster with the one before (`admin_departures`), not by the
+    history, so a state from before the history queues the reads too (issue #1264). And once after the update, every
+    channel whose state has no last-read mark is queued the same way: the read sets the mark, so such a device can place
+    entries from then on instead of waiting for the next role change.
 
   **What a demoted admin can still do.** Appending at all takes `ManageChannelRoles` on the server, which somebody it lists
   as a channel admin keeps after leaving the roster.
@@ -2519,8 +2525,20 @@ workspace roster (admin.md §2.3):
   - **Pinned keys:** a device with an incomplete history counts only keys it already pinned, and pins nothing for this. A
     key a hostile server made up earlier for a user this device had never seen (trust on first use, §3) still counts, and
     costs a stretch.
-  - **Unchanged by this:** a workspace admin's device that is anchored but was shown an old log, or holds a founder's claim,
-    still signs that snapshot with one change. That is the withheld demotion of §4.6.3 and the founding residual below.
+  - **A workspace admin's device shown an old log, or holding a founder's claim (issue #1264).** A founder's claim no longer
+    passes on: a workspace admin's ordinary entry on an unanchored snapshot anchors nothing, on any device ("What anchors",
+    review of #1286), and a founding on a fork the server shows only this device is on another head, which every device
+    that read the real log refuses. A withheld demotion on an anchored snapshot is closed where this device was told of it:
+    the entry in the channel's message applies, and a head from a member's message raises the alarm, after which it
+    vouches for nothing unseen (above). **What remains** is a server that withholds the entry and every message that would
+    tell of it from a workspace admin's device, typically one outside the channel's group, which gets no messages: its
+    ordinary entry then carries the old anchor on to the devices shown the same old log, and counts as a recent other
+    signer for the purge's time limit. That is §4.6.3's "Other signers on the same old log" with a workspace admin as the
+    other signer; what would close it is an owner's decision, listed in issue #1264.
+  - **Nobody hears of a member's stuck device.** A stretch or a lost anchor is known only to the device it happened on: a
+    workspace admin whose device read on time sees nothing, and isn't offered a look for it. The member's own app refuses
+    what needs a signed role, with words; telling an admin is up to them. A signal from that device to the workspace's
+    admins would be a new message format and a member's claim, an owner's decision (issue #1264).
 
   **Compatibility.** No signed format and nothing on the server changes; the new state is local and additive, and a reviewed
   entry is an ordinary checkpoint to older clients. A state from before this looks once more at what it skipped, and since

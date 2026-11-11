@@ -137,6 +137,11 @@ pub struct WorkspaceState {
   /// [`RosterDocument::provider_moves`], kept the same way: an older owner's app signs it away.
   #[serde(default)]
   pub provider_moves: u64,
+  /// How many verified rosters left out an owner or admin (with that identity key) of the roster
+  /// before them. Counted whether or not [`AdminHistory`] is complete, so a device from before the
+  /// history still notices a removal and reads its channels' role logs after it (issue #1264).
+  #[serde(default)]
+  pub admin_departures: u64,
 }
 
 /// Every stretch somebody was an owner or admin of the verified roster, from this device's own
@@ -273,15 +278,6 @@ impl RosterDocument {
 }
 
 impl AdminHistory {
-  /// How many tenures have ended: when it grows, an admin left.
-  pub fn ended_count(&self) -> usize {
-    self
-      .tenures
-      .iter()
-      .filter(|tenure| tenure.maybe_until.is_some())
-      .count()
-  }
-
   /// Tenures of `user` that have ended, in the order they began.
   pub fn ended_tenures_of(&self, user: UserId) -> impl Iterator<Item = &AdminTenure> + '_ {
     self
@@ -509,6 +505,9 @@ impl WorkspaceState {
       self.maybe_root = Some(root);
     }
     self.heads.maybe_roster_hash = Some(entry_hash(log, WorkspaceLog::Roster, entry)?);
+    if drops_an_admin(&self.roster, &document) {
+      self.admin_departures = self.admin_departures.wrapping_add(1);
+    }
     self.admin_history.is_complete |= is_genesis;
     self.admin_history.record(&document);
     self.heads.is_roster_chained |= document.maybe_prev_hash.is_some();
@@ -723,6 +722,19 @@ pub fn kept_unusable_entry(roster: &RosterDocument, roles: &[(UserId, RosterRole
     .iter()
     .map(|(user, _)| *user)
     .find(|user| unusable.iter().any(|(listed, _)| listed == user))
+}
+
+/// Whether `next` leaves out an owner or admin of `previous`, or names them with another identity
+/// key: the same as [`AdminHistory::record`] ending a tenure, without needing the history.
+fn drops_an_admin(previous: &RosterDocument, next: &RosterDocument) -> bool {
+  let is_admin = |member: &&RosterMember| matches!(member.role, RosterRole::Owner | RosterRole::Admin);
+  previous.members.iter().filter(is_admin).any(|before| {
+    !next
+      .members
+      .iter()
+      .filter(is_admin)
+      .any(|after| after.user_id == before.user_id && after.identity_key == before.identity_key)
+  })
 }
 
 fn owner_keys(roster: &RosterDocument) -> BTreeMap<UserId, Base64Bytes> {
@@ -1431,6 +1443,23 @@ mod tests {
       assert!(older.rebuild_admin_history(entries));
       assert!(older.admin_history.is_complete);
       assert_eq!(older.admin_history.tenures, complete.admin_history.tenures);
+    }
+
+    /// Issue #1264: a device from before the history still notices a removal, so it reads its
+    /// channels' role logs after it.
+    #[test]
+    fn a_removal_is_counted_also_while_the_history_is_incomplete() {
+      let (alice, bob) = (Owner::new(1), Owner::new(2));
+      let (complete, entries) = three_versions(&alice, &bob);
+      assert_eq!(complete.admin_departures, 1);
+
+      let mut older = WorkspaceState::default();
+      older.apply_entries(entries[..2].to_vec()).unwrap();
+      older.admin_history = AdminHistory::default();
+      older.admin_departures = 0;
+      older.apply_entries(vec![entries[2].clone()]).unwrap();
+      assert!(!older.admin_history.is_complete);
+      assert_eq!(older.admin_departures, 1);
     }
 
     #[test]

@@ -1949,6 +1949,132 @@ async fn a_device_from_before_the_history_gets_it_from_the_roster_log() {
   );
 }
 
+/// Issue #1264: the server withholds Alice's demotion of Bob from Eve's device, a workspace admin's.
+/// A member's head tells it there is more. Eve's ordinary change would carry the old snapshot's anchor
+/// on, Bob an admin in it, so her app signs nothing until she looked at the roles.
+#[tokio::test]
+async fn a_workspace_admin_told_of_a_withheld_entry_vouches_for_nothing_unseen() {
+  let server = FakeServer::new();
+  let mut world = LateWorld::new(&server).await;
+  let channel = world.anchored_channel().await;
+  let (bob_id, carol_id, eve_id) = (
+    world.bob.client.user_id(),
+    world.carol.client.user_id(),
+    world.eve.client.user_id(),
+  );
+  world.eve.client.sync_channel_roles(channel).await.unwrap();
+  let shown = world.eve.client.channel_role_state(channel).unwrap().version;
+  server.withhold_role_log(eve_id, channel, shown);
+  let demotion = world
+    .alice
+    .client
+    .sign_channel_roles(channel, &[(bob_id, ChannelRole::Member)], false)
+    .await
+    .unwrap();
+  assert_eq!(demotion, RoleSigning::Signed);
+
+  // A member's message carries the newer head; the log Eve's device reads leaves it out.
+  let head = world.alice.client.channel_role_state(channel).unwrap().head();
+  let mut eve_state = world.eve.client.channel_role_state(channel).unwrap();
+  eve_state.maybe_ahead = head;
+  world
+    .eve
+    .store
+    .put(
+      Table::Workspace,
+      &format!("channel_roles/{channel}"),
+      &serde_json::to_vec(&eve_state).unwrap(),
+    )
+    .unwrap();
+  world.eve.client.sync_channel_roles(channel).await.unwrap();
+  let state = world.eve.client.channel_role_state(channel).unwrap();
+  assert!(state.maybe_alarm.is_some());
+  assert!(state.is_workspace_anchored);
+  assert_eq!(state.role_of(bob_id), ChannelRole::Admin, "the old log");
+
+  let before = server.role_log(channel).len();
+  let signing = world
+    .eve
+    .client
+    .sign_channel_roles(channel, &[(carol_id, ChannelRole::Moderator)], false)
+    .await
+    .unwrap();
+  assert_eq!(signing, RoleSigning::Unsigned);
+  assert_eq!(server.role_log(channel).len(), before);
+}
+
+/// Issue #1264: a device from before the admin history notices a removal all the same and reads its
+/// channels' role logs after it, so its last-read mark moves past the roster that removed Eve.
+#[tokio::test]
+async fn a_device_from_before_the_history_reads_the_logs_after_a_removal() {
+  let server = FakeServer::new();
+  let mut world = LateWorld::new(&server).await;
+  let channel = world.anchored_channel().await;
+  world.carol.client.sync_workspace().await.unwrap();
+  forget_admin_history(&world.carol);
+  world.eve_leaves().await;
+  world.carol.client.sync_workspace().await.unwrap();
+  assert!(
+    !stored_workspace(&world.carol)["admin_history"]["is_complete"]
+      .as_bool()
+      .unwrap_or(false)
+  );
+  assert!(due_role_reads(&world.carol).contains_key(&channel));
+
+  world.carol.client.read_due_channel_roles().await.unwrap();
+  let roster = stored_workspace(&world.carol)["roster"]["version"]
+    .as_u64()
+    .unwrap();
+  assert_eq!(
+    world
+      .carol
+      .client
+      .channel_role_state(channel)
+      .unwrap()
+      .maybe_read_at_roster_version,
+    Some(roster)
+  );
+  assert!(due_role_reads(&world.carol).is_empty());
+}
+
+/// Issue #1264: a channel state from before the last-read mark gets one from a read in the first
+/// upkeep passes after the update, not at the next role change; then nothing is read any more.
+#[tokio::test]
+async fn a_state_without_a_read_mark_is_read_once_after_the_update() {
+  let server = FakeServer::new();
+  let mut world = LateWorld::new(&server).await;
+  let channel = world.anchored_channel().await;
+  let key = format!("channel_roles/{channel}");
+  let stored_bytes = world.carol.store.get(Table::Workspace, &key).unwrap().unwrap();
+  let mut stored: serde_json::Value = serde_json::from_slice(&stored_bytes).unwrap();
+  stored.as_object_mut().unwrap().remove("read_at_roster_version");
+  world
+    .carol
+    .store
+    .put(Table::Workspace, &key, &serde_json::to_vec(&stored).unwrap())
+    .unwrap();
+  assert_eq!(
+    world
+      .carol
+      .client
+      .channel_role_state(channel)
+      .unwrap()
+      .maybe_read_at_roster_version,
+    None
+  );
+
+  world.carol.client.read_due_channel_roles().await.unwrap();
+  let roster = stored_workspace(&world.carol)["roster"]["version"]
+    .as_u64()
+    .unwrap();
+  let state = world.carol.client.channel_role_state(channel).unwrap();
+  assert_eq!(state.maybe_read_at_roster_version, Some(roster));
+  assert!(state.is_workspace_anchored, "nothing it skipped");
+  let reads = server.role_log_reads(channel);
+  world.carol.client.read_due_channel_roles().await.unwrap();
+  assert_eq!(server.role_log_reads(channel), reads);
+}
+
 /// The channels whose role logs are due, as this device stored them.
 fn due_role_reads(peer: &Peer) -> std::collections::BTreeMap<ConversationId, serde_json::Value> {
   let bytes = peer
