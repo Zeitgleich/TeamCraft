@@ -717,6 +717,42 @@ handles.
 
 Cost on the call's hot path: none, no runtime code changed (the bench and its examples only).
 
+### A camera's encoders held to their bitrate and to the machine (issue #1762)
+
+The peaks above are one picture long. A test on 2026-11-11 found worse: a 720p Chrome fake camera
+(a Mandelbrot zoom with noise) sent its 320×180 layer at 0.8 to 1.6 Mbit/s instead of about
+0.15 Mbit/s, and on a 3 Mbit/s hotel link that layer alone took half the link and pushed the loss
+to 17 %. The cause is in Chrome, not in our configuration. WebCodecs gives its H.264 software
+encoder (OpenH264) the target bitrate in `RC_BITRATE_MODE` whatever `bitrateMode` says, but
+frame skipping stays off (on only behind a feature flag and only in `realtime` latency mode; a
+Mac's camera runs in `quality`). OpenH264's quantizer has a ceiling, so at 30 fps a
+150 kbit/s layer has about 600 bytes per picture, and no noisy picture fits in that. Without
+skipping, the encoder sends every picture at the ceiling's size. The desktop's OpenH264 keeps
+frame skipping on and holds its target. With a hardware encoder on Windows (Media Foundation),
+Chromium's source maps `variable` (the default) to a peak-constrained VBR, and WebCodecs sets its
+peak at ten times the target. That path wasn't measured.
+
+So the browser's camera is governed (`camera_governor.rs`, wired in `call_web/video.rs`; screen
+shares are not, #1733):
+
+- **Per layer:** if a layer sends more than 2× its bitrate over a 2 s window, its encoder is first
+  configured at half its bitrate, then the layer gets every 2nd, 3rd and 6th frame, never below
+  5 fps. A lax encoder follows the lower bitrate. One that can't shrink a picture sends fewer
+  pictures. The 180p layer above ends at 5 fps and about 200 kbit/s.
+- **Encoder load:** if more than 10 % of the frames find an encoder's queue full, or frames wait
+  in the queues on average, the camera's capture drops to ⅔ and then ½ of its frame rate (not
+  below 10 fps). After that, the top layers are left out one at a time (`CallEngine::limit_own_layers`).
+  Receivers move down as they do when the uplink pauses a layer. Frame rate goes first because it
+  also saves capture and background-effect work.
+- **Recovery:** both step back up in reverse order after 10 s of calm. A layer climbs only when
+  its output, scaled to the next step, stays under 1.25× its bitrate. A step up that is undone
+  within 10 s doubles the wait for the next, up to 2 min.
+
+The stats overlay shows what holds the camera back ("Held back"). Every threshold is a field of
+`CameraGovernorConfig` with these defaults. Cost on the hot path: a few comparisons per frame and
+per encoded picture, plus a deque of at most one window of picture sizes per layer. The budgets
+above don't change.
+
 ### Each picture with its own frame (issue #990)
 
 The first VideoToolbox session of a process takes 55 to 71 ms for its first picture (a 1440p or

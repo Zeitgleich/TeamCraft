@@ -158,6 +158,13 @@ stats-value-received-layer = { $layer } von { $offered } (angefragt ≤ { $max }
 stats-value-uplink-loss = { $loss } (Uplink)
 stats-value-network = RTT { $rtt } · Jitter { $jitter }
 stats-value-frames = verworfen { $dropped } · schwarz { $black }
+stats-limits = Gedrosselt
+stats-value-limits-none = nichts
+stats-value-limits-load = Encoder überlastet ({ $reason }): { $fps } von { $planned } fps, obere Ebenen aus { $off }
+stats-value-limits-layer = Ebene { $layer } über ihrer Bitrate: { $rate } bei { $fps } fps
+stats-overload-skipped = Bilder übersprungen
+stats-overload-queued = Bilder in der Warteschlange
+stats-overload-slow = langsame Kodierung
 stats-waiting = Warte auf die ersten Werte…
 # Der Chat neben dem Video (#936)
 call-chat = Chat

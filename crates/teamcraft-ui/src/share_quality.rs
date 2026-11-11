@@ -1006,6 +1006,7 @@ mod tests {
       maybe_frames_given: Some(given),
       maybe_frames_skipped: Some(skipped),
       maybe_held_back_ms: Some(if captured > 0 { 1_500 } else { 0 }),
+      maybe_camera_limits: None,
     })
   }
 

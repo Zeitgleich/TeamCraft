@@ -1461,8 +1461,10 @@ impl CallState<'_> {
         is_keyframe,
         timestamp_us,
       } => {
-        if let Some(sender) = self.sender_of_kind(&kind) {
-          sender.on_encoded(layer);
+        if let Some(sender) = self.sender_of_kind(&kind)
+          && let Err(gave_up) = sender.on_encoded(layer, data.len(), Instant::now())
+        {
+          self.on_encoders_gave_up(engine, &kind, gave_up);
         }
         let encoded = EncodedChunk {
           codec,
@@ -1548,6 +1550,7 @@ impl CallState<'_> {
       let (given, skipped) = sender.encoder_frame_counts();
       sent.maybe_frames_given = Some(given);
       sent.maybe_frames_skipped = Some(skipped);
+      sent.maybe_camera_limits = sender.camera_limits().map(camera_limits_stats);
     }
     if let Some(transport) = &self.maybe_transport
       && transport.kind() == CallTransport::Quic
@@ -1610,6 +1613,13 @@ impl CallState<'_> {
         && let Err(gave_up) = sender.capture().await
       {
         self.on_encoders_gave_up(engine, &kind, gave_up);
+      }
+      // A camera whose encoders don't keep up leaves its top layers out (#1762); the engine
+      // ignores a limit it already has.
+      if let Some(sender) = self.sender_of_kind(&kind)
+        && let Some(stream_id) = sender.publication.own.maybe_stream_id
+      {
+        engine.limit_own_layers(stream_id, sender.maybe_top_layer());
       }
     }
     Ok(Flow::Continue)
@@ -2773,6 +2783,34 @@ async fn received_packets(session: &SessionHandle) -> PacketCount {
       .ok()
       .and_then(|count| count.as_f64()),
   )
+}
+
+/// A governed camera's limits as the stats show them (#1762).
+#[cfg(feature = "call-view")]
+fn camera_limits_stats(limits: video::CameraLimits) -> teamcraft_client_api::video_stats::CameraLimitsStats {
+  use teamcraft_client_api::video_stats::{CameraLimitsStats, EncoderOverload, LayerLimitStats};
+
+  use crate::camera_governor::OverloadReason;
+
+  CameraLimitsStats {
+    planned_framerate: limits.planned.framerate,
+    framerate: limits.load.framerate,
+    top_layers_off: limits.load.top_layers_off,
+    maybe_overload: limits.maybe_reason.map(|reason| match reason {
+      OverloadReason::SkippedFrames => EncoderOverload::SkippedFrames,
+      OverloadReason::QueuedFrames => EncoderOverload::QueuedFrames,
+      OverloadReason::SlowEncoding => EncoderOverload::SlowEncoding,
+    }),
+    layers: limits
+      .layers
+      .into_iter()
+      .map(|(layer, bitrate_bps, framerate)| LayerLimitStats {
+        layer,
+        bitrate_bps,
+        framerate,
+      })
+      .collect(),
+  }
 }
 
 /// The session's smoothed round trip in milliseconds (`getStats().smoothedRtt`); `None` where the
