@@ -540,6 +540,7 @@ impl CallSession {
       height,
       max_framerate,
       max_bitrate_bps,
+      maybe_codec: None,
     }));
   }
 
@@ -1423,6 +1424,7 @@ fn native_config(
       video_decoders,
       max_simulcast_layers: CAMERA_LAYERS,
       max_frame_fragments: teamcraft_proto::MAX_VIDEO_FRAME_FRAGMENTS,
+      video_features: Vec::new(),
     },
     bwe: BweConfig::default(),
   };

@@ -284,7 +284,7 @@ impl FallbackEncoder {
       maybe_hardware_failure: None,
       maybe_software: None,
       make_software,
-      layer: *layer,
+      layer: layer.clone(),
       content,
       stall: StallWatch::default(),
       is_switching: false,
@@ -421,7 +421,7 @@ impl SimulcastEncoder {
       .iter()
       .map(|info| {
         Ok(LayerEncoder {
-          info: *info,
+          info: info.clone(),
           bitrate_bps: info.max_bitrate_bps,
           encoder: make_encoder(info)?,
           is_needed: true,
@@ -513,9 +513,9 @@ impl SimulcastEncoder {
       };
       let built = VideoLayerInfo {
         max_bitrate_bps: bitrate_bps,
-        ..*info
+        ..info.clone()
       };
-      rebuilt.push((*info, bitrate_bps, make_encoder(&built)?));
+      rebuilt.push((info.clone(), bitrate_bps, make_encoder(&built)?));
     }
     for (layer, (info, bitrate_bps, encoder)) in self.layers.iter_mut().zip(rebuilt) {
       layer.info = info;
@@ -544,7 +544,7 @@ impl SimulcastEncoder {
       }
       let built = VideoLayerInfo {
         max_bitrate_bps: bitrate_bps,
-        ..layer.info
+        ..layer.info.clone()
       };
       layer.encoder = make_encoder(&built)?;
       layer.bitrate_bps = bitrate_bps;
@@ -766,7 +766,7 @@ mod tests {
     ignore = "needs OpenH264: --features openh264-source"
   )]
   fn h264_round_trip_keeps_the_picture() {
-    let layer = simulcast_layers(HD, 30, 2_000_000, 1)[0];
+    let layer = simulcast_layers(HD, 30, 2_000_000, 1).remove(0);
     let mut encoder = OpenH264Encoder::new(&layer, VideoContent::Camera).unwrap();
     let mut decoder = OpenH264Decoder::new().unwrap();
     let mut last = None;
@@ -1101,13 +1101,13 @@ mod tests {
     ignore = "needs OpenH264: --features openh264-source"
   )]
   fn a_still_screen_of_text_stays_sharp_through_keyframes() {
-    let layer = *screen_layers(
+    let layer = screen_layers(
       HD,
       30,
       ScreenContentMode::Detail,
       &teamcraft_proto::ScreenShareResolution::Standard,
     )
-    .last()
+    .pop()
     .unwrap();
     let mut encoder = OpenH264Encoder::new(&layer, VideoContent::Screen).unwrap();
     let mut decoder = OpenH264Decoder::new().unwrap();
@@ -1228,7 +1228,8 @@ mod tests {
         30,
         100_000,
         1,
-      )[0];
+      )
+      .remove(0);
       let mut encoder = FallbackEncoder::with_software(
         Box::new(FakeEncoder::Failing),
         &layer,
@@ -1367,7 +1368,8 @@ mod tests {
         30,
         100_000,
         1,
-      )[0];
+      )
+      .remove(0);
       let encoder = FallbackEncoder::with_software(
         Box::new(hardware),
         &layer,

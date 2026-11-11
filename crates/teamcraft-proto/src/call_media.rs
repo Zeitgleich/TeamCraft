@@ -66,6 +66,17 @@ wire_enum! {
   }
 }
 
+wire_enum! {
+  /// What a client's call engine understands beyond the codecs it lists (#1733).
+  pub enum VideoFeature {
+    /// It takes the codec of each simulcast layer from [`VideoLayerInfo::maybe_codec`] and opens
+    /// a decoder for another codec at a layer switch: the SFU may forward it layers of a track
+    /// in other codecs than [`VideoTrack::codec`]. Clients without it get only the layers in the
+    /// track's codec.
+    LayerCodecs => "layer_codecs",
+  }
+}
+
 /// What a client can encode and decode; sent with `join`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaCapabilities {
@@ -81,10 +92,13 @@ pub struct MediaCapabilities {
   /// with larger frames. Clients that don't send it take [`SHORT_VIDEO_FRAME_FRAGMENTS`].
   #[serde(default = "short_video_frame_fragments")]
   pub max_frame_fragments: u16,
+  /// What its call engine understands beyond the codecs (#1733). Clients from before send none.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub video_features: Vec<VideoFeature>,
 }
 
 /// One simulcast layer of a published video track.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VideoLayerInfo {
   /// 0 is the lowest resolution.
   pub layer: u8,
@@ -92,6 +106,12 @@ pub struct VideoLayerInfo {
   pub height: u16,
   pub max_framerate: u8,
   pub max_bitrate_bps: u32,
+  /// The layer's codec where it isn't the track's (#1733): a screen share's large layers in AV1
+  /// above an H.264 layer every device decodes. `None`: [`VideoTrack::codec`]. The SFU forwards
+  /// such a layer only to receivers that decode its codec and know
+  /// [`VideoFeature::LayerCodecs`].
+  #[serde(rename = "codec", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_codec: Option<VideoCodec>,
 }
 
 /// A published video track as announced to all participants.
@@ -134,7 +154,41 @@ impl Default for MediaCapabilities {
       video_decoders: Vec::new(),
       max_simulcast_layers: 0,
       max_frame_fragments: MAX_VIDEO_FRAME_FRAGMENTS,
+      video_features: Vec::new(),
     }
+  }
+}
+
+impl MediaCapabilities {
+  /// Whether its engine takes layers in other codecs than their track's.
+  pub fn has_layer_codecs(&self) -> bool {
+    self.video_features.contains(&VideoFeature::LayerCodecs)
+  }
+}
+
+impl VideoLayerInfo {
+  /// The codec this layer is encoded in, as a layer of `track_codec`'s track.
+  pub fn codec<'a>(&'a self, track_codec: &'a VideoCodec) -> &'a VideoCodec {
+    self.maybe_codec.as_ref().unwrap_or(track_codec)
+  }
+}
+
+impl VideoTrack {
+  /// The codec of `layer`; the track's for a layer it doesn't have.
+  pub fn layer_codec(&self, layer: u8) -> &VideoCodec {
+    self
+      .layers
+      .iter()
+      .find(|info| info.layer == layer)
+      .map_or(&self.codec, |info| info.codec(&self.codec))
+  }
+
+  /// Whether some layer is in another codec than the track.
+  pub fn has_mixed_codecs(&self) -> bool {
+    self
+      .layers
+      .iter()
+      .any(|info| info.codec(&self.codec) != &self.codec)
   }
 }
 
@@ -191,6 +245,7 @@ mod tests {
       video_decoders: vec![VideoCodec::Av1, VideoCodec::H264],
       max_simulcast_layers: 3,
       max_frame_fragments: MAX_VIDEO_FRAME_FRAGMENTS,
+      video_features: Vec::new(),
     };
     assert_eq!(
       serde_json::to_string(&capabilities).unwrap(),
@@ -237,6 +292,37 @@ mod tests {
     // Fields of newer peers are ignored, as older peers ignore this one.
     let newer = r#"{"stream_id":7,"device_id":"5","kind":"camera","codec":"h264","layers":[],"hint":"x"}"#;
     assert_eq!(serde_json::from_str::<VideoTrack>(newer).unwrap(), track);
+  }
+
+  /// #1733: a layer in another codec than its track names it; layers in the track's codec, and
+  /// those of older clients, carry none. Features of newer clients are kept as unknown.
+  #[test]
+  fn layer_codecs_and_video_features_wire_format() {
+    let base = r#"{"layer":0,"width":854,"height":480,"max_framerate":15,"max_bitrate_bps":600000}"#;
+    let top =
+      r#"{"layer":1,"width":2560,"height":1440,"max_framerate":30,"max_bitrate_bps":4000000,"codec":"av1"}"#;
+    let track: VideoTrack = serde_json::from_str(&format!(
+      r#"{{"stream_id":7,"device_id":"5","kind":"screen","codec":"h264","layers":[{base},{top}]}}"#
+    ))
+    .unwrap();
+    assert_eq!(track.layers[0].maybe_codec, None);
+    assert_eq!(track.layer_codec(0), &VideoCodec::H264);
+    assert_eq!(track.layer_codec(1), &VideoCodec::Av1);
+    assert_eq!(track.layer_codec(5), &VideoCodec::H264);
+    assert!(track.has_mixed_codecs());
+    assert_eq!(serde_json::to_string(&track.layers[1]).unwrap(), top);
+    assert_eq!(serde_json::to_string(&track.layers[0]).unwrap(), base);
+
+    let capabilities: MediaCapabilities = serde_json::from_str(
+      r#"{"audio_codecs":["opus"],"video_encoders":[],"video_decoders":["h264"],"max_simulcast_layers":3,"video_features":["layer_codecs","later"]}"#,
+    )
+    .unwrap();
+    assert!(capabilities.has_layer_codecs());
+    assert_eq!(
+      capabilities.video_features,
+      vec![VideoFeature::LayerCodecs, VideoFeature::Unknown("later".into())]
+    );
+    assert!(!MediaCapabilities::default().has_layer_codecs());
   }
 
   #[test]

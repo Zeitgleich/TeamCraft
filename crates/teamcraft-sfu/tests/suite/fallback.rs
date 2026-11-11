@@ -1656,6 +1656,7 @@ async fn run_call_from(
     height: 360,
     max_framerate: 30,
     max_bitrate_bps: 300_000,
+    maybe_codec: None,
   }];
   if is_secured {
     report.was_secured = true;

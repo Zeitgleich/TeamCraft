@@ -435,24 +435,45 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
 - **Screen share quality** (`teamcraft_media::video::ScreenProfile`): two content modes, chosen per
   share (remembered): *detail* (default) keeps text sharp, up to 1440p at 30 fps; *motion* keeps
   smooth video, up to 1080p at 60 fps. The top layer's bitrate follows the pixel rate (about 0.06
-  bit per pixel, 2 to 8 Mbit/s: 1080p30 about 4, 1440p30 about 6.6); a second layer at half size and
-  a quarter of the bitrate serves weak viewers, and the uplink budget drops the big layer first.
-  A smaller source is never enlarged. Hardware encoders and the screen-content tuning of the encoders
-  apply as for cameras. **4K** (#565) is a choice per share where the workspace policy allows it
+  bit per pixel, 2 to 8 Mbit/s: 1080p30 about 4, 1440p30 about 6.6). A smaller source is never
+  enlarged. Hardware encoders and the screen-content tuning of the encoders apply as for cameras.
+  **4K** (#565) is a choice per share where the workspace policy allows it
   (`screen_share.max_resolution`, docs/admin.md §3.6): detail up to 4K at 30 fps, motion up to
-  1440p at 60 fps, the top layer at up to 16 Mbit/s, and above 1440p a third, quarter-size layer.
-  The bandwidth estimator grows past its 10 Mbit/s ceiling only up to what the sender (uplink) or
-  the SFU (a viewer's downlink) declares it needs, at most 25 Mbit/s. Budgets: docs/performance.md.
-- **Video codecs** (#565): every client announces what it encodes and decodes with `join`
-  (`MediaCapabilities`); the SFU tells each device that encodes video which codecs all the others
-  that receive video decode (`decodable_video_codecs`, again whenever that changes), and refuses a
-  subscription to a codec the receiver doesn't decode. A detail share goes out in AV1 with its
-  screen content tools (WebCodecs `contentHint: "text"`) where the sender encodes AV1 and everyone
-  else decodes it; a device that joins without AV1 makes the sender publish the share anew in
-  H.264, and the last one leaving lets it return to AV1. Cameras and motion shares stay H.264.
-  Today browsers with an AV1 WebCodecs encoder (Chrome, Edge, Firefox) send AV1; browsers and
-  desktops decode it where their WebCodecs does (the desktop's page tells its shell); the desktop's
-  own encoders and the phone apps are H.264 only, and older clients and SFUs H.264 too.
+  1440p at 60 fps, the top layer at up to 16 Mbit/s. The bandwidth estimator grows past its
+  10 Mbit/s ceiling only up to what the sender (uplink) or the SFU (a viewer's downlink) declares
+  it needs, at most 25 Mbit/s. Budgets: docs/performance.md.
+- **Screen share policy** (#1733, `teamcraft_media::share_policy`): meetings share text, not games,
+  so a detail share keeps its **resolution before its frame rate**. Its layers:
+  - a **base** layer at up to 480p (15 fps for detail) in H.264, which every device decodes, sent
+    throughout;
+  - a **middle** layer at half the picture where that is clearly larger than the base (from
+    1440p), in the top's codec where every viewer decodes it, else H.264;
+  - the **top** layer at the full picture, in AV1 where the sender encodes AV1 in hardware
+    (WebCodecs `isConfigSupported` with `prefer-hardware` and `MediaCapabilities.encodingInfo`'s
+    `powerEfficient`). A software AV1 encoder takes the top layer only up to about 1080p and at
+    15 fps; a larger share goes out in H.264 at full size instead.
+
+  The capture track and the encoders carry `contentHint: "text"` for detail. Under **CPU
+  pressure** (frames queued or skipped at the encoders, encode time against the frame interval:
+  the encoder-load controller shared with cameras) a share steps down in this order: the top
+  layer's frame rate (30, 20, 15, 10, 5 fps), the middle layer off, a top layer in software AV1 to
+  H.264 at the same size, and only then the top layer's size (3/4, 1/2). After a calm period it
+  steps back up in reverse, waiting longer after each step up that didn't hold. A motion share
+  drops its middle layer and size first and keeps its rate longest. On a **limited uplink** a
+  share whose encoders follow the allocation sends its top layer at a share of its bitrate with
+  the frame rate lowered in step (down to about 5 fps) before the top layer stops.
+- **Layer codecs** (#1733): a layer may name a codec other than its track's
+  (`VideoLayerInfo::maybe_codec`); the track's codec is its lowest layer's. Clients whose engine
+  reads layer codecs say so with `join` (`MediaCapabilities::video_features`: `layer_codecs`;
+  every engine with video decoders does); the SFU forwards a receiver only the lowest layers in
+  codecs it decodes and, without that feature, only those in the track's codec. The per-viewer
+  layer choice stays the bandwidth and viewport allocation: a viewer with AV1 and bandwidth gets
+  the AV1 top, a constrained one or one without AV1 (a phone, an older client) the H.264 base,
+  with no renegotiation. A receiver's decoder opens anew for the other codec at the switch's
+  keyframe. `decodable_video_codecs` also names the codecs at least one viewer that reads layer
+  codecs decodes (`decodable_by_some`); a sender encodes an AV1 layer only when someone does, and
+  publishes the share anew when its layers' codecs change. An SFU from before sends no
+  `decodable_by_some`: the share then goes out in one codec, as below.
 - **Screen share on Android** (#1667): MediaProjection behind the system's consent dialog (per
   share; Android 14+ asks every time), taken by the ongoing-call foreground service as
   `mediaProjection`. A virtual display mirrors the screen into an `ImageReader` (RGBA) at the size

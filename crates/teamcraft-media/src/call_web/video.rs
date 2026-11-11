@@ -59,6 +59,7 @@ use crate::call_video::ReceivedVideoFrame;
 use crate::camera_governor::{
   CameraGovernorConfig, CameraLoad, FrameTally, LayerLimit, LayerRateGuard, LoadStep, OverloadReason,
 };
+use crate::share_policy::Av1Encoding;
 use crate::video::{
   CAMERA_FRAMERATE, LayerSizer, ScreenProfile, VideoResolution, camera_layers, fit_within, within_layer_limit,
 };
@@ -329,6 +330,17 @@ impl TrackSender {
         Some(content_hint(profile)),
       ),
     };
+    if let Some(hint) = maybe_content_hint {
+      // #1733: the browser keeps the captured resolution and lowers the rate under load
+      // ("maintain resolution") for a track marked as text, not the other way round.
+      if let Err(error) = js_sys::Reflect::set(
+        &track,
+        &JsValue::from_str("contentHint"),
+        &JsValue::from_str(hint),
+      ) {
+        debug!(error = %js_message(&error), "content hint not set on the shared screen");
+      }
+    }
     let infos = within_layer_limit(&infos, max_layers);
     let sizer = LayerSizer::new(infos.clone(), limit);
     let encoding = Encoding {
@@ -1036,15 +1048,17 @@ impl Encoding {
       ("framerate", JsValue::from(self.layer_framerate(info))),
       ("latencyMode", JsValue::from_str(self.latency.as_str())),
     ];
-    match self.codec {
+    // `contentHint` (#565, #1733): "text" keeps a detail share's resolution and turns on AV1's
+    // screen content tools; it applies to H.264 as well where the browser knows it.
+    if let Some(hint) = self.maybe_content_hint {
+      entries.push(("contentHint", JsValue::from_str(hint)));
+    }
+    match info.codec(&self.codec) {
       VideoCodec::Av1 => {
         entries.push((
           "codec",
           JsValue::from_str(av1_encoder_codec(info.width, info.height, self.framerate)),
         ));
-        if let Some(hint) = self.maybe_content_hint {
-          entries.push(("contentHint", JsValue::from_str(hint)));
-        }
       },
       // H.264 as before #565, also for codecs nobody picks (`CallEngine::video_codec_for`).
       _ => {
@@ -1084,7 +1098,8 @@ impl LayerEncoder {
     let layer = info.layer;
     let kind = encoding.kind.clone();
     let output_kind = kind.clone();
-    let codec = encoding.codec.clone();
+    // #1733: a share's layers may differ in codec; each chunk carries its layer's.
+    let codec = info.codec(&encoding.codec).clone();
     let output = Closure::<dyn FnMut(EncodedVideoChunk)>::new(move |chunk: EncodedVideoChunk| {
       let bytes = Uint8Array::new_with_length(chunk.byte_length());
       let input = match chunk.copy_to(&bytes) {
@@ -1446,6 +1461,9 @@ fn h264_encoder_codec(width: u16, height: u16) -> &'static str {
 pub struct CodecSupport {
   pub encoders: Vec<VideoCodec>,
   pub decoders: Vec<VideoCodec>,
+  /// How it encodes AV1 (#1733): a screen share's top layer goes out in AV1 at full size only
+  /// from a hardware encoder.
+  pub av1_encoding: Av1Encoding,
 }
 
 /// What this browser encodes and decodes: H.264 always (every client sends and takes it), AV1
@@ -1455,6 +1473,7 @@ pub(super) async fn codec_support() -> CodecSupport {
   let mut support = CodecSupport {
     encoders: vec![VideoCodec::H264],
     decoders: vec![VideoCodec::H264],
+    av1_encoding: Av1Encoding::Unavailable,
   };
   let probe = Encoding {
     kind: VideoTrackKind::Screen,
@@ -1469,11 +1488,13 @@ pub(super) async fn codec_support() -> CodecSupport {
     height: 1440,
     max_framerate: 30,
     max_bitrate_bps: 6_000_000,
+    maybe_codec: None,
   };
   if let Ok(config) = probe.config(&layer)
     && is_supported(VideoEncoder::is_config_supported(&config)).await
   {
     support.encoders.insert(0, VideoCodec::Av1);
+    support.av1_encoding = av1_encoding(&config, &layer).await;
   }
   if let Ok(config) = dictionary(&[("codec", JsValue::from_str(AV1_CODEC))])
     && is_supported(VideoDecoder::is_config_supported(&config)).await
@@ -1481,6 +1502,61 @@ pub(super) async fn codec_support() -> CodecSupport {
     support.decoders.insert(0, VideoCodec::Av1);
   }
   support
+}
+
+/// Whether the browser encodes AV1 at `config` in hardware (#1733): WebCodecs takes the config
+/// with `hardwareAcceleration: "prefer-hardware"`, and `MediaCapabilities.encodingInfo` calls it
+/// power efficient where the browser has that API. Anything else is software: a browser that
+/// can't tell gets the reduced plan, which a hardware encoder only loses resolution with above
+/// 1080p.
+async fn av1_encoding(config: &js_sys::Object, layer: &VideoLayerInfo) -> Av1Encoding {
+  let hardware = js_sys::Object::assign(&js_sys::Object::new(), config);
+  let is_hardware_config = js_sys::Reflect::set(
+    &hardware,
+    &JsValue::from_str("hardwareAcceleration"),
+    &JsValue::from_str("prefer-hardware"),
+  )
+  .is_ok()
+    && is_supported(VideoEncoder::is_config_supported(&hardware)).await;
+  if !is_hardware_config {
+    return Av1Encoding::Software;
+  }
+  match is_power_efficient(layer).await {
+    Some(false) => Av1Encoding::Software,
+    Some(true) | None => Av1Encoding::Hardware,
+  }
+}
+
+/// `navigator.mediaCapabilities.encodingInfo(...)`'s `powerEfficient` for AV1 at `layer`'s size;
+/// `None` where the browser has no such API or doesn't answer.
+async fn is_power_efficient(layer: &VideoLayerInfo) -> Option<bool> {
+  let navigator = window().ok()?.navigator();
+  let capabilities = js_sys::Reflect::get(&navigator, &JsValue::from_str("mediaCapabilities")).ok()?;
+  let encoding_info: js_sys::Function =
+    js_sys::Reflect::get(&capabilities, &JsValue::from_str("encodingInfo"))
+      .ok()?
+      .dyn_into()
+      .ok()?;
+  let video = dictionary(&[
+    ("contentType", JsValue::from_str("video/AV1")),
+    ("width", JsValue::from(layer.width)),
+    ("height", JsValue::from(layer.height)),
+    ("bitrate", JsValue::from(layer.max_bitrate_bps)),
+    ("framerate", JsValue::from(layer.max_framerate)),
+  ])
+  .ok()?;
+  let query = dictionary(&[("type", JsValue::from_str("webrtc")), ("video", video.into())]).ok()?;
+  let promise: Promise = encoding_info.call1(&capabilities, &query).ok()?.dyn_into().ok()?;
+  let answer = JsFuture::from(promise).await.ok()?;
+  let is_supported = js_sys::Reflect::get(&answer, &JsValue::from_str("supported"))
+    .ok()?
+    .as_bool()?;
+  if !is_supported {
+    return None;
+  }
+  js_sys::Reflect::get(&answer, &JsValue::from_str("powerEfficient"))
+    .ok()?
+    .as_bool()
 }
 
 /// Whether an `isConfigSupported` answer says yes; a throw (no WebCodecs) or a rejection says no.
@@ -2781,6 +2857,7 @@ mod tests {
       height: 180 << layer,
       max_framerate: 30,
       max_bitrate_bps: 150_000 << layer,
+      maybe_codec: None,
     }
   }
 

@@ -404,6 +404,13 @@ pub enum CallEvent {
   /// them. Older SFUs send none: only H.264 is safe then.
   DecodableVideoCodecs {
     codecs: Vec<VideoCodec>,
+    /// The codecs at least one other device that receives video decodes and takes as a layer of
+    /// a track in another codec ([`crate::VideoFeature::LayerCodecs`]), best first (#1733): a
+    /// screen share's large layers may go out in them above a layer in one of `codecs`. Sent
+    /// only by SFUs that forward such layers; empty from SFUs before, which take a track in one
+    /// codec only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    decodable_by_some: Vec<VideoCodec>,
   },
   /// Arrival times of the datagrams this client sent (uplink estimation, done by the client).
   TransportFeedback {
@@ -942,11 +949,23 @@ mod tests {
   fn decodable_codecs_wire_format() {
     let event = CallEvent::DecodableVideoCodecs {
       codecs: vec![VideoCodec::Av1, VideoCodec::H264],
+      decodable_by_some: Vec::new(),
     };
     let json = serde_json::to_string(&event).unwrap();
     assert_eq!(
       json,
       r#"{"type":"decodable_video_codecs","codecs":["av1","h264"]}"#
+    );
+    assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), event);
+    // #1733: SFUs that forward layers in other codecs than their track say what some decode.
+    let event = CallEvent::DecodableVideoCodecs {
+      codecs: vec![VideoCodec::H264],
+      decodable_by_some: vec![VideoCodec::Av1, VideoCodec::H264],
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(
+      json,
+      r#"{"type":"decodable_video_codecs","codecs":["h264"],"decodable_by_some":["av1","h264"]}"#
     );
     assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), event);
     let unknown: CallEvent = serde_json::from_str(r#"{"type":"some_later_event","codecs":[]}"#).unwrap();

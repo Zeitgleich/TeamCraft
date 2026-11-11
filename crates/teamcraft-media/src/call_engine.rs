@@ -28,7 +28,8 @@ use teamcraft_proto::{
   Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallServerMessage, DaveKeyBinding,
   DaveTransitionId, DaveTransitionMode, DeviceId, ErrorBody, ErrorCode, LEGACY_SIMULCAST_LAYERS,
   MAX_SIMULCAST_LAYERS, MediaCapabilities, MediaStreamId, ScreenAudioTrack, ScreenShareTakeover,
-  TransportFeedback, UserId, VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrack, VideoTrackKind,
+  TransportFeedback, UserId, VideoCodec, VideoFeature, VideoLayerInfo, VideoPublicationId, VideoTrack,
+  VideoTrackKind,
 };
 use thiserror::Error;
 use tracing::{debug, trace, warn};
@@ -125,6 +126,9 @@ pub struct CallEngine {
   /// The video codecs every other device that receives video decodes, as the SFU last said
   /// (#565); `None` before it said (an older SFU never does): H.264 only.
   maybe_decodable: Option<Vec<VideoCodec>>,
+  /// The video codecs at least one other device decodes as a layer in another codec than its
+  /// track, as the SFU last said (#1733); empty from an SFU that forwards no such layers.
+  decodable_by_some: Vec<VideoCodec>,
   /// The most simulcast layers per track the SFU takes, as its last `joined` said (#978;
   /// [`LEGACY_SIMULCAST_LAYERS`] from an SFU that says nothing); `None` before the first.
   maybe_sfu_layer_limit: Option<u8>,
@@ -568,6 +572,7 @@ impl CallEngine {
       maybe_nack: None,
       maybe_switch_secret: None,
       maybe_decodable: None,
+      decodable_by_some: Vec::new(),
       maybe_sfu_layer_limit: None,
       remote_video: HashMap::new(),
       maybe_dave: None,
@@ -610,7 +615,7 @@ impl CallEngine {
     self.signal(CallClientMessage::Join {
       maybe_dave_resume_epoch: None,
       token,
-      capabilities: self.config.capabilities.clone(),
+      capabilities: self.join_capabilities(),
       dave_transition_mode: DaveTransitionMode::Coordinated,
     });
   }
@@ -682,9 +687,20 @@ impl CallEngine {
     self.signal(CallClientMessage::Join {
       maybe_dave_resume_epoch,
       token,
-      capabilities: self.config.capabilities.clone(),
+      capabilities: self.join_capabilities(),
       dave_transition_mode: DaveTransitionMode::Coordinated,
     });
+  }
+
+  /// The driver's capabilities as announced: every engine takes a frame's codec from its layer
+  /// ([`IncomingVideo::layer_codec`]), and the decoders of every driver open anew for another
+  /// codec at a keyframe (#1733).
+  fn join_capabilities(&self) -> MediaCapabilities {
+    let mut capabilities = self.config.capabilities.clone();
+    if !capabilities.video_decoders.is_empty() && !capabilities.has_layer_codecs() {
+      capabilities.video_features.push(VideoFeature::LayerCodecs);
+    }
+    capabilities
   }
 
   /// The SFU turned the join away for now and asked to wait this long: the connection is of no use
@@ -827,6 +843,19 @@ impl CallEngine {
       .find(|codec| decodable.contains(codec) && self.config.capabilities.video_encoders.contains(codec))
       .cloned()
       .unwrap_or(VideoCodec::H264)
+  }
+
+  /// The codec a track's larger layers may go out in above a base layer every viewer decodes
+  /// (#1733): the first of `candidates` this device encodes and at least one other device
+  /// decodes as such a layer. `None` from an SFU that forwards no layers in another codec than
+  /// their track's, and when no other device decodes any of them.
+  pub fn layer_codec_for(&self, candidates: &[VideoCodec]) -> Option<VideoCodec> {
+    candidates
+      .iter()
+      .find(|codec| {
+        self.decodable_by_some.contains(codec) && self.config.capabilities.video_encoders.contains(codec)
+      })
+      .cloned()
   }
 
   /// The most simulcast layers a track may be planned with (#978): what the SFU said it takes,
@@ -1137,9 +1166,11 @@ impl CallEngine {
     };
     // #1733: DAVE leaves a codec's headers in the clear by parsing the frame as that codec. An
     // AV1 frame parsed as H.264 has no start code, so nothing of it was kept: viewers got empty
-    // frames and never drew the share.
-    if track.codec != frame.codec {
-      debug!(stream_id = stream.0, codec = %frame.codec, track_codec = %track.codec, "video frame in another codec than its track, dropped");
+    // frames and never drew the share. Each layer has its codec (a share's AV1 layers above an
+    // H.264 one).
+    let layer_codec = track.layer_codec(frame.layer.value());
+    if layer_codec != &frame.codec {
+      debug!(stream_id = stream.0, codec = %frame.codec, layer_codec = %layer_codec, "video frame in another codec than its layer, dropped");
       self.count_dropped_video(stream);
       return VideoSendOutcome::WrongCodec;
     }
@@ -1481,9 +1512,13 @@ impl CallEngine {
         self.event(CallEngineEvent::ConnectionReplaced);
         Ok(())
       },
-      CallEvent::DecodableVideoCodecs { codecs } => {
-        if self.maybe_decodable.as_ref() != Some(&codecs) {
+      CallEvent::DecodableVideoCodecs {
+        codecs,
+        decodable_by_some,
+      } => {
+        if self.maybe_decodable.as_ref() != Some(&codecs) || self.decodable_by_some != decodable_by_some {
           self.maybe_decodable = Some(codecs.clone());
+          self.decodable_by_some = decodable_by_some;
           self.event(CallEngineEvent::DecodableVideoCodecs(codecs));
         }
         Ok(())
@@ -2543,7 +2578,9 @@ impl CallEngine {
       return Ok(());
     };
     let needs_keyframe = track.take_loss();
-    let (sender, codec, maybe_layer) = (track.sender, track.codec.clone(), track.layer());
+    let (sender, maybe_layer) = (track.sender, track.layer());
+    // #1733: each layer has its codec (a share's AV1 layers above an H.264 one).
+    let codec = maybe_layer.map_or_else(|| track.codec.clone(), |layer| track.layer_codec(layer));
     if needs_keyframe {
       self.ask_for_keyframe(stream, now);
     }
@@ -2726,7 +2763,7 @@ impl CallEngine {
     track.maybe_publication_id = Some(publication);
     self.own_video.insert(
       stream,
-      OutgoingVideo::new(track.kind.clone(), track.codec.clone()),
+      OutgoingVideo::new(track.kind.clone(), track.codec.clone()).with_layers(&track.layers),
     );
     // Drivers start with every layer, and the SFU takes every layer as carried. A track without
     // layer list isn't limited.
@@ -2781,7 +2818,7 @@ impl CallEngine {
       self.signal(CallClientMessage::PublishVideo {
         kind: pending.kind.clone(),
         codec: pending.codec.clone(),
-        layers: pending.layers.iter().take(limit).copied().collect(),
+        layers: pending.layers.iter().take(limit).cloned().collect(),
         maybe_publication_id: Some(pending.id),
       });
     }
@@ -3127,6 +3164,7 @@ mod tests {
 
       let all = CallEvent::DecodableVideoCodecs {
         codecs: vec![VideoCodec::Av1, VideoCodec::Vp9, VideoCodec::H264],
+        decodable_by_some: Vec::new(),
       };
       engine.handle_signal(event(2, all.clone()), now).unwrap();
       assert_eq!(engine.video_codec_for(&screen), VideoCodec::Av1);
@@ -3140,6 +3178,7 @@ mod tests {
 
       let h264_only = CallEvent::DecodableVideoCodecs {
         codecs: vec![VideoCodec::H264],
+        decodable_by_some: Vec::new(),
       };
       engine.handle_signal(event(3, h264_only.clone()), now).unwrap();
       assert_eq!(engine.video_codec_for(&screen), VideoCodec::H264);
@@ -3156,6 +3195,21 @@ mod tests {
         1,
         "told once per change: {repeated:?}"
       );
+      // An SFU that forwards layers in other codecs names what some decode (#1733): a share's
+      // large layers may go out in AV1 although not everyone decodes it.
+      assert_eq!(engine.layer_codec_for(&screen), None, "not said yet");
+      let some_av1 = CallEvent::DecodableVideoCodecs {
+        codecs: vec![VideoCodec::H264],
+        decodable_by_some: vec![VideoCodec::Av1, VideoCodec::H264],
+      };
+      engine.handle_signal(event(5, some_av1), now).unwrap();
+      assert_eq!(engine.video_codec_for(&screen), VideoCodec::H264);
+      assert_eq!(engine.layer_codec_for(&screen), Some(VideoCodec::Av1));
+      assert_eq!(engine.layer_codec_for(&[VideoCodec::Vp9]), None);
+      assert!(drain(&mut engine).iter().any(|output| matches!(
+        output,
+        EngineOutput::Event(CallEngineEvent::DecodableVideoCodecs(_))
+      )));
     }
 
     #[test]
@@ -3166,6 +3220,34 @@ mod tests {
       assert!(matches!(
         engine.poll_output(),
         Some(EngineOutput::Signal(CallClientMessage::Join { token, .. })) if token == "token"
+      ));
+    }
+
+    /// #1733: an engine that receives video says it takes layers in other codecs than their
+    /// track's; one that receives none (audio only) says nothing.
+    #[test]
+    fn join_says_layer_codecs_where_video_is_received() {
+      let now = Instant::now();
+      let mut receiving = CallEngine::new(
+        CallEngineConfig {
+          capabilities: MediaCapabilities {
+            video_decoders: vec![VideoCodec::H264],
+            ..MediaCapabilities::default()
+          },
+          ..engine(1, now).config
+        },
+        now,
+      );
+      receiving.join("token".into());
+      assert!(matches!(
+        receiving.poll_output(),
+        Some(EngineOutput::Signal(CallClientMessage::Join { capabilities, .. })) if capabilities.has_layer_codecs()
+      ));
+      let mut audio_only = engine(2, now);
+      audio_only.join("token".into());
+      assert!(matches!(
+        audio_only.poll_output(),
+        Some(EngineOutput::Signal(CallClientMessage::Join { capabilities, .. })) if !capabilities.has_layer_codecs()
       ));
     }
 
@@ -3851,6 +3933,69 @@ mod tests {
         VideoSendOutcome::WrongCodec
       );
       assert!(deliver_video(&mut alice, &mut bob, now).is_empty());
+    }
+
+    /// #1733: a share with an H.264 base and AV1 above it. Each layer's frames go out in the
+    /// layer's codec, are told apart by it at the viewer, and a frame in another codec than its
+    /// layer never leaves.
+    #[test]
+    fn each_layer_of_a_mixed_share_goes_out_in_its_codec() {
+      let now = Instant::now();
+      let (mut alice, mut bob) = secured_pair(now);
+      let mut layers = layers(2);
+      layers[1].maybe_codec = Some(VideoCodec::Av1);
+      let track = VideoTrack {
+        stream_id: MediaStreamId(50),
+        device_id: device(1),
+        kind: VideoTrackKind::Screen,
+        codec: VideoCodec::H264,
+        layers: layers.clone(),
+        maybe_publication_id: None,
+      };
+      alice.publish_video(
+        VideoPublicationId(0),
+        VideoTrackKind::Screen,
+        VideoCodec::H264,
+        layers,
+      );
+      let published = CallEvent::VideoPublished { track: track.clone() };
+      alice.handle_signal(event(6, published.clone()), now).unwrap();
+      bob.handle_signal(event(4, published), now).unwrap();
+      drain(&mut alice);
+      drain(&mut bob);
+      let av1_top = EncodedVideoFrame {
+        codec: VideoCodec::Av1,
+        layer: SimulcastLayer::new(1).unwrap(),
+        timestamp: RtpTimestamp(3000),
+        is_keyframe: true,
+        data: vec![0x12, 0x00, 0x32, 0x03, 1, 2, 3],
+      };
+      assert_eq!(
+        alice.send_video(track.stream_id, &av1_top, now),
+        VideoSendOutcome::Sent
+      );
+      let frames = deliver_video(&mut alice, &mut bob, now);
+      assert_eq!(frames.len(), 1);
+      assert_eq!(frames[0].codec, VideoCodec::Av1);
+      let h264_top = EncodedVideoFrame {
+        codec: VideoCodec::H264,
+        ..av1_top.clone()
+      };
+      assert_eq!(
+        alice.send_video(track.stream_id, &h264_top, now),
+        VideoSendOutcome::WrongCodec
+      );
+      let h264_base = EncodedVideoFrame {
+        layer: SimulcastLayer::BASE,
+        ..h264_top
+      };
+      assert_eq!(
+        alice.send_video(track.stream_id, &h264_base, now),
+        VideoSendOutcome::Sent
+      );
+      let frames = deliver_video(&mut alice, &mut bob, now);
+      assert_eq!(frames.len(), 1);
+      assert_eq!(frames[0].codec, VideoCodec::H264);
     }
 
     /// Alice publishes a screen share in AV1 on stream 50, and Bob sees it.
@@ -6872,6 +7017,7 @@ mod tests {
       height,
       max_framerate: 30,
       max_bitrate_bps,
+      maybe_codec: None,
     })
     .collect()
   }

@@ -1049,6 +1049,7 @@ fn engine_config(id: i64) -> CallEngineConfig {
       video_decoders: vec![VideoCodec::H264],
       max_simulcast_layers: 3,
       max_frame_fragments: teamcraft_proto::MAX_VIDEO_FRAME_FRAGMENTS,
+      video_features: Vec::new(),
     },
     bwe: BweConfig::default(),
   }
@@ -1069,6 +1070,7 @@ fn small_layers() -> Vec<VideoLayerInfo> {
     height,
     max_framerate: 30,
     max_bitrate_bps,
+    maybe_codec: None,
   })
   .collect()
 }

@@ -677,7 +677,7 @@ mod tests {
     ignore = "decodes with OpenH264: --features openh264-source"
   )]
   fn hardware_pictures_decode_and_keyframes_come_on_request() {
-    let layer = simulcast_layers(HD, 30, 2_000_000, 1)[0];
+    let layer = simulcast_layers(HD, 30, 2_000_000, 1).remove(0);
     let Some(mut encoder) = GstreamerEncoder::new(&layer, VideoContent::Camera) else {
       assert!(
         std::env::var_os("TEAMCRAFT_REQUIRE_HARDWARE_ENCODER").is_none(),
@@ -766,15 +766,15 @@ mod tests {
       width: 2560,
       height: 1440,
     };
-    let screen_layer = *screen_layers(
+    let screen_layer = screen_layers(
       screen,
       30,
       ScreenContentMode::Detail,
       &ScreenShareResolution::Standard,
     )
-    .last()
+    .pop()
     .unwrap();
-    let camera_layer = simulcast_layers(HD, 30, 1_500_000, 1)[0];
+    let camera_layer = simulcast_layers(HD, 30, 1_500_000, 1).remove(0);
     let cases = [
       (camera_layer, VideoContent::Camera, 33_333u64),
       (screen_layer, VideoContent::Screen, 33_333),
@@ -822,7 +822,7 @@ mod tests {
   /// as its picture: a slow encoder, in every GStreamer.
   fn slow_pipeline(sleep_us: u32) -> GstreamerEncoder {
     gst::init().unwrap();
-    let layer = simulcast_layers(HD, 30, 1_500_000, 1)[0];
+    let layer = simulcast_layers(HD, 30, 1_500_000, 1).remove(0);
     let description = format!(
       "appsrc name=source is-live=true format=time ! identity name=slow sleep-time={sleep_us} ! \
        appsink name=sink sync=false"
@@ -924,7 +924,7 @@ mod tests {
       width: 1364,
       height: 768,
     };
-    let layer = simulcast_layers(screen, 30, 2_000_000, 2)[0];
+    let layer = simulcast_layers(screen, 30, 2_000_000, 2).remove(0);
     assert_eq!(layer.width % 4, 2, "the half-size layer needs padded rows");
     let Some(mut encoder) = GstreamerEncoder::new(&layer, VideoContent::Screen) else {
       assert!(
@@ -950,7 +950,7 @@ mod tests {
   fn a_calm_camera_picture_uses_its_bitrate() {
     const FRAMES: u64 = 120;
     const SETTLED: u64 = 30;
-    let layer = simulcast_layers(HD, 30, 1_500_000, 1)[0];
+    let layer = simulcast_layers(HD, 30, 1_500_000, 1).remove(0);
     let Some(mut encoder) = GstreamerEncoder::new(&layer, VideoContent::Camera) else {
       assert!(
         std::env::var_os("TEAMCRAFT_REQUIRE_HARDWARE_ENCODER").is_none(),
@@ -1240,7 +1240,7 @@ mod tests {
       properties: |bitrate_kbps, _content| format!("bitrate={bitrate_kbps}"),
       is_screen_quality_governed: true,
     };
-    let layer = simulcast_layers(HD, 30, 1_659_000, 1)[0];
+    let layer = simulcast_layers(HD, 30, 1_659_000, 1).remove(0);
     let governed = pipeline_description(&element, &layer, VideoContent::Screen, Some(0.125));
     assert!(
       governed.contains("vtenc_h264 bitrate=1659 quality=0.125 !"),
@@ -1367,7 +1367,7 @@ mod tests {
         properties: element.properties,
         is_screen_quality_governed: false,
       };
-      let layer = simulcast_layers(HD, 30, 2_000_000, 1)[0];
+      let layer = simulcast_layers(HD, 30, 2_000_000, 1).remove(0);
       let description = pipeline_description(&element, &layer, VideoContent::Camera, None);
       let mut probe = Probe {
         profile,

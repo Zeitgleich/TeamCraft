@@ -561,6 +561,7 @@ impl Host {
           video_decoders: codecs.decoders,
           max_simulcast_layers: MAX_SIMULCAST_LAYERS,
           max_frame_fragments: teamcraft_proto::MAX_VIDEO_FRAME_FRAGMENTS,
+          video_features: Vec::new(),
         },
         bwe: BweConfig::default(),
       },

@@ -4424,6 +4424,7 @@ mod tests {
       height: 180,
       max_framerate: 30,
       max_bitrate_bps: 150_000,
+      maybe_codec: None,
     }]
   }
 
