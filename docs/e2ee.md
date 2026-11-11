@@ -1615,8 +1615,8 @@ channel is in (channels move between spaces too), so purging what the server lis
 once would let it relabel a direct message or another space's channel in and destroy the deleter's copy.
 The deleter's device hides those channels with their history kept for the retention, and they count towards
 the mass notice, where a relabel shows as more than the user deleted; a conversation it pinned as direct
-it leaves alone. Binding a channel's space in signed state, which would let this purge at once again, is
-#1171 (design: §4.6.5). Other deletions that stay claims: a space admin's, one under a custom permission scheme, the last
+it leaves alone. Binding a channel's space in signed state, which lets this purge at once again, is
+decided in §4.6.5 (signed space deletions, #1727). Other deletions that stay claims: a space admin's, one under a custom permission scheme, the last
 member's leave with `delete_if_last`, a channel without signed roles deleted by its channel admin, a direct
 message deleted with an account, and a deletion from a client or against a server from before signed
 deletions. Within 1.x neither side needs the other: a client before this version sends no body and gets the
@@ -1637,7 +1637,8 @@ Residual risks:
 - **The name an admin sees is the server's word.** The signature binds the channel's ID, the epoch and the time,
   not the name or anything else the admin saw. A server can show channel X's ID under the name "old-test", and
   one confirmation purges X on every member's device at once. It takes a real admin's real click, on a list the
-  server wrote. Nothing here stops it, and a retention would have. §4.6.5 (#1171) designs a name members verify.
+  server wrote. Nothing here stops it, and a retention would have. §4.6.5 binds the name in the channel's anchor, and a
+  deletion carries the name hash the admin saw (D3, #1725).
 - A device that can't read the role log or roster, or that the server shows fewer entries, judges on its copy,
   which may still hold a demoted admin. Failing closed on a failed read wouldn't help: the server can answer
   with fewer entries instead.
@@ -1844,7 +1845,8 @@ never by the server's member list:
   checks that the group's first member (the founder's leaf) is the organizer's device and refuses
   the group otherwise, so a member can't found the group and add the others. Remaining gap: the
   organizer is the server's word, not a signature, so a hostile server can name somebody else (a
-  signed organizer in the invitation would close it); and a group whose first leaf was reused after
+  signed organizer in the invitation would close it); an invitee who places the organizer's key
+  package at leaf 0 passes the check, which the anchor closes (§4.6.5, "Meetings", #1725); and a group whose first leaf was reused after
   the organizer's first device was removed is refused as well.
 - **Later invitees.** When the organizer saves a changed invitee list (`PATCH /meetings/{id}`),
   the organizer's device adds the new users to the group with signed adds (`update_meeting_chat_members`,
@@ -2321,6 +2323,7 @@ workspace roster (admin.md §2.3):
   in **this device's MLS group** of the channel, are members of the instance (no guest, bot or
   deactivated account), and this device has their identity key, the one it pinned for them, which their
   place in the group is verified against. It carries the signed mark `has_server_listed_roles`.
+  An anchored channel (§4.6.5) is never founded this way: its founding is the anchor's.
 
   This trusts the server at first sight, which is a decision and not an oversight: nothing signed
   says who a channel's admins were before there was a log, and the alternative, a co-owner who can
@@ -2622,7 +2625,8 @@ exactly one thing besides the tree: the group context, which goes into the key s
 that holds another context than the others can't read the epoch at all. A device can't be in an
 epoch and not know the rule, and no server can show two versions of it.
 
-- A private-use **group context extension** (RFC 9420 §17.3) holds the format version, the role log's
+- A private-use **group context extension** (RFC 9420 §17.3, type `0xF7C0`; §4.6.5's anchor is
+  `0xF7C1`) holds the format version, the role log's
   version and entry hash, and the channel's admins and moderators, each with their identity key, at
   most `max_strict_roles` (client, 64) since it travels in every welcome and `GroupInfo`.
 - The extension present means **strict**, absent means §4.6. Nothing else switches it: not the role
@@ -2777,8 +2781,9 @@ this doesn't wait for #1171. It helps #1171 in return: once a channel is strict,
 admin in a way every member verifiably shares, so a channel admin of the context could purge at once
 (§4.6, "A signed deletion"). A channel founded with the extension in its very first epoch would have its
 founder bound to the group from the start, for the founder half of #1171; it proves the roles were set
-before anybody else was in it, not who created the channel. The space half is untouched. The design for
-#1171 is §4.6.5: an anchor in its own extension from epoch 0, and strict from creation as an option (its D9).
+before anybody else was in it, not who created the channel. The space half is untouched. #1171 is
+decided in §4.6.5: an anchor in its own extension (`0xF7C1`) from epoch 0, and strict from creation as an option
+(its D9, #1729).
 
 **Residual risks.**
 
@@ -3053,10 +3058,12 @@ only to Bob's device, Carol's device accepts Alice's own entry with the unchange
 with version up by one and assignments, appointments and anchor unchanged, and Alice still an admin there. It also
 accepts Alice promoting Dave, then Dave's entry. Bob's device, given Carol's older head, doesn't change.
 
-### 4.6.5 Anchoring a channel's founder, space and name (issue #1171, design for review)
+### 4.6.5 Anchoring a channel's founder, space and name (issue #1171)
 
-**Status: design, not implemented.** Nothing below is in the code. It needs the owner's decisions (D1 to D10, at
-the end) and a crypto review before anything is built.
+**Status: decided, not implemented.** The owner decided D1 to D10 (table at the end) on #1171. A crypto review of
+this section comes before any code; the work is split into #1725 (the anchor), #1727 (signed space
+deletions), #1728 (anchoring older channels), #1729 (strict from creation) and #1726 (the
+meeting invitee list).
 
 **The gap.** Facts that decisions rest on are the server's word, or trust on first use:
 
@@ -3073,42 +3080,117 @@ the end) and a crypto review before anything is built.
   the organizer's published key package at leaf 0 and signs the group information himself. Everybody in such a
   group is invited, so that is availability, not disclosure.
 
-**The idea.** The founder's device signs a **channel anchor** and founds the MLS group with it in the group context
-of epoch 0. Every member of an epoch holds the same group context, since it goes into the key schedule (§4.6.2,
-"The switch and the roles live in the group context"): a device can't be in the group and see another anchor, and
-the server can't show two. Nothing goes into a log the server could withhold. Moves and renames change the anchor's
-properties with a signed group context extensions commit.
+**The design.** The founder's device signs a **channel anchor** and founds the MLS group with it in the group
+context of epoch 0. Every member of an epoch holds the same group context, since it goes into the key schedule
+(§4.6.2, "The switch and the roles live in the group context"): a device can't be in the group and see another
+anchor, and the server can't show two. Nothing goes into a log the server could withhold. Moves and renames
+change the anchor's properties with a signed group context extensions commit.
 
-**The anchor** is a private-use group context extension (RFC 9420 §17.3), TLS-encoded, at most `max_anchor_bytes`
-(client, 4 KiB):
+One rule runs through all of it: **the anchor only grants.** Every decision it enables (a purge at once, a founding
+that isn't trust on first use, a space deletion) needs a verified anchor; without one, or with a property that
+doesn't verify, a device judges exactly as it does today. So stripping, damaging or replacing the anchor can cost
+availability and speed, never more than today's guarantees.
 
-- **The founding**, fixed for the group's life: a format version, the conversation ID, the kind (channel, or meeting
-  chat with the meeting's ID), the origin (`Founded`: the founder's user ID and identity key; `Reviewed`: the
-  workspace admin who anchored an older channel, below) and the signing time. It is signed by the founder's device
-  under a log kind of its own (`WorkspaceLog::ChannelAnchor`), with the device certificate, so it can't pass for a
-  role entry or a deletion, or be moved to another conversation (whose group ID differs, as it derives from it).
-- **The properties**: the space's ID and the name's hash (`SHA-256("TeamCraft-v1 channel name" ‖ name)` over the
-  exact name the server stores), with a version starting at 1. At founding they are signed with the founding; later
-  each change is signed on its own (below). The server knows names anyway; a hash keeps the context small and
-  leaves room to encrypt names later. Apps show the server's name and know whether it matches.
+#### What is signed
+
+The anchor is a private-use group context extension (RFC 9420 §17.3) of type **`0xF7C1`** (`channel_anchor`).
+TeamCraft's private-use extension types are `0xF7C0` for §4.6.2's strict roles and `0xF7C1` for the anchor; a new
+one takes the next number. Its content is TLS-encoded (RFC 9420 §2.1 presentation language, `<V>` a variable-length
+vector with a varint length) and at most `max_anchor_bytes` (client, 4 KiB):
+
+```
+struct {
+  uint8  format;                     // 1
+  ChannelAnchorFounding founding;
+  opaque founding_entry<V>;          // SignedLogEntry over founding (below)
+  ChannelProperties properties;
+  opaque properties_entry<V>;        // SignedLogEntry that authorized properties
+} ChannelAnchor;
+
+struct {
+  uint64 conversation_id;            // equals the MLS group ID (big-endian conversation ID)
+  AnchorKind kind;                   // channel(1) | meeting_chat(2) { uint64 meeting_id; }
+  AnchorOrigin origin;               // founded(1) { uint64 founder_user_id; opaque founder_identity_key[32]; }
+                                     // reviewed(2) { uint64 reviewer_user_id; opaque reviewer_identity_key[32];
+                                     //               uint64 roster_version; opaque role_log_head[32]; }
+  uint64 signed_at_ms;               // the signer's clock; shown, never decided on
+} ChannelAnchorFounding;
+
+struct {
+  uint64 version;                    // 1 at the founding, one up per change
+  optional<uint64> space_id;         // none: a channel outside any space
+  opaque name_hash[32];
+  opaque prev_hash[32];              // zero at version 1; SHA-256 of the previous ChannelProperties' encoding
+} ChannelProperties;
+```
+
+- **The signatures** are the workspace log signatures every log entry uses (`sign_log_entry`): an Ed25519 signature
+  by a device key over `labeled("TeamCraft-v1 workspace log", TLS { log, version, payload<V> })`, stored as
+  `SignedLogEntry { device certificate, signature }`. The log kind separates them from every other entry: a founding
+  can't pass for a role entry, a deletion or a properties change, and the other way round. The device certificate
+  binds the device key to the user's identity key (§3), and must verify under the key the founding names.
+
+  | Entry              | Log kind (new)          | Version           | Payload                                                 |
+  |--------------------|-------------------------|-------------------|---------------------------------------------------------|
+  | The founding       | `ChannelAnchor` (6)     | `format` (1)      | `ChannelAnchorFounding ‖ ChannelProperties` (version 1) |
+  | A move or rename   | `ChannelProperties` (7) | the new `version` | `ChannelPropertiesChange` (below)                       |
+  | A space's deletion | `SpaceDeletion` (8)     | `signed_at_ms`    | `SpaceDeletionDocument` (below)                         |
+
+  At version 1, `properties_entry` is empty and the founding entry covers the properties; later it holds the change
+  that set them. So **the extension verifies on its own**: a device that only ever saw the current epoch (a
+  newcomer's welcome, an add-back) checks the founding and the last change without the history of commits.
+- **The name hash** is `SHA-256(labeled("TeamCraft-v1 channel name", name))` over the UTF-8 bytes of the name
+  exactly as the client sent them in the create or rename request; no normalization on either side. A server that
+  normalizes or truncates makes the name stale (below), which only costs the retention. The server knows names
+  anyway: the hash isn't for secrecy, it keeps the context small and leaves room to encrypt names later.
 - **Not in it:** members, roles (that is §4.6.2's extension, kept apart so a channel can be anchored without being
   strict), the topic and the visibility (§4.7: a signed history record is a later step).
+- **A newer `format`** a device can't parse grants nothing, and doesn't fall back to founding at first sight either:
+  the app says it has to update. An unknown `kind` or `origin` is the same.
 
-**Founding.** The creating device asked the server for the space and the name itself (`create_channel_from`), so it
-signs what it asked for, never the server's answer. It signs the anchor and the founding role entry (§4.6.1)
-together, then creates the group with the anchor (`MlsGroup::builder().with_group_context_extensions`), its own
-leaf announcing the type. In an anchored channel:
+#### Founding
+
+The creating device asked the server for the space and the name itself (`create_channel_from`), so it signs what it
+asked for, never the server's answer. It signs the founding and the founding role entry (§4.6.1) together, then
+creates the group with the anchor (`MlsGroup::builder().with_group_context_extensions`), listing `0xF7C1` in
+`required_capabilities` and announcing it in its own leaf. A meeting chat's anchor has kind `meeting_chat` and the
+organizer as founder (D10).
+
+**Verifying an anchor.** A device verifies the extension whenever it accepts a group context that carries one: at a
+welcome (also an add-back), at a commit that changes it, and when it creates the group. It checks, in this order:
+
+1. The encoding parses completely, within `max_anchor_bytes`, with a known `format`, `kind` and `origin`.
+2. `conversation_id` is the conversation this group belongs to, and the MLS group ID is derived from it; for a
+   meeting chat, `meeting_id` is the meeting the server named.
+3. The founding entry: the certificate verifies under the founding's identity key, the signature under the
+   certificate's device key, over the log kind `ChannelAnchor`. The key is judged as a role entry's (§4.6.1,
+   "Whose key a role names"): a pin of this device that names another key for that user refuses it; an unpinned key
+   is trust on first use (§3) and attestation (§3.1) closes it.
+4. For `reviewed`: the reviewer was a workspace owner or admin at `roster_version` of the signed roster this device
+   holds or fetches. A roster it can't verify up to that version grants nothing yet and is fetched again.
+5. The properties: at version 1, `prev_hash` is zero and the founding entry covered them. Above 1,
+   `properties_entry` is a `ChannelProperties` entry for this conversation whose new values and version are these,
+   and whose signer may (D4, D5, below) as far as this device can tell from the current context, tree and roster. A
+   signer it can't confirm (a member who has since left, a roster it can't read) makes that property **stale for
+   this device**, not the anchor invalid.
+6. The pin: the device records the founding's hash (`SHA-256` of `founding` and `founding_entry`) per conversation
+   the first time it accepts it. A later context of the same conversation without the anchor, or with another
+   founding, is refused (below, "Stripping and replacing").
+
+A founding that fails checks 1 to 4 means the device treats the group as not anchored, as a channel from before
+this, and shows a workspace admin "The channel's founding doesn't verify" in the look at the roles (§4.6.1); it
+doesn't leave the group for it. Members are asked nothing (#1276).
+
+**What the founding decides.** In an anchored channel:
 
 - **Only the anchor's founding counts.** A first role entry is the founding only if its signer is the anchor's
   founder, under the anchor's identity key, naming themselves admin; any other first entry is junk. Nobody founds at
   first sight (§4.6.1): a device at cursor 0 that is shown an empty log signs nothing. That closes "any device at
-  cursor 0" (§4.6.1, "Founding at first sight") for these channels.
+  cursor 0" (§4.6.1, "Founding at first sight") for these channels. A `reviewed` anchor names no founder: its role log
+  head is the reviewed list (below), which counts as a workspace admin's list.
 - **A snapshot that goes back to the anchored founding is anchored** (`may_anchor`), as a workspace admin's own
   founding is. So a channel admin of a channel a member created purges at once, under §4.6's conditions, §4.6.3's
   time limit included (D8).
-- **The founder's key.** Members verify the anchor's signature against the key it names, and that key as for a role
-  entry (§4.6.1, "Whose key a role names"). Every member's device checked it when it joined. A key the server made
-  up for a user nobody pinned before is trust on first use (§3), as everywhere; attestation (§3.1) closes it.
 
 The anchor proves who founded *this group*, and that space and name were set before anybody else was in it. It
 doesn't prove that this group is the one the server's directory means: a member can found another group under the
@@ -3116,93 +3198,156 @@ same ID (§4.6.2, finding 4). Members of the real group never move; a newcomer w
 fork, which shows as falling out, as today. That fork's anchor names its own founder, so the forger has authority
 over his fork only.
 
-**Moves and renames** are a group context extensions proposal that changes only the properties. Any member commits
-it, like a role commit in §4.6.2 ("Role changes while strict"), with a signed `ChannelPropertiesChange` in the
-commit's authenticated data: the conversation, the epoch it was signed for (accepted up to 32 epochs later, §4.6,
-"Freshness"), the hash of the properties it replaces, the new space or name hash and the next version. Every member
-checks that the founding stays byte for byte, the version is one up, the hash chain holds, the proposal does exactly
-what the change says, and the signer may:
+#### Moves and renames
 
-- **A rename** (D5): any member with a leaf, as anybody in the group may add people (§4.6); in a strict channel its
-  admins; workspace owners and admins of a fresh roster, also from outside the group.
-- **A move** (D4): workspace owners and admins of a fresh roster, and a strict channel's admins. Not any member: the
-  space is what lets a space's deletion purge (below).
+A move or rename is one group context extensions proposal that replaces only the anchor's `properties` and
+`properties_entry`. Any member commits it, like a role commit in §4.6.2 ("Role changes while strict"), with the
+signed entry also in the commit's authenticated data, so a device judges it before it merges anything:
+
+```
+struct {
+  uint64 conversation_id;
+  uint64 signed_for_epoch;           // accepted up to 32 epochs later (§4.6, "Freshness")
+  ChannelProperties properties;      // the new version, prev_hash = hash of the replaced properties
+  uint64 roster_version;             // for a workspace signer: the roster that made them one
+} ChannelPropertiesChange;
+```
+
+Every member checks that `format` and `founding` stay byte for byte, the version is one up, `prev_hash` is the hash
+of the properties it replaces, the extension's new properties are exactly the signed ones, the proposal changes no
+other extension (§4.6.2's strict roles and `required_capabilities` stay byte for byte; a role commit likewise keeps
+the anchor), the commit carries nothing else, and the signer may:
+
+- **A rename** (D5): any member with a leaf, as anybody in the group may add people (§4.6); in a strict channel only
+  its admins; workspace owners and admins of a fresh roster, also from outside the group. The risk is the server
+  swapping names, not members renaming, and a member's rename is shown with their name.
+- **A move** (D4): workspace owners and admins of a fresh roster, and a strict channel's admins. Not any member:
+  the space is what lets a space's deletion purge (below), and a member with the server could set up a purge.
 - **Anybody else** (a space admin, a custom scheme, a role log admin of a channel that isn't strict, an older
   client) changes the server only. The anchor keeps the old value, and the channel is **stale** in that property:
   server and anchor differ. Stale refuses nothing else; a deletion that relies on that property takes the retention.
 
-The verdict reads only the context, the tree and the roster, as in §4.6.2: role log entries aren't alike on every
-device, and a commit some members refuse splits the group (§4.6.2, finding 1). Apps sign at the action and ask
+The verdict reads only the context, the tree, the roster and the signed change, as in §4.6.2: role log entries
+aren't alike on every device, and a commit some members refuse splits the group (§4.6.2, finding 1). Rejected:
+letting any member move (D4's alternative) and limiting renames like moves (D5's alternative), which leaves more
+names stale and makes more deletions take the retention without stopping a swap. Apps sign at the action and ask
 nobody (#1276).
 
-**Who can be in an anchored group.** openmls refuses a leaf that doesn't announce every group context extension: in
-an `Add` (`InsufficientCapabilities`, validation valn0502), a welcome (`UnsupportedExtensions`, valn1415) and an
-update (valn0602), as openmls 0.9.2's source shows; to be confirmed in a throwaway test like §4.6.2's. So an app
-from before this can't join an anchored channel or open its welcome, and the adder is told that person has to
+#### Stripping and replacing
+
+| Attack                                                                      | Why it fails                                                                                                                                                                                                |
+|-----------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| The server drops the extension from what it serves                          | It can't: the context is in the key schedule and in every `GroupInfo` and welcome, which the adder signs. A context without it is another group                                                             |
+| A member commits a proposal that removes or changes the founding            | Every honest member refuses it (founding byte for byte). A non-strict channel then falls out and asks to be added back; strict stops at the epoch (§4.6.2, "A commit that is refused")                      |
+| An add-back or welcome into a group without the anchor, or with another one | The pin refuses it: the device stays out and shows the channel as unreachable, rather than take a re-founded group. A device that never pinned the channel gets today's guarantees (the anchor only grants) |
+| A member commits properties nobody authorized                               | Honest members refuse the commit; a device brought back into it by that member's welcome sees a `properties_entry` it can't confirm, and the property is stale for it                                       |
+| The server replays an old properties change                                 | `version` must be one up and `prev_hash` must match; `signed_for_epoch` limits it to 32 epochs                                                                                                              |
+| The server serves an old welcome or `GroupInfo`                             | The device is at an old epoch and can't read the current one: availability. A deletion names an epoch, and a device behind it takes the retention                                                           |
+| A founding from another conversation or meeting                             | `conversation_id` and the group ID, and `meeting_id`, must match; the log kind keeps it from passing for another entry                                                                                      |
+| The creating device is told a low `minimum_client_version`                  | The channel is founded unanchored, as today: availability of the new guarantees, nothing below today (D2)                                                                                                   |
+| A member founds another group under the channel's ID                        | A fork under his own anchor; members of the real group never read it (§4.6.2, finding 4); a newcomer welcomed into it falls out later                                                                       |
+
+#### Who can be in an anchored group
+
+openmls refuses a leaf that doesn't announce every type in `required_capabilities`: in an `Add`
+(`InsufficientCapabilities`, valn0502), a welcome (`UnsupportedExtensions`, valn1415) and an update (valn0602), as
+openmls 0.9.2's source shows; the implementation (#1725) confirms it in a test before relying on it. So an
+app from before this can't join an anchored channel or open its welcome, and the adder is told that person has to
 update, before anything is sent. The rollout (D2):
 
-1. Release N: every app announces the type in its key packages and leaves, with the code that verifies it. A device
+1. Release N: every app announces `0xF7C1` in its key packages and leaves, with the code that verifies it. A device
    replaces its stock of key packages when it updates. Nothing is anchored yet.
 2. A device founds anchored once the server's `minimum_client_version` (updates.md §4.4) is at least N. That is the
-   server's word and moves only availability: "lower" leaves channels unanchored, as today; "higher" keeps old apps
-   out of new channels, which a server can do by refusing them anyway.
+   server's word and moves only availability. Rejected: anchoring at once with N, which keeps people who haven't
+   updated out of new channels, and a workspace policy switch, which is one more setting for the same effect.
 
 DMs, group DMs and the notes get no anchor: they have no founder authority and no space, and no signature deletes
-them.
+them. Rejected for D1: the founding only as a signed entry in the role log, which costs no compatibility but stays
+withholdable and forkable like today's, and a group ID derived from the anchor, which has the same cost as the
+extension and can't carry properties that change.
 
-**Channels from before this** (D6). Nothing signed says who created them, and that can't be proven afterwards. They
-stay as today (founding at first sight, space and name the server's word, a channel admin's deletion takes the
-retention unless workspace-anchored) until a workspace owner or admin **anchors** one:
+#### Channels from before this (D6, #1728)
+
+Nothing signed says who created them, and that can't be proven afterwards. They stay as today (founding at first
+sight, space and name the server's word, a channel admin's deletion takes the retention unless workspace-anchored)
+until a workspace owner or admin **anchors** one:
 
 - The look at the roles (§4.6.1, "Check roles") gains two rows, the space and the name as the server lists them.
   "Confirm exactly these roles" on a channel whose every leaf announces the type also signs an anchor with origin
-  `Reviewed` and those properties, committed as a group context extensions proposal with the reviewed list in the
-  same authenticated data.
+  `reviewed` (the reviewer, the roster version, the hash of the reviewed role entry) and those properties, committed
+  as a group context extensions proposal that adds the extension and its `required_capabilities` entry, with the
+  reviewed list in the same authenticated data. Members check it as a founding, plus that the reviewed role entry
+  is the one in the authenticated data.
 - Today's clients refuse any such proposal (`UnsupportedProposal`), so every leaf must be on N. The look says how
   many devices are on an older app and offers to remove a stale one; the "ready" and leaf refresh steps are §4.6.2's
   (steps 2 and 3), built once for both.
+- Adding an anchor to a group that has none is the only allowed change of that kind; once there, it is never removed.
 - Nobody else is asked or shown a mark (#1276). A workspace admin's look says "Space and name are the server's word
   here" on a channel that isn't anchored, and which value differs on a stale one.
 
-**What it makes possible.**
+Rejected: never anchoring them, and letting the listed admin's app anchor at first sight, which is the server's word
+and couldn't count for a purge.
+
+#### What it makes possible
 
 - **A channel admin's deletion purges at once** on an anchored channel, founded or reviewed, within §4.6.3's time
   limit (D8), and without it on a strict channel whose context names them. A channel where only the founder ever
-  signed meets the limit only after a co-admin's or a workspace admin's entry; strict closes that.
-- **Signed space deletions** (D7). A workspace owner or admin signs a `SpaceDeletionDocument` under
-  `WorkspaceLog::SpaceDeletion`: the space, every channel the deleter was shown in it with the group epoch the server
-  reported for it, and the signing time. A member's device purges a channel at once only if all of §4.6's signed
-  deletion holds for it (the signer, the device list, no alarm, the age limits, the server no longer lists it, its
-  group not past that epoch), the channel is on the signed list, and its anchor's space is that space and not stale.
-  Every other channel is a claim, kept for the retention; a direct message is never purged this way, as it has no
-  anchor. The deleter's own device does the same (#1162). A space admin's deletion stays a claim: space roles aren't
-  signed.
-- **The name at a deletion.** `ChannelDeletionDocument` and each entry of a space's deletion gain the name hash the
-  deleter saw. A member purges at once only if it is its anchor's name and that isn't stale; otherwise the retention.
-  A deleter in the group is shown the name its anchor holds; one outside sees the server's, and a swapped name fails
-  on the members' side. Older clients ignore the field and judge as before until they update.
+  signed meets the limit only after a co-admin's or a workspace admin's entry; strict closes that. Rejected for D8:
+  starting the time limit at the anchored founding, which proves the founding, not the role today, and would accept
+  a withheld demotion for 30 days.
+- **Signed space deletions** (D7, #1727). A workspace owner or admin signs a `SpaceDeletionDocument`:
+
+  ```
+  struct {
+    uint64 space_id;
+    uint64 roster_version;
+    SpaceDeletionChannel channels<V>;  // every channel the deleter was shown in the space
+    uint64 signed_at_ms;
+  } SpaceDeletionDocument;
+
+  struct {
+    uint64 conversation_id;
+    uint64 epoch;                      // the group epoch the server reported
+    opaque name_hash[32];              // the name the deleter was shown
+  } SpaceDeletionChannel;
+  ```
+
+  A member's device purges a channel at once only if all of §4.6's signed deletion holds for it (the signer, the
+  device list, no alarm, the age limits, the server no longer lists it, its group not past that epoch), the channel
+  is on the signed list, its anchor's space is that space and not stale, and the name hash matches (below). Every
+  other channel is a claim, kept for the retention; a direct message is never purged this way, as it has no anchor.
+  The deleter's own device does the same (#1162). A space admin's deletion stays a claim: space roles aren't signed,
+  and signing them (D7's alternative) is much larger.
+- **The name at a deletion** (D3, #1725). `ChannelDeletionDocument` gains `optional<opaque name_hash[32]>`,
+  the hash of the name the deleter was shown, as each entry of a space's deletion has. A member purges at once only
+  if it equals its anchor's name hash and that isn't stale; otherwise the retention. A deleter in the group is shown
+  the name its anchor holds; one outside sees the server's, and a swapped name fails on the members' side. Older
+  clients ignore the field and judge as before until they update. Rejected: not binding the name (the residual of
+  §4.6 stays) and the name in plain text (larger, and in the way of encrypted names).
 - **#1197, D3** ("only workspace signers turn strict on, until #1171"). The anchored founder is a fact every member
   shares, so a channel can be **strict from its first epoch**, with its founder as admin in §4.6.2's extension, if
-  the founder chooses it at creation (D9). Turning strict on for a channel that exists still takes a workspace
-  signer: an admin after the founding comes from the role log, which members can see differently.
+  the founder chooses it at creation (D9, #1729). Turning strict on for a channel that exists still takes a
+  workspace signer: an admin after the founding comes from the role log, which members can see differently.
+  Rejected: every new channel strict, which puts §4.6.2's costs on all.
 - **#879** (§13.1.1, option A, "whoever the group says is admin"). Sources managed by channel admins become possible
   in strict channels, now also those a member created strict. An anchored channel that isn't strict gains nothing
   here: its admins after the founding come from the role log.
 
-**Meetings** (D10).
+#### Meetings (D10)
 
-- **The founder proof.** A meeting chat's group gets an anchor too, kind meeting chat with the meeting's ID, the
-  organizer its founder. A joining member checks it against the organizer the server names (§4.6, "Whose group"),
-  besides the first leaf. An invitee can no longer make himself the founder: that takes the organizer's device
-  signature. He can still copy the real anchor and the organizer's leaf into a group of his own, which the organizer
-  has no keys for; the authority it carries stays the organizer's, so that is a fork and availability, as any
-  member's (§4.6.2, finding 4). Which organizer the server names stays its word.
-- **The invitee list.** The organizer's signed admitters statement (`meeting_admitters`, #1103, above) gains the
-  invitees' user IDs, under the same sequence, end of validity and storage. A host's Join adds only users the newest
-  statement names and the server still lists (its word can only lower); anybody else knocks at the lobby like
-  anybody with the link. It needs no anchor and can be built on its own.
+- **The founder proof** (#1725). A meeting chat's group gets an anchor too, kind `meeting_chat` with the
+  meeting's ID, the organizer its founder. A joining member checks it against the organizer the server names (§4.6,
+  "Whose group"), besides the first leaf. An invitee can no longer make himself the founder: that takes the
+  organizer's device signature. He can still copy the real anchor and the organizer's leaf into a group of his own,
+  which the organizer has no keys for; the authority it carries stays the organizer's, so that is a fork and
+  availability, as any member's (§4.6.2, finding 4). Which organizer the server names stays its word.
+- **The invitee list** (#1726). The organizer's signed admitters statement (`meeting_admitters`, #1103,
+  above) gains the invitees' user IDs, under the same sequence, end of validity and storage. A host's Join adds only
+  users the newest statement names and the server still lists (its word can only lower); anybody else knocks at the
+  lobby like anybody with the link. It needs no anchor and is built on its own. Rejected: taking meetings out of
+  #1171 altogether, which leaves the founder proof unbuilt.
 
-**Threats.**
+#### Threats
 
 | Who              | Tries                                                                       | What they get                                                                                                                          |
 |------------------|-----------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------|
@@ -3213,6 +3358,7 @@ retention unless workspace-anchored) until a workspace owner or admin **anchors*
 | Hostile server   | Claiming a lower or a higher minimum client version                         | Channels unanchored as today, or old apps kept out of new channels: availability only                                                  |
 | Hostile server   | Withholding a move or rename commit                                         | A device behind it holds the older value; a deletion names an epoch, so the device catches up first, or takes the retention            |
 | Hostile server   | Withholding a demotion in the role log                                      | Unchanged by this: §4.6.3's time limit; strict channels close it                                                                       |
+| Hostile server   | Stripping or replacing the anchor                                           | See "Stripping and replacing": refused where pinned, today's guarantees where not                                                      |
 | Malicious member | Founding another group under the channel's ID with himself as founder       | A fork under his own anchor; members of the real group can't read it (finding 4); a newcomer welcomed into it falls out later          |
 | Malicious member | Changing the space or the name                                              | Refused unless they may (D4, D5); a member's rename is shown with their name                                                           |
 | Malicious member | Copying an organizer's anchor and leaf into a meeting group of his own      | No authority; a fork, availability                                                                                                     |
@@ -3221,25 +3367,34 @@ retention unless workspace-anchored) until a workspace owner or admin **anchors*
 | Replay           | An old move or rename, an old deletion, an anchor from another conversation | Version and hash chain, the 32-epoch freshness, the deletion's epoch and age; the anchor names its conversation, which the group ID is |
 | Fork             | The server showing different commits to different devices                   | As today: the group splits and devices fall out; within each side the anchor is alike                                                  |
 
-**Building blocks.** No new primitive and no new dependency: openmls 0.9 (group context extensions, capabilities,
-group context extensions proposals, authenticated data), Ed25519 signatures of a device key with its certificate
-(`teamcraft_crypto::workspace::sign_log_entry`, new log kinds `ChannelAnchor`, `ChannelProperties`,
-`SpaceDeletion`), SHA-256 (`sha2`) for the name hash and the hash chain, and the organizer's identity key signature
-of `meeting_admitters`.
+#### For the crypto review
+
+- **Building blocks.** No new primitive and no new dependency: openmls 0.9 (group context extensions,
+  `required_capabilities`, group context extensions proposals, authenticated data), Ed25519 signatures of a device
+  key with its certificate under the existing `TeamCraft-v1 workspace log` label and three new log kinds, SHA-256
+  (`sha2`) for the name hash, the founding pin and the hash chain, and the organizer's signature of
+  `meeting_admitters`.
+- **Domain separation.** The label `TeamCraft-v1 workspace log` with the log kind and version in the signed input
+  separates the three new entries from each other and from role entries, deletions, roster and policy; the name hash
+  has its own label `TeamCraft-v1 channel name`. MLS's own signatures use `"MLS 1.0 "` labels (§3).
+- **Questions for the reviewer:** whether the founding should also bind the founder's device key directly, not only
+  through the certificate; whether a properties change should name the founding's hash besides the conversation;
+  whether openmls checks `required_capabilities` on every path named above (the test in #1725); and whether
+  a `reviewed` anchor's roster version is enough when the roster is withheld past it.
 
 **What implementing it takes.**
 
 - `teamcraft-crypto`: the extension and its parser (with a fuzz target), the capability in key packages and leaves,
-  founding with it, the properties commit and its pure verdict, the three documents.
-- `teamcraft-core`: founding anchored, the founding entry rule and `may_anchor`, stale properties, the name hash in
-  deletions, space deletions, anchoring in the look, the meeting check and the invitee list.
+  founding with it, the properties commit and its pure verdict, the three documents and the founding pin's hash.
+- `teamcraft-core`: founding anchored, the founding entry rule and `may_anchor`, the pin, stale properties, the name
+  hash in deletions, space deletions, anchoring in the look, the meeting check and the invitee list.
 - `teamcraft-server`: the space deletion's document with the deletion and in `signed_deletions`, the invitees in
-  `meeting_admitters`; property commits are ordinary commits.
+  `meeting_admitters`, and storing names byte for byte; property commits are ordinary commits.
 - Clients: "has to update" when adding, the look's two rows, the strict choice at creation (D9), on desktop, web,
   Android and iOS. No new prompt.
-- Tests: a forged or foreign anchor, a changed founding, each signer and property against the verdict, stale
-  properties, replays, an old leaf refused, a relabelled DM in a space's deletion, a swapped name, a copied meeting
-  anchor.
+- Tests: a forged or foreign anchor, a changed or removed founding, an add-back into an unanchored or re-founded
+  group, each signer and property against the verdict, stale properties, replays, an old leaf refused, an unknown
+  format, a relabelled DM in a space's deletion, a swapped name, a copied meeting anchor.
 
 **Residual risks.**
 
@@ -3248,24 +3403,30 @@ of `meeting_admitters`.
 - The server's directory and the anchor can differ; apps show the server's name and space, decisions don't use it.
 - A workspace admin outside the group can't see the anchor and signs on the server's list; the members' devices
   catch a swap, theirs doesn't.
-- Pins are trust on first use where nothing attests them (§3).
+- A device that never pinned a channel can be welcomed into an unanchored fork of it and gets today's guarantees
+  there; the pin protects only what a device has seen.
+- Pins are trust on first use where nothing attests them (§3), the founder's key included.
 - Founder authority in a channel that isn't strict ends at the founding: later roles come from the role log, with
   §4.6.1's and §4.6.3's limits.
+- A refused properties or founding commit costs availability: a non-strict channel falls out and waits for an
+  honest add-back, a strict one stops at the epoch until an admin continues it.
+- Which organizer a meeting has is the server's word; the anchor proves only that the named organizer founded it.
+- `signed_at_ms` is the signer's clock and decides nothing.
 
-**The owner's decisions.**
+**The owner's decisions** (accepted on #1171).
 
-| No. | Decision                                   | Recommendation                                                                                                                                  | Alternatives                                                                                                                                                                      |
-|-----|--------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| D1  | Where founder, space and name live         | A group context extension from epoch 0: alike for every member, nothing to withhold. Costs: apps from before can't be in anchored channels      | A signed founding entry in the role log only: no compatibility cost, but withholdable and forkable like today's. A group ID derived from the anchor: the same cost, no properties |
-| D2  | When new channels start anchored           | Once the server's `minimum_client_version` reaches the release that announces the type; its word moves only availability                        | At once with that release, keeping not yet updated apps out of new channels. A workspace policy switch                                                                            |
-| D3  | Bind the name                              | Yes, as a hash; a deletion carries the name hash shown, and a mismatch takes the retention                                                      | No: the residual of §4.6 stays. The name in plain text: the same, larger, and in the way of encrypted names                                                                       |
-| D4  | Who signs a move so it counts              | Workspace owners and admins of a fresh roster, and a strict channel's admins; otherwise stale, and a space's deletion takes the retention there | Any member with a leaf, as for additions: moves by people in the channel count, but a member and the server can set up a space purge                                              |
-| D5  | Who signs a rename so it counts            | Any member with a leaf (strict: its admins), and workspace signers: the risk is the server swapping names, not members renaming                 | As D4: fewer signers, more stale names, and deletions after a rename take the retention                                                                                           |
-| D6  | Channels from before this                  | Workspace owners and admins anchor them in the look at the roles, with the reviewed list, once every leaf is updated; nobody is prompted        | Never: they stay as today. The listed admin's app at first sight: the server's word, which can't count for a purge                                                                |
-| D7  | Signed space deletions                     | Workspace owners and admins; channels purge where the anchor's space matches and isn't stale; space admins' deletions stay claims               | Also space admins: needs signed space roles, much larger. None: a space's channels stay claims                                                                                    |
-| D8  | §4.6.3's time limit on an anchored founder | Keep it: an anchor proves the founding, not the role today. Strict is the full answer                                                           | The anchored founding starts the window: a founder purges at once for 30 days, accepting a withheld demotion in that time                                                         |
-| D9  | Strict from creation (#1197 D3)            | The founder may choose it when creating a channel; existing channels keep D3 (workspace signers)                                                | Every new channel strict: §4.6.2's costs (D2, D4 there) for all. Not at all                                                                                                       |
-| D10 | Meetings                                   | Anchor meeting chats too; the invitee list in the organizer's signed statement, as its own issue that doesn't wait for the anchor               | Scope meetings out of #1171 into their own issue entirely                                                                                                                         |
+| No. | Decision                                   | Decided                                                                                                                                         |
+|-----|--------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|
+| D1  | Where founder, space and name live         | A group context extension from epoch 0: alike for every member, nothing to withhold. Apps from before can't be in anchored channels             |
+| D2  | When new channels start anchored           | Once the server's `minimum_client_version` reaches the release that announces the type; its word moves only availability                        |
+| D3  | Bind the name                              | Yes, as a hash; a deletion carries the name hash shown, and a mismatch takes the retention                                                      |
+| D4  | Who signs a move so it counts              | Workspace owners and admins of a fresh roster, and a strict channel's admins; otherwise stale, and a space's deletion takes the retention there |
+| D5  | Who signs a rename so it counts            | Any member with a leaf (strict: its admins), and workspace signers                                                                              |
+| D6  | Channels from before this                  | Workspace owners and admins anchor them in the look at the roles, with the reviewed list, once every leaf is updated; nobody is prompted        |
+| D7  | Signed space deletions                     | Workspace owners and admins; channels purge where the anchor's space matches and isn't stale; space admins' deletions stay claims               |
+| D8  | §4.6.3's time limit on an anchored founder | Kept: an anchor proves the founding, not the role today. Strict is the full answer                                                              |
+| D9  | Strict from creation (#1197 D3)            | The founder may choose it when creating a channel; existing channels keep D3 (workspace signers)                                                |
+| D10 | Meetings                                   | Meeting chats are anchored too; the invitee list goes into the organizer's signed statement, as its own issue that doesn't wait for the anchor  |
 
 ### 4.7 Converting a channel between private and public
 
@@ -6499,7 +6660,7 @@ A signed policy (D2) handles the bridge: a workspace admin switches it on once t
   section doesn't decide anything there.
 - **#878 (§4.6.2)** puts roles into the group context, which is what the bridge wants: it is in the group, so it can't be
   shown a different context and still read the channel. Only workspace signers turn a channel strict for now.
-- **#1171** (§4.6.5) would bind a channel's founder to its group from the start. It is what lets a channel created by a member
+- **#1171** (§4.6.5, decided; #1725) binds a channel's founder to its group from the start. It is what lets a channel created by a member
   count. Together they turn option A's "later" into the issue's whole promise, with a rule simple enough to explain:
   whoever the group says is admin.
 
