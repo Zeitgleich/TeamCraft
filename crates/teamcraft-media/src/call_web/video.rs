@@ -830,11 +830,13 @@ impl LayerEncoder {
     let layer = info.layer;
     let kind = encoding.kind.clone();
     let output_kind = kind.clone();
+    let codec = encoding.codec.clone();
     let output = Closure::<dyn FnMut(EncodedVideoChunk)>::new(move |chunk: EncodedVideoChunk| {
       let bytes = Uint8Array::new_with_length(chunk.byte_length());
       let input = match chunk.copy_to(&bytes) {
         Ok(()) => Input::VideoEncoded {
           kind: output_kind.clone(),
+          codec: codec.clone(),
           layer,
           data: bytes.to_vec(),
           is_keyframe: chunk.chunk_type() == "key",

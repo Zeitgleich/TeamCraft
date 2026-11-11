@@ -368,6 +368,10 @@ pub enum VideoSendOutcome {
   LayerPaused,
   /// DAVE isn't ready yet: nothing leaves unencrypted.
   NotSecured,
+  /// The frame isn't in the codec the track is published in (an encoder's late output after
+  /// the track switched codec, #565): viewers couldn't decode it, and DAVE would cut it up as
+  /// the wrong codec's format (#1733).
+  WrongCodec,
   /// Encryption or packetization failed (logged by the engine).
   Failed,
 }
@@ -988,8 +992,16 @@ impl CallEngine {
     if self.is_compromised {
       return VideoSendOutcome::NotSecured;
     }
-    if !self.own_video.contains_key(&stream) {
+    let Some(track) = self.own_video.get(&stream) else {
       return VideoSendOutcome::NotPublished;
+    };
+    // #1733: DAVE leaves a codec's headers in the clear by parsing the frame as that codec. An
+    // AV1 frame parsed as H.264 has no start code, so nothing of it was kept: viewers got empty
+    // frames and never drew the share.
+    if track.codec != frame.codec {
+      debug!(stream_id = stream.0, codec = %frame.codec, track_codec = %track.codec, "video frame in another codec than its track, dropped");
+      self.count_dropped_video(stream);
+      return VideoSendOutcome::WrongCodec;
     }
     let is_layer_sent = self
       .sent_layers
@@ -3227,6 +3239,93 @@ mod tests {
         .into_iter()
         .filter_map(|output| match output {
           EngineOutput::Event(CallEngineEvent::EncryptionFailed { retry_after }) => Some(retry_after),
+          _ => None,
+        })
+        .collect()
+    }
+
+    /// #1733: a web client's share goes out in AV1 where every viewer decodes it. Its frames
+    /// reach the viewer whole, with the sequence header the decoder starts from.
+    #[test]
+    fn an_av1_share_reaches_the_viewer_whole() {
+      let now = Instant::now();
+      let (mut alice, mut bob) = secured_pair(now);
+      let track = av1_share(&mut alice, &mut bob, now);
+      // A temporal delimiter, a sequence header and a frame OBU, as WebCodecs' encoder gives it.
+      let mut unit = vec![0x12, 0x00, 0x0a, 0x04, 0, 1, 2, 3, 0x32, 0xac, 0x02];
+      unit.extend((0..300u32).map(|value| (value % 251) as u8));
+      let frame = EncodedVideoFrame {
+        codec: VideoCodec::Av1,
+        layer: SimulcastLayer::BASE,
+        timestamp: RtpTimestamp(3000),
+        is_keyframe: true,
+        data: unit.clone(),
+      };
+      assert_eq!(
+        alice.send_video(track.stream_id, &frame, now),
+        VideoSendOutcome::Sent
+      );
+      let frames = deliver_video(&mut alice, &mut bob, now);
+      assert_eq!(frames.len(), 1);
+      assert_eq!(frames[0].codec, VideoCodec::Av1);
+      assert_eq!(frames[0].data, unit);
+    }
+
+    /// #1733: the web client said H.264 for every frame, also its AV1 share's. DAVE then kept
+    /// nothing of them, and viewers decoded empty frames. A frame that isn't in its track's codec
+    /// never leaves.
+    #[test]
+    fn a_frame_in_another_codec_than_its_track_is_not_sent() {
+      let now = Instant::now();
+      let (mut alice, mut bob) = secured_pair(now);
+      let track = av1_share(&mut alice, &mut bob, now);
+      let frame = EncodedVideoFrame {
+        codec: VideoCodec::H264,
+        data: vec![0x12, 0x00, 0x32, 0x03, 1, 2, 3],
+        ..video_frame()
+      };
+      assert_eq!(
+        alice.send_video(track.stream_id, &frame, now),
+        VideoSendOutcome::WrongCodec
+      );
+      assert!(deliver_video(&mut alice, &mut bob, now).is_empty());
+    }
+
+    /// Alice publishes a screen share in AV1 on stream 50, and Bob sees it.
+    fn av1_share(alice: &mut CallEngine, bob: &mut CallEngine, now: Instant) -> VideoTrack {
+      let track = VideoTrack {
+        stream_id: MediaStreamId(50),
+        device_id: device(1),
+        kind: VideoTrackKind::Screen,
+        codec: VideoCodec::Av1,
+        layers: Vec::new(),
+        maybe_publication_id: None,
+      };
+      alice.publish_video(
+        VideoPublicationId(0),
+        VideoTrackKind::Screen,
+        VideoCodec::Av1,
+        Vec::new(),
+      );
+      let published = CallEvent::VideoPublished { track: track.clone() };
+      alice.handle_signal(event(6, published.clone()), now).unwrap();
+      bob.handle_signal(event(4, published), now).unwrap();
+      drain(alice);
+      drain(bob);
+      track
+    }
+
+    /// Hands Alice's datagrams to Bob; the video frames he received.
+    fn deliver_video(alice: &mut CallEngine, bob: &mut CallEngine, now: Instant) -> Vec<ReceivedVideoFrame> {
+      for output in drain(alice) {
+        if let EngineOutput::Datagram(bytes) = output {
+          bob.handle_datagram(&bytes, now);
+        }
+      }
+      drain(bob)
+        .into_iter()
+        .filter_map(|output| match output {
+          EngineOutput::Event(CallEngineEvent::VideoFrame(frame)) => Some(frame),
           _ => None,
         })
         .collect()
