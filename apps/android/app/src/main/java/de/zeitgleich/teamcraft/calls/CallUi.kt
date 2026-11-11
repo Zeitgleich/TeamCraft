@@ -19,7 +19,9 @@ import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Image
@@ -61,6 +63,7 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenuGroup
 import androidx.compose.material3.DropdownMenuItem
@@ -214,6 +217,8 @@ internal class CallUiState(
   val isNotetakerPresent: Boolean = false,
   /** A DM or group DM call: while nobody else is in it yet, it says "Calling…" (others ring). */
   val isDirectCall: Boolean = false,
+  /** This device shares its screen: the sharing bar shows, the menu offers "Stop sharing". */
+  val isSharingScreen: Boolean = false,
 )
 
 /** Somebody else in the call, as the tiles show them. */
@@ -316,6 +321,10 @@ internal class CallUiActions(
    * string resource; issue #1290).
    */
   val maybeNotetakerRefusal: Int? = null,
+  /** "Share screen" in the menu: asks the system for consent; `null` while it can't be offered. */
+  val maybeOnShareScreen: (() -> Unit)? = null,
+  /** "Stop sharing" in the menu and on the sharing bar. */
+  val onStopScreenShare: () -> Unit = {},
 )
 
 /** The room the header and the bottom (notices and controls) take, so the stage keeps clear of them. */
@@ -373,6 +382,12 @@ internal fun InCallContent(
           Modifier.fillMaxWidth().padding(horizontal = 16.dp).onSizeChanged { noticesPx = it.height },
           horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+          ScreenShareBar(
+            isShown = ui.isSharingScreen,
+            isSoundShared = ui.maybeState?.isSharingScreenSound == true,
+            reduceMotion = reduceMotion,
+            onStop = actions.onStopScreenShare,
+          )
           StatusHint(ui.maybeState)
           EncryptionFailureBanner(ui.maybeState, actions.onRetryEncryption, actions.onHangUp)
           banner()
@@ -871,6 +886,47 @@ private fun callStatus(ui: CallUiState): CallStatus {
 }
 
 /**
+ * "You're sharing your screen" with Stop, as Google Meet keeps it in view while presenting: the
+ * notices stay when the controls hide, so the share is never out of sight. It grows in from the
+ * controls and shrinks back the same way (a fade only with reduced motion).
+ */
+@Composable
+private fun ScreenShareBar(isShown: Boolean, isSoundShared: Boolean, reduceMotion: Boolean, onStop: () -> Unit) {
+  val haptics = LocalHapticFeedback.current
+  AnimatedVisibility(
+    visible = isShown,
+    enter = if (reduceMotion) fadeIn() else fadeIn() + expandVertically(expandFrom = Alignment.Bottom),
+    exit = if (reduceMotion) fadeOut() else fadeOut() + shrinkVertically(shrinkTowards = Alignment.Bottom),
+  ) {
+    Surface(
+      color = MaterialTheme.colorScheme.primaryContainer,
+      contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+      shape = MaterialTheme.shapes.large,
+      modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp).semantics { liveRegion = LiveRegionMode.Polite },
+    ) {
+      Row(
+        Modifier.padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        Icon(CallIcons.ScreenShare, contentDescription = null, modifier = Modifier.size(20.dp))
+        Text(
+          stringResource(if (isSoundShared) R.string.call_sharing_screen_sound else R.string.call_sharing_screen),
+          style = MaterialTheme.typography.bodyMedium,
+          modifier = Modifier.weight(1f),
+        )
+        Button(onClick = {
+          haptics.performHapticFeedback(HapticFeedbackType.ToggleOff)
+          onStop()
+        }) {
+          Text(stringResource(R.string.call_stop_sharing))
+        }
+      }
+    }
+  }
+}
+
+/**
  * The hints that matter while talking: reconnecting, that nobody hears you, and a limited
  * network; a small floating pill above the controls, clear of the tiles.
  */
@@ -1000,7 +1056,7 @@ private fun ControlBar(ui: CallUiState, actions: CallUiActions, modifier: Modifi
       actions.onInteraction()
       actions.onSpeaker(it)
     }
-    MoreButton(state?.isDeafened == true, actions)
+    MoreButton(state?.isDeafened == true, ui.isSharingScreen, actions)
     HangUpButton(actions.onHangUp)
   }
 }
@@ -1043,9 +1099,9 @@ private fun CallToggle(icon: ImageVector, label: String, isChecked: Boolean, isO
 /** "More options" and its menu: Material 3 Expressive's grouped menu, every item with its icon. */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun MoreButton(isDeafened: Boolean, actions: CallUiActions) {
+private fun MoreButton(isDeafened: Boolean, isSharingScreen: Boolean, actions: CallUiActions) {
   var isMenuOpen by remember { mutableStateOf(false) }
-  val entries = menuEntries(isDeafened, actions)
+  val entries = menuEntries(isDeafened, isSharingScreen, actions)
   Box {
     FilledTonalIconButton(
       onClick = {
@@ -1090,7 +1146,14 @@ private class MenuEntry(
 )
 
 @Composable
-private fun menuEntries(isDeafened: Boolean, actions: CallUiActions): List<MenuEntry> = buildList {
+private fun menuEntries(isDeafened: Boolean, isSharingScreen: Boolean, actions: CallUiActions): List<MenuEntry> = buildList {
+  if (isSharingScreen) {
+    add(MenuEntry(stringResource(R.string.call_stop_sharing), CallIcons.StopScreenShare, onClick = actions.onStopScreenShare))
+  } else {
+    actions.maybeOnShareScreen?.let { onShareScreen ->
+      add(MenuEntry(stringResource(R.string.call_share_screen), CallIcons.ScreenShare, onClick = onShareScreen))
+    }
+  }
   add(
     MenuEntry(
       text = stringResource(if (isDeafened) R.string.call_undeafen else R.string.call_deafen),

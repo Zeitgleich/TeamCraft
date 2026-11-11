@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
@@ -337,6 +338,12 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
     hasCamera = isGranted
     calls.setCameraWanted(isGranted)
   }
+  val screenShareStatus by calls.screenShareStatus.collectAsStateWithLifecycle()
+  val screenConsent = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+    val consent = result.data
+    // Closing the system's dialog is a choice, not a failure: nothing is shared, nothing to say.
+    if (result.resultCode == Activity.RESULT_OK && consent != null) calls.shareScreen(result.resultCode, consent)
+  }
   var isAddingPeople by rememberSaveable { mutableStateOf(false) }
   var maybeAddChoice by remember { mutableStateOf<AddPeopleChoice?>(null) }
   val maybeConversationId = maybeState?.conversationId
@@ -421,6 +428,7 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
       isNotetakerPresent = maybeNotetaker?.isPresent == true,
       // "Add people" is offered in DM and group DM calls only: its choice says which this is.
       isDirectCall = addChoice != null,
+      isSharingScreen = screenShareStatus != ScreenShareStatus.Off,
     ),
     actions = CallUiActions(
       onToggleControls = { areControlsShown = !areControlsShown },
@@ -439,6 +447,17 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
       maybeNotetakerRefusal = maybeNotetakerRefusal,
       onHangUp = { calls.hangUp() },
       onRetryEncryption = { calls.retryEncryption() },
+      maybeOnShareScreen = if (isConnected && screenShareStatus == ScreenShareStatus.Off) {
+        {
+          // Android 14+ asks every time: one consent is one share.
+          val projections = context.getSystemService(MediaProjectionManager::class.java)
+          runCatching { screenConsent.launch(projections.createScreenCaptureIntent()) }
+            .onFailure { Log.w("TeamCraftScreen", "no screen capture dialog", it) }
+        }
+      } else {
+        null
+      },
+      onStopScreenShare = { calls.stopScreenShare() },
     ),
     banner = {
       Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {

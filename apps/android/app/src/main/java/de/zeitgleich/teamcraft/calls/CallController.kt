@@ -5,9 +5,11 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.media.projection.MediaProjection
 import android.net.Uri
 import android.telecom.DisconnectCause
 import android.util.Log
+import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.core.telecom.CallAttributesCompat
 import androidx.core.telecom.CallControlScope
@@ -49,7 +51,8 @@ import uniffi.teamcraft_ffi.VideoTrackInfo
  * Calls through Android's Telecom stack (Jetpack Core-Telecom): the system knows about the call,
  * so ringing, the lock screen, Bluetooth headsets, car kits and Android Auto all work, and a
  * cellular call puts ours on hold. Media and encryption run in the Rust call engine
- * ([CallSession]); this class connects the two and hands the camera's frames to the engine.
+ * ([CallSession]); this class connects the two and hands the camera's frames and the shared
+ * screen ([ScreenCapture]) to the engine.
  */
 class CallController(
   private val context: Context,
@@ -89,6 +92,10 @@ class CallController(
   @Volatile private var maybeAloneEnd: Job? = null
   /** "Try again" is rejoining; the old session's ended state is awaited here and not shown (#1624). */
   @Volatile private var maybeRetryEnded: CompletableDeferred<Unit>? = null
+  private val screenShare = MutableStateFlow(ScreenShareStatus.Off)
+  @Volatile private var maybeScreenCapture: ScreenCapture? = null
+  /** The ongoing-call service keeps the camera alive (it sends). */
+  @Volatile private var isCameraKeptAlive = false
 
   /** "Add people" and following a move of the call into a meeting room. */
   val moves = CallMoves(
@@ -116,6 +123,9 @@ class CallController(
 
   /** The call ringing on this device, until answered, declined or ended elsewhere. */
   val incomingRing: StateFlow<IncomingRing?> = ringing
+
+  /** Whether this device shares its screen; the call's state says whether its sound goes too. */
+  val screenShareStatus: StateFlow<ScreenShareStatus> = screenShare
 
   /** Joining a call (answered, not connected yet). */
   val isJoining: StateFlow<Boolean> = joining
@@ -289,7 +299,8 @@ class CallController(
     wantsCamera.value = isWanted
     if (!isWanted) {
       maybeSession?.stopCamera()
-      CallService.start(context, hasCamera = false)
+      isCameraKeptAlive = false
+      keepCallAlive()
     }
   }
 
@@ -304,7 +315,8 @@ class CallController(
     scope.launch {
       try {
         session.startCamera(uprightWidth.toUShort(), uprightHeight.toUShort(), CAMERA_FRAMERATE.toUByte())
-        CallService.start(context, hasCamera = true)
+        isCameraKeptAlive = true
+        keepCallAlive()
       } catch (error: Exception) {
         Log.w(TAG, "the camera could not be published", error)
         wantsCamera.value = false
@@ -312,6 +324,75 @@ class CallController(
         isCameraStarting = false
       }
     }
+  }
+
+  /**
+   * The user agreed in the system's screen capture dialog: the ongoing-call service takes the
+   * projection (Android 14+ hands it out only to a `mediaProjection` foreground service) and
+   * passes it to [onScreenProjection], which starts sharing.
+   */
+  fun shareScreen(resultCode: Int, consent: Intent) {
+    if (maybeSession == null || screenShare.value != ScreenShareStatus.Off) return
+    screenShare.value = ScreenShareStatus.Starting
+    CallService.shareScreen(context, isCameraKeptAlive, resultCode, consent)
+  }
+
+  /** From [CallService]: the projection for the consent, or `null` when there is none. */
+  fun onScreenProjection(maybeProjection: MediaProjection?) {
+    val session = maybeSession
+    if (maybeProjection == null || session == null || screenShare.value != ScreenShareStatus.Starting) {
+      // The call ended or the share was stopped while the service started.
+      maybeProjection?.stop()
+      if (screenShare.value == ScreenShareStatus.Starting) failScreenShare()
+      return
+    }
+    val capture = ScreenCapture(context, maybeProjection, session, scope, onEnded = ::onScreenShareEnded)
+    maybeScreenCapture = capture
+    scope.launch {
+      if (capture.start()) {
+        Log.i(TAG, "screen share: started")
+        // Not when it was stopped meanwhile (onScreenShareEnded let it go).
+        if (maybeScreenCapture === capture) screenShare.value = ScreenShareStatus.On
+      } else if (maybeScreenCapture === capture) {
+        maybeScreenCapture = null
+        failScreenShare()
+      }
+    }
+  }
+
+  /** "Stop sharing", the call ending or moving: the share ends and the system's indicator goes. */
+  fun stopScreenShare() {
+    val maybeCapture = maybeScreenCapture
+    if (maybeCapture != null) {
+      maybeCapture.stop()
+    } else if (screenShare.value == ScreenShareStatus.Starting) {
+      // The service's projection, when it comes, is let go in onScreenProjection.
+      screenShare.value = ScreenShareStatus.Off
+    }
+  }
+
+  private fun onScreenShareEnded(capture: ScreenCapture) {
+    if (maybeScreenCapture !== capture) return
+    maybeScreenCapture = null
+    screenShare.value = ScreenShareStatus.Off
+    Log.i(TAG, "screen share: ended")
+    // The service drops `mediaProjection`; after the call it is gone already.
+    if (maybeSession != null) keepCallAlive()
+  }
+
+  /** Sharing didn't start: the user hears why, the service drops `mediaProjection`. */
+  private fun failScreenShare() {
+    screenShare.value = ScreenShareStatus.Off
+    if (maybeSession != null) keepCallAlive()
+    ContextCompat.getMainExecutor(context).execute {
+      Toast.makeText(context, R.string.call_share_screen_failed, Toast.LENGTH_LONG).show()
+    }
+  }
+
+  /** Starts the ongoing-call service, or updates what it keeps alive. */
+  private fun keepCallAlive() {
+    val hasScreen = maybeScreenCapture != null || screenShare.value == ScreenShareStatus.Starting
+    CallService.start(context, hasCamera = isCameraKeptAlive, hasScreen = hasScreen)
   }
 
   /** Switches between the loudspeaker and the earpiece (or the headset that is connected). */
@@ -353,6 +434,8 @@ class CallController(
     val conversationId = current.conversationId
     scope.launch {
       options = CallOptions(isCameraOn = wantsCamera.value, isMuted = current.isMuted)
+      // The share belongs to the session that ends here; sharing again is a new consent.
+      stopScreenShare()
       val ended = CompletableDeferred<Unit>()
       maybeRetryEnded = ended
       maybeSession = null
@@ -533,7 +616,8 @@ class CallController(
     session.setVideoListener(Video())
     wantsCamera.value = options.isCameraOn
     options = CallOptions()
-    CallService.start(context, hasCamera = false)
+    isCameraKeptAlive = false
+    keepCallAlive()
     return true
   }
 
@@ -548,6 +632,8 @@ class CallController(
     if (session == null || current?.conversationId != from) return false
     options = CallOptions(isCameraOn = wantsCamera.value, isMuted = current.isMuted)
     maybeLeftConversation = from
+    // The share belongs to the DM's call; in the meeting room's it is a new consent.
+    stopScreenShare()
     maybeSession = null
     session.leave()
     session.close()
@@ -703,6 +789,8 @@ class CallController(
 
   /** Cleans up after a call; safe to call more than once. */
   private fun leave() {
+    // Before the session closes: the capture tells the engine first.
+    stopScreenShare()
     maybeSession?.let { session ->
       session.leave()
       session.close()
@@ -711,6 +799,7 @@ class CallController(
     maybeTelecomCall = null
     moves.reset()
     wantsCamera.value = false
+    isCameraKeptAlive = false
     tracks.value = emptyList()
     frames.value = emptyMap()
     CallService.stop(context)
@@ -727,7 +816,10 @@ class CallController(
         maybeRetry.complete(Unit)
         return
       }
+      val wasSharing = this@CallController.state.value?.isSharingScreen == true
       this@CallController.state.value = state
+      // The engine ended the share by itself (its encoder kept failing, a turn's restart failed).
+      if (wasSharing && !state.isSharingScreen) maybeScreenCapture?.stop()
       followOthers(state)
       // The engine is the source of truth: once its call ended, the session, the service and its
       // notification go too, whether or not Telecom reports its disconnect back (endWithEngine
@@ -788,6 +880,15 @@ class CallController(
     /** How long "Try again" waits for the engine to report the old session's end. */
     private const val RETRY_LEAVE_WAIT_MS = 5_000L
   }
+}
+
+/** This device's screen share, as the call screen shows it. */
+enum class ScreenShareStatus {
+  Off,
+
+  /** The user agreed; the projection and the engine's track are on their way. */
+  Starting,
+  On,
 }
 
 /** What the user chose before joining. */

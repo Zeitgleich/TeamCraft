@@ -111,4 +111,9 @@
   <string name="call_join_failed">Joining the call didn\'t work. Call back from the conversation.</string>
   <string name="call_join_failed_microphone">TeamCraft needs the microphone to join a call. Allow it, then call back from the conversation.</string>
   <string name="call_join_failed_network">No connection to the server. Check the network, then call back from the conversation.</string>
+  <string name="call_share_screen">Share screen</string>
+  <string name="call_stop_sharing">Stop sharing</string>
+  <string name="call_sharing_screen">You\'re sharing your screen</string>
+  <string name="call_sharing_screen_sound">You\'re sharing your screen and its sound</string>
+  <string name="call_share_screen_failed">Your screen couldn\'t be shared. Try again from the call\'s menu.</string>
 </resources>
