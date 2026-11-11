@@ -31,6 +31,8 @@ pub enum IconName {
   Close,
   Plus,
   Bookmark,
+  /// Pinned messages; the star is favourites.
+  Pin,
   Link,
   File,
   Sun,
@@ -182,6 +184,7 @@ impl IconName {
       Self::Close => "M18 6 6 18M6 6l12 12",
       Self::Plus => "M12 5v14M5 12h14",
       Self::Bookmark => "M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z",
+      Self::Pin => "M12 16v5 M8 3h8 M9.5 3v6.5L6 13v3h12v-3l-3.5-3.5V3",
       Self::Link => {
         "M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7 M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"
       },

@@ -1174,6 +1174,21 @@ mod tests {
       assert!(fixture.pinned_ids().is_empty());
     }
 
+    /// Issue #1735: the panel, read before the pin, lists a pin made through the UI afterwards.
+    #[test]
+    fn a_pin_made_after_the_scan_is_listed() {
+      let (store, _dir) = cached_sealed_store();
+      let fixture = Fixture::new(store);
+      let _ = teamcraft_client_api::backend::ChatBackend::messages(&fixture.backend, conversation(), 0, 50);
+      assert!(fixture.pinned_ids().is_empty());
+      fixture.backend.ui_set_pinned(conversation(), server_id(2), true);
+      fixture.mirror.ui_set_pinned(conversation(), server_id(2), true);
+      assert_eq!(fixture.pinned_ids(), vec![server_id(2)]);
+      fixture.backend.ui_set_pinned(conversation(), server_id(2), false);
+      fixture.mirror.ui_set_pinned(conversation(), server_id(2), false);
+      assert!(fixture.pinned_ids().is_empty());
+    }
+
     fn pinned(n: i64, is_pinned: bool) -> StoredMessage {
       let mut message = text(n, PEER, "plain");
       message.is_pinned = is_pinned;
@@ -1732,6 +1747,12 @@ mod tests {
     ));
     std::fs::create_dir_all(&dir).unwrap();
     (Arc::new(open_sealed(&dir)), ScratchDir(dir))
+  }
+
+  fn cached_sealed_store() -> (Arc<TrackedStore<SealedSqliteStore>>, ScratchDir) {
+    let (store, dir) = sealed_store();
+    let store = Arc::try_unwrap(store).ok().unwrap();
+    (Arc::new(TrackedStore::with_message_cache(store, 1 << 20)), dir)
   }
 
   fn tracked_sealed_store() -> (Arc<TrackedStore<SealedSqliteStore>>, ScratchDir) {
