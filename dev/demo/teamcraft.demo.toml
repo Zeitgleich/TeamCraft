@@ -1,0 +1,55 @@
+# teamcraft-server on the demo instance for store reviews (docs/operations.md, "Demo instance").
+# Only what differs from the defaults of teamcraft.example.toml. Placeholders: demo.example.com;
+# secrets come from the environment (TEAMCRAFT_DATABASE__URL, TEAMCRAFT_STORAGE__ACCESS_KEY,
+# TEAMCRAFT_STORAGE__SECRET_KEY, TEAMCRAFT_SECRETS__..., as on any instance).
+
+[server]
+listen_addr = "127.0.0.1:8080"
+
+[database]
+url = "postgres://teamcraft@127.0.0.1:5432/teamcraft"
+# Postgres runs with a small config next to it (shared_buffers 32 MB, max_connections 20).
+max_connections = 5
+
+[oidc]
+# Dex with static users (dev/demo/dex.example.yaml), no Keycloak.
+issuer = "https://demo.example.com/dex"
+jwks_uri = "http://127.0.0.1:5556/dex/keys"
+client_id = "teamcraft"
+# `groups` makes Dex put the users' groups into the tokens; roles are read from it.
+app_scopes = ["openid", "profile", "email", "offline_access", "groups"]
+roles_claim = "groups"
+app_redirect_uris = ["de.zeitgleich.teamcraft:/oauth/callback"]
+
+[oidc.sync]
+# Dex has no admin API: no provider sync, group sync, pre-created accounts or leaver events. The
+# server logs this at start. Users are the static list in Dex; the nightly reset undoes the rest.
+is_enabled = false
+
+[limits]
+# Attachments: small, few, and gone with the next reset anyway.
+max_pending_attachments_per_user = 5
+max_attachment_bytes_per_user = 104857600
+draft_file_retention_days = 1
+max_draft_files_per_user = 10
+max_devices_per_user = 5
+
+[storage]
+endpoint = "https://s3.demo.example.com"
+region = "garage"
+bucket = "teamcraft-demo"
+access_key = "set-through-the-environment"
+secret_key = "set-through-the-environment"
+path_style = true
+# 10 MiB per file (as stored, i.e. ciphertext).
+max_attachment_bytes = 10485760
+multipart_expiry_secs = 3600
+
+[retention]
+# The signed policy of the seed keeps 500 messages per channel (demo-seed.rs); the job runs often so
+# nothing piles up between resets.
+interval_secs = 900
+
+[logging]
+filter = "info"
+format = "json"

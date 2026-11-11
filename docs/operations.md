@@ -1404,3 +1404,155 @@ them with rootless podman: non-root user, read-only root filesystem, no capabili
 `no-new-privileges`. It checks that each starts, passes its `healthcheck`, answers on IPv4 and IPv6
 where it has an endpoint, and stops cleanly on SIGTERM. Run it after changing a Containerfile or a
 base image digest.
+
+## Demo instance for store reviews
+
+Google Play and the App Store review every update with an account we give them (issue #1628). The demo
+instance is a separate, small server for that, with placeholder content only: no real people's names,
+presence or spaces in sight. It runs the same release as production, deployed the same way
+(`Zeitgleich/teamcraft-deploy`); the apps talk to it like to any server, there is no mock backend in
+any build. It also serves store screenshots, demos, device checks and end-to-end runs against a real
+instance.
+
+Files in this repository:
+
+| File                             | What                                                                      |
+|----------------------------------|---------------------------------------------------------------------------|
+| `dev/demo/teamcraft.demo.toml`   | Server settings that differ from the defaults (identity provider, limits) |
+| `dev/demo/dex.example.yaml`      | Identity provider: Dex with static users and their groups                 |
+| `tests/e2e/src/bin/demo-seed.rs` | The seeding run: real clients make the space, channels, DMs and files     |
+| `dev/demo/demo-reset.sh`         | `snapshot` after seeding, `restore` every night, `check`                  |
+| `dev/dev-token.py`               | Signs a user in at the provider (used by the seeding run)                 |
+
+### Without Keycloak
+
+The demo uses Dex with a static user list instead of Keycloak: about 30 MB of memory instead of
+400. What TeamCraft takes from Keycloak specifically, and how it runs without it:
+
+| Keycloak specific                              | On the demo                                                                                                                            |
+|------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------|
+| Roles in `resource_access.<client_id>.roles`   | `[oidc] roles_claim = "groups"`: the server also reads role names from Dex's `groups` claim                                            |
+| `azp` names the app's client                   | Dex leaves `azp` out; a token whose only audience is `client_id` counts as issued to it (any provider)                                 |
+| Admin API: sync, group sync, pre-made accounts | Off (`[oidc.sync] is_enabled = false`, no secret); the server logs at start that the sync is off and what that means                   |
+| Provider events (leavers, provisioning.md §4)  | Off: nothing posts them                                                                                                                |
+| Back-channel logout                            | Dex doesn't send it; sessions end with their tokens                                                                                    |
+| Account API for identity key attestation       | Missing: the apps get 404 and enroll with trust on first use, without a prompt (e2ee.md §3.1)                                          |
+| Client roles in the ID token (role signing)    | Missing: the apps log `the identity provider's ID tokens carry no client roles`; the seed's owner signed the roster once, and it stays |
+| DPoP                                           | Dex doesn't advertise it; tokens stay unbound (the default policy `optional`)                                                          |
+
+The users are a fixed list in Dex's configuration, so nobody joins or leaves; the nightly reset
+undoes everything else. Production keeps Keycloak and the sync.
+
+### Setting it up
+
+1. A small VPS (1 vCPU, 1 GB RAM, 10 GB disk) with the playbook of `teamcraft-deploy` and the demo
+   settings: `dev/demo/teamcraft.demo.toml` for the server, Dex instead of Keycloak with
+   `dev/demo/dex.example.yaml` (passwords as bcrypt hashes in the environment, never in a file in a
+   repository), Garage single node for the bucket, Caddy, and Postgres with a small configuration
+   (`shared_buffers = 32MB`, `max_connections = 20`). Mail is off; push goes through the existing
+   push gateway. Name the database `teamcraft_demo`: the reset refuses a database without `demo` in
+   its name.
+2. On the empty instance, run the seeding run once, from a machine with the repository:
+
+   ```sh
+   E2E_DEPLOYED_URL=https://demo.example.com \
+   DEV_TOKEN_ISSUER=https://demo.example.com/dex \
+   DEV_TOKEN_SCOPES="openid profile email groups" \
+   DEV_TOKEN_PASSWORD='password of alex, sam and robin' \
+   DEV_TOKEN_PASSWORD_OWNER='password of owner' \
+   DEV_TOKEN_PASSWORD_REVIEWER_1='password of reviewer-1' \
+   DEV_TOKEN_PASSWORD_REVIEWER_2='password of reviewer-2' \
+   DEMO_RECOVERY_PASSPHRASE='the passphrase reviewers type' \
+   cargo run -p teamcraft-e2e --features e2e --bin demo-seed
+   ```
+
+   It signs every user in at Dex, enrolls one device each, signs the workspace policy as the owner
+   (500 messages kept per channel, passphrases allowed), and writes the space `Project A` with the
+   channels `general`, `design` and `release-planning`, direct messages between the members and
+   both reviewers, and three small files. It stops at the first failure with a non-zero exit code.
+3. On the server, take the snapshot: `dev/demo/demo-reset.sh snapshot` (settings at the top of the
+   script). It stops the server, dumps the database, copies the bucket into the seed directory and
+   starts the server again.
+4. Sign in on a phone as a reviewer (instructions below) and check that the channels, messages and
+   files are readable.
+
+### Nightly reset
+
+`dev/demo/demo-reset.sh restore` stops the server, empties the schema `public` and restores the
+dump, makes the bucket equal to the seed's copy (`rclone sync`: uploads since are deleted), starts
+the server and waits for `/readyz`. It logs every step with a time stamp, takes a lock so that two
+runs don't overlap, starts the server again after a failed step, and exits non-zero on any failure.
+Run it from a systemd timer at a quiet hour (03:00 UTC) with `OnFailure=` pointing at the alert, or
+from cron with the exit code checked. `demo-reset.sh check` checks settings, tools and seed without
+changing anything.
+
+What a reset does to people on the demo: their devices, messages, files and sessions at the server
+are gone, the seed is back. The workspace's root of trust is the seed's, so the apps don't see a new
+workspace; a reviewer's app finds its device unknown and signs in again (the review instructions say
+so). Dex isn't reset: its refresh tokens survive, which only saves a password prompt.
+
+The seed's messages keep the date of the seeding run, and retention counts messages, not days, so
+they never expire. Seed again when the dates look stale, or when a release can't read the old seed.
+
+**Upgrades** go out with every release like production. The server migrates the restored seed
+forward at every start, so a new release works on the old snapshot. **Rollback**: install the
+previous release, then run `demo-reset.sh restore` (the snapshot predates the new migrations).
+
+**Monitoring**: an uptime check on `https://demo.example.com/readyz` every minute, alerting after a
+few failures, and the reset's exit code. A review that can't sign in can reject a release.
+
+### Memory budget
+
+Estimates until measured on the real VM; the target is under 1 GB in total. Record the resident
+memory after a day here (`podman stats`, or `ps -o rss`).
+
+| Component          | Setting                                | Estimate   | Measured |
+|--------------------|----------------------------------------|------------|----------|
+| Dex                | static users, SQLite                   | 30 MB      | –        |
+| PostgreSQL         | `shared_buffers` 32 MB, 20 connections | 50–80 MB   | –        |
+| Garage             | single node                            | 20–50 MB   | –        |
+| `teamcraft-server` | release build, 5 database connections  | 50–100 MB  | –        |
+| `teamcraft-sfu`    | small call limits                      | 20–50 MB   | –        |
+| Caddy              | TLS and reverse proxy                  | 30 MB      | –        |
+| Push               | the existing push gateway              | 0          | –        |
+| Mail               | off                                    | 0          | –        |
+| **Total**          |                                        | 200–340 MB | –        |
+
+Disk stays flat: the seed directory holds a few MB, database and bucket go back to it every night,
+attachments are at most 10 MB each and 100 MB per user (`[storage]` and `[limits]` in
+`teamcraft.demo.toml`), and journald rotates the logs.
+
+### Changing the seed
+
+Edit `tests/e2e/src/bin/demo-seed.rs` (users, space, channels, messages, files, policy); a new user
+also goes into Dex's static users with their group (`owner` or `member`). Then, on the instance:
+stop the reset timer, empty the instance (`restore` won't do, it brings back the old seed: stop the
+server, drop and create the schema `public`, empty the bucket, start the server), run the seeding run,
+take a new snapshot, and start the timer again. Placeholder names only (`Project A`, `example.com`).
+
+### Review instructions
+
+Paste these into the Google Play Console (App content, App access) and App Store Connect (App Review
+Information, sign-in information): the first reviewer account for Google Play, the second for the
+App Store. The address, passwords and passphrase are filled in there, never in this repository.
+
+```text
+TeamCraft is an end-to-end encrypted team chat for companies. Accounts come from the company's
+sign-in service, so we run a demo server for review. It is reset every night at 03:00 UTC: the
+messages you write and the device you set up are removed then.
+
+1. Open the app. When it asks for a server, enter: <demo server address>
+2. Tap "Sign in". On the sign-in page enter
+   Email: <reviewer e-mail>
+   Password: <reviewer password>
+   There is no second factor and nothing else to confirm.
+3. The account already has encryption keys, so the app asks how to set up this device. Choose to
+   unlock with a recovery key, and in the field "Recovery key or passphrase" enter:
+   <passphrase>
+4. You are now in the workspace "Project A": the channels general, design and release-planning,
+   direct messages with Alex and Sam, and shared files. You can write messages, react, open and
+   share files, and start threads.
+
+If the app says that this device is no longer signed in or no longer known (after the nightly
+reset), sign out and repeat steps 2 and 3.
+```
