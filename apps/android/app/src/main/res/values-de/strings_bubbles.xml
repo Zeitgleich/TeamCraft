@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Konversationsblasen für Direktnachrichten (Android 11+, Issue #591). -->
+<!-- Unterhaltungs-Bubbles für Direktnachrichten (Android 11+, Issue #591). -->
 <resources>
-  <string name="bubble_setting">Als Blase anzeigen</string>
+  <string name="bubble_setting">Als Bubble anzeigen</string>
   <string name="bubble_setting_hint">Neue Nachrichten schweben über anderen Apps. Nur, solange Benachrichtigungen den Nachrichtentext zeigen.</string>
-  <string name="bubble_setting_system_off">Blasen sind für diese App in den Systemeinstellungen ausgeschaltet.</string>
+  <string name="bubble_setting_system_off">Bubbles sind in den Systemeinstellungen aus.</string>
+  <string name="bubble_open_system_settings">Einstellungen öffnen</string>
   <string name="bubble_needs_app">Öffne TeamCraft, um hier weiterzumachen.</string>
   <string name="bubble_open_app">TeamCraft öffnen</string>
 </resources>

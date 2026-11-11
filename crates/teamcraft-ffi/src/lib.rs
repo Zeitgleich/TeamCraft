@@ -32,6 +32,7 @@ mod picture_retries;
 mod reads;
 mod recovery_kit;
 mod row_badge;
+mod screen_audio;
 mod server_entry;
 mod server_pool;
 mod settings_sync;

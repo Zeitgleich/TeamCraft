@@ -53,6 +53,9 @@ pub enum PerfOperation {
   FileDownload,
   /// Starting or joining a call until the media is connected.
   CallSetup,
+  /// A screen share in a call, sent by the sharer and by each viewer when it ends: how smooth it
+  /// was and why not (#1733).
+  ScreenShare,
   /// An MLS commit (adding or removing members, key updates) until the server took it.
   MlsCommit,
   /// A conversation opened (or the app back from a push) until its newest server message is in the
@@ -363,6 +366,7 @@ impl PerfOperation {
       Self::FileUpload => "file.upload",
       Self::FileDownload => "file.download",
       Self::CallSetup => "call.setup",
+      Self::ScreenShare => "call.screen_share",
       Self::MlsCommit => "mls.commit",
       Self::CatchUp => "conversation.catch_up",
       Self::OlderHistoryPage => "history.older_page",
@@ -379,7 +383,7 @@ impl PerfOperation {
       Self::MessageSend | Self::MlsCommit => "task",
       Self::Resync => "sync",
       Self::FileUpload | Self::FileDownload => "file",
-      Self::CallSetup => "call",
+      Self::CallSetup | Self::ScreenShare => "call",
       Self::CatchUp => "sync",
       Self::OlderHistoryPage => "ui.load",
       Self::ScrollBack => "ui.scroll",
@@ -647,6 +651,7 @@ mod tests {
       PerfOperation::FileUpload,
       PerfOperation::FileDownload,
       PerfOperation::CallSetup,
+      PerfOperation::ScreenShare,
       PerfOperation::MlsCommit,
       PerfOperation::CatchUp,
       PerfOperation::OlderHistoryPage,

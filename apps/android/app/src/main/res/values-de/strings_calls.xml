@@ -8,8 +8,8 @@
   <string name="call_encryption_open">Verschlüsselungscode anzeigen</string>
   <string name="call_encryption_title">Ende-zu-Ende-verschlüsselt</string>
   <string name="call_encryption_body">Nur die Personen in diesem Anruf können ihn hören und sehen, nicht einmal der Server. Damit sicher niemand dazwischensitzt, vergleiche den Code mit den anderen.</string>
-  <string name="call_deafen">Taub schalten</string>
-  <string name="call_undeafen">Ton wieder an</string>
+  <string name="call_deafen">Ton aus</string>
+  <string name="call_undeafen">Ton an</string>
   <string name="call_camera_on">Kamera an</string>
   <string name="call_camera_off">Kamera aus</string>
   <string name="call_camera_flip">Kamera wechseln</string>
@@ -111,4 +111,9 @@
   <string name="call_join_failed">Der Beitritt zum Anruf hat nicht geklappt. Ruf aus der Unterhaltung zurück.</string>
   <string name="call_join_failed_microphone">TeamCraft braucht das Mikrofon, um einem Anruf beizutreten. Erlaube es und ruf dann aus der Unterhaltung zurück.</string>
   <string name="call_join_failed_network">Keine Verbindung zum Server. Prüf das Netzwerk und ruf dann aus der Unterhaltung zurück.</string>
+  <string name="call_share_screen">Bildschirm teilen</string>
+  <string name="call_stop_sharing">Teilen beenden</string>
+  <string name="call_sharing_screen">Du teilst deinen Bildschirm</string>
+  <string name="call_sharing_screen_sound">Du teilst deinen Bildschirm und seinen Ton</string>
+  <string name="call_share_screen_failed">Dein Bildschirm konnte nicht geteilt werden. Versuch es noch einmal über das Menü des Anrufs.</string>
 </resources>

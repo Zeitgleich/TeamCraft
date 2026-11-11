@@ -37,6 +37,8 @@ pub struct OutgoingVideo {
   pub counters: SentCounters,
   frame_number: u16,
   sequences: [SequenceNumber; MAX_LAYERS],
+  /// When the uplink was last looked at, and whether it held the top layer back then.
+  maybe_uplink_check: Option<(Instant, bool)>,
 }
 
 /// What an own track sent so far (stats for nerds, #938).
@@ -49,6 +51,8 @@ pub struct SentCounters {
   pub pictures_dropped: u64,
   /// Each layer that sent anything, in the order they first did.
   pub layers: Vec<LayerCounters>,
+  /// How long the uplink held the top layer back (#1733).
+  pub held_back: Duration,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -56,6 +60,7 @@ pub struct LayerCounters {
   pub layer: u8,
   pub pictures: u64,
   pub bytes: u64,
+  pub keyframes: u64,
 }
 
 /// What arrived of another device's track so far (stats for nerds, #938).
@@ -74,6 +79,10 @@ pub struct ReceivedCounters {
   maybe_jitter_ticks: Option<f64>,
   /// Arrival minus RTP time of the last packet, in ticks.
   maybe_last_transit: Option<f64>,
+  /// Keyframes asked of the SFU (#1733).
+  pub keyframe_requests: u64,
+  /// The longest time between two frames handed to the decoder while subscribed (#1733).
+  pub longest_gap: Duration,
 }
 
 /// A track another device publishes.
@@ -98,6 +107,8 @@ pub struct IncomingVideo {
   /// Deltas are useless until the next keyframe: none arrived yet, or one went missing.
   is_waiting_for_keyframe: bool,
   maybe_last_keyframe_request: Option<Instant>,
+  /// When the last frame went to the decoder, since the subscription started.
+  maybe_last_used: Option<Instant>,
 }
 
 /// A decrypted video frame for the app's decoder.
@@ -128,6 +139,7 @@ impl OutgoingVideo {
       counters: SentCounters::default(),
       frame_number: 0,
       sequences: [SequenceNumber(0); MAX_LAYERS],
+      maybe_uplink_check: None,
     }
   }
 
@@ -157,8 +169,8 @@ impl OutgoingVideo {
     Ok(packets)
   }
 
-  /// Counts a picture of `layer` that went out as `packets`.
-  pub fn count_sent(&mut self, layer: SimulcastLayer, packets: &[Vec<u8>]) {
+  /// Counts a picture of `layer` (a keyframe or not) that went out as `packets`.
+  pub fn count_sent(&mut self, layer: SimulcastLayer, is_keyframe: bool, packets: &[Vec<u8>]) {
     let bytes: u64 = packets.iter().map(|packet| packet.len() as u64).sum();
     let counters = &mut self.counters;
     counters.packets += packets.len() as u64;
@@ -173,7 +185,19 @@ impl OutgoingVideo {
     if let Some(counted) = counters.layers.iter_mut().find(|counted| counted.layer == layer) {
       counted.pictures += 1;
       counted.bytes += bytes;
+      counted.keyframes += u64::from(is_keyframe);
     }
+  }
+
+  /// The uplink was looked at `now`: whether it holds the top layer back. The time since the last
+  /// look counts as held back when it did then.
+  pub fn note_uplink(&mut self, is_top_held: bool, now: Instant) {
+    if let Some((last, was_held)) = self.maybe_uplink_check
+      && was_held
+    {
+      self.counters.held_back += now.saturating_duration_since(last);
+    }
+    self.maybe_uplink_check = Some((now, is_top_held));
   }
 
   /// Counts a picture that was meant to go out but didn't.
@@ -197,6 +221,7 @@ impl IncomingVideo {
       is_loss: false,
       is_waiting_for_keyframe: true,
       maybe_last_keyframe_request: None,
+      maybe_last_used: None,
     }
   }
 
@@ -217,6 +242,23 @@ impl IncomingVideo {
     } else {
       self.counters.frames_discarded += 1;
     }
+  }
+
+  /// A frame went to the decoder at `now`: the time since the last one may be the longest the
+  /// picture stood still.
+  pub fn note_used(&mut self, now: Instant) {
+    if let Some(last) = self.maybe_last_used {
+      let gap = now.saturating_duration_since(last);
+      if gap > self.counters.longest_gap {
+        self.counters.longest_gap = gap;
+      }
+    }
+    self.maybe_last_used = Some(now);
+  }
+
+  /// A new subscription: the time it wasn't received is no gap.
+  pub fn restart_gaps(&mut self) {
+    self.maybe_last_used = None;
   }
 
   /// The layer arriving now.
@@ -278,6 +320,7 @@ impl IncomingVideo {
       .is_none_or(|last| now.saturating_duration_since(last) >= interval);
     if is_due {
       self.maybe_last_keyframe_request = Some(now);
+      self.counters.keyframe_requests += 1;
     }
     is_due
   }
@@ -452,7 +495,7 @@ mod tests {
       let packets = outgoing
         .packetize(StreamId(7), layer, RtpTimestamp(0), false, &vec![0; bytes])
         .unwrap();
-      outgoing.count_sent(layer, &packets);
+      outgoing.count_sent(layer, bytes == 500, &packets);
     }
     outgoing.count_dropped();
     let counters = &outgoing.counters;
@@ -464,6 +507,8 @@ mod tests {
       .map(|layer| (layer.layer, layer.pictures))
       .collect();
     assert_eq!(layers, [(0, 1), (2, 2)]);
+    assert_eq!(counters.layers[0].keyframes, 1);
+    assert_eq!(counters.layers[1].keyframes, 0);
     assert!(counters.layers[1].bytes > 4000, "with the headers");
     assert_eq!(
       counters.bytes,
@@ -513,6 +558,39 @@ mod tests {
       incoming.push(SimulcastLayer::BASE, &packet),
       Err(FragmentError::MissingExtension)
     );
+  }
+
+  #[test]
+  fn held_back_time_counts_while_the_top_layer_is_held() {
+    let mut outgoing = OutgoingVideo::new(VideoTrackKind::Screen, VideoCodec::Av1);
+    let start = Instant::now();
+    let at = |ms: u64| start + Duration::from_millis(ms);
+    outgoing.note_uplink(false, at(0));
+    outgoing.note_uplink(true, at(100));
+    outgoing.note_uplink(true, at(400));
+    outgoing.note_uplink(false, at(1_000));
+    outgoing.note_uplink(false, at(5_000));
+    assert_eq!(outgoing.counters.held_back, Duration::from_millis(900));
+  }
+
+  #[test]
+  fn the_longest_gap_between_used_frames_restarts_with_a_subscription() {
+    let mut incoming = IncomingVideo::new(&track());
+    let start = Instant::now();
+    let at = |ms: u64| start + Duration::from_millis(ms);
+    for ms in [0, 33, 66, 1_566, 1_600] {
+      incoming.note_used(at(ms));
+    }
+    assert_eq!(incoming.counters.longest_gap, Duration::from_millis(1_500));
+    // Not received for a minute, then subscribed again: no gap.
+    incoming.restart_gaps();
+    incoming.note_used(at(61_600));
+    assert_eq!(incoming.counters.longest_gap, Duration::from_millis(1_500));
+    // Keyframe requests that go out are counted, rate-limited ones aren't.
+    assert!(incoming.is_keyframe_request_due(at(0), Duration::from_secs(1)));
+    assert!(!incoming.is_keyframe_request_due(at(500), Duration::from_secs(1)));
+    assert!(incoming.is_keyframe_request_due(at(1_000), Duration::from_secs(1)));
+    assert_eq!(incoming.counters.keyframe_requests, 2);
   }
 
   fn track() -> VideoTrack {

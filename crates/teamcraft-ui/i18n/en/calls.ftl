@@ -334,6 +334,7 @@ error-call-video-off-after-crashes = This window crashed several times in a row,
 error-call-sound-blocked = The browser didn't let the page play sound. Click anywhere on the page, then try again.
 error-call-server-lost = The call server can't be reached anymore, so the call ended. Try again in a moment.
 error-call-connection-lost = The connection broke and the call couldn't be resumed. Check your connection, then call again.
+error-call-encryption-failed = The call's encryption couldn't be set up with everyone in it, so you left the call. Join again. If it keeps happening, tell the host.
 
 ## Settings: sections, search and rows (#327)
 calls-noise-hint = Filters typing, fans and other background noise.

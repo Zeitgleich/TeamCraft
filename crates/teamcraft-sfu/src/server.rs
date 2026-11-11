@@ -213,6 +213,19 @@ pub(crate) enum SessionError {
   Room(#[from] RoomError),
 }
 
+impl SessionError {
+  /// The client sent something the SFU refuses (too large, unreadable, not a join first, refused by
+  /// the room), as opposed to a connection that broke or timed out.
+  fn is_client_fault(&self) -> bool {
+    matches!(
+      self,
+      Self::Signaling(SignalingError::TooLarge { .. } | SignalingError::Json(_))
+        | Self::ExpectedJoin
+        | Self::Room(_)
+    )
+  }
+}
+
 impl Sfu {
   pub fn bind(
     config: SfuConfig,
@@ -343,8 +356,12 @@ impl Sfu {
       let shared = Arc::clone(&self.shared);
       tokio::spawn(
         async move {
-          if let Err(error) = handle_session(incoming, &shared).await {
-            debug!(%error, "session ended");
+          match handle_session(incoming, &shared).await {
+            Ok(()) => {},
+            // The SFU closed the session for what the client sent: the client's log only says
+            // "closed", so this is the one place that names the cause.
+            Err(error) if error.is_client_fault() => info!(%error, "session closed for a protocol violation"),
+            Err(error) => debug!(%error, "session ended"),
           }
         }
         .instrument(info_span!("session", session_number)),
@@ -835,8 +852,9 @@ impl ParticipantSession {
     let mut interval = tokio::time::interval(PERIODIC_INTERVAL);
     loop {
       interval.tick().await;
-      self.room.on_timer(self.grant.device_id, Instant::now());
-      if let Some(feedback) = self.room.take_uplink_feedback(self.grant.device_id) {
+      let now = Instant::now();
+      self.room.on_timer(self.grant.device_id, now);
+      if let Some(feedback) = self.room.take_uplink_feedback(self.grant.device_id, now) {
         // Fails only when the writer task ended, i.e. the session is closing anyway.
         let _ = self
           .signal_tx

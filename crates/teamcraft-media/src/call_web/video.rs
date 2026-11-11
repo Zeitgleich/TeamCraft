@@ -389,6 +389,12 @@ impl TrackSender {
     self.frames_captured
   }
 
+  /// Frames given to the layers' encoders so far, and those skipped because a queue was full.
+  #[cfg(feature = "call-view")]
+  pub fn encoder_frame_counts(&self) -> (u64, u64) {
+    self.encoders.frame_counts()
+  }
+
   /// Whether the next picture is due at `now` ([`TrackSender::capture`] it then).
   pub fn is_due(&mut self, now: Instant) -> bool {
     self.cadence.due(now) > 0

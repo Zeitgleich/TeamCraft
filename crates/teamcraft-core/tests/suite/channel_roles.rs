@@ -2002,6 +2002,131 @@ async fn a_workspace_admin_told_of_a_withheld_entry_vouches_for_nothing_unseen()
   assert_eq!(server.role_log(channel).len(), before);
 }
 
+/// Issue #1264, option 2A: a member's device stuck on the channel's roles says so in the head its
+/// messages carry, and the workspace admin's device in the channel offers the existing review for
+/// it, until a list she looked at is signed.
+#[tokio::test]
+async fn a_stuck_members_message_offers_the_workspace_admin_the_review() {
+  let server = FakeServer::new();
+  let mut world = LateWorld::new(&server).await;
+  let channel = world.anchored_channel().await;
+  let (alice_id, bob_id, carol_id) = ids(&world.alice, &world.bob, &world.carol);
+  world.alice.client.sync_channel_roles(channel).await.unwrap();
+  let shown = world.bob.client.channel_role_state(channel).unwrap();
+  server.withhold_role_log(bob_id, channel, shown.version);
+  let promotion = world
+    .eve
+    .client
+    .sign_channel_roles(channel, &[(carol_id, ChannelRole::Moderator)], false)
+    .await
+    .unwrap();
+  assert_eq!(promotion, RoleSigning::Signed);
+  world.alice.client.sync_channel_roles(channel).await.unwrap();
+  world.carol.client.sync_channel_roles(channel).await.unwrap();
+  assert!(
+    !world
+      .ui_of_alice()
+      .channel_roles_review(channel)
+      .unwrap()
+      .needs_a_look
+  );
+
+  // Carol's head tells Bob's device of an entry its log leaves out: an alarm, stuck until a list.
+  world
+    .carol
+    .client
+    .send_text(channel, None, "hello")
+    .await
+    .unwrap();
+  settle(&mut [&mut world.bob, &mut world.carol]).await;
+  world.bob.client.check_channel_roles_heads().await.unwrap();
+  let stuck = world.bob.client.channel_role_state(channel).unwrap();
+  assert!(stuck.maybe_alarm.is_some(), "{stuck:?}");
+  assert!(stuck.needs_review());
+
+  world.bob.client.send_text(channel, None, "hi").await.unwrap();
+  settle(&mut [&mut world.alice, &mut world.bob]).await;
+  let state = world.alice.client.channel_role_state(channel).unwrap();
+  assert!(state.is_review_asked());
+  assert!(state.maybe_alarm.is_none(), "a request is no alarm: {state:?}");
+  let review = world.ui_of_alice().channel_roles_review(channel).unwrap();
+  assert!(review.needs_a_look);
+  assert_eq!(review.review_asked_by, vec![bob_id], "she sees who asked");
+
+  let reviewed = [
+    (alice_id, ChannelRole::Admin),
+    (bob_id, ChannelRole::Admin),
+    (carol_id, ChannelRole::Moderator),
+  ];
+  assert_eq!(
+    world
+      .alice
+      .client
+      .sign_reviewed_channel_roles(channel, &reviewed, review.log_cursor)
+      .await
+      .unwrap(),
+    RoleSigning::Signed
+  );
+  assert!(
+    !world
+      .alice
+      .client
+      .channel_role_state(channel)
+      .unwrap()
+      .is_review_asked()
+  );
+  assert!(
+    !world
+      .ui_of_alice()
+      .channel_roles_review(channel)
+      .unwrap()
+      .needs_a_look
+  );
+
+  // The server keeps her list from Bob's device too: still stuck, his next message asks again,
+  // though his head stays below her list.
+  server.advance_clock(std::time::Duration::from_secs(1));
+  world
+    .bob
+    .client
+    .send_text(channel, None, "still stuck")
+    .await
+    .unwrap();
+  settle(&mut [&mut world.alice, &mut world.bob]).await;
+  let state = world.alice.client.channel_role_state(channel).unwrap();
+  assert_eq!(
+    state
+      .review_requests
+      .iter()
+      .map(|request| request.user_id)
+      .collect::<Vec<_>>(),
+    vec![bob_id]
+  );
+  assert!(
+    world
+      .ui_of_alice()
+      .channel_roles_review(channel)
+      .unwrap()
+      .needs_a_look
+  );
+}
+
+/// Issue #1264, option 1B, between clients: the workspace admin's ordinary entry anchors the
+/// channel on the members' devices as before, but isn't a recent other signer for a channel admin's
+/// purge.
+#[tokio::test]
+async fn a_workspace_admins_ordinary_entry_is_no_recent_signer_for_a_purge() {
+  let server = FakeServer::new();
+  let mut world = LateWorld::new(&server).await;
+  let channel = world.anchored_channel().await;
+  let (alice_id, eve_id) = (world.alice.client.user_id(), world.eve.client.user_id());
+  let state = world.carol.client.channel_role_state(channel).unwrap();
+  assert!(state.is_workspace_anchored, "Eve's entry anchors as before");
+  let signers: Vec<UserId> = state.recent_signers.iter().map(|recent| recent.user_id).collect();
+  assert!(!signers.contains(&eve_id), "{signers:?}");
+  assert_eq!(signers, vec![alice_id], "Alice founded it");
+}
+
 /// Issue #1264: a device from before the admin history notices a removal all the same and reads its
 /// channels' role logs after it, so its last-read mark moves past the roster that removed Eve.
 #[tokio::test]

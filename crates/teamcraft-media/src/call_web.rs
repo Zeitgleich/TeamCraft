@@ -1459,8 +1459,8 @@ impl CallState<'_> {
     Ok(Flow::Continue)
   }
 
-  /// The engine's video stats with what the browser adds: the encoders, the capture size and
-  /// frames taken, and the round trip as last read. Starts the next reading of the round trip:
+  /// The engine's video stats with what the browser adds: the encoders, the capture size, frames
+  /// taken and those the encoders had no room for, and the round trip as last read. Starts the next reading of the round trip:
   /// the stats are read once a second while someone looks at them.
   #[cfg(feature = "call-view")]
   fn video_stats(&self, engine: &CallEngine) -> teamcraft_client_api::video_stats::VideoStatsReport {
@@ -1495,6 +1495,9 @@ impl CallState<'_> {
         height: size.height,
       });
       sent.maybe_frames_captured = Some(sender.frames_captured());
+      let (given, skipped) = sender.encoder_frame_counts();
+      sent.maybe_frames_given = Some(given);
+      sent.maybe_frames_skipped = Some(skipped);
     }
     if let Some(transport) = &self.maybe_transport
       && transport.kind() == CallTransport::Quic
@@ -2882,6 +2885,8 @@ impl AudioClock {
 
 impl Drop for AudioClock {
   fn drop(&mut self) {
+    // The port outlives this clock: a pulse still queued would call the dropped closure.
+    detach_port(&self.node);
     // Already detached with its closed context: nothing to undo.
     let _ = self.node.disconnect();
   }
@@ -2961,6 +2966,23 @@ impl Capture {
     for track in self.stream.get_tracks().iter() {
       track.unchecked_into::<MediaStreamTrack>().stop();
     }
+  }
+}
+
+impl Drop for Capture {
+  fn drop(&mut self) {
+    // The port outlives this capture: samples still queued would call the dropped closure.
+    detach_port(&self.node);
+  }
+}
+
+/// Unhooks a worklet node's port from its message closure before the closure is dropped. The
+/// worklet may still have messages queued; without this they call a dropped closure (wasm-bindgen
+/// throws "closure invoked recursively or after being dropped").
+fn detach_port(node: &AudioWorkletNode) {
+  // A node whose port can't be read has nothing hooked to it.
+  if let Ok(port) = node.port() {
+    port.set_onmessage(None);
   }
 }
 

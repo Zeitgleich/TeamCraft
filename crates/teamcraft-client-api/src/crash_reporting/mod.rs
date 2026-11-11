@@ -37,7 +37,7 @@ pub use reporter::{
   TRANSACTION_BATCH,
 };
 pub use script_stack::frames_from_script_stack;
-pub use scrub::scrub;
+pub use scrub::{scrub, without_ids};
 pub use transaction::{
   MAX_MEASUREMENTS, MAX_SPANS, MAX_TAGS, PerfOperation, PerfSpan, PerfStatus, PerfUnit, SpanId, TraceId,
   Transaction,

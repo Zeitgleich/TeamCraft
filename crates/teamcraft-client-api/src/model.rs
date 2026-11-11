@@ -322,6 +322,10 @@ pub struct ChannelRolesReview {
   /// This device can't vouch for what it has, or something contradicts it: the panel says so.
   #[serde(default)]
   pub needs_a_look: bool,
+  /// Members whose devices said in a message that they are stuck on this channel's roles and asked
+  /// for a review (issue #1264), until a reviewed list answers them. Their own claim.
+  #[serde(default)]
+  pub review_asked_by: Vec<UserId>,
   /// The roles this device's own snapshot gives. The list to sign comes from the member list, the
   /// server's word, so a row it doesn't have here is marked.
   pub snapshot: Vec<(UserId, ChannelRole)>,

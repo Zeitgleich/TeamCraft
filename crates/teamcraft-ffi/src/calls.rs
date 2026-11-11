@@ -30,12 +30,15 @@ use teamcraft_media::datagram::SimulcastLayer;
 use teamcraft_media::fallback_link::{FallbackSocket, fallback_opener};
 use teamcraft_media::openh264_library;
 use teamcraft_media::rtp::RtpTimestamp;
-use teamcraft_media::video::{EncodedVideoFrame, VideoResolution, simulcast_layers};
+use teamcraft_media::video::{
+  EncodedVideoFrame, ScreenProfile, VideoResolution, simulcast_layers, within_layer_limit,
+};
 use teamcraft_media::video_capture::CaptureFormat;
 use teamcraft_media::video_pipeline::{VideoSendConfig, preferred_encoders};
 use teamcraft_proto::{
   AudioCodec, CallJoinTokenResponse, ConversationId, DeviceId, ErrorCode, GatewayEvent, MediaCapabilities,
-  MediaStreamId, UserId, VideoCodec, VideoLayerInfo, VideoTrack, VideoTrackKind,
+  MediaStreamId, ScreenContentMode, ScreenSharePolicy, ScreenShareResolution, UserId, VideoCodec,
+  VideoLayerInfo, VideoTrack, VideoTrackKind,
 };
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
@@ -43,7 +46,8 @@ use tracing::{info, warn};
 use crate::engine::Job;
 
 use crate::error::TeamCraftError;
-use crate::video::{AppCamera, CameraFrame, CameraSlot, VideoFrameRgba, i420_to_rgba};
+use crate::screen_audio::{AppScreenAudio, ScreenAudioSlot};
+use crate::video::{AppCapture, CameraFrame, FrameSlot, ScreenFrame, VideoFrameRgba, i420_to_rgba};
 
 /// The app's network changes, as the core hands them out.
 type NetworkChangeStream = futures_channel::mpsc::UnboundedReceiver<()>;
@@ -53,6 +57,12 @@ const CALL_WORKER_THREADS: usize = 2;
 /// Simulcast layers a phone sends: its uplink and encoder are small.
 const CAMERA_LAYERS: u8 = 2;
 const CAMERA_BITRATE_BPS: u32 = 800_000;
+/// Simulcast layers a phone sends of its screen: the picture and a half-size one for weak links.
+const SCREEN_LAYERS: u8 = 2;
+/// Frames per second a phone shares its screen at: screen content, where text stays sharp and
+/// the encoder and battery rest. A still screen sends no new frames at all (the call repeats the
+/// last picture now and then).
+const SCREEN_FRAMERATE: u8 = 15;
 /// The highest layer a phone receives of other devices' tracks (0 is the smallest).
 const RECEIVE_MAX_LAYER: u8 = 1;
 
@@ -180,7 +190,22 @@ pub struct RemoteVideoFrame {
 #[derive(uniffi::Object)]
 pub struct CallSession {
   controls: mpsc::UnboundedSender<Control>,
-  camera: CameraSlot,
+  camera: FrameSlot,
+  screen: FrameSlot,
+  screen_audio: ScreenAudioSlot,
+  /// The verified workspace policy's limit on shares, as it was when the call was joined.
+  screen_policy: ScreenSharePolicy,
+}
+
+/// The picture a phone captures its screen at for a share ([`CallSession::start_screen_share`]):
+/// the screen's size within the workspace's limit, upright as the screen is. The app sizes its
+/// capture (a virtual display) to it, so the system scales and nothing is converted twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct ScreenCaptureSize {
+  pub width: u16,
+  pub height: u16,
+  /// At most this many pictures a second; a still screen delivers fewer.
+  pub max_framerate: u8,
 }
 
 /// Another device's video track.
@@ -207,6 +232,13 @@ pub struct CallStateInfo {
   pub is_deafened: bool,
   /// This device sends its camera.
   pub is_camera_on: bool,
+  /// This device shares its screen. Turns off by itself when the share's track ended (its
+  /// encoder kept failing), so the app stops capturing then.
+  #[uniffi(default = false)]
+  pub is_sharing_screen: bool,
+  /// The share's sound (what other apps play) is sent too.
+  #[uniffi(default = false)]
+  pub is_sharing_screen_sound: bool,
   /// End-to-end encrypted with every participant's device verified.
   pub is_secured: bool,
   /// Other devices in the call.
@@ -291,6 +323,8 @@ pub(crate) struct CallPreparation {
   pub(crate) signer: CallKeySigner,
   /// The conversation's devices (this one included) whose certificates verified.
   pub(crate) devices: Vec<VerifiedDevice>,
+  /// How large screen shares may be under the verified workspace policy (#565).
+  pub(crate) screen_policy: ScreenSharePolicy,
 }
 
 /// Where call events meet the app's listener: the engine feeds it gateway events, call threads
@@ -322,6 +356,14 @@ enum Control {
     done: oneshot::Sender<Result<(), TeamCraftError>>,
   },
   StopCamera,
+  StartScreenShare {
+    format: CaptureFormat,
+    layers: Vec<VideoLayerInfo>,
+    done: oneshot::Sender<Result<(), TeamCraftError>>,
+  },
+  StopScreenShare,
+  StartScreenAudio(oneshot::Sender<Result<(), TeamCraftError>>),
+  StopScreenAudio,
   SetVideoListener(Arc<dyn VideoListener>),
   /// Hold: nothing is sent and nothing is played until released.
   SetHeld(bool),
@@ -399,12 +441,69 @@ impl CallSession {
   /// One camera image; `false` while the camera isn't published (or the image is malformed).
   /// Called from the camera's thread; doesn't wait for the call.
   pub fn push_camera_frame(&self, frame: CameraFrame) -> bool {
-    self.camera.push(&frame)
+    self.camera.push_camera(&frame)
   }
 
   pub fn stop_camera(&self) {
     self.camera.clear();
     self.send(Control::StopCamera);
+  }
+
+  /// Shares the screen: the app captures it at the returned size and pushes the pictures with
+  /// [`CallSession::push_screen_frame`]. `screen_width × screen_height` is the screen as it is
+  /// turned now; when it turns, the app calls this again with the new size, which replaces the
+  /// running share. Sent as screen content (sharp text, a low frame rate) within the workspace's
+  /// screen share policy.
+  pub async fn start_screen_share(
+    &self,
+    screen_width: u32,
+    screen_height: u32,
+  ) -> Result<ScreenCaptureSize, TeamCraftError> {
+    let plan = screen_share_plan(screen_width, screen_height, &self.screen_policy)?;
+    let (done, done_rx) = oneshot::channel();
+    self.send(Control::StartScreenShare {
+      format: plan.format,
+      layers: plan.layers,
+      done,
+    });
+    done_rx.await.map_err(|_| TeamCraftError::EngineStopped)??;
+    Ok(ScreenCaptureSize {
+      width: plan.format.resolution.width,
+      height: plan.format.resolution.height,
+      max_framerate: plan.format.framerate,
+    })
+  }
+
+  /// One picture of the shared screen; `false` while no share runs (or the picture is
+  /// malformed). Called from the capture's thread; doesn't wait for the call.
+  pub fn push_screen_frame(&self, frame: ScreenFrame) -> bool {
+    self.screen.push_screen(&frame)
+  }
+
+  /// Ends the share and its sound.
+  pub fn stop_screen_share(&self) {
+    self.screen.clear();
+    self.screen_audio.clear();
+    self.send(Control::StopScreenShare);
+  }
+
+  /// Sends the share's sound as a second audio stream (not muted with the microphone); the app
+  /// pushes it with [`CallSession::push_screen_audio`]. Only while sharing the screen.
+  pub async fn start_screen_audio(&self) -> Result<(), TeamCraftError> {
+    let (done, done_rx) = oneshot::channel();
+    self.send(Control::StartScreenAudio(done));
+    done_rx.await.map_err(|_| TeamCraftError::EngineStopped)?
+  }
+
+  /// Sound of the share: 16-bit little-endian mono PCM at 48 kHz, in chunks of 10 to 20 ms;
+  /// `false` while it isn't sent. Called from the capture's thread; doesn't wait for the call.
+  pub fn push_screen_audio(&self, pcm16: Vec<u8>) -> bool {
+    self.screen_audio.push(&pcm16)
+  }
+
+  pub fn stop_screen_audio(&self) {
+    self.screen_audio.clear();
+    self.send(Control::StopScreenAudio);
   }
 
   /// Puts the call on hold (or takes it off): the microphone is silenced and the others aren't
@@ -562,11 +661,18 @@ pub(crate) async fn join(
   let network_rx = network.subscribe();
   let conversation = preparation.conversation;
   let own_device = preparation.device_id;
+  let screen_policy = preparation.screen_policy.clone();
   let mut config = native_config(preparation, &jobs)?;
   config.is_muted_at_start = is_muted;
   config.maybe_ticket_source = Some(Arc::new(EngineJoinTickets { jobs, conversation }));
-  let camera = CameraSlot::default();
-  let thread_camera = camera.clone();
+  let camera = FrameSlot::default();
+  let screen = FrameSlot::default();
+  let screen_audio = ScreenAudioSlot::default();
+  let slots = AppSlots {
+    camera: camera.clone(),
+    screen: screen.clone(),
+    screen_audio: screen_audio.clone(),
+  };
   let (controls, control_rx) = mpsc::unbounded_channel();
   let (joined, joined_rx) = oneshot::channel();
   lock(&hub.inner).maybe_active = Some(conversation);
@@ -576,6 +682,8 @@ pub(crate) async fn join(
     is_muted,
     is_deafened: false,
     is_camera_on: false,
+    is_sharing_screen: false,
+    is_sharing_screen_sound: false,
     is_secured: false,
     participant_count: 0,
     participant_user_ids: Vec::new(),
@@ -617,7 +725,7 @@ pub(crate) async fn join(
         let _ = joined.send(Ok(()));
         let context = CallContext {
           own_device,
-          camera: thread_camera,
+          slots,
           hub: thread_hub,
           connection,
         };
@@ -633,17 +741,39 @@ pub(crate) async fn join(
     warn!(%error, "joining the call failed");
     hub.report(ended(conversation, CallEndReason::Failed));
   }
-  result.map(|()| Arc::new(CallSession { controls, camera }))
+  result.map(|()| {
+    Arc::new(CallSession {
+      controls,
+      camera,
+      screen,
+      screen_audio,
+      screen_policy,
+    })
+  })
 }
 
 /// What the call thread needs besides the call.
 struct CallContext {
   own_device: DeviceId,
-  camera: CameraSlot,
+  slots: AppSlots,
   hub: CallHub,
   /// The chat server's (gateway's) connection: tells a call server that went away from this
   /// device's own network.
   connection: ConnectionStatus,
+}
+
+/// Where the app's pushed camera and screen pictures and screen sound go.
+struct AppSlots {
+  camera: FrameSlot,
+  screen: FrameSlot,
+  screen_audio: ScreenAudioSlot,
+}
+
+/// How a phone's screen of some size is shared: what it captures at and the layers it sends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScreenSharePlan {
+  format: CaptureFormat,
+  layers: Vec<VideoLayerInfo>,
 }
 
 /// Applies the app's controls and reports the engine's events until the call ends.
@@ -688,6 +818,12 @@ async fn run_call(
       Some(()) = network.next() => call.network_changed(),
       maybe_event = call.next_event() => match maybe_event {
         Some(event) => {
+          if is_own_screen_end(&event) {
+            // The share's sound goes with its picture, as on desktop.
+            call.stop_screen_audio();
+            context.slots.screen.clear();
+            context.slots.screen_audio.clear();
+          }
           encoded.report(context.own_device, &event);
           if !encoded.is_active() {
             watch_video(&call, &event, context.own_device, &mut video);
@@ -705,7 +841,9 @@ async fn run_call(
       },
     }
   }
-  context.camera.clear();
+  context.slots.camera.clear();
+  context.slots.screen.clear();
+  context.slots.screen_audio.clear();
   match call.leave().await {
     Ok(_) => {},
     Err(NativeCallError::ConnectionLost) => {
@@ -746,7 +884,7 @@ async fn apply_control(
       state.is_deafened = is_deafened;
     },
     Control::StartCamera { format, done } => {
-      let result = start_camera(call, format, context.camera.clone()).await;
+      let result = start_camera(call, format, context.slots.camera.clone()).await;
       state.is_camera_on = result.is_ok();
       // The app may have stopped waiting; the state report tells it anyway.
       let _ = done.send(result);
@@ -754,6 +892,38 @@ async fn apply_control(
     Control::StopCamera => {
       call.stop_video(VideoTrackKind::Camera);
       state.is_camera_on = false;
+    },
+    Control::StartScreenShare { format, layers, done } => {
+      let result = start_screen_share(call, format, layers, context.slots.screen.clone()).await;
+      // A failed restart (the screen turned) leaves no share running.
+      state.is_sharing_screen = result.is_ok();
+      if result.is_err() {
+        call.stop_screen_audio();
+        state.is_sharing_screen_sound = false;
+      }
+      let _ = done.send(result);
+    },
+    Control::StopScreenShare => {
+      call.stop_screen_audio();
+      call.stop_video(VideoTrackKind::Screen);
+      state.is_sharing_screen = false;
+      state.is_sharing_screen_sound = false;
+    },
+    Control::StartScreenAudio(done) => {
+      let result = if state.is_sharing_screen {
+        call
+          .start_screen_audio(Box::new(AppScreenAudio::new(context.slots.screen_audio.clone())))
+          .await
+          .map_err(|error| TeamCraftError::Call(error.to_string()))
+      } else {
+        Err(TeamCraftError::Call("no screen share runs".into()))
+      };
+      state.is_sharing_screen_sound = result.is_ok();
+      let _ = done.send(result);
+    },
+    Control::StopScreenAudio => {
+      call.stop_screen_audio();
+      state.is_sharing_screen_sound = false;
     },
     Control::SetVideoListener(listener) => {
       listener.on_video_tracks(video.tracks.values().cloned().collect());
@@ -775,12 +945,12 @@ async fn apply_control(
 async fn start_camera(
   call: &NativeCall,
   format: CaptureFormat,
-  camera: CameraSlot,
+  camera: FrameSlot,
 ) -> Result<(), TeamCraftError> {
   let config = VideoSendConfig {
     maybe_layer_plan: None,
     kind: VideoTrackKind::Camera,
-    capture: Box::new(AppCamera::new(format, camera)),
+    capture: Box::new(AppCapture::new(format, camera)),
     layers: simulcast_layers(
       format.resolution,
       format.framerate,
@@ -983,6 +1153,81 @@ fn track_info(track: &VideoTrack) -> VideoTrackInfo {
   }
 }
 
+/// Publishes the screen share, replacing a running one (the screen turned). Like the desktop's
+/// share it repeats its last picture while the screen is still, so a viewer who joins late sees it.
+async fn start_screen_share(
+  call: &NativeCall,
+  format: CaptureFormat,
+  layers: Vec<VideoLayerInfo>,
+  screen: FrameSlot,
+) -> Result<(), TeamCraftError> {
+  let config = VideoSendConfig {
+    maybe_layer_plan: None,
+    kind: VideoTrackKind::Screen,
+    capture: Box::new(AppCapture::new(format, screen)),
+    layers,
+    encoders: preferred_encoders(),
+    maybe_filter: None,
+    maybe_picture_tap: None,
+    maybe_idle_refresh: VideoSendConfig::default_idle_refresh(&VideoTrackKind::Screen),
+  };
+  call
+    .start_video(config)
+    .await
+    .map_err(|error| TeamCraftError::Call(error.to_string()))
+}
+
+/// A phone's screen share: detail content (text stays sharp) at the screen's size, turned as it
+/// is, within the standard share size, which every workspace policy allows; a policy below it
+/// would lower it ([`ScreenShareResolution::within`]). A phone never asks for 4K: its screen is
+/// small, and its encoder and uplink are what limit it.
+fn screen_share_plan(
+  screen_width: u32,
+  screen_height: u32,
+  policy: &ScreenSharePolicy,
+) -> Result<ScreenSharePlan, TeamCraftError> {
+  let profile = ScreenProfile {
+    mode: ScreenContentMode::Detail,
+    size: ScreenShareResolution::Standard.within(&policy.max_resolution),
+  };
+  let side = |value: u32| u16::try_from(value & !1).unwrap_or(u16::MAX - 1);
+  let source = VideoResolution {
+    width: side(screen_width),
+    height: side(screen_height),
+  };
+  let layers = within_layer_limit(&profile.layers(source, SCREEN_FRAMERATE), SCREEN_LAYERS);
+  let maybe_top = layers
+    .iter()
+    .max_by_key(|layer| u32::from(layer.width) * u32::from(layer.height))
+    .filter(|top| top.width >= 2 && top.height >= 2);
+  let Some(top) = maybe_top else {
+    return Err(TeamCraftError::Call(format!(
+      "a screen of {screen_width}x{screen_height} can't be shared"
+    )));
+  };
+  Ok(ScreenSharePlan {
+    format: CaptureFormat {
+      resolution: VideoResolution {
+        width: top.width,
+        height: top.height,
+      },
+      framerate: top.max_framerate,
+    },
+    layers,
+  })
+}
+
+/// The own screen share's track ended by itself (its encoder kept failing).
+fn is_own_screen_end(event: &CallEngineEvent) -> bool {
+  matches!(
+    event,
+    CallEngineEvent::OwnVideoEnded {
+      kind: VideoTrackKind::Screen,
+      ..
+    }
+  )
+}
+
 /// Camera frames arrive upright, so a portrait phone sends portrait video; I420 needs even sides.
 fn upright(width: u16, height: u16) -> VideoResolution {
   VideoResolution {
@@ -1058,6 +1303,13 @@ fn apply_event(
       state.speaking_user_ids = speaking;
     },
     CallEngineEvent::MuteChanged(is_muted) => state.is_muted = is_muted,
+    CallEngineEvent::OwnVideoEnded {
+      kind: VideoTrackKind::Screen,
+      ..
+    } => {
+      state.is_sharing_screen = false;
+      state.is_sharing_screen_sound = false;
+    },
     CallEngineEvent::DeafenChanged(is_deafened) => state.is_deafened = is_deafened,
     CallEngineEvent::RemovedByHost { .. } => return Some(CallEndReason::RemovedByHost),
     CallEngineEvent::EndedByHost { .. } => return Some(CallEndReason::EndedByHost),
@@ -1121,6 +1373,8 @@ fn ended(conversation: ConversationId, reason: CallEndReason) -> CallStateInfo {
     is_muted: false,
     is_deafened: false,
     is_camera_on: false,
+    is_sharing_screen: false,
+    is_sharing_screen_sound: false,
     is_secured: false,
     participant_count: 0,
     participant_user_ids: Vec::new(),
@@ -1750,6 +2004,98 @@ mod tests {
     audio.is_held = false;
     audio.is_muted = true;
     assert!(audio.is_silent());
+  }
+
+  mod screen_share {
+    use teamcraft_media::call_engine::OwnVideoEnd;
+
+    use super::*;
+
+    /// A phone shares its screen as it is turned, sharp (its own size where it fits 1440p turned
+    /// upright) and at a low frame rate, in two layers.
+    #[test]
+    fn a_phone_screen_is_shared_upright_at_its_size() {
+      let plan = screen_share_plan(1080, 2400, &ScreenSharePolicy::default()).unwrap();
+      assert_eq!(
+        plan.format.resolution,
+        VideoResolution {
+          width: 1080,
+          height: 2400
+        }
+      );
+      assert_eq!(plan.format.framerate, SCREEN_FRAMERATE);
+      assert_eq!(plan.layers.len(), usize::from(SCREEN_LAYERS));
+      let turned = screen_share_plan(2400, 1080, &ScreenSharePolicy::default()).unwrap();
+      assert_eq!(
+        turned.format.resolution,
+        VideoResolution {
+          width: 2400,
+          height: 1080
+        }
+      );
+    }
+
+    /// A large tablet or a QHD+ phone is shrunk to the standard share size, also where the
+    /// workspace would allow 4K: a phone never asks for it.
+    #[test]
+    fn large_screens_stay_within_the_standard_size_under_every_policy() {
+      for max_resolution in [
+        ScreenShareResolution::Uhd,
+        ScreenShareResolution::Standard,
+        ScreenShareResolution::Unknown("8k".into()),
+      ] {
+        let policy = ScreenSharePolicy { max_resolution };
+        let plan = screen_share_plan(1440, 3200, &policy).unwrap();
+        assert_eq!(
+          plan.format.resolution,
+          VideoResolution {
+            width: 1152,
+            height: 2560
+          }
+        );
+      }
+    }
+
+    #[test]
+    fn odd_screen_sizes_are_made_even() {
+      let plan = screen_share_plan(1081, 2401, &ScreenSharePolicy::default()).unwrap();
+      assert_eq!(
+        plan.format.resolution,
+        VideoResolution {
+          width: 1080,
+          height: 2400
+        }
+      );
+    }
+
+    #[test]
+    fn a_screen_without_a_size_is_refused() {
+      assert!(screen_share_plan(0, 0, &ScreenSharePolicy::default()).is_err());
+    }
+
+    /// A share whose track ended by itself (the encoder kept failing) shows off, sound included,
+    /// so the app stops capturing; the camera's end doesn't touch it.
+    #[test]
+    fn a_share_that_ended_by_itself_shows_off() {
+      let mut state = ended(conversation(5), CallEndReason::Left);
+      state.is_sharing_screen = true;
+      state.is_sharing_screen_sound = true;
+      let camera_end = CallEngineEvent::OwnVideoEnded {
+        kind: VideoTrackKind::Camera,
+        end: OwnVideoEnd::WhileSending,
+      };
+      assert!(!is_own_screen_end(&camera_end));
+      apply_to(&mut state, camera_end);
+      assert!(state.is_sharing_screen);
+      let screen_end = CallEngineEvent::OwnVideoEnded {
+        kind: VideoTrackKind::Screen,
+        end: OwnVideoEnd::WhileSending,
+      };
+      assert!(is_own_screen_end(&screen_end));
+      apply_to(&mut state, screen_end);
+      assert!(!state.is_sharing_screen);
+      assert!(!state.is_sharing_screen_sound);
+    }
   }
 
   #[derive(Default)]

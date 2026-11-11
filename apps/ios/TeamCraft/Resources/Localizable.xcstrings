@@ -13606,13 +13606,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "This device can't vouch for every role here, or the member list shows one nobody confirmed. You can check them if you want to: what you confirm counts on every member's device. Chat isn't affected."
+            "value": "This device or a member's can't vouch for every role here, or the member list shows one nobody confirmed. You can check them if you want to: what you confirm counts on every member's device. Chat isn't affected."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Dieses Gerät kann nicht für jede Rolle hier einstehen, oder die Mitgliederliste zeigt eine, die niemand bestätigt hat. Du kannst sie prüfen, wenn du möchtest: Was du bestätigst, gilt auf den Geräten aller Mitglieder. Der Chat ist davon nicht betroffen."
+            "value": "Dieses Gerät oder das eines Mitglieds kann nicht für jede Rolle hier einstehen, oder die Mitgliederliste zeigt eine, die niemand bestätigt hat. Du kannst sie prüfen, wenn du möchtest: Was du bestätigst, gilt auf den Geräten aller Mitglieder. Der Chat ist davon nicht betroffen."
           }
         }
       }

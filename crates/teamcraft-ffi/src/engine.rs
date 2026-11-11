@@ -2195,6 +2195,8 @@ async fn prepare_call(
     device_id: client.device_id(),
     signer: client.call_key_signer(),
     devices,
+    // Before a workspace was verified: the default policy, as the desktop takes it.
+    screen_policy: teamcraft_core::workspace::screen_share_policy(client.store()).unwrap_or_default(),
   })
 }
 

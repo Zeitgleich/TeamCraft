@@ -530,7 +530,7 @@ impl Network {
       client.engine.on_timer(self.now);
       if let Some(connection) = &client.maybe_connection {
         connection.room.on_timer(device(id), self.now);
-        if let Some(feedback) = connection.room.take_uplink_feedback(device(id)) {
+        if let Some(feedback) = connection.room.take_uplink_feedback(device(id), self.now) {
           connection
             .signal_tx
             .try_send(Outgoing::Event(CallEvent::TransportFeedback { feedback }))

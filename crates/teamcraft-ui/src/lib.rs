@@ -111,6 +111,7 @@ pub mod settings;
 pub mod settings_sync;
 pub mod share_into;
 pub mod share_link;
+pub mod share_quality;
 pub mod shell_drop;
 #[cfg(target_arch = "wasm32")]
 pub mod shell_level;

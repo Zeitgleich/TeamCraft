@@ -1,6 +1,7 @@
-//! Video glue between the phone's camera and display and `teamcraft-media`: the app's camera
-//! frames (Android `YUV_420_888`, any row and pixel stride, rotated as the sensor sits) become
-//! upright I420 for the encoder, and decoded frames become RGBA for a bitmap.
+//! Video glue between the phone's camera, screen and display and `teamcraft-media`: the app's
+//! camera frames (Android `YUV_420_888`, any row and pixel stride, rotated as the sensor sits) and
+//! screen frames (RGBA, as a screen capture hands them out) become upright I420 for the encoder,
+//! and decoded frames become RGBA for a bitmap.
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -24,6 +25,17 @@ pub struct CameraFrame {
   pub timestamp_us: u64,
 }
 
+/// One picture of the shared screen as the platform hands it out (Android's `ImageReader` in
+/// `RGBA_8888`): `width × height` pixels of 4 bytes, rows `row_stride` bytes apart.
+#[derive(Clone, uniffi::Record)]
+pub struct ScreenFrame {
+  pub width: u32,
+  pub height: u32,
+  pub rgba: Vec<u8>,
+  pub row_stride: u32,
+  pub timestamp_us: u64,
+}
+
 /// A decoded frame of another device's video, ready for a bitmap.
 #[derive(Clone, uniffi::Record)]
 pub struct VideoFrameRgba {
@@ -34,22 +46,22 @@ pub struct VideoFrameRgba {
   pub rgba: Vec<u8>,
 }
 
-/// The camera as a capture source for the encoder: the app pushes frames, [`VideoCapture::start`]
-/// hands over the queue they go to.
-pub(crate) struct AppCamera {
+/// The camera or the screen as a capture source for the encoder: the app pushes frames,
+/// [`VideoCapture::start`] hands over the queue they go to.
+pub(crate) struct AppCapture {
   format: CaptureFormat,
-  slot: CameraSlot,
-  /// This camera's start, while its queue is the slot's.
+  slot: FrameSlot,
+  /// This capture's start, while its queue is the slot's.
   maybe_start: Option<u64>,
 }
 
-/// Where pushed camera frames go while the camera track runs.
+/// Where pushed frames go while their track (camera or screen) runs.
 #[derive(Clone, Default)]
-pub(crate) struct CameraSlot {
+pub(crate) struct FrameSlot {
   inner: Arc<Mutex<SlotState>>,
 }
 
-/// The queue of the camera that started last, numbered by its start.
+/// The queue of the capture that started last, numbered by its start.
 #[derive(Default)]
 struct SlotState {
   starts: u64,
@@ -64,8 +76,8 @@ enum Rotation {
   ThreeQuarters,
 }
 
-impl AppCamera {
-  pub(crate) fn new(format: CaptureFormat, slot: CameraSlot) -> Self {
+impl AppCapture {
+  pub(crate) fn new(format: CaptureFormat, slot: FrameSlot) -> Self {
     Self {
       format,
       slot,
@@ -74,7 +86,7 @@ impl AppCamera {
   }
 }
 
-impl VideoCapture for AppCamera {
+impl VideoCapture for AppCapture {
   fn format(&self) -> CaptureFormat {
     self.format
   }
@@ -87,8 +99,8 @@ impl VideoCapture for AppCamera {
     Ok(())
   }
 
-  /// Leaves the slot to a camera that started since: the call starts a replacing camera track
-  /// before it stops the running one.
+  /// Leaves the slot to a capture that started since: the call starts a replacing track before
+  /// it stops the running one.
   fn stop(&mut self) {
     let Some(start) = self.maybe_start.take() else {
       return;
@@ -104,9 +116,21 @@ impl VideoCapture for AppCamera {
   }
 }
 
-impl CameraSlot {
-  /// Converts and queues `frame`; `false` while no camera track runs or the frame is malformed.
-  pub(crate) fn push(&self, frame: &CameraFrame) -> bool {
+impl FrameSlot {
+  /// Converts and queues a camera image; `false` while no camera track runs or the image is
+  /// malformed.
+  pub(crate) fn push_camera(&self, frame: &CameraFrame) -> bool {
+    self.push_with(|| camera_to_i420(frame))
+  }
+
+  /// Converts and queues a screen picture; `false` while no screen track runs or the picture is
+  /// malformed.
+  pub(crate) fn push_screen(&self, frame: &ScreenFrame) -> bool {
+    self.push_with(|| screen_to_i420(frame))
+  }
+
+  /// Converts only while a track takes the frame: a phone pushes frames before and after.
+  fn push_with(&self, convert: impl FnOnce() -> Result<VideoFrame, VideoError>) -> bool {
     let Some(sender) = self
       .lock()
       .maybe_current
@@ -115,10 +139,10 @@ impl CameraSlot {
     else {
       return false;
     };
-    match camera_to_i420(frame) {
+    match convert() {
       Ok(converted) => sender.send(converted),
       Err(error) => {
-        tracing::debug!(%error, "camera frame dropped");
+        tracing::debug!(%error, "pushed video frame dropped");
         false
       },
     }
@@ -166,6 +190,54 @@ pub(crate) fn camera_to_i420(frame: &CameraFrame) -> Result<VideoFrame, VideoErr
     VideoResolution {
       width: dimension(out_width),
       height: dimension(out_height),
+    },
+    frame.timestamp_us,
+    data,
+  )
+}
+
+/// I420 from a screen picture in RGBA (BT.601 limited range, as the encoders expect); odd
+/// dimensions lose their last column or row. Each chroma sample averages its 2×2 pixels, so thin
+/// coloured text keeps its hue.
+pub(crate) fn screen_to_i420(frame: &ScreenFrame) -> Result<VideoFrame, VideoError> {
+  let width = even(frame.width);
+  let height = even(frame.height);
+  let stride = as_usize(frame.row_stride);
+  let pixel = |column: usize, row: usize| -> [i32; 3] {
+    let at = row * stride + column * 4;
+    match frame.rgba.get(at..at + 3) {
+      Some(rgb) => [i32::from(rgb[0]), i32::from(rgb[1]), i32::from(rgb[2])],
+      // A short buffer reads as black, as a short camera plane does.
+      None => [0, 0, 0],
+    }
+  };
+  let mut data = Vec::with_capacity(width * height * 3 / 2);
+  for row in 0..height {
+    for column in 0..width {
+      let [r, g, b] = pixel(column, row);
+      data.push(clamp(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16));
+    }
+  }
+  let mut v_plane = Vec::with_capacity(width * height / 4);
+  for row in (0..height).step_by(2) {
+    for column in (0..width).step_by(2) {
+      let mut sum = [0; 3];
+      for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+        let rgb = pixel(column + dx, row + dy);
+        for channel in 0..3 {
+          sum[channel] += rgb[channel];
+        }
+      }
+      let [r, g, b] = sum.map(|channel| (channel + 2) / 4);
+      data.push(clamp(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128));
+      v_plane.push(clamp(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128));
+    }
+  }
+  data.extend_from_slice(&v_plane);
+  VideoFrame::new(
+    VideoResolution {
+      width: dimension(width),
+      height: dimension(height),
     },
     frame.timestamp_us,
     data,
@@ -307,42 +379,89 @@ mod tests {
 
   #[test]
   fn pushes_only_while_started() {
-    let slot = CameraSlot::default();
+    let slot = FrameSlot::default();
     let frame = camera_frame(2, 2, vec![0; 4], vec![128], vec![128], 2, 1, 0);
-    assert!(!slot.push(&frame));
+    assert!(!slot.push_camera(&frame));
     let format = CaptureFormat {
       resolution: VideoResolution { width: 2, height: 2 },
       framerate: 15,
     };
-    let mut camera = AppCamera::new(format, slot.clone());
+    let mut camera = AppCapture::new(format, slot.clone());
     let (sender, receiver) = teamcraft_media::video_capture::frame_queue();
     camera.start(sender).unwrap();
-    assert!(slot.push(&frame));
+    assert!(slot.push_camera(&frame));
     assert_eq!(receiver.recv().unwrap().resolution(), format.resolution);
     camera.stop();
-    assert!(!slot.push(&frame));
+    assert!(!slot.push_camera(&frame));
   }
 
   /// A camera track that replaces the running one starts before the old one stops.
   #[test]
   fn a_replaced_camera_leaves_the_slot_to_its_successor() {
-    let slot = CameraSlot::default();
+    let slot = FrameSlot::default();
     let frame = camera_frame(2, 2, vec![0; 4], vec![128], vec![128], 2, 1, 0);
     let format = CaptureFormat {
       resolution: VideoResolution { width: 2, height: 2 },
       framerate: 15,
     };
-    let mut old = AppCamera::new(format, slot.clone());
+    let mut old = AppCapture::new(format, slot.clone());
     let (old_sender, _old_receiver) = teamcraft_media::video_capture::frame_queue();
     old.start(old_sender).unwrap();
-    let mut new = AppCamera::new(format, slot.clone());
+    let mut new = AppCapture::new(format, slot.clone());
     let (new_sender, new_receiver) = teamcraft_media::video_capture::frame_queue();
     new.start(new_sender).unwrap();
     old.stop();
-    assert!(slot.push(&frame));
+    assert!(slot.push_camera(&frame));
     assert_eq!(new_receiver.recv().unwrap().resolution(), format.resolution);
     new.stop();
-    assert!(!slot.push(&frame));
+    assert!(!slot.push_camera(&frame));
+  }
+
+  #[test]
+  fn screen_pictures_become_limited_range_i420() {
+    // 2x2 white, then 2x2 pure red, side by side in one row-padded 4x2 picture.
+    let white = [255, 255, 255, 255];
+    let red = [255, 0, 0, 255];
+    let mut rgba = Vec::new();
+    for _ in 0..2 {
+      rgba.extend_from_slice(&white);
+      rgba.extend_from_slice(&white);
+      rgba.extend_from_slice(&red);
+      rgba.extend_from_slice(&red);
+      rgba.extend_from_slice(&[9; 4]);
+    }
+    let frame = screen_frame(4, 2, rgba, 20);
+    let converted = screen_to_i420(&frame).unwrap();
+    assert_eq!(converted.resolution(), VideoResolution { width: 4, height: 2 });
+    assert_eq!(&converted.data()[..4], &[235, 235, 82, 82]);
+    // U then V, one sample per 2x2 block: white is neutral, red is low U, high V.
+    assert_eq!(&converted.data()[8..], &[128, 90, 128, 240]);
+  }
+
+  #[test]
+  fn short_or_odd_screen_pictures_do_not_panic() {
+    let frame = screen_frame(5, 3, vec![255; 7], 20);
+    let converted = screen_to_i420(&frame).unwrap();
+    assert_eq!(converted.resolution(), VideoResolution { width: 4, height: 2 });
+    assert_eq!(converted.data().len(), 12);
+  }
+
+  #[test]
+  fn screen_frames_go_to_the_screen_track_only_while_it_runs() {
+    let slot = FrameSlot::default();
+    let frame = screen_frame(2, 2, vec![0; 16], 8);
+    assert!(!slot.push_screen(&frame));
+    let format = CaptureFormat {
+      resolution: VideoResolution { width: 2, height: 2 },
+      framerate: 15,
+    };
+    let mut screen = AppCapture::new(format, slot.clone());
+    let (sender, receiver) = teamcraft_media::video_capture::frame_queue();
+    screen.start(sender).unwrap();
+    assert!(slot.push_screen(&frame));
+    assert_eq!(receiver.recv().unwrap().resolution(), format.resolution);
+    screen.stop();
+    assert!(!slot.push_screen(&frame));
   }
 
   #[test]
@@ -353,6 +472,16 @@ mod tests {
     assert_eq!(rgba.len(), 16);
     assert_eq!(&rgba[..4], &[128, 128, 128, 255]);
     assert_eq!(&rgba[8..12], &[255, 255, 255, 255]);
+  }
+
+  fn screen_frame(width: u32, height: u32, rgba: Vec<u8>, row_stride: u32) -> ScreenFrame {
+    ScreenFrame {
+      width,
+      height,
+      rgba,
+      row_stride,
+      timestamp_us: 0,
+    }
   }
 
   #[allow(clippy::too_many_arguments)]

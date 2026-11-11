@@ -266,6 +266,7 @@ app-link-web-only = Dieser Link funktioniert nur im Browser.
 app-link-sign-in = Dort anmelden
 app-link-open-browser = Im Browser öffnen
 open-in-app = In der App öffnen
+open-in-app-text = Öffne TeamCraft in der App für eine bessere Integration
 tray-custom-status = Eigenen Status festlegen…
 tray-new-message = Neue Nachricht…
 
