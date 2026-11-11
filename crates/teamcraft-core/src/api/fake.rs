@@ -175,6 +175,12 @@ struct State {
   /// Per reader and channel, the last role log version the server shows them: a withheld entry.
   withheld_role_logs: HashMap<(UserId, ConversationId), u64>,
   role_log_reads: HashMap<ConversationId, usize>,
+  /// Roster entries after this version are shown only once a role log was read: as if they were
+  /// published between the two reads.
+  maybe_roster_shown_until_role_log_read: Option<u64>,
+  /// Requests that read the workspace roster log, and the policy log.
+  roster_log_reads: usize,
+  policy_log_reads: usize,
   /// The next append to a role log answers 409, as if another admin got there first.
   is_next_role_append_in_conflict: bool,
   /// `PUT read-position` requests that arrived, to check that queued ones are sent once.
@@ -847,6 +853,22 @@ impl FakeServer {
       .get(&conversation)
       .copied()
       .unwrap_or(0)
+  }
+
+  /// How many requests read the workspace log of `kind` so far.
+  pub fn workspace_log_reads(&self, kind: &WorkspaceLogKind) -> usize {
+    let state = self.lock();
+    match kind {
+      WorkspaceLogKind::Roster => state.roster_log_reads,
+      WorkspaceLogKind::Policy => state.policy_log_reads,
+      _ => 0,
+    }
+  }
+
+  /// Shows the roster log only up to `version` until the next read of any channel's role log, as if
+  /// the newer entries were published right after the device began its pass.
+  pub fn publish_roster_on_next_role_log_read(&self, version: u64) {
+    self.lock().maybe_roster_shown_until_role_log_read = Some(version);
   }
 
   /// Makes reads of the workspace logs answer 503 (`None`: work again).
@@ -5732,6 +5754,11 @@ impl ServerApi for FakeServerApi {
     query: &ListWorkspaceLogQuery,
   ) -> Result<ListWorkspaceLogResponse, ApiError> {
     self.with(|state, _| {
+      match kind {
+        WorkspaceLogKind::Roster => state.roster_log_reads += 1,
+        WorkspaceLogKind::Policy => state.policy_log_reads += 1,
+        _ => {},
+      }
       let after = query.maybe_after.unwrap_or(0);
       let is_failing = match state.failing_workspace_log {
         Some(WorkspaceLogFailure::Every) => true,
@@ -5751,6 +5778,11 @@ impl ServerApi for FakeServerApi {
         .filter(|entry| entry.version > after)
         .cloned()
         .collect();
+      if *kind == WorkspaceLogKind::Roster
+        && let Some(shown_until) = state.maybe_roster_shown_until_role_log_read
+      {
+        entries.retain(|entry| entry.version <= shown_until);
+      }
       let has_more = entries.len() > limit;
       entries.truncate(limit);
       Ok(ListWorkspaceLogResponse { entries, has_more })
@@ -5813,6 +5845,7 @@ impl ServerApi for FakeServerApi {
   ) -> Result<teamcraft_proto::ListChannelRoleLogResponse, ApiError> {
     self.with(|state, me| {
       *state.role_log_reads.entry(conversation).or_default() += 1;
+      state.maybe_roster_shown_until_role_log_read = None;
       if state.failing_role_logs.contains(&conversation) {
         return Err(ApiError::status(503, ErrorCode::Unavailable, "try again later"));
       }

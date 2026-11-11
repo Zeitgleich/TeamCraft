@@ -2438,7 +2438,11 @@ workspace roster (admin.md §2.3):
     whole roster log when a role log first has new entries, and takes the result only if it ends on the head it
     verified; one that doesn't is read again only once there is a newer roster.
   - **Entries are judged on the newest roster and its history, or not at all.** If reading the roster or the replay
-    fails, the entries stay unread for the next sync, so a network failure can't refuse an entry for good.
+    fails, the entries stay unread for the next sync, so a network failure can't refuse an entry for good. A pass
+    over several channels (the upkeep after a catch-up) reads their role logs first and then the roster once, before
+    judging any of them: the roster is read after every entry it judges, so it is at least as new as the one each was
+    signed on (#1706). Logs held for that are bounded: once about 2000 entries are held (plus at most one whole
+    log read on top), they are judged and the pass goes on with the next part.
   - **An entry by somebody who left counts for roles** if it verifies under the key of an ended tenure, builds on this
     device's head, its `signed_at_ms` lies inside that tenure (`role_tenure_clock_skew`, client setting, ten minutes,
     for the signer's clock), its `created_at` too but with no leeway at the end, and that tenure lasted at least until

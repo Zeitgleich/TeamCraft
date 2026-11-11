@@ -29,12 +29,17 @@ const CHANNEL_ROLES_KEY_PREFIX: &str = "channel_roles/";
 const CHANNEL_ROLES_AHEAD_KEY: &str = "channel_roles_ahead";
 /// The channels whose role logs are read after an admin left the roster, in [`Table::Workspace`].
 const CHANNEL_ROLES_DUE_KEY: &str = "channel_roles_due";
+/// Counts how often [`CHANNEL_ROLES_DUE_KEY`] was queued afresh, in [`Table::Workspace`].
+const CHANNEL_ROLES_DUE_GENERATION_KEY: &str = "channel_roles_due_generation";
 /// How many of those are read in one upkeep pass, so a removal is no burst.
 const ROLE_LOG_READS_PER_PASS: usize = 4;
 /// How long a failed one waits before it is read again, doubling up to the cap: one channel that
 /// keeps failing neither holds up the others nor asks the server every pass.
 const ROLE_LOG_READ_RETRY_MS: i64 = 5 * 60 * 1000;
 const ROLE_LOG_READ_RETRY_MAX_MS: i64 = 6 * 60 * 60 * 1000;
+/// Role entries held at most between reading channels' logs and judging them on one roster read: a
+/// pass over many channels with long logs judges them in parts, so memory stays bounded.
+const MAX_HELD_ROLE_ENTRIES: usize = 2_000;
 /// Pages of a role log read in one sync; a log longer than this is read on in the next one.
 const MAX_ROLE_LOG_PAGES: usize = 100;
 /// Claimed founders whose identity keys are pinned before a channel's first entries are verified.
@@ -90,6 +95,16 @@ struct DueRoleRead {
   not_before_ms: i64,
 }
 
+/// A channel's role log as read, before its new entries are judged.
+struct RoleLogRead {
+  conversation: ConversationId,
+  state: ChannelRoleState,
+  entries: Vec<ChannelRoleLogEntryResponse>,
+  is_read_to_end: bool,
+  /// The roster version this device held before the read.
+  roster_at_read: u64,
+}
+
 /// What became of a role change on this device's side of the signature.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RoleSigning {
@@ -142,52 +157,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// keeps the last accepted snapshot. A server that refuses the log (not a member any more, an
   /// older server) changes nothing.
   pub async fn sync_channel_roles(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
-    let mut state = self.channel_role_state(conversation)?;
-    state.prepare_read();
-    // Before the read, so an entry that arrives while it runs isn't judged by a newer roster.
-    let roster_at_read = self.workspace()?.roster.version;
-    let (entries, is_read_to_end) = match self.fetch_role_log(conversation, state.log_read_from()).await {
-      Ok(read) => read,
-      Err(CoreError::Api(error)) if error.is_not_found() || error.is_forbidden() => return Ok(()),
-      Err(error) => return Err(error),
-    };
-    // Entries members sent in the channel: the log must show the same (e2ee.md §4.6.3).
-    state.compare_log(&entries, is_read_to_end);
-    if entries.iter().any(|entry| entry.version > state.cursor) {
-      // Entries are judged against the newest roster the server shows, with its history. A failed
-      // read leaves them unread, to be judged next time: judged on an old roster they would be
-      // refused for good, and could end up as a stretch only a workspace admin can end.
-      self.sync_workspace().await?;
-      self.complete_admin_history().await?;
-      // A founder must hold the key this device pins for them; pin before verifying, or the
-      // entry would be skipped for good.
-      let claimed = founder_candidates(&state, &entries);
-      let pinned = self.pin_identities(claimed).await?;
-      let workspace = self.workspace()?;
-      let verifier = RoleVerifier {
-        conversation,
-        workspace: &workspace,
-        roster_max_age_ms: self.roster_max_age_ms(),
-        now_ms: self.now_ms(),
-        tenure_clock_skew_ms: i64::try_from(self.settings.role_tenure_clock_skew.as_millis())
-          .unwrap_or(i64::MAX),
-        pinned: &pinned,
-      };
-      for error in state.apply_entries(entries, &verifier) {
-        tracing::warn!(conversation_id = %conversation, %error, "skipped a channel role entry");
-      }
-    }
-    if is_read_to_end {
-      state.note_read(roster_at_read);
-    }
-    state.check_ahead();
-    if let Some(alarm) = &state.maybe_alarm {
-      tracing::error!(conversation_id = %conversation, %alarm, "channel role log alarm");
-    }
-    if let Some(from) = state.maybe_unverified_from {
-      tracing::warn!(conversation_id = %conversation, from, "this device can't verify a stretch of the channel's role log");
-    }
-    self.put_channel_role_state(conversation, &state)
+    let read: Vec<RoleLogRead> = self.read_role_log(conversation).await?.into_iter().collect();
+    self.judge_role_logs(read).await
   }
 
   /// Signs the channel's roles after `changes` (`Member` drops a role) if this user can do so in a
@@ -588,15 +559,29 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Syncs the role logs of channels where a member showed a newer head; afterwards their state
-  /// says whether this device is shown less than its colleagues. One read when nothing is due.
+  /// says whether this device is shown less than its colleagues. One read when nothing is due. The
+  /// logs are read first and judged together, so the workspace roster is read once for all of them
+  /// (#1706), not once per channel.
   pub async fn check_channel_roles_heads(&mut self) -> Result<(), CoreError> {
     let ahead = self.channel_roles_ahead()?;
     if ahead.is_empty() {
       return Ok(());
     }
+    let mut reads = Vec::new();
+    let mut held_entries = 0;
+    for conversation in &ahead {
+      if let Some(read) = self.read_role_log(*conversation).await? {
+        held_entries += read.entries.len();
+        reads.push(read);
+      }
+      if held_entries >= MAX_HELD_ROLE_ENTRIES {
+        self.judge_role_logs(std::mem::take(&mut reads)).await?;
+        held_entries = 0;
+      }
+    }
+    self.judge_role_logs(reads).await?;
     let mut still_open = BTreeSet::new();
     for conversation in &ahead {
-      self.sync_channel_roles(*conversation).await?;
       // A log too long for one read hasn't shown the entries members sent yet: read on next time.
       if !self.channel_role_state(*conversation)?.unconfirmed.is_empty() {
         still_open.insert(*conversation);
@@ -627,19 +612,42 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .map(|(conversation, _)| *conversation)
       .take(ROLE_LOG_READS_PER_PASS)
       .collect();
+    // Each log is read on its own, so one channel that fails holds up no other; they are judged
+    // together, on one read of the roster.
+    let mut reads = Vec::new();
+    let mut read_channels = Vec::new();
     for conversation in batch {
-      if let Err(error) = self.sync_channel_roles(conversation).await {
-        tracing::debug!(conversation_id = %conversation, %error, "channel role log due after a removal not read yet");
-        if let Some(read) = due.get_mut(&conversation) {
-          read.failures = read.failures.saturating_add(1);
-          read.not_before_ms = now.saturating_add(role_read_retry_ms(read.failures));
-        }
-      } else {
-        due.remove(&conversation);
+      match self.read_role_log(conversation).await {
+        Ok(maybe_read) => {
+          reads.extend(maybe_read);
+          read_channels.push(conversation);
+        },
+        Err(error) => postpone_due_read(&mut due, conversation, now, &error),
       }
-      records::put_json(&self.store, Table::Workspace, CHANNEL_ROLES_DUE_KEY, &due)?;
     }
-    Ok(())
+    let queued_before = self.due_queue_generation()?;
+    let judged = self.judge_role_logs(reads).await;
+    // The roster read on the way ended another admin's tenure: every channel was queued afresh, and
+    // these logs were read before that roster, so they stay due with the rest.
+    if self.due_queue_generation()? != queued_before {
+      if let Err(error) = judged {
+        tracing::debug!(%error, "channel role logs due after a removal not read yet");
+      }
+      return Ok(());
+    }
+    match judged {
+      Ok(()) => {
+        for conversation in read_channels {
+          due.remove(&conversation);
+        }
+      },
+      Err(error) => {
+        for conversation in read_channels {
+          postpone_due_read(&mut due, conversation, now, &error);
+        }
+      },
+    }
+    records::put_json(&self.store, Table::Workspace, CHANNEL_ROLES_DUE_KEY, &due)
   }
 
   /// Marks every channel this device has role state for as due. Runs when a verified roster ends an
@@ -652,7 +660,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .filter_map(|(key, _)| key.strip_prefix(CHANNEL_ROLES_KEY_PREFIX)?.parse().ok())
       .map(|conversation| (conversation, DueRoleRead::default()))
       .collect();
-    records::put_json(&self.store, Table::Workspace, CHANNEL_ROLES_DUE_KEY, &due)
+    records::put_json(&self.store, Table::Workspace, CHANNEL_ROLES_DUE_KEY, &due)?;
+    let generation = self.due_queue_generation()?.wrapping_add(1);
+    records::put_json(
+      &self.store,
+      Table::Workspace,
+      CHANNEL_ROLES_DUE_GENERATION_KEY,
+      &generation,
+    )
+  }
+
+  /// How often the due reads were queued afresh, so a pass can tell that the queue it holds a copy
+  /// of was replaced while it ran.
+  fn due_queue_generation(&self) -> Result<u64, CoreError> {
+    Ok(records::get_json(&self.store, Table::Workspace, CHANNEL_ROLES_DUE_GENERATION_KEY)?.unwrap_or(0))
   }
 
   fn channel_roles_ahead(&self) -> Result<BTreeSet<ConversationId>, CoreError> {
@@ -936,6 +957,91 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
+  /// Reads the channel's new role entries, without judging them yet. `None` when the server refuses
+  /// the log (not a member any more, an older server).
+  async fn read_role_log(&self, conversation: ConversationId) -> Result<Option<RoleLogRead>, CoreError> {
+    let mut state = self.channel_role_state(conversation)?;
+    state.prepare_read();
+    // Before the read, so an entry that arrives while it runs isn't judged by a newer roster.
+    let roster_at_read = self.workspace()?.roster.version;
+    let (entries, is_read_to_end) = match self.fetch_role_log(conversation, state.log_read_from()).await {
+      Ok(read) => read,
+      Err(CoreError::Api(error)) if error.is_not_found() || error.is_forbidden() => return Ok(None),
+      Err(error) => return Err(error),
+    };
+    // Entries members sent in the channel: the log must show the same (e2ee.md §4.6.3).
+    state.compare_log(&entries, is_read_to_end);
+    Ok(Some(RoleLogRead {
+      conversation,
+      state,
+      entries,
+      is_read_to_end,
+      roster_at_read,
+    }))
+  }
+
+  /// Verifies the new entries of logs read before and stores each channel's state. The workspace
+  /// roster is read once for all of them, after the last log was read, and only if one has new
+  /// entries: every entry is then judged against a roster at least as new as the one it was signed
+  /// on (e2ee.md §4.6.1). A failed roster read stores nothing, so every entry stays unread.
+  async fn judge_role_logs(&mut self, reads: Vec<RoleLogRead>) -> Result<(), CoreError> {
+    let has_new_entries = reads
+      .iter()
+      .any(|read| read.entries.iter().any(|entry| entry.version > read.state.cursor));
+    if has_new_entries {
+      // Entries are judged against the newest roster the server shows, with its history. A failed
+      // read leaves them unread, to be judged next time: judged on an old roster they would be
+      // refused for good, and could end up as a stretch only a workspace admin can end.
+      self.sync_workspace().await?;
+      self.complete_admin_history().await?;
+    }
+    for read in reads {
+      self.judge_role_log(read).await?;
+    }
+    Ok(())
+  }
+
+  /// One channel's part of [`Self::judge_role_logs`], on the roster read for all of them.
+  async fn judge_role_log(&mut self, read: RoleLogRead) -> Result<(), CoreError> {
+    let RoleLogRead {
+      conversation,
+      mut state,
+      entries,
+      is_read_to_end,
+      roster_at_read,
+    } = read;
+    if entries.iter().any(|entry| entry.version > state.cursor) {
+      // A founder must hold the key this device pins for them; pin before verifying, or the
+      // entry would be skipped for good.
+      let claimed = founder_candidates(&state, &entries);
+      let pinned = self.pin_identities(claimed).await?;
+      let workspace = self.workspace()?;
+      let verifier = RoleVerifier {
+        conversation,
+        workspace: &workspace,
+        roster_max_age_ms: self.roster_max_age_ms(),
+        now_ms: self.now_ms(),
+        tenure_clock_skew_ms: i64::try_from(self.settings.role_tenure_clock_skew.as_millis())
+          .unwrap_or(i64::MAX),
+        pinned: &pinned,
+      };
+      for error in state.apply_entries(entries, &verifier) {
+        tracing::warn!(conversation_id = %conversation, %error, "skipped a channel role entry");
+      }
+    }
+    if is_read_to_end {
+      state.note_read(roster_at_read);
+    }
+    state.check_ahead();
+    if let Some(alarm) = &state.maybe_alarm {
+      tracing::error!(conversation_id = %conversation, %alarm, "channel role log alarm");
+    }
+    if let Some(from) = state.maybe_unverified_from {
+      tracing::warn!(conversation_id = %conversation, from, "this device can't verify a stretch of the channel's role log");
+    }
+    self.put_channel_role_state(conversation, &state)
+  }
+
   async fn fetch_role_log(
     &self,
     conversation: ConversationId,
@@ -1025,6 +1131,20 @@ fn founder_candidates(state: &ChannelRoleState, entries: &[ChannelRoleLogEntryRe
     .filter_map(|user| crate::convert::user_from_crypto(user).ok())
     .take(MAX_FOUNDER_CANDIDATES)
     .collect()
+}
+
+/// A due role log read failed: it waits longer, and the other channels get their turn meanwhile.
+fn postpone_due_read(
+  due: &mut BTreeMap<ConversationId, DueRoleRead>,
+  conversation: ConversationId,
+  now_ms: i64,
+  error: &CoreError,
+) {
+  tracing::debug!(conversation_id = %conversation, %error, "channel role log due after a removal not read yet");
+  if let Some(read) = due.get_mut(&conversation) {
+    read.failures = read.failures.saturating_add(1);
+    read.not_before_ms = now_ms.saturating_add(role_read_retry_ms(read.failures));
+  }
 }
 
 /// How long a role log read waits after its `failures`th failure.
