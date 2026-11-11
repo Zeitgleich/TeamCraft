@@ -30,6 +30,7 @@ import androidx.core.content.pm.ShortcutManagerCompat
 import androidx.core.graphics.drawable.IconCompat
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.security.AppLockPrefs
+import de.zeitgleich.teamcraft.ui.BubbleActivity
 import de.zeitgleich.teamcraft.ui.MainActivity
 import de.zeitgleich.teamcraft.ui.ShareShortcuts
 import kotlinx.coroutines.CoroutineScope
@@ -62,6 +63,8 @@ class MessageNotifier(
   /** Whether the phone projects to a car now (Android Auto). */
   private val isInCar: () -> Boolean = { false },
   private val elapsedNow: () -> Long = SystemClock::elapsedRealtime,
+  /** Conversations the user opted in to show as bubbles (#591). */
+  private val bubbles: BubblePrefs = BubblePrefs(context),
 ) {
   private val manager = NotificationManagerCompat.from(context)
   private val lock = Any()
@@ -583,8 +586,12 @@ class MessageNotifier(
   }
 
   private fun spec(entry: ConversationNotification, privacy: MessagePrivacy, alerting: NotificationAlerting) =
-    MessageNotificationSpecs.conversation(entry, privacy, alerting == NotificationAlerting.ALERT, labels())
+    MessageNotificationSpecs.conversation(entry, privacy, alerting == NotificationAlerting.ALERT, labels(), canBubble(entry))
       ?.let { if (alerting == NotificationAlerting.REFRESH) it.copy(alerting = alerting) else it }
+
+  /** Opted in for this conversation, and the system allows bubbles (the privacy rules apply in the spec). */
+  private fun canBubble(entry: ConversationNotification): Boolean =
+    entry.isDirect && bubbles.isEnabled(entry.conversationId) && bubbles.isAllowedBySystem()
 
   /**
    * Android drops updates of an app that posts more than about 5 notifications a second, without
@@ -653,6 +660,7 @@ class MessageNotifier(
       builder.setLargeIcon(avatars.maybeBitmap(sender.key) ?: PersonIcons.bitmap(sender.key, sender.name))
     }
     spec.maybeShortcut?.let { shortcut -> builder.setShortcutId(shortcut.id).setLocusId(LocusIdCompat(shortcut.id)) }
+    if (spec.isBubble) spec.maybeShortcut?.let { shortcut -> builder.setBubbleMetadata(bubbleMetadata(shortcut)) }
     spec.actions.forEach { action ->
       builder.addAction(
         when (action) {
@@ -663,6 +671,26 @@ class MessageNotifier(
       )
     }
     return builder.build()
+  }
+
+  /**
+   * The conversation as a bubble: [BubbleActivity] shows it. Bubbles need a mutable PendingIntent
+   * (the system adds the display bounds), so the intent names its component and carries the launch
+   * token like the notification's own tap.
+   */
+  private fun bubbleMetadata(shortcut: ShortcutSpec): NotificationCompat.BubbleMetadata {
+    val intent = Intent(context, BubbleActivity::class.java)
+      .setData(conversationUri(shortcut.id))
+      .putExtra(MainActivity.EXTRA_CONVERSATION_ID, shortcut.id)
+      .putExtra(MainActivity.EXTRA_LAUNCH_TOKEN, LaunchToken.of(context))
+    val pending = PendingIntent.getActivity(context, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE)
+    val label = shortcut.label.ifBlank { context.getString(R.string.app_name) }
+    val key = shortcut.maybePerson?.key ?: shortcut.id
+    return NotificationCompat.BubbleMetadata.Builder(pending, IconCompat.createWithAdaptiveBitmap(PersonIcons.bitmap(key, label)))
+      .setDesiredHeight(BUBBLE_HEIGHT_DP)
+      .setAutoExpandBubble(false)
+      .setSuppressNotification(false)
+      .build()
   }
 
   private fun messagingStyle(conversation: ConversationStyleSpec): NotificationCompat.MessagingStyle {
@@ -923,6 +951,7 @@ class MessageNotifier(
     private const val QUIET_NOTE_TAG = "quiet_note"
     private const val QUIET_NOTE_MS = 3_000L
     private const val POST_CONFIRM_MS = 1_500L
+    private const val BUBBLE_HEIGHT_DP = 600
     private const val EXTRA_REVISION = "de.zeitgleich.teamcraft.REVISION"
     private const val GROUP_MESSAGES = "de.zeitgleich.teamcraft.MESSAGES"
     private const val SELF_KEY = "self"

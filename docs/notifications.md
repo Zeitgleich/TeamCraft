@@ -862,6 +862,20 @@ read without bringing the window up).
   (issue #409). The counts live in the server process, so after a restart a device shows no push until
   the next one.
 
+### Android conversation bubbles (issue #591)
+
+A direct message (one-to-one or group) can float as a bubble on Android 11+. It is a device setting,
+off by default: "Show as bubble" in the conversation's notification settings (direct messages only;
+it does not follow the account). A notification gets `BubbleMetadata` only when all hold: the user
+opted this conversation in, the system allows bubbles (`NotificationManager.areBubblesAllowed()` and
+the direct messages channel's `canBubble()`), the notification shows message content (the
+"sender only" and "nothing" settings and the app lock suppress the bubble, as they suppress the
+text), and it has its conversation shortcut. The expanded bubble is `BubbleActivity`, a separate
+entry that shows the conversation screen; tapping the notification, shares and links still open the
+main activity. With the app lock on, or in any state that needs sign-in, the bubble sends the user to
+the main activity. A conversation deleted or left while its bubble is up closes it and clears the
+notification. Turning the toggle off re-posts the notification silently without the bubble.
+
 ### What only real devices can show
 
 Emulators and simulators do not reproduce Doze, App Standby buckets, OEM battery managers, PushKit's
