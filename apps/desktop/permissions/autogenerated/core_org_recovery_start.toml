@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-core-org-recovery-start"
+description = "Enables the core_org_recovery_start command without any pre-configured scope."
+commands.allow = ["core_org_recovery_start"]
+
+[[permission]]
+identifier = "deny-core-org-recovery-start"
+description = "Denies the core_org_recovery_start command without any pre-configured scope."
+commands.deny = ["core_org_recovery_start"]

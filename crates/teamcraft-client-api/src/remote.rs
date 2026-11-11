@@ -8,7 +8,7 @@ use teamcraft_proto::ScheduledMessageId;
 use teamcraft_proto::synced_settings::{SettingWrite, SyncedSettings};
 use teamcraft_proto::{
   AttachmentId, BackgroundId, Base64Bytes, CallRosterEntry, CategoryId, HistoryPolicy, OrgBackgroundId,
-  SignInReason,
+  RecoveryRequestId, SignInReason,
 };
 
 use crate::actions::{
@@ -406,6 +406,50 @@ pub enum LinkStatus {
   },
 }
 
+/// This (new) device's request for organization recovery (e2ee.md §6.3.1), as the shell reports
+/// it. The person lost every device and the kit; the IT department decides.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum OrgRecoveryStatus {
+  /// No request on this device: none made yet, or a restart lost its one-time key.
+  #[default]
+  NotStarted,
+  /// The organization can't recover this account (not set up, switched off for this person, or
+  /// nothing to recover): only a reset is left.
+  Unavailable,
+  /// A request is open: the person reads `code` to an admin.
+  Requested {
+    request_id: RecoveryRequestId,
+    code: String,
+    stage: OrgRecoveryStage,
+  },
+  #[serde(other)]
+  Unknown,
+}
+
+/// How far an open organization recovery got.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "stage", rename_all = "snake_case")]
+pub enum OrgRecoveryStage {
+  /// The request is new: nothing asked from the server yet.
+  Sent,
+  /// Waiting for admins to approve.
+  Waiting {
+    approvals: u32,
+    required_approvals: u32,
+  },
+  /// Enough admins approved; the last approver's device unlocks the key for this one.
+  Approved,
+  /// The key arrived: this device can finish.
+  Ready,
+  Denied,
+  Expired,
+  /// Withdrawn, e.g. on another device.
+  Cancelled,
+  #[serde(other)]
+  Unknown,
+}
+
 /// A signed-in device showing a code for a new phone to scan (*Link a phone*, e2ee.md §5, issue
 /// #998). Once the phone scanned it, the user types the code the phone shows, as for a code this
 /// device scanned.
@@ -595,6 +639,9 @@ pub enum EnrollSecret {
   Passphrase { passphrase: String },
   /// Desktop: the backup key this computer kept in its OS keychain (e2ee.md §6.5.6).
   KeptOnDevice,
+  /// Recovery through the organization (e2ee.md §6.3.1), once the admins approved this device's
+  /// open request: the new kit's key protects the account from then on.
+  OrgRecovery { recovery_key: String },
   /// The device of a meeting guest (browser only): an ephemeral identity with no backup.
   Guest,
 }
@@ -605,6 +652,7 @@ impl std::fmt::Debug for EnrollSecret {
       Self::RecoveryKey { .. } => "RecoveryKey([redacted])",
       Self::Passphrase { .. } => "Passphrase([redacted])",
       Self::KeptOnDevice => "KeptOnDevice",
+      Self::OrgRecovery { .. } => "OrgRecovery([redacted])",
       Self::Guest => "Guest",
     })
   }
@@ -3072,12 +3120,53 @@ mod tests {
       serde_json::to_string(&EnrollSecret::KeptOnDevice).expect("serialize"),
       r#"{"kind":"kept_on_device"}"#
     );
+    let org = EnrollSecret::OrgRecovery {
+      recovery_key: "CCCC-DDDD".into(),
+    };
+    assert_eq!(
+      serde_json::to_string(&org).expect("serialize"),
+      r#"{"kind":"org_recovery","recovery_key":"CCCC-DDDD"}"#
+    );
+    assert!(!format!("{org:?}").contains("CCCC"));
     assert_eq!(
       serde_json::to_string(&ChatAction::SetRecoveryKey {
         recovery_key: "K".into()
       })
       .expect("serialize"),
       r#"{"action":"set_recovery_key","recovery_key":"K"}"#
+    );
+  }
+
+  #[test]
+  fn org_recovery_status_has_stable_wire_names() {
+    let status = OrgRecoveryStatus::Requested {
+      request_id: "77".parse().expect("id"),
+      code: "ab12-cd34".into(),
+      stage: OrgRecoveryStage::Waiting {
+        approvals: 1,
+        required_approvals: 2,
+      },
+    };
+    let json = serde_json::to_string(&status).expect("serialize");
+    assert_eq!(
+      json,
+      r#"{"state":"requested","request_id":"77","code":"ab12-cd34","stage":{"stage":"waiting","approvals":1,"required_approvals":2}}"#
+    );
+    assert_eq!(
+      serde_json::from_str::<OrgRecoveryStatus>(&json).expect("parse"),
+      status
+    );
+    assert_eq!(
+      serde_json::to_string(&OrgRecoveryStatus::Unavailable).expect("serialize"),
+      r#"{"state":"unavailable"}"#
+    );
+    assert_eq!(
+      serde_json::from_str::<OrgRecoveryStatus>(r#"{"state":"paused"}"#).expect("parse"),
+      OrgRecoveryStatus::Unknown
+    );
+    assert_eq!(
+      serde_json::from_str::<OrgRecoveryStage>(r#"{"stage":"escalated"}"#).expect("parse"),
+      OrgRecoveryStage::Unknown
     );
   }
 

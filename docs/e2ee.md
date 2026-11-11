@@ -3942,6 +3942,18 @@ sharing); nothing below is a new primitive.
   fingerprint of the request key (shown on the recovering device and compared by the admins). A person
   has one open request, which expires (`limits.org_recovery_request_ttl_secs`). Every step is an audit
   entry that targets the person, so it appears in their security log.
+- **On the recovering device** (phones, desktop and web alike: *Ask my IT department* in the first
+  run). It is an explanation first: the IT department decides, and without recovery set up for the
+  person (`403`/`409` on `POST /requests`) the device says that only a reset is left. Otherwise it
+  shows the code, has the person save and check a new recovery kit while the admins decide, and
+  finishes once the sealed key arrived. All clients run the same `OrgRecoveryAttempt` in
+  `teamcraft-core` (the phones through teamcraft-ffi, the desktop core and the browser's in-page
+  core through `OrgRecoveryFlow`). The request key lives only in the core's memory: a restart loses
+  it, so the device asks again with a new key and code and withdraws the old request (`DELETE`);
+  web and desktop keep the request ID (not secret) in `localStorage` for that. A sign-out before
+  the end withdraws the request too. The device has no device keys yet, so no gateway event reaches
+  it: it reads `GET /requests/{id}` every 5 s while the code or the finish step is on screen (and the
+  page is visible), not otherwise.
 
 ### 6.4 Account data in the key bag (implemented)
 

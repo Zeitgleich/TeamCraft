@@ -329,3 +329,20 @@
     transform: none;
   }
 }
+
+/* Recovery through the organization (org_recovery_setup.rs, #1705): the code to read out is
+   eight groups of four, so it wraps by group and stays readable at phone width. */
+.org-recovery-code {
+  font-size: var(--text-2xl);
+  letter-spacing: 0.08em;
+  padding-left: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.onboarding .status-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

@@ -118,6 +118,7 @@ pub mod notification_prompt;
 pub mod offline_banner;
 pub mod onboarding;
 pub mod org_badge;
+pub mod org_recovery_setup;
 pub mod page;
 pub mod pdf_pane;
 pub mod pending_button;

@@ -95,8 +95,9 @@ pub fn parse_recovery_key(text: &str) -> Result<RecoveryKey, CoreError> {
 
 /// What a recovering device received from the combining admin.
 pub struct OrgRecoveryUnlock {
-  /// The one-time key whose public part the admins sealed to.
-  pub key: RecoveryRequestKey,
+  /// The one-time key whose public part the admins sealed to (shared with the request that keeps
+  /// it, so a failed enrollment can be retried).
+  pub key: std::sync::Arc<RecoveryRequestKey>,
   /// The request this device made (its code was compared with the admin).
   pub request: RecoveryRequest,
   /// The user's backup key, sealed to the request.

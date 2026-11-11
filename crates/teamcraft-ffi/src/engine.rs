@@ -170,7 +170,7 @@ pub(crate) struct Engine {
   maybe_loop_started: Option<tokio::time::Instant>,
   /// The enrolled identity's fingerprint (empty before enrollment).
   pub(crate) identity_fingerprint: String,
-  pub(crate) maybe_recovery: Option<crate::bridge::PendingRecovery>,
+  pub(crate) maybe_recovery: Option<teamcraft_core::client::OrgRecoveryAttempt>,
   maybe_link_offer: Option<Rc<LinkOffer>>,
   /// What the new device tells the user's other devices about itself while it waits.
   maybe_link_announcement: Option<LinkAnnouncement>,

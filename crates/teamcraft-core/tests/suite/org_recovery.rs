@@ -126,7 +126,7 @@ async fn recover_through_two_admins(new_secret: NewBackupSecret, unlock_after: E
   let recovery_options = EnrollmentOptions {
     secret: EnrollmentSecret::OrgRecovery {
       unlock: OrgRecoveryUnlock {
-        key,
+        key: std::sync::Arc::new(key),
         request,
         sealed_backup_key,
       },

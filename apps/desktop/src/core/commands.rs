@@ -11,14 +11,14 @@ use teamcraft_client_api::model::{Message, ThreadId};
 use teamcraft_client_api::remote::{AttachmentPriority, LinkRequestView};
 use teamcraft_client_api::remote::{
   CORE_CHANGED_EVENT, CORE_FAILED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreConnection,
-  CoreStatus, EnrollRequest, LinkStatus, MessageWindow, PhoneLinkStatus,
+  CoreStatus, EnrollRequest, LinkStatus, MessageWindow, OrgRecoveryStatus, PhoneLinkStatus,
 };
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_core::clock::{Clock, SystemClock};
 use teamcraft_core::store::SecretVault;
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_media::effects::normalize_background_file;
-use teamcraft_proto::{ConversationId, MessageId, UserId};
+use teamcraft_proto::{ConversationId, MessageId, RecoveryRequestId, UserId};
 use tokio::sync::oneshot::error::RecvError;
 
 use super::runtime::{CoreConfig, CoreRuntime, FailureHandler, KeyChoice, SaveTo, TokenCache};
@@ -308,6 +308,27 @@ pub fn core_approval_cancel(host: State<'_, CoreHost>) -> Result<(), CommandErro
 #[tauri::command(rename_all = "snake_case")]
 pub async fn core_link_announce(host: State<'_, CoreHost>) -> Result<(), CommandError> {
   Ok(host.current()?.link_announce().await?)
+}
+
+/// New device: asks the organization to recover the account (e2ee.md §6.3.1), withdrawing
+/// `maybe_previous`, a request the page made before it reloaded.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn core_org_recovery_start(
+  host: State<'_, CoreHost>,
+  maybe_previous: Option<RecoveryRequestId>,
+) -> Result<OrgRecoveryStatus, CommandError> {
+  Ok(host.current()?.org_recovery_start(maybe_previous).await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn core_org_recovery_status(host: State<'_, CoreHost>) -> Result<OrgRecoveryStatus, CommandError> {
+  Ok(host.current()?.org_recovery_status().await?)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn core_org_recovery_cancel(host: State<'_, CoreHost>) -> Result<(), CommandError> {
+  host.current()?.org_recovery_cancel();
+  Ok(())
 }
 
 #[tauri::command(rename_all = "snake_case")]
