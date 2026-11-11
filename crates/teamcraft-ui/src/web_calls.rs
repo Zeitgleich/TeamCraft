@@ -326,7 +326,10 @@ impl WebCallHost {
       .call(EXPORT_ACT, &[JsValue::from_str(&json)])
       .await
       .map(|answer| answer.as_string())
-      .map_err(|failure| failure.to_wire())
+      .map_err(|failure| {
+        crate::crash_reports::capture_call_failure(&failure);
+        failure.to_wire()
+      })
   }
 
   /// Shares the screen chosen in a picker [`pick_screen`] opened (`StartScreenShare` with the
@@ -652,7 +655,9 @@ impl Callbacks {
     };
     // A failure no action waits for (a camera that stopped mid-call), as `ActionFailure` wire text.
     let failed = Closure::<dyn Fn(String)>::new(|wire: String| {
-      crate::feedback::report_failure(ActionFailure::from_wire(&wire));
+      let failure = ActionFailure::from_wire(&wire);
+      crate::crash_reports::capture_call_failure(&failure);
+      crate::feedback::report_failure(failure);
     });
     // The organization's background rule and the pictures behind the camera, from the core (#439).
     let background_rule = Closure::<dyn Fn() -> Promise>::new(|| {

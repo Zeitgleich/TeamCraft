@@ -139,6 +139,32 @@ fn skip_components(path: &str, count: usize) -> &str {
   path.splitn(count + 1, '/').nth(count).unwrap_or_default()
 }
 
+/// `text` with every run of six or more digits (device, call and user IDs) as `[id]`, so the same
+/// failure on different devices or calls groups into one issue.
+pub fn without_ids(text: &str) -> String {
+  let mut out = String::with_capacity(text.len());
+  let mut digits = String::new();
+  for c in text.chars() {
+    if c.is_ascii_digit() {
+      digits.push(c);
+      continue;
+    }
+    push_digits(&mut out, &mut digits);
+    out.push(c);
+  }
+  push_digits(&mut out, &mut digits);
+  out
+}
+
+fn push_digits(out: &mut String, digits: &mut String) {
+  if digits.len() >= 6 {
+    out.push_str("[id]");
+  } else {
+    out.push_str(digits);
+  }
+  digits.clear();
+}
+
 fn is_relative(path: &str) -> bool {
   let bytes = path.as_bytes();
   let has_drive = bytes.len() > 1 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
@@ -156,6 +182,20 @@ fn truncate(text: String, max_chars: usize) -> String {
 mod tests {
   use super::super::event::{CrashLevel, ErrorSource, EventId};
   use super::*;
+
+  #[test]
+  fn ids_go_short_numbers_stay() {
+    assert_eq!(
+      without_ids("call key: no verified certificate for device 113934831536046080"),
+      "call key: no verified certificate for device [id]"
+    );
+    assert_eq!(
+      without_ids("epoch 12 of 99999 at 1080p"),
+      "epoch 12 of 99999 at 1080p"
+    );
+    assert_eq!(without_ids("123456"), "[id]");
+    assert_eq!(without_ids(""), "");
+  }
 
   /// What a session with secret content could leave behind; none of it may reach a report.
   const SECRETS: &[&str] = &[

@@ -234,10 +234,13 @@ pub enum CallFailure {
   /// The call broke off and couldn't be resumed within the reconnect grace period, along with the
   /// connection to the chat server: this device's own network.
   ConnectionLost,
+  /// The call's end-to-end encryption couldn't be set up with everyone in it (a key that didn't
+  /// verify, a DAVE change this device couldn't apply), so this device left the call.
+  EncryptionFailed,
 }
 
 impl CallFailure {
-  const ALL: [Self; 31] = [
+  const ALL: [Self; 32] = [
     Self::MicrophoneDenied,
     Self::MicrophoneMissing,
     Self::MicrophoneInUse,
@@ -269,6 +272,7 @@ impl CallFailure {
     Self::VideoOffAfterCrashes,
     Self::ServerLost,
     Self::ConnectionLost,
+    Self::EncryptionFailed,
   ];
 
   /// Stable name on the wire, after [`CALL_PREFIX`].
@@ -305,6 +309,7 @@ impl CallFailure {
       Self::VideoOffAfterCrashes => "video_off_after_crashes",
       Self::ServerLost => "server_lost",
       Self::ConnectionLost => "connection_lost",
+      Self::EncryptionFailed => "encryption_failed",
     }
   }
 

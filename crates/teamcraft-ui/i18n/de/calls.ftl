@@ -332,6 +332,7 @@ error-call-video-off-after-crashes = Dieses Fenster ist mehrmals hintereinander 
 error-call-sound-blocked = Der Browser hat der Seite keinen Ton erlaubt. Klicke irgendwo auf die Seite und versuche es erneut.
 error-call-server-lost = Der Anrufserver ist zurzeit nicht mehr erreichbar, der Anruf wurde deshalb beendet. Versuche es gleich noch einmal.
 error-call-connection-lost = Die Verbindung ist abgebrochen und der Anruf konnte nicht fortgesetzt werden. Prüfe deine Verbindung und ruf erneut an.
+error-call-encryption-failed = Die Verschlüsselung des Anrufs konnte nicht mit allen Teilnehmenden eingerichtet werden, deshalb hast du den Anruf verlassen. Tritt erneut bei. Passiert das wieder, sag dem Gastgeber Bescheid.
 
 ## Settings: sections, search and rows (#327)
 calls-noise-hint = Filtert Tippen, Lüfter und andere Hintergrundgeräusche.
