@@ -21,7 +21,7 @@ use teamcraft_media::audio_processing::AudioProcessingConfig;
 use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_auth::{CallBindingSigner, DeviceCallKeyAuthenticator};
 use teamcraft_media::call_cues::StatusCues;
-use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent, OwnPublication};
+use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent, OwnPublication, OwnVideoEnd};
 use teamcraft_media::call_native::{
   JoinTicketSource, NativeCall, NativeCallConfig, NativeCallError, TicketFuture, TrustFuture, TrustSource,
 };
@@ -239,6 +239,10 @@ pub struct CallStateInfo {
   /// The share's sound (what other apps play) is sent too.
   #[uniffi(default = false)]
   pub is_sharing_screen_sound: bool,
+  /// The user whose screen share replaced this device's (a call has one at a time): the share
+  /// turned off, and the app says who took over. Cleared when this device shares again.
+  #[uniffi(default = None)]
+  pub maybe_screen_share_taken_over_by: Option<String>,
   /// End-to-end encrypted with every participant's device verified.
   pub is_secured: bool,
   /// Other devices in the call.
@@ -684,6 +688,7 @@ pub(crate) async fn join(
     is_camera_on: false,
     is_sharing_screen: false,
     is_sharing_screen_sound: false,
+    maybe_screen_share_taken_over_by: None,
     is_secured: false,
     participant_count: 0,
     participant_user_ids: Vec::new(),
@@ -897,6 +902,9 @@ async fn apply_control(
       let result = start_screen_share(call, format, layers, context.slots.screen.clone()).await;
       // A failed restart (the screen turned) leaves no share running.
       state.is_sharing_screen = result.is_ok();
+      if result.is_ok() {
+        state.maybe_screen_share_taken_over_by = None;
+      }
       if result.is_err() {
         call.stop_screen_audio();
         state.is_sharing_screen_sound = false;
@@ -1305,10 +1313,13 @@ fn apply_event(
     CallEngineEvent::MuteChanged(is_muted) => state.is_muted = is_muted,
     CallEngineEvent::OwnVideoEnded {
       kind: VideoTrackKind::Screen,
-      ..
+      end,
     } => {
       state.is_sharing_screen = false;
       state.is_sharing_screen_sound = false;
+      if let OwnVideoEnd::TakenOver { by_user_id, .. } = end {
+        state.maybe_screen_share_taken_over_by = Some(by_user_id.to_string());
+      }
     },
     CallEngineEvent::DeafenChanged(is_deafened) => state.is_deafened = is_deafened,
     CallEngineEvent::RemovedByHost { .. } => return Some(CallEndReason::RemovedByHost),
@@ -1375,6 +1386,7 @@ fn ended(conversation: ConversationId, reason: CallEndReason) -> CallStateInfo {
     is_camera_on: false,
     is_sharing_screen: false,
     is_sharing_screen_sound: false,
+    maybe_screen_share_taken_over_by: None,
     is_secured: false,
     participant_count: 0,
     participant_user_ids: Vec::new(),
@@ -2095,6 +2107,27 @@ mod tests {
       apply_to(&mut state, screen_end);
       assert!(!state.is_sharing_screen);
       assert!(!state.is_sharing_screen_sound);
+      assert_eq!(state.maybe_screen_share_taken_over_by, None);
+    }
+
+    /// Another device's share replaced ours: it shows off, and the app learns who took over.
+    #[test]
+    fn a_share_taken_over_says_by_whom() {
+      let mut state = ended(conversation(5), CallEndReason::Left);
+      state.is_sharing_screen = true;
+      state.is_sharing_screen_sound = true;
+      let taken_over = CallEngineEvent::OwnVideoEnded {
+        kind: VideoTrackKind::Screen,
+        end: OwnVideoEnd::TakenOver {
+          by_user_id: UserId::from_snowflake(Snowflake::new(8).unwrap()),
+          by_device_id: DeviceId::from_snowflake(Snowflake::new(9).unwrap()),
+        },
+      };
+      assert!(is_own_screen_end(&taken_over));
+      apply_to(&mut state, taken_over);
+      assert!(!state.is_sharing_screen);
+      assert!(!state.is_sharing_screen_sound);
+      assert_eq!(state.maybe_screen_share_taken_over_by.as_deref(), Some("8"));
     }
   }
 

@@ -244,6 +244,15 @@ pub enum CallEvent {
     /// SFUs from before send none, and clients from before ignore it.
     #[serde(rename = "switch_secret", default, skip_serializing_if = "Option::is_none")]
     maybe_switch_secret: Option<Base64Bytes>,
+    /// The last screen share of this device that another device's share replaced
+    /// ([`CallEvent::ScreenShareTakenOver`]), also while this device was away: a device that comes
+    /// back must not publish that share again. SFUs from before send none.
+    #[serde(
+      rename = "screen_share_taken_over",
+      default,
+      skip_serializing_if = "Option::is_none"
+    )]
+    maybe_screen_share_taken_over: Option<ScreenShareTakeover>,
   },
   ParticipantJoined {
     participant: CallParticipant,
@@ -336,6 +345,11 @@ pub enum CallEvent {
   ScreenAudioUnpublished {
     stream_id: MediaStreamId,
   },
+  /// To a device whose screen share ended because another device started one: a call has one
+  /// screen share at a time, and the latest wins. Sent before the share's `video_unpublished` (and
+  /// the `screen_audio_unpublished` of its sound); the device stops capturing it. Older clients
+  /// read `Unknown` and still see their share unpublished.
+  ScreenShareTakenOver(ScreenShareTakeover),
   /// To the publisher: send a keyframe on this layer soon (a receiver switches to it).
   KeyframeRequested {
     stream_id: MediaStreamId,
@@ -413,6 +427,16 @@ pub struct CallParticipant {
 pub struct ScreenAudioTrack {
   pub device_id: DeviceId,
   pub stream_id: MediaStreamId,
+}
+
+/// A screen share that ended because another device started one ([`CallEvent::ScreenShareTakenOver`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenShareTakeover {
+  /// The share that ended.
+  pub stream_id: MediaStreamId,
+  /// Who shares now: the UI names them.
+  pub by_user_id: UserId,
+  pub by_device_id: DeviceId,
 }
 
 /// SFU-assigned id of one media stream, as in the datagram header (`teamcraft-media::datagram`).
@@ -718,6 +742,7 @@ mod tests {
       maybe_reconnect_grace_ms: Some(30_000),
       maybe_max_simulcast_layers: Some(4),
       maybe_switch_secret: None,
+      maybe_screen_share_taken_over: None,
     };
     let json = serde_json::to_string(&joined).unwrap();
     assert!(json.ends_with(r#""maybe_reconnect_grace_ms":30000,"maybe_max_simulcast_layers":4}"#));
@@ -744,6 +769,41 @@ mod tests {
       newer,
       CallEvent::Joined {
         maybe_max_simulcast_layers: Some(4),
+        ..
+      }
+    ));
+  }
+
+  /// One screen share at a time: the replaced share's device hears who took over, in an event
+  /// and, when it comes back, in `joined`; `joined` of older SFUs has none.
+  #[test]
+  fn screen_share_takeover_wire_format() {
+    let takeover = ScreenShareTakeover {
+      stream_id: MediaStreamId(12),
+      by_user_id: UserId::from_snowflake(Snowflake::new(4).unwrap()),
+      by_device_id: DeviceId::from_snowflake(Snowflake::new(5).unwrap()),
+    };
+    let event = CallEvent::ScreenShareTakenOver(takeover);
+    let json = r#"{"type":"screen_share_taken_over","stream_id":12,"by_user_id":"4","by_device_id":"5"}"#;
+    assert_eq!(serde_json::to_string(&event).unwrap(), json);
+    assert_eq!(serde_json::from_str::<CallEvent>(json).unwrap(), event);
+    let joined: CallEvent = serde_json::from_str(
+      r#"{"type":"joined","call_id":"7","participant":{"user_id":"4","device_id":"5","audio_stream_id":9},"participants":[],"screen_share_taken_over":{"stream_id":12,"by_user_id":"4","by_device_id":"5"}}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+      joined,
+      CallEvent::Joined { maybe_screen_share_taken_over: Some(read), .. } if read == takeover
+    ));
+    // An SFU from before sends none.
+    let old: CallEvent = serde_json::from_str(
+      r#"{"type":"joined","call_id":"7","participant":{"user_id":"4","device_id":"5","audio_stream_id":9},"participants":[]}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+      old,
+      CallEvent::Joined {
+        maybe_screen_share_taken_over: None,
         ..
       }
     ));

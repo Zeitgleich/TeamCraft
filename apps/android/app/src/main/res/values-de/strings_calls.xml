@@ -116,4 +116,6 @@
   <string name="call_sharing_screen">Du teilst deinen Bildschirm</string>
   <string name="call_sharing_screen_sound">Du teilst deinen Bildschirm und seinen Ton</string>
   <string name="call_share_screen_failed">Dein Bildschirm konnte nicht geteilt werden. Versuch es noch einmal über das Menü des Anrufs.</string>
+  <string name="call_share_taken_over">%1$s teilt jetzt den Bildschirm, darum wurde dein Teilen beendet.</string>
+  <string name="call_share_taken_over_unnamed">Jemand anderes teilt jetzt den Bildschirm, darum wurde dein Teilen beendet.</string>
 </resources>

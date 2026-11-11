@@ -116,4 +116,6 @@
   <string name="call_sharing_screen">You\'re sharing your screen</string>
   <string name="call_sharing_screen_sound">You\'re sharing your screen and its sound</string>
   <string name="call_share_screen_failed">Your screen couldn\'t be shared. Try again from the call\'s menu.</string>
+  <string name="call_share_taken_over">%1$s is now sharing their screen, so your share ended.</string>
+  <string name="call_share_taken_over_unnamed">Someone else is now sharing their screen, so your share ended.</string>
 </resources>

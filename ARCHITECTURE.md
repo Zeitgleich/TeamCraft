@@ -405,6 +405,19 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
   sends every layer its new uplink carries until then. A viewer's tile whose video got no new
   picture for 3 s says so ("Video paused: weak connection").
 - **Screen share:** separate session/stream, so a heavy share cannot degrade the call.
+- **One screen share at a time:** a call has one screen share; cameras are not limited. The SFU
+  decides, as it decides all media routing: when a device publishes a screen track, the SFU ends
+  every other device's share (and its sound) under the room's lock, so of two shares started at
+  about the same moment the request that reaches it last wins. The replaced device hears
+  `screen_share_taken_over` (stream and who took over) before everyone sees its share unpublished;
+  its client stops capturing and says "Bob is now sharing their screen, so your share ended".
+  Viewers simply switch to the new share. A device that was away when it happened (reconnecting,
+  or back without its slot) finds the takeover in its next `joined` and does not publish that share
+  again, which would take it back; the SFU keeps the last takeover per device for the call. A
+  device's own new share (another codec) replaces its earlier one without a takeover. Not kept
+  across an SFU restart: a device that missed its takeover and then rejoins a restarted SFU
+  publishes its share again, and the later of the two shares wins. Older clients read the event as
+  unknown but still see their share unpublished, and their engine stops sending it.
 - **Screen share quality** (`teamcraft_media::video::ScreenProfile`): two content modes, chosen per
   share (remembered): *detail* (default) keeps text sharp, up to 1440p at 30 fps; *motion* keeps
   smooth video, up to 1080p at 60 fps. The top layer's bitrate follows the pixel rate (about 0.06

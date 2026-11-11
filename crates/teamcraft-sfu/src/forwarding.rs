@@ -506,6 +506,26 @@ impl Forwarder {
     Ok(())
   }
 
+  /// Unpublishes every screen share of devices other than `sharer`'s: a call has one screen
+  /// share at a time, and the latest one wins. A device's own earlier share stays (it publishes
+  /// its share anew in another codec, then unpublishes the old one). Returns the owner and stream
+  /// of each share that ended.
+  pub fn end_other_screen_shares(&mut self, sharer: DeviceId) -> Vec<(DeviceId, StreamId)> {
+    let ended: Vec<(DeviceId, StreamId)> = self
+      .video_tracks
+      .iter()
+      .filter(|(_, route)| route.track.kind == VideoTrackKind::Screen && route.track.device_id != sharer)
+      .map(|(stream_id, route)| (route.track.device_id, *stream_id))
+      .collect();
+    for (_, stream_id) in &ended {
+      self.video_tracks.remove(stream_id);
+    }
+    if !ended.is_empty() {
+      self.forget_keyframe_requests();
+    }
+    ended
+  }
+
   /// The publisher's uplink carries `layers` of its track now (the lowest ones; it pauses the
   /// others): receivers are allocated no higher layer, so they move to one that is sent.
   pub fn set_uplink_layers(

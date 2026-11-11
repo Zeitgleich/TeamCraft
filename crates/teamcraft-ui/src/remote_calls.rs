@@ -613,6 +613,7 @@ mod tests {
         is_sharing_screen: false,
         background: BackgroundEffect::default(),
         maybe_muted_by_host: None,
+        maybe_screen_share_taken_over_by: None,
         screen_sound: Default::default(),
         is_reconnecting: false,
         reconnecting: Vec::new(),
