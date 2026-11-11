@@ -401,6 +401,8 @@ enum Input {
   Pulse,
   VideoEncoded {
     kind: VideoTrackKind,
+    /// What the layer's encoder encodes: a share's is AV1 where every viewer decodes it (#565).
+    codec: VideoCodec,
     layer: u8,
     data: Vec<u8>,
     is_keyframe: bool,
@@ -432,6 +434,31 @@ enum Input {
   #[cfg(feature = "call-view")]
   RoundTrip(Option<u32>),
   Command(Command),
+}
+
+/// What a layer's encoder put out, before it goes to the engine.
+#[derive(Debug, Clone, PartialEq)]
+struct EncodedChunk {
+  codec: VideoCodec,
+  layer: u8,
+  data: Vec<u8>,
+  is_keyframe: bool,
+  timestamp_us: f64,
+}
+
+impl EncodedChunk {
+  /// The frame the engine sends, in the codec the encoder encoded (#1733); `None` for a layer
+  /// number out of range.
+  fn into_frame(self) -> Option<EncodedVideoFrame> {
+    Some(EncodedVideoFrame {
+      codec: self.codec,
+      layer: SimulcastLayer::new(self.layer).ok()?,
+      // Encoder timestamps start at 0 and stay far below u64::MAX microseconds.
+      timestamp: EncodedVideoFrame::rtp_timestamp(self.timestamp_us.max(0.0) as u64),
+      is_keyframe: self.is_keyframe,
+      data: self.data,
+    })
+  }
 }
 
 enum Command {
@@ -1428,6 +1455,7 @@ impl CallState<'_> {
       Input::Pulse => return self.on_pulse(engine, audio).await,
       Input::VideoEncoded {
         kind,
+        codec,
         layer,
         data,
         is_keyframe,
@@ -1436,7 +1464,14 @@ impl CallState<'_> {
         if let Some(sender) = self.sender_of_kind(&kind) {
           sender.on_encoded(layer);
         }
-        self.send_video_frame(engine, &kind, layer, data, is_keyframe, timestamp_us);
+        let encoded = EncodedChunk {
+          codec,
+          layer,
+          data,
+          is_keyframe,
+          timestamp_us,
+        };
+        self.send_video_frame(engine, &kind, encoded);
       },
       Input::VideoEnded(kind) => self.end_video(engine, &kind),
       Input::VideoEncodeFailed {
@@ -2420,15 +2455,7 @@ impl CallState<'_> {
       .find(|sender| sender.publication.kind == *kind)
   }
 
-  fn send_video_frame(
-    &mut self,
-    engine: &mut CallEngine,
-    kind: &VideoTrackKind,
-    layer: u8,
-    data: Vec<u8>,
-    is_keyframe: bool,
-    timestamp_us: f64,
-  ) {
+  fn send_video_frame(&mut self, engine: &mut CallEngine, kind: &VideoTrackKind, encoded: EncodedChunk) {
     let has_sender = self.sender_of_kind(kind).is_some();
     if has_sender && !self.encoded_kinds.contains(kind) {
       self.encoded_kinds.push(kind.clone());
@@ -2441,17 +2468,11 @@ impl CallState<'_> {
     else {
       return;
     };
-    let Ok(layer) = SimulcastLayer::new(layer) else {
+    let Some(frame) = encoded.into_frame() else {
       return;
     };
-    let frame = EncodedVideoFrame {
-      codec: VideoCodec::H264,
-      layer,
-      // Encoder timestamps start at 0 and stay far below u64::MAX microseconds.
-      timestamp: EncodedVideoFrame::rtp_timestamp(timestamp_us.max(0.0) as u64),
-      is_keyframe,
-      data,
-    };
+    // A late frame of the encoders a codec switch replaced is refused (`WrongCodec`); the new
+    // ones start with keyframes.
     engine.send_video(stream_id, &frame, Instant::now());
   }
 }
@@ -4135,6 +4156,40 @@ mod tests {
         kind,
         own: OwnPublication::new(id),
       }
+    }
+  }
+
+  mod encoded_chunks {
+    use super::*;
+
+    /// #1733: a share's AV1 encoder output went out labelled H.264, and viewers got empty frames.
+    #[test]
+    fn a_frame_goes_out_in_the_codec_its_encoder_encoded() {
+      let chunk = EncodedChunk {
+        codec: VideoCodec::Av1,
+        layer: 1,
+        data: vec![0x12, 0x00, 0x0a, 0x04, 0, 1, 2, 3],
+        is_keyframe: true,
+        timestamp_us: 1_000_000.0,
+      };
+      let frame = chunk.clone().into_frame().unwrap();
+      assert_eq!(frame.codec, VideoCodec::Av1);
+      assert_eq!(frame.layer.value(), 1);
+      assert_eq!(frame.data, chunk.data);
+      assert!(frame.is_keyframe);
+      assert_eq!(frame.timestamp, EncodedVideoFrame::rtp_timestamp(1_000_000));
+    }
+
+    #[test]
+    fn a_layer_out_of_range_is_dropped() {
+      let chunk = EncodedChunk {
+        codec: VideoCodec::H264,
+        layer: u8::MAX,
+        data: vec![0, 0, 0, 1, 0x65],
+        is_keyframe: true,
+        timestamp_us: 0.0,
+      };
+      assert!(chunk.into_frame().is_none());
     }
   }
 
