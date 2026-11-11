@@ -123,6 +123,7 @@ davey = { path = "crates/vendor/davey" }
 openmls_memory_storage = { path = "crates/vendor/openmls_memory_storage" }
 wtransport = { path = "crates/vendor/wtransport" }
 tract-nnef = { path = "crates/vendor/tract-nnef" }
+wry = { path = "crates/vendor/wry" }
 
 # Keep target/ small: several worktrees build in parallel on one disk. Line tables are enough
 # for backtraces; dependencies carry no debug info.

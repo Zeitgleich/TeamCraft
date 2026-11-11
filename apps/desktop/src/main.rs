@@ -540,6 +540,9 @@ fn create_main_window(app: &tauri::AppHandle, maybe_was_visible: Option<bool>) -
     true => window.initialization_script(webview_menu::NATIVE_MENU_SCRIPT),
     false => window,
   };
+  // WebKit reads its memory limits only when the web context is created, with the first window.
+  #[cfg(target_os = "linux")]
+  webview_memory::set_memory_pressure();
   let window = window.build()?;
   #[cfg(target_os = "linux")]
   {

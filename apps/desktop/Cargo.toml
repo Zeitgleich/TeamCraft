@@ -89,9 +89,12 @@ zbus = { version = "5.13", default-features = false, features = ["tokio"] }
 # The desktop's window button layout (gtk-decoration-layout) for the custom title bar (MIT; the
 # same version Tauri uses on Linux, so already in the tree).
 gtk = "0.18"
-# The webview's cache model and page cache (webview_memory.rs; MIT, the version wry uses, so already in
-# the tree).
-webkit2gtk = "2.0.2"
+# The webview's cache model, page cache and memory pressure settings (webview_memory.rs; MIT, the
+# version wry uses, so already in the tree).
+webkit2gtk = { version = "2.0.2", features = ["v2_34"] }
+# Tauri's webview library, patched (crates/vendor/wry) to apply WebKit's memory pressure settings
+# when it creates the web context (#1708); the version Tauri uses, so no new crate.
+wry = { version = "0.57", default-features = false, features = ["os-webview"] }
 
 # macOS cameras (AVFoundation) and hardware H.264 through GStreamer's VideoToolbox encoder
 # (`vtenc_h264`); untested. The dmg bundles GStreamer.framework (packaging/macos/bundle-gstreamer.sh);
