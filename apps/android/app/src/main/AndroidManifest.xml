@@ -16,6 +16,8 @@
   <!-- Video in calls and scanning the device-link QR code. -->
   <uses-permission android:name="android.permission.CAMERA" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+  <!-- Sharing the screen in a call (MediaProjection, while the ongoing-call service runs). -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
   <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
   <application
@@ -116,7 +118,7 @@
     <service
       android:name=".calls.CallService"
       android:exported="false"
-      android:foregroundServiceType="phoneCall|microphone|camera" />
+      android:foregroundServiceType="phoneCall|microphone|camera|mediaProjection" />
 
     <!-- Android Auto calling: lists conversations to call (Car App Library, category CALLING). -->
     <service
