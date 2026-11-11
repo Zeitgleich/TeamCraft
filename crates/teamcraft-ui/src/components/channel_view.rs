@@ -772,7 +772,7 @@ fn ChannelHeader(
             });
           }
         >
-          <Icon name=IconName::Pin />
+          <Icon name=IconName::Bookmark />
         </button>
         <button
           class="header-btn"
@@ -904,7 +904,7 @@ fn ConversationMore(
             {move || i18n.t_count("members-button-label", member_count())}
           </button>
           <button type="button" class="menu-item" role="menuitem" on:click=move |_| choose(|state, _, _| state.panel.set(SidePanel::Pins))>
-            <Icon name=IconName::Pin />
+            <Icon name=IconName::Bookmark />
             {move || i18n.t("pins-title")}
           </button>
           <button type="button" class="menu-item" role="menuitem" on:click=move |_| {

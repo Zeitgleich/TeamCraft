@@ -826,7 +826,7 @@ private fun PinnedBanner(message: Message) {
   Surface(color = MaterialTheme.colorScheme.secondaryContainer, modifier = Modifier.fillMaxWidth()) {
     Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
       Icon(
-        painterResource(R.drawable.ic_push_pin),
+        painterResource(R.drawable.ic_bookmark),
         contentDescription = stringResource(R.string.message_pinned),
         modifier = Modifier.padding(end = 8.dp).size(16.dp),
       )
