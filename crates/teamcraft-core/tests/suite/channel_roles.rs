@@ -1598,7 +1598,8 @@ async fn a_pass_over_several_channels_reads_the_roster_once() {
 
 /// An entry signed by an admin of a newer roster than the one this device held when the pass began
 /// is judged on that newer roster, read once after the logs: it verifies, and nothing is refused
-/// for good on an old roster.
+/// for good on an old roster. The server publishes that roster between the device's first log read
+/// and its roster read, so a pass reading the roster first fails here.
 #[tokio::test]
 async fn an_entry_on_a_roster_newer_than_the_devices_verifies_in_the_pass() {
   let server = FakeServer::new();
@@ -1640,6 +1641,9 @@ async fn an_entry_on_a_roster_newer_than_the_devices_verifies_in_the_pass() {
     "Carol's device hasn't seen the roster naming Dave"
   );
 
+  // The roster naming Dave appears only once the pass has read the logs: a pass that read the
+  // roster first would judge Dave's entry on the old one and refuse it for good.
+  server.publish_roster_on_next_role_log_read(held);
   mark_ahead(&world.carol, &[channel, other]);
   let (roster, _) = workspace_reads(&server);
   world.carol.client.check_channel_roles_heads().await.unwrap();
@@ -1657,6 +1661,109 @@ async fn an_entry_on_a_roster_newer_than_the_devices_verifies_in_the_pass() {
   assert!(state.maybe_rejection.is_none(), "{:?}", state.maybe_rejection);
   assert!(state.is_workspace_anchored);
   assert!(!state.has_unverified_stretch());
+}
+
+/// The other way round: an admin removed in a roster this device hasn't seen yet signs after the
+/// removal. The pass judges the entry on the roster read after the logs, which ended the tenure, and
+/// refuses it; on the roster held when the pass began it would have passed.
+#[tokio::test]
+async fn an_entry_after_a_removal_the_device_hasnt_seen_is_refused_in_the_pass() {
+  let server = FakeServer::new();
+  let mut world = LateWorld::new(&server).await;
+  let channel = world.anchored_channel().await;
+  let space = world.alice.space().await;
+  let other = carol_in_new_channel(&mut world, space, "other").await;
+  let carol_id = world.carol.client.user_id();
+  world.eve.client.sync_channel_roles(channel).await.unwrap();
+  world.carol.client.sync_workspace().await.unwrap();
+  let held = stored_workspace(&world.carol)["roster"]["version"]
+    .as_u64()
+    .unwrap();
+  world.eve_leaves().await;
+  server.advance_clock(std::time::Duration::from_secs(2 * 60 * 60));
+  world.clock.advance(2 * 60 * 60 * 1000);
+  let entries = server.role_log(channel).len();
+  world
+    .eve
+    .client
+    .sign_channel_roles(channel, &[(carol_id, ChannelRole::Admin)], false)
+    .await
+    .unwrap();
+  assert_eq!(
+    server.role_log(channel).len(),
+    entries + 1,
+    "Eve's device, on its old roster, signed"
+  );
+
+  server.publish_roster_on_next_role_log_read(held);
+  mark_ahead(&world.carol, &[channel, other]);
+  let (roster, _) = workspace_reads(&server);
+  world.carol.client.check_channel_roles_heads().await.unwrap();
+
+  assert_eq!(workspace_reads(&server).0, roster + 1);
+  let state = world.carol.client.channel_role_state(channel).unwrap();
+  assert_eq!(state.role_of(carol_id), ChannelRole::Member);
+  assert!(state.is_workspace_anchored);
+  assert!(!state.has_unverified_stretch());
+}
+
+/// A due pass whose roster read ends another admin's tenure leaves the queue that removal made: the
+/// logs it read came before that roster, so every channel is read again.
+#[tokio::test]
+async fn a_tenure_ending_during_a_due_pass_keeps_every_channel_due() {
+  let server = FakeServer::new();
+  let mut world = LateWorld::new(&server).await;
+  let (alice_id, carol_id) = (world.alice.client.user_id(), world.carol.client.user_id());
+  let mut dave = LateWorld::enroll(&server, &world.clock, "Dave").await;
+  let dave_id = dave.client.user_id();
+  world
+    .alice
+    .client
+    .publish_roster(&[
+      (alice_id, RosterRole::Owner),
+      (world.eve.client.user_id(), RosterRole::Admin),
+      (dave_id, RosterRole::Admin),
+    ])
+    .await
+    .unwrap();
+  server.set_admin(dave_id);
+  dave.client.full_sync().await.unwrap();
+  let mut channels = vec![world.anchored_channel().await];
+  let space = world.alice.space().await;
+  for name in ["a", "b", "c", "d", "e"] {
+    channels.push(carol_in_new_channel(&mut world, space, name).await);
+  }
+  // Eve leaves: Carol's device queues every channel.
+  world.clock.advance(60 * 60 * 1000);
+  world
+    .alice
+    .client
+    .publish_roster(&[(alice_id, RosterRole::Owner), (dave_id, RosterRole::Admin)])
+    .await
+    .unwrap();
+  world.carol.client.sync_workspace().await.unwrap();
+  assert_eq!(due_role_reads(&world.carol).len(), channels.len());
+  // New entries, so the pass reads the roster; and Dave leaves in a roster Carol hasn't seen.
+  for channel in &channels {
+    world
+      .alice
+      .client
+      .set_channel_role(*channel, carol_id, ChannelRole::Moderator)
+      .await
+      .unwrap();
+  }
+  world.clock.advance(60 * 60 * 1000);
+  world
+    .alice
+    .client
+    .publish_roster(&[(alice_id, RosterRole::Owner)])
+    .await
+    .unwrap();
+
+  world.carol.client.read_due_channel_roles().await.unwrap();
+
+  let due = due_role_reads(&world.carol);
+  assert_eq!(due.len(), channels.len(), "queued afresh, the read ones too");
 }
 
 /// A replay that didn't end on the verified head isn't asked for again at the same roster: reading

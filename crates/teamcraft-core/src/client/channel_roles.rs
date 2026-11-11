@@ -29,6 +29,8 @@ const CHANNEL_ROLES_KEY_PREFIX: &str = "channel_roles/";
 const CHANNEL_ROLES_AHEAD_KEY: &str = "channel_roles_ahead";
 /// The channels whose role logs are read after an admin left the roster, in [`Table::Workspace`].
 const CHANNEL_ROLES_DUE_KEY: &str = "channel_roles_due";
+/// Counts how often [`CHANNEL_ROLES_DUE_KEY`] was queued afresh, in [`Table::Workspace`].
+const CHANNEL_ROLES_DUE_GENERATION_KEY: &str = "channel_roles_due_generation";
 /// How many of those are read in one upkeep pass, so a removal is no burst.
 const ROLE_LOG_READS_PER_PASS: usize = 4;
 /// How long a failed one waits before it is read again, doubling up to the cap: one channel that
@@ -623,11 +625,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         Err(error) => postpone_due_read(&mut due, conversation, now, &error),
       }
     }
-    let ended_before = self.workspace()?.admin_history.ended_count();
+    let queued_before = self.due_queue_generation()?;
     let judged = self.judge_role_logs(reads).await;
     // The roster read on the way ended another admin's tenure: every channel was queued afresh, and
     // these logs were read before that roster, so they stay due with the rest.
-    if self.workspace()?.admin_history.ended_count() > ended_before {
+    if self.due_queue_generation()? != queued_before {
       if let Err(error) = judged {
         tracing::debug!(%error, "channel role logs due after a removal not read yet");
       }
@@ -658,7 +660,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .filter_map(|(key, _)| key.strip_prefix(CHANNEL_ROLES_KEY_PREFIX)?.parse().ok())
       .map(|conversation| (conversation, DueRoleRead::default()))
       .collect();
-    records::put_json(&self.store, Table::Workspace, CHANNEL_ROLES_DUE_KEY, &due)
+    records::put_json(&self.store, Table::Workspace, CHANNEL_ROLES_DUE_KEY, &due)?;
+    let generation = self.due_queue_generation()?.wrapping_add(1);
+    records::put_json(
+      &self.store,
+      Table::Workspace,
+      CHANNEL_ROLES_DUE_GENERATION_KEY,
+      &generation,
+    )
+  }
+
+  /// How often the due reads were queued afresh, so a pass can tell that the queue it holds a copy
+  /// of was replaced while it ran.
+  fn due_queue_generation(&self) -> Result<u64, CoreError> {
+    Ok(records::get_json(&self.store, Table::Workspace, CHANNEL_ROLES_DUE_GENERATION_KEY)?.unwrap_or(0))
   }
 
   fn channel_roles_ahead(&self) -> Result<BTreeSet<ConversationId>, CoreError> {
