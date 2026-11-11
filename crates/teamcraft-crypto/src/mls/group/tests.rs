@@ -9,6 +9,8 @@ use crate::membership::{HistoryShare, MembershipError};
 use crate::message::{MessageContext, MessageError, decrypt_message, encrypt_message};
 use crate::mls::{DefaultMlsProvider, create_key_package};
 
+mod anchored;
+
 const CONVERSATION: ConversationId = ConversationId::new(42);
 const ALICE: u64 = 1;
 const BOB: u64 = 2;

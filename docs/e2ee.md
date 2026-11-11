@@ -3060,10 +3060,13 @@ accepts Alice promoting Dave, then Dave's entry. Bob's device, given Carol's old
 
 ### 4.6.5 Anchoring a channel's founder, space and name (issue #1171)
 
-**Status: decided, not implemented.** The owner decided D1 to D10 (table at the end) on #1171. A crypto review of
-this section comes before any code; the work is split into #1725 (the anchor), #1727 (signed space
-deletions), #1728 (anchoring older channels), #1729 (strict from creation) and #1726 (the
-meeting invitee list).
+**Status: decided; the cryptography is implemented, the clients don't use it yet.** The owner decided D1 to D10
+(table at the end) on #1171, and a crypto review changed the design (end of this section). `teamcraft-crypto`'s
+`channel_anchor` and `mls` hold the encoding, the hashes, the signatures, the verdicts, the pin and floor record,
+anchored founding and the move and rename commits (#1725, first part; "Implementation notes" below). Founding
+anchored channels from the apps, the checks on every join path and the name rules are #1725's second part; the rest
+is split into #1727 (signed space deletions), #1728 (anchoring older channels), #1729 (strict from creation) and
+#1726 (the meeting invitee list).
 
 **The gap.** Facts that decisions rest on are the server's word, or trust on first use:
 
@@ -3102,9 +3105,9 @@ vector with a varint length) and at most `max_anchor_bytes` (client, 4 KiB):
 struct {
   uint8  format;                     // 1
   ChannelAnchorFounding founding;
-  opaque founding_entry<V>;          // SignedLogEntry over founding (below)
-  ChannelProperties properties;
-  opaque properties_entry<V>;        // SignedLogEntry that authorized properties
+  ChannelProperties founding_properties;   // version 1, byte for byte for ever
+  opaque founding_entry<V>;          // SignedLogEntry over founding ‖ founding_properties (below)
+  optional<SignedPropertiesChange> last_change;   // none at version 1 (below, "Moves and renames")
 } ChannelAnchor;
 
 struct {
@@ -3142,7 +3145,7 @@ struct {
   |---------------------|----------------------------------------------------------------------------------------------------------|
   | The name hash       | `labeled("TeamCraft-v1 channel name", name<V>)`                                                          |
   | The properties hash | `labeled("TeamCraft-v1 channel properties", ChannelProperties)`, the value `prev_hash` holds             |
-  | The founding hash   | `labeled("TeamCraft-v1 channel anchor pin", ChannelAnchorFounding ‖ ChannelProperties)` (the version 1)  |
+  | The founding hash   | `labeled("TeamCraft-v1 channel anchor pin", ChannelAnchorFounding ‖ founding_properties)` (version 1)    |
 
   The founding hash leaves out the signature and the certificate, so a re-encoded or re-signed founding of the
   same content has the same pin; signatures are verified with `verify_strict` (`ed25519-dalek`) everywhere, so a
@@ -3160,9 +3163,10 @@ struct {
   | A move or rename   | `ChannelProperties` (7) | the new `version` | `ChannelPropertiesChange` (below)                       |
   | A space's deletion | `SpaceDeletion` (8)     | `signed_at_ms`    | `SpaceDeletionDocument` (below)                         |
 
-  At version 1, `properties_entry` is empty and the founding entry covers the properties; later it holds the change
-  that set them. So **the extension verifies on its own**: a device that only ever saw the current epoch (a
-  newcomer's welcome, an add-back) checks the founding and the last change without the history of commits.
+  The current properties are the last change's, or `founding_properties` while there is none. The founding entry
+  covers `founding_properties`, which stay in the anchor, and the last change carries its own signed document. So
+  **the extension verifies on its own**: a device that only ever saw the current epoch (a newcomer's welcome, an
+  add-back) checks the founding and the last change without the history of commits.
 - **The name hash** is over the UTF-8 bytes of the name exactly as the client sent them in the create or rename
   request; nothing normalizes on the verifying side. Before sending, the client brings the name to NFC and refuses
   bidi controls, other control characters and invisible characters (zero-width, default-ignorable code points) at
@@ -3275,9 +3279,9 @@ the forger's to show anyway, and falls out of it later. The forger can't sign an
 
 #### Moves and renames
 
-A move or rename is one group context extensions proposal that replaces only the anchor's `properties` and
-`properties_entry`. Any member commits it, like a role commit in §4.6.2 ("Role changes while strict"), with the
-signed entry also in the commit's authenticated data, so a device judges it before it merges anything:
+A move or rename is one group context extensions proposal that replaces only the anchor's `last_change`. Any member
+commits it, like a role commit in §4.6.2 ("Role changes while strict"), with the signed change also in the commit's
+authenticated data (after the four bytes `TCAP`), so a device judges it before it merges anything:
 
 ```
 struct {
@@ -3285,19 +3289,26 @@ struct {
   opaque founding_hash[32];          // the anchor's founding hash: a change counts under one founding only
   uint64 signed_for_epoch;           // accepted up to 32 epochs later (§4.6, "Freshness")
   ChannelProperties properties;      // the new version, prev_hash = properties hash of the replaced properties
-  uint64 roster_version;             // for a workspace signer: the roster that made them one
+  uint64 roster_version;             // for a workspace signer: the roster that made them one; 0 otherwise
 } ChannelPropertiesChange;
+
+struct {
+  ChannelPropertiesChange change;
+  opaque entry<V>;                   // SignedLogEntry over change, log kind ChannelProperties, version = properties.version
+} SignedPropertiesChange;
 ```
 
-Every member checks that `format` and `founding` stay byte for byte, `founding_hash` is the anchor's, the version is
-one up, `prev_hash` is the properties hash of the properties it replaces, the extension's new properties are exactly
-the signed ones, `name_set_by` names the signer with the class the verdict gives them if the name changed and stays
+Every member checks that `format`, `founding`, `founding_properties` and `founding_entry` stay byte for byte,
+`founding_hash` is the anchor's, the version is one up, `prev_hash` is the properties hash of the properties it
+replaces, the extension's `last_change` is exactly the signed change in the authenticated data, `name_set_by` names the signer with the class the verdict gives them if the name changed and stays
 byte for byte if it didn't, the proposal changes no other extension (§4.6.2's strict roles and
 `required_capabilities` stay byte for byte; a role commit likewise keeps the anchor), the commit carries nothing
 else, and the signer may:
 
 - **A rename** (D5): any member with a leaf, as anybody in the group may add people (§4.6); in a strict channel only
-  its admins; workspace owners and admins of a fresh roster, also from outside the group. A member's rename counts
+  its admins; workspace owners and admins of a fresh roster, also from outside the group. A workspace signer's
+  class is `workspace` even when they are also a member; `founder` is set only by the founding (a founder's later
+  rename is a member's or a workspace signer's, until a strict channel's admin class exists). A member's rename counts
   for what the channel is called, and is shown with their name. It doesn't count for a purge: a name lets a
   deletion purge at once only when `name_set_by` is the founder, a strict channel's admin or a workspace signer.
   A name a member set (`member`) is **stale for deletions**, which take the retention; otherwise a member and the
@@ -3523,6 +3534,36 @@ and couldn't count for a purge.
     `UpdatePath` leaf, an external commit's leaf, and a group context extensions proposal while some leaf lacks it.
   - A `reviewed` anchor's roster version alone isn't enough when the roster is withheld past it: hence the epoch
     and the fresh roster. A roster withheld from every verifier remains (residual risks), as in §4.6.2.
+
+**Implementation notes** (#1725, first part: `teamcraft-crypto`). Writing the code changed or pinned down:
+
+- **The anchor keeps its version 1.** The design had `properties` and a `properties_entry` holding a
+  `SignedLogEntry`. That can't verify on its own: after the first change, the founding entry covers properties
+  that are no longer in the anchor, and a `SignedLogEntry` holds only the certificate and signature, not the
+  change's `signed_for_epoch` and `roster_version` it signed. So the anchor carries `founding_properties` (byte for
+  byte for ever, under the founding entry and the pin) and `optional<SignedPropertiesChange> last_change`, the
+  change document with its entry. The current properties are the last change's, else the founding's. Same content,
+  no new primitive; one more `ChannelProperties` (about 90 bytes).
+- **The last change on its own** (welcome, add-back, external commit): its signature must verify under the signer's
+  pinned key and name this conversation and founding. A workspace signer of the roster version it names (as of the
+  anchoring: the members of the time checked freshness) confirms space and name. A member with a leaf confirms the
+  name only if `name_set_by` is that member, and the space only if it is still the founding's (a member never
+  moves; the history in between isn't visible). Anything else makes both properties stale for this device; the
+  anchor still verifies.
+- **openmls is stricter than the design assumed.** All seven `required_capabilities` paths refuse an old leaf (tests
+  in `mls/group/tests/anchored.rs`); a welcome to an old app can't even be built by an honest adder. openmls also
+  refuses a group context whose unknown extension `required_capabilities` doesn't name, so a commit that keeps the
+  anchor and drops the requirement isn't built either. Before openmls, `ConversationGroup` refuses a key package
+  without the capability with `MustUpdate`, which the clients turn into "has to update".
+- **Interfaces.** Check 3 asks `IdentityDirectory::device_listing`, check 4 and the move and rename verdict ask
+  `MembershipAuthority::workspace_signer`; both answer `Unknown` by default, which grants nothing. The verdict of a
+  commit judges a workspace signer's roster as `Newest` (fresh); a verified anchor's properties are `Confirmed` or
+  `Stale` each. `AnchorFloor` is the pin and floor record for the account data (hashes as hex), merged by maximum;
+  two foundings or two hashes for one version mark it forked (no grants). Re-founding and its chain are the
+  account data's part (#1725, second part) and #1728's.
+- **The name hash's known answer:** `name_hash("general")` is
+  `e0c5e1a616c7db0ab0a95802b91233f845bc3d1194ef04a22aebee68280c9174` (SHA-256 of the one-byte label length, the
+  label, the varint length 7 and the bytes).
 
 **What implementing it takes.**
 

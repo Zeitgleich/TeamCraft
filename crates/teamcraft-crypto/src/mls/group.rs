@@ -3,10 +3,12 @@
 use std::collections::BTreeSet;
 
 use openmls::messages::group_info::VerifiableGroupInfo;
+use openmls::prelude::CommitMessageBundle;
 use openmls::prelude::{
-  GroupEpoch, GroupId, KeyPackage, LeafNodeIndex, MlsGroup, MlsGroupJoinConfig, MlsGroupState,
-  MlsMessageBodyIn, MlsMessageIn, MlsMessageOut, ProcessedMessageContent, Proposal, Sender, StagedCommit,
-  StagedWelcome, WelcomeError,
+  Extension, ExtensionType, Extensions, GroupContext, GroupEpoch, GroupId, KeyPackage, LeafNodeIndex,
+  LeafNodeParameters, MlsGroup, MlsGroupJoinConfig, MlsGroupState, MlsMessageBodyIn, MlsMessageIn,
+  MlsMessageOut, ProcessedMessageContent, Proposal, RequiredCapabilitiesExtension, Sender, StagedCommit,
+  StagedWelcome, UnknownExtension, WelcomeError,
 };
 use openmls_traits::OpenMlsProvider;
 use openmls_traits::storage::StorageProvider as _;
@@ -17,7 +19,11 @@ use zeroize::Zeroizing;
 
 use super::content_keys::{ApplicationPayload, ContentKeyBundle, SealedContentKeys};
 use super::rejoin::{SignedRejoinRequest, VerifiedRejoinRequest};
-use super::{CIPHERSUITE, GroupMember, MlsError, credential, validate_key_package};
+use super::{CIPHERSUITE, GroupMember, MlsError, credential, leaf_capabilities, validate_key_package};
+use crate::channel_anchor::{
+  AnchorExpectation, CHANNEL_ANCHOR_EXTENSION_TYPE, ChannelAnchor, DEFAULT_MAX_ANCHOR_BYTES,
+  PROPERTIES_CHANGE_AAD_MAGIC, SignedPropertiesChange, VerifiedAnchor,
+};
 use crate::content_key::{ContentKey, ContentKeyId};
 use crate::domain;
 use crate::identity::{DeviceKeyPair, SignedDeviceCertificate, VerifiedDevice};
@@ -153,6 +159,9 @@ pub struct MembershipUpdate {
   pub is_self_removed: bool,
   /// The member whose commit it was, from its credential; `None` for this device's own commits.
   pub maybe_committer: Option<GroupMember>,
+  /// A move or rename of the channel (e2ee.md §4.6.5) that the commit made, checked: the anchor
+  /// now carries it. Raise the anchor floor with [`ConversationGroup::verified_anchor`].
+  pub maybe_properties_change: Option<Box<SignedPropertiesChange>>,
 }
 
 /// The membership effect of a commit, with every added device verified.
@@ -170,10 +179,60 @@ impl ConversationGroup {
     certificate: &SignedDeviceCertificate,
     conversation_id: ConversationId,
   ) -> Result<Self, MlsError> {
+    Self::create_with(
+      provider,
+      device,
+      certificate,
+      conversation_id,
+      Extensions::empty(),
+    )
+  }
+
+  /// Creates the group for a new channel or meeting chat with its signed anchor in the group
+  /// context of epoch 0 (e2ee.md §4.6.5, "Founding"), required of every leaf: an app that doesn't
+  /// announce the anchor can't be added or open a welcome. The anchor must be for this
+  /// conversation; the caller verifies it like every other ([`Self::verified_anchor`]).
+  pub fn create_anchored(
+    provider: &impl OpenMlsProvider,
+    device: &DeviceKeyPair,
+    certificate: &SignedDeviceCertificate,
+    conversation_id: ConversationId,
+    anchor: &ChannelAnchor,
+  ) -> Result<Self, MlsError> {
+    if anchor.founding().conversation_id != conversation_id {
+      return Err(MlsError::WrongConversation {
+        expected: conversation_id,
+        actual: anchor.founding().conversation_id,
+      });
+    }
+    let extensions = Extensions::from_vec(vec![
+      Extension::Unknown(
+        CHANNEL_ANCHOR_EXTENSION_TYPE,
+        UnknownExtension(anchor.to_bytes()?),
+      ),
+      Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(
+        &[ExtensionType::Unknown(CHANNEL_ANCHOR_EXTENSION_TYPE)],
+        &[],
+        &[],
+      )),
+    ])
+    .map_err(|error| MlsError::openmls("anchor extension", error))?;
+    Self::create_with(provider, device, certificate, conversation_id, extensions)
+  }
+
+  fn create_with(
+    provider: &impl OpenMlsProvider,
+    device: &DeviceKeyPair,
+    certificate: &SignedDeviceCertificate,
+    conversation_id: ConversationId,
+    extensions: Extensions<GroupContext>,
+  ) -> Result<Self, MlsError> {
     let group = MlsGroup::builder()
       .with_group_id(group_id(conversation_id))
       .ciphersuite(CIPHERSUITE)
       .use_ratchet_tree_extension(true)
+      .with_capabilities(leaf_capabilities(&[]))
+      .with_group_context_extensions(extensions)
       .build(provider, device, credential::credential_with_key(certificate)?)
       .map_err(|error| MlsError::openmls("group creation", error))?;
     Ok(Self::from_group(conversation_id, group, ChangeHistory::default()))
@@ -375,6 +434,11 @@ impl ConversationGroup {
       .skip_lifetime_validation()
       .build_group(provider, info, credential_with_key)
       .map_err(|error| MlsError::openmls("external join", error))?
+      .leaf_node_parameters(
+        LeafNodeParameters::builder()
+          .with_capabilities(leaf_capabilities(&[]))
+          .build(),
+      )
       .load_psks(provider.storage())
       .map_err(|error| MlsError::openmls("external join", error))?
       .build(provider.rand(), provider.crypto(), device, |_| true)
@@ -444,6 +508,34 @@ impl ConversationGroup {
 
   pub fn conversation_id(&self) -> ConversationId {
     self.conversation_id
+  }
+
+  /// The anchor extension's bytes in the current group context, unparsed; `None` for a group
+  /// without one (a DM, a channel from before anchors).
+  pub fn anchor_bytes(&self) -> Option<&[u8]> {
+    anchor_bytes_of(self.group.extensions())
+  }
+
+  /// Verifies the group's anchor (checks 1 to 5, e2ee.md §4.6.5) against the tree and epoch this
+  /// device holds; `Ok(None)` for a group without one. The pin and the floor are the caller's.
+  pub fn verified_anchor(
+    &self,
+    expected: &AnchorExpectation,
+    directory: &impl IdentityDirectory,
+    authority: &impl MembershipAuthority,
+  ) -> Result<Option<VerifiedAnchor>, MlsError> {
+    let Some(bytes) = self.anchor_bytes() else {
+      return Ok(None);
+    };
+    let anchor = ChannelAnchor::from_bytes(bytes, DEFAULT_MAX_ANCHOR_BYTES)?;
+    let tree_users = self.members()?.into_iter().map(|member| member.user_id).collect();
+    Ok(Some(anchor.verify(
+      expected,
+      self.epoch(),
+      &tree_users,
+      directory,
+      authority,
+    )?))
   }
 
   /// Signed changes this group has committed or accepted; persist them with the MLS state.
@@ -575,6 +667,7 @@ impl ConversationGroup {
     let mut proposed = ProposedMembership::default();
     for bytes in key_packages {
       let (key_package, added_device) = validate_key_package(provider, bytes, directory)?;
+      self.ensure_capable(&key_package, &added_device)?;
       validated_key_packages.push(key_package);
       proposed.added.push(added_device);
     }
@@ -598,6 +691,39 @@ impl ConversationGroup {
     Ok(output)
   }
 
+  /// Commits a move or rename of the channel (e2ee.md §4.6.5, "Moves and renames"): one group
+  /// context extensions proposal that replaces the anchor's last change and keeps every other
+  /// extension byte for byte (also those this version doesn't know), with the signed change in the
+  /// authenticated data. Checked as the members will check it first. Pending until
+  /// [`Self::confirm_commit`].
+  pub fn commit_properties_change(
+    &mut self,
+    provider: &impl OpenMlsProvider,
+    device: &DeviceKeyPair,
+    signed: &SignedPropertiesChange,
+    directory: &impl IdentityDirectory,
+    authority: &impl MembershipAuthority,
+  ) -> Result<CommitOutput, MlsError> {
+    let current = self.current_anchor()?;
+    let tree_users = self.members()?.into_iter().map(|member| member.user_id).collect();
+    current.check_change(signed, self.epoch(), &tree_users, directory, authority)?;
+    let changed = current.with_change(signed.clone()).to_bytes()?;
+    let extensions = with_anchor(self.group.extensions(), changed)?;
+    let mut aad = PROPERTIES_CHANGE_AAD_MAGIC.to_vec();
+    aad.extend_from_slice(&signed.to_bytes()?);
+    self.group.set_aad(aad);
+    let result = self.stage_context_commit(provider, device, extensions);
+    self.group.set_aad(Vec::new());
+    let output = result?;
+    self.maybe_pending = Some(PendingCommit {
+      commit: output.commit.clone(),
+      maybe_change: None,
+      removed: Vec::new(),
+      maybe_rejoin: None,
+    });
+    Ok(output)
+  }
+
   /// Checks one key package fetched from the server the way the commit functions do (signature,
   /// lifetime, credential, signed device list, not revoked from this group), so the caller can leave
   /// out one device's bad package instead of failing the whole commit. Returns whose it is.
@@ -607,7 +733,8 @@ impl ConversationGroup {
     bytes: &[u8],
     directory: &impl IdentityDirectory,
   ) -> Result<GroupMember, MlsError> {
-    let (_, device) = validate_key_package(provider, bytes, directory)?;
+    let (key_package, device) = validate_key_package(provider, bytes, directory)?;
+    self.ensure_capable(&key_package, &device)?;
     let member = GroupMember::from(&device);
     self.check_not_removed(&ProposedMembership {
       added: vec![device],
@@ -629,6 +756,7 @@ impl ConversationGroup {
     let mut proposed = ProposedMembership::default();
     for bytes in key_packages {
       let (key_package, added_device) = validate_key_package(provider, bytes, directory)?;
+      self.ensure_capable(&key_package, &added_device)?;
       validated_key_packages.push(key_package);
       proposed.added.push(added_device);
     }
@@ -670,6 +798,7 @@ impl ConversationGroup {
     let verified = signed.verify(directory)?;
     let (old_leaf, member) = self.check_verified_rejoin(&verified)?;
     let (key_package, added) = validate_key_package(provider, key_package, directory)?;
+    self.ensure_capable(&key_package, &added)?;
     if GroupMember::from(&added) != member {
       return Err(MlsError::ChangeDoesNotMatchCommit);
     }
@@ -722,6 +851,7 @@ impl ConversationGroup {
       maybe_rejoined: pending.maybe_rejoin.map(|(member, _)| member),
       is_self_removed: false,
       maybe_committer: None,
+      maybe_properties_change: None,
     })
   }
 
@@ -938,26 +1068,7 @@ impl ConversationGroup {
       .map_err(|error| MlsError::openmls("commit creation", error))?
       .stage_commit(provider)
       .map_err(|error| MlsError::openmls("commit staging", error))?;
-    let maybe_welcome = bundle
-      .to_welcome_msg()
-      .map(|welcome| welcome.to_bytes())
-      .transpose()
-      .map_err(|error| MlsError::openmls("welcome encoding", error))?;
-    let maybe_group_info = bundle
-      .group_info()
-      .cloned()
-      .map(|info| MlsMessageOut::from(info).to_bytes())
-      .transpose()
-      .map_err(|error| MlsError::openmls("group info encoding", error))?;
-    let commit = bundle
-      .into_commit()
-      .to_bytes()
-      .map_err(|error| MlsError::openmls("commit encoding", error))?;
-    Ok(CommitOutput {
-      commit,
-      maybe_welcome,
-      maybe_group_info,
-    })
+    commit_output(bundle)
   }
 
   /// TeamCraft's rules for accepting another member's commit (e2ee.md §4.6, admin.md §2.3). Also
@@ -970,6 +1081,10 @@ impl ConversationGroup {
     directory: &impl IdentityDirectory,
     authority: &impl MembershipAuthority,
   ) -> Result<(MembershipUpdate, Option<ChangeId>), MlsError> {
+    if let Some(signed) = authenticated_data.strip_prefix(PROPERTIES_CHANGE_AAD_MAGIC) {
+      let update = self.authorize_properties_change(staged, sender_index, signed, directory, authority)?;
+      return Ok((update, None));
+    }
     let proposed = self.verify_commit_contents(staged, sender_index, directory)?;
     if let Some(request) = authenticated_data.strip_prefix(REJOIN_AAD_MAGIC) {
       self.check_guest_commit(sender_index, &proposed, None, directory)?;
@@ -987,6 +1102,7 @@ impl ConversationGroup {
         maybe_rejoined: Some(member),
         is_self_removed: staged.self_removed(),
         maybe_committer: None,
+        maybe_properties_change: None,
       };
       return Ok((update, Some(verified.request().request_id())));
     }
@@ -1017,8 +1133,80 @@ impl ConversationGroup {
       maybe_rejoined: None,
       is_self_removed: staged.self_removed(),
       maybe_committer: None,
+      maybe_properties_change: None,
     };
     Ok((update, None))
+  }
+
+  /// A move or rename (e2ee.md §4.6.5): the commit carries one group context extensions proposal
+  /// and nothing else (its path leaf keeps its identity), the signed change passes
+  /// [`ChannelAnchor::check_change`], and the new context is the current one with exactly that
+  /// change as the anchor's last change: the founding and every other extension byte for byte.
+  fn authorize_properties_change(
+    &self,
+    staged: &StagedCommit,
+    sender_index: LeafNodeIndex,
+    signed: &[u8],
+    directory: &impl IdentityDirectory,
+    authority: &impl MembershipAuthority,
+  ) -> Result<MembershipUpdate, MlsError> {
+    let mut proposals = 0usize;
+    for queued in staged.queued_proposals() {
+      if !matches!(queued.proposal(), Proposal::GroupContextExtensions(_)) {
+        return Err(MlsError::UnsupportedProposal);
+      }
+      if !matches!(queued.sender(), Sender::Member(_)) {
+        return Err(MlsError::ExternalSender);
+      }
+      proposals += 1;
+    }
+    if proposals != 1 {
+      return Err(MlsError::ContextChangeMismatch);
+    }
+    if let Some(leaf) = staged.update_path_leaf_node() {
+      self.verify_same_identity(sender_index, leaf, directory)?;
+    }
+    let signed = SignedPropertiesChange::from_bytes(signed)?;
+    let current = self.current_anchor()?;
+    let tree_users = self.members()?.into_iter().map(|member| member.user_id).collect();
+    current.check_change(&signed, self.epoch(), &tree_users, directory, authority)?;
+    let expected = with_anchor(
+      self.group.extensions(),
+      current.with_change(signed.clone()).to_bytes()?,
+    )?;
+    if staged.group_context().extensions() != &expected {
+      return Err(MlsError::ContextChangeMismatch);
+    }
+    Ok(MembershipUpdate {
+      maybe_properties_change: Some(Box::new(signed)),
+      ..MembershipUpdate::default()
+    })
+  }
+
+  /// The anchor of the current context, parsed; a group without one has nothing to change.
+  fn current_anchor(&self) -> Result<ChannelAnchor, MlsError> {
+    let bytes = self.anchor_bytes().ok_or(MlsError::NotAnchored)?;
+    Ok(ChannelAnchor::from_bytes(bytes, DEFAULT_MAX_ANCHOR_BYTES)?)
+  }
+
+  fn stage_context_commit(
+    &mut self,
+    provider: &impl OpenMlsProvider,
+    device: &DeviceKeyPair,
+    extensions: Extensions<GroupContext>,
+  ) -> Result<CommitOutput, MlsError> {
+    let bundle = self
+      .group
+      .commit_builder()
+      .propose_group_context_extensions(extensions)
+      .map_err(|error| MlsError::openmls("commit creation", error))?
+      .load_psks(provider.storage())
+      .map_err(|error| MlsError::openmls("commit creation", error))?
+      .build(provider.rand(), provider.crypto(), device, |_| true)
+      .map_err(|error| MlsError::openmls("commit creation", error))?
+      .stage_commit(provider)
+      .map_err(|error| MlsError::openmls("commit staging", error))?;
+    commit_output(bundle)
   }
 
   /// TeamCraft's rule for an external commit: only a further device of a user who is already a
@@ -1071,6 +1259,7 @@ impl ConversationGroup {
       maybe_rejoined: None,
       is_self_removed: false,
       maybe_committer: None,
+      maybe_properties_change: None,
     })
   }
 
@@ -1257,6 +1446,25 @@ impl ConversationGroup {
     }
   }
 
+  /// A device whose leaf doesn't announce every extension the group requires (an app from before
+  /// the anchor, e2ee.md §4.6.5) can't be added: openmls would refuse the commit. Checked first, so
+  /// the adder can say that person has to update before anything is sent.
+  fn ensure_capable(&self, key_package: &KeyPackage, device: &VerifiedDevice) -> Result<(), MlsError> {
+    let Some(required) = self.group.extensions().required_capabilities() else {
+      return Ok(());
+    };
+    let announced = key_package.leaf_node().capabilities().extensions();
+    if required
+      .extension_types()
+      .iter()
+      .all(|extension| announced.contains(extension))
+    {
+      Ok(())
+    } else {
+      Err(MlsError::MustUpdate(device.device_id()))
+    }
+  }
+
   /// Devices removed from the group before stay out, whatever the server serves for them.
   fn check_not_removed(&self, proposed: &ProposedMembership) -> Result<(), MlsError> {
     match proposed
@@ -1340,6 +1548,38 @@ impl StagedJoin {
     Err(MlsError::UnexpectedMessage(
       "the welcome's sender isn't in its group",
     ))
+  }
+
+  /// The anchor extension's bytes in the welcome's group context, unparsed.
+  pub fn anchor_bytes(&self) -> Option<&[u8]> {
+    anchor_bytes_of(self.staged.group_context().extensions())
+  }
+
+  /// Verifies the welcome's anchor (checks 1 to 5, e2ee.md §4.6.5) before the join completes;
+  /// `Ok(None)` for a group without one. Check the pin and floor before completing.
+  pub fn verified_anchor(
+    &self,
+    expected: &AnchorExpectation,
+    directory: &impl IdentityDirectory,
+    authority: &impl MembershipAuthority,
+  ) -> Result<Option<VerifiedAnchor>, MlsError> {
+    let Some(bytes) = self.anchor_bytes() else {
+      return Ok(None);
+    };
+    let anchor = ChannelAnchor::from_bytes(bytes, DEFAULT_MAX_ANCHOR_BYTES)?;
+    let tree_users = self
+      .staged
+      .members()
+      .map(|member| credential::member_of(&member.credential).map(|member| member.user_id))
+      .collect::<Result<BTreeSet<_>, _>>()?;
+    let epoch = self.staged.group_context().epoch().as_u64();
+    Ok(Some(anchor.verify(
+      expected,
+      epoch,
+      &tree_users,
+      directory,
+      authority,
+    )?))
   }
 
   /// Verifies every leaf against its user's pinned identity without joining yet: who is in the
@@ -1426,6 +1666,60 @@ impl ChangeHistory {
 /// Whether the tree in a group information holds a leaf with this signature key. Read as it comes,
 /// without checking lifetimes or signatures: an old leaf must not hide this device's own, and a
 /// made-up one only makes the device ask to be added.
+/// What to send for a staged commit.
+fn commit_output(bundle: CommitMessageBundle) -> Result<CommitOutput, MlsError> {
+  let maybe_welcome = bundle
+    .to_welcome_msg()
+    .map(|welcome| welcome.to_bytes())
+    .transpose()
+    .map_err(|error| MlsError::openmls("welcome encoding", error))?;
+  let maybe_group_info = bundle
+    .group_info()
+    .cloned()
+    .map(|info| MlsMessageOut::from(info).to_bytes())
+    .transpose()
+    .map_err(|error| MlsError::openmls("group info encoding", error))?;
+  let commit = bundle
+    .into_commit()
+    .to_bytes()
+    .map_err(|error| MlsError::openmls("commit encoding", error))?;
+  Ok(CommitOutput {
+    commit,
+    maybe_welcome,
+    maybe_group_info,
+  })
+}
+
+fn anchor_bytes_of(extensions: &Extensions<GroupContext>) -> Option<&[u8]> {
+  extensions
+    .unknown(CHANNEL_ANCHOR_EXTENSION_TYPE)
+    .map(|extension| extension.0.as_slice())
+}
+
+/// `extensions` with the anchor's content replaced by `anchor`, every other extension byte for
+/// byte and in its place (e2ee.md §4.6.5: a proposal keeps what it doesn't change, unknown ones
+/// included).
+fn with_anchor(
+  extensions: &Extensions<GroupContext>,
+  anchor: Vec<u8>,
+) -> Result<Extensions<GroupContext>, MlsError> {
+  let mut anchor = Some(anchor);
+  let replaced: Vec<Extension> = extensions
+    .iter()
+    .map(|extension| match extension {
+      Extension::Unknown(CHANNEL_ANCHOR_EXTENSION_TYPE, _) => Extension::Unknown(
+        CHANNEL_ANCHOR_EXTENSION_TYPE,
+        UnknownExtension(anchor.take().unwrap_or_default()),
+      ),
+      other => other.clone(),
+    })
+    .collect();
+  if anchor.is_some() {
+    return Err(MlsError::NotAnchored);
+  }
+  Extensions::from_vec(replaced).map_err(|error| MlsError::openmls("anchor extension", error))
+}
+
 fn holds_signature_key(info: &VerifiableGroupInfo, signature_key: &[u8]) -> bool {
   info.extensions().ratchet_tree().is_some_and(|tree| {
     tree
