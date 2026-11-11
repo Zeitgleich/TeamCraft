@@ -92,6 +92,45 @@ async fn a_payload_must_name_this_channel_and_the_next_version() {
   app.stop().await;
 }
 
+/// e2ee.md §4.6.5 (#1748): a channel its creator's app founded with an anchor takes its first role
+/// entry only from the creator; a workspace admin may append after that, and anywhere else.
+#[tokio::test]
+async fn an_anchored_channels_first_entry_comes_only_from_its_creator() {
+  let app = app!();
+  let (alice, bob) = (owner(), admin());
+  let space = create_space(&app, &alice, "Team", "invite_only").await;
+  let created = app
+    .post(
+      &alice,
+      &format!("/spaces/{space}/channels"),
+      json!({"name": "anchored", "visibility": "private", "is_anchored": true}),
+    )
+    .await;
+  assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+  let anchored = created.id();
+  let open = create_channel(&app, &alice, &space, "open", "private").await;
+  let bob_id = user_id(&app, &bob).await;
+  add_space_member(&app, &alice, &space, &bob_id, "member").await;
+  for channel in [&anchored, &open] {
+    add_channel_member(&app, &alice, channel, &bob_id).await;
+  }
+  let (alice_device, bob_device) = (
+    register_device(&app, &alice).await,
+    register_device(&app, &bob).await,
+  );
+
+  let refused = append(&app, &bob, &bob_device, &anchored, 0, &document(&anchored, 1)).await;
+  assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+  let founded = append(&app, &alice, &alice_device, &anchored, 0, &document(&anchored, 1)).await;
+  assert_eq!(founded.status, StatusCode::CREATED, "{}", founded.body);
+  let next = append(&app, &bob, &bob_device, &anchored, 1, &document(&anchored, 2)).await;
+  assert_eq!(next.status, StatusCode::CREATED, "{}", next.body);
+
+  let unanchored = append(&app, &bob, &bob_device, &open, 0, &document(&open, 1)).await;
+  assert_eq!(unanchored.status, StatusCode::CREATED, "{}", unanchored.body);
+  app.stop().await;
+}
+
 async fn append(
   app: &TestApp,
   user: &TestUser,

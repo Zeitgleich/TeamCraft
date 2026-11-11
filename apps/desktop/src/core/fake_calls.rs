@@ -159,6 +159,7 @@ fn active_call(request: CallRequest, carol: UserId) -> ActiveCall {
     kind: request.kind,
     is_muted: false,
     maybe_muted_by_host: None,
+    maybe_screen_share_taken_over_by: None,
     screen_sound: ScreenShareSound::Off,
     is_reconnecting: false,
     reconnecting: Vec::new(),

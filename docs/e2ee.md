@@ -1892,8 +1892,17 @@ never by the server's member list:
     again as a new guest. The store is the web client's encrypted store (§9). "Leave the meeting" deletes its
     database (only a guest device accepts that command), and a guest page opened later deletes the
     database an earlier page left behind (closed without leaving), as far as no other tab holds it
-    open. Until then the encrypted data stays in the browser; nothing reuses it, since the session
-    token is gone and the server deactivates the account when access ends. No push, no search index, no account data sync.
+    open, unless it is the guest's own address coming back. *Reloading* (meetings.md, "Guests in the
+    browser"): after the lobby entry the page seals the session token, the meeting, the chat, the
+    guest's user and the organizer's fingerprint with a fresh random key (XChaCha20-Poly1305, label
+    `TeamCraft-v1 guest resume`), keeps the ciphertext in the tab's session storage and puts the key
+    only into the address fragment (`#r=`), which never reaches a server. A reload of the tab opens
+    the session and the device's database again and asks the server for the lobby state; the server
+    alone decides whether the token still counts. Session storage goes with the tab, so a stolen
+    browser profile or history holds the key at most next to a copy a tab still has open (session
+    restore). Leaving, a refusal, any 401 and a turned-away guest forget the copy.
+    Otherwise the encrypted data stays in the browser until the next guest page; nothing reuses it,
+    and the server deactivates the account when access ends. No push, no search index, no account data sync.
   - *The meeting link* (#987). A meeting has one link for members and guests alike,
     `<base>/meeting/<token>#v=<fingerprint>`, the same in "Copy link", the invitation e-mails and
     the calendar event:
@@ -2324,7 +2333,8 @@ workspace roster (admin.md §2.3):
   in **this device's MLS group** of the channel, are members of the instance (no guest, bot or
   deactivated account), and this device has their identity key, the one it pinned for them, which their
   place in the group is verified against. It carries the signed mark `has_server_listed_roles`.
-  An anchored channel (§4.6.5) is never founded this way: its founding is the anchor's.
+  An anchored channel (§4.6.5) is never founded this way: its founding is the anchor's, signed only by its founder,
+  and a device that holds an anchor or a pin for the channel signs nothing at first sight.
 
   This trusts the server at first sight, which is a decision and not an oversight: nothing signed
   says who a channel's admins were before there was a log, and the alternative, a co-owner who can
@@ -3094,8 +3104,9 @@ accepts Alice promoting Dave, then Dave's entry. Bob's device, given Carol's old
 crypto review changed the design (end of this section). `teamcraft-crypto`'s `channel_anchor` and `mls` hold the
 encoding, the hashes, the signatures, the verdicts, the pin and floor record, anchored founding and the move and
 rename commits (#1725, first part). `teamcraft-core` founds channels anchored, checks the anchor against the pin and
-floor on every join path, signs moves and renames, and binds a deletion to the name (#1740; "Implementation notes"
-below). Still open: meeting chats (D10, #1747), the role log's anchored founding and `may_anchor` (#1748), what the
+floor on every join path, signs moves and renames, binds a deletion to the name (#1740), and takes only the
+anchored founding in the role log, with `may_anchor` for it (#1748; "Implementation notes" below). Still open:
+meeting chats (D10, #1747), what the
 apps show of the anchor and the mobile name checks (#1749), and re-founding with its chain in the account data:
 `AnchorFloor` keeps no re-founding chain yet, so a re-founding is refused as another founding until #1728. The parts
 split off before: #1727 (signed space deletions), #1728 (anchoring older channels and re-founding), #1729 (strict
@@ -3638,6 +3649,50 @@ and couldn't count for a purge.
     lists. A member purges an anchored channel at once only if the anchor verifies, the floor grants, the name
     counts for deletions (`name_set_by` not a member), the deletion names it and the listed name hashes to it and
     keeps the rules. A pinned channel whose anchor doesn't verify takes the retention.
+  - **The role log's founding (#1748):** the role verifier (`RoleVerifier::founding`) takes a `RoleFounding` from
+    the anchor, asked only while the device accepted no entry yet, as it decides nothing after that:
+    `Anchored` with the verified anchor's founder and identity key while the floor grants (no floor recorded yet
+    counts as granting, as for a deletion, so a founder whose pin failed to record still reads their own founding);
+    `Withheld` for a channel whose group carries an anchor or which is pinned, when the anchor doesn't verify here
+    (pin or not: a server that refuses the founder's device list before the first pin must not turn the channel
+    back to trust on first use), shows a fork, or names no founder (a review or a re-founding, until #1728);
+    `Claimed`, today's trust on first use, only for a channel with neither anchor nor pin. Under `Anchored`, a
+    first entry counts only as the founder's, signed under the anchor's key and naming them admin; every other
+    first entry, a workspace admin's included, is junk and starts no unverified stretch. The founding anchors the
+    snapshot (`is_workspace_anchored`) on the same conditions as a workspace admin's own founding (no
+    server-listed mark, no key other than this device pinned).
+    **Nothing refused before the founding moves the cursor**, under `Anchored` or `Withheld`: the log is read from
+    its start until the founding is accepted, and no such read is marked as at the roster. A server that hides the
+    founding and shows what came after can't push a device past it for good; read and refused, it would be lost
+    when it shows. Under `Withheld` nothing is read at all. Either way, a read that leaves the founding open (the
+    anchor gave no founder, or the log showed entries but no founding this device takes) waits before the next:
+    the anchor is asked and the log read again only after five minutes, doubling up to six hours
+    (`FoundingWait`; a wait set while the clock was ahead lasts no longer than that), or at once when the pin or
+    floor changes. So a server can't have every sync (`ChannelRolesUpdate`) fetch and verify the whole log and the
+    anchor's device lists anew. Meanwhile the channel counts as unsigned on that device, as on one that never read
+    the log, and a read without new entries isn't marked as at the roster.
+    **Who signs the founding:** nobody at first sight on a channel whose group carries an anchor or which is pinned,
+    whether in the upkeep (`found_listed_channels`) or with a role change. Only the anchor's founder, under their own
+    key (`may_found_roles`): at creation, and again, if it never reached the server, in their upkeep (whatever the
+    server lists) or with their next role change, naming themselves admin and that change, nothing the server lists.
+    It signs only as founder while the founding is open, never as a workspace admin it may also be: members take no
+    other authority then. **The server's part:** the creator's app says the channel is anchored when creating it
+    (`CreateChannelRequest::is_anchored`), and the server keeps the creator (`anchored_channel_founders`) and takes
+    the role log's version 1 only from them. Nobody else it lets append (a channel admin it lists, a workspace
+    admin, an older or modified app) can take the version the founding needs. Members never rely on this.
+    What a server gets from showing a founder's other device an empty log: a second founding by the same founder,
+    naming only them, on a fork only devices at cursor 0 can join. It reinstates no demoted founder for a purge:
+    D8 keeps §4.6.3's time limit, and on such a fork nobody else signed. A channel admin's deletion on a
+    member-founded channel purges at once only while somebody else's entry (the founder appointing them, say) is
+    younger than `channel_roles_max_age`; the founder alone purges nothing at once.
+    Residuals: **a server-side denial of service, permanent until #1728's re-founding.** Any entry at version 1
+    that isn't the founder's founding (planted by a malicious server, or appended by anybody a server lets append,
+    which an honest server since this change refuses) keeps the founding from ever getting its version: members
+    skip the entry, the founder's device stays at cursor 0 and its append gets `409`, and a workspace admin's
+    reviewed list doesn't count while the founding is open. The roles then stay the server's word on every
+    member's device. A malicious server can do as much by refusing the append. A device outside the channel's group with no pin
+    (a workspace admin who never joined) can't tell the channel is anchored and reads its log as before anchors; a
+    deletion asks for a group anyway.
 - **The name hash's known answer:** `name_hash("general")` is
   `e0c5e1a616c7db0ab0a95802b91233f845bc3d1194ef04a22aebee68280c9174` (SHA-256 of the one-byte label length, the
   label, the varint length 7 and the bytes).
@@ -4679,7 +4734,7 @@ restored together with them on a new device.
 - **Group epoch floors.** Per conversation, the newest MLS epoch in which one of the user's devices
   switched the content key; merging keeps the higher one. A new device of the user doesn't join a
   group from information older than that (§4.6).
-- **Channel anchor pins and floors** (§4.6.5, not implemented yet). Per anchored conversation, the founding hash
+- **Channel anchor pins and floors** (§4.6.5; re-founding chain not implemented yet, #1728). Per anchored conversation, the founding hash
   first accepted, the highest properties version with its hash, the highest epoch the anchor was seen in, and the
   chain of verified re-foundings (old founding hash, the re-founding, new founding hash). Merging keeps the higher
   version and epoch; a founding reached from the other copy's through that chain wins with its floor; only two
@@ -6266,7 +6321,10 @@ newer number drops just those from its caches, and drops everything for a number
 (another process, the notification extension). Reads see only committed writes: the notes of a group
 (what the UI reads again, the journal of written messages) are published after its commit, and a
 reader whose snapshot is older than a note takes a new one first. A read thread's own writes go
-through the writer, and its next read sees them. The notification extension opens no reader. The
+through the writer, and its next read sees them; an action's local half (an outbox write, a read
+marker) runs on a thread of its own, so the reads don't wait while it waits for the writer's lock
+(issue #1756), and a read thread's cache write (the sidebar's counts) is put off while another thread
+holds the lock. The notification extension opens no reader. The
 write-ahead log is purged on a connection of its own, which counts the connections' open transactions
 and truncates when they are idle (§4.3.1, issue #1684). A truncation moves SQLite's data version on
 the other connections; the writer counts it as another process's commit (which drops its caches and

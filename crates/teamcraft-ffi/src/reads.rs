@@ -9,6 +9,10 @@
 //! There are two read threads, each on a read connection of its own (issue #1476): the open chat's
 //! queries ([`ReadQueue::query`]) don't wait behind the chat list, a snapshot or the share sheet's
 //! targets on the main one (issue #1583), and neither waits for the engine's groups of writes.
+//!
+//! An action's local half runs on a third thread (issue #1756): it writes, so it waits for the
+//! store's write lock while the engine holds a group of writes, and the reads queued behind it on
+//! the main read thread waited with it, for seconds during a catch-up.
 
 use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
@@ -70,6 +74,8 @@ pub(crate) struct ReadQueue {
   jobs: mpsc::Sender<ReadJob>,
   /// The open chat's queries: a thread of their own (issue #1583).
   query_jobs: mpsc::Sender<ReadJob>,
+  /// Actions' local halves, which wait for the write lock: a thread of their own (issue #1756).
+  act_jobs: mpsc::Sender<ReadJob>,
   /// The chat list's read, shared by everyone who asks while one waits to start (issue #1466).
   conversations: Arc<SharedRead<Vec<ConversationItem>>>,
 }
@@ -80,6 +86,8 @@ pub(crate) struct ReadLanes {
   pub(crate) main: Store,
   /// The open chat's queries.
   pub(crate) query: Store,
+  /// Actions' local halves: they read and write through the writing connection, in a group.
+  pub(crate) act: Store,
 }
 
 /// Which read thread runs a job.
@@ -87,6 +95,7 @@ pub(crate) struct ReadLanes {
 enum Lane {
   Main,
   Query,
+  Act,
 }
 
 /// What a read does when its caller is gone before it starts.
@@ -156,10 +165,18 @@ impl ReadQueue {
       catch_up_focus.clone(),
       engine.clone(),
     )?;
-    let query_jobs = spawn_lane("teamcraft-queries", lanes.query, listener, catch_up_focus, engine)?;
+    let query_jobs = spawn_lane(
+      "teamcraft-queries",
+      lanes.query,
+      listener.clone(),
+      catch_up_focus.clone(),
+      engine.clone(),
+    )?;
+    let act_jobs = spawn_lane("teamcraft-actions", lanes.act, listener, catch_up_focus, engine)?;
     Ok(Self {
       jobs,
       query_jobs,
+      act_jobs,
       conversations: Arc::new(SharedRead::new()),
     })
   }
@@ -194,14 +211,15 @@ impl ReadQueue {
     answer.await.map_err(|_| TeamCraftError::EngineStopped)?
   }
 
-  /// Runs an action's local half on the read thread and hands what it queued to the engine, in
+  /// Runs an action's local half on the actions' thread and hands what it queued to the engine, in
   /// the order of the actions; answers once the engine took it, like before this thread existed.
+  /// It waits there for the store's write lock, and the reads don't wait with it (issue #1756).
   pub(crate) async fn act<R, F>(&self, job: F) -> Result<R, TeamCraftError>
   where
     R: Send + 'static,
     F: FnOnce(&mut Reads) -> Result<R, TeamCraftError> + Send + 'static,
   {
-    let answer = self.queue(Lane::Main, WhenCallerGone::Run, move |reads| {
+    let answer = self.queue(Lane::Act, WhenCallerGone::Run, move |reads| {
       // One group of writes: what the action reads comes from the writing connection and nothing
       // else commits in between, so a change it makes to a record can't undo the engine's.
       let store = reads.store.clone();
@@ -218,9 +236,11 @@ impl ReadQueue {
   pub(crate) fn close(&self) {
     let (closed, is_closed) = mpsc::channel();
     let query_closed = closed.clone();
+    let act_closed = closed.clone();
     self.post(move |reads| reads.maybe_closing = Some(closed));
     self.post_to(Lane::Query, move |reads| reads.maybe_closing = Some(query_closed));
-    // Ends once both threads answered or ended: an error means every sender is gone, which is
+    self.post_to(Lane::Act, move |reads| reads.maybe_closing = Some(act_closed));
+    // Ends once every thread answered or ended: an error means every sender is gone, which is
     // what this waits for.
     while is_closed.recv().is_ok() {}
   }
@@ -279,6 +299,7 @@ impl ReadQueue {
     let queued = Instant::now();
     let timing = match lane {
       Lane::Query => perf_jobs::queued_for_query(std::any::type_name::<F>()),
+      Lane::Act => perf_jobs::queued_for_action(std::any::type_name::<F>()),
       Lane::Main => perf_jobs::queued(PerfJobKind::ReadQueue, std::any::type_name::<F>()),
     };
     let boxed: ReadJob = Box::new(move |reads| {
@@ -354,9 +375,10 @@ impl ReadQueue {
     let _ = self.lane(lane).send(Box::new(job));
   }
 
-  /// Runs `job` on every read thread: what each keeps of the account.
+  /// Runs `job` on every thread: what each keeps of the account.
   fn post_all(&self, job: impl Fn(&mut Reads) + Clone + Send + 'static) {
     self.post_to(Lane::Query, job.clone());
+    self.post_to(Lane::Act, job.clone());
     self.post_to(Lane::Main, job);
   }
 
@@ -371,6 +393,7 @@ impl ReadQueue {
     match lane {
       Lane::Main => &self.jobs,
       Lane::Query => &self.query_jobs,
+      Lane::Act => &self.act_jobs,
     }
   }
 }
@@ -959,7 +982,8 @@ mod tests {
       for flood in floods {
         flood.await.unwrap().unwrap();
       }
-      let spans = perf_jobs::perf_job_spans(since_ms, perf_jobs::now_ms());
+      // Not `perf_job_spans`: its longest few may be other tests' jobs, running meanwhile.
+      let spans = perf_jobs::recorded_between(since_ms, perf_jobs::now_ms());
       let opened = spans
         .iter()
         .find(|span| span.name == "open_chat")
@@ -1078,6 +1102,59 @@ mod tests {
       files.finish();
     }
 
+    /// Issue #1756: an action waits for the store's write lock while the engine holds a group of
+    /// writes, and a read asked after it doesn't wait with it; the action's write lands once the
+    /// engine's group ended.
+    #[tokio::test]
+    async fn an_action_waiting_for_the_write_lock_holds_up_no_read() {
+      let files = FileLanes::open();
+      files.engine.put(Table::Users, "a", b"before").unwrap();
+      let engine = files.engine.clone();
+      let (held, is_held) = mpsc::channel();
+      let (release, released) = mpsc::channel::<()>();
+      let catch_up = std::thread::spawn(move || {
+        write_group(&engine, || {
+          engine.put(Table::Users, "engine", b"1")?;
+          held.send(()).map_err(|_| TeamCraftError::EngineStopped)?;
+          // Deliberately ignored: the test ends the wait either way.
+          let _ = released.recv();
+          Ok::<_, TeamCraftError>(())
+        })
+        .unwrap();
+      });
+      is_held.recv().unwrap();
+
+      // Queued before the read: on one thread the read would wait for the engine's group too.
+      let mut act = Box::pin(files.queue.act(|reads| {
+        reads.store.put(Table::Users, "a", b"acted")?;
+        Ok(())
+      }));
+      tokio::select! {
+        biased;
+        _ = &mut act => panic!("the action can't finish while the engine holds the store"),
+        () = std::future::ready(()) => {},
+      }
+      let seen = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        files.queue.read(|reads| Ok(reads.store.get(Table::Users, "a")?)),
+      )
+      .await
+      .expect("the read doesn't wait for the action")
+      .unwrap();
+      assert_eq!(seen, Some(b"before".to_vec()));
+
+      release.send(()).unwrap();
+      catch_up.join().unwrap();
+      // No account and no engine here to take what the action hands on: it fails after its local
+      // half, which ran all the same.
+      assert!(act.await.is_err());
+      assert_eq!(
+        files.engine.get(Table::Users, "a").unwrap(),
+        Some(b"acted".to_vec())
+      );
+      files.finish();
+    }
+
     /// The engine's store and read threads on a database file, as `Engine::open` makes them.
     struct FileLanes {
       engine: Store,
@@ -1110,6 +1187,7 @@ mod tests {
           ReadLanes {
             main: lane(),
             query: lane(),
+            act: engine.sharing(LaneStore::writer(Arc::clone(&writer))),
           },
           Arc::new(Quiet),
           CatchUpFocus::default(),
@@ -1200,7 +1278,8 @@ mod tests {
     let queue = ReadQueue::start(
       ReadLanes {
         main: store.clone(),
-        query: store,
+        query: store.clone(),
+        act: store,
       },
       Arc::new(Quiet),
       CatchUpFocus::default(),

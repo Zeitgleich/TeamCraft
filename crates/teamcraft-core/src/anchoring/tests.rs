@@ -355,6 +355,43 @@ mod deletions {
   }
 }
 
+/// e2ee.md §4.6.5, "What the founding decides": the role log takes its founder from the anchor
+/// only while the floor grants.
+mod role_founders {
+  use super::*;
+
+  #[test]
+  fn a_verified_anchor_names_its_founder_under_its_key() {
+    let world = World::new();
+    let anchor = world.verified(&world.founded("general"), 0).unwrap();
+    assert_eq!(
+      role_founding(true, Some(&anchor), true),
+      RoleFounding::Anchored {
+        founder: convert::user_from_crypto(world.founder.user_id).unwrap(),
+        identity_key: *world.founder.identity.public_key().as_bytes(),
+      }
+    );
+  }
+
+  /// A fork, an anchor that doesn't verify, or one this device can't place: nobody founds.
+  #[test]
+  fn a_floor_that_doesnt_grant_or_no_verified_anchor_names_nobody() {
+    let world = World::new();
+    let anchor = world.verified(&world.founded("general"), 0).unwrap();
+    assert_eq!(role_founding(true, Some(&anchor), false), RoleFounding::Withheld);
+    assert_eq!(role_founding(true, None, true), RoleFounding::Withheld);
+  }
+
+  /// Review of #1748: a group that carries an anchor this device can't verify, and no pin (the
+  /// server refused the founder's device list before the first pin), is no channel from before
+  /// anchors: nobody founds. Only neither anchor nor pin is a claim.
+  #[test]
+  fn an_unverifiable_anchor_without_a_pin_is_withheld_and_only_no_anchor_is_claimed() {
+    assert_eq!(role_founding(true, None, false), RoleFounding::Withheld);
+    assert_eq!(role_founding(false, None, false), RoleFounding::Claimed);
+  }
+}
+
 /// The founder (a member of the channel, not a workspace admin) and a member.
 struct World {
   founder: Person,

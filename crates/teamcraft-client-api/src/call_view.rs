@@ -135,6 +135,7 @@ impl CallView {
       is_sharing_screen: false,
       background,
       maybe_muted_by_host: None,
+      maybe_screen_share_taken_over_by: None,
       screen_sound: ScreenShareSound::Off,
       is_reconnecting: false,
       reconnecting: Vec::new(),

@@ -711,6 +711,10 @@ pub struct ActiveCall {
   /// The meeting host who last muted everyone (cleared when the user unmutes).
   #[serde(default)]
   pub maybe_muted_by_host: Option<UserId>,
+  /// Who started the screen share that replaced this device's (a call has one at a time; cleared
+  /// when this device shares again). The UI tells the user their share ended and why.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_screen_share_taken_over_by: Option<UserId>,
   /// Whether this device's screen share carries the computer's sound.
   #[serde(default)]
   pub screen_sound: ScreenShareSound,

@@ -11,7 +11,7 @@ use teamcraft_client_api::calls::{
 use teamcraft_proto::{DeviceId, MediaStreamId, UserId, VideoTrackKind};
 
 use crate::call_cues::StatusCues;
-use crate::call_engine::CallEngineEvent;
+use crate::call_engine::{CallEngineEvent, OwnVideoEnd};
 use crate::call_resilience::CallTransport;
 
 /// Who is who in the active call: the engine reports devices, the UI shows people.
@@ -161,6 +161,7 @@ impl CallRoster {
         roster.sharing_screen.insert(track.device_id);
         if Some(track.device_id) == roster.own_device {
           roster.maybe_own_screen = Some(track.stream_id);
+          active.maybe_screen_share_taken_over_by = None;
         }
       },
       // The SFU lost our share with the slot (a rejoin after its restart): the engine publishes it
@@ -178,6 +179,14 @@ impl CallRoster {
       CallEngineEvent::VideoUnpublished(stream_id) if roster.maybe_own_screen == Some(stream_id) => {
         roster.maybe_own_screen = None;
         roster.end_own_screen(active);
+      },
+      // Another device's share replaced ours (one screen share per call): the UI says who.
+      CallEngineEvent::OwnVideoEnded {
+        kind: VideoTrackKind::Screen,
+        end: OwnVideoEnd::TakenOver { by_user_id, .. },
+      } => {
+        roster.end_own_screen(active);
+        active.maybe_screen_share_taken_over_by = Some(by_user_id);
       },
       // The driver stopped an own track whose camera or share went away by itself.
       CallEngineEvent::OwnVideoEnded { kind, .. } => match kind {
@@ -616,6 +625,29 @@ mod tests {
       assert!(!active.is_sharing_screen);
       assert_eq!(active.screen_sound, ScreenShareSound::Off);
       assert!(active.is_camera_on, "the camera goes on");
+    }
+
+    /// One screen share per call: a share another device's replaced shows off and names who took
+    /// over, until this device shares again.
+    #[test]
+    fn an_own_share_taken_over_says_by_whom_until_sharing_again() {
+      let mut view = sharing_view();
+      let mut roster = CallRoster::new(device(10));
+      let taken_over = CallEngineEvent::OwnVideoEnded {
+        kind: VideoTrackKind::Screen,
+        end: OwnVideoEnd::TakenOver {
+          by_user_id: user(3),
+          by_device_id: device(30),
+        },
+      };
+      assert!(roster.apply(&mut view, taken_over));
+      let active = view.maybe_active.as_ref().unwrap();
+      assert!(!active.is_sharing_screen);
+      assert_eq!(active.screen_sound, ScreenShareSound::Off);
+      assert_eq!(active.maybe_screen_share_taken_over_by, Some(user(3)));
+      roster.apply(&mut view, own_screen(12));
+      let active = view.maybe_active.as_ref().unwrap();
+      assert_eq!(active.maybe_screen_share_taken_over_by, None);
     }
 
     #[test]

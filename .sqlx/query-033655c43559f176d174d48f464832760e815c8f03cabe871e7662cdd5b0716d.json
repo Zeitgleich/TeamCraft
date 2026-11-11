@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT founder_id FROM anchored_channel_founders WHERE conversation_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "founder_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "anchored_channel_founders",
+            "name": "founder_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "033655c43559f176d174d48f464832760e815c8f03cabe871e7662cdd5b0716d"
+}

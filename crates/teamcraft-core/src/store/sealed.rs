@@ -204,6 +204,11 @@ pub trait RecordBackend {
   /// hold it back here (an overdue purge of the log, issue #1684).
   fn before_writes(&self) {}
 
+  /// Whether [`Self::before_writes`] would hold this thread's group back now.
+  fn holds_writes(&self) -> bool {
+    false
+  }
+
   /// Puts the record `seal` makes, about `size_hint` bytes. A backend that collects writes may
   /// call `seal` only when it writes the record, and not at all when a newer write of the same
   /// record comes first. Writes keep their order either way.
@@ -2052,29 +2057,25 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
 
   fn begin_writes(&self) -> Result<(), StoreError> {
     self.backend.before_writes();
-    let mut state = self.lock_to_begin();
-    if state.depth == 0 && state.read_depth > 0 {
-      // A read group's snapshot ends for the writes, and begins again after them.
-      self.backend.end_read();
+    let state = self.lock_to_begin();
+    self.begin_writes_locked(state)
+  }
+
+  fn try_begin_writes(&self) -> Result<bool, StoreError> {
+    if self.backend.holds_writes() {
+      return Ok(false);
     }
-    self.backend.begin_writes()?;
-    if state.depth == 0 {
-      // Looked at once the group holds the write lock: a commit of another process it waited for
-      // counts, and nobody else commits from here on.
-      self.follow_disk(&mut state);
-      state.maybe_group_owner = Some(thread::current().id());
-      state.maybe_group_started = Mark::write_group();
-      if matches!(state.maybe_journal, Some((_, JournalRole::Publishes))) {
-        if let Some(stamp) = self.backend.commit_stamp() {
-          state.last_commit = stamp.sequence;
-        }
-        state.maybe_written = Some(WriteSet::default());
-      }
+    let state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let me = thread::current().id();
+    // What `lock_to_begin` waits for: another thread's group, or threads that waited for the last.
+    let would_wait = match state.maybe_group_owner {
+      Some(owner) => owner != me,
+      None => state.awaiting > 0,
+    };
+    if would_wait {
+      return Ok(false);
     }
-    state.depth += 1;
-    drop(state);
-    self.entry_log().depth += 1;
-    Ok(())
+    self.begin_writes_locked(state).map(|()| true)
   }
 
   fn end_writes(&self) -> Result<(), StoreError> {
@@ -2185,6 +2186,32 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
 }
 
 impl<B: RecordBackend> SealedStore<B> {
+  /// Begins a group of writes, or a nested one, with the state locked by a thread whose turn it is.
+  fn begin_writes_locked(&self, mut state: MutexGuard<'_, State<B>>) -> Result<(), StoreError> {
+    if state.depth == 0 && state.read_depth > 0 {
+      // A read group's snapshot ends for the writes, and begins again after them.
+      self.backend.end_read();
+    }
+    self.backend.begin_writes()?;
+    if state.depth == 0 {
+      // Looked at once the group holds the write lock: a commit of another process it waited for
+      // counts, and nobody else commits from here on.
+      self.follow_disk(&mut state);
+      state.maybe_group_owner = Some(thread::current().id());
+      state.maybe_group_started = Mark::write_group();
+      if matches!(state.maybe_journal, Some((_, JournalRole::Publishes))) {
+        if let Some(stamp) = self.backend.commit_stamp() {
+          state.last_commit = stamp.sequence;
+        }
+        state.maybe_written = Some(WriteSet::default());
+      }
+    }
+    state.depth += 1;
+    drop(state);
+    self.entry_log().depth += 1;
+    Ok(())
+  }
+
   /// The entries of `table` whose key starts with `prefix`, through the table's directory.
   fn list_from(&self, table: Table, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
     self.reading(|state| {

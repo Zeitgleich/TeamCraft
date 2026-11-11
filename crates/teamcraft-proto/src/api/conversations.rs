@@ -190,6 +190,11 @@ pub struct CreateChannelRequest {
   /// Marks the channel as integration channel (see `ConversationResponse::is_integration`).
   #[serde(default)]
   pub is_integration: bool,
+  /// The creator's app founds the channel with an anchor (e2ee.md §4.6.5): the server then takes
+  /// the first entry of its role log only from the creator. Members never rely on it; it keeps
+  /// others an honest server lets append from taking the version the founding needs.
+  #[serde(default)]
+  pub is_anchored: bool,
   /// Client-generated key that makes a retry of this request return the original result instead
   /// of creating a second one. Optional so older clients keep working.
   #[serde(rename = "idempotency_key", default, skip_serializing_if = "Option::is_none")]

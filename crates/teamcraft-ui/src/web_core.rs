@@ -171,6 +171,14 @@ thread_local! {
 struct Setup {
   auth: Rc<dyn Authenticator>,
   server_url: String,
+  page: PageKind,
+}
+
+/// Whose page runs the core: a member's, or a meeting guest's with its ephemeral device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageKind {
+  Member,
+  Guest,
 }
 
 /// The core of the signed-in account: in this tab, or in the tab that owns the store.
@@ -282,8 +290,9 @@ impl AccessTokenSource for WebTokens {
   }
 }
 
-/// Called once at startup by the sign-in code. `server_url` empty means the page's own origin.
-pub fn configure(auth: Rc<dyn Authenticator>, server_url: &str) {
+/// Called once at startup by the sign-in code (or the guest page). `server_url` empty means the
+/// page's own origin.
+pub fn configure(auth: Rc<dyn Authenticator>, server_url: &str, page: PageKind) {
   let server_url = if server_url.is_empty() {
     web_sys::window()
       .and_then(|window| window.location().origin().ok())
@@ -291,7 +300,13 @@ pub fn configure(auth: Rc<dyn Authenticator>, server_url: &str) {
   } else {
     server_url.to_owned()
   };
-  SETUP.with(|setup| *setup.borrow_mut() = Some(Setup { auth, server_url }));
+  SETUP.with(|setup| {
+    *setup.borrow_mut() = Some(Setup {
+      auth,
+      server_url,
+      page,
+    })
+  });
 }
 
 /// Whether this page can run the core (the page was configured for it).
@@ -1756,7 +1771,16 @@ impl Core {
   async fn try_open(&mut self) -> Result<CoreStatus, String> {
     let name = format!("teamcraft-{}", self.user);
     announce_database(&name);
-    request_persistent_storage();
+    // A guest's device lives as long as the meeting: no browser prompt for it (Firefox asks).
+    let is_member_page = SETUP.with(|setup| {
+      setup
+        .borrow()
+        .as_ref()
+        .is_some_and(|setup| setup.page == PageKind::Member)
+    });
+    if is_member_page {
+      request_persistent_storage();
+    }
     let store = match &self.store {
       // Opened before, when the token wasn't there yet.
       Some(store) => store.clone(),

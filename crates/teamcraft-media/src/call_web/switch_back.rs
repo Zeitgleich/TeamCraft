@@ -672,6 +672,7 @@ mod tests {
         maybe_reconnect_grace_ms: Some(30_000),
         maybe_max_simulcast_layers: Some(teamcraft_proto::MAX_SIMULCAST_LAYERS),
         maybe_switch_secret: None,
+        maybe_screen_share_taken_over: None,
       };
       engine
         .handle_signal(

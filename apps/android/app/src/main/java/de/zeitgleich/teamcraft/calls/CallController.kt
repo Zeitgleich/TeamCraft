@@ -380,6 +380,18 @@ class CallController(
     if (maybeSession != null) keepCallAlive()
   }
 
+  /** Somebody else started sharing their screen, which ended this device's share: the user hears who. */
+  private fun announceShareTakenOver(userId: String) {
+    scope.launch {
+      val maybeName = moves.names()[userId]
+      val text = maybeName?.let { context.getString(R.string.call_share_taken_over, it) }
+        ?: context.getString(R.string.call_share_taken_over_unnamed)
+      ContextCompat.getMainExecutor(context).execute {
+        Toast.makeText(context, text, Toast.LENGTH_LONG).show()
+      }
+    }
+  }
+
   /** Sharing didn't start: the user hears why, the service drops `mediaProjection`. */
   private fun failScreenShare() {
     screenShare.value = ScreenShareStatus.Off
@@ -825,8 +837,12 @@ class CallController(
       }
       val wasSharing = this@CallController.state.value?.isSharingScreen == true
       this@CallController.state.value = state
-      // The engine ended the share by itself (its encoder kept failing, a turn's restart failed).
-      if (wasSharing && !state.isSharingScreen) maybeScreenCapture?.stop()
+      // The engine ended the share by itself (its encoder kept failing, a turn's restart failed,
+      // or another device's share replaced it: a call has one at a time).
+      if (wasSharing && !state.isSharingScreen) {
+        maybeScreenCapture?.stop()
+        state.maybeScreenShareTakenOverBy?.let(::announceShareTakenOver)
+      }
       followOthers(state)
       // The engine is the source of truth: once its call ended, the session, the service and its
       // notification go too, whether or not Telecom reports its disconnect back (endWithEngine
