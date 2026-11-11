@@ -27,8 +27,8 @@ use teamcraft_client_api::video_stats::VideoStatsReport;
 use teamcraft_proto::{
   Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallServerMessage, DaveKeyBinding,
   DaveTransitionId, DaveTransitionMode, DeviceId, ErrorBody, ErrorCode, LEGACY_SIMULCAST_LAYERS,
-  MAX_SIMULCAST_LAYERS, MediaCapabilities, MediaStreamId, ScreenAudioTrack, TransportFeedback, UserId,
-  VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrack, VideoTrackKind,
+  MAX_SIMULCAST_LAYERS, MediaCapabilities, MediaStreamId, ScreenAudioTrack, ScreenShareTakeover,
+  TransportFeedback, UserId, VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrack, VideoTrackKind,
 };
 use thiserror::Error;
 use tracing::{debug, warn};
@@ -252,6 +252,11 @@ pub enum CallEngineEvent {
     kind: VideoTrackKind,
     end: OwnVideoEnd,
   },
+  /// This device's screen share ended because another device started one (a call has one screen
+  /// share at a time; the SFU lets the latest win). The engine no longer sends it, nor its sound;
+  /// the driver stops capturing it and reports [`CallEngineEvent::OwnVideoEnded`] with
+  /// [`OwnVideoEnd::TakenOver`]. Also after a rejoin, when it happened while away.
+  ScreenShareTakenOver(ScreenShareTakeover),
   /// A device (this one included) started or stopped sending its shared screen's sound.
   ScreenAudioChanged {
     device_id: DeviceId,
@@ -318,6 +323,11 @@ pub enum OwnVideoEnd {
   BeforeFirstPicture,
   /// After it sent pictures: the camera or share went away mid-call.
   WhileSending,
+  /// A screen share another device's share replaced ([`CallEngineEvent::ScreenShareTakenOver`]).
+  TakenOver {
+    by_user_id: UserId,
+    by_device_id: DeviceId,
+  },
 }
 
 /// A driver's view of the publication of one of its own tracks (#929): the id it published the
@@ -447,6 +457,7 @@ struct RejoinedState {
   participants: Vec<CallParticipant>,
   video_tracks: Vec<VideoTrack>,
   screen_audio_tracks: Vec<ScreenAudioTrack>,
+  maybe_screen_share_taken_over: Option<ScreenShareTakeover>,
 }
 
 /// RTP numbering of one outgoing audio stream.
@@ -1249,6 +1260,7 @@ impl CallEngine {
         maybe_reconnect_grace_ms,
         maybe_max_simulcast_layers,
         maybe_switch_secret,
+        maybe_screen_share_taken_over,
       } => {
         self.maybe_reconnect_grace = maybe_reconnect_grace_ms.map(Duration::from_millis);
         self.maybe_switch_secret = maybe_switch_secret;
@@ -1261,6 +1273,7 @@ impl CallEngine {
             participants,
             video_tracks,
             screen_audio_tracks,
+            maybe_screen_share_taken_over,
           };
           return self.on_rejoined(previous, call_id, participant, state);
         }
@@ -1325,6 +1338,10 @@ impl CallEngine {
       },
       CallEvent::ScreenAudioPublished { track } => {
         self.on_screen_audio_published(track);
+        Ok(())
+      },
+      CallEvent::ScreenShareTakenOver(takeover) => {
+        self.on_screen_share_taken_over(takeover);
         Ok(())
       },
       CallEvent::ScreenAudioUnpublished { stream_id } => {
@@ -1447,6 +1464,13 @@ impl CallEngine {
     )?));
     self.reconcile_participants(state.participants);
     self.reconcile_remote_video(&state.video_tracks);
+    // A share replaced while away is not one the SFU lost: it is not published again, and neither
+    // is its sound (ARCHITECTURE.md §6.3).
+    if let Some(takeover) = state.maybe_screen_share_taken_over
+      && self.on_screen_share_taken_over(takeover)
+    {
+      self.event(CallEngineEvent::VideoUnpublished(takeover.stream_id));
+    }
     self.reconcile_screen_audio(&state.screen_audio_tracks);
     // What the SFU needed and what the uplink carried belong to the old connection (#921): the
     // tracks the SFU kept send every layer the new uplink carries until the SFU says which it
@@ -2494,6 +2518,30 @@ impl CallEngine {
       return;
     };
     self.send_media(stream, SimulcastLayer::BASE, &rtp, now);
+  }
+
+  /// Another device's screen share replaced ours on `takeover.stream_id`: the track and its sound
+  /// stop here without asking the SFU, which ended both already. Returns whether it was ours; an
+  /// older share of this device (one it published anew meanwhile, or stopped) changes nothing.
+  fn on_screen_share_taken_over(&mut self, takeover: ScreenShareTakeover) -> bool {
+    let stream = StreamId(takeover.stream_id.0);
+    let is_own_screen = self
+      .own_tracks
+      .get(&stream)
+      .is_some_and(|track| track.kind == VideoTrackKind::Screen);
+    if !is_own_screen {
+      debug!(
+        stream_id = stream.0,
+        "takeover of a share that isn't ours (any more)"
+      );
+      return false;
+    }
+    self.forget_own_track(stream);
+    // Its sound went with it at the SFU; an answer to a request still on its way is withdrawn
+    // when it comes (`on_screen_audio_published`).
+    self.screen_audio = ScreenAudioState::Off;
+    self.event(CallEngineEvent::ScreenShareTakenOver(takeover));
+    true
   }
 
   /// The SFU announced screen sound; ours starts sending (or is withdrawn if no longer wanted).
@@ -3805,6 +3853,7 @@ mod tests {
         maybe_reconnect_grace_ms,
         maybe_max_simulcast_layers,
         maybe_switch_secret: Some(Base64Bytes::new(secret.to_vec())),
+        maybe_screen_share_taken_over: None,
       }
     }
   }
@@ -3968,6 +4017,7 @@ mod tests {
         maybe_reconnect_grace_ms,
         maybe_max_simulcast_layers,
         maybe_switch_secret: None,
+        maybe_screen_share_taken_over: None,
       };
       alice.handle_signal(event(1, kept), now).unwrap();
       assert_eq!(
@@ -4049,6 +4099,7 @@ mod tests {
         maybe_reconnect_grace_ms,
         maybe_max_simulcast_layers,
         maybe_switch_secret: None,
+        maybe_screen_share_taken_over: None,
       };
       alice.handle_signal(event(1, kept), now).unwrap();
       assert!(
@@ -4105,6 +4156,7 @@ mod tests {
         maybe_reconnect_grace_ms,
         maybe_max_simulcast_layers,
         maybe_switch_secret: None,
+        maybe_screen_share_taken_over: None,
       };
       alice.handle_signal(event(1, kept), now).unwrap();
       let outputs = drain(&mut alice);
@@ -4184,6 +4236,7 @@ mod tests {
         maybe_reconnect_grace_ms,
         maybe_max_simulcast_layers,
         maybe_switch_secret: None,
+        maybe_screen_share_taken_over: None,
       };
       assert!(matches!(
         alice.handle_signal(event(1, other_call), now),
@@ -4804,6 +4857,7 @@ mod tests {
         maybe_reconnect_grace_ms,
         maybe_max_simulcast_layers,
         maybe_switch_secret: None,
+        maybe_screen_share_taken_over: None,
       }
     }
 
@@ -4818,6 +4872,248 @@ mod tests {
         output,
         EngineOutput::Signal(CallClientMessage::UnpublishVideo { .. })
       )
+    }
+  }
+
+  /// One screen share per call: the SFU lets the latest share win and tells the replaced one.
+  mod screen_takeover {
+    use super::*;
+
+    const SHARE: VideoPublicationId = VideoPublicationId(7);
+    const CAMERA: VideoPublicationId = VideoPublicationId(8);
+
+    #[test]
+    fn a_taken_over_share_stops_with_its_sound_without_asking_the_sfu() {
+      let now = Instant::now();
+      let mut alice = sharing(now);
+      alice
+        .handle_signal(event(4, CallEvent::ScreenShareTakenOver(takeover(52))), now)
+        .unwrap();
+      assert_eq!(
+        drain(&mut alice),
+        vec![EngineOutput::Event(CallEngineEvent::ScreenShareTakenOver(
+          takeover(52)
+        ))]
+      );
+      assert!(!alice.is_sharing_screen_audio());
+      assert_eq!(
+        alice.send_video(MediaStreamId(52), &video_frame(), now),
+        VideoSendOutcome::NotPublished
+      );
+      // The SFU's unpublications that follow, and the driver stopping its capture, ask nothing:
+      // the SFU ended both already.
+      alice
+        .handle_signal(
+          event(
+            5,
+            CallEvent::VideoUnpublished {
+              stream_id: MediaStreamId(52),
+            },
+          ),
+          now,
+        )
+        .unwrap();
+      alice
+        .handle_signal(
+          event(
+            6,
+            CallEvent::ScreenAudioUnpublished {
+              stream_id: MediaStreamId(70),
+            },
+          ),
+          now,
+        )
+        .unwrap();
+      alice.withdraw_video(SHARE);
+      alice.unpublish_screen_audio();
+      assert!(
+        !drain(&mut alice)
+          .iter()
+          .any(|output| matches!(output, EngineOutput::Signal(_)))
+      );
+    }
+
+    #[test]
+    fn a_takeover_of_an_earlier_share_or_a_camera_changes_nothing() {
+      let now = Instant::now();
+      let mut alice = sharing(now);
+      alice.publish_video(CAMERA, VideoTrackKind::Camera, VideoCodec::H264, layers(1));
+      answer(
+        &mut alice,
+        4,
+        own_track(53, Some(CAMERA), VideoTrackKind::Camera),
+        now,
+      );
+      drain(&mut alice);
+      // A share this device replaced itself meanwhile, and its camera, are not its share.
+      for (seq, stream) in [(5, 51), (6, 53)] {
+        alice
+          .handle_signal(event(seq, CallEvent::ScreenShareTakenOver(takeover(stream))), now)
+          .unwrap();
+      }
+      assert_eq!(drain(&mut alice), Vec::new());
+      assert!(alice.is_sharing_screen_audio());
+      for stream in [52, 53] {
+        assert_ne!(
+          alice.send_video(MediaStreamId(stream), &video_frame(), now),
+          VideoSendOutcome::NotPublished
+        );
+      }
+    }
+
+    /// Taken over while the connection was lost: the SFU says so in `joined`, and the share is
+    /// not published again (which would take the share back), while a camera the SFU lost is.
+    #[test]
+    fn a_share_taken_over_while_away_is_not_published_again() {
+      let now = Instant::now();
+      let mut alice = sharing(now);
+      alice.publish_video(CAMERA, VideoTrackKind::Camera, VideoCodec::H264, layers(1));
+      answer(
+        &mut alice,
+        4,
+        own_track(53, Some(CAMERA), VideoTrackKind::Camera),
+        now,
+      );
+      drain(&mut alice);
+
+      alice.connection_lost();
+      alice.rejoin("fresh".into(), now);
+      drain(&mut alice);
+      alice
+        .handle_signal(event(1, rejoined_after_takeover(Some(takeover(52)))), now)
+        .unwrap();
+      let outputs = drain(&mut alice);
+      for expected in [
+        EngineOutput::Event(CallEngineEvent::ScreenShareTakenOver(takeover(52))),
+        EngineOutput::Event(CallEngineEvent::VideoUnpublished(MediaStreamId(52))),
+        EngineOutput::Signal(CallClientMessage::PublishVideo {
+          kind: VideoTrackKind::Camera,
+          codec: VideoCodec::H264,
+          layers: layers(1),
+          maybe_publication_id: Some(CAMERA),
+        }),
+      ] {
+        assert!(outputs.contains(&expected), "missing {expected:?} in {outputs:?}");
+      }
+      assert!(
+        !outputs.iter().any(|output| matches!(
+          output,
+          EngineOutput::Signal(
+            CallClientMessage::PublishVideo {
+              kind: VideoTrackKind::Screen,
+              ..
+            } | CallClientMessage::PublishScreenAudio
+          )
+        )),
+        "{outputs:?}"
+      );
+      assert!(!alice.is_sharing_screen_audio());
+    }
+
+    /// Without a takeover (an SFU restart lost the share), the share is published again.
+    #[test]
+    fn a_share_the_sfu_lost_is_published_again() {
+      let now = Instant::now();
+      let mut alice = sharing(now);
+      alice.connection_lost();
+      alice.rejoin("fresh".into(), now);
+      drain(&mut alice);
+      alice
+        .handle_signal(event(1, rejoined_after_takeover(None)), now)
+        .unwrap();
+      let outputs = drain(&mut alice);
+      for expected in [
+        EngineOutput::Signal(CallClientMessage::PublishVideo {
+          kind: VideoTrackKind::Screen,
+          codec: VideoCodec::H264,
+          layers: layers(1),
+          maybe_publication_id: Some(SHARE),
+        }),
+        EngineOutput::Signal(CallClientMessage::PublishScreenAudio),
+      ] {
+        assert!(outputs.contains(&expected), "missing {expected:?} in {outputs:?}");
+      }
+      assert!(!outputs.iter().any(|output| matches!(
+        output,
+        EngineOutput::Event(CallEngineEvent::ScreenShareTakenOver(_))
+      )));
+    }
+
+    /// Alice (device 1) shares her screen on stream 52 with its sound on stream 70.
+    fn sharing(now: Instant) -> CallEngine {
+      let mut alice = engine_joined(1, now);
+      alice.publish_video(SHARE, VideoTrackKind::Screen, VideoCodec::H264, layers(1));
+      answer(
+        &mut alice,
+        2,
+        own_track(52, Some(SHARE), VideoTrackKind::Screen),
+        now,
+      );
+      alice.publish_screen_audio();
+      let sound = ScreenAudioTrack {
+        device_id: device(1),
+        stream_id: MediaStreamId(70),
+      };
+      alice
+        .handle_signal(event(3, CallEvent::ScreenAudioPublished { track: sound }), now)
+        .unwrap();
+      drain(&mut alice);
+      alice
+    }
+
+    /// Bob (device 2) took over.
+    fn takeover(stream: u32) -> ScreenShareTakeover {
+      ScreenShareTakeover {
+        stream_id: MediaStreamId(stream),
+        by_user_id: participant(2).user_id,
+        by_device_id: device(2),
+      }
+    }
+
+    fn answer(engine: &mut CallEngine, seq: u64, track: VideoTrack, now: Instant) {
+      engine
+        .handle_signal(event(seq, CallEvent::VideoPublished { track }), now)
+        .unwrap();
+    }
+
+    fn own_track(
+      stream: u32,
+      maybe_publication_id: Option<VideoPublicationId>,
+      kind: VideoTrackKind,
+    ) -> VideoTrack {
+      VideoTrack {
+        kind,
+        maybe_publication_id,
+        ..video_track(stream, 1, 1)
+      }
+    }
+
+    /// The SFU kept nothing of this device's (a lost slot): no tracks, no sound.
+    fn rejoined_after_takeover(maybe_takeover: Option<ScreenShareTakeover>) -> CallEvent {
+      let CallEvent::Joined {
+        call_id,
+        participant,
+        participants,
+        video_tracks,
+        screen_audio_tracks,
+        maybe_reconnect_grace_ms,
+        maybe_max_simulcast_layers,
+        ..
+      } = joined(1, &[])
+      else {
+        unreachable!()
+      };
+      CallEvent::Joined {
+        call_id,
+        participant,
+        participants,
+        video_tracks,
+        screen_audio_tracks,
+        maybe_reconnect_grace_ms,
+        maybe_max_simulcast_layers,
+        maybe_switch_secret: None,
+        maybe_screen_share_taken_over: maybe_takeover,
+      }
     }
   }
 
@@ -4961,6 +5257,7 @@ mod tests {
         maybe_reconnect_grace_ms,
         maybe_max_simulcast_layers,
         maybe_switch_secret: None,
+        maybe_screen_share_taken_over: None,
       }
     }
   }
@@ -5815,6 +6112,7 @@ mod tests {
       maybe_reconnect_grace_ms: Some(30_000),
       maybe_max_simulcast_layers: Some(MAX_SIMULCAST_LAYERS),
       maybe_switch_secret: None,
+      maybe_screen_share_taken_over: None,
     }
   }
 

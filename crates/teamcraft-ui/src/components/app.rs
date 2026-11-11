@@ -51,7 +51,7 @@ use crate::history::{Travel, travel};
 use crate::i18n::{I18n, provide_i18n, use_i18n};
 use crate::meetings::parse_guest_link;
 use crate::model::TimestampMs;
-use crate::model::{ConversationId, SpaceId};
+use crate::model::{ConversationId, SpaceId, UserId};
 use crate::motion::use_leave_ghost;
 use crate::navigation::Step;
 use crate::notify_sync::NotificationSync;
@@ -1364,6 +1364,27 @@ pub(crate) fn connect_calls(state: AppState) {
       call.show_camera_in_use(fallback.used.id.clone());
     }
     maybe_fallback
+  });
+  // Somebody else started sharing their screen, which ended ours (a call has one share at a
+  // time): the user learns who took over. The share button already shows it off.
+  Effect::new(move |previous: Option<Option<UserId>>| {
+    let maybe_by = state.read(|backend| {
+      backend
+        .active_call()
+        .and_then(|active| active.maybe_screen_share_taken_over_by)
+    });
+    if let Some(by) = maybe_by
+      && previous.is_some_and(|previous| previous != maybe_by)
+    {
+      let maybe_name = untrack(|| state.read(|backend| backend.user(by)))
+        .map(|user| user.display_name)
+        .filter(|name| !name.is_empty());
+      state.show_toast(match maybe_name {
+        Some(name) => i18n.t_with("share-taken-over", &[("name", &name)]),
+        None => i18n.t("share-taken-over-unnamed"),
+      });
+    }
+    maybe_by
   });
   // The shell ended the call (the other side hung up, the connection dropped): leave the screen.
   // A call that broke off for good says why (issue #427).

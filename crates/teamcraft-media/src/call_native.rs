@@ -35,8 +35,8 @@ use socket2::{Domain, Protocol, Socket, Type};
 use teamcraft_net::{ATTEMPT_DELAY, RaceError, interleave, race};
 use teamcraft_proto::{
   Base64Bytes, CallClientMessage, CallServerMessage, DeviceId, ErrorCode, MediaStreamId,
-  SFU_GOING_AWAY_CLOSE_CODE, SFU_SWITCHED_CLOSE_CODE, VideoCodec, VideoLayerInfo, VideoPublicationId,
-  VideoTrackKind, fallback_protocols,
+  SFU_GOING_AWAY_CLOSE_CODE, SFU_SWITCHED_CLOSE_CODE, ScreenShareTakeover, VideoCodec, VideoLayerInfo,
+  VideoPublicationId, VideoTrackKind, fallback_protocols,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
@@ -2243,6 +2243,11 @@ impl Sinks {
             CallEngineEvent::VideoPublished(track) if track.device_id == engine.device_id() => {
               self.video.follow_publications(engine.device_id(), &event);
             },
+            CallEngineEvent::ScreenShareTakenOver(takeover) => {
+              // The app hears it as the share's end.
+              self.video.end_taken_over_share(engine, *takeover, &self.events);
+              continue;
+            },
             CallEngineEvent::VideoPublished(track) => {
               self
                 .video
@@ -2581,6 +2586,30 @@ impl VideoState {
         (sender.kind.clone(), end)
       })
       .collect()
+  }
+
+  /// Another device's share replaced ours (a call has one screen share at a time): the capture
+  /// stops as if the system had ended it, its sound with it (the engine no longer sends any; the
+  /// timer stops its capture), and the app hears who took over.
+  fn end_taken_over_share(
+    &mut self,
+    engine: &mut CallEngine,
+    takeover: ScreenShareTakeover,
+    events: &mpsc::UnboundedSender<CallEngineEvent>,
+  ) {
+    let kind = VideoTrackKind::Screen;
+    if !self.senders.iter().any(|(sender, _)| sender.kind == kind) {
+      return;
+    }
+    self.stop(engine, &kind);
+    // The app may have stopped listening; the call goes on.
+    let _ = events.send(CallEngineEvent::OwnVideoEnded {
+      kind,
+      end: OwnVideoEnd::TakenOver {
+        by_user_id: takeover.by_user_id,
+        by_device_id: takeover.by_device_id,
+      },
+    });
   }
 
   /// Stops capturing a track of `kind` and unpublishes it, also when the SFU hasn't confirmed it
