@@ -164,7 +164,6 @@ pub(crate) fn AuthFrame(
     <main class="auth-page">
       <BundleBanner />
       <section class="auth-card">
-        <crate::app_links::OpenInAppButton />
         {(!hide_brand).then(|| view! {
           <div class="auth-brand" translate="no">
             {move || brand_mark(brand)}
