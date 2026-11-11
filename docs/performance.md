@@ -2554,14 +2554,14 @@ the chunks that load later. The limit:
 
 | Limit                                | Value        | Above it                         |
 |--------------------------------------|--------------|----------------------------------|
-| A guest in a meeting: gzip -9 total  | 10,000,000 B | fails; warns from 95 % (9.5 MB)  |
-| Signed-in first visit: gzip -9 total | 10,000,000 B | fails; warns from 95 % (9.5 MB)  |
+| A guest in a meeting: gzip -9 total  | 6,440,000 B  | fails; warns from 95 % (6.12 MB) |
+| Signed-in first visit: gzip -9 total | 5,610,000 B  | fails; warns from 95 % (5.33 MB) |
 | The call module: gzip -9             | 1,000,000 B  | fails                            |
 
-Both budgets are 10 MB since 2026-11-10: new features (polls #1689, the local search index #1693)
-had pushed a signed-in first visit to 5.39 MB (CI, PR #1692), over its 5.37 MB budget, and a guest's
-meeting to 6.17 MB of 6.18 MB. At 10 MB they only catch big regressions; splitting further and
-bringing them back down is #1699. Before that they were the sizes of #1462 below plus about 6 % for a signed-in first visit and about 5 %
+Both budgets are the sizes of #1699 below plus about 5 % since 2026-11-11. From 2026-11-10 they
+were 10 MB: new features (polls #1689, the local search index #1693) had pushed a signed-in first
+visit to 5.39 MB (CI, PR #1692), over its 5.37 MB budget, and a guest's meeting to 6.17 MB of
+6.18 MB; by #1699 they had grown on to 5.56 and 6.33 MB. Before that they were the sizes of #1462 below plus about 6 % for a signed-in first visit and about 5 %
 for a guest (6 % would have raised it, as the guest's meeting had grown since #1452), so they warn
 only after real growth; before that they were 6.19 and 5.39 MB (#1452, #1465; 5.65 MB before the
 pack), 6.28 and 5.74 MB (#1437), 6.35 and 5.8 MB (#1413), 6.8 and 6.2 MB, the sizes of #1148 plus about 6 %. For a while they were 10 MB, because the guest's meeting had reached its budget of the time
@@ -2575,6 +2575,64 @@ information. The uncompressed size is printed but not limited: what a user waits
 transfer. The earlier growth ratchet on it (11.85 MB) was dropped with the split (#334): main had
 outgrown it anyway, and the split moves code between files without changing what matters. Raising
 the budget is a decision, not a fix.
+
+#### The snapshot's JSON and the data export out of the first visit (#1699, 2026-11-11)
+
+Ranked as the issue describes (the release bundle as `web-size.yml` builds it, then
+`teamcraft-web-bundle` again without wasm-opt, function bodies by `twiggy` per file, files grouped
+into the app, the signed-in app's pack and a guest's meeting by the split loader), the largest parts
+neither a guest nor a member's first screen needs were JSON again and the data export:
+
+- **The snapshot and feed reads went through JSON in the page.** The UI read the sidebar snapshot,
+  what changed in it, a feed's page and a thread with `tauri::call`, which in the browser handed
+  them to the page's core as a `serde_json::Value` and read the answer back from one: the app
+  carried the writers of `ChatSnapshot`, `SnapshotChanges`, `MessageWindow` and the messages, the
+  signed-in app their readers. They are typed now (`remote_backend::CoreRead`, `web_core::read`), as
+  the chat actions and queries are since #1413; in JSON they only travel to the desktop shell
+  (`areas::shell_read`, in `shell`) and between two tabs of an account (`areas::read_in_owner_tab`
+  and the owner's side in `tabs`).
+- **Every answer type had two JSON readers.** `tauri::call::<T>` read the desktop shell's answer
+  from text and the page core's from a `Value`, both per type, and the browser only ever used the
+  second. The shell's answer is read into a `Value` first now, so each type has one reader (about
+  0.14 MB of the signed-in app before wasm-opt).
+- **The data export** (#211: the archive's writers, its checkpoint and the personal data's JSON,
+  about 75 kB of the app before wasm-opt) runs its steps in `settings`
+  (`areas::export_step`), next to its card, which the module is loaded for anyway. A step whose
+  module can't load ends the export with a network failure in the card, which offers to start it
+  again.
+
+Release `trunk build` on Linux (trunk 0.22.0, wasm-opt 131, Rust 1.99.1, the CI job's commands),
+`main` 11c61e40, gzip -9:
+
+| Download                                      | Before      | After       | Delta      |
+|-----------------------------------------------|-------------|-------------|------------|
+| A guest in a meeting (lobby, meeting, calls)  | 6,330,576 B | 6,125,773 B | −204,803 B |
+| Signed-in first visit                         | 5,555,281 B | 5,341,057 B | −214,224 B |
+| The app (in both)                             | 2,962,648 B | 2,861,790 B | −100,858 B |
+| Signed-in app (pack)                          | 2,099,637 B | 1,986,271 B | −113,366 B |
+| `settings` (with the settings)                | 0.35 MB     | 0.41 MB     |            |
+| `tabs` (when a second tab asks)               | 0.17 MB     | 0.18 MB     |            |
+
+The service worker (427,159 B) and the texts (65,837 B) did not change. Both budgets are these
+sizes plus about 5 % (above).
+
+Measured and left, for #1699's follow-ups:
+
+- **Polls** (#1689): the poll card, voting and closing are about 30 kB of the signed-in app before
+  wasm-opt (under 10 kB gzip), and the dialog is in `dialogs` already. A card that loads would show
+  a placeholder in the message list the first time a poll scrolls in, for little.
+- **The member-only rounds of the engine's upkeep** (role signing, about 0.13 MB of the app before
+  wasm-opt with `Upkeep::tick`'s part): only a guest would gain, and it needs `Upkeep::tick` in
+  teamcraft-core to hand those rounds to the shell, which then runs them in `session`.
+- **The guest's join page** (about 50 kB of the app before wasm-opt): only a signed-in first visit
+  would gain; in `guest` it would make the lobby wait for the whole meeting's chunks, in a module of
+  its own a guest pays a round trip before the name form.
+- **The desktop-only parts of every page** (`auth::tauri` and its callers, about 0.11 MB of the
+  signed-in app before wasm-opt): spread over 40 files; each needs its own split point.
+- **Crash reporting** (about 0.16 MB of the app before wasm-opt): its tracing layer and panic hook
+  run from the start; only the sending (`crash_reports::flush`, `refresh_config`) could wait.
+- **The REST answers' readers** (`GetMeResponse`, meetings, users, announcements; about 0.11 MB
+  of JSON readers from text in the signed-in app) are used by the browser and stay.
 
 #### The console's texts load with the console (#1462, 2026-11-08)
 

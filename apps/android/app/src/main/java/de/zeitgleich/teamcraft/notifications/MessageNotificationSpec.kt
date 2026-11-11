@@ -43,6 +43,12 @@ data class MessageNotificationSpec(
   val actions: List<MessageAction>,
   /** The thread a reply goes to: the newest message's. */
   val maybeReplyThreadId: String?,
+  /**
+   * Floats as a conversation bubble (Android 11+): a direct message the user opted in for, on a
+   * notification that shows its content (the bubble shows the conversation, so it never outlives
+   * a setting or the app lock that hides it).
+   */
+  val isBubble: Boolean = false,
 )
 
 /** MessagingStyle: the conversation's lines with their senders. */
@@ -138,6 +144,8 @@ object MessageNotificationSpecs {
     privacy: MessagePrivacy,
     isAlerting: Boolean,
     labels: NotificationText.Labels,
+    /** The user opted in for this conversation and the system allows bubbles (see [BubblePrefs]). */
+    canBubble: Boolean = false,
   ): MessageNotificationSpec? {
     val received = entry.lines.filter { !it.isOwn }
     val newest = received.lastOrNull() ?: return null
@@ -198,6 +206,7 @@ object MessageNotificationSpecs {
       maybeShortcut = shortcut,
       actions = if (privacy.offersActions) listOf(MessageAction.REPLY, MessageAction.MARK_READ, MessageAction.MUTE) else emptyList(),
       maybeReplyThreadId = newest.maybeThreadId,
+      isBubble = canBubble && entry.isDirect && privacy.showsContent && shortcut != null && conversation != null,
     )
   }
 

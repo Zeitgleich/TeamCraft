@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.media.AudioAttributes
 import android.media.RingtoneManager
+import android.os.Build
 import android.provider.Settings
 import androidx.annotation.StringRes
 import de.zeitgleich.teamcraft.R
@@ -70,6 +71,9 @@ object NotificationChannels {
       NotificationChannel(id, context.getString(name), importance).apply {
         description = context.getString(this@Channel.description)
         if (this@Channel.id == INCOMING_CALLS) ringLikeAPhone()
+        // Direct messages may float as bubbles when the user opts a conversation in (#591); the
+        // user can still turn it off for the channel in the system settings.
+        if (this@Channel.id == DIRECT_MESSAGES && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) setAllowBubbles(true)
       }
 
     private fun NotificationChannel.ringLikeAPhone() {

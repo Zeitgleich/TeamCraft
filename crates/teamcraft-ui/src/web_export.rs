@@ -8,8 +8,10 @@
 //! and the checkpoint the core left is deleted on the next look.
 
 use teamcraft_client_api::data_export::DataExportStatus;
-use teamcraft_core::export::{ExportError, ExportJob, ExportSink};
+use teamcraft_core::export::{ExportError, ExportJob, ExportSink, ExportStep};
 use wasm_bindgen::JsCast;
+
+use crate::web_core::WebClient;
 
 /// What the page buffers before it hands a piece to the browser.
 const PIECE_BYTES: usize = 1024 * 1024;
@@ -31,6 +33,15 @@ pub(crate) struct WebExportRun {
   pub(crate) job: ExportJob,
   pub(crate) sink: BlobSink,
   pub(crate) file_name: String,
+}
+
+/// One step of an export with what it reads from and writes to. The steps run in the security
+/// settings' module (`areas::export_step`, #1699), next to the export's card: the archive's writers
+/// (about 75 kB before wasm-opt) were in every first visit.
+pub(crate) struct ExportTurn<'a> {
+  pub(crate) job: &'a mut ExportJob,
+  pub(crate) sink: &'a mut BlobSink,
+  pub(crate) client: &'a mut WebClient,
 }
 
 /// The archive as pieces the browser holds.
@@ -83,6 +94,12 @@ impl BlobSink {
     self.buffer.fill(0);
     self.buffer.clear();
     Ok(())
+  }
+}
+
+impl ExportTurn<'_> {
+  pub(crate) async fn step(self) -> Result<ExportStep, ExportError> {
+    Box::pin(self.job.step(self.client, self.sink)).await
   }
 }
 
