@@ -982,7 +982,8 @@ mod tests {
       for flood in floods {
         flood.await.unwrap().unwrap();
       }
-      let spans = perf_jobs::perf_job_spans(since_ms, perf_jobs::now_ms());
+      // Not `perf_job_spans`: its longest few may be other tests' jobs, running meanwhile.
+      let spans = perf_jobs::recorded_between(since_ms, perf_jobs::now_ms());
       let opened = spans
         .iter()
         .find(|span| span.name == "open_chat")

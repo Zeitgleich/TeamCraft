@@ -124,6 +124,20 @@ pub fn perf_job_spans(start_ms: f64, end_ms: f64) -> Vec<PerfJobSpan> {
   spans_between(&records, start_ms, end_ms)
 }
 
+/// The queue jobs recorded here that overlap `start_ms` to `end_ms`, all of them: tests run in
+/// parallel and share the records, so another test's longer jobs may push a job out of
+/// [`perf_job_spans`]' longest few.
+#[cfg(test)]
+pub(crate) fn recorded_between(start_ms: f64, end_ms: f64) -> Vec<PerfJobSpan> {
+  RECORDS
+    .lock()
+    .unwrap_or_else(PoisonError::into_inner)
+    .iter()
+    .filter(|span| span.done_at_ms >= start_ms && span.enqueued_at_ms <= end_ms)
+    .cloned()
+    .collect()
+}
+
 /// Where slow jobs and kept traces are reported; replaces the one before.
 #[uniffi::export]
 pub fn set_perf_listener(listener: Arc<dyn PerfListener>) {
