@@ -189,7 +189,7 @@ internal class ScreenCapture(
     val reader = newReader(size)
     display.resize(size.width.toInt(), size.height.toInt(), context.resources.displayMetrics.densityDpi)
     display.surface = reader.surface
-    maybeReader?.close()
+    maybeReader?.let(::closeOnCaptureThread)
     maybeReader = reader
     maybeSize = size
     Log.i(TAG, "the screen turned; sharing ${size.width}x${size.height}")
@@ -311,6 +311,16 @@ internal class ScreenCapture(
     }
   }
 
+  /**
+   * Closes a reader after the picture its listener may be copying right now: the listener runs on
+   * the capture thread, and closing the reader from another thread unmaps the buffer under it
+   * (found on a device: SIGSEGV in `ByteBuffer.get` when the phone turned). [release] quits the
+   * thread safely, so a close posted before still runs.
+   */
+  private fun closeOnCaptureThread(reader: ImageReader) {
+    if (!handler.post { reader.close() }) reader.close()
+  }
+
   /** Lets everything go; called under the lock. */
   private fun release() {
     isStopped = true
@@ -324,7 +334,7 @@ internal class ScreenCapture(
     maybeAudioThread = null
     maybeDisplay?.release()
     maybeDisplay = null
-    maybeReader?.close()
+    maybeReader?.let(::closeOnCaptureThread)
     maybeReader = null
     projection.unregisterCallback(projectionCallback)
     // Ends the system's indicator; stopping twice (the system stopped it) does nothing.
