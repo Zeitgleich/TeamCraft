@@ -323,6 +323,14 @@ pub fn admin_task(
 #[cfg(target_arch = "wasm32")]
 pub(crate) type EngineRun<'a> = Pin<Box<dyn Future<Output = Result<(), teamcraft_core::CoreError>> + 'a>>;
 
+/// A step of the data export on its way.
+#[cfg(target_arch = "wasm32")]
+pub(crate) type ExportRun<'a> = Pin<
+  Box<
+    dyn Future<Output = Result<teamcraft_core::export::ExportStep, teamcraft_core::export::ExportError>> + 'a,
+  >,
+>;
+
 /// A chat request in JSON, between two tabs of an account (`tabs`) or to the desktop shell
 /// (`shell`), on its way.
 pub(crate) type ChatRun<T> = Pin<Box<dyn Future<Output = Result<T, String>>>>;
@@ -358,6 +366,15 @@ pub(crate) fn settings_action(
   action: teamcraft_client_api::remote::ChatAction,
 ) -> Result<EngineRun<'_>, SplitLoaderError> {
   Ok(Box::pin(crate::web_core::settings_action(client, action)))
+}
+
+/// One step of "Export my data" (`web_export.rs`), with the security settings that show its card.
+#[cfg(target_arch = "wasm32")]
+#[wasm_split(settings, wasm_split_path = ::leptos::wasm_split, fallible)]
+pub(crate) fn export_step(
+  turn: crate::web_export::ExportTurn<'_>,
+) -> Result<ExportRun<'_>, SplitLoaderError> {
+  Ok(Box::pin(turn.step()))
 }
 
 /// The console's engine operations (`web_core::EnginePart::Admin`): the workspace's policy and
@@ -414,6 +431,16 @@ pub(crate) fn query_owner_tab(
   Ok(Box::pin(crate::web_core::query_owner_tab(follower, query)))
 }
 
+/// A follower tab's read of the snapshot or a feed, as JSON for the tab that runs the core (#1699).
+#[cfg(target_arch = "wasm32")]
+#[wasm_split(tabs, wasm_split_path = ::leptos::wasm_split, fallible)]
+pub(crate) fn read_in_owner_tab(
+  follower: Rc<crate::web_tabs::Follower>,
+  read: crate::remote_backend::CoreRead,
+) -> Result<ChatRun<crate::remote_backend::CoreReadAnswer>, SplitLoaderError> {
+  Ok(Box::pin(crate::web_core::read_in_owner_tab(follower, read)))
+}
+
 /// The desktop shell takes chat actions and queries in JSON (`core_action`, `core_query`); a browser
 /// hands them to the page's core typed. So the JSON code of `ChatAction` and `ChatAnswer` (about
 /// 0.65 MB before wasm-opt, shared with `tabs`) is in a module only the desktop app loads (#1413).
@@ -430,6 +457,15 @@ pub(crate) fn shell_query(
   query: teamcraft_client_api::remote::ChatQuery,
 ) -> Result<ChatRun<teamcraft_client_api::remote::ChatAnswer>, SplitLoaderError> {
   Ok(Box::pin(crate::remote_backend::shell_query(query)))
+}
+
+/// A read of the snapshot or a feed from the desktop shell, in JSON: the readers of the snapshot's
+/// JSON were in every first visit (#1699).
+#[wasm_split(shell, wasm_split_path = ::leptos::wasm_split, fallible)]
+pub(crate) fn shell_read(
+  read: crate::remote_backend::CoreRead,
+) -> Result<ChatRun<crate::remote_backend::CoreReadAnswer>, SplitLoaderError> {
+  Ok(Box::pin(crate::remote_backend::shell_read(read)))
 }
 
 /// Shows the view `load` builds once its chunk is there: a placeholder until then, and a message

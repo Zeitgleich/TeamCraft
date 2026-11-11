@@ -895,9 +895,19 @@ pub async fn call<T: for<'de> Deserialize<'de>>(
   command: &str,
   args: &serde_json::Value,
 ) -> Result<T, String> {
-  if !is_available() {
-    return call_web_core(command, args).await;
-  }
+  // Only the reading of the answer is per type, from a `Value` in both cases: a reader from text
+  // as well doubled every answer type's JSON code in the browser, which never takes this path to
+  // the shell (#1699).
+  let answer = if is_available() {
+    call_shell(command, args).await?
+  } else {
+    call_web_core(command, args).await?
+  };
+  serde_json::from_value(answer).map_err(|error| format!("unreadable answer of {command}: {error}"))
+}
+
+/// A desktop command's answer as JSON.
+async fn call_shell(command: &str, args: &serde_json::Value) -> Result<serde_json::Value, String> {
   let js_args =
     js_sys::JSON::parse(&args.to_string()).map_err(|_| "could not encode the arguments".to_owned())?;
   let answer = invoke(command, js_args).await.map_err(|error| match error {
@@ -914,19 +924,12 @@ pub async fn call<T: for<'de> Deserialize<'de>>(
 
 /// The browser has no shell: the core commands are answered by the core running in the page.
 #[cfg(target_arch = "wasm32")]
-async fn call_web_core<T: for<'de> Deserialize<'de>>(
-  command: &str,
-  args: &serde_json::Value,
-) -> Result<T, String> {
-  let answer = crate::web_core::call(command, args.clone()).await?;
-  serde_json::from_value(answer).map_err(|error| format!("unreadable answer of {command}: {error}"))
+async fn call_web_core(command: &str, args: &serde_json::Value) -> Result<serde_json::Value, String> {
+  crate::web_core::call(command, args.clone()).await
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn call_web_core<T: for<'de> Deserialize<'de>>(
-  command: &str,
-  _args: &serde_json::Value,
-) -> Result<T, String> {
+async fn call_web_core(command: &str, _args: &serde_json::Value) -> Result<serde_json::Value, String> {
   Err(format!("{command} needs the desktop app or a browser"))
 }
 

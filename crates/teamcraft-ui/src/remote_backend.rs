@@ -183,6 +183,149 @@ pub(crate) async fn shell_query(query: ChatQuery) -> Result<ChatAnswer, String> 
   call("core_query", &json!({ "query": query })).await
 }
 
+/// Reads the core's snapshot or a feed, like [`core_action`]: typed from the core in this page,
+/// in JSON from the desktop shell (`areas::shell_read`, #1699).
+async fn core_read(read: CoreRead) -> Result<CoreReadAnswer, String> {
+  #[cfg(target_arch = "wasm32")]
+  if !crate::auth::tauri::is_available() {
+    return crate::web_core::read(read).await;
+  }
+  crate::areas::shell_read(read)
+    .await
+    .map_err(|error| error.to_string())?
+    .await
+}
+
+/// A read for the desktop shell, in JSON (in the `shell` chunk).
+pub(crate) async fn shell_read(read: CoreRead) -> Result<CoreReadAnswer, String> {
+  let (command, args) = read.to_json();
+  let answer: serde_json::Value = call(command, &args).await?;
+  read.answer_from_json(answer)
+}
+
+async fn read_snapshot() -> Result<ChatSnapshot, String> {
+  match core_read(CoreRead::Snapshot).await? {
+    CoreReadAnswer::Snapshot(snapshot) => Ok(*snapshot),
+    _ => Err(CoreRead::Snapshot.mismatch()),
+  }
+}
+
+async fn read_snapshot_changes(maybe_since: Option<SnapshotCursor>) -> Result<SnapshotChanges, String> {
+  let read = CoreRead::Changes(maybe_since);
+  match core_read(read).await? {
+    CoreReadAnswer::Changes(changes) => Ok(*changes),
+    _ => Err(read.mismatch()),
+  }
+}
+
+async fn read_messages(
+  conversation: ConversationId,
+  start: usize,
+  len: usize,
+) -> Result<MessageWindow, String> {
+  let read = CoreRead::Messages {
+    conversation,
+    start,
+    len,
+  };
+  match core_read(read).await? {
+    CoreReadAnswer::Messages(window) => Ok(window),
+    _ => Err(read.mismatch()),
+  }
+}
+
+async fn read_thread(conversation: ConversationId, thread: ThreadId) -> Result<Vec<Message>, String> {
+  let read = CoreRead::Thread { conversation, thread };
+  match core_read(read).await? {
+    CoreReadAnswer::Thread(messages) => Ok(messages),
+    _ => Err(read.mismatch()),
+  }
+}
+
+/// A read of the core's snapshot or of a feed (`core_snapshot`, `core_snapshot_changes`,
+/// `core_messages`, `core_thread`). The page's core answers it typed; in JSON it only travels to
+/// the desktop shell and between two tabs of an account, whose code is in the `shell` and `tabs`
+/// modules (#1699): the readers and writers of the snapshot's JSON were in every first visit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CoreRead {
+  Snapshot,
+  /// What changed since the cursor; without one, the whole snapshot.
+  Changes(Option<SnapshotCursor>),
+  Messages {
+    conversation: ConversationId,
+    start: usize,
+    len: usize,
+  },
+  Thread {
+    conversation: ConversationId,
+    thread: ThreadId,
+  },
+}
+
+/// The answer to a [`CoreRead`].
+pub(crate) enum CoreReadAnswer {
+  Snapshot(Box<ChatSnapshot>),
+  Changes(Box<SnapshotChanges>),
+  Messages(MessageWindow),
+  Thread(Vec<Message>),
+}
+
+impl CoreRead {
+  /// The read as the shell's command and its arguments.
+  pub(crate) fn to_json(self) -> (&'static str, serde_json::Value) {
+    match self {
+      Self::Snapshot => ("core_snapshot", json!({})),
+      Self::Changes(maybe_since) => ("core_snapshot_changes", json!({ "since": maybe_since })),
+      Self::Messages {
+        conversation,
+        start,
+        len,
+      } => (
+        "core_messages",
+        json!({ "conversation": conversation, "start": start, "len": len }),
+      ),
+      Self::Thread { conversation, thread } => (
+        "core_thread",
+        json!({ "conversation": conversation, "thread": thread }),
+      ),
+    }
+  }
+
+  /// Reads the answer to this read from JSON.
+  pub(crate) fn answer_from_json(self, answer: serde_json::Value) -> Result<CoreReadAnswer, String> {
+    let read = match self {
+      Self::Snapshot => {
+        serde_json::from_value(answer).map(|snapshot| CoreReadAnswer::Snapshot(Box::new(snapshot)))
+      },
+      Self::Changes(_) => {
+        serde_json::from_value(answer).map(|changes| CoreReadAnswer::Changes(Box::new(changes)))
+      },
+      Self::Messages { .. } => serde_json::from_value(answer).map(CoreReadAnswer::Messages),
+      Self::Thread { .. } => serde_json::from_value(answer).map(CoreReadAnswer::Thread),
+    };
+    read.map_err(|error| format!("unreadable answer of {}: {error}", self.to_json().0))
+  }
+
+  /// The error of an answer of another kind than the read's: a mistake here.
+  fn mismatch(self) -> String {
+    format!("the answer of {} is of another read", self.to_json().0)
+  }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl CoreReadAnswer {
+  /// The answer in JSON, for another tab of the account.
+  pub(crate) fn to_json(&self) -> Result<serde_json::Value, String> {
+    let written = match self {
+      Self::Snapshot(snapshot) => serde_json::to_value(snapshot),
+      Self::Changes(changes) => serde_json::to_value(changes),
+      Self::Messages(window) => serde_json::to_value(window),
+      Self::Thread(messages) => serde_json::to_value(messages),
+    };
+    written.map_err(|error| error.to_string())
+  }
+}
+
 /// Wraps the key backup with a new recovery passphrase.
 pub async fn change_passphrase(passphrase: &str) -> Result<(), String> {
   core_action(ChatAction::ChangePassphrase {
@@ -652,13 +795,13 @@ impl<T: Clone> EventRoute<T> {
 impl RemoteChat {
   /// Reads the first snapshot and starts following the shell's change events.
   pub async fn connect() -> Result<Self, String> {
-    let first: SnapshotChanges = call("core_snapshot_changes", &json!({ "since": null })).await?;
+    let first = read_snapshot_changes(None).await?;
     let cursor = first.cursor;
     let snapshot = match first.maybe_full {
       Some(full) => *full,
       // Invariant: a reader without a cursor gets the whole snapshot; should a shell not send it,
       // the plain read does.
-      None => call("core_snapshot", &json!({})).await?,
+      None => read_snapshot().await?,
     };
     let backend = Self {
       mirror: Rc::new(RefCell::new(Mirror {
@@ -795,7 +938,7 @@ impl RemoteChat {
   async fn refresh(&self) {
     let refresh_ms = crate::perf::now_ms();
     let since = self.mirror.borrow().cursor;
-    let changes = match call::<SnapshotChanges>("core_snapshot_changes", &json!({ "since": since })).await {
+    let changes = match read_snapshot_changes(Some(since)).await {
       Ok(changes) => changes,
       Err(error) => {
         tracing::warn!(%error, "could not refresh the chat snapshot");
@@ -940,8 +1083,7 @@ impl RemoteChat {
   /// Reads the newest rows of a feed whose total jumped to `total`, which tell where the rows held
   /// are now; returns whether anything changed.
   async fn follow_moved_rows(&self, conversation: ConversationId, total: usize) -> bool {
-    let args = json!({ "conversation": conversation, "start": total.saturating_sub(PAGE), "len": PAGE });
-    let outcome = call::<MessageWindow>("core_messages", &args).await;
+    let outcome = read_messages(conversation, total.saturating_sub(PAGE), PAGE).await;
     let mut mirror = self.mirror.borrow_mut();
     let feed = mirror.feeds.entry(conversation).or_default();
     match outcome {
@@ -1015,9 +1157,8 @@ impl RemoteChat {
     }
     let mut is_changed = false;
     loop {
-      let args = json!({ "conversation": conversation, "start": page * PAGE, "len": PAGE });
       let started_ms = crate::perf::now_ms();
-      let outcome = call::<MessageWindow>("core_messages", &args).await;
+      let outcome = read_messages(conversation, page * PAGE, PAGE).await;
       // A switch whose rows weren't in the mirror: the read from the core's store is a step of it.
       crate::perf::with_pending(
         crate::perf::PerfOperation::ChannelSwitch,
@@ -1072,11 +1213,7 @@ impl RemoteChat {
     }
     let mut is_changed = false;
     loop {
-      let outcome = call::<Vec<Message>>(
-        "core_thread",
-        &json!({ "conversation": conversation, "thread": thread }),
-      )
-      .await;
+      let outcome = read_thread(conversation, thread).await;
       let mut mirror = self.mirror.borrow_mut();
       match outcome {
         Ok(messages) => {
@@ -3800,6 +3937,70 @@ mod tests {
     }
 
     use super::window;
+  }
+
+  mod core_read {
+    use super::*;
+
+    /// The desktop shell and a tab that runs the core answer these commands (#1699): their names
+    /// and arguments are what they always were.
+    #[test]
+    fn reads_keep_the_shells_commands_and_arguments() {
+      let conversation: ConversationId = id_from_raw(7);
+      assert_eq!(CoreRead::Snapshot.to_json(), ("core_snapshot", json!({})));
+      assert_eq!(
+        CoreRead::Changes(None).to_json(),
+        ("core_snapshot_changes", json!({ "since": null }))
+      );
+      assert_eq!(
+        CoreRead::Messages {
+          conversation,
+          start: 100,
+          len: PAGE
+        }
+        .to_json(),
+        (
+          "core_messages",
+          json!({ "conversation": conversation, "start": 100, "len": PAGE })
+        )
+      );
+      let thread: ThreadId = id_from_raw(9);
+      assert_eq!(
+        CoreRead::Thread { conversation, thread }.to_json(),
+        (
+          "core_thread",
+          json!({ "conversation": conversation, "thread": thread })
+        )
+      );
+    }
+
+    #[test]
+    fn an_answer_reads_back_from_its_json() {
+      let read = CoreRead::Messages {
+        conversation: id_from_raw(7),
+        start: 0,
+        len: PAGE,
+      };
+      let json = CoreReadAnswer::Messages(window(2, &["a", "b"]))
+        .to_json()
+        .unwrap();
+      match read.answer_from_json(json) {
+        Ok(CoreReadAnswer::Messages(back)) => assert_eq!(back, window(2, &["a", "b"])),
+        _ => panic!("a feed's page reads back as one"),
+      }
+    }
+
+    #[test]
+    fn an_answer_of_another_shape_is_an_error_naming_the_command() {
+      let error = CoreRead::Thread {
+        conversation: id_from_raw(7),
+        thread: id_from_raw(9),
+      }
+      .answer_from_json(json!({ "not": "a thread" }))
+      .err()
+      .unwrap();
+      assert!(error.contains("core_thread"), "{error}");
+    }
   }
 
   mod slot {
