@@ -129,6 +129,8 @@ fn GuestShell(
     picture_retries,
   ));
   crate::startup::first_view();
+  // The call's duration ticks for a guest too (the member app starts it in `app.rs`).
+  crate::calls::run_call_clock(state.call);
   change_source.set_change_notifier(Rc::new(move || state.backend_changed()));
   crate::feedback::set_failure_sink(move |failure| state.show_failure(i18n, &failure));
   state.open_conversation(conversation);
@@ -170,9 +172,13 @@ fn GuestShell(
       <header class="guest-meeting-bar">
         <h1 class="guest-meeting-title" translate="no">{title}</h1>
         <span class="grow"></span>
-        <button class="btn btn-primary" on:click=move |_| join_meeting(state, i18n, conversation)>
-          {move || i18n.t("guest-join-call")}
-        </button>
+        // Only while the guest isn't in the call (or about to join it): in it, the call screen has
+        // its own controls.
+        {move || (state.call.phase.get() == CallPhase::Idle).then(|| view! {
+          <button class="btn btn-primary" on:click=move |_| join_meeting(state, i18n, conversation)>
+            {move || i18n.t("guest-join-call")}
+          </button>
+        })}
         <button class="btn" prop:disabled=move || is_leaving.get() on:click=leave>
           {move || i18n.t("guest-leave")}
         </button>

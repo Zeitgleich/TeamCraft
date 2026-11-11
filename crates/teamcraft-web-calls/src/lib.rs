@@ -39,7 +39,7 @@ use teamcraft_media::audio_io::{AudioDeviceChoice, AudioDeviceId, AudioDeviceInf
 use teamcraft_media::audio_level::SharedLevel;
 use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_auth::{BindingRole, CallKeyAuthenticator, CallKeyError};
-use teamcraft_media::call_engine::{CallEngineConfig, CallEngineError, CallEngineEvent};
+use teamcraft_media::call_engine::{CallEngineConfig, CallEngineError, CallEngineEvent, OwnVideoEnd};
 use teamcraft_media::call_resilience::{
   JoinTicket, JoinTicketError, ResilienceConfig, certificate_hashes_from_hex,
 };
@@ -1498,12 +1498,16 @@ impl Host {
   }
 
   fn on_engine_event(&self, roster: &mut CallRoster, event: CallEngineEvent) {
-    if let CallEngineEvent::OwnVideoEnded {
-      kind: VideoTrackKind::Camera,
-      ..
-    } = &event
-    {
-      self.on_camera_ended();
+    if let CallEngineEvent::OwnVideoEnded { kind, end } = &event {
+      if *end == OwnVideoEnd::EncodingFailed {
+        self.report(&ActionFailure::new(
+          FailureKind::Call(CallFailure::VideoEncodingFailed),
+          "the browser can't encode the video in a codec the call uses",
+        ));
+      }
+      if *kind == VideoTrackKind::Camera {
+        self.on_camera_ended(*end);
+      }
     }
     if let CallEngineEvent::OwnVideoEnded {
       kind: VideoTrackKind::Screen,
@@ -1524,7 +1528,7 @@ impl Host {
   /// another app took it, or its pictures could no longer be encoded; issue #920). The roster
   /// turns it off in the call state; its stream leaves the self view, and the user hears why the
   /// video is off. A camera started meanwhile replaces the stream only after this.
-  fn on_camera_ended(&self) {
+  fn on_camera_ended(&self, end: OwnVideoEnd) {
     {
       let mut state = self.state.borrow_mut();
       state.release_camera();
@@ -1532,10 +1536,13 @@ impl Host {
         view.set_src_object(None);
       }
     }
-    self.report(&ActionFailure::new(
-      FailureKind::Call(CallFailure::CameraStopped),
-      "the camera ended by itself",
-    ));
+    // An encoder that gave up was reported as that: the camera itself was fine.
+    if end != OwnVideoEnd::EncodingFailed {
+      self.report(&ActionFailure::new(
+        FailureKind::Call(CallFailure::CameraStopped),
+        "the camera ended by itself",
+      ));
+    }
   }
 
   /// Shows a failure no action waits for.

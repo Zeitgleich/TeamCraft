@@ -3836,11 +3836,54 @@ fn watch_worker() {
   }
 }
 
-/// Asks the browser not to delete the store under storage pressure (e2ee.md §9.4). Browsers decide
-/// on their own (Chrome grants it to installed or often used sites, Firefox asks the user); without
-/// it the store can be evicted, and the enrollment screen says so.
+/// Whether the browser turns a request for persistent storage into a question to the user
+/// (Firefox): there the app asks first, from a banner (`components::persistence_prompt`).
+pub fn persistence_asks_the_user() -> bool {
+  let Some(window) = web_sys::window() else {
+    return false;
+  };
+  !js_sys::Reflect::has(
+    &window.navigator(),
+    &wasm_bindgen::JsValue::from_str("userAgentData"),
+  )
+  .unwrap_or(false)
+}
+
+/// Whether the browser already keeps this site's data under storage pressure.
+pub async fn is_storage_persisted() -> bool {
+  let Some(window) = web_sys::window() else {
+    return false;
+  };
+  let Ok(promise) = window.navigator().storage().persisted() else {
+    return false;
+  };
+  wasm_bindgen_futures::JsFuture::from(promise)
+    .await
+    .is_ok_and(|granted| granted.is_truthy())
+}
+
+/// Asks the browser to keep this site's data. Start it inside a click: Firefox shows its question
+/// only for a request a person started. `None` where the browser has no such request.
+pub fn request_storage_persistence() -> Option<js_sys::Promise> {
+  web_sys::window()?.navigator().storage().persist().ok()
+}
+
+/// Asks the browser not to delete the store under storage pressure (e2ee.md §9.4), where the browser
+/// decides by itself: Chromium grants it to installed or often used sites without asking. Firefox
+/// asks the user instead, a question people can't answer and that unsettles them, so it isn't
+/// asked there; without it the store can be evicted under storage pressure, and the enrollment
+/// screen says so.
 fn request_persistent_storage() {
   let Some(window) = web_sys::window() else { return };
+  // Only Chromium has `navigator.userAgentData`: a feature check, not a user agent sniff.
+  let is_silent = js_sys::Reflect::has(
+    &window.navigator(),
+    &wasm_bindgen::JsValue::from_str("userAgentData"),
+  )
+  .unwrap_or(false);
+  if !is_silent {
+    return;
+  }
   let Ok(promise) = window.navigator().storage().persist() else {
     return;
   };

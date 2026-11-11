@@ -315,6 +315,7 @@ error-call-screen-denied = macOS doesn't let TeamCraft share your screen, even i
 call-screen-settings-open = Open System Settings
 error-call-screen-needs-click = Your browser didn't open the screen picker. Select Share screen again, then choose what to share.
 error-call-camera-no-picture = Your camera turned on but sends no picture, so your video stays off. Check that no other app uses it, or choose another camera.
+error-call-video-encoding-failed = Your browser can't send your video in a format this call uses, so your video is off; your sound goes on. Update the browser or use another one.
 error-call-camera-stopped = Your camera stopped, so your video is off: it was disconnected, or the system or another app took it. Turn it on again, or choose another camera.
 error-call-screen-no-picture = Your screen share started but sends no picture, so it was stopped. Try sharing again, or choose another screen or window.
 error-call-camera-black = Your camera sends only black. Check that it isn't covered or closed with a privacy shutter, or choose another camera.

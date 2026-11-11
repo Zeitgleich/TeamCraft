@@ -166,6 +166,7 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       CallFailure::ScreenNeedsWayland => "error-call-screen-needs-wayland",
       CallFailure::CameraNoPicture => "error-call-camera-no-picture",
       CallFailure::CameraStopped => "error-call-camera-stopped",
+      CallFailure::VideoEncodingFailed => "error-call-video-encoding-failed",
       CallFailure::ScreenNoPicture => "error-call-screen-no-picture",
       CallFailure::CameraBlack => "error-call-camera-black",
       CallFailure::ScreenBlack => "error-call-screen-black",
@@ -446,6 +447,10 @@ mod tests {
         assert_eq!(failure_message_key(&camera(failure)), key);
         assert_eq!(failure_action(&camera(failure)), Some(ToastAction::ChooseCamera));
       }
+      // The browser can't encode the video: another camera wouldn't help.
+      let encoding = camera(CallFailure::VideoEncodingFailed);
+      assert_eq!(failure_message_key(&encoding), "error-call-video-encoding-failed");
+      assert_eq!(failure_action(&encoding), None);
       assert_eq!(failure_action(&camera(CallFailure::CameraDenied)), None);
       assert_eq!(failure_action(&camera(CallFailure::ScreenUnavailable)), None);
       assert_eq!(failure_action(&ActionFailure::other("x")), None);

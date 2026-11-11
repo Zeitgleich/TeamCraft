@@ -198,6 +198,9 @@ pub enum CallFailure {
   CameraStopped,
   /// The screen share started, but no picture of it could be sent.
   ScreenNoPicture,
+  /// The browser can't encode the video in a codec the call uses (Firefox without its H.264
+  /// plugin, say): the camera or share was fine, the video is off, audio goes on.
+  VideoEncodingFailed,
   /// The camera sends, but only black (covered, a privacy shutter, a camera that doesn't wake
   /// up). The video stays on.
   CameraBlack,
@@ -245,7 +248,7 @@ pub enum CallFailure {
 }
 
 impl CallFailure {
-  const ALL: [Self; 32] = [
+  const ALL: [Self; 33] = [
     Self::MicrophoneDenied,
     Self::MicrophoneMissing,
     Self::MicrophoneInUse,
@@ -263,6 +266,7 @@ impl CallFailure {
     Self::CameraNoPicture,
     Self::CameraStopped,
     Self::ScreenNoPicture,
+    Self::VideoEncodingFailed,
     Self::CameraBlack,
     Self::ScreenBlack,
     Self::Unsupported,
@@ -300,6 +304,7 @@ impl CallFailure {
       Self::CameraNoPicture => "camera_no_picture",
       Self::CameraStopped => "camera_stopped",
       Self::ScreenNoPicture => "screen_no_picture",
+      Self::VideoEncodingFailed => "video_encoding_failed",
       Self::CameraBlack => "camera_black",
       Self::ScreenBlack => "screen_black",
       Self::Unsupported => "unsupported",

@@ -318,6 +318,9 @@ pub enum OwnVideoEnd {
   BeforeFirstPicture,
   /// After it sent pictures: the camera or share went away mid-call.
   WhileSending,
+  /// Its encoder kept failing: the browser can't encode it in a codec the call uses. The camera or
+  /// share itself was fine.
+  EncodingFailed,
 }
 
 /// A driver's view of the publication of one of its own tracks (#929): the id it published the

@@ -2390,15 +2390,19 @@ impl CallState<'_> {
   /// unplugged camera, a revoked permission; or its encoders gave up): it stops, and the app
   /// hears about it, so the UI doesn't show the camera or share on any more (issue #920).
   fn end_video(&mut self, engine: &mut CallEngine, kind: &VideoTrackKind) {
-    if self.sender_of_kind(kind).is_none() {
-      // Stopped already: nothing ended by itself.
-      return;
-    }
     let end = if self.encoded_kinds.contains(kind) {
       OwnVideoEnd::WhileSending
     } else {
       OwnVideoEnd::BeforeFirstPicture
     };
+    self.end_video_with(engine, kind, end);
+  }
+
+  fn end_video_with(&mut self, engine: &mut CallEngine, kind: &VideoTrackKind, end: OwnVideoEnd) {
+    if self.sender_of_kind(kind).is_none() {
+      // Stopped already: nothing ended by itself.
+      return;
+    }
     self.stop_video(engine, kind);
     // The app may have stopped listening; the call goes on.
     let _ = self.events.unbounded_send(CallEngineEvent::OwnVideoEnded {
@@ -2415,7 +2419,7 @@ impl CallState<'_> {
       layer = gave_up.layer,
       "the browser can't encode this video; stopping it"
     );
-    self.end_video(engine, kind);
+    self.end_video_with(engine, kind, OwnVideoEnd::EncodingFailed);
   }
 
   /// Own tracks follow their publications ([`follow_publication`]); a track that is gone loses
