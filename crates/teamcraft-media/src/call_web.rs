@@ -84,7 +84,7 @@ use futures::future::{Either, select};
 use js_sys::{Array, Float32Array, Function, Object, Promise, Reflect, Uint8Array};
 use teamcraft_proto::{
   CallClientMessage, CallServerMessage, DeviceId, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE,
-  SFU_SWITCHED_CLOSE_CODE, VideoCodec, VideoPublicationId, VideoTrack, VideoTrackKind,
+  SFU_SWITCHED_CLOSE_CODE, ScreenShareTakeover, VideoCodec, VideoPublicationId, VideoTrack, VideoTrackKind,
 };
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
@@ -1699,6 +1699,11 @@ impl CallState<'_> {
               self.update_layer(engine, track.stream_id);
             },
             CallEngineEvent::VideoUnpublished(_) => self.on_publication(&event),
+            CallEngineEvent::ScreenShareTakenOver(takeover) => {
+              // The app hears it as the share's end.
+              self.on_screen_share_taken_over(engine, *takeover);
+              continue;
+            },
             CallEngineEvent::DecodableVideoCodecs(_) => self.follow_codecs(engine),
             CallEngineEvent::KeyframeRequested { stream_id, layer } => {
               if let Some(sender) = self.sender_of(*stream_id) {
@@ -2408,6 +2413,23 @@ impl CallState<'_> {
     let _ = self.events.unbounded_send(CallEngineEvent::OwnVideoEnded {
       kind: kind.clone(),
       end,
+    });
+  }
+
+  /// Another device's share replaced ours (a call has one screen share at a time): the capture
+  /// and its sound stop as if the browser had ended them, and the app hears who took over.
+  fn on_screen_share_taken_over(&mut self, engine: &mut CallEngine, takeover: ScreenShareTakeover) {
+    if self.sender_of_kind(&VideoTrackKind::Screen).is_none() {
+      return;
+    }
+    self.stop_video(engine, &VideoTrackKind::Screen);
+    // The app may have stopped listening; the call goes on.
+    let _ = self.events.unbounded_send(CallEngineEvent::OwnVideoEnded {
+      kind: VideoTrackKind::Screen,
+      end: OwnVideoEnd::TakenOver {
+        by_user_id: takeover.by_user_id,
+        by_device_id: takeover.by_device_id,
+      },
     });
   }
 
@@ -4327,6 +4349,7 @@ mod tests {
       maybe_reconnect_grace_ms: Some(30_000),
       maybe_max_simulcast_layers: Some(teamcraft_proto::MAX_SIMULCAST_LAYERS),
       maybe_switch_secret: None,
+      maybe_screen_share_taken_over: None,
     }
   }
 

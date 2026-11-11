@@ -33,8 +33,9 @@ use teamcraft_media::{
 use teamcraft_proto::{
   Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallRosterEntry, ConversationId,
   DaveTransitionId, DaveTransitionMode, DeviceId, ErrorBody, ErrorCode, MAX_SIMULCAST_LAYERS,
-  MediaCapabilities, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, SfuCallRoster, SfuControlAction,
-  TransportFeedback, UnixMillis, UserId, VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrackKind,
+  MediaCapabilities, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, ScreenShareTakeover, SfuCallRoster,
+  SfuControlAction, TransportFeedback, UnixMillis, UserId, VideoCodec, VideoLayerInfo, VideoPublicationId,
+  VideoTrackKind,
 };
 use thiserror::Error;
 use tokio::sync::Notify;
@@ -156,6 +157,10 @@ struct RoomState {
   /// The video codecs each device was last told the others decode (#565); a device without an
   /// entry hears them with its next (re)join.
   decodable_announced: HashMap<DeviceId, Vec<VideoCodec>>,
+  /// Each device's last screen share another device's replaced, kept for the call (one per
+  /// device, also after it left): a device that was away when it happened hears it with its next
+  /// `joined` and doesn't publish that share again. Dropped when the device shares again.
+  screen_shares_taken_over: HashMap<DeviceId, ScreenShareTakeover>,
   quality: Arc<CallQuality>,
 }
 
@@ -574,6 +579,7 @@ impl Room {
       )?,
       next_stream_id: 1,
       decodable_announced: HashMap::new(),
+      screen_shares_taken_over: HashMap::new(),
       quality,
     };
     Ok(Self {
@@ -738,6 +744,9 @@ impl Room {
     let track = state
       .forwarder
       .publish_video(owner, stream_id, kind, codec, layers, maybe_publication_id)?;
+    if track.kind == VideoTrackKind::Screen {
+      state.end_other_screen_shares(self.call_id, owner, track.stream_id);
+    }
     state.broadcast(CallEvent::VideoPublished { track });
     Ok(())
   }
@@ -1260,6 +1269,7 @@ impl RoomState {
         maybe_reconnect_grace_ms: Some(u64::try_from(reconnect_grace.as_millis()).unwrap_or(u64::MAX)),
         maybe_max_simulcast_layers: Some(MAX_SIMULCAST_LAYERS),
         maybe_switch_secret,
+        maybe_screen_share_taken_over: self.screen_shares_taken_over.get(&participant_id).copied(),
       },
     );
     for (device_id, other) in &self.participants {
@@ -1362,6 +1372,52 @@ impl RoomState {
     self.decodable_announced.remove(&participant_id);
     self.announce_decodable_codecs(None);
     info!(call_id = %call_id, participant_id = %participant_id, "participant left");
+  }
+
+  /// A call has one screen share at a time (ARCHITECTURE.md §6.3): `sharer`'s new share on
+  /// `stream_id` ends everyone else's, with its sound. Each replaced device hears who took over
+  /// before the others see its share go, so it stops capturing instead of publishing again; one
+  /// that is away hears it with its next `joined`. Called under the room's lock, so of two shares
+  /// started at about the same moment the one whose request came last wins.
+  fn end_other_screen_shares(&mut self, call_id: CallId, sharer: DeviceId, stream_id: MediaStreamId) {
+    let Some(by_user_id) = self
+      .participants
+      .get(&sharer)
+      .map(|participant| participant.user_id)
+    else {
+      return;
+    };
+    // The sharer's own earlier takeover no longer matters: its new share is the current one.
+    self.screen_shares_taken_over.remove(&sharer);
+    let screen_audio: HashMap<DeviceId, StreamId> =
+      self.forwarder.screen_audio_streams().into_iter().collect();
+    for (owner, ended) in self.forwarder.end_other_screen_shares(sharer) {
+      let takeover = ScreenShareTakeover {
+        stream_id: MediaStreamId(ended.0),
+        by_user_id,
+        by_device_id: sharer,
+      };
+      info!(
+        call_id = %call_id,
+        participant_id = %owner,
+        by = %sharer,
+        stream_id = ended.0,
+        new_stream_id = stream_id.0,
+        "screen share taken over"
+      );
+      self.screen_shares_taken_over.insert(owner, takeover);
+      self.send_to(owner, CallEvent::ScreenShareTakenOver(takeover));
+      self.broadcast(CallEvent::VideoUnpublished {
+        stream_id: takeover.stream_id,
+      });
+      if let Some(sound) = screen_audio.get(&owner)
+        && self.forwarder.unpublish_screen_audio(owner, *sound).is_ok()
+      {
+        self.broadcast(CallEvent::ScreenAudioUnpublished {
+          stream_id: MediaStreamId(sound.0),
+        });
+      }
+    }
   }
 
   /// The next free stream id. The counter wraps after 2^32 publications; ids still in use are

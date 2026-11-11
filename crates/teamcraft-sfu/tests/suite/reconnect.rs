@@ -1,8 +1,8 @@
 //! Calls that survive lost connections and lossy paths, without a network: the SFU's rooms and
 //! real call engines exchange signaling and datagrams through in-memory links, and time is
 //! passed in. Deterministic: losses follow fixed patterns. Simulcast layers a publisher pauses
-//! or resumes on the way (#921), and tracks stopped before the SFU confirmed them (#929), are
-//! here too.
+//! or resumes on the way (#921), tracks stopped before the SFU confirmed them (#929), and screen
+//! shares that replace each other across lost connections, are here too.
 
 // clippy.toml only relaxes these lints inside #[test] functions; the helpers below are test code too.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -351,6 +351,194 @@ mod own_publications {
     assert_ne!(live[0], stream, "the camera from before the loss is gone");
     assert_eq!(network.confirmed(ALICE, third), Some(live[0]));
     assert_eq!(network.confirmed(ALICE, second), None);
+  }
+}
+
+/// One screen share per call: a new share ends the one before (docs/meetings.md, "Screen
+/// sharing"); cameras are not limited.
+mod screen_takeover {
+  use teamcraft_proto::ScreenShareTakeover;
+
+  use super::*;
+
+  const CAROL: i64 = 3;
+
+  #[test]
+  fn a_new_share_ends_the_one_before_and_viewers_switch_to_it() {
+    let mut network = Network::with_secured(&[ALICE, BOB, CAROL]);
+    let alice_camera = network.publish(ALICE, VideoTrackKind::Camera);
+    let bob_camera = network.publish(BOB, VideoTrackKind::Camera);
+    let alice_screen = network.publish(ALICE, VideoTrackKind::Screen);
+    network.subscribe(CAROL, alice_screen, 0);
+    network.client_mut(ALICE).engine.publish_screen_audio();
+    network.pump();
+    assert!(network.client(ALICE).engine.is_sharing_screen_audio());
+
+    let bob_screen = network.publish(BOB, VideoTrackKind::Screen);
+    assert_eq!(
+      taken_over(&network, ALICE),
+      vec![ScreenShareTakeover {
+        stream_id: alice_screen,
+        by_user_id: user(BOB),
+        by_device_id: device(BOB),
+      }]
+    );
+    assert_eq!(taken_over(&network, BOB), Vec::new());
+    for viewer in [ALICE, CAROL] {
+      assert_eq!(
+        live_screens(&network, viewer),
+        vec![(device(BOB), bob_screen)],
+        "{viewer}"
+      );
+    }
+    // Cameras go on.
+    assert_eq!(network.live_tracks(CAROL, ALICE), vec![alice_camera]);
+    assert_eq!(network.live_tracks(CAROL, BOB), vec![bob_camera, bob_screen]);
+    // The share's sound went with it, and nothing of the old share reaches anybody.
+    assert!(!network.client(ALICE).engine.is_sharing_screen_audio());
+    assert!(network.saw(
+      CAROL,
+      &CallEngineEvent::ScreenAudioChanged {
+        device_id: device(ALICE),
+        is_shared: false,
+      }
+    ));
+    network.subscribe(CAROL, bob_screen, 0);
+    network.send_video(BOB, bob_screen, 5);
+    assert!(!network.pictures(CAROL, bob_screen).is_empty());
+    network.send_video(ALICE, alice_screen, 5);
+    assert!(network.pictures(CAROL, alice_screen).is_empty());
+  }
+
+  /// A device that publishes its share anew (another codec) replaces its own share itself.
+  #[test]
+  fn a_device_publishing_its_share_anew_takes_nothing_over() {
+    let mut network = Network::with_secured(&[ALICE, BOB]);
+    let first = network.publish(ALICE, VideoTrackKind::Screen);
+    network.ask_for(ALICE, VideoTrackKind::Screen);
+    network.pump();
+    assert_eq!(taken_over(&network, ALICE), Vec::new());
+    let screens = live_screens(&network, BOB);
+    assert_eq!(screens.len(), 2, "{screens:?}");
+    assert_eq!(screens[0], (device(ALICE), first));
+  }
+
+  /// Two shares started at about the same moment: whichever request reaches the SFU last wins,
+  /// and everyone, both sharers included, ends up with that one share.
+  #[test]
+  fn of_two_shares_started_at_once_the_last_request_wins() {
+    for (first, last) in [(ALICE, BOB), (BOB, ALICE)] {
+      let mut network = Network::with_secured(&[ALICE, BOB, CAROL]);
+      // Both ask before either hears anything back.
+      network.ask_for(ALICE, VideoTrackKind::Screen);
+      network.ask_for(BOB, VideoTrackKind::Screen);
+      network.drain_client(first);
+      network.drain_client(last);
+      network.pump();
+
+      let winner = network.live_tracks(CAROL, last);
+      assert_eq!(winner.len(), 1);
+      for viewer in [ALICE, BOB, CAROL] {
+        assert_eq!(
+          live_screens(&network, viewer),
+          vec![(device(last), winner[0])],
+          "{viewer} after {first} then {last}"
+        );
+      }
+      let losses = taken_over(&network, first);
+      assert_eq!(losses.len(), 1, "{losses:?}");
+      assert_eq!(losses[0].by_device_id, device(last));
+      assert_eq!(taken_over(&network, last), Vec::new());
+    }
+  }
+
+  /// Taken over while its connection was lost: back in its kept slot, the device hears it in
+  /// `joined` and doesn't publish the share again, which would take it back from the new one.
+  #[test]
+  fn a_share_taken_over_while_away_stays_ended_after_the_resume() {
+    let mut network = Network::with_secured(&[ALICE, BOB, CAROL]);
+    let alice_screen = network.publish(ALICE, VideoTrackKind::Screen);
+    network.lose(ALICE);
+    let bob_screen = network.publish(BOB, VideoTrackKind::Screen);
+    assert_eq!(network.rejoin(ALICE), JoinOutcome::Resumed);
+    network.pump();
+
+    assert_eq!(
+      taken_over(&network, ALICE)
+        .iter()
+        .map(|t| t.stream_id)
+        .collect::<Vec<_>>(),
+      vec![alice_screen]
+    );
+    for viewer in [ALICE, BOB, CAROL] {
+      assert_eq!(
+        live_screens(&network, viewer),
+        vec![(device(BOB), bob_screen)],
+        "{viewer}"
+      );
+    }
+    assert_eq!(taken_over(&network, BOB), Vec::new());
+  }
+
+  /// The same after the slot was given up: the SFU remembers the takeover for the call.
+  #[test]
+  fn a_share_taken_over_while_away_stays_ended_after_a_rejoin_without_the_slot() {
+    let mut network = Network::with_secured(&[ALICE, BOB, CAROL]);
+    let alice_screen = network.publish(ALICE, VideoTrackKind::Screen);
+    network.lose(ALICE);
+    let bob_screen = network.publish(BOB, VideoTrackKind::Screen);
+    assert!(network.expire_lost_sessions(ALICE));
+    assert_eq!(network.rejoin(ALICE), JoinOutcome::Joined);
+    network.pump();
+
+    assert_eq!(
+      taken_over(&network, ALICE)
+        .iter()
+        .map(|t| t.stream_id)
+        .collect::<Vec<_>>(),
+      vec![alice_screen]
+    );
+    assert_eq!(live_screens(&network, CAROL), vec![(device(BOB), bob_screen)]);
+    // Sharing again later is a new share, and it takes over in turn.
+    let again = network.ask_for(ALICE, VideoTrackKind::Screen);
+    network.pump();
+    let again = network.confirmed(ALICE, again).unwrap();
+    assert_eq!(live_screens(&network, CAROL), vec![(device(ALICE), again)]);
+    assert_eq!(
+      taken_over(&network, BOB)
+        .iter()
+        .map(|t| t.stream_id)
+        .collect::<Vec<_>>(),
+      vec![bob_screen]
+    );
+  }
+
+  /// What the client's engine said about its shares being taken over.
+  fn taken_over(network: &Network, id: i64) -> Vec<ScreenShareTakeover> {
+    network
+      .client(id)
+      .events
+      .iter()
+      .filter_map(|event| match event {
+        CallEngineEvent::ScreenShareTakenOver(takeover) => Some(*takeover),
+        _ => None,
+      })
+      .collect()
+  }
+
+  /// Every device's screen shares that `viewer` was told about and that weren't unpublished.
+  fn live_screens(network: &Network, viewer: i64) -> Vec<(DeviceId, MediaStreamId)> {
+    let mut live = Vec::new();
+    for event in &network.client(viewer).events {
+      match event {
+        CallEngineEvent::VideoPublished(track) if track.kind == VideoTrackKind::Screen => {
+          live.push((track.device_id, track.stream_id));
+        },
+        CallEngineEvent::VideoUnpublished(stream_id) => live.retain(|(_, stream)| stream != stream_id),
+        _ => {},
+      }
+    }
+    live
   }
 }
 
