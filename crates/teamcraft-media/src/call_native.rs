@@ -1240,10 +1240,11 @@ impl CallConnection {
     }
   }
 
-  /// The SFU turned the join away for now (#1227): the link is of no use any more, and the next
-  /// attempt waits as long as the SFU asked. The call goes on.
+  /// The SFU turned the join away for now (#1227), or a resumed DAVE group failed its checks: the
+  /// link is of no use any more, and the next attempt waits as long as asked (not at all after a
+  /// failed resume). The call goes on.
   fn refused(&mut self, engine: &mut CallEngine, retry_after: Duration, now: Instant) {
-    info!(?retry_after, "the SFU asks to join again later");
+    info!(?retry_after, "joining the call again on a new connection");
     self.lose(engine, now);
     if let Some(schedule) = &mut self.maybe_schedule {
       schedule.on_join_refused(now, retry_after, &self.resilience);

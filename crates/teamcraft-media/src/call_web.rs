@@ -1796,9 +1796,10 @@ impl CallState<'_> {
     self.watch.on_heard(now);
     engine.handle_signal(message, now)?;
     if let Some(retry_after) = engine.take_join_refusal() {
-      // Joined this call too often (#1227): this session is of no use, the next attempt waits as
-      // asked, and the call goes on.
-      info!(?retry_after, "the SFU asks to join again later");
+      // Joined this call too often (#1227), or a resumed DAVE group failed its checks: this session
+      // is of no use, the next attempt waits as asked (at once after a failed resume), and the call
+      // goes on.
+      info!(?retry_after, "joining the call again on a new connection");
       self.maybe_refused_retry_after = Some(retry_after);
       return Ok(self.on_session_lost(engine, SessionEnd::Lost));
     }

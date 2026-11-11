@@ -2164,12 +2164,10 @@ impl CallEngine {
     Ok(())
   }
 
-  /// A member of the group held that the trusted roster doesn't have (a device removed from the
-  /// conversation, or one that left the call while this device was away).
+  /// A member of the group held that has no business in it any more: one the trusted roster (if
+  /// any) doesn't have, or one that left the call while this device was away.
   fn member_off_the_roster(&mut self) -> Result<Option<DeviceId>, CallEngineError> {
-    let Some(roster) = self.maybe_trusted_roster.clone() else {
-      return Ok(None);
-    };
+    let maybe_roster = self.maybe_trusted_roster.clone();
     let own = DaveParticipantId::from_device(self.config.device_id);
     for (member, _) in self.dave()?.member_signature_keys() {
       if member == own {
@@ -2180,7 +2178,10 @@ impl CallEngine {
         .map_err(|_| CallEngineError::Protocol("member id"))?;
       // Without call key bindings nothing was verified to know who left by.
       let has_left = self.maybe_authenticator.is_some() && !self.keys_before_reconnect.contains_key(&device);
-      if !roster.contains(&device) || has_left {
+      let is_off_roster = maybe_roster
+        .as_ref()
+        .is_some_and(|roster| !roster.contains(&device));
+      if is_off_roster || has_left {
         return Ok(Some(device));
       }
     }
@@ -5874,10 +5875,24 @@ mod tests {
       /// group with his leaf: his key is retired, and Alice joins afresh.
       #[test]
       fn a_member_that_left_meanwhile_starts_over() {
+        assert_left_meanwhile_starts_over(Some([device(1), device(2)]));
+      }
+
+      /// The same without a trusted roster (a call before the roster arrived): starting over, not
+      /// a compromised call.
+      #[test]
+      fn a_member_that_left_meanwhile_starts_over_without_a_roster() {
+        assert_left_meanwhile_starts_over(None);
+      }
+
+      fn assert_left_meanwhile_starts_over(maybe_roster: Option<[DeviceId; 2]>) {
         let now = Instant::now();
         let (mut alice, _bob) = secured_pair(now);
         let epoch = held_epoch(&alice);
-        alice.set_trusted_roster([device(1), device(2)]);
+        match maybe_roster {
+          Some(roster) => alice.set_trusted_roster(roster),
+          None => alice.maybe_trusted_roster = None,
+        }
         alice.connection_lost(now);
         alice.rejoin("fresh".into(), now);
         alice.handle_signal(event(1, joined(1, &[])), now).unwrap();
