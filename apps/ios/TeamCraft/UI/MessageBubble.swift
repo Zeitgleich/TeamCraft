@@ -547,7 +547,7 @@ struct BubbleFooter: View {
   var body: some View {
     HStack(spacing: 3) {
       if maybeExtras?.isPinned == true {
-        Image(systemName: "bookmark.fill").accessibilityLabel(Text("pinned"))
+        Image(systemName: "pin.fill").accessibilityLabel(Text("pinned"))
       }
       if message.isEdited { Text("edited") }
       if showsTime { Text(message.sentDate, style: .time) }

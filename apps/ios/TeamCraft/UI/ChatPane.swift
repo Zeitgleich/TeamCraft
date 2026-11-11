@@ -1078,7 +1078,7 @@ struct ChatPane: View {
     let isSaved = maybeExtras?.isSaved == true
     Button("forward", systemImage: "arrowshape.turn.up.right") { maybeForwarding = MessageTarget(message: message) }
     if conversation.canManageBookmarks {
-      Button(LocalizedStringKey(isPinned ? "unpin" : "pin"), systemImage: isPinned ? "bookmark.slash" : "bookmark") {
+      Button(LocalizedStringKey(isPinned ? "unpin" : "pin"), systemImage: isPinned ? "pin.slash" : "pin") {
         Task {
           await model.perform(.setPinned(conversationId: conversation.id, messageId: message.id, isPinned: !isPinned))
         }

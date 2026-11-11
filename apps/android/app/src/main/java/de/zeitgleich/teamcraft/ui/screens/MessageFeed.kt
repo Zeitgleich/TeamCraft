@@ -1525,7 +1525,7 @@ private fun Footer(
   ) {
     if (maybeExtras?.isPinned == true) {
       Icon(
-        painterResource(R.drawable.ic_bookmark),
+        painterResource(R.drawable.ic_push_pin),
         contentDescription = stringResource(R.string.message_pinned),
         tint = colors.muted,
         modifier = Modifier.size(12.dp),

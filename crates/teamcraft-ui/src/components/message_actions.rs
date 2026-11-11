@@ -174,7 +174,7 @@ impl MessageAction {
       Self::Quote => IconName::Reply,
       Self::Forward => IconName::Forward,
       Self::Save | Self::Unsave | Self::BookmarkFile => IconName::Bookmark,
-      Self::Pin | Self::Unpin => IconName::Bookmark,
+      Self::Pin | Self::Unpin => IconName::Pin,
       Self::CopyLink => IconName::Link,
       Self::CopyText => IconName::Copy,
       Self::MarkUnread => IconName::EyeOff,
@@ -757,7 +757,7 @@ pub fn PinsPanel(conversation: ConversationId) -> impl IntoView {
           }
         </For>
         <Show when=move || pinned.get().is_empty() fallback=|| ()>
-          <EmptyState icon=IconName::Bookmark title_key="pins-empty-title" body_key="pins-empty" as_item=true />
+          <EmptyState icon=IconName::Pin title_key="pins-empty-title" body_key="pins-empty" as_item=true />
         </Show>
       </ul>
     </aside>
