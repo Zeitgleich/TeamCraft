@@ -108,15 +108,31 @@ GST_PLUGIN_FEATURE_RANK=avdec_h264:NONE,avdec_h265:NONE,openh264dec:NONE,vah264d
 
 ## Start-up environment
 
-Before GTK starts, the shell checks two variables that GTK and WebKitGTK read only once
+Before GTK starts, the shell checks variables that GTK, WebKitGTK and glibc read only once
 (`apps/desktop/src/startup_env.rs`). If one is missing, the app restarts itself once with it set,
 so this works the same for every package (deb, rpm, AppImage, Flatpak) and from a terminal. A value
 you set yourself is never changed.
 
-| Variable                           | Set to | Why                                                                                     |
-|------------------------------------|--------|-----------------------------------------------------------------------------------------|
-| `GTK_USE_PORTAL`                   | `1`    | File dialogs through xdg-desktop-portal, the desktop's own dialog (not in Flatpak, which does this anyway) |
-| `WEBKIT_DISABLE_DMABUF_RENDERER`   | `1`    | Only with `TEAMCRAFT_WEBKIT_DMABUF=0`, see "Rendering"                                  |
+| Variable                         | Set to   | Why                                                                                                        |
+|----------------------------------|----------|------------------------------------------------------------------------------------------------------------|
+| `GTK_USE_PORTAL`                 | `1`      | File dialogs through xdg-desktop-portal, the desktop's own dialog (not in Flatpak, which does this anyway) |
+| `WEBKIT_DISABLE_DMABUF_RENDERER` | `1`      | Only with `TEAMCRAFT_WEBKIT_DMABUF=0`, see "Rendering"                                                     |
+| `MALLOC_ARENA_MAX`               | `2`      | glibc's allocator gives freed memory back (not when you set `GLIBC_TUNABLES`), see "Memory"                |
+| `MALLOC_TRIM_THRESHOLD_`         | `131072` | The same                                                                                                   |
+
+### Memory
+
+WebKit releases memory in the page's process once it passes a fraction of a limit, by default the
+machine's RAM (at most 3 GB). The app lowers the limit to 512 MiB; WebKit then releases caches above
+half of it and also JIT code above 70 % (docs/performance.md, "Desktop on Linux: memory pressure and
+the allocator"). The page is never ended for using more. To change it:
+
+| Variable                                 | Default | Meaning                                                    |
+|------------------------------------------|---------|------------------------------------------------------------|
+| `TEAMCRAFT_WEBVIEW_MEMORY_LIMIT_MIB`     | `512`   | The limit in MiB; `0` keeps WebKit's own settings          |
+| `TEAMCRAFT_WEBVIEW_MEMORY_CONSERVATIVE`  | `0.5`   | Fraction of the limit above which caches are released      |
+| `TEAMCRAFT_WEBVIEW_MEMORY_STRICT`        | `0.7`   | Fraction above which JIT code and a full collection follow |
+| `TEAMCRAFT_WEBVIEW_MEMORY_POLL_SECS`     | `10`    | How often WebKit measures, in seconds                      |
 
 ### Rendering
 

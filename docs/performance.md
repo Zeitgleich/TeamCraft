@@ -1937,7 +1937,78 @@ under Xvfb sit in RAM where a GPU keeps some in VRAM. In the shell's process GTK
 process sit next to the core; the core's caches are bounded (the message cache at 64 MiB). Nothing
 of ours explains the gap to the budget, and WebKit's limits can only be set where Tauri creates its
 web context, without a hook: #1708 (WebKit's memory pressure settings, a heap profile of the core,
-a release build on a GPU).
+a release build on a GPU). What came of it: "Desktop on Linux: memory pressure and the allocator".
+
+### Desktop on Linux: memory pressure and the allocator (issue #1708)
+
+Same harness and machine as above (`desktop_perf.rs`, large workspace, debug shell with the release
+web client, Xvfb, CPU painting), measured 2026-11-11 on WebKitGTK 2.54.2. Each change was run on
+its own against a baseline of the same build with WebKit's own settings; one run takes about 30
+minutes, 14 of them seeding. The settings of a run are environment variables, so one binary serves
+all of them.
+
+**WebKit's memory pressure settings.** WebKit gives memory back in its web process (dead resources,
+decoded pictures, font and layout caches; at the strict threshold also JIT code and a full garbage
+collection) only once the process passes a fraction of `WebKitMemoryPressureSettings`' limit. The
+limit defaults to the machine's RAM, at most 3 GB, and the first threshold to a third of it: about
+1 GB, which the page never reaches, so WebKit never released anything. The settings are a
+construct-only property of the web context, no environment variable sets them, and Tauri creates
+the context through wry without a hook. wry is vendored with a setter its web contexts pick up
+(`crates/vendor/wry/VENDORED.md`, with an upstream PR draft); the shell calls it before the first
+window (`webview_memory.rs`). The kill threshold stays 0: a killed web process would reload the
+page (`webview_recovery.rs`), and no run logged a terminated web process.
+
+| Web process, large workspace, after 40 switches | Shown, PSS (anon) | Hidden, PSS (anon) | Web process CPU, shown / hidden |
+|-------------------------------------------------|-------------------|--------------------|---------------------------------|
+| WebKit's settings (3 GB, 0.33 / 0.5, 30 s)      | 386 MiB (319)     | 357 MiB (292)      | 0.04 / 0.05 %                   |
+| 512 MiB, 0.3 / 0.5, 5 s                         | 307 MiB (239)     | 305 MiB (239)      | 0.14 / 0.14 %                   |
+| 384 MiB, 0.3 / 0.5, 10 s                        | 301 MiB (233)     | 299 MiB (234)      | 0.10 / 0.11 %                   |
+| 512 MiB, 0.5 / 0.7, 10 s (the default)          | 307 MiB (240)     | 305 MiB (240)      | 0.10 / 0.11 %                   |
+
+Below about 240 MiB anonymous nothing more comes free: a strict threshold the page sits above
+(384 MiB × 0.5) saved 6 MiB more than a conservative one, and costs a full collection every poll.
+The default limit keeps the page near that floor with the least work: WebKit checks every 10 s and
+releases while the page is above 256 MiB by its measure. Channel switches stayed at 101–106 ms p50
+and 156–173 ms p95 in all runs (the same within the spread between runs). Each value is a
+`TEAMCRAFT_WEBVIEW_MEMORY_*` variable (`LIMIT_MIB`, 0 for WebKit's own settings; `CONSERVATIVE`,
+`STRICT`; `POLL_SECS`).
+
+**The shell's allocator.** A heap profile of the shell during the same run (heaptrack on the debug
+binary, from the start after seeding to the quit, about 13 minutes) found little of the core alive:
+
+| Shell and core, heaptrack               | Value                                      |
+|-----------------------------------------|--------------------------------------------|
+| Peak of the heap (during the catch-up)  | 73 MiB                                     |
+| Alive at the end                        | 34 MiB                                     |
+| Of it the message cache                 | 13 MiB                                     |
+| Of it the openmls provider (300 groups) | 3.8 MiB                                    |
+| Of it SQLite and SQLCipher              | 1.6 MiB                                    |
+| Allocations in all                      | 60 million, 37 million of them short-lived |
+
+Yet the shell's process held 145 MiB anonymous. glibc's allocator keeps freed memory in its arenas
+(up to eight per core, one per thread that allocates) and, after a large block is freed, raises its
+trim threshold up to 64 MiB, so a peak during a catch-up stays: 51 MiB in 122 arena mappings next to
+31 MiB of main heap in the harness, and 314 MiB in arenas after four hours of the installed 1.0.30
+on a real workspace. The start already re-executes itself for GTK's variables (`startup_env.rs`); it
+now also sets `MALLOC_ARENA_MAX=2` and a fixed `MALLOC_TRIM_THRESHOLD_=131072` (set, glibc keeps
+the threshold and gives blocks from 128 KiB up their own mapping), unless the user set them or
+`GLIBC_TUNABLES`. The arenas went from 51 to under 1 MiB, the shell's anonymous memory from 145 to
+89 MiB, with no change in channel switches or idle CPU.
+
+| Whole app, large workspace (PSS) | Before        | After         | Budget  |
+|----------------------------------|---------------|---------------|---------|
+| Window shown                     | 657 MiB       | 515 MiB       | 400 MiB |
+| Closed to the tray               | 626 MiB       | 510 MiB       | 400 MiB |
+| Of it the page                   | 357 MiB       | 296 MiB       | -       |
+| Of it the shell and core         | 249 MiB       | 194 MiB       | -       |
+| Of it the network process        | 20 MiB        | 19 MiB        | -       |
+| Idle CPU, shown / hidden         | 0.13 / 0.24 % | 0.19 / 0.30 % | 0.5 %   |
+
+Still above the budget in this measurement. What is left: the debug binary's own mapped files
+(about 90 MiB of the shell's 194; the release binary maps about 44 MiB), and the page's floor of
+about 240 MiB anonymous that WebKit doesn't release, which with CPU painting under Xvfb holds
+backing stores a GPU keeps in VRAM. The release build on a GPU with the same workspace is the
+number the budget is about; it is the open part of #1708.
 
 ### Coming back and bad networks, end to end (issue #972)
 
