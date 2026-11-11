@@ -34,6 +34,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.R
@@ -101,7 +102,12 @@ fun ConversationNotificationsDialog(viewModel: MainViewModel, conversationId: St
         }
         MutePresets(current) { settings = it }
         if (canBubble) {
-          val isAllowed = remember { bubbles.isAllowedBySystem() }
+          // Read again on every return to the app: the user may come back from the system settings.
+          var isAllowed by remember { mutableStateOf(bubbles.isAllowedBySystem()) }
+          LifecycleResumeEffect(Unit) {
+            isAllowed = bubbles.isAllowedBySystem()
+            onPauseOrDispose {}
+          }
           Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
             Text(stringResource(R.string.bubble_setting), style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
             Switch(checked = isBubble, onCheckedChange = { isBubble = it })
@@ -110,6 +116,11 @@ fun ConversationNotificationsDialog(viewModel: MainViewModel, conversationId: St
             stringResource(if (isAllowed) R.string.bubble_setting_hint else R.string.bubble_setting_system_off),
             style = MaterialTheme.typography.bodySmall,
           )
+          if (!isAllowed) {
+            TextButton(onClick = { context.startActivity(bubbles.systemSettingsIntent()) }) {
+              Text(stringResource(R.string.bubble_open_system_settings))
+            }
+          }
         }
         Text(stringResource(R.string.notify_channel_mentions), style = MaterialTheme.typography.titleSmall)
         for ((choice, label) in CHANNEL_MENTION_CHOICES) {

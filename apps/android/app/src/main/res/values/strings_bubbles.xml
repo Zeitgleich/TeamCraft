@@ -3,7 +3,8 @@
 <resources>
   <string name="bubble_setting">Show as bubble</string>
   <string name="bubble_setting_hint">New messages float on top of other apps. Only while notifications show message text.</string>
-  <string name="bubble_setting_system_off">Bubbles are turned off for this app in the system settings.</string>
+  <string name="bubble_setting_system_off">Bubbles are off in the system settings.</string>
+  <string name="bubble_open_system_settings">Open settings</string>
   <string name="bubble_needs_app">Open TeamCraft to continue here.</string>
   <string name="bubble_open_app">Open TeamCraft</string>
 </resources>

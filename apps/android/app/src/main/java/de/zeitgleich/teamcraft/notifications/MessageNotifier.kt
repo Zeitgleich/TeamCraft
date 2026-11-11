@@ -19,6 +19,7 @@ import android.text.style.StyleSpan
 import android.util.Log
 import java.util.Base64
 import java.util.concurrent.atomic.AtomicLong
+import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.Person
@@ -193,7 +194,7 @@ class MessageNotifier(
       val lines = notification.maybeMessageId?.let { NotificationLines.withoutPlaceholder(entry.lines, it) } ?: entry.lines
       if (lines.isEmpty()) {
         update(withBadge.copy(conversations = withBadge.conversations - entry.conversationId))
-        manager.cancel(entry.conversationId, MESSAGE_ID)
+        cancelConversation(entry.conversationId)
       } else {
         val updated = entry.copy(lines = lines)
         update(withBadge.copy(conversations = withBadge.conversations + (entry.conversationId to updated)))
@@ -230,7 +231,7 @@ class MessageNotifier(
         val left = id?.let { NotificationLines.withoutPlaceholder(lines, it) } ?: lines
         if (left.isEmpty()) {
           update(shown.copy(conversations = shown.conversations - entry.conversationId))
-          manager.cancel(entry.conversationId, MESSAGE_ID)
+          cancelConversation(entry.conversationId)
           postSummary()
           return true
         }
@@ -357,7 +358,7 @@ class MessageNotifier(
       val lines = NotificationLines.afterRead(entry.lines, maybeThreadId, maybeUpToMessageId)
       if (lines.isEmpty()) {
         update(withBadge.copy(conversations = withBadge.conversations - conversationId))
-        manager.cancel(conversationId, MESSAGE_ID)
+        cancelConversation(conversationId)
       } else {
         val updated = entry.copy(lines = lines)
         update(withBadge.copy(conversations = withBadge.conversations + (conversationId to updated)))
@@ -373,9 +374,67 @@ class MessageNotifier(
       val shown = shown()
       if (conversationId !in shown.conversations) return
       update(shown.copy(conversations = shown.conversations - conversationId))
-      manager.cancel(conversationId, MESSAGE_ID)
+      cancelConversation(conversationId)
       postSummary()
     }
+  }
+
+  /**
+   * Takes the conversation's notification away. One shown as a bubble stays, out of the shade:
+   * cancelling it would close the bubble, and reading in the bubble marks the conversation read
+   * (found on a device: the bubble closed half a second after it opened). The system removes it
+   * with the bubble.
+   */
+  private fun cancelConversation(conversationId: String) {
+    val maybeBubbled = bubbledNotification(conversationId)
+    if (maybeBubbled == null) {
+      manager.cancel(conversationId, MESSAGE_ID)
+      return
+    }
+    postSafely(conversationId, MESSAGE_ID, withoutShadeEntry(maybeBubbled))
+  }
+
+  /**
+   * A bubble the user dismissed leaves [withoutShadeEntry]'s hidden notification behind. The
+   * system keeps an update of it out of the shade too (found on a device: the next message showed
+   * nothing), so it goes before a new one is posted.
+   */
+  private fun dropDismissedBubble(conversationId: String) {
+    val maybeHidden = activeConversation(conversationId)?.takeIf { notification ->
+      notification.flags and Notification.FLAG_BUBBLE == 0 && notification.bubbleMetadata?.isNotificationSuppressed == true
+    }
+    if (maybeHidden != null) manager.cancel(conversationId, MESSAGE_ID)
+  }
+
+  private fun bubbledNotification(conversationId: String): Notification? =
+    activeConversation(conversationId)?.takeIf { it.flags and Notification.FLAG_BUBBLE != 0 }
+
+  /** The system's copy of the conversation's notification (Android 11+, where bubbles are). */
+  private fun activeConversation(conversationId: String): Notification? {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+    val system = context.getSystemService(NotificationManager::class.java) ?: return null
+    val active = runCatching { system.activeNotifications }.getOrNull() ?: return null
+    return active.firstOrNull { it.id == MESSAGE_ID && it.tag == conversationId }?.notification
+  }
+
+  /** The bubble's notification again, silent and hidden from the shade. */
+  @RequiresApi(Build.VERSION_CODES.R)
+  private fun withoutShadeEntry(bubbled: Notification): Notification {
+    val builder = Notification.Builder.recoverBuilder(context, bubbled).setOnlyAlertOnce(true)
+    bubbled.bubbleMetadata?.let { metadata ->
+      val maybeIntent = metadata.intent
+      val maybeIcon = metadata.icon
+      if (maybeIntent != null && maybeIcon != null) {
+        builder.setBubbleMetadata(
+          Notification.BubbleMetadata.Builder(maybeIntent, maybeIcon)
+            .setDesiredHeight(metadata.desiredHeight)
+            .setAutoExpandBubble(false)
+            .setSuppressNotification(true)
+            .build(),
+        )
+      }
+    }
+    return builder.build()
   }
 
   /**
@@ -579,6 +638,7 @@ class MessageNotifier(
     val privacy = MessagePrivacy.of(contentPrefs.content.value, isAppLockOn(), entry.isVerified)
     val spec = spec(entry, privacy, alerting) ?: return
     val revision = revisions.incrementAndGet()
+    dropDismissedBubble(entry.conversationId)
     postSafely(entry.conversationId, MESSAGE_ID, build(spec, revision))
     confirmLater(entry.conversationId, revision, alerting)
     spec.maybeShortcut?.let(::pushShortcut)

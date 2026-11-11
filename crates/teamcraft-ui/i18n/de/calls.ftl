@@ -277,8 +277,8 @@ call-encryption-retry-in = { $count ->
    *[other] Du kannst es in { $count } Minuten erneut versuchen.
   }
 call-ended = Anruf beendet
-control-deafen = Anrufton stummschalten
-control-undeafen = Anrufton einschalten
+control-deafen = Ton aus
+control-undeafen = Ton an
 
 ## Aktivität, zuletzt online und Anrufliste
 calls-title = Anrufe
