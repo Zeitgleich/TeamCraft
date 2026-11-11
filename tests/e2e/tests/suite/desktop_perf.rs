@@ -93,11 +93,11 @@ async fn the_desktop_app_hidden_in_the_tray_stays_idle() {
   switch_to(&mut app, &first_name, &first_last, catch_up_wait).await;
   report.seconds_start_to_first_channel = started.elapsed().as_secs_f64();
   report.seconds_start_until_settled =
-    wait_until_settled(&mut app).await.as_secs_f64() + report.seconds_start_to_first_channel;
+    wait_until_settled(&mut app, catch_up_wait).await.as_secs_f64() + report.seconds_start_to_first_channel;
 
   eprintln!("desktop perf: switching channels");
   switch_through_channels(&mut app, &seeded, &mut report).await;
-  wait_until_settled(&mut app).await;
+  wait_until_settled(&mut app, catch_up_wait).await;
   hold_for_a_look(&app).await;
   eprintln!("desktop perf: watching the visible window");
   report.visible = measure_idle(&stack, &mut app, scale.idle).await;
@@ -108,7 +108,7 @@ async fn the_desktop_app_hidden_in_the_tray_stays_idle() {
     .await
     .unwrap();
   wait_until_hidden(&mut app).await;
-  wait_until_settled(&mut app).await;
+  wait_until_settled(&mut app, catch_up_wait).await;
   eprintln!("desktop perf: watching the app hidden in the tray");
   report.hidden = measure_idle(&stack, &mut app, scale.idle).await;
 
@@ -253,24 +253,50 @@ async fn wait_until_hidden(app: &mut DesktopApp) {
 }
 
 /// Waits until the app's process group stays below [`SETTLED_CPU_PERCENT`] for [`SETTLE_WINDOW`].
-async fn wait_until_settled(app: &mut DesktopApp) -> Duration {
+/// When it doesn't within `timeout`, the failure names the busy processes and what the page
+/// animates.
+async fn wait_until_settled(app: &mut DesktopApp, timeout: Duration) -> Duration {
   app.detach_inspector();
   let pid = app.pid();
   let started = Instant::now();
   loop {
-    let before = ProcessUsage::total(ProcessUsage::of_tree(pid).values());
+    let before = ProcessUsage::of_tree(pid);
     tokio::time::sleep(SETTLE_WINDOW).await;
-    let after = ProcessUsage::total(ProcessUsage::of_tree(pid).values());
-    let percent = cpu_percent(after.cpu_time.saturating_sub(before.cpu_time), SETTLE_WINDOW);
-    eprintln!("desktop perf: {percent:.1} % CPU over {SETTLE_WINDOW:?}");
+    let after = ProcessUsage::of_tree(pid);
+    let busy = busy_processes(&before, &after);
+    let percent: f64 = busy.values().sum();
+    eprintln!("desktop perf: {percent:.1} % CPU over {SETTLE_WINDOW:?} {busy:.1?}");
     if percent < SETTLED_CPU_PERCENT {
       return started.elapsed();
     }
-    assert!(
-      started.elapsed() < CATCH_UP_WAIT_LARGE,
-      "the app stayed busy ({percent:.1} % CPU)"
-    );
+    if started.elapsed() >= timeout {
+      let animations = app.evaluate(RUNNING_ANIMATIONS).await.unwrap_or_default();
+      panic!(
+        "the app stayed busy ({percent:.1} % CPU: {busy:.1?}); running animations {animations}; the page shows {:?}",
+        app.text().await
+      );
+    }
   }
+}
+
+/// The page's running CSS animations and transitions, by element class.
+const RUNNING_ANIMATIONS: &str = "JSON.stringify(document.getAnimations()
+  .filter(a => a.playState === 'running')
+  .map(a => `${a.animationName ?? a.transitionProperty ?? 'animation'} on ${a.effect?.target?.className ?? '?'}`))";
+
+/// CPU percent of each process of the app between two readings.
+fn busy_processes(
+  before: &BTreeMap<String, ProcessUsage>,
+  after: &BTreeMap<String, ProcessUsage>,
+) -> BTreeMap<String, f64> {
+  after
+    .iter()
+    .map(|(name, usage)| {
+      let earlier = before.get(name).map_or(Duration::ZERO, |usage| usage.cpu_time);
+      let percent = cpu_percent(usage.cpu_time.saturating_sub(earlier), SETTLE_WINDOW);
+      (name.clone(), percent)
+    })
+    .collect()
 }
 
 /// CPU, wakeups and memory of each of the app's processes, and the server's requests, over
