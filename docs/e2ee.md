@@ -6327,8 +6327,11 @@ log holds old page versions until it is purged (§4.3.1, "Wiping"); a store whos
 aside (§9.5) takes its log with it.
 
 **Eviction (web).** The core asks for persistent storage (`navigator.storage.persist()`) when it
-opens the store; browsers grant it by their own rules (installed or often used sites, or the user
-agrees). Without it the browser may delete the origin's data under storage pressure, and Safari
+opens a member's store, in browsers that decide without asking (Chromium grants it to installed or
+often used sites). Firefox turns the request into a permission prompt people can't judge without
+context, so there a banner after sign-in explains it first and only its "Continue" starts the
+request; "Not now" or the browser's answer is kept per user on the device, so it asks once. A
+meeting guest's page never asks. Without it the browser may delete the origin's data under storage pressure, and Safari
 deletes it after weeks without a visit. Deleted data can't be restored from the device, but the keys
 can: the enrollment screen comes up again, and when this browser had the account set up before (a
 marker in local storage), it says that the browser deleted the data and offers the recovery

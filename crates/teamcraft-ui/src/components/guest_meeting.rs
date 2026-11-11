@@ -114,7 +114,10 @@ fn GuestShell(
   let change_source = backend.clone();
   let state = AppState::new(backend, settings, None);
   provide_context(state);
-  provide_context(MeetingsHub::new(MeetingsClient::new(auth.clone())));
+  provide_context(MeetingsHub::for_guest(
+    MeetingsClient::new(auth.clone()),
+    conversation,
+  ));
   provide_context(crate::channel_policy::ChannelPolicyHub::new(
     crate::rest::RestClient::new(auth.clone()),
   ));
@@ -129,6 +132,8 @@ fn GuestShell(
     picture_retries,
   ));
   crate::startup::first_view();
+  // The call's duration ticks for a guest too (the member app starts it in `app.rs`).
+  crate::calls::run_call_clock(state.call);
   change_source.set_change_notifier(Rc::new(move || state.backend_changed()));
   crate::feedback::set_failure_sink(move |failure| state.show_failure(i18n, &failure));
   state.open_conversation(conversation);
@@ -167,13 +172,15 @@ fn GuestShell(
 
   view! {
     <div class="app guest-meeting">
-      <header class="guest-meeting-bar">
+      // The call screen has its own title and hang-up: while the guest is in the call, this bar
+      // would only repeat the title and offer a second way out.
+      <header class="guest-meeting-bar" prop:hidden=move || state.call.phase.get() != CallPhase::Idle>
         <h1 class="guest-meeting-title" translate="no">{title}</h1>
         <span class="grow"></span>
         <button class="btn btn-primary" on:click=move |_| join_meeting(state, i18n, conversation)>
           {move || i18n.t("guest-join-call")}
         </button>
-        <button class="btn" prop:disabled=move || is_leaving.get() on:click=leave>
+        <button class="btn" prop:disabled=move || is_leaving.get() on:click=leave.clone()>
           {move || i18n.t("guest-leave")}
         </button>
       </header>

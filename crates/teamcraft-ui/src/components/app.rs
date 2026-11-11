@@ -37,6 +37,7 @@ use crate::components::incoming_call::IncomingCallDialog;
 use crate::components::link_request_prompt::LinkRequestPrompt;
 use crate::components::notification_prompt::NotificationPrompt;
 use crate::components::offline_banner::OfflineBanner;
+use crate::components::persistence_prompt::PersistencePrompt;
 use crate::components::rail::SpaceRail;
 use crate::components::roster_banner::RosterBanner;
 use crate::components::settings_tabs::apply_call_prefs;
@@ -326,6 +327,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         <StorageBanner />
         <RosterBanner />
         <NotificationPrompt />
+        <PersistencePrompt />
         <DesktopNotificationPrompt />
         <AnnouncementBanner />
         <GuestNotice />

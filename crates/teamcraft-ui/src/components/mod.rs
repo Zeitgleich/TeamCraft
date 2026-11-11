@@ -123,6 +123,7 @@ pub mod page;
 pub mod pdf_pane;
 pub mod pending_button;
 pub mod people_picker;
+pub mod persistence_prompt;
 pub mod picture_editor;
 pub mod poll_card;
 pub mod poll_dialog;

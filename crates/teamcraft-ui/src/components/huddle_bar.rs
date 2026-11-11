@@ -232,11 +232,12 @@ pub fn CallBar() -> impl IntoView {
     let Some(request) = call.maybe_request.get() else {
       return String::new();
     };
-    let maybe_meeting_title = maybe_hub.and_then(|hub| hub.title_for(request.conversation));
     let name = state
       .read(|backend| backend.conversation(request.conversation))
       .map(|conversation| conversation.name)
       .unwrap_or_default();
+    let maybe_meeting_title =
+      crate::meetings::MeetingsHub::heading_title(maybe_hub, request.conversation, &name);
     call_heading(i18n, request.kind, maybe_meeting_title.as_deref(), &name)
   });
   let people = Memo::new(move |_| {
