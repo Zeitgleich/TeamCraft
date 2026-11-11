@@ -252,12 +252,32 @@ pub fn AppLinkPrompt(links: AppLinks) -> impl IntoView {
   }
 }
 
-/// Browser: "Open in the app" on a page that is a place in the app. Never redirects by itself, since
-/// without the app the link would lead nowhere. In the page's flow (the banner row, the sign-in card),
-/// never above it: nothing fixed may cover the composer's send or a call's controls.
+/// Who is looking at the signed-in shell. A visitor with no session (sign-in page, a meeting's lobby)
+/// never gets this far: those pages don't contain the banner. It is only for people who can use the
+/// installed app.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Viewer {
+  /// Joined by a link, with no account of their own.
+  Guest,
+  /// Signed in with an account.
+  Member,
+}
+
+/// Whether the banner may show at all: guests and visitors without an account can't use the app for
+/// this, so it never appears for them (#1736).
+fn is_offered_to(viewer: Viewer) -> bool {
+  viewer == Viewer::Member
+}
+
+/// Browser: "Open in the app" on a page that is a place in the app, for signed-in members only. It
+/// says why, then offers the button. Never redirects by itself, since without the app the link would
+/// lead nowhere. In the page's flow (the banner row), never above it: nothing fixed may cover the
+/// composer's send or a call's controls. Only the signed-in shell shows it, never the sign-in page or
+/// the guest pages.
 #[component]
 pub fn OpenInAppButton() -> impl IntoView {
   let i18n = use_i18n();
+  let state = crate::state::use_app_state();
   let maybe_link = button_link();
   let is_shown = RwSignal::new(maybe_link.is_some());
   let dismiss = move |_| {
@@ -265,9 +285,17 @@ pub fn OpenInAppButton() -> impl IntoView {
     crate::settings::store_string(BUTTON_DISMISSED_KEY, "1");
   };
   move || {
-    let link = maybe_link.clone().filter(|_| is_shown.get())?;
+    let viewer = if crate::channel_access::is_guest(state) {
+      Viewer::Guest
+    } else {
+      Viewer::Member
+    };
+    let link = maybe_link
+      .clone()
+      .filter(|_| is_offered_to(viewer) && is_shown.get())?;
     Some(view! {
       <div class="update-banner open-in-app" role="region" aria-label=move || i18n.t("open-in-app")>
+        <span class="open-in-app-text">{move || i18n.t("open-in-app-text")}</span>
         <a class="btn btn-small btn-primary" href=link on:click=move |_| is_shown.set(false)>
           {move || i18n.t("open-in-app")}
         </a>
@@ -310,6 +338,12 @@ fn button_link_of(address: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn the_banner_is_for_signed_in_members_only() {
+    assert!(is_offered_to(Viewer::Member));
+    assert!(!is_offered_to(Viewer::Guest));
+  }
 
   #[test]
   fn the_button_offers_places_and_keeps_secrets_out_of_the_scheme() {

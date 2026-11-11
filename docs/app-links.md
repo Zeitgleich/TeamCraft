@@ -63,10 +63,13 @@ instance that isn't in its list, whatever that instance serves.
 So on those instances a tap on an `https://` link opens the web client, and the web client shows
 **"Open in the app"**. That button is a `teamcraft://open/<host>/<path>` link. The page can't know
 whether an app is installed, so it never redirects by itself; without the app the button does nothing
-useful, and the reader can close it for good (a choice kept in this browser). It sits in the page's flow
-(the banner row, the sign-in card), never above it, so it can't cover the composer's send or a call's
-controls, and it isn't in a guest's running call. It isn't shown in an
-installed web app, on the bare address and sign-in page, or on links that are web only.
+useful, so a short sentence before it says why ("Open TeamCraft in the app for better integration"), and
+the reader can close it for good (a choice kept in this browser). It sits in the banner row of the
+signed-in app, never above the page, so it can't cover the composer's send or a call's controls.
+**Only signed-in members see it.** Guests and visitors without an account can't use the installed app
+for this, so it is never shown on the sign-in page, a meeting's lobby, or a guest's call (#1736;
+`app_links::is_offered_to`). It isn't shown in an installed web app, on the bare address, or on links
+that are web only.
 
 What a self-hosted instance gets without any setup: the button, on all platforms. What takes more: an
 own build of the apps that lists its host (`teamcraft.appLinkHosts` on Android, `APP_ENTITLEMENTS` and

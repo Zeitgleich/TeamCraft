@@ -6,6 +6,11 @@
 .modal-body .app-link-host { margin-block: var(--space-3); }
 /* "Open in the app" (app_links.rs): a button in the banner row, not a link in a text. */
 .open-in-app a.btn { text-decoration: none; }
+/* Sentence, button and close: at phone width the sentence takes a line and the rest wraps below. */
+.open-in-app { gap: var(--space-2) var(--space-3); }
+.open-in-app-text { flex: 1 1 14rem; min-width: 0; overflow-wrap: anywhere; }
+.open-in-app .grow { display: none; }
+.open-in-app .icon-btn { margin-inline-start: auto; }
 
 /* Sharing into the app (share_into.rs). */
 .share-into-notice {
