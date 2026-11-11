@@ -2882,6 +2882,8 @@ impl AudioClock {
 
 impl Drop for AudioClock {
   fn drop(&mut self) {
+    // The port outlives this clock: a pulse still queued would call the dropped closure.
+    detach_port(&self.node);
     // Already detached with its closed context: nothing to undo.
     let _ = self.node.disconnect();
   }
@@ -2961,6 +2963,23 @@ impl Capture {
     for track in self.stream.get_tracks().iter() {
       track.unchecked_into::<MediaStreamTrack>().stop();
     }
+  }
+}
+
+impl Drop for Capture {
+  fn drop(&mut self) {
+    // The port outlives this capture: samples still queued would call the dropped closure.
+    detach_port(&self.node);
+  }
+}
+
+/// Unhooks a worklet node's port from its message closure before the closure is dropped. The
+/// worklet may still have messages queued; without this they call a dropped closure (wasm-bindgen
+/// throws "closure invoked recursively or after being dropped").
+fn detach_port(node: &AudioWorkletNode) {
+  // A node whose port can't be read has nothing hooked to it.
+  if let Ok(port) = node.port() {
+    port.set_onmessage(None);
   }
 }
 
