@@ -287,6 +287,13 @@ impl Forwarder {
     if let Some(speakers) = self.speakers.remove(device_id, now) {
       effects.push(Effect::ActiveSpeakers(speakers));
     }
+    // Its tracks start afresh when it is back: their silence meanwhile is the lost connection, not
+    // a stopped encoder to stand in for (#1719).
+    for route in self.video_tracks.values_mut() {
+      if route.track.device_id == device_id {
+        route.arrivals = LayerArrivals::default();
+      }
+    }
     let subscribed: Vec<StreamId> = self
       .video_tracks
       .iter_mut()
