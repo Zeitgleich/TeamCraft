@@ -5321,10 +5321,18 @@ keys.
    that adds it and checked as a joiner's: a key that only came with a welcome, or with an earlier
    proposal, vouches for nobody's addition. After a welcome or a commit each member keeps the
    bound keys of the group's members only. Once a device leaves the call its bound key is retired
-   for the rest of the call: a proposal that brings that device back with the same key (the SFU
-   replaying its old binding and key package) is refused; a device that really comes back joins
-   with a fresh DAVE key and binding. So within one call a binding can't be replayed to make a
-   departed device look present, and across calls the call id stops it. A welcome binding without
+   for the rest of the call on every member that saw it leave: a proposal that brings that device
+   back with the same key (the SFU replaying its old binding and key package) is refused there
+   (`RetiredKey`, which still ends that member's call, #1753); a device that really comes back joins
+   with a fresh DAVE key and binding. A member that was reconnecting meanwhile retires the keys of
+   the devices missing from the participant list of its rejoin. Each engine remembers at most
+   `MAX_RETIRED_CALL_KEYS` (4096) retired keys, the oldest evicted first. **Limits:** a device that
+   joined after the departure never saw the key and can't retire it; for such a late joiner a
+   replayed binding is caught only by the time check, so the SFU can propose the departed device
+   to it again within the one-day leeway (a device that shows as present but holds none of the
+   group's keys: the member's leaf must still be signed with the bound key, which the departed
+   device discarded when it left). Members that saw the departure refuse that proposal, so it is
+   never committed while one of them is in the call. Across calls the call id stops a replay. A welcome binding without
    a time check doesn't let the SFU swap or invent a key either: the member's MLS leaf must be
    signed with the bound key, which only that device holds.
    Before committing proposals, and after every epoch change, each member checks that every other

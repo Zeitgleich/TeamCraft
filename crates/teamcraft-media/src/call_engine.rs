@@ -48,6 +48,10 @@ use crate::rtp::{PayloadType, RtpHeader, RtpPacket, RtpTimestamp, SequenceNumber
 use crate::uplink_layers::{OwnTrack, UplinkLayers, UplinkPolicy, probe_demand_bps};
 use crate::video::EncodedVideoFrame;
 
+/// How many retired call keys an engine remembers (e2ee.md §8); the oldest goes first. A call with
+/// more departures than this is far beyond any meeting size, and an evicted key still needs its
+/// binding's time to pass the joiner check.
+const MAX_RETIRED_CALL_KEYS: usize = 4096;
 /// RTP timestamp increment per 20 ms Opus frame at 48 kHz.
 const OPUS_FRAME_TICKS: u32 = 960;
 /// Largest datagram the engine produces; audio frames are far below it.
@@ -135,7 +139,10 @@ pub struct CallEngine {
   /// DAVE keys of devices that left this call: never accepted again in it, so the SFU can't bring a
   /// departed device back with its old binding and key package (e2ee.md §8). Kept across
   /// reconnects; a device that comes back joins with a fresh key.
-  retired_keys: HashSet<(DeviceId, Vec<u8>)>,
+  retired_keys: RetiredKeys,
+  /// The verified keys from before a reconnect, until the rejoin's participant list says who left
+  /// meanwhile; their keys are retired then.
+  keys_before_reconnect: HashMap<DeviceId, Vec<u8>>,
   /// The driver can bring the trusted roster up to date during the call
   /// ([`Self::enable_roster_refresh`]).
   refreshes_roster: bool,
@@ -461,6 +468,31 @@ pub enum CallEngineError {
   RetiredKey(DeviceId),
 }
 
+/// Call keys of devices that left, bounded by [`MAX_RETIRED_CALL_KEYS`] (oldest evicted first).
+#[derive(Debug, Default)]
+struct RetiredKeys {
+  keys: HashSet<(DeviceId, Vec<u8>)>,
+  order: VecDeque<(DeviceId, Vec<u8>)>,
+}
+
+impl RetiredKeys {
+  fn retire(&mut self, device: DeviceId, key: Vec<u8>) {
+    if !self.keys.insert((device, key.clone())) {
+      return;
+    }
+    self.order.push_back((device, key));
+    while self.order.len() > MAX_RETIRED_CALL_KEYS {
+      if let Some(oldest) = self.order.pop_front() {
+        self.keys.remove(&oldest);
+      }
+    }
+  }
+
+  fn contains(&self, device: DeviceId, key: &[u8]) -> bool {
+    self.keys.contains(&(device, key.to_vec()))
+  }
+}
+
 impl CallEngine {
   pub fn new(config: CallEngineConfig, now: Instant) -> Self {
     let uplink = SendSideEstimator::new(config.bwe);
@@ -496,7 +528,8 @@ impl CallEngine {
       maybe_trusted_roster: None,
       maybe_authenticator: None,
       verified_keys: HashMap::new(),
-      retired_keys: HashSet::new(),
+      retired_keys: RetiredKeys::default(),
+      keys_before_reconnect: HashMap::new(),
       refreshes_roster: false,
       held_dave: Vec::new(),
       is_roster_requested: false,
@@ -560,7 +593,9 @@ impl CallEngine {
       Phase::Idle | Phase::Joined { .. } | Phase::Rejoining { .. } => return,
     }
     self.last_event_seq = 0;
-    self.verified_keys.clear();
+    // Who left while this device was away shows only in the rejoin's participant list.
+    let away = std::mem::take(&mut self.verified_keys);
+    self.keys_before_reconnect.extend(away);
     // DAVE starts over on the new connection: what was held belongs to the old group.
     self.held_dave.clear();
     self.is_roster_requested = false;
@@ -1430,9 +1465,13 @@ impl CallEngine {
       .map(|participant| (participant.device_id, participant))
       .collect();
     let known: Vec<DeviceId> = self.participants.keys().copied().collect();
+    let before_reconnect = std::mem::take(&mut self.keys_before_reconnect);
     for device_id in known {
       // Gone, or back with another audio stream (it rejoined without a slot): left, then joined.
       if current.get(&device_id) != self.participants.get(&device_id) {
+        if let Some(key) = before_reconnect.get(&device_id) {
+          self.retired_keys.retire(device_id, key.clone());
+        }
         self.remove_participant(device_id);
       }
     }
@@ -1569,7 +1608,7 @@ impl CallEngine {
   fn remove_participant(&mut self, device_id: DeviceId) {
     self.participants.remove(&device_id);
     if let Some(key) = self.verified_keys.remove(&device_id) {
-      self.retired_keys.insert((device_id, key));
+      self.retired_keys.retire(device_id, key);
     }
     self.audio_streams.retain(|_, (owner, _)| *owner != device_id);
     let streams: Vec<StreamId> = self
@@ -1979,7 +2018,7 @@ impl CallEngine {
         continue;
       }
       let key = authenticator.verify(call_id, *device_id, binding.as_slice(), role)?;
-      if self.retired_keys.contains(&(*device_id, key.clone())) {
+      if self.retired_keys.contains(*device_id, &key) {
         return Err(CallEngineError::RetiredKey(*device_id));
       }
       keys.insert(*device_id, key);
@@ -2655,7 +2694,7 @@ mod tests {
 
   use super::*;
   use crate::call_auth::DeviceCallKeyAuthenticator;
-  use crate::dave::{DaveEpoch, DaveExternalSender};
+  use crate::dave::{DaveEpoch, DaveExternalSender, DaveLeafIndex};
   use crate::rtp::AudioLevel;
 
   const CALL: i64 = 99;
@@ -5052,6 +5091,36 @@ mod tests {
     #[test]
     fn departed_device_is_not_added_again_with_its_old_key() {
       let now = Instant::now();
+      let (mut alice, carol_binding, (gateway, _)) = alice_with_carol_added(now);
+      alice
+        .handle_signal(event(9, CallEvent::ParticipantLeft { device_id: device(3) }), now)
+        .unwrap();
+      // The SFU replays her old binding.
+      let mut carol = joined_engine(3, &[1, 2], &gateway, None, now);
+      let (package, _) = key_package_of(&mut carol);
+      let proposals = gateway
+        .propose(
+          DaveCallId::from_call(call()),
+          DaveEpoch(2),
+          &[(DaveParticipantId(3), &package)],
+          &[],
+        )
+        .unwrap();
+      let replayed = vec![binding(3, carol_binding)];
+      let result = alice.handle_signal(event(10, dave_proposals(2, proposals, &[1, 2, 3], replayed)), now);
+      assert!(matches!(result, Err(CallEngineError::RetiredKey(member)) if member == device(3)));
+    }
+
+    /// Alice and Bob paired, Carol added by Alice's commit (events up to 8); Carol's binding, and
+    /// the gateway and authenticators to bring her back.
+    #[allow(clippy::type_complexity)]
+    fn alice_with_carol_added(
+      now: Instant,
+    ) -> (
+      CallEngine,
+      Vec<u8>,
+      (DaveExternalSender, HashMap<i64, Arc<dyn CallKeyAuthenticator>>),
+    ) {
       let authenticators = authenticators(&[1, 2, 3]);
       let gateway = DaveExternalSender::new().unwrap();
       let (mut alice, _bob) = paired_in(&gateway, &authenticators, now, None, Vec::new());
@@ -5059,16 +5128,6 @@ mod tests {
       let mut carol = joined_engine(3, &[1, 2], &gateway, Some(&authenticators[&3]), now);
       let (package, carol_binding) = key_package_of(&mut carol);
       let carol_binding = carol_binding.unwrap();
-      let add_carol = |epoch: u64| {
-        gateway
-          .propose(
-            DaveCallId::from_call(call()),
-            DaveEpoch(epoch),
-            &[(DaveParticipantId(3), &package)],
-            &[],
-          )
-          .unwrap()
-      };
       alice
         .handle_signal(
           event(
@@ -5080,12 +5139,17 @@ mod tests {
           now,
         )
         .unwrap();
+      let proposals = gateway
+        .propose(
+          DaveCallId::from_call(call()),
+          DaveEpoch(1),
+          &[(DaveParticipantId(3), &package)],
+          &[],
+        )
+        .unwrap();
       let bindings = vec![binding(3, carol_binding.clone())];
       alice
-        .handle_signal(
-          event(7, dave_proposals(1, add_carol(1), &[1, 2, 3], bindings)),
-          now,
-        )
+        .handle_signal(event(7, dave_proposals(1, proposals, &[1, 2, 3], bindings)), now)
         .unwrap();
       let (commit, _) = take_commit(&mut alice);
       alice
@@ -5101,16 +5165,63 @@ mod tests {
           now,
         )
         .unwrap();
-      alice
-        .handle_signal(event(9, CallEvent::ParticipantLeft { device_id: device(3) }), now)
-        .unwrap();
-      // The SFU replays her binding with her old key package.
-      let replayed = vec![binding(3, carol_binding)];
+      (alice, carol_binding, (gateway, authenticators))
+    }
+
+    #[test]
+    fn device_that_left_during_a_reconnect_is_not_added_again_with_its_old_key() {
+      let now = Instant::now();
+      let (mut alice, carol_binding, _) = alice_with_carol_added(now);
+      alice.connection_lost();
+      alice.rejoin("fresh".into(), now);
+      drain(&mut alice);
+      // Carol left while Alice was away: the rejoin's list no longer has her.
+      alice.handle_signal(event(1, joined(1, &[2])), now).unwrap();
       let result = alice.handle_signal(
-        event(10, dave_proposals(2, add_carol(2), &[1, 2, 3], replayed)),
+        event(
+          2,
+          dave_proposals(0, Vec::new(), &[1, 2, 3], vec![binding(3, carol_binding)]),
+        ),
         now,
       );
       assert!(matches!(result, Err(CallEngineError::RetiredKey(member)) if member == device(3)));
+    }
+
+    #[test]
+    fn device_that_comes_back_with_a_fresh_key_is_added() {
+      let now = Instant::now();
+      let (mut alice, _, carol_back) = alice_with_carol_added(now);
+      alice
+        .handle_signal(event(9, CallEvent::ParticipantLeft { device_id: device(3) }), now)
+        .unwrap();
+      let (gateway, authenticators) = carol_back;
+      let mut carol = joined_engine(3, &[1, 2], &gateway, Some(&authenticators[&3]), now);
+      let (package, binding_again) = key_package_of(&mut carol);
+      alice
+        .handle_signal(
+          event(
+            10,
+            CallEvent::ParticipantJoined {
+              participant: participant(3),
+            },
+          ),
+          now,
+        )
+        .unwrap();
+      // Her old leaf goes and her new key comes in one commit.
+      let proposals = gateway
+        .propose(
+          DaveCallId::from_call(call()),
+          DaveEpoch(2),
+          &[(DaveParticipantId(3), &package)],
+          &[DaveLeafIndex(2)],
+        )
+        .unwrap();
+      let bindings = vec![binding(3, binding_again.unwrap())];
+      alice
+        .handle_signal(event(11, dave_proposals(2, proposals, &[1, 2, 3], bindings)), now)
+        .unwrap();
+      let (_commit, _welcome) = take_commit(&mut alice);
     }
 
     #[test]
