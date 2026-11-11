@@ -19,11 +19,17 @@
 //! ([`VerifiedDeletion::device`]): the certificate alone outlives a device's removal, and it has no
 //! expiry.
 //!
+//! On an anchored channel (e2ee.md §4.6.5, D3) the deletion must also name the channel's name as the
+//! anchor signed it, by a founder, a strict channel's admin or a workspace signer, and the server
+//! must list that name: a member's rename, a swapped or missing name, or a forked anchor take the
+//! retention.
+//!
 //! The deletion names the channel, the group's epoch, which the server takes only as the current one,
 //! and when it was signed. So a signature the server held back, for example after refusing it, is
 //! refused here once the group has moved on or it got too old. A device without the group judges
 //! nothing, and neither does one that sees a sign of being shown different logs.
 
+use teamcraft_crypto::channel_anchor::{AnchorHash, VerifiedAnchor};
 use teamcraft_crypto::identity::{DeviceKeyPair, IdentityPublicKey, SignedDeviceCertificate, VerifiedDevice};
 use teamcraft_crypto::membership::IdentityDirectory;
 use teamcraft_crypto::mls::MAX_CHANGE_AGE_EPOCHS;
@@ -32,6 +38,7 @@ use teamcraft_proto::{
   Base64Bytes, ChannelDeletionDocument, ChannelRole, ConversationId, SignedChannelDeletion, UserId,
 };
 
+use crate::anchoring::name_counts_for_deletion;
 use crate::channel_roles::{ChannelRoleState, KeyDirectory, SignerAuthority, roster_admin_keys};
 use crate::convert;
 use crate::error::CoreError;
@@ -59,6 +66,25 @@ pub struct DeletionVerifier<'a> {
   pub channel_roles_max_age_ms: i64,
   /// The newest server time this device saw; a time ahead of `now_ms` can only refuse.
   pub newest_server_ms: i64,
+  /// The channel's anchor as this device holds it (D3).
+  pub anchor: AnchorFacts<'a>,
+}
+
+/// What this device knows of the channel's anchor when it judges a deletion.
+#[derive(Clone, Copy, Debug)]
+pub enum AnchorFacts<'a> {
+  /// No anchor, and none pinned: the deletion is judged as before anchors.
+  Unanchored,
+  /// The user's devices pinned the channel to an anchor this device can't verify right now: the
+  /// anchor grants nothing, and the name can't be checked.
+  Unverifiable,
+  Anchored {
+    anchor: &'a VerifiedAnchor,
+    /// The pin and floor show no fork.
+    floor_grants: bool,
+    /// The name the server lists for the channel.
+    maybe_listed_name: Option<&'a str>,
+  },
 }
 
 /// What this device's MLS group says.
@@ -100,6 +126,10 @@ pub enum SignedDeletionError {
   Unauthorized,
   #[error("nobody but the deleting channel admin signed this channel's roles lately")]
   NoRecentOtherSigner,
+  /// D3: the deletion doesn't name the anchored name, the name is a member's or doesn't verify,
+  /// or the server lists another one.
+  #[error("the signed deletion doesn't name the channel's anchored name")]
+  NameMismatch,
 }
 
 /// Checks a signed deletion against what this device verified.
@@ -133,6 +163,9 @@ pub fn verify_signed_deletion(
   {
     return Err(SignedDeletionError::Alarm);
   }
+  if !is_name_as_anchored(&document, verifier.anchor) {
+    return Err(SignedDeletionError::NameMismatch);
+  }
   if let Some(verified) = verified_by_workspace_admin(signed, &document, verifier) {
     return Ok(verified);
   }
@@ -144,19 +177,21 @@ pub fn verify_signed_deletion(
   Ok(verified)
 }
 
-/// The signed deletion of `conversation` for the group's `epoch`. Who may sign is up to the members'
-/// devices.
+/// The signed deletion of `conversation` for the group's `epoch`, naming the hash of the name the
+/// deleter was shown (D3). Who may sign is up to the members' devices.
 pub(crate) fn sign_channel_deletion(
   device: &DeviceKeyPair,
   certificate: &SignedDeviceCertificate,
   conversation: ConversationId,
   epoch: u64,
   signed_at_ms: i64,
+  maybe_name_hash: Option<AnchorHash>,
 ) -> Result<SignedChannelDeletion, CoreError> {
   let document = ChannelDeletionDocument {
     conversation_id: conversation,
     epoch,
     signed_at_ms,
+    maybe_name_hash: maybe_name_hash.map(|hash| Base64Bytes::new(hash.as_bytes().to_vec())),
   };
   let payload = serde_json::to_vec(&document).map_err(|error| CoreError::Corrupt(error.to_string()))?;
   let signature = sign_log_entry(
@@ -170,6 +205,28 @@ pub(crate) fn sign_channel_deletion(
     payload: Base64Bytes::new(payload),
     signature: Base64Bytes::new(signature),
   })
+}
+
+/// D3: on an anchored channel the deletion names the anchor's name, which counts for deletions
+/// (`anchoring::name_counts_for_deletion`); a pinned anchor this device can't verify refuses. A
+/// channel without an anchor is judged as before.
+fn is_name_as_anchored(document: &ChannelDeletionDocument, anchor: AnchorFacts<'_>) -> bool {
+  match anchor {
+    AnchorFacts::Unanchored => true,
+    AnchorFacts::Unverifiable => false,
+    AnchorFacts::Anchored {
+      anchor,
+      floor_grants,
+      maybe_listed_name,
+    } => {
+      let maybe_hash = document
+        .maybe_name_hash
+        .as_ref()
+        .and_then(|hash| <[u8; 32]>::try_from(hash.as_slice()).ok())
+        .map(AnchorHash::from_bytes);
+      name_counts_for_deletion(anchor, floor_grants, maybe_listed_name, maybe_hash)
+    },
+  }
 }
 
 /// Whether a member signs for the epoch the server told it: not behind its own group, and no further
@@ -298,6 +355,80 @@ mod tests {
   const ROLES_MAX_AGE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
   /// Who signed the entry that made the channel admin one, in the test worlds.
   const APPOINTER: i64 = 9;
+
+  /// D3 (e2ee.md §4.6.5): on an anchored channel the deletion must name the anchored name, which
+  /// the server lists, and which a member didn't set.
+  mod anchored_names {
+    use super::*;
+
+    #[test]
+    fn a_deletion_naming_the_founders_name_purges() {
+      let (admin, mut world) = world_with_workspace_admin();
+      world.anchor_founded_as("general", "general");
+      assert!(world.verify(&admin.deletion_named(EPOCH, "general")).is_ok());
+    }
+
+    #[test]
+    fn a_deletion_without_a_name_hash_takes_the_retention() {
+      let (admin, mut world) = world_with_workspace_admin();
+      world.anchor_founded_as("general", "general");
+      assert_eq!(
+        world.verify(&admin.deletion(EPOCH)).unwrap_err(),
+        SignedDeletionError::NameMismatch
+      );
+    }
+
+    /// The server showed the deleter this channel as "old-test".
+    #[test]
+    fn a_swapped_name_takes_the_retention() {
+      let (admin, mut world) = world_with_workspace_admin();
+      world.anchor_founded_as("general", "old-test");
+      assert_eq!(
+        world
+          .verify(&admin.deletion_named(EPOCH, "old-test"))
+          .unwrap_err(),
+        SignedDeletionError::NameMismatch
+      );
+      world.anchor_founded_as("general", "general");
+      assert_eq!(
+        world
+          .verify(&admin.deletion_named(EPOCH, "old-test"))
+          .unwrap_err(),
+        SignedDeletionError::NameMismatch
+      );
+    }
+
+    #[test]
+    fn a_forked_or_unverifiable_anchor_takes_the_retention() {
+      let (admin, mut world) = world_with_workspace_admin();
+      world.anchor_founded_as("general", "general");
+      world.is_anchor_forked = true;
+      assert_eq!(
+        world.verify(&admin.deletion_named(EPOCH, "general")).unwrap_err(),
+        SignedDeletionError::NameMismatch
+      );
+      world.is_anchor_forked = false;
+      world.is_anchor_unverifiable = true;
+      assert_eq!(
+        world.verify(&admin.deletion_named(EPOCH, "general")).unwrap_err(),
+        SignedDeletionError::NameMismatch
+      );
+    }
+
+    /// A channel without an anchor is judged as before: the name hash isn't needed.
+    #[test]
+    fn an_unanchored_channel_needs_no_name() {
+      let (admin, world) = world_with_workspace_admin();
+      assert!(world.verify(&admin.deletion(EPOCH)).is_ok());
+    }
+
+    fn world_with_workspace_admin() -> (Person, World) {
+      let admin = Person::new(9);
+      let mut world = World::default();
+      world.roster_admin(&admin, RosterRole::Admin);
+      (admin, world)
+    }
+  }
 
   mod accepted {
     use super::*;
@@ -755,6 +886,10 @@ mod tests {
     is_channel: bool,
     now_ms: i64,
     newest_server_ms: i64,
+    /// The channel's verified anchor and the name the server lists.
+    maybe_anchor: Option<(VerifiedAnchor, String)>,
+    is_anchor_forked: bool,
+    is_anchor_unverifiable: bool,
   }
 
   impl Default for World {
@@ -774,6 +909,9 @@ mod tests {
         is_channel: true,
         now_ms: NOW_MS,
         newest_server_ms: i64::MIN,
+        maybe_anchor: None,
+        is_anchor_forked: false,
+        is_anchor_unverifiable: false,
       }
     }
   }
@@ -801,6 +939,72 @@ mod tests {
       };
     }
 
+    /// Founds the channel anchored under `name` (by a founder of its own) and lists it as `listed`.
+    fn anchor_founded_as(&mut self, name: &str, listed: &str) {
+      use teamcraft_crypto::channel_anchor::{
+        AnchorExpectation, AnchorKind, ChannelAnchor, ExpectedKind, Founding, Judged, Standing,
+      };
+      use teamcraft_crypto::membership::{MembershipAction, MembershipAuthority};
+
+      struct Founder(crypto::UserId, IdentityPublicKey);
+      impl IdentityDirectory for Founder {
+        fn pinned_identity(&self, user_id: crypto::UserId) -> Option<IdentityPublicKey> {
+          (user_id == self.0).then_some(self.1)
+        }
+        fn device_listing(&self, _: &VerifiedDevice, _: u64, _: Judged) -> Standing {
+          Standing::Confirmed
+        }
+      }
+      struct Nobody;
+      impl MembershipAuthority for Nobody {
+        fn is_authorized(&self, _: crypto::UserId, _: crypto::ConversationId, _: &MembershipAction) -> bool {
+          false
+        }
+      }
+
+      let founder = Person::new(3);
+      let conversation_id = convert::conversation(conversation(CHANNEL));
+      let anchor = ChannelAnchor::found(
+        &founder.device,
+        &founder.certificate,
+        &Founding {
+          conversation_id,
+          kind: AnchorKind::Channel,
+          device_list_version: 1,
+          signed_at_ms: 1,
+          maybe_space_id: None,
+          name,
+        },
+      )
+      .unwrap();
+      let directory = Founder(convert::user(founder.user_id), founder.identity.public_key());
+      let verified = anchor
+        .verify(
+          &AnchorExpectation {
+            conversation_id,
+            kind: ExpectedKind::Channel,
+          },
+          EPOCH,
+          &Default::default(),
+          &directory,
+          &Nobody,
+        )
+        .unwrap();
+      self.maybe_anchor = Some((verified, listed.to_owned()));
+    }
+
+    fn anchor_facts(&self) -> AnchorFacts<'_> {
+      match &self.maybe_anchor {
+        _ if self.is_anchor_unverifiable => AnchorFacts::Unverifiable,
+        None => AnchorFacts::Unanchored,
+        Some((anchor, listed)) => AnchorFacts::Anchored {
+          anchor,
+          floor_grants: !self.is_anchor_forked,
+          maybe_listed_name: Some(listed),
+        },
+      }
+    }
+
     fn verify(&self, signed: &SignedChannelDeletion) -> Result<VerifiedDeletion, SignedDeletionError> {
       verify_signed_deletion(
         signed,
@@ -819,6 +1023,7 @@ mod tests {
           now_ms: self.now_ms,
           channel_roles_max_age_ms: ROLES_MAX_AGE_MS,
           newest_server_ms: self.newest_server_ms,
+          anchor: self.anchor_facts(),
         },
       )
     }
@@ -878,6 +1083,20 @@ mod tests {
         conversation(channel),
         epoch,
         signed_at_ms,
+        None,
+      )
+      .unwrap()
+    }
+
+    /// A deletion naming the name the deleter was shown (D3).
+    fn deletion_named(&self, epoch: u64, name: &str) -> SignedChannelDeletion {
+      sign_channel_deletion(
+        &self.device,
+        &self.certificate,
+        conversation(CHANNEL),
+        epoch,
+        NOW_MS,
+        Some(teamcraft_crypto::channel_anchor::name_hash(name)),
       )
       .unwrap()
     }

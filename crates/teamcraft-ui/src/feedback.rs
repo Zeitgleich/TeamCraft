@@ -98,6 +98,11 @@ pub fn failure_message(i18n: I18n, failure: &ActionFailure) -> String {
       let device = failure.detail.lines().next().unwrap_or_default();
       i18n.t_with(failure_message_key(failure), &[("device", device)])
     },
+    // Names the person who has to update (e2ee.md §4.6.5): the detail's first line.
+    FailureKind::MustUpdate => {
+      let name = failure.detail.lines().next().unwrap_or_default();
+      i18n.t_with(failure_message_key(failure), &[("name", name)])
+    },
     _ => i18n.t(failure_message_key(failure)),
   }
 }
@@ -126,6 +131,7 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       BugReportBlocker::WrongConversation => "report-error-wrong-conversation",
     },
     FailureKind::ChannelRolesDisputed => "error-channel-roles-disputed",
+    FailureKind::MustUpdate => "error-must-update",
     FailureKind::Link(failure) => match failure {
       LinkFailure::CodeInvalid => "error-link-code-invalid",
       LinkFailure::OtherVersion => "error-link-other-version",
@@ -202,6 +208,7 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       ErrorCode::SpaceHasHiddenChannels => "error-space-has-hidden-channels",
       ErrorCode::ChannelNeedsAdmin => "error-channel-needs-admin",
       ErrorCode::NotAChannel => "error-not-a-channel",
+      ErrorCode::InvalidChannelName => "channel-name-error-refused",
       ErrorCode::AdminJoinRequestNotFound => "error-admin-join-request-gone",
       ErrorCode::AdminJoinRequestTooSoon => "error-admin-join-request-too-soon",
       ErrorCode::CallDeviceLimit => "error-call-device-limit",

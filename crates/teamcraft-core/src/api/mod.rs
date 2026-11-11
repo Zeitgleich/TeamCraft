@@ -78,6 +78,9 @@ use teamcraft_proto::{
   InviteResponse, ListCategoriesResponse, ListInvitesResponse, SpaceResponse, UpdateCategoryRequest,
   UpdateConversationRequest, UpdateSpaceMemberRequest, UpdateSpaceRequest,
 };
+use teamcraft_proto::{
+  ClientCompatibilityResponse, GatewayInfoResponse, PushGatewayResponse, WebPushKeyResponse,
+};
 use teamcraft_proto::{CreateDeviceLinkRequest, DeviceLinkRequest};
 use teamcraft_proto::{
   CreateInstantMeetingRequest, MeetingAdmittersResponse, MeetingId, MeetingResponse,
@@ -88,7 +91,6 @@ use teamcraft_proto::{
   DirectoryInvitationsQuery, DirectoryInvitationsResponse, DirectoryPeopleQuery, DirectoryPeopleResponse,
 };
 use teamcraft_proto::{ExpiringGuestResponse, ExtendGuestRequest};
-use teamcraft_proto::{GatewayInfoResponse, PushGatewayResponse, WebPushKeyResponse};
 use teamcraft_proto::{
   ImportDmRequest, ImportMemberStateRequest, ImportMessagesRequest, ImportMessagesResponse,
   ProvisionUsersRequest, ProvisionUsersResponse,
@@ -862,6 +864,9 @@ pub trait ServerApi {
   /// The public information of a push gateway (`GET /v1/info`, no account): its token key. Asked
   /// of the gateway itself, never through the server, so a server can't substitute a key.
   fn gateway_info(&self, gateway_url: &str) -> impl Future<Output = Result<GatewayInfoResponse, ApiError>>;
+  /// The server's version and the oldest app it supports (`GET /client-compatibility`, no
+  /// account): whether new channels are founded anchored (e2ee.md §4.6.5, D2).
+  fn client_compatibility(&self) -> impl Future<Output = Result<ClientCompatibilityResponse, ApiError>>;
   /// Ends a sealed device token at its gateway (`POST /v1/tokens/revoke`, no account).
   fn revoke_gateway_token(
     &self,

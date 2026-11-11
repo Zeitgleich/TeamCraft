@@ -3,6 +3,7 @@
 //! adapters; network and decryption happen below them.
 
 pub mod account_data;
+pub mod anchoring;
 pub mod api;
 pub mod attestation;
 pub mod canvas;

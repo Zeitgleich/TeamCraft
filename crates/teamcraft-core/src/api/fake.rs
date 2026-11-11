@@ -29,7 +29,7 @@ use teamcraft_proto::{
   SyncHeadsResponse, UnixMillis, UpdateConversationMemberRequest, UpdateScheduledMessageRequest,
   UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserGroupRoster, UserId, UserKind, UserSummary,
 };
-use teamcraft_proto::{AdminJoinRequestChange, AdminJoinRequestResponse};
+use teamcraft_proto::{AdminJoinRequestChange, AdminJoinRequestResponse, ClientCompatibilityResponse};
 use teamcraft_proto::{
   AppendWorkspaceLogRequest, ListWorkspaceLogQuery, ListWorkspaceLogResponse, WorkspaceLogEntryResponse,
   WorkspaceLogKind,
@@ -131,6 +131,8 @@ pub struct FakeGateway {
 
 #[derive(Default)]
 struct State {
+  /// `GET /client-compatibility`'s minimum; `None`: `1.0.0`.
+  maybe_minimum_client_version: Option<String>,
   /// `GET /user-groups/rosters` as a real server answers it.
   user_groups: Vec<UserGroupRoster>,
   /// The built-in `@admins` the rosters announce.
@@ -957,6 +959,11 @@ impl FakeServer {
   /// channel roles (issue #380).
   pub fn set_role_log_lacking(&self, is_lacking: bool) {
     self.lock().lacks_role_log = is_lacking;
+  }
+
+  /// The oldest app version the server names (`GET /client-compatibility`); `1.0.0` until set.
+  pub fn set_minimum_client_version(&self, version: &str) {
+    self.lock().maybe_minimum_client_version = Some(version.to_owned());
   }
 
   /// The user's `GET /conversations` answers only after `delay` (a long full sync).
@@ -6588,6 +6595,18 @@ impl ServerApi for FakeServerApi {
   async fn web_push_key(&self) -> Result<WebPushKeyResponse, ApiError> {
     Ok(WebPushKeyResponse {
       maybe_public_key: Some(FAKE_WEB_PUSH_KEY.to_owned()),
+    })
+  }
+
+  async fn client_compatibility(&self) -> Result<ClientCompatibilityResponse, ApiError> {
+    Ok(ClientCompatibilityResponse {
+      server_version: "1.0.0".into(),
+      minimum_client_version: self
+        .server
+        .lock()
+        .maybe_minimum_client_version
+        .clone()
+        .unwrap_or_else(|| "1.0.0".into()),
     })
   }
 

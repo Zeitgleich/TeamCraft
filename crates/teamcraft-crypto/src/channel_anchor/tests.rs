@@ -89,6 +89,31 @@ mod encoding {
   }
 
   #[test]
+  fn a_meeting_chats_newer_origin_asks_for_an_update() {
+    let world = World::new();
+    let kind = AnchorKind::MeetingChat { meeting_id: MEETING };
+    let bytes = world.found(kind, "standup").to_bytes().unwrap();
+    // format (1) ‖ conversation (8) ‖ kind (1) ‖ meeting ID (8) ‖ origin: offset 18
+    const ORIGIN: usize = 1 + 8 + 1 + 8;
+    assert_eq!(bytes[ORIGIN], 1, "a founded origin");
+    let mut origin = bytes.clone();
+    origin[ORIGIN] = 4;
+    assert!(matches!(
+      ChannelAnchor::from_bytes(&origin, DEFAULT_MAX_ANCHOR_BYTES),
+      Err(AnchorError::MustUpdate)
+    ));
+    // An unknown name authority after it is still malformed, not newer: the offset is right.
+    let mut setter = bytes;
+    let authority = ORIGIN + 41 + 8 + 8 + 8 + 9 + 32;
+    assert_eq!(setter[authority], NameAuthority::Founder as u8);
+    setter[authority] = 9;
+    assert!(matches!(
+      ChannelAnchor::from_bytes(&setter, DEFAULT_MAX_ANCHOR_BYTES),
+      Err(AnchorError::Malformed(tls_codec::Error::UnknownValue(_)))
+    ));
+  }
+
+  #[test]
   fn an_unknown_value_outside_kind_and_origin_is_malformed() {
     let world = World::new();
     let mut bytes = world.found(AnchorKind::Channel, "general").to_bytes().unwrap();

@@ -3090,13 +3090,16 @@ accepts Alice promoting Dave, then Dave's entry. Bob's device, given Carol's old
 
 ### 4.6.5 Anchoring a channel's founder, space and name (issue #1171)
 
-**Status: decided; the cryptography is implemented, the clients don't use it yet.** The owner decided D1 to D10
-(table at the end) on #1171, and a crypto review changed the design (end of this section). `teamcraft-crypto`'s
-`channel_anchor` and `mls` hold the encoding, the hashes, the signatures, the verdicts, the pin and floor record,
-anchored founding and the move and rename commits (#1725, first part; "Implementation notes" below). Founding
-anchored channels from the apps, the checks on every join path and the name rules are #1725's second part; the rest
-is split into #1727 (signed space deletions), #1728 (anchoring older channels), #1729 (strict from creation) and
-#1726 (the meeting invitee list).
+**Status: decided; implemented for channels.** The owner decided D1 to D10 (table at the end) on #1171, and a
+crypto review changed the design (end of this section). `teamcraft-crypto`'s `channel_anchor` and `mls` hold the
+encoding, the hashes, the signatures, the verdicts, the pin and floor record, anchored founding and the move and
+rename commits (#1725, first part). `teamcraft-core` founds channels anchored, checks the anchor against the pin and
+floor on every join path, signs moves and renames, and binds a deletion to the name (#1740; "Implementation notes"
+below). Still open: meeting chats (D10, #1747), the role log's anchored founding and `may_anchor` (#1748), what the
+apps show of the anchor and the mobile name checks (#1749), and re-founding with its chain in the account data:
+`AnchorFloor` keeps no re-founding chain yet, so a re-founding is refused as another founding until #1728. The parts
+split off before: #1727 (signed space deletions), #1728 (anchoring older channels and re-founding), #1729 (strict
+from creation) and #1726 (the meeting invitee list).
 
 **The gap.** Facts that decisions rest on are the server's word, or trust on first use:
 
@@ -3599,6 +3602,42 @@ and couldn't count for a purge.
   `Stale` each. `AnchorFloor` is the pin and floor record for the account data (hashes as hex), merged by maximum;
   two foundings or two hashes for one version mark it forked (no grants). Re-founding and its chain are the
   account data's part (#1725, second part) and #1728's.
+- **The core's part** (#1740):
+  - **When:** `anchoring::ANCHORING_RELEASE` is 1.0.31, the first release whose apps all announce the anchor. A device
+    asks `GET /client-compatibility` when it founds a channel and keeps the highest minimum it saw in its store.
+  - **Check 3 and 4 on a device:** it holds only the newest verified device list and roster. `Newest` asks that the
+    newest list names the device unrevoked and is at least `device_list_version`; `list_version` is only a lower
+    bound there, and a properties change's 0 means "any" (`IdentityDirectory::device_listing`). `AsNamed` takes a
+    device the newest list still names, and answers `Unknown` for a revoked one, which may have been revoked before
+    the version named (the anchor only grants). A workspace signer is an admin of the fresh roster at or above the
+    version named; a stale roster or a newer named version is `Unknown`. Only the founder's and the last change's
+    signer's device lists are fetched, never every member's.
+  - **The pin and floor in practice:** the founder pins at creation; a welcome or add-back is checked once
+    completed and deleted if refused; an external commit is checked before it is sent and the group deleted if
+    refused. Whether to check never rests on the server's kind for the conversation: a group that carries an
+    anchor, or a conversation the user's devices pinned, is checked as a channel, so relisting a pinned channel as
+    a DM skips nothing. A pinned conversation whose anchor doesn't verify right now (a device list not fetched,
+    which a server can cause) is held to the floor on its own unverified word: the pinned founding, no older
+    properties version, no other hash for the same version, no older epoch; it then raises nothing and grants
+    nothing. Another founding, none, or anything below the floor is refused, and the device stays out. Every merged
+    move or rename raises the floor, the committer's own included (`maybe_properties_change`).
+  - **Founding needs the own device list:** once D2 is reached, a device that can't find itself on its own signed
+    device list (after fetching it again) creates no channel and says so, rather than found one unanchored.
+  - **Moves and renames:** the apps sign them after the server took them, as a workspace signer if the user is an
+    admin of the fresh roster, else a rename as a member; a move by anybody else, or a change that can't be signed,
+    leaves the property stale. A move without a rename signs the listed name only if it hashes to the anchor's,
+    else nothing.
+  - **Names:** clients trim the name, bring it to NFC and refuse bidi controls, control characters and
+    default-ignorable code points (`teamcraft_proto::channel_name`). The emoji presentation selector after an
+    `Extended_Pictographic` character, and the zero-width joiner between them (a skin tone or the selector may
+    come before it), stay allowed, so emoji typed with them work; next to anything else (letters, dashes,
+    bullets, private-use characters) they are refused. The server stores channel names byte for byte: it trims
+    and normalizes nothing, and refuses a name that breaks these rules (`invalid_channel_name`, shown at the
+    field) instead of repairing it.
+  - **A deletion's name (D3):** `ChannelDeletionDocument.name_hash` is the hash of the name the deleter's device
+    lists. A member purges an anchored channel at once only if the anchor verifies, the floor grants, the name
+    counts for deletions (`name_set_by` not a member), the deletion names it and the listed name hashes to it and
+    keeps the rules. A pinned channel whose anchor doesn't verify takes the retention.
 - **The name hash's known answer:** `name_hash("general")` is
   `e0c5e1a616c7db0ab0a95802b91233f845bc3d1194ef04a22aebee68280c9174` (SHA-256 of the one-byte label length, the
   label, the varint length 7 and the bytes).
