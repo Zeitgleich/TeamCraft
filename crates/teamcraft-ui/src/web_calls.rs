@@ -34,7 +34,9 @@ use teamcraft_client_api::page_calls::{
 use teamcraft_client_api::remote::{CallAction, CallActionAnswer, CallSnapshot};
 use teamcraft_core::CallKeySigner;
 use teamcraft_crypto::call_binding::{CallBindingError, CallId as CryptoCallId, SignedCallKeyBinding};
-use teamcraft_media::call_auth::{CallBindingSigner, CallKeyAuthenticator, DeviceCallKeyAuthenticator};
+use teamcraft_media::call_auth::{
+  BindingRole, CallBindingSigner, CallKeyAuthenticator, DeviceCallKeyAuthenticator,
+};
 use teamcraft_proto::{
   CallId, ConversationId, DeviceId, GatewayEvent, MediaStreamId, ScreenContentMode, ScreenShareResolution,
 };
@@ -60,6 +62,8 @@ thread_local! {
 
 type ChangeHandler = Rc<dyn Fn(CallSnapshot)>;
 type ModuleLoad = Shared<LocalBoxFuture<'static, Result<CallModule, String>>>;
+/// The page verifies a call key binding for the call module: call id, device id, binding, role.
+type VerifyCallback = dyn Fn(String, String, Uint8Array, Option<String>) -> Result<Uint8Array, JsValue>;
 
 /// The page's side of the calls of the signed-in account.
 pub struct WebCallHost {
@@ -94,7 +98,7 @@ struct Callbacks {
   _changed: Closure<dyn Fn(String)>,
   _prepare: Closure<dyn Fn(String) -> Promise>,
   _sign: Closure<dyn Fn(String, Uint8Array) -> Result<Uint8Array, JsValue>>,
-  _verify: Closure<dyn Fn(String, String, Uint8Array) -> Result<Uint8Array, JsValue>>,
+  _verify: Closure<VerifyCallback>,
   _roster: Closure<dyn Fn(String) -> Promise>,
   _failed: Closure<dyn Fn(String)>,
   _background_rule: Closure<dyn Fn() -> Promise>,
@@ -486,14 +490,20 @@ impl WebCallHost {
       .map_err(|error| error.to_string())
   }
 
-  fn verify(&self, call_id: &str, device_id: &str, binding: &[u8]) -> Result<Vec<u8>, String> {
+  fn verify(
+    &self,
+    call_id: &str,
+    device_id: &str,
+    binding: &[u8],
+    role: BindingRole,
+  ) -> Result<Vec<u8>, String> {
     let call_id: CallId = serde_json::from_str(call_id).map_err(|error| error.to_string())?;
     let device_id: DeviceId = serde_json::from_str(device_id).map_err(|error| error.to_string())?;
     let call = self.maybe_call.borrow();
     let call = call.as_ref().ok_or("no call is being joined")?;
     call
       .authenticator
-      .verify(call_id, device_id, binding)
+      .verify(call_id, device_id, binding, role)
       .map_err(|error| error.to_string())
   }
 }
@@ -643,11 +653,16 @@ impl Callbacks {
       )
     };
     let verify = {
-      Closure::<dyn Fn(String, String, Uint8Array) -> Result<Uint8Array, JsValue>>::new(
-        move |call_id: String, device_id: String, binding: Uint8Array| {
+      Closure::<VerifyCallback>::new(
+        move |call_id: String, device_id: String, binding: Uint8Array, maybe_role: Option<String>| {
           let host = host.upgrade().ok_or_else(|| JsValue::from_str("signed out"))?;
+          // A call module from before the role checks every binding as a joiner's, as it did.
+          let role = maybe_role
+            .as_deref()
+            .and_then(BindingRole::from_wire)
+            .unwrap_or(BindingRole::Joiner);
           let key = host
-            .verify(&call_id, &device_id, &binding.to_vec())
+            .verify(&call_id, &device_id, &binding.to_vec(), role)
             .map_err(|error| JsValue::from_str(&error))?;
           Ok(Uint8Array::from(key.as_slice()))
         },

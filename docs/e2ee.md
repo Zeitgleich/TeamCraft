@@ -5300,12 +5300,41 @@ keys.
 1. For every call a device generates a **fresh P-256 key pair** (never reused across calls) for its
    DAVE MLS leaf.
 2. It signs a **call key binding** with its device key: `{ call_id, user_id, device_id, DAVE public
-   key, not_after }`, domain-separated with the label `TeamCraft-v1 call key binding` (validity at
-   most one hour; it is only needed while the device joins). The binding travels to the SFU with the
+   key, not_after }`, domain-separated with the label `TeamCraft-v1 call key binding` (`not_after`
+   10 minutes after signing, by the signer's clock). The binding travels to the SFU with the
    DAVE key package; the SFU hands it to the members together with the proposal to add the device,
    and to a joining device together with the welcome (the bindings of the existing members).
 3. Members verify a binding against the device's certificate (§3, the same `VerifiedDevice` as in
-   chat) and reject it if it is for another call, another device, expired, or valid for too long.
+   chat) and reject it if it is for another call or another device. **Time.** Only a joining
+   device's binding (the one that comes with the proposal) is checked for time, by the verifying
+   member's clock against the signer's `not_after`; neither clock is trusted, so both checks
+   allow `CALL_KEY_BINDING_CLOCK_LEEWAY_SECS` (one day): a joiner's binding is accepted until
+   one day after its `not_after` (so up to 24 h 10 min after signing by a correct clock) and
+   refused if its `not_after` is more than 25 h ahead. The day is deliberate: guests bring
+   PCs with a wrong time zone (up to 14 h off), Windows reading the hardware clock as local time
+   (an hour or two) or no time sync, and a refused binding throws them out of the call. The window
+   is not what stops a replay (below). The bindings in a welcome belong to devices already in the
+   group, signed when each of them joined, possibly hours ago; the members present then checked
+   their time, so a late joiner checks them without it (before, every device that joined more than
+   10 minutes after the others was refused and left the call).
+   **What a binding vouches for.** A device is added only with its own binding, in the proposal
+   that adds it and checked as a joiner's: a key that only came with a welcome, or with an earlier
+   proposal, vouches for nobody's addition. After a welcome or a commit each member keeps the
+   bound keys of the group's members only. Once a device leaves the call its bound key is retired
+   for the rest of the call on every member that saw it leave: a proposal that brings that device
+   back with the same key (the SFU replaying its old binding and key package) is refused there
+   (`RetiredKey`, which still ends that member's call, #1753); a device that really comes back joins
+   with a fresh DAVE key and binding. A member that was reconnecting meanwhile retires the keys of
+   the devices missing from the participant list of its rejoin. Each engine remembers at most
+   `MAX_RETIRED_CALL_KEYS` (4096) retired keys, the oldest evicted first. **Limits:** a device that
+   joined after the departure never saw the key and can't retire it; for such a late joiner a
+   replayed binding is caught only by the time check, so the SFU can propose the departed device
+   to it again within the one-day leeway (a device that shows as present but holds none of the
+   group's keys: the member's leaf must still be signed with the bound key, which the departed
+   device discarded when it left). Members that saw the departure refuse that proposal, so it is
+   never committed while one of them is in the call. Across calls the call id stops a replay. A welcome binding without
+   a time check doesn't let the SFU swap or invent a key either: the member's MLS leaf must be
+   signed with the bound key, which only that device holds.
    Before committing proposals, and after every epoch change, each member checks that every other
    member's MLS leaf signature key equals the key in that member's verified binding. A mismatch or a
    member without a verified binding stops media for the call (no unencrypted fallback).
