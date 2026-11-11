@@ -787,15 +787,18 @@ class CallController(
     leave()
   }
 
-  /** Cleans up after a call; safe to call more than once. */
+  /**
+   * Cleans up after a call; safe to call more than once, also at the same time: hanging up and
+   * the Telecom call ending both get here, on different threads (found on a device: the second
+   * `leave` hit the closed session and crashed the app).
+   */
   private fun leave() {
     // Before the session closes: the capture tells the engine first.
     stopScreenShare()
-    maybeSession?.let { session ->
+    takeSession()?.let { session ->
       session.leave()
       session.close()
     }
-    maybeSession = null
     maybeTelecomCall = null
     moves.reset()
     wantsCamera.value = false
@@ -804,6 +807,10 @@ class CallController(
     frames.value = emptyMap()
     CallService.stop(context)
   }
+
+  /** The session, once: whoever takes it leaves and closes it. */
+  @Synchronized
+  private fun takeSession(): CallSession? = maybeSession.also { maybeSession = null }
 
   /** Engine callbacks arrive on the engine's and the call's threads; the state flow is thread-safe. */
   private inner class Listener : CallListener {
