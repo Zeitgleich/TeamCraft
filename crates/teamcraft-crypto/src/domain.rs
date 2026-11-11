@@ -60,6 +60,12 @@ pub(crate) const WORKSPACE_LOG_HASH: &str = "TeamCraft-v1 workspace log entry ha
 pub(crate) const IMPORTED_MESSAGE_ID: &str = "TeamCraft-v1 imported message";
 /// The organizer's signature on who may let guests into a meeting (e2ee.md §4.6, "Meeting guests").
 pub(crate) const MEETING_ADMITTERS: &str = "TeamCraft-v1 meeting admitters";
+/// Hash input label of a channel's name in its anchor (e2ee.md §4.6.5).
+pub(crate) const CHANNEL_NAME: &str = "TeamCraft-v1 channel name";
+/// Hash input label of a channel anchor's properties, the value of the next one's `prev_hash`.
+pub(crate) const CHANNEL_PROPERTIES: &str = "TeamCraft-v1 channel properties";
+/// Hash input label of a channel anchor's founding, the pin devices keep (e2ee.md §4.6.5).
+pub(crate) const CHANNEL_ANCHOR_PIN: &str = "TeamCraft-v1 channel anchor pin";
 
 /// Returns `len(label) || label || body`.
 pub(crate) fn labeled(label: &str, body: &[u8]) -> Vec<u8> {
@@ -76,7 +82,7 @@ pub(crate) fn labeled(label: &str, body: &[u8]) -> Vec<u8> {
 mod tests {
   use super::*;
 
-  const ALL_LABELS: [&str; 42] = [
+  const ALL_LABELS: [&str; 45] = [
     DEVICE_CERTIFICATE,
     IDENTITY_FINGERPRINT,
     MESSAGE_AAD,
@@ -119,6 +125,9 @@ mod tests {
     SERVER_SETTING_AAD,
     SEALED_CONTENT_KEYS,
     MEETING_ADMITTERS,
+    CHANNEL_NAME,
+    CHANNEL_PROPERTIES,
+    CHANNEL_ANCHOR_PIN,
   ];
 
   #[test]

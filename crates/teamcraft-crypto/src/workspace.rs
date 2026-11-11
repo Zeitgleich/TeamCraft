@@ -34,6 +34,12 @@ pub enum WorkspaceLog {
   /// A custom emoji of the workspace (issue #207): the "version" is when it was signed, and the
   /// payload names the emoji and its picture's hash.
   CustomEmoji = 5,
+  /// A channel's founding in its anchor (e2ee.md §4.6.5): the "version" is the anchor's format
+  /// and the payload is the founding with its first properties.
+  ChannelAnchor = 6,
+  /// A move or rename of an anchored channel: the "version" is the new properties version and
+  /// the payload a `ChannelPropertiesChange` naming the channel and its founding.
+  ChannelProperties = 7,
 }
 
 /// The signature field of a log entry: the signer's device certificate and its signature.

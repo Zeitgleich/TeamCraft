@@ -28,6 +28,7 @@ the lockfile. Fuzzing itself stays manual (`run.sh`).
 | `voice_decode`        | voice messages (Ogg or WebM Opus) decoded to WAV: no panic, output bounded by the input's size                   |
 | `imip`                | received iMIP REPLY text; rendering events from arbitrary strings (CR/LF injection, line folding)                |
 | `workspace_log`       | signed workspace log entries (random payloads and signatures must fail verification) and the roster/policy chain |
+| `channel_anchor`      | a channel's anchor and properties changes: no panic, size limit held, stable re-encoding, no random signature    |
 | `crypto_decoders`     | binary decoders of messages, key bags, wrapped backup keys, membership changes, certificates, call bindings      |
 | `dpop_proof`          | DPoP proofs from the `DPoP` header or a first WebSocket frame, also valid ones with bytes changed: never a panic |
 | `scim`                | SCIM filters, PATCH paths and operations, user and group resources: no panic, bounded, stable round trip         |
