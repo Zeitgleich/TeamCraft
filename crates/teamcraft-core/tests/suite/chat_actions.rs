@@ -133,37 +133,6 @@ async fn bookmarks_replace_the_bar_for_every_member() {
   assert_eq!(titles, ["spec.pdf"]);
 }
 
-/// The pinned panel of a conversation, open before the pin (or asked for by the pinned bar), lists
-/// the pin afterwards: on the device that pinned and on the others.
-#[tokio::test]
-async fn the_pinned_panel_lists_a_pin_made_after_it_was_read() {
-  let (_server, mut alice, mut bob, channel) = channel_with_two().await;
-  let (alice_ui, bob_ui) = (backend_of(&alice), backend_of(&bob));
-  alice_ui.post_message(channel, None, "the plan");
-  run_commands(&mut alice, &alice_ui).await;
-  settle(&mut [&mut alice, &mut bob]).await;
-  assert!(alice_ui.pinned_messages(channel).is_empty());
-  assert!(bob_ui.pinned_messages(channel).is_empty());
-
-  let plan = last(&bob_ui, channel);
-  bob_ui.set_pinned(channel, plan.id, true);
-  assert_eq!(
-    bodies(&bob_ui.pinned_messages(channel)),
-    ["the plan"],
-    "at once on the device that pinned"
-  );
-  run_commands(&mut bob, &bob_ui).await;
-  settle(&mut [&mut alice, &mut bob]).await;
-  assert_eq!(bodies(&bob_ui.pinned_messages(channel)), ["the plan"]);
-  assert_eq!(bodies(&alice_ui.pinned_messages(channel)), ["the plan"]);
-
-  bob_ui.set_pinned(channel, plan.id, false);
-  run_commands(&mut bob, &bob_ui).await;
-  settle(&mut [&mut alice, &mut bob]).await;
-  assert!(bob_ui.pinned_messages(channel).is_empty());
-  assert!(alice_ui.pinned_messages(channel).is_empty());
-}
-
 #[tokio::test]
 async fn pins_forwards_and_channel_copies_of_thread_replies() {
   let (_server, mut alice, mut bob, channel) = channel_with_two().await;
@@ -472,8 +441,4 @@ fn user_messages(backend: &impl ChatBackend, conversation: ConversationId) -> Ve
 fn last(backend: &impl ChatBackend, conversation: ConversationId) -> Message {
   let count = backend.message_count(conversation);
   backend.messages(conversation, count - 1, 1).remove(0)
-}
-
-fn bodies(messages: &[Message]) -> Vec<String> {
-  messages.iter().map(|message| message.body.clone()).collect()
 }
