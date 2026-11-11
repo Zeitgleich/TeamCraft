@@ -867,14 +867,23 @@ read without bringing the window up).
 A direct message (one-to-one or group) can float as a bubble on Android 11+. It is a device setting,
 off by default: "Show as bubble" in the conversation's notification settings (direct messages only;
 it does not follow the account). A notification gets `BubbleMetadata` only when all hold: the user
-opted this conversation in, the system allows bubbles (`NotificationManager.areBubblesAllowed()` and
-the direct messages channel's `canBubble()`), the notification shows message content (the
+opted this conversation in, the system allows bubbles (the app's bubble preference in the system
+settings is "All" or "Selected conversations", `getBubblePreference()`; `areBubblesAllowed()` on
+Android 11), the notification shows message content (the
 "sender only" and "nothing" settings and the app lock suppress the bubble, as they suppress the
 text), and it has its conversation shortcut. The expanded bubble is `BubbleActivity`, a separate
 entry that shows the conversation screen; tapping the notification, shares and links still open the
 main activity. With the app lock on, or in any state that needs sign-in, the bubble sends the user to
 the main activity. A conversation deleted or left while its bubble is up closes it and clears the
 notification. Turning the toggle off re-posts the notification silently without the bubble.
+
+Bubbles are off for an app until the user allows them, so the toggle says so while the system
+preference is "None" and offers "Open settings" (the app's bubble settings); the hint follows the
+setting when the user comes back. With "Selected conversations" the system shows a bubble button on
+the conversation's notification, and the user picks the conversation there. Channels are not
+checked: `NotificationChannel.canBubble()` is false for any channel the user never changed (found on
+a device: it kept bubbles off everywhere), and a direct message with a mention posts on the
+mentions channel.
 
 ### What only real devices can show
 

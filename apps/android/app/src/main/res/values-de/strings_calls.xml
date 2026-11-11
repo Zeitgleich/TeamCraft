@@ -8,8 +8,8 @@
   <string name="call_encryption_open">Verschlüsselungscode anzeigen</string>
   <string name="call_encryption_title">Ende-zu-Ende-verschlüsselt</string>
   <string name="call_encryption_body">Nur die Personen in diesem Anruf können ihn hören und sehen, nicht einmal der Server. Damit sicher niemand dazwischensitzt, vergleiche den Code mit den anderen.</string>
-  <string name="call_deafen">Taub schalten</string>
-  <string name="call_undeafen">Ton wieder an</string>
+  <string name="call_deafen">Ton aus</string>
+  <string name="call_undeafen">Ton an</string>
   <string name="call_camera_on">Kamera an</string>
   <string name="call_camera_off">Kamera aus</string>
   <string name="call_camera_flip">Kamera wechseln</string>
