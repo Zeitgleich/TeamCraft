@@ -2324,8 +2324,8 @@ workspace roster (admin.md §2.3):
   in **this device's MLS group** of the channel, are members of the instance (no guest, bot or
   deactivated account), and this device has their identity key, the one it pinned for them, which their
   place in the group is verified against. It carries the signed mark `has_server_listed_roles`.
-  An anchored channel (§4.6.5) is never founded this way: its founding is the anchor's, and a device that holds an
-  anchor or a pin for the channel signs nothing at first sight.
+  An anchored channel (§4.6.5) is never founded this way: its founding is the anchor's, signed only by its founder,
+  and a device that holds an anchor or a pin for the channel signs nothing at first sight.
 
   This trusts the server at first sight, which is a decision and not an oversight: nothing signed
   says who a channel's admins were before there was a log, and the alternative, a co-owner who can
@@ -3644,25 +3644,33 @@ and couldn't count for a purge.
     the anchor, asked only while the device accepted no entry yet, as it decides nothing after that:
     `Anchored` with the verified anchor's founder and identity key while the floor grants (no floor recorded yet
     counts as granting, as for a deletion, so a founder whose pin failed to record still reads their own founding);
-    `Withheld` for a pinned channel whose anchor doesn't verify here, a fork, or an anchor that names no founder (a
-    review or a re-founding, until #1728); `Claimed`, today's trust on first use, for a channel with neither anchor
-    nor pin, or whose anchor doesn't verify and was never pinned (judged as before anchors, above). Under
-    `Anchored`, a first entry counts only as the founder's, signed under the anchor's key and naming them admin;
-    every other first entry, a workspace admin's included, is junk and starts no unverified stretch, so the real
-    founding after it still founds. The founding anchors the snapshot (`is_workspace_anchored`) on the same
-    conditions as a workspace admin's own founding (no server-listed mark, no key other than this device pinned).
-    Under `Withheld` nothing is read: the cursor stays, the read isn't marked as at the roster, and the entries are
-    read once the anchor decides. Read and refused, the founding would be lost for good when the anchor verifies;
-    read as a claim, it would be the trust on first use the anchor closes. Meanwhile the channel counts as
-    unsigned on that device, as it does on one that never read the log. A device of the founder signs a founding
-    only where the anchor names it (`may_found_roles`); nobody signs one at first sight on a channel whose group
-    carries an anchor or which is pinned, whether in the upkeep (`found_listed_channels`) or with a role change.
-    D8 keeps §4.6.3's time limit: a channel admin's deletion on a member-founded channel purges at once only while
-    somebody else's entry (the founder appointing them, say) is younger than `channel_roles_max_age`, and the
-    founder alone purges nothing at once. Residual: if the creator's founding entry never reaches the server, the
-    channel's roles stay the server's word until a re-founding (#1728); nobody else may found it. A device
-    outside the channel's group with no pin (a workspace admin who never joined) can't tell the channel is
-    anchored and reads its log as before anchors; a deletion asks for a group anyway.
+    `Withheld` for a channel whose group carries an anchor or which is pinned, when the anchor doesn't verify here
+    (pin or not: a server that refuses the founder's device list before the first pin must not turn the channel
+    back to trust on first use), shows a fork, or names no founder (a review or a re-founding, until #1728);
+    `Claimed`, today's trust on first use, only for a channel with neither anchor nor pin. Under `Anchored`, a
+    first entry counts only as the founder's, signed under the anchor's key and naming them admin; every other
+    first entry, a workspace admin's included, is junk and starts no unverified stretch. The founding anchors the
+    snapshot (`is_workspace_anchored`) on the same conditions as a workspace admin's own founding (no
+    server-listed mark, no key other than this device pinned).
+    **Nothing refused before the founding moves the cursor**, under `Anchored` or `Withheld`: the log is read from
+    its start until the founding is accepted, and no such read is marked as at the roster. A server that hides the
+    founding and shows what came after can't push a device past it for good; read and refused, it would be lost
+    when it shows. Under `Withheld` nothing is read at all; the anchor is asked again only after a wait (five
+    minutes, doubling up to six hours, `FoundingWait`) or at once when the pin or floor changes, and the log isn't
+    fetched in between. Meanwhile the channel counts as unsigned on that device, as on one that never read the log.
+    **Who signs the founding:** nobody at first sight on a channel whose group carries an anchor or which is pinned,
+    whether in the upkeep (`found_listed_channels`) or with a role change. Only the anchor's founder, under their own
+    key (`may_found_roles`): at creation, and again, if it never reached the server, in their upkeep (whatever the
+    server lists) or with their next role change, naming themselves admin and that change, nothing the server lists.
+    What a server gets from showing a founder's other device an empty log: a second founding by the same founder,
+    naming only them, on a fork only devices at cursor 0 can join. It reinstates no demoted founder for a purge:
+    D8 keeps §4.6.3's time limit, and on such a fork nobody else signed. A channel admin's deletion on a
+    member-founded channel purges at once only while somebody else's entry (the founder appointing them, say) is
+    younger than `channel_roles_max_age`; the founder alone purges nothing at once.
+    Residuals: a server that plants entries before the founding keeps the founder's device, at cursor 0, from
+    appending it (`409`), as it could refuse the append anyway. A device outside the channel's group with no pin
+    (a workspace admin who never joined) can't tell the channel is anchored and reads its log as before anchors; a
+    deletion asks for a group anyway.
 - **The name hash's known answer:** `name_hash("general")` is
   `e0c5e1a616c7db0ab0a95802b91233f845bc3d1194ef04a22aebee68280c9174` (SHA-256 of the one-byte label length, the
   label, the varint length 7 and the bytes).

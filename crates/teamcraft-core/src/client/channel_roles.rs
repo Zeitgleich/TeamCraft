@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
+use teamcraft_crypto::channel_anchor::AnchorFloor;
 use teamcraft_crypto::workspace::{WorkspaceLog, claimed_signer, sign_log_entry};
 use teamcraft_proto::{
   AppendChannelRoleLogRequest, Base64Bytes, ChannelRole, ChannelRoleLogEntryResponse, ChannelRolesDocument,
@@ -78,6 +79,17 @@ enum RolePlan<'a> {
   Action { changes: &'a [(UserId, ChannelRole)] },
   /// Nobody acting: found the channel if it has no log and the server lists this user its admin.
   FirstSight,
+}
+
+/// When to ask an anchored channel's anchor for its founder again, after it gave none (a device
+/// list it couldn't fetch, a fork), in [`Table::Workspace`].
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct FoundingWait {
+  not_before_ms: i64,
+  failures: u32,
+  /// The pin and floor at the time: a changed one asks again at once.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  maybe_floor: Option<AnchorFloor>,
 }
 
 /// How far the channels without a log are, for the upkeep.
@@ -289,7 +301,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .maybe_my_membership
         .as_ref()
         .is_some_and(|membership| membership.role == ChannelRole::Admin);
-      if conversation.kind != ConversationKind::Channel || conversation.is_archived || !is_listed_admin {
+      if conversation.kind != ConversationKind::Channel || conversation.is_archived {
         continue;
       }
       let id = conversation.id;
@@ -297,12 +309,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .waiting
         .get(&id)
         .is_some_and(|wait| wait.not_before_ms > now);
-      // An anchored channel's founding is the anchor's, never one at first sight (e2ee.md §4.6.5).
-      if !is_waiting
-        && self.channel_role_state(id)?.is_unfounded()
-        && self.has_group(id)?
-        && !self.is_anchored_channel(id)?
-      {
+      if is_waiting || !self.channel_role_state(id)?.is_unfounded() || !self.has_group(id)? {
+        continue;
+      }
+      // An anchored channel's founding is the anchor's, never one at first sight (e2ee.md §4.6.5):
+      // only the founder's own app signs it, if it was lost at creation, whatever the server lists.
+      let is_due = if self.is_anchored_channel(id)? {
+        self.anchor_claims_founder(id, self.account.user_id)?
+      } else {
+        is_listed_admin
+      };
+      if is_due {
         due.push(id);
       }
     }
@@ -406,10 +423,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return self.role_entry(conversation, changes, false, false).await;
     }
     // Nobody founds an anchored channel at first sight: a device at cursor 0 shown an empty log
-    // signs nothing (e2ee.md §4.6.5). The change stays the server's word.
+    // signs nothing (e2ee.md §4.6.5), and the change stays the server's word. Only the anchor's
+    // founder signs the founding, if it was lost at creation: themselves as admin and the change,
+    // nothing the server lists.
     if self.is_anchored_channel(conversation)? {
-      tracing::info!(conversation_id = %conversation, "an anchored channel's roles are founded by its anchor's founder only");
-      return Ok(None);
+      if !self.may_found_roles(conversation, &state).await? {
+        tracing::info!(conversation_id = %conversation, "an anchored channel's roles are founded by its anchor's founder only");
+        return Ok(None);
+      }
+      return self.role_entry(conversation, changes, true, false).await;
     }
     let Some(mut roles) = self.first_sight_roles(conversation).await? else {
       tracing::info!(conversation_id = %conversation, "not in this channel's group: left to an admin who is");
@@ -1064,6 +1086,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   async fn read_role_log(&self, conversation: ConversationId) -> Result<Option<RoleLogRead>, CoreError> {
     let mut state = self.channel_role_state(conversation)?;
     state.prepare_read();
+    // An anchored channel whose anchor gave no founder lately: its log would be read from the start
+    // and left unread again (e2ee.md §4.6.5).
+    if !state.is_signed() && self.is_founding_waiting(conversation)? {
+      return Ok(None);
+    }
     // Before the read, so an entry that arrives while it runs isn't judged by a newer roster.
     let roster_at_read = self.workspace()?.roster.version;
     let (entries, is_read_to_end) = match self.fetch_role_log(conversation, state.log_read_from()).await {
@@ -1135,7 +1162,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       }
     }
     // Entries left unread for the anchor weren't seen at this roster.
-    if is_read_to_end && !state.waits_for_founding(founding) {
+    if is_read_to_end && !state.is_founding_open(founding) {
       state.note_read(roster_at_read);
     }
     state.check_ahead();
@@ -1181,13 +1208,52 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if state.is_signed() {
       return Ok(RoleFounding::Withheld);
     }
-    match Box::pin(self.role_founding(conversation)).await {
-      Ok(founding) => Ok(founding),
+    if self.is_founding_waiting(conversation)? {
+      return Ok(RoleFounding::Withheld);
+    }
+    let founding = match Box::pin(self.role_founding(conversation)).await {
+      Ok(founding) => founding,
       Err(error) => {
         tracing::warn!(conversation_id = %conversation, %error, "could not judge the channel's anchor; its role log waits");
-        Ok(RoleFounding::Withheld)
+        RoleFounding::Withheld
       },
+    };
+    self.note_founding_wait(conversation, founding)?;
+    Ok(founding)
+  }
+
+  /// Whether an anchor that gave no founder last time is asked again only later: it fetches device
+  /// lists, and the log would be read from its start for nothing. A changed pin or floor asks at once.
+  fn is_founding_waiting(&self, conversation: ConversationId) -> Result<bool, CoreError> {
+    let maybe_wait: Option<FoundingWait> =
+      records::get_json(&self.store, Table::Workspace, &founding_wait_key(conversation))?;
+    Ok(maybe_wait.is_some_and(|wait| {
+      wait.not_before_ms > self.now_ms() && wait.maybe_floor == self.account_data().anchor_floor(conversation)
+    }))
+  }
+
+  /// Records when to ask the anchor again after it gave no founder (later and later), or forgets
+  /// that once it gives one.
+  fn note_founding_wait(
+    &self,
+    conversation: ConversationId,
+    founding: RoleFounding,
+  ) -> Result<(), CoreError> {
+    let key = founding_wait_key(conversation);
+    let maybe_wait: Option<FoundingWait> = records::get_json(&self.store, Table::Workspace, &key)?;
+    if founding != RoleFounding::Withheld {
+      if maybe_wait.is_some() {
+        self.store.delete(Table::Workspace, &key)?;
+      }
+      return Ok(());
     }
+    let failures = maybe_wait.map_or(0, |wait| wait.failures).saturating_add(1);
+    let wait = FoundingWait {
+      not_before_ms: self.now_ms().saturating_add(role_read_retry_ms(failures)),
+      failures,
+      maybe_floor: self.account_data().anchor_floor(conversation),
+    };
+    records::put_json(&self.store, Table::Workspace, &key, &wait)
   }
 
   async fn fetch_role_log(
@@ -1316,6 +1382,10 @@ pub(crate) fn channel_roles_alarmed_key() -> &'static str {
 #[cfg(feature = "ui")]
 pub(crate) fn role_key_standings_key(conversation: ConversationId) -> String {
   format!("{ROLE_KEY_STANDINGS_KEY_PREFIX}{conversation}")
+}
+
+fn founding_wait_key(conversation: ConversationId) -> String {
+  format!("channel_roles_founding_wait/{conversation}")
 }
 
 pub(crate) fn channel_roles_key(conversation: ConversationId) -> String {

@@ -365,7 +365,7 @@ mod role_founders {
     let world = World::new();
     let anchor = world.verified(&world.founded("general"), 0).unwrap();
     assert_eq!(
-      role_founding(Some(&anchor), true),
+      role_founding(true, Some(&anchor), true),
       RoleFounding::Anchored {
         founder: convert::user_from_crypto(world.founder.user_id).unwrap(),
         identity_key: *world.founder.identity.public_key().as_bytes(),
@@ -378,8 +378,17 @@ mod role_founders {
   fn a_floor_that_doesnt_grant_or_no_verified_anchor_names_nobody() {
     let world = World::new();
     let anchor = world.verified(&world.founded("general"), 0).unwrap();
-    assert_eq!(role_founding(Some(&anchor), false), RoleFounding::Withheld);
-    assert_eq!(role_founding(None, true), RoleFounding::Withheld);
+    assert_eq!(role_founding(true, Some(&anchor), false), RoleFounding::Withheld);
+    assert_eq!(role_founding(true, None, true), RoleFounding::Withheld);
+  }
+
+  /// Review of #1748: a group that carries an anchor this device can't verify, and no pin (the
+  /// server refused the founder's device list before the first pin), is no channel from before
+  /// anchors: nobody founds. Only neither anchor nor pin is a claim.
+  #[test]
+  fn an_unverifiable_anchor_without_a_pin_is_withheld_and_only_no_anchor_is_claimed() {
+    assert_eq!(role_founding(true, None, false), RoleFounding::Withheld);
+    assert_eq!(role_founding(false, None, false), RoleFounding::Claimed);
   }
 }
 

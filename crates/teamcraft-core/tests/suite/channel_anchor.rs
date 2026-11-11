@@ -239,6 +239,80 @@ mod roles {
     }
   }
 
+  /// Review of #1748: the server withholds Alice's device list before Bob's device ever pinned the
+  /// anchor. Bob's device can't verify it, but the group carries it: Alice's founding is no claim
+  /// to take on first use. It waits unread, the log isn't fetched again at once, and once the list
+  /// is back and the wait is over, the founding is read and anchors.
+  #[tokio::test]
+  async fn an_unverifiable_anchor_without_a_pin_founds_nothing_until_it_verifies() {
+    let server = anchoring_server();
+    let clock = Arc::new(ManualClock::new(server.server_now_ms()));
+    let enroll = async |name: &str| {
+      Peer::enroll_on_clock(
+        server.add_user(name),
+        name,
+        common::settings(),
+        Box::new(clock.clone()),
+      )
+      .await
+    };
+    let (mut alice, mut bob) = (enroll("Alice").await, enroll("Bob").await);
+    let alice_id = alice.client.user_id();
+    let space = alice.space().await;
+    let channel = alice.client.create_channel(space, "general").await.unwrap();
+    let list = server.device_list_of(alice_id).unwrap();
+    server.forget_device_list(alice_id);
+    alice
+      .client
+      .add_member(channel, bob.client.user_id())
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    assert!(bob.client.has_group(channel).unwrap());
+    assert_eq!(
+      bob.client.account_data().anchor_floor(channel),
+      None,
+      "never pinned"
+    );
+
+    bob.client.sync_channel_roles(channel).await.unwrap();
+    let state = bob.client.channel_role_state(channel).unwrap();
+    assert!(!state.is_signed(), "Alice's founding is no claim here");
+    assert_eq!(state.role_of(alice_id), ChannelRole::Member);
+    let reads = server.role_log_reads(channel);
+    bob.client.sync_channel_roles(channel).await.unwrap();
+    assert_eq!(server.role_log_reads(channel), reads, "asked again only later");
+
+    server.serve_device_list(alice_id, list);
+    clock.advance(6 * 60 * 1000);
+    bob.client.sync_channel_roles(channel).await.unwrap();
+    let state = bob.client.channel_role_state(channel).unwrap();
+    assert_eq!(state.role_of(alice_id), ChannelRole::Admin);
+    assert!(state.is_workspace_anchored);
+  }
+
+  /// Review of #1748: Alice's founding entry never reached the server at creation. Her own upkeep
+  /// signs it later, as the anchor's founder; it is no founding at first sight.
+  #[tokio::test]
+  async fn a_founding_lost_at_creation_is_signed_by_the_founders_upkeep() {
+    let server = anchoring_server();
+    let (mut alice, mut bob) = two(&server).await;
+    server.set_role_log_lacking(true);
+    let channel = shared_channel(&mut alice, &mut bob, "general").await;
+    server.set_role_log_lacking(false);
+    assert_eq!(server.role_log(channel).len(), 0);
+
+    bob.client.found_listed_channels().await.unwrap();
+    assert_eq!(server.role_log(channel).len(), 0, "Bob isn't the founder");
+    alice.client.found_listed_channels().await.unwrap();
+    assert_eq!(server.role_log(channel).len(), 1);
+    bob.client.sync_channel_roles(channel).await.unwrap();
+    let state = bob.client.channel_role_state(channel).unwrap();
+    assert_eq!(state.role_of(alice.client.user_id()), ChannelRole::Admin);
+    assert!(state.is_workspace_anchored);
+    assert!(!state.has_server_listed_roles);
+  }
+
   /// The server lists Bob as the channel's admin and shows his device an empty log: neither his
   /// upkeep nor his next role change founds a second one (no first sight in an anchored channel).
   #[tokio::test]

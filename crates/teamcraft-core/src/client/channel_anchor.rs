@@ -269,20 +269,34 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Who may found the channel's roles (e2ee.md §4.6.5, "What the founding decides"): the verified
-  /// anchor's founder while the floor grants; nobody for a pinned channel whose anchor doesn't
-  /// verify here or shows a fork; the first entry's claim, as before anchors, for a channel with
-  /// neither anchor nor pin, or with an anchor that doesn't verify and was never pinned.
+  /// anchor's founder while the floor grants; nobody for a channel whose group carries an anchor or
+  /// which is pinned, when the anchor doesn't verify here or shows a fork (a server that refuses the
+  /// founder's device list mustn't turn the channel back to trust on first use); the first entry's
+  /// claim, as before anchors, only for a channel with neither anchor nor pin.
   pub(crate) async fn role_founding(
     &mut self,
     conversation: ConversationId,
   ) -> Result<RoleFounding, CoreError> {
-    let is_pinned = self.account_data().anchor_floor(conversation).is_some();
+    let is_anchored = self.is_anchored_channel(conversation)?;
     Ok(match Box::pin(self.held_anchor(conversation)).await? {
-      HeldAnchor::Anchored { anchor, floor_grants } => anchoring::role_founding(Some(&anchor), floor_grants),
-      HeldAnchor::Unverifiable => RoleFounding::Withheld,
-      HeldAnchor::Unanchored if is_pinned => RoleFounding::Withheld,
-      HeldAnchor::Unanchored => RoleFounding::Claimed,
+      HeldAnchor::Anchored { anchor, floor_grants } => {
+        anchoring::role_founding(is_anchored, Some(&anchor), floor_grants)
+      },
+      HeldAnchor::Unverifiable | HeldAnchor::Unanchored => anchoring::role_founding(is_anchored, None, false),
     })
+  }
+
+  /// Whether the anchor the group carries claims `user` as its founder, unverified: only a cheap
+  /// filter for whose upkeep tries the founding, which [`Self::role_founding`] then decides.
+  pub(crate) fn anchor_claims_founder(
+    &mut self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> Result<bool, CoreError> {
+    let Some(group) = self.group(conversation)? else {
+      return Ok(false);
+    };
+    Ok(anchor_signers(group.anchor_bytes()).first() == Some(&user))
   }
 
   /// Signs and commits a move or rename the server took (e2ee.md §4.6.5, D4, D5), so members' apps

@@ -626,13 +626,28 @@ impl ChannelRoleState {
       if entry.version <= self.cursor {
         continue;
       }
+      let before = self.cursor;
+      let holds_cursor = self.is_founding_open(verifier.founding);
       self.cursor = entry.version;
       if let Err(error) = self.apply_entry(&entry, verifier) {
+        // e2ee.md §4.6.5: while an anchored channel's founding isn't accepted, nothing it refuses moves
+        // the cursor. A server that shows entries after the founding but hides the founding itself
+        // can't push this device past it for good: it is read when the log shows it.
+        if holds_cursor {
+          self.cursor = before;
+        }
         self.maybe_rejection = Some(error.to_string());
         skipped.push(error);
       }
     }
     skipped
+  }
+
+  /// Whether an anchored channel's founding is still to come on this device: the anchor decides
+  /// who founds, and nothing is accepted yet. The log is then read from its start each time, and no
+  /// read counts as seen at a roster.
+  pub fn is_founding_open(&self, founding: RoleFounding) -> bool {
+    founding != RoleFounding::Claimed && !self.is_signed()
   }
 
   /// Whether the entries must wait unread: nothing is accepted yet, and the channel's anchor can't
@@ -1440,6 +1455,14 @@ impl ChannelRoleState {
   }
 
   fn remember_skipped(&mut self, hash: &[u8; HASH_BYTES]) {
+    // An anchored channel's log is read again from its start until the founding comes.
+    if self
+      .skipped_hashes
+      .iter()
+      .any(|known| known.as_slice() == hash.as_slice())
+    {
+      return;
+    }
     self.skipped_hashes.push(Base64Bytes::new(hash.to_vec()));
     if self.skipped_hashes.len() > MAX_SKIPPED_HASHES {
       self.skipped_hashes.remove(0);
@@ -1794,11 +1817,49 @@ mod tests {
       assert_eq!(world.apply(&mut state, by_other_key).len(), 1);
       assert!(!state.is_signed(), "nothing founded, no stretch");
       assert_eq!(state.role_of(bob.user_id), ChannelRole::Member);
+      assert_eq!(state.cursor, 0, "the founding may still come");
 
-      let founding = alice.entry(&state, &[(&alice, ChannelRole::Admin)]);
+      // Alice founds after the junk, at version 5.
+      let behind_the_junk = ChannelRoleState {
+        cursor: 4,
+        ..state.clone()
+      };
+      let founding = alice.entry(&behind_the_junk, &[(&alice, ChannelRole::Admin)]);
       assert!(world.apply(&mut state, founding).is_empty());
       assert_eq!(state.role_of(alice.user_id), ChannelRole::Admin);
       assert!(state.is_workspace_anchored);
+    }
+
+    /// Review of #1748: the server hides the founding and shows what came after it. Nothing it
+    /// refuses moves the cursor, so the founding is read once the log shows it.
+    #[test]
+    fn a_hidden_founding_is_read_when_the_log_shows_it() {
+      let (alice, bob) = (Person::new(1), Person::new(2));
+      let world = anchored_by(&alice, &[&alice, &bob], &[]);
+      let mut on_time = ChannelRoleState::default();
+      let founding = alice.entry(&on_time, &[(&alice, ChannelRole::Admin)]);
+      assert!(world.apply(&mut on_time, founding.clone()).is_empty());
+      let roles = [(&alice, ChannelRole::Admin), (&bob, ChannelRole::Admin)];
+      let appoint = alice.entry(&on_time, &roles);
+      assert!(world.apply(&mut on_time, appoint.clone()).is_empty());
+      let by_bob = bob.entry(&on_time, &[(&bob, ChannelRole::Admin)]);
+      assert!(world.apply(&mut on_time, by_bob.clone()).is_empty());
+
+      let mut late = ChannelRoleState::default();
+      let after = vec![appoint.clone(), by_bob.clone()];
+      assert_eq!(world.apply_all(&mut late, after).len(), 2);
+      assert_eq!((late.version, late.cursor), (0, 0));
+      assert!(!late.is_signed());
+
+      assert!(
+        world
+          .apply_all(&mut late, vec![founding, appoint, by_bob])
+          .is_empty()
+      );
+      assert_eq!((late.version, late.cursor), (3, 3));
+      assert_eq!(late.role_of(alice.user_id), ChannelRole::Member);
+      assert_eq!(late.role_of(bob.user_id), ChannelRole::Admin);
+      assert!(late.is_workspace_anchored);
     }
 
     /// A founding that names the anchor's founder only as a moderator, or as admin under another

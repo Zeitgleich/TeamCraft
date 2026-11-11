@@ -202,12 +202,20 @@ pub fn name_counts_for_deletion(
   floor_grants && is_listed_name_the_anchors && anchor.name_counts_for_deletion(maybe_deletion_name_hash)
 }
 
-/// Who founds the roles of a channel that carries an anchor or is pinned to one (e2ee.md §4.6.5,
-/// "What the founding decides"): the verified anchor's founder, under its identity key, while the
-/// floor grants. An anchor that doesn't verify, a fork, or an anchor that names no founder (a
-/// review or a re-founding, #1728) gives nobody: nothing founds and nothing anchors. A channel
-/// with neither anchor nor pin is [`RoleFounding::Claimed`], which this never returns.
-pub fn role_founding(maybe_verified: Option<&VerifiedAnchor>, floor_grants: bool) -> RoleFounding {
+/// Who founds a channel's roles (e2ee.md §4.6.5, "What the founding decides"). `is_anchored`: the
+/// group carries an anchor or the user's devices pinned the channel. Then only the verified
+/// anchor's founder, under its identity key, while the floor grants; an anchor that doesn't verify
+/// (whatever the reason, a refused device list included), a fork, or an anchor that names no
+/// founder (a review or a re-founding, #1728) gives nobody: nothing founds and nothing anchors.
+/// Only a channel with neither anchor nor pin is [`RoleFounding::Claimed`].
+pub fn role_founding(
+  is_anchored: bool,
+  maybe_verified: Option<&VerifiedAnchor>,
+  floor_grants: bool,
+) -> RoleFounding {
+  if !is_anchored {
+    return RoleFounding::Claimed;
+  }
   let Some((user, key)) = maybe_verified
     .filter(|_| floor_grants)
     .and_then(VerifiedAnchor::founder)
