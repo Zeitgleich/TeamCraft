@@ -17,6 +17,7 @@ use teamcraft_proto::{ConversationId, ConversationResponse, SpaceId, UserId};
 use super::Client;
 use crate::anchoring::{self, AnchorOutcome, AnchorVerdict, ReleaseVersion};
 use crate::api::ServerApi;
+use crate::channel_roles::RoleFounding;
 use crate::convert;
 use crate::error::CoreError;
 use crate::records;
@@ -251,6 +252,51 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       (_, Some(_)) => HeldAnchor::Unverifiable,
       (_, None) => HeldAnchor::Unanchored,
     })
+  }
+
+  /// Whether the channel is anchored on this device: its group carries an anchor, or the user's
+  /// devices pinned it. Nobody founds such a channel's roles at first sight (e2ee.md §4.6.5); an
+  /// anchor that doesn't verify counts here too, which only ever withholds a signature.
+  pub(crate) fn is_anchored_channel(&mut self, conversation: ConversationId) -> Result<bool, CoreError> {
+    if self.account_data().anchor_floor(conversation).is_some() {
+      return Ok(true);
+    }
+    Ok(
+      self
+        .group(conversation)?
+        .is_some_and(|group| group.anchor_bytes().is_some()),
+    )
+  }
+
+  /// Who may found the channel's roles (e2ee.md §4.6.5, "What the founding decides"): the verified
+  /// anchor's founder while the floor grants; nobody for a channel whose group carries an anchor or
+  /// which is pinned, when the anchor doesn't verify here or shows a fork (a server that refuses the
+  /// founder's device list mustn't turn the channel back to trust on first use); the first entry's
+  /// claim, as before anchors, only for a channel with neither anchor nor pin.
+  pub(crate) async fn role_founding(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<RoleFounding, CoreError> {
+    let is_anchored = self.is_anchored_channel(conversation)?;
+    Ok(match Box::pin(self.held_anchor(conversation)).await? {
+      HeldAnchor::Anchored { anchor, floor_grants } => {
+        anchoring::role_founding(is_anchored, Some(&anchor), floor_grants)
+      },
+      HeldAnchor::Unverifiable | HeldAnchor::Unanchored => anchoring::role_founding(is_anchored, None, false),
+    })
+  }
+
+  /// Whether the anchor the group carries claims `user` as its founder, unverified: only a cheap
+  /// filter for whose upkeep tries the founding, which [`Self::role_founding`] then decides.
+  pub(crate) fn anchor_claims_founder(
+    &mut self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> Result<bool, CoreError> {
+    let Some(group) = self.group(conversation)? else {
+      return Ok(false);
+    };
+    Ok(anchor_signers(group.anchor_bytes()).first() == Some(&user))
   }
 
   /// Signs and commits a move or rename the server took (e2ee.md §4.6.5, D4, D5), so members' apps

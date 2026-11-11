@@ -89,6 +89,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_topic: options.maybe_topic,
       maybe_description: None,
       is_integration: options.is_integration,
+      is_anchored: false,
       maybe_idempotency_key: options.maybe_idempotency_key,
     };
     self.create_channel_from(space, &request).await
