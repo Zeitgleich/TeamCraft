@@ -2459,7 +2459,10 @@ workspace roster (admin.md §2.3):
     it holds into an anchor on every device: an appointee of a demoted admin, or a demoted owner, could then purge. The
     same goes for a device a member told of another entry for its version or a newer one it isn't shown (an alarm, or a
     head not read yet, issue #1264): it may have been shown an old log, a withheld demotion (§4.6.3), and its signature
-    would carry the old snapshot's anchor on to every device shown the same. Such
+    would carry the old snapshot's anchor on to every device shown the same. The cost: a member of the group can hold off
+    workspace admins' ordinary role signing in a channel with a made-up head, as the alarm it raises is a claim and stays
+    until a reviewed list is signed; so can a read that stopped at the page limit with entries left (a false alarm), and
+    a head not read yet shows the look for a moment after an honest concurrent change. "Check roles" is the way out. Such
     a device (`must_review_before_vouching`) signs no ordinary entry, in whatever role this user acts: the role select
     doesn't sign, the server's change stands unsigned, and they are told so where they changed it. A workspace admin's
     channel members section says so in a few words and offers "Check roles"; nobody else sees any of it, and nothing asks

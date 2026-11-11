@@ -34,6 +34,8 @@ const CHANNEL_ROLES_DUE_GENERATION_KEY: &str = "channel_roles_due_generation";
 /// Set once the channels whose state has no read mark were queued for a read, in
 /// [`Table::Workspace`]: a state from before the mark was recorded gets it from that read.
 const CHANNEL_ROLES_MARKS_QUEUED_KEY: &str = "channel_roles_marks_queued";
+/// The roster's `admin_departures` the due reads were last queued for, in [`Table::Workspace`].
+const CHANNEL_ROLES_QUEUED_DEPARTURES_KEY: &str = "channel_roles_queued_departures";
 /// How many of those are read in one upkeep pass, so a removal is no burst.
 const ROLE_LOG_READS_PER_PASS: usize = 4;
 /// How long a failed one waits before it is read again, doubling up to the cap: one channel that
@@ -603,6 +605,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// (e2ee.md §4.6.1, "Reading the log late"). A local read while nothing is due, which is nearly
   /// always. A failure stays due, later and later, and doesn't hold up the other channels.
   pub async fn read_due_channel_roles(&mut self) -> Result<(), CoreError> {
+    self.queue_reads_after_departures(self.workspace()?.admin_departures)?;
     self.queue_unmarked_channel_role_reads()?;
     let mut due: BTreeMap<ConversationId, DueRoleRead> =
       records::get_json(&self.store, Table::Workspace, CHANNEL_ROLES_DUE_KEY)?.unwrap_or_default();
@@ -674,6 +677,24 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
+  /// Queues the reads for every removal the verified roster counted (`admin_departures`) that no
+  /// queue covers yet. The count is stored with the roster before this runs, so a crash in between
+  /// only means the next sync or upkeep pass queues them (review of #1715).
+  pub(crate) fn queue_reads_after_departures(&self, departures: u64) -> Result<(), CoreError> {
+    let queued: u64 =
+      records::get_json(&self.store, Table::Workspace, CHANNEL_ROLES_QUEUED_DEPARTURES_KEY)?.unwrap_or(0);
+    if queued == departures {
+      return Ok(());
+    }
+    self.queue_channel_role_reads()?;
+    records::put_json(
+      &self.store,
+      Table::Workspace,
+      CHANNEL_ROLES_QUEUED_DEPARTURES_KEY,
+      &departures,
+    )
+  }
+
   /// Once per device: a channel state from before the read mark was recorded can't place an entry
   /// by somebody who left, and gets the mark only from a read to the log's end, which used to wait
   /// for the next role change or removal. Queues those channels with the reads after a removal, so
@@ -687,19 +708,26 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     let mut due: BTreeMap<ConversationId, DueRoleRead> =
       records::get_json(&self.store, Table::Workspace, CHANNEL_ROLES_DUE_KEY)?.unwrap_or_default();
-    let channels: Vec<ConversationId> = self
+    for (key, bytes) in self
       .store
       .list_prefix(Table::Workspace, CHANNEL_ROLES_KEY_PREFIX)?
-      .into_iter()
-      .filter_map(|(key, _)| key.strip_prefix(CHANNEL_ROLES_KEY_PREFIX)?.parse().ok())
-      .collect();
-    for conversation in channels {
-      if self
-        .channel_role_state(conversation)?
-        .maybe_read_at_roster_version
-        .is_none()
-      {
-        due.entry(conversation).or_default();
+    {
+      let Some(conversation) = key
+        .strip_prefix(CHANNEL_ROLES_KEY_PREFIX)
+        .and_then(|id| id.parse::<ConversationId>().ok())
+      else {
+        continue;
+      };
+      // One state this device can't read mustn't keep the marker unset, or every pass would fail
+      // here before the reads due after a removal.
+      match serde_json::from_slice::<ChannelRoleState>(&bytes) {
+        Ok(state) if state.maybe_read_at_roster_version.is_none() => {
+          due.entry(conversation).or_default();
+        },
+        Ok(_) => {},
+        Err(error) => {
+          tracing::warn!(conversation_id = %conversation, %error, "unreadable channel role state not queued");
+        },
       }
     }
     records::put_json(&self.store, Table::Workspace, CHANNEL_ROLES_DUE_KEY, &due)?;

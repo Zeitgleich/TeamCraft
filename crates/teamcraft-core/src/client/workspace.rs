@@ -347,20 +347,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     );
     let mut entries = roster?;
     entries.extend(policy?);
-    let departures_before = state.admin_departures;
     if let Err(error) = state.apply_entries(entries) {
       tracing::error!(%error, "rejected workspace log entry");
     }
-    // Counted on every device, also one whose admin history is incomplete (issue #1264).
-    let has_an_admin_left = state.admin_departures != departures_before;
     state.check_ahead();
     if let Some(alarm) = &state.maybe_alarm {
       tracing::error!(%alarm, "workspace log alarm");
     }
     records::put_json(&self.store, Table::Workspace, WORKSPACE_KEY, &state)?;
-    if has_an_admin_left {
-      self.queue_channel_role_reads()?;
-    }
+    // Counted on every device, also one whose admin history is incomplete (issue #1264), and
+    // compared with what was queued, not with the state before this sync, so a crash right after
+    // storing the roster loses nothing.
+    self.queue_reads_after_departures(state.admin_departures)?;
     // Addresses the server showed under an earlier policy are not shown under this one.
     if !state.policy.directory.shows_email {
       self.drop_cached_emails()?;
