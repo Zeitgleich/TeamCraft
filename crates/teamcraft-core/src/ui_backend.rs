@@ -65,7 +65,7 @@ use crate::records::{self, Draft};
 use crate::store::{
   BookmarkItem, ConversationEvent, FeedVersion, LocalStore, MessageContent, MessageEdge, MessageFilter,
   MessageMeta, MessageOrder, MessageSlot, StoreError, StoredMessage, Table, Unreadable, Written,
-  read_together, write_group,
+  read_together, try_write_group,
 };
 
 /// Rows read at a time when a list's anchor is looked for by its time ([`FeedAnchor`]).
@@ -1355,13 +1355,15 @@ impl<S: LocalStore> CoreChatBackend<S> {
 
   /// Keeps the tallies counted since the last call, in one group: a start counts many at once, and
   /// each on its own would wait for the disk. They are a cache: one not kept is counted again.
+  /// While another thread holds the store's group they stay for the next call: a read pass that
+  /// waited for the write lock here held up every read behind it (issue #1756).
   pub(crate) fn flush_entry_tallies(&self) {
     let _step = crate::timing::step("flush_entry_tallies");
     let tallies = std::mem::take(&mut *self.entry_tallies.borrow_mut());
     if tallies.is_empty() {
       return;
     }
-    let result: Result<(), CoreError> = write_group(&self.store, || {
+    let result: Result<Option<()>, CoreError> = try_write_group(&self.store, || {
       for (conversation, tally) in &tallies {
         self
           .store
@@ -1369,8 +1371,19 @@ impl<S: LocalStore> CoreChatBackend<S> {
       }
       Ok(())
     });
-    if let Err(error) = result {
-      tracing::debug!(%error, "could not keep the sidebar counts");
+    match result {
+      Ok(Some(())) => {},
+      Ok(None) => self.keep_for_next_flush(tallies),
+      Err(error) => tracing::debug!(%error, "could not keep the sidebar counts"),
+    }
+  }
+
+  /// Tallies a flush couldn't write now: the next flush tries again, and a tally counted since
+  /// is newer than the one put back.
+  fn keep_for_next_flush(&self, tallies: BTreeMap<ConversationId, EntryTally>) {
+    let mut kept = self.entry_tallies.borrow_mut();
+    for (conversation, tally) in tallies {
+      kept.entry(conversation).or_insert(tally);
     }
   }
 

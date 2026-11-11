@@ -668,6 +668,15 @@ impl<S: LocalStore> TrackedStore<S> {
     Ok(())
   }
 
+  /// The store's group began on this thread: its notes are published when it ends.
+  fn note_group_begun(&self) {
+    if self.is_numbered {
+      let mut group = self.group();
+      group.maybe_owner = Some(thread::current().id());
+      group.depth += 1;
+    }
+  }
+
   fn group(&self) -> std::sync::MutexGuard<'_, GroupNotes> {
     // Invariant-free data: at worst a note is published early or a reader reads again.
     self.group.lock().unwrap_or_else(PoisonError::into_inner)
@@ -953,12 +962,16 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
   fn begin_writes(&self) -> Result<(), StoreError> {
     // The store's group is this thread's from here on: no other thread writes until it ends.
     self.inner.begin_writes()?;
-    if self.is_numbered {
-      let mut group = self.group();
-      group.maybe_owner = Some(thread::current().id());
-      group.depth += 1;
-    }
+    self.note_group_begun();
     Ok(())
+  }
+
+  fn try_begin_writes(&self) -> Result<bool, StoreError> {
+    let has_begun = self.inner.try_begin_writes()?;
+    if has_begun {
+      self.note_group_begun();
+    }
+    Ok(has_begun)
   }
 
   fn end_writes(&self) -> Result<(), StoreError> {

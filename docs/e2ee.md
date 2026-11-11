@@ -6285,7 +6285,10 @@ newer number drops just those from its caches, and drops everything for a number
 (another process, the notification extension). Reads see only committed writes: the notes of a group
 (what the UI reads again, the journal of written messages) are published after its commit, and a
 reader whose snapshot is older than a note takes a new one first. A read thread's own writes go
-through the writer, and its next read sees them. The notification extension opens no reader. The
+through the writer, and its next read sees them; an action's local half (an outbox write, a read
+marker) runs on a thread of its own, so the reads don't wait while it waits for the writer's lock
+(issue #1756), and a read thread's cache write (the sidebar's counts) is put off while another thread
+holds the lock. The notification extension opens no reader. The
 write-ahead log is purged on a connection of its own, which counts the connections' open transactions
 and truncates when they are idle (§4.3.1, issue #1684). A truncation moves SQLite's data version on
 the other connections; the writer counts it as another process's commit (which drops its caches and

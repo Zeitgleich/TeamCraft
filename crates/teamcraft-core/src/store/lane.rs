@@ -299,6 +299,14 @@ impl LocalStore for LaneStore {
     Ok(())
   }
 
+  fn try_begin_writes(&self) -> Result<bool, StoreError> {
+    let has_begun = self.writer.try_begin_writes()?;
+    if has_begun {
+      self.writing.fetch_add(1, Ordering::AcqRel);
+    }
+    Ok(has_begun)
+  }
+
   fn end_writes(&self) -> Result<(), StoreError> {
     let ended = self.writer.end_writes();
     // One thread per lane: nothing else moves the depth between the two steps.
@@ -340,7 +348,9 @@ mod tests {
 
   use super::*;
   use crate::store::tests::{id, message};
-  use crate::store::{CommitJournal, SealedStoreLimits, StaticKeySource, TrackedStore, read_together};
+  use crate::store::{
+    CommitJournal, SealedStoreLimits, StaticKeySource, TrackedStore, read_together, try_write_group,
+  };
 
   mod caches {
     use super::*;
@@ -437,6 +447,58 @@ mod tests {
 
   mod lanes {
     use super::*;
+
+    /// Issue #1756: a read thread that would write while the engine holds the store's group gets no
+    /// group, at once, instead of waiting with every read behind it; once the group ended it gets one.
+    #[test]
+    fn a_try_group_does_not_wait_for_another_threads_group() {
+      let lanes = Lanes::open();
+      let lane = TrackedStore::new(LaneStore::reader(
+        Arc::clone(&lanes.writer),
+        Arc::clone(&lanes.reader),
+      ));
+      let writer = Arc::clone(&lanes.writer);
+      let (held, is_held) = mpsc::channel();
+      let (release, released) = mpsc::channel::<()>();
+      let engine = std::thread::spawn(move || {
+        crate::store::write_group(&*writer, || {
+          writer.put(Table::Users, "engine", b"1")?;
+          held.send(()).unwrap();
+          released.recv().unwrap();
+          Ok::<_, StoreError>(())
+        })
+        .unwrap();
+      });
+      is_held.recv().unwrap();
+
+      let skipped = try_write_group(&lane, || lane.put(Table::Users, "a", b"tally")).unwrap();
+      assert_eq!(skipped, None);
+      // Reads go on meanwhile, on the reader.
+      assert_eq!(lane.get(Table::Users, "a").unwrap(), None);
+
+      release.send(()).unwrap();
+      engine.join().unwrap();
+      let kept = try_write_group(&lane, || lane.put(Table::Users, "a", b"tally")).unwrap();
+      assert_eq!(kept, Some(()));
+      assert_eq!(lane.get(Table::Users, "a").unwrap(), Some(b"tally".to_vec()));
+      drop(lane);
+      lanes.finish();
+    }
+
+    #[test]
+    fn a_try_group_nests_in_the_threads_own_group() {
+      let lanes = Lanes::open();
+      let lane = LaneStore::reader(Arc::clone(&lanes.writer), Arc::clone(&lanes.reader));
+      crate::store::write_group(&lane, || {
+        let nested = try_write_group(&lane, || lane.put(Table::Users, "a", b"inner"))?;
+        assert_eq!(nested, Some(()));
+        Ok::<_, StoreError>(())
+      })
+      .unwrap();
+      assert_eq!(lane.get(Table::Users, "a").unwrap(), Some(b"inner".to_vec()));
+      drop(lane);
+      lanes.finish();
+    }
 
     /// Issue #1583: a long read on the reader holds up neither the writer nor its commit.
     #[test]

@@ -26,19 +26,19 @@ This note builds on [crash-reports.md](crash-reports.md) (format, backend, scrub
 Spans are written at `trace` level, so log layers (which stop at `info`) don't pay for them; the
 trace layer's own filter takes them at any level.
 
-| Chokepoint                                         | Span (`op`)                            | Description                               | Fields            |
-|----------------------------------------------------|----------------------------------------|-------------------------------------------|-------------------|
-| Every HTTP request of the core (`send_traced`)     | `http.client`                          | `GET /api/v1/users/{id}`                  | `status`, `error` |
-| Reading an API answer's body                       | `http.body`                            | `http.body`                               | `body_bytes`      |
-| Each gateway event received and applied            | `gateway.event`                        | the event's kind (`message_create`)       | `error`           |
-| Mobile FFI engine queue (every engine call)        | `queue.engine`                         | the job's function (`send_message`)       | `depth`           |
-| Mobile FFI read queue, open chat's read thread     | `queue.read`, `queue.query`            | the job's function (`messages`)           | `depth`           |
-| Mobile FFI query of the app                        | `db.query`                             | `query_<kind>` (`query_feed_extras`)      | –                 |
-| Desktop shell: a request of the page               | `queue.shell`                          | the request's function                    | –                 |
-| Store: wait for a group lock, a write group        | `store.lock_wait`, `store.write_group` | `store_lock`, `write_group`               | –                 |
-| Named steps (`timing::step`, about 70 places)      | `core.step`                            | the step's name (`catch_up_conversation`) | –                 |
-| Server: every request (axum middleware)            | `http.server`                          | `GET /api/v1/users/{id}` (matched route)  | `status`          |
-| Server: every SQL statement (sqlx's statement log) | `db.sql`                               | the statement, literals removed           | `rows`            |
+| Chokepoint                                         | Span (`op`)                              | Description                               | Fields            |
+|----------------------------------------------------|------------------------------------------|-------------------------------------------|-------------------|
+| Every HTTP request of the core (`send_traced`)     | `http.client`                            | `GET /api/v1/users/{id}`                  | `status`, `error` |
+| Reading an API answer's body                       | `http.body`                              | `http.body`                               | `body_bytes`      |
+| Each gateway event received and applied            | `gateway.event`                          | the event's kind (`message_create`)       | `error`           |
+| Mobile FFI engine queue (every engine call)        | `queue.engine`                           | the job's function (`send_message`)       | `depth`           |
+| Mobile FFI read queue, open chat's, actions'       | `queue.read`, `queue.query`, `queue.act` | the job's function (`messages`)           | `depth`           |
+| Mobile FFI query of the app                        | `db.query`                               | `query_<kind>` (`query_feed_extras`)      | –                 |
+| Desktop shell: a request of the page               | `queue.shell`                            | the request's function                    | –                 |
+| Store: wait for a group lock, a write group        | `store.lock_wait`, `store.write_group`   | `store_lock`, `write_group`               | –                 |
+| Named steps (`timing::step`, about 70 places)      | `core.step`                              | the step's name (`catch_up_conversation`) | –                 |
+| Server: every request (axum middleware)            | `http.server`                            | `GET /api/v1/users/{id}` (matched route)  | `status`          |
+| Server: every SQL statement (sqlx's statement log) | `db.sql`                                 | the statement, literals removed           | `rows`            |
 
 Gateway connect, resume and catch-up, push handling (`push_notification`, `push_preview`,
 `push_catch_up`) and the other named stretches are `core.step` spans. Every FFI call reaches the

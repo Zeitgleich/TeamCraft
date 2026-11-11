@@ -1147,6 +1147,13 @@ pub trait LocalStore {
     Ok(())
   }
 
+  /// [`Self::begin_writes`] if it wouldn't wait: `false`, and no group begun, while another thread
+  /// holds the store's group (issue #1756). For writes that can wait for a later chance, on a thread
+  /// whose reads must not wait. Stores that never wait keep the default.
+  fn try_begin_writes(&self) -> Result<bool, StoreError> {
+    self.begin_writes().map(|()| true)
+  }
+
   /// Ends the group started by the matching [`Self::begin_writes`].
   fn end_writes(&self) -> Result<(), StoreError> {
     Ok(())
@@ -1223,6 +1230,22 @@ where
   store.begin_writes()?;
   let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(writes));
   end_group(store, result)
+}
+
+/// [`write_group`] if the group can begin without waiting ([`LocalStore::try_begin_writes`]):
+/// `None`, and `writes` not run, while another thread holds the store (issue #1756).
+#[track_caller]
+pub fn try_write_group<S, T, E>(store: &S, writes: impl FnOnce() -> Result<T, E>) -> Result<Option<T>, E>
+where
+  S: LocalStore + ?Sized,
+  E: From<StoreError>,
+{
+  let _site = GroupSite::enter(std::panic::Location::caller());
+  if !store.try_begin_writes()? {
+    return Ok(None);
+  }
+  let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(writes));
+  end_group(store, result).map(Some)
 }
 
 thread_local! {
@@ -1512,6 +1535,10 @@ macro_rules! forward_local_store {
 
       fn begin_writes(&self) -> Result<(), StoreError> {
         (**self).begin_writes()
+      }
+
+      fn try_begin_writes(&self) -> Result<bool, StoreError> {
+        (**self).try_begin_writes()
       }
 
       fn end_writes(&self) -> Result<(), StoreError> {
