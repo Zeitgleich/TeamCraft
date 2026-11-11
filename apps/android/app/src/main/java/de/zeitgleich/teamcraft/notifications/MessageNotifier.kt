@@ -394,13 +394,27 @@ class MessageNotifier(
     postSafely(conversationId, MESSAGE_ID, withoutShadeEntry(maybeBubbled))
   }
 
-  private fun bubbledNotification(conversationId: String): Notification? {
+  /**
+   * A bubble the user dismissed leaves [withoutShadeEntry]'s hidden notification behind. The
+   * system keeps an update of it out of the shade too (found on a device: the next message showed
+   * nothing), so it goes before a new one is posted.
+   */
+  private fun dropDismissedBubble(conversationId: String) {
+    val maybeHidden = activeConversation(conversationId)?.takeIf { notification ->
+      notification.flags and Notification.FLAG_BUBBLE == 0 && notification.bubbleMetadata?.isNotificationSuppressed == true
+    }
+    if (maybeHidden != null) manager.cancel(conversationId, MESSAGE_ID)
+  }
+
+  private fun bubbledNotification(conversationId: String): Notification? =
+    activeConversation(conversationId)?.takeIf { it.flags and Notification.FLAG_BUBBLE != 0 }
+
+  /** The system's copy of the conversation's notification (Android 11+, where bubbles are). */
+  private fun activeConversation(conversationId: String): Notification? {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
     val system = context.getSystemService(NotificationManager::class.java) ?: return null
     val active = runCatching { system.activeNotifications }.getOrNull() ?: return null
-    return active.firstOrNull { it.id == MESSAGE_ID && it.tag == conversationId }
-      ?.notification
-      ?.takeIf { it.flags and Notification.FLAG_BUBBLE != 0 }
+    return active.firstOrNull { it.id == MESSAGE_ID && it.tag == conversationId }?.notification
   }
 
   /** The bubble's notification again, silent and hidden from the shade. */
@@ -624,6 +638,7 @@ class MessageNotifier(
     val privacy = MessagePrivacy.of(contentPrefs.content.value, isAppLockOn(), entry.isVerified)
     val spec = spec(entry, privacy, alerting) ?: return
     val revision = revisions.incrementAndGet()
+    dropDismissedBubble(entry.conversationId)
     postSafely(entry.conversationId, MESSAGE_ID, build(spec, revision))
     confirmLater(entry.conversationId, revision, alerting)
     spec.maybeShortcut?.let(::pushShortcut)
