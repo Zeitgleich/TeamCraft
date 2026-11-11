@@ -1225,6 +1225,8 @@ an owner approval record for `owner_approval`).
 #### 12. Client binding via `aud` only (low)
 
 **Status: fixed** in `a73700f` (`fix/security-server`). The client binding requires `azp` to equal the configured client; `aud` is no longer used.
+Since #1628 (providers without `azp`, such as Dex): a token without `azp` counts only when the client is
+its sole audience. Keycloak always sets `azp`, so another realm client's token is still refused.
 
 **Location:** `crates/teamcraft-server/src/auth/validator.rs:202-220, 246-255`.
 

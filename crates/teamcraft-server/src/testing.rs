@@ -540,6 +540,7 @@ impl TestApp {
         leeway_secs: 30,
         logout_audiences: vec![TEST_CLIENT.into(), "teamcraft-server".into()],
         maybe_organization_claim: settings.maybe_organization_claim.clone(),
+        maybe_roles_claim: None,
       },
     );
     let state = AppState {

@@ -37,6 +37,9 @@ pub struct ValidatorOptions {
   pub logout_audiences: Vec<String>,
   /// Token claim holding the user's organization, if the server reads one.
   pub maybe_organization_claim: Option<String>,
+  /// Top-level token claim with role names, read besides `resource_access.<client_id>.roles`: for
+  /// providers that can't nest client roles, such as Dex's `groups` (operations.md, "Demo instance").
+  pub maybe_roles_claim: Option<String>,
 }
 
 /// What a valid token tells us about the caller.
@@ -101,6 +104,8 @@ struct AccessClaims {
   sub: String,
   #[serde(default)]
   azp: Option<String>,
+  #[serde(default)]
+  aud: Option<serde_json::Value>,
   /// `Bearer` for access tokens, or `DPoP` for bound ones; `ID`, `Logout` and `Refresh` tokens must
   /// not be accepted as one.
   #[serde(default)]
@@ -310,9 +315,19 @@ impl TokenValidator {
         "token was not issued for this application".into(),
       ));
     }
+    let claim_roles = self
+      .options
+      .maybe_roles_claim
+      .as_deref()
+      .map(|claim| roles_from(claims.extra.get(claim)))
+      .unwrap_or_default();
     let role = self
       .roles
-      .resolve(claims.client_roles(&self.options.client_id))
+      .resolve(
+        claims
+          .client_roles(&self.options.client_id)
+          .chain(claim_roles.iter().copied()),
+      )
       .ok_or(AuthError::NoTeamcraftRole)?;
 
     let maybe_organization = self
@@ -348,9 +363,20 @@ impl TokenValidator {
 
 impl AccessClaims {
   /// Only tokens the app's own client asked for count. Another client of the realm gets
-  /// `aud: [teamcraft]` once its token carries TeamCraft roles, but its `azp` is its own.
+  /// `aud: [teamcraft]` once its token carries TeamCraft roles, but its `azp` is its own. Providers
+  /// that leave out `azp` for a token with one audience (OIDC Core §2; Dex) name the client as the
+  /// sole audience instead; a token for several audiences without `azp` names no party.
   fn is_issued_to(&self, client_id: &str) -> bool {
-    self.azp.as_deref() == Some(client_id)
+    match self.azp.as_deref() {
+      Some(authorized) => authorized == client_id,
+      None => match &self.aud {
+        Some(serde_json::Value::String(audience)) => audience == client_id,
+        Some(serde_json::Value::Array(audiences)) => {
+          matches!(audiences.as_slice(), [serde_json::Value::String(audience)] if audience == client_id)
+        },
+        _ => false,
+      },
+    }
   }
 
   fn client_roles(&self, client_id: &str) -> impl Iterator<Item = &str> {
@@ -375,6 +401,15 @@ fn token_binding_of(maybe_confirmation: Option<&Confirmation>) -> Result<TokenBi
     .and_then(|jkt| JwkThumbprint::parse(jkt).ok())
     .map(TokenBinding::Bound)
     .ok_or_else(|| AuthError::InvalidToken("unusable cnf claim".into()))
+}
+
+/// Role names out of a claim value: a list of strings, or one string. Anything else names none.
+fn roles_from(maybe_value: Option<&serde_json::Value>) -> Vec<&str> {
+  match maybe_value {
+    Some(serde_json::Value::String(name)) => vec![name.as_str()],
+    Some(serde_json::Value::Array(items)) => items.iter().filter_map(serde_json::Value::as_str).collect(),
+    _ => Vec::new(),
+  }
 }
 
 /// The organization out of a claim value: a string, or the first string of a list. Blank values
@@ -515,6 +550,80 @@ mod tests {
     assert!(validator().verify(&token, &public_key()).is_err());
     let token = sign(&claims(json!({"azp": null, "aud": ["account", CLIENT]})));
     assert!(validator().verify(&token, &public_key()).is_err());
+  }
+
+  mod plain_oidc {
+    use super::*;
+
+    #[test]
+    fn a_token_without_azp_counts_when_this_client_is_its_only_audience() {
+      for aud in [json!(CLIENT), json!([CLIENT])] {
+        let token = sign(&claims(json!({"azp": null, "aud": aud})));
+        assert_eq!(
+          validator().verify(&token, &public_key()).unwrap().role,
+          Role::Member
+        );
+      }
+      for aud in [json!("other-app"), json!(["other-app"]), json!([]), json!(null)] {
+        let token = sign(&claims(json!({"azp": null, "aud": aud})));
+        assert_invalid(
+          validator().verify(&token, &public_key()),
+          "token was not issued for this application",
+        );
+      }
+    }
+
+    #[test]
+    fn roles_are_read_from_the_configured_claim() {
+      let validator = validator_with(dex_options(), RoleNames::default());
+      let token = sign(&dex_claims(json!(["team-a", "owner"])));
+      assert_eq!(validator.verify(&token, &public_key()).unwrap().role, Role::Owner);
+      let token = sign(&dex_claims(json!("guest")));
+      assert_eq!(validator.verify(&token, &public_key()).unwrap().role, Role::Guest);
+      // Client roles still count, the highest role wins.
+      let mut both = dex_claims(json!(["member"]));
+      both["resource_access"] = json!({CLIENT: {"roles": ["admin"]}});
+      assert_eq!(
+        validator.verify(&sign(&both), &public_key()).unwrap().role,
+        Role::Admin
+      );
+    }
+
+    #[test]
+    fn a_claim_without_teamcraft_roles_or_of_another_shape_names_none() {
+      let validator = validator_with(dex_options(), RoleNames::default());
+      for groups in [json!(["team-a"]), json!({"owner": true}), json!(7), json!(null)] {
+        let token = sign(&dex_claims(groups.clone()));
+        assert!(
+          matches!(
+            validator.verify(&token, &public_key()),
+            Err(AuthError::NoTeamcraftRole)
+          ),
+          "{groups}"
+        );
+      }
+    }
+
+    #[test]
+    fn the_claim_is_ignored_unless_configured() {
+      let token = sign(&dex_claims(json!(["owner"])));
+      assert!(matches!(
+        validator().verify(&token, &public_key()),
+        Err(AuthError::NoTeamcraftRole)
+      ));
+    }
+
+    fn dex_options() -> ValidatorOptions {
+      ValidatorOptions {
+        maybe_roles_claim: Some("groups".into()),
+        ..options()
+      }
+    }
+
+    /// A token as Dex issues it: no `azp`, the client as the audience, roles in `groups`.
+    fn dex_claims(groups: Value) -> Value {
+      claims(json!({"azp": null, "aud": CLIENT, "resource_access": null, "groups": groups}))
+    }
   }
 
   #[test]
@@ -854,6 +963,7 @@ mod tests {
       leeway_secs: 30,
       logout_audiences: vec![CLIENT.into(), "teamcraft-server".into()],
       maybe_organization_claim: None,
+      maybe_roles_claim: None,
     }
   }
 
