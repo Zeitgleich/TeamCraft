@@ -8,16 +8,22 @@
 
 use crate::common;
 
+use std::sync::Arc;
+
 use common::{Peer, settle};
 use teamcraft_core::anchoring::ANCHORING_RELEASE;
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
+use teamcraft_core::client::RoleSigning;
+use teamcraft_core::clock::ManualClock;
 use teamcraft_core::error::CoreError;
 use teamcraft_core::records;
-use teamcraft_core::store::{LocalStore, Table};
+use teamcraft_core::store::{LocalStore, MessageFilter, Table};
 use teamcraft_core::workspace::RosterRole;
 use teamcraft_proto::channel_name::ChannelNameError;
-use teamcraft_proto::{ConversationId, ConversationKind, ConversationResponse, UpdateConversationRequest};
+use teamcraft_proto::{
+  ChannelRole, ConversationId, ConversationKind, ConversationResponse, UpdateConversationRequest,
+};
 
 mod founding {
   use super::*;
@@ -210,6 +216,119 @@ mod deletions {
     alice.client.delete_channel(channel).await.unwrap();
     bob.client.full_sync().await.unwrap();
     assert!(!bob.client.has_group(channel).unwrap(), "purged at once");
+  }
+}
+
+/// e2ee.md §4.6.5, "What the founding decides": the role log of an anchored channel takes only the
+/// anchor's founding, and a snapshot going back to it is anchored (#1748).
+mod roles {
+  use super::*;
+
+  /// Alice is no workspace admin: her founding anchors all the same, on Bob's device and her own.
+  #[tokio::test]
+  async fn a_members_anchored_founding_anchors_the_roles() {
+    let server = anchoring_server();
+    let (mut alice, mut bob) = two(&server).await;
+    let channel = shared_channel(&mut alice, &mut bob, "general").await;
+    let alice_id = alice.client.user_id();
+    bob.client.sync_channel_roles(channel).await.unwrap();
+    for peer in [&alice, &bob] {
+      let state = peer.client.channel_role_state(channel).unwrap();
+      assert_eq!(state.role_of(alice_id), ChannelRole::Admin);
+      assert!(state.is_workspace_anchored, "{}", peer.name);
+    }
+  }
+
+  /// The server lists Bob as the channel's admin and shows his device an empty log: neither his
+  /// upkeep nor his next role change founds a second one (no first sight in an anchored channel).
+  #[tokio::test]
+  async fn a_servers_empty_log_at_cursor_zero_founds_nothing() {
+    let server = anchoring_server();
+    let (mut alice, mut bob) = two(&server).await;
+    let mut carol = Peer::enroll(&server, "Carol").await;
+    let bob_id = bob.client.user_id();
+    let space = alice.space().await;
+    let channel = alice.client.create_channel(space, "general").await.unwrap();
+    server.withhold_role_log(bob_id, channel, 0);
+    for peer in [&bob, &carol] {
+      alice
+        .client
+        .add_member(channel, peer.client.user_id())
+        .await
+        .unwrap();
+    }
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    assert_eq!(server.role_log(channel).len(), 1);
+    server.set_channel_role_unsigned(channel, bob_id, ChannelRole::Admin);
+    bob.client.full_sync().await.unwrap();
+    bob.client.sync_channel_roles(channel).await.unwrap();
+    assert!(bob.client.channel_role_state(channel).unwrap().is_unfounded());
+
+    bob.client.found_listed_channels().await.unwrap();
+    let signing = bob
+      .client
+      .set_channel_role(channel, carol.client.user_id(), ChannelRole::Moderator)
+      .await
+      .unwrap();
+    assert_eq!(signing, RoleSigning::Unsigned);
+    assert_eq!(server.role_log(channel).len(), 1, "nothing founded");
+  }
+
+  /// D8: Alice, a member, founded the channel and made Bob an admin. Bob's deletion purges at once
+  /// on Carol's device while Alice's entry is younger than §4.6.3's time limit, and takes the
+  /// retention after it.
+  #[tokio::test]
+  async fn a_channel_admin_of_a_members_channel_purges_within_the_time_limit() {
+    for (waited, is_purged) in [(0, true), (31 * 24 * 60 * 60, false)] {
+      let server = anchoring_server();
+      let clock = Arc::new(ManualClock::new(server.server_now_ms()));
+      let enroll = async |name: &str| {
+        Peer::enroll_on_clock(
+          server.add_user(name),
+          name,
+          common::settings(),
+          Box::new(clock.clone()),
+        )
+        .await
+      };
+      let (mut alice, mut bob, mut carol) =
+        (enroll("Alice").await, enroll("Bob").await, enroll("Carol").await);
+      let channel = shared_channel(&mut alice, &mut bob, "general").await;
+      alice
+        .client
+        .add_member(channel, carol.client.user_id())
+        .await
+        .unwrap();
+      settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+      let bob_id = bob.client.user_id();
+      let signing = alice
+        .client
+        .set_channel_role(channel, bob_id, ChannelRole::Admin)
+        .await
+        .unwrap();
+      assert_eq!(signing, RoleSigning::Signed);
+      alice.client.send_text(channel, None, "hello").await.unwrap();
+      settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+      for peer in [&mut bob, &mut carol] {
+        peer.client.sync_channel_roles(channel).await.unwrap();
+      }
+      let roles = carol.client.channel_role_state(channel).unwrap();
+      assert_eq!(roles.role_of(bob_id), ChannelRole::Admin);
+      assert!(roles.is_workspace_anchored);
+
+      let wait = std::time::Duration::from_secs(waited);
+      clock.advance(i64::try_from(wait.as_millis()).unwrap());
+      server.advance_clock(wait);
+      bob.client.delete_channel(channel).await.unwrap();
+      assert!(server.deletion_signature(channel).is_some());
+      carol.client.full_sync().await.unwrap();
+      let has_history = !carol
+        .store
+        .messages(channel, MessageFilter::TopLevel)
+        .unwrap()
+        .is_empty();
+      assert_eq!(!has_history, is_purged, "after {waited} s");
+    }
   }
 }
 

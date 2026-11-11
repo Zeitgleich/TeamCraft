@@ -355,6 +355,34 @@ mod deletions {
   }
 }
 
+/// e2ee.md §4.6.5, "What the founding decides": the role log takes its founder from the anchor
+/// only while the floor grants.
+mod role_founders {
+  use super::*;
+
+  #[test]
+  fn a_verified_anchor_names_its_founder_under_its_key() {
+    let world = World::new();
+    let anchor = world.verified(&world.founded("general"), 0).unwrap();
+    assert_eq!(
+      role_founding(Some(&anchor), true),
+      RoleFounding::Anchored {
+        founder: convert::user_from_crypto(world.founder.user_id).unwrap(),
+        identity_key: *world.founder.identity.public_key().as_bytes(),
+      }
+    );
+  }
+
+  /// A fork, an anchor that doesn't verify, or one this device can't place: nobody founds.
+  #[test]
+  fn a_floor_that_doesnt_grant_or_no_verified_anchor_names_nobody() {
+    let world = World::new();
+    let anchor = world.verified(&world.founded("general"), 0).unwrap();
+    assert_eq!(role_founding(Some(&anchor), false), RoleFounding::Withheld);
+    assert_eq!(role_founding(None, true), RoleFounding::Withheld);
+  }
+}
+
 /// The founder (a member of the channel, not a workspace admin) and a member.
 struct World {
   founder: Person,

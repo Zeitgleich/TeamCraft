@@ -17,6 +17,7 @@ use teamcraft_proto::{ConversationId, ConversationResponse, SpaceId, UserId};
 use super::Client;
 use crate::anchoring::{self, AnchorOutcome, AnchorVerdict, ReleaseVersion};
 use crate::api::ServerApi;
+use crate::channel_roles::RoleFounding;
 use crate::convert;
 use crate::error::CoreError;
 use crate::records;
@@ -250,6 +251,37 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       (_, Some(_)) => HeldAnchor::Unverifiable,
       (_, None) => HeldAnchor::Unanchored,
+    })
+  }
+
+  /// Whether the channel is anchored on this device: its group carries an anchor, or the user's
+  /// devices pinned it. Nobody founds such a channel's roles at first sight (e2ee.md §4.6.5); an
+  /// anchor that doesn't verify counts here too, which only ever withholds a signature.
+  pub(crate) fn is_anchored_channel(&mut self, conversation: ConversationId) -> Result<bool, CoreError> {
+    if self.account_data().anchor_floor(conversation).is_some() {
+      return Ok(true);
+    }
+    Ok(
+      self
+        .group(conversation)?
+        .is_some_and(|group| group.anchor_bytes().is_some()),
+    )
+  }
+
+  /// Who may found the channel's roles (e2ee.md §4.6.5, "What the founding decides"): the verified
+  /// anchor's founder while the floor grants; nobody for a pinned channel whose anchor doesn't
+  /// verify here or shows a fork; the first entry's claim, as before anchors, for a channel with
+  /// neither anchor nor pin, or with an anchor that doesn't verify and was never pinned.
+  pub(crate) async fn role_founding(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<RoleFounding, CoreError> {
+    let is_pinned = self.account_data().anchor_floor(conversation).is_some();
+    Ok(match Box::pin(self.held_anchor(conversation)).await? {
+      HeldAnchor::Anchored { anchor, floor_grants } => anchoring::role_founding(Some(&anchor), floor_grants),
+      HeldAnchor::Unverifiable => RoleFounding::Withheld,
+      HeldAnchor::Unanchored if is_pinned => RoleFounding::Withheld,
+      HeldAnchor::Unanchored => RoleFounding::Claimed,
     })
   }
 

@@ -2324,7 +2324,8 @@ workspace roster (admin.md §2.3):
   in **this device's MLS group** of the channel, are members of the instance (no guest, bot or
   deactivated account), and this device has their identity key, the one it pinned for them, which their
   place in the group is verified against. It carries the signed mark `has_server_listed_roles`.
-  An anchored channel (§4.6.5) is never founded this way: its founding is the anchor's.
+  An anchored channel (§4.6.5) is never founded this way: its founding is the anchor's, and a device that holds an
+  anchor or a pin for the channel signs nothing at first sight.
 
   This trusts the server at first sight, which is a decision and not an oversight: nothing signed
   says who a channel's admins were before there was a log, and the alternative, a co-owner who can
@@ -3094,8 +3095,9 @@ accepts Alice promoting Dave, then Dave's entry. Bob's device, given Carol's old
 crypto review changed the design (end of this section). `teamcraft-crypto`'s `channel_anchor` and `mls` hold the
 encoding, the hashes, the signatures, the verdicts, the pin and floor record, anchored founding and the move and
 rename commits (#1725, first part). `teamcraft-core` founds channels anchored, checks the anchor against the pin and
-floor on every join path, signs moves and renames, and binds a deletion to the name (#1740; "Implementation notes"
-below). Still open: meeting chats (D10, #1747), the role log's anchored founding and `may_anchor` (#1748), what the
+floor on every join path, signs moves and renames, binds a deletion to the name (#1740), and takes only the
+anchored founding in the role log, with `may_anchor` for it (#1748; "Implementation notes" below). Still open:
+meeting chats (D10, #1747), what the
 apps show of the anchor and the mobile name checks (#1749), and re-founding with its chain in the account data:
 `AnchorFloor` keeps no re-founding chain yet, so a re-founding is refused as another founding until #1728. The parts
 split off before: #1727 (signed space deletions), #1728 (anchoring older channels and re-founding), #1729 (strict
@@ -3638,6 +3640,29 @@ and couldn't count for a purge.
     lists. A member purges an anchored channel at once only if the anchor verifies, the floor grants, the name
     counts for deletions (`name_set_by` not a member), the deletion names it and the listed name hashes to it and
     keeps the rules. A pinned channel whose anchor doesn't verify takes the retention.
+  - **The role log's founding (#1748):** the role verifier (`RoleVerifier::founding`) takes a `RoleFounding` from
+    the anchor, asked only while the device accepted no entry yet, as it decides nothing after that:
+    `Anchored` with the verified anchor's founder and identity key while the floor grants (no floor recorded yet
+    counts as granting, as for a deletion, so a founder whose pin failed to record still reads their own founding);
+    `Withheld` for a pinned channel whose anchor doesn't verify here, a fork, or an anchor that names no founder (a
+    review or a re-founding, until #1728); `Claimed`, today's trust on first use, for a channel with neither anchor
+    nor pin, or whose anchor doesn't verify and was never pinned (judged as before anchors, above). Under
+    `Anchored`, a first entry counts only as the founder's, signed under the anchor's key and naming them admin;
+    every other first entry, a workspace admin's included, is junk and starts no unverified stretch, so the real
+    founding after it still founds. The founding anchors the snapshot (`is_workspace_anchored`) on the same
+    conditions as a workspace admin's own founding (no server-listed mark, no key other than this device pinned).
+    Under `Withheld` nothing is read: the cursor stays, the read isn't marked as at the roster, and the entries are
+    read once the anchor decides. Read and refused, the founding would be lost for good when the anchor verifies;
+    read as a claim, it would be the trust on first use the anchor closes. Meanwhile the channel counts as
+    unsigned on that device, as it does on one that never read the log. A device of the founder signs a founding
+    only where the anchor names it (`may_found_roles`); nobody signs one at first sight on a channel whose group
+    carries an anchor or which is pinned, whether in the upkeep (`found_listed_channels`) or with a role change.
+    D8 keeps §4.6.3's time limit: a channel admin's deletion on a member-founded channel purges at once only while
+    somebody else's entry (the founder appointing them, say) is younger than `channel_roles_max_age`, and the
+    founder alone purges nothing at once. Residual: if the creator's founding entry never reaches the server, the
+    channel's roles stay the server's word until a re-founding (#1728); nobody else may found it. A device
+    outside the channel's group with no pin (a workspace admin who never joined) can't tell the channel is
+    anchored and reads its log as before anchors; a deletion asks for a group anyway.
 - **The name hash's known answer:** `name_hash("general")` is
   `e0c5e1a616c7db0ab0a95802b91233f845bc3d1194ef04a22aebee68280c9174` (SHA-256 of the one-byte label length, the
   label, the varint length 7 and the bytes).
@@ -4679,7 +4704,7 @@ restored together with them on a new device.
 - **Group epoch floors.** Per conversation, the newest MLS epoch in which one of the user's devices
   switched the content key; merging keeps the higher one. A new device of the user doesn't join a
   group from information older than that (§4.6).
-- **Channel anchor pins and floors** (§4.6.5, not implemented yet). Per anchored conversation, the founding hash
+- **Channel anchor pins and floors** (§4.6.5; re-founding chain not implemented yet, #1728). Per anchored conversation, the founding hash
   first accepted, the highest properties version with its hash, the highest epoch the anchor was seen in, and the
   chain of verified re-foundings (old founding hash, the re-founding, new founding hash). Merging keeps the higher
   version and epoch; a founding reached from the other copy's through that chain wins with its floor; only two

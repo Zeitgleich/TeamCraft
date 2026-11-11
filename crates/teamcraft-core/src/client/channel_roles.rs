@@ -15,8 +15,8 @@ use crate::api::ServerApi;
 #[cfg(feature = "ui")]
 use crate::channel_roles::RoleKeyStanding;
 use crate::channel_roles::{
-  ChannelRoleState, ChannelRolesHead, CheckedRoleKey, MessageEntry, RoleKeyEvidence, RoleVerifier,
-  SignerAuthority,
+  ChannelRoleState, ChannelRolesHead, CheckedRoleKey, MessageEntry, RoleFounding, RoleKeyEvidence,
+  RoleVerifier, SignerAuthority,
 };
 use crate::error::CoreError;
 use crate::records;
@@ -297,7 +297,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .waiting
         .get(&id)
         .is_some_and(|wait| wait.not_before_ms > now);
-      if !is_waiting && self.channel_role_state(id)?.is_unfounded() && self.has_group(id)? {
+      // An anchored channel's founding is the anchor's, never one at first sight (e2ee.md §4.6.5).
+      if !is_waiting
+        && self.channel_role_state(id)?.is_unfounded()
+        && self.has_group(id)?
+        && !self.is_anchored_channel(id)?
+      {
         due.push(id);
       }
     }
@@ -399,6 +404,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         return Ok(None);
       }
       return self.role_entry(conversation, changes, false, false).await;
+    }
+    // Nobody founds an anchored channel at first sight: a device at cursor 0 shown an empty log
+    // signs nothing (e2ee.md §4.6.5). The change stays the server's word.
+    if self.is_anchored_channel(conversation)? {
+      tracing::info!(conversation_id = %conversation, "an anchored channel's roles are founded by its anchor's founder only");
+      return Ok(None);
     }
     let Some(mut roles) = self.first_sight_roles(conversation).await? else {
       tracing::info!(conversation_id = %conversation, "not in this channel's group: left to an admin who is");
@@ -558,6 +569,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       tenure_clock_skew_ms: i64::try_from(self.settings.role_tenure_clock_skew.as_millis())
         .unwrap_or(i64::MAX),
       pinned: &pinned,
+      // A member's message never carries a founding (`take_message_entry` ignores it while nothing
+      // is accepted), so the anchor decides nothing here.
+      founding: RoleFounding::Withheld,
     };
     let outcome = state.take_message_entry(entry, &verifier);
     match outcome {
@@ -802,6 +816,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       tracing::info!(conversation_id = %conversation, "not vouching for keys this device can't check");
       return Ok(None);
     }
+    // In an anchored channel only the anchor's founder founds, under its key (e2ee.md §4.6.5):
+    // anybody else's founding would be junk on every member's device.
+    let may_found = may_found
+      && (!authorities.contains(&SignerAuthority::Founder)
+        || self.may_found_roles(conversation, &state).await?);
     let mut maybe_refusal = None;
     for authority in authorities {
       if authority == SignerAuthority::Founder && !may_found {
@@ -1093,7 +1112,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       is_read_to_end,
       roster_at_read,
     } = read;
+    let mut founding = RoleFounding::Claimed;
     if entries.iter().any(|entry| entry.version > state.cursor) {
+      founding = self.founding_for(conversation, &state).await?;
       // A founder must hold the key this device pins for them; pin before verifying, or the
       // entry would be skipped for good.
       let claimed = founder_candidates(&state, &entries);
@@ -1107,12 +1128,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         tenure_clock_skew_ms: i64::try_from(self.settings.role_tenure_clock_skew.as_millis())
           .unwrap_or(i64::MAX),
         pinned: &pinned,
+        founding,
       };
       for error in state.apply_entries(entries, &verifier) {
         tracing::warn!(conversation_id = %conversation, %error, "skipped a channel role entry");
       }
     }
-    if is_read_to_end {
+    // Entries left unread for the anchor weren't seen at this roster.
+    if is_read_to_end && !state.waits_for_founding(founding) {
       state.note_read(roster_at_read);
     }
     state.check_ahead();
@@ -1123,6 +1146,48 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       tracing::warn!(conversation_id = %conversation, from, "this device can't verify a stretch of the channel's role log");
     }
     self.put_channel_role_state(conversation, &state)
+  }
+
+  /// Whether this user's founding would found the channel's roles on members' devices: as before
+  /// anchors, or as the founder the anchor names, under this account's identity key.
+  async fn may_found_roles(
+    &mut self,
+    conversation: ConversationId,
+    state: &ChannelRoleState,
+  ) -> Result<bool, CoreError> {
+    let me = self.account.user_id;
+    let own_key = *self.account.identity_public_key().as_bytes();
+    Ok(match self.founding_for(conversation, state).await? {
+      RoleFounding::Claimed => true,
+      RoleFounding::Anchored {
+        founder,
+        identity_key,
+      } => founder == me && identity_key == own_key,
+      RoleFounding::Withheld => false,
+    })
+  }
+
+  /// Who may found the channel's roles, for a read of its log: asked of the anchor only while
+  /// nothing is accepted, as it decides nothing after that. An anchor this device can't judge now
+  /// (a device list it can't fetch) withholds the founding: the entries wait for the next read.
+  async fn founding_for(
+    &mut self,
+    conversation: ConversationId,
+    state: &ChannelRoleState,
+  ) -> Result<RoleFounding, CoreError> {
+    if !self.is_anchored_channel(conversation)? {
+      return Ok(RoleFounding::Claimed);
+    }
+    if state.is_signed() {
+      return Ok(RoleFounding::Withheld);
+    }
+    match Box::pin(self.role_founding(conversation)).await {
+      Ok(founding) => Ok(founding),
+      Err(error) => {
+        tracing::warn!(conversation_id = %conversation, %error, "could not judge the channel's anchor; its role log waits");
+        Ok(RoleFounding::Withheld)
+      },
+    }
   }
 
   async fn fetch_role_log(

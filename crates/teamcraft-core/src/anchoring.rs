@@ -15,6 +15,9 @@ use teamcraft_crypto::channel_anchor::{
 use teamcraft_crypto::mls::MlsError;
 use teamcraft_proto::channel_name::keeps_channel_name_rules;
 
+use crate::channel_roles::RoleFounding;
+use crate::convert;
+
 /// The release whose apps all announce the anchor in their key packages and leaves (#1741): once
 /// the server's `minimum_client_version` reaches it, no app that can join a channel lacks it, and
 /// new channels are founded anchored (D2).
@@ -197,6 +200,27 @@ pub fn name_counts_for_deletion(
   let is_listed_name_the_anchors = maybe_listed_name
     .is_some_and(|name| keeps_channel_name_rules(name) && name_hash(name) == anchor.properties().name_hash);
   floor_grants && is_listed_name_the_anchors && anchor.name_counts_for_deletion(maybe_deletion_name_hash)
+}
+
+/// Who founds the roles of a channel that carries an anchor or is pinned to one (e2ee.md §4.6.5,
+/// "What the founding decides"): the verified anchor's founder, under its identity key, while the
+/// floor grants. An anchor that doesn't verify, a fork, or an anchor that names no founder (a
+/// review or a re-founding, #1728) gives nobody: nothing founds and nothing anchors. A channel
+/// with neither anchor nor pin is [`RoleFounding::Claimed`], which this never returns.
+pub fn role_founding(maybe_verified: Option<&VerifiedAnchor>, floor_grants: bool) -> RoleFounding {
+  let Some((user, key)) = maybe_verified
+    .filter(|_| floor_grants)
+    .and_then(VerifiedAnchor::founder)
+  else {
+    return RoleFounding::Withheld;
+  };
+  match convert::user_from_crypto(user) {
+    Ok(founder) => RoleFounding::Anchored {
+      founder,
+      identity_key: *key.as_bytes(),
+    },
+    Err(_) => RoleFounding::Withheld,
+  }
 }
 
 /// Whether the listed name differs from what the anchor signed: shown to members as a mark.
