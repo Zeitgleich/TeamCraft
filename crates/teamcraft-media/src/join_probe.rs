@@ -243,9 +243,8 @@ impl Train {
 
 /// The rate the arrivals of datagrams sent back to back show (arrival in µs, bytes): the bytes
 /// after the first arrival over the time they took. `None` with fewer than two; a spread too
-/// small to time is `u32::MAX` (the caller caps it). Shared with the SFU's probes before a layer
-/// switch up.
-pub fn train_rate_bps(arrivals: &[(u64, usize)]) -> Option<u32> {
+/// small to time is `u32::MAX` (the caller caps it).
+fn train_rate_bps(arrivals: &[(u64, usize)]) -> Option<u32> {
   let mut sorted = arrivals.to_vec();
   sorted.sort_unstable();
   let (&(first_us, _), &(last_us, _)) = (sorted.first()?, sorted.last()?);

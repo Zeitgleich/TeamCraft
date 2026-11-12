@@ -757,9 +757,11 @@ shares are not, #1733):
   below 10 fps). After that, the top layers are left out one at a time (`CallEngine::limit_own_layers`).
   Receivers move down as they do when the uplink pauses a layer. Frame rate goes first because it
   also saves capture and background-effect work.
-- **Recovery:** both step back up in reverse order after 10 s of calm. A layer climbs only when
-  its output, scaled to the next step, stays under 1.25× its bitrate. A step up that is undone
-  within 10 s doubles the wait for the next, up to 2 min.
+- **Recovery:** both step back up in reverse order after two calm 2 s windows in a row (about
+  4 s). A layer climbs only when its output, scaled to the next step, stays
+  under 1.25× its bitrate. A step up that is undone within 5 s doubles the wait for the next, up
+  to 8 s (#1792: at 10 s doubling up to 2 min, a share pushed down by a false overload stayed
+  small for minutes).
 
 The stats overlay shows what holds the camera back ("Held back"). Every threshold is a field of
 `CameraGovernorConfig` with these defaults. Cost on the hot path: a few comparisons per frame and
@@ -784,8 +786,8 @@ camera's judge (`EncoderLoad`) and its timings:
 - **Step down:** one layer of one stream per step, the least important first: the smallest camera
   tile, then larger ones, a screen share last. Through the same `Subscribe { max_layer }` the
   tiles' sizes use; the SFU sends the lower layer from its next keyframe.
-- **Recovery:** back up in reverse order after 10 s of calm; a step up undone within 10 s doubles
-  the wait, up to 2 min.
+- **Recovery:** back up in reverse order after two calm 2 s windows; a step up undone within 5 s doubles
+  the wait, up to 8 s.
 - **Not the network:** datagrams carry the time they were read into the call's loop, and the
   transport feedback reports that, so a busy loop's backlog doesn't read as a congested downlink.
   The step down only changes what this device asks for: senders and other receivers keep theirs.

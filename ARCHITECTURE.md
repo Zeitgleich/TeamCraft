@@ -756,7 +756,8 @@ Settings → Chats).
   step, to 85 % of itself; a queue that lasts 500 ms (the window the delivered rate is measured
   over) while more is sent than gets through cuts it to 85 % of what got through, as does loss
   above 10 % (to what got through less half the loss; only loss of packets sent after the last
-  such cut counts); loss of 2–10 % holds it. GCC cuts to what got through at once, but a camera
+  such cut counts, and the next such cut may follow 400 ms later: a link that lost its room is
+  cut to it within a second, #1792); loss of 2–10 % holds it. GCC cuts to what got through at once, but a camera
   doesn't fill its estimate (layers in steps, keyframes): the queue of one keyframe cut it below
   its top layer. A burst's queue can last as long (a still screen's keyframe read by a slow
   machine), but nothing more is sent meanwhile: cut to what got through of it, a CI runner's
@@ -764,8 +765,9 @@ Settings → Chats).
   a lasting backlog (or loss) ends it, for every sender: the keyframes a new subscription starts
   with are sent far above the start estimate, and a slow receiver queues them. Growth is 8 %/s,
   and 50 %/s once the path showed no congestion for 2 s: simulcast grows in steps, so the next
-  step is the probe. A probe that meets congestion doubles that wait (up to 32 s); once 10 % more
-  than at the last congestion gets through, it is 2 s again. Before, a camera cut to its middle
+  step is the probe. A probe that meets congestion doubles that wait (up to 4 s: at 32 s, a
+  mobile link that swings every few seconds kept the estimate creeping at 8 %/s through a minute
+  with room, #1792); once 10 % more than at the last congestion gets through, it is 2 s again. Before, a camera cut to its middle
   layer by a 500 kbit/s limit needed about 20 s back to 720p once the limit was gone.
 
   *Sender* (`uplink_layers`, cameras the call encodes itself: desktop and phones): after 48 kbit/s
@@ -777,9 +779,25 @@ Settings → Chats).
   covers everything. The estimate may grow to 1.15 × 1.1 times what everything takes (as at the
   SFU): capped at exactly that, every step cut (a keyframe's queue) took a screen share's sharp
   layer away once regrowing took longer than its 3 s hold. A step up undone within 4 s was a probe
-  the uplink didn't carry: the next one waits 4 s, doubling up to 32 s, and 4 s again after a step
+  the uplink didn't carry: the next one waits 2 s, doubling up to 4 s, and 2 s again after a step
   that held (the estimate grows back within seconds after a cut, and every probe costs a keyframe
-  and a moment of congestion). Before, the top layer stopped as soon as its whole bitrate didn't
+  and a moment of congestion; at up to 32 s a mobile link's minute of room was half over, #1792).
+  Where the encoders change their rate in place (the browser's WebCodecs, cameras and screen
+  shares), a lower share follows at once and a higher one after 0.5 s: a change costs no keyframe.
+  A screen share's 3 s hold doesn't apply when the estimate is below half of what its layers need:
+  that is a link that lost its room, not a keyframe's dip.
+
+  *Uplink probes* (#1792, `teamcraft_media::rate_probe`): while the sender holds layers (or
+  shares of them) back, it pads its uplink as the SFU pads a viewer's downlink (below), at most
+  1.5 times what gets through now (1.25 after a cluster that fell short), every 2–4 s while they
+  fall short and back to back while they get through. One that gets through lifts the estimate
+  to its rate at once and the layers follow with the next feedback; one that falls short holds the
+  estimate, so its own queue cuts nothing. Only towards SFUs that take padding (`probe_bytes`),
+  never during the estimate's fast start or the probe at the start. Simulated on the test setup's
+  LTE link (`ltevary.sh`: 1.2–2.1 Mbit/s swinging every 2–4 s, 10 Mbit/s for a minute, `tbf` with
+  a 32 kB bucket and 150 ms of queue) with a 1440p share in the browser: its top layer 1.3 s after
+  the room appeared, whole after 3.1 s, and back within the link 0.9 s after it went
+  (`rate_probe::tests::uplink_on_lte`; before: see the pull request of #1792). Before, the top layer stopped as soon as its whole bitrate didn't
   fit: a 500 kbit/s uplink carried 320×180 at about 80 kbit/s, a 2 Mbit/s one 640×360 at 300
   kbit/s. Browsers' cameras and screen shares send a layer whole or not at all, as before.
 
@@ -795,24 +813,32 @@ Settings → Chats).
   a CI runner's viewer saw no picture for 5.3 s after its link's estimate collapsed). Other
   viewers of the same camera are not affected.
 
-  Before a step up the SFU checks that the viewer's downlink carries it (`probe`, #994): the
-  estimate grows while the link isn't full, and switching to the next layer to find out stalled
-  the picture of a viewer whose link couldn't take it (a 250 kbit/s viewer of a 1080p camera:
-  gaps of 2.6–5.2 s every few seconds). The SFU sends a burst of padding datagrams back to back
-  (50 ms of the new total, at least four of 1000 bytes) on a stream it never assigns; receivers
-  report their arrival like any datagram's and drop them (every client does, also those from
-  before). The bottleneck spaces them out at its rate, so their arrival times show what the link
-  carries. A burst that gets through lets the step follow 0.5 s after the estimate covers it, and
-  after the fast start raises the estimate there (at most twice what it was sent for; during it,
-  jumping ahead switched a screen share's viewer to the sharp layer before the presenter's own
-  uplink carried it); one that falls short limits the estimate to what got through (never below
-  what keeps the current layers), and the next one waits 2 s, then 4 s.
-  Bursts also go out before the estimate covers a step, so a link that got better is found
-  within seconds instead of after the estimate's slow growth after congestion. Their queue and
+  Before a step up the SFU checks that the viewer's downlink carries it (`rate_probe`, #994,
+  #1792): the estimate grows while the link isn't full, and switching to the next layer to find
+  out stalled the picture of a viewer whose link couldn't take it (a 250 kbit/s viewer of a 1080p
+  camera: gaps of 2.6–5.2 s every few seconds). The SFU sends a cluster of three trains of padding
+  datagrams (1000 bytes each) on a stream it never assigns, one per 100 ms timer tick, sized so
+  that what it forwards anyway plus the padding is the rate in question; receivers report their
+  arrival like any datagram's and drop them (every client does, also those from before). A link
+  that carries the rate drains each train before the next; one that doesn't queues the excess, so
+  the last train waits longer than the first (more than 25 ms: short), and lost padding is short
+  too. Until #1792 a single burst's spread was the measure: a token bucket in front of the link
+  (Linux `tbf`, an LTE cell's grant) lets tens of kilobytes through at once, and a 3 Mbit/s link
+  with a 32 kB bucket showed five times its rate. A cluster probes at most 1.5 times what the
+  viewer gets now (1.25 after one that fell short; the estimate of a viewer whose layers don't
+  fill it says nothing about the link): a cluster at the whole step of a 1440p share from 2 Mbit/s
+  overflowed a mobile link's buffer and took video with it. One that gets through lets the step
+  follow 0.5 s after the estimate covers it, and after the fast start raises the estimate to its
+  rate (during it, jumping ahead switched a screen share's viewer to the sharp layer before the
+  presenter's own uplink carried it), and the next cluster follows at once; one that falls short
+  holds the estimate at most at its rate (never below what keeps the current layers), forgets
+  what earlier ones showed, and the next one waits 2 s, then 4 s. Clusters also go out before
+  the estimate covers a step, so a link that got better is found within seconds. Their queue and
   loss don't count as congestion. Receivers that send no feedback switch up as before. After
-  (`weak_downlink`, laptop): every frame 180p, longest gap 150–200 ms (8 runs in parallel); a
-  simulated 250 kbit/s link that becomes 10 Mbit/s reaches the top layer after 4.7 s (6.6 s
-  before).
+  (`weak_downlink`, laptop): every frame 180p, longest gap 150–200 ms (8 runs in parallel). On
+  the simulated LTE link of `ltevary.sh` (2–3.5 Mbit/s swinging, 25 Mbit/s for a minute) a 1440p
+  share's viewer gets the top layer 1.7 s after the room appears and is back on 720p 0.6 s after
+  it goes (`a_viewer_on_lte_follows_the_link_within_seconds`).
 
   Measured (`bandwidth_limits` in the SFU's test suite: real SFU, a 720p camera with sensor noise,
   a bottleneck with a 250 ms queue; OpenH264, laptop, release build):
@@ -830,8 +856,8 @@ Settings → Chats).
   (dB: luma PSNR of the picture as a large tile shows it, a lower layer scaled up to 720p.) A
   sudden drop stalls a little longer than before: the top layer keeps its share for the hold
   until the estimator's cut to what got through. While a limit stays, the next layer is tried
-  now and then (the probe: 4 s apart at first, then up to 32 s), which can hold the picture up
-  for up to a second. Not yet: browsers' cameras don't adapt their bitrate (WebCodecs would need
+  now and then (the probe: 2 s apart at first, then up to 4 s; padding first where the SFU takes
+  it), which can hold the picture up for up to a second. Not yet: browsers' cameras don't adapt their bitrate (WebCodecs would need
   a reconfigured encoder per change); the shares aren't told to the SFU, which allocates by the
   layers' full bitrates.
 

@@ -21,7 +21,9 @@
 //! [`CameraGovernorConfig::calm_period`]; a step up that is undone within
 //! [`CameraGovernorConfig::probe_proof`] doubles the wait for the next one, up to
 //! [`CameraGovernorConfig::max_calm_period`]. A step changes how the encoders are configured,
-//! which may cost a keyframe, so they are few and far between.
+//! which may cost a keyframe, so they are not taken on every window; but a machine that got idle
+//! gets its picture back within seconds, and failed steps never hold it back for longer than a
+//! few (#1792: a share that went down to 480p for a false overload stayed there for minutes).
 //!
 //! Screen shares keep their own policy (#1733): nothing here is applied to them, though
 //! [`EncoderLoad`] is built to be reused there.
@@ -204,9 +206,10 @@ impl Default for CameraGovernorConfig {
       overload_encode_share: 0.9,
       calm_encode_share: 0.5,
       min_capture_framerate: 10,
-      calm_period: Duration::from_secs(10),
-      max_calm_period: Duration::from_secs(120),
-      probe_proof: Duration::from_secs(10),
+      // A window: the step follows the second calm window in a row, about 4 s (#1792).
+      calm_period: Duration::from_secs(2),
+      max_calm_period: Duration::from_secs(8),
+      probe_proof: Duration::from_secs(5),
     }
   }
 }

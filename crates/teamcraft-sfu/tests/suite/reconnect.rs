@@ -250,11 +250,12 @@ mod simulcast_layers {
     network.client_mut(ALICE).uplink_loss_every = None;
     network.pictures(BOB, stream);
 
-    // Two seconds of video: Bob moves to a layer Alice sends and sees pictures again.
+    // Two seconds of video: Bob moves to a layer Alice sends and sees pictures again. The loss
+    // is over, so Alice's uplink probes find the room and the top layer may come back (#1792).
     network.send_video(ALICE, stream, 60);
     let after = network.pictures(BOB, stream);
     assert!(!after.is_empty(), "the viewer froze on the paused layer");
-    assert!(after.iter().all(|layer| *layer < 2), "{after:?}");
+    assert!(after.first().is_some_and(|layer| *layer < 2), "{after:?}");
   }
 
   /// A publisher that was away while someone started to watch its top layer hears about it when

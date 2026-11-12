@@ -19,9 +19,11 @@
 //!   number; the receiver's feedback drives a [`SendSideEstimator`]. A new subscription measures
 //!   the receiver's downlink afresh (#941). Incoming datagrams with a transport sequence number
 //!   are recorded for the sender's own (uplink) estimation.
-//! - **Probes before a switch up (#994):** a receiver that sends feedback gets a higher layer only
-//!   once a padding burst showed its link carries it ([`crate::probe`]); a burst that falls short
-//!   limits the estimate instead of a picture that stalls.
+//! - **Probes before a switch up (#994, #1792):** a receiver that sends feedback gets a higher
+//!   layer only once a cluster of padding showed its link carries it
+//!   ([`teamcraft_media::rate_probe`]); one that falls short holds the estimate instead of a
+//!   picture that stalls, and the next comes within seconds, so a link that got better is used
+//!   while it lasts.
 //!
 //! - **Resending lost video (#1762):** forwarded video packets are kept for a short while per
 //!   track and layer; a receiver's NACK gets the ones it names again, restamped for it, within a
@@ -44,9 +46,10 @@ use std::time::{Duration, Instant};
 
 use teamcraft_media::{
   bwe::{BweConfig, FeedbackRecorder, SendSideEstimator},
-  datagram::{DatagramError, DatagramHeader, PADDING_STREAM, StreamId},
+  datagram::{DatagramError, DatagramHeader, PADDING_STREAM, StreamId, padding_datagram},
   fragment::{FragmentError, FrameFragment},
   join_probe::{JoinProbe, JoinProbeConfig, LinkMeasurement},
+  rate_probe::{ProbeOutcome, RateProbe, RateProbeConfig},
   rtp::{AudioLevel, RtpError, RtpHeader},
 };
 use teamcraft_proto::{
@@ -59,7 +62,6 @@ use thiserror::Error;
 use crate::layers::{
   LayerAllocationConfig, LayerAllocator, ProbeRequest, TrackDemand, UpgradeProof, full_demand_bps,
 };
-use crate::probe::{DownlinkProbe, ProbeConfig, ProbeOutcome, padding_datagram};
 use crate::retransmit::{PacketHistory, RetransmitBudget, RetransmitConfig};
 use crate::speakers::{SpeakerSelectionConfig, SpeakerSelector};
 
@@ -85,7 +87,7 @@ pub struct ForwardingConfig {
   pub layers: LayerAllocationConfig,
   pub bwe: BweConfig,
   pub keyframes: KeyframeRequestConfig,
-  pub probe: ProbeConfig,
+  pub probe: RateProbeConfig,
   /// A layer counts as stopped when a lower layer of its track kept arriving this long without
   /// it; receivers get the best lower layer that still flows. Above the gaps of a
   /// layer that runs (a still screen sends its picture again every second, `SCREEN_IDLE_REFRESH`),
@@ -183,7 +185,7 @@ struct ParticipantRoute {
   feedback_epoch: Instant,
   allocator: LayerAllocator,
   /// Probes of the downlink before a switch up.
-  probe: DownlinkProbe,
+  probe: RateProbe,
   /// The probe the allocation waits for.
   maybe_probe_request: Option<ProbeRequest>,
   /// The receiver sent transport feedback: its downlink can be probed.
@@ -264,7 +266,7 @@ impl Default for ForwardingConfig {
       layers: LayerAllocationConfig::default(),
       bwe: BweConfig::default(),
       keyframes: KeyframeRequestConfig::default(),
-      probe: ProbeConfig::default(),
+      probe: RateProbeConfig::default(),
       layer_stalled_after: Duration::from_millis(1500),
       retransmit: RetransmitConfig::default(),
       probe_bytes: 15_000,
@@ -308,7 +310,7 @@ impl Forwarder {
       uplink: FeedbackRecorder::new(now),
       feedback_epoch: now,
       allocator: LayerAllocator::new(),
-      probe: DownlinkProbe::new(),
+      probe: RateProbe::new(),
       maybe_probe_request: None,
       has_feedback: false,
       is_suspended: false,
@@ -375,7 +377,7 @@ impl Forwarder {
     participant.uplink = FeedbackRecorder::new(now);
     participant.feedback_epoch = now;
     participant.allocator = LayerAllocator::new();
-    participant.probe = DownlinkProbe::new();
+    participant.probe = RateProbe::new();
     participant.maybe_probe_request = None;
     participant.has_feedback = false;
     participant.is_suspended = false;
@@ -866,15 +868,22 @@ impl Forwarder {
       // switched a screen share's viewer to the sharp layer before the presenter's uplink
       // estimate (in its own fast start) carried that layer, and the presenter stopped it again
       // (screen_sharpness on CI). After congestion the estimate grows slowly: there the probe
-      // lifts it.
-      Some(ProbeOutcome::Carried { measured_bps }) if !participant.downlink.is_in_fast_start() => {
-        participant.downlink.raise_to(measured_bps);
+      // lifts it at once (#1792).
+      Some(ProbeOutcome::Carried { target_bps }) if !participant.downlink.is_in_fast_start() => {
+        participant.downlink.raise_to(target_bps);
       },
       Some(ProbeOutcome::Carried { .. }) => {},
+      // Short of the target: the estimate is no higher than that, and the cluster's queue is no
+      // reason to cut it below what the receiver gets now.
       Some(ProbeOutcome::FellShort {
-        measured_bps,
+        target_bps,
         floor_bps,
-      }) => participant.downlink.limit_to(measured_bps.max(floor_bps), now),
+      }) => {
+        let estimate_bps = participant.downlink.estimate_bps();
+        participant
+          .downlink
+          .limit_to(estimate_bps.min(target_bps).max(floor_bps), now);
+      },
       None => {},
     }
     effects.extend(self.on_timer(receiver, now));
@@ -988,16 +997,37 @@ impl Forwarder {
     }
   }
 
-  /// A padding burst for the probe `receiver`'s allocation waits for, when one may go out.
+  /// The next train of padding for the probe `receiver`'s allocation waits for, when one is due:
+  /// a cluster starts when the allocation asks for one and the last is long enough ago.
   fn probe_downlink(&mut self, receiver: DeviceId, now: Instant) -> Option<Effect> {
     let config = self.config.probe;
     let participant = self.participants.get_mut(&receiver)?;
     participant.probe.on_timer(&config, now);
-    let request = participant.maybe_probe_request?;
-    if participant.is_suspended || !participant.probe.may_start(now) {
+    if participant.is_suspended {
       return None;
     }
-    let sizes = DownlinkProbe::burst_sizes(&config, request.target_bps);
+    if !participant.probe.is_running() {
+      let request = participant.maybe_probe_request?;
+      if !participant.probe.may_start(now) {
+        return None;
+      }
+      // A step above what the link carries now: the estimate of a receiver that gets less than
+      // it (its layers don't fill it) says nothing about the link, and a cluster at the whole
+      // step of a 1440p share from there overflowed a mobile link's buffer (#1792).
+      let sending_bps = participant.downlink.sent_bps(now);
+      let shown_bps = participant.probe.shown_bps(&config, now);
+      let carried_bps = participant
+        .downlink
+        .estimate_bps()
+        .min(sending_bps.max(request.floor_bps).max(shown_bps));
+      let target_bps = participant
+        .probe
+        .target_bps(&config, request.target_bps, carried_bps);
+      participant
+        .probe
+        .start(target_bps, request.floor_bps, sending_bps, now);
+    }
+    let sizes = participant.probe.due_train(&config, now)?;
     let mut datagrams = Vec::with_capacity(sizes.len());
     let mut maybe_first_seq = None;
     for bytes in &sizes {
@@ -1005,13 +1035,7 @@ impl Forwarder {
       maybe_first_seq.get_or_insert(seq);
       datagrams.push(padding_datagram(*bytes, seq));
     }
-    participant.probe.started(
-      request.target_bps,
-      request.floor_bps,
-      maybe_first_seq?,
-      &sizes,
-      now,
-    );
+    participant.probe.sent(maybe_first_seq?, &sizes, now);
     Some(Effect::Padding { receiver, datagrams })
   }
 
@@ -2367,18 +2391,30 @@ mod tests {
       // What the middle layer (500 kbit/s) needs.
       let covered_bps = f64::from(config.audio_reserve_bps) + 500_000.0 * config.upswitch_headroom;
       let (mut maybe_covered_at, mut maybe_switched_at) = (None, None);
+      // Everything sent to the receiver arrives, padding included, and is reported in order.
+      let mut next_to_report = 0u16;
+      let mut sent = 0u16;
       for round in 0..60u16 {
         let at = now + Duration::from_millis(100 * u64::from(round));
         for _ in 0..10 {
-          forwarder.route(device(1), &audio(1, 10), at).unwrap();
+          let route = forwarder.route(device(1), &audio(1, 10), at).unwrap();
+          sent += u16::try_from(route.deliveries.iter().filter(|(to, _)| *to == device(2)).count()).unwrap();
         }
         let since_epoch = u64::try_from(at.saturating_duration_since(epoch).as_micros()).unwrap();
         let feedback = TransportFeedback {
-          base_seq: round * 10,
-          arrivals_us: (0..10u64).map(|i| Some(since_epoch + i * 1_000)).collect(),
+          base_seq: next_to_report,
+          arrivals_us: (0..u64::from(sent - next_to_report))
+            .map(|i| Some(since_epoch + i * 100))
+            .collect(),
         };
+        next_to_report = sent;
         let mut effects = forwarder.on_transport_feedback(device(2), &feedback, at);
         effects.extend(forwarder.on_timer(device(2), at));
+        for effect in &effects {
+          if let Effect::Padding { datagrams, .. } = effect {
+            sent += u16::try_from(datagrams.len()).unwrap();
+          }
+        }
         let estimate = forwarder.downlink_estimate_bps(device(2)).unwrap();
         if maybe_covered_at.is_none() && f64::from(estimate) >= covered_bps {
           maybe_covered_at = Some(at);
@@ -2956,6 +2992,47 @@ mod tests {
       );
     }
 
+    /// #1792: a viewer on LTE on the motorway (`ltevary.sh`): the downlink swings between 2 and
+    /// 3.5 Mbit/s every 2 to 4 s, then a cell has 25 Mbit/s for a minute, then it swings again.
+    /// A 1440p screen share's 720p layer fits the swings, its top layer only the minute: it is
+    /// forwarded within seconds of the room appearing, and within a second of the room going the
+    /// viewer is back on what fits, without a picture that stands still.
+    #[test]
+    fn a_viewer_on_lte_follows_the_link_within_seconds() {
+      let lte = Lte::default();
+      let run = simulate_on(Link::lte(), &share_layers(), &lte.capacities(), lte.end());
+      let report = LteReport::of(&run, &lte, |layer| layer == 2);
+      eprintln!("{report:?}");
+      assert!(
+        report
+          .up_after
+          .is_some_and(|after| after <= Duration::from_secs(5)),
+        "top layer {:?} after the room appeared",
+        report.up_after
+      );
+      assert!(
+        report.down_after <= Duration::from_secs(1),
+        "top layer until {:?} after the room went",
+        report.down_after
+      );
+      // Clusters that fall short queue their excess and may take a datagram of video with them,
+      // as the probes before a switch up did; a layer sent to find out took a tenth of them.
+      assert!(
+        report.lost[0] * 100 <= report.sent[0] * 3,
+        "{:?} of {:?} datagrams lost while the link swung",
+        report.lost,
+        report.sent
+      );
+      assert!(
+        report.longest_gap <= Duration::from_millis(700),
+        "the picture stood still for {:?} ({:?} of {:?} datagrams lost, padding {:?})",
+        report.longest_gap,
+        report.lost,
+        report.sent,
+        report.padding
+      );
+    }
+
     /// Runs a publisher sending all its layers at their bitrates and a receiver behind a link of
     /// `capacity_bps` that reports feedback every 100 ms; returns the receiver's dominant layer in
     /// the last 20 of 60 s (the estimate ramps up at 8 %/s from 300 kbit/s).
@@ -2998,6 +3075,20 @@ mod tests {
       capacities: &[(Duration, u64)],
       duration: Duration,
     ) -> Vec<(Duration, Option<u8>)> {
+      let link = Link::new(capacities.first().map_or(u64::MAX, |(_, bps)| *bps));
+      simulate_on(link, layers, capacities, duration)
+        .into_iter()
+        .map(|datagram| (datagram.at, datagram.maybe_layer))
+        .collect()
+    }
+
+    /// [`simulate`] behind `link`, with each datagram's arrival.
+    fn simulate_on(
+      mut link: Link,
+      layers: &[VideoLayerInfo],
+      capacities: &[(Duration, u64)],
+      duration: Duration,
+    ) -> Vec<SimulatedDatagram> {
       let (mut forwarder, start) = room(3);
       forwarder
         .publish_video(
@@ -3011,19 +3102,24 @@ mod tests {
         .unwrap();
       let top = layers.last().map_or(0, |info| info.layer);
       forwarder.subscribe(device(2), VIDEO, Some(top), start).unwrap();
-      let mut link = Link::new(capacities.first().map_or(u64::MAX, |(_, bps)| *bps));
       let mut recorder = FeedbackRecorder::new(start);
       let mut in_flight: Vec<(Instant, TransportSeq)> = Vec::new();
       let mut frame_number = 0u16;
+      let mut keyframes_asked: std::collections::HashSet<u8> = std::collections::HashSet::new();
       let mut now = start;
       let end = start + duration;
       let mut next_feedback = start + Duration::from_millis(100);
-      let mut sent: Vec<(Duration, Option<u8>)> = Vec::new();
+      let mut sent: Vec<SimulatedDatagram> = Vec::new();
       let mut send = |link: &mut Link, delivered: &[u8], now: Instant, in_flight: &mut Vec<_>| {
         let parsed = DatagramHeader::parse(delivered).unwrap();
         let is_padding = parsed.stream_id == teamcraft_media::datagram::PADDING_STREAM;
-        sent.push((now - start, (!is_padding).then_some(parsed.layer.value())));
-        if let (Some(arrival), Some(seq)) = (link.send(delivered.len(), now), parsed.maybe_transport_seq) {
+        let maybe_arrival = link.send(delivered.len(), now);
+        sent.push(SimulatedDatagram {
+          at: now - start,
+          maybe_layer: (!is_padding).then_some(parsed.layer.value()),
+          maybe_arrival: maybe_arrival.map(|arrival| arrival - start),
+        });
+        if let (Some(arrival), Some(seq)) = (maybe_arrival, parsed.maybe_transport_seq) {
           in_flight.push((arrival, seq));
         }
       };
@@ -3031,9 +3127,9 @@ mod tests {
         if let Some((_, capacity_bps)) = capacities.iter().rev().find(|(from, _)| now - start >= *from) {
           link.capacity_bps = *capacity_bps;
         }
-        // 30 fps; a keyframe every second so layer switches can happen.
-        let is_keyframe = frame_number.is_multiple_of(30);
+        // 30 fps; a keyframe every second, and on the SFU's request, as a publisher sends one.
         for info in layers {
+          let is_keyframe = frame_number.is_multiple_of(30) || keyframes_asked.remove(&info.layer);
           let frame_bytes = (info.max_bitrate_bps / 8 / 30) as usize;
           for (fragment, payload) in
             fragment_frame(&vec![0; frame_bytes], frame_number, is_keyframe, 1000).unwrap()
@@ -3051,10 +3147,12 @@ mod tests {
             }
             .to_bytes(1200)
             .unwrap();
-            for (receiver, delivered) in forwarder.route(device(1), &datagram, now).unwrap().deliveries {
+            let route = forwarder.route(device(1), &datagram, now).unwrap();
+            for (receiver, delivered) in route.deliveries {
               assert_eq!(receiver, device(2));
               send(&mut link, &delivered, now, &mut in_flight);
             }
+            note_keyframe_requests(&route.effects, &mut keyframes_asked);
           }
         }
         now += Duration::from_millis(33);
@@ -3073,6 +3171,7 @@ mod tests {
             Some(feedback) => forwarder.on_transport_feedback(device(2), &feedback, now),
             None => forwarder.on_timer(device(2), now),
           };
+          note_keyframe_requests(&effects, &mut keyframes_asked);
           for effect in effects {
             if let Effect::Padding { receiver, datagrams } = effect {
               assert_eq!(receiver, device(2));
@@ -3085,30 +3184,198 @@ mod tests {
       }
       sent
     }
+
+    fn note_keyframe_requests(effects: &[Effect], keyframes_asked: &mut std::collections::HashSet<u8>) {
+      for effect in effects {
+        if let Effect::KeyframeRequest { layer, .. } = effect {
+          keyframes_asked.insert(*layer);
+        }
+      }
+    }
   }
 
-  /// A downlink bottleneck: capacity, 30 ms delay, 300 ms drop-tail queue.
+  /// The LTE link of the test setup's `ltevary.sh` (#1792), deterministic: `swing` of rates
+  /// between 2 and 3.5 Mbit/s held 2 to 4 s each, `fast` at 25 Mbit/s, `swing` again.
+  #[derive(Debug, Clone, Copy)]
+  struct Lte {
+    swing: Duration,
+    fast: Duration,
+    fast_bps: u64,
+  }
+
+  impl Default for Lte {
+    fn default() -> Self {
+      Self {
+        swing: Duration::from_secs(40),
+        fast: Duration::from_secs(60),
+        fast_bps: 25_000_000,
+      }
+    }
+  }
+
+  impl Lte {
+    /// From when, which capacity.
+    fn capacities(&self) -> Vec<(Duration, u64)> {
+      const SWING_KBPS: [u64; 8] = [2_000, 3_500, 2_400, 3_100, 2_000, 2_800, 3_400, 2_200];
+      const HOLD_SECONDS: [u64; 5] = [2, 3, 4, 3, 2];
+      let mut capacities = Vec::new();
+      let swing = |from: Duration, until: Duration, capacities: &mut Vec<(Duration, u64)>| {
+        let mut at = from;
+        let mut index = 0;
+        while at < until {
+          capacities.push((at, SWING_KBPS[index % SWING_KBPS.len()] * 1000));
+          at += Duration::from_secs(HOLD_SECONDS[index % HOLD_SECONDS.len()]);
+          index += 1;
+        }
+      };
+      swing(Duration::ZERO, self.fast_from(), &mut capacities);
+      capacities.push((self.fast_from(), self.fast_bps));
+      swing(self.fast_until(), self.end(), &mut capacities);
+      capacities
+    }
+
+    fn fast_from(&self) -> Duration {
+      self.swing
+    }
+
+    fn fast_until(&self) -> Duration {
+      self.swing + self.fast
+    }
+
+    fn end(&self) -> Duration {
+      self.fast_until() + self.swing
+    }
+  }
+
+  /// How a run on an [`Lte`] link followed it.
+  #[derive(Debug)]
+  struct LteReport {
+    /// From the room appearing until the first datagram of the top layer.
+    up_after: Option<Duration>,
+    /// From the room going until the last datagram of the top layer.
+    down_after: Duration,
+    /// The longest time without a video datagram arriving, after the first 5 s.
+    longest_gap: Duration,
+    /// Video datagrams the link dropped, after the first 5 s, of those sent: while it swings
+    /// before the minute, during it, and while it swings after it.
+    lost: [usize; 3],
+    sent: [usize; 3],
+    /// Padding datagrams sent, and dropped.
+    padding: (usize, usize),
+  }
+
+  impl LteReport {
+    fn of(run: &[SimulatedDatagram], lte: &Lte, is_top: impl Fn(u8) -> bool) -> Self {
+      let is_top_datagram = |datagram: &&SimulatedDatagram| datagram.maybe_layer.is_some_and(&is_top);
+      let up_after = run
+        .iter()
+        .filter(is_top_datagram)
+        .find(|datagram| datagram.at >= lte.fast_from())
+        .map(|datagram| datagram.at - lte.fast_from());
+      let down_after = run
+        .iter()
+        .filter(is_top_datagram)
+        .filter(|datagram| datagram.at >= lte.fast_until())
+        .map(|datagram| datagram.at - lte.fast_until())
+        .max()
+        .unwrap_or_default();
+      let settled = Duration::from_secs(5);
+      let mut arrivals: Vec<Duration> = run
+        .iter()
+        .filter(|datagram| datagram.at >= settled && datagram.maybe_layer.is_some())
+        .filter_map(|datagram| datagram.maybe_arrival)
+        .collect();
+      arrivals.sort_unstable();
+      let longest_gap = arrivals
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .max()
+        .unwrap_or_default();
+      let phases = [
+        (settled, lte.fast_from()),
+        (lte.fast_from(), lte.fast_until()),
+        (lte.fast_until(), lte.end()),
+      ];
+      let video_in = |(from, until): (Duration, Duration)| {
+        run.iter().filter(move |datagram| {
+          datagram.at >= from && datagram.at < until && datagram.maybe_layer.is_some()
+        })
+      };
+      let lost = phases.map(|phase| {
+        video_in(phase)
+          .filter(|datagram| datagram.maybe_arrival.is_none())
+          .count()
+      });
+      let sent = phases.map(|phase| video_in(phase).count());
+      let padding_sent: Vec<&SimulatedDatagram> = run
+        .iter()
+        .filter(|datagram| datagram.maybe_layer.is_none())
+        .collect();
+      let padding_lost = padding_sent
+        .iter()
+        .filter(|datagram| datagram.maybe_arrival.is_none())
+        .count();
+      Self {
+        up_after,
+        down_after,
+        longest_gap,
+        lost,
+        sent,
+        padding: (padding_sent.len(), padding_lost),
+      }
+    }
+  }
+
+  /// One datagram the simulated SFU sent to the receiver.
+  #[derive(Debug, Clone, Copy)]
+  struct SimulatedDatagram {
+    /// When it was sent, from the simulation's start.
+    at: Duration,
+    /// Its layer; `None` for padding.
+    maybe_layer: Option<u8>,
+    /// When it arrived, from the simulation's start; `None` when the link dropped it.
+    maybe_arrival: Option<Duration>,
+  }
+
+  /// A downlink bottleneck: capacity, 30 ms delay, a drop-tail queue (300 ms by default) and,
+  /// like Linux's `tbf`, a token bucket of `bucket_bytes` that lets a burst through at once.
   struct Link {
     capacity_bps: u64,
-    maybe_free_at: Option<Instant>,
+    queue_limit: Duration,
+    bucket_bytes: usize,
+    /// When the bucket would be empty had nothing been sent since (the token bucket's clock).
+    maybe_empty_at: Option<Instant>,
   }
 
   impl Link {
     fn new(capacity_bps: u64) -> Self {
       Self {
         capacity_bps,
-        maybe_free_at: None,
+        queue_limit: Duration::from_millis(300),
+        bucket_bytes: 0,
+        maybe_empty_at: None,
+      }
+    }
+
+    /// The LTE test setup's link (`ltevary.sh`): `tbf` with a 32 kB bucket and 150 ms of queue.
+    fn lte() -> Self {
+      Self {
+        queue_limit: Duration::from_millis(150),
+        bucket_bytes: 32_000,
+        ..Self::new(3_000_000)
       }
     }
 
     fn send(&mut self, bytes: usize, now: Instant) -> Option<Instant> {
-      let start = self.maybe_free_at.map_or(now, |free| free.max(now));
-      if start.saturating_duration_since(now) > Duration::from_millis(300) {
+      let seconds = |bytes: usize| Duration::from_secs_f64(bytes as f64 * 8.0 / self.capacity_bps as f64);
+      let full_since = now.checked_sub(seconds(self.bucket_bytes)).unwrap_or(now);
+      let empty_at = self.maybe_empty_at.map_or(full_since, |at| at.max(full_since));
+      let departure = (empty_at + seconds(bytes)).max(now);
+      if empty_at.saturating_duration_since(now) > self.queue_limit {
         return None;
       }
-      let free = start + Duration::from_secs_f64(bytes as f64 * 8.0 / self.capacity_bps as f64);
-      self.maybe_free_at = Some(free);
-      Some(free + Duration::from_millis(30))
+      self.maybe_empty_at = Some(empty_at + seconds(bytes));
+      Some(departure + Duration::from_millis(30))
     }
   }
 
@@ -3202,6 +3469,25 @@ mod tests {
       (1, 640, 360, 375_000),
       (2, 1280, 720, 1_500_000),
       (3, 1920, 1080, 3_000_000),
+    ]
+    .into_iter()
+    .map(|(layer, width, height, max_bitrate_bps)| VideoLayerInfo {
+      layer,
+      width,
+      height,
+      max_framerate: 30,
+      max_bitrate_bps,
+      maybe_codec: None,
+    })
+    .collect()
+  }
+
+  /// A 1440p screen share's layers, about (#1733): 480p, 720p and 1440p.
+  fn share_layers() -> Vec<VideoLayerInfo> {
+    [
+      (0, 852, 480, 500_000),
+      (1, 1280, 720, 1_660_000),
+      (2, 2560, 1440, 6_600_000),
     ]
     .into_iter()
     .map(|(layer, width, height, max_bitrate_bps)| VideoLayerInfo {
