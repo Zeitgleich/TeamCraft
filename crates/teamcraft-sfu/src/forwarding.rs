@@ -2594,7 +2594,7 @@ mod tests {
       let (receiver, measurement) = measured[0];
       assert_eq!(receiver, device(2));
       assert_eq!(measurement.capacity_bps, 2_000_000);
-      assert_eq!(forwarder.downlink_estimate_bps(device(2)), Some(1_700_000));
+      assert_eq!(forwarder.downlink_estimate_bps(device(2)), Some(1_900_000));
       assert!(paddings(&forwarder.on_timer(device(2), at + Duration::from_secs(1))).is_empty());
     }
 

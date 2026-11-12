@@ -96,9 +96,11 @@ const MAX_FEEDBACK_ENTRIES: usize = 1000;
 /// one padding datagram reported lost makes a probe fall short and limits the estimate. A gap
 /// still open after the window is a loss, as before (also the send queue's own drops).
 pub const REORDER_WINDOW: Duration = Duration::from_millis(150);
-/// The share of a link's measured capacity the estimate takes from a probe at the start
-/// (`crate::join_probe`): the rest is room for other traffic and the measurement's error.
-const PROBE_SHARE: f64 = 0.85;
+/// The share of a link's measured capacity the estimate starts at after a probe at the start
+/// (`crate::join_probe`; WebRTC's probe estimator takes the same, `kTargetUtilizationFraction`). At
+/// 85 % a screen share whose two layers and sound need 1.27 times the layers, on a link of 1.45
+/// times them, started with its top layer held back and its slides waited (screen_uplink_bursts).
+const PROBE_SHARE: f64 = 0.95;
 
 /// Settings of the estimator.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -183,8 +185,8 @@ pub struct SendSideEstimator {
   recent_sends: VecDeque<(Instant, usize)>,
   recent_sent_bytes: usize,
   maybe_first_send_at: Option<Instant>,
-  /// What a probe at the start showed the path carries ([`SendSideEstimator::apply_probe`]), as
-  /// the estimate takes it: the fast start grows no further.
+  /// What a probe at the start showed the path carries ([`SendSideEstimator::apply_probe`]): the
+  /// fast start grows no further.
   maybe_probed_bps: Option<f64>,
 }
 
@@ -394,7 +396,9 @@ impl SendSideEstimator {
   /// Packets in flight still meet their feedback.
   pub fn measure_afresh(&mut self) {
     // What a probe showed of the path stands in for the start value, a guess.
-    let start = self.maybe_probed_bps.unwrap_or(f64::from(self.config.start_bps));
+    let start = self
+      .maybe_probed_bps
+      .map_or(f64::from(self.config.start_bps), |probed| probed * PROBE_SHARE);
     self.estimate_bps = self
       .estimate_bps
       .max(start)
@@ -418,16 +422,15 @@ impl SendSideEstimator {
   }
 
   /// A probe at the start showed the path carries `capacity_bps` (`crate::join_probe`): the
-  /// estimate takes [`PROBE_SHARE`] of it at once, whether that is more or less than it has now,
-  /// and the fast start ends there, now and after [`Self::measure_afresh`]. A narrow link isn't
+  /// estimate takes [`PROBE_SHARE`] of it at once, whether that is more or less than it has now; the
+  /// fast start ends now, and after [`Self::measure_afresh`] it ends at the capacity. A narrow link isn't
   /// overshot by the fast start and then cut (a 1 Mbit/s link went to 2.7 Mbit/s in two seconds
   /// before its first loss), and a wide one doesn't wait for the estimate to grow. From there the
   /// estimate grows as usual, should the probe have shown too little.
   pub fn apply_probe(&mut self, capacity_bps: u32) -> u32 {
-    let probed =
-      (f64::from(capacity_bps) * PROBE_SHARE).clamp(f64::from(self.config.min_bps), self.ceiling_bps());
-    self.maybe_probed_bps = Some(probed);
-    self.estimate_bps = probed;
+    let capacity = f64::from(capacity_bps).clamp(f64::from(self.config.min_bps), self.ceiling_bps());
+    self.maybe_probed_bps = Some(capacity);
+    self.estimate_bps = (capacity * PROBE_SHARE).max(f64::from(self.config.min_bps));
     self.is_starting = false;
     self.estimate_bps()
   }
@@ -1076,11 +1079,11 @@ mod tests {
     #[test]
     fn measuring_afresh_starts_from_the_probe() {
       let mut estimator = SendSideEstimator::new(BweConfig::default());
-      assert_eq!(estimator.apply_probe(200_000), 170_000);
+      assert_eq!(estimator.apply_probe(200_000), 190_000);
       estimator.measure_afresh();
       assert_eq!(
         estimator.estimate_bps(),
-        170_000,
+        190_000,
         "not the start value, above the link"
       );
       estimator.forget_probe();

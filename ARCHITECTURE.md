@@ -415,8 +415,8 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
   the client sends a few short trains of padding to the SFU, and the SFU to the client (three
   trains of five 1000-byte datagrams, 150 ms apart, `TEAMCRAFT_SFU_PROBE_BYTES`). The spread of
   each train in the transport feedback is the narrowest link's rate (packet-train dispersion); the
-  median of the trains, if at least 80 % of a train arrived, seeds the estimate at 85 % of it and
-  ends its fast start there, also when a new track measures afresh. A 1 Mbit/s mobile link is no
+  median of the trains, if at least 80 % of a train arrived, seeds the estimate at 95 % of it (as
+  WebRTC does) and ends its fast start at it, also when a new track measures afresh. A 1 Mbit/s mobile link is no
   longer overshot to almost 3 Mbit/s before its first loss, and a fast one has its layers within a
   second instead of four. Nothing waits for it: audio and the first layers start as before. The
   SFU announces the bytes it takes in `joined` (`probe_bytes`); clients probe only such SFUs, older

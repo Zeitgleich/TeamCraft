@@ -5246,7 +5246,7 @@ mod tests {
       engine.on_timer(at + Duration::from_secs(1));
       assert!(padding_seqs(&drain(&mut engine)).is_empty(), "no more trains");
       let estimate = engine.video_stats(0).maybe_uplink.unwrap().estimate_bps;
-      assert!((1_500_000..=1_800_000).contains(&estimate), "{estimate}");
+      assert!((1_700_000..=2_000_000).contains(&estimate), "{estimate}");
     }
 
     #[test]
