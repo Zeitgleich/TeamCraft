@@ -1334,13 +1334,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "%@ added the notetaker. The call goes on in a meeting room, where what is said is sent to OpenRouter for a transcript. Your audio reaches it only once you join there."
+            "value": "%@ added the notetaker. The call goes on in a meeting room, where what is said is sent to OpenRouter for a transcript. You move over with everybody else."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "%@ hat den Notetaker hinzugefügt. Der Anruf geht in einem Besprechungsraum weiter, wo das Gesprochene für ein Transkript an OpenRouter gesendet wird. Dein Ton erreicht ihn erst, wenn du dort beitrittst."
+            "value": "%@ hat den Notetaker hinzugefügt. Der Anruf geht in einem Besprechungsraum weiter, wo das Gesprochene für ein Transkript an OpenRouter gesendet wird. Du wechselst mit allen anderen dorthin."
           }
         }
       }

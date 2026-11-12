@@ -176,12 +176,13 @@ the change, and people taken off the list are removed from the group.
    encrypted `call_moved` event with the room, the added people and the DM call's ID). The history
    shows it as a line ("Alice moved the call into 'Call with notetaker'") which, for whoever is in
    the room, opens it: there the summary lands (issue #1290).
-   `call_move` alone moves nobody: a device in the DM's call shows "X moved the call into a meeting
-   room and added Y" once the announcement is in, and on the user's tap checks it (announced by a
-   member of the DM's group, the room's group holds nobody but the DM's members and the named
-   people, and the announcement is for the call this device is in now) before it joins the room's
-   call with its microphone and camera as they were. Only the device that added the people follows
-   without the tap; the user's other devices ask too. A followed announcement is forgotten, so it
+   `call_move` alone moves nobody: once the announcement is in, every device in the DM's call checks
+   it (announced by a member of the DM's group, the room's group holds nobody but the DM's members
+   and the named people, and the announcement is for the call this device is in now) and joins the
+   room's call by itself with its microphone and camera as they were, so the whole call moves
+   together without anybody tapping. While it follows, the call screen says "X moved the call into
+   a meeting room and added Y" (for the notetaker: where the audio goes); a follow that fails stays
+   in the DM's call and keeps a button to try again. A followed announcement is forgotten, so it
    never moves the device again, and the end of the call clears the announcements made for it (also
    those a failed follow left behind) and the device's note of the call's ID. The DM keeps its members and history, and the added people never
    see it. If the server refuses the move (409), the adding app cancels the room it just made.

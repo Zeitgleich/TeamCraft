@@ -304,8 +304,9 @@ final class CallManager: NSObject, @unchecked Sendable {
     Task { await checkAnnouncedMove() }
   }
 
-  /// A move this device asked for is followed at once; any other (the user's own from another
-  /// device included) is offered on the call screen.
+  /// Every device in the call follows at once, after the core's check, so the whole call moves
+  /// together; for a move somebody else made, the call screen says who moved it (and where the
+  /// audio goes) while it follows, and keeps its button when following failed.
   @MainActor
   private func checkAnnouncedMove() async {
     guard let move = maybeAnnouncedMove,
@@ -324,6 +325,7 @@ final class CallManager: NSObject, @unchecked Sendable {
       byName: names[info.byUserId] ?? String(localized: "call_move_someone"),
       addedNames: info.addedUserIds.map { names[$0] ?? String(localized: "call_move_someone") },
       isNotetakerOnly: maybeBot.map { info.addedUserIds == [$0] } ?? false)
+    await follow(move)
   }
 
   /// Checks the move in the core, then switches the call over. A refused move is dropped (the

@@ -1877,11 +1877,12 @@ never by the server's member list:
   The server's `call_move` event is only a trigger: the adding device announces the move in the
   DM's group (an encrypted `CallMoved` event naming the room, the added people and the DM call's
   ID), and another device follows only that announcement, decrypted in the DM's group (so its
-  sender is a member), after the user's tap that shows who moved the call and whom they added, and
-  only if it is for the call this device is in now (the call ID of its own join token) and the
-  room's group, once this device is in it, holds nobody but the DM's members and the named people.
-  Only the device that added the people follows without the tap (a flag only it writes into its
-  record); a followed announcement is deleted. A server that redirects the call, replays an earlier
+  sender is a member), and only if it is for the call this device is in now (the call ID of its own
+  join token) and the room's group, once this device is in it, holds nobody but the DM's members
+  and the named people. Every device in the call follows such an announcement by itself, so the call
+  moves together; its call screen says who moved the call and whom they added while it does (a
+  flag only the adding device writes into its record leaves that notice out there). A followed
+  announcement is deleted. A server that redirects the call, replays an earlier
   move in a later call, or a member who points it at an old room with other people in it, gets
   nobody's audio or video there.
 
@@ -5880,11 +5881,13 @@ weighed:
 | The DM                         | Unchanged: no commit, same members and history                                                                                      | A 1:1 is a group for a while; the server refuses a third member in a DM, so it needs an exception to who may change a group (§4.6) |
 | What the bot reads             | Only the new room: no history, and only what is written there                                                                       | Everything written in the DM while it is in, more than the audio the policy sends it                                               |
 | Afterwards                     | Nothing to undo; the room keeps the summary                                                                                         | A device has to remove it; one that is offline or gone leaves the bot in the DM for good                                           |
-| Whose audio it hears           | Only of those who followed the move with a tap; the others stay in the DM's call                                                    | Everybody in the call from the commit on; the banner is the only notice                                                            |
+| Whose audio it hears           | Of those who moved: every device in the call follows by itself; the banner says where the audio goes, leaving is the way out        | Everybody in the call from the commit on; the banner is the only notice                                                            |
 | New trust, protocol and server | None: the move's checks (announced in the DM's group, the room holds nobody else) and endpoints as they are                         | A temporary membership, its removal protocol, a server exception for DMs                                                           |
 
-**(a) it is**: it adds no party, no trust and no server change, keeps the DM as it is, and gives
-everybody in the call a choice before the notetaker hears them. A sibling "call notes"
+**(a) it is**: it adds no party, no trust and no server change, and keeps the DM as it is. The
+call moves together (#1444): asking everybody to tap split calls in two, so the devices follow by
+themselves, and the notice on every call screen, as in a channel call the notetaker joins, says
+where the audio goes. A sibling "call notes"
 conversation that only receives the summary while the call stays in the DM was no option: the bot
 can only hear a call it is a member of (above), so the call has to be where the bot is.
 

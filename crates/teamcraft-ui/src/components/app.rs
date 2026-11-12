@@ -1498,9 +1498,9 @@ fn report_lost_call() {
 /// Somebody added people to the DM call this device is in, and the server says the call moved into
 /// a meeting room (docs/meetings.md, "A call becomes a meeting"). The server's word alone moves
 /// nothing: the move shows only once a member of the DM's encryption group announced it, with who
-/// moved it and whom they added. A move this device asked for follows at once (after the core's
-/// check); any other, the user's own from another device included, waits for a tap in the call
-/// screen.
+/// moved it and whom they added. Every device in the call follows at once, after the core's check,
+/// so the whole call moves together (nobody has to tap); a follow that fails stays in this call and
+/// leaves the banner with its button for another try.
 fn follow_moved_calls(state: AppState) {
   let call = state.call;
   let pending = crate::feedback::PendingAction::new();
@@ -1529,10 +1529,10 @@ fn follow_moved_calls(state: AppState) {
       return;
     }
     call.move_offer.set(maybe_offer.clone());
-    if let Some(offer) = maybe_offer.filter(|offer| offer.is_requested_here) {
-      // "Add notetaker" moved the call: the core asked the notetaker into the room.
+    if let Some(offer) = maybe_offer {
+      // "Add notetaker" moved the call from here: the core asked the notetaker into the room.
       let maybe_bot = state.read(|backend| backend.notetaker_policy().and_then(|policy| policy.maybe_bot));
-      if maybe_bot.is_some_and(|bot| offer.added.contains(&bot)) {
+      if offer.is_requested_here && maybe_bot.is_some_and(|bot| offer.added.contains(&bot)) {
         call.notetaker_asked_in.set(Some(offer.to));
       }
       state.follow_call_move(offer.from, offer.to, pending);
