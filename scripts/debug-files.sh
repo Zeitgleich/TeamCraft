@@ -44,7 +44,7 @@ main() {
     split) shift; [ "$#" -eq 2 ] || fail "usage: $0 split BINARY OUT_DIR"; split "$@" ;;
     store) shift; [ "$#" -ge 2 ] || fail "usage: $0 store LABEL FILE..."; store "$@" ;;
     fetch) shift; [ "$#" -ge 1 ] || fail "usage: $0 fetch BUILD_ID [DIR]"; fetch "$@" ;;
-    sentry-cli) shift; install_sentry_cli; exec "$SENTRY_CLI" "$@" ;;
+    sentry-cli) shift; install_sentry_cli || exit 1; exec "$SENTRY_CLI" "$@" ;;
     index) shift; [ "$#" -eq 1 ] || fail "usage: $0 index LABEL"; require_bucket; s3_get "index/$1.txt" - ;;
     *) fail "usage: $0 split BINARY OUT_DIR | store LABEL FILE... | fetch BUILD_ID [DIR] | index LABEL" ;;
   esac
@@ -75,7 +75,10 @@ store() {
     warn "no crash reports backend and no DEBUG_FILES_S3_* bucket: the debug files of $label are not kept"
     return 0
   fi
-  install_sentry_cli
+  if ! install_sentry_cli; then
+    warn "no sentry-cli: the debug files of $label are not kept"
+    return 0
+  fi
   if [ "$has_backend" = true ]; then
     "$SENTRY_CLI" debug-files upload "$@" \
       || warn "the debug files of $label did not reach the crash reports backend"
@@ -211,20 +214,26 @@ install_sentry_cli() {
       sha256=50009f23c49d6e9ff7624204c7035855303b49c5e326708ee783c1fdf783ac83 ;;
     MINGW*-aarch64 | MINGW*-arm64 | MSYS*-aarch64 | MSYS*-arm64) asset=sentry-cli-Windows-aarch64.exe
       sha256=3c197c61120e2d53a6ecfd9e7812d123bfdc598df1d569700bf5c3b936dfe891 ;;
-    *) fail "no pinned sentry-cli for $(uname -s)-$(uname -m)" ;;
+    *) echo "error: no pinned sentry-cli for $(uname -s)-$(uname -m)" >&2; return 1 ;;
   esac
   dir="${RUNNER_TEMP:-$(mktemp -d)}/sentry-cli-$SENTRY_CLI_VERSION"
   SENTRY_CLI="$dir/$asset"
   [ -x "$SENTRY_CLI" ] && return 0
   mkdir -p "$dir"
-  curl --fail --silent --show-error --location --retry 5 --retry-all-errors --output "$SENTRY_CLI" \
-    "https://github.com/getsentry/sentry-cli/releases/download/$SENTRY_CLI_VERSION/$asset"
-  [ "$(sha256_of "$SENTRY_CLI")" = "$sha256" ] || fail "checksum mismatch: $asset"
-  chmod +x "$SENTRY_CLI"
+  curl --fail --silent --show-error --location --retry 5 --retry-all-errors --output "$SENTRY_CLI.part" \
+    "https://github.com/getsentry/sentry-cli/releases/download/$SENTRY_CLI_VERSION/$asset" || return 1
+  if [ "$(sha256_of "$SENTRY_CLI.part")" != "$sha256" ]; then
+    echo "error: checksum mismatch: $asset" >&2
+    rm -f "$SENTRY_CLI.part"
+    return 1
+  fi
+  chmod +x "$SENTRY_CLI.part"
+  mv "$SENTRY_CLI.part" "$SENTRY_CLI"
 }
 
+# From stdin: with a path, GNU sha256sum escapes backslashes (Windows paths) and prefixes the line.
 sha256_of() {
-  if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d ' ' -f 1
+  if command -v sha256sum >/dev/null; then sha256sum <"$1"; else shasum -a 256 <"$1"; fi | cut -d ' ' -f 1
 }
 
 main "$@"
