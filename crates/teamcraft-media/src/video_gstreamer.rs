@@ -103,7 +103,7 @@ impl GstreamerEncoder {
         Ok(mut encoder) => {
           encoder.maybe_governed = is_governed.then(|| Governed {
             hardware: element,
-            layer: *layer,
+            layer: layer.clone(),
             governor: QualityGovernor::new(layer.max_bitrate_bps),
           });
           return Some(encoder);
@@ -133,7 +133,7 @@ impl GstreamerEncoder {
     let Some(governed) = &self.maybe_governed else {
       return;
     };
-    let layer = governed.layer;
+    let layer = governed.layer.clone();
     let description = pipeline_description(governed.hardware, &layer, VideoContent::Screen, Some(quality));
     match Self::build(&description, self.element, &layer, VideoContent::Screen) {
       Ok(rebuilt) => {

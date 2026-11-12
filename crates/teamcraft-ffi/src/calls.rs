@@ -1128,7 +1128,7 @@ fn apply_encoded_control(
     Control::PublishEncodedCamera(layer) => {
       if encoded.maybe_camera.is_none() {
         state.is_camera_on = true;
-        let publication = call.publish_video(VideoTrackKind::Camera, VideoCodec::H264, vec![*layer]);
+        let publication = call.publish_video(VideoTrackKind::Camera, VideoCodec::H264, vec![layer.clone()]);
         encoded.maybe_camera = Some(OwnPublication::new(publication));
       }
     },

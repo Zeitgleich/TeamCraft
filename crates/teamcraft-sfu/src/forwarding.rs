@@ -2539,14 +2539,22 @@ mod tests {
       forwarder.on_timer(device(2), now);
       assert_eq!(send_frame(&mut forwarder, 0, true, now), devices(&[2]));
       assert!(send_frame(&mut forwarder, 2, true, now).is_empty());
+      // A larger tile: the AV1 top once the allocation's upswitch hold passed and its keyframe
+      // came; the base until then.
       forwarder.subscribe(device(2), VIDEO, Some(2), now).unwrap();
-      assert_eq!(
-        send_frame(&mut forwarder, 0, false, now),
-        devices(&[2]),
-        "until the switch"
-      );
-      assert_eq!(send_frame(&mut forwarder, 2, true, now), devices(&[2]));
-      assert!(send_frame(&mut forwarder, 0, false, now).is_empty());
+      let mut maybe_switched_at = None;
+      for step in 1..=100u32 {
+        let at = now + Duration::from_millis(100) * step;
+        forwarder.on_timer(device(2), at);
+        let base = send_frame(&mut forwarder, 0, false, at);
+        if send_frame(&mut forwarder, 2, true, at) == devices(&[2]) {
+          maybe_switched_at = Some(at);
+          break;
+        }
+        assert_eq!(base, devices(&[2]), "the base until the switch");
+      }
+      let at = maybe_switched_at.expect("switched to the AV1 top");
+      assert!(send_frame(&mut forwarder, 0, false, at).is_empty());
     }
 
     /// Only clients that take layer codecs count for the codecs some decode; the codecs all
