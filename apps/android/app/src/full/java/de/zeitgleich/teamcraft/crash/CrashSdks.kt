@@ -99,6 +99,17 @@ private object SentryCrashSdk : CrashSdk {
     return SentryPerfHandle(transaction)
   }
 
+  override fun captureHandled(what: String, cause: String) {
+    if (maybeRunning == null) return
+    val event = SentryEvent().apply {
+      level = SentryLevel.ERROR
+      message = Message().apply { formatted = "Handled: $what" }
+      fingerprints = listOf("handled", what, cause)
+      setTag("cause", cause)
+    }
+    runCatching { Sentry.captureEvent(event) }
+  }
+
   private fun configure(options: SentryAndroidOptions, settings: CrashSdkSettings) {
     options.dsn = settings.config.dsn
     options.release = settings.release

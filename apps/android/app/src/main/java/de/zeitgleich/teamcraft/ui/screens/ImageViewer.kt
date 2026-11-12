@@ -86,7 +86,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.DialogWindowProvider
-import androidx.core.content.FileProvider
+import de.zeitgleich.teamcraft.ui.SharedFiles
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -682,11 +682,4 @@ private suspend fun saveToGallery(context: Context, path: String, file: FileInfo
 }
 
 /** Hands a decrypted file to another app (send to, save to files) through the FileProvider. */
-fun shareFile(context: Context, file: File, mediaType: String) {
-  val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
-  val intent = Intent(Intent.ACTION_SEND)
-    .setType(mediaType)
-    .putExtra(Intent.EXTRA_STREAM, uri)
-    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-  runCatching { context.startActivity(Intent.createChooser(intent, file.name)) }
-}
+fun shareFile(context: Context, file: File, mediaType: String) = SharedFiles.share(context, file, mediaType)

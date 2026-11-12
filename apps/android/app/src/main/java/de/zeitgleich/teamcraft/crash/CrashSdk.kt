@@ -21,6 +21,13 @@ interface CrashSdk {
    * one out. [name] and [op] come from the core's list of measures.
    */
   fun startTransaction(name: String, op: String, startedAtMs: Long): PerfHandle? = null
+
+  /**
+   * Reports a handled failure the user saw as an error message instead of a crash. [what] names the
+   * place, [cause] the exception's class; never a message, which may hold a file name. Does nothing
+   * while the SDK isn't running. The core's log ring comes along as breadcrumbs, like for a crash.
+   */
+  fun captureHandled(what: String, cause: String) = Unit
 }
 
 /** What the SDK is started with: the instance's setting, this build's release and the installation. */

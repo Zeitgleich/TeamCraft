@@ -139,6 +139,8 @@
   <string name="no_conversation_selected">Wähle eine Unterhaltung.</string>
   <string name="image_save">Speichern</string>
   <string name="image_saved">In Bilder/TeamCraft gespeichert</string>
+  <string name="file_open_failed">Die Datei konnte nicht geöffnet werden.</string>
+  <string name="file_open_no_app">Keine App kann diese Datei öffnen.</string>
   <string name="image_save_failed">Das Bild konnte nicht gespeichert werden.</string>
 
   <!-- Settings pages -->
