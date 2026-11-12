@@ -55,6 +55,11 @@ use crate::route::Route;
 const PAGE: usize = 100;
 /// Events arrive in bursts (a sync delivers many); refresh once after they settle.
 const REFRESH_DELAY: Duration = Duration::from_millis(120);
+/// A change of the core asks a query again at most this often; one that comes sooner is answered
+/// once the interval is over. A steady stream of changes (a channel an integration posts to every
+/// second) asked every query on every change, an expensive one (the activity feed, for a badge)
+/// back to back. The user's own actions still ask at once.
+const MIN_REQUERY_INTERVAL: Duration = Duration::from_secs(1);
 
 thread_local! {
   /// The backend the core's events go to (#344). The page subscribes once; a new sign-in connects a
@@ -527,6 +532,8 @@ struct RefreshPlan {
   moved: Vec<(ConversationId, usize)>,
   threads: Vec<(ConversationId, ThreadId)>,
   queries: Vec<(String, ChatQuery)>,
+  /// Queries asked too recently to ask again now: they are due after [`MIN_REQUERY_INTERVAL`].
+  has_deferred_queries: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -551,6 +558,11 @@ struct Slot {
   is_used: bool,
   /// The core changed while an answer was in flight: it is asked again when that one arrives.
   is_outdated: bool,
+  /// When it was last asked ([`crate::perf::now_ms`]).
+  maybe_asked_ms: Option<f64>,
+  /// The core changed less than [`MIN_REQUERY_INTERVAL`] after it was asked: asked again once the
+  /// interval is over ([`RemoteChat::queue_requery`]).
+  is_requery_due: bool,
 }
 
 /// The receiver of events the page subscribed to once (see `CORE_EVENTS`).
@@ -566,6 +578,7 @@ pub struct RemoteChat {
   /// The newest action failure, for the admin console's inline error (`last_action_error`).
   maybe_error: Rc<RefCell<Option<String>>>,
   refresh_queued: Rc<Cell<bool>>,
+  requery_queued: Rc<Cell<bool>>,
   answers: Rc<RefCell<HashMap<String, Slot>>>,
 }
 
@@ -816,6 +829,7 @@ impl RemoteChat {
       notify: Rc::new(RefCell::new(None)),
       maybe_error: Rc::new(RefCell::new(None)),
       refresh_queued: Rc::new(Cell::new(false)),
+      requery_queued: Rc::new(Cell::new(false)),
       answers: Rc::new(RefCell::new(HashMap::new())),
     };
     // async-ok: a thread-local, not a signal.
@@ -876,6 +890,9 @@ impl RemoteChat {
   async fn fetch_answer(&self, key: String, query: ChatQuery) -> bool {
     let mut is_changed = false;
     loop {
+      if let Some(slot) = self.answers.borrow_mut().get_mut(&key) {
+        slot.maybe_asked_ms = Some(crate::perf::now_ms());
+      }
       let outcome = core_query(query.clone()).await;
       let mut answers = self.answers.borrow_mut();
       let slot = answers.entry(key.clone()).or_default();
@@ -932,6 +949,50 @@ impl RemoteChat {
     );
   }
 
+  /// Asks the queries a change of the core found too recently asked once [`MIN_REQUERY_INTERVAL`]
+  /// is over: one timer however many changes came meanwhile.
+  fn queue_requery(&self) {
+    if self.requery_queued.replace(true) {
+      return;
+    }
+    let backend = self.clone();
+    set_timeout(
+      move || {
+        // async-ok: a Cell, not a signal.
+        backend.requery_queued.set(false);
+        spawn_local(async move { backend.requery_due().await });
+      },
+      MIN_REQUERY_INTERVAL,
+    );
+  }
+
+  async fn requery_due(&self) {
+    let due = self.take_due_queries();
+    let changed = join_all(due.into_iter().map(|(key, query)| self.fetch_answer(key, query))).await;
+    if changed.into_iter().any(|is_changed| is_changed) {
+      self.changed();
+    }
+  }
+
+  /// The queries due again, marked loading; one still in flight is asked again when it arrives.
+  fn take_due_queries(&self) -> Vec<(String, ChatQuery)> {
+    let mut due = Vec::new();
+    for (key, slot) in self.answers.borrow_mut().iter_mut() {
+      if !std::mem::take(&mut slot.is_requery_due) {
+        continue;
+      }
+      if slot.is_loading {
+        slot.is_outdated = true;
+        continue;
+      }
+      if let Some(query) = slot.maybe_query.clone() {
+        slot.is_loading = true;
+        due.push((key.clone(), query));
+      }
+    }
+    due
+  }
+
   /// Takes what changed in the snapshot, re-reads what the UI showed of the conversations that
   /// changed, and tells the UI only when something differs: a change elsewhere in the core costs
   /// no re-render, and a change in one conversation no re-read of the others (issue #246).
@@ -945,7 +1006,10 @@ impl RemoteChat {
         return;
       },
     };
-    let mut plan = self.plan_refresh(changes);
+    let mut plan = self.plan_refresh(changes, crate::perf::now_ms());
+    if plan.has_deferred_queries {
+      self.queue_requery();
+    }
     // First, and before the pages: their numbers are valid once the rows held moved.
     let moves = join_all(
       plan
@@ -993,7 +1057,7 @@ impl RemoteChat {
   /// changed, if the UI read them since its last change; the others of those conversations are
   /// only marked stale and reloaded when read again. Queries are asked again whenever the core
   /// changed (they read more than the snapshot).
-  fn plan_refresh(&self, changes: SnapshotChanges) -> RefreshPlan {
+  fn plan_refresh(&self, changes: SnapshotChanges, now_ms: f64) -> RefreshPlan {
     let mut plan = RefreshPlan::default();
     let applied = {
       let mut mirror = self.mirror.borrow_mut();
@@ -1063,6 +1127,14 @@ impl RemoteChat {
           .and_then(|route| route.conversation())
           .is_some_and(|conversation| !applied.touches(conversation))
       {
+        continue;
+      }
+      let is_recent = slot
+        .maybe_asked_ms
+        .is_some_and(|asked_ms| now_ms - asked_ms < MIN_REQUERY_INTERVAL.as_secs_f64() * 1_000.0);
+      if is_recent && (slot.is_loading || slot.is_used) {
+        slot.is_requery_due = true;
+        plan.has_deferred_queries = true;
         continue;
       }
       if slot.is_loading {
@@ -3546,10 +3618,13 @@ mod tests {
         feed.is_used = true;
       }
 
-      let plan = backend.plan_refresh(SnapshotChanges {
-        feeds: vec![conversation],
-        ..SnapshotChanges::default()
-      });
+      let plan = backend.plan_refresh(
+        SnapshotChanges {
+          feeds: vec![conversation],
+          ..SnapshotChanges::default()
+        },
+        0.0,
+      );
 
       assert!(!plan.is_snapshot_changed, "the sidebar has nothing to re-render");
       assert_eq!(plan.threads, vec![(conversation, thread)]);
@@ -3566,12 +3641,70 @@ mod tests {
         mirror.used_threads.insert((conversation, thread));
       }
 
-      let plan = backend.plan_refresh(SnapshotChanges {
-        feeds: vec![id_from_raw(8)],
-        ..SnapshotChanges::default()
-      });
+      let plan = backend.plan_refresh(
+        SnapshotChanges {
+          feeds: vec![id_from_raw(8)],
+          ..SnapshotChanges::default()
+        },
+        0.0,
+      );
 
       assert!(plan.threads.is_empty() && plan.pages.is_empty());
+    }
+
+    mod requery {
+      use super::*;
+
+      #[test]
+      fn a_query_asked_within_the_interval_is_asked_once_it_is_over() {
+        let backend = backend();
+        insert_slot(&backend, false, 1_000.0);
+
+        let plan = backend.plan_refresh(SnapshotChanges::default(), 1_500.0);
+        assert!(plan.queries.is_empty() && plan.has_deferred_queries);
+        assert_eq!(backend.take_due_queries().len(), 1);
+
+        insert_slot(&backend, false, 1_000.0);
+        let plan = backend.plan_refresh(SnapshotChanges::default(), 2_000.0);
+        assert_eq!(plan.queries.len(), 1);
+        assert!(!plan.has_deferred_queries);
+      }
+
+      /// A slow answer and a change every second asked it back to back.
+      #[test]
+      fn a_query_in_flight_waits_for_the_interval_instead_of_being_asked_on_arrival() {
+        let backend = backend();
+        insert_slot(&backend, true, 1_000.0);
+
+        let plan = backend.plan_refresh(SnapshotChanges::default(), 1_200.0);
+        assert!(plan.has_deferred_queries);
+        let answers = backend.answers.borrow();
+        let slot = answers.values().next().unwrap();
+        assert!(slot.is_requery_due && !slot.is_outdated);
+      }
+
+      #[test]
+      fn a_due_query_still_in_flight_is_asked_again_when_it_arrives() {
+        let backend = backend();
+        insert_slot(&backend, true, 1_000.0);
+        backend.plan_refresh(SnapshotChanges::default(), 1_200.0);
+
+        assert!(backend.take_due_queries().is_empty());
+        assert!(backend.answers.borrow().values().all(|slot| slot.is_outdated));
+      }
+
+      fn insert_slot(backend: &RemoteChat, is_loading: bool, asked_ms: f64) {
+        backend.answers.borrow_mut().insert(
+          "activity".to_owned(),
+          Slot {
+            maybe_query: Some(ChatQuery::Activity),
+            is_used: true,
+            is_loading,
+            maybe_asked_ms: Some(asked_ms),
+            ..Slot::default()
+          },
+        );
+      }
     }
 
     pub(super) fn backend() -> RemoteChat {
@@ -3589,6 +3722,7 @@ mod tests {
         notify: Rc::new(RefCell::new(None)),
         maybe_error: Rc::new(RefCell::new(None)),
         refresh_queued: Rc::new(Cell::new(false)),
+        requery_queued: Rc::new(Cell::new(false)),
         answers: Rc::new(RefCell::new(HashMap::new())),
       }
     }
