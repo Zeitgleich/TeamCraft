@@ -368,7 +368,7 @@ mod hostile_statements {
 
     bob
       .client
-      .set_up_meeting_chat_from(chat, &rig.listed())
+      .set_up_meeting_chat_from(chat, None, &rig.listed())
       .await
       .unwrap();
 
@@ -406,7 +406,7 @@ mod hostile_statements {
     rig
       .alice
       .client
-      .set_up_meeting_chat_from(chat, &rig.listed())
+      .set_up_meeting_chat_from(chat, None, &rig.listed())
       .await
       .unwrap();
 

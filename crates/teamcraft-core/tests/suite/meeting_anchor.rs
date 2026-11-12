@@ -149,6 +149,8 @@ async fn a_statement_of_an_organizer_the_server_made_up_counts_nowhere() {
   bob.client.full_sync().await.unwrap();
   mallory.client.full_sync().await.unwrap();
   bob.client.check_meeting_admission(chat).await.unwrap();
+  // Mallory saw Alice's statement: hers goes above it.
+  mallory.client.check_meeting_admission(chat).await.unwrap();
 
   // The server makes Mallory, an invitee, the organizer; she invites Dave and signs.
   server.set_organizer_of_chat(chat, mallory_id);

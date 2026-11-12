@@ -3657,6 +3657,9 @@ and couldn't count for a purge.
     (`refuses_meeting_anchor`, `FloorError::NotThisMeeting`): no honest device signs one. Anything else that
     doesn't verify grants nothing, as for channels. Inside a group state (a commit) the anchor names its own meeting
     and founder: the founding can't change there. `is_founded_by_organizer` keeps the first-leaf check besides.
+    The admitters (and with them the signed invitees) are verified against the founder of the anchor the device
+    pinned, or this user while it holds an unsigned choice of the organizer's: a server that names somebody else as
+    organizer counts only if the signed host lists hand the meeting over (#1720); an insider it names gets nothing.
     Residual risk: a meeting chat whose group carries no anchor (founded before the release, or by an invitee who
     leaves it out) is judged as before on a device that hasn't pinned the chat.
 - **The invitee list** (#1726). The organizer's signed admitters statement (`meeting_admitters`, #1103,
