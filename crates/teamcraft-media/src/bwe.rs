@@ -63,6 +63,11 @@ const THRESHOLD_UP_RATE: f64 = 0.0087;
 const THRESHOLD_DOWN_RATE: f64 = 0.039;
 /// Window over which the delivered (acknowledged) bitrate is measured.
 const ACKED_RATE_WINDOW: Duration = Duration::from_millis(500);
+/// The latest part of it a cut to what got through takes: a link that lost its room delivers at
+/// its new rate from the moment its queue is full, and the arrivals from before the drop still in
+/// the whole window held the first cut above it (a dip from 2.2 to 0.9 Mbit/s needed 1.6 s to
+/// fit, #1792).
+const RECENT_ACKED_WINDOW: Duration = Duration::from_millis(250);
 /// Sent packets older than this without feedback are forgotten.
 const SEND_HISTORY: Duration = Duration::from_secs(5);
 /// Minimum time between two delay-based decreases (about one feedback round trip).
@@ -87,6 +92,11 @@ const APP_LIMITED_SHARE: f64 = 0.5;
 /// An overuse that lasts this long is a queue the delivered rate's window ([`ACKED_RATE_WINDOW`])
 /// saw all along: what got through is the path's rate, also for an application-limited sender.
 const LASTING_OVERUSE: Duration = ACKED_RATE_WINDOW;
+/// For this long after probe padding was sent, a queue doesn't cut the estimate a step: the
+/// padding's own queue delays what is sent along with it, and the step cut that followed a probe
+/// that fell short held a 250 kbit/s viewer's estimate below its 180p layer until the picture
+/// paused (#1792). A queue that lasts, and loss, still cut it.
+const PROBE_QUEUE_GRACE: Duration = Duration::from_millis(400);
 /// Sending this much more than gets through is a backlog on the path.
 const BACKLOG_SHARE: f64 = 1.1;
 /// The longest wait before growing at [`BweConfig::recovery_increase_per_second`] after probes
@@ -197,12 +207,15 @@ pub struct SendSideEstimator {
   maybe_overuse_since: Option<Instant>,
   /// The current overuse already cut the rate to what got through ([`LASTING_OVERUSE`]).
   has_cut_to_delivered: bool,
-  /// (send time, bytes) of the last [`APP_LIMITED_WINDOW`], and their sum.
-  recent_sends: VecDeque<(Instant, usize)>,
+  /// (send time, bytes, whether probe padding) of the last [`APP_LIMITED_WINDOW`], and the sum
+  /// of their bytes.
+  recent_sends: VecDeque<(Instant, usize, bool)>,
   recent_sent_bytes: usize,
   maybe_first_send_at: Option<Instant>,
   /// What a probe at the start showed the path carries ([`SendSideEstimator::apply_probe`]).
   maybe_probed_bps: Option<f64>,
+  /// When the last probe padding was sent ([`PROBE_QUEUE_GRACE`]).
+  maybe_last_probe_at: Option<Instant>,
 }
 
 /// Receiver side: records arrival times and produces [`TransportFeedback`].
@@ -307,6 +320,7 @@ impl SendSideEstimator {
       recent_sent_bytes: 0,
       maybe_first_send_at: None,
       maybe_probed_bps: None,
+      maybe_last_probe_at: None,
     }
   }
 
@@ -341,7 +355,10 @@ impl SendSideEstimator {
     );
     self.forget_old(now);
     self.maybe_first_send_at.get_or_insert(now);
-    self.recent_sends.push_back((now, bytes));
+    self.recent_sends.push_back((now, bytes, is_probe));
+    if is_probe {
+      self.maybe_last_probe_at = Some(now);
+    }
     self.recent_sent_bytes += bytes;
     seq
   }
@@ -501,6 +518,14 @@ impl SendSideEstimator {
     self.is_holding_after_decrease = true;
   }
 
+  /// A probe at `target_bps` fell short (`crate::rate_probe`, #1792): the estimate is no higher
+  /// than that, as after a delay-based cut there; the cut goes no lower than `floor_bps`, what the
+  /// current layers need (it never raises the estimate).
+  pub fn after_short_probe(&mut self, target_bps: u32, floor_bps: u32, now: Instant) {
+    let estimate_bps = self.estimate_bps();
+    self.limit_to(estimate_bps.min(target_bps).max(floor_bps), now);
+  }
+
   /// A probe showed the path carries `bps` (#994): the estimate is at least that, up to its
   /// ceiling. A path that got better is used without waiting for the estimate to grow there.
   pub fn raise_to(&mut self, bps: u32) {
@@ -510,11 +535,27 @@ impl SendSideEstimator {
       .clamp(f64::from(self.config.min_bps), self.ceiling_bps());
   }
 
-  /// What the sender sent over the last second (padding included), for a probe that pads up to
-  /// a rate on top of it (`crate::rate_probe`).
+  /// What the sender sent over the last second besides probe padding, for a probe that pads up
+  /// to a rate on top of it (`crate::rate_probe`). With the padding of the clusters before, a
+  /// cluster that followed them padded too little and "carried" rates it never sent: a 250 kbit/s
+  /// link's estimate climbed to 330 kbit/s (#1792).
   pub fn sent_bps(&self, now: Instant) -> u32 {
+    let Some(first_send_at) = self.maybe_first_send_at else {
+      return 0;
+    };
+    let bytes: usize = self
+      .recent_sends
+      .iter()
+      .rev()
+      .take_while(|(at, ..)| now.saturating_duration_since(*at) <= SENT_RATE_WINDOW)
+      .filter(|(_, _, is_probe)| !is_probe)
+      .map(|(_, bytes, _)| bytes)
+      .sum();
+    let span = now
+      .saturating_duration_since(first_send_at)
+      .clamp(Duration::from_millis(100), SENT_RATE_WINDOW);
     // Saturating float-to-int conversion is intended.
-    self.sent_bps_within(now, SENT_RATE_WINDOW) as u32
+    (bytes as f64 * 8.0 / span.as_secs_f64()) as u32
   }
 
   pub fn estimate_bps(&self) -> u32 {
@@ -596,13 +637,17 @@ impl SendSideEstimator {
         {
           // The queue outlasted the delivered rate's window: what got through is the path's
           // rate, whatever the sender planned.
-          self.estimate_bps = self.estimate_bps.min(self.config.decrease_factor * acked_bps);
+          let delivered_bps = self.recent_acked_bps(acked_bps);
+          self.estimate_bps = self.estimate_bps.min(self.config.decrease_factor * delivered_bps);
           self.maybe_last_decrease_at = Some(now);
           self.note_cut_to_delivered(now);
           self.is_holding_after_decrease = true;
           self.has_cut_to_delivered = true;
         } else if acked_bps > 0.0
           && !self.is_holding_after_decrease
+          && self
+            .maybe_last_probe_at
+            .is_none_or(|at| now.saturating_duration_since(at) >= PROBE_QUEUE_GRACE)
           && self.may_decrease(now, DELAY_DECREASE_INTERVAL)
         {
           // A step: what got through says little while the sender didn't fill the estimate (the
@@ -645,7 +690,7 @@ impl SendSideEstimator {
     if self.last_loss_ratio > 0.10 && acked_bps > 0.0 && may_cut_for_loss {
       // Based on what got through, not on the previous estimate, so repeated reports of the same
       // loss episode don't compound. Loss is damage also to an application-limited sender.
-      let loss_based = acked_bps * (1.0 - 0.5 * self.last_loss_ratio);
+      let loss_based = self.recent_acked_bps(acked_bps) * (1.0 - 0.5 * self.last_loss_ratio);
       self.estimate_bps = self.estimate_bps.min(loss_based);
       self.maybe_last_decrease_at = Some(now);
       self.note_cut_to_delivered(now);
@@ -692,8 +737,8 @@ impl SendSideEstimator {
       .recent_sends
       .iter()
       .rev()
-      .take_while(|(at, _)| now.saturating_duration_since(*at) <= window)
-      .map(|(_, bytes)| bytes)
+      .take_while(|(at, ..)| now.saturating_duration_since(*at) <= window)
+      .map(|(_, bytes, _)| bytes)
       .sum();
     let span = now
       .saturating_duration_since(first_send_at)
@@ -704,7 +749,7 @@ impl SendSideEstimator {
   /// What the sender sent lately (over [`APP_LIMITED_WINDOW`], or since its first packet when that
   /// is more recent); below [`APP_LIMITED_SHARE`] of the estimate it is application-limited.
   fn recent_sent_bps(&mut self, now: Instant) -> f64 {
-    while let Some(&(at, bytes)) = self.recent_sends.front() {
+    while let Some(&(at, bytes, _)) = self.recent_sends.front() {
       if now.saturating_duration_since(at) <= APP_LIMITED_WINDOW {
         break;
       }
@@ -724,6 +769,36 @@ impl SendSideEstimator {
     self
       .maybe_last_decrease_at
       .is_none_or(|last| now.saturating_duration_since(last) >= interval)
+  }
+
+  /// What got through lately: over [`RECENT_ACKED_WINDOW`], at most `acked_bps` (over the whole
+  /// window), which it is when too little arrived lately to tell.
+  fn recent_acked_bps(&self, acked_bps: f64) -> f64 {
+    let recent_bps = self.acked_bps_within(RECENT_ACKED_WINDOW);
+    if recent_bps > 0.0 {
+      recent_bps.min(acked_bps)
+    } else {
+      acked_bps
+    }
+  }
+
+  /// Delivered bitrate over the last `window` of arrivals (within [`ACKED_RATE_WINDOW`]).
+  fn acked_bps_within(&self, window: Duration) -> f64 {
+    let Some(&(latest, _)) = self.acked.iter().max_by_key(|(at, _)| *at) else {
+      return 0.0;
+    };
+    let recent = self
+      .acked
+      .iter()
+      .filter(|(at, _)| latest.saturating_duration_since(*at) <= window);
+    let bytes: usize = recent.clone().map(|(_, bytes)| bytes).sum();
+    let Some((earliest, _)) = recent.min_by_key(|(at, _)| *at) else {
+      return 0.0;
+    };
+    let span = latest
+      .saturating_duration_since(*earliest)
+      .max(Duration::from_millis(100));
+    bytes as f64 * 8.0 / span.as_secs_f64()
   }
 
   /// Delivered bitrate over the last [`ACKED_RATE_WINDOW`] of arrivals.
