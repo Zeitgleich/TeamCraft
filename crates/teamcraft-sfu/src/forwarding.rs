@@ -44,8 +44,8 @@ use teamcraft_media::{
 };
 use teamcraft_proto::{
   DeviceId, KNOWN_VIDEO_CODECS, MAX_NACK_SEQUENCE_NUMBERS, MAX_SIMULCAST_LAYERS, MediaCapabilities,
-  MediaStreamId, ScreenAudioTrack, TransportFeedback, VideoCodec, VideoFeature, VideoLayerInfo,
-  VideoPublicationId, VideoTrack, VideoTrackKind,
+  MediaStreamId, ScreenAudioTrack, TransportFeedback, VideoCodec, VideoLayerInfo, VideoPublicationId,
+  VideoTrack, VideoTrackKind,
 };
 use thiserror::Error;
 
@@ -375,7 +375,7 @@ impl Forwarder {
   /// participant that encodes no video (it publishes nothing), or one that isn't there.
   ///
   /// Besides, the codecs at least one of them decodes and takes as a layer in another codec than
-  /// its track ([`VideoFeature::LayerCodecs`], #1733): a screen share's large layers may go out
+  /// its track ([`teamcraft_proto::VideoFeature::LayerCodecs`], #1733): a screen share's large layers may go out
   /// in them above a base layer in a codec of the first list. With nobody else, every codec too.
   pub fn decodable_video_codecs(&self, device_id: DeviceId) -> Option<DecodableCodecs> {
     let publisher = self.participants.get(&device_id)?;
@@ -1248,7 +1248,7 @@ impl VideoTrackRoute {
 
 /// How many of `track`'s lowest layers a receiver of `capabilities` takes (#1733): layers in a
 /// codec it decodes, and in another codec than the track's only where it knows layer codecs
-/// ([`VideoFeature::LayerCodecs`]). The SFU switches a receiver between layers at keyframes, and
+/// ([`teamcraft_proto::VideoFeature::LayerCodecs`]). The SFU switches a receiver between layers at keyframes, and
 /// its decoder follows the codec there; a client from before takes the track's codec only.
 fn receivable_layers(track: &VideoTrack, capabilities: &MediaCapabilities) -> usize {
   track
@@ -2500,6 +2500,8 @@ mod tests {
 
   /// #1733: a screen share's base layer in H.264 every device decodes, its large layers in AV1.
   mod layer_codecs {
+    use teamcraft_proto::VideoFeature;
+
     use super::*;
 
     /// Each viewer gets the best layer it decodes and takes: AV1 for one that knows layer codecs
