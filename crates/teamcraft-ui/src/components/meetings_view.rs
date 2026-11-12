@@ -11,30 +11,26 @@ use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::meeting_hosts::co_hosts_from_dialog;
 use teamcraft_crypto::guest_link::code_of_fingerprint;
 use teamcraft_proto::{
-  CancelScope, IdempotencyKey, LobbyEntry, LobbyState, MeetingId, MeetingResponse, MeetingStatus, RsvpStatus,
-  UnixMillis, UpdateMeetingRequest,
+  CancelScope, IdempotencyKey, LobbyEntry, LobbyState, MeetingId, MeetingResponse, UnixMillis,
+  UpdateMeetingRequest,
 };
 
 use crate::calls::{CallKind, CallRequest};
 use crate::channel_access::is_guest;
-use crate::clock::{format_date, format_local_datetime_input, format_time, local_day, now_ms};
-use crate::components::avatar::{Avatar, AvatarSize};
+use crate::clock::{format_date, format_local_datetime_input, format_time, now_ms};
 use crate::components::compact_back::CompactBack;
-use crate::components::empty_state::{EmptyAction, EmptyState};
 use crate::components::icons::{Icon, IconName};
-use crate::components::meeting_controls::{HostControls, RsvpList};
+use crate::components::meeting_rows::MeetingsBody;
 use crate::components::message_actions::copy_text;
 use crate::components::modal::Modal;
 use crate::components::page::ScopedSpaceName;
 use crate::components::pending_button::PendingButton;
-use crate::components::sliding_indicator::SlidingIndicator;
 use crate::feedback::PendingAction;
 use crate::form_errors::{error_id, focus_first_invalid};
 use crate::i18n::{I18n, use_i18n};
 use crate::meetings::{
   ExternalInvitee, FormError, FormField, MeetingError, MeetingsHub, Repeat, STATUS_CONFLICT,
-  STATUS_NOT_FOUND, ScheduleForm, SeriesEnd, WEEKDAYS, attending_users, hosts_lobby, is_over, my_rsvp,
-  with_verifier,
+  STATUS_NOT_FOUND, ScheduleForm, SeriesEnd, WEEKDAYS, is_over, with_verifier,
 };
 use crate::model::{ConversationId, SpaceId, UserId};
 use crate::reactive::{SetIfAlive, UpdateIfAlive, pause, use_interval_while_visible};
@@ -51,10 +47,6 @@ const KNOCK_POLL_MS: u64 = 3_000;
 /// A first meeting suggestion starts at the next full hour, at least this far ahead.
 const MIN_LEAD_MS: i64 = 10 * 60_000;
 const MS_PER_HOUR: i64 = 3_600_000;
-/// Join is the main action from this long before a meeting starts.
-const JOIN_LEAD_MS: i64 = 15 * 60_000;
-/// Attendee pictures shown on a meeting; the names follow in text.
-const MAX_FACES: usize = 4;
 const DURATIONS: [u32; 6] = [15, 30, 45, 60, 90, 120];
 /// The element of the schedule dialog whose first invalid field gets the focus.
 const SCHEDULE_BODY_ID: &str = "schedule-form-body";
@@ -171,34 +163,7 @@ pub fn MeetingsView() -> impl IntoView {
         })
       }}
       <LinkVisitBanner hub=hub visit=visit />
-      <div class="meetings-list panel-scroll">
-        <For
-          each=move || meetings.with(|shown| meeting_days(shown, now_ms()))
-          key=|day| (day.day, day.meetings.iter().map(|meeting| (meeting.id, meeting.status.clone(), meeting.attendees.len())).collect::<Vec<_>>())
-          let:day
-        >
-          <h2 class="meetings-day">{move || day_label(day.day, day.first_start, i18n)}</h2>
-          <ul class="meetings-day-list">
-            {day.meetings.into_iter().map(|meeting| view! { <MeetingCard meeting=meeting /> }).collect_view()}
-          </ul>
-        </For>
-        <Show when=move || hub.is_loaded.get() && meetings.with(Vec::is_empty) fallback=|| ()>
-          {move || {
-            let body_key = if scope.get().is_some() { "meetings-space-empty" } else { "meetings-empty" };
-            view! {
-              <EmptyState
-                icon=IconName::Calendar
-                title_key="meetings-empty-title"
-                body_key=body_key
-                maybe_action=can_create.then(|| EmptyAction {
-                  label_key: "meetings-schedule",
-                  on_click: Callback::new(move |()| state.overlay.set(Overlay::ScheduleMeeting)),
-                })
-              />
-            }
-          }}
-        </Show>
-      </div>
+      <MeetingsBody meetings=meetings scope=scope can_create=can_create />
     </section>
   }
 }
@@ -210,249 +175,6 @@ fn meetings_in_scope(meetings: &[MeetingResponse], maybe_space: Option<SpaceId>)
     .filter(|meeting| maybe_space.is_none() || meeting.maybe_space == maybe_space)
     .cloned()
     .collect()
-}
-
-/// Meetings of one local day, for the day headings.
-#[derive(Clone, Debug, PartialEq)]
-struct MeetingDay {
-  day: i64,
-  first_start: i64,
-  meetings: Vec<MeetingResponse>,
-}
-
-fn meeting_days(meetings: &[MeetingResponse], _now: i64) -> Vec<MeetingDay> {
-  let mut days: Vec<MeetingDay> = Vec::new();
-  for meeting in meetings {
-    let day = local_day(meeting.starts_at.0);
-    match days.last_mut().filter(|last| last.day == day) {
-      Some(last) => last.meetings.push(meeting.clone()),
-      None => days.push(MeetingDay {
-        day,
-        first_start: meeting.starts_at.0,
-        meetings: vec![meeting.clone()],
-      }),
-    }
-  }
-  days
-}
-
-fn day_label(day: i64, first_start: i64, i18n: I18n) -> String {
-  let today = local_day(now_ms());
-  match day - today {
-    0 => i18n.t("meetings-today"),
-    1 => i18n.t("meetings-tomorrow"),
-    _ => format_date(first_start, i18n.locale().tag()),
-  }
-}
-
-#[component]
-fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
-  let state = use_app_state();
-  let i18n = use_i18n();
-  let hub = expect_context::<MeetingsHub>();
-  let me = state.me().id;
-  let locale = i18n.locale().tag();
-  let id = meeting.id;
-  let is_host = meeting.organizer_user_id == me;
-  // A co-host the organizer named (#1720): guest links and the host controls, not the edit.
-  let is_co_host = meeting.co_host_user_ids.contains(&me);
-  let is_cancelled = meeting.status == MeetingStatus::Cancelled;
-  let over = is_over(&meeting, now_ms());
-  let rsvp = my_rsvp(&meeting, me);
-  let start_time = format_time(meeting.starts_at.0, locale);
-  let end_time = format_time(meeting.ends_at.0, locale);
-  let now = now_ms();
-  let is_live = !over && meeting.starts_at.0 <= now;
-  // Dialling in a little early is normal, so Join leads from a quarter of an hour before.
-  let is_joinable = !over && meeting.starts_at.0 - JOIN_LEAD_MS <= now;
-  let users = state.read(|backend| backend.users());
-  let faces: Vec<crate::model::User> = meeting
-    .attendees
-    .iter()
-    .filter_map(|attendee| attendee.maybe_user_id)
-    .filter_map(|id| users.iter().find(|user| user.id == id).cloned())
-    .take(MAX_FACES)
-    .collect();
-  let organizer = state
-    .read(|backend| backend.user(meeting.organizer_user_id))
-    .map(|user| user.display_name)
-    .unwrap_or_default();
-  let attendees = attendee_summary(&meeting, state.read(|backend| backend.users()));
-  let join_url = meeting.join_url.clone();
-  // "Copy link" carries the organizer's fingerprint as this device has it pinned (e2ee.md §4.6),
-  // never the server's; made once per meeting so the click can copy at once.
-  if !over {
-    verify_link(state, hub, meeting.conversation_id, meeting.id);
-  }
-  let shows_guest_links = RwSignal::new(false);
-  let show_responses = RwSignal::new(false);
-  let response_total = meeting.attendees.len();
-  let attendees_for_list = meeting.attendees.clone();
-  let conversation = meeting.conversation_id;
-  // Host controls matter while the meeting runs (a little before the start counts, people dial in early).
-  let is_live_host = (is_host || is_co_host) && is_joinable;
-  let meeting_for_join = meeting.clone();
-  let has_recurrence = meeting.maybe_recurrence.is_some();
-  let has_lobby = hosts_lobby(&meeting, me);
-  let starts_at = meeting.starts_at;
-  let is_occurrence_cancelled = meeting.is_occurrence_cancelled;
-  let is_holiday = meeting.is_occurrence_holiday;
-  // A cancellation can be taken back while what it cancelled is still to come.
-  let can_restore = is_host && is_cancelled && meeting.ends_at.0 > now;
-  // The organizer starts the meeting itself, also early (issue #1006): its invitees are rung.
-  let join_key = if is_host && !is_live {
-    "meetings-start"
-  } else {
-    "meetings-join"
-  };
-  let (restoring, hiding) = (PendingAction::new(), PendingAction::new());
-
-  let cancel = move |_| state.overlay.set(Overlay::CancelMeeting(id, starts_at.0));
-  let restore = move |_| {
-    restoring.spawn(async move {
-      let maybe_occurrence = is_occurrence_cancelled.then_some(starts_at);
-      hub
-        .client()
-        .restore(id, maybe_occurrence)
-        .await
-        .map_err(|error| error.to_failure())?;
-      hub.refresh(me, now_ms()).await;
-      Ok(())
-    });
-  };
-  let hide = move |_| {
-    hiding.spawn(async move {
-      hub.client().hide(id).await.map_err(|error| error.to_failure())?;
-      hub.refresh(me, now_ms()).await;
-      Ok(())
-    });
-  };
-  let answer = move |status: RsvpStatus| {
-    spawn_local(async move {
-      hub.run(me, now_ms(), hub.client().set_rsvp(id, status)).await;
-    });
-  };
-
-  view! {
-    <li class="meeting-card" class:meeting-over=over class:meeting-live=is_live class:meeting-cancelled=is_cancelled>
-      <div class="meeting-time">
-        <span class="meeting-start">{start_time}</span>
-        <span class="meeting-end">{end_time}</span>
-      </div>
-      <div class="meeting-main">
-      <div class="meeting-head">
-        <h3 class="meeting-title" translate="no">{meeting.title.clone()}</h3>
-        {is_live.then(|| view! { <span class="badge badge-live">{move || i18n.t("meetings-live")}</span> })}
-        {has_recurrence.then(|| view! { <span class="meeting-flag" title=move || i18n.t("meetings-recurring")><Icon name=IconName::Rotate /></span> })}
-        {is_co_host.then(|| view! { <span class="badge badge-host">{move || i18n.t("host-role-co-host")}</span> })}
-        {is_cancelled
-          .then(|| {
-            let key = if is_holiday { "meetings-holiday" } else { "meetings-cancelled" };
-            view! { <span class="badge badge-cancelled">{move || i18n.t(key)}</span> }
-          })}
-      </div>
-      <p class="meeting-meta" translate="no">
-        {move || i18n.t_with("meetings-organizer", &[("name", &organizer)])}
-      </p>
-      <div class="meeting-people">
-        <span class="avatar-stack">
-          {faces.into_iter().map(|user| view! { <Avatar user=user size=AvatarSize::Small /> }).collect_view()}
-        </span>
-        <span class="meeting-attendees" translate="no">{attendees.clone()}</span>
-      </div>
-      <div class="meeting-actions">
-        {(!over)
-          .then(|| {
-            let meeting = meeting_for_join.clone();
-            view! {
-              <button class="btn" class:btn-primary=is_joinable on:click=move |_| {
-                if is_host {
-                  // A meeting from before 1.0.3 has a chat without encryption: the organizer's
-                  // device founds its group the first time it opens the meeting (nothing happens
-                  // when the group is there already).
-                  let invitees = attending_users(&meeting);
-                  state.try_write(|backend| backend.set_up_meeting_chat(meeting.conversation_id, invitees));
-                }
-                join_meeting(state, i18n, meeting.conversation_id)
-              }>
-                {move || i18n.t(join_key)}
-              </button>
-            }
-          })}
-        {(!over).then(|| view! { <MeetingLinkButton meeting=id conversation=conversation join_url=join_url.clone() /> })}
-        {(!over && !is_host && rsvp.is_some())
-          .then(|| {
-            view! {
-              <div class="segmented" role="group" aria-label=move || i18n.t("meetings-rsvp")>
-                <SlidingIndicator />
-                {[RsvpStatus::Accepted, RsvpStatus::Tentative, RsvpStatus::Declined]
-                  .into_iter()
-                  .map(|option| {
-                    let key = format!("meetings-rsvp-{}", option.as_str());
-                    let pressed = rsvp.as_ref() == Some(&option);
-                    let choice = option.clone();
-                    view! {
-                      <button aria-pressed=pressed.to_string() on:click=move |_| answer(choice.clone())>
-                        {move || i18n.t(&key)}
-                      </button>
-                    }
-                  })
-                  .collect_view()}
-              </div>
-            }
-          })}
-        {(!over && (is_host || is_co_host))
-          .then(|| {
-            view! {
-              <button
-                class="btn"
-                aria-expanded=move || shows_guest_links.get().to_string()
-                on:click=move |_| shows_guest_links.update(|open| *open = !*open)
-              >
-                {move || i18n.t("meetings-invite-guests")}
-              </button>
-            }
-          })}
-        {(!over && is_host)
-          .then(|| {
-            view! {
-              <button class="btn" on:click=move |_| state.overlay.set(Overlay::EditMeeting(id))>
-                {move || i18n.t("meetings-edit")}
-              </button>
-              <button class="btn btn-quiet" on:click=cancel>{move || i18n.t("meetings-cancel")}</button>
-            }
-          })}
-        {can_restore
-          .then(|| {
-            view! {
-              <PendingButton pending=restoring class="btn" on_click=restore>
-                {move || i18n.t(if is_holiday { "meetings-restore-holiday" } else { "meetings-restore" })}
-              </PendingButton>
-            }
-          })}
-        {(is_host && is_cancelled && !is_occurrence_cancelled)
-          .then(|| {
-            view! {
-              <PendingButton pending=hiding class="btn btn-quiet" on_click=hide>
-                {move || i18n.t("meetings-remove")}
-              </PendingButton>
-            }
-          })}
-      </div>
-      <Show when=move || shows_guest_links.get() fallback=|| ()>
-        <GuestLinks meeting=id conversation=conversation />
-      </Show>
-      <button class="btn btn-quiet btn-small meeting-responses" aria-expanded=move || show_responses.get().to_string() on:click=move |_| show_responses.update(|open| *open = !*open)>
-        {move || i18n.t_with("meetings-responses", &[("count", &response_total.to_string())])}
-      </button>
-      <Show when=move || show_responses.get() fallback=|| ()>
-        <RsvpList attendees=attendees_for_list.clone() />
-      </Show>
-      {is_live_host.then(|| view! { <HostControls meeting=id conversation=conversation /> })}
-      {has_lobby.then(|| view! { <Lobby meeting=id /> })}
-      </div>
-    </li>
-  }
 }
 
 /// Guests waiting for admission into a meeting the user hosts: on the meeting's card and on the
@@ -613,7 +335,7 @@ fn LinkField(link: String, field_id: String, label_key: &'static str) -> impl In
 /// code, which guests see on their page and may compare. The meeting link itself, which guests use
 /// too, is "Copy link". The one-time link stays in a field in case the browser refused the copy.
 #[component]
-fn GuestLinks(meeting: MeetingId, conversation: ConversationId) -> impl IntoView {
+pub(crate) fn GuestLinks(meeting: MeetingId, conversation: ConversationId) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let hub = expect_context::<MeetingsHub>();
@@ -858,7 +580,12 @@ const VERIFY_POLL: Duration = Duration::from_millis(100);
 
 /// Has the core make the meeting link's fragment from this device's pinned organizer key, once per
 /// meeting; it lands in `hub.verified_links`.
-fn verify_link(state: AppState, hub: MeetingsHub, conversation: ConversationId, meeting: MeetingId) {
+pub(crate) fn verify_link(
+  state: AppState,
+  hub: MeetingsHub,
+  conversation: ConversationId,
+  meeting: MeetingId,
+) {
   let is_new = hub
     .verifying
     .try_update_value(|verifying| verifying.insert(meeting))
@@ -1256,28 +983,6 @@ pub fn join_meeting(state: AppState, i18n: I18n, conversation: ConversationId) {
     },
     true,
   );
-}
-
-fn attendee_summary(meeting: &MeetingResponse, users: Vec<crate::model::User>) -> String {
-  let names: Vec<String> = meeting
-    .attendees
-    .iter()
-    .map(|attendee| {
-      attendee
-        .maybe_user_id
-        .and_then(|id| {
-          users
-            .iter()
-            .find(|user| user.id == id)
-            .map(|user| user.display_name.clone())
-        })
-        .or_else(|| attendee.maybe_name.clone())
-        .or_else(|| attendee.maybe_email.clone())
-        .unwrap_or_default()
-    })
-    .filter(|name| !name.is_empty())
-    .collect();
-  names.join(", ")
 }
 
 // ---- The schedule dialog ----------------------------------------------------------------------------
@@ -2068,21 +1773,6 @@ mod tests {
     assert_eq!(ids(meetings_in_scope(&all, None)).len(), 3);
   }
 
-  #[test]
-  fn meetings_are_grouped_by_local_day() {
-    assert!(meeting_days(&[], 0).is_empty());
-    let day = 1_792_540_800_000;
-    let meetings = [
-      fixture(1, day + MS_PER_HOUR),
-      fixture(2, day + 3 * MS_PER_HOUR),
-      fixture(3, day + 30 * MS_PER_HOUR),
-    ];
-    let days = meeting_days(&meetings, day);
-    assert_eq!(days.len(), 2);
-    assert_eq!(days[0].meetings.len(), 2);
-    assert_eq!(days[1].meetings[0].id, meetings[2].id);
-  }
-
   fn fixture(id: u64, starts_at: i64) -> MeetingResponse {
     MeetingResponse {
       id: id_from_raw(id),
@@ -2091,7 +1781,7 @@ mod tests {
       starts_at: teamcraft_proto::UnixMillis(starts_at),
       ends_at: teamcraft_proto::UnixMillis(starts_at + MS_PER_HOUR),
       kind: teamcraft_proto::MeetingKind::Scheduled,
-      status: MeetingStatus::Scheduled,
+      status: teamcraft_proto::MeetingStatus::Scheduled,
       has_lobby: true,
       organizer_user_id: id_from_raw(1),
       conversation_id: id_from_raw(9),
