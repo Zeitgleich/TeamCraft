@@ -211,6 +211,7 @@ impl Options {
         video_decoders: vec![VideoCodec::H264],
         max_simulcast_layers: 3,
         max_frame_fragments: teamcraft_proto::MAX_VIDEO_FRAME_FRAGMENTS,
+        video_features: Vec::new(),
       },
       bwe: BweConfig::default(),
     };

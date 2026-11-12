@@ -379,6 +379,7 @@ pub fn simulcast_layers(
       height,
       max_framerate,
       max_bitrate_bps,
+      maybe_codec: None,
     })
     .collect()
 }
@@ -437,48 +438,37 @@ pub fn screen_bitrate_bps(resolution: VideoResolution, framerate: u8, size: &Scr
   ) as u32
 }
 
-/// Layers of a screen share captured at `source`: the picture within the mode's and size's limits,
-/// plus a half-size layer at a quarter of the bitrate for viewers on weak links (the uplink budget
-/// drops the big layer first, so a slow link or viewer doesn't lower the quality for the others).
-/// A picture above 1440p (a 4K share) gets a quarter-size layer too: from 4K the half-size one is
-/// 1080p at about 4 Mbit/s, and a weak link needs a step below it. A portrait source (a phone, a
-/// turned monitor) fits the limit turned upright, so it keeps as many pixels as a landscape one.
+/// Layers of a screen share captured at `source` in one codec (#1733, [`crate::share_policy`]): an
+/// H.264-sized base of at most 480p for viewers on weak links, half the picture where that is
+/// clearly larger than the base (from 1440p), and the picture within the mode's and size's limits.
+/// The uplink budget drops the big layer first, so a slow link or viewer doesn't lower the quality
+/// for the others. A portrait source (a phone, a turned monitor) fits the limit turned upright,
+/// so it keeps as many pixels as a landscape one. A share whose layers may differ in codec
+/// plans them with [`crate::share_policy::ShareLadder`] directly.
 pub fn screen_layers(
   source: VideoResolution,
   framerate: u8,
   mode: ScreenContentMode,
   size: &ScreenShareResolution,
 ) -> Vec<VideoLayerInfo> {
-  let (limit, max_framerate) = screen_limits(mode, size);
-  let resolution = fit_within(source, oriented_like(limit, source));
-  let framerate = framerate.clamp(1, max_framerate);
-  let layers = if u32::from(resolution.width) * u32::from(resolution.height) > QHD_PIXELS {
-    3
-  } else {
-    2
-  };
-  simulcast_layers(
-    resolution,
+  use crate::share_policy::{EncoderKind, ShareCodecs, ShareEncoders, ShareLadder, SharePlan};
+  let ladder = ShareLadder::new(SharePlan {
+    source,
     framerate,
-    screen_bitrate_bps(resolution, framerate, size),
-    layers,
-  )
-}
-
-const QHD_PIXELS: u32 = 2560 * 1440;
-
-/// `limit` turned to portrait when `source` is taller than wide.
-fn oriented_like(limit: VideoResolution, source: VideoResolution) -> VideoResolution {
-  let is_portrait = source.height > source.width;
-  let is_limit_portrait = limit.height > limit.width;
-  if is_portrait == is_limit_portrait {
-    limit
-  } else {
-    VideoResolution {
-      width: limit.height,
-      height: limit.width,
-    }
-  }
+    profile: ScreenProfile {
+      mode,
+      size: size.clone(),
+    },
+    codecs: ShareCodecs {
+      by_all: vec![VideoCodec::H264],
+      by_some: Vec::new(),
+    },
+    encoders: ShareEncoders {
+      av1: EncoderKind::Unavailable,
+      vp9: EncoderKind::Unavailable,
+    },
+  });
+  ladder.layers(ladder.step(0))
 }
 
 /// How a screen share is sent (#530, #565): what it keeps under pressure and how large it may be.
@@ -505,11 +495,15 @@ impl ScreenProfile {
   /// (WebCodecs `contentHint: "text"`) text came out 7 to 11 dB sharper than H.264 at 1 to 2
   /// Mbit/s, and a still screen needed a fraction of H.264's bitrate (docs/performance.md). A
   /// motion share stays H.264: there AV1 was no sharper than the hardware H.264 encoder and cost
-  /// several times its CPU. H.264, which every device decodes, comes last.
+  /// several times its CPU. VP9 only where a device encodes it in hardware (#1733; Chrome's
+  /// software VP9 mis-tagged the colour range, docs/performance.md). H.264, which every device
+  /// decodes, comes last.
   pub fn codecs(&self) -> Vec<VideoCodec> {
     match self.mode {
       ScreenContentMode::Motion => vec![VideoCodec::H264],
-      ScreenContentMode::Detail | ScreenContentMode::Unknown => vec![VideoCodec::Av1, VideoCodec::H264],
+      ScreenContentMode::Detail | ScreenContentMode::Unknown => {
+        vec![VideoCodec::Av1, VideoCodec::Vp9, VideoCodec::H264]
+      },
     }
   }
 }
@@ -580,6 +574,7 @@ pub fn camera_layers(source: VideoResolution, framerate: u8, limit: VideoResolut
         height: size.height,
         max_framerate: framerate,
         max_bitrate_bps: hd_scaled_bitrate(size),
+        maybe_codec: None,
       }
     })
     .collect()
@@ -595,7 +590,10 @@ pub fn within_layer_limit(layers: &[VideoLayerInfo], max_layers: u8) -> Vec<Vide
     .iter()
     .skip(skipped)
     .zip(0u8..)
-    .map(|(info, layer)| VideoLayerInfo { layer, ..*info })
+    .map(|(info, layer)| VideoLayerInfo {
+      layer,
+      ..info.clone()
+    })
     .collect()
 }
 
@@ -698,7 +696,7 @@ pub fn resized_layers(configured: &[VideoLayerInfo], top: VideoResolution) -> Ve
       VideoLayerInfo {
         width: side(top.width),
         height: side(top.height),
-        ..*layer
+        ..layer.clone()
       }
     })
     .collect()
@@ -974,13 +972,13 @@ mod tests {
     let res = |width, height| VideoResolution { width, height };
     let standard = ScreenShareResolution::Standard;
     let detail = screen_layers(res(3840, 2160), 60, ScreenContentMode::Detail, &standard);
-    let top = detail.last().unwrap();
-    assert_eq!((top.width, top.height, top.max_framerate), (2560, 1440, 30));
-    assert_eq!(detail.len(), 2);
-    assert_eq!((detail[0].width, detail[0].height), (1280, 720));
+    // #1733: a 480p base every device decodes, at a rate text needs, and half the picture.
+    assert_eq!(
+      sides_and_rates(&detail),
+      vec![(852, 480, 15), (1280, 720, 30), (2560, 1440, 30)]
+    );
     let motion = screen_layers(res(2560, 1440), 60, ScreenContentMode::Motion, &standard);
-    let top = motion.last().unwrap();
-    assert_eq!((top.width, top.height, top.max_framerate), (1920, 1080, 60));
+    assert_eq!(sides_and_rates(&motion), vec![(960, 540, 60), (1920, 1080, 60)]);
     // A small window is not enlarged.
     let small = screen_layers(res(800, 600), 30, ScreenContentMode::Detail, &standard);
     assert_eq!(
@@ -1009,20 +1007,20 @@ mod tests {
     let res = |width, height| VideoResolution { width, height };
     let uhd = ScreenShareResolution::Uhd;
     let detail = screen_layers(res(3840, 2160), 60, ScreenContentMode::Detail, &uhd);
-    let sizes: Vec<(u16, u16, u8)> = detail
-      .iter()
-      .map(|layer| (layer.width, layer.height, layer.max_framerate))
-      .collect();
-    assert_eq!(sizes, vec![(960, 540, 30), (1920, 1080, 30), (3840, 2160, 30)]);
+    assert_eq!(
+      sides_and_rates(&detail),
+      vec![(960, 540, 15), (1920, 1080, 30), (3840, 2160, 30)]
+    );
     assert!(detail[2].max_bitrate_bps > SCREEN_MAX_BITRATE_BPS);
     assert_eq!(detail[1].max_bitrate_bps, detail[2].max_bitrate_bps / 4);
     // A 5K screen is shrunk to 4K; motion keeps 60 fps at 1440p.
     let five_k = screen_layers(res(5120, 2880), 30, ScreenContentMode::Detail, &uhd);
     assert_eq!((five_k[2].width, five_k[2].height), (3840, 2160));
     let motion = screen_layers(res(3840, 2160), 60, ScreenContentMode::Motion, &uhd);
-    let top = motion.last().unwrap();
-    assert_eq!((top.width, top.height, top.max_framerate), (2560, 1440, 60));
-    assert_eq!(motion.len(), 2);
+    assert_eq!(
+      sides_and_rates(&motion),
+      vec![(852, 480, 60), (1280, 720, 60), (2560, 1440, 60)]
+    );
     // A 1440p screen shared in 4K is sent as before: the size option never enlarges.
     let qhd = screen_layers(res(2560, 1440), 30, ScreenContentMode::Detail, &uhd);
     assert_eq!(
@@ -1040,6 +1038,13 @@ mod tests {
     width: 1280,
     height: 720,
   };
+
+  fn sides_and_rates(layers: &[VideoLayerInfo]) -> Vec<(u16, u16, u8)> {
+    layers
+      .iter()
+      .map(|layer| (layer.width, layer.height, layer.max_framerate))
+      .collect()
+  }
 
   /// What DAVE (and AV1's RTP format) leave of a temporal unit becomes one again (#565).
   #[test]
@@ -1476,6 +1481,10 @@ mod tests {
       );
       assert_eq!(
         chosen_layer(&VideoTrackKind::Screen, &screen, thumbnail, Some(720)),
+        1
+      );
+      assert_eq!(
+        chosen_layer(&VideoTrackKind::Screen, &screen, thumbnail, Some(480)),
         0
       );
     }
@@ -1518,12 +1527,7 @@ mod tests {
 
     #[test]
     fn resized_layers_keep_the_aspect_ratio_their_shares_and_caps() {
-      let configured = screen_layers(
-        res(2560, 1440),
-        30,
-        ScreenContentMode::Detail,
-        &ScreenShareResolution::Standard,
-      );
+      let configured = two_layers(res(2560, 1440));
       let portrait = resized_layers(&configured, res(810, 1440));
       let summary: Vec<_> = portrait
         .iter()
@@ -1601,13 +1605,12 @@ mod tests {
 
     fn screen_sizer() -> (LayerSizer, Instant) {
       let limit = res(2560, 1440);
-      let configured = screen_layers(
-        limit,
-        30,
-        ScreenContentMode::Detail,
-        &ScreenShareResolution::Standard,
-      );
-      (LayerSizer::new(configured, limit), Instant::now())
+      (LayerSizer::new(two_layers(limit), limit), Instant::now())
+    }
+
+    /// A picture and its half, as a share had them before #1733.
+    fn two_layers(top: VideoResolution) -> Vec<VideoLayerInfo> {
+      simulcast_layers(top, 30, 6_635_000, 2)
     }
 
     fn sides(layers: &[VideoLayerInfo]) -> Vec<(u16, u16)> {

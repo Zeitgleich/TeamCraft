@@ -771,17 +771,17 @@ mod tests {
   }
 
   #[test]
-  fn cameras_get_four_layers_and_screens_two() {
+  fn cameras_get_four_layers_and_screens_three() {
     let limit = teamcraft_media::video::camera_limit(None);
     assert_eq!(camera_layers(camera_format(limit).resolution, limit).len(), 4);
     let detail = ScreenProfile::default();
     let screen = screen_layers(screen_format(&detail), &detail);
-    assert_eq!(screen.len(), 2);
-    assert_eq!(
-      (screen[1].width, screen[1].height, screen[1].max_framerate),
-      (2560, 1440, 30)
-    );
-    assert_eq!((screen[0].width, screen[0].height), (1280, 720));
+    // #1733: a 480p base every device decodes, half the picture, and the picture.
+    let sides: Vec<(u16, u16, u8)> = screen
+      .iter()
+      .map(|layer| (layer.width, layer.height, layer.max_framerate))
+      .collect();
+    assert_eq!(sides, vec![(852, 480, 15), (1280, 720, 30), (2560, 1440, 30)]);
   }
 
   /// A 4K share asks the capture for 4K (#565); the page's AV1 decoder joins H.264 (#565).
@@ -859,7 +859,8 @@ mod tests {
         framerate: 15,
       },
       &ScreenProfile::default(),
-    )[0];
+    )
+    .remove(0);
     let mut encoder = OpenH264Encoder::new(&layer, VideoContent::Camera).unwrap();
     let picture = encoder
       .encode(&test_pattern(layer_resolution(&layer), 0, 0).unwrap(), true)

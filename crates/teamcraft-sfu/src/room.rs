@@ -47,7 +47,7 @@ use crate::{
   auth::JoinGrant,
   config::SfuConfig,
   dave_coordinator::{DaveCoordinator, DaveCoordinatorError, DaveDeadlines, Outbound},
-  forwarding::{Effect, ForwardError, Forwarder},
+  forwarding::{DecodableCodecs, Effect, ForwardError, Forwarder},
   quality::CallQuality,
   rate_limit::TokenBucket,
   signaling::Outgoing,
@@ -156,7 +156,7 @@ struct RoomState {
   next_stream_id: u32,
   /// The video codecs each device was last told the others decode (#565); a device without an
   /// entry hears them with its next (re)join.
-  decodable_announced: HashMap<DeviceId, Vec<VideoCodec>>,
+  decodable_announced: HashMap<DeviceId, DecodableCodecs>,
   /// Each device's last screen share another device's replaced, kept for the call (one per
   /// device, also after it left): a device that was away when it happened hears it with its next
   /// `joined` and doesn't publish that share again. Dropped when the device shares again.
@@ -1556,7 +1556,8 @@ impl RoomState {
       self.send_to(
         device_id,
         CallEvent::DecodableVideoCodecs {
-          codecs: codecs.clone(),
+          codecs: codecs.by_all.clone(),
+          decodable_by_some: codecs.by_some.clone(),
         },
       );
       self.decodable_announced.insert(device_id, codecs);
@@ -2079,7 +2080,7 @@ mod tests {
       events
         .iter()
         .filter_map(|event| match event {
-          CallEvent::DecodableVideoCodecs { codecs } => Some(codecs.clone()),
+          CallEvent::DecodableVideoCodecs { codecs, .. } => Some(codecs.clone()),
           _ => None,
         })
         .collect()

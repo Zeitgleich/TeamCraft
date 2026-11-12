@@ -52,6 +52,8 @@ const JITTER_RESTART_TICKS: f64 = 10.0 * crate::video::VIDEO_CLOCK_RATE_HZ as f6
 pub struct OutgoingVideo {
   pub kind: VideoTrackKind,
   pub codec: VideoCodec,
+  /// Layers in another codec than the track's (#1733: a share's AV1 layers above H.264).
+  layer_codecs: Vec<(u8, VideoCodec)>,
   pub counters: SentCounters,
   frame_number: u16,
   sequences: [SequenceNumber; MAX_LAYERS],
@@ -198,11 +200,33 @@ impl OutgoingVideo {
     Self {
       kind,
       codec,
+      layer_codecs: Vec::new(),
       counters: SentCounters::default(),
       frame_number: 0,
       sequences: [SequenceNumber(0); MAX_LAYERS],
       maybe_uplink_check: None,
     }
+  }
+
+  /// The track's layers in another codec than the track's own (#1733).
+  pub fn with_layers(mut self, layers: &[VideoLayerInfo]) -> Self {
+    self.layer_codecs = layers
+      .iter()
+      .filter_map(|info| {
+        let codec = info.codec(&self.codec);
+        (codec != &self.codec).then(|| (info.layer, codec.clone()))
+      })
+      .collect();
+    self
+  }
+
+  /// The codec `layer` is encoded in.
+  pub fn layer_codec(&self, layer: u8) -> &VideoCodec {
+    self
+      .layer_codecs
+      .iter()
+      .find(|(other, _)| *other == layer)
+      .map_or(&self.codec, |(_, codec)| codec)
   }
 
   /// RTP packets (serialized) carrying one encrypted frame of `layer`.
@@ -216,7 +240,7 @@ impl OutgoingVideo {
   ) -> Result<Vec<Vec<u8>>, VideoPacketError> {
     let frame_number = self.frame_number;
     self.frame_number = self.frame_number.wrapping_add(1);
-    let payload_type = payload_type(&self.codec);
+    let payload_type = payload_type(self.layer_codec(layer.value()));
     let sequence = &mut self.sequences[usize::from(layer.value()) % MAX_LAYERS];
     let mut packets = Vec::new();
     for (fragment, payload) in
@@ -332,6 +356,18 @@ impl IncomingVideo {
   /// A new subscription: the time it wasn't received is no gap.
   pub fn restart_gaps(&mut self) {
     self.maybe_last_used = None;
+  }
+
+  /// The codec of `layer` (#1733): a share's large layers may be in another codec than the
+  /// track. The SFU switches a receiver to another layer at its keyframe, where a decoder for
+  /// that codec opens.
+  pub fn layer_codec(&self, layer: SimulcastLayer) -> VideoCodec {
+    self
+      .layers
+      .iter()
+      .find(|info| info.layer == layer.value())
+      .map_or(&self.codec, |info| info.codec(&self.codec))
+      .clone()
   }
 
   /// The layer arriving now.

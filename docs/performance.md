@@ -443,6 +443,19 @@ quarter more):
 The percentage is of one core at the picture's frame rate. libaom spreads the work over several
 threads, so a 4K share in AV1 takes about one core in all, spread over several.
 
+**What the share policy (#1733) makes of these numbers.** Software AV1 takes the top layer only up
+to about 1080p and at 15 fps: 1080p scrolling then costs about 4 ms per 66 ms frame (12 % of a
+core) instead of 24 %, and a 1440p share, at 46 % of a core in software AV1, goes out in H.264
+(hardware where there is one) at full size instead. The H.264 base layer (480p, 15 fps) every
+viewer decodes costs a ninth of a 1440p picture's pixels at half its rate. On a loaded machine
+(Windows 11, Chrome 157, a VM with the host at load 34) the share had dropped its 1440p layer and
+sent 720p at 27 fps; under the policy the encoder-load controller lowers the top layer's rate
+first (30, 20, 15, 10, 5 fps), then stops the middle layer, then turns software AV1 into H.264,
+and only then makes the top smaller, one size at a time (1080, 900, 720 lines at 5 fps) before
+the 480p base is all that is left. No budget in the table at the top changes: a share's
+uplink demand at 1440p grows by the base layer (about 0.5 Mbit/s) and shrinks where AV1 replaces
+H.264 on top.
+
 **The desktop's encoders** (`crates/teamcraft-media/examples/screen_bench.rs`: every layer of the
 profile, encoded in real time as the call's encoder thread does, from a synthetic page of
 pixel-font text on a 3840x2160 display, 10 s per row; CPU is the process's over all threads,
