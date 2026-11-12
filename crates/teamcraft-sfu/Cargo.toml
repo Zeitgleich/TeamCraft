@@ -18,7 +18,8 @@ anyhow.workspace = true
 jsonwebtoken.workspace = true
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 # Room in the UDP socket's receive buffer, which wtransport's own binding has no setting for.
-socket2.workspace = true
+# `all`: TCP_NOTSENT_LOWAT for the call fallback's sockets (#1810).
+socket2 = { workspace = true, features = ["all"] }
 # The WebSocket fallback for networks that block UDP (ARCHITECTURE.md §6.6); both already in the tree.
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }

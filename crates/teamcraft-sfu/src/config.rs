@@ -6,6 +6,7 @@ use std::{
 };
 
 use ipnet::{IpNet, Ipv4Net};
+use teamcraft_media::fallback_pacer::PacingConfig;
 use teamcraft_media::fallback_queue::MediaQueueConfig;
 
 use crate::forwarding::ForwardingConfig;
@@ -118,8 +119,13 @@ pub struct FallbackConfig {
   pub requires_upgrade_token: bool,
   /// What waits for one slow connection. Media beyond it, or older, is dropped.
   pub queue: MediaQueueConfig,
-  /// The socket's send buffer. What is in it can't be dropped any more and has to go through, so a
-  /// big one is seconds of latency on a narrow link; the kernel's auto-tuning grows it to megabytes.
+  /// How video is paced to what the connection drains, measured end to end with pings (#1810). The
+  /// same rate caps the connection's layer allocation, and sizes the socket's send buffer.
+  pub pacing: PacingConfig,
+  /// The socket's send buffer at most. What is in it can't be dropped any more and has to go
+  /// through, so a big one is seconds of latency on a narrow link; the kernel's auto-tuning grows it
+  /// to megabytes. While the connection runs it is kept to a few hundred milliseconds at its pacing
+  /// rate, within this bound.
   pub socket_send_buffer_bytes: usize,
   /// How often a connection is pinged: keeps proxies from closing a quiet call, and the answers
   /// prove the path alive. Under a second would be noise, over a few seconds too slow to notice a
@@ -193,6 +199,7 @@ impl Default for FallbackConfig {
       first_frame_timeout: Duration::from_secs(3),
       requires_upgrade_token: false,
       queue: MediaQueueConfig::default(),
+      pacing: PacingConfig::default(),
       socket_send_buffer_bytes: 128 * 1024,
       ping_interval: Duration::from_secs(1),
       write_timeout: Duration::from_secs(5),

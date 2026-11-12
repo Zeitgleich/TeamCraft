@@ -196,6 +196,9 @@ struct ParticipantRoute {
   retransmit_budget: RetransmitBudget,
   /// The probe of its downlink at the start, while it runs.
   maybe_join_probe: Option<JoinProbe>,
+  /// What its connection drains, where the transport measures that itself (the WebSocket
+  /// fallback's pacing rate, #1810): its downlink is taken as no more than that.
+  maybe_link_capacity_bps: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -316,6 +319,7 @@ impl Forwarder {
       is_suspended: false,
       retransmit_budget: RetransmitBudget::default(),
       maybe_join_probe: self.new_join_probe(now),
+      maybe_link_capacity_bps: None,
     };
     self.participants.insert(device_id, route);
   }
@@ -382,6 +386,8 @@ impl Forwarder {
     participant.has_feedback = false;
     participant.is_suspended = false;
     participant.retransmit_budget = RetransmitBudget::default();
+    // Its new connection measures its own, if it does.
+    participant.maybe_link_capacity_bps = None;
     self
       .video_tracks
       .iter()
@@ -819,7 +825,7 @@ impl Forwarder {
     if !is_received || participant.is_suspended {
       return Vec::new();
     }
-    let estimate_bps = participant.downlink.estimate_bps();
+    let estimate_bps = participant.downlink_bps();
     let mut resent = Vec::new();
     for &sequence_number in sequence_numbers.iter().take(MAX_NACK_SEQUENCE_NUMBERS) {
       let Some(datagram) = history.get(sequence_number, now, config.window) else {
@@ -1014,8 +1020,7 @@ impl Forwarder {
       let sending_bps = participant.downlink.sent_bps(now);
       let shown_bps = participant.probe.shown_bps(&config, now);
       let carried_bps = participant
-        .downlink
-        .estimate_bps()
+        .downlink_bps()
         .min(sending_bps.max(request.floor_bps).max(shown_bps));
       let target_bps = participant
         .probe
@@ -1058,6 +1063,15 @@ impl Forwarder {
   /// when nothing is resent.
   pub fn retransmit_window_ms(&self) -> Option<u32> {
     self.config.retransmit.announced_window_ms()
+  }
+
+  /// What a receiver's connection drains, as its transport measured it (`None`: it doesn't).
+  /// The layer allocation, resends and probes take its downlink as no more than that from the next
+  /// timer on.
+  pub fn set_link_capacity(&mut self, receiver: DeviceId, maybe_capacity_bps: Option<u32>) {
+    if let Some(participant) = self.participants.get_mut(&receiver) {
+      participant.maybe_link_capacity_bps = maybe_capacity_bps;
+    }
   }
 
   /// Current downlink estimate of a receiver.
@@ -1144,7 +1158,7 @@ impl Forwarder {
     };
     // Without any feedback yet (older clients) the estimate is just the start value; it still
     // grants the lowest layers.
-    let estimate = participant.downlink.estimate_bps();
+    let estimate = participant.downlink_bps();
     let max_frame_fragments = participant.capabilities.max_frame_fragments;
     let capabilities = &participant.capabilities;
     let speakers = self.speakers.selected();
@@ -1349,6 +1363,17 @@ impl Forwarder {
       stream_id,
       layers: needed,
     })
+  }
+}
+
+impl ParticipantRoute {
+  /// Its downlink as far as anything measured: the estimate from its feedback, within what its
+  /// connection drains.
+  fn downlink_bps(&self) -> u32 {
+    let estimate_bps = self.downlink.estimate_bps();
+    self
+      .maybe_link_capacity_bps
+      .map_or(estimate_bps, |capacity_bps| estimate_bps.min(capacity_bps))
   }
 }
 
@@ -2910,6 +2935,37 @@ mod tests {
       assert_eq!(settled_layer(3_000_000), Some(2));
     }
 
+    /// #1810: on the WebSocket fallback, what the connection drains caps the layers whatever the
+    /// feedback says; without the cap the feedback decides again.
+    #[test]
+    fn the_link_capacity_caps_the_layers() {
+      let (mut forwarder, now) = video_room();
+      forwarder.subscribe(device(2), VIDEO, Some(2), now).unwrap();
+      // A probe at the start showed a wide downlink.
+      forwarder
+        .participants
+        .get_mut(&device(2))
+        .unwrap()
+        .downlink
+        .apply_probe(10_000_000);
+      let up_at = switched_to(&mut forwarder, 2, now).expect("never switched up");
+
+      forwarder.set_link_capacity(device(2), Some(400_000));
+      let down_at = switched_to(&mut forwarder, 0, up_at).expect("the cap didn't switch down");
+      assert!(
+        down_at - up_at <= Duration::from_millis(100),
+        "{:?}",
+        down_at - up_at
+      );
+      assert_eq!(forwarder.participants[&device(2)].downlink_bps(), 400_000);
+
+      forwarder.set_link_capacity(device(2), None);
+      assert!(
+        switched_to(&mut forwarder, 2, down_at).is_some(),
+        "never switched up again"
+      );
+    }
+
     #[test]
     fn uplink_arrivals_become_feedback_for_the_sender() {
       let (mut forwarder, now) = room(2);
@@ -3145,6 +3201,27 @@ mod tests {
           "seed {seed}: video stood still for {longest_gap:?}"
         );
       }
+    }
+
+    /// Runs the receiver's timer and keyframes of every layer until it is switched to `layer`;
+    /// when, if within 30 s.
+    fn switched_to(forwarder: &mut Forwarder, layer: u8, from: Instant) -> Option<Instant> {
+      let request = Effect::KeyframeRequest {
+        publisher: device(1),
+        stream_id: VIDEO,
+        layer,
+      };
+      let mut at = from;
+      while at < from + Duration::from_secs(30) {
+        at += Duration::from_millis(100);
+        if forwarder.on_timer(device(2), at).contains(&request) {
+          return Some(at);
+        }
+        for layer in 0..3 {
+          send_frame(forwarder, layer, true, at);
+        }
+      }
+      None
     }
 
     /// Runs a publisher sending all its layers at their bitrates and a receiver behind a link of

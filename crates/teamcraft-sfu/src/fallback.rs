@@ -75,6 +75,8 @@ const WRITER_FINISH_TIMEOUT: Duration = Duration::from_secs(1);
 /// that what waits behind a slow peer waits in the queue, where it can still be dropped.
 const WRITE_BUFFER_BYTES: usize = 16 * 1024;
 const FORWARDED_FOR: &str = "x-forwarded-for";
+/// How often the pacing rate reaches the layer allocation: as often as the pacer measures.
+const LINK_CAPACITY_INTERVAL: Duration = Duration::from_millis(250);
 /// After a failed `accept`, typically out of descriptors: the loop mustn't spin on it.
 const ACCEPT_ERROR_PAUSE: Duration = Duration::from_millis(50);
 /// Descriptors the SFU needs besides the fallback's connections: its sockets, logs and requests.
@@ -87,6 +89,11 @@ const MAX_UNJOINED_PER_DEVICE: usize = 2;
 /// How long a connection whose session moved to QUIC is still read, for what its client sent before
 /// it learned of the move; the client closes it as soon as it read the close.
 const SWITCH_LINGER: Duration = Duration::from_secs(5);
+/// What the kernel may hold of a connection's data that it hasn't sent yet (`TCP_NOTSENT_LOWAT`):
+/// beyond it a write waits, and what waits can still be dropped in the queue (#1810). A few
+/// datagrams, so a write never waits for the next round trip.
+#[cfg(any(target_os = "android", target_os = "linux"))]
+const NOT_SENT_BYTES: u32 = 16 * 1024;
 
 type Sink = SplitSink<WebSocketStream<TcpStream>, Message>;
 type Source = SplitStream<WebSocketStream<TcpStream>>;
@@ -347,7 +354,7 @@ async fn handle_connection(
       joined_slot
     },
   };
-  let sender = FallbackSender::new(config.fallback.queue);
+  let sender = FallbackSender::paced(config.fallback.queue, config.fallback.pacing);
   let (signal_tx, signal_rx) = mpsc::channel(config.signaling_queue_len.max(1));
   let handover = Arc::new(Handover::default());
   let handle = ParticipantHandle {
@@ -400,8 +407,10 @@ async fn handle_connection(
   };
   let writer = tokio::spawn(run_writer(sink, frames, sender.clone(), writer_config));
   let mut end = run_session(&session, &mut source, writer, &sender, config.idle_timeout).await;
+  // Its next connection measures its own, or (QUIC) needs no cap.
+  session.set_link_capacity(None);
   if has_moved.load(Ordering::Acquire) {
-    linger(&session, &mut source).await;
+    linger(&session, &mut source, &sender).await;
     // Whatever happened to this connection, the session goes on on the other one.
     end = SessionEnd::Closed;
   }
@@ -427,11 +436,12 @@ async fn run_session(
   idle_timeout: Duration,
 ) -> SessionEnd {
   let end = tokio::select! {
-    end = read_frames(session, source, idle_timeout) => match end {
+    end = read_frames(session, source, sender, idle_timeout) => match end {
       ReadEnd::Closed => SessionEnd::Closed,
       ReadEnd::Lost => SessionEnd::Lost,
     },
     () = session.periodic() => SessionEnd::Closed,
+    () = report_link_capacity(session, sender) => SessionEnd::Closed,
     written = &mut writer => match written {
       // The SFU closed it (a host control, a replaced connection).
       Ok(WriterEnd::Closed) => SessionEnd::Closed,
@@ -457,8 +467,8 @@ async fn run_session(
 
 /// The session moved to QUIC (#1309): what its client sent here before it learned of that still
 /// counts. Read until the client closes, for [`SWITCH_LINGER`] at most.
-async fn linger(session: &ParticipantSession, source: &mut Source) {
-  if tokio::time::timeout(SWITCH_LINGER, read_frames(session, source, SWITCH_LINGER))
+async fn linger(session: &ParticipantSession, source: &mut Source, sender: &FallbackSender) {
+  if tokio::time::timeout(SWITCH_LINGER, read_frames(session, source, sender, SWITCH_LINGER))
     .await
     .is_err()
   {
@@ -466,7 +476,22 @@ async fn linger(session: &ParticipantSession, source: &mut Source) {
   }
 }
 
-async fn read_frames(session: &ParticipantSession, source: &mut Source, idle_timeout: Duration) -> ReadEnd {
+/// The rate the writer paces to is what the connection drains: the session's layers follow it, not
+/// only the feedback, which on TCP sees a full buffer late or not at all (#1810).
+async fn report_link_capacity(session: &ParticipantSession, sender: &FallbackSender) {
+  let mut interval = tokio::time::interval(LINK_CAPACITY_INTERVAL);
+  loop {
+    interval.tick().await;
+    session.set_link_capacity(sender.pacing_rate_bps());
+  }
+}
+
+async fn read_frames(
+  session: &ParticipantSession,
+  source: &mut Source,
+  sender: &FallbackSender,
+  idle_timeout: Duration,
+) -> ReadEnd {
   loop {
     let Ok(maybe_item) = tokio::time::timeout(idle_timeout, source.next()).await else {
       debug!("nothing arrived on the fallback connection for the idle timeout");
@@ -483,8 +508,10 @@ async fn read_frames(session: &ParticipantSession, source: &mut Source, idle_tim
           return end;
         }
       },
-      // tungstenite answers pings by itself. These prove the path alive, nothing more.
-      Message::Ping(_) | Message::Pong(_) => {},
+      // tungstenite answers pings by itself. These prove the path alive.
+      Message::Ping(_) => {},
+      // The answer to one of the writer's: it measures the path for the pacer.
+      Message::Pong(payload) => sender.on_pong(&payload),
       Message::Close(maybe_frame) => {
         // A page that goes away closes with 1001 and hasn't time for more; anything else (or none
         // at all) didn't mean to leave the call.
@@ -623,8 +650,13 @@ fn configure_socket(stream: &TcpStream, config: &FallbackConfig) {
     debug!(%error, "could not turn off Nagle's algorithm on a fallback connection");
   }
   // The kernel's auto-tuned buffer can hold seconds of media on a narrow link.
-  if let Err(error) = SockRef::from(stream).set_send_buffer_size(config.socket_send_buffer_bytes) {
+  let socket = SockRef::from(stream);
+  if let Err(error) = socket.set_send_buffer_size(config.socket_send_buffer_bytes) {
     debug!(%error, "could not size a fallback connection's send buffer");
+  }
+  #[cfg(any(target_os = "android", target_os = "linux"))]
+  if let Err(error) = socket.set_tcp_notsent_lowat(NOT_SENT_BYTES) {
+    debug!(%error, "could not bound what a fallback connection holds unsent");
   }
 }
 

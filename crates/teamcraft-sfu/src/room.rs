@@ -893,6 +893,14 @@ impl Room {
     state.quality.incidents(incidents);
   }
 
+  /// What a participant's connection drains, where its transport measures that (the fallback's
+  /// pacing, #1810); `None` for one that doesn't. Its layers follow from the next timer on.
+  pub fn set_link_capacity(&self, device_id: DeviceId, maybe_capacity_bps: Option<u32>) {
+    lock(&self.state)
+      .forwarder
+      .set_link_capacity(device_id, maybe_capacity_bps);
+  }
+
   /// Feedback on the datagrams `sender` sent since the last call, for its uplink estimation.
   pub fn take_uplink_feedback(&self, sender: DeviceId, now: Instant) -> Option<TransportFeedback> {
     lock(&self.state).forwarder.take_uplink_feedback(sender, now)
