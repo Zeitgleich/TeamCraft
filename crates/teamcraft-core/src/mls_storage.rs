@@ -31,6 +31,16 @@
 //! record moved. All of this is looked at inside the save's group, which holds the database's write
 //! lock: nobody else can commit between the look and the save.
 //!
+//! A client opens the storage on demand ([`open_mls_storage`], issue #1758): openmls reads an entry
+//! from the store when it first asks for it, so a start reads no group's state, and a group costs
+//! its dozen entries when it is first used (the chat list shows meanwhile; Android 1.0.30 read all
+//! 83 groups' first, 4.7 s). The provider keeps what it read; a key it deleted or found missing is
+//! never read again (crates/vendor/openmls_memory_storage/VENDORED.md). What it never read is what
+//! the store holds, so a save still writes what changed. A rewrite first fills in every entry the
+//! provider never read, then writes everything as before: the store ends up as the state this
+//! process knows, the newest of each entry it never touched included. Whoever lists entries of the
+//! provider directly fills them in first ([`load_key_packages`]).
+//!
 //! Versions before 1.0.9 kept the storage as one record ([`LEGACY_KEY`]). [`load_mls_storage`] moves
 //! it to entries in one group of writes and leaves [`MOVED_MARKER`] in its place, which every
 //! earlier version fails to read (instead of reading no MLS state, losing every group, and later
@@ -46,6 +56,7 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use openmls_memory_storage::{MemoryStorageError, ValueSource};
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use openmls_traits::OpenMlsProvider;
 use zeroize::Zeroizing;
@@ -66,6 +77,9 @@ const ENTRY_PREFIX: &str = "entry/";
 const SET_ASIDE_PREFIX: &str = "set_aside/";
 /// When a set-aside record was first seen, by its key after this prefix: milliseconds, big endian.
 const SET_ASIDE_SEEN_PREFIX: &str = "set_aside_seen/";
+/// openmls_memory_storage's label of key package bundles (as `teamcraft-crypto`'s
+/// `stored_key_packages` reads them): what [`load_key_packages`] fills in.
+const KEY_PACKAGE_LABEL: &[u8] = b"KeyPackage";
 /// Bumped by every save, big endian: another process's commit moved the MLS state if this moved.
 /// Versions that don't know it (1.0.9 and later ignore records of unknown kinds) don't bump it; they
 /// never run beside this one, the app and its extension update together.
@@ -217,6 +231,63 @@ pub fn load_mls_storage(store: &impl LocalStore) -> Result<(OpenMlsRustCrypto, S
   Ok((provider, saved))
 }
 
+/// Opens the provider storage on demand (see the module docs): reads the record under [`LEGACY_KEY`]
+/// and the generation now, and every entry when openmls first asks for it, through `store`. A store
+/// that still holds the record of a version before 1.0.9, or one set aside next to entries, is
+/// loaded whole instead ([`load_mls_storage`]): the move needs every entry.
+pub fn open_mls_storage<S>(store: &S) -> Result<(OpenMlsRustCrypto, SavedMlsStorage), CoreError>
+where
+  S: LocalStore + Clone + Send + Sync + 'static,
+{
+  let _step = crate::timing::step("mls_storage_open");
+  // Before the reads: another process's commit after them counts.
+  let maybe_tally = store.write_tally();
+  match store.get(Table::MlsStorage, LEGACY_KEY)?.map(Zeroizing::new) {
+    Some(record) if record.as_slice() == MOVED_MARKER => {},
+    Some(_) => return load_mls_storage(store),
+    // Moved before the marker existed, or a store this version set up (as when loaded whole).
+    None => store.put(Table::MlsStorage, LEGACY_KEY, MOVED_MARKER)?,
+  }
+  let generation = stored_generation(store)?.unwrap_or(0);
+  let provider = OpenMlsRustCrypto::default();
+  let source: Box<dyn ValueSource> = Box::new(StoreSource(store.clone()));
+  provider.storage().load_on_demand(source);
+  // Nothing has changed against the store yet, and from here on what changes is noted.
+  provider.storage().take_changed_keys();
+  let is_rewrite_due = maybe_tally.is_some_and(|tally| tally.lost > 0);
+  let saved = SavedMlsStorage::new(Saved {
+    maybe_tally,
+    generation,
+    is_rewrite_due,
+    written_bytes: 0,
+  });
+  Ok((provider, saved))
+}
+
+/// Fills in the key package bundles of a provider opened on demand that it hasn't read yet, so
+/// what lists them (`teamcraft_crypto::mls::stored_key_packages`) sees all of them. Nothing to do on
+/// a provider loaded whole.
+pub fn load_key_packages(store: &impl LocalStore, provider: &OpenMlsRustCrypto) -> Result<(), CoreError> {
+  let storage = provider.storage();
+  if !storage.is_on_demand() {
+    return Ok(());
+  }
+  // Base64 encodes three bytes in four characters: the record keys of a label's entries share the
+  // encoding of its first whole three-byte groups.
+  let whole = KEY_PACKAGE_LABEL.len() / 3 * 3;
+  let prefix = format!(
+    "{ENTRY_PREFIX}{}",
+    URL_SAFE_NO_PAD.encode(&KEY_PACKAGE_LABEL[..whole])
+  );
+  for (key, value) in store.list_prefix(Table::MlsStorage, &prefix)? {
+    let value = Zeroizing::new(value);
+    if let Some(storage_key) = parse_entry_key(&key).filter(|key| key.starts_with(KEY_PACKAGE_LABEL)) {
+      storage.fill(storage_key, value.to_vec());
+    }
+  }
+  Ok(())
+}
+
 /// Writes what changed in the provider storage since the last save, as one group of writes (see
 /// the module docs). Call it after every MLS operation, inside the group of the records that must
 /// agree with the state.
@@ -226,7 +297,6 @@ pub fn save_mls_storage(
   saved: &SavedMlsStorage,
 ) -> Result<(), CoreError> {
   let storage = provider.storage();
-  let values = storage.values.read().map_err(|_| poisoned())?;
   let mut state = saved.lock()?;
   // Nothing to write and nothing moved: no group, no write lock to wait for. A commit this look
   // misses is seen by the next save, which looks again inside its group.
@@ -236,7 +306,20 @@ pub fn save_mls_storage(
   let written = write_group(store, || -> Result<Written, CoreError> {
     let maybe_tally = store.write_tally();
     state.follow_disk(maybe_tally, store)?;
-    let changes = state.changes(&values, storage.take_changed_keys(), store)?;
+    // A rewrite writes the state this process knows: on demand, also what it never read.
+    let maybe_listed = if state.is_rewrite_due {
+      let listed = list_records(store)?;
+      if storage.is_on_demand() {
+        for (key, value) in &listed.entries {
+          storage.fill(key.clone(), value.to_vec());
+        }
+      }
+      Some(listed)
+    } else {
+      None
+    };
+    let values = storage.values.read().map_err(|_| poisoned())?;
+    let changes = state.changes(&values, storage.take_changed_keys(), maybe_listed, store)?;
     let has_written = changes.is_rewrite || !changes.puts.is_empty() || !changes.deletes.is_empty();
     let bytes = if has_written {
       write_changes(store, &changes, &values)?
@@ -361,11 +444,12 @@ impl Saved {
   }
 
   /// The keys to write and to delete: what changed since the last save, or everything when a
-  /// rewrite is due.
+  /// rewrite is due (`maybe_listed`: the store's MLS records, listed in this group).
   fn changes<'a>(
     &self,
     values: &'a StorageMap,
     changed_keys: HashSet<Vec<u8>>,
+    maybe_listed: Option<Listed>,
     store: &impl LocalStore,
   ) -> Result<Changes<'a>, CoreError> {
     if !self.is_rewrite_due {
@@ -388,7 +472,10 @@ impl Saved {
     // Every key that may be on disk: what the store lists (the disk itself for SQLCipher, and a
     // sealed store's cache followed the disk when this group began), and deletes the disk lost
     // (which a sealed store's cache doesn't list).
-    let listed = list_records(store)?;
+    let listed = match maybe_listed {
+      Some(listed) => listed,
+      None => list_records(store)?,
+    };
     let mut maybe_stored: BTreeSet<Vec<u8>> = listed.entries.into_keys().collect();
     maybe_stored.extend(
       store
@@ -558,6 +645,19 @@ fn set_aside_key(index: usize) -> String {
 
 fn poisoned() -> CoreError {
   CoreError::Corrupt("MLS storage lock poisoned".into())
+}
+
+/// Where a provider opened on demand reads the entries it hasn't read yet.
+struct StoreSource<S>(S);
+
+impl<S: LocalStore + Send + Sync> ValueSource for StoreSource<S> {
+  fn value(&self, key: &[u8]) -> Result<Option<Vec<u8>>, MemoryStorageError> {
+    self.0.get(Table::MlsStorage, &entry_key(key)).map_err(|error| {
+      // openmls only hears that the storage failed: the reason is here.
+      tracing::warn!(%error, "could not read MLS state from the local store");
+      MemoryStorageError::SourceUnreadable
+    })
+  }
 }
 
 #[cfg(test)]
@@ -1179,6 +1279,115 @@ mod tests {
       mls_storage_len(&provider),
       GROUPS * 12
     );
+  }
+
+  /// A provider opened on demand (issue #1758).
+  mod on_demand {
+    use std::sync::Arc;
+
+    use super::*;
+
+    /// A start reads no entry; a save still writes what changed and nothing else.
+    #[test]
+    fn opening_reads_no_entry_and_a_save_writes_what_changed() {
+      let store = Arc::new(FlakyStore::default());
+      let provider = provider_with(&[(b"a", b"1"), (b"b", b"2"), (b"c", b"3")]);
+      save_mls_storage(&*store, &provider, &SavedMlsStorage::default()).unwrap();
+      store.take_counts();
+
+      let (opened, saved) = open_mls_storage(&store).unwrap();
+      assert!(opened.storage().is_on_demand());
+      assert_eq!(entries_of(&opened), Vec::new(), "nothing read at the start");
+      set(&opened, b"b", Some(b"22"));
+      set(&opened, b"c", None);
+      set(&opened, b"d", Some(b"4"));
+      save_mls_storage(&*store, &opened, &saved).unwrap();
+
+      assert_eq!(store.take_counts(), (2, 1), "b and d written, c deleted");
+      assert_eq!(
+        durable_entries(&store),
+        [entry(b"a", b"1"), entry(b"b", b"22"), entry(b"d", b"4")]
+      );
+    }
+
+    /// Another process saved: the rewrite writes what this process knows (the entries it never
+    /// read as the store lists them) and deletes what it deleted, as when everything was loaded.
+    #[test]
+    fn a_rewrite_keeps_what_was_never_read_and_deletes_what_was_deleted() {
+      let store = Arc::new(FlakyStore::default());
+      let provider = provider_with(&[(b"a", b"1"), (b"b", b"2"), (b"c", b"3")]);
+      save_mls_storage(&*store, &provider, &SavedMlsStorage::default()).unwrap();
+      let (opened, saved) = open_mls_storage(&store).unwrap();
+      set(&opened, b"a", Some(b"11"));
+      set(&opened, b"b", None);
+      store.write_elsewhere(b"a", b"other");
+      store.write_elsewhere(b"b", b"other");
+      store.take_counts();
+
+      save_mls_storage(&*store, &opened, &saved).unwrap();
+
+      assert_eq!(durable_entries(&store), [entry(b"a", b"11"), entry(b"c", b"3")]);
+      assert_eq!(durable_entries(&store), entries_of(&opened));
+      assert_eq!(store.take_counts(), (2, 1), "a and c written, b deleted");
+    }
+
+    /// A group of writes the disk lost: the next save makes the disk match again, the lost delete
+    /// included, and leaves the entries never read as they are.
+    #[test]
+    fn after_a_lost_group_the_next_save_makes_the_disk_match_again() {
+      let store = Arc::new(FlakyStore::default());
+      let provider = provider_with(&[(b"a", b"1"), (b"b", b"2"), (b"c", b"3")]);
+      save_mls_storage(&*store, &provider, &SavedMlsStorage::default()).unwrap();
+      let (opened, saved) = open_mls_storage(&store).unwrap();
+      set(&opened, b"a", Some(b"11"));
+      set(&opened, b"b", None);
+      store.fail_next_group();
+      assert!(write_group(&*store, || save_mls_storage(&*store, &opened, &saved)).is_err());
+      assert_eq!(
+        durable_entries(&store),
+        [entry(b"a", b"1"), entry(b"b", b"2"), entry(b"c", b"3")]
+      );
+
+      save_mls_storage(&*store, &opened, &saved).unwrap();
+
+      assert_eq!(durable_entries(&store), [entry(b"a", b"11"), entry(b"c", b"3")]);
+    }
+
+    /// What lists the key packages sees every one, not only those openmls read.
+    #[test]
+    fn key_packages_not_read_yet_are_filled_in_for_a_listing() {
+      let store = Arc::new(FlakyStore::default());
+      let package = b"KeyPackage\"ref\"\x00\x01".as_slice();
+      let provider = provider_with(&[(package, b"bundle"), (b"Tree\"group\"\x00\x01", b"tree")]);
+      save_mls_storage(&*store, &provider, &SavedMlsStorage::default()).unwrap();
+      let (opened, _) = open_mls_storage(&store).unwrap();
+
+      load_key_packages(&*store, &opened).unwrap();
+
+      assert_eq!(entries_of(&opened), [entry(package, b"bundle")]);
+    }
+
+    /// Moving the record of a version before 1.0.9 needs every entry: such a store loads whole.
+    #[test]
+    fn a_store_of_a_version_before_1_0_9_is_loaded_whole_and_moved() {
+      let store = Arc::new(FlakyStore::default());
+      store
+        .put(
+          Table::MlsStorage,
+          LEGACY_KEY,
+          &legacy(&[(b"a", b"1"), (b"b", b"2")]),
+        )
+        .unwrap();
+
+      let (provider, _) = open_mls_storage(&store).unwrap();
+
+      assert!(!provider.storage().is_on_demand());
+      assert_eq!(entries_of(&provider), [entry(b"a", b"1"), entry(b"b", b"2")]);
+      assert_eq!(
+        store.get(Table::MlsStorage, LEGACY_KEY).unwrap().as_deref(),
+        Some(MOVED_MARKER)
+      );
+    }
   }
 
   type Entry = (Vec<u8>, Vec<u8>);

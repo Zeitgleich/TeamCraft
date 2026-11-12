@@ -30,6 +30,8 @@ struct ReplacedPackage {
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// The key packages whose private parts this device holds.
   pub fn stored_key_packages(&self) -> Result<Vec<StoredKeyPackage>, CoreError> {
+    // The listing reads the provider's map: on demand, the packages not read yet go in first.
+    crate::mls_storage::load_key_packages(&self.store, &self.provider)?;
     Ok(stored_key_packages(&self.provider)?)
   }
 

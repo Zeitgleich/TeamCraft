@@ -36,6 +36,8 @@ teamcraft-proto.workspace = true
 teamcraft-crypto = { path = "../teamcraft-crypto" }
 # Same MLS stack as teamcraft-crypto; the provider's storage is persisted in the local store.
 openmls_rust_crypto = "0.6.0"
+# The provider's storage itself (our patch, crates/vendor): a client opens it on demand (#1758).
+openmls_memory_storage = "0.6.0"
 openmls_traits = "0.6.0"
 serde.workspace = true
 # Sealed push tokens travel as base64url in the registration (docs/push-gateway.md).

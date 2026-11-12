@@ -186,6 +186,104 @@ mod groups {
     }
   }
 
+  /// Issue #1758: a client opened on demand reads a group's entries when it first uses the group.
+  /// Through what real MLS operations do, every entry it holds is what the store holds, and no
+  /// entry it deleted (or looked for and didn't find) is in the store.
+  #[tokio::test]
+  async fn a_client_opened_on_demand_saves_what_real_operations_change() {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let dave = Peer::enroll(&server, "Dave").await;
+    let store = Arc::new(CountingStore::default());
+    let api = server.add_user("Carol");
+    let mut carol = PendingEnrollment::new()
+      .complete(
+        api.clone(),
+        store.clone(),
+        common::clock(),
+        common::settings(),
+        common::options(PASSPHRASE),
+      )
+      .await
+      .unwrap();
+    let space = alice.space().await;
+    let joined = alice.client.create_channel(space, "joined").await.unwrap();
+    alice.client.add_member(joined, carol.user_id()).await.unwrap();
+    let left = alice.client.create_channel(space, "left").await.unwrap();
+    alice.client.add_member(left, carol.user_id()).await.unwrap();
+    carol.full_sync().await.unwrap();
+    drop(carol);
+
+    let mut carol = Client::open_on_demand(api, store.clone(), common::clock(), common::settings())
+      .unwrap()
+      .unwrap();
+    assert_saved_on_demand(&carol, &store, "opened");
+    carol.full_sync().await.unwrap();
+    assert_eq!(carol.group_loads(), 0, "a sync with no news reads no group");
+
+    alice.client.send_text(joined, None, "hello").await.unwrap();
+    carol.full_sync().await.unwrap();
+    assert_saved_on_demand(&carol, &store, "received a message");
+
+    carol.send_text(joined, None, "hello back").await.unwrap();
+    assert_saved_on_demand(&carol, &store, "sent a message");
+
+    alice
+      .client
+      .add_member(joined, dave.client.user_id())
+      .await
+      .unwrap();
+    carol.full_sync().await.unwrap();
+    assert_saved_on_demand(&carol, &store, "processed another's commit");
+
+    let later = alice.client.create_channel(space, "later").await.unwrap();
+    alice.client.add_member(later, carol.user_id()).await.unwrap();
+    carol.full_sync().await.unwrap();
+    assert_saved_on_demand(&carol, &store, "joined by welcome");
+
+    let own = carol.create_channel(space, "own").await.unwrap();
+    carol.add_member(own, dave.client.user_id()).await.unwrap();
+    assert_saved_on_demand(&carol, &store, "founded a group and made a commit");
+
+    alice.client.remove_member(left, carol.user_id()).await.unwrap();
+    carol.full_sync().await.unwrap();
+    assert_saved_on_demand(&carol, &store, "removed from a group");
+    assert!(!carol.stored_key_packages().unwrap().is_empty());
+  }
+
+  #[track_caller]
+  fn assert_saved_on_demand(
+    client: &Client<FakeServerApi, Arc<CountingStore>>,
+    store: &CountingStore,
+    step: &str,
+  ) {
+    use openmls_traits::OpenMlsProvider as _;
+
+    let (loaded, _) = teamcraft_core::mls_storage::load_mls_storage(store).unwrap();
+    let on_disk = loaded.storage().values.read().unwrap().clone();
+    let storage = client.mls_provider().storage();
+    assert!(storage.is_on_demand(), "{step}");
+    let held = storage.values.read().unwrap().clone();
+    if step == "opened" {
+      assert!(held.is_empty(), "read at the start: {}", held.len());
+    }
+    for (key, value) in &held {
+      assert_eq!(
+        on_disk.get(key),
+        Some(value),
+        "{step}: {}",
+        String::from_utf8_lossy(key)
+      );
+    }
+    for (key, value) in on_disk {
+      if !held.contains_key(&key) {
+        let shown = String::from_utf8_lossy(&key).into_owned();
+        // Settled here (deleted, or looked for and missing) yet stored: a delete that wasn't saved.
+        assert!(storage.fill(key, value), "{step}: still stored: {shown}");
+      }
+    }
+  }
+
   /// A commit in one channel writes records of that channel's group, none of another's.
   #[tokio::test]
   async fn a_change_to_one_group_writes_only_its_records() {

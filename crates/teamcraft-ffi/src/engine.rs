@@ -857,7 +857,7 @@ impl Engine {
       tracing::debug!(%error, "stray staged upload copies could not be listed");
     }
     trim_downloads(&self.download_dir, MAX_DOWNLOADS_BYTES, Duration::ZERO);
-    let maybe_client = Client::open(
+    let maybe_client = Client::open_on_demand(
       self.api(),
       self.store.clone(),
       Box::new(SystemClock),
@@ -1857,7 +1857,7 @@ impl Engine {
   }
 
   fn reopen_client(&mut self) -> Result<(), TeamCraftError> {
-    let opened = Client::open(
+    let opened = Client::open_on_demand(
       self.api(),
       self.store.clone(),
       Box::new(SystemClock),

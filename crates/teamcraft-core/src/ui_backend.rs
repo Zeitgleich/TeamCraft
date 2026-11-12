@@ -1021,6 +1021,12 @@ impl<S: LocalStore> CoreChatBackend<S> {
     list.into_iter().map(|user| (user.id, user)).collect()
   }
 
+  /// One user's summary, by its record (keyed by the user's ID): [`Self::summaries`] reads and
+  /// decodes every user, and the chat list asked for one per direct message (issue #1758).
+  pub(crate) fn summary_of(&self, user: UserId) -> Option<UserSummary> {
+    self.read(records::get_json(&self.store, Table::Users, &user.to_string()))
+  }
+
   /// The conversations of `spaces` and every direct message, in one pass over the store, in the
   /// store's order. For the mobile apps' lists: asking per space read and decrypted every
   /// conversation and user record once per space.
@@ -2318,10 +2324,9 @@ impl<S: LocalStore> CoreChatBackend<S> {
 
 impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
   fn me(&self) -> User {
-    let users = self.summaries();
-    users
-      .get(&self.me)
-      .map(|summary| self.to_user(summary))
+    self
+      .summary_of(self.me)
+      .map(|summary| self.to_user(&summary))
       .unwrap_or_else(|| User {
         id: self.me,
         username: String::new(),
@@ -2340,7 +2345,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
   }
 
   fn user(&self, id: UserId) -> Option<User> {
-    self.summaries().get(&id).map(|summary| self.to_user(summary))
+    self.summary_of(id).map(|summary| self.to_user(&summary))
   }
 
   fn users(&self) -> Vec<User> {

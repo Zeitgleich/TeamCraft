@@ -11,12 +11,13 @@
 //! for timing.
 //!
 //! Follow-ups add their scenarios here: a purge on a connection of its own (#1684), short groups of
-//! writes (#1681), the user map (#1682).
+//! writes (#1681), the user map (#1682), the signed-in start (#1758).
 #![cfg(feature = "sealed-sqlite")]
 #![allow(clippy::unwrap_used, reason = "test helpers: a failure fails the test")]
 
 mod catch_up;
 mod purge;
+mod start;
 mod vfs;
 
 use std::path::PathBuf;
@@ -44,6 +45,7 @@ pub struct SlowStore {
   /// The other read thread's connection (the query lane: searches, long walks).
   pub second_reader: Arc<SealedSqliteStore>,
   directory: PathBuf,
+  key: SymmetricKey,
 }
 
 impl SlowStore {
@@ -55,15 +57,36 @@ impl SlowStore {
       rand_core::RngCore::next_u64(&mut rand_core::OsRng)
     ));
     std::fs::create_dir_all(&directory).unwrap();
+    let key = SymmetricKey::generate(&mut rand_core::OsRng);
+    Self::open_in(disk, directory, key)
+  }
+
+  /// The same store opened again, as a new process would: connections of their own, with empty
+  /// caches.
+  pub fn reopen(mut self) -> Self {
+    let disk = self.disk.clone();
+    let directory = std::mem::take(&mut self.directory);
+    let key = self.key.duplicate();
+    // Closed before the new connections open, as by a process that ended.
+    drop(self);
+    Self::open_in(disk, directory, key)
+  }
+
+  fn open_in(disk: SlowDisk, directory: PathBuf, key: SymmetricKey) -> Self {
     let path = disk.uri(&directory.join("store.db"));
-    let key = StaticKeySource::new(SymmetricKey::generate(&mut rand_core::OsRng));
+    let key_source = StaticKeySource::new(key.duplicate());
     let journal = CommitJournal::new();
-    let writer = Arc::new(SealedSqliteStore::open(&path, &key).unwrap());
+    let writer = Arc::new(SealedSqliteStore::open(&path, &key_source).unwrap());
     writer.publish_commits(Arc::clone(&journal));
     let open_reader = || {
       Arc::new(
-        SealedSqliteStore::open_reader(&path, &key, SealedStoreLimits::default(), Arc::clone(&journal))
-          .unwrap(),
+        SealedSqliteStore::open_reader(
+          &path,
+          &key_source,
+          SealedStoreLimits::default(),
+          Arc::clone(&journal),
+        )
+        .unwrap(),
       )
     };
     let lane = LaneStore::reader(Arc::clone(&writer), open_reader());
@@ -74,6 +97,7 @@ impl SlowStore {
       lane,
       second_reader,
       directory,
+      key,
     }
   }
 
@@ -85,6 +109,10 @@ impl SlowStore {
 
 impl Drop for SlowStore {
   fn drop(&mut self) {
+    if self.directory.as_os_str().is_empty() {
+      // Reopened: the files stay for the new connections.
+      return;
+    }
     // Deliberately ignored: a leftover directory in the temp dir fails nothing.
     let _ = std::fs::remove_dir_all(&self.directory);
   }

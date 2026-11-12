@@ -115,7 +115,8 @@ figment = { version = "0.10", features = ["toml", "env"] }
 # wtransport 0.7.2 with a client Endpoint::rebind, so calls survive network changes (ARCHITECTURE.md
 # §6.5). See crates/vendor/wtransport/VENDORED.md.
 # openmls_memory_storage 0.6.0 notes the keys it changes, so a save of the MLS state writes them without
-# comparing the whole state (#840). See crates/vendor/openmls_memory_storage/VENDORED.md.
+# comparing the whole state (#840), and reads values from the local store when first asked for, so
+# a start reads no group's state (#1758). See crates/vendor/openmls_memory_storage/VENDORED.md.
 # tract-nnef 0.23.9 with a `minimal_core_registry` feature, so the browser's segmentation module
 # leaves tract's unused core operators out (#1336). See crates/vendor/tract-nnef/VENDORED.md.
 [patch.crates-io]

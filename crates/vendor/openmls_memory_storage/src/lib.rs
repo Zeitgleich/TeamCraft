@@ -4,7 +4,7 @@ use zeroize::Zeroize as _;
 use std::{
     collections::{HashMap, HashSet},
     ops::Deref,
-    sync::{Mutex, MutexGuard, RwLock, RwLockWriteGuard},
+    sync::{Mutex, MutexGuard, OnceLock, RwLock, RwLockWriteGuard},
 };
 
 #[cfg(feature = "test-utils")]
@@ -25,12 +25,40 @@ pub struct MemoryStorage {
     /// DAVE session) notes nothing. Every write of this crate goes through [`TrackedValues`], which
     /// does not hand out the map mutably.
     changed_keys: Mutex<Option<HashSet<Vec<u8>>>>,
+    /// TeamCraft patch: where the values not in memory are, for a storage that reads them when they
+    /// are first asked for ([`Self::load_on_demand`]); unset, every value is in memory.
+    on_demand: OnceLock<OnDemand>,
+}
+
+/// TeamCraft patch: where a storage that loads on demand reads the values not in memory: the
+/// device's local store (`teamcraft-core`, issue #1758), so a start reads no group's state before
+/// the group is used.
+pub trait ValueSource: Send + Sync {
+    /// The value stored under `key`; `None` if there is none.
+    fn value(&self, key: &[u8]) -> Result<Option<Vec<u8>>, MemoryStorageError>;
+}
+
+/// TeamCraft patch: the source of a storage that loads on demand, and the keys it is done with.
+struct OnDemand {
+    source: Box<dyn ValueSource>,
+    /// Keys never read from the source again: looked up there once (found or not), filled in, or
+    /// written or deleted here. Memory holds what they hold, and one memory doesn't hold is gone:
+    /// the source may still hold a value a delete here hasn't reached yet.
+    settled: Mutex<HashSet<Vec<u8>>>,
+}
+
+impl std::fmt::Debug for OnDemand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OnDemand").finish_non_exhaustive()
+    }
 }
 
 /// TeamCraft patch: the map under its write lock; each change notes its key.
 struct TrackedValues<'a> {
     values: RwLockWriteGuard<'a, HashMap<Vec<u8>, Vec<u8>>>,
     changed_keys: MutexGuard<'a, Option<HashSet<Vec<u8>>>>,
+    /// The settled keys of a storage that loads on demand: every change settles its key.
+    maybe_settled: Option<MutexGuard<'a, HashSet<Vec<u8>>>>,
 }
 
 impl Deref for TrackedValues<'_> {
@@ -48,22 +76,38 @@ impl TrackedValues<'_> {
         if self.values.get(&key) != Some(&value) {
             self.note(&key);
         }
+        self.settle(&key);
         if let Some(mut replaced) = self.values.insert(key, value) {
             replaced.zeroize();
         }
     }
 
+    /// On a storage that loads on demand the source may hold the key whether or not memory does:
+    /// the delete is a change either way, and the key is never read from the source again.
     fn remove(&mut self, key: &[u8]) {
         if let Some(mut removed) = self.values.remove(key) {
             removed.zeroize();
             self.note(key);
+        } else if self.maybe_settled.is_some() {
+            self.note(key);
         }
+        self.settle(key);
     }
 
-    /// The bytes of a list, created empty if missing, for the caller to change.
+    /// The bytes of a list, created empty if missing, for the caller to change. On a storage that
+    /// loads on demand the caller put the list in memory first ([`MemoryStorage::fault_in`]).
     fn list_bytes(&mut self, key: Vec<u8>) -> &mut Vec<u8> {
         self.note(&key);
+        self.settle(&key);
         self.values.entry(key).or_insert_with(|| b"[]".to_vec())
+    }
+
+    fn settle(&mut self, key: &[u8]) {
+        if let Some(settled) = self.maybe_settled.as_mut() {
+            if !settled.contains(key) {
+                settled.insert(key.to_vec());
+            }
+        }
     }
 
     fn note(&mut self, key: &[u8]) {
@@ -105,13 +149,78 @@ impl MemoryStorage {
         self.tracked_values().remove(key);
     }
 
+    /// Values not in memory are read from `source` when they are first asked for, and stay in
+    /// memory from then on: a read through the storage trait, and a change of a list, looks its key
+    /// up there first. Reading the map directly (`values`) sees only what is in memory; the owner
+    /// fills in what it needs that way ([`Self::fill`]). Set once, before the storage is used;
+    /// `false` if it was set already.
+    pub fn load_on_demand(&self, source: Box<dyn ValueSource>) -> bool {
+        self.on_demand
+            .set(OnDemand {
+                source,
+                settled: Mutex::default(),
+            })
+            .is_ok()
+    }
+
+    /// Whether values not in memory come from a source ([`Self::load_on_demand`]).
+    pub fn is_on_demand(&self) -> bool {
+        self.on_demand.get().is_some()
+    }
+
+    /// Keeps `value`, which the owner read from the source, under `key`, unless the key is settled
+    /// (in memory, or looked up, written or deleted here: what memory holds wins). Not a change.
+    /// Whether it was kept.
+    pub fn fill(&self, key: Vec<u8>, value: Vec<u8>) -> bool {
+        let mut values = self.values.write().unwrap();
+        if values.contains_key(&key) {
+            return false;
+        }
+        if let Some(on_demand) = self.on_demand.get() {
+            let mut settled = on_demand.settled.lock().unwrap();
+            if settled.contains(&key) {
+                return false;
+            }
+            settled.insert(key.clone());
+        }
+        values.insert(key, value);
+        true
+    }
+
+    /// Puts the value under `key` in memory if only the source has it, so a read or a change of it
+    /// finds it there. The source is asked once per key.
+    fn fault_in(&self, key: &[u8]) -> Result<(), MemoryStorageError> {
+        let Some(on_demand) = self.on_demand.get() else {
+            return Ok(());
+        };
+        if self.values.read().unwrap().contains_key(key)
+            || on_demand.settled.lock().unwrap().contains(key)
+        {
+            return Ok(());
+        }
+        match on_demand.source.value(key)? {
+            Some(value) => {
+                self.fill(key.to_vec(), value);
+            }
+            None => {
+                on_demand.settled.lock().unwrap().insert(key.to_vec());
+            }
+        }
+        Ok(())
+    }
+
     fn tracked_values(&self) -> TrackedValues<'_> {
         let values = self.values.write().unwrap();
-        // Always after the map's lock.
+        // Always after the map's lock, and the settled keys after the changed ones.
         let changed_keys = self.changed_keys.lock().unwrap();
+        let maybe_settled = self
+            .on_demand
+            .get()
+            .map(|on_demand| on_demand.settled.lock().unwrap());
         TrackedValues {
             values,
             changed_keys,
+            maybe_settled,
         }
     }
 }
@@ -121,9 +230,11 @@ impl MemoryStorage {
 impl Clone for MemoryStorage {
     fn clone(&self) -> Self {
         let values = self.values.read().unwrap();
+        // A copy holds what is in memory; it reads nothing from a source.
         Self {
             values: RwLock::new(values.clone()),
             changed_keys: Mutex::new(self.changed_keys.lock().unwrap().clone()),
+            on_demand: OnceLock::new(),
         }
     }
 }
@@ -181,6 +292,7 @@ impl MemoryStorage {
         Ok(Self {
             values: RwLock::new(map),
             changed_keys: Mutex::default(),
+            on_demand: OnceLock::new(),
         })
     }
 }
@@ -211,8 +323,10 @@ impl MemoryStorage {
         key: &[u8],
         value: Vec<u8>,
     ) -> Result<(), <Self as StorageProvider<CURRENT_VERSION>>::Error> {
-        let mut values = self.tracked_values();
         let storage_key = build_key_from_vec::<VERSION>(label, key.to_vec());
+        // TeamCraft patch: the list may still be in the source only.
+        self.fault_in(&storage_key)?;
+        let mut values = self.tracked_values();
 
         #[cfg(feature = "test-utils")]
         log::debug!("  write key: {}", hex::encode(&storage_key));
@@ -238,8 +352,10 @@ impl MemoryStorage {
         key: &[u8],
         value: Vec<u8>,
     ) -> Result<(), <Self as StorageProvider<CURRENT_VERSION>>::Error> {
-        let mut values = self.tracked_values();
         let storage_key = build_key_from_vec::<VERSION>(label, key.to_vec());
+        // TeamCraft patch: the list may still be in the source only.
+        self.fault_in(&storage_key)?;
+        let mut values = self.tracked_values();
 
         #[cfg(feature = "test-utils")]
         log::debug!("  write key: {}", hex::encode(&storage_key));
@@ -268,8 +384,9 @@ impl MemoryStorage {
         label: &[u8],
         key: &[u8],
     ) -> Result<Option<V>, <Self as StorageProvider<CURRENT_VERSION>>::Error> {
-        let values = self.values.read().unwrap();
         let storage_key = build_key_from_vec::<VERSION>(label, key.to_vec());
+        self.fault_in(&storage_key)?;
+        let values = self.values.read().unwrap();
 
         #[cfg(feature = "test-utils")]
         log::debug!("  read key: {}", hex::encode(&storage_key));
@@ -293,11 +410,11 @@ impl MemoryStorage {
         label: &[u8],
         key: &[u8],
     ) -> Result<Vec<V>, <Self as StorageProvider<CURRENT_VERSION>>::Error> {
-        let values = self.values.read().unwrap();
-
         let mut storage_key = label.to_vec();
         storage_key.extend_from_slice(key);
         storage_key.extend_from_slice(&u16::to_be_bytes(VERSION));
+        self.fault_in(&storage_key)?;
+        let values = self.values.read().unwrap();
 
         #[cfg(feature = "test-utils")]
         log::debug!("  read list key: {}", hex::encode(&storage_key));
@@ -347,6 +464,9 @@ pub enum MemoryStorageError {
     UnsupportedMethod,
     #[error("Error serializing value.")]
     SerializationError,
+    /// TeamCraft patch: a storage that loads on demand could not read a value from its source.
+    #[error("A value could not be read from the storage's source.")]
+    SourceUnreadable,
 }
 
 const KEY_PACKAGE_LABEL: &[u8] = b"KeyPackage";
@@ -531,8 +651,9 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<Option<TreeSync>, Self::Error> {
-        let values = self.values.read().unwrap();
         let key = build_key::<CURRENT_VERSION, &GroupId>(TREE_LABEL, group_id);
+        self.fault_in(&key)?;
+        let values = self.values.read().unwrap();
 
         let Some(value) = values.get(&key) else {
             return Ok(None);
@@ -549,8 +670,9 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<Option<GroupContext>, Self::Error> {
-        let values = self.values.read().unwrap();
         let key = build_key::<CURRENT_VERSION, &GroupId>(GROUP_CONTEXT_LABEL, group_id);
+        self.fault_in(&key)?;
+        let values = self.values.read().unwrap();
 
         let Some(value) = values.get(&key) else {
             return Ok(None);
@@ -567,8 +689,9 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<Option<InterimTranscriptHash>, Self::Error> {
-        let values = self.values.read().unwrap();
         let key = build_key::<CURRENT_VERSION, &GroupId>(INTERIM_TRANSCRIPT_HASH_LABEL, group_id);
+        self.fault_in(&key)?;
+        let values = self.values.read().unwrap();
 
         let Some(value) = values.get(&key) else {
             return Ok(None);
@@ -585,8 +708,9 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<Option<ConfirmationTag>, Self::Error> {
-        let values = self.values.read().unwrap();
         let key = build_key::<CURRENT_VERSION, &GroupId>(CONFIRMATION_TAG_LABEL, group_id);
+        self.fault_in(&key)?;
+        let values = self.values.read().unwrap();
 
         let Some(value) = values.get(&key) else {
             return Ok(None);
@@ -603,10 +727,10 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         public_key: &SignaturePublicKey,
     ) -> Result<Option<SignatureKeyPair>, Self::Error> {
-        let values = self.values.read().unwrap();
-
         let key =
             build_key::<CURRENT_VERSION, &SignaturePublicKey>(SIGNATURE_KEY_PAIR_LABEL, public_key);
+        self.fault_in(&key)?;
+        let values = self.values.read().unwrap();
 
         let Some(value) = values.get(&key) else {
             return Ok(None);
@@ -933,6 +1057,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         let storage_key = build_key_from_vec::<CURRENT_VERSION>(EPOCH_KEY_PAIRS_LABEL, key);
         log::debug!("Reading encryption epoch key pairs");
 
+        self.fault_in(&storage_key)?;
         let values = self.values.read().unwrap();
         let value = values.get(&storage_key);
 
@@ -1121,8 +1246,9 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<Option<ApplicationExportTree>, Self::Error> {
-        let values = self.values.read().unwrap();
         let key = build_key::<CURRENT_VERSION, &GroupId>(APPLICATION_EXPORT_TREE_LABEL, group_id);
+        self.fault_in(&key)?;
+        let values = self.values.read().unwrap();
 
         let Some(value) = values.get(&key) else {
             return Ok(None);
@@ -1170,8 +1296,9 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         epoch_id: &EpochId,
     ) -> Result<Option<VcEmulationEpochState>, Self::Error> {
-        let values = self.values.read().unwrap();
         let key = build_key::<CURRENT_VERSION, &EpochId>(VC_EMULATION_EPOCH_STATE_LABEL, epoch_id);
+        self.fault_in(&key)?;
+        let values = self.values.read().unwrap();
         let Some(value) = values.get(&key) else {
             return Ok(None);
         };
@@ -1228,8 +1355,9 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<Option<VcEmulationBindings>, Self::Error> {
-        let values = self.values.read().unwrap();
         let key = build_key::<CURRENT_VERSION, &GroupId>(VC_EMULATION_BINDING_LABEL, group_id);
+        self.fault_in(&key)?;
+        let values = self.values.read().unwrap();
         let Some(value) = values.get(&key) else {
             return Ok(None);
         };
@@ -1271,9 +1399,10 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<Option<RegisteredVcEmulationEpoch>, Self::Error> {
-        let values = self.values.read().unwrap();
         let key =
             build_key::<CURRENT_VERSION, &GroupId>(REGISTERED_VC_EMULATION_EPOCH_LABEL, group_id);
+        self.fault_in(&key)?;
+        let values = self.values.read().unwrap();
         let Some(value) = values.get(&key) else {
             return Ok(None);
         };
@@ -1315,8 +1444,9 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         epoch_id: &EpochId,
     ) -> Result<Option<VcOperationTree>, Self::Error> {
-        let values = self.values.read().unwrap();
         let key = build_key::<CURRENT_VERSION, &EpochId>(VC_OPERATION_TREE_LABEL, epoch_id);
+        self.fault_in(&key)?;
+        let values = self.values.read().unwrap();
         let Some(value) = values.get(&key) else {
             return Ok(None);
         };
@@ -1369,11 +1499,12 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         &self,
         hash_ref: &KeyPackageRef,
     ) -> Result<Option<RetainedKeyPackageMaterial>, Self::Error> {
-        let values = self.values.read().unwrap();
         let key = build_key::<CURRENT_VERSION, &KeyPackageRef>(
             RETAINED_KEY_PACKAGE_MATERIAL_LABEL,
             hash_ref,
         );
+        self.fault_in(&key)?;
+        let values = self.values.read().unwrap();
         let Some(value) = values.get(&key) else {
             return Ok(None);
         };
@@ -1520,5 +1651,138 @@ mod changed_keys {
         storage.set_value(b"a".to_vec(), b"1".to_vec());
         storage.remove_value(b"a");
         assert_eq!(storage.take_changed_keys().len(), 1);
+    }
+}
+
+/// TeamCraft patch.
+#[cfg(test)]
+mod on_demand {
+    use std::sync::Arc;
+
+    use super::*;
+
+    #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
+    struct GroupId(u8);
+    impl Key<CURRENT_VERSION> for GroupId {}
+    impl traits::GroupId<CURRENT_VERSION> for GroupId {}
+    impl Entity<CURRENT_VERSION> for GroupId {}
+    impl traits::TreeSync<CURRENT_VERSION> for GroupId {}
+    impl traits::GroupContext<CURRENT_VERSION> for GroupId {}
+    impl traits::LeafNode<CURRENT_VERSION> for GroupId {}
+
+    /// A source that holds what another storage held, and counts what it was asked.
+    #[derive(Default)]
+    struct Source {
+        values: Mutex<HashMap<Vec<u8>, Vec<u8>>>,
+        asked: Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl ValueSource for Arc<Source> {
+        fn value(&self, key: &[u8]) -> Result<Option<Vec<u8>>, MemoryStorageError> {
+            self.asked.lock().unwrap().push(key.to_vec());
+            Ok(self.values.lock().unwrap().get(key).cloned())
+        }
+    }
+
+    /// A storage on demand over what `filled` wrote, and its source.
+    fn on_demand_over(filled: impl FnOnce(&MemoryStorage)) -> (MemoryStorage, Arc<Source>) {
+        let before = MemoryStorage::default();
+        filled(&before);
+        let source = Arc::new(Source {
+            values: Mutex::new(before.values.read().unwrap().clone()),
+            ..Source::default()
+        });
+        let storage = MemoryStorage::default();
+        assert!(storage.load_on_demand(Box::new(source.clone())));
+        assert!(!storage.load_on_demand(Box::new(source.clone())), "set once");
+        storage.take_changed_keys();
+        (storage, source)
+    }
+
+    #[test]
+    fn a_value_is_read_from_the_source_once_and_is_no_change() {
+        let (storage, source) = on_demand_over(|before| {
+            before.write_tree(&GroupId(1), &GroupId(2)).unwrap();
+        });
+        assert!(storage.values.read().unwrap().is_empty(), "nothing read before asked");
+        assert_eq!(storage.tree(&GroupId(1)).unwrap(), Some(GroupId(2)));
+        assert_eq!(storage.tree(&GroupId(1)).unwrap(), Some(GroupId(2)));
+        assert_eq!(storage.tree::<_, GroupId>(&GroupId(9)).unwrap(), None);
+        assert_eq!(storage.tree::<_, GroupId>(&GroupId(9)).unwrap(), None);
+        assert_eq!(source.asked.lock().unwrap().len(), 2, "each key asked once");
+        assert!(!storage.has_changed_keys());
+    }
+
+    #[test]
+    fn a_deleted_value_stays_deleted_and_the_delete_is_a_change() {
+        let (storage, _) = on_demand_over(|before| {
+            before.write_tree(&GroupId(1), &GroupId(2)).unwrap();
+            before.write_context(&GroupId(1), &GroupId(3)).unwrap();
+        });
+        // Never read here, but on disk: the save must delete it there too.
+        storage.delete_tree(&GroupId(1)).unwrap();
+        assert_eq!(storage.take_changed_keys().len(), 1);
+        assert_eq!(storage.tree::<_, GroupId>(&GroupId(1)).unwrap(), None);
+        // Read, then deleted.
+        assert_eq!(storage.group_context(&GroupId(1)).unwrap(), Some(GroupId(3)));
+        storage.delete_context(&GroupId(1)).unwrap();
+        assert_eq!(storage.group_context::<_, GroupId>(&GroupId(1)).unwrap(), None);
+        assert_eq!(storage.take_changed_keys().len(), 1);
+        // The owner's fill doesn't bring back what was deleted here.
+        let tree_key = build_key::<CURRENT_VERSION, &GroupId>(TREE_LABEL, &GroupId(1));
+        assert!(!storage.fill(tree_key, b"old".to_vec()));
+        assert_eq!(storage.tree::<_, GroupId>(&GroupId(1)).unwrap(), None);
+    }
+
+    #[test]
+    fn a_list_changed_before_it_was_read_keeps_what_the_source_had() {
+        let (storage, _) = on_demand_over(|before| {
+            before.append_own_leaf_node(&GroupId(1), &GroupId(5)).unwrap();
+        });
+        storage.append_own_leaf_node(&GroupId(1), &GroupId(6)).unwrap();
+        assert_eq!(
+            storage.own_leaf_nodes::<_, GroupId>(&GroupId(1)).unwrap(),
+            vec![GroupId(5), GroupId(6)]
+        );
+        assert_eq!(storage.take_changed_keys().len(), 1);
+    }
+
+    #[test]
+    fn a_written_value_wins_over_the_source_and_a_fill() {
+        let (storage, source) = on_demand_over(|before| {
+            before.write_tree(&GroupId(1), &GroupId(2)).unwrap();
+        });
+        storage.write_tree(&GroupId(1), &GroupId(7)).unwrap();
+        let key = build_key::<CURRENT_VERSION, &GroupId>(TREE_LABEL, &GroupId(1));
+        assert!(!storage.fill(key, b"old".to_vec()));
+        assert_eq!(storage.tree(&GroupId(1)).unwrap(), Some(GroupId(7)));
+        assert!(source.asked.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_fill_is_kept_and_is_no_change() {
+        let (storage, source) = on_demand_over(|_| {});
+        let key = build_key::<CURRENT_VERSION, &GroupId>(TREE_LABEL, &GroupId(1));
+        assert!(storage.fill(key.clone(), serde_json::to_vec(&GroupId(4)).unwrap()));
+        assert!(!storage.fill(key, b"again".to_vec()));
+        assert_eq!(storage.tree(&GroupId(1)).unwrap(), Some(GroupId(4)));
+        assert!(source.asked.lock().unwrap().is_empty());
+        assert!(!storage.has_changed_keys());
+    }
+
+    #[test]
+    fn a_source_that_fails_fails_the_read() {
+        struct Broken;
+        impl ValueSource for Broken {
+            fn value(&self, _: &[u8]) -> Result<Option<Vec<u8>>, MemoryStorageError> {
+                Err(MemoryStorageError::SourceUnreadable)
+            }
+        }
+        let storage = MemoryStorage::default();
+        storage.load_on_demand(Box::new(Broken));
+        assert_eq!(
+            storage.tree::<_, GroupId>(&GroupId(1)),
+            Err(MemoryStorageError::SourceUnreadable)
+        );
     }
 }

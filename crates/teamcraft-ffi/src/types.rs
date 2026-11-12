@@ -139,7 +139,8 @@ pub struct LinkRequestItem {
   pub seconds_left: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+// Serialized for the chat list a start shows first (`reads::KeptChatList`, issue #1758).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Enum)]
 pub enum ConversationKind {
   Public,
   Private,
@@ -189,7 +190,7 @@ pub struct SpaceMenuItem {
 
 /// What the lists show of the other person in a one-to-one DM besides their presence (issue
 /// #132): the BOT marker and the avatar colour, the same hue as on desktop and web.
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
 pub struct PeerInfo {
   pub user_id: String,
   /// A bot or integration account.
@@ -198,7 +199,9 @@ pub struct PeerInfo {
   pub avatar_hue: u16,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+/// Serialized for the chat list a start shows first (`reads::KeptChatList`, issue #1758): one kept
+/// by an older version that doesn't decode is not shown.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
 pub struct ConversationItem {
   pub id: String,
   pub maybe_space_id: Option<String>,
@@ -820,7 +823,7 @@ pub enum PushService {
   Apns,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Enum)]
 pub enum Presence {
   /// "Available": automatic.
   Online,
