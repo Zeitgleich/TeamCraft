@@ -85,7 +85,7 @@ async fn slides_reach_the_viewer_through_a_limited_uplink() {
     .iter()
     .map(|layer| u64::from(layer.max_bitrate_bps))
     .sum();
-  let run = run(WINDOW, Some((layers_bps as f64 * LIMIT_SHARE) as u64)).await;
+  let run = run(WINDOW, Some((layers_bps as f64 * LIMIT_SHARE) as u64), None).await;
   let summary = run.summary();
   println!("{summary}");
   // Slides the encoder gave a picture of: each has to reach the viewer, soon after.
@@ -121,10 +121,55 @@ async fn slides_reach_the_viewer_through_a_limited_uplink() {
     "{:.1} % of the uplink's bytes dropped:\n{summary}",
     dropped * 100.0
   );
-  let (keyframes, allowed) = run.keyframes();
+  let keyframes = run.keyframes();
+  assert_eq!(
+    keyframes.rebuilt_for_rate, 0,
+    "a rate change rebuilt an encoder:\n{summary}"
+  );
+  assert_eq!(
+    keyframes.built,
+    keyframes.republished * run.layers.len(),
+    "encoders built for anything but new layers:\n{summary}"
+  );
   assert!(
-    keyframes <= allowed,
-    "{keyframes} keyframes, {allowed} asked for, for layers back or for new layers:\n{summary}"
+    keyframes.forced <= keyframes.asked,
+    "more keyframes forced than asked for:\n{summary}"
+  );
+}
+
+/// #1781: an uplink that dips to half of what the share's layers ask for and comes back makes the
+/// share step its rate (the top layer at a share of its bitrate, at a lower frame rate). The
+/// encoders take every step in place: none is rebuilt, and no keyframe comes beyond those asked
+/// for (viewers' requests, layers needed again). Before, each step rebuilt the encoder, and half
+/// the top layer's pictures were keyframes (12 of 24 on CI).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dipping_uplink_steps_the_share_in_place() {
+  let layers_bps: u64 = share_layers(WINDOW)
+    .iter()
+    .map(|layer| u64::from(layer.max_bitrate_bps))
+    .sum();
+  let dip = Dip {
+    after: SETTLE,
+    lasts: Duration::from_secs(8),
+    limit_bps: layers_bps / 2,
+  };
+  let run = run(WINDOW, Some((layers_bps as f64 * LIMIT_SHARE) as u64), Some(dip)).await;
+  let summary = run.summary();
+  println!("{summary}");
+  let keyframes = run.keyframes();
+  assert!(keyframes.in_place > 0, "the dip changed no rate:\n{summary}");
+  assert_eq!(
+    keyframes.rebuilt_for_rate, 0,
+    "a rate change rebuilt an encoder:\n{summary}"
+  );
+  assert_eq!(
+    keyframes.built,
+    keyframes.republished * run.layers.len(),
+    "encoders built for anything but new layers:\n{summary}"
+  );
+  assert!(
+    keyframes.forced <= keyframes.asked,
+    "more keyframes forced than asked for:\n{summary}"
   );
 }
 
@@ -139,9 +184,17 @@ async fn measure_screen_share_bursts_on_a_limited_uplink() {
     Some(10_000_000),
     Some(4_000_000),
   ] {
-    let run = run(SHARED, maybe_limit_bps).await;
+    let run = run(SHARED, maybe_limit_bps, None).await;
     println!("== uplink {maybe_limit_bps:?} bit/s\n{}", run.summary());
   }
+}
+
+/// A stretch of a run with a narrower uplink.
+struct Dip {
+  /// Since the share's start.
+  after: Duration,
+  lasts: Duration,
+  limit_bps: u64,
 }
 
 /// What a run recorded, timed from the share's start.
@@ -155,6 +208,11 @@ struct Run {
   received: Vec<(Duration, u64, VideoResolution)>,
   shown: BTreeMap<u64, usize>,
   encoded: Vec<Encoded>,
+  /// When an encoder was built (the share's start, new layers, or a rate an encoder couldn't take
+  /// in place).
+  built: Vec<Duration>,
+  /// When an encoder was given a new rate, and whether it took it in place.
+  rate_changes: Vec<(Duration, bool)>,
   /// The uplink's packets: when, bytes, whether dropped.
   link: Vec<(Duration, usize, bool)>,
   /// The presenter's uplink estimates: when, bit/s.
@@ -183,7 +241,7 @@ fn profile() -> ScreenProfile {
 }
 
 /// Shares slides at `size` through an uplink limited to `maybe_limit_bps`.
-async fn run(size: VideoResolution, maybe_limit_bps: Option<u64>) -> Run {
+async fn run(size: VideoResolution, maybe_limit_bps: Option<u64>, maybe_dip: Option<Dip>) -> Run {
   let (port, certificate_hash) = start_sfu().await;
   let sfu = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port);
   let start = Instant::now();
@@ -197,7 +255,7 @@ async fn run(size: VideoResolution, maybe_limit_bps: Option<u64>) -> Run {
 
   let slides = SlideShow::new(start, size);
   let (shown, changes) = (Arc::clone(&slides.shown), Arc::clone(&slides.changes));
-  let encoded: Arc<Mutex<Vec<Encoded>>> = Arc::default();
+  let log = EncoderLog::default();
   let layers = share_layers(size);
   let started_at = start.elapsed();
   let config = VideoSendConfig {
@@ -205,7 +263,7 @@ async fn run(size: VideoResolution, maybe_limit_bps: Option<u64>) -> Run {
     kind: VideoTrackKind::Screen,
     layers: layers.clone(),
     capture: Box::new(slides),
-    encoders: counting(preferred_encoders(), start, Arc::clone(&encoded)),
+    encoders: counting(preferred_encoders(), start, log.clone()),
     maybe_filter: None,
     maybe_picture_tap: None,
     maybe_idle_refresh: VideoSendConfig::default_idle_refresh(&VideoTrackKind::Screen),
@@ -218,8 +276,22 @@ async fn run(size: VideoResolution, maybe_limit_bps: Option<u64>) -> Run {
   let received: Arc<Mutex<Vec<(Duration, u64, VideoResolution)>>> = Arc::default();
   let (mut uplink_estimates, mut layers_needed) = (Vec::new(), Vec::new());
   let (mut keyframe_requests, mut published) = (Vec::new(), Vec::new());
-  let end = tokio::time::Instant::now() + SHARE;
+  let share_start = tokio::time::Instant::now();
+  let end = share_start + SHARE;
+  let mut is_dipped = false;
   while tokio::time::Instant::now() < end {
+    if let Some(dip) = &maybe_dip {
+      let since = share_start.elapsed();
+      let should_dip = since >= dip.after && since < dip.after + dip.lasts;
+      if should_dip != is_dipped {
+        is_dipped = should_dip;
+        relay.to_sfu.set_limit(if should_dip {
+          Some(dip.limit_bps)
+        } else {
+          maybe_limit_bps
+        });
+      }
+    }
     match tokio::time::timeout(Duration::from_millis(5), presenter.next_event()).await {
       Ok(Some(CallEngineEvent::LayersNeeded { layers, .. })) => layers_needed.push((start.elapsed(), layers)),
       Ok(Some(CallEngineEvent::UplinkEstimate { bps, .. })) => uplink_estimates.push((start.elapsed(), bps)),
@@ -252,7 +324,9 @@ async fn run(size: VideoResolution, maybe_limit_bps: Option<u64>) -> Run {
   let received = received.lock().unwrap().clone();
   let shown = shown.lock().unwrap().clone();
   let changes = changes.lock().unwrap().clone();
-  let encoded = encoded.lock().unwrap().clone();
+  let encoded = log.pictures.lock().unwrap().clone();
+  let built = log.built.lock().unwrap().clone();
+  let rate_changes = log.rate_changes.lock().unwrap().clone();
   let link = relay.to_sfu.log.lock().unwrap().clone();
   Run {
     size,
@@ -261,6 +335,8 @@ async fn run(size: VideoResolution, maybe_limit_bps: Option<u64>) -> Run {
     received,
     shown,
     encoded,
+    built,
+    rate_changes,
     link,
     uplink_estimates,
     layers_needed,
@@ -356,29 +432,55 @@ impl Run {
     estimates.fold((u32::MAX, 0), |(low, high), bps| (low.min(bps), high.max(bps)))
   }
 
-  /// After [`SETTLE`]: the keyframes out of the encoders, and the most there may be: one per
-  /// keyframe asked for, one per layer that came back (the uplink held it, or nobody needed it),
-  /// and one per layer each time the share went out with new layers. A rate step adds none
-  /// (#1781: rebuilt encoders sent 9 keyframes in 17 pictures).
-  fn keyframes(&self) -> (usize, usize) {
+  /// After [`SETTLE`], per cause: what the share sent and what explains it. #1781: a rate change
+  /// rebuilt the encoder, which started with a keyframe (9 in 17 pictures through a dipping
+  /// uplink); in place it sends none.
+  fn keyframes(&self) -> Keyframes {
     let settled = self.started_at + SETTLE;
-    let sent = self
+    let after_settle = |at: &Duration| *at >= settled;
+    let pictures: Vec<&Encoded> = self
       .encoded
       .iter()
-      .filter(|picture| picture.is_keyframe && picture.at >= settled)
-      .count();
-    let asked = self.keyframe_requests.iter().filter(|at| **at >= settled).count();
-    let republished = self.republished.iter().filter(|at| **at >= settled).count();
+      .filter(|picture| after_settle(&picture.at))
+      .collect();
+    let count = |cause: KeyframeCause| {
+      pictures
+        .iter()
+        .filter(|picture| picture.maybe_keyframe == Some(cause))
+        .count()
+    };
     let mut came_back = 0;
     for pair in self.layers_needed.windows(2) {
       let [(_, before), (at, after)] = pair else {
         continue;
       };
-      if *at >= settled {
+      if after_settle(at) {
         came_back += after.iter().filter(|layer| !before.contains(layer)).count();
       }
     }
-    (sent, asked + came_back + republished * self.layers.len())
+    Keyframes {
+      new_encoder: count(KeyframeCause::NewEncoder),
+      forced: count(KeyframeCause::Forced),
+      own: count(KeyframeCause::Encoders),
+      built: self.built.iter().filter(|at| after_settle(at)).count(),
+      republished: self.republished.iter().filter(|at| after_settle(at)).count(),
+      asked: self
+        .keyframe_requests
+        .iter()
+        .filter(|at| after_settle(at))
+        .count()
+        + came_back,
+      in_place: self
+        .rate_changes
+        .iter()
+        .filter(|(at, is_in_place)| after_settle(at) && *is_in_place)
+        .count(),
+      rebuilt_for_rate: self
+        .rate_changes
+        .iter()
+        .filter(|(at, is_in_place)| after_settle(at) && !is_in_place)
+        .count(),
+    }
   }
 
   /// The share of the uplink's bytes the bottleneck dropped after [`SETTLE`].
@@ -436,13 +538,7 @@ impl Run {
         self.estimate_range().1 / 1000,
         self.layers_needed.last().map(|(_, layers)| layers),
       ),
-      format!(
-        "keyframes after the first {} s: {} of {} asked for, for layers back or for new layers; published anew {} times",
-        SETTLE.as_secs(),
-        self.keyframes().0,
-        self.keyframes().1,
-        self.republished.len(),
-      ),
+      format!("after the first {} s: {:?}", SETTLE.as_secs(), self.keyframes()),
     ];
     let seconds = (SHARE.as_secs_f64() - 1.0).max(1.0);
     // The layers were planned for the largest picture; the encoders work at the shared screen's
@@ -498,18 +594,59 @@ struct Encoded {
   width: u16,
   bytes: usize,
   is_keyframe: bool,
+  /// Why it is a keyframe, if it is one.
+  maybe_keyframe: Option<KeyframeCause>,
   /// The capture timestamp of its frame.
   timestamp_us: u64,
 }
 
-/// `encoders`, recording every picture.
-fn counting(encoders: EncoderFactory, start: Instant, log: Arc<Mutex<Vec<Encoded>>>) -> EncoderFactory {
+/// Why a picture is a keyframe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyframeCause {
+  /// The first picture of an encoder just built.
+  NewEncoder,
+  /// The sender asked for it: a viewer's request, a layer needed again.
+  Forced,
+  /// The encoder chose it (a scene change, its keyframe interval).
+  Encoders,
+}
+
+/// The keyframes after [`SETTLE`] by cause, and what explains them.
+#[derive(Debug)]
+// Some counts are only read through `Debug`, in the summary.
+#[allow(dead_code)]
+struct Keyframes {
+  new_encoder: usize,
+  forced: usize,
+  own: usize,
+  /// Encoders built, and times the share went out with new layers.
+  built: usize,
+  republished: usize,
+  /// Keyframes asked for: viewers' requests and layers needed again.
+  asked: usize,
+  /// Rate changes the encoders took in place, and ones that rebuilt them.
+  in_place: usize,
+  rebuilt_for_rate: usize,
+}
+
+/// What the encoders did, shared by them.
+#[derive(Default, Clone)]
+struct EncoderLog {
+  pictures: Arc<Mutex<Vec<Encoded>>>,
+  built: Arc<Mutex<Vec<Duration>>>,
+  rate_changes: Arc<Mutex<Vec<(Duration, bool)>>>,
+}
+
+/// `encoders`, recording every picture, every encoder built and every rate change.
+fn counting(encoders: EncoderFactory, start: Instant, log: EncoderLog) -> EncoderFactory {
   Arc::new(move |layer, content| {
+    log.built.lock().unwrap().push(start.elapsed());
     Ok(Box::new(CountingEncoder {
       inner: encoders(layer, content)?,
       width: layer.width,
       start,
-      log: Arc::clone(&log),
+      has_encoded: false,
+      log: log.clone(),
     }) as Box<dyn VideoEncoder>)
   })
 }
@@ -518,7 +655,8 @@ struct CountingEncoder {
   inner: Box<dyn VideoEncoder>,
   width: u16,
   start: Instant,
-  log: Arc<Mutex<Vec<Encoded>>>,
+  has_encoded: bool,
+  log: EncoderLog,
 }
 
 impl VideoEncoder for CountingEncoder {
@@ -537,15 +675,37 @@ impl VideoEncoder for CountingEncoder {
   ) -> Result<Option<EncodedPicture>, VideoCodecError> {
     let maybe_picture = self.inner.encode(frame, is_keyframe_forced)?;
     if let Some(picture) = &maybe_picture {
-      self.log.lock().unwrap().push(Encoded {
+      let maybe_keyframe = picture.is_keyframe.then_some(if !self.has_encoded {
+        KeyframeCause::NewEncoder
+      } else if is_keyframe_forced {
+        KeyframeCause::Forced
+      } else {
+        KeyframeCause::Encoders
+      });
+      self.has_encoded = true;
+      self.log.pictures.lock().unwrap().push(Encoded {
         at: self.start.elapsed(),
         width: self.width,
         bytes: picture.data.len(),
         is_keyframe: picture.is_keyframe,
+        maybe_keyframe,
         timestamp_us: frame.timestamp_us(),
       });
     }
     Ok(maybe_picture)
+  }
+
+  /// Passed on: the wrapper must not turn an in-place change into a rebuild (the trait's default
+  /// answers "not in place").
+  fn set_rate(&mut self, bitrate_bps: u32, framerate: u8) -> Result<bool, VideoCodecError> {
+    let is_in_place = self.inner.set_rate(bitrate_bps, framerate)?;
+    self
+      .log
+      .rate_changes
+      .lock()
+      .unwrap()
+      .push((self.start.elapsed(), is_in_place));
+    Ok(is_in_place)
   }
 }
 
