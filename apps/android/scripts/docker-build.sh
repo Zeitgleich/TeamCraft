@@ -9,7 +9,7 @@
 #                                           Google Play screenshots into <dir> (relative to apps/android)
 #
 # TEAMCRAFT_RUST_PROFILE (release, or dev for faster builds) and TEAMCRAFT_ANDROID_ABIS
-# (default "arm64-v8a x86_64") are passed on to scripts/build.sh.
+# (default "arm64-v8a x86_64") are passed on to scripts/build.sh, CARGO_PROFILE_RELEASE_DEBUG to Cargo.
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -35,6 +35,7 @@ docker run --rm \
   -e HOME=/android/home \
   -e CARGO_HOME=/android/cargo \
   -e TEAMCRAFT_RUST_PROFILE \
+  -e CARGO_PROFILE_RELEASE_DEBUG \
   -e TEAMCRAFT_ANDROID_ABIS \
   -e TEAMCRAFT_SCREENSHOT_CALL \
   -v "${REPO_DIR}:/src" \

@@ -320,6 +320,9 @@ jobs:
           fi
       - name: Build APKs and the App Bundle
         env:
+          # Line tables in the Rust library: file and line in native crash reports. The APKs and the
+          # bundle are stripped by AGP all the same; the unstripped library is kept below.
+          CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
           PUSH_GATEWAY_URL: ${{ vars.TEAMCRAFT_ANDROID_PUSH_GATEWAY_URL }}
           # The hosts this publisher's Android build opens as App Links (docs/app-links.md); may be empty.
           APP_LINK_HOSTS: ${{ vars.TEAMCRAFT_APP_LINK_HOSTS }}
@@ -342,35 +345,36 @@ jobs:
       - name: Remove the Firebase config
         if: always()
         run: rm -f "$TEAMCRAFT_ANDROID_CACHE/gradle/gradle.properties"
-      # The R8 mapping (under the UUID the app carries) and the unstripped native libraries of the
-      # full release. A failed upload only costs readable stack traces: it warns, the release goes on.
-      - name: Upload crash report symbols (optional)
-        if: env.HAS_CRASH_SYMBOLS == 'true'
+      # The R8 mapping (under the UUID the app carries) goes to the crash reports backend; the
+      # unstripped native libraries of the full release to wherever debug files are kept privately
+      # (scripts/debug-files.sh: the backend and/or the DEBUG_FILES_S3_* bucket, by build ID). A
+      # failed upload only costs readable stack traces: it warns, the release goes on.
+      - name: Keep crash report symbols (optional)
         env:
           SENTRY_URL: ${{ secrets.CRASH_REPORTS_URL }}
           SENTRY_AUTH_TOKEN: ${{ secrets.CRASH_REPORTS_AUTH_TOKEN }}
           SENTRY_ORG: ${{ secrets.CRASH_REPORTS_ORG }}
           SENTRY_PROJECT: ${{ secrets.CRASH_REPORTS_PROJECT }}
-          SENTRY_CLI_VERSION: 3.8.2
-          SENTRY_CLI_SHA256: c958865f9d4000183509ea21b1f04925d5390de6d8d87386b9e69f2b305070c3
+          DEBUG_FILES_S3_ENDPOINT: ${{ secrets.DEBUG_FILES_S3_ENDPOINT }}
+          DEBUG_FILES_S3_REGION: ${{ secrets.DEBUG_FILES_S3_REGION }}
+          DEBUG_FILES_S3_BUCKET: ${{ secrets.DEBUG_FILES_S3_BUCKET }}
+          DEBUG_FILES_S3_ACCESS_KEY_ID: ${{ secrets.DEBUG_FILES_S3_ACCESS_KEY_ID }}
+          DEBUG_FILES_S3_SECRET_ACCESS_KEY: ${{ secrets.DEBUG_FILES_S3_SECRET_ACCESS_KEY }}
         run: |
           set -u
-          cli="$RUNNER_TEMP/sentry-cli"
-          curl -fsSL -o "$cli" \
-            "https://github.com/getsentry/sentry-cli/releases/download/$SENTRY_CLI_VERSION/sentry-cli-Linux-x86_64"
-          echo "$SENTRY_CLI_SHA256  $cli" | sha256sum -c -
-          chmod +x "$cli"
           mapping=apps/android/app/build/outputs/mapping/fullRelease/mapping.txt
           libs=apps/android/app/build/intermediates/merged_native_libs/fullRelease
-          if [ -f "$mapping" ]; then
-            "$cli" upload-proguard --uuid "$PROGUARD_UUID" "$mapping" \
-              || echo "::warning::the R8 mapping did not reach the crash reports backend"
-          else
-            echo "::warning::no R8 mapping at $mapping"
+          if [ "${HAS_CRASH_SYMBOLS:-}" = true ]; then
+            if [ -f "$mapping" ]; then
+              scripts/debug-files.sh sentry-cli upload-proguard --uuid "$PROGUARD_UUID" "$mapping" \
+                || echo "::warning::the R8 mapping did not reach the crash reports backend"
+            else
+              echo "::warning::no R8 mapping at $mapping"
+            fi
           fi
-          if [ -d "$libs" ]; then
-            "$cli" debug-files upload "$libs" \
-              || echo "::warning::the native symbols did not reach the crash reports backend"
+          mapfile -t so_files < <(find "$libs" -name '*.so' 2>/dev/null | sort)
+          if [ "${#so_files[@]}" -gt 0 ]; then
+            scripts/debug-files.sh store "android/$VERSION" "${so_files[@]}"
           else
             echo "::warning::no unstripped native libraries at $libs"
           fi
