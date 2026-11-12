@@ -748,7 +748,7 @@ impl ControlFrames for OutgoingFrames {
   async fn next_frame(&mut self) -> Option<Vec<u8>> {
     loop {
       let message = match self.maybe_queue.as_mut()?.next().await? {
-        Dequeued::Message(message) => message,
+        Dequeued::Message(message) => *message,
         Dequeued::HandOver => {
           // Everything before the move went out: the queue goes on on the new connection, and
           // the client reads this one up to the close.

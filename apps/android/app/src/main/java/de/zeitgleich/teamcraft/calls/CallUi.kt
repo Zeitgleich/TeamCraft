@@ -166,6 +166,9 @@ private val STAGE_MARGIN = 8.dp
 /** The active speaker's tile: a thin outline in the accent, as Google Meet marks it. */
 private val SPEAKER_OUTLINE = 2.dp
 
+/** The warning mark of a tile whose person could not be verified: amber, readable on the dark pill. */
+private val UNVERIFIED_TINT = Color(0xFFFFB74D)
+
 /** The one other person's avatar when nobody shows video (Google Phone's in-call screen). */
 private val SOLO_AVATAR_SIZE = 144.dp
 
@@ -228,6 +231,7 @@ private class Person(
   val isSpeaking: Boolean,
   val isRejoining: Boolean,
   val isMuted: Boolean = false,
+  val isUnverified: Boolean = false,
 )
 
 private fun CallUiState.people(): List<Person> {
@@ -235,7 +239,7 @@ private fun CallUiState.people(): List<Person> {
   val speaking = state.speakingUserIds
   // Speakers first, loudest first; the rest by name.
   return state.participantUserIds
-    .map { id -> Person(id, names[id].orEmpty(), id in speaking, id in state.reconnectingUserIds, id in state.mutedUserIds) }
+    .map { id -> Person(id, names[id].orEmpty(), id in speaking, id in state.reconnectingUserIds, id in state.mutedUserIds, id in state.unverifiedUserIds) }
     .sortedWith(compareBy({ speaking.indexOf(it.userId).let { index -> if (index < 0) Int.MAX_VALUE else index } }, { it.name.lowercase() }))
 }
 
@@ -546,7 +550,7 @@ private fun AvatarTile(person: Person, modifier: Modifier) {
     // As large as the tile allows, within reason: a lone tile's avatar isn't a poster.
     val size = (minOf(maxWidth, maxHeight) * 0.45f).coerceIn(48.dp, 128.dp)
     AvatarImage(person.userId, person.name, size)
-    NameLabel(person.name, person.isMuted, Modifier.align(Alignment.BottomStart))
+    NameLabel(person.name, person.isMuted, person.isUnverified, Modifier.align(Alignment.BottomStart))
   }
 }
 
@@ -622,19 +626,25 @@ private fun SpeakingAvatar(
 
 /** The name at the tile's bottom left, on a dark pill so it reads on any picture. */
 @Composable
-private fun NameLabel(name: String, isMuted: Boolean, modifier: Modifier) {
+private fun NameLabel(name: String, isMuted: Boolean, isUnverified: Boolean, modifier: Modifier) {
   if (name.isEmpty()) return
-  val mutedName = stringResource(R.string.call_person_muted, name)
+  // Said as one: who, and what is wrong or switched off.
+  val description = when {
+    isUnverified && isMuted -> stringResource(R.string.call_person_unverified_muted, name)
+    isUnverified -> stringResource(R.string.call_person_unverified, name)
+    isMuted -> stringResource(R.string.call_person_muted, name)
+    else -> null
+  }
   Row(
     modifier
       .padding(8.dp)
       .background(Color.Black.copy(alpha = 0.55f), CircleShape)
       .padding(horizontal = 8.dp, vertical = 2.dp)
-      // Said as one: who, and that they are muted.
-      .then(if (isMuted) Modifier.semantics(mergeDescendants = true) { contentDescription = mutedName } else Modifier),
+      .then(if (description != null) Modifier.semantics(mergeDescendants = true) { contentDescription = description } else Modifier),
     verticalAlignment = Alignment.CenterVertically,
     horizontalArrangement = Arrangement.spacedBy(4.dp),
   ) {
+    if (isUnverified) Icon(CallIcons.Warning, contentDescription = null, tint = UNVERIFIED_TINT, modifier = Modifier.size(14.dp))
     if (isMuted) Icon(CallIcons.MicOff, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
     Text(name, color = Color.White, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
   }
@@ -690,7 +700,7 @@ private fun VideoTile(
         modifier = Modifier.fillMaxSize(),
       )
     }
-    if (maybeOwner != null) NameLabel(maybeOwner.name, maybeOwner.isMuted, Modifier.align(Alignment.BottomStart))
+    if (maybeOwner != null) NameLabel(maybeOwner.name, maybeOwner.isMuted, maybeOwner.isUnverified, Modifier.align(Alignment.BottomStart))
   }
 }
 

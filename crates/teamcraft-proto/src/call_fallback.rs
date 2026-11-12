@@ -32,7 +32,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use thiserror::Error;
 
 /// HTTP path of the WebSocket on the SFU's fallback listener.
-pub const CALL_FALLBACK_PATH: &str = "/call/fallback";
+pub const CALL_FALLBACK_PATH: &str = "/call/ws";
 
 /// The subprotocol the SFU answers with when the client offered it.
 pub const CALL_FALLBACK_PROTOCOL: &str = "teamcraft-call";

@@ -467,6 +467,7 @@ class CallController(
         mutedUserIds = emptyList(),
         reconnectingCount = 0u,
         reconnectingUserIds = emptyList(),
+        unverifiedUserIds = emptyList(),
         maybePrivacyCode = null,
         maybeEncryptionRetryAfterSecs = null,
       )
@@ -662,6 +663,7 @@ class CallController(
       mutedUserIds = emptyList(),
       reconnectingCount = 0u,
       reconnectingUserIds = emptyList(),
+      unverifiedUserIds = emptyList(),
       maybePrivacyCode = null,
     )
     if (join(to)) return true

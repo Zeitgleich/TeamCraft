@@ -20,13 +20,14 @@
 //! it, so it needs no Prometheus (#1666).
 
 use std::net::IpAddr;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use teamcraft_ops::metrics::{
   Histogram, HistogramOpts, IntCounter, IntCounterVec, Metrics, MetricsError, Opts,
 };
-use teamcraft_proto::{CALL_LOSS_BUCKETS_PERMILLE, SfuCallQuality};
+use teamcraft_proto::{CALL_LOSS_BUCKETS_PERMILLE, SfuCallIncidents, SfuCallQuality};
 use wtransport::Connection;
 
 /// How often a session's QUIC path statistics go into the histograms.
@@ -65,6 +66,8 @@ struct Window {
   loss: [AtomicU32; WINDOW_BUCKETS],
   quic_sessions: AtomicU32,
   fallback_sessions: AtomicU32,
+  /// Rare control-path events (DAVE restarts, signaling overflows); a lock is cheap enough there.
+  incidents: Mutex<SfuCallIncidents>,
 }
 
 /// What a session reaches the SFU on.
@@ -134,6 +137,14 @@ impl CallQuality {
         .collect(),
       quic_sessions: self.window.quic_sessions.swap(0, Ordering::Relaxed),
       fallback_sessions: self.window.fallback_sessions.swap(0, Ordering::Relaxed),
+      incidents: std::mem::take(&mut *lock(&self.window.incidents)),
+    }
+  }
+
+  /// Incidents of a call's DAVE group or signaling, counted into the window.
+  pub fn incidents(&self, incidents: SfuCallIncidents) {
+    if !incidents.is_empty() {
+      lock(&self.window.incidents).add(incidents);
     }
   }
 
@@ -312,6 +323,11 @@ fn loss_ratio(previous: PathCounters, now: PathCounters) -> Option<f64> {
   Some((lost as f64 / sent as f64).min(1.0))
 }
 
+/// Recovers from poisoning: the counts stay usable whatever panicked while holding them.
+fn lock(mutex: &Mutex<SfuCallIncidents>) -> std::sync::MutexGuard<'_, SfuCallIncidents> {
+  mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -399,13 +415,25 @@ mod tests {
       quality.record_path(Duration::from_millis(40), counters(0, 0), counters(1_000, 900));
       quality.session_joined(Transport::Quic, IpAddr::V4(Ipv4Addr::LOCALHOST));
       quality.session_joined(Transport::Fallback, IpAddr::V4(Ipv4Addr::LOCALHOST));
+      quality.incidents(SfuCallIncidents {
+        dave_restarts: 1,
+        ..SfuCallIncidents::default()
+      });
+      quality.incidents(SfuCallIncidents {
+        dave_restarts: 1,
+        signaling_overflows: 1,
+        ..SfuCallIncidents::default()
+      });
       let window = quality.take_window();
+      assert_eq!(window.incidents.dave_restarts, 2);
+      assert_eq!(window.incidents.signaling_overflows, 1);
       // 0.1 % is in the first bucket (le), 3 % in the one up to 5 %, 90 % above the last bound.
       assert_eq!(window.loss_buckets, vec![1, 0, 0, 0, 1, 0, 0, 0, 1]);
       assert_eq!((window.quic_sessions, window.fallback_sessions), (1, 1));
       let empty = quality.take_window();
       assert_eq!(empty.loss_buckets, vec![0; WINDOW_BUCKETS]);
       assert_eq!((empty.quic_sessions, empty.fallback_sessions), (0, 0));
+      assert!(empty.incidents.is_empty());
     }
 
     #[test]

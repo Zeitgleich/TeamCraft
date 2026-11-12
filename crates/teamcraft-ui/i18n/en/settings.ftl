@@ -784,6 +784,7 @@ settings-f-apple_bundle_id = iOS bundle ID
 
 settings-unit-percent = %
 settings-unit-ms = ms
+settings-unit-reports = reports
 settings-group-health_alerts = Health alerts
 settings-group-health_alerts-hint = When the system health checks tell admins and owners. A check must fail without a break for the first time below before admins are told; an alert ends once the check has been fine for the second. A restart or a slow answer raises nothing.
 settings-f-hold_secs = A check must fail for
@@ -822,6 +823,7 @@ settings-f-dsn = DSN of the backend project
 settings-f-sample_percent = Share of handled errors sent (crashes are always sent)
 settings-f-trace_percent = Share of measured operations sent as performance data (start, channel switch, send, sync; lower it as the instance grows)
 settings-f-slow_job_ms = Report a job of the mobile apps' core as slow after (it names the job, its wait and its queue; 0: never)
+settings-f-call_reports_per_call = Problem reports one call may send at most (encryption failures, frozen video, reconnects; sampled like other errors; 0: none)
 settings-f-environment = Environment name
 settings-f-allows_opt_out = People may turn crash reports off in their privacy settings
 settings-f-shows_notice = Tell people on the first start that the app sends crash reports
@@ -829,6 +831,7 @@ settings-error-dsn = Enter the project's DSN, like https://key@errors.example.co
 settings-error-bridge-url = Enter an https address without a user name, query or #fragment (http only for localhost).
 settings-error-crash-percent = Enter 0 to 100 percent.
 settings-error-slow-job = Enter 0 to 60000 milliseconds.
+settings-error-call-reports = Enter 0 to 50 reports.
 settings-error-crash-environment = Use 1 to 64 lowercase letters, digits, "-", "_" or ".".
 
 ## Report a problem (docs/bug-reports.md)
