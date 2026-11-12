@@ -124,8 +124,10 @@ use crate::call_resilience::{
 use crate::call_video::ReceivedVideoFrame;
 use crate::datagram::SimulcastLayer;
 use crate::jitter::{JitterBuffer, JitterBufferConfig, Playout};
+use crate::receive_load::{DecodedFrame, Importance, ReceiveLoad, ReceiveOverload, WatchedStream};
 use crate::resample::MonoResampler;
 use crate::rtp::AudioLevel;
+use crate::share_policy::{EncoderKind, ShareCodecs, ShareEncoders};
 use crate::video::{EncodedVideoFrame, ScreenProfile, TOP_LAYER, VideoResolution, chosen_layer};
 use crate::web_api::{
   AudioData, AudioDecoder, AudioEncoder, EncodedAudioChunk, QUIC_GLOBAL, WORKLET_SOURCE, WebTransport,
@@ -163,6 +165,14 @@ const SECURE_CONTEXT: &str = "camera and microphone access (the page needs HTTPS
 const AUDIBLE_AMPLITUDE: f32 = 0.01;
 /// The session's packet count is read every this many timer ticks (500 ms).
 const STATS_EVERY_TICKS: u32 = 5;
+/// The RTP video clock.
+const RTP_VIDEO_CLOCK_HZ: u64 = 90_000;
+/// A received stream's frame interval until two frames tell (30 fps).
+const DEFAULT_FRAME_INTERVAL: Duration = Duration::from_micros(33_333);
+/// Frame intervals outside these are gaps, not the stream's rate: a decoder's lateness is weighed
+/// against the rate.
+const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(5);
+const MAX_FRAME_INTERVAL: Duration = Duration::from_millis(500);
 /// How long a session whose signaling stream ended waits for its close reason.
 const CLOSE_INFO_WAIT: Duration = Duration::from_millis(200);
 /// WebTransport close code of a deliberate leave (as on native clients).
@@ -214,6 +224,9 @@ pub struct WebCallConfig {
   /// whose Content-Security-Policy allows scripts only from their own origin need it; `None` loads
   /// the module from a blob URL.
   pub maybe_worklet_url: Option<String>,
+  /// How this browser encodes AV1 and VP9 ([`CodecSupport::share_encoders`]): a screen share's
+  /// top layer goes out in them at full size only from a hardware encoder (#1733).
+  pub share_encoders: ShareEncoders,
 }
 
 /// Gets a fresh join ticket from `teamcraft-server` in the page.
@@ -371,10 +384,12 @@ enum Input {
   },
   /// The trusted roster as the page's core knows it now ([`WebTrustSource`]).
   Trust(Result<Vec<DeviceId>, String>),
-  /// A datagram of the session with this generation.
+  /// A datagram of the session with this generation, and when it was read: the loop may get to
+  /// it later on a busy machine (#1762).
   Datagram {
     generation: u64,
     bytes: Vec<u8>,
+    read_at: Instant,
   },
   /// Samples of the microphone or of a shared screen's sound.
   Captured {
@@ -1150,9 +1165,12 @@ async fn run_call(
     stats: CallStats::default(),
     own_device: config.engine.device_id,
     senders: Vec::new(),
+    share_encoders: config.share_encoders,
     next_publication: VideoPublicationId(0),
     encoded_kinds: Vec::new(),
     views: HashMap::new(),
+    receive_load: ReceiveLoad::new(Instant::now()),
+    maybe_datagram_read_at: None,
     remote_tracks: HashMap::new(),
     qualities: HashMap::new(),
     pulses: Pulses {
@@ -1289,11 +1307,18 @@ struct CallState<'a> {
   stats: CallStats,
   own_device: DeviceId,
   senders: Vec<TrackSender>,
+  /// How this browser encodes AV1 and VP9, for a share's plan (#1733).
+  share_encoders: ShareEncoders,
   /// The id the next own video publication goes under.
   next_publication: VideoPublicationId,
   /// Kinds whose running own track encoded a picture: one that ends before did not start.
   encoded_kinds: Vec<VideoTrackKind>,
   views: HashMap<MediaStreamId, Watched>,
+  /// Whether the received video's decoders keep up on this device; holds tiles below what they
+  /// want while they don't (#1762).
+  receive_load: ReceiveLoad,
+  /// When the datagram being handled was read, while its frames come out of the engine.
+  maybe_datagram_read_at: Option<Instant>,
   /// Other devices' published tracks: their kind and layers decide which layer a tile asks for.
   remote_tracks: HashMap<MediaStreamId, VideoTrack>,
   /// The lines the viewer picked per received track (#967); Auto where none. Kept while the
@@ -1315,9 +1340,39 @@ struct Watched {
   view: VideoView,
   /// The canvas' size as last reported (device pixels).
   shown: VideoResolution,
+  /// The layer the tile's size and the viewer's quality choice ask for.
+  wanted_layer: u8,
+  /// The layer asked of the SFU: [`Self::wanted_layer`], less what this device's load holds back.
   max_layer: u8,
+  /// The RTP timestamp of the last frame decoded, for the frame interval.
+  maybe_last_timestamp: Option<u32>,
+  /// The time between the stream's frames, as the last two told.
+  frame_interval: Duration,
+  /// Nothing was decoded while the tile was hidden: it needs a keyframe once shown.
+  is_waiting_for_keyframe: bool,
   /// Reports the canvas' size as [`Input::VideoResized`]; `None` where the browser can't.
-  _maybe_size_watch: Option<video::SizeWatch>,
+  maybe_size_watch: Option<video::SizeWatch>,
+}
+
+impl Watched {
+  /// A tile laid out at zero size (hidden, collapsed). Without a size watch the size is never
+  /// told again, so such a tile counts as shown.
+  fn is_hidden(&self) -> bool {
+    self.maybe_size_watch.is_some() && (self.shown.width == 0 || self.shown.height == 0)
+  }
+
+  /// The interval before the frame at RTP `timestamp`, from the one before it: what a decoder
+  /// has for it. Gaps (a lost frame, a paused sender) don't count.
+  fn next_interval(&mut self, timestamp: u32) -> Duration {
+    if let Some(last) = self.maybe_last_timestamp.replace(timestamp) {
+      let interval =
+        Duration::from_micros(u64::from(timestamp.wrapping_sub(last)) * 1_000_000 / RTP_VIDEO_CLOCK_HZ);
+      if (MIN_FRAME_INTERVAL..=MAX_FRAME_INTERVAL).contains(&interval) {
+        self.frame_interval = interval;
+      }
+    }
+    self.frame_interval
+  }
 }
 
 impl CallState<'_> {
@@ -1387,14 +1442,20 @@ impl CallState<'_> {
           .switch
           .failed_to_open(generation, Instant::now(), &self.resilience);
       },
-      Input::Datagram { generation, bytes } => {
-        let now = Instant::now();
+      Input::Datagram {
+        generation,
+        bytes,
+        read_at,
+      } => {
+        // The arrival is when the datagram was read, not when this loop got to it: a busy
+        // machine's delay isn't the network's (#1762). Frames it completes are late by the rest.
+        self.maybe_datagram_read_at = Some(read_at);
         if self.watch.is_current(generation) {
-          self.watch.on_heard(now);
-          engine.handle_datagram(&bytes, now);
+          self.watch.on_heard(Instant::now());
+          engine.handle_datagram(&bytes, read_at);
         } else if let Some(bytes) = self.switch.on_datagram(generation, bytes) {
           // The session the call moves to: its media plays at once.
-          engine.handle_datagram(&bytes, now);
+          engine.handle_datagram(&bytes, read_at);
         }
       },
       Input::Captured {
@@ -1462,7 +1523,7 @@ impl CallState<'_> {
         timestamp_us,
       } => {
         if let Some(sender) = self.sender_of_kind(&kind)
-          && let Err(gave_up) = sender.on_encoded(layer, data.len(), Instant::now())
+          && let Err(gave_up) = sender.on_encoded(layer, data.len(), timestamp_us, Instant::now())
         {
           self.on_encoders_gave_up(engine, &kind, gave_up);
         }
@@ -1501,6 +1562,11 @@ impl CallState<'_> {
       Input::VideoResized { stream_id, shown } => {
         if let Some(watched) = self.views.get_mut(&stream_id) {
           watched.shown = shown;
+          // Shown again after nothing was decoded while hidden (#1762).
+          if watched.is_waiting_for_keyframe && !watched.is_hidden() {
+            watched.is_waiting_for_keyframe = false;
+            engine.request_keyframe(stream_id, Instant::now());
+          }
         }
         self.update_layer(engine, stream_id);
       },
@@ -1551,7 +1617,9 @@ impl CallState<'_> {
       sent.maybe_frames_given = Some(given);
       sent.maybe_frames_skipped = Some(skipped);
       sent.maybe_camera_limits = sender.camera_limits().map(camera_limits_stats);
+      sent.maybe_share_limits = sender.share_limits().map(share_limits_stats);
     }
+    self.add_decoding_stats(&mut report);
     if let Some(transport) = &self.maybe_transport
       && transport.kind() == CallTransport::Quic
     {
@@ -1564,6 +1632,39 @@ impl CallState<'_> {
       });
     }
     report
+  }
+
+  /// What this device's decoders do with each received track (#1762): the queue now, and the
+  /// layer this device holds it to for its own load.
+  #[cfg(feature = "call-view")]
+  fn add_decoding_stats(&self, report: &mut teamcraft_client_api::video_stats::VideoStatsReport) {
+    use teamcraft_client_api::video_stats::{DecodeOverload, DeviceLimitStats, VideoTrackStats};
+
+    let maybe_reason = self.receive_load.maybe_reason().map(|reason| match reason {
+      ReceiveOverload::QueuedFrames => DecodeOverload::QueuedFrames,
+      ReceiveOverload::LateFrames => DecodeOverload::LateFrames,
+    });
+    let unlimited: HashMap<MediaStreamId, u8> = self
+      .watched_streams()
+      .iter()
+      .map(|stream| (stream.stream_id, stream.unlimited_layer()))
+      .collect();
+    for track in &mut report.tracks {
+      let VideoTrackStats::Received(received) = track else {
+        continue;
+      };
+      let Some(watched) = self.views.get(&received.stream_id) else {
+        continue;
+      };
+      received.maybe_decode_queue = Some(watched.view.queue_size());
+      let is_held_back = unlimited
+        .get(&received.stream_id)
+        .is_some_and(|layer| watched.max_layer < *layer);
+      received.maybe_device_limit = is_held_back.then_some(DeviceLimitStats {
+        layer: watched.max_layer,
+        maybe_reason,
+      });
+    }
   }
 
   /// Leaves the call at once (the SFU frees the slot, and the other side of a 1:1 call hears of
@@ -1622,6 +1723,21 @@ impl CallState<'_> {
         engine.limit_own_layers(stream_id, sender.maybe_top_layer());
       }
     }
+    // A share's top layer follows what the uplink carries (#1733).
+    let mut gave_up = Vec::new();
+    for sender in &mut self.senders {
+      if let Some(stream_id) = sender.publication.own.maybe_stream_id
+        && let Some(top) = engine.uplink_top(stream_id)
+        && let Err(layer) = sender.on_uplink(top, now)
+      {
+        gave_up.push((sender.publication.kind.clone(), layer));
+      }
+    }
+    for (kind, layer) in gave_up {
+      self.on_encoders_gave_up(engine, &kind, layer);
+    }
+    // A share whose CPU ladder or uplink changed its layers goes out anew (#1733).
+    self.publish_replans(engine);
     Ok(Flow::Continue)
   }
 
@@ -1631,6 +1747,7 @@ impl CallState<'_> {
     if self.timer_ticks.is_multiple_of(STATS_EVERY_TICKS) {
       self.request_path_stats();
     }
+    self.judge_receive_load(engine, now);
     let tick = self.watch.on_tick(now);
     if let Some(id) = tick.maybe_ping {
       self.send_ping(id)?;
@@ -1650,11 +1767,73 @@ impl CallState<'_> {
       return;
     };
     let maybe_max_lines = self.qualities.get(&stream_id).copied();
-    let max_layer = chosen_layer(&track.kind, &track.layers, watched.shown, maybe_max_lines);
-    if max_layer != watched.max_layer {
-      debug!(stream_id = stream_id.0, max_layer, shown = ?watched.shown, "video tile asks for another layer");
-      watched.max_layer = max_layer;
-      engine.set_video_max_layer(stream_id, max_layer);
+    watched.wanted_layer = chosen_layer(&track.kind, &track.layers, watched.shown, maybe_max_lines);
+    self.ask_for_layers(engine);
+  }
+
+  /// Asks for each watched track what its tile wants, less what this device's load holds back
+  /// (#1762), where that changed.
+  fn ask_for_layers(&mut self, engine: &mut CallEngine) {
+    let layers = self.receive_load.layers(&self.watched_streams());
+    for (stream_id, max_layer) in layers {
+      if let Some(watched) = self.views.get_mut(&stream_id)
+        && watched.max_layer != max_layer
+      {
+        debug!(
+          stream_id = stream_id.0,
+          max_layer,
+          wanted_layer = watched.wanted_layer,
+          shown = ?watched.shown,
+          "video tile asks for another layer"
+        );
+        watched.max_layer = max_layer;
+        engine.set_video_max_layer(stream_id, max_layer);
+      }
+    }
+  }
+
+  /// The watched tracks as this device's receive load weighs them.
+  fn watched_streams(&self) -> Vec<WatchedStream> {
+    self
+      .views
+      .iter()
+      .map(|(stream_id, watched)| {
+        let maybe_track = self.remote_tracks.get(stream_id);
+        let kind = maybe_track.map_or(VideoTrackKind::Camera, |track| track.kind.clone());
+        WatchedStream {
+          stream_id: *stream_id,
+          importance: Importance::new(&kind, watched.shown),
+          wanted_layer: watched.wanted_layer,
+          offered_layers: maybe_track
+            .map(|track| track.layers.iter().map(|info| info.layer).collect())
+            .unwrap_or_default(),
+        }
+      })
+      .collect()
+  }
+
+  /// Judges whether this device decodes what it receives (#1762), every timer tick: a step asks
+  /// the SFU for other layers, and the UI hears when the device starts or stops holding video
+  /// back. Nothing watched, nothing to judge.
+  fn judge_receive_load(&mut self, engine: &mut CallEngine, now: Instant) {
+    if self.views.is_empty() {
+      self.receive_load.measure_afresh(now);
+    }
+    let was_limited = self.receive_load.is_limited();
+    if self.receive_load.evaluate(&self.watched_streams(), now) {
+      info!(
+        is_limited = self.receive_load.is_limited(),
+        reason = ?self.receive_load.maybe_reason(),
+        "received video's decoders: layers changed for this device's load"
+      );
+      self.ask_for_layers(engine);
+    }
+    let is_limited = self.receive_load.is_limited();
+    if is_limited != was_limited {
+      // The app dropped the call if nobody reads the events.
+      let _ = self
+        .events
+        .unbounded_send(CallEngineEvent::DecodeLimited(is_limited));
     }
   }
 
@@ -1688,9 +1867,27 @@ impl CallState<'_> {
           remote.jitter.push(sequence_number, opus);
         },
         EngineOutput::Event(CallEngineEvent::VideoFrame(frame)) => {
-          if let Some(watched) = self.views.get_mut(&frame.stream_id) {
-            decode_video(&mut watched.view, &frame, engine);
+          let Some(watched) = self.views.get_mut(&frame.stream_id) else {
+            continue;
+          };
+          // No work for a picture nobody sees (#1762): its decoder closes, and a keyframe is
+          // asked for once the tile shows again.
+          if watched.is_hidden() {
+            watched.view.close();
+            watched.is_waiting_for_keyframe = true;
+            continue;
           }
+          let queued = watched.view.queue_size();
+          let interval = watched.next_interval(frame.timestamp.0);
+          decode_video(&mut watched.view, &frame, engine);
+          let late_by = self.maybe_datagram_read_at.map_or(Duration::ZERO, |read_at| {
+            Instant::now().saturating_duration_since(read_at)
+          });
+          self.receive_load.on_frame(DecodedFrame {
+            queued,
+            late_by,
+            interval,
+          });
         },
         EngineOutput::Event(event) => {
           match &event {
@@ -1708,7 +1905,11 @@ impl CallState<'_> {
               // A tile may have been watching before its layers were known.
               self.update_layer(engine, track.stream_id);
             },
-            CallEngineEvent::VideoUnpublished(_) => self.on_publication(&event),
+            CallEngineEvent::VideoUnpublished(_) => {
+              self.on_publication(&event);
+              // The steps a gone tile held go to the others (#1762).
+              self.ask_for_layers(engine);
+            },
             CallEngineEvent::ScreenShareTakenOver(takeover) => {
               // The app hears it as the share's end.
               self.on_screen_share_taken_over(engine, *takeover);
@@ -1754,6 +1955,8 @@ impl CallState<'_> {
     if self.maybe_screen_sound.is_some() && !engine.is_sharing_screen_audio() {
       self.stop_screen_sound(engine);
     }
+    // Frames out of the next input (a timer's recovered packets) weren't completed by this read.
+    self.maybe_datagram_read_at = None;
     Ok(())
   }
 
@@ -2250,10 +2453,24 @@ impl CallState<'_> {
           Watched {
             view,
             shown,
+            wanted_layer: max_layer,
             max_layer,
-            _maybe_size_watch: maybe_size_watch,
+            maybe_last_timestamp: None,
+            frame_interval: DEFAULT_FRAME_INTERVAL,
+            is_waiting_for_keyframe: false,
+            maybe_size_watch,
           },
         );
+        // What this device's load holds back holds for a new tile too (#1762).
+        let max_layer = self
+          .receive_load
+          .layers(&self.watched_streams())
+          .get(&stream_id)
+          .copied()
+          .unwrap_or(max_layer);
+        if let Some(watched) = self.views.get_mut(&stream_id) {
+          watched.max_layer = max_layer;
+        }
         engine.subscribe_video(stream_id, Some(max_layer));
       },
       Command::SetStatusCues(status_cues) => self.cues.set_setting(status_cues),
@@ -2265,6 +2482,8 @@ impl CallState<'_> {
       Command::UnwatchVideo(stream_id) => {
         if self.views.remove(&stream_id).is_some() {
           engine.subscribe_video(stream_id, None);
+          // The steps it held go to the others (#1762).
+          self.ask_for_layers(engine);
         }
       },
       Command::SetVideoQuality {
@@ -2296,13 +2515,22 @@ impl CallState<'_> {
     self.stop_video(engine, &kind);
     let publication = self.next_publication;
     self.next_publication = VideoPublicationId(publication.0.wrapping_add(1));
-    let codec = engine.video_codec_for(&plan.codecs);
+    let codecs = share_codecs(engine, &plan.codecs);
     // Within the layers the SFU takes (#978): a 1080p camera's 180p only where it takes four.
     let max_layers = engine.simulcast_layer_limit();
-    let sender =
-      TrackSender::start(stream, plan, codec.clone(), max_layers, publication, self.inputs).await?;
-    // The encoders are ours: a camera follows the uplink with its layers' bitrates (#939).
-    engine.publish_adaptive_video(publication, kind, codec, sender.layers());
+    let sender = TrackSender::start(
+      stream,
+      plan,
+      codecs,
+      self.share_encoders,
+      max_layers,
+      publication,
+      self.inputs,
+    )
+    .await?;
+    // The encoders are ours: a camera follows the uplink with its layers' bitrates (#939), a
+    // share with its top layer's frame rate (#1733).
+    engine.publish_video_adapting_in_place(publication, kind, sender.codec().clone(), sender.layers());
     self.senders.push(sender);
     // What the others decode may have changed while the capture started.
     self.follow_codecs(engine);
@@ -2315,7 +2543,15 @@ impl CallState<'_> {
   /// whose encoders can't open in the new codec keeps its own (viewers that can't decode it see
   /// nothing until it ends).
   fn follow_codecs(&mut self, engine: &mut CallEngine) {
+    let mut gave_up = Vec::new();
     for sender in &mut self.senders {
+      if sender.publication.kind == VideoTrackKind::Screen {
+        // A share plans its layers' codecs itself (#1733); its new layers go out below.
+        if let Err(layer) = sender.follow_share_codecs(share_codecs(engine, sender.codecs())) {
+          gave_up.push((sender.publication.kind.clone(), layer));
+        }
+        continue;
+      }
       let wanted = engine.video_codec_for(sender.codecs());
       if wanted == *sender.codec() {
         continue;
@@ -2327,7 +2563,7 @@ impl CallState<'_> {
           self.next_publication = VideoPublicationId(publication.0.wrapping_add(1));
           debug!(kind = ?sender.publication.kind, codec = %wanted, "video track goes out in another codec");
           engine.withdraw_video(withdrawn);
-          engine.publish_adaptive_video(
+          engine.publish_video_adapting_in_place(
             publication,
             sender.publication.kind.clone(),
             wanted,
@@ -2337,6 +2573,39 @@ impl CallState<'_> {
         Err(error) => {
           warn!(%error, codec = %wanted, "video encoders can't switch codec; the track keeps its own")
         },
+      }
+    }
+    for (kind, layer) in gave_up {
+      self.on_encoders_gave_up(engine, &kind, layer);
+    }
+    self.publish_replans(engine);
+  }
+
+  /// Publishes anew the own tracks whose layers changed beyond what their encoders follow in
+  /// place (#1733: a share's middle layer stopped, its top's codec changed, or the viewers'
+  /// codecs did). The capture goes on; viewers see the track end and the new one start, with
+  /// keyframes. A track whose new encoders don't open keeps its layers.
+  fn publish_replans(&mut self, engine: &mut CallEngine) {
+    for sender in &mut self.senders {
+      let Some(replan) = sender.take_replan() else {
+        continue;
+      };
+      let publication = self.next_publication;
+      let withdrawn = sender.publication.own.id;
+      let layers = replan.layers.len();
+      match sender.rebuild(replan, publication, self.inputs) {
+        Ok(()) => {
+          self.next_publication = VideoPublicationId(publication.0.wrapping_add(1));
+          debug!(kind = ?sender.publication.kind, codec = %sender.codec(), layers, "video track goes out with other layers");
+          engine.withdraw_video(withdrawn);
+          engine.publish_video_adapting_in_place(
+            publication,
+            sender.publication.kind.clone(),
+            sender.codec().clone(),
+            sender.layers(),
+          );
+        },
+        Err(error) => warn!(%error, "new video encoders didn't open; the track keeps its layers"),
       }
     }
   }
@@ -2788,6 +3057,59 @@ async fn received_packets(session: &SessionHandle) -> PacketCount {
 
 /// A governed camera's limits as the stats show them (#1762).
 #[cfg(feature = "call-view")]
+/// The codecs an own track's layers may use (#1733): what every viewer decodes, and what some
+/// decode as a layer in another codec where the SFU forwards such layers.
+fn share_codecs(engine: &CallEngine, candidates: &[VideoCodec]) -> ShareCodecs {
+  ShareCodecs {
+    by_all: engine.video_codecs_for(candidates),
+    by_some: engine.layer_codecs_for(candidates),
+  }
+}
+
+fn share_limits_stats(
+  limits: crate::share_policy::ShareLimits,
+) -> teamcraft_client_api::video_stats::ShareLimitsStats {
+  use teamcraft_client_api::video_stats::{EncoderOverload, ShareLimitsStats, ShareStepStats, VideoSize};
+
+  use crate::camera_governor::OverloadReason;
+  use crate::share_policy::ShareStep;
+
+  let step = |step: ShareStep| ShareStepStats {
+    top_codec: step.top_codec,
+    top_framerate: step.top_framerate,
+    maybe_top: step.maybe_top.map(|top| VideoSize {
+      width: top.width,
+      height: top.height,
+    }),
+    has_middle: step.has_middle,
+  };
+  ShareLimitsStats {
+    av1_encoder: encoder_kind(limits.encoders.av1),
+    vp9_encoder: encoder_kind(limits.encoders.vp9),
+    planned: step(limits.planned),
+    now: step(limits.now),
+    level: u8::try_from(limits.level).unwrap_or(u8::MAX),
+    levels: u8::try_from(limits.levels).unwrap_or(u8::MAX),
+    maybe_overload: limits.maybe_reason.map(|reason| match reason {
+      OverloadReason::SkippedFrames => EncoderOverload::SkippedFrames,
+      OverloadReason::QueuedFrames => EncoderOverload::QueuedFrames,
+      OverloadReason::SlowEncoding => EncoderOverload::SlowEncoding,
+    }),
+    uplink_steps: u8::try_from(limits.uplink_steps).unwrap_or(u8::MAX),
+    sizes: u8::try_from(limits.sizes).unwrap_or(u8::MAX),
+  }
+}
+
+fn encoder_kind(kind: EncoderKind) -> teamcraft_client_api::video_stats::ShareEncoderKind {
+  use teamcraft_client_api::video_stats::ShareEncoderKind;
+
+  match kind {
+    EncoderKind::Hardware => ShareEncoderKind::Hardware,
+    EncoderKind::Software => ShareEncoderKind::Software,
+    EncoderKind::Unavailable => ShareEncoderKind::Unavailable,
+  }
+}
+
 fn camera_limits_stats(limits: video::CameraLimits) -> teamcraft_client_api::video_stats::CameraLimitsStats {
   use teamcraft_client_api::video_stats::{CameraLimitsStats, EncoderOverload, LayerLimitStats};
 
@@ -3536,7 +3858,11 @@ async fn read_signaling(
 async fn read_datagrams(stream: ReadableStream, inputs: mpsc::UnboundedSender<Input>, generation: u64) {
   let result = read_chunks(stream, |bytes| {
     inputs
-      .unbounded_send(Input::Datagram { generation, bytes })
+      .unbounded_send(Input::Datagram {
+        generation,
+        bytes,
+        read_at: Instant::now(),
+      })
       .is_ok()
   })
   .await;
@@ -4301,6 +4627,10 @@ mod tests {
         true
       }
 
+      fn queue_size(&self) -> u32 {
+        0
+      }
+
       fn decode(&self, _frame: &ReceivedVideoFrame) -> Result<(), WebCallError> {
         Err(WebCallError::Browser {
           context: "VideoDecoder",
@@ -4316,6 +4646,10 @@ mod tests {
 
       fn is_configured(&self) -> bool {
         true
+      }
+
+      fn queue_size(&self) -> u32 {
+        0
       }
 
       fn decode(&self, _frame: &ReceivedVideoFrame) -> Result<(), WebCallError> {
@@ -4425,6 +4759,7 @@ mod tests {
       height: 180,
       max_framerate: 30,
       max_bitrate_bps: 150_000,
+      maybe_codec: None,
     }]
   }
 

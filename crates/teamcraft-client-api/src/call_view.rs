@@ -160,6 +160,7 @@ impl CallView {
       reconnecting: Vec::new(),
       unverified: Vec::new(),
       is_on_limited_network: false,
+      is_video_limited_by_device: false,
       maybe_moved_to: None,
       maybe_joined_at: Some(joined_at),
       maybe_encryption_failure: None,

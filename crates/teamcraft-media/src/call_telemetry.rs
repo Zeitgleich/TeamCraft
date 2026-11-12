@@ -1187,6 +1187,7 @@ mod tests {
           maybe_frames_skipped: None,
           maybe_held_back_ms: None,
           maybe_camera_limits: None,
+          maybe_share_limits: None,
         }),
         VideoTrackStats::Received(ReceivedVideoStats {
           stream_id: MediaStreamId(20),
@@ -1214,6 +1215,8 @@ mod tests {
           keyframe_requests: 0,
           maybe_longest_gap_ms: None,
           maybe_max_framerate: None,
+          maybe_decode_queue: None,
+          maybe_device_limit: None,
         }),
       ],
       maybe_uplink_probe: None,

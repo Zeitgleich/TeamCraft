@@ -6,8 +6,8 @@
 use std::time::Duration;
 
 use teamcraft_client_api::video_stats::{
-  CameraLimitsStats, EncoderImplementation, EncoderOverload, LinkProbeStats, ReceivedVideoStats,
-  SentVideoStats, VideoSize, VideoStatsReport,
+  CameraLimitsStats, DecodeOverload, EncoderImplementation, EncoderOverload, LinkProbeStats,
+  ReceivedVideoStats, SentVideoStats, ShareEncoderKind, ShareLimitsStats, VideoSize, VideoStatsReport,
 };
 use teamcraft_proto::{MediaStreamId, VideoCodec, VideoTrackKind};
 
@@ -291,7 +291,75 @@ fn sent_rows(
   if let Some(limits) = &sent.maybe_camera_limits {
     rows.push(row("stats-limits", camera_limits_text(limits, words)));
   }
+  if let Some(limits) = &sent.maybe_share_limits {
+    rows.push(row("stats-share-policy", share_limits_text(limits, words)));
+  }
   rows
+}
+
+/// Why an own screen share's layers are what they are (#1733): its top layer's codec, rate and
+/// size, whether the middle layer is sent, the AV1 encoder, and the CPU step with its reason.
+fn share_limits_text(limits: &ShareLimitsStats, words: Words<'_>) -> String {
+  let now = &limits.now;
+  let encoder = |kind: ShareEncoderKind| match kind {
+    ShareEncoderKind::Hardware => words("stats-encoder-kind-hardware", &[]),
+    ShareEncoderKind::Software => words("stats-encoder-kind-software", &[]),
+    ShareEncoderKind::Unavailable => words("stats-encoder-kind-none", &[]),
+    ShareEncoderKind::Unknown => MISSING.to_owned(),
+  };
+  let top = now
+    .maybe_top
+    .map_or_else(|| words("stats-share-base-only", &[]), size_text);
+  let mut text = words(
+    "stats-value-share",
+    &[
+      ("codec", &codec_text(&now.top_codec)),
+      ("size", &top),
+      ("fps", &now.top_framerate.to_string()),
+      ("planned", &limits.planned.top_framerate.to_string()),
+      (
+        "middle",
+        &words(
+          if now.has_middle {
+            "stats-share-middle-on"
+          } else {
+            "stats-share-middle-off"
+          },
+          &[],
+        ),
+      ),
+      ("av1", &encoder(limits.av1_encoder)),
+      ("vp9", &encoder(limits.vp9_encoder)),
+    ],
+  );
+  if limits.level > 0 {
+    let reason = match limits.maybe_overload {
+      Some(EncoderOverload::SkippedFrames) => words("stats-overload-skipped", &[]),
+      Some(EncoderOverload::QueuedFrames) => words("stats-overload-queued", &[]),
+      Some(EncoderOverload::SlowEncoding) => words("stats-overload-slow", &[]),
+      Some(EncoderOverload::Unknown) | None => MISSING.to_owned(),
+    };
+    text.push_str(" · ");
+    text.push_str(&words(
+      "stats-value-share-step",
+      &[
+        ("level", &limits.level.to_string()),
+        ("levels", &limits.levels.to_string()),
+        ("reason", &reason),
+      ],
+    ));
+  }
+  if limits.uplink_steps > 0 {
+    text.push_str(" · ");
+    text.push_str(&words(
+      "stats-value-share-uplink",
+      &[
+        ("steps", &limits.uplink_steps.to_string()),
+        ("sizes", &limits.sizes.saturating_sub(1).to_string()),
+      ],
+    ));
+  }
+  text
 }
 
 /// Why an own camera sends less than its plan (#1762): the encoders' load, then each layer
@@ -413,7 +481,30 @@ fn received_rows(
         ],
       ),
     ),
+    row("stats-decoding", decoding_text(received, words)),
   ]
+}
+
+/// The decoder's queue, and whether this device holds the track back for its own load (#1762):
+/// "limited by this device" tells a busy machine from a weak link.
+fn decoding_text(received: &ReceivedVideoStats, words: Words<'_>) -> String {
+  let queue = or_missing(received.maybe_decode_queue.map(|queue| queue.to_string()));
+  let Some(limit) = received.maybe_device_limit else {
+    return words("stats-value-decoding", &[("queue", &queue)]);
+  };
+  let reason = match limit.maybe_reason {
+    Some(DecodeOverload::QueuedFrames) => words("stats-decode-queued", &[]),
+    Some(DecodeOverload::LateFrames) => words("stats-decode-late", &[]),
+    Some(DecodeOverload::Unknown) | None => MISSING.to_owned(),
+  };
+  words(
+    "stats-value-decoding-limited",
+    &[
+      ("queue", &queue),
+      ("reason", &reason),
+      ("layer", &limit.layer.to_string()),
+    ],
+  )
 }
 
 fn row(label_key: &'static str, value: String) -> StatsRow {
@@ -497,7 +588,8 @@ fn layer_list(layers: impl Iterator<Item = u8>) -> String {
 #[cfg(test)]
 mod tests {
   use teamcraft_client_api::video_stats::{
-    LayerLimitStats, OfferedLayer, SentLayerStats, UplinkStats, VideoEncoderInfo, VideoTrackStats,
+    DeviceLimitStats, LayerLimitStats, OfferedLayer, SentLayerStats, ShareStepStats, UplinkStats,
+    VideoEncoderInfo, VideoTrackStats,
   };
 
   use super::*;
@@ -597,6 +689,31 @@ mod tests {
       assert_eq!(value(&rows, "stats-loss"), "1.0 %");
       assert_eq!(value(&rows, "stats-network"), "RTT 34 ms · jitter 4.5 ms");
       assert_eq!(value(&rows, "stats-frames"), "dropped 3 · black –");
+    }
+
+    /// #1762: a busy device says it holds the track back itself, so it isn't taken for a weak
+    /// link.
+    #[test]
+    fn a_received_track_held_back_by_this_device_says_so() {
+      let mut window = StatsWindow::default();
+      let limited = ReceivedVideoStats {
+        maybe_decode_queue: Some(5),
+        maybe_device_limit: Some(DeviceLimitStats {
+          layer: 0,
+          maybe_reason: Some(DecodeOverload::QueuedFrames),
+        }),
+        ..received(1_000, 300, 0, 100)
+      };
+      window.push(report(1_000, None, Some(limited)));
+      let rows = english(&window, StatsTarget::Received(REMOTE));
+      assert_eq!(
+        value(&rows, "stats-decoding"),
+        "queue 5 · limited by this device (frames queued): layer ≤ 0"
+      );
+      let mut window = StatsWindow::default();
+      window.push(report(1_000, None, Some(received(1_000, 300, 0, 100))));
+      let rows = english(&window, StatsTarget::Received(REMOTE));
+      assert_eq!(value(&rows, "stats-decoding"), "queue –");
     }
 
     /// #1719: a track that got no packet between two reports has no loss to show, not 0 %.
@@ -776,7 +893,49 @@ mod tests {
         framerate: 5,
       }],
     });
+    sent.maybe_share_limits = Some(share_limits());
     sent
+  }
+
+  /// A software AV1 share stepped down to H.264 at 5 fps without its middle layer.
+  fn share_limits() -> ShareLimitsStats {
+    ShareLimitsStats {
+      av1_encoder: ShareEncoderKind::Software,
+      vp9_encoder: ShareEncoderKind::Unavailable,
+      planned: ShareStepStats {
+        top_codec: VideoCodec::Av1,
+        top_framerate: 15,
+        maybe_top: Some(VideoSize {
+          width: 1920,
+          height: 1080,
+        }),
+        has_middle: false,
+      },
+      now: ShareStepStats {
+        top_codec: VideoCodec::H264,
+        top_framerate: 5,
+        maybe_top: Some(VideoSize {
+          width: 1600,
+          height: 900,
+        }),
+        has_middle: false,
+      },
+      level: 3,
+      levels: 6,
+      maybe_overload: Some(EncoderOverload::SlowEncoding),
+      uplink_steps: 1,
+      sizes: 3,
+    }
+  }
+
+  /// #1733: the overlay says why a share's layers are what they are.
+  #[test]
+  fn the_share_row_says_why_its_layers_are_what_they_are() {
+    let text = share_limits_text(&share_limits(), &en_words());
+    assert_eq!(
+      text,
+      "top H.264 1600×900 at 5 of 15 fps · middle layer off · encoders AV1 software, VP9 none · encoders overloaded (slow encoding): step 3 of 6 · uplink: 1 of 2 sizes smaller"
+    );
   }
 
   fn english(window: &StatsWindow, target: StatsTarget) -> Vec<StatsRow> {
@@ -859,6 +1018,7 @@ mod tests {
       maybe_frames_skipped: None,
       maybe_held_back_ms: None,
       maybe_camera_limits: None,
+      maybe_share_limits: None,
     })
   }
 
@@ -885,6 +1045,8 @@ mod tests {
       keyframe_requests: 0,
       maybe_longest_gap_ms: None,
       maybe_max_framerate: None,
+      maybe_decode_queue: None,
+      maybe_device_limit: None,
     }
   }
 

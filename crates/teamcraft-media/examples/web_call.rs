@@ -72,6 +72,7 @@ pub async fn join_dev_call(
       video_decoders: vec![VideoCodec::H264, VideoCodec::Vp9],
       max_simulcast_layers: 1,
       max_frame_fragments: teamcraft_proto::MAX_VIDEO_FRAME_FRAGMENTS,
+      video_features: Vec::new(),
     },
     bwe: BweConfig::default(),
   };
@@ -101,6 +102,10 @@ pub async fn join_dev_call(
     is_muted_at_start: false,
     // The development page has no Content-Security-Policy.
     maybe_worklet_url: None,
+    share_encoders: teamcraft_media::share_policy::ShareEncoders {
+      av1: teamcraft_media::share_policy::EncoderKind::Unavailable,
+      vp9: teamcraft_media::share_policy::EncoderKind::Unavailable,
+    },
   };
   let call = WebCall::join(config)
     .await

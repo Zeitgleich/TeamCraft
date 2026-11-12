@@ -103,6 +103,11 @@ impl CallRoster {
         active.is_on_limited_network = transport == CallTransport::Fallback;
         return true;
       },
+      CallEngineEvent::DecodeLimited(is_limited) => {
+        let has_changed = active.is_video_limited_by_device != is_limited;
+        active.is_video_limited_by_device = is_limited;
+        return has_changed;
+      },
       CallEngineEvent::ParticipantReconnecting(device_id) => {
         roster.reconnecting.insert(device_id);
         active.reconnecting = roster.reconnecting_users();
@@ -368,6 +373,30 @@ mod transport_tests {
     assert!(is_limited(&view));
     assert!(roster.apply(&mut view, CallEngineEvent::TransportChanged(CallTransport::Quic)));
     assert!(!is_limited(&view));
+  }
+
+  /// #1762: a device that can't decode all it receives says so, calmly, until it can again; the
+  /// same state again doesn't make the UI read.
+  #[test]
+  fn a_busy_device_shows_until_it_decodes_what_its_tiles_want() {
+    let device = DeviceId::from_snowflake(Snowflake::new(1).unwrap());
+    let mut roster = CallRoster::new(device);
+    let mut view = CallView::default();
+    view.start_active(
+      CallRequest {
+        conversation: ConversationId::from_snowflake(Snowflake::new(2).unwrap()),
+        kind: CallKind::Group,
+      },
+      BackgroundEffect::default(),
+      0,
+    );
+    let is_busy = |view: &CallView| view.maybe_active.as_ref().unwrap().is_video_limited_by_device;
+    assert!(!is_busy(&view));
+    assert!(roster.apply(&mut view, CallEngineEvent::DecodeLimited(true)));
+    assert!(is_busy(&view));
+    assert!(!roster.apply(&mut view, CallEngineEvent::DecodeLimited(true)));
+    assert!(roster.apply(&mut view, CallEngineEvent::DecodeLimited(false)));
+    assert!(!is_busy(&view));
   }
 
   /// A refusal shows until the call is secured (#1555).

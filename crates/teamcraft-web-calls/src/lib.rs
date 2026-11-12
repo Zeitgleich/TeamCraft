@@ -581,6 +581,7 @@ impl Host {
           video_decoders: codecs.decoders,
           max_simulcast_layers: MAX_SIMULCAST_LAYERS,
           max_frame_fragments: teamcraft_proto::MAX_VIDEO_FRAME_FRAGMENTS,
+          video_features: Vec::new(),
         },
         bwe: BweConfig::default(),
       },
@@ -598,6 +599,7 @@ impl Host {
       }),
       status_cues: status_cues(sounds),
       maybe_worklet_url: Some(self.worklet_url.clone()),
+      share_encoders: codecs.share_encoders,
       is_muted_at_start,
     };
     let requires_background = prepared.requires_background;

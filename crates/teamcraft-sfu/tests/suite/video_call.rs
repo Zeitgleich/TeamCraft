@@ -303,6 +303,7 @@ fn three_layers() -> Vec<VideoLayerInfo> {
     height,
     max_framerate: 30,
     max_bitrate_bps,
+    maybe_codec: None,
   })
   .collect()
 }

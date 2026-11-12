@@ -8,7 +8,7 @@
 //! less (only sound) doesn't hold its layers back (#935). A screen share keeps its layers through
 //! a short dip ([`UplinkPolicy::screen_downswitch_hold`]), as at the SFU (#941).
 //!
-//! A camera whose encoders follow the allocation ([`OwnTrack::adapts_bitrate`]) gives up bitrate
+//! A camera whose encoders follow the allocation ([`OwnTrack::adaptation`]) gives up bitrate
 //! before resolution (#939): its top sent layer may be encoded at a share of its bitrate
 //! ([`UplinkPolicy::camera_bitrate_shares`]), down to half, before it stops and the next lower
 //! layer becomes the top one. The frame rate stays. Lower layers keep their whole bitrate (other
@@ -51,6 +51,11 @@ pub struct UplinkPolicy {
   /// encoded at, lowest first, the last one 1.0. Few steps: the encoders are rebuilt (and send a
   /// keyframe) when a layer's bitrate changes.
   pub camera_bitrate_shares: [f64; 3],
+  /// The same for a screen share that adapts its bitrate (#1733): its encoders send the top layer
+  /// at the frame rate that share of the bitrate allows ([`crate::share_policy::share_framerate`]),
+  /// so a limited uplink keeps the share's resolution and lowers its rate, down to about 5 fps
+  /// at the least share, before the top layer stops.
+  pub screen_bitrate_shares: [f64; 4],
   /// How long the estimate has to stay below a camera's top layer at its share before the
   /// share drops while the layer stays (a lower layer is taken at once). A lower share rebuilds
   /// the layer's encoder, and its keyframe is the largest picture there is: sent into a link
@@ -95,9 +100,22 @@ pub struct OwnTrack<'a> {
   pub stream: StreamId,
   pub kind: &'a VideoTrackKind,
   pub layers: &'a [VideoLayerInfo],
-  /// Its encoders follow [`UplinkLayers::bitrate_bps`] (a camera the call encodes itself); other
-  /// tracks are sent at their layers' whole bitrate or not at all.
-  pub adapts_bitrate: bool,
+  /// How its encoders follow [`UplinkLayers::bitrate_bps`].
+  pub adaptation: Adaptation,
+}
+
+/// How an own track's encoders follow a bitrate below a layer's whole one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Adaptation {
+  /// They don't: the track is sent at its layers' whole bitrate or not at all.
+  Whole,
+  /// They are rebuilt at the new bitrate, which starts with a keyframe (the desktop's): a camera
+  /// steps through its shares, a screen share stays whole. A share's keyframe is the largest
+  /// picture there is, and one per step into a congested uplink was what lost its slides (#1733).
+  Rebuilt,
+  /// They change the rate in place (the browser's WebCodecs): a camera and a screen share both
+  /// step through their shares, the share at a lower frame rate (#1733).
+  InPlace,
 }
 
 /// The current allocation: per track the highest layer that may be sent, `None` for paused.
@@ -127,6 +145,7 @@ impl Default for UplinkPolicy {
       upgrade_margin: 1.15,
       screen_downswitch_hold: Duration::from_secs(3),
       camera_bitrate_shares: [0.5, 0.7, 1.0],
+      screen_bitrate_shares: [0.2, 0.35, 0.6, 1.0],
       share_downswitch_hold: Duration::from_secs(1),
       share_upswitch_hold: Duration::from_secs(2),
       probe_proof: Duration::from_secs(4),
@@ -289,12 +308,12 @@ impl UplinkLayers {
     for track in ordered {
       let maybe_current = self.top_layers.get(&track.stream).copied().flatten();
       let current_share = self.share_of(track.stream);
-      let is_adaptive = track.adapts_bitrate && *track.kind == VideoTrackKind::Camera;
-      let track_shares: &[f64] = if is_adaptive {
-        &policy.camera_bitrate_shares
-      } else {
-        &[1.0]
+      let track_shares: &[f64] = match (track.kind, track.adaptation) {
+        (VideoTrackKind::Camera, Adaptation::Rebuilt | Adaptation::InPlace) => &policy.camera_bitrate_shares,
+        (VideoTrackKind::Screen, Adaptation::InPlace) => &policy.screen_bitrate_shares,
+        _ => &[1.0],
       };
+      let is_adaptive = track_shares.len() > 1;
       // Candidates from the least to the most: each layer at each share, the lower layers whole.
       let mut maybe_chosen: Option<(u8, f64)> = None;
       let mut below = 0.0;
@@ -694,7 +713,7 @@ mod tests {
         stream: SCREEN,
         kind: &VideoTrackKind::Screen,
         layers: &screen_layers,
-        adapts_bitrate: false,
+        adaptation: Adaptation::Whole,
       },
     ];
     let mut uplink = UplinkLayers::new(300_000);
@@ -715,7 +734,7 @@ mod tests {
       stream: SCREEN,
       kind: &VideoTrackKind::Screen,
       layers: &screen_layers,
-      adapts_bitrate: false,
+      adaptation: Adaptation::Whole,
     }];
     let start = Instant::now();
     let at = |millis: u64| start + Duration::from_millis(millis);
@@ -754,7 +773,7 @@ mod tests {
       stream: SCREEN,
       kind: &VideoTrackKind::Screen,
       layers: &shares,
-      adapts_bitrate: false,
+      adaptation: Adaptation::Whole,
     }];
     let start = Instant::now();
     let at = |seconds: u64| start + Duration::from_secs(seconds);
@@ -870,7 +889,7 @@ mod tests {
     assert_eq!(uplink.bitrate_bps(CAMERA, &layers[2]), 1_500_000);
   }
 
-  /// Cameras the call doesn't encode itself and screen shares keep their whole bitrate per layer.
+  /// Cameras and screen shares the call doesn't encode itself keep their whole bitrate per layer.
   #[test]
   fn other_tracks_send_a_layer_whole_or_not_at_all() {
     let layers = camera_layers();
@@ -885,7 +904,7 @@ mod tests {
       stream: SCREEN,
       kind: &VideoTrackKind::Screen,
       layers: &screen_layers,
-      adapts_bitrate: true,
+      adaptation: Adaptation::Whole,
     }];
     let start = Instant::now();
     let mut uplink = UplinkLayers::new(300_000);
@@ -902,6 +921,45 @@ mod tests {
     assert_eq!(uplink.bitrate_bps(SCREEN, &screen_layers[0]), 1_600_000);
   }
 
+  /// #1733: a screen share that adapts its bitrate keeps its sharp top layer on an uplink that
+  /// can't carry it whole, at a share of its bitrate (its encoders lower the frame rate to it),
+  /// instead of falling back to the half-size layer at full rate as before.
+  #[test]
+  fn an_adapting_screen_share_keeps_its_resolution_at_a_lower_rate() {
+    let screen_layers = [layer(0, 1_600_000), layer(1, 6_600_000)];
+    let tracks = [OwnTrack {
+      stream: SCREEN,
+      kind: &VideoTrackKind::Screen,
+      layers: &screen_layers,
+      adaptation: Adaptation::InPlace,
+    }];
+    let start = Instant::now();
+    let at = |seconds: u64| start + Duration::from_secs(seconds);
+    let mut uplink = UplinkLayers::new(300_000);
+    uplink.on_estimate(9_000_000, &tracks, false, &policy(), at(0));
+    uplink.on_estimate(6_000_000, &tracks, false, &policy(), at(1));
+    uplink.on_estimate(6_000_000, &tracks, false, &policy(), at(4));
+    assert!(uplink.allows(SCREEN, 1), "the sharp layer stays");
+    assert_eq!(uplink.bitrate_bps(SCREEN, &screen_layers[1]), 3_960_000);
+    // A link that can't carry even the least share of it drops to the lower layer.
+    uplink.on_estimate(2_200_000, &tracks, false, &policy(), at(5));
+    uplink.on_estimate(2_200_000, &tracks, false, &policy(), at(9));
+    assert!(!uplink.allows(SCREEN, 1));
+    assert!(uplink.allows(SCREEN, 0));
+    // Encoders rebuilt for every step (the desktop's) keep a share whole: each step would send
+    // the largest keyframe there is into the congested uplink.
+    let rebuilt = [OwnTrack {
+      adaptation: Adaptation::Rebuilt,
+      ..tracks[0]
+    }];
+    let mut uplink = UplinkLayers::new(300_000);
+    uplink.on_estimate(9_000_000, &rebuilt, false, &policy(), at(0));
+    uplink.on_estimate(6_000_000, &rebuilt, false, &policy(), at(1));
+    uplink.on_estimate(6_000_000, &rebuilt, false, &policy(), at(5));
+    assert!(!uplink.allows(SCREEN, 1));
+    assert_eq!(uplink.bitrate_bps(SCREEN, &screen_layers[0]), 1_600_000);
+  }
+
   /// The estimate may grow far enough above what everything takes that a step cut (to 85 %)
   /// leaves every layer, the screen share's sharp one too, in place without a hold.
   #[test]
@@ -911,7 +969,7 @@ mod tests {
       stream: SCREEN,
       kind: &VideoTrackKind::Screen,
       layers: &screen_layers,
-      adapts_bitrate: false,
+      adaptation: Adaptation::Whole,
     }];
     let cap = probe_demand_bps(&tracks, false, &policy());
     assert!(cap > demand_bps(&tracks, false, &policy()));
@@ -953,13 +1011,13 @@ mod tests {
       stream: CAMERA,
       kind: &VideoTrackKind::Camera,
       layers,
-      adapts_bitrate: false,
+      adaptation: Adaptation::Whole,
     }
   }
 
   fn adapting_camera(layers: &[VideoLayerInfo]) -> OwnTrack<'_> {
     OwnTrack {
-      adapts_bitrate: true,
+      adaptation: Adaptation::Rebuilt,
       ..camera(layers)
     }
   }
@@ -999,6 +1057,7 @@ mod tests {
       height: 180,
       max_framerate: 30,
       max_bitrate_bps,
+      maybe_codec: None,
     }
   }
 }

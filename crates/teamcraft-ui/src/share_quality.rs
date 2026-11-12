@@ -1009,6 +1009,7 @@ mod tests {
       maybe_frames_skipped: Some(skipped),
       maybe_held_back_ms: Some(if captured > 0 { 1_500 } else { 0 }),
       maybe_camera_limits: None,
+      maybe_share_limits: None,
     })
   }
 
@@ -1046,6 +1047,8 @@ mod tests {
       keyframe_requests: discarded / 10,
       maybe_longest_gap_ms: Some(gap_ms),
       maybe_max_framerate: Some(30),
+      maybe_decode_queue: None,
+      maybe_device_limit: None,
     })
   }
 }

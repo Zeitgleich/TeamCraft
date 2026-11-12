@@ -544,6 +544,7 @@ impl CallSession {
       height,
       max_framerate,
       max_bitrate_bps,
+      maybe_codec: None,
     }));
   }
 
@@ -1133,7 +1134,7 @@ fn apply_encoded_control(
     Control::PublishEncodedCamera(layer) => {
       if encoded.maybe_camera.is_none() {
         state.is_camera_on = true;
-        let publication = call.publish_video(VideoTrackKind::Camera, VideoCodec::H264, vec![*layer]);
+        let publication = call.publish_video(VideoTrackKind::Camera, VideoCodec::H264, vec![layer.clone()]);
         encoded.maybe_camera = Some(OwnPublication::new(publication));
       }
     },
@@ -1454,6 +1455,7 @@ fn native_config(
       video_decoders,
       max_simulcast_layers: CAMERA_LAYERS,
       max_frame_fragments: teamcraft_proto::MAX_VIDEO_FRAME_FRAGMENTS,
+      video_features: Vec::new(),
     },
     bwe: BweConfig::default(),
   };

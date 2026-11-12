@@ -97,6 +97,58 @@ pub struct SentVideoStats {
   /// shares, the desktop's encoders).
   #[serde(default)]
   pub maybe_camera_limits: Option<CameraLimitsStats>,
+  /// Why an own screen share's layers are what they are (#1733); `None` for cameras and where
+  /// no share policy runs (the desktop's encoders).
+  #[serde(default)]
+  pub maybe_share_limits: Option<ShareLimitsStats>,
+}
+
+/// What a screen share's policy made of its layers (#1733): the plan from the viewers' codecs and
+/// this device's AV1 encoder, and the step the encoders' load holds it at now.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShareLimitsStats {
+  pub av1_encoder: ShareEncoderKind,
+  #[serde(default = "unknown_encoder")]
+  pub vp9_encoder: ShareEncoderKind,
+  pub planned: ShareStepStats,
+  pub now: ShareStepStats,
+  /// Steps down the ladder, of `levels`.
+  pub level: u8,
+  pub levels: u8,
+  /// Why the encoders were found overloaded, while the share runs below its plan.
+  #[serde(default)]
+  pub maybe_overload: Option<EncoderOverload>,
+  /// Sizes the top layer stepped down because the uplink didn't carry it, of `sizes` less one.
+  #[serde(default)]
+  pub uplink_steps: u8,
+  #[serde(default)]
+  pub sizes: u8,
+}
+
+/// One step of a share's ladder: its top layer and whether the middle layer is sent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShareStepStats {
+  pub top_codec: VideoCodec,
+  pub top_framerate: u8,
+  /// The top layer's size; `None` where the base layer alone is sent.
+  #[serde(default)]
+  pub maybe_top: Option<VideoSize>,
+  pub has_middle: bool,
+}
+
+/// How the device encodes a codec.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShareEncoderKind {
+  Hardware,
+  Software,
+  Unavailable,
+  #[serde(other)]
+  Unknown,
+}
+
+fn unknown_encoder() -> ShareEncoderKind {
+  ShareEncoderKind::Unknown
 }
 
 /// Why an own camera sends less than it was planned with (#1762): its encoders didn't keep up
@@ -216,6 +268,36 @@ pub struct ReceivedVideoStats {
   /// The frame rate the sender announced for the layer arriving now.
   #[serde(default)]
   pub maybe_max_framerate: Option<u8>,
+  /// Frames waiting in this device's decoder of the track now (#1762); `None` where the platform
+  /// doesn't tell.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_decode_queue: Option<u32>,
+  /// This device asks for a lower layer of the track than its tile wants, because it can't decode
+  /// more (#1762); `None` while it doesn't hold the track back.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_device_limit: Option<DeviceLimitStats>,
+}
+
+/// A received track this device holds below what its tile wants, for its own load.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceLimitStats {
+  /// The highest layer asked for now.
+  pub layer: u8,
+  /// Why the decoders were found overloaded.
+  #[serde(default)]
+  pub maybe_reason: Option<DecodeOverload>,
+}
+
+/// How this device's decoders were found overloaded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecodeOverload {
+  /// Frames waited in the decoders' queues.
+  QueuedFrames,
+  /// Frames reached the decoders late: the receive path didn't keep up.
+  LateFrames,
+  #[serde(other)]
+  Unknown,
 }
 
 /// A layer another device offers.
@@ -318,6 +400,11 @@ mod tests {
           keyframe_requests: 2,
           maybe_longest_gap_ms: Some(120),
           maybe_max_framerate: Some(30),
+          maybe_decode_queue: Some(4),
+          maybe_device_limit: Some(DeviceLimitStats {
+            layer: 1,
+            maybe_reason: Some(DecodeOverload::QueuedFrames),
+          }),
         }),
       ],
     };
@@ -397,6 +484,7 @@ mod tests {
       maybe_frames_skipped: None,
       maybe_held_back_ms: Some(0),
       maybe_camera_limits: None,
+      maybe_share_limits: None,
     }
   }
 }

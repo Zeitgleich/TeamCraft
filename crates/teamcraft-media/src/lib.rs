@@ -33,10 +33,12 @@ pub mod picture_check;
 pub mod playback_gstreamer;
 #[cfg(feature = "quic-send")]
 pub mod quic_send;
+pub mod receive_load;
 pub mod resample;
 pub mod ringtone;
 pub mod rtp;
 pub mod send_queue;
+pub mod share_policy;
 #[cfg(feature = "sound-files")]
 pub mod sound_file;
 pub mod uplink_layers;

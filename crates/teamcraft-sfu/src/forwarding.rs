@@ -163,6 +163,15 @@ pub struct Removal {
   pub maybe_screen_audio: Option<StreamId>,
 }
 
+/// The video codecs a publisher's viewers decode ([`Forwarder::decodable_video_codecs`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodableCodecs {
+  /// Decoded by every other participant that receives video.
+  pub by_all: Vec<VideoCodec>,
+  /// Decoded by at least one of them that takes layers in other codecs than their track's.
+  pub by_some: Vec<VideoCodec>,
+}
+
 #[derive(Debug)]
 struct ParticipantRoute {
   audio_stream: StreamId,
@@ -387,19 +396,44 @@ impl Forwarder {
   /// what `device_id` can publish so that everyone may watch it. Participants without video
   /// decoders (audio only) don't count; with nobody else, every codec there is. `None` for a
   /// participant that encodes no video (it publishes nothing), or one that isn't there.
-  pub fn decodable_video_codecs(&self, device_id: DeviceId) -> Option<Vec<VideoCodec>> {
+  ///
+  /// Besides, the codecs at least one of them decodes and takes as a layer in another codec than
+  /// its track ([`teamcraft_proto::VideoFeature::LayerCodecs`], #1733): a screen share's large layers may go out
+  /// in them above a base layer in a codec of the first list. With nobody else, every codec too.
+  pub fn decodable_video_codecs(&self, device_id: DeviceId) -> Option<DecodableCodecs> {
     let publisher = self.participants.get(&device_id)?;
     if publisher.capabilities.video_encoders.is_empty() {
       return None;
     }
-    let mut codecs = KNOWN_VIDEO_CODECS.to_vec();
+    let mut by_all = KNOWN_VIDEO_CODECS.to_vec();
+    let mut by_some = Vec::new();
+    let mut has_receivers = false;
     for (other, participant) in &self.participants {
       let decoders = &participant.capabilities.video_decoders;
-      if *other != device_id && !decoders.is_empty() {
-        codecs.retain(|codec| decoders.contains(codec));
+      if *other == device_id || decoders.is_empty() {
+        continue;
+      }
+      has_receivers = true;
+      by_all.retain(|codec| decoders.contains(codec));
+      if participant.capabilities.has_layer_codecs() {
+        by_some.extend(
+          decoders
+            .iter()
+            .filter(|codec| KNOWN_VIDEO_CODECS.contains(codec))
+            .cloned(),
+        );
       }
     }
-    Some(codecs)
+    let by_some = if has_receivers {
+      KNOWN_VIDEO_CODECS
+        .iter()
+        .filter(|codec| by_some.contains(codec))
+        .cloned()
+        .collect()
+    } else {
+      KNOWN_VIDEO_CODECS.to_vec()
+    };
+    Some(DecodableCodecs { by_all, by_some })
   }
 
   /// Removes a participant with its tracks and subscriptions.
@@ -491,9 +525,17 @@ impl Forwarder {
     maybe_publication_id: Option<VideoPublicationId>,
   ) -> Result<VideoTrack, ForwardError> {
     let participant = self.participants.get(&owner).ok_or(ForwardError::NotJoined)?;
-    if !participant.capabilities.video_encoders.contains(&codec) {
+    let encoders = &participant.capabilities.video_encoders;
+    if !encoders.contains(&codec) || layers.iter().any(|info| !encoders.contains(info.codec(&codec))) {
       return Err(ForwardError::InvalidPublication(
         "codec not in the publisher's encoders",
+      ));
+    }
+    // #1733: the lowest layer is in the track's codec, so a receiver that knows only the track's
+    // codec (a client from before layer codecs) has a layer to get.
+    if layers.first().is_some_and(|info| info.codec(&codec) != &codec) {
+      return Err(ForwardError::InvalidPublication(
+        "the lowest layer must be in the track's codec",
       ));
     }
     // Four since #978; clients publish three to SFUs from before, which say no limit in `joined`.
@@ -624,11 +666,7 @@ impl Forwarder {
     if route.track.device_id == receiver {
       return Err(ForwardError::OwnTrack);
     }
-    if !participant
-      .capabilities
-      .video_decoders
-      .contains(&route.track.codec)
-    {
+    if receivable_layers(&route.track, &participant.capabilities) == 0 {
       return Err(ForwardError::UnsupportedCodec(route.track.codec.clone()));
     }
     let is_new = maybe_max_layer.is_some() && !route.subscribers.contains_key(&receiver);
@@ -1087,6 +1125,7 @@ impl Forwarder {
     // grants the lowest layers.
     let estimate = participant.downlink.estimate_bps();
     let max_frame_fragments = participant.capabilities.max_frame_fragments;
+    let capabilities = &participant.capabilities;
     let speakers = self.speakers.selected();
     let demands: Vec<TrackDemand<'_>> = self
       .video_tracks
@@ -1103,12 +1142,17 @@ impl Forwarder {
           stream_id,
           priority,
           max_layer: subscription.max_layer,
-          // Layers the publisher's uplink doesn't carry, or with frames larger than the receiver
-          // reassembles, aren't there to have.
+          // Layers the publisher's uplink doesn't carry, with frames larger than the receiver
+          // reassembles, or in a codec it doesn't decode (#1733), aren't there to have.
           layers: route
             .track
             .layers
-            .get(..route.uplink_layers.min(route.layers_within(max_frame_fragments)))
+            .get(
+              ..route
+                .uplink_layers
+                .min(route.layers_within(max_frame_fragments))
+                .min(receivable_layers(&route.track, capabilities)),
+            )
             .unwrap_or_default(),
           can_pause: !is_screen || self.config.layers.can_pause_screen_shares,
           downswitch_hold: if is_screen {
@@ -1296,6 +1340,22 @@ impl VideoTrackRoute {
       .take_while(|most| **most <= max_frame_fragments)
       .count()
   }
+}
+
+/// How many of `track`'s lowest layers a receiver of `capabilities` takes (#1733): layers in a
+/// codec it decodes, and in another codec than the track's only where it knows layer codecs
+/// ([`teamcraft_proto::VideoFeature::LayerCodecs`]). The SFU switches a receiver between layers at keyframes, and
+/// its decoder follows the codec there; a client from before takes the track's codec only.
+fn receivable_layers(track: &VideoTrack, capabilities: &MediaCapabilities) -> usize {
+  track
+    .layers
+    .iter()
+    .take_while(|info| {
+      let codec = info.codec(&track.codec);
+      capabilities.video_decoders.contains(codec)
+        && (codec == &track.codec || capabilities.has_layer_codecs())
+    })
+    .count()
 }
 
 /// Notes a packet of `layer`: it continues the layer's run, or starts a new one after a gap.
@@ -2457,7 +2517,10 @@ mod tests {
       let track = publish(&mut forwarder, 100, four_layers()).unwrap();
       assert_eq!(track.layers.len(), 4);
       let mut five = four_layers();
-      five.push(VideoLayerInfo { layer: 4, ..five[3] });
+      five.push(VideoLayerInfo {
+        layer: 4,
+        ..five[3].clone()
+      });
       assert_eq!(
         publish(&mut forwarder, 101, five),
         Err(ForwardError::InvalidPublication("needs 1 to 4 layers"))
@@ -2637,6 +2700,168 @@ mod tests {
           _ => None,
         })
         .collect()
+    }
+  }
+
+  /// #1733: a screen share's base layer in H.264 every device decodes, its large layers in AV1.
+  mod layer_codecs {
+    use teamcraft_proto::VideoFeature;
+
+    use super::*;
+
+    /// Each viewer gets the best layer it decodes and takes: AV1 for one that knows layer codecs
+    /// and decodes AV1, the H.264 base for one without AV1 and for a client from before.
+    #[test]
+    fn each_viewer_gets_the_best_layer_in_a_codec_it_takes() {
+      let (mut forwarder, now) = mixed_room();
+      for viewer in 2..=4 {
+        forwarder.subscribe(device(viewer), VIDEO, Some(2), now).unwrap();
+      }
+      for viewer in 2..=4 {
+        forwarder.on_timer(device(viewer), now);
+      }
+      assert_eq!(send_frame(&mut forwarder, 0, true, now), devices(&[3, 4]));
+      assert_eq!(send_frame(&mut forwarder, 1, true, now), Vec::<DeviceId>::new());
+      assert_eq!(send_frame(&mut forwarder, 2, true, now), devices(&[2]));
+      // Deltas follow the same way; nobody gets a layer it can't decode.
+      assert_eq!(send_frame(&mut forwarder, 2, false, now), devices(&[2]));
+      assert_eq!(send_frame(&mut forwarder, 0, false, now), devices(&[3, 4]));
+      let effects = forwarder.on_timer(device(2), now);
+      assert!(
+        !effects.iter().any(|effect| matches!(
+          effect,
+          Effect::LayersNeeded { layers, .. } if layers != &[0, 2]
+        )),
+        "{effects:?}"
+      );
+    }
+
+    /// A viewer held to the lowest layer (a small tile, or a budget the allocation, which knows
+    /// nothing of codecs, fits only the base into) gets the H.264 base and back: no
+    /// renegotiation, the SFU forwards another layer from its keyframe on.
+    #[test]
+    fn a_viewer_held_to_the_base_gets_h264_and_back() {
+      let (mut forwarder, now) = mixed_room();
+      forwarder.subscribe(device(2), VIDEO, Some(0), now).unwrap();
+      forwarder.on_timer(device(2), now);
+      assert_eq!(send_frame(&mut forwarder, 0, true, now), devices(&[2]));
+      assert!(send_frame(&mut forwarder, 2, true, now).is_empty());
+      // A larger tile: the AV1 top once the allocation's upswitch hold passed and its keyframe
+      // came; the base until then.
+      forwarder.subscribe(device(2), VIDEO, Some(2), now).unwrap();
+      let mut maybe_switched_at = None;
+      for step in 1..=100u32 {
+        let at = now + Duration::from_millis(100) * step;
+        forwarder.on_timer(device(2), at);
+        let base = send_frame(&mut forwarder, 0, false, at);
+        if send_frame(&mut forwarder, 2, true, at) == devices(&[2]) {
+          maybe_switched_at = Some(at);
+          break;
+        }
+        assert_eq!(base, devices(&[2]), "the base until the switch");
+      }
+      let at = maybe_switched_at.expect("switched to the AV1 top");
+      assert!(send_frame(&mut forwarder, 0, false, at).is_empty());
+    }
+
+    /// Only clients that take layer codecs count for the codecs some decode; the codecs all
+    /// decode still name what the base layer may be.
+    #[test]
+    fn the_publisher_hears_what_all_and_what_some_decode() {
+      let (forwarder, _) = mixed_room();
+      assert_eq!(
+        forwarder.decodable_video_codecs(device(1)),
+        Some(DecodableCodecs {
+          by_all: vec![VideoCodec::H264],
+          by_some: vec![VideoCodec::Av1, VideoCodec::H264],
+        })
+      );
+    }
+
+    #[test]
+    fn a_track_whose_base_or_layers_the_publisher_cant_encode_is_refused() {
+      let (mut forwarder, _) = mixed_room();
+      let mut av1_base = mixed_layers();
+      av1_base[0].maybe_codec = Some(VideoCodec::Av1);
+      let mut vp9_top = mixed_layers();
+      vp9_top[2].maybe_codec = Some(VideoCodec::Vp9);
+      for layers in [av1_base, vp9_top] {
+        assert!(matches!(
+          forwarder.publish_video(
+            device(1),
+            StreamId(7),
+            VideoTrackKind::Screen,
+            VideoCodec::H264,
+            layers,
+            None
+          ),
+          Err(ForwardError::InvalidPublication(_))
+        ));
+      }
+    }
+
+    /// Device 1 shares its screen on [`VIDEO`] ([`mixed_layers`]) to: 2, which decodes AV1 and
+    /// takes layer codecs; 3, which takes them but decodes H.264 only (a phone); 4, a client
+    /// from before that decodes AV1 too. Downlinks fit every layer.
+    fn mixed_room() -> (Forwarder, Instant) {
+      let now = Instant::now();
+      let mut config = ForwardingConfig::default();
+      config.bwe.start_bps = 10_000_000;
+      config.bwe.max_bps = config.bwe.max_bps.max(10_000_000);
+      let mut forwarder = Forwarder::new(config);
+      let both = vec![VideoCodec::Av1, VideoCodec::H264];
+      let viewers = [
+        (1, both.clone(), true),
+        (2, both.clone(), true),
+        (3, vec![VideoCodec::H264], true),
+        (4, both.clone(), false),
+      ];
+      for (n, decoders, has_layer_codecs) in viewers {
+        let capabilities = MediaCapabilities {
+          video_encoders: both.clone(),
+          video_decoders: decoders,
+          max_simulcast_layers: 3,
+          video_features: if has_layer_codecs {
+            vec![VideoFeature::LayerCodecs]
+          } else {
+            Vec::new()
+          },
+          ..MediaCapabilities::default()
+        };
+        forwarder.add_participant(device(n), stream(n), capabilities, now);
+      }
+      forwarder
+        .publish_video(
+          device(1),
+          VIDEO,
+          VideoTrackKind::Screen,
+          VideoCodec::H264,
+          mixed_layers(),
+          None,
+        )
+        .unwrap();
+      (forwarder, now)
+    }
+
+    /// A 1440p share: H.264 at 480p, AV1 at 720p and 1440p.
+    fn mixed_layers() -> Vec<VideoLayerInfo> {
+      [
+        (0, 854, 480, 500_000, None),
+        (1, 1280, 720, 1_000_000, Some(VideoCodec::Av1)),
+        (2, 2560, 1440, 3_000_000, Some(VideoCodec::Av1)),
+      ]
+      .into_iter()
+      .map(
+        |(layer, width, height, max_bitrate_bps, maybe_codec)| VideoLayerInfo {
+          layer,
+          width,
+          height,
+          max_framerate: 30,
+          max_bitrate_bps,
+          maybe_codec,
+        },
+      )
+      .collect()
     }
   }
 
@@ -2985,6 +3210,7 @@ mod tests {
       height,
       max_framerate: 30,
       max_bitrate_bps,
+      maybe_codec: None,
     })
     .collect()
   }
@@ -3002,6 +3228,7 @@ mod tests {
       height,
       max_framerate: 30,
       max_bitrate_bps,
+      maybe_codec: None,
     })
     .collect()
   }

@@ -13,9 +13,11 @@ use futures::channel::{mpsc, oneshot};
 use js_sys::{ArrayBuffer, Uint8Array};
 use teamcraft_proto::{CallServerMessage, FallbackFrame};
 use tracing::{debug, warn};
+// The browser clock: `std` has none on wasm.
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
 use web_sys::{BinaryType, MessageEvent, WebSocket};
+use web_time::Instant;
 
 use super::{Input, LEAVE_CLOSE_CODE, MAX_SIGNALING_BYTES, SessionEnd, WebCallError, session_end};
 use crate::fallback_queue::may_buffer;
@@ -134,7 +136,11 @@ fn message_handler(
       Ok(FallbackFrame::Datagram(_)) => {
         let mut bytes = bytes;
         bytes.remove(0);
-        let _ = inputs.unbounded_send(Input::Datagram { generation, bytes });
+        let _ = inputs.unbounded_send(Input::Datagram {
+          generation,
+          bytes,
+          read_at: Instant::now(),
+        });
       },
       Ok(FallbackFrame::Signal(body)) if body.len() > MAX_SIGNALING_BYTES => {
         warn!(length = body.len(), "signaling message too large");
