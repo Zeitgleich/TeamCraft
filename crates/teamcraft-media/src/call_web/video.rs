@@ -592,7 +592,8 @@ impl TrackSender {
 
   /// A layer's encoder produced a picture of `bytes` for the frame of `timestamp_us`: it works, a
   /// governed layer's output is held to its bitrate, and a share's top layer tells how long it
-  /// took against the frame interval (#1733).
+  /// took against the frame interval (#1733). `now` is when the encoder handed the picture out,
+  /// not when the call loop got to it: a busy loop is no slow encoder (#1762).
   pub fn on_encoded(
     &mut self,
     layer: u8,
@@ -1436,6 +1437,7 @@ impl LayerEncoder {
     // #1733: a share's layers may differ in codec; each chunk carries its layer's.
     let codec = info.codec(&encoding.codec).clone();
     let output = Closure::<dyn FnMut(EncodedVideoChunk)>::new(move |chunk: EncodedVideoChunk| {
+      let encoded_at = Instant::now();
       let bytes = Uint8Array::new_with_length(chunk.byte_length());
       let input = match chunk.copy_to(&bytes) {
         Ok(()) => Input::VideoEncoded {
@@ -1445,6 +1447,7 @@ impl LayerEncoder {
           data: bytes.to_vec(),
           is_keyframe: chunk.chunk_type() == "key",
           timestamp_us: chunk.timestamp(),
+          encoded_at,
         },
         Err(error) => Input::CodecFailed {
           context: "video encoder output",
