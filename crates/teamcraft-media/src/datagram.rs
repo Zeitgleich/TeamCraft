@@ -169,8 +169,8 @@ impl DatagramHeader {
 }
 
 /// A padding datagram of `bytes` bytes with transport sequence number `seq`: zeros on
-/// [`PADDING_STREAM`], for probing a link (`crate::join_probe`, the SFU's probes before a layer
-/// switch up).
+/// [`PADDING_STREAM`], for probing a link (`crate::join_probe` at the start, `crate::rate_probe`
+/// before a step up).
 pub fn padding_datagram(bytes: usize, seq: TransportSeq) -> Vec<u8> {
   let header = DatagramHeader {
     stream_id: PADDING_STREAM,

@@ -69,6 +69,16 @@ const SEND_HISTORY: Duration = Duration::from_secs(5);
 const DELAY_DECREASE_INTERVAL: Duration = Duration::from_millis(200);
 /// Window over which the loss ratio is measured.
 const LOSS_WINDOW: Duration = Duration::from_secs(1);
+/// The least time between two cuts for loss. A cut counts only the loss of what was sent after the
+/// one before, so the next one answers loss the first didn't stop: a link that lost its room
+/// (a mobile cell, #1792) is cut to it in two steps within a second. The first comes about
+/// 300 ms after the drop (the reorder window, a feedback interval and the way back) from a
+/// delivered rate that still holds arrivals from before it; 400 ms later the delivered rate's
+/// window holds only what the link carries now. At a second apart, sending fit the link again
+/// only after 1.5 s.
+const LOSS_CUT_INTERVAL: Duration = Duration::from_millis(400);
+/// Window over which [`SendSideEstimator::sent_bps`] measures.
+const SENT_RATE_WINDOW: Duration = Duration::from_secs(1);
 /// Window over which the sent rate tells an application-limited sender.
 const APP_LIMITED_WINDOW: Duration = Duration::from_secs(2);
 /// A sender that sent less than this share of the estimate over [`APP_LIMITED_WINDOW`] is
@@ -80,8 +90,10 @@ const LASTING_OVERUSE: Duration = ACKED_RATE_WINDOW;
 /// Sending this much more than gets through is a backlog on the path.
 const BACKLOG_SHARE: f64 = 1.1;
 /// The longest wait before growing at [`BweConfig::recovery_increase_per_second`] after probes
-/// that met congestion.
-const MAX_RECOVERY_WAIT: Duration = Duration::from_secs(32);
+/// that met congestion. A few seconds: on a mobile link that swings every few seconds nearly every
+/// probe meets congestion, and at 32 s the estimate still crept at 8 %/s when a cell had room
+/// for a minute (#1792).
+const MAX_RECOVERY_WAIT: Duration = Duration::from_secs(4);
 /// A recovery succeeded once this much more than before the last congestion gets through.
 const RECOVERED_SHARE: f64 = 1.1;
 /// Largest feedback the recorder produces in one message.
@@ -131,10 +143,10 @@ pub struct BweConfig {
   /// (a limit was lifted, cross traffic ended). At 8 %/s, a camera that a 500 kbit/s limit had
   /// cut to its middle layer needed about 20 seconds back to its top layer once the limit was
   /// lifted (#939), and a viewer as long at the SFU. Simulcast layers grow in large steps, so a
-  /// sender can't fill the estimate on its way up: the next layer is the probe. A probe that
-  /// meets congestion doubles the wait before the next one (up to [`MAX_RECOVERY_WAIT`]), so a
-  /// path that stays limited isn't probed every few seconds; once more gets through than before
-  /// the congestion, the wait is short again.
+  /// sender can't fill the estimate on its way up: the next layer is the probe, or padding
+  /// (`crate::rate_probe`). A probe that meets congestion doubles the wait before the next one,
+  /// up to [`MAX_RECOVERY_WAIT`] (a few seconds: the path is followed as it is now, #1792); once
+  /// more gets through than before the congestion, the wait is short again.
   pub recovery_increase_per_second: f64,
   pub recovery_after: Duration,
 }
@@ -160,6 +172,10 @@ pub struct SendSideEstimator {
   /// (feedback time, lost, reported) of the last [`LOSS_WINDOW`].
   loss_history: VecDeque<(Instant, usize, usize)>,
   last_loss_ratio: f64,
+  /// The same of every datagram but probes, also those sent before a cut: what
+  /// [`SendSideEstimator::loss_ratio`] reports (the audio's forward error correction follows it).
+  /// Cleared at every cut, as the estimate's own, it read 0 on a link that lost a fifth.
+  seen_loss_history: VecDeque<(Instant, usize, usize)>,
   maybe_demand_bps: Option<u32>,
   /// After a delay-based decrease, no further one until the detector reported normal again (the
   /// queue needs time to drain; cutting on every report would spiral down).
@@ -277,6 +293,7 @@ impl SendSideEstimator {
       maybe_loss_counts_from: None,
       loss_history: VecDeque::new(),
       last_loss_ratio: 0.0,
+      seen_loss_history: VecDeque::new(),
       maybe_demand_bps: None,
       is_holding_after_decrease: false,
       is_starting: true,
@@ -334,10 +351,16 @@ impl SendSideEstimator {
     let base = unwrap_seq(feedback.base_seq, self.highest_sent);
     let mut lost = 0usize;
     let mut reported = 0usize;
+    let mut seen_lost = 0usize;
+    let mut seen_reported = 0usize;
     for (offset, maybe_arrival_us) in feedback.arrivals_us.iter().enumerate() {
       let Some(sent) = self.sent.remove(&(base + offset as u64)) else {
         continue;
       };
+      if !sent.is_probe {
+        seen_reported += 1;
+        seen_lost += usize::from(maybe_arrival_us.is_none());
+      }
       // Loss of packets sent before the last cut to what got through was answered by it; that
       // of a probe burst answers the probe (`limit_to`).
       let is_counted = !sent.is_probe && self.maybe_loss_counts_from.is_none_or(|from| sent.at >= from);
@@ -356,6 +379,12 @@ impl SendSideEstimator {
     if reported > 0 {
       self.loss_history.push_back((now, lost, reported));
     }
+    if seen_reported > 0 {
+      self.seen_loss_history.push_back((now, seen_lost, seen_reported));
+    }
+    self
+      .seen_loss_history
+      .retain(|(at, _, _)| now.saturating_duration_since(*at) <= LOSS_WINDOW);
     self
       .loss_history
       .retain(|(at, _, _)| now.saturating_duration_since(*at) <= LOSS_WINDOW);
@@ -418,6 +447,7 @@ impl SendSideEstimator {
     self.acked.clear();
     self.loss_history.clear();
     self.last_loss_ratio = 0.0;
+    self.seen_loss_history.clear();
     self.maybe_last_update_at = None;
     self.maybe_last_decrease_at = None;
     self.maybe_last_delivered_cut_at = None;
@@ -480,6 +510,13 @@ impl SendSideEstimator {
       .clamp(f64::from(self.config.min_bps), self.ceiling_bps());
   }
 
+  /// What the sender sent over the last second (padding included), for a probe that pads up to
+  /// a rate on top of it (`crate::rate_probe`).
+  pub fn sent_bps(&self, now: Instant) -> u32 {
+    // Saturating float-to-int conversion is intended.
+    self.sent_bps_within(now, SENT_RATE_WINDOW) as u32
+  }
+
   pub fn estimate_bps(&self) -> u32 {
     // Invariant: clamped to the u32 config bounds in `update_rate`.
     self.estimate_bps as u32
@@ -495,8 +532,19 @@ impl SendSideEstimator {
     self.delay.usage
   }
 
+  /// The share of datagrams the path lost over the last [`LOSS_WINDOW`] of feedback.
   pub fn loss_ratio(&self) -> f64 {
-    self.last_loss_ratio
+    let (lost, reported) = self
+      .seen_loss_history
+      .iter()
+      .fold((0, 0), |(lost_sum, reported_sum), (_, lost, reported)| {
+        (lost_sum + lost, reported_sum + reported)
+      });
+    if reported == 0 {
+      0.0
+    } else {
+      lost as f64 / reported as f64
+    }
   }
 
   fn update_rate(&mut self, now: Instant) {
@@ -593,7 +641,7 @@ impl SendSideEstimator {
     // held the loss cut back for a second (#939).
     let may_cut_for_loss = self
       .maybe_last_delivered_cut_at
-      .is_none_or(|last| now.saturating_duration_since(last) >= LOSS_WINDOW);
+      .is_none_or(|last| now.saturating_duration_since(last) >= LOSS_CUT_INTERVAL);
     if self.last_loss_ratio > 0.10 && acked_bps > 0.0 && may_cut_for_loss {
       // Based on what got through, not on the previous estimate, so repeated reports of the same
       // loss episode don't compound. Loss is damage also to an application-limited sender.

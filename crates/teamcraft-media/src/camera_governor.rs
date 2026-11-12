@@ -21,7 +21,9 @@
 //! [`CameraGovernorConfig::calm_period`]; a step up that is undone within
 //! [`CameraGovernorConfig::probe_proof`] doubles the wait for the next one, up to
 //! [`CameraGovernorConfig::max_calm_period`]. A step changes how the encoders are configured,
-//! which may cost a keyframe, so they are few and far between.
+//! which may cost a keyframe, so they are not taken on every window; but a machine that got idle
+//! gets its picture back within seconds, and failed steps never hold it back for longer than a
+//! few (#1792: a share that went down to 480p for a false overload stayed there for minutes).
 //!
 //! Screen shares keep their own policy (#1733): nothing here is applied to them, though
 //! [`EncoderLoad`] is built to be reused there.
@@ -75,6 +77,12 @@ pub struct CameraGovernorConfig {
   pub overload_encode_share: f64,
   /// Calm needs encoding to take at most this share of the frame interval, where measured.
   pub calm_encode_share: f64,
+  /// One window past an overload threshold by less than this factor (or with encoding within
+  /// less than the frame interval) steps down only when the window before was overloaded too. The
+  /// keyframes of a layer switch or a new decoder fill a queue for a moment: one such window
+  /// (a decoder queue of 1.5 at a join) sent a viewer to 480p, and every step up that met the
+  /// next one counted as a failed probe, which held it there for minutes (#1792).
+  pub clear_overload_factor: f64,
   /// The camera is never captured at fewer frames per second than this for the encoders' sake.
   pub min_capture_framerate: u8,
   /// How long a limit has to stay calm before it steps back up.
@@ -139,6 +147,8 @@ pub struct EncoderLoad {
   maybe_calm_since: Option<Instant>,
   probes: Probes,
   maybe_reason: Option<OverloadReason>,
+  /// The last judged window was overloaded.
+  was_over: bool,
 }
 
 /// One frame given to the encoders, as they took it.
@@ -203,10 +213,12 @@ impl Default for CameraGovernorConfig {
       calm_queue_depth: 0.25,
       overload_encode_share: 0.9,
       calm_encode_share: 0.5,
+      clear_overload_factor: 2.0,
       min_capture_framerate: 10,
-      calm_period: Duration::from_secs(10),
-      max_calm_period: Duration::from_secs(120),
-      probe_proof: Duration::from_secs(10),
+      // A window: the step follows the second calm window in a row, about 4 s (#1792).
+      calm_period: Duration::from_secs(2),
+      max_calm_period: Duration::from_secs(8),
+      probe_proof: Duration::from_secs(5),
     }
   }
 }
@@ -366,6 +378,7 @@ impl EncoderLoad {
       maybe_calm_since: None,
       probes: Probes::new(),
       maybe_reason: None,
+      was_over: false,
     }
   }
 
@@ -395,6 +408,7 @@ impl EncoderLoad {
   pub fn measure_afresh(&mut self, now: Instant) {
     self.window = LoadWindow::new(now);
     self.maybe_calm_since = None;
+    self.was_over = false;
   }
 
   /// Judges the window once it is whole; the new level when it changed.
@@ -421,11 +435,18 @@ impl EncoderLoad {
     } else {
       None
     };
+    let factor = config.clear_overload_factor;
+    let is_clearly_over = skip_ratio > config.overload_skip_ratio * factor
+      || queue_depth >= config.overload_queue_depth * factor
+      || maybe_encode_share.is_some_and(|share| share >= config.overload_encode_share.max(1.0));
+    let was_over = std::mem::replace(&mut self.was_over, maybe_reason.is_some());
     let is_calm = tally.skipped == 0
       && queue_depth <= config.calm_queue_depth
       && maybe_encode_share.is_none_or(|share| share <= config.calm_encode_share);
     let verdict = match maybe_reason {
-      Some(_) => Verdict::Over,
+      Some(_) if is_clearly_over || was_over => Verdict::Over,
+      // A moment's overload (keyframes after a switch): the next window decides.
+      Some(_) => Verdict::Neither,
       None if self.level > 0 && is_calm => Verdict::Calm,
       None => Verdict::Neither,
     };
@@ -874,6 +895,53 @@ mod tests {
       assert_eq!(load.maybe_reason(), Some(OverloadReason::SkippedFrames));
     }
 
+    /// #1792: the keyframes of a layer switch fill a decoder's queue for one window (1.5 frames
+    /// on average, measured at a join): no step down for that, nor a failed probe after a step
+    /// up. A queue that stays steps down at the end of its second window, and once it is gone the
+    /// level comes back within about 4 s.
+    #[test]
+    fn a_moment_of_queueing_is_no_overload_but_a_queue_that_stays_is() {
+      let config = CameraGovernorConfig::default();
+      let start = Instant::now();
+      let mut load = EncoderLoad::with_levels(3, start);
+      let mut now = start;
+      let queued = |depth_tenths: u32| FrameTally {
+        given: 10,
+        queued: depth_tenths,
+        ..FrameTally::default()
+      };
+      // A switch: one window at 1.5, then calm again.
+      now = window(&mut load, now, queued(15), &config);
+      assert_eq!(load.evaluate(now, &config), None);
+      now = window(&mut load, now, queued(0), &config);
+      assert_eq!(load.evaluate(now, &config), None);
+      assert_eq!(load.level(), 0);
+      // A queue that stays: down after its second window.
+      now = window(&mut load, now, queued(15), &config);
+      assert_eq!(load.evaluate(now, &config), None);
+      now = window(&mut load, now, queued(15), &config);
+      assert_eq!(load.evaluate(now, &config), Some(1));
+      // Twice the threshold is no moment: down at once.
+      now = window(&mut load, now, queued(25), &config);
+      assert_eq!(load.evaluate(now, &config), Some(2));
+      // Calm: up again within about 4 s.
+      let calm_from = now;
+      while load.level() == 2 {
+        now = window(&mut load, now, queued(0), &config);
+        load.evaluate(now, &config);
+      }
+      assert!(now - calm_from <= Duration::from_secs(4), "{:?}", now - calm_from);
+      // The next switch right after the step up: no step down, and no failed probe either.
+      now = window(&mut load, now, queued(15), &config);
+      assert_eq!(load.evaluate(now, &config), None);
+      let calm_from = now;
+      while load.level() == 1 {
+        now = window(&mut load, now, queued(0), &config);
+        load.evaluate(now, &config);
+      }
+      assert!(now - calm_from <= Duration::from_secs(4), "{:?}", now - calm_from);
+    }
+
     #[test]
     fn frames_waiting_in_the_queue_count_as_overload_too() {
       let config = CameraGovernorConfig::default();
@@ -885,7 +953,10 @@ mod tests {
         queued: 4,
         ..FrameTally::default()
       };
+      // 1.33 frames waiting, less than twice the threshold: a second window decides.
       let now = feed(&mut load, start, 30, queued, &config);
+      assert_eq!(load.evaluate(now, &config), None);
+      let now = feed(&mut load, now, 30, queued, &config);
       assert_eq!(load.evaluate(now, &config), Some(step(20, 0)));
       assert_eq!(load.maybe_reason(), Some(OverloadReason::QueuedFrames));
     }
@@ -976,17 +1047,22 @@ mod tests {
         frame_interval: interval,
         ..FrameTally::default()
       };
+      // Within the frame interval: overloaded only when it stays for a second window.
       for _ in 0..60 {
         load.on_frame(slow);
       }
-      assert_eq!(load.evaluate(start + config.load_window, &config), Some(1));
+      assert_eq!(load.evaluate(start + config.load_window, &config), None);
+      for _ in 0..60 {
+        load.on_frame(slow);
+      }
+      assert_eq!(load.evaluate(start + config.load_window * 2, &config), Some(1));
       assert_eq!(load.maybe_reason(), Some(OverloadReason::SlowEncoding));
       // Half the interval is neither overloaded nor calm: it stays.
       let busy = FrameTally {
         encode_time: Duration::from_millis(20),
         ..slow
       };
-      let mut now = start + config.load_window;
+      let mut now = start + config.load_window * 2;
       for _ in 0..10 {
         for _ in 0..60 {
           load.on_frame(busy);
@@ -1001,6 +1077,19 @@ mod tests {
       }
       assert_eq!(single.evaluate(start + config.load_window, &config), None);
       assert_eq!(single.level(), 0);
+    }
+
+    /// Gives `load` a load window of 30 fps of frames, each taken as `tally` says.
+    fn window(
+      load: &mut EncoderLoad,
+      start: Instant,
+      tally: FrameTally,
+      config: &CameraGovernorConfig,
+    ) -> Instant {
+      for _ in 0..60 {
+        load.on_frame(tally);
+      }
+      start + config.load_window
     }
 
     /// Gives a load window of frames at `framerate`, each taken as `tally` says.

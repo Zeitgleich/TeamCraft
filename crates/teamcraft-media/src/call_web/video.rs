@@ -1259,9 +1259,15 @@ impl<E: FrameEncoder> LayerEncoders<E> {
   }
 
   /// Every how many-th captured frame layer `index` takes for its own frame rate: a share's base
-  /// layer at 15 fps of a capture at 30 takes every second (#1733).
+  /// layer at 15 fps of a capture at 30 takes every second (#1733). A governed layer's own rate,
+  /// not the one its limit leaves it: the limit's frame divisor applies on top, and counted twice
+  /// a camera layer held to every second frame got every fourth.
   fn rate_divisor(&self, index: usize) -> u8 {
-    let layer_rate = self.built(index).max_framerate.max(1);
+    let layer_rate = match self.maybe_governor {
+      Some(_) => self.layers[index].info.max_framerate,
+      None => self.built(index).max_framerate,
+    }
+    .max(1);
     let capture = self.framerate.max(1);
     // Rounded: 30 fps for a layer at 18 takes every frame (the encoder drops what it must).
     ((u16::from(capture) + u16::from(layer_rate) / 2) / u16::from(layer_rate))

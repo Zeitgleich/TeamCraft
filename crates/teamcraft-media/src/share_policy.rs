@@ -1243,7 +1243,10 @@ mod tests {
         frame_interval: Duration::from_millis(33),
         ..FrameTally::default()
       };
+      // Within the frame interval: a second window decides (#1792).
       let now = window(&mut governor, start, slow);
+      assert_eq!(governor.evaluate(now), None);
+      let now = window(&mut governor, now, slow);
       assert_eq!(governor.evaluate(now), Some(1));
       assert_eq!(governor.step().top_framerate, 20);
       assert_eq!(governor.limits().maybe_reason, Some(OverloadReason::SlowEncoding));
@@ -1273,6 +1276,8 @@ mod tests {
         }
       }
       assert!(first_up.unwrap() >= calm_period);
+      // #1792: within about 5 s of the machine getting idle, not minutes.
+      assert!(first_up.unwrap() <= Duration::from_secs(5), "{first_up:?}");
       let mut down: Vec<ShareStep> = governor.ladder().steps().to_vec();
       down.reverse();
       assert_eq!(ups, down, "back up in reverse");
@@ -1299,6 +1304,10 @@ mod tests {
         }
       }
       assert!(waited.unwrap() >= calm_period * 2, "{waited:?}");
+      // Failed steps make the next wait longer, but seconds, not minutes.
+      let max_calm_period = CameraGovernorConfig::default().max_calm_period;
+      let load_window = CameraGovernorConfig::default().load_window;
+      assert!(waited.unwrap() <= max_calm_period + load_window, "{waited:?}");
     }
 
     /// A limited uplink: the top layer at its least share is still too much. Its size steps

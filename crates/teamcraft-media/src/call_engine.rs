@@ -47,6 +47,7 @@ use crate::dave::{
 };
 use crate::join_probe::{JoinProbe, JoinProbeConfig, LinkMeasurement};
 use crate::nack::NackConfig;
+use crate::rate_probe::{RateProbeConfig, UplinkProbe};
 use crate::rtp::{PayloadType, RtpHeader, RtpPacket, RtpTimestamp, SequenceNumber, Ssrc};
 use crate::share_policy::UplinkTop;
 use crate::uplink_layers::{Adaptation, OwnTrack, UplinkLayers, UplinkPolicy, probe_demand_bps};
@@ -192,6 +193,8 @@ pub struct CallEngine {
   maybe_probe_bytes: Option<u32>,
   /// The uplink's probe while it runs, and what it showed.
   maybe_uplink_probe: Option<JoinProbe>,
+  /// Padding that probes the uplink while own layers are held back for it (#1792).
+  uplink_rate_probe: UplinkProbe,
   maybe_uplink_measurement: Option<LinkMeasurement>,
   /// What the SFU's probe of the downlink showed, as it said.
   maybe_downlink_measurement: Option<LinkMeasurement>,
@@ -626,6 +629,7 @@ impl CallEngine {
       uplink_feedback_epoch: now,
       maybe_probe_bytes: None,
       maybe_uplink_probe: None,
+      uplink_rate_probe: UplinkProbe::new(),
       maybe_uplink_measurement: None,
       maybe_downlink_measurement: None,
       started_at: now,
@@ -695,6 +699,7 @@ impl CallEngine {
     self.is_roster_requested = false;
     // Another network: its capacity is unknown, measure afresh.
     self.uplink = SendSideEstimator::new(self.config.bwe);
+    self.uplink_rate_probe = UplinkProbe::new();
     self.uplink_layers = UplinkLayers::new(self.config.bwe.start_bps);
     self.update_uplink_demand();
     self.downlink_feedback = FeedbackRecorder::new(now);
@@ -776,6 +781,7 @@ impl CallEngine {
       self.uplink.forget_sent();
       // What the old path showed says nothing about this one.
       self.uplink.forget_probe();
+      self.uplink_rate_probe = UplinkProbe::new();
       self.measure_uplink_afresh();
       self.start_uplink_probe(now);
     }
@@ -1410,7 +1416,7 @@ impl CallEngine {
   }
 
   /// Periodic work (every ~100 ms): reports arrival times of received datagrams to the SFU, and
-  /// asks for missing video packets again or gives up on them, and sends the uplink probe's
+  /// asks for missing video packets again or gives up on them, and sends the uplink probes'
   /// trains.
   pub fn on_timer(&mut self, now: Instant) {
     if let Some(feedback) = self.downlink_feedback.take_feedback(now) {
@@ -1418,6 +1424,7 @@ impl CallEngine {
     }
     self.on_video_timer(now);
     self.run_uplink_probe(now);
+    self.run_uplink_rate_probe(now);
     self.execute_overdue_transition(now);
     self.check_encryption_setup(now);
   }
@@ -1927,7 +1934,19 @@ impl CallEngine {
     {
       self.apply_uplink_probe(measurement);
     }
-    let bps = self.uplink.on_feedback(feedback, now, self.uplink_feedback_epoch);
+    let mut bps = self.uplink.on_feedback(feedback, now, self.uplink_feedback_epoch);
+    if let Some(outcome) =
+      self
+        .uplink_rate_probe
+        .on_feedback(&RateProbeConfig::default(), feedback, &mut self.uplink, now)
+    {
+      bps = self.uplink.estimate_bps();
+      debug!(
+        ?outcome,
+        estimate_bps = bps,
+        "uplink probed while layers are held back"
+      );
+    }
     let is_sending_screen_audio = self.screen_audio != ScreenAudioState::Off;
     let tracks = own_track_views(&self.own_tracks, &self.adaptive_tracks);
     let has_changed =
@@ -1978,6 +1997,34 @@ impl CallEngine {
     if let (Some(first), Some(probe)) = (maybe_first, self.maybe_uplink_probe.as_mut()) {
       probe.sent(first, &sizes, now);
     }
+  }
+
+  /// Pads the uplink while own layers are held back for it (#1792, `crate::rate_probe`): a cluster
+  /// that gets through lifts the estimate, and the layers follow with the next feedback. Only
+  /// where the SFU takes padding, and not while the probe at the start runs.
+  fn run_uplink_rate_probe(&mut self, now: Instant) {
+    let is_join_probe_running = self
+      .maybe_uplink_probe
+      .as_ref()
+      .is_some_and(|probe| !probe.is_over());
+    if self.maybe_probe_bytes.is_none() || is_join_probe_running || !self.is_in_call() {
+      return;
+    }
+    let is_sending_screen_audio = self.screen_audio != ScreenAudioState::Off;
+    let tracks = own_track_views(&self.own_tracks, &self.adaptive_tracks);
+    let maybe_wanted_bps = self
+      .uplink_layers
+      .is_holding_back(&tracks)
+      .then(|| probe_demand_bps(&tracks, is_sending_screen_audio, &self.uplink_policy));
+    let datagrams = self.uplink_rate_probe.on_timer(
+      &RateProbeConfig::default(),
+      &mut self.uplink,
+      maybe_wanted_bps,
+      now,
+    );
+    self
+      .outputs
+      .extend(datagrams.into_iter().map(EngineOutput::Datagram));
   }
 
   /// The uplink probe's result: the estimate starts from it, and the layers follow with the next

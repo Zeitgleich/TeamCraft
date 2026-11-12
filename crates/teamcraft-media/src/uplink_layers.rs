@@ -46,6 +46,8 @@ pub struct UplinkPolicy {
   /// to such a burst with a cut it recovers from within seconds: stopping the sharp layer at
   /// once sent its viewers back to the blurred half-size picture right after the sharp one
   /// arrived (issue #941). An uplink that really can't carry the share stays below for longer.
+  /// An estimate below [`SCREEN_HOLD_SHARE`] of what the layers need is no burst's dip: the
+  /// link lost its room, and the layers stop at once (#1792).
   pub screen_downswitch_hold: Duration,
   /// The shares of its bitrate the top sent layer of a camera that adapts its bitrate may be
   /// encoded at, lowest first, the last one 1.0. Few steps: the encoders are rebuilt (and send a
@@ -64,14 +66,25 @@ pub struct UplinkPolicy {
   /// within this time.
   pub share_downswitch_hold: Duration,
   /// How long the estimate has to allow a higher share of a camera's top layer before it
-  /// rises while the layer stays. Each change costs a keyframe of the layer; stepping through
-  /// the shares one after another sent three within a second into a nearly full link (#939).
+  /// rises while the layer stays, where the encoders are rebuilt ([`Adaptation::Rebuilt`]). Each
+  /// change costs a keyframe of the layer; stepping through the shares one after another sent
+  /// three within a second into a nearly full link (#939).
   pub share_upswitch_hold: Duration,
+  /// The same where the encoders change their rate in place ([`Adaptation::InPlace`]): a change
+  /// costs nothing, and a share's top layer climbs through its four shares within seconds once
+  /// the uplink has room (#1792).
+  pub in_place_share_upswitch_hold: Duration,
+  /// [`UplinkPolicy::share_downswitch_hold`] where the encoders change their rate in place: a
+  /// lower share costs no keyframe, and on a link that lost its room every moment of the higher
+  /// one queues and loses video (#1792).
+  pub in_place_share_downswitch_hold: Duration,
   /// A step up of a camera that adapts its bitrate counts as carried once it held this long; one
-  /// undone sooner was a probe the uplink didn't carry, and the next step up waits (4 s, doubling
+  /// undone sooner was a probe the uplink didn't carry, and the next step up waits (2 s, doubling
   /// with every such probe up to [`MAX_PROBE_BACKOFF`], from the start after one that held). The
   /// estimate grows again within seconds after a cut, and every probe costs a keyframe and a
-  /// moment of congestion: on a link that stays limited they came every few seconds (#939).
+  /// moment of congestion: on a link that stays limited they came every few seconds (#939). The
+  /// wait stays at seconds: the uplink is padded first where it can (`crate::rate_probe`), and a
+  /// mobile link that had room for a minute waited half of it at 32 s (#1792).
   pub probe_proof: Duration,
   /// How long the estimate has to stay below what a camera's lowest layer needs before the
   /// camera stops altogether; until then that layer goes on at its least bitrate (#1719). The
@@ -80,10 +93,13 @@ pub struct UplinkPolicy {
   pub camera_pause_hold: Duration,
 }
 
+/// A screen share's layers stop without [`UplinkPolicy::screen_downswitch_hold`] when the
+/// estimate is below this share of what they need.
+const SCREEN_HOLD_SHARE: f64 = 0.5;
 /// The longest wait before a camera steps up again after probes that failed.
-const MAX_PROBE_BACKOFF: Duration = Duration::from_secs(32);
+const MAX_PROBE_BACKOFF: Duration = Duration::from_secs(4);
 /// The wait after the first probe that failed.
-const FIRST_PROBE_BACKOFF: Duration = Duration::from_secs(4);
+const FIRST_PROBE_BACKOFF: Duration = Duration::from_secs(2);
 
 /// The step-up probes of one adaptive camera.
 #[derive(Debug, Default)]
@@ -148,6 +164,8 @@ impl Default for UplinkPolicy {
       screen_bitrate_shares: [0.2, 0.35, 0.6, 1.0],
       share_downswitch_hold: Duration::from_secs(1),
       share_upswitch_hold: Duration::from_secs(2),
+      in_place_share_upswitch_hold: Duration::from_millis(500),
+      in_place_share_downswitch_hold: Duration::ZERO,
       probe_proof: Duration::from_secs(4),
       camera_pause_hold: Duration::from_secs(5),
     }
@@ -235,6 +253,13 @@ impl UplinkLayers {
       None => true,
       Some(maybe_top) => maybe_top.is_some_and(|top| layer <= top),
     }
+  }
+
+  /// Whether layers of `tracks` are held back for the uplink (or sent at a share of their
+  /// bitrate): the sender would send more than the estimate lets it, so the uplink is worth a
+  /// probe (`crate::rate_probe::UplinkProbe`).
+  pub fn is_holding_back(&self, tracks: &[OwnTrack<'_>]) -> bool {
+    self.is_limited && !self.is_fully_allocated(tracks)
   }
 
   /// Forgets a track that is no longer published.
@@ -335,13 +360,27 @@ impl UplinkLayers {
         below += f64::from(info.max_bitrate_bps);
       }
       let maybe_top = maybe_chosen.map(|(layer, _)| layer);
-      let maybe_top = self.after_screen_hold(track, maybe_current, maybe_top, policy, now);
+      let current_need = track
+        .layers
+        .iter()
+        .filter(|info| maybe_current.is_some_and(|current| info.layer <= current))
+        .map(|info| {
+          let layer_share = if Some(info.layer) == maybe_current {
+            current_share
+          } else {
+            1.0
+          };
+          f64::from(info.max_bitrate_bps) * layer_share
+        })
+        .sum::<f64>();
+      let is_far_below = budget < SCREEN_HOLD_SHARE * current_need;
+      let maybe_top = self.after_screen_hold(track, maybe_current, maybe_top, is_far_below, policy, now);
       let share = match maybe_chosen {
         Some((layer, share)) if Some(layer) == maybe_top => share,
         _ => 1.0,
       };
       let share = self.after_share_hold(
-        track.stream,
+        track,
         (maybe_current, current_share),
         (maybe_top, share),
         policy,
@@ -456,24 +495,27 @@ impl UplinkLayers {
 
   /// `share` for the top layer `maybe_top`, unless that is the current top layer at another
   /// share, asked for less long than [`UplinkPolicy::share_downswitch_hold`] (lower) or
-  /// [`UplinkPolicy::share_upswitch_hold`] (higher): then the current share.
+  /// [`UplinkPolicy::share_upswitch_hold`] (higher; [`UplinkPolicy::in_place_share_upswitch_hold`]
+  /// for encoders that change their rate in place): then the current share.
   fn after_share_hold(
     &mut self,
-    stream: StreamId,
+    track: &OwnTrack<'_>,
     (maybe_current, current_share): (Option<u8>, f64),
     (maybe_top, share): (Option<u8>, f64),
     policy: &UplinkPolicy,
     now: Instant,
   ) -> f64 {
+    let stream = track.stream;
     if maybe_top.is_none() || maybe_top != maybe_current || share == current_share {
       self.share_change_pending_since.remove(&stream);
       return share;
     }
     let is_higher = share > current_share;
-    let hold = if is_higher {
-      policy.share_upswitch_hold
-    } else {
-      policy.share_downswitch_hold
+    let hold = match (is_higher, track.adaptation) {
+      (true, Adaptation::InPlace) => policy.in_place_share_upswitch_hold,
+      (true, Adaptation::Whole | Adaptation::Rebuilt) => policy.share_upswitch_hold,
+      (false, Adaptation::InPlace) => policy.in_place_share_downswitch_hold,
+      (false, Adaptation::Whole | Adaptation::Rebuilt) => policy.share_downswitch_hold,
     };
     let pending = self
       .share_change_pending_since
@@ -490,13 +532,14 @@ impl UplinkLayers {
   }
 
   /// `maybe_top` for `track`, unless it is a screen share whose layers drop below
-  /// `maybe_current` for less than [`UplinkPolicy::screen_downswitch_hold`]: then
-  /// `maybe_current`.
+  /// `maybe_current` for less than [`UplinkPolicy::screen_downswitch_hold`] while the budget is
+  /// not far below them (`is_far_below`): then `maybe_current`.
   fn after_screen_hold(
     &mut self,
     track: &OwnTrack<'_>,
     maybe_current: Option<u8>,
     maybe_top: Option<u8>,
+    is_far_below: bool,
     policy: &UplinkPolicy,
     now: Instant,
   ) -> Option<u8> {
@@ -504,7 +547,7 @@ impl UplinkLayers {
     let is_screen = *track.kind == VideoTrackKind::Screen;
     let is_still_there =
       maybe_current.is_some_and(|current| track.layers.iter().any(|info| info.layer == current));
-    if !is_screen || !is_still_there || rank(maybe_top) >= rank(maybe_current) {
+    if !is_screen || !is_still_there || is_far_below || rank(maybe_top) >= rank(maybe_current) {
       self.downgrade_pending_since.remove(&track.stream);
       return maybe_top;
     }
@@ -811,20 +854,25 @@ mod tests {
     assert!(uplink.allows(CAMERA, 2));
     uplink.on_estimate(800_000, &tracks, false, &policy(), at(1_500));
     assert!(!uplink.allows(CAMERA, 2));
-    // The next probe waits 4 s, the one after that 8 s.
+    // The next probe waits 2 s, the one after that 4 s, and never longer (#1792).
     uplink.on_estimate(1_700_000, &tracks, false, &policy(), at(3_000));
     assert!(!uplink.allows(CAMERA, 2));
-    uplink.on_estimate(1_700_000, &tracks, false, &policy(), at(5_600));
+    uplink.on_estimate(1_700_000, &tracks, false, &policy(), at(3_600));
     assert!(uplink.allows(CAMERA, 2));
-    uplink.on_estimate(800_000, &tracks, false, &policy(), at(6_000));
-    uplink.on_estimate(1_700_000, &tracks, false, &policy(), at(13_000));
+    uplink.on_estimate(800_000, &tracks, false, &policy(), at(4_000));
+    uplink.on_estimate(1_700_000, &tracks, false, &policy(), at(7_000));
     assert!(!uplink.allows(CAMERA, 2));
-    uplink.on_estimate(1_700_000, &tracks, false, &policy(), at(14_100));
+    uplink.on_estimate(1_700_000, &tracks, false, &policy(), at(8_100));
     assert!(uplink.allows(CAMERA, 2));
-    // This one holds: a later failure waits 4 s again.
-    uplink.on_estimate(1_700_000, &tracks, false, &policy(), at(18_200));
-    uplink.on_estimate(800_000, &tracks, false, &policy(), at(19_000));
-    uplink.on_estimate(1_700_000, &tracks, false, &policy(), at(19_100));
+    uplink.on_estimate(800_000, &tracks, false, &policy(), at(8_500));
+    uplink.on_estimate(1_700_000, &tracks, false, &policy(), at(12_400));
+    assert!(!uplink.allows(CAMERA, 2));
+    uplink.on_estimate(1_700_000, &tracks, false, &policy(), at(12_600));
+    assert!(uplink.allows(CAMERA, 2));
+    // This one holds: a later failure doesn't hold the next step back.
+    uplink.on_estimate(1_700_000, &tracks, false, &policy(), at(16_700));
+    uplink.on_estimate(800_000, &tracks, false, &policy(), at(17_000));
+    uplink.on_estimate(1_700_000, &tracks, false, &policy(), at(17_100));
     assert!(uplink.allows(CAMERA, 2));
   }
 
