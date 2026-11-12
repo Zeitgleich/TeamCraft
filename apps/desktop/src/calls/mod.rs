@@ -307,7 +307,7 @@ impl CallHost {
   /// view (docs/crash-reports.md, "Call problems"): each goes to the page once, and the snapshot
   /// doesn't grow with them.
   pub fn page_snapshot(&self) -> CallSnapshot {
-    let reports = lock(&self.state).view.call_reports.drain(..).collect();
+    let reports = std::mem::take(&mut lock(&self.state).view.call_reports);
     CallSnapshot {
       call_reports: reports,
       ..self.snapshot()

@@ -3,7 +3,7 @@
 //! desktop shell and the browser both keep a [`CallView`], so calls look and behave the same in
 //! either; `teamcraft-media` (`call_view`) applies the media engine's events to it.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{CallEndCause, CallRosterEntry, ConversationId, GatewayEvent, MediaStreamId, UserId};
@@ -33,7 +33,7 @@ pub struct CallView {
   pub ends_when_one_side_leaves: bool,
   /// The media layer's last problem reports, at most [`MAX_KEPT_CALL_REPORTS`], for the page to
   /// send (docs/crash-reports.md, "Call problems").
-  pub call_reports: VecDeque<CallReport>,
+  pub call_reports: Vec<CallReport>,
 }
 
 /// Problem reports a [`CallView`] keeps for the page; the oldest go first.
@@ -129,9 +129,9 @@ impl CallView {
     let has_any = !reports.is_empty();
     for report in reports {
       if self.call_reports.len() >= MAX_KEPT_CALL_REPORTS {
-        self.call_reports.pop_front();
+        self.call_reports.remove(0);
       }
-      self.call_reports.push_back(report);
+      self.call_reports.push(report);
     }
     has_any
   }

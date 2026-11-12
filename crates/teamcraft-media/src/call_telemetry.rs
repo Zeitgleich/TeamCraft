@@ -13,7 +13,7 @@
 //! only; no device, user, call or conversation ID, no name, key, key binding or privacy code
 //! (`crash_reporting::call`). The trail says what happened, never who.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use teamcraft_client_api::crash_reporting::{
@@ -72,19 +72,21 @@ pub struct CallTelemetry {
   maybe_transport: Option<CallTransportKind>,
   was_fallback: bool,
   reconnects: u32,
-  reconnect_times: VecDeque<u64>,
+  reconnect_times: Vec<u64>,
   maybe_dave_epoch: Option<u64>,
   devices: BTreeSet<DeviceId>,
   maybe_uplink: Option<(u32, u8)>,
   link: LinkSample,
   sent: Vec<SentVideoContext>,
   received: Vec<ReceivedVideoContext>,
-  streams: BTreeMap<MediaStreamId, StreamWatch>,
-  reported: BTreeMap<&'static str, u8>,
-  sfu_codes: BTreeSet<String>,
-  trail: VecDeque<String>,
+  // Small lists rather than maps: a handful of entries, and less code in the browser's call module
+  // (its download budget).
+  streams: Vec<(MediaStreamId, StreamWatch)>,
+  reported: Vec<(&'static str, u8)>,
+  sfu_codes: Vec<String>,
+  trail: Vec<String>,
   summary: SummaryParts,
-  pending: VecDeque<CallReport>,
+  pending: Vec<CallReport>,
 }
 
 /// The link as the last stats sample saw it.
@@ -146,19 +148,19 @@ impl CallTelemetry {
       maybe_transport: None,
       was_fallback: false,
       reconnects: 0,
-      reconnect_times: VecDeque::new(),
+      reconnect_times: Vec::new(),
       maybe_dave_epoch: None,
       devices: BTreeSet::new(),
       maybe_uplink: None,
       link: LinkSample::default(),
       sent: Vec::new(),
       received: Vec::new(),
-      streams: BTreeMap::new(),
-      reported: BTreeMap::new(),
-      sfu_codes: BTreeSet::new(),
-      trail: VecDeque::new(),
+      streams: Vec::new(),
+      reported: Vec::new(),
+      sfu_codes: Vec::new(),
+      trail: Vec::new(),
       summary: SummaryParts::default(),
-      pending: VecDeque::new(),
+      pending: Vec::new(),
     }
   }
 
@@ -232,7 +234,8 @@ impl CallTelemetry {
       CallEngineEvent::Error(error) => {
         let code = error.error_code.as_str().to_owned();
         self.note(now_ms, format!("sfu refused a request: {code}"));
-        if self.sfu_codes.len() < usize::from(MAX_SFU_REJECTIONS) && self.sfu_codes.insert(code.clone()) {
+        if self.sfu_codes.len() < usize::from(MAX_SFU_REJECTIONS) && !self.sfu_codes.contains(&code) {
+          self.sfu_codes.push(code.clone());
           self.push(now_ms, CallProblem::SfuRejected { code });
         }
       },
@@ -363,7 +366,7 @@ impl CallTelemetry {
 
   /// The call ended: a summary of a call that went badly, over the thresholds only.
   pub fn finish(&mut self, now_ms: u64) {
-    for watch in self.streams.values_mut() {
+    for (_, watch) in &mut self.streams {
       if watch.is_frozen {
         self.summary.frozen_ms += now_ms.saturating_sub(watch.changed_ms);
         watch.is_frozen = false;
@@ -394,7 +397,7 @@ impl CallTelemetry {
 
   /// The reports since the last call, oldest first.
   pub fn take_reports(&mut self) -> Vec<CallReport> {
-    self.pending.drain(..).collect()
+    std::mem::take(&mut self.pending)
   }
 
   fn on_reconnecting(&mut self, now_ms: u64) {
@@ -402,14 +405,10 @@ impl CallTelemetry {
     self.reconnects += 1;
     self.note(now_ms, "reconnecting".to_owned());
     let window = millis(self.thresholds.churn_window);
-    self.reconnect_times.push_back(now_ms);
-    while self
+    self.reconnect_times.push(now_ms);
+    self
       .reconnect_times
-      .front()
-      .is_some_and(|at| now_ms.saturating_sub(*at) > window)
-    {
-      self.reconnect_times.pop_front();
-    }
+      .retain(|at| now_ms.saturating_sub(*at) <= window);
     let in_window = u32::try_from(self.reconnect_times.len()).unwrap_or(u32::MAX);
     if in_window > self.thresholds.churn_reconnects {
       self.report(
@@ -446,7 +445,7 @@ impl CallTelemetry {
   /// Compares each subscribed track's counters with the last sample: a picture that stood still
   /// past the threshold is a freeze (one report per episode, up to [`MAX_FREEZES`] a call).
   fn watch_streams(&mut self, report: &VideoStatsReport, now_ms: u64) {
-    let mut seen = BTreeSet::new();
+    let mut seen = Vec::new();
     let (mut packets, mut lost) = (0_u64, 0_u64);
     let mut freezes = Vec::new();
     for track in &report.tracks {
@@ -456,15 +455,29 @@ impl CallTelemetry {
       if received.maybe_max_layer.is_none() {
         continue;
       }
-      seen.insert(received.stream_id);
-      let watch = self.streams.entry(received.stream_id).or_insert(StreamWatch {
-        frames: received.frames,
-        packets: received.packets,
-        packets_lost: received.packets_lost,
-        changed_ms: now_ms,
-        packets_at_change: received.packets,
-        is_frozen: false,
-      });
+      seen.push(received.stream_id);
+      let index = match self
+        .streams
+        .iter()
+        .position(|(stream, _)| *stream == received.stream_id)
+      {
+        Some(index) => index,
+        None => {
+          self.streams.push((
+            received.stream_id,
+            StreamWatch {
+              frames: received.frames,
+              packets: received.packets,
+              packets_lost: received.packets_lost,
+              changed_ms: now_ms,
+              packets_at_change: received.packets,
+              is_frozen: false,
+            },
+          ));
+          self.streams.len() - 1
+        },
+      };
+      let watch = &mut self.streams[index].1;
       packets += received.packets.saturating_sub(watch.packets);
       lost += received.packets_lost.saturating_sub(watch.packets_lost);
       watch.packets = received.packets;
@@ -495,7 +508,7 @@ impl CallTelemetry {
         self.summary.frozen_ms += now_ms.saturating_sub(watch.changed_ms);
       }
     }
-    self.streams.retain(|stream, _| seen.contains(stream));
+    self.streams.retain(|(stream, _)| seen.contains(stream));
     self.note_downlink_loss(packets, lost);
     for freeze in freezes {
       self.summary.freezes += 1;
@@ -522,7 +535,7 @@ impl CallTelemetry {
   }
 
   fn restart_stream_watches(&mut self, now_ms: u64) {
-    for watch in self.streams.values_mut() {
+    for (_, watch) in &mut self.streams {
       if watch.is_frozen {
         self.summary.frozen_ms += now_ms.saturating_sub(watch.changed_ms);
         watch.is_frozen = false;
@@ -538,7 +551,15 @@ impl CallTelemetry {
   }
 
   fn push_capped(&mut self, now_ms: u64, problem: CallProblem, cap: u8) {
-    let count = self.reported.entry(problem.kind()).or_default();
+    let kind = problem.kind();
+    let index = match self.reported.iter().position(|(reported, _)| *reported == kind) {
+      Some(index) => index,
+      None => {
+        self.reported.push((kind, 0));
+        self.reported.len() - 1
+      },
+    };
+    let count = &mut self.reported[index].1;
     if *count >= cap {
       return;
     }
@@ -555,13 +576,13 @@ impl CallTelemetry {
         .saturating_add(i64::try_from(now_ms.saturating_sub(self.started_ms)).unwrap_or(i64::MAX)),
       problem,
       context: self.context(now_ms),
-      trail: self.trail.iter().cloned().collect(),
+      trail: self.trail.clone(),
     };
     self.next_seq += 1;
     if self.pending.len() >= MAX_PENDING {
-      self.pending.pop_front();
+      self.pending.remove(0);
     }
-    self.pending.push_back(report);
+    self.pending.push(report);
   }
 
   fn context(&self, now_ms: u64) -> CallContext {
@@ -585,11 +606,11 @@ impl CallTelemetry {
   fn note(&mut self, now_ms: u64, what: String) {
     let since_ms = now_ms.saturating_sub(self.started_ms);
     if self.trail.len() >= MAX_CALL_TRAIL {
-      self.trail.pop_front();
+      self.trail.remove(0);
     }
     self
       .trail
-      .push_back(format!("+{}.{} s {what}", since_ms / 1000, since_ms % 1000 / 100));
+      .push(format!("+{}.{} s {what}", since_ms / 1000, since_ms % 1000 / 100));
   }
 }
 

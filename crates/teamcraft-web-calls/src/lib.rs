@@ -1640,7 +1640,7 @@ impl Host {
         // The browser opens the camera the user picks or none: no fallback here.
         maybe_camera_fallback: None,
         maybe_this_device: state.view.maybe_this_device,
-        call_reports: state.view.call_reports.iter().cloned().collect(),
+        call_reports: state.view.call_reports.clone(),
       }
     };
     let Ok(json) = serde_json::to_string(&snapshot) else {
