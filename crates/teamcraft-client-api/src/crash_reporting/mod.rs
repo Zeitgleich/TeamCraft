@@ -33,7 +33,7 @@ use thiserror::Error;
 pub use call::{
   BrowserFamily, BrowserInfo, CallContext, CallEventDetail, CallProblem, CallQualitySummary, CallRef,
   CallReport, CallReportGate, CallTransportKind, MAX_CALL_TRAIL, MAX_RECEIVED_TRACKS, ReceivedVideoContext,
-  SentVideoContext, Unverified, identifier,
+  ResumeFailure, SentVideoContext, Unverified, identifier,
 };
 pub use event::{
   AppInfo, AppPlatform, CrashEvent, CrashLevel, ErrorSource, EventId, InstallationId, StackFrame,

@@ -69,8 +69,9 @@ pub enum CallProblem {
   EncryptionFailed { is_refused: bool, retry_after_s: u32 },
   /// Another device was refused by the encryption (#1763).
   MemberRefused,
-  /// A resumed DAVE group failed its checks after a reconnect and was dropped (#1763).
-  ResumeFailed,
+  /// The DAVE group held across a reconnect wasn't resumed (#1763): the SFU didn't, or it failed
+  /// its checks (a member off the roster). The device joined the group afresh.
+  ResumeFailed { cause: ResumeFailure },
   /// A member's identity didn't check out: the call stopped its media (e2ee.md §8).
   Unverified { cause: Unverified },
   /// An own track's encoder gave up (#1766).
@@ -104,6 +105,25 @@ pub enum CallProblem {
   PoorCall(CallQualitySummary),
   #[serde(other)]
   Unknown,
+}
+
+/// Why a held DAVE group wasn't resumed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumeFailure {
+  /// The SFU didn't resume it (it restarted or started the group over).
+  NotResumed,
+  /// It held a member the call's roster no longer has.
+  MemberOffRoster,
+}
+
+impl ResumeFailure {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::NotResumed => "not_resumed",
+      Self::MemberOffRoster => "member_off_roster",
+    }
+  }
 }
 
 /// Why a member's identity didn't check out.
@@ -183,6 +203,14 @@ pub struct SentVideoContext {
   /// Lines of the highest layer that sends.
   pub top_lines: u16,
   pub layers: u8,
+  /// A camera held below its plan (#1768): the frame rate it was started with and runs at now,
+  /// and top layers left out because the encoders didn't keep up.
+  #[serde(default)]
+  pub maybe_planned_fps: Option<u8>,
+  #[serde(default)]
+  pub maybe_fps: Option<u8>,
+  #[serde(default)]
+  pub top_layers_off: u8,
 }
 
 /// Another device's track this device receives.
@@ -285,7 +313,7 @@ impl CallProblem {
     match self {
       Self::EncryptionFailed { .. } => "encryption_failed",
       Self::MemberRefused => "member_refused",
-      Self::ResumeFailed => "resume_failed",
+      Self::ResumeFailed { .. } => "resume_failed",
       Self::Unverified { .. } => "unverified",
       Self::VideoEncodingFailed { .. } => "video_encoding_failed",
       Self::ReconnectChurn { .. } => "reconnect_churn",
@@ -304,12 +332,17 @@ impl CallProblem {
     match self {
       Self::EncryptionFailed { .. }
       | Self::MemberRefused
-      | Self::ResumeFailed
+      | Self::ResumeFailed {
+        cause: ResumeFailure::MemberOffRoster,
+      }
       | Self::Unverified { .. }
       | Self::VideoEncodingFailed { .. }
       | Self::CallFailed { .. }
       | Self::ProtocolError { .. } => CrashLevel::Error,
-      Self::ReconnectChurn { .. }
+      Self::ResumeFailed {
+        cause: ResumeFailure::NotResumed,
+      }
+      | Self::ReconnectChurn { .. }
       | Self::VideoFreeze { .. }
       | Self::TransportFallback
       | Self::SfuRejected { .. }
@@ -323,7 +356,7 @@ impl CallProblem {
     match self {
       Self::EncryptionFailed { .. } => "CallEncryptionFailed",
       Self::MemberRefused => "CallMemberRefused",
-      Self::ResumeFailed => "CallResumeFailed",
+      Self::ResumeFailed { .. } => "CallResumeFailed",
       Self::Unverified { .. } => "CallUnverifiedMember",
       Self::VideoEncodingFailed { .. } => "VideoEncodingFailed",
       Self::ReconnectChurn { .. } => "CallReconnectChurn",
@@ -346,6 +379,7 @@ impl CallProblem {
         parts.push(if *is_refused { "refused" } else { "setup_timeout" }.to_owned());
       },
       Self::Unverified { cause } => parts.push(cause.as_str().to_owned()),
+      Self::ResumeFailed { cause } => parts.push(cause.as_str().to_owned()),
       Self::VideoEncodingFailed {
         video,
         codec,
@@ -384,7 +418,12 @@ impl CallProblem {
         is_refused: false, ..
       } => "encryption: not secured in time".to_owned(),
       Self::MemberRefused => "encryption: another member was refused".to_owned(),
-      Self::ResumeFailed => "encryption: the resumed group failed its checks".to_owned(),
+      Self::ResumeFailed {
+        cause: ResumeFailure::NotResumed,
+      } => "encryption: the SFU didn't resume the group after a reconnect".to_owned(),
+      Self::ResumeFailed {
+        cause: ResumeFailure::MemberOffRoster,
+      } => "encryption: the resumed group held a member off the roster".to_owned(),
       Self::Unverified { cause } => format!("unverified member: {}", cause.as_str()),
       Self::VideoEncodingFailed {
         video,
@@ -833,7 +872,9 @@ mod tests {
           retry_after_s: 60,
         },
         CallProblem::MemberRefused,
-        CallProblem::ResumeFailed,
+        CallProblem::ResumeFailed {
+          cause: ResumeFailure::MemberOffRoster,
+        },
         CallProblem::Unverified {
           cause: Unverified::RetiredKey,
         },
@@ -849,6 +890,9 @@ mod tests {
       }
       for problem in [
         CallProblem::TransportFallback,
+        CallProblem::ResumeFailed {
+          cause: ResumeFailure::NotResumed,
+        },
         CallProblem::ReconnectChurn {
           reconnects: 4,
           window_s: 300,
@@ -1131,6 +1175,9 @@ mod tests {
           maybe_encoder: Some(EncoderImplementation::Browser),
           top_lines: 720,
           layers: 3,
+          maybe_planned_fps: Some(30),
+          maybe_fps: Some(15),
+          top_layers_off: 1,
         }],
         received: vec![ReceivedVideoContext {
           video: VideoTrackKind::Camera,

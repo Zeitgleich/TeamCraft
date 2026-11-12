@@ -258,10 +258,10 @@ per-packet work, one stats read every 3 s during a call, nothing outside one.
 | Type                    | Level   | When                                                                                                                                 | Fingerprint after `call`, kind |
 |-------------------------|---------|--------------------------------------------------------------------------------------------------------------------------------------|--------------------------------|
 | `CallEncryptionFailed`  | error   | DAVE couldn't take this device in: the SFU refused it, or nothing secured it in time                                                 | `refused` or `setup_timeout`   |
-| `CallMemberRefused`     | error   | Another member was refused by the encryption (#1763; hook ready)                                                                     | –                              |
-| `CallResumeFailed`      | error   | A resumed DAVE group failed its checks after a reconnect (#1763; hook ready)                                                         | –                              |
+| `CallMemberRefused`     | error   | Another member's key binding didn't verify: it was kept out of the group (#1763)                                                     | –                              |
+| `CallResumeFailed`      | either  | The DAVE group held across a reconnect wasn't resumed (warning) or held a member off the roster (error), #1763                       | the cause                      |
 | `CallUnverifiedMember`  | error   | A member's key didn't check out, a retired key came back, or the roster or authenticator was missing                                 | the cause                      |
-| `VideoEncodingFailed`   | error   | An own track's encoder gave up (#1766; hook ready): codec, encoder (WebCodecs, hardware, software), lines and layer                  | kind, codec, encoder           |
+| `VideoEncodingFailed`   | error   | An own track's encoder gave up (#1766): codec, encoder (WebCodecs, hardware, software), lines and top layer last sent                | kind, codec, encoder           |
 | `CallReconnectChurn`    | warning | More than 3 reconnects within 5 minutes                                                                                              | –                              |
 | `CallVideoFreeze`       | warning | A subscribed track showed no new picture for 6 s (not while reconnecting); whether its packets still arrived                         | kind, `arriving` or `silent`   |
 | `CallFailed`            | error   | The join failed, or the call ended with an error, by the error's variant (`connection_lost`, `browser_webtransport_connect`, `dave`) | the code, `join` or `in_call`  |
@@ -278,13 +278,13 @@ was frozen in the background) is not sent.
 
 **What a call report adds** to a handled event:
 
-| Field             | Content                                                                                                                                                                                                                                                                                                                                                                             |
-|-------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `fingerprint`     | `call`, the kind and its stable parts (table above), never a number                                                                                                                                                                                                                                                                                                                 |
-| Tags              | `call.problem`, `call.transport` (`quic`, `fallback`), `call.devices` (`1`, `2`, `3-5`, `6-10`, `11+`), `call.codec_sent`, `call.codec_received`, `call.encoder`, `call.reconnected`; on the web page `browser` (`Firefox 133`) and `browser.name`                                                                                                                                  |
-| Context `call`    | `call_ref` (8 random bytes per call and device), `seq`, `problem`, `problem_details` (its numbers), transport, `since_join_s`, `reconnects`, DAVE epoch, devices, own tracks (kind, codec, encoder, top lines, layers), received tracks (kind, codec, lines arriving, layer, highest asked for; at most 8), uplink estimate and loss, downlink loss, round trip, the highest jitter |
-| Context `browser` | Family and major version only, from the user agent (web page)                                                                                                                                                                                                                                                                                                                       |
-| Breadcrumbs       | The logs as before, then the call's trail: up to 20 lines `call +12.3 s reconnecting`, times since the join, what happened, never who                                                                                                                                                                                                                                               |
+| Field             | Content                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+|-------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `fingerprint`     | `call`, the kind and its stable parts (table above), never a number                                                                                                                                                                                                                                                                                                                                                                                              |
+| Tags              | `call.problem`, `call.transport` (`quic`, `fallback`), `call.devices` (`1`, `2`, `3-5`, `6-10`, `11+`), `call.codec_sent`, `call.codec_received`, `call.encoder`, `call.reconnected`; on the web page `browser` (`Firefox 133`) and `browser.name`                                                                                                                                                                                                               |
+| Context `call`    | `call_ref` (8 random bytes per call and device), `seq`, `problem`, `problem_details` (its numbers), transport, `since_join_s`, `reconnects`, DAVE epoch, devices, own tracks (kind, codec, encoder, top lines, layers; a camera held below its plan: planned and actual frame rate, top layers off), received tracks (kind, codec, lines arriving, layer, highest asked for; at most 8), uplink estimate and loss, downlink loss, round trip, the highest jitter |
+| Context `browser` | Family and major version only, from the user agent (web page)                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Breadcrumbs       | The logs as before, then the call's trail: up to 20 lines `call +12.3 s reconnecting`, times since the join, what happened, never who                                                                                                                                                                                                                                                                                                                            |
 
 **Privacy by construction.** `CallReport` has no field for a user, device, conversation or call
 ID, a name, a key, a key binding, a privacy code or media: counts, enums and words from the code.
@@ -558,20 +558,20 @@ core). The Android measures of its own (`Perf.kt`) take their names from the cor
 
 ## Status
 
-| Part                                                         | State                                      |
-|--------------------------------------------------------------|--------------------------------------------|
-| This design, the core module (config, scrub, queue, panic)   | Done (first pull request)                  |
-| Web and desktop page: wasm panics, script errors             | Done (third pull request)                  |
-| Panic hooks of the desktop shell and the server              | Done (fourth pull request)                 |
-| Admin setting, served in `GET /api/v1/server-info`, relay    | Done (second pull request)                 |
-| User opt-out, first-start notice (web and desktop page)      | Done (third pull request)                  |
-| Android SDK, symbol upload in the release workflow           | Done (fifth pull request)                  |
-| iOS (sentry-cocoa), settings and notice                      | Written; Mac build: #1515                  |
-| iOS dSYM upload, device test                                 | Next (#1515)                               |
-| GlitchTip in teamcraft-deploy                                | teamcraft-deploy                           |
-| Performance data: web, desktop, Android, iOS SDK (#1521)     | Done; iOS untested (#1515)                 |
-| Screen-share quality, web and desktop (#1733)                | Done; real-hardware codec test open        |
-| Core job steps, slow-job warnings, catch-up (#1521 review)   | Done; iOS built in CI only                 |
-| Call problems (web, desktop) and the SFU's incidents (#1762) | Done; #1763/#1766 events wired once merged |
-| Named core steps on every platform                           | Done                                       |
-| Uploads and MLS commits as transactions of their own         | Next                                       |
+| Part                                                         | State                               |
+|--------------------------------------------------------------|-------------------------------------|
+| This design, the core module (config, scrub, queue, panic)   | Done (first pull request)           |
+| Web and desktop page: wasm panics, script errors             | Done (third pull request)           |
+| Panic hooks of the desktop shell and the server              | Done (fourth pull request)          |
+| Admin setting, served in `GET /api/v1/server-info`, relay    | Done (second pull request)          |
+| User opt-out, first-start notice (web and desktop page)      | Done (third pull request)           |
+| Android SDK, symbol upload in the release workflow           | Done (fifth pull request)           |
+| iOS (sentry-cocoa), settings and notice                      | Written; Mac build: #1515           |
+| iOS dSYM upload, device test                                 | Next (#1515)                        |
+| GlitchTip in teamcraft-deploy                                | teamcraft-deploy                    |
+| Performance data: web, desktop, Android, iOS SDK (#1521)     | Done; iOS untested (#1515)          |
+| Screen-share quality, web and desktop (#1733)                | Done; real-hardware codec test open |
+| Core job steps, slow-job warnings, catch-up (#1521 review)   | Done; iOS built in CI only          |
+| Call problems (web, desktop) and the SFU's incidents (#1762) | Done; mobile apps not yet           |
+| Named core steps on every platform                           | Done                                |
+| Uploads and MLS commits as transactions of their own         | Next                                |

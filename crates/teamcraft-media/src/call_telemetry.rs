@@ -18,12 +18,12 @@ use std::time::Duration;
 
 use teamcraft_client_api::crash_reporting::{
   CallContext, CallProblem, CallQualitySummary, CallRef, CallReport, CallTransportKind, MAX_CALL_TRAIL,
-  MAX_RECEIVED_TRACKS, ReceivedVideoContext, SentVideoContext, Unverified,
+  MAX_RECEIVED_TRACKS, ReceivedVideoContext, ResumeFailure, SentVideoContext, Unverified,
 };
-use teamcraft_client_api::video_stats::{EncoderImplementation, VideoStatsReport, VideoTrackStats};
+use teamcraft_client_api::video_stats::{VideoStatsReport, VideoTrackStats};
 use teamcraft_proto::{DeviceId, MediaStreamId, VideoCodec, VideoTrackKind};
 
-use crate::call_engine::{CallEngineError, CallEngineEvent, OwnVideoEnd};
+use crate::call_engine::{CallEngineError, CallEngineEvent, DaveResumeFailure, OwnVideoEnd};
 use crate::call_resilience::CallTransport;
 
 /// How often the drivers sample the video stats for the telemetry while joined.
@@ -242,8 +242,24 @@ impl CallTelemetry {
           OwnVideoEnd::BeforeFirstPicture => "before its first picture",
           OwnVideoEnd::WhileSending => "while sending",
           OwnVideoEnd::TakenOver { .. } => "taken over",
+          OwnVideoEnd::EncodingFailed => "its encoder gave up",
         };
         self.note(now_ms, format!("own {} ended by itself ({how})", kind.as_str()));
+        if *end == OwnVideoEnd::EncodingFailed {
+          self.video_encoding_failed(kind, now_ms);
+        }
+      },
+      CallEngineEvent::MemberRefused(_) => {
+        self.note(now_ms, "another member refused by the encryption".to_owned());
+        self.report(now_ms, CallProblem::MemberRefused);
+      },
+      CallEngineEvent::DaveResumeFailed(failure) => {
+        let cause = match failure {
+          DaveResumeFailure::NotResumed => ResumeFailure::NotResumed,
+          DaveResumeFailure::MemberOffRoster => ResumeFailure::MemberOffRoster,
+        };
+        self.note(now_ms, format!("encryption not resumed: {}", cause.as_str()));
+        self.report(now_ms, CallProblem::ResumeFailed { cause });
       },
       CallEngineEvent::ScreenShareTakenOver(_) => self.note(now_ms, "screen share taken over".to_owned()),
       CallEngineEvent::ConnectionReplaced => self.note(now_ms, "joined on another connection".to_owned()),
@@ -322,31 +338,17 @@ impl CallTelemetry {
     }
   }
 
-  /// Another device was refused by the call's encryption (`CallEngineEvent::MemberRefused`, #1763).
-  pub fn member_refused(&mut self, now_ms: u64) {
-    self.note(now_ms, "another member refused by the encryption".to_owned());
-    self.report(now_ms, CallProblem::MemberRefused);
-  }
-
-  /// A resumed DAVE group failed its checks after a reconnect (#1763).
-  pub fn resume_failed(&mut self, now_ms: u64) {
-    self.note(now_ms, "resumed encryption failed its checks".to_owned());
-    self.report(now_ms, CallProblem::ResumeFailed);
-  }
-
-  /// An own track's encoder gave up (`VideoEncodingFailed`, #1766).
-  pub fn video_encoding_failed(
-    &mut self,
-    video: VideoTrackKind,
-    codec: VideoCodec,
-    maybe_encoder: Option<EncoderImplementation>,
-    (lines, layer): (u16, u8),
-    now_ms: u64,
-  ) {
-    self.note(
-      now_ms,
-      format!("{} encoder gave up ({})", video.as_str(), codec.as_str()),
-    );
+  /// An own track's encoder gave up (`OwnVideoEnd::EncodingFailed`, #1766): the codec, encoder,
+  /// lines and top layer it last sent, as the last stats sample saw them.
+  fn video_encoding_failed(&mut self, video: &VideoTrackKind, now_ms: u64) {
+    let maybe_sent = self.sent.iter().find(|sent| sent.video == *video);
+    let codec = maybe_sent.map_or(VideoCodec::Unknown("unknown".to_owned()), |sent| {
+      sent.codec.clone()
+    });
+    let maybe_encoder = maybe_sent.and_then(|sent| sent.maybe_encoder);
+    let lines = maybe_sent.map_or(0, |sent| sent.top_lines);
+    let layer = maybe_sent.map_or(0, |sent| sent.layers.saturating_sub(1));
+    let video = video.clone();
     self.report(
       now_ms,
       CallProblem::VideoEncodingFailed {
@@ -609,6 +611,15 @@ fn sent_context(report: &VideoStatsReport) -> Vec<SentVideoContext> {
           .max()
           .unwrap_or(0),
         layers: u8::try_from(sent.layers.len()).unwrap_or(u8::MAX),
+        maybe_planned_fps: sent
+          .maybe_camera_limits
+          .as_ref()
+          .map(|limits| limits.planned_framerate),
+        maybe_fps: sent.maybe_camera_limits.as_ref().map(|limits| limits.framerate),
+        top_layers_off: sent
+          .maybe_camera_limits
+          .as_ref()
+          .map_or(0, |limits| limits.top_layers_off),
       }),
       VideoTrackStats::Received(_) => None,
     })
@@ -651,8 +662,8 @@ fn seconds(ms: u64) -> u32 {
 #[cfg(test)]
 mod tests {
   use teamcraft_client_api::video_stats::{
-    OfferedLayer, ReceivedVideoStats, SentLayerStats, SentVideoStats, UplinkStats, VideoEncoderInfo,
-    VideoSize,
+    EncoderImplementation, OfferedLayer, ReceivedVideoStats, SentLayerStats, SentVideoStats, UplinkStats,
+    VideoEncoderInfo, VideoSize,
   };
   use teamcraft_proto::{CallId, CallParticipant, ErrorBody, ErrorCode, Id, Snowflake, UserId};
 
@@ -823,25 +834,48 @@ mod tests {
     }
 
     #[test]
-    fn the_hooks_of_newer_events_report_too() {
+    fn refusals_and_failed_resumes_are_reported_by_cause() {
       let mut telemetry = joined(2);
-      telemetry.member_refused(1_000);
-      telemetry.resume_failed(2_000);
-      telemetry.video_encoding_failed(
-        VideoTrackKind::Screen,
-        VideoCodec::Av1,
-        Some(EncoderImplementation::Browser),
-        (1440, 2),
+      telemetry.on_event(&CallEngineEvent::MemberRefused(device(2)), 1_000);
+      telemetry.on_event(
+        &CallEngineEvent::DaveResumeFailed(DaveResumeFailure::MemberOffRoster),
+        2_000,
+      );
+      let reports = telemetry.take_reports();
+      assert_eq!(reports[0].problem, CallProblem::MemberRefused);
+      assert_eq!(
+        reports[1].problem,
+        CallProblem::ResumeFailed {
+          cause: ResumeFailure::MemberOffRoster
+        }
+      );
+      assert!(
+        !serde_json::to_string(&reports)
+          .unwrap()
+          .contains(&device(2).to_string())
+      );
+    }
+
+    #[test]
+    fn an_encoder_that_gave_up_names_what_it_last_sent() {
+      let mut telemetry = joined(2);
+      telemetry.observe_stats(&stats(10, 100, 0), 0);
+      telemetry.on_event(
+        &CallEngineEvent::OwnVideoEnded {
+          kind: VideoTrackKind::Camera,
+          end: OwnVideoEnd::EncodingFailed,
+        },
         3_000,
       );
-      let kinds: Vec<&str> = telemetry
-        .take_reports()
-        .iter()
-        .map(|report| report.problem.kind())
-        .collect();
       assert_eq!(
-        kinds,
-        ["member_refused", "resume_failed", "video_encoding_failed"]
+        telemetry.take_reports()[0].problem,
+        CallProblem::VideoEncodingFailed {
+          video: VideoTrackKind::Camera,
+          codec: VideoCodec::Av1,
+          maybe_encoder: Some(EncoderImplementation::Browser),
+          lines: 720,
+          layer: 1,
+        }
       );
     }
 
@@ -1131,6 +1165,7 @@ mod tests {
           maybe_frames_given: None,
           maybe_frames_skipped: None,
           maybe_held_back_ms: None,
+          maybe_camera_limits: None,
         }),
         VideoTrackStats::Received(ReceivedVideoStats {
           stream_id: MediaStreamId(20),
