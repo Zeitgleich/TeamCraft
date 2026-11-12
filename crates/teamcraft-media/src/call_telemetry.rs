@@ -25,7 +25,6 @@ use teamcraft_proto::{DeviceId, MediaStreamId, VideoCodec, VideoTrackKind};
 
 use crate::call_engine::{CallEngineError, CallEngineEvent, DaveResumeFailure, OwnVideoEnd};
 use crate::call_resilience::CallTransport;
-use crate::capture_health::STALL_WINDOW;
 
 /// How often the drivers sample the video stats for the telemetry while joined.
 pub const STATS_SAMPLE_INTERVAL: Duration = Duration::from_secs(3);
@@ -273,8 +272,10 @@ impl CallTelemetry {
           now_ms,
           CallProblem::CaptureStalled {
             video: kind.clone(),
-            window: (*window).into(),
-            window_s: seconds(millis(STALL_WINDOW)),
+            window: window.buffers.into(),
+            window_s: seconds(millis(window.length)),
+            frames_encoded: window.frames_encoded,
+            maybe_since_picture_s: window.maybe_since_picture.map(|since| seconds(millis(since))),
           },
         );
       },
@@ -936,10 +937,15 @@ mod tests {
     #[test]
     fn a_stalled_capture_is_reported_with_its_buffer_counts() {
       let mut telemetry = joined(2);
-      let window = crate::capture_health::BufferCounts {
-        cursor_only: 50,
-        unmapped: 150,
-        ..Default::default()
+      let window = crate::capture_health::StallWindow {
+        buffers: crate::capture_health::BufferCounts {
+          cursor_only: 50,
+          unmapped: 150,
+          ..Default::default()
+        },
+        frames_encoded: 5,
+        length: Duration::from_secs(5),
+        maybe_since_picture: Some(Duration::from_millis(41_600)),
       };
       let stalled = CallEngineEvent::CaptureStalled {
         kind: VideoTrackKind::Screen,
@@ -954,6 +960,8 @@ mod tests {
         video,
         window: counts,
         window_s,
+        frames_encoded,
+        maybe_since_picture_s,
       } = &reports[0].problem
       else {
         panic!("{:?}", reports[0].problem);
@@ -964,6 +972,7 @@ mod tests {
         (150, 50, 0)
       );
       assert_eq!(*window_s, 5);
+      assert_eq!((*frames_encoded, *maybe_since_picture_s), (5, Some(41)));
     }
 
     #[test]

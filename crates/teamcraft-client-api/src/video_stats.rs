@@ -55,6 +55,8 @@ pub struct UplinkStats {
 /// One video track: an own one (sent) or another device's (received).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "side", rename_all = "snake_case")]
+// A report a second for a handful of tracks: the sent side's size costs nothing worth a box.
+#[allow(clippy::large_enum_variant)]
 pub enum VideoTrackStats {
   Sent(SentVideoStats),
   Received(ReceivedVideoStats),
@@ -102,7 +104,7 @@ pub struct SentVideoStats {
   #[serde(default)]
   pub maybe_share_limits: Option<ShareLimitsStats>,
   /// What the capture made of the buffers its source handed over (#1805); `None` where the
-  /// capture doesn't count them (cameras, the browser).
+  /// capture doesn't count them (the desktop's cameras). The browser counts its takes instead.
   #[serde(default)]
   pub maybe_capture_buffers: Option<CaptureBufferStats>,
 }
@@ -121,13 +123,23 @@ pub struct CaptureBufferStats {
   /// Buffers the capture couldn't read (a DMA-BUF it can't map).
   pub unmapped: u64,
   /// Buffers whose picture lies outside their memory, or in a format the capture can't convert.
+  /// In the browser: pictures the page couldn't take from the capture.
   pub unreadable: u64,
+  /// The browser: pictures the page took from the playing capture, new or not.
+  #[serde(default)]
+  pub taken: u64,
+  /// The browser: takes while the capture had no picture to give.
+  #[serde(default)]
+  pub not_ready: u64,
+  /// The browser: frames its capture dropped before they reached the page, where it tells.
+  #[serde(default)]
+  pub discarded: u64,
 }
 
 impl CaptureBufferStats {
-  /// Buffers that should have been a picture and weren't.
+  /// Buffers (or takes) that should have been a picture and weren't.
   pub fn unusable(&self) -> u64 {
-    self.corrupted + self.unmapped + self.unreadable
+    self.corrupted + self.unmapped + self.unreadable + self.not_ready
   }
 }
 

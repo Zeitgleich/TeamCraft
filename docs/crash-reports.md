@@ -279,7 +279,22 @@ corrupted, a DMA-BUF it can't map, or unreadable (out of its memory, a format it
 A still screen hands over nothing or cursor moves only, so it never stalls; a moving screen whose
 buffers can't be used showed the others one still picture for minutes before (#1805). The sharer
 sees "The others see only a still picture" in the call until pictures come again or the track
-stops. Cameras and the browser don't count their buffers yet.
+stops. Desktop cameras don't count their buffers yet.
+
+The report's context holds counters only: the outcomes over the window, `frames_encoded`, the
+rates `capture_fps` (new pictures) and `encode_fps` per second over the window, and
+`since_picture_s`, the seconds since the last new picture (`null`: none since the track was
+first judged).
+
+The browser's capture hands over no buffers: the page takes a picture from a playing `<video>`
+at the track's frame rate. It counts its takes (`taken`, `not_ready` when the capture had no
+picture, `unreadable` when the take failed) and, where the browser tells, the frames its capture
+delivered (`pictures`, from the track's `stats.deliveredFrames` in Chrome, else
+`getVideoPlaybackQuality().totalVideoFrames`) and dropped before they reached the page
+(`discarded`, Chrome's `stats.discardedFrames`). It stalls when failed or empty takes outnumber
+good ones (5 or more), or when the capture dropped 5 or more frames in 5 s and delivered none. A
+still tab hands over nothing and drops nothing, so it never stalls; a capture the browser stops
+feeding looks just like it and isn't caught yet (#1805's follow-up measures what browsers show).
 
 While its capture stalls, the sender sets a bit in each frame's header (e2ee.md §8, "A stalled
 capture"). Viewers then show "X's video isn't updating", count the flagged frames as no new
