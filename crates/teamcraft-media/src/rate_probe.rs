@@ -23,10 +23,14 @@
 //!
 //! - **Bounded:** one cluster at a time, [`RateProbeConfig::trains`] trains of at most
 //!   [`RateProbeConfig::max_datagrams`]; a cluster that fell short delays the next by
-//!   [`RateProbeConfig::retry_after`], doubling up to [`RateProbeConfig::max_retry_after`] (a few
-//!   seconds: a link that swings is probed again soon, #1792), and one that got through ends that.
+//!   [`RateProbeConfig::retry_after`], doubling up to [`RateProbeConfig::max_retry_after`] (1 s,
+//!   then 2 s: on a link that swings room comes and goes within seconds, and a cluster that fell
+//!   in a dip right before room appeared held the top layer more than 5 s after it at 2 to 4 s,
+//!   #1792); one that got through ends that.
+//!   The smaller step after a failure ([`RateProbeConfig::step_factors`]) is the care instead.
 //! - **In steps:** a cluster probes at most [`RateProbeConfig::step_factors`] times what the link
-//!   carries now ([`RateProbe::target_bps`]), smaller steps after clusters that fell short. One
+//!   carries now ([`RateProbe::target_bps`]): 1.5 times, 1.25 after clusters that fell short, 2
+//!   after two in a row that got through. One
 //!   that fell short put its excess into the link's queue; a 1440p share's top layer probed from a
 //!   2 Mbit/s link overflowed a mobile link's buffer and took video with it. A link with room is
 //!   climbed a step per cluster, about every 400 ms.
@@ -62,16 +66,17 @@ pub struct RateProbeConfig {
   /// How long what a cluster showed counts.
   pub result_valid_for: Duration,
   /// The wait after a cluster that fell short before the next one; it doubles with every further
-  /// one up to `max_retry_after`, and one that gets through ends it.
+  /// one up to `max_retry_after` (by default the same), and one that gets through ends it.
   pub retry_after: Duration,
   pub max_retry_after: Duration,
   /// A cluster whose feedback hasn't come within this after its last train is given up.
   pub timeout: Duration,
-  /// A cluster probes at most this many times what the link carries now: the first after one
-  /// that got through, the second after one or more that fell short. A cluster that falls short
-  /// queues its excess for about 300 ms: at half again, a buffer of 150 ms overflows only where
-  /// the link already queued.
-  pub step_factors: [f64; 2],
+  /// A cluster probes at most this many times what the link carries now: after one or more that
+  /// fell short, at first (or after one that got through), and after two or more in a row that
+  /// got through. A cluster that falls short queues its excess for about 300 ms: at half again, a
+  /// buffer of 150 ms overflows only where the link already queued; a link that carried two steps
+  /// in a row has room, and is climbed faster.
+  pub step_factors: [f64; 3],
 }
 
 /// The probes of one link.
@@ -85,6 +90,8 @@ pub struct RateProbe {
   retry_wait: Duration,
   /// Clusters that fell short since the last that got through.
   failures: usize,
+  /// Clusters in a row that got through.
+  successes: usize,
 }
 
 /// A sender's probes of its own uplink while it holds layers back (#1792): the client's side of
@@ -144,10 +151,10 @@ impl Default for RateProbeConfig {
       max_datagrams: 100,
       max_queue_growth: Duration::from_millis(25),
       result_valid_for: Duration::from_secs(3),
-      retry_after: Duration::from_secs(2),
-      max_retry_after: Duration::from_secs(4),
+      retry_after: Duration::from_secs(1),
+      max_retry_after: Duration::from_secs(2),
       timeout: Duration::from_secs(1),
-      step_factors: [1.5, 1.25],
+      step_factors: [1.25, 1.5, 2.0],
     }
   }
 }
@@ -175,11 +182,14 @@ impl RateProbe {
   /// carry `carried_bps` (what gets through now, at most the estimate): at most a step above that
   /// ([`RateProbeConfig::step_factors`]).
   pub fn target_bps(&self, config: &RateProbeConfig, wanted_bps: u32, carried_bps: u32) -> u32 {
-    let factor = config
-      .step_factors
-      .get(self.failures.min(config.step_factors.len().saturating_sub(1)))
-      .copied()
-      .unwrap_or(1.0);
+    let [after_failure, first, after_successes] = config.step_factors;
+    let factor = if self.failures > 0 {
+      after_failure
+    } else if self.successes >= 2 {
+      after_successes
+    } else {
+      first
+    };
     // Saturating float-to-int conversion is intended.
     wanted_bps.min((f64::from(carried_bps) * factor) as u32)
   }
@@ -298,6 +308,7 @@ impl RateProbe {
         self.maybe_next_at = None;
         self.retry_wait = Duration::ZERO;
         self.failures = 0;
+        self.successes += 1;
       },
       ProbeOutcome::FellShort { .. } => {
         // What an earlier cluster showed is in doubt: a full token bucket in front of the link
@@ -305,6 +316,7 @@ impl RateProbe {
         // overflowed its buffer.
         self.maybe_shown = None;
         self.failures += 1;
+        self.successes = 0;
         self.retry_wait = (self.retry_wait * 2).clamp(config.retry_after, config.max_retry_after);
         self.maybe_next_at = Some(now + self.retry_wait);
       },
@@ -365,8 +377,7 @@ impl UplinkProbe {
         target_bps,
         floor_bps,
       } => {
-        let estimate_bps = uplink.estimate_bps();
-        uplink.limit_to(estimate_bps.min(target_bps).max(floor_bps), now);
+        uplink.after_short_probe(target_bps, floor_bps, now);
       },
     }
     Some(outcome)
@@ -505,7 +516,8 @@ mod tests {
     assert!(matches!(outcome, Some(ProbeOutcome::FellShort { .. })));
   }
 
-  /// Clusters that fall short come 2, 4, 4 s apart; one that gets through ends the wait.
+  /// Clusters that fall short come 1 s, then 2 s apart, never further (#1792); one that gets
+  /// through ends the wait.
   #[test]
   fn clusters_that_fall_short_back_off_for_seconds_only() {
     let config = RateProbeConfig::default();
@@ -522,13 +534,13 @@ mod tests {
       waits.push(wait.as_secs());
       now = reported + wait;
     }
-    assert_eq!(waits, vec![2, 4, 4, 4]);
+    assert_eq!(waits, vec![1, 2, 2, 2]);
     run_cluster(&mut probe, &config, now, 2_000_000, 0, |_, _| 0);
     assert!(probe.may_start(now + config.train_spacing * 2));
   }
 
   /// Clusters climb from what the link carries in steps, smaller ones after clusters that fell
-  /// short.
+  /// short, larger ones after two in a row that got through.
   #[test]
   fn clusters_probe_a_step_above_what_the_link_carries() {
     let config = RateProbeConfig::default();
@@ -545,6 +557,16 @@ mod tests {
     assert_eq!(targets, vec![2_500_000, 2_500_000, 2_500_000]);
     run_cluster(&mut probe, &config, now, 2_000_000, 0, |_, _| 0);
     assert_eq!(probe.target_bps(&config, 7_000_000, 2_000_000), 3_000_000);
+    // Two in a row: the link has room, and the steps double.
+    run_cluster(
+      &mut probe,
+      &config,
+      now + Duration::from_secs(1),
+      3_000_000,
+      0,
+      |_, _| 0,
+    );
+    assert_eq!(probe.target_bps(&config, 7_000_000, 3_000_000), 6_000_000);
   }
 
   #[test]
@@ -581,8 +603,8 @@ mod tests {
     assert!(probe.is_running());
     probe.on_timer(&config, now + Duration::from_secs(1));
     assert!(!probe.is_running());
-    assert!(!probe.may_start(now + Duration::from_secs(2)));
-    assert!(probe.may_start(now + Duration::from_secs(3)));
+    assert!(!probe.may_start(now + Duration::from_millis(1900)));
+    assert!(probe.may_start(now + Duration::from_secs(2)));
   }
 
   /// #1792: a laptop sharing its screen from LTE on the motorway (`ltevary.sh`): its uplink swings
@@ -656,6 +678,122 @@ mod tests {
       );
     }
 
+    /// A user's uplink as it really is, not a fixed limit (#1792): seeded walks around 1.7 Mbit/s
+    /// with dips, handovers and minutes of room ([`Walk`]). After every dip and every end of room
+    /// what the sender sends fits the link again within a second; within 5 s of room appearing
+    /// the top layer is sent; video and audio never stand still outside a handover.
+    #[test]
+    fn a_sender_follows_a_fluctuating_uplink_within_seconds() {
+      for seed in [1, 7, 42] {
+        let walk = Walk::new(
+          seed,
+          WALK_END,
+          (1_200_000, 1_700_000, 2_400_000),
+          (9_000_000, 18_000_000),
+        );
+        let (sent, ticks) = simulate(true, &|at| walk.capacity_at(at), &walk.outages, WALK_END);
+        let report = WalkReport::of(&walk, &sent, &ticks);
+        eprintln!("seed {seed}: {report:?}");
+        assert!(
+          report.rooms > 0 && report.drops > 5,
+          "seed {seed}: a walk without room or dips"
+        );
+        assert!(
+          report.slowest_top <= Duration::from_secs(5),
+          "seed {seed}: top layer {:?} after room appeared",
+          report.slowest_top
+        );
+        // About a second: the link's bucket hides a dip for a third of a second, its queue
+        // fills in a few hundred milliseconds, and loss shows a reorder window (150 ms) and a
+        // feedback interval later.
+        assert!(
+          report.slowest_fit <= Duration::from_millis(1200),
+          "seed {seed}: sending fit {:?} after a drop",
+          report.slowest_fit
+        );
+        assert!(
+          report.longest_video_gap <= Duration::from_millis(700),
+          "seed {seed}: video stood still for {:?}",
+          report.longest_video_gap
+        );
+        assert!(
+          report.longest_audio_gap <= Duration::from_millis(200),
+          "seed {seed}: audio stopped for {:?}",
+          report.longest_audio_gap
+        );
+      }
+    }
+
+    const WALK_END: Duration = Duration::from_secs(200);
+    /// Sending fits a fluctuating link when it is within this factor of it ([`WalkReport`]).
+    const FIT_TOLERANCE: f64 = 1.15;
+
+    /// How a sender followed a [`Walk`]: the slowest of its times.
+    #[derive(Debug)]
+    struct WalkReport {
+      rooms: usize,
+      drops: usize,
+      /// From room appearing until the top layer is sent.
+      slowest_top: Duration,
+      /// From a dip or the end of room until what is sent fits the link.
+      slowest_fit: Duration,
+      /// The longest time without an arrival, outside handovers and the second after them.
+      longest_video_gap: Duration,
+      longest_audio_gap: Duration,
+    }
+
+    impl WalkReport {
+      fn of(walk: &Walk, sent: &[Sent], ticks: &[Tick]) -> Self {
+        let after = |from: Duration, is_done: &dyn Fn(&Tick) -> bool| {
+          ticks
+            .iter()
+            .filter(|tick| tick.at >= from && tick.at >= SWING_FROM)
+            .find(|tick| is_done(tick))
+            .map_or(WALK_END.saturating_sub(from), |tick| tick.at - from)
+        };
+        let slowest_top = walk
+          .rooms
+          .iter()
+          .map(|(from, _)| after(*from, &|tick| tick.is_top_sent))
+          .max()
+          .unwrap_or_default();
+        // Within a step of the estimate: an excess smaller than that fills the link's bucket and
+        // queue for seconds, so no estimate sees it within a dip, and nothing stands still.
+        let slowest_fit = walk
+          .drops
+          .iter()
+          .map(|from| {
+            after(*from, &|tick| {
+              f64::from(tick.planned_bps) <= FIT_TOLERANCE * tick.capacity_bps as f64
+            })
+          })
+          .max()
+          .unwrap_or_default();
+        let longest_gap = |kind: Kind| {
+          let mut arrivals: Vec<Duration> = sent
+            .iter()
+            .filter(|datagram| datagram.kind == kind && datagram.at >= SWING_FROM)
+            .filter_map(|datagram| datagram.maybe_arrival)
+            .collect();
+          arrivals.sort_unstable();
+          arrivals
+            .windows(2)
+            .filter(|pair| !walk.is_near_outage(pair[0], pair[1]))
+            .map(|pair| pair[1] - pair[0])
+            .max()
+            .unwrap_or_default()
+        };
+        Self {
+          rooms: walk.rooms.len(),
+          drops: walk.drops.len(),
+          slowest_top,
+          slowest_fit,
+          longest_video_gap: longest_gap(Kind::Video),
+          longest_audio_gap: longest_gap(Kind::Audio),
+        }
+      }
+    }
+
     /// How the sender followed its uplink: phases are the swing before the minute, the minute,
     /// and the swing after it.
     #[derive(Debug)]
@@ -683,6 +821,16 @@ mod tests {
       Padding,
     }
 
+    /// What the sender planned at one tick of the simulation, on a link of `capacity_bps`.
+    struct Tick {
+      at: Duration,
+      capacity_bps: u64,
+      /// Audio and the video layers at their bitrates.
+      planned_bps: u32,
+      is_top_sent: bool,
+      is_top_whole: bool,
+    }
+
     /// One datagram on the link: when sent, of which kind, and when it arrived (`None`: dropped).
     struct Sent {
       at: Duration,
@@ -690,8 +838,14 @@ mod tests {
       maybe_arrival: Option<Duration>,
     }
 
-    /// Runs the share for [`END`]; `is_probing`: with [`UplinkProbe`].
-    fn run(is_probing: bool) -> Report {
+    /// Runs the share on a link of `capacity_at` until `end`; `is_probing`: with [`UplinkProbe`].
+    /// What was sent, and per tick what the sender planned.
+    fn simulate(
+      is_probing: bool,
+      capacity_at: &dyn Fn(Duration) -> u64,
+      holds: &[(Duration, Duration)],
+      end: Duration,
+    ) -> (Vec<Sent>, Vec<Tick>) {
       let start = Instant::now();
       let config = RateProbeConfig::default();
       let policy = UplinkPolicy::default();
@@ -710,14 +864,12 @@ mod tests {
       // As the call engine does, the uplink is probed at the start.
       let mut join_probe = JoinProbe::new(JoinProbeConfig::default(), start);
       let mut recorder = FeedbackRecorder::new(start);
-      let mut link = Link::new(start);
+      let mut link = Link::new(start, holds);
       let mut in_flight: VecDeque<(Instant, TransportSeq)> = VecDeque::new();
       let mut feedback_in_flight: VecDeque<(Instant, TransportFeedback)> = VecDeque::new();
       let mut sent: Vec<Sent> = Vec::new();
       let mut next_frame_us = 0u64;
-      let mut fits_after = None;
-      let mut top_after = None;
-      let mut whole_after = None;
+      let mut ticks: Vec<Tick> = Vec::new();
       let mut send = |link: &mut Link,
                       kind: Kind,
                       bytes: usize,
@@ -735,7 +887,7 @@ mod tests {
         });
       };
       let mut now = start;
-      while now - start < END {
+      while now - start < end {
         let elapsed = now - start;
         link.capacity_bps = capacity_at(elapsed);
         if elapsed.as_micros().is_multiple_of(AUDIO_INTERVAL.as_micros()) {
@@ -814,18 +966,38 @@ mod tests {
             .filter(|info| allocation.allows(SHARE, info.layer))
             .map(|info| allocation.bitrate_bps(SHARE, info))
             .sum::<u32>();
-        if elapsed >= FAST_FROM && elapsed < FAST_UNTIL {
-          if allocation.allows(SHARE, 2) {
-            top_after.get_or_insert(elapsed - FAST_FROM);
-            if allocation.bitrate_bps(SHARE, &layers[2]) == layers[2].max_bitrate_bps {
-              whole_after.get_or_insert(elapsed - FAST_FROM);
-            }
-          }
-        } else if elapsed >= FAST_UNTIL && u64::from(planned_bps) <= link.capacity_bps {
-          fits_after.get_or_insert(elapsed - FAST_UNTIL);
-        }
+        ticks.push(Tick {
+          at: elapsed,
+          capacity_bps: link.capacity_bps,
+          planned_bps,
+          is_top_sent: allocation.allows(SHARE, 2),
+          is_top_whole: allocation.allows(SHARE, 2)
+            && allocation.bitrate_bps(SHARE, &layers[2]) == layers[2].max_bitrate_bps,
+        });
         now += TICK;
       }
+      (sent, ticks)
+    }
+
+    /// Runs the share on the fixed LTE link ([`capacity_at`]) for [`END`].
+    fn run(is_probing: bool) -> Report {
+      let (sent, ticks) = simulate(is_probing, &capacity_at, &[], END);
+      let in_fast = |tick: &&Tick| tick.at >= FAST_FROM && tick.at < FAST_UNTIL;
+      let top_after = ticks
+        .iter()
+        .filter(in_fast)
+        .find(|tick| tick.is_top_sent)
+        .map(|tick| tick.at - FAST_FROM);
+      let whole_after = ticks
+        .iter()
+        .filter(in_fast)
+        .find(|tick| tick.is_top_whole)
+        .map(|tick| tick.at - FAST_FROM);
+      let fits_after = ticks
+        .iter()
+        .filter(|tick| tick.at >= FAST_UNTIL)
+        .find(|tick| u64::from(tick.planned_bps) <= tick.capacity_bps)
+        .map_or(END - FAST_UNTIL, |tick| tick.at - FAST_UNTIL);
       let phases = [
         (SWING_FROM, FAST_FROM),
         (FAST_FROM, FAST_UNTIL),
@@ -857,7 +1029,7 @@ mod tests {
       Report {
         top_after,
         whole_after,
-        fits_after: fits_after.unwrap_or(END - FAST_UNTIL),
+        fits_after,
         longest_audio_gap: longest_gap(Kind::Audio),
         longest_video_gap: longest_gap(Kind::Video),
         audio_lost: count(Kind::Audio, true),
@@ -897,6 +1069,91 @@ mod tests {
       }
     }
 
+    /// A mobile link as a user has it (#1792), seeded: every 500 ms the rate walks by up to
+    /// ±15 % within `(low, typical, high)`; now and then (4 % of the steps) a dip to 40 % for 1 to
+    /// 2 s, a tunnel or a crowded cell, or (2 %) a handover that holds everything for 200 to
+    /// 500 ms ([`Link`] hands it over then); and every 60 to 90 s a cell with room, 30 to 60 s within `rooms`.
+    struct Walk {
+      /// From when, which capacity.
+      steps: Vec<(Duration, u64)>,
+      /// When a dip began or room ended: the sender has to fit the link again.
+      drops: Vec<Duration>,
+      outages: Vec<(Duration, Duration)>,
+      rooms: Vec<(Duration, Duration)>,
+    }
+
+    impl Walk {
+      const STEP: Duration = Duration::from_millis(500);
+
+      fn new(seed: u64, end: Duration, (low, typical, high): (u64, u64, u64), rooms: (u64, u64)) -> Self {
+        let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let mut next = move || {
+          state ^= state << 13;
+          state ^= state >> 7;
+          state ^= state << 17;
+          state
+        };
+        let mut walk = Self {
+          steps: Vec::new(),
+          drops: Vec::new(),
+          outages: Vec::new(),
+          rooms: Vec::new(),
+        };
+        let mut rate = typical as f64;
+        let mut at = Duration::ZERO;
+        let mut next_room = Duration::from_secs(30 + next() % 20);
+        while at < end {
+          if at >= next_room && at + Duration::from_secs(45) < end {
+            let length = Duration::from_secs(30 + next() % 31).min(end - at - Duration::from_secs(15));
+            let mut room_rate = (rooms.0 + next() % (rooms.1 - rooms.0)) as f64;
+            let until = at + length;
+            walk.rooms.push((at, until));
+            while at < until {
+              walk.steps.push((at, room_rate as u64));
+              room_rate =
+                (room_rate * (0.9 + (next() % 200) as f64 / 1000.0)).clamp(rooms.0 as f64, rooms.1 as f64);
+              at += Self::STEP;
+            }
+            walk.drops.push(at);
+            next_room = at + Duration::from_secs(60 + next() % 30);
+            continue;
+          }
+          let roll = next() % 100;
+          if roll < 2 {
+            let length = Duration::from_millis(200 + next() % 300);
+            walk.outages.push((at, at + length));
+            at += length;
+          } else if roll < 6 {
+            walk.steps.push((at, (rate * 0.4) as u64));
+            walk.drops.push(at);
+            at += Duration::from_millis(1000 + next() % 1000);
+          } else {
+            rate = (rate * (0.85 + (next() % 300) as f64 / 1000.0)).clamp(low as f64, high as f64);
+            walk.steps.push((at, rate as u64));
+            at += Self::STEP;
+          }
+        }
+        walk
+      }
+
+      fn capacity_at(&self, at: Duration) -> u64 {
+        self
+          .steps
+          .iter()
+          .rev()
+          .find(|(from, _)| *from <= at)
+          .map_or(1_000_000, |(_, bps)| *bps)
+      }
+
+      /// Whether a gap from `from` to `until` touches a handover or the second after it.
+      fn is_near_outage(&self, from: Duration, until: Duration) -> bool {
+        self
+          .outages
+          .iter()
+          .any(|(start, end)| from < *end + Duration::from_secs(1) && until > *start)
+      }
+    }
+
     /// A 1440p screen share's layers, about (#1733): 480p, 720p and 1440p.
     fn share_layers() -> Vec<VideoLayerInfo> {
       [
@@ -917,20 +1174,28 @@ mod tests {
     }
 
     /// The test setup's link (`tbf` with a 32 kB bucket and 150 ms of queue), 30 ms one way.
+    /// During a handover (`holds`) the link holds what it gets and hands it over once it ends.
     struct Link {
       capacity_bps: u64,
       /// When the bucket would be empty had nothing been sent since.
       empty_at: Instant,
+      holds: Vec<(Instant, Instant)>,
+      last_arrival: Instant,
     }
 
     impl Link {
       const BUCKET_BYTES: usize = 32_000;
       const QUEUE_LIMIT: Duration = Duration::from_millis(150);
 
-      fn new(start: Instant) -> Self {
+      fn new(start: Instant, holds: &[(Duration, Duration)]) -> Self {
         Self {
           capacity_bps: 1_000_000,
           empty_at: start,
+          holds: holds
+            .iter()
+            .map(|(from, until)| (start + *from, start + *until))
+            .collect(),
+          last_arrival: start,
         }
       }
 
@@ -942,7 +1207,14 @@ mod tests {
           return None;
         }
         self.empty_at = empty_at + seconds(bytes);
-        Some(self.empty_at.max(now) + ONE_WAY)
+        let through = self.empty_at.max(now);
+        let through = self
+          .holds
+          .iter()
+          .find(|(from, until)| through >= *from && through < *until)
+          .map_or(through, |(_, until)| *until);
+        self.last_arrival = (through + ONE_WAY).max(self.last_arrival);
+        Some(self.last_arrival)
       }
     }
   }
