@@ -9,11 +9,12 @@ use std::collections::{HashMap, HashSet};
 
 use teamcraft_client_api::activity::{ActivityFeed, ActivityItem, ActivityKind};
 use teamcraft_client_api::model::{ConversationId, Id, MessageId, ThreadId, UserId};
+use teamcraft_proto::ClientMessageId;
 
 use crate::imported::Authorship;
 use crate::read_state;
 use crate::readable_text::readable_text;
-use crate::store::{LocalStore, MessageContent, StoredMessage};
+use crate::store::{LocalStore, MessageContent, StoreError, StoredMessage, Written};
 use crate::ui_backend::{CoreChatBackend, CoreCommand, ui_message_id};
 
 /// Entries kept in the feed.
@@ -77,18 +78,18 @@ impl<S: LocalStore> CoreChatBackend<S> {
         items.extend(kept.items.iter().cloned());
         continue;
       }
-      let mut fresh = Vec::new();
-      self.with_all_messages(conversation, &mut |messages| {
-        let is_bot = |user| self.read(crate::integration_sources::is_known_bot(self.store_ref(), user));
-        fresh = conversation_items(
-          self.me_id(),
-          maybe_importer,
-          &is_bot,
-          &reads,
-          conversation,
-          messages,
-        );
-      });
+      let maybe_relevant = cache.remove(&conversation).map(|kept| kept.relevant);
+      let relevant = self.relevant_messages(conversation, maybe_relevant);
+      let is_bot = |user| self.read(crate::integration_sources::is_known_bot(self.store_ref(), user));
+      let fresh = items_of(
+        self.me_id(),
+        maybe_importer,
+        &is_bot,
+        &reads,
+        conversation,
+        &relevant.in_order(),
+        relevant.maybe_newest_top_level,
+      );
       if let Some(revision) = maybe_revision {
         cache.insert(
           conversation,
@@ -96,6 +97,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
             revision,
             reads,
             items: fresh.clone(),
+            relevant,
           },
         );
       }
@@ -103,6 +105,38 @@ impl<S: LocalStore> CoreChatBackend<S> {
     }
     drop(cache);
     feed_of(items).with_join_requests(self.ui_join_requests())
+  }
+
+  /// The messages of `conversation` entries can come from: those kept before, brought up to date
+  /// with what the store's journal says was written since (one lookup per written message), or
+  /// read whole when there are none or the journal can't tell.
+  fn relevant_messages(
+    &self,
+    conversation: ConversationId,
+    maybe_kept: Option<RelevantMessages>,
+  ) -> RelevantMessages {
+    let me = self.me_id();
+    let store = self.store_ref();
+    // Taken before reading: a write in between is followed again next time, which changes nothing.
+    let maybe_cursor = store.written_cursor();
+    if let (Some(mut kept), Some(cursor)) = (maybe_kept, maybe_cursor)
+      && let Some(from) = kept.maybe_cursor
+      && let Some(written) = store.written_since(conversation, from)
+    {
+      match kept.follow(me, store, conversation, &written) {
+        Ok(true) => {
+          kept.maybe_cursor = Some(cursor);
+          return kept;
+        },
+        Ok(false) => {},
+        Err(error) => tracing::debug!(%error, "local store read failed, reading the conversation again"),
+      }
+    }
+    let mut relevant = RelevantMessages::default();
+    self.with_all_messages(conversation, &mut |messages| {
+      relevant = RelevantMessages::of(me, maybe_cursor, messages);
+    });
+    relevant
   }
 
   /// Reads every entry by moving the read positions of their targets: the conversation's for
@@ -186,17 +220,45 @@ fn conversation_items(
   conversation: ConversationId,
   messages: &[StoredMessage],
 ) -> Vec<ActivityItem> {
-  let read = ReadCheck::new(me, reads, messages);
+  let all: Vec<&StoredMessage> = messages.iter().collect();
+  let maybe_newest_top_level = newest_top_level_of_others(me, &all);
+  items_of(
+    me,
+    maybe_importer,
+    is_bot,
+    reads,
+    conversation,
+    &all,
+    maybe_newest_top_level,
+  )
+}
+
+/// The entries of one conversation from `messages` (in display order), which hold at least the
+/// [`is_relevant`] ones; `maybe_newest_top_level` is [`newest_top_level_of_others`] of all of them.
+fn items_of(
+  me: UserId,
+  maybe_importer: Option<UserId>,
+  is_bot: &dyn Fn(UserId) -> bool,
+  reads: &ConversationReads,
+  conversation: ConversationId,
+  messages: &[&StoredMessage],
+  maybe_newest_top_level: Option<MessageId>,
+) -> Vec<ActivityItem> {
+  let read = ReadCheck::new(me, reads, messages, maybe_newest_top_level);
   let by_id: HashMap<_, _> = messages
     .iter()
-    .map(|stored| (stored.client_message_id, stored))
+    .map(|stored| (stored.client_message_id, *stored))
     .collect();
   let my_threads = threads_involving(me, messages);
   let mut items = Vec::new();
 
   // Per person, message and emoji only the newest reaction message counts (they toggle).
   let mut latest_reactions: HashMap<_, &StoredMessage> = HashMap::new();
-  for stored in messages.iter().filter(|stored| stored.sender_user_id != me) {
+  for stored in messages
+    .iter()
+    .copied()
+    .filter(|stored| stored.sender_user_id != me)
+  {
     match &stored.content {
       MessageContent::Text { body, mentions, .. } if mentions.contains(&me) => {
         items.push(item(
@@ -316,6 +378,77 @@ pub(crate) struct KeptActivity {
   revision: u64,
   reads: ConversationReads,
   items: Vec<ActivityItem>,
+  /// What the entries were built from, followed from here when the conversation changes.
+  relevant: RelevantMessages,
+}
+
+/// The messages of one conversation an entry can come from or depend on ([`is_relevant`]), kept
+/// with where the store's journal of writes stood when they were last brought up to date. A
+/// message written later then costs one lookup instead of a read of the whole conversation: a
+/// channel that an integration posts to every second was read whole every second, and a large one
+/// doesn't fit the store's message cache.
+#[derive(Debug, Default)]
+pub(crate) struct RelevantMessages {
+  /// `None`: the store keeps no journal (or the read failed); they are read whole next time.
+  maybe_cursor: Option<u64>,
+  messages: HashMap<ClientMessageId, StoredMessage>,
+  /// [`newest_top_level_of_others`] of all of the conversation's messages, not only these.
+  maybe_newest_top_level: Option<MessageId>,
+}
+
+impl RelevantMessages {
+  /// The relevant ones of all of a conversation's `messages`, read after the journal stood at
+  /// `maybe_cursor`.
+  fn of(me: UserId, maybe_cursor: Option<u64>, messages: &[StoredMessage]) -> Self {
+    let mut relevant = Self {
+      maybe_cursor,
+      ..Self::default()
+    };
+    for message in messages {
+      relevant.note(me, message);
+    }
+    relevant
+  }
+
+  /// Brings them up to date with what the journal says was written: each message as the store
+  /// holds it now, or gone. `false`: the journal can't tell which (all of the conversation's
+  /// messages went), so they are read whole again.
+  fn follow(
+    &mut self,
+    me: UserId,
+    store: &impl LocalStore,
+    conversation: ConversationId,
+    written: &[Written],
+  ) -> Result<bool, StoreError> {
+    for write in written {
+      let Written::Message(client_message_id) = write else {
+        return Ok(false);
+      };
+      self.messages.remove(client_message_id);
+      if let Some(message) = store.message(conversation, *client_message_id)? {
+        self.note(me, &message);
+      }
+    }
+    Ok(true)
+  }
+
+  /// Kept in display order, as the entries are built from them.
+  fn in_order(&self) -> Vec<&StoredMessage> {
+    let mut messages: Vec<&StoredMessage> = self.messages.values().collect();
+    messages.sort_by_key(|message| message.order());
+    messages
+  }
+
+  /// A deleted or edited message doesn't move [`Self::maybe_newest_top_level`] back: it only
+  /// decides that the conversation is read up to there while the server counts nothing unread.
+  fn note(&mut self, me: UserId, message: &StoredMessage) {
+    if let Some(newest) = newest_top_level_of_others(me, &[message]) {
+      self.maybe_newest_top_level = self.maybe_newest_top_level.max(Some(newest));
+    }
+    if is_relevant(me, message) {
+      self.messages.insert(message.client_message_id, message.clone());
+    }
+  }
 }
 
 /// Decides from the read positions whether an entry was seen. The one rule: an entry is read when
@@ -329,17 +462,13 @@ struct ReadCheck {
 }
 
 impl ReadCheck {
-  fn new(me: UserId, reads: &ConversationReads, messages: &[StoredMessage]) -> Self {
-    let newest_top_level = reads
-      .is_caught_up
-      .then(|| {
-        messages
-          .iter()
-          .filter(|stored| stored.maybe_thread_id.is_none() && stored.sender_user_id != me)
-          .filter_map(|stored| stored.maybe_server_id)
-          .max()
-      })
-      .flatten();
+  fn new(
+    me: UserId,
+    reads: &ConversationReads,
+    messages: &[&StoredMessage],
+    maybe_newest_top_level: Option<MessageId>,
+  ) -> Self {
+    let newest_top_level = reads.is_caught_up.then_some(maybe_newest_top_level).flatten();
     let thread_first_unread = reads
       .thread_unread
       .iter()
@@ -379,8 +508,32 @@ impl ReadCheck {
   }
 }
 
+/// Whether an entry can come from `message` or depend on it: the user's own messages (what others
+/// react to, the threads they are in), mentions of the user, every thread message (replies, and
+/// the replies a thread's read position counts) and reactions. Everything else (a channel's
+/// ordinary top-level posts) matters only through [`newest_top_level_of_others`].
+fn is_relevant(me: UserId, message: &StoredMessage) -> bool {
+  message.sender_user_id == me
+    || message.maybe_thread_id.is_some()
+    || match &message.content {
+      MessageContent::Text { mentions, .. } => mentions.contains(&me),
+      MessageContent::Reaction { .. } => true,
+      _ => false,
+    }
+}
+
+/// The newest top-level message of others with a server ID: read once the server counts nothing
+/// unread in the conversation.
+fn newest_top_level_of_others(me: UserId, messages: &[&StoredMessage]) -> Option<MessageId> {
+  messages
+    .iter()
+    .filter(|stored| stored.maybe_thread_id.is_none() && stored.sender_user_id != me)
+    .filter_map(|stored| stored.maybe_server_id)
+    .max()
+}
+
 /// Threads the user started or replied in: replies there concern them.
-fn threads_involving(me: UserId, messages: &[StoredMessage]) -> HashSet<ThreadId> {
+fn threads_involving(me: UserId, messages: &[&StoredMessage]) -> HashSet<ThreadId> {
   let mut threads: HashSet<ThreadId> = messages
     .iter()
     .filter(|stored| stored.sender_user_id == me && !stored.is_hidden())
@@ -713,6 +866,108 @@ mod tests {
     };
     assert_eq!(of(&|_| false, stored.clone()), None);
     assert_eq!(of(&|_| true, stored).as_deref(), Some("Hotline"));
+  }
+
+  mod followed {
+    use super::*;
+    use crate::store::MemoryStore;
+
+    #[test]
+    fn following_the_writes_gives_the_entries_a_whole_read_gives() {
+      let store = MemoryStore::new();
+      let before = [
+        text(1, ME, 100, "ship it", &[], None),
+        text(2, ANNA, 110, "@me look", &[ME], None),
+        text(3, BEN, 120, "a bot post", &[], None),
+      ];
+      write(&store, &before);
+      let mut relevant = RelevantMessages::of(user(ME), Some(0), &before);
+
+      let after = [
+        reaction(4, ANNA, 130, 1, "🎉", true),
+        reply(5, BEN, 140, "agreed", &[], 1),
+        text(6, BEN, 150, "another bot post", &[], None),
+        // An edit takes the mention out: the entry goes.
+        text(2, ANNA, 160, "look", &[], None),
+      ];
+      write(&store, &after);
+      let written: Vec<Written> = after
+        .iter()
+        .map(|message| Written::Message(message.client_message_id))
+        .collect();
+      assert!(
+        relevant
+          .follow(user(ME), &store, id_from_raw(50), &written)
+          .unwrap()
+      );
+
+      let all = store
+        .messages(id_from_raw(50), crate::store::MessageFilter::All)
+        .unwrap();
+      let reads = ConversationReads {
+        is_caught_up: true,
+        ..ConversationReads::default()
+      };
+      assert_eq!(
+        sorted(followed_items(&reads, &relevant)),
+        sorted(conversation_items(
+          user(ME),
+          None,
+          &|_| false,
+          &reads,
+          id_from_raw(50),
+          &all
+        )),
+      );
+      assert_eq!(
+        kinds(&ActivityFeed::from_items(followed_items(&reads, &relevant))).len(),
+        2
+      );
+    }
+
+    #[test]
+    fn ordinary_posts_of_others_are_not_kept_but_count_for_the_read_position() {
+      let posts: Vec<StoredMessage> = (1..=50)
+        .map(|raw| text(raw, BEN, i64::from(raw), "a bot post", &[], None))
+        .collect();
+      let relevant = RelevantMessages::of(user(ME), Some(0), &posts);
+      assert!(relevant.messages.is_empty());
+      assert_eq!(relevant.maybe_newest_top_level, Some(message_id(50)));
+    }
+
+    #[test]
+    fn a_conversation_whose_messages_all_went_is_read_whole_again() {
+      let store = MemoryStore::new();
+      let mut relevant = RelevantMessages::of(user(ME), Some(0), &[]);
+      assert!(
+        !relevant
+          .follow(user(ME), &store, id_from_raw(50), &[Written::Conversation])
+          .unwrap()
+      );
+    }
+
+    fn write(store: &MemoryStore, messages: &[StoredMessage]) {
+      for message in messages {
+        store.upsert_message(message).unwrap();
+      }
+    }
+
+    fn followed_items(reads: &ConversationReads, relevant: &RelevantMessages) -> Vec<ActivityItem> {
+      items_of(
+        user(ME),
+        None,
+        &|_| false,
+        reads,
+        id_from_raw(50),
+        &relevant.in_order(),
+        relevant.maybe_newest_top_level,
+      )
+    }
+
+    fn sorted(mut items: Vec<ActivityItem>) -> Vec<ActivityItem> {
+      items.sort_by(|a, b| a.id.cmp(&b.id));
+      items
+    }
   }
 
   /// The feed with the conversation read through message `read_through` (0: nothing read).
