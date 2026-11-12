@@ -542,7 +542,7 @@ impl Stack {
     if let Some(port) = maybe_fallback_port {
       envs.push((
         "TEAMCRAFT_CALLS__SFU_FALLBACK_URL".into(),
-        format!("ws://127.0.0.1:{port}/call/fallback"),
+        format!("ws://127.0.0.1:{port}/call/ws"),
       ));
     }
     if settings.has_calls {

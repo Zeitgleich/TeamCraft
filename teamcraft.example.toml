@@ -726,7 +726,7 @@ is_enabled = true
 # proxy", has the route for Caddy and nginx and the order of the rollout).
 # sfu_fallback_enabled = true
 # Its URL; the default is sfu_url's host on port 443.
-# sfu_fallback_url = "wss://sfu.example.com/call/fallback"
+# sfu_fallback_url = "wss://sfu.example.com/call/ws"
 # `iss` of join tokens; the SFU is configured with the same value.
 # issuer = "https://chat.example.com"
 # signing_key_path = "/etc/teamcraft/call-signing.pem"
