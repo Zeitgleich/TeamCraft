@@ -37,6 +37,8 @@ const FIRST_PULL_TIMEOUT_MS: u64 = 500;
 /// A hardware H.264 encoder for one layer.
 pub struct GstreamerEncoder {
   pipeline: gst::Pipeline,
+  /// The encoder element, whose `bitrate` changes in place where it allows that (#1781).
+  encoder: gst::Element,
   source: AppSrc,
   sink: AppSink,
   resolution: VideoResolution,
@@ -176,6 +178,9 @@ impl GstreamerEncoder {
       .by_name("sink")
       .and_then(|element| element.downcast::<AppSink>().ok())
       .ok_or_else(|| VideoCodecError::Codec("no appsink".into()))?;
+    let encoder = pipeline
+      .by_name("encoder")
+      .ok_or_else(|| VideoCodecError::Codec("no encoder element".into()))?;
     let framerate = i32::from(layer.max_framerate.max(1));
     let info = gstreamer_video::VideoInfo::builder(
       gstreamer_video::VideoFormat::Nv12,
@@ -199,6 +204,7 @@ impl GstreamerEncoder {
     pipeline.set_state(gst::State::Playing).map_err(gstreamer_error)?;
     Ok(Self {
       pipeline,
+      encoder,
       source,
       sink,
       resolution: VideoResolution {
@@ -362,6 +368,28 @@ impl VideoEncoder for GstreamerEncoder {
     self.govern(timestamp_us, data.len(), is_keyframe);
     Ok(Some(EncodedPicture { is_keyframe, data }))
   }
+
+  /// Sets the element's `bitrate` (kbit/s) while it plays, where the element allows that
+  /// (`GST_PARAM_MUTABLE_PLAYING`: `vtenc_h264` sets VideoToolbox's `AverageBitRate`,
+  /// `mfh264enc` Media Foundation's `CODECAPI_AVEncCommonMeanBitRate`, `vah264enc` reconfigures
+  /// its rate control); V4L2's `extra-controls` don't, and are rebuilt. The frame rate stays in
+  /// the caps: the encoders follow the frames' timestamps, so fewer frames get the bitrate's
+  /// share each (a screen's pictures keep their quality at a lower rate, as #1733 wants).
+  fn set_rate(&mut self, bitrate_bps: u32, _framerate: u8) -> Result<bool, VideoCodecError> {
+    let Some(property) = self.encoder.find_property("bitrate") else {
+      return Ok(false);
+    };
+    let is_live = property.flags().contains(gst::PARAM_FLAG_MUTABLE_PLAYING);
+    if !is_live || property.value_type() != u32::static_type() {
+      return Ok(false);
+    }
+    self.encoder.set_property("bitrate", (bitrate_bps / 1000).max(1));
+    if let Some(governed) = &mut self.maybe_governed {
+      governed.layer.max_bitrate_bps = bitrate_bps;
+      governed.governor.set_target(bitrate_bps);
+    }
+    Ok(true)
+  }
 }
 
 impl Drop for GstreamerEncoder {
@@ -488,7 +516,7 @@ fn pipeline_description(
   // GStreamer reads the number the same in every locale.
   let quality = maybe_quality.map_or(String::new(), |quality| format!(" quality={quality:.3}"));
   format!(
-    "appsrc name=source is-live=true format=time ! {} {}{quality} ! \
+    "appsrc name=source is-live=true format=time ! {} name=encoder {}{quality} ! \
      video/x-h264,profile={} ! h264parse config-interval=-1 ! \
      video/x-h264,stream-format=byte-stream,alignment=au ! appsink name=sink sync=false",
     element.name,
@@ -613,6 +641,12 @@ impl QualityGovernor {
     let is_change = (quality - self.quality).abs() >= MIN_QUALITY_STEP
       || (quality == SCREEN_QUALITY && quality > self.quality);
     is_change.then_some(quality)
+  }
+
+  /// The layer's bitrate is `target_bps` from now on: it is measured afresh against it.
+  fn set_target(&mut self, target_bps: u32) {
+    self.target_bps = f64::from(target_bps.max(1));
+    self.measured.clear();
   }
 
   /// The encoder encodes at `quality` from now on: it is measured afresh.
@@ -824,14 +858,14 @@ mod tests {
     gst::init().unwrap();
     let layer = simulcast_layers(HD, 30, 1_500_000, 1).remove(0);
     let description = format!(
-      "appsrc name=source is-live=true format=time ! identity name=slow sleep-time={sleep_us} ! \
+      "appsrc name=source is-live=true format=time ! identity name=encoder sleep-time={sleep_us} ! \
        appsink name=sink sync=false"
     );
     GstreamerEncoder::build(&description, "identity", &layer, VideoContent::Camera).unwrap()
   }
 
   fn set_sleep(encoder: &GstreamerEncoder, sleep_us: u32) {
-    let slow = encoder.pipeline.by_name("slow").unwrap();
+    let slow = encoder.pipeline.by_name("encoder").unwrap();
     slow.set_property("sleep-time", sleep_us);
   }
 
@@ -1245,11 +1279,32 @@ mod tests {
     let layer = simulcast_layers(HD, 30, 1_659_000, 1).remove(0);
     let governed = pipeline_description(&element, &layer, VideoContent::Screen, Some(0.125));
     assert!(
-      governed.contains("vtenc_h264 bitrate=1659 quality=0.125 !"),
+      governed.contains("vtenc_h264 name=encoder bitrate=1659 quality=0.125 !"),
       "{governed}"
     );
     let plain = pipeline_description(&element, &layer, VideoContent::Camera, None);
     assert!(!plain.contains("quality"), "{plain}");
+  }
+
+  /// #1781: an element whose `bitrate` changes while it plays takes a new rate in place (x264,
+  /// where installed, stands in for the hardware elements: the same property); one without is
+  /// rebuilt.
+  #[test]
+  fn a_bitrate_the_element_takes_while_playing_changes_in_place() {
+    gst::init().unwrap();
+    if gst::ElementFactory::find("x264enc").is_some() {
+      let layer = simulcast_layers(HD, 30, 1_500_000, 1).remove(0);
+      let description = "appsrc name=source is-live=true format=time ! x264enc name=encoder bitrate=1500 ! \
+                         appsink name=sink sync=false";
+      let mut encoder =
+        GstreamerEncoder::build(description, "x264enc", &layer, VideoContent::Camera).unwrap();
+      assert!(encoder.set_rate(400_000, 30).unwrap());
+      assert_eq!(encoder.encoder.property::<u32>("bitrate"), 400);
+    }
+    assert!(
+      !slow_pipeline(0).set_rate(400_000, 30).unwrap(),
+      "identity has no bitrate"
+    );
   }
 
   #[test]
