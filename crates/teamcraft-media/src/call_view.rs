@@ -449,8 +449,11 @@ mod transport_tests {
     let is_stalled = |view: &CallView| view.maybe_active.as_ref().unwrap().is_own_capture_stalled;
     let stalled = CallEngineEvent::CaptureStalled {
       kind: VideoTrackKind::Screen,
-      window: crate::capture_health::BufferCounts {
-        unmapped: 150,
+      window: crate::capture_health::StallWindow {
+        buffers: crate::capture_health::BufferCounts {
+          unmapped: 150,
+          ..Default::default()
+        },
         ..Default::default()
       },
     };
@@ -465,11 +468,11 @@ mod transport_tests {
     // Camera and screen stalled: the hint stays until both give pictures again.
     let camera = CallEngineEvent::CaptureStalled {
       kind: VideoTrackKind::Camera,
-      window: crate::capture_health::BufferCounts::default(),
+      window: crate::capture_health::StallWindow::default(),
     };
     let screen = CallEngineEvent::CaptureStalled {
       kind: VideoTrackKind::Screen,
-      window: crate::capture_health::BufferCounts::default(),
+      window: crate::capture_health::StallWindow::default(),
     };
     assert!(roster.apply(&mut view, camera));
     assert!(!roster.apply(&mut view, screen));

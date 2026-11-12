@@ -190,3 +190,73 @@ meetings-joined-by-link = { $name } ist mit dem Meeting-Link beigetreten
 meetings-remove-joined = Entfernen
 meetings-visit-from-outside = Ein Link möchte eine Besprechung öffnen. Bist du noch nicht dabei, bittet das Öffnen die Hosts, dich einzulassen.
 meetings-visit-open = Besprechung öffnen
+
+# Meetings-Seite: Ansichten, Jetzt / Als Nächstes, Antworten, Zeilen (#956)
+meetings-views = Meetings anzeigen
+meetings-tab-upcoming = Anstehend
+meetings-tab-hosted = Von mir
+meetings-tab-invited = Eingeladen
+meetings-tab-past = Vergangen
+meetings-hosted-empty-title = Nichts, was du leitest
+meetings-hosted-empty = Meetings, die du organisierst oder mitleitest, erscheinen hier.
+meetings-invited-empty-title = Keine Einladungen
+meetings-invited-empty = Meetings, zu denen andere dich einladen, erscheinen hier.
+meetings-past-empty-title = Keine vergangenen Meetings
+meetings-past-empty = Meetings der letzten 30 Tage erscheinen hier, sobald sie vorbei sind.
+meetings-show-more = Mehr anzeigen
+meetings-reach = Meetings bis { $date }
+meetings-loading = Meetings werden geladen …
+meetings-hero-now = Jetzt
+meetings-hero-next = Als Nächstes
+meetings-hero-running = Läuft · { $time }
+meetings-hero-soon = { $count ->
+    [one] Beginnt in 1 Minute · { $time }
+   *[other] Beginnt in { $count } Minuten · { $time }
+}
+meetings-details = Details
+meetings-more = Weitere Aktionen
+meetings-needs-answer = Wartet auf deine Antwort
+meetings-answer-covers = { $count ->
+    [one] Deine Antwort gilt auch für 1 weiteren Termin der Serie
+   *[other] Deine Antwort gilt auch für { $count } weitere Termine der Serie
+}
+meetings-series-daily = { $count ->
+    [one] Jeden Tag
+   *[other] Alle { $count } Tage
+}
+meetings-series-workdays = { $count ->
+    [one] Jeden Werktag
+   *[other] Alle { $count } Tage an Werktagen
+}
+meetings-series-weekly = { $count ->
+    [one] Jede Woche
+   *[other] Alle { $count } Wochen
+}
+meetings-series-monthly = { $count ->
+    [one] Jeden Monat
+   *[other] Alle { $count } Monate
+}
+meetings-state-soon = { $count ->
+    [one] In 1 Min.
+   *[other] In { $count } Min.
+}
+meetings-state-ended = Beendet
+meetings-state-waiting = { $count ->
+    [one] 1 wartet
+   *[other] { $count } warten
+}
+meetings-rsvp-state-accepted = Zugesagt
+meetings-rsvp-state-tentative = Vielleicht
+meetings-rsvp-state-declined = Abgelehnt
+meetings-rsvp-state-none = Antworten
+meetings-link-copied-toast = Meeting-Link kopiert
+meetings-you-host = Du leitest
+meetings-people = { $count ->
+    [one] 1 Person
+   *[other] { $count } Personen
+}
+meetings-duration-minutes = { $minutes } Min.
+meetings-duration-hours = { $hours } Std.
+meetings-duration-both = { $hours } Std. { $minutes } Min.
+meetings-yesterday = Gestern
+meetings-when = Wann

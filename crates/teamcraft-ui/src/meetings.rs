@@ -37,6 +37,10 @@ pub const STATUS_CONFLICT: u16 = 409;
 /// Meetings that ended less than this long ago are still listed.
 const LIST_LOOKBACK_MS: i64 = 60 * 60_000;
 const LIST_LIMIT: u32 = 100;
+/// How far back the Past view of the meetings page reaches (#956).
+const PAST_LOOKBACK_MS: i64 = 30 * 24 * 60 * 60_000;
+/// The server's own maximum: a month of daily series still fits.
+const PAST_LIST_LIMIT: u32 = 500;
 const MS_PER_MINUTE: i64 = 60_000;
 /// How long a meeting may be scheduled for in one go.
 const MAX_DURATION_MINUTES: u32 = 24 * 60;
@@ -98,6 +102,19 @@ impl MeetingsClient {
       meetings,
       maybe_clock,
     })
+  }
+
+  /// The caller's meetings of the last [`PAST_LOOKBACK_MS`] up to `now`, for the Past view; those
+  /// still running are in the list too (the view leaves them out).
+  pub async fn list_past(&self, now: TimestampMs) -> Result<Vec<MeetingResponse>, MeetingError> {
+    let path = format!(
+      "/api/v1/meetings?from={}&to={now}&limit={PAST_LIST_LIMIT}",
+      now - PAST_LOOKBACK_MS
+    );
+    let response = self
+      .call::<ListMeetingsResponse>(ApiMethod::Get, &path, None)
+      .await?;
+    Ok(response.meetings)
   }
 
   /// Whose public holidays the caller's series skip (#1441).
@@ -371,6 +388,8 @@ pub struct MeetingsHub {
   /// Why the last call failed, for a visible message.
   pub maybe_error: RwSignal<Option<String>>,
   pub is_loaded: RwSignal<bool>,
+  /// The meetings of the Past view, loaded when it is first shown (`None` until then).
+  pub maybe_past: RwSignal<Option<Vec<MeetingResponse>>>,
   /// The meeting just scheduled or started, for the dialog that hands out its link.
   pub maybe_created: RwSignal<Option<MeetingResponse>>,
   /// The server's clock as of the last list (meeting reminders run on it).
@@ -397,6 +416,7 @@ impl MeetingsHub {
       cohosted: RwSignal::new(HashSet::new()),
       maybe_error: RwSignal::new(None),
       is_loaded: RwSignal::new(false),
+      maybe_past: RwSignal::new(None),
       maybe_created: RwSignal::new(None),
       clock: RwSignal::new(ServerClock::default()),
       verified_links: RwSignal::new(HashMap::new()),
@@ -504,6 +524,20 @@ impl MeetingsHub {
       },
       Err(error) => {
         tracing::warn!(%error, "could not load the meetings");
+        self.maybe_error.set_if_alive(Some(error.to_string()));
+      },
+    }
+  }
+
+  /// Reloads the meetings of the Past view.
+  pub async fn refresh_past(&self, now: TimestampMs) {
+    match self.client().list_past(now).await {
+      Ok(meetings) => {
+        self.maybe_error.set_if_alive(None);
+        self.maybe_past.set_if_alive(Some(meetings));
+      },
+      Err(error) => {
+        tracing::warn!(%error, "could not load the past meetings");
         self.maybe_error.set_if_alive(Some(error.to_string()));
       },
     }
