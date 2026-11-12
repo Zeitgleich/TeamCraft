@@ -242,6 +242,8 @@ final class AppModel {
   @ObservationIgnored private var maybeCore: TeamCraft?
   @ObservationIgnored private var maybeSettingsSync: SettingsSyncer?
   @ObservationIgnored private var settingsDefaultsObserver: NSObjectProtocol?
+  /// When pictures that failed during an outage are asked for again (issue #1617).
+  let pictureRetries = PictureRetries()
   /// Pictures of spaces on disk, by version (AppModel+SpacePictures.swift).
   @ObservationIgnored let spacePictureStore = SpacePictureStore(
     directory: FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -1235,6 +1237,8 @@ final class AppModel {
     setConnection(maybeCore?.connectionState())
     if connection?.isConnected == true && !wasConnected {
       Task { [weak self] in await self?.pushUpkeep() }
+      // The server is back: pictures that failed meanwhile ask now.
+      pictureRetries.outageEnded()
     }
     Task { [weak self] in await self?.refreshLinkRequests() }
     Task { [weak self] in
@@ -1521,9 +1525,11 @@ final class AppModel {
   /// The device's network path changed (Wi-Fi to cellular, a VPN, airplane mode off): the grace
   /// period follows it, and on a change after the first path the core checks its connection now
   /// instead of waiting for its own detection and backoff.
-  func networkPathChanged(isFirstPath: Bool) {
+  func networkPathChanged(isFirstPath: Bool, cameOnline: Bool) {
     observeConnection()
     if !isFirstPath { networkChanged() }
+    // The device is back online: pictures that failed meanwhile ask now (issue #1617).
+    if !isFirstPath, cameOnline { pictureRetries.outageEnded() }
   }
 
   private func setConnection(_ maybeConnection: ConnectionState?) {

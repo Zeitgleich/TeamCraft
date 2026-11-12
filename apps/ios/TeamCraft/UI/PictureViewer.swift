@@ -56,6 +56,8 @@ struct PictureViewer: View {
       await model.load(app: app)
     }
     .task(id: app.changeCount) { await model.refresh(app: app) }
+    // A shared retry round ran: an original that failed during an outage is asked for again (#1617).
+    .onChange(of: app.pictureRetries.round) { Task { await model.refresh(app: app) } }
     .task(id: model.isDownloading) {
       // Download progress doesn't always come as a change: read it while it runs, on screen only.
       while model.isDownloading {
