@@ -52,17 +52,112 @@ final class ChatModelTests: XCTestCase {
     XCTAssertEqual(sections[0].conversations.map(\.id), ["4"])
   }
 
-  func testDirectSectionsFavoritesFirstAndFiltered() {
+  /// #1786: the Chats tab is one list without a header, the favorites pinned on top.
+  func testDirectSectionsAreOneListWithFavoritesPinnedAndFiltered() {
     let list = [
       item("1", "Sam", kind: .direct),
       item("2", "Sam, Alex", kind: .group, favorite: true),
       item("3", "general", space: "Team A"),
       item("4", "Kim", kind: .direct),
     ]
-    let sections = directSections(list)
-    XCTAssertEqual(sections.map(\.title), [.favorites, .directMessages])
-    XCTAssertEqual(sections[1].conversations.map(\.name), ["Kim", "Sam"])
+    let sections = directSections(list + [list[0]])
+    XCTAssertEqual(sections.map(\.title), [.chats])
+    XCTAssertTrue(sections[0].title.isHeaderless)
+    XCTAssertNil(sections[0].collapseKey)
+    XCTAssertEqual(sections[0].conversations.map(\.name), ["Sam, Alex", "Kim", "Sam"])
     XCTAssertEqual(directSections(list, filter: " sAm").flatMap(\.conversations).map(\.id), ["2", "1"])
+  }
+
+  /// #1786: a favorite stays on top however old its newest message; each part by recency.
+  func testFavoritesArePinnedAboveNewerConversations() {
+    let at = { (seconds: TimeInterval) in Date(timeIntervalSince1970: seconds) }
+    let list = [
+      item("1", "Amy", kind: .direct),
+      item("2", "Bob", kind: .direct, favorite: true),
+      item("3", "Cid", kind: .direct, unread: 1),
+      item("4", "Dan", kind: .direct, favorite: true),
+    ]
+    let activity = ["1": at(40), "2": at(10), "3": at(30), "4": at(20)]
+    XCTAssertEqual(directSections(list, lastActivity: activity).flatMap(\.conversations).map(\.name), ["Dan", "Bob", "Amy", "Cid"])
+    XCTAssertEqual(
+      directSections(list, lastActivity: activity, chip: .unread).flatMap(\.conversations).map(\.name), ["Cid"])
+  }
+
+  /// #1786: the one search field finds conversations by name, DMs and channels, above the messages.
+  func testTheSearchFindsConversationsByName() {
+    let at = { (seconds: TimeInterval) in Date(timeIntervalSince1970: seconds) }
+    let list = [
+      item("1", "Design", kind: .direct),
+      item("2", "design-review", space: "Team A"),
+      item("3", "old-design", space: "Team A"),
+      item("4", "general", space: "Team A", favorite: true),
+      item("5", "designers", space: "Team B", favorite: true),
+    ]
+    let archived = ConversationItem(
+      id: "6", maybeSpaceId: "Team A", maybeSpaceName: "Team A", kind: .public, name: "design-2019", topic: "",
+      unreadCount: 0, mentionCount: 0, isFavorite: false, isMuted: false, canPost: false, isArchived: true)
+    let activity = ["1": at(10), "2": at(30), "3": at(20)]
+    XCTAssertEqual(
+      nameMatches(list + [archived, list[0]], query: " DESIGN", lastActivity: activity).map(\.id), ["5", "2", "3", "1"])
+    XCTAssertEqual(nameMatches(list + [archived], query: "2019", listsArchived: true).map(\.id), ["6"])
+    XCTAssertTrue(nameMatches(list, query: "  ").isEmpty)
+  }
+
+  /// #1786: "All" is a chip of its own and comes first; Unread counts the conversations it lists.
+  func testChipsStartWithAllAndUnreadCountsItsConversations() {
+    XCTAssertEqual(HomeFilter.chips, [.all, .unread, .people, .groups])
+    XCTAssertEqual(HomeFilter.listChips, [.all, .unread, .people, .groups, .channels])
+    let list = [
+      item("1", "Amy", kind: .direct, unread: 3),
+      item("2", "Bob", kind: .direct, unread: 4, muted: true),
+      item("3", "Cid", kind: .direct, unread: 1, mentions: 1, muted: true),
+      item("4", "general", space: "Team A", unread: 2),
+      item("5", "release", space: "Team A", mentions: 1),
+    ]
+    XCTAssertEqual(HomeFilter.unreadCount(list + [list[0]], isList: false), 2)
+    XCTAssertEqual(HomeFilter.unreadCount(list, isList: true), 4)
+  }
+
+  /// #1786: Chats first, then Channels, Meetings and Activity; the list layout has no Channels tab.
+  func testTheBarStartsWithChatsAndTheListLayoutHasNoChannelsTab() {
+    XCTAssertEqual(ChatTab.barItems(isList: false), [.chats, .channels, .meetings, .activity])
+    XCTAssertEqual(ChatTab.barItems(isList: true), [.chats, .meetings, .activity])
+    XCTAssertEqual(ChatTab.channels.shown(isList: true), .chats)
+    XCTAssertEqual(ChatTab.meetings.shown(isList: true), .meetings)
+    XCTAssertEqual(ChatTab.channels.shown(isList: false), .channels)
+  }
+
+  /// #1786: a conversation opened from elsewhere lands on a tab that lists it.
+  func testAnOpenedConversationLandsOnATabThatListsIt() {
+    let dm = item("1", "Amy", kind: .direct)
+    let channel = item("2", "general", space: "Team A")
+    XCTAssertEqual(ChatTab.chats.opening(dm, isList: false), .chats)
+    XCTAssertEqual(ChatTab.chats.opening(channel, isList: false), .channels)
+    XCTAssertEqual(ChatTab.chats.opening(channel, isList: true), .chats)
+    // Channels lists the DMs with something new, Activity both: they stay.
+    XCTAssertEqual(ChatTab.channels.opening(dm, isList: false), .channels)
+    XCTAssertEqual(ChatTab.activity.opening(channel, isList: false), .activity)
+    XCTAssertEqual(ChatTab.meetings.opening(dm, isList: false), .chats)
+    XCTAssertEqual(ChatTab.meetings.opening(channel, isList: false), .channels)
+    XCTAssertEqual(ChatTab.meetings.opening(channel, isList: true), .chats)
+  }
+
+  /// #1786: what each bar item counts.
+  func testTheBarMarksCountWhatIsAddressedToTheUser() {
+    let list = [
+      item("1", "Amy", kind: .direct, unread: 3),
+      item("2", "general", space: "Team A", unread: 5),
+      item("3", "release", space: "Team A", unread: 1, mentions: 2),
+    ]
+    func mark(_ tab: ChatTab, isList: Bool = false) -> [Int] {
+      let result = tab.mark(list, isList: isList, joinRequests: 1)
+      return [result.count, result.hasNew ? 1 : 0]
+    }
+    XCTAssertEqual(mark(.chats), [3, 0])
+    XCTAssertEqual(mark(.channels), [2, 1])
+    XCTAssertEqual(mark(.meetings), [0, 0])
+    XCTAssertEqual(mark(.activity), [3, 0])
+    XCTAssertEqual(mark(.chats, isList: true), [3, 1])
   }
 
   /// #1488: Home has the DMs with something new, then the favorites, then each space; the DMs tab
@@ -118,7 +213,8 @@ final class ChatModelTests: XCTestCase {
     XCTAssertEqual(result.map(\.name), ["quiet", "release", "Bob", "Amy"])
   }
 
-  /// #1151: the list layout holds the DMs and the channels of all spaces, favorites first.
+  /// #1151: the list layout holds the DMs and the channels of all spaces in one list, favorites
+  /// pinned on top (#1786).
   func testTheListHoldsDmsAndChannelsOfAllSpacesByRecency() {
     let list = [
       item("1", "Amy", kind: .direct),
@@ -128,8 +224,9 @@ final class ChatModelTests: XCTestCase {
     ]
     let at = { (seconds: TimeInterval) in Date(timeIntervalSince1970: seconds) }
     let sections = listSections(list + [list[0]], lastActivity: ["1": at(20), "2": at(30), "3": at(10)])
-    XCTAssertEqual(sections.map(\.title), [.favorites, .everything])
-    XCTAssertEqual(sections[1].conversations.map(\.id), ["2", "1", "3"])
+    XCTAssertEqual(sections.map(\.title), [.everything])
+    XCTAssertTrue(sections[0].title.isHeaderless)
+    XCTAssertEqual(sections[0].conversations.map(\.id), ["4", "2", "1", "3"])
     XCTAssertEqual(listSections(list, chip: .channels).flatMap(\.conversations).count, 3)
     XCTAssertEqual(listSections(list, chip: .people).flatMap(\.conversations).map(\.id), ["1"])
   }

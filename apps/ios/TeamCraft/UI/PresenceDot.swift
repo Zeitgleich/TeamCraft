@@ -6,8 +6,20 @@ import SwiftUI
 struct PresenceDot: View {
   let presence: Presence
   var size: CGFloat = 10
+  /// A ring in the colour behind the avatar it sits on (#1786), so the dot stands off the avatar; the
+  /// hollow offline ring shows that colour inside, so the states differ in shape, not only in hue.
+  var maybeRing: Color? = nil
 
   var body: some View {
+    dot
+      .background {
+        if let ring = maybeRing {
+          Circle().fill(ring).padding(-max(2, size * 0.15))
+        }
+      }
+  }
+
+  private var dot: some View {
     ZStack {
       switch presence {
       case .offline:

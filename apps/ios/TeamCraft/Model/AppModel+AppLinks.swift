@@ -74,8 +74,9 @@ extension AppModel {
     isAskingAboutMeetingLink = false
   }
 
+  /// The chats screen selects its Meetings tab (#1786).
   func showMeetingsForAppLink() {
     isAskingAboutMeetingLink = false
-    isShowingMeetingsFromLink = true
+    isMeetingsTabAsked = true
   }
 }

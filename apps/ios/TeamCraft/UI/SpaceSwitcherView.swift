@@ -22,8 +22,9 @@ struct SpaceMark: View {
   }
 }
 
-/// Home's title in the spaces layout (#1526): the selected space with a chevron; a tap opens the
-/// switcher. A dot on the chevron says another space has something new, so switching hides nothing.
+/// The chats screen's header in the spaces layout (#1526, #1786): at the leading edge, the selected
+/// space's mark and name with a chevron; a tap opens the switcher. A dot on the chevron says another
+/// space has something new, so switching hides nothing.
 struct SpaceSwitcherTitle: View {
   let space: HomeSpace
   let hasNewElsewhere: Bool
@@ -31,20 +32,22 @@ struct SpaceSwitcherTitle: View {
 
   var body: some View {
     Button(action: onTap) {
-      HStack(spacing: 6) {
-        SpaceMark(spaceId: space.id, name: space.name, maybeImageVersion: space.maybeImageVersion, size: 24)
+      HStack(spacing: 8) {
+        SpaceMark(spaceId: space.id, name: space.name, maybeImageVersion: space.maybeImageVersion, size: 32)
         Text(space.name)
-          .font(.app(.headline))
+          .font(.app(.title3).weight(.bold))
+          .foregroundStyle(Theme.text)
           .lineLimit(1)
         Image(systemName: "chevron.down")
-          .font(.app(.caption).weight(.bold))
+          .font(.app(.footnote).weight(.bold))
           .foregroundStyle(.secondary)
           .overlay(alignment: .topTrailing) {
             if hasNewElsewhere {
-              Circle().fill(Theme.accent).frame(width: 7, height: 7).offset(x: 4, y: -3)
+              Circle().fill(Theme.accent).frame(width: 8, height: 8).offset(x: 5, y: -4)
             }
           }
       }
+      .frame(minHeight: 44)
       .contentShape(Rectangle())
     }
     .buttonStyle(.plain)

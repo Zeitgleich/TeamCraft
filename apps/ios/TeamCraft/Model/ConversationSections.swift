@@ -6,8 +6,10 @@ enum SectionTitle: Hashable {
   case space(String)
   case channels
   case directMessages
-  /// The list layout's conversations that are not favorites (#1151).
+  /// The list layout's one list (#1151), favorites pinned on top (#1786).
   case everything
+  /// The Chats tab's one list of DMs (#1786), favorites pinned on top.
+  case chats
   /// Archived channels, for guests, who have no channel browser to find them in.
   case archived
   /// Home's DMs with something new, on top of its list (#1488).
@@ -16,6 +18,15 @@ enum SectionTitle: Hashable {
   case spaceChannels(spaceId: String)
   /// The Activity tab's one list (shown without a header).
   case activity
+
+  /// A tab's one list, shown without a header (#1786): Chats, the list layout's mixed list and
+  /// Activity.
+  var isHeaderless: Bool {
+    switch self {
+    case .chats, .everything, .activity: return true
+    default: return false
+    }
+  }
 }
 
 struct ConversationSection: Identifiable {
@@ -47,7 +58,7 @@ struct ConversationSection: Identifiable {
       if let spaceId { return "space:\(spaceId)" }
       return "space-name:\(name)"
     case .spaceChannels(let spaceId): return "space:\(spaceId)"
-    case .everything, .activity: return nil
+    case .chats, .everything, .activity: return nil
     }
   }
 
@@ -91,20 +102,59 @@ enum ChatListGrouping: String, CaseIterable {
   static let key = "chat_list_grouping"
 }
 
-/// The bottom navigation of the chats screen (#1488, as on Android): Home (the DMs with something
-/// new and the channels by space), the DMs, and Activity (what waits for the user).
+/// The floating bottom bar of the chats screen (#1786): Chats (the DMs, the tab the app starts on),
+/// Channels (the selected space's channels, Home before), Meetings and Activity (what waits for the
+/// user). iOS only for now; Android keeps Home, DMs and Activity (#1488).
 enum ChatTab: Hashable, CaseIterable {
-  case home, direct, activity
+  case chats, channels, meetings, activity
+
+  /// The bar's items: the list layout has every conversation on Chats and no Channels tab.
+  static func barItems(isList: Bool) -> [ChatTab] {
+    isList ? allCases.filter { $0 != .channels } : allCases
+  }
+
+  /// The tab on screen for the one picked: the list layout shows its channels on Chats.
+  func shown(isList: Bool) -> ChatTab {
+    isList && self == .channels ? .chats : self
+  }
+
+  /// The tab a conversation opened from elsewhere (a notification, a link, a meeting) lands on: one
+  /// that lists it. Channels lists the DMs with something new too and Activity both, so a DM opened
+  /// from there stays highlighted there.
+  func opening(_ item: ConversationItem, isList: Bool) -> ChatTab {
+    let tab = shown(isList: isList)
+    switch tab {
+    case .chats where !isList && !item.isDirect: return .channels
+    case .meetings: return isList || item.isDirect ? .chats : .channels
+    default: return tab
+    }
+  }
+
+  /// What the bar shows on the item: a number for what is addressed to the user (mentions, DMs,
+  /// requests to join), `hasNew` (a dot) for new channel messages. Channels and Activity count only
+  /// mentions; Chats every unread DM, and in the list layout the channels' mentions too. Meetings
+  /// has no mark.
+  func mark(_ conversations: [ConversationItem], isList: Bool, joinRequests: Int) -> (count: Int, hasNew: Bool) {
+    let direct = TabBadge(conversations.filter(\.isDirect))
+    let channels = TabBadge(conversations.filter { !$0.isDirect })
+    switch shown(isList: isList) {
+    case .chats where isList: return (max(direct.mentions + channels.mentions, direct.unread), channels.unread > 0)
+    case .chats: return (max(direct.mentions, direct.unread), false)
+    case .channels: return (channels.mentions, channels.unread > 0)
+    case .meetings: return (0, false)
+    case .activity: return (direct.mentions + channels.mentions + joinRequests, false)
+    }
+  }
 }
 
-/// The filter chips of Home (as in Element): one at a time, `all` is none selected.
+/// The filter chips of the Chats tab (as in Element): one at a time, "All" selected by default.
 enum HomeFilter: Hashable, CaseIterable {
   case all, unread, people, groups, channels
 
-  /// The chips, in display order.
-  static let chips: [HomeFilter] = [.unread, .people, .groups]
+  /// The chips, in display order (#1786: "All" is a chip of its own).
+  static let chips: [HomeFilter] = [.all, .unread, .people, .groups]
   /// The chips of the list layout, where channels are in the list too.
-  static let listChips: [HomeFilter] = [.unread, .people, .groups, .channels]
+  static let listChips: [HomeFilter] = [.all, .unread, .people, .groups, .channels]
 
   func matches(_ item: ConversationItem) -> Bool {
     switch self {
@@ -114,6 +164,15 @@ enum HomeFilter: Hashable, CaseIterable {
     case .groups: return item.kind == .group
     case .channels: return !item.isDirect
     }
+  }
+
+  /// The number on the Unread chip (#1786): the conversations of the Chats tab it lets through, the
+  /// DMs or in the list layout every listed conversation, each counted once.
+  static func unreadCount(_ conversations: [ConversationItem], isList: Bool) -> Int {
+    var seen = Set<String>()
+    return conversations.filter {
+      seen.insert($0.id).inserted && ($0.isDirect || (isList && !$0.isArchived)) && unread.matches($0)
+    }.count
   }
 }
 
@@ -213,65 +272,70 @@ func activityConversations(_ conversations: [ConversationItem], lastActivity: [S
     }
 }
 
-/// The DMs tab: favorites, then the rest, each the most recent first (`lastActivity`: newest message
-/// per conversation; by name without one). Only conversations `chip` lets through whose names
-/// contain `filter` (any case) are kept. Empty sections are left out.
+/// The Chats tab (#1786): one list of the DMs, the favorites pinned on top, then the rest, each part
+/// the most recent first (`lastActivity`: newest message per conversation; by name without one). Only
+/// conversations `chip` lets through whose names contain `filter` (any case) are kept. No section
+/// without rows.
 func directSections(
   _ conversations: [ConversationItem], lastActivity: [String: Date] = [:], filter: String = "",
   chip: HomeFilter = .all
 ) -> [ConversationSection] {
-  let needle = filter.trimmingCharacters(in: .whitespaces)
-  func byRecency(_ lhs: ConversationItem, _ rhs: ConversationItem) -> Bool {
-    let left = lastActivity[lhs.id] ?? .distantPast
-    let right = lastActivity[rhs.id] ?? .distantPast
-    return left == right ? byName(lhs, rhs) : left > right
-  }
-  var seen = Set<String>()
-  let direct = conversations
-    // Each conversation is one row, however often a caller hands it over.
-    .filter { seen.insert($0.id).inserted }
-    .filter {
-      $0.isDirect && chip.matches($0) && (needle.isEmpty || $0.listName.localizedCaseInsensitiveContains(needle))
-    }
-    .sorted(by: byRecency)
-  let favorites = direct.filter(\.isFavorite)
-  let rest = direct.filter { !$0.isFavorite }
-  var sections: [ConversationSection] = []
-  if !favorites.isEmpty { sections.append(ConversationSection(title: .favorites, conversations: favorites)) }
-  if !rest.isEmpty { sections.append(ConversationSection(title: .directMessages, conversations: rest)) }
-  return sections
+  let direct = pinnedByRecency(
+    conversations.filter { $0.isDirect && chip.matches($0) && nameContains($0, filter) }, lastActivity: lastActivity)
+  return direct.isEmpty ? [] : [ConversationSection(title: .chats, conversations: direct)]
 }
 
-/// The list layout's one list (#1151): favorites, then every other DM and channel, each the most
-/// recent first. Only conversations `chip` lets through whose names contain `filter` (any case) are
-/// kept. Empty sections are left out.
+/// What the one search field finds by name (#1786), above the message hits: every listed DM and
+/// channel whose name contains `query` (any case), the favorites first, then the most recent.
+/// Archived channels only where they are listed (`listsArchived`: guests, who can't browse them).
+func nameMatches(
+  _ conversations: [ConversationItem], query: String, lastActivity: [String: Date] = [:], listsArchived: Bool = false
+) -> [ConversationItem] {
+  guard !query.trimmingCharacters(in: .whitespaces).isEmpty else { return [] }
+  return pinnedByRecency(
+    conversations.filter { (listsArchived || !$0.isArchived) && nameContains($0, query) }, lastActivity: lastActivity)
+}
+
+private func nameContains(_ item: ConversationItem, _ filter: String) -> Bool {
+  let needle = filter.trimmingCharacters(in: .whitespaces)
+  return needle.isEmpty || item.listName.localizedCaseInsensitiveContains(needle)
+}
+
+/// Each conversation once, however often a caller hands it over; the favorites first, each part the
+/// most recent first (by name without a message).
+private func pinnedByRecency(_ conversations: [ConversationItem], lastActivity: [String: Date]) -> [ConversationItem] {
+  var seen = Set<String>()
+  return conversations
+    .filter { seen.insert($0.id).inserted }
+    .sorted { lhs, rhs in
+      if lhs.isFavorite != rhs.isFavorite { return lhs.isFavorite }
+      let left = lastActivity[lhs.id] ?? .distantPast
+      let right = lastActivity[rhs.id] ?? .distantPast
+      return left == right ? byName(lhs, rhs) : left > right
+    }
+}
+
+/// The list layout's one list (#1151): every DM and channel, the favorites pinned on top (#1786),
+/// then the rest, each part the most recent first. Only conversations `chip` lets through whose
+/// names contain `filter` (any case) are kept. No section without rows.
 ///
-/// `bySpace` (#1345): after the favorites, the DMs, then the other channels of each space under its
-/// name (spaces by name, as in the Spaces tab), each still the most recent first. Favorites stay on
-/// top, across spaces; a space whose channels are all favorites has no section. Same as Android.
+/// `bySpace` (#1345): the favorites in a section of their own, then the DMs, then the other channels
+/// of each space under its name (spaces by name, as in the Spaces tab), each still the most recent
+/// first. Favorites stay on top, across spaces; a space whose channels are all favorites has no
+/// section. Same as Android.
 func listSections(
   _ conversations: [ConversationItem], lastActivity: [String: Date] = [:], filter: String = "",
   chip: HomeFilter = .all, bySpace: Bool = false
 ) -> [ConversationSection] {
-  let needle = filter.trimmingCharacters(in: .whitespaces)
-  func byRecency(_ lhs: ConversationItem, _ rhs: ConversationItem) -> Bool {
-    let left = lastActivity[lhs.id] ?? .distantPast
-    let right = lastActivity[rhs.id] ?? .distantPast
-    return left == right ? byName(lhs, rhs) : left > right
+  let shown = pinnedByRecency(
+    conversations.filter { chip.matches($0) && nameContains($0, filter) }, lastActivity: lastActivity)
+  guard bySpace else {
+    return shown.isEmpty ? [] : [ConversationSection(title: .everything, conversations: shown)]
   }
-  var seen = Set<String>()
-  let shown = conversations
-    .filter { seen.insert($0.id).inserted }
-    .filter { chip.matches($0) && (needle.isEmpty || $0.listName.localizedCaseInsensitiveContains(needle)) }
-    .sorted(by: byRecency)
   let favorites = shown.filter(\.isFavorite)
   let rest = shown.filter { !$0.isFavorite }
   var sections: [ConversationSection] = []
   if !favorites.isEmpty { sections.append(ConversationSection(title: .favorites, conversations: favorites)) }
-  guard bySpace else {
-    if !rest.isEmpty { sections.append(ConversationSection(title: .everything, conversations: rest)) }
-    return sections
-  }
   let direct = rest.filter(\.isDirect)
   if !direct.isEmpty { sections.append(ConversationSection(title: .directMessages, conversations: direct)) }
   // Grouping keeps the recency order inside each space.
