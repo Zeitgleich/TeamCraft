@@ -98,10 +98,10 @@ pub(crate) fn slow_job(job: &str, waited: Duration, ran: Ran) {
   }
 }
 
-/// Logs a read on the read thread that took long or waited long, which should be rare: nothing but
-/// another read and another thread's group of writes holds it up.
+/// Logs a read on the read thread that took long, which should be rare, or that only waited long
+/// (issue #1759: the waiter is not the cause, the log names it as waiting so it isn't read as slow).
 pub(crate) fn slow_read(job: &str, waited: Duration, ran: Ran) {
-  if waited >= SLOW_JOB || ran.wall >= SLOW_JOB {
+  if ran.wall >= SLOW_JOB {
     tracing::info!(
       target: LIFECYCLE,
       job,
@@ -109,6 +109,14 @@ pub(crate) fn slow_read(job: &str, waited: Duration, ran: Ran) {
       ran_ms = ran.wall.as_millis(),
       cpu_ms = ran.maybe_cpu.map(|cpu| cpu.as_millis()),
       "slow read"
+    );
+  } else if waited >= SLOW_JOB {
+    tracing::info!(
+      target: LIFECYCLE,
+      job,
+      waited_ms = waited.as_millis(),
+      ran_ms = ran.wall.as_millis(),
+      "read waited behind another job"
     );
   }
 }

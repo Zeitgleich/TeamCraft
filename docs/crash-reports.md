@@ -384,11 +384,14 @@ So #1466 reads in GlitchTip as: `channel.switch` 6.4 s, of which `queue.wait mes
 queue depth 41, next to forty `core.read conversations` steps. A test reproduces it
 (`reads.rs`, `a_chat_open_behind_a_flood_names_what_it_waited_for`).
 
-**Slow jobs as warnings.** A job that waits or runs longer than the instance's threshold
+**Slow jobs as warnings.** A job that *runs* longer than the instance's threshold
 (Administration → Crash reports → `slow_job_ms`, 1000 ms by default, 0: never) is sent as a warning
-event `Slow core job: <name>`, grouped per job, tagged with `job`, `queue`, `wait_ms`, `run_ms`,
+event `Slow core job: <name>`, grouped per job. A job that only *waited* that long is not slow itself
+(#1759): one event `Read lane blocked: <blocker>` (`Engine lane blocked` for the engine thread) names
+the job that held the thread meanwhile, grouped by it, with the tags `blocker`, `blocker_run_ms` and
+`waiters` (jobs queued behind it); `unknown` when no job is known. Both are tagged with `job`, `queue`, `wait_ms`, `run_ms`,
 `cpu_ms` and `queue_depth`, sampled like handled errors; at most one per job a minute and 20 per
-process. It shows slow jobs that no measure was open for (a background sync holding the read thread).
+process (the blocked report is limited per blocker). It shows slow jobs that no measure was open for (a background sync holding the read thread).
 `cpu_ms` is the CPU time the job's thread used while it ran (Android; #1634): far below `run_ms`,
 the job waited (a lock, or the process frozen in the background, which counts on the wall clock),
 about `run_ms`, it worked. The app's queries all run as the job `query`; each is also kept as a step
