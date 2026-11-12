@@ -651,8 +651,8 @@ fn base_size(full_top: VideoResolution) -> VideoResolution {
   }
   let divisor = top_lines.div_ceil(BASE_MAX_LINES);
   VideoResolution {
-    width: (full_top.width / divisor & !1).max(2),
-    height: (full_top.height / divisor & !1).max(2),
+    width: ((full_top.width / divisor) & !1).max(2),
+    height: ((full_top.height / divisor) & !1).max(2),
   }
 }
 
