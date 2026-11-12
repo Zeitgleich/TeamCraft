@@ -122,6 +122,7 @@ use crate::call_resilience::{
   connect_preferring_quic, fallback_delay, rejoin_attempt,
 };
 use crate::call_video::ReceivedVideoFrame;
+use crate::capture_health::StallChange;
 use crate::datagram::SimulcastLayer;
 use crate::jitter::{JitterBuffer, JitterBufferConfig, Playout};
 use crate::receive_load::{
@@ -1601,6 +1602,7 @@ impl CallState<'_> {
       sent.maybe_frames_skipped = Some(skipped);
       sent.maybe_camera_limits = sender.camera_limits().map(camera_limits_stats);
       sent.maybe_share_limits = sender.share_limits().map(crate::share_policy::ShareLimits::stats);
+      sent.maybe_capture_buffers = Some(sender.capture_counts().into());
     }
     self.add_decoding_stats(&mut report);
     if let Some(transport) = &self.maybe_transport
@@ -1731,6 +1733,7 @@ impl CallState<'_> {
       self.request_path_stats();
     }
     self.judge_receive_load(engine, now);
+    self.judge_captures(engine, now);
     let tick = self.watch.on_tick(now);
     if let Some(id) = tick.maybe_ping {
       self.send_ping(id)?;
@@ -1817,6 +1820,32 @@ impl CallState<'_> {
       let _ = self
         .events
         .unbounded_send(CallEngineEvent::DecodeLimited(is_limited));
+    }
+  }
+
+  /// Judges whether each own track's capture still gives pictures (#1805), every timer tick: a
+  /// stall tells the viewers (in the track's frames), the sharer and the call's crash reports,
+  /// as on the desktop.
+  fn judge_captures(&mut self, engine: &mut CallEngine, now: Instant) {
+    for sender in &mut self.senders {
+      let Some(change) = sender.judge_capture(now) else {
+        continue;
+      };
+      let kind = sender.publication.kind.clone();
+      let event = match change {
+        StallChange::Stalled(window) => {
+          warn!(?kind, ?window, "own capture gives no new pictures");
+          engine.set_own_capture_stalled(&kind, true);
+          CallEngineEvent::CaptureStalled { kind, window }
+        },
+        StallChange::Recovered => {
+          info!(?kind, "own capture gives pictures again");
+          engine.set_own_capture_stalled(&kind, false);
+          CallEngineEvent::CaptureRecovered(kind)
+        },
+      };
+      // The app may have stopped listening; the call goes on.
+      let _ = self.events.unbounded_send(event);
     }
   }
 
@@ -2651,6 +2680,12 @@ impl CallState<'_> {
       .partition(|sender| sender.publication.kind == *kind);
     self.senders = kept;
     for sender in stopped {
+      // A stalled track that goes takes its hint with it (#1805).
+      if sender.is_capture_stalled() {
+        let _ = self
+          .events
+          .unbounded_send(CallEngineEvent::CaptureRecovered(kind.clone()));
+      }
       // Also before the SFU confirmed it: its answer is then unpublished when it comes (#929).
       engine.withdraw_video(sender.publication.own.id);
       sender.stop();
