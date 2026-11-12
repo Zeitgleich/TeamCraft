@@ -30,6 +30,8 @@ pub struct CallRoster {
   muted: BTreeSet<DeviceId>,
   /// Others' devices whose call key didn't verify: kept out of the encryption.
   refused: BTreeSet<DeviceId>,
+  /// Others' tracks whose capture stalled, as their frames say (#1805).
+  stalled_captures: Vec<(DeviceId, VideoTrackKind)>,
 }
 
 impl CallRoster {
@@ -65,6 +67,8 @@ impl CallRoster {
           .insert(participant.device_id, participant.user_id);
       },
       CallEngineEvent::ParticipantLeft(device_id) => {
+        roster.stalled_captures.retain(|(device, _)| *device != device_id);
+        active.stalled_videos = roster.stalled_users();
         roster.users_by_device.remove(&device_id);
         roster.sharing_screen.remove(&device_id);
         roster.reconnecting.remove(&device_id);
@@ -73,6 +77,22 @@ impl CallRoster {
         if roster.refused.remove(&device_id) {
           active.unverified = roster.refused_users();
         }
+      },
+      CallEngineEvent::RemoteCaptureStalled {
+        device,
+        kind,
+        is_stalled,
+      } => {
+        roster
+          .stalled_captures
+          .retain(|(stalled, stalled_kind)| (*stalled, stalled_kind) != (device, &kind));
+        if is_stalled {
+          roster.stalled_captures.push((device, kind));
+        }
+        let users = roster.stalled_users();
+        let has_changed = active.stalled_videos != users;
+        active.stalled_videos = users;
+        return has_changed;
       },
       CallEngineEvent::MemberRefused(device_id) => {
         roster.refused.insert(device_id);
@@ -291,6 +311,16 @@ impl CallRoster {
       .refused
       .iter()
       .filter_map(|device| self.users_by_device.get(device).copied())
+      .collect();
+    users.into_iter().collect()
+  }
+
+  /// People with a track whose capture stalled (#1805).
+  fn stalled_users(&self) -> Vec<UserId> {
+    let users: BTreeSet<UserId> = self
+      .stalled_captures
+      .iter()
+      .filter_map(|(device, _)| self.users_by_device.get(device).copied())
       .collect();
     users.into_iter().collect()
   }
@@ -750,6 +780,29 @@ mod tests {
       assert!(!CallRoster::default().apply(&mut view, event));
       assert!(view.maybe_active.is_none());
     }
+  }
+
+  /// #1805: another device's stalled capture names its person until its frames say otherwise,
+  /// or the device leaves.
+  #[test]
+  fn whose_video_isnt_updating_shows_until_it_is_again() {
+    let mut view = active_view();
+    let mut roster = CallRoster::new(device(1));
+    roster.apply(&mut view, CallEngineEvent::ParticipantJoined(participant(4, 3)));
+    let stalled = |is_stalled| CallEngineEvent::RemoteCaptureStalled {
+      device: device(3),
+      kind: VideoTrackKind::Screen,
+      is_stalled,
+    };
+    let stalled_videos = |view: &CallView| view.maybe_active.as_ref().unwrap().stalled_videos.clone();
+    assert!(roster.apply(&mut view, stalled(true)));
+    assert_eq!(stalled_videos(&view), [user(4)]);
+    assert!(!roster.apply(&mut view, stalled(true)));
+    assert!(roster.apply(&mut view, stalled(false)));
+    assert!(stalled_videos(&view).is_empty());
+    roster.apply(&mut view, stalled(true));
+    roster.apply(&mut view, CallEngineEvent::ParticipantLeft(device(3)));
+    assert!(stalled_videos(&view).is_empty());
   }
 
   fn active_view() -> CallView {

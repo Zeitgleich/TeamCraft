@@ -1880,6 +1880,7 @@ mod tests {
         index: 0,
         count: 1,
         is_keyframe: false,
+        is_capture_stalled: false,
       }
       .write_to(&mut rtp);
       forwarder
@@ -3450,6 +3451,7 @@ mod tests {
       index: 0,
       count,
       is_keyframe,
+      is_capture_stalled: false,
     }
     .write_to(&mut rtp);
     let route = forwarder

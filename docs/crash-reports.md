@@ -279,6 +279,12 @@ buffers can't be used showed the others one still picture for minutes before (#1
 sees "The others see only a still picture" in the call until pictures come again or the track
 stops. Cameras and the browser don't count their buffers yet.
 
+While its capture stalls, the sender sets a bit in each frame's header (e2ee.md §8, "A stalled
+capture"). Viewers then show "X's video isn't updating", count the flagged frames as no new
+picture (so `CallVideoFreeze` fires with `arriving` after 6 s, where a still slide's repeats
+don't), and a viewer's `ScreenShareChoppy` names the cause `sender's capture stalled` when the
+flagged time reaches the freeze threshold.
+
 The message names the kind and its stable parts only (`camera picture froze (vp9, packets still
 arriving)`); the numbers are in the event's `call` context. Each kind goes once per call (freezes
 three times, SFU refusals once per code), the page sends at most the instance's cap per call

@@ -292,6 +292,7 @@ mod tests {
         keyframe_requests: 0,
         maybe_longest_gap_ms: None,
         maybe_max_framerate: None,
+        is_sender_capture_stalled: false,
         maybe_decode_queue: None,
         maybe_device_limit: None,
       })],

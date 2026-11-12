@@ -296,6 +296,10 @@ pub struct ReceivedVideoStats {
   /// The frame rate the sender announced for the layer arriving now.
   #[serde(default)]
   pub maybe_max_framerate: Option<u8>,
+  /// The sender says its capture is stalled (#1805): its frames repeat a picture this device has,
+  /// and the track counts as frozen however many of them come.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_sender_capture_stalled: bool,
   /// Frames waiting in this device's decoder of the track now (#1762); `None` where the platform
   /// doesn't tell.
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -428,6 +432,7 @@ mod tests {
           keyframe_requests: 2,
           maybe_longest_gap_ms: Some(120),
           maybe_max_framerate: Some(30),
+          is_sender_capture_stalled: false,
           maybe_decode_queue: Some(4),
           maybe_device_limit: Some(DeviceLimitStats {
             layer: 1,

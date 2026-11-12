@@ -278,6 +278,17 @@ impl CallTelemetry {
           },
         );
       },
+      CallEngineEvent::RemoteCaptureStalled { kind, is_stalled, .. } => {
+        let how = if *is_stalled {
+          "stalled"
+        } else {
+          "gives pictures again"
+        };
+        self.note(
+          now_ms,
+          format!("another device's {} capture {how}", kind.as_str()),
+        );
+      },
       CallEngineEvent::CaptureRecovered(kind) => {
         self.note(
           now_ms,
@@ -500,7 +511,8 @@ impl CallTelemetry {
       lost += received.packets_lost.saturating_sub(watch.packets_lost);
       watch.packets = received.packets;
       watch.packets_lost = received.packets_lost;
-      if received.frames != watch.frames {
+      // Frames that repeat the picture of a stalled capture (#1805) are no new picture.
+      if received.frames != watch.frames && !received.is_sender_capture_stalled {
         watch.frames = received.frames;
         if watch.is_frozen {
           self.summary.frozen_ms += now_ms.saturating_sub(watch.changed_ms);
@@ -1059,6 +1071,44 @@ mod tests {
       assert!(telemetry.take_reports().is_empty());
     }
 
+    /// #1805: a sharer whose capture stalled still sends a picture a second (the last one
+    /// again), and says so in its frames: the viewer counts the time as frozen.
+    #[test]
+    fn frames_of_a_stalled_capture_are_no_new_pictures() {
+      let mut telemetry = joined(2);
+      let stalled = |frames, packets| {
+        let mut report = stats(frames, packets, 0);
+        for track in &mut report.tracks {
+          if let VideoTrackStats::Received(received) = track {
+            received.is_sender_capture_stalled = true;
+          }
+        }
+        report
+      };
+      telemetry.observe_stats(&stats(100, 1_000, 0), 0);
+      telemetry.observe_stats(&stalled(103, 1_100), 3_000);
+      assert!(telemetry.take_reports().is_empty());
+      telemetry.observe_stats(&stalled(106, 1_200), 6_000);
+      assert!(matches!(
+        telemetry.take_reports()[0].problem,
+        CallProblem::VideoFreeze {
+          frozen_s: 6,
+          is_media_arriving: true,
+          ..
+        }
+      ));
+    }
+
+    /// A still slide sends a picture a second without the flag: no freeze, however long.
+    #[test]
+    fn a_still_slide_is_no_freeze() {
+      let mut telemetry = joined(2);
+      for second in 0..30u64 {
+        telemetry.observe_stats(&stats(100 + second, 1_000 + second * 10, 0), second * 1_000);
+      }
+      assert!(telemetry.take_reports().is_empty());
+    }
+
     #[test]
     fn a_silent_track_is_told_from_one_whose_decoder_stalls() {
       let mut telemetry = joined(2);
@@ -1269,6 +1319,7 @@ mod tests {
           keyframe_requests: 0,
           maybe_longest_gap_ms: None,
           maybe_max_framerate: None,
+          is_sender_capture_stalled: false,
           maybe_decode_queue: None,
           maybe_device_limit: None,
         }),

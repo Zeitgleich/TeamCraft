@@ -411,6 +411,7 @@ mod tests {
       index,
       count,
       is_keyframe,
+      is_capture_stalled: false,
     }
     .write_to(&mut header);
     datagram(stream, layer, &RtpPacket { header, payload })

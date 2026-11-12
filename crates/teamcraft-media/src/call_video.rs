@@ -59,6 +59,9 @@ pub struct OutgoingVideo {
   sequences: [SequenceNumber; MAX_LAYERS],
   /// When the uplink was last looked at, and whether it held the top layer back then.
   maybe_uplink_check: Option<(Instant, bool)>,
+  /// The capture gets buffers it can't turn into pictures (#1805): every frame says so, and the
+  /// viewers count the time as frozen.
+  is_capture_stalled: bool,
 }
 
 /// What an own track sent so far (stats for nerds, #938).
@@ -131,6 +134,8 @@ pub struct IncomingVideo {
   /// The end (exclusive) of the newest frame seen, and when the layer's last packet arrived.
   maybe_frame_end: Option<u64>,
   maybe_last_arrival: Option<Instant>,
+  /// The sender says its capture is stalled (#1805), as of the last packet.
+  is_sender_capture_stalled: bool,
   /// Packets went missing since the last [`IncomingVideo::take_loss`].
   is_loss: bool,
   /// Deltas are useless until the next keyframe: none arrived yet, or one went missing.
@@ -208,7 +213,13 @@ impl OutgoingVideo {
       frame_number: 0,
       sequences: [SequenceNumber(0); MAX_LAYERS],
       maybe_uplink_check: None,
+      is_capture_stalled: false,
     }
+  }
+
+  /// Whether the track's capture is stalled (#1805); its frames say so from now on.
+  pub fn set_capture_stalled(&mut self, is_stalled: bool) {
+    self.is_capture_stalled = is_stalled;
   }
 
   /// The track's layers in another codec than the track's own (#1733).
@@ -246,9 +257,10 @@ impl OutgoingVideo {
     let payload_type = payload_type(self.layer_codec(layer.value()));
     let sequence = &mut self.sequences[usize::from(layer.value()) % MAX_LAYERS];
     let mut packets = Vec::new();
-    for (fragment, payload) in
+    for (mut fragment, payload) in
       fragment_frame(encrypted, frame_number, is_keyframe, MAX_FRAGMENT_PAYLOAD_BYTES)?
     {
+      fragment.is_capture_stalled = self.is_capture_stalled;
       let mut header = RtpHeader::new(payload_type, *sequence, timestamp, Ssrc(stream_id.0));
       header.is_marker = fragment.is_last();
       fragment.write_to(&mut header);
@@ -312,6 +324,7 @@ impl IncomingVideo {
       maybe_loss_at: None,
       maybe_frame_end: None,
       maybe_last_arrival: None,
+      is_sender_capture_stalled: false,
       is_loss: false,
       is_waiting_for_keyframe: true,
       maybe_last_keyframe_request: None,
@@ -374,6 +387,12 @@ impl IncomingVideo {
   }
 
   /// The layer arriving now.
+  /// Whether the sender says its capture is stalled (#1805): its frames repeat a picture this
+  /// device already has.
+  pub fn is_sender_capture_stalled(&self) -> bool {
+    self.is_sender_capture_stalled
+  }
+
   pub fn layer(&self) -> Option<SimulcastLayer> {
     self.maybe_layer
   }
@@ -400,6 +419,7 @@ impl IncomingVideo {
     now: Instant,
   ) -> Result<Reception, FragmentError> {
     let fragment = FrameFragment::from_header(&packet.header)?;
+    self.is_sender_capture_stalled = fragment.is_capture_stalled;
     if self.maybe_layer != Some(layer) {
       // Another layer starts at a keyframe; fragments of the old layer can't complete it, and
       // its deltas can't follow the old layer's pictures.
@@ -686,6 +706,38 @@ mod tests {
   use teamcraft_proto::{Id, Snowflake};
 
   use super::*;
+
+  /// #1805: an own track whose capture stalled says so in every frame until it doesn't, and the
+  /// receiving end knows it from the next packet.
+  #[test]
+  fn a_stalled_capture_travels_with_the_frames() {
+    let mut outgoing = OutgoingVideo::new(VideoTrackKind::Screen, VideoCodec::Vp9);
+    let mut incoming = IncomingVideo::new(&track(), None);
+    let now = Instant::now();
+    let mut send = |outgoing: &mut OutgoingVideo, is_keyframe| {
+      for bytes in outgoing
+        .packetize(
+          StreamId(7),
+          SimulcastLayer::BASE,
+          RtpTimestamp(9000),
+          is_keyframe,
+          &[1; 10],
+        )
+        .unwrap()
+      {
+        incoming
+          .push(SimulcastLayer::BASE, &RtpPacket::parse(&bytes).unwrap(), now)
+          .unwrap();
+      }
+      incoming.is_sender_capture_stalled()
+    };
+    assert!(!send(&mut outgoing, true));
+    outgoing.set_capture_stalled(true);
+    assert!(send(&mut outgoing, false));
+    assert!(send(&mut outgoing, true));
+    outgoing.set_capture_stalled(false);
+    assert!(!send(&mut outgoing, false));
+  }
 
   #[test]
   fn frames_survive_packetizing_and_layer_switches() {

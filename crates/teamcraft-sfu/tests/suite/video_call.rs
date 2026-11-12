@@ -254,6 +254,7 @@ impl Client {
       index: 0,
       count: 1,
       is_keyframe,
+      is_capture_stalled: false,
     }
     .write_to(&mut header);
     let rtp = RtpPacket {

@@ -261,6 +261,13 @@ pub enum CallEngineEvent {
   },
   /// Not from the engine but from the media driver: that capture gives pictures again.
   CaptureRecovered(VideoTrackKind),
+  /// Another device's capture of a track this device receives stalled (`is_stalled`) or gives
+  /// pictures again (#1805), as its frames say: the UI tells whose video isn't updating.
+  RemoteCaptureStalled {
+    device: DeviceId,
+    kind: VideoTrackKind,
+    is_stalled: bool,
+  },
   /// Another device's connection was lost; it keeps its place while it reconnects.
   ParticipantReconnecting(DeviceId),
   ParticipantReconnected(DeviceId),
@@ -1244,6 +1251,14 @@ impl CallEngine {
     self.ask_for_keyframe(stream, now);
   }
 
+  /// Whether the capture of the own track of `kind` is stalled (#1805): its frames tell the
+  /// viewers from now on.
+  pub fn set_own_capture_stalled(&mut self, kind: &VideoTrackKind, is_stalled: bool) {
+    for track in self.own_video.values_mut().filter(|track| track.kind == *kind) {
+      track.set_capture_stalled(is_stalled);
+    }
+  }
+
   /// Encrypts, splits and sends one encoded frame of an own track. Dropped before DAVE is ready,
   /// like audio, and on layers nobody receives or the uplink can't carry.
   pub fn send_video(
@@ -1409,6 +1424,7 @@ impl CallEngine {
             .find(|info| info.layer == layer.value())
             .map(|info| info.max_framerate)
         }),
+        is_sender_capture_stalled: track.is_sender_capture_stalled(),
         // The driver's decoders: it adds what it knows of them.
         maybe_decode_queue: None,
         maybe_device_limit: None,
@@ -1567,7 +1583,7 @@ impl CallEngine {
       },
       CallEvent::VideoUnpublished { stream_id } => {
         let stream = StreamId(stream_id.0);
-        self.remote_video.remove(&stream);
+        self.forget_remote_video(stream);
         self.subscriptions.remove(&stream);
         self.forget_own_track(stream);
         self.event(CallEngineEvent::VideoUnpublished(stream_id));
@@ -1790,7 +1806,7 @@ impl CallEngine {
       .copied()
       .collect();
     for stream in gone {
-      self.remote_video.remove(&stream);
+      self.forget_remote_video(stream);
       self.subscriptions.remove(&stream);
       self.event(CallEngineEvent::VideoUnpublished(MediaStreamId(stream.0)));
     }
@@ -1915,7 +1931,7 @@ impl CallEngine {
       .map(|(stream, _)| *stream)
       .collect();
     for stream in streams {
-      self.remote_video.remove(&stream);
+      self.forget_remote_video(stream);
       self.subscriptions.remove(&stream);
     }
     self.event(CallEngineEvent::ParticipantLeft(device_id));
@@ -2736,6 +2752,21 @@ impl CallEngine {
         .is_some_and(|participant| participant.user_id == self.config.user_id)
   }
 
+  /// Drops a received track; one whose sender said its capture stalled takes the hint with it
+  /// (#1805).
+  fn forget_remote_video(&mut self, stream: StreamId) {
+    let Some(track) = self.remote_video.remove(&stream) else {
+      return;
+    };
+    if track.is_sender_capture_stalled() {
+      self.event(CallEngineEvent::RemoteCaptureStalled {
+        device: track.sender,
+        kind: track.kind,
+        is_stalled: false,
+      });
+    }
+  }
+
   /// Reassembles and decrypts a received track's frames. Missing packets are asked for again
   /// where the SFU resends them (#1762); after a packet given up on or a frame that didn't
   /// decrypt, its deltas are dropped until the next keyframe, which is asked for.
@@ -2750,9 +2781,21 @@ impl CallEngine {
     let Some(track) = self.remote_video.get_mut(&stream) else {
       return Ok(());
     };
+    let was_stalled = track.is_sender_capture_stalled();
     let reception = track
       .push(layer, &packet, now)
       .map_err(|_| CallEngineError::Protocol("bad video fragment"))?;
+    if track.is_sender_capture_stalled() != was_stalled {
+      let event = CallEngineEvent::RemoteCaptureStalled {
+        device: track.sender,
+        kind: track.kind.clone(),
+        is_stalled: track.is_sender_capture_stalled(),
+      };
+      self.event(event);
+    }
+    let Some(track) = self.remote_video.get_mut(&stream) else {
+      return Ok(());
+    };
     if reception.is_late {
       track.count_late_arrival(rtp.len());
     } else {
