@@ -2601,7 +2601,7 @@ the chunks that load later. The limit:
 |--------------------------------------|--------------|----------------------------------|
 | A guest in a meeting: gzip -9 total  | 6,440,000 B  | fails; warns from 95 % (6.12 MB) |
 | Signed-in first visit: gzip -9 total | 5,610,000 B  | fails; warns from 95 % (5.33 MB) |
-| The call module: gzip -9             | 1,000,000 B  | fails                            |
+| The call module: gzip -9             | 1,100,000 B  | fails                            |
 
 Both budgets are the sizes of #1699 below plus about 5 % since 2026-11-11. From 2026-11-10 they
 were 10 MB: new features (polls #1689, the local search index #1693) had pushed a signed-in first
@@ -2620,6 +2620,11 @@ information. The uncompressed size is printed but not limited: what a user waits
 transfer. The earlier growth ratchet on it (11.85 MB) was dropped with the split (#334): main had
 outgrown it anyway, and the split moves code between files without changing what matters. Raising
 the budget is a decision, not a fix.
+
+The call module's budget was 1,000,000 B (0.86 MB with the effects' compositors, #439, plus about
+15 %) until the call problem reports (#1762, 2026-11-12) took the module to 1.02 MB; it is
+1,100,000 B since, a decision of the maintainer: the reports pay for themselves in field bugs found
+without asking anybody for logs.
 
 #### The snapshot's JSON and the data export out of the first visit (#1699, 2026-11-11)
 
