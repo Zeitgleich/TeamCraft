@@ -1656,6 +1656,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f67855af358fcb20fac58f9d714c94e2b228fe5694c1c9b4ead4a366343eda1b"
 
 [[package]]
+name = "constant_time_eq"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9eb6feb175df65d0a3ccd3e73484e940d0ac664e8034f0519fd49a93db3071d9"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "convert_case"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1931,9 +1940,9 @@ checksum = "217698eaf96b4a3f0bc4f3662aaa55bdf913cd54d7204591faa790070c6d0853"
 
 [[package]]
 name = "crc32fast"
-version = "1.5.3"
+version = "1.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ba106e844045ddc02c20768ac4b0b7cb45f2cc2ecbd833ac9f5dacb183c2055"
+checksum = "5f97d3416d5337d15c4b0d78c8c91df922ca143f57ec20e2d1c188333047ef04"
 dependencies = [
  "cfg-if 1.0.5",
 ]
@@ -7821,9 +7830,9 @@ dependencies = [
 
 [[package]]
 name = "psl"
-version = "2.1.246"
+version = "2.1.249"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27d58bd13c235442118460335daf360f0fefaa9035ec4ad957f851d738e7b7d6"
+checksum = "d5a4e068733aa4f2ef06083331e02678699f997128ad66e57a8adc7e3f654ba0"
 dependencies = [
  "psl-types",
 ]
@@ -13030,11 +13039,12 @@ dependencies = [
 
 [[package]]
 name = "wasm_split_cli_support"
-version = "0.2.4"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6c1f994b196e31969f4cdbe37d051362659567efc0f5c90cb931a8a5cdc530f"
+checksum = "0d301082e27eb836f18aae1d1c643f5aded266d2ba746ab51e4b396cadade9ff"
 dependencies = [
  "eyre",
+ "fixedbitset",
  "gimli 0.34.0",
  "lazy_static",
  "rayon",
@@ -14405,10 +14415,11 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "9.2.2"
+version = "9.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e408c6cc4699dd017d53dc080cd51c2cea2b5354af57a1479bd265ed42911487"
+checksum = "0700e6c427aff64acdbf02e85fbfd946c2ee12319d1af013092f3a2178914ff8"
 dependencies = [
+ "constant_time_eq",
  "crc32fast",
  "getrandom 0.4.3",
  "indexmap 2.14.2",
@@ -14417,6 +14428,7 @@ dependencies = [
  "nix",
  "typed-path",
  "windows-sys 0.61.2",
+ "zeroize",
 ]
 
 [[package]]
