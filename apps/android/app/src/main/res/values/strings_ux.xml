@@ -145,6 +145,8 @@
   <string name="no_conversation_selected">Pick a conversation.</string>
   <string name="image_save">Save</string>
   <string name="image_saved">Saved to Pictures/TeamCraft</string>
+  <string name="file_open_failed">The file couldn\'t be opened.</string>
+  <string name="file_open_no_app">No app can open this file.</string>
   <string name="image_save_failed">The picture couldn\'t be saved.</string>
 
   <!-- Settings pages -->

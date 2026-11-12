@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Decrypted downloads the user opens in another app (the core writes them to store/downloads)
-     and the diagnostics text the user exports from settings. -->
+<!-- Decrypted downloads the user opens in another app and the diagnostics text the user exports
+     from settings. The core writes downloads to files/store/<server>/downloads/<account>/, a name
+     per server, so the whole store is the root here and SharedFiles.isShareable lets only the
+     downloads folders through. Keep this list equal to SharedFiles.ROOTS (SharedFilesTest). -->
 <paths>
-  <files-path name="downloads" path="store/downloads/" />
+  <files-path name="store" path="store/" />
   <cache-path name="diagnostics" path="diagnostics/" />
 </paths>

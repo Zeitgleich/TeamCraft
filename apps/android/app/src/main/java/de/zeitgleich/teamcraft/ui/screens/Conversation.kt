@@ -135,7 +135,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.core.content.FileProvider
+import de.zeitgleich.teamcraft.ui.SharedFiles
 import androidx.core.graphics.PaintCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
@@ -915,12 +915,8 @@ private fun MessageList(
   }
 }
 
-/** Opens a decrypted download in another app through the FileProvider. */
-fun openFile(context: Context, file: File, mediaType: String) {
-  val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
-  val intent = Intent(Intent.ACTION_VIEW).setDataAndType(uri, mediaType).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-  runCatching { context.startActivity(Intent.createChooser(intent, file.name)) }
-}
+/** Opens a decrypted download in another app through the FileProvider; a failure shows a message. */
+fun openFile(context: Context, file: File, mediaType: String) = SharedFiles.open(context, file, mediaType)
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable

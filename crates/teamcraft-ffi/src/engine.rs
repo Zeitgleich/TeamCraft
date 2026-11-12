@@ -70,7 +70,9 @@ use crate::types::{
 };
 use crate::{AccessToken, EventListener, TokenProvider};
 
-/// Decrypted downloads, one folder per account below it.
+/// Decrypted downloads, one folder per account below it. The Android app hands these to other
+/// apps through its FileProvider and names the folder too (`SharedFiles.DOWNLOADS_DIR`, #1761):
+/// change both together.
 /// Wrong short codes allowed before a link approval is dropped.
 const MAX_APPROVAL_MISSES: u8 = 3;
 const DOWNLOADS_DIR: &str = "downloads";
