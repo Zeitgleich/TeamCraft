@@ -75,15 +75,21 @@ use crate::fallback_queue::MediaQueueConfig;
 use crate::fallback_socket::{FallbackSender, WriterConfig, run_writer};
 use crate::jitter::JitterBufferConfig;
 use crate::quic_send::{QuicSender, set_datagram_send_buffer};
+use crate::rtp::RtpTimestamp;
 use crate::send_queue::SendQueueConfig;
 use crate::sfu_address::{PinnedResolver, sfu_addresses};
 use crate::system_audio::{SystemAudioCapture, SystemAudioError, SystemAudioReceiver, system_audio_queue};
-use crate::video::{EncodedVideoFrame, TOP_LAYER, VideoResolution, ViewChoice};
+use crate::video::{EncodedVideoFrame, TOP_LAYER, VideoResolution};
 use crate::video_capture::CaptureError;
 use crate::video_pipeline::{
   FirstPicture, FrameSink, KeyframeNeeded, RepeatedWarning, SendProgress, StoppingSender, VideoReceiver,
   VideoSendConfig, VideoSender, VideoStartError,
 };
+
+mod receive;
+
+pub use self::receive::DecodeReporter;
+use self::receive::{Asks, RemoteVideo};
 
 /// Audio frame period.
 const FRAME_INTERVAL: Duration = Duration::from_millis(20);
@@ -292,6 +298,13 @@ enum VideoCommand {
     stream_id: MediaStreamId,
     maybe_max_lines: Option<u16>,
   },
+  /// The app handed a frame of a subscribed track to its decoder ([`DecodeReporter`]).
+  Decoding {
+    stream_id: MediaStreamId,
+    timestamp: RtpTimestamp,
+    queued: u32,
+    late_by: Duration,
+  },
 }
 
 /// Where the answer to a [`VideoCommand::Start`] goes.
@@ -318,13 +331,9 @@ struct VideoState {
   /// The call task's own command queue, for the decoder threads' keyframe requests. Weak: it
   /// must not keep the call running once the app dropped its handle.
   maybe_commands: Option<mpsc::WeakUnboundedSender<Command>>,
-  /// What others' tracks show, for counting what arrives per kind.
-  remote_kinds: HashMap<MediaStreamId, VideoTrackKind>,
-  /// Others' tracks' layers, for the layer a view asks for.
-  remote_layers: HashMap<MediaStreamId, Vec<VideoLayerInfo>>,
-  /// How the app shows others' tracks: their tiles' sizes and the viewer's picks (#967). Kept
-  /// while a track is published, so a tile shown again asks for what it asked before.
-  views: HashMap<MediaStreamId, ViewChoice>,
+  /// Others' tracks: what they show, how the app shows them, and what this device's decoders
+  /// keep up with (#1775).
+  remote: RemoteVideo,
   counts: VideoCounts,
   send_warning: RepeatedWarning,
   /// When the counters were last looked at, and what they were.
@@ -640,6 +649,12 @@ impl NativeCall {
     done_rx.await.ok()
   }
 
+  /// Where the app tells how its decoders take the frames of the tracks it subscribed to: with
+  /// it, the call asks for less where they fall behind (#1775).
+  pub fn decode_reporter(&self) -> DecodeReporter {
+    DecodeReporter::new(self.commands.downgrade())
+  }
+
   fn video(&self, command: VideoCommand) {
     // A closed channel means the call already ended.
     let _ = self.commands.send(Command::Video(command));
@@ -774,7 +789,7 @@ async fn run_call(
           }
         },
         ConnectionEvent::Input(LinkInput::Datagram(datagram)) => {
-          engine.handle_datagram(&datagram, Instant::now());
+          engine.handle_datagram(&datagram.bytes, datagram.read_at);
         },
         ConnectionEvent::Input(LinkInput::Ended(LinkEnd::Closed)) => break Ok(()),
         ConnectionEvent::Input(LinkInput::Ended(LinkEnd::Lost)) => connection.lose(&mut engine, Instant::now()),
@@ -788,7 +803,7 @@ async fn run_call(
             Some(early) => {
               sinks.use_transport(CallTransport::Quic, quic_jitter);
               for datagram in early {
-                engine.handle_datagram(&datagram, now);
+                engine.handle_datagram(&datagram.bytes, datagram.read_at);
               }
             },
             None => connection.lose(&mut engine, now),
@@ -798,7 +813,7 @@ async fn run_call(
         ConnectionEvent::SwitchTried(Ok(SwitchedLink { link, early })) => {
           connection.begin_switch(link, Instant::now());
           for datagram in early {
-            engine.handle_datagram(&datagram, Instant::now());
+            engine.handle_datagram(&datagram.bytes, datagram.read_at);
           }
         },
         ConnectionEvent::SwitchTried(Err(error)) => connection.on_failed_switch(error, Instant::now()),
@@ -870,6 +885,7 @@ async fn run_call(
         }
         sinks.video.collect_stopped();
         sinks.video.log_counts(now);
+        sinks.judge_receive_load(&mut engine, now);
       },
       Some((kind, frame)) = encoded_rx.recv() => sinks.video.send(&mut engine, &kind, &frame, Instant::now()),
       fetched = fetched_trust(&mut maybe_trust_fetch) => {
@@ -936,6 +952,7 @@ async fn run_call(
               .and_then(Link::rtt)
               .map(|rtt| u32::try_from(rtt.as_millis()).unwrap_or(u32::MAX));
             sinks.video.add_sender_stats(&mut report);
+            sinks.video.remote.add_decoding_stats(&mut report);
             // The caller may have given up waiting.
             let _ = done.send(report);
           },
@@ -1057,7 +1074,7 @@ struct LostTry {
 struct SwitchedLink {
   link: Link,
   /// The datagrams that came before the SFU's answer, for the engine.
-  early: Vec<Bytes>,
+  early: Vec<ReadDatagram>,
 }
 
 /// Why a try to move the call to QUIC didn't.
@@ -1135,8 +1152,16 @@ enum ConnectionEvent {
 /// What arrives on a link.
 enum LinkInput {
   Signal(CallServerMessage),
-  Datagram(Bytes),
+  Datagram(ReadDatagram),
   Ended(LinkEnd),
+}
+
+/// A datagram as the connection's reader got it.
+struct ReadDatagram {
+  bytes: Bytes,
+  /// When it was read, before it waited for the call task: the engine weighs its arrival by this,
+  /// so a busy call loop isn't taken for a congested downlink (#1775).
+  read_at: Instant,
 }
 
 /// How a link ended.
@@ -1452,7 +1477,7 @@ impl CallConnection {
   /// datagrams that came on QUIC before the SFU's answer, if they haven't gone to the engine yet.
   /// `None` if no move was under way (the SFU moved the session to a link this client gave up on):
   /// that is a loss.
-  async fn finish_switch(&mut self, engine: &mut CallEngine, now: Instant) -> Option<Vec<Bytes>> {
+  async fn finish_switch(&mut self, engine: &mut CallEngine, now: Instant) -> Option<Vec<ReadDatagram>> {
     let mut early = Vec::new();
     if self.switch.maybe_moving.is_none() {
       // The fallback's close can overtake the try's end, which is due by now: the SFU answered
@@ -2038,9 +2063,9 @@ fn handle_video(
     } => match VideoReceiver::start(sink, video.keyframe_requester(stream_id)) {
       Ok(receiver) => {
         video.receivers.insert(stream_id, receiver);
-        let max_layer = maybe_max_layer
-          .unwrap_or(TOP_LAYER)
-          .min(video.view_layer(stream_id));
+        let max_layer = video
+          .remote
+          .receive(stream_id, maybe_max_layer.unwrap_or(TOP_LAYER));
         engine.subscribe_video(stream_id, Some(max_layer));
       },
       Err(error) => warn!(%error, "cannot decode video"),
@@ -2048,6 +2073,8 @@ fn handle_video(
     VideoCommand::Unwatch(stream_id) => {
       if video.receivers.remove(&stream_id).is_some() {
         engine.subscribe_video(stream_id, None);
+        let asks = video.remote.stop_receiving(stream_id);
+        apply_asks(engine, asks);
       }
     },
     VideoCommand::RequestKeyframe(stream_id) => engine.request_keyframe(stream_id, Instant::now()),
@@ -2062,25 +2089,49 @@ fn handle_video(
     VideoCommand::Subscribe {
       stream_id,
       maybe_max_layer,
-    } => {
-      let maybe_max_layer = maybe_max_layer.map(|max_layer| max_layer.min(video.view_layer(stream_id)));
-      engine.subscribe_video(stream_id, maybe_max_layer);
+    } => match maybe_max_layer {
+      Some(max_layer) => {
+        let max_layer = video.remote.receive(stream_id, max_layer);
+        engine.subscribe_video(stream_id, Some(max_layer));
+      },
+      None => {
+        engine.subscribe_video(stream_id, None);
+        let asks = video.remote.stop_receiving(stream_id);
+        apply_asks(engine, asks);
+      },
     },
     VideoCommand::Shown { stream_id, shown } => {
-      video.views.entry(stream_id).or_default().maybe_shown = Some(shown);
-      video.follow_view(engine, stream_id);
+      let asks = video.remote.set_shown(stream_id, shown);
+      apply_asks(engine, asks);
     },
     VideoCommand::Quality {
       stream_id,
       maybe_max_lines,
     } => {
-      video.views.entry(stream_id).or_default().maybe_max_lines = maybe_max_lines;
-      video.follow_view(engine, stream_id);
+      let asks = video.remote.set_quality(stream_id, maybe_max_lines);
+      apply_asks(engine, asks);
     },
+    VideoCommand::Decoding {
+      stream_id,
+      timestamp,
+      queued,
+      late_by,
+    } => video.remote.on_decoding(stream_id, timestamp, queued, late_by),
     VideoCommand::Send { stream_id, frame } => {
       // Frames the app encodes itself; what becomes of each is its own business.
       let _ = engine.send_video(stream_id, &frame, Instant::now());
     },
+  }
+}
+
+/// Asks the SFU for the layers a change of the received tracks calls for, and for the keyframe of
+/// a track shown again after its frames were dropped.
+fn apply_asks(engine: &mut CallEngine, asks: Asks) {
+  for (stream_id, layer) in asks.layers {
+    engine.set_video_max_layer(stream_id, layer);
+  }
+  if let Some(stream_id) = asks.maybe_keyframe {
+    engine.request_keyframe(stream_id, Instant::now());
   }
 }
 
@@ -2180,6 +2231,17 @@ impl Sinks {
     tokio::time::sleep(FRAME_INTERVAL * 5).await;
   }
 
+  /// Judges whether this device decodes the video it receives (#1775): a step asks the SFU for
+  /// other layers, and the app hears when the device starts or stops holding video back.
+  fn judge_receive_load(&mut self, engine: &mut CallEngine, now: Instant) {
+    let mut asks = self.video.remote.judge(now);
+    if let Some(is_limited) = asks.maybe_is_limited.take() {
+      // The app may have stopped listening; the call goes on.
+      let _ = self.events.send(CallEngineEvent::DecodeLimited(is_limited));
+    }
+    apply_asks(engine, asks);
+  }
+
   /// Sends what the engine produced. Without a link (rejoining), signaling and media are
   /// dropped: the engine renews what matters when it is back.
   fn flush(
@@ -2225,10 +2287,23 @@ impl Sinks {
         },
         EngineOutput::Event(CallEngineEvent::VideoFrame(frame)) => {
           self.video.count_received(frame.stream_id);
+          // No work for a picture nobody sees (#1775).
+          if !self.video.remote.admits(&frame) {
+            continue;
+          }
           // Watched tracks are decoded for the app's sink; tracks the app subscribed to itself
-          // (subscribe_video) arrive encoded as events.
+          // (subscribe_video) arrive encoded as events, and the app reports their decoding.
           match self.video.receivers.get(&frame.stream_id) {
-            Some(receiver) => receiver.push(frame),
+            Some(receiver) => {
+              let (stream_id, timestamp) = (frame.stream_id, frame.timestamp);
+              let queued = receiver.queued();
+              let late_by = Instant::now().saturating_duration_since(frame.arrived_at);
+              receiver.push(frame);
+              self
+                .video
+                .remote
+                .on_decoding(stream_id, timestamp, queued, late_by);
+            },
             None => {
               let _ = self.events.send(CallEngineEvent::VideoFrame(frame));
             },
@@ -2250,21 +2325,18 @@ impl Sinks {
               continue;
             },
             CallEngineEvent::VideoPublished(track) => {
-              self
-                .video
-                .remote_kinds
-                .insert(track.stream_id, track.kind.clone());
-              self
-                .video
-                .remote_layers
-                .insert(track.stream_id, track.layers.clone());
-              self.video.follow_view(engine, track.stream_id);
+              let asks =
+                self
+                  .video
+                  .remote
+                  .on_published(track.stream_id, track.kind.clone(), track.layers.clone());
+              apply_asks(engine, asks);
             },
             CallEngineEvent::VideoUnpublished(stream_id) => {
               self.video.receivers.remove(stream_id);
-              self.video.remote_kinds.remove(stream_id);
-              self.video.remote_layers.remove(stream_id);
-              self.video.views.remove(stream_id);
+              // The steps a gone track held go to the others.
+              let asks = self.video.remote.on_unpublished(*stream_id);
+              apply_asks(engine, asks);
               // An own track the SFU dropped (rejoin without the slot) is published again.
               self.video.follow_publications(engine.device_id(), &event);
             },
@@ -2379,26 +2451,6 @@ impl VideoState {
     }
   }
 
-  /// The layer the app's view of a received track asks for ([`ViewChoice::layer`]); the top one
-  /// for a track it said nothing about, or whose layers are unknown.
-  fn view_layer(&self, stream_id: MediaStreamId) -> u8 {
-    let (Some(view), Some(kind), Some(layers)) = (
-      self.views.get(&stream_id),
-      self.remote_kinds.get(&stream_id),
-      self.remote_layers.get(&stream_id),
-    ) else {
-      return TOP_LAYER;
-    };
-    view.layer(kind, layers)
-  }
-
-  /// Asks for the layer a received track's view calls for now (nothing while it isn't received).
-  fn follow_view(&self, engine: &mut CallEngine, stream_id: MediaStreamId) {
-    if self.views.contains_key(&stream_id) {
-      engine.set_video_max_layer(stream_id, self.view_layer(stream_id));
-    }
-  }
-
   /// What a decoder thread of `stream_id` calls when it needs a keyframe: a command to the call
   /// task (nothing once the call ended).
   fn keyframe_requester(&self, stream_id: MediaStreamId) -> KeyframeNeeded {
@@ -2447,7 +2499,7 @@ impl VideoState {
   }
 
   fn count_received(&mut self, stream_id: MediaStreamId) {
-    if let Some(kind) = self.remote_kinds.get(&stream_id)
+    if let Some(kind) = self.remote.kind_of(stream_id)
       && let Some(stats) = self.counts.of_mut(kind)
     {
       stats.pictures_received += 1;
@@ -2499,7 +2551,7 @@ impl VideoState {
   /// track's pictures stopped somewhere during it (capture, encoder, sending), so a log shows
   /// where they stop.
   fn log_counts(&mut self, now: Instant) {
-    if self.senders.is_empty() && self.remote_kinds.is_empty() {
+    if self.senders.is_empty() && self.remote.is_empty() {
       self.maybe_last_log = None;
       return;
     }
@@ -2872,7 +2924,10 @@ async fn read_fallback(
   let end = read_socket(stream, received, sender, move |input| {
     let input = match input {
       SocketInput::Signal(message) => LinkInput::Signal(message),
-      SocketInput::Datagram(bytes) => LinkInput::Datagram(bytes),
+      SocketInput::Datagram(bytes) => LinkInput::Datagram(ReadDatagram {
+        bytes,
+        read_at: Instant::now(),
+      }),
     };
     delivering.send(input).is_ok()
   })
@@ -2890,7 +2945,11 @@ async fn read_datagrams(connection: Connection, inputs: mpsc::UnboundedSender<Li
   loop {
     match connection.receive_datagram().await {
       Ok(datagram) => {
-        if inputs.send(LinkInput::Datagram(datagram.payload())).is_err() {
+        let read = ReadDatagram {
+          bytes: datagram.payload(),
+          read_at: Instant::now(),
+        };
+        if inputs.send(LinkInput::Datagram(read)).is_err() {
           return;
         }
       },

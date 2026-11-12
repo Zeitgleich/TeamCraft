@@ -242,6 +242,8 @@ pub struct VideoSendConfig {
 /// One watched track's decoder thread.
 pub struct VideoReceiver {
   frames: std_mpsc::Sender<ReceivedVideoFrame>,
+  /// Frames pushed that the decoder hasn't taken yet: how far it is behind (#1775).
+  waiting: Arc<AtomicU32>,
   thread: Option<JoinHandle<()>>,
 }
 
@@ -1149,6 +1151,8 @@ impl VideoReceiver {
   /// calls `keyframe_needed` and the decoder waits for the next keyframe.
   pub fn start(mut sink: FrameSink, mut keyframe_needed: KeyframeNeeded) -> Result<Self, VideoCodecError> {
     let (frames, frame_rx) = std_mpsc::channel::<ReceivedVideoFrame>();
+    let waiting = Arc::new(AtomicU32::new(0));
+    let taken = Arc::clone(&waiting);
     let thread = std::thread::Builder::new()
       .name("video-decoder".into())
       .spawn(move || {
@@ -1161,6 +1165,7 @@ impl VideoReceiver {
         };
         let mut is_waiting_for_keyframe = true;
         for frame in frame_rx {
+          taken.fetch_sub(1, Ordering::Relaxed);
           if is_waiting_for_keyframe && !frame.is_keyframe {
             continue;
           }
@@ -1181,13 +1186,20 @@ impl VideoReceiver {
       .map_err(|error| VideoCodecError::Codec(error.to_string()))?;
     Ok(Self {
       frames,
+      waiting,
       thread: Some(thread),
     })
   }
 
   pub fn push(&self, frame: ReceivedVideoFrame) {
+    self.waiting.fetch_add(1, Ordering::Relaxed);
     // The decoder thread only ends when this receiver is dropped.
     let _ = self.frames.send(frame);
+  }
+
+  /// Frames waiting for the decoder: the one decoding now isn't counted.
+  pub fn queued(&self) -> u32 {
+    self.waiting.load(Ordering::Relaxed)
   }
 }
 
@@ -2187,6 +2199,7 @@ mod tests {
       timestamp: frame.timestamp,
       is_keyframe: frame.is_keyframe,
       data: frame.data,
+      arrived_at: Instant::now(),
     }
   }
 }

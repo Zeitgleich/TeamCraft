@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-call-video-decode-queue"
+description = "Enables the call_video_decode_queue command without any pre-configured scope."
+commands.allow = ["call_video_decode_queue"]
+
+[[permission]]
+identifier = "deny-call-video-decode-queue"
+description = "Denies the call_video_decode_queue command without any pre-configured scope."
+commands.deny = ["call_video_decode_queue"]
