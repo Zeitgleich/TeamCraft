@@ -227,7 +227,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Whether the host lists hand the meeting from `founder_key` to `organizer`'s pinned key.
-  async fn is_handed_over_from(
+  pub(super) async fn is_handed_over_from(
     &mut self,
     conversation: ConversationId,
     founder_key: &IdentityPublicKey,

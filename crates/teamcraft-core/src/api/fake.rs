@@ -1386,6 +1386,14 @@ impl FakeServer {
       .and_then(|conversation| conversation.response.maybe_meeting_id)
   }
 
+  /// The server names another organizer for a meeting chat, without any handover (a hostile
+  /// server); that user may then publish the chat's admitters.
+  pub fn set_organizer_of_chat(&self, chat: ConversationId, organizer: UserId) {
+    if let Some(conversation) = self.lock().conversations.get_mut(&chat) {
+      conversation.response.maybe_organizer_user_id = Some(organizer);
+    }
+  }
+
   /// The server names another meeting for a meeting chat (a hostile server).
   pub fn set_meeting_of_chat(&self, chat: ConversationId, meeting: teamcraft_proto::MeetingId) {
     if let Some(conversation) = self.lock().conversations.get_mut(&chat) {

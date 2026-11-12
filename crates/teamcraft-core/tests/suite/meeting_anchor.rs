@@ -14,6 +14,8 @@ use teamcraft_core::client::HostsChange;
 use teamcraft_core::meeting_invitees::InviteeList;
 use teamcraft_proto::{ConversationId, MeetingId};
 
+const ACCESS_ENDS_MS: i64 = 4_000_000_000_000;
+
 #[tokio::test]
 async fn an_invitee_pins_the_organizers_anchor() {
   let (_server, mut alice, mut bob, _carol, chat) = anchored_meeting().await;
@@ -111,6 +113,76 @@ async fn after_a_handover_a_new_member_accepts_the_former_organizers_anchor() {
   );
 }
 
+/// A server that names an insider as organizer gets the insider's statement nowhere: devices that
+/// pinned the chat's anchor hold to its founder, absent a signed handover.
+#[tokio::test]
+async fn a_statement_of_an_organizer_the_server_made_up_counts_nowhere() {
+  let server = anchoring_server_signing_invitees();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let mut mallory = Peer::enroll(&server, "Mallory").await;
+  // Dave has no device yet: whoever lists him can't get him in right away.
+  let dave_api = server.add_user("Dave");
+  let dave = dave_api.user_id();
+  let (bob_id, mallory_id) = (bob.client.user_id(), mallory.client.user_id());
+  let chat = server.create_meeting_chat(alice.client.user_id(), &[bob_id, mallory_id, dave]);
+  let meeting = server.meeting_of_chat(chat).unwrap();
+  alice
+    .client
+    .set_up_meeting_chat_from(
+      chat,
+      Some(meeting),
+      &InviteeList::Chosen {
+        added: vec![bob_id, mallory_id],
+        kept: Vec::new(),
+      },
+    )
+    .await
+    .unwrap();
+  assert!(
+    alice
+      .client
+      .sync_meeting_admitters(meeting, chat, ACCESS_ENDS_MS)
+      .await
+      .unwrap()
+  );
+  bob.client.full_sync().await.unwrap();
+  mallory.client.full_sync().await.unwrap();
+  bob.client.check_meeting_admission(chat).await.unwrap();
+
+  // The server makes Mallory, an invitee, the organizer; she invites Dave and signs.
+  server.set_organizer_of_chat(chat, mallory_id);
+  mallory
+    .client
+    .update_meeting_chat_members(chat, &[bob_id, dave], &[])
+    .await
+    .unwrap();
+  assert!(
+    mallory
+      .client
+      .sync_meeting_admitters(meeting, chat, ACCESS_ENDS_MS)
+      .await
+      .unwrap()
+  );
+  let mut dave_peer = Peer::enroll_as(dave_api, "Dave").await;
+  let listed = InviteeList::Listed(vec![bob_id, mallory_id, dave]);
+
+  alice
+    .client
+    .set_up_meeting_chat_from(chat, Some(meeting), &listed)
+    .await
+    .unwrap();
+  bob
+    .client
+    .set_up_meeting_chat_from(chat, Some(meeting), &listed)
+    .await
+    .unwrap();
+
+  dave_peer.client.full_sync().await.unwrap();
+  assert!(!alice.client.group_users(chat).unwrap().contains(&dave));
+  assert!(!bob.client.group_users(chat).unwrap().contains(&dave));
+}
+
 /// Alice organizes a meeting inviting Bob, on an instance whose minimum client version is the
 /// anchoring release; her device set the chat up with the meeting's ID. Carol is a member of the
 /// chat on the server, not invited yet.
@@ -148,4 +220,11 @@ fn chosen(peer: &Peer) -> InviteeList {
 
 fn other_meeting() -> MeetingId {
   "4242".parse().unwrap()
+}
+
+fn anchoring_server_signing_invitees() -> FakeServer {
+  let server = FakeServer::new();
+  let release = teamcraft_core::meeting_invitees::SIGNED_INVITEES_RELEASE;
+  server.set_minimum_client_version(&format!("{}.{}.{}", release.major, release.minor, release.patch));
+  server
 }

@@ -207,6 +207,26 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.apply_anchor_verdict(conversation, verdict)
   }
 
+  /// The founder of the meeting chat's anchor this device pinned (D10): who organized the meeting
+  /// when its group was founded, whatever the server names now. `None` without a pin or a meeting
+  /// chat's anchor.
+  pub(crate) fn pinned_meeting_founder(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<Option<UserId>, CoreError> {
+    if self.account_data().anchor_floor(conversation).is_none() {
+      return Ok(None);
+    }
+    let Some(group) = self.group(conversation)? else {
+      return Ok(None);
+    };
+    group
+      .anchor_bytes()
+      .and_then(anchoring::meeting_named_by)
+      .map(|named| convert::user_from_crypto(named.organizer))
+      .transpose()
+  }
+
   /// What a meeting chat's anchor must name when this device enters its group (D10, #1747): the
   /// meeting and the organizer the server names for the chat. After a handover (#1720) the group
   /// keeps the anchor its first organizer signed: then the founder counts if the signed host lists
