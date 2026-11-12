@@ -22,6 +22,7 @@ pub(crate) mod video;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -46,7 +47,8 @@ use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_auth::{CallBindingSigner, DeviceCallKeyAuthenticator};
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent, OwnVideoEnd};
 use teamcraft_media::call_native::{
-  JoinTicketSource, NativeCall, NativeCallConfig, NativeCallError, TicketFuture, TrustFuture, TrustSource,
+  DecodeReporter, JoinTicketSource, NativeCall, NativeCallConfig, NativeCallError, TicketFuture, TrustFuture,
+  TrustSource,
 };
 use teamcraft_media::call_resilience::{JoinTicket, JoinTicketError, certificate_hash_from_hex};
 use teamcraft_media::call_telemetry::{CallTelemetry, STATS_SAMPLE_INTERVAL, TelemetryThresholds};
@@ -211,8 +213,15 @@ enum Control {
 /// Shows the UI a failure as `failure::ActionFailure` wire text.
 pub type FailureReporter = Arc<dyn Fn(String) + Send + Sync>;
 
-/// Gets a watched track's decrypted frames (see `video::h264_sink` and `video::jpeg_sink`).
-pub type VideoSink = Arc<dyn Fn(&ReceivedVideoFrame) + Send + Sync>;
+/// Gets a watched track's decrypted frames (see `video::h264_sink` and `video::jpeg_sink`), and
+/// knows how many wait in its decoder (#1775).
+#[derive(Clone)]
+pub struct VideoSink {
+  deliver: Arc<dyn Fn(&ReceivedVideoFrame) + Send + Sync>,
+  /// Frames waiting in the decoder: the webview tells it for its own (`call_video_decode_queue`),
+  /// the JPEG transcoder counts them.
+  queued: Arc<AtomicU32>,
+}
 type VideoSinks = Arc<Mutex<HashMap<MediaStreamId, WatchedVideo>>>;
 
 /// The webview channel a watch sends through (`tauri::ipc::Channel::id`). An unwatch names it,
@@ -225,6 +234,25 @@ pub struct ChannelId(pub u32);
 struct WatchedVideo {
   channel: ChannelId,
   sink: VideoSink,
+}
+
+impl VideoSink {
+  pub fn new(deliver: impl Fn(&ReceivedVideoFrame) + Send + Sync + 'static, queued: Arc<AtomicU32>) -> Self {
+    Self {
+      deliver: Arc::new(deliver),
+      queued,
+    }
+  }
+
+  /// Hands a frame to the decoder.
+  fn deliver(&self, frame: &ReceivedVideoFrame) {
+    (self.deliver)(frame);
+  }
+
+  /// Frames waiting in the decoder, as last known.
+  fn queued(&self) -> u32 {
+    self.queued.load(Ordering::Relaxed)
+  }
 }
 
 /// Lets the media layer sign with the core's signer (the device key stays in the core).
@@ -425,6 +453,7 @@ impl CallHost {
     }
     let (controls, control_rx) = mpsc::unbounded_channel();
     lock(&self.video_sinks).clear();
+    let decode_reporter = call.decode_reporter();
     let task = tokio::spawn(run_media(
       call,
       telemetry,
@@ -435,6 +464,7 @@ impl CallHost {
         notify: Arc::clone(&self.notify),
         report_failure: Arc::clone(&self.report_failure),
         video_sinks: Arc::clone(&self.video_sinks),
+        decode_reporter,
         levels: self.levels.clone(),
       },
     ));
@@ -582,6 +612,16 @@ impl CallHost {
   /// Asks for a keyframe of a watched track whose decoder in the webview failed.
   pub async fn request_keyframe(&self, stream_id: MediaStreamId) {
     self.control(Control::RequestKeyframe(stream_id)).await;
+  }
+
+  /// The webview's decoder of a watched track has `queued` frames waiting (#1775); `channel`
+  /// names the watch, so a late report of a replaced one changes nothing.
+  pub fn set_video_decode_queue(&self, stream_id: MediaStreamId, channel: ChannelId, queued: u32) {
+    if let Some(watched) = lock(&self.video_sinks).get(&stream_id)
+      && watched.channel == channel
+    {
+      watched.sink.queued.store(queued, Ordering::Relaxed);
+    }
   }
 
   /// What the active call's video does (stats for nerds, #938); `None` outside a call.
@@ -1297,6 +1337,8 @@ struct MediaShared {
   notify: Arc<dyn Fn() + Send + Sync>,
   report_failure: FailureReporter,
   video_sinks: VideoSinks,
+  /// Tells the call how the watched tracks' decoders keep up (#1775).
+  decode_reporter: DecodeReporter,
   /// Where the call's microphone level goes while the device menu watches it (#986).
   levels: LevelWatch,
 }
@@ -1499,9 +1541,12 @@ fn on_event(
     CallEngineEvent::VideoFrame(frame) => {
       let maybe_sink = lock(&shared.video_sinks)
         .get(&frame.stream_id)
-        .map(|watched| Arc::clone(&watched.sink));
+        .map(|watched| watched.sink.clone());
       if let Some(sink) = maybe_sink {
-        sink(frame);
+        // How late the frame reaches the decoder and how many wait there: the call steps the
+        // received video down when this device falls behind (#1775).
+        shared.decode_reporter.frame_decoding(frame, sink.queued());
+        sink.deliver(frame);
       }
       return;
     },
@@ -2410,6 +2455,7 @@ mod tests {
           let _ = sink.send(failure);
         }),
         video_sinks: Arc::default(),
+        decode_reporter: call.decode_reporter(),
         levels: LevelWatch::default(),
       };
       let telemetry = CallTelemetry::new(
@@ -2496,10 +2542,8 @@ mod tests {
   #[tokio::test]
   async fn a_new_page_starts_without_the_watchers_of_the_last_one() {
     let host = Arc::new(host());
-    let (stream, sink): (MediaStreamId, VideoSink) = (MediaStreamId(3), Arc::new(|_| {}));
-    host
-      .watch_video(stream, ChannelId(1), None, Arc::clone(&sink))
-      .await;
+    let (stream, sink) = (MediaStreamId(3), VideoSink::new(|_| {}, Arc::default()));
+    host.watch_video(stream, ChannelId(1), None, sink.clone()).await;
     let levels = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counted = Arc::clone(&levels);
     host.watch_level(ChannelId(2), move |_| {
@@ -2514,6 +2558,23 @@ mod tests {
     assert_eq!(levels.load(std::sync::atomic::Ordering::Relaxed), 0);
     host.watch_video(stream, ChannelId(3), None, sink).await;
     assert!(lock(&host.video_sinks).contains_key(&stream));
+  }
+
+  /// #1775: the webview's decoder queue reaches the watch it belongs to, and a report of a watch
+  /// replaced since changes nothing.
+  #[tokio::test]
+  async fn the_webviews_decoder_queue_reaches_its_watch_only() {
+    let host = Arc::new(host());
+    let stream = MediaStreamId(3);
+    let sink = VideoSink::new(|_| {}, Arc::default());
+    host.watch_video(stream, ChannelId(1), None, sink.clone()).await;
+
+    host.set_video_decode_queue(stream, ChannelId(1), 4);
+    assert_eq!(sink.queued(), 4);
+    host.set_video_decode_queue(stream, ChannelId(2), 9);
+    assert_eq!(sink.queued(), 4);
+    host.set_video_decode_queue(MediaStreamId(4), ChannelId(1), 9);
+    assert_eq!(sink.queued(), 4);
   }
 
   fn host() -> CallHost {

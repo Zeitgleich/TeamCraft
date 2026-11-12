@@ -12,6 +12,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc as std_mpsc;
 
 use teamcraft_client_api::calls::{
@@ -456,12 +457,14 @@ const CODEC_VP9: u8 = 2;
 const CODEC_JPEG: u8 = 3;
 const CODEC_AV1: u8 = 4;
 
-/// Sends a watched track's frames as they arrive, for the webview's WebCodecs decoder.
+/// Sends a watched track's frames as they arrive, for the webview's WebCodecs decoder; the
+/// webview tells its decoder's queue (`call_video_decode_queue`).
 pub(super) fn h264_sink(send: impl Fn(Vec<u8>) -> bool + Send + Sync + 'static) -> VideoSink {
   // An undelivered frame costs nothing further here: no thread runs for this sink.
-  Arc::new(move |frame| {
+  let deliver = move |frame: &ReceivedVideoFrame| {
     let _ = send(video_message(frame));
-  })
+  };
+  VideoSink::new(deliver, Arc::default())
 }
 
 /// Decodes a watched track on a thread of its own and sends JPEG images at a reduced rate, for
@@ -473,19 +476,29 @@ pub(super) fn jpeg_sink(
   keyframe_needed: impl Fn() + Send + 'static,
 ) -> VideoSink {
   let (frames, queue) = std_mpsc::channel::<ReceivedVideoFrame>();
+  // Frames handed over that the transcoder hasn't taken yet (#1775).
+  let waiting = Arc::new(AtomicU32::new(0));
+  let taken = Arc::clone(&waiting);
   let spawned = std::thread::Builder::new()
     .name("teamcraft-video-jpeg".into())
-    .spawn(move || transcode_to_jpeg(&queue, &send, &keyframe_needed));
+    .spawn(move || transcode_to_jpeg(&queue, &taken, &send, &keyframe_needed));
   if let Err(error) = spawned {
     warn!(%error, "no thread for JPEG video; the track stays blank");
   }
+  let counted = Arc::clone(&waiting);
   // Unbounded on purpose: dropping H.264 frames would break decoding until the next keyframe.
-  // The sender only fails once the thread is gone; then there is nobody to decode for.
-  Arc::new(move |frame| drop(frames.send(frame.clone())))
+  // The call asks for a lower layer once the queue grows. The sender only fails once the thread
+  // is gone; then there is nobody to decode for.
+  let deliver = move |frame: &ReceivedVideoFrame| {
+    counted.fetch_add(1, Ordering::Relaxed);
+    drop(frames.send(frame.clone()));
+  };
+  VideoSink::new(deliver, waiting)
 }
 
 fn transcode_to_jpeg(
   queue: &std_mpsc::Receiver<ReceivedVideoFrame>,
+  waiting: &AtomicU32,
   send: &dyn Fn(Vec<u8>) -> bool,
   keyframe_needed: &dyn Fn(),
 ) {
@@ -499,6 +512,7 @@ fn transcode_to_jpeg(
   let mut transcoder = JpegTranscoder::new(Box::new(decoder));
   let mut is_broken = false;
   while let Ok(frame) = queue.recv() {
+    waiting.fetch_sub(1, Ordering::Relaxed);
     let timestamp_us = timestamp_us(&frame);
     if frame.is_keyframe {
       is_broken = false;
@@ -822,6 +836,7 @@ mod tests {
       timestamp: RtpTimestamp(90_000),
       is_keyframe: true,
       data: vec![0, 0, 0, 1, 0x65],
+      arrived_at: std::time::Instant::now(),
     };
     assert_eq!(
       video_message(&frame),
@@ -868,7 +883,7 @@ mod tests {
       .unwrap();
     let (images, received) = std_mpsc::channel();
     let sink = jpeg_sink(move |message| images.send(message).is_ok(), || {});
-    sink(&ReceivedVideoFrame {
+    sink.deliver(&ReceivedVideoFrame {
       sender: DeviceId::from_snowflake(Snowflake::new(2).unwrap()),
       stream_id: MediaStreamId(7),
       codec: VideoCodec::H264,
@@ -876,11 +891,14 @@ mod tests {
       timestamp: RtpTimestamp(0),
       is_keyframe: true,
       data: picture.data,
+      arrived_at: std::time::Instant::now(),
     });
 
     let message = received.recv_timeout(Duration::from_secs(5)).unwrap();
     assert_eq!(&message[..4], &[1, KEYFRAME_FLAG | JPEG_FLAG, CODEC_JPEG, 0]);
     assert_eq!(&message[16..18], &[0xff, 0xd8]);
+    // The transcoder took the frame: none waits (#1775).
+    assert_eq!(sink.queued(), 0);
   }
 
   #[test]

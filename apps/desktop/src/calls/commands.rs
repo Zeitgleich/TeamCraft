@@ -168,6 +168,19 @@ pub async fn call_request_keyframe(
   Ok(())
 }
 
+/// The webview's decoder of a watched track has `queued` frames waiting (#1775): the call asks
+/// for a lower layer while decoders here fall behind. `channel` is the id of the watch's `frames`
+/// channel.
+#[tauri::command(rename_all = "snake_case")]
+pub fn call_video_decode_queue(
+  calls: State<'_, Arc<CallHost>>,
+  stream_id: MediaStreamId,
+  channel: u32,
+  queued: u32,
+) {
+  calls.set_video_decode_queue(stream_id, ChannelId(channel), queued);
+}
+
 /// What the active call's video does (stats for nerds, #938): the counters of every own and
 /// received track, the encoders and the round trip; `None` outside a call.
 #[tauri::command(rename_all = "snake_case")]

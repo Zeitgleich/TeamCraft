@@ -365,6 +365,7 @@ fn main() -> anyhow::Result<()> {
       calls::commands::call_background_preview,
       calls::commands::call_unwatch_video,
       calls::commands::call_request_keyframe,
+      calls::commands::call_video_decode_queue,
       calls::commands::call_video_stats,
       calls::commands::call_watch_camera,
       calls::commands::call_unwatch_camera,

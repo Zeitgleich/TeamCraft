@@ -185,6 +185,9 @@ pub struct ReceivedVideoFrame {
   pub timestamp: RtpTimestamp,
   pub is_keyframe: bool,
   pub data: Vec<u8>,
+  /// When the datagram that completed the frame arrived (the `now` the engine got it with): how
+  /// late the frame reaches a decoder is measured from here, without the network's delay (#1775).
+  pub arrived_at: Instant,
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -325,6 +325,9 @@ mod view {
   /// How often a watched track's shown size is looked at (#967): the shell receives the smallest
   /// layer that covers it while the viewer leaves the quality to the call.
   const SHOWN_SIZE_INTERVAL: Duration = Duration::from_secs(1);
+  /// The decoder's queue is told the shell at most this often, when it changed (#1775): enough
+  /// for the call's two-second judgement of this device's load, few calls while it is busy.
+  const DECODE_QUEUE_INTERVAL: Duration = Duration::from_millis(250);
   /// WebCodecs codec strings, as the browser's call module uses them (`call_web/video.rs`).
   const H264_CODEC: &str = "avc1.42e028";
   const VP9_CODEC: &str = "vp09.00.10.08";
@@ -430,6 +433,20 @@ mod view {
     maybe_told_size: Cell<Option<(u32, u32)>>,
     /// When the shown size of another device's track was last looked at.
     maybe_size_looked_at: Cell<Option<Duration>>,
+    /// Tells the shell at once when another device's track can't be seen any more, or can again.
+    maybe_size_watch: RefCell<Option<SizeWatch>>,
+    /// The decoder's queue as last told the shell (it starts at none waiting), and when.
+    maybe_told_queue: Cell<Option<u32>>,
+    maybe_queue_told_at: Cell<Option<Duration>>,
+  }
+
+  /// Looks at a remote track's shown size whenever its canvas is resized or the page is hidden or
+  /// shown (the window minimized, hidden to the tray, restored): a track nobody can see isn't
+  /// decoded by the shell, and once it can be seen again it asks for a keyframe (#1775).
+  struct SizeWatch {
+    observer: web_sys::ResizeObserver,
+    document: web_sys::Document,
+    on_change: Closure<dyn FnMut()>,
   }
 
   struct FrameChannel {
@@ -475,7 +492,13 @@ mod view {
         last_drawn_image: Cell::new(0),
         maybe_told_size: Cell::new(None),
         maybe_size_looked_at: Cell::new(None),
+        maybe_size_watch: RefCell::new(None),
+        maybe_told_queue: Cell::new(None),
+        maybe_queue_told_at: Cell::new(None),
       });
+      if matches!(source, VideoSource::Remote(_)) {
+        *view.maybe_size_watch.borrow_mut() = SizeWatch::start(&view, &document);
+      }
       let starting = Rc::clone(&view);
       spawn_local(async move {
         if is_video_off().await {
@@ -542,6 +565,8 @@ mod view {
         _callback: callback,
       });
       self.is_waiting_for_keyframe.set(true);
+      // The shell's new watch starts with an empty queue.
+      self.maybe_told_queue.set(None);
       Some(argument)
     }
 
@@ -609,24 +634,23 @@ mod view {
     /// changed (looked at once a second while frames come): while the viewer leaves the quality
     /// to the call, it receives the smallest layer that covers the tile (#967), as in the browser.
     fn tell_shown_size(&self) {
-      let VideoSource::Remote(stream_id) = self.source else {
-        return;
-      };
-      let now = crate::motion::now();
       let is_due = self
         .maybe_size_looked_at
         .get()
-        .is_none_or(|at| now.saturating_sub(at) >= SHOWN_SIZE_INTERVAL);
-      if !is_due {
-        return;
+        .is_none_or(|at| crate::motion::now().saturating_sub(at) >= SHOWN_SIZE_INTERVAL);
+      if is_due {
+        self.look_at_shown_size();
       }
-      self.maybe_size_looked_at.set(Some(now));
-      let maybe_size = web_sys::window().and_then(|window| {
-        let rect = self.canvas.get_bounding_client_rect();
-        drawn_size(rect.width(), rect.height(), window.device_pixel_ratio())
-      });
+    }
+
+    /// Tells the shell the shown size now, if it changed; zero while nobody can see the track.
+    fn look_at_shown_size(&self) {
+      let VideoSource::Remote(stream_id) = self.source else {
+        return;
+      };
+      self.maybe_size_looked_at.set(Some(crate::motion::now()));
       // Not in the page (lingering after its tile went): nothing to tell.
-      let Some(size) = maybe_size else {
+      let Some(size) = self.shown_size() else {
         return;
       };
       if self.maybe_told_size.replace(Some(size)) == Some(size) {
@@ -637,6 +661,53 @@ mod view {
         if let Err(error) = call::<()>("call_size_video", &args).await {
           // The track keeps the layer it has.
           tracing::debug!(%error, "video size not told");
+        }
+      });
+    }
+
+    /// The size the canvas is shown at in device pixels: zero while the window is minimized or
+    /// hidden to the tray, or the tile is laid out at zero size; `None` while it isn't in the page.
+    fn shown_size(&self) -> Option<(u32, u32)> {
+      let window = web_sys::window()?;
+      if window.document().is_some_and(|document| document.hidden()) {
+        return Some((0, 0));
+      }
+      if !self.canvas.is_connected() {
+        return None;
+      }
+      let rect = self.canvas.get_bounding_client_rect();
+      Some(drawn_size(rect.width(), rect.height(), window.device_pixel_ratio()).unwrap_or((0, 0)))
+    }
+
+    /// Tells the shell how many frames wait in the decoder, when that changed (at most every
+    /// [`DECODE_QUEUE_INTERVAL`]): the call asks for less while this device falls behind (#1775).
+    fn tell_decode_queue(&self, queued: u32) {
+      let VideoSource::Remote(stream_id) = self.source else {
+        return;
+      };
+      if self.maybe_told_queue.get().unwrap_or(0) == queued {
+        return;
+      }
+      let now = crate::motion::now();
+      let is_due = self
+        .maybe_queue_told_at
+        .get()
+        .is_none_or(|at| now.saturating_sub(at) >= DECODE_QUEUE_INTERVAL);
+      let maybe_channel = self
+        .maybe_channel
+        .borrow()
+        .as_ref()
+        .map(|channel| channel.callback_id);
+      let (true, Some(channel)) = (is_due, maybe_channel) else {
+        return;
+      };
+      self.maybe_told_queue.set(Some(queued));
+      self.maybe_queue_told_at.set(Some(now));
+      spawn_local(async move {
+        let args = json!({ "stream_id": stream_id, "channel": channel, "queued": queued });
+        if let Err(error) = call::<()>("call_video_decode_queue", &args).await {
+          // The call goes on judging by what it was told before.
+          tracing::debug!(%error, "decoder queue not told");
         }
       });
     }
@@ -797,10 +868,14 @@ mod view {
         ("data", data.into()),
       ])
       .and_then(|init| EncodedVideoChunk::new(&init));
+      let queued = decoder.decoder.decode_queue_size();
       if chunk.and_then(|chunk| decoder.decoder.decode(&chunk)).is_err() {
         drop(maybe_decoder);
         self.decoder_error(header.codec);
+        return;
       }
+      drop(maybe_decoder);
+      self.tell_decode_queue(queued);
     }
 
     /// A decoder failed on a frame: the next keyframe gets a new one. For H.264 the first error
@@ -886,6 +961,7 @@ mod view {
       }
       let maybe_channel = self.close_frame_channel();
       self.maybe_decoder.borrow_mut().take();
+      self.maybe_size_watch.borrow_mut().take();
       // Never asked (the bridge had no channel): nothing to stop.
       let Some(channel) = maybe_channel else {
         return;
@@ -904,6 +980,36 @@ mod view {
           tracing::debug!(%error, command, "video not unwatched");
         }
       });
+    }
+  }
+
+  impl SizeWatch {
+    fn start(view: &Rc<StreamView>, document: &web_sys::Document) -> Option<Self> {
+      let weak = Rc::downgrade(view);
+      let on_change = Closure::<dyn FnMut()>::new(move || {
+        if let Some(view) = weak.upgrade() {
+          view.look_at_shown_size();
+        }
+      });
+      let observer = web_sys::ResizeObserver::new(on_change.as_ref().unchecked_ref()).ok()?;
+      observer.observe(&view.canvas);
+      // Without the listener a minimized window is only noticed when it is resized.
+      let _ =
+        document.add_event_listener_with_callback("visibilitychange", on_change.as_ref().unchecked_ref());
+      Some(Self {
+        observer,
+        document: document.clone(),
+        on_change,
+      })
+    }
+  }
+
+  impl Drop for SizeWatch {
+    fn drop(&mut self) {
+      self.observer.disconnect();
+      let _ = self
+        .document
+        .remove_event_listener_with_callback("visibilitychange", self.on_change.as_ref().unchecked_ref());
     }
   }
 

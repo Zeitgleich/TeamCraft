@@ -797,7 +797,26 @@ camera's judge (`EncoderLoad`) and its timings:
 The call says "Your computer is busy: video quality reduced" while it holds video back, and the
 stats overlay shows the decoder's queue and "limited by this device". Cost on the hot path: one
 `decodeQueueSize` read and a few additions per received frame, and a short list of the watched
-tiles per 100 ms timer tick (a sort of them every 2 s). The desktop's native decoders aren't governed yet.
+tiles per 100 ms timer tick (a sort of them every 2 s).
+
+The native driver (`call_native.rs`, its `receive` module; issue #1775) does the same with the
+same `ReceiveLoad`, for the desktop and the headless client:
+
+- **Arrival:** the connection's reader stamps each datagram when it reads it, and the engine gets
+  that time (`handle_datagram`); a frame carries the arrival of the datagram that completed it
+  (`ReceivedVideoFrame::arrived_at`).
+- **Where the decoders are:** the driver's own decoder thread (`VideoReceiver`) reports the frames
+  waiting for it. The desktop hands frames to its webview (WebCodecs) or its JPEG transcoder and
+  reports each through `DecodeReporter`: the lateness at that hand-over, and the frames waiting in
+  the decoder. The transcoder counts them; the webview tells its `decodeQueueSize` when it
+  changed, at most every 250 ms (`call_video_decode_queue`), so a calm call costs no calls.
+- **Hidden tiles:** the webview tells a zero size while the window is minimized or hidden to the
+  tray (`visibilitychange`) or the tile is laid out at zero size (a `ResizeObserver`). The driver
+  then drops the track's frames, and once it shows again asks for a keyframe and drops deltas
+  until it comes.
+
+Cost: an atomic counter per frame and handed-over frame, one command per frame to the call task,
+and the same per-tick judgement as in the browser.
 
 ### Each picture with its own frame (issue #990)
 

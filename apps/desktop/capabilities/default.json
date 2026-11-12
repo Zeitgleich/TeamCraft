@@ -92,6 +92,7 @@
     "allow-call-background-preview",
     "allow-call-unwatch-video",
     "allow-call-request-keyframe",
+    "allow-call-video-decode-queue",
     "allow-call-video-stats",
     "allow-call-watch-camera",
     "allow-call-unwatch-camera",

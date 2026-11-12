@@ -3342,6 +3342,7 @@ mod tests {
       timestamp: RtpTimestamp(0),
       is_keyframe,
       data: vec![0, 0, 0, 1],
+      arrived_at: web_time::Instant::now(),
     }
   }
 
