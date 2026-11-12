@@ -598,14 +598,15 @@ impl TrackSender {
       .layers
       .last()
       .is_some_and(|top| top.info.layer == layer);
-    if is_top && let Some(share) = &mut self.maybe_share {
-      if let Some(encode_time) = self.top_encode_timer.on_encoded(timestamp_us, now) {
-        share.on_frame(FrameTally {
-          encode_time,
-          frame_interval: std::time::Duration::from_secs(1) / u32::from(share.step().top_framerate.max(1)),
-          ..FrameTally::default()
-        });
-      }
+    if is_top
+      && let Some(share) = &mut self.maybe_share
+      && let Some(encode_time) = self.top_encode_timer.on_encoded(timestamp_us, now)
+    {
+      share.on_frame(FrameTally {
+        encode_time,
+        frame_interval: std::time::Duration::from_secs(1) / u32::from(share.step().top_framerate.max(1)),
+        ..FrameTally::default()
+      });
     }
     self.encoders.on_encoded(layer, bytes, now)
   }
