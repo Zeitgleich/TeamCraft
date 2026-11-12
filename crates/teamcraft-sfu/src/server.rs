@@ -869,6 +869,13 @@ impl ParticipantSession {
     }
   }
 
+  /// What this session's connection drains, if its transport measures that (#1810).
+  pub(crate) fn set_link_capacity(&self, maybe_capacity_bps: Option<u32>) {
+    self
+      .room
+      .set_link_capacity(self.grant.device_id, maybe_capacity_bps);
+  }
+
   pub(crate) fn handle_client_message(&self, message: CallClientMessage) {
     // Proves the session's path to a browser, which can't see QUIC keep-alives. One small answer
     // per ping; when the queue is full it is dropped, and the client's next ping asks again.

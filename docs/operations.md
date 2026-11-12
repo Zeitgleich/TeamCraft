@@ -470,7 +470,9 @@ depend on any of it.
     join token in the upgrade, default 3000),
     `TEAMCRAFT_SFU_FALLBACK_QUEUE_BYTES` (per connection, default 1 MiB, so at most about 1 GiB in all
     with every connection full), `TEAMCRAFT_SFU_FALLBACK_QUEUE_MAX_AGE_MILLIS` (default 300) and
-    `TEAMCRAFT_SFU_FALLBACK_SEND_BUFFER_BYTES` (default 128 KiB). `teamcraft_sfu_fallback_connections`
+    `TEAMCRAFT_SFU_FALLBACK_SEND_BUFFER_BYTES` (default 128 KiB). Video is paced to what a connection
+    drains (#1810); `TEAMCRAFT_SFU_FALLBACK_TARGET_QUEUE_DELAY_MILLIS` (default 120) is how much may
+    wait in the buffers on the way before the rate drops. `teamcraft_sfu_fallback_connections`
     in the metrics shows how many use it.
   - Clients send their join token with the upgrade too (`Sec-WebSocket-Protocol`, #1297), and the
     SFU checks it before upgrading: a client with a valid one doesn't hold the slots anybody can

@@ -118,6 +118,20 @@ impl MediaQueue {
     self.audio.is_empty() && self.video.is_empty()
   }
 
+  /// Like [`Self::pop`], but video only if `may_send_video`: audio isn't paced (#1810).
+  pub fn pop_paced(&mut self, may_send_video: bool, now: Instant) -> Option<Vec<u8>> {
+    self.drop_stale(now);
+    if self.audio.is_empty() && !may_send_video {
+      return None;
+    }
+    self.pop(now)
+  }
+
+  /// Whether audio is waiting (it may go at once, paced or not).
+  pub fn has_audio(&self) -> bool {
+    !self.audio.is_empty()
+  }
+
   /// Datagrams dropped since the start, for the metrics.
   pub fn dropped_packets(&self) -> u64 {
     self.dropped_packets
@@ -287,6 +301,37 @@ mod tests {
       for marker in 0..3u8 {
         assert_eq!(queue.pop(start).unwrap().last(), Some(&marker));
       }
+    }
+  }
+
+  mod pacing {
+    use super::*;
+
+    #[test]
+    fn audio_goes_while_video_waits_for_the_pacer() {
+      let start = Instant::now();
+      let mut queue = queue(1024 * 1024, Duration::from_millis(300));
+      queue.push(video(), start);
+      queue.push(audio(), start);
+      assert_eq!(
+        queue.pop_paced(false, start).map(|bytes| bytes.len()),
+        Some(AUDIO_BYTES)
+      );
+      assert_eq!(queue.pop_paced(false, start), None);
+      assert_eq!(
+        queue.pop_paced(true, start).map(|bytes| bytes.len()),
+        Some(VIDEO_BYTES)
+      );
+    }
+
+    #[test]
+    fn stale_audio_doesnt_let_video_past_the_pacer() {
+      let start = Instant::now();
+      let mut queue = queue(1024 * 1024, Duration::from_millis(300));
+      queue.push(audio(), start);
+      queue.push(video(), start + Duration::from_millis(200));
+      assert_eq!(queue.pop_paced(false, start + Duration::from_millis(300)), None);
+      assert!(!queue.is_empty());
     }
   }
 

@@ -17,6 +17,7 @@ pub mod capture_health;
 pub mod datagram;
 #[cfg(feature = "native")]
 pub mod fallback_link;
+pub mod fallback_pacer;
 pub mod fallback_queue;
 #[cfg(feature = "fallback-socket")]
 pub mod fallback_socket;

@@ -289,6 +289,9 @@ fn apply_fallback_env(fallback: &mut FallbackConfig) -> anyhow::Result<()> {
   if let Some(bytes) = env_count("TEAMCRAFT_SFU_FALLBACK_SEND_BUFFER_BYTES")? {
     fallback.socket_send_buffer_bytes = bytes;
   }
+  if let Some(millis) = env_count("TEAMCRAFT_SFU_FALLBACK_TARGET_QUEUE_DELAY_MILLIS")? {
+    fallback.pacing.target_queue_delay = Duration::from_millis(u64::try_from(millis)?);
+  }
   Ok(())
 }
 

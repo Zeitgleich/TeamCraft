@@ -645,7 +645,7 @@ mod join_pace {
   /// The events of `wanted` kind that arrive until the socket is quiet for a moment.
   async fn count_events(socket: &mut Socket, wanted: impl Fn(&CallEvent) -> bool) -> usize {
     let mut count = 0;
-    while let Ok(Some(Ok(message))) = tokio::time::timeout(Duration::from_millis(500), socket.next()).await {
+    while let Ok(Some(message)) = tokio::time::timeout(Duration::from_millis(500), next_frame(socket)).await {
       if let Message::Binary(bytes) = message
         && let FallbackFrame::Signal(body) = FallbackFrame::decode(&bytes).unwrap()
         && let CallServerMessage::Event { event, .. } = serde_json::from_slice(body).unwrap()
@@ -1133,7 +1133,7 @@ mod switch_back {
     /// One frame: `Some(Some(code))` for a close, `Some(None)` for anything else, `None` when the
     /// socket ended. Events must come in order.
     async fn read_one(&mut self) -> Option<Option<u32>> {
-      let message = self.socket.next().await?.ok()?;
+      let message = next_frame(&mut self.socket).await?;
       let Message::Binary(bytes) = message else {
         return Some(None);
       };
@@ -1864,4 +1864,15 @@ fn authenticators() -> HashMap<u64, Arc<dyn CallKeyAuthenticator>> {
       (device, authenticator)
     })
     .collect()
+}
+
+/// The next message that isn't a ping or a pong: the SFU pings a few times a second to measure the
+/// path (#1810), so a socket is never quiet otherwise. `None` when it ended or failed.
+async fn next_frame(socket: &mut Socket) -> Option<Message> {
+  loop {
+    match socket.next().await?.ok()? {
+      Message::Ping(_) | Message::Pong(_) => {},
+      message => return Some(message),
+    }
+  }
 }
