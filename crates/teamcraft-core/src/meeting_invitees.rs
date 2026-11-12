@@ -104,59 +104,61 @@ pub fn signs_invitees(maybe_highest_minimum: Option<ReleaseVersion>) -> bool {
 mod tests {
   use super::*;
 
-  const BOB: UserId = UserId::new(2);
-  const CAROL: UserId = UserId::new(3);
-  const MALLORY: UserId = UserId::new(66);
+  const BOB: u64 = 2;
+  const CAROL: u64 = 3;
+  const MALLORY: u64 = 66;
 
   #[test]
   fn the_users_the_organizer_added_count_as_they_are() {
     let chosen = InviteeList::Chosen {
-      added: vec![CAROL],
+      added: vec![user(CAROL)],
       kept: Vec::new(),
     };
-    let to_add = invitees_to_add(&chosen, &SignedInvitees::Known(vec![BOB]), true);
-    assert_eq!(to_add, vec![CAROL]);
+    let to_add = invitees_to_add(&chosen, &SignedInvitees::Known(vec![user(BOB)]), true);
+    assert_eq!(to_add, vec![user(CAROL)]);
   }
 
   #[test]
   fn the_servers_list_counts_only_where_the_signed_list_names_the_user() {
-    let signed = SignedInvitees::Known(vec![BOB, CAROL]);
-    let listed = InviteeList::Listed(vec![BOB, MALLORY]);
+    let signed = SignedInvitees::Known(vec![user(BOB), user(CAROL)]);
+    let listed = InviteeList::Listed(vec![user(BOB), user(MALLORY)]);
     assert_eq!(
       invitees_to_add(&listed, &signed, true),
-      vec![BOB],
+      vec![user(BOB)],
       "Mallory knocks; Carol, no longer listed, isn't added"
     );
     // An edit carries the server's list over: Mallory, slipped into it, isn't kept either.
     let edit = InviteeList::Chosen {
-      added: vec![UserId::new(4)],
-      kept: vec![BOB, MALLORY],
+      added: vec![user(4)],
+      kept: vec![user(BOB), user(MALLORY)],
     };
-    assert_eq!(invitees_to_add(&edit, &signed, true), vec![UserId::new(4), BOB]);
+    assert_eq!(invitees_to_add(&edit, &signed, true), vec![user(4), user(BOB)]);
   }
 
   #[test]
   fn without_a_signed_list_the_servers_list_adds_nobody_once_signing_is_on() {
-    let listed = InviteeList::Listed(vec![BOB, MALLORY]);
+    let listed = InviteeList::Listed(vec![user(BOB), user(MALLORY)]);
     assert!(invitees_to_add(&listed, &SignedInvitees::Unknown, true).is_empty());
     assert_eq!(
       invitees_to_add(&listed, &SignedInvitees::Unknown, false),
-      vec![BOB, MALLORY],
+      vec![user(BOB), user(MALLORY)],
       "before the release, as before"
     );
   }
 
   #[test]
   fn a_pending_own_choice_counts_before_the_statement() {
-    let chosen = ChosenInvitees { invitees: vec![BOB] };
-    let signed = [CAROL];
+    let chosen = ChosenInvitees {
+      invitees: vec![user(BOB)],
+    };
+    let signed = [user(CAROL)];
     assert_eq!(
       newest_signed_invitees(Some(&chosen), Some(&signed)),
-      SignedInvitees::Known(vec![BOB])
+      SignedInvitees::Known(vec![user(BOB)])
     );
     assert_eq!(
       newest_signed_invitees(None, Some(&signed)),
-      SignedInvitees::Known(vec![CAROL])
+      SignedInvitees::Known(vec![user(CAROL)])
     );
     assert_eq!(newest_signed_invitees(None, None), SignedInvitees::Unknown);
   }
@@ -167,5 +169,9 @@ mod tests {
     assert!(!signs_invitees(ReleaseVersion::parse("1.0.31")));
     assert!(signs_invitees(Some(SIGNED_INVITEES_RELEASE)));
     assert!(signs_invitees(ReleaseVersion::parse("1.1.0")));
+  }
+
+  fn user(raw: u64) -> UserId {
+    raw.to_string().parse().unwrap()
   }
 }
