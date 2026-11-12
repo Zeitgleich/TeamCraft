@@ -17,9 +17,9 @@ use leptos::prelude::*;
 use serde::Deserialize;
 use teamcraft_client_api::crash_reporting::trace::{self, TraceSettings, WireTraceTree};
 use teamcraft_client_api::crash_reporting::{
-  AppInfo, AppPlatform, BrowserInfo, CallReport, CallReportGate, CrashEvent, CrashLevel, CrashReporter,
-  CrashReportingConfig, CrashReportingConsent, CrashSendOutcome, ErrorSource, EventId, InstallationId,
-  PanicParts, PendingPanic, StackFrame, Transaction, frames_from_script_stack, without_ids,
+  AppInfo, AppPlatform, BrowserInfo, BrowserNoiseCount, CallReport, CallReportGate, CrashEvent, CrashLevel,
+  CrashReporter, CrashReportingConfig, CrashReportingConsent, CrashSendOutcome, ErrorSource, EventId,
+  InstallationId, PanicParts, PendingPanic, StackFrame, Transaction, frames_from_script_stack, without_ids,
 };
 use teamcraft_client_api::debug_log;
 use teamcraft_client_api::failure::ActionFailure;
@@ -48,6 +48,7 @@ thread_local! {
   static REPORTER: RefCell<Option<CrashReporter>> = const { RefCell::new(None) };
   static IS_FLUSHING: Cell<bool> = const { Cell::new(false) };
   static IS_DEAD: Cell<bool> = const { Cell::new(false) };
+  static BROWSER_NOISE: RefCell<BrowserNoiseCount> = RefCell::new(BrowserNoiseCount::default());
   static SCRIPT_ERRORS: Cell<u32> = const { Cell::new(0) };
   static SIGN_OUT_REPORTS: Cell<u32> = const { Cell::new(0) };
   static STORAGE_REPORTS: Cell<u32> = const { Cell::new(0) };
@@ -304,6 +305,11 @@ fn listen_to_window() {
     return;
   };
   let on_error = Closure::<dyn Fn(web_sys::ErrorEvent)>::new(|event: web_sys::ErrorEvent| {
+    // The browser's own notice about a layout loop is harmless and not the app's to report (#1760).
+    // async-ok: a counter of this module, not a signal.
+    if BROWSER_NOISE.with(|count| count.borrow_mut().absorb(&event.message())) {
+      return;
+    }
     let mut frames = frames_of(&event.error());
     if frames.is_empty() {
       frames.extend(StackFrame::from_error_event(
