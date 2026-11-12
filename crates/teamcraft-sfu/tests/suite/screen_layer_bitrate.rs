@@ -174,7 +174,7 @@ async fn measure(size: VideoResolution) -> Vec<Measured> {
       Err(seen) => Err(seen),
     };
     measured.push(Measured {
-      layer: *layer,
+      layer: layer.clone(),
       received,
     });
   }
