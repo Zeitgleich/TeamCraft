@@ -107,6 +107,9 @@ pub struct CallEngine {
   /// Layers of own tracks the SFU was last told the uplink carries (it starts with all of them);
   /// without an entry, unknown to it (after a rejoin).
   uplink_announced: HashMap<StreamId, Vec<u8>>,
+  /// The highest layer of an own track its encoders keep up with (#1762: a camera on an
+  /// overloaded machine leaves its top layers out); without an entry, all of them.
+  encoder_top_layers: HashMap<StreamId, u8>,
   uplink_policy: UplinkPolicy,
   /// Other devices' tracks this device receives, with the highest layer asked for.
   subscriptions: HashMap<StreamId, u8>,
@@ -554,6 +557,7 @@ impl CallEngine {
       adaptive_tracks: HashSet::new(),
       bitrates_announced: HashMap::new(),
       uplink_announced: HashMap::new(),
+      encoder_top_layers: HashMap::new(),
       uplink_policy: UplinkPolicy::default(),
       subscriptions: HashMap::new(),
       maybe_reconnect_grace: None,
@@ -1040,6 +1044,27 @@ impl CallEngine {
     }
   }
 
+  /// Sends an own track's layers only up to `maybe_top_layer` (`None`: all of them), whatever
+  /// the uplink carries: the device's encoders don't keep up with the others (#1762). Receivers
+  /// of a layer left out move to the highest one sent, and the SFU is told, as when the uplink
+  /// pauses a layer (#921); a layer that comes back starts with a keyframe. An unknown stream
+  /// changes nothing.
+  pub fn limit_own_layers(&mut self, stream_id: MediaStreamId, maybe_top_layer: Option<u8>) {
+    let stream = StreamId(stream_id.0);
+    if !self.own_tracks.contains_key(&stream) {
+      return;
+    }
+    let previous = match maybe_top_layer {
+      Some(top) => self.encoder_top_layers.insert(stream, top),
+      None => self.encoder_top_layers.remove(&stream),
+    };
+    if previous == maybe_top_layer {
+      return;
+    }
+    self.announce_layers(true);
+    self.announce_uplink_layers();
+  }
+
   /// Receives another device's track up to `max_layer`; `None` stops receiving it.
   pub fn subscribe_video(&mut self, stream_id: MediaStreamId, maybe_max_layer: Option<u8>) {
     let stream = StreamId(stream_id.0);
@@ -1212,6 +1237,7 @@ impl CallEngine {
         maybe_frames_given: None,
         maybe_frames_skipped: None,
         maybe_held_back_ms: Some(u64::try_from(track.counters.held_back.as_millis()).unwrap_or(u64::MAX)),
+        maybe_camera_limits: None,
       })
     });
     let mut remote: Vec<(&StreamId, &IncomingVideo)> = self.remote_video.iter().collect();
@@ -1733,6 +1759,7 @@ impl CallEngine {
     self.sfu_layers.remove(&stream);
     self.sent_layers.remove(&stream);
     self.uplink_announced.remove(&stream);
+    self.encoder_top_layers.remove(&stream);
     self.uplink_layers.remove(stream);
     self.adaptive_tracks.remove(&stream);
     self.bitrates_announced.remove(&stream);
@@ -1792,7 +1819,7 @@ impl CallEngine {
       let mut layers: Vec<u8> = wanted
         .iter()
         .copied()
-        .filter(|layer| self.uplink_layers.allows(stream, *layer))
+        .filter(|layer| self.is_layer_sent(stream, *layer))
         .collect();
       // Receivers of a layer the uplink stopped move to the highest one it carries (#921): sent
       // at once, it doesn't wait for the SFU to ask for it while their picture stands still (#939).
@@ -1800,7 +1827,7 @@ impl CallEngine {
         .layers
         .iter()
         .map(|info| info.layer)
-        .filter(|layer| self.uplink_layers.allows(stream, *layer))
+        .filter(|layer| self.is_layer_sent(stream, *layer))
         .max();
       if let Some(top) = maybe_carried_top
         && layers.len() < wanted.len()
@@ -1828,6 +1855,15 @@ impl CallEngine {
       }
     }
     self.announce_bitrates();
+  }
+
+  /// Whether an own track's layer goes out: the uplink carries it and the encoders keep up.
+  fn is_layer_sent(&self, stream: StreamId, layer: u8) -> bool {
+    self.uplink_layers.allows(stream, layer)
+      && self
+        .encoder_top_layers
+        .get(&stream)
+        .is_none_or(|top| layer <= *top)
   }
 
   /// Tells the driver the bitrate per layer of each adaptive own track, where that changed.
@@ -1875,7 +1911,7 @@ impl CallEngine {
         .layers
         .iter()
         .map(|info| info.layer)
-        .filter(|layer| self.uplink_layers.allows(stream, *layer))
+        .filter(|layer| self.is_layer_sent(stream, *layer))
         .collect();
       if self.uplink_announced.get(&stream) == Some(&layers) {
         continue;
@@ -4660,6 +4696,70 @@ mod tests {
         .map(|layers| layers.iter().max().map(|top| vec![*top]).unwrap_or_default())
         .collect();
       assert_eq!(encoded, tops, "carried: {carried:?}");
+    }
+
+    /// Issue #1762: a camera whose encoders don't keep up leaves its top layer out. Its receivers
+    /// move to the next lower one, the SFU hears it as from a limited uplink, and the layer comes
+    /// back with a keyframe once the encoders keep up again.
+    #[test]
+    fn layers_the_encoders_dont_keep_up_with_are_left_out_like_paused_ones() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      ask_for(&mut alice, &video_track(50, 1, 3));
+      alice
+        .handle_signal(
+          event(
+            6,
+            CallEvent::VideoPublished {
+              track: video_track(50, 1, 3),
+            },
+          ),
+          now,
+        )
+        .unwrap();
+      let needed = CallEvent::LayersNeeded {
+        stream_id: MediaStreamId(50),
+        layers: vec![2],
+      };
+      alice.handle_signal(event(7, needed), now).unwrap();
+      drain(&mut alice);
+      alice.limit_own_layers(MediaStreamId(50), Some(1));
+      let outputs = drain(&mut alice);
+      assert!(
+        outputs.contains(&EngineOutput::Event(CallEngineEvent::LayersNeeded {
+          stream_id: MediaStreamId(50),
+          layers: vec![1],
+        }))
+      );
+      assert!(
+        outputs.contains(&EngineOutput::Signal(CallClientMessage::UplinkLayers {
+          stream_id: MediaStreamId(50),
+          layers: vec![0, 1],
+        }))
+      );
+      // The same limit again says nothing.
+      alice.limit_own_layers(MediaStreamId(50), Some(1));
+      assert!(drain(&mut alice).is_empty());
+      alice.limit_own_layers(MediaStreamId(50), None);
+      let outputs = drain(&mut alice);
+      assert!(
+        outputs.contains(&EngineOutput::Event(CallEngineEvent::LayersNeeded {
+          stream_id: MediaStreamId(50),
+          layers: vec![2],
+        }))
+      );
+      assert!(
+        outputs.contains(&EngineOutput::Event(CallEngineEvent::KeyframeRequested {
+          stream_id: MediaStreamId(50),
+          layer: 2,
+        }))
+      );
+      assert!(
+        outputs.contains(&EngineOutput::Signal(CallClientMessage::UplinkLayers {
+          stream_id: MediaStreamId(50),
+          layers: vec![0, 1, 2],
+        }))
+      );
     }
 
     /// Issue #939: the driver of an adaptive camera hears the bitrate per layer whenever it

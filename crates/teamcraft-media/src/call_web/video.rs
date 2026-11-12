@@ -21,6 +21,12 @@
 //! itself, so viewers decode it either way. An encoder that refuses the new configuration is
 //! replaced at the new bitrate like a failed one.
 //!
+//! A camera's encoders are governed (#1762, [`crate::camera_governor`]): a layer whose encoder
+//! sends far more than its bitrate is configured lower and then gets fewer frames (Chrome's
+//! H.264 encoder skips none on its own, so on hard content a 320×180 layer sent ten times its
+//! bitrate), and encoders that don't keep up lower the camera's frame rate, then leave its top
+//! layers out. Screen shares are not governed.
+//!
 //! A watched track's canvas reports its shown size ([`SizeWatch`]), from which the call picks the
 //! layer to receive ([`crate::video::layer_for_view`]).
 //!
@@ -34,7 +40,7 @@ use js_sys::{Promise, Uint8Array};
 use teamcraft_proto::{
   MediaStreamId, ScreenContentMode, VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrackKind,
 };
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
@@ -50,6 +56,9 @@ use super::{
 };
 use crate::call_engine::OwnPublication;
 use crate::call_video::ReceivedVideoFrame;
+use crate::camera_governor::{
+  CameraGovernorConfig, CameraLoad, FrameTally, LayerLimit, LayerRateGuard, LoadStep, OverloadReason,
+};
 use crate::video::{
   CAMERA_FRAMERATE, LayerSizer, ScreenProfile, VideoResolution, camera_layers, fit_within, within_layer_limit,
 };
@@ -107,7 +116,19 @@ pub(super) struct TrackSender {
   maybe_effects: Option<effects::WebEffects>,
   /// When the next picture is due, at the track's frame rate.
   cadence: Cadence,
+  /// A camera's encoders against the frames they get (#1762); `None` for a screen share.
+  maybe_load: Option<CameraLoad>,
   _ended: Closure<dyn FnMut()>,
+}
+
+/// Why an own camera sends less than its plan (#1762), for the stats.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct CameraLimits {
+  pub planned: LoadStep,
+  pub load: LoadStep,
+  pub maybe_reason: Option<OverloadReason>,
+  /// Layers whose encoder overshot: the layer, the bitrate it is encoded at and its frame rate.
+  pub layers: Vec<(u8, u32, u8)>,
 }
 
 /// Which SFU stream an own track is sent on.
@@ -128,6 +149,12 @@ pub(super) struct LayerEncoders<E> {
   /// timing reports both, #1336).
   given: u64,
   skipped_queue_full: u64,
+  /// Set for a camera ([`LayerEncoders::govern`]): each layer's output is held to its bitrate.
+  maybe_governor: Option<CameraGovernorConfig>,
+  /// The frame rate the track is captured at now.
+  framerate: u8,
+  /// Frames given so far: a layer that gets every n-th frame takes those it divides.
+  frame_index: u64,
 }
 
 /// Opens an encoder for a layer; the number (generation) tells its failure reports from those of
@@ -143,6 +170,10 @@ struct Layer<E> {
   is_needed: bool,
   wants_keyframe: bool,
   restarts_in_a_row: u8,
+  /// Its output against its bitrate, for a governed track.
+  maybe_guard: Option<LayerRateGuard>,
+  /// The next output is measured afresh: the layer paused or resumed, or its encoder changed.
+  is_measure_stale: bool,
 }
 
 /// One layer's encoder: WebCodecs in the browser, a fake in tests.
@@ -153,8 +184,9 @@ pub(super) trait FrameEncoder {
   fn is_configured(&self) -> bool;
   fn queue_size(&self) -> u32;
   fn encode(&self, frame: &Self::Frame, is_keyframe: bool) -> Result<(), WebCallError>;
-  /// Encodes the next frames at `bitrate_bps`, the running encoder configured again.
-  fn set_bitrate(&mut self, bitrate_bps: u32) -> Result<(), WebCallError>;
+  /// Encodes the next frames at `bitrate_bps` and `framerate`, the running encoder configured
+  /// again.
+  fn configure(&mut self, bitrate_bps: u32, framerate: u8) -> Result<(), WebCallError>;
 }
 
 /// A layer's encoders kept failing: the browser can't encode the track, which stops.
@@ -175,6 +207,9 @@ struct LayerEncoder {
   encoder: VideoEncoder,
   /// Its `VideoEncoderConfig`, configured again with another bitrate (#939).
   config: js_sys::Object,
+  /// A camera's layer: a new configuration changes its frame rate too (#1762); a screen share's
+  /// keeps the track's.
+  is_framerate_per_layer: bool,
   _output: Closure<dyn FnMut(EncodedVideoChunk)>,
   _error: Closure<dyn FnMut(JsValue)>,
 }
@@ -303,7 +338,15 @@ impl TrackSender {
       latency,
       maybe_content_hint,
     };
-    let encoders = LayerEncoders::new(infos, encoding.opener(inputs))?;
+    let is_camera = plan.shape == LayerShape::Camera;
+    let layer_count = u8::try_from(infos.len()).unwrap_or(u8::MAX);
+    let mut encoders = LayerEncoders::new(infos, encoding.opener(inputs))?;
+    let now = Instant::now();
+    let maybe_load = is_camera.then(|| {
+      let config = CameraGovernorConfig::default();
+      encoders.govern(config, plan.framerate, now);
+      CameraLoad::new(plan.framerate, layer_count, now, &config)
+    });
     // "Stop sharing" in the browser's own UI (or an unplugged camera) ends the track.
     let ended_sender = inputs.clone();
     let ended_kind = plan.kind.clone();
@@ -329,7 +372,8 @@ impl TrackSender {
       frames_captured: 0,
       #[cfg(feature = "effects")]
       maybe_effects: plan.maybe_effects.map(effects::WebEffects::new).transpose()?,
-      cadence: Cadence::per_second(plan.framerate, Instant::now()),
+      cadence: Cadence::per_second(plan.framerate, now),
+      maybe_load,
       _ended: ended,
     })
   }
@@ -460,12 +504,65 @@ impl TrackSender {
       let (given, skipped) = self.encoders.frame_counts();
       effects.observe_encoders(given, skipped);
     }
-    result
+    let tally = result?;
+    self.govern_load(tally, Instant::now())
   }
 
-  /// A layer's encoder produced a frame: it works.
-  pub fn on_encoded(&mut self, layer: u8) {
-    self.encoders.on_encoded(layer);
+  /// A layer's encoder produced a picture of `bytes`: it works, and a governed layer's output is
+  /// held to its bitrate.
+  pub fn on_encoded(&mut self, layer: u8, bytes: usize, now: Instant) -> Result<(), EncoderGaveUp> {
+    self.encoders.on_encoded(layer, bytes, now)
+  }
+
+  /// The highest layer a governed camera's encoders keep up with, when they leave some out
+  /// ([`crate::call_engine::CallEngine::limit_own_layers`]).
+  pub fn maybe_top_layer(&self) -> Option<u8> {
+    let load = self.maybe_load.as_ref()?;
+    let off = load.step().top_layers_off;
+    let count = u8::try_from(self.encoders.layers.len()).unwrap_or(u8::MAX);
+    (off > 0).then(|| count.saturating_sub(1).saturating_sub(off))
+  }
+
+  /// What holds a governed camera below its plan; `None` for a screen share.
+  #[cfg(feature = "call-view")]
+  pub fn camera_limits(&self) -> Option<CameraLimits> {
+    let load = self.maybe_load.as_ref()?;
+    Some(CameraLimits {
+      planned: load.planned(),
+      load: load.step(),
+      maybe_reason: load.maybe_reason(),
+      layers: self.encoders.layer_limits(),
+    })
+  }
+
+  /// Judges whether the encoders keep up; a new step changes the capture's frame rate (the top
+  /// layers left out go through [`Self::maybe_top_layer`]).
+  fn govern_load(&mut self, tally: FrameTally, now: Instant) -> Result<(), EncoderGaveUp> {
+    let Some(load) = &mut self.maybe_load else {
+      return Ok(());
+    };
+    load.on_frame(tally);
+    let Some(config) = self.encoders.maybe_governor else {
+      return Ok(());
+    };
+    let Some(step) = load.evaluate(now, &config) else {
+      return Ok(());
+    };
+    info!(
+      framerate = step.framerate,
+      top_layers_off = step.top_layers_off,
+      reason = ?load.maybe_reason(),
+      "camera encoders' load changed the camera's frame rate or layers"
+    );
+    if step.framerate != self.framerate {
+      self.framerate = step.framerate;
+      self.cadence = Cadence::per_second(step.framerate, now);
+      self.frames_since_keyframe = self
+        .frames_since_keyframe
+        .min(KEYFRAME_INTERVAL_SECONDS * u32::from(step.framerate));
+      self.encoders.set_framerate(step.framerate)?;
+    }
+    Ok(())
   }
 
   /// WebCodecs reported that an encoder failed (and closed it).
@@ -538,16 +635,32 @@ impl<E: FrameEncoder> LayerEncoders<E> {
           is_needed: true,
           wants_keyframe: true,
           restarts_in_a_row: 0,
+          maybe_guard: None,
+          is_measure_stale: true,
         })
       })
       .collect::<Result<Vec<_>, WebCallError>>()?;
+    let framerate = layers.first().map_or(1, |layer| layer.info.max_framerate);
     Ok(Self {
       next_generation: layers.len() as u64,
       layers,
       open: Box::new(open),
       given: 0,
       skipped_queue_full: 0,
+      maybe_governor: None,
+      framerate,
+      frame_index: 0,
     })
+  }
+
+  /// Holds each layer's output to its bitrate from now on (a camera, #1762), the track captured
+  /// at `framerate`.
+  pub fn govern(&mut self, config: CameraGovernorConfig, framerate: u8, now: Instant) {
+    self.maybe_governor = Some(config);
+    self.framerate = framerate.max(1);
+    for layer in &mut self.layers {
+      layer.maybe_guard = Some(LayerRateGuard::new(now));
+    }
   }
 
   /// The layers as published, each with its whole bitrate.
@@ -569,13 +682,61 @@ impl<E: FrameEncoder> LayerEncoders<E> {
         continue;
       }
       layer.bitrate_bps = bitrate_bps;
-      if !layer.encoder.is_configured() {
-        continue;
-      }
-      if let Err(error) = layer.encoder.set_bitrate(bitrate_bps) {
-        warn!(%error, layer = layer.info.layer, bitrate_bps, "a video encoder takes no new bitrate; replacing it");
-        self.restart(index)?;
-      }
+      self.reconfigure(index)?;
+    }
+    Ok(())
+  }
+
+  /// The camera is captured at `framerate` from now on (its encoders didn't keep up, or keep up
+  /// again): every layer's encoder is configured at its share of it.
+  pub fn set_framerate(&mut self, framerate: u8) -> Result<(), EncoderGaveUp> {
+    let framerate = framerate.max(1);
+    if framerate == self.framerate {
+      return Ok(());
+    }
+    self.framerate = framerate;
+    for index in 0..self.layers.len() {
+      self.layers[index].is_measure_stale = true;
+      self.reconfigure(index)?;
+    }
+    Ok(())
+  }
+
+  /// The layers whose encoder overshot and runs limited: the layer, its bitrate and frame rate.
+  pub fn layer_limits(&self) -> Vec<(u8, u32, u8)> {
+    let Some(config) = &self.maybe_governor else {
+      return Vec::new();
+    };
+    self
+      .layers
+      .iter()
+      .filter_map(|layer| {
+        let limit = layer.limit(self.framerate, config);
+        limit.is_limited().then(|| {
+          (
+            layer.info.layer,
+            limit.bitrate_bps(layer.bitrate_bps, config),
+            limit.framerate(self.framerate),
+          )
+        })
+      })
+      .collect()
+  }
+
+  /// Configures a layer's running encoder at its bitrate and frame rate now; one that refuses is
+  /// replaced at them (starting with a keyframe), a closed one is replaced with the next frame.
+  fn reconfigure(&mut self, index: usize) -> Result<(), EncoderGaveUp> {
+    let built = self.built(index);
+    let layer = &mut self.layers[index];
+    if !layer.encoder.is_configured() {
+      return Ok(());
+    }
+    if let Err(error) = layer
+      .encoder
+      .configure(built.max_bitrate_bps, built.max_framerate)
+    {
+      warn!(%error, layer = layer.info.layer, bitrate_bps = built.max_bitrate_bps, "a video encoder takes no new configuration; replacing it");
+      self.restart(index)?;
     }
     Ok(())
   }
@@ -596,16 +757,32 @@ impl<E: FrameEncoder> LayerEncoders<E> {
     for layer in &mut self.layers {
       let is_needed = needed.contains(&layer.info.layer);
       layer.wants_keyframe |= is_needed && !layer.is_needed;
+      layer.is_measure_stale |= is_needed != layer.is_needed;
       layer.is_needed = is_needed;
     }
   }
 
   /// Encodes `frame` on every needed layer whose encoder has room. A failed encoder is replaced
   /// (the new one starts with the next frame, a keyframe); the error is only a layer that gave up.
-  pub fn encode(&mut self, frame: &E::Frame, is_periodic_keyframe: bool) -> Result<(), EncoderGaveUp> {
+  ///
+  /// A governed layer whose encoder overshot gets only every n-th frame; a periodic keyframe it
+  /// doesn't get waits for its next frame. The tally says how the encoders took the frame.
+  pub fn encode(
+    &mut self,
+    frame: &E::Frame,
+    is_periodic_keyframe: bool,
+  ) -> Result<FrameTally, EncoderGaveUp> {
+    let mut tally = FrameTally::default();
+    let frame_index = self.frame_index;
+    self.frame_index = self.frame_index.wrapping_add(1);
     for index in 0..self.layers.len() {
+      let divisor = self.limit(index).frame_divisor;
       let layer = &mut self.layers[index];
       if !layer.is_needed {
+        continue;
+      }
+      if !frame_index.is_multiple_of(u64::from(divisor.max(1))) {
+        layer.wants_keyframe |= is_periodic_keyframe;
         continue;
       }
       // Closed after an error whose report hasn't arrived yet (that report is stale then).
@@ -614,18 +791,22 @@ impl<E: FrameEncoder> LayerEncoders<E> {
         self.restart(index)?;
         continue;
       }
-      if layer.encoder.queue_size() > MAX_ENCODE_QUEUE {
+      let queued = layer.encoder.queue_size();
+      if queued > MAX_ENCODE_QUEUE {
         self.skipped_queue_full += 1;
+        tally.skipped += 1;
         continue;
       }
       self.given += 1;
+      tally.given += 1;
+      tally.queued += queued;
       let is_keyframe = std::mem::take(&mut layer.wants_keyframe) || is_periodic_keyframe;
       if let Err(error) = layer.encoder.encode(frame, is_keyframe) {
         warn!(%error, layer = layer.info.layer, "encoding a video frame failed");
         self.restart(index)?;
       }
     }
-    Ok(())
+    Ok(tally)
   }
 
   /// Frames given to the layers' encoders so far, and those skipped because a queue was full.
@@ -643,10 +824,14 @@ impl<E: FrameEncoder> LayerEncoders<E> {
     for layer in &mut self.layers {
       let generation = self.next_generation;
       self.next_generation += 1;
-      layer.encoder = (self.open)(layer.built(), generation)?;
+      layer.encoder = (self.open)(
+        layer.built(self.framerate, self.maybe_governor.as_ref()),
+        generation,
+      )?;
       layer.generation = generation;
       layer.wants_keyframe = true;
       layer.restarts_in_a_row = 0;
+      layer.is_measure_stale = true;
     }
     Ok(())
   }
@@ -666,11 +851,15 @@ impl<E: FrameEncoder> LayerEncoders<E> {
       layer.info = *info;
       let generation = self.next_generation;
       self.next_generation += 1;
-      match (self.open)(layer.built(), generation) {
+      match (self.open)(
+        layer.built(self.framerate, self.maybe_governor.as_ref()),
+        generation,
+      ) {
         Ok(encoder) => {
           layer.encoder = encoder;
           layer.generation = generation;
           layer.wants_keyframe = true;
+          layer.is_measure_stale = true;
         },
         Err(error) => {
           warn!(%error, layer = info.layer, "opening a video encoder at the new size failed");
@@ -681,11 +870,33 @@ impl<E: FrameEncoder> LayerEncoders<E> {
     Ok(())
   }
 
-  /// A layer's encoder produced a frame: it works, so a later failure may restart it again.
-  pub fn on_encoded(&mut self, layer: u8) {
-    if let Some(layer) = self.layer_mut(layer) {
-      layer.restarts_in_a_row = 0;
+  /// A layer's encoder produced a picture of `bytes`: it works, so a later failure may restart it
+  /// again. A governed layer's output is judged against its bitrate; a new limit configures its
+  /// encoder (one that refuses is replaced, and the error is a layer that gave up).
+  pub fn on_encoded(&mut self, layer: u8, bytes: usize, now: Instant) -> Result<(), EncoderGaveUp> {
+    let Some(index) = self.layers.iter().position(|current| current.info.layer == layer) else {
+      return Ok(());
+    };
+    let framerate = self.framerate;
+    let layer = &mut self.layers[index];
+    layer.restarts_in_a_row = 0;
+    let (Some(config), Some(guard)) = (&self.maybe_governor, &mut layer.maybe_guard) else {
+      return Ok(());
+    };
+    if std::mem::take(&mut layer.is_measure_stale) {
+      guard.measure_afresh(now);
     }
+    guard.on_output(bytes, now, config);
+    let Some(limit) = guard.evaluate(layer.bitrate_bps, framerate, now, config) else {
+      return Ok(());
+    };
+    info!(
+      layer = layer.info.layer,
+      bitrate_bps = limit.bitrate_bps(layer.bitrate_bps, config),
+      framerate = limit.framerate(framerate),
+      "a camera layer's output against its bitrate changed its limit"
+    );
+    self.reconfigure(index)
   }
 
   /// WebCodecs reported an encoder's failure; the report of an encoder already replaced is stale.
@@ -712,17 +923,33 @@ impl<E: FrameEncoder> LayerEncoders<E> {
       layer.restarts_in_a_row += 1;
       let generation = self.next_generation;
       self.next_generation += 1;
-      match (self.open)(layer.built(), generation) {
+      match (self.open)(
+        layer.built(self.framerate, self.maybe_governor.as_ref()),
+        generation,
+      ) {
         Ok(encoder) => {
           debug!(layer = layer.info.layer, "started a new video encoder");
           layer.encoder = encoder;
           layer.generation = generation;
           layer.wants_keyframe = true;
+          layer.is_measure_stale = true;
           return Ok(());
         },
         Err(error) => warn!(%error, layer = layer.info.layer, "starting a new video encoder failed"),
       }
     }
+  }
+
+  /// What layer `index` is held to now.
+  fn limit(&self, index: usize) -> LayerLimit {
+    match &self.maybe_governor {
+      Some(config) => self.layers[index].limit(self.framerate, config),
+      None => LayerLimit::NONE,
+    }
+  }
+
+  fn built(&self, index: usize) -> VideoLayerInfo {
+    self.layers[index].built(self.framerate, self.maybe_governor.as_ref())
   }
 
   fn layer_mut(&mut self, layer: u8) -> Option<&mut Layer<E>> {
@@ -731,12 +958,28 @@ impl<E: FrameEncoder> LayerEncoders<E> {
 }
 
 impl<E> Layer<E> {
-  /// What its encoder is opened with: the layer at the bitrate it is encoded at.
-  fn built(&self) -> VideoLayerInfo {
+  /// What its encoder is opened with: the layer at the bitrate it is encoded at, and for a
+  /// governed track at its limit and the track's frame rate now.
+  fn built(&self, framerate: u8, maybe_governor: Option<&CameraGovernorConfig>) -> VideoLayerInfo {
+    let Some(config) = maybe_governor else {
+      return VideoLayerInfo {
+        max_bitrate_bps: self.bitrate_bps,
+        ..self.info
+      };
+    };
+    let limit = self.limit(framerate, config);
     VideoLayerInfo {
-      max_bitrate_bps: self.bitrate_bps,
+      max_bitrate_bps: limit.bitrate_bps(self.bitrate_bps, config),
+      max_framerate: limit.framerate(framerate).min(self.info.max_framerate),
       ..self.info
     }
+  }
+
+  fn limit(&self, framerate: u8, config: &CameraGovernorConfig) -> LayerLimit {
+    self
+      .maybe_guard
+      .as_ref()
+      .map_or(LayerLimit::NONE, |guard| guard.limit(framerate, config))
   }
 }
 
@@ -790,7 +1033,7 @@ impl Encoding {
       ("width", JsValue::from(info.width)),
       ("height", JsValue::from(info.height)),
       ("bitrate", JsValue::from(info.max_bitrate_bps)),
-      ("framerate", JsValue::from(self.framerate)),
+      ("framerate", JsValue::from(self.layer_framerate(info))),
       ("latencyMode", JsValue::from_str(self.latency.as_str())),
     ];
     match self.codec {
@@ -816,6 +1059,17 @@ impl Encoding {
       },
     }
     dictionary(&entries)
+  }
+}
+
+impl Encoding {
+  /// A camera's layer is encoded at its own frame rate (lower while governed, #1762); a screen
+  /// share's at the track's, as before.
+  fn layer_framerate(&self, info: &VideoLayerInfo) -> u8 {
+    match self.kind {
+      VideoTrackKind::Camera => info.max_framerate,
+      _ => self.framerate,
+    }
   }
 }
 
@@ -872,6 +1126,7 @@ impl LayerEncoder {
     Ok(Self {
       encoder,
       config,
+      is_framerate_per_layer: encoding.kind == VideoTrackKind::Camera,
       _output: output,
       _error: error,
     })
@@ -898,17 +1153,18 @@ impl FrameEncoder for LayerEncoder {
       .map_err(browser("VideoEncoder"))
   }
 
-  /// `configure()` again with only the bitrate changed: the spec queues it behind the frames
+  /// `configure()` again with only the bitrate and frame rate changed: the spec queues it behind the frames
   /// already given, and Chrome then changes the running encoder's rate rather than build a new
   /// one; either way the chunks say which are keyframes. An error makes the caller replace the
   /// encoder.
-  fn set_bitrate(&mut self, bitrate_bps: u32) -> Result<(), WebCallError> {
-    js_sys::Reflect::set(
-      &self.config,
-      &JsValue::from_str("bitrate"),
-      &JsValue::from(bitrate_bps),
-    )
-    .map_err(browser("VideoEncoder"))?;
+  fn configure(&mut self, bitrate_bps: u32, framerate: u8) -> Result<(), WebCallError> {
+    let set = |key: &str, value: JsValue| {
+      js_sys::Reflect::set(&self.config, &JsValue::from_str(key), &value).map_err(browser("VideoEncoder"))
+    };
+    set("bitrate", JsValue::from(bitrate_bps))?;
+    if self.is_framerate_per_layer {
+      set("framerate", JsValue::from(framerate))?;
+    }
     self
       .encoder
       .configure(&self.config)
@@ -1958,7 +2214,7 @@ mod tests {
       for generation in 0..u64::from(MAX_ENCODER_RESTARTS) {
         encoders.on_failed(0, generation).unwrap();
       }
-      encoders.on_encoded(0);
+      encoders.on_encoded(0, 100, Instant::now()).unwrap();
       assert_eq!(encoders.on_failed(0, u64::from(MAX_ENCODER_RESTARTS)), Ok(()));
     }
 
@@ -2156,6 +2412,125 @@ mod tests {
     }
   }
 
+  /// Issue #1762: a camera's layers are held to their bitrate, and its frame rate follows the
+  /// encoders' load.
+  mod governed {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn an_overshooting_layer_is_configured_lower_then_gets_fewer_frames() {
+      let (bench, mut encoders) = encoders(2);
+      let start = Instant::now();
+      let config = CameraGovernorConfig::default();
+      encoders.govern(config, 30, start);
+      // Layer 0 sends 5 kB per picture (1.2 Mbit/s for 150 kbit/s); layer 1 keeps to its bitrate.
+      let mut now = start;
+      run(&mut encoders, &mut now, 64, &[(0, 5_000), (1, 1_000)]);
+      // The bitrate step: the running encoder configured at half its bitrate, at 30 fps.
+      assert_eq!(bench.borrow().rates[2..], [(0, 75_000)]);
+      assert_eq!(bench.borrow().framerates, vec![(0, 30)]);
+      run(&mut encoders, &mut now, 64, &[(0, 5_000), (1, 1_000)]);
+      // Still too much: every second frame, the encoder told so.
+      assert_eq!(bench.borrow().framerates[1..], [(0, 15)]);
+      assert_eq!(encoders.layer_limits(), vec![(0, 75_000, 15)]);
+      let coded_before = bench.borrow().coded.len();
+      for _ in 0..4 {
+        encoders.encode(&(), false).unwrap();
+      }
+      let layer_0 = bench.borrow().coded[coded_before..]
+        .iter()
+        .filter(|(layer, ..)| *layer == 0)
+        .count();
+      assert_eq!(layer_0, 2);
+      // Layer 1, within its bitrate, was never configured again.
+      assert!(
+        bench
+          .borrow()
+          .framerates
+          .iter()
+          .all(|(generation, _)| *generation == 0)
+      );
+    }
+
+    /// A periodic keyframe that falls on a frame a limited layer doesn't get comes with its next.
+    #[test]
+    fn a_limited_layer_takes_a_periodic_keyframe_on_its_next_frame() {
+      let (bench, mut encoders) = encoders(1);
+      let start = Instant::now();
+      encoders.govern(CameraGovernorConfig::default(), 30, start);
+      let mut now = start;
+      run(&mut encoders, &mut now, 150, &[(0, 5_000)]);
+      assert_eq!(encoders.layer_limits(), vec![(0, 75_000, 15)]);
+      // Line the frames up so that the periodic keyframe falls on a skipped one.
+      if encoders.frame_index % 2 == 0 {
+        encoders.encode(&(), false).unwrap();
+      }
+      let coded_before = bench.borrow().coded.len();
+      encoders.encode(&(), true).unwrap();
+      encoders.encode(&(), false).unwrap();
+      assert_eq!(bench.borrow().coded[coded_before..], [(0, 0, true)]);
+    }
+
+    #[test]
+    fn a_lower_capture_frame_rate_configures_every_layer() {
+      let (bench, mut encoders) = encoders(2);
+      encoders.govern(CameraGovernorConfig::default(), 30, Instant::now());
+      encoders.set_framerate(20).unwrap();
+      assert_eq!(bench.borrow().framerates, vec![(0, 20), (1, 20)]);
+      // The bitrates stay.
+      assert_eq!(bench.borrow().rates[2..], [(0, 150_000), (1, 300_000)]);
+      encoders.set_framerate(20).unwrap();
+      assert_eq!(bench.borrow().framerates.len(), 2);
+    }
+
+    #[test]
+    fn the_tally_counts_frames_given_skipped_and_queued() {
+      let (bench, mut encoders) = encoders(2);
+      bench.borrow_mut().queue = 1;
+      let tally = encoders.encode(&(), false).unwrap();
+      assert_eq!((tally.given, tally.skipped, tally.queued), (2, 0, 2));
+      bench.borrow_mut().queue = MAX_ENCODE_QUEUE + 1;
+      let tally = encoders.encode(&(), false).unwrap();
+      assert_eq!((tally.given, tally.skipped, tally.queued), (0, 2, 0));
+    }
+
+    /// Ungoverned encoders (a screen share) are configured at their bitrate alone.
+    #[test]
+    fn ungoverned_layers_have_no_limits() {
+      let (bench, mut encoders) = encoders(1);
+      let mut now = Instant::now();
+      run(&mut encoders, &mut now, 30 * 6, &[(0, 50_000)]);
+      assert!(encoders.layer_limits().is_empty());
+      assert_eq!(bench.borrow().rates, vec![(0, 150_000)]);
+    }
+
+    /// Gives `frames` frames at 30 fps, each layer of `outputs` giving a picture of its bytes.
+    fn run(
+      encoders: &mut LayerEncoders<FakeEncoder>,
+      now: &mut Instant,
+      frames: u32,
+      outputs: &[(u8, usize)],
+    ) {
+      for _ in 0..frames {
+        *now += Duration::from_millis(33);
+        let before = encoders.frame_index;
+        encoders.encode(&(), false).unwrap();
+        for &(layer, bytes) in outputs {
+          let divisor = encoders
+            .layers
+            .iter()
+            .position(|current| current.info.layer == layer)
+            .map_or(1, |index| encoders.limit(index).frame_divisor);
+          if before.is_multiple_of(u64::from(divisor)) {
+            encoders.on_encoded(layer, bytes, *now).unwrap();
+          }
+        }
+      }
+    }
+  }
+
   mod video_view {
     use super::*;
 
@@ -2252,8 +2627,12 @@ mod tests {
     failing_opens: usize,
     /// Encoders' bitrates by generation: each opened one's and each configured again.
     rates: Vec<(u64, u32)>,
-    /// Generations whose `set_bitrate` throws.
+    /// Generations whose `configure` throws.
     refusing: HashSet<u64>,
+    /// Encoders' frame rates by generation, each time they are configured again.
+    framerates: Vec<(u64, u8)>,
+    /// Frames waiting in every encoder.
+    queue: u32,
   }
 
   type Shared<C> = Rc<RefCell<Bench<C>>>;
@@ -2280,6 +2659,8 @@ mod tests {
         failing_opens: 0,
         rates: Vec::new(),
         refusing: HashSet::new(),
+        framerates: Vec::new(),
+        queue: 0,
       }))
     }
 
@@ -2312,7 +2693,7 @@ mod tests {
     }
 
     fn queue_size(&self) -> u32 {
-      0
+      self.bench.borrow().queue
     }
 
     fn encode(&self, _frame: &(), is_keyframe: bool) -> Result<(), WebCallError> {
@@ -2322,12 +2703,13 @@ mod tests {
         .code(self.layer, self.generation, is_keyframe)
     }
 
-    fn set_bitrate(&mut self, bitrate_bps: u32) -> Result<(), WebCallError> {
+    fn configure(&mut self, bitrate_bps: u32, framerate: u8) -> Result<(), WebCallError> {
       let mut bench = self.bench.borrow_mut();
       if bench.refusing.contains(&self.generation) {
         return Err(failure("configure"));
       }
       bench.rates.push((self.generation, bitrate_bps));
+      bench.framerates.push((self.generation, framerate));
       Ok(())
     }
   }

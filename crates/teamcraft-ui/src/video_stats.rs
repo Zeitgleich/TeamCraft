@@ -6,7 +6,8 @@
 use std::time::Duration;
 
 use teamcraft_client_api::video_stats::{
-  EncoderImplementation, ReceivedVideoStats, SentVideoStats, VideoSize, VideoStatsReport,
+  CameraLimitsStats, EncoderImplementation, EncoderOverload, ReceivedVideoStats, SentVideoStats, VideoSize,
+  VideoStatsReport,
 };
 use teamcraft_proto::{MediaStreamId, VideoCodec, VideoTrackKind};
 
@@ -215,7 +216,7 @@ fn sent_rows(
     },
   );
   let uplink = report.maybe_uplink;
-  vec![
+  let mut rows = vec![
     row(
       "stats-resolution",
       words(
@@ -285,7 +286,48 @@ fn sent_rows(
         ],
       ),
     ),
-  ]
+  ];
+  if let Some(limits) = &sent.maybe_camera_limits {
+    rows.push(row("stats-limits", camera_limits_text(limits, words)));
+  }
+  rows
+}
+
+/// Why an own camera sends less than its plan (#1762): the encoders' load, then each layer
+/// whose encoder overshot; "none" while nothing holds it back.
+fn camera_limits_text(limits: &CameraLimitsStats, words: Words<'_>) -> String {
+  if !limits.is_limited() {
+    return words("stats-value-limits-none", &[]);
+  }
+  let mut parts = Vec::new();
+  if limits.framerate < limits.planned_framerate || limits.top_layers_off > 0 {
+    let reason = match limits.maybe_overload {
+      Some(EncoderOverload::SkippedFrames) => words("stats-overload-skipped", &[]),
+      Some(EncoderOverload::QueuedFrames) => words("stats-overload-queued", &[]),
+      Some(EncoderOverload::SlowEncoding) => words("stats-overload-slow", &[]),
+      Some(EncoderOverload::Unknown) | None => MISSING.to_owned(),
+    };
+    parts.push(words(
+      "stats-value-limits-load",
+      &[
+        ("fps", &limits.framerate.to_string()),
+        ("planned", &limits.planned_framerate.to_string()),
+        ("off", &limits.top_layers_off.to_string()),
+        ("reason", &reason),
+      ],
+    ));
+  }
+  for layer in &limits.layers {
+    parts.push(words(
+      "stats-value-limits-layer",
+      &[
+        ("layer", &layer.layer.to_string()),
+        ("rate", &bitrate_text(f64::from(layer.bitrate_bps))),
+        ("fps", &layer.framerate.to_string()),
+      ],
+    ));
+  }
+  parts.join(" · ")
 }
 
 fn received_rows(
@@ -436,7 +478,7 @@ fn layer_list(layers: impl Iterator<Item = u8>) -> String {
 #[cfg(test)]
 mod tests {
   use teamcraft_client_api::video_stats::{
-    OfferedLayer, SentLayerStats, UplinkStats, VideoEncoderInfo, VideoTrackStats,
+    LayerLimitStats, OfferedLayer, SentLayerStats, UplinkStats, VideoEncoderInfo, VideoTrackStats,
   };
 
   use super::*;
@@ -652,7 +694,7 @@ mod tests {
         ));
         window.push(report(
           2_000,
-          sent_camera(5, [(2, 2), (2, 2), (0, 0)], 2),
+          sent_camera(5, [(2, 2), (2, 2), (0, 0)], 2).map(with_limits),
           Some(received(2, 2, 0, 2)),
         ));
         for target in [StatsTarget::OwnCamera, StatsTarget::Received(REMOTE)] {
@@ -670,6 +712,52 @@ mod tests {
         }
       }
     }
+  }
+
+  /// Issue #1762: the overlay says why the own camera sends less than planned.
+  #[test]
+  fn the_camera_limits_say_why_quality_dropped() {
+    let mut window = StatsWindow::default();
+    window.push(report(1_000, sent_camera(5, [(1, 1), (1, 1), (0, 0)], 1), None));
+    window.push(report(
+      2_000,
+      sent_camera(5, [(2, 2), (2, 2), (0, 0)], 2).map(with_limits),
+      None,
+    ));
+    assert_eq!(
+      value(&english(&window, StatsTarget::OwnCamera), "stats-limits"),
+      "encoders overloaded (frames skipped): 15 of 30 fps, top layers off 1 · layer 0 over its bitrate: 75 kbit/s at 5 fps"
+    );
+    let calm = sent_camera(5, [(3, 3), (3, 3), (0, 0)], 3).map(|mut sent| {
+      sent.maybe_camera_limits = Some(CameraLimitsStats {
+        planned_framerate: 30,
+        framerate: 30,
+        top_layers_off: 0,
+        maybe_overload: None,
+        layers: Vec::new(),
+      });
+      sent
+    });
+    window.push(report(3_000, calm, None));
+    assert_eq!(
+      value(&english(&window, StatsTarget::OwnCamera), "stats-limits"),
+      "none"
+    );
+  }
+
+  fn with_limits(mut sent: SentVideoStats) -> SentVideoStats {
+    sent.maybe_camera_limits = Some(CameraLimitsStats {
+      planned_framerate: 30,
+      framerate: 15,
+      top_layers_off: 1,
+      maybe_overload: Some(EncoderOverload::SkippedFrames),
+      layers: vec![LayerLimitStats {
+        layer: 0,
+        bitrate_bps: 75_000,
+        framerate: 5,
+      }],
+    });
+    sent
   }
 
   fn english(window: &StatsWindow, target: StatsTarget) -> Vec<StatsRow> {
@@ -743,6 +831,7 @@ mod tests {
       maybe_frames_given: None,
       maybe_frames_skipped: None,
       maybe_held_back_ms: None,
+      maybe_camera_limits: None,
     })
   }
 

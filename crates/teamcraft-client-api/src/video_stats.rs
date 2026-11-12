@@ -79,6 +79,58 @@ pub struct SentVideoStats {
   /// How long the uplink held the top layer back (it carried only lower ones), in milliseconds.
   #[serde(default)]
   pub maybe_held_back_ms: Option<u64>,
+  /// What holds an own camera below its plan (#1762); `None` where nothing governs it (screen
+  /// shares, the desktop's encoders).
+  #[serde(default)]
+  pub maybe_camera_limits: Option<CameraLimitsStats>,
+}
+
+/// Why an own camera sends less than it was planned with (#1762): its encoders didn't keep up
+/// (the frame rate first, then the top layers), or a layer's encoder sent far more than its
+/// bitrate (configured lower, then given fewer frames).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CameraLimitsStats {
+  /// The frame rate the camera was started with.
+  pub planned_framerate: u8,
+  /// The frame rate it is captured at now.
+  pub framerate: u8,
+  /// Top layers left out because the encoders didn't keep up.
+  pub top_layers_off: u8,
+  /// Why the encoders were found overloaded, while the camera runs below its plan.
+  #[serde(default)]
+  pub maybe_overload: Option<EncoderOverload>,
+  /// Layers held below their bitrate or frame rate because their encoder overshot.
+  #[serde(default)]
+  pub layers: Vec<LayerLimitStats>,
+}
+
+/// How a camera's encoders were found overloaded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EncoderOverload {
+  /// Frames found an encoder's queue full and were skipped.
+  SkippedFrames,
+  /// Frames waited in the encoders' queues.
+  QueuedFrames,
+  /// Encoding took most of the frame interval.
+  SlowEncoding,
+  #[serde(other)]
+  Unknown,
+}
+
+/// A layer whose encoder overshot its bitrate, and what it is held to now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LayerLimitStats {
+  pub layer: u8,
+  pub bitrate_bps: u32,
+  pub framerate: u8,
+}
+
+impl CameraLimitsStats {
+  /// Whether anything holds the camera below its plan.
+  pub fn is_limited(&self) -> bool {
+    self.framerate < self.planned_framerate || self.top_layers_off > 0 || !self.layers.is_empty()
+  }
 }
 
 /// One simulcast layer of an own track.
@@ -321,6 +373,7 @@ mod tests {
       maybe_frames_given: None,
       maybe_frames_skipped: None,
       maybe_held_back_ms: Some(0),
+      maybe_camera_limits: None,
     }
   }
 }
