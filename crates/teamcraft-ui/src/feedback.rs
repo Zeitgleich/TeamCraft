@@ -167,6 +167,7 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       CallFailure::CameraNoPicture => "error-call-camera-no-picture",
       CallFailure::CameraStopped => "error-call-camera-stopped",
       CallFailure::VideoEncodingFailed => "error-call-video-encoding-failed",
+      CallFailure::VideoNotDecodableByAll => "error-call-video-not-decodable-by-all",
       CallFailure::ScreenNoPicture => "error-call-screen-no-picture",
       CallFailure::CameraBlack => "error-call-camera-black",
       CallFailure::ScreenBlack => "error-call-screen-black",

@@ -126,6 +126,7 @@ pub struct NativeCall {
   next_publication: Arc<AtomicU32>,
   /// The microphone's newest meter reading (#986).
   microphone_level: SharedLevel,
+  video_decoders: Vec<VideoCodec>,
 }
 
 /// How to reach the SFU and what to send and play.
@@ -457,6 +458,7 @@ impl NativeCall {
     let (event_tx, events) = mpsc::unbounded_channel();
     let microphone_level = SharedLevel::default();
     let next_publication = Arc::new(AtomicU32::new(0));
+    let video_decoders = config.engine.capabilities.video_decoders.clone();
     let task = tokio::spawn(run_call(
       config,
       link,
@@ -471,12 +473,19 @@ impl NativeCall {
       task,
       next_publication,
       microphone_level,
+      video_decoders,
     })
   }
 
   /// Whether the call has ended by itself.
   pub fn is_finished(&self) -> bool {
     self.task.is_finished()
+  }
+
+  /// The video codecs this device decodes, as the call announced them: others' tracks in another
+  /// codec can't be shown here (#1793).
+  pub fn video_decoders(&self) -> &[VideoCodec] {
+    &self.video_decoders
   }
 
   /// The microphone's level (0.0 to 1.0) as the call captures it, also while muted, about ten

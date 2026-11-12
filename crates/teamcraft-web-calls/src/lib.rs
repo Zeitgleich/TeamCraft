@@ -1537,6 +1537,12 @@ impl Host {
   }
 
   fn on_engine_event(&self, roster: &mut CallRoster, event: CallEngineEvent) {
+    if matches!(event, CallEngineEvent::OwnVideoNotDecodableByAll) {
+      self.report(&ActionFailure::new(
+        FailureKind::Call(CallFailure::VideoNotDecodableByAll),
+        "the browser sends video in a codec not everyone in the call decodes",
+      ));
+    }
     if let CallEngineEvent::OwnVideoEnded { kind, end } = &event {
       if *end == OwnVideoEnd::EncodingFailed {
         self.report(&ActionFailure::new(
@@ -1702,6 +1708,7 @@ async fn run_media(
   mut telemetry: CallTelemetry,
 ) {
   let mut roster = CallRoster::new(own_device);
+  roster.set_video_decoders(call.video_decoders().to_vec());
   let mut is_hang_up = false;
   loop {
     let next = {

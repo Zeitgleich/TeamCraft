@@ -8,7 +8,7 @@ use teamcraft_client_api::calls::{
   ActiveCall, CallEndReason, CallStatusSounds, EncryptionFailure, Participant, RemoteVideoTrack,
   ScreenShareSound,
 };
-use teamcraft_proto::{DeviceId, MediaStreamId, UserId, VideoTrackKind};
+use teamcraft_proto::{DeviceId, MediaStreamId, UserId, VideoCodec, VideoTrackKind};
 
 use crate::call_cues::StatusCues;
 use crate::call_engine::{CallEngineEvent, OwnVideoEnd};
@@ -34,6 +34,8 @@ pub struct CallRoster {
   stalled_captures: Vec<(DeviceId, VideoTrackKind)>,
   /// Own tracks whose capture stalled (#1805): the hint stays while any of them is.
   own_stalled: Vec<VideoTrackKind>,
+  /// The video codecs this device decodes; empty: not said, every track counts as decodable.
+  video_decoders: Vec<VideoCodec>,
 }
 
 impl CallRoster {
@@ -42,6 +44,12 @@ impl CallRoster {
       own_device: Some(own_device),
       ..Self::default()
     }
+  }
+
+  /// The video codecs this device decodes (`MediaCapabilities::video_decoders`): others' tracks in
+  /// another codec are marked [`RemoteVideoTrack::is_undecodable`] (#1793).
+  pub fn set_video_decoders(&mut self, decoders: Vec<VideoCodec>) {
+    self.video_decoders = decoders;
   }
 
   /// Updates the view's active call from one engine event; `true` if the UI should read again. Audio and
@@ -287,6 +295,8 @@ impl CallRoster {
                 .iter()
                 .map(|layer| (layer.width, layer.height))
                 .collect(),
+              // The base layer is in the track's codec; every viewer must decode that one.
+              is_undecodable: !self.video_decoders.is_empty() && !self.video_decoders.contains(&track.codec),
             },
           );
         }

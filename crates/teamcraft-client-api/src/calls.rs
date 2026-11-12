@@ -904,6 +904,10 @@ pub struct RemoteVideoTrack {
   pub kind: teamcraft_proto::VideoTrackKind,
   /// (width, height) of each simulcast layer, lowest first; pick `max_layer` by tile size.
   pub layers: Vec<(u16, u16)>,
+  /// It goes out in a codec this device doesn't decode (#1793: a browser that can't encode H.264
+  /// sends AV1 or VP9): the tile says why it shows no video.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_undecodable: bool,
 }
 
 /// A call running in a conversation (server roster), whether or not this device is in it.

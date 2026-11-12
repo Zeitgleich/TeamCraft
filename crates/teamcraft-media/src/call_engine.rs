@@ -313,6 +313,10 @@ pub enum CallEngineEvent {
     kind: VideoTrackKind,
     end: OwnVideoEnd,
   },
+  /// Not from the engine but from the media driver, once per call (#1793): an own track goes out in
+  /// a codec not every other device decodes, because this browser can't encode H.264. Those
+  /// devices get no video from this one; the UI says so.
+  OwnVideoNotDecodableByAll,
   /// This device's screen share ended because another device started one (a call has one screen
   /// share at a time; the SFU lets the latest win). The engine no longer sends it, nor its sound;
   /// the driver stops capturing it and reports [`CallEngineEvent::OwnVideoEnded`] with
@@ -904,27 +908,68 @@ impl CallEngine {
 
   /// The codec to publish a track in that the driver can encode as any of `candidates`, best
   /// first (#565): the first one this device announced as an encoder and every other device that
-  /// receives video decodes ([`CallEngineEvent::DecodableVideoCodecs`]). H.264, which every
-  /// device decodes, when none of them is, and before the SFU said (an older SFU never does).
+  /// receives video decodes ([`CallEngineEvent::DecodableVideoCodecs`]). When none of them is,
+  /// and before the SFU said (an older SFU never does), [`Self::fallback_video_codec`].
   pub fn video_codec_for(&self, candidates: &[VideoCodec]) -> VideoCodec {
     let Some(decodable) = &self.maybe_decodable else {
-      return VideoCodec::H264;
+      return self.fallback_video_codec(candidates);
     };
     candidates
       .iter()
-      .find(|codec| decodable.contains(codec) && self.config.capabilities.video_encoders.contains(codec))
+      .find(|codec| decodable.contains(codec) && self.encodes(codec))
+      .cloned()
+      .unwrap_or_else(|| self.fallback_video_codec(candidates))
+  }
+
+  /// The codecs of `candidates`, in their order, this device encodes and every other device that
+  /// receives video decodes (#565, #1733); before the SFU said (an older SFU never does), or when
+  /// there are none, [`Self::fallback_video_codec`] alone. [`Self::video_codec_for`] is the first
+  /// of them.
+  pub fn video_codecs_for(&self, candidates: &[VideoCodec]) -> Vec<VideoCodec> {
+    let Some(decodable) = &self.maybe_decodable else {
+      return vec![self.fallback_video_codec(candidates)];
+    };
+    let codecs = self.encodable(candidates, decodable);
+    if codecs.is_empty() {
+      vec![self.fallback_video_codec(candidates)]
+    } else {
+      codecs
+    }
+  }
+
+  /// What a track goes out in when no codec of `candidates` is both encoded here and decoded by
+  /// everyone: H.264, which every device decodes, where this device encodes it (or encodes none
+  /// of `candidates`, so the failure says why). A browser whose H.264 encoder refuses to work
+  /// (#1793: Firefox on Linux) sends the first candidate it encodes that some other device
+  /// decodes, else the first it encodes: those who can't decode it get no video from it and
+  /// are told so ([`Self::is_decodable_by_all`]).
+  pub fn fallback_video_codec(&self, candidates: &[VideoCodec]) -> VideoCodec {
+    if self.encodes(&VideoCodec::H264) {
+      return VideoCodec::H264;
+    }
+    let is_decoded_by_some = |codec: &&VideoCodec| {
+      self
+        .maybe_decodable
+        .iter()
+        .flatten()
+        .chain(&self.decodable_by_some)
+        .any(|decoded| decoded == *codec)
+    };
+    let encodable = || candidates.iter().filter(|codec| self.encodes(codec));
+    encodable()
+      .find(is_decoded_by_some)
+      .or_else(|| encodable().next())
       .cloned()
       .unwrap_or(VideoCodec::H264)
   }
 
-  /// The codecs of `candidates`, in their order, this device encodes and every other device that
-  /// receives video decodes (#565, #1733); H.264 alone before the SFU said (an older SFU never
-  /// does). [`Self::video_codec_for`] is the first of them.
-  pub fn video_codecs_for(&self, candidates: &[VideoCodec]) -> Vec<VideoCodec> {
-    let Some(decodable) = &self.maybe_decodable else {
-      return vec![VideoCodec::H264];
-    };
-    self.encodable(candidates, decodable)
+  /// Whether every other device that receives video decodes `codec`, as far as the SFU said
+  /// (#1793); `true` before it said.
+  pub fn is_decodable_by_all(&self, codec: &VideoCodec) -> bool {
+    self
+      .maybe_decodable
+      .as_ref()
+      .is_none_or(|decodable| decodable.contains(codec))
   }
 
   /// The codecs of `candidates`, in their order, a track's larger layers may go out in above a
@@ -939,9 +984,14 @@ impl CallEngine {
   fn encodable(&self, candidates: &[VideoCodec], decodable: &[VideoCodec]) -> Vec<VideoCodec> {
     candidates
       .iter()
-      .filter(|codec| decodable.contains(codec) && self.config.capabilities.video_encoders.contains(codec))
+      .filter(|codec| decodable.contains(codec) && self.encodes(codec))
       .cloned()
       .collect()
+  }
+
+  /// Whether this device announced `codec` as one it encodes.
+  fn encodes(&self, codec: &VideoCodec) -> bool {
+    self.config.capabilities.video_encoders.contains(codec)
   }
 
   /// The most simulcast layers a track may be planned with (#978): what the SFU said it takes,
@@ -3505,6 +3555,66 @@ mod tests {
         output,
         EngineOutput::Event(CallEngineEvent::DecodableVideoCodecs(_))
       )));
+    }
+
+    /// #1793: a browser whose H.264 encoder refuses to work sends what everyone decodes of what
+    /// it encodes (AV1, then VP9), with the same candidates; where some device decodes only
+    /// H.264, the codec some others decode, and the driver is told not everyone decodes it.
+    #[test]
+    fn a_device_without_h264_sends_what_the_others_decode() {
+      let now = Instant::now();
+      let mut engine = CallEngine::new(
+        CallEngineConfig {
+          capabilities: MediaCapabilities {
+            video_encoders: vec![VideoCodec::Av1, VideoCodec::Vp9],
+            ..MediaCapabilities::default()
+          },
+          ..engine(1, now).config
+        },
+        now,
+      );
+      engine.join("t".into());
+      engine.handle_signal(event(1, joined(1, &[2])), now).unwrap();
+      let camera = [VideoCodec::H264, VideoCodec::Av1, VideoCodec::Vp9];
+      assert_eq!(engine.video_codec_for(&camera), VideoCodec::Av1, "older SFU");
+      assert!(engine.is_decodable_by_all(&VideoCodec::Av1), "not said yet");
+
+      let decodes = |seq, codecs: &[VideoCodec], by_some: &[VideoCodec]| {
+        event(
+          seq,
+          CallEvent::DecodableVideoCodecs {
+            codecs: codecs.to_vec(),
+            decodable_by_some: by_some.to_vec(),
+          },
+        )
+      };
+      engine
+        .handle_signal(decodes(2, &[VideoCodec::Vp9, VideoCodec::H264], &[]), now)
+        .unwrap();
+      assert_eq!(engine.video_codec_for(&camera), VideoCodec::Vp9);
+      assert_eq!(engine.video_codecs_for(&camera), vec![VideoCodec::Vp9]);
+      assert!(engine.is_decodable_by_all(&VideoCodec::Vp9));
+
+      // A phone that decodes H.264 only joined; a desktop app decodes AV1 as a layer.
+      engine
+        .handle_signal(
+          decodes(3, &[VideoCodec::H264], &[VideoCodec::Av1, VideoCodec::H264]),
+          now,
+        )
+        .unwrap();
+      assert_eq!(engine.video_codec_for(&camera), VideoCodec::Av1);
+      assert_eq!(engine.video_codecs_for(&camera), vec![VideoCodec::Av1]);
+      assert!(!engine.is_decodable_by_all(&VideoCodec::Av1));
+      // Nobody else decodes either: the first it encodes.
+      engine
+        .handle_signal(decodes(4, &[VideoCodec::H264], &[]), now)
+        .unwrap();
+      assert_eq!(
+        engine.video_codec_for(&[VideoCodec::H264, VideoCodec::Vp9, VideoCodec::Av1]),
+        VideoCodec::Vp9
+      );
+      // Nothing it encodes among the candidates: H.264, whose failure says why.
+      assert_eq!(engine.video_codec_for(&[VideoCodec::H264]), VideoCodec::H264);
     }
 
     #[test]

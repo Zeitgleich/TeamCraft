@@ -216,6 +216,10 @@ pub enum CallFailure {
   /// The browser can't encode the video in a codec the call uses (Firefox without its H.264
   /// plugin, say): the camera or share was fine, the video is off, audio goes on.
   VideoEncodingFailed,
+  /// The video goes out, but in a codec some others in the call can't decode: this browser can't
+  /// encode H.264 (Firefox on Linux, #1793), and a phone decodes nothing else. They get no video
+  /// from this device; told once per call.
+  VideoNotDecodableByAll,
   /// The camera sends, but only black (covered, a privacy shutter, a camera that doesn't wake
   /// up). The video stays on.
   CameraBlack,
@@ -263,7 +267,7 @@ pub enum CallFailure {
 }
 
 impl CallFailure {
-  const ALL: [Self; 33] = [
+  const ALL: [Self; 34] = [
     Self::MicrophoneDenied,
     Self::MicrophoneMissing,
     Self::MicrophoneInUse,
@@ -282,6 +286,7 @@ impl CallFailure {
     Self::CameraStopped,
     Self::ScreenNoPicture,
     Self::VideoEncodingFailed,
+    Self::VideoNotDecodableByAll,
     Self::CameraBlack,
     Self::ScreenBlack,
     Self::Unsupported,
@@ -320,6 +325,7 @@ impl CallFailure {
       Self::CameraStopped => "camera_stopped",
       Self::ScreenNoPicture => "screen_no_picture",
       Self::VideoEncodingFailed => "video_encoding_failed",
+      Self::VideoNotDecodableByAll => "video_not_decodable_by_all",
       Self::CameraBlack => "camera_black",
       Self::ScreenBlack => "screen_black",
       Self::Unsupported => "unsupported",

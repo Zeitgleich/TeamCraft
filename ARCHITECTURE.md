@@ -502,6 +502,15 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
   codecs decodes (`decodable_by_some`); a sender encodes an AV1 layer only when someone does, and
   publishes the share anew when its layers' codecs change. An SFU from before sends no
   `decodable_by_some`: the share then goes out in one codec, as below.
+- **A browser that can't encode H.264** (#1793): `isConfigSupported` isn't trusted alone; a web
+  client test-encodes one small frame per codec once per page (Firefox on Linux says yes to
+  H.264 and then refuses every frame). Without H.264 it announces AV1 and VP9 (software VP9 only
+  here) as its encoders, and its camera and its share's base layer go out in the first of AV1
+  and VP9 that every viewer decodes, with the same layers. Where some viewer decodes only H.264
+  (a phone, an older client), the track goes out in a codec some others decode: the sender is
+  told once per call that not everyone sees its video, and a receiver that can't decode a track
+  doesn't watch it, and its tile says why (`RemoteVideoTrack::is_undecodable`). Desktop apps
+  decode H.264 and AV1 (where their page does), phones H.264 only.
 - **Screen share on Android** (#1667): MediaProjection behind the system's consent dialog (per
   share; Android 14+ asks every time), taken by the ongoing-call foreground service as
   `mediaProjection`. A virtual display mirrors the screen into an `ImageReader` (RGBA) at the size
