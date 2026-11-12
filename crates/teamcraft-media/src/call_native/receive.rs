@@ -194,17 +194,22 @@ impl RemoteVideo {
     timestamp: RtpTimestamp,
     queued: u32,
     late_by: Duration,
+    now: Instant,
   ) {
     let Some(received) = self.received.get_mut(&stream_id) else {
       return;
     };
     received.maybe_queued = Some(queued);
     let interval = received.interval.next(timestamp);
-    self.load.on_frame(DecodedFrame {
-      queued,
-      late_by,
-      interval,
-    });
+    self.load.on_frame(
+      stream_id,
+      DecodedFrame {
+        queued,
+        late_by,
+        interval,
+      },
+      now,
+    );
   }
 
   /// Judges whether this device decodes what it receives (every timer tick): the layers to ask
@@ -653,7 +658,13 @@ mod tests {
     let frames = (duration.as_micros() / FRAME.as_micros()) as u32;
     for index in 0..frames {
       for stream_id in [CAMERA, SHARE] {
-        video.on_decoding(stream_id, RtpTimestamp(index * TICKS_PER_FRAME), queued, late_by);
+        video.on_decoding(
+          stream_id,
+          RtpTimestamp(index * TICKS_PER_FRAME),
+          queued,
+          late_by,
+          start + FRAME * index,
+        );
       }
     }
     start + duration

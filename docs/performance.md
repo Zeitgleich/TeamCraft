@@ -804,6 +804,14 @@ camera's judge (`EncoderLoad`) and its timings:
   from the moment the datagram that completed them was read (overloaded past 0.9 of the frame
   interval). A frame that waited for a resent packet isn't late: its lateness starts when that
   packet came.
+- **Bursts aren't load** (#1809): lossy and fallback links hand frames over in bursts (resent
+  packets completing several at once, the WebSocket fallback's backlog after head-of-line
+  blocking, the end of a handover), which a fast decoder empties within a few intervals. A queue
+  above the pipeline counts only once it stood there longer than the frame interval times its
+  peak (what a decoder at the frame rate needs to drain it; then all of it, from when it rose),
+  and a frame handed over within a quarter interval of the one before doesn't count as late. A decoder slower
+  than the frame rate never drains: it is still limited within a window or two. Before, viewers
+  on an idle host were limited 8 to 17 times in 10 minutes on such links.
 - **Step down:** one layer of one stream per step, the least important first: the smallest camera
   tile, then larger ones, a screen share last. Through the same `Subscribe { max_layer }` the
   tiles' sizes use; the SFU sends the lower layer from its next keyframe.

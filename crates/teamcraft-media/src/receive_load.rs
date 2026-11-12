@@ -20,6 +20,15 @@
 //! the link (#1792). A decoder that falls behind piles up more than that within a window; one
 //! whose frames come late against the frame interval is the other sign.
 //!
+//! Bursty arrival is the network's too (#1809): after a loss burst resent packets complete several
+//! frames at once, the WebSocket fallback hands over a backlog after head-of-line blocking, a
+//! handover ends with a burst. The decoder's queue then holds more than its pipeline for a moment
+//! and empties it within a frame interval or two. So a queue counts only once it stayed above the
+//! pipeline longer than a decoder that keeps the frame rate needs to drain its peak (then all of
+//! it, from when it rose), and frames that came as a burst (closer than a quarter of the frame
+//! interval to the one before) don't count toward lateness: they waited behind each other. A
+//! decoder slower than the frame rate never drains: its queue counts within a window.
+//!
 //! Only this device's load counts here, never the network: a frame's lateness is measured from
 //! the arrival of the packet that completed it, so a frame that waited for a resent packet isn't
 //! late, and the step down limits only what this device asks for. Nothing of it reaches the
@@ -48,12 +57,18 @@ const DEFAULT_FRAME_INTERVAL: Duration = Duration::from_micros(33_333);
 const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(5);
 const MAX_FRAME_INTERVAL: Duration = Duration::from_millis(500);
 
+/// A frame that came closer than this share of the frame interval to the one before it came in
+/// a burst.
+const BURST_SPACING_DIVISOR: u32 = 4;
+
 /// The received video's decoders against the frames they get, and the layers that leaves each
 /// watched stream.
 #[derive(Debug, Clone)]
 pub struct ReceiveLoad {
   load: EncoderLoad,
   config: CameraGovernorConfig,
+  /// Each decoding stream's recent frames: bursts and how long its queue stood above the pipeline.
+  flows: BTreeMap<MediaStreamId, Flow>,
 }
 
 /// A received stream a tile shows, as the load's ladder sees it.
@@ -87,6 +102,17 @@ pub struct DecodedFrame {
   pub interval: Duration,
 }
 
+/// One stream's frames as they reached its decoder (#1809).
+#[derive(Debug, Clone, Copy, Default)]
+struct Flow {
+  maybe_last_at: Option<Instant>,
+  /// Since when its queue stands above the pipeline, and the most frames beyond it meanwhile.
+  maybe_backlog: Option<(Instant, u32)>,
+  /// Frames beyond the pipeline not counted yet: they count once the queue didn't drain in time,
+  /// and are forgotten when it did.
+  withheld: u32,
+}
+
 /// A received stream's frame interval, from its frames' RTP timestamps: what
 /// [`DecodedFrame::interval`] weighs the lateness against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,18 +139,31 @@ impl ReceiveLoad {
     Self {
       load: EncoderLoad::with_levels(1, now),
       config,
+      flows: BTreeMap::new(),
     }
   }
 
-  /// A frame was handed to a decoder; of the frames waiting in it, only those beyond its pipeline
-  /// ([`DECODER_PIPELINE_FRAMES`]) count as queued.
-  pub fn on_frame(&mut self, frame: DecodedFrame) {
+  /// A frame of `stream_id` was handed to its decoder at `now`. Of the frames waiting in it, only
+  /// those beyond its pipeline ([`DECODER_PIPELINE_FRAMES`]) count, and only once the queue had
+  /// time to drain (#1809); a frame that came in a burst doesn't count toward lateness.
+  pub fn on_frame(&mut self, stream_id: MediaStreamId, frame: DecodedFrame, now: Instant) {
+    let flow = self.flows.entry(stream_id).or_default();
+    let is_burst = flow
+      .maybe_last_at
+      .replace(now)
+      .is_some_and(|last| now.saturating_duration_since(last) < frame.interval / BURST_SPACING_DIVISOR);
+    let queued = flow.backlog(frame, now);
+    let (encode_time, frame_interval) = if is_burst {
+      (Duration::ZERO, Duration::ZERO)
+    } else {
+      (frame.late_by, frame.interval)
+    };
     self.load.on_frame(FrameTally {
       given: 1,
       skipped: 0,
-      queued: frame.queued.saturating_sub(DECODER_PIPELINE_FRAMES),
-      encode_time: frame.late_by,
-      frame_interval: frame.interval,
+      queued,
+      encode_time,
+      frame_interval,
     });
   }
 
@@ -132,10 +171,15 @@ impl ReceiveLoad {
   /// paused), so the window says nothing of the load.
   pub fn measure_afresh(&mut self, now: Instant) {
     self.load.measure_afresh(now);
+    self.flows.clear();
   }
 
   /// Judges the load once a window is whole; whether the layers of `streams` changed.
   pub fn evaluate(&mut self, streams: &[WatchedStream], now: Instant) -> bool {
+    // Streams no longer watched decode nothing more: their flows would only grow the map.
+    self
+      .flows
+      .retain(|stream_id, _| streams.iter().any(|stream| stream.stream_id == *stream_id));
     self.load.set_level_count(step_count(streams) + 1);
     self.load.evaluate(now, &self.config).is_some()
   }
@@ -176,6 +220,29 @@ impl WatchedStream {
   /// wants.
   pub fn unlimited_layer(&self) -> u8 {
     Ladder::new(self).layer()
+  }
+}
+
+impl Flow {
+  /// The frames beyond the pipeline that count as queued. While the queue is new enough that a
+  /// decoder keeping the frame rate could still drain its peak, they are held back; once it
+  /// didn't, they count with the frame's own.
+  fn backlog(&mut self, frame: DecodedFrame, now: Instant) -> u32 {
+    let excess = frame.queued.saturating_sub(DECODER_PIPELINE_FRAMES);
+    if excess == 0 {
+      self.maybe_backlog = None;
+      self.withheld = 0;
+      return 0;
+    }
+    let (since, peak) = self.maybe_backlog.get_or_insert((now, excess));
+    *peak = (*peak).max(excess);
+    let to_drain = frame.interval.saturating_mul(*peak);
+    if now.saturating_duration_since(*since) < to_drain {
+      self.withheld = self.withheld.saturating_add(excess);
+      0
+    } else {
+      excess.saturating_add(std::mem::take(&mut self.withheld))
+    }
   }
 }
 
@@ -341,12 +408,69 @@ mod tests {
       let mut now = start;
       for frame in 0..61u32 {
         now += FRAME_INTERVAL;
-        load.on_frame(DecodedFrame {
-          queued: frame / 6,
-          ..calm()
-        });
+        load.on_frame(
+          STAGE,
+          DecodedFrame {
+            queued: frame / 6,
+            ..calm()
+          },
+          now,
+        );
       }
       assert!(load.evaluate(&streams, now));
+      assert_eq!(load.maybe_reason(), Some(ReceiveOverload::QueuedFrames));
+    }
+
+    /// #1809: a lossy or fallback link hands frames over in bursts: ten after a 300 ms gap,
+    /// every 2 s. A decoder faster than the frame rate empties them within a few intervals, so
+    /// neither the queue they leave for a moment nor the wait behind each other is overload.
+    #[test]
+    fn bursts_that_a_fast_decoder_drains_change_nothing() {
+      let start = Instant::now();
+      let mut load = ReceiveLoad::new(start);
+      let streams = call();
+      let mut decoder = Decoder::new(Duration::from_millis(8));
+      let mut now = start;
+      for _ in 0..10 {
+        // A second and a half of steady frames, then a gap and the held frames at once.
+        for _ in 0..51 {
+          now += FRAME_INTERVAL;
+          load.on_frame(STAGE, decoder.hand_over(now, Duration::ZERO), now);
+        }
+        now += Duration::from_millis(300);
+        for index in 0..10u32 {
+          let at = now + Duration::from_millis(u64::from(index));
+          // Each waited for the ones before it in the receive path.
+          let late_by = Duration::from_millis(u64::from(index) * 3);
+          load.on_frame(STAGE, decoder.hand_over(at, late_by), at);
+        }
+        now += Duration::from_millis(10);
+        assert!(!load.evaluate(&streams, now), "limited at {:?}", now - start);
+      }
+      assert!(!load.is_limited());
+    }
+
+    /// #1809: a decoder slower than the frame rate never drains its queue, bursts or not: it is
+    /// limited within two windows.
+    #[test]
+    fn a_decoder_slower_than_the_frame_rate_steps_down_within_two_windows() {
+      let start = Instant::now();
+      let mut load = ReceiveLoad::new(start);
+      let streams = call();
+      let mut decoder = Decoder::new(Duration::from_millis(40));
+      let mut now = start;
+      let mut window_end = start + CameraGovernorConfig::default().load_window;
+      let mut windows = 0;
+      while !load.is_limited() && windows < 2 {
+        now += FRAME_INTERVAL;
+        load.on_frame(STAGE, decoder.hand_over(now, Duration::ZERO), now);
+        if now >= window_end {
+          load.evaluate(&streams, now);
+          windows += 1;
+          window_end = now + CameraGovernorConfig::default().load_window;
+        }
+      }
+      assert!(load.is_limited(), "not limited after {windows} windows");
       assert_eq!(load.maybe_reason(), Some(ReceiveOverload::QueuedFrames));
     }
 
@@ -355,8 +479,10 @@ mod tests {
       let start = Instant::now();
       let mut load = ReceiveLoad::new(start);
       let streams = call();
+      let mut now = start;
       for _ in 0..30 {
-        load.on_frame(overloaded());
+        now += FRAME_INTERVAL;
+        load.on_frame(STAGE, overloaded(), now);
       }
       assert!(!load.evaluate(&streams, start + Duration::from_secs(1)));
     }
@@ -451,6 +577,36 @@ mod tests {
     }
   }
 
+  /// A decoder that takes `decode_time` per frame, one after the other: how many frames wait in
+  /// it when the next is handed over.
+  struct Decoder {
+    decode_time: Duration,
+    done_at: std::collections::VecDeque<Instant>,
+  }
+
+  impl Decoder {
+    fn new(decode_time: Duration) -> Self {
+      Self {
+        decode_time,
+        done_at: std::collections::VecDeque::new(),
+      }
+    }
+
+    fn hand_over(&mut self, now: Instant, late_by: Duration) -> DecodedFrame {
+      while self.done_at.front().is_some_and(|done| *done <= now) {
+        self.done_at.pop_front();
+      }
+      let queued = u32::try_from(self.done_at.len()).unwrap();
+      let start = self.done_at.back().copied().unwrap_or(now).max(now);
+      self.done_at.push_back(start + self.decode_time);
+      DecodedFrame {
+        queued,
+        late_by,
+        interval: FRAME_INTERVAL,
+      }
+    }
+  }
+
   /// Feeds a window of frames at 30 fps, then judges it.
   struct Clock {
     now: Instant,
@@ -470,7 +626,7 @@ mod tests {
       let end = self.now + CameraGovernorConfig::default().load_window;
       while self.now < end {
         self.now += FRAME_INTERVAL;
-        self.load.on_frame(frame);
+        self.load.on_frame(STAGE, frame, self.now);
       }
       self.load.evaluate(streams, self.now)
     }
