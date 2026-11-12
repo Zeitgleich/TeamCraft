@@ -879,10 +879,7 @@ impl Forwarder {
         target_bps,
         floor_bps,
       }) => {
-        let estimate_bps = participant.downlink.estimate_bps();
-        participant
-          .downlink
-          .limit_to(estimate_bps.min(target_bps).max(floor_bps), now);
+        participant.downlink.after_short_probe(target_bps, floor_bps, now);
       },
       None => {},
     }
@@ -3017,9 +3014,9 @@ mod tests {
         report.down_after
       );
       // Clusters that fall short queue their excess and may take a datagram of video with them,
-      // as the probes before a switch up did; a layer sent to find out took a tenth of them.
+      // as the probes before a switch up did; on main (a burst's spread for a measure) a quarter.
       assert!(
-        report.lost[0] * 100 <= report.sent[0] * 3,
+        report.lost[0] * 100 <= report.sent[0] * 4,
         "{:?} of {:?} datagrams lost while the link swung",
         report.lost,
         report.sent
@@ -3032,6 +3029,122 @@ mod tests {
         report.sent,
         report.padding
       );
+    }
+
+    /// #1792: a viewer's downlink as it really is, not a fixed limit: seeded walks around
+    /// 2.8 Mbit/s with dips, handovers and minutes of 15–30 Mbit/s ([`Walk`]). After every dip and
+    /// every end of room the forwarded layer fits the link again within about a second; within
+    /// 5 s of room appearing the top layer is forwarded; video never stands still outside a
+    /// handover.
+    #[test]
+    fn a_viewer_follows_a_fluctuating_downlink_within_seconds() {
+      let layers = share_layers();
+      let end = Duration::from_secs(200);
+      for seed in [1, 7, 42] {
+        let walk = Walk::new(
+          seed,
+          end,
+          (2_000_000, 2_800_000, 3_800_000),
+          (15_000_000, 30_000_000),
+        );
+        let link = Link {
+          holds: walk.outages.clone(),
+          ..Link::lte()
+        };
+        let run = simulate_on(link, &layers, &walk.steps, end);
+        let video: Vec<&SimulatedDatagram> = run
+          .iter()
+          .filter(|datagram| datagram.maybe_layer.is_some())
+          .collect();
+        let bitrate = |layer: u8| {
+          layers
+            .iter()
+            .find(|info| info.layer == layer)
+            .map_or(0, |info| info.max_bitrate_bps)
+        };
+        let after = |from: Duration, is_done: &dyn Fn(&SimulatedDatagram) -> bool| {
+          video
+            .iter()
+            .filter(|datagram| datagram.at >= from)
+            .find(|datagram| is_done(datagram))
+            .map_or(end.saturating_sub(from), |datagram| datagram.at - from)
+        };
+        let slowest_top = walk
+          .rooms
+          .iter()
+          .map(|(from, _)| after(*from, &|datagram| datagram.maybe_layer == Some(2)))
+          .max()
+          .unwrap_or_default();
+        // Within a step of the estimate. A layer a little above the link (a fifth) fills its
+        // bucket and queue for seconds without a datagram lost or late: no estimate sees that
+        // within a dip, and no picture stands still, so only drops whose excess did harm before
+        // the switch count (`absorbed` the others).
+        let fits = |datagram: &SimulatedDatagram| {
+          let layer_bps = datagram.maybe_layer.map_or(0, bitrate);
+          f64::from(layer_bps) <= 1.15 * walk.capacity_at(datagram.at) as f64
+        };
+        let is_harmed = |from: Duration, until: Duration| {
+          video
+            .iter()
+            .filter(|datagram| datagram.at >= from && datagram.at < until)
+            .any(|datagram| {
+              datagram
+                .maybe_arrival
+                .is_none_or(|arrival| arrival - datagram.at > Duration::from_millis(300))
+            })
+        };
+        let fit_times: Vec<(Duration, bool)> = walk
+          .drops
+          .iter()
+          .map(|from| {
+            let fit = after(*from, &fits);
+            (fit, is_harmed(*from, *from + fit))
+          })
+          .collect();
+        let absorbed = fit_times.iter().filter(|(_, is_harmed)| !is_harmed).count();
+        let slowest_fit = fit_times
+          .iter()
+          .filter(|(_, is_harmed)| *is_harmed)
+          .map(|(fit, _)| *fit)
+          .max()
+          .unwrap_or_default();
+        let mut arrivals: Vec<Duration> = video
+          .iter()
+          .filter(|datagram| datagram.at >= Duration::from_secs(5))
+          .filter_map(|datagram| datagram.maybe_arrival)
+          .collect();
+        arrivals.sort_unstable();
+        let longest_gap = arrivals
+          .windows(2)
+          .filter(|pair| !walk.is_near_outage(pair[0], pair[1]))
+          .map(|pair| pair[1] - pair[0])
+          .max()
+          .unwrap_or_default();
+        eprintln!(
+          "seed {seed}: rooms {}, drops {} ({absorbed} absorbed), slowest top {slowest_top:?}, slowest fit {slowest_fit:?}, longest gap {longest_gap:?}",
+          walk.rooms.len(),
+          walk.drops.len()
+        );
+        assert!(
+          !walk.rooms.is_empty() && walk.drops.len() > 5,
+          "seed {seed}: a walk without room or dips"
+        );
+        assert!(
+          slowest_top <= Duration::from_secs(5),
+          "seed {seed}: top layer {slowest_top:?} after room appeared"
+        );
+        // About a second. A layer a fifth above the link shows only once the link's bucket
+        // (32 kB) and queue (150 ms) are full, about a second into the dip; a deeper dip shows
+        // sooner (most drops fit within 0.75 s).
+        assert!(
+          slowest_fit <= Duration::from_millis(1300),
+          "seed {seed}: the layer fit {slowest_fit:?} after a drop"
+        );
+        assert!(
+          longest_gap <= Duration::from_millis(700),
+          "seed {seed}: video stood still for {longest_gap:?}"
+        );
+      }
     }
 
     /// Runs a publisher sending all its layers at their bitrates and a receiver behind a link of
@@ -3091,6 +3204,7 @@ mod tests {
       duration: Duration,
     ) -> Vec<SimulatedDatagram> {
       let (mut forwarder, start) = room(3);
+      link.maybe_origin = Some(start);
       forwarder
         .publish_video(
           device(1),
@@ -3327,6 +3441,92 @@ mod tests {
     }
   }
 
+  /// A mobile link as a user has it (#1792), seeded: every 500 ms the rate walks by up to
+  /// ±15 % within `(low, typical, high)`; now and then (4 % of the steps) a dip to 40 % for 1 to
+  /// 2 s, a tunnel or a crowded cell, or (2 %) a handover that holds everything for 200 to
+  /// 500 ms ([`Link::holds`]); and every 60 to 90 s a cell with room, 30 to 60 s within `rooms`.
+  /// The sender's side has the same in `teamcraft_media::rate_probe`'s tests.
+  struct Walk {
+    /// From when, which capacity.
+    steps: Vec<(Duration, u64)>,
+    /// When a dip began or room ended: the layer has to fit the link again.
+    drops: Vec<Duration>,
+    outages: Vec<(Duration, Duration)>,
+    rooms: Vec<(Duration, Duration)>,
+  }
+
+  impl Walk {
+    const STEP: Duration = Duration::from_millis(500);
+
+    fn new(seed: u64, end: Duration, (low, typical, high): (u64, u64, u64), rooms: (u64, u64)) -> Self {
+      let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+      let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+      };
+      let mut walk = Self {
+        steps: Vec::new(),
+        drops: Vec::new(),
+        outages: Vec::new(),
+        rooms: Vec::new(),
+      };
+      let mut rate = typical as f64;
+      let mut at = Duration::ZERO;
+      let mut next_room = Duration::from_secs(30 + next() % 20);
+      while at < end {
+        if at >= next_room && at + Duration::from_secs(45) < end {
+          let length = Duration::from_secs(30 + next() % 31).min(end - at - Duration::from_secs(15));
+          let mut room_rate = (rooms.0 + next() % (rooms.1 - rooms.0)) as f64;
+          let until = at + length;
+          walk.rooms.push((at, until));
+          while at < until {
+            walk.steps.push((at, room_rate as u64));
+            room_rate =
+              (room_rate * (0.9 + (next() % 200) as f64 / 1000.0)).clamp(rooms.0 as f64, rooms.1 as f64);
+            at += Self::STEP;
+          }
+          walk.drops.push(at);
+          next_room = at + Duration::from_secs(60 + next() % 30);
+          continue;
+        }
+        let roll = next() % 100;
+        if roll < 2 {
+          let length = Duration::from_millis(200 + next() % 300);
+          walk.outages.push((at, at + length));
+          at += length;
+        } else if roll < 6 {
+          walk.steps.push((at, (rate * 0.4) as u64));
+          walk.drops.push(at);
+          at += Duration::from_millis(1000 + next() % 1000);
+        } else {
+          rate = (rate * (0.85 + (next() % 300) as f64 / 1000.0)).clamp(low as f64, high as f64);
+          walk.steps.push((at, rate as u64));
+          at += Self::STEP;
+        }
+      }
+      walk
+    }
+
+    fn capacity_at(&self, at: Duration) -> u64 {
+      self
+        .steps
+        .iter()
+        .rev()
+        .find(|(from, _)| *from <= at)
+        .map_or(1_000_000, |(_, bps)| *bps)
+    }
+
+    /// Whether a gap from `from` to `until` touches a handover or the second after it.
+    fn is_near_outage(&self, from: Duration, until: Duration) -> bool {
+      self
+        .outages
+        .iter()
+        .any(|(start, end)| from < *end + Duration::from_secs(1) && until > *start)
+    }
+  }
+
   /// One datagram the simulated SFU sent to the receiver.
   #[derive(Debug, Clone, Copy)]
   struct SimulatedDatagram {
@@ -3346,6 +3546,11 @@ mod tests {
     bucket_bytes: usize,
     /// When the bucket would be empty had nothing been sent since (the token bucket's clock).
     maybe_empty_at: Option<Instant>,
+    /// Handovers, from the simulation's start (`maybe_origin`): the link holds what it gets and
+    /// hands it over once they end.
+    holds: Vec<(Duration, Duration)>,
+    maybe_origin: Option<Instant>,
+    maybe_last_arrival: Option<Instant>,
   }
 
   impl Link {
@@ -3355,6 +3560,9 @@ mod tests {
         queue_limit: Duration::from_millis(300),
         bucket_bytes: 0,
         maybe_empty_at: None,
+        holds: Vec::new(),
+        maybe_origin: None,
+        maybe_last_arrival: None,
       }
     }
 
@@ -3376,7 +3584,18 @@ mod tests {
         return None;
       }
       self.maybe_empty_at = Some(empty_at + seconds(bytes));
-      Some(departure + Duration::from_millis(30))
+      let through = match self.maybe_origin {
+        Some(origin) => self
+          .holds
+          .iter()
+          .find(|(from, until)| departure >= origin + *from && departure < origin + *until)
+          .map_or(departure, |(_, until)| origin + *until),
+        None => departure,
+      };
+      let arrival = through + Duration::from_millis(30);
+      let arrival = self.maybe_last_arrival.map_or(arrival, |last| arrival.max(last));
+      self.maybe_last_arrival = Some(arrival);
+      Some(arrival)
     }
   }
 

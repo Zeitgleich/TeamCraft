@@ -796,8 +796,11 @@ stats came from the page's own receive path, not from the link.
 The browser's receive side is governed now (`receive_load.rs`, wired in `call_web.rs`), with the
 camera's judge (`EncoderLoad`) and its timings:
 
-- **Signals, all of this device:** frames waiting in a decoder (WebCodecs `decodeQueueSize`,
-  overloaded at 1 on average over two 2 s windows in a row, or at 2 over one), and frames that reach the decoder late, measured
+- **Signals, all of this device:** frames waiting in a decoder beyond the one or two its pipeline
+  holds while it keeps up (WebCodecs `decodeQueueSize` less 2, overloaded at 1 on average over
+  two 2 s windows in a row, or at 2 over one; #1792: Firefox holds 0.3–0.9 frames at 480p on an
+  idle machine, and counted as queued that kept its viewers at 480p for minutes), and frames that
+  reach the decoder late, measured
   from the moment the datagram that completed them was read (overloaded past 0.9 of the frame
   interval). A frame that waited for a resent packet isn't late: its lateness starts when that
   packet came.

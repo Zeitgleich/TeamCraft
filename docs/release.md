@@ -425,6 +425,119 @@ release on the internal track → *Promote release* → the target track, then r
 another track automatically, set `TEAMCRAFT_PLAY_TRACK` (and give the service account the matching
 permission); every published tag, candidates included, then goes there.
 
+## Debug symbols
+
+Shipped binaries carry no debug info and no symbol table (smaller downloads). Every release build
+keeps them separately, by build ID, so a crash report or a stack sample of a shipped build can be
+symbolized later, the way Google Play keeps the R8 mapping and native symbols per build.
+`scripts/debug-files.sh` does the work in `desktop-release.yml` and the `android` job of
+`release.yml`.
+
+| Platform | Built with                                | Shipped binary                             | Debug file                                 |
+|----------|-------------------------------------------|--------------------------------------------|--------------------------------------------|
+| Linux    | line tables, not stripped                 | stripped by `debug-files.sh split`         | `teamcraft-desktop.debug` (zlib), build ID |
+| macOS    | line tables, `split-debuginfo = "packed"` | `strip -S -x` after the UUID check         | `teamcraft-desktop.dSYM`, Mach-O UUID      |
+| Windows  | line tables, `strip = "none"`             | never holds symbols (only the PDB's GUID)  | `teamcraft_desktop.pdb`, GUID and age      |
+| Android  | line tables                               | stripped by AGP in the APKs and the bundle | the unstripped `.so` files, build ID       |
+
+The Flatpak (built, not published) is left out: flatpak-builder splits its own `.Debug` extension.
+
+**Never a workflow artifact:** this repository is public, and so are its Actions artifacts. The
+debug files go only to the places below; with none configured, the step warns and the release goes
+on without them. A failed upload warns too.
+
+| Where                                   | Configured by (repository secrets)              | What it is for                                                     |
+|-----------------------------------------|-------------------------------------------------|--------------------------------------------------------------------|
+| Crash reports backend (GlitchTip ≥ 7.0) | `CRASH_REPORTS_*` (crash-reports.md, "Symbols") | Symbolizes native crash reports by debug ID; no download           |
+| Private S3 bucket                       | `DEBUG_FILES_S3_*` (below)                      | The place to download them from: `eu-stack`, `gdb`, `atos`, WinDbg |
+
+The bucket is any S3 service (path-style URLs, SigV4; `curl --aws-sigv4`, no SDK), set by the
+secrets `DEBUG_FILES_S3_ENDPOINT` (`https://s3.example.com`), `DEBUG_FILES_S3_BUCKET`,
+`DEBUG_FILES_S3_ACCESS_KEY_ID`, `DEBUG_FILES_S3_SECRET_ACCESS_KEY` and `DEBUG_FILES_S3_REGION`
+(default `us-east-1`). Give the key read and write on that bucket only, keep the bucket private,
+and set a lifecycle rule if old builds should expire (a nightly release adds a few hundred MB).
+Layout, the one each platform's tools use:
+
+| Key                                       | Content                                                        |
+|-------------------------------------------|----------------------------------------------------------------|
+| `buildid/<build-id>/debuginfo`            | ELF debug file (Linux, Android), as a debuginfod server has it |
+| `macho/<UUID>/teamcraft-desktop.dSYM.zip` | dSYM bundle                                                    |
+| `pdb/<name>.pdb/<GUID><age>/<name>.pdb`   | PDB, as a symbol server (symstore) has it                      |
+| `index/desktop/<version>/<target>.txt`    | The build's files with their IDs, and the commit               |
+| `index/android/<version>.txt`             | The same for the Android libraries                             |
+
+A build that isn't a tag (Actions → Desktop release → Run workflow) is indexed as
+`<version>+<commit>`.
+
+### Symbolizing a Linux stack
+
+The bucket's credentials go into the environment (`DEBUG_FILES_S3_*`, as above); `scripts/debug-files.sh
+fetch` puts the debug file where elfutils and gdb look by build ID.
+
+1. **The build ID** of the shipped executable (deb/rpm: `/usr/bin/teamcraft-desktop`; AppImage: the
+   running process, or `--appimage-extract`):
+
+   ```sh
+   eu-readelf -n /usr/bin/teamcraft-desktop | grep 'Build ID'
+   eu-unstrip -n -p "$(pidof teamcraft-desktop)" | grep teamcraft-desktop   # of a running process
+   coredumpctl info teamcraft-desktop                                       # of a core dump
+   ```
+
+   Or look it up by version: `scripts/debug-files.sh index desktop/1.0.32/x86_64-unknown-linux-gnu`.
+2. **Fetch it** (to `~/.cache/teamcraft-debug/.build-id/<xx>/<rest>.debug` unless a directory is given):
+
+   ```sh
+   scripts/debug-files.sh fetch 8bb2f9efa81511d2e8212b7e19b513864e5c4920
+   ```
+
+3. **Live stack samples** (idle CPU, hangs), with inlined frames, file and line:
+
+   ```sh
+   eu-stack -p "$(pidof teamcraft-desktop)" -i -s --debuginfo-path="$HOME/.cache/teamcraft-debug" \
+     | rustfilt
+   ```
+
+   Set `DEBUGINFOD_URLS=` (empty) to keep elfutils from asking the distribution's debuginfod for it.
+   Names are Rust v0 mangled (`_RNv…`); `rustfilt` (`cargo install rustfilt`) demangles them.
+4. **A single address** from a report: subtract the executable's load address (the first
+   `teamcraft-desktop` line of `/proc/<pid>/maps`, or the report's image address) and look up the
+   offset:
+
+   ```sh
+   eu-addr2line -e ~/.cache/teamcraft-debug/.build-id/8b/b2f9….debug -f -i -C 0x1449e
+   ```
+
+5. **A core dump:**
+
+   ```sh
+   coredumpctl debug teamcraft-desktop \
+     --debugger-arguments="-iex 'set debug-file-directory /usr/lib/debug:$HOME/.cache/teamcraft-debug'"
+   ```
+
+   Or copy the file to `/usr/lib/debug/.build-id/<xx>/<rest>.debug`, where gdb and every elfutils
+   tool find it without options.
+
+### Symbolizing on macOS, Windows and Android
+
+- **macOS:** `dwarfdump --uuid /Applications/TeamCraft.app/Contents/MacOS/teamcraft-desktop` gives
+  the UUID; download `macho/<UUID>/teamcraft-desktop.dSYM.zip` (UUID without dashes) from the
+  bucket, unzip it, and `atos -o teamcraft-desktop.dSYM -l <load address> <address>`. A dSYM next
+  to the app (or found by Spotlight) is picked up by lldb and Console crash reports.
+- **Windows:** the bucket's `pdb/` tree is a symbol store: copy the PDB into a local directory in
+  the same layout and set `_NT_SYMBOL_PATH=srv*C:\symbols` (WinDbg, Visual Studio), or put it next to
+  the executable.
+- **Android:** Google Play symbolizes from the bundle's symbol table ([Google Play](#google-play)). For a
+  tombstone or `adb bugreport`, the library's build ID is in the backtrace lines (`BuildId: …`):
+  fetch it as on Linux and run `ndk-stack -sym <dir>` or `llvm-addr2line` on the offsets.
+
+### Crash reports
+
+GlitchTip (from 7.0) symbolizes a native frame server-side when the event carries the frame's
+`instruction_addr` and the image's debug ID in `debug_meta.images`: Android's NDK crashes do. The
+desktop app's panic reports don't yet: they resolve frames on the device from `std::backtrace`, which
+finds no names in a stripped binary, so they show the panic's message and location only
+(crash-reports.md, "Symbols").
+
 ## Checking locally
 
 ```sh

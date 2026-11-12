@@ -13,6 +13,13 @@
 //! [`CameraGovernorConfig::calm_period`], it steps back up in the reverse order; a step up that
 //! doesn't hold doubles the wait.
 //!
+//! A decoder holds a frame or two in its pipeline while it keeps up: Firefox's WebCodecs decoder
+//! reports 0.3 to 0.9 frames waiting at 480p on an idle machine, every window, and Chrome now and
+//! then two. Only frames beyond [`DECODER_PIPELINE_FRAMES`] count as queued: measured as they
+//! were, a Firefox viewer's 480p was never calm, and it stayed there through minutes of room on
+//! the link (#1792). A decoder that falls behind piles up more than that within a window; one
+//! whose frames come late against the frame interval is the other sign.
+//!
 //! Only this device's load counts here, never the network: a frame's lateness is measured from
 //! the arrival of the packet that completed it, so a frame that waited for a resent packet isn't
 //! late, and the step down limits only what this device asks for. Nothing of it reaches the
@@ -29,6 +36,9 @@ use crate::camera_governor::{CameraGovernorConfig, EncoderLoad, FrameTally, Over
 use crate::rtp::RtpTimestamp;
 use crate::video::VideoResolution;
 
+/// Frames a decoder that keeps up holds in its pipeline: waiting frames up to this many are no
+/// sign of overload.
+pub const DECODER_PIPELINE_FRAMES: u32 = 2;
 /// The RTP video clock.
 const RTP_VIDEO_CLOCK_HZ: u64 = 90_000;
 /// A received stream's frame interval until two frames tell (30 fps).
@@ -106,12 +116,13 @@ impl ReceiveLoad {
     }
   }
 
-  /// A frame was handed to a decoder.
+  /// A frame was handed to a decoder; of the frames waiting in it, only those beyond its pipeline
+  /// ([`DECODER_PIPELINE_FRAMES`]) count as queued.
   pub fn on_frame(&mut self, frame: DecodedFrame) {
     self.load.on_frame(FrameTally {
       given: 1,
       skipped: 0,
-      queued: frame.queued,
+      queued: frame.queued.saturating_sub(DECODER_PIPELINE_FRAMES),
       encode_time: frame.late_by,
       frame_interval: frame.interval,
     });
@@ -297,6 +308,48 @@ mod tests {
       assert!(!clock.load.is_limited());
     }
 
+    /// #1792: Firefox's decoder holds one or two frames all the time on an idle machine. That
+    /// is its pipeline, not a queue: a viewer held down by a moment of load steps back up within
+    /// two calm windows, and stays.
+    #[test]
+    fn a_steady_pipeline_of_one_or_two_frames_is_calm() {
+      let mut clock = Clock::new();
+      let streams = call();
+      assert!(clock.run(&streams, overloaded()));
+      let pipeline = |queued: u32| DecodedFrame { queued, ..calm() };
+      let calm_from = clock.now;
+      let mut steps = 0;
+      for round in 0..6u32 {
+        steps += usize::from(clock.run(&streams, pipeline(1 + round % 2)));
+      }
+      assert!(
+        !clock.load.is_limited(),
+        "still limited after {:?}",
+        clock.now - calm_from
+      );
+      assert_eq!(steps, 1);
+      assert_eq!(clock.load.layers(&streams), wanted(&streams));
+    }
+
+    /// A decoder whose output falls behind its input: the queue grows frame by frame, and the
+    /// least important stream steps down after the window.
+    #[test]
+    fn a_growing_queue_steps_down() {
+      let start = Instant::now();
+      let mut load = ReceiveLoad::new(start);
+      let streams = call();
+      let mut now = start;
+      for frame in 0..61u32 {
+        now += FRAME_INTERVAL;
+        load.on_frame(DecodedFrame {
+          queued: frame / 6,
+          ..calm()
+        });
+      }
+      assert!(load.evaluate(&streams, now));
+      assert_eq!(load.maybe_reason(), Some(ReceiveOverload::QueuedFrames));
+    }
+
     #[test]
     fn nothing_is_judged_before_a_whole_window() {
       let start = Instant::now();
@@ -472,8 +525,9 @@ mod tests {
       .collect()
   }
 
+  /// A decoder that fell behind: frames pile up far beyond its pipeline.
   fn overloaded() -> DecodedFrame {
-    DecodedFrame { queued: 3, ..calm() }
+    DecodedFrame { queued: 5, ..calm() }
   }
 
   fn starved() -> DecodedFrame {

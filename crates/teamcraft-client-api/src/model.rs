@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::ClientMessageId;
 use teamcraft_proto::Permission;
-pub use teamcraft_proto::{ChannelRole, InviteId, JoinPolicy, SpaceRole};
+pub use teamcraft_proto::{ChannelRole, InviteId, JoinPolicy, LogLevel, SpaceRole};
 pub use teamcraft_proto::{ConversationId, DeviceId, Id, MessageId, Snowflake, SpaceId, ThreadId, UserId};
 
 /// Builds a typed ID from a small integer. Mock data and tests use it; real IDs come from the server.
@@ -735,39 +735,6 @@ pub enum BookmarkKind {
   File,
 }
 
-/// Ordered from least to most severe, so `level >= minimum` filters.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum LogLevel {
-  Debug,
-  Info,
-  Warn,
-  Error,
-}
-
-impl LogLevel {
-  pub fn slug(self) -> &'static str {
-    match self {
-      Self::Debug => "debug",
-      Self::Info => "info",
-      Self::Warn => "warn",
-      Self::Error => "error",
-    }
-  }
-}
-
-impl LogLevel {
-  /// The level named by a log word (`warning`, `ERR`, `fatal`, …); `None` for anything else.
-  pub fn from_word(word: &str) -> Option<Self> {
-    match word.to_lowercase().as_str() {
-      "trace" | "debug" => Some(Self::Debug),
-      "info" | "notice" => Some(Self::Info),
-      "warn" | "warning" => Some(Self::Warn),
-      "error" | "err" | "fatal" | "critical" | "alert" | "emergency" => Some(Self::Error),
-      _ => None,
-    }
-  }
-}
-
 /// Shows a message of an integration channel as one log line: the bridge writes `[LEVEL] text`
 /// (or a bare `ERROR text`), which becomes a level and the text without the prefix. Lines without a
 /// level are `info`.
@@ -810,12 +777,20 @@ pub fn as_chat_message(message: &mut Message) {
   message.kind = MessageKind::User;
 }
 
+/// The level of a log line and the line without its level prefix. The shared detection
+/// ([`teamcraft_proto::find_level`]) finds the level after a timestamp or host prefix too; only a
+/// level that opens the line (`[ERROR] text`, `ERROR: text`) is cut off, since the row shows the
+/// level as a colour. A level in the middle stays in the text, which keeps its time and context.
 pub(crate) fn split_level(body: &str) -> Option<(LogLevel, &str)> {
-  let first_end = body.find(char::is_whitespace).unwrap_or(body.len());
-  let (first, rest) = body.split_at(first_end);
-  let word = first.trim_matches(['[', ']', ':']);
-  let level = LogLevel::from_word(word)?;
-  Some((level, rest.trim_start()))
+  let found = teamcraft_proto::find_level(body)?;
+  let is_leading = body[..found.range.start]
+    .chars()
+    .all(|c| matches!(c, '[' | '<' | '('));
+  if !is_leading {
+    return Some((found.level, body));
+  }
+  let rest = body[found.range.end..].trim_start_matches([']', '>', ')', ':']);
+  Some((found.level, rest.trim_start()))
 }
 
 /// Which system event a system message reports; the text is built from i18n.

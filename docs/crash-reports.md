@@ -532,17 +532,23 @@ core). The Android measures of its own (`Perf.kt`) take their names from the cor
 
 | Platform         | What the report carries                          | Symbol upload (release workflow)                 |
 |------------------|--------------------------------------------------|--------------------------------------------------|
-| Desktop, server  | Function names, resolved on the device           | None needed for names; see below for lines       |
+| Desktop          | Frames resolved on the device (stripped: none)   | Debug files by build ID; not used by reports yet |
+| Server           | Function names, resolved on the device           | None needed for names; see below for lines       |
 | Web (wasm)       | Function index and offset (names are stripped)   | None (gap, below)                                |
 | Android (Kotlin) | Obfuscated names (R8)                            | R8 `mapping.txt` under the build's ProGuard UUID |
 | Android (NDK)    | Addresses and debug IDs of `libteamcraft_ffi.so` | The unstripped `.so` (ELF debug files)           |
 | iOS              | Addresses and debug IDs                          | dSYMs from the Xcode archive (#1515)             |
 
-- **Rust on desktop and server** resolves frames in the process (`std::backtrace`): release builds
-  keep their symbol table, so function names are there; file and line need debug info in the
-  binary (`debug = "line-tables-only"`, a few MB more per binary) and are left out for now. Sending
-  addresses plus debug images for server-side symbolication would need the `sentry` crate's
-  debug-image code; not worth it while function names suffice.
+- **Rust on the server** resolves frames in the process (`std::backtrace`): its release build keeps
+  the symbol table, so function names are there; file and line would need debug info in the
+  binary and are left out for now.
+- **Rust on desktop** resolves frames the same way, but the shipped desktop binaries are stripped,
+  so a panic report has its message and location and no function names. Each release keeps its
+  debug files privately by build ID (release.md, "Debug symbols"), which GlitchTip (from 7.0) uses
+  for frames that carry `instruction_addr` and the image's debug ID in `debug_meta.images`. Sending
+  those from the desktop panic hook (the `sentry` crate's debug-image code, or the loaded
+  executable's build ID and load address) is the missing piece; until then, symbolize a report's
+  addresses by hand as in the release.md runbook.
 - **wasm** (`profile.web-release` strips the name section to save download size): a browser frame
   is `wasm-function[1234]:0x5678`, and GlitchTip doesn't symbolicate wasm. To read one, build the
   release's commit with `strip = false` (the build is reproducible) and map the frame with
@@ -555,8 +561,9 @@ core). The Android measures of its own (`Perf.kt`) take their names from the cor
 - **Android:** the release workflow (`release.yml`, job `android`) gives the full release a fresh
   ProGuard UUID (`-Pteamcraft.proguardUuid`, written to the app's `sentry-debug-meta.properties`)
   and uploads `mapping.txt` under it (`sentry-cli upload-proguard`) and the unstripped libraries
-  of `merged_native_libs/fullRelease` (`sentry-cli debug-files upload`). `sentry-cli` is pinned by
-  version and SHA-256. GlitchTip takes both through its Sentry-compatible debug file API; older
+  of `merged_native_libs/fullRelease`, built with line tables (`scripts/debug-files.sh store`:
+  `sentry-cli debug-files upload`, and the private bucket of release.md, "Debug symbols", when
+  configured). `sentry-cli` is pinned by version and SHA-256 in `scripts/debug-files.sh`. GlitchTip takes both through its Sentry-compatible debug file API; older
   GlitchTip versions failed to apply mappings uploaded without a `kind` (GlitchTip backend issue
   504), so check the first deobfuscated crash.
 - **Upload is optional.** The workflow uploads when the secrets `CRASH_REPORTS_URL`,

@@ -94,8 +94,10 @@ pub struct UplinkPolicy {
 }
 
 /// A screen share's layers stop without [`UplinkPolicy::screen_downswitch_hold`] when the
-/// estimate is below this share of what they need.
-const SCREEN_HOLD_SHARE: f64 = 0.5;
+/// estimate is below this share of what they need. A keyframe's queue cuts the estimate a step,
+/// to 85 %; a mobile link's dip to 40 % cut it to 70 % of what a share's lowest shares needed,
+/// and at 50 % here the share went on sending above the link for the whole hold (#1792).
+const SCREEN_HOLD_SHARE: f64 = 0.8;
 /// The longest wait before a camera steps up again after probes that failed.
 const MAX_PROBE_BACKOFF: Duration = Duration::from_secs(4);
 /// The wait after the first probe that failed.
@@ -166,7 +168,7 @@ impl Default for UplinkPolicy {
       screen_bitrate_shares: [0.2, 0.35, 0.6, 1.0],
       share_downswitch_hold: Duration::from_secs(1),
       share_upswitch_hold: Duration::from_secs(2),
-      in_place_share_upswitch_hold: Duration::from_millis(500),
+      in_place_share_upswitch_hold: Duration::from_millis(250),
       in_place_share_downswitch_hold: Duration::ZERO,
       probe_proof: Duration::from_secs(4),
       camera_pause_hold: Duration::from_secs(5),

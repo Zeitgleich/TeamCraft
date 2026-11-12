@@ -10858,6 +10858,7 @@ dependencies = [
  "serde",
  "serde_json",
  "subtle",
+ "teamcraft-client-api",
  "teamcraft-core",
  "teamcraft-crypto",
  "teamcraft-ops",

@@ -28,14 +28,6 @@ impl Default for LogFilter {
   }
 }
 
-impl LogLevel {
-  pub fn from_slug(slug: &str) -> Option<Self> {
-    [Self::Debug, Self::Info, Self::Warn, Self::Error]
-      .into_iter()
-      .find(|level| level.slug() == slug)
-  }
-}
-
 impl LogFilter {
   /// Whether the filter hides anything.
   pub fn is_active(&self) -> bool {
