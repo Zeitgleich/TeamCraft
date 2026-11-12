@@ -20,9 +20,7 @@ use tokio::sync::mpsc;
 
 use super::{Command, VideoCommand};
 use crate::call_video::ReceivedVideoFrame;
-use crate::receive_load::{
-  DecodedFrame, FrameInterval, Importance, ReceiveLoad, ReceiveOverload, WatchedStream,
-};
+use crate::receive_load::{DecodedFrame, FrameInterval, Importance, ReceiveLoad, WatchedStream};
 use crate::rtp::RtpTimestamp;
 use crate::video::{TOP_LAYER, VideoResolution, ViewChoice};
 
@@ -237,6 +235,8 @@ impl RemoteVideo {
   #[cfg(feature = "call-view")]
   pub(super) fn add_decoding_stats(&self, report: &mut teamcraft_client_api::video_stats::VideoStatsReport) {
     use teamcraft_client_api::video_stats::{DecodeOverload, DeviceLimitStats, VideoTrackStats};
+
+    use crate::receive_load::ReceiveOverload;
 
     let maybe_reason = self.load.maybe_reason().map(|reason| match reason {
       ReceiveOverload::QueuedFrames => DecodeOverload::QueuedFrames,
