@@ -2441,6 +2441,34 @@ mod tests {
       );
     }
 
+    /// The encode time is the encoder's alone, measured on the encoder thread around the encode
+    /// call: a call task that takes the load late (busy, or behind on its queue) doesn't make fast
+    /// encoders look slow. The browser once counted its call loop's backlog as encoding and ran
+    /// the whole ladder down while its encoder took 13 to 20 ms a 1440p frame.
+    #[test]
+    fn a_call_task_that_takes_the_load_late_doesnt_step_a_fast_encoder_down() {
+      let mut share = Share::start();
+      let end = share.now + Duration::from_secs(60);
+      while share.now < end {
+        // The encoder thread encodes on time; the call task gets to the load every 3 s only.
+        for _ in 0..30 {
+          let tally = share
+            .encoder_loop
+            .load
+            .tally(share.now, share.now + Duration::from_millis(15));
+          share.encoder_loop.counters.add_load(tally);
+          share.now += FRAME_PERIOD;
+        }
+        let taken = share.encoder_loop.counters.take_load();
+        assert_eq!(
+          share.steps.on_load(taken, share.now),
+          None,
+          "no step for fast encoders"
+        );
+      }
+      assert_eq!(share.steps.limits().level, 0);
+    }
+
     /// A share's sender pieces: steps, encoder thread state and encoders, on a test clock.
     struct Share {
       steps: ShareSteps,
