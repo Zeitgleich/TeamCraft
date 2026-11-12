@@ -4501,6 +4501,10 @@ mod tests {
         true
       }
 
+      fn queue_size(&self) -> u32 {
+        0
+      }
+
       fn decode(&self, _frame: &ReceivedVideoFrame) -> Result<(), WebCallError> {
         Err(WebCallError::Browser {
           context: "VideoDecoder",
@@ -4516,6 +4520,10 @@ mod tests {
 
       fn is_configured(&self) -> bool {
         true
+      }
+
+      fn queue_size(&self) -> u32 {
+        0
       }
 
       fn decode(&self, _frame: &ReceivedVideoFrame) -> Result<(), WebCallError> {
