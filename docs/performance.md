@@ -2586,6 +2586,51 @@ own (`teamcraft-actions`, span `queue.act`), which reads and writes through the 
 group. The chat list pass keeps the sidebar's counts (`flush_entry_tallies`) only when the lock is
 free (`LocalStore::try_begin_writes`); otherwise they wait for the next pass, since they are a cache.
 
+### Signed-in start: the MLS state on demand, the kept chat list (issue #1758)
+
+Android 1.0.30 (POCO F3, 83 conversations) reported `mls_storage_load` 4.7 s on the engine thread
+and `chat_list_build` 2.6 s on the main read thread before the list showed; `open_client` and the
+settings jobs queued behind the first for 4 to 5 s. Both are reads of cold pages from flash: a
+sealed record is a point lookup by a random ID, a few B-tree pages, and the start read every MLS
+entry of every group (about a dozen per group, and the key packages) and about ten records per
+conversation for the list. Now:
+
+- The client opens the MLS state on demand (`mls_storage::open_mls_storage`, the provider patch's
+  `ValueSource`; docs/e2ee.md §9.5): the start reads the marker and the generation, and a group's
+  entries are read when the group is first used. A sync with no news reads no group (test
+  `a_client_opened_on_demand_saves_what_real_operations_change`).
+- The app's first chat list after a start is the one the last pass kept (`reads.rs`, one sealed
+  record of the account table); the pass runs once the main read thread has nothing else queued and
+  tells the app (`on_change`) when the list differs. A pass keeps its list at most every 10 s.
+- `me()` and `user()` read one user record instead of decoding every user; the FFI's list asked
+  `user()` once per direct message.
+
+`tests/suite/slow_disk/start.rs` in `teamcraft-core` counts the pages the start reads on the
+slow-disk VFS of #1686, which now counts reads and can delay them: 83 channels of 20 messages with
+3 more members each (real MLS groups through the fake server), every read 300 µs, release build,
+local machine, November 2026, median of 3:
+
+```sh
+cargo test --release -p teamcraft-core --all-features --test suite -- --ignored --nocapture \
+  measure_signed_in_start   # START_CHANNELS, START_MESSAGES, START_MEMBERS change the workspace
+```
+
+| Start step (83 conversations)          | Before: reads | Before: time | After: reads | After: time |
+|----------------------------------------|---------------|--------------|--------------|-------------|
+| MLS state (engine thread)              | 2,488         | 962 ms       | 12           | 4.7 ms      |
+| First chat list (main read thread)     | 1,504         | 585 ms       | 13           | 5.1 ms      |
+| A list pass after that, warm caches    | 1             | 1.5 ms       | 1            | 1.5 ms      |
+
+- The test's ratio of the two steps (1.6 : 1) is the phone's (1.8 : 1): the reads are the cost. At
+  the rate the reports imply (about 1.8 ms per read on that phone at start), the MLS state now
+  takes some 20 ms and the first list some 25 ms, against 4.7 s and 2.6 s. Not measured on a phone
+  yet.
+- The kept list of 83 conversations is 28 KiB, sealed: a dozen pages, whatever the number of
+  conversations up to a few hundred.
+- What moved, not gone: a group's state is read when it is first used (its dozen entries, in one
+  snapshot), and the full list pass still runs at the start, after the list shows and only when no
+  other read waits. The engine's jobs no longer wait for the MLS state.
+
 ### Files view on a large workspace (issue #1509)
 
 `crates/teamcraft-ffi/tests/files_budget.rs` measures the Files view through the API the apps call:

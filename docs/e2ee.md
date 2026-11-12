@@ -6477,6 +6477,19 @@ such a full save. The browser store never loses an accepted write while the page
 owner (§9.4). A deleted group leaves no entry, the previous epoch's leaf keys included, which
 openmls 0.9 leaves behind after a commit that removed the device.
 
+The mobile apps' client opens the storage on demand (issue #1758): a start reads the marker and the
+generation, and openmls reads an entry from the store when it first asks for it (the patch's
+`ValueSource`), so a group's state is read when the group is first used, in one snapshot of the
+store; Android read all 83 groups' state before anything else ran, 4.7 s. A key the provider
+deleted, or looked for and didn't find, is never read from the store again, and its delete is a
+change the next save writes whether or not the entry was ever read. What it never read is what the
+store holds, so a save writes what changed as before. A full save first fills in every entry it
+never read (from the store, inside the save's group) and then writes them all: the result is the
+state this process knows, as before, the newest copy of each entry it never touched included. What
+lists entries of the map directly (the key packages for their upkeep) fills those in first. A store
+that still holds the record of a version before 1.0.9 is loaded whole, for the move. A read that
+fails fails the openmls operation that needed it, like any other error of the storage.
+
 Versions before 1.0.9 kept the whole storage as one record (`provider`). Opening the store moves it
 to entries in one group of writes that puts a marker in the old record's place last: until that
 group is on disk the old record is what a start reads. The marker is a length prefix far beyond the

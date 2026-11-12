@@ -13,12 +13,18 @@
 //! An action's local half runs on a third thread (issue #1756): it writes, so it waits for the
 //! store's write lock while the engine holds a group of writes, and the reads queued behind it on
 //! the main read thread waited with it, for seconds during a catch-up.
+//!
+//! The chat list a start asks for first is the one the last pass kept (issue #1758): one record,
+//! where a pass reads a dozen per conversation (2.6 s for 83 on Android 1.0.30, before the list
+//! showed). The main thread runs a pass once nothing else waits, and tells the app if the list
+//! changed.
 
 use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::mpsc;
+use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use teamcraft_client_api::backend::{ChatBackend as _, SearchBackend as _};
 use teamcraft_client_api::entry_rules::{channel_leave, space_leave};
@@ -35,7 +41,8 @@ use teamcraft_core::pending_work::PendingWork;
 use teamcraft_core::prefetch::load_segment_prefetch;
 use teamcraft_core::push_guard;
 use teamcraft_core::push_preview::{device_push_content, push_content_mode};
-use teamcraft_core::store::{read_together, write_group};
+use teamcraft_core::records;
+use teamcraft_core::store::{Table, read_together, try_write_group, write_group};
 use teamcraft_core::transfers::Transfers;
 use teamcraft_core::ui_backend::{CoreChatBackend, EntryNeed};
 use teamcraft_core::ui_snapshot::SnapshotCache;
@@ -58,6 +65,12 @@ use crate::types::{
 /// wrote, before it settles for the newest system line; a second look goes this many times further.
 const PREVIEW_ROWS: usize = 8;
 const PREVIEW_FURTHER: usize = 8;
+/// Where a pass keeps the chat list for the next start: the account's table, sealed like every
+/// record (issue #1758).
+const KEPT_CHAT_LIST_KEY: &str = "chat_list";
+/// How often at most a pass keeps a list that changed: it is only what the next start shows before
+/// its own pass, and a catch-up changes the list several times a second.
+const KEEP_CHAT_LIST_EVERY: Duration = Duration::from_secs(10);
 
 /// Work for the read thread.
 type ReadJob = Box<dyn FnOnce(&mut Reads) + Send>;
@@ -143,6 +156,29 @@ pub(crate) struct ReadAccount {
   /// What a snapshot built last: a change costs what it touched, not the workspace (issue #246).
   pub(crate) snapshots: SnapshotCache,
   pub(crate) identity_fingerprint: String,
+  /// The chat list since the account was known on this thread.
+  chat_list: ChatListAtStart,
+  /// The chat list the store keeps, as far as this thread knows.
+  maybe_kept: Option<Vec<ConversationItem>>,
+  /// When this thread kept the chat list last.
+  maybe_kept_at: Option<Instant>,
+}
+
+/// The chat list since the start (issue #1758).
+#[derive(Clone, Debug, PartialEq)]
+enum ChatListAtStart {
+  /// Nobody asked yet: the first ask gets the list the last pass kept, if there is one.
+  NotAsked,
+  /// The kept list was handed out: a pass runs once the thread has nothing else to do.
+  Kept(Vec<ConversationItem>),
+  /// A pass ran.
+  Passed,
+}
+
+/// The chat list as a pass kept it.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct KeptChatList {
+  items: Vec<ConversationItem>,
 }
 
 impl ReadAccount {
@@ -207,7 +243,7 @@ impl ReadQueue {
   /// Each change notification makes several screens ask at once, and a pass reads every
   /// conversation, so separate passes kept the thread busy and opening a chat waited (#1466).
   pub(crate) async fn conversations(&self) -> Result<Vec<ConversationItem>, TeamCraftError> {
-    let answer = self.share(&self.conversations, |reads: &mut Reads| reads.conversations())?;
+    let answer = self.share(&self.conversations, |reads: &mut Reads| reads.chat_list())?;
     answer.await.map_err(|_| TeamCraftError::EngineStopped)?
   }
 
@@ -264,6 +300,9 @@ impl ReadQueue {
         backend,
         snapshots: SnapshotCache::new(u64::try_from(SystemClock.now_ms()).unwrap_or_default()),
         identity_fingerprint: identity_fingerprint.clone(),
+        chat_list: ChatListAtStart::NotAsked,
+        maybe_kept: None,
+        maybe_kept_at: None,
       });
     });
   }
@@ -398,6 +437,17 @@ impl ReadQueue {
   }
 }
 
+/// The chat list the last pass kept; `None` without one, or one this version doesn't read.
+fn kept_chat_list(store: &Store) -> Option<Vec<ConversationItem>> {
+  match records::get_json::<KeptChatList>(store, Table::Account, KEPT_CHAT_LIST_KEY) {
+    Ok(maybe_kept) => maybe_kept.map(|kept| kept.items),
+    Err(error) => {
+      tracing::debug!(%error, "the kept chat list does not read; a pass builds it");
+      None
+    },
+  }
+}
+
 /// Starts a read thread on `store` and answers its queue.
 fn spawn_lane(
   name: &str,
@@ -419,7 +469,20 @@ fn spawn_lane(
         maybe_account: None,
         maybe_closing: None,
       };
-      for job in jobs {
+      loop {
+        let job = match jobs.try_recv() {
+          Ok(job) => job,
+          Err(TryRecvError::Empty) if reads.is_idle_work_due() => {
+            // Like a job's, a panic here leaves the thread working.
+            let _ = std::panic::catch_unwind(AssertUnwindSafe(|| reads.when_idle()));
+            continue;
+          },
+          Err(TryRecvError::Empty) => match jobs.recv() {
+            Ok(job) => job,
+            Err(_) => break,
+          },
+          Err(TryRecvError::Disconnected) => break,
+        };
         // The panic log names it (logging.rs), and the caller's answer is gone: the next read
         // still works instead of every read of a dead thread failing.
         let _ = std::panic::catch_unwind(AssertUnwindSafe(|| job(&mut reads)));
@@ -535,6 +598,75 @@ impl Reads {
     });
     engine.send(job).map_err(|_| TeamCraftError::EngineStopped)?;
     Ok(answer)
+  }
+
+  /// The chat list the app shows ([`ReadQueue::conversations`]). The first ask after the start
+  /// gets the list the last pass kept, one record (issue #1758); the pass follows once nothing else
+  /// waits ([`Self::when_idle`]). Every other ask is a pass, which keeps its list now and then.
+  pub(crate) fn chat_list(&mut self) -> Result<Vec<ConversationItem>, TeamCraftError> {
+    let account = self.maybe_account.as_mut().ok_or(TeamCraftError::NotEnrolled)?;
+    if account.chat_list == ChatListAtStart::NotAsked
+      && let Some(kept) = kept_chat_list(&self.store)
+    {
+      account.chat_list = ChatListAtStart::Kept(kept.clone());
+      account.maybe_kept = Some(kept.clone());
+      return Ok(kept);
+    }
+    self.chat_list_pass()
+  }
+
+  /// Whether [`Self::when_idle`] has something to do.
+  fn is_idle_work_due(&self) -> bool {
+    self
+      .maybe_account
+      .as_ref()
+      .is_some_and(|account| matches!(account.chat_list, ChatListAtStart::Kept(_)))
+  }
+
+  /// Work for when no job waits: the pass after a start that showed the kept chat list, which tells
+  /// the app if the list is another now.
+  fn when_idle(&mut self) {
+    let Some(account) = self.maybe_account.as_mut() else {
+      return;
+    };
+    let ChatListAtStart::Kept(shown) = std::mem::replace(&mut account.chat_list, ChatListAtStart::Passed)
+    else {
+      return;
+    };
+    match self.together(Self::chat_list_pass) {
+      Ok(items) if items != shown => self.listener.on_change(),
+      Ok(_) => {},
+      // The app asks again on the next change, and that ask is a pass.
+      Err(error) => tracing::warn!(%error, "the chat list after the start could not be read"),
+    }
+  }
+
+  /// A pass over the chat list; keeps it for the next start when it changed, now and then.
+  fn chat_list_pass(&mut self) -> Result<Vec<ConversationItem>, TeamCraftError> {
+    let items = self.conversations()?;
+    let store = self.store.clone();
+    let account = self.maybe_account.as_mut().ok_or(TeamCraftError::NotEnrolled)?;
+    account.chat_list = ChatListAtStart::Passed;
+    let is_due = account.maybe_kept.as_ref() != Some(&items)
+      && account
+        .maybe_kept_at
+        .is_none_or(|kept_at| kept_at.elapsed() >= KEEP_CHAT_LIST_EVERY);
+    if !is_due {
+      return Ok(items);
+    }
+    let kept = KeptChatList { items };
+    // Only when the write lock is free: the engine's catch-up may hold it, and this is a cache.
+    match try_write_group(&store, || {
+      records::put_json(&store, Table::Account, KEPT_CHAT_LIST_KEY, &kept)
+    }) {
+      Ok(Some(())) => {
+        account.maybe_kept = Some(kept.items.clone());
+        account.maybe_kept_at = Some(Instant::now());
+      },
+      Ok(None) => {},
+      Err(error) => tracing::debug!(%error, "could not keep the chat list"),
+    }
+    Ok(kept.items)
   }
 
   pub(crate) fn conversations(&self) -> Result<Vec<ConversationItem>, TeamCraftError> {

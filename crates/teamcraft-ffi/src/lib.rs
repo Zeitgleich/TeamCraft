@@ -2186,6 +2186,39 @@ mod tests {
       assert!(matches!(prefetch.await.unwrap(), Err(TeamCraftError::Network(_))));
     }
 
+    /// Issue #1758: the first chat list after a start is the one the last pass kept, one record,
+    /// and the pass that follows once the read thread is idle tells the app the list changed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_start_shows_the_kept_chat_list_first_and_tells_when_it_changed() {
+      let directory = TestDir::new("kept-chat-list");
+      enroll(&directory).await;
+      put_direct_message(&directory, 1, "Sam Doe");
+      let core = open_with(&directory, Arc::new(NoTokens), Arc::new(Quiet));
+      assert_eq!(names(&core.conversations().await.unwrap()), ["Sam Doe"]);
+      // A pass keeps its list only while the write lock is free; the client opens meanwhile.
+      while kept_chat_list(&directory).is_none() {
+        assert_eq!(names(&core.conversations().await.unwrap()), ["Sam Doe"]);
+      }
+      drop(core);
+      // Written after the last pass, as a sync does before the app is closed.
+      put_direct_message(&directory, 2, "Kim Roe");
+
+      let (changed, changes) = mpsc::channel();
+      let core = open_with(&directory, Arc::new(NoTokens), Arc::new(Changes(changed)));
+      assert_eq!(
+        names(&core.conversations().await.unwrap()),
+        ["Sam Doe"],
+        "the kept list, before any pass"
+      );
+      changes
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the pass after the start tells the app");
+      assert_eq!(
+        names(&core.conversations().await.unwrap()),
+        ["Sam Doe", "Kim Roe"]
+      );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_store_only_the_client_finds_unreadable_leads_to_the_recovery() {
       let directory = TestDir::new("late-problem");
@@ -2368,6 +2401,52 @@ mod tests {
       }))
       .unwrap();
       store.upsert_message(&message).unwrap();
+    }
+
+    /// A direct message of the enrolled user with `name`, as the sync stores it.
+    fn put_direct_message(directory: &TestDir, index: i64, name: &str) {
+      use teamcraft_proto::{Id as _, Snowflake};
+
+      let store = SealedSqliteStore::open(
+        &directory.store(),
+        &StaticKeySource::new(SymmetricKey::from_bytes(KEY)),
+      )
+      .unwrap();
+      let me = teamcraft_core::records::load_account(&store)
+        .unwrap()
+        .unwrap()
+        .user_id;
+      let peer = teamcraft_proto::UserId::from_snowflake(Snowflake::new(500 + index).unwrap());
+      let conversation =
+        teamcraft_proto::ConversationId::from_snowflake(Snowflake::new(1_000 + index).unwrap());
+      let person = |user: teamcraft_proto::UserId, name: &str| serde_json::json!({ "id": user, "display_name": name, "kind": "member", "is_deactivated": false });
+      let record = serde_json::json!({
+        "id": conversation,
+        "kind": "dm",
+        "visibility": "private",
+        "history_policy": "from_join",
+        "is_archived": false,
+        "moderation": teamcraft_proto::ChannelModeration::default(),
+        "contains_guests": false,
+        "participants": [person(me, "Alice"), person(peer, name)],
+      });
+      serde_json::from_value::<teamcraft_proto::ConversationResponse>(record.clone()).unwrap();
+      teamcraft_core::records::put_json(&store, Table::Conversations, &conversation.to_string(), &record)
+        .unwrap();
+    }
+
+    /// The chat list a pass kept, as the store holds it now.
+    fn kept_chat_list(directory: &TestDir) -> Option<Vec<u8>> {
+      let store = SealedSqliteStore::open(
+        &directory.store(),
+        &StaticKeySource::new(SymmetricKey::from_bytes(KEY)),
+      )
+      .unwrap();
+      store.get(Table::Account, "chat_list").unwrap()
+    }
+
+    fn names(items: &[ConversationItem]) -> Vec<&str> {
+      items.iter().map(|item| item.name.as_str()).collect()
     }
 
     /// A sync state that doesn't decode: only the client reads it.

@@ -10908,6 +10908,7 @@ dependencies = [
  "image",
  "js-sys",
  "keyring",
+ "openmls_memory_storage",
  "openmls_rust_crypto",
  "openmls_traits",
  "p256",

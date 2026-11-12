@@ -622,11 +622,40 @@ impl Default for ClientSettings {
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Opens the client of an enrolled device; `None` if the store holds no account yet (enroll).
+  /// Reads every group's MLS state now; [`Self::open_on_demand`] reads a group's when it is used.
   pub fn open(
     api: A,
     store: S,
     clock: Box<dyn Clock>,
     settings: ClientSettings,
+  ) -> Result<Option<Self>, CoreError> {
+    Self::open_with(api, store, clock, settings, |store| {
+      mls_storage::load_mls_storage(store)
+    })
+  }
+
+  /// [`Self::open`], with the MLS state read from the store when openmls first asks for it
+  /// (`mls_storage::open_mls_storage`, issue #1758): the start reads no group's state.
+  pub fn open_on_demand(
+    api: A,
+    store: S,
+    clock: Box<dyn Clock>,
+    settings: ClientSettings,
+  ) -> Result<Option<Self>, CoreError>
+  where
+    S: Clone + Send + Sync + 'static,
+  {
+    Self::open_with(api, store, clock, settings, |store| {
+      mls_storage::open_mls_storage(store)
+    })
+  }
+
+  fn open_with(
+    api: A,
+    store: S,
+    clock: Box<dyn Clock>,
+    settings: ClientSettings,
+    open_mls: impl FnOnce(&S) -> Result<(OpenMlsRustCrypto, mls_storage::SavedMlsStorage), CoreError>,
   ) -> Result<Option<Self>, CoreError> {
     let _step = crate::timing::step("client_open");
     let Some(account) = records::load_account(&store)? else {
@@ -635,7 +664,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if settings.leaves_mls_upkeep_to_app && mls_storage::has_unmoved_record(&store)? {
       return Err(CoreError::MlsStateNotMoved);
     }
-    let (provider, saved_mls) = mls_storage::load_mls_storage(&store)?;
+    let (provider, saved_mls) = open_mls(&store)?;
     if !settings.leaves_mls_upkeep_to_app {
       let now_ms = clock.now_ms();
       if let Err(error) = mls_storage::wipe_old_set_aside(&store, now_ms, settings.mls_set_aside_grace) {
@@ -861,13 +890,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .map(|bytes| PendingCommit::from_bytes(bytes.as_slice()))
       .transpose()?;
       self.group_loads += 1;
-      let maybe_group = ConversationGroup::load(
-        &self.provider,
-        convert::conversation(conversation),
-        applied.into_iter().map(ChangeId::from_bytes),
-        history,
-        maybe_pending,
-      )?;
+      // One snapshot of the store: a provider opened on demand reads the group's entries now, and
+      // another process's commit between two of them would mix two states.
+      let maybe_group = crate::store::read_together(&self.store, || {
+        ConversationGroup::load(
+          &self.provider,
+          convert::conversation(conversation),
+          applied.into_iter().map(ChangeId::from_bytes),
+          history,
+          maybe_pending,
+        )
+        .map_err(CoreError::from)
+      })?;
       match maybe_group {
         Some(group) => {
           self.groups.insert(conversation, group);

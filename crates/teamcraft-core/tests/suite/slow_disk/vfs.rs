@@ -1,7 +1,9 @@
 //! A SQLite VFS whose disk syncs are slow, as on a phone's flash (issue #1680): files are real
-//! files, every `xSync` waits a set delay and is counted. Locks and the write-ahead log's shared
-//! memory live in this process, which is all a test needs: every connection to the database is
-//! one of its own.
+//! files, every `xSync` waits a set delay and is counted. Reads of the database and the log are
+//! counted too, and may wait a delay of their own: a phone's start reads from flash, not from the
+//! page cache (issue #1758). SQLite maps no file here, so every page it doesn't hold in its own
+//! cache is a read. Locks and the write-ahead log's shared memory live in this process, which is
+//! all a test needs: every connection to the database is one of its own.
 //!
 //! Written on `sqlite-plugin`'s safe `Vfs` trait: the workspace forbids `unsafe` in our crates.
 
@@ -37,12 +39,18 @@ pub struct DiskTally {
   pub database_syncs: u64,
   /// Syncs of the write-ahead log.
   pub log_syncs: u64,
+  /// Reads of the database file and the write-ahead log (each a page, or a header).
+  pub reads: u64,
 }
 
 struct DiskState {
-  sync_delay: Duration,
+  /// Nanoseconds each sync waits.
+  sync_delay_nanos: AtomicU64,
+  /// Nanoseconds each read of the database or the log waits.
+  read_delay_nanos: AtomicU64,
   database_syncs: AtomicU64,
   log_syncs: AtomicU64,
+  reads: AtomicU64,
   /// Locks and shared memory per database file, shared by every connection to it.
   databases: Mutex<HashMap<PathBuf, Arc<Database>>>,
   next_handle: AtomicU64,
@@ -98,9 +106,11 @@ impl SlowDisk {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let name = format!("teamcraft-slow-disk-{}", NEXT.fetch_add(1, Ordering::Relaxed));
     let state = Arc::new(DiskState {
-      sync_delay,
+      sync_delay_nanos: AtomicU64::new(nanos(sync_delay)),
+      read_delay_nanos: AtomicU64::new(0),
       database_syncs: AtomicU64::new(0),
       log_syncs: AtomicU64::new(0),
+      reads: AtomicU64::new(0),
       databases: Mutex::default(),
       next_handle: AtomicU64::new(0),
     });
@@ -125,7 +135,21 @@ impl SlowDisk {
     DiskTally {
       database_syncs: self.state.database_syncs.load(Ordering::Relaxed),
       log_syncs: self.state.log_syncs.load(Ordering::Relaxed),
+      reads: self.state.reads.load(Ordering::Relaxed),
     }
+  }
+
+  /// From now on syncs wait `sync_delay` and reads of the database and the log `read_delay`: a
+  /// test fills a store at full speed, then measures on a phone's disk.
+  pub fn set_delays(&self, sync_delay: Duration, read_delay: Duration) {
+    self
+      .state
+      .sync_delay_nanos
+      .store(nanos(sync_delay), Ordering::Relaxed);
+    self
+      .state
+      .read_delay_nanos
+      .store(nanos(read_delay), Ordering::Relaxed);
   }
 }
 
@@ -139,6 +163,7 @@ impl DiskTally {
     DiskTally {
       database_syncs: self.database_syncs - before.database_syncs,
       log_syncs: self.log_syncs - before.log_syncs,
+      reads: self.reads - before.reads,
     }
   }
 }
@@ -236,6 +261,10 @@ impl Vfs for SlowVfs {
   }
 
   fn read(&self, handle: &mut SlowFile, offset: usize, data: &mut [u8]) -> VfsResult<usize> {
+    if matches!(handle.kind, OpenKind::MainDb | OpenKind::Wal) {
+      self.state.reads.fetch_add(1, Ordering::Relaxed);
+      wait(&self.state.read_delay_nanos);
+    }
     let file = handle.file()?;
     let offset = u64::try_from(offset).map_err(|_| vars::SQLITE_IOERR_READ)?;
     file
@@ -338,7 +367,7 @@ impl Vfs for SlowVfs {
       _ => &self.state.database_syncs,
     };
     counter.fetch_add(1, Ordering::Relaxed);
-    std::thread::sleep(self.state.sync_delay);
+    wait(&self.state.sync_delay_nanos);
     Ok(())
   }
 
@@ -478,6 +507,18 @@ impl VfsHandle for SlowFile {
 
   fn in_memory(&self) -> bool {
     false
+  }
+}
+
+fn nanos(delay: Duration) -> u64 {
+  u64::try_from(delay.as_nanos()).unwrap_or(u64::MAX)
+}
+
+/// Waits the delay `nanos` holds; none at zero.
+fn wait(nanos: &AtomicU64) {
+  let delay = nanos.load(Ordering::Relaxed);
+  if delay > 0 {
+    std::thread::sleep(Duration::from_nanos(delay));
   }
 }
 
