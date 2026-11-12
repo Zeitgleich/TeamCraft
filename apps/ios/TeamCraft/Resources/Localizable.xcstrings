@@ -7169,22 +7169,6 @@
         }
       }
     },
-    "search_hint": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Search messages"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Nachrichten durchsuchen"
-          }
-        }
-      }
-    },
     "search_title": {
       "localizations": {
         "en": {
@@ -8465,22 +8449,6 @@
         }
       }
     },
-    "dm_filter": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Filter direct messages"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Direktnachrichten filtern"
-          }
-        }
-      }
-    },
     "dm_filter_empty": {
       "localizations": {
         "en": {
@@ -8573,22 +8541,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Offline"
-          }
-        }
-      }
-    },
-    "home_title": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Home"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Startseite"
           }
         }
       }
@@ -14977,22 +14929,6 @@
         }
       }
     },
-    "nav_direct": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "DMs"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "DMs"
-          }
-        }
-      }
-    },
     "nav_activity": {
       "localizations": {
         "en": {
@@ -15085,22 +15021,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Geplant"
-          }
-        }
-      }
-    },
-    "home_entry_meetings": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Meetings"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Meetings"
           }
         }
       }
@@ -15229,22 +15149,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Braucht deine Aufmerksamkeit"
-          }
-        }
-      }
-    },
-    "quick_meetings_status": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Coming up and past"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Anstehend und vergangen"
           }
         }
       }
@@ -19693,6 +19597,102 @@
           "stringUnit": {
             "state": "translated",
             "value": "Deine Organisation hat die Wiederherstellung für dich nicht eingerichtet. Deine IT-Abteilung kann dein Konto nur zurücksetzen."
+          }
+        }
+      }
+    },
+    "nav_chats": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Chats"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Chats"
+          }
+        }
+      }
+    },
+    "nav_channels": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Channels"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kanäle"
+          }
+        }
+      }
+    },
+    "nav_meetings": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Meetings"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Meetings"
+          }
+        }
+      }
+    },
+    "search_chats_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Search"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Suchen"
+          }
+        }
+      }
+    },
+    "search_clear": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Clear search"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Suche löschen"
+          }
+        }
+      }
+    },
+    "search_section_messages": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Messages"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nachrichten"
           }
         }
       }

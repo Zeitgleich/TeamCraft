@@ -11,35 +11,18 @@ struct RootView: View {
   var body: some View {
     ZStack {
       Theme.background.ignoresSafeArea()
-      switch model.phase {
-      case .starting:
-        // The loading mark below stands in for this screen.
-        EmptyView()
-      case .needsServer(let address, let failure):
-        ServerEntryView(address: address, failure: failure)
-      case .confirmServer(let checked):
-        ServerConfirmView(checked: checked)
-      case .signedOut(let failure):
-        SignInView(failure: failure)
-      case .needsEnrollment(let hasExistingIdentity, let failure):
-        EnrollmentView(hasExistingIdentity: hasExistingIdentity, failure: failure)
-      case .linking(let progress):
-        // A fresh attempt forgets an earlier "asked".
-        LinkThisDeviceView(progress: progress).id(progress.attempt)
-      case .recovering(let progress, let failure):
-        OrgRecoveryView(progress: progress, failure: failure)
-      case .ready(let account):
-        ConversationListView(account: account)
-          .id(appliedFont)
-          // A new device asks to be linked: a card on every signed-in device (docs/e2ee.md §5).
-          .overlay(alignment: .top) { LinkPromptOverlay() }
-      case .failed(let failure):
-        FailureView(failure: failure)
-      case .storeUnreadable(let problem, let failure):
-        StoreRecoveryView(problem: problem, failure: failure)
-      }
+      #if DEBUG
+        if ChatListDemo.isOn {
+          // Screenshots of the chat list with sample chats (#1786), whatever the account's state.
+          ConversationListView(account: ChatListDemo.account)
+        } else {
+          phaseView
+        }
+      #else
+        phaseView
+      #endif
       // The animated mark while the core starts, handing over to whatever screen comes next (#463).
-      LoadingMarkOverlay(isLoading: isStarting)
+      LoadingMarkOverlay(isLoading: isStarting && !isDemo)
     }
     .font(.app(.body))
     .onReceive(NotificationCenter.default.publisher(for: AppFont.mayHaveChanged)) { _ in
@@ -72,6 +55,47 @@ struct RootView: View {
     case .ready: "ready \(model.currentServerOrigin ?? "")"
     default: "other \(model.currentServerOrigin ?? "")"
     }
+  }
+
+  /// The screen of the account's state.
+  @ViewBuilder
+  private var phaseView: some View {
+    switch model.phase {
+    case .starting:
+      // The loading mark below stands in for this screen.
+      EmptyView()
+    case .needsServer(let address, let failure):
+      ServerEntryView(address: address, failure: failure)
+    case .confirmServer(let checked):
+      ServerConfirmView(checked: checked)
+    case .signedOut(let failure):
+      SignInView(failure: failure)
+    case .needsEnrollment(let hasExistingIdentity, let failure):
+      EnrollmentView(hasExistingIdentity: hasExistingIdentity, failure: failure)
+    case .linking(let progress):
+      // A fresh attempt forgets an earlier "asked".
+      LinkThisDeviceView(progress: progress).id(progress.attempt)
+    case .recovering(let progress, let failure):
+      OrgRecoveryView(progress: progress, failure: failure)
+    case .ready(let account):
+      ConversationListView(account: account)
+        .id(appliedFont)
+        // A new device asks to be linked: a card on every signed-in device (docs/e2ee.md §5).
+        .overlay(alignment: .top) { LinkPromptOverlay() }
+    case .failed(let failure):
+      FailureView(failure: failure)
+    case .storeUnreadable(let problem, let failure):
+      StoreRecoveryView(problem: problem, failure: failure)
+    }
+  }
+
+  /// The chat list with sample chats, for screenshots (Debug builds only, `ChatListDemo`).
+  private var isDemo: Bool {
+    #if DEBUG
+      ChatListDemo.isOn
+    #else
+      false
+    #endif
   }
 
   private var isReady: Bool {

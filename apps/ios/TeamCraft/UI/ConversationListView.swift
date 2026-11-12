@@ -18,7 +18,6 @@ struct ConversationListView: View {
   @State private var query = ""
   @State private var hits: [SearchHitItem] = []
   @State private var isShowingSettings = false
-  @State private var isShowingMeetings = false
   @State private var isShowingDirectory = false
   @State private var isShowingFilters = false
   @State private var filters = SearchFilters()
@@ -46,15 +45,18 @@ struct ConversationListView: View {
   @State private var createdSpaces = 0
   /// The space Home of the spaces layout shows, remembered on this device as on Android.
   @AppStorage("home_selected_space") private var rememberedSpaceId = ""
-  /// Home, DMs and Activity (#1488), as on Android.
-  @State private var tab: ChatTab = .home
-  /// Home's sections the user collapsed, on this device (keys: `ConversationSection.collapseKey`).
+  /// Chats, Channels, Meetings and Activity (#1786); the app starts on Chats.
+  @State private var tab: ChatTab = .chats
+  /// The Channels tab's sections the user collapsed, on this device (keys:
+  /// `ConversationSection.collapseKey`; the stored name is from when the tab was Home).
   @AppStorage("home_collapsed_sections") private var collapsedRaw = ""
   @State private var homeChip: HomeFilter = .all
   /// Takes effect at once: the view follows the stored value (#1151).
   @AppStorage(ChatListLayout.key) private var layoutRaw = ChatListLayout.spaces.rawValue
   @AppStorage(ChatListGrouping.key) private var groupingRaw = ChatListGrouping.mixed.rawValue
-  @State private var dmFilter = ""
+  /// The user's own presence, as Settings set it: on the avatar in the header (#1786).
+  @AppStorage("presence") private var presenceRaw = PresenceChoice.online.rawValue
+  @Environment(\.horizontalSizeClass) private var sizeClass
   /// A mute from the long-press menu the server didn't take (#903).
   @State private var isMuteFailed = false
   @State private var maybeFilters: ConversationFiltersTarget?
@@ -71,24 +73,40 @@ struct ConversationListView: View {
   var body: some View {
     NavigationSplitView {
       sidebar
+        // One background under the header and the list, also in the iPad's sidebar column, so the
+        // header doesn't stand off as a band and the presence rings match it.
+        .scrollContentBackground(.hidden)
+        .background { Color(.systemBackground).ignoresSafeArea() }
+        // The header, the one search field and the chips stay put above the list (#1786): one line
+        // on every tab, so nothing jumps when switching.
         .safeAreaInset(edge: .top, spacing: 0) {
           VStack(spacing: 0) {
+            header
             OfflineBanner()
             // Any conversation with messages still to come (issue #1457).
             SyncingLine(isCatchingUp: conversations.contains(where: \.isCatchingUp))
             if let progress = maybeFirstSync { FirstSyncBar(progress: progress) }
             NotificationPromptCard()
+            if !conversations.isEmpty || isSearching {
+              ChatSearchField(text: $query, hasFilters: !filters.isEmpty) { isShowingFilters = true }
+                .padding(.horizontal, 16)
+                .padding(.bottom, isFilterShown && !isSearching ? 0 : 8)
+            }
+            if isFilterShown && !isSearching && !conversations.isEmpty {
+              FilterChipRow(
+                chips: isList ? HomeFilter.listChips : HomeFilter.chips, selection: $homeChip,
+                unreadCount: HomeFilter.unreadCount(conversations, isList: isList))
+            }
           }
+          .background { Color(.systemBackground).ignoresSafeArea(edges: .top) }
         }
-        // The new-message button floats above the list, in the theme's color (#1488).
-        .overlay(alignment: .bottomTrailing) {
-          if !isSearching && tab != .activity { composeButton }
-        }
+        // The floating bar with the compose button next to it (#1786): nothing covers a row, and the
+        // list's last row scrolls clear of it.
         .safeAreaInset(edge: .bottom, spacing: 0) {
-          if !isSearching && !conversations.isEmpty { bottomNavigation }
+          if !isSearching && !conversations.isEmpty { bottomBar }
         }
-        .navigationTitle(maybeHeaderSpace.map { Text($0.name) } ?? Text("chats_title"))
-        .navigationBarTitleDisplayMode(maybeHeaderSpace == nil ? .automatic : .inline)
+        .toolbar(.hidden, for: .navigationBar)
+        .navigationTitle(Text(shownTab.titleKey))
         .alert("dnd_save_failed", isPresented: $isMuteFailed) {}
         .sheet(item: $maybeFilters) { ConversationFiltersView(conversationId: $0.id) }
         .alert("deletions_suspect \(suspectDeletions)", isPresented: isSuspectDeletionsShown) {}
@@ -110,39 +128,6 @@ struct ConversationListView: View {
         } message: {
           Text(leaveMessage)
         }
-        .toolbar {
-          ToolbarItem(placement: .topBarLeading) {
-            Button { isShowingFilters = true } label: {
-              Image(
-                systemName: filters.isEmpty
-                  ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
-            }
-            .accessibilityLabel(Text("search_filters_title"))
-          }
-          // Drafts, scheduled messages and meetings are Home's quick-access cards; a new message is
-          // the floating button (#1488).
-          ToolbarItemGroup(placement: .topBarTrailing) {
-            if let space = maybeHeaderSpace {
-              // The selected space's views, browsing and actions, next to its name (#1526).
-              Menu {
-                spaceActions(spaceId: space.id, name: space.name, hasUnread: space.mentionCount > 0 || space.hasUnread)
-              } label: {
-                Image(systemName: "ellipsis.circle")
-              }
-              .accessibilityLabel(Text("space_options \(space.name)"))
-              .task(id: space.id) { spaceMenus[space.id] = await model.spaceMenu(space.id) }
-            }
-            Button { isShowingSettings = true } label: { Image(systemName: "gearshape") }
-              .accessibilityLabel(Text("settings_title"))
-          }
-          if let space = maybeHeaderSpace {
-            ToolbarItem(placement: .principal) {
-              SpaceSwitcherTitle(
-                space: space, hasNewElsewhere: hasNewElsewhere(spaces, selectedId: space.id)
-              ) { isSwitchingSpace = true }
-            }
-          }
-        }
     } detail: {
       if let conversation = conversations.first(where: { $0.id == selection }) {
         ChatPane(conversation: conversation, threadId: nil, account: account)
@@ -155,7 +140,6 @@ struct ConversationListView: View {
         Text("no_conversation_selected").foregroundStyle(Theme.textMuted)
       }
     }
-    .searchable(text: $query, prompt: Text("search_hint"))
     // A snapshot is too much to decode on every change for this: once per account, and again when
     // the list's spaces change or the switcher opens (#1526).
     .task(
@@ -163,6 +147,12 @@ struct ConversationListView: View {
         userId: account.userId, count: conversations.count, spaceIds: listedSpaceIds, isSwitching: isSwitchingSpace,
         created: createdSpaces)
     ) {
+      #if DEBUG
+        if ChatListDemo.isOn {
+          snapshotSpaces = ChatListDemo.spaces
+          return
+        }
+      #endif
       guard let snapshot = await model.browseSnapshot() else { return }
       canBrowseChannels = snapshot.canBrowseChannels
       snapshotSpaces = (snapshot.spaces ?? []).map { HomeSpace(id: $0.id, name: $0.name, maybeImageVersion: $0.maybeImageVersion) }
@@ -172,6 +162,19 @@ struct ConversationListView: View {
       if canBrowseChannels { canCreateSpaces = await model.canCreateSpaces() }
     }
     .task(id: model.changeCount) {
+      #if DEBUG
+        if ChatListDemo.isOn {
+          if !hasLoaded {
+            tab = ChatListDemo.initialTab ?? tab
+            query = ChatListDemo.initialQuery ?? query
+          }
+          conversations = ChatListDemo.conversations
+          previews = ChatListDemo.previews()
+          runningCalls = ChatListDemo.runningCalls
+          hasLoaded = true
+          return
+        }
+      #endif
       conversations = await model.conversations()
       // The chat list shows the core's rows: a signed-in start is done (#1521).
       Perf.chatListShown()
@@ -192,19 +195,19 @@ struct ConversationListView: View {
         model.openConversationId = nil
       }
     }
-    // A channel opened from elsewhere (notification, link) while the DMs show: Home has it. Home
-    // lists DMs with something new too, so a DM opened from there stays highlighted there.
+    // A conversation opened from elsewhere (notification, link, a name found by the search) lands on
+    // the tab that lists it, so its row is there to come back to (`ChatTab.opening`).
     .onChange(of: selection) { _, id in
-      if let selected = conversations.first(where: { $0.id == id }), tab == .direct, isList || !selected.isDirect {
-        tab = .home
-      }
+      guard let selected = conversations.first(where: { $0.id == id }) else { return }
+      let next = tab.opening(selected, isList: isList)
+      if next != shownTab { tab = next }
+      if !query.isEmpty { query = "" }
     }
     // Why an action on a request to join didn't go through, also for the open channel's banner;
     // the channel browser shows its own.
     .joinNoteAlert(model, isActive: maybeBrowseTab == nil)
     .sheet(isPresented: $isShowingSettings) { SettingsView(account: account) }
     .crashReportsNotice { isShowingSettings = true }
-    .sheet(isPresented: $isShowingMeetings) { MeetingsView(account: account) }
     .sheet(isPresented: $isShowingDirectory) {
       DirectoryView { conversationId in selection = conversationId }
     }
@@ -214,10 +217,14 @@ struct ConversationListView: View {
         selection = place.conversationId
       }
     }
-    .onChange(of: model.isShowingMeetingsFromLink) { _, isAsked in
+    // A meetings link lands on the Meetings tab (#1786); on a phone the open conversation closes, so
+    // the tab is on screen.
+    .onChange(of: model.isMeetingsTabAsked, initial: true) { _, isAsked in
       if isAsked {
-        isShowingMeetings = true
-        model.isShowingMeetingsFromLink = false
+        model.isMeetingsTabAsked = false
+        query = ""
+        tab = .meetings
+        if sizeClass == .compact { selection = nil }
       }
     }
     .sheet(isPresented: $isShowingFilters) { SearchFiltersView(filters: $filters) }
@@ -243,8 +250,9 @@ struct ConversationListView: View {
         spaces: spaces, selectedId: maybeSelectedSpace?.id, canBrowse: canBrowseChannels,
         onCreate: canCreateSpaces ? { createsSpaceNext = true } : nil
       ) { spaceId in
+        // The space scopes the Channels tab: that is where picking one shows something.
         rememberedSpaceId = spaceId
-        tab = .home
+        tab = .channels
       }
     }
     .sheet(item: $maybeNewChannelSpace) { space in
@@ -254,7 +262,7 @@ struct ConversationListView: View {
       NewSpaceView { spaceId in
         createdSpaces += 1
         rememberedSpaceId = spaceId
-        tab = .home
+        tab = .channels
       }
     }
   }
@@ -273,118 +281,204 @@ struct ConversationListView: View {
 
   private var listedSpaceIds: Set<String> { Set(conversations.compactMap(\.maybeSpaceId)) }
 
-  /// The space Home of the spaces layout shows; the list layout shows all of them.
+  /// The space the Channels tab of the spaces layout shows; the list layout shows all of them.
   private var maybeSelectedSpace: HomeSpace? {
     isList ? nil : selectedSpace(spaces, remembered: rememberedSpaceId)
   }
 
-  /// The space the header names: on Home of the spaces layout, not while searching.
-  private var maybeHeaderSpace: HomeSpace? {
-    shownTab == .home && !isSearching ? maybeSelectedSpace : nil
-  }
+  /// The space the header names (#1786): on every tab of the spaces layout; the list layout and a
+  /// user without spaces have the plain title.
+  private var maybeHeaderSpace: HomeSpace? { maybeSelectedSpace }
 
-  /// The tab on screen: the list layout has the DMs on Home and no tab of their own for them.
-  private var shownTab: ChatTab { isList && tab == .direct ? .home : tab }
+  /// The tab on screen: the list layout has its channels on Chats and no tab of their own for them.
+  private var shownTab: ChatTab { tab.shown(isList: isList) }
 
-  /// Where the chips and the filter belong: the DMs, and Home in the list layout.
-  private var isFilterShown: Bool { isList ? shownTab == .home : shownTab == .direct }
+  /// Where the chips belong: the Chats tab.
+  private var isFilterShown: Bool { shownTab == .chats }
+
+  /// The Channels tab of the spaces layout, or the list layout's Chats, which holds the channels.
+  private var showsChannels: Bool { isList ? shownTab == .chats : shownTab == .channels }
+
+  private var presence: Presence { PresenceChoice(rawValue: presenceRaw)?.presence ?? .online }
 
   private var collapsed: Set<String> { Set(collapsedRaw.split(separator: "\n").map(String.init)) }
+
+  /// One line on every tab (#1786): the space switcher (or the title) at the leading edge, the
+  /// space's menu and the user's own avatar, which opens Settings, at the trailing edge.
+  private var header: some View {
+    HStack(spacing: 4) {
+      if let space = maybeHeaderSpace {
+        SpaceSwitcherTitle(space: space, hasNewElsewhere: hasNewElsewhere(spaces, selectedId: space.id)) {
+          isSwitchingSpace = true
+        }
+      } else {
+        Text("chats_title")
+          .font(.app(.title3).weight(.bold))
+          .lineLimit(1)
+          .accessibilityAddTraits(.isHeader)
+      }
+      Spacer(minLength: 8)
+      if let space = maybeHeaderSpace {
+        // The selected space's views, browsing and actions, next to its name (#1526).
+        Menu {
+          spaceActions(spaceId: space.id, name: space.name, hasUnread: space.mentionCount > 0 || space.hasUnread)
+        } label: {
+          Image(systemName: "ellipsis.circle")
+            .font(.app(.title3))
+            .foregroundStyle(Theme.accent)
+            .frame(minWidth: 44, minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .accessibilityLabel(Text("space_options \(space.name)"))
+        .task(id: space.id) { spaceMenus[space.id] = await model.spaceMenu(space.id) }
+      }
+      OwnAvatarButton(name: account.displayName, presence: presence) { isShowingSettings = true }
+    }
+    .padding(.leading, 16)
+    .padding(.trailing, 10)
+    .frame(minHeight: 52)
+  }
 
   @ViewBuilder
   private var sidebar: some View {
     if isSearching {
-      SearchResultsView(hits: hits, query: fullQuery) { hit in
-        query = ""
-        filters = SearchFilters()
-        selection = hit.message.conversationId
-      }
+      searchResults
     } else if conversations.isEmpty {
       if hasLoaded {
         EmptyChatsView { tab in maybeBrowseTab = tab }
       } else {
         Color.clear
       }
+    } else if shownTab == .meetings {
+      MeetingsView(account: account)
     } else {
-      List(selection: $selection) {
-        if shownTab == .home {
-          quickAccessCards
-          ScheduledAttentionSection()
-          GuestNoticeSection()
-        }
-        if shownTab == .activity {
-          // Admins asking to join a channel the user owns: they wait for a decision (#799).
-          JoinRequestSection()
-          if shownSections.isEmpty && model.joinRequests.isEmpty {
-            ContentUnavailableView {
-              Label("activity_empty_title", systemImage: "checkmark")
-            } description: {
-              Text("activity_empty")
-            }
+      conversationList
+    }
+  }
+
+  /// The search's results (#1786): the conversations whose name matches first, then the messages.
+  private var searchResults: some View {
+    let lastActivity = previews.mapValues(\.sentDate)
+    let named = nameMatches(conversations, query: query, lastActivity: lastActivity, listsArchived: !canBrowseChannels)
+    return List(selection: $selection) {
+      if !named.isEmpty {
+        Section("chats_title") {
+          ForEach(named, id: \.id) { conversation in
+            conversationRow(conversation, showsSpace: true, showsPin: conversation.isFavorite)
           }
-        } else if isFilterShown {
-          TextField("dm_filter", text: $dmFilter)
-            .textFieldStyle(.roundedBorder)
-            .autocorrectionDisabled()
-          homeChips
-          if shownSections.isEmpty {
-            let isUnfiltered = dmFilter.isEmpty && homeChip == .all
-            Text(LocalizedStringKey(isUnfiltered ? "dm_empty" : "dm_filter_empty")).foregroundStyle(Theme.textMuted)
-            if isUnfiltered {
-              Button("dm_new", systemImage: "square.and.pencil") { maybeBrowseTab = .people }
-            }
-          }
-        } else if shownSections.isEmpty {
-          Text("spaces_empty").foregroundStyle(Theme.textMuted)
-        }
-        ForEach(shownSections) { section in
-          let isFiltering = !dmFilter.isEmpty || homeChip != .all
-          let isCollapsible = shownTab == .home && (!isList || (isBySpace && !isFiltering)) && section.collapseKey != nil
-          let isCollapsed = isCollapsible && collapsed.contains(section.collapseKey ?? "")
-          Section(
-            header: sectionHeader(section, isCollapsible: isCollapsible, isCollapsed: isCollapsed)
-              .contextMenu { spaceMenu(for: section) }
-              .task(id: section.id) { await loadSpaceMenu(for: section) }
-          ) {
-            // A space without joined channels says so, and where to find some (#1526).
-            if let spaceId = section.spaceId, section.conversations.isEmpty, !isCollapsed {
-              Text("space_no_channels").foregroundStyle(Theme.textMuted)
-              // Home of the spaces layout has the same button right below.
-              if canBrowseChannels && section.isSpace {
-                Button("browse_channels", systemImage: "plus") { browseChannels(in: spaceId) }
-              }
-            }
-            ForEach(section.visibleRows(isCollapsed: isCollapsed, selectedId: selection), id: \.id) { conversation in
-              ConversationRow(
-                conversation: conversation, maybePreview: previews[conversation.id],
-                // A space's section names it in its header, so its rows don't (#1345).
-                showsSpace: section.title == .favorites || (isList && !section.isSpace),
-                callCount: runningCalls[conversation.id] ?? 0,
-                typingNames: typingNames(in: model.typingNow, conversation: conversation.id, thread: nil))
-                .tag(conversation.id)
-                .swipeActions(edge: .leading) { readButton(for: conversation) }
-                .swipeActions(edge: .trailing) { favoriteButton(for: conversation) }
-                .task(id: conversation.id) { await loadLeaveChoice(for: conversation) }
-                .contextMenu {
-                  readButton(for: conversation)
-                  muteMenu(for: conversation)
-                  levelMenu(for: conversation)
-                  Button("notify_filters_title", systemImage: "bell.badge") { maybeFilters = ConversationFiltersTarget(id: conversation.id) }
-                  favoriteButton(for: conversation)
-                  copyLinkButton(for: conversation)
-                  leaveButton(for: conversation)
-                  deleteButton(for: conversation)
-                }
-            }
-          }
-        }
-        if isList && !isBySpace && shownTab == .home && dmFilter.isEmpty && homeChip == .all { listSpacesSection }
-        if (!isList || isBySpace) && shownTab == .home && canBrowseChannels {
-          Button("browse_channels", systemImage: "plus") { browseChannels(in: maybeSelectedSpace?.id) }
         }
       }
-      .listStyle(.sidebar)
-      .animation(.snappy(duration: 0.25), value: collapsedRaw)
+      if !hits.isEmpty {
+        Section("search_section_messages") {
+          SearchHitRows(hits: hits) { hit in
+            query = ""
+            filters = SearchFilters()
+            selection = hit.message.conversationId
+          }
+        }
+      } else if named.isEmpty {
+        Text("search_empty").foregroundStyle(Theme.textMuted).listRowSeparator(.hidden)
+      }
+    }
+    .listStyle(.plain)
+  }
+
+  private var conversationList: some View {
+    List(selection: $selection) {
+      if showsChannels {
+        quickAccessCards
+        ScheduledAttentionSection()
+        GuestNoticeSection()
+      }
+      if shownTab == .activity {
+        // Admins asking to join a channel the user owns: they wait for a decision (#799).
+        JoinRequestSection()
+        if shownSections.isEmpty && model.joinRequests.isEmpty {
+          ContentUnavailableView {
+            Label("activity_empty_title", systemImage: "checkmark")
+          } description: {
+            Text("activity_empty")
+          }
+        }
+      } else if isFilterShown && shownSections.isEmpty {
+        let isUnfiltered = homeChip == .all
+        Text(LocalizedStringKey(isUnfiltered ? "dm_empty" : "dm_filter_empty")).foregroundStyle(Theme.textMuted)
+        if isUnfiltered {
+          Button("dm_new", systemImage: "square.and.pencil") { maybeBrowseTab = .people }
+        }
+      } else if shownSections.isEmpty {
+        Text("spaces_empty").foregroundStyle(Theme.textMuted)
+      }
+      ForEach(shownSections) { section in
+        let isFiltering = homeChip != .all
+        let isCollapsible =
+          section.collapseKey != nil && (isList ? isBySpace && !isFiltering && shownTab == .chats : shownTab == .channels)
+        let isCollapsed = isCollapsible && collapsed.contains(section.collapseKey ?? "")
+        if section.title.isHeaderless {
+          Section { sectionRows(section, isCollapsed: false) }
+        } else {
+          Section {
+            sectionRows(section, isCollapsed: isCollapsed)
+          } header: {
+            sectionHeader(section, isCollapsible: isCollapsible, isCollapsed: isCollapsed)
+              .contextMenu { spaceMenu(for: section) }
+              .task(id: section.id) { await loadSpaceMenu(for: section) }
+          }
+        }
+      }
+      if isList && !isBySpace && shownTab == .chats && homeChip == .all { listSpacesSection }
+      if canBrowseChannels && ((!isList && shownTab == .channels) || (isBySpace && shownTab == .chats)) {
+        Button("browse_channels", systemImage: "plus") { browseChannels(in: maybeSelectedSpace?.id) }
+      }
+    }
+    .listStyle(.plain)
+    .animation(.snappy(duration: 0.25), value: collapsedRaw)
+  }
+
+  @ViewBuilder
+  private func sectionRows(_ section: ConversationSection, isCollapsed: Bool) -> some View {
+    // A space without joined channels says so, and where to find some (#1526).
+    if let spaceId = section.spaceId, section.conversations.isEmpty, !isCollapsed {
+      Text("space_no_channels").foregroundStyle(Theme.textMuted)
+      // The Channels tab of the spaces layout has the same button right below.
+      if canBrowseChannels && section.isSpace {
+        Button("browse_channels", systemImage: "plus") { browseChannels(in: spaceId) }
+      }
+    }
+    ForEach(section.visibleRows(isCollapsed: isCollapsed, selectedId: selection), id: \.id) { conversation in
+      conversationRow(
+        conversation,
+        // A space's section names it in its header, so its rows don't (#1345).
+        showsSpace: section.title == .favorites || (isList && !section.isSpace),
+        // The Favorites section says it already (#1786).
+        showsPin: conversation.isFavorite && section.title != .favorites)
+    }
+  }
+
+  private func conversationRow(_ conversation: ConversationItem, showsSpace: Bool, showsPin: Bool) -> some View {
+    // The list's own colour, also in the iPad's sidebar column (whose rows are tinted otherwise);
+    // the open conversation on the accent's soft tint.
+    let background = selection == conversation.id ? Theme.accentSoft : Color(.systemBackground)
+    return ConversationRow(
+      conversation: conversation, maybePreview: previews[conversation.id], showsSpace: showsSpace, showsPin: showsPin,
+      callCount: runningCalls[conversation.id] ?? 0,
+      typingNames: typingNames(in: model.typingNow, conversation: conversation.id, thread: nil), background: background
+    )
+    .tag(conversation.id)
+    .listRowBackground(background)
+    .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+    .swipeActions(edge: .leading) { readButton(for: conversation) }
+    .swipeActions(edge: .trailing) { favoriteButton(for: conversation) }
+    .task(id: conversation.id) { await loadLeaveChoice(for: conversation) }
+    .contextMenu {
+      readButton(for: conversation)
+      muteMenu(for: conversation)
+      levelMenu(for: conversation)
+      Button("notify_filters_title", systemImage: "bell.badge") { maybeFilters = ConversationFiltersTarget(id: conversation.id) }
+      favoriteButton(for: conversation)
+      copyLinkButton(for: conversation)
+      leaveButton(for: conversation)
+      deleteButton(for: conversation)
     }
   }
 
@@ -424,117 +518,56 @@ struct ConversationListView: View {
   }
 
   private var shownSections: [ConversationSection] {
-    if isList {
-      let sections = listSections(
-        conversations, lastActivity: previews.mapValues(\.sentDate), filter: dmFilter, chip: homeChip, bySpace: isBySpace)
-      // While filtering, only matches count: no empty spaces.
-      let isFiltering = !dmFilter.isEmpty || homeChip != .all
-      return isBySpace && !isFiltering ? withEmptySpaces(sections, spaces: spaces) : sections
-    }
     let lastActivity = previews.mapValues(\.sentDate)
     switch shownTab {
-    case .home:
-      // Without spaces (yet), Home lists what there is.
+    case .chats where isList:
+      let sections = listSections(conversations, lastActivity: lastActivity, chip: homeChip, bySpace: isBySpace)
+      // While filtering, only matches count: no empty spaces.
+      return isBySpace && homeChip == .all ? withEmptySpaces(sections, spaces: spaces) : sections
+    case .chats:
+      return directSections(conversations, lastActivity: lastActivity, chip: homeChip)
+    case .channels:
+      // Without spaces (yet), the tab lists what there is.
       if let space = maybeSelectedSpace {
         return spaceHomeSections(
           conversations, spaceId: space.id, lastActivity: lastActivity, listsArchived: !canBrowseChannels)
       }
       return homeSections(conversations, lastActivity: lastActivity, listsArchived: !canBrowseChannels)
-    case .direct: return directSections(conversations, lastActivity: lastActivity, filter: dmFilter, chip: homeChip)
+    case .meetings:
+      return []
     case .activity:
       let waiting = activityConversations(conversations, lastActivity: lastActivity)
       return waiting.isEmpty ? [] : [ConversationSection(title: .activity, conversations: waiting)]
     }
   }
 
-  /// Unread / People / Groups; tapping the selected chip again shows everything.
-  private var homeChips: some View {
-    HStack {
-      ForEach(isList ? HomeFilter.listChips : HomeFilter.chips, id: \.self) { chip in
-        Button(LocalizedStringKey(chipKey(chip))) { homeChip = homeChip == chip ? .all : chip }
-          .buttonStyle(.bordered)
-          .tint(homeChip == chip ? Theme.accent : .secondary)
-          .accessibilityAddTraits(homeChip == chip ? .isSelected : [])
+  /// The floating bar and, next to it on the same line, the compose button (#1786). The button stays
+  /// on every tab, so the bar keeps its width.
+  private var bottomBar: some View {
+    HStack(alignment: .center, spacing: 10) {
+      FloatingTabBar(
+        items: ChatTab.barItems(isList: isList), selected: shownTab,
+        mark: { $0.mark(conversations, isList: isList, joinRequests: model.joinRequests.count) }
+      ) { item in
+        tab = item
       }
+      composeButton
     }
+    .padding(.horizontal, 16)
+    .padding(.top, 8)
+    .padding(.bottom, 4)
   }
 
-  private func chipKey(_ chip: HomeFilter) -> String {
-    switch chip {
-    case .all: return "home_filter_all"
-    case .unread: return "home_filter_unread"
-    case .people: return "home_filter_people"
-    case .groups: return "home_filter_groups"
-    case .channels: return "channels"
-    }
-  }
-
-  /// Home, DMs and Activity at the bottom (#1488), each with what is new in it: a number for what
-  /// is addressed to the user (mentions, DMs, requests to join), a dot for new channel messages.
-  private var bottomNavigation: some View {
-    HStack(spacing: 0) {
-      ForEach(ChatTab.allCases.filter { !(isList && $0 == .direct) }, id: \.self) { item in
-        let badge = tabBadge(item)
-        Button {
-          tab = item
-        } label: {
-          VStack(spacing: 2) {
-            Image(systemName: tabSymbol(item))
-              .symbolVariant(shownTab == item ? .fill : .none)
-              .font(.system(size: 20))
-              .frame(height: 26)
-              .overlay(alignment: .topTrailing) { TabBadgeMark(count: badge.count, hasNew: badge.hasNew) }
-            Text(tabLabel(item)).font(.app(.caption2))
-          }
-          .frame(maxWidth: .infinity, minHeight: 49)
-          .foregroundStyle(shownTab == item ? Theme.accent : Theme.textMuted)
-          .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(Text(tabLabel(item)))
-        .accessibilityValue(badge.count > 0 ? Text("chat_unread \(badge.count)") : Text(verbatim: ""))
-        .accessibilityAddTraits(shownTab == item ? .isSelected : [])
-      }
-    }
-    .background(.bar)
-    .overlay(alignment: .top) { Divider() }
-    .sensoryFeedback(.selection, trigger: tab)
-  }
-
-  private func tabLabel(_ tab: ChatTab) -> LocalizedStringKey {
-    switch tab {
-    case .home: return "home_title"
-    case .direct: return "nav_direct"
-    case .activity: return "nav_activity"
-    }
-  }
-
-  private func tabSymbol(_ tab: ChatTab) -> String {
-    switch tab {
-    case .home: return "house"
-    case .direct: return "bubble.left.and.bubble.right"
-    case .activity: return "bell"
-    }
-  }
-
-  /// Channels and Activity count only mentions; DMs (and the list layout's Home) every unread message.
-  private func tabBadge(_ tab: ChatTab) -> (count: Int, hasNew: Bool) {
-    let direct = TabBadge(conversations.filter(\.isDirect))
-    let channels = TabBadge(conversations.filter { !$0.isDirect })
-    switch tab {
-    case .home where isList:
-      return (max(direct.mentions + channels.mentions, direct.unread), channels.unread > 0)
-    case .home: return (channels.mentions, channels.unread > 0)
-    case .direct: return (max(direct.mentions, direct.unread), false)
-    case .activity: return (direct.mentions + channels.mentions + model.joinRequests.count, false)
-    }
-  }
-
-  /// Bottom right in the theme's color (#1488). On Home a menu of what can be started (#1534): a
-  /// message, a channel in the space Home shows, a space, browsing; on the DMs a new message.
+  /// In the accent colour next to the bar (#1786). On the Chats tab of the spaces layout a new
+  /// message; elsewhere a menu of what can be started (#1534): a message, a channel in the selected
+  /// space, a space, browsing, the directory.
   @ViewBuilder
   private var composeButton: some View {
-    if shownTab == .home {
+    if shownTab == .chats && !isList {
+      Button { maybeBrowseTab = .people } label: { ComposeMark(symbol: "square.and.pencil") }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text("new_chat"))
+    } else {
       Menu {
         Button("dm_new", systemImage: "square.and.pencil") { maybeBrowseTab = .people }
         if let space = maybeChannelSpace {
@@ -551,29 +584,15 @@ struct ConversationListView: View {
         // Everybody has a directory; a guest's lists the people they share a conversation with.
         Button("directory_title", systemImage: "person.2") { isShowingDirectory = true }
       } label: {
-        composeMark(symbol: "plus")
+        ComposeMark(symbol: "plus")
       }
+      .buttonStyle(.plain)
       .task { if canBrowseChannels { canCreateSpaces = await model.canCreateSpaces() } }
-      .padding(16)
       .accessibilityLabel(Text("create_new"))
-    } else {
-      Button { maybeBrowseTab = .people } label: { composeMark(symbol: "square.and.pencil") }
-        .buttonStyle(.plain)
-        .padding(16)
-        .accessibilityLabel(Text("new_chat"))
     }
   }
 
-  private func composeMark(symbol: String) -> some View {
-    Image(systemName: symbol)
-      .font(.app(.title2).weight(.semibold))
-      .foregroundStyle(.white)
-      .frame(width: 56, height: 56)
-      .background(Theme.accent, in: .rect(cornerRadius: 16))
-      .shadow(color: .black.opacity(0.18), radius: 8, y: 4)
-  }
-
-  /// Where "New channel" of the menu creates one: the space Home shows, or in the list layout the
+  /// Where "New channel" of the menu creates one: the selected space, or in the list layout the
   /// only space where the user may; else each space's menu has it.
   private var maybeChannelSpace: HomeSpace? {
     if let selected = maybeSelectedSpace { return channelSpaceIds.contains(selected.id) ? selected : nil }
@@ -581,9 +600,9 @@ struct ConversationListView: View {
     return isList && creatable.count == 1 ? creatable.first : nil
   }
 
-  /// The quick-access cards on top of Home (#1488): drafts, scheduled messages and meetings, each
+  /// The quick-access cards on top of the Channels tab (#1488): drafts and scheduled messages, each
   /// with a one-line status from state the list has anyway (#1466); a card with something waiting
-  /// is tinted.
+  /// is tinted. Meetings are a tab of their own (#1786).
   private var quickAccessCards: some View {
     let draftCount = conversations.filter { $0.maybeDraftPreview != nil }.count
     return ScrollView(.horizontal, showsIndicators: false) {
@@ -604,14 +623,12 @@ struct ConversationListView: View {
           }
           .buttonStyle(.plain)
         }
-        QuickAccessCard(
-          symbol: "calendar", title: "home_entry_meetings", status: "quick_meetings_status", isHighlighted: false
-        ) { isShowingMeetings = true }
       }
       .padding(.vertical, 4)
     }
     .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
     .listRowBackground(Color.clear)
+    .listRowSeparator(.hidden)
   }
 
   private func toggleCollapsed(_ key: String) {
@@ -912,6 +929,7 @@ struct ConversationListView: View {
     case .channels, .spaceChannels: return String(localized: "channels")
     case .directMessages: return String(localized: "direct_messages")
     case .everything: return String(localized: "list_conversations")
+    case .chats: return String(localized: "nav_chats")
     case .unreadDirect: return String(localized: "section_unread_direct")
     case .activity: return String(localized: "nav_activity")
     }
@@ -925,6 +943,7 @@ struct ConversationListView: View {
     case .channels, .spaceChannels: return "channels"
     case .directMessages: return "direct_messages"
     case .everything: return "list_conversations"
+    case .chats: return "nav_chats"
     case .unreadDirect: return "section_unread_direct"
     case .activity: return "nav_activity"
     }
@@ -941,32 +960,42 @@ private struct SpacesRead: Hashable {
   let created: Int
 }
 
+/// A conversation in the chat list (#1786): a 48 pt avatar with the presence, then two lines. Line 1:
+/// the name (bold while unread), marks and the time; line 2: the newest message (or who types, or
+/// the draft) and the unread count. Unread reads without reading: bold name, accent time, badge.
 struct ConversationRow: View {
   let conversation: ConversationItem
   var maybePreview: ChatPreview?
   /// Names the space after a channel's name, where the list is not that space's own (#1152).
   var showsSpace = false
+  /// A favorite pinned on top of a list that has no Favorites section (#1786).
+  var showsPin = false
   /// People in the call running here; 0 without one (issue #1352).
   var callCount = 0
   /// Who types here right now (#882): the row says so instead of the preview.
   var typingNames: [String] = []
+  /// The row's colour, for the rings around the presence dot and a group's front avatar.
+  var background = Color(.systemBackground)
 
   private var isUnread: Bool { conversation.unreadCount > 0 }
 
   var body: some View {
-    HStack(spacing: 10) {
-      leading
+    HStack(spacing: 12) {
+      ConversationAvatar(conversation: conversation, background: background)
         .overlay(alignment: .bottomTrailing) {
           if let presence = conversation.maybePeerPresence {
-            PresenceDot(presence: presence, size: 8)
+            PresenceDot(presence: presence, size: 14, maybeRing: background)
+              .offset(x: 2, y: 2)
               .accessibilityHidden(false)
               .accessibilityLabel(Text(presence.label))
           }
         }
-      VStack(alignment: .leading, spacing: 2) {
-        HStack {
+      VStack(alignment: .leading, spacing: 3) {
+        HStack(spacing: 6) {
           Text(conversation.listName)
-            .fontWeight(isUnread ? .semibold : .regular)
+            .font(.app(.body))
+            .fontWeight(isUnread ? .bold : .semibold)
+            .foregroundStyle(Theme.text)
             .lineLimit(1)
           if conversation.isWithBot { BotBadge() }
           if showsSpace, let space = conversation.maybeSpaceName {
@@ -979,11 +1008,17 @@ struct ConversationRow: View {
               .truncationMode(.tail)
               .layoutPriority(-1)
           }
+          if showsPin {
+            Image(systemName: "pin.fill")
+              .font(.app(.caption2))
+              .foregroundStyle(Theme.textMuted)
+              .accessibilityLabel(Text("pinned"))
+          }
           if conversation.isMuted {
             Image(systemName: "bell.slash").font(.app(.caption)).foregroundStyle(Theme.textMuted)
               .accessibilityLabel(Text("chat_muted"))
           }
-          Spacer()
+          Spacer(minLength: 4)
           if callCount > 0 {
             Label("\(callCount)", systemImage: "phone.fill")
               .font(.app(.caption2).weight(.semibold))
@@ -993,26 +1028,32 @@ struct ConversationRow: View {
               .background(Color.green, in: Capsule())
               .accessibilityLabel(Text("call_participants \(callCount)"))
           }
+          if let preview = maybePreview {
+            Text(listTime(preview.sentDate))
+              .font(.app(.footnote))
+              .fontWeight(isUnread ? .semibold : .regular)
+              .foregroundStyle(isUnread ? Theme.accent : Theme.textMuted)
+              .lineLimit(1)
+              .fixedSize()
+          }
+        }
+        HStack(spacing: 6) {
+          previewText
+            .font(.app(.subheadline))
+            .foregroundStyle(isUnread ? Theme.text : Theme.textMuted)
+            .lineLimit(1)
+          Spacer(minLength: 4)
           if let badge = rowBadge(
             unreadCount: conversation.unreadCount, mentionCount: conversation.mentionCount, isMuted: conversation.isMuted)
           {
             RowCountBadge(badge: badge, isMuted: conversation.isMuted)
           }
-          if let preview = maybePreview {
-            Text(listTime(preview.sentDate))
-              .font(.app(.caption))
-              .foregroundStyle(isUnread ? Theme.accent : Theme.textMuted)
-          }
-        }
-        HStack {
-          previewText
-            .font(.app(.subheadline))
-            .foregroundStyle(isUnread ? Theme.text : Theme.textMuted)
-            .lineLimit(1)
-          Spacer()
         }
       }
+      // The separator starts at the text, not under the avatar.
+      .alignmentGuide(.listRowSeparatorLeading) { $0[.leading] }
     }
+    .frame(minHeight: 60)
     .opacity(conversation.isMuted ? 0.6 : 1)
   }
 
@@ -1058,31 +1099,84 @@ struct ConversationRow: View {
     }
     return date.formatted(date: .numeric, time: .omitted)
   }
+}
 
-  /// A person's DM shows their colour and initials (the hue desktop shows); the rest a symbol.
-  @ViewBuilder
-  private var leading: some View {
-    if conversation.kind == .direct, !conversation.isNotesToSelf {
-      Text(AvatarView.initials(of: conversation.name))
-        .font(.system(size: 11, weight: .semibold))
-        .foregroundStyle(.white)
-        .frame(width: 26, height: 26)
-        .background(conversation.avatarColor, in: Circle())
-        .accessibilityHidden(true)
-    } else {
-      Image(systemName: icon).frame(width: 22).foregroundStyle(Theme.textMuted)
+/// A conversation's 48 pt picture in the chat list (#1786): a person's colour and initials (the hue
+/// desktop shows); a group two overlapping people; the notes to self a bookmark; a channel its
+/// symbol on a tile.
+struct ConversationAvatar: View {
+  let conversation: ConversationItem
+  /// The row's colour: the ring around the group's front avatar.
+  var background = Color(.systemBackground)
+  var size: CGFloat = 48
+
+  var body: some View {
+    Group {
+      if conversation.isNotesToSelf {
+        Image(systemName: "bookmark.fill")
+          .font(.system(size: size * 0.4, weight: .semibold))
+          .foregroundStyle(Theme.accentStrong)
+          .frame(width: size, height: size)
+          .background(Theme.accentSoft, in: Circle())
+      } else if conversation.kind == .direct {
+        PersonInitials(name: conversation.name, color: conversation.avatarColor, size: size)
+      } else if conversation.kind == .group {
+        groupAvatar
+      } else {
+        Image(systemName: symbol)
+          .font(.system(size: size * 0.4, weight: .semibold))
+          .foregroundStyle(Theme.accentStrong)
+          .frame(width: size, height: size)
+          .background(Theme.accentSoft, in: .rect(cornerRadius: size * 0.25))
+      }
+    }
+    .frame(width: size, height: size)
+    .accessibilityHidden(true)
+  }
+
+  /// Two people of the group, the second in front; their names come from the group's name.
+  private var groupAvatar: some View {
+    let names = groupNames
+    let small = size * 2 / 3
+    return ZStack {
+      PersonInitials(name: names.first ?? conversation.name, color: PersonColor.avatar(names.first ?? conversation.id), size: small)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+      PersonInitials(
+        name: names.count > 1 ? names[1] : "+", color: PersonColor.avatar(names.count > 1 ? names[1] : conversation.id),
+        size: small
+      )
+      .background(Circle().fill(background).padding(-2))
+      .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
     }
   }
 
-  private var icon: String {
-    if conversation.isNotesToSelf { return "bookmark" }
+  private var groupNames: [String] {
+    conversation.name.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+  }
+
+  private var symbol: String {
     switch conversation.kind {
-    case .direct: return "person"
-    case .group: return "person.2"
-    case .integration: return "bolt"
-    case .private: return "lock"
+    case .integration: return "bolt.fill"
+    case .private: return "lock.fill"
     default: return "number"
     }
+  }
+}
+
+/// A person's initials on their colour.
+private struct PersonInitials: View {
+  let name: String
+  let color: Color
+  let size: CGFloat
+
+  var body: some View {
+    Text(AvatarView.initials(of: name))
+      .font(.system(size: size * 0.38, weight: .semibold))
+      .minimumScaleFactor(0.5)
+      .lineLimit(1)
+      .foregroundStyle(.white)
+      .frame(width: size, height: size)
+      .background(color, in: Circle())
   }
 }
 
@@ -1111,25 +1205,23 @@ struct BotBadge: View {
   }
 }
 
-struct SearchResultsView: View {
+/// The messages the search found, as rows of the search's list (#1786): conversation, author, text.
+struct SearchHitRows: View {
   let hits: [SearchHitItem]
-  let query: String
   let onSelect: (SearchHitItem) -> Void
 
   var body: some View {
-    if hits.isEmpty {
-      Text("search_empty").foregroundStyle(Theme.textMuted)
-    } else {
-      List(hits, id: \.message.id) { hit in
-        Button { onSelect(hit) } label: {
-          VStack(alignment: .leading, spacing: 2) {
-            Text(hit.listName).font(.app(.caption)).foregroundStyle(Theme.textMuted)
-            Text(verbatim: hit.message.shownAuthorName).font(.app(.subheadline).weight(.semibold))
-            Text(hit.message.body).lineLimit(3)
-          }
+    ForEach(hits, id: \.message.id) { hit in
+      Button { onSelect(hit) } label: {
+        VStack(alignment: .leading, spacing: 2) {
+          Text(hit.listName).font(.app(.caption)).foregroundStyle(Theme.textMuted)
+          Text(verbatim: hit.message.shownAuthorName).font(.app(.subheadline).weight(.semibold))
+          Text(hit.message.body).lineLimit(3)
         }
-        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
       }
+      .buttonStyle(.plain)
     }
   }
 }
@@ -1238,30 +1330,10 @@ private struct QuickAccessCardLabel: View {
     .frame(width: 132, alignment: .leading)
     .padding(12)
     .background(
-      isHighlighted ? Theme.accentSoft : Color(.secondarySystemGroupedBackground),
+      // On the plain list (#1786) a fill, not the grouped list's card colour.
+      isHighlighted ? Theme.accentSoft : Color(.tertiarySystemFill),
       in: .rect(cornerRadius: 16))
     .contentShape(.rect(cornerRadius: 16))
     .accessibilityElement(children: .combine)
-  }
-}
-
-/// A tab's mark: the number of what is addressed to the user, or a dot for something new.
-private struct TabBadgeMark: View {
-  let count: Int
-  let hasNew: Bool
-
-  var body: some View {
-    if count > 0 {
-      Text(count > 99 ? "99+" : "\(count)")
-        .font(.app(.caption2).weight(.bold))
-        .foregroundStyle(.white)
-        .padding(.horizontal, 5)
-        .frame(minWidth: 18, minHeight: 18)
-        .background(.red, in: .capsule)
-        .offset(x: 12, y: -6)
-        .accessibilityHidden(true)
-    } else if hasNew {
-      Circle().fill(Theme.textMuted).frame(width: 8, height: 8).offset(x: 6, y: -2).accessibilityHidden(true)
-    }
   }
 }

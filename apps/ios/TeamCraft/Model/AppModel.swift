@@ -181,7 +181,8 @@ final class AppModel {
   var isServerFromLink = false
   var appLinkWebURL: URL?
   var isAskingAboutMeetingLink = false
-  var isShowingMeetingsFromLink = false
+  /// A meetings link was followed: the chats screen selects its Meetings tab (#1786) and clears this.
+  var isMeetingsTabAsked = false
   var isPermalinkFromLinkMissing = false
   var browserLink: BrowserLink?
   /// The conversation on screen; its notifications are not shown as banners.

@@ -1,42 +1,42 @@
 import SwiftUI
 
-/// Upcoming meetings: join (the meeting's chat call) and answer the invitation.
+/// Upcoming meetings: join (the meeting's chat call) and answer the invitation. The chats screen's
+/// Meetings tab (#1786): it shows in place, under the screen's header and above its bottom bar, in
+/// that screen's navigation; it has none of its own.
 struct MeetingsView: View {
   @Environment(AppModel.self) private var model
-  @Environment(\.dismiss) private var dismiss
   let account: Account
 
   @State private var meetings: [Meeting]?
   @State private var isRsvpFailed = false
 
   var body: some View {
-    NavigationStack {
-      Group {
-        if let meetings = meetings?.filter({ $0.status == "scheduled" }) {
-          if meetings.isEmpty {
-            Text("meetings_empty").foregroundStyle(Theme.textMuted)
-          } else {
-            // A repeating meeting is listed once per occurrence, all with the series' ID.
-            List(meetings, id: \.occurrenceKey) { meeting in
-              MeetingRow(account: account, meeting: meeting, onJoin: { dismiss() }) { answer in
-                await respond(to: meeting, with: answer)
-              }
-            }
+    Group {
+      if let meetings = meetings?.filter({ $0.status == "scheduled" }) {
+        if meetings.isEmpty {
+          ContentUnavailableView {
+            Label("meetings_title", systemImage: "calendar")
+          } description: {
+            Text("meetings_empty")
           }
         } else {
-          ProgressView("loading")
+          // A repeating meeting is listed once per occurrence, all with the series' ID.
+          List(meetings, id: \.occurrenceKey) { meeting in
+            // Joining starts the meeting's call as before; the tab stays where it is.
+            MeetingRow(account: account, meeting: meeting, onJoin: {}) { answer in
+              await respond(to: meeting, with: answer)
+            }
+          }
+          .listStyle(.plain)
         }
+      } else {
+        ProgressView("loading")
       }
-      .frame(maxWidth: .infinity, maxHeight: .infinity)
-      .navigationTitle("meetings_title")
-      .navigationBarTitleDisplayMode(.inline)
-      .toolbar {
-        ToolbarItem(placement: .confirmationAction) { Button("done") { dismiss() } }
-      }
-      .task(id: model.changeCount) { meetings = await model.meetings() }
-      .alert("meetings_rsvp_failed", isPresented: $isRsvpFailed) {
-        Button("done", role: .cancel) {}
-      }
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .task(id: model.changeCount) { meetings = await model.meetings() }
+    .alert("meetings_rsvp_failed", isPresented: $isRsvpFailed) {
+      Button("done", role: .cancel) {}
     }
   }
 
