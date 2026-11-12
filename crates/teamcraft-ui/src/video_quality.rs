@@ -129,6 +129,7 @@ mod tests {
         packets: 0,
         bytes: 0,
         packets_lost: 0,
+        packets_recovered: 0,
         frames: 0,
         frames_discarded: 0,
         maybe_jitter_ms: None,

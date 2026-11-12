@@ -1037,6 +1037,7 @@ mod tests {
       packets: frames * 10,
       bytes: frames * 10_000,
       packets_lost: lost,
+      packets_recovered: 0,
       frames,
       frames_discarded: discarded,
       maybe_jitter_ms: Some(if frames > 300 { 6.0 } else { 3.0 }),

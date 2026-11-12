@@ -693,6 +693,14 @@ impl Room {
         self.request_keyframe(participant_id, stream_id, now);
         Ok(())
       },
+      CallClientMessage::Nack {
+        stream_id,
+        layer,
+        sequence_numbers,
+      } => {
+        self.resend(participant_id, stream_id, layer, &sequence_numbers, now);
+        Ok(())
+      },
       CallClientMessage::UplinkLayers { stream_id, layers } => rejected(
         participant_id,
         self.set_uplink_layers(participant_id, stream_id, &layers, now),
@@ -812,6 +820,35 @@ impl Room {
       .forwarder
       .request_keyframe(receiver, StreamId(stream_id.0), now);
     state.apply(effects);
+  }
+
+  /// Resends the video packets `receiver` names that are still kept, to it alone (#1762). A NACK
+  /// for a track it no longer receives is no error: it crossed a layer switch or an unpublish.
+  pub fn resend(
+    &self,
+    receiver: DeviceId,
+    stream_id: MediaStreamId,
+    layer: u8,
+    sequence_numbers: &[u16],
+    now: Instant,
+  ) {
+    let (link, datagrams) = {
+      let mut state = lock(&self.state);
+      let datagrams = state
+        .forwarder
+        .resend(receiver, StreamId(stream_id.0), layer, sequence_numbers, now);
+      if datagrams.is_empty() {
+        return;
+      }
+      state.quality.retransmitted(datagrams.len());
+      let Some(handle) = state.handle_of(receiver) else {
+        return;
+      };
+      (Arc::clone(&handle.link), datagrams)
+    };
+    for datagram in &datagrams {
+      link.send_datagram(datagram);
+    }
   }
 
   /// The publisher's uplink carries only `layers` of its track. A track unpublished meanwhile is
@@ -1291,6 +1328,7 @@ impl RoomState {
         maybe_max_simulcast_layers: Some(MAX_SIMULCAST_LAYERS),
         maybe_switch_secret,
         maybe_screen_share_taken_over: self.screen_shares_taken_over.get(&participant_id).copied(),
+        maybe_retransmit_window_ms: self.forwarder.retransmit_window_ms(),
       },
     );
     // Right after `joined`: a device that rejoins with a group held takes anything else as "not

@@ -23,6 +23,7 @@ pub mod fragment;
 pub mod jitter;
 #[cfg(feature = "message-sounds")]
 pub mod message_sounds;
+pub mod nack;
 pub mod ogg_opus;
 #[cfg(feature = "native")]
 pub mod openh264_library;

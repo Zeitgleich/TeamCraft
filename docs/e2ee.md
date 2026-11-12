@@ -5671,6 +5671,18 @@ sequence numbers and timestamps continue across the rejoin – they are unencryp
 the SFU sees anyway, and DAVE's per-frame nonces come from the new epoch's ratchets, so nothing
 repeats.
 
+**Resent video packets** (#1762). On a lossy downlink a receiver names the video packets it is
+missing (`nack`: track, layer and RTP sequence numbers) and the SFU sends them once more, to that
+receiver only, from a short history of what it forwarded (`TEAMCRAFT_SFU_RETRANSMIT_WINDOW_MS`,
+1 s). The SFU resends the datagrams exactly as it forwarded them: still DAVE encrypted, with the same
+RTP header, only restamped with the receiver's transport sequence number like every other datagram.
+It decrypts nothing and gets no new information: which packets a receiver lost was visible to it
+anyway (the loss of its own QUIC path, and the transport feedback the receiver sends for bandwidth
+estimation). A resent frame decrypts like the original, so it can't be used to inject anything; a
+duplicate is dropped by the receiver before reassembly, and a frame repeated after it was shown is
+too old to be reassembled again. Audio isn't resent (Opus conceals and corrects losses itself, and a
+resent frame would be too late to play).
+
 **Joining too often** (#1227). Every join re-keys the call twice: the device's leaf is removed when
 its connection goes, and added again with its new key package. A member with a valid join token
 (60 s) who loops connect, join, drop would make every other device in the call re-key with each

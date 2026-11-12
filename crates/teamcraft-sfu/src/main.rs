@@ -47,6 +47,11 @@
 //!   (media waiting for one connection, default 1 MiB), `TEAMCRAFT_SFU_FALLBACK_QUEUE_MAX_AGE_MILLIS`
 //!   (older media is dropped, default 300) and `TEAMCRAFT_SFU_FALLBACK_SEND_BUFFER_BYTES` (a
 //!   connection's socket buffer, default 128 KiB)
+//! - `TEAMCRAFT_SFU_RETRANSMIT_WINDOW_MS`: how long forwarded video packets are kept to resend
+//!   them to a receiver that lost them (NACK, #1762), default 1000, `0` turns retransmission off;
+//!   `TEAMCRAFT_SFU_RETRANSMIT_MAX_PACKETS_PER_LAYER` (default 1024),
+//!   `TEAMCRAFT_SFU_RETRANSMIT_MAX_SHARE_PERCENT` (of a receiver's downlink estimate that resent
+//!   packets may take, default 30) and `TEAMCRAFT_SFU_RETRANSMIT_BURST_BYTES` (default 65536)
 //! - `TEAMCRAFT_SFU_METRICS_ENABLED=1`: serve `GET /metrics` on a listener of its own (off by
 //!   default, docs/operations.md, "Metrics"), and `TEAMCRAFT_SFU_METRICS_ADDRS`: its addresses,
 //!   comma-separated, default `127.0.0.1:9465,[::1]:9465` (`[::]:9465` is dual stack)
@@ -69,6 +74,7 @@ use teamcraft_sfu::{
   health::{DEFAULT_HEALTH_ADDR, serve_health},
   metrics::{SfuMetrics, metrics_addrs},
   reporting::HttpReporter,
+  retransmit::RetransmitConfig,
   server::Sfu,
 };
 use tracing::{info, warn};
@@ -77,6 +83,8 @@ use wtransport::Identity;
 
 /// Where the fallback listens unless `TEAMCRAFT_SFU_FALLBACK_BIND` says otherwise.
 const DEFAULT_FALLBACK_ADDR: &str = "127.0.0.1:8082";
+/// Upper bound for `TEAMCRAFT_SFU_RETRANSMIT_WINDOW_MS`.
+const MAX_RETRANSMIT_WINDOW: Duration = Duration::from_secs(5);
 /// Upper bound for `TEAMCRAFT_SFU_DAVE_TRANSITION_DEADLINE_MS`, below the clients' 5 s fallback.
 const MAX_DAVE_TRANSITION_DEADLINE: Duration = Duration::from_secs(4);
 /// The longest DAVE resume grace: a member away keeps its leaf, and with it the media key, no
@@ -171,6 +179,7 @@ async fn run() -> anyhow::Result<()> {
     config.max_devices_per_user_per_call = devices;
   }
 
+  apply_retransmit_env(&mut config.forwarding.retransmit)?;
   apply_fallback_env(&mut config.fallback)?;
 
   let identity = load_identity().await?;
@@ -352,6 +361,33 @@ async fn load_identity() -> anyhow::Result<Identity> {
 
 fn health_addr() -> anyhow::Result<SocketAddr> {
   Ok(env_addr("TEAMCRAFT_SFU_HEALTH_BIND")?.unwrap_or(DEFAULT_HEALTH_ADDR.parse()?))
+}
+
+/// The retransmission of lost video packets (#1762).
+fn apply_retransmit_env(retransmit: &mut RetransmitConfig) -> anyhow::Result<()> {
+  if let Some(window) = env_duration_millis("TEAMCRAFT_SFU_RETRANSMIT_WINDOW_MS")? {
+    // A receiver gives up on a packet within about a second anyway; longer only holds memory.
+    anyhow::ensure!(
+      window <= MAX_RETRANSMIT_WINDOW,
+      "TEAMCRAFT_SFU_RETRANSMIT_WINDOW_MS must be at most {}",
+      MAX_RETRANSMIT_WINDOW.as_millis()
+    );
+    retransmit.window = window;
+  }
+  if let Some(packets) = env_count("TEAMCRAFT_SFU_RETRANSMIT_MAX_PACKETS_PER_LAYER")? {
+    retransmit.max_packets_per_layer = packets;
+  }
+  if let Some(percent) = env_count("TEAMCRAFT_SFU_RETRANSMIT_MAX_SHARE_PERCENT")? {
+    retransmit.max_share_percent = u8::try_from(percent)
+      .ok()
+      .filter(|percent| *percent <= 100)
+      .context("TEAMCRAFT_SFU_RETRANSMIT_MAX_SHARE_PERCENT must be at most 100")?;
+  }
+  if let Some(bytes) = env_count("TEAMCRAFT_SFU_RETRANSMIT_BURST_BYTES")? {
+    retransmit.burst_bytes =
+      u32::try_from(bytes).context("TEAMCRAFT_SFU_RETRANSMIT_BURST_BYTES is too large")?;
+  }
+  Ok(())
 }
 
 fn env_addr(name: &str) -> anyhow::Result<Option<SocketAddr>> {

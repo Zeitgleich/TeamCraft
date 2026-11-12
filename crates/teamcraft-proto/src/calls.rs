@@ -40,6 +40,9 @@ pub const SFU_GOING_AWAY_CLOSE_CODE: u32 = 0x4805;
 /// moved to another one ([`CallClientMessage::Switch`], #1309): every event queued for it went out
 /// before the close, and the next one comes on the new connection. Not the end of the call.
 pub const SFU_SWITCHED_CLOSE_CODE: u32 = 0x4806;
+/// The most sequence numbers one [`CallClientMessage::Nack`] may name; an SFU ignores the rest.
+/// More missing at once is a burst no retransmission repairs in time: a keyframe is cheaper.
+pub const MAX_NACK_SEQUENCE_NUMBERS: usize = 256;
 
 /// Bytes of the secret that lets a session move to another connection ([`CallEvent::Joined`]).
 pub const SWITCH_SECRET_BYTES: usize = 32;
@@ -168,6 +171,16 @@ pub enum CallClientMessage {
   RequestKeyframe {
     stream_id: MediaStreamId,
   },
+  /// Video packets of a received track that didn't arrive (#1762): the RTP sequence numbers of
+  /// `layer`, which this device receives, at most [`MAX_NACK_SEQUENCE_NUMBERS`]. The SFU sends
+  /// those it still holds once more, to this device only, as it forwarded them (still DAVE
+  /// encrypted). Sent only to SFUs that announced a retransmission window in
+  /// [`CallEvent::Joined`]; older SFUs would ignore it.
+  Nack {
+    stream_id: MediaStreamId,
+    layer: u8,
+    sequence_numbers: Vec<u16>,
+  },
   /// The layers of an own video track this device's uplink carries now (the lowest ones; empty:
   /// none), whatever [`CallEvent::LayersNeeded`] asks for. The SFU forwards no higher layer of it,
   /// so receivers move to a layer that is actually sent instead of freezing on a paused one
@@ -263,6 +276,15 @@ pub enum CallEvent {
       skip_serializing_if = "Option::is_none"
     )]
     maybe_screen_share_taken_over: Option<ScreenShareTakeover>,
+    /// How long the SFU keeps the video packets it forwarded to resend them on a
+    /// [`CallClientMessage::Nack`] (#1762). SFUs from before send none and resend nothing: a
+    /// client then asks for a keyframe at once instead of waiting for packets that don't come.
+    #[serde(
+      rename = "retransmit_window_ms",
+      default,
+      skip_serializing_if = "Option::is_none"
+    )]
+    maybe_retransmit_window_ms: Option<u32>,
   },
   ParticipantJoined {
     participant: CallParticipant,
@@ -534,6 +556,16 @@ impl fmt::Debug for CallClientMessage {
         .debug_struct("RequestKeyframe")
         .field("stream_id", stream_id)
         .finish(),
+      Self::Nack {
+        stream_id,
+        layer,
+        sequence_numbers,
+      } => f
+        .debug_struct("Nack")
+        .field("stream_id", stream_id)
+        .field("layer", layer)
+        .field("sequence_numbers", &sequence_numbers.len())
+        .finish(),
       Self::UplinkLayers { stream_id, layers } => f
         .debug_struct("UplinkLayers")
         .field("stream_id", stream_id)
@@ -761,6 +793,7 @@ mod tests {
       maybe_max_simulcast_layers: Some(4),
       maybe_switch_secret: None,
       maybe_screen_share_taken_over: None,
+      maybe_retransmit_window_ms: None,
     };
     let json = serde_json::to_string(&joined).unwrap();
     assert!(json.ends_with(r#""maybe_reconnect_grace_ms":30000,"maybe_max_simulcast_layers":4}"#));
@@ -822,6 +855,7 @@ mod tests {
       old,
       CallEvent::Joined {
         maybe_screen_share_taken_over: None,
+        maybe_retransmit_window_ms: None,
         ..
       }
     ));
@@ -864,6 +898,43 @@ mod tests {
     let json = serde_json::to_string(&request).unwrap();
     assert_eq!(json, r#"{"type":"request_keyframe","stream_id":12}"#);
     assert_eq!(serde_json::from_str::<CallClientMessage>(&json).unwrap(), request);
+  }
+
+  #[test]
+  fn nack_wire_format() {
+    let nack = CallClientMessage::Nack {
+      stream_id: MediaStreamId(12),
+      layer: 1,
+      sequence_numbers: vec![65_535, 0, 7],
+    };
+    let json = serde_json::to_string(&nack).unwrap();
+    assert_eq!(
+      json,
+      r#"{"type":"nack","stream_id":12,"layer":1,"sequence_numbers":[65535,0,7]}"#
+    );
+    assert_eq!(serde_json::from_str::<CallClientMessage>(&json).unwrap(), nack);
+    // Its contents don't go to logs, only how many.
+    assert!(!format!("{nack:?}").contains("65535"));
+  }
+
+  /// An SFU from before reads a NACK as `Unknown` and ignores it.
+  #[test]
+  fn nack_is_unknown_to_an_older_reader() {
+    #[derive(serde::Deserialize, Debug, PartialEq)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    enum OlderClientMessage {
+      RequestKeyframe {
+        #[allow(dead_code)]
+        stream_id: MediaStreamId,
+      },
+      #[serde(other)]
+      Unknown,
+    }
+    let json = r#"{"type":"nack","stream_id":12,"layer":1,"sequence_numbers":[3]}"#;
+    assert_eq!(
+      serde_json::from_str::<OlderClientMessage>(json).unwrap(),
+      OlderClientMessage::Unknown
+    );
   }
 
   /// Older clients read the event as `Unknown` and keep their codec (H.264).

@@ -851,6 +851,7 @@ mod tests {
       packets,
       bytes,
       packets_lost: lost,
+      packets_recovered: 0,
       frames,
       frames_discarded: 3,
       maybe_jitter_ms: Some(4.5),

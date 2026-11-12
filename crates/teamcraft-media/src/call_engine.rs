@@ -31,7 +31,7 @@ use teamcraft_proto::{
   TransportFeedback, UserId, VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrack, VideoTrackKind,
 };
 use thiserror::Error;
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 // `std::time::Instant` on native; the browser clock on wasm, where `std` has none.
 use web_time::Instant;
 
@@ -39,11 +39,12 @@ use crate::audio_frame::EncodedAudioFrame;
 use crate::bwe::{BweConfig, FeedbackRecorder, SendSideEstimator};
 use crate::call_auth::{BindingRole, CallKeyAuthenticator, CallKeyError};
 use crate::call_resilience::CallTransport;
-use crate::call_video::{IncomingVideo, OutgoingVideo, ReceivedVideoFrame};
+use crate::call_video::{IncomingVideo, OutgoingVideo, ReceivedVideoFrame, ReleasedFrame};
 use crate::datagram::{DatagramHeader, MediaDatagram, SimulcastLayer, StreamId};
 use crate::dave::{
   DaveCallId, DaveEpoch, DaveError, DaveFrameStats, DaveParticipant, DaveParticipantId, FrameCodec, MediaKind,
 };
+use crate::nack::NackConfig;
 use crate::rtp::{PayloadType, RtpHeader, RtpPacket, RtpTimestamp, SequenceNumber, Ssrc};
 use crate::uplink_layers::{OwnTrack, UplinkLayers, UplinkPolicy, probe_demand_bps};
 use crate::video::EncodedVideoFrame;
@@ -115,6 +116,9 @@ pub struct CallEngine {
   subscriptions: HashMap<StreamId, u8>,
   /// How long the SFU keeps this device's slot after the connection was lost.
   maybe_reconnect_grace: Option<Duration>,
+  /// How missing video packets are asked for again, from the SFU's last `joined`; `None` before,
+  /// and from an SFU that resends nothing (#1762).
+  maybe_nack: Option<NackConfig>,
   /// What moves the current session to another connection without a rejoin (#1309), from the
   /// SFU's last `joined`; `None` from an SFU that sends none, and while away.
   maybe_switch_secret: Option<Base64Bytes>,
@@ -561,6 +565,7 @@ impl CallEngine {
       uplink_policy: UplinkPolicy::default(),
       subscriptions: HashMap::new(),
       maybe_reconnect_grace: None,
+      maybe_nack: None,
       maybe_switch_secret: None,
       maybe_decodable: None,
       maybe_sfu_layer_limit: None,
@@ -1078,6 +1083,7 @@ impl CallEngine {
     {
       track.wait_for_keyframe();
       track.restart_gaps();
+      track.restart();
     }
     self.signal(CallClientMessage::Subscribe {
       stream_id,
@@ -1261,6 +1267,7 @@ impl CallEngine {
         packets: counters.packets,
         bytes: counters.bytes,
         packets_lost: counters.packets_lost,
+        packets_recovered: counters.packets_recovered,
         frames: counters.frames,
         frames_discarded: counters.frames_discarded,
         // Milliseconds don't need more than f32.
@@ -1287,11 +1294,13 @@ impl CallEngine {
     }
   }
 
-  /// Periodic work (every ~100 ms): reports arrival times of received datagrams to the SFU.
+  /// Periodic work (every ~100 ms): reports arrival times of received datagrams to the SFU, and
+  /// asks for missing video packets again or gives up on them.
   pub fn on_timer(&mut self, now: Instant) {
     if let Some(feedback) = self.downlink_feedback.take_feedback(now) {
       self.signal(CallClientMessage::TransportFeedback { feedback });
     }
+    self.on_video_timer(now);
     self.execute_overdue_transition(now);
     self.check_encryption_setup(now);
   }
@@ -1346,8 +1355,10 @@ impl CallEngine {
         maybe_max_simulcast_layers,
         maybe_switch_secret,
         maybe_screen_share_taken_over,
+        maybe_retransmit_window_ms,
       } => {
         self.maybe_reconnect_grace = maybe_reconnect_grace_ms.map(Duration::from_millis);
+        self.set_retransmit_window(maybe_retransmit_window_ms);
         self.maybe_switch_secret = maybe_switch_secret;
         // An SFU from before #978 says nothing and takes three; more than this version plans
         // would be no use.
@@ -2450,8 +2461,9 @@ impl CallEngine {
         .is_some_and(|participant| participant.user_id == self.config.user_id)
   }
 
-  /// Reassembles and decrypts a received track's frames. After a lost packet or a frame that
-  /// didn't decrypt, its deltas are dropped until the next keyframe, which is asked for.
+  /// Reassembles and decrypts a received track's frames. Missing packets are asked for again
+  /// where the SFU resends them (#1762); after a packet given up on or a frame that didn't
+  /// decrypt, its deltas are dropped until the next keyframe, which is asked for.
   fn receive_video(
     &mut self,
     stream: StreamId,
@@ -2463,39 +2475,116 @@ impl CallEngine {
     let Some(track) = self.remote_video.get_mut(&stream) else {
       return Ok(());
     };
-    track.count_arrival(
-      rtp.len(),
-      packet.header.timestamp,
-      now.saturating_duration_since(self.started_at),
-    );
-    let maybe_complete = track
-      .push(layer, &packet)
+    let reception = track
+      .push(layer, &packet, now)
       .map_err(|_| CallEngineError::Protocol("bad video fragment"))?;
-    let mut needs_keyframe = track.take_loss();
-    let maybe_frame = match maybe_complete {
-      Some(complete) if track.accepts(complete.is_keyframe) => {
-        // A keyframe makes whatever went missing before it irrelevant.
-        needs_keyframe &= !complete.is_keyframe;
-        Some(complete)
-      },
-      // A delta whose reference went missing: the decoder can't use it.
-      Some(_) => {
-        track.count_frame(false);
-        needs_keyframe = true;
-        None
-      },
-      None => None,
+    if reception.is_late {
+      track.count_late_arrival(rtp.len());
+    } else {
+      track.count_arrival(
+        rtp.len(),
+        packet.header.timestamp,
+        now.saturating_duration_since(self.started_at),
+      );
+    }
+    self.send_nack(stream, now);
+    self.deliver_video(stream, reception.frames, now)
+  }
+
+  /// Periodic work of the received tracks: missing packets asked for again or given up on, and
+  /// the frames that waited for them.
+  fn on_video_timer(&mut self, now: Instant) {
+    if self.is_compromised {
+      return;
+    }
+    let streams: Vec<StreamId> = self.remote_video.keys().copied().collect();
+    for stream in streams {
+      let Some(track) = self.remote_video.get_mut(&stream) else {
+        continue;
+      };
+      let frames = track.on_timer(now);
+      self.send_nack(stream, now);
+      if let Err(error) = self.deliver_video(stream, frames, now) {
+        debug!(%error, stream_id = stream.0, "dropping video frame");
+      }
+    }
+  }
+
+  /// Asks the SFU for a received track's missing packets that are due.
+  fn send_nack(&mut self, stream: StreamId, now: Instant) {
+    let Some(request) = self
+      .remote_video
+      .get_mut(&stream)
+      .and_then(|track| track.take_nack(now))
+    else {
+      return;
     };
-    let (sender, codec) = (track.sender, track.codec.clone());
+    trace!(
+      stream_id = stream.0,
+      packets = request.sequence_numbers.len(),
+      "asking for missing video packets"
+    );
+    self.signal(CallClientMessage::Nack {
+      stream_id: MediaStreamId(stream.0),
+      layer: request.layer.value(),
+      sequence_numbers: request.sequence_numbers,
+    });
+  }
+
+  /// Decrypts the frames whose turn came and hands them to the app's decoder; asks for a keyframe
+  /// when the picture broke.
+  fn deliver_video(
+    &mut self,
+    stream: StreamId,
+    frames: Vec<ReleasedFrame>,
+    now: Instant,
+  ) -> Result<(), CallEngineError> {
+    let Some(track) = self.remote_video.get_mut(&stream) else {
+      return Ok(());
+    };
+    let needs_keyframe = track.take_loss();
+    let (sender, codec, maybe_layer) = (track.sender, track.codec.clone(), track.layer());
     if needs_keyframe {
       self.ask_for_keyframe(stream, now);
     }
-    let Some(complete) = maybe_frame else {
+    let Some(layer) = maybe_layer else {
       return Ok(());
     };
     if self.resume != DaveResume::None {
       return Ok(());
     }
+    let mut result = Ok(());
+    // After a frame that didn't decrypt, the deltas behind it can't be decoded either.
+    let mut is_broken = false;
+    for released in frames.into_iter().filter(|released| released.is_usable) {
+      if is_broken && !released.frame.is_keyframe {
+        if let Some(track) = self.remote_video.get_mut(&stream) {
+          track.count_frame(false);
+        }
+        continue;
+      }
+      match self.decrypt_video(stream, sender, codec.clone(), layer, released, now) {
+        Ok(()) => is_broken = false,
+        Err(error) => {
+          is_broken = true;
+          result = Err(error);
+        },
+      }
+    }
+    result
+  }
+
+  /// Decrypts one complete frame of a received track for [`CallEngineEvent::VideoFrame`].
+  fn decrypt_video(
+    &mut self,
+    stream: StreamId,
+    sender: DeviceId,
+    codec: VideoCodec,
+    layer: SimulcastLayer,
+    released: ReleasedFrame,
+    now: Instant,
+  ) -> Result<(), CallEngineError> {
+    let complete = released.frame;
     let decrypted = self.dave()?.decrypt_frame(
       DaveParticipantId::from_device(sender),
       MediaKind::Video,
@@ -2524,7 +2613,7 @@ impl CallEngine {
       stream_id: MediaStreamId(stream.0),
       codec,
       layer,
-      timestamp: packet.header.timestamp,
+      timestamp: released.timestamp,
       is_keyframe: complete.is_keyframe,
       data,
     }));
@@ -2535,6 +2624,18 @@ impl CallEngine {
   fn count_dropped_video(&mut self, stream: StreamId) {
     if let Some(track) = self.own_video.get_mut(&stream) {
       track.count_dropped();
+    }
+  }
+
+  /// The SFU keeps forwarded video packets for `maybe_window_ms` (`joined`, #1762): missing ones
+  /// are asked for and waited for within it. `None` (an older SFU) or zero: a gap is a loss at
+  /// once, as before.
+  fn set_retransmit_window(&mut self, maybe_window_ms: Option<u32>) {
+    self.maybe_nack = maybe_window_ms
+      .filter(|window_ms| *window_ms > 0)
+      .map(|window_ms| NackConfig::for_window(Duration::from_millis(u64::from(window_ms))));
+    for track in self.remote_video.values_mut() {
+      track.set_nack(self.maybe_nack);
     }
   }
 
@@ -2558,9 +2659,10 @@ impl CallEngine {
       self.on_own_track_published(track);
       return;
     }
-    self
-      .remote_video
-      .insert(StreamId(track.stream_id.0), IncomingVideo::new(&track));
+    self.remote_video.insert(
+      StreamId(track.stream_id.0),
+      IncomingVideo::new(&track, self.maybe_nack),
+    );
     self.event(CallEngineEvent::VideoPublished(track));
   }
 
@@ -3237,6 +3339,90 @@ mod tests {
       assert_eq!(requests(&outputs), vec![STREAM]);
       deliver(&mut bob, &datagrams_of(&mut alice, true, now), now);
       assert_eq!(frames(&drain(&mut bob)), vec![true]);
+    }
+
+    /// #1762: an SFU that resends lost packets gets asked for them, and the picture goes on
+    /// without a keyframe.
+    mod retransmission {
+      use super::*;
+
+      #[test]
+      fn a_lost_fragment_is_asked_for_and_the_frames_go_on_once_it_comes() {
+        let now = Instant::now();
+        let (mut alice, mut bob) = watching_pair(now);
+        bob.set_retransmit_window(Some(1000));
+        let mut keyframe = datagrams_of(&mut alice, true, now);
+        let lost = keyframe.remove(1);
+        deliver(&mut bob, &keyframe, now);
+        deliver(&mut bob, &datagrams_of(&mut alice, false, now), now);
+        let outputs = drain(&mut bob);
+        assert!(frames(&outputs).is_empty(), "both wait for the lost fragment");
+        assert!(requests(&outputs).is_empty(), "no keyframe needed yet");
+        assert_eq!(
+          nacks(&outputs),
+          vec![(STREAM, 0, vec![rtp_sequence_number(&lost)])]
+        );
+        let resent_at = now + Duration::from_millis(80);
+        deliver(&mut bob, &[lost], resent_at);
+        let outputs = drain(&mut bob);
+        assert_eq!(frames(&outputs), vec![true, false]);
+        assert!(requests(&outputs).is_empty());
+        bob.on_timer(resent_at + Duration::from_secs(2));
+        assert!(nacks(&drain(&mut bob)).is_empty(), "nothing missing any more");
+      }
+
+      #[test]
+      fn a_fragment_that_never_comes_is_given_up_for_a_keyframe() {
+        let now = Instant::now();
+        let (mut alice, mut bob) = watching_pair(now);
+        bob.set_retransmit_window(Some(1000));
+        let mut keyframe = datagrams_of(&mut alice, true, now);
+        keyframe.remove(1);
+        deliver(&mut bob, &keyframe, now);
+        let mut outputs = drain(&mut bob);
+        let mut at = now;
+        while requests(&outputs).is_empty() && at < now + Duration::from_secs(2) {
+          at += Duration::from_millis(100);
+          bob.on_timer(at);
+          outputs.extend(drain(&mut bob));
+        }
+        assert_eq!(requests(&outputs), vec![STREAM]);
+        assert_eq!(nacks(&outputs).len(), 3, "asked for three times");
+        assert!(at <= now + Duration::from_secs(1), "within the SFU's window");
+      }
+
+      #[test]
+      fn an_sfu_that_resends_nothing_is_asked_for_nothing() {
+        let now = Instant::now();
+        let (mut alice, mut bob) = watching_pair(now);
+        bob.set_retransmit_window(None);
+        let mut keyframe = datagrams_of(&mut alice, true, now);
+        keyframe.remove(1);
+        deliver(&mut bob, &keyframe, now);
+        deliver(&mut bob, &datagrams_of(&mut alice, false, now), now);
+        let outputs = drain(&mut bob);
+        assert!(nacks(&outputs).is_empty());
+        assert_eq!(requests(&outputs), vec![STREAM], "a keyframe at once, as before");
+      }
+
+      fn nacks(outputs: &[EngineOutput]) -> Vec<(MediaStreamId, u8, Vec<u16>)> {
+        outputs
+          .iter()
+          .filter_map(|output| match output {
+            EngineOutput::Signal(CallClientMessage::Nack {
+              stream_id,
+              layer,
+              sequence_numbers,
+            }) => Some((*stream_id, *layer, sequence_numbers.clone())),
+            _ => None,
+          })
+          .collect()
+      }
+
+      fn rtp_sequence_number(datagram: &[u8]) -> u16 {
+        let datagram = MediaDatagram::parse(datagram).unwrap();
+        RtpPacket::parse(datagram.rtp).unwrap().header.sequence_number.0
+      }
     }
 
     /// Alice publishes a screen track (one layer) that Bob receives.
@@ -4095,6 +4281,7 @@ mod tests {
         maybe_max_simulcast_layers,
         maybe_switch_secret: Some(Base64Bytes::new(secret.to_vec())),
         maybe_screen_share_taken_over: None,
+        maybe_retransmit_window_ms: None,
       }
     }
   }
@@ -4259,6 +4446,7 @@ mod tests {
         maybe_max_simulcast_layers,
         maybe_switch_secret: None,
         maybe_screen_share_taken_over: None,
+        maybe_retransmit_window_ms: None,
       };
       alice.handle_signal(event(1, kept), now).unwrap();
       assert_eq!(
@@ -4341,6 +4529,7 @@ mod tests {
         maybe_max_simulcast_layers,
         maybe_switch_secret: None,
         maybe_screen_share_taken_over: None,
+        maybe_retransmit_window_ms: None,
       };
       alice.handle_signal(event(1, kept), now).unwrap();
       assert!(
@@ -4398,6 +4587,7 @@ mod tests {
         maybe_max_simulcast_layers,
         maybe_switch_secret: None,
         maybe_screen_share_taken_over: None,
+        maybe_retransmit_window_ms: None,
       };
       alice.handle_signal(event(1, kept), now).unwrap();
       let outputs = drain(&mut alice);
@@ -4478,6 +4668,7 @@ mod tests {
         maybe_max_simulcast_layers,
         maybe_switch_secret: None,
         maybe_screen_share_taken_over: None,
+        maybe_retransmit_window_ms: None,
       };
       assert!(matches!(
         alice.handle_signal(event(1, other_call), now),
@@ -5163,6 +5354,7 @@ mod tests {
         maybe_max_simulcast_layers,
         maybe_switch_secret: None,
         maybe_screen_share_taken_over: None,
+        maybe_retransmit_window_ms: None,
       }
     }
 
@@ -5418,6 +5610,7 @@ mod tests {
         maybe_max_simulcast_layers,
         maybe_switch_secret: None,
         maybe_screen_share_taken_over: maybe_takeover,
+        maybe_retransmit_window_ms: None,
       }
     }
   }
@@ -5563,6 +5756,7 @@ mod tests {
         maybe_max_simulcast_layers,
         maybe_switch_secret: None,
         maybe_screen_share_taken_over: None,
+        maybe_retransmit_window_ms: None,
       }
     }
   }
@@ -6636,6 +6830,7 @@ mod tests {
       maybe_max_simulcast_layers: Some(MAX_SIMULCAST_LAYERS),
       maybe_switch_secret: None,
       maybe_screen_share_taken_over: None,
+      maybe_retransmit_window_ms: None,
     }
   }
 

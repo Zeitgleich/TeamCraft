@@ -21,6 +21,7 @@ pub mod quality;
 pub mod rate_limit;
 pub mod rejoin;
 pub mod reporting;
+pub mod retransmit;
 pub mod room;
 pub mod server;
 pub mod signaling;
