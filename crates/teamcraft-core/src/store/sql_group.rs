@@ -76,6 +76,7 @@ impl WriteGroup {
 
   /// What was lost so far, and whether another connection committed since the last look. A
   /// `data_version` that can't be read counts as a foreign commit: the caller then writes all.
+  #[cfg(any(feature = "sqlcipher", test))]
   pub(crate) fn tally(&mut self, connection: &Connection) -> WriteTally {
     self.tally_checking(connection, || true)
   }

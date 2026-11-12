@@ -53,5 +53,9 @@ cargo nextest run --workspace --profile ci           # what CI runs (plus `cargo
 cargo test --workspace --features integration         # with the dev stack running
 ```
 
+Quick check while iterating on a crate: per-crate clippy on the feature sets it is built with
+(`scripts/check-feature-combos.sh <crate>`, #1774). Don't fall back to `--workspace` for this; CI
+runs the full workspace clippy.
+
 Tests must be deterministic: no sleeping for timing, inject clocks and RNGs where behaviour depends
 on them.

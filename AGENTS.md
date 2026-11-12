@@ -99,6 +99,14 @@ cargo test --workspace --all-features
 cargo deny check
 ```
 
+While working on one crate, check just the crates you touched instead of the whole workspace
+(minutes faster). Per-crate clippy resolves features without the workspace's unification, so run
+it on the feature sets the workspace builds the crate with; CI's workspace run stays the full gate:
+
+```sh
+scripts/check-feature-combos.sh teamcraft-core teamcraft-ffi   # or no arguments for every crate
+```
+
 ## Git workflow
 
 - Work on **feature branches** (`feat/…`, `fix/…`, `docs/…`), one feature or milestone step each.
