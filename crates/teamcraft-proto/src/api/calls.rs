@@ -19,7 +19,7 @@ pub struct CallJoinTokenResponse {
   /// WebTransport URL of the SFU, e.g. `https://sfu.example.com:4433/call`.
   pub sfu_url: String,
   /// WebSocket URL of the SFU's fallback for networks that block UDP (ARCHITECTURE.md §6.6), e.g.
-  /// `wss://sfu.example.com/call/fallback`. Clients use it only when QUIC doesn't connect. Absent
+  /// `wss://sfu.example.com/call/ws`. Clients use it only when QUIC doesn't connect. Absent
   /// from older servers, and when the instance turned the fallback off.
   #[serde(rename = "sfu_fallback_url", default, skip_serializing_if = "Option::is_none")]
   pub maybe_sfu_fallback_url: Option<String>,
