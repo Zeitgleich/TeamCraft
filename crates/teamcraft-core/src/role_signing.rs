@@ -98,13 +98,15 @@ pub enum AutomaticBasis {
   Unknown,
 }
 
-/// The provider whose tokens count, and which of its client roles mean what.
+/// The provider whose tokens count, where they name the roles, and which roles mean what.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoleProviderAnchor {
   pub issuer: String,
   pub client_id: String,
   pub owner_role: String,
   pub admin_role: String,
+  /// The signed policy's `roles_claim`: empty means the client roles (issue #1742).
+  pub roles_claim: Vec<String>,
 }
 
 impl RoleProviderAnchor {
@@ -117,11 +119,13 @@ impl RoleProviderAnchor {
       client_id: provider.client_id.clone(),
       owner_role: policy.owner_role.clone(),
       admin_role: policy.admin_role.clone(),
+      roles_claim: policy.roles_claim.clone(),
     })
   }
 
   /// While the signed policy names no provider: the one this device got its own token from, read with
-  /// the role names the policy gives, else the ones everybody starts with. Never the server's word.
+  /// the role names and claim the policy gives, else the ones everybody starts with. Never the server's
+  /// word.
   pub fn of_own_token(issuer: &str, client_id: &str, maybe_policy: Option<&RoleSigningPolicy>) -> Self {
     Self {
       issuer: issuer.to_owned(),
@@ -134,6 +138,7 @@ impl RoleProviderAnchor {
         || DEFAULT_ADMIN_ROLE.to_owned(),
         |policy| policy.admin_role.clone(),
       ),
+      roles_claim: maybe_policy.map_or_else(Vec::new, |policy| policy.roles_claim.clone()),
     }
   }
 }
@@ -1336,6 +1341,7 @@ mod tests {
       client_id: "chat".into(),
       owner_role: "chat-owner".into(),
       admin_role: "chat-admin".into(),
+      roles_claim: Vec::new(),
     };
     let roles = |names: &[&str]| names.iter().map(|name| (*name).to_string()).collect::<Vec<_>>();
     assert_eq!(provider_role(None, &anchor), ProviderRole::NotSaid);

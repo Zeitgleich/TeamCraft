@@ -818,6 +818,14 @@ pub struct RoleSigningPolicy {
   /// provider's. Only the signed policy raises it, so the server can't make anybody's account unknown.
   #[serde(default, skip_serializing_if = "is_zero")]
   pub provider_moves: u64,
+  /// Where the provider's tokens name the roles: a path of claim names, e.g. `["groups"]` (Dex) or
+  /// `["realm_access", "roles"]`. Empty, as in every policy signed before issue #1742, means the client
+  /// roles, `resource_access.<client_id>.roles` (Keycloak). The owners' word like the role names, never
+  /// the server's `[oidc] roles_claim`: a server that could point the apps at another claim could
+  /// point them at one a member writes. A claim that names the person (`sub`, `email`, …) names no role
+  /// (`teamcraft_crypto::attestation::roles_claim_is_usable`).
+  #[serde(rename = "roles_claim", default, skip_serializing_if = "Vec::is_empty")]
+  pub roles_claim: Vec<String>,
 }
 
 wire_enum! {
@@ -835,7 +843,7 @@ wire_enum! {
 pub struct RoleProvider {
   pub issuer: String,
   /// The client the tokens are issued to; its client roles are read
-  /// (`resource_access.<client_id>.roles`).
+  /// (`resource_access.<client_id>.roles`) unless the policy names another `roles_claim`.
   pub client_id: String,
 }
 
@@ -867,6 +875,7 @@ impl Default for RoleSigningPolicy {
       accepts_new_provider: false,
       maybe_key_attestation: None,
       provider_moves: 0,
+      roles_claim: Vec::new(),
     }
   }
 }
@@ -1072,6 +1081,22 @@ mod tests {
     let older: WorkspacePolicy = serde_json::from_value(json).unwrap();
     assert!(!older.notetaker.is_enabled);
     assert_eq!(older.notetaker.active_bot(), None);
+  }
+
+  #[test]
+  fn role_signing_without_a_roles_claim_keeps_its_bytes_and_reads_client_roles() {
+    let older = r#"{"mode":"automatic","owner_role":"owner","admin_role":"admin","provider":{"issuer":"https://id.example.com","client_id":"teamcraft"}}"#;
+    let policy: RoleSigningPolicy = serde_json::from_str(older).unwrap();
+    assert!(policy.roles_claim.is_empty());
+    assert_eq!(serde_json::to_string(&policy).unwrap(), older);
+
+    let dex = RoleSigningPolicy {
+      roles_claim: vec!["groups".into()],
+      ..RoleSigningPolicy::default()
+    };
+    let json = serde_json::to_string(&dex).unwrap();
+    assert!(json.ends_with(r#""roles_claim":["groups"]}"#), "{json}");
+    assert_eq!(serde_json::from_str::<RoleSigningPolicy>(&json).unwrap(), dex);
   }
 
   mod guest_dm_start {

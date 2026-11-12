@@ -101,6 +101,10 @@ fn RoleSigningSettings(policy: PolicyDraft) -> impl IntoView {
     });
   };
   let name_error = move |name: String| name.trim().is_empty().then(|| i18n.t("policy-role-name-empty"));
+  let claim_error = move |path: &[String]| {
+    (!teamcraft_crypto::attestation::roles_claim_is_usable(path))
+      .then(|| i18n.t("policy-roles-claim-unusable"))
+  };
 
   view! {
     <SelectRow
@@ -164,6 +168,28 @@ fn RoleSigningSettings(policy: PolicyDraft) -> impl IntoView {
         })}
       </div>
       <p class="muted-text small">{move || i18n.t("policy-role-names-hint")}</p>
+      <div class="field">
+        <label for="policy-roles-claim">{move || i18n.t("policy-roles-claim")}</label>
+        <input
+          id="policy-roles-claim"
+          class="input"
+          translate="no"
+          spellcheck="false"
+          autocomplete="off"
+          placeholder="resource_access.<client>.roles"
+          aria-invalid=move || claim_error(&signing.get().roles_claim).is_some().then_some("true")
+          aria-describedby=move || claim_error(&signing.get().roles_claim).is_some().then(|| error_id("policy-roles-claim"))
+          prop:value=move || signing.get().roles_claim.join(".")
+          on:input=move |ev| {
+            let path = roles_claim_path(&event_target_value(&ev));
+            edit(&|signing| signing.roles_claim.clone_from(&path));
+          }
+        />
+        {move || claim_error(&signing.get().roles_claim).map(|text| view! {
+          <p id=error_id("policy-roles-claim") class="field-error" role="alert">{text}</p>
+        })}
+      </div>
+      <p class="muted-text small">{move || i18n.t("policy-roles-claim-hint")}</p>
       {move || signing.get().maybe_provider.map(|provider| view! {
         <p class="muted-text small">
           {i18n.t_with("policy-role-provider", &[("issuer", &provider.issuer)])}
@@ -178,6 +204,16 @@ fn RoleSigningSettings(policy: PolicyDraft) -> impl IntoView {
       })}
     </details>
   }
+}
+
+/// The signed policy's `roles_claim` as typed: claim names separated by dots, nothing for the client
+/// roles. A claim name with a dot in it can't be entered here.
+fn roles_claim_path(typed: &str) -> Vec<String> {
+  let typed = typed.trim();
+  if typed.is_empty() {
+    return Vec::new();
+  }
+  typed.split('.').map(str::to_owned).collect()
 }
 
 /// What keeps role changes from being signed by themselves, in words the operator or the owner can act

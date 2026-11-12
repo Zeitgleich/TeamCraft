@@ -184,8 +184,9 @@ do it, on evidence the server can't forge. **The owner's decision, not up for de
 provider is the source of truth for owner and admin roles, and whoever controls it can appoint admins.
 The server alone can't appoint anybody.
 
-**The evidence.** The same ID token as for attestation (§3.1), read for two more things: the client roles
-(`resource_access.<client>.roles`) and the time of issue (`iat`). `verify_role_evidence` checks the
+**The evidence.** The same ID token as for attestation (§3.1), read for two more things: the roles and the
+time of issue (`iat`). The roles are the client roles (`resource_access.<client>.roles`) unless the signed policy
+names another claim (`role_signing.roles_claim`, below). `verify_role_evidence` checks the
 signature against the provider's own keys, fetched directly from the issuer, then issuer, audience, `azp`,
 that it is an ID token, the claim `"<user id>:<fingerprint>"`, and that it has an `iat`.
 
@@ -242,12 +243,33 @@ real tokens then read as contradictory, which the owners see, and that admin's l
 them. The window closes for each person only with their first token that counts. Somebody already on the roster when this arrived has
 no noted account until then, and until then no token takes their role away.
 
-**Who sets what the tokens mean.** The signed policy has a `role_signing` group: the mode, the role names, and the
-provider (issuer and client ID).
+**Who sets what the tokens mean.** The signed policy has a `role_signing` group: the mode, the role names, the
+claim the roles are read from, and the provider (issuer and client ID).
 
 - **Role names** default to `owner` and `admin` and are never taken from the server: a server that could name them
   could call every member's role "admin". An instance whose realm uses other names sets them once in the console
   (Administration → Security), which is a signed policy like any other. Until then its tokens say neither.
+- **The roles claim** (issue #1742) is where the tokens name the roles: a path of claim names, `["groups"]` for Dex's
+  groups or `["realm_access", "roles"]` for a nested list, entered in the console as `groups` or `realm_access.roles`
+  (Administration → Security, the identity provider settings; a claim name with a dot in it can't be entered there).
+  Empty, and in every policy signed before, it is the client roles, `resource_access.<client>.roles`. The value there
+  may be a list of names or, for a named claim, one name; anything else, or no such claim, is "no role claim" in the
+  table above. Like the role names it is the owners' word, never the server's `[oidc] roles_claim`: a server that could
+  point the apps at a claim could point them at one a member writes, such as `tc_identity_key`. So a path that starts
+  at a claim naming the person (`sub`, `name`, `preferred_username`, `email`, `nickname`, `given_name`, `family_name`,
+  `middle_name`, `tc_identity_key`) or has a blank name names no role at all
+  (`teamcraft_crypto::attestation::roles_claim_is_usable`); the console says so. Beyond that, the owners choose a claim
+  only the provider sets: with an upstream connector (LDAP, GitHub) group names may be somebody else's choice, hence
+  distinctive role names (`teamcraft-owner`). The same claim is read from the expired access tokens the server keeps
+  (`verify_role_loss`), where no such claim means no role, as for client roles. The server reads its own
+  `[oidc] roles_claim` for sign-in; the two should name the same claim, and nothing makes them. A plain OIDC provider
+  still has to put `tc_identity_key` into the ID token for any of this (§3.1), as only a token naming the person's key
+  is evidence. **Compatibility:** the field is left out of the signed bytes while empty, so every policy signed before
+  verifies and reads as before. An owner's app from before this version that signs the policy again drops the field,
+  which turns the claim back into the client roles until an owner of this version saves it again: ID tokens then say
+  nothing about roles (no role claim) and change nobody, but a kept access token reads as no role, as it does for
+  every app from before this version on such a provider. Older apps never read the named claim, so mixed versions
+  sign on client roles only. Owners of a provider without client roles should update their apps first.
 - **The provider** is pinned in the signed policy by the first round of an owner's app after this version, whether or not
   the realm has the mappers, from the token this device got from its own token endpoint. Every device also remembers the
   issuer it used, so one that announces another before anything is pinned stops it. From then on another issuer stops the

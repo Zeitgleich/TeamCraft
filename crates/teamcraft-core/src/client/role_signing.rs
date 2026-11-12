@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use teamcraft_crypto::attestation::{
   AttestationError, AttestationExpectations, UnverifiedClaims, attestation_claim, unverified_claims,
-  unverified_client_roles, verify_role_evidence, verify_role_loss,
+  unverified_roles, verify_role_evidence, verify_role_loss,
 };
 use teamcraft_crypto::identity::IdentityPublicKey;
 use teamcraft_proto::{
@@ -88,7 +88,8 @@ pub enum PublishedRole {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "problem", rename_all = "snake_case")]
 pub enum RoleSigningProblem {
-  /// ID tokens carry no client roles: the realm needs the mapper.
+  /// ID tokens carry no roles where the signed policy reads them: the realm needs the mapper, or the
+  /// policy the provider's claim (`roles_claim`).
   NoRoleClaim,
   /// The provider didn't store the identity key attribute, or the account API refused it.
   NoKeyClaim,
@@ -233,7 +234,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .await?;
     }
     let state = self.workspace()?;
-    let role = provider_role(claims.maybe_roles.as_deref(), &anchor);
+    let maybe_roles = unverified_roles(&tokens.id_token, &anchor.client_id, &anchor.roles_claim);
+    let role = provider_role(maybe_roles.as_deref(), &anchor);
     let my_entry = state
       .roster
       .members
@@ -244,8 +246,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       // shows by still naming the role. Only people it concerns hear of it.
       if is_provider_admin(tokens, &anchor) {
         tracing::warn!(
-          "the identity provider's ID tokens carry no client roles, so role changes can't be signed by \
-           themselves: add the role mapper (docs/operations.md, \"Role signing\")"
+          roles_claim = %roles_claim_label(&anchor.roles_claim),
+          "the identity provider's ID tokens carry no roles in the claim the signed policy reads, so role \
+           changes can't be signed by themselves: add the role mapper, or name the claim in the console \
+           (docs/operations.md, \"Role signing\")"
         );
         self.set_problem(Some(RoleSigningProblem::NoRoleClaim))?;
         return Ok(true);
@@ -816,10 +820,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 }
 
+/// The claim role evidence is read from, for the log.
+fn roles_claim_label(roles_claim: &[String]) -> String {
+  if roles_claim.is_empty() {
+    "resource_access.<client>.roles".to_owned()
+  } else {
+    roles_claim.join(".")
+  }
+}
+
 /// Whether the access token gives this user an owner or admin role: the people a realm's missing mapper
 /// concerns. Only decides who hears of it, so nothing is verified.
 fn is_provider_admin(tokens: &ProviderTokens, anchor: &RoleProviderAnchor) -> bool {
-  let maybe_roles = unverified_client_roles(&tokens.access_token, &anchor.client_id);
+  let maybe_roles = unverified_roles(&tokens.access_token, &anchor.client_id, &anchor.roles_claim);
   matches!(
     provider_role(maybe_roles.as_deref(), anchor),
     ProviderRole::Owner | ProviderRole::Admin
@@ -848,7 +861,7 @@ fn role_loss_statements(
     else {
       continue;
     };
-    let evidence = match verify_role_loss(&loss.token, jwks, &expected) {
+    let evidence = match verify_role_loss(&loss.token, jwks, &expected, &anchor.roles_claim) {
       Ok(evidence) => evidence,
       Err(error) => {
         tracing::debug!(user_id = %loss.user_id, %error, "role loss evidence refused");
@@ -888,6 +901,7 @@ fn verified_statement(
     token,
     jwks,
     &expected,
+    &anchor.roles_claim,
     convert::user(user),
     &IdentityPublicKey::from_bytes(*public_key),
   )?;

@@ -825,9 +825,15 @@ API or some other way for users to set the attribute (`crates/teamcraft-core/src
 **Role names.** The apps read `owner` and `admin`, whatever `[oidc.roles]` says, because they don't take the server's word
 for what a role means. If your realm calls them something else, an owner enters the names once under Administration → Security.
 
+**Roles in another claim** (a provider without Keycloak's client roles, such as Dex with `[oidc] roles_claim = "groups"`): the
+apps don't take `roles_claim` from the server either. An owner enters the claim once under Administration → Security → identity
+provider settings ("Claim with the roles", e.g. `groups`, or `realm_access.roles` for a nested one), together with the role names
+the claim uses (`teamcraft-owner`, …). Empty means `resource_access.<client>.roles`. Claims that name the person (`sub`, `email`,
+`preferred_username`, …) name no role. The provider still has to put `tc_identity_key` into the ID token (the rows above).
+
 **Without the mapper** nothing breaks and nobody is prompted: the provider is still pinned, the roster stays as it is, re-signing for
 freshness goes on, and the Security section of the console says what is missing to those who see it, for owners with the way to change roles by hand.
-The apps log `the identity provider's ID tokens carry no client roles`. On an instance with no signed roster yet, the first
+The apps log `the identity provider's ID tokens carry no roles in the claim the signed policy reads`. On an instance with no signed roster yet, the first
 owner signs themselves in by saving the policy once.
 
 **Taking people off.** A role removed in the realm counts as soon as the person's app or the server has a token that shows it. For
@@ -1463,7 +1469,7 @@ The demo uses Dex with a static user list instead of Keycloak: about 30 MB of me
 | Provider events (leavers, provisioning.md §4)  | Off: nothing posts them                                                                                                                  |
 | Back-channel logout                            | Dex doesn't send it; sessions end with their tokens                                                                                      |
 | Account API for identity key attestation       | Missing: the apps get 404 and enroll with trust on first use, without a prompt (e2ee.md §3.1)                                            |
-| Client roles in the ID token (role signing)    | Missing: the apps log `the identity provider's ID tokens carry no client roles`; the seed's owner signed the roster once, and it stays   |
+| Client roles in the ID token (role signing)    | Missing: the apps log `the identity provider's ID tokens carry no roles in the claim the signed policy reads`; the seed's owner signed the roster once, and it stays. Naming `groups` in the signed policy (Administration → Security) lets the apps read Dex's groups, but Dex has no `tc_identity_key` claim, so its tokens still attest nothing |
 | DPoP                                           | Dex doesn't advertise it; tokens stay unbound (the default policy `optional`)                                                            |
 
 `roles_claim` grants a role to every name in the claim that equals an `[oidc.roles]` name, so the

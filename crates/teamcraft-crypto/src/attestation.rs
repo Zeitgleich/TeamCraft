@@ -14,7 +14,9 @@
 //!
 //! [`verify_role_evidence`] reads more out of the same token: the roles the provider gave the person
 //! when it issued the token, and when that was (e2ee.md §3.1.3, issue #1276). Owners' apps sign the
-//! admin roster on that evidence.
+//! admin roster on that evidence. Which claim names the roles is the signed policy's word
+//! (`role_signing.roles_claim`, issue #1742): by default the client roles
+//! (`resource_access.<client>.roles`, Keycloak), else a path such as `groups` (Dex).
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -27,6 +29,19 @@ use crate::ids::UserId;
 
 /// The ID token claim (and identity provider user attribute) carrying the attestation.
 pub const ATTESTATION_CLAIM: &str = "tc_identity_key";
+/// Claims that name the person or are their own word, never a role: reading roles from one would let
+/// somebody name themselves `owner`. The server refuses them as `[oidc] roles_claim` too.
+const PERSONAL_CLAIMS: [&str; 9] = [
+  "sub",
+  "name",
+  "preferred_username",
+  "email",
+  "nickname",
+  "given_name",
+  "family_name",
+  "middle_name",
+  ATTESTATION_CLAIM,
+];
 /// Longest token accepted (bytes); ID tokens are a few kilobytes at most.
 const MAX_TOKEN_BYTES: usize = 16 * 1024;
 /// RSA keys outside this range aren't taken: shorter ones are weak, longer ones cost a device a lot
@@ -56,9 +71,10 @@ pub struct RoleEvidence {
   /// The token's `iat`: the provider's clock, seconds since the epoch. Evidence is ordered by this
   /// alone, never by a device's clock or the server's word.
   pub issued_at: i64,
-  /// The client roles in the token (`resource_access.<client>.roles`). `None` when the token has no
-  /// such claim, which says nothing about the person: the realm may simply not map roles into ID
-  /// tokens.
+  /// The roles in the token: the client roles (`resource_access.<client>.roles`), or the claim the
+  /// signed policy names ([`roles_claim_is_usable`]). `None` when the token has no such claim, or one
+  /// that isn't a role name or a list of them, which says nothing about the person: the realm may
+  /// simply not map roles into ID tokens.
   pub maybe_roles: Option<Vec<String>>,
 }
 
@@ -72,6 +88,8 @@ pub struct UnverifiedClaims {
   pub maybe_authorized_party: Option<String>,
   pub maybe_issued_at: Option<i64>,
   pub maybe_key_claim: Option<String>,
+  /// The client roles (`resource_access.<client>.roles`), whatever the signed policy names: for what
+  /// it says, [`unverified_roles`].
   pub maybe_roles: Option<Vec<String>>,
 }
 
@@ -119,11 +137,13 @@ pub fn verify_attestation(
 }
 
 /// [`verify_attestation`], and what else the token says: the roles and the time of issue, for
-/// signing the admin roster (e2ee.md §3.1.3). Only ID tokens count here.
+/// signing the admin roster (e2ee.md §3.1.3). Only ID tokens count here. `roles_claim` is the path of
+/// claim names the signed policy gives; empty means the client roles (see [`RoleEvidence::maybe_roles`]).
 pub fn verify_role_evidence(
   token: &str,
   jwks_json: &[u8],
   expected: &AttestationExpectations<'_>,
+  roles_claim: &[String],
   user: UserId,
   identity: &IdentityPublicKey,
 ) -> Result<RoleEvidence, AttestationError> {
@@ -136,18 +156,20 @@ pub fn verify_role_evidence(
   Ok(RoleEvidence {
     subject: verified.subject,
     issued_at,
-    maybe_roles: client_roles(&claims, expected.audience),
+    maybe_roles: roles_in(&claims, expected.audience, roles_claim),
   })
 }
 
 /// What an access token of this client says about a person's roles: the evidence that somebody lost a
 /// role, kept by the server from the requests it saw (e2ee.md §3.1.3). Names no identity key, so it can
 /// only count for an account already noted. No role of this client means none, not "not said": unlike ID
-/// tokens, access tokens always carry them, or nobody could use TeamCraft at all.
+/// tokens, access tokens always carry them, or nobody could use TeamCraft at all. `roles_claim` as for
+/// [`verify_role_evidence`]; a claim that can't name roles ([`roles_claim_is_usable`]) says nothing.
 pub fn verify_role_loss(
   token: &str,
   jwks_json: &[u8],
   expected: &AttestationExpectations<'_>,
+  roles_claim: &[String],
 ) -> Result<RoleEvidence, AttestationError> {
   let claims = verified_claims(token, jwks_json)?;
   let issuer = claims.get("iss").and_then(Value::as_str).unwrap_or_default();
@@ -172,7 +194,8 @@ pub fn verify_role_loss(
       .get("iat")
       .and_then(Value::as_i64)
       .ok_or(AttestationError::NoIssueTime)?,
-    maybe_roles: Some(client_roles(&claims, expected.audience).unwrap_or_default()),
+    maybe_roles: roles_claim_is_usable(roles_claim)
+      .then(|| roles_in(&claims, expected.audience, roles_claim).unwrap_or_default()),
   })
 }
 
@@ -196,7 +219,7 @@ pub fn unverified_claims(token: &str) -> Result<UnverifiedClaims, AttestationErr
   let maybe_roles = maybe_authorized_party
     .iter()
     .chain(audience.iter())
-    .find_map(|client| client_roles(&claims, client));
+    .find_map(|client| roles_in(&claims, client, &[]));
   Ok(UnverifiedClaims {
     issuer: claims
       .get("iss")
@@ -211,13 +234,26 @@ pub fn unverified_claims(token: &str) -> Result<UnverifiedClaims, AttestationErr
   })
 }
 
-/// The roles of `client` in a token, without checking its signature: see [`UnverifiedClaims`].
-pub fn unverified_client_roles(token: &str, client: &str) -> Option<Vec<String>> {
+/// The roles in a token issued to `client`, read as [`verify_role_evidence`] does, without checking its
+/// signature: see [`UnverifiedClaims`].
+pub fn unverified_roles(token: &str, client: &str, roles_claim: &[String]) -> Option<Vec<String>> {
   if token.len() > MAX_TOKEN_BYTES {
     return None;
   }
   let claims = decode_json(token.split('.').nth(1)?).ok()?;
-  client_roles(&claims, client)
+  roles_in(&claims, client, roles_claim)
+}
+
+/// Whether the signed policy's `roles_claim` can name roles at all: empty (the client roles), or a path
+/// of non-blank claim names that doesn't start at a claim naming the person ([`PERSONAL_CLAIMS`]). One
+/// that can't reads as no role claim in every token, so it never puts anybody on or takes them off.
+pub fn roles_claim_is_usable(roles_claim: &[String]) -> bool {
+  match roles_claim.split_first() {
+    None => true,
+    Some((first, _)) => {
+      !PERSONAL_CLAIMS.contains(&first.as_str()) && roles_claim.iter().all(|name| !name.trim().is_empty())
+    },
+  }
 }
 
 /// The JSON claims of a token signed by a key of `jwks_json`.
@@ -320,20 +356,32 @@ fn key_claim(claims: &Value) -> Option<&str> {
   }
 }
 
-/// `resource_access.<client>.roles`, where the server's validator reads the roles of access tokens.
-fn client_roles(claims: &Value, client: &str) -> Option<Vec<String>> {
-  let roles = claims
-    .get("resource_access")?
-    .get(client)?
-    .get("roles")?
-    .as_array()?;
-  Some(
-    roles
+/// The roles at `roles_claim` ([`roles_claim_is_usable`]); with an empty path
+/// `resource_access.<client>.roles`, where the server's validator reads the roles of access tokens. A
+/// list of names, or one name as the server's `[oidc] roles_claim` also takes it; anything else names
+/// no role.
+fn roles_in(claims: &Value, client: &str, roles_claim: &[String]) -> Option<Vec<String>> {
+  let value = if roles_claim.is_empty() {
+    claims.get("resource_access")?.get(client)?.get("roles")?
+  } else {
+    if !roles_claim_is_usable(roles_claim) {
+      return None;
+    }
+    roles_claim
       .iter()
-      .filter_map(Value::as_str)
-      .map(str::to_string)
-      .collect(),
-  )
+      .try_fold(claims, |value, name| value.get(name.as_str()))?
+  };
+  match value {
+    Value::Array(roles) => Some(
+      roles
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect(),
+    ),
+    Value::String(role) if !roles_claim.is_empty() => Some(vec![role.clone()]),
+    _ => None,
+  }
 }
 
 /// `Ok(false)` for a key of another type than the algorithm needs.
@@ -461,7 +509,7 @@ mod tests {
         ATTESTATION_CLAIM: attestation_claim(ALICE, &identity),
       }));
       let evidence =
-        verify_role_evidence(&token, &provider.jwks(), &expectations(), ALICE, &identity).unwrap();
+        verify_role_evidence(&token, &provider.jwks(), &expectations(), &[], ALICE, &identity).unwrap();
       assert_eq!(evidence.subject, "abc");
       assert_eq!(evidence.issued_at, 1_000);
       assert_eq!(
@@ -481,7 +529,7 @@ mod tests {
         ATTESTATION_CLAIM: attestation_claim(ALICE, &identity),
       }));
       let evidence =
-        verify_role_evidence(&token, &provider.jwks(), &expectations(), ALICE, &identity).unwrap();
+        verify_role_evidence(&token, &provider.jwks(), &expectations(), &[], ALICE, &identity).unwrap();
       assert_eq!(evidence.maybe_roles, None);
     }
 
@@ -491,7 +539,14 @@ mod tests {
       let identity = IdentityKeyPair::generate(&mut OsRng).public_key();
       let jwks = provider.jwks();
       let check = |claims: Value| {
-        verify_role_evidence(&provider.token(claims), &jwks, &expectations(), ALICE, &identity)
+        verify_role_evidence(
+          &provider.token(claims),
+          &jwks,
+          &expectations(),
+          &[],
+          ALICE,
+          &identity,
+        )
       };
       let claim = attestation_claim(ALICE, &identity);
       assert!(matches!(
@@ -506,6 +561,118 @@ mod tests {
         check(json!({ "iss": ISSUER, "aud": CLIENT, "azp": "other", "iat": 1, ATTESTATION_CLAIM: claim })),
         Err(AttestationError::WrongAudience)
       ));
+    }
+
+    fn path(names: &[&str]) -> Vec<String> {
+      names.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    /// The roles `claims` give by `roles_claim`, from a token that passed every other check.
+    fn roles_by(roles_claim: &[String], mut claims: Value) -> Option<Vec<String>> {
+      let provider = Provider::new();
+      let identity = IdentityKeyPair::generate(&mut OsRng).public_key();
+      let base = json!({
+        "iss": ISSUER, "aud": CLIENT, "sub": "abc", "iat": 1_000,
+        ATTESTATION_CLAIM: attestation_claim(ALICE, &identity),
+      });
+      for (name, value) in base.as_object().unwrap() {
+        claims[name] = value.clone();
+      }
+      let token = provider.token(claims);
+      let evidence = verify_role_evidence(
+        &token,
+        &provider.jwks(),
+        &expectations(),
+        roles_claim,
+        ALICE,
+        &identity,
+      )
+      .unwrap();
+      let unverified = unverified_roles(&token, CLIENT, roles_claim);
+      assert_eq!(
+        unverified, evidence.maybe_roles,
+        "a device reads its own token the same way"
+      );
+      evidence.maybe_roles
+    }
+
+    #[test]
+    fn without_a_roles_claim_the_client_roles_count() {
+      let keycloak = json!({
+        "resource_access": { CLIENT: { "roles": ["owner"] } },
+        "groups": ["admin"],
+      });
+      assert_eq!(roles_by(&[], keycloak), Some(vec!["owner".to_string()]));
+    }
+
+    #[test]
+    fn a_top_level_list_such_as_dex_groups_counts_when_the_policy_names_it() {
+      let dex = json!({
+        "groups": ["teamcraft-admin", "staff"],
+        "resource_access": { CLIENT: { "roles": ["owner"] } },
+      });
+      assert_eq!(
+        roles_by(&path(&["groups"]), dex),
+        Some(vec!["teamcraft-admin".to_string(), "staff".to_string()])
+      );
+      // One name, as the server's `roles_claim` takes it too.
+      assert_eq!(
+        roles_by(&path(&["role"]), json!({ "role": "owner" })),
+        Some(vec!["owner".to_string()])
+      );
+    }
+
+    #[test]
+    fn a_nested_path_counts() {
+      let claims = json!({
+        "realm_access": { "roles": ["admin"] },
+        "resource_access": { CLIENT: { "roles": ["owner"] } },
+      });
+      assert_eq!(
+        roles_by(&path(&["realm_access", "roles"]), claims.clone()),
+        Some(vec!["admin".to_string()])
+      );
+      // The default, spelled out.
+      assert_eq!(
+        roles_by(&path(&["resource_access", CLIENT, "roles"]), claims),
+        Some(vec!["owner".to_string()])
+      );
+    }
+
+    #[test]
+    fn a_missing_or_wrongly_typed_claim_says_nothing() {
+      let groups = path(&["groups"]);
+      assert_eq!(roles_by(&groups, json!({})), None);
+      assert_eq!(roles_by(&groups, json!({ "groups": 1 })), None);
+      assert_eq!(roles_by(&groups, json!({ "groups": { "owner": true } })), None);
+      assert_eq!(
+        roles_by(&path(&["groups", "x"]), json!({ "groups": ["owner"] })),
+        None
+      );
+      // The client roles keep their shape: a single name there isn't one.
+      assert_eq!(
+        roles_by(
+          &[],
+          json!({ "resource_access": { CLIENT: { "roles": "owner" } } })
+        ),
+        None
+      );
+    }
+
+    #[test]
+    fn a_claim_naming_the_person_or_a_blank_path_names_no_role() {
+      for name in ["sub", "email", "preferred_username", ATTESTATION_CLAIM] {
+        let claim = path(&[name]);
+        assert!(!roles_claim_is_usable(&claim), "{name}");
+        assert_eq!(roles_by(&claim, json!({})), None, "{name}");
+      }
+      let claims = json!({ "nickname": "owner", "groups": { "": ["owner"] } });
+      assert_eq!(roles_by(&path(&["nickname"]), claims.clone()), None);
+      assert_eq!(roles_by(&path(&["groups", ""]), claims.clone()), None);
+      assert_eq!(roles_by(&path(&[" "]), claims), None);
+      assert!(roles_claim_is_usable(&[]));
+      assert!(roles_claim_is_usable(&path(&["groups"])));
+      assert!(roles_claim_is_usable(&path(&["profile_roles", "sub"])));
     }
 
     #[test]
@@ -535,10 +702,37 @@ mod tests {
         "iss": ISSUER, "aud": "account", "azp": CLIENT, "typ": "Bearer", "sub": "abc", "iat": 7,
         "resource_access": { "account": { "roles": ["manage-account"] } },
       }));
-      let evidence = verify_role_loss(&token, &provider.jwks(), &expectations()).unwrap();
+      let evidence = verify_role_loss(&token, &provider.jwks(), &expectations(), &[]).unwrap();
       assert_eq!(evidence.subject, "abc");
       assert_eq!(evidence.issued_at, 7);
       assert_eq!(evidence.maybe_roles, Some(Vec::new()));
+    }
+
+    #[test]
+    fn an_access_token_reads_the_claim_the_policy_names() {
+      let provider = Provider::new();
+      let jwks = provider.jwks();
+      let token = |claims: Value| {
+        let mut base = json!({ "iss": ISSUER, "azp": CLIENT, "typ": "Bearer", "sub": "abc", "iat": 7 });
+        for (name, value) in claims.as_object().unwrap() {
+          base[name] = value.clone();
+        }
+        provider.token(base)
+      };
+      let groups = vec!["groups".to_string()];
+      let check = |token: &str, roles_claim: &[String]| {
+        verify_role_loss(token, &jwks, &expectations(), roles_claim)
+          .unwrap()
+          .maybe_roles
+      };
+      assert_eq!(
+        check(&token(json!({ "groups": ["staff"] })), &groups),
+        Some(vec!["staff".to_string()])
+      );
+      // Without the claim the person has no role left, as with client roles.
+      assert_eq!(check(&token(json!({})), &groups), Some(Vec::new()));
+      // A claim that can't name roles says nothing at all.
+      assert_eq!(check(&token(json!({})), &["email".to_string()]), None);
     }
 
     #[test]
@@ -547,26 +741,40 @@ mod tests {
       let jwks = provider.jwks();
       let claims =
         |azp: &str, typ: &str| json!({ "iss": ISSUER, "azp": azp, "typ": typ, "sub": "abc", "iat": 7 });
-      assert!(verify_role_loss(&provider.token(claims(CLIENT, "DPoP")), &jwks, &expectations()).is_ok());
+      assert!(
+        verify_role_loss(
+          &provider.token(claims(CLIENT, "DPoP")),
+          &jwks,
+          &expectations(),
+          &[]
+        )
+        .is_ok()
+      );
       assert!(matches!(
         verify_role_loss(
           &Provider::new().token(claims(CLIENT, "Bearer")),
           &jwks,
-          &expectations()
+          &expectations(),
+          &[]
         ),
         Err(AttestationError::InvalidSignature)
       ));
       assert!(matches!(
-        verify_role_loss(&provider.token(claims("other", "Bearer")), &jwks, &expectations()),
+        verify_role_loss(
+          &provider.token(claims("other", "Bearer")),
+          &jwks,
+          &expectations(),
+          &[]
+        ),
         Err(AttestationError::WrongAudience)
       ));
       assert!(matches!(
-        verify_role_loss(&provider.token(claims(CLIENT, "ID")), &jwks, &expectations()),
+        verify_role_loss(&provider.token(claims(CLIENT, "ID")), &jwks, &expectations(), &[]),
         Err(AttestationError::WrongType(_))
       ));
       let untyped = json!({ "iss": ISSUER, "azp": CLIENT, "sub": "abc", "iat": 7 });
       assert!(matches!(
-        verify_role_loss(&provider.token(untyped), &jwks, &expectations()),
+        verify_role_loss(&provider.token(untyped), &jwks, &expectations(), &[]),
         Err(AttestationError::WrongType(_))
       ));
     }
@@ -591,7 +799,7 @@ mod tests {
         }),
       );
       let jwks = rsa_jwks(&rsa::RsaPublicKey::from(&key));
-      let evidence = verify_role_evidence(&token, &jwks, &expectations(), ALICE, &identity).unwrap();
+      let evidence = verify_role_evidence(&token, &jwks, &expectations(), &[], ALICE, &identity).unwrap();
       assert_eq!(evidence.issued_at, 9);
     }
 
@@ -610,6 +818,7 @@ mod tests {
           &token,
           &rsa_jwks(&rsa::RsaPublicKey::from(&other)),
           &expectations(),
+          &[],
           ALICE,
           &identity
         ),
@@ -624,6 +833,7 @@ mod tests {
           &parts.join("."),
           &rsa_jwks(&rsa::RsaPublicKey::from(&key)),
           &expectations(),
+          &[],
           ALICE,
           &identity
         ),
@@ -636,6 +846,7 @@ mod tests {
           &short_token,
           &rsa_jwks(&rsa::RsaPublicKey::from(&short)),
           &expectations(),
+          &[],
           ALICE,
           &identity
         )

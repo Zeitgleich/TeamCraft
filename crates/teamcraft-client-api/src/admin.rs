@@ -408,7 +408,8 @@ pub struct OwnerRosterStatus {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "issue", rename_all = "snake_case")]
 pub enum RoleSigningIssue {
-  /// ID tokens carry no client roles: for the operator (the realm needs the mapper).
+  /// ID tokens carry no roles where the signed policy reads them: for the operator (the realm needs the
+  /// mapper) or an owner (the policy the provider's claim).
   NoRoleClaim,
   /// The provider doesn't take the identity key attribute: for the operator.
   NoKeyClaim,
