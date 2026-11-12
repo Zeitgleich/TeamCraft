@@ -9,7 +9,7 @@
 # bumps both in the FROM lines; by hand, take the index digest
 # (`docker buildx imagetools inspect <image>`, the top-level Digest), never a single-platform one.
 
-FROM docker.io/library/rust:1.99.1-trixie@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc AS build
+FROM docker.io/library/rust:1.99.1-trixie@sha256:8a4e90c7946b74626488b1446f712c0fe0ed1a596cbd3d871684bc9c5433ae07 AS build
 # The publisher's crash reports service (docs/crash-reports.md): built in when the release workflow
 # passes it (repository variable TEAMCRAFT_CRASH_REPORTS_DSN); empty builds send nothing by default.
 ARG TEAMCRAFT_CRASH_REPORTS_DSN=""
@@ -29,7 +29,7 @@ RUN --mount=type=cache,id=teamcraft-cargo-registry,target=/usr/local/cargo/regis
     cargo build --release --locked -p teamcraft-server --bin teamcraft-server \
  && install -D target/release/teamcraft-server /out/teamcraft-server
 
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:08476c244888bfb425bae1ae4dd7c17f093e972aab8426883d97f3c6f280f7c1
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cc66d222f0a7ec996b78a99fe76a969bc80b539a5016ad866c14d1949bc6d0ab
 LABEL org.opencontainers.image.title="teamcraft-server" \
       org.opencontainers.image.description="TeamCraft REST API and gateway" \
       org.opencontainers.image.source="https://github.com/Zeitgleich/TeamCraft" \
