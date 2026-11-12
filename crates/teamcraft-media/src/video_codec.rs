@@ -156,6 +156,11 @@ struct LayerEncoder {
   /// When it was last given a frame (capture time): a layer at a lower rate than the capture
   /// (a share's 15 fps base under a 30 fps top, #1733) takes only the frames its rate allows.
   maybe_last_frame_us: Option<u64>,
+  /// A frame came that this layer left out for its rate: the picture it shows isn't encoded yet.
+  /// The sender gives it the last picture again once it is due ([`SimulcastEncoder::is_catch_up_due`]):
+  /// a still screen sends no next frame, and a slide that came right after another picture
+  /// waited for the idle refresh, a second later, or was never sent.
+  has_missed_frame: bool,
 }
 
 #[derive(Debug, Error)]
@@ -430,6 +435,7 @@ impl SimulcastEncoder {
           is_needed: true,
           wants_keyframe: true,
           maybe_last_frame_us: None,
+          has_missed_frame: false,
         })
       })
       .collect::<Result<_, VideoCodecError>>()?;
@@ -459,6 +465,16 @@ impl SimulcastEncoder {
   /// Whether anybody receives a layer; with none, encoding is wasted.
   pub fn has_needed_layers(&self) -> bool {
     self.layers.iter().any(|layer| layer.is_needed)
+  }
+
+  /// Whether a needed layer left out the last frame for its rate and would take one stamped
+  /// `timestamp_us`: the sender gives it the last picture again then, so a picture that came
+  /// too early for a layer reaches it within the layer's frame interval.
+  pub fn is_catch_up_due(&self, timestamp_us: u64) -> bool {
+    self
+      .layers
+      .iter()
+      .any(|layer| layer.is_needed && layer.has_missed_frame && layer.would_be_due(timestamp_us))
   }
 
   /// Encodes `frame` on the lowest layer although no layer is needed, only to learn whether the
@@ -616,9 +632,14 @@ impl SimulcastEncoder {
     started: &mut Vec<StartedLayer>,
   ) -> Result<(), VideoCodecError> {
     for (index, layer) in self.layers.iter_mut().enumerate().rev() {
-      if !layer.is_needed || !layer.is_due(frame.timestamp_us()) {
+      if !layer.is_needed {
         continue;
       }
+      if !layer.is_due(frame.timestamp_us()) {
+        layer.has_missed_frame = true;
+        continue;
+      }
+      layer.has_missed_frame = false;
       let size = VideoResolution {
         width: layer.info.width,
         height: layer.info.height,
@@ -662,15 +683,19 @@ impl LayerEncoder {
   /// Whether a frame captured at `timestamp_us` is due for this layer at its frame rate, and if
   /// so, notes it. A little early counts (three quarters of the interval): captures jitter.
   fn is_due(&mut self, timestamp_us: u64) -> bool {
-    let interval_us = 1_000_000 / u64::from(self.info.max_framerate.max(1));
-    let is_due = self
-      .maybe_last_frame_us
-      // A timestamp not after the last one (a restarted or synthetic clock) is never held back.
-      .is_none_or(|last| timestamp_us <= last || timestamp_us - last >= interval_us * 3 / 4);
+    let is_due = self.would_be_due(timestamp_us);
     if is_due {
       self.maybe_last_frame_us = Some(timestamp_us);
     }
     is_due
+  }
+
+  fn would_be_due(&self, timestamp_us: u64) -> bool {
+    let interval_us = 1_000_000 / u64::from(self.info.max_framerate.max(1));
+    self
+      .maybe_last_frame_us
+      // A timestamp not after the last one (a restarted or synthetic clock) is never held back.
+      .is_none_or(|last| timestamp_us <= last || timestamp_us - last >= interval_us * 3 / 4)
   }
 }
 
@@ -981,6 +1006,30 @@ mod tests {
       assert_eq!(*size, sizes_of(&layers)[usize::from(*layer)], "layer {layer}");
     }
     assert!(simulcast.wants_keyframe(), "layer 1 still waits for its keyframe");
+  }
+
+  /// Gives a picture of every frame.
+  struct Counting;
+
+  impl VideoEncoder for Counting {
+    fn codec(&self) -> VideoCodec {
+      VideoCodec::H264
+    }
+
+    fn name(&self) -> &'static str {
+      "counting"
+    }
+
+    fn encode(
+      &mut self,
+      _frame: &VideoFrame,
+      is_keyframe_forced: bool,
+    ) -> Result<Option<EncodedPicture>, VideoCodecError> {
+      Ok(Some(EncodedPicture {
+        is_keyframe: is_keyframe_forced,
+        data: vec![0, 0, 0, 1, 0x65],
+      }))
+    }
   }
 
   /// Logs `start` and `finish` with the size of the frame; layer 1 gives no picture.
@@ -1502,6 +1551,42 @@ mod tests {
     }
     assert!(counts[0] <= 15, "{counts:?}");
     assert!(counts[1] > counts[0], "{counts:?}");
+  }
+
+  /// A frame that came too early for a layer's rate leaves the layer due for a catch-up once its
+  /// interval passed, and only then.
+  #[test]
+  fn a_frame_left_out_for_the_rate_is_caught_up_once_due() {
+    let layers = simulcast_layers(
+      VideoResolution {
+        width: 32,
+        height: 32,
+      },
+      30,
+      100_000,
+      1,
+    );
+    let mut simulcast =
+      SimulcastEncoder::new(&layers, |_| Ok(Box::new(Counting) as Box<dyn VideoEncoder>)).unwrap();
+    let frame = |timestamp_us| {
+      VideoFrame::new(
+        VideoResolution {
+          width: 32,
+          height: 32,
+        },
+        timestamp_us,
+        vec![128; 32 * 32 * 3 / 2],
+      )
+      .unwrap()
+    };
+    assert_eq!(simulcast.encode(&frame(1_000_000)).unwrap().len(), 1);
+    assert!(!simulcast.is_catch_up_due(1_100_000), "nothing left out");
+    // A slide 1 ms later (a refresh ran ahead of the capture's clock): too early at 30 fps.
+    assert!(simulcast.encode(&frame(1_001_000)).unwrap().is_empty());
+    assert!(!simulcast.is_catch_up_due(1_010_000));
+    assert!(simulcast.is_catch_up_due(1_026_000));
+    assert_eq!(simulcast.encode(&frame(1_026_000)).unwrap().len(), 1);
+    assert!(!simulcast.is_catch_up_due(1_100_000), "caught up");
   }
 
   fn layers_of(frames: &[EncodedVideoFrame]) -> Vec<u8> {

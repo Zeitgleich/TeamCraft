@@ -99,14 +99,17 @@ impl FrameLimiter {
   }
 
   fn is_due(&mut self, timestamp_us: u64) -> bool {
-    if let Some(last) = self.maybe_last_us
-      && timestamp_us.saturating_sub(last) < self.min_interval_us
-      && timestamp_us >= last
-    {
+    if !self.would_be_due(timestamp_us) {
       return false;
     }
     self.maybe_last_us = Some(timestamp_us);
     true
+  }
+
+  fn would_be_due(&self, timestamp_us: u64) -> bool {
+    self
+      .maybe_last_us
+      .is_none_or(|last| timestamp_us.saturating_sub(last) >= self.min_interval_us || timestamp_us < last)
   }
 }
 
@@ -354,6 +357,7 @@ impl VideoSender {
       },
       frame_rx,
       maybe_pending_frame: maybe_first_frame,
+      maybe_held_back: None,
       control_rx,
       encoded,
       counters: Arc::clone(&counters),
@@ -438,6 +442,11 @@ struct EncoderLoop {
   frame_rx: FrameReceiver,
   /// A frame taken from the capture before the loop ran (the one the layers were planned for).
   maybe_pending_frame: Option<VideoFrame>,
+  /// The latest frame that came too soon for the track's rate ([`FrameLimiter`]), and when: it
+  /// goes out once due unless a newer frame comes first. A still screen sends no next frame, and
+  /// a slide that came right after another picture was lost: the idle refresh then repeated
+  /// the picture before it (screen_uplink_bursts, #1733).
+  maybe_held_back: Option<(VideoFrame, Instant)>,
   control_rx: std_mpsc::Receiver<SenderControl>,
   encoded: mpsc::UnboundedSender<(VideoTrackKind, EncodedVideoFrame)>,
   counters: Arc<SendCounters>,
@@ -545,7 +554,9 @@ impl EncoderLoop {
         }
         continue;
       }
-      let received = match self.maybe_pending_frame.take() {
+      let maybe_held = self.take_due_held_back(&limiter, Instant::now());
+      let is_held = maybe_held.is_some();
+      let received = match maybe_held.or_else(|| self.maybe_pending_frame.take()) {
         Some(frame) => Ok(frame),
         None => self.frame_rx.recv_timeout(CONTROL_POLL),
       };
@@ -562,18 +573,23 @@ impl EncoderLoop {
           return;
         },
       };
-      self.stall.on_frame(Instant::now());
       // A request that came while waiting (a viewer asked for a keyframe) applies to this frame.
       if self.apply_controls(&mut simulcast) == LoopStep::Stop {
         return;
       }
-      self.counters.captured.fetch_add(1, Ordering::Relaxed);
-      self.counters.note_capture(frame.resolution());
-      self.check_content(&frame);
-      // A camera may deliver 60 fps; the call sends at most its layers' rate.
+      if !is_held {
+        self.stall.on_frame(Instant::now());
+        self.counters.captured.fetch_add(1, Ordering::Relaxed);
+        self.counters.note_capture(frame.resolution());
+        self.check_content(&frame);
+      }
+      // A camera may deliver 60 fps; the call sends at most its layers' rate. A frame too soon
+      // waits for its turn: it may be the last one of a still screen.
       if !limiter.is_due(frame.timestamp_us()) {
+        self.maybe_held_back = Some((frame, Instant::now()));
         continue;
       }
+      self.maybe_held_back = None;
       // Shrink before the filter (background effects) and the encoders: they work per pixel.
       let target = send_resolution.map_or(frame.resolution(), |limit| fit_within(frame.resolution(), limit));
       let frame = if target == frame.resolution() {
@@ -608,8 +624,20 @@ impl EncoderLoop {
     }
   }
 
-  /// The last picture again with a later timestamp, when [`Refresh`] says so (and someone
-  /// receives the track).
+  /// The frame held back for the rate, stamped with the time it waited, once the limiter takes it.
+  fn take_due_held_back(&mut self, limiter: &FrameLimiter, now: Instant) -> Option<VideoFrame> {
+    let (frame, held_at) = self.maybe_held_back.as_ref()?;
+    let waited_us = u64::try_from(now.saturating_duration_since(*held_at).as_micros()).unwrap_or(u64::MAX);
+    let timestamp_us = frame.timestamp_us().saturating_add(waited_us);
+    if !limiter.would_be_due(timestamp_us) {
+      return None;
+    }
+    let (frame, _) = self.maybe_held_back.take()?;
+    Some(frame.with_timestamp_us(timestamp_us))
+  }
+
+  /// The last picture again with a later timestamp, when [`Refresh`] says so or a layer left it
+  /// out for its rate (and someone receives the track).
   fn due_refresh(
     &self,
     simulcast: &SimulcastEncoder,
@@ -617,16 +645,19 @@ impl EncoderLoop {
     now: Instant,
   ) -> Option<VideoFrame> {
     let last = maybe_last?;
-    let is_due = simulcast.has_needed_layers()
-      && self
-        .refresh
-        .is_due(now, last.encoded_at, simulcast.wants_keyframe());
-    if !is_due {
-      return None;
-    }
     let elapsed_us =
       u64::try_from(now.saturating_duration_since(last.encoded_at).as_micros()).unwrap_or(u64::MAX);
     let timestamp_us = last.frame.timestamp_us().saturating_add(elapsed_us);
+    // A layer that left the last picture out for its rate (a new slide right after a refresh, or
+    // a share's 15 fps base) gets it once due: a still screen sends no next frame (#1733).
+    let is_due = simulcast.has_needed_layers()
+      && (self
+        .refresh
+        .is_due(now, last.encoded_at, simulcast.wants_keyframe())
+        || simulcast.is_catch_up_due(timestamp_us));
+    if !is_due {
+      return None;
+    }
     Some(last.frame.clone().with_timestamp_us(timestamp_us))
   }
 
@@ -1785,6 +1816,7 @@ mod tests {
         },
         frame_rx,
         maybe_pending_frame: None,
+        maybe_held_back: None,
         control_rx,
         encoded,
         counters: Arc::default(),
@@ -1849,6 +1881,19 @@ mod tests {
         timestamps.is_sorted() && timestamps[0] < timestamps[2],
         "{timestamps:?}"
       );
+    }
+
+    /// A slide that comes right after the last picture (here 1 ms after it) is too early for the
+    /// track's rate, and a still screen sends no next frame: it goes out once its interval
+    /// passed, not with the idle refresh a second later, nor never (screen_uplink_bursts, #1733).
+    #[tokio::test]
+    async fn a_slide_too_early_for_the_rate_goes_out_within_the_interval() {
+      let (_sender, frames, mut encoded_rx) = still_screen(None);
+      assert!(frames.send(test_pattern(VGA, 0, 1_000_000).unwrap()));
+      let first = next(&mut encoded_rx).await;
+      assert!(frames.send(test_pattern(VGA, 1, 1_001_000).unwrap()));
+      let slide = next(&mut encoded_rx).await;
+      assert!(slide.timestamp.0 > first.timestamp.0);
     }
 
     /// A screen sender whose frames the test pushes, with fake encoders.
