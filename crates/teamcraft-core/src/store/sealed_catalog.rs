@@ -6,7 +6,8 @@
 //! skip it as unknown), keyed `<generation>/d/<table>/…` (a table's keys),
 //! `<generation>/m/<conversation>/…` (a conversation's messages), `<generation>/f/<conversation>/…`
 //! (the rows of its feed, whose page lengths count positions) and `<generation>/x/<conversation>/…`
-//! (its reactions by target, replies by thread, events and pinned messages), plus the record [`META_KEY`] saying
+//! (its reactions by target, replies by thread, events, pinned messages, messages by thread, and
+//! mentions and posts by person), plus the record [`META_KEY`] saying
 //! which generation is current, what it holds and whether it is complete. The catalog is derived
 //! from the records: a damaged or older one is built again under a new generation, and the build
 //! deletes the nodes of older ones. Nothing about the catalog is readable without the database key:
@@ -18,11 +19,11 @@ use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{ClientMessageId, ConversationId, Id, MessageId, ThreadId};
+use teamcraft_proto::{ClientMessageId, ConversationId, Id, MessageId, ThreadId, UserId};
 
 use super::lru::Lru;
 use super::sealed_index::{HeapBytes, IndexNodes, IndexPage, IndexRoot};
-use super::{Attached, MessageFilter, MessageOrder, StoreError, StoredMessage};
+use super::{Attached, MessageFilter, MessageOrder, StoreError, StoredMessage, UserLink};
 
 /// The reserved table the catalog's records are entries of.
 pub(crate) const CATALOG_TABLE: &str = "_catalog";
@@ -44,8 +45,9 @@ pub(crate) const FEED_VERSION_KIND: &str = "v";
 /// 1: tables and messages; 2: feeds and relations; 3: which messages have files and documents
 /// ([`MessageFlags::FILES`], issue #1509); 4: which messages have web links
 /// ([`MessageFlags::LINKS`], issue #609); 5: which messages are pinned ([`Relation::Pinned`],
-/// issue #1757).
-pub(crate) const CATALOG_VERSION: u32 = 5;
+/// issue #1757); 6: the messages of each thread ([`Relation::InThread`]), and whom a message
+/// mentions and who posted it ([`Relation::Mentions`], [`Relation::PostedBy`], issue #1790).
+pub(crate) const CATALOG_VERSION: u32 = 6;
 
 /// How far the catalog of a store is built, and its generation (random, so a catalog built again
 /// never meets nodes of an earlier one). A store written before the catalog existed builds it when
@@ -119,6 +121,13 @@ pub(crate) enum Relation {
   Event,
   /// A pinned message the pinned panel lists ([`StoredMessage::is_shown_pin`], catalog version 5).
   Pinned,
+  /// A message of this thread as [`MessageFilter::Thread`] lists it: the thread view's messages,
+  /// placeholders and deleted ones included (catalog version 6).
+  InThread(ThreadId),
+  /// A text that mentions this person ([`StoredMessage::mentions_user`], catalog version 6).
+  Mentions(UserId),
+  /// A post of this person ([`StoredMessage::is_post`], catalog version 6).
+  PostedBy(UserId),
 }
 
 /// A page of an index: its scope (the conversation or table) and its number.
@@ -174,7 +183,26 @@ impl Relation {
     if message.is_shown_pin() {
       relations.push(Self::Pinned);
     }
+    if let Some(thread) = message.maybe_thread_id
+      && message.matches(MessageFilter::Thread(thread))
+    {
+      relations.push(Self::InThread(thread));
+    }
+    relations.extend(
+      message
+        .linked_users()
+        .into_iter()
+        .map(|(link, user)| Self::linking(link, user)),
+    );
     relations
+  }
+
+  /// The relation of the messages that `link` `user`.
+  pub(crate) fn linking(link: UserLink, user: UserId) -> Self {
+    match link {
+      UserLink::Mentioned => Self::Mentions(user),
+      UserLink::Posted => Self::PostedBy(user),
+    }
   }
 
   fn parts(self) -> (u8, u128) {
@@ -183,6 +211,9 @@ impl Relation {
       Self::ReplyIn(thread) => (1, u128::from(raw_thread(thread).cast_unsigned())),
       Self::Event => (2, 0),
       Self::Pinned => (3, 0),
+      Self::InThread(thread) => (4, u128::from(raw_thread(thread).cast_unsigned())),
+      Self::Mentions(user) => (5, u128::from(user.snowflake().get().cast_unsigned())),
+      Self::PostedBy(user) => (6, u128::from(user.snowflake().get().cast_unsigned())),
     }
   }
 
@@ -190,6 +221,12 @@ impl Relation {
   pub(crate) fn first_key(self) -> RelationKey {
     let (kind, target) = self.parts();
     RelationKey(kind, target, MessageKey(0, i64::MIN, 0))
+  }
+
+  /// The largest key of this relation.
+  pub(crate) fn last_key(self) -> RelationKey {
+    let (kind, target) = self.parts();
+    RelationKey(kind, target, MessageKey(u8::MAX, i64::MAX, u128::MAX))
   }
 
   pub(crate) fn key_of(self, message: MessageKey) -> RelationKey {

@@ -22,7 +22,7 @@ use crate::client::stored_account_data;
 use crate::error::CoreError;
 use crate::records;
 use crate::search_scope::ConversationScope;
-use crate::store::{LocalStore, MessageContent, MessageFilter, StoredMessage, Table};
+use crate::store::{LocalStore, MessageContent, StoredMessage, Table, UserLink};
 use crate::ui_backend::{CoreChatBackend, CoreCommand, UnreadCounts};
 
 /// Hits shown per search.
@@ -77,12 +77,21 @@ impl<S: LocalStore> SearchBackend for CoreChatBackend<S> {
     }
   }
 
+  /// The newest mentions of each conversation through the store's index of them (issue #1790), not
+  /// every message of every conversation.
   fn recent_mentions(&self) -> Vec<SearchHit> {
+    let me = self.me_id();
     let mut mentions: Vec<StoredMessage> = self
       .conversation_ids()
       .into_iter()
-      .flat_map(|conversation| self.stored(conversation))
-      .filter(|stored| matches!(&stored.content, MessageContent::Text { mentions, .. } if mentions.contains(&self.me_id())))
+      .flat_map(|conversation| {
+        self.read(
+          self
+            .store_ref()
+            .user_messages(conversation, me, UserLink::Mentioned, MAX_HITS)
+            .map_err(CoreError::from),
+        )
+      })
       .collect();
     mentions.sort_by_key(|message| std::cmp::Reverse(message.sent_at_ms));
     mentions.truncate(MAX_HITS);
@@ -300,10 +309,12 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .collect()
   }
 
-  pub(crate) fn stored(&self, conversation: ConversationId) -> Vec<StoredMessage> {
+  /// All of a conversation's messages: the browser's search, which has no index of terms yet.
+  #[cfg(target_arch = "wasm32")]
+  fn stored(&self, conversation: ConversationId) -> Vec<StoredMessage> {
     self
       .store_ref()
-      .messages(conversation, MessageFilter::All)
+      .messages(conversation, crate::store::MessageFilter::All)
       .map_err(CoreError::from)
       .unwrap_or_default()
   }

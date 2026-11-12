@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
-use teamcraft_proto::{ClientMessageId, ConversationId, Id, MessageId, ThreadId};
+use teamcraft_proto::{ClientMessageId, ConversationId, Id, MessageId, ThreadId, UserId};
 use zeroize::Zeroizing;
 
 use super::sql_group::{
@@ -20,7 +20,7 @@ use super::sqlite_log::{LOG_PRAGMAS, PurgeState};
 use super::sqlite_wipe::wipe_free_pages;
 use super::{
   Attached, AttachedRange, DatabaseKeySource, FeedChange, FeedVersion, LocalStore, MessageEdge,
-  MessageFilter, MessageOrder, MessageSlot, StoreError, StoredMessage, Table, WriteTally,
+  MessageFilter, MessageOrder, MessageSlot, StoreError, StoredMessage, Table, UserLink, WriteTally,
 };
 
 /// The layout steps of this store, in order ([`run_migrations`]). Released 1.0 databases carry
@@ -55,6 +55,12 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     version: 6,
     kind: MigrationKind::Layout(migrate_to_v6),
   },
+  // A thread's messages, whom a message mentions and who posted it (issue #1790), the latter two
+  // filled from the records.
+  Migration {
+    version: 7,
+    kind: MigrationKind::Layout(migrate_to_v7),
+  },
 ];
 /// How a message record spells the media type of a picture or a video (`AttachmentRef`, compact JSON):
 /// the bytes [`SqlCipherStore::attached_messages`] looks for.
@@ -65,6 +71,13 @@ const ATTACHMENT_MARKER: &[u8] = br#""attachment_id":"#;
 /// How a message record spells a pinned message (`StoredMessage`, compact JSON): the bytes the
 /// layout step of version 6 looks for before it decodes a record.
 const PINNED_MARKER: &[u8] = br#""is_pinned":true"#;
+/// How a message record spells a text that mentions somebody (`MessageContent::Text`, compact JSON;
+/// no mentions are left out): the bytes the layout step of version 7 looks for.
+const MENTIONS_MARKER: &[u8] = br#""mentions":["#;
+/// How a message record spells a text and a file (`MessageContent`, compact JSON): the messages the
+/// layout step of version 7 decodes for their poster.
+const TEXT_MARKER: &[u8] = br#""type":"text""#;
+const FILE_MARKER: &[u8] = br#""type":"file""#;
 /// What every web link has ([`teamcraft_proto::web_links`]), in any case of its scheme.
 const LINK_MARKER: &[u8] = b"://";
 /// Rows an attachments query reads at a time at least.
@@ -104,6 +117,27 @@ const PINNED_COLUMN_V6: &str = "
   ALTER TABLE messages ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;
   CREATE INDEX messages_pinned ON messages (conversation_id, sort_group, sort_value, client_message_id)
     WHERE is_pinned = 1;
+";
+/// The reads of issue #1790, each through an index that holds only what it returns: a thread's
+/// messages (placeholders and deleted ones too, which `messages_replies` leaves out), the posts of
+/// a person (the sender of a [`StoredMessage::is_post`], written from the record like the feed's
+/// columns) and the people a text mentions (a row per person, kept with the message).
+const USER_INDEXES_V7: &str = "
+  CREATE INDEX messages_threads ON messages (conversation_id, thread_id, sort_group, sort_value, client_message_id)
+    WHERE thread_id IS NOT NULL;
+  ALTER TABLE messages ADD COLUMN poster_id INTEGER;
+  CREATE INDEX messages_posts ON messages (conversation_id, poster_id, sort_group, sort_value, client_message_id)
+    WHERE poster_id IS NOT NULL;
+  CREATE TABLE message_mentions (
+    conversation_id INTEGER NOT NULL,
+    client_message_id BLOB NOT NULL,
+    user_id INTEGER NOT NULL,
+    sort_group INTEGER NOT NULL,
+    sort_value INTEGER NOT NULL,
+    PRIMARY KEY (conversation_id, client_message_id, user_id)
+  ) WITHOUT ROWID;
+  CREATE INDEX message_mentions_by_user
+    ON message_mentions (conversation_id, user_id, sort_group, sort_value, client_message_id);
 ";
 /// The feed's display order, ties broken as [`super::MessageOrder`] does.
 const FEED_ORDER: &str = "ORDER BY sort_group, sort_value, client_message_id";
@@ -145,6 +179,8 @@ struct FeedColumns {
   is_reply: bool,
   /// [`PINNED_COLUMN_V6`].
   is_pinned: bool,
+  /// The poster of a post ([`USER_INDEXES_V7`]).
+  maybe_poster: Option<i64>,
 }
 
 /// The connection and the group of writes open on it: one lock, so a write and the group it joins
@@ -367,15 +403,15 @@ impl LocalStore for SqlCipherStore {
       connection.execute(
         "INSERT INTO messages
            (conversation_id, client_message_id, sort_group, sort_value, thread_id, is_hidden, in_channel, record,
-            is_feed_row, is_event, reaction_target, is_reply, is_pinned)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            is_feed_row, is_event, reaction_target, is_reply, is_pinned, poster_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
          ON CONFLICT (conversation_id, client_message_id) DO UPDATE SET
            sort_group = excluded.sort_group, sort_value = excluded.sort_value,
            thread_id = excluded.thread_id, is_hidden = excluded.is_hidden,
            in_channel = excluded.in_channel, record = excluded.record,
            is_feed_row = excluded.is_feed_row, is_event = excluded.is_event,
            reaction_target = excluded.reaction_target, is_reply = excluded.is_reply,
-           is_pinned = excluded.is_pinned",
+           is_pinned = excluded.is_pinned, poster_id = excluded.poster_id",
         params![
           message.conversation_id.snowflake().get(),
           message.client_message_id.as_bytes().as_slice(),
@@ -390,8 +426,10 @@ impl LocalStore for SqlCipherStore {
           feed.maybe_reaction_target.as_ref().map(<[u8; 16]>::as_slice),
           feed.is_reply,
           feed.is_pinned,
+          feed.maybe_poster,
         ],
-      )
+      )?;
+      write_mentions(connection, message)
     })
   }
 
@@ -746,6 +784,57 @@ impl LocalStore for SqlCipherStore {
     Ok(pinned)
   }
 
+  /// The posts' index, or the mentions' table, walked back from the end: only the rows returned.
+  /// The index preselects; the record decides.
+  fn user_messages(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+    link: UserLink,
+    limit: usize,
+  ) -> Result<Vec<StoredMessage>, StoreError> {
+    let sql = match link {
+      UserLink::Posted => {
+        "SELECT record FROM messages WHERE conversation_id = ?1 AND poster_id = ?2
+         ORDER BY sort_group DESC, sort_value DESC, client_message_id DESC LIMIT ?3"
+      },
+      UserLink::Mentioned => {
+        "SELECT messages.record FROM message_mentions JOIN messages
+           ON messages.conversation_id = message_mentions.conversation_id
+          AND messages.client_message_id = message_mentions.client_message_id
+         WHERE message_mentions.conversation_id = ?1 AND message_mentions.user_id = ?2
+         ORDER BY message_mentions.sort_group DESC, message_mentions.sort_value DESC,
+           message_mentions.client_message_id DESC
+         LIMIT ?3"
+      },
+    };
+    let inner = self.lock();
+    let records: Vec<Vec<u8>> = inner
+      .connection
+      .prepare_cached(sql)
+      .and_then(|mut statement| {
+        statement
+          .query_map(
+            params![
+              conversation.snowflake().get(),
+              user.snowflake().get(),
+              i64::try_from(limit).unwrap_or(i64::MAX)
+            ],
+            |row| row.get(0),
+          )?
+          .collect()
+      })
+      .map_err(database_error)?;
+    let mut linked = Vec::with_capacity(records.len());
+    for record in &records {
+      let message = decode_message(record)?;
+      if message.links(user, link) {
+        linked.push(message);
+      }
+    }
+    Ok(linked)
+  }
+
   fn reactions_to(
     &self,
     conversation: ConversationId,
@@ -837,6 +926,10 @@ impl LocalStore for SqlCipherStore {
     self.write(|connection| {
       bump_feed_version(connection, conversation, FeedChange::Reshaped)?;
       connection.execute(
+        "DELETE FROM message_mentions WHERE conversation_id = ?1",
+        params![conversation.snowflake().get()],
+      )?;
+      connection.execute(
         "DELETE FROM messages WHERE conversation_id = ?1",
         params![conversation.snowflake().get()],
       )
@@ -850,6 +943,13 @@ impl LocalStore for SqlCipherStore {
   ) -> Result<(), StoreError> {
     self.write(|connection| {
       note_feed_change(connection, conversation, client_message_id, None)?;
+      connection.execute(
+        "DELETE FROM message_mentions WHERE conversation_id = ?1 AND client_message_id = ?2",
+        params![
+          conversation.snowflake().get(),
+          client_message_id.as_bytes().as_slice()
+        ],
+      )?;
       connection.execute(
         "DELETE FROM messages WHERE conversation_id = ?1 AND client_message_id = ?2",
         params![
@@ -947,6 +1047,33 @@ impl std::fmt::Debug for SqlCipherStore {
   }
 }
 
+/// The rows of [`USER_INDEXES_V7`]'s mentions table for `message`, replacing the ones it had.
+fn write_mentions(connection: &Connection, message: &StoredMessage) -> rusqlite::Result<usize> {
+  let conversation = message.conversation_id.snowflake().get();
+  let client_message_id = message.client_message_id.as_bytes().as_slice();
+  let mut written = connection
+    .prepare_cached("DELETE FROM message_mentions WHERE conversation_id = ?1 AND client_message_id = ?2")?
+    .execute(params![conversation, client_message_id])?;
+  let (sort_group, sort_value) = message.sort_key();
+  for (link, user) in message.linked_users() {
+    if link == UserLink::Mentioned {
+      written += connection
+        .prepare_cached(
+          "INSERT INTO message_mentions (conversation_id, client_message_id, user_id, sort_group, sort_value)
+           VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?
+        .execute(params![
+          conversation,
+          client_message_id,
+          user.snowflake().get(),
+          sort_group,
+          sort_value
+        ])?;
+    }
+  }
+  Ok(written)
+}
+
 fn decode_message(record: &[u8]) -> Result<StoredMessage, StoreError> {
   serde_json::from_slice(record).map_err(|error| StoreError::Corrupt(error.to_string()))
 }
@@ -976,6 +1103,47 @@ fn migrate_to_v6(connection: &Connection) -> Result<(), StoreError> {
     let record: Vec<u8> = row.get(1).map_err(database_error)?;
     if decode_message(&record).is_ok_and(|message| message.is_shown_pin()) {
       update.execute(params![rowid]).map_err(database_error)?;
+    }
+  }
+  Ok(())
+}
+
+/// Version 7: the thread index, the posts' column and index, and the mentions' table (issue #1790).
+/// Only the server messages whose bytes spell a text or a file are decoded, and the record decides;
+/// one that doesn't decode is in neither, as for the feed's columns.
+fn migrate_to_v7(connection: &Connection) -> Result<(), StoreError> {
+  let _step = crate::timing::step("sqlite_migrate");
+  connection
+    .execute_batch(USER_INDEXES_V7)
+    .map_err(database_error)?;
+  let mut select = connection
+    .prepare(
+      "SELECT rowid, record FROM messages
+       WHERE sort_group = 0 AND (instr(record, ?1) > 0 OR instr(record, ?2) > 0)",
+    )
+    .map_err(database_error)?;
+  let mut update = connection
+    .prepare("UPDATE messages SET poster_id = ?2 WHERE rowid = ?1")
+    .map_err(database_error)?;
+  let mut rows = select
+    .query(params![TEXT_MARKER, FILE_MARKER])
+    .map_err(database_error)?;
+  while let Some(row) = rows.next().map_err(database_error)? {
+    let rowid: i64 = row.get(0).map_err(database_error)?;
+    let record: Vec<u8> = row.get(1).map_err(database_error)?;
+    let Ok(message) = decode_message(&record) else {
+      continue;
+    };
+    if message.is_post() {
+      update
+        .execute(params![rowid, message.sender_user_id.snowflake().get()])
+        .map_err(database_error)?;
+    }
+    if record
+      .windows(MENTIONS_MARKER.len())
+      .any(|window| window == MENTIONS_MARKER)
+    {
+      write_mentions(connection, &message).map_err(database_error)?;
     }
   }
   Ok(())
@@ -1084,6 +1252,9 @@ impl FeedColumns {
       maybe_reaction_target: message.relation_target().map(|target| *target.as_bytes()),
       is_reply: message.counts_as_reply(),
       is_pinned: message.is_shown_pin(),
+      maybe_poster: message
+        .is_post()
+        .then(|| message.sender_user_id.snowflake().get()),
     }
   }
 }
@@ -1483,6 +1654,106 @@ mod tests {
     pinned.is_pinned = false;
     store.upsert_message(&pinned).unwrap();
     assert_eq!(store.pinned_messages(conversation).unwrap().len(), 1);
+    drop(store);
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  /// Issue #1790: a database from before the posts' column and the mentions' table gets them,
+  /// filled from its records, and the reads find the posts and mentions written before the upgrade
+  /// (a body that only spells a mention is none, a pending message is no post). The thread index
+  /// needs no filling: the thread's read finds its replies at once.
+  #[test]
+  fn a_database_before_the_people_indexes_has_them_filled() {
+    use crate::store::tests::{id, media_content, message};
+    use crate::store::{MessageContent, UserLink};
+
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let key = SymmetricKey::generate(&mut OsRng);
+    let conversation = id(6);
+    let (me, peer) = (id::<UserId>(1), id::<UserId>(2));
+    let mut mention = message(conversation, 1, Some(100), None, 1);
+    mention.sender_user_id = peer;
+    mention.content = MessageContent::Text {
+      body: "hi".into(),
+      mentions: vec![me, peer],
+      meta: Default::default(),
+    };
+    let mut spelled = message(conversation, 2, Some(110), Some(100), 2);
+    spelled.content = MessageContent::Text {
+      body: r#""mentions":[1]"#.into(),
+      mentions: Vec::new(),
+      meta: Default::default(),
+    };
+    let mut file = message(conversation, 3, Some(120), Some(100), 3);
+    file.content = media_content("image/png");
+    let pending = message(conversation, 4, None, None, 4);
+    let mut reaction = message(conversation, 5, Some(130), None, 5);
+    reaction.content = MessageContent::Reaction {
+      target: mention.client_message_id,
+      emoji: "👍".into(),
+      is_added: true,
+      maybe_custom: None,
+    };
+    let written = [&mention, &spelled, &file, &pending, &reaction];
+    {
+      let connection = Connection::open(&path).unwrap();
+      keyed(&connection, &key);
+      run_migrations(&connection, &MIGRATIONS[..6]).unwrap();
+      for stored in written {
+        let (sort_group, sort_value) = stored.sort_key();
+        connection
+          .execute(
+            "INSERT INTO messages
+               (conversation_id, client_message_id, sort_group, sort_value, thread_id, is_hidden, in_channel, record)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
+            params![
+              conversation.snowflake().get(),
+              stored.client_message_id.as_bytes().as_slice(),
+              sort_group,
+              sort_value,
+              stored.maybe_thread_id.map(|thread| thread.snowflake().get()),
+              stored.is_hidden(),
+              serde_json::to_vec(stored).unwrap(),
+            ],
+          )
+          .unwrap();
+      }
+    }
+    let store = SqlCipherStore::open(&path, &StaticKeySource::new(key)).unwrap();
+    let mentions = |user| {
+      store
+        .user_messages(conversation, user, UserLink::Mentioned, 10)
+        .unwrap()
+    };
+    let posts = |user| {
+      store
+        .user_messages(conversation, user, UserLink::Posted, 10)
+        .unwrap()
+    };
+    assert_eq!(mentions(me), vec![mention.clone()]);
+    assert_eq!(mentions(peer), vec![mention.clone()]);
+    assert_eq!(posts(peer), vec![mention.clone()]);
+    assert_eq!(posts(me), vec![file.clone(), spelled.clone()], "newest first");
+    assert_eq!(
+      store
+        .messages(conversation, MessageFilter::Thread(id(100)))
+        .unwrap(),
+      vec![spelled.clone(), file.clone()]
+    );
+    // Written after the upgrade: the indexes follow.
+    mention.content = MessageContent::Text {
+      body: "hi".into(),
+      mentions: vec![peer],
+      meta: Default::default(),
+    };
+    store.upsert_message(&mention).unwrap();
+    assert!(mentions(me).is_empty());
+    store
+      .delete_message(conversation, mention.client_message_id)
+      .unwrap();
+    assert!(mentions(peer).is_empty());
+    assert!(posts(peer).is_empty());
     drop(store);
     std::fs::remove_dir_all(&directory).unwrap();
   }

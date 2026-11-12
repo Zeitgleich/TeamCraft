@@ -2,7 +2,7 @@
 //! the user's own messages from the decrypted local store. The server sees nothing of either.
 
 use std::cmp::Reverse;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 use teamcraft_client_api::actions::ReplyPreview;
 use teamcraft_client_api::drafts::{DraftItem, DraftReply, SentItem};
@@ -12,7 +12,7 @@ use teamcraft_proto::ConversationResponse;
 use crate::client::{reply_ref, stored_account_data};
 use crate::error::CoreError;
 use crate::records::{self, draft_reply_key};
-use crate::store::{LocalStore, MessageContent, MessageEdge, MessageFilter, StoredMessage, Table};
+use crate::store::{LocalStore, MessageContent, MessageEdge, StoredMessage, Table, UserLink};
 use crate::ui_actions::reply_preview;
 use crate::ui_activity::shorten;
 use crate::ui_backend::{CoreChatBackend, UnreadCounts};
@@ -147,20 +147,19 @@ impl<S: LocalStore> CoreChatBackend<S> {
     {
       return kept.items.clone();
     }
+    // The newest posts of the user through the store's index of them (issue #1790), not every
+    // message of the conversation.
     let me = self.me_id();
-    let mut newest: VecDeque<SentItem> = VecDeque::new();
-    let visited = self
-      .store_ref()
-      .visit_messages(conversation, MessageFilter::All, &mut |stored| {
-        if let Some(item) = sent_item(me, conversation, stored) {
-          if newest.len() == MAX_SENT {
-            newest.pop_front();
-          }
-          newest.push_back(item);
-        }
-      });
-    self.read(visited.map_err(CoreError::from));
-    let items: Vec<SentItem> = newest.into();
+    let posts = self.read(
+      self
+        .store_ref()
+        .user_messages(conversation, me, UserLink::Posted, MAX_SENT)
+        .map_err(CoreError::from),
+    );
+    let items: Vec<SentItem> = posts
+      .iter()
+      .filter_map(|stored| sent_item(me, conversation, stored))
+      .collect();
     if let Some(revision) = maybe_revision {
       self.sent.borrow_mut().insert(
         conversation,

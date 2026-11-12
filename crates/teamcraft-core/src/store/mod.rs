@@ -776,6 +776,16 @@ pub enum Attached {
   Link,
 }
 
+/// How a message links to a person, for [`LocalStore::user_messages`] (issue #1790).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UserLink {
+  /// A text that mentions them ([`StoredMessage::mentions_user`]): what "recent mentions" lists.
+  Mentioned,
+  /// A text or file they posted and the server took ([`StoredMessage::is_post`]): what the "sent"
+  /// list of Drafts & sent lists.
+  Posted,
+}
+
 /// Media types the image viewer shows: pictures and videos.
 const MEDIA_TYPE_PREFIXES: [&str; 2] = ["image/", "video/"];
 
@@ -1084,6 +1094,26 @@ pub trait LocalStore {
     })?;
     pinned.sort_by_key(StoredMessage::order);
     Ok(pinned)
+  }
+  /// The newest `limit` of `conversation`'s messages that `link` `user` ([`StoredMessage::links`]),
+  /// newest (last in display order) first: the mentions of the user, or their posts (issue #1790).
+  /// A store with an index of them reads only those; the default reads the conversation whole.
+  fn user_messages(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+    link: UserLink,
+    limit: usize,
+  ) -> Result<Vec<StoredMessage>, StoreError> {
+    let mut linked = Vec::new();
+    self.visit_messages(conversation, MessageFilter::All, &mut |message| {
+      if message.links(user, link) {
+        linked.push(message.clone());
+      }
+    })?;
+    linked.sort_by_key(|message| std::cmp::Reverse(message.order()));
+    linked.truncate(limit);
+    Ok(linked)
   }
   /// The reactions to any of `targets`, in display order (the latest of a person's counts).
   fn reactions_to(
@@ -1510,6 +1540,16 @@ macro_rules! forward_local_store {
         (**self).pinned_messages(conversation)
       }
 
+      fn user_messages(
+        &self,
+        conversation: ConversationId,
+        user: UserId,
+        link: UserLink,
+        limit: usize,
+      ) -> Result<Vec<StoredMessage>, StoreError> {
+        (**self).user_messages(conversation, user, link, limit)
+      }
+
       fn reactions_to(
         &self,
         conversation: ConversationId,
@@ -1746,6 +1786,44 @@ impl StoredMessage {
   /// ([`LocalStore::pinned_messages`]).
   pub fn is_shown_pin(&self) -> bool {
     self.is_pinned && !self.is_hidden()
+  }
+
+  /// A text that mentions `user`.
+  pub fn mentions_user(&self, user: UserId) -> bool {
+    matches!(&self.content, MessageContent::Text { mentions, .. } if mentions.contains(&user))
+  }
+
+  /// A text or file the server took (it has a server ID): what its sender's "sent" list can show.
+  pub fn is_post(&self) -> bool {
+    self.maybe_server_id.is_some()
+      && matches!(
+        self.content,
+        MessageContent::Text { .. } | MessageContent::File { .. }
+      )
+  }
+
+  /// Whether this message links to `user` as `link` ([`LocalStore::user_messages`]).
+  pub fn links(&self, user: UserId, link: UserLink) -> bool {
+    match link {
+      UserLink::Mentioned => self.mentions_user(user),
+      UserLink::Posted => self.is_post() && self.sender_user_id == user,
+    }
+  }
+
+  /// The people a stored index of [`UserLink`]s files this message under, each once.
+  pub(crate) fn linked_users(&self) -> Vec<(UserLink, UserId)> {
+    let mut linked = Vec::new();
+    if let MessageContent::Text { mentions, .. } = &self.content {
+      for user in mentions {
+        if !linked.contains(&(UserLink::Mentioned, *user)) {
+          linked.push((UserLink::Mentioned, *user));
+        }
+      }
+    }
+    if self.is_post() {
+      linked.push((UserLink::Posted, self.sender_user_id));
+    }
+    linked
   }
 
   /// A thread reply the sender also posted to the conversation.
@@ -2102,6 +2180,154 @@ pub(crate) mod tests {
     a_place_holds_its_message_and_lines_and_pending_ones_their_own(store);
     feed_reads_follow_every_write(store);
     pinned_messages_follow_every_write(store);
+    thread_and_user_reads_follow_every_write(store);
+  }
+
+  /// Issue #1790: a thread's read and the reads of a person's mentions and posts answer what a
+  /// whole read of the conversation says, through sends, edits that add or take mentions, deletes
+  /// (a placeholder and a deleted reply stay in the thread), removals and the conversation's
+  /// removal.
+  fn thread_and_user_reads_follow_every_write(store: &impl LocalStore) {
+    let conversation = id(80);
+    let other = id(81);
+    let (me, peer) = (id::<UserId>(1), id::<UserId>(2));
+    let thread = id::<ThreadId>(3_000);
+    let check = |conversation: ConversationId| {
+      let mut all = store.messages(conversation, MessageFilter::All).unwrap();
+      all.sort_by_key(StoredMessage::order);
+      let in_thread: Vec<StoredMessage> = all
+        .iter()
+        .filter(|message| message.matches(MessageFilter::Thread(thread)))
+        .cloned()
+        .collect();
+      assert_eq!(
+        store
+          .messages(conversation, MessageFilter::Thread(thread))
+          .unwrap(),
+        in_thread,
+        "the thread as a whole read finds it"
+      );
+      for user in [me, peer] {
+        for link in [UserLink::Mentioned, UserLink::Posted] {
+          let mut expected: Vec<StoredMessage> = all
+            .iter()
+            .filter(|message| message.links(user, link))
+            .cloned()
+            .collect();
+          expected.reverse();
+          assert_eq!(
+            store.user_messages(conversation, user, link, usize::MAX).unwrap(),
+            expected,
+            "{link:?} of {user} as a whole read finds them"
+          );
+          expected.truncate(2);
+          assert_eq!(
+            store.user_messages(conversation, user, link, 2).unwrap(),
+            expected,
+            "the newest {link:?} of {user}"
+          );
+        }
+      }
+      in_thread
+        .iter()
+        .map(|message| message.client_message_id)
+        .collect::<Vec<_>>()
+    };
+    let mentioning = |message: &mut StoredMessage, mentions: Vec<UserId>| {
+      message.content = MessageContent::Text {
+        body: "hey".into(),
+        mentions,
+        meta: Default::default(),
+      };
+    };
+    let mut root = message(conversation, 80, Some(3_000), None, 3_000);
+    let mut first = message(conversation, 81, Some(3_010), Some(3_000), 3_010);
+    mentioning(&mut first, vec![me, peer, me]);
+    let mut second = message(conversation, 82, Some(3_020), Some(3_000), 3_020);
+    second.sender_user_id = peer;
+    let mut placeholder = message(conversation, 83, Some(3_030), Some(3_000), 3_030);
+    placeholder.content = MessageContent::Unknown;
+    placeholder.maybe_unreadable = Some(Unreadable::Waiting { since_ms: 0 });
+    let mut reaction = message(conversation, 84, Some(3_040), Some(3_000), 3_040);
+    reaction.content = MessageContent::Reaction {
+      target: first.client_message_id,
+      emoji: "👍".into(),
+      is_added: true,
+      maybe_custom: None,
+    };
+    let mut pending = message(conversation, 85, None, Some(3_000), 9_000);
+    mentioning(&mut pending, vec![peer]);
+    let mut file = message(conversation, 86, Some(3_050), None, 3_050);
+    file.content = media_content("application/pdf");
+    let mut elsewhere = message(other, 87, Some(3_060), Some(3_000), 3_060);
+    mentioning(&mut elsewhere, vec![me]);
+    for stored in [
+      &root,
+      &first,
+      &second,
+      &placeholder,
+      &reaction,
+      &pending,
+      &file,
+      &elsewhere,
+    ] {
+      store.upsert_message(stored).unwrap();
+    }
+    assert_eq!(
+      check(conversation),
+      [
+        first.client_message_id,
+        second.client_message_id,
+        placeholder.client_message_id,
+        pending.client_message_id
+      ]
+    );
+    check(other);
+
+    // Sent: the pending reply is a post now. Edited: the root mentions somebody, the first reply
+    // no longer does. Deleted for everyone: the reply stays in the thread, but is no post.
+    pending.maybe_server_id = Some(id(3_070));
+    store.upsert_message(&pending).unwrap();
+    mentioning(&mut root, vec![peer]);
+    store.upsert_message(&root).unwrap();
+    mentioning(&mut first, Vec::new());
+    store.upsert_message(&first).unwrap();
+    second.content = MessageContent::Deleted;
+    store.upsert_message(&second).unwrap();
+    // Readable at last.
+    placeholder.maybe_unreadable = None;
+    mentioning(&mut placeholder, vec![me]);
+    store.upsert_message(&placeholder).unwrap();
+    assert_eq!(
+      check(conversation),
+      [
+        first.client_message_id,
+        second.client_message_id,
+        placeholder.client_message_id,
+        pending.client_message_id
+      ]
+    );
+
+    // Removed (expired), then the conversation goes: another conversation's stay.
+    store
+      .delete_message(conversation, placeholder.client_message_id)
+      .unwrap();
+    check(conversation);
+    store.delete_messages(conversation).unwrap();
+    assert!(check(conversation).is_empty());
+    for link in [UserLink::Mentioned, UserLink::Posted] {
+      assert!(
+        store
+          .user_messages(conversation, me, link, usize::MAX)
+          .unwrap()
+          .is_empty()
+      );
+    }
+    assert_eq!(
+      store.user_messages(other, me, UserLink::Mentioned, 10).unwrap(),
+      [elsewhere.clone()]
+    );
+    store.delete_messages(other).unwrap();
   }
 
   /// Issue #1757: the pinned panel's read answers what a whole read of the conversation says,
