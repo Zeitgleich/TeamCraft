@@ -253,6 +253,10 @@ impl LocalStore for LaneStore {
     self.reading().event_messages(conversation)
   }
 
+  fn pinned_messages(&self, conversation: ConversationId) -> Result<Vec<StoredMessage>, StoreError> {
+    self.reading().pinned_messages(conversation)
+  }
+
   fn reactions_to(
     &self,
     conversation: ConversationId,

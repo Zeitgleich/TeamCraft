@@ -50,6 +50,11 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     version: 5,
     kind: MigrationKind::Layout(migrate_to_v5),
   },
+  // Which messages the pinned panel lists, filled from the records (issue #1757).
+  Migration {
+    version: 6,
+    kind: MigrationKind::Layout(migrate_to_v6),
+  },
 ];
 /// How a message record spells the media type of a picture or a video (`AttachmentRef`, compact JSON):
 /// the bytes [`SqlCipherStore::attached_messages`] looks for.
@@ -57,6 +62,9 @@ const MEDIA_IMAGE_MARKER: &[u8] = br#""media_type":"image/"#;
 const MEDIA_VIDEO_MARKER: &[u8] = br#""media_type":"video/"#;
 /// How a message record spells any attachment (`AttachmentRef`, compact JSON).
 const ATTACHMENT_MARKER: &[u8] = br#""attachment_id":"#;
+/// How a message record spells a pinned message (`StoredMessage`, compact JSON): the bytes the
+/// layout step of version 6 looks for before it decodes a record.
+const PINNED_MARKER: &[u8] = br#""is_pinned":true"#;
 /// What every web link has ([`teamcraft_proto::web_links`]), in any case of its scheme.
 const LINK_MARKER: &[u8] = b"://";
 /// Rows an attachments query reads at a time at least.
@@ -88,6 +96,14 @@ const FEED_VERSIONS_V5: &str = "
     reshaped INTEGER NOT NULL DEFAULT 0,
     edited INTEGER NOT NULL DEFAULT 0
   );
+";
+/// Whether a message is a pin the pinned panel lists ([`StoredMessage::is_shown_pin`]), with a partial
+/// index in display order: the panel reads only the pinned messages, not the conversation (issue
+/// #1757). Written from the record like the feed's columns.
+const PINNED_COLUMN_V6: &str = "
+  ALTER TABLE messages ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;
+  CREATE INDEX messages_pinned ON messages (conversation_id, sort_group, sort_value, client_message_id)
+    WHERE is_pinned = 1;
 ";
 /// The feed's display order, ties broken as [`super::MessageOrder`] does.
 const FEED_ORDER: &str = "ORDER BY sort_group, sort_value, client_message_id";
@@ -127,6 +143,8 @@ struct FeedColumns {
   is_event: bool,
   maybe_reaction_target: Option<[u8; 16]>,
   is_reply: bool,
+  /// [`PINNED_COLUMN_V6`].
+  is_pinned: bool,
 }
 
 /// The connection and the group of writes open on it: one lock, so a write and the group it joins
@@ -349,14 +367,15 @@ impl LocalStore for SqlCipherStore {
       connection.execute(
         "INSERT INTO messages
            (conversation_id, client_message_id, sort_group, sort_value, thread_id, is_hidden, in_channel, record,
-            is_feed_row, is_event, reaction_target, is_reply)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            is_feed_row, is_event, reaction_target, is_reply, is_pinned)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
          ON CONFLICT (conversation_id, client_message_id) DO UPDATE SET
            sort_group = excluded.sort_group, sort_value = excluded.sort_value,
            thread_id = excluded.thread_id, is_hidden = excluded.is_hidden,
            in_channel = excluded.in_channel, record = excluded.record,
            is_feed_row = excluded.is_feed_row, is_event = excluded.is_event,
-           reaction_target = excluded.reaction_target, is_reply = excluded.is_reply",
+           reaction_target = excluded.reaction_target, is_reply = excluded.is_reply,
+           is_pinned = excluded.is_pinned",
         params![
           message.conversation_id.snowflake().get(),
           message.client_message_id.as_bytes().as_slice(),
@@ -370,6 +389,7 @@ impl LocalStore for SqlCipherStore {
           feed.is_event,
           feed.maybe_reaction_target.as_ref().map(<[u8; 16]>::as_slice),
           feed.is_reply,
+          feed.is_pinned,
         ],
       )
     })
@@ -702,6 +722,30 @@ impl LocalStore for SqlCipherStore {
     records.iter().map(|record| decode_message(record)).collect()
   }
 
+  /// The pinned index's rows only. The column preselects; the record decides, as for the feed.
+  fn pinned_messages(&self, conversation: ConversationId) -> Result<Vec<StoredMessage>, StoreError> {
+    let inner = self.lock();
+    let records: Vec<Vec<u8>> = inner
+      .connection
+      .prepare_cached(&format!(
+        "SELECT record FROM messages WHERE conversation_id = ?1 AND is_pinned = 1 {FEED_ORDER}"
+      ))
+      .and_then(|mut statement| {
+        statement
+          .query_map(params![conversation.snowflake().get()], |row| row.get(0))?
+          .collect()
+      })
+      .map_err(database_error)?;
+    let mut pinned = Vec::with_capacity(records.len());
+    for record in &records {
+      let message = decode_message(record)?;
+      if message.is_shown_pin() {
+        pinned.push(message);
+      }
+    }
+    Ok(pinned)
+  }
+
   fn reactions_to(
     &self,
     conversation: ConversationId,
@@ -912,6 +956,31 @@ fn migrate_to_v5(connection: &Connection) -> Result<(), StoreError> {
   connection.execute_batch(FEED_VERSIONS_V5).map_err(database_error)
 }
 
+/// Version 6: the pinned column and its index (issue #1757), set from the records of the pinned
+/// messages. Only records whose bytes say they are pinned are decoded, and the record decides; one
+/// that doesn't decode stays unpinned, as for the feed's columns.
+fn migrate_to_v6(connection: &Connection) -> Result<(), StoreError> {
+  let _step = crate::timing::step("sqlite_migrate");
+  connection
+    .execute_batch(PINNED_COLUMN_V6)
+    .map_err(database_error)?;
+  let mut select = connection
+    .prepare("SELECT rowid, record FROM messages WHERE instr(record, ?1) > 0")
+    .map_err(database_error)?;
+  let mut update = connection
+    .prepare("UPDATE messages SET is_pinned = 1 WHERE rowid = ?1")
+    .map_err(database_error)?;
+  let mut rows = select.query(params![PINNED_MARKER]).map_err(database_error)?;
+  while let Some(row) = rows.next().map_err(database_error)? {
+    let rowid: i64 = row.get(0).map_err(database_error)?;
+    let record: Vec<u8> = row.get(1).map_err(database_error)?;
+    if decode_message(&record).is_ok_and(|message| message.is_shown_pin()) {
+      update.execute(params![rowid]).map_err(database_error)?;
+    }
+  }
+  Ok(())
+}
+
 /// Counts what replacing the stored message with `maybe_new` (`None`: removing it) changes of the
 /// feed. Before the write it counts: a crash between the two only makes a reader count again. A
 /// record that doesn't decode counts as a change, whatever it was.
@@ -1014,6 +1083,7 @@ impl FeedColumns {
       is_event: message.is_event(),
       maybe_reaction_target: message.relation_target().map(|target| *target.as_bytes()),
       is_reply: message.counts_as_reply(),
+      is_pinned: message.is_shown_pin(),
     }
   }
 }
@@ -1341,6 +1411,78 @@ mod tests {
       vec![reaction]
     );
     assert_eq!(store.reply_counts(conversation, &[id(100)]).unwrap(), [1]);
+    drop(store);
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  /// Issue #1757: a database from before the pinned column gets it, filled from its records, and
+  /// the pinned panel's read finds the pins made before the upgrade (a body that only spells a pin
+  /// is none).
+  #[test]
+  fn a_database_before_the_pinned_column_has_it_filled() {
+    use crate::store::MessageContent;
+    use crate::store::tests::{id, message};
+
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let key = SymmetricKey::generate(&mut OsRng);
+    let conversation = id(6);
+    let mut pinned = message(conversation, 1, Some(100), None, 1);
+    pinned.is_pinned = true;
+    let mut spelled = message(conversation, 2, Some(110), None, 2);
+    spelled.content = MessageContent::Text {
+      body: r#"{"is_pinned":true}"#.into(),
+      mentions: Vec::new(),
+      meta: Default::default(),
+    };
+    let mut control = message(conversation, 3, Some(120), None, 3);
+    control.content = MessageContent::Pin {
+      target: pinned.client_message_id,
+      is_pinned: true,
+    };
+    control.is_pinned = true;
+    let mut pending = message(conversation, 4, None, None, 4);
+    pending.is_pinned = true;
+    {
+      let connection = Connection::open(&path).unwrap();
+      keyed(&connection, &key);
+      run_migrations(&connection, &MIGRATIONS[..5]).unwrap();
+      for stored in [&pinned, &spelled, &control, &pending] {
+        let (sort_group, sort_value) = stored.sort_key();
+        connection
+          .execute(
+            "INSERT INTO messages
+               (conversation_id, client_message_id, sort_group, sort_value, thread_id, is_hidden, in_channel, record)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
+            params![
+              conversation.snowflake().get(),
+              stored.client_message_id.as_bytes().as_slice(),
+              sort_group,
+              sort_value,
+              stored.maybe_thread_id.map(|thread| thread.snowflake().get()),
+              stored.is_hidden(),
+              serde_json::to_vec(stored).unwrap(),
+            ],
+          )
+          .unwrap();
+      }
+    }
+    let store = SqlCipherStore::open(&path, &StaticKeySource::new(key)).unwrap();
+    assert_eq!(
+      store.pinned_messages(conversation).unwrap(),
+      vec![pinned.clone(), pending]
+    );
+    let marked: i64 = store
+      .lock()
+      .connection
+      .query_row("SELECT count(*) FROM messages WHERE is_pinned = 1", [], |row| {
+        row.get(0)
+      })
+      .unwrap();
+    assert_eq!(marked, 2, "only the shown pins are marked");
+    pinned.is_pinned = false;
+    store.upsert_message(&pinned).unwrap();
+    assert_eq!(store.pinned_messages(conversation).unwrap().len(), 1);
     drop(store);
     std::fs::remove_dir_all(&directory).unwrap();
   }

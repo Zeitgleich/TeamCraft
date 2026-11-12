@@ -1072,6 +1072,19 @@ pub trait LocalStore {
     events.sort_by_key(StoredMessage::order);
     Ok(events)
   }
+  /// `conversation`'s pinned messages ([`StoredMessage::is_shown_pin`]), in display order: what the
+  /// pinned panel lists (issue #1757). A store with an index of them reads only those, kept up to
+  /// date by every write of a message; the default reads the conversation whole.
+  fn pinned_messages(&self, conversation: ConversationId) -> Result<Vec<StoredMessage>, StoreError> {
+    let mut pinned = Vec::new();
+    self.visit_messages(conversation, MessageFilter::All, &mut |message| {
+      if message.is_shown_pin() {
+        pinned.push(message.clone());
+      }
+    })?;
+    pinned.sort_by_key(StoredMessage::order);
+    Ok(pinned)
+  }
   /// The reactions to any of `targets`, in display order (the latest of a person's counts).
   fn reactions_to(
     &self,
@@ -1493,6 +1506,10 @@ macro_rules! forward_local_store {
         (**self).event_messages(conversation)
       }
 
+      fn pinned_messages(&self, conversation: ConversationId) -> Result<Vec<StoredMessage>, StoreError> {
+        (**self).pinned_messages(conversation)
+      }
+
       fn reactions_to(
         &self,
         conversation: ConversationId,
@@ -1723,6 +1740,12 @@ impl StoredMessage {
           | MessageContent::ChannelRolesEntry { .. }
       ),
     }
+  }
+
+  /// A pinned message the conversation shows: what the pinned panel lists
+  /// ([`LocalStore::pinned_messages`]).
+  pub fn is_shown_pin(&self) -> bool {
+    self.is_pinned && !self.is_hidden()
   }
 
   /// A thread reply the sender also posted to the conversation.
@@ -2078,6 +2101,101 @@ pub(crate) mod tests {
     prefixes_list_only_their_keys(store);
     a_place_holds_its_message_and_lines_and_pending_ones_their_own(store);
     feed_reads_follow_every_write(store);
+    pinned_messages_follow_every_write(store);
+  }
+
+  /// Issue #1757: the pinned panel's read answers what a whole read of the conversation says,
+  /// through pins and unpins (local or synced: both are writes of the message), a pending message
+  /// that was sent, an edit, a delete and an expiry (the message rewritten or removed), and the
+  /// conversation's removal.
+  fn pinned_messages_follow_every_write(store: &impl LocalStore) {
+    let conversation = id(70);
+    let other = id(71);
+    let pinned_ids = |conversation| -> Vec<ClientMessageId> {
+      let pinned = store.pinned_messages(conversation).unwrap();
+      let mut all = store.messages(conversation, MessageFilter::All).unwrap();
+      all.sort_by_key(StoredMessage::order);
+      let expected: Vec<StoredMessage> = all.into_iter().filter(StoredMessage::is_shown_pin).collect();
+      assert_eq!(pinned, expected, "as a whole read finds them");
+      pinned.iter().map(|message| message.client_message_id).collect()
+    };
+    let mut pending = message(conversation, 71, None, None, 9_000);
+    let mut first = message(conversation, 72, Some(2_000), None, 2_000);
+    let mut second = message(conversation, 73, Some(2_100), None, 2_100);
+    let mut reply = message(conversation, 74, Some(2_200), Some(2_000), 2_200);
+    let plain = message(conversation, 75, Some(2_300), None, 2_300);
+    // A pin that is itself hidden (a control message) is no pin of the panel.
+    let mut control = message(conversation, 76, Some(2_400), None, 2_400);
+    control.content = MessageContent::Pin {
+      target: first.client_message_id,
+      is_pinned: true,
+    };
+    control.is_pinned = true;
+    let mut elsewhere = message(other, 77, Some(2_500), None, 2_500);
+    elsewhere.is_pinned = true;
+    for stored in [&pending, &first, &second, &reply, &plain, &control, &elsewhere] {
+      store.upsert_message(stored).unwrap();
+    }
+    assert!(pinned_ids(conversation).is_empty());
+    assert_eq!(pinned_ids(other), [elsewhere.client_message_id]);
+
+    // Pinned out of display order, a pending message and a thread reply among them.
+    for stored in [&mut second, &mut first, &mut pending, &mut reply] {
+      stored.is_pinned = true;
+      store.upsert_message(stored).unwrap();
+    }
+    assert_eq!(
+      pinned_ids(conversation),
+      [
+        first.client_message_id,
+        second.client_message_id,
+        reply.client_message_id,
+        pending.client_message_id
+      ]
+    );
+
+    // Sent: the pending one moves to its server ID and stays pinned.
+    pending.maybe_server_id = Some(id(2_050));
+    store.upsert_message(&pending).unwrap();
+    // Edited: still pinned.
+    first.content = MessageContent::Text {
+      body: "edited".into(),
+      mentions: Vec::new(),
+      meta: Default::default(),
+    };
+    store.upsert_message(&first).unwrap();
+    // Unpinned.
+    second.is_pinned = false;
+    store.upsert_message(&second).unwrap();
+    assert_eq!(
+      pinned_ids(conversation),
+      [
+        first.client_message_id,
+        pending.client_message_id,
+        reply.client_message_id
+      ]
+    );
+
+    // Deleted for everyone: what the record says decides, as a whole read does.
+    reply.content = MessageContent::Deleted;
+    store.upsert_message(&reply).unwrap();
+    pinned_ids(conversation);
+    // Removed (expired, or dropped from the outbox).
+    store
+      .delete_message(conversation, first.client_message_id)
+      .unwrap();
+    assert!(
+      !pinned_ids(conversation).contains(&first.client_message_id),
+      "a removed message is no pin"
+    );
+
+    // The conversation goes: none of its pins stay, another conversation's do.
+    store.delete_messages(conversation).unwrap();
+    assert!(store.pinned_messages(conversation).unwrap().is_empty());
+    assert_eq!(pinned_ids(other), [elsewhere.client_message_id]);
+    store.upsert_message(&plain).unwrap();
+    assert!(pinned_ids(conversation).is_empty(), "nothing comes back");
+    store.delete_messages(other).unwrap();
   }
 
   /// Issue #155: the feed reads answer what a whole read of the conversation says, through sends,
