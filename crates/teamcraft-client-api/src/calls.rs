@@ -732,6 +732,10 @@ pub struct ActiveCall {
   /// quality may be lower.
   #[serde(default)]
   pub is_on_limited_network: bool,
+  /// This device can't decode all the video it receives (#1762): it asks for lower layers, and
+  /// the UI says the computer is busy. A calm hint, not an error.
+  #[serde(default)]
+  pub is_video_limited_by_device: bool,
   /// Somebody added people to this DM call: it moved into this meeting chat, and the UI switches
   /// over to its call (docs/meetings.md, "A call becomes a meeting").
   #[serde(default, skip_serializing_if = "Option::is_none")]

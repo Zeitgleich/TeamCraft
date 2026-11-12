@@ -237,6 +237,9 @@ pub(super) trait FrameDecoder {
   fn codec(&self) -> &VideoCodec;
   /// Whether it takes frames: WebCodecs closes a decoder for good after an error.
   fn is_configured(&self) -> bool;
+  /// Frames waiting to be decoded (#1762): a decoder that keeps up has taken the last one by the
+  /// time the next comes.
+  fn queue_size(&self) -> u32;
   fn decode(&self, frame: &ReceivedVideoFrame) -> Result<(), WebCallError>;
 }
 
@@ -1228,6 +1231,20 @@ impl<D: FrameDecoder> VideoView<D> {
     Ok(())
   }
 
+  /// Frames waiting in the decoder; none without one.
+  pub fn queue_size(&self) -> u32 {
+    self
+      .maybe_decoder
+      .as_ref()
+      .map_or(0, |open| open.decoder.queue_size())
+  }
+
+  /// Closes the decoder of a tile nobody sees (#1762): no work for a picture nobody watches. The
+  /// next keyframe opens a new one.
+  pub fn close(&mut self) {
+    self.maybe_decoder = None;
+  }
+
   /// WebCodecs reported a decoder's failure. Returns whether it was the current decoder, which is
   /// dropped then (the caller asks for a keyframe); the report of a decoder already replaced is
   /// stale.
@@ -1337,6 +1354,10 @@ impl FrameDecoder for Decoder {
 
   fn is_configured(&self) -> bool {
     self.decoder.state() == CONFIGURED
+  }
+
+  fn queue_size(&self) -> u32 {
+    self.decoder.decode_queue_size()
   }
 
   fn decode(&self, frame: &ReceivedVideoFrame) -> Result<(), WebCallError> {
@@ -2721,6 +2742,10 @@ mod tests {
 
     fn is_configured(&self) -> bool {
       !self.bench.borrow().closed.contains(&self.generation)
+    }
+
+    fn queue_size(&self) -> u32 {
+      0
     }
 
     fn decode(&self, frame: &ReceivedVideoFrame) -> Result<(), WebCallError> {

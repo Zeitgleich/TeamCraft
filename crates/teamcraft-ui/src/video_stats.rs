@@ -6,8 +6,8 @@
 use std::time::Duration;
 
 use teamcraft_client_api::video_stats::{
-  CameraLimitsStats, EncoderImplementation, EncoderOverload, ReceivedVideoStats, SentVideoStats, VideoSize,
-  VideoStatsReport,
+  CameraLimitsStats, DecodeOverload, EncoderImplementation, EncoderOverload, ReceivedVideoStats,
+  SentVideoStats, VideoSize, VideoStatsReport,
 };
 use teamcraft_proto::{MediaStreamId, VideoCodec, VideoTrackKind};
 
@@ -411,7 +411,30 @@ fn received_rows(
         ],
       ),
     ),
+    row("stats-decoding", decoding_text(received, words)),
   ]
+}
+
+/// The decoder's queue, and whether this device holds the track back for its own load (#1762):
+/// "limited by this device" tells a busy machine from a weak link.
+fn decoding_text(received: &ReceivedVideoStats, words: Words<'_>) -> String {
+  let queue = or_missing(received.maybe_decode_queue.map(|queue| queue.to_string()));
+  let Some(limit) = received.maybe_device_limit else {
+    return words("stats-value-decoding", &[("queue", &queue)]);
+  };
+  let reason = match limit.maybe_reason {
+    Some(DecodeOverload::QueuedFrames) => words("stats-decode-queued", &[]),
+    Some(DecodeOverload::LateFrames) => words("stats-decode-late", &[]),
+    Some(DecodeOverload::Unknown) | None => MISSING.to_owned(),
+  };
+  words(
+    "stats-value-decoding-limited",
+    &[
+      ("queue", &queue),
+      ("reason", &reason),
+      ("layer", &limit.layer.to_string()),
+    ],
+  )
 }
 
 fn row(label_key: &'static str, value: String) -> StatsRow {
@@ -478,7 +501,8 @@ fn layer_list(layers: impl Iterator<Item = u8>) -> String {
 #[cfg(test)]
 mod tests {
   use teamcraft_client_api::video_stats::{
-    LayerLimitStats, OfferedLayer, SentLayerStats, UplinkStats, VideoEncoderInfo, VideoTrackStats,
+    DeviceLimitStats, LayerLimitStats, OfferedLayer, SentLayerStats, UplinkStats, VideoEncoderInfo,
+    VideoTrackStats,
   };
 
   use super::*;
@@ -578,6 +602,31 @@ mod tests {
       assert_eq!(value(&rows, "stats-loss"), "1.0 %");
       assert_eq!(value(&rows, "stats-network"), "RTT 34 ms · jitter 4.5 ms");
       assert_eq!(value(&rows, "stats-frames"), "dropped 3 · black –");
+    }
+
+    /// #1762: a busy device says it holds the track back itself, so it isn't taken for a weak
+    /// link.
+    #[test]
+    fn a_received_track_held_back_by_this_device_says_so() {
+      let mut window = StatsWindow::default();
+      let limited = ReceivedVideoStats {
+        maybe_decode_queue: Some(5),
+        maybe_device_limit: Some(DeviceLimitStats {
+          layer: 0,
+          maybe_reason: Some(DecodeOverload::QueuedFrames),
+        }),
+        ..received(1_000, 300, 0, 100)
+      };
+      window.push(report(1_000, None, Some(limited)));
+      let rows = english(&window, StatsTarget::Received(REMOTE));
+      assert_eq!(
+        value(&rows, "stats-decoding"),
+        "queue 5 · limited by this device (frames queued): layer ≤ 0"
+      );
+      let mut window = StatsWindow::default();
+      window.push(report(1_000, None, Some(received(1_000, 300, 0, 100))));
+      let rows = english(&window, StatsTarget::Received(REMOTE));
+      assert_eq!(value(&rows, "stats-decoding"), "queue –");
     }
 
     /// #1719: a track that got no packet between two reports has no loss to show, not 0 %.
@@ -858,6 +907,8 @@ mod tests {
       keyframe_requests: 0,
       maybe_longest_gap_ms: None,
       maybe_max_framerate: None,
+      maybe_decode_queue: None,
+      maybe_device_limit: None,
     }
   }
 

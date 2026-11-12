@@ -32,6 +32,7 @@ pub mod picture_check;
 pub mod playback_gstreamer;
 #[cfg(feature = "quic-send")]
 pub mod quic_send;
+pub mod receive_load;
 pub mod resample;
 pub mod ringtone;
 pub mod rtp;

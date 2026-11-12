@@ -753,6 +753,37 @@ The stats overlay shows what holds the camera back ("Held back"). Every threshol
 per encoded picture, plus a deque of at most one window of picture sizes per layer. The budgets
 above don't change.
 
+### A receiver that can't decode what it gets (issue #1762)
+
+The other side of the same tests: a loaded Windows VM showed "dropped 700" on a received share.
+Its decoders fell behind, frames piled up in them, and the SFU went on sending the top layer
+because nobody upstream knew. The picture froze and stuttered, and part of the "loss" in the
+stats came from the page's own receive path, not from the link.
+
+The browser's receive side is governed now (`receive_load.rs`, wired in `call_web.rs`), with the
+camera's judge (`EncoderLoad`) and its timings:
+
+- **Signals, all of this device:** frames waiting in a decoder (WebCodecs `decodeQueueSize`,
+  overloaded at 1 on average over a 2 s window), and frames that reach the decoder late, measured
+  from the moment the datagram that completed them was read (overloaded past 0.9 of the frame
+  interval). A frame that waited for a resent packet isn't late: its lateness starts when that
+  packet came.
+- **Step down:** one layer of one stream per step, the least important first: the smallest camera
+  tile, then larger ones, a screen share last. Through the same `Subscribe { max_layer }` the
+  tiles' sizes use; the SFU sends the lower layer from its next keyframe.
+- **Recovery:** back up in reverse order after 10 s of calm; a step up undone within 10 s doubles
+  the wait, up to 2 min.
+- **Not the network:** datagrams carry the time they were read into the call's loop, and the
+  transport feedback reports that, so a busy loop's backlog doesn't read as a congested downlink.
+  The step down only changes what this device asks for: senders and other receivers keep theirs.
+- **Hidden tiles:** a tile laid out at zero size decodes nothing (its decoder closes) and asks for
+  a keyframe when it shows again.
+
+The call says "Your computer is busy: video quality reduced" while it holds video back, and the
+stats overlay shows the decoder's queue and "limited by this device". Cost on the hot path: one
+`decodeQueueSize` read and a few additions per received frame, and a short list of the watched
+tiles per 100 ms timer tick (a sort of them every 2 s). The desktop's native decoders aren't governed yet.
+
 ### Each picture with its own frame (issue #990)
 
 The first VideoToolbox session of a process takes 55 to 71 ms for its first picture (a 1440p or

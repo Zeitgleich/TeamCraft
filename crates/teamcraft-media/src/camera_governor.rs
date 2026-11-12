@@ -374,6 +374,13 @@ impl EncoderLoad {
     self.level
   }
 
+  /// The ladder changed length (a receiver's ladder grows and shrinks with the streams it
+  /// watches): the level stays, but never past the new last one.
+  pub fn set_level_count(&mut self, level_count: usize) {
+    self.level_count = level_count.max(1);
+    self.level = self.level.min(self.level_count - 1);
+  }
+
   /// Why the encoders were last found overloaded, while below the plan.
   pub fn maybe_reason(&self) -> Option<OverloadReason> {
     self.maybe_reason.filter(|_| self.level > 0)

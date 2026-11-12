@@ -230,6 +230,10 @@ pub enum CallEngineEvent {
   /// Not from the engine but from the media driver: what carries the call to the SFU, at the start
   /// and after a rejoin. The UI says when it is the fallback (ARCHITECTURE.md §6.6).
   TransportChanged(CallTransport),
+  /// Not from the engine but from the media driver: this device can't decode all the video it
+  /// receives and asks for lower layers than its tiles want (#1762); `false` once it is back to
+  /// what they want. The UI says the computer is busy.
+  DecodeLimited(bool),
   /// Another device's connection was lost; it keeps its place while it reconnects.
   ParticipantReconnecting(DeviceId),
   ParticipantReconnected(DeviceId),
@@ -918,7 +922,9 @@ impl CallEngine {
     }
   }
 
-  /// Handles one received datagram (decrypts audio for [`CallEngineEvent::AudioFrame`]).
+  /// Handles one received datagram (decrypts audio for [`CallEngineEvent::AudioFrame`]). `now`
+  /// is when it arrived: a driver whose loop runs behind passes the time it read the datagram,
+  /// so the transport feedback reports the network's delay and not this device's (#1762).
   pub fn handle_datagram(&mut self, bytes: &[u8], now: Instant) {
     if let Err(error) = self.receive_datagram(bytes, now) {
       debug!(%error, "dropping datagram");
@@ -1281,6 +1287,9 @@ impl CallEngine {
             .find(|info| info.layer == layer.value())
             .map(|info| info.max_framerate)
         }),
+        // The driver's decoders: it adds what it knows of them.
+        maybe_decode_queue: None,
+        maybe_device_limit: None,
       })
     });
     VideoStatsReport {
@@ -4141,6 +4150,38 @@ mod tests {
         bob.poll_output(),
         Some(EngineOutput::Signal(CallClientMessage::TransportFeedback { .. }))
       ));
+    }
+
+    /// #1762: a busy receiver's loop gets to its datagrams late and in a bunch. The feedback
+    /// reports them as they arrived (the time the driver passes), so the SFU's estimate of the
+    /// downlink doesn't read this device's load as a congested link.
+    #[test]
+    fn transport_feedback_reports_arrival_not_when_the_loop_got_to_it() {
+      let start = Instant::now();
+      let (mut alice, mut bob) = secured_pair(start);
+      let mut datagrams = Vec::new();
+      for _ in 0..3 {
+        alice.send_audio(&frame(), start);
+        datagrams.push(take_datagram(&mut alice));
+      }
+      // Read 20 ms apart, handled together 300 ms later.
+      for (index, datagram) in datagrams.iter().enumerate() {
+        bob.handle_datagram(datagram, start + Duration::from_millis(20 * index as u64));
+      }
+      drain(&mut bob);
+      bob.on_timer(start + Duration::from_millis(300));
+      let arrivals: Vec<u64> = std::iter::from_fn(|| bob.poll_output())
+        .find_map(|output| match output {
+          EngineOutput::Signal(CallClientMessage::TransportFeedback { feedback }) => Some(feedback),
+          _ => None,
+        })
+        .expect("transport feedback")
+        .arrivals_us
+        .into_iter()
+        .flatten()
+        .collect();
+      let gaps: Vec<u64> = arrivals.windows(2).map(|pair| pair[1] - pair[0]).collect();
+      assert_eq!(gaps, vec![20_000, 20_000]);
     }
 
     /// #994: the SFU probes a receiver's downlink with padding on a stream it never assigns; the
