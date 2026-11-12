@@ -837,7 +837,7 @@ Settings → Chats).
   loss don't count as congestion. Receivers that send no feedback switch up as before. After
   (`weak_downlink`, laptop): every frame 180p, longest gap 150–200 ms (8 runs in parallel). On
   the simulated LTE link of `ltevary.sh` (2–3.5 Mbit/s swinging, 25 Mbit/s for a minute) a 1440p
-  share's viewer gets the top layer 1.7 s after the room appears and is back on 720p 0.6 s after
+  share's viewer gets the top layer 1.8 s after the room appears and is back on 720p 0.6 s after
   it goes (`a_viewer_on_lte_follows_the_link_within_seconds`).
 
   Measured (`bandwidth_limits` in the SFU's test suite: real SFU, a 720p camera with sensor noise,
