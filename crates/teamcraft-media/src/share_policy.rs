@@ -1162,7 +1162,10 @@ mod tests {
         frame_interval: Duration::from_millis(33),
         ..FrameTally::default()
       };
+      // Within the frame interval: a second window decides (#1792).
       let now = window(&mut governor, start, slow);
+      assert_eq!(governor.evaluate(now), None);
+      let now = window(&mut governor, now, slow);
       assert_eq!(governor.evaluate(now), Some(1));
       assert_eq!(governor.step().top_framerate, 20);
       assert_eq!(governor.limits().maybe_reason, Some(OverloadReason::SlowEncoding));

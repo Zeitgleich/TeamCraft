@@ -756,7 +756,11 @@ shares are not, #1733):
   in the queues on average, the camera's capture drops to ⅔ and then ½ of its frame rate (not
   below 10 fps). After that, the top layers are left out one at a time (`CallEngine::limit_own_layers`).
   Receivers move down as they do when the uplink pauses a layer. Frame rate goes first because it
-  also saves capture and background-effect work.
+  also saves capture and background-effect work. A window past a threshold by less than twice it
+  (and with encoding within the frame interval) steps down only when the window before was
+  overloaded too (#1792): the keyframes of a layer switch fill a queue for a moment, and one such
+  window (a decoder queue of 1.5 at a join) sent a viewer to 480p, where failed step ups held it
+  for minutes.
 - **Recovery:** both step back up in reverse order after two calm 2 s windows in a row (about
   4 s). A layer climbs only when its output, scaled to the next step, stays
   under 1.25× its bitrate. A step up that is undone within 5 s doubles the wait for the next, up
@@ -779,7 +783,7 @@ The browser's receive side is governed now (`receive_load.rs`, wired in `call_we
 camera's judge (`EncoderLoad`) and its timings:
 
 - **Signals, all of this device:** frames waiting in a decoder (WebCodecs `decodeQueueSize`,
-  overloaded at 1 on average over a 2 s window), and frames that reach the decoder late, measured
+  overloaded at 1 on average over two 2 s windows in a row, or at 2 over one), and frames that reach the decoder late, measured
   from the moment the datagram that completed them was read (overloaded past 0.9 of the frame
   interval). A frame that waited for a resent packet isn't late: its lateness starts when that
   packet came.
