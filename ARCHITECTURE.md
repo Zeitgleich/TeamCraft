@@ -474,8 +474,9 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
   uplink carried it whole for 10 s. A change of size, codec or layer count publishes the share
   anew (viewers switch with a keyframe); a frame rate change reconfigures the encoders in place.
   The overlay's "Share policy" row says why the layers are what they are. The desktop's own
-  encoders plan the same layers in H.264 and follow the uplink's bitrate; a CPU ladder for them
-  is a follow-up (#1777).
+  encoders plan the same layers in H.264 and send them whole or not at all: each rate change
+  rebuilds them with a keyframe, and a share's keyframe per step into a congested uplink lost
+  slides (`screen_uplink_bursts`). A CPU ladder for them is a follow-up (#1777).
 - **Layer codecs** (#1733): a layer may name a codec other than its track's
   (`VideoLayerInfo::maybe_codec`); the track's codec is its lowest layer's. Clients whose engine
   reads layer codecs say so with `join` (`MediaCapabilities::video_features`: `layer_codecs`;

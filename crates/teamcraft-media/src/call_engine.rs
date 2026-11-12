@@ -48,7 +48,7 @@ use crate::dave::{
 use crate::nack::NackConfig;
 use crate::rtp::{PayloadType, RtpHeader, RtpPacket, RtpTimestamp, SequenceNumber, Ssrc};
 use crate::share_policy::UplinkTop;
-use crate::uplink_layers::{OwnTrack, UplinkLayers, UplinkPolicy, probe_demand_bps};
+use crate::uplink_layers::{Adaptation, OwnTrack, UplinkLayers, UplinkPolicy, probe_demand_bps};
 use crate::video::EncodedVideoFrame;
 
 /// How many retired call keys an engine remembers (e2ee.md §8); the oldest goes first. A call with
@@ -103,7 +103,7 @@ pub struct CallEngine {
   uplink_layers: UplinkLayers,
   /// Own tracks whose encoders follow the uplink's bitrate per layer
   /// ([`CallEngine::publish_adaptive_video`]).
-  adaptive_tracks: HashSet<StreamId>,
+  adaptive_tracks: HashMap<StreamId, Adaptation>,
   /// Bitrates per layer the driver was last told to encode adaptive own tracks at (it starts
   /// with the layers' own).
   bitrates_announced: HashMap<StreamId, Vec<(u8, u32)>>,
@@ -492,7 +492,7 @@ struct PendingPublication {
   /// sender and is unpublished at once (#929).
   is_withdrawn: bool,
   /// The driver's encoders follow [`CallEngineEvent::LayerBitrates`].
-  adapts_bitrate: bool,
+  adaptation: Adaptation,
 }
 
 /// A prepared DAVE transition waiting for [`CallEvent::DaveExecuteTransition`].
@@ -575,7 +575,7 @@ impl CallEngine {
       sfu_layers: HashMap::new(),
       sent_layers: HashMap::new(),
       uplink_layers,
-      adaptive_tracks: HashSet::new(),
+      adaptive_tracks: HashMap::new(),
       bitrates_announced: HashMap::new(),
       uplink_announced: HashMap::new(),
       encoder_top_layers: HashMap::new(),
@@ -1037,13 +1037,13 @@ impl CallEngine {
     codec: VideoCodec,
     layers: Vec<VideoLayerInfo>,
   ) {
-    self.publish(publication, kind, codec, layers, false);
+    self.publish(publication, kind, codec, layers, Adaptation::Whole);
   }
 
-  /// [`Self::publish_video`] for a track whose encoders follow [`CallEngineEvent::LayerBitrates`]:
-  /// a camera's top sent layer is then encoded at less than its bitrate on a limited uplink,
-  /// before it stops and the picture drops to the next lower layer (#939). Other kinds are sent
-  /// as by [`Self::publish_video`].
+  /// [`Self::publish_video`] for a track whose encoders are rebuilt at the bitrates of
+  /// [`CallEngineEvent::LayerBitrates`] (the desktop's): a camera's top sent layer is then encoded
+  /// at less than its bitrate on a limited uplink, before it stops and the picture drops to the
+  /// next lower layer (#939). Other kinds are sent as by [`Self::publish_video`].
   pub fn publish_adaptive_video(
     &mut self,
     publication: VideoPublicationId,
@@ -1051,7 +1051,20 @@ impl CallEngine {
     codec: VideoCodec,
     layers: Vec<VideoLayerInfo>,
   ) {
-    self.publish(publication, kind, codec, layers, true);
+    self.publish(publication, kind, codec, layers, Adaptation::Rebuilt);
+  }
+
+  /// [`Self::publish_adaptive_video`] for a track whose encoders change their rate in place (the
+  /// browser's WebCodecs): a screen share's top layer then also steps through shares of its
+  /// bitrate, at a lower frame rate, before it stops (#1733).
+  pub fn publish_video_adapting_in_place(
+    &mut self,
+    publication: VideoPublicationId,
+    kind: VideoTrackKind,
+    codec: VideoCodec,
+    layers: Vec<VideoLayerInfo>,
+  ) {
+    self.publish(publication, kind, codec, layers, Adaptation::InPlace);
   }
 
   fn publish(
@@ -1060,7 +1073,7 @@ impl CallEngine {
     kind: VideoTrackKind,
     codec: VideoCodec,
     layers: Vec<VideoLayerInfo>,
-    adapts_bitrate: bool,
+    adaptation: Adaptation,
   ) {
     let is_in_use = self
       .pending_publications
@@ -1077,7 +1090,7 @@ impl CallEngine {
       codec,
       layers,
       is_withdrawn: false,
-      adapts_bitrate,
+      adaptation,
     });
   }
 
@@ -1786,7 +1799,11 @@ impl CallEngine {
       .collect();
     lost.sort_by_key(|(id, _)| *id);
     for (id, track) in lost {
-      let adapts_bitrate = self.adaptive_tracks.contains(&StreamId(track.stream_id.0));
+      let adaptation = self
+        .adaptive_tracks
+        .get(&StreamId(track.stream_id.0))
+        .copied()
+        .unwrap_or(Adaptation::Whole);
       self.forget_own_track(StreamId(track.stream_id.0));
       self.event(CallEngineEvent::VideoUnpublished(track.stream_id));
       self.request_publication(PendingPublication {
@@ -1795,7 +1812,7 @@ impl CallEngine {
         codec: track.codec,
         layers: track.layers,
         is_withdrawn: false,
-        adapts_bitrate,
+        adaptation,
       });
     }
     // Requests the SFU never answered (lost with the connection, or dropped with the slot): asked
@@ -1958,7 +1975,7 @@ impl CallEngine {
 
   /// Tells the driver the bitrate per layer of each adaptive own track, where that changed.
   fn announce_bitrates(&mut self) {
-    let mut streams: Vec<StreamId> = self.adaptive_tracks.iter().copied().collect();
+    let mut streams: Vec<StreamId> = self.adaptive_tracks.keys().copied().collect();
     streams.sort_unstable();
     for stream in streams {
       let Some(track) = self.own_tracks.get(&stream) else {
@@ -2761,9 +2778,9 @@ impl CallEngine {
     }
     match self.take_answered_publication(&track) {
       Some(pending) if !pending.is_withdrawn => {
-        if pending.adapts_bitrate {
+        if pending.adaptation != Adaptation::Whole {
           let stream = StreamId(track.stream_id.0);
-          self.adaptive_tracks.insert(stream);
+          self.adaptive_tracks.insert(stream, pending.adaptation);
           // Drivers start with the layers' own bitrates.
           let own: Vec<(u8, u32)> = track
             .layers
@@ -3148,7 +3165,7 @@ impl AudioRtpState {
 /// The own tracks as the uplink allocation sees them.
 fn own_track_views<'a>(
   own_tracks: &'a HashMap<StreamId, VideoTrack>,
-  adaptive_tracks: &HashSet<StreamId>,
+  adaptive_tracks: &HashMap<StreamId, Adaptation>,
 ) -> Vec<OwnTrack<'a>> {
   own_tracks
     .iter()
@@ -3156,7 +3173,7 @@ fn own_track_views<'a>(
       stream: *stream,
       kind: &track.kind,
       layers: &track.layers,
-      adapts_bitrate: adaptive_tracks.contains(stream),
+      adaptation: adaptive_tracks.get(stream).copied().unwrap_or(Adaptation::Whole),
     })
     .collect()
 }

@@ -2334,7 +2334,7 @@ impl CallState<'_> {
     .await?;
     // The encoders are ours: a camera follows the uplink with its layers' bitrates (#939), a
     // share with its top layer's frame rate (#1733).
-    engine.publish_adaptive_video(publication, kind, sender.codec().clone(), sender.layers());
+    engine.publish_video_adapting_in_place(publication, kind, sender.codec().clone(), sender.layers());
     self.senders.push(sender);
     // What the others decode may have changed while the capture started.
     self.follow_codecs(engine);
@@ -2367,7 +2367,7 @@ impl CallState<'_> {
           self.next_publication = VideoPublicationId(publication.0.wrapping_add(1));
           debug!(kind = ?sender.publication.kind, codec = %wanted, "video track goes out in another codec");
           engine.withdraw_video(withdrawn);
-          engine.publish_adaptive_video(
+          engine.publish_video_adapting_in_place(
             publication,
             sender.publication.kind.clone(),
             wanted,
@@ -2402,7 +2402,7 @@ impl CallState<'_> {
           self.next_publication = VideoPublicationId(publication.0.wrapping_add(1));
           debug!(kind = ?sender.publication.kind, codec = %sender.codec(), layers, "video track goes out with other layers");
           engine.withdraw_video(withdrawn);
-          engine.publish_adaptive_video(
+          engine.publish_video_adapting_in_place(
             publication,
             sender.publication.kind.clone(),
             sender.codec().clone(),
