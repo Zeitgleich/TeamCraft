@@ -168,6 +168,27 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         .is_some_and(|active| active.is_own_capture_stalled && !active.is_reconnecting)
     })
   });
+  // #1805: others whose capture stalled, as their video says; by name where known.
+  let stalled_videos = Memo::new(move |_| {
+    state.read(|backend| {
+      let Some(active) = backend.active_call() else {
+        return Vec::new();
+      };
+      if active.is_reconnecting {
+        return Vec::new();
+      }
+      active
+        .stalled_videos
+        .iter()
+        .map(|user| {
+          backend
+            .user(*user)
+            .map(|user| user.display_name)
+            .filter(|name| !name.is_empty())
+        })
+        .collect::<Vec<_>>()
+    })
+  });
   let reconnecting = Memo::new(move |_| {
     state.read(|backend| {
       backend
@@ -587,6 +608,18 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         <Show when=move || is_own_capture_stalled.get() fallback=|| ()>
           <span class="muted-text" role="status">{move || i18n.t("call-capture-stalled")}</span>
         </Show>
+        <For
+          each=move || stalled_videos.get().into_iter().enumerate()
+          key=|(index, maybe_name)| (*index, maybe_name.clone())
+          let:stalled
+        >
+          <span class="muted-text" role="status">
+            {match stalled.1 {
+              Some(name) => i18n.t_with("call-video-stalled", &[("name", &name)]),
+              None => i18n.t("call-video-stalled-unnamed"),
+            }}
+          </span>
+        </For>
       </header>
       // The organizer, and a host of somebody else's meeting (a co-host, #1720, or a chat admin,
       // #1103): the host controls and the lobby.

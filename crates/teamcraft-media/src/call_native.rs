@@ -899,6 +899,12 @@ async fn run_call(
         sinks.video.log_counts(now);
         sinks.judge_receive_load(&mut engine, now);
         for event in sinks.video.judge_captures(now) {
+          // The viewers learn it from the track's frames (#1805).
+          match &event {
+            CallEngineEvent::CaptureStalled { kind, .. } => engine.set_own_capture_stalled(kind, true),
+            CallEngineEvent::CaptureRecovered(kind) => engine.set_own_capture_stalled(kind, false),
+            _ => {},
+          }
           // The app may have stopped listening; the call goes on.
           let _ = sinks.events.send(event);
         }

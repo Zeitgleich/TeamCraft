@@ -71,6 +71,8 @@ enum Side {
     layer_looks: u32,
     below_asked: u32,
     max_jitter_ms: f32,
+    /// How long the sharer said its capture was stalled (#1805), between looks.
+    stalled_ms: u64,
   },
 }
 
@@ -147,6 +149,9 @@ pub struct ViewerSummary {
   pub maybe_asked_layer: Option<u8>,
   pub maybe_top_offered: Option<u8>,
   pub maybe_size: Option<VideoSize>,
+  /// How long the sharer said its capture was stalled (#1805): its frames kept coming, repeating
+  /// one picture.
+  pub stalled_ms: u64,
 }
 
 /// Why a share was choppy.
@@ -158,6 +163,9 @@ pub enum Choppy {
   FramesDiscarded,
   /// A viewer's picture stood still for [`CHOPPY_FREEZE_MS`] or longer.
   Froze,
+  /// The sharer said its capture was stalled for [`CHOPPY_FREEZE_MS`] or longer (#1805): its
+  /// frames kept coming, but showed one picture.
+  SenderCaptureStalled,
 }
 
 /// A summary as a transaction's tags, measurements and its step's data: names from the code,
@@ -240,6 +248,7 @@ impl Share {
         layer_looks: 0,
         below_asked: 0,
         max_jitter_ms: 0.0,
+        stalled_ms: 0,
       },
     };
     let mut share = Self {
@@ -253,10 +262,18 @@ impl Share {
   }
 
   fn observe(&mut self, at_ms: u64, track: &VideoTrackStats, report: &VideoStatsReport) {
+    let since_ms = at_ms.saturating_sub(self.last_at_ms);
     self.last_at_ms = at_ms;
     match (&mut self.side, track) {
       (Side::Sent { last, .. }, VideoTrackStats::Sent(sent)) => **last = sent.clone(),
-      (Side::Received { last, .. }, VideoTrackStats::Received(received)) => **last = received.clone(),
+      (Side::Received { last, stalled_ms, .. }, VideoTrackStats::Received(received)) => {
+        // A look between two that both said stalled counts whole; one at either end half: the
+        // change came somewhere between.
+        let stalled_looks =
+          u64::from(last.is_sender_capture_stalled) + u64::from(received.is_sender_capture_stalled);
+        *stalled_ms += since_ms * stalled_looks / 2;
+        **last = received.clone();
+      },
       _ => return,
     }
     self.look(report, track);
@@ -362,6 +379,7 @@ impl Share {
         layer_looks,
         below_asked,
         max_jitter_ms,
+        stalled_ms,
       } => {
         let frames = last.frames.saturating_sub(first.frames);
         let discarded = last.frames_discarded.saturating_sub(first.frames_discarded);
@@ -394,6 +412,7 @@ impl Share {
           maybe_asked_layer: last.maybe_max_layer,
           maybe_top_offered: last.layers.iter().map(|offered| offered.layer).max(),
           maybe_size,
+          stalled_ms: *stalled_ms,
         })
       },
     }
@@ -411,7 +430,9 @@ impl ShareSummary {
           .is_some_and(|share| share > CHOPPY_SKIPPED_SHARE))
       .then_some(Choppy::EncoderSkipped),
       Self::Received(viewer) if viewer.seconds >= MIN_SECONDS => {
-        if viewer.discarded_share > CHOPPY_DISCARDED_SHARE {
+        if viewer.stalled_ms >= CHOPPY_FREEZE_MS {
+          Some(Choppy::SenderCaptureStalled)
+        } else if viewer.discarded_share > CHOPPY_DISCARDED_SHARE {
           Some(Choppy::FramesDiscarded)
         } else if viewer
           .maybe_longest_gap_ms
@@ -556,6 +577,7 @@ impl ShareSummary {
           ("frames", viewer.frames as f64),
           ("frames_discarded", viewer.frames_discarded as f64),
           ("packets_lost", viewer.packets_lost as f64),
+          ("sender_stalled_ms", viewer.stalled_ms as f64),
         ];
         push_size(&mut data, ("width", "height"), viewer.maybe_size);
         let numbers = [
@@ -597,6 +619,7 @@ impl Choppy {
       Self::EncoderSkipped => "encoder skipped frames",
       Self::FramesDiscarded => "frames discarded",
       Self::Froze => "picture froze",
+      Self::SenderCaptureStalled => "sender's capture stalled",
     }
   }
 }
@@ -897,6 +920,40 @@ mod tests {
     assert!(described.tags.contains(&("layer", "top")));
   }
 
+  /// #1805: a sharer whose capture stalled keeps sending its last picture once a second, so the
+  /// viewer's frames never stop; its frames say so, and the time counts. A still slide without
+  /// the flag sends the same and is not choppy.
+  #[test]
+  fn a_viewer_counts_the_time_the_sharer_said_its_capture_stalled() {
+    let summary = |is_stalled: bool| {
+      let mut meter = ShareMeter::default();
+      let look = |frames: u64, is_stalled: bool| {
+        let mut track = received(frames, 0, 0, Some(1), 1_000);
+        if let VideoTrackStats::Received(received) = &mut track {
+          received.is_sender_capture_stalled = is_stalled;
+        }
+        track
+      };
+      meter.observe(&report(0, vec![look(0, false)], None));
+      for second in (2..=20).step_by(2) {
+        meter.observe(&report(second * 1_000, vec![look(second, is_stalled)], None));
+      }
+      meter.finish_all().remove(0).1
+    };
+    let stalled = summary(true);
+    let ShareSummary::Received(viewer) = &stalled else {
+      panic!("{stalled:?}");
+    };
+    // The first two seconds count half: the change came somewhere between the looks.
+    assert_eq!(viewer.stalled_ms, 19_000);
+    assert_eq!(stalled.choppy(), Some(Choppy::SenderCaptureStalled));
+    assert_eq!(
+      stalled.choppy_message(Choppy::SenderCaptureStalled),
+      "viewer: sender's capture stalled (h264, 1440p)"
+    );
+    assert_eq!(summary(false).choppy(), None);
+  }
+
   #[test]
   fn a_viewer_is_choppy_when_it_discards_or_freezes() {
     let choppy = |discarded: u64, gap_ms: u64| {
@@ -1048,6 +1105,7 @@ mod tests {
       keyframe_requests: discarded / 10,
       maybe_longest_gap_ms: Some(gap_ms),
       maybe_max_framerate: Some(30),
+      is_sender_capture_stalled: false,
       maybe_decode_queue: None,
       maybe_device_limit: None,
     })

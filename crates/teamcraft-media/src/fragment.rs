@@ -5,8 +5,12 @@
 //! design notes). Each packet carries an unencrypted [`FRAME_FRAGMENT_EXTENSION_ID`] extension:
 //!
 //! ```text
-//! frame number (16 bits) | fragment index (8) | fragment count (8) | flags (8, bit 0 = keyframe)
+//! frame number (16 bits) | fragment index (8) | fragment count (8) | flags (8)
 //! ```
+//!
+//! Flags: bit 0, a keyframe; bit 1, the sender's capture is stalled (#1805): it gets buffers it
+//! can't turn into pictures, so the frame repeats a picture the viewers already have. Readers
+//! ignore the bits they don't know.
 //!
 //! A frame of more than 255 fragments (a keyframe of a text-heavy screen share at 1440p is about
 //! 400 KB, issue #941) uses the long form, with 16-bit index and count:
@@ -38,6 +42,9 @@ const SHORT_EXTENSION_BYTES: usize = 5;
 const LONG_EXTENSION_BYTES: usize = 7;
 /// Keyframe bit in the flags byte.
 const KEYFRAME_FLAG: u8 = 0x01;
+/// The sender's capture is stalled (#1805). Metadata the SFU could tell from the traffic anyway
+/// (one repeated picture a second): docs/e2ee.md, "Metadata".
+const CAPTURE_STALLED_FLAG: u8 = 0x02;
 /// At most this many frames are reassembled at the same time.
 const MAX_FRAMES_IN_FLIGHT: usize = 8;
 
@@ -48,6 +55,8 @@ pub struct FrameFragment {
   pub index: u16,
   pub count: u16,
   pub is_keyframe: bool,
+  /// The sender's capture is stalled (#1805).
+  pub is_capture_stalled: bool,
 }
 
 /// A reassembled frame.
@@ -55,6 +64,8 @@ pub struct FrameFragment {
 pub struct CompleteFrame {
   pub frame_number: u16,
   pub is_keyframe: bool,
+  /// The sender said its capture stalled (#1805), on the frame's first fragment that came.
+  pub is_capture_stalled: bool,
   pub data: Vec<u8>,
 }
 
@@ -69,6 +80,7 @@ pub struct FrameAssembler {
 #[derive(Debug)]
 struct PartialFrame {
   is_keyframe: bool,
+  is_capture_stalled: bool,
   fragments: Vec<Option<Vec<u8>>>,
   received: usize,
 }
@@ -131,6 +143,7 @@ impl FrameFragment {
       index,
       count,
       is_keyframe: flags & KEYFRAME_FLAG != 0,
+      is_capture_stalled: flags & CAPTURE_STALLED_FLAG != 0,
     })
   }
 
@@ -138,7 +151,13 @@ impl FrameFragment {
   /// most 255 fragments, the long form otherwise.
   pub fn write_to(&self, header: &mut RtpHeader) {
     let [frame_high, frame_low] = self.frame_number.to_be_bytes();
-    let flags = if self.is_keyframe { KEYFRAME_FLAG } else { 0 };
+    let keyframe = if self.is_keyframe { KEYFRAME_FLAG } else { 0 };
+    let stalled = if self.is_capture_stalled {
+      CAPTURE_STALLED_FLAG
+    } else {
+      0
+    };
+    let flags = keyframe | stalled;
     let data = match (u8::try_from(self.index), u8::try_from(self.count)) {
       (Ok(index), Ok(count)) => vec![frame_high, frame_low, index, count, flags],
       _ => {
@@ -182,6 +201,7 @@ pub fn fragment_frame(
       index: 0,
       count: 1,
       is_keyframe,
+      is_capture_stalled: false,
     };
     return Ok(vec![(fragment, frame)]);
   }
@@ -195,6 +215,7 @@ pub fn fragment_frame(
           index,
           count,
           is_keyframe,
+          is_capture_stalled: false,
         };
         (fragment, chunk)
       })
@@ -225,6 +246,7 @@ impl FrameAssembler {
       .entry(fragment.frame_number)
       .or_insert_with(|| PartialFrame {
         is_keyframe: fragment.is_keyframe,
+        is_capture_stalled: fragment.is_capture_stalled,
         fragments: vec![None; usize::from(fragment.count)],
         received: 0,
       });
@@ -246,6 +268,7 @@ impl FrameAssembler {
     Ok(Some(CompleteFrame {
       frame_number: fragment.frame_number,
       is_keyframe: partial.is_keyframe,
+      is_capture_stalled: partial.is_capture_stalled,
       data: partial.fragments.into_iter().flatten().flatten().collect(),
     }))
   }
@@ -344,6 +367,7 @@ mod tests {
         index: 2,
         count: 5,
         is_keyframe: true,
+        is_capture_stalled: false,
       };
       let parsed = through_header(fragment);
       assert_eq!(
@@ -374,6 +398,48 @@ mod tests {
       let complete = maybe_complete.unwrap();
       assert_eq!(complete.data, frame);
       assert!(complete.is_keyframe);
+    }
+
+    /// #1805: the stalled capture's bit travels next to the keyframe bit, and a reader that only
+    /// knows the keyframe bit (an older app, the SFU) reads the frame as before.
+    #[test]
+    fn the_capture_stalled_bit_round_trips_and_leaves_the_keyframe_bit_alone() {
+      for (is_keyframe, is_capture_stalled) in [(false, true), (true, true), (true, false)] {
+        let fragment = FrameFragment {
+          frame_number: 7,
+          index: 0,
+          count: 1,
+          is_keyframe,
+          is_capture_stalled,
+        };
+        let parsed = through_header(fragment);
+        assert_eq!(FrameFragment::from_header(&parsed).unwrap(), fragment);
+        let flags = *parsed
+          .extension(FRAME_FRAGMENT_EXTENSION_ID)
+          .unwrap()
+          .last()
+          .unwrap();
+        assert_eq!(flags & KEYFRAME_FLAG != 0, is_keyframe);
+      }
+    }
+
+    /// Flag bits this version doesn't know (a newer sender's) are ignored, not refused.
+    #[test]
+    fn unknown_flag_bits_are_ignored() {
+      let fragment = FrameFragment {
+        frame_number: 7,
+        index: 0,
+        count: 1,
+        is_keyframe: false,
+        is_capture_stalled: false,
+      };
+      let mut parsed = through_header(fragment);
+      let mut extension = parsed.extension(FRAME_FRAGMENT_EXTENSION_ID).unwrap().to_vec();
+      *extension.last_mut().unwrap() = 0xFC;
+      parsed.set_extension(FRAME_FRAGMENT_EXTENSION_ID, extension);
+      let read = FrameFragment::from_header(&parsed).unwrap();
+      assert!(!read.is_keyframe);
+      assert!(!read.is_capture_stalled);
     }
 
     /// `fragment` written into an RTP header and parsed back.
@@ -440,6 +506,7 @@ mod tests {
         index: 0,
         count: 3,
         is_keyframe: false,
+        is_capture_stalled: false,
       };
       assembler.push(first, &[1]).unwrap();
       let liar = FrameFragment { count: 4, ..first };
@@ -458,6 +525,7 @@ mod tests {
           index: 0,
           count: 2,
           is_keyframe: false,
+          is_capture_stalled: false,
         };
         assembler.push(fragment, &[0]).unwrap();
       }

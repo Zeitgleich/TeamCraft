@@ -740,6 +740,10 @@ pub struct ActiveCall {
   /// (#1805): the others see a still picture, and the UI tells the sharer to share again.
   #[serde(default)]
   pub is_own_capture_stalled: bool,
+  /// Others whose camera or screen capture stalled, as their video says (#1805): the UI says
+  /// whose video isn't updating.
+  #[serde(default)]
+  pub stalled_videos: Vec<UserId>,
   /// Somebody added people to this DM call: it moved into this meeting chat, and the UI switches
   /// over to its call (docs/meetings.md, "A call becomes a meeting").
   #[serde(default, skip_serializing_if = "Option::is_none")]

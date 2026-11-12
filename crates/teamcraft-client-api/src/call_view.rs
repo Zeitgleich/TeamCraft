@@ -162,6 +162,7 @@ impl CallView {
       is_on_limited_network: false,
       is_video_limited_by_device: false,
       is_own_capture_stalled: false,
+      stalled_videos: Vec::new(),
       maybe_moved_to: None,
       maybe_joined_at: Some(joined_at),
       maybe_encryption_failure: None,
