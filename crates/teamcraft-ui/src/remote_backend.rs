@@ -2503,6 +2503,13 @@ impl ChatBackend for RemoteChat {
     }
   }
 
+  fn moved_call(&self, conversation: ConversationId) -> Option<teamcraft_client_api::notetaker::MovedCall> {
+    match self.ask(ChatQuery::MovedCall { conversation }) {
+      Some(ChatAnswer::MovedCall { maybe_moved }) => maybe_moved,
+      _ => None,
+    }
+  }
+
   fn accept_call_move(&self, from: ConversationId, to: ConversationId) {
     self.act(ChatAction::AcceptCallMove { from, to });
   }

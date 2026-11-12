@@ -163,7 +163,7 @@ pub const MOVED_CALL_HINT_MAX_AGE_MS: i64 = 3 * 60 * 60_000;
 
 /// A conversation's call that moved into a meeting room, as announced in the conversation (a
 /// `CallMoved` event), for the hint that sends latecomers there.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MovedCall {
   /// Who moved the call.
   pub by: UserId,

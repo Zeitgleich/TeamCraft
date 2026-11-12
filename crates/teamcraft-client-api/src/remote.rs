@@ -1905,6 +1905,10 @@ pub enum ChatQuery {
     from: ConversationId,
     to: ConversationId,
   },
+  /// The newest announced move of the conversation's call (the latecomers' hint, #1321).
+  MovedCall {
+    conversation: ConversationId,
+  },
   Activity,
   LastSeen {
     user: UserId,
@@ -1955,6 +1959,9 @@ pub enum ChatAnswer {
   },
   CallMoveOffer {
     maybe_offer: Option<CallMoveOffer>,
+  },
+  MovedCall {
+    maybe_moved: Option<crate::notetaker::MovedCall>,
   },
   MessageExtras {
     extras: Vec<MessageExtras>,
@@ -2391,6 +2398,9 @@ impl ChatQuery {
       },
       Self::CallMoveOffer { from, to } => ChatAnswer::CallMoveOffer {
         maybe_offer: backend.call_move_offer(from, to),
+      },
+      Self::MovedCall { conversation } => ChatAnswer::MovedCall {
+        maybe_moved: backend.moved_call(conversation),
       },
       Self::Thread { conversation, thread } => ChatAnswer::Messages {
         messages: backend.thread(conversation, thread),
