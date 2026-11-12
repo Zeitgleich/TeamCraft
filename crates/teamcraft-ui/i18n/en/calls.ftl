@@ -166,6 +166,14 @@ stats-value-limits-layer = layer { $layer } over its bitrate: { $rate } at { $fp
 stats-overload-skipped = frames skipped
 stats-overload-queued = frames queued
 stats-overload-slow = slow encoding
+stats-share-policy = Share policy
+stats-value-share = top { $codec } at { $fps } of { $planned } fps, { $scale } % size · middle layer { $middle } · AV1 encoder { $av1 }
+stats-value-share-step = encoders overloaded ({ $reason }): step { $level } of { $levels }
+stats-share-middle-on = on
+stats-share-middle-off = off
+stats-av1-hardware = hardware
+stats-av1-software = software
+stats-av1-unavailable = none
 stats-waiting = Waiting for the first numbers…
 # The chat next to the video (#936)
 call-chat = Chat

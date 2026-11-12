@@ -6,8 +6,8 @@
 use std::time::Duration;
 
 use teamcraft_client_api::video_stats::{
-  CameraLimitsStats, EncoderImplementation, EncoderOverload, ReceivedVideoStats, SentVideoStats, VideoSize,
-  VideoStatsReport,
+  Av1EncoderKind, CameraLimitsStats, EncoderImplementation, EncoderOverload, ReceivedVideoStats,
+  SentVideoStats, ShareLimitsStats, VideoSize, VideoStatsReport,
 };
 use teamcraft_proto::{MediaStreamId, VideoCodec, VideoTrackKind};
 
@@ -290,7 +290,61 @@ fn sent_rows(
   if let Some(limits) = &sent.maybe_camera_limits {
     rows.push(row("stats-limits", camera_limits_text(limits, words)));
   }
+  if let Some(limits) = &sent.maybe_share_limits {
+    rows.push(row("stats-share-policy", share_limits_text(limits, words)));
+  }
   rows
+}
+
+/// Why an own screen share's layers are what they are (#1733): its top layer's codec, rate and
+/// size, whether the middle layer is sent, the AV1 encoder, and the CPU step with its reason.
+fn share_limits_text(limits: &ShareLimitsStats, words: Words<'_>) -> String {
+  let now = &limits.now;
+  let av1 = match limits.av1_encoder {
+    Av1EncoderKind::Hardware => words("stats-av1-hardware", &[]),
+    Av1EncoderKind::Software => words("stats-av1-software", &[]),
+    Av1EncoderKind::Unavailable => words("stats-av1-unavailable", &[]),
+    Av1EncoderKind::Unknown => MISSING.to_owned(),
+  };
+  let mut text = words(
+    "stats-value-share",
+    &[
+      ("codec", &codec_text(&now.top_codec)),
+      ("fps", &now.top_framerate.to_string()),
+      ("planned", &limits.planned.top_framerate.to_string()),
+      ("scale", &(now.top_scale_per_mille / 10).to_string()),
+      (
+        "middle",
+        &words(
+          if now.has_middle {
+            "stats-share-middle-on"
+          } else {
+            "stats-share-middle-off"
+          },
+          &[],
+        ),
+      ),
+      ("av1", &av1),
+    ],
+  );
+  if limits.level > 0 {
+    let reason = match limits.maybe_overload {
+      Some(EncoderOverload::SkippedFrames) => words("stats-overload-skipped", &[]),
+      Some(EncoderOverload::QueuedFrames) => words("stats-overload-queued", &[]),
+      Some(EncoderOverload::SlowEncoding) => words("stats-overload-slow", &[]),
+      Some(EncoderOverload::Unknown) | None => MISSING.to_owned(),
+    };
+    text.push_str(" · ");
+    text.push_str(&words(
+      "stats-value-share-step",
+      &[
+        ("level", &limits.level.to_string()),
+        ("levels", &limits.levels.to_string()),
+        ("reason", &reason),
+      ],
+    ));
+  }
+  text
 }
 
 /// Why an own camera sends less than its plan (#1762): the encoders' load, then each layer
@@ -478,7 +532,8 @@ fn layer_list(layers: impl Iterator<Item = u8>) -> String {
 #[cfg(test)]
 mod tests {
   use teamcraft_client_api::video_stats::{
-    LayerLimitStats, OfferedLayer, SentLayerStats, UplinkStats, VideoEncoderInfo, VideoTrackStats,
+    LayerLimitStats, OfferedLayer, SentLayerStats, ShareStepStats, UplinkStats, VideoEncoderInfo,
+    VideoTrackStats,
   };
 
   use super::*;
@@ -757,7 +812,40 @@ mod tests {
         framerate: 5,
       }],
     });
+    sent.maybe_share_limits = Some(share_limits());
     sent
+  }
+
+  /// A software AV1 share stepped down to H.264 at 5 fps without its middle layer.
+  fn share_limits() -> ShareLimitsStats {
+    ShareLimitsStats {
+      av1_encoder: Av1EncoderKind::Software,
+      planned: ShareStepStats {
+        top_codec: VideoCodec::Av1,
+        top_framerate: 15,
+        top_scale_per_mille: 1000,
+        has_middle: false,
+      },
+      now: ShareStepStats {
+        top_codec: VideoCodec::H264,
+        top_framerate: 5,
+        top_scale_per_mille: 1000,
+        has_middle: false,
+      },
+      level: 3,
+      levels: 4,
+      maybe_overload: Some(EncoderOverload::SlowEncoding),
+    }
+  }
+
+  /// #1733: the overlay says why a share's layers are what they are.
+  #[test]
+  fn the_share_row_says_why_its_layers_are_what_they_are() {
+    let text = share_limits_text(&share_limits(), &en_words());
+    assert_eq!(
+      text,
+      "top H.264 at 5 of 15 fps, 100 % size · middle layer off · AV1 encoder software · encoders overloaded (slow encoding): step 3 of 4"
+    );
   }
 
   fn english(window: &StatsWindow, target: StatsTarget) -> Vec<StatsRow> {
@@ -832,6 +920,7 @@ mod tests {
       maybe_frames_skipped: None,
       maybe_held_back_ms: None,
       maybe_camera_limits: None,
+      maybe_share_limits: None,
     })
   }
 

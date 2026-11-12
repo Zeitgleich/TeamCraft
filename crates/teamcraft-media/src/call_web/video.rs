@@ -25,7 +25,8 @@
 //! sends far more than its bitrate is configured lower and then gets fewer frames (Chrome's
 //! H.264 encoder skips none on its own, so on hard content a 320×180 layer sent ten times its
 //! bitrate), and encoders that don't keep up lower the camera's frame rate, then leave its top
-//! layers out. Screen shares are not governed.
+//! layers out. A screen share follows its own policy (#1733, [`crate::share_policy`]) on the same
+//! load controller: its top layer's frame rate first, then its middle layer, its codec and size.
 //!
 //! A watched track's canvas reports its shown size ([`SizeWatch`]), from which the call picks the
 //! layer to receive ([`crate::video::layer_for_view`]).
@@ -34,6 +35,8 @@
 //! a failed encoder or decoder for good, so a failed encoder is replaced by a new one that starts
 //! with a keyframe, and a failed decoder is dropped and a keyframe asked for, from which a new one
 //! starts. Only encoders that keep failing stop their track.
+
+use std::collections::VecDeque;
 
 use futures::channel::mpsc;
 use js_sys::{Promise, Uint8Array};
@@ -59,7 +62,7 @@ use crate::call_video::ReceivedVideoFrame;
 use crate::camera_governor::{
   CameraGovernorConfig, CameraLoad, FrameTally, LayerLimit, LayerRateGuard, LoadStep, OverloadReason,
 };
-use crate::share_policy::Av1Encoding;
+use crate::share_policy::{Av1Encoding, ShareCodecs, ShareGovernor, ShareLimits, SharePlan, share_framerate};
 use crate::video::{
   CAMERA_FRAMERATE, LayerSizer, ScreenProfile, VideoResolution, camera_layers, fit_within, within_layer_limit,
 };
@@ -119,7 +122,25 @@ pub(super) struct TrackSender {
   cadence: Cadence,
   /// A camera's encoders against the frames they get (#1762); `None` for a screen share.
   maybe_load: Option<CameraLoad>,
+  /// A screen share's policy and its encoders' load (#1733); `None` for a camera.
+  maybe_share: Option<ShareGovernor>,
+  /// The most layers the SFU takes (#978).
+  max_layers: u8,
+  /// The largest picture sent.
+  limit: VideoResolution,
+  /// The share's layers changed beyond what its encoders follow in place: it goes out anew.
+  maybe_replan: Option<Replan>,
+  /// When the share's top layer was given each of its last frames, by timestamp: its encode time
+  /// is the wait for the chunk (#1733).
+  top_encode_starts: VecDeque<(i64, Instant)>,
   _ended: Closure<dyn FnMut()>,
+}
+
+/// New layers for an own track, to be published anew ([`TrackSender::take_replan`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Replan {
+  pub codec: VideoCodec,
+  pub layers: Vec<VideoLayerInfo>,
 }
 
 /// Why an own camera sends less than its plan (#1762), for the stats.
@@ -203,14 +224,11 @@ pub(super) struct SizeWatch {
   _on_resize: Closure<dyn FnMut()>,
 }
 
-/// A WebCodecs H.264 encoder for one layer; closed on drop.
+/// A WebCodecs encoder for one layer; closed on drop.
 struct LayerEncoder {
   encoder: VideoEncoder,
-  /// Its `VideoEncoderConfig`, configured again with another bitrate (#939).
+  /// Its `VideoEncoderConfig`, configured again with another bitrate and frame rate (#939, #1762).
   config: js_sys::Object,
-  /// A camera's layer: a new configuration changes its frame rate too (#1762); a screen share's
-  /// keeps the track's.
-  is_framerate_per_layer: bool,
   _output: Closure<dyn FnMut(EncodedVideoChunk)>,
   _error: Closure<dyn FnMut(JsValue)>,
 }
@@ -282,19 +300,26 @@ pub(super) enum LayerShape {
   /// #967, #978),
   /// encoded in the latency mode that gives them their bitrate ([`camera_latency_mode`]).
   Camera,
-  /// A screen share's layers (`video::screen_layers`: the picture and a half-size one, a
-  /// quarter-size one too above 1440p), as on the desktop.
+  /// A screen share's layers ([`crate::share_policy`], #1733): an H.264 base of at most 480p,
+  /// a half-size middle one from 1440p, and the picture, the large ones in AV1 where this browser
+  /// encodes it well and some viewer decodes it; stepped down under CPU pressure.
   Screen(ScreenProfile),
 }
 
+/// Frames of a share's top layer whose encode start is kept until its chunk comes back.
+const SHARE_ENCODE_STARTS: usize = 64;
+
 impl TrackSender {
-  /// Starts encoding the stream's video track as `plan.kind`, to be published under `publication`.
-  /// Its encoders encode `codec`, one of `plan.codecs`, in at most `max_layers` layers (the top
-  /// ones of the plan: what the SFU takes, #978).
+  /// Starts encoding the stream's video track as `plan.kind`, to be published under `publication`
+  /// in [`Self::codec`] with [`Self::layers`]. A camera's encoders encode `codecs.by_all`, one of
+  /// `plan.codecs`; a share's layers follow its policy from `codecs` and `av1` (#1733). At most
+  /// `max_layers` layers (the top ones of the plan: what the SFU takes, #978).
+  #[allow(clippy::too_many_arguments)]
   pub async fn start(
     stream: MediaStream,
     plan: TrackPlan,
-    codec: VideoCodec,
+    codecs: ShareCodecs,
+    av1: Av1Encoding,
     max_layers: u8,
     publication: VideoPublicationId,
     inputs: &mpsc::UnboundedSender<Input>,
@@ -318,18 +343,36 @@ impl TrackSender {
     let limit = plan.maybe_max_resolution.unwrap_or(resolution);
     let resolution = fit_within(resolution, limit);
     let video = play_hidden(&stream).await?;
-    let (infos, latency, maybe_content_hint) = match &plan.shape {
-      LayerShape::Camera => (
+    let now = Instant::now();
+    let maybe_share = match &plan.shape {
+      LayerShape::Camera => None,
+      LayerShape::Screen(profile) => Some(ShareGovernor::new(
+        SharePlan {
+          source: resolution,
+          framerate: plan.framerate,
+          profile: profile.clone(),
+          codecs: codecs.clone(),
+          av1,
+        },
+        now,
+      )),
+    };
+    let (infos, latency, maybe_content_hint) = match (&plan.shape, &maybe_share) {
+      (LayerShape::Screen(profile), Some(share)) => {
+        (share.layers(), LatencyMode::Realtime, Some(content_hint(profile)))
+      },
+      _ => (
         camera_layers(resolution, plan.framerate, limit),
         camera_latency_mode(),
         None,
       ),
-      LayerShape::Screen(profile) => (
-        profile.layers(resolution, plan.framerate),
-        LatencyMode::Realtime,
-        Some(content_hint(profile)),
-      ),
     };
+    let codec = maybe_share
+      .as_ref()
+      .map_or_else(|| codecs.by_all.clone(), ShareGovernor::track_codec);
+    let framerate = maybe_share
+      .as_ref()
+      .map_or(plan.framerate, |share| share.step().top_framerate);
     if let Some(hint) = maybe_content_hint {
       // #1733: the browser keeps the captured resolution and lowers the rate under load
       // ("maintain resolution") for a track marked as text, not the other way round.
@@ -346,14 +389,13 @@ impl TrackSender {
     let encoding = Encoding {
       kind: plan.kind.clone(),
       codec,
-      framerate: plan.framerate,
+      framerate,
       latency,
       maybe_content_hint,
     };
     let is_camera = plan.shape == LayerShape::Camera;
     let layer_count = u8::try_from(infos.len()).unwrap_or(u8::MAX);
     let mut encoders = LayerEncoders::new(infos, encoding.opener(inputs))?;
-    let now = Instant::now();
     let maybe_load = is_camera.then(|| {
       let config = CameraGovernorConfig::default();
       encoders.govern(config, plan.framerate, now);
@@ -377,15 +419,20 @@ impl TrackSender {
       encoding,
       codecs: plan.codecs,
       sizer,
-      framerate: plan.framerate,
+      framerate,
       frames_since_keyframe: 0,
       timestamp_us: 0.0,
       failed_pictures_in_a_row: 0,
       frames_captured: 0,
       #[cfg(feature = "effects")]
       maybe_effects: plan.maybe_effects.map(effects::WebEffects::new).transpose()?,
-      cadence: Cadence::per_second(plan.framerate, now),
+      cadence: Cadence::per_second(framerate, now),
       maybe_load,
+      maybe_share,
+      max_layers,
+      limit,
+      maybe_replan: None,
+      top_encode_starts: VecDeque::new(),
       _ended: ended,
     })
   }
@@ -511,6 +558,15 @@ impl TrackSender {
     };
     let result = self.encoders.encode(&frame, is_periodic_keyframe);
     frame.close();
+    if self.maybe_share.is_some() {
+      // Timestamps are whole microseconds; the cast keeps them.
+      self
+        .top_encode_starts
+        .push_back((self.timestamp_us as i64, Instant::now()));
+      if self.top_encode_starts.len() > SHARE_ENCODE_STARTS {
+        self.top_encode_starts.pop_front();
+      }
+    }
     #[cfg(feature = "effects")]
     if let Some(effects) = &mut self.maybe_effects {
       let (given, skipped) = self.encoders.frame_counts();
@@ -520,10 +576,127 @@ impl TrackSender {
     self.govern_load(tally, Instant::now())
   }
 
-  /// A layer's encoder produced a picture of `bytes`: it works, and a governed layer's output is
-  /// held to its bitrate.
-  pub fn on_encoded(&mut self, layer: u8, bytes: usize, now: Instant) -> Result<(), EncoderGaveUp> {
+  /// A layer's encoder produced a picture of `bytes` for the frame of `timestamp_us`: it works, a
+  /// governed layer's output is held to its bitrate, and a share's top layer tells how long it
+  /// took against the frame interval (#1733).
+  pub fn on_encoded(
+    &mut self,
+    layer: u8,
+    bytes: usize,
+    timestamp_us: f64,
+    now: Instant,
+  ) -> Result<(), EncoderGaveUp> {
+    let is_top = self
+      .encoders
+      .layers
+      .last()
+      .is_some_and(|top| top.info.layer == layer);
+    if is_top && let Some(share) = &mut self.maybe_share {
+      // The cast keeps the whole microseconds the frame was stamped with.
+      let key = timestamp_us as i64;
+      if let Some(index) = self.top_encode_starts.iter().position(|(stamp, _)| *stamp == key) {
+        let (_, given_at) = self.top_encode_starts[index];
+        self.top_encode_starts.drain(..=index);
+        share.on_frame(FrameTally {
+          encode_time: now.saturating_duration_since(given_at),
+          frame_interval: std::time::Duration::from_secs(1) / u32::from(share.step().top_framerate.max(1)),
+          ..FrameTally::default()
+        });
+      }
+    }
     self.encoders.on_encoded(layer, bytes, now)
+  }
+
+  /// The share's layers changed beyond what its encoders follow in place (the CPU ladder stopped
+  /// its middle layer or changed its codec, the viewers' codecs changed): what it is to be
+  /// published as anew, once ([`Self::rebuild`]).
+  pub fn take_replan(&mut self) -> Option<Replan> {
+    self.maybe_replan.take()
+  }
+
+  /// Encodes `replan`'s layers from the next picture on, under the new publication
+  /// `publication`; every layer starts with a keyframe and the old stream is the caller's to
+  /// withdraw. A layer whose encoder doesn't open keeps the old layers.
+  pub fn rebuild(
+    &mut self,
+    replan: Replan,
+    publication: VideoPublicationId,
+    inputs: &mpsc::UnboundedSender<Input>,
+  ) -> Result<(), WebCallError> {
+    let previous = std::mem::replace(&mut self.encoding.codec, replan.codec.clone());
+    let framerate = replan
+      .layers
+      .iter()
+      .map(|info| info.max_framerate)
+      .max()
+      .unwrap_or(1);
+    if let Err(error) = self
+      .encoders
+      .replace_layers(replan.layers.clone(), self.encoding.opener(inputs))
+    {
+      self.encoding.codec = previous;
+      return Err(error);
+    }
+    self.encoding.framerate = framerate;
+    self.sizer = LayerSizer::new(replan.layers, self.limit);
+    self.publication.own = OwnPublication::new(publication);
+    self.frames_since_keyframe = 0;
+    self.top_encode_starts.clear();
+    self.set_capture_rate(framerate, Instant::now());
+    if let Some(share) = &mut self.maybe_share {
+      share.measure_afresh(Instant::now());
+    }
+    Ok(())
+  }
+
+  /// Plans a share anew for the codecs the viewers decode now (#1733): where its layers change,
+  /// [`Self::take_replan`] has them. A camera follows [`Self::switch_codec`].
+  pub fn follow_share_codecs(&mut self, codecs: ShareCodecs) -> Result<(), EncoderGaveUp> {
+    let Some(share) = &mut self.maybe_share else {
+      return Ok(());
+    };
+    let plan = SharePlan {
+      codecs,
+      ..share.ladder().plan().clone()
+    };
+    share.replan(plan, Instant::now());
+    self.follow_share_step()
+  }
+
+  /// What holds a share below its plan, for the stats; `None` for a camera.
+  #[cfg(feature = "call-view")]
+  pub fn share_limits(&self) -> Option<ShareLimits> {
+    self.maybe_share.as_ref().map(ShareGovernor::limits)
+  }
+
+  /// The share's encoders follow its step now: in place where only rates changed, else the
+  /// track goes out anew ([`Self::take_replan`]).
+  fn follow_share_step(&mut self) -> Result<(), EncoderGaveUp> {
+    let Some(share) = &self.maybe_share else {
+      return Ok(());
+    };
+    let layers = within_layer_limit(&share.layers(), self.max_layers);
+    let codec = share.track_codec();
+    let framerate = share.step().top_framerate;
+    if codec == self.encoding.codec && self.encoders.update_infos(&layers)? {
+      self.maybe_replan = None;
+      self.set_capture_rate(framerate, Instant::now());
+    } else if self.encoders.infos() != layers || codec != self.encoding.codec {
+      self.maybe_replan = Some(Replan { codec, layers });
+    }
+    Ok(())
+  }
+
+  /// Captures at `framerate` from `now` on.
+  fn set_capture_rate(&mut self, framerate: u8, now: Instant) {
+    if framerate == self.framerate {
+      return;
+    }
+    self.framerate = framerate.max(1);
+    self.cadence = Cadence::per_second(self.framerate, now);
+    self.frames_since_keyframe = self
+      .frames_since_keyframe
+      .min(KEYFRAME_INTERVAL_SECONDS * u32::from(self.framerate));
   }
 
   /// The highest layer a governed camera's encoders keep up with, when they leave some out
@@ -550,6 +723,22 @@ impl TrackSender {
   /// Judges whether the encoders keep up; a new step changes the capture's frame rate (the top
   /// layers left out go through [`Self::maybe_top_layer`]).
   fn govern_load(&mut self, tally: FrameTally, now: Instant) -> Result<(), EncoderGaveUp> {
+    if let Some(share) = &mut self.maybe_share {
+      share.on_frame(tally);
+      let Some(level) = share.evaluate(now) else {
+        return Ok(());
+      };
+      info!(
+        level,
+        top_framerate = share.step().top_framerate,
+        top_codec = %share.step().top_codec,
+        has_middle = share.step().has_middle,
+        top_scale_per_mille = share.step().top_scale_per_mille,
+        reason = ?share.limits().maybe_reason,
+        "screen share encoders' load changed the share's step"
+      );
+      return self.follow_share_step();
+    }
     let Some(load) = &mut self.maybe_load else {
       return Ok(());
     };
@@ -594,6 +783,30 @@ impl TrackSender {
       return Ok(());
     };
     debug!(kind = ?self.publication.kind, width = source.width, height = source.height, "the video source changed size; new encoders");
+    if let Some(share) = &mut self.maybe_share {
+      // A share plans its layers for the new size (#1733): a window shrunk below 1440p loses its
+      // middle layer rather than getting a base below 480p.
+      let plan = SharePlan {
+        source: fit_within(source, self.limit),
+        ..share.ladder().plan().clone()
+      };
+      share.replan(plan, Instant::now());
+      let layers = within_layer_limit(&share.layers(), self.max_layers);
+      if self
+        .encoders
+        .infos()
+        .iter()
+        .map(|info| (info.layer, &info.maybe_codec))
+        .eq(layers.iter().map(|info| (info.layer, &info.maybe_codec)))
+      {
+        return self.encoders.resize(&layers);
+      }
+      self.maybe_replan = Some(Replan {
+        codec: share.track_codec(),
+        layers,
+      });
+      return Ok(());
+    }
     self.encoders.resize(&infos)
   }
 
@@ -640,9 +853,9 @@ impl<E: FrameEncoder> LayerEncoders<E> {
       .zip(0..)
       .map(|(info, generation)| {
         Ok(Layer {
-          info,
           bitrate_bps: info.max_bitrate_bps,
-          encoder: open(info, generation)?,
+          encoder: open(info.clone(), generation)?,
+          info,
           generation,
           is_needed: true,
           wants_keyframe: true,
@@ -652,7 +865,12 @@ impl<E: FrameEncoder> LayerEncoders<E> {
         })
       })
       .collect::<Result<Vec<_>, WebCallError>>()?;
-    let framerate = layers.first().map_or(1, |layer| layer.info.max_framerate);
+    // The track is captured at its fastest layer's rate; slower layers take every n-th frame.
+    let framerate = layers
+      .iter()
+      .map(|layer| layer.info.max_framerate)
+      .max()
+      .unwrap_or(1);
     Ok(Self {
       next_generation: layers.len() as u64,
       layers,
@@ -677,7 +895,7 @@ impl<E: FrameEncoder> LayerEncoders<E> {
 
   /// The layers as published, each with its whole bitrate.
   pub fn infos(&self) -> Vec<VideoLayerInfo> {
-    self.layers.iter().map(|layer| layer.info).collect()
+    self.layers.iter().map(|layer| layer.info.clone()).collect()
   }
 
   /// Encodes the layers at `bitrates` (layer, bit/s) from now on (#939). A layer whose bitrate
@@ -788,12 +1006,12 @@ impl<E: FrameEncoder> LayerEncoders<E> {
     let frame_index = self.frame_index;
     self.frame_index = self.frame_index.wrapping_add(1);
     for index in 0..self.layers.len() {
-      let divisor = self.limit(index).frame_divisor;
+      let divisor = self.limit(index).frame_divisor.max(1) * self.rate_divisor(index);
       let layer = &mut self.layers[index];
       if !layer.is_needed {
         continue;
       }
-      if !frame_index.is_multiple_of(u64::from(divisor.max(1))) {
+      if !frame_index.is_multiple_of(u64::from(divisor)) {
         layer.wants_keyframe |= is_periodic_keyframe;
         continue;
       }
@@ -860,7 +1078,7 @@ impl<E: FrameEncoder> LayerEncoders<E> {
       if layer.bitrate_bps == layer.info.max_bitrate_bps {
         layer.bitrate_bps = info.max_bitrate_bps;
       }
-      layer.info = *info;
+      layer.info = info.clone();
       let generation = self.next_generation;
       self.next_generation += 1;
       match (self.open)(
@@ -952,6 +1170,86 @@ impl<E: FrameEncoder> LayerEncoders<E> {
     }
   }
 
+  /// The layers' frame rates, sizes and bitrates follow `infos` in place where each layer keeps
+  /// its id, size and codec (a share's frame rate stepped, #1733): the running encoders are
+  /// configured again, without a keyframe. `false`, and nothing changed, where the layers differ
+  /// otherwise: the track is built anew ([`Self::replace_layers`]).
+  pub fn update_infos(&mut self, infos: &[VideoLayerInfo]) -> Result<bool, EncoderGaveUp> {
+    let is_same_shape = infos.len() == self.layers.len()
+      && self.layers.iter().zip(infos).all(|(layer, info)| {
+        layer.info.layer == info.layer
+          && (layer.info.width, layer.info.height) == (info.width, info.height)
+          && layer.info.maybe_codec == info.maybe_codec
+      });
+    if !is_same_shape {
+      return Ok(false);
+    }
+    self.framerate = infos.iter().map(|info| info.max_framerate).max().unwrap_or(1);
+    for (index, info) in infos.iter().enumerate() {
+      let layer = &mut self.layers[index];
+      if layer.info == *info {
+        continue;
+      }
+      // A bitrate lowered for the uplink stays lowered.
+      if layer.bitrate_bps == layer.info.max_bitrate_bps {
+        layer.bitrate_bps = info.max_bitrate_bps;
+      }
+      layer.info = info.clone();
+      self.reconfigure(index)?;
+    }
+    Ok(true)
+  }
+
+  /// New layers `infos` with new encoders from `open`, each starting with a keyframe (a share's
+  /// middle layer stopped, or a layer's codec changed, #1733). Fails when one doesn't open.
+  pub fn replace_layers(
+    &mut self,
+    infos: Vec<VideoLayerInfo>,
+    open: impl FnMut(VideoLayerInfo, u64) -> Result<E, WebCallError> + 'static,
+  ) -> Result<(), WebCallError> {
+    let mut open: EncoderOpener<E> = Box::new(open);
+    // Generations go on from the replaced encoders', so their late failure reports are stale.
+    let mut layers = Vec::with_capacity(infos.len());
+    let mut next_generation = self.next_generation;
+    for info in infos {
+      let generation = next_generation;
+      next_generation += 1;
+      layers.push(Layer {
+        bitrate_bps: info.max_bitrate_bps,
+        encoder: open(info.clone(), generation)?,
+        info,
+        generation,
+        is_needed: true,
+        wants_keyframe: true,
+        restarts_in_a_row: 0,
+        maybe_guard: None,
+        is_measure_stale: true,
+      });
+    }
+    self.framerate = layers
+      .iter()
+      .map(|layer| layer.info.max_framerate)
+      .max()
+      .unwrap_or(1);
+    self.layers = layers;
+    self.open = open;
+    self.next_generation = next_generation;
+    self.maybe_governor = None;
+    Ok(())
+  }
+
+  /// Every how many-th captured frame layer `index` takes for its own frame rate: a share's base
+  /// layer at 15 fps of a capture at 30 takes every second (#1733).
+  fn rate_divisor(&self, index: usize) -> u8 {
+    let layer_rate = self.built(index).max_framerate.max(1);
+    let capture = self.framerate.max(1);
+    // Rounded: 30 fps for a layer at 18 takes every frame (the encoder drops what it must).
+    ((u16::from(capture) + u16::from(layer_rate) / 2) / u16::from(layer_rate))
+      .clamp(1, u16::from(u8::MAX))
+      .try_into()
+      .unwrap_or(1)
+  }
+
   /// What layer `index` is held to now.
   fn limit(&self, index: usize) -> LayerLimit {
     match &self.maybe_governor {
@@ -974,16 +1272,19 @@ impl<E> Layer<E> {
   /// governed track at its limit and the track's frame rate now.
   fn built(&self, framerate: u8, maybe_governor: Option<&CameraGovernorConfig>) -> VideoLayerInfo {
     let Some(config) = maybe_governor else {
+      // An ungoverned track (a screen share) on a limited uplink keeps its resolution and lowers
+      // its frame rate with its bitrate (#1733).
       return VideoLayerInfo {
         max_bitrate_bps: self.bitrate_bps,
-        ..self.info
+        max_framerate: share_framerate(&self.info, self.bitrate_bps),
+        ..self.info.clone()
       };
     };
     let limit = self.limit(framerate, config);
     VideoLayerInfo {
       max_bitrate_bps: limit.bitrate_bps(self.bitrate_bps, config),
       max_framerate: limit.framerate(framerate).min(self.info.max_framerate),
-      ..self.info
+      ..self.info.clone()
     }
   }
 
@@ -1077,13 +1378,11 @@ impl Encoding {
 }
 
 impl Encoding {
-  /// A camera's layer is encoded at its own frame rate (lower while governed, #1762); a screen
-  /// share's at the track's, as before.
+  /// Every layer is encoded at its own frame rate: a camera's lower while governed (#1762), a
+  /// share's base layer at what text needs and its top at what the CPU and the uplink allow
+  /// (#1733).
   fn layer_framerate(&self, info: &VideoLayerInfo) -> u8 {
-    match self.kind {
-      VideoTrackKind::Camera => info.max_framerate,
-      _ => self.framerate,
-    }
+    info.max_framerate.max(1)
   }
 }
 
@@ -1141,7 +1440,6 @@ impl LayerEncoder {
     Ok(Self {
       encoder,
       config,
-      is_framerate_per_layer: encoding.kind == VideoTrackKind::Camera,
       _output: output,
       _error: error,
     })
@@ -1177,9 +1475,7 @@ impl FrameEncoder for LayerEncoder {
       js_sys::Reflect::set(&self.config, &JsValue::from_str(key), &value).map_err(browser("VideoEncoder"))
     };
     set("bitrate", JsValue::from(bitrate_bps))?;
-    if self.is_framerate_per_layer {
-      set("framerate", JsValue::from(framerate))?;
-    }
+    set("framerate", JsValue::from(framerate.max(1)))?;
     self
       .encoder
       .configure(&self.config)
@@ -2490,6 +2786,86 @@ mod tests {
 
   /// Issue #1762: a camera's layers are held to their bitrate, and its frame rate follows the
   /// encoders' load.
+  /// #1733: a share's layers at their own frame rates, a limited uplink lowering the top's
+  /// rate instead of its size, and the ladder's steps applied in place or by new encoders.
+  mod share_layers {
+    use super::*;
+
+    #[test]
+    fn a_slower_layer_takes_every_n_th_frame() {
+      let (bench, mut encoders) = encoders(2);
+      let mut infos = encoders.infos();
+      infos[0].max_framerate = 15;
+      assert!(encoders.update_infos(&infos).unwrap());
+      for _ in 0..4 {
+        encoders.encode(&(), false).unwrap();
+      }
+      let coded = &bench.borrow().coded;
+      assert_eq!(coded.iter().filter(|(layer, ..)| *layer == 0).count(), 2);
+      assert_eq!(coded.iter().filter(|(layer, ..)| *layer == 1).count(), 4);
+    }
+
+    /// The uplink gives the top layer a fifth of its bitrate: it keeps its size and gets a
+    /// fifth of the frames, at a matching frame rate.
+    #[test]
+    fn a_lower_bitrate_lowers_the_frame_rate_not_the_size() {
+      let (bench, mut encoders) = encoders(2);
+      encoders.set_bitrates(&[(1, 60_000)]).unwrap();
+      assert_eq!(bench.borrow().framerates.last(), Some(&(1, 6)));
+      for _ in 0..10 {
+        encoders.encode(&(), false).unwrap();
+      }
+      let top = bench
+        .borrow()
+        .coded
+        .iter()
+        .filter(|(layer, ..)| *layer == 1)
+        .count();
+      assert_eq!(top, 2);
+      assert_eq!(encoders.infos()[1].width, 640);
+    }
+
+    /// A rate step keeps the encoders; a new codec or a layer less doesn't fit in place.
+    #[test]
+    fn rate_steps_apply_in_place_other_steps_need_new_layers() {
+      let (bench, mut encoders) = encoders(2);
+      let mut slower = encoders.infos();
+      slower[1].max_framerate = 10;
+      assert!(encoders.update_infos(&slower).unwrap());
+      assert_eq!(bench.borrow().opened.len(), 2, "no new encoder");
+      assert_eq!(bench.borrow().framerates.last(), Some(&(1, 10)));
+      let mut av1 = slower.clone();
+      av1[1].maybe_codec = Some(VideoCodec::Av1);
+      assert!(!encoders.update_infos(&av1).unwrap());
+      assert!(!encoders.update_infos(&slower[..1]).unwrap());
+      assert_eq!(encoders.infos(), slower, "nothing changed");
+    }
+
+    #[test]
+    fn replaced_layers_get_new_encoders_that_start_with_keyframes() {
+      let (bench, mut encoders) = encoders(3);
+      encoders.encode(&(), false).unwrap();
+      let shared = Rc::clone(&bench);
+      let mut fewer = encoders.infos();
+      fewer.remove(1);
+      fewer[1].layer = 1;
+      encoders
+        .replace_layers(fewer.clone(), move |info, generation| {
+          shared.borrow_mut().open(info.layer, generation)?;
+          Ok(FakeEncoder {
+            layer: info.layer,
+            generation,
+            bench: Rc::clone(&shared),
+          })
+        })
+        .unwrap();
+      assert_eq!(encoders.infos(), fewer);
+      assert_eq!(bench.borrow().opened[3..], [(0, 3), (1, 4)]);
+      encoders.encode(&(), false).unwrap();
+      assert_eq!(bench.borrow().coded[3..], [(0, 3, true), (1, 4, true)]);
+    }
+  }
+
   mod governed {
     use std::time::Duration;
 

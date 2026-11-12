@@ -579,6 +579,7 @@ impl Host {
       }),
       status_cues: status_cues(sounds),
       maybe_worklet_url: Some(self.worklet_url.clone()),
+      av1_encoding: codecs.av1_encoding,
       is_muted_at_start,
     };
     let requires_background = prepared.requires_background;

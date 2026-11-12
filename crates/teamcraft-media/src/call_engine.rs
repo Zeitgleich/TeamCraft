@@ -1275,6 +1275,7 @@ impl CallEngine {
         maybe_frames_skipped: None,
         maybe_held_back_ms: Some(u64::try_from(track.counters.held_back.as_millis()).unwrap_or(u64::MAX)),
         maybe_camera_limits: None,
+        maybe_share_limits: None,
       })
     });
     let mut remote: Vec<(&StreamId, &IncomingVideo)> = self.remote_video.iter().collect();

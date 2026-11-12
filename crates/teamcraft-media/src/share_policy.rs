@@ -23,7 +23,10 @@
 //! reverse order. Pure policy: the driver feeds the inputs and builds encoders from the layers.
 
 use teamcraft_proto::{ScreenContentMode, VideoCodec, VideoLayerInfo};
+// `std::time::Instant` on native; the browser clock on wasm, where `std` has none.
+use web_time::Instant;
 
+use crate::camera_governor::{CameraGovernorConfig, EncoderLoad, FrameTally, OverloadReason};
 use crate::video::{ScreenProfile, VideoResolution, fit_within, screen_bitrate_bps};
 
 /// The base layer's largest picture: 480p, turned upright for a portrait source.
@@ -105,13 +108,30 @@ pub struct ShareLadder {
   steps: Vec<ShareStep>,
 }
 
-/// Why a share's top layer is what it is (stats for nerds).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ShareLimit {
-  /// Sent as planned.
-  Unlimited,
-  /// The encoders fell behind: the ladder stepped down (`level` steps of [`ShareLadder::len`]).
-  Cpu { level: usize },
+/// A share's encoders against the frames they get, on its [`ShareLadder`]: down a step when they
+/// fall behind (frames queued or skipped, encode time against the frame interval), back up in
+/// reverse after a calm period, waiting longer after each step up that didn't hold. The same
+/// load controller as a camera's ([`EncoderLoad`]); the ladder is the share's own.
+#[derive(Debug, Clone)]
+pub struct ShareGovernor {
+  ladder: ShareLadder,
+  load: EncoderLoad,
+  config: CameraGovernorConfig,
+}
+
+/// Why a share's layers are what they are (stats for nerds).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareLimits {
+  /// How the sender encodes AV1.
+  pub av1: Av1Encoding,
+  /// The full plan's step and the step now.
+  pub planned: ShareStep,
+  pub now: ShareStep,
+  /// Steps down the ladder, of [`ShareLadder::len`] less one.
+  pub level: usize,
+  pub levels: usize,
+  /// Why the encoders were last found overloaded, while below the plan.
+  pub maybe_reason: Option<OverloadReason>,
 }
 
 impl ShareLadder {
@@ -154,6 +174,81 @@ impl ShareLadder {
   /// [`Self::track_codec`] naming it.
   pub fn layers(&self, level: usize) -> Vec<VideoLayerInfo> {
     share_layers(&self.plan, self.step(level))
+  }
+}
+
+impl ShareGovernor {
+  /// Starts at the full plan of `plan`.
+  pub fn new(plan: SharePlan, now: Instant) -> Self {
+    Self::with_config(plan, CameraGovernorConfig::default(), now)
+  }
+
+  pub fn with_config(plan: SharePlan, config: CameraGovernorConfig, now: Instant) -> Self {
+    let ladder = ShareLadder::new(plan);
+    let load = EncoderLoad::with_levels(ladder.len(), now);
+    Self { ladder, load, config }
+  }
+
+  pub fn ladder(&self) -> &ShareLadder {
+    &self.ladder
+  }
+
+  pub fn level(&self) -> usize {
+    self.load.level()
+  }
+
+  /// What the encoders get now.
+  pub fn step(&self) -> &ShareStep {
+    self.ladder.step(self.level())
+  }
+
+  /// The layers now, lowest first.
+  pub fn layers(&self) -> Vec<VideoLayerInfo> {
+    self.ladder.layers(self.level())
+  }
+
+  /// The codec the share is published in now.
+  pub fn track_codec(&self) -> VideoCodec {
+    self.ladder.track_codec(self.level())
+  }
+
+  /// A frame was given to the encoders (or an encoded one came back with its encode time).
+  pub fn on_frame(&mut self, tally: FrameTally) {
+    self.load.on_frame(tally);
+  }
+
+  /// Measures afresh from `now`: the encoders were replaced or paused.
+  pub fn measure_afresh(&mut self, now: Instant) {
+    self.load.measure_afresh(now);
+  }
+
+  /// Judges the encoders' load once a window is whole; the new level when it changed.
+  pub fn evaluate(&mut self, now: Instant) -> Option<usize> {
+    self.load.evaluate(now, &self.config)
+  }
+
+  /// Plans the share anew (the source was resized, the viewers' codecs changed): the load and
+  /// its level carry over where the new ladder has as many steps, else it starts at the plan.
+  pub fn replan(&mut self, plan: SharePlan, now: Instant) {
+    if plan == *self.ladder.plan() {
+      return;
+    }
+    let ladder = ShareLadder::new(plan);
+    if ladder.len() != self.ladder.len() {
+      self.load = EncoderLoad::with_levels(ladder.len(), now);
+    }
+    self.ladder = ladder;
+  }
+
+  pub fn limits(&self) -> ShareLimits {
+    ShareLimits {
+      av1: self.ladder.plan().av1,
+      planned: self.ladder.step(0).clone(),
+      now: self.step().clone(),
+      level: self.level(),
+      levels: self.ladder.len().saturating_sub(1),
+      maybe_reason: self.load.maybe_reason(),
+    }
   }
 }
 
@@ -296,7 +391,7 @@ fn share_layers(plan: &SharePlan, step: &ShareStep) -> Vec<VideoLayerInfo> {
   let is_detail = plan.profile.mode != ScreenContentMode::Motion;
   if top.height > base.height || top.width > base.width {
     let framerate = if is_detail {
-      step.top_framerate.min(BASE_DETAIL_FRAMERATE).max(1)
+      step.top_framerate.clamp(1, BASE_DETAIL_FRAMERATE)
     } else {
       step.top_framerate
     };
@@ -598,6 +693,139 @@ mod tests {
       assert_eq!(rates.first(), Some(&60));
       assert_eq!(rates.last(), Some(&30));
       assert!(rates[..rates.len() - 1].iter().all(|rate| *rate == 60));
+    }
+  }
+
+  /// The share's encoder-load controller (#1733, the comment of 2026-11-11): overloaded windows
+  /// walk the ladder down in its order, a calm period walks it back up in reverse, and a step up
+  /// that doesn't hold makes the next wait longer.
+  mod governor {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn overload_steps_down_in_the_ladders_order_keeping_the_base() {
+      let start = Instant::now();
+      let mut governor = ShareGovernor::new(plan(QHD, Av1Encoding::Software, both(VideoCodec::Av1)), start);
+      let mut now = start;
+      let mut seen = vec![governor.step().clone()];
+      while governor.level() + 1 < governor.ladder().len() {
+        now = window(&mut governor, now, overloaded());
+        assert!(
+          governor.evaluate(now).is_some(),
+          "a step down per overloaded window"
+        );
+        seen.push(governor.step().clone());
+        let layers = governor.layers();
+        assert_eq!((layers[0].width, layers[0].height), (852, 480));
+      }
+      assert_eq!(seen, governor.ladder().steps());
+      assert_eq!(
+        governor.limits().maybe_reason,
+        Some(OverloadReason::SkippedFrames)
+      );
+      now = window(&mut governor, now, overloaded());
+      assert_eq!(governor.evaluate(now), None, "nothing below the last step");
+    }
+
+    /// Encoding that takes most of the frame interval counts as overload too, also with an
+    /// empty queue: the browser's encoder falls behind the capture.
+    #[test]
+    fn slow_encoding_steps_down() {
+      let start = Instant::now();
+      let mut governor = ShareGovernor::new(plan(QHD, Av1Encoding::Hardware, both(VideoCodec::Av1)), start);
+      let slow = FrameTally {
+        given: 1,
+        encode_time: Duration::from_millis(32),
+        frame_interval: Duration::from_millis(33),
+        ..FrameTally::default()
+      };
+      let now = window(&mut governor, start, slow);
+      assert_eq!(governor.evaluate(now), Some(1));
+      assert_eq!(governor.step().top_framerate, 20);
+      assert_eq!(governor.limits().maybe_reason, Some(OverloadReason::SlowEncoding));
+    }
+
+    #[test]
+    fn calm_recovers_in_reverse_with_hysteresis_and_backoff() {
+      let start = Instant::now();
+      let mut governor = ShareGovernor::new(plan(QHD, Av1Encoding::Hardware, both(VideoCodec::Av1)), start);
+      let mut now = start;
+      for _ in 0..3 {
+        now = window(&mut governor, now, overloaded());
+        governor.evaluate(now);
+      }
+      assert_eq!(governor.level(), 3);
+      // Calm windows: nothing for the calm period, then one step up at a time.
+      let calm_period = CameraGovernorConfig::default().calm_period;
+      let calm_since = now;
+      let mut ups = Vec::new();
+      while governor.level() > 1 {
+        now = window(&mut governor, now, calm());
+        if let Some(level) = governor.evaluate(now) {
+          ups.push((level, now.saturating_duration_since(calm_since)));
+        }
+      }
+      assert_eq!(ups[0].0, 2);
+      assert!(ups[0].1 >= calm_period, "{ups:?}");
+      // The step up didn't hold: back down at once, and the next one waits twice as long.
+      now = window(&mut governor, now, overloaded());
+      assert_eq!(governor.evaluate(now), Some(2));
+      let calm_since = now;
+      let mut waited = None;
+      while waited.is_none() {
+        now = window(&mut governor, now, calm());
+        if governor.evaluate(now).is_some() {
+          waited = Some(now.saturating_duration_since(calm_since));
+        }
+      }
+      assert!(waited.unwrap() >= calm_period * 2, "{waited:?}");
+    }
+
+    /// New codecs (a viewer without AV1 joined) keep the load's level where the ladder keeps
+    /// its length.
+    #[test]
+    fn a_replan_keeps_the_level_where_it_can() {
+      let start = Instant::now();
+      let mut governor = ShareGovernor::new(plan(QHD, Av1Encoding::Hardware, both(VideoCodec::Av1)), start);
+      let now = window(&mut governor, start, overloaded());
+      governor.evaluate(now);
+      let codecs = ShareCodecs {
+        by_all: VideoCodec::H264,
+        maybe_by_some: Some(VideoCodec::Av1),
+      };
+      governor.replan(plan(QHD, Av1Encoding::Hardware, codecs), now);
+      assert_eq!(governor.level(), 1);
+      assert_eq!(
+        governor.layers()[1].maybe_codec,
+        None,
+        "the middle layer in H.264"
+      );
+    }
+
+    /// Feeds a load window of 30 fps frames of `tally`; the time at its end.
+    fn window(governor: &mut ShareGovernor, from: Instant, tally: FrameTally) -> Instant {
+      let config = CameraGovernorConfig::default();
+      for _ in 0..(config.load_window.as_millis() / 33) {
+        governor.on_frame(tally);
+      }
+      from + config.load_window
+    }
+
+    fn overloaded() -> FrameTally {
+      FrameTally {
+        given: 1,
+        skipped: 2,
+        ..FrameTally::default()
+      }
+    }
+
+    fn calm() -> FrameTally {
+      FrameTally {
+        given: 3,
+        ..FrameTally::default()
+      }
     }
   }
 

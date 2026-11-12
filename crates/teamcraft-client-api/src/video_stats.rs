@@ -83,6 +83,46 @@ pub struct SentVideoStats {
   /// shares, the desktop's encoders).
   #[serde(default)]
   pub maybe_camera_limits: Option<CameraLimitsStats>,
+  /// Why an own screen share's layers are what they are (#1733); `None` for cameras and where
+  /// no share policy runs (the desktop's encoders).
+  #[serde(default)]
+  pub maybe_share_limits: Option<ShareLimitsStats>,
+}
+
+/// What a screen share's policy made of its layers (#1733): the plan from the viewers' codecs and
+/// this device's AV1 encoder, and the step the encoders' load holds it at now.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShareLimitsStats {
+  pub av1_encoder: Av1EncoderKind,
+  pub planned: ShareStepStats,
+  pub now: ShareStepStats,
+  /// Steps down the ladder, of `levels`.
+  pub level: u8,
+  pub levels: u8,
+  /// Why the encoders were found overloaded, while the share runs below its plan.
+  #[serde(default)]
+  pub maybe_overload: Option<EncoderOverload>,
+}
+
+/// One step of a share's ladder: its top layer and whether the middle layer is sent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShareStepStats {
+  pub top_codec: VideoCodec,
+  pub top_framerate: u8,
+  /// The top layer's size in per mille of the share's full picture.
+  pub top_scale_per_mille: u16,
+  pub has_middle: bool,
+}
+
+/// How the device encodes AV1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Av1EncoderKind {
+  Hardware,
+  Software,
+  Unavailable,
+  #[serde(other)]
+  Unknown,
 }
 
 /// Why an own camera sends less than it was planned with (#1762): its encoders didn't keep up
@@ -378,6 +418,7 @@ mod tests {
       maybe_frames_skipped: None,
       maybe_held_back_ms: Some(0),
       maybe_camera_limits: None,
+      maybe_share_limits: None,
     }
   }
 }
