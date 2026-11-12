@@ -26,6 +26,7 @@ mod cached_start;
 mod calls;
 mod client_outages;
 mod conversion;
+mod demo_signin;
 mod dependency_outages;
 mod deployed;
 #[cfg(feature = "desktop")]
