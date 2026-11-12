@@ -35,6 +35,18 @@ pub struct FilesPage {
   pub has_more: bool,
 }
 
+impl FilesPage {
+  /// The page of the first `limit` of `found` (newest first); one more found means more exist.
+  pub fn of_found(mut found: Vec<FileInfo>, limit: usize) -> Self {
+    let has_more = found.len() > limit;
+    found.truncate(limit);
+    Self {
+      files: found,
+      has_more,
+    }
+  }
+}
+
 /// What the Files view asks for.
 #[derive(Clone, Copy, Debug)]
 pub struct FilesQuery<'a> {
