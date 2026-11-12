@@ -736,6 +736,10 @@ pub struct ActiveCall {
   /// the UI says the computer is busy. A calm hint, not an error.
   #[serde(default)]
   pub is_video_limited_by_device: bool,
+  /// This device's own camera or screen capture gets buffers it can't turn into pictures
+  /// (#1805): the others see a still picture, and the UI tells the sharer to share again.
+  #[serde(default)]
+  pub is_own_capture_stalled: bool,
   /// Somebody added people to this DM call: it moved into this meeting chat, and the UI switches
   /// over to its call (docs/meetings.md, "A call becomes a meeting").
   #[serde(default, skip_serializing_if = "Option::is_none")]

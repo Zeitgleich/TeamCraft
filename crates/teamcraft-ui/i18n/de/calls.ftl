@@ -300,6 +300,7 @@ call-connecting = Verbindung wird hergestellt …
 call-reconnecting = Verbindung unterbrochen, wird wiederhergestellt …
 call-limited-network = Eingeschränktes Netzwerk, die Gesprächsqualität kann geringer sein
 call-device-busy = Dein Computer ist ausgelastet: Videoqualität reduziert
+call-capture-stalled = Die anderen sehen von deinem Bildschirm oder deiner Kamera nur ein Standbild. Beende es und starte es neu.
 call-encryption-failed = Dein Gerät konnte nicht in die Verschlüsselung des Anrufs aufgenommen werden, du hörst also niemanden und wirst nicht gehört. Andere im Anruf können dieses Gerät eventuell nicht überprüfen.
 call-encryption-retry = Erneut versuchen
 call-encryption-retry-in = { $count ->

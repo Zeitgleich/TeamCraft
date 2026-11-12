@@ -67,6 +67,7 @@ use crate::call_resilience::{
   ReconnectSchedule, RejoinPacer, ResilienceConfig, SWITCH_DRAIN_TIMEOUT, connect_preferring_quic,
   fallback_delay, rejoin_attempt,
 };
+use crate::capture_health::{CaptureStallWatch, StallChange};
 use crate::fallback_link::{
   FallbackOpener, LoopbackOpener, SignalFrames, SocketEnd, SocketInput, is_allowed_url, is_going_away,
   read_socket,
@@ -341,6 +342,9 @@ struct VideoState {
   send_warning: RepeatedWarning,
   /// When the counters were last looked at, and what they were.
   maybe_last_log: Option<(Instant, VideoCounts)>,
+  /// Own captures that count their buffers, by publication: whether they still give pictures
+  /// (#1805).
+  capture_watches: Vec<(VideoPublicationId, VideoTrackKind, CaptureStallWatch)>,
 }
 
 /// An own track whose capture and encoder thread start on a blocking task.
@@ -894,6 +898,10 @@ async fn run_call(
         sinks.video.govern_shares(&mut engine, now);
         sinks.video.log_counts(now);
         sinks.judge_receive_load(&mut engine, now);
+        for event in sinks.video.judge_captures(now) {
+          // The app may have stopped listening; the call goes on.
+          let _ = sinks.events.send(event);
+        }
       },
       Some((kind, frame)) = encoded_rx.recv() => sinks.video.send(&mut engine, &kind, &frame, Instant::now()),
       fetched = fetched_trust(&mut maybe_trust_fetch) => {
@@ -2616,6 +2624,7 @@ impl VideoState {
       sent.maybe_frames_captured = Some(progress.frames_captured);
       sent.maybe_frames_black = Some(progress.frames_black);
       sent.maybe_share_limits = sender.share_limits().map(crate::share_policy::ShareLimits::stats);
+      sent.maybe_capture_buffers = progress.maybe_capture_buffers.map(Into::into);
     }
   }
 
@@ -2661,6 +2670,58 @@ impl VideoState {
       engine.publish_video_adapting_in_place(republished, sender.kind.clone(), VideoCodec::H264, layers);
       *publication = OwnPublication::new(republished);
     }
+  }
+
+  /// Judges the own captures that count their buffers ([`CaptureStallWatch`], #1805): an event
+  /// for each that stalled or recovered.
+  fn judge_captures(&mut self, now: Instant) -> Vec<CallEngineEvent> {
+    let mut events = Vec::new();
+    let senders = &self.senders;
+    // A stalled track that went away (stopped, ended) takes its hint with it.
+    self.capture_watches.retain(|(id, kind, watch)| {
+      let is_kept = senders.iter().any(|(_, publication)| publication.id == *id);
+      if !is_kept && watch.is_stalled() {
+        events.push(CallEngineEvent::CaptureRecovered(kind.clone()));
+      }
+      is_kept
+    });
+    for (sender, publication) in &self.senders {
+      let Some(counts) = sender.progress().maybe_capture_buffers else {
+        continue;
+      };
+      let index = match self
+        .capture_watches
+        .iter()
+        .position(|(id, ..)| *id == publication.id)
+      {
+        Some(index) => index,
+        None => {
+          self
+            .capture_watches
+            .push((publication.id, sender.kind.clone(), CaptureStallWatch::new()));
+          self.capture_watches.len() - 1
+        },
+      };
+      let Some(change) = self.capture_watches[index].2.observe(counts, now) else {
+        continue;
+      };
+      let kind = sender.kind.clone();
+      events.push(match change {
+        StallChange::Stalled(window) => {
+          warn!(
+            ?kind,
+            ?window,
+            "own capture gets buffers it can't turn into pictures"
+          );
+          CallEngineEvent::CaptureStalled { kind, window }
+        },
+        StallChange::Recovered => {
+          info!(?kind, "own capture gives pictures again");
+          CallEngineEvent::CaptureRecovered(kind)
+        },
+      });
+    }
+    events
   }
 
   /// Kinds of own tracks whose capture ended by itself, and whether they sent pictures before.

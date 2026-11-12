@@ -23,7 +23,7 @@ use teamcraft_proto::{VideoCodec, VideoTrackKind};
 
 use super::event::{CrashEvent, CrashLevel, ErrorSource, EventId, hex};
 use super::scrub::MAX_BREADCRUMBS;
-use crate::video_stats::EncoderImplementation;
+use crate::video_stats::{CaptureBufferStats, EncoderImplementation};
 
 /// Lines of the call's own trail a report carries at most (its breadcrumbs, beside the log's).
 pub const MAX_CALL_TRAIL: usize = 20;
@@ -103,8 +103,29 @@ pub enum CallProblem {
   ProtocolError { what: String },
   /// A call that went badly, summed up at its end; only over a threshold.
   PoorCall(CallQualitySummary),
+  /// An own track's capture got buffers from its source it couldn't turn into pictures (#1805):
+  /// the others saw a still picture while the screen moved. What came over `window_s`.
+  CaptureStalled {
+    video: VideoTrackKind,
+    window: CaptureBufferStats,
+    window_s: u32,
+  },
   #[serde(other)]
   Unknown,
+}
+
+/// Which unusable buffers of a stalled capture were the most (fingerprint and title): the cause
+/// differs, so do the issues.
+fn unusable_reason(window: &CaptureBufferStats) -> &'static str {
+  let reasons = [
+    (window.unmapped, "unmapped"),
+    (window.corrupted, "corrupted"),
+    (window.unreadable, "unreadable"),
+  ];
+  reasons
+    .iter()
+    .max_by_key(|(count, _)| *count)
+    .map_or("unknown", |(_, reason)| reason)
 }
 
 /// Why a held DAVE group wasn't resumed.
@@ -323,6 +344,7 @@ impl CallProblem {
       Self::SfuRejected { .. } => "sfu_rejected",
       Self::ProtocolError { .. } => "protocol_error",
       Self::PoorCall(_) => "poor_call",
+      Self::CaptureStalled { .. } => "capture_stalled",
       Self::Unknown => "unknown",
     }
   }
@@ -338,7 +360,8 @@ impl CallProblem {
       | Self::Unverified { .. }
       | Self::VideoEncodingFailed { .. }
       | Self::CallFailed { .. }
-      | Self::ProtocolError { .. } => CrashLevel::Error,
+      | Self::ProtocolError { .. }
+      | Self::CaptureStalled { .. } => CrashLevel::Error,
       Self::ResumeFailed {
         cause: ResumeFailure::NotResumed,
       }
@@ -366,6 +389,7 @@ impl CallProblem {
       Self::SfuRejected { .. } => "CallSfuRejected",
       Self::ProtocolError { .. } => "CallProtocolError",
       Self::PoorCall(_) => "PoorCall",
+      Self::CaptureStalled { .. } => "CaptureStalled",
       Self::Unknown => "CallProblem",
     }
   }
@@ -404,6 +428,10 @@ impl CallProblem {
       },
       Self::SfuRejected { code } => parts.push(code.clone()),
       Self::ProtocolError { what } => parts.push(what.clone()),
+      Self::CaptureStalled { video, window, .. } => {
+        parts.push(video.as_str().to_owned());
+        parts.push(unusable_reason(window).to_owned());
+      },
       _ => {},
     }
     parts
@@ -464,6 +492,11 @@ impl CallProblem {
       Self::SfuRejected { code } => format!("the SFU refused a request: {code}"),
       Self::ProtocolError { what } => format!("protocol violation: {what}"),
       Self::PoorCall(_) => "a call went badly".to_owned(),
+      Self::CaptureStalled { video, window, .. } => format!(
+        "{} capture gets buffers it can't use ({})",
+        video.as_str(),
+        unusable_reason(window)
+      ),
       Self::Unknown => "call problem".to_owned(),
     }
   }
@@ -478,6 +511,14 @@ impl CallProblem {
       },
       Self::VideoFreeze { frozen_s, .. } => json!({ "frozen_s": frozen_s }),
       Self::PoorCall(summary) => serde_json::to_value(summary).unwrap_or(Value::Null),
+      Self::CaptureStalled { window, window_s, .. } => json!({
+        "window_s": window_s,
+        "pictures": window.pictures,
+        "cursor_only": window.cursor_only,
+        "corrupted": window.corrupted,
+        "unmapped": window.unmapped,
+        "unreadable": window.unreadable,
+      }),
       _ => Value::Null,
     }
   }
@@ -517,6 +558,15 @@ impl CallProblem {
         codec: scrub_codec(codec),
         frozen_s,
         is_media_arriving,
+      },
+      Self::CaptureStalled {
+        video,
+        window,
+        window_s,
+      } => Self::CaptureStalled {
+        video: scrub_kind(video),
+        window,
+        window_s,
       },
       other => other,
     }
@@ -976,6 +1026,26 @@ mod tests {
         })
       };
       assert_eq!(poor(10).fingerprint(), poor(300).fingerprint());
+      // #1805: a stalled capture by its kind and what kept its buffers from becoming pictures.
+      let stalled = |unmapped, corrupted| CallProblem::CaptureStalled {
+        video: VideoTrackKind::Screen,
+        window: CaptureBufferStats {
+          unmapped,
+          corrupted,
+          ..CaptureBufferStats::default()
+        },
+        window_s: 5,
+      };
+      assert_eq!(
+        stalled(150, 3).fingerprint(),
+        ["call", "capture_stalled", "screen", "unmapped"]
+      );
+      assert_eq!(stalled(150, 3).fingerprint(), stalled(90, 0).fingerprint());
+      assert_eq!(
+        stalled(0, 40).fingerprint(),
+        ["call", "capture_stalled", "screen", "corrupted"]
+      );
+      assert_eq!(stalled(1, 0).level(), CrashLevel::Error);
     }
   }
 

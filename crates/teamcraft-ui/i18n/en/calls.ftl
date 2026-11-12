@@ -300,6 +300,7 @@ call-connecting = Connecting…
 call-reconnecting = Connection lost, reconnecting…
 call-limited-network = Limited network, call quality may be lower
 call-device-busy = Your computer is busy: video quality reduced
+call-capture-stalled = The others see only a still picture of your screen or camera. Stop it and start it again.
 call-encryption-failed = Your device couldn't be added to the call's encryption, so you can't hear or be heard. Others in the call may not be able to verify this device.
 call-encryption-retry = Try again
 call-encryption-retry-in = { $count ->

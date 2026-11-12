@@ -4,7 +4,7 @@
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self as std_mpsc, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -15,6 +15,7 @@ use tracing::{debug, info, warn};
 
 use crate::call_video::ReceivedVideoFrame;
 use crate::camera_governor::FrameTally;
+use crate::capture_health::{BufferCounts, CaptureHealth};
 use crate::picture_check::{PictureContent, picture_content};
 use crate::share_policy::{EncoderKind, ShareCodecs, ShareEncoders, ShareLimits, SharePlan, UplinkTop};
 use crate::share_steps::{ShareChange, ShareSteps};
@@ -201,6 +202,8 @@ struct SendCounters {
   encoder_names: Mutex<String>,
   /// The encoders' load since the call last took it (#1777).
   load: Mutex<FrameTally>,
+  /// What became of the capture's buffers, where it counts them (#1805).
+  maybe_capture_health: OnceLock<CaptureHealth>,
   /// Waits for a frame that ended without one: lets tests know the thread idled.
   #[cfg(test)]
   idle_polls: AtomicU64,
@@ -214,6 +217,8 @@ pub struct SendProgress {
   pub pictures_encoded: u64,
   /// Captured frames that showed nothing but black.
   pub frames_black: u64,
+  /// What became of the capture's buffers, where it counts them (#1805).
+  pub maybe_capture_buffers: Option<BufferCounts>,
 }
 
 /// What an own track's encoder thread works with now (stats for nerds, #938).
@@ -376,6 +381,10 @@ impl VideoSender {
     let (first_picture, first_picture_rx) = oneshot::channel();
     let (black_notice, black_rx) = oneshot::channel();
     let counters = Arc::new(SendCounters::default());
+    if let Some(health) = capture.health() {
+      // Invariant: the counters were just made; nothing set this yet.
+      let _ = counters.maybe_capture_health.set(health);
+    }
     let encoder_loop = EncoderLoop {
       kind: kind.clone(),
       layers: layers.clone(),
@@ -1183,6 +1192,7 @@ impl SendCounters {
       frames_captured: self.captured.load(Ordering::Relaxed),
       pictures_encoded: self.encoded.load(Ordering::Relaxed),
       frames_black: self.black.load(Ordering::Relaxed),
+      maybe_capture_buffers: self.maybe_capture_health.get().map(CaptureHealth::stats),
     }
   }
 
@@ -1748,6 +1758,7 @@ mod tests {
           frames_captured: 1,
           pictures_encoded: 1,
           frames_black: 0,
+          maybe_capture_buffers: None,
         }
       );
     }
@@ -2244,6 +2255,52 @@ mod tests {
         .await
         .expect("the track stopped");
       assert_eq!(progress.pictures_encoded, 1);
+    }
+
+    /// #1805: what became of the buffers of a capture that counts them reaches the track's
+    /// progress, and so the call's stats and its stall watch.
+    #[tokio::test]
+    async fn a_capture_that_counts_its_buffers_reports_them() {
+      let pushed = Arc::new(Mutex::new(None));
+      let health = CaptureHealth::new();
+      let (sender, first_picture, _encoded_rx) = start_sender(
+        Box::new(Counting(
+          SharedCapture(manual_capture(), Arc::clone(&pushed)),
+          health.clone(),
+        )),
+        fake_encoders(),
+      );
+      let frames = pushed.lock().unwrap().clone().unwrap();
+      assert!(frames.send(test_pattern(VGA, 0, 0).unwrap()));
+      assert_eq!(first_picture.wait().await, Ok(()));
+      health.record(crate::capture_health::BufferOutcome::Picture);
+      for _ in 0..3 {
+        health.record(crate::capture_health::BufferOutcome::Unmapped);
+      }
+      let counts = sender.progress().maybe_capture_buffers.unwrap();
+      assert_eq!((counts.pictures, counts.unmapped, counts.unusable()), (1, 3, 3));
+      drop(frames);
+    }
+
+    /// A capture that counts its buffers in `health` (#1805).
+    struct Counting(SharedCapture, CaptureHealth);
+
+    impl VideoCapture for Counting {
+      fn format(&self) -> CaptureFormat {
+        self.0.format()
+      }
+
+      fn start(&mut self, frames: crate::video_capture::FrameSender) -> Result<(), CaptureError> {
+        self.0.start(frames)
+      }
+
+      fn stop(&mut self) {
+        self.0.stop();
+      }
+
+      fn health(&self) -> Option<CaptureHealth> {
+        Some(self.1.clone())
+      }
     }
 
     /// A capture with a short stall limit.

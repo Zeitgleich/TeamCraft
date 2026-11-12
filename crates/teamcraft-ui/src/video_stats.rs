@@ -1019,6 +1019,7 @@ mod tests {
       maybe_held_back_ms: None,
       maybe_camera_limits: None,
       maybe_share_limits: None,
+      maybe_capture_buffers: None,
     })
   }
 
