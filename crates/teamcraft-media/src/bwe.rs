@@ -185,8 +185,7 @@ pub struct SendSideEstimator {
   recent_sends: VecDeque<(Instant, usize)>,
   recent_sent_bytes: usize,
   maybe_first_send_at: Option<Instant>,
-  /// What a probe at the start showed the path carries ([`SendSideEstimator::apply_probe`]): the
-  /// fast start grows no further.
+  /// What a probe at the start showed the path carries ([`SendSideEstimator::apply_probe`]).
   maybe_probed_bps: Option<f64>,
 }
 
@@ -395,12 +394,24 @@ impl SendSideEstimator {
   /// forgotten, and the estimate grows as fast as at the start until the path shows congestion.
   /// Packets in flight still meet their feedback.
   pub fn measure_afresh(&mut self) {
-    // What a probe showed of the path stands in for the start value, a guess.
+    // The fast start ramps up from the start value as without a probe: jumping to what the probe
+    // showed sent a new share's keyframes of every layer at once into the link's queue, and a
+    // slide was lost (screen_uplink_bursts). Nor does the ramp stop at the probed capacity: an
+    // estimate held right at it left no room for a slide's burst, where the overshoot and its
+    // cut to 85 % of what got through do. The probe only lowers the start on a link narrower
+    // than it.
+    let start_bps = f64::from(self.config.start_bps);
     let start = self
       .maybe_probed_bps
-      .map_or(f64::from(self.config.start_bps), |probed| probed * PROBE_SHARE);
-    self.estimate_bps = self
-      .estimate_bps
+      .map_or(start_bps, |probed| start_bps.min(probed * PROBE_SHARE));
+    // An estimate the probe set and no traffic has filled since (a call of sound only) counts
+    // only as far as what got through would let it grow (the application-limited ceiling).
+    let carried = if self.maybe_probed_bps.is_some() {
+      self.estimate_bps.min(1.5 * self.acked_bps() + 10_000.0)
+    } else {
+      self.estimate_bps
+    };
+    self.estimate_bps = carried
       .max(start)
       .clamp(f64::from(self.config.min_bps), self.ceiling_bps());
     self.delay = DelayDetector::new();
@@ -422,8 +433,8 @@ impl SendSideEstimator {
   }
 
   /// A probe at the start showed the path carries `capacity_bps` (`crate::join_probe`): the
-  /// estimate takes [`PROBE_SHARE`] of it at once, whether that is more or less than it has now;
-  /// the fast start ends now, and after [`Self::measure_afresh`] it ends at the capacity. A narrow
+  /// estimate takes [`PROBE_SHARE`] of it at once, whether that is more or less than it has now,
+  /// and the fast start ends. A narrow
   /// link isn't overshot by the fast start and then cut (a 1 Mbit/s link went to 2.7 Mbit/s in two seconds
   /// before its first loss), and a wide one doesn't wait for the estimate to grow. From there the
   /// estimate grows as usual, should the probe have shown too little.
@@ -573,16 +584,7 @@ impl SendSideEstimator {
             f64::MAX
           };
           let ceiling = app_limited_ceiling.max(self.maybe_demand_bps.map_or(0.0, f64::from));
-          let mut grown = self.estimate_bps * growth;
-          // The fast start ends where a probe showed the path ends.
-          if self.is_starting
-            && let Some(probed) = self.maybe_probed_bps
-            && grown >= probed
-          {
-            grown = probed.max(self.estimate_bps);
-            self.is_starting = false;
-          }
-          self.estimate_bps = grown.min(ceiling.max(self.estimate_bps));
+          self.estimate_bps = (self.estimate_bps * growth).min(ceiling.max(self.estimate_bps));
         }
       },
     }

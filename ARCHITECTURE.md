@@ -416,9 +416,11 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
   trains of five 1000-byte datagrams, 150 ms apart, `TEAMCRAFT_SFU_PROBE_BYTES`). The spread of
   each train in the transport feedback is the narrowest link's rate (packet-train dispersion); the
   median of the trains, if at least 80 % of a train arrived, seeds the estimate at 95 % of it (as
-  WebRTC does) and ends its fast start at it, also when a new track measures afresh. A 1 Mbit/s mobile link is no
-  longer overshot to almost 3 Mbit/s before its first loss, and a fast one has its layers within a
-  second instead of four. Nothing waits for it: audio and the first layers start as before. The
+  WebRTC does) and ends its fast start. A 1 Mbit/s mobile link is no longer overshot to almost
+  3 Mbit/s before its first loss, and a fast one has its layers within a second instead of four.
+  A new track that measures afresh ramps up from the start value as before (lower on a link the
+  probe showed narrower), keeping of the probed estimate only what traffic carried: jumping to the
+  probed rate sent a new share's keyframes of every layer into the link's queue at once. Nothing waits for it: audio and the first layers start as before. The
   SFU announces the bytes it takes in `joined` (`probe_bytes`); clients probe only such SFUs, older
   clients still get (and report) the SFU's trains. WebRTC probes with paced clusters at 3× and 6×
   the start rate instead; trains sent back to back need no pacer and answer in one round trip.
