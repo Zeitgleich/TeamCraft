@@ -18,7 +18,7 @@ cd "$(dirname "$0")/.."
 
 # "<crate>|<targets>|<extra cargo args>": one clippy run each. `all` = --all-targets. The core's
 # integration tests need the `ui` feature (`tests/common`), so a feature set without it is checked
-# on the library only.
+# on the library only (likewise the server's tests and `integration`).
 combos=(
   # Storage backends of the core, alone and together: the two stores share the store's SQL modules.
   "teamcraft-core|lib|--no-default-features"
@@ -35,7 +35,9 @@ combos=(
   # The other crates, each with the feature sets its own Cargo.toml picks for its dependencies.
   "teamcraft-ffi|all|"
   "teamcraft-ui|all|"
-  "teamcraft-server|all|"
+  # The server's integration tests need the `integration` feature (and skip without a database).
+  "teamcraft-server|lib|"
+  "teamcraft-server|all|--features integration"
   "teamcraft-media|all|"
   "teamcraft-sfu|all|"
 )
