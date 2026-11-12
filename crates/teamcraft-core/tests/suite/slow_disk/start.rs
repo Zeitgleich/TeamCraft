@@ -30,8 +30,10 @@ const MESSAGES_PER_CHANNEL: usize = 20;
 /// phone at start, while other threads read too).
 const PHONE_READ_DELAY: Duration = Duration::from_micros(300);
 /// What opening the MLS state may read, whatever the number of groups: the old record's marker and
-/// the generation, a few pages each.
-const MAX_OPEN_READS: u64 = 16;
+/// the generation, a few pages each. The exact count moves by a page or two with the B-tree's shape
+/// (random keys and sizes per run: 16 to 18 seen in CI), so the bound leaves room for that; the
+/// comparison with the whole load below is what shows it doesn't grow with the groups.
+const MAX_OPEN_READS: u64 = 24;
 /// Where the measurement keeps a list like the app's kept chat list.
 const KEPT_LIST_KEY: &str = "measured_chat_list";
 
