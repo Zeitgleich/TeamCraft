@@ -62,7 +62,9 @@ use crate::call_video::ReceivedVideoFrame;
 use crate::camera_governor::{
   CameraGovernorConfig, CameraLoad, FrameTally, LayerLimit, LayerRateGuard, LoadStep, OverloadReason,
 };
-use crate::share_policy::{Av1Encoding, ShareCodecs, ShareGovernor, ShareLimits, SharePlan, share_framerate};
+use crate::share_policy::{
+  EncoderKind, ShareCodecs, ShareEncoders, ShareGovernor, ShareLimits, SharePlan, UplinkTop, share_framerate,
+};
 use crate::video::{
   CAMERA_FRAMERATE, LayerSizer, ScreenProfile, VideoResolution, camera_layers, fit_within, within_layer_limit,
 };
@@ -77,8 +79,15 @@ const H264_CODEC: &str = "avc1.42e028";
 const H264_CODEC_LEVEL_5_1: &str = "avc1.42e033";
 /// The largest picture of level 4.0, in macroblocks of 16×16 pixels (H.264 table A-1, MaxFS).
 const LEVEL_4_0_MAX_MACROBLOCKS: u32 = 8192;
-/// WebCodecs codec string: VP9 profile 0 (older browser clients).
-const VP9_CODEC: &str = "vp09.00.10.08";
+/// WebCodecs codec string: VP9 profile 0, level 5.1, 8 bit: decoders take any picture a share
+/// sends under it (#1733).
+const VP9_CODEC: &str = "vp09.00.51.08";
+/// VP9 level 4.1 (up to 2048×1088, #1733), 5.0 (4K at 30 fps) and 5.1 encoder strings.
+const VP9_CODEC_LEVEL_4_1: &str = "vp09.00.41.08";
+const VP9_CODEC_LEVEL_5_0: &str = "vp09.00.50.08";
+/// Level 4.1's largest picture and level 5.0's samples per second (VP9 spec, annex A).
+const VP9_LEVEL_4_1_MAX_PICTURE: u32 = 2_228_224;
+const VP9_LEVEL_5_0_MAX_RATE: u64 = 311_951_360;
 /// WebCodecs codec string: AV1 Main profile, level 5.0, 8 bit (#565): up to 4K at 30 fps and
 /// 1440p at 60 fps, every picture a screen share sends. Decoders take it for any smaller picture.
 const AV1_CODEC: &str = "av01.0.12M.08";
@@ -311,15 +320,16 @@ const SHARE_ENCODE_STARTS: usize = 64;
 
 impl TrackSender {
   /// Starts encoding the stream's video track as `plan.kind`, to be published under `publication`
-  /// in [`Self::codec`] with [`Self::layers`]. A camera's encoders encode `codecs.by_all`, one of
-  /// `plan.codecs`; a share's layers follow its policy from `codecs` and `av1` (#1733). At most
-  /// `max_layers` layers (the top ones of the plan: what the SFU takes, #978).
+  /// in [`Self::codec`] with [`Self::layers`]. A camera's encoders encode the first of
+  /// `codecs.by_all` (of `plan.codecs`); a share's layers follow its policy from `codecs` and
+  /// `encoders` (#1733). At most `max_layers` layers (the top ones of the plan: what the SFU
+  /// takes, #978).
   #[allow(clippy::too_many_arguments)]
   pub async fn start(
     stream: MediaStream,
     plan: TrackPlan,
     codecs: ShareCodecs,
-    av1: Av1Encoding,
+    encoders: ShareEncoders,
     max_layers: u8,
     publication: VideoPublicationId,
     inputs: &mpsc::UnboundedSender<Input>,
@@ -352,7 +362,7 @@ impl TrackSender {
           framerate: plan.framerate,
           profile: profile.clone(),
           codecs: codecs.clone(),
-          av1,
+          encoders,
         },
         now,
       )),
@@ -367,9 +377,10 @@ impl TrackSender {
         None,
       ),
     };
-    let codec = maybe_share
-      .as_ref()
-      .map_or_else(|| codecs.by_all.clone(), ShareGovernor::track_codec);
+    let codec = maybe_share.as_ref().map_or_else(
+      || codecs.by_all.first().cloned().unwrap_or(VideoCodec::H264),
+      ShareGovernor::track_codec,
+    );
     let framerate = maybe_share
       .as_ref()
       .map_or(plan.framerate, |share| share.step().top_framerate);
@@ -663,6 +674,22 @@ impl TrackSender {
     self.follow_share_step()
   }
 
+  /// How the uplink treats the share's top layer now (#1733): where it can't carry it even at its
+  /// least frame rate, the top steps to a smaller size, and back once it carried it whole.
+  pub fn on_uplink(&mut self, top: UplinkTop, now: Instant) -> Result<(), EncoderGaveUp> {
+    let Some(share) = &mut self.maybe_share else {
+      return Ok(());
+    };
+    if !share.on_uplink(top, now) {
+      return Ok(());
+    }
+    info!(
+      top_lines = ?share.step().maybe_top.map(|top| top.width.min(top.height)),
+      "the uplink changed the screen share's top layer size"
+    );
+    self.follow_share_step()
+  }
+
   /// What holds a share below its plan, for the stats; `None` for a camera.
   #[cfg(feature = "call-view")]
   pub fn share_limits(&self) -> Option<ShareLimits> {
@@ -733,7 +760,7 @@ impl TrackSender {
         top_framerate = share.step().top_framerate,
         top_codec = %share.step().top_codec,
         has_middle = share.step().has_middle,
-        top_scale_per_mille = share.step().top_scale_per_mille,
+        top_lines = ?share.step().maybe_top.map(|top| top.width.min(top.height)),
         reason = ?share.limits().maybe_reason,
         "screen share encoders' load changed the share's step"
       );
@@ -1361,6 +1388,12 @@ impl Encoding {
           JsValue::from_str(av1_encoder_codec(info.width, info.height, self.framerate)),
         ));
       },
+      VideoCodec::Vp9 => {
+        entries.push((
+          "codec",
+          JsValue::from_str(vp9_encoder_codec(info.width, info.height, info.max_framerate)),
+        ));
+      },
       // H.264 as before #565, also for codecs nobody picks (`CallEngine::video_codec_for`).
       _ => {
         entries.push((
@@ -1757,26 +1790,23 @@ fn h264_encoder_codec(width: u16, height: u16) -> &'static str {
 pub struct CodecSupport {
   pub encoders: Vec<VideoCodec>,
   pub decoders: Vec<VideoCodec>,
-  /// How it encodes AV1 (#1733): a screen share's top layer goes out in AV1 at full size only
-  /// from a hardware encoder.
-  pub av1_encoding: Av1Encoding,
+  /// How it encodes AV1 and VP9 (#1733): a screen share's top layer goes out in them at full size
+  /// only from a hardware encoder.
+  pub share_encoders: ShareEncoders,
 }
 
 /// What this browser encodes and decodes: H.264 always (every client sends and takes it), AV1
 /// where WebCodecs says it encodes a standard screen share's top layer (1440p at 30 fps, in real
-/// time) and decodes it. A browser that doesn't answer gets H.264 only.
+/// time), VP9 where it does so in hardware (#1733), and each where it decodes it. A browser that
+/// doesn't answer gets H.264 only.
 pub(super) async fn codec_support() -> CodecSupport {
   let mut support = CodecSupport {
     encoders: vec![VideoCodec::H264],
     decoders: vec![VideoCodec::H264],
-    av1_encoding: Av1Encoding::Unavailable,
-  };
-  let probe = Encoding {
-    kind: VideoTrackKind::Screen,
-    codec: VideoCodec::Av1,
-    framerate: 30,
-    latency: LatencyMode::Realtime,
-    maybe_content_hint: Some("text"),
+    share_encoders: ShareEncoders {
+      av1: EncoderKind::Unavailable,
+      vp9: EncoderKind::Unavailable,
+    },
   };
   let layer = VideoLayerInfo {
     layer: 0,
@@ -1786,27 +1816,44 @@ pub(super) async fn codec_support() -> CodecSupport {
     max_bitrate_bps: 6_000_000,
     maybe_codec: None,
   };
-  if let Ok(config) = probe.config(&layer)
-    && is_supported(VideoEncoder::is_config_supported(&config)).await
-  {
-    support.encoders.insert(0, VideoCodec::Av1);
-    support.av1_encoding = av1_encoding(&config, &layer).await;
+  support.share_encoders.vp9 = encoder_kind(VideoCodec::Vp9, &layer).await;
+  if support.share_encoders.vp9 == EncoderKind::Hardware {
+    support.encoders.insert(0, VideoCodec::Vp9);
   }
-  if let Ok(config) = dictionary(&[("codec", JsValue::from_str(AV1_CODEC))])
-    && is_supported(VideoDecoder::is_config_supported(&config)).await
-  {
-    support.decoders.insert(0, VideoCodec::Av1);
+  support.share_encoders.av1 = encoder_kind(VideoCodec::Av1, &layer).await;
+  if support.share_encoders.av1 != EncoderKind::Unavailable {
+    support.encoders.insert(0, VideoCodec::Av1);
+  }
+  for (codec, name) in [(VideoCodec::Vp9, VP9_CODEC), (VideoCodec::Av1, AV1_CODEC)] {
+    if let Ok(config) = dictionary(&[("codec", JsValue::from_str(name))])
+      && is_supported(VideoDecoder::is_config_supported(&config)).await
+    {
+      support.decoders.insert(0, codec);
+    }
   }
   support
 }
 
-/// Whether the browser encodes AV1 at `config` in hardware (#1733): WebCodecs takes the config
-/// with `hardwareAcceleration: "prefer-hardware"`, and `MediaCapabilities.encodingInfo` calls it
-/// power efficient where the browser has that API. Anything else is software: a browser that
-/// can't tell gets the reduced plan, which a hardware encoder only loses resolution with above
-/// 1080p.
-async fn av1_encoding(config: &js_sys::Object, layer: &VideoLayerInfo) -> Av1Encoding {
-  let hardware = js_sys::Object::assign(&js_sys::Object::new(), config);
+/// How the browser encodes `codec` at `layer` for a screen share (#1733): not at all where
+/// WebCodecs refuses the config; in hardware where it takes it with `hardwareAcceleration:
+/// "prefer-hardware"` and `MediaCapabilities.encodingInfo` doesn't call it power inefficient;
+/// else in software. A browser that can't tell gets the software plan, which a hardware encoder
+/// only loses resolution or rate with.
+async fn encoder_kind(codec: VideoCodec, layer: &VideoLayerInfo) -> EncoderKind {
+  let probe = Encoding {
+    kind: VideoTrackKind::Screen,
+    codec: codec.clone(),
+    framerate: layer.max_framerate,
+    latency: LatencyMode::Realtime,
+    maybe_content_hint: Some("text"),
+  };
+  let Ok(config) = probe.config(layer) else {
+    return EncoderKind::Unavailable;
+  };
+  if !is_supported(VideoEncoder::is_config_supported(&config)).await {
+    return EncoderKind::Unavailable;
+  }
+  let hardware = js_sys::Object::assign(&js_sys::Object::new(), &config);
   let is_hardware_config = js_sys::Reflect::set(
     &hardware,
     &JsValue::from_str("hardwareAcceleration"),
@@ -1815,17 +1862,22 @@ async fn av1_encoding(config: &js_sys::Object, layer: &VideoLayerInfo) -> Av1Enc
   .is_ok()
     && is_supported(VideoEncoder::is_config_supported(&hardware)).await;
   if !is_hardware_config {
-    return Av1Encoding::Software;
+    return EncoderKind::Software;
   }
-  match is_power_efficient(layer).await {
-    Some(false) => Av1Encoding::Software,
-    Some(true) | None => Av1Encoding::Hardware,
+  match is_power_efficient(&codec, layer).await {
+    Some(false) => EncoderKind::Software,
+    Some(true) | None => EncoderKind::Hardware,
   }
 }
 
-/// `navigator.mediaCapabilities.encodingInfo(...)`'s `powerEfficient` for AV1 at `layer`'s size;
-/// `None` where the browser has no such API or doesn't answer.
-async fn is_power_efficient(layer: &VideoLayerInfo) -> Option<bool> {
+/// `navigator.mediaCapabilities.encodingInfo(...)`'s `powerEfficient` for `codec` at `layer`'s
+/// size; `None` where the browser has no such API or doesn't answer.
+async fn is_power_efficient(codec: &VideoCodec, layer: &VideoLayerInfo) -> Option<bool> {
+  let content_type = match codec {
+    VideoCodec::Av1 => "video/AV1",
+    VideoCodec::Vp9 => "video/VP9",
+    VideoCodec::H264 | VideoCodec::Unknown(_) => "video/H264",
+  };
   let navigator = window().ok()?.navigator();
   let capabilities = js_sys::Reflect::get(&navigator, &JsValue::from_str("mediaCapabilities")).ok()?;
   let encoding_info: js_sys::Function =
@@ -1834,7 +1886,7 @@ async fn is_power_efficient(layer: &VideoLayerInfo) -> Option<bool> {
       .dyn_into()
       .ok()?;
   let video = dictionary(&[
-    ("contentType", JsValue::from_str("video/AV1")),
+    ("contentType", JsValue::from_str(content_type)),
     ("width", JsValue::from(layer.width)),
     ("height", JsValue::from(layer.height)),
     ("bitrate", JsValue::from(layer.max_bitrate_bps)),
@@ -1877,6 +1929,19 @@ fn av1_encoder_codec(width: u16, height: u16, framerate: u8) -> &'static str {
     AV1_CODEC
   } else {
     AV1_CODEC_LEVEL_5_1
+  }
+}
+
+/// The codec string a VP9 encoder of `width`×`height` at `framerate` is configured with (#1733).
+fn vp9_encoder_codec(width: u16, height: u16, framerate: u8) -> &'static str {
+  let picture = u32::from(width) * u32::from(height);
+  let rate = u64::from(picture) * u64::from(framerate);
+  if picture <= VP9_LEVEL_4_1_MAX_PICTURE {
+    VP9_CODEC_LEVEL_4_1
+  } else if rate <= VP9_LEVEL_5_0_MAX_RATE {
+    VP9_CODEC_LEVEL_5_0
+  } else {
+    VP9_CODEC
   }
 }
 

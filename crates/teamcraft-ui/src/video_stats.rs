@@ -6,8 +6,8 @@
 use std::time::Duration;
 
 use teamcraft_client_api::video_stats::{
-  Av1EncoderKind, CameraLimitsStats, EncoderImplementation, EncoderOverload, ReceivedVideoStats,
-  SentVideoStats, ShareLimitsStats, VideoSize, VideoStatsReport,
+  CameraLimitsStats, EncoderImplementation, EncoderOverload, ReceivedVideoStats, SentVideoStats,
+  ShareEncoderKind, ShareLimitsStats, VideoSize, VideoStatsReport,
 };
 use teamcraft_proto::{MediaStreamId, VideoCodec, VideoTrackKind};
 
@@ -300,19 +300,22 @@ fn sent_rows(
 /// size, whether the middle layer is sent, the AV1 encoder, and the CPU step with its reason.
 fn share_limits_text(limits: &ShareLimitsStats, words: Words<'_>) -> String {
   let now = &limits.now;
-  let av1 = match limits.av1_encoder {
-    Av1EncoderKind::Hardware => words("stats-av1-hardware", &[]),
-    Av1EncoderKind::Software => words("stats-av1-software", &[]),
-    Av1EncoderKind::Unavailable => words("stats-av1-unavailable", &[]),
-    Av1EncoderKind::Unknown => MISSING.to_owned(),
+  let encoder = |kind: ShareEncoderKind| match kind {
+    ShareEncoderKind::Hardware => words("stats-encoder-kind-hardware", &[]),
+    ShareEncoderKind::Software => words("stats-encoder-kind-software", &[]),
+    ShareEncoderKind::Unavailable => words("stats-encoder-kind-none", &[]),
+    ShareEncoderKind::Unknown => MISSING.to_owned(),
   };
+  let top = now
+    .maybe_top
+    .map_or_else(|| words("stats-share-base-only", &[]), size_text);
   let mut text = words(
     "stats-value-share",
     &[
       ("codec", &codec_text(&now.top_codec)),
+      ("size", &top),
       ("fps", &now.top_framerate.to_string()),
       ("planned", &limits.planned.top_framerate.to_string()),
-      ("scale", &(now.top_scale_per_mille / 10).to_string()),
       (
         "middle",
         &words(
@@ -324,7 +327,8 @@ fn share_limits_text(limits: &ShareLimitsStats, words: Words<'_>) -> String {
           &[],
         ),
       ),
-      ("av1", &av1),
+      ("av1", &encoder(limits.av1_encoder)),
+      ("vp9", &encoder(limits.vp9_encoder)),
     ],
   );
   if limits.level > 0 {
@@ -341,6 +345,16 @@ fn share_limits_text(limits: &ShareLimitsStats, words: Words<'_>) -> String {
         ("level", &limits.level.to_string()),
         ("levels", &limits.levels.to_string()),
         ("reason", &reason),
+      ],
+    ));
+  }
+  if limits.uplink_steps > 0 {
+    text.push_str(" · ");
+    text.push_str(&words(
+      "stats-value-share-uplink",
+      &[
+        ("steps", &limits.uplink_steps.to_string()),
+        ("sizes", &limits.sizes.saturating_sub(1).to_string()),
       ],
     ));
   }
@@ -819,22 +833,31 @@ mod tests {
   /// A software AV1 share stepped down to H.264 at 5 fps without its middle layer.
   fn share_limits() -> ShareLimitsStats {
     ShareLimitsStats {
-      av1_encoder: Av1EncoderKind::Software,
+      av1_encoder: ShareEncoderKind::Software,
+      vp9_encoder: ShareEncoderKind::Unavailable,
       planned: ShareStepStats {
         top_codec: VideoCodec::Av1,
         top_framerate: 15,
-        top_scale_per_mille: 1000,
+        maybe_top: Some(VideoSize {
+          width: 1920,
+          height: 1080,
+        }),
         has_middle: false,
       },
       now: ShareStepStats {
         top_codec: VideoCodec::H264,
         top_framerate: 5,
-        top_scale_per_mille: 1000,
+        maybe_top: Some(VideoSize {
+          width: 1600,
+          height: 900,
+        }),
         has_middle: false,
       },
       level: 3,
-      levels: 4,
+      levels: 6,
       maybe_overload: Some(EncoderOverload::SlowEncoding),
+      uplink_steps: 1,
+      sizes: 3,
     }
   }
 
@@ -844,7 +867,7 @@ mod tests {
     let text = share_limits_text(&share_limits(), &en_words());
     assert_eq!(
       text,
-      "top H.264 at 5 of 15 fps, 100 % size · middle layer off · AV1 encoder software · encoders overloaded (slow encoding): step 3 of 4"
+      "top H.264 1600×900 at 5 of 15 fps · middle layer off · encoders AV1 software, VP9 none · encoders overloaded (slow encoding): step 3 of 6 · uplink: 1 of 2 sizes smaller"
     );
   }
 

@@ -126,7 +126,7 @@ use crate::datagram::SimulcastLayer;
 use crate::jitter::{JitterBuffer, JitterBufferConfig, Playout};
 use crate::resample::MonoResampler;
 use crate::rtp::AudioLevel;
-use crate::share_policy::{Av1Encoding, ShareCodecs};
+use crate::share_policy::{EncoderKind, ShareCodecs, ShareEncoders};
 use crate::video::{EncodedVideoFrame, ScreenProfile, TOP_LAYER, VideoResolution, chosen_layer};
 use crate::web_api::{
   AudioData, AudioDecoder, AudioEncoder, EncodedAudioChunk, QUIC_GLOBAL, WORKLET_SOURCE, WebTransport,
@@ -215,9 +215,9 @@ pub struct WebCallConfig {
   /// whose Content-Security-Policy allows scripts only from their own origin need it; `None` loads
   /// the module from a blob URL.
   pub maybe_worklet_url: Option<String>,
-  /// How this browser encodes AV1 ([`CodecSupport::av1_encoding`]): a screen share's top layer
-  /// goes out in AV1 at full size only from a hardware encoder (#1733).
-  pub av1_encoding: Av1Encoding,
+  /// How this browser encodes AV1 and VP9 ([`CodecSupport::share_encoders`]): a screen share's
+  /// top layer goes out in them at full size only from a hardware encoder (#1733).
+  pub share_encoders: ShareEncoders,
 }
 
 /// Gets a fresh join ticket from `teamcraft-server` in the page.
@@ -1154,7 +1154,7 @@ async fn run_call(
     stats: CallStats::default(),
     own_device: config.engine.device_id,
     senders: Vec::new(),
-    av1_encoding: config.av1_encoding,
+    share_encoders: config.share_encoders,
     next_publication: VideoPublicationId(0),
     encoded_kinds: Vec::new(),
     views: HashMap::new(),
@@ -1294,8 +1294,8 @@ struct CallState<'a> {
   stats: CallStats,
   own_device: DeviceId,
   senders: Vec<TrackSender>,
-  /// How this browser encodes AV1, for a share's plan (#1733).
-  av1_encoding: Av1Encoding,
+  /// How this browser encodes AV1 and VP9, for a share's plan (#1733).
+  share_encoders: ShareEncoders,
   /// The id the next own video publication goes under.
   next_publication: VideoPublicationId,
   /// Kinds whose running own track encoded a picture: one that ends before did not start.
@@ -1630,7 +1630,20 @@ impl CallState<'_> {
         engine.limit_own_layers(stream_id, sender.maybe_top_layer());
       }
     }
-    // A share whose CPU ladder changed its layers goes out anew (#1733).
+    // A share's top layer follows what the uplink carries (#1733).
+    let mut gave_up = Vec::new();
+    for sender in &mut self.senders {
+      if let Some(stream_id) = sender.publication.own.maybe_stream_id
+        && let Some(top) = engine.uplink_top(stream_id)
+        && let Err(layer) = sender.on_uplink(top, now)
+      {
+        gave_up.push((sender.publication.kind.clone(), layer));
+      }
+    }
+    for (kind, layer) in gave_up {
+      self.on_encoders_gave_up(engine, &kind, layer);
+    }
+    // A share whose CPU ladder or uplink changed its layers goes out anew (#1733).
     self.publish_replans(engine);
     Ok(Flow::Continue)
   }
@@ -2313,7 +2326,7 @@ impl CallState<'_> {
       stream,
       plan,
       codecs,
-      self.av1_encoding,
+      self.share_encoders,
       max_layers,
       publication,
       self.inputs,
@@ -2852,17 +2865,15 @@ async fn received_packets(session: &SessionHandle) -> PacketCount {
 /// decode as a layer in another codec where the SFU forwards such layers.
 fn share_codecs(engine: &CallEngine, candidates: &[VideoCodec]) -> ShareCodecs {
   ShareCodecs {
-    by_all: engine.video_codec_for(candidates),
-    maybe_by_some: engine.layer_codec_for(candidates),
+    by_all: engine.video_codecs_for(candidates),
+    by_some: engine.layer_codecs_for(candidates),
   }
 }
 
 fn share_limits_stats(
   limits: crate::share_policy::ShareLimits,
 ) -> teamcraft_client_api::video_stats::ShareLimitsStats {
-  use teamcraft_client_api::video_stats::{
-    Av1EncoderKind, EncoderOverload, ShareLimitsStats, ShareStepStats,
-  };
+  use teamcraft_client_api::video_stats::{EncoderOverload, ShareLimitsStats, ShareStepStats, VideoSize};
 
   use crate::camera_governor::OverloadReason;
   use crate::share_policy::ShareStep;
@@ -2870,15 +2881,15 @@ fn share_limits_stats(
   let step = |step: ShareStep| ShareStepStats {
     top_codec: step.top_codec,
     top_framerate: step.top_framerate,
-    top_scale_per_mille: step.top_scale_per_mille,
+    maybe_top: step.maybe_top.map(|top| VideoSize {
+      width: top.width,
+      height: top.height,
+    }),
     has_middle: step.has_middle,
   };
   ShareLimitsStats {
-    av1_encoder: match limits.av1 {
-      Av1Encoding::Hardware => Av1EncoderKind::Hardware,
-      Av1Encoding::Software => Av1EncoderKind::Software,
-      Av1Encoding::Unavailable => Av1EncoderKind::Unavailable,
-    },
+    av1_encoder: encoder_kind(limits.encoders.av1),
+    vp9_encoder: encoder_kind(limits.encoders.vp9),
     planned: step(limits.planned),
     now: step(limits.now),
     level: u8::try_from(limits.level).unwrap_or(u8::MAX),
@@ -2888,6 +2899,18 @@ fn share_limits_stats(
       OverloadReason::QueuedFrames => EncoderOverload::QueuedFrames,
       OverloadReason::SlowEncoding => EncoderOverload::SlowEncoding,
     }),
+    uplink_steps: u8::try_from(limits.uplink_steps).unwrap_or(u8::MAX),
+    sizes: u8::try_from(limits.sizes).unwrap_or(u8::MAX),
+  }
+}
+
+fn encoder_kind(kind: EncoderKind) -> teamcraft_client_api::video_stats::ShareEncoderKind {
+  use teamcraft_client_api::video_stats::ShareEncoderKind;
+
+  match kind {
+    EncoderKind::Hardware => ShareEncoderKind::Hardware,
+    EncoderKind::Software => ShareEncoderKind::Software,
+    EncoderKind::Unavailable => ShareEncoderKind::Unavailable,
   }
 }
 

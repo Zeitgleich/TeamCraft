@@ -448,20 +448,33 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
     throughout;
   - a **middle** layer at half the picture where that is clearly larger than the base (from
     1440p), in the top's codec where every viewer decodes it, else H.264;
-  - the **top** layer at the full picture, in AV1 where the sender encodes AV1 in hardware
-    (WebCodecs `isConfigSupported` with `prefer-hardware` and `MediaCapabilities.encodingInfo`'s
-    `powerEfficient`). A software AV1 encoder takes the top layer only up to about 1080p and at
-    15 fps; a larger share goes out in H.264 at full size instead.
+  - the **top** layer at the full picture, in the best codec the sender encodes well and some
+    viewer decodes: AV1 or VP9 from a hardware encoder (WebCodecs `isConfigSupported` with
+    `prefer-hardware` and `MediaCapabilities.encodingInfo`'s `powerEfficient`), AV1 from a
+    software encoder only up to about 1080p and at 15 fps, else H.264. H.264 is a codec of its
+    own, not a fallback: a device without a good AV1 or VP9 encoder sends its full picture
+    (720p, 1080p, 1440p) in H.264, at the bitrate H.264 needs; AV1 layers get 60 % and VP9
+    layers 80 % of it for the same picture (docs/performance.md). Software VP9 is never used
+    (Chrome's mis-tagged the colour range, below).
 
   The capture track and the encoders carry `contentHint: "text"` for detail. Under **CPU
   pressure** (frames queued or skipped at the encoders, encode time against the frame interval:
   the encoder-load controller shared with cameras) a share steps down in this order: the top
   layer's frame rate (30, 20, 15, 10, 5 fps), the middle layer off, a top layer in software AV1 to
-  H.264 at the same size, and only then the top layer's size (3/4, 1/2). After a calm period it
-  steps back up in reverse, waiting longer after each step up that didn't hold. A motion share
-  drops its middle layer and size first and keeps its rate longest. On a **limited uplink** a
-  share whose encoders follow the allocation sends its top layer at a share of its bitrate with
-  the frame rate lowered in step (down to about 5 fps) before the top layer stops.
+  H.264 at the same size, then the top layer's size step by step (2160, 1440, 1080, 900, 720
+  lines in the capture's aspect, the longer side a multiple of 16), each at 5 fps, and only last
+  the base layer alone: the 480p base is the floor for weak viewers, never the next step after the
+  full picture. After a calm period it steps back up in reverse (size first, then the frame
+  rate), waiting longer after each step up that didn't hold. A motion share drops its middle
+  layer and size first and keeps its rate longest. On a **limited uplink** a share whose encoders
+  follow the allocation sends its top layer at a share of its bitrate with the frame rate lowered
+  in step (down to about 5 fps); where the uplink can't carry the top layer even so, the top
+  steps to the next smaller size (one size per 2 s held), and back one size at a time once the
+  uplink carried it whole for 10 s. A change of size, codec or layer count publishes the share
+  anew (viewers switch with a keyframe); a frame rate change reconfigures the encoders in place.
+  The overlay's "Share policy" row says why the layers are what they are. The desktop's own
+  encoders plan the same layers in H.264 and follow the uplink's bitrate; a CPU ladder for them
+  is a follow-up.
 - **Layer codecs** (#1733): a layer may name a codec other than its track's
   (`VideoLayerInfo::maybe_codec`); the track's codec is its lowest layer's. Clients whose engine
   reads layer codecs say so with `join` (`MediaCapabilities::video_features`: `layer_codecs`;

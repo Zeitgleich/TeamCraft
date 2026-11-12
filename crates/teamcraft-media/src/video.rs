@@ -451,8 +451,8 @@ pub fn screen_layers(
   mode: ScreenContentMode,
   size: &ScreenShareResolution,
 ) -> Vec<VideoLayerInfo> {
-  use crate::share_policy::{Av1Encoding, ShareCodecs, ShareLadder, SharePlan};
-  ShareLadder::new(SharePlan {
+  use crate::share_policy::{EncoderKind, ShareCodecs, ShareEncoders, ShareLadder, SharePlan};
+  let ladder = ShareLadder::new(SharePlan {
     source,
     framerate,
     profile: ScreenProfile {
@@ -460,12 +460,15 @@ pub fn screen_layers(
       size: size.clone(),
     },
     codecs: ShareCodecs {
-      by_all: VideoCodec::H264,
-      maybe_by_some: None,
+      by_all: vec![VideoCodec::H264],
+      by_some: Vec::new(),
     },
-    av1: Av1Encoding::Unavailable,
-  })
-  .layers(0)
+    encoders: ShareEncoders {
+      av1: EncoderKind::Unavailable,
+      vp9: EncoderKind::Unavailable,
+    },
+  });
+  ladder.layers(ladder.step(0))
 }
 
 /// How a screen share is sent (#530, #565): what it keeps under pressure and how large it may be.
@@ -492,11 +495,15 @@ impl ScreenProfile {
   /// (WebCodecs `contentHint: "text"`) text came out 7 to 11 dB sharper than H.264 at 1 to 2
   /// Mbit/s, and a still screen needed a fraction of H.264's bitrate (docs/performance.md). A
   /// motion share stays H.264: there AV1 was no sharper than the hardware H.264 encoder and cost
-  /// several times its CPU. H.264, which every device decodes, comes last.
+  /// several times its CPU. VP9 only where a device encodes it in hardware (#1733; Chrome's
+  /// software VP9 mis-tagged the colour range, docs/performance.md). H.264, which every device
+  /// decodes, comes last.
   pub fn codecs(&self) -> Vec<VideoCodec> {
     match self.mode {
       ScreenContentMode::Motion => vec![VideoCodec::H264],
-      ScreenContentMode::Detail | ScreenContentMode::Unknown => vec![VideoCodec::Av1, VideoCodec::H264],
+      ScreenContentMode::Detail | ScreenContentMode::Unknown => {
+        vec![VideoCodec::Av1, VideoCodec::Vp9, VideoCodec::H264]
+      },
     }
   }
 }

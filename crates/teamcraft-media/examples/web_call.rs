@@ -102,7 +102,10 @@ pub async fn join_dev_call(
     is_muted_at_start: false,
     // The development page has no Content-Security-Policy.
     maybe_worklet_url: None,
-    av1_encoding: teamcraft_media::share_policy::Av1Encoding::Unavailable,
+    share_encoders: teamcraft_media::share_policy::ShareEncoders {
+      av1: teamcraft_media::share_policy::EncoderKind::Unavailable,
+      vp9: teamcraft_media::share_policy::EncoderKind::Unavailable,
+    },
   };
   let call = WebCall::join(config)
     .await

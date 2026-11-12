@@ -451,7 +451,8 @@ viewer decodes costs a ninth of a 1440p picture's pixels at half its rate. On a 
 (Windows 11, Chrome 157, a VM with the host at load 34) the share had dropped its 1440p layer and
 sent 720p at 27 fps; under the policy the encoder-load controller lowers the top layer's rate
 first (30, 20, 15, 10, 5 fps), then stops the middle layer, then turns software AV1 into H.264,
-and only then makes the top smaller. No budget in the table at the top changes: a share's
+and only then makes the top smaller, one size at a time (1080, 900, 720 lines at 5 fps) before
+the 480p base is all that is left. No budget in the table at the top changes: a share's
 uplink demand at 1440p grows by the base layer (about 0.5 Mbit/s) and shrinks where AV1 replaces
 H.264 on top.
 

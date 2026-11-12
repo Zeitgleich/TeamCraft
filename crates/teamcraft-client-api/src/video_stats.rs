@@ -93,7 +93,9 @@ pub struct SentVideoStats {
 /// this device's AV1 encoder, and the step the encoders' load holds it at now.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShareLimitsStats {
-  pub av1_encoder: Av1EncoderKind,
+  pub av1_encoder: ShareEncoderKind,
+  #[serde(default = "unknown_encoder")]
+  pub vp9_encoder: ShareEncoderKind,
   pub planned: ShareStepStats,
   pub now: ShareStepStats,
   /// Steps down the ladder, of `levels`.
@@ -102,6 +104,11 @@ pub struct ShareLimitsStats {
   /// Why the encoders were found overloaded, while the share runs below its plan.
   #[serde(default)]
   pub maybe_overload: Option<EncoderOverload>,
+  /// Sizes the top layer stepped down because the uplink didn't carry it, of `sizes` less one.
+  #[serde(default)]
+  pub uplink_steps: u8,
+  #[serde(default)]
+  pub sizes: u8,
 }
 
 /// One step of a share's ladder: its top layer and whether the middle layer is sent.
@@ -109,20 +116,25 @@ pub struct ShareLimitsStats {
 pub struct ShareStepStats {
   pub top_codec: VideoCodec,
   pub top_framerate: u8,
-  /// The top layer's size in per mille of the share's full picture.
-  pub top_scale_per_mille: u16,
+  /// The top layer's size; `None` where the base layer alone is sent.
+  #[serde(default)]
+  pub maybe_top: Option<VideoSize>,
   pub has_middle: bool,
 }
 
-/// How the device encodes AV1.
+/// How the device encodes a codec.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Av1EncoderKind {
+pub enum ShareEncoderKind {
   Hardware,
   Software,
   Unavailable,
   #[serde(other)]
   Unknown,
+}
+
+fn unknown_encoder() -> ShareEncoderKind {
+  ShareEncoderKind::Unknown
 }
 
 /// Why an own camera sends less than it was planned with (#1762): its encoders didn't keep up

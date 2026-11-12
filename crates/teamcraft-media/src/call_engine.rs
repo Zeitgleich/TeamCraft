@@ -47,6 +47,7 @@ use crate::dave::{
 };
 use crate::nack::NackConfig;
 use crate::rtp::{PayloadType, RtpHeader, RtpPacket, RtpTimestamp, SequenceNumber, Ssrc};
+use crate::share_policy::UplinkTop;
 use crate::uplink_layers::{OwnTrack, UplinkLayers, UplinkPolicy, probe_demand_bps};
 use crate::video::EncodedVideoFrame;
 
@@ -845,17 +846,31 @@ impl CallEngine {
       .unwrap_or(VideoCodec::H264)
   }
 
-  /// The codec a track's larger layers may go out in above a base layer every viewer decodes
-  /// (#1733): the first of `candidates` this device encodes and at least one other device
-  /// decodes as such a layer. `None` from an SFU that forwards no layers in another codec than
-  /// their track's, and when no other device decodes any of them.
-  pub fn layer_codec_for(&self, candidates: &[VideoCodec]) -> Option<VideoCodec> {
+  /// The codecs of `candidates`, in their order, this device encodes and every other device that
+  /// receives video decodes (#565, #1733); H.264 alone before the SFU said (an older SFU never
+  /// does). [`Self::video_codec_for`] is the first of them.
+  pub fn video_codecs_for(&self, candidates: &[VideoCodec]) -> Vec<VideoCodec> {
+    let Some(decodable) = &self.maybe_decodable else {
+      return vec![VideoCodec::H264];
+    };
+    self.encodable(candidates, decodable)
+  }
+
+  /// The codecs of `candidates`, in their order, a track's larger layers may go out in above a
+  /// base layer every viewer decodes (#1733): those this device encodes and at least one other
+  /// device decodes as such a layer. Empty from an SFU that forwards no layers in another codec
+  /// than their track's.
+  pub fn layer_codecs_for(&self, candidates: &[VideoCodec]) -> Vec<VideoCodec> {
+    self.encodable(candidates, &self.decodable_by_some)
+  }
+
+  /// `candidates` this device encodes and that are in `decodable`.
+  fn encodable(&self, candidates: &[VideoCodec], decodable: &[VideoCodec]) -> Vec<VideoCodec> {
     candidates
       .iter()
-      .find(|codec| {
-        self.decodable_by_some.contains(codec) && self.config.capabilities.video_encoders.contains(codec)
-      })
+      .filter(|codec| decodable.contains(codec) && self.config.capabilities.video_encoders.contains(codec))
       .cloned()
+      .collect()
   }
 
   /// The most simulcast layers a track may be planned with (#978): what the SFU said it takes,
@@ -1831,6 +1846,22 @@ impl CallEngine {
     self.note_held_back_layers(now);
     let loss_percent = loss_percent(self.uplink.loss_ratio());
     self.event(CallEngineEvent::UplinkEstimate { bps, loss_percent });
+  }
+
+  /// How the uplink treats the top layer of the own track on `stream_id` now (#1733): a share's
+  /// governor steps its top layer's size down where the uplink can't carry it even at its least
+  /// frame rate. `None` for a track this device doesn't publish.
+  pub fn uplink_top(&self, stream_id: MediaStreamId) -> Option<UplinkTop> {
+    let stream = StreamId(stream_id.0);
+    let track = self.own_tracks.get(&stream)?;
+    let top = track.layers.iter().max_by_key(|info| info.layer)?;
+    Some(if !self.uplink_layers.allows(stream, top.layer) {
+      UplinkTop::Held
+    } else if self.uplink_layers.bitrate_bps(stream, top) < top.max_bitrate_bps {
+      UplinkTop::Reduced
+    } else {
+      UplinkTop::Whole
+    })
   }
 
   /// Counts the time the uplink holds each own track's top layer back (screen-share quality,
@@ -3198,15 +3229,16 @@ mod tests {
       );
       // An SFU that forwards layers in other codecs names what some decode (#1733): a share's
       // large layers may go out in AV1 although not everyone decodes it.
-      assert_eq!(engine.layer_codec_for(&screen), None, "not said yet");
+      assert!(engine.layer_codecs_for(&screen).is_empty(), "not said yet");
       let some_av1 = CallEvent::DecodableVideoCodecs {
         codecs: vec![VideoCodec::H264],
         decodable_by_some: vec![VideoCodec::Av1, VideoCodec::H264],
       };
       engine.handle_signal(event(5, some_av1), now).unwrap();
       assert_eq!(engine.video_codec_for(&screen), VideoCodec::H264);
-      assert_eq!(engine.layer_codec_for(&screen), Some(VideoCodec::Av1));
-      assert_eq!(engine.layer_codec_for(&[VideoCodec::Vp9]), None);
+      assert_eq!(engine.layer_codecs_for(&screen), screen.to_vec());
+      assert_eq!(engine.video_codecs_for(&screen), vec![VideoCodec::H264]);
+      assert!(engine.layer_codecs_for(&[VideoCodec::Vp9]).is_empty());
       assert!(drain(&mut engine).iter().any(|output| matches!(
         output,
         EngineOutput::Event(CallEngineEvent::DecodableVideoCodecs(_))
