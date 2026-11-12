@@ -44,7 +44,7 @@ use serde::{Deserialize, Serialize};
 use teamcraft_crypto::local_store::LOOKUP_ID_LEN;
 use teamcraft_crypto::local_store::{LocalStoreKeys, LookupId};
 use teamcraft_crypto::secret::SymmetricKey;
-use teamcraft_proto::{Base64Bytes, ClientMessageId, ConversationId, MessageId, ThreadId};
+use teamcraft_proto::{Base64Bytes, ClientMessageId, ConversationId, MessageId, ThreadId, UserId};
 use zeroize::Zeroizing;
 
 use super::commit_journal::{CommitJournal, CommitStamp, Replay, WriteSet};
@@ -57,7 +57,7 @@ use super::sealed_catalog::{
 use super::sealed_index::{self, Direction};
 use super::{
   Attached, AttachedRange, FeedChange, FeedVersion, LocalStore, MessageEdge, MessageFilter, MessageOrder,
-  MessageSlot, StoreError, StoredMessage, Table, WriteTally,
+  MessageSlot, StoreError, StoredMessage, Table, UserLink, WriteTally,
 };
 use crate::push_preview::ShownMessage;
 use crate::timing::Mark;
@@ -1132,6 +1132,37 @@ impl<B: RecordBackend> SealedStore<B> {
     Ok(keys)
   }
 
+  /// The newest `limit` messages `relation` lists in `conversation`'s relations index, as their
+  /// keys, newest first: a walk back from the relation's end that stops after them.
+  fn newest_related_keys(
+    &self,
+    state: &mut State<B>,
+    conversation: ConversationId,
+    relation: Relation,
+    limit: usize,
+  ) -> Result<Vec<MessageKey>, StoreError> {
+    let mut keys = Vec::new();
+    if limit == 0 {
+      return Ok(keys);
+    }
+    let last = relation.last_key();
+    self.relations(state, conversation, |nodes| {
+      sealed_index::scan(
+        nodes,
+        Bound::Included(&last),
+        Direction::Backward,
+        &mut |key, ()| {
+          let is_inside = relation.holds(key);
+          if is_inside {
+            keys.push(key.message_key());
+          }
+          is_inside && keys.len() < limit
+        },
+      )
+    })?;
+    Ok(keys)
+  }
+
   /// The keys of `conversation`'s index that `keep` picks, walking from `from` in `direction`
   /// until `keep` says to stop (`None`).
   fn index_keys(
@@ -1804,11 +1835,19 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     })
   }
 
+  /// A thread's messages from the relations index (its root, the pages that hold them and their
+  /// records, issue #1790); the rest walk the message index.
   fn messages(
     &self,
     conversation: ConversationId,
     filter: MessageFilter,
   ) -> Result<Vec<StoredMessage>, StoreError> {
+    if let MessageFilter::Thread(thread) = filter {
+      return self.reading(|state| {
+        let keys = self.related_keys(state, conversation, Relation::InThread(thread))?;
+        self.load_listed(state, conversation, &keys, |message| message.matches(filter))
+      });
+    }
     self.reading(|state| {
       let keys = self.index_keys(
         state,
@@ -1922,6 +1961,21 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     self.reading(|state| {
       let keys = self.related_keys(state, conversation, Relation::Pinned)?;
       self.load_listed(state, conversation, &keys, StoredMessage::is_shown_pin)
+    })
+  }
+
+  /// A walk back through the relations index that stops after `limit` of them: their pages and
+  /// records, whatever the conversation's length.
+  fn user_messages(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+    link: UserLink,
+    limit: usize,
+  ) -> Result<Vec<StoredMessage>, StoreError> {
+    self.reading(|state| {
+      let keys = self.newest_related_keys(state, conversation, Relation::linking(link, user), limit)?;
+      self.load_listed(state, conversation, &keys, |message| message.links(user, link))
     })
   }
 
@@ -2921,6 +2975,203 @@ mod tests {
       assert!(store.pinned_messages(id(0)).unwrap().is_empty());
     }
 
+    /// Issue #1790: in a conversation with 100,000 messages a thread, a person's mentions and the
+    /// newest posts of a person read the relations index's root, the pages that hold them and their
+    /// records: what they return, not the conversation.
+    #[test]
+    fn threads_mentions_and_posts_read_only_what_they_return() {
+      const MESSAGES: i64 = 100_000;
+      const CHANNEL: i64 = 7;
+      let (me, peer) = (id::<UserId>(2), id::<UserId>(3));
+      let thread = id::<ThreadId>(server_id(CHANNEL, 10));
+      let replies = [11, MESSAGES / 2, MESSAGES - 3];
+      let mentions = [5, 70_000, MESSAGES - 2];
+      let peer_posts = [20, 21, MESSAGES - 1];
+      let records = Records::default();
+      let key = SymmetricKey::generate(&mut OsRng);
+      let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::default()).unwrap();
+      for start in (0..MESSAGES).step_by(10_000) {
+        crate::store::write_group(&store, || {
+          for n in start..start + 10_000 {
+            store.upsert_message(&shaped(
+              CHANNEL,
+              n,
+              thread,
+              &replies,
+              &mentions,
+              &peer_posts,
+              me,
+              peer,
+            ))?;
+          }
+          Ok::<_, StoreError>(())
+        })
+        .unwrap();
+      }
+      drop(store);
+
+      let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::minimal()).unwrap();
+      let clients = |messages: Vec<StoredMessage>| -> Vec<ClientMessageId> {
+        messages
+          .into_iter()
+          .map(|stored| stored.client_message_id)
+          .collect()
+      };
+      let of = |ns: &[i64]| -> Vec<ClientMessageId> { ns.iter().map(|n| client_id(CHANNEL, *n)).collect() };
+      let newest_first =
+        |ns: &[i64]| -> Vec<ClientMessageId> { ns.iter().rev().map(|n| client_id(CHANNEL, *n)).collect() };
+
+      records.reads.set(0);
+      let in_thread = clients(
+        store
+          .messages(id(CHANNEL), MessageFilter::Thread(thread))
+          .unwrap(),
+      );
+      assert_eq!(in_thread, of(&replies), "in display order");
+      assert!(
+        records.reads.get() <= 3 + replies.len(),
+        "{} reads",
+        records.reads.get()
+      );
+
+      records.reads.set(0);
+      let mentioning = clients(
+        store
+          .user_messages(id(CHANNEL), me, UserLink::Mentioned, 50)
+          .unwrap(),
+      );
+      assert_eq!(mentioning, newest_first(&mentions));
+      assert!(
+        records.reads.get() <= 3 + mentions.len(),
+        "{} reads",
+        records.reads.get()
+      );
+
+      records.reads.set(0);
+      let posted = clients(
+        store
+          .user_messages(id(CHANNEL), peer, UserLink::Posted, 2)
+          .unwrap(),
+      );
+      assert_eq!(posted, newest_first(&peer_posts[1..]), "the newest two");
+      assert!(records.reads.get() <= 3 + 2, "{} reads", records.reads.get());
+
+      // Everybody else posted the rest: the newest few of them are a few reads too.
+      records.reads.set(0);
+      let posted = store
+        .user_messages(id(CHANNEL), id(1), UserLink::Posted, 5)
+        .unwrap();
+      assert_eq!(posted.len(), 5);
+      assert!(records.reads.get() <= 3 + 5, "{} reads", records.reads.get());
+    }
+
+    /// The `n`th message of [`threads_mentions_and_posts_read_only_what_they_return`]: a reply of
+    /// `thread`, a mention of `me` or a post of `peer` where the lists say so.
+    #[allow(clippy::too_many_arguments)]
+    fn shaped(
+      conversation: i64,
+      n: i64,
+      thread: ThreadId,
+      replies: &[i64],
+      mentions: &[i64],
+      peer_posts: &[i64],
+      me: UserId,
+      peer: UserId,
+    ) -> StoredMessage {
+      let mut stored = numbered(conversation, n);
+      if replies.contains(&n) {
+        stored.maybe_thread_id = Some(thread);
+      }
+      if mentions.contains(&n) {
+        stored.content = crate::store::MessageContent::Text {
+          body: "hi".into(),
+          mentions: vec![me],
+          meta: Default::default(),
+        };
+      }
+      if peer_posts.contains(&n) {
+        stored.sender_user_id = peer;
+      }
+      stored
+    }
+
+    /// Issue #1790: a catalog of version 5 knows no threads, mentions or posts. The store builds it
+    /// again when it opens, and the reads then find those written before the upgrade.
+    #[test]
+    fn a_catalog_from_before_the_thread_and_people_indexes_gets_them() {
+      let records = Records::default();
+      let key = SymmetricKey::generate(&mut OsRng);
+      let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::default()).unwrap();
+      fill(&store);
+      let (me, peer) = (id::<UserId>(2), id::<UserId>(3));
+      let thread = id::<ThreadId>(server_id(1, 10));
+      let shaped_at = |n| shaped(1, n, thread, &[11, 12], &[11, 30], &[30], me, peer);
+      let written: Vec<StoredMessage> = [11, 12, 30].into_iter().map(shaped_at).collect();
+      for stored in &written {
+        store.upsert_message(stored).unwrap();
+      }
+      let old_generation = store.read_catalog_state().unwrap().unwrap().generation();
+      // What a version-5 build wrote: the same indexes without these relations.
+      store
+        .grouped(|state| {
+          store.relations(state, id(1), |nodes| {
+            for message in &written {
+              for relation in Relation::of(message) {
+                if matches!(
+                  relation,
+                  Relation::InThread(_) | Relation::Mentions(_) | Relation::PostedBy(_)
+                ) {
+                  sealed_index::remove(nodes, &relation.key_of(MessageKey::of(message)))?;
+                }
+              }
+            }
+            Ok(())
+          })
+        })
+        .unwrap();
+      assert!(
+        store
+          .messages(id(1), MessageFilter::Thread(thread))
+          .unwrap()
+          .is_empty(),
+        "no thread known"
+      );
+      let old_state = format!(r#"{{"state":"complete","generation":{old_generation},"version":5}}"#);
+      store
+        .grouped(|_| store.write_named(CATALOG_TABLE, META_KEY, old_state.as_bytes()))
+        .unwrap();
+      drop(store);
+
+      let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::default()).unwrap();
+      let state = store.read_catalog_state().unwrap().unwrap();
+      assert!(matches!(
+        state,
+        CatalogState::Complete {
+          version: CATALOG_VERSION,
+          ..
+        }
+      ));
+      assert_ne!(state.generation(), old_generation, "built again");
+      assert_eq!(
+        store.messages(id(1), MessageFilter::Thread(thread)).unwrap(),
+        written[..2]
+      );
+      assert_eq!(
+        store.user_messages(id(1), me, UserLink::Mentioned, 10).unwrap(),
+        vec![written[2].clone(), written[0].clone()]
+      );
+      assert_eq!(
+        store.user_messages(id(1), peer, UserLink::Posted, 10).unwrap(),
+        vec![written[2].clone()]
+      );
+      assert!(
+        store
+          .user_messages(id(0), me, UserLink::Mentioned, 10)
+          .unwrap()
+          .is_empty()
+      );
+    }
+
     /// What building the catalog again for version 3 costs on a large store (#1509): every record
     /// is opened once. A measurement, not a check:
     /// `cargo test --release -p teamcraft-core --all-features --lib -- --ignored --nocapture
@@ -3434,6 +3685,167 @@ mod tests {
         .collect();
       self.reads.set(self.reads.get() + batch.len());
       Ok(batch)
+    }
+  }
+
+  /// Issue #1790: what the UI shows of a large conversation through the store's indexes reads what
+  /// it shows, not the conversation, also through the UI's message cache (which the conversation
+  /// isn't in): the thread view and marking it read, the conversation's last activity, recent
+  /// mentions, the sent list and the conversation's files.
+  #[cfg(feature = "ui")]
+  mod ui_reads {
+    use teamcraft_client_api::backend::{ChatBackend, SearchBackend};
+    use teamcraft_proto::{
+      ChannelModeration, ConversationKind, ConversationResponse, ConversationVisibility, HistoryPolicy,
+    };
+
+    use super::*;
+    use crate::store::{DEFAULT_MESSAGE_CACHE_BYTES, MessageContent, TrackedStore};
+    use crate::ui_backend::{CoreChatBackend, CoreCommand};
+
+    const MESSAGES: i64 = 20_000;
+    const CHANNEL: i64 = 7;
+    /// Reads of tables (the conversation's record, users, settings) and of the indexes besides
+    /// what is shown: a whole read of the conversation reads every one of its messages.
+    const MAX_READS: usize = 60;
+
+    #[test]
+    fn what_the_lists_show_of_a_large_conversation_is_all_they_read() {
+      let me = id::<UserId>(2);
+      let thread = id::<ThreadId>(server_id(CHANNEL, 10));
+      let replies = [11, MESSAGES / 2, MESSAGES - 5];
+      let mentions = [5, MESSAGES - 4];
+      let mine = [MESSAGES / 2 + 1, MESSAGES - 5, MESSAGES - 3];
+      let records: &'static Records = Box::leak(Box::default());
+      let key = SymmetricKey::generate(&mut OsRng);
+      let store = SealedStore::open_backend(records, &key, SealedStoreLimits::default()).unwrap();
+      for start in (0..MESSAGES).step_by(5_000) {
+        crate::store::write_group(&store, || {
+          for n in start..start + 5_000 {
+            let mut stored = numbered(CHANNEL, n);
+            if replies.contains(&n) {
+              stored.maybe_thread_id = Some(thread);
+            }
+            if mine.contains(&n) {
+              stored.sender_user_id = me;
+            }
+            if mentions.contains(&n) {
+              stored.content = MessageContent::Text {
+                body: format!("@me {n}"),
+                mentions: vec![me],
+                meta: Default::default(),
+              };
+            }
+            if n == MESSAGES - 6 {
+              stored.content = media_content("image/png");
+            }
+            store.upsert_message(&stored)?;
+          }
+          Ok::<_, StoreError>(())
+        })
+        .unwrap();
+      }
+      let mut pending = message(id(CHANNEL), 0, None, None, 3 * MESSAGES);
+      pending.client_message_id = client_id(CHANNEL, -1);
+      pending.sender_user_id = me;
+      store.upsert_message(&pending).unwrap();
+      crate::records::put_json(
+        &store,
+        Table::Conversations,
+        &id::<ConversationId>(CHANNEL).to_string(),
+        &channel(),
+      )
+      .unwrap();
+      drop(store);
+
+      let store = SealedStore::open_backend(records, &key, SealedStoreLimits::minimal()).unwrap();
+      let tracked = TrackedStore::with_message_cache(store, DEFAULT_MESSAGE_CACHE_BYTES);
+      let backend = CoreChatBackend::new(tracked, me, Box::new(crate::clock::ManualClock::new(0)));
+      let conversation = id::<ConversationId>(CHANNEL);
+      let message_id = |n: i64| id::<MessageId>(server_id(CHANNEL, n));
+      let reads = |what: &str, read: &mut dyn FnMut()| {
+        records.reads.set(0);
+        read();
+        assert!(
+          records.reads.get() <= MAX_READS,
+          "{what}: {} reads",
+          records.reads.get()
+        );
+      };
+
+      reads("the thread", &mut || {
+        let shown: Vec<MessageId> = backend
+          .thread(conversation, thread)
+          .iter()
+          .map(|message| message.id)
+          .collect();
+        let expected: Vec<MessageId> = [10].iter().chain(&replies).map(|n| message_id(*n)).collect();
+        assert_eq!(shown, expected);
+      });
+      reads("marking the thread read", &mut || {
+        backend.mark_thread_read(conversation, thread);
+      });
+      assert!(backend.drain_commands().contains(&CoreCommand::MarkThreadRead {
+        conversation,
+        thread,
+        message: message_id(MESSAGES - 5),
+      }));
+      reads("the last activity", &mut || {
+        assert_eq!(backend.last_activity(conversation), Some(3 * MESSAGES));
+      });
+      reads("recent mentions", &mut || {
+        let shown: Vec<MessageId> = backend
+          .recent_mentions()
+          .iter()
+          .map(|hit| hit.message.id)
+          .collect();
+        assert_eq!(shown, [message_id(MESSAGES - 4), message_id(5)]);
+      });
+      reads("the sent list", &mut || {
+        let sent: Vec<MessageId> = backend
+          .sent_messages(None)
+          .iter()
+          .map(|item| item.message)
+          .collect();
+        let expected: Vec<MessageId> = mine.iter().rev().map(|n| message_id(*n)).collect();
+        assert_eq!(sent, expected);
+      });
+      // All of them: the message index's pages are walked whole (they say which messages have
+      // files), but no message without files is read.
+      records.reads.set(0);
+      let files = backend.conversation_files(conversation);
+      assert_eq!(files.len(), 1);
+      assert_eq!(files[0].message, message_id(MESSAGES - 6));
+      assert!(
+        records.reads.get() <= MAX_READS + usize::try_from(MESSAGES).unwrap() / 100,
+        "the conversation's files: {} reads",
+        records.reads.get()
+      );
+    }
+
+    fn channel() -> ConversationResponse {
+      ConversationResponse {
+        id: id(CHANNEL),
+        maybe_space_id: None,
+        kind: ConversationKind::Channel,
+        maybe_name: Some("big".into()),
+        maybe_topic: None,
+        maybe_description: None,
+        visibility: ConversationVisibility::Private,
+        history_policy: HistoryPolicy::Full,
+        maybe_category_id: None,
+        is_archived: false,
+        moderation: ChannelModeration::default(),
+        is_integration: false,
+        contains_guests: false,
+        maybe_organizer_user_id: None,
+        maybe_my_permissions: None,
+        maybe_importer_user_id: None,
+        maybe_imported_through: None,
+        maybe_my_membership: None,
+        participants: Vec::new(),
+        maybe_image: None,
+      }
     }
   }
 

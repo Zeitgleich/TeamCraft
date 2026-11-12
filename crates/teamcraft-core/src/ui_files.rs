@@ -15,14 +15,15 @@ use crate::client::disk_downloads::{DownloadRecord, DownloadStatus, download_rec
 use crate::client::draft_files::note_sent_draft_file;
 use crate::client::files::{
   PendingFile, PendingUpload, RetryCause, TransferFailure, TransferState, UploadPurpose, UploadRetry,
-  UploadSource, attachments_of, cancel_pending_file, cancel_pending_upload, failed_uploads, pending_upload,
-  save_pending_upload, share_links, transfer_state,
+  UploadSource, attachments_of, cancel_pending_file, cancel_pending_upload, failed_uploads,
+  failed_uploads_prefix, pending_upload, save_pending_upload, share_links, transfer_state,
 };
 use crate::error::CoreError;
 use crate::imported::Authorship;
 use crate::records;
 use crate::store::{
-  Attached, AttachedRange, AttachmentRef, ImageDimensions, LocalStore, MessageMeta, StoredMessage, Table,
+  Attached, AttachedRange, AttachmentRef, ImageDimensions, LocalStore, MessageMeta, MessageSlot,
+  StoredMessage, Table,
 };
 use crate::transfers::Transfers;
 use crate::ui_backend::{CoreChatBackend, CoreCommand, RedactedText, imported_author_view, ui_message_id};
@@ -268,9 +269,48 @@ impl<S: LocalStore> CoreChatBackend<S> {
     }
   }
 
+  /// Newest first. Reads only the messages that can have files (issue #1790): those still in the
+  /// outbox, the sent ones with attachments through the store's index of them, and those whose
+  /// uploads failed, by their records; not the whole conversation and a lookup per message.
   pub(crate) fn ui_conversation_files(&self, conversation: ConversationId) -> Vec<FileInfo> {
-    let mut messages = self.all_messages(conversation);
-    messages.reverse();
+    let store = self.store_ref();
+    let mut messages = self.read(
+      store
+        .messages_at(conversation, MessageSlot::Pending)
+        .map_err(CoreError::from),
+    );
+    messages.extend(self.attached_messages(
+      conversation,
+      Attached::Any,
+      AttachedRange::Older(None),
+      usize::MAX,
+    ));
+    let failed_prefix = failed_uploads_prefix(conversation);
+    let failed = store
+      .list_prefix(Table::FileTransfers, &failed_prefix)
+      .unwrap_or_default();
+    for (key, _) in failed {
+      let Some(client_message_id) = key
+        .strip_prefix(&failed_prefix)
+        .and_then(|hex| ClientMessageId::from_hex(hex).ok())
+      else {
+        continue;
+      };
+      if !messages
+        .iter()
+        .any(|stored| stored.client_message_id == client_message_id)
+      {
+        messages.extend(
+          self.read(
+            store
+              .message(conversation, client_message_id)
+              .map_err(CoreError::from),
+          ),
+        );
+      }
+    }
+    messages.sort_by_key(|stored| std::cmp::Reverse(stored.order()));
+    messages.dedup_by_key(|stored| stored.client_message_id);
     let maybe_importer = self.importer();
     messages
       .iter()

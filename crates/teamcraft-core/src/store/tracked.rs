@@ -34,7 +34,7 @@ use teamcraft_proto::{AttachmentId, ClientMessageId, ConversationId, MessageId, 
 use super::message_cache::MessageCache;
 use super::{
   Attached, AttachedRange, AttachmentRef, FeedVersion, LocalStore, MessageContent, MessageEdge,
-  MessageFilter, MessageOrder, MessageSlot, StoreError, StoredMessage, Table, WriteTally, Written,
+  MessageFilter, MessageOrder, MessageSlot, StoreError, StoredMessage, Table, UserLink, WriteTally, Written,
 };
 use crate::records::draft_reply_key;
 
@@ -682,6 +682,12 @@ impl<S: LocalStore> TrackedStore<S> {
     self.group.lock().unwrap_or_else(PoisonError::into_inner)
   }
 
+  /// Whether a read for `filter` goes to the store's index rather than through the cache, when the
+  /// cache doesn't hold the conversation: a thread, of a store that indexes it.
+  fn reads_narrowly(&self, filter: MessageFilter) -> bool {
+    matches!(filter, MessageFilter::Thread(_)) && self.inner.indexes_feed()
+  }
+
   fn journal(&self) -> std::sync::MutexGuard<'_, Journal> {
     // Invariant-free data: at worst a reader reads again what it keeps.
     self.journal.lock().unwrap_or_else(PoisonError::into_inner)
@@ -764,7 +770,9 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
   }
 
   /// From the cache when it holds the conversation; otherwise read whole and kept, unless a write
-  /// to it came in between (the read may predate it).
+  /// to it came in between (the read may predate it). A thread is read through the store's index
+  /// instead when the cache doesn't hold its conversation (issue #1790): the thread view would
+  /// otherwise read the whole conversation to show a few replies.
   fn messages(
     &self,
     conversation: ConversationId,
@@ -772,6 +780,20 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
   ) -> Result<Vec<StoredMessage>, StoreError> {
     if !self.cache().is_enabled() {
       return self.inner.messages(conversation, filter);
+    }
+    if self.reads_narrowly(filter) {
+      self.follow_disk();
+      let maybe_held = self.cache().shared(conversation);
+      return match maybe_held {
+        Some(messages) => Ok(
+          messages
+            .iter()
+            .filter(|message| message.matches(filter))
+            .cloned()
+            .collect(),
+        ),
+        None => self.inner.messages(conversation, filter),
+      };
     }
     let mut matching = Vec::new();
     self.with_all_messages(conversation, &mut |messages| {
@@ -806,6 +828,12 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     filter: MessageFilter,
     visit: &mut dyn FnMut(&StoredMessage),
   ) -> Result<(), StoreError> {
+    if self.reads_narrowly(filter) {
+      for message in self.messages(conversation, filter)? {
+        visit(&message);
+      }
+      return Ok(());
+    }
     self.with_all_messages(conversation, &mut |messages| {
       for message in messages.iter().filter(|message| message.matches(filter)) {
         visit(message);
@@ -885,6 +913,16 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
 
   fn pinned_messages(&self, conversation: ConversationId) -> Result<Vec<StoredMessage>, StoreError> {
     self.inner.pinned_messages(conversation)
+  }
+
+  fn user_messages(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+    link: UserLink,
+    limit: usize,
+  ) -> Result<Vec<StoredMessage>, StoreError> {
+    self.inner.user_messages(conversation, user, link, limit)
   }
 
   fn reactions_to(

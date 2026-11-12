@@ -1627,6 +1627,12 @@ pub fn failed_uploads(
   Ok(records::get_json(store, Table::FileTransfers, &key)?.unwrap_or_default())
 }
 
+/// The prefix of the keys of [`failed_uploads`] in `conversation`, each followed by the message's
+/// client ID in hex.
+pub fn failed_uploads_prefix(conversation: ConversationId) -> String {
+  failed_key(&format!("{conversation}/"))
+}
+
 fn failed_key(outbox_key: &str) -> String {
   format!("failed/{outbox_key}")
 }

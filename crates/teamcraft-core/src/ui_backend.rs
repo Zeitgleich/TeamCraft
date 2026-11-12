@@ -70,6 +70,9 @@ use crate::store::{
 
 /// Rows read at a time when a list's anchor is looked for by its time ([`FeedAnchor`]).
 const ANCHOR_WALK_ROWS: usize = 64;
+/// Rows of the feed read at a time when its newest readable message is looked for from the end
+/// ([`ChatBackend::last_activity`]).
+const LAST_ACTIVITY_ROWS: usize = 16;
 /// How often the tallies of unread counts that follow the journal are handed to the store at most
 /// ([`CoreChatBackend::keep_followed_tallies_if_due`]).
 const FOLLOWED_KEEP_EVERY_MS: i64 = 5_000;
@@ -2446,7 +2449,36 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     count
   }
 
+  /// A store that indexes the feed is read from its end, a few rows at a time, up to the first
+  /// readable one (issue #1790): its rows are the top-level messages neither hidden nor deleted, in
+  /// server order, which is the order they were sent in up to the senders' clocks. The newest time
+  /// among the rows read counts, so a clock a little off within them doesn't matter.
   fn last_activity(&self, conversation: ConversationId) -> Option<TimestampMs> {
+    if self.store.indexes_feed() {
+      let mut end = self.read(self.store.feed_len(conversation).map_err(CoreError::from));
+      while end > 0 {
+        let start = end.saturating_sub(LAST_ACTIVITY_ROWS);
+        let rows = self.read(
+          self
+            .store
+            .feed_rows(conversation, start, end - start)
+            .map_err(CoreError::from),
+        );
+        if rows.is_empty() {
+          return None;
+        }
+        let maybe_newest = rows
+          .iter()
+          .filter(|message| message.maybe_unreadable.is_none())
+          .map(|message| message.sent_at_ms)
+          .max();
+        if maybe_newest.is_some() {
+          return maybe_newest;
+        }
+        end = start;
+      }
+      return None;
+    }
     self
       .read(
         self
@@ -2487,8 +2519,34 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     answer
   }
 
+  /// A store that indexes the feed reads the root by its ID, the thread's messages through its
+  /// index of them and their reactions and replies through its indexes (issue #1790), not the
+  /// whole conversation.
   fn thread(&self, conversation: ConversationId, thread: ThreadId) -> Vec<Message> {
     let root_id = MessageId::from_snowflake(thread.snowflake());
+    if self.store.indexes_feed() {
+      let maybe_root = self.read(
+        self
+          .store
+          .message_by_server_id(conversation, root_id)
+          .map_err(CoreError::from),
+      );
+      let replies = self.read(
+        self
+          .store
+          .messages(conversation, MessageFilter::Thread(thread))
+          .map_err(CoreError::from),
+      );
+      let rows: Vec<StoredMessage> = maybe_root
+        .into_iter()
+        .chain(
+          replies
+            .into_iter()
+            .filter(|message| !message.is_hidden() && !is_deleted(message)),
+        )
+        .collect();
+      return self.with_indexed_relations(conversation, &rows, self.importer());
+    }
     let mut rows = Vec::new();
     self.with_all_messages(conversation, &mut |all| {
       let root = all
@@ -2565,13 +2623,16 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn mark_thread_read(&self, conversation: ConversationId, thread: ThreadId) {
     // The server takes a reply of the thread, not the root; the newest one stored is the furthest
-    // this device has seen.
+    // this device has seen. Only the thread is read (issue #1790).
     let maybe_latest = self
-      .stored(conversation)
+      .read(
+        self
+          .store
+          .messages(conversation, MessageFilter::Thread(thread))
+          .map_err(CoreError::from),
+      )
       .into_iter()
-      .filter(|stored| {
-        stored.maybe_thread_id == Some(thread) && matches!(stored.content, MessageContent::Text { .. })
-      })
+      .filter(|stored| matches!(stored.content, MessageContent::Text { .. }))
       .filter_map(|stored| stored.maybe_server_id)
       .max();
     if let Some(message) = maybe_latest {

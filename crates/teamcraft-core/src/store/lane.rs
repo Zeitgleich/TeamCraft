@@ -7,11 +7,11 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use teamcraft_proto::{ClientMessageId, ConversationId, MessageId, ThreadId};
+use teamcraft_proto::{ClientMessageId, ConversationId, MessageId, ThreadId, UserId};
 
 use super::{
   Attached, AttachedRange, FeedVersion, LocalStore, MessageEdge, MessageFilter, MessageOrder, MessageSlot,
-  SealedSqliteStore, StoreError, StoredMessage, Table, WriteTally, Written,
+  SealedSqliteStore, StoreError, StoredMessage, Table, UserLink, WriteTally, Written,
 };
 use crate::push_preview::ShownMessage;
 
@@ -255,6 +255,16 @@ impl LocalStore for LaneStore {
 
   fn pinned_messages(&self, conversation: ConversationId) -> Result<Vec<StoredMessage>, StoreError> {
     self.reading().pinned_messages(conversation)
+  }
+
+  fn user_messages(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+    link: UserLink,
+    limit: usize,
+  ) -> Result<Vec<StoredMessage>, StoreError> {
+    self.reading().user_messages(conversation, user, link, limit)
   }
 
   fn reactions_to(
