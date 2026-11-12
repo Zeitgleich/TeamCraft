@@ -137,6 +137,11 @@ fn screen(settings: Settings) -> AnyView {
   #[cfg(feature = "demo")]
   if crate::settings::BackendMode::load() == crate::settings::BackendMode::Mock {
     let backend: Rc<dyn Backend> = Rc::new(crate::mock::MockBackend::new(now_ms()));
+    // The meetings page talks to the server directly; the demo answers for it.
+    let meetings = Rc::new(crate::mock_meetings::MockMeetings::new(now_ms()));
+    provide_context(crate::meetings::MeetingsHub::new(
+      crate::meetings::MeetingsClient::new(meetings),
+    ));
     return view! { <Shell backend=backend settings=settings /> }.into_any();
   }
   // Ends in `SessionGate`, the module's first view (#1465).
