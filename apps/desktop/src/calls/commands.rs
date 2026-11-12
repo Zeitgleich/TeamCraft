@@ -17,7 +17,7 @@ use crate::core::commands::{CommandError, CoreHost};
 
 #[tauri::command(rename_all = "snake_case")]
 pub fn call_snapshot(calls: State<'_, Arc<CallHost>>) -> CallSnapshot {
-  calls.snapshot()
+  calls.page_snapshot()
 }
 
 /// Lists microphones and speakers again; the snapshot keeps the result.

@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::Environment;
+use super::call::CallEventDetail;
+#[cfg(doc)]
+use super::call::CallReport;
 
 /// Product name in the release (`teamcraft@1.0.9`), so all apps of a version group together.
 pub(super) const RELEASE_PREFIX: &str = "teamcraft@";
@@ -28,6 +31,9 @@ pub struct CrashEvent {
   pub frames: Vec<StackFrame>,
   /// Recent lines of the redacted debug log ring, oldest first.
   pub breadcrumbs: Vec<String>,
+  /// A call problem's fingerprint, tags and `call` context ([`CallReport::into_event`]); boxed,
+  /// as most reports have none.
+  pub maybe_call: Option<Box<CallEventDetail>>,
 }
 
 /// How bad it is: fatal reports are always sent, the others are sampled.
@@ -107,6 +113,14 @@ impl CrashEvent {
   }
 
   fn payload(&self, app: &AppInfo, environment: &Environment, installation: InstallationId) -> Value {
+    let mut payload = self.base_payload(app, environment, installation);
+    if let Some(call) = &self.maybe_call {
+      call.apply(&mut payload);
+    }
+    payload
+  }
+
+  fn base_payload(&self, app: &AppInfo, environment: &Environment, installation: InstallationId) -> Value {
     let timestamp = seconds(self.timestamp_ms);
     let mut tags = BTreeMap::new();
     tags.insert("app.platform", app.platform.as_str());
@@ -348,6 +362,7 @@ mod tests {
     );
     assert_eq!(payload["timestamp"], json!(1_700_000_000.5));
     // Nothing a report must never carry has a field at all.
+    assert!(payload.get("fingerprint").is_none());
     for field in ["server_name", "request", "extra", "modules"] {
       assert!(payload.get(field).is_none(), "{field}");
     }
@@ -369,6 +384,7 @@ mod tests {
         is_in_app: true,
       }],
       breadcrumbs: vec!["2026-11-08T10:00:00Z INFO teamcraft_core: connected".to_owned()],
+      maybe_call: None,
     }
   }
 

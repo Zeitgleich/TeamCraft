@@ -162,7 +162,8 @@ account, the device or the instance, and it is rotated when the user turns repor
   - **An own backend:** the instance's own DSN (GlitchTip or any Sentry-protocol backend).
   - **Nowhere:** crash reports are off.
 
-  Plus the sample rate for handled errors (crashes are always sent) and the environment name.
+  Plus the sample rate for handled errors (crashes are always sent), the problem reports per call
+  ("Call problems") and the environment name.
   Stored as an instance setting in the database (`settings.crash_reports`) and served to the apps
   in `GET /api/v1/server-info` (`crash_reports`, absent while nothing is sent), so store apps work
   for every instance without a rebuild. Nothing to send: nothing is captured, and queued reports
@@ -226,16 +227,91 @@ not reported. At most five per page life; the service worker reports none.
 
 ### Call failures
 
-A call that fails on the web page, at the join or after it started (the call module ends it), is a
-handled warning of type `CallFailed`, besides the toast that says why: its message is the failure's
-wire text (`call_encryption_failed: DAVE: …`, `call_server_unreachable: …`), with runs of six or
-more digits (device, call and user IDs) as `[id]`, so one cause is one issue. Only failures the
-user can't fix are sent: the call's own (encryption, a browser API that failed), the call server
-out of reach, and a browser that lacks what calls need; a refused or missing microphone or camera
-is not. At most five per page life. The call module is a wasm instance of its own with its own log
-ring: every report of the page carries both logs as breadcrumbs, merged by time, so a script error
-of the call module or a failed call shows what the call did before (GlitchTip TEAMCRAFT-23, the
-guest of 2026-11-11 whose join ended silently twelve times).
+A call action other than the join that fails on the web page (a camera or a screen share that
+couldn't start for a reason that isn't the user's) is a handled warning of type `CallFailed`,
+besides the toast that says why: its message is the failure's wire text, with runs of six or more
+digits (device, call and user IDs) as `[id]`, so one cause is one issue. Only failures the user
+can't fix are sent: the call's own (a browser API that failed) and a browser that lacks what calls
+need; a refused or missing microphone or camera is not. At most five per page life. A join that
+fails and a call that ends with an error are call problems (below), with the call's state. The
+call module is a wasm instance of its own with its own log ring: every report of the page carries
+both logs as breadcrumbs, merged by time, so a script error of the call module or a failed call
+shows what the call did before (GlitchTip TEAMCRAFT-23, the guest of 2026-11-11 whose join ended
+silently twelve times).
+
+### Call problems
+
+Issue #1762. What goes wrong in a call, with the call's state when it happened, so a report from
+the field can be read without asking for logs. Web and desktop; the mobile apps don't report them
+yet.
+
+**How.** The media drivers keep a `CallTelemetry` per call (`teamcraft_media::call_telemetry`):
+it hears the engine's events (joins, rekeys, reconnects, the transport, the SFU's refusals; never
+audio or video frames), samples the video stats every 3 s while in a call (the report "stats for
+nerds" shows, `VideoStatsReport`) and sees the call's end. Problems become `CallReport`s
+(`crash_reporting::call`), which ride to the page with the call snapshot (`call_reports`, at most
+16 waiting; they leave the call state once the page has them, so later snapshots don't carry them);
+the page lets each through its `CallReportGate` once and captures it like any handled error:
+sampled with the instance's rate, scrubbed, queued. Nothing runs on the media path: no per-frame or
+per-packet work, one stats read every 3 s during a call, nothing outside one.
+
+| Type                    | Level   | When                                                                                                                                 | Fingerprint after `call`, kind |
+|-------------------------|---------|--------------------------------------------------------------------------------------------------------------------------------------|--------------------------------|
+| `CallEncryptionFailed`  | error   | DAVE couldn't take this device in: the SFU refused it, or nothing secured it in time                                                 | `refused` or `setup_timeout`   |
+| `CallMemberRefused`     | error   | Another member was refused by the encryption (#1763; hook ready)                                                                     | –                              |
+| `CallResumeFailed`      | error   | A resumed DAVE group failed its checks after a reconnect (#1763; hook ready)                                                         | –                              |
+| `CallUnverifiedMember`  | error   | A member's key didn't check out, a retired key came back, or the roster or authenticator was missing                                 | the cause                      |
+| `VideoEncodingFailed`   | error   | An own track's encoder gave up (#1766; hook ready): codec, encoder (WebCodecs, hardware, software), lines and layer                  | kind, codec, encoder           |
+| `CallReconnectChurn`    | warning | More than 3 reconnects within 5 minutes                                                                                              | –                              |
+| `CallVideoFreeze`       | warning | A subscribed track showed no new picture for 6 s (not while reconnecting); whether its packets still arrived                         | kind, `arriving` or `silent`   |
+| `CallFailed`            | error   | The join failed, or the call ended with an error, by the error's variant (`connection_lost`, `browser_webtransport_connect`, `dave`) | the code, `join` or `in_call`  |
+| `CallTransportFallback` | warning | The call runs on the WebSocket fallback                                                                                              | –                              |
+| `CallSfuRejected`       | warning | The SFU refused a request, by its `error_code`                                                                                       | the code                       |
+| `CallProtocolError`     | error   | `CallEngineError::Protocol` (and a sequence gap): the violation's name from the code                                                 | the name                       |
+| `PoorCall`              | warning | At the end of a call of 30 s or more: 15 s frozen, 3 reconnects or 10 lossy samples (5 % or more downlink loss)                      | –                              |
+
+The message names the kind and its stable parts only (`camera picture froze (vp9, packets still
+arriving)`); the numbers are in the event's `call` context. Each kind goes once per call (freezes
+three times, SFU refusals once per code), the page sends at most the instance's cap per call
+(below) and 30 per page life, and a report older than 5 minutes when the page sees it (a page that
+was frozen in the background) is not sent.
+
+**What a call report adds** to a handled event:
+
+| Field             | Content                                                                                                                                                                                                                                                                                                                                                                             |
+|-------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `fingerprint`     | `call`, the kind and its stable parts (table above), never a number                                                                                                                                                                                                                                                                                                                 |
+| Tags              | `call.problem`, `call.transport` (`quic`, `fallback`), `call.devices` (`1`, `2`, `3-5`, `6-10`, `11+`), `call.codec_sent`, `call.codec_received`, `call.encoder`, `call.reconnected`; on the web page `browser` (`Firefox 133`) and `browser.name`                                                                                                                                  |
+| Context `call`    | `call_ref` (8 random bytes per call and device), `seq`, `problem`, `problem_details` (its numbers), transport, `since_join_s`, `reconnects`, DAVE epoch, devices, own tracks (kind, codec, encoder, top lines, layers), received tracks (kind, codec, lines arriving, layer, highest asked for; at most 8), uplink estimate and loss, downlink loss, round trip, the highest jitter |
+| Context `browser` | Family and major version only, from the user agent (web page)                                                                                                                                                                                                                                                                                                                       |
+| Breadcrumbs       | The logs as before, then the call's trail: up to 20 lines `call +12.3 s reconnecting`, times since the join, what happened, never who                                                                                                                                                                                                                                               |
+
+**Privacy by construction.** `CallReport` has no field for a user, device, conversation or call
+ID, a name, a key, a key binding, a privacy code or media: counts, enums and words from the code.
+The call is named by a random `call_ref` that only groups one call's reports on one device; it can't
+be joined with another device's reports of the same call or with the call on the server. Error
+codes and violation names pass `identifier` (lowercase letters, digits, `_ . : -`, at most 64;
+anything else becomes `other`), a codec or track kind the code doesn't know too. The tests build
+reports with a name, an e-mail address, a JWT and a home directory in every string field and
+assert that the envelope holds none of them (`call.rs`, `a_report_carrying_secrets_in_its_strings_loses_them`),
+and that the telemetry's reports hold no device ID or privacy code (`call_telemetry.rs`).
+
+**Settings:** "Problem reports per call" (Administration → Crash reports, `call_reports_per_call`,
+8 by default, 0: none), sampled with the handled errors' rate. An older server's `server-info`
+without it: 8.
+
+### The SFU's incidents
+
+The SFU counts what goes wrong in its calls (`SfuCallIncidents`: DAVE groups started over because
+no member committed in time, strikes and refusals of joiners that stalled them, DAVE transitions run
+before every member was ready, participants dropped because their signaling queue overflowed) and
+sends the counts with its roster report, beside the sessions per transport. The server reports them
+through its own path to the backend in force (`sfu_incidents.rs`): handled warnings
+`SfuDaveRestart`, `SfuDaveRefusal`, `SfuDaveLateTransition`, `SfuSignalingOverflow`, and
+`SfuFallbackShare` when 30 % or more of at least 20 sessions joined on the WebSocket fallback. Each
+kind at most once in 30 minutes (the counts in between summed into its breadcrumb), 100 per server
+process, sampled with the handled errors' rate. Counts only: no call, device or address. Platform
+`server`.
 
 ## Processes without a page
 
@@ -482,19 +558,20 @@ core). The Android measures of its own (`Perf.kt`) take their names from the cor
 
 ## Status
 
-| Part                                                         | State                            |
-|--------------------------------------------------------------|----------------------------------|
-| This design, the core module (config, scrub, queue, panic)   | Done (first pull request)        |
-| Web and desktop page: wasm panics, script errors             | Done (third pull request)        |
-| Panic hooks of the desktop shell and the server              | Done (fourth pull request)       |
-| Admin setting, served in `GET /api/v1/server-info`, relay    | Done (second pull request)       |
-| User opt-out, first-start notice (web and desktop page)      | Done (third pull request)        |
-| Android SDK, symbol upload in the release workflow           | Done (fifth pull request)        |
-| iOS (sentry-cocoa), settings and notice                      | Written; Mac build: #1515        |
-| iOS dSYM upload, device test                                 | Next (#1515)                     |
-| GlitchTip in teamcraft-deploy                                | teamcraft-deploy                 |
-| Performance data: web, desktop, Android, iOS SDK (#1521)     | Done; iOS untested (#1515)       |
-| Screen-share quality, web and desktop (#1733)                | Done; real-hardware codec test open |
-| Core job steps, slow-job warnings, catch-up (#1521 review)   | Done; iOS built in CI only       |
-| Named core steps on every platform                           | Done                             |
-| Uploads and MLS commits as transactions of their own         | Next                             |
+| Part                                                         | State                                      |
+|--------------------------------------------------------------|--------------------------------------------|
+| This design, the core module (config, scrub, queue, panic)   | Done (first pull request)                  |
+| Web and desktop page: wasm panics, script errors             | Done (third pull request)                  |
+| Panic hooks of the desktop shell and the server              | Done (fourth pull request)                 |
+| Admin setting, served in `GET /api/v1/server-info`, relay    | Done (second pull request)                 |
+| User opt-out, first-start notice (web and desktop page)      | Done (third pull request)                  |
+| Android SDK, symbol upload in the release workflow           | Done (fifth pull request)                  |
+| iOS (sentry-cocoa), settings and notice                      | Written; Mac build: #1515                  |
+| iOS dSYM upload, device test                                 | Next (#1515)                               |
+| GlitchTip in teamcraft-deploy                                | teamcraft-deploy                           |
+| Performance data: web, desktop, Android, iOS SDK (#1521)     | Done; iOS untested (#1515)                 |
+| Screen-share quality, web and desktop (#1733)                | Done; real-hardware codec test open        |
+| Core job steps, slow-job warnings, catch-up (#1521 review)   | Done; iOS built in CI only                 |
+| Call problems (web, desktop) and the SFU's incidents (#1762) | Done; #1763/#1766 events wired once merged |
+| Named core steps on every platform                           | Done                                       |
+| Uploads and MLS commits as transactions of their own         | Next                                       |

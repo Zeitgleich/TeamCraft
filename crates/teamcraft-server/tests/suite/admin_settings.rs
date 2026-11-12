@@ -981,6 +981,7 @@ mod instance_settings {
         "sample_percent": 20,
         "trace_percent": 100,
         "slow_job_ms": 1000,
+        "call_reports_per_call": 8,
         "environment": "production",
         "allows_opt_out": true,
         "shows_notice": true,

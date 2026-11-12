@@ -9,6 +9,7 @@
 //! [`scrub`] before it is queued, breadcrumbs come only from the redacted debug log ring, and the
 //! only identifier is a random [`InstallationId`], never a user ID.
 
+mod call;
 mod event;
 mod panic;
 mod queue;
@@ -23,10 +24,17 @@ use std::future::Future;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{CrashReportsInfo, DEFAULT_SLOW_JOB_MS, is_crash_environment};
+use teamcraft_proto::{
+  CrashReportsInfo, DEFAULT_CALL_REPORTS_PER_CALL, DEFAULT_SLOW_JOB_MS, is_crash_environment,
+};
 pub use teamcraft_proto::{Dsn, DsnError};
 use thiserror::Error;
 
+pub use call::{
+  BrowserFamily, BrowserInfo, CallContext, CallEventDetail, CallProblem, CallQualitySummary, CallRef,
+  CallReport, CallReportGate, CallTransportKind, MAX_CALL_TRAIL, MAX_RECEIVED_TRACKS, ReceivedVideoContext,
+  SentVideoContext, Unverified, identifier,
+};
 pub use event::{
   AppInfo, AppPlatform, CrashEvent, CrashLevel, ErrorSource, EventId, InstallationId, StackFrame,
 };
@@ -64,6 +72,9 @@ pub struct CrashReportingConfig {
   /// 0: never.
   #[serde(default = "default_slow_job_ms")]
   pub slow_job_ms: u32,
+  /// Problem reports one call may send at most (docs/crash-reports.md, "Call problems"); 0: none.
+  #[serde(default = "default_call_reports_per_call")]
+  pub call_reports_per_call: u8,
   pub environment: Environment,
   /// The user's opt-out counts; off: the instance requires reports.
   #[serde(default = "is_on")]
@@ -140,6 +151,7 @@ impl CrashReportingConfig {
       sample_rate: SampleRate::new(sample_rate)?,
       trace_rate: SampleRate::NONE,
       slow_job_ms: DEFAULT_SLOW_JOB_MS,
+      call_reports_per_call: DEFAULT_CALL_REPORTS_PER_CALL,
       environment: Environment::new(environment)?,
       allows_opt_out: true,
       shows_notice: true,
@@ -154,6 +166,7 @@ impl CrashReportingConfig {
       shows_notice: info.shows_notice,
       trace_rate: SampleRate::new(f64::from(info.trace_percent) / 100.0)?,
       slow_job_ms: info.slow_job_ms,
+      call_reports_per_call: info.call_reports_per_call,
       ..Self::new(
         &info.dsn,
         f64::from(info.sample_percent) / 100.0,
@@ -169,6 +182,10 @@ fn is_on() -> bool {
 
 fn default_slow_job_ms() -> u32 {
   DEFAULT_SLOW_JOB_MS
+}
+
+fn default_call_reports_per_call() -> u8 {
+  DEFAULT_CALL_REPORTS_PER_CALL
 }
 
 impl SampleRate {
@@ -305,6 +322,7 @@ mod tests {
       sample_percent: 20,
       trace_percent: 5,
       slow_job_ms: 1_000,
+      call_reports_per_call: 3,
       environment: "production".to_owned(),
       allows_opt_out: false,
       shows_notice: true,
@@ -313,6 +331,7 @@ mod tests {
     assert_eq!(config.sample_rate.get(), 0.2);
     assert_eq!(config.trace_rate.get(), 0.05);
     assert!(!config.allows_opt_out);
+    assert_eq!(config.call_reports_per_call, 3);
     let hostile = CrashReportsInfo {
       sample_percent: 200,
       ..info
@@ -343,6 +362,7 @@ mod tests {
         "sample_rate": 0.5,
         "trace_rate": 0.0,
         "slow_job_ms": 1000,
+        "call_reports_per_call": 8,
         "environment": "production",
         "allows_opt_out": true,
         "shows_notice": true,
@@ -359,6 +379,7 @@ mod tests {
     }))
     .unwrap();
     assert_eq!(older.trace_rate, SampleRate::NONE);
+    assert_eq!(older.call_reports_per_call, DEFAULT_CALL_REPORTS_PER_CALL);
     assert!(
       serde_json::from_value::<CrashReportingConfig>(serde_json::json!({
         "dsn": "https://abc123@errors.example.com/7",

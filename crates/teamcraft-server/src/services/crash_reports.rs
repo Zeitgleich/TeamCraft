@@ -16,8 +16,8 @@ use axum::body::Bytes;
 use reqwest::header::{CONTENT_TYPE, RETRY_AFTER};
 use teamcraft_client_api::crash_reporting::trace;
 use teamcraft_client_api::crash_reporting::{
-  AppInfo, AppPlatform, CrashQueue, CrashReporter, CrashReportingConfig, CrashSendOutcome, EventId,
-  InstallationId, PanicParts,
+  AppInfo, AppPlatform, CrashEvent, CrashQueue, CrashReporter, CrashReportingConfig, CrashSendOutcome,
+  EventId, InstallationId, PanicParts,
 };
 use teamcraft_proto::{Dsn, ErrorCode, MAX_CRASH_ENVELOPE_BYTES};
 use tokio::sync::Notify;
@@ -268,6 +268,66 @@ async fn send_traces(state: &AppState, reporter: &mut CrashReporter, config: &Cr
       return;
     }
   }
+}
+
+/// Handled events of the server's own (the SFU's incidents, `sfu_incidents`): sampled with the
+/// instance's rate, scrubbed and sent from a task of their own, so the caller never waits for the
+/// backend. Nothing while crash reports are off.
+pub(crate) fn capture_events(state: &AppState, events: Vec<CrashEvent>) {
+  static INSTALLATION: std::sync::OnceLock<InstallationId> = std::sync::OnceLock::new();
+  let Some(config) = current_config(state) else {
+    return;
+  };
+  let installation = *INSTALLATION.get_or_init(|| InstallationId::from_random_bytes(random_bytes()));
+  let mut reporter = CrashReporter::new(server_app(), installation, CrashQueue::default());
+  let Ok(url) = Url::parse(&config.dsn.envelope_url(env!("CARGO_PKG_VERSION"))) else {
+    return;
+  };
+  reporter.set_config(Some(config));
+  for event in events {
+    reporter.capture(event, random_roll());
+  }
+  let mut bodies = Vec::new();
+  while let Some(pending) = reporter.next_send(now_ms()) {
+    bodies.push(pending.request.body);
+    // Sent once: the task below doesn't report back.
+    reporter.record_outcome(pending.event_id, CrashSendOutcome::Accepted, now_ms());
+  }
+  if bodies.is_empty() {
+    return;
+  }
+  let relay = &state.crash_relay;
+  if !relay.allows_private && check_public_url(&url).is_err() {
+    return;
+  }
+  let http = relay.http.clone();
+  tokio::spawn(async move {
+    for body in bodies {
+      let sent = tokio::time::timeout(
+        FORWARD_TIMEOUT,
+        http
+          .post(url.clone())
+          .header(CONTENT_TYPE, ENVELOPE_CONTENT_TYPE)
+          .body(body)
+          .send(),
+      )
+      .await;
+      if !matches!(sent, Ok(Ok(ref response)) if response.status().is_success()) {
+        debug!("an SFU incident report did not reach the backend");
+        return;
+      }
+    }
+  });
+}
+
+/// A uniform roll in `[0, 1)` for sampling.
+fn random_roll() -> f64 {
+  let bytes = random_bytes();
+  let value = u64::from_le_bytes([
+    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], 0,
+  ]);
+  // Precision: 56 random bits, exact in an f64.
+  value as f64 / (1_u64 << 56) as f64
 }
 
 /// The backend's answer to a send of the server's own.

@@ -177,6 +177,7 @@ mod tests {
       loss_buckets: Vec::new(),
       quic_sessions,
       fallback_sessions,
+      ..SfuCallQuality::default()
     }
   }
 }
