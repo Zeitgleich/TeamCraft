@@ -2834,6 +2834,7 @@ impl CallEngine {
       timestamp: released.timestamp,
       is_keyframe: complete.is_keyframe,
       data,
+      arrived_at: now,
     }));
     Ok(())
   }

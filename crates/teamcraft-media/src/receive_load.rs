@@ -26,7 +26,17 @@ use teamcraft_proto::{MediaStreamId, VideoTrackKind};
 use web_time::Instant;
 
 use crate::camera_governor::{CameraGovernorConfig, EncoderLoad, FrameTally, OverloadReason};
+use crate::rtp::RtpTimestamp;
 use crate::video::VideoResolution;
+
+/// The RTP video clock.
+const RTP_VIDEO_CLOCK_HZ: u64 = 90_000;
+/// A received stream's frame interval until two frames tell (30 fps).
+const DEFAULT_FRAME_INTERVAL: Duration = Duration::from_micros(33_333);
+/// Frame intervals outside these are gaps, not the stream's rate: a decoder's lateness is weighed
+/// against the rate.
+const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(5);
+const MAX_FRAME_INTERVAL: Duration = Duration::from_millis(500);
 
 /// The received video's decoders against the frames they get, and the layers that leaves each
 /// watched stream.
@@ -65,6 +75,14 @@ pub struct DecodedFrame {
   pub late_by: Duration,
   /// The stream's frame interval, which [`Self::late_by`] is measured against.
   pub interval: Duration,
+}
+
+/// A received stream's frame interval, from its frames' RTP timestamps: what
+/// [`DecodedFrame::interval`] weighs the lateness against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameInterval {
+  maybe_last: Option<RtpTimestamp>,
+  interval: Duration,
 }
 
 /// Why the receiving decoders were last found overloaded.
@@ -147,6 +165,30 @@ impl WatchedStream {
   /// wants.
   pub fn unlimited_layer(&self) -> u8 {
     Ladder::new(self).layer()
+  }
+}
+
+impl FrameInterval {
+  /// The interval before the frame at `timestamp`, from the one before it: what a decoder has
+  /// for it. Gaps (a lost frame, a paused sender) don't count.
+  pub fn next(&mut self, timestamp: RtpTimestamp) -> Duration {
+    if let Some(last) = self.maybe_last.replace(timestamp) {
+      let ticks = u64::from(timestamp.0.wrapping_sub(last.0));
+      let interval = Duration::from_micros(ticks * 1_000_000 / RTP_VIDEO_CLOCK_HZ);
+      if (MIN_FRAME_INTERVAL..=MAX_FRAME_INTERVAL).contains(&interval) {
+        self.interval = interval;
+      }
+    }
+    self.interval
+  }
+}
+
+impl Default for FrameInterval {
+  fn default() -> Self {
+    Self {
+      maybe_last: None,
+      interval: DEFAULT_FRAME_INTERVAL,
+    }
   }
 }
 
@@ -383,6 +425,22 @@ mod tests {
 
   /// A thumbnail (shown small, wants the middle of three layers), the stage camera (wants its
   /// top) and a screen share (its top).
+  #[test]
+  fn the_frame_interval_follows_the_timestamps_and_skips_gaps() {
+    let mut interval = FrameInterval::default();
+    assert_eq!(interval.next(RtpTimestamp(0)), DEFAULT_FRAME_INTERVAL);
+    assert_eq!(interval.next(RtpTimestamp(6_000)), Duration::from_micros(66_666));
+    // A paused sender's gap of five seconds isn't the rate.
+    assert_eq!(
+      interval.next(RtpTimestamp(456_000)),
+      Duration::from_micros(66_666)
+    );
+    // The 32-bit clock wraps.
+    let mut wrapping = FrameInterval::default();
+    wrapping.next(RtpTimestamp(u32::MAX - 999));
+    assert_eq!(wrapping.next(RtpTimestamp(2_000)), Duration::from_micros(33_333));
+  }
+
   fn call() -> Vec<WatchedStream> {
     vec![
       stream(THUMBNAIL, &VideoTrackKind::Camera, 320, 180, 1, &[0, 1, 2]),

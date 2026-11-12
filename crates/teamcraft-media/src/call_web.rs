@@ -124,7 +124,9 @@ use crate::call_resilience::{
 use crate::call_video::ReceivedVideoFrame;
 use crate::datagram::SimulcastLayer;
 use crate::jitter::{JitterBuffer, JitterBufferConfig, Playout};
-use crate::receive_load::{DecodedFrame, Importance, ReceiveLoad, ReceiveOverload, WatchedStream};
+use crate::receive_load::{
+  DecodedFrame, FrameInterval, Importance, ReceiveLoad, ReceiveOverload, WatchedStream,
+};
 use crate::resample::MonoResampler;
 use crate::rtp::AudioLevel;
 use crate::share_policy::{EncoderKind, ShareCodecs, ShareEncoders};
@@ -165,14 +167,6 @@ const SECURE_CONTEXT: &str = "camera and microphone access (the page needs HTTPS
 const AUDIBLE_AMPLITUDE: f32 = 0.01;
 /// The session's packet count is read every this many timer ticks (500 ms).
 const STATS_EVERY_TICKS: u32 = 5;
-/// The RTP video clock.
-const RTP_VIDEO_CLOCK_HZ: u64 = 90_000;
-/// A received stream's frame interval until two frames tell (30 fps).
-const DEFAULT_FRAME_INTERVAL: Duration = Duration::from_micros(33_333);
-/// Frame intervals outside these are gaps, not the stream's rate: a decoder's lateness is weighed
-/// against the rate.
-const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(5);
-const MAX_FRAME_INTERVAL: Duration = Duration::from_millis(500);
 /// How long a session whose signaling stream ended waits for its close reason.
 const CLOSE_INFO_WAIT: Duration = Duration::from_millis(200);
 /// WebTransport close code of a deliberate leave (as on native clients).
@@ -1344,10 +1338,8 @@ struct Watched {
   wanted_layer: u8,
   /// The layer asked of the SFU: [`Self::wanted_layer`], less what this device's load holds back.
   max_layer: u8,
-  /// The RTP timestamp of the last frame decoded, for the frame interval.
-  maybe_last_timestamp: Option<u32>,
-  /// The time between the stream's frames, as the last two told.
-  frame_interval: Duration,
+  /// The time between the stream's frames, for weighing a decoder's lateness.
+  frame_interval: FrameInterval,
   /// Nothing was decoded while the tile was hidden: it needs a keyframe once shown.
   is_waiting_for_keyframe: bool,
   /// Reports the canvas' size as [`Input::VideoResized`]; `None` where the browser can't.
@@ -1359,19 +1351,6 @@ impl Watched {
   /// told again, so such a tile counts as shown.
   fn is_hidden(&self) -> bool {
     self.maybe_size_watch.is_some() && (self.shown.width == 0 || self.shown.height == 0)
-  }
-
-  /// The interval before the frame at RTP `timestamp`, from the one before it: what a decoder
-  /// has for it. Gaps (a lost frame, a paused sender) don't count.
-  fn next_interval(&mut self, timestamp: u32) -> Duration {
-    if let Some(last) = self.maybe_last_timestamp.replace(timestamp) {
-      let interval =
-        Duration::from_micros(u64::from(timestamp.wrapping_sub(last)) * 1_000_000 / RTP_VIDEO_CLOCK_HZ);
-      if (MIN_FRAME_INTERVAL..=MAX_FRAME_INTERVAL).contains(&interval) {
-        self.frame_interval = interval;
-      }
-    }
-    self.frame_interval
   }
 }
 
@@ -1878,7 +1857,7 @@ impl CallState<'_> {
             continue;
           }
           let queued = watched.view.queue_size();
-          let interval = watched.next_interval(frame.timestamp.0);
+          let interval = watched.frame_interval.next(frame.timestamp);
           decode_video(&mut watched.view, &frame, engine);
           let late_by = self.maybe_datagram_read_at.map_or(Duration::ZERO, |read_at| {
             Instant::now().saturating_duration_since(read_at)
@@ -2455,8 +2434,7 @@ impl CallState<'_> {
             shown,
             wanted_layer: max_layer,
             max_layer,
-            maybe_last_timestamp: None,
-            frame_interval: DEFAULT_FRAME_INTERVAL,
+            frame_interval: FrameInterval::default(),
             is_waiting_for_keyframe: false,
             maybe_size_watch,
           },
@@ -4691,6 +4669,7 @@ mod tests {
         timestamp: crate::rtp::RtpTimestamp(0),
         is_keyframe: true,
         data: vec![0, 0, 0, 1, 0x65],
+        arrived_at: Instant::now(),
       }
     }
   }
