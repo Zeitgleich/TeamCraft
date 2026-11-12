@@ -1099,8 +1099,9 @@ impl CallEngine {
   }
 
   /// [`Self::publish_adaptive_video`] for a track whose encoders change their rate in place (the
-  /// browser's WebCodecs): a screen share's top layer then also steps through shares of its
-  /// bitrate, at a lower frame rate, before it stops (#1733).
+  /// browser's WebCodecs, the desktop's share on the share policy, #1781): a screen share's top
+  /// layer then also steps through shares of its bitrate, at a lower frame rate, before it stops
+  /// (#1733).
   pub fn publish_video_adapting_in_place(
     &mut self,
     publication: VideoPublicationId,

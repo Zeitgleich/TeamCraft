@@ -15,8 +15,8 @@
 //! viewers on weak links take them). Before, the top layer stopped as soon as its whole bitrate
 //! didn't fit: a 500 kbit/s uplink sent 320×180 at about 80 kbit/s, a 2 Mbit/s one 640×360.
 //! A share changes only after a hold ([`UplinkPolicy::share_downswitch_hold`],
-//! [`UplinkPolicy::share_upswitch_hold`]; on the desktop each change rebuilds the encoder, which
-//! starts with a keyframe, while the browser's WebCodecs encoders change their rate in place), and
+//! [`UplinkPolicy::share_upswitch_hold`]; an encoder that can't change its rate in place is
+//! rebuilt, which starts with a keyframe), and
 //! such a camera climbs back one step at a time: an estimate that grew while the uplink carried
 //! less is no proof that it carries every layer at once.
 //!
@@ -125,12 +125,14 @@ pub struct OwnTrack<'a> {
 pub enum Adaptation {
   /// They don't: the track is sent at its layers' whole bitrate or not at all.
   Whole,
-  /// They are rebuilt at the new bitrate, which starts with a keyframe (the desktop's): a camera
-  /// steps through its shares, a screen share stays whole. A share's keyframe is the largest
-  /// picture there is, and one per step into a congested uplink was what lost its slides (#1733).
+  /// They may be rebuilt at the new bitrate, which starts with a keyframe (the desktop's cameras,
+  /// and a share not on the share policy): a camera steps through its shares, a screen share
+  /// stays whole. A share's keyframe is the largest picture there is, and one per step into a
+  /// congested uplink was what lost its slides (#1733).
   Rebuilt,
-  /// They change the rate in place (the browser's WebCodecs): a camera and a screen share both
-  /// step through their shares, the share at a lower frame rate (#1733).
+  /// They change the rate in place (the browser's WebCodecs, and the desktop's share on the share
+  /// policy, #1781): a camera and a screen share both step through their shares, the share at a
+  /// lower frame rate (#1733).
   InPlace,
 }
 

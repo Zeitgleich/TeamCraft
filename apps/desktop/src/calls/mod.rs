@@ -808,6 +808,7 @@ impl CallHost {
       maybe_filter: Some(self.self_view.filter(maybe_filter)),
       maybe_picture_tap: None,
       maybe_idle_refresh: None,
+      maybe_screen_profile: None,
     };
     // Answers once the capture runs; the media task turns the camera on in the call state, and
     // off again (with an error for the user) if no picture comes.
@@ -955,6 +956,9 @@ impl CallHost {
       maybe_filter: None,
       maybe_picture_tap: Some(self.screen_view.picture_tap()),
       maybe_idle_refresh: VideoSendConfig::default_idle_refresh(&VideoTrackKind::Screen),
+      // The share policy's ladder for the encoders' load and the uplink, like the browser's
+      // (#1777); rates change in place (#1781).
+      maybe_screen_profile: Some(profile),
     };
     self.start_video(config).await?;
     if maybe_new_token.is_some() {
@@ -2482,6 +2486,7 @@ mod tests {
         maybe_layer_plan: None,
         maybe_picture_tap: None,
         maybe_idle_refresh: VideoSendConfig::default_idle_refresh(&kind),
+        maybe_screen_profile: None,
         kind,
         capture,
         layers: simulcast_layers(FORMAT.resolution, 30, 300_000, 1),

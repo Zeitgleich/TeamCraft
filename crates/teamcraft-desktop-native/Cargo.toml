@@ -43,32 +43,45 @@ expect_used = "warn"
 if_same_then_else = "allow"
 undocumented_unsafe_blocks = "deny"
 
+[features]
+default = ["shell"]
+# The desktop shell's OS calls (the table in lib.rs). Off for teamcraft-media, which needs only
+# `openh264` and must not pull WebKitGTK, WebView2 or AppKit into every native build.
+shell = ["dep:block2", "dep:objc2", "dep:objc2-user-notifications", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:webkit2gtk-sys", "dep:windows", "dep:webview2-com"]
+# OpenH264's `SetOption` for the native video encoders' in-place rate changes (#1781): the
+# `openh264` crate offers it only through its raw API.
+openh264 = ["dep:openh264", "dep:openh264-sys2"]
+
 [dependencies]
 thiserror.workspace = true
 tracing.workspace = true
+# The OpenH264 encoder whose rate `openh264_rate` changes, and its option types (BSD-2-Clause; the
+# versions teamcraft-media uses, so already in the tree).
+openh264 = { version = "0.9.9", optional = true, default-features = false, features = ["libloading"] }
+openh264-sys2 = { version = "0.9.9", optional = true, default-features = false }
 
 # macOS: NSWorkspaceDidWakeNotification, the notification delegate and notification attachments
 # (Network.framework's path monitor is linked directly, it has no Objective-C API)
 # through the safe-ish objc2 bindings (Zlib/Apache-2.0/MIT; already in the tree through Tauri's macOS
 # stack).
 [target.'cfg(target_os = "macos")'.dependencies]
-block2 = "0.6.2"
-objc2 = "0.6.2"
-objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNNotification", "UNNotificationAttachment", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNUserNotificationCenter"] }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWorkspace"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSError", "NSNotification", "NSObject", "NSOperation", "NSString", "NSURL"] }
+block2 = { version = "0.6.2", optional = true }
+objc2 = { version = "0.6.2", optional = true }
+objc2-user-notifications = { version = "0.3.2", optional = true, default-features = false, features = ["std", "block2", "UNNotification", "UNNotificationAttachment", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNUserNotificationCenter"] }
+objc2-app-kit = { version = "0.3.2", optional = true, default-features = false, features = ["std", "NSWorkspace"] }
+objc2-foundation = { version = "0.3.2", optional = true, default-features = false, features = ["std", "block2", "NSError", "NSNotification", "NSObject", "NSOperation", "NSString", "NSURL"] }
 
 # Linux: the WebKitGTK version at run time (MIT; the version wry uses, so already in the tree).
 [target.'cfg(target_os = "linux")'.dependencies]
-webkit2gtk-sys = "2.0.2"
+webkit2gtk-sys = { version = "2.0.2", optional = true }
 
 # Windows: PowerRegisterSuspendResumeNotification and NotifyNetworkConnectivityHintChange
 # (MIT/Apache-2.0; the version the shell uses).
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_System_Power", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62", optional = true, features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_System_Power", "Win32_UI_WindowsAndMessaging"] }
 # Windows: WebView2's `ProcessFailed` event (MIT; the version wry and Tauri use, so the same COM
 # types as `PlatformWebview::controller()`).
-webview2-com = "0.39.1"
+webview2-com = { version = "0.39.1", optional = true }
 
 # Android: the JNI entry that hands the Java VM and context to ndk-context for cpal's AAudio backend
 # (both already in the tree through cpal and ndk; the same ndk-context instance cpal reads).

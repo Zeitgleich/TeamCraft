@@ -4,6 +4,8 @@
 //! Captures run on their own threads and hand I420 frames to a bounded channel; a full channel
 //! means the encoder is behind, and the capture drops the frame instead of building latency.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -79,7 +81,13 @@ pub struct CaptureFormat {
 #[derive(Debug, Clone)]
 pub struct FrameSender {
   sender: SyncSender<VideoFrame>,
+  dropped: DroppedFrames,
 }
+
+/// How many frames a [`FrameSender`] dropped because the queue was full: the encoder thread
+/// didn't keep up (#1777, a share policy's load signal). Shared by its clones.
+#[derive(Debug, Clone, Default)]
+pub struct DroppedFrames(Arc<AtomicU64>);
 
 /// A fake for tests: frames are pushed by hand.
 pub struct ManualCapture {
@@ -130,16 +138,36 @@ pub type FrameReceiver = Receiver<VideoFrame>;
 /// A bounded frame queue between a capture and its consumer.
 pub fn frame_queue() -> (FrameSender, FrameReceiver) {
   let (sender, receiver) = sync_channel(CAPTURE_QUEUE_FRAMES);
-  (FrameSender { sender }, receiver)
+  let sender = FrameSender {
+    sender,
+    dropped: DroppedFrames::default(),
+  };
+  (sender, receiver)
 }
 
 impl FrameSender {
   /// Queues a frame; `false` once the consumer is gone (stop capturing then).
   pub fn send(&self, frame: VideoFrame) -> bool {
     match self.sender.try_send(frame) {
-      Ok(()) | Err(TrySendError::Full(_)) => true,
+      Ok(()) => true,
+      Err(TrySendError::Full(_)) => {
+        self.dropped.0.fetch_add(1, Ordering::Relaxed);
+        true
+      },
       Err(TrySendError::Disconnected(_)) => false,
     }
+  }
+
+  /// The count of the frames this queue drops.
+  pub fn dropped_frames(&self) -> DroppedFrames {
+    self.dropped.clone()
+  }
+}
+
+impl DroppedFrames {
+  /// Frames dropped so far.
+  pub fn count(&self) -> u64 {
+    self.0.load(Ordering::Relaxed)
   }
 }
 

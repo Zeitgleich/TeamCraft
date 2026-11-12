@@ -24,7 +24,7 @@ dave = [
 ]
 # Native clients: Opus via libopus (C, built with cmake), audio device I/O via cpal (ALSA on Linux
 # needs libasound2-dev) and the WebTransport call driver. Browsers use WebCodecs and Web Audio.
-native = ["dave", "dep:webpki-roots", "dep:ndk", "dep:openh264", "dep:bzip2", "dep:zune-jpeg", "dep:jpeg-encoder", "dep:opus", "dep:cpal", "dep:tokio", "dep:wtransport", "dep:socket2", "dep:teamcraft-net", "dep:serde_json", "dep:tracing-subscriber", "dep:anyhow", "dep:url", "fallback-socket", "quic-send"]
+native = ["dave", "dep:webpki-roots", "dep:ndk", "dep:openh264", "dep:teamcraft-desktop-native", "dep:bzip2", "dep:zune-jpeg", "dep:jpeg-encoder", "dep:opus", "dep:cpal", "dep:tokio", "dep:wtransport", "dep:socket2", "dep:teamcraft-net", "dep:serde_json", "dep:tracing-subscriber", "dep:anyhow", "dep:url", "fallback-socket", "quic-send"]
 
 # The writer of a call's WebSocket fallback (ARCHITECTURE.md §6.6), shared by the SFU and the native
 # clients.
@@ -127,6 +127,9 @@ web-time = "1.1.0"
 # H.264 software encoder and decoder (Cisco's OpenH264, BSD-2-Clause, built from source): the
 # fallback when no hardware encoder is available, and decodable by every browser.
 openh264 = { version = "0.9.9", optional = true, default-features = false, features = ["libloading"] }
+# OpenH264's bitrate and frame rate changed in place (#1781): `SetOption` needs `unsafe`, which
+# lives only in that crate (code-style.md, "Native FFI").
+teamcraft-desktop-native = { path = "../teamcraft-desktop-native", optional = true, default-features = false, features = ["openh264"] }
 # Cisco ships the OpenH264 binaries bzip2-compressed (pure-Rust decoder, MIT/Apache-2.0).
 bzip2 = { version = "0.6.1", optional = true }
 # MJPEG camera frames (many USB cameras only deliver 720p+ as MJPEG): pure-Rust JPEG decoder.

@@ -14,10 +14,11 @@ use openh264::encoder::{
 use openh264::formats::YUVSource;
 use teamcraft_proto::{VideoCodec, VideoLayerInfo};
 use thiserror::Error;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::datagram::SimulcastLayer;
 use crate::openh264_library::{self, OpenH264LibraryError};
+use crate::share_policy::share_framerate;
 use crate::video::{EncodedVideoFrame, VideoError, VideoFrame, VideoResolution};
 
 /// A keyframe at least this often, so receivers recover from losses without asking.
@@ -63,6 +64,13 @@ pub trait VideoEncoder {
   ) -> Result<Option<EncodedPicture>, VideoCodecError> {
     self.encode(frame, is_keyframe_forced)
   }
+
+  /// Encodes at `bitrate_bps` and `framerate` from the next frame on, in place: no new encoder,
+  /// so no keyframe (#1781). `false` where this encoder can't change them while it runs: it is
+  /// then built anew at them, and that one starts with a keyframe.
+  fn set_rate(&mut self, _bitrate_bps: u32, _framerate: u8) -> Result<bool, VideoCodecError> {
+    Ok(false)
+  }
 }
 
 /// Decodes one stream.
@@ -95,6 +103,10 @@ pub const SOFTWARE_ENCODER_NAME: &str = OPENH264;
 pub struct OpenH264Encoder {
   encoder: Encoder,
   resolution: VideoResolution,
+  content: VideoContent,
+  /// OpenH264 sets itself up with the first frame; until then its options can't be set, and a
+  /// new encoder costs no keyframe.
+  has_encoded: bool,
 }
 
 pub struct OpenH264Decoder {
@@ -144,12 +156,21 @@ enum HardwareAnswer {
 /// receiver needs (the SFU's `LayersNeeded`) and honouring keyframe requests per layer.
 pub struct SimulcastEncoder {
   layers: Vec<LayerEncoder>,
+  /// A screen share's layers lower their frame rate with their bitrate (#1733); a camera's keep
+  /// it.
+  content: VideoContent,
 }
 
 struct LayerEncoder {
+  /// The layer as planned now: its size as encoded, its whole bitrate and frame rate.
   info: VideoLayerInfo,
-  /// What the encoder is built for: the layer's bitrate, or less on a limited uplink (#939).
+  /// What the uplink gives it (the engine's last `LayerBitrates` for it, #939); `None` before any.
+  maybe_uplink_bps: Option<u32>,
+  /// What the encoder encodes at: the layer's bitrate, or the uplink's where less.
   bitrate_bps: u32,
+  /// The frames per second it takes: the layer's, or a screen layer's share of it on a limited
+  /// uplink ([`share_framerate`]).
+  framerate: u8,
   encoder: Box<dyn VideoEncoder>,
   is_needed: bool,
   wants_keyframe: bool,
@@ -177,32 +198,40 @@ pub enum VideoCodecError {
 
 impl OpenH264Encoder {
   pub fn new(layer: &VideoLayerInfo, content: VideoContent) -> Result<Self, VideoCodecError> {
-    let (usage, rate_control, framerate) = match content {
-      VideoContent::Camera => (
-        UsageType::CameraVideoRealTime,
-        RateControlMode::Bitrate,
-        layer.max_framerate,
-      ),
-      VideoContent::Screen => (
-        UsageType::ScreenContentRealTime,
-        RateControlMode::Timestamp,
-        layer.max_framerate.min(SCREEN_PLANNED_FRAMERATE),
-      ),
-    };
-    let config = EncoderConfig::new()
-      .bitrate(BitRate::from_bps(layer.max_bitrate_bps))
-      .max_frame_rate(FrameRate::from_hz(f32::from(framerate.max(1))))
-      .usage_type(usage)
-      .rate_control_mode(rate_control)
-      .intra_frame_period(IntraFramePeriod::from_num_frames(KEYFRAME_INTERVAL_FRAMES));
-    let encoder = Encoder::with_api_config(openh264_library::api()?, config).map_err(codec_error)?;
     Ok(Self {
-      encoder,
+      encoder: Self::build(content, layer.max_bitrate_bps, layer.max_framerate)?,
       resolution: VideoResolution {
         width: layer.width,
         height: layer.height,
       },
+      content,
+      has_encoded: false,
     })
+  }
+
+  fn build(content: VideoContent, bitrate_bps: u32, framerate: u8) -> Result<Encoder, VideoCodecError> {
+    let (usage, rate_control) = match content {
+      VideoContent::Camera => (UsageType::CameraVideoRealTime, RateControlMode::Bitrate),
+      VideoContent::Screen => (UsageType::ScreenContentRealTime, RateControlMode::Timestamp),
+    };
+    let config = EncoderConfig::new()
+      .bitrate(BitRate::from_bps(bitrate_bps))
+      .max_frame_rate(FrameRate::from_hz(f32::from(Self::planned_framerate(
+        content, framerate,
+      ))))
+      .usage_type(usage)
+      .rate_control_mode(rate_control)
+      .intra_frame_period(IntraFramePeriod::from_num_frames(KEYFRAME_INTERVAL_FRAMES));
+    Encoder::with_api_config(openh264_library::api()?, config).map_err(codec_error)
+  }
+
+  /// The frame rate the rate control plans with: a screen's at most
+  /// [`SCREEN_PLANNED_FRAMERATE`].
+  fn planned_framerate(content: VideoContent, framerate: u8) -> u8 {
+    match content {
+      VideoContent::Camera => framerate.max(1),
+      VideoContent::Screen => framerate.clamp(1, SCREEN_PLANNED_FRAMERATE),
+    }
   }
 }
 
@@ -229,6 +258,7 @@ impl VideoEncoder for OpenH264Encoder {
       .encoder
       .encode_at(&I420(&frame), timestamp)
       .map_err(codec_error)?;
+    self.has_encoded = true;
     let is_keyframe = match bitstream.frame_type() {
       FrameType::IDR | FrameType::I => true,
       FrameType::P | FrameType::IPMixed => false,
@@ -238,6 +268,22 @@ impl VideoEncoder for OpenH264Encoder {
       is_keyframe,
       data: bitstream.to_vec(),
     }))
+  }
+
+  fn set_rate(&mut self, bitrate_bps: u32, framerate: u8) -> Result<bool, VideoCodecError> {
+    let planned = Self::planned_framerate(self.content, framerate);
+    if !self.has_encoded {
+      self.encoder = Self::build(self.content, bitrate_bps, planned)?;
+      return Ok(true);
+    }
+    match teamcraft_desktop_native::set_openh264_rate(&mut self.encoder, bitrate_bps, f32::from(planned)) {
+      Ok(()) => Ok(true),
+      Err(error) => {
+        // Not expected of a running encoder; a new one at the rate does the same with a keyframe.
+        warn!(%error, bitrate_bps, framerate, "OpenH264 keeps its rate; a new encoder takes over");
+        Ok(false)
+      },
+    }
   }
 }
 
@@ -408,6 +454,25 @@ impl VideoEncoder for FallbackEncoder {
     let software = self.maybe_software.insert(software);
     software.encode(frame, is_keyframe_forced || is_switching)
   }
+
+  /// The encoder at work changes its rate; software built later starts at it.
+  fn set_rate(&mut self, bitrate_bps: u32, framerate: u8) -> Result<bool, VideoCodecError> {
+    self.layer.max_bitrate_bps = bitrate_bps;
+    self.layer.max_framerate = framerate;
+    if let Some(hardware) = self.maybe_hardware.as_mut() {
+      match hardware.set_rate(bitrate_bps, framerate) {
+        Ok(is_changed) => return Ok(is_changed),
+        Err(error) => {
+          self.hardware_failed(&error);
+        },
+      }
+    }
+    match self.maybe_software.as_mut() {
+      Some(software) => software.set_rate(bitrate_bps, framerate),
+      // Built at the new rate once it takes over.
+      None => Ok(true),
+    }
+  }
 }
 
 impl StallWatch {
@@ -430,7 +495,9 @@ impl SimulcastEncoder {
       .map(|info| {
         Ok(LayerEncoder {
           info: info.clone(),
+          maybe_uplink_bps: None,
           bitrate_bps: info.max_bitrate_bps,
+          framerate: info.max_framerate,
           encoder: make_encoder(info)?,
           is_needed: true,
           wants_keyframe: true,
@@ -439,7 +506,21 @@ impl SimulcastEncoder {
         })
       })
       .collect::<Result<_, VideoCodecError>>()?;
-    Ok(Self { layers })
+    Ok(Self {
+      layers,
+      content: VideoContent::Camera,
+    })
+  }
+
+  /// The layers carry `content`: a screen share's lower their frame rate with their bitrate.
+  pub fn with_content(mut self, content: VideoContent) -> Self {
+    self.content = content;
+    self
+  }
+
+  /// The layers as encoded now: their sizes, and their bitrates and frame rates as planned.
+  pub fn infos(&self) -> Vec<VideoLayerInfo> {
+    self.layers.iter().map(|layer| layer.info.clone()).collect()
   }
 
   /// Only `layers` are encoded from now on (the SFU's `LayersNeeded`); a layer coming back starts
@@ -525,50 +606,82 @@ impl SimulcastEncoder {
         .iter()
         .find(|info| info.layer == layer.info.layer)
         .ok_or(VideoCodecError::UnknownLayer(layer.info.layer))?;
-      // A bitrate lowered for the uplink stays lowered.
-      let bitrate_bps = if layer.bitrate_bps == layer.info.max_bitrate_bps {
-        info.max_bitrate_bps
-      } else {
-        layer.bitrate_bps
+      // A bitrate lowered for the uplink stays lowered, and the rates stepped for the share
+      // policy stay stepped: only the size is new.
+      let info = VideoLayerInfo {
+        width: info.width,
+        height: info.height,
+        ..layer.info.clone()
       };
+      let (bitrate_bps, framerate) = self.content.encoded_rate(&info, layer.maybe_uplink_bps);
       let built = VideoLayerInfo {
         max_bitrate_bps: bitrate_bps,
+        max_framerate: framerate,
         ..info.clone()
       };
-      rebuilt.push((info.clone(), bitrate_bps, make_encoder(&built)?));
+      rebuilt.push((info, bitrate_bps, framerate, make_encoder(&built)?));
     }
-    for (layer, (info, bitrate_bps, encoder)) in self.layers.iter_mut().zip(rebuilt) {
+    for (layer, (info, bitrate_bps, framerate, encoder)) in self.layers.iter_mut().zip(rebuilt) {
       layer.info = info;
       layer.bitrate_bps = bitrate_bps;
+      layer.framerate = framerate;
       layer.encoder = encoder;
       layer.wants_keyframe = true;
     }
     Ok(())
   }
 
-  /// Encodes the layers at `bitrates` (layer, bit/s) from now on (#939: the top layer of a camera
-  /// at less than its bitrate on a limited uplink). A layer whose bitrate changes gets a new
-  /// encoder from `make_encoder` and starts with a keyframe (not every encoder can change its
-  /// bitrate on the fly); the others go on. On an error that layer keeps its encoder.
+  /// Encodes the layers at `bitrates` (layer, bit/s) from the uplink from now on (#939: the top
+  /// layer of a camera at less than its bitrate on a limited uplink; a screen layer then also at
+  /// a lower frame rate, #1733). A layer whose rate changes keeps its encoder where that changes
+  /// in place, without a keyframe (#1781); else it gets a new encoder from `make_encoder`, which
+  /// starts with a keyframe. On an error that layer keeps its encoder and rate. A bitrate of 0 or
+  /// of an unknown layer is ignored.
   pub fn set_bitrates(
     &mut self,
     bitrates: &[(u8, u32)],
     mut make_encoder: impl FnMut(&VideoLayerInfo) -> Result<Box<dyn VideoEncoder>, VideoCodecError>,
   ) -> Result<(), VideoCodecError> {
+    let content = self.content;
     for layer in &mut self.layers {
       let Some(&(_, bitrate_bps)) = bitrates.iter().find(|(id, _)| *id == layer.info.layer) else {
         continue;
       };
-      if bitrate_bps == layer.bitrate_bps || bitrate_bps == 0 {
+      if bitrate_bps == 0 {
         continue;
       }
-      let built = VideoLayerInfo {
-        max_bitrate_bps: bitrate_bps,
+      if layer.maybe_uplink_bps == Some(bitrate_bps) {
+        continue;
+      }
+      layer.retune(content, layer.info.clone(), Some(bitrate_bps), &mut make_encoder)?;
+    }
+    Ok(())
+  }
+
+  /// The layers take the bitrates and frame rates of `infos` (a screen share's rate stepped for
+  /// its encoders' load, #1777), matched by layer, keeping their sizes; in place where the
+  /// encoders can (#1781), else rebuilt. The uplink's bitrate still caps them. Layers `infos`
+  /// doesn't name keep theirs.
+  pub fn set_rates(
+    &mut self,
+    infos: &[VideoLayerInfo],
+    mut make_encoder: impl FnMut(&VideoLayerInfo) -> Result<Box<dyn VideoEncoder>, VideoCodecError>,
+  ) -> Result<(), VideoCodecError> {
+    let content = self.content;
+    for layer in &mut self.layers {
+      let Some(planned) = infos.iter().find(|info| info.layer == layer.info.layer) else {
+        continue;
+      };
+      let info = VideoLayerInfo {
+        max_bitrate_bps: planned.max_bitrate_bps,
+        max_framerate: planned.max_framerate,
         ..layer.info.clone()
       };
-      layer.encoder = make_encoder(&built)?;
-      layer.bitrate_bps = bitrate_bps;
-      layer.wants_keyframe = true;
+      if info == layer.info {
+        continue;
+      }
+      let maybe_uplink_bps = layer.maybe_uplink_bps;
+      layer.retune(content, info, maybe_uplink_bps, &mut make_encoder)?;
     }
     Ok(())
   }
@@ -691,11 +804,63 @@ impl LayerEncoder {
   }
 
   fn would_be_due(&self, timestamp_us: u64) -> bool {
-    let interval_us = 1_000_000 / u64::from(self.info.max_framerate.max(1));
+    let interval_us = 1_000_000 / u64::from(self.framerate.max(1));
     self
       .maybe_last_frame_us
       // A timestamp not after the last one (a restarted or synthetic clock) is never held back.
       .is_none_or(|last| timestamp_us <= last || timestamp_us - last >= interval_us * 3 / 4)
+  }
+}
+
+impl LayerEncoder {
+  /// Encodes as `info` plans it within `maybe_uplink_bps`: the running encoder changes its rate
+  /// in place where it can, else a new one from `make_encoder` takes over with a keyframe. On an
+  /// error nothing changes.
+  fn retune(
+    &mut self,
+    content: VideoContent,
+    info: VideoLayerInfo,
+    maybe_uplink_bps: Option<u32>,
+    make_encoder: &mut impl FnMut(&VideoLayerInfo) -> Result<Box<dyn VideoEncoder>, VideoCodecError>,
+  ) -> Result<(), VideoCodecError> {
+    let (bitrate_bps, framerate) = content.encoded_rate(&info, maybe_uplink_bps);
+    if (bitrate_bps, framerate) != (self.bitrate_bps, self.framerate) {
+      if self.encoder.set_rate(bitrate_bps, framerate)? {
+        debug!(
+          layer = info.layer,
+          bitrate_bps, framerate, "layer rate changed in place"
+        );
+      } else {
+        let built = VideoLayerInfo {
+          max_bitrate_bps: bitrate_bps,
+          max_framerate: framerate,
+          ..info.clone()
+        };
+        self.encoder = make_encoder(&built)?;
+        self.wants_keyframe = true;
+      }
+    }
+    self.info = info;
+    self.maybe_uplink_bps = maybe_uplink_bps;
+    self.bitrate_bps = bitrate_bps;
+    self.framerate = framerate;
+    Ok(())
+  }
+}
+
+impl VideoContent {
+  /// The bitrate and frame rate a layer planned as `info` is encoded at within
+  /// `maybe_uplink_bps`: a screen layer keeps its pictures' quality and lowers its frame rate with
+  /// its bitrate (#1733, [`share_framerate`]); a camera layer keeps its frame rate.
+  fn encoded_rate(self, info: &VideoLayerInfo, maybe_uplink_bps: Option<u32>) -> (u32, u8) {
+    let bitrate_bps = maybe_uplink_bps.map_or(info.max_bitrate_bps, |uplink_bps| {
+      uplink_bps.min(info.max_bitrate_bps)
+    });
+    let framerate = match self {
+      Self::Camera => info.max_framerate,
+      Self::Screen => share_framerate(info, bitrate_bps),
+    };
+    (bitrate_bps, framerate.max(1))
   }
 }
 
@@ -833,15 +998,15 @@ mod tests {
     assert!(psnr > 30.0, "PSNR {psnr:.1} dB");
   }
 
-  /// Issue #939: a layer whose bitrate changes gets an encoder built for it, which starts with a
-  /// keyframe and stays within the new bitrate; the other layers go on as they were, and a resize
-  /// keeps the lowered bitrate.
+  /// Issues #939 and #1781: a layer whose bitrate changes keeps its encoder, which OpenH264
+  /// changes in place: no new encoder and no keyframe on any layer. A resize rebuilds every layer,
+  /// the lowered one at its lowered bitrate.
   #[test]
   #[cfg_attr(
     not(feature = "openh264-source"),
     ignore = "needs OpenH264: --features openh264-source"
   )]
-  fn a_layer_bitrate_change_rebuilds_only_that_layer() {
+  fn a_layer_bitrate_change_keeps_the_encoder_and_sends_no_keyframe() {
     let layers = simulcast_layers(HD, 30, 1_600_000, 3);
     let built: Arc<Mutex<Vec<(u8, u32)>>> = Arc::default();
     let make = |built: Arc<Mutex<Vec<(u8, u32)>>>| {
@@ -862,19 +1027,14 @@ mod tests {
     simulcast
       .set_bitrates(&lowered, make(Arc::clone(&built)))
       .unwrap();
-    assert_eq!(*built.lock().unwrap(), vec![(2, 560_000)]);
-    let next = encode_frames(&mut simulcast, &mut index, 1);
-    for frame in &next {
-      let expected = frame.layer.value() == 2;
-      assert_eq!(frame.is_keyframe, expected, "layer {}", frame.layer.value());
-    }
-    // The same bitrates again rebuild nothing.
-    simulcast
-      .set_bitrates(&lowered, make(Arc::clone(&built)))
-      .unwrap();
-    assert_eq!(built.lock().unwrap().len(), 1);
+    assert!(
+      built.lock().unwrap().is_empty(),
+      "in place: {:?}",
+      built.lock().unwrap()
+    );
+    let next = encode_frames(&mut simulcast, &mut index, 5);
+    assert!(next.iter().all(|frame| !frame.is_keyframe), "no keyframe");
     // A source of another size rebuilds every layer, the lowered one at its lowered bitrate.
-    built.lock().unwrap().clear();
     simulcast.resize(&layers, make(Arc::clone(&built))).unwrap();
     assert_eq!(
       *built.lock().unwrap(),
@@ -884,6 +1044,150 @@ mod tests {
         (2, 560_000)
       ]
     );
+  }
+
+  /// #1781: OpenH264 holds a bitrate set while it runs, down and up again, without a keyframe.
+  #[test]
+  #[cfg_attr(
+    not(feature = "openh264-source"),
+    ignore = "needs OpenH264: --features openh264-source"
+  )]
+  fn openh264_holds_a_rate_changed_in_place() {
+    const SMALL: VideoResolution = VideoResolution {
+      width: 320,
+      height: 180,
+    };
+    let layer = simulcast_layers(SMALL, 30, 1_200_000, 1).remove(0);
+    let mut screen = OpenH264Encoder::new(&layer, VideoContent::Screen).unwrap();
+    screen.encode(&noise(SMALL, 0), false).unwrap();
+    assert!(
+      teamcraft_desktop_native::set_openh264_rate(&mut screen.encoder, 300_000, 5.0).is_ok(),
+      "a screen encoder takes its rate in place"
+    );
+    let mut encoder = OpenH264Encoder::new(&layer, VideoContent::Camera).unwrap();
+    let mut index = 0;
+    // Bits and keyframes of the next `frames` frames.
+    let mut encode = |encoder: &mut OpenH264Encoder, frames: u32| {
+      let (mut bytes, mut keyframes) = (0, 0);
+      for _ in 0..frames {
+        if let Some(picture) = encoder.encode(&noise(SMALL, index), false).unwrap() {
+          bytes += picture.data.len();
+          keyframes += usize::from(picture.is_keyframe);
+        }
+        index += 1;
+      }
+      (bytes * 8, keyframes)
+    };
+    encode(&mut encoder, 30);
+    let (high_bps, high_keyframes) = encode(&mut encoder, 30);
+    assert!(encoder.set_rate(150_000, 30).unwrap());
+    assert_eq!(
+      encode(&mut encoder, 1).1,
+      0,
+      "the picture after the change refers to the last"
+    );
+    encode(&mut encoder, 29);
+    let (low_bps, low_keyframes) = encode(&mut encoder, 30);
+    assert!(encoder.set_rate(1_200_000, 30).unwrap());
+    assert_eq!(
+      encode(&mut encoder, 1).1,
+      0,
+      "the picture after the change refers to the last"
+    );
+    encode(&mut encoder, 29);
+    let (raised_bps, raised_keyframes) = encode(&mut encoder, 30);
+    // The moving pattern makes OpenH264 send an I picture now and then on its own (scene changes);
+    // a change of rate adds none.
+    assert!(
+      low_keyframes.max(raised_keyframes) <= high_keyframes,
+      "keyframes per second: {high_keyframes} before, {low_keyframes} lowered, {raised_keyframes} raised"
+    );
+    assert!(
+      low_bps < 200_000,
+      "{low_bps} bit/s at 150 kbit/s (before: {high_bps})"
+    );
+    assert!(
+      raised_bps > low_bps * 3,
+      "{raised_bps} bit/s raised again, {low_bps} lowered"
+    );
+  }
+
+  /// An encoder that can't change its rate while it runs is built anew at the rate, starting with
+  /// a keyframe; a screen layer lowers its frame rate with its bitrate (#1733), a camera's keeps it.
+  #[test]
+  fn a_rate_an_encoder_cant_take_in_place_rebuilds_it_and_a_screen_lowers_its_frame_rate() {
+    let layers = simulcast_layers(
+      VideoResolution {
+        width: 64,
+        height: 64,
+      },
+      30,
+      1_000_000,
+      1,
+    );
+    for (content, expected_framerate) in [(VideoContent::Screen, 15), (VideoContent::Camera, 30)] {
+      let built: Arc<Mutex<Vec<(u32, u8)>>> = Arc::default();
+      let log = Arc::clone(&built);
+      let mut simulcast = SimulcastEncoder::new(&layers, |info| {
+        log
+          .lock()
+          .unwrap()
+          .push((info.max_bitrate_bps, info.max_framerate));
+        Ok(Box::new(Refusing) as Box<dyn VideoEncoder>)
+      })
+      .unwrap()
+      .with_content(content);
+      let first = simulcast.encode(&gray(0)).unwrap();
+      assert!(first[0].is_keyframe);
+      simulcast
+        .set_bitrates(&[(0, 500_000)], |info| {
+          built
+            .lock()
+            .unwrap()
+            .push((info.max_bitrate_bps, info.max_framerate));
+          Ok(Box::new(Refusing) as Box<dyn VideoEncoder>)
+        })
+        .unwrap();
+      assert_eq!(
+        built.lock().unwrap().last(),
+        Some(&(500_000, expected_framerate)),
+        "{content:?}"
+      );
+      let next = simulcast.encode(&gray(100_000)).unwrap();
+      assert!(next[0].is_keyframe, "a new encoder starts with a keyframe");
+    }
+
+    /// Takes no rate in place; pictures are keyframes when forced.
+    struct Refusing;
+
+    impl VideoEncoder for Refusing {
+      fn codec(&self) -> VideoCodec {
+        VideoCodec::H264
+      }
+
+      fn name(&self) -> &'static str {
+        "refusing"
+      }
+
+      fn encode(
+        &mut self,
+        _frame: &VideoFrame,
+        is_keyframe_forced: bool,
+      ) -> Result<Option<EncodedPicture>, VideoCodecError> {
+        Ok(Some(EncodedPicture {
+          is_keyframe: is_keyframe_forced,
+          data: vec![0; 10],
+        }))
+      }
+    }
+
+    fn gray(timestamp_us: u64) -> VideoFrame {
+      let resolution = VideoResolution {
+        width: 64,
+        height: 64,
+      };
+      VideoFrame::new(resolution, timestamp_us, vec![128; 64 * 64 * 3 / 2]).unwrap()
+    }
   }
 
   #[test]
@@ -1605,6 +1909,25 @@ mod tests {
     data.extend(std::iter::repeat_n(110, width * height / 4));
     data.extend(std::iter::repeat_n(150, width * height / 4));
     VideoFrame::new(resolution, u64::from(index) * 33_333, data).unwrap()
+  }
+
+  /// [`test_pattern`] with pseudo-random grain, another for every frame: more detail than the
+  /// lower bitrates here carry, and no scene change (full-range noise made OpenH264 send keyframes
+  /// for scene changes, or fail its keyframe outright).
+  fn noise(resolution: VideoResolution, index: u32) -> VideoFrame {
+    let pattern = test_pattern(resolution, index);
+    let mut state = 0x9e37_79b9_7f4a_7c15u64 ^ u64::from(index);
+    let data = pattern
+      .data()
+      .iter()
+      .map(|value| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        value.saturating_add((state >> 60) as u8)
+      })
+      .collect();
+    VideoFrame::new(resolution, pattern.timestamp_us(), data).unwrap()
   }
 
   /// Lines of small print on white: pseudo-random 5×7 glyphs with 1 pixel strokes and gaps

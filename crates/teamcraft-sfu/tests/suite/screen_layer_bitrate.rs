@@ -23,7 +23,7 @@ use std::time::Duration;
 use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent};
 use teamcraft_media::call_native::{NativeCall, NativeCallConfig};
-use teamcraft_media::video::{TOP_LAYER, VideoFrame, VideoResolution, screen_layers};
+use teamcraft_media::video::{ScreenProfile, TOP_LAYER, VideoFrame, VideoResolution, screen_layers};
 use teamcraft_media::video_capture::{CaptureError, CaptureFormat, FrameSender, VideoCapture};
 use teamcraft_media::video_pipeline::{VideoSendConfig, preferred_encoders};
 use teamcraft_proto::{
@@ -162,6 +162,11 @@ async fn measure(size: VideoResolution) -> Vec<Measured> {
       maybe_filter: None,
       maybe_picture_tap: None,
       maybe_idle_refresh: VideoSendConfig::default_idle_refresh(&VideoTrackKind::Screen),
+      // Stepping along the share policy like the desktop's share (#1777).
+      maybe_screen_profile: Some(ScreenProfile {
+        mode: ScreenContentMode::Detail,
+        size: ScreenShareResolution::Standard,
+      }),
     })
     .await
     .unwrap();

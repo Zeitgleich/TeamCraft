@@ -14,11 +14,14 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::call_video::ReceivedVideoFrame;
+use crate::camera_governor::FrameTally;
 use crate::picture_check::{PictureContent, picture_content};
+use crate::share_policy::{EncoderKind, ShareCodecs, ShareEncoders, ShareLimits, SharePlan, UplinkTop};
+use crate::share_steps::{ShareChange, ShareSteps};
 use crate::video::{
-  EncodedVideoFrame, LayerSizer, VideoFrame, VideoResolution, fit_within, within_layer_limit,
+  EncodedVideoFrame, LayerSizer, ScreenProfile, VideoFrame, VideoResolution, fit_within, within_layer_limit,
 };
-use crate::video_capture::{CaptureError, FrameReceiver, VideoCapture, frame_queue};
+use crate::video_capture::{CaptureError, DroppedFrames, FrameReceiver, VideoCapture, frame_queue};
 use crate::video_codec::{
   FallbackEncoder, OpenH264Decoder, OpenH264Encoder, SimulcastEncoder, VideoCodecError, VideoContent,
   VideoDecoder, VideoEncoder,
@@ -56,6 +59,9 @@ const ENCODER_NAMES_INTERVAL: Duration = Duration::from_secs(1);
 /// takes longer gets the layers planned for the size asked for, and the start check
 /// ([`FIRST_PICTURE_TIMEOUT`]) still applies after it.
 pub const FIRST_FRAME_WAIT: Duration = Duration::from_secs(3);
+/// The longest gap between two encoded frames the load counts (#1777): a still screen sends none
+/// for seconds, and that idle time says nothing about whether the encoders keep up.
+const MAX_LOAD_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Makes the encoder for one layer; hardware where available (see [`software_encoders`]).
 pub type EncoderFactory =
@@ -98,6 +104,11 @@ impl FrameLimiter {
     }
   }
 
+  /// The send rate is `maybe_max_framerate` from now on (a share's rate stepped, #1777).
+  fn set_max_framerate(&mut self, maybe_max_framerate: Option<u8>) {
+    self.min_interval_us = Self::new(maybe_max_framerate).min_interval_us;
+  }
+
   fn is_due(&mut self, timestamp_us: u64) -> bool {
     if !self.would_be_due(timestamp_us) {
       return false;
@@ -116,7 +127,10 @@ impl FrameLimiter {
 /// One published track's capture and encoder thread.
 pub struct VideoSender {
   pub kind: VideoTrackKind,
+  /// The layers as published; a governed share's change with its steps.
   pub layers: Vec<VideoLayerInfo>,
+  /// A screen share's steps under the share policy ([`VideoSendConfig::maybe_screen_profile`]).
+  maybe_share: Option<ShareSteps>,
   controls: std_mpsc::Sender<SenderControl>,
   counters: Arc<SendCounters>,
   thread: Option<WorkerThread>,
@@ -185,6 +199,8 @@ struct SendCounters {
   capture_size: AtomicU32,
   /// The encoders at work ([`SimulcastEncoder::encoder_names`]), noted now and then.
   encoder_names: Mutex<String>,
+  /// The encoders' load since the call last took it (#1777).
+  load: Mutex<FrameTally>,
   /// Waits for a frame that ended without one: lets tests know the thread idled.
   #[cfg(test)]
   idle_polls: AtomicU64,
@@ -237,6 +253,10 @@ pub struct VideoSendConfig {
   /// deliver when something changes ([`VideoSendConfig::default_idle_refresh`]); `None` for
   /// cameras, which deliver all the time.
   pub maybe_idle_refresh: Option<Duration>,
+  /// A screen share's profile: its layers then follow the share policy's ladder (#1777) for its
+  /// encoders' load and the uplink, its rates in place, its sizes and layers published anew.
+  /// `None`: the layers stay as given (cameras, and shares that don't step).
+  pub maybe_screen_profile: Option<ScreenProfile>,
 }
 
 /// One watched track's decoder thread.
@@ -251,6 +271,10 @@ enum SenderControl {
   Keyframe(u8),
   NeededLayers(Vec<u8>),
   Bitrates(Vec<(u8, u32)>),
+  /// A share's step changed the layers' rates ([`ShareChange::Rates`]).
+  Rates(Vec<VideoLayerInfo>),
+  /// A share's step changed its layers ([`ShareChange::Layers`]): new encoders.
+  Layers(Vec<VideoLayerInfo>),
 }
 
 /// Hardware encoders where the platform has them (Android: MediaCodec; Linux and macOS with the
@@ -323,12 +347,21 @@ impl VideoSender {
       maybe_filter,
       maybe_picture_tap,
       maybe_idle_refresh,
+      maybe_screen_profile,
     } = config;
     let content = match kind {
       VideoTrackKind::Screen => VideoContent::Screen,
       _ => VideoContent::Camera,
     };
+    let maybe_share = match (&kind, maybe_screen_profile) {
+      (VideoTrackKind::Screen, Some(profile)) => Some(share_steps(&*capture, profile, &layers)),
+      _ => None,
+    };
+    let layers = maybe_share
+      .as_ref()
+      .map_or(layers, |share| share.layers().to_vec());
     let (frames, frame_rx) = frame_queue();
+    let dropped = frames.dropped_frames();
     let stall = StallWatch::new(capture.stall_limit());
     capture.start(frames)?;
     let (layers, maybe_first_frame) = match maybe_layer_plan {
@@ -350,6 +383,8 @@ impl VideoSender {
         layers.clone(),
         largest_resolution(&layers).unwrap_or(VideoResolution { width: 0, height: 0 }),
       ),
+      limiter: FrameLimiter::new(max_framerate(&layers)),
+      load: LoadMeter::new(dropped),
       content,
       encoders,
       maybe_filter,
@@ -377,6 +412,7 @@ impl VideoSender {
     let sender = Self {
       kind,
       layers,
+      maybe_share,
       controls,
       counters,
       thread: Some(thread),
@@ -418,6 +454,74 @@ impl VideoSender {
   pub fn details(&self) -> SenderDetails {
     self.counters.details()
   }
+
+  /// Whether the track is a screen share on the share policy: published so that the uplink steps
+  /// its rate in place ([`crate::call_engine::CallEngine::publish_video_adapting_in_place`]).
+  pub fn is_governed_share(&self) -> bool {
+    self.maybe_share.is_some()
+  }
+
+  /// Takes a governed share one step along the share policy (#1777) for its encoders' load since
+  /// the last call and for how the uplink treats its top layer now (`None` while unpublished).
+  /// Rates go to the encoders in place; new layers too, and come back here: the caller publishes
+  /// the track anew with them. Nothing for other tracks.
+  pub fn govern_share(
+    &mut self,
+    maybe_uplink_top: Option<UplinkTop>,
+    now: Instant,
+  ) -> Option<Vec<VideoLayerInfo>> {
+    let share = self.maybe_share.as_mut()?;
+    let load = self.counters.take_load();
+    let by_load = share.on_load(load, now);
+    let by_uplink = maybe_uplink_top.and_then(|top| share.on_uplink(top, now));
+    let layers = share.layers().to_vec();
+    // The last word has the layers now; new layers from either need new encoders.
+    match (by_load, by_uplink) {
+      (None, None) => None,
+      (Some(ShareChange::Layers(_)), _) | (_, Some(ShareChange::Layers(_))) => {
+        // A stopped thread changes nothing any more.
+        let _ = self.controls.send(SenderControl::Layers(layers.clone()));
+        self.layers = layers.clone();
+        Some(layers)
+      },
+      _ => {
+        let _ = self.controls.send(SenderControl::Rates(layers));
+        None
+      },
+    }
+  }
+
+  /// What holds a governed share below its plan (stats for nerds); `None` for other tracks.
+  pub fn share_limits(&self) -> Option<ShareLimits> {
+    self.maybe_share.as_ref().map(ShareSteps::limits)
+  }
+}
+
+/// A share's steps, planned from what its capture delivers, within as many layers as `layers`
+/// (what the SFU takes, [`VideoSendConfig::within_layer_limit`]). The desktop's encoders are
+/// H.264 only: the ladder has no codec step.
+fn share_steps(capture: &dyn VideoCapture, profile: ScreenProfile, layers: &[VideoLayerInfo]) -> ShareSteps {
+  let format = capture.format();
+  let plan = SharePlan {
+    source: format.resolution,
+    framerate: format.framerate,
+    profile,
+    codecs: ShareCodecs {
+      by_all: vec![teamcraft_proto::VideoCodec::H264],
+      by_some: Vec::new(),
+    },
+    encoders: ShareEncoders {
+      av1: EncoderKind::Unavailable,
+      vp9: EncoderKind::Unavailable,
+    },
+  };
+  let max_layers = u8::try_from(layers.len()).unwrap_or(u8::MAX);
+  ShareSteps::new(plan, max_layers, Instant::now())
+}
+
+/// The highest frame rate of `layers`: what the track is sent at.
+fn max_framerate(layers: &[VideoLayerInfo]) -> Option<u8> {
+  layers.iter().map(|layer| layer.max_framerate).max()
 }
 
 impl VideoSender {
@@ -436,6 +540,9 @@ struct EncoderLoop {
   layers: Vec<VideoLayerInfo>,
   /// Keeps the encoders in the shape of the pictures (a shared window resized, #931).
   sizer: LayerSizer,
+  /// Holds back frames that come faster than the layers' rate.
+  limiter: FrameLimiter,
+  load: LoadMeter,
   content: VideoContent,
   encoders: EncoderFactory,
   maybe_filter: Option<FrameFilter>,
@@ -503,6 +610,15 @@ struct Refresh {
   maybe_idle_interval: Option<Duration>,
 }
 
+/// Measures the encoders' load on the encoder thread (#1777): per encoded frame its encode time
+/// against the time since the last one, and the frames the capture dropped meanwhile because the
+/// thread was busy.
+struct LoadMeter {
+  dropped: DroppedFrames,
+  dropped_seen: u64,
+  maybe_last_start: Option<Instant>,
+}
+
 /// The picture encoded last (scaled and filtered), for [`Refresh`].
 struct LastPicture {
   frame: VideoFrame,
@@ -514,15 +630,13 @@ impl EncoderLoop {
     let encoders = Arc::clone(&self.encoders);
     let content = self.content;
     let mut simulcast = match SimulcastEncoder::new(&self.layers, |layer| encoders(layer, content)) {
-      Ok(simulcast) => simulcast,
+      Ok(simulcast) => simulcast.with_content(content),
       Err(error) => {
         warn!(%error, kind = ?self.kind, "no video encoder; the track sends nothing");
         self.report_start(Err(VideoStartError::NoEncoder(error.to_string())));
         return;
       },
     };
-    let send_resolution = largest_resolution(&self.layers);
-    let mut limiter = FrameLimiter::new(self.layers.iter().map(|layer| layer.max_framerate).max());
     let mut encode_warning = RepeatedWarning::default();
     let started_at = Instant::now();
     let mut maybe_last: Option<LastPicture> = None;
@@ -556,7 +670,7 @@ impl EncoderLoop {
         }
         continue;
       }
-      let maybe_held = self.take_due_held_back(&limiter, Instant::now());
+      let maybe_held = self.take_due_held_back(Instant::now());
       let is_held = maybe_held.is_some();
       let received = match maybe_held.or_else(|| self.maybe_pending_frame.take()) {
         Some(frame) => Ok(frame),
@@ -587,13 +701,14 @@ impl EncoderLoop {
       }
       // A camera may deliver 60 fps; the call sends at most its layers' rate. A frame too soon
       // waits for its turn: it may be the last one of a still screen.
-      if !limiter.is_due(frame.timestamp_us()) {
+      if !self.limiter.is_due(frame.timestamp_us()) {
         self.maybe_held_back = Some((frame, Instant::now()));
         continue;
       }
       self.maybe_held_back = None;
       // Shrink before the filter (background effects) and the encoders: they work per pixel.
-      let target = send_resolution.map_or(frame.resolution(), |limit| fit_within(frame.resolution(), limit));
+      let target = largest_resolution(&self.layers)
+        .map_or(frame.resolution(), |limit| fit_within(frame.resolution(), limit));
       let frame = if target == frame.resolution() {
         frame
       } else {
@@ -627,11 +742,11 @@ impl EncoderLoop {
   }
 
   /// The frame held back for the rate, stamped with the time it waited, once the limiter takes it.
-  fn take_due_held_back(&mut self, limiter: &FrameLimiter, now: Instant) -> Option<VideoFrame> {
+  fn take_due_held_back(&mut self, now: Instant) -> Option<VideoFrame> {
     let (frame, held_at) = self.maybe_held_back.as_ref()?;
     let waited_us = u64::try_from(now.saturating_duration_since(*held_at).as_micros()).unwrap_or(u64::MAX);
     let timestamp_us = frame.timestamp_us().saturating_add(waited_us);
-    if !limiter.would_be_due(timestamp_us) {
+    if !self.limiter.would_be_due(timestamp_us) {
       return None;
     }
     let (frame, _) = self.maybe_held_back.take()?;
@@ -676,7 +791,10 @@ impl EncoderLoop {
     if self.maybe_first_picture.is_some() && !simulcast.has_needed_layers() {
       return self.encode_unsent(simulcast, frame, encode_warning);
     }
-    let encoded_frames = match simulcast.encode(&frame) {
+    let started = Instant::now();
+    let result = simulcast.encode(&frame);
+    self.counters.add_load(self.load.tally(started, Instant::now()));
+    let encoded_frames = match result {
       Ok(encoded_frames) => encoded_frames,
       Err(error) => {
         self.note_no_picture(|| format!("{}: {error}", simulcast.encoder_names()));
@@ -773,7 +891,7 @@ impl EncoderLoop {
   /// stopped). The only place that takes controls from the queue: a keyframe request taken
   /// anywhere else to look for the stop got lost (issue #683), and with it the picture of a
   /// still screen for whoever asked.
-  fn apply_controls(&self, simulcast: &mut SimulcastEncoder) -> LoopStep {
+  fn apply_controls(&mut self, simulcast: &mut SimulcastEncoder) -> LoopStep {
     loop {
       match self.control_rx.try_recv() {
         Ok(SenderControl::Keyframe(layer)) => {
@@ -789,9 +907,45 @@ impl EncoderLoop {
             Err(error) => warn!(%error, ?bitrates, "encoders not rebuilt for new layer bitrates"),
           }
         },
+        Ok(SenderControl::Rates(layers)) => self.follow_rates(simulcast, layers),
+        Ok(SenderControl::Layers(layers)) => self.replace_layers(simulcast, layers),
         Err(std_mpsc::TryRecvError::Empty) => return LoopStep::Continue,
         Err(std_mpsc::TryRecvError::Disconnected) => return LoopStep::Stop,
       }
+    }
+  }
+
+  /// A share's step changed its layers' rates: the encoders take them (in place where they can,
+  /// #1781), and frames come at the new top rate.
+  fn follow_rates(&mut self, simulcast: &mut SimulcastEncoder, layers: Vec<VideoLayerInfo>) {
+    let (encoders, content) = (Arc::clone(&self.encoders), self.content);
+    if let Err(error) = simulcast.set_rates(&layers, |layer| encoders(layer, content)) {
+      warn!(%error, kind = ?self.kind, "encoders not rebuilt for the share's new rates");
+      return;
+    }
+    debug!(kind = ?self.kind, framerate = ?max_framerate(&layers), "layer rates follow the share's step");
+    self.limiter.set_max_framerate(max_framerate(&layers));
+    self.layers = layers;
+  }
+
+  /// A share's step changed its layers: new encoders for them, each starting with a keyframe (the
+  /// call publishes the track anew meanwhile). Where they can't be built the old ones go on.
+  fn replace_layers(&mut self, simulcast: &mut SimulcastEncoder, layers: Vec<VideoLayerInfo>) {
+    let (encoders, content) = (Arc::clone(&self.encoders), self.content);
+    match SimulcastEncoder::new(&layers, |layer| encoders(layer, content)) {
+      Ok(replaced) => {
+        *simulcast = replaced.with_content(content);
+        info!(kind = ?self.kind, layers = layers.len(), top = ?largest_resolution(&layers), "new layers for the share's step");
+        self.sizer = LayerSizer::new(
+          layers.clone(),
+          largest_resolution(&layers).unwrap_or(VideoResolution { width: 0, height: 0 }),
+        );
+        self.limiter.set_max_framerate(max_framerate(&layers));
+        self.layers = layers;
+      },
+      Err(error) => {
+        warn!(%error, kind = ?self.kind, "no encoders for the share's new layers; the old ones go on")
+      },
     }
   }
 
@@ -1060,6 +1214,56 @@ impl SendCounters {
       *noted = names;
     }
   }
+
+  fn add_load(&self, tally: FrameTally) {
+    if let Ok(mut load) = self.load.lock() {
+      load.given += tally.given;
+      load.skipped += tally.skipped;
+      load.queued += tally.queued;
+      load.encode_time += tally.encode_time;
+      load.frame_interval += tally.frame_interval;
+    }
+  }
+
+  /// The load since the last call.
+  fn take_load(&self) -> FrameTally {
+    self
+      .load
+      .lock()
+      .map(|mut load| std::mem::take(&mut *load))
+      .unwrap_or_default()
+  }
+}
+
+impl LoadMeter {
+  fn new(dropped: DroppedFrames) -> Self {
+    Self {
+      dropped,
+      dropped_seen: 0,
+      maybe_last_start: None,
+    }
+  }
+
+  /// One frame given to the encoders from `started` to `finished`.
+  fn tally(&mut self, started: Instant, finished: Instant) -> FrameTally {
+    let dropped = self.dropped.count();
+    let skipped = dropped.saturating_sub(self.dropped_seen);
+    self.dropped_seen = dropped;
+    let encode_time = finished.saturating_duration_since(started);
+    let frame_interval = self
+      .maybe_last_start
+      .map_or(encode_time, |last| started.saturating_duration_since(last))
+      .min(MAX_LOAD_INTERVAL)
+      .max(encode_time);
+    self.maybe_last_start = Some(started);
+    FrameTally {
+      given: 1,
+      skipped: u32::try_from(skipped).unwrap_or(u32::MAX),
+      queued: 0,
+      encode_time,
+      frame_interval,
+    }
+  }
 }
 
 impl RepeatedWarning {
@@ -1266,6 +1470,7 @@ mod tests {
       })),
       maybe_picture_tap: None,
       maybe_idle_refresh: None,
+      maybe_screen_profile: None,
     };
     let (sender, _first_picture) = VideoSender::start(config, encoded).unwrap();
     let frames = pushed.lock().unwrap().clone().unwrap();
@@ -1327,6 +1532,7 @@ mod tests {
       maybe_filter: None,
       maybe_picture_tap: None,
       maybe_idle_refresh: None,
+      maybe_screen_profile: None,
     };
     let (sender, _first_picture) = VideoSender::start(config, encoded).unwrap();
     let frames = pushed.lock().unwrap().clone().unwrap();
@@ -1375,6 +1581,7 @@ mod tests {
       maybe_filter: None,
       maybe_picture_tap: None,
       maybe_idle_refresh: None,
+      maybe_screen_profile: None,
     };
     let (sender, _first_picture) = VideoSender::start(config, encoded).unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -1413,6 +1620,7 @@ mod tests {
       maybe_filter: None,
       maybe_picture_tap: None,
       maybe_idle_refresh: None,
+      maybe_screen_profile: None,
     };
     let (sender, _first_picture) = VideoSender::start(config, encoded).unwrap();
     assert_eq!(sender.layers, crate::video::camera_layers(hd, 30, limit));
@@ -1449,6 +1657,7 @@ mod tests {
       maybe_filter: None,
       maybe_picture_tap: None,
       maybe_idle_refresh: None,
+      maybe_screen_profile: None,
     }
     .within_layer_limit(3);
     assert_eq!(config.layers.len(), 3);
@@ -1484,6 +1693,7 @@ mod tests {
         seen_by_tap.lock().unwrap().push(frame.timestamp_us());
       })),
       maybe_idle_refresh: None,
+      maybe_screen_profile: None,
     };
     let (sender, _first_picture) = VideoSender::start(config, encoded).unwrap();
     // The one frame the capture delivers, over and over: a late viewer gets its picture.
@@ -1803,6 +2013,7 @@ mod tests {
         maybe_filter: None,
         maybe_picture_tap: None,
         maybe_idle_refresh: None,
+        maybe_screen_profile: None,
       };
       let (sender, first_picture) = VideoSender::start(config, encoded).unwrap();
       (sender, first_picture, encoded_rx)
@@ -1818,6 +2029,8 @@ mod tests {
       let encoder_loop = EncoderLoop {
         kind: VideoTrackKind::Camera,
         sizer: LayerSizer::new(layers.clone(), VGA),
+        limiter: FrameLimiter::new(max_framerate(&layers)),
+        load: LoadMeter::new(DroppedFrames::default()),
         layers,
         content: VideoContent::Camera,
         encoders: fake_encoders(),
@@ -1927,6 +2140,7 @@ mod tests {
         maybe_filter: None,
         maybe_picture_tap: None,
         maybe_idle_refresh,
+        maybe_screen_profile: None,
       };
       let (sender, _first_picture) = VideoSender::start(config, encoded).unwrap();
       let frames = pushed.lock().unwrap().clone().unwrap();
@@ -2123,6 +2337,7 @@ mod tests {
         maybe_filter: None,
         maybe_picture_tap: None,
         maybe_idle_refresh: None,
+        maybe_screen_profile: None,
       };
       let (sender, mut first_picture) = VideoSender::start(config, encoded).unwrap();
       let black_pictures = first_picture.take_black_pictures().unwrap();
@@ -2151,6 +2366,7 @@ mod tests {
         maybe_filter: None,
         maybe_picture_tap: None,
         maybe_idle_refresh: None,
+        maybe_screen_profile: None,
       };
       let (sender, mut first_picture) = VideoSender::start(config, encoded).unwrap();
       let black_pictures = first_picture.take_black_pictures().unwrap();
@@ -2166,6 +2382,269 @@ mod tests {
       let mut data = vec![16; pixels];
       data.resize(pixels * 3 / 2, 128);
       VideoFrame::new(VGA, 0, data).unwrap()
+    }
+  }
+
+  /// #1777: a screen share whose encoders can't keep up walks the share policy's ladder in its
+  /// order, and back up in reverse once they keep up again. The encoder thread's load meter, the
+  /// governor and the encoders' changes are the sender's own; the encoder is a fake whose encode
+  /// time the test sets, on a clock the test moves.
+  mod share_ladder {
+    use std::sync::atomic::AtomicUsize;
+
+    use teamcraft_proto::{ScreenContentMode, ScreenShareResolution};
+
+    use super::*;
+    use crate::camera_governor::CameraGovernorConfig;
+    use crate::share_policy::ShareLadder;
+    use crate::video_codec::EncodedPicture;
+
+    /// A frame every this long: the capture's rate as the load sees it.
+    const FRAME_PERIOD: Duration = Duration::from_millis(100);
+    /// Encoding a frame when the machine is slow: more than the frame period.
+    const SLOW_ENCODE: Duration = Duration::from_millis(150);
+    const FAST_ENCODE: Duration = Duration::from_millis(1);
+    const MAX_LAYERS: u8 = 3;
+
+    #[test]
+    fn a_slow_encoder_walks_the_ladder_down_in_order_and_back_up_in_reverse() {
+      let ladder = ShareLadder::new(plan());
+      let last = ladder.len() - 1;
+      let expected = |level: usize| within_layer_limit(&ladder.layers(ladder.step(level)), MAX_LAYERS);
+      let mut share = Share::start();
+
+      let down = share.run(SLOW_ENCODE, |levels| levels.last() == Some(&last));
+      assert_eq!(
+        down.levels,
+        (1..=last).collect::<Vec<_>>(),
+        "down one step at a time"
+      );
+      // Rates first (in place, nothing rebuilt), then the layers step by step (new encoders).
+      for (index, level) in down.levels.iter().enumerate() {
+        let (layers, is_new) = &down.changes[index];
+        assert_eq!(*layers, expected(*level), "level {level}");
+        let previous = expected(level - 1);
+        let is_same_shape = previous.len() == layers.len()
+          && previous
+            .iter()
+            .zip(layers)
+            .all(|(a, b)| (a.layer, a.width, a.height) == (b.layer, b.width, b.height));
+        assert_eq!(*is_new, !is_same_shape, "level {level}");
+      }
+      let rate_steps = down.changes.iter().take_while(|(_, is_new)| !is_new).count();
+      assert_eq!(
+        rate_steps, 4,
+        "30 to 20, 15, 10 and 5 fps before any layer changes"
+      );
+      assert_eq!(
+        down.changes.last().map(|(layers, _)| layers.len()),
+        Some(1),
+        "the base alone"
+      );
+
+      let up = share.run(FAST_ENCODE, |levels| levels.last() == Some(&0));
+      assert_eq!(up.levels, (0..last).rev().collect::<Vec<_>>(), "up in reverse");
+      assert_eq!(share.encoder_loop.layers, expected(0));
+      assert_eq!(share.simulcast.infos(), expected(0));
+      assert_eq!(
+        share.encoder_loop.limiter.min_interval_us,
+        FrameLimiter::new(Some(30)).min_interval_us,
+        "frames at the plan's rate again"
+      );
+    }
+
+    /// The encode time is the encoder's alone, measured on the encoder thread around the encode
+    /// call: a call task that takes the load late (busy, or behind on its queue) doesn't make fast
+    /// encoders look slow. The browser once counted its call loop's backlog as encoding and ran
+    /// the whole ladder down while its encoder took 13 to 20 ms a 1440p frame.
+    #[test]
+    fn a_call_task_that_takes_the_load_late_doesnt_step_a_fast_encoder_down() {
+      let mut share = Share::start();
+      let end = share.now + Duration::from_secs(60);
+      while share.now < end {
+        // The encoder thread encodes on time; the call task gets to the load every 3 s only.
+        for _ in 0..30 {
+          let tally = share
+            .encoder_loop
+            .load
+            .tally(share.now, share.now + Duration::from_millis(15));
+          share.encoder_loop.counters.add_load(tally);
+          share.now += FRAME_PERIOD;
+        }
+        let taken = share.encoder_loop.counters.take_load();
+        assert_eq!(
+          share.steps.on_load(taken, share.now),
+          None,
+          "no step for fast encoders"
+        );
+      }
+      assert_eq!(share.steps.limits().level, 0);
+    }
+
+    /// A share's sender pieces: steps, encoder thread state and encoders, on a test clock.
+    struct Share {
+      steps: ShareSteps,
+      encoder_loop: EncoderLoop,
+      simulcast: SimulcastEncoder,
+      built: Arc<AtomicUsize>,
+      now: Instant,
+    }
+
+    /// What one run changed: the levels in order, and per change the layers and whether they
+    /// were new (built anew) rather than rates (in place).
+    struct Run {
+      levels: Vec<usize>,
+      changes: Vec<(Vec<VideoLayerInfo>, bool)>,
+    }
+
+    impl Share {
+      fn start() -> Self {
+        let now = Instant::now();
+        let config = CameraGovernorConfig {
+          calm_period: Duration::from_secs(2),
+          max_calm_period: Duration::from_secs(8),
+          probe_proof: Duration::from_secs(2),
+          ..CameraGovernorConfig::default()
+        };
+        let steps = ShareSteps::with_config(plan(), config, MAX_LAYERS, now);
+        let built = Arc::new(AtomicUsize::new(0));
+        let encoder_loop = encoder_loop(steps.layers().to_vec(), Arc::clone(&built));
+        let encoders = Arc::clone(&encoder_loop.encoders);
+        let simulcast = SimulcastEncoder::new(steps.layers(), |layer| encoders(layer, VideoContent::Screen))
+          .unwrap()
+          .with_content(VideoContent::Screen);
+        Self {
+          steps,
+          encoder_loop,
+          simulcast,
+          built,
+          now,
+        }
+      }
+
+      /// Encodes frames taking `encode` each until `is_done` with the levels so far (at most ten
+      /// minutes of test time), applying each change as the sender does.
+      fn run(&mut self, encode: Duration, is_done: impl Fn(&[usize]) -> bool) -> Run {
+        let mut run = Run {
+          levels: Vec::new(),
+          changes: Vec::new(),
+        };
+        let end = self.now + Duration::from_secs(600);
+        while !is_done(&run.levels) && self.now < end {
+          let tally = self.encoder_loop.load.tally(self.now, self.now + encode);
+          self.now += encode.max(FRAME_PERIOD);
+          let Some(change) = self.steps.on_load(tally, self.now) else {
+            continue;
+          };
+          run.levels.push(self.steps.limits().level);
+          let built_before = self.built.load(Ordering::Relaxed);
+          let (layers, is_new) = match change {
+            ShareChange::Rates(layers) => {
+              self
+                .encoder_loop
+                .follow_rates(&mut self.simulcast, layers.clone());
+              (layers, false)
+            },
+            ShareChange::Layers(layers) => {
+              self
+                .encoder_loop
+                .replace_layers(&mut self.simulcast, layers.clone());
+              (layers, true)
+            },
+          };
+          let rebuilt = self.built.load(Ordering::Relaxed) - built_before;
+          let expected_rebuilt = if is_new { layers.len() } else { 0 };
+          assert_eq!(rebuilt, expected_rebuilt, "encoders built for {layers:?}");
+          assert_eq!(self.encoder_loop.layers, layers);
+          run.changes.push((layers, is_new));
+        }
+        run
+      }
+    }
+
+    /// An encoder thread's state for `layers`, without the thread; its encoders count their
+    /// builds and take rates in place.
+    fn encoder_loop(layers: Vec<VideoLayerInfo>, built: Arc<AtomicUsize>) -> EncoderLoop {
+      let (_frames, frame_rx) = frame_queue();
+      let (_controls, control_rx) = std_mpsc::channel();
+      let (encoded, _encoded_rx) = mpsc::unbounded_channel();
+      let largest = largest_resolution(&layers).unwrap();
+      EncoderLoop {
+        kind: VideoTrackKind::Screen,
+        sizer: LayerSizer::new(layers.clone(), largest),
+        limiter: FrameLimiter::new(max_framerate(&layers)),
+        load: LoadMeter::new(DroppedFrames::default()),
+        layers,
+        content: VideoContent::Screen,
+        encoders: Arc::new(move |_, _| {
+          built.fetch_add(1, Ordering::Relaxed);
+          Ok(Box::new(Retunable) as Box<dyn VideoEncoder>)
+        }),
+        maybe_filter: None,
+        maybe_picture_tap: None,
+        refresh: Refresh {
+          maybe_idle_interval: None,
+        },
+        frame_rx,
+        maybe_pending_frame: None,
+        maybe_held_back: None,
+        control_rx,
+        encoded,
+        counters: Arc::default(),
+        maybe_first_picture: None,
+        maybe_no_picture: None,
+        maybe_names_noted_at: None,
+        black: BlackWatch::new(oneshot::channel().0),
+        stall: StallWatch::new(None),
+      }
+    }
+
+    /// An encoder that changes its rate in place; it never encodes here.
+    struct Retunable;
+
+    impl VideoEncoder for Retunable {
+      fn codec(&self) -> VideoCodec {
+        VideoCodec::H264
+      }
+
+      fn name(&self) -> &'static str {
+        "retunable"
+      }
+
+      fn encode(
+        &mut self,
+        _frame: &VideoFrame,
+        _is_keyframe_forced: bool,
+      ) -> Result<Option<EncodedPicture>, VideoCodecError> {
+        Ok(None)
+      }
+
+      fn set_rate(&mut self, _bitrate_bps: u32, _framerate: u8) -> Result<bool, VideoCodecError> {
+        Ok(true)
+      }
+    }
+
+    /// A 1440p detail share: a middle layer, and top sizes to step through.
+    fn plan() -> SharePlan {
+      SharePlan {
+        source: VideoResolution {
+          width: 2560,
+          height: 1440,
+        },
+        framerate: 30,
+        profile: ScreenProfile {
+          mode: ScreenContentMode::Detail,
+          size: ScreenShareResolution::Standard,
+        },
+        codecs: ShareCodecs {
+          by_all: vec![VideoCodec::H264],
+          by_some: Vec::new(),
+        },
+        encoders: ShareEncoders {
+          av1: EncoderKind::Unavailable,
+          vp9: EncoderKind::Unavailable,
+        },
+      }
     }
   }
 

@@ -976,6 +976,7 @@ async fn start_camera(
     maybe_filter: None,
     maybe_picture_tap: None,
     maybe_idle_refresh: None,
+    maybe_screen_profile: None,
   };
   call
     .start_video(config)
@@ -1185,6 +1186,7 @@ async fn start_screen_share(
     maybe_filter: None,
     maybe_picture_tap: None,
     maybe_idle_refresh: VideoSendConfig::default_idle_refresh(&VideoTrackKind::Screen),
+    maybe_screen_profile: None,
   };
   call
     .start_video(config)

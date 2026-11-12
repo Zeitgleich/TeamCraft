@@ -199,6 +199,7 @@ fn camera_config(camera: WarmingCamera) -> VideoSendConfig {
     maybe_filter: None,
     maybe_picture_tap: None,
     maybe_idle_refresh: None,
+    maybe_screen_profile: None,
   }
 }
 

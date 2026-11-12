@@ -748,6 +748,53 @@ fn oriented_like(limit: VideoResolution, source: VideoResolution) -> VideoResolu
   }
 }
 
+#[cfg(feature = "call-view")]
+impl ShareLimits {
+  /// The limits as the stats overlay's "Share policy" row shows them, from the browser's sender
+  /// and the desktop's alike.
+  pub fn stats(self) -> teamcraft_client_api::video_stats::ShareLimitsStats {
+    use teamcraft_client_api::video_stats::{EncoderOverload, ShareLimitsStats, ShareStepStats, VideoSize};
+
+    let step = |step: ShareStep| ShareStepStats {
+      top_codec: step.top_codec,
+      top_framerate: step.top_framerate,
+      maybe_top: step.maybe_top.map(|top| VideoSize {
+        width: top.width,
+        height: top.height,
+      }),
+      has_middle: step.has_middle,
+    };
+    ShareLimitsStats {
+      av1_encoder: self.encoders.av1.stats(),
+      vp9_encoder: self.encoders.vp9.stats(),
+      planned: step(self.planned),
+      now: step(self.now),
+      level: u8::try_from(self.level).unwrap_or(u8::MAX),
+      levels: u8::try_from(self.levels).unwrap_or(u8::MAX),
+      maybe_overload: self.maybe_reason.map(|reason| match reason {
+        OverloadReason::SkippedFrames => EncoderOverload::SkippedFrames,
+        OverloadReason::QueuedFrames => EncoderOverload::QueuedFrames,
+        OverloadReason::SlowEncoding => EncoderOverload::SlowEncoding,
+      }),
+      uplink_steps: u8::try_from(self.uplink_steps).unwrap_or(u8::MAX),
+      sizes: u8::try_from(self.sizes).unwrap_or(u8::MAX),
+    }
+  }
+}
+
+#[cfg(feature = "call-view")]
+impl EncoderKind {
+  fn stats(self) -> teamcraft_client_api::video_stats::ShareEncoderKind {
+    use teamcraft_client_api::video_stats::ShareEncoderKind;
+
+    match self {
+      Self::Hardware => ShareEncoderKind::Hardware,
+      Self::Software => ShareEncoderKind::Software,
+      Self::Unavailable => ShareEncoderKind::Unavailable,
+    }
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use teamcraft_proto::ScreenShareResolution;
