@@ -96,6 +96,11 @@ const MAX_FEEDBACK_ENTRIES: usize = 1000;
 /// one padding datagram reported lost makes a probe fall short and limits the estimate. A gap
 /// still open after the window is a loss, as before (also the send queue's own drops).
 pub const REORDER_WINDOW: Duration = Duration::from_millis(150);
+/// The share of a link's measured capacity the estimate starts at after a probe at the start
+/// (`crate::join_probe`; WebRTC's probe estimator takes the same, `kTargetUtilizationFraction`). At
+/// 85 % a screen share whose two layers and sound need 1.27 times the layers, on a link of 1.45
+/// times them, started with its top layer held back and its slides waited (screen_uplink_bursts).
+const PROBE_SHARE: f64 = 0.95;
 
 /// Settings of the estimator.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -180,6 +185,8 @@ pub struct SendSideEstimator {
   recent_sends: VecDeque<(Instant, usize)>,
   recent_sent_bytes: usize,
   maybe_first_send_at: Option<Instant>,
+  /// What a probe at the start showed the path carries ([`SendSideEstimator::apply_probe`]).
+  maybe_probed_bps: Option<f64>,
 }
 
 /// Receiver side: records arrival times and produces [`TransportFeedback`].
@@ -282,6 +289,7 @@ impl SendSideEstimator {
       recent_sends: VecDeque::new(),
       recent_sent_bytes: 0,
       maybe_first_send_at: None,
+      maybe_probed_bps: None,
     }
   }
 
@@ -386,9 +394,25 @@ impl SendSideEstimator {
   /// forgotten, and the estimate grows as fast as at the start until the path shows congestion.
   /// Packets in flight still meet their feedback.
   pub fn measure_afresh(&mut self) {
-    self.estimate_bps = self
-      .estimate_bps
-      .max(f64::from(self.config.start_bps))
+    // The fast start ramps up from the start value as without a probe: jumping to what the probe
+    // showed sent a new share's keyframes of every layer at once into the link's queue, and a
+    // slide was lost (screen_uplink_bursts). Nor does the ramp stop at the probed capacity: an
+    // estimate held right at it left no room for a slide's burst, where the overshoot and its
+    // cut to 85 % of what got through do. The probe only lowers the start on a link narrower
+    // than it.
+    let start_bps = f64::from(self.config.start_bps);
+    let start = self
+      .maybe_probed_bps
+      .map_or(start_bps, |probed| start_bps.min(probed * PROBE_SHARE));
+    // An estimate the probe set and no traffic has filled since (a call of sound only) counts
+    // only as far as what got through would let it grow (the application-limited ceiling).
+    let carried = if self.maybe_probed_bps.is_some() {
+      self.estimate_bps.min(1.5 * self.acked_bps() + 10_000.0)
+    } else {
+      self.estimate_bps
+    };
+    self.estimate_bps = carried
+      .max(start)
       .clamp(f64::from(self.config.min_bps), self.ceiling_bps());
     self.delay = DelayDetector::new();
     self.acked.clear();
@@ -406,6 +430,27 @@ impl SendSideEstimator {
     self.has_grown_recovering = false;
     self.maybe_overuse_since = None;
     self.has_cut_to_delivered = false;
+  }
+
+  /// A probe at the start showed the path carries `capacity_bps` (`crate::join_probe`): the
+  /// estimate takes [`PROBE_SHARE`] of it at once, whether that is more or less than it has now,
+  /// and the fast start ends. A narrow
+  /// link isn't overshot by the fast start and then cut (a 1 Mbit/s link went to 2.7 Mbit/s in two seconds
+  /// before its first loss), and a wide one doesn't wait for the estimate to grow. From there the
+  /// estimate grows as usual, should the probe have shown too little.
+  pub fn apply_probe(&mut self, capacity_bps: u32) -> u32 {
+    // The share of what was measured, within the bounds: a link far above the ceiling starts at it.
+    let capacity = f64::from(capacity_bps);
+    self.maybe_probed_bps = Some(capacity);
+    self.estimate_bps = (capacity * PROBE_SHARE).clamp(f64::from(self.config.min_bps), self.ceiling_bps());
+    self.is_starting = false;
+    self.estimate_bps()
+  }
+
+  /// The path changed (a session moved to another connection): what a probe showed of the old
+  /// one no longer bounds the fast start.
+  pub fn forget_probe(&mut self) {
+    self.maybe_probed_bps = None;
   }
 
   /// A probe showed the path carries no more than `bps` (the SFU's padding burst before a layer
@@ -881,6 +926,7 @@ fn linear_slope(points: &VecDeque<(f64, f64)>) -> f64 {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::join_probe::{JoinProbe, JoinProbeConfig, LinkMeasurement};
 
   const PACKET_BYTES: usize = 1200;
   const TICK: Duration = Duration::from_millis(5);
@@ -959,6 +1005,93 @@ mod tests {
       let settled = sim.estimator.estimate_bps();
       assert!((350_000..=600_000).contains(&settled), "settled at {settled}");
       assert!(sim.link.queue_delay(sim.now) < Duration::from_millis(100));
+    }
+  }
+
+  /// The probe at the start (#1762) on the links of the real-world tests: the estimate starts from
+  /// what the link carries instead of growing past it and collapsing, or creeping up to it.
+  mod join_probe {
+    use super::*;
+
+    /// Hamburg DOCSIS on a bad day: 3 Mbit/s with 10 % loss.
+    #[test]
+    fn a_lossy_three_mbit_link_starts_near_its_capacity() {
+      let mut sim = Simulation::probing(Link::new(3_000_000, 20, 100));
+      sim.run(Duration::from_secs(1));
+      let measured = sim.maybe_measurement.expect("the probe ended within a second");
+      assert!(
+        (2_000_000..=3_600_000).contains(&measured.capacity_bps),
+        "{measured:?}"
+      );
+      assert!(measured.loss_percent > 0, "the loss shows");
+      sim.run(Duration::from_secs(5));
+      assert!(
+        sim.max_estimate_bps <= 3_600_000,
+        "overshot to {}",
+        sim.max_estimate_bps
+      );
+    }
+
+    /// A mobile link: 1 Mbit/s, long and jittery.
+    #[test]
+    fn a_one_mbit_mobile_link_is_not_overshot() {
+      let mobile = || Link {
+        jitter: Duration::from_millis(10),
+        ..Link::new(1_000_000, 80, 10)
+      };
+      let mut probed = Simulation::probing(mobile());
+      probed.run(Duration::from_secs(1));
+      let measured = probed.maybe_measurement.expect("the probe ended within a second");
+      assert!(
+        (500_000..=1_600_000).contains(&measured.capacity_bps),
+        "{measured:?}"
+      );
+      probed.run(Duration::from_secs(5));
+      // Without the probe the fast start triples the estimate past the link before the first
+      // congestion stops it.
+      let mut guessing = Simulation::new(mobile());
+      guessing.run(Duration::from_secs(6));
+      assert!(
+        probed.max_estimate_bps < guessing.max_estimate_bps,
+        "probed {} against {} without",
+        probed.max_estimate_bps,
+        guessing.max_estimate_bps
+      );
+      assert!(
+        probed.max_estimate_bps <= 1_400_000,
+        "overshot to {}",
+        probed.max_estimate_bps
+      );
+    }
+
+    /// A fast link: the estimate is at its ceiling within a second, not after four.
+    #[test]
+    fn a_hundred_mbit_link_starts_at_the_ceiling() {
+      let mut probed = Simulation::probing(Link::new(100_000_000, 10, 0));
+      probed.run(Duration::from_secs(1));
+      let measured = probed.maybe_measurement.expect("the probe ended within a second");
+      assert!(measured.capacity_bps >= 50_000_000, "{measured:?}");
+      assert_eq!(probed.estimator.estimate_bps(), BweConfig::default().max_bps);
+      let mut guessing = Simulation::new(Link::new(100_000_000, 10, 0));
+      guessing.run(Duration::from_secs(1));
+      assert!(guessing.estimator.estimate_bps() < BweConfig::default().max_bps / 4);
+    }
+
+    /// A new track measures afresh (#935): from what the probe showed, not from the guess, and the
+    /// fast start stops there again.
+    #[test]
+    fn measuring_afresh_starts_from_the_probe() {
+      let mut estimator = SendSideEstimator::new(BweConfig::default());
+      assert_eq!(estimator.apply_probe(200_000), 190_000);
+      estimator.measure_afresh();
+      assert_eq!(
+        estimator.estimate_bps(),
+        190_000,
+        "not the start value, above the link"
+      );
+      estimator.forget_probe();
+      estimator.measure_afresh();
+      assert_eq!(estimator.estimate_bps(), BweConfig::default().start_bps);
     }
   }
 
@@ -1486,6 +1619,11 @@ mod tests {
     next_feedback_at: Instant,
     budget_bytes: f64,
     sending: Sending,
+    /// The probe at the start (`crate::join_probe`), when the simulation runs one, and its result.
+    maybe_probe: Option<JoinProbe>,
+    maybe_measurement: Option<LinkMeasurement>,
+    /// The highest estimate so far.
+    max_estimate_bps: u32,
   }
 
   /// What the simulated sender sends.
@@ -1517,16 +1655,52 @@ mod tests {
         next_feedback_at: now + FEEDBACK_INTERVAL,
         budget_bytes: 0.0,
         sending: Sending::Estimate,
+        maybe_probe: None,
+        maybe_measurement: None,
+        max_estimate_bps: 0,
       }
+    }
+
+    /// The same, probing the link at the start.
+    fn probing(link: Link) -> Self {
+      let mut sim = Self::new(link);
+      sim.maybe_probe = Some(JoinProbe::new(JoinProbeConfig::default(), sim.now));
+      sim
     }
 
     fn run(&mut self, duration: Duration) {
       let end = self.now + duration;
       while self.now < end {
+        self.send_probe();
         self.send_paced();
         self.deliver_packets();
         self.exchange_feedback();
+        self.max_estimate_bps = self.max_estimate_bps.max(self.estimator.estimate_bps());
         self.now += TICK;
+      }
+    }
+
+    fn send_probe(&mut self) {
+      let Some(probe) = self.maybe_probe.as_mut() else {
+        return;
+      };
+      if let Some(measurement) = probe.on_timer(self.now) {
+        self.estimator.apply_probe(measurement.capacity_bps);
+        self.maybe_measurement = Some(measurement);
+      }
+      let Some(sizes) = probe.due_train(self.now) else {
+        return;
+      };
+      let mut maybe_first = None;
+      for bytes in &sizes {
+        let seq = self.estimator.on_send_probe(*bytes, self.now);
+        maybe_first.get_or_insert(seq);
+        if let Some(arrival) = self.link.send(*bytes, self.now) {
+          self.in_flight.push_back((arrival, seq));
+        }
+      }
+      if let (Some(first), Some(probe)) = (maybe_first, self.maybe_probe.as_mut()) {
+        probe.sent(first, &sizes, self.now);
       }
     }
 
@@ -1608,6 +1782,14 @@ mod tests {
         .is_some_and(|(at, _)| *at <= self.now)
       {
         if let Some((_, feedback)) = self.feedback_in_flight.pop_front() {
+          if let Some(measurement) = self
+            .maybe_probe
+            .as_mut()
+            .and_then(|probe| probe.on_feedback(&feedback))
+          {
+            self.estimator.apply_probe(measurement.capacity_bps);
+            self.maybe_measurement = Some(measurement);
+          }
           self.estimator.on_feedback(&feedback, self.now, self.epoch);
         }
       }

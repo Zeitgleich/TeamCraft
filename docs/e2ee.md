@@ -5682,6 +5682,9 @@ estimation). A resent frame decrypts like the original, so it can't be used to i
 duplicate is dropped by the receiver before reassembly, and a frame repeated after it was shown is
 too old to be reassembled again. Audio isn't resent (Opus conceals and corrects losses itself, and a
 resent frame would be too late to play).
+**Probing links at the start** (#1762). The padding trains that measure a link when a device joins
+(ARCHITECTURE.md §6.3) carry zeros on a stream nobody publishes; the SFU and the client learn only
+how much arrived when, which they see of every datagram anyway.
 
 **Joining too often** (#1227). Every join re-keys the call twice: the device's leaf is removed when
 its connection goes, and added again with its new key package. A member with a valid join token

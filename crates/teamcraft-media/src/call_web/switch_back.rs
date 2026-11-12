@@ -72,7 +72,8 @@ struct Moving<T> {
 /// An input of the session the call moves to, held back until the old one closed.
 #[derive(Debug, PartialEq)]
 pub(super) enum Held {
-  Signal(CallServerMessage),
+  /// Boxed: a signaling message is far larger than the end of a session.
+  Signal(Box<CallServerMessage>),
   Ended(SessionEnd),
 }
 
@@ -204,7 +205,7 @@ impl<T> SwitchBack<T> {
   ) -> Answer<T> {
     match mem::replace(&mut self.phase, Phase::Idle) {
       Phase::Moving(mut moving) if moving.generation == generation => {
-        moving.held.push(Held::Signal(message));
+        moving.held.push(Held::Signal(Box::new(message)));
         self.phase = Phase::Moving(moving);
         Answer::Held
       },
@@ -530,7 +531,7 @@ mod tests {
       assert!(moved.early.is_empty(), "went to the engine with the answer");
       assert_eq!(
         moved.held,
-        vec![Held::Signal(event(8)), Held::Ended(SessionEnd::Lost)]
+        vec![Held::Signal(Box::new(event(8))), Held::Ended(SessionEnd::Lost)]
       );
       assert!(watch.is_current(candidate));
       assert!(!watch.is_current(old));
@@ -628,12 +629,12 @@ mod tests {
       }
       let moved = switch.finish().expect("moved");
       watch.moved(moved.generation, now);
-      engine.moved_to_another_path();
+      engine.moved_to_another_path(now);
       for held in moved.held {
         let Held::Signal(message) = held else {
           panic!("only signals were held");
         };
-        engine.handle_signal(message, now).unwrap();
+        engine.handle_signal(*message, now).unwrap();
       }
       assert_eq!(delivered, vec![2, 3]);
       assert!(engine.is_in_call());
@@ -674,6 +675,7 @@ mod tests {
         maybe_switch_secret: None,
         maybe_screen_share_taken_over: None,
         maybe_retransmit_window_ms: None,
+        maybe_probe_bytes: None,
       };
       engine
         .handle_signal(

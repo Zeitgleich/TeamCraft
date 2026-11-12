@@ -53,8 +53,9 @@ pub struct Handover {
 /// What comes next out of a [`SignalQueue`].
 #[derive(Debug)]
 pub enum Dequeued {
-  /// To write on the connection, numbered if it is an event.
-  Message(CallServerMessage),
+  /// To write on the connection, numbered if it is an event. Boxed: a message is large next to
+  /// the hand-over marker.
+  Message(Box<CallServerMessage>),
   /// The session moved: nothing more goes out on this connection.
   HandOver,
 }
@@ -103,7 +104,7 @@ impl SignalQueue {
   pub async fn next(&mut self) -> Option<Dequeued> {
     let outgoing = self.outgoing.recv().await?;
     Some(match self.sequence.frame(outgoing) {
-      Some(message) => Dequeued::Message(message),
+      Some(message) => Dequeued::Message(Box::new(message)),
       None => Dequeued::HandOver,
     })
   }
@@ -225,18 +226,18 @@ mod tests {
 
     assert!(matches!(
       old.next().await,
-      Some(Dequeued::Message(CallServerMessage::Event { seq: 1, .. }))
+      Some(Dequeued::Message(message)) if matches!(*message, CallServerMessage::Event { seq: 1, .. })
     ));
     assert!(matches!(
       old.next().await,
-      Some(Dequeued::Message(CallServerMessage::Event { seq: 2, .. }))
+      Some(Dequeued::Message(message)) if matches!(*message, CallServerMessage::Event { seq: 2, .. })
     ));
     assert!(matches!(old.next().await, Some(Dequeued::HandOver)));
     assert!(old.hand_over());
     let mut new = arrives.await.unwrap();
     assert!(matches!(
       new.next().await,
-      Some(Dequeued::Message(CallServerMessage::Event { seq: 3, .. }))
+      Some(Dequeued::Message(message)) if matches!(*message, CallServerMessage::Event { seq: 3, .. })
     ));
   }
 

@@ -2061,14 +2061,14 @@ impl CallState<'_> {
       self.sessions.close(&old.session);
     }
     self.use_transport(CallTransport::Quic);
-    engine.moved_to_another_path();
+    engine.moved_to_another_path(now);
     info!("the call moved to QUIC");
     for bytes in moved.early {
       engine.handle_datagram(&bytes, now);
     }
     for held in moved.held {
       let flow = match held {
-        Held::Signal(message) => self.on_signal(engine, message)?,
+        Held::Signal(message) => self.on_signal(engine, *message)?,
         Held::Ended(end) => self.on_session_lost(engine, end),
       };
       if self.maybe_transport.is_none() || matches!(flow, Flow::Leave) {
@@ -4724,6 +4724,7 @@ mod tests {
       maybe_switch_secret: None,
       maybe_screen_share_taken_over: None,
       maybe_retransmit_window_ms: None,
+      maybe_probe_bytes: None,
     }
   }
 

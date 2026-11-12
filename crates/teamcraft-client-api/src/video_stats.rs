@@ -27,8 +27,22 @@ pub struct VideoStatsReport {
   /// What the send side estimates for this device's uplink.
   #[serde(default)]
   pub maybe_uplink: Option<UplinkStats>,
+  /// What the probe of this device's uplink at the start of the call showed (#1762); `None`
+  /// before it ended, and where the SFU takes no probe.
+  #[serde(default)]
+  pub maybe_uplink_probe: Option<LinkProbeStats>,
+  /// What the SFU's probe of this device's downlink showed.
+  #[serde(default)]
+  pub maybe_downlink_probe: Option<LinkProbeStats>,
   #[serde(default)]
   pub tracks: Vec<VideoTrackStats>,
+}
+
+/// What a probe of a link at the start of a call showed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkProbeStats {
+  pub capacity_bps: u32,
+  pub loss_percent: u8,
 }
 
 /// The uplink as the bandwidth estimator sees it.
@@ -362,6 +376,11 @@ mod tests {
         estimate_bps: 2_500_000,
         loss_percent: 1,
       }),
+      maybe_uplink_probe: Some(LinkProbeStats {
+        capacity_bps: 4_000_000,
+        loss_percent: 0,
+      }),
+      maybe_downlink_probe: None,
       tracks: vec![
         VideoTrackStats::Sent(sent(&[(0, 10), (1, 0)])),
         VideoTrackStats::Received(ReceivedVideoStats {

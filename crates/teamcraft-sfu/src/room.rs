@@ -1331,6 +1331,7 @@ impl RoomState {
         maybe_switch_secret,
         maybe_screen_share_taken_over: self.screen_shares_taken_over.get(&participant_id).copied(),
         maybe_retransmit_window_ms: self.forwarder.retransmit_window_ms(),
+        maybe_probe_bytes: self.forwarder.probe_bytes(),
       },
     );
     // Right after `joined`: a device that rejoins with a group held takes anything else as "not
@@ -1527,6 +1528,16 @@ impl RoomState {
           },
         ),
         // A few datagrams every few seconds at most, queued without blocking.
+        Effect::DownlinkMeasured {
+          receiver,
+          measurement,
+        } => self.send_to(
+          receiver,
+          CallEvent::DownlinkMeasured {
+            capacity_bps: measurement.capacity_bps,
+            loss_percent: measurement.loss_percent,
+          },
+        ),
         Effect::Padding { receiver, datagrams } => {
           if let Some(handle) = self.handle_of(receiver) {
             for datagram in &datagrams {

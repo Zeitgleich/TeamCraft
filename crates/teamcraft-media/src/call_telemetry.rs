@@ -1219,6 +1219,8 @@ mod tests {
           maybe_device_limit: None,
         }),
       ],
+      maybe_uplink_probe: None,
+      maybe_downlink_probe: None,
     }
   }
 }

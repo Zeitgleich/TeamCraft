@@ -41,10 +41,11 @@ use crate::bwe::{BweConfig, FeedbackRecorder, SendSideEstimator};
 use crate::call_auth::{BindingRole, CallKeyAuthenticator, CallKeyError};
 use crate::call_resilience::CallTransport;
 use crate::call_video::{IncomingVideo, OutgoingVideo, ReceivedVideoFrame, ReleasedFrame};
-use crate::datagram::{DatagramHeader, MediaDatagram, SimulcastLayer, StreamId};
+use crate::datagram::{DatagramHeader, MediaDatagram, SimulcastLayer, StreamId, padding_datagram};
 use crate::dave::{
   DaveCallId, DaveEpoch, DaveError, DaveFrameStats, DaveParticipant, DaveParticipantId, FrameCodec, MediaKind,
 };
+use crate::join_probe::{JoinProbe, JoinProbeConfig, LinkMeasurement};
 use crate::nack::NackConfig;
 use crate::rtp::{PayloadType, RtpHeader, RtpPacket, RtpTimestamp, SequenceNumber, Ssrc};
 use crate::share_policy::UplinkTop;
@@ -186,6 +187,14 @@ pub struct CallEngine {
   downlink_feedback: FeedbackRecorder,
   /// Base for the SFU's arrival times in uplink feedback (only differences matter).
   uplink_feedback_epoch: Instant,
+  /// The padding the SFU takes for probing the uplink at the start, from its last `joined`;
+  /// `None` from an SFU that takes none (#1762).
+  maybe_probe_bytes: Option<u32>,
+  /// The uplink's probe while it runs, and what it showed.
+  maybe_uplink_probe: Option<JoinProbe>,
+  maybe_uplink_measurement: Option<LinkMeasurement>,
+  /// What the SFU's probe of the downlink showed, as it said.
+  maybe_downlink_measurement: Option<LinkMeasurement>,
   /// When the engine was made: the base of arrival times for the jitter of received video.
   started_at: Instant,
   microphone_rtp: AudioRtpState,
@@ -615,6 +624,10 @@ impl CallEngine {
       uplink,
       downlink_feedback: FeedbackRecorder::new(now),
       uplink_feedback_epoch: now,
+      maybe_probe_bytes: None,
+      maybe_uplink_probe: None,
+      maybe_uplink_measurement: None,
+      maybe_downlink_measurement: None,
       started_at: now,
       microphone_rtp: AudioRtpState::new(),
       screen_rtp: AudioRtpState::new(),
@@ -757,12 +770,31 @@ impl CallEngine {
   /// path. What the uplink estimate learned belongs to the old path (the fallback's TCP has
   /// another delay, and its own queue), so it is measured afresh, as at the start; own tracks
   /// that were held back come back, with keyframes. The secret was used up.
-  pub fn moved_to_another_path(&mut self) {
+  pub fn moved_to_another_path(&mut self, now: Instant) {
     self.maybe_switch_secret = None;
     if self.is_in_call() {
       self.uplink.forget_sent();
+      // What the old path showed says nothing about this one.
+      self.uplink.forget_probe();
       self.measure_uplink_afresh();
+      self.start_uplink_probe(now);
     }
+  }
+
+  /// What the probe of this device's uplink at the start showed (#1762); `None` before it ended
+  /// and where the SFU takes no probe.
+  pub fn uplink_measurement(&self) -> Option<LinkMeasurement> {
+    self.maybe_uplink_measurement
+  }
+
+  /// What the SFU's probe of this device's downlink showed, as it said.
+  pub fn downlink_measurement(&self) -> Option<LinkMeasurement> {
+    self.maybe_downlink_measurement
+  }
+
+  /// The uplink's current bandwidth estimate.
+  pub fn uplink_estimate_bps(&self) -> u32 {
+    self.uplink.estimate_bps()
   }
 
   /// Bandwidth kept for audio when the uplink limits video layers.
@@ -1371,17 +1403,21 @@ impl CallEngine {
         estimate_bps: self.uplink.estimate_bps(),
         loss_percent: loss_percent(self.uplink.loss_ratio()),
       }),
+      maybe_uplink_probe: self.uplink_measurement().map(probe_stats),
+      maybe_downlink_probe: self.downlink_measurement().map(probe_stats),
       tracks: sent.chain(received).collect(),
     }
   }
 
   /// Periodic work (every ~100 ms): reports arrival times of received datagrams to the SFU, and
-  /// asks for missing video packets again or gives up on them.
+  /// asks for missing video packets again or gives up on them, and sends the uplink probe's
+  /// trains.
   pub fn on_timer(&mut self, now: Instant) {
     if let Some(feedback) = self.downlink_feedback.take_feedback(now) {
       self.signal(CallClientMessage::TransportFeedback { feedback });
     }
     self.on_video_timer(now);
+    self.run_uplink_probe(now);
     self.execute_overdue_transition(now);
     self.check_encryption_setup(now);
   }
@@ -1437,9 +1473,13 @@ impl CallEngine {
         maybe_switch_secret,
         maybe_screen_share_taken_over,
         maybe_retransmit_window_ms,
+        maybe_probe_bytes,
       } => {
         self.maybe_reconnect_grace = maybe_reconnect_grace_ms.map(Duration::from_millis);
         self.set_retransmit_window(maybe_retransmit_window_ms);
+        self.maybe_probe_bytes = maybe_probe_bytes;
+        self.maybe_downlink_measurement = None;
+        self.start_uplink_probe(now);
         self.maybe_switch_secret = maybe_switch_secret;
         // An SFU from before #978 says nothing and takes three; more than this version plans
         // would be no use.
@@ -1528,6 +1568,16 @@ impl CallEngine {
       },
       CallEvent::KeyframeRequested { stream_id, layer } => {
         self.event(CallEngineEvent::KeyframeRequested { stream_id, layer });
+        Ok(())
+      },
+      CallEvent::DownlinkMeasured {
+        capacity_bps,
+        loss_percent,
+      } => {
+        self.maybe_downlink_measurement = Some(LinkMeasurement {
+          capacity_bps,
+          loss_percent,
+        });
         Ok(())
       },
       CallEvent::LayersNeeded { stream_id, layers } => {
@@ -1870,6 +1920,13 @@ impl CallEngine {
   /// New uplink feedback: the estimate decides which own video layers fit next to the audio, the
   /// loss how much forward error correction the audio carries.
   fn on_uplink_feedback(&mut self, feedback: &TransportFeedback, now: Instant) {
+    if let Some(measurement) = self
+      .maybe_uplink_probe
+      .as_mut()
+      .and_then(|probe| probe.on_feedback(feedback))
+    {
+      self.apply_uplink_probe(measurement);
+    }
     let bps = self.uplink.on_feedback(feedback, now, self.uplink_feedback_epoch);
     let is_sending_screen_audio = self.screen_audio != ScreenAudioState::Off;
     let tracks = own_track_views(&self.own_tracks, &self.adaptive_tracks);
@@ -1884,6 +1941,56 @@ impl CallEngine {
     self.note_held_back_layers(now);
     let loss_percent = loss_percent(self.uplink.loss_ratio());
     self.event(CallEngineEvent::UplinkEstimate { bps, loss_percent });
+  }
+
+  /// Starts probing the uplink (#1762, `crate::join_probe`) where the SFU takes the padding: at
+  /// the join, after a rejoin and on another path. The first train goes out at once; nothing
+  /// waits for the result.
+  fn start_uplink_probe(&mut self, now: Instant) {
+    self.maybe_uplink_measurement = None;
+    self.maybe_uplink_probe = self
+      .maybe_probe_bytes
+      .and_then(|bytes| JoinProbeConfig::default().within_bytes(usize::try_from(bytes).unwrap_or(usize::MAX)))
+      .map(|config| JoinProbe::new(config, now));
+    self.run_uplink_probe(now);
+  }
+
+  /// Sends the uplink probe's train that is due, and gives up trains whose feedback didn't come.
+  fn run_uplink_probe(&mut self, now: Instant) {
+    let Some(probe) = self.maybe_uplink_probe.as_mut() else {
+      return;
+    };
+    if let Some(measurement) = probe.on_timer(now) {
+      self.apply_uplink_probe(measurement);
+      return;
+    }
+    let Some(sizes) = probe.due_train(now) else {
+      return;
+    };
+    let mut maybe_first = None;
+    for bytes in &sizes {
+      let seq = self.uplink.on_send_probe(*bytes, now);
+      maybe_first.get_or_insert(seq);
+      self
+        .outputs
+        .push_back(EngineOutput::Datagram(padding_datagram(*bytes, seq)));
+    }
+    if let (Some(first), Some(probe)) = (maybe_first, self.maybe_uplink_probe.as_mut()) {
+      probe.sent(first, &sizes, now);
+    }
+  }
+
+  /// The uplink probe's result: the estimate starts from it, and the layers follow with the next
+  /// feedback.
+  fn apply_uplink_probe(&mut self, measurement: LinkMeasurement) {
+    let bps = self.uplink.apply_probe(measurement.capacity_bps);
+    debug!(
+      capacity_bps = measurement.capacity_bps,
+      loss_percent = measurement.loss_percent,
+      estimate_bps = bps,
+      "uplink probed"
+    );
+    self.maybe_uplink_measurement = Some(measurement);
   }
 
   /// How the uplink treats the top layer of the own track on `stream_id` now (#1733): a share's
@@ -3187,6 +3294,15 @@ fn own_track_views<'a>(
     .collect()
 }
 
+/// What a probe showed of a link, for the stats.
+#[cfg(feature = "call-view")]
+fn probe_stats(measurement: LinkMeasurement) -> teamcraft_client_api::video_stats::LinkProbeStats {
+  teamcraft_client_api::video_stats::LinkProbeStats {
+    capacity_bps: measurement.capacity_bps,
+    loss_percent: measurement.loss_percent,
+  }
+}
+
 fn loss_percent(ratio: f64) -> u8 {
   // Invariant: clamped to 0..=100 first, so the cast is lossless.
   (ratio * 100.0).round().clamp(0.0, 100.0) as u8
@@ -4484,7 +4600,7 @@ mod tests {
 
       // The SFU's answer comes on the new connection; the driver takes it, the engine ignores it.
       engine.handle_signal(CallServerMessage::Switched, now).unwrap();
-      engine.moved_to_another_path();
+      engine.moved_to_another_path(now);
 
       assert!(engine.is_in_call(), "no rejoin");
       assert!(engine.maybe_switch_secret().is_none());
@@ -4534,6 +4650,7 @@ mod tests {
         maybe_switch_secret: Some(Base64Bytes::new(secret.to_vec())),
         maybe_screen_share_taken_over: None,
         maybe_retransmit_window_ms: None,
+        maybe_probe_bytes: None,
       }
     }
   }
@@ -4699,6 +4816,7 @@ mod tests {
         maybe_switch_secret: None,
         maybe_screen_share_taken_over: None,
         maybe_retransmit_window_ms: None,
+        maybe_probe_bytes: None,
       };
       alice.handle_signal(event(1, kept), now).unwrap();
       assert_eq!(
@@ -4782,6 +4900,7 @@ mod tests {
         maybe_switch_secret: None,
         maybe_screen_share_taken_over: None,
         maybe_retransmit_window_ms: None,
+        maybe_probe_bytes: None,
       };
       alice.handle_signal(event(1, kept), now).unwrap();
       assert!(
@@ -4840,6 +4959,7 @@ mod tests {
         maybe_switch_secret: None,
         maybe_screen_share_taken_over: None,
         maybe_retransmit_window_ms: None,
+        maybe_probe_bytes: None,
       };
       alice.handle_signal(event(1, kept), now).unwrap();
       let outputs = drain(&mut alice);
@@ -4926,6 +5046,7 @@ mod tests {
         maybe_switch_secret: None,
         maybe_screen_share_taken_over: None,
         maybe_retransmit_window_ms: None,
+        maybe_probe_bytes: None,
       };
       assert!(matches!(
         alice.handle_signal(event(1, other_call), now),
@@ -5360,6 +5481,83 @@ mod tests {
 
   /// Issue #929: every answer of the SFU belongs to exactly the publication that asked for it, and
   /// one whose track was stopped before it came is unpublished at once.
+  /// The probe of the links at the start (#1762).
+  mod join_probe {
+    use super::*;
+
+    #[test]
+    fn the_uplink_is_probed_where_the_sfu_takes_it_and_the_estimate_starts_there() {
+      let start = Instant::now();
+      let mut engine = engine(1, start);
+      engine.join("t".into());
+      let mut probing = joined(1, &[]);
+      if let CallEvent::Joined {
+        maybe_probe_bytes, ..
+      } = &mut probing
+      {
+        *maybe_probe_bytes = Some(15_000);
+      }
+      engine.handle_signal(event(1, probing), start).unwrap();
+      let mut at = start;
+      for train in 0..3u64 {
+        if train > 0 {
+          engine.on_timer(at);
+        }
+        let seqs = padding_seqs(&drain(&mut engine));
+        assert_eq!(seqs.len(), 5, "train {train}");
+        // The SFU reports them 4 ms apart: a 2 Mbit/s uplink.
+        let feedback = TransportFeedback {
+          base_seq: seqs[0],
+          arrivals_us: (0..5).map(|index| Some(index * 4000)).collect(),
+        };
+        engine
+          .handle_signal(event(2 + train, CallEvent::TransportFeedback { feedback }), at)
+          .unwrap();
+        at += Duration::from_millis(150);
+      }
+      let probe = engine.uplink_measurement().expect("the probe ended");
+      assert_eq!(probe.capacity_bps, 2_000_000);
+      engine.on_timer(at + Duration::from_secs(1));
+      assert!(padding_seqs(&drain(&mut engine)).is_empty(), "no more trains");
+      let estimate = engine.uplink_estimate_bps();
+      assert!((1_700_000..=2_000_000).contains(&estimate), "{estimate}");
+    }
+
+    #[test]
+    fn an_sfu_that_takes_no_padding_gets_none() {
+      let now = Instant::now();
+      let mut engine = engine_joined(1, now);
+      engine.on_timer(now + Duration::from_millis(500));
+      assert!(padding_seqs(&drain(&mut engine)).is_empty());
+      assert_eq!(engine.uplink_measurement(), None);
+    }
+
+    #[test]
+    fn the_sfus_measurement_of_the_downlink_shows_in_the_stats() {
+      let now = Instant::now();
+      let mut engine = engine_joined(1, now);
+      let measured = CallEvent::DownlinkMeasured {
+        capacity_bps: 12_000_000,
+        loss_percent: 3,
+      };
+      engine.handle_signal(event(2, measured), now).unwrap();
+      let probe = engine.downlink_measurement().unwrap();
+      assert_eq!((probe.capacity_bps, probe.loss_percent), (12_000_000, 3));
+    }
+
+    fn padding_seqs(outputs: &[EngineOutput]) -> Vec<u16> {
+      outputs
+        .iter()
+        .filter_map(|output| match output {
+          EngineOutput::Datagram(bytes) => MediaDatagram::parse(bytes).ok(),
+          _ => None,
+        })
+        .filter(|datagram| datagram.header.stream_id == crate::datagram::PADDING_STREAM)
+        .filter_map(|datagram| datagram.header.maybe_transport_seq.map(|seq| seq.0))
+        .collect()
+    }
+  }
+
   mod own_publications {
     use super::*;
 
@@ -5612,6 +5810,7 @@ mod tests {
         maybe_switch_secret: None,
         maybe_screen_share_taken_over: None,
         maybe_retransmit_window_ms: None,
+        maybe_probe_bytes: None,
       }
     }
 
@@ -5868,6 +6067,7 @@ mod tests {
         maybe_switch_secret: None,
         maybe_screen_share_taken_over: maybe_takeover,
         maybe_retransmit_window_ms: None,
+        maybe_probe_bytes: None,
       }
     }
   }
@@ -6014,6 +6214,7 @@ mod tests {
         maybe_switch_secret: None,
         maybe_screen_share_taken_over: None,
         maybe_retransmit_window_ms: None,
+        maybe_probe_bytes: None,
       }
     }
   }
@@ -7088,6 +7289,7 @@ mod tests {
       maybe_switch_secret: None,
       maybe_screen_share_taken_over: None,
       maybe_retransmit_window_ms: None,
+      maybe_probe_bytes: None,
     }
   }
 

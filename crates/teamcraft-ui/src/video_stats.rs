@@ -6,8 +6,8 @@
 use std::time::Duration;
 
 use teamcraft_client_api::video_stats::{
-  CameraLimitsStats, DecodeOverload, EncoderImplementation, EncoderOverload, ReceivedVideoStats,
-  SentVideoStats, ShareEncoderKind, ShareLimitsStats, VideoSize, VideoStatsReport,
+  CameraLimitsStats, DecodeOverload, EncoderImplementation, EncoderOverload, LinkProbeStats,
+  ReceivedVideoStats, SentVideoStats, ShareEncoderKind, ShareLimitsStats, VideoSize, VideoStatsReport,
 };
 use teamcraft_proto::{MediaStreamId, VideoCodec, VideoTrackKind};
 
@@ -272,6 +272,7 @@ fn sent_rows(
         )],
       ),
     ),
+    row("stats-probe", probe_text(report.maybe_uplink_probe, words)),
     row("stats-network", network_text(report.maybe_rtt_ms, None, words)),
     row(
       "stats-frames",
@@ -465,6 +466,7 @@ fn received_rows(
       ),
     ),
     row("stats-loss", or_missing(loss.map(percent_text))),
+    row("stats-probe", probe_text(report.maybe_downlink_probe, words)),
     row(
       "stats-network",
       network_text(report.maybe_rtt_ms, received.maybe_jitter_ms, words),
@@ -519,6 +521,23 @@ fn network_text(maybe_rtt_ms: Option<u32>, maybe_jitter_ms: Option<f32>, words: 
         &or_missing(maybe_jitter_ms.map(|jitter| format!("{jitter:.1} ms"))),
       ),
     ],
+  )
+}
+
+/// What the probe of a link at the start of the call showed (#1762); "–" before it ended, and
+/// where nobody probed.
+fn probe_text(maybe_probe: Option<LinkProbeStats>, words: Words<'_>) -> String {
+  maybe_probe.map_or_else(
+    || MISSING.to_owned(),
+    |probe| {
+      words(
+        "stats-value-probe",
+        &[
+          ("capacity", &bitrate_text(f64::from(probe.capacity_bps))),
+          ("loss", &percent_text(f64::from(probe.loss_percent))),
+        ],
+      )
+    },
   )
 }
 
@@ -947,6 +966,14 @@ mod tests {
       maybe_uplink: Some(UplinkStats {
         estimate_bps: 2_500_000,
         loss_percent: 2,
+      }),
+      maybe_uplink_probe: Some(LinkProbeStats {
+        capacity_bps: 3_000_000,
+        loss_percent: 7,
+      }),
+      maybe_downlink_probe: Some(LinkProbeStats {
+        capacity_bps: 12_000_000,
+        loss_percent: 0,
       }),
       tracks: maybe_sent
         .map(VideoTrackStats::Sent)

@@ -968,6 +968,8 @@ mod tests {
         estimate_bps,
         loss_percent: 1,
       }),
+      maybe_uplink_probe: None,
+      maybe_downlink_probe: None,
       tracks,
     }
   }

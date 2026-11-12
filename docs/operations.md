@@ -506,6 +506,12 @@ depend on any of it.
   SFU learns nothing it didn't forward already. Audio isn't resent. `rate()` of
   `teamcraft_sfu_retransmitted_packets_total` against the forwarded bytes shows how lossy the
   viewers' links are.
+- **Links are probed at the start (#1762).** When a participant joins or comes back, the SFU sends
+  it a few short trains of padding and the client sends the SFU the same; their spread in the
+  transport feedback shows what each link carries, and the bandwidth estimates (and so the first
+  video layers) start from that. `TEAMCRAFT_SFU_PROBE_BYTES` bounds it per direction (default
+  15000: three trains of five 1000-byte datagrams within half a second; at most 100000; `0` turns
+  it off, and clients then don't probe either). The results show in the call's stats for nerds.
 - Keep the SFU's UDP port out of anything that tracks UDP "connections" by address and port (a
   load balancer without QUIC connection-ID routing, a strict stateful firewall): when a client
   changes networks its QUIC connection continues from a new address (connection migration,

@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use teamcraft_media::audio_frame::EncodedAudioFrame;
 use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_engine::{CallEngine, CallEngineConfig, CallEngineEvent, EngineOutput};
-use teamcraft_media::datagram::SimulcastLayer;
+use teamcraft_media::datagram::{DatagramHeader, PADDING_STREAM, SimulcastLayer};
 use teamcraft_media::rtp::{AudioLevel, RtpTimestamp};
 use teamcraft_media::uplink_layers::UplinkPolicy;
 use teamcraft_media::video::EncodedVideoFrame;
@@ -555,7 +555,7 @@ struct Client {
   /// Sessions of connections lost (or silently dropped) and not released yet.
   lost_sessions: Vec<(Arc<Room>, SessionId)>,
   events: Vec<CallEngineEvent>,
-  /// Drop every n-th datagram on the way to the SFU.
+  /// Drop every n-th media datagram on the way to the SFU.
   uplink_loss_every: Option<u64>,
   uplink_sent: u64,
   /// The id of the client's next video publication.
@@ -964,10 +964,15 @@ impl Network {
         },
         EngineOutput::Datagram(bytes) => {
           let client = self.client_mut(id);
-          client.uplink_sent += 1;
-          let is_lost = client
-            .uplink_loss_every
-            .is_some_and(|every| client.uplink_sent.is_multiple_of(every));
+          // The loss pattern is the media's: the probe's padding at the start (#1762) goes through
+          // and doesn't shift it.
+          let is_padding =
+            DatagramHeader::parse(&bytes).is_ok_and(|header| header.stream_id == PADDING_STREAM);
+          client.uplink_sent += u64::from(!is_padding);
+          let is_lost = !is_padding
+            && client
+              .uplink_loss_every
+              .is_some_and(|every| client.uplink_sent.is_multiple_of(every));
           if let Some(connection) = client.maybe_connection.as_ref().filter(|_| !is_lost) {
             connection.room.forward_datagram(device(id), &bytes, now).unwrap();
           }

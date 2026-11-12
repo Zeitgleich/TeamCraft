@@ -175,7 +175,7 @@ pub(crate) async fn read_socket(
     };
     match decode(bytes) {
       Ok(Decoded::Input(input)) => {
-        if !deliver(input) {
+        if !deliver(*input) {
           return SocketEnd::Lost;
         }
       },
@@ -188,7 +188,8 @@ pub(crate) async fn read_socket(
 }
 
 enum Decoded {
-  Input(SocketInput),
+  /// Boxed: a signaling message is far larger than the other variants.
+  Input(Box<SocketInput>),
   Closed(u32),
   Nothing,
 }
@@ -196,14 +197,14 @@ enum Decoded {
 fn decode(bytes: Bytes) -> Result<Decoded, teamcraft_proto::FallbackFrameError> {
   Ok(match FallbackFrame::decode(&bytes)? {
     FallbackFrame::Signal(body) => match serde_json::from_slice(body) {
-      Ok(message) => Decoded::Input(SocketInput::Signal(message)),
+      Ok(message) => Decoded::Input(Box::new(SocketInput::Signal(message))),
       Err(error) => {
         warn!(%error, "invalid signaling message");
         Decoded::Nothing
       },
     },
     // Without its kind byte, without copying.
-    FallbackFrame::Datagram(_) => Decoded::Input(SocketInput::Datagram(bytes.slice(1..))),
+    FallbackFrame::Datagram(_) => Decoded::Input(Box::new(SocketInput::Datagram(bytes.slice(1..)))),
     FallbackFrame::Close { code, .. } => Decoded::Closed(code),
     FallbackFrame::Unknown(kind) => {
       debug!(kind, "ignoring a frame of a newer SFU");

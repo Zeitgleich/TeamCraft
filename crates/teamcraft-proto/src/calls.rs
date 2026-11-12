@@ -285,6 +285,12 @@ pub enum CallEvent {
       skip_serializing_if = "Option::is_none"
     )]
     maybe_retransmit_window_ms: Option<u32>,
+    /// How many bytes of padding the SFU takes for this client's probe of its uplink at the start
+    /// (#1762): trains of datagrams on the padding stream, whose arrival the SFU reports like any
+    /// other's. SFUs from before send none and would count the padding as lost: a client then
+    /// probes nothing.
+    #[serde(rename = "probe_bytes", default, skip_serializing_if = "Option::is_none")]
+    maybe_probe_bytes: Option<u32>,
   },
   ParticipantJoined {
     participant: CallParticipant,
@@ -391,6 +397,12 @@ pub enum CallEvent {
   KeyframeRequested {
     stream_id: MediaStreamId,
     layer: u8,
+  },
+  /// What the SFU's probe of this device's downlink at the start showed (#1762), for the stats.
+  /// Older clients read `Unknown`.
+  DownlinkMeasured {
+    capacity_bps: u32,
+    loss_percent: u8,
   },
   /// To the publisher: the layers someone receives; others may be paused to save uplink.
   LayersNeeded {
@@ -801,6 +813,7 @@ mod tests {
       maybe_switch_secret: None,
       maybe_screen_share_taken_over: None,
       maybe_retransmit_window_ms: None,
+      maybe_probe_bytes: None,
     };
     let json = serde_json::to_string(&joined).unwrap();
     assert!(json.ends_with(r#""maybe_reconnect_grace_ms":30000,"maybe_max_simulcast_layers":4}"#));
@@ -863,6 +876,7 @@ mod tests {
       CallEvent::Joined {
         maybe_screen_share_taken_over: None,
         maybe_retransmit_window_ms: None,
+        maybe_probe_bytes: None,
         ..
       }
     ));
@@ -942,6 +956,42 @@ mod tests {
       serde_json::from_str::<OlderClientMessage>(json).unwrap(),
       OlderClientMessage::Unknown
     );
+  }
+
+  /// #1762: what the SFU's probe of a downlink showed; older clients read it as `Unknown`.
+  #[test]
+  fn downlink_measured_wire_format() {
+    let event = CallEvent::DownlinkMeasured {
+      capacity_bps: 3_000_000,
+      loss_percent: 7,
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(
+      json,
+      r#"{"type":"downlink_measured","capacity_bps":3000000,"loss_percent":7}"#
+    );
+    assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), event);
+  }
+
+  /// `joined` from an SFU that takes no probe (an older one) names no bytes.
+  #[test]
+  fn probe_bytes_are_optional_in_joined() {
+    let json = r#"{"type":"joined","call_id":"7","participant":{"user_id":"4","device_id":"5","audio_stream_id":9},"participants":[],"probe_bytes":15000}"#;
+    assert!(matches!(
+      serde_json::from_str::<CallEvent>(json).unwrap(),
+      CallEvent::Joined {
+        maybe_probe_bytes: Some(15_000),
+        ..
+      }
+    ));
+    let older = json.replace(r#","probe_bytes":15000"#, "");
+    assert!(matches!(
+      serde_json::from_str::<CallEvent>(&older).unwrap(),
+      CallEvent::Joined {
+        maybe_probe_bytes: None,
+        ..
+      }
+    ));
   }
 
   /// Older clients read the event as `Unknown` and keep their codec (H.264).
