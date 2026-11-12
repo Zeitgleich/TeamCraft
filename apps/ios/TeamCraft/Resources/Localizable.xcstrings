@@ -9777,6 +9777,22 @@
         }
       }
     },
+    "call_person_unverified %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@, not verified, gets no audio or video"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@, nicht verifiziert, erhält kein Audio und Video"
+          }
+        }
+      }
+    },
     "call_person_muted %@": {
       "localizations": {
         "en": {
