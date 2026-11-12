@@ -748,6 +748,22 @@ impl CallEngine {
     }
   }
 
+  /// What the probe of this device's uplink at the start showed (#1762); `None` before it ended
+  /// and where the SFU takes no probe.
+  pub fn uplink_measurement(&self) -> Option<LinkMeasurement> {
+    self.maybe_uplink_measurement
+  }
+
+  /// What the SFU's probe of this device's downlink showed, as it said.
+  pub fn downlink_measurement(&self) -> Option<LinkMeasurement> {
+    self.maybe_downlink_measurement
+  }
+
+  /// The uplink's current bandwidth estimate.
+  pub fn uplink_estimate_bps(&self) -> u32 {
+    self.uplink.estimate_bps()
+  }
+
   /// Bandwidth kept for audio when the uplink limits video layers.
   pub fn set_uplink_policy(&mut self, policy: UplinkPolicy) {
     self.uplink_policy = policy;
@@ -1306,8 +1322,8 @@ impl CallEngine {
         estimate_bps: self.uplink.estimate_bps(),
         loss_percent: loss_percent(self.uplink.loss_ratio()),
       }),
-      maybe_uplink_probe: self.maybe_uplink_measurement.map(probe_stats),
-      maybe_downlink_probe: self.maybe_downlink_measurement.map(probe_stats),
+      maybe_uplink_probe: self.uplink_measurement().map(probe_stats),
+      maybe_downlink_probe: self.downlink_measurement().map(probe_stats),
       tracks: sent.chain(received).collect(),
     }
   }
@@ -3168,6 +3184,7 @@ fn own_track_views<'a>(
 }
 
 /// What a probe showed of a link, for the stats.
+#[cfg(feature = "call-view")]
 fn probe_stats(measurement: LinkMeasurement) -> teamcraft_client_api::video_stats::LinkProbeStats {
   teamcraft_client_api::video_stats::LinkProbeStats {
     capacity_bps: measurement.capacity_bps,
@@ -5241,11 +5258,11 @@ mod tests {
           .unwrap();
         at += Duration::from_millis(150);
       }
-      let probe = engine.video_stats(0).maybe_uplink_probe.expect("the probe ended");
+      let probe = engine.uplink_measurement().expect("the probe ended");
       assert_eq!(probe.capacity_bps, 2_000_000);
       engine.on_timer(at + Duration::from_secs(1));
       assert!(padding_seqs(&drain(&mut engine)).is_empty(), "no more trains");
-      let estimate = engine.video_stats(0).maybe_uplink.unwrap().estimate_bps;
+      let estimate = engine.uplink_estimate_bps();
       assert!((1_700_000..=2_000_000).contains(&estimate), "{estimate}");
     }
 
@@ -5255,7 +5272,7 @@ mod tests {
       let mut engine = engine_joined(1, now);
       engine.on_timer(now + Duration::from_millis(500));
       assert!(padding_seqs(&drain(&mut engine)).is_empty());
-      assert_eq!(engine.video_stats(0).maybe_uplink_probe, None);
+      assert_eq!(engine.uplink_measurement(), None);
     }
 
     #[test]
@@ -5267,7 +5284,7 @@ mod tests {
         loss_percent: 3,
       };
       engine.handle_signal(event(2, measured), now).unwrap();
-      let probe = engine.video_stats(0).maybe_downlink_probe.unwrap();
+      let probe = engine.downlink_measurement().unwrap();
       assert_eq!((probe.capacity_bps, probe.loss_percent), (12_000_000, 3));
     }
 

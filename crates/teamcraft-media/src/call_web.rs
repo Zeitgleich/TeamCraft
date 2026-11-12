@@ -1865,7 +1865,7 @@ impl CallState<'_> {
     }
     for held in moved.held {
       let flow = match held {
-        Held::Signal(message) => self.on_signal(engine, message)?,
+        Held::Signal(message) => self.on_signal(engine, *message)?,
         Held::Ended(end) => self.on_session_lost(engine, end),
       };
       if self.maybe_transport.is_none() || matches!(flow, Flow::Leave) {
