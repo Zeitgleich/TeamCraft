@@ -226,10 +226,11 @@ private class SentryPerfHandle(private val transaction: ITransaction) : PerfHand
 }
 
 /**
- * A core job that waited or ran longer than the instance's threshold, as a warning (sampled with
- * the handled errors' rate in `beforeSend`), grouped per job: its name, queue, wait, run, the
- * thread's CPU time while it ran and the queue's depth as tags. Names are functions in the code
- * (and query kinds), never data.
+ * A core job that ran longer than the instance's threshold, or a thread held up that long (one "lane
+ * blocked" event naming the job that held it, grouped by it, not one per waiter, #1759), as a
+ * warning (sampled with the handled errors' rate in `beforeSend`), grouped per job: its name,
+ * queue, wait, run, the thread's CPU time while it ran and the queue's depth as tags. Names are
+ * functions in the code (and query kinds), never data.
  */
 private object SlowJobReports : PerfListener {
   override fun onSlowJob(job: PerfJobSpan) {
@@ -237,8 +238,19 @@ private object SlowJobReports : PerfListener {
     val runMs = (job.doneAtMs - job.startedAtMs).toLong()
     val event = SentryEvent().apply {
       level = SentryLevel.WARNING
-      message = Message().apply { formatted = "Slow core job: ${job.name}" }
-      fingerprints = listOf("slow-core-job", job.name)
+      if (job.blockedBy.isEmpty()) {
+        message = Message().apply { formatted = "Slow core job: ${job.name}" }
+        fingerprints = listOf("slow-core-job", job.name)
+        if (job.waiters > 0u) setTag("waiters", job.waiters.toString())
+      } else {
+        // The waiter's own name varies; the cause groups the issue.
+        val lane = if (job.kind == PerfJobKind.ENGINE_QUEUE) "Engine" else "Read"
+        message = Message().apply { formatted = "$lane lane blocked: ${job.blockedBy}" }
+        fingerprints = listOf("slow-core-job-blocked", jobOp(job.kind), job.blockedBy)
+        setTag("blocker", job.blockedBy)
+        setTag("blocker_run_ms", job.blockerRunMs.toLong().toString())
+        setTag("waiters", job.waiters.toString())
+      }
       setTag("job", job.name)
       setTag("queue", jobOp(job.kind))
       setTag("wait_ms", waitMs.toString())

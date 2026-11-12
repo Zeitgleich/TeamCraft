@@ -183,20 +183,34 @@ final class CatchUpMeasure {
   func dispose() { Perf.cancel(.catchUp, key: conversationId) }
 }
 
-/// A core job that waited or ran longer than the instance's threshold, as a warning (sampled with
-/// the handled errors' rate in `beforeSend`), grouped per job. Names are functions in the code.
+/// A core job that ran longer than the instance's threshold, or a thread held up that long by one
+/// (`blockedBy`: one "lane blocked" event naming the job that held it, not one per waiter, #1759), as
+/// a warning (sampled with the handled errors' rate in `beforeSend`), grouped per job or per
+/// blocker. Names are functions in the code.
 final class SlowJobReports: PerfListener, Sendable {
   func onSlowJob(job: PerfJobSpan) {
     let event = Event(level: .warning)
-    event.message = SentryMessage(formatted: "Slow core job: \(job.name)")
-    event.fingerprint = ["slow-core-job", job.name]
+    let queue = jobOperation(job.kind)
     event.tags = [
       "job": job.name,
-      "queue": jobOperation(job.kind),
+      "queue": queue,
       "wait_ms": String(Int(job.startedAtMs - job.enqueuedAtMs)),
       "run_ms": String(Int(job.doneAtMs - job.startedAtMs)),
       "queue_depth": String(job.queueDepth),
     ]
+    if job.blockedBy.isEmpty {
+      event.message = SentryMessage(formatted: "Slow core job: \(job.name)")
+      event.fingerprint = ["slow-core-job", job.name]
+      if job.waiters > 0 { event.tags?["waiters"] = String(job.waiters) }
+    } else {
+      // The waiter's own name varies; the cause groups the issue.
+      let lane = job.kind == .engineQueue ? "Engine" : "Read"
+      event.message = SentryMessage(formatted: "\(lane) lane blocked: \(job.blockedBy)")
+      event.fingerprint = ["slow-core-job-blocked", queue, job.blockedBy]
+      event.tags?["blocker"] = job.blockedBy
+      event.tags?["blocker_run_ms"] = String(Int(job.blockerRunMs))
+      event.tags?["waiters"] = String(job.waiters)
+    }
     // Far below run_ms: the job waited (a lock, or the app suspended in the background).
     if let cpuMs = job.maybeCpuMs {
       event.tags?["cpu_ms"] = String(Int(cpuMs))
