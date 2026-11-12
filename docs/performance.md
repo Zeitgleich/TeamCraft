@@ -443,6 +443,19 @@ quarter more):
 The percentage is of one core at the picture's frame rate. libaom spreads the work over several
 threads, so a 4K share in AV1 takes about one core in all, spread over several.
 
+**What the share policy (#1733) makes of these numbers.** Software AV1 takes the top layer only up
+to about 1080p and at 15 fps: 1080p scrolling then costs about 4 ms per 66 ms frame (12 % of a
+core) instead of 24 %, and a 1440p share, at 46 % of a core in software AV1, goes out in H.264
+(hardware where there is one) at full size instead. The H.264 base layer (480p, 15 fps) every
+viewer decodes costs a ninth of a 1440p picture's pixels at half its rate. On a loaded machine
+(Windows 11, Chrome 157, a VM with the host at load 34) the share had dropped its 1440p layer and
+sent 720p at 27 fps; under the policy the encoder-load controller lowers the top layer's rate
+first (30, 20, 15, 10, 5 fps), then stops the middle layer, then turns software AV1 into H.264,
+and only then makes the top smaller, one size at a time (1080, 900, 720 lines at 5 fps) before
+the 480p base is all that is left. No budget in the table at the top changes: a share's
+uplink demand at 1440p grows by the base layer (about 0.5 Mbit/s) and shrinks where AV1 replaces
+H.264 on top.
+
 **The desktop's encoders** (`crates/teamcraft-media/examples/screen_bench.rs`: every layer of the
 profile, encoded in real time as the call's encoder thread does, from a synthetic page of
 pixel-font text on a 3840x2160 display, 10 s per row; CPU is the process's over all threads,
@@ -2632,7 +2645,7 @@ the chunks that load later. The limit:
 |--------------------------------------|--------------|----------------------------------|
 | A guest in a meeting: gzip -9 total  | 6,440,000 B  | fails; warns from 95 % (6.12 MB) |
 | Signed-in first visit: gzip -9 total | 5,610,000 B  | fails; warns from 95 % (5.33 MB) |
-| The call module: gzip -9             | 1,000,000 B  | fails                            |
+| The call module: gzip -9             | 1,100,000 B  | fails                            |
 
 Both budgets are the sizes of #1699 below plus about 5 % since 2026-11-11. From 2026-11-10 they
 were 10 MB: new features (polls #1689, the local search index #1693) had pushed a signed-in first
@@ -2651,6 +2664,11 @@ information. The uncompressed size is printed but not limited: what a user waits
 transfer. The earlier growth ratchet on it (11.85 MB) was dropped with the split (#334): main had
 outgrown it anyway, and the split moves code between files without changing what matters. Raising
 the budget is a decision, not a fix.
+
+The call module's budget was 1,000,000 B (0.86 MB with the effects' compositors, #439, plus about
+15 %) until the call problem reports (#1762, 2026-11-12) took the module to 1.02 MB; it is
+1,100,000 B since, a decision of the maintainer: the reports pay for themselves in field bugs found
+without asking anybody for logs.
 
 #### The snapshot's JSON and the data export out of the first visit (#1699, 2026-11-11)
 

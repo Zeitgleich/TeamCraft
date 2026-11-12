@@ -37,6 +37,7 @@ pub mod resample;
 pub mod ringtone;
 pub mod rtp;
 pub mod send_queue;
+pub mod share_policy;
 #[cfg(feature = "sound-files")]
 pub mod sound_file;
 pub mod uplink_layers;
@@ -74,6 +75,8 @@ pub mod call_cues;
 pub mod call_engine;
 #[cfg(feature = "native")]
 pub mod call_native;
+#[cfg(feature = "call-view")]
+pub mod call_telemetry;
 #[cfg(feature = "dave")]
 pub mod call_video;
 #[cfg(feature = "call-view")]

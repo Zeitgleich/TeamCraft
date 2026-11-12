@@ -171,6 +171,16 @@ stats-value-decoding = queue { $queue }
 stats-value-decoding-limited = queue { $queue } · limited by this device ({ $reason }): layer ≤ { $layer }
 stats-decode-queued = frames queued
 stats-decode-late = frames late
+stats-share-policy = Share policy
+stats-value-share = top { $codec } { $size } at { $fps } of { $planned } fps · middle layer { $middle } · encoders AV1 { $av1 }, VP9 { $vp9 }
+stats-value-share-uplink = uplink: { $steps } of { $sizes } sizes smaller
+stats-share-base-only = 480p base only
+stats-value-share-step = encoders overloaded ({ $reason }): step { $level } of { $levels }
+stats-share-middle-on = on
+stats-share-middle-off = off
+stats-encoder-kind-hardware = hardware
+stats-encoder-kind-software = software
+stats-encoder-kind-none = none
 stats-waiting = Waiting for the first numbers…
 # The chat next to the video (#936)
 call-chat = Chat

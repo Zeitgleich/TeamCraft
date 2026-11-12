@@ -28,7 +28,8 @@ use teamcraft_proto::{
   Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallServerMessage, DaveKeyBinding,
   DaveTransitionId, DaveTransitionMode, DeviceId, ErrorBody, ErrorCode, LEGACY_SIMULCAST_LAYERS,
   MAX_SIMULCAST_LAYERS, MediaCapabilities, MediaStreamId, ScreenAudioTrack, ScreenShareTakeover,
-  TransportFeedback, UserId, VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrack, VideoTrackKind,
+  TransportFeedback, UserId, VideoCodec, VideoFeature, VideoLayerInfo, VideoPublicationId, VideoTrack,
+  VideoTrackKind,
 };
 use thiserror::Error;
 use tracing::{debug, trace, warn};
@@ -46,7 +47,8 @@ use crate::dave::{
 };
 use crate::nack::NackConfig;
 use crate::rtp::{PayloadType, RtpHeader, RtpPacket, RtpTimestamp, SequenceNumber, Ssrc};
-use crate::uplink_layers::{OwnTrack, UplinkLayers, UplinkPolicy, probe_demand_bps};
+use crate::share_policy::UplinkTop;
+use crate::uplink_layers::{Adaptation, OwnTrack, UplinkLayers, UplinkPolicy, probe_demand_bps};
 use crate::video::EncodedVideoFrame;
 
 /// How many retired call keys an engine remembers (e2ee.md §8); the oldest goes first. A call with
@@ -101,7 +103,7 @@ pub struct CallEngine {
   uplink_layers: UplinkLayers,
   /// Own tracks whose encoders follow the uplink's bitrate per layer
   /// ([`CallEngine::publish_adaptive_video`]).
-  adaptive_tracks: HashSet<StreamId>,
+  adaptive_tracks: HashMap<StreamId, Adaptation>,
   /// Bitrates per layer the driver was last told to encode adaptive own tracks at (it starts
   /// with the layers' own).
   bitrates_announced: HashMap<StreamId, Vec<(u8, u32)>>,
@@ -125,6 +127,9 @@ pub struct CallEngine {
   /// The video codecs every other device that receives video decodes, as the SFU last said
   /// (#565); `None` before it said (an older SFU never does): H.264 only.
   maybe_decodable: Option<Vec<VideoCodec>>,
+  /// The video codecs at least one other device decodes as a layer in another codec than its
+  /// track, as the SFU last said (#1733); empty from an SFU that forwards no such layers.
+  decodable_by_some: Vec<VideoCodec>,
   /// The most simulcast layers per track the SFU takes, as its last `joined` said (#978;
   /// [`LEGACY_SIMULCAST_LAYERS`] from an SFU that says nothing); `None` before the first.
   maybe_sfu_layer_limit: Option<u8>,
@@ -240,6 +245,9 @@ pub enum CallEngineEvent {
   /// Another device's call key binding didn't verify (forged, another device's, or one that left
   /// the call): it isn't let into the DAVE group and gets no media key (e2ee.md §8, #1753).
   MemberRefused(DeviceId),
+  /// The DAVE group held across a lost connection couldn't be resumed: the device joins the group
+  /// afresh (a short gap in media). For the crash reports' call problems.
+  DaveResumeFailed(DaveResumeFailure),
   ActiveSpeakers(Vec<DeviceId>),
   /// Another device muted or unmuted its microphone.
   ParticipantMuted {
@@ -337,6 +345,15 @@ pub enum CallEngineEvent {
   DecodableVideoCodecs(Vec<VideoCodec>),
   /// The SFU rejected a request.
   Error(ErrorBody),
+}
+
+/// Why a held DAVE group wasn't resumed after a rejoin ([`CallEngineEvent::DaveResumeFailed`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaveResumeFailure {
+  /// The SFU didn't resume it (it restarted, or started the group over).
+  NotResumed,
+  /// It held a member the call's roster no longer has, or one that left while this device was away.
+  MemberOffRoster,
 }
 
 /// When an own track that ended by itself ([`CallEngineEvent::OwnVideoEnded`]) ended.
@@ -479,7 +496,7 @@ struct PendingPublication {
   /// sender and is unpublished at once (#929).
   is_withdrawn: bool,
   /// The driver's encoders follow [`CallEngineEvent::LayerBitrates`].
-  adapts_bitrate: bool,
+  adaptation: Adaptation,
 }
 
 /// A prepared DAVE transition waiting for [`CallEvent::DaveExecuteTransition`].
@@ -562,7 +579,7 @@ impl CallEngine {
       sfu_layers: HashMap::new(),
       sent_layers: HashMap::new(),
       uplink_layers,
-      adaptive_tracks: HashSet::new(),
+      adaptive_tracks: HashMap::new(),
       bitrates_announced: HashMap::new(),
       uplink_announced: HashMap::new(),
       encoder_top_layers: HashMap::new(),
@@ -572,6 +589,7 @@ impl CallEngine {
       maybe_nack: None,
       maybe_switch_secret: None,
       maybe_decodable: None,
+      decodable_by_some: Vec::new(),
       maybe_sfu_layer_limit: None,
       remote_video: HashMap::new(),
       maybe_dave: None,
@@ -614,7 +632,7 @@ impl CallEngine {
     self.signal(CallClientMessage::Join {
       maybe_dave_resume_epoch: None,
       token,
-      capabilities: self.config.capabilities.clone(),
+      capabilities: self.join_capabilities(),
       dave_transition_mode: DaveTransitionMode::Coordinated,
     });
   }
@@ -686,9 +704,20 @@ impl CallEngine {
     self.signal(CallClientMessage::Join {
       maybe_dave_resume_epoch,
       token,
-      capabilities: self.config.capabilities.clone(),
+      capabilities: self.join_capabilities(),
       dave_transition_mode: DaveTransitionMode::Coordinated,
     });
+  }
+
+  /// The driver's capabilities as announced: every engine takes a frame's codec from its layer
+  /// ([`IncomingVideo::layer_codec`]), and the decoders of every driver open anew for another
+  /// codec at a keyframe (#1733).
+  fn join_capabilities(&self) -> MediaCapabilities {
+    let mut capabilities = self.config.capabilities.clone();
+    if !capabilities.video_decoders.is_empty() && !capabilities.has_layer_codecs() {
+      capabilities.video_features.push(VideoFeature::LayerCodecs);
+    }
+    capabilities
   }
 
   /// The SFU turned the join away for now and asked to wait this long: the connection is of no use
@@ -831,6 +860,33 @@ impl CallEngine {
       .find(|codec| decodable.contains(codec) && self.config.capabilities.video_encoders.contains(codec))
       .cloned()
       .unwrap_or(VideoCodec::H264)
+  }
+
+  /// The codecs of `candidates`, in their order, this device encodes and every other device that
+  /// receives video decodes (#565, #1733); H.264 alone before the SFU said (an older SFU never
+  /// does). [`Self::video_codec_for`] is the first of them.
+  pub fn video_codecs_for(&self, candidates: &[VideoCodec]) -> Vec<VideoCodec> {
+    let Some(decodable) = &self.maybe_decodable else {
+      return vec![VideoCodec::H264];
+    };
+    self.encodable(candidates, decodable)
+  }
+
+  /// The codecs of `candidates`, in their order, a track's larger layers may go out in above a
+  /// base layer every viewer decodes (#1733): those this device encodes and at least one other
+  /// device decodes as such a layer. Empty from an SFU that forwards no layers in another codec
+  /// than their track's.
+  pub fn layer_codecs_for(&self, candidates: &[VideoCodec]) -> Vec<VideoCodec> {
+    self.encodable(candidates, &self.decodable_by_some)
+  }
+
+  /// `candidates` this device encodes and that are in `decodable`.
+  fn encodable(&self, candidates: &[VideoCodec], decodable: &[VideoCodec]) -> Vec<VideoCodec> {
+    candidates
+      .iter()
+      .filter(|codec| decodable.contains(codec) && self.config.capabilities.video_encoders.contains(codec))
+      .cloned()
+      .collect()
   }
 
   /// The most simulcast layers a track may be planned with (#978): what the SFU said it takes,
@@ -987,13 +1043,13 @@ impl CallEngine {
     codec: VideoCodec,
     layers: Vec<VideoLayerInfo>,
   ) {
-    self.publish(publication, kind, codec, layers, false);
+    self.publish(publication, kind, codec, layers, Adaptation::Whole);
   }
 
-  /// [`Self::publish_video`] for a track whose encoders follow [`CallEngineEvent::LayerBitrates`]:
-  /// a camera's top sent layer is then encoded at less than its bitrate on a limited uplink,
-  /// before it stops and the picture drops to the next lower layer (#939). Other kinds are sent
-  /// as by [`Self::publish_video`].
+  /// [`Self::publish_video`] for a track whose encoders are rebuilt at the bitrates of
+  /// [`CallEngineEvent::LayerBitrates`] (the desktop's): a camera's top sent layer is then encoded
+  /// at less than its bitrate on a limited uplink, before it stops and the picture drops to the
+  /// next lower layer (#939). Other kinds are sent as by [`Self::publish_video`].
   pub fn publish_adaptive_video(
     &mut self,
     publication: VideoPublicationId,
@@ -1001,7 +1057,20 @@ impl CallEngine {
     codec: VideoCodec,
     layers: Vec<VideoLayerInfo>,
   ) {
-    self.publish(publication, kind, codec, layers, true);
+    self.publish(publication, kind, codec, layers, Adaptation::Rebuilt);
+  }
+
+  /// [`Self::publish_adaptive_video`] for a track whose encoders change their rate in place (the
+  /// browser's WebCodecs): a screen share's top layer then also steps through shares of its
+  /// bitrate, at a lower frame rate, before it stops (#1733).
+  pub fn publish_video_adapting_in_place(
+    &mut self,
+    publication: VideoPublicationId,
+    kind: VideoTrackKind,
+    codec: VideoCodec,
+    layers: Vec<VideoLayerInfo>,
+  ) {
+    self.publish(publication, kind, codec, layers, Adaptation::InPlace);
   }
 
   fn publish(
@@ -1010,7 +1079,7 @@ impl CallEngine {
     kind: VideoTrackKind,
     codec: VideoCodec,
     layers: Vec<VideoLayerInfo>,
-    adapts_bitrate: bool,
+    adaptation: Adaptation,
   ) {
     let is_in_use = self
       .pending_publications
@@ -1027,7 +1096,7 @@ impl CallEngine {
       codec,
       layers,
       is_withdrawn: false,
-      adapts_bitrate,
+      adaptation,
     });
   }
 
@@ -1143,9 +1212,11 @@ impl CallEngine {
     };
     // #1733: DAVE leaves a codec's headers in the clear by parsing the frame as that codec. An
     // AV1 frame parsed as H.264 has no start code, so nothing of it was kept: viewers got empty
-    // frames and never drew the share.
-    if track.codec != frame.codec {
-      debug!(stream_id = stream.0, codec = %frame.codec, track_codec = %track.codec, "video frame in another codec than its track, dropped");
+    // frames and never drew the share. Each layer has its codec (a share's AV1 layers above an
+    // H.264 one).
+    let layer_codec = track.layer_codec(frame.layer.value());
+    if layer_codec != &frame.codec {
+      debug!(stream_id = stream.0, codec = %frame.codec, layer_codec = %layer_codec, "video frame in another codec than its layer, dropped");
       self.count_dropped_video(stream);
       return VideoSendOutcome::WrongCodec;
     }
@@ -1250,6 +1321,7 @@ impl CallEngine {
         maybe_frames_skipped: None,
         maybe_held_back_ms: Some(u64::try_from(track.counters.held_back.as_millis()).unwrap_or(u64::MAX)),
         maybe_camera_limits: None,
+        maybe_share_limits: None,
       })
     });
     let mut remote: Vec<(&StreamId, &IncomingVideo)> = self.remote_video.iter().collect();
@@ -1490,9 +1562,13 @@ impl CallEngine {
         self.event(CallEngineEvent::ConnectionReplaced);
         Ok(())
       },
-      CallEvent::DecodableVideoCodecs { codecs } => {
-        if self.maybe_decodable.as_ref() != Some(&codecs) {
+      CallEvent::DecodableVideoCodecs {
+        codecs,
+        decodable_by_some,
+      } => {
+        if self.maybe_decodable.as_ref() != Some(&codecs) || self.decodable_by_some != decodable_by_some {
           self.maybe_decodable = Some(codecs.clone());
+          self.decodable_by_some = decodable_by_some;
           self.event(CallEngineEvent::DecodableVideoCodecs(codecs));
         }
         Ok(())
@@ -1732,7 +1808,11 @@ impl CallEngine {
       .collect();
     lost.sort_by_key(|(id, _)| *id);
     for (id, track) in lost {
-      let adapts_bitrate = self.adaptive_tracks.contains(&StreamId(track.stream_id.0));
+      let adaptation = self
+        .adaptive_tracks
+        .get(&StreamId(track.stream_id.0))
+        .copied()
+        .unwrap_or(Adaptation::Whole);
       self.forget_own_track(StreamId(track.stream_id.0));
       self.event(CallEngineEvent::VideoUnpublished(track.stream_id));
       self.request_publication(PendingPublication {
@@ -1741,7 +1821,7 @@ impl CallEngine {
         codec: track.codec,
         layers: track.layers,
         is_withdrawn: false,
-        adapts_bitrate,
+        adaptation,
       });
     }
     // Requests the SFU never answered (lost with the connection, or dropped with the slot): asked
@@ -1804,6 +1884,22 @@ impl CallEngine {
     self.note_held_back_layers(now);
     let loss_percent = loss_percent(self.uplink.loss_ratio());
     self.event(CallEngineEvent::UplinkEstimate { bps, loss_percent });
+  }
+
+  /// How the uplink treats the top layer of the own track on `stream_id` now (#1733): a share's
+  /// governor steps its top layer's size down where the uplink can't carry it even at its least
+  /// frame rate. `None` for a track this device doesn't publish.
+  pub fn uplink_top(&self, stream_id: MediaStreamId) -> Option<UplinkTop> {
+    let stream = StreamId(stream_id.0);
+    let track = self.own_tracks.get(&stream)?;
+    let top = track.layers.iter().max_by_key(|info| info.layer)?;
+    Some(if !self.uplink_layers.allows(stream, top.layer) {
+      UplinkTop::Held
+    } else if self.uplink_layers.bitrate_bps(stream, top) < top.max_bitrate_bps {
+      UplinkTop::Reduced
+    } else {
+      UplinkTop::Whole
+    })
   }
 
   /// Counts the time the uplink holds each own track's top layer back (screen-share quality,
@@ -1888,7 +1984,7 @@ impl CallEngine {
 
   /// Tells the driver the bitrate per layer of each adaptive own track, where that changed.
   fn announce_bitrates(&mut self) {
-    let mut streams: Vec<StreamId> = self.adaptive_tracks.iter().copied().collect();
+    let mut streams: Vec<StreamId> = self.adaptive_tracks.keys().copied().collect();
     streams.sort_unstable();
     for stream in streams {
       let Some(track) = self.own_tracks.get(&stream) else {
@@ -2204,6 +2300,7 @@ impl CallEngine {
   /// and the device joins again without one.
   fn give_up_resume(&mut self, event: &CallEvent) {
     debug!("the SFU didn't resume the DAVE group held: joining it afresh");
+    self.event(CallEngineEvent::DaveResumeFailed(DaveResumeFailure::NotResumed));
     let call_id = self.call_id();
     self.drop_held_dave();
     match (event, call_id) {
@@ -2232,6 +2329,9 @@ impl CallEngine {
     if let Some(device) = self.member_off_the_roster()? {
       // The SFU's participant list said the device is still here; the signed roster decides.
       warn!(%device, "a resumed DAVE group has a member off the call's roster: joining afresh");
+      self.event(CallEngineEvent::DaveResumeFailed(
+        DaveResumeFailure::MemberOffRoster,
+      ));
       self.drop_held_dave();
       self.maybe_join_retry_after = Some(Duration::ZERO);
       return Ok(());
@@ -2552,7 +2652,9 @@ impl CallEngine {
       return Ok(());
     };
     let needs_keyframe = track.take_loss();
-    let (sender, codec, maybe_layer) = (track.sender, track.codec.clone(), track.layer());
+    let (sender, maybe_layer) = (track.sender, track.layer());
+    // #1733: each layer has its codec (a share's AV1 layers above an H.264 one).
+    let codec = maybe_layer.map_or_else(|| track.codec.clone(), |layer| track.layer_codec(layer));
     if needs_keyframe {
       self.ask_for_keyframe(stream, now);
     }
@@ -2685,9 +2787,9 @@ impl CallEngine {
     }
     match self.take_answered_publication(&track) {
       Some(pending) if !pending.is_withdrawn => {
-        if pending.adapts_bitrate {
+        if pending.adaptation != Adaptation::Whole {
           let stream = StreamId(track.stream_id.0);
-          self.adaptive_tracks.insert(stream);
+          self.adaptive_tracks.insert(stream, pending.adaptation);
           // Drivers start with the layers' own bitrates.
           let own: Vec<(u8, u32)> = track
             .layers
@@ -2735,7 +2837,7 @@ impl CallEngine {
     track.maybe_publication_id = Some(publication);
     self.own_video.insert(
       stream,
-      OutgoingVideo::new(track.kind.clone(), track.codec.clone()),
+      OutgoingVideo::new(track.kind.clone(), track.codec.clone()).with_layers(&track.layers),
     );
     // Drivers start with every layer, and the SFU takes every layer as carried. A track without
     // layer list isn't limited.
@@ -2790,7 +2892,7 @@ impl CallEngine {
       self.signal(CallClientMessage::PublishVideo {
         kind: pending.kind.clone(),
         codec: pending.codec.clone(),
-        layers: pending.layers.iter().take(limit).copied().collect(),
+        layers: pending.layers.iter().take(limit).cloned().collect(),
         maybe_publication_id: Some(pending.id),
       });
     }
@@ -3072,7 +3174,7 @@ impl AudioRtpState {
 /// The own tracks as the uplink allocation sees them.
 fn own_track_views<'a>(
   own_tracks: &'a HashMap<StreamId, VideoTrack>,
-  adaptive_tracks: &HashSet<StreamId>,
+  adaptive_tracks: &HashMap<StreamId, Adaptation>,
 ) -> Vec<OwnTrack<'a>> {
   own_tracks
     .iter()
@@ -3080,7 +3182,7 @@ fn own_track_views<'a>(
       stream: *stream,
       kind: &track.kind,
       layers: &track.layers,
-      adapts_bitrate: adaptive_tracks.contains(stream),
+      adaptation: adaptive_tracks.get(stream).copied().unwrap_or(Adaptation::Whole),
     })
     .collect()
 }
@@ -3136,6 +3238,7 @@ mod tests {
 
       let all = CallEvent::DecodableVideoCodecs {
         codecs: vec![VideoCodec::Av1, VideoCodec::Vp9, VideoCodec::H264],
+        decodable_by_some: Vec::new(),
       };
       engine.handle_signal(event(2, all.clone()), now).unwrap();
       assert_eq!(engine.video_codec_for(&screen), VideoCodec::Av1);
@@ -3149,6 +3252,7 @@ mod tests {
 
       let h264_only = CallEvent::DecodableVideoCodecs {
         codecs: vec![VideoCodec::H264],
+        decodable_by_some: Vec::new(),
       };
       engine.handle_signal(event(3, h264_only.clone()), now).unwrap();
       assert_eq!(engine.video_codec_for(&screen), VideoCodec::H264);
@@ -3165,6 +3269,22 @@ mod tests {
         1,
         "told once per change: {repeated:?}"
       );
+      // An SFU that forwards layers in other codecs names what some decode (#1733): a share's
+      // large layers may go out in AV1 although not everyone decodes it.
+      assert!(engine.layer_codecs_for(&screen).is_empty(), "not said yet");
+      let some_av1 = CallEvent::DecodableVideoCodecs {
+        codecs: vec![VideoCodec::H264],
+        decodable_by_some: vec![VideoCodec::Av1, VideoCodec::H264],
+      };
+      engine.handle_signal(event(5, some_av1), now).unwrap();
+      assert_eq!(engine.video_codec_for(&screen), VideoCodec::H264);
+      assert_eq!(engine.layer_codecs_for(&screen), screen.to_vec());
+      assert_eq!(engine.video_codecs_for(&screen), vec![VideoCodec::H264]);
+      assert!(engine.layer_codecs_for(&[VideoCodec::Vp9]).is_empty());
+      assert!(drain(&mut engine).iter().any(|output| matches!(
+        output,
+        EngineOutput::Event(CallEngineEvent::DecodableVideoCodecs(_))
+      )));
     }
 
     #[test]
@@ -3175,6 +3295,34 @@ mod tests {
       assert!(matches!(
         engine.poll_output(),
         Some(EngineOutput::Signal(CallClientMessage::Join { token, .. })) if token == "token"
+      ));
+    }
+
+    /// #1733: an engine that receives video says it takes layers in other codecs than their
+    /// track's; one that receives none (audio only) says nothing.
+    #[test]
+    fn join_says_layer_codecs_where_video_is_received() {
+      let now = Instant::now();
+      let mut receiving = CallEngine::new(
+        CallEngineConfig {
+          capabilities: MediaCapabilities {
+            video_decoders: vec![VideoCodec::H264],
+            ..MediaCapabilities::default()
+          },
+          ..engine(1, now).config
+        },
+        now,
+      );
+      receiving.join("token".into());
+      assert!(matches!(
+        receiving.poll_output(),
+        Some(EngineOutput::Signal(CallClientMessage::Join { capabilities, .. })) if capabilities.has_layer_codecs()
+      ));
+      let mut audio_only = engine(2, now);
+      audio_only.join("token".into());
+      assert!(matches!(
+        audio_only.poll_output(),
+        Some(EngineOutput::Signal(CallClientMessage::Join { capabilities, .. })) if !capabilities.has_layer_codecs()
       ));
     }
 
@@ -3860,6 +4008,69 @@ mod tests {
         VideoSendOutcome::WrongCodec
       );
       assert!(deliver_video(&mut alice, &mut bob, now).is_empty());
+    }
+
+    /// #1733: a share with an H.264 base and AV1 above it. Each layer's frames go out in the
+    /// layer's codec, are told apart by it at the viewer, and a frame in another codec than its
+    /// layer never leaves.
+    #[test]
+    fn each_layer_of_a_mixed_share_goes_out_in_its_codec() {
+      let now = Instant::now();
+      let (mut alice, mut bob) = secured_pair(now);
+      let mut layers = layers(2);
+      layers[1].maybe_codec = Some(VideoCodec::Av1);
+      let track = VideoTrack {
+        stream_id: MediaStreamId(50),
+        device_id: device(1),
+        kind: VideoTrackKind::Screen,
+        codec: VideoCodec::H264,
+        layers: layers.clone(),
+        maybe_publication_id: None,
+      };
+      alice.publish_video(
+        VideoPublicationId(0),
+        VideoTrackKind::Screen,
+        VideoCodec::H264,
+        layers,
+      );
+      let published = CallEvent::VideoPublished { track: track.clone() };
+      alice.handle_signal(event(6, published.clone()), now).unwrap();
+      bob.handle_signal(event(4, published), now).unwrap();
+      drain(&mut alice);
+      drain(&mut bob);
+      let av1_top = EncodedVideoFrame {
+        codec: VideoCodec::Av1,
+        layer: SimulcastLayer::new(1).unwrap(),
+        timestamp: RtpTimestamp(3000),
+        is_keyframe: true,
+        data: vec![0x12, 0x00, 0x32, 0x03, 1, 2, 3],
+      };
+      assert_eq!(
+        alice.send_video(track.stream_id, &av1_top, now),
+        VideoSendOutcome::Sent
+      );
+      let frames = deliver_video(&mut alice, &mut bob, now);
+      assert_eq!(frames.len(), 1);
+      assert_eq!(frames[0].codec, VideoCodec::Av1);
+      let h264_top = EncodedVideoFrame {
+        codec: VideoCodec::H264,
+        ..av1_top.clone()
+      };
+      assert_eq!(
+        alice.send_video(track.stream_id, &h264_top, now),
+        VideoSendOutcome::WrongCodec
+      );
+      let h264_base = EncodedVideoFrame {
+        layer: SimulcastLayer::BASE,
+        ..h264_top
+      };
+      assert_eq!(
+        alice.send_video(track.stream_id, &h264_base, now),
+        VideoSendOutcome::Sent
+      );
+      let frames = deliver_video(&mut alice, &mut bob, now);
+      assert_eq!(frames.len(), 1);
+      assert_eq!(frames[0].codec, VideoCodec::H264);
     }
 
     /// Alice publishes a screen share in AV1 on stream 50, and Bob sees it.
@@ -4654,12 +4865,17 @@ mod tests {
         layers: vec![0, 2],
       };
       alice.handle_signal(event(2, needed), now).unwrap();
+      // This SFU didn't resume the DAVE group held (the crash reports hear of it), and the layers
+      // narrow.
       assert_eq!(
         drain(&mut alice),
-        vec![EngineOutput::Event(CallEngineEvent::LayersNeeded {
-          stream_id: MediaStreamId(50),
-          layers: vec![0, 2],
-        })]
+        vec![
+          EngineOutput::Event(CallEngineEvent::DaveResumeFailed(DaveResumeFailure::NotResumed)),
+          EngineOutput::Event(CallEngineEvent::LayersNeeded {
+            stream_id: MediaStreamId(50),
+            layers: vec![0, 2],
+          })
+        ]
       );
     }
 
@@ -6913,6 +7129,7 @@ mod tests {
       height,
       max_framerate: 30,
       max_bitrate_bps,
+      maybe_codec: None,
     })
     .collect()
   }

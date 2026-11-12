@@ -447,7 +447,7 @@ depend on any of it.
   deployment has to add the route**, or clients on such networks keep failing to join as before;
   nothing else breaks without it. Configurations for Caddy and nginx (Plesk included), the order of
   the rollout and how to check it: [Call fallback through the proxy](#call-fallback-through-the-proxy).
-  - The reverse proxy serves `wss://<SFU host>/call/fallback` on 443 and passes it to that port:
+  - The reverse proxy serves `wss://<SFU host>/call/ws` on 443 and passes it to that port:
     WebSocket upgrade allowed, no response buffering, idle timeout above a few seconds (the SFU pings
     each second), `X-Forwarded-For` set. The SFU host name needs a TCP/443 route and a certificate;
     the bundled playbook's certificate already covers `sfu.<host>`.
@@ -458,7 +458,7 @@ depend on any of it.
     listed, or all its clients share one limit**, and the SFU logs one warning when it sees the
     header from a peer it doesn't trust. Don't list networks that clients can connect from: they
     could then name any address.
-  - Clients are told the URL with their join token. The default is `wss://<host of sfu_url>/call/fallback`;
+  - Clients are told the URL with their join token. The default is `wss://<host of sfu_url>/call/ws`;
     `[calls] sfu_fallback_url` sets another one, and the web client's `connect-src` follows it.
   - **Turning it off:** `[calls] sfu_fallback_enabled = false` on the server stops offering it, and
     `TEAMCRAFT_SFU_FALLBACK_ENABLED=0` on the SFU closes the listener. Without an offer, clients behave
@@ -559,7 +559,7 @@ depend on any of it.
 
 What the reverse proxy needs so that clients on networks that block UDP reach the SFU's fallback on
 TCP 443 (#1226). The server and the apps need nothing for it: from 1.0.20 on the server offers
-`wss://<host of sfu_url>/call/fallback` with every join token, and a client uses it only when QUIC
+`wss://<host of sfu_url>/call/ws` with every join token, and a client uses it only when QUIC
 doesn't connect. Until the route exists such a client fails to join, as it did before there was a
 fallback.
 
@@ -583,7 +583,7 @@ buffer them, and sets `X-Forwarded-For` to the client's address; a path matcher 
 
 ```caddy
 sfu.chat.example.com {
-	handle /call/fallback {
+	handle /call/ws {
 		reverse_proxy 127.0.0.1:8082 {
 			# Otherwise a reload of Caddy closes every call on the fallback at once (they rejoin).
 			stream_close_delay 5m
@@ -599,7 +599,7 @@ sfu.chat.example.com {
 name:
 
 ```nginx
-location = /call/fallback {
+location = /call/ws {
   proxy_pass http://127.0.0.1:8082;
   proxy_http_version 1.1;
   proxy_set_header Upgrade $http_upgrade;
@@ -613,15 +613,15 @@ location = /call/fallback {
 ```
 
 Keep the `=`: nginx prefers a regular-expression location over a plain prefix one, so behind a
-regex catch-all (Plesk's directives of the reference deployment have one) `location /call/fallback`
+regex catch-all (Plesk's directives of the reference deployment have one) `location /call/ws`
 would send the fallback to the chat server. When the SFU's host name is an alias of the chat domain
 (one Plesk domain, one certificate), the location answers on the other names as well; no harm, only
 clients given the SFU's URL ask for it. With a CDN or a second proxy in front, use
 `$proxy_add_x_forwarded_for` and list the inner proxy as trusted instead.
 
 Other proxies need the same four things: the exact path, the upgrade, no buffering, and
-`X-Forwarded-For`. Apache (2.4.47 or later): `ProxyPass "/call/fallback"
-"http://127.0.0.1:8082/call/fallback" upgrade=websocket`; HAProxy and Traefik pass upgrades on
+`X-Forwarded-For`. Apache (2.4.47 or later): `ProxyPass "/call/ws"
+"http://127.0.0.1:8082/call/ws" upgrade=websocket`; HAProxy and Traefik pass upgrades on
 their own (HAProxy: `timeout tunnel` of at least 30 s).
 
 **Order of the rollout.** Each step is safe without the next one:
@@ -641,7 +641,7 @@ To roll back, remove the route (clients behave as before it) or stop offering th
 ```sh
 curl -sS -o /dev/null -w '%{http_code}\n' --http1.1 --max-time 10 \
   -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
-  -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' https://sfu.chat.example.com/call/fallback
+  -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' https://sfu.chat.example.com/call/ws
 ```
 
 - `101`: the SFU took the upgrade (and closes it 3 s later for want of a `join`). The route works.

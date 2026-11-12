@@ -35,7 +35,7 @@ fn ciscos_binary_installs_and_codes() {
     "a cached install is found again"
   );
 
-  let layer = simulcast_layers(SIZE, 30, 1_000_000, 1)[0];
+  let layer = simulcast_layers(SIZE, 30, 1_000_000, 1).remove(0);
   let mut encoder = OpenH264Encoder::new(&layer, VideoContent::Camera).unwrap();
   let mut decoder = OpenH264Decoder::new().unwrap();
   let mut decoded = 0;

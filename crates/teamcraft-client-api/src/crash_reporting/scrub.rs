@@ -8,6 +8,7 @@
 
 use crate::debug_log::redact;
 
+use super::call::CallEventDetail;
 use super::event::{CrashEvent, StackFrame};
 
 /// What stands in for removed quoted text.
@@ -44,6 +45,12 @@ pub fn scrub(event: CrashEvent) -> CrashEvent {
       .skip(breadcrumbs_to_skip)
       .map(|line| truncate(scrub_text(line), MAX_BREADCRUMB_CHARS))
       .collect(),
+    maybe_call: event.maybe_call.map(|call| {
+      Box::new(CallEventDetail {
+        report: call.report.scrubbed(),
+        ..*call
+      })
+    }),
     ..event
   }
 }
@@ -357,6 +364,7 @@ mod tests {
         "2026-11-08T10:00:02Z INFO teamcraft_core: opened https://team.example.com/s/1#share-link-secret"
           .to_owned(),
       ],
+      maybe_call: None,
     }
   }
 }

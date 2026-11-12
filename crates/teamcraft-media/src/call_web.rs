@@ -127,6 +127,7 @@ use crate::jitter::{JitterBuffer, JitterBufferConfig, Playout};
 use crate::receive_load::{DecodedFrame, Importance, ReceiveLoad, ReceiveOverload, WatchedStream};
 use crate::resample::MonoResampler;
 use crate::rtp::AudioLevel;
+use crate::share_policy::{EncoderKind, ShareCodecs, ShareEncoders};
 use crate::video::{EncodedVideoFrame, ScreenProfile, TOP_LAYER, VideoResolution, chosen_layer};
 use crate::web_api::{
   AudioData, AudioDecoder, AudioEncoder, EncodedAudioChunk, QUIC_GLOBAL, WORKLET_SOURCE, WebTransport,
@@ -223,6 +224,9 @@ pub struct WebCallConfig {
   /// whose Content-Security-Policy allows scripts only from their own origin need it; `None` loads
   /// the module from a blob URL.
   pub maybe_worklet_url: Option<String>,
+  /// How this browser encodes AV1 and VP9 ([`CodecSupport::share_encoders`]): a screen share's
+  /// top layer goes out in them at full size only from a hardware encoder (#1733).
+  pub share_encoders: ShareEncoders,
 }
 
 /// Gets a fresh join ticket from `teamcraft-server` in the page.
@@ -1161,6 +1165,7 @@ async fn run_call(
     stats: CallStats::default(),
     own_device: config.engine.device_id,
     senders: Vec::new(),
+    share_encoders: config.share_encoders,
     next_publication: VideoPublicationId(0),
     encoded_kinds: Vec::new(),
     views: HashMap::new(),
@@ -1302,6 +1307,8 @@ struct CallState<'a> {
   stats: CallStats,
   own_device: DeviceId,
   senders: Vec<TrackSender>,
+  /// How this browser encodes AV1 and VP9, for a share's plan (#1733).
+  share_encoders: ShareEncoders,
   /// The id the next own video publication goes under.
   next_publication: VideoPublicationId,
   /// Kinds whose running own track encoded a picture: one that ends before did not start.
@@ -1516,7 +1523,7 @@ impl CallState<'_> {
         timestamp_us,
       } => {
         if let Some(sender) = self.sender_of_kind(&kind)
-          && let Err(gave_up) = sender.on_encoded(layer, data.len(), Instant::now())
+          && let Err(gave_up) = sender.on_encoded(layer, data.len(), timestamp_us, Instant::now())
         {
           self.on_encoders_gave_up(engine, &kind, gave_up);
         }
@@ -1610,6 +1617,7 @@ impl CallState<'_> {
       sent.maybe_frames_given = Some(given);
       sent.maybe_frames_skipped = Some(skipped);
       sent.maybe_camera_limits = sender.camera_limits().map(camera_limits_stats);
+      sent.maybe_share_limits = sender.share_limits().map(share_limits_stats);
     }
     self.add_decoding_stats(&mut report);
     if let Some(transport) = &self.maybe_transport
@@ -1715,6 +1723,21 @@ impl CallState<'_> {
         engine.limit_own_layers(stream_id, sender.maybe_top_layer());
       }
     }
+    // A share's top layer follows what the uplink carries (#1733).
+    let mut gave_up = Vec::new();
+    for sender in &mut self.senders {
+      if let Some(stream_id) = sender.publication.own.maybe_stream_id
+        && let Some(top) = engine.uplink_top(stream_id)
+        && let Err(layer) = sender.on_uplink(top, now)
+      {
+        gave_up.push((sender.publication.kind.clone(), layer));
+      }
+    }
+    for (kind, layer) in gave_up {
+      self.on_encoders_gave_up(engine, &kind, layer);
+    }
+    // A share whose CPU ladder or uplink changed its layers goes out anew (#1733).
+    self.publish_replans(engine);
     Ok(Flow::Continue)
   }
 
@@ -2492,13 +2515,22 @@ impl CallState<'_> {
     self.stop_video(engine, &kind);
     let publication = self.next_publication;
     self.next_publication = VideoPublicationId(publication.0.wrapping_add(1));
-    let codec = engine.video_codec_for(&plan.codecs);
+    let codecs = share_codecs(engine, &plan.codecs);
     // Within the layers the SFU takes (#978): a 1080p camera's 180p only where it takes four.
     let max_layers = engine.simulcast_layer_limit();
-    let sender =
-      TrackSender::start(stream, plan, codec.clone(), max_layers, publication, self.inputs).await?;
-    // The encoders are ours: a camera follows the uplink with its layers' bitrates (#939).
-    engine.publish_adaptive_video(publication, kind, codec, sender.layers());
+    let sender = TrackSender::start(
+      stream,
+      plan,
+      codecs,
+      self.share_encoders,
+      max_layers,
+      publication,
+      self.inputs,
+    )
+    .await?;
+    // The encoders are ours: a camera follows the uplink with its layers' bitrates (#939), a
+    // share with its top layer's frame rate (#1733).
+    engine.publish_video_adapting_in_place(publication, kind, sender.codec().clone(), sender.layers());
     self.senders.push(sender);
     // What the others decode may have changed while the capture started.
     self.follow_codecs(engine);
@@ -2511,7 +2543,15 @@ impl CallState<'_> {
   /// whose encoders can't open in the new codec keeps its own (viewers that can't decode it see
   /// nothing until it ends).
   fn follow_codecs(&mut self, engine: &mut CallEngine) {
+    let mut gave_up = Vec::new();
     for sender in &mut self.senders {
+      if sender.publication.kind == VideoTrackKind::Screen {
+        // A share plans its layers' codecs itself (#1733); its new layers go out below.
+        if let Err(layer) = sender.follow_share_codecs(share_codecs(engine, sender.codecs())) {
+          gave_up.push((sender.publication.kind.clone(), layer));
+        }
+        continue;
+      }
       let wanted = engine.video_codec_for(sender.codecs());
       if wanted == *sender.codec() {
         continue;
@@ -2523,7 +2563,7 @@ impl CallState<'_> {
           self.next_publication = VideoPublicationId(publication.0.wrapping_add(1));
           debug!(kind = ?sender.publication.kind, codec = %wanted, "video track goes out in another codec");
           engine.withdraw_video(withdrawn);
-          engine.publish_adaptive_video(
+          engine.publish_video_adapting_in_place(
             publication,
             sender.publication.kind.clone(),
             wanted,
@@ -2533,6 +2573,39 @@ impl CallState<'_> {
         Err(error) => {
           warn!(%error, codec = %wanted, "video encoders can't switch codec; the track keeps its own")
         },
+      }
+    }
+    for (kind, layer) in gave_up {
+      self.on_encoders_gave_up(engine, &kind, layer);
+    }
+    self.publish_replans(engine);
+  }
+
+  /// Publishes anew the own tracks whose layers changed beyond what their encoders follow in
+  /// place (#1733: a share's middle layer stopped, its top's codec changed, or the viewers'
+  /// codecs did). The capture goes on; viewers see the track end and the new one start, with
+  /// keyframes. A track whose new encoders don't open keeps its layers.
+  fn publish_replans(&mut self, engine: &mut CallEngine) {
+    for sender in &mut self.senders {
+      let Some(replan) = sender.take_replan() else {
+        continue;
+      };
+      let publication = self.next_publication;
+      let withdrawn = sender.publication.own.id;
+      let layers = replan.layers.len();
+      match sender.rebuild(replan, publication, self.inputs) {
+        Ok(()) => {
+          self.next_publication = VideoPublicationId(publication.0.wrapping_add(1));
+          debug!(kind = ?sender.publication.kind, codec = %sender.codec(), layers, "video track goes out with other layers");
+          engine.withdraw_video(withdrawn);
+          engine.publish_video_adapting_in_place(
+            publication,
+            sender.publication.kind.clone(),
+            sender.codec().clone(),
+            sender.layers(),
+          );
+        },
+        Err(error) => warn!(%error, "new video encoders didn't open; the track keeps its layers"),
       }
     }
   }
@@ -2984,6 +3057,59 @@ async fn received_packets(session: &SessionHandle) -> PacketCount {
 
 /// A governed camera's limits as the stats show them (#1762).
 #[cfg(feature = "call-view")]
+/// The codecs an own track's layers may use (#1733): what every viewer decodes, and what some
+/// decode as a layer in another codec where the SFU forwards such layers.
+fn share_codecs(engine: &CallEngine, candidates: &[VideoCodec]) -> ShareCodecs {
+  ShareCodecs {
+    by_all: engine.video_codecs_for(candidates),
+    by_some: engine.layer_codecs_for(candidates),
+  }
+}
+
+fn share_limits_stats(
+  limits: crate::share_policy::ShareLimits,
+) -> teamcraft_client_api::video_stats::ShareLimitsStats {
+  use teamcraft_client_api::video_stats::{EncoderOverload, ShareLimitsStats, ShareStepStats, VideoSize};
+
+  use crate::camera_governor::OverloadReason;
+  use crate::share_policy::ShareStep;
+
+  let step = |step: ShareStep| ShareStepStats {
+    top_codec: step.top_codec,
+    top_framerate: step.top_framerate,
+    maybe_top: step.maybe_top.map(|top| VideoSize {
+      width: top.width,
+      height: top.height,
+    }),
+    has_middle: step.has_middle,
+  };
+  ShareLimitsStats {
+    av1_encoder: encoder_kind(limits.encoders.av1),
+    vp9_encoder: encoder_kind(limits.encoders.vp9),
+    planned: step(limits.planned),
+    now: step(limits.now),
+    level: u8::try_from(limits.level).unwrap_or(u8::MAX),
+    levels: u8::try_from(limits.levels).unwrap_or(u8::MAX),
+    maybe_overload: limits.maybe_reason.map(|reason| match reason {
+      OverloadReason::SkippedFrames => EncoderOverload::SkippedFrames,
+      OverloadReason::QueuedFrames => EncoderOverload::QueuedFrames,
+      OverloadReason::SlowEncoding => EncoderOverload::SlowEncoding,
+    }),
+    uplink_steps: u8::try_from(limits.uplink_steps).unwrap_or(u8::MAX),
+    sizes: u8::try_from(limits.sizes).unwrap_or(u8::MAX),
+  }
+}
+
+fn encoder_kind(kind: EncoderKind) -> teamcraft_client_api::video_stats::ShareEncoderKind {
+  use teamcraft_client_api::video_stats::ShareEncoderKind;
+
+  match kind {
+    EncoderKind::Hardware => ShareEncoderKind::Hardware,
+    EncoderKind::Software => ShareEncoderKind::Software,
+    EncoderKind::Unavailable => ShareEncoderKind::Unavailable,
+  }
+}
+
 fn camera_limits_stats(limits: video::CameraLimits) -> teamcraft_client_api::video_stats::CameraLimitsStats {
   use teamcraft_client_api::video_stats::{CameraLimitsStats, EncoderOverload, LayerLimitStats};
 
@@ -4632,6 +4758,7 @@ mod tests {
       height: 180,
       max_framerate: 30,
       max_bitrate_bps: 150_000,
+      maybe_codec: None,
     }]
   }
 

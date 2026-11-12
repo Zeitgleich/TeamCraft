@@ -153,6 +153,9 @@ struct LayerEncoder {
   encoder: Box<dyn VideoEncoder>,
   is_needed: bool,
   wants_keyframe: bool,
+  /// When it was last given a frame (capture time): a layer at a lower rate than the capture
+  /// (a share's 15 fps base under a 30 fps top, #1733) takes only the frames its rate allows.
+  maybe_last_frame_us: Option<u64>,
 }
 
 #[derive(Debug, Error)]
@@ -284,7 +287,7 @@ impl FallbackEncoder {
       maybe_hardware_failure: None,
       maybe_software: None,
       make_software,
-      layer: *layer,
+      layer: layer.clone(),
       content,
       stall: StallWatch::default(),
       is_switching: false,
@@ -421,11 +424,12 @@ impl SimulcastEncoder {
       .iter()
       .map(|info| {
         Ok(LayerEncoder {
-          info: *info,
+          info: info.clone(),
           bitrate_bps: info.max_bitrate_bps,
           encoder: make_encoder(info)?,
           is_needed: true,
           wants_keyframe: true,
+          maybe_last_frame_us: None,
         })
       })
       .collect::<Result<_, VideoCodecError>>()?;
@@ -513,9 +517,9 @@ impl SimulcastEncoder {
       };
       let built = VideoLayerInfo {
         max_bitrate_bps: bitrate_bps,
-        ..*info
+        ..info.clone()
       };
-      rebuilt.push((*info, bitrate_bps, make_encoder(&built)?));
+      rebuilt.push((info.clone(), bitrate_bps, make_encoder(&built)?));
     }
     for (layer, (info, bitrate_bps, encoder)) in self.layers.iter_mut().zip(rebuilt) {
       layer.info = info;
@@ -544,7 +548,7 @@ impl SimulcastEncoder {
       }
       let built = VideoLayerInfo {
         max_bitrate_bps: bitrate_bps,
-        ..layer.info
+        ..layer.info.clone()
       };
       layer.encoder = make_encoder(&built)?;
       layer.bitrate_bps = bitrate_bps;
@@ -612,7 +616,7 @@ impl SimulcastEncoder {
     started: &mut Vec<StartedLayer>,
   ) -> Result<(), VideoCodecError> {
     for (index, layer) in self.layers.iter_mut().enumerate().rev() {
-      if !layer.is_needed {
+      if !layer.is_needed || !layer.is_due(frame.timestamp_us()) {
         continue;
       }
       let size = VideoResolution {
@@ -651,6 +655,22 @@ impl SimulcastEncoder {
     for layer in unfinished {
       self.layers[layer.index].wants_keyframe |= layer.wants_keyframe;
     }
+  }
+}
+
+impl LayerEncoder {
+  /// Whether a frame captured at `timestamp_us` is due for this layer at its frame rate, and if
+  /// so, notes it. A little early counts (three quarters of the interval): captures jitter.
+  fn is_due(&mut self, timestamp_us: u64) -> bool {
+    let interval_us = 1_000_000 / u64::from(self.info.max_framerate.max(1));
+    let is_due = self
+      .maybe_last_frame_us
+      // A timestamp not after the last one (a restarted or synthetic clock) is never held back.
+      .is_none_or(|last| timestamp_us <= last || timestamp_us - last >= interval_us * 3 / 4);
+    if is_due {
+      self.maybe_last_frame_us = Some(timestamp_us);
+    }
+    is_due
   }
 }
 
@@ -766,7 +786,7 @@ mod tests {
     ignore = "needs OpenH264: --features openh264-source"
   )]
   fn h264_round_trip_keeps_the_picture() {
-    let layer = simulcast_layers(HD, 30, 2_000_000, 1)[0];
+    let layer = simulcast_layers(HD, 30, 2_000_000, 1).remove(0);
     let mut encoder = OpenH264Encoder::new(&layer, VideoContent::Camera).unwrap();
     let mut decoder = OpenH264Decoder::new().unwrap();
     let mut last = None;
@@ -1101,13 +1121,13 @@ mod tests {
     ignore = "needs OpenH264: --features openh264-source"
   )]
   fn a_still_screen_of_text_stays_sharp_through_keyframes() {
-    let layer = *screen_layers(
+    let layer = screen_layers(
       HD,
       30,
       ScreenContentMode::Detail,
       &teamcraft_proto::ScreenShareResolution::Standard,
     )
-    .last()
+    .pop()
     .unwrap();
     let mut encoder = OpenH264Encoder::new(&layer, VideoContent::Screen).unwrap();
     let mut decoder = OpenH264Decoder::new().unwrap();
@@ -1228,7 +1248,8 @@ mod tests {
         30,
         100_000,
         1,
-      )[0];
+      )
+      .remove(0);
       let mut encoder = FallbackEncoder::with_software(
         Box::new(FakeEncoder::Failing),
         &layer,
@@ -1367,7 +1388,8 @@ mod tests {
         30,
         100_000,
         1,
-      )[0];
+      )
+      .remove(0);
       let encoder = FallbackEncoder::with_software(
         Box::new(hardware),
         &layer,
@@ -1455,6 +1477,31 @@ mod tests {
         height: layer.height,
       })
       .collect()
+  }
+
+  /// #1733: a share's 15 fps base layer under its 30 fps top gets every second frame; the top
+  /// gets them all.
+  #[test]
+  #[cfg_attr(
+    not(feature = "openh264-source"),
+    ignore = "needs OpenH264: --features openh264-source"
+  )]
+  fn a_slower_layer_gets_only_the_frames_its_rate_allows() {
+    let mut layers = simulcast_layers(HD, 30, 2_000_000, 2);
+    layers[0].max_framerate = 15;
+    let mut simulcast = SimulcastEncoder::new(&layers, |layer| {
+      Ok(Box::new(OpenH264Encoder::new(layer, VideoContent::Camera)?) as Box<dyn VideoEncoder>)
+    })
+    .unwrap();
+    let mut counts = [0usize; 2];
+    for index in 0..30u32 {
+      let frame = text_page(HD, index % 2 == 0).with_timestamp_us(u64::from(index) * 33_333);
+      for picture in simulcast.encode(&frame).unwrap() {
+        counts[usize::from(picture.layer.value())] += 1;
+      }
+    }
+    assert!(counts[0] <= 15, "{counts:?}");
+    assert!(counts[1] > counts[0], "{counts:?}");
   }
 
   fn layers_of(frames: &[EncodedVideoFrame]) -> Vec<u8> {

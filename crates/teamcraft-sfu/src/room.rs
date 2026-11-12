@@ -33,9 +33,9 @@ use teamcraft_media::{
 use teamcraft_proto::{
   Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallRosterEntry, ConversationId,
   DaveTransitionId, DaveTransitionMode, DeviceId, ErrorBody, ErrorCode, MAX_SIMULCAST_LAYERS,
-  MediaCapabilities, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, ScreenShareTakeover, SfuCallRoster,
-  SfuControlAction, TransportFeedback, UnixMillis, UserId, VideoCodec, VideoLayerInfo, VideoPublicationId,
-  VideoTrackKind,
+  MediaCapabilities, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, ScreenShareTakeover, SfuCallIncidents,
+  SfuCallRoster, SfuControlAction, TransportFeedback, UnixMillis, UserId, VideoCodec, VideoLayerInfo,
+  VideoPublicationId, VideoTrackKind,
 };
 use thiserror::Error;
 use tokio::sync::Notify;
@@ -47,7 +47,7 @@ use crate::{
   auth::JoinGrant,
   config::SfuConfig,
   dave_coordinator::{DaveCoordinator, DaveCoordinatorError, DaveDeadlines, Outbound},
-  forwarding::{Effect, ForwardError, Forwarder},
+  forwarding::{DecodableCodecs, Effect, ForwardError, Forwarder},
   quality::CallQuality,
   rate_limit::TokenBucket,
   signaling::Outgoing,
@@ -156,7 +156,7 @@ struct RoomState {
   next_stream_id: u32,
   /// The video codecs each device was last told the others decode (#565); a device without an
   /// entry hears them with its next (re)join.
-  decodable_announced: HashMap<DeviceId, Vec<VideoCodec>>,
+  decodable_announced: HashMap<DeviceId, DecodableCodecs>,
   /// Each device's last screen share another device's replaced, kept for the call (one per
   /// device, also after it left): a device that was away when it happened hears it with its next
   /// `joined` and doesn't publish that share again. Dropped when the device shares again.
@@ -889,6 +889,8 @@ impl Room {
     state.apply(effects);
     let outbound = state.dave.on_timer(now);
     state.dispatch(outbound);
+    let incidents = state.dave.take_incidents();
+    state.quality.incidents(incidents);
   }
 
   /// Feedback on the datagrams `sender` sent since the last call, for its uplink estimation.
@@ -1554,7 +1556,8 @@ impl RoomState {
       self.send_to(
         device_id,
         CallEvent::DecodableVideoCodecs {
-          codecs: codecs.clone(),
+          codecs: codecs.by_all.clone(),
+          decodable_by_some: codecs.by_some.clone(),
         },
       );
       self.decodable_announced.insert(device_id, codecs);
@@ -1580,7 +1583,17 @@ impl RoomState {
 
   fn send_to(&self, device_id: DeviceId, event: CallEvent) {
     if let Some(handle) = self.handle_of(device_id) {
-      send(handle, event);
+      self.send_counted(handle, event);
+    }
+  }
+
+  /// Sends, counting a participant dropped for a full signaling queue as an incident.
+  fn send_counted(&self, handle: &ParticipantHandle, event: CallEvent) {
+    if send(handle, event) == Sent::Overflowed {
+      self.quality.incidents(SfuCallIncidents {
+        signaling_overflows: 1,
+        ..SfuCallIncidents::default()
+      });
     }
   }
 
@@ -1604,7 +1617,7 @@ impl RoomState {
   fn dispatch(&self, outbound: Vec<Outbound>) {
     for Outbound { recipient, event } in outbound {
       match self.handle_of(recipient) {
-        Some(handle) => send(handle, event),
+        Some(handle) => self.send_counted(handle, event),
         None => debug!(
           participant_id = %recipient,
           "dropping DAVE message for a departed or reconnecting participant"
@@ -1626,7 +1639,8 @@ fn rejected(participant_id: DeviceId, result: Result<(), RoomError>) -> Result<(
 /// written first.
 fn close_after_event(handles: Vec<ParticipantHandle>, event: CallEvent, code: u32, reason: &'static [u8]) {
   for handle in &handles {
-    send(handle, event.clone());
+    // They are closed anyway; an overflow says nothing new.
+    let _ = send(handle, event.clone());
   }
   tokio::spawn(async move {
     tokio::time::sleep(CLOSE_GRACE).await;
@@ -1636,16 +1650,30 @@ fn close_after_event(handles: Vec<ParticipantHandle>, event: CallEvent, code: u3
   });
 }
 
-fn send(handle: &ParticipantHandle, event: CallEvent) {
+/// How a [`send`] went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sent {
+  Queued,
+  /// The participant's queue was full: it was disconnected.
+  Overflowed,
+  Closed,
+}
+
+#[must_use]
+fn send(handle: &ParticipantHandle, event: CallEvent) -> Sent {
   match handle.signal_tx.try_send(Outgoing::Event(event)) {
-    Ok(()) => {},
+    Ok(()) => Sent::Queued,
     // A participant that doesn't drain its signaling stream would make the queue grow without bound.
     Err(TrySendError::Full(_)) => {
       warn!("signaling queue full, disconnecting the participant");
       handle.link.close(SIGNALING_OVERFLOW, b"signaling queue overflow");
+      Sent::Overflowed
     },
     // The receiver only disappears when the session ends, which also removes the participant.
-    Err(TrySendError::Closed(_)) => warn!("signaling channel closed"),
+    Err(TrySendError::Closed(_)) => {
+      warn!("signaling channel closed");
+      Sent::Closed
+    },
   }
 }
 
@@ -2052,7 +2080,7 @@ mod tests {
       events
         .iter()
         .filter_map(|event| match event {
-          CallEvent::DecodableVideoCodecs { codecs } => Some(codecs.clone()),
+          CallEvent::DecodableVideoCodecs { codecs, .. } => Some(codecs.clone()),
           _ => None,
         })
         .collect()

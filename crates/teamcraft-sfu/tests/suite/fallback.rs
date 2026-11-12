@@ -245,10 +245,7 @@ mod first_frame {
     let mut stream = tokio::net::TcpStream::connect(sfu.fallback_addr).await.unwrap();
     let mut buffer = [0u8; 16];
     // Half a request, and then nothing.
-    stream
-      .write_all(b"GET /call/fallback HTTP/1.1\r\n")
-      .await
-      .unwrap();
+    stream.write_all(b"GET /call/ws HTTP/1.1\r\n").await.unwrap();
     let closed = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buffer)).await;
     assert!(matches!(closed, Ok(Ok(0) | Err(_))), "{closed:?}");
     wait_until(|| sfu.control.fallback_connections() == 0).await;
@@ -1656,6 +1653,7 @@ async fn run_call_from(
     height: 360,
     max_framerate: 30,
     max_bitrate_bps: 300_000,
+    maybe_codec: None,
   }];
   if is_secured {
     report.was_secured = true;

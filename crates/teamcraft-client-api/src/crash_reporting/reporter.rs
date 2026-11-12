@@ -682,6 +682,7 @@ mod tests {
       message: "boom".to_owned(),
       frames: vec![StackFrame::default()],
       breadcrumbs: Vec::new(),
+      maybe_call: None,
     }
   }
 }

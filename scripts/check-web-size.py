@@ -65,8 +65,9 @@ SPLIT_MODULE = re.compile(
 # who loads it once and then from the service worker's cache.
 DEFAULT_BUDGET_BYTES = 5_610_000
 # The call module's gzip -9 size, decimal megabytes: 0.86 MB with the effects' compositors (#439),
-# plus about 15 %. The segmentation is a module of its own that only loads when an effect starts.
-DEFAULT_CALL_MODULE_BUDGET_BYTES = 1_000_000
+# plus about 15 %; raised to 1.1 MB when the call problem reports (#1762) took it to 1.02 MB. The
+# segmentation is a module of its own that only loads when an effect starts.
+DEFAULT_CALL_MODULE_BUDGET_BYTES = 1_100_000
 CALL_MODULE = "teamcraft-web-calls-*_bg.wasm"
 # Lazy files that only load on demand (marked in the list).
 ON_DEMAND_PREFIX = "teamcraft-web-segmentation-"

@@ -326,12 +326,16 @@ impl WebCallHost {
   pub async fn act(self: &Rc<Self>, action: CallAction) -> Result<CallActionAnswer, String> {
     let module = self.module().await?;
     let json = serde_json::to_string(&action).map_err(|error| error.to_string())?;
+    // A join that failed is reported by the call module with the call's state ("Call problems").
+    let is_join = matches!(action, CallAction::Join { .. });
     module
       .call(EXPORT_ACT, &[JsValue::from_str(&json)])
       .await
       .map(|answer| answer.as_string())
       .map_err(|failure| {
-        crate::crash_reports::capture_call_failure(&failure);
+        if !is_join {
+          crate::crash_reports::capture_call_failure(&failure);
+        }
         failure.to_wire()
       })
   }
@@ -668,11 +672,11 @@ impl Callbacks {
         },
       )
     };
-    // A failure no action waits for (a camera that stopped mid-call), as `ActionFailure` wire text.
+    // A failure no action waits for (a camera that stopped mid-call, a call that ended with an
+    // error), as `ActionFailure` wire text. The call module reports a call's end with the call's
+    // state itself ("Call problems"); a camera that stopped is the device's, not worth a report.
     let failed = Closure::<dyn Fn(String)>::new(|wire: String| {
-      let failure = ActionFailure::from_wire(&wire);
-      crate::crash_reports::capture_call_failure(&failure);
-      crate::feedback::report_failure(failure);
+      crate::feedback::report_failure(ActionFailure::from_wire(&wire));
     });
     // The organization's background rule and the pictures behind the camera, from the core (#439).
     let background_rule = Closure::<dyn Fn() -> Promise>::new(|| {

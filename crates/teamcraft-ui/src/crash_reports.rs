@@ -17,12 +17,12 @@ use leptos::prelude::*;
 use serde::Deserialize;
 use teamcraft_client_api::crash_reporting::trace::{self, TraceSettings, WireTraceTree};
 use teamcraft_client_api::crash_reporting::{
-  AppInfo, AppPlatform, CrashEvent, CrashLevel, CrashReporter, CrashReportingConfig, CrashReportingConsent,
-  CrashSendOutcome, ErrorSource, EventId, InstallationId, PanicParts, PendingPanic, StackFrame, Transaction,
-  frames_from_script_stack, without_ids,
+  AppInfo, AppPlatform, BrowserInfo, CallReport, CallReportGate, CrashEvent, CrashLevel, CrashReporter,
+  CrashReportingConfig, CrashReportingConsent, CrashSendOutcome, ErrorSource, EventId, InstallationId,
+  PanicParts, PendingPanic, StackFrame, Transaction, frames_from_script_stack, without_ids,
 };
 use teamcraft_client_api::debug_log;
-use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
+use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::server_entry::SERVER_INFO_PATH;
 use teamcraft_proto::{CRASH_REPORTS_PATH, ServerInfoResponse};
 use wasm_bindgen::JsCast;
@@ -52,6 +52,7 @@ thread_local! {
   static SIGN_OUT_REPORTS: Cell<u32> = const { Cell::new(0) };
   static STORAGE_REPORTS: Cell<u32> = const { Cell::new(0) };
   static CALL_REPORTS: Cell<u32> = const { Cell::new(0) };
+  static CALL_GATE: RefCell<CallReportGate> = RefCell::new(CallReportGate::new(0));
   static STATUS: RwSignal<Option<CrashReportsStatus>> = RwSignal::new(None);
 }
 
@@ -385,12 +386,44 @@ pub fn capture_lost_sign_in(reason: &'static str) {
 /// message starts with the failure's stable wire name (`call_encryption_failed: …`), IDs taken
 /// out, so one cause is one issue; the breadcrumbs carry the call module's log next to the page's.
 pub fn capture_call_failure(failure: &ActionFailure) {
-  if !is_reported_call_failure(&failure.kind)
+  if !failure.kind.is_reported_call_failure()
     || CALL_REPORTS.with(|count| count.replace(count.get() + 1)) >= MAX_CALL_REPORTS
   {
     return;
   }
   capture_handled("CallFailed", without_ids(&failure.to_wire()));
+}
+
+/// The media layer's problem reports from a call snapshot (docs/crash-reports.md, "Call
+/// problems"): each once, at most the instance's cap per call, sampled like other handled errors.
+/// The web page adds the browser's family and major version; the desktop's media is native.
+pub fn capture_call_reports(reports: &[CallReport]) {
+  if reports.is_empty() {
+    return;
+  }
+  let per_call = with_reporter(|reporter| reporter.config().map(|config| config.call_reports_per_call))
+    .flatten()
+    .unwrap_or(0);
+  let now = now_ms();
+  let admitted: Vec<CallReport> = CALL_GATE.with(|gate| {
+    let mut gate = gate.borrow_mut();
+    gate.set_per_call(per_call);
+    reports
+      .iter()
+      .filter(|report| gate.admit(report, now))
+      .cloned()
+      .collect()
+  });
+  if admitted.is_empty() {
+    return;
+  }
+  let maybe_browser = (!tauri::is_available()).then(browser);
+  for report in admitted {
+    let event = report.into_event(event_id(), maybe_browser, breadcrumbs());
+    with_reporter(|reporter| reporter.capture(event, random_roll()));
+  }
+  store_queue();
+  flush();
 }
 
 /// IndexedDB failed (`teamcraft_core::store::IdbFailureHook`): the operation and the
@@ -418,6 +451,7 @@ fn capture_script_error(error_type: &str, message: String, frames: Vec<StackFram
     message,
     frames,
     breadcrumbs: breadcrumbs(),
+    maybe_call: None,
   };
   with_reporter(|reporter| reporter.capture(event, random_roll()));
   store_queue();
@@ -436,6 +470,7 @@ pub(crate) fn capture_handled(error_type: &str, message: String) {
     message,
     frames: Vec::new(),
     breadcrumbs: breadcrumbs(),
+    maybe_call: None,
   };
   with_reporter(|reporter| reporter.capture(event, random_roll()));
   store_queue();
@@ -487,6 +522,14 @@ fn app_info() -> AppInfo {
     os_name: os_name(),
     maybe_os_version: None,
   }
+}
+
+/// The browser's family and major version from the user agent, for call reports.
+fn browser() -> BrowserInfo {
+  let agent = web_sys::window()
+    .and_then(|window| window.navigator().user_agent().ok())
+    .unwrap_or_default();
+  BrowserInfo::from_user_agent(&agent)
 }
 
 /// The OS family from the user agent; nothing finer (no browser version, no device).
@@ -558,19 +601,6 @@ fn page_breadcrumbs() -> Vec<String> {
   let mut lines = debug_log::recent_lines();
   lines.extend(trace::breadcrumb_lines(js_sys::Date::now()));
   lines
-}
-
-/// Failures worth a report: the call's own (encryption, a browser API that failed, the call server
-/// out of reach) and the browser lacking what calls need. Refused devices and the like are the
-/// user's to fix and say nothing new.
-fn is_reported_call_failure(kind: &FailureKind) -> bool {
-  matches!(
-    kind,
-    FailureKind::Other
-      | FailureKind::Call(
-        CallFailure::EncryptionFailed | CallFailure::Unsupported | CallFailure::ServerUnreachable
-      )
-  )
 }
 
 /// Collection follows the reporter (docs/tracing.md): in the page's own process, and on desktop in

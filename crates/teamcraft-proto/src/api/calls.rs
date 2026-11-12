@@ -19,7 +19,7 @@ pub struct CallJoinTokenResponse {
   /// WebTransport URL of the SFU, e.g. `https://sfu.example.com:4433/call`.
   pub sfu_url: String,
   /// WebSocket URL of the SFU's fallback for networks that block UDP (ARCHITECTURE.md §6.6), e.g.
-  /// `wss://sfu.example.com/call/fallback`. Clients use it only when QUIC doesn't connect. Absent
+  /// `wss://sfu.example.com/call/ws`. Clients use it only when QUIC doesn't connect. Absent
   /// from older servers, and when the instance turned the fallback off.
   #[serde(rename = "sfu_fallback_url", default, skip_serializing_if = "Option::is_none")]
   pub maybe_sfu_fallback_url: Option<String>,
@@ -194,6 +194,48 @@ pub struct SfuCallQuality {
   pub quic_sessions: u32,
   /// Sessions that joined over the WebSocket fallback (UDP blocked on the way).
   pub fallback_sessions: u32,
+  /// What went wrong in the window (docs/crash-reports.md, "The SFU's incidents"). Absent from an
+  /// older SFU: none.
+  #[serde(default)]
+  pub incidents: SfuCallIncidents,
+}
+
+/// Incidents of the SFU's calls since its last report, counted, no call or device named; the server
+/// reports them to the crash reports' backend, rate limited.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SfuCallIncidents {
+  /// DAVE groups started over because no member committed the proposals in time (#1555).
+  #[serde(default)]
+  pub dave_restarts: u32,
+  /// Strikes given to joiners of those stalled proposals.
+  #[serde(default)]
+  pub dave_strikes: u32,
+  /// Joiners refused after stalling the group too often.
+  #[serde(default)]
+  pub dave_refusals: u32,
+  /// DAVE transitions executed at their deadline before every member was ready.
+  #[serde(default)]
+  pub dave_late_transitions: u32,
+  /// Participants disconnected because their signaling queue overflowed.
+  #[serde(default)]
+  pub signaling_overflows: u32,
+}
+
+impl SfuCallIncidents {
+  pub fn is_empty(&self) -> bool {
+    *self == Self::default()
+  }
+
+  /// Adds `other`'s counts, saturating.
+  pub fn add(&mut self, other: Self) {
+    self.dave_restarts = self.dave_restarts.saturating_add(other.dave_restarts);
+    self.dave_strikes = self.dave_strikes.saturating_add(other.dave_strikes);
+    self.dave_refusals = self.dave_refusals.saturating_add(other.dave_refusals);
+    self.dave_late_transitions = self
+      .dave_late_transitions
+      .saturating_add(other.dave_late_transitions);
+    self.signaling_overflows = self.signaling_overflows.saturating_add(other.signaling_overflows);
+  }
 }
 
 /// One call on the SFU, with every device in it (also those reconnecting). Also the answer of the
@@ -291,14 +333,26 @@ mod tests {
         loss_buckets: vec![3, 0, 0, 0, 1, 0, 0, 0, 0],
         quic_sessions: 4,
         fallback_sessions: 1,
+        incidents: SfuCallIncidents {
+          dave_restarts: 1,
+          dave_strikes: 2,
+          ..SfuCallIncidents::default()
+        },
       }),
     };
     let json = serde_json::to_string(&report).unwrap();
     assert_eq!(
       json,
-      r#"{"uptime_secs":5,"calls":[],"quality":{"loss_buckets":[3,0,0,0,1,0,0,0,0],"quic_sessions":4,"fallback_sessions":1}}"#
+      concat!(
+        r#"{"uptime_secs":5,"calls":[],"quality":{"loss_buckets":[3,0,0,0,1,0,0,0,0],"quic_sessions":4,"#,
+        r#""fallback_sessions":1,"incidents":{"dave_restarts":1,"dave_strikes":2,"dave_refusals":0,"#,
+        r#""dave_late_transitions":0,"signaling_overflows":0}}}"#
+      )
     );
     assert_eq!(serde_json::from_str::<SfuRosterReport>(&json).unwrap(), report);
+    let older: SfuCallQuality =
+      serde_json::from_str(r#"{"loss_buckets":[],"quic_sessions":1,"fallback_sessions":0}"#).unwrap();
+    assert!(older.incidents.is_empty());
   }
 
   #[test]
