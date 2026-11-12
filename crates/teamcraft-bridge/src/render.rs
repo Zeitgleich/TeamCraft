@@ -3,6 +3,7 @@
 
 use serde::Deserialize;
 use serde_json::Value;
+use teamcraft_proto::{find_level, parse_level_field};
 
 use crate::batch::LogLine;
 
@@ -245,7 +246,16 @@ pub fn parse_log_lines(content_type: &str, body: &[u8], rules: &LogRules) -> Vec
     .collect()
 }
 
-/// `[LEVEL] message` from an object with a message field; `None` if it isn't one.
+/// Fields of an NDJSON object that carry the message, the level and the time, in order of
+/// preference (`MESSAGE` and `PRIORITY` are journald's `-o json`).
+const MESSAGE_FIELDS: [&str; 5] = ["message", "msg", "text", "log", "MESSAGE"];
+const LEVEL_FIELDS: [&str; 5] = ["level", "severity", "lvl", "levelname", "PRIORITY"];
+const TIME_FIELDS: [&str; 4] = ["time", "ts", "timestamp", "@timestamp"];
+
+/// `[LEVEL] time message` from an object with a message field; `None` if it isn't one. The level
+/// comes first so the apps, which read it with the same detection (`teamcraft_proto::find_level`),
+/// show it as the line's level and cut the prefix off. The level is a word or a number (syslog
+/// priority `0..=7`, journald's `PRIORITY`; `10..=60` of bunyan and pino).
 fn json_line(line: &str) -> Option<(String, Option<String>)> {
   let value: Value = serde_json::from_str(line).ok()?;
   let object = value.as_object()?;
@@ -257,44 +267,28 @@ fn json_line(line: &str) -> Option<(String, Option<String>)> {
         .or_else(|| Some(value.to_string()))
     })
   };
-  let message = field(&["message", "msg", "text", "log"])?;
-  let level = field(&["level", "severity", "lvl"]).map(|level| level.to_lowercase());
-  let time = field(&["time", "ts", "timestamp", "@timestamp"]);
+  let message = field(&MESSAGE_FIELDS)?;
+  let raw_level = field(&LEVEL_FIELDS);
+  let time = field(&TIME_FIELDS);
+  let parsed = raw_level.as_deref().and_then(parse_level_field);
   let mut text = String::new();
+  match (parsed, &raw_level) {
+    (Some((_, name)), _) => text.push_str(&format!("[{}] ", name.to_uppercase())),
+    (None, Some(raw)) => text.push_str(&format!("[{}] ", raw.to_uppercase())),
+    (None, None) => {},
+  }
   if let Some(time) = time {
     text.push_str(&time);
     text.push(' ');
   }
-  if let Some(level) = &level {
-    text.push_str(&format!("[{}] ", level.to_uppercase()));
-  }
   text.push_str(&message);
-  Some((text, level))
+  Some((text, parsed.map(|(_, name)| name.to_owned())))
 }
 
-/// A level word at the start or in brackets of an unstructured line: `ERROR something`, `[warn] x`.
+/// The canonical name of the level an unstructured line names near its start (see
+/// [`teamcraft_proto::find_level`]): `ERROR something`, `2026-11-12T10:00:00Z WARN x`, `level=error`.
 fn plain_level(line: &str) -> Option<String> {
-  let first = line
-    .split(|c: char| c.is_whitespace() || c == ':')
-    .find(|part| !part.is_empty())?
-    .trim_matches(['[', ']']);
-  let lower = first.to_lowercase();
-  matches!(
-    lower.as_str(),
-    "trace"
-      | "debug"
-      | "info"
-      | "notice"
-      | "warn"
-      | "warning"
-      | "error"
-      | "err"
-      | "fatal"
-      | "critical"
-      | "alert"
-      | "emergency"
-  )
-  .then_some(lower)
+  find_level(line).map(|found| found.name.to_owned())
 }
 
 #[cfg(test)]
@@ -435,10 +429,125 @@ not json at all
       assert_eq!(
         summary,
         [
-          ("2026-10-22T10:00:00Z [ERROR] db down", true),
+          ("[ERROR] 2026-10-22T10:00:00Z db down", true),
           ("[INFO] ok", false),
           ("not json at all", false),
           (r#"{"unrelated":1}"#, false)
+        ]
+      );
+    }
+
+    #[test]
+    fn timestamped_lines_alert_on_their_level() {
+      let body = "\
+2026-11-12T10:00:00Z ERROR disk full\n\
+2026-11-12T10:00:00+0100 host unit[42]: FATAL: out of memory\n\
+Nov 12 10:00:00 host app[1]: ERROR boom\n\
+time=2026-11-12T10:00:00Z level=error msg=boom\n\
+2026/11/12 10:00:00 [error] 12#0: upstream\n\
+2026-11-12T10:00:00Z host app[1]: no error found\n\
+2026-11-12T10:00:00Z INFO all fine\n";
+      let lines = parse_log_lines("text/plain", body.as_bytes(), &rules());
+      let alerts: Vec<bool> = lines.iter().map(|line| line.is_alert).collect();
+      assert_eq!(alerts, [true, true, true, true, true, false, false]);
+    }
+
+    #[test]
+    fn journald_json_uses_message_and_priority() {
+      let body = br#"{"MESSAGE":"disk full","PRIORITY":"3","__REALTIME_TIMESTAMP":"1"}
+{"MESSAGE":"started","PRIORITY":"6"}
+{"MESSAGE":"crashed","PRIORITY":2}
+{"msg":"slow","level":40}
+{"msg":"dead","level":60}
+{"msg":"odd","level":"loud"}
+"#;
+      let lines = parse_log_lines("application/x-ndjson", body, &rules());
+      let summary: Vec<_> = lines.iter().map(|l| (l.text.as_str(), l.is_alert)).collect();
+      assert_eq!(
+        summary,
+        [
+          ("[ERROR] disk full", true),
+          ("[INFO] started", false),
+          ("[CRITICAL] crashed", false),
+          ("[WARN] slow", false),
+          ("[FATAL] dead", true),
+          ("[LOUD] odd", false),
+        ]
+      );
+    }
+
+    #[test]
+    fn garbage_and_oversized_lines_are_kept_without_a_level() {
+      let huge = format!("{{\"msg\":\"{}\",\"level\":\"error\"}}", "x".repeat(1_000_000));
+      let lines = parse_log_lines("application/x-ndjson", huge.as_bytes(), &rules());
+      assert_eq!(lines.len(), 1);
+      assert!(lines[0].is_alert);
+      let lines = parse_log_lines("text/plain", &[0xff, 0, b'[', b'['], &rules());
+      assert_eq!(lines.len(), 1);
+      assert!(!lines[0].is_alert);
+    }
+
+    /// What the bridge writes is read back by the apps' log view to the same level.
+    #[test]
+    fn a_line_written_by_the_bridge_has_the_same_level_in_the_apps() {
+      use teamcraft_client_api::model::{LogLevel, Message, MessageKind, as_log_line, id_from_raw};
+
+      let ndjson = br#"{"time":"2026-11-12T10:00:00Z","level":"ERROR","msg":"db down"}
+{"time":"2026-11-12T10:00:00Z","level":"warn","msg":"slow"}
+{"MESSAGE":"fine","PRIORITY":"6"}
+{"MESSAGE":"gone","PRIORITY":"1"}
+{"msg":"noisy","level":20}
+"#;
+      let plain = b"2026-11-12T10:00:00Z ERROR disk full\nlevel=warn msg=slow\nstarted\n";
+      let levels = |content_type: &str, body: &[u8]| {
+        parse_log_lines(content_type, body, &rules())
+          .into_iter()
+          .map(|line| (line.is_alert, app_level(&line.text)))
+          .collect::<Vec<_>>()
+      };
+      fn chat_message(body: &str) -> Message {
+        Message {
+          id: id_from_raw(1),
+          conversation: id_from_raw(2),
+          author: id_from_raw(3),
+          kind: MessageKind::User,
+          sent_at: 0,
+          body: body.to_owned(),
+          is_edited: false,
+          reactions: Vec::new(),
+          reply_count: 0,
+          maybe_thread: None,
+          maybe_imported: None,
+          maybe_source: None,
+          maybe_placeholder: None,
+          group_mentions: Vec::new(),
+          custom_emoji: Vec::new(),
+          mentions_me: false,
+          maybe_poll: None,
+        }
+      }
+      fn app_level(text: &str) -> LogLevel {
+        match as_log_line(chat_message(text)).kind {
+          MessageKind::Log(level) => level,
+          other => panic!("not a log line: {other:?}"),
+        }
+      }
+      assert_eq!(
+        levels("application/x-ndjson", ndjson),
+        [
+          (true, LogLevel::Error),
+          (false, LogLevel::Warn),
+          (false, LogLevel::Info),
+          (false, LogLevel::Error),
+          (false, LogLevel::Debug),
+        ]
+      );
+      assert_eq!(
+        levels("text/plain", plain),
+        [
+          (true, LogLevel::Error),
+          (false, LogLevel::Warn),
+          (false, LogLevel::Info)
         ]
       );
     }

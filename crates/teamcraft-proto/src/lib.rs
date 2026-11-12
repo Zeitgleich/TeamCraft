@@ -17,6 +17,7 @@ mod id;
 mod import;
 mod integration;
 pub mod live;
+mod log_level;
 mod notetaker;
 mod permission;
 mod poll;
@@ -71,6 +72,7 @@ pub use integration::{
   SourceId, SourceIdentity, SourceKind, SourceOptions, SourcePictureError, SourcePictureHash,
   SourceTokenHash, SourceTokenHashError, check_source_picture, clean_source_name,
 };
+pub use log_level::{LevelMatch, LogLevel, find_level, level_from_number, parse_level_field};
 pub use notetaker::{
   DEFAULT_SUMMARY_MODEL, DEFAULT_SUMMARY_PROMPT, DEFAULT_TRANSCRIPTION_MODEL, LANGUAGE_AUTO, MAX_MODEL_CHARS,
   MAX_PROMPT_CHARS, NotetakerInviters, NotetakerPolicy, NotetakerPolicyError, NotetakerRequest,

@@ -22,11 +22,16 @@ runs the server. Full reference: [docs/bridge.md](../../bridge.md).
 3. **Configure the bridge** from
    [teamcraft-bridge.example.toml](../../../crates/teamcraft-bridge/teamcraft-bridge.example.toml):
    server URL, bot token (`bot_token_file` or `TEAMCRAFT_BRIDGE_SERVER__BOT_TOKEN`), a database key
-   (`openssl rand -base64 32`), a recovery passphrase, and one `[[sources]]` block per producer with
-   its token and target `conversation_id`.
+   (`openssl rand -base64 32`) and a recovery passphrase. Sources are not in the file: a workspace
+   admin adds them in the app (step 5).
 4. **Start it.** The first run enrolls the bot's device. A **member then adds the bot to each
    channel from a client**: that commits the bot into the encrypted group and hands it the keys. The
    bridge never adds itself.
+5. **Add a source** (workspace admin): in **Channel settings → Integrations → Sources**, choose
+   **Add source**, pick webhook or log lines and a name. The app shows the URL with its token **once**; copy it into the
+   producer. The bridge reads the source from the channel itself and serves it within seconds, with
+   no restart. To replace a leaked URL, revoke the source and add a new one
+   ([docs/bridge.md](../../bridge.md#sources)).
 
 ## Sending data
 
@@ -47,6 +52,13 @@ configured address" and selects it first; see [docs/bridge.md](../../bridge.md#w
 Log lines are batched into one message per second (or 64 KB). Sources have a rate limit (600/min by
 default); alert levels and `danger` webhook attachments can @mention people.
 
+**Levels.** A line's level is found after a timestamp or host prefix too (`2026-11-12T10:00:00Z ERROR
+disk full`, `[warn] …`, `level=error`); a level word inside a sentence ("no error found") does not
+count. Lines without a level are `info`. For systemd, send the journal as JSON
+(`journalctl -u myservice -f -o json | curl -T - -H 'Content-Type: application/x-ndjson' …`): its
+numeric `PRIORITY` becomes the level, while `-o short-iso` carries none. Details:
+[docs/bridge.md, "Levels"](../../bridge.md#levels).
+
 A producer that retries webhooks should send an `Idempotency-Key` header (one random value per
 message, the same with every attempt): a retry after a lost answer is then answered without posting
 twice. Keys are kept for 10 minutes, in memory (docs/bridge.md, "Retries").
@@ -64,7 +76,7 @@ twice. Keys are kept for 10 minutes, in memory (docs/bridge.md, "Retries").
 ## Limits
 
 Webhooks take text and files (`multipart/form-data`, within the bridge's `[files]` limits; see the
-bridge docs, "Files"); source configuration is read at start.
+bridge docs, "Files"). Sources are read from the channel and need no restart.
 
 ## Log view
 
