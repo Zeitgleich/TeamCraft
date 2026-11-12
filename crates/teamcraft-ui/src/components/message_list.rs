@@ -42,7 +42,7 @@ const PREFETCH_VIEWPORTS: f64 = 4.0;
 /// Distance from the bottom that still counts as "following the latest message".
 const STICK_THRESHOLD_PX: f64 = 8.0;
 const ESTIMATED_MESSAGE_HEIGHT: f32 = 68.0;
-const ESTIMATED_LOG_HEIGHT: f32 = 22.0;
+pub(crate) const ESTIMATED_LOG_HEIGHT: f32 = 22.0;
 /// New messages looked at for the first one from somebody else (the divider goes there).
 const MAX_NEW_SCAN: usize = 50;
 /// How long after a scrolling key its scroll events count as the user's.
@@ -1751,10 +1751,13 @@ pub(crate) fn handle_list_keys(
     (Some(position), _) => (position + 1).min(items.len() - 1),
   };
   if let Some(item) = items.get(target) {
+    // A log row can be wider than the pane: moving between rows only scrolls vertically, so the
+    // part of a long line being read stays where it is (#1744).
+    let left = container_element.scroll_left();
     drop(item.focus());
     item.scroll_into_view();
+    container_element.set_scroll_left(left);
   }
-  let _ = container_element;
 }
 
 #[cfg(test)]
