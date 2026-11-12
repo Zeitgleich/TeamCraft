@@ -676,6 +676,7 @@ mod admitters {
         expires_at_ms: u64::try_from(ACCESS_ENDS_MS).unwrap(),
         link_admission: LinkAdmission::Lobby,
         admitters,
+        maybe_invitees: None,
       }
     }
 

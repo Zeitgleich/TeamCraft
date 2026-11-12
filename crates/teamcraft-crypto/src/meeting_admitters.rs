@@ -8,9 +8,16 @@
 //! sequence number that only grows and an end of validity. The server stores and serves it; a guest
 //! checks it against `v`, a member against the organizer's pinned key, so a server can't add an
 //! admitter, move a list to another meeting, or bring back an older list to whoever saw a newer one.
+//!
+//! From version 2 the statement also names the meeting's invitees (#1726, e2ee.md §4.6.5,
+//! "Meetings (D10)"): a host's Join adds only users the organizer signed, so a server can't slip
+//! an uninvited user past "only invited". A version 1 statement still verifies; it names no
+//! invitees ([`VerifiedMeetingAdmitters::maybe_invitees`] is `None`).
+
+use std::io::Write;
 
 use tls_codec::{
-  DeserializeBytes as _, Serialize as _, Size as _, TlsDeserializeBytes, TlsSerialize, TlsSize,
+  DeserializeBytes, Serialize as _, Size as _, TlsDeserializeBytes, TlsSerialize, TlsSize,
 };
 
 use crate::domain;
@@ -19,15 +26,29 @@ use crate::identity::{
 };
 use crate::ids::{ConversationId, MeetingId, UserId};
 
+/// The first version: admitters, no invitees.
 const MEETING_ADMITTERS_VERSION: u8 = 1;
+/// Admitters and the invitees (#1726).
+const MEETING_INVITEES_VERSION: u8 = 2;
 /// At most this many admitters besides the organizer (a meeting chat's people).
 pub const MAX_ADMITTERS: usize = 1_000;
+/// At most this many invited users (the server's `max_invitees` is lower by default).
+pub const MAX_INVITEES: usize = 1_000;
 /// An encoded statement is never larger: the server refuses larger ones before reading them.
 pub const MAX_ENCODED_BYTES: usize = 64 * 1024;
 
-/// The admitters of one meeting, as the organizer states them.
-#[derive(Clone, Debug, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+/// The admitters of one meeting, as the organizer states them. Encoded as [`AdmittersBody`], then,
+/// from version 2, the invitees.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MeetingAdmitters {
+  body: AdmittersBody,
+  /// Sorted, one entry per user; `Some` exactly from version 2.
+  maybe_invitees: Option<Vec<UserId>>,
+}
+
+/// The fields of every version, in their version 1 encoding.
+#[derive(Clone, Debug, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+struct AdmittersBody {
   version: u8,
   meeting_id: MeetingId,
   conversation_id: ConversationId,
@@ -68,6 +89,10 @@ pub struct AdmittersDraft {
   pub link_admission: LinkAdmission,
   /// In any order; the statement sorts them. One entry per user.
   pub admitters: Vec<Admitter>,
+  /// The users the organizer invited, in any order (the statement sorts them), or `None` for a
+  /// version 1 statement without them (signed while older apps that can't read version 2 may still
+  /// check it).
+  pub maybe_invitees: Option<Vec<UserId>>,
 }
 
 /// A statement with the organizer's signature, as the server stores it.
@@ -122,7 +147,9 @@ pub enum MeetingAdmittersError {
   Rollback { seen: u64, offered: u64 },
   #[error("{0} admitters are more than allowed")]
   TooManyAdmitters(usize),
-  #[error("the admitters are not sorted by user, or name a user twice")]
+  #[error("{0} invitees are more than allowed")]
+  TooManyInvitees(usize),
+  #[error("the admitters or invitees are not sorted by user, or name a user twice")]
   NotCanonical,
   #[error("the admitters take {0} bytes, more than allowed")]
   TooLarge(usize),
@@ -139,15 +166,33 @@ impl AdmittersDraft {
     if admitters.len() > MAX_ADMITTERS {
       return Err(MeetingAdmittersError::TooManyAdmitters(admitters.len()));
     }
+    let maybe_invitees = self.maybe_invitees.map(|mut invitees| {
+      invitees.sort_unstable();
+      invitees.dedup();
+      invitees
+    });
+    if let Some(invitees) = &maybe_invitees
+      && invitees.len() > MAX_INVITEES
+    {
+      return Err(MeetingAdmittersError::TooManyInvitees(invitees.len()));
+    }
+    let version = if maybe_invitees.is_some() {
+      MEETING_INVITEES_VERSION
+    } else {
+      MEETING_ADMITTERS_VERSION
+    };
     let statement = MeetingAdmitters {
-      version: MEETING_ADMITTERS_VERSION,
-      meeting_id: self.meeting_id,
-      conversation_id: self.conversation_id,
-      organizer: organizer.public_key(),
-      sequence: self.sequence,
-      expires_at_ms: self.expires_at_ms,
-      link_admission: self.link_admission.to_byte(),
-      admitters,
+      body: AdmittersBody {
+        version,
+        meeting_id: self.meeting_id,
+        conversation_id: self.conversation_id,
+        organizer: organizer.public_key(),
+        sequence: self.sequence,
+        expires_at_ms: self.expires_at_ms,
+        link_admission: self.link_admission.to_byte(),
+        admitters,
+      },
+      maybe_invitees,
     };
     let signature = organizer.sign_labeled(domain::MEETING_ADMITTERS, &statement.tls_serialize_detached()?);
     let signed = SignedMeetingAdmitters { statement, signature };
@@ -170,17 +215,17 @@ impl SignedMeetingAdmitters {
 
   /// The claimed meeting, before verification (the server files the statement under it).
   pub fn unverified_meeting_id(&self) -> MeetingId {
-    self.statement.meeting_id
+    self.statement.body.meeting_id
   }
 
   /// The claimed meeting chat, before verification.
   pub fn unverified_conversation_id(&self) -> ConversationId {
-    self.statement.conversation_id
+    self.statement.body.conversation_id
   }
 
   /// The claimed sequence number, before verification.
   pub fn unverified_sequence(&self) -> u64 {
-    self.statement.sequence
+    self.statement.body.sequence
   }
 
   /// Whether the statement is well formed and signed by the key it names. The server's sanity
@@ -196,7 +241,7 @@ impl SignedMeetingAdmitters {
     &self,
     expected: &AdmittersExpectation<'_>,
   ) -> Result<VerifiedMeetingAdmitters, MeetingAdmittersError> {
-    let statement = &self.statement;
+    let statement = &self.statement.body;
     if statement.organizer.fingerprint() != *expected.organizer {
       return Err(MeetingAdmittersError::WrongOrganizer);
     }
@@ -229,7 +274,7 @@ impl SignedMeetingAdmitters {
       });
     }
     Ok(VerifiedMeetingAdmitters {
-      statement: statement.clone(),
+      statement: self.statement.clone(),
     })
   }
 
@@ -242,15 +287,18 @@ impl SignedMeetingAdmitters {
   }
 
   fn check_signed_by_named_key(&self) -> Result<(), MeetingAdmittersError> {
-    let statement = &self.statement;
-    if statement.version != MEETING_ADMITTERS_VERSION {
+    let statement = &self.statement.body;
+    if !matches!(
+      statement.version,
+      MEETING_ADMITTERS_VERSION | MEETING_INVITEES_VERSION
+    ) {
       return Err(MeetingAdmittersError::UnsupportedVersion(statement.version));
     }
     statement
       .organizer
       .verify_labeled(
         domain::MEETING_ADMITTERS,
-        &statement.tls_serialize_detached()?,
+        &self.statement.tls_serialize_detached()?,
         &self.signature,
       )
       .map_err(MeetingAdmittersError::InvalidSignature)?;
@@ -265,34 +313,43 @@ impl SignedMeetingAdmitters {
     if !is_canonical {
       return Err(MeetingAdmittersError::NotCanonical);
     }
+    if let Some(invitees) = &self.statement.maybe_invitees {
+      if invitees.len() > MAX_INVITEES {
+        return Err(MeetingAdmittersError::TooManyInvitees(invitees.len()));
+      }
+      if !invitees.windows(2).all(|pair| pair[0] < pair[1]) {
+        return Err(MeetingAdmittersError::NotCanonical);
+      }
+    }
     Ok(())
   }
 }
 
 impl VerifiedMeetingAdmitters {
   pub fn sequence(&self) -> u64 {
-    self.statement.sequence
+    self.statement.body.sequence
   }
 
   pub fn expires_at_ms(&self) -> u64 {
-    self.statement.expires_at_ms
+    self.statement.body.expires_at_ms
   }
 
   pub fn link_admission(&self) -> LinkAdmission {
     // Checked in `verify`.
-    LinkAdmission::from_byte(self.statement.link_admission).unwrap_or(LinkAdmission::Lobby)
+    LinkAdmission::from_byte(self.statement.body.link_admission).unwrap_or(LinkAdmission::Lobby)
   }
 
   pub fn admitters(&self) -> &[Admitter] {
-    &self.statement.admitters
+    &self.statement.body.admitters
   }
 
   /// Whether `user` with exactly `identity_key` may let guests in: a listed admitter, or the
   /// organizer (whose key signed the list).
   pub fn is_admitter(&self, user: UserId, identity_key: &IdentityPublicKey) -> bool {
-    *identity_key == self.statement.organizer
+    *identity_key == self.statement.body.organizer
       || self
         .statement
+        .body
         .admitters
         .iter()
         .any(|admitter| admitter.user_id == user && admitter.identity_key == *identity_key)
@@ -303,13 +360,77 @@ impl VerifiedMeetingAdmitters {
     self.is_admitter(device.user_id(), device.identity_key())
   }
 
-  /// Whether `other` names the same admitters with the same link admission (sequence and end of
-  /// validity aside): the organizer's device signs anew only when this changes or the end nears.
-  pub fn has_same_admitters(&self, admitters: &[Admitter], link_admission: LinkAdmission) -> bool {
+  /// The users the organizer invited, sorted; `None` for a version 1 statement, which doesn't say.
+  pub fn maybe_invitees(&self) -> Option<&[UserId]> {
+    self.statement.maybe_invitees.as_deref()
+  }
+
+  /// Whether the statement names the same admitters, link admission and invitees as `draft`
+  /// (sequence and end of validity aside): the organizer's device signs anew only when this
+  /// changes or the end nears. A version 1 statement differs from a draft with invitees.
+  pub fn has_same_content(
+    &self,
+    admitters: &[Admitter],
+    link_admission: LinkAdmission,
+    maybe_invitees: Option<&[UserId]>,
+  ) -> bool {
     let mut sorted = admitters.to_vec();
     sorted.sort_by_key(|admitter| admitter.user_id);
     sorted.dedup_by_key(|admitter| admitter.user_id);
-    self.statement.admitters == sorted && self.link_admission() == link_admission
+    let maybe_sorted_invitees = maybe_invitees.map(|invitees| {
+      let mut invitees = invitees.to_vec();
+      invitees.sort_unstable();
+      invitees.dedup();
+      invitees
+    });
+    self.statement.body.admitters == sorted
+      && self.link_admission() == link_admission
+      && self.statement.maybe_invitees == maybe_sorted_invitees
+  }
+}
+
+impl tls_codec::Size for MeetingAdmitters {
+  fn tls_serialized_len(&self) -> usize {
+    self.body.tls_serialized_len()
+      + self
+        .maybe_invitees
+        .as_ref()
+        .map_or(0, tls_codec::Size::tls_serialized_len)
+  }
+}
+
+impl tls_codec::Serialize for MeetingAdmitters {
+  fn tls_serialize<W: Write>(&self, writer: &mut W) -> Result<usize, tls_codec::Error> {
+    let mut written = self.body.tls_serialize(writer)?;
+    if let Some(invitees) = &self.maybe_invitees {
+      written += invitees.tls_serialize(writer)?;
+    }
+    Ok(written)
+  }
+}
+
+impl DeserializeBytes for MeetingAdmitters {
+  /// Version 1 ends after the body; version 2 has the invitees after it. Any other version is
+  /// read as version 1, so its remaining bytes fail the exact decoding.
+  fn tls_deserialize_bytes(bytes: &[u8]) -> Result<(Self, &[u8]), tls_codec::Error> {
+    let (body, rest) = AdmittersBody::tls_deserialize_bytes(bytes)?;
+    if body.version != MEETING_INVITEES_VERSION {
+      return Ok((
+        Self {
+          body,
+          maybe_invitees: None,
+        },
+        rest,
+      ));
+    }
+    let (invitees, rest) = Vec::<UserId>::tls_deserialize_bytes(rest)?;
+    Ok((
+      Self {
+        body,
+        maybe_invitees: Some(invitees),
+      },
+      rest,
+    ))
   }
 }
 
@@ -373,9 +494,127 @@ mod tests {
     let ids: Vec<u64> = verified.admitters().iter().map(|a| a.user_id.get()).collect();
     assert_eq!(ids, vec![2, 3]);
     let listed = [admitter(&bob), admitter(&carol)];
-    assert!(verified.has_same_admitters(&listed, LinkAdmission::ByThemselves));
-    assert!(!verified.has_same_admitters(&listed, LinkAdmission::Lobby));
-    assert!(!verified.has_same_admitters(&listed[..1], LinkAdmission::ByThemselves));
+    assert!(verified.has_same_content(&listed, LinkAdmission::ByThemselves, None));
+    assert!(!verified.has_same_content(&listed, LinkAdmission::Lobby, None));
+    assert!(!verified.has_same_content(&listed[..1], LinkAdmission::ByThemselves, None));
+  }
+
+  mod invitees {
+    use super::*;
+
+    #[test]
+    fn the_invitees_are_signed_sorted_and_round_trip() {
+      let (organizer, bob) = (TestUser::new(1), TestUser::new(2));
+      let anchor = organizer.identity.public_key().fingerprint();
+      let mut with_invitees = draft(&[&bob], 3);
+      with_invitees.maybe_invitees = Some(vec![UserId::new(9), UserId::new(4), UserId::new(9)]);
+      let signed = with_invitees.sign(&organizer.identity).unwrap();
+      let decoded = SignedMeetingAdmitters::from_bytes(&signed.to_bytes().unwrap()).unwrap();
+
+      let verified = decoded.verify(&expect(&anchor, None)).unwrap();
+
+      assert_eq!(
+        verified.maybe_invitees(),
+        Some(&[UserId::new(4), UserId::new(9)][..])
+      );
+      assert!(decoded.check_shape().is_ok());
+      let listed = [admitter(&bob)];
+      let invitees = [UserId::new(9), UserId::new(4)];
+      assert!(verified.has_same_content(&listed, LinkAdmission::ByThemselves, Some(&invitees)));
+      assert!(!verified.has_same_content(&listed, LinkAdmission::ByThemselves, None));
+      assert!(!verified.has_same_content(
+        &listed,
+        LinkAdmission::ByThemselves,
+        Some(&invitees[..1])
+      ));
+    }
+
+    #[test]
+    fn a_first_version_statement_still_verifies_and_names_no_invitees() {
+      let (organizer, bob) = (TestUser::new(1), TestUser::new(2));
+      let anchor = organizer.identity.public_key().fingerprint();
+      let signed = draft(&[&bob], 3).sign(&organizer.identity).unwrap();
+      let bytes = signed.to_bytes().unwrap();
+      assert_eq!(bytes[0], MEETING_ADMITTERS_VERSION, "signed as version 1");
+
+      let verified = SignedMeetingAdmitters::from_bytes(&bytes)
+        .unwrap()
+        .verify(&expect(&anchor, None))
+        .unwrap();
+
+      assert_eq!(verified.maybe_invitees(), None);
+      assert!(verified.admits_device(&device_of(&bob)));
+    }
+
+    #[test]
+    fn an_invitee_the_server_adds_breaks_the_signature() {
+      let organizer = TestUser::new(1);
+      let anchor = organizer.identity.public_key().fingerprint();
+      let mut with_invitees = draft(&[], 3);
+      with_invitees.maybe_invitees = Some(vec![UserId::new(4)]);
+      let mut signed = with_invitees.sign(&organizer.identity).unwrap();
+      signed
+        .statement
+        .maybe_invitees
+        .as_mut()
+        .unwrap()
+        .push(UserId::new(66));
+      assert!(matches!(
+        signed.verify(&expect(&anchor, None)),
+        Err(MeetingAdmittersError::InvalidSignature(_))
+      ));
+    }
+
+    #[test]
+    fn stripping_the_invitees_breaks_the_signature() {
+      let organizer = TestUser::new(1);
+      let anchor = organizer.identity.public_key().fingerprint();
+      let mut with_invitees = draft(&[], 3);
+      with_invitees.maybe_invitees = Some(vec![UserId::new(4)]);
+      let mut signed = with_invitees.sign(&organizer.identity).unwrap();
+      // The server drops the list and claims version 1, so the Join would take its own list.
+      signed.statement.maybe_invitees = None;
+      signed.statement.body.version = MEETING_ADMITTERS_VERSION;
+      assert!(matches!(
+        signed.verify(&expect(&anchor, None)),
+        Err(MeetingAdmittersError::InvalidSignature(_))
+      ));
+    }
+
+    #[test]
+    fn unsorted_or_too_many_invitees_are_refused() {
+      let organizer = TestUser::new(1);
+      let anchor = organizer.identity.public_key().fingerprint();
+      let mut with_invitees = draft(&[], 1);
+      with_invitees.maybe_invitees = Some(vec![UserId::new(4), UserId::new(5)]);
+      let mut statement = with_invitees.sign(&organizer.identity).unwrap().statement;
+      if let Some(invitees) = statement.maybe_invitees.as_mut() {
+        invitees.reverse();
+      }
+      assert!(matches!(
+        resign(statement, &organizer).verify(&expect(&anchor, None)),
+        Err(MeetingAdmittersError::NotCanonical)
+      ));
+
+      let mut too_many = draft(&[], 1);
+      too_many.maybe_invitees = Some((0..=MAX_INVITEES as u64).map(UserId::new).collect());
+      assert!(matches!(
+        too_many.sign(&organizer.identity),
+        Err(MeetingAdmittersError::TooManyInvitees(_))
+      ));
+    }
+
+    #[test]
+    fn an_unknown_version_is_refused() {
+      let organizer = TestUser::new(1);
+      let anchor = organizer.identity.public_key().fingerprint();
+      let mut statement = draft(&[], 1).sign(&organizer.identity).unwrap().statement;
+      statement.body.version = 3;
+      assert!(matches!(
+        resign(statement, &organizer).verify(&expect(&anchor, None)),
+        Err(MeetingAdmittersError::UnsupportedVersion(3))
+      ));
+    }
   }
 
   mod forged {
@@ -400,7 +639,7 @@ mod tests {
       let anchor = organizer.identity.public_key().fingerprint();
       let mut signed = draft(&[&bob], 2).sign(&organizer.identity).unwrap();
       // The server adds itself to a list the organizer signed.
-      signed.statement.admitters.push(admitter(&mallory));
+      signed.statement.body.admitters.push(admitter(&mallory));
       assert!(matches!(
         signed.verify(&expect(&anchor, None)),
         Err(MeetingAdmittersError::InvalidSignature(_))
@@ -492,7 +731,7 @@ mod tests {
         .sign(&organizer.identity)
         .unwrap()
         .statement;
-      statement.admitters.reverse();
+      statement.body.admitters.reverse();
       let unsorted = resign(statement, &organizer);
       assert!(matches!(
         unsorted.verify(&expect(&anchor, None)),
@@ -500,7 +739,7 @@ mod tests {
       ));
 
       let mut statement = draft(&[&bob], 1).sign(&organizer.identity).unwrap().statement;
-      statement.link_admission = 7;
+      statement.body.link_admission = 7;
       assert!(matches!(
         resign(statement, &organizer).verify(&expect(&anchor, None)),
         Err(MeetingAdmittersError::UnknownLinkAdmission(7))
@@ -549,6 +788,7 @@ mod tests {
       expires_at_ms: ENDS_MS,
       link_admission: LinkAdmission::ByThemselves,
       admitters: admitters.iter().map(|user| admitter(user)).collect(),
+      maybe_invitees: None,
     }
   }
 

@@ -1760,6 +1760,7 @@ mod admitters {
       expires_at_ms: u64::try_from(ENDS_AT).unwrap(),
       link_admission: LinkAdmission::ByThemselves,
       admitters: Vec::new(),
+      maybe_invitees: None,
     }
     .sign(organizer)
     .unwrap();
