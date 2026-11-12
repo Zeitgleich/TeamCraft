@@ -386,13 +386,22 @@ impl IncomingVideo {
       .clone()
   }
 
-  /// The layer arriving now.
   /// Whether the sender says its capture is stalled (#1805): its frames repeat a picture this
   /// device already has.
   pub fn is_sender_capture_stalled(&self) -> bool {
     self.is_sender_capture_stalled
   }
 
+  /// Takes the sender's word on its capture from a frame that went to the decoder (in order and
+  /// decrypted), so a late, resent or undecryptable packet can't change it. Returns whether it
+  /// changed.
+  pub fn note_sender_capture(&mut self, is_stalled: bool) -> bool {
+    let has_changed = self.is_sender_capture_stalled != is_stalled;
+    self.is_sender_capture_stalled = is_stalled;
+    has_changed
+  }
+
+  /// The layer arriving now.
   pub fn layer(&self) -> Option<SimulcastLayer> {
     self.maybe_layer
   }
@@ -419,7 +428,6 @@ impl IncomingVideo {
     now: Instant,
   ) -> Result<Reception, FragmentError> {
     let fragment = FrameFragment::from_header(&packet.header)?;
-    self.is_sender_capture_stalled = fragment.is_capture_stalled;
     if self.maybe_layer != Some(layer) {
       // Another layer starts at a keyframe; fragments of the old layer can't complete it, and
       // its deltas can't follow the old layer's pictures.
@@ -707,14 +715,17 @@ mod tests {
 
   use super::*;
 
-  /// #1805: an own track whose capture stalled says so in every frame until it doesn't, and the
-  /// receiving end knows it from the next packet.
+  /// #1805: an own track whose capture stalled says so in every frame until it doesn't. The
+  /// receiving end reads it from the frames it releases, in order: packets alone, also late ones,
+  /// don't change what it believes.
   #[test]
   fn a_stalled_capture_travels_with_the_frames() {
     let mut outgoing = OutgoingVideo::new(VideoTrackKind::Screen, VideoCodec::Vp9);
     let mut incoming = IncomingVideo::new(&track(), None);
     let now = Instant::now();
+    let mut sent = Vec::new();
     let mut send = |outgoing: &mut OutgoingVideo, is_keyframe| {
+      let mut released = Vec::new();
       for bytes in outgoing
         .packetize(
           StreamId(7),
@@ -725,18 +736,38 @@ mod tests {
         )
         .unwrap()
       {
-        incoming
+        let reception = incoming
           .push(SimulcastLayer::BASE, &RtpPacket::parse(&bytes).unwrap(), now)
           .unwrap();
+        released.extend(
+          reception
+            .frames
+            .iter()
+            .map(|frame| frame.frame.is_capture_stalled),
+        );
+        sent.push(bytes);
       }
-      incoming.is_sender_capture_stalled()
+      assert!(!incoming.is_sender_capture_stalled(), "only the engine takes it");
+      released
     };
-    assert!(!send(&mut outgoing, true));
+    assert_eq!(send(&mut outgoing, true), vec![false]);
     outgoing.set_capture_stalled(true);
-    assert!(send(&mut outgoing, false));
-    assert!(send(&mut outgoing, true));
+    assert_eq!(send(&mut outgoing, false), vec![true]);
+    assert_eq!(send(&mut outgoing, true), vec![true]);
     outgoing.set_capture_stalled(false);
-    assert!(!send(&mut outgoing, false));
+    assert_eq!(send(&mut outgoing, false), vec![false]);
+    for bytes in &sent {
+      let reception = incoming
+        .push(SimulcastLayer::BASE, &RtpPacket::parse(bytes).unwrap(), now)
+        .unwrap();
+      assert!(
+        reception.frames.is_empty(),
+        "a packet sent again releases nothing"
+      );
+    }
+    assert!(incoming.note_sender_capture(true));
+    assert!(!incoming.note_sender_capture(true));
+    assert!(incoming.note_sender_capture(false));
   }
 
   #[test]

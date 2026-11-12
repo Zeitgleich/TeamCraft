@@ -32,6 +32,8 @@ pub struct CallRoster {
   refused: BTreeSet<DeviceId>,
   /// Others' tracks whose capture stalled, as their frames say (#1805).
   stalled_captures: Vec<(DeviceId, VideoTrackKind)>,
+  /// Own tracks whose capture stalled (#1805): the hint stays while any of them is.
+  own_stalled: Vec<VideoTrackKind>,
 }
 
 impl CallRoster {
@@ -128,14 +130,19 @@ impl CallRoster {
         active.is_video_limited_by_device = is_limited;
         return has_changed;
       },
-      CallEngineEvent::CaptureStalled { .. } => {
+      CallEngineEvent::CaptureStalled { kind, .. } => {
+        if !roster.own_stalled.contains(&kind) {
+          roster.own_stalled.push(kind);
+        }
         let has_changed = !active.is_own_capture_stalled;
         active.is_own_capture_stalled = true;
         return has_changed;
       },
-      CallEngineEvent::CaptureRecovered(_) => {
-        let has_changed = active.is_own_capture_stalled;
-        active.is_own_capture_stalled = false;
+      CallEngineEvent::CaptureRecovered(kind) => {
+        roster.own_stalled.retain(|stalled| *stalled != kind);
+        let is_stalled = !roster.own_stalled.is_empty();
+        let has_changed = active.is_own_capture_stalled != is_stalled;
+        active.is_own_capture_stalled = is_stalled;
         return has_changed;
       },
       CallEngineEvent::ParticipantReconnecting(device_id) => {
@@ -450,6 +457,27 @@ mod transport_tests {
     assert!(roster.apply(&mut view, stalled.clone()));
     assert!(is_stalled(&view));
     assert!(!roster.apply(&mut view, stalled));
+    assert!(roster.apply(
+      &mut view,
+      CallEngineEvent::CaptureRecovered(VideoTrackKind::Screen)
+    ));
+    assert!(!is_stalled(&view));
+    // Camera and screen stalled: the hint stays until both give pictures again.
+    let camera = CallEngineEvent::CaptureStalled {
+      kind: VideoTrackKind::Camera,
+      window: crate::capture_health::BufferCounts::default(),
+    };
+    let screen = CallEngineEvent::CaptureStalled {
+      kind: VideoTrackKind::Screen,
+      window: crate::capture_health::BufferCounts::default(),
+    };
+    assert!(roster.apply(&mut view, camera));
+    assert!(!roster.apply(&mut view, screen));
+    assert!(!roster.apply(
+      &mut view,
+      CallEngineEvent::CaptureRecovered(VideoTrackKind::Camera)
+    ));
+    assert!(is_stalled(&view));
     assert!(roster.apply(
       &mut view,
       CallEngineEvent::CaptureRecovered(VideoTrackKind::Screen)

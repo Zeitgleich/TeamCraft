@@ -2781,21 +2781,9 @@ impl CallEngine {
     let Some(track) = self.remote_video.get_mut(&stream) else {
       return Ok(());
     };
-    let was_stalled = track.is_sender_capture_stalled();
     let reception = track
       .push(layer, &packet, now)
       .map_err(|_| CallEngineError::Protocol("bad video fragment"))?;
-    if track.is_sender_capture_stalled() != was_stalled {
-      let event = CallEngineEvent::RemoteCaptureStalled {
-        device: track.sender,
-        kind: track.kind.clone(),
-        is_stalled: track.is_sender_capture_stalled(),
-      };
-      self.event(event);
-    }
-    let Some(track) = self.remote_video.get_mut(&stream) else {
-      return Ok(());
-    };
     if reception.is_late {
       track.count_late_arrival(rtp.len());
     } else {
@@ -2911,13 +2899,26 @@ impl CallEngine {
       &complete.data,
     );
     let is_decrypted = decrypted.is_ok();
+    let mut maybe_capture_change = None;
     if let Some(track) = self.remote_video.get_mut(&stream) {
       track.count_frame(is_decrypted);
       if is_decrypted {
         track.note_used(now);
+        // #1805: only a frame that decrypted and went in order speaks for the sender's capture;
+        // the event goes once per change, so at most at the frame rate.
+        if track.note_sender_capture(complete.is_capture_stalled) {
+          maybe_capture_change = Some(CallEngineEvent::RemoteCaptureStalled {
+            device: track.sender,
+            kind: track.kind.clone(),
+            is_stalled: complete.is_capture_stalled,
+          });
+        }
       } else {
         track.wait_for_keyframe();
       }
+    }
+    if let Some(event) = maybe_capture_change {
+      self.event(event);
     }
     let data = match decrypted {
       // DAVE sends AV1 without its temporal delimiters and last OBU sizes (#565).
@@ -4399,6 +4400,90 @@ mod tests {
       assert_eq!(frames[0].data, data);
       assert!(frames[0].is_keyframe);
       assert_eq!(frames[0].sender, device(1));
+    }
+
+    /// #1805 review: the sender's word on its capture counts only from frames that decrypted and
+    /// went to the decoder in order, once per change. A frame that doesn't decrypt, or an old
+    /// packet sent again, changes nothing.
+    #[test]
+    fn a_stalled_capture_is_taken_only_from_decrypted_frames_in_order() {
+      let now = Instant::now();
+      let (mut alice, mut bob) = secured_pair(now);
+      let track = VideoTrack {
+        stream_id: MediaStreamId(50),
+        device_id: device(1),
+        kind: VideoTrackKind::Screen,
+        codec: VideoCodec::Vp9,
+        layers: Vec::new(),
+        maybe_publication_id: None,
+      };
+      alice.publish_video(
+        VideoPublicationId(0),
+        VideoTrackKind::Screen,
+        VideoCodec::Vp9,
+        Vec::new(),
+      );
+      let published = CallEvent::VideoPublished { track };
+      alice.handle_signal(event(6, published.clone()), now).unwrap();
+      bob.handle_signal(event(4, published), now).unwrap();
+      drain(&mut alice);
+      drain(&mut bob);
+      let mut timestamp = 0;
+      let mut send = |alice: &mut CallEngine, is_keyframe: bool| {
+        timestamp += 3000;
+        let frame = EncodedVideoFrame {
+          codec: VideoCodec::Vp9,
+          layer: SimulcastLayer::BASE,
+          timestamp: RtpTimestamp(timestamp),
+          is_keyframe,
+          data: (0..300u32).map(|value| (value % 251) as u8).collect(),
+        };
+        assert_eq!(
+          alice.send_video(MediaStreamId(50), &frame, now),
+          VideoSendOutcome::Sent
+        );
+        drain(alice)
+          .into_iter()
+          .filter_map(|output| match output {
+            EngineOutput::Datagram(bytes) => Some(bytes),
+            _ => None,
+          })
+          .collect::<Vec<_>>()
+      };
+      let stalls = |bob: &mut CallEngine, datagrams: &[Vec<u8>]| -> Vec<bool> {
+        for datagram in datagrams {
+          bob.handle_datagram(datagram, now);
+        }
+        drain(bob)
+          .into_iter()
+          .filter_map(|output| match output {
+            EngineOutput::Event(CallEngineEvent::RemoteCaptureStalled { is_stalled, .. }) => Some(is_stalled),
+            _ => None,
+          })
+          .collect()
+      };
+
+      alice.set_own_capture_stalled(&VideoTrackKind::Screen, true);
+      let first = send(&mut alice, true);
+      assert_eq!(stalls(&mut bob, &first), vec![true]);
+      let repeat = send(&mut alice, false);
+      assert_eq!(
+        stalls(&mut bob, &repeat),
+        Vec::<bool>::new(),
+        "no change, no event"
+      );
+
+      alice.set_own_capture_stalled(&VideoTrackKind::Screen, false);
+      let mut forged = send(&mut alice, false);
+      let datagram = forged.last_mut().unwrap();
+      let middle = datagram.len() - 40;
+      datagram[middle] ^= 0xFF;
+      assert_eq!(stalls(&mut bob, &forged), Vec::<bool>::new(), "didn't decrypt");
+
+      let recovered = send(&mut alice, true);
+      assert_eq!(stalls(&mut bob, &recovered), vec![false]);
+      assert_eq!(stalls(&mut bob, &first), Vec::<bool>::new(), "sent again");
+      assert_eq!(stalls(&mut bob, &repeat), Vec::<bool>::new(), "sent again");
     }
 
     /// Stats for nerds (#938): both sides count what went out and came in, per track and layer.

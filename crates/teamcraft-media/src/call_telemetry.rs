@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use teamcraft_client_api::crash_reporting::{
   CallContext, CallProblem, CallQualitySummary, CallRef, CallReport, CallTransportKind, MAX_CALL_TRAIL,
-  MAX_RECEIVED_TRACKS, ReceivedVideoContext, ResumeFailure, SentVideoContext, Unverified,
+  MAX_RECEIVED_TRACKS, ReceivedVideoContext, ResumeFailure, SentVideoContext, Unverified, identifier,
 };
 use teamcraft_client_api::video_stats::{VideoStatsReport, VideoTrackStats};
 use teamcraft_proto::{DeviceId, MediaStreamId, VideoCodec, VideoTrackKind};
@@ -284,9 +284,10 @@ impl CallTelemetry {
         } else {
           "gives pictures again"
         };
+        // The kind comes from another device: an unknown one is its free text, kept to code words.
         self.note(
           now_ms,
-          format!("another device's {} capture {how}", kind.as_str()),
+          format!("another device's {} capture {how}", identifier(kind.as_str())),
         );
       },
       CallEngineEvent::CaptureRecovered(kind) => {

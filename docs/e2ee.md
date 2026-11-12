@@ -5685,14 +5685,25 @@ resent frame would be too late to play).
 **Probing links at the start** (#1762). The padding trains that measure a link when a device joins
 (ARCHITECTURE.md §6.3) carry zeros on a stream nobody publishes; the SFU and the client learn only
 how much arrived when, which they see of every datagram anyway.
+
 **A stalled capture** (#1805). A frame's fragment header has a flags byte outside the DAVE
 payload: bit 0 marks a keyframe (the SFU needs it to switch layers), bit 1 says the sender's own
 capture stalled (it gets buffers from its source it can't use, so the frames it sends repeat one
 picture). Viewers use the bit to tell that from a still slide, which sends the same repeats, and
-show "X's video isn't updating". The bit is in the clear because there is no member-only channel
-in the media path that older clients would ignore: anything inside the DAVE payload goes to their
-decoder. What it tells the SFU it can already see: a stalled share sends one small repeated frame
-a second where a moving one sent a stream. Older SFUs and clients ignore unknown bits.
+show "X's video isn't updating". The bit is in the clear because the media path has no
+member-only channel that older clients would ignore: anything inside the DAVE payload goes to
+their decoders.
+
+- **What the SFU learns:** whether a stream's repeats are a stalled capture or a still picture,
+  over time. That is new (in the traffic both look the same) but low-sensitivity metadata: it
+  says something about the sender's device, nothing about the content, and the SFU sees already
+  when a share sends one small frame a second.
+- **It is not authenticated:** the server can set or clear it. Viewers take it only from frames
+  that decrypted and went to the decoder in order (a resent or forged packet changes nothing),
+  and raise the hint once per change, but a hostile SFU can still flip it on genuine frames. So
+  the hint and the freeze telemetry are advisory; nothing about keys or membership depends on it.
+- **A network observer** learns nothing: the transport is encrypted.
+- Older SFUs and clients ignore unknown bits.
 
 **Joining too often** (#1227). Every join re-keys the call twice: the device's leaf is removed when
 its connection goes, and added again with its new key package. A member with a valid join token

@@ -64,6 +64,8 @@ pub struct FrameFragment {
 pub struct CompleteFrame {
   pub frame_number: u16,
   pub is_keyframe: bool,
+  /// The sender said its capture stalled (#1805), on the frame's first fragment that came.
+  pub is_capture_stalled: bool,
   pub data: Vec<u8>,
 }
 
@@ -78,6 +80,7 @@ pub struct FrameAssembler {
 #[derive(Debug)]
 struct PartialFrame {
   is_keyframe: bool,
+  is_capture_stalled: bool,
   fragments: Vec<Option<Vec<u8>>>,
   received: usize,
 }
@@ -243,6 +246,7 @@ impl FrameAssembler {
       .entry(fragment.frame_number)
       .or_insert_with(|| PartialFrame {
         is_keyframe: fragment.is_keyframe,
+        is_capture_stalled: fragment.is_capture_stalled,
         fragments: vec![None; usize::from(fragment.count)],
         received: 0,
       });
@@ -264,6 +268,7 @@ impl FrameAssembler {
     Ok(Some(CompleteFrame {
       frame_number: fragment.frame_number,
       is_keyframe: partial.is_keyframe,
+      is_capture_stalled: partial.is_capture_stalled,
       data: partial.fragments.into_iter().flatten().flatten().collect(),
     }))
   }
@@ -395,7 +400,6 @@ mod tests {
       assert!(complete.is_keyframe);
     }
 
-    /// `fragment` written into an RTP header and parsed back.
     /// #1805: the stalled capture's bit travels next to the keyframe bit, and a reader that only
     /// knows the keyframe bit (an older app, the SFU) reads the frame as before.
     #[test]
@@ -419,6 +423,26 @@ mod tests {
       }
     }
 
+    /// Flag bits this version doesn't know (a newer sender's) are ignored, not refused.
+    #[test]
+    fn unknown_flag_bits_are_ignored() {
+      let fragment = FrameFragment {
+        frame_number: 7,
+        index: 0,
+        count: 1,
+        is_keyframe: false,
+        is_capture_stalled: false,
+      };
+      let mut parsed = through_header(fragment);
+      let mut extension = parsed.extension(FRAME_FRAGMENT_EXTENSION_ID).unwrap().to_vec();
+      *extension.last_mut().unwrap() = 0xFC;
+      parsed.set_extension(FRAME_FRAGMENT_EXTENSION_ID, extension);
+      let read = FrameFragment::from_header(&parsed).unwrap();
+      assert!(!read.is_keyframe);
+      assert!(!read.is_capture_stalled);
+    }
+
+    /// `fragment` written into an RTP header and parsed back.
     fn through_header(fragment: FrameFragment) -> RtpHeader {
       let mut header = RtpHeader::new(
         PayloadType::new(100).unwrap(),
