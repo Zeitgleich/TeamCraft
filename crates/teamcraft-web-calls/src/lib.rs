@@ -18,6 +18,7 @@ use std::cell::{Cell, RefCell};
 use std::pin::pin;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::StreamExt;
 use futures::channel::{mpsc, oneshot};
@@ -29,6 +30,7 @@ use teamcraft_client_api::calls::{
   CallStatusSounds, CameraBackground, DevicePresence, EffectsOffer, JoinMedia, MediaDevice, MediaDevices,
   OrgBackgrounds, PreviewCamera, PushToTalk, ScreenShareSound, VideoQuality,
 };
+use teamcraft_client_api::crash_reporting::CallRef;
 use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
 use teamcraft_client_api::page_calls::{
   BrowserGraphics, EffectsCompositing, PreparedCall, effects_compositing_with_override,
@@ -43,6 +45,7 @@ use teamcraft_media::call_engine::{CallEngineConfig, CallEngineError, CallEngine
 use teamcraft_media::call_resilience::{
   JoinTicket, JoinTicketError, ResilienceConfig, certificate_hashes_from_hex,
 };
+use teamcraft_media::call_telemetry::{CallTelemetry, STATS_SAMPLE_INTERVAL, TelemetryThresholds};
 use teamcraft_media::call_view::{CallRoster, started_screen_sound, status_cues};
 use teamcraft_media::call_web::{
   self, CameraEffects, LocalTicketFuture, LocalTrustFuture, MediaAccessReason, MediaInput, MicrophoneMeter,
@@ -213,6 +216,8 @@ enum Control {
   StatusSounds(CallStatusSounds),
   NetworkChanged,
   VideoStats(oneshot::Sender<Option<VideoStatsReport>>),
+  /// Time for the call's telemetry to sample the video stats ([`STATS_SAMPLE_INTERVAL`]).
+  TelemetrySample,
   Leave,
   /// Leaves with the hang-up tone: a 1:1 call that ended for both (#997).
   HangUp,
@@ -532,7 +537,22 @@ impl Host {
       .view
       .start_for(request.conversation, js_sys::Date::now() as i64);
     self.leave().await;
-    let prepared = self.prepare(request.conversation).await?;
+    let mut telemetry = CallTelemetry::new(
+      random_call_ref(),
+      now_ms(),
+      unix_ms(),
+      TelemetryThresholds::default(),
+    );
+    let prepared = match self.prepare(request.conversation).await {
+      Ok(prepared) => prepared,
+      Err(failure) => {
+        if failure.kind.is_reported_call_failure() {
+          telemetry.call_failed("prepare", now_ms());
+          self.add_call_reports(&mut telemetry);
+        }
+        return Err(failure);
+      },
+    };
     let (microphone, speakers, sounds) = {
       let state = self.state.borrow();
       (
@@ -581,7 +601,14 @@ impl Host {
       is_muted_at_start,
     };
     let requires_background = prepared.requires_background;
-    let call = WebCall::join(config).await.map_err(failure)?;
+    let call = match WebCall::join(config).await {
+      Ok(call) => call,
+      Err(error) => {
+        report_failure(&mut telemetry, &error);
+        self.add_call_reports(&mut telemetry);
+        return Err(failure(error));
+      },
+    };
     {
       let state = &mut *self.state.borrow_mut();
       state.requires_background = requires_background;
@@ -597,6 +624,7 @@ impl Host {
       }
     }
     let (controls, control_rx) = mpsc::unbounded();
+    let controls_for_sampler = controls.clone();
     let (finished_tx, finished) = oneshot::channel();
     *self.maybe_media.borrow_mut() = Some(Media {
       controls,
@@ -604,8 +632,9 @@ impl Host {
       microphone_level: call.microphone_level(),
     });
     let host = Rc::downgrade(self);
+    spawn_local(sample_telemetry(controls_for_sampler));
     spawn_local(async move {
-      run_media(call, control_rx, host, own_device).await;
+      run_media(call, control_rx, host, own_device, telemetry).await;
       // Nobody waits when the call ended on its own.
       let _ = finished_tx.send(());
     });
@@ -1497,6 +1526,14 @@ impl Host {
     }
   }
 
+  /// The telemetry's new problem reports go to the page with the next snapshot.
+  fn add_call_reports(&self, telemetry: &mut CallTelemetry) {
+    let reports = telemetry.take_reports();
+    if self.state.borrow_mut().view.add_call_reports(reports) {
+      self.changed();
+    }
+  }
+
   fn on_engine_event(&self, roster: &mut CallRoster, event: CallEngineEvent) {
     if let CallEngineEvent::OwnVideoEnded { kind, end } = &event {
       if *end == OwnVideoEnd::EncodingFailed {
@@ -1603,6 +1640,7 @@ impl Host {
         // The browser opens the camera the user picks or none: no fallback here.
         maybe_camera_fallback: None,
         maybe_this_device: state.view.maybe_this_device,
+        call_reports: state.view.call_reports.clone(),
       }
     };
     let Ok(json) = serde_json::to_string(&snapshot) else {
@@ -1618,7 +1656,11 @@ impl Host {
       .call1(&JsValue::NULL, &JsValue::from_str(&json))
     {
       tracing::warn!(?error, "the page did not take the call state");
+      return;
     }
+    // The page has the problem reports now (docs/crash-reports.md, "Call problems"): they leave
+    // the view, so the next states don't carry them again.
+    self.state.borrow_mut().view.call_reports.clear();
   }
 }
 
@@ -1655,6 +1697,7 @@ async fn run_media(
   mut controls: mpsc::UnboundedReceiver<Control>,
   host: Weak<Host>,
   own_device: DeviceId,
+  mut telemetry: CallTelemetry,
 ) {
   let mut roster = CallRoster::new(own_device);
   let mut is_hang_up = false;
@@ -1672,13 +1715,29 @@ async fn run_media(
       break;
     };
     match next {
-      Either::Left(Some(event)) => host.on_engine_event(&mut roster, event),
+      Either::Left(Some(event)) => {
+        // Frames are the media path's; the telemetry wants the call's events only.
+        if !matches!(
+          event,
+          CallEngineEvent::AudioFrame { .. } | CallEngineEvent::VideoFrame(_)
+        ) {
+          telemetry.on_event(&event, now_ms());
+          host.add_call_reports(&mut telemetry);
+        }
+        host.on_engine_event(&mut roster, event);
+      },
       // The call ended on its own (the SFU closed it, or rejoining failed).
       Either::Left(None) => break,
       Either::Right(None | Some(Control::Leave)) => break,
       Either::Right(Some(Control::HangUp)) => {
         is_hang_up = true;
         break;
+      },
+      Either::Right(Some(Control::TelemetrySample)) => {
+        if let Some(report) = call.video_stats().await {
+          telemetry.observe_stats(&report, now_ms());
+          host.add_call_reports(&mut telemetry);
+        }
       },
       Either::Right(Some(control)) => apply(&call, control).await,
     }
@@ -1688,6 +1747,13 @@ async fn run_media(
   } else {
     call.leave().await
   };
+  if let Err(error) = &left {
+    report_failure(&mut telemetry, error);
+  }
+  telemetry.finish(now_ms());
+  if let Some(host) = host.upgrade() {
+    host.add_call_reports(&mut telemetry);
+  }
   let result = left.map(|stats| {
     tracing::info!(
       frames_sent = stats.frames_sent,
@@ -1741,7 +1807,7 @@ async fn apply(call: &WebCall, control: Control) {
     Control::StatusSounds(sounds) => call.set_status_cues(status_cues(sounds)),
     Control::NetworkChanged => call.network_changed(),
     Control::VideoStats(done) => drop(done.send(call.video_stats().await)),
-    Control::Leave | Control::HangUp => {},
+    Control::TelemetrySample | Control::Leave | Control::HangUp => {},
   }
 }
 
@@ -1900,9 +1966,88 @@ fn background_required(detail: &str) -> ActionFailure {
   )
 }
 
+/// Asks the call's task for a telemetry sample every [`STATS_SAMPLE_INTERVAL`] until the call ends
+/// (its controls close). A timer while in a call only; the sample is the stats overlay's report.
+async fn sample_telemetry(controls: mpsc::UnboundedSender<Control>) {
+  loop {
+    sleep(STATS_SAMPLE_INTERVAL).await;
+    if controls.unbounded_send(Control::TelemetrySample).is_err() {
+      return;
+    }
+  }
+}
+
+/// A join that failed or a call that ended with an error, for the telemetry: engine errors by
+/// their kind, the others by a code from the error's variant (never its text). What the user can
+/// fix (a refused microphone, being offline) and the user's leave are not reported.
+fn report_failure(telemetry: &mut CallTelemetry, error: &WebCallError) {
+  let code = match error {
+    WebCallError::Engine(engine) => {
+      telemetry.engine_failed(engine, now_ms());
+      return;
+    },
+    WebCallError::Ended => return,
+    _ if !failure_kind(error).is_reported_call_failure() => return,
+    WebCallError::Browser { context, .. } => format!("browser_{}", context.to_lowercase().replace(' ', "_")),
+    WebCallError::MediaAccess { input, reason, .. } => {
+      format!("media_access_{input:?}_{reason:?}").to_lowercase()
+    },
+    WebCallError::Unsupported(what) => format!("unsupported_{}", what.to_lowercase().replace(' ', "_")),
+    WebCallError::SampleRate(_) => "sample_rate".to_owned(),
+    WebCallError::Ticket(_) => "join_ticket".to_owned(),
+    WebCallError::ConnectionLost => "connection_lost".to_owned(),
+  };
+  telemetry.call_failed(&code, now_ms());
+}
+
+/// The driver's clock for the telemetry, in milliseconds.
+fn now_ms() -> u64 {
+  // Precision: `Date.now()` is a whole, positive number of milliseconds.
+  js_sys::Date::now() as u64
+}
+
+fn unix_ms() -> i64 {
+  // Precision: as above.
+  js_sys::Date::now() as i64
+}
+
+/// A random name for the call's reports. `Math.random` will do: it only groups one call's reports
+/// and is no secret.
+fn random_call_ref() -> CallRef {
+  let mut bytes = [0_u8; 8];
+  for byte in &mut bytes {
+    // Truncation: a value in [0, 256).
+    *byte = (js_sys::Math::random() * 256.0) as u8;
+  }
+  CallRef::from_random_bytes(bytes)
+}
+
+/// A browser timer, for the telemetry's samples.
+async fn sleep(duration: Duration) {
+  let millis = i32::try_from(duration.as_millis()).unwrap_or(i32::MAX);
+  let promise = Promise::new(&mut |resolve, _reject| {
+    if let Some(window) = web_sys::window() {
+      // A timer that can't be set never resolves: no more samples then, nothing else breaks.
+      let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, millis);
+    }
+  });
+  // The promise only resolves.
+  let _ = JsFuture::from(promise).await;
+}
+
 /// How a failed call action reads in the page: what to do about it, then the detail.
 fn failure(error: WebCallError) -> ActionFailure {
-  let kind = match &error {
+  let kind = failure_kind(&error);
+  if let WebCallError::Ticket(error) = &error {
+    // The page's own failure text (a refused join token, offline), already in wire form.
+    return ActionFailure::from_wire(&error.reason);
+  }
+  ActionFailure::new(kind, error.to_string())
+}
+
+/// The failure kind of `error`, as the page words it.
+fn failure_kind(error: &WebCallError) -> FailureKind {
+  match error {
     WebCallError::MediaAccess { input, reason, .. } => {
       media_failure(*input, *reason).map_or(FailureKind::Other, FailureKind::Call)
     },
@@ -1914,16 +2059,14 @@ fn failure(error: WebCallError) -> ActionFailure {
       | CallEngineError::UnverifiedMember(_)
       | CallEngineError::RetiredKey(_),
     ) => FailureKind::Call(CallFailure::EncryptionFailed),
-    // The page's own failure text (a refused join token, offline), already in wire form.
-    WebCallError::Ticket(error) => return ActionFailure::from_wire(&error.reason),
+    WebCallError::Ticket(error) => ActionFailure::from_wire(&error.reason).kind,
     // The chat server answered (it handed out the token); the SFU didn't: likely UDP blocked.
     WebCallError::Browser {
       context: "WebTransport connect",
       ..
     } => FailureKind::Call(CallFailure::ServerUnreachable),
     _ => FailureKind::Other,
-  };
-  ActionFailure::new(kind, error.to_string())
+  }
 }
 
 /// The call failure a refused device means; `None` when the browser gave no known reason.

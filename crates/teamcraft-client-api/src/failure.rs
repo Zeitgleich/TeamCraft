@@ -70,6 +70,21 @@ pub enum FailureKind {
   Other,
 }
 
+impl FailureKind {
+  /// Whether a call failure of this kind is worth a crash report: the call's own (encryption, a
+  /// browser API that failed, the call server out of reach) and the browser lacking what calls
+  /// need. Refused devices and the like are the user's to fix and say nothing new.
+  pub fn is_reported_call_failure(&self) -> bool {
+    matches!(
+      self,
+      Self::Other
+        | Self::Call(
+          CallFailure::EncryptionFailed | CallFailure::Unsupported | CallFailure::ServerUnreachable
+        )
+    )
+  }
+}
+
 /// Why a system notification could not be shown, so the UI can say what to do about it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NotificationFailure {

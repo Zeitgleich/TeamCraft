@@ -1439,6 +1439,7 @@ pub async fn report_left(state: &AppState, report: SfuParticipantReport) -> Resu
 pub async fn report_roster(state: &AppState, report: SfuRosterReport) -> Result<(), ApiError> {
   let calls = calls_of(state)?;
   if let Some(quality) = &report.maybe_quality {
+    crate::services::sfu_incidents::report(state, quality);
     state
       .health
       .note_call_quality(time::OffsetDateTime::now_utc(), quality.clone());

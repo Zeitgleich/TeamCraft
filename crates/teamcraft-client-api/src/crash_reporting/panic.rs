@@ -82,6 +82,7 @@ impl PanicParts {
       message: self.message,
       frames,
       breadcrumbs,
+      maybe_call: None,
     }
   }
 }

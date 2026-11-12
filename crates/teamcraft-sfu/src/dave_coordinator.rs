@@ -47,6 +47,7 @@ use std::{
 use teamcraft_media::dave::{DaveEpoch, DaveError, DaveExternalSender, DaveLeafIndex, DaveParticipantId};
 use teamcraft_proto::{
   Base64Bytes, CallEvent, CallId, DaveKeyBinding, DaveTransitionId, DaveTransitionMode, DeviceId, IdError,
+  SfuCallIncidents,
 };
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -92,6 +93,9 @@ pub struct DaveCoordinator {
   /// Members whose connection dropped, with when they leave the group unless back. Their leaves,
   /// bindings and transition modes stay meanwhile; they commit nothing and hold up no execution.
   away: HashMap<DeviceId, Instant>,
+  /// Restarts, strikes, refusals and late transitions since the room last took them, for the
+  /// crash reports' backend (docs/crash-reports.md, "The SFU's incidents"). Counts only.
+  incidents: SfuCallIncidents,
 }
 
 /// How long the coordinator waits for its members.
@@ -189,7 +193,13 @@ impl DaveCoordinator {
       restarting: BTreeSet::new(),
       maybe_restart_deadline: None,
       away: HashMap::new(),
+      incidents: SfuCallIncidents::default(),
     })
+  }
+
+  /// The incidents since the last call, and none from now.
+  pub fn take_incidents(&mut self) -> SfuCallIncidents {
+    std::mem::take(&mut self.incidents)
   }
 
   /// The `ExternalSender` package every participant installs on join.
@@ -547,6 +557,7 @@ impl DaveCoordinator {
     };
     let mut requeued = Vec::new();
     let mut outbound = Vec::new();
+    let struck = transition.joiners.len();
     for (joiner, key_package) in transition.joiners {
       // A joiner that left (and maybe came back on a new connection) still stalled them.
       if self.strike(joiner, now).is_refused() {
@@ -558,6 +569,15 @@ impl DaveCoordinator {
       }
     }
     let refused = outbound.len();
+    self.incidents.dave_restarts = self.incidents.dave_restarts.saturating_add(1);
+    self.incidents.dave_strikes = self
+      .incidents
+      .dave_strikes
+      .saturating_add(u32::try_from(struck).unwrap_or(u32::MAX));
+    self.incidents.dave_refusals = self
+      .incidents
+      .dave_refusals
+      .saturating_add(u32::try_from(refused).unwrap_or(u32::MAX));
     let members: Vec<DeviceId> = self.members().collect();
     warn!(
       call_id = %self.call_id,
@@ -739,6 +759,7 @@ impl DaveCoordinator {
       return Vec::new();
     };
     if !execution.awaiting.is_empty() {
+      self.incidents.dave_late_transitions = self.incidents.dave_late_transitions.saturating_add(1);
       // A count only: which members lag says nothing useful in a log and is nobody else's business.
       info!(
         call_id = %self.call_id,
@@ -1389,6 +1410,12 @@ mod tests {
       assert_eq!(harness.restarts_to(1), 2);
       assert_eq!(harness.refusals_to(3).len(), 1);
       assert!(harness.coordinator.maybe_transition.is_none());
+      // The crash reports' backend hears of it as counts.
+      let incidents = harness.coordinator.take_incidents();
+      assert_eq!(incidents.dave_restarts, 2);
+      assert_eq!(incidents.dave_strikes, 2);
+      assert_eq!(incidents.dave_refusals, 1);
+      assert!(harness.coordinator.take_incidents().is_empty());
     }
 
     /// A refused device that reconnects is refused again at once, with the time left, and costs

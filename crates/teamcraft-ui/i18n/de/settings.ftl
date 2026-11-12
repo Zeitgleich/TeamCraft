@@ -784,6 +784,7 @@ settings-f-apple_bundle_id = iOS-Bundle-ID
 
 settings-unit-percent = %
 settings-unit-ms = ms
+settings-unit-reports = Berichte
 settings-group-health_alerts = Systemwarnungen
 settings-group-health_alerts-hint = Wann die Prüfungen des Systemzustands Admins und Eigentümer benachrichtigen. Eine Prüfung muss so lange ununterbrochen fehlschlagen, wie im ersten Feld steht, bevor Admins Bescheid bekommen; eine Warnung endet, wenn die Prüfung so lange in Ordnung war, wie im zweiten Feld steht. Ein Neustart oder eine langsame Antwort löst nichts aus.
 settings-f-hold_secs = Eine Prüfung muss fehlschlagen für
@@ -822,6 +823,7 @@ settings-f-dsn = DSN des Backend-Projekts
 settings-f-sample_percent = Anteil gesendeter behandelter Fehler (Abstürze werden immer gesendet)
 settings-f-trace_percent = Anteil gemessener Vorgänge, deren Leistungsdaten gesendet werden (Start, Kanalwechsel, Senden, Abgleich; mit wachsender Instanz senken)
 settings-f-slow_job_ms = Job im Core der Mobil-Apps als langsam melden nach (nennt den Job, seine Wartezeit und seine Warteschlange; 0: nie)
+settings-f-call_reports_per_call = Höchstens so viele Problemberichte pro Anruf (Verschlüsselungsfehler, eingefrorenes Video, Neuverbindungen; wie andere Fehler gesampelt; 0: keine)
 settings-f-environment = Name der Umgebung
 settings-f-allows_opt_out = Personen dürfen Absturzberichte in ihren Datenschutzeinstellungen abschalten
 settings-f-shows_notice = Beim ersten Start darauf hinweisen, dass die App Absturzberichte sendet
@@ -829,6 +831,7 @@ settings-error-dsn = Gib die DSN des Projekts ein, etwa https://key@errors.examp
 settings-error-bridge-url = Gib eine https-Adresse ohne Benutzername, Query und #Fragment ein (http nur für localhost).
 settings-error-crash-percent = Gib 0 bis 100 Prozent ein.
 settings-error-slow-job = Gib 0 bis 60000 Millisekunden ein.
+settings-error-call-reports = Gib 0 bis 50 Berichte ein.
 settings-error-crash-environment = Verwende 1 bis 64 Kleinbuchstaben, Ziffern, „-“, „_“ oder „.“.
 
 ## Problem melden (docs/bug-reports.md)

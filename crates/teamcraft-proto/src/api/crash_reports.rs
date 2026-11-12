@@ -18,6 +18,8 @@ pub const CRASH_REPORTS_PATH: &str = "/api/v1/crash-reports";
 pub const MAX_CRASH_ENVELOPE_BYTES: usize = 256 * 1024;
 /// What counts as a slow job of the apps' core by default, in milliseconds.
 pub const DEFAULT_SLOW_JOB_MS: u32 = 1_000;
+/// How many problem reports one call may send by default (docs/crash-reports.md, "Call problems").
+pub const DEFAULT_CALL_REPORTS_PER_CALL: u8 = 8;
 /// Longest environment name, in characters.
 pub const MAX_CRASH_ENVIRONMENT_CHARS: usize = 64;
 
@@ -41,6 +43,10 @@ pub struct CrashReportSettings {
   /// sampled warning naming the job, its wait and its queue (issue #1521). 0: never. Absent: 1000.
   #[serde(default = "default_slow_job_ms")]
   pub slow_job_ms: u32,
+  /// Problem reports one call may send at most (encryption failures, freezes, reconnect churn;
+  /// issue #1762), sampled like other handled errors. 0: none. Absent from older rows: 8.
+  #[serde(default = "default_call_reports_per_call")]
+  pub call_reports_per_call: u8,
   /// The environment the backend groups reports by (`production`, `staging`).
   pub environment: String,
   /// People may turn reports off in their privacy settings. Off: reports are mandatory on this
@@ -76,6 +82,9 @@ pub struct CrashReportsInfo {
   pub trace_percent: u8,
   #[serde(default = "default_slow_job_ms")]
   pub slow_job_ms: u32,
+  /// Absent (an older server): the default.
+  #[serde(default = "default_call_reports_per_call")]
+  pub call_reports_per_call: u8,
   pub environment: String,
   #[serde(default = "is_on")]
   pub allows_opt_out: bool,
@@ -137,6 +146,7 @@ impl Default for CrashReportSettings {
       sample_percent: 100,
       trace_percent: 100,
       slow_job_ms: DEFAULT_SLOW_JOB_MS,
+      call_reports_per_call: DEFAULT_CALL_REPORTS_PER_CALL,
       environment: "production".to_owned(),
       allows_opt_out: true,
       shows_notice: true,
@@ -186,6 +196,7 @@ impl CrashReportSettings {
       sample_percent: self.sample_percent,
       trace_percent: self.trace_percent,
       slow_job_ms: self.slow_job_ms,
+      call_reports_per_call: self.call_reports_per_call,
       environment: self.environment.clone(),
       allows_opt_out: self.allows_opt_out,
       shows_notice: self.shows_notice,
@@ -203,6 +214,10 @@ fn all_percent() -> u8 {
 
 fn default_slow_job_ms() -> u32 {
   DEFAULT_SLOW_JOB_MS
+}
+
+fn default_call_reports_per_call() -> u8 {
+  DEFAULT_CALL_REPORTS_PER_CALL
 }
 
 /// Lowercase ASCII letters, digits, `-`, `_` and `.`, 1 to [`MAX_CRASH_ENVIRONMENT_CHARS`].
@@ -330,6 +345,7 @@ mod tests {
         sample_percent: 100,
         trace_percent: 100,
         slow_job_ms: 1_000,
+        call_reports_per_call: 8,
         environment: "production".to_owned(),
         allows_opt_out: true,
         shows_notice: true,
@@ -386,6 +402,7 @@ mod tests {
         "sample_percent": 100,
         "trace_percent": 100,
         "slow_job_ms": 1000,
+        "call_reports_per_call": 8,
         "environment": "production",
         "allows_opt_out": true,
         "shows_notice": true,
@@ -408,6 +425,8 @@ mod tests {
       info.trace_percent, 0,
       "an older server asks for no performance data"
     );
+    assert_eq!(row.call_reports_per_call, DEFAULT_CALL_REPORTS_PER_CALL);
+    assert_eq!(info.call_reports_per_call, DEFAULT_CALL_REPORTS_PER_CALL);
   }
 
   #[test]

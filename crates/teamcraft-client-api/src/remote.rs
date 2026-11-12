@@ -82,6 +82,10 @@ pub struct CallSnapshot {
   /// devices are the user's others.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub maybe_this_device: Option<CallRosterEntry>,
+  /// The media layer's last problem reports (docs/crash-reports.md, "Call problems"), oldest
+  /// first; the page takes each once (`CallReportGate`) and sends it with the crash reports.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub call_reports: Vec<crate::crash_reporting::CallReport>,
 }
 
 /// Something the user did in or about a call.

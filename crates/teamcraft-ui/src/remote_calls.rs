@@ -91,6 +91,7 @@ impl RemoteCalls {
     // Not the calls themselves: the host must not keep what keeps it alive.
     let (snapshot, notify) = (calls.snapshot.clone(), calls.notify.clone());
     host.set_on_change(Rc::new(move |next| {
+      report_call_problems(&next);
       *snapshot.borrow_mut() = next;
       let maybe_notify = notify.borrow().clone();
       if let Some(notify) = maybe_notify {
@@ -465,6 +466,7 @@ impl RemoteCalls {
     spawn_local(async move {
       match call::<CallSnapshot>("call_snapshot", &json!({})).await {
         Ok(snapshot) => {
+          report_call_problems(&snapshot);
           if !calls.replace_snapshot(snapshot) {
             return;
           }
@@ -493,6 +495,15 @@ impl RemoteCalls {
     *held = snapshot;
     true
   }
+}
+
+/// The media layer's problem reports in a snapshot go to the crash reporter, each once
+/// (docs/crash-reports.md, "Call problems").
+fn report_call_problems(snapshot: &CallSnapshot) {
+  #[cfg(target_arch = "wasm32")]
+  crate::crash_reports::capture_call_reports(&snapshot.call_reports);
+  #[cfg(not(target_arch = "wasm32"))]
+  let _ = snapshot;
 }
 
 /// Server roster of a conversation's call, plus the media layer's view when this device is in it.
@@ -637,6 +648,7 @@ mod tests {
       preview_camera: PreviewCamera::Off,
       maybe_camera_fallback: None,
       maybe_this_device: None,
+      call_reports: Vec::new(),
     };
     assert_eq!(roster_of(&snapshot, conversation), vec![carol, dave]);
     assert!(roster_of(&snapshot, id_from_raw(8)).is_empty());

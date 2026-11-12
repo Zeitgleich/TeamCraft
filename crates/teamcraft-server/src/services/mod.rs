@@ -68,6 +68,7 @@ pub mod runtime_settings;
 pub mod scheduled_messages;
 pub mod scim;
 pub mod session;
+pub mod sfu_incidents;
 pub mod shares;
 pub mod space_images;
 pub mod spaces;
