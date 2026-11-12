@@ -42,20 +42,24 @@ use web_time::Instant;
 use crate::camera_governor::{CameraGovernorConfig, EncoderLoad, FrameTally, OverloadReason};
 use crate::video::{ScreenProfile, VideoResolution, fit_within, screen_bitrate_bps};
 
-/// The base layer's largest picture: 480p, turned upright for a portrait source.
-const BASE_LIMIT: VideoResolution = VideoResolution {
-  width: 854,
-  height: 480,
-};
+/// The base layer's most lines: about 480p, as an integer fraction of the top (#1733): a third of
+/// 1440p (480), half of 1080p (540), a quarter of 2160p (540). An integer step keeps a scrolled
+/// page's one-pixel moves whole pixels in the base, which the encoders follow cheaply; at 1.5
+/// times smaller they became fractions, and OpenH264 skipped nearly every picture to hold the
+/// bitrate.
+const BASE_MAX_LINES: u16 = 540;
 /// The base layer's frame rate for a detail share: text needs no more.
 const BASE_DETAIL_FRAMERATE: u8 = 15;
 /// Bits per pixel of the base layer: H.264 at 480p needs more per pixel than the large layers to
 /// keep small text readable at all.
 const BASE_BITS_PER_PIXEL: f64 = 0.08;
 const BASE_MIN_BITRATE_BPS: u32 = 300_000;
-/// A layer above another needs at least this many times its lines to be worth sending: a 1080p
-/// share's half (540p) is hardly more than the base, a 1440p share's (720p) is.
+/// A middle layer above the base needs at least this many times its lines to be worth sending: a
+/// 1080p share's half (540p) is the base, a 1440p share's (720p) is clearly more.
 const MIN_LINES_RATIO: f64 = 1.4;
+/// A stepped-down top layer needs at least this many times the base's lines: 720p above a 540p
+/// base still is a step worth taking before the base alone.
+const MIN_TOP_LINES_RATIO: f64 = 1.3;
 /// The least frame rate a share is sent at, for the CPU and the uplink alike ("about 5 fps").
 pub const MIN_SHARE_FRAMERATE: u8 = 5;
 /// The frame rates a detail share's top layer steps down through, highest first; the least is
@@ -196,7 +200,7 @@ struct UplinkSizes {
 impl ShareLadder {
   /// The steps for `plan`, the full plan first.
   pub fn new(plan: SharePlan) -> Self {
-    let top_sizes = top_sizes(full_top_size(&plan), plan.source);
+    let top_sizes = top_sizes(full_top_size(&plan));
     let steps = ladder_steps(&plan, &top_sizes);
     Self {
       plan,
@@ -422,11 +426,11 @@ pub fn share_framerate(info: &VideoLayerInfo, bitrate_bps: u32) -> u8 {
 /// The top layer's sizes for a share whose full top is `full_top`: the full picture, then each of
 /// [`TOP_LINES`] below it that is clearly larger than the base, in the full picture's aspect: the
 /// shorter side at the line count, the longer side scaled and aligned to [`SIDE_ALIGNMENT`].
-pub fn top_sizes(full_top: VideoResolution, source: VideoResolution) -> Vec<VideoResolution> {
-  let base_lines = f64::from(lines(base_size(source)));
+pub fn top_sizes(full_top: VideoResolution) -> Vec<VideoResolution> {
+  let base_lines = f64::from(lines(base_size(full_top)));
   let mut sizes = vec![full_top];
   for step_lines in TOP_LINES {
-    if step_lines >= lines(full_top) || f64::from(step_lines) < base_lines * MIN_LINES_RATIO {
+    if step_lines >= lines(full_top) || f64::from(step_lines) < base_lines * MIN_TOP_LINES_RATIO {
       continue;
     }
     sizes.push(with_lines(full_top, step_lines));
@@ -449,7 +453,7 @@ fn ladder_steps(plan: &SharePlan, top_sizes: &[VideoResolution]) -> Vec<ShareSte
     top_codec,
     top_framerate: max_framerate,
     maybe_top: Some(full_top),
-    has_middle: middle_size(full_top, plan.source).is_some(),
+    has_middle: middle_size(full_top).is_some(),
   };
   let mut steps = match plan.profile.mode {
     ScreenContentMode::Motion => motion_steps(full, top_sizes),
@@ -459,7 +463,7 @@ fn ladder_steps(plan: &SharePlan, top_sizes: &[VideoResolution]) -> Vec<ShareSte
   if let Some(last) = steps.last().cloned()
     && last
       .maybe_top
-      .is_some_and(|top| lines(top) > lines(base_size(plan.source)))
+      .is_some_and(|top| lines(top) > lines(base_size(full_top)))
   {
     steps.push(ShareStep {
       maybe_top: None,
@@ -569,7 +573,7 @@ fn base_codec(codecs: &ShareCodecs, step: &ShareStep) -> VideoCodec {
 fn share_layers(plan: &SharePlan, step: &ShareStep) -> Vec<VideoLayerInfo> {
   let base_codec = base_codec(&plan.codecs, step);
   let size = &plan.profile.size;
-  let base = base_size(plan.source);
+  let base = base_size(full_top_size(plan));
   let is_detail = plan.profile.mode != ScreenContentMode::Motion;
   let base_framerate = if is_detail {
     step.top_framerate.clamp(1, BASE_DETAIL_FRAMERATE)
@@ -590,7 +594,7 @@ fn share_layers(plan: &SharePlan, step: &ShareStep) -> Vec<VideoLayerInfo> {
     return numbered(layers, &base_codec);
   };
   if step.has_middle
-    && let Some(middle) = middle_size(full_top_size(plan), plan.source)
+    && let Some(middle) = middle_size(full_top_size(plan))
     && f64::from(lines(top)) >= f64::from(lines(middle)) * MIN_LINES_RATIO
   {
     // Without layer codecs the base's codec is the top's, and so is the middle's.
@@ -637,18 +641,28 @@ fn full_top_size(plan: &SharePlan) -> VideoResolution {
   fit_within(plan.source, oriented_like(limit, plan.source))
 }
 
-/// The base layer's size: the source within 480p.
-fn base_size(source: VideoResolution) -> VideoResolution {
-  fit_within(source, oriented_like(BASE_LIMIT, source))
+/// The base layer's size for a share whose full top is `full_top`: the top divided by the least
+/// integer that brings it to [`BASE_MAX_LINES`] or fewer, with even sides; the top itself where it
+/// has no more lines.
+fn base_size(full_top: VideoResolution) -> VideoResolution {
+  let top_lines = lines(full_top);
+  if top_lines <= BASE_MAX_LINES {
+    return full_top;
+  }
+  let divisor = top_lines.div_ceil(BASE_MAX_LINES);
+  VideoResolution {
+    width: (full_top.width / divisor & !1).max(2),
+    height: (full_top.height / divisor & !1).max(2),
+  }
 }
 
 /// The middle layer's size, half the full top's, where that is clearly larger than the base.
-fn middle_size(full_top: VideoResolution, source: VideoResolution) -> Option<VideoResolution> {
+fn middle_size(full_top: VideoResolution) -> Option<VideoResolution> {
   let middle = VideoResolution {
     width: (full_top.width / 2) & !1,
     height: (full_top.height / 2) & !1,
   };
-  (f64::from(lines(middle)) >= f64::from(lines(base_size(source))) * MIN_LINES_RATIO).then_some(middle)
+  (f64::from(lines(middle)) >= f64::from(lines(base_size(full_top))) * MIN_LINES_RATIO).then_some(middle)
 }
 
 /// A picture's lines: its shorter side (a portrait screen's width).
@@ -758,7 +772,7 @@ mod tests {
       let full_hd = ShareLadder::new(plan(FULL_HD, SW, both(VideoCodec::Av1)));
       assert_eq!(
         shape(&full_hd.layers(full_hd.step(0))),
-        vec![(852, 480, 15, None), (1920, 1080, 15, Some(VideoCodec::Av1))]
+        vec![(960, 540, 15, None), (1920, 1080, 15, Some(VideoCodec::Av1))]
       );
       let qhd = ShareLadder::new(plan(QHD, SW, both(VideoCodec::Av1)));
       assert_eq!(
@@ -903,10 +917,26 @@ mod tests {
   mod sizes {
     use super::*;
 
+    /// The base is an integer fraction of the top at about 480p: one-pixel moves of a scrolled
+    /// page stay whole pixels in it.
+    #[test]
+    fn the_base_is_an_integer_fraction_of_the_top() {
+      let base = |width, height| {
+        let size = base_size(VideoResolution { width, height });
+        (size.width, size.height)
+      };
+      assert_eq!(base(2560, 1440), (852, 480));
+      assert_eq!(base(1920, 1080), (960, 540));
+      assert_eq!(base(3840, 2160), (960, 540));
+      assert_eq!(base(1280, 720), (640, 360));
+      assert_eq!(base(1440, 2560), (480, 852));
+      assert_eq!(base(800, 450), (800, 450), "small: no base below it");
+    }
+
     #[test]
     fn a_4k_share_steps_through_every_size_above_the_base() {
       assert_eq!(
-        sides(&top_sizes(UHD, UHD)),
+        sides(&top_sizes(UHD)),
         vec![(3840, 2160), (2560, 1440), (1920, 1080), (1600, 900), (1280, 720)]
       );
     }
@@ -918,18 +948,14 @@ mod tests {
         height: 1200,
       };
       assert_eq!(
-        sides(&top_sizes(four_three, four_three)),
+        sides(&top_sizes(four_three)),
         vec![(1600, 1200), (1440, 1080), (1200, 900), (960, 720)]
       );
       let ultrawide_top = VideoResolution {
         width: 2560,
         height: 1072,
       };
-      let ultrawide = VideoResolution {
-        width: 3440,
-        height: 1440,
-      };
-      let sizes = top_sizes(ultrawide_top, ultrawide);
+      let sizes = top_sizes(ultrawide_top);
       assert_eq!(sides(&sizes), vec![(2560, 1072), (2144, 900), (1712, 720)]);
       for size in &sizes[1..] {
         assert_eq!(size.width % SIDE_ALIGNMENT, 0, "{size:?}");
@@ -940,7 +966,7 @@ mod tests {
         height: 2560,
       };
       assert_eq!(
-        sides(&top_sizes(portrait, portrait)),
+        sides(&top_sizes(portrait)),
         vec![(1440, 2560), (1080, 1920), (900, 1600), (720, 1280)]
       );
     }
@@ -949,14 +975,14 @@ mod tests {
     #[test]
     fn small_shares_have_few_or_no_size_steps() {
       assert_eq!(
-        sides(&top_sizes(FULL_HD, FULL_HD)),
+        sides(&top_sizes(FULL_HD)),
         vec![(1920, 1080), (1600, 900), (1280, 720)]
       );
       let hd = VideoResolution {
         width: 1280,
         height: 720,
       };
-      assert_eq!(sides(&top_sizes(hd, hd)), vec![(1280, 720)]);
+      assert_eq!(sides(&top_sizes(hd)), vec![(1280, 720)]);
     }
 
     fn sides(sizes: &[VideoResolution]) -> Vec<(u16, u16)> {
@@ -999,9 +1025,10 @@ mod tests {
       );
       for step in ladder.steps() {
         let layers = ladder.layers(step);
+        // Half of 1080p: an integer step below the top.
         assert_eq!(
           (layers[0].width, layers[0].height),
-          (852, 480),
+          (960, 540),
           "base at {step:?}"
         );
         assert_eq!(layers[0].maybe_codec, None);
@@ -1216,7 +1243,11 @@ mod tests {
         "the smallest size, not the base"
       );
       let layers = governor.layers();
-      assert_eq!(layers.first().map(|info| info.height), Some(480));
+      assert_eq!(
+        layers.first().map(|info| info.height),
+        Some(540),
+        "a quarter of 2160p"
+      );
       assert_eq!(layers.last().map(|info| info.height), Some(720));
       // A reduced top (a lower rate) is no reason to step up.
       assert!(!governor.on_uplink(UplinkTop::Reduced, now + config.calm_period * 2));

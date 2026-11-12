@@ -444,7 +444,8 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
   it needs, at most 25 Mbit/s. Budgets: docs/performance.md.
 - **Screen share policy** (#1733, `teamcraft_media::share_policy`): meetings share text, not games,
   so a detail share keeps its **resolution before its frame rate**. Its layers:
-  - a **base** layer at up to 480p (15 fps for detail) in H.264, which every device decodes, sent
+  - a **base** layer at about 480p (an integer fraction of the top, so a scrolled page moves by
+    whole pixels: 480 lines of 1440p, 540 of 1080p and 2160p; 15 fps for detail) in H.264, which every device decodes, sent
     throughout;
   - a **middle** layer at half the picture where that is clearly larger than the base (from
     1440p), in the top's codec where every viewer decodes it, else H.264;

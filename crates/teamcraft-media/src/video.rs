@@ -978,7 +978,7 @@ mod tests {
       vec![(852, 480, 15), (1280, 720, 30), (2560, 1440, 30)]
     );
     let motion = screen_layers(res(2560, 1440), 60, ScreenContentMode::Motion, &standard);
-    assert_eq!(sides_and_rates(&motion), vec![(852, 480, 60), (1920, 1080, 60)]);
+    assert_eq!(sides_and_rates(&motion), vec![(960, 540, 60), (1920, 1080, 60)]);
     // A small window is not enlarged.
     let small = screen_layers(res(800, 600), 30, ScreenContentMode::Detail, &standard);
     assert_eq!(
@@ -1009,7 +1009,7 @@ mod tests {
     let detail = screen_layers(res(3840, 2160), 60, ScreenContentMode::Detail, &uhd);
     assert_eq!(
       sides_and_rates(&detail),
-      vec![(852, 480, 15), (1920, 1080, 30), (3840, 2160, 30)]
+      vec![(960, 540, 15), (1920, 1080, 30), (3840, 2160, 30)]
     );
     assert!(detail[2].max_bitrate_bps > SCREEN_MAX_BITRATE_BPS);
     assert_eq!(detail[1].max_bitrate_bps, detail[2].max_bitrate_bps / 4);
