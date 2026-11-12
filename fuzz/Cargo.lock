@@ -5610,6 +5610,7 @@ dependencies = [
  "image",
  "js-sys",
  "keyring",
+ "openmls_memory_storage",
  "openmls_rust_crypto",
  "openmls_traits",
  "rand_core 0.6.4",
