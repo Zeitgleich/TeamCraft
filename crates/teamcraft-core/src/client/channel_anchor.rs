@@ -3,8 +3,9 @@
 //! changes it, and signing moves and renames.
 //!
 //! The pure decisions are `crate::anchoring`'s; this module reads the device's state for them and
-//! records the outcome in the account data. Meeting chats (D10) aren't anchored yet: the apps
-//! don't hand the meeting's ID to the chat's founding.
+//! records the outcome in the account data. Meeting chats are anchored too (D10, #1747): the
+//! organizer's device founds with the meeting's ID, and a member checks the anchor against the
+//! meeting and organizer the server names.
 
 use teamcraft_crypto::channel_anchor::{
   AnchorKind, ChannelAnchor, ChannelProperties, DEFAULT_MAX_ANCHOR_BYTES, FloorError, Founding,
@@ -12,10 +13,10 @@ use teamcraft_crypto::channel_anchor::{
 };
 use teamcraft_crypto::membership::IdentityDirectory;
 use teamcraft_crypto::mls::{ConversationGroup, MlsError};
-use teamcraft_proto::{ConversationId, ConversationResponse, SpaceId, UserId};
+use teamcraft_proto::{ConversationId, ConversationKind, ConversationResponse, MeetingId, SpaceId, UserId};
 
 use super::Client;
-use crate::anchoring::{self, AnchorOutcome, AnchorVerdict, ReleaseVersion};
+use crate::anchoring::{self, AnchorOutcome, AnchorVerdict, MeetingExpectation, ReleaseVersion};
 use crate::api::ServerApi;
 use crate::channel_roles::RoleFounding;
 use crate::convert;
@@ -135,15 +136,39 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     name: &str,
     device_list_version: u64,
   ) -> Result<ChannelAnchor, CoreError> {
-    let founding = Founding {
+    self.sign_anchor_founding(&Founding {
       conversation_id: convert::conversation(conversation),
       kind: AnchorKind::Channel,
       device_list_version,
       signed_at_ms: u64::try_from(self.now_ms()).unwrap_or(0),
       maybe_space_id: Some(convert::space(space)),
       name,
-    };
-    ChannelAnchor::found(&self.account.device, &self.account.certificate, &founding)
+    })
+  }
+
+  /// Signs the anchor of a meeting chat this organizer's device founds (D10, #1747): kind
+  /// `meeting_chat` with `meeting`, as the app handed it over, outside any space and without a name
+  /// (a meeting chat is never renamed through its anchor, and no deletion purges by its name).
+  pub(crate) fn sign_meeting_founding(
+    &self,
+    conversation: ConversationId,
+    meeting: MeetingId,
+    device_list_version: u64,
+  ) -> Result<ChannelAnchor, CoreError> {
+    self.sign_anchor_founding(&Founding {
+      conversation_id: convert::conversation(conversation),
+      kind: AnchorKind::MeetingChat {
+        meeting_id: convert::meeting(meeting),
+      },
+      device_list_version,
+      signed_at_ms: u64::try_from(self.now_ms()).unwrap_or(0),
+      maybe_space_id: None,
+      name: "",
+    })
+  }
+
+  fn sign_anchor_founding(&self, founding: &Founding<'_>) -> Result<ChannelAnchor, CoreError> {
+    ChannelAnchor::found(&self.account.device, &self.account.certificate, founding)
       .map_err(|error| CoreError::Mls(MlsError::from(error)))
   }
 
@@ -156,22 +181,75 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     group: &ConversationGroup,
   ) -> Result<Result<(), FloorError>, CoreError> {
     let maybe_floor = self.account_data().anchor_floor(conversation);
+    if maybe_floor.is_none() && group.anchor_bytes().is_none() {
+      return Ok(Ok(()));
+    }
+    let tree_users = users_of(group)?;
+    let directory = self.anchor_directory(group.anchor_bytes(), tree_users).await?;
+    let maybe_meeting = self
+      .meeting_expectation_entering(conversation, group, &directory)
+      .await?;
     let Some(expected) = anchoring::anchor_expectation(
       convert::conversation(conversation),
       maybe_floor.is_some(),
       group.anchor_bytes().is_some(),
+      maybe_meeting,
     ) else {
       return Ok(Ok(()));
     };
-    let tree_users = users_of(group)?;
-    let directory = self.anchor_directory(group.anchor_bytes(), tree_users).await?;
     let authority = self.anchor_authority()?;
-    let outcome = AnchorOutcome::of(
-      group.verified_anchor(&expected, &directory, &authority),
-      group.anchor_bytes(),
-    );
+    let result = group.verified_anchor(&expected, &directory, &authority);
+    if anchoring::refuses_meeting_anchor(&expected, &result) {
+      return self.apply_anchor_verdict(conversation, AnchorVerdict::Refuse(FloorError::NotThisMeeting));
+    }
+    let outcome = AnchorOutcome::of(result, group.anchor_bytes());
     let verdict = anchoring::judge_entering(maybe_floor.as_ref(), &outcome, group.epoch());
     self.apply_anchor_verdict(conversation, verdict)
+  }
+
+  /// What a meeting chat's anchor must name when this device enters its group (D10, #1747): the
+  /// meeting and the organizer the server names for the chat. After a handover (#1720) the group
+  /// keeps the anchor its first organizer signed: then the founder counts if the signed host lists
+  /// hand the meeting from the founder's key (as its leaf verified) to the organizer named now.
+  /// `None` for any other conversation (its anchor must be a channel's); a server too old to name
+  /// the meeting leaves the meeting chat's anchor to name itself.
+  async fn meeting_expectation_entering(
+    &mut self,
+    conversation: ConversationId,
+    group: &ConversationGroup,
+    directory: &PinnedDirectory,
+  ) -> Result<Option<MeetingExpectation>, CoreError> {
+    let maybe_named = group.anchor_bytes().and_then(anchoring::meeting_named_by);
+    let is_listed_meeting = self
+      .cached_conversations()?
+      .get(&conversation)
+      .is_some_and(|response| response.kind == ConversationKind::Meeting);
+    if maybe_named.is_none() && !is_listed_meeting {
+      return Ok(None);
+    }
+    let response = self.api.conversation(conversation).await?;
+    if response.kind != ConversationKind::Meeting {
+      return Ok(None);
+    }
+    let (Some(meeting), Some(organizer)) = (response.maybe_meeting_id, response.maybe_organizer_user_id)
+    else {
+      return Ok(maybe_named);
+    };
+    let mut expected = MeetingExpectation {
+      meeting_id: convert::meeting(meeting),
+      organizer: convert::user(organizer),
+    };
+    if let Some(named) = maybe_named
+      && named.organizer != expected.organizer
+      && let Some(founder) = group.members()?.into_iter().next()
+      && founder.user_id == named.organizer
+      && self
+        .is_handed_over_group(conversation, group, founder, directory, organizer)
+        .await?
+    {
+      expected.organizer = named.organizer;
+    }
+    Ok(Some(expected))
   }
 
   /// Pins the anchor of a channel this device just founded (its own founding is entered like any
@@ -204,10 +282,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let maybe_floor = self.account_data().anchor_floor(conversation);
     let authority = self.anchor_authority()?;
     let group = self.group_or_error(conversation)?;
+    // The founding can't change inside a group state, and was checked against the server's meeting
+    // and organizer when this device entered it: a meeting chat's anchor names its own.
     let Some(expected) = anchoring::anchor_expectation(
       convert::conversation(conversation),
       maybe_floor.is_some(),
       group.anchor_bytes().is_some(),
+      group.anchor_bytes().and_then(anchoring::meeting_named_by),
     ) else {
       return Ok(());
     };
@@ -233,10 +314,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Ok(HeldAnchor::Unanchored);
     };
     let maybe_bytes = group.anchor_bytes().map(<[u8]>::to_vec);
+    // As inside a group state: checked against the server's word when this device entered it.
     let Some(expected) = anchoring::anchor_expectation(
       convert::conversation(conversation),
       maybe_floor.is_some(),
       maybe_bytes.is_some(),
+      maybe_bytes.as_deref().and_then(anchoring::meeting_named_by),
     ) else {
       return Ok(HeldAnchor::Unanchored);
     };

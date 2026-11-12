@@ -92,7 +92,11 @@ pub fn MeetingsView() -> impl IntoView {
         // The server makes the chat without encryption; an instant meeting invites nobody.
         // Gone only with the app; then the chat stays without encryption (nobody else founds it).
         state.try_write(|backend| {
-          backend.set_up_meeting_chat(meeting.conversation_id, ChatInvitees::chosen(Vec::new()))
+          backend.set_up_meeting_chat(
+            meeting.conversation_id,
+            meeting.id,
+            ChatInvitees::chosen(Vec::new()),
+          )
         });
         show_created(state, hub, meeting);
       }
@@ -1164,7 +1168,9 @@ pub fn ScheduleMeetingDialog(
             // group (from this request, never from the server's member list).
             let invitees = ChatInvitees::chosen(crate::meetings::invited_users(&request));
             // Gone only with the app; then the chat stays without encryption (nobody else founds it).
-            state.try_write(|backend| backend.set_up_meeting_chat(meeting.conversation_id, invitees));
+            state.try_write(|backend| {
+              backend.set_up_meeting_chat(meeting.conversation_id, meeting.id, invitees)
+            });
             // The lobby setting as the organizer chose it here, never as the server reports it,
             // decides whether this device lets guests of the link in by itself (#987 review).
             let has_lobby = request.has_lobby;
@@ -1701,7 +1707,9 @@ pub(crate) async fn save_meeting_edit(
   }
   // From the saved meeting, which is what the server holds now.
   let (invitees, removed) = saved_change(&before, &saved, added);
-  state.try_write(|backend| backend.update_meeting_chat_members(saved.conversation_id, invitees, removed));
+  state.try_write(|backend| {
+    backend.update_meeting_chat_members(saved.conversation_id, saved.id, invitees, removed)
+  });
   let until = saved.ends_at.0 + GUEST_ACCESS_GRACE_MS;
   state.try_write(|backend| backend.sync_meeting_admitters(saved.id, saved.conversation_id, until));
   clear_pending_edit(before.id);

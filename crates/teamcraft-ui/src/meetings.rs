@@ -714,9 +714,17 @@ fn store_pending_edits(edits: &[PendingEdit]) {
 pub fn finish_pending_edits(state: crate::state::AppState, hub: MeetingsHub) {
   let meetings = hub.meetings.get_untracked();
   reconcile_pending_edits(now_ms(), &meetings, |conversation, invitees, removed| {
+    // Only meetings in the list are reconciled, so the chat's meeting is there.
+    let Some(meeting) = meetings
+      .iter()
+      .find(|meeting| meeting.conversation_id == conversation)
+      .map(|meeting| meeting.id)
+    else {
+      return;
+    };
     // The server's list: only users the organizer's signed list names are added (#1726).
     let invitees = ChatInvitees::listed(invitees);
-    state.try_write(|backend| backend.update_meeting_chat_members(conversation, invitees, removed));
+    state.try_write(|backend| backend.update_meeting_chat_members(conversation, meeting, invitees, removed));
   });
 }
 

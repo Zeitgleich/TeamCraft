@@ -4,8 +4,8 @@ use utoipa::ToSchema;
 use crate::wire_enum::wire_enum;
 use crate::{
   CategoryId, ChannelMentions, ChannelModeration, ChannelRole, ConversationId, ConversationKind,
-  ConversationVisibility, DeletedConversationSignature, HistoryPolicy, IdempotencyKey, MessageId, Permission,
-  QuietHours, SpaceId, SpaceImage, UnixMillis, UserId, UserSummary,
+  ConversationVisibility, DeletedConversationSignature, HistoryPolicy, IdempotencyKey, MeetingId, MessageId,
+  Permission, QuietHours, SpaceId, SpaceImage, UnixMillis, UserId, UserSummary,
 };
 
 wire_enum! {
@@ -107,6 +107,11 @@ pub struct ConversationResponse {
     skip_serializing_if = "Option::is_none"
   )]
   pub maybe_organizer_user_id: Option<UserId>,
+  /// The meeting a meeting chat belongs to; only in the answer for a single conversation, like
+  /// the organizer. Clients check the chat's encryption anchor against it (e2ee.md §4.6.5,
+  /// "Meetings (D10)"); the server's word, not a signature.
+  #[serde(rename = "meeting_id", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_meeting_id: Option<MeetingId>,
   /// The channel permissions the caller holds in the conversation now (`create_post`,
   /// `manage_members`, ...), so clients offer only what will work (issue #691). A hint: every
   /// request is checked again. Absent from older servers; clients then evaluate the built-in
@@ -485,6 +490,7 @@ mod tests {
       participants,
       maybe_image: None,
       maybe_organizer_user_id: None,
+      maybe_meeting_id: None,
       maybe_my_permissions: None,
       maybe_importer_user_id: None,
       maybe_imported_through: None,

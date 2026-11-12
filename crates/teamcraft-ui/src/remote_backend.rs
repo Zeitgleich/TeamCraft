@@ -1724,10 +1724,12 @@ impl ChatBackend for RemoteChat {
   fn set_up_meeting_chat(
     &self,
     conversation: ConversationId,
+    meeting: teamcraft_proto::MeetingId,
     invitees: teamcraft_client_api::meeting_invitees::ChatInvitees,
   ) {
     self.act(ChatAction::SetUpMeetingChat {
       conversation,
+      meeting,
       invitees,
     });
   }
@@ -1735,11 +1737,13 @@ impl ChatBackend for RemoteChat {
   fn update_meeting_chat_members(
     &self,
     conversation: ConversationId,
+    meeting: teamcraft_proto::MeetingId,
     invitees: teamcraft_client_api::meeting_invitees::ChatInvitees,
     removed: Vec<UserId>,
   ) {
     self.act(ChatAction::UpdateMeetingChatMembers {
       conversation,
+      meeting,
       invitees,
       removed,
     });

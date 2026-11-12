@@ -190,6 +190,7 @@ pub fn conversation_response(
     }),
     contains_guests: extras.with_guests.contains(&conversation.id),
     maybe_organizer_user_id: None,
+    maybe_meeting_id: None,
     maybe_my_permissions: None,
     maybe_importer_user_id: conversation.maybe_importer,
     maybe_imported_through: conversation.maybe_imported_through,

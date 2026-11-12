@@ -1104,6 +1104,10 @@ pub enum FloorError {
   /// The conversation is pinned to an anchor, and the group state carries none.
   #[error("the group carries no anchor, but one is pinned")]
   Stripped,
+  /// A meeting chat's group carries an anchor of another meeting or conversation, or one that
+  /// doesn't name the organizer as founder: a copy or a forgery, refused even without a pin (D10).
+  #[error("the meeting chat's anchor names another meeting, conversation or founder")]
+  NotThisMeeting,
 }
 
 /// The labelled hash of a channel name: over the UTF-8 bytes exactly as sent, with their length.

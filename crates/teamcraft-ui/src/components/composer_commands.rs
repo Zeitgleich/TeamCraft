@@ -350,6 +350,7 @@ fn start_meeting(state: AppState, i18n: I18n) -> Outcome {
       state.try_write(|backend| {
         backend.set_up_meeting_chat(
           meeting.conversation_id,
+          meeting.id,
           teamcraft_client_api::meeting_invitees::ChatInvitees::chosen(Vec::new()),
         )
       });

@@ -19,7 +19,7 @@ use teamcraft_proto::channel_name::checked_channel_name;
 use teamcraft_proto::{
   AddConversationMemberRequest, Base64Bytes, ClaimKeyPackagesRequest, ConversationId, ConversationKind,
   CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest, DeviceId, HistoryPolicy, Id, IdempotencyKey,
-  ListMlsMessagesQuery, ListMlsMessagesResponse, MlsMessageId, MlsMessageKind, MlsMessageResponse,
+  ListMlsMessagesQuery, ListMlsMessagesResponse, MeetingId, MlsMessageId, MlsMessageKind, MlsMessageResponse,
   MlsWelcome, PostMlsCommitRequest, PostMlsMessageRequest, SpaceId, UserId,
 };
 
@@ -68,6 +68,9 @@ const GROUP_INFO_PUBLISHED_PREFIX: &str = "group-info-published/";
 /// Key prefix of the lists of users taken off a meeting's invitees whom this device still has to
 /// remove from the chat's group, in [`Table::SyncState`].
 const MEETING_REMOVALS_PREFIX: &str = "meeting-removals/";
+/// Key prefix of the meeting a meeting chat belongs to, as the app handed it to the setup: the
+/// founding's anchor names it (D10, #1747), also when a later sync finishes the founding.
+const MEETING_OF_CHAT_PREFIX: &str = "meeting-of-chat/";
 
 /// This device's commit, merged: what it did and when the server stored it.
 pub(super) struct OwnCommit {
@@ -349,20 +352,70 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       added: invitees.to_vec(),
       kept: Vec::new(),
     };
-    self.set_up_meeting_chat_from(id, &chosen).await
+    self.set_up_meeting_chat_from(id, None, &chosen).await
   }
 
-  /// [`Self::set_up_meeting_chat`] with the invitees as `list` names them: the organizer's own
-  /// choice, or the server's attendees (a host's Join), of which only users the organizer's newest
-  /// signed list names are added (#1726, e2ee.md §4.6.5, "Meetings (D10)"); anybody else knocks
-  /// at the lobby.
+  /// [`Self::set_up_meeting_chat`] for the meeting `maybe_meeting` (the app's, from the meeting it
+  /// scheduled or joins; without it, the one the server names for the chat), which a founding
+  /// signs into the group's anchor once anchoring is on (D10, #1747), with the invitees as `list`
+  /// names them: the organizer's own choice, or the server's attendees (a host's Join), of which
+  /// only users the organizer's newest signed list names are added (#1726, e2ee.md §4.6.5,
+  /// "Meetings (D10)"); anybody else knocks at the lobby.
   pub async fn set_up_meeting_chat_from(
     &mut self,
     id: ConversationId,
+    maybe_meeting: Option<MeetingId>,
     list: &InviteeList,
   ) -> Result<bool, CoreError> {
+    if let Some(meeting) = maybe_meeting {
+      self.note_meeting_of_chat(id, meeting)?;
+    }
     let admitted = self.meeting_invitees_to_add(id, list).await?;
     self.set_up_meeting_chat_with(id, &admitted).await
+  }
+
+  /// Notes the meeting the app named for a meeting chat, for its founding.
+  pub(super) fn note_meeting_of_chat(&self, id: ConversationId, meeting: MeetingId) -> Result<(), CoreError> {
+    records::put_json(
+      &self.store,
+      Table::SyncState,
+      &format!("{MEETING_OF_CHAT_PREFIX}{id}"),
+      &meeting,
+    )
+  }
+
+  /// The meeting a meeting chat's founding names: the app's, else the server's for the chat.
+  async fn meeting_of_chat(&mut self, id: ConversationId) -> Result<Option<MeetingId>, CoreError> {
+    let maybe_noted: Option<MeetingId> = records::get_json(
+      &self.store,
+      Table::SyncState,
+      &format!("{MEETING_OF_CHAT_PREFIX}{id}"),
+    )?;
+    if maybe_noted.is_some() {
+      return Ok(maybe_noted);
+    }
+    Ok(self.api.conversation(id).await?.maybe_meeting_id)
+  }
+
+  /// Founds a meeting chat's group (only the organizer's devices get here): anchored with the
+  /// meeting once the instance's minimum client version reaches the anchoring release, like a
+  /// channel (D2, D10), and pinned at once; unanchored before, or without a meeting to name.
+  async fn found_meeting_group(&mut self, id: ConversationId) -> Result<(), CoreError> {
+    let maybe_anchor = match self.meeting_of_chat(id).await? {
+      Some(meeting) => match Box::pin(self.prepare_anchored_founding()).await? {
+        Some(version) => Some(self.sign_meeting_founding(id, meeting, version)?),
+        None => None,
+      },
+      None => {
+        tracing::warn!(conversation_id = %id, "no meeting named for the meeting chat; founded without an anchor");
+        None
+      },
+    };
+    self.found_dm_group_anchored(id, maybe_anchor.as_ref())?;
+    if maybe_anchor.is_some() {
+      Box::pin(self.pin_own_founding(id)).await;
+    }
+    Ok(())
   }
 
   /// [`Self::set_up_meeting_chat`] once the invitees are decided.
@@ -452,7 +505,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       added: invitees.to_vec(),
       kept: Vec::new(),
     };
-    self.update_meeting_chat_members_from(id, &chosen, removed).await
+    self
+      .update_meeting_chat_members_from(id, None, &chosen, removed)
+      .await
   }
 
   /// [`Self::update_meeting_chat_members`] with the invitees as `list` names them: users carried
@@ -462,9 +517,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub async fn update_meeting_chat_members_from(
     &mut self,
     id: ConversationId,
+    maybe_meeting: Option<MeetingId>,
     list: &InviteeList,
     removed: &[UserId],
   ) -> Result<bool, CoreError> {
+    if let Some(meeting) = maybe_meeting {
+      self.note_meeting_of_chat(id, meeting)?;
+    }
     let admitted = self.meeting_invitees_to_add(id, list).await?;
     let invitees = admitted.as_slice();
     let is_complete = Box::pin(self.set_up_meeting_chat_with(id, invitees)).await?;
@@ -910,6 +969,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         return self.complete_dm_setup(id, others);
       },
       Some(_) => {},
+      None if server_epoch == 0 && is_meeting_chat => Box::pin(self.found_meeting_group(id)).await?,
       None if server_epoch == 0 => self.found_dm_group(id)?,
       None => {
         // Someone else founded it: their welcome is on the way, or another device of this user is
@@ -1016,6 +1076,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Founds a DM's group. A content key this device makes for it is noted in the setup record
   /// first, so that giving the group up later (another founding won) can stop using it.
   fn found_dm_group(&mut self, id: ConversationId) -> Result<(), CoreError> {
+    self.found_dm_group_anchored(id, None)
+  }
+
+  /// [`Self::found_dm_group`] with `maybe_anchor` in the group context (a meeting chat, D10).
+  fn found_dm_group_anchored(
+    &mut self,
+    id: ConversationId,
+    maybe_anchor: Option<&ChannelAnchor>,
+  ) -> Result<(), CoreError> {
     let has_current = self
       .account
       .key_bag
@@ -1031,7 +1100,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       };
       records::put_json(&self.store, Table::SyncState, &dm_setup_key(id), &setup)?;
     }
-    self.found_group_with_key(id, maybe_key)
+    self.found_group_from(id, maybe_key, maybe_anchor)
   }
 
   /// Forgets the setup record once this device is in a group that holds everybody. Done as well
@@ -1762,16 +1831,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.found_group_from(conversation, None, maybe_anchor)
   }
 
-  /// Founds a conversation's group with `maybe_key` as the first content key; without one, a new
-  /// key is made unless the conversation has a current key already.
-  fn found_group_with_key(
-    &mut self,
-    conversation: ConversationId,
-    maybe_key: Option<ContentKey>,
-  ) -> Result<(), CoreError> {
-    self.found_group_from(conversation, maybe_key, None)
-  }
-
+  /// Founds a conversation's group with `maybe_key` as the first content key (without one, a new
+  /// key is made unless the conversation has a current key already) and `maybe_anchor` in its
+  /// context.
   fn found_group_from(
     &mut self,
     conversation: ConversationId,

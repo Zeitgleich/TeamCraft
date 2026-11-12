@@ -384,6 +384,7 @@ fn conversation(n: i64) -> ConversationResponse {
     is_integration: false,
     contains_guests: false,
     maybe_organizer_user_id: None,
+    maybe_meeting_id: None,
     maybe_my_permissions: None,
     maybe_importer_user_id: None,
     maybe_imported_through: None,

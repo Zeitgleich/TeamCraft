@@ -193,6 +193,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         maybe_idempotency_key: Some(key),
       })
       .await?;
+    // The meeting the room's founding names in its anchor (D10, #1747).
+    self.note_meeting_of_chat(meeting.conversation_id, meeting.id)?;
     let result = self
       .move_call_to_meeting(from, meeting.conversation_id, in_call, added)
       .await;

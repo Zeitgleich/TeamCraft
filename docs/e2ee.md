@@ -1872,9 +1872,10 @@ never by the server's member list:
   verified it), hand the meeting to the organizer's key as this device pinned it. Remaining gap:
   the organizer is the server's word, not a signature, so a hostile server can name somebody else
   (a signed organizer in the invitation would close it); an invitee who places the organizer's key
-  package at leaf 0 passes the check, which the anchor closes (§4.6.5, "Meetings", #1725); and a
-  group whose first leaf was reused after the organizer's first device was removed is refused as
-  well.
+  package at leaf 0 passes the check, which the anchor closes where the group carries one
+  (§4.6.5, "Meetings (D10)", #1747: an anchor the invitee signed is refused, one without an
+  anchor is judged as before unless the user's devices pinned the chat); and a group whose first
+  leaf was reused after the organizer's first device was removed is refused as well.
 - **Later invitees.** When the organizer saves a changed invitee list (`PATCH /meetings/{id}`),
   the organizer's device adds the new users to the group with signed adds (`update_meeting_chat_members`,
   from the list the organizer saved, never the server's member list) and removes the users taken
@@ -3240,8 +3241,8 @@ crypto review changed the design (end of this section). `teamcraft-crypto`'s `ch
 encoding, the hashes, the signatures, the verdicts, the pin and floor record, anchored founding and the move and
 rename commits (#1725, first part). `teamcraft-core` founds channels anchored, checks the anchor against the pin and
 floor on every join path, signs moves and renames, binds a deletion to the name (#1740), and takes only the
-anchored founding in the role log, with `may_anchor` for it (#1748; "Implementation notes" below). Still open:
-meeting chats (D10, #1747), what the
+anchored founding in the role log, with `may_anchor` for it (#1748; "Implementation notes" below), and founds
+meeting chats anchored and checks them against the server's meeting and organizer (D10, #1747). Still open: what the
 apps show of the anchor and the mobile name checks (#1749), and re-founding with its chain in the account data:
 `AnchorFloor` keeps no re-founding chain yet, so a re-founding is refused as another founding until #1728. The parts
 split off before: #1727 (signed space deletions), #1728 (anchoring older channels and re-founding), #1729 (strict
@@ -3642,6 +3643,22 @@ and couldn't count for a purge.
   organizer's device signature. He can still copy the real anchor and the organizer's leaf into a group of his own,
   which the organizer has no keys for; the authority it carries stays the organizer's, so that is a fork and
   availability, as any member's (§4.6.2, finding 4). Which organizer the server names stays its word.
+  - *Built* (#1747): the apps hand the meeting's ID to the chat's setup (`set_up_meeting_chat`,
+    `update_meeting_chat_members`; the room of a call that grows takes the instant meeting's), and the organizer's
+    device founds the group with `ChannelAnchor::found` of kind `meeting_chat { meeting_id }` (`create_anchored`)
+    once its highest `minimum_client_version` reaches `anchoring::ANCHORING_RELEASE`, as channels do; without an
+    ID from the app it takes the one the server names for the chat. A meeting chat's anchor names no space and an
+    empty name: the chat is never renamed or purged through its anchor. `GET /conversations/{id}` names the meeting
+    (`meeting_id`) besides the organizer. On entering a group state (welcome, add-back, external commit, the own
+    founding), `anchor_expectation` expects `MeetingChat { meeting_id, organizer }` with the server's meeting and
+    organizer; after a handover (#1720) the founder counts as organizer if the signed host lists hand the meeting
+    from the founder's key to the organizer named now. Unlike a channel's, a meeting chat's anchor that names
+    another meeting or conversation, or a founder who isn't the organizer, is refused even without a pin
+    (`refuses_meeting_anchor`, `FloorError::NotThisMeeting`): no honest device signs one. Anything else that
+    doesn't verify grants nothing, as for channels. Inside a group state (a commit) the anchor names its own meeting
+    and founder: the founding can't change there. `is_founded_by_organizer` keeps the first-leaf check besides.
+    Residual risk: a meeting chat whose group carries no anchor (founded before the release, or by an invitee who
+    leaves it out) is judged as before on a device that hasn't pinned the chat.
 - **The invitee list** (#1726). The organizer's signed admitters statement (`meeting_admitters`, #1103,
   above) gains the invitees' user IDs, under the same sequence, end of validity and storage. A host's Join adds only
   users the newest statement names and the server still lists (its word can only lower); anybody else knocks at the

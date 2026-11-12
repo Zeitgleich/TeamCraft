@@ -834,7 +834,7 @@ fn open_meeting(state: crate::state::AppState, i18n: I18n, meeting: &MeetingResp
     // The server's attendees: only users the organizer's signed list names go in (#1726); anybody
     // else knocks at the lobby.
     let invitees = crate::meetings::ChatInvitees::listed(attending_users(meeting));
-    state.try_write(|backend| backend.set_up_meeting_chat(meeting.conversation_id, invitees));
+    state.try_write(|backend| backend.set_up_meeting_chat(meeting.conversation_id, meeting.id, invitees));
   }
   join_meeting(state, i18n, meeting.conversation_id);
 }

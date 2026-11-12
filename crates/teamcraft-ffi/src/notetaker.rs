@@ -241,7 +241,7 @@ impl Engine {
       .with_client(move |client| {
         Box::pin(async move {
           client
-            .update_meeting_chat_members_from(chat, &InviteeList::from(invitees), &removed)
+            .update_meeting_chat_members_from(chat, Some(meeting), &InviteeList::from(invitees), &removed)
             .await?;
           // Who may let guests in changed with the group; a failure here leaves the old statement,
           // which the next edit or start renews.

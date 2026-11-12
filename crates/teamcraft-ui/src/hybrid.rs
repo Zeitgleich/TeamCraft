@@ -620,20 +620,22 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
   fn set_up_meeting_chat(
     &self,
     conversation: ConversationId,
+    meeting: teamcraft_proto::MeetingId,
     invitees: teamcraft_client_api::meeting_invitees::ChatInvitees,
   ) {
-    self.chat.set_up_meeting_chat(conversation, invitees);
+    self.chat.set_up_meeting_chat(conversation, meeting, invitees);
   }
 
   fn update_meeting_chat_members(
     &self,
     conversation: ConversationId,
+    meeting: teamcraft_proto::MeetingId,
     invitees: teamcraft_client_api::meeting_invitees::ChatInvitees,
     removed: Vec<UserId>,
   ) {
     self
       .chat
-      .update_meeting_chat_members(conversation, invitees, removed);
+      .update_meeting_chat_members(conversation, meeting, invitees, removed);
   }
 
   fn add_people_to_call(

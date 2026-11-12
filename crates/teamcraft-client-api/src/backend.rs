@@ -466,9 +466,11 @@ pub trait ChatBackend {
   /// Sets up the encryption of a meeting chat this user just scheduled or started, with the users
   /// they invited (the organizer's own request), or of a meeting they join as its organizer (the
   /// server's attendees, of which only users the organizer's signed list names go in, #1726).
+  /// `meeting` goes into the group's anchor when this device founds it (D10, #1747).
   fn set_up_meeting_chat(
     &self,
     _conversation: ConversationId,
+    _meeting: teamcraft_proto::MeetingId,
     _invitees: crate::meeting_invitees::ChatInvitees,
   ) {
   }
@@ -479,6 +481,7 @@ pub trait ChatBackend {
   fn update_meeting_chat_members(
     &self,
     _conversation: ConversationId,
+    _meeting: teamcraft_proto::MeetingId,
     _invitees: crate::meeting_invitees::ChatInvitees,
     _removed: Vec<UserId>,
   ) {
