@@ -422,15 +422,16 @@ impl SendSideEstimator {
   }
 
   /// A probe at the start showed the path carries `capacity_bps` (`crate::join_probe`): the
-  /// estimate takes [`PROBE_SHARE`] of it at once, whether that is more or less than it has now; the
-  /// fast start ends now, and after [`Self::measure_afresh`] it ends at the capacity. A narrow link isn't
-  /// overshot by the fast start and then cut (a 1 Mbit/s link went to 2.7 Mbit/s in two seconds
+  /// estimate takes [`PROBE_SHARE`] of it at once, whether that is more or less than it has now;
+  /// the fast start ends now, and after [`Self::measure_afresh`] it ends at the capacity. A narrow
+  /// link isn't overshot by the fast start and then cut (a 1 Mbit/s link went to 2.7 Mbit/s in two seconds
   /// before its first loss), and a wide one doesn't wait for the estimate to grow. From there the
   /// estimate grows as usual, should the probe have shown too little.
   pub fn apply_probe(&mut self, capacity_bps: u32) -> u32 {
-    let capacity = f64::from(capacity_bps).clamp(f64::from(self.config.min_bps), self.ceiling_bps());
+    // The share of what was measured, within the bounds: a link far above the ceiling starts at it.
+    let capacity = f64::from(capacity_bps);
     self.maybe_probed_bps = Some(capacity);
-    self.estimate_bps = (capacity * PROBE_SHARE).max(f64::from(self.config.min_bps));
+    self.estimate_bps = (capacity * PROBE_SHARE).clamp(f64::from(self.config.min_bps), self.ceiling_bps());
     self.is_starting = false;
     self.estimate_bps()
   }
