@@ -101,6 +101,34 @@ pub struct SentVideoStats {
   /// no share policy runs (the desktop's encoders).
   #[serde(default)]
   pub maybe_share_limits: Option<ShareLimitsStats>,
+  /// What the capture made of the buffers its source handed over (#1805); `None` where the
+  /// capture doesn't count them (cameras, the browser).
+  #[serde(default)]
+  pub maybe_capture_buffers: Option<CaptureBufferStats>,
+}
+
+/// The buffers a capture got from its source, by what became of them (#1805), counted since the
+/// capture started. A screen that moves but whose buffers can't be used shows a still picture to
+/// everybody, while a still screen delivers nothing at all: only these counts tell the two apart.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureBufferStats {
+  /// Buffers that became a picture.
+  pub pictures: u64,
+  /// Buffers without a picture by design: only the cursor moved.
+  pub cursor_only: u64,
+  /// Buffers the source marked as corrupted.
+  pub corrupted: u64,
+  /// Buffers the capture couldn't read (a DMA-BUF it can't map).
+  pub unmapped: u64,
+  /// Buffers whose picture lies outside their memory, or in a format the capture can't convert.
+  pub unreadable: u64,
+}
+
+impl CaptureBufferStats {
+  /// Buffers that should have been a picture and weren't.
+  pub fn unusable(&self) -> u64 {
+    self.corrupted + self.unmapped + self.unreadable
+  }
 }
 
 /// What a screen share's policy made of its layers (#1733): the plan from the viewers' codecs and
@@ -485,6 +513,7 @@ mod tests {
       maybe_held_back_ms: Some(0),
       maybe_camera_limits: None,
       maybe_share_limits: None,
+      maybe_capture_buffers: None,
     }
   }
 }

@@ -269,6 +269,15 @@ per-packet work, one stats read every 3 s during a call, nothing outside one.
 | `CallSfuRejected`       | warning | The SFU refused a request, by its `error_code`                                                                                       | the code                       |
 | `CallProtocolError`     | error   | `CallEngineError::Protocol` (and a sequence gap): the violation's name from the code                                                 | the name                       |
 | `PoorCall`              | warning | At the end of a call of 30 s or more: 15 s frozen, 3 reconnects or 10 lossy samples (5 % or more downlink loss)                      | –                              |
+| `CaptureStalled`        | error   | An own capture got buffers it couldn't use (5 or more in 5 s, more than pictures): counts by outcome over the window (#1805)          | kind, the most frequent reason |
+
+A stalled capture (#1805) is judged on the desktop's PipeWire capture, which counts every buffer
+its source hands over by what became of it (`capture_health`): a picture, the cursor only,
+corrupted, a DMA-BUF it can't map, or unreadable (out of its memory, a format it can't convert).
+A still screen hands over nothing or cursor moves only, so it never stalls; a moving screen whose
+buffers can't be used showed the others one still picture for minutes before (#1805). The sharer
+sees "The others see only a still picture" in the call until pictures come again or the track
+stops. Cameras and the browser don't count their buffers yet.
 
 The message names the kind and its stable parts only (`camera picture froze (vp9, packets still
 arriving)`); the numbers are in the event's `call` context. Each kind goes once per call (freezes

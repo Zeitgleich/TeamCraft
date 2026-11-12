@@ -166,6 +166,7 @@ fn active_call(request: CallRequest, carol: UserId) -> ActiveCall {
     unverified: Vec::new(),
     is_on_limited_network: false,
     is_video_limited_by_device: false,
+    is_own_capture_stalled: false,
     maybe_moved_to: None,
     maybe_joined_at: None,
     maybe_encryption_failure: None,

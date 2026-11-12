@@ -27,6 +27,7 @@ use pw::spa::pod::Pod;
 use tracing::{debug, info, trace, warn};
 
 use crate::capture_convert::{PixelFormat, RawPicture};
+use crate::capture_health::{BufferOutcome, CaptureHealth};
 use crate::video::VideoResolution;
 use crate::video_capture::{CaptureError, CaptureFormat, FrameSender, VideoCapture};
 use crate::video_pipeline::RepeatedWarning;
@@ -68,6 +69,8 @@ pub struct PortalCapture {
   maybe_session: Option<ScreencastSession>,
   maybe_remote: Option<Remote>,
   maybe_running: Option<(pw::channel::Sender<()>, JoinHandle<()>)>,
+  /// What became of the stream's buffers (#1805).
+  health: CaptureHealth,
 }
 
 struct ScreencastSession {
@@ -94,6 +97,7 @@ struct StreamState {
   delivered: u64,
   /// Pictures that can't be used, logged at most every few seconds.
   warning: RepeatedWarning,
+  health: CaptureHealth,
 }
 
 /// What a PipeWire buffer's chunk holds.
@@ -134,6 +138,7 @@ impl PortalCapture {
       maybe_session: None,
       maybe_remote: Some(Remote { fd, maybe_node: None }),
       maybe_running: None,
+      health: CaptureHealth::new(),
     })
   }
 
@@ -218,6 +223,7 @@ impl PortalCapture {
         maybe_node: Some(node),
       }),
       maybe_running: None,
+      health: CaptureHealth::new(),
     };
     Ok((capture, maybe_token))
   }
@@ -237,16 +243,21 @@ impl VideoCapture for PortalCapture {
     let (stop, stop_rx) = pw::channel::channel::<()>();
     let source = self.source;
     let format = self.format;
+    let health = self.health.clone();
     let thread = std::thread::Builder::new()
       .name("pipewire-capture".into())
       .spawn(move || {
-        if let Err(error) = run_stream(remote, source, format, frames, stop_rx) {
+        if let Err(error) = run_stream(remote, source, format, frames, health, stop_rx) {
           warn!(%error, ?source, "PipeWire capture ended");
         }
       })
       .map_err(|error| CaptureError::Device(error.to_string()))?;
     self.maybe_running = Some((stop, thread));
     Ok(())
+  }
+
+  fn health(&self) -> Option<CaptureHealth> {
+    Some(self.health.clone())
   }
 
   fn stop(&mut self) {
@@ -283,6 +294,7 @@ fn run_stream(
   source: PortalSource,
   format: CaptureFormat,
   frames: FrameSender,
+  health: CaptureHealth,
   stop: pw::channel::Receiver<()>,
 ) -> Result<(), pw::Error> {
   pw::init();
@@ -310,6 +322,7 @@ fn run_stream(
     start: Instant::now(),
     delivered: 0,
     warning: RepeatedWarning::default(),
+    health,
   };
   let loop_for_quit = main_loop.clone();
   let loop_for_error = main_loop.clone();
@@ -370,6 +383,7 @@ fn run_stream(
       trace!(offset, size, stride, "buffer");
       let is_corrupted = chunk.flags().contains(spa::buffer::ChunkFlags::CORRUPTED);
       let Some(pixel_format) = state.maybe_pixel_format else {
+        state.health.record(BufferOutcome::Unreadable);
         state.warning.warn(|suppressed| {
           warn!(format = ?state.format.format(), suppressed, "PipeWire buffer in a format we can't convert");
         });
@@ -377,6 +391,7 @@ fn run_stream(
       };
       let Some(mapped) = data.data() else {
         // A DMA-BUF the stream can't map: no picture ever comes this way.
+        state.health.record(BufferOutcome::Unmapped);
         state
           .warning
           .warn(|suppressed| warn!(source = ?state.source, suppressed, "PipeWire buffer not mapped"));
@@ -385,8 +400,17 @@ fn run_stream(
       let bytes = match picture_range(mapped.len(), offset, size, is_corrupted) {
         ChunkContent::Picture(range) => &mapped[range],
         // Metadata-only buffers (a cursor move, nothing new on screen) and damaged ones.
-        ChunkContent::Empty => return,
+        ChunkContent::Empty => {
+          let outcome = if is_corrupted {
+            BufferOutcome::Corrupted
+          } else {
+            BufferOutcome::CursorOnly
+          };
+          state.health.record(outcome);
+          return;
+        },
         ChunkContent::OutOfRange => {
+          state.health.record(BufferOutcome::Unreadable);
           let mapped_len = mapped.len();
           state.warning.warn(|suppressed| {
             warn!(
@@ -410,6 +434,7 @@ fn run_stream(
       let timestamp_us = u64::try_from(state.start.elapsed().as_micros()).unwrap_or(u64::MAX);
       match picture.to_i420(timestamp_us) {
         Ok(frame) => {
+          state.health.record(BufferOutcome::Picture);
           if state.delivered == 0 {
             debug!(source = ?state.source, "first PipeWire frame");
           }
@@ -419,6 +444,7 @@ fn run_stream(
           }
         },
         Err(error) => {
+          state.health.record(BufferOutcome::Unreadable);
           let source = state.source;
           state
             .warning

@@ -160,6 +160,14 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         .is_some_and(|active| active.is_video_limited_by_device && !active.is_reconnecting)
     })
   });
+  // #1805: this device's own capture gives the others a still picture.
+  let is_own_capture_stalled = Memo::new(move |_| {
+    state.read(|backend| {
+      backend
+        .active_call()
+        .is_some_and(|active| active.is_own_capture_stalled && !active.is_reconnecting)
+    })
+  });
   let reconnecting = Memo::new(move |_| {
     state.read(|backend| {
       backend
@@ -575,6 +583,9 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         </Show>
         <Show when=move || is_video_limited_by_device.get() fallback=|| ()>
           <span class="muted-text" role="status">{move || i18n.t("call-device-busy")}</span>
+        </Show>
+        <Show when=move || is_own_capture_stalled.get() fallback=|| ()>
+          <span class="muted-text" role="status">{move || i18n.t("call-capture-stalled")}</span>
         </Show>
       </header>
       // The organizer, and a host of somebody else's meeting (a co-host, #1720, or a chat admin,
