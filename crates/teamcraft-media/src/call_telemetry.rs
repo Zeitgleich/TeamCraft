@@ -1186,6 +1186,7 @@ mod tests {
           packets,
           bytes: packets * 1_000,
           packets_lost,
+          packets_recovered: 0,
           frames,
           frames_discarded: 0,
           maybe_jitter_ms: Some(12.4),
