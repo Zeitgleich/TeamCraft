@@ -14,7 +14,9 @@ The server creates the chat without an encryption group; the organizer's app set
 users the organizer invited, and a host's "admit" lets an admitted person in (e2ee.md §4.6,
 "Meeting chats"). A meeting from before that change gets its group the first time its organizer
 opens or joins it; people invited later are added by the organizer's app when the organizer saves
-the change, and people taken off the list are removed from the group.
+the change, and people taken off the list are removed from the group. The organizer signs the
+invitee list, so a host's Join adds only people the organizer invited; somebody the server lists
+besides knocks at the lobby (#1726).
 
 ## Model
 
@@ -51,7 +53,9 @@ the change, and people taken off the list are removed from the group.
    the organizer's device calls `update_meeting_chat_members` with that list and the users taken off
    it, so later invitees join the chat's encryption group and removed ones leave it (a signed
    commit that rotates the key). The list comes from the organizer's request, never from the
-   server's member list.
+   server's member list: users carried over from the server's list go in only where the
+   organizer's signed invitee list names them (e2ee.md §4.6, "Meeting chats", "Only invited";
+   #1726), and the organizer's device signs the new list into the admitters statement.
 3. **Answer**: invitees answer in the app (`PUT /meetings/{id}/rsvp`) or by e-mail. The e-mail path
    is `POST /api/internal/v1/meetings/replies` with the iMIP REPLY as `text/calendar`, called by the
    inbox handler that receives the mail (or by CalCraft) with the `inbox_token`. That caller vouches

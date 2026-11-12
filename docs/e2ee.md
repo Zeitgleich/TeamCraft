@@ -1822,10 +1822,10 @@ never by the server's member list:
   the group's first member is this user (the founder knows from its own founding that it is the
   organizer's device, so here the server's word for the organizer plays no part). Otherwise, or
   without a key bag from a link, it asks to be added and keeps its group, until a welcome replaces
-  it. Neither is held to this device's list of invitees: an admitted guest is on nobody's list, the
-  list can differ per device, and it isn't signed anyway. A device whose own leaf is in the group
-  information (a join whose answer was lost) asks to be added back, since members refuse an external
-  commit that replaces a leaf.
+  it. Neither is held to this device's list of invitees: an admitted guest is on nobody's list, and
+  the list can differ per device. A device whose own leaf is in the group information (a join
+  whose answer was lost) asks to be added back, since members refuse an external commit that
+  replaces a leaf.
 - **Old meetings.** A meeting made before the server stopped founding these groups has a chat
   without one. The organizer's device founds it the first time the organizer opens or joins the
   meeting (the same `set_up_meeting_chat`, with the attendees as that device knows the meeting; it
@@ -1859,6 +1859,18 @@ never by the server's member list:
   off the list with a signed removal commit, so they read nothing new. The removals are noted on
   the device first and finished on later syncs if a commit fails; admitted guests and members are
   not on that list and stay.
+- **Only invited** (#1726, §4.6.5, "Meetings (D10)"). The core takes a meeting's invitees by where
+  each user comes from (`InviteeList`): users the organizer **added** on this device (the create
+  request, the users an edit adds: in the request and on neither the list on screen nor the one
+  read again before the save) count as they are; users from the **server's list** (a host's Join
+  takes the attendees, an edit sends the whole list as the server had it, an edit finished after a
+  restart has only the server's) count only where the organizer's newest signed invitee list
+  names them: the device's own choice not signed yet, or else the newest statement verified
+  against the organizer's pinned key (whatever its end). The server's word can only lower the list. Without a signed list (none published, a version 1 one,
+  a forged or tampered one, or an older one than this device saw, which it refuses as a rollback)
+  the server's list adds nobody once the device's `minimum_client_version` reached 1.0.32, and as
+  before until then. Anybody left out knocks at the lobby like anybody with the link. Removals
+  need no signature: the server's word can only take people out.
 - **Admission.** A host's "admit" in the lobby is the host's own decision: the host's device adds the
   devices the admitted user has at that moment, with history from the join on (§4.7), signed like
   any addition. Nothing waits for a device that appears later, unattended, since the server could
@@ -1995,8 +2007,11 @@ never by the server's member list:
       signer, so a guest who knows only `v` can check it), a **sequence** that only grows, an
       **end of validity**, whether admitters let people of the link in by themselves (the
       organizer's "no lobby"), and the admitters: user IDs, each with the identity key that
-      certifies that user's devices. The identity key signs it under a label of its own (§2); at
-      most 1,000 admitters and 64 KiB.
+      certifies that user's devices. From version 2 it also names the meeting's **invitees** (user
+      IDs, sorted; #1726, §4.6.5, "Meetings (D10)"), under the same signature, sequence and end.
+      The identity key signs it under a label of its own (§2); at most 1,000 admitters, 1,000
+      invitees and 64 KiB. Version 1 (no invitees) still verifies and says nothing about who is
+      invited.
     - *Who is on it.* An organizer's device lists everybody with a device in the meeting chat's
       group as it sees it (the people the organizer's and hosts' own signed adds brought in) but
       itself and guests ("who counts as a guest", below), each with the identity key that device
@@ -2007,6 +2022,15 @@ never by the server's member list:
       last one it saw, and at least the time of signing in milliseconds, so the newest of two
       organizer devices stays ahead. It publishes when the meeting is scheduled or edited and
       keeps the list current for meetings that run or start within a day.
+    - *Invitees* (#1726). The organizer's device keeps the invitee list the organizer chose on it
+      (the create request; an edit's whole list, see below) until it signed it, and signs that, or
+      else the newest verified statement's list (a newer version 1 statement leaves the list as it
+      was). Once its statement holds the choice, the statements speak for it, a later one of another
+      organizer device included. A choice isn't ordered by time against statements: a sequence can
+      run ahead of the clock. It signs version 2 only once the highest `minimum_client_version` it
+      saw reaches `meeting_invitees::SIGNED_INVITEES_RELEASE` (1.0.32): an older app can't read
+      version 2 and would drop the whole statement, admitters included. A meeting handed over keeps
+      the former organizer's list as this device verified it, like "no lobby".
     - *The server* keeps the newest statement per meeting
       (`PUT /conversations/{id}/meeting-admitters`, the meeting's organizer only; a sequence not
       above the stored one gets `409`) and serves it to the chat's members, admitted guests too. It
@@ -3195,8 +3219,9 @@ from creation) and #1726 (the meeting invitee list).
   claims, on the deleter's device too (#1162).
 - **The name.** A signed deletion binds the channel's ID, not the name the admin saw: a server shows channel X as
   "old-test", and one click purges X on every member's device (§4.6, residual risks).
-- **Meetings.** The invitee list is unsigned: a host's Join takes the server's attendees as the list and adds them
-  (`meetings_view.rs`, `groups.rs`), so a hostile server gets an uninvited user past "only invited". And the check
+- **Meetings.** The invitee list was unsigned: a host's Join took the server's attendees as the list and added them
+  (`meetings_view.rs`, `groups.rs`), so a hostile server got an uninvited user past "only invited" (closed by #1726,
+  "Meetings (D10)" below). And the check
   that a meeting chat's first leaf is the organizer's device (§4.6, "Whose group") is met by an invitee who places
   the organizer's published key package at leaf 0 and signs the group information himself. Everybody in such a
   group is invited, so that is availability, not disclosure.
@@ -3585,6 +3610,14 @@ and couldn't count for a purge.
   users the newest statement names and the server still lists (its word can only lower); anybody else knocks at the
   lobby like anybody with the link. It needs no anchor and is built on its own. Rejected: taking meetings out of
   #1171 altogether, which leaves the founder proof unbuilt.
+  - *Built* (#1726): statement version 2 appends the sorted invitee IDs to version 1's encoding; version 1 still
+    verifies and names none. The organizer's devices sign version 2 once their highest `minimum_client_version`
+    reaches 1.0.32 (`meeting_invitees::SIGNED_INVITEES_RELEASE`), the first release that reads it; an older app
+    would refuse the statement and with it the admitters. The rules on the device are in §4.6, "Meeting chats"
+    ("Only invited"). Residual risks: until the instance's minimum reaches 1.0.32, a device that never chose or
+    verified a list (another device of the organizer's, a meeting from before) still takes the server's attendees
+    as before; from then on, such a meeting's invitees not yet in the group knock until the organizer saves the
+    invitee list again. Which organizer the server names stays its word (above).
 
 #### Threats
 

@@ -32,7 +32,7 @@ use crate::feedback::PendingAction;
 use crate::form_errors::{error_id, focus_first_invalid};
 use crate::i18n::{I18n, use_i18n};
 use crate::meetings::{
-  ExternalInvitee, FormError, FormField, MeetingError, MeetingsHub, Repeat, STATUS_CONFLICT,
+  ChatInvitees, ExternalInvitee, FormError, FormField, MeetingError, MeetingsHub, Repeat, STATUS_CONFLICT,
   STATUS_NOT_FOUND, ScheduleForm, SeriesEnd, WEEKDAYS, attending_users, hosts_lobby, is_over, my_rsvp,
   with_verifier,
 };
@@ -99,7 +99,9 @@ pub fn MeetingsView() -> impl IntoView {
       {
         // The server makes the chat without encryption; an instant meeting invites nobody.
         // Gone only with the app; then the chat stays without encryption (nobody else founds it).
-        state.try_write(|backend| backend.set_up_meeting_chat(meeting.conversation_id, Vec::new()));
+        state.try_write(|backend| {
+          backend.set_up_meeting_chat(meeting.conversation_id, ChatInvitees::chosen(Vec::new()))
+        });
         show_created(state, hub, meeting);
       }
       is_starting.set_if_alive(false);
@@ -370,7 +372,9 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
                   // A meeting from before 1.0.3 has a chat without encryption: the organizer's
                   // device founds its group the first time it opens the meeting (nothing happens
                   // when the group is there already).
-                  let invitees = attending_users(&meeting);
+                  // The server's attendees: only users the organizer's signed list names go in
+                  // (#1726); anybody else knocks at the lobby.
+                  let invitees = ChatInvitees::listed(attending_users(&meeting));
                   state.try_write(|backend| backend.set_up_meeting_chat(meeting.conversation_id, invitees));
                 }
                 join_meeting(state, i18n, meeting.conversation_id)
@@ -1455,7 +1459,7 @@ pub fn ScheduleMeetingDialog(
           if let Some(meeting) = hub.run(me, now_ms(), client.create(&request)).await {
             // The server makes the chat without encryption: the users invited here go into its
             // group (from this request, never from the server's member list).
-            let invitees = crate::meetings::invited_users(&request);
+            let invitees = ChatInvitees::chosen(crate::meetings::invited_users(&request));
             // Gone only with the app; then the chat stays without encryption (nobody else founds it).
             state.try_write(|backend| backend.set_up_meeting_chat(meeting.conversation_id, invitees));
             // The lobby setting as the organizer chose it here, never as the server reports it,
@@ -1968,9 +1972,12 @@ pub(crate) async fn save_meeting_edit(
   before: MeetingResponse,
   request: UpdateMeetingRequest,
 ) -> bool {
-  use crate::meetings::{clear_pending_edit, invitee_change, note_pending_edit, saved_change};
+  use crate::meetings::{added_users, clear_pending_edit, invitee_change, note_pending_edit, saved_change};
   // Diffed against the meeting as the server has it now, not the possibly stale list on screen.
+  let on_screen = before.clone();
   let before = hub.client().get(before.id).await.unwrap_or(before);
+  // The organizer's own additions: on neither list the server showed before (#1726).
+  let added = added_users(&request, &[&on_screen, &before]);
   // Written down before the save: if the app dies after the server took it but before the
   // chat's group lost the removed users, the next start finishes the removal.
   if let Some((_, removed)) = invitee_change(&before, &request) {
@@ -1990,7 +1997,7 @@ pub(crate) async fn save_meeting_edit(
     state.try_write(|backend| backend.note_meeting_lobby(saved.id, has_lobby));
   }
   // From the saved meeting, which is what the server holds now.
-  let (invitees, removed) = saved_change(&before, &saved);
+  let (invitees, removed) = saved_change(&before, &saved, added);
   state.try_write(|backend| backend.update_meeting_chat_members(saved.conversation_id, invitees, removed));
   let until = saved.ends_at.0 + GUEST_ACCESS_GRACE_MS;
   state.try_write(|backend| backend.sync_meeting_admitters(saved.id, saved.conversation_id, until));

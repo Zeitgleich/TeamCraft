@@ -31,6 +31,7 @@ use super::{Client, pending_post_key};
 use crate::api::{ApiError, ServerApi};
 use crate::convert;
 use crate::error::CoreError;
+use crate::meeting_invitees::InviteeList;
 use crate::mls_storage::adopt_mls_entries;
 use crate::records;
 use crate::retry::{RetryPolicy, millis};
@@ -344,6 +345,32 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     id: ConversationId,
     invitees: &[UserId],
   ) -> Result<bool, CoreError> {
+    let chosen = InviteeList::Chosen {
+      added: invitees.to_vec(),
+      kept: Vec::new(),
+    };
+    self.set_up_meeting_chat_from(id, &chosen).await
+  }
+
+  /// [`Self::set_up_meeting_chat`] with the invitees as `list` names them: the organizer's own
+  /// choice, or the server's attendees (a host's Join), of which only users the organizer's newest
+  /// signed list names are added (#1726, e2ee.md §4.6.5, "Meetings (D10)"); anybody else knocks
+  /// at the lobby.
+  pub async fn set_up_meeting_chat_from(
+    &mut self,
+    id: ConversationId,
+    list: &InviteeList,
+  ) -> Result<bool, CoreError> {
+    let admitted = self.meeting_invitees_to_add(id, list).await?;
+    self.set_up_meeting_chat_with(id, &admitted).await
+  }
+
+  /// [`Self::set_up_meeting_chat`] once the invitees are decided.
+  async fn set_up_meeting_chat_with(
+    &mut self,
+    id: ConversationId,
+    invitees: &[UserId],
+  ) -> Result<bool, CoreError> {
     let had_setup = self.dm_setup(id)?.is_some();
     let me = self.user_id();
     let others = conversation_members(invitees, me);
@@ -421,7 +448,26 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     invitees: &[UserId],
     removed: &[UserId],
   ) -> Result<bool, CoreError> {
-    let is_complete = self.set_up_meeting_chat(id, invitees).await?;
+    let chosen = InviteeList::Chosen {
+      added: invitees.to_vec(),
+      kept: Vec::new(),
+    };
+    self.update_meeting_chat_members_from(id, &chosen, removed).await
+  }
+
+  /// [`Self::update_meeting_chat_members`] with the invitees as `list` names them: users carried
+  /// over from the server's list (an edit sends the whole list, an edit finished after a restart
+  /// has only the server's) are added only where the organizer's newest signed list names them.
+  /// Removals need no signature: the server's word can only take people out.
+  pub async fn update_meeting_chat_members_from(
+    &mut self,
+    id: ConversationId,
+    list: &InviteeList,
+    removed: &[UserId],
+  ) -> Result<bool, CoreError> {
+    let admitted = self.meeting_invitees_to_add(id, list).await?;
+    let invitees = admitted.as_slice();
+    let is_complete = Box::pin(self.set_up_meeting_chat_with(id, invitees)).await?;
     let me = self.user_id();
     // Noted before anything can fail: the removal is finished later (`repair_dm_setups`), also
     // when this commit is lost or the app is closed. Somebody invited again isn't removed.

@@ -16,9 +16,7 @@
 
 use std::io::Write;
 
-use tls_codec::{
-  DeserializeBytes, Serialize as _, Size as _, TlsDeserializeBytes, TlsSerialize, TlsSize,
-};
+use tls_codec::{DeserializeBytes, Serialize as _, Size as _, TlsDeserializeBytes, TlsSerialize, TlsSize};
 
 use crate::domain;
 use crate::identity::{
@@ -522,11 +520,7 @@ mod tests {
       let invitees = [UserId::new(9), UserId::new(4)];
       assert!(verified.has_same_content(&listed, LinkAdmission::ByThemselves, Some(&invitees)));
       assert!(!verified.has_same_content(&listed, LinkAdmission::ByThemselves, None));
-      assert!(!verified.has_same_content(
-        &listed,
-        LinkAdmission::ByThemselves,
-        Some(&invitees[..1])
-      ));
+      assert!(!verified.has_same_content(&listed, LinkAdmission::ByThemselves, Some(&invitees[..1])));
     }
 
     #[test]

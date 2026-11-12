@@ -464,16 +464,22 @@ pub trait ChatBackend {
   /// "Retry" on a DM whose encryption setup waits for a welcome or failed.
   fn retry_dm_setup(&self, _conversation: ConversationId) {}
   /// Sets up the encryption of a meeting chat this user just scheduled or started, with the users
-  /// they invited (the organizer's own request: the group is never founded from the server's
-  /// member list).
-  fn set_up_meeting_chat(&self, _conversation: ConversationId, _invitees: Vec<UserId>) {}
+  /// they invited (the organizer's own request), or of a meeting they join as its organizer (the
+  /// server's attendees, of which only users the organizer's signed list names go in, #1726).
+  fn set_up_meeting_chat(
+    &self,
+    _conversation: ConversationId,
+    _invitees: crate::meeting_invitees::ChatInvitees,
+  ) {
+  }
   /// The organizer saved a changed invitee list of a meeting: `invitees` is the whole list, `removed`
-  /// the users taken off it. The new ones go into the chat's encryption group and the removed ones
-  /// out of it, signed by this device.
+  /// the users taken off it. The new ones go into the chat's encryption group (users carried over
+  /// from the server's list only where the signed list names them) and the removed ones out of it,
+  /// signed by this device.
   fn update_meeting_chat_members(
     &self,
     _conversation: ConversationId,
-    _invitees: Vec<UserId>,
+    _invitees: crate::meeting_invitees::ChatInvitees,
     _removed: Vec<UserId>,
   ) {
   }

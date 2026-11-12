@@ -14,6 +14,7 @@ use teamcraft_client_api::notetaker::{
 use teamcraft_core::CoreError;
 use teamcraft_core::api::ServerApi as _;
 use teamcraft_core::clock::{Clock as _, SystemClock};
+use teamcraft_core::meeting_invitees::InviteeList;
 use teamcraft_proto::{
   CallStateResponse, ConversationId, HistoryPolicy, ListMeetingsResponse, MeetingResponse, UserId,
 };
@@ -232,14 +233,15 @@ impl Engine {
     let body =
       serde_json::to_string(&request).map_err(|error| TeamCraftError::InvalidInput(error.to_string()))?;
     let saved: MeetingResponse = from_json(&self.api_request("PATCH", &path, Some(body)).await?)?;
-    let (invitees, removed) = saved_change(&before, &saved);
+    // The bot is the organizer's own addition; the rest is carried over from the server's list.
+    let (invitees, removed) = saved_change(&before, &saved, vec![bot]);
     let (meeting, chat) = (saved.id, saved.conversation_id);
     let until = saved.ends_at.0 + GUEST_ACCESS_GRACE_MS;
     self
       .with_client(move |client| {
         Box::pin(async move {
           client
-            .update_meeting_chat_members(chat, &invitees, &removed)
+            .update_meeting_chat_members_from(chat, &InviteeList::from(invitees), &removed)
             .await?;
           // Who may let guests in changed with the group; a failure here leaves the old statement,
           // which the next edit or start renews.

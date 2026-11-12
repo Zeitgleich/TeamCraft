@@ -617,14 +617,18 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.retry_dm_setup(conversation);
   }
 
-  fn set_up_meeting_chat(&self, conversation: ConversationId, invitees: Vec<UserId>) {
+  fn set_up_meeting_chat(
+    &self,
+    conversation: ConversationId,
+    invitees: teamcraft_client_api::meeting_invitees::ChatInvitees,
+  ) {
     self.chat.set_up_meeting_chat(conversation, invitees);
   }
 
   fn update_meeting_chat_members(
     &self,
     conversation: ConversationId,
-    invitees: Vec<UserId>,
+    invitees: teamcraft_client_api::meeting_invitees::ChatInvitees,
     removed: Vec<UserId>,
   ) {
     self

@@ -1529,6 +1529,11 @@ impl FakeServer {
     self.lock().meeting_admitters.insert(conversation, statement);
   }
 
+  /// The server withholds the meeting chat's admitters statement (answers 404).
+  pub fn clear_meeting_admitters(&self, conversation: ConversationId) {
+    self.lock().meeting_admitters.remove(&conversation);
+  }
+
   /// A meeting chat's host lists as the server holds them (every handover and the newest).
   pub fn meeting_hosts(&self, conversation: ConversationId) -> Vec<Vec<u8>> {
     self

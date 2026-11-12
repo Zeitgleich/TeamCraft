@@ -31,6 +31,7 @@ use crate::api::ServerApi;
 use crate::clock::Clock;
 use crate::convert;
 use crate::error::{CoreError, GuestRefusal};
+use crate::meeting_invitees::{self, ChosenInvitees, InviteeList, SignedInvitees};
 use crate::records;
 use crate::store::{LocalStore, Table};
 
@@ -62,6 +63,8 @@ const GUEST_MEETING_PREFIX: &str = "guest-meeting/";
 /// The newest organizer-signed admitters of a meeting chat this device verified
 /// ([`AdmittersRecord`]).
 const ADMITTERS_PREFIX: &str = "meeting-admitters/";
+/// Key prefix of the invitees the organizer chose on this device, per meeting chat (#1726).
+const CHOSEN_INVITEES_PREFIX: &str = "meeting-chosen-invitees/";
 
 /// The newest organizer-signed admitters of a meeting chat this device verified (#1103, e2ee.md
 /// §4.6, "Meeting guests"). An older statement is refused afterwards (a rollback by the server).
@@ -76,6 +79,10 @@ struct AdmittersRecord {
   admitters: Vec<UserId>,
   /// The list names this device's user with this device's identity key (or it is the organizer's).
   is_own: bool,
+  /// The invitees of the newest verified statement that names them (version 2, #1726); a newer
+  /// version 1 statement leaves them as they are. `None` before any did.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  maybe_invitees: Option<Vec<UserId>>,
 }
 
 impl PendingEnrollment {
@@ -348,11 +355,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .or(maybe_kept_admission)
         .unwrap_or(LinkAdmission::Lobby),
     };
+    let maybe_invitees: Option<Vec<teamcraft_crypto::ids::UserId>> = self
+      .invitees_to_sign(conversation)
+      .await?
+      .map(|invitees| invitees.into_iter().map(convert::user).collect());
     let wanted_until = u64::try_from(expires_at_ms).unwrap_or(0);
     if let Some(current) = &maybe_current
-      && current.has_same_admitters(&admitters, link_admission)
+      && current.has_same_content(&admitters, link_admission, maybe_invitees.as_deref())
       && current.expires_at_ms() >= wanted_until
     {
+      if maybe_invitees.is_some() {
+        self.forget_chosen_invitees(conversation)?;
+      }
       return Ok(false);
     }
     let now = u64::try_from(self.now_ms()).unwrap_or(0);
@@ -375,6 +389,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       expires_at_ms,
       link_admission,
       admitters,
+      maybe_invitees,
     }
     .sign(self.account.key_bag.identity())?;
     let request = PutMeetingAdmittersRequest {
@@ -398,8 +413,107 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     let verified = signed.verify(&expectation)?;
     self.keep_admitters(conversation, &verified)?;
+    if verified.maybe_invitees().is_some() {
+      self.forget_chosen_invitees(conversation)?;
+    }
     tracing::info!(meeting_id = %meeting, sequence, "published the meeting's admitters");
     Ok(true)
+  }
+
+  /// Which users of `list` this host's device adds to the meeting chat's group (#1726, e2ee.md
+  /// §4.6.5, "Meetings (D10)"): users the organizer added count as they are, users from the
+  /// server's list only where the organizer's newest signed list names them. A decision of the
+  /// organizer's is kept as the new list, for the next signed statement. Anybody left out knocks
+  /// at the lobby.
+  pub(super) async fn meeting_invitees_to_add(
+    &mut self,
+    conversation: ConversationId,
+    list: &InviteeList,
+  ) -> Result<Vec<UserId>, CoreError> {
+    let from_server = match list {
+      InviteeList::Chosen { kept, .. } => kept.len(),
+      InviteeList::Listed(listed) => listed.len(),
+    };
+    if from_server > 0 {
+      // The newest statement, whatever its end: an ended list is still the organizer's newest
+      // word on who is invited. A failure keeps what this device verified before.
+      if let Err(error) = self.organizers_admitters_at(conversation, 0).await {
+        tracing::warn!(conversation_id = %conversation, %error, "could not read the meeting's signed invitees");
+      }
+      self.refresh_minimum_client_version().await;
+    }
+    let signed = self.kept_signed_invitees(conversation)?;
+    let signs = meeting_invitees::signs_invitees(self.highest_minimum_client_version()?);
+    let to_add = meeting_invitees::invitees_to_add(list, &signed, signs);
+    if let InviteeList::Chosen { added, .. } = list {
+      let chosen = ChosenInvitees {
+        invitees: to_add.clone(),
+      };
+      records::put_json(
+        &self.store,
+        Table::SyncState,
+        &format!("{CHOSEN_INVITEES_PREFIX}{conversation}"),
+        &chosen,
+      )?;
+      tracing::debug!(conversation_id = %conversation, added = added.len(), "kept the organizer's invitees");
+    }
+    let vouched = to_add.len();
+    let offered = from_server
+      + match list {
+        InviteeList::Chosen { added, .. } => added.len(),
+        InviteeList::Listed(_) => 0,
+      };
+    if vouched < offered {
+      tracing::info!(
+        conversation_id = %conversation,
+        left_out = offered - vouched,
+        "listed attendees the organizer's signed list doesn't name are not added; they knock at the lobby"
+      );
+    }
+    Ok(to_add)
+  }
+
+  /// The invitees the organizer's next statement names: the newest list this device knows, once
+  /// the apps all read it ([`meeting_invitees::SIGNED_INVITEES_RELEASE`]); `None` before, or
+  /// without a list (a meeting from before signed invitees: its statement stays version 1).
+  async fn invitees_to_sign(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<Option<Vec<UserId>>, CoreError> {
+    self.refresh_minimum_client_version().await;
+    if !meeting_invitees::signs_invitees(self.highest_minimum_client_version()?) {
+      return Ok(None);
+    }
+    Ok(match self.kept_signed_invitees(conversation)? {
+      SignedInvitees::Known(invitees) => Some(invitees),
+      SignedInvitees::Unknown => None,
+    })
+  }
+
+  /// The organizer's choice on this device not signed yet, else the newest verified statement's
+  /// invitees, as kept; nothing is fetched.
+  fn kept_signed_invitees(&self, conversation: ConversationId) -> Result<SignedInvitees, CoreError> {
+    let maybe_chosen: Option<ChosenInvitees> = records::get_json(
+      &self.store,
+      Table::SyncState,
+      &format!("{CHOSEN_INVITEES_PREFIX}{conversation}"),
+    )?;
+    let maybe_signed = self
+      .admitters_record(conversation)?
+      .and_then(|record| record.maybe_invitees);
+    Ok(meeting_invitees::newest_signed_invitees(
+      maybe_chosen.as_ref(),
+      maybe_signed.as_deref(),
+    ))
+  }
+
+  /// The organizer's choice on this device is in a statement now: from here on the statements
+  /// speak for it, a newer one of another device included.
+  fn forget_chosen_invitees(&self, conversation: ConversationId) -> Result<(), CoreError> {
+    Ok(self.store.delete(
+      Table::SyncState,
+      &format!("{CHOSEN_INVITEES_PREFIX}{conversation}"),
+    )?)
   }
 
   /// Checks the organizer-signed admitters of the meeting chat against the organizer's key as this
@@ -481,6 +595,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     &mut self,
     conversation: ConversationId,
   ) -> Result<Option<VerifiedMeetingAdmitters>, CoreError> {
+    let now_ms = self.now_ms();
+    self.organizers_admitters_at(conversation, now_ms).await
+  }
+
+  /// [`Self::organizers_admitters`] by `now_ms` (0: whatever the end).
+  async fn organizers_admitters_at(
+    &mut self,
+    conversation: ConversationId,
+    now_ms: i64,
+  ) -> Result<Option<VerifiedMeetingAdmitters>, CoreError> {
     let Some(organizer) = self.api.conversation(conversation).await?.maybe_organizer_user_id else {
       return Ok(None);
     };
@@ -488,7 +612,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let organizer_key = directory
       .pinned_identity(convert::user(organizer))
       .ok_or(CoreError::UnknownIdentity(organizer))?;
-    let now_ms = self.now_ms();
     self
       .verified_admitters(conversation, None, &organizer_key.fingerprint(), now_ms)
       .await
@@ -574,12 +697,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     verified: &VerifiedMeetingAdmitters,
   ) -> Result<(), CoreError> {
-    if self
-      .admitters_record(conversation)?
+    let maybe_kept = self.admitters_record(conversation)?;
+    if maybe_kept
+      .as_ref()
       .is_some_and(|kept| kept.sequence > verified.sequence())
     {
       return Ok(());
     }
+    let maybe_invitees = match verified.maybe_invitees() {
+      Some(invitees) => Some(
+        invitees
+          .iter()
+          .map(|user| convert::user_from_crypto(*user))
+          .collect::<Result<_, _>>()?,
+      ),
+      None => maybe_kept.and_then(|kept| kept.maybe_invitees),
+    };
     let me = convert::user(self.account.user_id);
     let mut admitters = Vec::new();
     for admitter in verified.admitters() {
@@ -591,6 +724,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       admits_by_link: verified.link_admission() == LinkAdmission::ByThemselves,
       admitters,
       is_own: verified.is_admitter(me, &self.account.identity_public_key()),
+      maybe_invitees,
     };
     records::put_json(
       &self.store,

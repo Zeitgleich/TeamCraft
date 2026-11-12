@@ -22,6 +22,7 @@ use teamcraft_client_api::calls::{
 };
 use teamcraft_client_api::files_query::{FilesPage, FilesQuery};
 use teamcraft_client_api::live::LiveSnapshot;
+use teamcraft_client_api::meeting_invitees::ChatInvitees;
 use teamcraft_client_api::model::{
   Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, DeviceSetup, GapEdge,
   HistoryGap, ImportedAuthorView, ImportedFrom, ImportedMark, InviteMailState, JoinableSpace,
@@ -59,6 +60,7 @@ use crate::entry_tally::{self, Counted, EntryPass, EntryTally, TallyInputs, Unre
 use crate::error::CoreError;
 use crate::group_mentions::{may_mention_groups, mentionable_groups, stored_rosters};
 use crate::imported::{Authorship, ImportAdditions, ImportSource, ImportedAuthor, ImportedOrigin};
+use crate::meeting_invitees::InviteeList;
 use crate::notify_rules::{MentionPreferences, load_mention_preferences};
 use crate::people_names::shown_name;
 use crate::records::{self, Draft};
@@ -387,15 +389,16 @@ pub enum CoreCommand {
   RetryDmSetup {
     conversation: ConversationId,
   },
-  /// A meeting chat the user scheduled or started, with the users they invited.
+  /// A meeting chat the user scheduled or started, with the users they invited, or joins as its
+  /// organizer, with the server's attendees.
   SetUpMeetingChat {
     conversation: ConversationId,
-    invitees: Vec<UserId>,
+    invitees: InviteeList,
   },
   /// The organizer saved a changed invitee list of a meeting.
   UpdateMeetingChatMembers {
     conversation: ConversationId,
-    invitees: Vec<UserId>,
+    invitees: InviteeList,
     removed: Vec<UserId>,
   },
   /// The user added people to their DM call: it moves into the meeting chat they just started.
@@ -3118,22 +3121,22 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.command(CoreCommand::RetryDmSetup { conversation });
   }
 
-  fn set_up_meeting_chat(&self, conversation: ConversationId, invitees: Vec<UserId>) {
+  fn set_up_meeting_chat(&self, conversation: ConversationId, invitees: ChatInvitees) {
     self.command(CoreCommand::SetUpMeetingChat {
       conversation,
-      invitees,
+      invitees: InviteeList::from(invitees),
     });
   }
 
   fn update_meeting_chat_members(
     &self,
     conversation: ConversationId,
-    invitees: Vec<UserId>,
+    invitees: ChatInvitees,
     removed: Vec<UserId>,
   ) {
     self.command(CoreCommand::UpdateMeetingChatMembers {
       conversation,
-      invitees,
+      invitees: InviteeList::from(invitees),
       removed,
     });
   }

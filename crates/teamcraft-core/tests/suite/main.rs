@@ -50,6 +50,7 @@ mod links_budget;
 mod list_load;
 mod live_permissions;
 mod meeting_chats;
+mod meeting_invitees;
 mod member_devices;
 mod member_removal;
 mod messages;

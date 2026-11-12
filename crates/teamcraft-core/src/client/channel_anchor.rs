@@ -84,20 +84,26 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     records::get_json(&self.store, Table::SyncState, MINIMUM_VERSION_KEY)
   }
 
-  /// Whether a channel this device is about to create is founded anchored, and if so the version
-  /// of its own signed device list the founding names. Asked **before** the server creates the
-  /// channel: once D2 is reached, a channel is never founded unanchored silently. If this device's
-  /// own list can't be found even after fetching it again, the create fails with
-  /// [`CoreError::OwnDeviceListMissing`] and nothing is created.
-  pub(crate) async fn prepare_anchored_founding(&mut self) -> Result<Option<u64>, CoreError> {
+  /// Asks the server for its `minimum_client_version` and notes it. A failure keeps the highest
+  /// one seen before, which is what decisions then rest on.
+  pub(crate) async fn refresh_minimum_client_version(&mut self) {
     match self.api.client_compatibility().await {
       Ok(compatibility) => {
         if let Err(error) = self.note_minimum_client_version(&compatibility.minimum_client_version) {
           tracing::warn!(%error, "could not keep the minimum client version");
         }
       },
-      Err(error) => tracing::debug!(%error, "founding on the minimum client version seen before"),
+      Err(error) => tracing::debug!(%error, "deciding on the minimum client version seen before"),
     }
+  }
+
+  /// Whether a channel this device is about to create is founded anchored, and if so the version
+  /// of its own signed device list the founding names. Asked **before** the server creates the
+  /// channel: once D2 is reached, a channel is never founded unanchored silently. If this device's
+  /// own list can't be found even after fetching it again, the create fails with
+  /// [`CoreError::OwnDeviceListMissing`] and nothing is created.
+  pub(crate) async fn prepare_anchored_founding(&mut self) -> Result<Option<u64>, CoreError> {
+    self.refresh_minimum_client_version().await;
     if !anchoring::founds_anchored(self.highest_minimum_client_version()?) {
       return Ok(None);
     }

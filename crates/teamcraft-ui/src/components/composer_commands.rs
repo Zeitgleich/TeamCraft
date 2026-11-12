@@ -347,7 +347,12 @@ fn start_meeting(state: AppState, i18n: I18n) -> Outcome {
     {
       // The server makes the chat without encryption; an instant meeting invites nobody.
       // Gone only with the app; then the chat stays without encryption (nobody else founds it).
-      state.try_write(|backend| backend.set_up_meeting_chat(meeting.conversation_id, Vec::new()));
+      state.try_write(|backend| {
+        backend.set_up_meeting_chat(
+          meeting.conversation_id,
+          teamcraft_client_api::meeting_invitees::ChatInvitees::chosen(Vec::new()),
+        )
+      });
       state.open_meetings();
     }
   });
