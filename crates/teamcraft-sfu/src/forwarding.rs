@@ -26,6 +26,12 @@
 //! - **Resending lost video (#1762):** forwarded video packets are kept for a short while per
 //!   track and layer; a receiver's NACK gets the ones it names again, restamped for it, within a
 //!   budget of its downlink ([`crate::retransmit`]). Audio is never resent.
+//! - **Probing at the start (#1762):** a participant that joins or comes back gets a few short
+//!   trains of padding ([`teamcraft_media::join_probe`]) once it sent transport feedback; their
+//!   spread in its feedback shows what
+//!   its downlink carries, and its estimate (and so its first layers) starts from that instead of
+//!   a guess. Its own trains towards the SFU (the uplink probe) are taken and reported like any
+//!   datagram, and forwarded nowhere.
 //!
 //! - **Reconnecting participants** keep their streams and subscriptions but receive nothing until
 //!   they are back ([`Forwarder::suspend`], [`Forwarder::resume`]); a new path starts with fresh
@@ -38,8 +44,9 @@ use std::time::{Duration, Instant};
 
 use teamcraft_media::{
   bwe::{BweConfig, FeedbackRecorder, SendSideEstimator},
-  datagram::{DatagramError, DatagramHeader, StreamId},
+  datagram::{DatagramError, DatagramHeader, PADDING_STREAM, StreamId},
   fragment::{FragmentError, FrameFragment},
+  join_probe::{JoinProbe, JoinProbeConfig, LinkMeasurement},
   rtp::{AudioLevel, RtpError, RtpHeader},
 };
 use teamcraft_proto::{
@@ -86,6 +93,10 @@ pub struct ForwardingConfig {
   pub layer_stalled_after: Duration,
   /// Resending lost video packets to the receiver that asks.
   pub retransmit: RetransmitConfig,
+  /// Bytes of padding the probe of a participant's link at the start may send, each direction:
+  /// the SFU's of the downlink, and what it tells clients they may send for the uplink. Zero
+  /// turns both off.
+  pub probe_bytes: u32,
 }
 
 /// How often publishers are asked for keyframes. Keyframes are large: a receiver that keeps
@@ -130,6 +141,11 @@ pub enum Effect {
     stream_id: StreamId,
     layers: Vec<u8>,
   },
+  /// What the probe of a receiver's downlink at the start showed, for its stats.
+  DownlinkMeasured {
+    receiver: DeviceId,
+    measurement: LinkMeasurement,
+  },
   /// Padding that probes a receiver's downlink, numbered for it: to be sent as they are, back to
   /// back.
   Padding {
@@ -167,6 +183,8 @@ struct ParticipantRoute {
   is_suspended: bool,
   /// What may still be resent to it.
   retransmit_budget: RetransmitBudget,
+  /// The probe of its downlink at the start, while it runs.
+  maybe_join_probe: Option<JoinProbe>,
 }
 
 #[derive(Debug)]
@@ -240,6 +258,7 @@ impl Default for ForwardingConfig {
       probe: ProbeConfig::default(),
       layer_stalled_after: Duration::from_millis(1500),
       retransmit: RetransmitConfig::default(),
+      probe_bytes: 15_000,
     }
   }
 }
@@ -285,6 +304,7 @@ impl Forwarder {
       has_feedback: false,
       is_suspended: false,
       retransmit_budget: RetransmitBudget::default(),
+      maybe_join_probe: self.new_join_probe(now),
     };
     self.participants.insert(device_id, route);
   }
@@ -335,9 +355,12 @@ impl Forwarder {
     now: Instant,
   ) -> Vec<Effect> {
     let bwe = self.config.bwe;
+    let maybe_join_probe = self.new_join_probe(now);
     let Some(participant) = self.participants.get_mut(&device_id) else {
       return Vec::new();
     };
+    // Maybe another network: what it carries is measured afresh.
+    participant.maybe_join_probe = maybe_join_probe;
     participant.capabilities = capabilities;
     participant.downlink = SendSideEstimator::new(bwe);
     participant.uplink = FeedbackRecorder::new(now);
@@ -673,6 +696,13 @@ impl Forwarder {
       .participants
       .get_mut(&sender)
       .ok_or(ForwardError::NotJoined)?;
+    if header.stream_id == PADDING_STREAM {
+      // The sender probes its uplink: reported like any datagram, forwarded nowhere.
+      if let Some(seq) = header.maybe_transport_seq {
+        participant.uplink.on_arrival(seq, now);
+      }
+      return Ok(Route::default());
+    }
     let is_audio = header.stream_id == participant.audio_stream;
     let is_screen_audio = participant.maybe_screen_audio == Some(header.stream_id);
     if !is_audio
@@ -785,6 +815,14 @@ impl Forwarder {
       .downlink
       .on_feedback(feedback, now, participant.feedback_epoch);
     participant.has_feedback = true;
+    let mut effects = Vec::new();
+    if let Some(measurement) = participant
+      .maybe_join_probe
+      .as_mut()
+      .and_then(|probe| probe.on_feedback(feedback))
+    {
+      effects.push(Self::apply_join_probe(receiver, participant, measurement, now));
+    }
     match participant.probe.on_feedback(&self.config.probe, feedback, now) {
       // During the fast start the estimate triples every second on its own; jumping ahead of it
       // switched a screen share's viewer to the sharp layer before the presenter's uplink
@@ -801,13 +839,15 @@ impl Forwarder {
       }) => participant.downlink.limit_to(measured_bps.max(floor_bps), now),
       None => {},
     }
-    self.on_timer(receiver, now)
+    effects.extend(self.on_timer(receiver, now));
+    effects
   }
 
   /// Re-runs a receiver's layer allocation; called periodically (every ~100 ms) so paused tracks
   /// get their resume probe even when no feedback arrives.
   pub fn on_timer(&mut self, receiver: DeviceId, now: Instant) -> Vec<Effect> {
-    let mut effects = self.reallocate(receiver, now);
+    let mut effects: Vec<Effect> = self.run_join_probe(receiver, now).into_iter().collect();
+    effects.extend(self.reallocate(receiver, now));
     effects.extend(self.probe_downlink(receiver, now));
     let streams: Vec<StreamId> = self
       .video_tracks
@@ -852,6 +892,62 @@ impl Forwarder {
       .values()
       .map(|route| route.track.clone())
       .collect()
+  }
+
+  /// How many bytes of padding a client may send to probe its uplink (`joined`); `None` when
+  /// probing is off.
+  pub fn probe_bytes(&self) -> Option<u32> {
+    (self.config.probe_bytes > 0).then_some(self.config.probe_bytes)
+  }
+
+  fn new_join_probe(&self, now: Instant) -> Option<JoinProbe> {
+    JoinProbeConfig::default()
+      .within_bytes(usize::try_from(self.config.probe_bytes).unwrap_or(usize::MAX))
+      .map(|config| JoinProbe::new(config, now))
+  }
+
+  /// The train of `receiver`'s probe at the start that is due, or the probe's end when its last
+  /// train's feedback didn't come.
+  fn run_join_probe(&mut self, receiver: DeviceId, now: Instant) -> Option<Effect> {
+    let participant = self.participants.get_mut(&receiver)?;
+    // A receiver that reports no arrivals can't be measured (clients from before transport
+    // feedback); it gets no padding, as from the probes before a switch up.
+    if participant.is_suspended || !participant.has_feedback {
+      return None;
+    }
+    let probe = participant.maybe_join_probe.as_mut()?;
+    if let Some(measurement) = probe.on_timer(now) {
+      return Some(Self::apply_join_probe(receiver, participant, measurement, now));
+    }
+    let sizes = probe.due_train(now)?;
+    let mut datagrams = Vec::with_capacity(sizes.len());
+    let mut maybe_first_seq = None;
+    for bytes in &sizes {
+      let seq = participant.downlink.on_send_probe(*bytes, now);
+      maybe_first_seq.get_or_insert(seq);
+      datagrams.push(padding_datagram(*bytes, seq));
+    }
+    let first_seq = maybe_first_seq?;
+    if let Some(probe) = participant.maybe_join_probe.as_mut() {
+      probe.sent(first_seq, &sizes, now);
+    }
+    Some(Effect::Padding { receiver, datagrams })
+  }
+
+  /// The downlink estimate starts from what the probe showed, and counts as shown for a switch up;
+  /// the receiver is told for its stats.
+  fn apply_join_probe(
+    receiver: DeviceId,
+    participant: &mut ParticipantRoute,
+    measurement: LinkMeasurement,
+    now: Instant,
+  ) -> Effect {
+    let estimate_bps = participant.downlink.apply_probe(measurement.capacity_bps);
+    participant.probe.note_shown(estimate_bps, now);
+    Effect::DownlinkMeasured {
+      receiver,
+      measurement,
+    }
   }
 
   /// A padding burst for the probe `receiver`'s allocation waits for, when one may go out.
@@ -2432,6 +2528,115 @@ mod tests {
         forwarder.route(device(1), &datagram, now),
         Err(ForwardError::Fragment(FragmentError::MissingExtension))
       ));
+    }
+  }
+
+  /// The probe of a participant's link at the start (#1762).
+  mod join_probe {
+    use super::*;
+
+    #[test]
+    fn a_senders_padding_is_reported_and_forwarded_nowhere() {
+      let (mut forwarder, now) = room(3);
+      for seq in 0..5u16 {
+        let route = forwarder
+          .route(device(1), &padding_datagram(1000, TransportSeq(seq)), now)
+          .unwrap();
+        assert!(route.deliveries.is_empty() && route.effects.is_empty());
+      }
+      let feedback = forwarder.take_uplink_feedback(device(1), now).unwrap();
+      assert_eq!((feedback.base_seq, feedback.arrivals_us.len()), (0, 5));
+      assert_eq!(forwarder.probe_bytes(), Some(15_000));
+    }
+
+    #[test]
+    fn a_new_receivers_estimate_starts_from_its_trains() {
+      let (mut forwarder, start) = room(2);
+      assert!(
+        paddings(&forwarder.on_timer(device(2), start)).is_empty(),
+        "no feedback yet"
+      );
+      // The first feedback brings the first train.
+      let mut first_train = Some(paddings(&give_feedback(&mut forwarder, 2, start)));
+      let mut measured = Vec::new();
+      let mut at = start;
+      for _ in 0..3 {
+        let trains = first_train
+          .take()
+          .unwrap_or_else(|| paddings(&forwarder.on_timer(device(2), at)));
+        assert_eq!(trains.len(), 1, "one train at a time");
+        assert_eq!(trains[0].len(), 5);
+        assert!(paddings(&forwarder.on_timer(device(2), at + Duration::from_millis(50))).is_empty());
+        // A 2 Mbit/s link spaces 1000 bytes 4 ms apart.
+        let first = DatagramHeader::parse(&trains[0][0])
+          .unwrap()
+          .maybe_transport_seq
+          .unwrap();
+        let feedback = TransportFeedback {
+          base_seq: first.0,
+          arrivals_us: (0..5).map(|index| Some(index * 4000)).collect(),
+        };
+        measured.extend(
+          forwarder
+            .on_transport_feedback(device(2), &feedback, at + Duration::from_millis(60))
+            .into_iter()
+            .filter_map(|effect| match effect {
+              Effect::DownlinkMeasured {
+                receiver,
+                measurement,
+              } => Some((receiver, measurement)),
+              _ => None,
+            }),
+        );
+        at += Duration::from_millis(150);
+      }
+      assert_eq!(measured.len(), 1, "told once, after the last train");
+      let (receiver, measurement) = measured[0];
+      assert_eq!(receiver, device(2));
+      assert_eq!(measurement.capacity_bps, 2_000_000);
+      assert_eq!(forwarder.downlink_estimate_bps(device(2)), Some(1_700_000));
+      assert!(paddings(&forwarder.on_timer(device(2), at + Duration::from_secs(1))).is_empty());
+    }
+
+    #[test]
+    fn a_suspended_receiver_is_not_probed_and_a_resumed_one_afresh() {
+      let (mut forwarder, now) = room(2);
+      give_feedback(&mut forwarder, 2, now);
+      forwarder.suspend(device(2), now);
+      assert!(paddings(&forwarder.on_timer(device(2), now)).is_empty());
+      forwarder.resume(device(2), capabilities_av1(), now);
+      assert_eq!(paddings(&give_feedback(&mut forwarder, 2, now)).len(), 1);
+    }
+
+    #[test]
+    fn nothing_is_probed_when_turned_off() {
+      let now = Instant::now();
+      let mut forwarder = Forwarder::new(ForwardingConfig {
+        probe_bytes: 0,
+        ..ForwardingConfig::default()
+      });
+      forwarder.add_participant(device(1), stream(1), capabilities_av1(), now);
+      assert!(paddings(&give_feedback(&mut forwarder, 1, now)).is_empty());
+      assert_eq!(forwarder.probe_bytes(), None);
+    }
+
+    /// `receiver` reports its arrivals (none yet), so it can be measured; what that brings.
+    fn give_feedback(forwarder: &mut Forwarder, receiver: u64, now: Instant) -> Vec<Effect> {
+      let feedback = TransportFeedback {
+        base_seq: 0,
+        arrivals_us: Vec::new(),
+      };
+      forwarder.on_transport_feedback(device(receiver), &feedback, now)
+    }
+
+    fn paddings(effects: &[Effect]) -> Vec<Vec<Vec<u8>>> {
+      effects
+        .iter()
+        .filter_map(|effect| match effect {
+          Effect::Padding { datagrams, .. } => Some(datagrams.clone()),
+          _ => None,
+        })
+        .collect()
     }
   }
 

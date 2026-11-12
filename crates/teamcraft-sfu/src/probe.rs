@@ -6,8 +6,8 @@
 //! the picture stood still for up to 5 s until the SFU fell back.
 //!
 //! Now the switch up waits for a padding burst to show that the link carries the new rate: a few
-//! datagrams on [`PADDING_STREAM`], sent back to back, numbered for the receiver's transport
-//! feedback like any other. The bottleneck spaces them out at its rate; the receiver reports their
+//! datagrams on [`teamcraft_media::datagram::PADDING_STREAM`], sent back to back, numbered for the
+//! receiver's transport feedback like any other. The bottleneck spaces them out at its rate; the receiver reports their
 //! arrival times, and their spread tells what the link carries. A burst of a few kilobytes queues
 //! for a moment on a link that can't take the rate, but drops nothing and holds up no picture. A
 //! burst that falls short limits the estimate to what got through (it grows again from there,
@@ -19,7 +19,9 @@
 
 use std::time::{Duration, Instant};
 
-use teamcraft_media::datagram::{DatagramHeader, PADDING_STREAM, SimulcastLayer, TransportSeq};
+use teamcraft_media::datagram::TransportSeq;
+pub use teamcraft_media::datagram::padding_datagram;
+use teamcraft_media::join_probe::train_rate_bps;
 use teamcraft_proto::TransportFeedback;
 
 /// Settings of the downlink probes.
@@ -112,6 +114,12 @@ impl DownlinkProbe {
       .map_or(0, |(bps, _)| bps)
   }
 
+  /// Another measurement (the probe at the start, #1762) showed the link carries `bps` at `now`:
+  /// it counts as a burst's result.
+  pub fn note_shown(&mut self, bps: u32, now: Instant) {
+    self.maybe_shown = Some((bps, now));
+  }
+
   /// Whether a burst may go out now: none in flight, and the last one long enough ago.
   pub fn may_start(&self, now: Instant) -> bool {
     self.maybe_burst.is_none() && self.maybe_next_at.is_none_or(|next| now >= next)
@@ -201,7 +209,7 @@ impl Burst {
   /// The rate the arrivals' spread shows: the bytes after the first arrival over the time they
   /// took. Any loss means the link's queue overflowed: short of the target, whatever the spread.
   fn outcome(&self) -> ProbeOutcome {
-    let mut arrived: Vec<(u64, usize)> = self
+    let arrived: Vec<(u64, usize)> = self
       .datagrams
       .iter()
       .filter_map(|(bytes, report)| match report {
@@ -209,21 +217,8 @@ impl Burst {
         Report::Pending | Report::Lost => None,
       })
       .collect();
-    arrived.sort_unstable();
     let is_complete = arrived.len() == self.datagrams.len();
-    let measured_bps = match (arrived.first(), arrived.last()) {
-      (Some((first_us, _)), Some((last_us, _))) if arrived.len() >= 2 => {
-        let bits = arrived.iter().skip(1).map(|(_, bytes)| *bytes).sum::<usize>() as f64 * 8.0;
-        let span_us = last_us.saturating_sub(*first_us);
-        if span_us == 0 {
-          u32::MAX
-        } else {
-          // Saturating float-to-int conversion is intended.
-          (bits * 1_000_000.0 / span_us as f64) as u32
-        }
-      },
-      _ => 0,
-    };
+    let measured_bps = train_rate_bps(&arrived).unwrap_or(0);
     if is_complete && measured_bps >= self.target_bps {
       // The spread of datagrams sent back to back shows the link's capacity rather than what
       // is free of it: a burst shows at most twice what it was sent for.
@@ -239,23 +234,9 @@ impl Burst {
   }
 }
 
-/// A padding datagram of `bytes` bytes with transport sequence number `seq`.
-pub fn padding_datagram(bytes: usize, seq: TransportSeq) -> Vec<u8> {
-  let header = DatagramHeader {
-    stream_id: PADDING_STREAM,
-    layer: SimulcastLayer::BASE,
-    maybe_transport_seq: Some(seq),
-  };
-  let filler = vec![0u8; bytes.saturating_sub(header.encoded_len())];
-  let mut out = Vec::with_capacity(bytes);
-  header.write_to(&mut out);
-  out.extend_from_slice(&filler);
-  out
-}
-
 #[cfg(test)]
 mod tests {
-  use teamcraft_media::datagram::MediaDatagram;
+  use teamcraft_media::datagram::{MediaDatagram, PADDING_STREAM};
 
   use super::*;
 

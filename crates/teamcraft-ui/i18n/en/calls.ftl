@@ -147,6 +147,7 @@ stats-layer = Simulcast layer
 stats-loss = Packet loss
 stats-network = Network
 stats-frames = Frames
+stats-probe = Measured at the start
 stats-encoder-hardware = { $name } (hardware)
 stats-encoder-software = { $name } (software)
 stats-encoder-browser = { $name } (chosen by the browser)
@@ -166,6 +167,7 @@ stats-value-limits-layer = layer { $layer } over its bitrate: { $rate } at { $fp
 stats-overload-skipped = frames skipped
 stats-overload-queued = frames queued
 stats-overload-slow = slow encoding
+stats-value-probe = { $capacity } · { $loss } lost
 stats-waiting = Waiting for the first numbers…
 # The chat next to the video (#936)
 call-chat = Chat

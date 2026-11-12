@@ -147,6 +147,7 @@ stats-layer = Simulcast-Ebene
 stats-loss = Paketverlust
 stats-network = Netzwerk
 stats-frames = Bilder
+stats-probe = Gemessen beim Start
 stats-encoder-hardware = { $name } (Hardware)
 stats-encoder-software = { $name } (Software)
 stats-encoder-browser = { $name } (wählt der Browser)
@@ -166,6 +167,7 @@ stats-value-limits-layer = Ebene { $layer } über ihrer Bitrate: { $rate } bei {
 stats-overload-skipped = Bilder übersprungen
 stats-overload-queued = Bilder in der Warteschlange
 stats-overload-slow = langsame Kodierung
+stats-value-probe = { $capacity } · { $loss } verloren
 stats-waiting = Warte auf die ersten Werte…
 # Der Chat neben dem Video (#936)
 call-chat = Chat

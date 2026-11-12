@@ -168,6 +168,22 @@ impl DatagramHeader {
   }
 }
 
+/// A padding datagram of `bytes` bytes with transport sequence number `seq`: zeros on
+/// [`PADDING_STREAM`], for probing a link (`crate::join_probe`, the SFU's probes before a layer
+/// switch up).
+pub fn padding_datagram(bytes: usize, seq: TransportSeq) -> Vec<u8> {
+  let header = DatagramHeader {
+    stream_id: PADDING_STREAM,
+    layer: SimulcastLayer::BASE,
+    maybe_transport_seq: Some(seq),
+  };
+  let filler = vec![0u8; bytes.saturating_sub(header.encoded_len())];
+  let mut out = Vec::with_capacity(bytes);
+  header.write_to(&mut out);
+  out.extend_from_slice(&filler);
+  out
+}
+
 impl TransportSeq {
   pub fn next(self) -> Self {
     Self(self.0.wrapping_add(1))

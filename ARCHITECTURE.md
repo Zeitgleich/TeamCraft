@@ -411,6 +411,17 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
   Losses on a publisher's uplink aren't repaired: the SFU alone covers the common case (viewers
   behind worse links than the presenter, each repaired without a cost to the others), and the
   publisher's uplink estimate already drops layers its link loses.
+- **Probe at the start (#1762):** right after a join or rejoin (and after a move to another path)
+  the client sends a few short trains of padding to the SFU, and the SFU to the client (three
+  trains of five 1000-byte datagrams, 150 ms apart, `TEAMCRAFT_SFU_PROBE_BYTES`). The spread of
+  each train in the transport feedback is the narrowest link's rate (packet-train dispersion); the
+  median of the trains, if at least 80 % of a train arrived, seeds the estimate at 85 % of it and
+  ends its fast start there, also when a new track measures afresh. A 1 Mbit/s mobile link is no
+  longer overshot to almost 3 Mbit/s before its first loss, and a fast one has its layers within a
+  second instead of four. Nothing waits for it: audio and the first layers start as before. The
+  SFU announces the bytes it takes in `joined` (`probe_bytes`); clients probe only such SFUs, older
+  clients still get (and report) the SFU's trains. WebRTC probes with paced clusters at 3× and 6×
+  the start rate instead; trains sent back to back need no pacer and answer in one round trip.
 - **Layers that are sent (#921):** a publisher's uplink budget pauses its top layers; it tells the
   SFU which layers it carries (`uplink_layers`), and the SFU allocates no higher one. A layer that
   stops arriving while a lower one keeps coming (an older publisher, a failing encoder) is

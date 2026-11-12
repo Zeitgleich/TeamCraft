@@ -1494,7 +1494,7 @@ impl CallConnection {
     if let Some(unanswered) = self.switch.maybe_unanswered.take() {
       unanswered.close_as_leave();
     }
-    engine.moved_to_another_path();
+    engine.moved_to_another_path(now);
     info!("the call moved to QUIC");
     Some(early)
   }

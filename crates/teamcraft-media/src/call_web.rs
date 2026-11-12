@@ -1858,7 +1858,7 @@ impl CallState<'_> {
       self.sessions.close(&old.session);
     }
     self.use_transport(CallTransport::Quic);
-    engine.moved_to_another_path();
+    engine.moved_to_another_path(now);
     info!("the call moved to QUIC");
     for bytes in moved.early {
       engine.handle_datagram(&bytes, now);
@@ -4390,6 +4390,7 @@ mod tests {
       maybe_switch_secret: None,
       maybe_screen_share_taken_over: None,
       maybe_retransmit_window_ms: None,
+      maybe_probe_bytes: None,
     }
   }
 

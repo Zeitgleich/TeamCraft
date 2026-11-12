@@ -628,7 +628,7 @@ mod tests {
       }
       let moved = switch.finish().expect("moved");
       watch.moved(moved.generation, now);
-      engine.moved_to_another_path();
+      engine.moved_to_another_path(now);
       for held in moved.held {
         let Held::Signal(message) = held else {
           panic!("only signals were held");
@@ -674,6 +674,7 @@ mod tests {
         maybe_switch_secret: None,
         maybe_screen_share_taken_over: None,
         maybe_retransmit_window_ms: None,
+        maybe_probe_bytes: None,
       };
       engine
         .handle_signal(

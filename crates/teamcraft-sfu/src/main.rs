@@ -52,6 +52,8 @@
 //!   `TEAMCRAFT_SFU_RETRANSMIT_MAX_PACKETS_PER_LAYER` (default 1024),
 //!   `TEAMCRAFT_SFU_RETRANSMIT_MAX_SHARE_PERCENT` (of a receiver's downlink estimate that resent
 //!   packets may take, default 30) and `TEAMCRAFT_SFU_RETRANSMIT_BURST_BYTES` (default 65536)
+//! - `TEAMCRAFT_SFU_PROBE_BYTES`: padding the probe of a participant's link at the start may send,
+//!   each direction (#1762), default 15000, at most 100000; `0` turns it off
 //! - `TEAMCRAFT_SFU_METRICS_ENABLED=1`: serve `GET /metrics` on a listener of its own (off by
 //!   default, docs/operations.md, "Metrics"), and `TEAMCRAFT_SFU_METRICS_ADDRS`: its addresses,
 //!   comma-separated, default `127.0.0.1:9465,[::1]:9465` (`[::]:9465` is dual stack)
@@ -85,6 +87,8 @@ use wtransport::Identity;
 const DEFAULT_FALLBACK_ADDR: &str = "127.0.0.1:8082";
 /// Upper bound for `TEAMCRAFT_SFU_RETRANSMIT_WINDOW_MS`.
 const MAX_RETRANSMIT_WINDOW: Duration = Duration::from_secs(5);
+/// Upper bound for `TEAMCRAFT_SFU_PROBE_BYTES`: a probe is a few short trains, not a speed test.
+const MAX_PROBE_BYTES: u32 = 100_000;
 /// Upper bound for `TEAMCRAFT_SFU_DAVE_TRANSITION_DEADLINE_MS`, below the clients' 5 s fallback.
 const MAX_DAVE_TRANSITION_DEADLINE: Duration = Duration::from_secs(4);
 /// The longest DAVE resume grace: a member away keeps its leaf, and with it the media key, no
@@ -174,6 +178,16 @@ async fn run() -> anyhow::Result<()> {
   }
   if let Some(bytes) = env_count("TEAMCRAFT_SFU_UDP_RECEIVE_BUFFER_BYTES")? {
     config.udp_receive_buffer_bytes = bytes;
+  }
+  if let Ok(value) = std::env::var("TEAMCRAFT_SFU_PROBE_BYTES") {
+    let bytes: u32 = value
+      .parse()
+      .context("TEAMCRAFT_SFU_PROBE_BYTES is not a number")?;
+    anyhow::ensure!(
+      bytes <= MAX_PROBE_BYTES,
+      "TEAMCRAFT_SFU_PROBE_BYTES must be at most {MAX_PROBE_BYTES}"
+    );
+    config.forwarding.probe_bytes = bytes;
   }
   if let Some(devices) = env_count("TEAMCRAFT_SFU_MAX_DEVICES_PER_USER_PER_CALL")? {
     config.max_devices_per_user_per_call = devices;
