@@ -416,6 +416,9 @@ enum Input {
     data: Vec<u8>,
     is_keyframe: bool,
     timestamp_us: f64,
+    /// When the encoder handed the chunk out, stamped in its output callback: the call loop may
+    /// handle it much later, and that wait is no encoding time (#1762).
+    encoded_at: Instant,
   },
   VideoEnded(VideoTrackKind),
   /// WebCodecs closed a layer's encoder after an error (`generation` tells which encoder): the
@@ -1500,9 +1503,10 @@ impl CallState<'_> {
         data,
         is_keyframe,
         timestamp_us,
+        encoded_at,
       } => {
         if let Some(sender) = self.sender_of_kind(&kind)
-          && let Err(gave_up) = sender.on_encoded(layer, data.len(), timestamp_us, Instant::now())
+          && let Err(gave_up) = sender.on_encoded(layer, data.len(), timestamp_us, encoded_at)
         {
           self.on_encoders_gave_up(engine, &kind, gave_up);
         }

@@ -36,8 +36,6 @@
 //! with a keyframe, and a failed decoder is dropped and a keyframe asked for, from which a new one
 //! starts. Only encoders that keep failing stop their track.
 
-use std::collections::VecDeque;
-
 use futures::channel::mpsc;
 use js_sys::{Promise, Uint8Array};
 use teamcraft_proto::{
@@ -63,7 +61,8 @@ use crate::camera_governor::{
   CameraGovernorConfig, CameraLoad, FrameTally, LayerLimit, LayerRateGuard, LoadStep, OverloadReason,
 };
 use crate::share_policy::{
-  EncoderKind, ShareCodecs, ShareEncoders, ShareGovernor, ShareLimits, SharePlan, UplinkTop, share_framerate,
+  EncodeTimer, EncoderKind, ShareCodecs, ShareEncoders, ShareGovernor, ShareLimits, SharePlan, UplinkTop,
+  share_framerate,
 };
 use crate::video::{
   CAMERA_FRAMERATE, LayerSizer, ScreenProfile, VideoResolution, camera_layers, fit_within, within_layer_limit,
@@ -139,9 +138,9 @@ pub(super) struct TrackSender {
   limit: VideoResolution,
   /// The share's layers changed beyond what its encoders follow in place: it goes out anew.
   maybe_replan: Option<Replan>,
-  /// When the share's top layer was given each of its last frames, by timestamp: its encode time
-  /// is the wait for the chunk (#1733).
-  top_encode_starts: VecDeque<(i64, Instant)>,
+  /// When the share's top layer was given each of its last frames: its encode time is the wait
+  /// for the chunk (#1733).
+  top_encode_timer: EncodeTimer,
   _ended: Closure<dyn FnMut()>,
 }
 
@@ -318,9 +317,6 @@ pub(super) enum LayerShape {
   Screen(ScreenProfile),
 }
 
-/// Frames of a share's top layer whose encode start is kept until its chunk comes back.
-const SHARE_ENCODE_STARTS: usize = 64;
-
 impl TrackSender {
   /// Starts encoding the stream's video track as `plan.kind`, to be published under `publication`
   /// in [`Self::codec`] with [`Self::layers`]. A camera's encoders encode the first of
@@ -446,7 +442,7 @@ impl TrackSender {
       max_layers,
       limit,
       maybe_replan: None,
-      top_encode_starts: VecDeque::new(),
+      top_encode_timer: EncodeTimer::default(),
       _ended: ended,
     })
   }
@@ -562,6 +558,8 @@ impl TrackSender {
     };
     self.failed_pictures_in_a_row = 0;
     self.frames_captured += 1;
+    // The frame carries the timestamp it was taken with; the next one gets the following.
+    let frame_timestamp_us = self.timestamp_us;
     self.timestamp_us += 1_000_000.0 / f64::from(self.framerate.max(1));
     let is_periodic_keyframe =
       self.frames_since_keyframe >= KEYFRAME_INTERVAL_SECONDS * u32::from(self.framerate);
@@ -573,13 +571,7 @@ impl TrackSender {
     let result = self.encoders.encode(&frame, is_periodic_keyframe);
     frame.close();
     if self.maybe_share.is_some() {
-      // Timestamps are whole microseconds; the cast keeps them.
-      self
-        .top_encode_starts
-        .push_back((self.timestamp_us as i64, Instant::now()));
-      if self.top_encode_starts.len() > SHARE_ENCODE_STARTS {
-        self.top_encode_starts.pop_front();
-      }
+      self.top_encode_timer.on_given(frame_timestamp_us, Instant::now());
     }
     #[cfg(feature = "effects")]
     if let Some(effects) = &mut self.maybe_effects {
@@ -592,7 +584,8 @@ impl TrackSender {
 
   /// A layer's encoder produced a picture of `bytes` for the frame of `timestamp_us`: it works, a
   /// governed layer's output is held to its bitrate, and a share's top layer tells how long it
-  /// took against the frame interval (#1733).
+  /// took against the frame interval (#1733). `now` is when the encoder handed the picture out,
+  /// not when the call loop got to it: a busy loop is no slow encoder (#1762).
   pub fn on_encoded(
     &mut self,
     layer: u8,
@@ -605,18 +598,15 @@ impl TrackSender {
       .layers
       .last()
       .is_some_and(|top| top.info.layer == layer);
-    if is_top && let Some(share) = &mut self.maybe_share {
-      // The cast keeps the whole microseconds the frame was stamped with.
-      let key = timestamp_us as i64;
-      if let Some(index) = self.top_encode_starts.iter().position(|(stamp, _)| *stamp == key) {
-        let (_, given_at) = self.top_encode_starts[index];
-        self.top_encode_starts.drain(..=index);
-        share.on_frame(FrameTally {
-          encode_time: now.saturating_duration_since(given_at),
-          frame_interval: std::time::Duration::from_secs(1) / u32::from(share.step().top_framerate.max(1)),
-          ..FrameTally::default()
-        });
-      }
+    if is_top
+      && let Some(share) = &mut self.maybe_share
+      && let Some(encode_time) = self.top_encode_timer.on_encoded(timestamp_us, now)
+    {
+      share.on_frame(FrameTally {
+        encode_time,
+        frame_interval: std::time::Duration::from_secs(1) / u32::from(share.step().top_framerate.max(1)),
+        ..FrameTally::default()
+      });
     }
     self.encoders.on_encoded(layer, bytes, now)
   }
@@ -655,7 +645,7 @@ impl TrackSender {
     self.sizer = LayerSizer::new(replan.layers, self.limit);
     self.publication.own = OwnPublication::new(publication);
     self.frames_since_keyframe = 0;
-    self.top_encode_starts.clear();
+    self.top_encode_timer.clear();
     self.set_capture_rate(framerate, Instant::now());
     if let Some(share) = &mut self.maybe_share {
       share.measure_afresh(Instant::now());
@@ -1436,6 +1426,7 @@ impl LayerEncoder {
     // #1733: a share's layers may differ in codec; each chunk carries its layer's.
     let codec = info.codec(&encoding.codec).clone();
     let output = Closure::<dyn FnMut(EncodedVideoChunk)>::new(move |chunk: EncodedVideoChunk| {
+      let encoded_at = Instant::now();
       let bytes = Uint8Array::new_with_length(chunk.byte_length());
       let input = match chunk.copy_to(&bytes) {
         Ok(()) => Input::VideoEncoded {
@@ -1445,6 +1436,7 @@ impl LayerEncoder {
           data: bytes.to_vec(),
           is_keyframe: chunk.chunk_type() == "key",
           timestamp_us: chunk.timestamp(),
+          encoded_at,
         },
         Err(error) => Input::CodecFailed {
           context: "video encoder output",
