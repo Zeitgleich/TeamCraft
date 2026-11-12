@@ -33,6 +33,7 @@
 //! carried the smaller one whole for a while. Recovery is the reverse: size first, then rate.
 //! Pure policy: the driver feeds the inputs and builds encoders from the layers.
 
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use teamcraft_proto::{ScreenContentMode, VideoCodec, VideoLayerInfo};
@@ -185,6 +186,14 @@ pub struct ShareLimits {
   /// Sizes the top layer stepped down for the uplink, of `sizes` less one.
   pub uplink_steps: usize,
   pub sizes: usize,
+}
+
+/// Encoders whose work is out of sight (WebCodecs): each frame's time from being given to an
+/// encoder until its picture came out, matched by the frame's timestamp.
+#[derive(Debug, Clone, Default)]
+pub struct EncodeTimer {
+  /// When each of the last frames was given, by its timestamp in whole microseconds.
+  starts: VecDeque<(i64, Instant)>,
 }
 
 /// The top layer's size as the uplink allows it: an index into the ladder's top sizes.
@@ -406,6 +415,36 @@ impl UplinkSizes {
         false
       },
     }
+  }
+}
+
+impl EncodeTimer {
+  /// The frames an encoder may hold before the oldest start is forgotten.
+  const MAX_FRAMES: usize = 64;
+
+  /// The frame stamped `timestamp_us` was given to the encoder at `given_at`.
+  pub fn on_given(&mut self, timestamp_us: f64, given_at: Instant) {
+    // The cast keeps the whole microseconds a frame's timestamp has.
+    self.starts.push_back((timestamp_us as i64, given_at));
+    if self.starts.len() > Self::MAX_FRAMES {
+      self.starts.pop_front();
+    }
+  }
+
+  /// The picture of the frame stamped `timestamp_us` came out at `encoded_at`: how long it took,
+  /// when that frame was given. Frames given before it and never encoded (the encoder dropped
+  /// them) are forgotten.
+  pub fn on_encoded(&mut self, timestamp_us: f64, encoded_at: Instant) -> Option<Duration> {
+    let key = timestamp_us as i64;
+    let index = self.starts.iter().position(|(stamp, _)| *stamp == key)?;
+    let (_, given_at) = self.starts[index];
+    self.starts.drain(..=index);
+    Some(encoded_at.saturating_duration_since(given_at))
+  }
+
+  /// Forgets every start: the encoders were replaced.
+  pub fn clear(&mut self) {
+    self.starts.clear();
   }
 }
 
@@ -727,6 +766,48 @@ mod tests {
     width: 3840,
     height: 2160,
   };
+
+  mod encode_timer {
+    use super::*;
+
+    #[test]
+    fn a_picture_is_timed_from_its_own_frame() {
+      let start = Instant::now();
+      let mut timer = EncodeTimer::default();
+      // 30 fps: timestamps in fractions of a microsecond, as the capture stamps them.
+      let interval = 1_000_000.0 / 30.0;
+      timer.on_given(0.0, start);
+      timer.on_given(interval, start + Duration::from_millis(33));
+      // The picture of the second frame, 10 ms after it was given: not 43 ms after the first.
+      let took = timer.on_encoded(interval.trunc(), start + Duration::from_millis(43));
+      assert_eq!(took, Some(Duration::from_millis(10)));
+    }
+
+    #[test]
+    fn frames_the_encoder_dropped_are_forgotten() {
+      let start = Instant::now();
+      let mut timer = EncodeTimer::default();
+      for frame in 0..3u32 {
+        timer.on_given(
+          f64::from(frame) * 100_000.0,
+          start + Duration::from_millis(u64::from(frame) * 100),
+        );
+      }
+      assert_eq!(
+        timer.on_encoded(200_000.0, start + Duration::from_millis(205)),
+        Some(Duration::from_millis(5))
+      );
+      assert_eq!(timer.on_encoded(0.0, start + Duration::from_millis(300)), None);
+    }
+
+    #[test]
+    fn an_unknown_picture_times_nothing() {
+      let mut timer = EncodeTimer::default();
+      timer.on_given(0.0, Instant::now());
+      timer.clear();
+      assert_eq!(timer.on_encoded(0.0, Instant::now()), None);
+    }
+  }
 
   mod layers {
     use super::*;
