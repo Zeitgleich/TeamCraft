@@ -51,8 +51,8 @@ runs, and every complete line is handed on as it arrives (batched as described b
 logs are one long request:
 
 ```sh
-# systemd: the journal of one unit, from now on.
-journalctl -u myservice -f -n 0 -o short-iso | curl -sS -X POST -T - \
+# systemd: the journal of one unit, from now on. JSON carries the priority, so levels are found.
+journalctl -u myservice -f -n 0 -o json | curl -sS -X POST -T - \
   -H 'Content-Type: text/plain' "$TEAMCRAFT_INGEST"
 
 # Docker: stdout and stderr of a container.
@@ -63,9 +63,49 @@ docker logs -f --since 1s myservice 2>&1 | curl -sS -X POST -T - \
 Run it as a service that restarts: a stream ends when the bridge restarts or the connection
 breaks, and a lost connection loses the lines in flight. A unit with `Restart=always` and
 `RestartSec=5` is enough; `journalctl --cursor-file=/var/lib/shipper/cursor` (or `--since`)
-continues where the last run stopped. The journal's `-o json` lines carry `MESSAGE` and a numeric
-`PRIORITY`, not `message` and `level`, so the bridge shows them as raw JSON and finds no alert level;
-for readable lines with levels use `-o short-iso` as plain text, or `-o cat` for the message only.
+continues where the last run stopped.
+
+### Levels
+
+The level of a line decides its colour in the apps' log view and whether the line is an alert
+(`alert_levels`, default `error`, `err`, `fatal`, `critical`, `alert`, `emergency`). One detection
+(`teamcraft_proto::find_level`) serves the bridge, the log view and the text preview of log files, so
+a line has the same level everywhere. It looks at the first 160 bytes of a line:
+
+| Form                                              | Example                                                                       |
+|---------------------------------------------------|-------------------------------------------------------------------------------|
+| Level word after a timestamp or `host unit[pid]:` | `2026-11-12T10:00:00Z ERROR disk full`, `Nov 12 10:00:00 host app[1]: WARN x` |
+| Bracketed                                         | `[error] it broke`, `2026/11/12 10:00:00 [crit] upstream`                     |
+| Key and value (logfmt, JSON text)                 | `time=… level=error msg=boom`, `{"severity":"Info",…}`                        |
+| Word before a colon                               | `error: it broke`, `Warning: slow`                                            |
+| glog letter                                       | `E1112 10:00:00.123456 main.cc:12] boom`                                      |
+
+Upper-case words (`ERROR`) count anywhere in the head; other spellings only in the forms above, so
+prose such as "no error found" stays `info`. Words: `trace`, `debug`, `info`, `notice`, `warn`,
+`warning`, `error`, `err`, `fatal`, `critical`, `alert`, `emergency`, and the abbreviations `dbg`,
+`trc`, `inf`, `wrn`, `crit`, `emerg`, `panic`, `severe`, `verbose` (in `alert_levels`, `crit` is
+`critical`, `emerg` is `emergency`, `panic` is `fatal`, `severe` is `error`). A line without a level
+is `info`; the apps show `trace`/`debug` as debug, `notice`/`info` as info, `warn`/`warning` as warn,
+and everything above as error.
+
+journald's short formats (`-o short-iso`) carry **no level at all**: the journal keeps the priority
+in a field, and the line shows only what the program wrote. Use `-o json` (below) for levels.
+
+**NDJSON** (`Content-Type: application/x-ndjson`): the message is the first of `message`, `msg`,
+`text`, `log`, `MESSAGE`; the level the first of `level`, `severity`, `lvl`, `levelname`, `PRIORITY`;
+the time one of `time`, `ts`, `timestamp`, `@timestamp`. A level is a word or a number: syslog
+priorities `0`–`7` (journald sends `"PRIORITY":"3"` as text, which works too: `0` emergency, `3`
+error, `4` warning, `6` info, `7` debug) and the `10`–`60` scale of bunyan and pino. The bridge writes
+`[LEVEL] time message`, a form the apps read back to the same level and show without the prefix.
+Lines that are not JSON, or have no message field, are taken as plain text.
+
+```sh
+journalctl -u myservice -f -n 0 -o json | curl -sS -X POST -T - \
+  -H 'Content-Type: application/x-ndjson' "$TEAMCRAFT_INGEST"
+```
+
+Plain journal output works as well as long as the program prints a level (`-o short-iso` or `-o cat`
+of a service that logs `ERROR …`).
 
 - **Lines.** A line ends with `\n`. The last line of a stream without one is taken when the stream
   ends. A line longer than `listen.max_body_bytes` ends the stream with `413 payload_too_large`;
