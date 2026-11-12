@@ -254,6 +254,36 @@ pub struct ReceivedVideoStats {
   /// The frame rate the sender announced for the layer arriving now.
   #[serde(default)]
   pub maybe_max_framerate: Option<u8>,
+  /// Frames waiting in this device's decoder of the track now (#1762); `None` where the platform
+  /// doesn't tell.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_decode_queue: Option<u32>,
+  /// This device asks for a lower layer of the track than its tile wants, because it can't decode
+  /// more (#1762); `None` while it doesn't hold the track back.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_device_limit: Option<DeviceLimitStats>,
+}
+
+/// A received track this device holds below what its tile wants, for its own load.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceLimitStats {
+  /// The highest layer asked for now.
+  pub layer: u8,
+  /// Why the decoders were found overloaded.
+  #[serde(default)]
+  pub maybe_reason: Option<DecodeOverload>,
+}
+
+/// How this device's decoders were found overloaded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecodeOverload {
+  /// Frames waited in the decoders' queues.
+  QueuedFrames,
+  /// Frames reached the decoders late: the receive path didn't keep up.
+  LateFrames,
+  #[serde(other)]
+  Unknown,
 }
 
 /// A layer another device offers.
@@ -351,6 +381,11 @@ mod tests {
           keyframe_requests: 2,
           maybe_longest_gap_ms: Some(120),
           maybe_max_framerate: Some(30),
+          maybe_decode_queue: Some(4),
+          maybe_device_limit: Some(DeviceLimitStats {
+            layer: 1,
+            maybe_reason: Some(DecodeOverload::QueuedFrames),
+          }),
         }),
       ],
     };

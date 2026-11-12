@@ -1045,6 +1045,8 @@ mod tests {
       keyframe_requests: discarded / 10,
       maybe_longest_gap_ms: Some(gap_ms),
       maybe_max_framerate: Some(30),
+      maybe_decode_queue: None,
+      maybe_device_limit: None,
     })
   }
 }
