@@ -260,6 +260,10 @@ pub struct CallStateInfo {
   pub reconnecting_count: u32,
   /// The users all of whose devices are rejoining.
   pub reconnecting_user_ids: Vec<String>,
+  /// The users with a device whose call key binding did not verify: that device is kept out of the
+  /// call's encryption group and gets no audio or video. Marked "not verified" on their tile.
+  #[uniffi(default = [])]
+  pub unverified_user_ids: Vec<String>,
   /// The call runs on the fallback for networks that block UDP (ARCHITECTURE.md §6.6): the app says
   /// quality may be lower.
   #[uniffi(default = false)]
@@ -698,6 +702,7 @@ pub(crate) async fn join(
     muted_user_ids: Vec::new(),
     reconnecting_count: 0,
     reconnecting_user_ids: Vec::new(),
+    unverified_user_ids: Vec::new(),
     is_on_limited_network: false,
     maybe_privacy_code: None,
     maybe_end_reason: None,
@@ -794,6 +799,7 @@ async fn run_call(
   let mut reconnecting = BTreeSet::new();
   let mut roster = BTreeMap::new();
   let mut muted = BTreeSet::new();
+  let mut refused = BTreeSet::new();
   let mut video = RemoteVideo::default();
   let mut encoded = EncodedVideoBridge::default();
   let mut audio = AudioControls::default();
@@ -834,7 +840,7 @@ async fn run_call(
           if !encoded.is_active() {
             watch_video(&call, &event, context.own_device, &mut video);
           }
-          if let Some(end) = apply_event(state, &mut reconnecting, &mut roster, &mut muted, event) {
+          if let Some(end) = apply_event(state, &mut reconnecting, &mut roster, &mut muted, &mut refused, event) {
             reason = end;
             break;
           }
@@ -1246,12 +1252,14 @@ fn upright(width: u16, height: u16) -> VideoResolution {
 }
 
 /// Updates the call's state; returns why the call ends if the event ends it. `reconnecting`:
-/// other devices that are rejoining; `roster`: other devices in the call and their users.
+/// other devices that are rejoining; `roster`: other devices in the call and their users;
+/// `refused`: devices whose call key binding did not verify (kept out of the media group).
 fn apply_event(
   state: &mut CallStateInfo,
   reconnecting: &mut BTreeSet<DeviceId>,
   roster: &mut BTreeMap<DeviceId, UserId>,
   muted: &mut BTreeSet<DeviceId>,
+  refused: &mut BTreeSet<DeviceId>,
   event: CallEngineEvent,
 ) -> Option<CallEndReason> {
   match event {
@@ -1274,6 +1282,10 @@ fn apply_event(
       muted.remove(&device_id);
       roster.remove(&device_id);
       reconnecting.remove(&device_id);
+      refused.remove(&device_id);
+    },
+    CallEngineEvent::MemberRefused(device_id) => {
+      refused.insert(device_id);
     },
     CallEngineEvent::Reconnecting => {
       state.phase = CallPhase::Reconnecting;
@@ -1357,7 +1369,25 @@ fn apply_event(
     .retain(|speaking| users.iter().any(|user| user.to_string() == *speaking));
   state.reconnecting_user_ids = users_whose_devices_all(&users, roster, reconnecting);
   state.muted_user_ids = users_whose_devices_all(&users, roster, muted);
+  state.unverified_user_ids = users_with_any_device(&users, roster, refused);
   None
+}
+
+/// The users with at least one device in `devices`, each once.
+fn users_with_any_device(
+  users: &BTreeSet<UserId>,
+  roster: &BTreeMap<DeviceId, UserId>,
+  devices: &BTreeSet<DeviceId>,
+) -> Vec<String> {
+  users
+    .iter()
+    .filter(|user| {
+      roster
+        .iter()
+        .any(|(device, owner)| owner == *user && devices.contains(device))
+    })
+    .map(ToString::to_string)
+    .collect()
 }
 
 /// The users all of whose devices in the call are in `devices`, each once.
@@ -1396,6 +1426,7 @@ fn ended(conversation: ConversationId, reason: CallEndReason) -> CallStateInfo {
     muted_user_ids: Vec::new(),
     reconnecting_count: 0,
     reconnecting_user_ids: Vec::new(),
+    unverified_user_ids: Vec::new(),
     is_on_limited_network: false,
     maybe_privacy_code: None,
     maybe_end_reason: Some(reason),
@@ -1718,6 +1749,7 @@ mod tests {
     let mut reconnecting = BTreeSet::new();
     let mut roster = BTreeMap::new();
     let mut muted = BTreeSet::new();
+    let mut refused = BTreeSet::new();
     state.phase = CallPhase::Connecting;
     assert_eq!(
       apply_event(
@@ -1725,6 +1757,7 @@ mod tests {
         &mut reconnecting,
         &mut roster,
         &mut muted,
+        &mut refused,
         CallEngineEvent::MuteChanged(true)
       ),
       None
@@ -1736,6 +1769,7 @@ mod tests {
         &mut reconnecting,
         &mut roster,
         &mut muted,
+        &mut refused,
         CallEngineEvent::EndedByHost { by_user_id: user(1) }
       ),
       Some(CallEndReason::EndedByHost)
@@ -1787,6 +1821,7 @@ mod tests {
       &mut BTreeSet::new(),
       &mut BTreeMap::new(),
       &mut BTreeSet::new(),
+      &mut BTreeSet::new(),
       event,
     );
   }
@@ -1794,13 +1829,15 @@ mod tests {
   #[test]
   fn the_sfus_device_limit_refusal_ends_the_call_with_its_reason() {
     let mut state = ended(conversation(5), CallEndReason::Left);
-    let (mut reconnecting, mut roster, mut muted) = (BTreeSet::new(), BTreeMap::new(), BTreeSet::new());
+    let (mut reconnecting, mut roster, mut muted, mut refused) =
+      (BTreeSet::new(), BTreeMap::new(), BTreeSet::new(), BTreeSet::new());
     let mut apply = |code| {
       apply_event(
         &mut state,
         &mut reconnecting,
         &mut roster,
         &mut muted,
+        &mut refused,
         CallEngineEvent::Error(teamcraft_proto::ErrorBody::new(code, "refused")),
       )
     };
@@ -1814,7 +1851,8 @@ mod tests {
   #[test]
   fn the_state_names_who_speaks_and_who_is_rejoining() {
     let mut state = ended(conversation(5), CallEndReason::Left);
-    let (mut reconnecting, mut roster, mut muted) = (BTreeSet::new(), BTreeMap::new(), BTreeSet::new());
+    let (mut reconnecting, mut roster, mut muted, mut refused) =
+      (BTreeSet::new(), BTreeMap::new(), BTreeSet::new(), BTreeSet::new());
     let participant = |user_raw: i64, device_raw: i64| teamcraft_proto::CallParticipant {
       user_id: user(user_raw),
       device_id: device(device_raw),
@@ -1827,7 +1865,14 @@ mod tests {
       CallEngineEvent::ActiveSpeakers(vec![device(21), device(30), device(20)]),
       CallEngineEvent::ParticipantReconnecting(device(30)),
     ] {
-      apply_event(&mut state, &mut reconnecting, &mut roster, &mut muted, event);
+      apply_event(
+        &mut state,
+        &mut reconnecting,
+        &mut roster,
+        &mut muted,
+        &mut refused,
+        event,
+      );
     }
     // Loudest first, a person once however many devices they have in the call.
     assert_eq!(state.speaking_user_ids, vec!["2".to_string(), "3".to_string()]);
@@ -1838,22 +1883,64 @@ mod tests {
       &mut reconnecting,
       &mut roster,
       &mut muted,
+      &mut refused,
       CallEngineEvent::ParticipantLeft(device(30)),
     );
     assert_eq!(state.speaking_user_ids, vec!["2".to_string()]);
   }
 
   #[test]
-  fn a_person_counts_as_muted_when_all_their_devices_are() {
+  fn a_refused_device_marks_its_user_until_it_leaves() {
     let mut state = ended(conversation(5), CallEndReason::Left);
-    let (mut reconnecting, mut roster, mut muted) = (BTreeSet::new(), BTreeMap::new(), BTreeSet::new());
+    let (mut reconnecting, mut roster, mut muted, mut refused) =
+      (BTreeSet::new(), BTreeMap::new(), BTreeSet::new(), BTreeSet::new());
     let participant = |user_raw: i64, device_raw: i64| teamcraft_proto::CallParticipant {
       user_id: user(user_raw),
       device_id: device(device_raw),
       audio_stream_id: MediaStreamId(1),
     };
     let mut apply = |state: &mut CallStateInfo, event| {
-      apply_event(state, &mut reconnecting, &mut roster, &mut muted, event);
+      apply_event(
+        state,
+        &mut reconnecting,
+        &mut roster,
+        &mut muted,
+        &mut refused,
+        event,
+      );
+    };
+    apply(&mut state, CallEngineEvent::ParticipantJoined(participant(2, 20)));
+    apply(&mut state, CallEngineEvent::ParticipantJoined(participant(2, 21)));
+    apply(&mut state, CallEngineEvent::ParticipantJoined(participant(3, 30)));
+    assert!(state.unverified_user_ids.is_empty());
+    apply(&mut state, CallEngineEvent::MemberRefused(device(21)));
+    // A person once, however many devices; others are not marked.
+    assert_eq!(state.unverified_user_ids, vec!["2".to_string()]);
+    apply(&mut state, CallEngineEvent::ParticipantLeft(device(20)));
+    assert_eq!(state.unverified_user_ids, vec!["2".to_string()]);
+    apply(&mut state, CallEngineEvent::ParticipantLeft(device(21)));
+    assert!(state.unverified_user_ids.is_empty());
+  }
+
+  #[test]
+  fn a_person_counts_as_muted_when_all_their_devices_are() {
+    let mut state = ended(conversation(5), CallEndReason::Left);
+    let (mut reconnecting, mut roster, mut muted, mut refused) =
+      (BTreeSet::new(), BTreeMap::new(), BTreeSet::new(), BTreeSet::new());
+    let participant = |user_raw: i64, device_raw: i64| teamcraft_proto::CallParticipant {
+      user_id: user(user_raw),
+      device_id: device(device_raw),
+      audio_stream_id: MediaStreamId(1),
+    };
+    let mut apply = |state: &mut CallStateInfo, event| {
+      apply_event(
+        state,
+        &mut reconnecting,
+        &mut roster,
+        &mut muted,
+        &mut refused,
+        event,
+      );
     };
     apply(&mut state, CallEngineEvent::ParticipantJoined(participant(2, 20)));
     apply(&mut state, CallEngineEvent::ParticipantJoined(participant(2, 21)));
@@ -1884,7 +1971,8 @@ mod tests {
   #[test]
   fn the_state_names_the_people_in_the_call_once_each() {
     let mut state = ended(conversation(5), CallEndReason::Left);
-    let (mut reconnecting, mut roster, mut muted) = (BTreeSet::new(), BTreeMap::new(), BTreeSet::new());
+    let (mut reconnecting, mut roster, mut muted, mut refused) =
+      (BTreeSet::new(), BTreeMap::new(), BTreeSet::new(), BTreeSet::new());
     let participant = |user_raw: i64, device_raw: i64| teamcraft_proto::CallParticipant {
       user_id: user(user_raw),
       device_id: device(device_raw),
@@ -1897,7 +1985,14 @@ mod tests {
       CallEngineEvent::ParticipantLeft(device(30)),
     ];
     for event in events {
-      apply_event(&mut state, &mut reconnecting, &mut roster, &mut muted, event);
+      apply_event(
+        &mut state,
+        &mut reconnecting,
+        &mut roster,
+        &mut muted,
+        &mut refused,
+        event,
+      );
     }
     assert_eq!(state.participant_count, 2);
     assert_eq!(state.participant_user_ids, vec!["2".to_owned()]);
@@ -1919,6 +2014,7 @@ mod tests {
     let mut reconnecting = BTreeSet::new();
     let mut roster = BTreeMap::new();
     let mut muted = BTreeSet::new();
+    let mut refused = BTreeSet::new();
     state.phase = CallPhase::Connected;
     for event in [
       CallEngineEvent::ParticipantReconnecting(device(2)),
@@ -1926,7 +2022,14 @@ mod tests {
       CallEngineEvent::ParticipantReconnected(device(2)),
     ] {
       assert_eq!(
-        apply_event(&mut state, &mut reconnecting, &mut roster, &mut muted, event),
+        apply_event(
+          &mut state,
+          &mut reconnecting,
+          &mut roster,
+          &mut muted,
+          &mut refused,
+          event
+        ),
         None
       );
     }
@@ -1937,6 +2040,7 @@ mod tests {
         &mut reconnecting,
         &mut roster,
         &mut muted,
+        &mut refused,
         CallEngineEvent::Reconnecting
       ),
       None
@@ -1948,6 +2052,7 @@ mod tests {
       &mut reconnecting,
       &mut roster,
       &mut muted,
+      &mut refused,
       CallEngineEvent::Reconnected,
     );
     assert_eq!(state.phase, CallPhase::Connected);
@@ -1961,6 +2066,7 @@ mod tests {
     let mut reconnecting = BTreeSet::new();
     let mut roster = BTreeMap::new();
     let mut muted = BTreeSet::new();
+    let mut refused = BTreeSet::new();
     state.phase = CallPhase::Connected;
     assert!(!state.is_on_limited_network);
     for (transport, is_limited) in [
@@ -1974,6 +2080,7 @@ mod tests {
           &mut reconnecting,
           &mut roster,
           &mut muted,
+          &mut refused,
           CallEngineEvent::TransportChanged(transport)
         ),
         None

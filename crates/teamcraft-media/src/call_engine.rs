@@ -241,6 +241,9 @@ pub enum CallEngineEvent {
   /// Another device's call key binding didn't verify (forged, another device's, or one that left
   /// the call): it isn't let into the DAVE group and gets no media key (e2ee.md §8, #1753).
   MemberRefused(DeviceId),
+  /// The DAVE group held across a lost connection couldn't be resumed: the device joins the group
+  /// afresh (a short gap in media). For the crash reports' call problems.
+  DaveResumeFailed(DaveResumeFailure),
   ActiveSpeakers(Vec<DeviceId>),
   /// Another device muted or unmuted its microphone.
   ParticipantMuted {
@@ -338,6 +341,15 @@ pub enum CallEngineEvent {
   DecodableVideoCodecs(Vec<VideoCodec>),
   /// The SFU rejected a request.
   Error(ErrorBody),
+}
+
+/// Why a held DAVE group wasn't resumed after a rejoin ([`CallEngineEvent::DaveResumeFailed`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaveResumeFailure {
+  /// The SFU didn't resume it (it restarted, or started the group over).
+  NotResumed,
+  /// It held a member the call's roster no longer has, or one that left while this device was away.
+  MemberOffRoster,
 }
 
 /// When an own track that ended by itself ([`CallEngineEvent::OwnVideoEnded`]) ended.
@@ -2262,6 +2274,7 @@ impl CallEngine {
   /// and the device joins again without one.
   fn give_up_resume(&mut self, event: &CallEvent) {
     debug!("the SFU didn't resume the DAVE group held: joining it afresh");
+    self.event(CallEngineEvent::DaveResumeFailed(DaveResumeFailure::NotResumed));
     let call_id = self.call_id();
     self.drop_held_dave();
     match (event, call_id) {
@@ -2290,6 +2303,9 @@ impl CallEngine {
     if let Some(device) = self.member_off_the_roster()? {
       // The SFU's participant list said the device is still here; the signed roster decides.
       warn!(%device, "a resumed DAVE group has a member off the call's roster: joining afresh");
+      self.event(CallEngineEvent::DaveResumeFailed(
+        DaveResumeFailure::MemberOffRoster,
+      ));
       self.drop_held_dave();
       self.maybe_join_retry_after = Some(Duration::ZERO);
       return Ok(());
@@ -4791,12 +4807,17 @@ mod tests {
         layers: vec![0, 2],
       };
       alice.handle_signal(event(2, needed), now).unwrap();
+      // This SFU didn't resume the DAVE group held (the crash reports hear of it), and the layers
+      // narrow.
       assert_eq!(
         drain(&mut alice),
-        vec![EngineOutput::Event(CallEngineEvent::LayersNeeded {
-          stream_id: MediaStreamId(50),
-          layers: vec![0, 2],
-        })]
+        vec![
+          EngineOutput::Event(CallEngineEvent::DaveResumeFailed(DaveResumeFailure::NotResumed)),
+          EngineOutput::Event(CallEngineEvent::LayersNeeded {
+            stream_id: MediaStreamId(50),
+            layers: vec![0, 2],
+          })
+        ]
       );
     }
 

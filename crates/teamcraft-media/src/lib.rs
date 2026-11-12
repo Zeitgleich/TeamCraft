@@ -74,6 +74,8 @@ pub mod call_cues;
 pub mod call_engine;
 #[cfg(feature = "native")]
 pub mod call_native;
+#[cfg(feature = "call-view")]
+pub mod call_telemetry;
 #[cfg(feature = "dave")]
 pub mod call_video;
 #[cfg(feature = "call-view")]

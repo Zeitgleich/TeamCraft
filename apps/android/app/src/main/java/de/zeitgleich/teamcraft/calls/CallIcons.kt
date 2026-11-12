@@ -12,6 +12,10 @@ import androidx.compose.ui.unit.dp
  * their path data.
  */
 internal object CallIcons {
+  val Warning = icon(
+    "Warning",
+    "M1,21h22L12,2 1,21zM13,18h-2v-2h2v2zM13,14h-2v-4h2v4z",
+  )
   val Mic = icon(
     "Mic",
     "M12,14c1.66,0 2.99,-1.34 2.99,-3L15,5c0,-1.66 -1.34,-3 -3,-3S9,3.34 9,5v6c0,1.66 1.34,3 3,3z" +

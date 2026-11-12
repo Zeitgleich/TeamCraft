@@ -169,7 +169,8 @@ struct CallScreen: View {
         id: id, name: model.calls.names[id] ?? "",
         isSpeaking: call.speakingUserIds.contains(id),
         isRejoining: call.reconnectingUserIds.contains(id),
-        isMuted: call.mutedUserIds.contains(id))
+        isMuted: call.mutedUserIds.contains(id),
+        isUnverified: call.unverifiedUserIds.contains(id))
     }
     var tiles = people.map { person -> StageTile in
       if let stream = cameras.first(where: { call.userIdByDevice[$0.deviceId] == person.id }) {
@@ -179,7 +180,7 @@ struct CallScreen: View {
     }
     tiles += cameras.filter { call.userIdByDevice[$0.deviceId] == nil }.map { StageTile.camera($0) }
     if tiles.isEmpty {
-      tiles = [.avatar(StagePerson(id: "", name: call.displayName, isSpeaking: false, isRejoining: false, isMuted: false))]
+      tiles = [.avatar(StagePerson(id: "", name: call.displayName, isSpeaking: false, isRejoining: false, isMuted: false, isUnverified: false))]
     }
     return tiles
   }
@@ -209,7 +210,10 @@ struct CallScreen: View {
       .opacity(person.isRejoining ? 0.5 : 1)
       .animation(.easeOut(duration: 0.15), value: person.isSpeaking)
       .accessibilityElement(children: .ignore)
-      .accessibilityLabel(person.isMuted ? Text("call_person_muted \(person.name)") : Text(verbatim: person.name))
+      .accessibilityLabel(
+        person.isUnverified
+          ? Text("call_person_unverified \(person.name)")
+          : person.isMuted ? Text("call_person_muted \(person.name)") : Text(verbatim: person.name))
     }
   }
 
@@ -218,6 +222,7 @@ struct CallScreen: View {
   private func personTag(_ person: StagePerson) -> some View {
     if !person.name.isEmpty {
       HStack(spacing: 4) {
+        if person.isUnverified { unverifiedMark }
         if person.isMuted { Image(systemName: "mic.slash.fill").font(.app(.caption2)) }
         Text(person.name).lineLimit(1)
       }
@@ -228,6 +233,17 @@ struct CallScreen: View {
       .background(.black.opacity(0.55), in: Capsule())
       .padding(8)
     }
+  }
+
+  /// The warning mark of a tile whose person could not be verified (an SF Symbol, never an emoji).
+  private var unverifiedMark: some View {
+    Image(systemName: "exclamationmark.triangle.fill")
+      .font(.app(.caption2))
+      .foregroundStyle(.orange)
+  }
+
+  private func isUnverified(_ stream: RemoteVideoStream) -> Bool {
+    call.userIdByDevice[stream.deviceId].map { call.unverifiedUserIds.contains($0) } ?? false
   }
 
   private func isMuted(_ stream: RemoteVideoStream) -> Bool {
@@ -269,6 +285,7 @@ struct CallScreen: View {
   private func nameTag(for stream: RemoteVideoStream) -> some View {
     if let name = ownerName(of: stream) {
       HStack(spacing: 4) {
+        if isUnverified(stream) { unverifiedMark }
         if isMuted(stream) { Image(systemName: "mic.slash.fill").font(.app(.caption2)) }
         Text(name).lineLimit(1)
       }
@@ -276,7 +293,9 @@ struct CallScreen: View {
       .foregroundStyle(.white)
       .accessibilityElement(children: .ignore)
       .accessibilityLabel(
-        isMuted(stream) ? Text("call_person_muted \(name)") : Text(verbatim: name)
+        isUnverified(stream)
+          ? Text("call_person_unverified \(name)")
+          : isMuted(stream) ? Text("call_person_muted \(name)") : Text(verbatim: name)
       )
       .padding(.horizontal, 8)
       .padding(.vertical, 2)
@@ -639,6 +658,7 @@ private struct StagePerson: Identifiable {
   let isSpeaking: Bool
   let isRejoining: Bool
   let isMuted: Bool
+  let isUnverified: Bool
 }
 
 /// Reads the notetaker again for another call or other people in it.

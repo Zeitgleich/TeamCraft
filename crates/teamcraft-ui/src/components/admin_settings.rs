@@ -191,6 +191,7 @@ const HOURS: &str = "settings-unit-hours";
 const DAYS: &str = "settings-unit-days";
 const PERCENT: &str = "settings-unit-percent";
 const MILLISECONDS: &str = "settings-unit-ms";
+const REPORTS: &str = "settings-unit-reports";
 const MEGABYTES: &str = "settings-unit-mib";
 const KILOBYTES: &str = "settings-unit-kib";
 const PIXELS: &str = "settings-unit-px";
@@ -265,6 +266,13 @@ const CRASH_REPORTS: &[FieldDef] = &[
     (0, 60_000),
     MILLISECONDS,
     "settings-error-slow-job",
+  ),
+  ranged(
+    "call_reports_per_call",
+    1,
+    (0, 50),
+    REPORTS,
+    "settings-error-call-reports",
   ),
   FieldDef {
     id: "environment",
@@ -1404,6 +1412,7 @@ mod tests {
       ("sample_percent", "150"),
       ("trace_percent", "101"),
       ("slow_job_ms", "1000"),
+      ("call_reports_per_call", "8"),
       ("environment", "Prod"),
     ]
     .into_iter()

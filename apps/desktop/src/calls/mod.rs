@@ -22,8 +22,8 @@ pub(crate) mod video;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use teamcraft_client_api::call_view::{CallSignal, CallView};
 use teamcraft_client_api::calls::{
@@ -31,6 +31,7 @@ use teamcraft_client_api::calls::{
   CallStatusSounds, CameraFallback, DevicePresence, MediaDevice, MediaDevices, PreviewCamera, PushToTalk,
   ScreenShareSound, VideoQuality,
 };
+use teamcraft_client_api::crash_reporting::CallRef;
 use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
 use teamcraft_client_api::remote::CallSnapshot;
 use teamcraft_client_api::video_stats::VideoStatsReport;
@@ -48,6 +49,7 @@ use teamcraft_media::call_native::{
   JoinTicketSource, NativeCall, NativeCallConfig, NativeCallError, TicketFuture, TrustFuture, TrustSource,
 };
 use teamcraft_media::call_resilience::{JoinTicket, JoinTicketError, certificate_hash_from_hex};
+use teamcraft_media::call_telemetry::{CallTelemetry, STATS_SAMPLE_INTERVAL, TelemetryThresholds};
 use teamcraft_media::call_video::ReceivedVideoFrame;
 use teamcraft_media::call_view::{CallRoster, status_cues};
 use teamcraft_media::camera_choice::CameraReport;
@@ -283,6 +285,7 @@ impl CallHost {
     })
   }
 
+  /// The call state, without the problem reports ([`Self::page_snapshot`] hands those over).
   pub fn snapshot(&self) -> CallSnapshot {
     let state = lock(&self.state);
     CallSnapshot {
@@ -296,6 +299,18 @@ impl CallHost {
       preview_camera: state.preview_camera,
       maybe_camera_fallback: state.maybe_camera_fallback.clone(),
       maybe_this_device: state.view.maybe_this_device,
+      call_reports: Vec::new(),
+    }
+  }
+
+  /// The call state for the page, with the problem reports since the last read, which leave the
+  /// view (docs/crash-reports.md, "Call problems"): each goes to the page once, and the snapshot
+  /// doesn't grow with them.
+  pub fn page_snapshot(&self) -> CallSnapshot {
+    let reports = std::mem::take(&mut lock(&self.state).view.call_reports);
+    CallSnapshot {
+      call_reports: reports,
+      ..self.snapshot()
     }
   }
 
@@ -380,9 +395,22 @@ impl CallHost {
     // Push-to-talk: the microphone opens only while the key is held.
     let is_muted_at_start = is_muted || self.push_to_talk().is_enabled;
     config.is_muted_at_start = is_muted_at_start;
-    let call = NativeCall::join(config)
-      .await
-      .map_err(|error| call_failure_wire(&error))?;
+    let mut telemetry = CallTelemetry::new(
+      random_call_ref(),
+      telemetry_now_ms(),
+      unix_ms(),
+      TelemetryThresholds::default(),
+    );
+    let call = match NativeCall::join(config).await {
+      Ok(call) => call,
+      Err(error) => {
+        report_telemetry_failure(&mut telemetry, &error);
+        if lock(&self.state).view.add_call_reports(telemetry.take_reports()) {
+          self.changed();
+        }
+        return Err(call_failure_wire(&error));
+      },
+    };
     {
       let mut state = lock(&self.state);
       let background = state.background;
@@ -399,6 +427,7 @@ impl CallHost {
     lock(&self.video_sinks).clear();
     let task = tokio::spawn(run_media(
       call,
+      telemetry,
       control_rx,
       MediaShared {
         own_device,
@@ -1274,6 +1303,7 @@ struct MediaShared {
 
 async fn run_media(
   mut call: NativeCall,
+  mut telemetry: CallTelemetry,
   mut controls: mpsc::UnboundedReceiver<Control>,
   shared: MediaShared,
 ) {
@@ -1291,10 +1321,19 @@ async fn run_media(
   let microphone_level = call.microphone_level();
   let mut level_tick = tokio::time::interval(CALL_LEVEL_INTERVAL);
   level_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+  // The call's telemetry samples the video stats (docs/crash-reports.md, "Call problems").
+  let mut sample_tick = tokio::time::interval(STATS_SAMPLE_INTERVAL);
+  sample_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
   let mut is_hang_up = false;
   loop {
     tokio::select! {
       _ = level_tick.tick() => shared.levels.publish(microphone_level.get()),
+      _ = sample_tick.tick() => {
+        if let Some(report) = call.video_stats().await {
+          telemetry.observe_stats(&report, telemetry_now_ms());
+          add_call_reports(&mut telemetry, &shared);
+        }
+      },
       maybe_control = controls.recv() => match maybe_control {
         Some(Control::Mute(is_muted)) => call.set_muted(is_muted),
         Some(Control::Deafen(is_deafened)) => call.set_deafened(is_deafened),
@@ -1309,7 +1348,7 @@ async fn run_media(
           // What the call said before its answer comes first: the end of a track it replaced
           // must not end its successor.
           while let Some(event) = call.try_next_event() {
-            on_event(event, &mut roster, &mut video_starts, &shared);
+            on_event(event, &mut roster, &mut video_starts, &mut telemetry, &shared);
           }
           let result = match started {
             Ok(mut first_picture) => {
@@ -1400,7 +1439,7 @@ async fn run_media(
         }
       },
       maybe_event = call.next_event() => match maybe_event {
-        Some(event) => on_event(event, &mut roster, &mut video_starts, &shared),
+        Some(event) => on_event(event, &mut roster, &mut video_starts, &mut telemetry, &shared),
         // The call ended on its own (the SFU closed it or the network failed).
         None => break,
       },
@@ -1411,6 +1450,11 @@ async fn run_media(
   } else {
     call.leave().await
   };
+  if let Err(error) = &left {
+    report_telemetry_failure(&mut telemetry, error);
+  }
+  telemetry.finish(telemetry_now_ms());
+  add_call_reports(&mut telemetry, &shared);
   match left {
     Ok(stats) => tracing::info!(
       frames_sent = stats.frames_sent,
@@ -1440,8 +1484,17 @@ fn on_event(
   event: CallEngineEvent,
   roster: &mut CallRoster,
   video_starts: &mut VideoStarts,
+  telemetry: &mut CallTelemetry,
   shared: &MediaShared,
 ) {
+  // Frames are the media path's; the telemetry wants the call's events only.
+  if !matches!(
+    event,
+    CallEngineEvent::AudioFrame { .. } | CallEngineEvent::VideoFrame(_)
+  ) {
+    telemetry.on_event(&event, telemetry_now_ms());
+    add_call_reports(telemetry, shared);
+  }
   match &event {
     CallEngineEvent::VideoFrame(frame) => {
       let maybe_sink = lock(&shared.video_sinks)
@@ -1471,6 +1524,59 @@ fn on_event(
   if roster.apply(&mut lock(&shared.state).view, event) {
     (shared.notify)();
   }
+}
+
+/// The telemetry's new problem reports go to the page with the next snapshot.
+fn add_call_reports(telemetry: &mut CallTelemetry, shared: &MediaShared) {
+  if lock(&shared.state)
+    .view
+    .add_call_reports(telemetry.take_reports())
+  {
+    (shared.notify)();
+  }
+}
+
+/// A join that failed or a call that ended with an error, for the telemetry: engine errors by
+/// their kind, the others by their variant (never their text). A microphone that can't be opened
+/// is the device's, not worth a report.
+fn report_telemetry_failure(telemetry: &mut CallTelemetry, error: &NativeCallError) {
+  let code = match error {
+    NativeCallError::Engine(engine) => {
+      telemetry.engine_failed(engine, telemetry_now_ms());
+      return;
+    },
+    NativeCallError::Device(_) => return,
+    NativeCallError::Connect(_) => "connect",
+    NativeCallError::Signaling(_) => "signaling",
+    NativeCallError::Audio(_) => "audio_pipeline",
+    NativeCallError::Capture(_) => "capture",
+    NativeCallError::VideoStart(_) => "video_start",
+    NativeCallError::SystemAudio(_) => "system_audio",
+    NativeCallError::Ticket(_) => "join_ticket",
+    NativeCallError::ConnectionLost => "connection_lost",
+    NativeCallError::TaskEnded => "task_ended",
+  };
+  telemetry.call_failed(code, telemetry_now_ms());
+}
+
+/// The telemetry's clock: milliseconds since its first use, never backwards.
+fn telemetry_now_ms() -> u64 {
+  static ORIGIN: OnceLock<Instant> = OnceLock::new();
+  u64::try_from(ORIGIN.get_or_init(Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn unix_ms() -> i64 {
+  SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .map_or(0, |since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX))
+}
+
+/// A random name for the call's reports: the standard library's randomly seeded hasher (the OS's
+/// random source) over the time. No secret, it only groups one call's reports.
+fn random_call_ref() -> CallRef {
+  use std::hash::BuildHasher;
+  let seed = std::collections::hash_map::RandomState::new().hash_one(unix_ms());
+  CallRef::from_random_bytes(seed.to_le_bytes())
 }
 
 /// Which start of each own track kind is the current one, so that the first-picture check of a
@@ -2306,7 +2412,13 @@ mod tests {
         video_sinks: Arc::default(),
         levels: LevelWatch::default(),
       };
-      let task = tokio::spawn(run_media(call, control_rx, shared));
+      let telemetry = CallTelemetry::new(
+        random_call_ref(),
+        telemetry_now_ms(),
+        unix_ms(),
+        TelemetryThresholds::default(),
+      );
+      let task = tokio::spawn(run_media(call, telemetry, control_rx, shared));
       Media {
         controls,
         task,

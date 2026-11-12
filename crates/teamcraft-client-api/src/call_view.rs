@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{CallEndCause, CallRosterEntry, ConversationId, GatewayEvent, MediaStreamId, UserId};
 
+use crate::crash_reporting::CallReport;
 use crate::model::TimestampMs;
 
 use crate::calls::{
@@ -30,7 +31,13 @@ pub struct CallView {
   /// The active call is a 1:1 call that ends for both when one side leaves (issue #997, the
   /// server's word in the join token).
   pub ends_when_one_side_leaves: bool,
+  /// The media layer's last problem reports, at most [`MAX_KEPT_CALL_REPORTS`], for the page to
+  /// send (docs/crash-reports.md, "Call problems").
+  pub call_reports: Vec<CallReport>,
 }
+
+/// Problem reports a [`CallView`] keeps for the page; the oldest go first.
+pub const MAX_KEPT_CALL_REPORTS: usize = 16;
 
 /// What a gateway call event says about the user's calls: the part [`CallView`] needs. The web
 /// client hands these to its call module (`page_calls`).
@@ -117,6 +124,18 @@ impl CallSignal {
 }
 
 impl CallView {
+  /// Keeps the media layer's new problem reports for the page; `true` if there were any.
+  pub fn add_call_reports(&mut self, reports: Vec<CallReport>) -> bool {
+    let has_any = !reports.is_empty();
+    for report in reports {
+      if self.call_reports.len() >= MAX_KEPT_CALL_REPORTS {
+        self.call_reports.remove(0);
+      }
+      self.call_reports.push(report);
+    }
+    has_any
+  }
+
   /// This device joined the conversation's call at `joined_at` (wall clock, see
   /// [`CallView::start_for`]): it shows as active, no longer ringing, and the end reason of the
   /// previous call is gone.
