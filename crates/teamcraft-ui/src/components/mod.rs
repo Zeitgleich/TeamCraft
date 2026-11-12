@@ -156,6 +156,7 @@ pub mod setup_checklist;
 pub mod share_download;
 pub mod share_link_dialog;
 pub mod share_preview;
+pub mod share_stage;
 pub mod sheet;
 pub mod sidebar;
 pub mod sidebar_resizer;

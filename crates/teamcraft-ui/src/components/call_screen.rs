@@ -19,6 +19,7 @@ use crate::components::call_video::{
 use crate::components::count_badge::CountBadge;
 use crate::components::icons::{Icon, IconName};
 use crate::components::share_preview::OwnSharePreview;
+use crate::components::share_stage::use_strip_placement;
 use crate::components::video_quality::VideoQualityMenu;
 use crate::components::video_stats::{VideoStatsHub, VideoStatsOverlay};
 use crate::i18n::use_i18n;
@@ -439,6 +440,9 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
       .unwrap_or(0)
   });
 
+  // #1801: the shared screen gets the room first; the people's strip goes where it costs least.
+  let stage_wrap = NodeRef::<leptos::html::Div>::new();
+  let strip_placement = use_strip_placement(stage_wrap);
   let stage = move || {
     // A new host (#1720) relabels the tiles: rare enough to build the stage again for.
     meeting_hosts.track();
@@ -469,7 +473,11 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         .map(|tile| remote_tile(tile, false).into_any())
         .collect();
       return view! {
-        <div class="stage stage-share">
+        <div
+          class="stage stage-share"
+          class:strip-bottom=move || strip_placement.get().is_some_and(|placement| placement.is_bottom())
+          style:--strip-size=move || strip_placement.get().map(|placement| placement.css_size())
+        >
           <div class="share-main">
             <div class="share-banner" role="status">
               <Icon name=IconName::Monitor />
@@ -647,7 +655,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
       <crate::components::call_encryption::EncryptionFailureBanner request=request />
       <NotetakerBanner conversation=request.conversation notetaker=notetaker is_asked=notetaker_invite.is_asked />
       <div class="call-body">
-        <div class="call-stage-wrap">{stage}</div>
+        <div class="call-stage-wrap" node_ref=stage_wrap>{stage}</div>
         <Show when=move || chat.is_open.get() fallback=|| ()>
           <CallChatPanel chat=chat />
         </Show>
