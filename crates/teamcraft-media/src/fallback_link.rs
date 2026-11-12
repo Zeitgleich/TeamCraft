@@ -257,34 +257,34 @@ mod tests {
 
     #[test]
     fn tls_is_always_allowed() {
-      assert!(is_allowed_url("wss://sfu.example.com/call/fallback"));
-      assert!(is_allowed_url("wss://[2001:db8::1]:8443/call/fallback"));
+      assert!(is_allowed_url("wss://sfu.example.com/call/ws"));
+      assert!(is_allowed_url("wss://[2001:db8::1]:8443/call/ws"));
     }
 
     #[test]
     fn plain_only_reaches_the_machine_itself() {
-      assert!(is_allowed_url("ws://localhost:8082/call/fallback"));
-      assert!(is_allowed_url("ws://127.0.0.1:8082/call/fallback"));
-      assert!(is_allowed_url("ws://[::1]:8082/call/fallback"));
-      assert!(is_allowed_url("ws://[::ffff:127.0.0.1]:8082/call/fallback"));
+      assert!(is_allowed_url("ws://localhost:8082/call/ws"));
+      assert!(is_allowed_url("ws://127.0.0.1:8082/call/ws"));
+      assert!(is_allowed_url("ws://[::1]:8082/call/ws"));
+      assert!(is_allowed_url("ws://[::ffff:127.0.0.1]:8082/call/ws"));
     }
 
     #[test]
     fn plain_to_anywhere_else_is_refused() {
       for url in [
-        "ws://sfu.example.com/call/fallback",
-        "ws://192.0.2.1:8082/call/fallback",
-        "ws://[2001:db8::1]:8082/call/fallback",
-        "ws://localhost.example.com/call/fallback",
-        "ws://127.0.0.1.example.com/call/fallback",
-        "ws://localhost:x@evil.example.com/call/fallback",
-        "ws://localhost@evil.example.com/call/fallback",
-        "ws://[::1]@evil.example.com/call/fallback",
-        "ws://127.0.0.1:8082@evil.example.com/call/fallback",
-        "ws://user:secret@localhost/call/fallback",
-        "wss://localhost:x@evil.example.com/call/fallback",
-        "http://localhost/call/fallback",
-        "https://sfu.example.com/call/fallback",
+        "ws://sfu.example.com/call/ws",
+        "ws://192.0.2.1:8082/call/ws",
+        "ws://[2001:db8::1]:8082/call/ws",
+        "ws://localhost.example.com/call/ws",
+        "ws://127.0.0.1.example.com/call/ws",
+        "ws://localhost:x@evil.example.com/call/ws",
+        "ws://localhost@evil.example.com/call/ws",
+        "ws://[::1]@evil.example.com/call/ws",
+        "ws://127.0.0.1:8082@evil.example.com/call/ws",
+        "ws://user:secret@localhost/call/ws",
+        "wss://localhost:x@evil.example.com/call/ws",
+        "http://localhost/call/ws",
+        "https://sfu.example.com/call/ws",
         "",
       ] {
         assert!(!is_allowed_url(url), "{url}");

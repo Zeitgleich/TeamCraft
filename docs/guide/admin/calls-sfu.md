@@ -51,7 +51,7 @@ Network: open `3478/udp` from clients (IPv4 and IPv6). The SFU holds no state; s
 and pointing `sfu_url` at one (single SFU per instance today).
 
 For clients on networks that block UDP, have your reverse proxy pass
-`wss://<SFU host>/call/fallback` to the SFU's port `8082` (only on `127.0.0.1` unless you set
+`wss://<SFU host>/call/ws` to the SFU's port `8082` (only on `127.0.0.1` unless you set
 `TEAMCRAFT_SFU_FALLBACK_BIND`; the container image listens on `[::]`, so don't publish the port) and
 list the proxy in `TEAMCRAFT_SFU_FALLBACK_TRUSTED_PROXIES`, unless it runs on the same machine. Calls
 there run at lower quality and say so.

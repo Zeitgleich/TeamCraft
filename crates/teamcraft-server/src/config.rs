@@ -1568,7 +1568,7 @@ pub struct CallsConfig {
   #[serde(default = "default_sfu_fallback_enabled")]
   pub sfu_fallback_enabled: bool,
   /// WebSocket URL of that fallback. Without one: `sfu_url`'s host on port 443, path
-  /// `/call/fallback`. A self-signed SFU certificate (`sfu_certificate_sha256`) offers no default:
+  /// `/call/ws`. A self-signed SFU certificate (`sfu_certificate_sha256`) offers no default:
   /// a WebSocket can't accept it by its hash.
   #[serde(rename = "sfu_fallback_url", default)]
   pub maybe_sfu_fallback_url: Option<String>,
@@ -2166,9 +2166,9 @@ mod call_fallback_url {
   #[test]
   fn the_default_is_the_sfus_host_on_443() {
     let url = calls("https://sfu.example.com:3478/call").sfu_fallback_url();
-    assert_eq!(url.as_deref(), Some("wss://sfu.example.com/call/fallback"));
+    assert_eq!(url.as_deref(), Some("wss://sfu.example.com/call/ws"));
     let url = calls("https://[2001:db8::1]:3478/call").sfu_fallback_url();
-    assert_eq!(url.as_deref(), Some("wss://[2001:db8::1]/call/fallback"));
+    assert_eq!(url.as_deref(), Some("wss://[2001:db8::1]/call/ws"));
   }
 
   #[test]
@@ -2194,7 +2194,7 @@ mod call_fallback_url {
     let mut config = calls("https://sfu.example.com:3478/call");
     config.maybe_sfu_certificate_sha256 = Some("ab".repeat(32));
     assert_eq!(config.sfu_fallback_url(), None);
-    config.maybe_sfu_fallback_url = Some("ws://127.0.0.1:8082/call/fallback".into());
+    config.maybe_sfu_fallback_url = Some("ws://127.0.0.1:8082/call/ws".into());
     assert!(config.sfu_fallback_url().is_some());
   }
 

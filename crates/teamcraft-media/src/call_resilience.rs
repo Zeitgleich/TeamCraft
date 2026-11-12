@@ -1162,7 +1162,7 @@ mod tests {
         call_id: CallId::from_snowflake(Snowflake::ZERO),
         token: "token".into(),
         sfu_url: "https://sfu.example.com:4433/call".into(),
-        maybe_sfu_fallback_url: Some("wss://sfu.example.com/call/fallback".into()),
+        maybe_sfu_fallback_url: Some("wss://sfu.example.com/call/ws".into()),
         expires_at: UnixMillis(0),
         sfu_certificate_sha256: vec!["ab".repeat(32), "not hex".into(), vec!["CD"; 32].join(":")],
         ends_when_one_side_leaves: false,
