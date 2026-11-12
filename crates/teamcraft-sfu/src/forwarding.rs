@@ -287,6 +287,13 @@ impl Forwarder {
     if let Some(speakers) = self.speakers.remove(device_id, now) {
       effects.push(Effect::ActiveSpeakers(speakers));
     }
+    // Its tracks start afresh when it is back: their silence meanwhile is the lost connection, not
+    // a stopped encoder to stand in for (#1719).
+    for route in self.video_tracks.values_mut() {
+      if route.track.device_id == device_id {
+        route.arrivals = LayerArrivals::default();
+      }
+    }
     let subscribed: Vec<StreamId> = self
       .video_tracks
       .iter_mut()
@@ -298,7 +305,7 @@ impl Forwarder {
       })
       .collect();
     for stream_id in subscribed {
-      effects.extend(self.update_layers_needed(stream_id));
+      effects.extend(self.update_layers_needed(stream_id, now));
     }
     effects
   }
@@ -383,7 +390,7 @@ impl Forwarder {
       .filter_map(|(&stream_id, route)| route.subscribers.remove(&device_id).map(|_| stream_id))
       .collect();
     for stream_id in subscribed {
-      effects.extend(self.update_layers_needed(stream_id));
+      effects.extend(self.update_layers_needed(stream_id, now));
     }
     Removal {
       effects,
@@ -558,7 +565,7 @@ impl Forwarder {
     for receiver in receivers {
       effects.extend(self.reallocate(receiver, now));
     }
-    effects.extend(self.update_layers_needed(stream_id));
+    effects.extend(self.update_layers_needed(stream_id, now));
     Ok(effects)
   }
 
@@ -610,7 +617,7 @@ impl Forwarder {
       let interval = self.config.keyframes.per_layer_interval;
       effects.extend(self.keyframe_request(publisher, stream_id, layer, interval, now));
     }
-    effects.extend(self.update_layers_needed(stream_id));
+    effects.extend(self.update_layers_needed(stream_id, now));
     Ok(effects)
   }
 
@@ -738,7 +745,7 @@ impl Forwarder {
       .map(|(&stream_id, _)| stream_id)
       .collect();
     for stream_id in streams {
-      effects.extend(self.update_layers_needed(stream_id));
+      effects.extend(self.update_layers_needed(stream_id, now));
     }
     effects
   }
@@ -845,6 +852,7 @@ impl Forwarder {
       *most = (*most).max(fragment.count);
     }
     let arrivals = route.arrivals;
+    let is_camera = route.track.kind == VideoTrackKind::Camera;
     let mut receivers = Vec::new();
     for (&receiver, subscription) in &mut route.subscribers {
       let can_reassemble = self
@@ -855,9 +863,16 @@ impl Forwarder {
         // Its next allocation leaves this layer out.
         continue;
       }
-      let maybe_live = subscription
-        .target
-        .map(|target| live_layer(&arrivals, target, stalled_after));
+      let maybe_live = subscription.target.map(|target| {
+        stand_in_layer(
+          &arrivals,
+          is_camera,
+          subscription.max_layer,
+          target,
+          stalled_after,
+          now,
+        )
+      });
       if starts_keyframe && maybe_live == Some(layer) && subscription.current != Some(layer) {
         subscription.current = Some(layer);
       }
@@ -960,10 +975,21 @@ impl Forwarder {
       let publisher = route.track.device_id;
       // While the target doesn't flow, the best lower layer that does stands in (it needs a
       // keyframe as well); the target is still asked for, so it starts with one when it's back.
-      let live = live_layer(&route.arrivals, layer, stalled_after);
+      let is_camera = route.track.kind == VideoTrackKind::Camera;
+      let live = stand_in_layer(
+        &route.arrivals,
+        is_camera,
+        subscription.max_layer,
+        layer,
+        stalled_after,
+        now,
+      );
+      // Nothing of the camera flows: the layer the receiver gets is asked for again (a keyframe
+      // restarts an encoder that stopped, #1719), as often as a switch that waits.
+      let is_starved = is_starved(&route.arrivals, is_camera, stalled_after, now);
       let interval = self.config.keyframes.switch_retry_interval;
       for wanted in [live, layer] {
-        if current != Some(wanted) {
+        if current != Some(wanted) || (is_starved && wanted == live) {
           effects.extend(self.keyframe_request(publisher, stream_id, wanted, interval, now));
         }
       }
@@ -1024,21 +1050,37 @@ impl Forwarder {
       .retain(|(stream_id, _), _| tracks.contains_key(stream_id));
   }
 
-  fn update_layers_needed(&mut self, stream_id: StreamId) -> Option<Effect> {
+  fn update_layers_needed(&mut self, stream_id: StreamId, now: Instant) -> Option<Effect> {
     let stalled_after = self.config.layer_stalled_after;
     let route = self.video_tracks.get_mut(&stream_id)?;
     let arrivals = route.arrivals;
-    // A layer standing in for a stopped target is needed as well, or it might stop too.
+    let is_camera = route.track.kind == VideoTrackKind::Camera;
+    let is_starved = is_starved(&arrivals, is_camera, stalled_after, now);
+    let published = &route.track.layers;
+    // A layer standing in for a stopped target is needed as well, or it might stop too. While
+    // nothing of a camera flows, every layer a receiver may take is needed ([`is_starved`]).
     let mut needed: Vec<u8> = route
       .subscribers
       .values()
       .flat_map(|subscription| {
-        let maybe_live = subscription
-          .target
-          .map(|target| live_layer(&arrivals, target, stalled_after));
+        let maybe_live = subscription.target.map(|target| {
+          stand_in_layer(
+            &arrivals,
+            is_camera,
+            subscription.max_layer,
+            target,
+            stalled_after,
+            now,
+          )
+        });
+        let starved = published.iter().map(|info| info.layer).filter(move |layer| {
+          is_starved && subscription.target.is_some() && *layer <= subscription.max_layer
+        });
         [subscription.target, maybe_live, subscription.current]
+          .into_iter()
+          .flatten()
+          .chain(starved)
       })
-      .flatten()
       .collect();
     needed.sort_unstable();
     needed.dedup();
@@ -1094,17 +1136,68 @@ fn live_layer(arrivals: &LayerArrivals, target: u8, stalled_after: Duration) -> 
 /// now, or never sends). A pause of the whole track (a still screen, a camera that hiccups) is
 /// none: the lower layer's run starts anew with the first packet after it.
 fn has_stopped(arrivals: &LayerArrivals, layer: u8, stalled_after: Duration) -> bool {
-  let index = usize::from(layer);
-  let maybe_last = arrivals.get(index).copied().flatten().map(|run| run.last);
-  arrivals
-    .get(..index)
-    .unwrap_or_default()
-    .iter()
-    .flatten()
-    .any(|lower| {
-      let without = maybe_last.map_or(lower.since, |last| last.max(lower.since));
-      lower.last.saturating_duration_since(without) > stalled_after
+  (0..layer).any(|lower| has_outlasted(arrivals, lower, layer, stalled_after))
+}
+
+/// The layer a receiver that wants `target` (and takes up to `max_layer`) should get: the best
+/// lower layer that flows ([`live_layer`]), or for a camera whose layer stopped while nothing lower
+/// flows, the lowest higher one up to `max_layer` that kept arriving without it. In a call of two
+/// the publisher encodes only what its viewer takes: when that layer's encoder stopped, nothing
+/// lower was there to stand in, and the viewer's picture stood still for good (#1719). A screen's
+/// layers stand still with the screen and come back with it.
+fn stand_in_layer(
+  arrivals: &LayerArrivals,
+  is_camera: bool,
+  max_layer: u8,
+  target: u8,
+  stalled_after: Duration,
+  now: Instant,
+) -> u8 {
+  let live = live_layer(arrivals, target, stalled_after);
+  if !is_camera {
+    return live;
+  }
+  (live.saturating_add(1)..=max_layer)
+    .find(|other| {
+      is_flowing(arrivals, *other, stalled_after, now) && has_outlasted(arrivals, *other, live, stalled_after)
     })
+    .unwrap_or(live)
+}
+
+/// Whether nothing of a camera that sent before arrived within `stalled_after`: the layer its
+/// receivers get may have stopped with no other to stand in. That layer is asked for again, every
+/// layer a receiver may take is needed until one flows (another encoder may still work), and
+/// receivers move to one that does ([`stand_in_layer`]) until theirs is back (#1719). A camera
+/// that paused as a whole costs no more than a keyframe when it goes on.
+fn is_starved(arrivals: &LayerArrivals, is_camera: bool, stalled_after: Duration, now: Instant) -> bool {
+  let mut runs = arrivals.iter().flatten().peekable();
+  is_camera
+    && runs.peek().is_some()
+    && runs.all(|run| now.saturating_duration_since(run.last) > stalled_after)
+}
+
+/// Whether packets of `layer` arrived within `stalled_after` before `now`.
+fn is_flowing(arrivals: &LayerArrivals, layer: u8, stalled_after: Duration, now: Instant) -> bool {
+  arrivals
+    .get(usize::from(layer))
+    .copied()
+    .flatten()
+    .is_some_and(|run| now.saturating_duration_since(run.last) <= stalled_after)
+}
+
+/// Whether `other` kept coming for more than `stalled_after` without `layer` (since its own run
+/// started, for a `layer` that never came).
+fn has_outlasted(arrivals: &LayerArrivals, other: u8, layer: u8, stalled_after: Duration) -> bool {
+  let Some(other_run) = arrivals.get(usize::from(other)).copied().flatten() else {
+    return false;
+  };
+  let maybe_last = arrivals
+    .get(usize::from(layer))
+    .copied()
+    .flatten()
+    .map(|run| run.last);
+  let without = maybe_last.map_or(other_run.since, |last| last.max(other_run.since));
+  other_run.last.saturating_duration_since(without) > stalled_after
 }
 
 #[cfg(test)]
@@ -1467,6 +1560,49 @@ mod tests {
       );
     }
 
+    /// #1719: in a call of two the publisher encodes only the layer its viewer gets. When that
+    /// layer's encoder stops, nothing lower flows to stand in: the viewer's picture stood still
+    /// for good. Now the layer is asked for again, every layer the viewer may take is needed, and
+    /// the viewer moves to one that flows until its own is back.
+    #[test]
+    fn a_camera_layer_that_stops_with_nothing_else_flowing_is_replaced() {
+      let (mut forwarder, now) = wide_video_room();
+      forwarder.subscribe(device(2), VIDEO, Some(1), now).unwrap();
+      let mut at = now;
+      assert_eq!(send_frame(&mut forwarder, 1, true, at), devices(&[2]));
+      forwarder.on_timer(device(2), at);
+      for _ in 0..10 {
+        at += Duration::from_millis(100);
+        assert_eq!(send_frame(&mut forwarder, 1, false, at), devices(&[2]));
+        forwarder.on_timer(device(2), at);
+      }
+      // Layer 1's encoder stops; nothing of the camera arrives.
+      at += Duration::from_millis(1000);
+      let effects = forwarder.on_timer(device(2), at);
+      assert!(
+        !effects.contains(&layers_needed(&[0, 1])),
+        "too soon: {effects:?}"
+      );
+      at += Duration::from_millis(600);
+      let effects = forwarder.on_timer(device(2), at);
+      assert!(effects.contains(&keyframe_request(1)), "{effects:?}");
+      assert!(effects.contains(&layers_needed(&[0, 1])), "{effects:?}");
+      // Layer 0's encoder works: once it outlasted layer 1, the viewer moves to it.
+      send_frame(&mut forwarder, 0, true, at);
+      for _ in 0..16 {
+        at += Duration::from_millis(100);
+        send_frame(&mut forwarder, 0, false, at);
+        forwarder.on_timer(device(2), at);
+      }
+      assert_eq!(send_frame(&mut forwarder, 0, true, at), devices(&[2]));
+      assert_eq!(send_frame(&mut forwarder, 0, false, at), devices(&[2]));
+      // Layer 1 is back: the viewer returns to it on its keyframe.
+      at += Duration::from_millis(100);
+      assert!(send_frame(&mut forwarder, 1, false, at).is_empty());
+      assert_eq!(send_frame(&mut forwarder, 1, true, at), devices(&[2]));
+      assert!(send_frame(&mut forwarder, 0, false, at).is_empty());
+    }
+
     #[test]
     fn the_publishers_uplink_layers_cap_the_allocation() {
       let (mut forwarder, now) = wide_video_room();
@@ -1492,6 +1628,8 @@ mod tests {
         .unwrap();
       assert!(!effects.contains(&keyframe_request(2)));
       let later = now + LayerAllocationConfig::default().upswitch_hold;
+      // Layer 1 kept coming meanwhile (a camera that sends nothing is starved, #1719).
+      send_frame(&mut forwarder, 1, false, later);
       let effects = forwarder.on_timer(device(2), later);
       assert!(effects.contains(&keyframe_request(2)), "{effects:?}");
       assert!(effects.contains(&layers_needed(&[1, 2])), "{effects:?}");
@@ -1618,6 +1756,78 @@ mod tests {
         stream_id: VIDEO,
         layers: layers.to_vec(),
       }
+    }
+  }
+
+  mod stand_ins {
+    use super::*;
+
+    const STALLED_AFTER: Duration = Duration::from_millis(1500);
+
+    #[test]
+    fn a_camera_layer_that_stopped_is_stood_in_for_by_a_higher_one_that_kept_coming() {
+      let start = Instant::now();
+      let now = start + Duration::from_secs(4);
+      // Layer 0 stopped after a second; layer 1 kept coming.
+      let arrivals = runs(start, &[Some((0, 1000)), Some((0, 4000))]);
+      assert_eq!(stand_in_layer(&arrivals, true, 1, 0, STALLED_AFTER, now), 1);
+      // Not above what the receiver takes, and a screen's layers come back with the screen.
+      assert_eq!(stand_in_layer(&arrivals, true, 0, 0, STALLED_AFTER, now), 0);
+      assert_eq!(stand_in_layer(&arrivals, false, 1, 0, STALLED_AFTER, now), 0);
+      // A higher layer that only just started is no reason yet (a camera that hiccups as a whole).
+      let arrivals = runs(start, &[Some((0, 1000)), Some((3000, 4000))]);
+      assert_eq!(stand_in_layer(&arrivals, true, 1, 0, STALLED_AFTER, now), 0);
+    }
+
+    #[test]
+    fn a_camera_is_starved_once_nothing_of_it_arrived_for_a_while() {
+      let start = Instant::now();
+      let arrivals = runs(start, &[Some((0, 1000)), None]);
+      assert!(!is_starved(
+        &arrivals,
+        true,
+        STALLED_AFTER,
+        start + Duration::from_millis(2500)
+      ));
+      assert!(is_starved(
+        &arrivals,
+        true,
+        STALLED_AFTER,
+        start + Duration::from_millis(2600)
+      ));
+      assert!(!is_starved(
+        &arrivals,
+        false,
+        STALLED_AFTER,
+        start + Duration::from_secs(5)
+      ));
+      // Nothing ever came: nothing to restart.
+      assert!(!is_starved(
+        &runs(start, &[]),
+        true,
+        STALLED_AFTER,
+        start + Duration::from_secs(5)
+      ));
+      // One layer still flows.
+      let arrivals = runs(start, &[Some((0, 1000)), Some((0, 4900))]);
+      assert!(!is_starved(
+        &arrivals,
+        true,
+        STALLED_AFTER,
+        start + Duration::from_secs(5)
+      ));
+    }
+
+    /// Arrivals with a run per layer, (since, last) in milliseconds after `start`.
+    fn runs(start: Instant, layers: &[Option<(u64, u64)>]) -> LayerArrivals {
+      let mut arrivals: LayerArrivals = [None; MAX_SIMULCAST_LAYERS as usize];
+      for (slot, maybe_run) in arrivals.iter_mut().zip(layers) {
+        *slot = maybe_run.map(|(since, last)| LayerRun {
+          since: start + Duration::from_millis(since),
+          last: start + Duration::from_millis(last),
+        });
+      }
+      arrivals
     }
   }
 

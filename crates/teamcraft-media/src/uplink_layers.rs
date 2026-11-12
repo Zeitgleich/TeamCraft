@@ -68,6 +68,11 @@ pub struct UplinkPolicy {
   /// estimate grows again within seconds after a cut, and every probe costs a keyframe and a
   /// moment of congestion: on a link that stays limited they came every few seconds (#939).
   pub probe_proof: Duration,
+  /// How long the estimate has to stay below what a camera's lowest layer needs before the
+  /// camera stops altogether; until then that layer goes on at its least bitrate (#1719). The
+  /// upper layers make room first, at once; stopping the picture needs the uplink to stay that
+  /// poor, not one cut of an estimate that grows back within seconds.
+  pub camera_pause_hold: Duration,
 }
 
 /// The longest wait before a camera steps up again after probes that failed.
@@ -110,6 +115,8 @@ pub struct UplinkLayers {
   /// higher one.
   share_change_pending_since: HashMap<StreamId, (Instant, bool)>,
   probes: HashMap<StreamId, Probes>,
+  /// Since when the estimate is below a camera's lowest layer while it still sends it.
+  pause_pending_since: HashMap<StreamId, Instant>,
 }
 
 impl Default for UplinkPolicy {
@@ -123,6 +130,7 @@ impl Default for UplinkPolicy {
       share_downswitch_hold: Duration::from_secs(1),
       share_upswitch_hold: Duration::from_secs(2),
       probe_proof: Duration::from_secs(4),
+      camera_pause_hold: Duration::from_secs(5),
     }
   }
 }
@@ -138,6 +146,7 @@ impl UplinkLayers {
       downgrade_pending_since: HashMap::new(),
       share_change_pending_since: HashMap::new(),
       probes: HashMap::new(),
+      pause_pending_since: HashMap::new(),
     }
   }
 
@@ -184,6 +193,7 @@ impl UplinkLayers {
     self.downgrade_pending_since.clear();
     self.share_change_pending_since.clear();
     self.probes.clear();
+    self.pause_pending_since.clear();
   }
 
   /// The bitrate `info`'s layer of `stream` is encoded at: its whole bitrate, or a share of it
@@ -215,6 +225,7 @@ impl UplinkLayers {
     self.downgrade_pending_since.remove(&stream);
     self.share_change_pending_since.remove(&stream);
     self.probes.remove(&stream);
+    self.pause_pending_since.remove(&stream);
   }
 
   fn share_of(&self, stream: StreamId) -> f64 {
@@ -328,6 +339,14 @@ impl UplinkLayers {
       } else {
         (maybe_top, share)
       };
+      let (maybe_top, share) = self.after_pause_hold(
+        track,
+        maybe_current,
+        (maybe_top, share),
+        track_shares,
+        policy,
+        now,
+      );
       let used = track
         .layers
         .iter()
@@ -354,6 +373,34 @@ impl UplinkLayers {
     self
       .probes
       .retain(|stream, _| tracks.iter().any(|track| track.stream == *stream));
+    self
+      .pause_pending_since
+      .retain(|stream, _| tracks.iter().any(|track| track.stream == *stream));
+  }
+
+  /// `chosen` for `track`, unless that stops a camera that still sends while the estimate has
+  /// been below its lowest layer for less than [`UplinkPolicy::camera_pause_hold`]: then its
+  /// lowest layer at the least of `shares`.
+  fn after_pause_hold(
+    &mut self,
+    track: &OwnTrack<'_>,
+    maybe_current: Option<u8>,
+    chosen: (Option<u8>, f64),
+    shares: &[f64],
+    policy: &UplinkPolicy,
+    now: Instant,
+  ) -> (Option<u8>, f64) {
+    let is_camera = *track.kind == VideoTrackKind::Camera;
+    let maybe_lowest = track.layers.first().map(|info| info.layer);
+    if !is_camera || chosen.0.is_some() || maybe_current.is_none() || maybe_lowest.is_none() {
+      self.pause_pending_since.remove(&track.stream);
+      return chosen;
+    }
+    let since = *self.pause_pending_since.entry(track.stream).or_insert(now);
+    if now.saturating_duration_since(since) >= policy.camera_pause_hold {
+      return chosen;
+    }
+    (maybe_lowest, shares.first().copied().unwrap_or(1.0))
   }
 
   /// `chosen` for an adaptive camera at `current`, unless it is a step up while an earlier one
@@ -524,8 +571,50 @@ mod tests {
     assert!(uplink.on_estimate(800_000, &tracks, false, &policy(), now()));
     assert!(uplink.allows(CAMERA, 1));
     assert!(!uplink.allows(CAMERA, 2));
-    // Too little for even the lowest layer: video pauses, audio goes on.
+    // Too little for even the lowest layer: the camera keeps it until the estimate stays below
+    // (#1719), then video pauses and audio goes on.
     uplink.on_estimate(150_000, &tracks, false, &policy(), now());
+    assert!(uplink.allows(CAMERA, 0));
+    assert!(!uplink.allows(CAMERA, 1));
+    uplink.on_estimate(150_000, &tracks, false, &policy(), after_the_pause_hold());
+    assert!(!uplink.allows(CAMERA, 0));
+  }
+
+  /// #1719: one cut of the estimate below a camera's lowest layer doesn't stop the picture; the
+  /// estimate grows back within seconds. Only an uplink that stays that poor stops it.
+  #[test]
+  fn a_camera_stops_only_once_the_estimate_stays_below_its_lowest_layer() {
+    let layers = camera_layers();
+    let tracks = [adapting_camera(&layers)];
+    let mut uplink = UplinkLayers::new(300_000);
+    let start = now();
+    uplink.on_estimate(2_000_000, &tracks, false, &policy(), start);
+    uplink.on_estimate(60_000, &tracks, false, &policy(), start);
+    assert!(uplink.allows(CAMERA, 0));
+    assert!(!uplink.allows(CAMERA, 1));
+    // At its least bitrate meanwhile.
+    assert_eq!(uplink.bitrate_bps(CAMERA, &layers[0]), 75_000);
+    // Back above within the hold: the camera never stopped.
+    let back = start + policy().camera_pause_hold / 2;
+    uplink.on_estimate(300_000, &tracks, false, &policy(), back);
+    assert!(uplink.allows(CAMERA, 0));
+    // A new dip starts the hold anew; staying below for all of it stops the camera.
+    uplink.on_estimate(60_000, &tracks, false, &policy(), back);
+    uplink.on_estimate(
+      60_000,
+      &tracks,
+      false,
+      &policy(),
+      back + policy().camera_pause_hold / 2,
+    );
+    assert!(uplink.allows(CAMERA, 0));
+    uplink.on_estimate(
+      60_000,
+      &tracks,
+      false,
+      &policy(),
+      back + policy().camera_pause_hold,
+    );
     assert!(!uplink.allows(CAMERA, 0));
   }
 
@@ -569,6 +658,7 @@ mod tests {
     let mut before = UplinkLayers::new(300_000);
     before.on_estimate(6_000_000, &tracks, false, &policy(), now());
     before.on_estimate(200_000, &tracks, false, &policy(), now());
+    before.on_estimate(200_000, &tracks, false, &policy(), after_the_pause_hold());
     assert!(!before.allows(CAMERA, 0));
   }
 
@@ -579,6 +669,7 @@ mod tests {
     let mut uplink = UplinkLayers::new(300_000);
     uplink.on_estimate(2_000_000, &tracks, false, &policy(), now());
     uplink.on_estimate(100_000, &tracks, false, &policy(), now());
+    uplink.on_estimate(100_000, &tracks, false, &policy(), after_the_pause_hold());
     assert!(!uplink.allows(CAMERA, 0));
     // Exactly enough for layer 0 is not enough to bring it back...
     uplink.on_estimate(198_000, &tracks, false, &policy(), now());
@@ -610,6 +701,7 @@ mod tests {
     uplink.on_estimate(5_000_000, &tracks, true, &policy(), now());
     // Audio (48k + 80k screen sound) and the screen (400k) fit, the camera doesn't.
     uplink.on_estimate(600_000, &tracks, true, &policy(), now());
+    uplink.on_estimate(600_000, &tracks, true, &policy(), after_the_pause_hold());
     assert!(uplink.allows(SCREEN, 0));
     assert!(!uplink.allows(CAMERA, 0));
   }
@@ -845,9 +937,15 @@ mod tests {
     UplinkPolicy::default()
   }
 
-  /// Any time: the hold matters only for screen shares, which the tests above don't hold.
+  /// Any time: the holds matter only for screen shares and for stopping a camera, which the tests
+  /// above don't hold unless they say so.
   fn now() -> Instant {
     Instant::now()
+  }
+
+  /// Once a camera's lowest layer didn't fit for [`UplinkPolicy::camera_pause_hold`].
+  fn after_the_pause_hold() -> Instant {
+    now() + policy().camera_pause_hold
   }
 
   fn camera(layers: &[VideoLayerInfo]) -> OwnTrack<'_> {
