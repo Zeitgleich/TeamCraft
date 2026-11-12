@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
+use crate::capture_health::CaptureHealth;
 use crate::video::{VideoError, VideoFrame, VideoResolution};
 
 /// Frames waiting for the encoder; more are dropped.
@@ -36,6 +37,12 @@ pub trait VideoCapture: Send {
   /// captures that end by themselves when their device goes, screens that deliver only on change
   /// and frames an app pushes when it can.
   fn stall_limit(&self) -> Option<Duration> {
+    None
+  }
+
+  /// What became of the buffers the capture's source handed over (#1805), where the capture
+  /// counts them; `None` (the default) where it doesn't.
+  fn health(&self) -> Option<CaptureHealth> {
     None
   }
 }

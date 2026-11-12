@@ -13,6 +13,7 @@ pub mod audio_io;
 pub mod audio_level;
 pub mod bwe;
 pub mod call_resilience;
+pub mod capture_health;
 pub mod datagram;
 #[cfg(feature = "native")]
 pub mod fallback_link;

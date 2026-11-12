@@ -25,6 +25,7 @@ use teamcraft_proto::{DeviceId, MediaStreamId, VideoCodec, VideoTrackKind};
 
 use crate::call_engine::{CallEngineError, CallEngineEvent, DaveResumeFailure, OwnVideoEnd};
 use crate::call_resilience::CallTransport;
+use crate::capture_health::STALL_WINDOW;
 
 /// How often the drivers sample the video stats for the telemetry while joined.
 pub const STATS_SAMPLE_INTERVAL: Duration = Duration::from_secs(3);
@@ -266,6 +267,23 @@ impl CallTelemetry {
       },
       CallEngineEvent::ScreenShareTakenOver(_) => self.note(now_ms, "screen share taken over".to_owned()),
       CallEngineEvent::ConnectionReplaced => self.note(now_ms, "joined on another connection".to_owned()),
+      CallEngineEvent::CaptureStalled { kind, window } => {
+        self.note(now_ms, format!("own {} capture stalled", kind.as_str()));
+        self.report(
+          now_ms,
+          CallProblem::CaptureStalled {
+            video: kind.clone(),
+            window: (*window).into(),
+            window_s: seconds(millis(STALL_WINDOW)),
+          },
+        );
+      },
+      CallEngineEvent::CaptureRecovered(kind) => {
+        self.note(
+          now_ms,
+          format!("own {} capture gives pictures again", kind.as_str()),
+        );
+      },
       CallEngineEvent::DecodableVideoCodecs(codecs) => {
         let names: Vec<&str> = codecs.iter().map(VideoCodec::as_str).collect();
         self.note(now_ms, format!("decodable codecs: {}", names.join(",")));
@@ -900,6 +918,41 @@ mod tests {
       );
     }
 
+    /// #1805: an own capture that gives the others a still picture is reported once, with what
+    /// became of its buffers over the window.
+    #[test]
+    fn a_stalled_capture_is_reported_with_its_buffer_counts() {
+      let mut telemetry = joined(2);
+      let window = crate::capture_health::BufferCounts {
+        cursor_only: 50,
+        unmapped: 150,
+        ..Default::default()
+      };
+      let stalled = CallEngineEvent::CaptureStalled {
+        kind: VideoTrackKind::Screen,
+        window,
+      };
+      telemetry.on_event(&stalled, 3_000);
+      telemetry.on_event(&CallEngineEvent::CaptureRecovered(VideoTrackKind::Screen), 9_000);
+      telemetry.on_event(&stalled, 12_000);
+      let reports = telemetry.take_reports();
+      assert_eq!(reports.len(), 1, "once a call");
+      let CallProblem::CaptureStalled {
+        video,
+        window: counts,
+        window_s,
+      } = &reports[0].problem
+      else {
+        panic!("{:?}", reports[0].problem);
+      };
+      assert_eq!(*video, VideoTrackKind::Screen);
+      assert_eq!(
+        (counts.unmapped, counts.cursor_only, counts.pictures),
+        (150, 50, 0)
+      );
+      assert_eq!(*window_s, 5);
+    }
+
     #[test]
     fn pending_reports_are_bounded() {
       let mut telemetry = joined(2);
@@ -1188,6 +1241,7 @@ mod tests {
           maybe_held_back_ms: None,
           maybe_camera_limits: None,
           maybe_share_limits: None,
+          maybe_capture_buffers: None,
         }),
         VideoTrackStats::Received(ReceivedVideoStats {
           stream_id: MediaStreamId(20),

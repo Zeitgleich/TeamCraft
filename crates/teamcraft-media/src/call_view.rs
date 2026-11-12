@@ -108,6 +108,16 @@ impl CallRoster {
         active.is_video_limited_by_device = is_limited;
         return has_changed;
       },
+      CallEngineEvent::CaptureStalled { .. } => {
+        let has_changed = !active.is_own_capture_stalled;
+        active.is_own_capture_stalled = true;
+        return has_changed;
+      },
+      CallEngineEvent::CaptureRecovered(_) => {
+        let has_changed = active.is_own_capture_stalled;
+        active.is_own_capture_stalled = false;
+        return has_changed;
+      },
       CallEngineEvent::ParticipantReconnecting(device_id) => {
         roster.reconnecting.insert(device_id);
         active.reconnecting = roster.reconnecting_users();
@@ -397,6 +407,24 @@ mod transport_tests {
     assert!(!roster.apply(&mut view, CallEngineEvent::DecodeLimited(true)));
     assert!(roster.apply(&mut view, CallEngineEvent::DecodeLimited(false)));
     assert!(!is_busy(&view));
+    // #1805: an own capture that gives the others a still picture shows until it gives pictures
+    // again (or its track goes, which the driver reports the same way).
+    let is_stalled = |view: &CallView| view.maybe_active.as_ref().unwrap().is_own_capture_stalled;
+    let stalled = CallEngineEvent::CaptureStalled {
+      kind: VideoTrackKind::Screen,
+      window: crate::capture_health::BufferCounts {
+        unmapped: 150,
+        ..Default::default()
+      },
+    };
+    assert!(roster.apply(&mut view, stalled.clone()));
+    assert!(is_stalled(&view));
+    assert!(!roster.apply(&mut view, stalled));
+    assert!(roster.apply(
+      &mut view,
+      CallEngineEvent::CaptureRecovered(VideoTrackKind::Screen)
+    ));
+    assert!(!is_stalled(&view));
   }
 
   /// A refusal shows until the call is secured (#1555).

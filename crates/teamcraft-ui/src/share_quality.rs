@@ -1010,6 +1010,7 @@ mod tests {
       maybe_held_back_ms: Some(if captured > 0 { 1_500 } else { 0 }),
       maybe_camera_limits: None,
       maybe_share_limits: None,
+      maybe_capture_buffers: None,
     })
   }
 

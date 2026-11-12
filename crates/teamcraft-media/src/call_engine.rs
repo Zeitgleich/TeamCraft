@@ -41,6 +41,7 @@ use crate::bwe::{BweConfig, FeedbackRecorder, SendSideEstimator};
 use crate::call_auth::{BindingRole, CallKeyAuthenticator, CallKeyError};
 use crate::call_resilience::CallTransport;
 use crate::call_video::{IncomingVideo, OutgoingVideo, ReceivedVideoFrame, ReleasedFrame};
+use crate::capture_health::BufferCounts;
 use crate::datagram::{DatagramHeader, MediaDatagram, SimulcastLayer, StreamId, padding_datagram};
 use crate::dave::{
   DaveCallId, DaveEpoch, DaveError, DaveFrameStats, DaveParticipant, DaveParticipantId, FrameCodec, MediaKind,
@@ -251,6 +252,15 @@ pub enum CallEngineEvent {
   /// receives and asks for lower layers than its tiles want (#1762); `false` once it is back to
   /// what they want. The UI says the computer is busy.
   DecodeLimited(bool),
+  /// Not from the engine but from the media driver: an own track's capture gets buffers from its
+  /// source it can't turn into pictures (#1805), so the others see a still picture. What came over
+  /// the judged window. The UI tells the sharer, and the call's crash reports hear of it.
+  CaptureStalled {
+    kind: VideoTrackKind,
+    window: BufferCounts,
+  },
+  /// Not from the engine but from the media driver: that capture gives pictures again.
+  CaptureRecovered(VideoTrackKind),
   /// Another device's connection was lost; it keeps its place while it reconnects.
   ParticipantReconnecting(DeviceId),
   ParticipantReconnected(DeviceId),
@@ -1361,6 +1371,7 @@ impl CallEngine {
         maybe_held_back_ms: Some(u64::try_from(track.counters.held_back.as_millis()).unwrap_or(u64::MAX)),
         maybe_camera_limits: None,
         maybe_share_limits: None,
+        maybe_capture_buffers: None,
       })
     });
     let mut remote: Vec<(&StreamId, &IncomingVideo)> = self.remote_video.iter().collect();
