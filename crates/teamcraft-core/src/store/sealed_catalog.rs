@@ -6,7 +6,7 @@
 //! skip it as unknown), keyed `<generation>/d/<table>/…` (a table's keys),
 //! `<generation>/m/<conversation>/…` (a conversation's messages), `<generation>/f/<conversation>/…`
 //! (the rows of its feed, whose page lengths count positions) and `<generation>/x/<conversation>/…`
-//! (its reactions by target, replies by thread, and events), plus the record [`META_KEY`] saying
+//! (its reactions by target, replies by thread, events and pinned messages), plus the record [`META_KEY`] saying
 //! which generation is current, what it holds and whether it is complete. The catalog is derived
 //! from the records: a damaged or older one is built again under a new generation, and the build
 //! deletes the nodes of older ones. Nothing about the catalog is readable without the database key:
@@ -43,8 +43,9 @@ pub(crate) const FEED_VERSION_KIND: &str = "v";
 /// What a complete catalog holds. A store with an older one builds it again when it opens.
 /// 1: tables and messages; 2: feeds and relations; 3: which messages have files and documents
 /// ([`MessageFlags::FILES`], issue #1509); 4: which messages have web links
-/// ([`MessageFlags::LINKS`], issue #609).
-pub(crate) const CATALOG_VERSION: u32 = 4;
+/// ([`MessageFlags::LINKS`], issue #609); 5: which messages are pinned ([`Relation::Pinned`],
+/// issue #1757).
+pub(crate) const CATALOG_VERSION: u32 = 5;
 
 /// How far the catalog of a store is built, and its generation (random, so a catalog built again
 /// never meets nodes of an earlier one). A store written before the catalog existed builds it when
@@ -116,6 +117,8 @@ pub(crate) enum Relation {
   ReplyIn(ThreadId),
   /// An event or derived line ([`StoredMessage::is_event`]).
   Event,
+  /// A pinned message the pinned panel lists ([`StoredMessage::is_shown_pin`], catalog version 5).
+  Pinned,
 }
 
 /// A page of an index: its scope (the conversation or table) and its number.
@@ -168,6 +171,9 @@ impl Relation {
     if message.is_event() {
       relations.push(Self::Event);
     }
+    if message.is_shown_pin() {
+      relations.push(Self::Pinned);
+    }
     relations
   }
 
@@ -176,6 +182,7 @@ impl Relation {
       Self::ReactionTo(target) => (0, u128::from_be_bytes(*target.as_bytes())),
       Self::ReplyIn(thread) => (1, u128::from(raw_thread(thread).cast_unsigned())),
       Self::Event => (2, 0),
+      Self::Pinned => (3, 0),
     }
   }
 

@@ -43,15 +43,24 @@ impl<S: LocalStore> CoreChatBackend<S> {
     message: MessageId,
   ) -> Option<StoredMessage> {
     // A message the server numbered is one keyed read, whatever the conversation's size (it is
-    // the common case: replies, pins, saves and edits of messages on screen). The rest (a message
-    // still in the outbox, a line this device placed itself) is looked for among all.
-    if !is_pending(message)
-      && let Ok(Some(stored)) = self.store_ref().message_by_server_id(conversation, message)
-    {
-      return Some(stored);
-    }
+    // the common case: replies, pins, saves and edits of messages on screen). The rest is looked
+    // for at its place (issue #1757): a message still in the outbox among the pending ones, a line
+    // this device placed itself at the ID it shows under.
+    let slot = if is_pending(message) {
+      MessageSlot::Pending
+    } else {
+      if let Ok(Some(stored)) = self.store_ref().message_by_server_id(conversation, message) {
+        return Some(stored);
+      }
+      MessageSlot::At(message)
+    };
     self
-      .all_messages(conversation)
+      .read(
+        self
+          .store_ref()
+          .messages_at(conversation, slot)
+          .map_err(CoreError::from),
+      )
       .into_iter()
       .find(|stored| ui_message_id(stored) == message)
   }
@@ -83,14 +92,13 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .saved_items()
       .into_iter()
       .filter_map(|(item, saved_at)| {
-        let all = self.all_messages(item.conversation_id);
-        let stored = all
-          .iter()
-          .find(|stored| stored.client_message_id == item.client_message_id)?;
+        // The saved message by its key and its relations through the indexes, not its whole
+        // conversation per item (issue #1757).
+        let message = self.message_by_client_id(item.conversation_id, item.client_message_id)?;
         let (conversation_name, is_notes_to_self) =
           names.get(&item.conversation_id).cloned().unwrap_or_default();
         Some(SavedItem {
-          message: self.to_message(stored, &all),
+          message,
           conversation_name,
           is_notes_to_self,
           saved_at,
@@ -732,19 +740,25 @@ impl<S: LocalStore> CoreChatBackend<S> {
     })
   }
 
+  /// Point lookups only, like [`Self::ui_linked_message`] (issue #1757): the conversation's record,
+  /// then the message by its server ID.
   pub(crate) fn ui_resolve_permalink(&self, link: &str) -> Option<PermalinkTarget> {
     let target = parse_permalink(link)?;
     // Only conversations this device is a member of, and messages it can read.
+    self.read(
+      self
+        .store_ref()
+        .get(Table::Conversations, &target.conversation.to_string())
+        .map_err(CoreError::from),
+    )?;
     self
-      .conversations_raw()
-      .iter()
-      .any(|conversation| conversation.id == target.conversation)
-      .then_some(())?;
-    self
-      .all_messages(target.conversation)
-      .iter()
-      .any(|stored| stored.maybe_server_id == Some(target.message))
-      .then_some(target)
+      .read(
+        self
+          .store_ref()
+          .message_by_server_id(target.conversation, target.message)
+          .map_err(CoreError::from),
+      )
+      .map(|_| target)
   }
 
   /// Point lookups only (the conversation's record, then the message by its server ID): previews
@@ -881,19 +895,24 @@ impl<S: LocalStore> CoreChatBackend<S> {
     conversation: ConversationId,
   ) -> Option<teamcraft_client_api::notetaker::MovedCall> {
     let mut newest: Option<(i64, UserId, ConversationId)> = None;
-    self.with_all_messages(conversation, &mut |all| {
-      for stored in all {
-        let MessageContent::Event {
-          event: ConversationEvent::CallMoved { meeting, .. },
-        } = &stored.content
-        else {
-          continue;
-        };
-        if newest.is_none_or(|(at, ..)| stored.sent_at_ms >= at) {
-          newest = Some((stored.sent_at_ms, stored.sender_user_id, *meeting));
-        }
+    // Events only, through the store's index of them (issue #1757), not the whole conversation.
+    let events = self.read(
+      self
+        .store_ref()
+        .event_messages(conversation)
+        .map_err(CoreError::from),
+    );
+    for stored in &events {
+      let MessageContent::Event {
+        event: ConversationEvent::CallMoved { meeting, .. },
+      } = &stored.content
+      else {
+        continue;
+      };
+      if newest.is_none_or(|(at, ..)| stored.sent_at_ms >= at) {
+        newest = Some((stored.sent_at_ms, stored.sender_user_id, *meeting));
       }
-    });
+    }
     let (moved_at, by, room) = newest?;
     let WorkspaceEvent::CallMoved { room_name, .. } = self.with_room_name(WorkspaceEvent::CallMoved {
       by,

@@ -1145,20 +1145,17 @@ mod tests {
     }
   }
 
-  /// TEAMCRAFT-F: the pinned bar read and decrypted the whole conversation on every change.
+  /// TEAMCRAFT-F, issue #1757: the pinned bar and panel read the store's index of pins, which
+  /// follows every write, instead of the whole conversation.
   mod pinned {
     use super::*;
-    use crate::ui_backend::PIN_SCANS;
 
     #[test]
-    fn pins_are_scanned_once_and_then_followed() {
+    fn pins_follow_every_write() {
       let (store, _dir) = tracked_sealed_store();
       let mut fixture = Fixture::new(store);
       fixture.write(&pinned(2, true));
-      let scans = || PIN_SCANS.with(std::cell::Cell::get);
-      let before = scans();
       assert_eq!(fixture.pinned_ids(), vec![server_id(2)]);
-      assert_eq!(scans() - before, 1);
 
       fixture.write(&pinned(4, true));
       assert_eq!(fixture.pinned_ids(), vec![server_id(2), server_id(4)]);
@@ -1166,10 +1163,11 @@ mod tests {
       assert_eq!(fixture.pinned_ids(), vec![server_id(4)]);
       fixture.write(&text(30, PEER, "new"));
       assert_eq!(fixture.pinned_ids(), vec![server_id(4)]);
-      assert_eq!(scans() - before, 1, "later changes are followed, not scanned");
 
       fixture.remove(4);
       assert!(fixture.pinned_ids().is_empty(), "a removed message is no pin");
+      fixture.write(&pinned(5, true));
+      assert_eq!(fixture.pinned_ids(), vec![server_id(5)]);
       fixture.remove_all();
       assert!(fixture.pinned_ids().is_empty());
     }
