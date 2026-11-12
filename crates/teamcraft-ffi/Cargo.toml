@@ -60,8 +60,9 @@ paranoid-android = "0.2.2"
 teamcraft-desktop-native = { path = "../teamcraft-desktop-native" }
 
 [target.'cfg(target_os = "ios")'.dependencies]
-# Core tracing to os_log (Console.app, `log stream`), the maintained tracing layer for it.
-tracing-oslog = "0.3.0"
+# Core tracing to os_log (Console.app, `log stream`): a small safe wrapper, written to by our own
+# event-only layer (`os_log.rs`; `tracing-oslog` panicked on events in spans its filter dropped).
+oslog = { version = "0.2.0", default-features = false }
 
 [dev-dependencies]
 base64 = "0.23.1"

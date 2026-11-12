@@ -212,7 +212,7 @@ pub(crate) fn diagnostics_text(app_version: &str, os_version: &str, lines: &[Str
 
 /// What reaches the system log: `warn` and above, lifecycle steps from `info`.
 #[cfg(any(target_os = "android", target_os = "ios", test))]
-fn system_log_filter() -> Targets {
+pub(crate) fn system_log_filter() -> Targets {
   Targets::new()
     .with_default(Level::WARN)
     .with_target(LIFECYCLE, Level::INFO)
@@ -241,10 +241,9 @@ fn install_system_log() {
 
 #[cfg(target_os = "ios")]
 fn install_system_log() {
-  use tracing_oslog::OsLogger;
   use tracing_subscriber::layer::{Layer as _, SubscriberExt as _};
 
-  let layer = OsLogger::new(SUBSYSTEM, TAG).with_filter(system_log_filter());
+  let layer = crate::os_log::layer(SUBSYSTEM, TAG).with_filter(system_log_filter());
   let ring = teamcraft_client_api::debug_log::layer();
   // Ignored: another subscriber (a test harness) already owns the process.
   let _ = tracing::subscriber::set_global_default(

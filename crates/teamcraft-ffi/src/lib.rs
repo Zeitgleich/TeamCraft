@@ -27,6 +27,8 @@ mod markup;
 mod media_viewer;
 mod meeting_hosts;
 mod notetaker;
+#[cfg(any(target_os = "ios", test))]
+mod os_log;
 mod perf_jobs;
 mod picture_retries;
 mod reads;
