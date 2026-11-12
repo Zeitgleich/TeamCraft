@@ -124,7 +124,7 @@ async fn slides_reach_the_viewer_through_a_limited_uplink() {
   let (keyframes, allowed) = run.keyframes();
   assert!(
     keyframes <= allowed,
-    "{keyframes} keyframes, {allowed} asked for or for new layers:\n{summary}"
+    "{keyframes} keyframes, {allowed} asked for, for layers back or for new layers:\n{summary}"
   );
 }
 
@@ -159,7 +159,8 @@ struct Run {
   link: Vec<(Duration, usize, bool)>,
   /// The presenter's uplink estimates: when, bit/s.
   uplink_estimates: Vec<(Duration, u32)>,
-  layers_needed: Vec<Vec<u8>>,
+  /// The layers the presenter was told to encode (the SFU's need within the uplink): when, which.
+  layers_needed: Vec<(Duration, Vec<u8>)>,
   /// When a viewer (through the SFU) asked the presenter for a keyframe.
   keyframe_requests: Vec<Duration>,
   /// When the share went out anew with other layers (a size step of the share policy).
@@ -220,7 +221,7 @@ async fn run(size: VideoResolution, maybe_limit_bps: Option<u64>) -> Run {
   let end = tokio::time::Instant::now() + SHARE;
   while tokio::time::Instant::now() < end {
     match tokio::time::timeout(Duration::from_millis(5), presenter.next_event()).await {
-      Ok(Some(CallEngineEvent::LayersNeeded { layers, .. })) => layers_needed.push(layers),
+      Ok(Some(CallEngineEvent::LayersNeeded { layers, .. })) => layers_needed.push((start.elapsed(), layers)),
       Ok(Some(CallEngineEvent::UplinkEstimate { bps, .. })) => uplink_estimates.push((start.elapsed(), bps)),
       Ok(Some(CallEngineEvent::KeyframeRequested { .. })) => keyframe_requests.push(start.elapsed()),
       Ok(Some(CallEngineEvent::VideoPublished(track))) if track.kind == VideoTrackKind::Screen => {
@@ -356,8 +357,9 @@ impl Run {
   }
 
   /// After [`SETTLE`]: the keyframes out of the encoders, and the most there may be: one per
-  /// keyframe asked for, and one per layer each time the share went out with new layers. A rate
-  /// step adds none (#1781: rebuilt encoders sent 9 keyframes in 17 pictures).
+  /// keyframe asked for, one per layer that came back (the uplink held it, or nobody needed it),
+  /// and one per layer each time the share went out with new layers. A rate step adds none
+  /// (#1781: rebuilt encoders sent 9 keyframes in 17 pictures).
   fn keyframes(&self) -> (usize, usize) {
     let settled = self.started_at + SETTLE;
     let sent = self
@@ -367,7 +369,16 @@ impl Run {
       .count();
     let asked = self.keyframe_requests.iter().filter(|at| **at >= settled).count();
     let republished = self.republished.iter().filter(|at| **at >= settled).count();
-    (sent, asked + republished * self.layers.len())
+    let mut came_back = 0;
+    for pair in self.layers_needed.windows(2) {
+      let [(_, before), (at, after)] = pair else {
+        continue;
+      };
+      if *at >= settled {
+        came_back += after.iter().filter(|layer| !before.contains(layer)).count();
+      }
+    }
+    (sent, asked + came_back + republished * self.layers.len())
   }
 
   /// The share of the uplink's bytes the bottleneck dropped after [`SETTLE`].
@@ -423,10 +434,10 @@ impl Run {
         SETTLE.as_secs(),
         self.estimate_range().0 / 1000,
         self.estimate_range().1 / 1000,
-        self.layers_needed.last(),
+        self.layers_needed.last().map(|(_, layers)| layers),
       ),
       format!(
-        "keyframes after the first {} s: {} of {} asked for or for new layers; published anew {} times",
+        "keyframes after the first {} s: {} of {} asked for, for layers back or for new layers; published anew {} times",
         SETTLE.as_secs(),
         self.keyframes().0,
         self.keyframes().1,

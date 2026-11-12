@@ -1058,6 +1058,12 @@ mod tests {
       height: 180,
     };
     let layer = simulcast_layers(SMALL, 30, 1_200_000, 1).remove(0);
+    let mut screen = OpenH264Encoder::new(&layer, VideoContent::Screen).unwrap();
+    screen.encode(&noise(SMALL, 0), false).unwrap();
+    assert!(
+      teamcraft_desktop_native::set_openh264_rate(&mut screen.encoder, 300_000, 5.0).is_ok(),
+      "a screen encoder takes its rate in place"
+    );
     let mut encoder = OpenH264Encoder::new(&layer, VideoContent::Camera).unwrap();
     let mut index = 0;
     // Bits and keyframes of the next `frames` frames.
