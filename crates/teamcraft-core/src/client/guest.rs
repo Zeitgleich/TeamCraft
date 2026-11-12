@@ -31,7 +31,7 @@ use crate::api::ServerApi;
 use crate::clock::Clock;
 use crate::convert;
 use crate::error::{CoreError, GuestRefusal};
-use crate::meeting_invitees::{self, ChosenInvitees, InviteeList, SignedInvitees};
+use crate::meeting_invitees::{self, ChosenInvitees, InviteeFacts, InviteeList, SignedInvitees};
 use crate::records;
 use crate::store::{LocalStore, Table};
 
@@ -65,6 +65,9 @@ const GUEST_MEETING_PREFIX: &str = "guest-meeting/";
 const ADMITTERS_PREFIX: &str = "meeting-admitters/";
 /// Key prefix of the invitees the organizer chose on this device, per meeting chat (#1726).
 const CHOSEN_INVITEES_PREFIX: &str = "meeting-chosen-invitees/";
+/// Key prefix of the users a verified commit took out of a meeting chat's group, per chat, with
+/// the sequence of the newest statement this device held then (#1726).
+const REMOVED_INVITEES_PREFIX: &str = "meeting-removed-invitees/";
 
 /// The newest organizer-signed admitters of a meeting chat this device verified (#1103, e2ee.md
 /// §4.6, "Meeting guests"). An older statement is refused afterwards (a rollback by the server).
@@ -82,7 +85,14 @@ struct AdmittersRecord {
   /// The invitees of the newest verified statement that names them (version 2, #1726); a newer
   /// version 1 statement leaves them as they are. `None` before any did.
   #[serde(default, skip_serializing_if = "Option::is_none")]
-  maybe_invitees: Option<Vec<UserId>>,
+  maybe_invitees: Option<InviteesRecord>,
+}
+
+/// The invitees of a verified statement, with its sequence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct InviteesRecord {
+  sequence: u64,
+  invitees: Vec<UserId>,
 }
 
 impl PendingEnrollment {
@@ -440,22 +450,40 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       if let Err(error) = self.organizers_admitters_at(conversation, 0).await {
         tracing::warn!(conversation_id = %conversation, %error, "could not read the meeting's signed invitees");
       }
-      self.refresh_minimum_client_version().await;
     }
+    // Decides whether a choice is kept and how the server's list counts.
+    self.refresh_minimum_client_version().await;
     let signed = self.kept_signed_invitees(conversation)?;
     let signs = meeting_invitees::signs_invitees(self.highest_minimum_client_version()?);
-    let to_add = meeting_invitees::invitees_to_add(list, &signed, signs);
+    let in_group = self.members_in_group(conversation)?;
+    let removed = self.removed_invitees(conversation)?;
+    let facts = InviteeFacts {
+      signed: &signed,
+      signs_invitees: signs,
+      in_group: &in_group,
+      removed: &removed,
+    };
+    let to_add = meeting_invitees::invitees_to_add(list, &facts);
     if let InviteeList::Chosen { added, .. } = list {
-      let chosen = ChosenInvitees {
-        invitees: to_add.clone(),
-      };
-      records::put_json(
-        &self.store,
-        Table::SyncState,
-        &format!("{CHOSEN_INVITEES_PREFIX}{conversation}"),
-        &chosen,
-      )?;
-      tracing::debug!(conversation_id = %conversation, added = added.len(), "kept the organizer's invitees");
+      // The organizer invites them again: an earlier removal no longer keeps them out.
+      for user in added {
+        self.note_invitee_added(conversation, *user)?;
+      }
+      // Before every app reads signed invitees, a choice carries users over unchecked: it is
+      // neither kept nor signed.
+      if signs {
+        let chosen = ChosenInvitees {
+          invitees: to_add.clone(),
+          maybe_base_sequence: self.signed_invitees_sequence(conversation)?,
+        };
+        records::put_json(
+          &self.store,
+          Table::SyncState,
+          &format!("{CHOSEN_INVITEES_PREFIX}{conversation}"),
+          &chosen,
+        )?;
+        tracing::debug!(conversation_id = %conversation, added = added.len(), "kept the organizer's invitees");
+      }
     }
     let vouched = to_add.len();
     let offered = from_server
@@ -485,9 +513,87 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Ok(None);
     }
     Ok(match self.kept_signed_invitees(conversation)? {
-      SignedInvitees::Known(invitees) => Some(invitees),
+      SignedInvitees::Known { invitees, .. } => Some(invitees),
       SignedInvitees::Unknown => None,
     })
+  }
+
+  /// The users with a device in the meeting chat's group on this device, guests left out (they
+  /// came in through signed adds); none without a group.
+  fn members_in_group(&mut self, conversation: ConversationId) -> Result<Vec<UserId>, CoreError> {
+    if !self.has_group(conversation)? {
+      return Ok(Vec::new());
+    }
+    let in_group = self.group_users(conversation)?;
+    let guests = self.guest_users(in_group.iter().copied())?;
+    Ok(
+      in_group
+        .into_iter()
+        .filter(|user| !guests.contains(user))
+        .collect(),
+    )
+  }
+
+  /// The sequence of the newest verified statement that named invitees.
+  fn signed_invitees_sequence(&self, conversation: ConversationId) -> Result<Option<u64>, CoreError> {
+    Ok(
+      self
+        .admitters_record(conversation)?
+        .and_then(|record| record.maybe_invitees)
+        .map(|invitees| invitees.sequence),
+    )
+  }
+
+  /// A verified commit took `user` out of the meeting chat's group (#1726): the server's list
+  /// doesn't bring the user back until a statement newer than the one held now names them.
+  pub(super) fn note_invitee_removed(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> Result<(), CoreError> {
+    let held = self
+      .admitters_record(conversation)?
+      .map_or(0, |record| record.sequence);
+    let mut removed = self.removed_invitees(conversation)?;
+    removed.insert(user, held);
+    self.save_removed_invitees(conversation, &removed)
+  }
+
+  /// `user` went into the group again, by a verified commit or the organizer's own choice.
+  pub(super) fn note_invitee_added(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> Result<(), CoreError> {
+    let mut removed = self.removed_invitees(conversation)?;
+    if removed.remove(&user).is_some() {
+      self.save_removed_invitees(conversation, &removed)?;
+    }
+    Ok(())
+  }
+
+  fn removed_invitees(&self, conversation: ConversationId) -> Result<BTreeMap<UserId, u64>, CoreError> {
+    let entries: Vec<(UserId, u64)> = records::get_json(
+      &self.store,
+      Table::SyncState,
+      &format!("{REMOVED_INVITEES_PREFIX}{conversation}"),
+    )?
+    .unwrap_or_default();
+    Ok(entries.into_iter().collect())
+  }
+
+  fn save_removed_invitees(
+    &self,
+    conversation: ConversationId,
+    removed: &BTreeMap<UserId, u64>,
+  ) -> Result<(), CoreError> {
+    let entries: Vec<(UserId, u64)> = removed.iter().map(|(user, at)| (*user, *at)).collect();
+    records::put_json(
+      &self.store,
+      Table::SyncState,
+      &format!("{REMOVED_INVITEES_PREFIX}{conversation}"),
+      &entries,
+    )
   }
 
   /// The organizer's choice on this device not signed yet, else the newest verified statement's
@@ -503,7 +609,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .and_then(|record| record.maybe_invitees);
     Ok(meeting_invitees::newest_signed_invitees(
       maybe_chosen.as_ref(),
-      maybe_signed.as_deref(),
+      maybe_signed
+        .as_ref()
+        .map(|signed| (signed.sequence, signed.invitees.as_slice())),
+      &self.removed_invitees(conversation)?,
     ))
   }
 
@@ -643,6 +752,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let verified = SignedMeetingAdmitters::from_bytes(response.statement.as_slice())
       .and_then(|signed| signed.verify(&expectation));
     match verified {
+      Ok(admitters) if !has_known_ids(&admitters) => {
+        tracing::warn!(conversation_id = %conversation, "the meeting's admitters name an ID this device can't use; ignored");
+        Ok(None)
+      },
       Ok(admitters) => {
         self.keep_admitters(conversation, &admitters)?;
         Ok(Some(admitters))
@@ -705,12 +818,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Ok(());
     }
     let maybe_invitees = match verified.maybe_invitees() {
-      Some(invitees) => Some(
-        invitees
+      Some(invitees) => Some(InviteesRecord {
+        sequence: verified.sequence(),
+        invitees: invitees
           .iter()
           .map(|user| convert::user_from_crypto(*user))
           .collect::<Result<_, _>>()?,
-      ),
+      }),
       None => maybe_kept.and_then(|kept| kept.maybe_invitees),
     };
     let me = convert::user(self.account.user_id);
@@ -731,7 +845,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Table::SyncState,
       &format!("{ADMITTERS_PREFIX}{conversation}"),
       &record,
-    )
+    )?;
+    // A pending choice made on an older statement is replaced by this newer decision.
+    if verified.maybe_invitees().is_some()
+      && let Some(chosen) = records::get_json::<ChosenInvitees>(
+        &self.store,
+        Table::SyncState,
+        &format!("{CHOSEN_INVITEES_PREFIX}{conversation}"),
+      )?
+      && chosen
+        .maybe_base_sequence
+        .is_none_or(|base| verified.sequence() > base)
+    {
+      self.forget_chosen_invitees(conversation)?;
+    }
+    Ok(())
   }
 
   /// Whether this is a guest's ephemeral device.
@@ -901,4 +1029,14 @@ fn deadlines_key(conversation: ConversationId) -> String {
 
 fn organizer_anchor_key(conversation: ConversationId) -> String {
   format!("{ORGANIZER_ANCHOR_PREFIX}{conversation}")
+}
+
+/// Whether every user ID a verified statement names is one this device can use; a statement that
+/// names another counts as not verifying.
+fn has_known_ids(verified: &VerifiedMeetingAdmitters) -> bool {
+  let admitters = verified.admitters().iter().map(|admitter| admitter.user_id);
+  let invitees = verified.maybe_invitees().unwrap_or_default().iter().copied();
+  admitters
+    .chain(invitees)
+    .all(|user| convert::user_from_crypto(user).is_ok())
 }

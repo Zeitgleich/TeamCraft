@@ -1726,6 +1726,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           })
         );
         self.note_removed_senders(conversation, &left_members(&update), at_ms)?;
+        self.note_meeting_membership(conversation, &update)?;
         // A signed addition committed now is newer than this device's removal of the user: an
         // earlier one about them would make it stale (Freshness).
         if let Some(MembershipAction::AddUser { user_id, .. }) =
@@ -2190,6 +2191,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     at_ms: i64,
   ) -> Result<Option<SharedKeys>, CoreError> {
     self.note_removed_senders(conversation, &left_members(update), at_ms)?;
+    self.note_meeting_membership(conversation, update)?;
     if let Some(MembershipAction::AddUser { user_id, .. }) =
       update.maybe_change.as_ref().map(MembershipChange::action)
     {
@@ -2714,6 +2716,38 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.retry_undecrypted(conversation)?;
     }
     Ok(())
+  }
+
+  /// In a meeting chat, notes whom a merged commit took out or let in again, for the invitees a
+  /// host's Join may add (#1726).
+  fn note_meeting_membership(
+    &mut self,
+    conversation: ConversationId,
+    update: &MembershipUpdate,
+  ) -> Result<(), CoreError> {
+    let maybe_action = update.maybe_change.as_ref().map(MembershipChange::action);
+    let Some(action) = maybe_action.filter(|action| {
+      matches!(
+        action,
+        MembershipAction::RemoveUser { .. } | MembershipAction::AddUser { .. }
+      )
+    }) else {
+      return Ok(());
+    };
+    let maybe_known: Option<teamcraft_proto::ConversationResponse> =
+      records::get_json(&self.store, Table::Conversations, &conversation.to_string())?;
+    if maybe_known.is_none_or(|known| known.kind != ConversationKind::Meeting) {
+      return Ok(());
+    }
+    match action {
+      MembershipAction::RemoveUser { user_id } => {
+        self.note_invitee_removed(conversation, convert::user_from_crypto(*user_id)?)
+      },
+      MembershipAction::AddUser { user_id, .. } => {
+        self.note_invitee_added(conversation, convert::user_from_crypto(*user_id)?)
+      },
+      MembershipAction::RemoveDevice { .. } => Ok(()),
+    }
   }
 
   /// Notes when devices left the conversation, at the server's time of the removal commit:

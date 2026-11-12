@@ -105,6 +105,162 @@ async fn an_edit_carries_over_only_signed_invitees_from_the_servers_list() {
   assert!(!invitees.contains(&signed(rig.mallory_id())));
 }
 
+mod organizer_devices {
+  use super::*;
+
+  /// One device's edit whose signing failed doesn't override what another device decided since.
+  #[tokio::test]
+  async fn a_stale_choice_of_one_device_doesnt_bring_back_a_user_the_other_took_out() {
+    let mut rig = Rig::new(SIGNING_RELEASE).await;
+    let (chat, bob, carol, dave) = (rig.chat, rig.bob, rig.carol, rig.dave);
+    let mut laptop = rig.organizers_laptop().await;
+    // The phone invites Dave, but its statement never reaches the server.
+    rig
+      .alice
+      .client
+      .update_meeting_chat_members(chat, &[bob, carol, dave], &[])
+      .await
+      .unwrap();
+    // The laptop takes Dave off the list again and signs.
+    laptop.full_sync().await.unwrap();
+    laptop
+      .update_meeting_chat_members(chat, &[bob, carol], &[dave])
+      .await
+      .unwrap();
+    // The laptop's list is the signed one again: it may have nothing new to sign.
+    laptop
+      .sync_meeting_admitters(rig.meeting, chat, ACCESS_ENDS_MS)
+      .await
+      .unwrap();
+
+    // The phone comes back.
+    rig.alice.client.full_sync().await.unwrap();
+    rig.sign_if_changed().await;
+    rig
+      .alice
+      .client
+      .set_up_meeting_chat_from(chat, &InviteeList::Listed(vec![bob, carol, dave]))
+      .await
+      .unwrap();
+
+    assert!(!rig.statement().maybe_invitees().unwrap().contains(&signed(dave)));
+    assert!(!rig.alice.client.group_users(chat).unwrap().contains(&dave));
+  }
+
+  /// A meeting from before signed invitees: an edit once signing is on carries over the invitees
+  /// already in the group, not only the users it adds.
+  #[tokio::test]
+  async fn a_legacy_meetings_edit_keeps_the_invitees_in_the_group() {
+    let mut rig = Rig::new("1.0.31").await;
+    assert_eq!(rig.statement().maybe_invitees(), None);
+    rig.server.set_minimum_client_version(SIGNING_RELEASE);
+    let (chat, bob, carol, dave) = (rig.chat, rig.bob, rig.carol, rig.dave);
+    let edit = InviteeList::Chosen {
+      added: vec![dave],
+      kept: vec![bob, carol],
+    };
+    rig
+      .alice
+      .client
+      .update_meeting_chat_members_from(chat, &edit, &[])
+      .await
+      .unwrap();
+    rig.sign().await;
+
+    let invitees = rig.statement().maybe_invitees().unwrap().to_vec();
+    assert!(invitees.contains(&signed(bob)), "in the group: carried over");
+    assert!(invitees.contains(&signed(dave)), "added");
+    assert!(
+      !invitees.contains(&signed(carol)),
+      "no device in the group yet: knocks until invited again"
+    );
+  }
+
+  /// A newer version 1 statement (an organizer device that doesn't sign invitees yet) leaves the
+  /// invitees of the version 2 one before it.
+  #[tokio::test]
+  async fn a_newer_first_version_statement_keeps_the_signed_invitees() {
+    let mut rig = Rig::new(SIGNING_RELEASE).await;
+    let chat = rig.chat;
+    // A device new to the instance's lower minimum signs version 1 statements.
+    rig.server.set_minimum_client_version("1.0.31");
+    let mut laptop = rig.organizers_laptop().await;
+    rig
+      .alice
+      .client
+      .update_meeting_chat_members(chat, &[rig.bob, rig.carol, rig.dave], &[])
+      .await
+      .unwrap();
+    rig.sign().await;
+    laptop.full_sync().await.unwrap();
+    assert!(
+      laptop
+        .sync_meeting_admitters(rig.meeting, chat, ACCESS_ENDS_MS)
+        .await
+        .unwrap()
+    );
+    assert_eq!(
+      rig.statement().maybe_invitees(),
+      None,
+      "the laptop signed version 1"
+    );
+
+    let listed = rig.listed();
+    rig
+      .alice
+      .client
+      .set_up_meeting_chat_from(chat, &listed)
+      .await
+      .unwrap();
+
+    assert!(
+      !rig
+        .alice
+        .client
+        .group_users(chat)
+        .unwrap()
+        .contains(&rig.mallory_id())
+    );
+  }
+}
+
+mod co_hosts {
+  use super::*;
+  use teamcraft_core::client::HostsChange;
+
+  #[tokio::test]
+  async fn a_co_hosts_join_adds_only_signed_invitees() {
+    let mut rig = Rig::new(SIGNING_RELEASE).await;
+    let mut bob = rig.bob_peer.take().unwrap();
+    rig
+      .alice
+      .client
+      .change_meeting_hosts(&HostsChange {
+        meeting: rig.meeting,
+        conversation: rig.chat,
+        co_hosts: vec![rig.bob],
+        maybe_new_organizer: None,
+      })
+      .await
+      .unwrap();
+    bob.client.full_sync().await.unwrap();
+
+    bob
+      .client
+      .set_up_meeting_chat_from(rig.chat, &rig.listed())
+      .await
+      .unwrap();
+
+    assert!(
+      !bob
+        .client
+        .group_users(rig.chat)
+        .unwrap()
+        .contains(&rig.mallory_id())
+    );
+  }
+}
+
 mod hostile_statements {
   use super::*;
 
@@ -145,6 +301,74 @@ mod hostile_statements {
       .unwrap();
 
     assert!(!laptop.group_users(chat).unwrap().contains(&mallory_id));
+  }
+
+  #[tokio::test]
+  async fn a_removal_after_the_held_statement_survives_a_withheld_newer_one() {
+    let mut rig = Rig::new(SIGNING_RELEASE).await;
+    let mallory_id = rig.mallory_id();
+    let (chat, bob, carol) = (rig.chat, rig.bob, rig.carol);
+    rig
+      .alice
+      .client
+      .update_meeting_chat_members(chat, &[bob, carol, mallory_id], &[])
+      .await
+      .unwrap();
+    rig.sign().await;
+    let mut laptop = rig.organizers_laptop().await;
+    laptop.check_meeting_admission(chat).await.unwrap();
+    rig
+      .alice
+      .client
+      .update_meeting_chat_members(chat, &[bob, carol], &[mallory_id])
+      .await
+      .unwrap();
+    rig.sign().await;
+    // The server withholds the newest statement from the laptop, which saw the removal commit.
+    rig.server.clear_meeting_admitters(chat);
+    laptop.full_sync().await.unwrap();
+    assert!(!laptop.group_users(chat).unwrap().contains(&mallory_id));
+
+    laptop
+      .set_up_meeting_chat_from(chat, &rig.listed())
+      .await
+      .unwrap();
+
+    assert!(!laptop.group_users(chat).unwrap().contains(&mallory_id));
+  }
+
+  #[tokio::test]
+  async fn a_statement_of_another_chat_adds_nobody() {
+    let mut rig = Rig::new(SIGNING_RELEASE).await;
+    let mallory_id = rig.mallory_id();
+    // Another meeting of Alice's that invites Mallory, signed by Alice.
+    let other_chat = rig
+      .server
+      .create_meeting_chat(rig.alice.client.user_id(), &[mallory_id]);
+    rig
+      .alice
+      .client
+      .set_up_meeting_chat(other_chat, &[mallory_id])
+      .await
+      .unwrap();
+    assert!(
+      rig
+        .alice
+        .client
+        .sync_meeting_admitters(rig.meeting, other_chat, ACCESS_ENDS_MS)
+        .await
+        .unwrap()
+    );
+    let moved = rig.server.meeting_admitters(other_chat).unwrap();
+    rig.server.set_meeting_admitters(rig.chat, moved);
+    let mut laptop = rig.organizers_laptop().await;
+
+    laptop
+      .set_up_meeting_chat_from(rig.chat, &rig.listed())
+      .await
+      .unwrap();
+
+    assert!(!laptop.group_users(rig.chat).unwrap().contains(&mallory_id));
   }
 
   #[tokio::test]
@@ -211,6 +435,7 @@ struct Rig {
   bob: UserId,
   carol: UserId,
   carol_api: Option<teamcraft_core::api::fake::FakeServerApi>,
+  bob_peer: Option<Peer>,
   /// A member of the chat on the server, not invited (yet).
   dave: UserId,
   chat: ConversationId,
@@ -244,11 +469,13 @@ impl Rig {
       bob: bob_id,
       carol,
       carol_api: Some(carol_api),
+      bob_peer: None,
       dave,
       chat,
       meeting: "8".parse().unwrap(),
     };
     rig.sign().await;
+    rig.bob_peer = Some(bob);
     rig
   }
 
@@ -259,6 +486,16 @@ impl Rig {
   /// The meeting's attendees as the server lists them.
   fn listed(&self) -> InviteeList {
     InviteeList::Listed(vec![self.bob, self.carol, self.mallory_id()])
+  }
+
+  /// Alice's phone signs anew if anything changed; whether it did doesn't matter here.
+  async fn sign_if_changed(&mut self) {
+    self
+      .alice
+      .client
+      .sync_meeting_admitters(self.meeting, self.chat, ACCESS_ENDS_MS)
+      .await
+      .unwrap();
   }
 
   async fn sign(&mut self) {

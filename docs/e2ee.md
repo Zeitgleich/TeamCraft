@@ -1864,13 +1864,18 @@ never by the server's member list:
   request, the users an edit adds: in the request and on neither the list on screen nor the one
   read again before the save) count as they are; users from the **server's list** (a host's Join
   takes the attendees, an edit sends the whole list as the server had it, an edit finished after a
-  restart has only the server's) count only where the organizer's newest signed invitee list
-  names them: the device's own choice not signed yet, or else the newest statement verified
-  against the organizer's pinned key (whatever its end). The server's word can only lower the list. Without a signed list (none published, a version 1 one,
-  a forged or tampered one, or an older one than this device saw, which it refuses as a rollback)
-  the server's list adds nobody once the device's `minimum_client_version` reached 1.0.32, and as
-  before until then. Anybody left out knocks at the lobby like anybody with the link. Removals
-  need no signature: the server's word can only take people out.
+  restart has only the server's) count where they have a device in the group already (they came
+  in through signed adds; guests aside), or where the organizer's newest signed invitee list names
+  them: the device's pending choice, or else the newest statement verified against the
+  organizer's pinned key (whatever its end). A user a verified commit took out of the group after
+  that list (the device notes the statement it held then) stays out until a newer statement names
+  them again, so a server that withholds the newest statement from one host and still lists the
+  user gets nobody back in. The server's word can only lower the list. Without a signed list (none
+  published, a version 1 one, a forged or tampered one, one of another chat or meeting, or an
+  older one than this device saw, which it refuses as a rollback) the server's list adds nobody
+  beyond the group once the device's `minimum_client_version` reached 1.0.32, and as before until
+  then. Anybody left out knocks at the lobby like anybody with the link. Removals need no
+  signature: the server's word can only take people out.
 - **Admission.** A host's "admit" in the lobby is the host's own decision: the host's device adds the
   devices the admitted user has at that moment, with history from the join on (§4.7), signed like
   any addition. Nothing waits for a device that appears later, unattended, since the server could
@@ -2023,14 +2028,19 @@ never by the server's member list:
       organizer devices stays ahead. It publishes when the meeting is scheduled or edited and
       keeps the list current for meetings that run or start within a day.
     - *Invitees* (#1726). The organizer's device keeps the invitee list the organizer chose on it
-      (the create request; an edit's whole list, see below) until it signed it, and signs that, or
-      else the newest verified statement's list (a newer version 1 statement leaves the list as it
-      was). Once its statement holds the choice, the statements speak for it, a later one of another
-      organizer device included. A choice isn't ordered by time against statements: a sequence can
-      run ahead of the clock. It signs version 2 only once the highest `minimum_client_version` it
-      saw reaches `meeting_invitees::SIGNED_INVITEES_RELEASE` (1.0.32): an older app can't read
-      version 2 and would drop the whole statement, admitters included. A meeting handed over keeps
-      the former organizer's list as this device verified it, like "no lobby".
+      (the create request; an edit's whole list, see below) as pending, made on the newest verified
+      statement with invitees it held, and signs that, or else the newest verified statement's list
+      (a newer version 1 statement leaves the list as it was). A statement newer than the one a
+      pending choice was made on (another organizer device's later decision, or this device's own
+      once signed) replaces the choice, so a choice whose signing failed never overrides what was
+      decided since. Users a verified commit took out of the group after the list it signs from are
+      left out, so a removal no statement knows of yet is never signed back in. A choice made before
+      every app reads signed invitees is neither kept nor signed: it carried the server's list over
+      unchecked. It signs version 2 only once the highest `minimum_client_version` it saw reaches
+      `meeting_invitees::SIGNED_INVITEES_RELEASE` (1.0.32): an older app can't read version 2 and
+      would drop the whole statement, admitters included. A meeting handed over keeps the former
+      organizer's list as this device verified it, like "no lobby". A statement that names a user ID
+      the device can't use counts as not verifying.
     - *The server* keeps the newest statement per meeting
       (`PUT /conversations/{id}/meeting-admitters`, the meeting's organizer only; a sequence not
       above the stored one gets `409`) and serves it to the chat's members, admitted guests too. It
@@ -3614,10 +3624,11 @@ and couldn't count for a purge.
     verifies and names none. The organizer's devices sign version 2 once their highest `minimum_client_version`
     reaches 1.0.32 (`meeting_invitees::SIGNED_INVITEES_RELEASE`), the first release that reads it; an older app
     would refuse the statement and with it the admitters. The rules on the device are in §4.6, "Meeting chats"
-    ("Only invited"). Residual risks: until the instance's minimum reaches 1.0.32, a device that never chose or
-    verified a list (another device of the organizer's, a meeting from before) still takes the server's attendees
-    as before; from then on, such a meeting's invitees not yet in the group knock until the organizer saves the
-    invitee list again. Which organizer the server names stays its word (above).
+    ("Only invited"). Residual risks: until the instance's minimum reaches 1.0.32, a device that never verified a
+    list (another device of the organizer's, a meeting from before) still takes the server's attendees as before;
+    from then on, such a meeting's invitees with a device in the group are carried over, and those not in the group
+    yet knock until the organizer adds them again in an edit. Which organizer the server names stays its word
+    (above).
 
 #### Threats
 

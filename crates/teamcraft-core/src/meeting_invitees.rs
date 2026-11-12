@@ -5,6 +5,8 @@
 //!
 //! The pure decisions live here; `client::guest` reads and keeps the lists.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::UserId;
 
@@ -41,56 +43,120 @@ impl From<teamcraft_client_api::meeting_invitees::ChatInvitees> for InviteeList 
 }
 
 /// The newest invitee list this device knows the organizer decided on: its own choice not signed
-/// yet, or else the newest statement the organizer's key signed.
+/// yet, unless a newer statement replaced it, or else the newest statement the organizer's key
+/// signed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SignedInvitees {
   /// No list of the organizer's is known here (a meeting from before signed invitees, a statement
   /// of version 1, or none at all).
   Unknown,
-  Known(Vec<UserId>),
+  /// `sequence`: the statement's, or for a pending choice the statement it was made on (0 for
+  /// none). A removal seen after it is undone only by a newer list.
+  Known { invitees: Vec<UserId>, sequence: u64 },
 }
 
-/// The organizer's own choice on this device, pending until this device signed it into a
-/// statement (then the statement speaks for it, and a later one of another device replaces it).
-/// Not ordered by time against statements: a sequence can run ahead of the clock.
+/// The organizer's own choice on this device, pending until it is signed. It was made on the
+/// newest statement with invitees this device had verified (`maybe_base_sequence`); a statement
+/// newer than that (another device's later decision, or this device's own once signed) replaces
+/// it, so a choice whose signing failed never overrides what was decided since.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChosenInvitees {
   pub invitees: Vec<UserId>,
+  pub maybe_base_sequence: Option<u64>,
 }
 
-/// This device's pending choice if there is one, else the newest verified statement's invitees.
+/// What a host's device knows when it decides who of a list to add.
+#[derive(Clone, Copy, Debug)]
+pub struct InviteeFacts<'a> {
+  pub signed: &'a SignedInvitees,
+  /// [`signs_invitees`] on this device.
+  pub signs_invitees: bool,
+  /// Users with a device in the chat's group on this device, guests left out: they came in
+  /// through signed adds, so the server's list may carry them over.
+  pub in_group: &'a [UserId],
+  /// Users a verified commit took out of the group, with the sequence of the newest statement
+  /// this device held then.
+  pub removed: &'a BTreeMap<UserId, u64>,
+}
+
+/// The pending choice unless a statement newer than its base was verified since, else the newest
+/// verified statement's invitees (`sequence`, `invitees`), without the users a verified commit took
+/// out after that list (`removed`, with the sequence held then): a removal the list doesn't know
+/// of is never signed back in.
 pub fn newest_signed_invitees(
   maybe_chosen: Option<&ChosenInvitees>,
-  maybe_statement: Option<&[UserId]>,
+  maybe_statement: Option<(u64, &[UserId])>,
+  removed: &BTreeMap<UserId, u64>,
 ) -> SignedInvitees {
-  match (maybe_chosen, maybe_statement) {
-    (Some(chosen), _) => SignedInvitees::Known(chosen.invitees.clone()),
-    (None, Some(invitees)) => SignedInvitees::Known(invitees.to_vec()),
+  let signed = newest_list(maybe_chosen, maybe_statement);
+  match signed {
+    SignedInvitees::Known { invitees, sequence } => SignedInvitees::Known {
+      invitees: invitees
+        .into_iter()
+        .filter(|user| removed.get(user).is_none_or(|removed_at| sequence > *removed_at))
+        .collect(),
+      sequence,
+    },
+    SignedInvitees::Unknown => SignedInvitees::Unknown,
+  }
+}
+
+fn newest_list(
+  maybe_chosen: Option<&ChosenInvitees>,
+  maybe_statement: Option<(u64, &[UserId])>,
+) -> SignedInvitees {
+  let maybe_pending = maybe_chosen.filter(|chosen| {
+    maybe_statement
+      .is_none_or(|(sequence, _)| chosen.maybe_base_sequence.is_some_and(|base| sequence <= base))
+  });
+  match (maybe_pending, maybe_statement) {
+    (Some(chosen), _) => SignedInvitees::Known {
+      invitees: chosen.invitees.clone(),
+      sequence: chosen.maybe_base_sequence.unwrap_or(0),
+    },
+    (None, Some((sequence, invitees))) => SignedInvitees::Known {
+      invitees: invitees.to_vec(),
+      sequence,
+    },
     (None, None) => SignedInvitees::Unknown,
   }
 }
 
 /// Which users of `list` a host's device adds to the meeting chat's group; for a decision of the
 /// organizer's, also the new invitee list it keeps and signs. Users the organizer added count as
-/// they are. Users from the server's list count only where the signed list names them (its word
-/// can only lower). Without a signed list: before [`SIGNED_INVITEES_RELEASE`] as before it (the
-/// server's list), from it on nobody, who then knocks at the lobby.
-pub fn invitees_to_add(list: &InviteeList, signed: &SignedInvitees, signs_invitees: bool) -> Vec<UserId> {
+/// they are. Users from the server's list count where they are in the group already, or where
+/// the signed list names them and no removal seen after that list took them out (the server's
+/// word can only lower). Without a signed list: before [`SIGNED_INVITEES_RELEASE`] as before it
+/// (the server's list, removals aside), from it on only users in the group. Anybody else knocks at
+/// the lobby.
+pub fn invitees_to_add(list: &InviteeList, facts: &InviteeFacts<'_>) -> Vec<UserId> {
   let (added, from_server) = match list {
     InviteeList::Chosen { added, kept } => (added.as_slice(), kept.as_slice()),
     InviteeList::Listed(listed) => (&[][..], listed.as_slice()),
   };
   let mut result: Vec<UserId> = Vec::new();
-  let vouched = from_server.iter().filter(|user| match signed {
-    SignedInvitees::Known(named) => named.contains(user),
-    SignedInvitees::Unknown => !signs_invitees,
-  });
+  let vouched = from_server.iter().filter(|user| is_vouched(**user, facts));
   for user in added.iter().chain(vouched) {
     if !result.contains(user) {
       result.push(*user);
     }
   }
   result
+}
+
+fn is_vouched(user: UserId, facts: &InviteeFacts<'_>) -> bool {
+  if facts.in_group.contains(&user) {
+    return true;
+  }
+  let (is_named, sequence) = match facts.signed {
+    SignedInvitees::Known { invitees, sequence } => (invitees.contains(&user), *sequence),
+    SignedInvitees::Unknown => (!facts.signs_invitees, 0),
+  };
+  is_named
+    && facts
+      .removed
+      .get(&user)
+      .is_none_or(|removed_at| sequence > *removed_at)
 }
 
 /// Whether the organizer's devices sign the invitees (a version 2 statement): once the highest
@@ -114,16 +180,19 @@ mod tests {
       added: vec![user(CAROL)],
       kept: Vec::new(),
     };
-    let to_add = invitees_to_add(&chosen, &SignedInvitees::Known(vec![user(BOB)]), true);
-    assert_eq!(to_add, vec![user(CAROL)]);
+    let signed = known(&[BOB], 5);
+    assert_eq!(
+      invitees_to_add(&chosen, &facts(&signed, &[], &[])),
+      vec![user(CAROL)]
+    );
   }
 
   #[test]
   fn the_servers_list_counts_only_where_the_signed_list_names_the_user() {
-    let signed = SignedInvitees::Known(vec![user(BOB), user(CAROL)]);
+    let signed = known(&[BOB, CAROL], 5);
     let listed = InviteeList::Listed(vec![user(BOB), user(MALLORY)]);
     assert_eq!(
-      invitees_to_add(&listed, &signed, true),
+      invitees_to_add(&listed, &facts(&signed, &[], &[])),
       vec![user(BOB)],
       "Mallory knocks; Carol, no longer listed, isn't added"
     );
@@ -132,35 +201,84 @@ mod tests {
       added: vec![user(4)],
       kept: vec![user(BOB), user(MALLORY)],
     };
-    assert_eq!(invitees_to_add(&edit, &signed, true), vec![user(4), user(BOB)]);
+    assert_eq!(
+      invitees_to_add(&edit, &facts(&signed, &[], &[])),
+      vec![user(4), user(BOB)]
+    );
   }
 
   #[test]
-  fn without_a_signed_list_the_servers_list_adds_nobody_once_signing_is_on() {
+  fn without_a_signed_list_only_users_in_the_group_count_once_signing_is_on() {
     let listed = InviteeList::Listed(vec![user(BOB), user(MALLORY)]);
-    assert!(invitees_to_add(&listed, &SignedInvitees::Unknown, true).is_empty());
+    let unknown = SignedInvitees::Unknown;
+    assert!(invitees_to_add(&listed, &facts(&unknown, &[], &[])).is_empty());
     assert_eq!(
-      invitees_to_add(&listed, &SignedInvitees::Unknown, false),
+      invitees_to_add(&listed, &facts(&unknown, &[BOB], &[])),
+      vec![user(BOB)],
+      "a legacy meeting's invitee already in the group is carried over"
+    );
+    let before = InviteeFacts {
+      signs_invitees: false,
+      ..facts(&unknown, &[], &[])
+    };
+    assert_eq!(
+      invitees_to_add(&listed, &before),
       vec![user(BOB), user(MALLORY)],
       "before the release, as before"
     );
   }
 
   #[test]
-  fn a_pending_own_choice_counts_before_the_statement() {
+  fn a_removal_after_the_signed_list_keeps_the_user_out_until_a_newer_list() {
+    let listed = InviteeList::Listed(vec![user(CAROL)]);
+    // Carol was taken out while this device held statement 5; the server withholds the newer one.
+    let removed = [(CAROL, 5)];
+    assert!(invitees_to_add(&listed, &facts(&known(&[CAROL], 5), &[], &removed)).is_empty());
+    assert_eq!(
+      invitees_to_add(&listed, &facts(&known(&[CAROL], 6), &[], &removed)),
+      vec![user(CAROL)],
+      "invited again in a newer statement"
+    );
+  }
+
+  #[test]
+  fn a_pending_choice_counts_until_a_newer_statement_than_its_base() {
     let chosen = ChosenInvitees {
-      invitees: vec![user(BOB)],
+      invitees: vec![user(BOB), user(CAROL)],
+      maybe_base_sequence: Some(5),
     };
-    let signed = [user(CAROL)];
+    let signed = [user(BOB)];
     assert_eq!(
-      newest_signed_invitees(Some(&chosen), Some(&signed)),
-      SignedInvitees::Known(vec![user(BOB)])
+      newest_signed_invitees(Some(&chosen), Some((5, &signed)), &BTreeMap::new()),
+      known(&[BOB, CAROL], 5)
     );
     assert_eq!(
-      newest_signed_invitees(None, Some(&signed)),
-      SignedInvitees::Known(vec![user(CAROL)])
+      newest_signed_invitees(Some(&chosen), Some((6, &signed)), &BTreeMap::new()),
+      known(&[BOB], 6),
+      "another device decided since: its list counts"
     );
-    assert_eq!(newest_signed_invitees(None, None), SignedInvitees::Unknown);
+    let on_nothing = ChosenInvitees {
+      maybe_base_sequence: None,
+      ..chosen
+    };
+    assert_eq!(
+      newest_signed_invitees(Some(&on_nothing), None, &BTreeMap::new()),
+      known(&[BOB, CAROL], 0)
+    );
+    assert_eq!(
+      newest_signed_invitees(Some(&on_nothing), Some((1, &signed)), &BTreeMap::new()),
+      known(&[BOB], 1)
+    );
+    assert_eq!(
+      newest_signed_invitees(None, None, &BTreeMap::new()),
+      SignedInvitees::Unknown
+    );
+    // Carol was taken out after the choice (no newer statement): never signed back in.
+    let removed: BTreeMap<UserId, u64> = [(user(CAROL), 5)].into_iter().collect();
+    assert_eq!(
+      newest_signed_invitees(Some(&on_nothing.clone()), None, &removed),
+      known(&[BOB], 0)
+    );
   }
 
   #[test]
@@ -169,6 +287,31 @@ mod tests {
     assert!(!signs_invitees(ReleaseVersion::parse("1.0.31")));
     assert!(signs_invitees(Some(SIGNED_INVITEES_RELEASE)));
     assert!(signs_invitees(ReleaseVersion::parse("1.1.0")));
+  }
+
+  fn known(users: &[u64], sequence: u64) -> SignedInvitees {
+    SignedInvitees::Known {
+      invitees: users.iter().map(|raw| user(*raw)).collect(),
+      sequence,
+    }
+  }
+
+  /// Signing on, `in_group` in the group, `removed` (user, sequence) taken out; leaked for the
+  /// borrowed fields (tests only).
+  fn facts<'a>(signed: &'a SignedInvitees, in_group: &[u64], removed: &[(u64, u64)]) -> InviteeFacts<'a> {
+    let in_group: &'a [UserId] = Vec::leak(in_group.iter().map(|raw| user(*raw)).collect());
+    let removed: &'a BTreeMap<UserId, u64> = Box::leak(Box::new(
+      removed
+        .iter()
+        .map(|(raw, sequence)| (user(*raw), *sequence))
+        .collect(),
+    ));
+    InviteeFacts {
+      signed,
+      signs_invitees: true,
+      in_group,
+      removed,
+    }
   }
 
   fn user(raw: u64) -> UserId {
