@@ -433,12 +433,12 @@ symbolized later, the way Google Play keeps the R8 mapping and native symbols pe
 `scripts/debug-files.sh` does the work in `desktop-release.yml` and the `android` job of
 `release.yml`.
 
-| Platform | Built with                       | Shipped binary                             | Debug file                                 |
-|----------|----------------------------------|--------------------------------------------|--------------------------------------------|
-| Linux    | line tables, not stripped        | stripped by `debug-files.sh split`         | `teamcraft-desktop.debug` (zlib), build ID |
-| macOS    | line tables, `strip = "symbols"` | stripped by rustc after `dsymutil`         | `teamcraft-desktop.dSYM`, Mach-O UUID      |
-| Windows  | line tables, `strip = "none"`    | never holds symbols (only the PDB's GUID)  | `teamcraft_desktop.pdb`, GUID and age      |
-| Android  | line tables                      | stripped by AGP in the APKs and the bundle | the unstripped `.so` files, build ID       |
+| Platform | Built with                                | Shipped binary                             | Debug file                                 |
+|----------|-------------------------------------------|--------------------------------------------|--------------------------------------------|
+| Linux    | line tables, not stripped                 | stripped by `debug-files.sh split`         | `teamcraft-desktop.debug` (zlib), build ID |
+| macOS    | line tables, `split-debuginfo = "packed"` | `strip -S -x` after the UUID check         | `teamcraft-desktop.dSYM`, Mach-O UUID      |
+| Windows  | line tables, `strip = "none"`             | never holds symbols (only the PDB's GUID)  | `teamcraft_desktop.pdb`, GUID and age      |
+| Android  | line tables                               | stripped by AGP in the APKs and the bundle | the unstripped `.so` files, build ID       |
 
 The Flatpak (built, not published) is left out: flatpak-builder splits its own `.Debug` extension.
 
