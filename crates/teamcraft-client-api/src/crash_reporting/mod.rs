@@ -9,6 +9,7 @@
 //! [`scrub`] before it is queued, breadcrumbs come only from the redacted debug log ring, and the
 //! only identifier is a random [`InstallationId`], never a user ID.
 
+mod browser_noise;
 mod call;
 mod event;
 mod panic;
@@ -30,6 +31,7 @@ use teamcraft_proto::{
 pub use teamcraft_proto::{Dsn, DsnError};
 use thiserror::Error;
 
+pub use browser_noise::{BrowserNoiseCount, is_resize_observer_loop};
 pub use call::{
   BrowserFamily, BrowserInfo, CallContext, CallEventDetail, CallProblem, CallQualitySummary, CallRef,
   CallReport, CallReportGate, CallTransportKind, MAX_CALL_TRAIL, MAX_RECEIVED_TRACKS, ReceivedVideoContext,

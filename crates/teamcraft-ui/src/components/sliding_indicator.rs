@@ -99,8 +99,9 @@ fn follow_selection(indicator: web_sys::HtmlElement, placing: Placing) {
   let on_select = Closure::<dyn FnMut()>::new({
     let list = list.clone();
     let resize = resize.clone();
+    let indicator = indicator.clone();
     move || {
-      observe_items(&resize, &list);
+      observe_items(&resize, &list, &indicator);
       place(Move::Slide);
     }
   });
@@ -120,7 +121,7 @@ fn follow_selection(indicator: web_sys::HtmlElement, placing: Placing) {
     tracing::debug!("could not observe a tab list");
   }
   resize.observe(&list);
-  observe_items(&resize, &list);
+  observe_items(&resize, &list, &indicator);
   let observers = StoredValue::new_local((selection, resize, on_select, on_resize));
   on_cleanup(move || {
     observers.try_with_value(|(selection, resize, _, _)| {
@@ -130,11 +131,21 @@ fn follow_selection(indicator: web_sys::HtmlElement, placing: Placing) {
   });
 }
 
-/// Observes every child of `list` for resize; observing one twice is a no-op.
-fn observe_items(resize: &web_sys::ResizeObserver, list: &web_sys::HtmlElement) {
+/// Observes every child of `list` for resize except the indicator; observing one twice is a
+/// no-op. The indicator is sized by what the observer's callback places: watching it would make
+/// every item's resize resize an element of the same depth in the same frame, which the browser
+/// doesn't deliver again ("ResizeObserver loop completed with undelivered notifications",
+/// #1760).
+fn observe_items(
+  resize: &web_sys::ResizeObserver,
+  list: &web_sys::HtmlElement,
+  indicator: &web_sys::HtmlElement,
+) {
   let items = list.children();
   for index in 0..items.length() {
-    if let Some(item) = items.item(index) {
+    if let Some(item) = items.item(index)
+      && item != **indicator
+    {
       resize.observe(&item);
     }
   }
