@@ -16,7 +16,7 @@ use crate::components::date_jump::DatePill;
 use crate::components::file_views::{LinkPreviewCard, MessageFiles, without_upload_bytes};
 use crate::components::icons::{Icon, IconName};
 use crate::components::long_press::LongPress;
-use crate::components::message_actions::{MessageAction, QuotedImage, run_message_action};
+use crate::components::message_actions::{MessageAction, QuotedImage, copy_text, run_message_action};
 use crate::components::message_link_card::MessageLinkPreviews;
 use crate::components::message_toolbar::{ActiveMessage, ToolbarHost};
 use crate::components::poll_card::PollCard;
@@ -250,6 +250,11 @@ pub fn log_entry_line(
   let is_source = author.is_source;
   let author = author.name.clone();
   let title = author.clone();
+  // The whole line as shown, for the copy button (long-pressing one monospace line is fiddly, #1789).
+  let line = format!(
+    "{time} {author} {} {text}",
+    i18n.t(&format!("log-level-{}", level.slug()))
+  );
   let tab_index = if class.starts_with("msg ") { "-1" } else { "" };
   let data_nav = if class.starts_with("msg ") { "row" } else { "" };
   view! {
@@ -265,7 +270,32 @@ pub fn log_entry_line(
       <span class="log-text" translate="no">
         {text}
       </span>
+      <LogCopyButton line=line />
     </div>
+  }
+}
+
+/// "Copy line" of a log row: sticks to the right edge of the pane while the row is scrolled
+/// sideways; shown on hover and focus, always on touch devices.
+#[component]
+fn LogCopyButton(line: String) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let copy = move |event: leptos::ev::MouseEvent| {
+    event.stop_propagation();
+    let failed = i18n.t("action-copy-failed");
+    // Started inside the click: browsers only allow clipboard writes from a user action.
+    let copying = copy_text(&line);
+    leptos::task::spawn_local(async move {
+      if !copying.await {
+        state.show_error(failed, String::new());
+      }
+    });
+  };
+  view! {
+    <button type="button" class="log-copy" aria-label=move || i18n.t("log-copy-line") title=move || i18n.t("log-copy-line") on:click=copy>
+      <Icon name=IconName::Copy />
+    </button>
   }
 }
 

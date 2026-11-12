@@ -340,6 +340,27 @@ mod tests {
     assert!(!log_text.contains("overflow"), "the text must not be clipped");
   }
 
+  /// The time column stays in view while the log is scrolled sideways, on a background that follows
+  /// the row's (#1789).
+  #[test]
+  fn log_css_pins_the_time_column_and_the_copy_button() {
+    let css = include_str!("../../style/main/140-log.css");
+    let rule = |selector: &str| {
+      css
+        .split(&format!("{selector} {{"))
+        .nth(1)
+        .and_then(|rest| rest.split('}').next())
+        .unwrap_or_else(|| panic!("the {selector} rule exists"))
+        .to_owned()
+    };
+    let time = rule(".log-time");
+    assert!(time.contains("position: sticky;") && time.contains("left: 0;"));
+    assert!(time.contains("background: var(--log-bg);"));
+    assert!(css.contains("--log-bg: var(--surface-2);"));
+    let copy = rule(".log-copy");
+    assert!(copy.contains("position: sticky;") && copy.contains("right: 0;"));
+  }
+
   #[test]
   fn scanning_keeps_only_matching_entries_in_order() {
     let backend = MockBackend::new(1_800_000_000_000);
