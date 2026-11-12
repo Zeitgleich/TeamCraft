@@ -337,6 +337,89 @@ mod hostile_statements {
     assert!(!laptop.group_users(chat).unwrap().contains(&mallory_id));
   }
 
+  /// Statements and commits share no order: an intermediate statement that still names a user
+  /// the host saw removed since lifts nothing.
+  #[tokio::test]
+  async fn an_intermediate_statement_after_a_removal_doesnt_bring_the_user_back() {
+    let mut rig = Rig::new(SIGNING_RELEASE).await;
+    let mut bob = rig.bob_peer.take().unwrap();
+    let mallory_id = rig.mallory_id();
+    let (chat, bob_id, carol) = (rig.chat, rig.bob, rig.carol);
+    bob.client.check_meeting_admission(chat).await.unwrap();
+    // Alice invites Mallory and signs (withheld from Bob), then takes her out and signs again.
+    rig
+      .alice
+      .client
+      .update_meeting_chat_members(chat, &[bob_id, carol, mallory_id], &[])
+      .await
+      .unwrap();
+    rig.sign().await;
+    let intermediate = rig.server.meeting_admitters(chat).unwrap();
+    rig
+      .alice
+      .client
+      .update_meeting_chat_members(chat, &[bob_id, carol], &[mallory_id])
+      .await
+      .unwrap();
+    rig.sign().await;
+    bob.client.full_sync().await.unwrap();
+    // The server now serves the intermediate statement, newer than any Bob saw.
+    rig.server.set_meeting_admitters(chat, intermediate);
+
+    bob
+      .client
+      .set_up_meeting_chat_from(chat, &rig.listed())
+      .await
+      .unwrap();
+
+    assert!(!bob.client.group_users(chat).unwrap().contains(&mallory_id));
+  }
+
+  /// The organizer's own removal outlasts another device's statement signed before it.
+  #[tokio::test]
+  async fn the_organizers_removal_outlasts_another_devices_earlier_statement() {
+    let mut rig = Rig::new(SIGNING_RELEASE).await;
+    let mallory_id = rig.mallory_id();
+    let (chat, bob, carol) = (rig.chat, rig.bob, rig.carol);
+    let mut laptop = rig.organizers_laptop().await;
+    // The laptop invites Mallory and signs; the phone never fetches that statement.
+    laptop
+      .update_meeting_chat_members(chat, &[bob, carol, mallory_id], &[])
+      .await
+      .unwrap();
+    assert!(
+      laptop
+        .sync_meeting_admitters(rig.meeting, chat, ACCESS_ENDS_MS)
+        .await
+        .unwrap()
+    );
+    // The phone sees the add, then takes Mallory off the list.
+    rig.alice.client.full_sync().await.unwrap();
+    rig
+      .alice
+      .client
+      .update_meeting_chat_members(chat, &[bob, carol], &[mallory_id])
+      .await
+      .unwrap();
+
+    rig.sign_if_changed().await;
+    rig
+      .alice
+      .client
+      .set_up_meeting_chat_from(chat, &rig.listed())
+      .await
+      .unwrap();
+
+    assert!(
+      !rig
+        .statement()
+        .maybe_invitees()
+        .unwrap()
+        .contains(&signed(mallory_id))
+    );
+    assert!(!rig.alice.client.group_users(chat).unwrap().contains(&mallory_id));
+  }
+
   #[tokio::test]
   async fn a_statement_of_another_chat_adds_nobody() {
     let mut rig = Rig::new(SIGNING_RELEASE).await;

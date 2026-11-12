@@ -1867,10 +1867,13 @@ never by the server's member list:
   restart has only the server's) count where they have a device in the group already (they came
   in through signed adds; guests aside), or where the organizer's newest signed invitee list names
   them: the device's pending choice, or else the newest statement verified against the
-  organizer's pinned key (whatever its end). A user a verified commit took out of the group after
-  that list (the device notes the statement it held then) stays out until a newer statement names
-  them again, so a server that withholds the newest statement from one host and still lists the
-  user gets nobody back in. The server's word can only lower the list. Without a signed list (none
+  organizer's pinned key (whatever its end). A user a verified commit took out of the group stays
+  out until a verified commit adds them again or this device's own choice does: no statement lifts
+  a removal, whatever its sequence, since statements and commits share no order and the server
+  picks which statement a device sees. The device notes removals on every conversation's commits
+  (the server's kind for it can't suppress them), keeps at most 1,000 per conversation, and drops
+  them with the conversation's other records. A member a host admitted from the lobby is in the
+  group, so the organizer's next edit carries them into the signed list. The server's word can only lower the list. Without a signed list (none
   published, a version 1 one, a forged or tampered one, one of another chat or meeting, or an
   older one than this device saw, which it refuses as a rollback) the server's list adds nobody
   beyond the group once the device's `minimum_client_version` reached 1.0.32, and as before until
@@ -2033,10 +2036,11 @@ never by the server's member list:
       (a newer version 1 statement leaves the list as it was). A statement newer than the one a
       pending choice was made on (another organizer device's later decision, or this device's own
       once signed) replaces the choice, so a choice whose signing failed never overrides what was
-      decided since. Users a verified commit took out of the group after the list it signs from are
-      left out, so a removal no statement knows of yet is never signed back in. A choice made before
-      every app reads signed invitees is neither kept nor signed: it carried the server's list over
-      unchecked. It signs version 2 only once the highest `minimum_client_version` it saw reaches
+      decided since. Users a verified commit took out of the group and nothing let in again are left
+      out, so a removal is never signed back in, the device's own included after another device's
+      earlier statement replaced its choice. A choice made before every app reads signed invitees is
+      neither kept nor signed: it carried the server's list over unchecked. It signs version 2 only
+      once the highest `minimum_client_version` it saw reaches
       `meeting_invitees::SIGNED_INVITEES_RELEASE` (1.0.32): an older app can't read version 2 and
       would drop the whole statement, admitters included. A meeting handed over keeps the former
       organizer's list as this device verified it, like "no lobby". A statement that names a user ID

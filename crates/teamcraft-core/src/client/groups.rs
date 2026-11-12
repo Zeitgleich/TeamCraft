@@ -2718,8 +2718,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
-  /// In a meeting chat, notes whom a merged commit took out or let in again, for the invitees a
-  /// host's Join may add (#1726).
+  /// Notes whom a merged commit took out or let in again, for the invitees a meeting's host may
+  /// add (#1726); in every conversation, so the server's kind for it can't suppress the note.
   fn note_meeting_membership(
     &mut self,
     conversation: ConversationId,
@@ -2734,11 +2734,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }) else {
       return Ok(());
     };
-    let maybe_known: Option<teamcraft_proto::ConversationResponse> =
-      records::get_json(&self.store, Table::Conversations, &conversation.to_string())?;
-    if maybe_known.is_none_or(|known| known.kind != ConversationKind::Meeting) {
-      return Ok(());
-    }
     match action {
       MembershipAction::RemoveUser { user_id } => {
         self.note_invitee_removed(conversation, convert::user_from_crypto(*user_id)?)

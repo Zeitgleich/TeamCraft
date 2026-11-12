@@ -10,7 +10,7 @@
 //! a device of an admitter that key signed for the meeting (#1103): the organizer's devices publish
 //! that list, the other members' devices check they are on it before they let a guest in.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use teamcraft_crypto::backup::Argon2Settings;
 
 use rand_core::{OsRng, RngCore};
@@ -65,9 +65,11 @@ const GUEST_MEETING_PREFIX: &str = "guest-meeting/";
 const ADMITTERS_PREFIX: &str = "meeting-admitters/";
 /// Key prefix of the invitees the organizer chose on this device, per meeting chat (#1726).
 const CHOSEN_INVITEES_PREFIX: &str = "meeting-chosen-invitees/";
-/// Key prefix of the users a verified commit took out of a meeting chat's group, per chat, with
-/// the sequence of the newest statement this device held then (#1726).
+/// Key prefix of the users a verified commit took out of a conversation's group since one let them
+/// in, per conversation, oldest first (#1726).
 const REMOVED_INVITEES_PREFIX: &str = "meeting-removed-invitees/";
+/// At most this many removed users are kept per conversation; the oldest go first.
+const MAX_REMOVED_INVITEES: usize = teamcraft_crypto::meeting_admitters::MAX_INVITEES;
 
 /// The newest organizer-signed admitters of a meeting chat this device verified (#1103, e2ee.md
 /// §4.6, "Meeting guests"). An older statement is refused afterwards (a rollback by the server).
@@ -513,7 +515,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Ok(None);
     }
     Ok(match self.kept_signed_invitees(conversation)? {
-      SignedInvitees::Known { invitees, .. } => Some(invitees),
+      SignedInvitees::Known(invitees) => Some(invitees),
       SignedInvitees::Unknown => None,
     })
   }
@@ -544,18 +546,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
-  /// A verified commit took `user` out of the meeting chat's group (#1726): the server's list
-  /// doesn't bring the user back until a statement newer than the one held now names them.
+  /// A verified commit took `user` out of the conversation's group (#1726): neither the server's
+  /// list nor any statement brings the user back into a meeting chat, only a verified commit that
+  /// adds them again or this device's own choice. Noted whatever kind the server says the
+  /// conversation is, so it can't suppress the note.
   pub(super) fn note_invitee_removed(
     &self,
     conversation: ConversationId,
     user: UserId,
   ) -> Result<(), CoreError> {
-    let held = self
-      .admitters_record(conversation)?
-      .map_or(0, |record| record.sequence);
-    let mut removed = self.removed_invitees(conversation)?;
-    removed.insert(user, held);
+    let mut removed = self.removed_list(conversation)?;
+    removed.retain(|known| *known != user);
+    removed.push(user);
+    if removed.len() > MAX_REMOVED_INVITEES {
+      let excess = removed.len() - MAX_REMOVED_INVITEES;
+      removed.drain(..excess);
+    }
     self.save_removed_invitees(conversation, &removed)
   }
 
@@ -565,34 +571,52 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     user: UserId,
   ) -> Result<(), CoreError> {
-    let mut removed = self.removed_invitees(conversation)?;
-    if removed.remove(&user).is_some() {
+    let mut removed = self.removed_list(conversation)?;
+    let before = removed.len();
+    removed.retain(|known| *known != user);
+    if removed.len() != before {
       self.save_removed_invitees(conversation, &removed)?;
     }
     Ok(())
   }
 
-  fn removed_invitees(&self, conversation: ConversationId) -> Result<BTreeMap<UserId, u64>, CoreError> {
-    let entries: Vec<(UserId, u64)> = records::get_json(
-      &self.store,
+  /// Forgets the conversation's invitee records (the pending choice, the removals) with its other
+  /// per-conversation state.
+  pub(crate) fn forget_invitee_records(&self, conversation: ConversationId) -> Result<(), CoreError> {
+    self.forget_chosen_invitees(conversation)?;
+    Ok(self.store.delete(
       Table::SyncState,
       &format!("{REMOVED_INVITEES_PREFIX}{conversation}"),
-    )?
-    .unwrap_or_default();
-    Ok(entries.into_iter().collect())
+    )?)
   }
 
-  fn save_removed_invitees(
-    &self,
-    conversation: ConversationId,
-    removed: &BTreeMap<UserId, u64>,
-  ) -> Result<(), CoreError> {
-    let entries: Vec<(UserId, u64)> = removed.iter().map(|(user, at)| (*user, *at)).collect();
+  fn removed_invitees(&self, conversation: ConversationId) -> Result<BTreeSet<UserId>, CoreError> {
+    Ok(self.removed_list(conversation)?.into_iter().collect())
+  }
+
+  fn removed_list(&self, conversation: ConversationId) -> Result<Vec<UserId>, CoreError> {
+    Ok(
+      records::get_json(
+        &self.store,
+        Table::SyncState,
+        &format!("{REMOVED_INVITEES_PREFIX}{conversation}"),
+      )?
+      .unwrap_or_default(),
+    )
+  }
+
+  fn save_removed_invitees(&self, conversation: ConversationId, removed: &[UserId]) -> Result<(), CoreError> {
+    if removed.is_empty() {
+      return Ok(self.store.delete(
+        Table::SyncState,
+        &format!("{REMOVED_INVITEES_PREFIX}{conversation}"),
+      )?);
+    }
     records::put_json(
       &self.store,
       Table::SyncState,
       &format!("{REMOVED_INVITEES_PREFIX}{conversation}"),
-      &entries,
+      &removed,
     )
   }
 
