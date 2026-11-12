@@ -777,7 +777,7 @@ mod tests {
     let camera_layer = simulcast_layers(HD, 30, 1_500_000, 1).remove(0);
     let cases = [
       (camera_layer, VideoContent::Camera, 33_333u64),
-      (screen_layer, VideoContent::Screen, 33_333),
+      (screen_layer.clone(), VideoContent::Screen, 33_333),
       (screen_layer, VideoContent::Screen, 1_000_000),
     ];
     for (layer, content, interval_us) in cases {
@@ -1013,7 +1013,9 @@ mod tests {
       30,
       ScreenContentMode::Detail,
       &ScreenShareResolution::Standard,
-    )[0];
+    )
+    // The half-size layer (720p of 1440p; the base below it is 480p since #1733).
+    .remove(1);
     let Some(mut encoder) = GstreamerEncoder::new(&layer, VideoContent::Screen) else {
       assert!(
         std::env::var_os("TEAMCRAFT_REQUIRE_HARDWARE_ENCODER").is_none(),
@@ -1032,7 +1034,7 @@ mod tests {
       } else {
         SCROLLED * 33_333 + (index - SCROLLED + 1) * 1_000_000
       };
-      let frame = page.shrunk(layer, offset, timestamp_us);
+      let frame = page.shrunk(&layer, offset, timestamp_us);
       let maybe_picture = encoder.encode(&frame, index == 0).unwrap();
       if let Some(picture) = maybe_picture
         && (SETTLED..SCROLLED).contains(&index)
@@ -1087,7 +1089,7 @@ mod tests {
     }
 
     /// The layer's picture of the page scrolled by `offset` rows of the page.
-    fn shrunk(&self, layer: VideoLayerInfo, offset: usize, timestamp_us: u64) -> VideoFrame {
+    fn shrunk(&self, layer: &VideoLayerInfo, offset: usize, timestamp_us: u64) -> VideoFrame {
       let (width, height) = (usize::from(layer.width), usize::from(layer.height));
       let mut data = Vec::with_capacity(width * height * 3 / 2);
       for y in 0..height {
