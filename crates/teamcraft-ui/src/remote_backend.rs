@@ -2091,6 +2091,14 @@ impl ChatBackend for RemoteChat {
     }
   }
 
+  fn conversation_files_page(&self, conversation: ConversationId, limit: usize) -> Option<FilesPage> {
+    match self.ask(ChatQuery::ConversationFilesPage { conversation, limit })? {
+      ChatAnswer::FilesPage { files, has_more } => Some(FilesPage { files, has_more }),
+      // An answer of another kind (an older core): its whole list, as it served it before.
+      _ => Some(FilesPage::of_found(self.conversation_files(conversation), limit)),
+    }
+  }
+
   fn conversation_media(
     &self,
     conversation: ConversationId,
