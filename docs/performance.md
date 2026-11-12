@@ -481,6 +481,20 @@ The GPU's utilization (`ioreg`, "Device Utilization %") stayed at 0 to 9 % durin
 VideoToolbox runs, as without them: the encoder is a media engine of its own. Battery drain was
 not measured (the Mac ran on AC power, and `powermetrics` needs root); CPU time is the stand-in.
 
+**The desktop's share follows the same ladder** (#1777). The encoder thread measures its load
+per encoded frame: the time the encoders took against the time since the previous frame (a
+second at most, so a still screen's pauses don't count), and the frames the capture dropped
+because the thread was busy. The call task feeds that, and how the uplink treats the top layer,
+into the same `ShareGovernor` the browser uses, every 100 ms. Its steps are H.264 only (the desktop
+encodes no AV1 or VP9): 30, 20, 15, 10, 5 fps, then the middle layer off, then the top layer's
+sizes, then the 480p base alone. A rate step changes the running encoders in place (#1781:
+OpenH264's `SetOption`, the GStreamer elements' `bitrate` while they play, which `vtenc_h264`
+passes on as VideoToolbox's `AverageBitRate` and `mfh264enc` as Media Foundation's
+`CODECAPI_AVEncCommonMeanBitRate`): no keyframe. A layer or size step publishes the share anew,
+each layer starting with a keyframe, as the browser does. On a 1440p share in OpenH264 (60 % of
+a core at 30 fps above) the first step to 20 fps should leave about 40 % (the same work per
+frame, two thirds of the frames); not yet measured on a slow machine.
+
 **Budgets** that follow from these numbers:
 
 - Desktop with a hardware encoder: encoding a share costs at most about 2 % of a core at the

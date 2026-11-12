@@ -114,8 +114,9 @@ pub struct NativeCall {
   commands: mpsc::UnboundedSender<Command>,
   events: mpsc::UnboundedReceiver<CallEngineEvent>,
   task: JoinHandle<Result<CallStats, NativeCallError>>,
-  /// The id of the next video publication: every one of the call goes through this handle.
-  next_publication: AtomicU32,
+  /// The id of the next video publication: every one of the call takes it from here, the
+  /// handle's and the call task's (a share published anew for its step, #1777).
+  next_publication: Arc<AtomicU32>,
   /// The microphone's newest meter reading (#986).
   microphone_level: SharedLevel,
 }
@@ -305,6 +306,8 @@ type StartResult = Result<(VideoSender, FirstPicture), CaptureError>;
 struct VideoState {
   /// Own tracks and their publications; the stream id arrives with `VideoPublished`.
   senders: Vec<(VideoSender, OwnPublication)>,
+  /// The handle's publication ids ([`NativeCall`]'s), for a share published anew.
+  next_publication: Arc<AtomicU32>,
   /// Own tracks being stopped: their threads end on blocking tasks (up to a second and a half for
   /// a camera), and their counters join [`VideoState::counts`] once they did (#922).
   stopping: Vec<StoppingSender>,
@@ -440,18 +443,20 @@ impl NativeCall {
     let (commands, command_rx) = mpsc::unbounded_channel();
     let (event_tx, events) = mpsc::unbounded_channel();
     let microphone_level = SharedLevel::default();
+    let next_publication = Arc::new(AtomicU32::new(0));
     let task = tokio::spawn(run_call(
       config,
       link,
       (commands.downgrade(), command_rx),
       event_tx,
       CallMeter::new(microphone_level.clone()),
+      Arc::clone(&next_publication),
     ));
     Ok(Self {
       commands,
       events,
       task,
-      next_publication: AtomicU32::new(0),
+      next_publication,
       microphone_level,
     })
   }
@@ -708,6 +713,7 @@ async fn run_call(
   ),
   events: mpsc::UnboundedSender<CallEngineEvent>,
   mut meter: CallMeter,
+  next_publication: Arc<AtomicU32>,
 ) -> Result<CallStats, NativeCallError> {
   let start = Instant::now();
   let mut engine = CallEngine::new(config.engine.clone(), start);
@@ -747,6 +753,7 @@ async fn run_call(
     stats: CallStats::default(),
     video: VideoState {
       maybe_commands: Some(own_commands),
+      next_publication,
       ..VideoState::default()
     },
     cues: CuePlayer::new(config.status_cues),
@@ -869,6 +876,7 @@ async fn run_call(
           stop_screen_audio(&mut engine, &mut maybe_screen_audio);
         }
         sinks.video.collect_stopped();
+        sinks.video.govern_shares(&mut engine, now);
         sinks.video.log_counts(now);
       },
       Some((kind, frame)) = encoded_rx.recv() => sinks.video.send(&mut engine, &kind, &frame, Instant::now()),
@@ -2359,13 +2367,24 @@ impl VideoState {
       .unwrap_or_else(|error| Err(CaptureError::Device(format!("the capture start failed: {error}"))))
       .map(|(sender, first_picture)| {
         self.stop(engine, &kind);
-        // The encoders are ours: a camera follows the uplink with its layers' bitrates (#939).
-        engine.publish_adaptive_video(
-          publication,
-          sender.kind.clone(),
-          VideoCodec::H264,
-          sender.layers.clone(),
-        );
+        // The encoders are ours: a camera follows the uplink with its layers' bitrates (#939); a
+        // share on the share policy changes its rates in place and steps like the browser's
+        // (#1781).
+        if sender.is_governed_share() {
+          engine.publish_video_adapting_in_place(
+            publication,
+            sender.kind.clone(),
+            VideoCodec::H264,
+            sender.layers.clone(),
+          );
+        } else {
+          engine.publish_adaptive_video(
+            publication,
+            sender.kind.clone(),
+            VideoCodec::H264,
+            sender.layers.clone(),
+          );
+        }
         self.senders.push((sender, OwnPublication::new(publication)));
         first_picture
       })
@@ -2544,6 +2563,7 @@ impl VideoState {
       });
       sent.maybe_frames_captured = Some(progress.frames_captured);
       sent.maybe_frames_black = Some(progress.frames_black);
+      sent.maybe_share_limits = sender.share_limits().map(crate::share_policy::ShareLimits::stats);
     }
   }
 
@@ -2568,6 +2588,26 @@ impl VideoState {
   fn follow_publications(&mut self, own_device: DeviceId, event: &CallEngineEvent) {
     for (_, publication) in &mut self.senders {
       publication.follow(own_device, event);
+    }
+  }
+
+  /// Takes each governed share a step along the share policy for its encoders' load and its
+  /// uplink (#1777); a share whose layers changed goes out anew under a new publication, as the
+  /// browser's does. The capture goes on; viewers see the track end and the new one start, with
+  /// keyframes.
+  fn govern_shares(&mut self, engine: &mut CallEngine, now: Instant) {
+    for (sender, publication) in &mut self.senders {
+      let maybe_top = publication
+        .maybe_stream_id
+        .and_then(|stream_id| engine.uplink_top(stream_id));
+      let Some(layers) = sender.govern_share(maybe_top, now) else {
+        continue;
+      };
+      let republished = VideoPublicationId(self.next_publication.fetch_add(1, Ordering::Relaxed));
+      debug!(kind = ?sender.kind, layers = layers.len(), "video track goes out with other layers");
+      engine.withdraw_video(publication.id);
+      engine.publish_video_adapting_in_place(republished, sender.kind.clone(), VideoCodec::H264, layers);
+      *publication = OwnPublication::new(republished);
     }
   }
 

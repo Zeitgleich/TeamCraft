@@ -296,6 +296,7 @@ async fn run(limited: Limited, steps: &[(Option<u64>, Duration)]) -> Timeline {
     maybe_filter: None,
     maybe_picture_tap: None,
     maybe_idle_refresh: None,
+    maybe_screen_profile: None,
   };
   presenter.start_video(config).await.unwrap();
 

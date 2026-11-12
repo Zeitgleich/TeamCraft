@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 
 use teamcraft_media::call_engine::CallEngineEvent;
 use teamcraft_media::capture_convert::{PixelFormat, RawPicture};
-use teamcraft_media::video::{VideoFrame, VideoResolution, screen_layers};
+use teamcraft_media::video::{ScreenProfile, VideoFrame, VideoResolution, screen_layers};
 use teamcraft_media::video_capture::{CaptureError, CaptureFormat, FrameSender, VideoCapture};
 use teamcraft_media::video_codec::{EncodedPicture, VideoCodecError, VideoEncoder};
 use teamcraft_media::video_pipeline::{EncoderFactory, VideoSendConfig, preferred_encoders};
@@ -76,7 +76,9 @@ const MAX_LINK_DELAY: Duration = Duration::from_secs(2);
 const MIN_JUDGED_SLIDES: usize = 3;
 
 /// #1005: slides of text reach the viewer through an uplink with room for the share but not for
-/// its bursts at once, each within seconds, and the bottleneck drops next to nothing.
+/// its bursts at once, each within seconds, and the bottleneck drops next to nothing. The desktop's
+/// share steps its rate with the uplink in place (#1781): no keyframe beyond those asked for and
+/// those of new layers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn slides_reach_the_viewer_through_a_limited_uplink() {
   let layers_bps: u64 = share_layers(WINDOW)
@@ -119,6 +121,11 @@ async fn slides_reach_the_viewer_through_a_limited_uplink() {
     "{:.1} % of the uplink's bytes dropped:\n{summary}",
     dropped * 100.0
   );
+  let (keyframes, allowed) = run.keyframes();
+  assert!(
+    keyframes <= allowed,
+    "{keyframes} keyframes, {allowed} asked for or for new layers:\n{summary}"
+  );
 }
 
 /// Prints per uplink what the share sent and how its slides reached the viewer.
@@ -153,17 +160,25 @@ struct Run {
   /// The presenter's uplink estimates: when, bit/s.
   uplink_estimates: Vec<(Duration, u32)>,
   layers_needed: Vec<Vec<u8>>,
+  /// When a viewer (through the SFU) asked the presenter for a keyframe.
+  keyframe_requests: Vec<Duration>,
+  /// When the share went out anew with other layers (a size step of the share policy).
+  republished: Vec<Duration>,
   started_at: Duration,
 }
 
-/// The desktop's layers for a detail share of a screen of `size`.
+/// The desktop's layers for a detail share of a screen of `size`, as it starts.
 fn share_layers(size: VideoResolution) -> Vec<VideoLayerInfo> {
-  screen_layers(
-    size,
-    FRAMERATE,
-    ScreenContentMode::Detail,
-    &ScreenShareResolution::Standard,
-  )
+  let profile = profile();
+  screen_layers(size, FRAMERATE, profile.mode, &profile.size)
+}
+
+/// The desktop's share: detail at the standard size.
+fn profile() -> ScreenProfile {
+  ScreenProfile {
+    mode: ScreenContentMode::Detail,
+    size: ScreenShareResolution::Standard,
+  }
 }
 
 /// Shares slides at `size` through an uplink limited to `maybe_limit_bps`.
@@ -193,16 +208,24 @@ async fn run(size: VideoResolution, maybe_limit_bps: Option<u64>) -> Run {
     maybe_filter: None,
     maybe_picture_tap: None,
     maybe_idle_refresh: VideoSendConfig::default_idle_refresh(&VideoTrackKind::Screen),
+    // The share steps along the share policy like the browser's (#1777), its rates in place
+    // (#1781).
+    maybe_screen_profile: Some(profile()),
   };
   presenter.start_video(config).await.unwrap();
 
   let received: Arc<Mutex<Vec<(Duration, u64, VideoResolution)>>> = Arc::default();
   let (mut uplink_estimates, mut layers_needed) = (Vec::new(), Vec::new());
+  let (mut keyframe_requests, mut published) = (Vec::new(), Vec::new());
   let end = tokio::time::Instant::now() + SHARE;
   while tokio::time::Instant::now() < end {
     match tokio::time::timeout(Duration::from_millis(5), presenter.next_event()).await {
       Ok(Some(CallEngineEvent::LayersNeeded { layers, .. })) => layers_needed.push(layers),
       Ok(Some(CallEngineEvent::UplinkEstimate { bps, .. })) => uplink_estimates.push((start.elapsed(), bps)),
+      Ok(Some(CallEngineEvent::KeyframeRequested { .. })) => keyframe_requests.push(start.elapsed()),
+      Ok(Some(CallEngineEvent::VideoPublished(track))) if track.kind == VideoTrackKind::Screen => {
+        published.push(start.elapsed());
+      },
       _ => {},
     }
     if let Ok(Some(CallEngineEvent::VideoPublished(track))) =
@@ -240,6 +263,9 @@ async fn run(size: VideoResolution, maybe_limit_bps: Option<u64>) -> Run {
     link,
     uplink_estimates,
     layers_needed,
+    keyframe_requests,
+    // The first publication is the share's start.
+    republished: published.into_iter().skip(1).collect(),
     started_at,
   }
 }
@@ -329,6 +355,21 @@ impl Run {
     estimates.fold((u32::MAX, 0), |(low, high), bps| (low.min(bps), high.max(bps)))
   }
 
+  /// After [`SETTLE`]: the keyframes out of the encoders, and the most there may be: one per
+  /// keyframe asked for, and one per layer each time the share went out with new layers. A rate
+  /// step adds none (#1781: rebuilt encoders sent 9 keyframes in 17 pictures).
+  fn keyframes(&self) -> (usize, usize) {
+    let settled = self.started_at + SETTLE;
+    let sent = self
+      .encoded
+      .iter()
+      .filter(|picture| picture.is_keyframe && picture.at >= settled)
+      .count();
+    let asked = self.keyframe_requests.iter().filter(|at| **at >= settled).count();
+    let republished = self.republished.iter().filter(|at| **at >= settled).count();
+    (sent, asked + republished * self.layers.len())
+  }
+
   /// The share of the uplink's bytes the bottleneck dropped after [`SETTLE`].
   fn dropped_share(&self) -> f64 {
     let settled = self.started_at + SETTLE;
@@ -383,6 +424,13 @@ impl Run {
         self.estimate_range().0 / 1000,
         self.estimate_range().1 / 1000,
         self.layers_needed.last(),
+      ),
+      format!(
+        "keyframes after the first {} s: {} of {} asked for or for new layers; published anew {} times",
+        SETTLE.as_secs(),
+        self.keyframes().0,
+        self.keyframes().1,
+        self.republished.len(),
       ),
     ];
     let seconds = (SHARE.as_secs_f64() - 1.0).max(1.0);

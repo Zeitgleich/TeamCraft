@@ -170,6 +170,7 @@ async fn check_content_arrives(
     kind: kind.clone(),
     maybe_picture_tap: None,
     maybe_idle_refresh: VideoSendConfig::default_idle_refresh(&kind),
+    maybe_screen_profile: None,
     capture,
     layers,
     encoders: software_encoders(),

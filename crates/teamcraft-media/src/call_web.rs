@@ -127,7 +127,7 @@ use crate::jitter::{JitterBuffer, JitterBufferConfig, Playout};
 use crate::receive_load::{DecodedFrame, Importance, ReceiveLoad, ReceiveOverload, WatchedStream};
 use crate::resample::MonoResampler;
 use crate::rtp::AudioLevel;
-use crate::share_policy::{EncoderKind, ShareCodecs, ShareEncoders};
+use crate::share_policy::{ShareCodecs, ShareEncoders};
 use crate::video::{EncodedVideoFrame, ScreenProfile, TOP_LAYER, VideoResolution, chosen_layer};
 use crate::web_api::{
   AudioData, AudioDecoder, AudioEncoder, EncodedAudioChunk, QUIC_GLOBAL, WORKLET_SOURCE, WebTransport,
@@ -1617,7 +1617,7 @@ impl CallState<'_> {
       sent.maybe_frames_given = Some(given);
       sent.maybe_frames_skipped = Some(skipped);
       sent.maybe_camera_limits = sender.camera_limits().map(camera_limits_stats);
-      sent.maybe_share_limits = sender.share_limits().map(share_limits_stats);
+      sent.maybe_share_limits = sender.share_limits().map(crate::share_policy::ShareLimits::stats);
     }
     self.add_decoding_stats(&mut report);
     if let Some(transport) = &self.maybe_transport
@@ -3063,50 +3063,6 @@ fn share_codecs(engine: &CallEngine, candidates: &[VideoCodec]) -> ShareCodecs {
   ShareCodecs {
     by_all: engine.video_codecs_for(candidates),
     by_some: engine.layer_codecs_for(candidates),
-  }
-}
-
-fn share_limits_stats(
-  limits: crate::share_policy::ShareLimits,
-) -> teamcraft_client_api::video_stats::ShareLimitsStats {
-  use teamcraft_client_api::video_stats::{EncoderOverload, ShareLimitsStats, ShareStepStats, VideoSize};
-
-  use crate::camera_governor::OverloadReason;
-  use crate::share_policy::ShareStep;
-
-  let step = |step: ShareStep| ShareStepStats {
-    top_codec: step.top_codec,
-    top_framerate: step.top_framerate,
-    maybe_top: step.maybe_top.map(|top| VideoSize {
-      width: top.width,
-      height: top.height,
-    }),
-    has_middle: step.has_middle,
-  };
-  ShareLimitsStats {
-    av1_encoder: encoder_kind(limits.encoders.av1),
-    vp9_encoder: encoder_kind(limits.encoders.vp9),
-    planned: step(limits.planned),
-    now: step(limits.now),
-    level: u8::try_from(limits.level).unwrap_or(u8::MAX),
-    levels: u8::try_from(limits.levels).unwrap_or(u8::MAX),
-    maybe_overload: limits.maybe_reason.map(|reason| match reason {
-      OverloadReason::SkippedFrames => EncoderOverload::SkippedFrames,
-      OverloadReason::QueuedFrames => EncoderOverload::QueuedFrames,
-      OverloadReason::SlowEncoding => EncoderOverload::SlowEncoding,
-    }),
-    uplink_steps: u8::try_from(limits.uplink_steps).unwrap_or(u8::MAX),
-    sizes: u8::try_from(limits.sizes).unwrap_or(u8::MAX),
-  }
-}
-
-fn encoder_kind(kind: EncoderKind) -> teamcraft_client_api::video_stats::ShareEncoderKind {
-  use teamcraft_client_api::video_stats::ShareEncoderKind;
-
-  match kind {
-    EncoderKind::Hardware => ShareEncoderKind::Hardware,
-    EncoderKind::Software => ShareEncoderKind::Software,
-    EncoderKind::Unavailable => ShareEncoderKind::Unavailable,
   }
 }
 

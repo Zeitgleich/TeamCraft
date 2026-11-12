@@ -246,6 +246,7 @@ async fn run(scenario: Scenario, duration: Duration) -> Timeline {
     maybe_filter: None,
     maybe_picture_tap: None,
     maybe_idle_refresh: VideoSendConfig::default_idle_refresh(&VideoTrackKind::Screen),
+    maybe_screen_profile: None,
   };
   presenter.start_video(config).await.unwrap();
 

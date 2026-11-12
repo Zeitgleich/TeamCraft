@@ -39,6 +39,7 @@ pub mod ringtone;
 pub mod rtp;
 pub mod send_queue;
 pub mod share_policy;
+pub mod share_steps;
 #[cfg(feature = "sound-files")]
 pub mod sound_file;
 pub mod uplink_layers;
