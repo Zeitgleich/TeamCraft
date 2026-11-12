@@ -2132,7 +2132,9 @@ fn handle_video(
       timestamp,
       queued,
       late_by,
-    } => video.remote.on_decoding(stream_id, timestamp, queued, late_by),
+    } => video
+      .remote
+      .on_decoding(stream_id, timestamp, queued, late_by, Instant::now()),
     VideoCommand::Send { stream_id, frame } => {
       // Frames the app encodes itself; what becomes of each is its own business.
       let _ = engine.send_video(stream_id, &frame, Instant::now());
@@ -2318,7 +2320,7 @@ impl Sinks {
               self
                 .video
                 .remote
-                .on_decoding(stream_id, timestamp, queued, late_by);
+                .on_decoding(stream_id, timestamp, queued, late_by, Instant::now());
             },
             None => {
               let _ = self.events.send(CallEngineEvent::VideoFrame(frame));

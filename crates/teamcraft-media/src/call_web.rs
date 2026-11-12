@@ -1866,11 +1866,15 @@ impl CallState<'_> {
           let late_by = self.maybe_datagram_read_at.map_or(Duration::ZERO, |read_at| {
             Instant::now().saturating_duration_since(read_at)
           });
-          self.receive_load.on_frame(DecodedFrame {
-            queued,
-            late_by,
-            interval,
-          });
+          self.receive_load.on_frame(
+            frame.stream_id,
+            DecodedFrame {
+              queued,
+              late_by,
+              interval,
+            },
+            Instant::now(),
+          );
         },
         EngineOutput::Event(event) => {
           match &event {
