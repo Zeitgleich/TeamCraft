@@ -1916,6 +1916,15 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     })
   }
 
+  /// The relations index lists them in display order: its root, the page that holds them, and
+  /// their records, whatever the conversation's length.
+  fn pinned_messages(&self, conversation: ConversationId) -> Result<Vec<StoredMessage>, StoreError> {
+    self.reading(|state| {
+      let keys = self.related_keys(state, conversation, Relation::Pinned)?;
+      self.load_listed(state, conversation, &keys, StoredMessage::is_shown_pin)
+    })
+  }
+
   fn reactions_to(
     &self,
     conversation: ConversationId,
@@ -2811,6 +2820,105 @@ mod tests {
         .map(|stored| stored.client_message_id)
         .collect();
       assert_eq!(linked_ids, [linked.client_message_id]);
+    }
+
+    /// Issue #1757: the pinned panel of a conversation with 100,000 messages reads the relations
+    /// index's root, the page that holds the pins, and the pinned records: what it lists, not the
+    /// conversation (it read and decrypted all of it, 3 to 9 s on Android).
+    #[test]
+    fn the_pinned_panel_reads_only_the_pins() {
+      const MESSAGES: i64 = 100_000;
+      const CHANNEL: i64 = 7;
+      let records = Records::default();
+      let key = SymmetricKey::generate(&mut OsRng);
+      let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::default()).unwrap();
+      let pinned_at = [3, MESSAGES / 2, MESSAGES - 2];
+      for start in (0..MESSAGES).step_by(10_000) {
+        crate::store::write_group(&store, || {
+          for n in start..start + 10_000 {
+            let mut stored = numbered(CHANNEL, n);
+            stored.is_pinned = pinned_at.contains(&n);
+            store.upsert_message(&stored)?;
+          }
+          Ok::<_, StoreError>(())
+        })
+        .unwrap();
+      }
+      drop(store);
+
+      let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::minimal()).unwrap();
+      records.reads.set(0);
+      let pinned: Vec<ClientMessageId> = store
+        .pinned_messages(id(CHANNEL))
+        .unwrap()
+        .into_iter()
+        .map(|stored| stored.client_message_id)
+        .collect();
+      let expected: Vec<ClientMessageId> = pinned_at.iter().map(|n| client_id(CHANNEL, *n)).collect();
+      assert_eq!(pinned, expected, "in display order");
+      assert!(
+        records.reads.get() <= 2 + pinned_at.len(),
+        "a root, a page and the pinned records: {} reads",
+        records.reads.get()
+      );
+
+      // Unpinned, then the conversation removed: the index follows.
+      let mut unpinned = numbered(CHANNEL, MESSAGES / 2);
+      unpinned.is_pinned = false;
+      store.upsert_message(&unpinned).unwrap();
+      records.reads.set(0);
+      assert_eq!(store.pinned_messages(id(CHANNEL)).unwrap().len(), 2);
+      assert!(records.reads.get() <= 2 + pinned_at.len());
+      store.delete_messages(id(CHANNEL)).unwrap();
+      assert!(store.pinned_messages(id(CHANNEL)).unwrap().is_empty());
+    }
+
+    /// Issue #1757: a catalog of version 4 knows no pins. The store builds it again when it opens,
+    /// and the pinned panel then finds the pins made before the upgrade through the index.
+    #[test]
+    fn a_catalog_from_before_the_pinned_index_gets_it() {
+      let records = Records::default();
+      let key = SymmetricKey::generate(&mut OsRng);
+      let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::default()).unwrap();
+      fill(&store);
+      let mut pinned = numbered(1, 10);
+      pinned.is_pinned = true;
+      let mut later = numbered(1, MESSAGES_PER_CONVERSATION - 1);
+      later.is_pinned = true;
+      store.upsert_message(&later).unwrap();
+      store.upsert_message(&pinned).unwrap();
+      let old_generation = store.read_catalog_state().unwrap().unwrap().generation();
+      // What a version-4 build wrote: the same indexes without the pins. Here the pins' entries are
+      // taken out of the relations index, as version 4 never wrote them.
+      store
+        .grouped(|state| {
+          store.relations(state, id(1), |nodes| {
+            for message in [&pinned, &later] {
+              sealed_index::remove(nodes, &Relation::Pinned.key_of(MessageKey::of(message)))?;
+            }
+            Ok(())
+          })
+        })
+        .unwrap();
+      assert!(store.pinned_messages(id(1)).unwrap().is_empty(), "no pins known");
+      let old_state = format!(r#"{{"state":"complete","generation":{old_generation},"version":4}}"#);
+      store
+        .grouped(|_| store.write_named(CATALOG_TABLE, META_KEY, old_state.as_bytes()))
+        .unwrap();
+      drop(store);
+
+      let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::default()).unwrap();
+      let state = store.read_catalog_state().unwrap().unwrap();
+      assert!(matches!(
+        state,
+        CatalogState::Complete {
+          version: CATALOG_VERSION,
+          ..
+        }
+      ));
+      assert_ne!(state.generation(), old_generation, "built again");
+      assert_eq!(store.pinned_messages(id(1)).unwrap(), vec![pinned, later]);
+      assert!(store.pinned_messages(id(0)).unwrap().is_empty());
     }
 
     /// What building the catalog again for version 3 costs on a large store (#1509): every record

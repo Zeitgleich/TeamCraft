@@ -320,6 +320,26 @@ mod tests {
     assert_eq!(FeedMode::from_slug("whatever"), FeedMode::Log);
   }
 
+  /// The log reads long entries by scrolling sideways (#1744): the row height stays the estimate's
+  /// and nothing cuts the text off.
+  #[test]
+  fn log_css_scrolls_sideways_and_keeps_the_row_height() {
+    let css = include_str!("../../style/main/140-log.css");
+    assert!(css.contains("overflow-x: auto;"));
+    assert!(css.contains("width: max-content;"));
+    let height = format!(
+      "height: {}px;",
+      crate::components::message_list::ESTIMATED_LOG_HEIGHT
+    );
+    assert!(css.contains(&height), "row height must equal the list's estimate");
+    let log_text = css
+      .split(".log-text {")
+      .nth(1)
+      .and_then(|rest| rest.split('}').next())
+      .expect("the log text rule exists");
+    assert!(!log_text.contains("overflow"), "the text must not be clipped");
+  }
+
   #[test]
   fn scanning_keeps_only_matching_entries_in_order() {
     let backend = MockBackend::new(1_800_000_000_000);

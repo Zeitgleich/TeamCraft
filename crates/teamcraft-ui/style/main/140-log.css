@@ -16,6 +16,18 @@
   flex-shrink: 0;
 }
 
+/* A long entry is read by scrolling the log sideways, as in a terminal (#1744): rows keep their
+   single 22px line (the virtual list's height estimate stays exact) and are as wide as their text.
+   The scroll width is that of the widest row rendered now: rows outside the window are not in the
+   DOM, so the bar may change while scrolling up or down, which a line of a terminal does too.
+   `overscroll-behavior-x: contain` keeps a sideways swipe at the left edge from also triggering the
+   browser's or system's back gesture; `pan-x pan-y` leaves both scroll axes to the browser. */
+.message-list.log-view {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  touch-action: pan-x pan-y;
+}
+
 /* Compact log view for integration channels. Rows have a fixed height so the estimate is exact. */
 .msg-log,
 .log-entry {
@@ -26,10 +38,21 @@
   padding: 0 16px;
   font: var(--text-xs)/22px var(--font-mono);
   white-space: nowrap;
+  /* At least the pane wide (hover/focus background), wider for a long text. */
+  width: max-content;
+  min-width: 100%;
 }
 
 .msg-log-batch {
+  width: max-content;
+  min-width: 100%;
   padding: 0;
+}
+
+/* Rows of a batch are as wide as the batch, which is as wide as its widest row. */
+.msg-log-batch > .log-entry {
+  width: auto;
+  min-width: 100%;
 }
 
 .msg-log:focus,
@@ -65,10 +88,9 @@
   font-weight: var(--weight-bold);
 }
 
+/* The whole text, never cut: the log scrolls sideways instead (see above). */
 .log-text {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  flex: none;
 }
 
 .level-debug .log-level {
