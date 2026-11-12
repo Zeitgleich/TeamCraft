@@ -14,6 +14,10 @@ cargo test --workspace --all-features
 cargo deny check
 ```
 
+For a change in one crate, `scripts/check-feature-combos.sh <crate>` runs clippy on just that
+crate with the feature sets the workspace builds it with, which is much faster than the workspace
+run. CI keeps running the full workspace check.
+
 ## Guidelines
 
 The rules are in [AGENTS.md](AGENTS.md) and [.claude/rules/](.claude/rules/). In short:

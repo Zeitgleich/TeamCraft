@@ -4,7 +4,9 @@
 //! The SQLCipher store purges on its one connection ([`PurgeState`]); the sealed store, whose read
 //! threads have connections of their own, on a connection and thread of its own (`log_purger`).
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(feature = "sqlcipher")]
+use std::time::Instant;
 
 use rusqlite::Connection;
 
@@ -27,9 +29,11 @@ pub(crate) const PURGE_INTERVAL: Duration = Duration::from_secs(30);
 /// Not after every group of writes: each try writes the log back and syncs, under the writer's
 /// lock, so on a phone's flash every write and every read that waits for the writer paid for it
 /// while a sync ran (a channel stayed empty for half a minute, 1.0.29).
+#[cfg(feature = "sqlcipher")]
 const FORCED_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 /// What the write-ahead log still owes a purge.
+#[cfg(feature = "sqlcipher")]
 pub(crate) struct PurgeState {
   /// Something was written since the log was last truncated, and a purge was asked for.
   pub(crate) is_due: bool,
@@ -45,6 +49,7 @@ pub(crate) struct PurgeState {
   busy_timeout: Duration,
 }
 
+#[cfg(feature = "sqlcipher")]
 impl PurgeState {
   /// For a connection whose statements wait `busy_timeout` for another connection's lock.
   pub(crate) fn new(busy_timeout: Duration) -> Self {
@@ -123,6 +128,7 @@ impl PurgeState {
 /// busy timeout it held up the engine and every read thread's write for that long whenever a read
 /// thread was reading (TEAMCRAFT-F). Frames it could write back are written back; the truncation
 /// is tried again later ([`PurgeState::run_if_due`]).
+#[cfg(feature = "sqlcipher")]
 fn checkpoint_truncate(connection: &Connection, busy_timeout: Duration) -> Result<bool, StoreError> {
   connection.busy_timeout(Duration::ZERO).map_err(sqlite_error)?;
   let checkpointed = checkpoint_truncate_now(connection);
@@ -145,7 +151,7 @@ pub(crate) fn checkpoint_truncate_now(connection: &Connection) -> Result<bool, S
   Ok(busy == 0 && log_frames == checkpointed_frames)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sqlcipher"))]
 mod tests {
   use super::*;
 
