@@ -108,6 +108,23 @@ pub struct ForwardingConfig {
   /// the SFU's of the downlink, and what it tells clients they may send for the uplink. Zero
   /// turns both off.
   pub probe_bytes: u32,
+  /// Voices first on a thin downlink (#1893).
+  pub downlink_voice: DownlinkVoiceConfig,
+}
+
+/// How a receiver's downlink is shared out between voices and video (#1893). A phone on a link
+/// of 64 kbit/s carries about one voice: it gets the loudest speaker, not the three loudest, and
+/// no video.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DownlinkVoiceConfig {
+  /// What one forwarded voice takes of a downlink: Opus at 32 kbit/s in 20 ms packets with its
+  /// headers. A receiver gets as many of the selected speakers as its downlink carries at this
+  /// rate, loudest first, and always the loudest.
+  pub voice_bps: u32,
+  /// A downlink below this is thin: its estimate grows by no demand (video it doesn't get would
+  /// let it grow past what the link carries), and its probes for video that waits come
+  /// rarely ([`RateProbeConfig::for_voice`]): each one that falls short costs the voices.
+  pub thin_below_bps: u32,
 }
 
 /// How often publishers are asked for keyframes. Keyframes are large: a receiver that keeps
@@ -293,6 +310,16 @@ impl Default for ForwardingConfig {
       retransmit: RetransmitConfig::default(),
       voice_guard: VoiceGuardConfig::default(),
       probe_bytes: 15_000,
+      downlink_voice: DownlinkVoiceConfig::default(),
+    }
+  }
+}
+
+impl Default for DownlinkVoiceConfig {
+  fn default() -> Self {
+    Self {
+      voice_bps: 60_000,
+      thin_below_bps: 150_000,
     }
   }
 }
@@ -823,10 +850,19 @@ impl Forwarder {
       if let Some(speakers) = self.speakers.record(sender, level, now) {
         route.effects.push(Effect::ActiveSpeakers(speakers));
       }
-      if self.speakers.is_selected(sender) {
-        self.others(sender)
-      } else {
-        Vec::new()
+      match self.speakers.selected().iter().position(|id| *id == sender) {
+        // The loudest go to everyone; the others to those whose downlink carries them too.
+        Some(rank) => self
+          .others(sender)
+          .into_iter()
+          .filter(|receiver| {
+            self
+              .participants
+              .get(receiver)
+              .is_some_and(|participant| rank < participant.voices_carried(&self.config.downlink_voice))
+          })
+          .collect(),
+        None => Vec::new(),
       }
     } else {
       let receivers = self.video_receivers(header.stream_id, header.layer.value(), &rtp_header, now)?;
@@ -1058,8 +1094,17 @@ impl Forwarder {
   /// The next train of padding for the probe `receiver`'s allocation waits for, when one is due:
   /// a cluster starts when the allocation asks for one and the last is long enough ago.
   fn probe_downlink(&mut self, receiver: DeviceId, now: Instant) -> Option<Effect> {
-    let config = self.config.probe;
+    let thin_below_bps = self.config.downlink_voice.thin_below_bps;
     let participant = self.participants.get_mut(&receiver)?;
+    let config = if participant.downlink_bps() < thin_below_bps {
+      RateProbeConfig {
+        retry_after: RateProbeConfig::for_voice().retry_after,
+        max_retry_after: RateProbeConfig::for_voice().max_retry_after,
+        ..self.config.probe
+      }
+    } else {
+      self.config.probe
+    };
     participant.probe.on_timer(&config, now);
     if participant.is_suspended {
       return None;
@@ -1253,7 +1298,11 @@ impl Forwarder {
         })
       })
       .collect();
-    let maybe_demand = (!demands.is_empty()).then(|| full_demand_bps(&self.config.layers, &demands));
+    // A thin downlink grows by what gets through, and by probes, not by video it doesn't get
+    // (#1893): that demand let a 64 kbit/s link's estimate grow past what it carries.
+    let is_thin = estimate < self.config.downlink_voice.thin_below_bps;
+    let maybe_demand =
+      (!demands.is_empty() && !is_thin).then(|| full_demand_bps(&self.config.layers, &demands));
     participant.downlink.set_demand_bps(maybe_demand);
     // While the downlink estimate is in its fast start, it only grows, from feedback of traffic
     // far below it: holding an upswitch for the usual time validates nothing, it only keeps a
@@ -1477,6 +1526,13 @@ impl ParticipantRoute {
       .maybe_link_capacity_bps
       .unwrap_or_else(|| self.downlink.estimate_bps())
   }
+
+  /// How many forwarded voices its downlink carries (#1893): at least one.
+  fn voices_carried(&self, config: &DownlinkVoiceConfig) -> usize {
+    usize::try_from(self.downlink_bps() / config.voice_bps.max(1))
+      .unwrap_or(usize::MAX)
+      .max(1)
+  }
 }
 
 impl VideoTrackRoute {
@@ -1617,6 +1673,35 @@ mod tests {
   mod audio {
     use super::*;
 
+    /// #1893: a receiver on a 64 kbit/s downlink gets the loudest speaker only; one on 150 kbit/s
+    /// the two loudest; everyone else all three.
+    #[test]
+    fn a_thin_downlink_gets_as_many_speakers_as_it_carries() {
+      let (mut forwarder, now) = room(5);
+      forwarder.set_link_capacity(device(4), Some(64_000));
+      forwarder.set_link_capacity(device(5), Some(150_000));
+      let mut receivers_of = BTreeMap::new();
+      for round in 0..20 {
+        for n in 1..=3u64 {
+          let at = now + Duration::from_millis(20 * round);
+          let route = forwarder.route(device(n), &audio(n, (10 * n) as u8), at).unwrap();
+          if round == 19 {
+            let mut to: Vec<u64> = route
+              .deliveries
+              .iter()
+              .map(|(receiver, _)| receiver.to_string().parse().unwrap())
+              .collect();
+            to.sort_unstable();
+            receivers_of.insert(n, to);
+          }
+        }
+      }
+      assert_eq!(forwarder.active_speakers(), devices(&[1, 2, 3]));
+      assert_eq!(receivers_of[&1], vec![2, 3, 4, 5], "the loudest reaches everyone");
+      assert_eq!(receivers_of[&2], vec![1, 3, 5]);
+      assert_eq!(receivers_of[&3], vec![1, 2]);
+    }
+
     #[test]
     fn top_three_of_five_are_forwarded() {
       let (mut forwarder, now) = room(5);
@@ -1736,6 +1821,19 @@ mod tests {
 
   mod video {
     use super::*;
+
+    /// #1893: a thin downlink's estimate grows by no demand for video it doesn't get; a good
+    /// one's does, so its layers can come back.
+    #[test]
+    fn a_thin_downlink_grows_by_no_demand() {
+      let (mut forwarder, now) = video_room();
+      forwarder.subscribe(device(2), VIDEO, Some(2), now).unwrap();
+      forwarder.on_timer(device(2), now);
+      assert!(forwarder.participants[&device(2)].downlink.demand_bps().is_some());
+      forwarder.set_link_capacity(device(2), Some(64_000));
+      forwarder.on_timer(device(2), now + Duration::from_millis(100));
+      assert_eq!(forwarder.participants[&device(2)].downlink.demand_bps(), None);
+    }
 
     #[test]
     fn switch_happens_on_a_keyframe_of_the_target_layer() {
