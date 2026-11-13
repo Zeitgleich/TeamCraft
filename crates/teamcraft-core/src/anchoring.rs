@@ -39,6 +39,20 @@ pub struct MeetingExpectation {
   pub organizer: UserId,
 }
 
+/// What this device can expect of a conversation's anchor when it enters the group, by the
+/// server's answer for the conversation (D10, #1747).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MeetingCheck {
+  /// Not a meeting chat: its anchor must be a channel's.
+  NotAMeeting,
+  /// A meeting chat whose meeting and organizer are known: the anchor must name them.
+  Expect(MeetingExpectation),
+  /// A meeting chat whose organizer (or, without a meeting anchor, whose meeting) the server
+  /// doesn't name: the anchor can't vouch for itself, so it grants nothing and nothing is pinned;
+  /// a pin already held still holds.
+  Unknown,
+}
+
 /// What a group state says about its anchor, before the pin and the floor.
 #[derive(Debug)]
 pub enum AnchorOutcome {
@@ -162,6 +176,26 @@ pub fn meeting_named_by(bytes: &[u8]) -> Option<MeetingExpectation> {
     },
     _ => None,
   }
+}
+
+/// Check 6 for a meeting chat whose meeting or organizer the server doesn't name
+/// ([`MeetingCheck::Unknown`]): the anchor isn't checked against itself, so it pins nothing; a pin
+/// the user's devices hold is still held to the floor on the anchor's own unverified word.
+pub fn judge_unknown_meeting(
+  maybe_floor: Option<&AnchorFloor>,
+  maybe_bytes: Option<&[u8]>,
+  epoch: u64,
+) -> AnchorVerdict {
+  let Some(floor) = maybe_floor else {
+    return AnchorVerdict::Unanchored;
+  };
+  let outcome = match maybe_bytes {
+    None => AnchorOutcome::Absent,
+    Some(bytes) => AnchorOutcome::Unverified {
+      maybe_parsed: ParsedAnchor::of(bytes),
+    },
+  };
+  judge_entering(Some(floor), &outcome, epoch)
 }
 
 /// D10: whether a meeting chat's group state is refused for what its anchor names, pin or not. An

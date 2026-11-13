@@ -3660,8 +3660,14 @@ and couldn't count for a purge.
     The admitters (and with them the signed invitees) are verified against the founder of the anchor the device
     pinned, or this user while it holds an unsigned choice of the organizer's: a server that names somebody else as
     organizer counts only if the signed host lists hand the meeting over (#1720); an insider it names gets nothing.
+    The anchor never vouches for itself: when the server names no organizer (or no meeting while the anchor names
+    one, the anchor's meeting is held to the organizer it names), the anchor grants nothing and nothing is pinned;
+    a pin already held still holds. The handover chain is checked against the newest host lists the device kept,
+    so a server can't replay a chain that ends at an organizer the meeting was handed on from.
     Residual risk: a meeting chat whose group carries no anchor (founded before the release, or by an invitee who
-    leaves it out) is judged as before on a device that hasn't pinned the chat.
+    leaves it out) is judged as before on a device that hasn't pinned the chat. Which organizer the server names
+    stays its word at a device's first entry, and the pin then makes it sticky for that user: their devices refuse
+    any other founding of the chat.
 - **The invitee list** (#1726). The organizer's signed admitters statement (`meeting_admitters`, #1103,
   above) gains the invitees' user IDs, under the same sequence, end of validity and storage. A host's Join adds only
   users the newest statement names and the server still lists (its word can only lower); anybody else knocks at the

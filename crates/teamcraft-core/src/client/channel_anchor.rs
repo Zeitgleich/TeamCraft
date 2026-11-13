@@ -16,7 +16,9 @@ use teamcraft_crypto::mls::{ConversationGroup, MlsError};
 use teamcraft_proto::{ConversationId, ConversationKind, ConversationResponse, MeetingId, SpaceId, UserId};
 
 use super::Client;
-use crate::anchoring::{self, AnchorOutcome, AnchorVerdict, MeetingExpectation, ReleaseVersion};
+use crate::anchoring::{
+  self, AnchorOutcome, AnchorVerdict, MeetingCheck, MeetingExpectation, ReleaseVersion,
+};
 use crate::api::ServerApi;
 use crate::channel_roles::RoleFounding;
 use crate::convert;
@@ -186,9 +188,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     let tree_users = users_of(group)?;
     let directory = self.anchor_directory(group.anchor_bytes(), tree_users).await?;
-    let maybe_meeting = self
+    let maybe_meeting = match self
       .meeting_expectation_entering(conversation, group, &directory)
-      .await?;
+      .await?
+    {
+      MeetingCheck::NotAMeeting => None,
+      MeetingCheck::Expect(expected) => Some(expected),
+      MeetingCheck::Unknown => {
+        tracing::warn!(conversation_id = %conversation, "the server names no meeting or organizer for the meeting chat; its anchor grants nothing");
+        let verdict =
+          anchoring::judge_unknown_meeting(maybe_floor.as_ref(), group.anchor_bytes(), group.epoch());
+        return self.apply_anchor_verdict(conversation, verdict);
+      },
+    };
     let Some(expected) = anchoring::anchor_expectation(
       convert::conversation(conversation),
       maybe_floor.is_some(),
@@ -231,32 +243,38 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// meeting and the organizer the server names for the chat. After a handover (#1720) the group
   /// keeps the anchor its first organizer signed: then the founder counts if the signed host lists
   /// hand the meeting from the founder's key (as its leaf verified) to the organizer named now.
-  /// `None` for any other conversation (its anchor must be a channel's); a server too old to name
-  /// the meeting leaves the meeting chat's anchor to name itself.
+  /// Any other conversation's anchor must be a channel's. The anchor never vouches for itself: a
+  /// server that names no organizer, or no meeting while the anchor names one, gets
+  /// [`MeetingCheck::Unknown`] (nothing granted or pinned); a server too old to name the meeting
+  /// has the anchor's meeting held to the organizer it names.
   async fn meeting_expectation_entering(
     &mut self,
     conversation: ConversationId,
     group: &ConversationGroup,
     directory: &PinnedDirectory,
-  ) -> Result<Option<MeetingExpectation>, CoreError> {
+  ) -> Result<MeetingCheck, CoreError> {
     let maybe_named = group.anchor_bytes().and_then(anchoring::meeting_named_by);
     let is_listed_meeting = self
       .cached_conversations()?
       .get(&conversation)
       .is_some_and(|response| response.kind == ConversationKind::Meeting);
     if maybe_named.is_none() && !is_listed_meeting {
-      return Ok(None);
+      return Ok(MeetingCheck::NotAMeeting);
     }
     let response = self.api.conversation(conversation).await?;
     if response.kind != ConversationKind::Meeting {
-      return Ok(None);
+      return Ok(MeetingCheck::NotAMeeting);
     }
-    let (Some(meeting), Some(organizer)) = (response.maybe_meeting_id, response.maybe_organizer_user_id)
-    else {
-      return Ok(maybe_named);
+    let Some(organizer) = response.maybe_organizer_user_id else {
+      return Ok(MeetingCheck::Unknown);
+    };
+    let meeting_id = match (response.maybe_meeting_id, maybe_named) {
+      (Some(meeting), _) => convert::meeting(meeting),
+      (None, Some(named)) => named.meeting_id,
+      (None, None) => return Ok(MeetingCheck::Unknown),
     };
     let mut expected = MeetingExpectation {
-      meeting_id: convert::meeting(meeting),
+      meeting_id,
       organizer: convert::user(organizer),
     };
     if let Some(named) = maybe_named
@@ -269,7 +287,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     {
       expected.organizer = named.organizer;
     }
-    Ok(Some(expected))
+    Ok(MeetingCheck::Expect(expected))
   }
 
   /// Pins the anchor of a channel this device just founded (its own founding is entered like any

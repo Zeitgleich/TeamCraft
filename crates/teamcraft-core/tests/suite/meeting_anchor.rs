@@ -7,14 +7,18 @@
 
 use crate::common;
 
-use common::{Peer, link_device, settle};
+use std::sync::Arc;
+
+use common::{Peer, link_device, link_device_with_store, settings, settle};
 use teamcraft_core::anchoring::ANCHORING_RELEASE;
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::client::HostsChange;
+use teamcraft_core::clock::ManualClock;
 use teamcraft_core::meeting_invitees::InviteeList;
 use teamcraft_proto::{ConversationId, MeetingId};
 
 const ACCESS_ENDS_MS: i64 = 4_000_000_000_000;
+const NOW_MS: i64 = 1_800_000_000_000;
 
 #[tokio::test]
 async fn an_invitee_pins_the_organizers_anchor() {
@@ -185,6 +189,221 @@ async fn a_statement_of_an_organizer_the_server_made_up_counts_nowhere() {
   assert!(!bob.client.group_users(chat).unwrap().contains(&dave));
 }
 
+mod servers_word {
+  use super::*;
+
+  /// An insider founds the chat herself and the server names no organizer or meeting: her anchor
+  /// can't vouch for itself, so a new member pins nothing.
+  #[tokio::test]
+  async fn a_self_founded_anchor_without_the_servers_organizer_pins_nothing() {
+    let (server, mut bob, chat) = insider_founded(false).await;
+    bob.client.full_sync().await.unwrap();
+    assert_eq!(bob.client.account_data().anchor_floor(chat), None);
+    let _ = server;
+  }
+
+  /// The server names the organizer but not the meeting: the insider's anchor is held to the
+  /// organizer, and refused.
+  #[tokio::test]
+  async fn a_self_founded_anchor_without_the_servers_meeting_is_refused() {
+    let (_server, mut bob, chat) = insider_founded(true).await;
+    bob.client.full_sync().await.unwrap();
+    assert!(!bob.client.has_group(chat).unwrap());
+    assert_eq!(bob.client.account_data().anchor_floor(chat), None);
+  }
+
+  /// Mallory, invited to Alice's meeting, founds its chat anchored by herself and adds Bob; the
+  /// server leaves out the meeting (and, unless `keeps_organizer`, the organizer).
+  async fn insider_founded(keeps_organizer: bool) -> (FakeServer, Peer, ConversationId) {
+    let server = anchoring_server();
+    let alice = Peer::enroll(&server, "Alice").await;
+    let bob = Peer::enroll(&server, "Bob").await;
+    let mut mallory = Peer::enroll(&server, "Mallory").await;
+    let chat = server.create_meeting_chat(
+      alice.client.user_id(),
+      &[bob.client.user_id(), mallory.client.user_id()],
+    );
+    let meeting = server.meeting_of_chat(chat);
+    server.hide_meeting_of_chat(chat, keeps_organizer);
+    let _ = mallory
+      .client
+      .set_up_meeting_chat_from(chat, meeting, &chosen(&bob))
+      .await;
+    (server, bob, chat)
+  }
+}
+
+mod entering {
+  use super::*;
+
+  /// A meeting chat founded before anchoring stays unanchored when a member enters it after the
+  /// release: nothing is refused and nothing pinned.
+  #[tokio::test]
+  async fn a_legacy_unanchored_chat_entered_after_the_release_stays_unanchored() {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut bob = Peer::enroll(&server, "Bob").await;
+    let chat = server.create_meeting_chat(alice.client.user_id(), &[bob.client.user_id()]);
+    let meeting = server.meeting_of_chat(chat);
+    alice
+      .client
+      .set_up_meeting_chat_from(
+        chat,
+        meeting,
+        &InviteeList::Chosen {
+          added: Vec::new(),
+          kept: Vec::new(),
+        },
+      )
+      .await
+      .unwrap();
+    let release = ANCHORING_RELEASE;
+    server.set_minimum_client_version(&format!("{}.{}.{}", release.major, release.minor, release.patch));
+    alice
+      .client
+      .set_up_meeting_chat_from(chat, meeting, &chosen(&bob))
+      .await
+      .unwrap();
+
+    bob.client.full_sync().await.unwrap();
+
+    assert!(bob.client.has_group(chat).unwrap());
+    assert_eq!(bob.client.account_data().anchor_floor(chat), None);
+  }
+
+  /// A further device whose join answer was lost is added back into an anchored meeting chat and
+  /// pins the same founding.
+  #[tokio::test]
+  async fn a_device_added_back_pins_the_meeting_chats_founding() {
+    let server = anchoring_server();
+    let clock = Arc::new(ManualClock::new(NOW_MS));
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let (mut laptop, _) = link_device_with_store(&mut alice, settings(), Box::new(clock.clone())).await;
+    let chat = server.create_meeting_chat(alice.client.user_id(), &[]);
+    let meeting = server.meeting_of_chat(chat);
+    alice
+      .client
+      .set_up_meeting_chat_from(
+        chat,
+        meeting,
+        &InviteeList::Chosen {
+          added: Vec::new(),
+          kept: Vec::new(),
+        },
+      )
+      .await
+      .unwrap();
+    server.lose_next_commit_answer(alice.client.user_id());
+    assert!(laptop.prepare_call(chat).await.is_err(), "the answer was lost");
+    clock.advance(i64::try_from(settings().rejoin_retry.as_millis()).unwrap());
+    assert!(laptop.prepare_call(chat).await.is_err(), "asks to be added back");
+    alice.client.full_sync().await.unwrap();
+
+    laptop.prepare_call(chat).await.unwrap();
+
+    assert_eq!(
+      laptop.account_data().anchor_floor(chat).unwrap().founding_hash,
+      alice
+        .client
+        .account_data()
+        .anchor_floor(chat)
+        .unwrap()
+        .founding_hash
+    );
+  }
+}
+
+mod handovers {
+  use super::*;
+
+  /// After a handover from Alice to Bob to Carol, the server names Bob again and serves only the
+  /// first list: a member who saw the newest holds to it, so Bob's statement counts for nothing.
+  #[tokio::test]
+  async fn a_replayed_host_list_doesnt_make_a_former_organizer_count() {
+    let server = anchoring_server_signing_invitees();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut bob = Peer::enroll(&server, "Bob").await;
+    let mut carol = Peer::enroll(&server, "Carol").await;
+    let mut erin = Peer::enroll(&server, "Erin").await;
+    let dave_api = server.add_user("Dave");
+    let dave = dave_api.user_id();
+    let (bob_id, carol_id, erin_id) = (
+      bob.client.user_id(),
+      carol.client.user_id(),
+      erin.client.user_id(),
+    );
+    let chat = server.create_meeting_chat(alice.client.user_id(), &[bob_id, carol_id, erin_id, dave]);
+    let meeting = server.meeting_of_chat(chat).unwrap();
+    alice
+      .client
+      .set_up_meeting_chat_from(
+        chat,
+        Some(meeting),
+        &InviteeList::Chosen {
+          added: vec![bob_id, carol_id, erin_id],
+          kept: Vec::new(),
+        },
+      )
+      .await
+      .unwrap();
+    assert!(
+      alice
+        .client
+        .sync_meeting_admitters(meeting, chat, ACCESS_ENDS_MS)
+        .await
+        .unwrap()
+    );
+    for peer in [&mut bob, &mut carol, &mut erin] {
+      peer.client.full_sync().await.unwrap();
+      peer.client.check_meeting_admission(chat).await.unwrap();
+    }
+    hand_over(&mut alice, meeting, chat, bob_id).await;
+    bob.client.full_sync().await.unwrap();
+    hand_over(&mut bob, meeting, chat, carol_id).await;
+    // Erin follows the whole chain to Carol.
+    erin.client.full_sync().await.unwrap();
+    erin.client.check_meeting_admission(chat).await.unwrap();
+
+    // The server names Bob again and serves only the first handover; Bob invites Dave and signs.
+    let lists = server.meeting_hosts(chat);
+    server.set_meeting_hosts(chat, lists.into_iter().take(1).collect());
+    server.set_organizer_of_chat(chat, bob_id);
+    bob.client.check_meeting_admission(chat).await.unwrap();
+    bob
+      .client
+      .update_meeting_chat_members(chat, &[carol_id, erin_id, dave], &[])
+      .await
+      .unwrap();
+    let _ = bob
+      .client
+      .sync_meeting_admitters(meeting, chat, ACCESS_ENDS_MS)
+      .await;
+    let mut dave_peer = Peer::enroll_as(dave_api, "Dave").await;
+
+    erin
+      .client
+      .set_up_meeting_chat_from(chat, Some(meeting), &InviteeList::Listed(vec![dave]))
+      .await
+      .unwrap();
+
+    dave_peer.client.full_sync().await.unwrap();
+    assert!(!erin.client.group_users(chat).unwrap().contains(&dave));
+  }
+
+  async fn hand_over(from: &mut Peer, meeting: MeetingId, chat: ConversationId, to: teamcraft_proto::UserId) {
+    from
+      .client
+      .change_meeting_hosts(&HostsChange {
+        meeting,
+        conversation: chat,
+        co_hosts: Vec::new(),
+        maybe_new_organizer: Some(to),
+      })
+      .await
+      .unwrap();
+  }
+}
+
 /// Alice organizes a meeting inviting Bob, on an instance whose minimum client version is the
 /// anchoring release; her device set the chat up with the meeting's ID. Carol is a member of the
 /// chat on the server, not invited yet.
@@ -227,6 +446,13 @@ fn other_meeting() -> MeetingId {
 fn anchoring_server_signing_invitees() -> FakeServer {
   let server = FakeServer::new();
   let release = teamcraft_core::meeting_invitees::SIGNED_INVITEES_RELEASE;
+  server.set_minimum_client_version(&format!("{}.{}.{}", release.major, release.minor, release.patch));
+  server
+}
+
+fn anchoring_server() -> FakeServer {
+  let server = FakeServer::new();
+  let release = ANCHORING_RELEASE;
   server.set_minimum_client_version(&format!("{}.{}.{}", release.major, release.minor, release.patch));
   server
 }

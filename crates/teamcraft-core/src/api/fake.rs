@@ -1394,6 +1394,17 @@ impl FakeServer {
     }
   }
 
+  /// The server names neither the meeting nor the organizer of a meeting chat (an older or a
+  /// hostile server), or only drops the meeting with `keeps_organizer`.
+  pub fn hide_meeting_of_chat(&self, chat: ConversationId, keeps_organizer: bool) {
+    if let Some(conversation) = self.lock().conversations.get_mut(&chat) {
+      conversation.response.maybe_meeting_id = None;
+      if !keeps_organizer {
+        conversation.response.maybe_organizer_user_id = None;
+      }
+    }
+  }
+
   /// The server names another meeting for a meeting chat (a hostile server).
   pub fn set_meeting_of_chat(&self, chat: ConversationId, meeting: teamcraft_proto::MeetingId) {
     if let Some(conversation) = self.lock().conversations.get_mut(&chat) {

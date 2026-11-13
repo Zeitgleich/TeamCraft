@@ -460,6 +460,50 @@ mod meeting_chats {
     assert!(!refuses_meeting_anchor(&as_channel, &result));
   }
 
+  /// The server names no organizer: the anchor can't vouch for itself, so nothing is pinned, and
+  /// a pin already held still holds.
+  #[test]
+  fn without_the_servers_organizer_a_meeting_anchor_pins_nothing() {
+    let world = World::new();
+    let anchor = world.found_meeting(&world.member, MEETING, CONVERSATION);
+    let bytes = anchor.to_bytes().unwrap();
+    assert_eq!(
+      judge_unknown_meeting(None, Some(&bytes), 1),
+      AnchorVerdict::Unanchored
+    );
+    let pinned = world.floor("general", 3);
+    assert_eq!(
+      judge_unknown_meeting(Some(&pinned), Some(&bytes), 4),
+      AnchorVerdict::Refuse(FloorError::OtherFounding),
+      "another founding than the pinned one"
+    );
+    assert_eq!(
+      judge_unknown_meeting(Some(&pinned), None, 4),
+      AnchorVerdict::Refuse(FloorError::Stripped)
+    );
+  }
+
+  /// A meeting anchor of a newer format than this app reads grants nothing and isn't refused as a
+  /// copy: the app says it has to update.
+  #[test]
+  fn a_newer_meeting_anchor_grants_nothing() {
+    let world = World::new();
+    let mut bytes = world
+      .found_meeting(&world.founder, MEETING, CONVERSATION)
+      .to_bytes()
+      .unwrap();
+    // format (1) ‖ conversation (8) ‖ kind (1) ‖ meeting ID (8) ‖ origin
+    bytes[1 + 8 + 1 + 8] = 4;
+    let expected = meeting_expectation(CONVERSATION, MEETING, FOUNDER);
+    let result = ChannelAnchor::from_bytes(&bytes, DEFAULT_MAX_ANCHOR_BYTES)
+      .map(|_| None)
+      .map_err(MlsError::from);
+    assert!(matches!(result, Err(MlsError::Anchor(AnchorError::MustUpdate))));
+    assert!(!refuses_meeting_anchor(&expected, &result));
+    let outcome = AnchorOutcome::of(result, Some(&bytes));
+    assert_eq!(judge_entering(None, &outcome, 1), AnchorVerdict::Unanchored);
+  }
+
   fn meeting_expectation(
     conversation: ConversationId,
     meeting: MeetingId,

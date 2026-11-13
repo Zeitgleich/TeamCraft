@@ -239,13 +239,28 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     let statements = self.host_statements(conversation).await?;
     let anchor = founder_key.fingerprint();
+    // Against the newest lists this device kept: a server can't replay a chain that ends at an
+    // organizer the meeting was handed on from since.
     let expectation = HostsExpectation {
       anchor: &anchor,
       maybe_meeting_id: None,
       conversation_id: convert::conversation(conversation),
-      maybe_seen_sequence: None,
+      maybe_seen_sequence: self.hosts_record(conversation)?.map(|record| record.sequence),
     };
-    Ok(verify_chain(&statements, &expectation).is_ok_and(|hosts| hosts.is_organizer_key(&organizer_key)))
+    match verify_chain(&statements, &expectation) {
+      Ok(hosts) => {
+        self.keep_hosts(conversation, &hosts)?;
+        Ok(hosts.is_organizer_key(&organizer_key))
+      },
+      Err(error) => {
+        tracing::warn!(conversation_id = %conversation, %error, "the meeting's host lists don't verify; the kept ones count");
+        Ok(
+          self
+            .hosts_record(conversation)?
+            .is_some_and(|record| record.organizer_fingerprint == organizer_key.fingerprint().to_string()),
+        )
+      },
+    }
   }
 
   /// Whether `device` hosts the meeting by the lists that follow from `anchor`, and the current
