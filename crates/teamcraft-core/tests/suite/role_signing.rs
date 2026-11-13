@@ -1309,6 +1309,49 @@ mod degraded {
   }
 }
 
+mod roles_claim {
+  //! Roles from a claim the signed policy names, such as Dex's `groups` (issue #1742).
+  use super::*;
+
+  /// An ID token naming `groups`, and client roles that say `owner` to show they aren't read.
+  fn give_groups(world: &World, peer: &Peer, groups: &[&str], issued_at: i64) {
+    let claim = peer.client.identity_attestation_claim();
+    let claims = with_roles(&claim, &["owner"], issued_at)
+      .with("sub", json!(format!("sub-of-{}", peer.name)))
+      .with("groups", json!(groups));
+    world
+      .server
+      .set_provider_token(peer.client.user_id(), world.provider.token(&claims));
+  }
+
+  #[tokio::test]
+  async fn a_signed_roles_claim_makes_a_plain_providers_groups_count() {
+    let world = World::new();
+    let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
+    let mut policy = alice.client.workspace().unwrap().policy;
+    policy.maybe_role_signing = Some(Box::new(RoleSigningPolicy {
+      roles_claim: vec!["groups".into()],
+      owner_role: "teamcraft-owner".into(),
+      admin_role: "teamcraft-admin".into(),
+      ..*policy.maybe_role_signing.unwrap()
+    }));
+    alice.client.publish_policy(policy).await.unwrap();
+    give_groups(&world, &alice, &["teamcraft-owner"], T0);
+    give_groups(&world, &bob, &["teamcraft-admin", "staff"], T0);
+
+    bob.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    alice.client.run_role_signing().await.unwrap();
+
+    assert_eq!(
+      role_of(&alice, bob.client.user_id()),
+      Some(RosterRole::Admin),
+      "the groups, not the client roles"
+    );
+    assert_eq!(role_of(&alice, alice.client.user_id()), Some(RosterRole::Owner));
+  }
+}
+
 mod manual {
   use super::*;
 
