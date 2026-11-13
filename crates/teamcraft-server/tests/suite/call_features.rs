@@ -593,6 +593,64 @@ mod host_controls {
   }
 
   #[tokio::test]
+  async fn the_host_ends_the_meeting_after_leaving_its_call() {
+    let Some(s) = running_meeting(HttpStatus::NO_CONTENT, true).await else {
+      return;
+    };
+    report(&s.app, "left", &s.call, &s.host_id, &s.devices[0]).await;
+    let path = format!("/meetings/{}/controls", s.meeting);
+    let ended = s.app.post(&s.host, &path, json!({"action": "end"})).await;
+    assert_eq!(ended.status, StatusCode::NO_CONTENT, "{}", ended.body);
+    assert_eq!(s.seen.lock().unwrap().last().unwrap().1["action"], "end");
+    let meeting = s.app.get(&s.host, &format!("/meetings/{}", s.meeting)).await;
+    assert_eq!(meeting.body["status"], "ended");
+    assert_eq!(
+      join_token(&s.app, &s.carol, &s.chat, &s.devices[1]).await,
+      StatusCode::CONFLICT
+    );
+    s.app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn an_instant_meeting_without_a_call_ends_too() {
+    // Without a control URL too: there is no call the SFU would have to stop.
+    let Some(app) =
+      TestApp::start_with_meetings_and_calls(&meetings_config(), &calls_config(30, None), SIGNING_KEY_PEM)
+        .await
+    else {
+      return;
+    };
+    let host = owner();
+    let created = app.post(&host, "/meetings/instant", json!({})).await;
+    assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+    let meeting = created.body["id"].as_str().unwrap().to_owned();
+    let path = format!("/meetings/{meeting}/controls");
+    let ended = app.post(&host, &path, json!({"action": "end"})).await;
+    assert_eq!(ended.status, StatusCode::NO_CONTENT, "{}", ended.body);
+    let listed = app.get(&host, &format!("/meetings/{meeting}")).await;
+    assert_eq!(listed.body["status"], "ended");
+    // Ending again says the meeting is over.
+    assert_eq!(
+      app.post(&host, &path, json!({"action": "end"})).await.status,
+      StatusCode::CONFLICT
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_call_gone_from_the_sfu_still_ends_the_meeting() {
+    let Some(s) = running_meeting(HttpStatus::NOT_FOUND, true).await else {
+      return;
+    };
+    let path = format!("/meetings/{}/controls", s.meeting);
+    let ended = s.app.post(&s.host, &path, json!({"action": "end"})).await;
+    assert_eq!(ended.status, StatusCode::NO_CONTENT, "{}", ended.body);
+    let meeting = s.app.get(&s.host, &format!("/meetings/{}", s.meeting)).await;
+    assert_eq!(meeting.body["status"], "ended");
+    s.app.stop().await;
+  }
+
+  #[tokio::test]
   async fn without_a_call_or_a_control_url_the_answer_says_why() {
     let Some(s) = running_meeting(HttpStatus::NO_CONTENT, false).await else {
       return;

@@ -217,6 +217,8 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       ErrorCode::ScheduledMessagesDisabled => "schedule-refused-off",
       ErrorCode::ScheduledMessageLimit => "schedule-refused-limit",
       ErrorCode::ScheduledTimeInvalid => "schedule-refused-past",
+      ErrorCode::CallNotFound => "error-call-not-running",
+      ErrorCode::MeetingNotFound => "error-meeting-gone",
       // All `*_not_found` codes, including ones this version doesn't know yet.
       other if other.as_str().ends_with("_not_found") => "error-not-found",
       _ => "error-generic",
@@ -525,6 +527,8 @@ mod tests {
         FailureKind::Server(ErrorCode::UserNotFound),
         FailureKind::Server(ErrorCode::CallDeviceLimit),
         FailureKind::Server(ErrorCode::GuestDmNotAllowed),
+        FailureKind::Server(ErrorCode::CallNotFound),
+        FailureKind::Server(ErrorCode::MeetingNotFound),
         FailureKind::Call(CallFailure::SpeakersUnavailable),
         FailureKind::Call(CallFailure::SpeakersMissing),
         FailureKind::Call(CallFailure::SoundBlocked),

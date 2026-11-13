@@ -9,7 +9,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use leptos::html;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use teamcraft_proto::{MeetingId, MeetingResponse, RsvpStatus};
+use teamcraft_proto::{MeetingId, MeetingKind, MeetingResponse, RsvpStatus};
 
 use crate::clock::{format_date, format_time, local_day, now_ms};
 use crate::components::avatar::{Avatar, AvatarSize};
@@ -209,13 +209,8 @@ fn NowNext(meeting: MeetingResponse, now: RwSignal<TimestampMs>) -> impl IntoVie
   let i18n = use_i18n();
   let me = state.me().id;
   let OpenRows(open_rows) = expect_context::<OpenRows>();
-  let locale = i18n.locale().tag();
   let row: RowId = (meeting.id, meeting.starts_at.0);
-  let span = format!(
-    "{}–{}",
-    format_time(meeting.starts_at.0, locale),
-    format_time(meeting.ends_at.0, locale)
-  );
+  let span = time_span(&meeting, i18n);
   let starts_at = meeting.starts_at.0;
   let title = meeting.title.clone();
   let organizer = organizer_line(state, &meeting, me, i18n);
@@ -374,7 +369,12 @@ fn MeetingRow(meeting: MeetingResponse, now: RwSignal<TimestampMs>) -> impl Into
   let is_hosting = is_hosted_by(&meeting, me);
   let rsvp = my_rsvp(&meeting, me);
   let start = format_time(meeting.starts_at.0, locale);
-  let length = duration_label(duration_minutes(&meeting), i18n);
+  // "Meet now" has no planned length: its end is only the outer bound of how long it stays open.
+  let length = if meeting.kind == MeetingKind::Instant {
+    String::new()
+  } else {
+    duration_label(duration_minutes(&meeting), i18n)
+  };
   let maybe_series = series_summary(&meeting);
   let has_lobby = hosts_lobby(&meeting, me);
   let faces: Vec<crate::model::User> = state.read(|backend| {
@@ -773,10 +773,9 @@ fn MeetingDetail(
   let is_over_now = is_over(&meeting, now.get_untracked());
   let is_live_host = is_hosting && is_joinable(&meeting, now.get_untracked());
   let when = format!(
-    "{}, {}–{}",
+    "{}, {}",
     format_date(meeting.starts_at.0, locale),
-    format_time(meeting.starts_at.0, locale),
-    format_time(meeting.ends_at.0, locale)
+    time_span(&meeting, i18n)
   );
   let maybe_series = series_summary(&meeting);
   let maybe_description = meeting
@@ -896,6 +895,17 @@ fn organizer_line(
 }
 
 /// "45 min", "1 h", "1 h 30 min".
+/// "10:00–11:00"; "since 23:18" for a "Meet now" meeting, which runs until somebody ends it (or,
+/// at the latest, the server's open window closes; docs/meetings.md).
+fn time_span(meeting: &MeetingResponse, i18n: I18n) -> String {
+  let locale = i18n.locale().tag();
+  let start = format_time(meeting.starts_at.0, locale);
+  if meeting.kind == MeetingKind::Instant {
+    return i18n.t_with("meetings-since", &[("time", &start)]);
+  }
+  format!("{start}–{}", format_time(meeting.ends_at.0, locale))
+}
+
 fn duration_label(minutes: i64, i18n: I18n) -> String {
   let (hours, rest) = (minutes / 60, minutes % 60);
   match (hours, rest) {

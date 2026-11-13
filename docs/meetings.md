@@ -266,6 +266,20 @@ card shows "Co-host" to a co-host.
 ¹ Without a lobby, as the organizer's signed admitters say (step 9). Hosts can't be removed from
 the call by the host controls.
 
+**Ending for everyone** (`POST /meetings/{id}/controls` with `end`, #1931) ends the meeting, not
+only its call, and works whether or not a call runs and whether or not the host is in it: a
+meeting that doesn't repeat is marked `ended`, its guests' sessions end at once (the guest sweep
+runs right away instead of waiting for its next round), the invited users get `meeting_update`,
+and a running call is stopped on the SFU (a call the SFU no longer knows is fine). Muting, locking
+and removing act on the call and answer `call_not_found` without one; the apps only offer them
+while a call runs. Every refusal reaches the user worded by its `error_code`.
+
+A "Meet now" meeting stays open for eight hours at most (its `ends_at`): long enough for a working
+day, short enough that a forgotten one doesn't keep its guest link working for days. It doesn't
+end when its call empties, because people drop out and come back (a lost connection, a moved
+call); a host ends it with "End for everyone". The apps show it as "since 23:18", not with its
+eight-hour window.
+
 **Signed, not the server's word.** Who hosts is a list the organizer's identity key signs
 (e2ee.md §4.6, "Meeting hosts"): the co-hosts with their identity keys, and the organizer from then
 on. The organizer's device signs it and publishes it with `PUT /conversations/{id}/meeting-hosts`

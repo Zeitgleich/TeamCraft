@@ -393,6 +393,42 @@ mod lobby {
   use super::*;
 
   #[tokio::test]
+  async fn ending_the_meeting_ends_its_guests_at_once() {
+    let rig = rig!();
+    let alice = owner();
+    let (meeting, _, token) = rig.meeting_with_guest(&alice, true).await;
+    let (_, joined) = rig.join(&token, "Gus").await;
+    let guest_token = joined["guest_token"].as_str().unwrap().to_owned();
+    let second_link = rig.one_time_link(&alice, &meeting).await;
+
+    // No call runs (this server has no calls at all): ending still closes the meeting (#1931).
+    let ended = rig
+      .app
+      .post(
+        &alice,
+        &format!("/meetings/{meeting}/controls"),
+        json!({"action": "end"}),
+      )
+      .await;
+
+    assert_eq!(ended.status, StatusCode::NO_CONTENT, "{}", ended.body);
+    assert_eq!(
+      rig.app.get(&alice, &format!("/meetings/{meeting}")).await.body["status"],
+      "ended"
+    );
+    assert_eq!(
+      rig.request(Some(&guest_token), Method::GET, "/me", None).await.0,
+      StatusCode::FORBIDDEN,
+      "the waiting guest's session is over"
+    );
+    assert_eq!(
+      rig.join(&credential(&second_link), "Ida").await.0,
+      StatusCode::UNAUTHORIZED
+    );
+    rig.app.stop().await;
+  }
+
+  #[tokio::test]
   async fn a_denied_guest_hears_it_and_stays_out() {
     let rig = rig!();
     let app = &rig.app;

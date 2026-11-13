@@ -152,6 +152,8 @@ host-lock = Meeting sperren
 host-unlock = Meeting entsperren
 host-end = Für alle beenden
 host-end-confirm = Meeting jetzt beenden
+host-end-explain = Alle werden aus dem Anruf entfernt, und Gäste können nicht mehr beitreten. Der Meeting-Chat bleibt lesbar.
+host-no-call = Gerade ist niemand im Anruf. Stummschalten und Sperren gehen, sobald jemand beitritt.
 host-remove = Entfernen
 # Co-Gastgeber und Übergabe eines Meetings (#1720)
 host-role-organizer = Gastgeber
@@ -209,6 +211,7 @@ meetings-loading = Meetings werden geladen …
 meetings-hero-now = Jetzt
 meetings-hero-next = Als Nächstes
 meetings-hero-running = Läuft · { $time }
+meetings-since = seit { $time }
 meetings-hero-soon = { $count ->
     [one] Beginnt in 1 Minute · { $time }
    *[other] Beginnt in { $count } Minuten · { $time }

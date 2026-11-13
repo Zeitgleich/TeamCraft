@@ -1850,7 +1850,7 @@ async fn owned_meeting(
 }
 
 /// Tells the organizer and the invited users to refetch the meeting.
-async fn announce(state: &AppState, meeting: &StoredMeeting) -> Result<(), ApiError> {
+pub(super) async fn announce(state: &AppState, meeting: &StoredMeeting) -> Result<(), ApiError> {
   let users = state.database.meeting_user_ids(meeting).await?;
   state.hub.publish(
     users,
