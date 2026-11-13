@@ -3662,8 +3662,12 @@ and couldn't count for a purge.
     organizer counts only if the signed host lists hand the meeting over (#1720); an insider it names gets nothing.
     The anchor never vouches for itself: when the server names no organizer (or no meeting while the anchor names
     one, the anchor's meeting is held to the organizer it names), the anchor grants nothing and nothing is pinned;
-    a pin already held still holds. The handover chain is checked against the newest host lists the device kept,
-    so a server can't replay a chain that ends at an organizer the meeting was handed on from.
+    a pin already held still holds. The handover chain is checked against the newest host lists the device kept
+    from the founder's key, so a server can't replay a chain that ends at an organizer the meeting was handed on
+    from; lists that don't verify hand nothing over (fails closed: the founder stays the organizer). Kept host
+    lists record the key they were verified from: once the device pins a meeting chat's anchor, only lists from its
+    founder's key are kept or count, and lists kept before from another key (the server's organizer, before the
+    device was in the group) are dropped.
     Residual risk: a meeting chat whose group carries no anchor (founded before the release, or by an invitee who
     leaves it out) is judged as before on a device that hasn't pinned the chat. Which organizer the server names
     stays its word at a device's first entry, and the pin then makes it sticky for that user: their devices refuse

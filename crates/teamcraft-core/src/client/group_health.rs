@@ -188,6 +188,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.store.delete(Table::Members, &conversation.to_string())?;
     self.forget_older_history(conversation)?;
     self.forget_invitee_records(conversation)?;
+    self.forget_host_records(conversation)?;
     Ok(())
   }
 
@@ -205,6 +206,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       client.store.delete_messages(conversation)?;
       client.forget_older_history(conversation)?;
       client.forget_invitee_records(conversation)?;
+      client.forget_host_records(conversation)?;
       super::messaging::forget_newest_controls(&client.store, conversation)?;
       crate::unseen_reactions::forget(&client.store, conversation)?;
       crate::integration_sources::forget_conversation(&client.store, conversation)?;

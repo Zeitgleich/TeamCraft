@@ -215,8 +215,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return self.apply_anchor_verdict(conversation, AnchorVerdict::Refuse(FloorError::NotThisMeeting));
     }
     let outcome = AnchorOutcome::of(result, group.anchor_bytes());
+    let maybe_meeting_founder = maybe_meeting
+      .and(outcome.verified())
+      .and_then(VerifiedAnchor::founder)
+      .map(|(_, key)| key.fingerprint());
     let verdict = anchoring::judge_entering(maybe_floor.as_ref(), &outcome, group.epoch());
-    self.apply_anchor_verdict(conversation, verdict)
+    let admitted = self.apply_anchor_verdict(conversation, verdict)?;
+    // The meeting's host lists count only from the founder's key now (#1747).
+    if admitted.is_ok()
+      && let Some(founder) = maybe_meeting_founder
+    {
+      self.note_pinned_meeting_founder(conversation, &founder)?;
+    }
+    Ok(admitted)
   }
 
   /// The founder of the meeting chat's anchor this device pinned (D10): who organized the meeting

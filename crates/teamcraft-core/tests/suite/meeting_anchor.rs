@@ -379,6 +379,11 @@ mod handovers {
       .sync_meeting_admitters(meeting, chat, ACCESS_ENDS_MS)
       .await;
     let mut dave_peer = Peer::enroll_as(dave_api, "Dave").await;
+    erin.client.full_sync().await.unwrap();
+    assert!(
+      !erin.client.group_users(chat).unwrap().contains(&dave),
+      "not in the group before the Join"
+    );
 
     erin
       .client
@@ -388,6 +393,96 @@ mod handovers {
 
     dave_peer.client.full_sync().await.unwrap();
     assert!(!erin.client.group_users(chat).unwrap().contains(&dave));
+  }
+
+  /// Before Bob's device is in the group, the server names Mallory and serves a host list she
+  /// signed from her own key; Bob's device verifies it from her key. Once Bob pinned Alice's
+  /// anchor, that list counts for nothing: Mallory, named again, doesn't become the organizer.
+  #[tokio::test]
+  async fn host_lists_kept_from_another_key_before_entering_dont_count() {
+    let server = anchoring_server_signing_invitees();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut bob = Peer::enroll(&server, "Bob").await;
+    let mut mallory = Peer::enroll(&server, "Mallory").await;
+    let dave_api = server.add_user("Dave");
+    let dave = dave_api.user_id();
+    let (alice_id, bob_id, mallory_id) = (
+      alice.client.user_id(),
+      bob.client.user_id(),
+      mallory.client.user_id(),
+    );
+    let chat = server.create_meeting_chat(alice_id, &[bob_id, mallory_id, dave]);
+    let meeting = server.meeting_of_chat(chat).unwrap();
+    // The poisoning: Mallory named, her own list, Bob's device reads it with no group yet.
+    server.set_organizer_of_chat(chat, mallory_id);
+    mallory
+      .client
+      .change_meeting_hosts(&HostsChange {
+        meeting,
+        conversation: chat,
+        co_hosts: Vec::new(),
+        maybe_new_organizer: None,
+      })
+      .await
+      .unwrap();
+    let poisoned = server.meeting_hosts(chat);
+    assert!(!poisoned.is_empty());
+    let _ = bob
+      .client
+      .let_guest_into_meeting_chat(chat, dave, "", ACCESS_ENDS_MS)
+      .await;
+    // Alice, named again, sets the chat up; Bob enters and pins her anchor.
+    server.set_organizer_of_chat(chat, alice_id);
+    alice
+      .client
+      .set_up_meeting_chat_from(
+        chat,
+        Some(meeting),
+        &InviteeList::Chosen {
+          added: vec![bob_id, mallory_id],
+          kept: Vec::new(),
+        },
+      )
+      .await
+      .unwrap();
+    assert!(
+      alice
+        .client
+        .sync_meeting_admitters(meeting, chat, ACCESS_ENDS_MS)
+        .await
+        .unwrap()
+    );
+    bob.client.full_sync().await.unwrap();
+    assert!(bob.client.account_data().anchor_floor(chat).is_some());
+    mallory.client.full_sync().await.unwrap();
+    mallory.client.check_meeting_admission(chat).await.unwrap();
+
+    // Mallory named again, with her own lists; she invites Dave and signs.
+    server.set_organizer_of_chat(chat, mallory_id);
+    server.set_meeting_hosts(chat, poisoned);
+    mallory
+      .client
+      .update_meeting_chat_members(chat, &[bob_id, dave], &[])
+      .await
+      .unwrap();
+    assert!(
+      mallory
+        .client
+        .sync_meeting_admitters(meeting, chat, ACCESS_ENDS_MS)
+        .await
+        .unwrap(),
+      "Mallory signed"
+    );
+    let mut dave_peer = Peer::enroll_as(dave_api, "Dave").await;
+
+    bob
+      .client
+      .set_up_meeting_chat_from(chat, Some(meeting), &InviteeList::Listed(vec![dave]))
+      .await
+      .unwrap();
+
+    dave_peer.client.full_sync().await.unwrap();
+    assert!(!bob.client.group_users(chat).unwrap().contains(&dave));
   }
 
   async fn hand_over(from: &mut Peer, meeting: MeetingId, chat: ConversationId, to: teamcraft_proto::UserId) {
