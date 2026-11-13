@@ -117,6 +117,10 @@ pub struct CallEngine {
   /// overloaded machine leaves its top layers out); without an entry, all of them.
   encoder_top_layers: HashMap<StreamId, u8>,
   uplink_policy: UplinkPolicy,
+  /// What this device's connection drains, where the transport measures that itself (the browser's
+  /// WebSocket fallback, #1848): the uplink's estimate for the own layers, in place of the one from
+  /// feedback, which misreads TCP.
+  maybe_uplink_capacity_bps: Option<u32>,
   /// Other devices' tracks this device receives, with the highest layer asked for.
   subscriptions: HashMap<StreamId, u8>,
   /// How long the SFU keeps this device's slot after the connection was lost.
@@ -617,6 +621,7 @@ impl CallEngine {
       uplink_announced: HashMap::new(),
       encoder_top_layers: HashMap::new(),
       uplink_policy: UplinkPolicy::default(),
+      maybe_uplink_capacity_bps: None,
       subscriptions: HashMap::new(),
       maybe_reconnect_grace: None,
       maybe_nack: None,
@@ -822,6 +827,13 @@ impl CallEngine {
   /// The uplink's current bandwidth estimate.
   pub fn uplink_estimate_bps(&self) -> u32 {
     self.uplink.estimate_bps()
+  }
+
+  /// What this device's connection drains, where its transport measures that (the WebSocket
+  /// fallback's pacer, #1848); `None` where it doesn't (QUIC). The own layers follow it from the
+  /// next feedback on, in place of the estimate from feedback.
+  pub fn set_uplink_capacity(&mut self, maybe_capacity_bps: Option<u32>) {
+    self.maybe_uplink_capacity_bps = maybe_capacity_bps;
   }
 
   /// Bandwidth kept for audio when the uplink limits video layers.
@@ -2024,6 +2036,9 @@ impl CallEngine {
         estimate_bps = bps,
         "uplink probed while layers are held back"
       );
+    }
+    if let Some(capacity_bps) = self.maybe_uplink_capacity_bps {
+      bps = capacity_bps;
     }
     let is_sending_screen_audio = self.screen_audio != ScreenAudioState::Off;
     let tracks = own_track_views(&self.own_tracks, &self.adaptive_tracks);
@@ -5679,6 +5694,30 @@ mod tests {
         "{heard:?}"
       );
       assert!(bitrates_heard(false).is_empty());
+    }
+
+    /// #1848: on the browser's WebSocket fallback the uplink is what its pacer measured, whatever
+    /// the feedback's estimate made of a lossy moment; back on QUIC the feedback decides again.
+    #[test]
+    fn a_transport_that_measures_its_uplink_overrides_the_feedback() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      alice.set_uplink_capacity(Some(2_500_000));
+      let mut seq = 6;
+      let heard = |outputs: Vec<EngineOutput>| {
+        outputs
+          .iter()
+          .rev()
+          .find_map(|output| match output {
+            EngineOutput::Event(CallEngineEvent::UplinkEstimate { bps, .. }) => Some(*bps),
+            _ => None,
+          })
+          .unwrap()
+      };
+      assert_eq!(heard(degrade_uplink(&mut alice, &mut seq, now)), 2_500_000);
+      alice.set_uplink_capacity(None);
+      let later = now + Duration::from_secs(1);
+      assert!(heard(degrade_uplink(&mut alice, &mut seq, later)) < 2_500_000);
     }
 
     /// Issue #935: a call that sent only sound through a lossy moment left an estimate cut below
