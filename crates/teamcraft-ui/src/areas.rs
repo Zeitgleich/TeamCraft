@@ -25,6 +25,7 @@ use leptos::wasm_split::{SplitLoaderError, wasm_split};
 
 use crate::admin::AdminSection;
 use crate::admin_live::{AdminLive, AdminTask};
+use crate::app_links::{AppLinkPrompt, AppLinks};
 use crate::calls::CallRequest;
 use crate::components::account_switcher::AccountsDialog;
 use crate::components::activity_view::{ActivityHome, ActivitySidebar};
@@ -77,6 +78,7 @@ use crate::components::status_menu::{CustomStatusDialog, StatusDurationDialog, S
 use crate::components::tab_elsewhere::TabElsewhere;
 use crate::components::update_notice::UpdateNoticeBanner;
 use crate::components::video_player::VideoPlayer;
+use crate::components::window_controls::WindowControls;
 use crate::components::workspace_dialogs::{
   BrowseChannelsDialog, ChannelSettingsDialog, NewChannelDialog, NewSpaceDialog, SpaceSettingsDialog,
 };
@@ -272,6 +274,13 @@ areas! {
   canvas(conversation: ConversationId) => canvas: view! { <CanvasView conversation=conversation /> };
   /// The log view of an integration channel: its toolbar and the filtered log.
   integration_feed(conversation: ConversationId) => log: view! { <IntegrationFeed conversation=conversation /> };
+  /// The desktop app's window controls (`desktop_only`): a browser never loads them (#1462).
+  window_controls(_unit: ()) => desktop: view! { <WindowControls /> };
+  /// The desktop app's question about a link from outside, and taking those links from the shell.
+  app_link_prompt(links: AppLinks) => desktop: {
+    links.listen();
+    view! { <AppLinkPrompt links=links /> }
+  };
   /// The public page of a share link (`/f/<id>`, e2ee.md §4.5.1), a page of its own: neither a
   /// member nor a guest needs it (#1413).
   #[cfg(target_arch = "wasm32")]
@@ -383,6 +392,28 @@ pub(crate) fn member_rounds(
   Ok(Box::pin(turn.upkeep.run_member_rounds(turn.client)))
 }
 
+/// The engine's side of the security settings' devices and last-seen choice
+/// (`CommandPart::Settings`, #1462), in their module.
+#[cfg(target_arch = "wasm32")]
+#[wasm_split(settings, wasm_split_path = ::leptos::wasm_split, fallible)]
+pub(crate) fn settings_command(
+  client: &mut crate::web_core::WebClient,
+  command: teamcraft_core::ui_backend::CoreCommand,
+) -> Result<EngineRun<'_>, SplitLoaderError> {
+  Ok(Box::pin(client.run_settings_command(command)))
+}
+
+/// The engine's side of the share link dialog (`CommandPart::Dialogs`, #1462): making a link (with
+/// its password's key derivation), listing and revoking them.
+#[cfg(target_arch = "wasm32")]
+#[wasm_split(dialogs, wasm_split_path = ::leptos::wasm_split, fallible)]
+pub(crate) fn dialogs_command(
+  client: &mut crate::web_core::WebClient,
+  command: teamcraft_core::ui_backend::CoreCommand,
+) -> Result<EngineRun<'_>, SplitLoaderError> {
+  Ok(Box::pin(client.run_dialogs_command(command)))
+}
+
 /// One step of "Export my data" (`web_export.rs`), with the security settings that show its card.
 #[cfg(target_arch = "wasm32")]
 #[wasm_split(settings, wasm_split_path = ::leptos::wasm_split, fallible)]
@@ -411,6 +442,18 @@ pub(crate) fn admin_command(
   command: teamcraft_core::ui_backend::CoreCommand,
 ) -> Result<EngineRun<'_>, SplitLoaderError> {
   Ok(Box::pin(client.run_admin_command(command)))
+}
+
+/// The engine's side of what only a member's page asks for (`CommandPart::Member`: the status,
+/// favorites, scheduled messages, a host's side of meetings, …), in the signed-in app's module like
+/// the upkeep's member rounds: a guest's meeting doesn't download it (#1462).
+#[cfg(target_arch = "wasm32")]
+#[wasm_split(session, wasm_split_path = ::leptos::wasm_split, fallible)]
+pub(crate) fn member_command(
+  client: &mut crate::web_core::WebClient,
+  command: teamcraft_core::ui_backend::CoreCommand,
+) -> Result<EngineRun<'_>, SplitLoaderError> {
+  Ok(Box::pin(client.run_member_command(command)))
 }
 
 /// The page's UI hands chat actions and queries to the core typed (`web_core::act`, `query`); in
@@ -493,6 +536,35 @@ where
   // Only this boxing is per caller: the views below are built once for every area. Generic, they
   // were copied for each caller's closure types, a few kB of the first visit each.
   area_view(place, None, Rc::new(move || Box::pin(load())))
+}
+
+/// A part only the desktop app shows (`desktop`): nothing in a browser, and in the desktop app the
+/// view once its module is there, without a placeholder, as the shell serves it from the disk. A
+/// module that doesn't load leaves the part out.
+pub fn desktop_only<F, Fut>(load: F) -> AnyView
+where
+  F: FnOnce() -> Fut + 'static,
+  Fut: Future<Output = Result<AnyView, SplitLoaderError>> + 'static,
+{
+  if !crate::auth::tauri::is_available() {
+    return ().into_any();
+  }
+  let is_ready = RwSignal::new(false);
+  let ready: StoredValue<Option<AnyView>, LocalStorage> = StoredValue::new_local(None);
+  spawn_local_scoped_with_cancellation(async move {
+    match load().await {
+      Ok(view) => {
+        // Fails only when the part is gone; the view then goes with this task.
+        let _ = ready.try_update_value(|slot| *slot = Some(view));
+        is_ready.set_if_alive(true);
+      },
+      Err(error) => tracing::warn!(%error, "a part of the desktop app did not load"),
+    }
+  });
+  view! {
+    {move || is_ready.get().then(|| ready.try_update_value(Option::take).flatten())}
+  }
+  .into_any()
 }
 
 /// The administration console. Its texts are a file of their own on the web, fetched here before

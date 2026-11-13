@@ -19,6 +19,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       CommandPart::Shared => self.run_shared_command(command).await,
       CommandPart::Workspace => self.run_workspace_command(command).await,
       CommandPart::Admin => self.run_admin_command(command).await,
+      CommandPart::Settings => self.run_settings_command(command).await,
+      CommandPart::Dialogs => self.run_dialogs_command(command).await,
+      CommandPart::Member => self.run_member_command(command).await,
     }
   }
 
@@ -41,6 +44,27 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub async fn run_admin_command(&mut self, command: CoreCommand) -> Result<(), CoreError> {
     let maybe_list = command.loading_list();
     let result = self.run_admin(command).await;
+    self.note_list(maybe_list, result)
+  }
+
+  /// Runs a command of [`CommandPart::Settings`]; refuses the others.
+  pub async fn run_settings_command(&mut self, command: CoreCommand) -> Result<(), CoreError> {
+    let maybe_list = command.loading_list();
+    let result = self.run_settings(command).await;
+    self.note_list(maybe_list, result)
+  }
+
+  /// Runs a command of [`CommandPart::Dialogs`]; refuses the others.
+  pub async fn run_dialogs_command(&mut self, command: CoreCommand) -> Result<(), CoreError> {
+    let maybe_list = command.loading_list();
+    let result = self.run_dialogs(command).await;
+    self.note_list(maybe_list, result)
+  }
+
+  /// Runs a command of [`CommandPart::Member`]; refuses the others.
+  pub async fn run_member_command(&mut self, command: CoreCommand) -> Result<(), CoreError> {
+    let maybe_list = command.loading_list();
+    let result = self.run_member(command).await;
     self.note_list(maybe_list, result)
   }
 
@@ -110,41 +134,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           None => Ok(()),
         }
       },
-      CoreCommand::SetFavorite {
-        conversation,
-        is_favorite,
-      } => {
-        let request = UpdateConversationMemberRequest {
-          maybe_is_favorite: Some(is_favorite),
-          ..Default::default()
-        };
-        self
-          .api
-          .update_member(conversation, self.account.user_id, &request)
-          .await?;
-        self.refresh_conversation(conversation).await
-      },
-      CoreCommand::SetPresence {
-        presence,
-        maybe_until,
-      } => {
-        let manual = match presence {
-          PresenceStatus::Online => ManualPresence::Auto,
-          PresenceStatus::Busy => ManualPresence::Busy,
-          PresenceStatus::DoNotDisturb => ManualPresence::DoNotDisturb,
-          PresenceStatus::BeRightBack => ManualPresence::BeRightBack,
-          PresenceStatus::Away => ManualPresence::Away,
-          PresenceStatus::Offline => ManualPresence::Invisible,
-        };
-        let request = SetPresenceRequest {
-          // Every manual status may end by itself ("Reset after", issue #1578); automatic can't.
-          maybe_until: maybe_until
-            .filter(|_| manual != ManualPresence::Auto)
-            .map(UnixMillis),
-          manual,
-        };
-        self.queue_action(PendingAction::Presence { request }).await
-      },
       #[cfg(not(target_arch = "wasm32"))]
       CoreCommand::FetchSearchHits { hits } => self.fetch_search_hits(&hits).await.map(|_| ()),
       CoreCommand::SetSaved {
@@ -166,26 +155,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         // Gives it up at the server now.
         self.upload_pending().await.map(|_| ())
       },
-      // On the heap: sealing catches the group up, a big future that would otherwise sit in the frame
-      // of every caller of this dispatch (the desktop core thread, 1 MiB on Windows).
-      CoreCommand::ScheduleMessage { message, due_at_ms } => {
-        Box::pin(self.schedule_message(message, due_at_ms)).await
-      },
-      CoreCommand::UpdateScheduled { id, body, due_at_ms } => {
-        Box::pin(self.update_scheduled(id, body, due_at_ms)).await
-      },
-      CoreCommand::CancelScheduled { id } => Box::pin(self.cancel_scheduled(id)).await,
-      CoreCommand::SendScheduledNow { id } => Box::pin(self.send_scheduled_now(id)).await,
       // On the heap like the scheduled sends: delivery opens a group DM, a big future.
       CoreCommand::QueueBugReport { report } => Box::pin(self.queue_bug_report(report)).await,
-      CoreCommand::SaveSearch { id, name, query } => self.update_account_data(|data, now| {
-        data.save_search(id, &name, &query, now);
-        true
-      }),
-      CoreCommand::DeleteSavedSearch { id } => self.update_account_data(|data, now| {
-        data.delete_saved_search(id, now);
-        true
-      }),
       CoreCommand::WriteSettings { writes } => self.write_synced_settings(&writes),
       CoreCommand::AddBackground { name, picture } => self.add_background(name, picture).await.map(|_| ()),
       CoreCommand::DeleteBackground { id } => self.delete_background(id).await,
@@ -237,17 +208,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       CoreCommand::RefreshPresence { users } => self.refresh_presence(&users).await,
       CoreCommand::RefreshReadReceipts { conversation } => self.refresh_read_receipts(conversation).await,
-      CoreCommand::SearchDirectory { query } => self.search_directory(&query).await.map(|_| ()),
-      CoreCommand::RefreshPrivacy => self.refresh_privacy().await.map(|_| ()),
-      CoreCommand::SetLastSeenVisibility { visibility } => self.set_last_seen_visibility(visibility).await,
-      CoreCommand::RefreshCallHistory => self.refresh_call_history().await,
-      CoreCommand::RefreshOwnDevices => self.refresh_own_devices().await,
-      CoreCommand::RevokeOwnDevice { device } => {
-        self.revoke_device(device).await?;
-        self.refresh_own_devices().await
-      },
-      CoreCommand::RenameOwnDevice { device, name } => self.rename_own_device(device, &name).await,
-      CoreCommand::TestPushOwnDevice { device } => self.test_push_own_device(device).await,
       CoreCommand::UploadFiles => self.upload_pending().await.map(|_| ()),
       CoreCommand::GeneratePreviews => self.generate_pending_previews().await.map(|_| ()),
       CoreCommand::DownloadFile {
@@ -262,110 +222,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         tracing::debug!(attachment_id = %attachment, ?control, "no download list without a host");
         Ok(())
       },
-      CoreCommand::CreateShareLink {
-        conversation,
-        attachment,
-        maybe_expires_in_seconds,
-        maybe_max_downloads,
-        maybe_password,
-      } => {
-        let settings = crate::client::files::ShareLinkSettings {
-          maybe_expires_in_seconds,
-          maybe_max_downloads,
-          maybe_password: maybe_password.map(|mut password| {
-            // The text is wiped when `password` drops; the secret owns the bytes from here.
-            teamcraft_crypto::secret::SecretBytes::new(std::mem::take(&mut password.0).into_bytes())
-          }),
-        };
-        self
-          .create_share_link(conversation, attachment, settings)
-          .await
-          .map(|_| ())
-      },
-      CoreCommand::RevokeShareLink {
-        attachment, share_id, ..
-      } => self.revoke_share_link(attachment, &share_id).await,
-      CoreCommand::RefreshShareLinks { attachment } => self.refresh_share_links(attachment).await,
-      CoreCommand::DismissSuspectDeletions => self.dismiss_suspect_deletions(),
-      CoreCommand::RetryDmSetup { conversation } => self.retry_dm_setup(conversation).await,
-      CoreCommand::SetUpMeetingChat {
-        conversation,
-        meeting,
-        invitees,
-      } => self
-        .set_up_meeting_chat_from(conversation, Some(meeting), &invitees)
-        .await
-        .map(|_| ()),
-      CoreCommand::UpdateMeetingChatMembers {
-        conversation,
-        meeting,
-        invitees,
-        removed,
-      } => self
-        .update_meeting_chat_members_from(conversation, Some(meeting), &invitees, &removed)
-        .await
-        .map(|_| ()),
-      CoreCommand::AddPeopleToCall {
-        from,
-        in_call,
-        added,
-        maybe_title,
-        key,
-      } => self
-        .add_people_to_call(from, &in_call, &added, maybe_title, key)
-        .await
-        .map(|_| ()),
-      CoreCommand::AcceptCallMove { from, to } => self.accept_call_move(from, to).await,
-      CoreCommand::LetIntoMeetingChat { conversation, user } => {
-        self.let_into_meeting_chat(conversation, user).await
-      },
-      CoreCommand::PrepareGuestLink {
-        conversation,
-        meeting,
-      } => self.prepare_guest_link(conversation, meeting).await,
-      CoreCommand::LetGuestIntoMeetingChat {
-        conversation,
-        guest,
-        knock_fingerprint,
-        access_ends_at_ms,
-      } => {
-        self
-          .let_guest_into_meeting_chat(conversation, guest, &knock_fingerprint, access_ends_at_ms)
-          .await
-      },
-      CoreCommand::PrepareGuestKeyCode { guest } => self.prepare_guest_key_code(guest).await,
-      CoreCommand::NoteMeetingLobby { meeting, has_lobby } => self.note_meeting_lobby(meeting, has_lobby),
-      CoreCommand::SyncMeetingAdmitters {
-        meeting,
-        conversation,
-        expires_at_ms,
-      } => self
-        .sync_meeting_admitters(meeting, conversation, expires_at_ms)
-        .await
-        .map(drop),
-      CoreCommand::CheckMeetingAdmission { conversation } => self.check_meeting_admission(conversation).await,
-      CoreCommand::ChangeMeetingHosts {
-        meeting,
-        conversation,
-        co_hosts,
-        maybe_new_organizer,
-      } => {
-        let change = super::HostsChange {
-          meeting,
-          conversation,
-          co_hosts,
-          maybe_new_organizer,
-        };
-        self.change_meeting_hosts(&change).await
-      },
       CoreCommand::RefreshMembers { conversation } => self.refresh_members(conversation).await,
       CoreCommand::RefreshChannelAnchor { conversation } => self.refresh_channel_anchor(conversation).await,
-      CoreCommand::SetCustomStatus { maybe_status } => {
-        let now = self.now_ms();
-        self
-          .set_custom_status(maybe_status.and_then(|status| status.to_wire(now)))
-          .await
-      },
       other => Err(runs_elsewhere(&other)),
     }
   }
@@ -524,6 +382,190 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         Box::pin(self.rename_custom_emoji(id, shortcode)).await
       },
       CoreCommand::DeleteCustomEmoji { id } => Box::pin(self.delete_custom_emoji(id)).await,
+      other => Err(runs_elsewhere(&other)),
+    }
+  }
+
+  async fn run_member(&mut self, command: CoreCommand) -> Result<(), CoreError> {
+    match command {
+      CoreCommand::SetFavorite {
+        conversation,
+        is_favorite,
+      } => {
+        let request = UpdateConversationMemberRequest {
+          maybe_is_favorite: Some(is_favorite),
+          ..Default::default()
+        };
+        self
+          .api
+          .update_member(conversation, self.account.user_id, &request)
+          .await?;
+        self.refresh_conversation(conversation).await
+      },
+      CoreCommand::SetPresence {
+        presence,
+        maybe_until,
+      } => {
+        let manual = match presence {
+          PresenceStatus::Online => ManualPresence::Auto,
+          PresenceStatus::Busy => ManualPresence::Busy,
+          PresenceStatus::DoNotDisturb => ManualPresence::DoNotDisturb,
+          PresenceStatus::BeRightBack => ManualPresence::BeRightBack,
+          PresenceStatus::Away => ManualPresence::Away,
+          PresenceStatus::Offline => ManualPresence::Invisible,
+        };
+        let request = SetPresenceRequest {
+          // Every manual status may end by itself ("Reset after", issue #1578); automatic can't.
+          maybe_until: maybe_until
+            .filter(|_| manual != ManualPresence::Auto)
+            .map(UnixMillis),
+          manual,
+        };
+        self.queue_action(PendingAction::Presence { request }).await
+      },
+      // On the heap: sealing catches the group up, a big future that would otherwise sit in the frame
+      // of every caller of this dispatch (the desktop core thread, 1 MiB on Windows).
+      CoreCommand::ScheduleMessage { message, due_at_ms } => {
+        Box::pin(self.schedule_message(message, due_at_ms)).await
+      },
+      CoreCommand::UpdateScheduled { id, body, due_at_ms } => {
+        Box::pin(self.update_scheduled(id, body, due_at_ms)).await
+      },
+      CoreCommand::CancelScheduled { id } => Box::pin(self.cancel_scheduled(id)).await,
+      CoreCommand::SendScheduledNow { id } => Box::pin(self.send_scheduled_now(id)).await,
+      CoreCommand::SaveSearch { id, name, query } => self.update_account_data(|data, now| {
+        data.save_search(id, &name, &query, now);
+        true
+      }),
+      CoreCommand::DeleteSavedSearch { id } => self.update_account_data(|data, now| {
+        data.delete_saved_search(id, now);
+        true
+      }),
+      CoreCommand::SearchDirectory { query } => self.search_directory(&query).await.map(|_| ()),
+      CoreCommand::RefreshPrivacy => self.refresh_privacy().await.map(|_| ()),
+      CoreCommand::RefreshCallHistory => self.refresh_call_history().await,
+      CoreCommand::DismissSuspectDeletions => self.dismiss_suspect_deletions(),
+      CoreCommand::RetryDmSetup { conversation } => self.retry_dm_setup(conversation).await,
+      CoreCommand::SetUpMeetingChat {
+        conversation,
+        meeting,
+        invitees,
+      } => self
+        .set_up_meeting_chat_from(conversation, Some(meeting), &invitees)
+        .await
+        .map(|_| ()),
+      CoreCommand::UpdateMeetingChatMembers {
+        conversation,
+        meeting,
+        invitees,
+        removed,
+      } => self
+        .update_meeting_chat_members_from(conversation, Some(meeting), &invitees, &removed)
+        .await
+        .map(|_| ()),
+      CoreCommand::AddPeopleToCall {
+        from,
+        in_call,
+        added,
+        maybe_title,
+        key,
+      } => self
+        .add_people_to_call(from, &in_call, &added, maybe_title, key)
+        .await
+        .map(|_| ()),
+      CoreCommand::AcceptCallMove { from, to } => self.accept_call_move(from, to).await,
+      CoreCommand::LetIntoMeetingChat { conversation, user } => {
+        self.let_into_meeting_chat(conversation, user).await
+      },
+      CoreCommand::PrepareGuestLink {
+        conversation,
+        meeting,
+      } => self.prepare_guest_link(conversation, meeting).await,
+      CoreCommand::LetGuestIntoMeetingChat {
+        conversation,
+        guest,
+        knock_fingerprint,
+        access_ends_at_ms,
+      } => {
+        self
+          .let_guest_into_meeting_chat(conversation, guest, &knock_fingerprint, access_ends_at_ms)
+          .await
+      },
+      CoreCommand::PrepareGuestKeyCode { guest } => self.prepare_guest_key_code(guest).await,
+      CoreCommand::NoteMeetingLobby { meeting, has_lobby } => self.note_meeting_lobby(meeting, has_lobby),
+      CoreCommand::SyncMeetingAdmitters {
+        meeting,
+        conversation,
+        expires_at_ms,
+      } => self
+        .sync_meeting_admitters(meeting, conversation, expires_at_ms)
+        .await
+        .map(drop),
+      CoreCommand::CheckMeetingAdmission { conversation } => self.check_meeting_admission(conversation).await,
+      CoreCommand::ChangeMeetingHosts {
+        meeting,
+        conversation,
+        co_hosts,
+        maybe_new_organizer,
+      } => {
+        let change = super::HostsChange {
+          meeting,
+          conversation,
+          co_hosts,
+          maybe_new_organizer,
+        };
+        self.change_meeting_hosts(&change).await
+      },
+      CoreCommand::SetCustomStatus { maybe_status } => {
+        let now = self.now_ms();
+        self
+          .set_custom_status(maybe_status.and_then(|status| status.to_wire(now)))
+          .await
+      },
+      other => Err(runs_elsewhere(&other)),
+    }
+  }
+
+  async fn run_settings(&mut self, command: CoreCommand) -> Result<(), CoreError> {
+    match command {
+      CoreCommand::SetLastSeenVisibility { visibility } => self.set_last_seen_visibility(visibility).await,
+      CoreCommand::RefreshOwnDevices => self.refresh_own_devices().await,
+      CoreCommand::RevokeOwnDevice { device } => {
+        self.revoke_device(device).await?;
+        self.refresh_own_devices().await
+      },
+      CoreCommand::RenameOwnDevice { device, name } => self.rename_own_device(device, &name).await,
+      CoreCommand::TestPushOwnDevice { device } => self.test_push_own_device(device).await,
+      other => Err(runs_elsewhere(&other)),
+    }
+  }
+
+  async fn run_dialogs(&mut self, command: CoreCommand) -> Result<(), CoreError> {
+    match command {
+      CoreCommand::CreateShareLink {
+        conversation,
+        attachment,
+        maybe_expires_in_seconds,
+        maybe_max_downloads,
+        maybe_password,
+      } => {
+        let settings = crate::client::files::ShareLinkSettings {
+          maybe_expires_in_seconds,
+          maybe_max_downloads,
+          maybe_password: maybe_password.map(|mut password| {
+            // The text is wiped when `password` drops; the secret owns the bytes from here.
+            teamcraft_crypto::secret::SecretBytes::new(std::mem::take(&mut password.0).into_bytes())
+          }),
+        };
+        self
+          .create_share_link(conversation, attachment, settings)
+          .await
+          .map(|_| ())
+      },
+      CoreCommand::RevokeShareLink {
+        attachment, share_id, ..
+      } => self.revoke_share_link(attachment, &share_id).await,
+      CoreCommand::RefreshShareLinks { attachment } => self.refresh_share_links(attachment).await,
       other => Err(runs_elsewhere(&other)),
     }
   }
