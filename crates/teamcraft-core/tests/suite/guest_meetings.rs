@@ -20,6 +20,7 @@ use teamcraft_core::clock::ManualClock;
 use teamcraft_core::error::{CoreError, GuestRefusal};
 use teamcraft_core::store::MemoryStore;
 use teamcraft_core::upkeep::{self, Upkeep};
+use teamcraft_core::workspace::RosterRole;
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_proto::{AddConversationMemberRequest, ConversationId, MeetingId, UserId};
 
@@ -460,7 +461,7 @@ mod admitters {
     // Carol joined after the organizer signed, and tries the plain add, which skips the
     // admitters check of `let_guest_into_meeting_chat`.
     let mut carol = rig.member("Carol").await;
-    rig.let_into_group(&mut carol).await;
+    rig.join_group(&mut carol).await;
     rig.guest_knows_the_link();
     rig.server_admits_the_guest().await;
 
@@ -1035,8 +1036,9 @@ mod hosts {
   mod lobby {
     use teamcraft_core::meeting_invitees::InviteeList;
     use teamcraft_core::meeting_lobby::UNSIGNED_GUEST_ACCESS_MS;
-    use teamcraft_core::workspace::RosterRole;
-    use teamcraft_crypto::meeting_admitters::{AdmittersExpectation, SignedMeetingAdmitters};
+    use teamcraft_crypto::meeting_admitters::{
+      AdmittersExpectation, SignedMeetingAdmitters, VerifiedMeetingAdmitters,
+    };
     use teamcraft_proto::LobbyEntry;
 
     /// The release whose apps read signed invitees: the instance's minimum here.
@@ -1206,11 +1208,7 @@ mod hosts {
     async fn a_member_the_signed_roster_vouches_for_is_let_in_as_a_member() {
       let mut rig = rig().await;
       let mut bob = rig.member("Bob").await;
-      let roster = [
-        (rig.alice.client.user_id(), RosterRole::Owner),
-        (bob.client.user_id(), RosterRole::Admin),
-      ];
-      rig.alice.client.publish_roster(&roster).await.unwrap();
+      rig.vouch_for(bob.client.user_id()).await;
 
       let entry = rig.member_entry(&bob);
       rig
@@ -1281,6 +1279,60 @@ mod hosts {
       assert!(!invitees.contains(&rig.guest_id().to_string().parse().unwrap()));
     }
 
+    /// A guest another device admitted, whom the server calls a member: the organizer's device
+    /// neither carries them over as an invitee nor signs them as an admitter (#1873 review).
+    #[tokio::test]
+    async fn the_organizer_doesnt_vouch_for_a_guest_another_device_admitted() {
+      let mut rig = rig().await;
+      rig.server.set_minimum_client_version(SIGNING_RELEASE);
+      let mut bob = rig.member("Bob").await;
+      rig.let_into_group(&mut bob).await;
+      rig.publish_admitters().await;
+      rig.guest_knows_the_link();
+      rig.server_admits_the_guest().await;
+      rig.server.show_as_member(rig.guest_id());
+
+      let entry = rig.relabelled_entry(Some(rig.guest.client.own_fingerprint()));
+      bob
+        .client
+        .let_in_from_lobby(rig.chat, &entry, ACCESS_ENDS_MS)
+        .await
+        .unwrap();
+      settle(&mut [&mut rig.alice, &mut bob, &mut rig.guest]).await;
+      rig.alice.client.full_sync().await.unwrap();
+      assert_eq!(rig.call_devices().await, 3, "the guest is in Alice's group");
+
+      let edit = InviteeList::Chosen {
+        added: Vec::new(),
+        kept: vec![rig.guest_id()],
+      };
+      rig
+        .alice
+        .client
+        .update_meeting_chat_members_from(rig.chat, None, &edit, &[])
+        .await
+        .unwrap();
+      rig.publish_admitters().await;
+
+      let guest: u64 = rig.guest_id().to_string().parse().unwrap();
+      let statement = rig.signed_statement();
+      let invitees: Vec<u64> = statement
+        .maybe_invitees()
+        .unwrap()
+        .iter()
+        .map(|user| user.get())
+        .collect();
+      assert!(!invitees.contains(&guest), "not carried over");
+      let admitters: Vec<u64> = statement
+        .admitters()
+        .iter()
+        .map(|admitter| admitter.user_id.get())
+        .collect();
+      assert!(!admitters.contains(&guest), "not an admitter");
+      let bob_id: u64 = bob.client.user_id().to_string().parse().unwrap();
+      assert!(admitters.contains(&bob_id), "Bob, on the roster, still is");
+    }
+
     impl Rig {
       /// The guest's entry in the lobby as the server lists it, with the fingerprint the server
       /// says the guest's page reported.
@@ -1311,9 +1363,20 @@ mod hosts {
 
       /// The raw invitee IDs of the newest admitters on the server, checked against Alice's key.
       fn signed_invitees(&self) -> Vec<u64> {
+        self
+          .signed_statement()
+          .maybe_invitees()
+          .unwrap()
+          .iter()
+          .map(|user| user.get())
+          .collect()
+      }
+
+      /// The newest admitters on the server, checked against Alice's key.
+      fn signed_statement(&self) -> VerifiedMeetingAdmitters {
         let bytes = self.server.meeting_admitters(self.chat).unwrap();
         let organizer: teamcraft_crypto::identity::IdentityFingerprint = self.fingerprint.parse().unwrap();
-        let verified = SignedMeetingAdmitters::from_bytes(&bytes)
+        SignedMeetingAdmitters::from_bytes(&bytes)
           .unwrap()
           .verify(&AdmittersExpectation {
             organizer: &organizer,
@@ -1322,13 +1385,7 @@ mod hosts {
             now_ms: 0,
             maybe_seen_sequence: None,
           })
-          .unwrap();
-        verified
-          .maybe_invitees()
-          .expect("a statement that names the invitees")
-          .iter()
-          .map(|user| user.get())
-          .collect()
+          .unwrap()
       }
     }
   }
@@ -1362,7 +1419,15 @@ impl Rig {
   }
 
   /// Alice's device lets a member into the meeting chat's group, and the member's device joins.
+  /// The member is Alice's colleague: on the roster Alice signs, so her device vouches for them
+  /// as a member (an admitter, an invitee it carries over, #1873).
   async fn let_into_group(&mut self, member: &mut Peer) {
+    self.vouch_for(member.client.user_id()).await;
+    self.join_group(member).await;
+  }
+
+  /// [`Self::let_into_group`] for a member Alice's roster doesn't name.
+  async fn join_group(&mut self, member: &mut Peer) {
     self
       .alice
       .client
@@ -1372,6 +1437,26 @@ impl Rig {
     settle(&mut [&mut self.alice, member]).await;
     member.client.full_sync().await.unwrap();
     assert!(member.client.has_group(self.chat).unwrap());
+  }
+
+  /// Alice, the first owner, puts `user` on the roster she signs (as an admin: the roster's way of
+  /// naming somebody in these tests; a plain member is vouched for by a noted provider account).
+  async fn vouch_for(&mut self, user: UserId) {
+    let workspace = self.alice.client.workspace().unwrap();
+    let mut roles: Vec<(UserId, RosterRole)> = workspace
+      .roster
+      .members
+      .iter()
+      .map(|member| (member.user_id, member.role.clone()))
+      .collect();
+    if roles.is_empty() {
+      roles.push((self.alice.client.user_id(), RosterRole::Owner));
+    }
+    if roles.iter().any(|(listed, _)| *listed == user) {
+      return;
+    }
+    roles.push((user, RosterRole::Admin));
+    self.alice.client.publish_roster(&roles).await.unwrap();
   }
 
   /// Alice's device signs and publishes who may let guests in, as its group stands.

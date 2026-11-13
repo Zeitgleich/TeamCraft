@@ -230,7 +230,9 @@ besides knocks at the lobby (#1726).
 9. **Admitters** (#1103; design in e2ee.md §4.6, "Meeting guests"): so that a guest isn't stuck
    while the organizer is away, the organizer's device signs who else may let guests into the
    chat's encryption group: everybody with a device in the meeting chat's group as that device sees
-   it, guests left out, with the identity keys it pinned for them, and whether they let in people
+   it whom it vouches for as a member (the owners' signed roster, or a host by the verified host
+   lists; guests and anybody only the server calls a member left out, #1873; a plain member whose
+   account the owners' apps haven't noted yet isn't named), with the identity keys it pinned for them, and whether they let in people
    of the link by themselves (the organizer's "no lobby"). It publishes the statement with
    `PUT /conversations/{id}/meeting-admitters` (the meeting's organizer only) when the meeting is
    scheduled or edited, and keeps it current for meetings that run or start within a day (every

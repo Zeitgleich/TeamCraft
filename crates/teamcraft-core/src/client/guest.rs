@@ -581,18 +581,44 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     })
   }
 
-  /// The users with a device in the meeting chat's group on this device, guests left out (they
-  /// came in through signed adds); none without a group.
+  /// The users with a device in the meeting chat's group on this device whom it vouches for as
+  /// members ([`Self::vouched_meeting_users`]: guests and anybody the signed roster doesn't name
+  /// left out, #1873); none without a group.
   fn members_in_group(&mut self, conversation: ConversationId) -> Result<Vec<UserId>, CoreError> {
     if !self.has_group(conversation)? {
       return Ok(Vec::new());
     }
     let in_group = self.group_users(conversation)?;
-    let guests = self.guest_users(in_group.iter().copied())?;
+    self.vouched_meeting_users(conversation, in_group)
+  }
+
+  /// The users among `users` of the meeting chat `conversation` this device vouches for as members,
+  /// for what the organizer's device signs (the admitters, the invitees it carries over): never a
+  /// guest ([`Self::guest_users`]), and otherwise only somebody the signed roster vouches for
+  /// (`WorkspaceState::vouches_for_member`), the organizer or a co-host by the host lists this
+  /// device verified, or this device's own user. The server's user kind alone vouches for nobody, so a
+  /// guest another device admitted and the server calls a member is left out (#1873). A plain
+  /// member whose account the owners' apps haven't noted yet is left out too (e2ee.md §4.6, "Who
+  /// is a guest, and until when").
+  pub(super) fn vouched_meeting_users(
+    &self,
+    conversation: ConversationId,
+    users: Vec<UserId>,
+  ) -> Result<Vec<UserId>, CoreError> {
+    let guests = self.guest_users(users.iter().copied())?;
+    let workspace = self.workspace()?;
+    // The hosts by the host lists this device verified (#1720), never by the server's naming.
+    let mut hosts: BTreeSet<UserId> = self.kept_co_hosts(conversation)?.into_iter().collect();
+    hosts.extend(self.kept_organizer(conversation)?);
+    let me = self.account.user_id;
+    let is_own_member = !self.is_guest_device()?;
     Ok(
-      in_group
+      users
         .into_iter()
         .filter(|user| !guests.contains(user))
+        .filter(|user| {
+          workspace.vouches_for_member(*user) || hosts.contains(user) || (*user == me && is_own_member)
+        })
         .collect(),
     )
   }
@@ -892,7 +918,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// The users this organizer's device names as admitters: everybody with a device in the meeting
-  /// chat's group but the organizer and guests, with the identity keys this device pinned.
+  /// chat's group but the organizer whom it vouches for as a member
+  /// ([`Self::vouched_meeting_users`], #1873), with the identity keys this device pinned.
   async fn admitter_candidates(&mut self, conversation: ConversationId) -> Result<Vec<Admitter>, CoreError> {
     let me = self.account.user_id;
     let in_group: Vec<UserId> = self
@@ -900,11 +927,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .into_iter()
       .filter(|user| *user != me)
       .collect();
-    let guests = self.guest_users(in_group.iter().copied())?;
-    let members: Vec<UserId> = in_group
-      .into_iter()
-      .filter(|user| !guests.contains(user))
-      .collect();
+    let members = self.vouched_meeting_users(conversation, in_group)?;
     let directory = self.pin_identities(members.iter().copied()).await?;
     Ok(
       members
