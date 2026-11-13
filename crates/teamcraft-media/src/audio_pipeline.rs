@@ -386,6 +386,7 @@ mod tests {
         target_depth_packets: 3,
         max_depth_packets: 50,
         max_excess_packets: 10,
+        max_adaptive_depth_packets: 3,
       });
       let mut capture = CapturePipeline::new(OpusEncoderConfig::default()).unwrap();
       capture
