@@ -167,8 +167,9 @@ impl BackgroundAccounts {
     lock(&self.states).get(origin).copied().unwrap_or_default()
   }
 
-  /// Stops watching the account of `origin`. Waits for a round in progress, so the account's
-  /// session is not in use here any more when this returns.
+  /// Stops watching the account of `origin`. Waits for a round in progress and for the watcher to
+  /// end, so the account's session is not in use here any more when this returns, and no state the
+  /// watcher found shows after it.
   pub async fn stop(&self, origin: &str) {
     let Some(watcher) = lock(&self.watchers).remove(origin) else {
       return;
@@ -177,6 +178,8 @@ impl BackgroundAccounts {
     watcher.is_stopped.store(true, Ordering::Release);
     watcher.task.abort();
     drop(busy);
+    // Aborted: ends at its next wait, the lock it would need or its pause. The error says so.
+    let _ = watcher.task.await;
     lock(&self.states).remove(origin);
   }
 
@@ -228,19 +231,20 @@ async fn run(
 ) {
   tokio::time::sleep(timing.first).await;
   loop {
-    let found = {
+    let is_changed = {
       let _round = busy.lock().await;
       // Stopped while waiting for the lock: the session belongs to someone else now.
       if is_stopped.load(Ordering::Acquire) {
         return;
       }
-      poll.poll().await
+      // Kept inside the round: a stop waits for it, so no state lands after the stop cleared it.
+      poll.poll().await.is_some_and(|state| {
+        let previous = lock(&states).insert(origin.clone(), state);
+        previous != Some(state)
+      })
     };
-    if let Some(state) = found {
-      let previous = lock(&states).insert(origin.clone(), state);
-      if previous != Some(state) {
-        on_change();
-      }
+    if is_changed {
+      on_change();
     }
     tokio::time::sleep(timing.every).await;
   }
@@ -325,28 +329,50 @@ mod tests {
 
   use teamcraft_core::store::OsKeystore;
   use teamcraft_proto::{ConversationId, ConversationUnread};
+  use tokio::sync::{Semaphore, mpsc};
 
   use super::*;
 
   const ORIGIN: &str = "https://b.example.com";
 
-  /// A round that takes `delay`, counting the rounds started and finished.
-  struct SlowPoll {
-    delay: Duration,
-    started: Arc<AtomicU32>,
+  /// A round that tells when it began and ends once the test lets it: no timing involved.
+  struct GatedPoll {
+    entered: mpsc::UnboundedSender<()>,
+    release: Arc<Semaphore>,
     finished: Arc<AtomicU32>,
   }
 
-  impl Poll for SlowPoll {
+  impl Poll for GatedPoll {
     async fn poll(&self) -> Option<BackgroundState> {
-      self.started.fetch_add(1, Ordering::SeqCst);
-      tokio::time::sleep(self.delay).await;
+      let _ = self.entered.send(());
+      self.release.acquire().await.unwrap().forget();
       self.finished.fetch_add(1, Ordering::SeqCst);
       Some(BackgroundState::Unread(UnreadBadge {
         mentions: 1,
         unread: 2,
       }))
     }
+  }
+
+  /// A [`GatedPoll`] whose rounds may run `released` times, the channel of their beginnings and the
+  /// count of those that ended.
+  fn gated(
+    released: usize,
+  ) -> (
+    GatedPoll,
+    mpsc::UnboundedReceiver<()>,
+    Arc<Semaphore>,
+    Arc<AtomicU32>,
+  ) {
+    let (entered, rounds) = mpsc::unbounded_channel();
+    let release = Arc::new(Semaphore::new(released));
+    let finished = Arc::new(AtomicU32::new(0));
+    let poll = GatedPoll {
+      entered,
+      release: Arc::clone(&release),
+      finished: Arc::clone(&finished),
+    };
+    (poll, rounds, release, finished)
   }
 
   fn accounts(changes: Arc<AtomicU32>) -> BackgroundAccounts {
@@ -394,52 +420,37 @@ mod tests {
     );
   }
 
-  /// Switching to an account waits for its round: afterwards no round of it runs here.
+  /// Switching to an account waits for its round: afterwards no round of it runs here, and its
+  /// badge is gone (a stopped watcher once wrote it back after the stop).
   #[tokio::test]
   async fn stopping_waits_for_the_round_and_none_follows() {
-    let changes = Arc::new(AtomicU32::new(0));
-    let accounts = accounts(Arc::clone(&changes));
-    let (started, finished) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
-    accounts.watch_with(
-      ORIGIN.to_owned(),
-      SlowPoll {
-        delay: Duration::from_millis(50),
-        started: Arc::clone(&started),
-        finished: Arc::clone(&finished),
-      },
-    );
-    while started.load(Ordering::SeqCst) == 0 {
-      tokio::time::sleep(Duration::from_millis(1)).await;
-    }
+    let accounts = accounts(Arc::new(AtomicU32::new(0)));
+    let (poll, mut rounds, release, finished) = gated(0);
+    accounts.watch_with(ORIGIN.to_owned(), poll);
+    rounds.recv().await.unwrap();
 
-    accounts.stop(ORIGIN).await;
+    // The stop is waiting for the round when the round is let go.
+    tokio::join!(accounts.stop(ORIGIN), async { release.add_permits(1) });
 
-    let after_stop = (started.load(Ordering::SeqCst), finished.load(Ordering::SeqCst));
-    assert_eq!(after_stop.0, after_stop.1, "the round in progress ended first");
-    tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
-      started.load(Ordering::SeqCst),
-      after_stop.0,
-      "no round after the stop"
+      finished.load(Ordering::SeqCst),
+      1,
+      "the round in progress ended first"
     );
     assert_eq!(accounts.state(ORIGIN), BackgroundState::Unknown);
+    // The watcher has ended: nothing holds the channel's sender any more, and no round began.
+    assert!(rounds.recv().await.is_none(), "no round after the stop");
   }
 
   #[tokio::test]
   async fn a_changed_state_is_told_once() {
     let changes = Arc::new(AtomicU32::new(0));
     let accounts = accounts(Arc::clone(&changes));
-    let started = Arc::new(AtomicU32::new(0));
-    accounts.watch_with(
-      ORIGIN.to_owned(),
-      SlowPoll {
-        delay: Duration::ZERO,
-        started: Arc::clone(&started),
-        finished: Arc::new(AtomicU32::new(0)),
-      },
-    );
-    while started.load(Ordering::SeqCst) < 3 {
-      tokio::time::sleep(Duration::from_millis(5)).await;
+    let (poll, mut rounds, _release, _finished) = gated(Semaphore::MAX_PERMITS);
+    accounts.watch_with(ORIGIN.to_owned(), poll);
+    // The third round began: the first two found the same counts and wrote them.
+    for _ in 0..3 {
+      rounds.recv().await.unwrap();
     }
     assert_eq!(
       changes.load(Ordering::SeqCst),
