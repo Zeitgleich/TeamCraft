@@ -4,7 +4,8 @@
 //! the headers (IP, UDP, QUIC, datagram, RTP, DAVE) weigh more than the speech. A phone on a link of
 //! 64 kbit/s can't send that. So the voice steps down as the uplink estimate falls: to a lower
 //! bitrate in 40 ms packets, then lower still in 60 ms packets, which halves and thirds the
-//! headers. It steps down at once. It steps back up one step at a time, and only on proof: a probe
+//! headers. It steps down once the estimate stayed below a step's bound for
+//! [`VoiceStepConfig::downgrade_after`]. It steps back up only on proof: a probe
 //! of the uplink ([`crate::rate_probe`]) carried the next step's bound with a margin. An estimate
 //! that grew while little was sent (a muted microphone) proves nothing: on a 64 kbit/s link it
 //! brought the full voice back, and the camera with it. A step up comes at least
@@ -33,6 +34,8 @@ pub struct VoiceSteps {
   config: VoiceStepConfig,
   step: VoiceStep,
   has_long_frames: bool,
+  /// Since when the estimate has been below the current step's bound.
+  maybe_below_since: Option<Instant>,
   /// The least time after the last change before a step up; doubles with each upgrade the link
   /// didn't carry.
   upgrade_after: Duration,
@@ -59,6 +62,9 @@ pub struct VoiceStepConfig {
   pub max_upgrade_after: Duration,
   /// A step down within this long after a step up shows the link didn't carry it.
   pub failed_upgrade_within: Duration,
+  /// The estimate steps the voice down once it stayed below the step's bound this long: the
+  /// estimator's first cut at a sudden drop is often a step it takes back within seconds (#939).
+  pub downgrade_after: Duration,
   /// Lost voice steps down again at most this often: what was sent before the last step down
   /// is still on the way.
   pub hurt_step_interval: Duration,
@@ -109,6 +115,7 @@ impl Default for VoiceStepConfig {
       max_upgrade_after: Duration::from_secs(80),
       failed_upgrade_within: Duration::from_secs(15),
       hurt_step_interval: Duration::from_secs(1),
+      downgrade_after: Duration::from_secs(2),
     }
   }
 }
@@ -119,6 +126,7 @@ impl VoiceSteps {
       config,
       step: VoiceStep::Full,
       has_long_frames: false,
+      maybe_below_since: None,
       upgrade_after: config.upgrade_after,
       maybe_upgraded_at: None,
       maybe_changed_at: None,
@@ -136,6 +144,7 @@ impl VoiceSteps {
   pub fn start_afresh(&mut self) -> Option<VoiceEncoding> {
     let before = self.encoding();
     self.step = VoiceStep::Full;
+    self.maybe_below_since = None;
     self.upgrade_after = self.config.upgrade_after;
     self.maybe_upgraded_at = None;
     self.maybe_changed_at = None;
@@ -196,6 +205,14 @@ impl VoiceSteps {
     let before = self.encoding();
     self.forget_held_upgrade(now);
     let mut target = self.step_for(f64::from(estimate_bps));
+    if target < self.step {
+      let below_since = *self.maybe_below_since.get_or_insert(now);
+      if now.saturating_duration_since(below_since) < self.config.downgrade_after {
+        target = self.step;
+      }
+    } else {
+      self.maybe_below_since = None;
+    }
     if is_voice_hurt && self.may_step_down_for_hurt(now) {
       target = target.min(self.step.lower());
     }
@@ -206,9 +223,8 @@ impl VoiceSteps {
     (after != before).then_some(after)
   }
 
-  /// A probe showed the uplink carries `carried_bps`: one step up when that is the next step's
-  /// bound with the margin, and the last change was long enough ago. Returns the new encoding
-  /// when it changed.
+  /// A probe showed the uplink carries `carried_bps`: up to the step that rate carries with the
+  /// margin, when the last change was long enough ago. Returns the new encoding when it changed.
   pub fn on_carried(&mut self, carried_bps: u32, now: Instant) -> Option<VoiceEncoding> {
     let before = self.encoding();
     self.forget_held_upgrade(now);
@@ -217,7 +233,7 @@ impl VoiceSteps {
       .maybe_changed_at
       .is_none_or(|changed_at| now.saturating_duration_since(changed_at) >= self.upgrade_after);
     if with_margin > self.step && is_due {
-      self.step = self.step.higher();
+      self.step = with_margin;
       self.maybe_upgraded_at = Some(now);
       self.maybe_changed_at = Some(now);
     }
@@ -249,6 +265,7 @@ impl VoiceSteps {
       self.upgrade_after = (self.upgrade_after * 2).min(self.config.max_upgrade_after);
     }
     self.step = target;
+    self.maybe_below_since = None;
     self.maybe_changed_at = Some(now);
   }
 
@@ -284,13 +301,6 @@ impl VoiceStep {
     match self {
       Self::Full => Self::Thin,
       Self::Thin | Self::Thinnest => Self::Thinnest,
-    }
-  }
-
-  fn higher(self) -> Self {
-    match self {
-      Self::Thinnest => Self::Thin,
-      Self::Thin | Self::Full => Self::Full,
     }
   }
 }
@@ -334,10 +344,36 @@ mod tests {
     assert_eq!(collapsed.step(), VoiceStep::Thinnest);
   }
 
+  /// The estimator's first cut at a sudden drop is often taken back within seconds: the voice
+  /// steps down only once the estimate stayed below the bound.
+  #[test]
+  fn a_short_dip_of_the_estimate_keeps_the_voice() {
+    let config = VoiceStepConfig::default();
+    let mut steps = VoiceSteps::new(config);
+    steps.set_long_frames(true);
+    let start = Instant::now();
+    for tick in 0..10 {
+      assert_eq!(steps.on_estimate(THIN_BPS, false, at(start, tick)), None);
+    }
+    assert_eq!(steps.on_estimate(GOOD_BPS, false, at(start, 10)), None);
+    for tick in 11..=30 {
+      steps.on_estimate(THINNEST_BPS, false, at(start, tick));
+    }
+    assert_eq!(steps.step(), VoiceStep::Full, "below for 1.9 s");
+    assert_eq!(
+      steps.on_estimate(THINNEST_BPS, false, at(start, 31)),
+      Some(config.thinnest)
+    );
+    // Lost voice doesn't wait.
+    let mut hurt = VoiceSteps::new(config);
+    hurt.set_long_frames(true);
+    assert_eq!(hurt.on_estimate(GOOD_BPS, true, start), Some(config.thin));
+  }
+
   /// An estimate that grew proves nothing (it grows while a muted microphone sends nothing); a
   /// probe that carried the next step's bound does, one step at a time.
   #[test]
-  fn only_a_carried_probe_steps_up_a_step_at_a_time() {
+  fn only_a_carried_probe_steps_up() {
     let config = VoiceStepConfig::default();
     let mut steps = steps(true);
     let start = Instant::now();
@@ -348,7 +384,11 @@ mod tests {
     let later = at(start, 100);
     // Just above the bound is not enough: the margin is missing.
     assert_eq!(steps.on_carried(config.thinnest_below_bps + 1, later), None);
-    assert_eq!(steps.on_carried(GOOD_BPS, later), Some(config.thin), "one step");
+    assert_eq!(
+      steps.on_carried(config.thin_below_bps, later),
+      Some(config.thin),
+      "as far as it carries"
+    );
     assert_eq!(
       steps.on_carried(GOOD_BPS, later + config.upgrade_after / 2),
       None,
@@ -357,6 +397,13 @@ mod tests {
     assert_eq!(
       steps.on_carried(GOOD_BPS, later + config.upgrade_after),
       Some(config.full)
+    );
+    let mut collapsed = self::steps(true);
+    collapsed.on_estimate(THINNEST_BPS, false, start);
+    assert_eq!(
+      collapsed.on_carried(GOOD_BPS, start + config.upgrade_after),
+      Some(config.full),
+      "a link back with room gets the full voice at once"
     );
   }
 
@@ -468,8 +515,12 @@ mod tests {
     assert_eq!(VoiceFrame::Ms40.duration(), Duration::from_millis(40));
   }
 
+  /// Steps that follow the estimate down at once, for the tests of everything else.
   fn steps(has_long_frames: bool) -> VoiceSteps {
-    let mut steps = VoiceSteps::new(VoiceStepConfig::default());
+    let mut steps = VoiceSteps::new(VoiceStepConfig {
+      downgrade_after: Duration::ZERO,
+      ..VoiceStepConfig::default()
+    });
     steps.set_long_frames(has_long_frames);
     steps
   }
