@@ -137,5 +137,6 @@ pub mod voice_decode;
 pub mod voice_guard;
 #[cfg(feature = "voice")]
 pub mod voice_recording;
+pub mod voice_steps;
 #[cfg(feature = "web-api")]
 pub mod web_api;

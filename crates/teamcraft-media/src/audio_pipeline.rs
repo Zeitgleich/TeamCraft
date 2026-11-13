@@ -1,6 +1,7 @@
-//! Native audio pipeline between devices and the network: microphone samples → (audio processing)
-//! → 20 ms Opus frames with their level, and received Opus packets → jitter buffer → decoded,
-//! mixed 20 ms frames for the speakers.
+//! Native audio pipeline between devices and the network: microphone samples → (audio processing,
+//! every 20 ms) → Opus packets (20 ms, or 40 or 60 ms on a thin uplink, #1893) with their level,
+//! and received Opus packets of any length → jitter buffer → decoded, mixed 20 ms frames for the
+//! speakers.
 //!
 //! Device-independent so tests and the headless client feed samples directly.
 
@@ -12,16 +13,21 @@ use crate::audio_codec::{
   AudioChannels, FRAME_SAMPLES_PER_CHANNEL, OpusDecoder, OpusEncoder, OpusEncoderConfig, OpusError,
 };
 pub use crate::audio_frame::EncodedAudioFrame;
+use crate::audio_frame::opus_packet_samples;
 use crate::audio_level::{DEFAULT_VOICE_THRESHOLD_DBOV, measure_audio_level};
 use crate::audio_processing::{AudioProcessingError, AudioProcessor, PROCESSING_FRAME_SAMPLES};
 use crate::call_engine::AudioOrigin;
 use crate::jitter::{JitterBuffer, JitterBufferConfig, Playout};
 use crate::rtp::SequenceNumber;
+use crate::voice_steps::VoiceEncoding;
 
-/// Microphone side: chops samples into 20 ms frames and encodes them.
+/// Microphone side: processes samples in 20 ms frames and encodes them in packets of the
+/// encoder's length.
 pub struct CapturePipeline {
   encoder: OpusEncoder,
   pending: Vec<f32>,
+  /// Processed samples waiting for a packet's worth.
+  processed: Vec<f32>,
   is_muted: bool,
   maybe_processor: Option<std::sync::Arc<AudioProcessor>>,
 }
@@ -44,6 +50,10 @@ pub struct PlaybackMixer {
 struct RemoteAudio {
   jitter: JitterBuffer<Vec<u8>>,
   decoder: OpusDecoder,
+  /// Decoded samples not played yet: a packet longer than 20 ms plays over several frames.
+  decoded: VecDeque<f32>,
+  /// Samples per channel of the last packet played: what a lost one is concealed for.
+  last_packet_samples: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -62,6 +72,7 @@ impl CapturePipeline {
         ..config
       })?,
       pending: Vec::with_capacity(2 * FRAME_SAMPLES_PER_CHANNEL),
+      processed: Vec::new(),
       is_muted: false,
       maybe_processor: None,
     })
@@ -77,6 +88,7 @@ impl CapturePipeline {
   pub fn set_muted(&mut self, is_muted: bool) {
     self.is_muted = is_muted;
     self.pending.clear();
+    self.processed.clear();
     if let Some(processor) = &self.maybe_processor {
       processor.set_capture_muted(is_muted);
     }
@@ -91,17 +103,26 @@ impl CapturePipeline {
     Ok(self.encoder.set_measured_loss_percent(measured_percent)?)
   }
 
-  /// Feeds mono 48 kHz samples (any chunk size); returns the frames that became complete.
+  /// Encodes at another bitrate and packet length from the next packet on (#1893).
+  pub fn set_voice_encoding(&mut self, encoding: VoiceEncoding) -> Result<(), AudioPipelineError> {
+    Ok(self.encoder.set_encoding(encoding)?)
+  }
+
+  /// Feeds mono 48 kHz samples (any chunk size); returns the packets that became complete.
   pub fn push(&mut self, samples: &[f32]) -> Result<Vec<EncodedAudioFrame>, AudioPipelineError> {
     if self.is_muted {
       return Ok(Vec::new());
     }
     self.pending.extend_from_slice(samples);
-    let mut frames = Vec::new();
     while self.pending.len() >= FRAME_SAMPLES_PER_CHANNEL {
       let mut frame: Vec<f32> = self.pending.drain(..FRAME_SAMPLES_PER_CHANNEL).collect();
       self.process(&mut frame)?;
-      let pcm: Vec<i16> = frame.iter().map(|sample| to_i16(*sample)).collect();
+      self.processed.extend(frame);
+    }
+    let packet_samples = self.encoder.frame_samples_per_channel();
+    let mut frames = Vec::new();
+    while self.processed.len() >= packet_samples {
+      let pcm: Vec<i16> = self.processed.drain(..packet_samples).map(to_i16).collect();
       let level = measure_audio_level(&pcm, DEFAULT_VOICE_THRESHOLD_DBOV);
       frames.push(EncodedAudioFrame {
         opus: self.encoder.encode(&pcm)?,
@@ -169,8 +190,16 @@ impl PlaybackMixer {
       std::collections::btree_map::Entry::Vacant(entry) => entry.insert(RemoteAudio {
         jitter: JitterBuffer::new(self.jitter_config),
         decoder: OpusDecoder::new(AudioChannels::Mono)?,
+        decoded: VecDeque::new(),
+        last_packet_samples: FRAME_SAMPLES_PER_CHANNEL,
       }),
     };
+    // The buffer's depths count packets of the length that arrives, from the first one on.
+    if let Some(samples) = opus_packet_samples(&opus) {
+      stream
+        .jitter
+        .set_packet_frames(samples.div_ceil(FRAME_SAMPLES_PER_CHANNEL));
+    }
     stream.jitter.push(sequence_number, opus);
     Ok(())
   }
@@ -203,19 +232,14 @@ impl PlaybackMixer {
   pub fn next_frame(&mut self) -> Result<Vec<f32>, AudioPipelineError> {
     let mut mix = vec![0.0f32; FRAME_SAMPLES_PER_CHANNEL];
     for stream in self.streams.values_mut() {
-      let maybe_pcm = match stream.jitter.pop() {
-        Some(Playout::Packet { item, .. }) => Some(stream.decoder.decode(&item)?),
-        // The next packet's in-band FEC recovers the lost one, if it is already here.
-        Some(Playout::Missing { .. }) => {
-          let maybe_next = stream.jitter.peek_next().map(Vec::as_slice);
-          Some(stream.decoder.conceal(maybe_next)?)
-        },
-        None => None,
-      };
-      if let Some(pcm) = maybe_pcm.filter(|_| !self.is_deafened) {
-        for (slot, sample) in mix.iter_mut().zip(pcm) {
-          *slot += f32::from(sample) / f32::from(i16::MAX);
-        }
+      stream.decode_frame()?;
+      let available = stream.decoded.len().min(FRAME_SAMPLES_PER_CHANNEL);
+      let samples = stream.decoded.drain(..available);
+      if self.is_deafened {
+        continue;
+      }
+      for (slot, sample) in mix.iter_mut().zip(samples) {
+        *slot += sample;
       }
     }
     for sample in &mut mix {
@@ -241,6 +265,39 @@ impl PlaybackMixer {
     }
     for chunk in render.chunks(PROCESSING_FRAME_SAMPLES) {
       processor.analyze_render(chunk)?;
+    }
+    Ok(())
+  }
+}
+
+impl RemoteAudio {
+  /// Decodes packets until a 20 ms frame is there to play, or the buffer has nothing due.
+  fn decode_frame(&mut self) -> Result<(), AudioPipelineError> {
+    while self.decoded.len() < FRAME_SAMPLES_PER_CHANNEL {
+      let pcm = match self.jitter.pop() {
+        Some(Playout::Packet { item, .. }) => {
+          let pcm = self.decoder.decode(&item)?;
+          if !pcm.is_empty() {
+            self.last_packet_samples = pcm.len();
+          }
+          pcm
+        },
+        // The next packet's in-band FEC recovers the lost one, if it is already here.
+        Some(Playout::Missing { .. }) => {
+          let maybe_next = self.jitter.peek_next().map(Vec::as_slice);
+          // A lost packet is as long as the one before it; FEC data in the next one only where
+          // that one is as long too (a step changed the length in between otherwise).
+          let maybe_fec =
+            maybe_next.filter(|next| opus_packet_samples(next) == Some(self.last_packet_samples));
+          self.decoder.conceal(maybe_fec, self.last_packet_samples)?
+        },
+        None => break,
+      };
+      self.decoded.extend(
+        pcm
+          .into_iter()
+          .map(|sample| f32::from(sample) / f32::from(i16::MAX)),
+      );
     }
     Ok(())
   }
@@ -319,6 +376,64 @@ mod tests {
       }
       let peak = last.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
       assert!(peak > 0.35, "both tones are audible in the mix, peak {peak}");
+    }
+
+    /// A voice on a thin uplink (#1893) sends 60 ms packets: each plays over three 20 ms frames,
+    /// a lost one is concealed for 60 ms, and the stream keeps time with the sender's capture.
+    #[test]
+    fn long_packets_play_at_their_length() {
+      let mut mixer = PlaybackMixer::new(JitterBufferConfig {
+        target_depth_packets: 3,
+        max_depth_packets: 50,
+        max_excess_packets: 10,
+      });
+      let mut capture = CapturePipeline::new(OpusEncoderConfig::default()).unwrap();
+      capture
+        .set_voice_encoding(VoiceEncoding {
+          bitrate_bps: 12_000,
+          frame: crate::voice_steps::VoiceFrame::Ms60,
+        })
+        .unwrap();
+      let packets: Vec<Vec<u8>> = (0..30u64)
+        .flat_map(|index| capture.push(&sine_tone(300.0, 0.3, index * 960, 960)).unwrap())
+        .map(|frame| frame.opus)
+        .collect();
+      assert_eq!(packets.len(), 10, "600 ms in 60 ms packets");
+      let mut played = Vec::new();
+      // Each packet arrives while the one before it plays; packet 5 is lost.
+      for (index, packet) in packets.into_iter().enumerate() {
+        if index != 5 {
+          mixer
+            .push(
+              device(1),
+              AudioOrigin::Microphone,
+              SequenceNumber(index as u16),
+              packet,
+            )
+            .unwrap();
+        }
+        if index > 0 {
+          played.extend((0..3).map(|_| mixer.next_frame().unwrap()));
+        }
+      }
+      played.extend((0..3).map(|_| mixer.next_frame().unwrap()));
+      assert_eq!(played.len(), 30);
+      // Low but not silent: the decoder fades in after concealing a pure tone.
+      let audible = |frame: &Vec<f32>| frame.iter().any(|sample| sample.abs() > 0.02);
+      // Every frame plays sound, the lost packet's concealed 60 ms included: one packet was the
+      // 60 ms of the target, the packets never ran dry, and the lost one didn't skip ahead.
+      assert!(
+        played.iter().all(audible),
+        "{:?}",
+        played
+          .iter()
+          .map(|frame| frame.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs())))
+          .collect::<Vec<_>>()
+      );
+      assert!(
+        mixer.next_frame().unwrap().iter().all(|sample| *sample == 0.0),
+        "all played"
+      );
     }
 
     #[test]

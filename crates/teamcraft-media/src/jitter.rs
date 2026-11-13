@@ -4,8 +4,11 @@
 //! buffered and then yields one item per call to [`JitterBuffer::pop`], reporting gaps as
 //! [`Playout::Missing`] so the decoder can run packet loss concealment or use in-band FEC.
 //!
-//! Depth is counted in packets instead of wall-clock time: callers pop once per frame interval
-//! (20 ms for Opus), which keeps the buffer free of clocks and deterministic to test.
+//! Depth is counted in packets instead of wall-clock time: callers pop once per packet they play
+//! (every 20 ms for 20 ms Opus packets), which keeps the buffer free of clocks and deterministic
+//! to test. The depths are set in 20 ms frames; a stream of longer packets (a voice on a thin
+//! uplink, #1893) says how many frames a packet holds ([`JitterBuffer::set_packet_frames`]), and
+//! the depths count the packets that hold as long.
 //!
 //! The depth adapts per stream (#1894): every underrun deepens it by [`ADAPT_STEP_PACKETS`], up to
 //! [`JitterBufferConfig::max_adaptive_depth_packets`], and [`SHRINK_AFTER_POPS`] without one take a
@@ -44,10 +47,13 @@ pub struct JitterBuffer<T> {
   state: PlayoutState,
   /// Pops in a row with more than `max_excess_packets` above the target.
   excess_pops: u32,
-  /// The depth playout aims for now: the configured target, deepened by underruns.
-  target_packets: usize,
+  /// The depth playout aims for now, in 20 ms frames: the configured target, deepened by
+  /// underruns.
+  target_frames: usize,
   /// Pops since the last underrun or shrink.
   calm_pops: u32,
+  /// 20 ms frames per packet of the stream: the depths are divided by it.
+  packet_frames: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,8 +138,9 @@ impl<T> JitterBuffer<T> {
       maybe_played_until: None,
       state: PlayoutState::Buffering,
       excess_pops: 0,
-      target_packets: config.target_depth_packets,
+      target_frames: config.target_depth_packets,
       calm_pops: 0,
+      packet_frames: 1,
     }
   }
 
@@ -141,15 +148,21 @@ impl<T> JitterBuffer<T> {
   pub fn set_config(&mut self, config: JitterBufferConfig) {
     self.config = config;
     self.excess_pops = 0;
-    self.target_packets = self.target_packets.clamp(
+    self.target_frames = self.target_frames.clamp(
       config.target_depth_packets,
       config.max_adaptive_depth_packets.max(config.target_depth_packets),
     );
   }
 
-  /// The depth playout aims for now (packets).
+  /// The depth playout aims for now, in 20 ms frames.
   pub fn target_depth_packets(&self) -> usize {
-    self.target_packets
+    self.target_frames
+  }
+
+  /// The stream's packets hold `frames` 20 ms frames each (1 to 6): the depths, set for 20 ms
+  /// packets, count packets of that length from now on, rounded up.
+  pub fn set_packet_frames(&mut self, frames: usize) {
+    self.packet_frames = frames.clamp(1, 6);
   }
 
   pub fn push(&mut self, sequence_number: SequenceNumber, item: T) -> PushOutcome {
@@ -176,7 +189,7 @@ impl<T> JitterBuffer<T> {
   pub fn pop(&mut self) -> Option<Playout<T>> {
     let next = match self.state {
       PlayoutState::Buffering => {
-        if self.packets.len() < self.target_packets {
+        if self.packets.len() < self.target_packets() {
           return None;
         }
         *self.packets.keys().next()?
@@ -226,7 +239,7 @@ impl<T> JitterBuffer<T> {
       .config
       .max_adaptive_depth_packets
       .max(self.config.target_depth_packets);
-    self.target_packets = (self.target_packets + ADAPT_STEP_PACKETS).min(ceiling);
+    self.target_frames = (self.target_frames + ADAPT_STEP_PACKETS).min(ceiling);
     self.calm_pops = 0;
   }
 
@@ -235,8 +248,8 @@ impl<T> JitterBuffer<T> {
     self.calm_pops += 1;
     if self.calm_pops >= SHRINK_AFTER_POPS {
       self.calm_pops = 0;
-      self.target_packets = self
-        .target_packets
+      self.target_frames = self
+        .target_frames
         .saturating_sub(1)
         .max(self.config.target_depth_packets);
     }
@@ -248,7 +261,7 @@ impl<T> JitterBuffer<T> {
       return next;
     };
     let buffered_slots = (highest + 1).saturating_sub(next);
-    let excess_bound = (self.target_packets + self.config.max_excess_packets) as u64;
+    let excess_bound = (self.target_packets() + self.in_packets(self.config.max_excess_packets)) as u64;
     if buffered_slots <= excess_bound {
       self.excess_pops = 0;
       return next;
@@ -258,9 +271,18 @@ impl<T> JitterBuffer<T> {
       return next;
     }
     self.excess_pops = 0;
-    let caught_up = (highest + 1).saturating_sub(self.target_packets as u64);
+    let caught_up = (highest + 1).saturating_sub(self.target_packets() as u64);
     self.packets.retain(|seq, _| *seq >= caught_up);
     caught_up
+  }
+
+  fn target_packets(&self) -> usize {
+    self.in_packets(self.target_frames)
+  }
+
+  /// `frames` 20 ms frames as packets of the stream, rounded up.
+  fn in_packets(&self, frames: usize) -> usize {
+    frames.div_ceil(self.packet_frames)
   }
 
   /// Maps a 16-bit sequence number onto a 64-bit counter that doesn't wrap, choosing the value
@@ -454,6 +476,21 @@ mod tests {
       assert_eq!(buffer.pop(), None);
       buffer.push(SequenceNumber(12), 12);
       assert_eq!(drain(&mut buffer), vec![Some(10), Some(11), Some(12)]);
+    }
+
+    /// 60 ms packets (#1893): the 60 ms of the target are one packet, not three.
+    #[test]
+    fn long_packets_wait_for_as_long_not_as_many() {
+      let mut buffer = JitterBuffer::new(CONFIG);
+      buffer.set_packet_frames(3);
+      buffer.push(SequenceNumber(10), 10);
+      assert_eq!(drain(&mut buffer), vec![Some(10)]);
+      let mut forty = JitterBuffer::new(CONFIG);
+      forty.set_packet_frames(2);
+      forty.push(SequenceNumber(10), 10);
+      assert_eq!(forty.pop(), None, "40 ms is less than the 60 ms of the target");
+      forty.push(SequenceNumber(11), 11);
+      assert_eq!(drain(&mut forty), vec![Some(10), Some(11)]);
     }
 
     #[test]

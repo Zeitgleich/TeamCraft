@@ -25,11 +25,11 @@ use std::time::Duration;
 #[cfg(feature = "call-view")]
 use teamcraft_client_api::video_stats::VideoStatsReport;
 use teamcraft_proto::{
-  Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallServerMessage, DaveKeyBinding,
-  DaveTransitionId, DaveTransitionMode, DeviceId, ErrorBody, ErrorCode, LEGACY_SIMULCAST_LAYERS,
-  MAX_SIMULCAST_LAYERS, MediaCapabilities, MediaStreamId, ScreenAudioTrack, ScreenShareTakeover,
-  TransportFeedback, UserId, VideoCodec, VideoFeature, VideoLayerInfo, VideoPublicationId, VideoTrack,
-  VideoTrackKind,
+  AudioFeature, Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallServerMessage,
+  DaveKeyBinding, DaveTransitionId, DaveTransitionMode, DeviceId, ErrorBody, ErrorCode,
+  LEGACY_SIMULCAST_LAYERS, MAX_SIMULCAST_LAYERS, MediaCapabilities, MediaStreamId, ScreenAudioTrack,
+  ScreenShareTakeover, TransportFeedback, UserId, VideoCodec, VideoFeature, VideoLayerInfo,
+  VideoPublicationId, VideoTrack, VideoTrackKind,
 };
 use thiserror::Error;
 use tracing::{debug, trace, warn};
@@ -37,6 +37,7 @@ use tracing::{debug, trace, warn};
 use web_time::Instant;
 
 use crate::audio_frame::EncodedAudioFrame;
+use crate::audio_frame::opus_packet_samples;
 use crate::bwe::{BweConfig, FeedbackRecorder, SendSideEstimator};
 use crate::call_auth::{BindingRole, CallKeyAuthenticator, CallKeyError};
 use crate::call_resilience::CallTransport;
@@ -56,12 +57,14 @@ use crate::share_policy::UplinkTop;
 use crate::uplink_layers::{Adaptation, OwnTrack, UplinkLayers, UplinkPolicy, probe_demand_bps};
 use crate::video::EncodedVideoFrame;
 use crate::voice_guard::{VoiceGuard, VoiceGuardConfig};
+use crate::voice_steps::{VoiceEncoding, VoiceSteps};
 
 /// How many retired call keys an engine remembers (e2ee.md §8); the oldest goes first. A call with
 /// more departures than this is far beyond any meeting size, and an evicted key still needs its
 /// binding's time to pass the joiner check.
 const MAX_RETIRED_CALL_KEYS: usize = 4096;
-/// RTP timestamp increment per 20 ms Opus frame at 48 kHz.
+/// RTP timestamp increment per 20 ms Opus frame at 48 kHz: what a packet that isn't valid Opus
+/// framing counts as.
 const OPUS_FRAME_TICKS: u32 = 960;
 /// How long after a probe's padding the own voice isn't judged by the voice guard: a cluster's
 /// trains come a timer tick (~100 ms) apart, and their queue drains within a few hundred ms.
@@ -202,6 +205,8 @@ pub struct CallEngine {
   is_video_held_for_voice: bool,
   /// When the uplink rate probe last sent padding: voice sent along with it isn't judged.
   maybe_padding_sent_at: Option<Instant>,
+  /// The own voice's bitrate and packet length on a thin uplink (#1893).
+  voice_steps: VoiceSteps,
   downlink_feedback: FeedbackRecorder,
   /// Base for the SFU's arrival times in uplink feedback (only differences matter).
   uplink_feedback_epoch: Instant,
@@ -271,6 +276,9 @@ pub enum CallEngineEvent {
   /// The own video is held back while the own voice is lost on the uplink (#1871, #1891): the UI
   /// says so, so nobody wonders why the camera froze. `false` once it may go out again.
   VideoHeldForVoice(bool),
+  /// How the own voice is to be encoded from now on (#1893): a lower bitrate in longer packets
+  /// while the uplink is thin, the full voice again once it has room.
+  VoiceEncoding(VoiceEncoding),
   /// Not from the engine but from the media driver: an own track's capture gets buffers from its
   /// source it can't turn into pictures (#1805), so the others see a still picture. What came over
   /// the judged window. The UI tells the sharer, and the call's crash reports hear of it.
@@ -669,6 +677,7 @@ impl CallEngine {
       uplink_voice: VoiceGuard::new(VoiceGuardConfig::losses_only()),
       is_video_held_for_voice: false,
       maybe_padding_sent_at: None,
+      voice_steps: VoiceSteps::new(UplinkPolicy::default().voice),
       downlink_feedback: FeedbackRecorder::new(now),
       uplink_feedback_epoch: now,
       maybe_probe_bytes: None,
@@ -745,6 +754,10 @@ impl CallEngine {
     self.uplink = SendSideEstimator::new(self.config.bwe);
     self.uplink_rate_probe = UplinkProbe::new();
     self.uplink_layers = UplinkLayers::new(self.config.bwe.start_bps);
+    // The SFU of the new connection says anew what the others play.
+    if let Some(encoding) = self.voice_steps.set_long_frames(false) {
+      self.event(CallEngineEvent::VoiceEncoding(encoding));
+    }
     self.update_uplink_demand();
     self.downlink_feedback = FeedbackRecorder::new(now);
     self.uplink_feedback_epoch = now;
@@ -778,6 +791,10 @@ impl CallEngine {
     let mut capabilities = self.config.capabilities.clone();
     if !capabilities.video_decoders.is_empty() && !capabilities.has_layer_codecs() {
       capabilities.video_features.push(VideoFeature::LayerCodecs);
+    }
+    // Every driver's playout takes Opus packets of any length (#1893).
+    if !capabilities.has_long_audio_frames() {
+      capabilities.audio_features.push(AudioFeature::LongFrames);
     }
     capabilities
   }
@@ -856,6 +873,7 @@ impl CallEngine {
 
   /// Bandwidth kept for audio when the uplink limits video layers.
   pub fn set_uplink_policy(&mut self, policy: UplinkPolicy) {
+    self.voice_steps.set_config(policy.voice);
     self.uplink_policy = policy;
   }
 
@@ -1727,6 +1745,13 @@ impl CallEngine {
         self.event(CallEngineEvent::ConnectionReplaced);
         Ok(())
       },
+      CallEvent::AudioFeatures { features } => {
+        let has_long_frames = features.contains(&AudioFeature::LongFrames);
+        if let Some(encoding) = self.voice_steps.set_long_frames(has_long_frames) {
+          self.event(CallEngineEvent::VoiceEncoding(encoding));
+        }
+        Ok(())
+      },
       CallEvent::DecodableVideoCodecs {
         codecs,
         decodable_by_some,
@@ -2059,6 +2084,7 @@ impl CallEngine {
       bps = capacity_bps;
     }
     self.uplink_voice.on_feedback(feedback, now);
+    self.follow_voice_steps(bps, now);
     let is_held = self.maybe_uplink_capacity_bps.is_none() && self.uplink_voice.is_hurt(now);
     if is_held != self.is_video_held_for_voice && (!is_held || !self.own_tracks.is_empty()) {
       self.is_video_held_for_voice = is_held;
@@ -2083,6 +2109,27 @@ impl CallEngine {
     self.note_held_back_layers(now);
     let loss_percent = loss_percent(self.uplink.loss_ratio());
     self.event(CallEngineEvent::UplinkEstimate { bps, loss_percent });
+  }
+
+  /// Steps the own voice down on a thin uplink and back up once it has room (#1893). Lost voice
+  /// steps it down by itself only while there is no own video: otherwise the video stops first
+  /// (#1871), and the estimate tells whether the voice has to give way too.
+  fn follow_voice_steps(&mut self, estimate_bps: u32, now: Instant) {
+    let is_voice_hurt = self.own_tracks.is_empty() && self.uplink_voice.is_hurt(now);
+    let was_wanted = self.voice_steps.wanted_bps();
+    if let Some(encoding) = self.voice_steps.on_estimate(estimate_bps, is_voice_hurt, now) {
+      debug!(
+        estimate_bps,
+        is_voice_hurt,
+        bitrate_bps = encoding.bitrate_bps,
+        frame = ?encoding.frame,
+        "the own voice changes its encoding"
+      );
+      self.event(CallEngineEvent::VoiceEncoding(encoding));
+    }
+    if self.voice_steps.wanted_bps() != was_wanted {
+      self.update_uplink_demand();
+    }
   }
 
   /// Starts probing the uplink (#1762, `crate::join_probe`) where the SFU takes the padding: at
@@ -2141,10 +2188,12 @@ impl CallEngine {
     }
     let is_sending_screen_audio = self.screen_audio != ScreenAudioState::Off;
     let tracks = own_track_views(&self.own_tracks, &self.adaptive_tracks);
-    let maybe_wanted_bps = self
+    let maybe_video_bps = self
       .uplink_layers
       .is_holding_back(&tracks)
       .then(|| probe_demand_bps(&tracks, is_sending_screen_audio, &self.uplink_policy));
+    // A voice below its full step probes for the next one, as held back layers do (#1893).
+    let maybe_wanted_bps = maybe_video_bps.max(self.voice_steps.wanted_bps());
     let datagrams = self.uplink_rate_probe.on_timer(
       &RateProbeConfig::default(),
       &mut self.uplink,
@@ -2330,9 +2379,12 @@ impl CallEngine {
   fn update_uplink_demand(&mut self) {
     let is_sending_screen_audio = self.screen_audio != ScreenAudioState::Off;
     let tracks = own_track_views(&self.own_tracks, &self.adaptive_tracks);
-    let maybe_demand =
+    let maybe_video_demand =
       (!tracks.is_empty()).then(|| probe_demand_bps(&tracks, is_sending_screen_audio, &self.uplink_policy));
-    self.uplink.set_demand_bps(maybe_demand);
+    // A voice below its full step lets the estimate grow to what the next step needs (#1893).
+    self
+      .uplink
+      .set_demand_bps(maybe_video_demand.max(self.voice_steps.wanted_bps()));
   }
 
   /// Installs the call's external sender and answers with a key package. Heard again, the SFU
@@ -3270,7 +3322,11 @@ impl CallEngine {
       Ssrc(stream.0),
     );
     header.set_audio_level(frame.level);
-    rtp_state.advance();
+    // The next packet starts where this one ends: 20 ms, or 40 or 60 ms on a thin uplink (#1893).
+    let ticks = opus_packet_samples(&frame.opus)
+      .and_then(|samples| u32::try_from(samples).ok())
+      .unwrap_or(OPUS_FRAME_TICKS);
+    rtp_state.advance(ticks);
     let Ok(rtp) = (RtpPacket {
       header,
       payload: &encrypted,
@@ -3496,10 +3552,10 @@ impl AudioRtpState {
     }
   }
 
-  /// Moves on by one 20 ms frame.
-  fn advance(&mut self) {
+  /// Moves on by one packet of `ticks` 48 kHz samples.
+  fn advance(&mut self, ticks: u32) {
     self.sequence = self.sequence.next();
-    self.timestamp = RtpTimestamp(self.timestamp.0.wrapping_add(OPUS_FRAME_TICKS));
+    self.timestamp = RtpTimestamp(self.timestamp.0.wrapping_add(ticks));
   }
 }
 
@@ -5545,6 +5601,60 @@ mod tests {
         .handle_signal(event(8, CallEvent::TransportFeedback { feedback }), later)
         .unwrap();
       assert!(drain(&mut alice).contains(&EngineOutput::Event(CallEngineEvent::VideoHeldForVoice(false))));
+    }
+
+    /// #1893: with every other participant playing long packets, a voice lost on the way while
+    /// there is no own video to stop first steps down to fewer, longer packets at once, and its
+    /// RTP timestamps move on by each packet's length.
+    #[test]
+    fn lost_voice_without_video_steps_down_to_longer_packets() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      let features = CallEvent::AudioFeatures {
+        features: vec![AudioFeature::LongFrames],
+      };
+      alice.handle_signal(event(6, features), now).unwrap();
+      let is_voice_step =
+        |output: &EngineOutput| matches!(output, EngineOutput::Event(CallEngineEvent::VoiceEncoding(_)));
+      assert!(
+        !drain(&mut alice).iter().any(is_voice_step),
+        "the full voice is sent in 20 ms packets either way"
+      );
+      for _ in 0..25 {
+        alice.send_audio(&frame(), now);
+      }
+      drain(&mut alice);
+      let feedback = TransportFeedback {
+        base_seq: 0,
+        arrivals_us: (0..25u64).map(|i| (i % 3 != 0).then_some(i * 20_000)).collect(),
+      };
+      let at = now + Duration::from_millis(500);
+      alice
+        .handle_signal(event(7, CallEvent::TransportFeedback { feedback }), at)
+        .unwrap();
+      let encodings: Vec<VoiceEncoding> = drain(&mut alice)
+        .into_iter()
+        .filter_map(|output| match output {
+          EngineOutput::Event(CallEngineEvent::VoiceEncoding(encoding)) => Some(encoding),
+          _ => None,
+        })
+        .collect();
+      assert_eq!(encodings.len(), 1, "{encodings:?}");
+      assert!(
+        encodings[0].frame > crate::voice_steps::VoiceFrame::Ms20,
+        "{encodings:?}"
+      );
+      assert!(encodings[0].bitrate_bps < 32_000);
+
+      let before = alice.microphone_rtp.timestamp.0;
+      // SILK wideband 40 ms (configuration 10), then a 20 ms packet.
+      let long = EncodedAudioFrame {
+        opus: vec![10 << 3, 1, 2, 3],
+        level: AudioLevel::new(20, true).unwrap(),
+      };
+      alice.send_audio(&long, at);
+      alice.send_audio(&frame(), at);
+      assert_eq!(alice.microphone_rtp.timestamp.0.wrapping_sub(before), 1920 + 960);
     }
 
     #[test]

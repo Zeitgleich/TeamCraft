@@ -1486,6 +1486,7 @@ fn native_config(
       max_simulcast_layers: CAMERA_LAYERS,
       max_frame_fragments: teamcraft_proto::MAX_VIDEO_FRAME_FRAGMENTS,
       video_features: Vec::new(),
+      audio_features: Vec::new(),
     },
     bwe: BweConfig::default(),
   };

@@ -77,6 +77,16 @@ wire_enum! {
   }
 }
 
+wire_enum! {
+  /// What a client's audio playout understands beyond the codecs it lists (#1893).
+  pub enum AudioFeature {
+    /// It plays Opus packets of any duration RFC 6716 allows (40 and 60 ms on a thin uplink), not
+    /// only 20 ms ones: a sender may lengthen its voice's frames only while every other
+    /// participant has it ([`crate::CallEvent::AudioFeatures`]).
+    LongFrames => "long_frames",
+  }
+}
+
 /// What a client can encode and decode; sent with `join`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaCapabilities {
@@ -95,6 +105,9 @@ pub struct MediaCapabilities {
   /// What its call engine understands beyond the codecs (#1733). Clients from before send none.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub video_features: Vec<VideoFeature>,
+  /// What its audio playout understands beyond the codecs (#1893). Clients from before send none.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub audio_features: Vec<AudioFeature>,
 }
 
 /// One simulcast layer of a published video track.
@@ -155,11 +168,17 @@ impl Default for MediaCapabilities {
       max_simulcast_layers: 0,
       max_frame_fragments: MAX_VIDEO_FRAME_FRAGMENTS,
       video_features: Vec::new(),
+      audio_features: Vec::new(),
     }
   }
 }
 
 impl MediaCapabilities {
+  /// Whether its playout takes voice packets longer than 20 ms.
+  pub fn has_long_audio_frames(&self) -> bool {
+    self.audio_features.contains(&AudioFeature::LongFrames)
+  }
+
   /// Whether its engine takes layers in other codecs than their track's.
   pub fn has_layer_codecs(&self) -> bool {
     self.video_features.contains(&VideoFeature::LayerCodecs)
@@ -246,6 +265,7 @@ mod tests {
       max_simulcast_layers: 3,
       max_frame_fragments: MAX_VIDEO_FRAME_FRAGMENTS,
       video_features: Vec::new(),
+      audio_features: Vec::new(),
     };
     assert_eq!(
       serde_json::to_string(&capabilities).unwrap(),
@@ -323,6 +343,34 @@ mod tests {
       vec![VideoFeature::LayerCodecs, VideoFeature::Unknown("later".into())]
     );
     assert!(!MediaCapabilities::default().has_layer_codecs());
+  }
+
+  /// #1893: long voice frames are announced; older clients send no `audio_features`, and features
+  /// of newer ones are kept as unknown.
+  #[test]
+  fn audio_features_wire_format() {
+    let capabilities = MediaCapabilities {
+      audio_features: vec![AudioFeature::LongFrames],
+      ..MediaCapabilities::default()
+    };
+    let json = serde_json::to_string(&capabilities).unwrap();
+    assert!(json.ends_with(r#","audio_features":["long_frames"]}"#), "{json}");
+    assert!(
+      serde_json::from_str::<MediaCapabilities>(&json)
+        .unwrap()
+        .has_long_audio_frames()
+    );
+    let older: MediaCapabilities = serde_json::from_str(
+      r#"{"audio_codecs":["opus"],"video_encoders":[],"video_decoders":[],"max_simulcast_layers":0}"#,
+    )
+    .unwrap();
+    assert!(!older.has_long_audio_frames());
+    let newer: MediaCapabilities = serde_json::from_str(
+      r#"{"audio_codecs":["opus"],"video_encoders":[],"video_decoders":[],"max_simulcast_layers":0,"audio_features":["later"]}"#,
+    )
+    .unwrap();
+    assert_eq!(newer.audio_features, vec![AudioFeature::Unknown("later".into())]);
+    assert!(!newer.has_long_audio_frames());
   }
 
   #[test]
