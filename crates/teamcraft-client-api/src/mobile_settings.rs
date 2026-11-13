@@ -22,6 +22,7 @@ use crate::settings_sync::{SettingBases, SyncedValues, keep_on_device, reconcile
 
 pub const KEY_LIST_LAYOUT: &str = "sidebar.layout";
 pub const KEY_LIST_GROUPING: &str = "sidebar.list_grouping";
+pub const KEY_FAVORITES_SORT: &str = "sidebar.favorites_sort";
 pub const KEY_ANIMATED_IMAGES: &str = "display.animated_images";
 pub const KEY_SHARE_TYPING: &str = "privacy.share_typing";
 pub const KEY_FIRST_NAME_IS_MENTION: &str = "notifications.first_name_is_mention";
@@ -33,9 +34,10 @@ pub const KEY_COLOR_THEME: &str = "display.color_theme";
 pub const KEY_FONT: &str = "display.font";
 
 /// Every account key the mobile apps read and write, in the order of [`MobileSettings`].
-pub const MOBILE_KEYS: [&str; 11] = [
+pub const MOBILE_KEYS: [&str; 12] = [
   KEY_LIST_LAYOUT,
   KEY_LIST_GROUPING,
+  KEY_FAVORITES_SORT,
   KEY_ANIMATED_IMAGES,
   KEY_SHARE_TYPING,
   KEY_FIRST_NAME_IS_MENTION,
@@ -56,6 +58,7 @@ const PRIVATE_KEYS: [&str; 1] = [KEY_KEYWORDS];
 pub struct MobileSettings {
   pub list_layout: ListLayout,
   pub list_grouping: ListGrouping,
+  pub favorites_sort: FavoritesSort,
   pub animated_images: AnimatedImages,
   pub shares_typing: bool,
   pub first_name_is_mention: bool,
@@ -88,6 +91,18 @@ pub enum ListGrouping {
   #[default]
   Mixed,
   BySpace,
+}
+
+/// How the Favorites section of the spaces layout is ordered. Wire values as `teamcraft-ui`
+/// `DmSort`, the choice Chats has too.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FavoritesSort {
+  /// By name (what the section did before there was a choice).
+  #[default]
+  Alphabetical,
+  /// The favorite with the newest message first.
+  Recent,
 }
 
 /// When animated images move. Web's "on hover" has no touch equivalent; a phone keeps its own
@@ -124,6 +139,7 @@ impl Default for MobileSettings {
     Self {
       list_layout: ListLayout::Spaces,
       list_grouping: ListGrouping::Mixed,
+      favorites_sort: FavoritesSort::Alphabetical,
       animated_images: AnimatedImages::Autoplay,
       shares_typing: true,
       first_name_is_mention: true,
@@ -197,6 +213,7 @@ impl SyncedValues for MobileSettings {
     let value = match key {
       KEY_LIST_LAYOUT => serde_json::to_value(self.list_layout).ok()?,
       KEY_LIST_GROUPING => serde_json::to_value(self.list_grouping).ok()?,
+      KEY_FAVORITES_SORT => serde_json::to_value(self.favorites_sort).ok()?,
       KEY_ANIMATED_IMAGES => serde_json::to_value(self.animated_images).ok()?,
       KEY_SHARE_TYPING => json!(self.shares_typing),
       KEY_FIRST_NAME_IS_MENTION => json!(self.first_name_is_mention),
@@ -219,6 +236,7 @@ impl SyncedValues for MobileSettings {
     match key {
       KEY_LIST_LAYOUT => assign(&mut self.list_layout, value),
       KEY_LIST_GROUPING => assign(&mut self.list_grouping, value),
+      KEY_FAVORITES_SORT => assign(&mut self.favorites_sort, value),
       KEY_ANIMATED_IMAGES => assign(&mut self.animated_images, value),
       KEY_SHARE_TYPING => assign(&mut self.shares_typing, value),
       KEY_FIRST_NAME_IS_MENTION => assign(&mut self.first_name_is_mention, value),
@@ -279,6 +297,7 @@ mod tests {
       let settings = MobileSettings {
         list_layout: ListLayout::List,
         list_grouping: ListGrouping::BySpace,
+        favorites_sort: FavoritesSort::Recent,
         animated_images: AnimatedImages::OnTap,
         shares_typing: false,
         first_name_is_mention: false,
@@ -292,6 +311,7 @@ mod tests {
       let read = |key| settings.read(key).unwrap();
       assert_eq!(read(KEY_LIST_LAYOUT), json!("list"));
       assert_eq!(read(KEY_LIST_GROUPING), json!("by_space"));
+      assert_eq!(read(KEY_FAVORITES_SORT), json!("recent"));
       assert_eq!(read(KEY_ANIMATED_IMAGES), json!("on_tap"));
       assert_eq!(read(KEY_SHARE_TYPING), json!(false));
       assert_eq!(read(KEY_KEYWORDS), json!(["release"]));

@@ -257,6 +257,8 @@ fn DeviceAccessBanner(conversation: ConversationId) -> impl IntoView {
             MembershipIssue::EncryptionSetup { .. }
               | MembershipIssue::EncryptionSetupFailed
               | MembershipIssue::WaitingForAdmission { .. }
+              // Unreachable: nothing it waits for gets it in (e2ee.md §4.6.5).
+              | MembershipIssue::AnchorRefused
           )
         })
     })
@@ -345,6 +347,7 @@ fn MembershipIssueBanners(conversation: ConversationId, info: Memo<Option<Conver
             Some(user),
           ),
           MembershipIssue::GroupRefused => ("alert", i18n.t("group-refused"), None),
+          MembershipIssue::AnchorRefused => ("alert", i18n.t("anchor-refused"), None),
           MembershipIssue::WaitingForFirstDevice { user } => (
             "status",
             i18n.t_with("waiting-first-device", &[("name", &name_of(user))]),
@@ -642,6 +645,28 @@ fn ChannelHeader(
       .is_some_and(|conv| matches!(conv.kind, ConversationKind::Public | ConversationKind::Private))
       && access.can_add_members()
   };
+  // A channel's listed name its anchor doesn't hold (e2ee.md §4.6.5): verified again when the
+  // channel opens, and marked under the name.
+  let is_channel = Memo::new(move |_| {
+    identity.with(|maybe| {
+      maybe
+        .as_ref()
+        .is_some_and(|(kind, _, _)| matches!(kind, ConversationKind::Public | ConversationKind::Private))
+    })
+  });
+  Effect::new(move |_| {
+    if is_channel.get() {
+      state.write(|backend| backend.refresh_channel_anchor(conversation));
+    }
+  });
+  let is_name_stale = Memo::new(move |_| {
+    is_channel.get()
+      && crate::anchor_marks::is_name_stale(
+        state
+          .read(|backend| backend.channel_anchor_marks(conversation))
+          .as_ref(),
+      )
+  });
   let members_open = move || state.panel.get() == SidePanel::Members;
   // While the other person of a direct conversation types, the line under the name says so (#882).
   let peer_typing = typing_text(conversation, None, true);
@@ -657,6 +682,18 @@ fn ChannelHeader(
         <CompactBack />
         <div class="header-identity">
           {title}
+          {move || {
+            is_name_stale.get().then(|| {
+              view! {
+                <div class="header-sub">
+                  <span class="header-name-stale" title=move || i18n.t("channel-name-stale-hint")>
+                    <Icon name=IconName::Alert />
+                    <span>{move || i18n.t("channel-name-stale")}</span>
+                  </span>
+                </div>
+              }
+            })
+          }}
           // A direct conversation: the other person's status under the name, as messengers do.
           {move || {
             maybe_peer.get().map(|other| {

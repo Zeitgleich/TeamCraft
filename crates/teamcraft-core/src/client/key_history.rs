@@ -470,10 +470,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.persist_keys()?;
     let epoch = self.group_or_error(conversation)?.epoch();
     self.note_key_epochs(conversation, &[fresh.id()], epoch)?;
-    self.store.delete(
-      Table::AppliedChanges,
-      &super::member_device::current_key_wait_key(conversation),
-    )?;
+    super::member_device::end_current_key_wait(&self.store, conversation)?;
     Ok(())
   }
 

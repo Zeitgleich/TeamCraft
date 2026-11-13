@@ -687,3 +687,86 @@ impl Person {
     }
   }
 }
+
+/// What the apps show of the anchor (issue #1749): the name it holds, who set it, and a fork.
+mod marks {
+  use super::*;
+
+  fn proto_user(raw: u64) -> teamcraft_proto::UserId {
+    convert::user_from_crypto(UserId::new(raw)).unwrap()
+  }
+
+  #[test]
+  fn the_founders_name_is_held_and_the_listed_name_matches() {
+    let world = World::new();
+    let anchor = world.verified(&world.founded("general"), 0).unwrap();
+    let held = HeldName::of(&anchor).unwrap();
+    assert_eq!(held.role, NameRole::Founder);
+    assert_eq!(held.set_by, proto_user(FOUNDER));
+    assert_eq!(held.name_hash, name_hash("general"));
+    let floor = AnchorFloor::first(&anchor, 0);
+    let marks = anchor_marks(Some(&held), Some(&floor), Some("general")).unwrap();
+    assert_eq!(
+      marks,
+      AnchorMarks {
+        is_name_stale: false,
+        maybe_name_set_by: Some((proto_user(FOUNDER), NameRole::Founder)),
+        maybe_fork: None,
+      }
+    );
+  }
+
+  /// A name the server lists but the anchor doesn't hold is marked; the anchor's setter stays.
+  #[test]
+  fn a_name_changed_on_the_server_only_is_stale() {
+    let world = World::new();
+    let anchor = world.verified(&world.founded("general"), 0).unwrap();
+    let held = HeldName::of(&anchor).unwrap();
+    let marks = anchor_marks(Some(&held), None, Some("old-test")).unwrap();
+    assert!(marks.is_name_stale);
+    assert_eq!(marks.is_name_stale, is_listed_name_stale(&anchor, "old-test"));
+    // Without a listed name there is nothing to compare.
+    assert!(!anchor_marks(Some(&held), None, None).unwrap().is_name_stale);
+  }
+
+  #[test]
+  fn a_members_rename_names_the_member() {
+    let world = World::new();
+    let renamed = world.renamed(&world.founded("general"), "old-test", 1);
+    let anchor = world.verified(&renamed, 2).unwrap();
+    let held = HeldName::of(&anchor).unwrap();
+    assert_eq!((held.set_by, held.role), (proto_user(MEMBER), NameRole::Member));
+    let marks = anchor_marks(Some(&held), None, Some("old-test")).unwrap();
+    assert!(!marks.is_name_stale);
+  }
+
+  /// A pinned channel whose anchor doesn't verify here shows no name mark, but a fork all the same.
+  #[test]
+  fn a_fork_shows_without_a_verified_anchor() {
+    let world = World::new();
+    let anchor = world.verified(&world.founded("general"), 0).unwrap();
+    let mut floor = AnchorFloor::first(&anchor, 0);
+    floor.state = FloorState::ForkedFounding;
+    let marks = anchor_marks(None, Some(&floor), Some("anything")).unwrap();
+    assert_eq!(
+      marks,
+      AnchorMarks {
+        is_name_stale: false,
+        maybe_name_set_by: None,
+        maybe_fork: Some(AnchorFork::Founding),
+      }
+    );
+    floor.state = FloorState::ForkedProperties;
+    assert_eq!(
+      anchor_marks(None, Some(&floor), None).unwrap().maybe_fork,
+      Some(AnchorFork::Properties)
+    );
+    floor.state = FloorState::Unknown;
+    assert_eq!(anchor_marks(None, Some(&floor), None).unwrap().maybe_fork, None);
+  }
+
+  #[test]
+  fn an_unanchored_channel_has_no_marks() {
+    assert_eq!(anchor_marks(None, None, Some("general")), None);
+  }
+}

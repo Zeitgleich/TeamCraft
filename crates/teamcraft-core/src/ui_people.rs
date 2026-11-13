@@ -45,9 +45,31 @@ pub(crate) struct RequestLog {
   maybe_custom_emoji: Option<(i64, u64)>,
   /// Member lists asked for because a member list had none, bounded like the searches.
   members: HashMap<ConversationId, i64>,
+  /// Channels whose anchor was verified again for the marks, bounded like the searches.
+  anchors: HashMap<ConversationId, i64>,
 }
 
+/// How long a channel's anchor, verified again for the marks, isn't verified again: it fetches
+/// the device lists of the anchor's signers.
+const ANCHOR_REFRESH_MS: i64 = 5 * 60_000;
+
 impl<S: LocalStore> CoreChatBackend<S> {
+  /// The channel or its settings opened: verify its anchor again for the marks (e2ee.md §4.6.5),
+  /// unless that was asked for within [`ANCHOR_REFRESH_MS`].
+  pub(crate) fn ui_refresh_channel_anchor(&self, conversation: ConversationId) {
+    let now = self.now_ms();
+    let mut log = self.requests.borrow_mut();
+    let is_due = log
+      .anchors
+      .get(&conversation)
+      .is_none_or(|requested| now - requested > ANCHOR_REFRESH_MS);
+    if is_due {
+      remember_search(&mut log.anchors, conversation, now);
+      drop(log);
+      self.command(CoreCommand::RefreshChannelAnchor { conversation });
+    }
+  }
+
   /// The UI needs the custom emoji (issue #207): read them unless asked for within a minute and
   /// nothing changed since (`LiveMarks::custom_emoji`).
   pub(crate) fn ui_want_custom_emoji(&self) {

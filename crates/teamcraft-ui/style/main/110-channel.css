@@ -170,6 +170,19 @@
   color: var(--text-muted);
 }
 
+/* The listed name isn't the one members' apps hold (e2ee.md §4.6.5, #1749). */
+.header-name-stale {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  color: var(--warn-text);
+}
+
+.header-name-stale > svg {
+  flex: none;
+}
+
 .header-divider {
   width: 1px;
   height: 18px;

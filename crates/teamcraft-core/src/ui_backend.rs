@@ -503,6 +503,10 @@ pub enum CoreCommand {
   RefreshChannelRoles {
     conversation: ConversationId,
   },
+  /// The channel's anchor verified again, for the marks its header and settings show.
+  RefreshChannelAnchor {
+    conversation: ConversationId,
+  },
   RemoveSpaceMember {
     space: SpaceId,
     user: UserId,
@@ -664,6 +668,7 @@ impl CoreCommand {
       | Self::CheckMeetingAdmission { .. }
       | Self::ChangeMeetingHosts { .. }
       | Self::RefreshMembers { .. }
+      | Self::RefreshChannelAnchor { .. }
       | Self::LoadHistoryAt { .. }
       | Self::LoadOlderHistory { .. }
       | Self::FillHistoryGap { .. } => CommandPart::Shared,
@@ -3077,6 +3082,9 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     if self.read(crate::client::is_queue_refused(&self.store, conversation)) {
       issues.push(MembershipIssue::GroupRefused);
     }
+    if self.read(crate::client::is_anchor_refused(&self.store, conversation)) {
+      issues.push(MembershipIssue::AnchorRefused);
+    }
     match self.read(crate::client::dm_setup_status(
       &self.store,
       conversation,
@@ -3901,6 +3909,34 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn channel_role_alarms(&self) -> Vec<ConversationId> {
     self.ui_channel_role_alarms()
+  }
+
+  fn channel_anchor_marks(
+    &self,
+    conversation: ConversationId,
+  ) -> Option<teamcraft_client_api::model::ChannelAnchorMarks> {
+    use teamcraft_client_api::model::{AnchorFork, AnchorNameRole, AnchorNameSetter, ChannelAnchorMarks};
+    let marks = self.read(crate::client::channel_anchor_marks(&self.store, conversation))?;
+    Some(ChannelAnchorMarks {
+      is_name_stale: marks.is_name_stale,
+      maybe_name_set_by: marks.maybe_name_set_by.map(|(user, role)| AnchorNameSetter {
+        user,
+        role: match role {
+          crate::anchoring::NameRole::Founder => AnchorNameRole::Founder,
+          crate::anchoring::NameRole::ChannelAdmin => AnchorNameRole::ChannelAdmin,
+          crate::anchoring::NameRole::Workspace => AnchorNameRole::Workspace,
+          crate::anchoring::NameRole::Member => AnchorNameRole::Member,
+        },
+      }),
+      maybe_fork: marks.maybe_fork.map(|fork| match fork {
+        crate::anchoring::AnchorFork::Founding => AnchorFork::Founding,
+        crate::anchoring::AnchorFork::Properties => AnchorFork::Properties,
+      }),
+    })
+  }
+
+  fn refresh_channel_anchor(&self, conversation: ConversationId) {
+    self.ui_refresh_channel_anchor(conversation);
   }
 
   fn sign_reviewed_channel_roles(

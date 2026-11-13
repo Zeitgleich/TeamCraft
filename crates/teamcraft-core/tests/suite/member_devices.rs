@@ -470,6 +470,54 @@ async fn a_device_that_joined_on_its_own_writes_once_a_member_handed_it_the_curr
   assert_eq!(phone.texts(channel), ["one", "two", "three", "from the laptop"]);
 }
 
+/// Issue #1878: a device that is a member on the server but not in the group has no key to write
+/// with. A message written there waits, and the conversation says so instead of a plain
+/// "sending"; once a member lets the device in, the message goes out and the note goes away.
+#[tokio::test]
+async fn a_message_held_back_for_a_missing_key_shows_that_the_device_waits() {
+  let server = FakeServer::new();
+  let (mut alice, mut bob, channel) = channel_with_history(&server).await;
+  let mut carol = Peer::enroll(&server, "Carol").await;
+  alice
+    .api
+    .add_member(
+      channel,
+      &AddConversationMemberRequest {
+        user_id: carol.client.user_id(),
+        maybe_role: None,
+      },
+    )
+    .await
+    .unwrap();
+  carol.client.full_sync().await.unwrap();
+  assert!(!carol.client.has_group(channel).unwrap());
+  carol.client.send_text(channel, None, "from Carol").await.unwrap();
+  let report = carol.client.flush_outbox().await.unwrap();
+  assert!(report.sent == 0 && report.pending >= 1, "{report:?}");
+  // As in an imported DM whose import device holds her addition: no request of her own is
+  // pending. The held message alone says that this device can't write here yet.
+  for key in [
+    format!("rejoin/{channel}"),
+    format!("device_add/{channel}"),
+    format!("current_key_wait/{channel}"),
+  ] {
+    carol.store.delete(Table::AppliedChanges, &key).unwrap();
+  }
+  assert!(is_waiting_for_device(carol.store.as_ref(), channel).unwrap());
+
+  // A member lets her device in; the held message goes out and the note goes away.
+  alice
+    .client
+    .add_member(channel, carol.client.user_id())
+    .await
+    .unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+  carol.client.flush_outbox().await.unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+  assert!(!is_waiting_for_device(carol.store.as_ref(), channel).unwrap());
+  assert!(bob.texts(channel).contains(&"from Carol".to_string()));
+}
+
 /// Issue #178 for a device added from a welcome: its key bag, served by the server on recovery,
 /// still names the key from before Carol's removal as current. It writes only with the key the
 /// members switched to, which it gets from a member that had it in the group.

@@ -26,7 +26,7 @@ use std::{
   future::Future,
   net::{SocketAddr, UdpSocket},
   sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicBool, AtomicUsize, Ordering},
   },
   time::{Duration, Instant},
@@ -73,6 +73,8 @@ use crate::{
 /// How often senders get feedback on their datagrams (uplink bandwidth estimation) and layer
 /// allocations are re-run.
 const PERIODIC_INTERVAL: Duration = Duration::from_millis(100);
+/// The base of the times in pongs (#1890): only their differences count, so any instant will do.
+static PONG_EPOCH: OnceLock<Instant> = OnceLock::new();
 
 /// HTTP path of the WebTransport session.
 const PRE_JOIN_LIMIT: u32 = 0x4803;
@@ -888,7 +890,9 @@ impl ParticipantSession {
     // Proves the session's path to a browser, which can't see QUIC keep-alives. One small answer
     // per ping; when the queue is full it is dropped, and the client's next ping asks again.
     if let CallClientMessage::Ping { id } = message {
-      let _ = self.signal_tx.try_send(Outgoing::Pong(id));
+      let received_us =
+        u64::try_from(PONG_EPOCH.get_or_init(Instant::now).elapsed().as_micros()).unwrap_or(u64::MAX);
+      let _ = self.signal_tx.try_send(Outgoing::Pong { id, received_us });
       return;
     }
     // The account's other devices leave for this one; one of them may be in the server's roster

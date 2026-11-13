@@ -320,6 +320,47 @@ mod roster_integrity {
   }
 
   #[tokio::test]
+  async fn the_member_rounds_re_sign_what_the_shared_tick_left() {
+    let server = FakeServer::new();
+    let clock = std::sync::Arc::new(teamcraft_core::clock::ManualClock::new(1_800_000_000_000));
+    let mut alice = Peer::enroll_on_clock(
+      server.add_user("Alice"),
+      "Alice",
+      common::settings(),
+      Box::new(clock.clone()),
+    )
+    .await;
+    let alice_id = alice.client.user_id();
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner)])
+      .await
+      .unwrap();
+    let before = alice.client.workspace().unwrap().roster.version;
+    let half = i64::try_from(common::settings().workspace_max_age.as_millis()).unwrap() / 2;
+    clock.advance(half + 1);
+    let mut upkeep = teamcraft_core::upkeep::Upkeep::new(std::time::Duration::ZERO);
+
+    upkeep.tick_shared(&mut alice.client).await;
+    assert_eq!(
+      alice.client.workspace().unwrap().roster.version,
+      before,
+      "left to the member rounds"
+    );
+    assert!(upkeep.is_workspace_signing_due());
+
+    upkeep.run_member_rounds(&mut alice.client).await;
+    assert_eq!(alice.client.workspace().unwrap().roster.version, before + 1);
+    assert!(!upkeep.is_workspace_signing_due(), "once per check");
+
+    // The full tick, as the native shells run it, signs in place.
+    clock.advance(half + 1);
+    upkeep.tick(&mut alice.client).await;
+    assert_eq!(alice.client.workspace().unwrap().roster.version, before + 2);
+    assert!(!upkeep.is_workspace_signing_due());
+  }
+
+  #[tokio::test]
   async fn an_older_signed_roster_served_again_is_refused() {
     let server = FakeServer::new();
     let mut alice = Peer::enroll(&server, "Alice").await;

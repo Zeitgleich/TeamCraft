@@ -2441,6 +2441,20 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::RefreshChannelRoles { conversation });
   }
 
+  fn channel_anchor_marks(
+    &self,
+    conversation: ConversationId,
+  ) -> Option<teamcraft_client_api::model::ChannelAnchorMarks> {
+    match self.ask(ChatQuery::ChannelAnchorMarks { conversation }) {
+      Some(ChatAnswer::ChannelAnchorMarks { maybe_marks }) => maybe_marks,
+      _ => None,
+    }
+  }
+
+  fn refresh_channel_anchor(&self, conversation: ConversationId) {
+    self.act(ChatAction::RefreshChannelAnchor { conversation });
+  }
+
   fn set_channel_role(
     &self,
     conversation: ConversationId,

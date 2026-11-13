@@ -136,13 +136,26 @@ async fn a_ping_is_answered_without_taking_an_event_number() {
   })
   .await
   .expect("no answer");
-  assert_eq!(
-    answers,
-    vec![
-      CallServerMessage::Pong { id: 7 },
-      CallServerMessage::Pong { id: 8 }
-    ]
-  );
+  let ids: Vec<u64> = answers
+    .iter()
+    .filter_map(|answer| match answer {
+      CallServerMessage::Pong { id, .. } => Some(*id),
+      _ => None,
+    })
+    .collect();
+  assert_eq!(ids, vec![7, 8]);
+  // Each says when the SFU read its ping (#1890), in order.
+  let read: Vec<u64> = answers
+    .iter()
+    .filter_map(|answer| match answer {
+      CallServerMessage::Pong {
+        maybe_received_us, ..
+      } => *maybe_received_us,
+      _ => None,
+    })
+    .collect();
+  assert_eq!(read.len(), 2);
+  assert!(read[0] <= read[1], "{read:?}");
 }
 
 /// Runs one call; `client_ips[i]` is the SFU address participant `i` connects to.

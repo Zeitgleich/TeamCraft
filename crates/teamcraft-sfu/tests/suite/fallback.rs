@@ -1806,7 +1806,7 @@ async fn wait_for_joined(socket: &mut Socket) {
 async fn wait_for_pong(socket: &mut Socket, wanted: u64) {
   wait_for_signal(
     socket,
-    |message| matches!(message, CallServerMessage::Pong { id } if *id == wanted),
+    |message| matches!(message, CallServerMessage::Pong { id, .. } if *id == wanted),
   )
   .await;
 }

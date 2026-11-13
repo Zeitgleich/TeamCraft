@@ -293,7 +293,7 @@ private fun ChatsPage(viewModel: MainViewModel) {
     if (AppearancePrefs.isSupported) row { DynamicColorSetting(it) }
     row { FontSetting(it) }
     row { ChatListLayoutSetting(it) }
-    if (isList) row { ChatListGroupingSetting(it) }
+    if (isList) row { ChatListGroupingSetting(it) } else row { FavoritesSortSetting(it) }
     row { MessageLayoutSetting(it) }
   }
   ColorThemeSetting()

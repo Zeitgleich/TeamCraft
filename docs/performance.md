@@ -2765,6 +2765,46 @@ The call module's budget was 1,000,000 B (0.86 MB with the effects' compositors,
 1,100,000 B since, a decision of the maintainer: the reports pay for themselves in field bugs found
 without asking anybody for logs.
 
+#### The upkeep's member-only rounds out of a guest's meeting (2026-11-13)
+
+Host lists that refuse forks (#1870) took a guest's meeting 2.6 kB over its budget, and with it
+the `Web wasm size` check of every pull request red. Instead of raising the budget, the rounds of
+the engine's upkeep only a member's device has work in left the app, as #1699 below had listed:
+signing roles on the identity provider's word (`run_role_signing`), the owners' re-signing of the
+roster (`refresh_workspace_signatures`), founding the role logs of channels from before signed
+roles (`found_listed_channels`) and removing leavers (`run_leaver_removal`).
+
+`Upkeep::tick` in teamcraft-core still runs them in place, at the same points of every tick: the
+mobile runner and the desktop app call it as before. The web client calls `Upkeep::tick_shared`,
+which leaves them out, and then `Upkeep::run_member_rounds` from the signed-in app's module
+(`areas::member_rounds`, in `session`), on a member's page only. The workspace's two run whenever
+the tick checked the workspace (it marks them due), roles and leavers on every tick as before,
+each paced by its own state. A meeting guest's device runs none of them: its page never calls the
+split point, and `run_member_rounds` does nothing on a guest device. While the module can't load
+(offline before it was cached, a deploy in between) the rounds wait and the workspace's signing
+stays due; the signed-in app is in the same module, so its page shows that it didn't load.
+
+The rounds are left out by type (`LeftToHost`), not by a constant flag: an `.await` behind
+`if false` stays in the async state machine, and the splitter (`wasm_split_cli_support`) then
+finds the rounds reachable from the app. The first attempt did exactly that and moved nothing; the
+splitter's `-v` trace, with a breadth-first search from the app's roots, showed the path
+(`Core::on_tick` → `upkeep::sign_and_remove`).
+
+Release `trunk build` on Linux (trunk 0.22.0, Rust 1.99.1, in the CI image with its commands),
+`main` 0ea57186, gzip -9:
+
+| Download                                      | Before      | After       | Delta     |
+|-----------------------------------------------|-------------|-------------|-----------|
+| A guest in a meeting (lobby, meeting, calls)  | 6,442,565 B | 6,376,013 B | −66,552 B |
+| Signed-in first visit                         | 5,564,171 B | 5,575,052 B | +10,881 B |
+| The app (in both)                             | 3,037,145 B | 2,969,978 B | −67,167 B |
+| Signed-in app (pack)                          | 2,029,576 B | 2,107,624 B | +78,048 B |
+
+The service worker (429,391 B) and the texts (68,059 B) did not change. A guest's meeting has
+about 64 kB below its budget again; a signed-in first visit pays about 11 kB for the code
+compressing in two files instead of one, and stays about 35 kB under its ceiling. The budgets did
+not change.
+
 #### The snapshot's JSON and the data export out of the first visit (#1699, 2026-11-11)
 
 Ranked as the issue describes (the release bundle as `web-size.yml` builds it, then
@@ -2811,8 +2851,7 @@ Measured and left, for #1699's follow-ups:
   wasm-opt (under 10 kB gzip), and the dialog is in `dialogs` already. A card that loads would show
   a placeholder in the message list the first time a poll scrolls in, for little.
 - **The member-only rounds of the engine's upkeep** (role signing, about 0.13 MB of the app before
-  wasm-opt with `Upkeep::tick`'s part): only a guest would gain, and it needs `Upkeep::tick` in
-  teamcraft-core to hand those rounds to the shell, which then runs them in `session`.
+  wasm-opt with `Upkeep::tick`'s part): done on 2026-11-13 (above).
 - **The guest's join page** (about 50 kB of the app before wasm-opt): only a signed-in first visit
   would gain; in `guest` it would make the lobby wait for the whole meeting's chunks, in a module of
   its own a guest pays a round trip before the name form.

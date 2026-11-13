@@ -533,6 +533,10 @@ pub enum MembershipIssue {
   /// The server lists the user but refuses this device the encryption group: new messages may be
   /// missing.
   GroupRefused,
+  /// The group the server offered this device isn't the one the user's devices pinned for this
+  /// channel (another founding, no anchor, or older than they saw): the device stays out, and the
+  /// channel is unreachable here (e2ee.md §4.6.5, "Stripping and replacing").
+  AnchorRefused,
   /// `user` hasn't set up the app yet; they are added to the encryption group (and get the
   /// messages) once their first device appears.
   WaitingForFirstDevice { user: UserId },
@@ -568,6 +572,56 @@ pub enum MembershipIssue {
   ImportInProgress { importer: UserId },
   /// Somebody who is no participant of this DM is a member of it and can read it.
   ReadByOutsider { user: UserId },
+  #[serde(other)]
+  Unknown,
+}
+
+/// What this device holds of a channel's anchor (e2ee.md §4.6.5): the marks members and
+/// workspace admins see.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelAnchorMarks {
+  /// The listed name isn't the one the anchor holds: renamed on the server only, or by an app that
+  /// couldn't sign it. A deletion then takes the retention on members' devices.
+  #[serde(default)]
+  pub is_name_stale: bool,
+  /// Who signed the anchor's current name; `None` while the anchor doesn't verify here.
+  #[serde(default)]
+  pub maybe_name_set_by: Option<AnchorNameSetter>,
+  /// The user's devices saw two sides of the anchor: it grants nothing (shown to workspace admins).
+  #[serde(default)]
+  pub maybe_fork: Option<AnchorFork>,
+}
+
+/// Who signed a channel's anchored name, and in which role.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnchorNameSetter {
+  pub user: UserId,
+  pub role: AnchorNameRole,
+}
+
+/// The role a channel's anchored name was signed in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnchorNameRole {
+  /// Named at the founding.
+  Founder,
+  ChannelAdmin,
+  /// A workspace owner or admin.
+  Workspace,
+  /// A member: a deletion takes the retention on members' devices (D5).
+  Member,
+  #[serde(other)]
+  Unknown,
+}
+
+/// What the user's devices saw two of in a channel's anchor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnchorFork {
+  /// Two foundings: only a re-founding settles it.
+  Founding,
+  /// Two names or spaces for one version: a later rename or move settles it.
+  Properties,
   #[serde(other)]
   Unknown,
 }
@@ -1204,6 +1258,25 @@ mod tests {
       serde_json::from_value::<MembershipIssue>(serde_json::json!({ "type": "from_a_newer_core" })).ok(),
       Some(MembershipIssue::Unknown)
     );
+    assert_eq!(
+      serde_json::to_value(MembershipIssue::AnchorRefused).unwrap_or_default()["type"],
+      "anchor_refused"
+    );
+  }
+
+  #[test]
+  fn anchor_marks_tolerate_what_a_newer_core_adds() {
+    let marks: ChannelAnchorMarks = serde_json::from_value(serde_json::json!({
+      "maybe_name_set_by": { "user": "7", "role": "a_newer_role" },
+      "maybe_fork": "a_newer_fork",
+    }))
+    .unwrap_or_default();
+    assert!(!marks.is_name_stale);
+    assert_eq!(
+      marks.maybe_name_set_by.map(|setter| setter.role),
+      Some(AnchorNameRole::Unknown)
+    );
+    assert_eq!(marks.maybe_fork, Some(AnchorFork::Unknown));
   }
 
   #[test]

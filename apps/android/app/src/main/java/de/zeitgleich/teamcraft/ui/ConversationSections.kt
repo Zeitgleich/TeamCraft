@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui
 
+import de.zeitgleich.teamcraft.ui.theme.FavoritesSort
 import uniffi.teamcraft_ffi.ConversationItem
 import uniffi.teamcraft_ffi.ConversationKind
 
@@ -97,12 +98,35 @@ fun hitLocation(maybeSpaceName: String?, name: String, isNotesToSelf: Boolean, n
 val ConversationItem.isDirect: Boolean
   get() = kind == ConversationKind.DIRECT || kind == ConversationKind.GROUP
 
+/**
+ * The favorites in the order the user chose: by name, or the newest message first (`lastActivity`:
+ * newest message time by conversation ID; one without a message last, ties by name). The one
+ * ordering of every Favorites section of the spaces layout.
+ */
+fun sortFavorites(
+  favorites: List<ConversationItem>,
+  sort: FavoritesSort,
+  lastActivity: Map<String, Long>,
+): List<ConversationItem> {
+  val byName = compareBy<ConversationItem, String>(String.CASE_INSENSITIVE_ORDER) { it.name }
+  return when (sort) {
+    FavoritesSort.Alphabetical -> favorites.sortedWith(byName)
+    FavoritesSort.Recent ->
+      favorites.sortedWith(compareByDescending<ConversationItem> { lastActivity[it.id] ?: Long.MIN_VALUE }.then(byName))
+  }
+}
+
 /** Channels of the spaces: favorite channels first, then each space (spaces and channels by name). */
-fun channelSections(conversations: List<ConversationItem>, listsArchived: Boolean = false): List<Section> {
+fun channelSections(
+  conversations: List<ConversationItem>,
+  listsArchived: Boolean = false,
+  favoritesSort: FavoritesSort = FavoritesSort.Alphabetical,
+  lastActivity: Map<String, Long> = emptyMap(),
+): List<Section> {
   val byName = compareBy<ConversationItem, String>(String.CASE_INSENSITIVE_ORDER) { it.name }
   // Archived channels leave the lists; Browse finds them (issue #212).
   val channels = conversations.filterNot { it.isDirect || it.isArchived }
-  val favorites = channels.filter { it.isFavorite }.sortedWith(byName)
+  val favorites = sortFavorites(channels.filter { it.isFavorite }, favoritesSort, lastActivity)
   val bySpace = channels
     .filterNot { it.isFavorite }
     .groupBy { it.maybeSpaceName }
@@ -121,19 +145,20 @@ fun channelSections(conversations: List<ConversationItem>, listsArchived: Boolea
 
 /**
  * Home of the spaces layout (#1488): the DMs with something new (not favorites, the most recent
- * first), then the favorites (DMs and channels, by name), then each space with its channels, as
+ * first), then the favorites (DMs and channels, by name or the newest first, as chosen), then each space with its channels, as
  * [channelSections] has them. Read DMs are on the DMs tab. Empty sections are left out.
  */
 fun homeSections(
   conversations: List<ConversationItem>,
   lastActivity: Map<String, Long> = emptyMap(),
   listsArchived: Boolean = false,
+  favoritesSort: FavoritesSort = FavoritesSort.Alphabetical,
 ): List<Section> {
   val byName = compareBy<ConversationItem, String>(String.CASE_INSENSITIVE_ORDER) { it.name }
   val byRecency = compareByDescending<ConversationItem> { lastActivity[it.id] ?: Long.MIN_VALUE }.then(byName)
   val unique = conversations.distinctBy { it.id }
   val unreadDirect = unique.filter { it.isDirect && !it.isFavorite && HomeFilter.Unread.matches(it) }.sortedWith(byRecency)
-  val favorites = unique.filter { it.isFavorite && !it.isArchived }.sortedWith(byName)
+  val favorites = sortFavorites(unique.filter { it.isFavorite && !it.isArchived }, favoritesSort, lastActivity)
   return buildList {
     if (unreadDirect.isNotEmpty()) add(Section(SectionTitle.UnreadDirect, unreadDirect))
     if (favorites.isNotEmpty()) add(Section(SectionTitle.Favorites, favorites))
@@ -152,9 +177,10 @@ fun spaceHomeSections(
   spaceId: String,
   lastActivity: Map<String, Long> = emptyMap(),
   listsArchived: Boolean = false,
+  favoritesSort: FavoritesSort = FavoritesSort.Alphabetical,
 ): List<Section> {
   val shown = conversations.filter { it.isDirect || it.isFavorite || it.maybeSpaceId == null || it.maybeSpaceId == spaceId }
-  val sections = homeSections(shown, lastActivity, listsArchived)
+  val sections = homeSections(shown, lastActivity, listsArchived, favoritesSort)
   val channels = sections.filter { it.title is SectionTitle.Space }.flatMap { it.conversations }
   val head = sections.filter { it.title == SectionTitle.UnreadDirect || it.title == SectionTitle.Favorites }
   val tail = sections.filter { it.title == SectionTitle.Channels || it.title == SectionTitle.Archived }

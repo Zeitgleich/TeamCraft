@@ -191,6 +191,7 @@ final class AppSettingsStores: SettingsSyncStores {
     return SyncedAppSettings(
       listLayout: Self.listLayout(defaults.string(forKey: ChatListLayout.key)),
       listGrouping: Self.listGrouping(defaults.string(forKey: ChatListGrouping.key)),
+      favoritesSort: Self.favoritesSort(defaults.string(forKey: FavoritesSort.key)),
       animatedImages: Self.animatedImages(defaults.string(forKey: AnimatedImagesSetting.key)),
       sharesTyping: defaults.object(forKey: Self.shareTypingKey) as? Bool ?? true,
       firstNameIsMention: mentions.isFirstNameMention,
@@ -209,6 +210,9 @@ final class AppSettingsStores: SettingsSyncStores {
     }
     if settings.listGrouping != before.listGrouping {
       defaults.set(Self.raw(settings.listGrouping), forKey: ChatListGrouping.key)
+    }
+    if settings.favoritesSort != before.favoritesSort {
+      defaults.set(Self.raw(settings.favoritesSort), forKey: FavoritesSort.key)
     }
     if settings.animatedImages != before.animatedImages {
       defaults.set(Self.raw(settings.animatedImages), forKey: AnimatedImagesSetting.key)
@@ -257,6 +261,10 @@ final class AppSettingsStores: SettingsSyncStores {
     maybeRaw.flatMap(ChatListGrouping.init(rawValue:)) == .bySpace ? .bySpace : .mixed
   }
 
+  static func favoritesSort(_ maybeRaw: String?) -> AppFavoritesSort {
+    FavoritesSort.stored(maybeRaw) == .recent ? .recent : .alphabetical
+  }
+
   static func animatedImages(_ maybeRaw: String?) -> AppAnimatedImages {
     AnimatedImagesSetting.stored(maybeRaw) == .onTap ? .onTap : .autoplay
   }
@@ -272,6 +280,13 @@ final class AppSettingsStores: SettingsSyncStores {
     switch grouping {
     case .mixed: return ChatListGrouping.mixed.rawValue
     case .bySpace: return ChatListGrouping.bySpace.rawValue
+    }
+  }
+
+  static func raw(_ sort: AppFavoritesSort) -> String {
+    switch sort {
+    case .alphabetical: return FavoritesSort.alphabetical.rawValue
+    case .recent: return FavoritesSort.recent.rawValue
     }
   }
 

@@ -5,6 +5,7 @@
 #![allow(clippy::unwrap_used)]
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::common;
 
@@ -18,6 +19,7 @@ use teamcraft_core::client::{
 use teamcraft_core::clock::ManualClock;
 use teamcraft_core::error::{CoreError, GuestRefusal};
 use teamcraft_core::store::MemoryStore;
+use teamcraft_core::upkeep::{self, Upkeep};
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_proto::{AddConversationMemberRequest, ConversationId, MeetingId, UserId};
 
@@ -317,6 +319,29 @@ async fn a_removed_guest_reads_nothing_sent_after_the_removal() {
 
 /// #1077: a guest's device leaves the organizer's new device to the members, who would refuse its
 /// commit and split the group; the guest still follows the group the members' commit makes.
+#[tokio::test]
+async fn a_guests_device_runs_no_member_rounds() {
+  let mut rig = rig().await;
+  let mut upkeep = Upkeep::new(Duration::ZERO);
+  assert!(
+    upkeep::runs_member_rounds(&rig.alice.client),
+    "a member's device does"
+  );
+  assert!(!upkeep::runs_member_rounds(&rig.guest.client));
+
+  upkeep.tick_shared(&mut rig.guest.client).await;
+  assert!(
+    upkeep.is_workspace_signing_due(),
+    "the shared tick leaves it, as for a member"
+  );
+
+  assert!(!upkeep.run_member_rounds(&mut rig.guest.client).await);
+  assert!(
+    !upkeep.is_workspace_signing_due(),
+    "nothing waits on a guest's device"
+  );
+}
+
 #[tokio::test]
 async fn a_guests_device_adds_no_other_users_new_device() {
   let mut rig = rig().await;

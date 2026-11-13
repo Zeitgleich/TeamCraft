@@ -1,6 +1,8 @@
 //! Messages: the outbox (client message IDs, retries), encryption with the conversation's content
 //! key, decryption of incoming messages and paged history (e2ee.md §4.1, §4.4).
 
+use std::collections::HashMap;
+
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use teamcraft_crypto::key_bag::KeyBag;
@@ -231,6 +233,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .map_or(0, |m| m.sent_at_ms)
     });
     let mut is_offline = false;
+    // Per conversation whose entries were tried: whether one was held back for a missing key.
+    let mut held_for_key: HashMap<ConversationId, bool> = HashMap::new();
     for mut entry in entries {
       if entry.maybe_last_error.is_some() {
         report.failed += 1;
@@ -260,8 +264,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         },
       }
       match self.send_entry(&entry).await {
-        Ok(true) => report.sent += 1,
-        Ok(false) => report.pending += 1,
+        Ok(true) => {
+          held_for_key.entry(entry.conversation_id).or_insert(false);
+          report.sent += 1;
+        },
+        Ok(false) => {
+          held_for_key.insert(entry.conversation_id, true);
+          report.pending += 1;
+        },
         Err(error) if error.is_retry_later() => {
           is_offline = true;
           report.pending += 1;
@@ -290,6 +300,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           report.failed += 1;
         },
       }
+    }
+    // Shown as "this device isn't set up for this conversation yet" until its messages go out
+    // (issue #1878).
+    for (conversation, is_held) in held_for_key {
+      super::member_device::note_sends_held_for_key(&self.store, conversation, is_held)?;
     }
     Ok(report)
   }

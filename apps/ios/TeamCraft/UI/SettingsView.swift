@@ -303,6 +303,7 @@ private struct ChatsSettingsPage: View {
   @AppStorage("share_typing") private var isSharingTyping = true
   @AppStorage(ChatListLayout.key) private var chatListLayout = ChatListLayout.spaces.rawValue
   @AppStorage(ChatListGrouping.key) private var chatListGrouping = ChatListGrouping.mixed.rawValue
+  @AppStorage(FavoritesSort.key) private var favoritesSort = FavoritesSort.alphabetical.rawValue
   @AppStorage(MessageLayout.key) private var messageLayout = MessageLayout.bubbles.rawValue
   @AppStorage(CallStatusSoundsSetting.key) private var statusSounds = CallStatusSoundsSetting.all.rawValue
   @AppStorage(OriginalDownloadSetting.key) private var originalDownload = OriginalDownloadSetting.fallback.rawValue
@@ -344,6 +345,16 @@ private struct ChatsSettingsPage: View {
           }
         } footer: {
           Text("chat_list_grouping_hint")
+        }
+      } else {
+        // The spaces layout's Favorites; the list keeps its favorites by recency.
+        Section {
+          Picker("favorites_sort", selection: $favoritesSort) {
+            Text("favorites_sort_recent").tag(FavoritesSort.recent.rawValue)
+            Text("favorites_sort_alphabetical").tag(FavoritesSort.alphabetical.rawValue)
+          }
+        } footer: {
+          Text("favorites_sort_hint")
         }
       }
       Section {

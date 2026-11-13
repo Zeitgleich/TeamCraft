@@ -1099,6 +1099,17 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.refresh_channel_roles(conversation);
   }
 
+  fn channel_anchor_marks(
+    &self,
+    conversation: ConversationId,
+  ) -> Option<teamcraft_client_api::model::ChannelAnchorMarks> {
+    self.chat.channel_anchor_marks(conversation)
+  }
+
+  fn refresh_channel_anchor(&self, conversation: ConversationId) {
+    self.chat.refresh_channel_anchor(conversation);
+  }
+
   fn set_channel_role(
     &self,
     conversation: ConversationId,

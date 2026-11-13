@@ -163,6 +163,10 @@
   <string name="chat_list_grouping">Channels</string>
   <string name="chat_list_grouping_mixed">Mixed with chats</string>
   <string name="chat_list_grouping_by_space">Grouped by space</string>
+  <string name="favorites_sort">Sort favorites</string>
+  <string name="favorites_sort_recent">Newest message first</string>
+  <string name="favorites_sort_alphabetical">Alphabetically</string>
+  <string name="favorites_sort_hint">Puts the favorites with the latest message on top of Home.</string>
   <string name="chat_list_grouping_hint">Grouped by space puts the channels of each space together under its name, after the direct messages. Favorites stay on top.</string>
   <string name="list_conversations">Conversations</string>
   <string name="dynamic_color">Use the colors of my wallpaper</string>

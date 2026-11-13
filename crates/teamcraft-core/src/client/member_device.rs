@@ -852,8 +852,49 @@ pub fn is_waiting_for_device(
       || store
         .get(Table::AppliedChanges, &super::groups::rejoin_key(conversation))?
         .is_some()
-      || is_waiting_for_current_key(store, conversation)?,
+      || is_waiting_for_current_key(store, conversation)?
+      || has_sends_held_for_key(store, conversation)?,
   )
+}
+
+/// This device has a current key for the conversation now: it no longer waits for one, and what
+/// its outbox held back can go out.
+pub(crate) fn end_current_key_wait(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+) -> Result<(), CoreError> {
+  store.delete(Table::AppliedChanges, &current_key_wait_key(conversation))?;
+  note_sends_held_for_key(store, conversation, false)
+}
+
+/// Whether the outbox holds messages of the conversation back because this device has no current
+/// content key for it: a device that is a member on the server but not (yet) in the group, with
+/// no request of its own pending (issue #1878). Without this the messages stay "sending" with no
+/// reason shown.
+pub(crate) fn has_sends_held_for_key(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+) -> Result<bool, CoreError> {
+  Ok(
+    store
+      .get(Table::AppliedChanges, &held_for_key_key(conversation))?
+      .is_some(),
+  )
+}
+
+/// Notes whether the last flush held messages of the conversation back for a missing content key.
+pub(crate) fn note_sends_held_for_key(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  is_held: bool,
+) -> Result<(), CoreError> {
+  let key = held_for_key_key(conversation);
+  if is_held {
+    store.put(Table::AppliedChanges, &key, &[1])?;
+  } else {
+    store.delete(Table::AppliedChanges, &key)?;
+  }
+  Ok(())
 }
 
 /// Whether this device joined (by external commit or from a welcome) and no current key came
@@ -891,6 +932,11 @@ pub(crate) fn current_key_wait_key(conversation: ConversationId) -> String {
 /// set back) counts as long ago.
 fn is_within(at_ms: i64, now_ms: i64, window_ms: i64) -> bool {
   (0..window_ms).contains(&now_ms.saturating_sub(at_ms))
+}
+
+/// Where this device notes that its outbox holds messages back for a missing content key.
+fn held_for_key_key(conversation: ConversationId) -> String {
+  format!("held_for_key/{conversation}")
 }
 
 /// Where this device notes that it asked the members to add it.
