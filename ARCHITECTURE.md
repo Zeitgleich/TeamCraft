@@ -484,7 +484,9 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
   follow the allocation sends its top layer at a share of its bitrate with the frame rate lowered
   in step (down to about 5 fps); where the uplink can't carry the top layer even so, the top
   steps to the next smaller size (one size per 2 s held), and back one size at a time once the
-  uplink carried it whole for 10 s. A change of size, codec or layer count publishes the share
+  uplink carried it whole for 10 s. While the encoders are overloaded, a held top layer doesn't step the size
+  (#1846): a starved encoder's bursts read as a narrow link, and the CPU's steps already lower what
+  is sent; stepping on both flapped the size every few seconds on a clean uplink. A change of size, codec or layer count publishes the share
   anew (viewers switch with a keyframe); a frame rate change reconfigures the encoders in place.
   The overlay's "Share policy" row says why the layers are what they are. The desktop's own
   encoders plan the same layers in H.264 and send them whole or not at all: each rate change
