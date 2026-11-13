@@ -1837,6 +1837,92 @@ meanwhile doesn't make it skip keys sealed to it before that request. The keys o
 it missed are sealed to it after the commit (above, "Keys a device added back missed"); the user's
 key bag may hold them too.
 
+**Asking again for a lost hand-over (issue #1878).** Every way into a group above ends with one
+member's device doing one thing: committing an addition it holds, adding a further device, or
+handing over the current key. When that one thing is lost (the member's device was offline when the
+`device_add` event went by, its queued hand-over was dropped, an app was reinstalled), the waiting
+device used to wait for good, with its messages held back unsent. So a device that is a member on
+the server but can't write asks again, in two states:
+
+- **In the group, without a current key** (it joined and no hand-over came, "The current key of a
+  further device"): it posts a *current-key request* (`TCKR`, no payload) into the group's queue.
+  A member's device that reads it checks that the sending device is in its own group's tree at the
+  current epoch, and queues the same hand-over it queues for a further device's join, ranked
+  (`device_add_stagger` per rank, online users first), so normally one member sends. The bundle
+  goes to the group over MLS as before and the first current key a member sends ends the wait.
+- **Not in the group** (no welcome came, no rejoin request is under way and it didn't open the DM
+  itself, whose setup retries on its own; a channel's self-add doesn't count, since members may
+  refuse that while a member holding the user's addition still commits it): it posts the
+  device-add request (`TCDA`, its user ID) whether or not its user has another device in the
+  group. Members handle it as before when the user has a device in the group (a further device).
+  When the user has none, a member's device acts only if it holds that user's **pending addition**
+  for this conversation (§4.3, "Nobody to add yet"): the addition it decided on and signs when it
+  commits. The request makes it due now, keeping its attempts (so a request never resets the
+  backoff of a user whose devices have no key package), at most once per `rejoin_retry` per
+  conversation and user, whatever device the request names; it is then committed with the
+  usual checks (the server still lists the user, the device passes the pinned identity and the
+  signed device list). A member without a pending addition does nothing: a request never makes
+  anybody decide to add a user.
+
+When: the device notes the state the first time it sees it, while a message waits in its outbox for
+a key or it waits for a current key, and asks once that lasted `key_reask_retry` (client, 2
+minutes). Each further request waits twice as long as the one before, up to `key_reask_retry_max`
+(client, 1 hour), for as long as the state lasts; a new gateway connection (a reconnect, a resume
+from sleep or the background, an app start) asks at once, but never twice within
+`key_reask_retry`. The note goes once the device can write (a current key, a group) or is no
+longer a member, and with it the backoff. A device outside the group that hasn't written anything
+there doesn't ask on its own (a first device may be listed in a hundred imported conversations): it
+reads with the key bag, and a pending addition still wakes on `device_add` and full syncs. Neither request is retried on a failed post beyond this
+schedule; a post refused for an epoch conflict waits for the next turn too.
+
+Idempotency: a request only ever makes due what a member already has queued or would queue for a
+join, and each kind is deduplicated where it lands. A member handles one device's `TCKR` once per
+`key_reask_retry` and its `TCDA` once per `rejoin_retry` in each conversation (repeats and replays
+cost it no requests, #187), and wakes a user's pending addition once per `rejoin_retry` whatever
+device the requests name, since the server can invent device IDs; the hand-over is one queued entry per (conversation, device) and is
+dropped once any current key arrives or the group switches keys; the pending addition is one entry
+per (conversation, user), gone once the user is in the group, and committed with a fresh signed
+change whose freshness rules (above) stop a second commit for the same user. So a member coming
+online to a queue full of requests from a device that asked many times sends one hand-over or
+commits one addition.
+
+Rate limits: the device's own schedule is the main one (at most one request per conversation per
+`key_reask_retry`, then one per hour). The server counts each post against the user's write limit
+(`[security]`, per user per minute, 429 beyond it) like any message; the device takes a 429 as a
+failed post and keeps to its schedule. The server needs no new endpoint and stores the requests as
+proposals in the group's queue, which it already accepts from members of the conversation.
+
+What a hostile server can do with it, and what it can't:
+
+- It can withhold or delay requests and answers, as any queue entry: the device keeps waiting and
+  says so (#1882), no worse than before.
+- It can replay old requests or forge new ones in a device's name: neither carries a signature,
+  since neither asks for anything a member wouldn't do anyway. A forged `TCKR` makes members hand
+  the current key to the group's own members over MLS, at most once per device per
+  `key_reask_retry`; nobody outside the group learns a key. A forged `TCDA` for a user with a
+  device in the group is the existing device-add request: the device is added only if its user's
+  signed device list names it (§4.6, "A further device joins on its own"). A forged `TCDA` for a
+  user without a device in the group only makes a member commit, sooner, an addition that member
+  already decided on, for a device that passes the same checks, at most once per `rejoin_retry`
+  per user and without resetting its backoff, so a flood of made-up device IDs costs the member
+  one try per window; a member without such a decision ignores it.
+- It can't get a device added that no member approved: a request adds nothing on its own, the
+  server's member list is never taken as a member's decision, and every addition still carries
+  either the user's own signed device list (a further device) or a member's signed change (a new
+  user), which members check when they merge.
+- It learns that a device can't write in a conversation, which it already saw: no messages from that
+  device arrive.
+
+A DM whose adder is still alone in its group (a founded group of one, waiting for the only other
+person's first device) doesn't read its queue until the founding is settled (above), so it doesn't
+see the request either; there the adder's full sync, which asks again whether waiting people have a
+device by now, finds the device.
+
+What it doesn't fix: when the only device holding a pending addition never comes back (the
+import device of §4.10 stopped for good, an adder who left), nobody else holds the decision, so
+the request goes unanswered. The conversation keeps saying that the device waits to be let in, and
+a member can add the person again, which makes a new decision.
+
 **Notes to self.** Every user has a DM with themself (`POST /dms` with their own ID; the server
 returns the same conversation every time). Its only participant is the user, so its group holds only
 that user's devices: the device that finds none after a sync founds the group like any DM's, and

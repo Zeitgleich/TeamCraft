@@ -38,6 +38,7 @@ mod imported_history;
 mod join_requests;
 mod key_history;
 mod key_packages;
+mod key_reask;
 mod leavers;
 mod linking;
 #[cfg(feature = "ui")]
@@ -129,6 +130,7 @@ pub use guest::{
   is_open_by_own_record,
 };
 pub use join_requests::is_open_private_channel;
+pub use key_reask::ReaskTrigger;
 pub use leavers::{LeaverRound, leavers_held_by_limit};
 pub use linking::{
   LinkAnnouncement, LinkApproval, LinkCodeKind, LinkOffer, LinkReceipt, LinkRequestInfo, LinkRequestList,
@@ -244,6 +246,13 @@ pub struct ClientSettings {
   pub self_add_retry: std::time::Duration,
   /// The wait before the next self-add doubles with each one, up to this.
   pub self_add_retry_max: std::time::Duration,
+  /// A device that is a member on the server but can't write (no group, or no current key) asks
+  /// the members again after waiting this long, and never twice within it (e2ee.md §4.6, "Asking
+  /// again for a lost hand-over", issue #1878). Members answer one device's current-key request
+  /// once per this long.
+  pub key_reask_retry: std::time::Duration,
+  /// The wait before the next such request doubles with each one, up to this.
+  pub key_reask_retry_max: std::time::Duration,
   /// Somebody added to a conversation who has no device for this long is shown as having never set
   /// up the app, and the wait for their first device ends (their first device still gets them in,
   /// should it ever appear).
@@ -512,6 +521,12 @@ pub struct Client<A, S> {
   /// When this device last handled a further device's request to be added, per conversation and
   /// device: repeats within `rejoin_retry` cost no requests (issue #187).
   device_add_requests_handled: HashMap<(ConversationId, teamcraft_proto::DeviceId), i64>,
+  /// When this device last handled a group device's request for the current key, per conversation
+  /// and device: repeats within `key_reask_retry` cost no requests (issue #1878).
+  current_key_requests_handled: HashMap<(ConversationId, teamcraft_proto::DeviceId), i64>,
+  /// When a device-add request last woke this device's pending addition of a user, per
+  /// conversation and user: at most once per `rejoin_retry`, whatever device a request names.
+  user_addition_wakes: HashMap<(ConversationId, UserId), i64>,
   /// Whether all welcomes were read since the last reset: only then may spent key packages go, so a
   /// welcome that waited for one is opened first (e2ee.md §4.3.1). Reset when a gateway connection
   /// starts (fresh or resumed), when a full sync starts and when a welcome sync starts; set when a
@@ -602,6 +617,8 @@ impl Default for ClientSettings {
       max_refound_epoch: 1_000,
       self_add_retry: std::time::Duration::from_secs(30 * 60),
       self_add_retry_max: std::time::Duration::from_secs(24 * 60 * 60),
+      key_reask_retry: std::time::Duration::from_secs(2 * 60),
+      key_reask_retry_max: std::time::Duration::from_secs(60 * 60),
       pending_addition_expiry: std::time::Duration::from_secs(90 * 24 * 60 * 60),
       rejoin_cooldown: std::time::Duration::from_secs(30 * 60),
       change_announcement_window: std::time::Duration::from_secs(10 * 60),
@@ -771,6 +788,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       device_activity: DeviceActivity::Active,
       member_join_attempts: HashMap::new(),
       device_add_requests_handled: HashMap::new(),
+      current_key_requests_handled: HashMap::new(),
+      user_addition_wakes: HashMap::new(),
       are_welcomes_synced: false,
       maybe_waiting_checked_at_ms: None,
       catch_up_focus: CatchUpFocus::default(),

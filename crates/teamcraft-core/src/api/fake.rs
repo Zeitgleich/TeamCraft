@@ -1735,6 +1735,28 @@ impl FakeServer {
     });
   }
 
+  /// Puts a proposal into `conversation`'s queue at its current epoch in the name of `sender`, a
+  /// device the server may have made up, as a malicious server might, and tells the members.
+  pub fn inject_proposal(&self, conversation: ConversationId, sender: DeviceId, payload: Vec<u8>) {
+    let mut state = self.lock();
+    let id = state.next_id();
+    let Some(entry) = state.conversations.get_mut(&conversation) else {
+      return;
+    };
+    let message = MlsMessageResponse {
+      id,
+      conversation_id: conversation,
+      epoch: entry.epoch,
+      kind: MlsMessageKind::Proposal,
+      sender_device_id: sender,
+      maybe_recipient_device_id: None,
+      payload: Base64Bytes::new(payload),
+    };
+    entry.mls.push(message.clone());
+    let members: Vec<UserId> = entry.members.keys().copied().collect();
+    state.publish(members, &GatewayEvent::MlsMessage { message });
+  }
+
   /// The welcomes stored for `device`, oldest first.
   pub fn welcomes_for(&self, device: DeviceId) -> Vec<MlsMessageResponse> {
     self

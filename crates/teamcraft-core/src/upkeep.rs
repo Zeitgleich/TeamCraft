@@ -20,7 +20,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use crate::api::ServerApi;
-use crate::client::Client;
+use crate::client::{Client, ReaskTrigger};
 use crate::store::LocalStore;
 
 /// How often a device looks for scheduled messages to seal again: one local read, and a key change
@@ -52,6 +52,8 @@ pub struct Upkeep {
   has_reported_refusal: bool,
   /// When the roster and workspace head were last checked.
   last_local_check_ms: i64,
+  /// The gateway connection this device last asked again for keys on (issue #1878).
+  maybe_key_reask_connection: Option<u64>,
   /// [`Self::tick_shared`] came to the workspace's signing (roster, channels' role logs) and left it
   /// to [`Self::run_member_rounds`], which runs it once and clears this.
   is_workspace_signing_due: bool,
@@ -96,6 +98,7 @@ impl Upkeep {
       has_failed: false,
       has_reported_refusal: false,
       last_local_check_ms: i64::MIN,
+      maybe_key_reask_connection: None,
       is_workspace_signing_due: false,
       #[cfg(feature = "ui")]
       last_scheduled_check_ms: i64::MIN,
@@ -165,7 +168,8 @@ impl Upkeep {
     if self.is_account_sync_due(client, now, interval_ms) {
       is_changed |= self.sync_account::<A, S, R>(client, now).await;
     }
-    if now.saturating_sub(self.last_local_check_ms) >= interval_ms {
+    let is_local_check_due = now.saturating_sub(self.last_local_check_ms) >= interval_ms;
+    if is_local_check_due {
       self.last_local_check_ms = now;
       self.check_workspace::<A, S, R>(client).await;
       // Conversations a sync had to skip (a 403 right after a removal, a group in a bad state);
@@ -191,6 +195,8 @@ impl Upkeep {
         tracing::debug!(%error, "abandoned device registrations not revoked yet");
       }
     }
+    // On the heap: the requests are rare, and their future would add to every tick's frame.
+    is_changed |= Box::pin(self.ask_again_for_keys(client, is_local_check_due)).await;
     is_changed |= R::run(client, MemberRound::RolesAndLeavers).await;
     // Key packages expire; a device that runs for weeks renews them in time (e2ee.md §4.3).
     if let Err(error) = client.renew_key_packages_if_due().await {
@@ -222,6 +228,34 @@ impl Upkeep {
       UploadMode::Host => flush_sends(client).await,
     };
     is_changed | is_flushed
+  }
+
+  /// Asks the members again where this device can't write (e2ee.md §4.6, "Asking again for a lost
+  /// hand-over"): with the local checks, and at once on a new gateway connection (a reconnect, a
+  /// resume, the app's start). Local reads while nothing waits.
+  async fn ask_again_for_keys<A: ServerApi, S: LocalStore>(
+    &mut self,
+    client: &mut Client<A, S>,
+    is_local_check_due: bool,
+  ) -> bool {
+    let maybe_connection = client.gateway_connections();
+    let is_new_connection = maybe_connection.is_some() && maybe_connection != self.maybe_key_reask_connection;
+    if !is_local_check_due && !is_new_connection {
+      return false;
+    }
+    let trigger = if is_new_connection {
+      ReaskTrigger::NewConnection
+    } else {
+      ReaskTrigger::Timer
+    };
+    self.maybe_key_reask_connection = maybe_connection;
+    match client.ask_again_for_keys(trigger).await {
+      Ok(posted) => posted > 0,
+      Err(error) => {
+        tracing::debug!(%error, "not every request for keys went out; asked again later");
+        false
+      },
+    }
   }
 
   /// Keeps this device's view of the scheduled messages (docs/scheduled-messages.md) and seals again
