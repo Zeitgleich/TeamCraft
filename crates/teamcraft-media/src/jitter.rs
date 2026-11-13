@@ -5,8 +5,14 @@
 //! [`Playout::Missing`] so the decoder can run packet loss concealment or use in-band FEC.
 //!
 //! Depth is counted in packets instead of wall-clock time: callers pop once per frame interval
-//! (20 ms for Opus), which keeps the buffer free of clocks and deterministic to test. Adaptive
-//! depth (growing with measured jitter) is a later step.
+//! (20 ms for Opus), which keeps the buffer free of clocks and deterministic to test.
+//!
+//! The depth adapts per stream (#1894): every underrun deepens it by [`ADAPT_STEP_PACKETS`], up to
+//! [`JitterBufferConfig::max_adaptive_depth_packets`], and [`SHRINK_AFTER_POPS`] without one take a
+//! packet off again, down to the configured target. A sender on the WebSocket fallback holds its
+//! voice back for 100 to 200 ms behind every lost TCP segment and then delivers it in one burst;
+//! a receiver on QUIC buffered 60 ms for every stream, and a guest on 0.1 % loss was a gap in
+//! almost every second.
 //!
 //! Network handovers: an outage empties the buffer, which re-buffers to the target depth before
 //! playing on. A backlog that arrives in one burst afterwards would add its length as latency for
@@ -22,6 +28,10 @@ const MAX_SEQUENCE_JUMP: u64 = 3000;
 /// Pops in a row (0.5 s of 20 ms frames) the buffer must stay above its excess bound before it
 /// skips ahead; a short burst of jitter drains by itself.
 const CATCH_UP_AFTER_POPS: u32 = 25;
+/// Packets an underrun adds to the depth (40 ms of 20 ms frames).
+const ADAPT_STEP_PACKETS: usize = 2;
+/// Pops without an underrun (30 s of 20 ms frames) after which the depth gives a packet back.
+const SHRINK_AFTER_POPS: u32 = 1500;
 
 /// Reorders packets by sequence number and paces playout.
 #[derive(Debug)]
@@ -34,6 +44,10 @@ pub struct JitterBuffer<T> {
   state: PlayoutState,
   /// Pops in a row with more than `max_excess_packets` above the target.
   excess_pops: u32,
+  /// The depth playout aims for now: the configured target, deepened by underruns.
+  target_packets: usize,
+  /// Pops since the last underrun or shrink.
+  calm_pops: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +56,8 @@ pub struct JitterBufferConfig {
   pub target_depth_packets: usize,
   /// Upper bound; on overflow the oldest packets are dropped.
   pub max_depth_packets: usize,
+  /// The most underruns may deepen the target to (#1894): a sender's TCP stall has to fit.
+  pub max_adaptive_depth_packets: usize,
   /// Packets above the target that are tolerated for a while; if more stay buffered, playout
   /// skips ahead to the target depth (latency after a handover burst).
   pub max_excess_packets: usize,
@@ -85,6 +101,7 @@ impl Default for JitterBufferConfig {
     Self {
       target_depth_packets: 3,
       max_depth_packets: 50,
+      max_adaptive_depth_packets: 8,
       max_excess_packets: 10,
     }
   }
@@ -100,6 +117,7 @@ impl JitterBufferConfig {
     Self {
       target_depth_packets: 8,
       max_depth_packets: 50,
+      max_adaptive_depth_packets: 12,
       max_excess_packets: 17,
     }
   }
@@ -114,6 +132,8 @@ impl<T> JitterBuffer<T> {
       maybe_played_until: None,
       state: PlayoutState::Buffering,
       excess_pops: 0,
+      target_packets: config.target_depth_packets,
+      calm_pops: 0,
     }
   }
 
@@ -121,6 +141,15 @@ impl<T> JitterBuffer<T> {
   pub fn set_config(&mut self, config: JitterBufferConfig) {
     self.config = config;
     self.excess_pops = 0;
+    self.target_packets = self.target_packets.clamp(
+      config.target_depth_packets,
+      config.max_adaptive_depth_packets.max(config.target_depth_packets),
+    );
+  }
+
+  /// The depth playout aims for now (packets).
+  pub fn target_depth_packets(&self) -> usize {
+    self.target_packets
   }
 
   pub fn push(&mut self, sequence_number: SequenceNumber, item: T) -> PushOutcome {
@@ -147,7 +176,7 @@ impl<T> JitterBuffer<T> {
   pub fn pop(&mut self) -> Option<Playout<T>> {
     let next = match self.state {
       PlayoutState::Buffering => {
-        if self.packets.len() < self.config.target_depth_packets {
+        if self.packets.len() < self.target_packets {
           return None;
         }
         *self.packets.keys().next()?
@@ -155,10 +184,12 @@ impl<T> JitterBuffer<T> {
       PlayoutState::Playing { next } => self.catch_up(next),
     };
     if self.maybe_highest.is_none_or(|highest| next > highest) {
-      // Underrun: re-buffer to rebuild the safety margin.
+      // Underrun: re-buffer to rebuild the safety margin, a deeper one from now on.
       self.state = PlayoutState::Buffering;
+      self.deepen();
       return None;
     }
+    self.note_calm_pop();
     self.state = PlayoutState::Playing { next: next + 1 };
     self.maybe_played_until = Some(next + 1);
     let sequence_number = truncate(next);
@@ -189,13 +220,35 @@ impl<T> JitterBuffer<T> {
     self.packets.is_empty()
   }
 
+  /// An underrun: the stream's arrivals vary more than the depth covers.
+  fn deepen(&mut self) {
+    let ceiling = self
+      .config
+      .max_adaptive_depth_packets
+      .max(self.config.target_depth_packets);
+    self.target_packets = (self.target_packets + ADAPT_STEP_PACKETS).min(ceiling);
+    self.calm_pops = 0;
+  }
+
+  /// A slot played: after long enough without an underrun the depth gives a packet back.
+  fn note_calm_pop(&mut self) {
+    self.calm_pops += 1;
+    if self.calm_pops >= SHRINK_AFTER_POPS {
+      self.calm_pops = 0;
+      self.target_packets = self
+        .target_packets
+        .saturating_sub(1)
+        .max(self.config.target_depth_packets);
+    }
+  }
+
   /// The slot to play: `next`, or further ahead when the buffer has stayed too deep for a while.
   fn catch_up(&mut self, next: u64) -> u64 {
     let Some(highest) = self.maybe_highest else {
       return next;
     };
     let buffered_slots = (highest + 1).saturating_sub(next);
-    let excess_bound = (self.config.target_depth_packets + self.config.max_excess_packets) as u64;
+    let excess_bound = (self.target_packets + self.config.max_excess_packets) as u64;
     if buffered_slots <= excess_bound {
       self.excess_pops = 0;
       return next;
@@ -205,7 +258,7 @@ impl<T> JitterBuffer<T> {
       return next;
     }
     self.excess_pops = 0;
-    let caught_up = (highest + 1).saturating_sub(self.config.target_depth_packets as u64);
+    let caught_up = (highest + 1).saturating_sub(self.target_packets as u64);
     self.packets.retain(|seq, _| *seq >= caught_up);
     caught_up
   }
@@ -309,6 +362,68 @@ mod fallback_timing {
     );
   }
 
+  /// #1894: a receiver on QUIC (the default depth) and a sender on the fallback, whose TCP holds
+  /// its voice back for 140 ms every two seconds (a lost segment on a 0.1 % lossy upload). The
+  /// first stalls deepen the buffer; after that they play through without a gap.
+  #[test]
+  fn a_sender_that_stalls_again_and_again_gets_a_deeper_buffer() {
+    let mut buffer = JitterBuffer::new(JitterBufferConfig::default());
+    let mut next = 0u16;
+    let mut waiting = 0u16;
+    let mut missing_late = 0;
+    for slot in 0u16..1000 {
+      if slot % 100 >= 50 && slot % 100 < 57 {
+        waiting += 1;
+      } else {
+        for _ in 0..=waiting {
+          buffer.push(SequenceNumber(next), next);
+          next += 1;
+        }
+        waiting = 0;
+      }
+      let has_packet = matches!(buffer.pop(), Some(Playout::Packet { .. }));
+      if slot >= 300 && !has_packet {
+        missing_late += 1;
+      }
+    }
+    assert_eq!(missing_late, 0);
+    assert!(buffer.target_depth_packets() <= JitterBufferConfig::default().max_adaptive_depth_packets);
+  }
+
+  /// A stream that calms down gives the extra depth back, a packet every half minute, down to the
+  /// configured target: the latency of one bad moment doesn't stay for the rest of the call.
+  #[test]
+  fn a_calm_stream_gives_the_depth_back() {
+    let mut buffer = JitterBuffer::new(JitterBufferConfig::default());
+    let mut next = 0u16;
+    // One stall early on.
+    for slot in 0u32..120 {
+      if !(50..57).contains(&slot) {
+        let count = if slot == 57 { 8 } else { 1 };
+        for _ in 0..count {
+          buffer.push(SequenceNumber(next), next);
+          next = next.wrapping_add(1);
+        }
+      }
+      buffer.pop();
+    }
+    let deepened = buffer.target_depth_packets();
+    assert!(
+      deepened > JitterBufferConfig::default().target_depth_packets,
+      "{deepened}"
+    );
+    // Ten calm minutes.
+    for _ in 0u32..30_000 {
+      buffer.push(SequenceNumber(next), next);
+      next = next.wrapping_add(1);
+      buffer.pop();
+    }
+    assert_eq!(
+      buffer.target_depth_packets(),
+      JitterBufferConfig::default().target_depth_packets
+    );
+  }
+
   #[test]
   fn a_call_that_moves_to_the_fallback_buffers_more_from_then_on() {
     let mut buffer = JitterBuffer::<u16>::new(JitterBufferConfig::default());
@@ -324,6 +439,7 @@ mod tests {
   const CONFIG: JitterBufferConfig = JitterBufferConfig {
     target_depth_packets: 3,
     max_depth_packets: 8,
+    max_adaptive_depth_packets: 3,
     max_excess_packets: 10,
   };
 
@@ -422,6 +538,7 @@ mod tests {
       let config = JitterBufferConfig {
         target_depth_packets: 3,
         max_depth_packets: 50,
+        max_adaptive_depth_packets: 3,
         max_excess_packets: 5,
       };
       let mut buffer = JitterBuffer::new(config);
