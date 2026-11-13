@@ -725,7 +725,7 @@ pub fn list_json_with_prefix<T: DeserializeOwned>(
     .collect()
 }
 
-fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, CoreError> {
+pub(crate) fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, CoreError> {
   serde_json::from_slice(bytes).map_err(|error| CoreError::Corrupt(error.to_string()))
 }
 

@@ -666,7 +666,7 @@ impl CallEngine {
       maybe_join_retry_after: None,
       has_reported_unauthenticated_keys: false,
       uplink,
-      uplink_voice: VoiceGuard::new(VoiceGuardConfig::default()),
+      uplink_voice: VoiceGuard::new(VoiceGuardConfig::losses_only()),
       is_video_held_for_voice: false,
       maybe_padding_sent_at: None,
       downlink_feedback: FeedbackRecorder::new(now),

@@ -16,7 +16,6 @@
 #![allow(clippy::print_stderr, reason = "the numbers are what this test is for")]
 #![allow(clippy::unwrap_used)]
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -144,10 +143,9 @@ async fn measure_a_list_pass_after_each_kind_of_sync_write() {
   );
   let store = TrackedStore::new(sealed);
   let backend = CoreChatBackend::new(store.clone(), me, Box::new(SystemClock));
-  let spaces: BTreeSet<SpaceId> = (0..SPACES).map(|space| id(900 + space)).collect();
   let pass = |label: &str| {
     let started = Instant::now();
-    let listed = backend.listed_conversations(&spaces);
+    let listed = backend.whole_list_pass().take_listed();
     assert_eq!(listed.len(), CONVERSATIONS as usize);
     eprintln!("{label:<58} {:>9.1} ms", ms(started.elapsed()));
   };
@@ -244,17 +242,16 @@ async fn measure_a_start_during_a_catch_up() {
     waiting.len(),
     seeded.elapsed()
   );
-  let spaces: BTreeSet<SpaceId> = (0..SPACES).map(|space| id(900 + space)).collect();
   {
     let last_run = CoreChatBackend::new(store.clone(), me, Box::new(SystemClock));
-    last_run.listed_conversations(&spaces);
+    last_run.whole_list_pass().take_listed();
   }
   drop(store);
 
   let store = open_store(&directory);
   let backend = CoreChatBackend::new(store.clone(), me, Box::new(SystemClock));
   let start = Instant::now();
-  backend.listed_conversations(&spaces);
+  backend.whole_list_pass().take_listed();
   eprintln!(
     "list usable after the start            {:>9.1} ms",
     ms(start.elapsed())
@@ -270,7 +267,7 @@ async fn measure_a_start_during_a_catch_up() {
   let mut index = 0;
   while started.elapsed() < length {
     let pass = Instant::now();
-    backend.listed_conversations(&spaces);
+    backend.whole_list_pass().take_listed();
     passes.push(pass.elapsed());
     if Instant::now() >= next_open {
       let conversation = conversation_id(index % CONVERSATIONS);
@@ -329,19 +326,18 @@ async fn measure_a_list_pass_after_another_connections_commit() {
   let store = open_store(&directory);
   let other = open_store(&directory);
   let backend = CoreChatBackend::new(store.clone(), me, Box::new(SystemClock));
-  let spaces: BTreeSet<SpaceId> = (0..SPACES).map(|space| id(900 + space)).collect();
-  backend.listed_conversations(&spaces);
+  backend.whole_list_pass().take_listed();
   let mut warm = Vec::new();
   let mut cold = Vec::new();
   for n in 0..COLD_PASSES {
     let pass = Instant::now();
-    backend.listed_conversations(&spaces);
+    backend.whole_list_pass().take_listed();
     warm.push(pass.elapsed());
     other
       .put(Table::SyncState, "cold-pass", &n.to_le_bytes())
       .unwrap();
     let pass = Instant::now();
-    backend.listed_conversations(&spaces);
+    backend.whole_list_pass().take_listed();
     cold.push(pass.elapsed());
   }
   warm.sort();
@@ -379,9 +375,8 @@ async fn measure_a_list_pass_on_a_read_connection_after_the_writers_commit() {
   let engine = TrackedStore::new(LaneStore::writer(Arc::clone(&writer)));
   let lane = engine.sharing(LaneStore::reader(Arc::clone(&writer), Arc::new(reader)));
   let backend = CoreChatBackend::new(lane.clone(), me, Box::new(SystemClock));
-  let spaces: BTreeSet<SpaceId> = (0..SPACES).map(|space| id(900 + space)).collect();
   read_together(&lane, || {
-    backend.listed_conversations(&spaces);
+    backend.whole_list_pass().take_listed();
     Ok::<_, teamcraft_core::store::StoreError>(())
   })
   .unwrap();
@@ -389,7 +384,7 @@ async fn measure_a_list_pass_on_a_read_connection_after_the_writers_commit() {
   let pass = |into: &mut Vec<Duration>| {
     let started = Instant::now();
     read_together(&lane, || {
-      backend.listed_conversations(&spaces);
+      backend.whole_list_pass().take_listed();
       Ok::<_, teamcraft_core::store::StoreError>(())
     })
     .unwrap();

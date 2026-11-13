@@ -18,6 +18,10 @@
 //! where a pass reads a dozen per conversation (2.6 s for 83 on Android 1.0.30, before the list
 //! showed). The main thread runs a pass once nothing else waits, and tells the app if the list
 //! changed.
+//!
+//! A pass and the chat previews run in slices ([`Slice`], issue #1819): each slice is a job of its
+//! own and queues the next behind what waits by then, so a read the app queued meanwhile waits one
+//! slice, not the whole pass (1.7–2.7 s on phones in 1.0.32).
 
 use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
@@ -33,6 +37,7 @@ use teamcraft_client_api::model::{
 };
 use teamcraft_client_api::search::parse_query;
 use teamcraft_core::TypingState;
+use teamcraft_core::chat_list_pass::{ListPass, SliceLimit};
 use teamcraft_core::client::{CatchUpFocus, LinkRequestList};
 use teamcraft_core::clock::{Clock as _, SystemClock};
 use teamcraft_core::notified;
@@ -46,7 +51,7 @@ use teamcraft_core::store::{Table, read_together, try_write_group, write_group};
 use teamcraft_core::transfers::Transfers;
 use teamcraft_core::ui_backend::{CoreChatBackend, EntryNeed};
 use teamcraft_core::ui_snapshot::SnapshotCache;
-use teamcraft_proto::{ConversationId, ThreadId, UserId};
+use teamcraft_proto::{ConversationId, SpaceId, ThreadId, UserId};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 
 use crate::EventListener;
@@ -75,6 +80,16 @@ const KEEP_CHAT_LIST_EVERY: Duration = Duration::from_secs(10);
 
 /// Work for the read thread.
 type ReadJob = Box<dyn FnOnce(&mut Reads) + Send>;
+
+/// The rest of a sliced read ([`Slice::More`]).
+pub(crate) type SliceJob<R> = Box<dyn FnOnce(&mut Reads) -> Slice<R> + Send>;
+
+/// What one slice of a read that hands the thread back between slices did (issue #1819).
+pub(crate) enum Slice<R> {
+  Done(Result<R, TeamCraftError>),
+  /// More to do: queued again behind the reads that wait by then.
+  More(SliceJob<R>),
+}
 
 /// An action's answer: the engine ran what it queued for the client.
 pub(crate) type Dispatched = oneshot::Receiver<Result<(), TeamCraftError>>;
@@ -130,6 +145,14 @@ struct SharedRead<R> {
   maybe_waiting: Mutex<Option<Vec<Reply<R>>>>,
 }
 
+/// Who waits for a sliced read.
+enum SliceCallers<R> {
+  /// The callers of a shared read, taken when its first slice starts.
+  Shared(Arc<SharedRead<R>>),
+  /// Callers known already: a read's own, or a shared read's after its first slice.
+  Given(Vec<Reply<R>>),
+}
+
 /// Where a [`SharedRead`] put a new caller.
 enum Joined {
   /// No pass was waiting: the caller queues one.
@@ -165,6 +188,20 @@ pub(crate) struct ReadAccount {
   maybe_kept: Option<Vec<ConversationItem>>,
   /// When this thread kept the chat list last.
   maybe_kept_at: Option<Instant>,
+  /// The pass after a start that showed the kept list, while it runs a slice at a time between
+  /// other reads ([`Reads::when_idle`]).
+  maybe_idle_pass: Option<ChatListRun>,
+  /// The slices of a chat list pass ([`SliceLimit::default`]; tests make them smaller).
+  slice_limit: SliceLimit,
+}
+
+/// A chat list pass under way: the core's pass and the app's items of the entries built so far.
+pub(crate) struct ChatListRun {
+  pass: ListPass,
+  /// Each space's name and picture version, for its conversations' items.
+  spaces: BTreeMap<SpaceId, (String, Option<String>)>,
+  /// The items so far with the space each belongs to, in the store's order.
+  items: Vec<(Option<SpaceId>, ConversationItem)>,
 }
 
 /// The chat list since the start (issue #1758).
@@ -250,6 +287,22 @@ impl ReadQueue {
     answer.await.map_err(|_| TeamCraftError::EngineStopped)?
   }
 
+  /// [`Self::read`] for a read that runs in slices: between two, the reads queued meanwhile run
+  /// (issue #1819). Skipped from the next slice on once the caller is gone.
+  pub(crate) async fn read_sliced<R, F>(&self, job: F) -> Result<R, TeamCraftError>
+  where
+    R: Clone + Send + 'static,
+    F: FnOnce(&mut Reads) -> Slice<R> + Send + 'static,
+  {
+    let (reply, answer) = oneshot::channel();
+    self.queue_slice(
+      std::any::type_name::<F>(),
+      SliceCallers::Given(vec![reply]),
+      Box::new(job),
+    )?;
+    answer.await.map_err(|_| TeamCraftError::EngineStopped)?
+  }
+
   /// Runs an action's local half on the actions' thread and hands what it queued to the engine, in
   /// the order of the actions; answers once the engine took it, like before this thread existed.
   /// It waits there for the store's write lock, and the reads don't wait with it (issue #1756).
@@ -306,6 +359,8 @@ impl ReadQueue {
         chat_list: ChatListAtStart::NotAsked,
         maybe_kept: None,
         maybe_kept_at: None,
+        maybe_idle_pass: None,
+        slice_limit: SliceLimit::default(),
       });
     });
   }
@@ -377,33 +432,14 @@ impl ReadQueue {
   ) -> Result<oneshot::Receiver<Result<R, TeamCraftError>>, TeamCraftError>
   where
     R: Clone + Send + 'static,
-    F: FnOnce(&mut Reads) -> Result<R, TeamCraftError> + Send + 'static,
+    F: FnOnce(&mut Reads) -> Slice<R> + Send + 'static,
   {
     let (reply, answer) = oneshot::channel();
     if let Joined::Waiting = shared.join(reply) {
       return Ok(answer);
     }
-    let queued = Instant::now();
-    let timing = perf_jobs::queued(PerfJobKind::ReadQueue, std::any::type_name::<F>());
-    let pass = shared.clone();
-    let boxed: ReadJob = Box::new(move |reads| {
-      let callers = pass.start();
-      if callers.is_empty() {
-        timing.skip();
-        return;
-      }
-      let span = timing.span();
-      let running = timing.start();
-      let clock = JobClock::start();
-      let result = span.in_scope(|| reads.together(job));
-      logging::slow_read(std::any::type_name::<F>(), clock.started() - queued, clock.ran());
-      running.done();
-      for caller in callers {
-        // A caller may have given up waiting meanwhile; nothing to tell it then.
-        let _ = caller.send(result.clone());
-      }
-    });
-    if let Err(error) = self.send_to(Lane::Main, boxed) {
+    let callers = SliceCallers::Shared(shared.clone());
+    if let Err(error) = self.queue_slice(std::any::type_name::<F>(), callers, Box::new(job)) {
       // The pass will never run: its callers (this one, and any that joined meanwhile) hear so.
       for caller in shared.start() {
         let _ = caller.send(Err(TeamCraftError::EngineStopped));
@@ -411,6 +447,48 @@ impl ReadQueue {
       return Err(error);
     }
     Ok(answer)
+  }
+
+  /// Queues a slice of a read for `callers`. A slice that isn't the last queues the next behind
+  /// the reads that wait by then (issue #1819); once no caller waits, the rest is skipped.
+  fn queue_slice<R>(
+    &self,
+    name: &'static str,
+    callers: SliceCallers<R>,
+    job: SliceJob<R>,
+  ) -> Result<(), TeamCraftError>
+  where
+    R: Clone + Send + 'static,
+  {
+    let queued = Instant::now();
+    let timing = perf_jobs::queued(PerfJobKind::ReadQueue, name);
+    let queue = self.clone();
+    let boxed: ReadJob = Box::new(move |reads| {
+      let callers = callers.waiting();
+      if callers.is_empty() {
+        timing.skip();
+        return;
+      }
+      let span = timing.span();
+      let running = timing.start();
+      let clock = JobClock::start();
+      let slice = span.in_scope(|| reads.slice(job));
+      logging::slow_read(name, clock.started() - queued, clock.ran());
+      running.done();
+      match slice {
+        Slice::Done(result) => {
+          for caller in callers {
+            // A caller may have given up waiting meanwhile; nothing to tell it then.
+            let _ = caller.send(result.clone());
+          }
+        },
+        // A queue that is closing drops the callers with the job: they hear the engine stopped.
+        Slice::More(next) => {
+          let _ = queue.queue_slice(name, SliceCallers::Given(callers), next);
+        },
+      }
+    });
+    self.send_to(Lane::Main, boxed)
   }
 
   fn post(&self, job: impl FnOnce(&mut Reads) + Send + 'static) {
@@ -443,6 +521,12 @@ impl ReadQueue {
       Lane::Act => &self.act_jobs,
     }
   }
+}
+
+/// Whether a slice that started at `started` ran its time ([`SliceLimit::max_ms`]).
+fn is_slice_over(started: Instant, limit: SliceLimit) -> bool {
+  let max = Duration::from_millis(u64::try_from(limit.max_ms).unwrap_or(0));
+  started.elapsed() >= max
 }
 
 /// The chat list the last pass kept; `None` without one, or one this version doesn't read.
@@ -510,6 +594,28 @@ fn spawn_lane(
   Ok(queue)
 }
 
+impl ChatListRun {
+  /// The items: spaces in ID order, then the direct messages, the store's order within each.
+  fn into_items(self) -> Vec<ConversationItem> {
+    let mut items = self.items;
+    items.sort_by_key(|(maybe_space, _)| (maybe_space.is_none(), *maybe_space));
+    items.into_iter().map(|(_, item)| item).collect()
+  }
+}
+
+impl<R> SliceCallers<R> {
+  /// The callers that still wait.
+  fn waiting(self) -> Vec<Reply<R>> {
+    match self {
+      Self::Shared(shared) => shared.start(),
+      Self::Given(mut callers) => {
+        callers.retain(|caller| !caller.is_closed());
+        callers
+      },
+    }
+  }
+}
+
 impl<R> SharedRead<R> {
   fn new() -> Self {
     Self {
@@ -554,6 +660,13 @@ impl Reads {
   ) -> Result<R, TeamCraftError> {
     let store = self.store.clone();
     read_together(&store, || job(self))
+  }
+
+  /// Runs one slice of a sliced read as one look at the store, like [`Self::together`].
+  fn slice<R>(&mut self, job: SliceJob<R>) -> Slice<R> {
+    let store = self.store.clone();
+    read_together(&store, || Ok::<_, TeamCraftError>(job(self)))
+      .unwrap_or_else(|error| Slice::Done(Err(error)))
   }
 
   /// The app's first question on every start: answered from what the store says, without waiting
@@ -616,17 +729,38 @@ impl Reads {
 
   /// The chat list the app shows ([`ReadQueue::conversations`]). The first ask after the start
   /// gets the list the last pass kept, one record (issue #1758); the pass follows once nothing else
-  /// waits ([`Self::when_idle`]). Every other ask is a pass, which keeps its list now and then.
-  pub(crate) fn chat_list(&mut self) -> Result<Vec<ConversationItem>, TeamCraftError> {
-    let account = self.maybe_account.as_mut().ok_or(TeamCraftError::NotEnrolled)?;
+  /// waits ([`Self::when_idle`]). Every other ask is a pass, a slice at a time (issue #1819), which
+  /// keeps its list now and then.
+  pub(crate) fn chat_list(&mut self) -> Slice<Vec<ConversationItem>> {
+    let Some(account) = self.maybe_account.as_mut() else {
+      return Slice::Done(Err(TeamCraftError::NotEnrolled));
+    };
     if account.chat_list == ChatListAtStart::NotAsked
       && let Some(kept) = kept_chat_list(&self.store)
     {
       account.chat_list = ChatListAtStart::Kept(kept.clone());
       account.maybe_kept = Some(kept.clone());
-      return Ok(kept);
+      return Slice::Done(Ok(kept));
     }
-    self.chat_list_pass()
+    // This pass answers the app, which asked for it: the one after the start has nothing to add.
+    account.maybe_idle_pass = None;
+    let limit = account.slice_limit;
+    // Beginning reads every conversation's record: a job of its own, not one with a slice on top.
+    match self.begin_chat_list(limit) {
+      Ok(run) => Slice::More(Box::new(move |reads: &mut Reads| reads.chat_list_slice(run))),
+      Err(error) => Slice::Done(Err(error)),
+    }
+  }
+
+  /// The next slice of an asked pass; the last one hands out the list.
+  fn chat_list_slice(&mut self, mut run: ChatListRun) -> Slice<Vec<ConversationItem>> {
+    if let Err(error) = self.continue_chat_list(&mut run) {
+      return Slice::Done(Err(error));
+    }
+    if !run.pass.is_done() {
+      return Slice::More(Box::new(move |reads: &mut Reads| reads.chat_list_slice(run)));
+    }
+    Slice::Done(self.finish_chat_list(run))
   }
 
   /// Whether [`Self::when_idle`] has something to do.
@@ -637,27 +771,90 @@ impl Reads {
       .is_some_and(|account| matches!(account.chat_list, ChatListAtStart::Kept(_)))
   }
 
-  /// Work for when no job waits: the pass after a start that showed the kept chat list, which tells
-  /// the app if the list is another now.
+  /// Work for when no job waits: the pass after a start that showed the kept chat list, a slice per
+  /// call (issue #1819), which tells the app if the list is another now.
   fn when_idle(&mut self) {
     let Some(account) = self.maybe_account.as_mut() else {
       return;
     };
+    let limit = account.slice_limit;
+    let maybe_run = account.maybe_idle_pass.take();
+    // Beginning is a call of its own, like a slice: it reads every conversation's record.
+    let step = self.together(|reads| match maybe_run {
+      Some(mut run) => {
+        reads.continue_chat_list(&mut run)?;
+        Ok(run)
+      },
+      None => reads.begin_chat_list(limit),
+    });
+    let run = match step {
+      Ok(run) => run,
+      Err(error) => {
+        // The app asks again on the next change, and that ask is a pass.
+        tracing::warn!(%error, "the chat list after the start could not be read");
+        if let Some(account) = self.maybe_account.as_mut() {
+          account.chat_list = ChatListAtStart::Passed;
+        }
+        return;
+      },
+    };
+    let Some(account) = self.maybe_account.as_mut() else {
+      return;
+    };
+    if !run.pass.is_done() {
+      account.maybe_idle_pass = Some(run);
+      return;
+    }
     let ChatListAtStart::Kept(shown) = std::mem::replace(&mut account.chat_list, ChatListAtStart::Passed)
     else {
       return;
     };
-    match self.together(Self::chat_list_pass) {
+    match self.finish_chat_list(run) {
       Ok(items) if items != shown => self.listener.on_change(),
       Ok(_) => {},
-      // The app asks again on the next change, and that ask is a pass.
-      Err(error) => tracing::warn!(%error, "the chat list after the start could not be read"),
+      Err(error) => tracing::warn!(%error, "the chat list after the start could not be kept"),
     }
   }
 
-  /// A pass over the chat list; keeps it for the next start when it changed, now and then.
-  fn chat_list_pass(&mut self) -> Result<Vec<ConversationItem>, TeamCraftError> {
-    let items = self.conversations()?;
+  /// Starts a chat list pass: the spaces and what every entry shares, no entry yet.
+  fn begin_chat_list(&self, limit: SliceLimit) -> Result<ChatListRun, TeamCraftError> {
+    let pass = self.backend()?.begin_list_pass(limit);
+    let spaces = pass
+      .spaces()
+      .iter()
+      .map(|space| (space.id, (space.name.clone(), space.maybe_image_version.clone())))
+      .collect();
+    Ok(ChatListRun {
+      pass,
+      spaces,
+      items: Vec::new(),
+    })
+  }
+
+  /// Builds the next slice of `run`'s entries and turns them into the app's items.
+  fn continue_chat_list(&self, run: &mut ChatListRun) -> Result<(), TeamCraftError> {
+    let backend = self.backend()?;
+    backend.continue_list_pass(&mut run.pass);
+    let me = backend.me();
+    for conversation in run.pass.take_listed() {
+      let maybe_peer = direct_peer(backend, &conversation, me.id);
+      let maybe_space = conversation.maybe_space;
+      let (maybe_space_name, maybe_space_image_version) = maybe_space
+        .and_then(|space| run.spaces.get(&space).cloned())
+        .map_or((None, None), |(name, version)| (Some(name), version));
+      let item = ConversationItem {
+        maybe_space_image_version,
+        ..ConversationItem::from_view(conversation, maybe_space_name, maybe_peer, me.is_guest)
+      };
+      run.items.push((maybe_space, item));
+    }
+    Ok(())
+  }
+
+  /// The list of a finished pass ([`ChatListRun::into_items`]). Keeps it for the next start when
+  /// it changed, now and then.
+  fn finish_chat_list(&mut self, run: ChatListRun) -> Result<Vec<ConversationItem>, TeamCraftError> {
+    let items = run.into_items();
     let store = self.store.clone();
     let account = self.maybe_account.as_mut().ok_or(TeamCraftError::NotEnrolled)?;
     account.chat_list = ChatListAtStart::Passed;
@@ -683,41 +880,21 @@ impl Reads {
     Ok(kept.items)
   }
 
+  /// The chat list in one go, for reads that need it whole (the share sheet's targets). Neither
+  /// kept nor the app's list: the start's state stays as it is.
   pub(crate) fn conversations(&self) -> Result<Vec<ConversationItem>, TeamCraftError> {
-    let backend = self.backend()?;
-    let spaces: BTreeMap<_, _> = backend
-      .spaces()
-      .into_iter()
-      .map(|space| (space.id, (space.name, space.maybe_image_version)))
-      .collect();
-    let space_ids = spaces.keys().copied().collect();
-    let mut conversations = backend.listed_conversations(&space_ids);
-    // Spaces in ID order, then the direct messages; the store's order within each.
-    conversations.sort_by_key(|conversation| (conversation.maybe_space.is_none(), conversation.maybe_space));
-    let me = backend.me();
-    Ok(
-      conversations
-        .into_iter()
-        .map(|conversation| {
-          let maybe_peer = direct_peer(backend, &conversation, me.id);
-          let (maybe_space_name, maybe_space_image_version) = conversation
-            .maybe_space
-            .and_then(|space| spaces.get(&space).cloned())
-            .map_or((None, None), |(name, version)| (Some(name), version));
-          ConversationItem {
-            maybe_space_image_version,
-            ..ConversationItem::from_view(conversation, maybe_space_name, maybe_peer, me.is_guest)
-          }
-        })
-        .collect(),
-    )
+    let mut run = self.begin_chat_list(SliceLimit::WHOLE)?;
+    while !run.pass.is_done() {
+      self.continue_chat_list(&mut run)?;
+    }
+    Ok(run.into_items())
   }
 
   /// Where a share from another app can go ([`share_targets`]), each with its last activity.
   pub(crate) fn share_targets(&self) -> Result<Vec<ConversationItem>, TeamCraftError> {
+    let listed = self.conversations()?;
     let backend = self.backend()?;
-    let items = self
-      .conversations()?
+    let items = listed
       .into_iter()
       .filter(|item| item.can_post)
       .map(|item| {
@@ -752,25 +929,52 @@ impl Reads {
     }))
   }
 
-  /// [`crate::TeamCraft::chat_previews`]. IDs that aren't conversation IDs are skipped, so one bad
-  /// entry doesn't cost the list all its previews.
+  /// [`crate::TeamCraft::chat_previews`], a slice at a time (issue #1819): each preview reads a
+  /// conversation's newest rows, 2.8 s for 77 conversations on a phone while a catch-up wrote. IDs
+  /// that aren't conversation IDs are skipped, so one bad entry doesn't cost the list all its
+  /// previews.
   pub(crate) fn chat_previews(
-    &self,
-    conversation_ids: &[String],
-  ) -> Result<Vec<ChatPreviewItem>, TeamCraftError> {
+    &mut self,
+    mut remaining: std::collections::VecDeque<String>,
+    mut previews: Vec<ChatPreviewItem>,
+  ) -> Slice<Vec<ChatPreviewItem>> {
+    let limit = match self.maybe_account.as_ref() {
+      Some(account) => account.slice_limit,
+      None => return Slice::Done(Err(TeamCraftError::NotEnrolled)),
+    };
+    let started = Instant::now();
+    let mut done = 0;
+    while let Some(id) = remaining.pop_front() {
+      match self.chat_preview(&id) {
+        Ok(Some(preview)) => previews.push(preview),
+        Ok(None) => {},
+        Err(error) => return Slice::Done(Err(error)),
+      }
+      done += 1;
+      if done >= limit.max_entries || is_slice_over(started, limit) {
+        break;
+      }
+    }
+    if remaining.is_empty() {
+      return Slice::Done(Ok(previews));
+    }
+    Slice::More(Box::new(move |reads: &mut Reads| {
+      reads.chat_previews(remaining, previews)
+    }))
+  }
+
+  /// One conversation's line in the chat list; `None` for an ID that isn't a conversation's or a
+  /// conversation without messages.
+  fn chat_preview(&self, id: &str) -> Result<Option<ChatPreviewItem>, TeamCraftError> {
     let backend = self.backend()?;
+    let Ok(conversation) = parse_id::<ConversationId>(id) else {
+      return Ok(None);
+    };
     Ok(
-      conversation_ids
-        .iter()
-        .filter_map(|id| {
-          let conversation: ConversationId = parse_id(id).ok()?;
-          let message = preview_message(backend, conversation)?;
-          Some(ChatPreviewItem {
-            conversation_id: id.clone(),
-            message: self.message_item(backend, &message),
-          })
-        })
-        .collect(),
+      preview_message(backend, conversation).map(|message| ChatPreviewItem {
+        conversation_id: id.to_string(),
+        message: self.message_item(backend, &message),
+      }),
     )
   }
 
@@ -1125,8 +1329,8 @@ mod tests {
       let (queue, release) = held_queue();
       let shared = Arc::new(SharedRead::new());
       let runs = Arc::new(AtomicUsize::new(0));
-      let first = queue.share(&shared, counting(&runs, vec![1, 2])).unwrap();
-      let second = queue.share(&shared, counting(&runs, vec![3])).unwrap();
+      let first = queue.share(&shared, whole(counting(&runs, vec![1, 2]))).unwrap();
+      let second = queue.share(&shared, whole(counting(&runs, vec![3]))).unwrap();
 
       release.send(()).unwrap();
       assert_eq!(first.await.unwrap().unwrap(), vec![1, 2]);
@@ -1134,7 +1338,7 @@ mod tests {
       assert_eq!(runs.load(Ordering::SeqCst), 1);
 
       // Asked after the pass started: a pass of its own, never an older answer.
-      let later = queue.share(&shared, counting(&runs, vec![4])).unwrap();
+      let later = queue.share(&shared, whole(counting(&runs, vec![4]))).unwrap();
       assert_eq!(later.await.unwrap().unwrap(), vec![4]);
       assert_eq!(runs.load(Ordering::SeqCst), 2);
     }
@@ -1144,12 +1348,107 @@ mod tests {
       let (queue, release) = held_queue();
       let shared = Arc::new(SharedRead::new());
       let runs = Arc::new(AtomicUsize::new(0));
-      drop(queue.share(&shared, counting(&runs, vec![1])).unwrap());
-      drop(queue.share(&shared, counting(&runs, vec![2])).unwrap());
+      drop(queue.share(&shared, whole(counting(&runs, vec![1]))).unwrap());
+      drop(queue.share(&shared, whole(counting(&runs, vec![2]))).unwrap());
 
       release.send(()).unwrap();
       queue.read(|_| Ok(())).await.unwrap();
       assert_eq!(runs.load(Ordering::SeqCst), 0);
+    }
+  }
+
+  /// Issue #1819: a long read hands the thread back between its slices.
+  mod slices {
+    use super::*;
+
+    /// A read queued while a sliced read runs waits for the slice under way, not the rest.
+    #[tokio::test]
+    async fn a_read_queued_during_a_sliced_read_waits_one_slice() {
+      let (queue, release) = held_queue();
+      let ran = Arc::new(AtomicUsize::new(0));
+      let (reply, answer) = oneshot::channel();
+      queue
+        .queue_slice(
+          "sliced",
+          SliceCallers::Given(vec![reply]),
+          slices_of(&ran, SLICES),
+        )
+        .unwrap();
+      let seen = ran.clone();
+      let behind = queue
+        .queue(Lane::Main, WhenCallerGone::Run, move |_| {
+          Ok(seen.load(Ordering::SeqCst))
+        })
+        .unwrap();
+
+      release.send(()).unwrap();
+      assert_eq!(behind.await.unwrap().unwrap(), 1, "it ran after the first slice");
+      assert_eq!(answer.await.unwrap().unwrap(), SLICES);
+      assert_eq!(ran.load(Ordering::SeqCst), SLICES);
+    }
+
+    /// Callers of a shared read hear its answer once its last slice ran.
+    #[tokio::test]
+    async fn a_shared_sliced_read_answers_every_caller() {
+      let (queue, release) = held_queue();
+      let shared = Arc::new(SharedRead::new());
+      let ran = Arc::new(AtomicUsize::new(0));
+      let first = queue.share(&shared, slices_of(&ran, SLICES)).unwrap();
+      let second = queue.share(&shared, slices_of(&ran, SLICES)).unwrap();
+
+      release.send(()).unwrap();
+      assert_eq!(first.await.unwrap().unwrap(), SLICES);
+      assert_eq!(second.await.unwrap().unwrap(), SLICES);
+      assert_eq!(ran.load(Ordering::SeqCst), SLICES, "one read for both");
+    }
+
+    /// Once nobody waits for it, the rest of a sliced read is skipped.
+    #[tokio::test]
+    async fn a_sliced_read_nobody_waits_for_stops() {
+      let (queue, release) = held_queue();
+      let ran = Arc::new(AtomicUsize::new(0));
+      let (reply, answer) = oneshot::channel();
+      queue
+        .queue_slice(
+          "sliced",
+          SliceCallers::Given(vec![reply]),
+          slices_of(&ran, SLICES),
+        )
+        .unwrap();
+      let seen = ran.clone();
+      let (told, tell) = mpsc::channel();
+      let (go, gone) = mpsc::channel::<()>();
+      queue.post(move |_| {
+        let _ = told.send(seen.load(Ordering::SeqCst));
+        // Holds the thread until the caller gave up; ignored, the test ends the wait either way.
+        let _ = gone.recv();
+      });
+      release.send(()).unwrap();
+      assert_eq!(tell.recv().unwrap(), 1);
+      drop(answer);
+      go.send(()).unwrap();
+
+      queue.read(|_| Ok(())).await.unwrap();
+      assert_eq!(
+        ran.load(Ordering::SeqCst),
+        1,
+        "the second slice found nobody waiting"
+      );
+    }
+
+    const SLICES: usize = 4;
+
+    /// A read of `total` slices that counts them in `ran` and answers how many ran.
+    fn slices_of(ran: &Arc<AtomicUsize>, total: usize) -> SliceJob<usize> {
+      let ran = ran.clone();
+      Box::new(move |_reads: &mut Reads| {
+        let done = ran.fetch_add(1, Ordering::SeqCst) + 1;
+        if done >= total {
+          Slice::Done(Ok(done))
+        } else {
+          Slice::More(slices_of(&ran, total))
+        }
+      })
     }
   }
 
@@ -1391,6 +1690,13 @@ mod tests {
   /// The read a chat open waits for.
   fn open_chat() -> impl FnOnce(&mut Reads) -> Result<(), TeamCraftError> + Send + 'static {
     |_| Ok(())
+  }
+
+  /// `job` as a read of one slice.
+  fn whole<R: Send + 'static>(
+    job: impl FnOnce(&mut Reads) -> Result<R, TeamCraftError> + Send + 'static,
+  ) -> impl FnOnce(&mut Reads) -> Slice<R> + Send + 'static {
+    move |reads| Slice::Done(job(reads))
   }
 
   /// A job that counts its runs and answers `value`.
