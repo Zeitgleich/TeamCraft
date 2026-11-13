@@ -130,8 +130,8 @@ async fn measure_voice_and_camera_on_a_thin_uplink() {
       .collect();
     let estimate = heard
       .iter()
-      .filter(|(at, line)| in_second(at) && line.starts_with("est"))
-      .last()
+      .rev()
+      .find(|(at, line)| in_second(at) && line.starts_with("est"))
       .map_or("", |(_, line)| line.as_str());
     writeln!(
       out,
