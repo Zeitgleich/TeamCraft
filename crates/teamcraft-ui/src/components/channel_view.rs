@@ -1038,8 +1038,16 @@ fn CallButtons(conversation: ConversationId, info: Memo<Option<Conversation>>) -
   // Without call support (an old browser, a second tab) the buttons still show and say why.
   let has_calls = state.read(|backend| backend.has_calls());
   let is_callable = move || kind().is_some_and(|kind| kind != ConversationKind::Integration);
-  let is_channel =
-    move || has_calls && matches!(kind(), Some(ConversationKind::Public | ConversationKind::Private));
+  // A meeting chat's call is the meeting's call, never a huddle (#1932).
+  let is_channel = move || {
+    has_calls
+      && info.with(|maybe| {
+        maybe.as_ref().is_some_and(|conv| {
+          matches!(conv.kind, ConversationKind::Public | ConversationKind::Private)
+            && !crate::meetings::is_meeting_chat(conv)
+        })
+      })
+  };
   let is_busy = move || call.phase.get() != CallPhase::Idle;
   let start = move |with_video: bool| {
     if has_calls {
