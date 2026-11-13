@@ -21,18 +21,22 @@ use super::content_keys::{ApplicationPayload, ContentKeyBundle, SealedContentKey
 use super::rejoin::{SignedRejoinRequest, VerifiedRejoinRequest};
 use super::{CIPHERSUITE, GroupMember, MlsError, credential, leaf_capabilities, validate_key_package};
 use crate::channel_anchor::{
-  AnchorExpectation, CHANNEL_ANCHOR_EXTENSION_TYPE, ChannelAnchor, DEFAULT_MAX_ANCHOR_BYTES,
-  PROPERTIES_CHANGE_AAD_MAGIC, SignedPropertiesChange, VerifiedAnchor,
+  AnchorExpectation, AnchorKind, CHANNEL_ANCHOR_EXTENSION_TYPE, ChannelAnchor, DEFAULT_MAX_ANCHOR_BYTES,
+  Judged, PROPERTIES_CHANGE_AAD_MAGIC, SignedPropertiesChange, Standing, VerifiedAnchor,
 };
 use crate::content_key::{ContentKey, ContentKeyId};
 use crate::domain;
 use crate::identity::{DeviceKeyPair, SignedDeviceCertificate, VerifiedDevice};
 use crate::ids::{ConversationId, UserId};
 use crate::membership::{
-  ChangeId, IdentityDirectory, MembershipAction, MembershipAuthority, MembershipChange,
+  ChangeId, IdentityDirectory, MembershipAction, MembershipAuthority, MembershipChange, MembershipError,
   SignedMembershipChange,
 };
 use crate::secret::SymmetricKey;
+use crate::strict_roles::{
+  STRICT_ROLES_AAD_MAGIC, STRICT_ROLES_EXTENSION_TYPE, SignedStrictRolesChange, StrictRoleKind, StrictRoles,
+  StrictRolesError, StrictRolesVerdict, StrictSigner, TreeLeaf, membership_verdict,
+};
 
 /// Prefix of MLS group IDs; the conversation ID follows as big-endian `u64`.
 const GROUP_ID_PREFIX: &[u8] = b"teamcraft/conversation/";
@@ -174,6 +178,10 @@ pub struct MembershipUpdate {
   /// A move or rename of the channel (e2ee.md §4.6.5) that the commit made, checked: the anchor
   /// now carries it. Raise the anchor floor with [`ConversationGroup::verified_anchor`].
   pub maybe_properties_change: Option<Box<SignedPropertiesChange>>,
+  /// A strict channel's roles change (e2ee.md §4.6.2) that another member's commit made, checked:
+  /// the context now carries its roles, or none if it turned strict off. `None` for this device's
+  /// own commits: read [`ConversationGroup::strict_roles`] after confirming.
+  pub maybe_strict_roles_change: Option<Box<SignedStrictRolesChange>>,
 }
 
 /// The membership effect of a commit, with every added device verified.
@@ -674,8 +682,8 @@ impl ConversationGroup {
     directory: &impl IdentityDirectory,
     authority: &impl MembershipAuthority,
   ) -> Result<CommitOutput, MlsError> {
-    let verified = signed_change.verify(directory, authority)?;
-    let change = verified.change();
+    // Honest clients never commit what they would refuse (e2ee.md §4.6.2).
+    let change = &self.authorize_signed_change(signed_change, directory, authority)?;
     let mut validated_key_packages = Vec::with_capacity(key_packages.len());
     let mut proposed = ProposedMembership::default();
     for bytes in key_packages {
@@ -869,6 +877,7 @@ impl ConversationGroup {
       is_self_removed: false,
       maybe_committer: None,
       maybe_properties_change: pending.maybe_properties_change.map(Box::new),
+      maybe_strict_roles_change: None,
     })
   }
 
@@ -1098,13 +1107,22 @@ impl ConversationGroup {
     directory: &impl IdentityDirectory,
     authority: &impl MembershipAuthority,
   ) -> Result<(MembershipUpdate, Option<ChangeId>), MlsError> {
+    if let Some(signed) = authenticated_data.strip_prefix(STRICT_ROLES_AAD_MAGIC) {
+      let update = self.authorize_strict_roles_change(staged, sender_index, signed, directory, authority)?;
+      return Ok((update, None));
+    }
     if let Some(signed) = authenticated_data.strip_prefix(PROPERTIES_CHANGE_AAD_MAGIC) {
       let update = self.authorize_properties_change(staged, sender_index, signed, directory, authority)?;
       return Ok((update, None));
     }
+    // In a strict channel the server's word about guests decides nothing: who signed matters, not
+    // who committed, and guests hold no signed role (e2ee.md §4.6.2).
+    let is_strict = self.is_strict();
     let proposed = self.verify_commit_contents(staged, sender_index, directory)?;
     if let Some(request) = authenticated_data.strip_prefix(REJOIN_AAD_MAGIC) {
-      self.check_guest_commit(sender_index, &proposed, None, directory)?;
+      if !is_strict {
+        self.check_guest_commit(sender_index, &proposed, None, directory)?;
+      }
       let verified = SignedRejoinRequest::from_bytes(request)?.verify(directory)?;
       let (_, member) = self.check_verified_rejoin(&verified)?;
       let added: Vec<GroupMember> = proposed.added.iter().map(GroupMember::from).collect();
@@ -1120,6 +1138,7 @@ impl ConversationGroup {
         is_self_removed: staged.self_removed(),
         maybe_committer: None,
         maybe_properties_change: None,
+        maybe_strict_roles_change: None,
       };
       return Ok((update, Some(verified.request().request_id())));
     }
@@ -1127,20 +1146,28 @@ impl ConversationGroup {
       if !proposed.removed.is_empty() {
         return Err(MlsError::MissingSignedChange);
       }
-      self.check_guest_commit(sender_index, &proposed, None, directory)?;
-      self.check_device_additions(&proposed)?;
+      // No addition either: a leaf refresh, the committer's own leaf and nobody's membership
+      // (e2ee.md §4.6.2, "Turning it on", step 3). Its path leaf keeps its identity (checked).
+      if !proposed.added.is_empty() {
+        if !is_strict {
+          self.check_guest_commit(sender_index, &proposed, None, directory)?;
+        }
+        self.check_device_additions(&proposed)?;
+      }
       (None, None)
     } else {
       let signed = SignedMembershipChange::from_bytes(authenticated_data)?;
-      let verified = signed.verify(directory, authority)?;
-      self.check_change_matches(verified.change(), &proposed)?;
-      let actor = verified.actor().user_id();
-      let maybe_self_leave = match verified.change().action() {
-        MembershipAction::RemoveUser { user_id } if *user_id == actor => Some(actor),
-        _ => None,
-      };
-      self.check_guest_commit(sender_index, &proposed, maybe_self_leave, directory)?;
-      (Some(verified.change().clone()), Some(actor))
+      let change = self.authorize_signed_change(&signed, directory, authority)?;
+      self.check_change_matches(&change, &proposed)?;
+      let actor = signed.signer_user();
+      if !is_strict {
+        let maybe_self_leave = match change.action() {
+          MembershipAction::RemoveUser { user_id } if *user_id == actor => Some(actor),
+          _ => None,
+        };
+        self.check_guest_commit(sender_index, &proposed, maybe_self_leave, directory)?;
+      }
+      (Some(change), Some(actor))
     };
     let update = MembershipUpdate {
       maybe_change,
@@ -1151,6 +1178,7 @@ impl ConversationGroup {
       is_self_removed: staged.self_removed(),
       maybe_committer: None,
       maybe_properties_change: None,
+      maybe_strict_roles_change: None,
     };
     Ok((update, None))
   }
@@ -1213,6 +1241,237 @@ impl ConversationGroup {
   fn current_anchor(&self) -> Result<ChannelAnchor, MlsError> {
     let bytes = self.anchor_bytes().ok_or(MlsError::NotAnchored)?;
     Ok(ChannelAnchor::from_bytes(bytes, DEFAULT_MAX_ANCHOR_BYTES)?)
+  }
+
+  /// Verifies a signed membership change and judges its signer: in a strict channel by the
+  /// context's roles (e2ee.md §4.6.2, "Who may do what"), otherwise by `authority` (§4.6).
+  /// Returns the change; its signer is [`SignedMembershipChange::signer_user`], now verified.
+  fn authorize_signed_change(
+    &self,
+    signed: &SignedMembershipChange,
+    directory: &impl IdentityDirectory,
+    authority: &impl MembershipAuthority,
+  ) -> Result<MembershipChange, MlsError> {
+    let Some(strict) = self.strict_roles()? else {
+      return Ok(signed.verify(directory, authority)?.change().clone());
+    };
+    let change = signed.unverified();
+    let action = change.action();
+    let signer = signed.signer_user();
+    let maybe_target_role = strict.role_of(action.target_user()).map(|role| role.role);
+    // A role counts only with a leaf, and under the identity key the context names.
+    if let Some(role) = strict.role_of(signer)
+      && let Ok(device) = signed.verify_signed_by(&role.identity_key)
+    {
+      let class = strict.signer_class(&device, &self.tree_leaves()?);
+      if membership_verdict(signer, class, action, maybe_target_role) {
+        return Ok(change.clone());
+      }
+    }
+    // Leaving, and workspace signers: under the signer's pinned identity key.
+    let pinned = directory
+      .pinned_identity(signer)
+      .ok_or(MembershipError::UnknownSigner(signer))?;
+    signed.verify_signed_by(&pinned)?;
+    if membership_verdict(signer, StrictSigner::Other, action, maybe_target_role) {
+      return Ok(change.clone());
+    }
+    // Only now the roster: at most one read, for a signer the context doesn't allow.
+    match authority.workspace_signer(signer, 0, Judged::Newest) {
+      Standing::Confirmed if authority.is_authorized(signer, change.conversation_id(), action) => {
+        Ok(change.clone())
+      },
+      Standing::Unknown => Err(MlsError::StrictRosterNeeded(signer)),
+      Standing::Confirmed | Standing::Refused => Err(MlsError::StrictRefused {
+        signer,
+        action: *action,
+      }),
+    }
+  }
+
+  /// Whether the channel is strict: its context carries the roles extension (e2ee.md §4.6.2).
+  /// Nothing else switches it.
+  pub fn is_strict(&self) -> bool {
+    strict_bytes_of(self.group.extensions()).is_some()
+  }
+
+  /// The strict roles of the current context; `None` for a channel that isn't strict. They were
+  /// verified when the commit that set them was merged; for a group this device joined, the
+  /// welcome's sender was checked against what it knew ([`StagedJoin::check_strict_sender`]).
+  pub fn strict_roles(&self) -> Result<Option<StrictRoles>, MlsError> {
+    strict_bytes_of(self.group.extensions())
+      .map(StrictRoles::from_bytes)
+      .transpose()
+      .map_err(MlsError::from)
+  }
+
+  /// Every leaf of the tree with its certificate and signature key, unverified.
+  fn tree_leaves(&self) -> Result<Vec<TreeLeaf>, MlsError> {
+    self
+      .group
+      .members()
+      .map(|member| {
+        Ok(TreeLeaf {
+          certificate: credential::decode(&member.credential)?,
+          signature_key: member.signature_key,
+        })
+      })
+      .collect()
+  }
+
+  /// Turns the channel strict, changes its roles or turns it off (e2ee.md §4.6.2): one group
+  /// context extensions proposal that sets the roles extension and requires it of every leaf,
+  /// every other extension byte for byte, with the signed change in the authenticated data.
+  /// Checked as the members will check it first. Pending until [`Self::confirm_commit`].
+  ///
+  /// Turning it on fails while a leaf doesn't announce the capability
+  /// ([`Self::leaves_without_strict`]): every device has to have refreshed its leaf first
+  /// ([`Self::commit_leaf_refresh`]).
+  pub fn commit_strict_roles(
+    &mut self,
+    provider: &impl OpenMlsProvider,
+    device: &DeviceKeyPair,
+    signed: &SignedStrictRolesChange,
+    directory: &impl IdentityDirectory,
+    authority: &impl MembershipAuthority,
+  ) -> Result<CommitOutput, MlsError> {
+    let verdict = self.judge_strict_roles_change(signed, directory, authority)?;
+    let extensions = with_strict(self.group.extensions(), &verdict)?;
+    let mut aad = STRICT_ROLES_AAD_MAGIC.to_vec();
+    aad.extend_from_slice(&signed.to_bytes()?);
+    self.group.set_aad(aad);
+    let result = self.stage_context_commit(provider, device, extensions);
+    self.group.set_aad(Vec::new());
+    let output = result?;
+    self.maybe_pending = Some(PendingCommit {
+      commit: output.commit.clone(),
+      maybe_change: None,
+      removed: Vec::new(),
+      maybe_rejoin: None,
+      maybe_properties_change: None,
+    });
+    Ok(output)
+  }
+
+  /// Refreshes this device's leaf with the capabilities this version announces, in an otherwise
+  /// empty commit (e2ee.md §4.6.2, "Turning it on", step 3). Apps from before #1197 refuse an
+  /// empty commit, so it is only sent once every device of the group answered "ready".
+  pub fn commit_leaf_refresh(
+    &mut self,
+    provider: &impl OpenMlsProvider,
+    device: &DeviceKeyPair,
+  ) -> Result<CommitOutput, MlsError> {
+    let parameters = LeafNodeParameters::builder()
+      .with_capabilities(leaf_capabilities(&[]))
+      .build();
+    let bundle = self
+      .group
+      .commit_builder()
+      .force_self_update(true)
+      .leaf_node_parameters(parameters)
+      .load_psks(provider.storage())
+      .map_err(|error| MlsError::openmls("commit creation", error))?
+      .build(provider.rand(), provider.crypto(), device, |_| true)
+      .map_err(|error| MlsError::openmls("commit creation", error))?
+      .stage_commit(provider)
+      .map_err(|error| MlsError::openmls("commit staging", error))?;
+    let output = commit_output(bundle)?;
+    self.maybe_pending = Some(PendingCommit {
+      commit: output.commit.clone(),
+      maybe_change: None,
+      removed: Vec::new(),
+      maybe_rejoin: None,
+      maybe_properties_change: None,
+    });
+    Ok(output)
+  }
+
+  /// The devices whose leaf doesn't announce strict channels: while there is one, the channel
+  /// can't be turned strict (e2ee.md §4.6.2, "Turning it on", D6).
+  pub fn leaves_without_strict(&self) -> Result<Vec<GroupMember>, MlsError> {
+    let strict_type = ExtensionType::Unknown(STRICT_ROLES_EXTENSION_TYPE);
+    let mut lacking = Vec::new();
+    for member in self.group.members() {
+      let leaf = self
+        .group
+        .public_group()
+        .leaf(member.index)
+        .ok_or(MlsError::ChangeDoesNotMatchCommit)?;
+      if !leaf.capabilities().extensions().contains(&strict_type) {
+        lacking.push(credential::member_of(&member.credential)?);
+      }
+    }
+    Ok(lacking)
+  }
+
+  /// The verdict on a roles change for this group as it stands: a channel's group (never a
+  /// meeting chat's), and [`StrictRoles::check_change`].
+  fn judge_strict_roles_change(
+    &self,
+    signed: &SignedStrictRolesChange,
+    directory: &impl IdentityDirectory,
+    authority: &impl MembershipAuthority,
+  ) -> Result<StrictRolesVerdict, MlsError> {
+    let maybe_current = self.strict_roles()?;
+    if maybe_current.is_none()
+      && let Some(bytes) = self.anchor_bytes()
+    {
+      // Only a meeting chat's anchor keeps strict out; DMs and the notes have no anchor and are
+      // the app's to keep out.
+      let is_meeting_chat = ChannelAnchor::from_bytes(bytes, DEFAULT_MAX_ANCHOR_BYTES)
+        .is_ok_and(|anchor| matches!(anchor.founding().kind, AnchorKind::MeetingChat { .. }));
+      if is_meeting_chat {
+        return Err(StrictRolesError::NotAChannel.into());
+      }
+    }
+    Ok(StrictRoles::check_change(
+      maybe_current.as_ref(),
+      signed,
+      self.conversation_id,
+      self.epoch(),
+      &self.tree_leaves()?,
+      directory,
+      authority,
+    )?)
+  }
+
+  /// A strict roles commit: one group context extensions proposal and nothing else (its path
+  /// leaf keeps its identity), the signed change passes [`StrictRoles::check_change`], and the
+  /// new context is exactly [`with_strict`] of the current one.
+  fn authorize_strict_roles_change(
+    &self,
+    staged: &StagedCommit,
+    sender_index: LeafNodeIndex,
+    signed: &[u8],
+    directory: &impl IdentityDirectory,
+    authority: &impl MembershipAuthority,
+  ) -> Result<MembershipUpdate, MlsError> {
+    let mut proposals = 0usize;
+    for queued in staged.queued_proposals() {
+      if !matches!(queued.proposal(), Proposal::GroupContextExtensions(_)) {
+        return Err(MlsError::UnsupportedProposal);
+      }
+      if !matches!(queued.sender(), Sender::Member(_)) {
+        return Err(MlsError::ExternalSender);
+      }
+      proposals += 1;
+    }
+    if proposals != 1 {
+      return Err(MlsError::ContextChangeMismatch);
+    }
+    if let Some(leaf) = staged.update_path_leaf_node() {
+      self.verify_same_identity(sender_index, leaf, directory)?;
+    }
+    let signed = SignedStrictRolesChange::from_bytes(signed)?;
+    let verdict = self.judge_strict_roles_change(&signed, directory, authority)?;
+    let expected = with_strict(self.group.extensions(), &verdict)?;
+    if staged.group_context().extensions() != &expected {
+      return Err(MlsError::ContextChangeMismatch);
+    }
+    Ok(MembershipUpdate {
+      maybe_strict_roles_change: Some(Box::new(signed)),
+      ..MembershipUpdate::default()
+    })
   }
 
   fn stage_context_commit(
@@ -1286,6 +1545,7 @@ impl ConversationGroup {
       is_self_removed: false,
       maybe_committer: None,
       maybe_properties_change: None,
+      maybe_strict_roles_change: None,
     })
   }
 
@@ -1581,6 +1841,55 @@ impl StagedJoin {
     anchor_bytes_of(self.staged.group_context().extensions())
   }
 
+  /// The strict roles of the welcome's group context; `None` for a channel that isn't strict.
+  /// Parsed, not trusted: who made the welcome is checked against what this device knew
+  /// ([`Self::check_strict_sender`]).
+  pub fn strict_roles(&self) -> Result<Option<StrictRoles>, MlsError> {
+    strict_bytes_of(self.staged.group_context().extensions())
+      .map(StrictRoles::from_bytes)
+      .transpose()
+      .map_err(MlsError::from)
+  }
+
+  /// A device that fell out of a strict channel opens a welcome only from a channel admin of the
+  /// newest roles it verified (`known`), or from a workspace owner or admin (e2ee.md §4.6.2,
+  /// "Falling out in a strict channel"): anybody else's welcome could carry a change it refused.
+  /// The admin is judged by `known`, not by the welcome's own context, which its maker chose.
+  /// Taking a member's welcome after `strict_rejoin_wait` on the user's word is the app's
+  /// decision, not this check's. Returns the sender.
+  pub fn check_strict_sender(
+    &self,
+    known: &StrictRoles,
+    directory: &impl IdentityDirectory,
+    authority: &impl MembershipAuthority,
+  ) -> Result<GroupMember, MlsError> {
+    let sender_index = self.staged.welcome_sender_index();
+    let leaf = self
+      .staged
+      .members()
+      .find(|member| member.index == sender_index)
+      .ok_or(MlsError::UnexpectedMessage(
+        "the welcome's sender isn't in its group",
+      ))?;
+    let certificate = credential::decode(&leaf.credential)?;
+    let claimed = credential::member_of(&leaf.credential)?;
+    let is_known_admin = known.role_of(claimed.user_id).is_some_and(|role| {
+      role.role == StrictRoleKind::Admin
+        && certificate
+          .verify(&role.identity_key)
+          .is_ok_and(|device| device.ensure_signing_key(&leaf.signature_key).is_ok())
+    });
+    if is_known_admin {
+      return Ok(claimed);
+    }
+    credential::verify(&leaf.credential, &leaf.signature_key, directory)?;
+    match authority.workspace_signer(claimed.user_id, 0, Judged::Newest) {
+      Standing::Confirmed => Ok(claimed),
+      Standing::Unknown => Err(MlsError::StrictRosterNeeded(claimed.user_id)),
+      Standing::Refused => Err(MlsError::StrictWelcomeRefused(claimed.user_id)),
+    }
+  }
+
   /// Verifies the welcome's anchor (checks 1 to 5, e2ee.md §4.6.5) before the join completes;
   /// `Ok(None)` for a group without one. Check the pin and floor before completing.
   pub fn verified_anchor(
@@ -1734,6 +2043,73 @@ fn commit_output(bundle: CommitMessageBundle) -> Result<CommitOutput, MlsError> 
     maybe_welcome,
     maybe_group_info,
   })
+}
+
+fn strict_bytes_of(extensions: &Extensions<GroupContext>) -> Option<&[u8]> {
+  extensions
+    .unknown(STRICT_ROLES_EXTENSION_TYPE)
+    .map(|extension| extension.0.as_slice())
+}
+
+/// `extensions` after a roles change: the roles extension set (replaced in place, or appended)
+/// and required of every leaf, or removed with its requirement for [`StrictRolesVerdict::Off`].
+/// Every other extension, and every other requirement, stays byte for byte and in its place. The
+/// committer and every member compute it alike, and the commit's context must equal it.
+fn with_strict(
+  extensions: &Extensions<GroupContext>,
+  verdict: &StrictRolesVerdict,
+) -> Result<Extensions<GroupContext>, MlsError> {
+  let strict_type = ExtensionType::Unknown(STRICT_ROLES_EXTENSION_TYPE);
+  let maybe_bytes = match verdict {
+    StrictRolesVerdict::Roles(roles) => Some(roles.to_bytes()?),
+    StrictRolesVerdict::Off => None,
+  };
+  let mut result = Vec::new();
+  let mut has_roles = false;
+  let mut has_requirement = false;
+  for extension in extensions.iter() {
+    match extension {
+      Extension::Unknown(STRICT_ROLES_EXTENSION_TYPE, _) => {
+        if let Some(bytes) = &maybe_bytes {
+          result.push(Extension::Unknown(
+            STRICT_ROLES_EXTENSION_TYPE,
+            UnknownExtension(bytes.clone()),
+          ));
+          has_roles = true;
+        }
+      },
+      Extension::RequiredCapabilities(required) => {
+        has_requirement = true;
+        let mut types: Vec<ExtensionType> = required
+          .extension_types()
+          .iter()
+          .copied()
+          .filter(|extension_type| *extension_type != strict_type)
+          .collect();
+        if maybe_bytes.is_some() {
+          types.push(strict_type);
+        }
+        result.push(Extension::RequiredCapabilities(
+          RequiredCapabilitiesExtension::new(&types, required.proposal_types(), required.credential_types()),
+        ));
+      },
+      other => result.push(other.clone()),
+    }
+  }
+  if let Some(bytes) = maybe_bytes {
+    if !has_roles {
+      result.push(Extension::Unknown(
+        STRICT_ROLES_EXTENSION_TYPE,
+        UnknownExtension(bytes),
+      ));
+    }
+    if !has_requirement {
+      result.push(Extension::RequiredCapabilities(
+        RequiredCapabilitiesExtension::new(&[strict_type], &[], &[]),
+      ));
+    }
+  }
+  Extensions::from_vec(result).map_err(|error| MlsError::openmls("strict roles extension", error))
 }
 
 fn anchor_bytes_of(extensions: &Extensions<GroupContext>) -> Option<&[u8]> {
