@@ -51,6 +51,8 @@ struct ConversationListView: View {
   /// `ConversationSection.collapseKey`; the stored name is from when the tab was Home).
   @AppStorage("home_collapsed_sections") private var collapsedRaw = ""
   @State private var homeChip: HomeFilter = .all
+  /// Home's "Recent activity" lists every conversation with a message, not only the newest few (#1906).
+  @State private var isShowingAllRecent = false
   /// Takes effect at once: the view follows the stored value (#1151).
   @AppStorage(ChatListLayout.key) private var layoutRaw = ChatListLayout.spaces.rawValue
   @AppStorage(ChatListGrouping.key) private var groupingRaw = ChatListGrouping.mixed.rawValue
@@ -452,13 +454,30 @@ struct ConversationListView: View {
         Button("browse_channels", systemImage: "plus") { browseChannels(in: spaceId) }
       }
     }
-    ForEach(section.visibleRows(isCollapsed: isCollapsed, selectedId: selection), id: \.id) { conversation in
+    let isRecent = section.title == .recentActivity
+    let rows = section.visibleRows(isCollapsed: isCollapsed, selectedId: selection)
+    // Recent activity shows the newest few until "Show all" (#1906); the section holds them all.
+    let shownRows = isRecent && !isShowingAllRecent && !isCollapsed ? Array(rows.prefix(recentActivityHomeRowCount)) : rows
+    // Its rows are also listed below it: their identity in the list names the section, as no
+    // two rows of one List may share one.
+    ForEach(shownRows.map { SectionRow(isRecent: isRecent, conversation: $0) }) { row in
+      let conversation = row.conversation
       conversationRow(
         conversation,
         // A space's section names it in its header, so its rows don't (#1345).
-        showsSpace: section.title == .favorites || (isList && !section.isSpace),
+        showsSpace: isRecent || section.title == .favorites || (isList && !section.isSpace),
         // The Favorites section says it already (#1786).
         showsPin: conversation.isFavorite && section.title != .favorites)
+    }
+    if isRecent && !isCollapsed && section.conversations.count > recentActivityHomeRowCount {
+      let label: LocalizedStringKey =
+        isShowingAllRecent ? "recent_activity_fewer" : "recent_activity_all \(section.conversations.count)"
+      Button(
+        label,
+        systemImage: isShowingAllRecent ? "chevron.up" : "chevron.down"
+      ) {
+        withAnimation(.snappy(duration: 0.25)) { isShowingAllRecent.toggle() }
+      }
     }
   }
 
@@ -534,14 +553,19 @@ struct ConversationListView: View {
     case .chats:
       return directSections(conversations, lastActivity: lastActivity, chip: homeChip)
     case .channels:
+      // Where something happened last, across every space, on top (#1906).
+      let recent = recentActivitySection(conversations, lastActivity: lastActivity, isShowingAll: true)
+      let head = recent.conversations.isEmpty ? [] : [recent]
       // Without spaces (yet), the tab lists what there is.
       if let space = maybeSelectedSpace {
-        return spaceHomeSections(
-          conversations, spaceId: space.id, lastActivity: lastActivity, listsArchived: !canBrowseChannels,
-          favoritesSort: favoritesSort)
+        return head
+          + spaceHomeSections(
+            conversations, spaceId: space.id, lastActivity: lastActivity, listsArchived: !canBrowseChannels,
+            favoritesSort: favoritesSort)
       }
-      return homeSections(
-        conversations, lastActivity: lastActivity, listsArchived: !canBrowseChannels, favoritesSort: favoritesSort)
+      return head
+        + homeSections(
+          conversations, lastActivity: lastActivity, listsArchived: !canBrowseChannels, favoritesSort: favoritesSort)
     case .meetings:
       return []
     case .activity:
@@ -940,6 +964,7 @@ struct ConversationListView: View {
     case .everything: return String(localized: "list_conversations")
     case .chats: return String(localized: "nav_chats")
     case .unreadDirect: return String(localized: "section_unread_direct")
+    case .recentActivity: return String(localized: "section_recent_activity")
     case .activity: return String(localized: "nav_activity")
     }
   }
@@ -954,9 +979,18 @@ struct ConversationListView: View {
     case .everything: return "list_conversations"
     case .chats: return "nav_chats"
     case .unreadDirect: return "section_unread_direct"
+    case .recentActivity: return "section_recent_activity"
     case .activity: return "nav_activity"
     }
   }
+}
+
+/// A conversation row of a section; Recent activity's rows have their own identity (#1906).
+private struct SectionRow: Identifiable {
+  let isRecent: Bool
+  let conversation: ConversationItem
+
+  var id: String { isRecent ? "recent:\(conversation.id)" : conversation.id }
 }
 
 /// When the chat list reads the snapshot for its spaces (#1526): per account, and when the list's

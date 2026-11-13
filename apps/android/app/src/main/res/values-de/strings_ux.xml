@@ -292,6 +292,9 @@
   </plurals>
   <string name="quick_scheduled_attention">Braucht deine Aufmerksamkeit</string>
   <string name="section_unread_direct">Neue Nachrichten</string>
+  <string name="section_recent_activity">Letzte Aktivität</string>
+  <string name="recent_activity_all">Alle anzeigen (%1$d)</string>
+  <string name="recent_activity_fewer">Weniger anzeigen</string>
   <string name="section_collapse">%1$s einklappen</string>
   <string name="section_expand">%1$s ausklappen</string>
   <!-- Message density (#598, #1488). -->

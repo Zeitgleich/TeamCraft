@@ -55,6 +55,7 @@ pub mod polls;
 pub mod privacy;
 pub mod qr;
 pub mod receipts;
+pub mod recent_activity;
 pub mod recovery_kit;
 pub mod remote;
 pub mod scheduled;

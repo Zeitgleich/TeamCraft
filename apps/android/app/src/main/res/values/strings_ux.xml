@@ -298,6 +298,9 @@
   </plurals>
   <string name="quick_scheduled_attention">Needs your attention</string>
   <string name="section_unread_direct">New messages</string>
+  <string name="section_recent_activity">Recent activity</string>
+  <string name="recent_activity_all">Show all (%1$d)</string>
+  <string name="recent_activity_fewer">Show fewer</string>
   <string name="section_collapse">Collapse %1$s</string>
   <string name="section_expand">Expand %1$s</string>
   <!-- Message density (#598, #1488). -->

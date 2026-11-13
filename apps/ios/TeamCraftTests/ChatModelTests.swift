@@ -182,6 +182,34 @@ final class ChatModelTests: XCTestCase {
     XCTAssertTrue(directSections([item("5", "release", space: "Project A", favorite: true)]).isEmpty)
   }
 
+  /// Home's Recent activity (#1906): DMs, groups and channels by their newest message, muted ones
+  /// kept, archived and silent ones left out; the newest few unless all are asked for.
+  func testRecentActivityListsTheNewestMessageFirstAcrossKinds() {
+    let at = { (seconds: TimeInterval) in Date(timeIntervalSince1970: seconds) }
+    let archived = ConversationItem(
+      id: "9", maybeSpaceId: "A", maybeSpaceName: "A", kind: .public, name: "old", topic: "",
+      unreadCount: 0, mentionCount: 0, isFavorite: false, isMuted: false, canPost: false, isArchived: true)
+    var list = [
+      item("1", "Amy", kind: .direct),
+      item("2", "general", space: "Project A"),
+      item("3", "muted", kind: .group, muted: true),
+      item("4", "quiet", space: "Project B"),
+      archived,
+    ]
+    var activity = ["1": at(10), "2": at(30), "3": at(20), "9": at(40)]
+    let recent = recentActivitySection(list + [list[0]], lastActivity: activity, isShowingAll: false)
+    XCTAssertEqual(recent.title, .recentActivity)
+    XCTAssertEqual(recent.conversations.map(\.id), ["2", "3", "1"])
+    for index in 10..<20 {
+      list.append(item("\(index)", "c\(index)", space: "Project A"))
+      activity["\(index)"] = at(TimeInterval(index))
+    }
+    XCTAssertEqual(
+      recentActivitySection(list, lastActivity: activity, isShowingAll: false).conversations.count,
+      recentActivityHomeRowCount)
+    XCTAssertEqual(recentActivitySection(list, lastActivity: activity, isShowingAll: true).conversations.count, 13)
+  }
+
   /// The Favorites of Home by the chosen sort: newest message first (ties by name, silent ones
   /// last) or by name.
   func testFavoritesFollowTheChosenSort() {
