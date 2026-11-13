@@ -754,8 +754,12 @@ impl CallEngine {
     self.uplink = SendSideEstimator::new(self.config.bwe);
     self.uplink_rate_probe = UplinkProbe::new();
     self.uplink_layers = UplinkLayers::new(self.config.bwe.start_bps);
-    // The SFU of the new connection says anew what the others play.
-    if let Some(encoding) = self.voice_steps.set_long_frames(false) {
+    // Voice sent while the connection was gone says nothing about the new one's room.
+    self.uplink_voice.forget();
+    // The SFU of the new connection says anew what the others play, and the voice starts full
+    // on the new network.
+    let long_off = self.voice_steps.set_long_frames(false);
+    if let Some(encoding) = self.voice_steps.start_afresh().or(long_off) {
       self.event(CallEngineEvent::VoiceEncoding(encoding));
     }
     self.update_uplink_demand();
@@ -844,6 +848,10 @@ impl CallEngine {
       self.uplink.forget_probe();
       self.uplink_rate_probe = UplinkProbe::new();
       self.measure_uplink_afresh();
+      if let Some(encoding) = self.voice_steps.start_afresh() {
+        self.event(CallEngineEvent::VoiceEncoding(encoding));
+      }
+      self.update_uplink_demand();
       self.start_uplink_probe(now);
     }
   }
@@ -2192,8 +2200,12 @@ impl CallEngine {
       .uplink_layers
       .is_holding_back(&tracks)
       .then(|| probe_demand_bps(&tracks, is_sending_screen_audio, &self.uplink_policy));
-    // A voice below its full step probes for the next one, as held back layers do (#1893).
-    let maybe_wanted_bps = maybe_video_bps.max(self.voice_steps.wanted_bps());
+    // A voice below its full step probes for its next step only (#1893): the link is too thin
+    // for the voice it had, and padding for held-back video kept a 64 kbit/s uplink full.
+    let maybe_wanted_bps = match self.voice_steps.wanted_bps() {
+      Some(voice_bps) => Some(voice_bps),
+      None => maybe_video_bps,
+    };
     let datagrams = self.uplink_rate_probe.on_timer(
       &RateProbeConfig::default(),
       &mut self.uplink,
@@ -2381,10 +2393,14 @@ impl CallEngine {
     let tracks = own_track_views(&self.own_tracks, &self.adaptive_tracks);
     let maybe_video_demand =
       (!tracks.is_empty()).then(|| probe_demand_bps(&tracks, is_sending_screen_audio, &self.uplink_policy));
-    // A voice below its full step lets the estimate grow to what the next step needs (#1893).
-    self
-      .uplink
-      .set_demand_bps(maybe_video_demand.max(self.voice_steps.wanted_bps()));
+    // A voice below its full step lets the estimate grow to what its next step needs, and no
+    // further (#1893): the video's demand let the estimate of a 64 kbit/s uplink grow past the
+    // camera's lowest layer, and the camera went on sending next to the voice.
+    let maybe_demand = match self.voice_steps.wanted_bps() {
+      Some(voice_bps) => Some(voice_bps),
+      None => maybe_video_demand,
+    };
+    self.uplink.set_demand_bps(maybe_demand);
   }
 
   /// Installs the call's external sender and answers with a key package. Heard again, the SFU
@@ -5601,6 +5617,36 @@ mod tests {
         .handle_signal(event(8, CallEvent::TransportFeedback { feedback }), later)
         .unwrap();
       assert!(drain(&mut alice).contains(&EngineOutput::Event(CallEngineEvent::VideoHeldForVoice(false))));
+    }
+
+    /// #1893: a voice below its full step caps what the uplink estimate may grow to at its next
+    /// step, own camera or not: the camera's demand let a 64 kbit/s uplink's estimate grow past
+    /// its lowest layer, and the camera went on next to the voice.
+    #[test]
+    fn a_thin_voice_caps_the_uplink_demand() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      ask_for(&mut alice, &video_track(50, 1, 3));
+      alice
+        .handle_signal(
+          event(
+            6,
+            CallEvent::VideoPublished {
+              track: video_track(50, 1, 3),
+            },
+          ),
+          now,
+        )
+        .unwrap();
+      let camera_demand = alice.uplink.demand_bps().unwrap();
+      alice.voice_steps.on_estimate(40_000, false, now);
+      alice.update_uplink_demand();
+      let voice_demand = alice.uplink.demand_bps().unwrap();
+      assert_eq!(Some(voice_demand), alice.voice_steps.wanted_bps());
+      assert!(
+        voice_demand < camera_demand / 4,
+        "{voice_demand} vs {camera_demand}"
+      );
     }
 
     /// #1893: with every other participant playing long packets, a voice lost on the way while
