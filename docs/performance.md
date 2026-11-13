@@ -2631,6 +2631,50 @@ cargo test --release -p teamcraft-core --all-features --test suite -- --ignored 
   snapshot), and the full list pass still runs at the start, after the list shows and only when no
   other read waits. The engine's jobs no longer wait for the MLS state.
 
+### The chat list pass after a start or a reconnect (issue #1819)
+
+Android 1.0.32 reported the full pass holding the main read thread for 1.7 to 2.7 s, at start and
+after every reconnect and full sync: `entry_counts` 27–180 ms per conversation and `chat_previews`
+2.8 s with 67 ms of CPU, both waiting on page reads while the catch-up wrote, and `settings_mark`
+and `join_request_alerts` waiting seconds behind them. Now:
+
+- The pass runs in slices of about 40 ms (`chat_list_pass::ListPass`, `DEFAULT_SLICE_MS`; a
+  slice ends after the entry that crossed it), and so do the previews: each slice is a read job of its own, which queues the next behind whatever
+  waits by then (`reads.rs`, `Slice`). A read queued during a pass waits one slice (test
+  `a_read_queued_during_a_sliced_read_waits_one_slice`). Each slice is one look at the store.
+- A slice reads what every entry shares once: the spaces, the import account, and the few
+  conversations with a catch-up mark or lines read, as a scan of the store's key directory. Asked
+  per conversation, each was a lookup, and most found nothing after a few page reads.
+- The apps' list leaves out what it never shows: a channel's member list and the bookmarks (a
+  direct message keeps its members, which name it). The spaces come from their records, not
+  `spaces()`, which also gathered each space's direct messages.
+- People are read one by one as an entry needs them (the user, the people of direct messages),
+  not the whole users table per pass.
+- The apps read the chat list only while they show (Android: the process lifecycle; iOS: the scene
+  phase). In the background nobody sees it, and the sync's reads queued behind it; back in front
+  the list reads once.
+
+Measured with `measure_signed_in_start` (83 channels of 20 messages, 300 µs per page read, release
+build, local machine) and `slow_disk::chat_list` (what one more conversation costs a cold pass):
+
+| Chat list pass                                  | Before            | After                    |
+|-------------------------------------------------|-------------------|--------------------------|
+| Cold pass, 83 channels: page reads              | 1,539             | 1,153–1,190              |
+| Cold pass, 83 channels: time                    | 567 ms            | 421–436 ms               |
+| Page reads per conversation more (6 vs 38)      | 17–19             | 11–14                    |
+| The longest a read waits behind the pass        | the whole pass    | 114–120 ms (beginning)   |
+| A slice, the longest                            | –                 | 42–44 ms (8 slices)      |
+
+- What a cold entry still reads: its record in the conversation list (about 4 pages, read with all
+  others when the pass begins) and what checks its kept tally (feed version, the feed's length, the
+  rank of the tally's last row: about 9 pages). A summary record per conversation, written with
+  every change, would save little of that: the tally's check reads the feed, which a catch-up
+  changes with every message.
+- The beginning of a pass is a job of its own and not sliced: the conversation list in one read,
+  every record (114–120 ms for 83 conversations at 300 µs per page). Reading the list's keys first
+  and the records a slice at a time would need a keys-only read of the store. Not measured on a
+  phone yet.
+
 ### Files view on a large workspace (issue #1509)
 
 `crates/teamcraft-ffi/tests/files_budget.rs` measures the Files view through the API the apps call:

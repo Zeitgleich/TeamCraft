@@ -58,6 +58,7 @@ struct ConversationListView: View {
   /// The user's own presence, as Settings set it: on the avatar in the header (#1786).
   @AppStorage("presence") private var presenceRaw = PresenceChoice.online.rawValue
   @Environment(\.horizontalSizeClass) private var sizeClass
+  @Environment(\.scenePhase) private var scenePhase
   /// A mute from the long-press menu the server didn't take (#903).
   @State private var isMuteFailed = false
   @State private var maybeFilters: ConversationFiltersTarget?
@@ -162,7 +163,11 @@ struct ConversationListView: View {
     .task(id: isSwitchingSpace) {
       if canBrowseChannels { canCreateSpaces = await model.canCreateSpaces() }
     }
-    .task(id: model.changeCount) {
+    // Only while the app shows (issue #1819): in the background, a catch-up's changes each read the
+    // whole chat list for nobody, and the reads the sync waits for queued behind them. Back in
+    // front, the list reads once.
+    .task(id: ListRefresh(changeCount: model.changeCount, isInBackground: scenePhase == .background)) {
+      guard scenePhase != .background else { return }
       #if DEBUG
         if ChatListDemo.isOn {
           if !hasLoaded {
@@ -1340,4 +1345,10 @@ private struct QuickAccessCardLabel: View {
     .contentShape(.rect(cornerRadius: 16))
     .accessibilityElement(children: .combine)
   }
+}
+
+/// What reads the chat list again: a change in the store, or the app leaving the background.
+private struct ListRefresh: Equatable {
+  let changeCount: Int
+  let isInBackground: Bool
 }

@@ -81,6 +81,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ProcessLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.painterResource
@@ -268,13 +271,18 @@ fun ChatListScreen(
   }
   var maybeFirstSync by remember { mutableStateOf<FirstSyncItem?>(null) }
   LaunchedEffect(Unit) {
-    // Every read finishes before the next starts: while syncing, changes come faster than a full
-    // pass over all conversations, and restarting on each would never show the previews.
-    viewModel.changeCount.collect {
-      viewModel.refreshChatList(accountUserId)
-      maybeFirstSync = viewModel.firstSync()
-      joinRequests = viewModel.joinRequests.list()
-      expiringGuests = viewModel.readChat { query(ChatQueries.expiringGuests()).guests } ?: emptyList()
+    // Only while the app shows (issue #1819): in the background, a catch-up's changes each read the
+    // whole chat list for nobody, and the reads the sync waits for queued behind them. Back in
+    // front, the counter's current value reads the list once.
+    ProcessLifecycleOwner.get().lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+      // Every read finishes before the next starts: while syncing, changes come faster than a full
+      // pass over all conversations, and restarting on each would never show the previews.
+      viewModel.changeCount.collect {
+        viewModel.refreshChatList(accountUserId)
+        maybeFirstSync = viewModel.firstSync()
+        joinRequests = viewModel.joinRequests.list()
+        expiringGuests = viewModel.readChat { query(ChatQueries.expiringGuests()).guests } ?: emptyList()
+      }
     }
   }
   val loaded = conversations

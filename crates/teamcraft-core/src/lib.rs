@@ -8,6 +8,8 @@ pub mod api;
 pub mod attestation;
 pub mod canvas;
 pub mod channel_roles;
+#[cfg(feature = "ui")]
+pub mod chat_list_pass;
 pub mod client;
 pub mod clock;
 pub mod connection;
