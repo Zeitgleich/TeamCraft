@@ -248,6 +248,7 @@ impl PendingEnrollment {
       member_join_attempts: HashMap::new(),
       device_add_requests_handled: HashMap::new(),
       current_key_requests_handled: HashMap::new(),
+      user_addition_wakes: HashMap::new(),
       are_welcomes_synced: false,
       maybe_waiting_checked_at_ms: None,
       catch_up_focus: super::CatchUpFocus::default(),

@@ -630,7 +630,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .insert((conversation, device), now);
   }
 
-  fn rejoin_retry_ms(&self) -> i64 {
+  pub(super) fn rejoin_retry_ms(&self) -> i64 {
     i64::try_from(self.settings.rejoin_retry.as_millis()).unwrap_or(i64::MAX)
   }
 

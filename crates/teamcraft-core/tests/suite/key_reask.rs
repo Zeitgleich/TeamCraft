@@ -19,8 +19,8 @@ use teamcraft_core::store::{LocalStore, Table};
 use teamcraft_core::upkeep::Upkeep;
 use teamcraft_core::{ClientSettings, GroupAccess};
 use teamcraft_proto::{
-  AddConversationMemberRequest, Base64Bytes, ConversationId, Id, ListMlsMessagesQuery, MlsMessageKind,
-  PostMlsMessageRequest,
+  AddConversationMemberRequest, Base64Bytes, ConversationId, DeviceId, Id, ListMlsMessagesQuery,
+  MlsMessageKind, PostMlsMessageRequest, Snowflake,
 };
 
 const NOW_MS: i64 = 1_800_000_000_000;
@@ -93,6 +93,64 @@ mod outside_the_group {
     assert_eq!(alice.client.mls_epoch(dm).unwrap(), before.map(|epoch| epoch + 1));
     bob.client.full_sync().await.unwrap();
     assert!(bob.client.has_group(dm).unwrap());
+  }
+
+  /// A server that floods the queue with requests for Bob, each in the name of a device it made
+  /// up, wakes Alice's addition of him at most once per `rejoin_retry`, and never resets its
+  /// backoff.
+  #[tokio::test]
+  async fn forged_requests_wake_a_waiting_addition_once_per_window_and_keep_its_backoff() {
+    let (server, clock, mut alice, bob, dm) = dm_with_a_lost_device_add().await;
+    let key = format!("add_user/{dm}/{}", bob.client.user_id());
+    let mut record: serde_json::Value =
+      serde_json::from_slice(&alice.store.get(Table::PendingChanges, &key).unwrap().unwrap()).unwrap();
+    record["attempts"] = 3.into();
+    alice
+      .store
+      .put(Table::PendingChanges, &key, &serde_json::to_vec(&record).unwrap())
+      .unwrap();
+    let flood = |first: i64| {
+      for offset in 0..5 {
+        let forged = DeviceId::from_snowflake(Snowflake::new(first + offset).unwrap());
+        server.inject_proposal(dm, forged, device_add_payload(&bob));
+      }
+    };
+    let pending = |alice: &Peer| -> serde_json::Value {
+      serde_json::from_slice(&alice.store.get(Table::PendingChanges, &key).unwrap().unwrap()).unwrap()
+    };
+
+    flood(900_000_000_000_000_001);
+    alice.client.sync_mls(dm).await.unwrap();
+    let woken = pending(&alice);
+    assert_eq!(woken["attempts"], 3, "the backoff stays");
+    assert_eq!(woken["maybe_not_before_ms"], NOW_MS, "due now");
+
+    // Back to waiting (as a failed try would leave it); more forged requests in the same window
+    // don't wake it again.
+    let mut waiting = woken.clone();
+    waiting["maybe_not_before_ms"] = (NOW_MS + 3_600_000).into();
+    alice
+      .store
+      .put(
+        Table::PendingChanges,
+        &key,
+        &serde_json::to_vec(&waiting).unwrap(),
+      )
+      .unwrap();
+    flood(900_000_000_000_000_101);
+    alice.client.sync_mls(dm).await.unwrap();
+    assert_eq!(pending(&alice)["maybe_not_before_ms"], NOW_MS + 3_600_000);
+
+    // The next window wakes it once more.
+    clock.advance(ms(common::settings().rejoin_retry));
+    flood(900_000_000_000_000_201);
+    alice.client.sync_mls(dm).await.unwrap();
+    let woken = pending(&alice);
+    assert_eq!(
+      woken["maybe_not_before_ms"],
+      NOW_MS + ms(common::settings().rejoin_retry)
+    );
+    assert_eq!(woken["attempts"], 3);
   }
 
   /// The server lists Mallory in a channel and posts a request in her device's name: no member

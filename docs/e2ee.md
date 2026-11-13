@@ -1857,7 +1857,9 @@ the server but can't write asks again, in two states:
   group. Members handle it as before when the user has a device in the group (a further device).
   When the user has none, a member's device acts only if it holds that user's **pending addition**
   for this conversation (§4.3, "Nobody to add yet"): the addition it decided on and signs when it
-  commits. The request makes it due now, as `device_add` would; it is then committed with the
+  commits. The request makes it due now, keeping its attempts (so a request never resets the
+  backoff of a user whose devices have no key package), at most once per `rejoin_retry` per
+  conversation and user, whatever device the request names; it is then committed with the
   usual checks (the server still lists the user, the device passes the pinned identity and the
   signed device list). A member without a pending addition does nothing: a request never makes
   anybody decide to add a user.
@@ -1876,7 +1878,8 @@ schedule; a post refused for an epoch conflict waits for the next turn too.
 Idempotency: a request only ever makes due what a member already has queued or would queue for a
 join, and each kind is deduplicated where it lands. A member handles one device's `TCKR` once per
 `key_reask_retry` and its `TCDA` once per `rejoin_retry` in each conversation (repeats and replays
-cost it no requests, #187); the hand-over is one queued entry per (conversation, device) and is
+cost it no requests, #187), and wakes a user's pending addition once per `rejoin_retry` whatever
+device the requests name, since the server can invent device IDs; the hand-over is one queued entry per (conversation, device) and is
 dropped once any current key arrives or the group switches keys; the pending addition is one entry
 per (conversation, user), gone once the user is in the group, and committed with a fresh signed
 change whose freshness rules (above) stop a second commit for the same user. So a member coming
@@ -1900,8 +1903,9 @@ What a hostile server can do with it, and what it can't:
   device in the group is the existing device-add request: the device is added only if its user's
   signed device list names it (§4.6, "A further device joins on its own"). A forged `TCDA` for a
   user without a device in the group only makes a member commit, sooner, an addition that member
-  already decided on, for a device that passes the same checks; a member without such a decision
-  ignores it.
+  already decided on, for a device that passes the same checks, at most once per `rejoin_retry`
+  per user and without resetting its backoff, so a flood of made-up device IDs costs the member
+  one try per window; a member without such a decision ignores it.
 - It can't get a device added that no member approved: a request adds nothing on its own, the
   server's member list is never taken as a member's decision, and every addition still carries
   either the user's own signed device list (a further device) or a member's signed change (a new

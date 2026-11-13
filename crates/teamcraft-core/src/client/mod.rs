@@ -524,6 +524,9 @@ pub struct Client<A, S> {
   /// When this device last handled a group device's request for the current key, per conversation
   /// and device: repeats within `key_reask_retry` cost no requests (issue #1878).
   current_key_requests_handled: HashMap<(ConversationId, teamcraft_proto::DeviceId), i64>,
+  /// When a device-add request last woke this device's pending addition of a user, per
+  /// conversation and user: at most once per `rejoin_retry`, whatever device a request names.
+  user_addition_wakes: HashMap<(ConversationId, UserId), i64>,
   /// Whether all welcomes were read since the last reset: only then may spent key packages go, so a
   /// welcome that waited for one is opened first (e2ee.md §4.3.1). Reset when a gateway connection
   /// starts (fresh or resumed), when a full sync starts and when a welcome sync starts; set when a
@@ -786,6 +789,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       member_join_attempts: HashMap::new(),
       device_add_requests_handled: HashMap::new(),
       current_key_requests_handled: HashMap::new(),
+      user_addition_wakes: HashMap::new(),
       are_welcomes_synced: false,
       maybe_waiting_checked_at_ms: None,
       catch_up_focus: CatchUpFocus::default(),

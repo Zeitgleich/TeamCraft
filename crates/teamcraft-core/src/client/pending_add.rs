@@ -151,19 +151,30 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// A device of `user` asked to be let into the conversation (e2ee.md §4.6, "Asking again for a
-  /// lost hand-over"): this device's pending addition of them there, if it holds one, is due now,
-  /// as `device_add` would make it. Returns whether there was one. Nothing else is woken, and
+  /// lost hand-over"): this device's pending addition of them there, if it holds one, is due now.
+  /// Its attempts stay, so a request never resets the backoff of a user without key packages.
+  /// At most once per `rejoin_retry` per conversation and user, whichever device the request names
+  /// (a server can invent device IDs). Returns whether it woke one. Nothing else is woken, and
   /// without one nobody is added.
   pub(crate) fn wake_user_addition_in(
     &mut self,
     conversation: ConversationId,
     user: UserId,
   ) -> Result<bool, CoreError> {
+    let (now, window_ms) = (self.now_ms(), self.rejoin_retry_ms());
+    let is_repeated = self
+      .user_addition_wakes
+      .get(&(conversation, user))
+      .is_some_and(|woken_at| super::member_device::is_within(*woken_at, now, window_ms));
+    if is_repeated {
+      return Ok(false);
+    }
     let Some(PendingChange::AddUser {
       conversation_id,
       user_id,
       history,
       wait,
+      attempts,
       maybe_waiting_since_ms,
       ..
     }) = self.stored_pending(&PendingChange::user_add_key(conversation, user))?
@@ -175,10 +186,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       user_id,
       history,
       wait,
-      maybe_not_before_ms: Some(self.now_ms()),
-      attempts: 0,
+      maybe_not_before_ms: Some(now),
+      attempts,
       maybe_waiting_since_ms,
     })?;
+    self
+      .user_addition_wakes
+      .retain(|_, woken_at| super::member_device::is_within(*woken_at, now, window_ms));
+    self.user_addition_wakes.insert((conversation, user), now);
     Ok(true)
   }
 
