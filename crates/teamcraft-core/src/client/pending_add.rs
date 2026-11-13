@@ -150,6 +150,38 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
+  /// A device of `user` asked to be let into the conversation (e2ee.md §4.6, "Asking again for a
+  /// lost hand-over"): this device's pending addition of them there, if it holds one, is due now,
+  /// as `device_add` would make it. Returns whether there was one. Nothing else is woken, and
+  /// without one nobody is added.
+  pub(crate) fn wake_user_addition_in(
+    &mut self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> Result<bool, CoreError> {
+    let Some(PendingChange::AddUser {
+      conversation_id,
+      user_id,
+      history,
+      wait,
+      maybe_waiting_since_ms,
+      ..
+    }) = self.stored_pending(&PendingChange::user_add_key(conversation, user))?
+    else {
+      return Ok(false);
+    };
+    self.queue_pending(PendingChange::AddUser {
+      conversation_id,
+      user_id,
+      history,
+      wait,
+      maybe_not_before_ms: Some(self.now_ms()),
+      attempts: 0,
+      maybe_waiting_since_ms,
+    })?;
+    Ok(true)
+  }
+
   /// Tries a due [`PendingChange::AddUser`]. Done once the user is in the group (or no longer a
   /// member at all, or a DM's setup took over); back to waiting while they have no device or none
   /// passes the checks; retried later while their devices have no key package.

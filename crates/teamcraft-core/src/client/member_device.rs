@@ -315,6 +315,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     added: GroupMember,
   ) -> Result<(), CoreError> {
     let device = convert::device_from_crypto(added.device_id)?;
+    self.queue_current_key_share_to(conversation, device)
+  }
+
+  /// Queues handing the current key to `device` of the group, ranked like an addition.
+  pub(crate) fn queue_current_key_share_to(
+    &mut self,
+    conversation: ConversationId,
+    device: DeviceId,
+  ) -> Result<(), CoreError> {
     if device == self.account.device_id {
       return Ok(());
     }
@@ -564,6 +573,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       tracing::debug!(conversation_id = %conversation, device_id = %sender_device, "skipped a repeated device add request");
       return Ok(());
     }
+    if !self.has_group(conversation)? {
+      return Ok(());
+    }
+    if !self.group_users(conversation)?.contains(&user) {
+      // The user has no device in the group: no further device, so only an addition this device
+      // decided on itself may go ahead, and the request makes it due now; committing it checks the
+      // user's devices as always. Nobody else is added on a request (e2ee.md §4.6, "Asking again
+      // for a lost hand-over").
+      if self.wake_user_addition_in(conversation, user)? {
+        self.note_device_add_request_handled(conversation, sender_device);
+        tracing::info!(conversation_id = %conversation, "a waiting user's device asked; their addition is due now");
+      }
+      return Ok(());
+    }
     let directory = self.trusted_directory([user]).await?;
     let is_listed = self.stored_device_lists(&directory, &[user]).iter().any(|list| {
       list
@@ -761,6 +784,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     {
       return Ok(());
     }
+    self.post_device_add_request(conversation).await.map(|_| ())
+  }
+
+  /// Posts the request to be added into the group's queue and notes it; `Ok(false)` when the group
+  /// moved on meanwhile (the next turn asks again).
+  pub(super) async fn post_device_add_request(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<bool, CoreError> {
+    let now = self.now_ms();
     // A member needs a key package of this device to add it.
     if let Err(error) = self.top_up_key_packages().await {
       tracing::debug!(%error, "key packages not topped up before asking to be added");
@@ -785,7 +818,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     match self.api.post_mls_message(conversation, &request).await {
       Ok(_) => {},
       // The group moved on meanwhile; the next sync asks again.
-      Err(error) if error.is_epoch_conflict() => return Ok(()),
+      Err(error) if error.is_epoch_conflict() => return Ok(false),
       Err(error) => return Err(error.into()),
     }
     tracing::info!(conversation_id = %conversation, "asked the members to add this device");
@@ -794,7 +827,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Table::AppliedChanges,
       &device_add_key(conversation),
       &DeviceAddRecord { requested_at_ms: now },
-    )
+    )?;
+    Ok(true)
   }
 
   /// Whether the conversation is a DM or group DM, by what this device has cached.
@@ -930,7 +964,7 @@ pub(crate) fn current_key_wait_key(conversation: ConversationId) -> String {
 
 /// Whether `at_ms` lies less than `window_ms` before `now_ms`. A time ahead of now (the clock was
 /// set back) counts as long ago.
-fn is_within(at_ms: i64, now_ms: i64, window_ms: i64) -> bool {
+pub(super) fn is_within(at_ms: i64, now_ms: i64, window_ms: i64) -> bool {
   (0..window_ms).contains(&now_ms.saturating_sub(at_ms))
 }
 
