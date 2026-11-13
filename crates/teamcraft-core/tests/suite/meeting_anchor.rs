@@ -395,6 +395,198 @@ mod handovers {
     assert!(!erin.client.group_users(chat).unwrap().contains(&dave));
   }
 
+  /// #1864: after a handover from Alice to Bob to Carol, the server names Bob again and withholds
+  /// his handover to Carol, and Bob signs a list of his own above Carol's (a fork from Alice's
+  /// handover to him): a member who saw the handover to Carol refuses the fork, so Bob's
+  /// statement counts for nothing, though its sequence is the newest.
+  #[tokio::test]
+  async fn a_former_organizers_fork_of_the_host_lists_doesnt_count() {
+    let server = anchoring_server_signing_invitees();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut bob = Peer::enroll(&server, "Bob").await;
+    let mut carol = Peer::enroll(&server, "Carol").await;
+    let mut erin = Peer::enroll(&server, "Erin").await;
+    let dave_api = server.add_user("Dave");
+    let dave = dave_api.user_id();
+    let (bob_id, carol_id, erin_id) = (
+      bob.client.user_id(),
+      carol.client.user_id(),
+      erin.client.user_id(),
+    );
+    let chat = server.create_meeting_chat(alice.client.user_id(), &[bob_id, carol_id, erin_id, dave]);
+    let meeting = server.meeting_of_chat(chat).unwrap();
+    alice
+      .client
+      .set_up_meeting_chat_from(
+        chat,
+        Some(meeting),
+        &InviteeList::Chosen {
+          added: vec![bob_id, carol_id, erin_id],
+          kept: Vec::new(),
+        },
+      )
+      .await
+      .unwrap();
+    assert!(
+      alice
+        .client
+        .sync_meeting_admitters(meeting, chat, ACCESS_ENDS_MS)
+        .await
+        .unwrap()
+    );
+    for peer in [&mut bob, &mut carol, &mut erin] {
+      peer.client.full_sync().await.unwrap();
+      peer.client.check_meeting_admission(chat).await.unwrap();
+    }
+    hand_over(&mut alice, meeting, chat, bob_id).await;
+    bob.client.full_sync().await.unwrap();
+    hand_over(&mut bob, meeting, chat, carol_id).await;
+    erin.client.full_sync().await.unwrap();
+    erin.client.check_meeting_admission(chat).await.unwrap();
+
+    // The fork: the first handover only, Bob named again, and Bob's own list above Carol's.
+    let lists = server.meeting_hosts(chat);
+    server.set_meeting_hosts(chat, lists.into_iter().take(1).collect());
+    server.set_organizer_of_chat(chat, bob_id);
+    bob
+      .client
+      .change_meeting_hosts(&HostsChange {
+        meeting,
+        conversation: chat,
+        co_hosts: Vec::new(),
+        maybe_new_organizer: None,
+      })
+      .await
+      .unwrap();
+    assert_eq!(
+      server.meeting_hosts(chat).len(),
+      2,
+      "Alice's handover and Bob's list"
+    );
+    bob.client.check_meeting_admission(chat).await.unwrap();
+    bob
+      .client
+      .update_meeting_chat_members(chat, &[carol_id, erin_id, dave], &[])
+      .await
+      .unwrap();
+    let _ = bob
+      .client
+      .sync_meeting_admitters(meeting, chat, ACCESS_ENDS_MS)
+      .await;
+    let mut dave_peer = Peer::enroll_as(dave_api, "Dave").await;
+    erin.client.full_sync().await.unwrap();
+    assert!(
+      !erin.client.group_users(chat).unwrap().contains(&dave),
+      "not in the group before the Join"
+    );
+
+    erin
+      .client
+      .set_up_meeting_chat_from(chat, Some(meeting), &InviteeList::Listed(vec![dave]))
+      .await
+      .unwrap();
+
+    dave_peer.client.full_sync().await.unwrap();
+    assert!(!erin.client.group_users(chat).unwrap().contains(&dave));
+  }
+
+  /// Honest handovers across devices (#1864): Alice hands the meeting to Bob, Bob names Carol
+  /// co-host and hands it on to her, each step read by Erin's device in between; the server keeps
+  /// only the handovers and the newest list. Erin follows every step, and a member added after the
+  /// last joins the group Alice founded.
+  #[tokio::test]
+  async fn honest_handovers_keep_verifying_where_a_handover_was_kept() {
+    let server = anchoring_server_signing_invitees();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut bob = Peer::enroll(&server, "Bob").await;
+    let mut carol = Peer::enroll(&server, "Carol").await;
+    let mut erin = Peer::enroll(&server, "Erin").await;
+    let dave_api = server.add_user("Dave");
+    let dave = dave_api.user_id();
+    let (bob_id, carol_id, erin_id) = (
+      bob.client.user_id(),
+      carol.client.user_id(),
+      erin.client.user_id(),
+    );
+    let chat = server.create_meeting_chat(alice.client.user_id(), &[bob_id, carol_id, erin_id, dave]);
+    let meeting = server.meeting_of_chat(chat).unwrap();
+    alice
+      .client
+      .set_up_meeting_chat_from(
+        chat,
+        Some(meeting),
+        &InviteeList::Chosen {
+          added: vec![bob_id, carol_id, erin_id],
+          kept: Vec::new(),
+        },
+      )
+      .await
+      .unwrap();
+    assert!(
+      alice
+        .client
+        .sync_meeting_admitters(meeting, chat, ACCESS_ENDS_MS)
+        .await
+        .unwrap()
+    );
+    for peer in [&mut bob, &mut carol, &mut erin] {
+      peer.client.full_sync().await.unwrap();
+      peer.client.check_meeting_admission(chat).await.unwrap();
+    }
+    hand_over(&mut alice, meeting, chat, bob_id).await;
+    bob.client.full_sync().await.unwrap();
+    erin.client.full_sync().await.unwrap();
+    erin.client.check_meeting_admission(chat).await.unwrap();
+    // Bob signs his own lists: the hosts again, then Carol as co-host; then he hands over.
+    assert!(bob.client.sync_meeting_hosts(meeting, chat).await.unwrap());
+    bob
+      .client
+      .change_meeting_hosts(&HostsChange {
+        meeting,
+        conversation: chat,
+        co_hosts: vec![carol_id],
+        maybe_new_organizer: None,
+      })
+      .await
+      .unwrap();
+    erin.client.full_sync().await.unwrap();
+    erin.client.check_meeting_admission(chat).await.unwrap();
+    hand_over(&mut bob, meeting, chat, carol_id).await;
+    carol.client.full_sync().await.unwrap();
+    assert!(carol.client.sync_meeting_hosts(meeting, chat).await.unwrap());
+    assert_eq!(
+      server.meeting_hosts(chat).len(),
+      3,
+      "the two handovers and Carol's list"
+    );
+    erin.client.full_sync().await.unwrap();
+    erin.client.check_meeting_admission(chat).await.unwrap();
+
+    // Carol invites Dave; Erin's device, which kept Bob's handover, follows the chain to her.
+    carol
+      .client
+      .update_meeting_chat_members(chat, &[bob_id, erin_id, dave], &[])
+      .await
+      .unwrap();
+    assert!(
+      carol
+        .client
+        .sync_meeting_admitters(meeting, chat, ACCESS_ENDS_MS)
+        .await
+        .unwrap()
+    );
+    let mut dave_peer = Peer::enroll_as(dave_api, "Dave").await;
+    erin
+      .client
+      .set_up_meeting_chat_from(chat, Some(meeting), &InviteeList::Listed(vec![dave]))
+      .await
+      .unwrap();
+    settle(&mut [&mut erin, &mut dave_peer]).await;
+    dave_peer.client.full_sync().await.unwrap();
+
+    assert!(erin.client.group_users(chat).unwrap().contains(&dave));
+  }
+
   /// Before Bob's device is in the group, the server names Mallory and serves a host list she
   /// signed from her own key; Bob's device verifies it from her key. Once Bob pinned Alice's
   /// anchor, that list counts for nothing: Mallory, named again, doesn't become the organizer.

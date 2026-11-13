@@ -996,6 +996,7 @@ mod hosts {
           user_id: signed_user(co_host.client.user_id()),
           identity_key,
         }],
+        maybe_previous: None,
       }
     }
   }
