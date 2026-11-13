@@ -65,6 +65,11 @@ pub struct BufferCounts {
   /// The browser: frames its capture dropped before they reached the page (0 on the desktop and
   /// where the browser doesn't tell).
   pub discarded: u64,
+  /// The browser presents the capture's frames at its rate also while the source is still
+  /// (Firefox, measured in #1835), and the page sees them now (it is visible): a capture that
+  /// presents none while the page keeps taking pictures has stopped. Chrome presents frames only
+  /// when the source changes, so there no frames is no sign of anything.
+  pub repeats_frames: bool,
 }
 
 /// One reading of a capture: its counts, and the frames its encoders produced so far (the
@@ -159,13 +164,16 @@ impl BufferCounts {
   }
 
   /// Whether these counts (over a window) are a stalled capture: unusable buffers keep coming and
-  /// outnumber the pictures, or the browser's capture delivered frames to nobody and dropped them
-  /// all. A still source hands over nothing, or only cursor moves, and is never stalled.
+  /// outnumber the pictures, the browser's capture delivered frames to nobody and dropped them
+  /// all, or a browser that repeats frames presented none while the page kept taking pictures
+  /// (#1835). A still source hands over nothing, or only cursor moves, and is otherwise never
+  /// stalled.
   pub fn is_stalled(&self) -> bool {
     let unusable = self.unusable();
     let is_unusable = unusable >= MIN_UNUSABLE && unusable > self.pictures.max(self.taken);
     let is_all_dropped = self.discarded >= MIN_UNUSABLE && self.pictures == 0;
-    is_unusable || is_all_dropped
+    let is_frozen = self.repeats_frames && self.taken >= MIN_UNUSABLE && self.pictures == 0;
+    is_unusable || is_all_dropped || is_frozen
   }
 
   /// What came since `earlier` (counters only grow; a restarted capture counts from zero).
@@ -179,6 +187,8 @@ impl BufferCounts {
       taken: self.taken.saturating_sub(earlier.taken),
       not_ready: self.not_ready.saturating_sub(earlier.not_ready),
       discarded: self.discarded.saturating_sub(earlier.discarded),
+      // How the browser behaves now.
+      repeats_frames: self.repeats_frames,
     }
   }
 }
@@ -312,6 +322,40 @@ mod tests {
       browser.tick(taken, delivered, 0)
     });
     assert_eq!(changes(ticks), Vec::new());
+  }
+
+  /// #1835, Firefox (measured in a Windows VM): its capture presents frames at its rate also
+  /// from a still screen (23 to 30 a second) and while the sharing page is busy. A still screen
+  /// is no stall; a capture that presents none for the window while the page keeps taking
+  /// pictures is, and recovers with the first frames again. Without frame repeats (Chrome) the
+  /// same counts are a still source.
+  #[test]
+  fn a_firefox_capture_that_stops_presenting_frames_is_a_stall() {
+    let firefox = |repeats_frames: bool| {
+      let mut browser = Browser::default();
+      browser.counts.repeats_frames = repeats_frames;
+      let still = (0..100u32).map(|_| (2, 3));
+      let stopped = (100..200u32).map(|_| (2, 0));
+      let again = (200..300u32).map(|_| (2, 3));
+      changes(
+        still
+          .chain(stopped)
+          .chain(again)
+          .map(|(taken, presented)| browser.tick(taken, presented, 0))
+          .collect::<Vec<_>>()
+          .into_iter(),
+      )
+    };
+    let found = firefox(true);
+    assert!(
+      matches!(
+        found.as_slice(),
+        [(_, StallChange::Stalled(_)), (200, StallChange::Recovered)]
+      ),
+      "{found:?}"
+    );
+    assert!(found[0].0 > 100 && found[0].0 <= 160, "{found:?}");
+    assert_eq!(firefox(false), Vec::new(), "Chrome: a still source");
   }
 
   /// The browser: a moving screen at 60 Hz shared at 15 frames a second. The browser may count

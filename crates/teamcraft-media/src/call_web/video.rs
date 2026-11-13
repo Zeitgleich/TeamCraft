@@ -158,6 +158,9 @@ pub(super) struct TrackSender {
   top_encode_timer: EncodeTimer,
   /// What the takes from the capture came to (#1805): taken, failed or with nothing to take.
   takes: BufferCounts,
+  /// The frames the hidden `<video>` presented, where the browser repeats frames at its rate and
+  /// tells nothing else (Firefox, #1835).
+  maybe_presented: Option<PresentedFrames>,
   /// Frames the top layer encoded (#1805).
   frames_encoded: u64,
   /// Whether the capture still gives pictures (#1805), judged on the call's timer.
@@ -310,6 +313,107 @@ struct Encoding {
   maybe_content_hint: Option<&'static str>,
 }
 
+/// Counts the frames a `<video>` presents (`requestVideoFrameCallback`'s `presentedFrames`), for a
+/// browser without `MediaStreamTrack.stats` whose capture repeats frames at its rate (Firefox,
+/// #1835). The callback is cancelled on drop, so it never runs on a dropped closure.
+struct PresentedFrames {
+  video: HtmlVideoElement,
+  count: std::rc::Rc<std::cell::Cell<u64>>,
+  /// The callback asked for last, to cancel.
+  handle: std::rc::Rc<std::cell::Cell<f64>>,
+  callback: FrameCallbackSlot,
+}
+
+/// The `requestVideoFrameCallback` closure, which asks for itself again.
+type FrameCallbackSlot = std::rc::Rc<std::cell::RefCell<Option<Closure<dyn FnMut(f64, JsValue)>>>>;
+
+impl PresentedFrames {
+  /// Starts counting; `None` where the browser has no `requestVideoFrameCallback`.
+  fn start(video: &HtmlVideoElement) -> Option<Self> {
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+
+    let request: js_sys::Function =
+      js_sys::Reflect::get(video, &JsValue::from_str("requestVideoFrameCallback"))
+        .ok()?
+        .dyn_into()
+        .ok()?;
+    let count = Rc::new(Cell::new(0));
+    let handle = Rc::new(Cell::new(0.0));
+    let callback: FrameCallbackSlot = Rc::new(RefCell::new(None));
+    let (counted, asked, next, target, again) = (
+      Rc::clone(&count),
+      Rc::clone(&handle),
+      Rc::clone(&callback),
+      video.clone(),
+      request.clone(),
+    );
+    *callback.borrow_mut() = Some(Closure::new(move |_now: f64, metadata: JsValue| {
+      if let Some(presented) = js_sys::Reflect::get(&metadata, &JsValue::from_str("presentedFrames"))
+        .ok()
+        .and_then(|value| value.as_f64())
+      {
+        // A frame count, far below 2^53.
+        counted.set(presented as u64);
+      }
+      if let Some(callback) = next.borrow().as_ref()
+        && let Some(id) = again
+          .call1(&target, callback.as_ref().unchecked_ref())
+          .ok()
+          .and_then(|id| id.as_f64())
+      {
+        asked.set(id);
+      }
+    }));
+    let id = request
+      .call1(video, callback.borrow().as_ref()?.as_ref().unchecked_ref())
+      .ok()?
+      .as_f64()?;
+    handle.set(id);
+    Some(Self {
+      video: video.clone(),
+      count,
+      handle,
+      callback,
+    })
+  }
+
+  fn count(&self) -> u64 {
+    self.count.get()
+  }
+}
+
+impl Drop for PresentedFrames {
+  fn drop(&mut self) {
+    if let Ok(cancel) = js_sys::Reflect::get(&self.video, &JsValue::from_str("cancelVideoFrameCallback"))
+      .and_then(|cancel| cancel.dyn_into::<js_sys::Function>())
+    {
+      // Nothing to do when it fails: the callback had run and not asked again.
+      let _ = cancel.call1(&self.video, &JsValue::from_f64(self.handle.get()));
+    }
+    // Breaks the closure's reference to itself.
+    self.callback.borrow_mut().take();
+  }
+}
+
+/// Whether this browser is Firefox, whose display capture repeats frames at its rate (#1835).
+fn is_firefox() -> bool {
+  window()
+    .ok()
+    .and_then(|window| window.navigator().user_agent().ok())
+    .is_some_and(|agent| agent.contains("Firefox/"))
+}
+
+/// Whether the page is visible now.
+fn is_page_visible() -> bool {
+  window()
+    .ok()
+    .and_then(|window| window.document())
+    .and_then(|document| js_sys::Reflect::get(&document, &JsValue::from_str("visibilityState")).ok())
+    .and_then(|state| state.as_string())
+    .is_some_and(|state| state == "visible")
+}
+
 /// What [`TrackSender::start`] needs besides the stream.
 pub(super) struct TrackPlan {
   pub kind: VideoTrackKind,
@@ -439,6 +543,7 @@ impl TrackSender {
       let _ = ended_sender.unbounded_send(Input::VideoEnded(ended_kind.clone()));
     });
     track.set_onended(Some(ended.as_ref().unchecked_ref()));
+    let maybe_presented = is_firefox().then(|| PresentedFrames::start(&video)).flatten();
     Ok(Self {
       publication: Publication {
         kind: plan.kind,
@@ -465,6 +570,7 @@ impl TrackSender {
       maybe_replan: None,
       top_encode_timer: EncodeTimer::default(),
       takes: BufferCounts::default(),
+      maybe_presented,
       frames_encoded: 0,
       stall_watch: CaptureStallWatch::new(),
       _ended: ended,
@@ -914,6 +1020,10 @@ impl TrackSender {
     {
       counts.pictures = delivered;
       counts.discarded = count(&stats, "discardedFrames").unwrap_or(0);
+    } else if let Some(presented) = &self.maybe_presented {
+      counts.pictures = presented.count();
+      // Hidden, the page sees no frames at all, presented or not.
+      counts.repeats_frames = is_page_visible();
     } else if let Some(quality) = video_playback_quality(&self.video) {
       counts.pictures = count(&quality, "totalVideoFrames").unwrap_or(0);
     }
