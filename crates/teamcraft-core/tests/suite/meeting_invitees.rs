@@ -9,6 +9,7 @@ use common::{Peer, TestClient, link_device};
 use rand_core::OsRng;
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::meeting_invitees::InviteeList;
+use teamcraft_core::workspace::RosterRole;
 use teamcraft_crypto::identity::{IdentityKeyPair, IdentityPublicKey};
 use teamcraft_crypto::ids::{ConversationId as SignedChatId, MeetingId as SignedMeetingId};
 use teamcraft_crypto::meeting_admitters::{AdmittersDraft, LinkAdmission, SignedMeetingAdmitters};
@@ -381,6 +382,19 @@ mod hostile_statements {
     let mut rig = Rig::new(SIGNING_RELEASE).await;
     let mallory_id = rig.mallory_id();
     let (chat, bob, carol) = (rig.chat, rig.bob, rig.carol);
+    // Mallory is a colleague here, whom the laptop invites: on the roster, so its statement names
+    // her as an admitter once she is in the group.
+    rig
+      .alice
+      .client
+      .publish_roster(&[
+        (rig.alice.client.user_id(), RosterRole::Owner),
+        (bob, RosterRole::Admin),
+        (rig.dave, RosterRole::Admin),
+        (mallory_id, RosterRole::Admin),
+      ])
+      .await
+      .unwrap();
     let mut laptop = rig.organizers_laptop().await;
     // The laptop invites Mallory and signs; the phone never fetches that statement.
     laptop
@@ -533,6 +547,17 @@ impl Rig {
     let mut bob = Peer::enroll(&server, "Bob").await;
     let mallory = Peer::enroll(&server, "Mallory").await;
     let dave = Peer::enroll(&server, "Dave").await.client.user_id();
+    // Alice's colleagues are on the roster she signs: her device vouches for them as members
+    // (#1873). Carol has no device yet; Mallory is the server's slip.
+    alice
+      .client
+      .publish_roster(&[
+        (alice.client.user_id(), RosterRole::Owner),
+        (bob.client.user_id(), RosterRole::Admin),
+        (dave, RosterRole::Admin),
+      ])
+      .await
+      .unwrap();
     let carol_api = server.add_user("Carol");
     let (bob_id, carol) = (bob.client.user_id(), carol_api.user_id());
     let chat = server.create_meeting_chat(

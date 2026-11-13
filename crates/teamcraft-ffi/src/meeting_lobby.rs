@@ -12,17 +12,18 @@
 use teamcraft_client_api::backend::ChatBackend as _;
 use teamcraft_client_api::meeting_hosts::{MeetingRole, role_of, should_offer_handover};
 use teamcraft_client_api::meeting_invitees::GUEST_ACCESS_GRACE_MS;
-use teamcraft_core::meeting_lobby::LobbyAdmission;
+use teamcraft_core::meeting_lobby::{LobbyAdmission, SignedMembership};
 use teamcraft_proto::{ConversationId, ListLobbyResponse, LobbyEntry, MeetingResponse, UserId};
 
 use crate::bridge::from_json;
 use crate::engine::{Engine, parse_id};
 use crate::error::TeamCraftError;
 
-/// How a waiting person can be let in, for their row in the lobby.
+/// How a waiting person can be let in, for their row in the lobby. Who is a member is the owners'
+/// signed roster's word, never the server's user kind (#1873).
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum LobbyPersonStatus {
-  /// A member of this server.
+  /// A member of the workspace by the signed roster.
   Member,
   /// A guest whose device is set up: "Admit" adds it. `maybe_key_code` is the code of the key this
   /// device pinned for them, to compare with the guest's screen; `None` until it is made (read
@@ -30,6 +31,9 @@ pub enum LobbyPersonStatus {
   Guest { maybe_key_code: Option<String> },
   /// A guest whose page is still setting up its device: no "Admit" yet.
   GuestDevicePending,
+  /// The server calls them a member, but the signed roster doesn't vouch for them yet: no
+  /// "Admit" (the row says so; inviting them to the meeting is the way in).
+  UnconfirmedMember,
 }
 
 /// Somebody waiting in the lobby.
@@ -122,10 +126,12 @@ impl Engine {
     };
     // The rule the rows show, checked here too: a guest only once this device made the code of the
     // key it pinned for them, which the app showed for the host to compare.
-    let has_key_code = self.backend()?.guest_key_code(user).is_some();
-    if decision == LobbyDecision::Admit && !LobbyAdmission::of(&entry).can_admit(has_key_code) {
+    let backend = self.backend()?;
+    let has_key_code = backend.guest_key_code(user).is_some();
+    let membership = signed_membership(backend.is_signed_member(user));
+    if decision == LobbyDecision::Admit && !LobbyAdmission::of(&entry, membership).can_admit(has_key_code) {
       return Err(TeamCraftError::InvalidInput(
-        "the guest's key code isn't shown yet".into(),
+        "the person can't be admitted yet: no key code shown or not a confirmed member".into(),
       ));
     }
     let meeting = read.meeting;
@@ -136,6 +142,8 @@ impl Engine {
     let path = format!("/meetings/{}/lobby/{user}/{verb}", meeting.id);
     self.api_request("POST", &path, None).await?;
     if decision == LobbyDecision::Admit {
+      // The meeting's end as the server lists it; the core caps a guest's access by the
+      // organizer's signed admitters (#1873).
       let (chat, until) = (meeting.conversation_id, meeting.ends_at.0 + GUEST_ACCESS_GRACE_MS);
       self
         .with_client(move |client| {
@@ -193,14 +201,29 @@ impl Engine {
   }
 }
 
-/// A host's row for `entry`, with the key code this device made for a guest, if any yet.
-pub(crate) fn lobby_person(entry: &LobbyEntry, maybe_key_code: Option<String>) -> LobbyPerson {
-  let admission = LobbyAdmission::of(entry);
+/// What the signed roster says of a waiting person, from the backend's answer.
+pub(crate) fn signed_membership(is_signed_member: bool) -> SignedMembership {
+  if is_signed_member {
+    SignedMembership::Member
+  } else {
+    SignedMembership::NotSigned
+  }
+}
+
+/// A host's row for `entry`, with what the signed roster says of them and the key code this device
+/// made for a guest, if any yet.
+pub(crate) fn lobby_person(
+  entry: &LobbyEntry,
+  membership: SignedMembership,
+  maybe_key_code: Option<String>,
+) -> LobbyPerson {
+  let admission = LobbyAdmission::of(entry, membership);
   let can_admit = admission.can_admit(maybe_key_code.is_some());
   let status = match admission {
     LobbyAdmission::Member => LobbyPersonStatus::Member,
     LobbyAdmission::Guest { .. } => LobbyPersonStatus::Guest { maybe_key_code },
     LobbyAdmission::GuestDevicePending => LobbyPersonStatus::GuestDevicePending,
+    LobbyAdmission::UnconfirmedMember => LobbyPersonStatus::UnconfirmedMember,
   };
   LobbyPerson {
     user_id: entry.user.id.to_string(),
@@ -240,8 +263,9 @@ mod tests {
 
   #[test]
   fn a_row_says_how_somebody_can_be_let_in() {
+    let not_signed = SignedMembership::NotSigned;
     let guest = entry("guest", true, Some("ab"));
-    let shown = lobby_person(&guest, Some("12 34".into()));
+    let shown = lobby_person(&guest, not_signed, Some("12 34".into()));
     assert_eq!(
       shown.status,
       LobbyPersonStatus::Guest {
@@ -250,16 +274,28 @@ mod tests {
     );
     assert!(shown.can_admit);
     assert!(
-      !lobby_person(&guest, None).can_admit,
+      !lobby_person(&guest, not_signed, None).can_admit,
       "no Admit before the key code is shown"
     );
     assert_eq!(
-      lobby_person(&entry("guest", false, None), None).status,
+      lobby_person(&entry("guest", false, None), not_signed, None).status,
       LobbyPersonStatus::GuestDevicePending
     );
-    let member = lobby_person(&entry("member", false, None), None);
+    let member = lobby_person(&entry("member", false, None), SignedMembership::Member, None);
     assert_eq!(member.status, LobbyPersonStatus::Member);
     assert!(member.can_admit);
+    let unconfirmed = lobby_person(&entry("member", false, None), not_signed, None);
+    assert_eq!(unconfirmed.status, LobbyPersonStatus::UnconfirmedMember);
+    assert!(
+      !unconfirmed.can_admit,
+      "the server's word alone admits nobody (#1873)"
+    );
+    let relabelled = lobby_person(&entry("member", true, Some("ab")), not_signed, None);
+    assert_eq!(
+      relabelled.status,
+      LobbyPersonStatus::Guest { maybe_key_code: None },
+      "a guest the server calls a member"
+    );
     assert_eq!(member.display_name, "Gus");
     assert_eq!(member.user_id, "77");
   }

@@ -687,6 +687,14 @@ impl FakeServer {
     }
   }
 
+  /// The server shows `user` as a member (kind `member`) from now on, whatever they were: a hostile
+  /// server relabelling a guest (#1873).
+  pub fn show_as_member(&self, user: UserId) {
+    if let Some(entry) = self.lock().users.get_mut(&user) {
+      entry.kind = UserKind::Member;
+    }
+  }
+
   /// From now on the server answers "not found" when asked who `user` is (`GET /users/{id}`).
   pub fn hide_user(&self, user: UserId) {
     self.lock().hidden_users.insert(user);

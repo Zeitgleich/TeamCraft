@@ -123,7 +123,9 @@ besides knocks at the lobby (#1726).
    `lobby_decision` to the guest); `deny` turns them away and ends their session. A guest reads
    and speaks only once a device of the organizer, or of an admitter the organizer signed (step
    9), added theirs to the chat's encryption group (see "Guests in the browser"): on a host's
-   "admit", or by itself when the organizer chose "no lobby" and the guest came with the meeting's
+   "admit" (a member only by the owners' signed roster, anybody else with the key their page
+   reported and until the end the organizer signed, never the server's user kind or a longer end
+   from the server; e2ee.md §4.6, "Who is a guest, and until when", #1873), or by itself when the organizer chose "no lobby" and the guest came with the meeting's
    token (the server's `has_lobby` doesn't decide it; whoever's device let them in is told each
    time, with "Remove"). Each guest of the link
    gets a one-time invite of their own (as for the shared guest link, step 5). Personal one-time links (`#invite=<token>`, a host's "One-time
@@ -228,7 +230,9 @@ besides knocks at the lobby (#1726).
 9. **Admitters** (#1103; design in e2ee.md §4.6, "Meeting guests"): so that a guest isn't stuck
    while the organizer is away, the organizer's device signs who else may let guests into the
    chat's encryption group: everybody with a device in the meeting chat's group as that device sees
-   it, guests left out, with the identity keys it pinned for them, and whether they let in people
+   it whom it vouches for as a member (the owners' signed roster, or a host by the verified host
+   lists; guests and anybody only the server calls a member left out, #1873; a plain member whose
+   account the owners' apps haven't noted yet isn't named), with the identity keys it pinned for them, and whether they let in people
    of the link by themselves (the organizer's "no lobby"). It publishes the statement with
    `PUT /conversations/{id}/meeting-admitters` (the meeting's organizer only) when the meeting is
    scheduled or edited, and keeps it current for meetings that run or start within a day (every
@@ -334,6 +338,10 @@ the key their page reported and only from a device the organizer's signed host l
 name (e2ee.md §4.6). A server that lists a phone user as a host without the organizer's signature
 gets no guest in through them: the add fails and the app says so. A knock reaches a host in the
 call as `lobby_join` (the call listener's `on_lobby_knock`), which reads the lobby again.
+Whether a row is a member or a guest is the owners' signed roster's word, not the server's user
+kind (#1873): a member the roster doesn't vouch for yet and who reported no key gets "Not
+confirmed as a member yet. Invite them to the meeting instead." and no "Admit"
+(`LobbyPersonStatus::UnconfirmedMember`); a guest the server calls a member is a guest row.
 
 **Telling people.** Every change sends `meeting_update` to the organizer, the invitees and the
 co-hosts before and after; a handover also `conversation_update` to the chat's members, whose

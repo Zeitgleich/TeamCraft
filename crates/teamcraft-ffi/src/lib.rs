@@ -1434,8 +1434,16 @@ impl TeamCraft {
     let mut people = Vec::with_capacity(read.entries.len());
     for entry in &read.entries {
       let guest = entry.user.id;
+      let membership = self
+        .read_queue()?
+        .query(move |reads| {
+          Ok(meeting_lobby::signed_membership(
+            reads.backend()?.is_signed_member(guest),
+          ))
+        })
+        .await?;
       let is_ready_guest = matches!(
-        teamcraft_core::meeting_lobby::LobbyAdmission::of(entry),
+        teamcraft_core::meeting_lobby::LobbyAdmission::of(entry, membership),
         teamcraft_core::meeting_lobby::LobbyAdmission::Guest { .. }
       );
       let maybe_key_code = if is_ready_guest {
@@ -1452,7 +1460,7 @@ impl TeamCraft {
       } else {
         None
       };
-      people.push(meeting_lobby::lobby_person(entry, maybe_key_code));
+      people.push(meeting_lobby::lobby_person(entry, membership, maybe_key_code));
     }
     Ok(Some(MeetingLobby {
       meeting_id: read.meeting.id.to_string(),

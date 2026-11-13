@@ -34,7 +34,7 @@ use crate::clock::Clock;
 use crate::convert;
 use crate::error::{CoreError, GuestRefusal};
 use crate::meeting_invitees::{self, ChosenInvitees, InviteeFacts, InviteeList, SignedInvitees};
-use crate::meeting_lobby::LobbyAdmission;
+use crate::meeting_lobby::{self, LobbyAdmission, SignedMembership};
 use crate::records;
 use crate::store::{LocalStore, Table};
 
@@ -163,10 +163,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// A host admitted `entry` from the lobby of the meeting whose chat is `conversation`: lets the
   /// person's devices into the chat's encryption on this host's own decision, as
-  /// [`LobbyAdmission::of`] says (a guest only with the key their page reported, until
-  /// `access_ends_at_ms`; a member as any member). The lobby entry is the server's hint of who
-  /// knocked; the checks are those of [`Self::let_guest_into_meeting_chat`] and
-  /// [`Self::let_into_meeting_chat`]. A guest whose device is not set up yet is refused.
+  /// [`LobbyAdmission::of`] says (a member as any member, only by the signed roster; anybody else
+  /// as a guest, only with the key their page reported, until `access_ends_at_ms` or the trusted
+  /// end before it). The lobby entry is the server's hint of who knocked; the checks are those of
+  /// [`Self::let_guest_into_meeting_chat`] and [`Self::let_into_meeting_chat`]. A guest whose device
+  /// is not set up yet, and a member the roster doesn't vouch for, are refused.
   pub async fn let_in_from_lobby(
     &mut self,
     conversation: ConversationId,
@@ -174,7 +175,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     access_ends_at_ms: i64,
   ) -> Result<(), CoreError> {
     let user = entry.user.id;
-    match LobbyAdmission::of(entry) {
+    let membership = if self.workspace()?.vouches_for_member(user) {
+      SignedMembership::Member
+    } else {
+      SignedMembership::NotSigned
+    };
+    match LobbyAdmission::of(entry, membership) {
       LobbyAdmission::Member => self.let_into_meeting_chat(conversation, user).await,
       LobbyAdmission::Guest { knock_fingerprint } => {
         self
@@ -182,6 +188,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           .await
       },
       LobbyAdmission::GuestDevicePending => Err(CoreError::GuestRefused(GuestRefusal::NotEnrolled)),
+      LobbyAdmission::UnconfirmedMember => Err(CoreError::GuestRefused(GuestRefusal::NotASignedMember)),
     }
   }
 
@@ -190,8 +197,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// itself for a guest of the meeting link in a meeting without a lobby. The identity key the
   /// server holds for the guest is pinned (a different one on a second look is refused), the guest
   /// is noted as a guest of this chat until `access_ends_at_ms` (end plus grace, as the host's app
-  /// shows it), and the device is added with a signed add, always with history from the join on:
-  /// a new epoch whose welcome is sealed to the guest's key package.
+  /// shows it), capped by the trusted end ([`meeting_lobby::guest_access_end`]: the organizer's
+  /// signed admitters, never a later end from the server, #1873), and the device is added with a
+  /// signed add, always with history from the join on: a new epoch whose welcome is sealed to the
+  /// guest's key package.
   ///
   /// `knock_fingerprint` is the fingerprint the guest's page reported with its device; the key the
   /// server presents must have it. That binds the key to the knock, but the server relays both:
@@ -233,10 +242,35 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     {
       return Err(CoreError::GuestRefused(GuestRefusal::NotTheKnockingKey));
     }
+    let access_ends_at_ms = self
+      .trusted_guest_access_end(conversation, access_ends_at_ms)
+      .await?;
     // Noted before the add: a guest is a guest here even if the server's user kind says otherwise,
     // and the guest is removed by `access_ends_at_ms` at the latest (e2ee.md §4.6).
     self.note_admitted_guest(conversation, guest, access_ends_at_ms)?;
     self.let_into_meeting_chat(conversation, guest).await
+  }
+
+  /// `asked_ms` capped by the end this device trusts for a guest of the meeting chat
+  /// ([`meeting_lobby::guest_access_end`]): the newest organizer-signed admitters it verified, read
+  /// afresh (a failed read keeps what it had; the server can withhold a statement, which only
+  /// shortens access).
+  async fn trusted_guest_access_end(
+    &mut self,
+    conversation: ConversationId,
+    asked_ms: i64,
+  ) -> Result<i64, CoreError> {
+    if let Err(error) = self.organizers_admitters_at(conversation, 0).await {
+      tracing::warn!(conversation_id = %conversation, %error, "could not read the meeting's admitters for a guest's end of access");
+    }
+    let maybe_signed_ms = self
+      .admitters_record(conversation)?
+      .map(|record| record.expires_at_ms);
+    Ok(meeting_lobby::guest_access_end(
+      asked_ms,
+      maybe_signed_ms,
+      self.now_ms(),
+    ))
   }
 
   /// Pins a waiting guest's identity key as the server presents it and keeps its key code for the
@@ -547,18 +581,44 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     })
   }
 
-  /// The users with a device in the meeting chat's group on this device, guests left out (they
-  /// came in through signed adds); none without a group.
+  /// The users with a device in the meeting chat's group on this device whom it vouches for as
+  /// members ([`Self::vouched_meeting_users`]: guests and anybody the signed roster doesn't name
+  /// left out, #1873); none without a group.
   fn members_in_group(&mut self, conversation: ConversationId) -> Result<Vec<UserId>, CoreError> {
     if !self.has_group(conversation)? {
       return Ok(Vec::new());
     }
     let in_group = self.group_users(conversation)?;
-    let guests = self.guest_users(in_group.iter().copied())?;
+    self.vouched_meeting_users(conversation, in_group)
+  }
+
+  /// The users among `users` of the meeting chat `conversation` this device vouches for as members,
+  /// for what the organizer's device signs (the admitters, the invitees it carries over): never a
+  /// guest ([`Self::guest_users`]), and otherwise only somebody the signed roster vouches for
+  /// (`WorkspaceState::vouches_for_member`), the organizer or a co-host by the host lists this
+  /// device verified, or this device's own user. The server's user kind alone vouches for nobody, so a
+  /// guest another device admitted and the server calls a member is left out (#1873). A plain
+  /// member whose account the owners' apps haven't noted yet is left out too (e2ee.md §4.6, "Who
+  /// is a guest, and until when").
+  pub(super) fn vouched_meeting_users(
+    &self,
+    conversation: ConversationId,
+    users: Vec<UserId>,
+  ) -> Result<Vec<UserId>, CoreError> {
+    let guests = self.guest_users(users.iter().copied())?;
+    let workspace = self.workspace()?;
+    // The hosts by the host lists this device verified (#1720), never by the server's naming.
+    let mut hosts: BTreeSet<UserId> = self.kept_co_hosts(conversation)?.into_iter().collect();
+    hosts.extend(self.kept_organizer(conversation)?);
+    let me = self.account.user_id;
+    let is_own_member = !self.is_guest_device()?;
     Ok(
-      in_group
+      users
         .into_iter()
         .filter(|user| !guests.contains(user))
+        .filter(|user| {
+          workspace.vouches_for_member(*user) || hosts.contains(user) || (*user == me && is_own_member)
+        })
         .collect(),
     )
   }
@@ -858,7 +918,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// The users this organizer's device names as admitters: everybody with a device in the meeting
-  /// chat's group but the organizer and guests, with the identity keys this device pinned.
+  /// chat's group but the organizer whom it vouches for as a member
+  /// ([`Self::vouched_meeting_users`], #1873), with the identity keys this device pinned.
   async fn admitter_candidates(&mut self, conversation: ConversationId) -> Result<Vec<Admitter>, CoreError> {
     let me = self.account.user_id;
     let in_group: Vec<UserId> = self
@@ -866,11 +927,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .into_iter()
       .filter(|user| *user != me)
       .collect();
-    let guests = self.guest_users(in_group.iter().copied())?;
-    let members: Vec<UserId> = in_group
-      .into_iter()
-      .filter(|user| !guests.contains(user))
-      .collect();
+    let members = self.vouched_meeting_users(conversation, in_group)?;
     let directory = self.pin_identities(members.iter().copied()).await?;
     Ok(
       members

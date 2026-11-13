@@ -2092,6 +2092,44 @@ never by the server's member list:
     chat, the member list and the call, and verify the certificate chain (identity key → device
     key → MLS leaf) exactly as for members. An identity key change for a pinned guest is refused
     like for anybody else (the server also refuses `replace` for guests).
+  - *Who is a guest, and until when* (#1873; `teamcraft_core::meeting_lobby`, the one rule of
+    every client's lobby: web, desktop, Android and iOS). The server's user kind decides neither.
+    A member is somebody the owners' signed roster vouches for (`WorkspaceState::vouches_for_member`):
+    an owner or admin, or an account the owners' apps noted (§3.1.4) that no owner removed by hand.
+    - **On the admitting device** (a host's "admit", or a link arrival let in by itself), somebody
+      in the lobby is let in **as a member** (their devices, no key check, no end) only if the
+      roster vouches for them. Anybody else is let in **as a guest** whatever the server calls
+      them: only with the key their page reported, after the key code was shown, until the end of
+      access, and recorded on that device as a guest. Somebody the server calls a member, whom the
+      roster doesn't vouch for and who reported no key, can't be admitted from the lobby ("Not
+      confirmed as a member yet"; the organizer invites them instead).
+    - **On the organizer's devices**, what they sign vouches for nobody by the server's word: the
+      admitters (below) and the invitees an edit carries over from the group (§4.6.5, "Meetings
+      (D10)") are only users the roster vouches for, the organizer and co-hosts of the host lists
+      the device verified, and never a guest it knows of (`Client::vouched_meeting_users`). So a
+      guest another device admitted, whom the server calls a member, is neither signed as an
+      admitter nor carried over as an invitee.
+    - **Not yet everywhere.** Elsewhere a device still counts as guests only those the server
+      calls guests and those it let in itself (`guest_users`): the guest set of the member
+      directory that judges commits, and the guests of the membership rule. In meeting chats the
+      membership rule already lets only roster members, the organizer, the co-hosts and the signed
+      admitters manage others (`for_meeting_chat`), so a relabelled guest adds nobody. Treating
+      everybody the roster doesn't vouch for as a guest in meeting chats everywhere waits until
+      plain members' accounts are broadly noted (#1926), as it would demote every member whose
+      account isn't noted yet.
+    - **Residuals.** A plain member whose account the owners' apps haven't noted yet (first come,
+      §3.1.4; never under manual signing) can't be let in from the lobby, and the organizer's
+      device no longer names them in a new admitters statement: they don't admit guests or people
+      of the link until their account is noted. Admitters an earlier statement named keep
+      working while it is in force.
+    - **The end of access** the host's app asks for comes from the server's meeting end plus the
+      guests' grace. The core caps it at the end of the organizer-signed admitters this device
+      verified, read afresh, while it lies ahead, and otherwise at the guests' grace (two hours)
+      from the admission (`meeting_lobby::guest_access_end`). A server that lengthens the meeting
+      lengthens nobody's access; withholding the statement only shortens it. Residual: the
+      organizer's device signs the end of the meeting as its meeting list shows it, so a server
+      that lengthens the meeting before the organizer's device signs gets that longer end signed
+      (#1919).
   - *Comparing codes.* The server relays both the guest's key and the fingerprint reported with
     the knock, so binding one to the other stops a swap by anybody but the server, not by the
     server itself. Two codes close that gap for whoever compares them out of band (a phone call,
@@ -2134,8 +2172,9 @@ never by the server's member list:
       invited.
     - *Who is on it.* An organizer's device lists everybody with a device in the meeting chat's
       group as it sees it (the people the organizer's and hosts' own signed adds brought in) but
-      itself and guests ("who counts as a guest", below), each with the identity key that device
-      pinned. "No lobby" is that device's own record, as for its own admissions; a device without
+      itself and guests ("who counts as a guest", below), and only those it vouches for as
+      members: the signed roster's, or hosts by the verified host lists ("Who is a guest, and until
+      when" above, #1873), each with the identity key that device pinned. "No lobby" is that device's own record, as for its own admissions; a device without
       one keeps what the organizer's key signed before. It signs anew only when the list or the
       flag changed, or to make the list last until the meeting's access ends (its end plus the
       guest grace, also for a series' next meeting); the sequence is above the server's and the
@@ -4554,7 +4593,7 @@ probe doing only the `serde_json` part (2026-11-04):
 | `automerge` 0.6.1                              | +930,498 B   | +284,962 B    | merges per character                |
 | Own op log, last writer wins per block         | a few kB     | a few kB      | one side's typing in the block lost |
 
-Neither CRDT breaks the budget of a signed-in first visit (5.59 MB gzip, docs/performance.md,
+Neither CRDT breaks the budget of a signed-in first visit (5.63 MB gzip, docs/performance.md,
 "Web bundle size"), and the editor doesn't count towards it anyway (below). `yrs` costs less than a
 third of `automerge` and speaks the Yjs format, which has editors and tooling around it. The op
 log would cost nothing, but it loses typing exactly where a meeting's notes are written: several

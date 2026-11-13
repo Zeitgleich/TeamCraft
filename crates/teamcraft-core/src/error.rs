@@ -430,6 +430,10 @@ pub enum GuestRefusal {
   /// The key the server presents for the guest is not the one their page reported with its device.
   #[error("the guest's identity key is not the one their device reported")]
   NotTheKnockingKey,
+  /// The server calls somebody in the lobby a member, but the signed roster doesn't vouch for them
+  /// and they reported no key to be let in as a guest with (#1873).
+  #[error("the signed roster doesn't confirm this member yet")]
+  NotASignedMember,
   /// The guest has not enrolled a device yet.
   #[error("the guest has no identity key yet")]
   NotEnrolled,
