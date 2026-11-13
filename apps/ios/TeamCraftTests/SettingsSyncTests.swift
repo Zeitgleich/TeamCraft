@@ -12,7 +12,7 @@ private final class FakeStores: SettingsSyncStores {
   var onWrite: (() -> Void)?
 
   static let defaults = SyncedAppSettings(
-    listLayout: .spaces, listGrouping: .mixed, animatedImages: .autoplay, sharesTyping: true,
+    listLayout: .spaces, listGrouping: .mixed, favoritesSort: .alphabetical, animatedImages: .autoplay, sharesTyping: true,
     firstNameIsMention: true, channelMentionsNotify: true, keywords: [], confirmChannelOver: 10,
     callStatusSounds: .all, colorTheme: "brand", font: "system")
 
@@ -252,6 +252,9 @@ final class AppSettingsStoresTests: XCTestCase {
   func testEveryNameRoundTrips() {
     for layout in [AppListLayout.spaces, .list] {
       XCTAssertEqual(AppSettingsStores.listLayout(AppSettingsStores.raw(layout)), layout)
+    }
+    for sort in [AppFavoritesSort.alphabetical, .recent] {
+      XCTAssertEqual(AppSettingsStores.favoritesSort(AppSettingsStores.raw(sort)), sort)
     }
     for grouping in [AppListGrouping.mixed, .bySpace] {
       XCTAssertEqual(AppSettingsStores.listGrouping(AppSettingsStores.raw(grouping)), grouping)

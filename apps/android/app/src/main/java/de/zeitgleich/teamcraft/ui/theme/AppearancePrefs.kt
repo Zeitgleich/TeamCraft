@@ -24,6 +24,15 @@ enum class ChatListGrouping {
   BySpace,
 }
 
+/** How the Favorites section of the spaces layout is ordered; Chats has the same choice on desktop. */
+enum class FavoritesSort {
+  /** By name (what the section did before there was a choice). */
+  Alphabetical,
+
+  /** The favorite with the newest message first. */
+  Recent,
+}
+
 /**
  * "Use the colors of the wallpaper" (Material You, Android 12+) instead of the TeamCraft colors.
  * A device setting, off by default so the app looks like desktop and web; a colour theme other
@@ -41,6 +50,10 @@ class AppearancePrefs private constructor(context: Context) {
   private val grouping = sharedGrouping ?: MutableStateFlow(
     ChatListGrouping.entries.firstOrNull { it.name == prefs.getString(KEY_GROUPING, null) } ?: ChatListGrouping.Mixed,
   ).also { sharedGrouping = it }
+
+  private val favoritesSort = sharedFavoritesSort ?: MutableStateFlow(
+    FavoritesSort.entries.firstOrNull { it.name == prefs.getString(KEY_FAVORITES_SORT, null) } ?: FavoritesSort.Alphabetical,
+  ).also { sharedFavoritesSort = it }
 
   private val colorTheme = sharedColorTheme ?: MutableStateFlow(
     prefs.getString(KEY_COLOR_THEME, null) ?: DEFAULT_COLOR_THEME,
@@ -85,6 +98,16 @@ class AppearancePrefs private constructor(context: Context) {
     LocalSettingChanges.changed()
   }
 
+  /** Live, like [chatListLayout]. Follows the account. */
+  val favoritesSortChoice: StateFlow<FavoritesSort> = favoritesSort
+
+  fun setFavoritesSort(choice: FavoritesSort) {
+    if (choice == favoritesSort.value) return
+    prefs.edit().putString(KEY_FAVORITES_SORT, choice.name).apply()
+    favoritesSort.value = choice
+    LocalSettingChanges.changed()
+  }
+
   /** Live, so the main screen switches as soon as the setting changes. */
   val chatListLayout: StateFlow<ChatListLayout> = layout
 
@@ -107,6 +130,7 @@ class AppearancePrefs private constructor(context: Context) {
     private const val KEY_DYNAMIC = "dynamic_color"
     private const val KEY_LAYOUT = "chat_list_layout"
     private const val KEY_GROUPING = "chat_list_grouping"
+    private const val KEY_FAVORITES_SORT = "favorites_sort"
     private const val KEY_COLOR_THEME = "color_theme"
     private const val KEY_FONT = "font"
 
@@ -120,6 +144,7 @@ class AppearancePrefs private constructor(context: Context) {
     private var shared: MutableStateFlow<Boolean>? = null
     private var sharedLayout: MutableStateFlow<ChatListLayout>? = null
     private var sharedGrouping: MutableStateFlow<ChatListGrouping>? = null
+    private var sharedFavoritesSort: MutableStateFlow<FavoritesSort>? = null
     private var sharedColorTheme: MutableStateFlow<String>? = null
     private var sharedFont: MutableStateFlow<String>? = null
 

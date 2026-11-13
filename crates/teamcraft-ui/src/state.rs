@@ -17,11 +17,12 @@ use crate::model::{
   id_from_raw,
 };
 use crate::navigation::{Step, divider_index, next_unread};
-use crate::prefs::{ListGrouping, SidebarLayout, SidebarSort};
+use crate::prefs::{DmSort, ListGrouping, SidebarLayout, SidebarSort};
 use crate::reactive::{SetIfAlive, get_if_observed};
 use crate::route::{HistoryReach, Route};
 use crate::sections::{
-  HomeFilter, ListOptions, apply_favorite_order, build_direct, build_list, build_sections, is_listed_in_chats,
+  FavoritesOrder, HomeFilter, ListOptions, apply_favorite_order, build_direct, build_list, build_sections_by,
+  is_listed_in_chats,
 };
 use crate::security::DeviceApproval;
 use crate::settings::{LastOpenPlace, Settings, last_open, remember_last_open};
@@ -910,6 +911,22 @@ impl AppState {
       None => return,
     };
     remember_last_open(self.me().id, place);
+  }
+
+  /// How the Favorites section of a space's sidebar is sorted (the user's choice).
+  pub fn favorites_sort(&self) -> DmSort {
+    self.settings.prefs.with(|prefs| prefs.sidebar.favorites_sort)
+  }
+
+  /// Runs `with` on the favorites' ordering for `sort`, reading each favorite's newest message time
+  /// from the backend (an `O(1)` lookup, and tracked, so a new message re-sorts the section).
+  pub fn with_favorites_order<R>(&self, sort: DmSort, with: impl FnOnce(&FavoritesOrder) -> R) -> R {
+    self.read(|backend| {
+      with(&FavoritesOrder {
+        sort,
+        recency: &|conversation| backend.last_activity(conversation),
+      })
+    })
   }
 
   /// DMs and group DMs as Home lists them (favorites first, then by recency
@@ -1996,7 +2013,9 @@ impl AppState {
     } else {
       self.space_list(space)
     });
-    build_sections(&all, &options)
+    let sort = self.favorites_sort();
+    self
+      .with_favorites_order(sort, |favorites| build_sections_by(&all, &options, favorites))
       .into_iter()
       .flat_map(|section| section.conversations)
       .collect()

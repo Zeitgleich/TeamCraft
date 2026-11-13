@@ -157,6 +157,10 @@
   <string name="chat_list_grouping">Kanäle</string>
   <string name="chat_list_grouping_mixed">Mit den Chats gemischt</string>
   <string name="chat_list_grouping_by_space">Nach Spaces gruppiert</string>
+  <string name="favorites_sort">Favoriten sortieren</string>
+  <string name="favorites_sort_recent">Neueste Nachricht zuerst</string>
+  <string name="favorites_sort_alphabetical">Alphabetisch</string>
+  <string name="favorites_sort_hint">Setzt die Favoriten mit der letzten Nachricht oben auf Home nach vorn.</string>
   <string name="chat_list_grouping_hint">Nach Spaces gruppiert stellt die Kanäle jedes Space unter seinem Namen zusammen, nach den Direktnachrichten. Favoriten bleiben oben.</string>
   <string name="list_conversations">Unterhaltungen</string>
   <string name="dynamic_color">Farben meines Hintergrundbilds verwenden</string>

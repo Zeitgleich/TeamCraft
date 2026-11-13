@@ -94,6 +94,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import de.zeitgleich.teamcraft.ui.theme.FavoritesSort
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
@@ -654,10 +655,11 @@ private fun HomeTab(
   quickAccess: QuickAccess,
 ) {
   // Without spaces (yet), Home lists what there is.
-  val sections = maybeSpace
-    ?.let { spaceHomeSections(conversations, it.id, list.lastActivity, listsArchived = !canBrowse) }
-    ?: homeSections(conversations, list.lastActivity, listsArchived = !canBrowse)
   val context = LocalContext.current
+  val favoritesSort by remember { AppearancePrefs.prefs(context).favoritesSortChoice }.collectAsState()
+  val sections = maybeSpace
+    ?.let { spaceHomeSections(conversations, it.id, list.lastActivity, listsArchived = !canBrowse, favoritesSort = favoritesSort) }
+    ?: homeSections(conversations, list.lastActivity, listsArchived = !canBrowse, favoritesSort = favoritesSort)
   val collapsing = remember { CollapsedSections.of(context) }
   val collapsed by collapsing.collapsed.collectAsState()
   LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(bottom = floatingTabBarClearance())) {

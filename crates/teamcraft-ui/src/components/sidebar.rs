@@ -19,10 +19,11 @@ use crate::entry_actions::MenuEntry;
 use crate::i18n::use_i18n;
 use crate::meetings::MeetingsHub;
 use crate::model::{Conversation, ConversationId, ConversationKind, PresenceStatus, SpaceId};
+use crate::prefs::DmSort;
 use crate::reactive::{items_by_key, keyed_item};
 use crate::sections::{
   GroupedSidebar, RowBadgeTone, Section, SectionKind, SidebarOptions, SpaceGroup, badge_count, build_grouped,
-  build_sections, move_favorite, row_badge,
+  build_sections_by, move_favorite, row_badge,
 };
 use crate::settings::{load_json, store_json};
 use crate::state::{AppState, MainView, Overlay, use_app_state};
@@ -127,23 +128,31 @@ pub fn Sidebar() -> impl IntoView {
   let shows_favorites_hint =
     Signal::derive(move || !has_favorites.get() && query.with(|query| query.trim().is_empty()));
   let sections = Memo::new(move |_| {
-    build_sections(
-      &listed.get(),
-      &SidebarOptions {
-        lists_archived: is_guest(state),
-        ..state.settings.sidebar_options(state.held_unread.get())
-      },
-    )
+    let sort = state.favorites_sort();
+    state.with_favorites_order(sort, |favorites| {
+      build_sections_by(
+        &listed.get(),
+        &SidebarOptions {
+          lists_archived: is_guest(state),
+          ..state.settings.sidebar_options(state.held_unread.get())
+        },
+        favorites,
+      )
+    })
   });
   let grouped = Memo::new(move |_| {
-    build_grouped(
-      &spaces.get(),
-      &listed.get(),
-      &SidebarOptions {
-        lists_archived: is_guest(state),
-        ..state.settings.sidebar_options(state.held_unread.get())
-      },
-    )
+    let sort = state.favorites_sort();
+    state.with_favorites_order(sort, |favorites| {
+      build_grouped(
+        &spaces.get(),
+        &listed.get(),
+        &SidebarOptions {
+          lists_archived: is_guest(state),
+          ..state.settings.sidebar_options(state.held_unread.get())
+        },
+        favorites,
+      )
+    })
   });
   view! {
     <nav class="sidebar" aria-label=move || i18n.t("sidebar-label")>
@@ -873,16 +882,26 @@ fn SidebarSection(
   }
 }
 
-/// Favorites can be put in order by dragging, or with Ctrl+Shift+↑/↓ on the focused one.
+/// Favorites can be put in order by dragging, or with Ctrl+Shift+↑/↓ on the focused one, unless
+/// they are sorted newest first (the order is then not the user's to set).
 #[component]
 fn FavoriteItems(conversations: Memo<Vec<Conversation>>) -> impl IntoView {
   let state = use_app_state();
+  let is_manual = move || {
+    state
+      .settings
+      .prefs
+      .with(|prefs| prefs.sidebar.favorites_sort == DmSort::Alphabetical)
+  };
   let by_id = items_by_key(conversations.into(), |conv: &Conversation| conv.id);
   let dragged = RwSignal::new(None::<ConversationId>);
   // Positions are read when they are needed: the rows stay while the order changes.
   let index_of =
     move |id: ConversationId| conversations.with_untracked(|list| list.iter().position(|conv| conv.id == id));
   let move_to = move |moved: ConversationId, to: usize| {
+    if !is_manual() {
+      return;
+    }
     let shown: Vec<ConversationId> =
       conversations.with_untracked(|list| list.iter().map(|conv| conv.id).collect());
     state
@@ -898,7 +917,7 @@ fn FavoriteItems(conversations: Memo<Vec<Conversation>>) -> impl IntoView {
         let id = conv.id;
         view! {
           <li
-            draggable="true"
+            draggable=move || is_manual().to_string()
             on:dragstart=move |_| dragged.set(Some(id))
             on:dragend=move |_| dragged.set(None)
             on:dragover=move |ev| {

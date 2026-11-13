@@ -145,6 +145,70 @@
         }
       }
     },
+    "favorites_sort": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sort favorites"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Favoriten sortieren"
+          }
+        }
+      }
+    },
+    "favorites_sort_alphabetical": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Alphabetically"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Alphabetisch"
+          }
+        }
+      }
+    },
+    "favorites_sort_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Puts the favorites with the latest message on top of Channels."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Setzt die Favoriten mit der letzten Nachricht oben bei Kanäle nach vorn."
+          }
+        }
+      }
+    },
+    "favorites_sort_recent": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Newest message first"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Neueste Nachricht zuerst"
+          }
+        }
+      }
+    },
     "video_unplayable": {
       "localizations": {
         "en": {

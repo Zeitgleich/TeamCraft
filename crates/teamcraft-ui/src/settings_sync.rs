@@ -127,6 +127,7 @@ synced_prefs! {
   "sidebar.list_grouping" => sidebar.list_grouping,
   "sidebar.sort" => sidebar.sort,
   "sidebar.dm_sort" => sidebar.dm_sort,
+  "sidebar.favorites_sort" => sidebar.favorites_sort,
   "sidebar.dm_limit" => sidebar.dm_limit,
   "sidebar.is_grouped_by_space" => sidebar.is_grouped_by_space,
   "sidebar.reopen_last_conversation" => sidebar.reopen_last_conversation,
@@ -589,7 +590,7 @@ mod tests {
   use teamcraft_proto::{DeviceId, Id, Snowflake};
 
   use super::*;
-  use crate::prefs::{AnimatedImages, Density, ListGrouping, NotifyLevel, SidebarLayout, Zoom};
+  use crate::prefs::{AnimatedImages, Density, DmSort, ListGrouping, NotifyLevel, SidebarLayout, Zoom};
 
   const KEY_DENSITY: &str = "display.density";
 
@@ -664,6 +665,7 @@ mod tests {
       for (key, choices) in [
         ("sidebar.layout", to_values(&SidebarLayout::ALL)),
         ("sidebar.list_grouping", to_values(&ListGrouping::ALL)),
+        ("sidebar.favorites_sort", to_values(&DmSort::ALL)),
         ("display.animated_images", to_values(&AnimatedImages::ALL)),
         (
           "calls.status_sounds",

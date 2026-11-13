@@ -54,6 +54,7 @@ struct ConversationListView: View {
   /// Takes effect at once: the view follows the stored value (#1151).
   @AppStorage(ChatListLayout.key) private var layoutRaw = ChatListLayout.spaces.rawValue
   @AppStorage(ChatListGrouping.key) private var groupingRaw = ChatListGrouping.mixed.rawValue
+  @AppStorage(FavoritesSort.key) private var favoritesSortRaw = FavoritesSort.alphabetical.rawValue
   /// The user's own presence, as Settings set it: on the avatar in the header (#1786).
   @AppStorage("presence") private var presenceRaw = PresenceChoice.online.rawValue
   @Environment(\.horizontalSizeClass) private var sizeClass
@@ -274,6 +275,7 @@ struct ConversationListView: View {
 
   private var isList: Bool { layoutRaw == ChatListLayout.list.rawValue }
 
+  private var favoritesSort: FavoritesSort { FavoritesSort.stored(favoritesSortRaw) }
   private var isBySpace: Bool { isList && groupingRaw == ChatListGrouping.bySpace.rawValue }
 
   /// The spaces the user belongs to, by name, with what is new in each (#1526).
@@ -530,9 +532,11 @@ struct ConversationListView: View {
       // Without spaces (yet), the tab lists what there is.
       if let space = maybeSelectedSpace {
         return spaceHomeSections(
-          conversations, spaceId: space.id, lastActivity: lastActivity, listsArchived: !canBrowseChannels)
+          conversations, spaceId: space.id, lastActivity: lastActivity, listsArchived: !canBrowseChannels,
+          favoritesSort: favoritesSort)
       }
-      return homeSections(conversations, lastActivity: lastActivity, listsArchived: !canBrowseChannels)
+      return homeSections(
+        conversations, lastActivity: lastActivity, listsArchived: !canBrowseChannels, favoritesSort: favoritesSort)
     case .meetings:
       return []
     case .activity:

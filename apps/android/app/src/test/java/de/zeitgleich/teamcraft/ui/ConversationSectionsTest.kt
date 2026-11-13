@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui
 
+import de.zeitgleich.teamcraft.ui.theme.FavoritesSort
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import uniffi.teamcraft_ffi.ConversationItem
@@ -92,6 +93,29 @@ class ConversationSectionsTest {
     assertEquals(listOf("Cid", "Amy"), home[0].conversations.map { it.name })
     assertEquals(listOf("Dan", "release"), home[1].conversations.map { it.name })
     assertEquals(listOf("general"), home[2].conversations.map { it.name })
+  }
+
+  @Test
+  fun favoritesFollowTheChosenSortWithTiesByNameAndSilentOnesLast() {
+    val favorites = listOf(
+      item("1", "zed", ConversationKind.PUBLIC, space = "Project A", isFavorite = true),
+      item("2", "quiet", ConversationKind.PUBLIC, space = "Project A", isFavorite = true),
+      item("3", "bob", ConversationKind.DIRECT, isFavorite = true),
+      item("4", "amy", ConversationKind.PUBLIC, space = "Project A", isFavorite = true),
+      item("5", "also quiet", ConversationKind.GROUP, isFavorite = true),
+    )
+    val at = mapOf("1" to 10L, "3" to 20L, "4" to 10L)
+    assertEquals(
+      listOf("bob", "amy", "zed", "also quiet", "quiet"),
+      sortFavorites(favorites, FavoritesSort.Recent, at).map { it.name },
+    )
+    assertEquals(
+      listOf("also quiet", "amy", "bob", "quiet", "zed"),
+      sortFavorites(favorites, FavoritesSort.Alphabetical, at).map { it.name },
+    )
+    val home = homeSections(favorites, lastActivity = at, favoritesSort = FavoritesSort.Recent)
+    assertEquals(SectionTitle.Favorites, home[0].title)
+    assertEquals(listOf("bob", "amy", "zed", "also quiet", "quiet"), home[0].conversations.map { it.name })
   }
 
   @Test
