@@ -21,6 +21,9 @@ use crate::error::ApiError;
 use crate::state::AppState;
 
 const MAX_PAYLOAD_BYTES: usize = 64 * 1024;
+/// A roster carries every person's identity provider mark (issue #1378): up to a client's
+/// `max_provider_marks` (8,000) of about 100 bytes each, and the owners and admins.
+const MAX_ROSTER_PAYLOAD_BYTES: usize = 1024 * 1024;
 const MAX_SIGNATURE_BYTES: usize = 4096;
 const MAX_LINK_PREVIEW_DOMAINS: usize = 500;
 const MAX_DOMAIN_CHARS: usize = 253;
@@ -45,7 +48,11 @@ pub async fn append(
   request: AppendWorkspaceLogRequest,
 ) -> Result<WorkspaceLogEntryResponse, ApiError> {
   require(state, caller, Permission::SignWorkspace, &Target::Instance)?;
-  if request.payload.is_empty() || request.payload.len() > MAX_PAYLOAD_BYTES {
+  let max_payload_bytes = match kind {
+    WorkspaceLogKind::Roster => MAX_ROSTER_PAYLOAD_BYTES,
+    _ => MAX_PAYLOAD_BYTES,
+  };
+  if request.payload.is_empty() || request.payload.len() > max_payload_bytes {
     return Err(ApiError::InvalidRequest("payload has an invalid size".into()));
   }
   if request.signature.is_empty() || request.signature.len() > MAX_SIGNATURE_BYTES {

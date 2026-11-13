@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM role_evidence evidence\n         USING UNNEST($1::bigint[], $2::bigint[]) AS mark(user_id, issued_at)\n         WHERE evidence.user_id = mark.user_id AND evidence.issued_at <= mark.issued_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8Array",
+        "Int8Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b3c5817012d1130dd74d53f8dc854a6a308ec1e4cc3eddef99127dc24e759de6"
+}

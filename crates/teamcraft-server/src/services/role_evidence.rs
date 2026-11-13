@@ -22,6 +22,11 @@ const MAX_TOKEN_CHARS: usize = 16 * 1024;
 /// After this long nobody acts on a token any more; they name people, so they don't stay.
 const KEEP_DAYS: i32 = 60;
 
+/// Members' tokens waiting for their account to be noted wake the owners' apps when the first arrives
+/// and at every this many after: each read and roster takes a page, and one event per member would send
+/// every owner's app to read the list as often as members sign in (issue #1378).
+const ACCOUNT_EVIDENCE_NUDGE: i64 = 50;
+
 /// The claims the server looks at. Not verified here.
 #[derive(Deserialize)]
 struct TokenOutline {
@@ -52,6 +57,9 @@ struct RosterMarksOutline {
 #[derive(Deserialize)]
 struct MarkOutline {
   issued_at: i64,
+  /// The account the owners noted for the person, if any.
+  #[serde(default)]
+  sub: Option<String>,
 }
 
 /// Keeps the caller's token if it is newer than the one stored and tells the owners' apps.
@@ -74,23 +82,47 @@ pub async fn put(
   if maybe_owner != Some(caller.user.id) {
     return Err(ApiError::Forbidden("this token belongs to somebody else".into()));
   }
-  // Only owners, admins and who is on the roster have anything to say here. Nobody else fills the table
-  // or sends the owners' apps to read it.
-  if !caller.role.includes(&Role::Admin) && !roster_members(state).await?.contains(&caller.user.id) {
-    return Ok(());
-  }
+  // Owners, admins and who is on the roster speak about roles. Anybody else only so that an owner's app
+  // notes their account (issue #1378): while the newest roster notes none for them, or another one than
+  // this token's, which the owners have to see. Nobody else fills the table or sends the owners' apps to
+  // read it.
+  let for_account = if caller.role.includes(&Role::Admin) {
+    false
+  } else {
+    let roster = latest_roster(state).await?;
+    if roster.members.contains(&caller.user.id) {
+      false
+    } else if roster.maybe_marks.is_some_and(|marks| {
+      marks
+        .get(&caller.user.id)
+        .and_then(|mark| mark.sub.as_deref())
+        .is_none_or(|noted| noted != outline.sub)
+    }) {
+      true
+    } else {
+      return Ok(());
+    }
+  };
   let is_stored = state
     .database
-    .put_role_evidence(caller.user.id, &request.token, outline.iat)
+    .put_role_evidence(caller.user.id, &request.token, outline.iat, for_account)
     .await?;
-  if is_stored {
+  if !is_stored {
+    return Ok(());
+  }
+  if for_account {
+    let waiting = state.database.count_account_evidence().await?;
+    if waiting != 1 && waiting % ACCOUNT_EVIDENCE_NUDGE != 0 {
+      return Ok(());
+    }
+  } else {
     state
       .database
       .delete_older_role_loss(caller.user.id, outline.iat)
       .await?;
-    let owners = state.database.list_provider_owners().await?;
-    state.hub.publish(owners, &GatewayEvent::RoleEvidenceUpdate);
   }
+  let owners = state.database.list_provider_owners().await?;
+  state.hub.publish(owners, &GatewayEvent::RoleEvidenceUpdate);
   Ok(())
 }
 
@@ -183,10 +215,13 @@ pub async fn settle_after_roster(state: &AppState, payload: &[u8]) {
   let Ok(outline) = serde_json::from_slice::<RosterMarksOutline>(payload) else {
     return;
   };
-  for (user, mark) in outline.provider_marks {
-    if let Err(error) = state.database.settle_role_evidence(user, mark.issued_at).await {
-      tracing::warn!(%error, "could not drop role evidence the roster took into account");
-    }
+  let marks: Vec<(UserId, i64)> = outline
+    .provider_marks
+    .into_iter()
+    .map(|(user, mark)| (user, mark.issued_at))
+    .collect();
+  if let Err(error) = state.database.settle_role_evidence(&marks).await {
+    tracing::warn!(%error, "could not drop role evidence the roster took into account");
   }
 }
 
@@ -241,17 +276,38 @@ async fn withdrawn_roles(state: &AppState) -> Result<Vec<WithdrawnRole>, ApiErro
 /// Who the newest roster lists. A roster the server can't read is one it stored for an older or a
 /// newer client: it reports nobody rather than somebody wrong.
 async fn roster_members(state: &AppState) -> Result<Vec<UserId>, ApiError> {
+  Ok(latest_roster(state).await?.members)
+}
+
+/// What the server reads of the newest roster.
+struct LatestRoster {
+  members: Vec<UserId>,
+  /// `None` without a roster, or one the server can't read: then nobody's account is to be noted.
+  maybe_marks: Option<std::collections::BTreeMap<UserId, MarkOutline>>,
+}
+
+async fn latest_roster(state: &AppState) -> Result<LatestRoster, ApiError> {
+  let nothing = LatestRoster {
+    members: Vec::new(),
+    maybe_marks: None,
+  };
   let Some(entry) = state
     .database
     .latest_workspace_log_entry(&WorkspaceLogKind::Roster)
     .await?
   else {
-    return Ok(Vec::new());
+    return Ok(nothing);
   };
   let Ok(roster) = serde_json::from_slice::<RosterOutline>(&entry.payload) else {
-    return Ok(Vec::new());
+    return Ok(nothing);
   };
-  Ok(roster.members.iter().map(|member| member.user_id).collect())
+  let maybe_marks = serde_json::from_slice::<RosterMarksOutline>(&entry.payload)
+    .ok()
+    .map(|outline| outline.provider_marks);
+  Ok(LatestRoster {
+    members: roster.members.iter().map(|member| member.user_id).collect(),
+    maybe_marks,
+  })
 }
 
 fn withdrawn_role(standing: &RoleStanding) -> Option<WithdrawnRole> {

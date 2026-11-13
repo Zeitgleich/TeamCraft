@@ -407,3 +407,154 @@ async fn people_who_lost_role_or_account_are_reported_for_the_roster_only() {
   );
   app.stop().await;
 }
+
+/// Signs `roster` as the next roster on the server (the server doesn't verify signatures).
+async fn append_roster(
+  app: &TestApp,
+  owner: &TestUser,
+  device: &Value,
+  expected_version: u64,
+  roster: &Value,
+) {
+  let appended = app
+    .post(
+      owner,
+      "/workspace/roster",
+      json!({
+        "expected_version": expected_version,
+        "payload": base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(roster).unwrap()),
+        "signature": "c2ln",
+        "signer_device_id": device,
+      }),
+    )
+    .await;
+  assert!(appended.status.is_success(), "{}", appended.body);
+}
+
+#[tokio::test]
+async fn a_members_token_is_kept_while_the_roster_notes_no_account_or_another_one() {
+  // Issue #1378: an owner's app notes every member's account, from their token.
+  let app = app!();
+  let (alice, carol) = (owner(), member("carol"));
+  let alice_id = enroll(&app, &alice).await;
+  let carol_id = enroll(&app, &carol).await;
+  let device = json!(register_device(&app, &alice).await);
+  let owner_entry = json!({"user_id": alice_id, "role": "owner", "identity_key": "a2V5MQ=="});
+  append_roster(
+    &app,
+    &alice,
+    &device,
+    0,
+    &json!({"version": 1, "members": [owner_entry]}),
+  )
+  .await;
+
+  // No account noted for Carol: her token is kept for the owners' apps.
+  let published = app
+    .put(&carol, "/me/role-evidence", json!({"token": token(&carol, 100)}))
+    .await;
+  assert_eq!(published.status, StatusCode::NO_CONTENT, "{}", published.body);
+  let listed = app.get(&alice, "/role-evidence").await;
+  let kept = entries(&listed.body);
+  assert_eq!(kept.len(), 1, "{}", listed.body);
+  assert_eq!(kept[0]["user_id"], carol_id);
+
+  // A roster notes her account: the token is settled, and the same account has nothing more to say.
+  append_roster(
+    &app,
+    &alice,
+    &device,
+    1,
+    &json!({"version": 2, "members": [owner_entry],
+           "provider_marks": { carol_id.as_str(): {"sub": carol.subject, "issued_at": 100} }}),
+  )
+  .await;
+  assert!(entries(&app.get(&alice, "/role-evidence").await.body).is_empty());
+  app
+    .put(&carol, "/me/role-evidence", json!({"token": token(&carol, 200)}))
+    .await;
+  assert!(entries(&app.get(&alice, "/role-evidence").await.body).is_empty());
+
+  // Another account noted for her: her token goes to the owners, who have to see the contradiction.
+  append_roster(
+    &app,
+    &alice,
+    &device,
+    2,
+    &json!({"version": 3, "members": [owner_entry],
+           "provider_marks": { carol_id.as_str(): {"sub": "sub-of-somebody-else", "issued_at": 150} }}),
+  )
+  .await;
+  app
+    .put(&carol, "/me/role-evidence", json!({"token": token(&carol, 300)}))
+    .await;
+  let listed = app.get(&alice, "/role-evidence").await;
+  assert_eq!(entries(&listed.body)[0]["user_id"], carol_id, "{}", listed.body);
+  app.stop().await;
+}
+
+#[tokio::test]
+async fn members_tokens_come_a_page_at_a_time_and_never_crowd_out_a_role_holders() {
+  let app = app!();
+  let (alice, bob) = (owner(), admin());
+  let alice_id = enroll(&app, &alice).await;
+  enroll(&app, &bob).await;
+  let device = json!(register_device(&app, &alice).await);
+  append_roster(
+    &app,
+    &alice,
+    &device,
+    0,
+    &json!({"version": 1, "members": [{"user_id": alice_id, "role": "owner", "identity_key": "a2V5MQ=="}]}),
+  )
+  .await;
+  for index in 0..205 {
+    let somebody = member(&format!("member{index}"));
+    enroll(&app, &somebody).await;
+    let reply = app
+      .put(
+        &somebody,
+        "/me/role-evidence",
+        json!({"token": token(&somebody, 100)}),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
+  }
+  app
+    .put(&bob, "/me/role-evidence", json!({"token": token(&bob, 100)}))
+    .await;
+
+  let listed = app.get(&alice, "/role-evidence").await;
+  let listed = entries(&listed.body);
+  assert_eq!(listed.len(), 201, "the role holder's and a page of members'");
+  assert!(listed.iter().any(|entry| entry["token"] == token(&bob, 100)));
+  app.stop().await;
+}
+
+#[tokio::test]
+async fn a_roster_may_carry_everybodys_marks() {
+  let app = app!();
+  let alice = owner();
+  let alice_id = enroll(&app, &alice).await;
+  let device = json!(register_device(&app, &alice).await);
+  // About what 8,000 members' marks take: far above the 64 KiB of a policy.
+  let marks: serde_json::Map<String, Value> = (1..=8000_u64)
+    .map(|user| {
+      (
+        (1_000_000_000_000_000 + user).to_string(),
+        json!({"sub": format!("{user:036}"), "issued_at": 1_731_500_000}),
+      )
+    })
+    .collect();
+  append_roster(
+    &app,
+    &alice,
+    &device,
+    0,
+    &json!({"version": 1,
+           "members": [{"user_id": alice_id, "role": "owner", "identity_key": "a2V5MQ=="}],
+           "provider_marks": marks}),
+  )
+  .await;
+  app.stop().await;
+}

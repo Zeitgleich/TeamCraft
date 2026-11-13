@@ -1444,6 +1444,267 @@ mod manual {
   }
 }
 
+mod member_accounts {
+  //! Every member's account at the provider, noted by an owner's app, first come (issue #1378), so that
+  //! their key attestation counts.
+  use teamcraft_core::api::ServerApi as _;
+  use teamcraft_core::records::pinned_identities;
+
+  use super::key_attestation::{add_to_new_channel, pin_of, require_attestation};
+  use super::*;
+
+  const DAY: i64 = 24 * 60 * 60;
+
+  #[tokio::test]
+  async fn a_members_account_is_noted_once_a_day_or_a_batch_and_their_key_then_counts_as_attested() {
+    let world = World::new();
+    let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
+    let bob_id = bob.client.user_id();
+    world.give_token(&bob, &["member"], T0);
+    bob.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+
+    // One member waiting, for a minute: not worth a roster of its own yet.
+    let version = alice.client.workspace().unwrap().roster.version;
+    world.give_token(&alice, &["owner"], T0 + 60);
+    alice.client.note_role_evidence_update();
+    alice.client.run_role_signing().await.unwrap();
+    assert_eq!(alice.client.workspace().unwrap().roster.version, version);
+    assert!(subject_of(&alice, bob_id).is_none());
+
+    // A day on, it is.
+    world.give_token(&alice, &["owner"], T0 + DAY);
+    alice.client.note_role_evidence_update();
+    alice.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    let workspace = alice.client.workspace().unwrap();
+    assert_eq!(subject_of(&alice, bob_id).as_deref(), Some("sub-of-Bob"));
+    assert!(
+      !workspace
+        .roster
+        .members
+        .iter()
+        .any(|member| member.user_id == bob_id),
+      "noting an account gives no role"
+    );
+    add_to_new_channel(&mut alice, bob_id).await.unwrap();
+    assert!(pin_of(&alice, bob_id).is_attested);
+    // Bob's app has nothing more to publish, and nothing to tell him.
+    world.give_token(&bob, &["member"], T0 + DAY + 60);
+    world.server.clear_role_evidence();
+    bob.client.run_role_signing().await.unwrap();
+    assert!(world.server.role_evidence_of(bob_id).is_none());
+    assert!(!bob.client.role_signing_record().unwrap().is_account_mismatched);
+  }
+
+  #[tokio::test]
+  async fn required_takes_full_effect_for_a_noted_member() {
+    let world = World::new();
+    let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
+    let mut erin = world.peer("Erin").await;
+    note_member(&world, &mut alice, &mut bob, T0).await;
+    // The server hands out Bob's key without its attestation.
+    world.server.set_identity_attestation(bob.client.user_id(), None);
+    require_attestation(&mut alice).await;
+    settle(&mut [&mut alice, &mut erin]).await;
+
+    // Refused: nobody's key can be used for him without the attestation.
+    assert!(add_to_new_channel(&mut erin, bob.client.user_id()).await.is_err());
+    assert!(
+      !pinned_identities(&*erin.store)
+        .unwrap()
+        .contains_key(&bob.client.user_id())
+    );
+  }
+
+  #[tokio::test]
+  async fn a_realm_account_claiming_a_members_user_id_is_refused_by_an_honest_server_path() {
+    // Mallory writes "<Bob's user ID>:<her key>" into her own attribute and publishes the genuine token
+    // she gets: the server stores it as hers, and it doesn't verify as a statement about her.
+    let world = World::new();
+    let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
+    let mut mallory = world.peer("Mallory").await;
+    let claim = format!(
+      "{}:{}",
+      bob.client.user_id(),
+      key_part(&mallory.client.identity_attestation_claim())
+    );
+    let token = world
+      .provider
+      .token(&with_roles(&claim, &["member"], T0).with("sub", json!("sub-of-Mallory")));
+    mallory
+      .api
+      .put_role_evidence(&teamcraft_proto::PutRoleEvidenceRequest { token })
+      .await
+      .unwrap();
+    world.give_token(&bob, &["member"], T0);
+    bob.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut mallory]).await;
+
+    world.give_token(&alice, &["owner"], T0 + DAY);
+    alice.client.note_role_evidence_update();
+    alice.client.run_role_signing().await.unwrap();
+
+    assert_eq!(
+      subject_of(&alice, bob.client.user_id()).as_deref(),
+      Some("sub-of-Bob")
+    );
+    assert!(subject_of(&alice, mallory.client.user_id()).is_none());
+  }
+
+  #[tokio::test]
+  async fn a_hostile_server_that_gets_in_first_is_seen_by_the_member_and_the_owners_and_an_owner_corrects_it()
+  {
+    let world = World::new();
+    let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
+    let mallory = world.peer("Mallory").await;
+    let bob_id = bob.client.user_id();
+    // The server lists Mallory's genuine token naming Bob's user ID and her key, under Bob, with her key.
+    let claim = format!(
+      "{}:{}",
+      bob_id,
+      key_part(&mallory.client.identity_attestation_claim())
+    );
+    let token = world
+      .provider
+      .token(&with_roles(&claim, &["member"], T0).with("sub", json!("sub-of-Mallory")));
+    world
+      .server
+      .forge_role_evidence(bob_id, token, mallory.client.identity_public_key_bytes().to_vec());
+    world.give_token(&alice, &["owner"], T0 + DAY);
+    alice.client.note_role_evidence_update();
+    alice.client.run_role_signing().await.unwrap();
+    assert_eq!(subject_of(&alice, bob_id).as_deref(), Some("sub-of-Mallory"));
+
+    // Bob's own app sees another account than his and says so; his token shows the owners.
+    settle(&mut [&mut alice, &mut bob]).await;
+    world.give_token(&bob, &["member"], T0 + DAY + 10);
+    bob.client.run_role_signing().await.unwrap();
+    assert!(bob.client.role_signing_record().unwrap().is_account_mismatched);
+    assert!(world.server.role_evidence_of(bob_id).is_some());
+    world.give_token(&alice, &["owner"], T0 + DAY + 20);
+    alice.client.note_role_evidence_update();
+    alice.client.run_role_signing().await.unwrap();
+    assert!(matches!(
+      alice.client.role_signing_record().unwrap().maybe_note,
+      Some(RoleSigningProblem::Contradictory { ref users }) if users.contains(&bob_id)
+    ));
+    assert_eq!(
+      subject_of(&alice, bob_id).as_deref(),
+      Some("sub-of-Mallory"),
+      "a later token never changes a noted account"
+    );
+
+    // Only an owner corrects it. Tokens from before that, Mallory's included, can't note it again.
+    alice.client.forget_provider_account(bob_id).await.unwrap();
+    assert!(subject_of(&alice, bob_id).is_none());
+    alice.client.note_role_evidence_update();
+    world.give_token(&alice, &["owner"], T0 + 3 * DAY);
+    alice.client.run_role_signing().await.unwrap();
+    assert!(subject_of(&alice, bob_id).is_none());
+
+    // Bob's app publishes a newer token by itself, which is noted.
+    settle(&mut [&mut alice, &mut bob]).await;
+    world.give_token(&bob, &["member"], T0 + 3 * DAY + 10);
+    bob.client.run_role_signing().await.unwrap();
+    assert!(!bob.client.role_signing_record().unwrap().is_account_mismatched);
+    world.give_token(&alice, &["owner"], T0 + 5 * DAY);
+    alice.client.note_role_evidence_update();
+    alice.client.run_role_signing().await.unwrap();
+    assert_eq!(subject_of(&alice, bob_id).as_deref(), Some("sub-of-Bob"));
+  }
+
+  #[tokio::test]
+  async fn a_changed_subject_is_never_taken_without_an_owner() {
+    // The provider account behind Bob changed (or a token of another account names him): it is reported,
+    // the noted account stays.
+    let world = World::new();
+    let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
+    let bob_id = bob.client.user_id();
+    note_member(&world, &mut alice, &mut bob, T0).await;
+    let claim = bob.client.identity_attestation_claim();
+    world.server.set_provider_token(
+      bob_id,
+      world
+        .provider
+        .token(&with_roles(&claim, &["member"], T0 + 2 * DAY).with("sub", json!("another-sub-of-Bob"))),
+    );
+    bob.client.run_role_signing().await.unwrap();
+    assert!(bob.client.role_signing_record().unwrap().is_account_mismatched);
+
+    world.give_token(&alice, &["owner"], T0 + 3 * DAY);
+    alice.client.note_role_evidence_update();
+    alice.client.run_role_signing().await.unwrap();
+
+    assert_eq!(subject_of(&alice, bob_id).as_deref(), Some("sub-of-Bob"));
+    assert!(matches!(
+      alice.client.role_signing_record().unwrap().maybe_note,
+      Some(RoleSigningProblem::Contradictory { .. })
+    ));
+  }
+
+  #[tokio::test]
+  async fn a_non_owner_can_not_correct_an_account() {
+    let world = World::new();
+    let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
+    note_member(&world, &mut alice, &mut bob, T0).await;
+    let bob_id = bob.client.user_id();
+    assert!(matches!(
+      bob.client.forget_provider_account(bob_id).await,
+      Err(teamcraft_core::CoreError::NotAnOwner)
+    ));
+    assert_eq!(subject_of(&alice, bob_id).as_deref(), Some("sub-of-Bob"));
+  }
+
+  #[tokio::test]
+  async fn under_manual_signing_a_member_publishes_nothing() {
+    let world = World::new();
+    let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
+    let mut policy = alice.client.workspace().unwrap().policy;
+    policy.maybe_role_signing = Some(Box::new(RoleSigningPolicy {
+      mode: RoleSigningMode::Manual,
+      ..*policy.maybe_role_signing.unwrap()
+    }));
+    alice.client.publish_policy(policy).await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+
+    world.give_token(&bob, &["member"], T0);
+    bob.client.run_role_signing().await.unwrap();
+
+    assert!(world.server.role_evidence_of(bob.client.user_id()).is_none());
+  }
+
+  /// Bob's app publishes his token at `issued_at`; Alice's app notes his account a day later.
+  async fn note_member(world: &World, alice: &mut Peer, bob: &mut Peer, issued_at: i64) {
+    world.give_token(bob, &["member"], issued_at);
+    bob.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut *alice, &mut *bob]).await;
+    world.give_token(alice, &["owner"], issued_at + DAY);
+    alice.client.note_role_evidence_update();
+    alice.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut *alice, &mut *bob]).await;
+    assert_eq!(
+      subject_of(alice, bob.client.user_id()).as_deref(),
+      Some(format!("sub-of-{}", bob.name).as_str())
+    );
+  }
+
+  fn subject_of(peer: &Peer, user: UserId) -> Option<String> {
+    peer
+      .client
+      .workspace()
+      .unwrap()
+      .provider_marks
+      .get(&user)
+      .and_then(|mark| mark.maybe_subject.clone())
+  }
+
+  /// The key half of an attestation claim, `<user ID>:<key>`.
+  fn key_part(claim: &str) -> &str {
+    claim.split(':').nth(1).unwrap()
+  }
+}
+
 mod key_attestation {
   //! Identity keys attested by the provider the owners pinned (e2ee.md §3.1, issue #1279).
   use teamcraft_core::ClientSettings;
@@ -1760,7 +2021,7 @@ mod key_attestation {
     assert_eq!(role_of(owner, peer.client.user_id()), Some(RosterRole::Admin));
   }
 
-  async fn require_attestation(owner: &mut Peer) {
+  pub(super) async fn require_attestation(owner: &mut Peer) {
     let mut policy = owner.client.workspace().unwrap().policy;
     policy.maybe_role_signing = Some(Box::new(RoleSigningPolicy {
       maybe_key_attestation: Some(KeyAttestationMode::Required),
@@ -1769,7 +2030,7 @@ mod key_attestation {
     owner.client.publish_policy(policy).await.unwrap();
   }
 
-  async fn add_to_new_channel(
+  pub(super) async fn add_to_new_channel(
     peer: &mut Peer,
     user: UserId,
   ) -> Result<ConversationId, teamcraft_core::CoreError> {
@@ -1794,7 +2055,7 @@ mod key_attestation {
       .set_jwks_source(Box::new(Jwks(world.provider.clone())));
   }
 
-  fn pin_of(peer: &Peer, user: UserId) -> PinnedIdentity {
+  pub(super) fn pin_of(peer: &Peer, user: UserId) -> PinnedIdentity {
     pinned_identities(&*peer.store).unwrap().remove(&user).unwrap()
   }
 }

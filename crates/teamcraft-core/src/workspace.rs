@@ -926,6 +926,7 @@ pub fn owner_roster_status(
     .ok()
     .flatten()?;
   let status = state.owner_status(millis(max_age))?;
+  let maybe_record = crate::client::role_signing_record(store).ok();
   Some(OwnerRosterStatus {
     version: state.roster.version,
     owners: status
@@ -944,8 +945,10 @@ pub fn owner_roster_status(
     is_signing_manual: !teamcraft_proto::RoleSigningPolicy::is_automatic(
       state.policy.maybe_role_signing.as_deref(),
     ),
-    maybe_signing_problem: crate::client::role_signing_record(store)
-      .ok()
+    is_own_account_mismatched: maybe_record
+      .as_ref()
+      .is_some_and(|record| record.is_account_mismatched),
+    maybe_signing_problem: maybe_record
       .and_then(|record| record.maybe_note)
       .and_then(|problem| signing_problem(&problem)),
   })
@@ -1184,6 +1187,64 @@ mod tests {
       fresh.apply_entries(vec![entry_2, entry_1]).unwrap();
 
       assert_eq!(fresh.provider_marks[&alice.user_id].issued_at, 100);
+    }
+
+    #[test]
+    fn a_members_mark_counts_only_signed_by_an_owner() {
+      // Issue #1378: the account noted for a member is what their key attestation is checked against.
+      let (alice, mallory) = (Owner::new(1), Owner::new(3));
+      let bob = UserId::from_snowflake(Snowflake::new(2).unwrap());
+      let mut state = WorkspaceState::default();
+      let first = roster(1, &[&alice], None, &state);
+      state
+        .apply_entries(vec![alice.sign(WorkspaceLogKind::Roster, 1, &first)])
+        .unwrap();
+
+      // Signed by somebody who isn't an owner of the verified roster: refused, nothing noted.
+      let mut forged = roster(2, &[&alice], None, &state);
+      forged.provider_marks.insert(bob, mark("sub-of-mallory", 100));
+      assert!(matches!(
+        state.apply_entries(vec![mallory.sign(WorkspaceLogKind::Roster, 2, &forged)]),
+        Err(WorkspaceError::Signature { .. })
+      ));
+      assert!(!state.provider_marks.contains_key(&bob));
+
+      let mut noted = roster(2, &[&alice], None, &state);
+      noted.provider_marks.insert(bob, mark("sub-b", 100));
+      state
+        .apply_entries(vec![alice.sign(WorkspaceLogKind::Roster, 2, &noted)])
+        .unwrap();
+      assert_eq!(state.provider_marks[&bob].maybe_subject.as_deref(), Some("sub-b"));
+    }
+
+    #[test]
+    fn a_members_mark_is_not_rolled_back() {
+      let alice = Owner::new(1);
+      let bob = UserId::from_snowflake(Snowflake::new(2).unwrap());
+      let mut state = WorkspaceState::default();
+      let first = roster(1, &[&alice], None, &state);
+      let entry_1 = alice.sign(WorkspaceLogKind::Roster, 1, &first);
+      state.apply_entries(vec![entry_1.clone()]).unwrap();
+      let mut noted = roster(2, &[&alice], None, &state);
+      noted.provider_marks.insert(bob, mark("sub-b", 100));
+      state
+        .apply_entries(vec![alice.sign(WorkspaceLogKind::Roster, 2, &noted)])
+        .unwrap();
+
+      // The server replays the roster from before, or another version 2 an owner once signed.
+      state.apply_entries(vec![entry_1]).unwrap();
+      let mut other = roster(2, &[&alice], None, &WorkspaceState::default());
+      other.provider_marks.insert(bob, mark("sub-of-mallory", 200));
+      let _ = state.apply_entries(vec![alice.sign(WorkspaceLogKind::Roster, 2, &other)]);
+      // A later roster that leaves the mark out, or carries an older one.
+      let mut older = roster(3, &[&alice], None, &state);
+      older.provider_marks.insert(bob, mark("sub-of-mallory", 50));
+      state
+        .apply_entries(vec![alice.sign(WorkspaceLogKind::Roster, 3, &older)])
+        .unwrap();
+
+      assert_eq!(state.roster.version, 3);
+      assert_eq!(state.provider_marks[&bob], mark("sub-b", 100));
     }
 
     /// A state whose verified policy counts `moves` provider moves.

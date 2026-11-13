@@ -444,6 +444,35 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.publish_roster(roles).await
   }
 
+  /// An owner corrects the account noted for `user` at the identity provider (issue #1378): when it
+  /// contradicts the one their app signs in with, a server and another account got in first. Signs a
+  /// roster that forgets it, with the floor at the newest token this device got from the provider, so
+  /// only a token issued after this notes an account for them again, as for anybody's first token: the
+  /// one that got in first can't, and the person's own app publishes a newer one by itself. The account
+  /// that got in first is worth closing at the provider. Keeps an edit by hand. Owners only.
+  pub async fn forget_provider_account(&mut self, user: UserId) -> Result<(), CoreError> {
+    self.sync_workspace().await?;
+    let state = self.workspace()?;
+    if !self.is_verified_owner(&state) {
+      return Err(CoreError::NotAnOwner);
+    }
+    let Some(mark) = state.provider_marks.get(&user) else {
+      return Ok(());
+    };
+    if mark.maybe_subject.is_none() {
+      return Ok(());
+    }
+    let forgotten = crate::role_signing::ProviderMark {
+      maybe_subject: None,
+      issued_at: mark.issued_at.max(self.newest_provider_time()),
+      maybe_by_hand: mark.maybe_by_hand,
+    };
+    let mut document = state.roster.clone();
+    keep_newer_marks(&mut document, &state);
+    document.provider_marks.insert(user, forgotten);
+    self.append_roster(document).await
+  }
+
   /// Publishes the current roster with a new org recovery key (owners only).
   pub(crate) async fn publish_org_recovery_key(&mut self, key: &[u8; 32]) -> Result<(), CoreError> {
     self.sync_workspace().await?;

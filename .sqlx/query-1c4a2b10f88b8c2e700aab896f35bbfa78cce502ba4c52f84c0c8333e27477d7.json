@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM role_losses loss\n         USING UNNEST($1::bigint[], $2::bigint[]) AS mark(user_id, issued_at)\n         WHERE loss.user_id = mark.user_id AND loss.issued_at <= mark.issued_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8Array",
+        "Int8Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1c4a2b10f88b8c2e700aab896f35bbfa78cce502ba4c52f84c0c8333e27477d7"
+}

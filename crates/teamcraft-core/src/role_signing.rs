@@ -23,6 +23,11 @@
 //!   it (e2ee.md §3.1.3).
 //! - An owner's edit by hand stands until the provider agrees with it once; after that the provider
 //!   leads again.
+//! - Everybody else's account is noted too, first come (issue #1378): the first verified token of somebody
+//!   not on the roster with no account noted yet, naming the key the server lists and this device pinned,
+//!   if any. That is what makes their key attestation count (e2ee.md §3.1). It changes no role, keeps an
+//!   owner's edit by hand, and a later token of another account is a contradiction, never a change.
+//!   Bounded per roster and in all, as every roster carries every mark.
 //! - After a move to another provider that the owners signed (`provider_moves` in the policy), the
 //!   accounts noted at the old one are forgotten, edits by hand included, and the new provider's are
 //!   noted as for anybody's first token. Only the signed policy starts this.
@@ -182,6 +187,10 @@ pub struct RosterPlanInput<'a> {
   pub pinned: &'a BTreeMap<UserId, [u8; 32]>,
   /// Since when (`provider_now`) this device has seen the server report each person.
   pub reports: &'a BTreeMap<UserId, i64>,
+  /// Accounts of people not on the roster noted in one roster at most: the rest wait for the next.
+  pub max_member_notes: usize,
+  /// Marks a roster carries at most: past it, nobody else's account is noted (it never drops one).
+  pub max_marks: usize,
   /// When this device last took somebody off on a report.
   pub maybe_last_report_removal: Option<i64>,
   /// How long a report has to stand before it counts (seconds, provider's clock).
@@ -204,12 +213,35 @@ pub struct RosterPlan {
   /// The reports still standing, for the next round.
   pub reports: BTreeMap<UserId, i64>,
   pub maybe_last_report_removal: Option<i64>,
+  /// How many of `changes` only note the account of somebody not on the roster.
+  pub member_notes: usize,
+  /// The oldest token among those notes (provider's clock), for how long they have waited.
+  pub maybe_oldest_member_note: Option<i64>,
+  /// More accounts could be noted than one roster takes: the next round goes on.
+  pub has_more_member_notes: bool,
+  /// The roster holds as many marks as it may: accounts wait that can't be noted.
+  pub is_full: bool,
 }
 
 impl RosterPlan {
   /// Whether there is anything to sign.
   pub fn has_changes(&self) -> bool {
     !self.changes.is_empty()
+  }
+
+  /// Whether this is worth a roster of its own: anything but accounts of people not on the roster, or
+  /// `batch` of those, or one that has waited `wait_secs` by `provider_now`. Every roster carries every
+  /// mark, so one per member would grow the log by the square of the workspace.
+  pub fn is_worth_signing(&self, batch: usize, wait_secs: i64, provider_now: i64) -> bool {
+    if self.changes.len() > self.member_notes {
+      return true;
+    }
+    self.member_notes > 0
+      && (self.member_notes >= batch
+        || self.has_more_member_notes
+        || self
+          .maybe_oldest_member_note
+          .is_some_and(|oldest| provider_now.saturating_sub(oldest) >= wait_secs))
   }
 }
 
@@ -352,6 +384,10 @@ pub fn plan_roster(input: RosterPlanInput<'_>) -> RosterPlan {
     if plan.reports.contains_key(&gone.user_id) {
       apply_report(&mut plan, gone, &input);
     }
+  }
+  // Last, so nothing above sees an account noted in the same round.
+  for statement in &statements {
+    note_member_account(&mut plan, statement, &input);
   }
   plan.contradicted.sort();
   plan.contradicted.dedup();
@@ -544,6 +580,73 @@ fn apply_report(plan: &mut RosterPlan, gone: &WithdrawnRole, input: &RosterPlanI
     basis: AutomaticBasis::ServerReport,
     maybe_issued_at: None,
   });
+}
+
+/// The account of somebody not on the roster, first come (issue #1378): their key attestation counts once
+/// it is noted (e2ee.md §3.1). Nothing about roles changes: the token's role was looked at above, and an
+/// owner's edit by hand stays. A token of another account than the one noted is a contradiction for the
+/// owners, never a change; only an owner corrects a noted account.
+fn note_member_account(plan: &mut RosterPlan, statement: &ProviderStatement, input: &RosterPlanInput<'_>) {
+  if plan
+    .members
+    .iter()
+    .any(|member| member.user_id == statement.user_id)
+  {
+    return;
+  }
+  let maybe_mark = plan.marks.get(&statement.user_id).cloned();
+  if let Some(noted) = maybe_mark.as_ref().and_then(|mark| mark.maybe_subject.as_ref()) {
+    if *noted != statement.subject {
+      plan.contradicted.push(statement.user_id);
+    }
+    return;
+  }
+  // One account at the provider is one person, and a token names the key this device pinned, if any.
+  let is_somebody_elses = plan.marks.iter().any(|(user, mark)| {
+    *user != statement.user_id && mark.maybe_subject.as_deref() == Some(statement.subject.as_str())
+  });
+  if is_somebody_elses || !names_the_known_key(plan, statement, input) {
+    plan.contradicted.push(statement.user_id);
+    return;
+  }
+  // Only a token newer than whatever floor is there, and recent: the floors stay through a provider move.
+  if maybe_mark
+    .as_ref()
+    .is_some_and(|mark| statement.issued_at <= mark.issued_at)
+  {
+    return;
+  }
+  if input.provider_now.saturating_sub(statement.issued_at) > input.max_evidence_age_secs {
+    return;
+  }
+  if plan.member_notes >= input.max_member_notes {
+    plan.has_more_member_notes = true;
+    return;
+  }
+  if maybe_mark.is_none() && plan.marks.len() >= input.max_marks {
+    plan.is_full = true;
+    return;
+  }
+  plan.marks.insert(
+    statement.user_id,
+    ProviderMark {
+      maybe_subject: Some(statement.subject.clone()),
+      issued_at: statement.issued_at,
+      maybe_by_hand: maybe_mark.and_then(|mark| mark.maybe_by_hand),
+    },
+  );
+  plan.changes.push(AutomaticChange {
+    user_id: statement.user_id,
+    change: AutomaticChangeKind::Noted,
+    basis: AutomaticBasis::ProviderToken,
+    maybe_issued_at: Some(statement.issued_at),
+  });
+  plan.member_notes += 1;
+  plan.maybe_oldest_member_note = Some(
+    plan
+      .maybe_oldest_member_note
+      .map_or(statement.issued_at, |oldest| oldest.min(statement.issued_at)),
+  );
 }
 
 /// Whether the provider now says what the owner set by hand.
@@ -1251,6 +1354,179 @@ mod tests {
     }
   }
 
+  mod member_accounts {
+    //! Everybody's account, first come (issue #1378).
+    use super::*;
+
+    #[test]
+    fn a_members_first_token_notes_their_account_and_changes_nothing_else() {
+      for role in [ProviderRole::Neither, ProviderRole::NotSaid] {
+        let plan = planned(&roster(), &no_marks(), &[statement(bob(), role, NOW)], &[]);
+        assert_eq!(plan.members, roster().members, "{role:?}");
+        assert_eq!(plan.marks[&bob()], noted("sub-2", NOW));
+        assert_eq!(plan.changes.len(), 1);
+        assert_eq!(plan.changes[0].change, AutomaticChangeKind::Noted);
+        assert_eq!(plan.changes[0].basis, AutomaticBasis::ProviderToken);
+        assert_eq!(plan.member_notes, 1);
+        assert_eq!(plan.maybe_oldest_member_note, Some(NOW));
+        assert!(plan.contradicted.is_empty());
+        // The next round has nothing to sign, and neither has a newer token of the same account.
+        let newer = [statement(bob(), role, NOW + 10)];
+        assert!(!planned(&roster(), &plan.marks, &newer, &[]).has_changes());
+      }
+    }
+
+    #[test]
+    fn a_later_token_of_another_account_is_a_contradiction_not_a_change() {
+      // A server and another realm account got in first, or the other way round: an owner decides.
+      let marks = marked(bob(), "sub-2", NOW - 10);
+      for role in [ProviderRole::Neither, ProviderRole::NotSaid, ProviderRole::Admin] {
+        let mut other = statement(bob(), role, NOW);
+        other.subject = "sub-of-somebody-else".to_owned();
+        let plan = planned(&roster(), &marks, &[other], &[]);
+        assert!(!plan.has_changes(), "{role:?}");
+        assert_eq!(plan.marks, marks);
+        assert_eq!(plan.contradicted, vec![bob()]);
+        assert_eq!(role_of(&plan, bob()), None);
+      }
+    }
+
+    #[test]
+    fn one_account_is_not_noted_for_two_people() {
+      // A realm account that got its token naming another person's user ID: its own account is noted
+      // already, so it can't become theirs too.
+      let marks = marked(carol(), "sub-2", NOW - 10);
+      let plan = planned(
+        &roster(),
+        &marks,
+        &[statement(bob(), ProviderRole::Neither, NOW)],
+        &[],
+      );
+      assert!(!plan.has_changes());
+      assert!(!plan.marks.contains_key(&bob()));
+      assert_eq!(plan.contradicted, vec![bob()]);
+    }
+
+    #[test]
+    fn a_token_naming_another_key_than_the_pinned_one_notes_nothing() {
+      let forged = ProviderStatement {
+        identity_key: Base64Bytes::new(vec![9; 32]),
+        ..statement(bob(), ProviderRole::Neither, NOW)
+      };
+      let pinned = BTreeMap::from([(bob(), [2_u8; 32])]);
+      let plan = plan_roster(RosterPlanInput {
+        pinned: &pinned,
+        ..input(&roster(), &no_marks(), std::slice::from_ref(&forged), &[])
+      });
+      assert!(!plan.has_changes());
+      assert_eq!(plan.contradicted, vec![bob()]);
+    }
+
+    #[test]
+    fn an_old_token_or_one_not_past_the_floor_notes_nothing() {
+      let old = statement(bob(), ProviderRole::Neither, NOW - MAX_AGE - 1);
+      assert!(!planned(&roster(), &no_marks(), &[old], &[]).has_changes());
+      // A floor without an account: after a provider move, or set by a report.
+      let floor = forget_accounts(&marked(bob(), "sub-2", NOW));
+      let replayed = statement(bob(), ProviderRole::Neither, NOW);
+      assert!(!planned(&roster(), &floor, &[replayed], &[]).has_changes());
+      let newer = statement(bob(), ProviderRole::Neither, NOW + 1);
+      let plan = planned(&roster(), &floor, &[newer], &[]);
+      assert_eq!(plan.marks[&bob()], noted("sub-2", NOW + 1));
+    }
+
+    #[test]
+    fn an_owners_edit_by_hand_stays() {
+      let marks = BTreeMap::from([(
+        bob(),
+        ProviderMark {
+          maybe_subject: None,
+          issued_at: NOW - 10,
+          maybe_by_hand: Some(HandRole::Removed),
+        },
+      )]);
+      let plan = planned(
+        &roster(),
+        &marks,
+        &[statement(bob(), ProviderRole::Admin, NOW)],
+        &[],
+      );
+      assert_eq!(
+        role_of(&plan, bob()),
+        None,
+        "removed by hand, against the provider"
+      );
+      assert_eq!(plan.marks[&bob()].maybe_subject.as_deref(), Some("sub-2"));
+      assert_eq!(plan.marks[&bob()].maybe_by_hand, Some(HandRole::Removed));
+    }
+
+    #[test]
+    fn once_noted_a_role_comes_only_from_that_account() {
+      let marks = marked(bob(), "sub-2", NOW - 10);
+      let plan = planned(
+        &roster(),
+        &marks,
+        &[statement(bob(), ProviderRole::Admin, NOW)],
+        &[],
+      );
+      assert_eq!(role_of(&plan, bob()), Some(RosterRole::Admin));
+      let mut other = statement(bob(), ProviderRole::Admin, NOW);
+      other.subject = "sub-of-somebody-else".to_owned();
+      let plan = planned(&roster(), &marks, &[other], &[]);
+      assert_eq!(role_of(&plan, bob()), None);
+      assert_eq!(plan.contradicted, vec![bob()]);
+    }
+
+    #[test]
+    fn bounded_per_roster_and_in_all() {
+      let statements = [
+        statement(bob(), ProviderRole::Neither, NOW),
+        statement(carol(), ProviderRole::Neither, NOW),
+      ];
+      let plan = plan_roster(RosterPlanInput {
+        max_member_notes: 1,
+        ..input(&roster(), &no_marks(), &statements, &[])
+      });
+      assert_eq!(plan.member_notes, 1);
+      assert!(plan.has_more_member_notes);
+      assert!(!plan.is_full);
+
+      let full = marked(user(9), "sub-9", NOW - 10);
+      let plan = plan_roster(RosterPlanInput {
+        max_marks: 1,
+        ..input(&roster(), &full, &statements, &[])
+      });
+      assert!(!plan.has_changes());
+      assert!(plan.is_full);
+      assert_eq!(plan.marks, full, "nobody's mark goes to make room");
+    }
+
+    #[test]
+    fn notes_alone_wait_for_a_batch_or_a_day() {
+      let one = planned(
+        &roster(),
+        &no_marks(),
+        &[statement(bob(), ProviderRole::Neither, NOW)],
+        &[],
+      );
+      assert!(!one.is_worth_signing(2, 100, NOW + 99));
+      assert!(one.is_worth_signing(2, 100, NOW + 100));
+      assert!(one.is_worth_signing(1, 100, NOW));
+      let with_a_role = planned(
+        &roster(),
+        &no_marks(),
+        &[
+          statement(bob(), ProviderRole::Neither, NOW),
+          statement(carol(), ProviderRole::Admin, NOW),
+        ],
+        &[],
+      );
+      assert_eq!(with_a_role.member_notes, 1);
+      assert!(with_a_role.is_worth_signing(50, 100, NOW));
+      assert!(!RosterPlan::default().is_worth_signing(1, 0, NOW));
+    }
+  }
+
   mod provider_move {
     use teamcraft_proto::RoleProvider;
 
@@ -1383,6 +1659,8 @@ mod tests {
       maybe_last_report_removal: None,
       report_grace_secs: GRACE,
       report_interval_secs: GRACE,
+      max_member_notes: 200,
+      max_marks: 8000,
     }
   }
 

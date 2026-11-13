@@ -66,6 +66,11 @@ pub struct RoleSigningRecord {
   /// another key (after a reset) needs another one.
   #[serde(rename = "attested_key", default, skip_serializing_if = "Option::is_none")]
   pub maybe_attested_key: Option<String>,
+  /// The owners signed another account at the provider for this user than the one this device signs
+  /// in with (issue #1378): a server and another account got in first, or the user's account changed.
+  /// Colleagues can't confirm this user's key until an owner corrects it.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_account_mismatched: bool,
 }
 
 /// The token this device published last.
@@ -128,6 +133,11 @@ pub(crate) struct RoleSigningRun {
   /// The attestation this device made sure the server holds since the app started, or the server
   /// refused (e.g. an older server without the endpoint): not asked again until the app starts anew.
   maybe_attestation_settled: Option<String>,
+  /// The last roster left accounts to note: the next round reads the evidence again.
+  has_more_to_note: bool,
+  /// The server refused a roster with more accounts noted (an older server's size limit): until the app
+  /// starts anew, rosters note no further accounts of people not on them.
+  are_member_notes_refused: bool,
 }
 
 #[derive(Debug)]
@@ -162,7 +172,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Ok(is_changed) => {
         self.role_signing.maybe_seen_token = Some(tokens.id_token);
         self.role_signing.maybe_read_connection = maybe_connection;
-        self.role_signing.is_evidence_dirty = false;
+        self.role_signing.is_evidence_dirty = std::mem::take(&mut self.role_signing.has_more_to_note);
         self.role_signing.retries = 0;
         self.role_signing.retry_at_ms = 0;
         Ok(is_changed)
@@ -234,6 +244,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .await?;
     }
     let state = self.workspace()?;
+    self.note_own_account(&state, &claims)?;
     let maybe_roles = unverified_roles(&tokens.id_token, &anchor.client_id, &anchor.roles_claim);
     let role = provider_role(maybe_roles.as_deref(), &anchor);
     let my_entry = state
@@ -268,13 +279,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         tracing::debug!(%error, "the server refused this token, as it should for no role");
       }
       return self
-        .attest_as_member(tokens, &claims, &expected, has_key_claim)
+        .attest_as_member(tokens, &claims, &state, &expected, has_key_claim)
         .await;
     }
     let concerns_me = matches!(role, ProviderRole::Owner | ProviderRole::Admin) || my_entry.is_some();
     if !concerns_me {
       return self
-        .attest_as_member(tokens, &claims, &expected, has_key_claim)
+        .attest_as_member(tokens, &claims, &state, &expected, has_key_claim)
         .await;
     }
     if !has_key_claim {
@@ -394,20 +405,111 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }))
   }
 
-  /// Somebody with no role: their token only attests their identity key, so the attribute is written
-  /// if the token doesn't name it yet. Not again on a realm that showed it doesn't take it, where
-  /// colleagues pin the key on first use as before.
+  /// Somebody with no role: their token attests their identity key, so the attribute is written if the
+  /// token doesn't name it yet. Not again on a realm that showed it doesn't take it, where colleagues pin
+  /// the key on first use as before. Once it does, the token goes to the owners' apps while the roster
+  /// notes no account for this user, or another one (issue #1378).
   async fn attest_as_member(
     &mut self,
     tokens: &ProviderTokens,
     claims: &UnverifiedClaims,
+    state: &WorkspaceState,
     expected: &str,
     has_key_claim: bool,
   ) -> Result<bool, CoreError> {
-    if has_key_claim || self.role_signing.is_attribute_unavailable {
+    if has_key_claim {
+      self.publish_account_evidence(tokens, claims, state).await?;
+      return Ok(false);
+    }
+    if self.role_signing.is_attribute_unavailable {
       return Ok(false);
     }
     self.write_identity_attribute(tokens, claims, expected).await
+  }
+
+  /// Publishes this member's token for the owners' apps to note their account (issue #1378): while the
+  /// roster notes none for them, at most once per `role_evidence_refresh`, so it stays recent; and while
+  /// it notes another one, so the owners hear of the contradiction. Only where owners' apps sign by
+  /// themselves, under a roster.
+  async fn publish_account_evidence(
+    &mut self,
+    tokens: &ProviderTokens,
+    claims: &UnverifiedClaims,
+    state: &WorkspaceState,
+  ) -> Result<(), CoreError> {
+    if state.roster.version == 0
+      || !RoleSigningPolicy::is_automatic(state.policy.maybe_role_signing.as_deref())
+    {
+      return Ok(());
+    }
+    let Some(issued_at) = claims.maybe_issued_at else {
+      return Ok(());
+    };
+    let maybe_mark = state.provider_marks.get(&self.account.user_id);
+    let is_noted = maybe_mark
+      .and_then(|mark| mark.maybe_subject.as_deref())
+      .is_some_and(|noted| Some(noted) == claims.maybe_subject.as_deref());
+    if is_noted {
+      return Ok(());
+    }
+    let mut record = self.role_signing_record()?;
+    let interval_secs = i64::try_from(self.settings.role_evidence_refresh.as_secs()).unwrap_or(i64::MAX);
+    let floor = maybe_mark.map_or(i64::MIN, |mark| mark.issued_at);
+    let is_recent = record.maybe_published.as_ref().is_some_and(|published| {
+      published.role == PublishedRole::Neither
+        && published.issued_at > floor
+        && issued_at.saturating_sub(published.issued_at) < interval_secs
+    });
+    if is_recent {
+      return Ok(());
+    }
+    let request = PutRoleEvidenceRequest {
+      token: tokens.id_token.clone(),
+    };
+    match self.api.put_role_evidence(&request).await {
+      Ok(()) => {},
+      // Nothing a member does depends on it: colleagues pin the key on first use meanwhile.
+      Err(error) if is_permanent_refusal(&error) => {
+        tracing::debug!(%error, "the server refused this member's token");
+      },
+      Err(error) => return Err(error.into()),
+    }
+    record.maybe_published = Some(PublishedEvidence {
+      issued_at,
+      role: PublishedRole::Neither,
+    });
+    records::put_json(&self.store, Table::Workspace, ROLE_SIGNING_KEY, &record)
+  }
+
+  /// Compares the account the owners signed for this user with the one this device signs in with: if
+  /// they differ, a server and another account got in first (or the account changed), and colleagues'
+  /// apps check this user's key against the wrong one. The user hears of it; the owners do through the
+  /// contradiction this user's token shows them. Not while a provider move the owners signed waits for
+  /// its roster: until then the marks name the provider before.
+  fn note_own_account(&self, state: &WorkspaceState, claims: &UnverifiedClaims) -> Result<(), CoreError> {
+    let is_move_unsettled =
+      unsettled_provider_move(state.policy.maybe_role_signing.as_deref(), state.provider_moves).is_some();
+    let maybe_noted = state
+      .provider_marks
+      .get(&self.account.user_id)
+      .and_then(|mark| mark.maybe_subject.as_deref());
+    let is_mismatched = !is_move_unsettled
+      && matches!(
+        (maybe_noted, claims.maybe_subject.as_deref()),
+        (Some(noted), Some(mine)) if noted != mine
+      );
+    let mut record = self.role_signing_record()?;
+    if record.is_account_mismatched == is_mismatched {
+      return Ok(());
+    }
+    if is_mismatched {
+      tracing::warn!(
+        "the owners signed another identity provider account for this user than the one it signs in \
+         with: colleagues can't confirm this user's key until an owner corrects it"
+      );
+    }
+    record.is_account_mismatched = is_mismatched;
+    records::put_json(&self.store, Table::Workspace, ROLE_SIGNING_KEY, &record)
   }
 
   /// The ID token doesn't name this identity key yet: write the attribute, and the next token will.
@@ -675,6 +777,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .collect();
     let secs = |duration: std::time::Duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX);
     let mut record = self.role_signing_record()?;
+    let max_member_notes = if self.role_signing.are_member_notes_refused {
+      0
+    } else {
+      self.settings.member_accounts_per_roster
+    };
     let plan = plan_roster(RosterPlanInput {
       roster: &state.roster,
       marks: &marks,
@@ -688,12 +795,25 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_last_report_removal: record.maybe_last_report_removal,
       report_grace_secs: secs(self.settings.role_report_grace),
       report_interval_secs: secs(self.settings.role_report_interval),
+      max_member_notes,
+      max_marks: self.settings.max_provider_marks,
     });
     record.reports.clone_from(&plan.reports);
     record.maybe_last_report_removal = plan.maybe_last_report_removal;
     records::put_json(&self.store, Table::Workspace, ROLE_SIGNING_KEY, &record)?;
     self.note_what_people_should_know(&plan.contradicted, &plan.reported)?;
-    let has_changes = plan.has_changes() || maybe_move.is_some();
+    if plan.is_full {
+      tracing::warn!(
+        max_provider_marks = self.settings.max_provider_marks,
+        "the roster holds as many accounts as it may: further members' keys stay pinned on first use"
+      );
+    }
+    let is_worth_signing = plan.is_worth_signing(
+      self.settings.member_account_batch,
+      secs(self.settings.member_account_wait),
+      own.issued_at,
+    );
+    let has_changes = is_worth_signing || maybe_move.is_some();
     if has_changes {
       if let Some(moves) = maybe_move {
         tracing::info!(
@@ -715,7 +835,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       if let Some(moves) = maybe_move {
         document.provider_moves = moves;
       }
-      self.append_roster_automatically(document, plan.changes).await?;
+      match self.append_roster_automatically(document, plan.changes).await {
+        Ok(()) => self.role_signing.has_more_to_note = plan.has_more_member_notes,
+        // An older server's limit on a roster's size: what concerns roles goes through without the
+        // accounts, in the next round.
+        Err(CoreError::Api(ApiError::Status { status: 400, .. })) if plan.member_notes > 0 => {
+          tracing::warn!(
+            "the server refused a roster noting members' accounts; rosters note none until restart"
+          );
+          self.role_signing.are_member_notes_refused = true;
+          self.role_signing.has_more_to_note = true;
+          return Ok(false);
+        },
+        Err(error) => return Err(error),
+      }
     }
     // The owner before signed themselves off and couldn't sign the policy under this roster: until
     // somebody does, they could still sign one that names an older roster (A7).

@@ -116,9 +116,10 @@ That makes it a second, independent trust anchor:
 - Other clients verify the token's signature against Keycloak's JWKS, fetched **directly from
   Keycloak**, not through the VPS (the discovery document's `jwks_uri` must be on the issuer's host),
   and check issuer, audience, that it is an ID token, the claim, and that its subject is the account
-  the owners signed for that person: the subject in the roster's provider marks (§3.1.3), which
-  exist for owners and admins. For anybody else a token confirms nothing, and their key is pinned on
-  first use. Implemented for RS256, ES256 and EdDSA
+  the owners signed for that person: the subject in the roster's provider marks (§3.1.3). Owners'
+  apps note it for owners and admins (§3.1.3) and, first come, for every other member whose app
+  published a token (§3.1.4). For somebody with no account noted yet a token confirms nothing, and
+  their key is pinned on first use. Implemented for RS256, ES256 and EdDSA
   ID tokens (`teamcraft-crypto::attestation`). The token's expiry isn't checked: it attests a key, not
   a session. The web app needs the provider to allow its origin for the JWKS (Keycloak: the client's
   web origins); where it can't fetch them it treats keys as not attested.
@@ -129,10 +130,12 @@ That makes it a second, independent trust anchor:
 - **Optional or required** is the signed policy's `role_signing.key_attestation` (admin console,
   Security; default optional). Optional: a key with a valid attestation by the signed account is
   pinned as attested, one without is pinned on first use and marked as not attested. Required: for a
-  person with a signed account, a key without such an attestation isn't pinned. Everybody else is
-  pinned on first use in both modes, so requiring it locks nobody out. For owners and admins the key
-  the owners signed in the roster is used anyway, so today the mode mostly decides what the pin
-  records; it takes full effect once every member's account is signed (#1378).
+  person with a signed account, owner, admin or plain member, a key without such an attestation isn't
+  pinned. Somebody with no account noted yet (their app never published a token, the roster is full,
+  or an owner forgot a wrong one) is pinned on first use in both modes, so requiring it locks nobody
+  out; that is the conservative reading of "required" while accounts are noted first come (§3.1.4).
+  For owners and admins the key the owners signed in the roster is used anyway; for plain members the
+  mode is what decides.
 - **Keys pinned before** stay pinned in both modes, so turning this on never locks anybody out. A key
   pinned without an attestation is looked at again when it is next needed, at most once a day
   (`ClientSettings::attestation_recheck`): once a valid attestation of the *same* key is there, it
@@ -142,9 +145,10 @@ That makes it a second, independent trust anchor:
   the key, or that the app took it as the server handed it out and comparing the safety number is the
   way to be sure.
 - What this protects: a key pinned as attested can only be faked by compromising both the TeamCraft
-  VPS and Keycloak (or the person's own account there). **Today that covers owners and admins only.**
-  Plain members have no owner-signed account yet, so their keys are pinned on first use and the safety
-  number is the check; owner-signed accounts for every member are #1378. It also doesn't cover keys
+  VPS and Keycloak (or the person's own account there), for everybody whose account the owners noted
+  (§3.1.3, §3.1.4). Accounts are noted first come, so a hostile server together with any account in
+  the realm can get in first for somebody whose token no owner's app has seen yet; their own app then
+  says so (§3.1.4). It doesn't cover people with no account noted yet, keys
   pinned on first use before the provider attested them, or
   people whose app never publishes an attestation (a realm without the attribute or mapper, local
   accounts, the integration bridge and other service accounts, meeting guests from outside the
@@ -223,6 +227,7 @@ event, once per gateway connection, and when its own role changed. Nothing runs 
 | No role claim at all                                               | Nothing, in either direction: the mapper may just be missing |
 | Another account than the one noted for this person                 | Nothing; contradictory, an owner hears of it                 |
 | The first token of somebody already on the roster, with their role | Notes their account (one roster write), changes nothing else |
+| The first token of somebody off the roster, no account noted       | Notes their account, first come (§3.1.4), no role            |
 
 **Freshness and replay, without anybody's clock.** Each person has a **mark** in the signed roster
 (`provider_marks`): their account (`sub`) and the `iat` of the newest token that counted. A token changes
@@ -391,6 +396,88 @@ older apps, which ignore it.
 (`TeamCraft::note_id_token`, and `take_id_token_request` for a new one), so they publish evidence and sign like desktop and web. Channel
 role logs need no token: its upkeep founds them like every other app's (§4.6.1, "Founding at first sight"). The notification extension
 leaves upkeep to the app, so it neither gets an ID token nor asks for one, and founding only reads the MLS group, it doesn't change it.
+
+### 3.1.4 Every member's account (issue #1378)
+
+A key attestation (§3.1) counts only against the account the owners signed for the person, and §3.1.3
+notes it only for owners and admins. So that plain members' keys are confirmed too, owners' apps note
+everybody's account, with the same machinery and nobody asked.
+
+**First come.** Every app with a provider session publishes its ID token (`PUT /me/role-evidence`) while
+the roster notes no account for its user, at most once per `role_evidence_refresh` (a day), so it stays
+recent. The server keeps it only for somebody whose account the newest roster doesn't note, or notes
+as another one than the token's (`for_account` in the table). An owner's app verifies it like role
+evidence and notes the token's subject (`sub`) in the person's mark (`AutomaticChangeKind::Noted`,
+`plan_roster`'s last step) if:
+
+- the person is not on the roster (role holders follow §3.1.3) and has no account noted;
+- the token verifies against the pinned provider and names the person's user ID and the key the server
+  lists for them, and the key this owner's device pinned for them, if it pinned one;
+- no other person has that account noted (one account, one person);
+- it is newer than the mark's floor, if there is one (a provider move or a correction leaves one), and
+  not older than `role_evidence_max_age` (30 days) by the provider's clock.
+
+Noting gives no role, and keeps an owner's edit by hand. **A later token of another account** for the
+same person changes nothing: the owners' apps report it as a contradiction (`Contradictory`), never
+replace a noted account by themselves.
+
+**The person's own app checks.** Every app compares the account noted for its user with the `sub` of
+its own ID token (`note_own_account`). If they differ, a server and another realm account got in first
+(or the account at the provider changed): the app tells the user (`is_account_mismatched`, a line above
+the app: colleagues can't confirm their key) and keeps publishing its token, which shows the owners the
+contradiction. Not while a provider move the owners signed waits for its roster.
+
+**Only an owner corrects it** (`Client::forget_provider_account`): a roster that forgets the noted
+account and raises the person's floor to the newest token the owner's device got from the provider. So
+neither the token that got in first nor any other from before the correction can note an account again;
+the person's app publishes a newer one by itself, which is noted as above. The account that got in
+first is worth closing at the provider, as it could try again with a fresh token while the server helps.
+The console button for this is #1880; until then it is a core call.
+
+**Where the marks live, and how many.** In the signed roster, like the role holders' (`provider_marks`):
+one chain every client verifies already, with every rule above (marks only move forward on every
+device, a roster an older owner's app signs without them changes nothing, a provider move forgets
+them). The roster is signed as a roster log entry, so the marks are covered by that signature and its
+domain (`WorkspaceLog::Roster`); there is no new signed document. The cost is that every roster carries
+every mark, about 100 bytes each, so:
+
+- **Batches.** An owner's app signs a roster only to note accounts once `member_account_batch` (50)
+  wait, or one has waited `member_account_wait` (a day, provider's clock), or anything else is signed
+  anyway. One roster per member would grow the log by the square of the workspace.
+- **Pages.** One roster notes at most `member_accounts_per_roster` (200); the server lists members'
+  tokens a page at a time (200, the longest waiting first), apart from the role holders', which they
+  never crowd out. A full page makes the next round read the next one. The server wakes the owners'
+  apps for the first waiting token and every 50th, not for each.
+- **A ceiling.** A roster carries at most `max_provider_marks` (8,000) marks. Past it nobody else's
+  account is noted (none is dropped to make room) and their keys stay pinned on first use; the owners'
+  apps log it. The server takes rosters up to 1 MiB (policies stay at 64 KiB); a server from before
+  this refuses a larger roster, and an owner's app that sees that notes no further members' accounts
+  until it starts anew, so role changes still go through. A separate, incremental document for
+  workspaces beyond the ceiling is #1881.
+
+**Residual risks.**
+
+- First come is trust on first use, moved from each device to the owners' apps: a server that is
+  hostile before a member's first token reaches an owner's app, together with any account in the realm
+  (whose user writes the member's user ID into their own attribute), gets that account noted for the
+  member. It needs the member's key on the server swapped too, which colleagues who pinned the real one
+  see as a key change. The member's own app tells them; until an owner corrects it, that account's key
+  counts as attested for them.
+- It also closes the window §3.1.3 leaves for role evidence: once a member's account is noted, a first
+  role token for them has to come from that account, so a provider admin together with the server can
+  no longer have an owner's app take their own token for somebody else's.
+- Nobody's account is noted under manual signing (`role_signing.mode = manual`), as nothing is signed
+  by itself there; members' apps don't publish then.
+- Attestations still don't expire (§3.1, "Known limit, old attestations"); that is a follow-up.
+
+**Compatibility.** Owners' apps from before this note no members' accounts and keep the marks they
+didn't write, as for every mark. Members' apps from before don't publish their token, and their keys
+stay pinned on first use. A server from before keeps no member's token (it answers as before and
+stores nothing). Nothing locks anybody out.
+
+**Mobile.** The logic is in the shared core: Android and iOS hand their ID token over
+(`TeamCraft::note_id_token`, issue #1288) and publish and check like desktop and web. The line about a
+mismatched account is in the shared web and desktop UI; the phones' own UI doesn't show it yet (#1880).
 
 ### 3.1.2 Tokens bound to a device: DPoP (issue #120)
 
