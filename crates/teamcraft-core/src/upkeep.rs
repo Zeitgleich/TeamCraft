@@ -16,6 +16,7 @@
 //! changed it; `key_bag_update` events bring other devices' changes in between. The timer only
 //! paces retries after a failure and local checks that rarely lead to a request.
 
+use std::future::Future;
 use std::time::Duration;
 
 use crate::api::ServerApi;
@@ -122,14 +123,14 @@ impl Upkeep {
   /// (the UI re-reads it then). Failures are logged and retried on a later tick: offline, every step
   /// fails fast.
   pub async fn tick<A: ServerApi, S: LocalStore>(&mut self, client: &mut Client<A, S>) -> bool {
-    self.tick_with::<A, S, true>(client).await
+    self.tick_with::<A, S, InPlace>(client).await
   }
 
   /// [`Self::tick`] without the member-only rounds, for a host that runs them itself with
   /// [`Self::run_member_rounds`] after every tick (the web client, from the signed-in app's module).
-  /// A separate monomorphization: its code doesn't reference theirs.
+  /// Its code doesn't reference theirs ([`LeftToHost`]), so a split build can leave them out.
   pub async fn tick_shared<A: ServerApi, S: LocalStore>(&mut self, client: &mut Client<A, S>) -> bool {
-    self.tick_with::<A, S, false>(client).await
+    self.tick_with::<A, S, LeftToHost>(client).await
   }
 
   /// The rounds [`Self::tick_shared`] left out, on the same schedule as in [`Self::tick`]: the
@@ -152,8 +153,8 @@ impl Upkeep {
     self.is_workspace_signing_due
   }
 
-  /// The body of [`Self::tick`] (`MEMBER_ROUNDS`) and [`Self::tick_shared`].
-  async fn tick_with<A: ServerApi, S: LocalStore, const MEMBER_ROUNDS: bool>(
+  /// The body of [`Self::tick`] and [`Self::tick_shared`].
+  async fn tick_with<A: ServerApi, S: LocalStore, R: MemberRounds>(
     &mut self,
     client: &mut Client<A, S>,
   ) -> bool {
@@ -162,11 +163,11 @@ impl Upkeep {
     let interval_ms = i64::try_from(self.interval.as_millis()).unwrap_or(i64::MAX);
     let mut is_changed = false;
     if self.is_account_sync_due(client, now, interval_ms) {
-      is_changed |= self.sync_account::<A, S, MEMBER_ROUNDS>(client, now).await;
+      is_changed |= self.sync_account::<A, S, R>(client, now).await;
     }
     if now.saturating_sub(self.last_local_check_ms) >= interval_ms {
       self.last_local_check_ms = now;
-      self.check_workspace::<A, S, MEMBER_ROUNDS>(client).await;
+      self.check_workspace::<A, S, R>(client).await;
       // Conversations a sync had to skip (a 403 right after a removal, a group in a bad state);
       // a local read that asks the server only for conversations that are marked.
       match client.resync_marked_conversations().await {
@@ -190,9 +191,7 @@ impl Upkeep {
         tracing::debug!(%error, "abandoned device registrations not revoked yet");
       }
     }
-    if MEMBER_ROUNDS {
-      is_changed |= sign_and_remove(client).await;
-    }
+    is_changed |= R::run(client, MemberRound::RolesAndLeavers).await;
     // Key packages expire; a device that runs for weeks renews them in time (e2ee.md §4.3).
     if let Err(error) = client.renew_key_packages_if_due().await {
       tracing::debug!(%error, "key packages not renewed yet");
@@ -326,7 +325,7 @@ impl Upkeep {
     is_wanted && (!self.has_failed || now.saturating_sub(self.last_attempt_ms) >= interval_ms)
   }
 
-  async fn sync_account<A: ServerApi, S: LocalStore, const MEMBER_ROUNDS: bool>(
+  async fn sync_account<A: ServerApi, S: LocalStore, R: MemberRounds>(
     &mut self,
     client: &mut Client<A, S>,
     now: i64,
@@ -360,23 +359,22 @@ impl Upkeep {
     if let Err(error) = client.rewrap_for_current_org_key().await {
       tracing::debug!(%error, "backup key not wrapped to the new org key yet");
     }
-    self.check_workspace::<A, S, MEMBER_ROUNDS>(client).await;
+    self.check_workspace::<A, S, R>(client).await;
     true
   }
 
   /// Owners keep the signed roster fresh (a no-op for everyone else and while it is), a roster
   /// newer than the one verified is fetched, and channel admins found the role logs of channels from
-  /// before signed roles. All only ask the server when the local state says so. Without
-  /// `MEMBER_ROUNDS` the signing waits for [`Self::run_member_rounds`].
-  async fn check_workspace<A: ServerApi, S: LocalStore, const MEMBER_ROUNDS: bool>(
+  /// before signed roles. All only ask the server when the local state says so. Left to the host
+  /// ([`LeftToHost`]), the signing waits for [`Self::run_member_rounds`].
+  async fn check_workspace<A: ServerApi, S: LocalStore, R: MemberRounds>(
     &mut self,
     client: &mut Client<A, S>,
   ) {
-    if MEMBER_ROUNDS {
-      refresh_roster(client).await;
-    } else {
+    if !R::IS_IN_PLACE {
       self.is_workspace_signing_due = true;
     }
+    R::run(client, MemberRound::Roster).await;
     if let Err(error) = client.check_workspace_head().await {
       tracing::debug!(%error, "workspace head not checked yet");
     }
@@ -386,9 +384,65 @@ impl Upkeep {
     if let Err(error) = client.read_due_channel_roles().await {
       tracing::debug!(%error, "channel role logs due after a removal not read yet");
     }
-    if MEMBER_ROUNDS {
-      found_channels(client).await;
+    R::run(client, MemberRound::Channels).await;
+  }
+}
+
+/// Where [`Upkeep`]'s member-only rounds run. A type, not a flag: an `.await` behind a constant
+/// `false` stays in the state machine, and with it the code it awaits.
+trait MemberRounds {
+  const IS_IN_PLACE: bool;
+
+  /// Runs `round`; whether the store may have changed.
+  fn run<A: ServerApi, S: LocalStore>(
+    client: &mut Client<A, S>,
+    round: MemberRound,
+  ) -> impl Future<Output = bool>;
+}
+
+/// The rounds run in the tick ([`Upkeep::tick`]).
+struct InPlace;
+
+/// The host runs them ([`Upkeep::tick_shared`], then [`Upkeep::run_member_rounds`]).
+struct LeftToHost;
+
+/// A member-only round, at its place in the tick.
+#[derive(Clone, Copy, Debug)]
+enum MemberRound {
+  /// Owners re-sign the roster, first in the workspace check.
+  Roster,
+  /// Channel admins found role logs, last in it.
+  Channels,
+  /// Roles and leavers, after the local checks.
+  RolesAndLeavers,
+}
+
+impl MemberRounds for InPlace {
+  const IS_IN_PLACE: bool = true;
+
+  async fn run<A: ServerApi, S: LocalStore>(client: &mut Client<A, S>, round: MemberRound) -> bool {
+    match round {
+      MemberRound::Roster => {
+        refresh_roster(client).await;
+        false
+      },
+      MemberRound::Channels => {
+        found_channels(client).await;
+        false
+      },
+      MemberRound::RolesAndLeavers => sign_and_remove(client).await,
     }
+  }
+}
+
+impl MemberRounds for LeftToHost {
+  const IS_IN_PLACE: bool = false;
+
+  fn run<A: ServerApi, S: LocalStore>(
+    _client: &mut Client<A, S>,
+    _round: MemberRound,
+  ) -> impl Future<Output = bool> {
+    std::future::ready(false)
   }
 }
 
