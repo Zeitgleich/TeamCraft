@@ -184,6 +184,9 @@ web-sys = { version = "0.3.83", features = [
 ] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+# Strict channels (e2ee.md §4.6.2, tests/suite/strict_channels.rs): the tests' leaves announce the
+# capability, which the apps don't yet (issue #1896).
+teamcraft-crypto = { path = "../teamcraft-crypto", features = ["strict-channels"] }
 tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
 # The call view the apps keep from the call events, for the roster tests (tests/suite/calls.rs).
 teamcraft-client-api = { path = "../teamcraft-client-api" }

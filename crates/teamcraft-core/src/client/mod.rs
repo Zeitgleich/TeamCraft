@@ -73,6 +73,7 @@ mod server_changes;
 pub(crate) mod server_deletions;
 mod sources;
 mod space_deletion;
+mod strict_channels;
 mod sync;
 mod sync_progress;
 mod sync_trace;
@@ -165,6 +166,7 @@ pub use sources::HistoryScan;
 pub use space_deletion::{
   ChannelRenamer, RenamerRole, SpaceDeletionPreview, SpaceDeletionPreviewChannel, space_deletion_preview,
 };
+pub use strict_channels::{StrictRejoinHold, StrictRejoinPrompt, StrictStop};
 pub use sync_progress::{SyncProgressSignal, notify_sync_progress_during};
 pub use sync_trace::SyncPhase;
 use teamcraft_crypto::membership::ChangeId;
@@ -269,6 +271,11 @@ pub struct ClientSettings {
   /// times): each answer costs a commit, and a broken or malicious device could ask far more often
   /// than `rejoin_retry` (issue #149).
   pub rejoin_cooldown: std::time::Duration,
+  /// In a strict channel, members who aren't its admins answer a device's rejoin request only after
+  /// this long, and a device that fell out asks its user before it takes such a member's welcome:
+  /// the welcome back should come from an admin of the roles it knew (e2ee.md §4.6.2, "Falling out
+  /// in a strict channel").
+  pub strict_rejoin_wait: std::time::Duration,
   /// How long after this device saw a change the server reports of a channel (archived, made
   /// private, ...) a member's encrypted announcement of it may come and still name who made it
   /// (issue #818), measured on the server's clock from the newest message known then. Later
@@ -546,6 +553,9 @@ pub struct Client<A, S> {
   /// Conversations whose MLS queue was caught up since the gateway (re)connected; the outbox
   /// sends into the others only after catching up (e2ee.md §4.6).
   mls_current: std::collections::BTreeSet<ConversationId>,
+  /// The strict channel whose group this device is continuing from its stop (e2ee.md §4.6.2, D4):
+  /// its next commit goes to the rewind instead of the queue's next epoch.
+  maybe_strict_rewind: Option<ConversationId>,
   /// What one pass over a conversation's MLS queue read for all its entries (issue #972); `None`
   /// outside of a pass, where each entry reads afresh.
   maybe_backlog_reads: Option<groups::BacklogReads>,
@@ -630,6 +640,7 @@ impl Default for ClientSettings {
       max_instant_meeting: std::time::Duration::from_secs(8 * 60 * 60),
       pending_addition_expiry: std::time::Duration::from_secs(90 * 24 * 60 * 60),
       rejoin_cooldown: std::time::Duration::from_secs(30 * 60),
+      strict_rejoin_wait: std::time::Duration::from_secs(7 * 24 * 60 * 60),
       change_announcement_window: std::time::Duration::from_secs(10 * 60),
       removed_sender_retention_leeway: std::time::Duration::from_secs(24 * 60 * 60),
       dm_welcome_timeout: std::time::Duration::from_secs(2 * 60),
@@ -785,6 +796,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       leavers: Default::default(),
       last_key_package_check_ms: i64::MIN,
       mls_current: Default::default(),
+      maybe_strict_rewind: None,
       maybe_backlog_reads: None,
       thread_turn_began_ms: i64::MIN,
       maybe_replay_left: None,

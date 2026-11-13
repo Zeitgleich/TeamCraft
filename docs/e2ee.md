@@ -3358,6 +3358,46 @@ independent crypto review of these points is still asked for before any app swit
 - **Still open** in the crypto part: a strict channel's renames and moves by its admins (§4.6.5, D5)
   still follow §4.6.5's member rule.
 
+**The app and server part** (#1896, first part; `strict-channels` still off). In `teamcraft-core`
+(`client/strict_channels.rs`) and `teamcraft-server`:
+
+- **Stopping** (D4): in a strict group, a commit `process_message` refuses (any error but
+  `is_strict_retry`) stops the device at its epoch. The stop (`StrictStop`: epoch, the refused entry,
+  its claimed signer, the reason) is written with the group state and the cursor past the entry. While
+  the group is still in that epoch: entries of later epochs are passed over (not "behind"), no rejoin
+  request goes out, the outbox counts as caught up and keeps the content key, and every commit of the
+  device's own is refused before it is posted (`StrictStopped`). The next commit for the epoch that
+  merges ends the stop with the epoch.
+- **A retry** (`StrictRosterNeeded`, `RosterUnknown`) reads the workspace logs and judges again; a
+  failed read holds the entry (the cursor stays). A roster that still doesn't judge the signer makes the
+  device behind, so it is brought back like one that fell out (the table above).
+- **Continuing**: `continue_strict_channel` commits "Remove {name}" (a signed removal) or an empty
+  commit (a leaf refresh) for the stopped epoch and posts it to `POST …/mls/rewind`. The server checks
+  membership, a channel, `manage_channel_roles` and the device; in one transaction it drops the commits
+  from that epoch on and every entry of later epochs (the epoch's own proposals, key messages and the
+  welcomes into it stay), drops newer group information, sets the epoch back, appends the commit and
+  writes the audit row `mls_group_rewound`. An epoch the group hasn't reached is an epoch conflict; the
+  current one is an ordinary commit. No migration: the audit log is the generic one.
+- **Roles**: `set_strict_roles` signs the change (a channel admin of the context with a leaf, otherwise
+  a workspace signer at the newest roster's version, D3), mirrors the role log head, and commits it
+  after reading the roster. Only for a private channel (`NotStrictCapable` for DMs, meeting chats, the
+  notes and public channels); a strict channel isn't converted to public before strict is off.
+- **The roles a device knew** go to the account data (`strict_roles`, merged by the higher epoch; an
+  entry without roles once a merged commit turned strict off) after every merged commit. A device
+  that fell out (it has the group or asked to be added back) opens a welcome back only after
+  `check_strict_sender` against them, or one without the extension only if it saw strict turned off.
+  Otherwise the welcome is refused and held (`StrictRejoinHold`, with who is new and gone against its
+  last tree); `strict_rejoin_prompt` says when the user may decide (`strict_rejoin_wait`, 7 days, or
+  at once when the user is the only known admin) and `accept_strict_rejoin` asks again and takes the
+  next welcome. A further device of the user, never in the group, joins as before.
+- **Answering rejoin requests**: in a strict group, members who are neither its admins nor workspace
+  admins answer only after `strict_rejoin_wait`.
+- **Not yet**: the ready and leaf refresh steps (2 and 3), a workspace signer outside the group
+  (the server's hint of the current version and hash), the welcome's tree diff as a timeline line, a
+  role log "off" as permission for a welcome without the extension, key package stock replacement on
+  update, the server's early refusal and UI hint, and D5's admin class for renames. Until they are in,
+  the feature stays off and no channel turns strict.
+
 ### 4.6.3 Noticing a withheld channel role change (issue #876)
 
 **Status: implemented** as decided (D1 to D4, end of this section, decided by the owner on 2026-11-05); "How it

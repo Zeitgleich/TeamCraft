@@ -647,3 +647,115 @@ mod delivery_over_the_gateway {
     app.stop().await;
   }
 }
+
+/// A strict channel's admin continues its group from the last good epoch (e2ee.md §4.6.2, D4).
+mod rewind {
+  use super::*;
+
+  async fn rewind(app: &TestApp, user: &TestUser, channel: &str, device: &str, epoch: u64) -> Reply {
+    app
+      .post(
+        user,
+        &format!("/conversations/{channel}/mls/rewind"),
+        json!({"device_id": device, "epoch": epoch, "commit": b64(&format!("rewind-{epoch}")), "group_info": b64("info-rewound")}),
+      )
+      .await
+  }
+
+  #[tokio::test]
+  async fn an_admin_drops_what_was_built_on_a_refused_commit_and_continues() {
+    let app = app!();
+    let g = group(&app).await;
+    let alice = owner();
+    let alice_device = register_device(&app, &alice).await;
+    commit(&app, &g.carol, &g.channel, &g.carol_device, 0, json!([])).await;
+    // The refused commit of epoch 1, a welcome it made and an entry built on it.
+    let refused = commit(
+      &app,
+      &g.dave,
+      &g.channel,
+      &g.dave_device,
+      1,
+      json!([{"device_id": g.carol_device, "welcome": b64("welcome-2")}]),
+    )
+    .await;
+    assert_eq!(refused.status, StatusCode::CREATED, "{}", refused.body);
+    commit(&app, &g.dave, &g.channel, &g.dave_device, 2, json!([])).await;
+
+    let reply = rewind(&app, &alice, &g.channel, &alice_device, 1).await;
+
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    assert_eq!(reply.body["new_epoch"], 2);
+    assert_eq!(reply.body["commit"]["epoch"], 1);
+    let backlog = app
+      .get(&g.carol, &format!("/conversations/{}/mls", g.channel))
+      .await;
+    assert_eq!(backlog.body["current_epoch"], 2);
+    let payloads: Vec<String> = backlog.body["messages"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .filter(|m| m["kind"] == "commit")
+      .map(|m| m["payload"].as_str().unwrap().to_owned())
+      .collect();
+    assert_eq!(payloads, vec![b64("commit-0"), b64("rewind-1")]);
+    // The refused commit's welcome went with it.
+    let welcomes = app
+      .get(&g.carol, &format!("/devices/{}/welcomes", g.carol_device))
+      .await;
+    assert_eq!(welcomes.body["messages"], json!([]), "{}", welcomes.body);
+    // The group information is the rewind's.
+    let info = app
+      .get(&g.carol, &format!("/conversations/{}/mls/group-info", g.channel))
+      .await;
+    assert_eq!(info.body, json!({"epoch": 2, "group_info": b64("info-rewound")}));
+    // The chain goes on from there.
+    let next = commit(&app, &g.carol, &g.channel, &g.carol_device, 2, json!([])).await;
+    assert_eq!(next.status, StatusCode::CREATED, "{}", next.body);
+    // An audit row names who did it.
+    let audit = app.get(&admin(), "/admin/audit?limit=50").await;
+    let entries = audit.body["entries"].as_array().unwrap();
+    assert!(
+      entries.iter().any(|entry| entry["action"] == "mls_group_rewound"),
+      "{}",
+      audit.body
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_plain_member_may_not_rewind() {
+    let app = app!();
+    let g = group(&app).await;
+    commit(&app, &g.carol, &g.channel, &g.carol_device, 0, json!([])).await;
+    commit(&app, &g.dave, &g.channel, &g.dave_device, 1, json!([])).await;
+
+    let reply = rewind(&app, &g.carol, &g.channel, &g.carol_device, 1).await;
+
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+    let backlog = app
+      .get(&g.carol, &format!("/conversations/{}/mls", g.channel))
+      .await;
+    assert_eq!(backlog.body["current_epoch"], 2);
+    assert_eq!(kinds(&backlog), vec!["commit", "commit"]);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn an_epoch_the_group_has_not_reached_is_a_conflict() {
+    let app = app!();
+    let g = group(&app).await;
+    let alice = owner();
+    let alice_device = register_device(&app, &alice).await;
+    commit(&app, &g.carol, &g.channel, &g.carol_device, 0, json!([])).await;
+
+    let ahead = rewind(&app, &alice, &g.channel, &alice_device, 3).await;
+    assert_eq!(ahead.status, StatusCode::CONFLICT, "{}", ahead.body);
+    assert_eq!(ahead.error_code(), "epoch_conflict");
+    // The current epoch itself takes it like an ordinary commit.
+    let current = rewind(&app, &alice, &g.channel, &alice_device, 1).await;
+    assert_eq!(current.status, StatusCode::CREATED, "{}", current.body);
+    assert_eq!(current.body["new_epoch"], 2);
+    app.stop().await;
+  }
+}

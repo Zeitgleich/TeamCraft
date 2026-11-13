@@ -235,6 +235,7 @@ impl PendingEnrollment {
       leavers: Default::default(),
       last_key_package_check_ms: i64::MIN,
       mls_current: Default::default(),
+      maybe_strict_rewind: None,
       maybe_backlog_reads: None,
       thread_turn_began_ms: i64::MIN,
       maybe_replay_left: None,

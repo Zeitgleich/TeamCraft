@@ -33,6 +33,20 @@ pub enum CommitOutcome {
   EpochConflict { current_epoch: u64 },
 }
 
+/// Result of a strict channel's rewind ([`Database::rewind_mls`]).
+#[derive(Debug, Clone)]
+pub enum RewindOutcome {
+  /// The group is now in `new_epoch`; it was in `dropped_from_epoch`, and `dropped_entries`
+  /// queue entries went.
+  Accepted {
+    new_epoch: u64,
+    dropped_from_epoch: u64,
+    dropped_entries: u64,
+  },
+  /// The group isn't in that epoch yet.
+  EpochConflict { current_epoch: u64 },
+}
+
 /// Result of posting a proposal or application message.
 #[derive(Debug, Clone)]
 pub enum PostOutcome {
@@ -96,6 +110,78 @@ impl Database {
     tx.commit().await?;
     Ok(CommitOutcome::Accepted {
       new_epoch: u64::try_from(new_epoch).unwrap_or(u64::MAX),
+    })
+  }
+
+  /// Continues a strict channel's group from `epoch` (e2ee.md §4.6.2, "A commit that is refused",
+  /// D4): drops the commits from that epoch on, every other entry after it and the group
+  /// information past it, sets the epoch back and appends `commit` (and its welcomes) for `epoch`,
+  /// with `audit`, in one transaction. Entries of `epoch` itself other than its commit (proposals,
+  /// key messages, the welcomes into it) stay: they belong to the last good epoch. A group already
+  /// in `epoch` takes the commit like [`Self::post_mls_commit`]; one behind it is an epoch
+  /// conflict.
+  #[allow(clippy::too_many_arguments)]
+  pub async fn rewind_mls(
+    &self,
+    conversation: ConversationId,
+    epoch: u64,
+    sender: DeviceId,
+    commit: &NewMlsMessage<'_>,
+    welcomes: &[NewMlsMessage<'_>],
+    maybe_group_info: Option<&[u8]>,
+    audit: &crate::NewAuditEntry<'_>,
+  ) -> Result<RewindOutcome, DbError> {
+    let epoch_db = epoch_to_db(epoch)?;
+    let mut tx = self.pool().begin().await?;
+    ensure_head(&mut tx, conversation).await?;
+    let current = sqlx::query_scalar!(
+      "SELECT epoch FROM mls_epoch_heads WHERE conversation_id = $1 FOR UPDATE",
+      to_db(conversation),
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if current < epoch_db {
+      return Ok(RewindOutcome::EpochConflict {
+        current_epoch: u64::try_from(current).unwrap_or(u64::MAX),
+      });
+    }
+    let dropped = sqlx::query!(
+      r#"DELETE FROM mls_messages
+         WHERE conversation_id = $1 AND (epoch > $2 OR (epoch = $2 AND kind = 'commit'))"#,
+      to_db(conversation),
+      epoch_db,
+    )
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    sqlx::query!(
+      "DELETE FROM mls_group_infos WHERE conversation_id = $1 AND epoch > $2",
+      to_db(conversation),
+      epoch_db,
+    )
+    .execute(&mut *tx)
+    .await?;
+    let new_epoch = epoch_db + 1;
+    sqlx::query!(
+      "UPDATE mls_epoch_heads SET epoch = $2 WHERE conversation_id = $1",
+      to_db(conversation),
+      new_epoch,
+    )
+    .execute(&mut *tx)
+    .await?;
+    insert_message(&mut tx, conversation, epoch_db, sender, commit).await?;
+    for welcome in welcomes {
+      insert_message(&mut tx, conversation, new_epoch, sender, welcome).await?;
+    }
+    if let Some(group_info) = maybe_group_info {
+      store_group_info(&mut tx, conversation, new_epoch, group_info).await?;
+    }
+    Database::record_audit_in(&mut tx, audit).await?;
+    tx.commit().await?;
+    Ok(RewindOutcome::Accepted {
+      new_epoch: u64::try_from(new_epoch).unwrap_or(u64::MAX),
+      dropped_from_epoch: u64::try_from(current).unwrap_or(u64::MAX),
+      dropped_entries: dropped,
     })
   }
 

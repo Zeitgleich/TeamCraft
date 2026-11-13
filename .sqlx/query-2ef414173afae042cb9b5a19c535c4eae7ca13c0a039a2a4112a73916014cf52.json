@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM mls_group_infos WHERE conversation_id = $1 AND epoch > $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2ef414173afae042cb9b5a19c535c4eae7ca13c0a039a2a4112a73916014cf52"
+}

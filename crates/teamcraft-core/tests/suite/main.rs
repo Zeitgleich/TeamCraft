@@ -85,6 +85,7 @@ mod single_image;
 mod slow_disk;
 mod snapshot_cache;
 mod store_integrity;
+mod strict_channels;
 mod sync_engine;
 mod sync_heads;
 mod unseen_reactions;

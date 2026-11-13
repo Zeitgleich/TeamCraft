@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE mls_epoch_heads SET epoch = $2 WHERE conversation_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "713fcbbe023eef8d07da21e06a1bcb05595d6adc72ded0a00cccc9eab40ed33d"
+}

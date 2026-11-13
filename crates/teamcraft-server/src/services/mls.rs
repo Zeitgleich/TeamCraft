@@ -3,7 +3,9 @@
 
 use std::collections::HashSet;
 
-use teamcraft_db::{CommitOutcome, MlsBacklogQuery, NewMlsMessage, PostOutcome, StoredMlsMessage};
+use teamcraft_db::{
+  CommitOutcome, MlsBacklogQuery, NewMlsMessage, PostOutcome, RewindOutcome, StoredMlsMessage,
+};
 use teamcraft_proto::{
   Base64Bytes, ConversationId, ConversationKind, DeviceId, ErrorCode, GatewayEvent, ListMlsMessagesQuery,
   ListMlsMessagesResponse, MlsGroupInfoResponse, MlsMessageId, MlsMessageKind, MlsMessageResponse,
@@ -12,6 +14,7 @@ use teamcraft_proto::{
 };
 
 use super::access::{load_conversation, require};
+use super::audit::Target as AuditTarget;
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -26,6 +29,123 @@ pub async fn post_commit(
   if !access.is_member() {
     return Err(ApiError::Forbidden("only members can commit".into()));
   }
+  let checked = check_commit(state, caller, conversation, &request).await?;
+  let (commit, welcomes) = checked.messages(&request);
+  let outcome = state
+    .database
+    .post_mls_commit(
+      conversation,
+      request.epoch,
+      request.device_id,
+      &commit,
+      &welcomes,
+      checked.maybe_group_info(&request),
+    )
+    .await?;
+  let new_epoch = match outcome {
+    CommitOutcome::Accepted { new_epoch } => new_epoch,
+    CommitOutcome::EpochConflict { current_epoch } => return Err(ApiError::EpochConflict { current_epoch }),
+  };
+  Ok(publish_commit(
+    state,
+    conversation,
+    &request,
+    &checked,
+    &commit,
+    &welcomes,
+    new_epoch,
+  ))
+}
+
+/// Continues a strict channel's group from the last good epoch (e2ee.md §4.6.2, "A commit that
+/// is refused", D4): a channel admin's or workspace admin's commit for `request.epoch` replaces
+/// what the queue holds from there, in one transaction with an audit row. Nothing about it is
+/// signed or needs to be: the first commit per epoch has always been the server's word, and the
+/// members judge this one like any other. A device already past that epoch ignores it.
+pub async fn rewind(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  conversation: ConversationId,
+  request: PostMlsCommitRequest,
+) -> Result<PostMlsCommitResponse, ApiError> {
+  let access = load_conversation(state, caller, conversation).await?;
+  if !access.is_member() {
+    return Err(ApiError::Forbidden("only members can commit".into()));
+  }
+  // Only a channel can be strict (e2ee.md §4.6.2): a DM, a meeting chat or the notes never.
+  if access.view.conversation.kind != ConversationKind::Channel {
+    return Err(ApiError::InvalidRequest(
+      "only a channel's group is continued".into(),
+    ));
+  }
+  require(state, caller, Permission::ManageChannelRoles, &access.target())?;
+  let checked = check_commit(state, caller, conversation, &request).await?;
+  let (commit, welcomes) = checked.messages(&request);
+  let target = AuditTarget::new("conversation", conversation);
+  let detail = serde_json::json!({
+    "epoch": request.epoch,
+    "device_id": request.device_id,
+  })
+  .to_string();
+  let mut audit = super::audit::prepared(state, caller.user.id, "mls_group_rewound", &target)?;
+  audit.detail = &detail;
+  let outcome = state
+    .database
+    .rewind_mls(
+      conversation,
+      request.epoch,
+      request.device_id,
+      &commit,
+      &welcomes,
+      checked.maybe_group_info(&request),
+      &audit,
+    )
+    .await?;
+  let new_epoch = match outcome {
+    RewindOutcome::Accepted {
+      new_epoch,
+      dropped_from_epoch,
+      dropped_entries,
+    } => {
+      tracing::warn!(
+        conversation_id = %conversation,
+        epoch = request.epoch,
+        dropped_from_epoch,
+        dropped_entries,
+        "a strict channel's group was continued from an earlier epoch"
+      );
+      new_epoch
+    },
+    RewindOutcome::EpochConflict { current_epoch } => return Err(ApiError::EpochConflict { current_epoch }),
+  };
+  Ok(publish_commit(
+    state,
+    conversation,
+    &request,
+    &checked,
+    &commit,
+    &welcomes,
+    new_epoch,
+  ))
+}
+
+/// A commit request checked against the conversation's members, with the IDs its entries get.
+struct CheckedCommit {
+  members: HashSet<UserId>,
+  owners: Vec<(DeviceId, UserId)>,
+  commit_id: MlsMessageId,
+  welcome_ids: Vec<MlsMessageId>,
+  max_payload: usize,
+}
+
+/// Checks a commit request of a member (the caller's device, payload sizes, welcomes only to
+/// devices of members, one each) and takes the IDs of its entries.
+async fn check_commit(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  conversation: ConversationId,
+  request: &PostMlsCommitRequest,
+) -> Result<CheckedCommit, ApiError> {
   ensure_own_device(state, caller, request.device_id).await?;
   check_payload(state, &request.commit)?;
   let limits = &state.settings.get().limits;
@@ -35,15 +155,7 @@ pub async fn post_commit(
   for welcome in &request.welcomes {
     check_payload(state, &welcome.welcome)?;
   }
-  // Group information too large to keep is dropped, never the commit: removals must go through.
   let max_payload = limits.max_mls_payload_bytes;
-  let maybe_group_info = request
-    .maybe_group_info
-    .as_ref()
-    .filter(|info| !info.is_empty() && info.len() <= max_payload);
-  if request.maybe_group_info.is_some() && maybe_group_info.is_none() {
-    tracing::debug!(conversation_id = %conversation, "commit stored without its group information");
-  }
 
   // Welcomes go to devices of members only, one per device.
   let members: HashSet<UserId> = state
@@ -69,58 +181,84 @@ pub async fn post_commit(
     .iter()
     .map(|_| state.next_id())
     .collect::<Result<_, _>>()?;
-  let welcomes: Vec<NewMlsMessage<'_>> = request
-    .welcomes
-    .iter()
-    .zip(&welcome_ids)
-    .map(|(welcome, id)| NewMlsMessage {
-      id: *id,
-      kind: MlsMessageKind::Welcome,
-      maybe_recipient: Some(welcome.device_id),
-      payload: welcome.welcome.as_slice(),
-    })
-    .collect();
-  let commit = NewMlsMessage {
-    id: commit_id,
-    kind: MlsMessageKind::Commit,
-    maybe_recipient: None,
-    payload: request.commit.as_slice(),
-  };
-
-  let outcome = state
-    .database
-    .post_mls_commit(
-      conversation,
-      request.epoch,
-      request.device_id,
-      &commit,
-      &welcomes,
-      maybe_group_info.map(Base64Bytes::as_slice),
-    )
-    .await?;
-  let new_epoch = match outcome {
-    CommitOutcome::Accepted { new_epoch } => new_epoch,
-    CommitOutcome::EpochConflict { current_epoch } => return Err(ApiError::EpochConflict { current_epoch }),
-  };
-
-  super::scheduled_messages::note_epoch_moved(state, conversation);
-  let commit_response = response(conversation, request.epoch, request.device_id, &commit);
-  state.hub.publish(
+  let checked = CheckedCommit {
     members,
+    owners,
+    commit_id,
+    welcome_ids,
+    max_payload,
+  };
+  if request.maybe_group_info.is_some() && checked.maybe_group_info(request).is_none() {
+    tracing::debug!(conversation_id = %conversation, "commit stored without its group information");
+  }
+  Ok(checked)
+}
+
+impl CheckedCommit {
+  /// The commit's and its welcomes' queue entries.
+  fn messages<'a>(&self, request: &'a PostMlsCommitRequest) -> (NewMlsMessage<'a>, Vec<NewMlsMessage<'a>>) {
+    let welcomes = request
+      .welcomes
+      .iter()
+      .zip(&self.welcome_ids)
+      .map(|(welcome, id)| NewMlsMessage {
+        id: *id,
+        kind: MlsMessageKind::Welcome,
+        maybe_recipient: Some(welcome.device_id),
+        payload: welcome.welcome.as_slice(),
+      })
+      .collect();
+    let commit = NewMlsMessage {
+      id: self.commit_id,
+      kind: MlsMessageKind::Commit,
+      maybe_recipient: None,
+      payload: request.commit.as_slice(),
+    };
+    (commit, welcomes)
+  }
+
+  /// Group information too large to keep is dropped, never the commit: removals must go through.
+  fn maybe_group_info<'a>(&self, request: &'a PostMlsCommitRequest) -> Option<&'a [u8]> {
+    request
+      .maybe_group_info
+      .as_ref()
+      .filter(|info| !info.is_empty() && info.len() <= self.max_payload)
+      .map(Base64Bytes::as_slice)
+  }
+}
+
+/// Tells the members about a stored commit and each welcome's device owner about their welcome.
+fn publish_commit(
+  state: &AppState,
+  conversation: ConversationId,
+  request: &PostMlsCommitRequest,
+  checked: &CheckedCommit,
+  commit: &NewMlsMessage<'_>,
+  welcomes: &[NewMlsMessage<'_>],
+  new_epoch: u64,
+) -> PostMlsCommitResponse {
+  super::scheduled_messages::note_epoch_moved(state, conversation);
+  let commit_response = response(conversation, request.epoch, request.device_id, commit);
+  state.hub.publish(
+    checked.members.iter().copied(),
     &GatewayEvent::MlsMessage {
       message: commit_response.clone(),
     },
   );
-  for (welcome, new) in request.welcomes.iter().zip(&welcomes) {
+  for (welcome, new) in request.welcomes.iter().zip(welcomes) {
     let message = response(conversation, new_epoch, request.device_id, new);
-    if let Some((_, owner)) = owners.iter().find(|(device, _)| *device == welcome.device_id) {
+    if let Some((_, owner)) = checked
+      .owners
+      .iter()
+      .find(|(device, _)| *device == welcome.device_id)
+    {
       state.hub.publish([*owner], &GatewayEvent::MlsMessage { message });
     }
   }
-  Ok(PostMlsCommitResponse {
+  PostMlsCommitResponse {
     new_epoch,
     commit: commit_response,
-  })
+  }
 }
 
 /// Stores a proposal or application message for the current epoch.

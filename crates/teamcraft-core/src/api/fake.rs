@@ -277,6 +277,8 @@ struct State {
   /// Gateway connections opened so far.
   gateway_connects: u64,
   next_connection: u64,
+  /// The rewinds of strict channels the server took, with the epoch each went back to.
+  rewinds: Vec<(ConversationId, u64)>,
   /// Users with workspace admin rights (permission checks only; trust comes from the roster).
   admins: HashSet<UserId>,
   /// Leavers the identity provider deactivated (docs/provisioning.md §3), with how long ago and
@@ -1962,6 +1964,12 @@ impl FakeServer {
 
   pub fn refuse_user_groups_to(&self, user: UserId) {
     self.lock().user_groups_refused.insert(user);
+  }
+
+  /// The rewinds of strict channels taken so far, with the epoch each went back to (e2ee.md
+  /// §4.6.2, D4).
+  pub fn rewinds(&self) -> Vec<(ConversationId, u64)> {
+    self.lock().rewinds.clone()
   }
 
   pub fn publish_event(&self, users: &[UserId], event: &GatewayEvent) {
@@ -4900,6 +4908,54 @@ impl ServerApi for FakeServerApi {
       }
       Ok(PostMlsCommitResponse { new_epoch, commit })
     })
+  }
+
+  /// Like the server's rewind (e2ee.md §4.6.2, D4): a channel admin or workspace admin who is a
+  /// member; the commits from `request.epoch` on and every later entry go, then the commit is
+  /// taken for that epoch.
+  async fn rewind_mls(
+    &self,
+    conversation: ConversationId,
+    request: &PostMlsCommitRequest,
+  ) -> Result<PostMlsCommitResponse, ApiError> {
+    self.with(|state, me| {
+      let is_instance_admin = state.admins.contains(&me);
+      let entry = state.member_conversation_mut(conversation, me)?;
+      let is_channel_admin = entry
+        .members
+        .get(&me)
+        .is_some_and(|(own, _)| *own == ChannelRole::Admin);
+      if !is_channel_admin && !is_instance_admin {
+        return Err(ApiError::status(
+          403,
+          ErrorCode::Forbidden,
+          "missing permission manage_channel_roles",
+        ));
+      }
+      if request.epoch > entry.epoch {
+        let current_epoch = entry.epoch;
+        return Err(ApiError::status(
+          409,
+          ErrorCode::EpochConflict,
+          format!("the group is in epoch {current_epoch}"),
+        ));
+      }
+      let epoch = request.epoch;
+      entry.mls.retain(|message| {
+        message.epoch < epoch || (message.epoch == epoch && message.kind != MlsMessageKind::Commit)
+      });
+      entry.epoch = epoch;
+      if entry
+        .maybe_group_info
+        .as_ref()
+        .is_some_and(|(info_epoch, _)| *info_epoch > epoch)
+      {
+        entry.maybe_group_info = None;
+      }
+      state.rewinds.push((conversation, epoch));
+      Ok(())
+    })?;
+    self.post_mls_commit(conversation, request).await
   }
 
   async fn post_mls_message(
