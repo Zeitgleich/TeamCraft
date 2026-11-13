@@ -78,6 +78,8 @@ const LAST_ACTIVITY_ROWS: usize = 16;
 /// How often the tallies of unread counts that follow the journal are handed to the store at most
 /// ([`CoreChatBackend::keep_followed_tallies_if_due`]).
 const FOLLOWED_KEEP_EVERY_MS: i64 = 5_000;
+/// The key prefix of how far a conversation's derived lines were read, in [`Table::SyncState`].
+const LINES_READ_PREFIX: &str = "lines_read/";
 
 /// Requests from the UI that need the server; the sync task drains and runs them.
 #[derive(Clone, Debug, PartialEq)]
@@ -803,6 +805,43 @@ pub struct CoreChatBackend<S> {
   gap_requests: RefCell<HashMap<ConversationId, u64>>,
   #[cfg(not(target_arch = "wasm32"))]
   pub(crate) search: RefCell<crate::ui_search::UiSearchState>,
+  /// What every entry of a chat list slice reads alike, while one runs ([`Self::with_pass_memo`]).
+  pass_memo: RefCell<Option<PassMemo>>,
+}
+
+/// How much of a conversation an entry carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EntryDetail {
+  /// All of it (the desktop's sidebar, a conversation's header).
+  Full,
+  /// What the mobile apps' chat lists show (issue #1819): no channel's member list and no
+  /// bookmarks, a record each per conversation that the list never shows. A direct message keeps
+  /// its members, which name it.
+  List,
+}
+
+/// What the entries of a chat list slice read alike, read once for the slice (issue #1819): the
+/// import account, the spaces, and the few conversations with a catch-up mark or lines read. The
+/// last two are a scan of the store's key directory each; asked per conversation they were a
+/// lookup each, and most of them found nothing after several page reads.
+pub(crate) struct PassMemo {
+  maybe_importer: Option<UserId>,
+  spaces: BTreeMap<SpaceId, SpaceResponse>,
+  catching_up: BTreeSet<ConversationId>,
+  lines_read: BTreeMap<ConversationId, MessageId>,
+}
+
+/// Puts back the memo that was there before [`CoreChatBackend::with_pass_memo`], also when the run
+/// panicked: the read thread goes on, and a memo left behind would answer later reads.
+struct MemoRestore<'a> {
+  slot: &'a RefCell<Option<PassMemo>>,
+  maybe_outer: Option<PassMemo>,
+}
+
+impl Drop for MemoRestore<'_> {
+  fn drop(&mut self) {
+    self.slot.replace(self.maybe_outer.take());
+  }
 }
 
 /// The oldest row a paging list holds, for [`CoreChatBackend::feed_tail`].
@@ -867,6 +906,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       gap_requests: RefCell::default(),
       #[cfg(not(target_arch = "wasm32"))]
       search: RefCell::new(Default::default()),
+      pass_memo: RefCell::new(None),
     }
   }
 
@@ -942,7 +982,81 @@ impl<S: LocalStore> CoreChatBackend<S> {
 
   /// The import account of the verified workspace policy (e2ee.md §4.10).
   pub(crate) fn importer(&self) -> Option<UserId> {
+    if let Some(memo) = self.pass_memo.borrow().as_ref() {
+      return memo.maybe_importer;
+    }
     crate::imported::importer(self.store_ref())
+  }
+
+  /// Runs `run` with `memo` answering what every entry reads alike. Only for reads within one look
+  /// at the store: the memo doesn't follow writes.
+  pub(crate) fn with_pass_memo<T>(&self, memo: PassMemo, run: impl FnOnce() -> T) -> T {
+    let _restore = MemoRestore {
+      slot: &self.pass_memo,
+      maybe_outer: self.pass_memo.replace(Some(memo)),
+    };
+    run()
+  }
+
+  /// What every entry of a chat list slice reads alike, from the store now ([`PassMemo`]).
+  pub(crate) fn read_pass_memo(&self) -> PassMemo {
+    let spaces: Vec<SpaceResponse> = self.read(records::list_json(&self.store, Table::Spaces));
+    PassMemo {
+      maybe_importer: crate::imported::importer(&self.store),
+      spaces: spaces.into_iter().map(|space| (space.id, space)).collect(),
+      catching_up: self
+        .keyed_by_conversation(Table::SyncState, crate::client::CATCHING_UP_PREFIX)
+        .into_keys()
+        .collect(),
+      lines_read: self.decoded_by_conversation(Table::SyncState, LINES_READ_PREFIX),
+    }
+  }
+
+  /// The records of `table` keyed `{prefix}{conversation}`, by conversation; others are skipped.
+  fn keyed_by_conversation(&self, table: Table, prefix: &str) -> BTreeMap<ConversationId, Vec<u8>> {
+    let listed = self.read(self.store.list_prefix(table, prefix).map_err(CoreError::from));
+    listed
+      .into_iter()
+      .filter_map(|(key, value)| Some((key.strip_prefix(prefix)?.parse().ok()?, value)))
+      .collect()
+  }
+
+  /// [`Self::keyed_by_conversation`], decoded; a record that doesn't decode is left out, as a
+  /// lookup of it would read nothing.
+  fn decoded_by_conversation<T: serde::de::DeserializeOwned>(
+    &self,
+    table: Table,
+    prefix: &str,
+  ) -> BTreeMap<ConversationId, T> {
+    self
+      .keyed_by_conversation(table, prefix)
+      .into_iter()
+      .filter_map(|(conversation, bytes)| Some((conversation, records::decode(&bytes).ok()?)))
+      .collect()
+  }
+
+  /// Whether `conversation` has a catch-up under way.
+  fn is_catching_up(&self, conversation: ConversationId) -> bool {
+    if let Some(memo) = self.pass_memo.borrow().as_ref() {
+      return memo.catching_up.contains(&conversation);
+    }
+    self.read(crate::client::is_catching_up(&self.store, conversation))
+  }
+
+  /// How far this device's derived lines of `conversation` count as read ([`note_lines_read`]).
+  fn lines_read(&self, conversation: ConversationId) -> Option<MessageId> {
+    if let Some(memo) = self.pass_memo.borrow().as_ref() {
+      return memo.lines_read.get(&conversation).copied();
+    }
+    self.read(lines_read_through(&self.store, conversation))
+  }
+
+  /// A space's record, as stored.
+  fn space_record(&self, space: SpaceId) -> Option<SpaceResponse> {
+    if let Some(memo) = self.pass_memo.borrow().as_ref() {
+      return memo.spaces.get(&space).cloned();
+    }
+    self.read(records::get_json(&self.store, Table::Spaces, &space.to_string()))
   }
 
   pub(crate) fn store_ref(&self) -> &S {
@@ -1037,22 +1151,6 @@ impl<S: LocalStore> CoreChatBackend<S> {
     self.read(records::get_json(&self.store, Table::Users, &user.to_string()))
   }
 
-  /// The conversations of `spaces` and every direct message, in one pass over the store, in the
-  /// store's order. For the mobile apps' lists: asking per space read and decrypted every
-  /// conversation and user record once per space.
-  pub fn listed_conversations(&self, spaces: &BTreeSet<SpaceId>) -> Vec<Conversation> {
-    let _step = crate::timing::step("chat_list_build");
-    self.conversations_where(|conversation| {
-      conversation
-        .maybe_space_id
-        .is_some_and(|space| spaces.contains(&space))
-        || matches!(
-          conversation.kind,
-          ConversationKindProto::Dm | ConversationKindProto::Group
-        )
-    })
-  }
-
   /// The entries of the stored conversations `is_listed` picks, in the store's order. One pass
   /// reads the users, preferences and account data once and keeps the tallies it counted in one
   /// group at the end: per conversation, they cost a decrypt and a disk wait each (issue #1466).
@@ -1075,7 +1173,9 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .conversations_raw()
       .iter()
       .filter(|conversation| is_listed(conversation))
-      .map(|conversation| self.listed_conversation(conversation, &users, &preferences, &account))
+      .map(|conversation| {
+        self.listed_conversation(conversation, &users, &preferences, &account, EntryDetail::Full)
+      })
       .collect();
     self.flush_entry_tallies();
     conversations
@@ -1165,19 +1265,26 @@ impl<S: LocalStore> CoreChatBackend<S> {
     preferences: &MentionPreferences,
   ) -> Conversation {
     let _step = crate::timing::step("to_conversation");
-    let conversation = self.listed_conversation(response, users, preferences, &self.account_data());
+    let conversation = self.listed_conversation(
+      response,
+      users,
+      preferences,
+      &self.account_data(),
+      EntryDetail::Full,
+    );
     self.flush_entry_tallies();
     conversation
   }
 
   /// A conversation's entry from what a pass read once. Callers [`Self::flush_entry_tallies`]
   /// when done.
-  fn listed_conversation(
+  pub(crate) fn listed_conversation(
     &self,
     response: &ConversationResponse,
     users: &BTreeMap<UserId, UserSummary>,
     preferences: &MentionPreferences,
     account: &AccountData,
+    detail: EntryDetail,
   ) -> Conversation {
     // An entry shows the unread counts alone.
     let counts = self.entry_counts(
@@ -1189,12 +1296,12 @@ impl<S: LocalStore> CoreChatBackend<S> {
     );
     Conversation {
       maybe_draft_preview: account.draft_preview(response.id),
-      ..self.conversation_view(response, users, counts.unread)
+      ..self.conversation_view_of(response, users, counts.unread, detail)
     }
   }
 
   /// The account data as stored (marks, drafts); the default when it doesn't read.
-  fn account_data(&self) -> AccountData {
+  pub(crate) fn account_data(&self) -> AccountData {
     self.read(crate::client::stored_account_data(&self.store))
   }
 
@@ -1211,7 +1318,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
     need: EntryNeed,
   ) -> EntryCounts {
     let _step = crate::timing::step("entry_counts");
-    let is_unread = self.unread_check(response, maybe_mark);
+    let maybe_lines_read = self.lines_read(response.id);
+    let is_unread = self.unread_check_given(response, maybe_mark, maybe_lines_read);
     let maybe_importer = self.importer();
     let rules = MentionRules {
       username: maybe_me
@@ -1232,7 +1340,6 @@ impl<S: LocalStore> CoreChatBackend<S> {
           .maybe_my_membership
           .as_ref()
           .and_then(|membership| membership.maybe_last_read_message_id);
-        let maybe_lines_read = self.read(lines_read_through(&self.store, conversation));
         let inputs = TallyInputs {
           version,
           maybe_importer,
@@ -1414,12 +1521,32 @@ impl<S: LocalStore> CoreChatBackend<S> {
     users: &BTreeMap<UserId, UserSummary>,
     unread: UnreadCounts,
   ) -> Conversation {
+    self.conversation_view_of(response, users, unread, EntryDetail::Full)
+  }
+
+  /// [`Self::conversation_view`] with as much as `detail` asks for.
+  fn conversation_view_of(
+    &self,
+    response: &ConversationResponse,
+    users: &BTreeMap<UserId, UserSummary>,
+    unread: UnreadCounts,
+    detail: EntryDetail,
+  ) -> Conversation {
     let _step = crate::timing::step("conversation_view");
-    let mut member_ids = self.members(response.id);
+    let is_listed_only = detail == EntryDetail::List
+      && !matches!(
+        response.kind,
+        ConversationKindProto::Dm | ConversationKindProto::Group
+      );
+    let mut member_ids = if is_listed_only {
+      Vec::new()
+    } else {
+      self.members(response.id)
+    };
     let is_notes_to_self = response.is_notes_to_self(self.me);
     // The import account is no person of a DM or the notes: the banner tells about it instead
     // (e2ee.md §4.10).
-    if let Some(importer) = self.dm_importer(response) {
+    if let Some(importer) = self.dm_importer(response, &member_ids) {
       member_ids.retain(|user| *user != importer);
     }
     // Notes to self (a DM of one): known from the conversation itself before any member list.
@@ -1471,8 +1598,12 @@ impl<S: LocalStore> CoreChatBackend<S> {
       is_favorite,
       is_muted: self.is_muted(response),
       can_post: response.may_post(),
-      bookmarks: self.bookmarks_of(response.id),
-      is_catching_up: self.read(crate::client::is_catching_up(&self.store, response.id)),
+      bookmarks: if detail == EntryDetail::List {
+        Vec::new()
+      } else {
+        self.bookmarks_of(response.id)
+      },
+      is_catching_up: self.is_catching_up(response.id),
       is_notes_to_self,
       is_archived: response.is_archived,
       is_imported: response.maybe_imported_through.is_some(),
@@ -1489,7 +1620,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
 
   /// The policy's import account when it is a member of this DM, group DM or notes without being a
   /// participant (e2ee.md §4.10).
-  fn dm_importer(&self, response: &ConversationResponse) -> Option<UserId> {
+  fn dm_importer(&self, response: &ConversationResponse, members: &[UserId]) -> Option<UserId> {
     if !matches!(
       response.kind,
       ConversationKindProto::Dm | ConversationKindProto::Group
@@ -1498,8 +1629,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     }
     let importer = self.importer()?;
     let is_participant = response.participants.iter().any(|user| user.id == importer);
-    let is_member =
-      response.maybe_importer_user_id == Some(importer) || self.members(response.id).contains(&importer);
+    let is_member = response.maybe_importer_user_id == Some(importer) || members.contains(&importer);
     (is_member && !is_participant).then_some(importer)
   }
 
@@ -1575,9 +1705,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       maybe_channel_mentions: None,
       maybe_quiet_hours: None,
     };
-    let maybe_space: Option<SpaceResponse> = response
-      .maybe_space_id
-      .and_then(|space| self.read(records::get_json(&self.store, Table::Spaces, &space.to_string())));
+    let maybe_space = response.maybe_space_id.and_then(|space| self.space_record(space));
     Some(effective_notifications(
       &own,
       maybe_space
@@ -1690,6 +1818,16 @@ impl<S: LocalStore> CoreChatBackend<S> {
     response: &ConversationResponse,
     maybe_mark: Option<MessageId>,
   ) -> impl Fn(&StoredMessage) -> bool + use<S> {
+    self.unread_check_given(response, maybe_mark, self.lines_read(response.id))
+  }
+
+  /// [`Self::unread_check`] with how far the derived lines were read already at hand.
+  fn unread_check_given(
+    &self,
+    response: &ConversationResponse,
+    maybe_mark: Option<MessageId>,
+    maybe_lines_read: Option<MessageId>,
+  ) -> impl Fn(&StoredMessage) -> bool + use<S> {
     let me = self.me;
     let maybe_last_read = response
       .maybe_my_membership
@@ -1698,8 +1836,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     // A line this device derived (from a commit, issue #811, or from the server's record, issue
     // #818) counts like a message at its place: the server's read position covers it once a later
     // message was read; one newer than all of them is read once this device marked the
-    // conversation read after it arrived.
-    let maybe_lines_read = self.read(lines_read_through(&self.store, response.id));
+    // conversation read after it arrived (`maybe_lines_read`).
     // Imported history counts as read (e2ee.md §4.10), like on the server, and so do the lines of
     // the import account adding people: they are part of the import.
     let maybe_importer = self.importer();
@@ -4040,7 +4177,7 @@ fn shown_unread_messages(response: &ConversationResponse, kind: ConversationKind
 }
 
 /// Whether the user is in a channel of the space.
-fn has_channel_in(conversations: &[ConversationResponse], space: SpaceId) -> bool {
+pub(crate) fn has_channel_in(conversations: &[ConversationResponse], space: SpaceId) -> bool {
   conversations.iter().any(|conversation| {
     conversation.maybe_space_id == Some(space) && conversation.maybe_my_membership.is_some()
   })
@@ -4500,7 +4637,7 @@ pub(crate) fn note_lines_read(
 }
 
 fn lines_read_key(conversation: ConversationId) -> String {
-  format!("lines_read/{conversation}")
+  format!("{LINES_READ_PREFIX}{conversation}")
 }
 
 /// Where a message stands for unread counting: the server's ID, a line this device derived at

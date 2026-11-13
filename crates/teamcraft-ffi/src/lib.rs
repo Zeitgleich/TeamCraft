@@ -621,8 +621,10 @@ impl TeamCraft {
     &self,
     conversation_ids: Vec<String>,
   ) -> Result<Vec<ChatPreviewItem>, TeamCraftError> {
+    let ids = conversation_ids.into_iter().collect();
     self
-      .read(move |reads| reads.chat_previews(&conversation_ids))
+      .read_queue()?
+      .read_sliced(move |reads: &mut Reads| reads.chat_previews(ids, Vec::new()))
       .await
   }
 
