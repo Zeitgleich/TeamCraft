@@ -232,6 +232,11 @@ pub enum CallServerMessage {
   /// Answer to [`CallClientMessage::Ping`]. Not an event: it takes no sequence number.
   Pong {
     id: u64,
+    /// When the SFU read the ping, in microseconds on a clock of its own (only differences
+    /// count): the ping's one-way delay, which the browser's upload pacer judges instead of a
+    /// round trip that also waited behind the download (#1890). Older SFUs send none.
+    #[serde(default, rename = "received_us", skip_serializing_if = "Option::is_none")]
+    maybe_received_us: Option<u64>,
   },
   /// Answer to [`CallClientMessage::Switch`]: this connection carries the session from now on. Not
   /// an event either: the events still queued for the old connection go out there, up to its close
@@ -1036,9 +1041,19 @@ mod tests {
     let json = serde_json::to_string(&ping).unwrap();
     assert_eq!(json, r#"{"type":"ping","id":3}"#);
     assert_eq!(serde_json::from_str::<CallClientMessage>(&json).unwrap(), ping);
-    let pong = CallServerMessage::Pong { id: 3 };
+    let pong = CallServerMessage::Pong {
+      id: 3,
+      maybe_received_us: None,
+    };
     let json = serde_json::to_string(&pong).unwrap();
     assert_eq!(json, r#"{"type":"pong","id":3}"#);
+    assert_eq!(serde_json::from_str::<CallServerMessage>(&json).unwrap(), pong);
+    let pong = CallServerMessage::Pong {
+      id: 4,
+      maybe_received_us: Some(1_250_000),
+    };
+    let json = serde_json::to_string(&pong).unwrap();
+    assert_eq!(json, r#"{"type":"pong","id":4,"received_us":1250000}"#);
     assert_eq!(serde_json::from_str::<CallServerMessage>(&json).unwrap(), pong);
   }
 

@@ -27,6 +27,13 @@
 //!   SFU's layer allocation can still switch up and find out.
 //! - No answer for a while: the rate drops with every ping that goes unanswered.
 //!
+//! A peer that says when it read each ping ([`DrainPacer::on_answer_received`], the SFU's pong to a
+//! browser, #1890) lets the pacer judge this direction alone: what waits is the ping's one-way
+//! delay above the smallest one, and what drained is counted when the peer read it. A round trip
+//! also holds the answer's way back, behind everything the other direction sends: a camera's
+//! upload next to a busy download was cut to what its little traffic drained, sat at the floor on
+//! a good link, and the camera with it.
+//!
 //! Audio, signaling and pings are never held back (the writer sends them regardless), but they
 //! count: video waits for what they took.
 //!
@@ -58,6 +65,8 @@ const MAX_PENDING_PROBES: usize = 64;
 /// The smallest round trip is taken over this long: long enough to see the path empty now and then,
 /// short enough to follow a path that changed.
 const MIN_ROUND_TRIP_WINDOW: Duration = Duration::from_secs(10);
+/// What answers waited on their way back is taken over this long, for the silence check.
+const REVERSE_WINDOW: Duration = Duration::from_secs(2);
 /// What got through recently, for the rate's ceiling while little is sent.
 const DRAIN_WINDOW: Duration = Duration::from_secs(5);
 /// Two answers closer than this measure the timer more than the path.
@@ -79,8 +88,10 @@ pub struct PacingConfig {
   pub probe_interval: Duration,
   /// The rate before anything was measured, and the least the ceiling grows to while little is sent.
   pub start_rate_bps: u32,
-  /// The rate never drops below this, so audio and the lowest video layer can still go out and be
-  /// measured.
+  /// The rate never drops below this, so that the path is still measured. Audio isn't held to the
+  /// rate, but it counts: at most this much video goes out besides it. A voice needs about
+  /// 50 kbit/s; at 300 kbit/s the pacer kept more than twice a collapsed link's 120 kbit/s in
+  /// flight, and the voice came seconds late or the session was lost (#1871, #1890).
   pub min_rate_bps: u32,
   pub max_rate_bps: u32,
   /// How much may wait in the buffers on the path, measured as the round trip above its smallest.
@@ -103,6 +114,13 @@ pub struct DrainPacer {
   /// Answers within [`DRAIN_SPAN`] and the newest one before, oldest first.
   answers: VecDeque<Answer>,
   round_trips: VecDeque<(Instant, Duration)>,
+  /// One-way delays of answered pings (the peer's clock minus this one's, in microseconds: only
+  /// differences count), within [`MIN_ROUND_TRIP_WINDOW`].
+  forward_delays: VecDeque<(Instant, i64)>,
+  /// This side's clock base for those delays.
+  maybe_epoch: Option<Instant>,
+  /// What answers waited on their way back, above the least, within [`REVERSE_WINDOW`].
+  reverse_waits: VecDeque<(Instant, Duration)>,
   drains: VecDeque<(Instant, f64)>,
   /// Whether the previous answer was late (its wait above the target).
   was_late: bool,
@@ -136,7 +154,7 @@ impl Default for PacingConfig {
     Self {
       probe_interval: Duration::from_millis(250),
       start_rate_bps: 4_000_000,
-      min_rate_bps: 300_000,
+      min_rate_bps: 64_000,
       max_rate_bps: 100_000_000,
       target_queue_delay: Duration::from_millis(120),
       burst: Duration::from_millis(20),
@@ -155,6 +173,9 @@ impl DrainPacer {
       probes: VecDeque::new(),
       answers: VecDeque::new(),
       round_trips: VecDeque::new(),
+      forward_delays: VecDeque::new(),
+      maybe_epoch: None,
+      reverse_waits: VecDeque::new(),
       drains: VecDeque::new(),
       was_late: true,
       maybe_stall: None,
@@ -190,8 +211,12 @@ impl DrainPacer {
 
   /// A ping with this number was written just now, behind everything written before.
   pub fn on_probe_sent(&mut self, number: u64, now: Instant) {
+    self.maybe_epoch.get_or_insert(now);
+    // An answer that waits on its way back says nothing of this direction.
+    let reverse_wait = self.recent_reverse_wait(now);
     if let Some(oldest) = self.probes.front()
-      && self.queue_delay(now.saturating_duration_since(oldest.sent_at)) > 2 * self.config.target_queue_delay
+      && self.queue_delay(now.saturating_duration_since(oldest.sent_at))
+        > 2 * self.config.target_queue_delay + reverse_wait
     {
       // Nothing came back for a while: what was sent is stuck somewhere on the way.
       self.set_rate(self.rate_bps * SILENCE_BACKOFF);
@@ -208,17 +233,79 @@ impl DrainPacer {
 
   /// The peer answered the ping with this number.
   pub fn on_answer(&mut self, number: u64, now: Instant) {
-    let Some(index) = self.probes.iter().position(|probe| probe.number == number) else {
+    let Some(probe) = self.take_probe(number) else {
       return;
     };
-    let probe = self.probes[index];
-    // TCP keeps the order: older pings were read too, and their answers won't come any more.
-    self.probes.drain(..=index);
     let round_trip = now.saturating_duration_since(probe.sent_at);
     self.note_round_trip(round_trip, now);
     let maybe_drain_bps = self.note_drain(probe.written_bytes, now);
     let queue_delay = self.queue_delay(round_trip);
     self.adapt(queue_delay, maybe_drain_bps, now);
+  }
+
+  /// The peer answered the ping with this number, and read it at `received_us` on its clock
+  /// (microseconds from any base, the same for every answer).
+  pub fn on_answer_received(&mut self, number: u64, received_us: u64, now: Instant) {
+    let Some(probe) = self.take_probe(number) else {
+      return;
+    };
+    let round_trip = now.saturating_duration_since(probe.sent_at);
+    self.note_round_trip(round_trip, now);
+    let epoch = *self.maybe_epoch.get_or_insert(probe.sent_at);
+    let sent_us =
+      i64::try_from(probe.sent_at.saturating_duration_since(epoch).as_micros()).unwrap_or(i64::MAX);
+    let delay_us = i64::try_from(received_us)
+      .unwrap_or(i64::MAX)
+      .saturating_sub(sent_us);
+    while self
+      .forward_delays
+      .front()
+      .is_some_and(|(at, _)| now.saturating_duration_since(*at) > MIN_ROUND_TRIP_WINDOW)
+    {
+      self.forward_delays.pop_front();
+    }
+    self.forward_delays.push_back((now, delay_us));
+    let least_us = self
+      .forward_delays
+      .iter()
+      .map(|(_, delay)| *delay)
+      .min()
+      .unwrap_or(delay_us);
+    let forward_wait = Duration::from_micros(u64::try_from(delay_us.saturating_sub(least_us)).unwrap_or(0));
+    // What the answer waited on its way back: the round trip above its least, less this way's wait.
+    let reverse_wait = self.queue_delay(round_trip).saturating_sub(forward_wait);
+    self.reverse_waits.push_back((now, reverse_wait));
+    while self
+      .reverse_waits
+      .front()
+      .is_some_and(|(at, _)| now.saturating_duration_since(*at) > REVERSE_WINDOW)
+    {
+      self.reverse_waits.pop_front();
+    }
+    // Drained when the peer read it: on this side's clock, the ping's send plus its wait.
+    let read_at = probe.sent_at + forward_wait;
+    let maybe_drain_bps = self.note_drain(probe.written_bytes, read_at);
+    self.adapt(forward_wait, maybe_drain_bps, now);
+  }
+
+  /// The ping with this number, and the older ones dropped: TCP keeps the order, so they were read
+  /// too, and their answers won't come any more.
+  fn take_probe(&mut self, number: u64) -> Option<Probe> {
+    let index = self.probes.iter().position(|probe| probe.number == number)?;
+    let probe = self.probes[index];
+    self.probes.drain(..=index);
+    Some(probe)
+  }
+
+  /// The most an answer waited on its way back lately (zero without one-way answers).
+  fn recent_reverse_wait(&self, now: Instant) -> Duration {
+    self
+      .reverse_waits
+      .iter()
+      .filter(|(at, _)| now.saturating_duration_since(*at) <= REVERSE_WINDOW)
+      .map(|(_, wait)| *wait)
+      .max()
+      .unwrap_or(Duration::ZERO)
   }
 
   fn adapt(&mut self, queue_delay: Duration, maybe_drain_bps: Option<f64>, now: Instant) {
@@ -429,6 +516,50 @@ mod tests {
       assert!(pacer.rate_bps() >= 3_000_000, "{}", pacer.rate_bps());
     }
 
+    /// #1890: a camera's small upload next to a busy download. Its pings reach the peer at once,
+    /// but the answers wait 100 to 400 ms behind the download's media. Judged by the round trip
+    /// that held the rate at its floor; judged one way it stays where the path allows.
+    #[test]
+    fn answers_that_wait_on_their_way_back_dont_cut_the_upload() {
+      let start = Instant::now();
+      let mut pacer = DrainPacer::new(PacingConfig::default());
+      let mut at = start;
+      for number in 0..120u64 {
+        pacer.on_probe_sent(number, at);
+        pacer.on_written(2_500, at);
+        let back = Duration::from_millis(100 + (number * 37 % 300));
+        let received_us = 20_000 + u64::try_from((at - start).as_micros()).unwrap();
+        pacer.on_answer_received(number, received_us, at + BASE_ROUND_TRIP + back);
+        at += 250 * MS;
+      }
+      assert!(
+        pacer.rate_bps() >= PacingConfig::default().start_rate_bps,
+        "{}",
+        pacer.rate_bps()
+      );
+    }
+
+    /// Judged one way, an upload that writes more than the path drains is still cut below what got
+    /// through.
+    #[test]
+    fn an_upload_that_falls_behind_is_cut_one_way_too() {
+      let start = Instant::now();
+      let mut pacer = DrainPacer::new(PacingConfig::default());
+      let mut at = start;
+      let mut backlog_bytes = 0.0;
+      for number in 0..24u64 {
+        let sent = 125_000u32;
+        pacer.on_probe_sent(number, at);
+        pacer.on_written(sent as usize, at);
+        backlog_bytes += f64::from(sent) - 1_500_000.0 / 8.0 / 4.0;
+        let waiting = Duration::from_secs_f64(backlog_bytes.max(0.0) * 8.0 / 1_500_000.0);
+        let received_us = 20_000 + u64::try_from((at - start + waiting).as_micros()).unwrap();
+        pacer.on_answer_received(number, received_us, at + BASE_ROUND_TRIP + waiting);
+        at += 250 * MS;
+      }
+      assert!(pacer.rate_bps() < 1_500_000, "{}", pacer.rate_bps());
+    }
+
     /// A path that drains less than is written while the delay grows still brings the rate down,
     /// spikes or not.
     #[test]
@@ -473,7 +604,7 @@ mod tests {
       let mut pacer = DrainPacer::new(PacingConfig::default());
       pacer.on_probe_sent(0, start);
       pacer.on_answer(0, start + BASE_ROUND_TRIP);
-      for number in 1..20u64 {
+      for number in 1..40u64 {
         pacer.on_probe_sent(number, start + 250 * MS * u32::try_from(number).unwrap());
       }
       assert_eq!(pacer.rate_bps(), PacingConfig::default().min_rate_bps);
