@@ -9,6 +9,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.ui.graphics.graphicsLayer
@@ -169,6 +170,8 @@ import de.zeitgleich.teamcraft.ui.theme.ChatListLayout
 import de.zeitgleich.teamcraft.ui.CollapsedSections
 import de.zeitgleich.teamcraft.ui.collapseKey
 import de.zeitgleich.teamcraft.ui.homeSections
+import de.zeitgleich.teamcraft.ui.recentActivityHomeRows
+import de.zeitgleich.teamcraft.ui.recentActivitySection
 import de.zeitgleich.teamcraft.ui.visibleRows
 import de.zeitgleich.teamcraft.core.ScheduledOverview
 import de.zeitgleich.teamcraft.ui.listName
@@ -670,8 +673,29 @@ private fun HomeTab(
     ?: homeSections(conversations, list.lastActivity, listsArchived = !canBrowse, favoritesSort = favoritesSort)
   val collapsing = remember { CollapsedSections.of(context) }
   val collapsed by collapsing.collapsed.collectAsState()
+  // Where something happened last, across every space (#1906): the newest few, all on request.
+  var isShowingAllRecent by rememberSaveable { mutableStateOf(false) }
+  val lastActivity = list.lastActivity
+  val allRecent = remember(conversations, lastActivity) { recentActivitySection(conversations, lastActivity, isShowingAll = true) }
+  val recent = if (isShowingAllRecent) allRecent else allRecent.copy(conversations = allRecent.conversations.take(recentActivityHomeRows))
   LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(bottom = floatingTabBarClearance())) {
     item(key = "quick-access") { QuickAccessRow(quickAccess, onNavigate) }
+    if (recent.conversations.isNotEmpty()) {
+      collapsibleRows(listOf(recent), list, collapsed, onToggle = collapsing::toggle, showsSpace = true)
+      val isCollapsed = recent.collapseKey()?.let { it in collapsed } == true
+      if (!isCollapsed && allRecent.conversations.size > recentActivityHomeRows) {
+        item(key = "recent-more") {
+          val label = if (isShowingAllRecent) {
+            stringResource(R.string.recent_activity_fewer)
+          } else {
+            stringResource(R.string.recent_activity_all, allRecent.conversations.size)
+          }
+          EntryRow(if (isShowingAllRecent) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown, label) {
+            isShowingAllRecent = !isShowingAllRecent
+          }
+        }
+      }
+    }
     if (sections.isEmpty()) {
       item(key = "empty") {
         EmptyHint(stringResource(R.string.spaces_empty))
@@ -898,6 +922,7 @@ private fun LazyListScope.collapsibleRows(
   collapsed: Set<String>,
   onToggle: (String) -> Unit,
   canBrowse: Boolean = false,
+  showsSpace: Boolean = false,
 ) {
   for (section in sections) {
     val maybeKey = section.collapseKey()
@@ -927,7 +952,7 @@ private fun LazyListScope.collapsibleRows(
         isSelected = conversation.id == list.maybeSelectedId,
         isChecked = conversation.id in list.selection,
         isSelecting = list.selection.isNotEmpty(),
-        showsSpace = section.title is SectionTitle.Favorites,
+        showsSpace = showsSpace || section.title is SectionTitle.Favorites,
         callCount = list.runningCalls[conversation.id] ?: 0,
         typing = list.typing[conversation.id].orEmpty(),
         onClick = { list.onOpen(conversation.id) },
@@ -1330,6 +1355,7 @@ private fun sectionTitleText(title: SectionTitle): String =
     SectionTitle.Notes -> stringResource(R.string.notes_title)
     SectionTitle.Recent -> stringResource(R.string.share_recent)
     SectionTitle.UnreadDirect -> stringResource(R.string.section_unread_direct)
+    SectionTitle.RecentActivity -> stringResource(R.string.section_recent_activity)
     is SectionTitle.Space -> title.name
     is SectionTitle.SpaceChannels -> stringResource(R.string.channels)
   }

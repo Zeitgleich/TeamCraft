@@ -34,6 +34,7 @@ mod os_log;
 mod perf_jobs;
 mod picture_retries;
 mod reads;
+mod recent_activity;
 mod recovery_kit;
 mod row_badge;
 mod screen_audio;

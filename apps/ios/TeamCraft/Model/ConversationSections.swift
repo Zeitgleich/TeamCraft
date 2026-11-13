@@ -18,6 +18,8 @@ enum SectionTitle: Hashable {
   case spaceChannels(spaceId: String)
   /// The Activity tab's one list (shown without a header).
   case activity
+  /// Home's newest conversations across DMs, groups and channels, on top (#1906).
+  case recentActivity
 
   /// A tab's one list, shown without a header (#1786): Chats, the list layout's mixed list and
   /// Activity.
@@ -51,6 +53,7 @@ struct ConversationSection: Identifiable {
     switch title {
     case .favorites: return "favorites"
     case .unreadDirect: return "unread-direct"
+    case .recentActivity: return "recent-activity"
     case .channels: return "channels"
     case .archived: return "archived"
     case .directMessages: return "direct"
@@ -453,6 +456,27 @@ func spaceHomeSections(
   let head = sections.filter { $0.title == .unreadDirect || $0.title == .favorites }
   let tail = sections.filter { $0.title == .channels || $0.title == .archived }
   return head + [ConversationSection(title: .spaceChannels(spaceId: spaceId), conversations: channels)] + tail
+}
+
+/// How many conversations Home's "Recent activity" shows before "Show all" (#1906): the core's number.
+let recentActivityHomeRowCount = Int(recentActivityHomeRows())
+
+/// Home's "Recent activity" (#1906): DMs, groups and channels with a message on the device, the
+/// newest first, in the core's order (`recentActivity`, the same on Android); the first
+/// `recentActivityHomeRowCount` unless `isShowingAll`. `lastActivity`: the previews' message times.
+func recentActivitySection(
+  _ conversations: [ConversationItem], lastActivity: [String: Date], isShowingAll: Bool
+) -> ConversationSection {
+  var byId: [String: ConversationItem] = [:]
+  for conversation in conversations where byId[conversation.id] == nil { byId[conversation.id] = conversation }
+  let candidates = conversations.map {
+    RecentActivityCandidate(
+      id: $0.id, name: $0.name,
+      maybeLastActivityMs: lastActivity[$0.id].map { Int64(($0.timeIntervalSince1970 * 1000).rounded()) },
+      isArchived: $0.isArchived)
+  }
+  let ids = recentActivity(candidates: candidates, maybeLimit: isShowingAll ? nil : UInt32(recentActivityHomeRowCount))
+  return ConversationSection(title: .recentActivity, conversations: ids.compactMap { byId[$0] })
 }
 
 /// The list layout grouped by space (#1526): `sections` as `listSections` made them, plus a section

@@ -3,6 +3,9 @@ package de.zeitgleich.teamcraft.ui
 import de.zeitgleich.teamcraft.ui.theme.FavoritesSort
 import uniffi.teamcraft_ffi.ConversationItem
 import uniffi.teamcraft_ffi.ConversationKind
+import uniffi.teamcraft_ffi.RecentActivityCandidate
+import uniffi.teamcraft_ffi.recentActivity
+import uniffi.teamcraft_ffi.recentActivityHomeRows
 
 /** A sidebar section, as the desktop shows them. */
 sealed interface SectionTitle {
@@ -36,6 +39,9 @@ sealed interface SectionTitle {
 
   /** Home's DMs with something new, on top of its list (#1488). */
   data object UnreadDirect : SectionTitle
+
+  /** Home's newest conversations across DMs, groups and channels, on top (#1906). */
+  data object RecentActivity : SectionTitle
 }
 
 data class Section(val title: SectionTitle, val conversations: List<ConversationItem>)
@@ -187,6 +193,25 @@ fun spaceHomeSections(
   return head + Section(SectionTitle.SpaceChannels(spaceId), channels) + tail
 }
 
+/** How many conversations Home's "Recent activity" shows before "Show all" (#1906): the core's number. */
+val recentActivityHomeRows: Int by lazy { recentActivityHomeRows().toInt() }
+
+/**
+ * Home's "Recent activity" (#1906): DMs, groups and channels with a message on the device, the
+ * newest first, in the core's order (`recentActivity`, the same on iOS); the first
+ * [recentActivityHomeRows] unless [isShowingAll]. `lastActivity`: the previews' message times.
+ */
+fun recentActivitySection(
+  conversations: List<ConversationItem>,
+  lastActivity: Map<String, Long>,
+  isShowingAll: Boolean,
+): Section {
+  val byId = conversations.associateBy { it.id }
+  val candidates = conversations.map { RecentActivityCandidate(it.id, it.name, lastActivity[it.id], it.isArchived) }
+  val ids = recentActivity(candidates, if (isShowingAll) null else recentActivityHomeRows.toUInt())
+  return Section(SectionTitle.RecentActivity, ids.mapNotNull { byId[it] })
+}
+
 /** A space the user belongs to, as the space switcher and the lists name it (#1526). */
 data class HomeSpace(
   val id: String,
@@ -261,6 +286,7 @@ fun withEmptySpaces(sections: List<Section>, spaces: List<HomeSpace>): List<Sect
 fun Section.collapseKey(): String? = when (val title = title) {
   SectionTitle.Favorites -> "favorites"
   SectionTitle.UnreadDirect -> "unread-direct"
+  SectionTitle.RecentActivity -> "recent-activity"
   SectionTitle.Channels -> "channels"
   SectionTitle.Archived -> "archived"
   SectionTitle.DirectMessages -> "direct"
