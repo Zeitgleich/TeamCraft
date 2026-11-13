@@ -496,7 +496,12 @@ fn ladder_steps(plan: &SharePlan, top_sizes: &[VideoResolution]) -> Vec<ShareSte
   };
   let mut steps = match plan.profile.mode {
     ScreenContentMode::Motion => motion_steps(full, top_sizes),
-    ScreenContentMode::Detail | ScreenContentMode::Unknown => detail_steps(full, top_sizes, is_software_av1),
+    ScreenContentMode::Detail | ScreenContentMode::Unknown => {
+      // Software AV1 steps down to the share's fallback codec, where that is another one.
+      let fallback = fallback_codec(&plan.codecs);
+      let maybe_av1_relief = (is_software_av1 && fallback != VideoCodec::Av1).then_some(fallback);
+      detail_steps(full, top_sizes, maybe_av1_relief)
+    },
   };
   // The least: the base layer alone, where there is a base below the top.
   if let Some(last) = steps.last().cloned()
@@ -513,9 +518,13 @@ fn ladder_steps(plan: &SharePlan, top_sizes: &[VideoResolution]) -> Vec<ShareSte
   steps
 }
 
-/// A detail share: frame rate, middle layer, software AV1, then size, each size at the least
-/// rate.
-fn detail_steps(full: ShareStep, top_sizes: &[VideoResolution], is_software_av1: bool) -> Vec<ShareStep> {
+/// A detail share: frame rate, middle layer, software AV1 (to `maybe_av1_relief`, H.264 where
+/// this device encodes it), then size, each size at the least rate.
+fn detail_steps(
+  full: ShareStep,
+  top_sizes: &[VideoResolution],
+  maybe_av1_relief: Option<VideoCodec>,
+) -> Vec<ShareStep> {
   let mut steps = vec![full.clone()];
   let mut step = full;
   for framerate in DETAIL_TOP_FRAMERATES {
@@ -528,8 +537,8 @@ fn detail_steps(full: ShareStep, top_sizes: &[VideoResolution], is_software_av1:
     step.has_middle = false;
     steps.push(step.clone());
   }
-  if is_software_av1 {
-    step.top_codec = VideoCodec::H264;
+  if let Some(codec) = maybe_av1_relief {
+    step.top_codec = codec;
     steps.push(step.clone());
   }
   for &size in &top_sizes[1..] {
@@ -562,7 +571,7 @@ fn motion_steps(full: ShareStep, top_sizes: &[VideoResolution]) -> Vec<ShareStep
 
 /// The top layer's codec in the full plan, the first that the share's profile takes, the viewers
 /// decode ([`ShareCodecs`]) and this device encodes well enough at this size: AV1 in hardware, VP9
-/// in hardware, AV1 in software up to about 1080p, else H.264 at full size.
+/// in hardware, AV1 in software up to about 1080p, else the fallback at full size ([`fallback_codec`]).
 fn planned_top_codec(plan: &SharePlan, full_top: VideoResolution) -> VideoCodec {
   let decoded = if plan.codecs.by_some.is_empty() {
     &plan.codecs.by_all
@@ -583,8 +592,7 @@ fn planned_top_codec(plan: &SharePlan, full_top: VideoResolution) -> VideoCodec 
   candidates
     .into_iter()
     .find(|(codec, is_good)| *is_good && is_usable(codec))
-    // H.264, which every device decodes and encodes, otherwise.
-    .map_or(VideoCodec::H264, |(codec, _)| codec)
+    .map_or_else(|| fallback_codec(&plan.codecs), |(codec, _)| codec)
 }
 
 /// `h264_bps` for a layer in `codec`: AV1 and VP9 need less than H.264 for the same picture.
@@ -598,13 +606,24 @@ pub fn codec_bitrate_bps(h264_bps: u32, codec: &VideoCodec) -> u32 {
   (f64::from(h264_bps) * share).round() as u32
 }
 
-/// The base layer's codec: H.264 where the SFU forwards layers in other codecs (every device
-/// decodes it), else the one codec of the whole share, the top's.
+/// The base layer's codec: the fallback where the SFU forwards layers in other codecs (H.264,
+/// which every device decodes), else the one codec of the whole share, the top's.
 fn base_codec(codecs: &ShareCodecs, step: &ShareStep) -> VideoCodec {
   if codecs.by_some.is_empty() {
     step.top_codec.clone()
   } else {
-    VideoCodec::H264
+    fallback_codec(codecs)
+  }
+}
+
+/// What a share sends where no better codec fits: H.264, which every device decodes and nearly
+/// every one encodes. A device whose H.264 encoder refuses to work (#1793: Firefox on Linux)
+/// announced none, so the codecs every viewer decodes lack it: the best of them, which the call
+/// picked for it ([`crate::call_engine::CallEngine::fallback_video_codec`]).
+fn fallback_codec(codecs: &ShareCodecs) -> VideoCodec {
+  match codecs.by_all.first() {
+    Some(best) if !codecs.by_all.contains(&VideoCodec::H264) => best.clone(),
+    _ => VideoCodec::H264,
   }
 }
 
@@ -971,6 +990,42 @@ mod tests {
         codec_bitrate_bps(h264_top.max_bitrate_bps, &VideoCodec::Av1)
       );
       assert!(av1_top.max_bitrate_bps < h264_top.max_bitrate_bps);
+    }
+
+    /// #1793: a device whose H.264 encoder refuses to work announced none, so no layer may be
+    /// H.264: the base and every step go out in the best codec every viewer decodes, also where
+    /// software AV1 would step down to H.264, and the middle and base where layers in other
+    /// codecs are forwarded.
+    #[test]
+    fn without_h264_no_layer_is_h264() {
+      let vp9_by_all = ShareCodecs {
+        by_all: vec![VideoCodec::Vp9],
+        by_some: vec![VideoCodec::Av1, VideoCodec::Vp9],
+      };
+      let software = ShareEncoders {
+        av1: EncoderKind::Software,
+        vp9: EncoderKind::Software,
+      };
+      for codecs in [
+        vp9_by_all,
+        ShareCodecs {
+          by_all: vec![VideoCodec::Av1],
+          by_some: Vec::new(),
+        },
+      ] {
+        let ladder = ShareLadder::new(plan(QHD, software, codecs.clone()));
+        for index in 0..ladder.len() {
+          let step = ladder.step(index);
+          let track = ladder.track_codec(step);
+          assert_ne!(track, VideoCodec::H264, "{codecs:?} step {index}");
+          for layer in ladder.layers(step) {
+            assert_ne!(*layer.codec(&track), VideoCodec::H264, "{codecs:?} {layer:?}");
+          }
+        }
+      }
+      // With H.264 the base stays H.264.
+      let ladder = ShareLadder::new(plan(QHD, software, both(VideoCodec::Av1)));
+      assert_eq!(ladder.track_codec(ladder.step(0)), VideoCodec::H264);
     }
 
     /// VP9 goes on top where this device encodes it in hardware and AV1 not; a software VP9

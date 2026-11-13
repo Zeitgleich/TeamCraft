@@ -16,6 +16,7 @@ use crate::components::video_stats::VideoStatsOverlay;
 use crate::i18n::use_i18n;
 use crate::model::User;
 use crate::reactive::{use_interval_while, use_page_visible};
+use crate::state::use_app_state;
 use crate::video_stats::StatsTarget;
 
 /// How long a shown video of another device may go without a new picture before its tile says so
@@ -247,6 +248,17 @@ pub fn LiveVideo(source: VideoSource, #[prop(into)] is_mirrored: Signal<bool>) -
   let picture_watch = StoredValue::new(None::<PictureWatch>);
   let own_picture_watch = StoredValue::new(None::<OwnPictureWatch>);
   let observer = StoredValue::new_local(None::<OnScreenObserver>);
+  // #1793: a track in a codec this device doesn't decode is not watched; the tile says why.
+  let state = use_app_state();
+  let is_undecodable = Memo::new(move |_| match source {
+    VideoSource::Remote(stream_id) => state.read(|backend| {
+      backend
+        .call_video_tracks()
+        .iter()
+        .any(|track| track.stream_id == stream_id && track.is_undecodable)
+    }),
+    VideoSource::OwnCamera | VideoSource::OwnScreen => false,
+  });
   Effect::new(move |_| {
     let Some(element) = host.get() else {
       return;
@@ -254,7 +266,7 @@ pub fn LiveVideo(source: VideoSource, #[prop(into)] is_mirrored: Signal<bool>) -
     if observer.with_value(Option::is_none) {
       observer.set_value(OnScreenObserver::new(&element, is_on_screen));
     }
-    let should_show = is_page_visible.get() && is_on_screen.get();
+    let should_show = is_page_visible.get() && is_on_screen.get() && !is_undecodable.get();
     if should_show != is_shown.get_untracked() {
       is_shown.set(should_show);
       // Watched afresh from now on: a hidden video gets no pictures by design.
@@ -344,8 +356,17 @@ pub fn LiveVideo(source: VideoSource, #[prop(into)] is_mirrored: Signal<bool>) -
   };
   view! {
     <div class="live-video" class:mirrored=move || is_mirrored.get() node_ref=host aria-hidden="true"></div>
-    <Show when=move || is_stalled.get() fallback=|| ()>
-      <span class="video-stalled" role="status">{move || i18n.t(stalled_key)}</span>
+    <Show
+      when=move || is_undecodable.get()
+      fallback=move || {
+        view! {
+          <Show when=move || is_stalled.get() fallback=|| ()>
+            <span class="video-stalled" role="status">{move || i18n.t(stalled_key)}</span>
+          </Show>
+        }
+      }
+    >
+      <span class="video-stalled" role="status">{move || i18n.t("video-undecodable")}</span>
     </Show>
     {maybe_quality}
     {maybe_stats_target.map(|target| view! { <VideoStatsOverlay target=target maybe_host=host /> })}

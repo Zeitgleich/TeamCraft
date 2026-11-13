@@ -105,6 +105,20 @@ const MAX_ENCODE_QUEUE: u32 = 2;
 const MAX_ENCODER_RESTARTS: u8 = 3;
 /// WebCodecs' state of an encoder or decoder that takes frames.
 const CONFIGURED: &str = "configured";
+/// How long a test encode of one frame may take before the encoder counts as working (#1793): a
+/// refusing one fails at once, a slow hardware encoder that is still starting up is no refusal.
+const TEST_ENCODE_TIMEOUT_MS: i32 = 2_000;
+/// The size of the test frame: small, so the check costs nothing.
+const TEST_FRAME_WIDTH: u16 = 320;
+const TEST_FRAME_HEIGHT: u16 = 180;
+/// The codecs a camera may go out in, best first (#1793): H.264, which every device decodes and
+/// most encode in hardware; AV1, then VP9 only where this browser can't encode H.264.
+const CAMERA_CODECS: [VideoCodec; 3] = [VideoCodec::H264, VideoCodec::Av1, VideoCodec::Vp9];
+
+thread_local! {
+  /// [`codec_support`]'s answer, found once per page (#1793): the test encodes cost a moment.
+  static CODEC_SUPPORT: std::cell::RefCell<Option<CodecSupport>> = const { std::cell::RefCell::new(None) };
+}
 
 /// One own track: capture, optional effects, an encoder per layer.
 pub(super) struct TrackSender {
@@ -114,7 +128,7 @@ pub(super) struct TrackSender {
   encoders: LayerEncoders<LayerEncoder>,
   /// What the encoders are built with, to build them anew in another codec (#565).
   encoding: Encoding,
-  /// The codecs the track may go out in, best first (`ScreenProfile::codecs`; cameras H.264).
+  /// The codecs the track may go out in, best first ([`camera_plan`], [`screen_plan`]).
   codecs: Vec<VideoCodec>,
   /// Follows the source's size with the layers' (a shared window resized).
   sizer: LayerSizer,
@@ -1816,7 +1830,7 @@ pub(super) fn camera_plan(limit: VideoResolution) -> TrackPlan {
     kind: VideoTrackKind::Camera,
     framerate: CAMERA_FRAMERATE,
     shape: LayerShape::Camera,
-    codecs: vec![VideoCodec::H264],
+    codecs: CAMERA_CODECS.to_vec(),
     maybe_max_resolution: Some(limit),
     #[cfg(feature = "effects")]
     maybe_effects: None,
@@ -1883,19 +1897,22 @@ pub struct CodecSupport {
   pub share_encoders: ShareEncoders,
 }
 
-/// What this browser encodes and decodes: H.264 always (every client sends and takes it), AV1
-/// where WebCodecs says it encodes a standard screen share's top layer (1440p at 30 fps, in real
-/// time), VP9 where it does so in hardware (#1733), and each where it decodes it. A browser that
-/// doesn't answer gets H.264 only.
+/// What this browser encodes and decodes, found once per page: H.264 where it encodes a test frame
+/// (#1793: Firefox on Linux says it encodes H.264 and then refuses every frame), AV1 where
+/// WebCodecs says it encodes a standard screen share's top layer (1440p at 30 fps, in real time),
+/// VP9 where it does so in hardware (#1733) or H.264 can't be encoded, each only where a test frame
+/// encodes; and each codec where it decodes it. A browser that doesn't answer gets H.264 only.
 pub(super) async fn codec_support() -> CodecSupport {
-  let mut support = CodecSupport {
-    encoders: vec![VideoCodec::H264],
-    decoders: vec![VideoCodec::H264],
-    share_encoders: ShareEncoders {
-      av1: EncoderKind::Unavailable,
-      vp9: EncoderKind::Unavailable,
-    },
-  };
+  if let Some(support) = CODEC_SUPPORT.with_borrow(Clone::clone) {
+    return support;
+  }
+  let support = check_codec_support().await;
+  info!(encoders = ?support.encoders, decoders = ?support.decoders, "video codecs of this browser");
+  CODEC_SUPPORT.set(Some(support.clone()));
+  support
+}
+
+async fn check_codec_support() -> CodecSupport {
   let layer = VideoLayerInfo {
     layer: 0,
     width: 2560,
@@ -1904,22 +1921,153 @@ pub(super) async fn codec_support() -> CodecSupport {
     max_bitrate_bps: 6_000_000,
     maybe_codec: None,
   };
-  support.share_encoders.vp9 = encoder_kind(VideoCodec::Vp9, &layer).await;
-  if support.share_encoders.vp9 == EncoderKind::Hardware {
-    support.encoders.insert(0, VideoCodec::Vp9);
+  let encodes_h264 = encodes_a_frame(VideoCodec::H264).await;
+  let mut share_encoders = ShareEncoders {
+    av1: EncoderKind::Unavailable,
+    vp9: EncoderKind::Unavailable,
+  };
+  for codec in [VideoCodec::Vp9, VideoCodec::Av1] {
+    let mut kind = encoder_kind(codec.clone(), &layer).await;
+    if kind != EncoderKind::Unavailable && !encodes_a_frame(codec.clone()).await {
+      warn!(%codec, "the browser says it encodes this codec, but a test frame failed");
+      kind = EncoderKind::Unavailable;
+    }
+    match codec {
+      VideoCodec::Av1 => share_encoders.av1 = kind,
+      _ => share_encoders.vp9 = kind,
+    }
   }
-  support.share_encoders.av1 = encoder_kind(VideoCodec::Av1, &layer).await;
-  if support.share_encoders.av1 != EncoderKind::Unavailable {
-    support.encoders.insert(0, VideoCodec::Av1);
+  if !encodes_h264 {
+    warn!("the browser can't encode H.264 here; video goes out in AV1 or VP9");
   }
+  let mut decoders = vec![VideoCodec::H264];
   for (codec, name) in [(VideoCodec::Vp9, VP9_CODEC), (VideoCodec::Av1, AV1_CODEC)] {
     if let Ok(config) = dictionary(&[("codec", JsValue::from_str(name))])
       && is_supported(VideoDecoder::is_config_supported(&config)).await
     {
-      support.decoders.insert(0, codec);
+      decoders.insert(0, codec);
     }
   }
-  support
+  CodecSupport {
+    encoders: announced_encoders(encodes_h264, share_encoders),
+    decoders,
+    share_encoders,
+  }
+}
+
+/// The video encoders a browser announces, best first, from whether it encodes H.264 and how it
+/// encodes AV1 and VP9: AV1 wherever it does; VP9 in hardware, and in software only in place of
+/// H.264 (#1793; Chrome's software VP9 mis-tagged the colour range, docs/performance.md); H.264
+/// where it does.
+fn announced_encoders(encodes_h264: bool, share: ShareEncoders) -> Vec<VideoCodec> {
+  let mut encoders = Vec::new();
+  if share.av1 != EncoderKind::Unavailable {
+    encoders.push(VideoCodec::Av1);
+  }
+  if share.vp9 == EncoderKind::Hardware || (!encodes_h264 && share.vp9 != EncoderKind::Unavailable) {
+    encoders.push(VideoCodec::Vp9);
+  }
+  if encodes_h264 {
+    encoders.push(VideoCodec::H264);
+  }
+  encoders
+}
+
+/// Whether the browser encodes one small camera frame in `codec` (#1793): `isConfigSupported`
+/// alone isn't enough, an encoder may refuse at configure or at the first frame. One that neither
+/// delivers nor fails within [`TEST_ENCODE_TIMEOUT_MS`] counts as working.
+async fn encodes_a_frame(codec: VideoCodec) -> bool {
+  let layer = VideoLayerInfo {
+    layer: 0,
+    width: TEST_FRAME_WIDTH,
+    height: TEST_FRAME_HEIGHT,
+    max_framerate: CAMERA_FRAMERATE,
+    max_bitrate_bps: 200_000,
+    maybe_codec: None,
+  };
+  let probe = Encoding {
+    kind: VideoTrackKind::Camera,
+    codec,
+    framerate: CAMERA_FRAMERATE,
+    latency: LatencyMode::Realtime,
+    maybe_content_hint: None,
+  };
+  let Ok(config) = probe.config(&layer) else {
+    return false;
+  };
+  if !is_supported(VideoEncoder::is_config_supported(&config)).await {
+    return false;
+  }
+  test_encode(&config).await.unwrap_or_else(|error| {
+    debug!(error = %js_message(&error), "test encode failed");
+    false
+  })
+}
+
+/// Encodes one grey frame with `config`: `true` once a chunk comes out, `false` on an error, and
+/// `true` when neither happened within [`TEST_ENCODE_TIMEOUT_MS`]. An encoder that throws at
+/// `configure` or `encode` is an error.
+async fn test_encode(config: &js_sys::Object) -> Result<bool, JsValue> {
+  let mut maybe_resolve = None;
+  let answer = Promise::new(&mut |resolve, _reject| maybe_resolve = Some(resolve));
+  // The executor runs within `Promise::new`, so this is always there.
+  let Some(resolve) = maybe_resolve else {
+    return Ok(false);
+  };
+  let delivered = resolve.clone();
+  let output = Closure::<dyn FnMut(JsValue)>::new(move |_chunk: JsValue| {
+    let _ = delivered.call1(&JsValue::NULL, &JsValue::TRUE);
+  });
+  let refused = resolve.clone();
+  let error = Closure::<dyn FnMut(JsValue)>::new(move |_error: JsValue| {
+    let _ = refused.call1(&JsValue::NULL, &JsValue::FALSE);
+  });
+  let encoder = VideoEncoder::new(&dictionary(&[
+    ("output", output.as_ref().clone()),
+    ("error", error.as_ref().clone()),
+  ])?)?;
+  let is_encoded = match start_test_encode(&encoder, config, &resolve) {
+    Ok(()) => JsFuture::from(answer)
+      .await
+      .map(|answer| answer.as_bool().unwrap_or(true)),
+    Err(error) => Err(error),
+  };
+  // Closing an errored encoder throws; nothing left to release then.
+  let _ = encoder.close();
+  // Closed, the encoder calls neither closure again; the timer calls only `resolve`.
+  drop((output, error));
+  is_encoded
+}
+
+/// Configures `encoder`, gives it one grey keyframe and sets the timer that resolves the test.
+fn start_test_encode(
+  encoder: &VideoEncoder,
+  config: &js_sys::Object,
+  resolve: &js_sys::Function,
+) -> Result<(), JsValue> {
+  encoder.configure(config)?;
+  let (width, height) = (u32::from(TEST_FRAME_WIDTH), u32::from(TEST_FRAME_HEIGHT));
+  // I420: a full-size luma plane and two quarter-size chroma planes.
+  let length = width * height * 3 / 2;
+  let data = Uint8Array::new_with_length(length);
+  data.fill(128, 0, length);
+  let init = dictionary(&[
+    ("format", JsValue::from_str("I420")),
+    ("codedWidth", JsValue::from(width)),
+    ("codedHeight", JsValue::from(height)),
+    ("timestamp", JsValue::from(0)),
+  ])?;
+  let frame = WebVideoFrame::new(&data.into(), &init)?;
+  let encoded = encoder.encode(&frame, &dictionary(&[("keyFrame", JsValue::TRUE)])?);
+  frame.close();
+  encoded?;
+  let window = web_sys::window().ok_or_else(|| JsValue::from_str("no window"))?;
+  window.set_timeout_with_callback_and_timeout_and_arguments_1(
+    resolve,
+    TEST_ENCODE_TIMEOUT_MS,
+    &JsValue::TRUE,
+  )?;
+  Ok(())
 }
 
 /// How the browser encodes `codec` at `layer` for a screen share (#1733): not at all where
@@ -2051,11 +2199,24 @@ pub(super) fn screen_plan(profile: &ScreenProfile) -> TrackPlan {
     kind: VideoTrackKind::Screen,
     framerate,
     shape: LayerShape::Screen(profile.clone()),
-    codecs: profile.codecs(),
+    codecs: screen_codecs(profile),
     maybe_max_resolution: Some(limit),
     #[cfg(feature = "effects")]
     maybe_effects: None,
   }
+}
+
+/// The codecs a share may go out in, best first: its profile's, then AV1 and VP9 for a browser
+/// that can't encode H.264 (#1793; a motion share's profile takes H.264 only). Its layers' codecs
+/// follow the profile ([`crate::share_policy`]).
+fn screen_codecs(profile: &ScreenProfile) -> Vec<VideoCodec> {
+  let mut codecs = profile.codecs();
+  for fallback in [VideoCodec::Av1, VideoCodec::Vp9] {
+    if !codecs.contains(&fallback) {
+      codecs.push(fallback);
+    }
+  }
+  codecs
 }
 
 /// Asks for the camera (`getUserMedia`); `maybe_device` is a `MediaDeviceInfo.deviceId`. Every
@@ -2671,6 +2832,71 @@ mod tests {
     assert_eq!(h264_encoder_codec(1280, 720), "avc1.42e028");
     assert_eq!(h264_encoder_codec(2216, 1440), "avc1.42e033");
     assert_eq!(h264_encoder_codec(2560, 1440), "avc1.42e033");
+  }
+
+  /// #1793: what a browser announces from its test encodes, and what its camera goes out in.
+  mod codec_fallback {
+    use teamcraft_proto::{MediaCapabilities, UserId};
+
+    use super::*;
+    use crate::bwe::BweConfig;
+    use crate::call_engine::{CallEngine, CallEngineConfig};
+
+    const SOFTWARE: ShareEncoders = ShareEncoders {
+      av1: EncoderKind::Unavailable,
+      vp9: EncoderKind::Software,
+    };
+
+    /// H.264 fails its test frame at configure, VP9 encodes in software: VP9 is announced in
+    /// place of H.264, and the camera goes out in it.
+    #[test]
+    fn a_camera_goes_out_in_vp9_where_h264_fails() {
+      let encoders = announced_encoders(false, SOFTWARE);
+      assert_eq!(encoders, vec![VideoCodec::Vp9]);
+      let now = Instant::now();
+      let engine = CallEngine::new(
+        CallEngineConfig {
+          user_id: UserId::from_snowflake(Snowflake::new(1).unwrap()),
+          device_id: DeviceId::from_snowflake(Snowflake::new(10).unwrap()),
+          capabilities: MediaCapabilities {
+            video_encoders: encoders,
+            ..MediaCapabilities::default()
+          },
+          bwe: BweConfig::default(),
+        },
+        now,
+      );
+      let camera = camera_plan(crate::video::CAMERA_MAX_RESOLUTION);
+      assert_eq!(engine.video_codec_for(&camera.codecs), VideoCodec::Vp9);
+      // A motion share takes H.264 only by its profile, and VP9 in its place.
+      let motion = ScreenProfile {
+        mode: ScreenContentMode::Motion,
+        size: teamcraft_proto::ScreenShareResolution::Standard,
+      };
+      assert_eq!(
+        engine.video_codec_for(&screen_plan(&motion).codecs),
+        VideoCodec::Vp9
+      );
+    }
+
+    /// Software VP9 only in place of H.264; AV1 wherever a test frame encodes.
+    #[test]
+    fn software_vp9_only_without_h264() {
+      assert_eq!(announced_encoders(true, SOFTWARE), vec![VideoCodec::H264]);
+      let both = ShareEncoders {
+        av1: EncoderKind::Software,
+        vp9: EncoderKind::Hardware,
+      };
+      assert_eq!(
+        announced_encoders(true, both),
+        vec![VideoCodec::Av1, VideoCodec::Vp9, VideoCodec::H264]
+      );
+      let none = ShareEncoders {
+        av1: EncoderKind::Unavailable,
+        vp9: EncoderKind::Unavailable,
+      };
+      assert!(announced_encoders(false, none).is_empty());
+    }
   }
 
   mod layer_encoders {

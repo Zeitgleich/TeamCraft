@@ -1354,6 +1354,7 @@ async fn run_media(
   shared: MediaShared,
 ) {
   let mut roster = CallRoster::new(shared.own_device);
+  roster.set_video_decoders(call.video_decoders().to_vec());
   let mut video_starts = VideoStarts::default();
   let MediaShared {
     state,

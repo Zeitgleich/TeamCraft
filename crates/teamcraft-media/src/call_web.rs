@@ -180,6 +180,7 @@ pub struct WebCall {
   finished: oneshot::Receiver<Result<CallStats, WebCallError>>,
   /// The microphone's newest meter reading (#986).
   microphone_level: SharedLevel,
+  video_decoders: Vec<VideoCodec>,
 }
 
 /// How to reach the SFU and what to send and play.
@@ -707,6 +708,7 @@ impl WebCall {
     let task_inputs = inputs.clone();
     let microphone_level = SharedLevel::default();
     let meter = CallMeter::new(microphone_level.clone());
+    let video_decoders = config.engine.capabilities.video_decoders.clone();
     spawn_local(async move {
       let channels = (task_inputs, input_rx, event_tx);
       let result = run_call(config, transport, sessions, audio, channels, meter).await;
@@ -718,7 +720,14 @@ impl WebCall {
       events,
       finished,
       microphone_level,
+      video_decoders,
     })
+  }
+
+  /// The video codecs this device decodes, as the call announced them: others' tracks in another
+  /// codec can't be shown here (#1793).
+  pub fn video_decoders(&self) -> &[VideoCodec] {
+    &self.video_decoders
   }
 
   /// The microphone's level (0.0 to 1.0) as the call captures it, also while muted, about ten
@@ -1163,6 +1172,7 @@ async fn run_call(
     stats: CallStats::default(),
     own_device: config.engine.device_id,
     senders: Vec::new(),
+    has_told_undecodable: false,
     share_encoders: config.share_encoders,
     next_publication: VideoPublicationId(0),
     encoded_kinds: Vec::new(),
@@ -1305,6 +1315,8 @@ struct CallState<'a> {
   stats: CallStats,
   own_device: DeviceId,
   senders: Vec<TrackSender>,
+  /// Whether the user heard that an own track goes out in a codec not everyone decodes (#1793).
+  has_told_undecodable: bool,
   /// How this browser encodes AV1 and VP9, for a share's plan (#1733).
   share_encoders: ShareEncoders,
   /// The id the next own video publication goes under.
@@ -2594,6 +2606,26 @@ impl CallState<'_> {
       self.on_encoders_gave_up(engine, &kind, layer);
     }
     self.publish_replans(engine);
+    self.tell_if_undecodable(engine);
+  }
+
+  /// Tells the user once per call when an own track goes out in a codec some other device
+  /// doesn't decode (#1793: this browser can't encode H.264, and a phone decodes nothing else).
+  fn tell_if_undecodable(&mut self, engine: &CallEngine) {
+    if self.has_told_undecodable {
+      return;
+    }
+    let maybe_undecodable = self
+      .senders
+      .iter()
+      .find(|sender| !engine.is_decodable_by_all(sender.codec()));
+    if let Some(sender) = maybe_undecodable {
+      self.has_told_undecodable = true;
+      warn!(kind = ?sender.publication.kind, codec = %sender.codec(), "not every device in the call decodes this video");
+      let _ = self
+        .events
+        .unbounded_send(CallEngineEvent::OwnVideoNotDecodableByAll);
+    }
   }
 
   /// Publishes anew the own tracks whose layers changed beyond what their encoders follow in
