@@ -39,6 +39,7 @@ pub mod server_secret;
 pub mod service_key;
 pub mod share_link;
 pub mod source_token;
+pub mod strict_roles;
 pub mod webhook;
 pub mod workspace;
 

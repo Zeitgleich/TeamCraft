@@ -52,7 +52,7 @@ pub(super) fn member_of(credential: &Credential) -> Result<GroupMember, MlsError
   })
 }
 
-fn decode(credential: &Credential) -> Result<SignedDeviceCertificate, MlsError> {
+pub(super) fn decode(credential: &Credential) -> Result<SignedDeviceCertificate, MlsError> {
   if credential.credential_type() != CredentialType::Basic {
     return Err(MlsError::UnsupportedCredential);
   }

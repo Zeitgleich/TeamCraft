@@ -40,6 +40,10 @@ pub enum WorkspaceLog {
   /// A move or rename of an anchored channel: the "version" is the new properties version and
   /// the payload a `ChannelPropertiesChange` naming the channel and its founding.
   ChannelProperties = 7,
+  /// A strict channel's roles change (e2ee.md §4.6.2): the "version" is the roles' version and the
+  /// payload a `StrictRolesChange` naming the channel. Its own kind, so a §4.6.1 role entry, which
+  /// a channel's founder may have signed on trust at first use, never passes for one.
+  StrictRoles = 8,
 }
 
 /// The signature field of a log entry: the signer's device certificate and its signature.

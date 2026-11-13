@@ -10,6 +10,7 @@ use crate::message::{MessageContext, MessageError, decrypt_message, encrypt_mess
 use crate::mls::{DefaultMlsProvider, create_key_package};
 
 mod anchored;
+mod strict;
 
 const CONVERSATION: ConversationId = ConversationId::new(42);
 const ALICE: u64 = 1;

@@ -129,3 +129,10 @@ path = "fuzz_targets/channel_anchor.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "strict_roles"
+path = "fuzz_targets/strict_roles.rs"
+test = false
+doc = false
+bench = false

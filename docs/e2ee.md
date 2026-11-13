@@ -2788,10 +2788,17 @@ its group with the admin in, unannounced (§4.6.2, finding 2).
 
 ### 4.6.2 Signed membership commits (issue #878, design for review)
 
-**Status: design, not implemented.** Nothing below is in the code. The owner has decided D1 to D6 (at
-the end); it needs a crypto review first. It extends stage 2 (§4.6.1), which restricts only
-the addition of a workspace admin under `owner_approval`. Everything else in a channel still follows
-§4.6: every member of the group may sign membership changes (security review A11).
+**Status: decided; the rule is implemented in `teamcraft-crypto`, not switched on in the apps.** The
+owner decided D1 to D6 (at the end). A review of the design changed details ("Review and implementation
+notes", end of this section). `teamcraft-crypto`'s `strict_roles` and `mls` hold the extension, the
+signed roles change, both verdicts, the roles commit, the leaf refresh and the welcome's sender check
+(#1197, first part). Leaves announce the capability only with the crate's `strict-channels` feature,
+which no app turns on yet: a client announces it only once it implements the whole rule, and stopping
+at a refused commit, the ready step, the rewind and the settings are the apps' and the server's
+(follow-up issues). Until then no channel can turn strict, and every channel follows §4.6.1 and §4.6.
+It extends stage 2 (§4.6.1), which restricts only the addition of a workspace admin under
+`owner_approval`. Everything else in a channel still follows §4.6: every member of the group may sign
+membership changes (security review A11).
 
 **Why stage 2's rule can't simply be widened.** Four things in today's code:
 
@@ -3011,7 +3018,7 @@ decided in §4.6.5: an anchor in its own extension (`0xF7C1`) from epoch 0, and 
 | D5  | No admin left, and no fresh roster                                      | Membership frozen, people can leave                                                                                                                             | Moderators with a leaf may sign the next admin                                                              |
 | D6  | One old or stale device blocks opting in, and an old app can't be added | Accept it: a group with an old client has no rule. Removing a stale device is offered                                                                           | None that keeps the guarantee                                                                               |
 
-**What implementing it takes** (not moderate, so not started):
+**What implementing it takes** (`teamcraft-crypto` done in #1197's first part; the rest in follow-up issues):
 
 - `teamcraft-crypto`: the extension and its parser (with a fuzz target), capabilities in key packages,
   group creation and external joins, the role commit, the pure verdict, a separate refusal from an
@@ -3032,6 +3039,67 @@ both sides hold the same extensions; a joiner's welcome carries them; a package 
 can't be added (`InsufficientCapabilities`); an empty extension list turns it off; today's clients refuse
 the switch (`UnsupportedProposal`) and an empty commit (`MissingSignedChange`); a commit from a group
 founded alone fails on decryption.
+
+**Review and implementation notes** (#1197, first part: `teamcraft-crypto`). Reviewing the design while
+writing the code changed or pinned down the following. The review was done by the implementer; an
+independent crypto review of these points is still asked for before any app switches the rule on.
+
+- **Encoding.** The extension (`0xF7C0`) holds a format byte and the last `SignedStrictRolesChange`, so it
+  verifies on its own like the anchor's last change: the change names the conversation, `version`,
+  `prev_hash`, `signed_for_epoch`, `signer_role`, `roster_version`, the mirrored role log entry
+  (`role_log_version`, `role_log_hash`: shown, never decided on) and the roles, each with the identity key
+  its holder signs under, ascending by user, at most 64. An empty list is "off" and never sits in a
+  context. A larger extension than 8 KiB isn't parsed; a newer format or an unknown role is "update the
+  app".
+- **Domain separation.** The change is signed as a workspace log entry of its own kind (`StrictRoles`, 8)
+  under `TeamCraft-v1 workspace log`, with its version. A §4.6.1 role entry, which a founder may have
+  signed on trust at first use, never passes for one, nor does a properties change or a roster entry
+  (tested). The chain hash is `TeamCraft-v1 strict roles` over the change's TLS encoding without the
+  signature, so a re-signed change of the same content chains the same.
+- **The signer's role is signed.** `signer_role` says which rule the change claims (a channel admin of
+  the context, or a workspace signer at `roster_version`), so one change can't be judged under the other.
+- **Every change chains exactly.** The design let a workspace admin sign "a higher version" without the
+  context's hash. That lets a workspace admin's entry, signed on an old state and held back, undo later
+  admin changes it never saw. Now every change is the current version plus one with the current hash; a
+  workspace admin outside the group reads both from the server's hint, and a wrong hint only gets the
+  entry refused.
+- **A 32-epoch window on every roles change.** The design needed no age limit, since the chain stops
+  replays. Turning on has no chain before it, though: an old "on" could be replayed after an "off". So
+  every roles change is accepted only from `signed_for_epoch` to 32 epochs after. Residual: within that
+  window, a workspace admin's "on" can be committed again after an "off"; it takes their signature.
+- **Roles are judged under the context's keys only.** An admin or moderator counts if the change's
+  certificate verifies under the identity key the context names and a leaf of that user and device signs
+  with the certificate's key. No directory pin and no device list decide it, so every member decides
+  alike. The pinned key is read only for leaving and for workspace signers.
+- **Leaving** is a `RemoveUser` of oneself or a `RemoveDevice` of one's own device, by anybody, the last
+  admin included. Adding oneself is never allowed (no self-add).
+- **Workspace signers** need `workspace_signer` confirmed on the newest roster (`Standing::Confirmed`)
+  and the existing `is_authorized` (`admin_self_join`). An unknown roster is `StrictRosterNeeded` (for a
+  roles change `RosterUnknown`), which `MlsError::is_strict_retry` marks: hold the commit and read the
+  roster, don't stop. Space admins and scheme holders get nothing in a strict channel (D2, tested against
+  the same change passing in a channel that isn't strict).
+- **The server's word about guests** (`is_guest`) isn't read in a strict channel, for signed changes,
+  additions of further devices and rejoins alike.
+- **What stops a device** (D4) is the apps' to decide from the error: a strict refusal
+  (`StrictRefused`, `StrictRoles`, and any other authorization error in a strict group) stops it; a retry
+  doesn't; an entry it can't read at its own epoch (finding 4) comes back as an openmls error, told apart
+  from both (tested with a group founded alone).
+- **The roles commit** is one group context extensions proposal and nothing else; the new context must
+  equal the current one with the roles set (replaced in place or appended) and `0xF7C0` added to
+  `required_capabilities` (appended, other requirements and every other extension byte for byte). "Off"
+  removes both; a requirement extension that had only `0xF7C0` stays, empty. Turning on is refused for a
+  meeting chat's anchor; DMs and the notes have none and are the apps' to keep out.
+- **The leaf refresh** (step 3) is an empty commit whose path leaf announces this build's capabilities.
+  This version takes an empty commit in every group, strict or not; older apps refuse it, as designed.
+  `leaves_without_strict` lists the devices that still block turning on (D6).
+- **The welcome's sender** (`StagedJoin::check_strict_sender`) is checked against the roles the device
+  knew, not the welcome's own context: an admin of those with a leaf certified under the named key, or a
+  workspace signer. Bob's modified client, having committed a refused addition, can't bring Dave back
+  into its fork (tested).
+- **The capability** is announced only with the `strict-channels` feature (always in the crate's own
+  tests). An app turns it on once it implements stopping, the ready step and the welcome check.
+- **Still open** in the crypto part: a strict channel's renames and moves by its admins (§4.6.5, D5)
+  still follow §4.6.5's member rule.
 
 ### 4.6.3 Noticing a withheld channel role change (issue #876)
 

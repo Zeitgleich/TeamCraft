@@ -288,25 +288,11 @@ impl SignedMembershipChange {
     directory: &impl IdentityDirectory,
     authority: &impl MembershipAuthority,
   ) -> Result<VerifiedMembershipChange, MembershipError> {
-    if self.change.version != MEMBERSHIP_CHANGE_VERSION {
-      return Err(MembershipError::UnsupportedVersion(self.change.version));
-    }
     let signer_user = self.signer.unverified().user_id;
     let pinned = directory
       .pinned_identity(signer_user)
       .ok_or(MembershipError::UnknownSigner(signer_user))?;
-    let actor = self
-      .signer
-      .verify(&pinned)
-      .map_err(MembershipError::InvalidSignerCertificate)?;
-    actor
-      .signing_key()
-      .verify_labeled(
-        domain::MEMBERSHIP_CHANGE,
-        &self.change.tls_serialize_detached()?,
-        &self.signature,
-      )
-      .map_err(|_| MembershipError::InvalidSignature)?;
+    let actor = self.verify_signed_by(&pinned)?;
     if !authority.is_authorized(actor.user_id(), self.change.conversation_id, &self.change.action) {
       return Err(MembershipError::Unauthorized {
         actor: actor.user_id(),
@@ -318,6 +304,29 @@ impl SignedMembershipChange {
       change: self.change.clone(),
       actor,
     })
+  }
+
+  /// Checks the version, the signer's certificate against `identity` and the device signature
+  /// over the change, and nothing about the signer's right to make it. For a strict channel
+  /// (e2ee.md §4.6.2), whose context names the identity key a role holder signs under; the caller
+  /// judges the right.
+  pub fn verify_signed_by(&self, identity: &IdentityPublicKey) -> Result<VerifiedDevice, MembershipError> {
+    if self.change.version != MEMBERSHIP_CHANGE_VERSION {
+      return Err(MembershipError::UnsupportedVersion(self.change.version));
+    }
+    let actor = self
+      .signer
+      .verify(identity)
+      .map_err(MembershipError::InvalidSignerCertificate)?;
+    actor
+      .signing_key()
+      .verify_labeled(
+        domain::MEMBERSHIP_CHANGE,
+        &self.change.tls_serialize_detached()?,
+        &self.signature,
+      )
+      .map_err(|_| MembershipError::InvalidSignature)?;
+    Ok(actor)
   }
 }
 
@@ -597,12 +606,20 @@ pub(crate) mod tests {
     }
   }
 
-  /// Lets the listed users make any change, plus everyone remove themselves.
-  pub(crate) struct TestAuthority(HashSet<UserId>);
+  /// Lets the listed users make any change, plus everyone remove themselves. The second set holds
+  /// rights from the server's roles (space admins, custom schemes): any change, but no workspace
+  /// signer.
+  pub(crate) struct TestAuthority(HashSet<UserId>, HashSet<UserId>);
 
   impl TestAuthority {
     pub(crate) fn allowing(users: &[UserId]) -> Self {
-      Self(users.iter().copied().collect())
+      Self(users.iter().copied().collect(), HashSet::new())
+    }
+
+    /// Also lets `users` make any change by a server role that isn't signed (e2ee.md §4.6.2, D2).
+    pub(crate) fn with_schemes(mut self, users: &[UserId]) -> Self {
+      self.1 = users.iter().copied().collect();
+      self
     }
   }
 
@@ -613,7 +630,7 @@ pub(crate) mod tests {
       _conversation_id: ConversationId,
       action: &MembershipAction,
     ) -> bool {
-      self.0.contains(&actor) || action.target_user() == actor
+      self.0.contains(&actor) || self.1.contains(&actor) || action.target_user() == actor
     }
 
     /// The listed users are workspace admins of every roster.

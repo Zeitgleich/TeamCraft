@@ -68,3 +68,8 @@ rand_chacha_010 = { package = "rand_chacha", version = "0.10.0" }
 getrandom_02 = { package = "getrandom", version = "0.2.17", features = ["js"] }
 getrandom = { version = "0.4.3", features = ["wasm_js"] }
 openmls = { version = "0.9.1", features = ["js"] }
+
+[features]
+# Leaves announce strict channels (e2ee.md §4.6.2). Only for an app that implements the whole rule:
+# stopping at a refused commit, the welcome's sender check and the rewind (issue #1197).
+strict-channels = []
