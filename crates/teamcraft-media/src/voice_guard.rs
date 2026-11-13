@@ -2,14 +2,16 @@
 //! their fate from the receiver's transport feedback.
 //!
 //! When a link collapses (5 Mbit/s to 120 kbit/s from one second to the next), its bottleneck holds
-//! the video sent for the old rate, and voice packets are lost with it until the bandwidth estimate
-//! has come down and the video stopped: two to four seconds in which a call was silent. The
-//! estimate is careful by design (a keyframe's burst, a jittery link and a still screen's bursts
-//! mustn't cut it), and it speaks for all traffic. Lost voice is the one signal that needs no
-//! judgement: once the audio of the last [`VoiceGuardConfig::window`] lost
-//! [`VoiceGuardConfig::max_loss`] or more, the video yields at once
-//! ([`VoiceGuard::is_hurt`]) and stays off for [`VoiceGuardConfig::hold`] after the last such
-//! moment.
+//! the video sent for the old rate, and voice packets are lost with it or wait behind it until the
+//! bandwidth estimate has come down and the video stopped: two to four seconds in which a call was
+//! silent. The estimate is careful by design (a keyframe's burst, a jittery link and a still
+//! screen's bursts mustn't cut it), and it speaks for all traffic. Hurt voice is the one signal
+//! that needs no judgement: once [`VoiceGuardConfig::max_loss`] or more of the voice reported
+//! within the last [`VoiceGuardConfig::window`] was lost or came
+//! [`VoiceGuardConfig::max_delay`] later than the fastest lately (it plays as a gap just the same:
+//! a sender's queue holds voice back behind a collapsed congestion window, not only the link), the
+//! video yields at once ([`VoiceGuard::is_hurt`]) and stays off for [`VoiceGuardConfig::hold`]
+//! after the last such moment.
 //!
 //! Pure state: time is passed in.
 
@@ -25,6 +27,8 @@ use crate::datagram::TransportSeq;
 /// Voice datagrams remembered until the feedback reports them: about four seconds of one voice.
 /// Older ones are forgotten (the feedback that would have reported them was lost).
 const MAX_PENDING: usize = 256;
+/// The fastest voice datagram's delay within this long is the path's own: what comes later waited.
+const BASELINE_WINDOW: Duration = Duration::from_secs(10);
 
 /// When voice counts as hurt.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -34,8 +38,11 @@ pub struct VoiceGuardConfig {
   /// At least this many of them have to be reported: one lost packet of a quiet moment isn't a
   /// collapsed link.
   pub min_reported: usize,
-  /// The share of them lost from which voice is hurt.
+  /// The share of them lost or late from which voice is hurt.
   pub max_loss: f64,
+  /// A voice datagram that came this much later than the fastest lately is late: a jitter buffer
+  /// doesn't wait that long.
+  pub max_delay: Duration,
   /// Video stays off this long after voice was last hurt: a link that collapsed doesn't come back
   /// within a second, and switching video on and off sends a keyframe each time.
   pub hold: Duration,
@@ -48,8 +55,13 @@ pub struct VoiceGuard {
   /// Voice datagrams without a report yet, by transport sequence number, oldest first.
   pending: VecDeque<TransportSeq>,
   pending_since: HashMap<u16, Instant>,
-  /// Reported voice datagrams: when, and whether lost.
+  /// Reported voice datagrams: when, and whether lost or late.
   reports: VecDeque<(Instant, bool)>,
+  /// One-way delays of reported voice (receiver's clock minus the sender's, in microseconds: only
+  /// differences count), for the baseline.
+  delays: VecDeque<(Instant, i64)>,
+  /// The sender's clock base for those delays.
+  maybe_epoch: Option<Instant>,
   maybe_hurt_at: Option<Instant>,
 }
 
@@ -59,6 +71,7 @@ impl Default for VoiceGuardConfig {
       window: Duration::from_millis(500),
       min_reported: 8,
       max_loss: 0.1,
+      max_delay: Duration::from_millis(150),
       hold: Duration::from_secs(3),
     }
   }
@@ -71,12 +84,15 @@ impl VoiceGuard {
       pending: VecDeque::new(),
       pending_since: HashMap::new(),
       reports: VecDeque::new(),
+      delays: VecDeque::new(),
+      maybe_epoch: None,
       maybe_hurt_at: None,
     }
   }
 
   /// A datagram carrying voice went out with transport sequence number `seq`.
   pub fn on_send(&mut self, seq: TransportSeq, now: Instant) {
+    self.maybe_epoch.get_or_insert(now);
     self.pending.push_back(seq);
     self.pending_since.insert(seq.0, now);
     while self.pending.len() > MAX_PENDING {
@@ -94,8 +110,12 @@ impl VoiceGuard {
         break;
       };
       let seq = feedback.base_seq.wrapping_add(offset);
-      if self.pending_since.remove(&seq).is_some() {
-        self.reports.push_back((now, maybe_arrival.is_none()));
+      if let Some(sent_at) = self.pending_since.remove(&seq) {
+        let is_hurt = match maybe_arrival {
+          Some(arrival_us) => self.is_late(sent_at, *arrival_us, now),
+          None => true,
+        };
+        self.reports.push_back((now, is_hurt));
       }
     }
     if !self.pending.is_empty() {
@@ -111,16 +131,44 @@ impl VoiceGuard {
       self.reports.pop_front();
     }
     let reported = self.reports.len();
-    let lost = self.reports.iter().filter(|(_, is_lost)| *is_lost).count();
-    if reported >= self.config.min_reported && lost as f64 >= self.config.max_loss * reported as f64 {
+    let hurt = self.reports.iter().filter(|(_, is_hurt)| *is_hurt).count();
+    if reported >= self.config.min_reported && hurt as f64 >= self.config.max_loss * reported as f64 {
       self.maybe_hurt_at = Some(now);
     }
+  }
+
+  /// Whether a voice datagram sent at `sent_at` that arrived at `arrival_us` (the receiver's
+  /// clock) came [`VoiceGuardConfig::max_delay`] later than the fastest within
+  /// [`BASELINE_WINDOW`].
+  fn is_late(&mut self, sent_at: Instant, arrival_us: u64, now: Instant) -> bool {
+    let epoch = *self.maybe_epoch.get_or_insert(sent_at);
+    let sent_us = i64::try_from(sent_at.saturating_duration_since(epoch).as_micros()).unwrap_or(i64::MAX);
+    let delay_us = i64::try_from(arrival_us)
+      .unwrap_or(i64::MAX)
+      .saturating_sub(sent_us);
+    while self
+      .delays
+      .front()
+      .is_some_and(|(at, _)| now.saturating_duration_since(*at) > BASELINE_WINDOW)
+    {
+      self.delays.pop_front();
+    }
+    self.delays.push_back((now, delay_us));
+    let fastest_us = self
+      .delays
+      .iter()
+      .map(|(_, delay)| *delay)
+      .min()
+      .unwrap_or(delay_us);
+    let max_delay_us = i64::try_from(self.config.max_delay.as_micros()).unwrap_or(i64::MAX);
+    delay_us.saturating_sub(fastest_us) > max_delay_us
   }
 
   /// Forgets what became of the voice so far: the link is measured afresh (a new video track,
   /// after a call of sound only, starts with every layer, #935).
   pub fn forget(&mut self) {
     self.reports.clear();
+    self.delays.clear();
     self.maybe_hurt_at = None;
   }
 
@@ -203,6 +251,46 @@ mod tests {
     let clean = send_voice(&mut guard, 20, 20, later, |_| true);
     guard.on_feedback(&clean, later + 100 * MS);
     assert!(!guard.is_hurt(later + 100 * MS));
+  }
+
+  #[test]
+  fn voice_held_back_is_hurt_like_lost_voice() {
+    let start = Instant::now();
+    let mut guard = VoiceGuard::new(VoiceGuardConfig::default());
+    // A second of voice on time: the path's own delay.
+    let on_time = send_voice(&mut guard, 0, 50, start, |_| true);
+    guard.on_feedback(&on_time, start + Duration::from_secs(1));
+    assert!(!guard.is_hurt(start + Duration::from_secs(1)));
+    // Then voice waits 300 ms behind video in a collapsed link: it arrives, too late.
+    let later = start + Duration::from_secs(1);
+    for index in 0..25u16 {
+      guard.on_send(TransportSeq(50 + index), later + 20 * MS * u32::from(index));
+    }
+    let held_back = TransportFeedback {
+      base_seq: 50,
+      arrivals_us: (0..25u64)
+        .map(|index| Some(1_000_000 + index * 20_000 + 300_000))
+        .collect(),
+    };
+    guard.on_feedback(&held_back, later + 800 * MS);
+    assert!(guard.is_hurt(later + 800 * MS));
+  }
+
+  #[test]
+  fn jitter_below_the_bound_is_not_hurt() {
+    let start = Instant::now();
+    let mut guard = VoiceGuard::new(VoiceGuardConfig::default());
+    for index in 0..50u16 {
+      guard.on_send(TransportSeq(index), start + 20 * MS * u32::from(index));
+    }
+    let jittery = TransportFeedback {
+      base_seq: 0,
+      arrivals_us: (0..50u64)
+        .map(|index| Some(index * 20_000 + (index % 5) * 20_000))
+        .collect(),
+    };
+    guard.on_feedback(&jittery, start + Duration::from_secs(1));
+    assert!(!guard.is_hurt(start + Duration::from_secs(1)));
   }
 
   #[test]
