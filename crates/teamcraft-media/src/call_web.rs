@@ -1669,6 +1669,10 @@ impl CallState<'_> {
   async fn on_pulse(&mut self, engine: &mut CallEngine, audio: &WebAudio) -> Result<Flow, WebCallError> {
     self.pulses.taken();
     let now = Instant::now();
+    // The fallback's paced upload: what its pacer lets out since the last pulse (#1848).
+    if let Some(session) = self.sending_transport().and_then(Transport::fallback) {
+      session.pump(now);
+    }
     self.meter.tick(now);
     for _ in 0..self.frame_cadence.due(now) {
       self.on_frame_tick(audio)?;
@@ -1727,6 +1731,7 @@ impl CallState<'_> {
   }
 
   fn on_timer_tick(&mut self, engine: &mut CallEngine, now: Instant) -> Result<Flow, WebCallError> {
+    self.follow_upload_pacing(engine);
     engine.on_timer(now);
     self.timer_ticks = self.timer_ticks.wrapping_add(1);
     if self.timer_ticks.is_multiple_of(STATS_EVERY_TICKS) {
@@ -2024,7 +2029,17 @@ impl CallState<'_> {
   fn on_signal(&mut self, engine: &mut CallEngine, message: CallServerMessage) -> Result<Flow, WebCallError> {
     let now = Instant::now();
     if let CallServerMessage::Pong { id } = message {
-      self.watch.on_pong(id, now);
+      let is_pacers = [self.sending_transport(), self.maybe_transport.as_ref()]
+        .into_iter()
+        .flatten()
+        .filter_map(Transport::fallback)
+        .any(|session| session.on_pong(id, now));
+      if is_pacers {
+        // The upload's pacer pinged: the answer proves the path all the same.
+        self.watch.on_heard(now);
+      } else {
+        self.watch.on_pong(id, now);
+      }
       return Ok(Flow::Continue);
     }
     self.watch.on_heard(now);
@@ -2240,6 +2255,22 @@ impl CallState<'_> {
       NetworkVerdict::Nothing => {},
     }
     Ok(())
+  }
+
+  /// On the fallback, the own layers follow what its upload drains, and an own stream whose video
+  /// its queue dropped starts again with a keyframe (#1848). On QUIC, the feedback decides.
+  fn follow_upload_pacing(&mut self, engine: &mut CallEngine) {
+    let Some(session) = self.sending_transport().and_then(Transport::fallback) else {
+      engine.set_uplink_capacity(None);
+      return;
+    };
+    engine.set_uplink_capacity(Some(session.upload_rate_bps()));
+    let needs = session.take_keyframe_needs();
+    for stream_id in needs {
+      if let Some(sender) = self.sender_of(MediaStreamId(stream_id.0)) {
+        sender.request_keyframes();
+      }
+    }
   }
 
   /// Asks the SFU to answer on the current session (its answer arrives as a signal).
@@ -2805,6 +2836,14 @@ impl CallState<'_> {
 }
 
 impl Transport {
+  /// The fallback session, where this runs on one.
+  fn fallback(&self) -> Option<&fallback::FallbackSession> {
+    match &self.writers {
+      Writers::Fallback(session) => Some(session),
+      Writers::Quic { .. } => None,
+    }
+  }
+
   /// A session to the ticket's SFU: QUIC, and the fallback next to it if the ticket offers one and
   /// QUIC is late or fails. Without one, exactly what QUIC does.
   async fn connect_preferring_quic(
