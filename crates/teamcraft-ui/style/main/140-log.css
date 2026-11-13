@@ -41,6 +41,9 @@
   /* At least the pane wide (hover/focus background), wider for a long text. */
   width: max-content;
   min-width: 100%;
+  /* What the pinned columns paint over the text scrolling beneath them: opaque, and the row's own
+     background while it is hovered or focused (#1789). */
+  --log-bg: var(--surface);
 }
 
 .msg-log-batch {
@@ -56,20 +59,75 @@
 }
 
 .msg-log:focus,
-.msg-log-batch:focus {
+.msg-log-batch:focus,
+.msg-log-batch:focus > .log-entry,
+.msg-log:focus-within {
+  --log-bg: var(--surface-2);
   background: var(--surface-2);
 }
 
 @media (hover: hover) and (pointer: fine) {
   .msg-log:hover {
+    --log-bg: var(--surface-2);
     background: var(--surface-2);
   }
 }
 
+/* The time stays in view while the row is scrolled sideways. The row's left padding moves into the
+   column, and the gap after it is covered too, so no text shows through beside the time. */
 .log-time {
+  position: sticky;
+  left: 0;
+  z-index: 1;
   flex: none;
+  padding-inline: 16px 10px;
+  margin-inline: -16px -10px;
+  background: var(--log-bg);
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
+}
+
+/* "Copy line": pinned to the right edge of the pane. Hidden until the row is hovered or focused,
+   but always there on touch devices, where there is no hover. */
+.log-copy {
+  position: sticky;
+  right: 0;
+  z-index: 1;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 22px;
+  margin-inline: auto -16px;
+  padding: 0;
+  border: 0;
+  background: var(--log-bg);
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+}
+
+.log-copy svg {
+  width: 14px;
+  height: 14px;
+}
+
+.msg-log:focus-within .log-copy,
+.log-copy:focus-visible {
+  opacity: 1;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .msg-log:hover .log-copy {
+    opacity: 1;
+  }
+}
+
+@media (hover: none) {
+  .log-copy {
+    opacity: 0.7;
+  }
 }
 
 .log-author .badge { margin-inline-end: 4px; }

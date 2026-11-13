@@ -3388,6 +3388,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     Some(self.ui_files_page(query))
   }
 
+  fn conversation_files_page(&self, conversation: ConversationId, limit: usize) -> Option<FilesPage> {
+    Some(self.ui_conversation_files_page(conversation, limit))
+  }
+
   fn conversation_links(
     &self,
     conversation: ConversationId,

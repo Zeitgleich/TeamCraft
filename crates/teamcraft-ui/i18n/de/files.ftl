@@ -49,6 +49,7 @@ shared-kind-links = Links
 links-empty-title = Noch keine Links
 links-empty = Links, die in dieser Unterhaltung geteilt werden, erscheinen hier.
 links-more = Mehr anzeigen
+files-more = Mehr anzeigen
 links-show-message = Nachricht zeigen
 file-download = Herunterladen
 file-progress = Übertragungsfortschritt

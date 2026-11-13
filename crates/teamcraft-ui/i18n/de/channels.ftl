@@ -73,6 +73,7 @@ log-level-debug = DEBUG
 log-level-info = INFO
 log-level-warn = WARN
 log-level-error = ERROR
+log-copy-line = Zeile kopieren
 
 ## Administration
 retention-days = Tage
