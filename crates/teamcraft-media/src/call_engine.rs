@@ -57,7 +57,7 @@ use crate::share_policy::UplinkTop;
 use crate::uplink_layers::{Adaptation, OwnTrack, UplinkLayers, UplinkPolicy, probe_demand_bps};
 use crate::video::EncodedVideoFrame;
 use crate::voice_guard::{VoiceGuard, VoiceGuardConfig};
-use crate::voice_steps::{VoiceEncoding, VoiceSteps};
+use crate::voice_steps::{VoiceEncoding, VoiceStep, VoiceSteps};
 
 /// How many retired call keys an engine remembers (e2ee.md §8); the oldest goes first. A call with
 /// more departures than this is far beyond any meeting size, and an evicted key still needs its
@@ -66,6 +66,11 @@ const MAX_RETIRED_CALL_KEYS: usize = 4096;
 /// RTP timestamp increment per 20 ms Opus frame at 48 kHz: what a packet that isn't valid Opus
 /// framing counts as.
 const OPUS_FRAME_TICKS: u32 = 960;
+/// Voice still lost this long after the own video was held for it steps down too (#1893): what
+/// the uplink had queued before the hold has drained by then. A sudden drop from 5 Mbit/s to
+/// 500 kbit/s lost voice for a moment only, and stepping it down then kept the camera back for no
+/// reason.
+const VIDEO_YIELDED_AFTER: Duration = Duration::from_secs(2);
 /// How long after a probe's padding the own voice isn't judged by the voice guard: a cluster's
 /// trains come a timer tick (~100 ms) apart, and their queue drains within a few hundred ms.
 const PADDING_SHADOW: Duration = Duration::from_millis(400);
@@ -203,6 +208,7 @@ pub struct CallEngine {
   uplink_voice: VoiceGuard,
   /// Whether the UI was told the own video is held for the voice ([`CallEngineEvent::VideoHeldForVoice`]).
   is_video_held_for_voice: bool,
+  maybe_video_held_since: Option<Instant>,
   /// When the uplink rate probe last sent padding: voice sent along with it isn't judged.
   maybe_padding_sent_at: Option<Instant>,
   /// The own voice's bitrate and packet length on a thin uplink (#1893).
@@ -676,6 +682,7 @@ impl CallEngine {
       uplink,
       uplink_voice: VoiceGuard::new(VoiceGuardConfig::losses_only()),
       is_video_held_for_voice: false,
+      maybe_video_held_since: None,
       maybe_padding_sent_at: None,
       voice_steps: VoiceSteps::new(UplinkPolicy::default().voice),
       downlink_feedback: FeedbackRecorder::new(now),
@@ -2102,14 +2109,20 @@ impl CallEngine {
     }
     self.uplink_voice.on_feedback(feedback, now);
     self.follow_voice_steps(bps, maybe_carried_bps, now);
-    let is_held = self.maybe_uplink_capacity_bps.is_none() && self.uplink_voice.is_hurt(now);
+    let is_hurt = self.maybe_uplink_capacity_bps.is_none() && self.uplink_voice.is_hurt(now);
+    // A voice on its thinnest step: the uplink has no room for video next to it (#1893). On a
+    // 64 kbit/s uplink the camera came back after every hold, at the start of every turn its
+    // owner talked, on an estimate grown from the voice alone, and took the voice with it again.
+    // It comes back once a probe showed room for more voice.
+    let is_held = is_hurt || self.is_voice_starved();
     if is_held != self.is_video_held_for_voice && (!is_held || !self.own_tracks.is_empty()) {
       self.is_video_held_for_voice = is_held;
+      self.maybe_video_held_since = is_held.then_some(now);
       self.event(CallEngineEvent::VideoHeldForVoice(is_held));
     }
     if is_held {
-      // The own voice is being lost (an uplink that collapsed): the video stops at once, before
-      // the estimate came down, and comes back as after any cut (#1871). A transport that
+      // The own voice is being lost (an uplink that collapsed), or thin: the video stops at once,
+      // before the estimate came down, and comes back as after any cut (#1871). A transport that
       // measures its uplink (the WebSocket fallback's pacer) loses nothing on the way.
       bps = 0;
     }
@@ -2139,9 +2152,29 @@ impl CallEngine {
     if self.is_muted {
       return;
     }
-    let is_voice_hurt = self.own_tracks.is_empty() && self.uplink_voice.is_hurt(now);
+    // With own video, it yields first; voice still lost once the video has been held for a
+    // while (what was queued before has drained) steps down too. Not on a transport that
+    // measures its uplink (the fallback's pacer): nothing is lost there.
+    // Lost after the video yielded: found lost later than that, not still within the guard's
+    // hold of what was lost while the uplink drained what it had queued.
+    let is_lost_since_yield = match (self.maybe_video_held_since, self.uplink_voice.last_hurt_at()) {
+      (Some(since), Some(hurt_at)) => hurt_at >= since + VIDEO_YIELDED_AFTER,
+      _ => false,
+    };
+    let is_voice_hurt = self.maybe_uplink_capacity_bps.is_none()
+      && (self.own_tracks.is_empty() || is_lost_since_yield)
+      && self.uplink_voice.is_hurt(now);
     let was_wanted = self.voice_steps.wanted_bps();
-    let maybe_down = self.voice_steps.on_estimate(estimate_bps, is_voice_hurt, now);
+    // On QUIC the estimate is no reason to step down by itself: after a sudden drop it stays cut
+    // while only the voice flows (an application-limited sender's estimate grows slowly), and a
+    // link of 500 kbit/s lost its camera to a voice stepped down for nothing. Voice lost on the
+    // way is the reason there. The fallback's pacer measures what the upload drains: its rate is.
+    let down_by_bps = if self.maybe_uplink_capacity_bps.is_some() {
+      estimate_bps
+    } else {
+      u32::MAX
+    };
+    let maybe_down = self.voice_steps.on_estimate(down_by_bps, is_voice_hurt, now);
     let maybe_up = maybe_carried_bps
       .filter(|_| !self.uplink_voice.is_hurt(now))
       .and_then(|carried_bps| self.voice_steps.on_carried(carried_bps, now));
@@ -2220,12 +2253,17 @@ impl CallEngine {
       .uplink_layers
       .is_holding_back(&tracks)
       .then(|| probe_demand_bps(&tracks, is_sending_screen_audio, &self.uplink_policy));
-    // A voice below its full step probes for its next step only (#1893): the link is too thin
-    // for the voice it had, and padding for held-back video kept a 64 kbit/s uplink full.
-    let maybe_wanted_bps = match self.voice_steps.wanted_bps() {
-      Some(voice_bps) => Some(voice_bps),
-      None => maybe_video_bps,
+    // A voice on its thinnest step probes for its next step only (#1893): padding for held-back
+    // video kept a 64 kbit/s uplink full. Above it, held-back video probes as well.
+    let maybe_wanted_bps = if self.is_voice_starved() {
+      self.voice_steps.wanted_bps()
+    } else {
+      maybe_video_bps.max(self.voice_steps.wanted_bps())
     };
+    // A thin voice wants a cluster's proof before it steps up, whatever the estimate says.
+    self
+      .uplink_rate_probe
+      .set_proof_wanted(self.voice_steps.wanted_bps().is_some() && self.maybe_probe_bytes.is_some());
     let datagrams = self.uplink_rate_probe.on_timer(
       &self.uplink_probe_config(),
       &mut self.uplink,
@@ -2240,13 +2278,19 @@ impl CallEngine {
       .extend(datagrams.into_iter().map(EngineOutput::Datagram));
   }
 
-  /// How the uplink is probed: rarely while a thin voice probes for its next step (#1893).
+  /// How the uplink is probed: rarely while the voice is on its thinnest step (#1893).
   fn uplink_probe_config(&self) -> RateProbeConfig {
-    if self.voice_steps.wanted_bps().is_some() {
+    if self.is_voice_starved() {
       RateProbeConfig::for_voice()
     } else {
       RateProbeConfig::default()
     }
+  }
+
+  /// Whether the own voice is on its thinnest step (#1893): the uplink is too thin for even the
+  /// lowest video layer next to it, and the voice keeps it to itself.
+  fn is_voice_starved(&self) -> bool {
+    self.voice_steps.step() == VoiceStep::Thinnest
   }
 
   /// The uplink probe's result: the estimate starts from it, and the layers follow with the next
@@ -2422,13 +2466,13 @@ impl CallEngine {
     let tracks = own_track_views(&self.own_tracks, &self.adaptive_tracks);
     let maybe_video_demand =
       (!tracks.is_empty()).then(|| probe_demand_bps(&tracks, is_sending_screen_audio, &self.uplink_policy));
-    // A voice below its full step lets the estimate grow by no demand (#1893): the video's
+    // A voice on its thinnest step lets the estimate grow by no demand (#1893): the video's
     // demand let the estimate of a 64 kbit/s uplink grow past the camera's lowest layer, and the
     // camera went on sending next to the voice. The voice's probes show when there is room.
-    let maybe_demand = match self.voice_steps.wanted_bps() {
-      Some(_) if self.maybe_probe_bytes.is_some() => None,
-      Some(voice_bps) => maybe_video_demand.max(Some(voice_bps)),
-      None => maybe_video_demand,
+    let maybe_demand = if self.is_voice_starved() && self.maybe_probe_bytes.is_some() {
+      None
+    } else {
+      maybe_video_demand.max(self.voice_steps.wanted_bps())
     };
     self.uplink.set_demand_bps(maybe_demand);
   }
@@ -3285,6 +3329,10 @@ impl CallEngine {
     self.uplink.measure_afresh();
     self.uplink_layers.measure_afresh(self.uplink.estimate_bps());
     self.uplink_voice.forget();
+    // The voice starts full again as well (#1893): it measures the uplink with the rest.
+    if let Some(encoding) = self.voice_steps.start_afresh() {
+      self.event(CallEngineEvent::VoiceEncoding(encoding));
+    }
     // Tracks that were held back come back as well, with keyframes.
     self.announce_layers(true);
     self.announce_uplink_layers();
@@ -5633,7 +5681,12 @@ mod tests {
         })
         .count();
       assert_eq!(held, 1, "{outputs:?}");
-      // And when the hold is over, with the next feedback that shows no loss.
+      // And when the hold is over and the voice is full again (#1893: after a collapse a probe
+      // shows the room for it), with the next feedback that shows no loss.
+      let later = at + Duration::from_secs(6);
+      // What a probe that carried does: the estimate rises to it, and the voice follows.
+      alice.uplink.raise_to(5_000_000);
+      alice.voice_steps.on_carried(5_000_000, later);
       for index in 0..25u32 {
         alice.send_audio(&frame(), at + Duration::from_millis(20) * index);
       }
@@ -5642,7 +5695,6 @@ mod tests {
         base_seq: 25,
         arrivals_us: (0..25u64).map(|i| Some(600_000 + i * 20_000)).collect(),
       };
-      let later = at + Duration::from_secs(4);
       alice
         .handle_signal(event(8, CallEvent::TransportFeedback { feedback }), later)
         .unwrap();
@@ -5670,6 +5722,9 @@ mod tests {
         .unwrap();
       let camera_demand = alice.uplink.demand_bps().unwrap();
       alice.voice_steps.on_estimate(40_000, false, now);
+      alice
+        .voice_steps
+        .on_estimate(40_000, false, now + Duration::from_secs(2));
       alice.update_uplink_demand();
       assert!(camera_demand > 1_000_000, "{camera_demand}");
       // Where the SFU takes padding: the voice's probes show when there is room.
@@ -5678,12 +5733,55 @@ mod tests {
       assert_eq!(alice.uplink.demand_bps(), None);
     }
 
+    /// #1893: a thin voice keeps the own camera back, and the UI hears why: on a 64 kbit/s uplink
+    /// the camera came back on an estimate grown from the voice alone, at every turn.
+    #[test]
+    fn a_thin_voice_holds_the_camera() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      ask_for(&mut alice, &video_track(50, 1, 3));
+      alice
+        .handle_signal(
+          event(
+            6,
+            CallEvent::VideoPublished {
+              track: video_track(50, 1, 3),
+            },
+          ),
+          now,
+        )
+        .unwrap();
+      drain(&mut alice);
+      alice.voice_steps.on_estimate(40_000, false, now);
+      alice
+        .voice_steps
+        .on_estimate(40_000, false, now + Duration::from_secs(2));
+      let feedback = TransportFeedback {
+        base_seq: 0,
+        arrivals_us: Vec::new(),
+      };
+      alice
+        .handle_signal(event(7, CallEvent::TransportFeedback { feedback }), now)
+        .unwrap();
+      let outputs = drain(&mut alice);
+      assert!(
+        outputs.contains(&EngineOutput::Event(CallEngineEvent::VideoHeldForVoice(true))),
+        "{outputs:?}"
+      );
+      assert!(outputs.iter().any(|output| matches!(
+        output,
+        EngineOutput::Event(CallEngineEvent::UplinkEstimate { bps: 0, .. })
+      )));
+    }
+
     /// #1893: while the microphone is muted the voice's step stays: nothing is sent, and what
     /// the estimate does then shows nothing about the voice.
     #[test]
     fn a_muted_voice_keeps_its_step() {
       let now = Instant::now();
       let (mut alice, _bob) = secured_pair(now);
+      // On the fallback, where the pacer's rate steps the voice down.
+      alice.set_uplink_capacity(Some(40_000));
       alice.set_muted(true);
       drain(&mut alice);
       alice.follow_voice_steps(40_000, None, now);
@@ -5691,6 +5789,7 @@ mod tests {
       assert!(drain(&mut alice).is_empty());
       alice.set_muted(false);
       alice.follow_voice_steps(40_000, None, now);
+      alice.follow_voice_steps(40_000, None, now + Duration::from_secs(2));
       assert_eq!(alice.voice_steps.step(), crate::voice_steps::VoiceStep::Thinnest);
     }
 

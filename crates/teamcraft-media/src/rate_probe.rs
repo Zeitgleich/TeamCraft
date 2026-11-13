@@ -104,6 +104,9 @@ pub struct RateProbe {
 #[derive(Debug, Default)]
 pub struct UplinkProbe {
   probe: RateProbe,
+  /// The sender wants a cluster's proof of the wanted rate, whatever the estimate says
+  /// ([`UplinkProbe::set_proof_wanted`]).
+  is_proof_wanted: bool,
 }
 
 /// What a cluster showed.
@@ -385,6 +388,14 @@ impl UplinkProbe {
     datagrams
   }
 
+  /// Whether a cluster runs for the wanted rate also while the estimate is above it (#1893): a thin
+  /// voice steps up only on a cluster that carried, and an estimate grown while little was sent
+  /// shows nothing. Without it a voice cut by lost packets on a link of 500 kbit/s, its estimate
+  /// still above what it wanted, waited for a cluster that never came.
+  pub fn set_proof_wanted(&mut self, is_proof_wanted: bool) {
+    self.is_proof_wanted = is_proof_wanted;
+  }
+
   /// Notes `feedback` and answers a cluster it completes on `uplink`.
   pub fn on_feedback(
     &mut self,
@@ -417,7 +428,8 @@ impl UplinkProbe {
       return false;
     };
     let estimate_bps = uplink.estimate_bps();
-    if estimate_bps >= wanted_bps || uplink.is_in_fast_start() || !self.probe.may_start(now) {
+    let is_shown_by_estimate = estimate_bps >= wanted_bps && !self.is_proof_wanted;
+    if is_shown_by_estimate || uplink.is_in_fast_start() || !self.probe.may_start(now) {
       return false;
     }
     let sending_bps = uplink.sent_bps(now);
