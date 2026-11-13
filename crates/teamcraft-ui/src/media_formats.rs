@@ -102,6 +102,31 @@ pub fn is_svg(media_type: &str) -> bool {
   essence(media_type) == "image/svg+xml"
 }
 
+/// HEIC and HEIF pictures (iPhone photos) that the composer turns into JPEG where the webview can
+/// decode them, as Safari and the macOS app can (#1588): the client core can't make their
+/// thumbnail or read their size, and many receivers can't show them.
+const HEIF_TYPES: [&str; 2] = ["image/heic", "image/heif"];
+/// A picked HEIC larger than this goes as it is: decoding it would take too much memory.
+pub const MAX_HEIF_CONVERT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Whether a picked file of this media type is a picture to send as JPEG instead.
+pub fn is_heif(media_type: &str) -> bool {
+  HEIF_TYPES.contains(&essence(media_type).as_str())
+}
+
+/// The name of a picture converted to JPEG: its extension becomes `.jpg` (`IMG_0001.HEIC` is
+/// `IMG_0001.jpg`); a name without one gets it added.
+pub fn jpeg_name(file_name: &str) -> String {
+  let stem = match file_name.rsplit_once('.') {
+    Some((stem, extension)) if !stem.is_empty() && !extension.contains(['/', '\\']) => stem,
+    _ => file_name,
+  };
+  match stem.trim() {
+    "" => "photo.jpg".to_owned(),
+    _ => format!("{stem}.jpg"),
+  }
+}
+
 /// Whether picture bytes are an animation: a GIF, an animated WebP (`ANIM` flag), an APNG (`acTL`
 /// before the image data) or an AVIF image sequence (`avis` brand). Only the header is read.
 pub fn is_animated(bytes: &[u8]) -> bool {
@@ -191,6 +216,28 @@ mod tests {
     assert!(!needs_app_thumbnail("image/jpeg"));
     assert!(!needs_app_thumbnail("image/webp"));
     assert!(!needs_app_thumbnail("application/pdf"));
+  }
+
+  #[test]
+  fn heic_and_heif_pictures_are_sent_as_jpeg() {
+    assert!(is_heif("image/heic"));
+    assert!(is_heif(" Image/HEIF "));
+    assert!(is_heif(&media_type_for("IMG_0001.HEIC", "")));
+    assert!(!is_heif("image/jpeg"));
+    assert!(!is_heif("image/heic-sequence"));
+    assert!(!is_heif("video/quicktime"));
+  }
+
+  #[test]
+  fn a_converted_picture_is_named_jpg() {
+    assert_eq!(jpeg_name("IMG_0001.HEIC"), "IMG_0001.jpg");
+    assert_eq!(jpeg_name("holiday.photo.heif"), "holiday.photo.jpg");
+    assert_eq!(jpeg_name("photo"), "photo.jpg");
+    assert_eq!(jpeg_name(".heic"), ".heic.jpg");
+    assert_eq!(jpeg_name(""), "photo.jpg");
+    assert_eq!(jpeg_name("dir.d/picture"), "dir.d/picture.jpg");
+    // Converting a name twice doesn't double the extension.
+    assert_eq!(jpeg_name(&jpeg_name("IMG_0002.heic")), "IMG_0002.jpg");
   }
 
   #[test]
