@@ -34,6 +34,10 @@ struct CallScreen: View {
   /// comes or goes.
   @State private var maybeHosts: MeetingHosts?
   @State private var isHostsShown = false
+  /// The lobby of the call's meeting for its hosts (#1859); `nil` for anybody else. Read again when
+  /// somebody comes or goes and on a knock.
+  @State private var maybeLobby: MeetingLobby?
+  @State private var isLobbyShown = false
   /// The organizer is asked whom to hand the meeting to before leaving.
   @State private var maybeHandover: HandoverOffer?
   @State private var isCheckingLeave = false
@@ -96,6 +100,11 @@ struct CallScreen: View {
         ) { await readHosts() }
       }
     }
+    .sheet(isPresented: $isLobbyShown) {
+      if let lobby = maybeLobby {
+        CallLobbySheet(conversationId: call.conversationId, lobby: lobby) { await readLobby() }
+      }
+    }
     .confirmationDialog(
       "call_hosts_leave_title", isPresented: handoverBinding, titleVisibility: .visible, presenting: maybeHandover
     ) { offer in
@@ -122,6 +131,9 @@ struct CallScreen: View {
     }
     .task(id: NotetakerKey(conversationId: call.conversationId, participants: call.participantUserIds)) {
       await readHosts()
+    }
+    .task(id: LobbyKey(conversationId: call.conversationId, participants: call.participantUserIds, knocks: model.calls.lobbyKnocks)) {
+      await readLobby()
     }
     .onChange(of: call.phase, initial: true) {
       // The clock starts with the first connection and runs through reconnects.
@@ -392,6 +404,9 @@ struct CallScreen: View {
       Spacer(minLength: 0)
       VStack(spacing: 12) {
         statusHint
+        if let lobby = shownLobby, !lobby.people.isEmpty {
+          LobbyBanner(waiting: lobby.people.count) { interact { isLobbyShown = true } }
+        }
         notetakerBanner
         if let offer = model.calls.maybeMoveOffer { moveBanner(offer) }
       }
@@ -521,6 +536,9 @@ struct CallScreen: View {
           if isHostsOffered {
             Button("call_hosts_title", systemImage: "person.2.badge.gearshape") { interact { isHostsShown = true } }
           }
+          if isLobbyOffered {
+            Button("call_lobby_title", systemImage: "person.badge.clock") { interact { isLobbyShown = true } }
+          }
         } label: {
           Image(systemName: "plus")
             .font(.app(.title2))
@@ -546,6 +564,11 @@ struct CallScreen: View {
         RoundControl(system: "person.2.badge.gearshape", isActive: false, label: "call_hosts_title") {
           interact { isHostsShown = true }
         }
+      } else if isLobbyOffered {
+        Spacer(minLength: 0)
+        RoundControl(system: "person.badge.clock", isActive: false, label: "call_lobby_title") {
+          interact { isLobbyShown = true }
+        }
       }
       Spacer(minLength: 0)
       RoundControl(system: "phone.down.fill", isActive: false, label: "call_hang_up", tint: Theme.danger) {
@@ -561,9 +584,29 @@ struct CallScreen: View {
     }
   }
 
-  /// How many of "Add people", "Add notetaker" and "Hosts" the bar offers.
+  /// How many of "Add people", "Add notetaker", "Hosts" and "Lobby" the bar offers.
   private var extraControls: Int {
-    [isAddingPeopleOffered, isNotetakerControlShown, isHostsOffered].filter { $0 }.count
+    [isAddingPeopleOffered, isNotetakerControlShown, isHostsOffered, isLobbyOffered].filter { $0 }.count
+  }
+
+  /// The lobby while connected: only its hosts get one from the core (#1859).
+  private var shownLobby: MeetingLobby? {
+    call.phase == .connected ? maybeLobby : nil
+  }
+
+  /// "Lobby" (#1859): the hosts of the call's meeting see who waits and admit or deny them.
+  private var isLobbyOffered: Bool { shownLobby != nil }
+
+  /// Reads the lobby again; a guest's key code the core is still making comes a few reads later.
+  private func readLobby() async {
+    let conversationId = call.conversationId
+    for _ in 0..<8 {
+      let lobby = await model.meetingLobby(conversationId: conversationId)
+      guard call.conversationId == conversationId, !Task.isCancelled else { return }
+      maybeLobby = lobby
+      guard let lobby, isWaitingForKeyCode(lobby) else { return }
+      try? await Task.sleep(for: .milliseconds(500))
+    }
   }
 
   /// "Hosts" (#1720): the organizer of the call's meeting names co-hosts or hands it over.
@@ -788,6 +831,13 @@ private struct StagePerson: Identifiable {
 private struct NotetakerKey: Hashable {
   let conversationId: String
   let participants: [String]
+}
+
+/// Reads the lobby again when the call, its people or a knock change.
+private struct LobbyKey: Hashable {
+  let conversationId: String
+  let participants: [String]
+  let knocks: Int
 }
 
 extension View {

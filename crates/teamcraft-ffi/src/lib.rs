@@ -26,6 +26,7 @@ mod logging;
 mod markup;
 mod media_viewer;
 mod meeting_hosts;
+mod meeting_lobby;
 mod notetaker;
 #[cfg(any(target_os = "ios", test))]
 mod os_log;
@@ -86,6 +87,9 @@ pub use media_viewer::{
   OriginalDownload, album_layout, fetches_original_automatically, media_viewer_limits,
 };
 pub use meeting_hosts::{MeetingHostAction, MeetingHosts, MeetingPart};
+pub use meeting_lobby::{
+  LobbyDecision, LobbyDecisionOutcome, LobbyLeftWaiting, LobbyPerson, LobbyPersonStatus, MeetingLobby,
+};
 pub use notetaker::{MovedCallHint, NotetakerAddition};
 pub use perf_jobs::{
   PerfJobKind, PerfJobSpan, PerfListener, perf_job_spans, set_perf_listener, set_slow_job_threshold_ms,
@@ -1346,6 +1350,84 @@ impl TeamCraft {
             .await
         })
       })
+      .await
+  }
+
+  /// The lobby of the meeting whose chat is `conversation_id` (#1859), for its hosts only: the
+  /// organizer, the co-hosts and a chat admin the server lets host it. `None` for anybody else and
+  /// for a conversation of no meeting. A guest's row carries the code of their key once this
+  /// device made it; until then read the lobby again shortly (the core pins the key on its queue).
+  pub async fn meeting_lobby(&self, conversation_id: String) -> Result<Option<MeetingLobby>, TeamCraftError> {
+    use teamcraft_client_api::backend::ChatBackend as _;
+    let Some(read) = self
+      .call(move |engine| Box::pin(async move { engine.lobby_read(&conversation_id).await }))
+      .await?
+    else {
+      return Ok(None);
+    };
+    let mut people = Vec::with_capacity(read.entries.len());
+    for entry in &read.entries {
+      let guest = entry.user.id;
+      let is_ready_guest = matches!(
+        teamcraft_core::meeting_lobby::LobbyAdmission::of(entry),
+        teamcraft_core::meeting_lobby::LobbyAdmission::Guest { .. }
+      );
+      let maybe_key_code = if is_ready_guest {
+        let maybe_code = self
+          .read_queue()?
+          .query(move |reads| Ok(reads.backend()?.guest_key_code(guest)))
+          .await?;
+        if maybe_code.is_none() {
+          self
+            .act_locally(move |reads| reads.apply_action(ChatAction::PrepareGuestKeyCode { guest }))
+            .await?;
+        }
+        maybe_code
+      } else {
+        None
+      };
+      people.push(meeting_lobby::lobby_person(entry, maybe_key_code));
+    }
+    Ok(Some(MeetingLobby {
+      meeting_id: read.meeting.id.to_string(),
+      people,
+    }))
+  }
+
+  /// A host admits or denies `user_id` waiting in the lobby of the meeting whose chat is
+  /// `conversation_id` (#1859), as desktop and web do. Admitting lets the person's devices into the
+  /// meeting chat's encryption from this device (e2ee.md §4.6, "Meeting guests"): a guest only
+  /// with the key their page reported (compare the key code first), and only from a device of a
+  /// host the organizer's signed lists name; anything else fails here. `NoLongerWaiting` when
+  /// another host decided first or they left.
+  pub async fn decide_lobby_entry(
+    &self,
+    conversation_id: String,
+    user_id: String,
+    decision: LobbyDecision,
+  ) -> Result<LobbyDecisionOutcome, TeamCraftError> {
+    self
+      .call(move |engine| {
+        Box::pin(async move {
+          engine
+            .decide_lobby_entry(&conversation_id, &user_id, decision)
+            .await
+        })
+      })
+      .await
+  }
+
+  /// After the user left the call of `conversation_id` from the system's call UI (CallKit, the
+  /// call notification), where no question can be asked (#1859): people wait in the meeting's
+  /// lobby, the user organizes it, nobody else hosts it and a member still in the call could take
+  /// it over. The app then posts a reminder whose "Hand over" offers these people
+  /// ([`Self::change_meeting_host`] with `HandOver`). `None`: nothing to remind of.
+  pub async fn lobby_left_waiting(
+    &self,
+    conversation_id: String,
+  ) -> Result<Option<LobbyLeftWaiting>, TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.lobby_left_waiting(&conversation_id).await }))
       .await
   }
 

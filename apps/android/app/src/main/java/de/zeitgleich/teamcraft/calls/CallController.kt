@@ -37,6 +37,7 @@ import de.zeitgleich.teamcraft.ui.listName
 import uniffi.teamcraft_ffi.CallEndReason
 import uniffi.teamcraft_ffi.CallListener
 import uniffi.teamcraft_ffi.CallPhase
+import uniffi.teamcraft_ffi.MeetingPart
 import uniffi.teamcraft_ffi.ConversationKind
 import uniffi.teamcraft_ffi.CallSession
 import uniffi.teamcraft_ffi.CallStateInfo
@@ -108,6 +109,9 @@ class CallController(
 
   /** Who hosts the meeting of the call, the organizer's host menu and the leave question (#1720). */
   val hosts = CallHosts(core, scope)
+
+  /** The lobby of the call's meeting, for its hosts (#1859). */
+  val lobby = CallLobby(core, scope)
 
   /** The call this device is in, as the engine reports it; `null` when idle. */
   val callState: StateFlow<CallStateInfo?> = state
@@ -435,6 +439,31 @@ class CallController(
   }
 
   /**
+   * Hang up from outside the call screen (the call notification, the car, Telecom), where no
+   * question can be asked (#1859): leaves, then reminds the organizer by notification if people
+   * still wait in the lobby with nobody else to let them in.
+   */
+  fun hangUpFromSystem() {
+    val maybeLeft = leftMeetingCall()
+    hangUp()
+    maybeLeft?.let(::remindOfLobby)
+  }
+
+  /**
+   * The call this device is connected to, unless it is known to be no meeting's the user organizes
+   * (the hosts are read while the call screen shows; unknown, the core decides).
+   */
+  private fun leftMeetingCall(): String? {
+    val call = state.value?.takeIf { it.phase == CallPhase.CONNECTED && maybeSession != null } ?: return null
+    val maybeHosts = hosts.hosts.value
+    return call.conversationId.takeIf { maybeHosts == null || maybeHosts.ownPart == MeetingPart.ORGANIZER }
+  }
+
+  private fun remindOfLobby(conversationId: String) {
+    scope.launch { LobbyReminder.check(context, core, conversationId) }
+  }
+
+  /**
    * "Try again" after the call's encryption refused this device (#1555, #1624): leaves the engine's
    * call and joins the same conversation again inside the same Telecom call, with the microphone
    * and camera as they were, so the entry path (incoming, notification, app, car) doesn't matter.
@@ -524,8 +553,10 @@ class CallController(
           },
           onDisconnect = {
             Log.i(TAG, "Telecom: disconnected by the system")
+            val maybeLeft = leftMeetingCall()
             if (joining.value) abandonJoin()
             leave()
+            maybeLeft?.let(::remindOfLobby)
             maybeTelecomJob?.cancel()
           },
           onSetActive = {},
@@ -819,6 +850,7 @@ class CallController(
     maybeTelecomCall = null
     moves.reset()
     hosts.reset()
+    lobby.reset()
     wantsCamera.value = false
     isCameraKeptAlive = false
     tracks.value = emptyList()
@@ -879,6 +911,11 @@ class CallController(
     override fun onCallMoved(fromConversationId: String, toConversationId: String) {
       // Only a trigger: the move is shown, and followed, once the DM's group announced it.
       moves.moved(fromConversationId, toConversationId)
+    }
+
+    override fun onLobbyKnock(meetingId: String) {
+      val conversationId = state.value?.conversationId ?: return
+      if (maybeSession != null) lobby.onKnock(conversationId, meetingId)
     }
   }
 

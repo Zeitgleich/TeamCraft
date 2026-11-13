@@ -104,7 +104,7 @@ impl Engine {
     )
   }
 
-  async fn meeting_of(
+  pub(crate) async fn meeting_of(
     &self,
     conversation: ConversationId,
   ) -> Result<Option<MeetingResponse>, TeamCraftError> {

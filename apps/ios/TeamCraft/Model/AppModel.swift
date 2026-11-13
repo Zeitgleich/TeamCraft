@@ -157,6 +157,9 @@ final class AppModel {
   private(set) var maybeScheduledCount: Int?
   /// The conversation a notification asked to open.
   var openConversationId: String?
+  /// "Hand over" on the lobby reminder after leaving a meeting's call from CallKit (#1859): the
+  /// choice of whom to hand the meeting to shows over whatever screen is up.
+  var maybeLobbyHandover: LobbyHandoverRequest?
   /// A message to show once its conversation is open (from a message link).
   var focusMessageId: String?
   /// The thread or composer "Drafts & sent" asked for; the conversation's pane takes it (#1220).

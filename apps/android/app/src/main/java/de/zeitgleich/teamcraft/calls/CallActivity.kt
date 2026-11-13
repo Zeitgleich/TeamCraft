@@ -406,6 +406,24 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
       onClose = { isHostsShown = false },
     )
   }
+  // The lobby of the call's meeting, for its hosts only (#1859): read again when somebody comes or
+  // goes, and on a knock (the call listener).
+  val lobby by calls.lobby.lobby.collectAsStateWithLifecycle()
+  val lobbyDecision by calls.lobby.decision.collectAsStateWithLifecycle()
+  LaunchedEffect(maybeConversationId, participantIds) {
+    maybeConversationId?.let { calls.lobby.refresh(it) }
+  }
+  var isLobbyShown by rememberSaveable { mutableStateOf(false) }
+  val maybeShownLobby = lobby?.takeIf { maybeState?.phase == CallPhase.CONNECTED }
+  if (isLobbyShown && maybeShownLobby != null && maybeConversationId != null) {
+    LobbyDialog(
+      lobby = maybeShownLobby,
+      deciding = lobbyDecision,
+      onDecide = { person, decision -> calls.lobby.decide(maybeConversationId, person, decision) },
+      onDismissFailure = { calls.lobby.dismissFailure() },
+      onClose = { isLobbyShown = false },
+    )
+  }
   val scope = rememberCoroutineScope()
   var isCheckingLeave by remember { mutableStateOf(false) }
   var maybeHandover by remember { mutableStateOf<HandoverOffer?>(null) }
@@ -522,9 +540,11 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
       },
       onStopScreenShare = { calls.stopScreenShare() },
       maybeOnHosts = if (maybeShownHosts != null && isConnected) ({ isHostsShown = true }) else null,
+      maybeOnLobby = if (maybeShownLobby != null) ({ isLobbyShown = true }) else null,
     ),
     banner = {
       Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        LobbyBanner(maybeShownLobby) { isLobbyShown = true }
         NotetakerBanner(calls.moves, maybeConversationId, maybeNotetaker)
         CallMoveBanner(calls.moves)
       }

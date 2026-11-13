@@ -23,7 +23,9 @@ use teamcraft_crypto::meeting_admitters::{
 };
 use teamcraft_crypto::membership::IdentityDirectory;
 use teamcraft_crypto::secret::SecretBytes;
-use teamcraft_proto::{Base64Bytes, ConversationId, MeetingId, PutMeetingAdmittersRequest, UserId};
+use teamcraft_proto::{
+  Base64Bytes, ConversationId, LobbyEntry, MeetingId, PutMeetingAdmittersRequest, UserId,
+};
 use zeroize::Zeroizing;
 
 use super::{Client, ClientSettings, EnrollmentOptions, EnrollmentSecret, PendingEnrollment};
@@ -32,6 +34,7 @@ use crate::clock::Clock;
 use crate::convert;
 use crate::error::{CoreError, GuestRefusal};
 use crate::meeting_invitees::{self, ChosenInvitees, InviteeFacts, InviteeList, SignedInvitees};
+use crate::meeting_lobby::LobbyAdmission;
 use crate::records;
 use crate::store::{LocalStore, Table};
 
@@ -156,6 +159,30 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       &link_fragment_key(meeting),
       &format!("{VERIFIER_KEY}={fingerprint}"),
     )
+  }
+
+  /// A host admitted `entry` from the lobby of the meeting whose chat is `conversation`: lets the
+  /// person's devices into the chat's encryption on this host's own decision, as
+  /// [`LobbyAdmission::of`] says (a guest only with the key their page reported, until
+  /// `access_ends_at_ms`; a member as any member). The lobby entry is the server's hint of who
+  /// knocked; the checks are those of [`Self::let_guest_into_meeting_chat`] and
+  /// [`Self::let_into_meeting_chat`]. A guest whose device is not set up yet is refused.
+  pub async fn let_in_from_lobby(
+    &mut self,
+    conversation: ConversationId,
+    entry: &LobbyEntry,
+    access_ends_at_ms: i64,
+  ) -> Result<(), CoreError> {
+    let user = entry.user.id;
+    match LobbyAdmission::of(entry) {
+      LobbyAdmission::Member => self.let_into_meeting_chat(conversation, user).await,
+      LobbyAdmission::Guest { knock_fingerprint } => {
+        self
+          .let_guest_into_meeting_chat(conversation, user, &knock_fingerprint, access_ends_at_ms)
+          .await
+      },
+      LobbyAdmission::GuestDevicePending => Err(CoreError::GuestRefused(GuestRefusal::NotEnrolled)),
+    }
   }
 
   /// Lets an admitted guest's device into the meeting chat's group: the organizer's devices, and

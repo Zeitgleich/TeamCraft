@@ -4,4 +4,11 @@
     <item name="android:statusBarColor">#111926</item>
     <item name="android:windowBackground">#F6F7F9</item>
   </style>
+  <!-- A dialog over whatever was on screen (the handover choice from a notification). -->
+  <style name="Theme.TeamCraft.Dialog" parent="android:Theme.Material.Light.NoActionBar">
+    <item name="android:windowIsTranslucent">true</item>
+    <item name="android:windowBackground">@android:color/transparent</item>
+    <item name="android:windowNoTitle">true</item>
+    <item name="android:backgroundDimEnabled">false</item>
+  </style>
 </resources>

@@ -24,6 +24,7 @@ pub mod imported;
 pub mod integration_sources;
 pub mod link_preview;
 pub mod meeting_invitees;
+pub mod meeting_lobby;
 pub mod signed_deletion;
 pub mod space_dms;
 // The keys come from the UI contract (client-api), which the hosts of a UI build in; the service

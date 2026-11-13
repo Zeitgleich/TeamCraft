@@ -338,6 +338,8 @@ internal class CallUiActions(
   val onStopScreenShare: () -> Unit = {},
   /** "Hosts" in the menu: the organizer of the call's meeting names co-hosts or hands it over (#1720). */
   val maybeOnHosts: (() -> Unit)? = null,
+  /** "Lobby" in the menu: the meeting's hosts see who waits and admit or deny them (#1859). */
+  val maybeOnLobby: (() -> Unit)? = null,
 )
 
 /** The room the header and the bottom (notices and controls) take, so the stage keeps clear of them. */
@@ -1199,6 +1201,9 @@ private fun menuEntries(isDeafened: Boolean, isSharingScreen: Boolean, actions: 
   }
   actions.maybeOnHosts?.let { onHosts ->
     add(MenuEntry(stringResource(R.string.call_hosts_title), Icons.Filled.Person, onClick = onHosts))
+  }
+  actions.maybeOnLobby?.let { onLobby ->
+    add(MenuEntry(stringResource(R.string.call_lobby_title), CallIcons.PersonAdd, onClick = onLobby))
   }
   actions.maybeOnAddNotetaker?.let { onAddNotetaker ->
     add(MenuEntry(stringResource(R.string.call_notetaker_add), Icons.Filled.Edit, onClick = onAddNotetaker))

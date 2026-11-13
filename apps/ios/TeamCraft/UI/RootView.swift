@@ -33,6 +33,8 @@ struct RootView: View {
       if let share = model.waitingShare, !isReady, !isStarting { ShareWaitingNotice(share: share) }
     }
     .sheet(item: shareToPick) { share in SharePickerView(share: share) }
+    // "Hand over" on the lobby reminder after leaving a meeting's call from CallKit (#1859).
+    .sheet(item: lobbyHandover) { request in LobbyHandoverSheet(request: request) }
     .alert(
       "share_other_account",
       isPresented: Binding(get: { model.isShareGoneForAccount }, set: { model.isShareGoneForAccount = $0 })
@@ -108,6 +110,13 @@ struct RootView: View {
     Binding(
       get: { isReady ? model.waitingShare : nil },
       set: { _ in })
+  }
+
+  /// The handover choice, once the account is ready (the app lock is in front until then).
+  private var lobbyHandover: Binding<LobbyHandoverRequest?> {
+    Binding(
+      get: { isReady ? model.maybeLobbyHandover : nil },
+      set: { model.maybeLobbyHandover = $0 })
   }
 
   private var isStarting: Bool {

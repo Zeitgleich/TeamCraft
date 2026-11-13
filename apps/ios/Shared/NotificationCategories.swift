@@ -19,6 +19,10 @@ enum NotificationCategories {
   static let joinRequestDeclineOnlyCategory = "join_request_decline_only"
   static let approveJoinAction = "approve_join"
   static let declineJoinAction = "decline_join"
+  /// The organizer left a meeting's call from CallKit while people still wait in its lobby
+  /// (#1859): "Hand over" opens the choice of whom to hand the meeting to.
+  static let lobbyLeftCategory = "lobby_left"
+  static let handOverAction = "hand_over"
   /// Key of the conversation ID in a notification's `userInfo`.
   static let conversationKey = "conversation_id"
 
@@ -63,6 +67,12 @@ enum NotificationCategories {
       identifier: joinRequestCategory, actions: [approveJoin, declineJoin], intentIdentifiers: [], options: [])
     let joinRequestDeclineOnly = UNNotificationCategory(
       identifier: joinRequestDeclineOnlyCategory, actions: [declineJoin], intentIdentifiers: [], options: [])
-    center.setNotificationCategories([message, call, meeting, joinRequest, joinRequestDeclineOnly])
+    // Handing a meeting over signs with the user's key: unlock first, then the app asks to whom.
+    let handOver = UNNotificationAction(
+      identifier: handOverAction, title: String(localized: "lobby_left_hand_over"),
+      options: [.foreground, .authenticationRequired])
+    let lobbyLeft = UNNotificationCategory(
+      identifier: lobbyLeftCategory, actions: [handOver], intentIdentifiers: [], options: [])
+    center.setNotificationCategories([message, call, meeting, joinRequest, joinRequestDeclineOnly, lobbyLeft])
   }
 }

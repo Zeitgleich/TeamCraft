@@ -294,14 +294,31 @@ most 32 times (the chain a guest reads stays short).
 **When the organizer leaves.** Leaving the call of a meeting with people in its lobby and nobody
 else to let them in (no co-host) asks first: "Hand over to …" (up to five people of the call, no
 guests) signs the handover and leaves, "Leave anyway" leaves. The desktop tray's "Leave call"
-brings the call up with the same question; leaving from the system's call UI (CallKit, Android's
-call notification) doesn't ask.
+brings the call up with the same question. Leaving from the system's call UI (CallKit, Android's
+call notification, Telecom, the car) can't ask: the app leaves, then posts a local notification
+"People are still waiting in the lobby of …" under the same conditions (the organizer, people
+waiting, no co-host, a member still in the call; `lobby_left_waiting` in the FFI). Its "Hand over"
+opens the app on the choice of whom to hand it to, read afresh; nobody left to choose or nobody
+waiting any more says so instead.
 
 **In the apps.** Android and iOS label the tiles of a meeting's call "Host" and "Co-host"; its
 organizer gets "Hosts" in the call's controls (each other member in the call: "Make co-host",
 "Remove as co-host", "Hand over host role") and the same question when leaving, the lobby count
 read from `GET /meetings/{id}/lobby`. The apps don't schedule meetings: there, co-hosts are named
 in the call.
+
+**The lobby in the apps** (#1859). The organizer and the co-hosts (and a chat admin the server
+lets host it) see "Lobby" in the controls of the meeting's call with a count of who waits; nobody
+else sees it, and the server refuses everybody else's `GET /meetings/{id}/lobby`. Each row is a
+waiting person with "Admit" and "Deny"; a guest's row shows the code of their key to compare with
+the guest's screen, and "Admit" waits until the guest's page set up its device. The core does the
+admitting (`decide_lobby_entry` in the FFI, `Client::let_in_from_lobby`), as desktop and web do: it
+reads the entry afresh (somebody another host decided on is no error), tells the server, then lets
+the person's devices into the chat's encryption on this device's own decision, a guest only with
+the key their page reported and only from a device the organizer's signed host list or admitters
+name (e2ee.md §4.6). A server that lists a phone user as a host without the organizer's signature
+gets no guest in through them: the add fails and the app says so. A knock reaches a host in the
+call as `lobby_join` (the call listener's `on_lobby_knock`), which reads the lobby again.
 
 **Telling people.** Every change sends `meeting_update` to the organizer, the invitees and the
 co-hosts before and after; a handover also `conversation_update` to the chat's members, whose
@@ -602,9 +619,9 @@ fake calendar and mailer; one test sends through the real SMTP sender to Mailpit
   cancelling one), holidays per organizer, host controls (mute all, remove, lock, end for everyone) and
   meetings created in other CalDAV clients.
 - Per-organizer calendars (see above).
-- Hosts (#1720, #1859): the apps have no lobby or admit UI, so a co-host on a phone can't let
-  anybody in; leaving from the system's call UI (CallKit, Android's call notification) doesn't ask
-  about the handover; the apps' schedule dialog has no co-host field.
+- Hosts (#1720, #1859): the apps' schedule dialog has no co-host field; the apps show the lobby
+  only in the meeting's call, not on the meeting list; the apps' lobby and the reminder after
+  leaving from CallKit are untested on an iPhone.
 - Meeting links: member clients reacting to `lobby_decision` instead of asking; making the link
   anew also turning away the guests still waiting from it; the desktop and mobile apps opening
   `/meeting/…` links themselves; hosts seeing how many guests the link let in; a reloaded guest

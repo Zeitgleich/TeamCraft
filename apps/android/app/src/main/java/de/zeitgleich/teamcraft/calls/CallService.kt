@@ -31,7 +31,7 @@ class CallService : Service() {
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     if (intent?.action == ACTION_HANG_UP) {
-      TeamCraftApplication.graph(this).calls.hangUp()
+      TeamCraftApplication.graph(this).calls.hangUpFromSystem()
       return START_NOT_STICKY
     }
     if (intent?.action == ACTION_STOP_SHARING) {
