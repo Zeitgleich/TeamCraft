@@ -10,7 +10,8 @@
 //! The drain rate is measured end to end, through any proxy: every ping goes out behind all that was
 //! written before it, and the peer's WebSocket answers it only once it has read all of that. So
 //! between two answers, the bytes written between their pings got through: that is the path's drain
-//! rate. And a ping's round trip above the smallest one seen is what waits in the buffers on the way.
+//! rate, taken over [`DRAIN_SPAN`] at least (#1863), so that one of the short stalls TCP has on a
+//! lossy link lowers it, not wipes it out. And a ping's round trip above the smallest one seen is what waits in the buffers on the way.
 //!
 //! - Waiting above [`PacingConfig::target_queue_delay`]: the rate drops below what got through, so
 //!   the buffers empty within a round trip or two.
@@ -61,6 +62,10 @@ const MIN_ROUND_TRIP_WINDOW: Duration = Duration::from_secs(10);
 const DRAIN_WINDOW: Duration = Duration::from_secs(5);
 /// Two answers closer than this measure the timer more than the path.
 const MIN_DRAIN_INTERVAL: Duration = Duration::from_millis(50);
+/// What the path drained is measured over at least this long (#1863): on a lossy link TCP stalls
+/// for a few hundred milliseconds every second or so, and a ping's interval across one measured
+/// next to nothing, which took the rate to its floor at every stall.
+const DRAIN_SPAN: Duration = Duration::from_millis(800);
 /// The smallest burst: a couple of full datagrams.
 const MIN_BURST_BYTES: f64 = 4.0 * 1024.0;
 /// What a WebSocket frame adds to its payload, about: its header, without a mask from the SFU.
@@ -95,7 +100,8 @@ pub struct DrainPacer {
   written_bytes: u64,
   /// Pings without an answer yet, oldest first.
   probes: VecDeque<Probe>,
-  maybe_last_answer: Option<Answer>,
+  /// Answers within [`DRAIN_SPAN`] and the newest one before, oldest first.
+  answers: VecDeque<Answer>,
   round_trips: VecDeque<(Instant, Duration)>,
   drains: VecDeque<(Instant, f64)>,
   /// Whether the previous answer was late (its wait above the target).
@@ -147,7 +153,7 @@ impl DrainPacer {
       maybe_refilled_at: None,
       written_bytes: 0,
       probes: VecDeque::new(),
-      maybe_last_answer: None,
+      answers: VecDeque::new(),
       round_trips: VecDeque::new(),
       drains: VecDeque::new(),
       was_late: true,
@@ -279,19 +285,35 @@ impl DrainPacer {
     }
   }
 
-  /// The drain rate between the last answer and this one, if they are far enough apart.
+  /// What the path drained over the last [`DRAIN_SPAN`], or since the first answer if that is
+  /// more recent and far enough back.
   fn note_drain(&mut self, written_bytes: u64, now: Instant) -> Option<f64> {
-    let maybe_last = self.maybe_last_answer;
-    let maybe_drain_bps = maybe_last.and_then(|last| {
-      let elapsed = now.saturating_duration_since(last.at);
-      (elapsed >= MIN_DRAIN_INTERVAL)
-        .then(|| written_bytes.saturating_sub(last.written_bytes) as f64 * 8.0 / elapsed.as_secs_f64())
+    let maybe_from = self
+      .answers
+      .iter()
+      .rev()
+      .find(|answer| now.saturating_duration_since(answer.at) >= DRAIN_SPAN)
+      .or_else(|| {
+        self
+          .answers
+          .front()
+          .filter(|answer| now.saturating_duration_since(answer.at) >= MIN_DRAIN_INTERVAL)
+      })
+      .copied();
+    let maybe_drain_bps = maybe_from.map(|from| {
+      let elapsed = now.saturating_duration_since(from.at);
+      written_bytes.saturating_sub(from.written_bytes) as f64 * 8.0 / elapsed.as_secs_f64()
     });
-    if maybe_last.is_none() || maybe_drain_bps.is_some() {
-      self.maybe_last_answer = Some(Answer {
-        at: now,
-        written_bytes,
-      });
+    self.answers.push_back(Answer {
+      at: now,
+      written_bytes,
+    });
+    while self
+      .answers
+      .get(1)
+      .is_some_and(|second| now.saturating_duration_since(second.at) >= DRAIN_SPAN)
+    {
+      self.answers.pop_front();
     }
     if let Some(drain_bps) = maybe_drain_bps {
       self.drains.push_back((now, drain_bps));
@@ -481,6 +503,130 @@ mod tests {
         pacer.on_probe_sent(number, start);
       }
       assert_eq!(pacer.probes.len(), MAX_PENDING_PROBES);
+    }
+  }
+
+  /// #1863: a link that carries 5 Mbit/s but, at 0.5 % loss, stalls for 200–500 ms every half to
+  /// one and a half seconds while TCP recovers a segment, as the test stack's lossy profile did.
+  /// Pings sent before or during a stall are answered only after it.
+  mod tcp_stalls {
+    use super::*;
+
+    const LINK_BPS: f64 = 5_000_000.0;
+    /// What the path holds of a connection's data (TCP's window, filling the bottleneck's buffer):
+    /// beyond it the writer waits.
+    const PATH_WINDOW_BYTES: f64 = 128.0 * 1024.0;
+    const TICK: Duration = Duration::from_millis(5);
+    const DATAGRAM_BYTES: usize = 1_200;
+
+    #[test]
+    fn short_stalls_dont_hold_the_rate_down() {
+      let rates = simulate(Duration::from_secs(60), LINK_BPS, 7);
+      let sharp = rates.iter().filter(|bps| **bps >= 2_500_000).count();
+      let median = median(&rates);
+      // About what the link carries between its stalls, most of the time: enough for the share's
+      // 720p layer.
+      assert!(
+        sharp * 10 >= rates.len() * 7,
+        "{sharp}/{} samples >= 2.5 Mbit/s, median {median}",
+        rates.len()
+      );
+      assert!(median >= 3_000_000, "median {median}");
+      // But not far above what the link carries.
+      assert!(median < 7_000_000, "median {median}");
+    }
+
+    #[test]
+    fn a_link_that_narrowed_brings_the_rate_down_within_seconds() {
+      // 5 Mbit/s with stalls, then 1 Mbit/s with stalls from 30 s on: below 1.5 Mbit/s from
+      // 33 s on (a sample every 250 ms).
+      let rates = simulate_narrowing(7);
+      let after_narrowing = &rates[132..];
+      assert!(
+        after_narrowing.iter().all(|bps| *bps < 1_500_000),
+        "{after_narrowing:?}"
+      );
+    }
+
+    /// The rate at each ping, as the SFU's layer allocation reads it.
+    fn simulate(duration: Duration, link_bps: f64, seed: u64) -> Vec<u32> {
+      run(duration, |_| link_bps, seed)
+    }
+
+    fn simulate_narrowing(seed: u64) -> Vec<u32> {
+      run(
+        Duration::from_secs(45),
+        |elapsed| {
+          if elapsed < Duration::from_secs(30) {
+            LINK_BPS
+          } else {
+            1_000_000.0
+          }
+        },
+        seed,
+      )
+    }
+
+    fn run(duration: Duration, link_bps: impl Fn(Duration) -> f64, seed: u64) -> Vec<u32> {
+      let start = Instant::now();
+      let mut pacer = DrainPacer::new(PacingConfig::default());
+      let mut rng = seed;
+      let mut next_stall = start + Duration::from_millis(500 + random(&mut rng) % 1000);
+      let mut stall_until = start;
+      let mut written = 0.0f64;
+      let mut drained = 0.0f64;
+      // Pings on the way: their number and what was written before them.
+      let mut pings: VecDeque<(u64, f64)> = VecDeque::new();
+      let mut answers: VecDeque<(u64, Instant)> = VecDeque::new();
+      let mut next_ping = start;
+      let mut number = 0u64;
+      let mut rates = Vec::new();
+      let mut now = start;
+      while now < start + duration {
+        if now >= next_stall {
+          stall_until = now + Duration::from_millis(200 + random(&mut rng) % 300);
+          next_stall = stall_until + Duration::from_millis(500 + random(&mut rng) % 1000);
+        }
+        if now >= stall_until {
+          let tick_bytes = link_bps(now - start) / 8.0 * TICK.as_secs_f64();
+          drained = (drained + tick_bytes).min(written);
+        }
+        while pings.front().is_some_and(|(_, before)| *before <= drained) {
+          let (answered, _) = pings.pop_front().unwrap();
+          answers.push_back((answered, now + BASE_ROUND_TRIP));
+        }
+        while answers.front().is_some_and(|(_, at)| *at <= now) {
+          let (answered, _) = answers.pop_front().unwrap();
+          pacer.on_answer(answered, now);
+        }
+        if now >= next_ping {
+          pacer.on_probe_sent(number, now);
+          pings.push_back((number, written));
+          number += 1;
+          next_ping += pacer.probe_interval();
+          rates.push(pacer.rate_bps());
+        }
+        // Video is always there: as much as the pacer and the path's window let through.
+        while pacer.wait_for(now).is_zero() && written - drained < PATH_WINDOW_BYTES {
+          pacer.on_written(DATAGRAM_BYTES, now);
+          written += (DATAGRAM_BYTES + FRAME_OVERHEAD_BYTES) as f64;
+        }
+        now += TICK;
+      }
+      rates
+    }
+
+    fn random(state: &mut u64) -> u64 {
+      *state = state
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
+      *state >> 33
+    }
+
+    fn median(values: &[u32]) -> u32 {
+      let mut sorted = values.to_vec();
+      sorted.sort_unstable();
+      sorted[sorted.len() / 2]
     }
   }
 
