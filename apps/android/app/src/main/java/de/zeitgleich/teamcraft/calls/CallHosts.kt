@@ -79,7 +79,7 @@ class CallHosts(
     scope.launch {
       changing.value = try {
         core.core().changeMeetingHost(conversationId, userId, action)
-        awaitChange(conversationId)
+        awaitHostsChange(core, conversationId)
       } catch (error: TeamCraftException) {
         Log.w(TAG, "the meeting's hosts could not be changed", error)
         HostsChange.Failed(null, failureText(error))
@@ -89,18 +89,6 @@ class CallHosts(
       }
       refresh(conversationId)
     }
-  }
-
-  /** Waits for the core's signed change to be saved or refused (it runs on its own queue). */
-  private suspend fun awaitChange(conversationId: String): HostsChange {
-    repeat(CHANGE_POLLS) {
-      when (val state = core.core().meetingHostsChange(conversationId)) {
-        null, CHANGE_SAVING -> delay(CHANGE_POLL_MILLIS)
-        CHANGE_SAVED -> return HostsChange.Idle
-        else -> return HostsChange.Failed(state)
-      }
-    }
-    return HostsChange.Idle
   }
 
   /**
@@ -168,10 +156,6 @@ class CallHosts(
 
   private companion object {
     const val TAG = "TeamCraftCalls"
-    const val CHANGE_SAVING = "saving"
-    const val CHANGE_SAVED = "saved"
-    const val CHANGE_POLLS = 40
-    const val CHANGE_POLL_MILLIS = 250L
     const val OFFER_TIMEOUT_MILLIS = 4_000L
 
     @StringRes
@@ -180,6 +164,26 @@ class CallHosts(
       else -> R.string.error_generic
     }
   }
+}
+
+private const val CHANGE_SAVING = "saving"
+private const val CHANGE_SAVED = "saved"
+private const val CHANGE_POLLS = 40
+private const val CHANGE_POLL_MILLIS = 250L
+
+/**
+ * Waits for the core's signed change of the hosts of `conversationId` to be saved or refused (it
+ * runs on the core's own queue): the host menu and the handover after leaving (#1859).
+ */
+internal suspend fun awaitHostsChange(core: CoreRepository, conversationId: String): HostsChange {
+  repeat(CHANGE_POLLS) {
+    when (val state = core.core().meetingHostsChange(conversationId)) {
+      null, CHANGE_SAVING -> delay(CHANGE_POLL_MILLIS)
+      CHANGE_SAVED -> return HostsChange.Idle
+      else -> return HostsChange.Failed(state)
+    }
+  }
+  return HostsChange.Idle
 }
 
 /** How many people of the call the leave question offers to hand the meeting to, as on desktop. */

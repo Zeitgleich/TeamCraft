@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Die Lobby eines Meetings im Anruf, für seine Gastgeber, und die Erinnerung nach dem Verlassen über die System-Anrufoberfläche (#1859). -->
+<resources>
+  <string name="call_lobby_title">Lobby</string>
+  <plurals name="call_lobby_banner">
+    <item quantity="one">%1$d Person wartet in der Lobby</item>
+    <item quantity="other">%1$d Personen warten in der Lobby</item>
+  </plurals>
+  <string name="call_lobby_review">Ansehen</string>
+  <string name="call_lobby_empty">Niemand wartet.</string>
+  <string name="call_lobby_admit">Einlassen</string>
+  <string name="call_lobby_deny">Ablehnen</string>
+  <string name="call_lobby_guest_code">Gast, Schlüsselcode</string>
+  <string name="call_lobby_guest_verifying">Gast, Schlüssel wird geprüft …</string>
+  <string name="call_lobby_guest_pending">Gast, richtet sein Gerät noch ein</string>
+  <string name="call_lobby_failed">%1$s: %2$s</string>
+  <string name="call_lobby_no_longer_waiting">Die Person wartet nicht mehr.</string>
+  <string name="call_lobby_admit_failed">Dieses Gerät konnte die Person nicht einlassen. Versuche es erneut oder frag den Organisator.</string>
+  <plurals name="lobby_left_title">
+    <item quantity="one">In der Lobby von %1$s wartet noch jemand</item>
+    <item quantity="other">In der Lobby von %1$s warten noch Personen</item>
+  </plurals>
+  <plurals name="lobby_left_title_unnamed">
+    <item quantity="one">In der Lobby wartet noch jemand</item>
+    <item quantity="other">In der Lobby warten noch Personen</item>
+  </plurals>
+  <plurals name="lobby_left_body">
+    <item quantity="one">%1$d Person wartet, und im Anruf kann sie niemand einlassen. Übergib das Meeting an jemanden, der noch da ist.</item>
+    <item quantity="other">%1$d Personen warten, und im Anruf kann sie niemand einlassen. Übergib das Meeting an jemanden, der noch da ist.</item>
+  </plurals>
+  <string name="lobby_left_hand_over">Übergeben</string>
+  <string name="lobby_left_hand_over_to">An %1$s übergeben</string>
+  <string name="lobby_left_checking">Es wird geprüft, wer noch im Anruf ist …</string>
+  <string name="lobby_left_nothing">Niemand muss mehr eingelassen werden, oder niemand im Anruf kann das Meeting übernehmen.</string>
+  <string name="lobby_left_handed_over">Das Meeting wurde an %1$s übergeben.</string>
+</resources>

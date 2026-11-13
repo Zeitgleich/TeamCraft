@@ -554,6 +554,37 @@ class MessageNotifier(
     postSafely(MEETING_HOST_TAG_PREFIX + (notification.maybeMeetingId ?: conversationId), MEETING_ID, built)
   }
 
+  /**
+   * The organizer left the call from the system's call UI while people wait in the lobby and
+   * nobody else can let them in (#1859): the meetings channel, one per meeting chat. A tap and
+   * "Hand over" open the choice of whom to hand the meeting to.
+   */
+  fun showLobbyLeftWaiting(conversationId: String, meetingTitle: String, waiting: Int, handOver: PendingIntent) {
+    if (!canPost()) return
+    val name = meetingTitle.takeIf { it.isNotBlank() }
+    val title = if (name != null) {
+      context.resources.getQuantityString(R.plurals.lobby_left_title, waiting, name)
+    } else {
+      context.resources.getQuantityString(R.plurals.lobby_left_title_unnamed, waiting)
+    }
+    val built = NotificationCompat.Builder(context, NotificationChannels.MEETINGS)
+      .setSmallIcon(R.drawable.ic_notification)
+      .setContentTitle(title)
+      .setContentText(context.resources.getQuantityString(R.plurals.lobby_left_body, waiting, waiting))
+      .setCategory(NotificationCompat.CATEGORY_REMINDER)
+      .setAutoCancel(true)
+      .setTimeoutAfter(LOBBY_LEFT_TIMEOUT_MS)
+      .setContentIntent(handOver)
+      .addAction(R.drawable.ic_notification, context.getString(R.string.lobby_left_hand_over), handOver)
+      .build()
+    postSafely(LOBBY_LEFT_TAG_PREFIX + conversationId, MEETING_ID, built)
+  }
+
+  /** The lobby reminder of `conversationId` is dealt with. */
+  fun removeLobbyLeftWaiting(conversationId: String) {
+    manager.cancel(LOBBY_LEFT_TAG_PREFIX + conversationId, MEETING_ID)
+  }
+
   /** A meeting's notice was dealt with on another device (a `dismiss` wake-up): takes it down. */
   fun removeMeeting(meetingId: String) {
     manager.cancel(MEETING_TAG_PREFIX + meetingId, MEETING_ID)
@@ -1028,6 +1059,10 @@ class MessageNotifier(
     private const val OTHER_ID = 3
     private const val MEETING_ID = 5
     private const val MEETING_TAG_PREFIX = "meeting:"
+    private const val LOBBY_LEFT_TAG_PREFIX = "lobby-left:"
+
+    /** Who waits in a lobby rarely waits longer: the reminder goes after this. */
+    private const val LOBBY_LEFT_TIMEOUT_MS = 30 * 60_000L
     private const val MEETING_HOST_TAG_PREFIX = "meeting-host:"
     /** The notice of a started meeting goes away by itself if nobody reacted to it. */
     private const val MEETING_START_TIMEOUT_MS = 60 * 60_000L

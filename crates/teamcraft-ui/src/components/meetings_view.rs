@@ -9,6 +9,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::meeting_hosts::co_hosts_from_dialog;
+use teamcraft_core::meeting_lobby::LobbyAdmission;
 use teamcraft_crypto::guest_link::code_of_fingerprint;
 use teamcraft_proto::{
   CancelScope, IdempotencyKey, LobbyEntry, LobbyState, MeetingId, MeetingResponse, UnixMillis,
@@ -208,8 +209,7 @@ pub fn Lobby(meeting: MeetingId) -> impl IntoView {
         .find(|item| item.id == meeting)
         .map(|item| (item.conversation_id, item.ends_at.0))
     });
-    let is_guest_user = entry.user.kind == teamcraft_proto::UserKind::Guest;
-    let maybe_knock_fingerprint = entry.maybe_knock_fingerprint.clone();
+    let admission = LobbyAdmission::of(entry);
     spawn_local(async move {
       let client = hub.client();
       let outcome = async move {
@@ -226,14 +226,7 @@ pub fn Lobby(meeting: MeetingId) -> impl IntoView {
       {
         // The host's own decision lets the admitted person's devices into the chat's encryption
         // (e2ee.md §4.6, "Meeting guests").
-        let_in(
-          state,
-          chat,
-          guest,
-          is_guest_user,
-          maybe_knock_fingerprint,
-          ends_at,
-        );
+        let_in(state, chat, guest, admission, ends_at);
       }
     });
   };
@@ -249,10 +242,11 @@ pub fn Lobby(meeting: MeetingId) -> impl IntoView {
               .map(|entry| {
                 let name = entry.user.display_name.clone();
                 // A guest's device is let in once their page set it up and reported its key's
-                // fingerprint; the host may compare the key code with the guest's screen first
-                // (e2ee.md §4.6, "Meeting guests").
+                // fingerprint, and only after the key code is shown, for the host to compare with
+                // the guest's screen (e2ee.md §4.6, "Meeting guests"; the rule all clients share).
                 let is_guest = entry.user.kind == teamcraft_proto::UserKind::Guest;
-                let is_guest_unproven = is_guest && (!entry.has_device || entry.maybe_knock_fingerprint.is_none());
+                let admission = LobbyAdmission::of(&entry);
+                let is_guest_unproven = !admission.has_device_to_add();
                 let guest_id = entry.user.id;
                 if is_guest && !is_guest_unproven {
                   prepare_key_code(state, hub, guest_id);
@@ -275,7 +269,9 @@ pub fn Lobby(meeting: MeetingId) -> impl IntoView {
                     })}
                     <button
                       class="btn btn-primary"
-                      prop:disabled=is_guest_unproven
+                      prop:disabled=move || {
+                        !admission.can_admit(hub.key_codes.with(|codes| codes.contains_key(&guest_id)))
+                      }
                       on:click=move |_| decide(&admit_entry, true)
                     >
                       {move || i18n.t("meetings-admit")}
@@ -477,26 +473,17 @@ pub(crate) fn MeetingLinkButton(
   }
 }
 
-/// Lets an admitted person's devices into the meeting chat's encryption group from this device:
-/// a guest's own device (organizer's devices only, with the key their page reported, until the end
-/// of their access), or a member's.
-fn let_in(
-  state: AppState,
-  chat: ConversationId,
-  user: UserId,
-  is_guest_user: bool,
-  maybe_knock_fingerprint: Option<String>,
-  ends_at_ms: i64,
-) {
-  state.try_write(|backend| {
-    if is_guest_user {
-      // Without a reported key there is nothing to admit; the lobby offers no "admit" then.
-      if let Some(fingerprint) = maybe_knock_fingerprint {
-        backend.let_guest_into_meeting_chat(chat, user, fingerprint, ends_at_ms + GUEST_ACCESS_GRACE_MS);
-      }
-    } else {
-      backend.let_into_meeting_chat(chat, user);
-    }
+/// Lets an admitted person's devices into the meeting chat's encryption group from this device, as
+/// [`LobbyAdmission`] says: a guest's own device (with the key their page reported, until the end
+/// of their access), or a member's. The phone apps do the same (`Client::let_in_from_lobby`).
+fn let_in(state: AppState, chat: ConversationId, user: UserId, admission: LobbyAdmission, ends_at_ms: i64) {
+  state.try_write(|backend| match admission {
+    LobbyAdmission::Guest { knock_fingerprint } => {
+      backend.let_guest_into_meeting_chat(chat, user, knock_fingerprint, ends_at_ms + GUEST_ACCESS_GRACE_MS);
+    },
+    LobbyAdmission::Member => backend.let_into_meeting_chat(chat, user),
+    // Without a reported key there is nothing to admit; the lobby offers no "admit" then.
+    LobbyAdmission::GuestDevicePending => {},
   });
 }
 
@@ -504,11 +491,10 @@ fn let_in(
 /// "no lobby" on this device (`is_open_by_own_record`; the server's `has_lobby` counts for nothing)
 /// and the person came with the meeting link, with a device whose key they reported.
 pub fn admits_by_itself(is_open_by_own_record: bool, entry: &LobbyEntry) -> bool {
-  let is_guest = entry.user.kind == teamcraft_proto::UserKind::Guest;
   is_open_by_own_record
     && entry.is_by_link
     && entry.has_device
-    && (!is_guest || entry.maybe_knock_fingerprint.is_some())
+    && LobbyAdmission::of(entry).has_device_to_add()
 }
 
 /// In a meeting the organizer opened without a lobby, the organizer's device lets in by itself
@@ -551,13 +537,12 @@ pub fn admit_link_arrivals(
       if !is_new {
         continue;
       }
-      let is_guest_user = entry.user.kind == teamcraft_proto::UserKind::Guest;
+      let admission = LobbyAdmission::of(&entry);
       let joined = i18n.t_with("meetings-joined-by-link", &[("name", &entry.user.display_name)]);
-      let fingerprint = entry.maybe_knock_fingerprint.clone();
       spawn_local(async move {
         match hub.client().admit(meeting, user).await {
           Ok(()) => {
-            let_in(state, chat, user, is_guest_user, fingerprint, ends_at);
+            let_in(state, chat, user, admission, ends_at);
             if state.is_alive() {
               state.show_toast_with_action(
                 joined,

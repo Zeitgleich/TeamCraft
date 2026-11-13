@@ -84,6 +84,9 @@ pub trait CallListener: Send + Sync {
   /// the DM's encryption group is in), show who moved it and whom they added, and on the user's
   /// tap `accept_call_move`, then join the room's call.
   fn on_call_moved(&self, from_conversation_id: String, to_conversation_id: String);
+  /// Somebody knocked at the lobby of `meeting_id`, or their device is now set up (#1859). Sent
+  /// to its hosts only: a host in the meeting's call reads the lobby again (`meeting_lobby`).
+  fn on_lobby_knock(&self, meeting_id: String);
 }
 
 /// An announced move of a DM call into a meeting room: who moved it and whom they added.
@@ -643,6 +646,7 @@ impl CallHub {
       } if maybe_active == Some(*conversation_id) => {
         listener.on_call_moved(conversation_id.to_string(), to_conversation_id.to_string());
       },
+      GatewayEvent::LobbyJoin { meeting_id, .. } => listener.on_lobby_knock(meeting_id.to_string()),
       _ => {},
     }
   }
@@ -1744,6 +1748,24 @@ mod tests {
   }
 
   #[test]
+  fn a_knock_at_a_lobby_reaches_the_listener() {
+    let hub = CallHub::default();
+    let listener = Arc::new(RecordingListener::default());
+    hub.set_listener(listener.clone());
+
+    let user: teamcraft_proto::UserSummary = serde_json::from_value(serde_json::json!({
+      "id": "77", "display_name": "Gus", "kind": "guest"
+    }))
+    .unwrap();
+    hub.on_gateway_event(&GatewayEvent::LobbyJoin {
+      meeting_id: teamcraft_proto::MeetingId::from_snowflake(Snowflake::new(7).unwrap()),
+      user,
+    });
+
+    assert_eq!(*listener.knocks.lock().unwrap(), vec!["7".to_owned()]);
+  }
+
+  #[test]
   fn rings_reach_the_listener_unless_in_that_call() {
     let hub = CallHub::default();
     let listener = Arc::new(RecordingListener::default());
@@ -2324,6 +2346,7 @@ mod tests {
     incoming: Mutex<Vec<String>>,
     ring_ended: Mutex<Vec<String>>,
     moved: Mutex<Vec<(String, String)>>,
+    knocks: Mutex<Vec<String>>,
   }
 
   impl CallListener for RecordingListener {
@@ -2343,6 +2366,10 @@ mod tests {
         .lock()
         .unwrap()
         .push((from_conversation_id, to_conversation_id));
+    }
+
+    fn on_lobby_knock(&self, meeting_id: String) {
+      self.knocks.lock().unwrap().push(meeting_id);
     }
   }
 

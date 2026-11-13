@@ -103,6 +103,14 @@
     </receiver>
 
     <!-- In-call screen; shown over the lock screen for answered calls. -->
+    <!-- "Hand over" on the reminder after leaving a meeting's call from the system's call UI (#1859). -->
+    <activity
+      android:name=".calls.HandoverActivity"
+      android:exported="false"
+      android:excludeFromRecents="true"
+      android:taskAffinity=""
+      android:theme="@style/Theme.TeamCraft.Dialog" />
+
     <activity
       android:name=".calls.CallActivity"
       android:exported="false"

@@ -66,7 +66,7 @@ private class ContactsScreen(carContext: CarContext) : Screen(carContext) {
         .addAction(
           Action.Builder()
             .setTitle(carContext.getString(R.string.call_hang_up))
-            .setOnClickListener { graph.calls.hangUp() }
+            .setOnClickListener { graph.calls.hangUpFromSystem() }
             .build(),
         )
         .build()

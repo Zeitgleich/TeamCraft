@@ -75,6 +75,17 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
       await AppModel.shared.reportMeetingNoticeDealtWith(meetingId: meetingId, startsAtMs: startsAt)
     }
     if response.actionIdentifier == UNNotificationDismissActionIdentifier { return }
+    // The lobby reminder after leaving from CallKit (#1859): "Hand over" and a tap open the choice.
+    // Routed by the category the app sets on its own reminder, never by a payload's kind, and
+    // acted on only with the app's tag over the reminder (`handleLobbyReminder`).
+    if response.notification.request.content.categoryIdentifier == NotificationCategories.lobbyLeftCategory {
+      if let conversationId = info[NotificationCategories.conversationKey] as? String {
+        AppModel.shared.handleLobbyReminder(
+          conversationId: conversationId, tag: info[NotificationAuthenticator.tagKey] as? String,
+          notificationId: response.notification.request.identifier)
+      }
+      return
+    }
     guard let conversationId = info[NotificationCategories.conversationKey] as? String else { return }
     let reply = (response as? UNTextInputNotificationResponse)?.userText
     let tag = info[NotificationAuthenticator.tagKey] as? String

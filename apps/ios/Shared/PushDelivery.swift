@@ -98,6 +98,9 @@ enum NotificationKeys {
   static let joinRequestKind = "join_request"
   /// The admin of a join request's notification (with its conversation under `conversation`).
   static let joinRequestUser = "join_request_user"
+  /// The organizer left a meeting's call from CallKit while people wait in its lobby (#1859),
+  /// notified by the app itself.
+  static let lobbyLeftKind = "lobby_left"
 
   /// The thread of a meeting's notices: the reminder and the start notice of a meeting share it, and
   /// a `dismiss` naming the meeting removes the thread's notifications.

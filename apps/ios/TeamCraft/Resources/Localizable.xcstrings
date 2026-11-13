@@ -19993,6 +19993,390 @@
         }
       }
     },
+    "call_lobby_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lobby"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lobby"
+          }
+        }
+      }
+    },
+    "call_lobby_banner %lld": {
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld person is waiting in the lobby"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld people are waiting in the lobby"
+                }
+              }
+            }
+          }
+        },
+        "de": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld Person wartet in der Lobby"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld Personen warten in der Lobby"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "call_lobby_review": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Review"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ansehen"
+          }
+        }
+      }
+    },
+    "call_lobby_empty": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nobody is waiting."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Niemand wartet."
+          }
+        }
+      }
+    },
+    "call_lobby_admit": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Admit"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Einlassen"
+          }
+        }
+      }
+    },
+    "call_lobby_deny": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deny"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ablehnen"
+          }
+        }
+      }
+    },
+    "call_lobby_guest_code": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Guest, key code"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gast, Schlüsselcode"
+          }
+        }
+      }
+    },
+    "call_lobby_guest_verifying": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Guest, checking the key…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gast, Schlüssel wird geprüft …"
+          }
+        }
+      }
+    },
+    "call_lobby_guest_pending": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Guest, still setting up their device"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gast, richtet sein Gerät noch ein"
+          }
+        }
+      }
+    },
+    "call_lobby_failed %@ %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@: %2$@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@: %2$@"
+          }
+        }
+      }
+    },
+    "call_lobby_no_longer_waiting": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "They are no longer waiting."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Person wartet nicht mehr."
+          }
+        }
+      }
+    },
+    "call_lobby_admit_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This device could not let them in. Try again or ask the organizer."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Gerät konnte die Person nicht einlassen. Versuche es erneut oder frag den Organisator."
+          }
+        }
+      }
+    },
+    "lobby_left_title_one %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Somebody is still waiting in the lobby of %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In der Lobby von %@ wartet noch jemand"
+          }
+        }
+      }
+    },
+    "lobby_left_title_other %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "People are still waiting in the lobby of %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In der Lobby von %@ warten noch Personen"
+          }
+        }
+      }
+    },
+    "lobby_left_title_unnamed_one": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Somebody is still waiting in the lobby"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In der Lobby wartet noch jemand"
+          }
+        }
+      }
+    },
+    "lobby_left_title_unnamed_other": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "People are still waiting in the lobby"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In der Lobby warten noch Personen"
+          }
+        }
+      }
+    },
+    "lobby_left_body %lld": {
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld person waits, and nobody in the call can let them in. Hand the meeting over to someone still there."
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld people wait, and nobody in the call can let them in. Hand the meeting over to someone still there."
+                }
+              }
+            }
+          }
+        },
+        "de": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld Person wartet, und im Anruf kann sie niemand einlassen. Übergib das Meeting an jemanden, der noch da ist."
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld Personen warten, und im Anruf kann sie niemand einlassen. Übergib das Meeting an jemanden, der noch da ist."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "lobby_left_hand_over": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hand over"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Übergeben"
+          }
+        }
+      }
+    },
+    "lobby_left_hand_over_to %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hand over to %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "An %@ übergeben"
+          }
+        }
+      }
+    },
+    "lobby_left_checking": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checking who is still in the call…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Es wird geprüft, wer noch im Anruf ist …"
+          }
+        }
+      }
+    },
+    "lobby_left_nothing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nobody needs to be let in any more, or nobody is left in the call to take the meeting."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Niemand muss mehr eingelassen werden, oder niemand im Anruf kann das Meeting übernehmen."
+          }
+        }
+      }
+    },
     "notification_meeting_co_host %@": {
       "localizations": {
         "en": {

@@ -115,7 +115,12 @@ final class CallManager: NSObject, @unchecked Sendable {
   /// Why "Add notetaker" failed (the call goes on unchanged).
   private(set) var maybeNotetakerFailure: AppFailure?
   /// Local picture and sender of the camera.
+  /// Counts knocks at a meeting's lobby (`lobby_join`, sent to its hosts, #1859): the call screen
+  /// reads the lobby of its meeting again when it changes.
+  private(set) var lobbyKnocks = 0
   @ObservationIgnored let camera = CameraStreamer()
+  /// The app's own hang-up asked CallKit to end the call: no lobby reminder, the call screen asked.
+  @ObservationIgnored private var isEndingFromApp = false
 
   @ObservationIgnored private let provider: CXProvider
   @ObservationIgnored private let controller = CXCallController()
@@ -211,6 +216,7 @@ final class CallManager: NSObject, @unchecked Sendable {
 
   func hangUp() {
     guard let call = activeCall else { return }
+    isEndingFromApp = true
     controller.request(CXTransaction(action: CXEndCallAction(call: call.id)), completion: { _ in })
   }
 
@@ -563,6 +569,7 @@ final class CallManager: NSObject, @unchecked Sendable {
       self.maybeMoveFailure = nil
       self.isNotetakerAsked = false
       self.maybeNotetakerFailure = nil
+      self.isEndingFromApp = false
       self.activeCall = nil
     }
   }
@@ -596,6 +603,13 @@ extension CallManager: CXProviderDelegate {
   }
 
   func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
+    // Ended in the system's call UI (the lock screen, a headset, CarPlay), which can't ask about a
+    // handover (#1859): the organizer is reminded of people still in the lobby afterwards.
+    if !isEndingFromApp, maybeSession != nil, let call = activeCall, call.phase == .connected {
+      let conversationId = call.conversationId
+      Task { @MainActor in await AppModel.shared.remindOfLobby(conversationId: conversationId) }
+    }
+    isEndingFromApp = false
     maybeSession?.leave()
     maybePendingAction?.fail()
     maybePendingAction = nil
@@ -790,6 +804,14 @@ extension CallManager: CallListener {
   func onCallMoved(fromConversationId: String, toConversationId: String) {
     Task { @MainActor in
       self.noteAnnouncedMove(CallMove(from: fromConversationId, to: toConversationId))
+    }
+  }
+
+  /// Somebody knocked at a meeting's lobby (#1859): a host's call screen reads it again.
+  func onLobbyKnock(meetingId: String) {
+    DispatchQueue.main.async {
+      guard self.activeCall != nil else { return }
+      self.lobbyKnocks += 1
     }
   }
 

@@ -1004,6 +1004,117 @@ mod hosts {
   fn signed_user(user: UserId) -> SignedUserId {
     SignedUserId::new(user.to_string().parse().unwrap())
   }
+
+  /// The phone apps' lobby (#1859): a host admits from the server's lobby entry, and the core
+  /// decides by the entry and its own checks how the person gets in.
+  mod lobby {
+    use teamcraft_proto::LobbyEntry;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn a_co_host_admits_a_guest_from_the_lobby_entry() {
+      let mut rig = rig().await;
+      let mut bob = rig.member("Bob").await;
+      rig.let_into_group(&mut bob).await;
+      rig.name_hosts(&[bob.client.user_id()], None).await;
+      rig.guest_knows_the_link();
+      rig.server_admits_the_guest().await;
+
+      let entry = rig.lobby_entry(Some(rig.guest.client.own_fingerprint()));
+      bob
+        .client
+        .let_in_from_lobby(rig.chat, &entry, ACCESS_ENDS_MS)
+        .await
+        .unwrap();
+      bob.client.send_text(rig.chat, None, "welcome").await.unwrap();
+      settle(&mut [&mut bob, &mut rig.guest]).await;
+      rig.guest.client.full_sync().await.unwrap();
+
+      assert!(rig.guest.client.has_group(rig.chat).unwrap());
+      assert_eq!(rig.guest.texts(rig.chat), vec!["welcome"]);
+    }
+
+    #[tokio::test]
+    async fn a_guest_whose_device_is_not_set_up_is_not_let_in() {
+      let mut rig = rig().await;
+      rig.guest_knows_the_link();
+      rig.server_admits_the_guest().await;
+
+      let entry = rig.lobby_entry(None);
+      let result = rig
+        .alice
+        .client
+        .let_in_from_lobby(rig.chat, &entry, ACCESS_ENDS_MS)
+        .await;
+
+      assert!(matches!(
+        result,
+        Err(CoreError::GuestRefused(GuestRefusal::NotEnrolled))
+      ));
+      settle(&mut [&mut rig.alice, &mut rig.guest]).await;
+      assert!(!rig.guest.client.has_group(rig.chat).unwrap());
+    }
+
+    #[tokio::test]
+    async fn an_entry_the_server_gave_another_key_is_refused() {
+      let mut rig = rig().await;
+      rig.guest_knows_the_link();
+      rig.server_admits_the_guest().await;
+
+      let entry = rig.lobby_entry(Some("ab".repeat(32)));
+      let result = rig
+        .alice
+        .client
+        .let_in_from_lobby(rig.chat, &entry, ACCESS_ENDS_MS)
+        .await;
+
+      assert!(matches!(
+        result,
+        Err(CoreError::GuestRefused(GuestRefusal::NotTheKnockingKey))
+      ));
+      settle(&mut [&mut rig.alice, &mut rig.guest]).await;
+      assert!(!rig.guest.client.has_group(rig.chat).unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_member_no_host_list_names_admits_nobody_from_the_lobby() {
+      let mut rig = rig().await;
+      let mut bob = rig.member("Bob").await;
+      rig.let_into_group(&mut bob).await;
+      rig.guest_knows_the_link();
+      rig.server_admits_the_guest().await;
+
+      // The server may list Bob as a host; only the organizer's signed list counts.
+      let entry = rig.lobby_entry(Some(rig.guest.client.own_fingerprint()));
+      let result = bob
+        .client
+        .let_in_from_lobby(rig.chat, &entry, ACCESS_ENDS_MS)
+        .await;
+
+      assert!(matches!(
+        result,
+        Err(CoreError::GuestRefused(GuestRefusal::NotAnAdmitter))
+      ));
+      settle(&mut [&mut bob, &mut rig.guest]).await;
+      assert!(!rig.guest.client.has_group(rig.chat).unwrap());
+    }
+
+    impl Rig {
+      /// The guest's entry in the lobby as the server lists it, with the fingerprint the server
+      /// says the guest's page reported.
+      fn lobby_entry(&self, maybe_fingerprint: Option<String>) -> LobbyEntry {
+        serde_json::from_value(serde_json::json!({
+          "user": {"id": self.guest_id().to_string(), "display_name": GUEST_NAME, "kind": "guest"},
+          "requested_at": NOW_MS,
+          "is_by_link": true,
+          "has_device": maybe_fingerprint.is_some(),
+          "knock_fingerprint": maybe_fingerprint,
+        }))
+        .unwrap()
+      }
+    }
+  }
 }
 
 impl Rig {

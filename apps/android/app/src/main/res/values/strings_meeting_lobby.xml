@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The lobby of a meeting in its call, for its hosts, and the reminder after leaving from the system's call UI (#1859). -->
+<resources>
+  <string name="call_lobby_title">Lobby</string>
+  <plurals name="call_lobby_banner">
+    <item quantity="one">%1$d person is waiting in the lobby</item>
+    <item quantity="other">%1$d people are waiting in the lobby</item>
+  </plurals>
+  <string name="call_lobby_review">Review</string>
+  <string name="call_lobby_empty">Nobody is waiting.</string>
+  <string name="call_lobby_admit">Admit</string>
+  <string name="call_lobby_deny">Deny</string>
+  <string name="call_lobby_guest_code">Guest, key code</string>
+  <string name="call_lobby_guest_verifying">Guest, checking the key…</string>
+  <string name="call_lobby_guest_pending">Guest, still setting up their device</string>
+  <string name="call_lobby_failed">%1$s: %2$s</string>
+  <string name="call_lobby_no_longer_waiting">They are no longer waiting.</string>
+  <string name="call_lobby_admit_failed">This device could not let them in. Try again or ask the organizer.</string>
+  <plurals name="lobby_left_title">
+    <item quantity="one">Somebody is still waiting in the lobby of %1$s</item>
+    <item quantity="other">People are still waiting in the lobby of %1$s</item>
+  </plurals>
+  <plurals name="lobby_left_title_unnamed">
+    <item quantity="one">Somebody is still waiting in the lobby</item>
+    <item quantity="other">People are still waiting in the lobby</item>
+  </plurals>
+  <plurals name="lobby_left_body">
+    <item quantity="one">%1$d person waits, and nobody in the call can let them in. Hand the meeting over to someone still there.</item>
+    <item quantity="other">%1$d people wait, and nobody in the call can let them in. Hand the meeting over to someone still there.</item>
+  </plurals>
+  <string name="lobby_left_hand_over">Hand over</string>
+  <string name="lobby_left_hand_over_to">Hand over to %1$s</string>
+  <string name="lobby_left_checking">Checking who is still in the call…</string>
+  <string name="lobby_left_nothing">Nobody needs to be let in any more, or nobody is left in the call to take the meeting.</string>
+  <string name="lobby_left_handed_over">The meeting was handed over to %1$s.</string>
+</resources>
