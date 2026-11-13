@@ -853,6 +853,9 @@ async fn run_command(client: &mut WebClient, command: CoreCommand) -> Result<(),
     CommandPart::Shared => return client.run_shared_command(command).await,
     CommandPart::Workspace => crate::areas::workspace_command(client, command).await,
     CommandPart::Admin => crate::areas::admin_command(client, command).await,
+    CommandPart::Settings => crate::areas::settings_command(client, command).await,
+    CommandPart::Dialogs => crate::areas::dialogs_command(client, command).await,
+    CommandPart::Member => crate::areas::member_command(client, command).await,
   };
   match running {
     Ok(running) => running.await,

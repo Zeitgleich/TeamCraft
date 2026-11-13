@@ -66,7 +66,8 @@ impl AppLinks {
     links
   }
 
-  /// Desktop: takes links from the shell, those the app was started with and every later one.
+  /// Desktop: takes links from the shell, those the app was started with and every later one. Called
+  /// with the prompt (`areas::app_link_prompt`), which only the desktop app loads.
   pub fn listen(self) {
     if !tauri::is_available() {
       return;

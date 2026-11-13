@@ -9,7 +9,7 @@ use teamcraft_client_api::os_notify::{NotificationTag, OsNotification, OsNotific
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
-use crate::app_links::{AppLinkPrompt, AppLinks, OpenInAppButton};
+use crate::app_links::{AppLinks, OpenInAppButton};
 use crate::areas::{self, Place, lazy_area};
 use crate::attention::{AttentionReporter, AttentionSignals, LockReading, is_attentive, last_activity_at};
 use crate::auth::tauri;
@@ -47,7 +47,7 @@ use crate::components::storage_banner::StorageBanner;
 use crate::components::thread_panel::ThreadPanel;
 use crate::components::top_bar::TopBar;
 use crate::components::update_notice::UpdateNotice;
-use crate::components::window_controls::{WindowControls, provide_window_chrome};
+use crate::components::window_controls::provide_window_chrome;
 use crate::history::{Travel, travel};
 use crate::i18n::{I18n, provide_i18n, use_i18n};
 use crate::meetings::parse_guest_link;
@@ -92,14 +92,15 @@ pub fn App() -> impl IntoView {
     sync_tray_labels(i18n);
   }
   let links = AppLinks::provide();
-  links.listen();
   let inbox = ShareInbox::provide();
   inbox.listen();
-  // Above every screen: sign-in has no top bar, but the window still needs its controls.
+  // Above every screen: sign-in has no top bar, but the window still needs its controls. They and
+  // the question about a link from outside are the desktop app's: a module of their own that a
+  // browser never loads (#1462), which takes the links from the shell once it is there.
   view! {
-    <WindowControls />
+    {areas::desktop_only(|| areas::window_controls(()))}
     {screen(settings)}
-    <AppLinkPrompt links=links />
+    {areas::desktop_only(move || areas::app_link_prompt(links))}
     <ShareNotice inbox=inbox />
   }
 }
