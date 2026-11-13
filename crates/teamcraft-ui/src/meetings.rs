@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use leptos::prelude::*;
 pub use teamcraft_client_api::meeting_invitees::{
-  adding_invitee, adding_invitees, attending_users, saved_change,
+  ChatInvitees, added_users, adding_invitee, adding_invitees, attending_users, saved_change,
 };
 use teamcraft_client_api::model::SpaceId;
 use teamcraft_proto::{
@@ -714,6 +714,8 @@ fn store_pending_edits(edits: &[PendingEdit]) {
 pub fn finish_pending_edits(state: crate::state::AppState, hub: MeetingsHub) {
   let meetings = hub.meetings.get_untracked();
   reconcile_pending_edits(now_ms(), &meetings, |conversation, invitees, removed| {
+    // The server's list: only users the organizer's signed list names are added (#1726).
+    let invitees = ChatInvitees::listed(invitees);
     state.try_write(|backend| backend.update_meeting_chat_members(conversation, invitees, removed));
   });
 }

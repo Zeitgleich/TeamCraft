@@ -1109,11 +1109,11 @@ pub enum ChatAction {
   },
   SetUpMeetingChat {
     conversation: ConversationId,
-    invitees: Vec<UserId>,
+    invitees: crate::meeting_invitees::ChatInvitees,
   },
   UpdateMeetingChatMembers {
     conversation: ConversationId,
-    invitees: Vec<UserId>,
+    invitees: crate::meeting_invitees::ChatInvitees,
     removed: Vec<UserId>,
   },
   AddPeopleToCall {

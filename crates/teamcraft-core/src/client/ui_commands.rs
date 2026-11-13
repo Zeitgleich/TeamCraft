@@ -292,7 +292,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         conversation,
         invitees,
       } => self
-        .set_up_meeting_chat(conversation, &invitees)
+        .set_up_meeting_chat_from(conversation, &invitees)
         .await
         .map(|_| ()),
       CoreCommand::UpdateMeetingChatMembers {
@@ -300,7 +300,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         invitees,
         removed,
       } => self
-        .update_meeting_chat_members(conversation, &invitees, &removed)
+        .update_meeting_chat_members_from(conversation, &invitees, &removed)
         .await
         .map(|_| ()),
       CoreCommand::AddPeopleToCall {
