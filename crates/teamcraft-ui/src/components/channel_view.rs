@@ -668,6 +668,9 @@ fn ChannelHeader(
       )
   });
   let members_open = move || state.panel.get() == SidePanel::Members;
+  // A meeting guest sees only what they may do in the meeting chat (#1929): no favourite, no call
+  // start (their page has its own "Join the call"), no notification or channel settings.
+  let is_member = !is_meeting_guest_page();
   // While the other person of a direct conversation types, the line under the name says so (#882).
   let peer_typing = typing_text(conversation, None, true);
   let search_label = move || {
@@ -722,15 +725,17 @@ fn ChannelHeader(
             })
           }}
         </div>
-        <button
-          class="icon-btn"
-          aria-pressed=move || is_favorite().to_string()
-          aria-label=move || if is_favorite() { i18n.t("favorite-remove") } else { i18n.t("favorite-add") }
-          title=move || if is_favorite() { i18n.t("favorite-remove") } else { i18n.t("favorite-add") }
-          on:click=move |_| state.write(|backend| backend.set_favorite(conversation, !is_favorite()))
-        >
-          <Icon name=IconName::Star />
-        </button>
+        <Show when=move || is_member fallback=|| ()>
+          <button
+            class="icon-btn"
+            aria-pressed=move || is_favorite().to_string()
+            aria-label=move || if is_favorite() { i18n.t("favorite-remove") } else { i18n.t("favorite-add") }
+            title=move || if is_favorite() { i18n.t("favorite-remove") } else { i18n.t("favorite-add") }
+            on:click=move |_| state.write(|backend| backend.set_favorite(conversation, !is_favorite()))
+          >
+            <Icon name=IconName::Star />
+          </button>
+        </Show>
         <div class="date-jump">
           <button
             class="icon-btn"
@@ -769,8 +774,10 @@ fn ChannelHeader(
         </Show>
       </div>
       <div class="header-actions">
-        <CallButtons conversation=conversation info=info />
-        <ConversationBell conversation=conversation />
+        <Show when=move || is_member fallback=|| ()>
+          <CallButtons conversation=conversation info=info />
+          <ConversationBell conversation=conversation />
+        </Show>
         <button
           class="header-btn compact-keep"
           aria-label=search_label
@@ -790,14 +797,16 @@ fn ChannelHeader(
           </button>
         </Show>
         <ConversationMore conversation=conversation tab=tab info=info />
-        <button
-          class="header-btn"
-          aria-label=move || i18n.t("channel-settings-title")
-          title=move || i18n.t("channel-settings-title")
-          on:click=move |_| state.overlay.set(Overlay::ChannelSettings(conversation))
-        >
-          <Icon name=IconName::Sliders />
-        </button>
+        <Show when=move || is_member fallback=|| ()>
+          <button
+            class="header-btn"
+            aria-label=move || i18n.t("channel-settings-title")
+            title=move || i18n.t("channel-settings-title")
+            on:click=move |_| state.overlay.set(Overlay::ChannelSettings(conversation))
+          >
+            <Icon name=IconName::Sliders />
+          </button>
+        </Show>
         <button
           class="header-btn"
           aria-pressed=move || (state.panel.get() == SidePanel::Pins).to_string()
@@ -893,6 +902,7 @@ fn ConversationMore(
       .is_some_and(|conv| matches!(conv.kind, ConversationKind::Public | ConversationKind::Private))
       && access.can_add_members()
   };
+  let is_member = !is_meeting_guest_page();
   let choose = move |action: fn(AppState, ConversationId, RwSignal<ChannelTab>)| {
     is_open.set(false);
     action(state, conversation, tab);
@@ -944,38 +954,40 @@ fn ConversationMore(
             <Icon name=IconName::Pin />
             {move || i18n.t("pins-title")}
           </button>
-          <button type="button" class="menu-item" role="menuitem" on:click=move |_| {
-            let id = conversation.to_string();
-            is_open.set(false);
-            state.settings.prefs.update(|prefs| {
-              let mut entry = prefs.notifications.conversation(&id);
-              entry.mute = if entry.mute == MuteFor::Off { MuteFor::Forever } else { MuteFor::Off };
-              prefs.notifications.set_conversation(&id, entry);
-            });
-          }>
-            {move || {
-              let is_muted = state
-                .settings
-                .prefs
-                .with(|prefs| prefs.notifications.conversation(&conversation.to_string()).mute != MuteFor::Off);
-              view! {
-                <Icon name=if is_muted { IconName::Bell } else { IconName::BellOff } />
-                {if is_muted { i18n.t("conversation-unmute") } else { i18n.t("conversation-mute") }}
-              }
-            }}
-          </button>
-          <button type="button" class="menu-item" role="menuitem" on:click=move |_| {
-            let favorite = !is_favorite();
-            is_open.set(false);
-            state.write(|backend| backend.set_favorite(conversation, favorite));
-          }>
-            <Icon name=IconName::Star />
-            {move || if is_favorite() { i18n.t("favorite-remove") } else { i18n.t("favorite-add") }}
-          </button>
-          <button type="button" class="menu-item" role="menuitem" on:click=move |_| choose(|state, conversation, _| state.overlay.set(Overlay::ChannelSettings(conversation)))>
-            <Icon name=IconName::Sliders />
-            {move || i18n.t("channel-settings-title")}
-          </button>
+          <Show when=move || is_member fallback=|| ()>
+            <button type="button" class="menu-item" role="menuitem" on:click=move |_| {
+              let id = conversation.to_string();
+              is_open.set(false);
+              state.settings.prefs.update(|prefs| {
+                let mut entry = prefs.notifications.conversation(&id);
+                entry.mute = if entry.mute == MuteFor::Off { MuteFor::Forever } else { MuteFor::Off };
+                prefs.notifications.set_conversation(&id, entry);
+              });
+            }>
+              {move || {
+                let is_muted = state
+                  .settings
+                  .prefs
+                  .with(|prefs| prefs.notifications.conversation(&conversation.to_string()).mute != MuteFor::Off);
+                view! {
+                  <Icon name=if is_muted { IconName::Bell } else { IconName::BellOff } />
+                  {if is_muted { i18n.t("conversation-unmute") } else { i18n.t("conversation-mute") }}
+                }
+              }}
+            </button>
+            <button type="button" class="menu-item" role="menuitem" on:click=move |_| {
+              let favorite = !is_favorite();
+              is_open.set(false);
+              state.write(|backend| backend.set_favorite(conversation, favorite));
+            }>
+              <Icon name=IconName::Star />
+              {move || if is_favorite() { i18n.t("favorite-remove") } else { i18n.t("favorite-add") }}
+            </button>
+            <button type="button" class="menu-item" role="menuitem" on:click=move |_| choose(|state, conversation, _| state.overlay.set(Overlay::ChannelSettings(conversation)))>
+              <Icon name=IconName::Sliders />
+              {move || i18n.t("channel-settings-title")}
+            </button>
+          </Show>
         </MenuSurface>
       </Show>
     </div>
@@ -1004,6 +1016,12 @@ fn HeaderStatus(user: crate::model::UserId) -> impl IntoView {
         }
       })
   }
+}
+
+/// Whether this is a meeting guest's page (`guest_meeting.rs`): somebody without an account in the
+/// meeting's chat. Not an account guest, who may call and keep favourites.
+fn is_meeting_guest_page() -> bool {
+  use_context::<crate::meetings::MeetingsHub>().is_some_and(|hub| hub.is_guest_page())
 }
 
 /// Start buttons in the header: audio and video call, plus a drop-in huddle in channels.

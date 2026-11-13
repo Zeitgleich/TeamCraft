@@ -478,6 +478,11 @@ impl MeetingsHub {
     }
   }
 
+  /// Whether this is a meeting guest's page (no account, only the meeting's chat and call).
+  pub fn is_guest_page(&self) -> bool {
+    self.maybe_guest_chat.is_some()
+  }
+
   pub fn title_for(&self, conversation: ConversationId) -> Option<String> {
     self.meetings.with(|all| {
       all

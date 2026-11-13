@@ -1,5 +1,6 @@
-//! What a guest sees after a host let them in: the meeting chat and its call, nothing else of the
-//! app (no sidebar, spaces, search or settings). The guest's page runs the same client core as a
+//! What a guest sees after a host let them in: the meeting's call, opened straight away on its
+//! pre-join screen (#1929), and the meeting chat behind it; nothing else of the app (no sidebar,
+//! spaces, search or settings). The guest's page runs the same client core as a
 //! member's, with an ephemeral device (e2ee.md §4.6, "Meeting guests"; docs/meetings.md).
 
 use std::rc::Rc;
@@ -139,6 +140,8 @@ fn GuestShell(
   state.open_conversation(conversation);
   if untrack(|| state.read(|backend| backend.has_calls() && !backend.has_simulated_calls())) {
     connect_calls(state);
+    // The guest knocked to join the call: admission opens it, the chat stays behind it (#1929).
+    join_meeting(state, i18n, conversation);
   }
   let call_prefs = Memo::new(move |_| settings.prefs.get().calls);
   Effect::new(move |previous: Option<crate::prefs::CallPrefs>| {
