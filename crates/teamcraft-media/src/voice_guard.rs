@@ -27,6 +27,8 @@ use crate::datagram::TransportSeq;
 /// Voice datagrams remembered until the feedback reports them: about four seconds of one voice.
 /// Older ones are forgotten (the feedback that would have reported them was lost).
 const MAX_PENDING: usize = 256;
+/// Voice packets that may still arrive out of order: 60 ms of a voice.
+const REORDER_PACKETS: u64 = 3;
 /// The fastest voice datagram's delay within this long is the path's own: what comes later waited.
 const BASELINE_WINDOW: Duration = Duration::from_secs(10);
 
@@ -180,6 +182,96 @@ impl VoiceGuard {
   }
 }
 
+/// Whether the voice a sender's upload delivers has gaps (#1889): the receiving end of a link (the
+/// SFU, for each participant's upload) counts the voice's RTP sequence numbers as they arrive.
+///
+/// A sender whose upload collapsed loses its voice also after its camera stopped: the link is
+/// shared with the acknowledgements of everything it receives (a third of 120 kbit/s for one
+/// camera on QUIC). Once its voice of the last [`VoiceGuardConfig::window`] arrived with
+/// [`VoiceGuardConfig::max_loss`] or more missing, it gets no video for
+/// [`VoiceGuardConfig::hold`] after the last such moment ([`ArrivingVoice::is_hurt`]).
+#[derive(Debug)]
+pub struct ArrivingVoice {
+  config: VoiceGuardConfig,
+  /// Arrived voice: when, and its RTP sequence number, unwrapped.
+  arrivals: VecDeque<(Instant, u64)>,
+  maybe_highest: Option<u64>,
+  maybe_hurt_at: Option<Instant>,
+}
+
+impl ArrivingVoice {
+  pub fn new(config: VoiceGuardConfig) -> Self {
+    Self {
+      config,
+      arrivals: VecDeque::new(),
+      maybe_highest: None,
+      maybe_hurt_at: None,
+    }
+  }
+
+  /// A voice packet with RTP sequence number `sequence_number` arrived.
+  pub fn on_arrival(&mut self, sequence_number: u16, now: Instant) {
+    let extended = match self.maybe_highest {
+      Some(highest) => unwrap_sequence_number(sequence_number, highest),
+      None => u64::from(sequence_number) + (1 << 16),
+    };
+    self.maybe_highest = Some(
+      self
+        .maybe_highest
+        .map_or(extended, |highest| highest.max(extended)),
+    );
+    let window = self.config.window;
+    while self
+      .arrivals
+      .front()
+      .is_some_and(|(at, _)| now.saturating_duration_since(*at) > window)
+    {
+      self.arrivals.pop_front();
+    }
+    self.arrivals.push_back((now, extended));
+    while self.arrivals.len() > MAX_PENDING {
+      self.arrivals.pop_front();
+    }
+    // The newest few may still come, out of order.
+    let settled = self
+      .maybe_highest
+      .unwrap_or(extended)
+      .saturating_sub(REORDER_PACKETS);
+    let lowest = self
+      .arrivals
+      .iter()
+      .map(|(_, seq)| *seq)
+      .min()
+      .unwrap_or(extended);
+    if settled < lowest {
+      return;
+    }
+    let expected = usize::try_from(settled - lowest + 1).unwrap_or(usize::MAX);
+    let arrived = self.arrivals.iter().filter(|(_, seq)| *seq <= settled).count();
+    let missing = expected.saturating_sub(arrived);
+    if expected >= self.config.min_reported && missing as f64 >= self.config.max_loss * expected as f64 {
+      self.maybe_hurt_at = Some(now);
+    }
+  }
+
+  /// Whether the sender's voice arrived with gaps within [`VoiceGuardConfig::hold`].
+  pub fn is_hurt(&self, now: Instant) -> bool {
+    self
+      .maybe_hurt_at
+      .is_some_and(|at| now.saturating_duration_since(at) < self.config.hold)
+  }
+}
+
+/// `sequence_number` as the 64-bit value closest to `reference`.
+fn unwrap_sequence_number(sequence_number: u16, reference: u64) -> u64 {
+  let base = reference & !0xFFFF;
+  [base.saturating_sub(0x1_0000), base, base + 0x1_0000]
+    .map(|candidate| candidate + u64::from(sequence_number))
+    .into_iter()
+    .min_by_key(|candidate| candidate.abs_diff(reference))
+    .unwrap_or(base + u64::from(sequence_number))
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -311,6 +403,62 @@ mod tests {
     }
     assert_eq!(guard.pending.len(), MAX_PENDING);
     assert_eq!(guard.pending_since.len(), MAX_PENDING);
+  }
+
+  mod arriving {
+    use super::*;
+
+    #[test]
+    fn voice_that_arrives_whole_is_not_hurt() {
+      let start = Instant::now();
+      let mut voice = ArrivingVoice::new(VoiceGuardConfig::default());
+      for seq in 0..50u16 {
+        voice.on_arrival(seq, start + 20 * MS * u32::from(seq));
+      }
+      assert!(!voice.is_hurt(start + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn voice_with_gaps_is_hurt_for_the_hold() {
+      let start = Instant::now();
+      let mut voice = ArrivingVoice::new(VoiceGuardConfig::default());
+      let mut last = start;
+      for seq in (0..50u16).filter(|seq| seq % 3 != 0) {
+        last = start + 20 * MS * u32::from(seq);
+        voice.on_arrival(seq, last);
+      }
+      assert!(voice.is_hurt(last));
+      let hold = VoiceGuardConfig::default().hold;
+      assert!(!voice.is_hurt(last + hold));
+    }
+
+    #[test]
+    fn reordering_and_wrap_around_are_no_gaps() {
+      let start = Instant::now();
+      let mut voice = ArrivingVoice::new(VoiceGuardConfig::default());
+      let first = u16::MAX - 20;
+      for index in 0..50u16 {
+        // Pairs swapped on the way.
+        let swapped = if index % 2 == 0 { index + 1 } else { index - 1 };
+        voice.on_arrival(first.wrapping_add(swapped), start + 20 * MS * u32::from(index));
+      }
+      assert!(!voice.is_hurt(start + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn a_muted_moment_is_no_gap() {
+      let start = Instant::now();
+      let mut voice = ArrivingVoice::new(VoiceGuardConfig::default());
+      for seq in 0..10u16 {
+        voice.on_arrival(seq, start + 20 * MS * u32::from(seq));
+      }
+      // Two seconds without voice, then it goes on where it stopped.
+      let later = start + Duration::from_secs(2);
+      for seq in 10..30u16 {
+        voice.on_arrival(seq, later + 20 * MS * u32::from(seq - 10));
+      }
+      assert!(!voice.is_hurt(later + Duration::from_secs(1)));
+    }
   }
 
   /// Sends `count` voice datagrams from `first`, 20 ms apart, and the feedback that reports them:

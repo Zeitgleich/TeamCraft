@@ -51,7 +51,7 @@ use teamcraft_media::{
   join_probe::{JoinProbe, JoinProbeConfig, LinkMeasurement},
   rate_probe::{ProbeOutcome, RateProbe, RateProbeConfig},
   rtp::{AudioLevel, RtpError, RtpHeader},
-  voice_guard::{VoiceGuard, VoiceGuardConfig},
+  voice_guard::{ArrivingVoice, VoiceGuard, VoiceGuardConfig},
 };
 use teamcraft_proto::{
   DeviceId, KNOWN_VIDEO_CODECS, MAX_NACK_SEQUENCE_NUMBERS, MAX_SIMULCAST_LAYERS, MediaCapabilities,
@@ -198,6 +198,9 @@ struct ParticipantRoute {
   has_feedback: bool,
   /// What becomes of the voice sent to it: while it is lost, its video yields (#1871).
   voice: VoiceGuard,
+  /// How its own voice arrives: while its upload loses it, it gets no video either, whose
+  /// acknowledgements share that upload (#1889).
+  uplink_voice: ArrivingVoice,
   /// The connection was lost: nothing is sent to it until it is back.
   is_suspended: bool,
   /// What may still be resent to it.
@@ -328,6 +331,7 @@ impl Forwarder {
       maybe_probe_request: None,
       has_feedback: false,
       voice: VoiceGuard::new(self.config.voice_guard),
+      uplink_voice: ArrivingVoice::new(self.config.voice_guard),
       is_suspended: false,
       retransmit_budget: RetransmitBudget::default(),
       maybe_join_probe: self.new_join_probe(now),
@@ -777,8 +781,19 @@ impl Forwarder {
     if let Some(seq) = header.maybe_transport_seq {
       participant.uplink.on_arrival(seq, now);
     }
+    let was_uplink_hurt = participant.uplink_voice.is_hurt(now);
+    if is_audio {
+      participant
+        .uplink_voice
+        .on_arrival(rtp_header.sequence_number.0, now);
+    }
+    let has_uplink_become_hurt = !was_uplink_hurt && participant.uplink_voice.is_hurt(now);
 
     let mut route = Route::default();
+    if has_uplink_become_hurt {
+      // Its video stops now, not with its next feedback.
+      route.effects.extend(self.reallocate(sender, now));
+    }
     let receivers = if is_screen_audio {
       self.others(sender)
     } else if is_audio {
@@ -1241,8 +1256,9 @@ impl Forwarder {
       UpgradeProof::NotRequired
     };
     // Its voice is being lost (a link that collapsed): the video yields at once, and no probe adds
-    // to the link meanwhile (#1871).
-    let allocation = if participant.voice.is_hurt(now) {
+    // to the link meanwhile (#1871). So does the video to a participant whose own voice arrives
+    // with gaps: the acknowledgements of what it receives share its collapsed upload (#1889).
+    let allocation = if participant.voice.is_hurt(now) || participant.uplink_voice.is_hurt(now) {
       participant.allocator.pause_all(&demands, now)
     } else {
       participant
@@ -3069,6 +3085,39 @@ mod tests {
             at - reported_at
           );
         }
+      }
+    }
+
+    /// #1889: a participant whose upload collapsed loses its own voice on the way to the SFU, also
+    /// after its camera stopped: the acknowledgements of the video it receives share that upload.
+    /// It gets no video from the first gaps on.
+    #[test]
+    fn gaps_in_a_participants_own_voice_pause_its_video() {
+      let (mut forwarder, now) = video_room();
+      forwarder.subscribe(device(2), VIDEO, Some(2), now).unwrap();
+      forwarder
+        .participants
+        .get_mut(&device(2))
+        .unwrap()
+        .downlink
+        .apply_probe(10_000_000);
+      let up_at = switched_to(&mut forwarder, 2, now).expect("never switched up");
+      assert!(send_frame(&mut forwarder, 2, true, up_at).contains(&device(2)));
+
+      // Device 2 speaks; a third of its voice doesn't arrive.
+      let mut at = up_at;
+      for sequence_number in (0..40u16).filter(|seq| seq % 3 != 0) {
+        at = up_at + Duration::from_millis(20) * u32::from(sequence_number);
+        let mut rtp = header();
+        rtp.sequence_number = SequenceNumber(sequence_number);
+        rtp.set_audio_level(AudioLevel::new(20, true).unwrap());
+        forwarder.route(device(2), &rtp_datagram(2, 0, rtp), at).unwrap();
+      }
+      for layer in 0..3 {
+        assert!(
+          send_frame(&mut forwarder, layer, true, at).is_empty(),
+          "layer {layer}"
+        );
       }
     }
 
