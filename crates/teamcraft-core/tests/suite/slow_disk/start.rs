@@ -6,19 +6,18 @@
 #![cfg(feature = "ui")]
 #![allow(clippy::print_stderr, reason = "the numbers are what the measurement is for")]
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use teamcraft_client_api::backend::ChatBackend as _;
 use teamcraft_core::api::fake::FakeServer;
+use teamcraft_core::chat_list_pass::SliceLimit;
 use teamcraft_core::clock::SystemClock;
 use teamcraft_core::mls_storage;
 use teamcraft_core::records;
 use teamcraft_core::store::{LaneStore, LocalStore as _, SealedSqliteStore, Table};
 use teamcraft_core::ui_backend::{CoreChatBackend, EntryNeed};
 use teamcraft_core::{Client, ClientSettings, PendingEnrollment};
-use teamcraft_proto::{ConversationId, SpaceId, UserId};
+use teamcraft_proto::{ConversationId, UserId};
 
 use super::{DiskTally, PHONE_SYNC_DELAY, SlowDisk, SlowStore};
 use crate::common::{Peer, options, settings, settle};
@@ -92,6 +91,22 @@ async fn measure_signed_in_start() {
   );
   let (_, again) = measure(&store.disk, || list_pass(&backend).len());
   eprintln!("chat list, a pass again:   {again}");
+  // As the app's read thread runs it (issue #1819): what another read waits for at most.
+  let store = store.reopen();
+  store.disk.set_delays(PHONE_SYNC_DELAY, PHONE_READ_DELAY);
+  let backend = list_backend(&store.lane, me);
+  let (mut pass, begun) = measure(&store.disk, || backend.begin_list_pass(SliceLimit::default()));
+  let mut longest = Duration::ZERO;
+  while !pass.is_done() {
+    let (_, slice) = measure(&store.disk, || backend.continue_list_pass(&mut pass));
+    longest = longest.max(slice.took);
+  }
+  eprintln!(
+    "chat list, in slices:      {:>7.1} ms to begin, {} slices, the longest {:.1} ms",
+    ms(begun.took),
+    pass.slices(),
+    ms(longest)
+  );
   // Like the app's kept list (the FFI's items are about the size of these).
   records::put_json(store.writer.as_ref(), Table::Account, KEPT_LIST_KEY, &listed).unwrap();
 
@@ -115,7 +130,7 @@ async fn measure_signed_in_start() {
 /// A store as a phone holds it after a while: Carol is in `channels` channels of Alice's with
 /// `members` more people, each with `messages` messages she caught up on, and her chat list was read
 /// once (its counts are kept).
-async fn seeded(channels: usize, messages: usize, members: usize) -> (SlowStore, UserId) {
+pub(super) async fn seeded(channels: usize, messages: usize, members: usize) -> (SlowStore, UserId) {
   let store = SlowStore::open(Duration::ZERO);
   let server = FakeServer::new();
   let mut alice = Peer::enroll(&server, "Alice").await;
@@ -184,20 +199,21 @@ async fn enroll_on(
 }
 
 /// The main read thread's backend, as the apps set it up.
-fn list_backend(lane: &LaneStore, me: UserId) -> CoreChatBackend<LaneStore> {
+pub(super) fn list_backend(lane: &LaneStore, me: UserId) -> CoreChatBackend<LaneStore> {
   CoreChatBackend::new(lane.clone(), me, Box::new(SystemClock)).with_entry_need(EntryNeed::Unread)
 }
 
-/// The apps' chat list read (`conversations` of the FFI): the spaces, then one pass.
-fn list_pass(backend: &CoreChatBackend<LaneStore>) -> Vec<teamcraft_client_api::model::Conversation> {
-  let spaces: BTreeSet<SpaceId> = backend.spaces().into_iter().map(|space| space.id).collect();
-  backend.listed_conversations(&spaces)
+/// The apps' chat list read (`conversations` of the FFI): one pass, in one go.
+pub(super) fn list_pass(
+  backend: &CoreChatBackend<LaneStore>,
+) -> Vec<teamcraft_client_api::model::Conversation> {
+  backend.whole_list_pass().take_listed()
 }
 
 /// What a step took and read.
-struct Measured {
-  took: Duration,
-  disk: DiskTally,
+pub(super) struct Measured {
+  pub(super) took: Duration,
+  pub(super) disk: DiskTally,
 }
 
 impl std::fmt::Display for Measured {
@@ -212,7 +228,7 @@ impl std::fmt::Display for Measured {
   }
 }
 
-fn measure<T>(disk: &SlowDisk, step: impl FnOnce() -> T) -> (T, Measured) {
+pub(super) fn measure<T>(disk: &SlowDisk, step: impl FnOnce() -> T) -> (T, Measured) {
   let before = disk.tally();
   let started = Instant::now();
   let result = step();

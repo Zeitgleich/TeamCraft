@@ -16,6 +16,7 @@
 #![allow(clippy::unwrap_used, reason = "test helpers: a failure fails the test")]
 
 mod catch_up;
+mod chat_list;
 mod purge;
 mod start;
 mod vfs;

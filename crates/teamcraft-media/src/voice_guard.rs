@@ -79,6 +79,21 @@ impl Default for VoiceGuardConfig {
   }
 }
 
+impl VoiceGuardConfig {
+  /// The own voice on the client's uplink: only lost voice counts, late voice doesn't. The
+  /// client sends its voice first (its send queue), so voice that comes late waited behind the
+  /// client's own video in the link's queue: a screen share's slide change (a picture of up to a
+  /// second of its bitrate) on a limited uplink, which the uplink allocation rides out (#941). A
+  /// collapsed uplink overflows its queue and loses voice. Judged by lateness as well, every slide
+  /// change stopped the share (#1888).
+  pub fn losses_only() -> Self {
+    Self {
+      max_delay: Duration::MAX,
+      ..Self::default()
+    }
+  }
+}
+
 impl VoiceGuard {
   pub fn new(config: VoiceGuardConfig) -> Self {
     Self {
@@ -366,6 +381,33 @@ mod tests {
     };
     guard.on_feedback(&held_back, later + 800 * MS);
     assert!(guard.is_hurt(later + 800 * MS));
+  }
+
+  /// The client's own uplink: voice held up behind its own burst arrives, and isn't hurt.
+  #[test]
+  fn held_back_voice_doesnt_count_where_only_losses_do() {
+    let start = Instant::now();
+    let mut guard = VoiceGuard::new(VoiceGuardConfig::losses_only());
+    let on_time = send_voice(&mut guard, 0, 50, start, |_| true);
+    guard.on_feedback(&on_time, start + Duration::from_secs(1));
+    let later = start + Duration::from_secs(1);
+    for index in 0..25u16 {
+      guard.on_send(TransportSeq(50 + index), later + 20 * MS * u32::from(index));
+    }
+    let held_back = TransportFeedback {
+      base_seq: 50,
+      arrivals_us: (0..25u64)
+        .map(|index| Some(1_000_000 + index * 20_000 + 300_000))
+        .collect(),
+    };
+    guard.on_feedback(&held_back, later + 800 * MS);
+    assert!(!guard.is_hurt(later + 800 * MS));
+    // Lost voice still is.
+    let lossy = send_voice(&mut guard, 75, 25, later + Duration::from_secs(1), |index| {
+      index % 3 != 0
+    });
+    guard.on_feedback(&lossy, later + Duration::from_millis(1500));
+    assert!(guard.is_hurt(later + Duration::from_millis(1500)));
   }
 
   #[test]
