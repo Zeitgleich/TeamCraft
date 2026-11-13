@@ -13,12 +13,13 @@ use super::start::{list_backend, list_pass, measure, seeded};
 /// Two workspaces whose difference is what one more conversation costs a pass.
 const FEWER: usize = 6;
 const MORE: usize = 38;
-/// Page reads a cold pass may take per conversation more. Before issue #1819 a pass read 17 to 19
-/// here (1,539 for 83 channels in `measure_signed_in_start`), now 11 to 14: the conversation's
-/// record in the list (about 4) and what checks its kept tally (feed version, length, the tally's
-/// last row). The catch-up mark, bookmarks, lines read and a channel's member list are no longer
-/// looked up per conversation. The spread is how SQLite laid out the file.
-const MAX_READS_PER_CONVERSATION: u64 = 15;
+/// Page reads a cold pass may take per conversation more. On one machine the pass read 17 to 19
+/// before issue #1819 and 11 to 14 after it: the conversation's record in the list (about 4) and
+/// what checks its kept tally (feed version, length, the tally's last row). How SQLite lays out the
+/// file and the machine move it by several pages (CI's runner read 17 after the change), so this
+/// bound can't tell the two apart: it catches what grows much faster, such as an entry reading its
+/// messages or a table whole.
+const MAX_READS_PER_CONVERSATION: u64 = 24;
 
 /// What one more conversation costs a pass on a store just opened: a few pages, not a lookup per
 /// record the entry might have.

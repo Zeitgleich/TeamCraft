@@ -2661,10 +2661,12 @@ build, local machine) and `slow_disk::chat_list` (what one more conversation cos
 |-------------------------------------------------|-------------------|--------------------------|
 | Cold pass, 83 channels: page reads              | 1,539             | 1,153–1,190              |
 | Cold pass, 83 channels: time                    | 567 ms            | 421–436 ms               |
-| Page reads per conversation more (6 vs 38)      | 17–19             | 11–14                    |
+| Page reads per conversation more (6 vs 38)      | 17–19             | 11–14 (CI's runner: 17)  |
 | The longest a read waits behind the pass        | the whole pass    | 114–120 ms (beginning)   |
 | A slice, the longest                            | –                 | 42–44 ms (8 slices)      |
 
+- Page counts move with how SQLite laid out the file and with the machine: the test's bound (24
+  per conversation) catches an entry that reads much more, not the difference above.
 - What a cold entry still reads: its record in the conversation list (about 4 pages, read with all
   others when the pass begins) and what checks its kept tally (feed version, the feed's length, the
   rank of the tally's last row: about 9 pages). A summary record per conversation, written with
