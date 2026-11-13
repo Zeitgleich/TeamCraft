@@ -150,6 +150,7 @@ struct CallScreen: View {
     } else if let spotlight {
       ZStack(alignment: .bottom) {
         RemoteVideoView(renderer: spotlight.renderer)
+          .overlay { videoNotice(for: spotlight) }
           .overlay(alignment: .bottomLeading) { nameTag(for: spotlight) }
         if filmstrip.count > 0 { filmstripView }
       }
@@ -222,6 +223,7 @@ struct CallScreen: View {
       RemoteVideoView(renderer: stream.renderer)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.black)
+        .overlay { videoNotice(for: stream) }
         .overlay(alignment: .bottomLeading) { nameTag(for: stream) }
         .clipShape(Self.tileShape)
         .overlay(Self.tileShape.stroke(isSpeaking(stream) ? Theme.accent : .white.opacity(0.12), lineWidth: isSpeaking(stream) ? 3 : 1))
@@ -241,9 +243,7 @@ struct CallScreen: View {
       .animation(.easeOut(duration: 0.15), value: person.isSpeaking)
       .accessibilityElement(children: .ignore)
       .accessibilityLabel(
-        person.isUnverified
-          ? Text("call_person_unverified \(person.name)")
-          : person.isMuted ? Text("call_person_muted \(person.name)") : Text(verbatim: person.name))
+        CallTileLabel(name: person.name, isMuted: person.isMuted, isUnverified: person.isUnverified).text)
     }
   }
 
@@ -277,11 +277,36 @@ struct CallScreen: View {
     }
   }
 
-  /// The warning mark of a tile whose person could not be verified (an SF Symbol, never an emoji).
+  /// The warning mark of a tile whose person could not be verified (an SF Symbol, never an emoji);
+  /// the name tag's dark capsule is under it in light and dark mode alike.
   private var unverifiedMark: some View {
     Image(systemName: "exclamationmark.triangle.fill")
       .font(.app(.caption2))
       .foregroundStyle(.orange)
+      .accessibilityHidden(true)
+  }
+
+  /// Why a tile shows no picture (#1838), over the video as web and desktop have it; the filmstrip's
+  /// small tiles show a sign and keep the sentence for VoiceOver.
+  @ViewBuilder
+  private func videoNotice(for stream: RemoteVideoStream, isCompact: Bool = false) -> some View {
+    if let notice = stream.maybeNotice {
+      if isCompact {
+        Image(systemName: "video.slash.fill")
+          .font(.app(.body))
+          .foregroundStyle(.white.opacity(0.8))
+          .accessibilityLabel(Text(notice))
+      } else {
+        Text(notice)
+          .font(.app(.footnote))
+          .multilineTextAlignment(.center)
+          .foregroundStyle(.white)
+          .padding(.horizontal, 12)
+          .padding(.vertical, 8)
+          .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+          .padding(16)
+      }
+    }
   }
 
   private func isUnverified(_ stream: RemoteVideoStream) -> Bool {
@@ -307,6 +332,7 @@ struct CallScreen: View {
         ForEach(filmstrip) { stream in
           RemoteVideoView(renderer: stream.renderer)
             .frame(width: 104, height: 78)
+            .overlay { videoNotice(for: stream, isCompact: true) }
             .overlay(alignment: .bottomLeading) { nameTag(for: stream) }
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay(
@@ -335,11 +361,7 @@ struct CallScreen: View {
       .font(.app(.caption).weight(.medium))
       .foregroundStyle(.white)
       .accessibilityElement(children: .ignore)
-      .accessibilityLabel(
-        isUnverified(stream)
-          ? Text("call_person_unverified \(name)")
-          : isMuted(stream) ? Text("call_person_muted \(name)") : Text(verbatim: name)
-      )
+      .accessibilityLabel(CallTileLabel(name: name, isMuted: isMuted(stream), isUnverified: isUnverified(stream)).text)
       .padding(.horizontal, 8)
       .padding(.vertical, 2)
       .background(.black.opacity(0.55), in: Capsule())

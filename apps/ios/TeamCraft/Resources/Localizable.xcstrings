@@ -9740,7 +9740,39 @@
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "%@, nicht verifiziert, erhält kein Audio und Video"
+            "value": "%@, nicht verifiziert, erhält kein Bild und keinen Ton"
+          }
+        }
+      }
+    },
+    "call_person_muted_unverified %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@, muted, not verified, gets no audio or video"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@, stummgeschaltet, nicht verifiziert, erhält kein Bild und keinen Ton"
+          }
+        }
+      }
+    },
+    "call_video_undecodable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This video can't be shown here: it comes in a format this device doesn't play"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Video kann hier nicht gezeigt werden: Es kommt in einem Format, das dieses Gerät nicht abspielt"
           }
         }
       }

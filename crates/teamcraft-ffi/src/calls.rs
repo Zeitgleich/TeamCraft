@@ -65,6 +65,9 @@ const SCREEN_LAYERS: u8 = 2;
 const SCREEN_FRAMERATE: u8 = 15;
 /// The highest layer a phone receives of other devices' tracks (0 is the smallest).
 const RECEIVE_MAX_LAYER: u8 = 1;
+/// What an app that decodes video itself ([`EncodedVideoListener`]) is handed: H.264 access units
+/// only (iOS: VideoToolbox).
+const ENCODED_VIDEO_DECODERS: [VideoCodec; 1] = [VideoCodec::H264];
 
 /// Told about rings and about the call this device is in. Called from the engine and call
 /// threads; implementations hand over to their UI thread.
@@ -174,6 +177,11 @@ pub struct RemoteVideoTrack {
   /// The publishing device.
   pub device_id: String,
   pub is_screen: bool,
+  /// The track's codec is among the phone's decoders (H.264). Otherwise (#1838: a browser that
+  /// can't encode H.264 sends AV1 or VP9) the app doesn't watch it and its tile says why it shows
+  /// no video; the mirror of `RemoteVideoTrack::is_undecodable` in teamcraft-client-api.
+  #[uniffi(default = true)]
+  pub is_playable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -1077,6 +1085,8 @@ impl EncodedVideoBridge {
           stream_id: track.stream_id.0.to_string(),
           device_id: track.device_id.to_string(),
           is_screen: track.kind == VideoTrackKind::Screen,
+          // The base layer is in the track's codec; every viewer must decode that one.
+          is_playable: ENCODED_VIDEO_DECODERS.contains(&track.codec),
         };
         self.remote_tracks.push(remote.clone());
         if let Some(listener) = &self.maybe_listener {
@@ -1436,6 +1446,17 @@ fn ended(conversation: ConversationId, reason: CallEndReason) -> CallStateInfo {
   }
 }
 
+/// The video codecs the phone decodes, as the call announces them (the SFU sends a device no track
+/// it doesn't decode): iOS decodes H.264 itself (VideoToolbox, [`EncodedVideoListener`]); Android
+/// once Cisco's OpenH264 is installed.
+fn phone_video_decoders(is_ios: bool, has_openh264: bool) -> Vec<VideoCodec> {
+  if is_ios || has_openh264 {
+    ENCODED_VIDEO_DECODERS.to_vec()
+  } else {
+    Vec::new()
+  }
+}
+
 /// The phone's default microphone and output (Telecom routes them); H.264 video, sent from the
 /// app's camera frames and received once Cisco's OpenH264 is installed for decoding. The trusted
 /// roster is refreshed through `jobs` when a device added during the call joins.
@@ -1443,11 +1464,7 @@ fn native_config(
   preparation: CallPreparation,
   jobs: &mpsc::UnboundedSender<Job>,
 ) -> Result<NativeCallConfig, TeamCraftError> {
-  let video_decoders = if openh264_library::is_available() {
-    vec![VideoCodec::H264]
-  } else {
-    Vec::new()
-  };
+  let video_decoders = phone_video_decoders(cfg!(target_os = "ios"), openh264_library::is_available());
   let engine = CallEngineConfig {
     user_id: preparation.user_id,
     device_id: preparation.device_id,
@@ -2116,6 +2133,45 @@ mod tests {
     video.set_listener(listener.clone());
     assert_eq!(*listener.tracks.lock().unwrap(), vec!["8".to_string()]);
     assert!(video.is_active());
+  }
+
+  #[test]
+  fn a_track_in_a_codec_the_phone_does_not_decode_is_not_playable() {
+    let mut video = EncodedVideoBridge::default();
+    let track = |stream: u32, codec: VideoCodec| VideoTrack {
+      stream_id: MediaStreamId(stream),
+      device_id: device(2),
+      kind: VideoTrackKind::Camera,
+      codec,
+      layers: Vec::new(),
+      maybe_publication_id: None,
+    };
+    video.report(
+      device(1),
+      &CallEngineEvent::VideoPublished(track(7, VideoCodec::H264)),
+    );
+    video.report(
+      device(1),
+      &CallEngineEvent::VideoPublished(track(8, VideoCodec::Av1)),
+    );
+    video.report(
+      device(1),
+      &CallEngineEvent::VideoPublished(track(9, VideoCodec::Vp9)),
+    );
+    let playable: Vec<_> = video
+      .remote_tracks
+      .iter()
+      .map(|track| (track.stream_id.as_str(), track.is_playable))
+      .collect();
+    assert_eq!(playable, vec![("7", true), ("8", false), ("9", false)]);
+  }
+
+  #[test]
+  fn the_phone_announces_the_h264_decoder_it_has() {
+    // iOS decodes with VideoToolbox; without an announced decoder the SFU refuses every track.
+    assert_eq!(phone_video_decoders(true, false), vec![VideoCodec::H264]);
+    assert_eq!(phone_video_decoders(false, true), vec![VideoCodec::H264]);
+    assert!(phone_video_decoders(false, false).is_empty());
   }
 
   #[test]
