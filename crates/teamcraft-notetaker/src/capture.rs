@@ -7,7 +7,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use teamcraft_media::audio_codec::{AudioChannels, OpusDecoder};
+use teamcraft_media::audio_codec::{AudioChannels, FRAME_SAMPLES_PER_CHANNEL, OpusDecoder};
+use teamcraft_media::audio_frame::opus_packet_samples;
 use teamcraft_media::rtp::SequenceNumber;
 use teamcraft_proto::DeviceId;
 use tracing::debug;
@@ -65,6 +66,9 @@ pub struct Segmenter {
 struct Speaker {
   decoder: OpusDecoder,
   maybe_last_sequence: Option<SequenceNumber>,
+  /// Samples of the last packet decoded: a lost one is concealed for as long (a voice on a thin
+  /// uplink sends 40 or 60 ms packets, #1893).
+  last_packet_samples: usize,
   segmenter: Segmenter,
 }
 
@@ -253,6 +257,7 @@ impl Speaker {
       Ok(decoder) => Some(Self {
         decoder,
         maybe_last_sequence: None,
+        last_packet_samples: FRAME_SAMPLES_PER_CHANNEL,
         segmenter: Segmenter::new(settings),
       }),
       Err(error) => {
@@ -274,8 +279,11 @@ impl Speaker {
       let missing = step - 1;
       if (1..=MAX_CONCEALED_FRAMES).contains(&missing) {
         for index in 0..missing {
-          let maybe_next = (index + 1 == missing).then_some(opus);
-          match self.decoder.conceal(maybe_next) {
+          // The next packet's in-band FEC only where it is as long as the lost one.
+          let maybe_next = (index + 1 == missing
+            && opus_packet_samples(opus) == Some(self.last_packet_samples))
+          .then_some(opus);
+          match self.decoder.conceal(maybe_next, self.last_packet_samples) {
             Ok(frame) => frames.push(frame),
             Err(error) => debug!(%error, "concealing a lost frame failed"),
           }
@@ -284,7 +292,12 @@ impl Speaker {
     }
     self.maybe_last_sequence = Some(sequence_number);
     match self.decoder.decode(opus) {
-      Ok(frame) => frames.push(frame),
+      Ok(frame) => {
+        if !frame.is_empty() {
+          self.last_packet_samples = frame.len();
+        }
+        frames.push(frame);
+      },
       Err(error) => debug!(%error, "a frame did not decode"),
     }
     frames
