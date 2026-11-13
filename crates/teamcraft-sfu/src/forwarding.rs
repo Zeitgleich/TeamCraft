@@ -58,6 +58,7 @@ use teamcraft_proto::{
   VideoTrack, VideoTrackKind,
 };
 use thiserror::Error;
+use tracing::debug;
 
 use crate::layers::{
   LayerAllocationConfig, LayerAllocator, ProbeRequest, TrackDemand, UpgradeProof, full_demand_bps,
@@ -69,6 +70,8 @@ use crate::speakers::{SpeakerSelectionConfig, SpeakerSelector};
 const MAX_VIDEO_TRACKS_PER_PARTICIPANT: usize = 4;
 /// The upswitch hold while a receiver's downlink estimate is in its fast start.
 const FAST_START_UPSWITCH_HOLD: Duration = Duration::from_millis(500);
+/// How often a receiver's layer allocation logs its inputs (debug).
+const ALLOCATION_LOG_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Routing state of one room.
 #[derive(Debug)]
@@ -199,6 +202,8 @@ struct ParticipantRoute {
   /// What its connection drains, where the transport measures that itself (the WebSocket
   /// fallback's pacing rate, #1810): its downlink is taken as no more than that.
   maybe_link_capacity_bps: Option<u32>,
+  /// When its allocation's inputs were last logged (at most once a second, debug).
+  maybe_allocation_logged_at: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -320,6 +325,7 @@ impl Forwarder {
       retransmit_budget: RetransmitBudget::default(),
       maybe_join_probe: self.new_join_probe(now),
       maybe_link_capacity_bps: None,
+      maybe_allocation_logged_at: None,
     };
     self.participants.insert(device_id, route);
   }
@@ -1213,7 +1219,9 @@ impl Forwarder {
     } else {
       self.config.layers
     };
-    let proof = if participant.has_feedback {
+    // A connection that measures what it drains proves an upgrade by draining it: probes over TCP
+    // would only queue behind the media.
+    let proof = if participant.has_feedback && participant.maybe_link_capacity_bps.is_none() {
       UpgradeProof::Shown {
         bps: participant.probe.shown_bps(&self.config.probe, now),
       }
@@ -1226,6 +1234,22 @@ impl Forwarder {
         .allocate_with_proof(&layers_config, estimate, proof, &demands, now);
     participant.maybe_probe_request = allocation.maybe_probe;
     let allocation = allocation.layers;
+    if participant
+      .maybe_allocation_logged_at
+      .is_none_or(|at| now.saturating_duration_since(at) >= ALLOCATION_LOG_INTERVAL)
+    {
+      participant.maybe_allocation_logged_at = Some(now);
+      debug!(
+        receiver = %receiver,
+        estimate_bps = participant.downlink.estimate_bps(),
+        maybe_link_capacity_bps = ?participant.maybe_link_capacity_bps,
+        sent_bps = participant.downlink.sent_bps(now),
+        shown_bps = ?proof,
+        demand_bps = ?maybe_demand,
+        layers = ?allocation.iter().map(|(stream, layer)| (stream.0, *layer)).collect::<Vec<_>>(),
+        "layer allocation"
+      );
+    }
 
     let stalled_after = self.config.layer_stalled_after;
     let mut effects = Vec::new();
@@ -1367,13 +1391,15 @@ impl Forwarder {
 }
 
 impl ParticipantRoute {
-  /// Its downlink as far as anything measured: the estimate from its feedback, within what its
-  /// connection drains.
+  /// Its downlink as far as anything measured: what its connection drains where the transport
+  /// measures that (the WebSocket fallback, #1810), else the estimate from its feedback. Over TCP
+  /// the feedback misleads (#1845): the fallback queue's drops look like loss and TCP's bursts like
+  /// a growing delay, and with the estimate as a second cap the layers stayed at the lowest one on
+  /// a link of several Mbit/s.
   fn downlink_bps(&self) -> u32 {
-    let estimate_bps = self.downlink.estimate_bps();
     self
       .maybe_link_capacity_bps
-      .map_or(estimate_bps, |capacity_bps| estimate_bps.min(capacity_bps))
+      .unwrap_or_else(|| self.downlink.estimate_bps())
   }
 }
 

@@ -43,8 +43,8 @@ use socket2::SockRef;
 use teamcraft_media::fallback_socket::{ControlFrames, FallbackSender, WriterConfig, WriterEnd, run_writer};
 use teamcraft_proto::{
   CALL_FALLBACK_PATH, CALL_FALLBACK_PROTOCOL, CallClientMessage, CallServerMessage, ErrorBody, ErrorCode,
-  FallbackFrame, MAX_FALLBACK_DATAGRAM_BYTES, SFU_GOING_AWAY_CLOSE_CODE, SFU_SWITCHED_CLOSE_CODE,
-  parse_offered_protocols,
+  FallbackFrame, MAX_FALLBACK_DATAGRAM_BYTES, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE,
+  SFU_SWITCHED_CLOSE_CODE, parse_offered_protocols,
 };
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
@@ -483,6 +483,10 @@ async fn report_link_capacity(session: &ParticipantSession, sender: &FallbackSen
   loop {
     interval.tick().await;
     session.set_link_capacity(sender.pacing_rate_bps());
+    // Video the queue dropped can't be shown until a keyframe (#1845).
+    for stream_id in sender.take_keyframe_needs() {
+      session.request_keyframe(MediaStreamId(stream_id.0));
+    }
   }
 }
 

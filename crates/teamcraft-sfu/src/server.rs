@@ -37,7 +37,7 @@ use teamcraft_media::dave::DaveEpoch;
 
 use teamcraft_media::quic_send::set_datagram_send_buffer;
 use teamcraft_proto::{
-  CallClientMessage, CallEvent, CallId, CallServerMessage, DeviceId, ErrorBody, ErrorCode,
+  CallClientMessage, CallEvent, CallId, CallServerMessage, DeviceId, ErrorBody, ErrorCode, MediaStreamId,
   SFU_GOING_AWAY_CLOSE_CODE, SFU_SWITCHED_CLOSE_CODE, SfuControlRequest, SfuRosterReport,
 };
 use thiserror::Error;
@@ -867,6 +867,14 @@ impl ParticipantSession {
           .try_send(Outgoing::Event(CallEvent::TransportFeedback { feedback }));
       }
     }
+  }
+
+  /// This session's receiver can't show `stream_id` until its next keyframe: its transport dropped
+  /// some of it (the fallback's queue, #1845).
+  pub(crate) fn request_keyframe(&self, stream_id: MediaStreamId) {
+    self
+      .room
+      .request_keyframe(self.grant.device_id, stream_id, Instant::now());
   }
 
   /// What this session's connection drains, if its transport measures that (#1810).

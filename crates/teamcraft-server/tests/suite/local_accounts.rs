@@ -192,10 +192,12 @@ mod sign_in {
       assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}: {reply}");
     }
 
+    // The very code sent again below is the replay, also when a new time step began meanwhile.
+    let code = code_at(&secret, 0);
     let (status, session) = public_post(
       &app,
       "/auth/local/login",
-      json!({"login": "Gus@Partner.test", "password": PASSWORD, "totp_code": code_at(&secret, 0)}),
+      json!({"login": "Gus@Partner.test", "password": PASSWORD, "totp_code": code}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{session}");
@@ -210,11 +212,11 @@ mod sign_in {
     let (_, conversations) = bearer(&app, reqwest::Method::GET, &access, "/conversations", None).await;
     assert_eq!(conversations["conversations"][0]["name"], "client");
 
-    // A code is accepted once: the same one again (same time step) is a replay.
+    // A code is accepted once: the same one again is a replay.
     let (status, _) = public_post(
       &app,
       "/auth/local/login",
-      json!({"login": "gus@partner.test", "password": PASSWORD, "totp_code": code_at(&secret, 0)}),
+      json!({"login": "gus@partner.test", "password": PASSWORD, "totp_code": code}),
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "replayed code");

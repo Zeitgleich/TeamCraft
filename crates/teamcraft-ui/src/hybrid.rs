@@ -838,6 +838,14 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.files_page(query)
   }
 
+  fn conversation_files_page(
+    &self,
+    conversation: ConversationId,
+    limit: usize,
+  ) -> Option<teamcraft_client_api::files_query::FilesPage> {
+    self.chat.conversation_files_page(conversation, limit)
+  }
+
   fn conversation_media(
     &self,
     conversation: ConversationId,
