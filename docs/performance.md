@@ -2738,11 +2738,13 @@ the chunks that load later. The limit:
 
 | Limit                                | Value        | Above it                         |
 |--------------------------------------|--------------|----------------------------------|
-| A guest in a meeting: gzip -9 total  | 6,440,000 B  | fails; warns from 95 % (6.12 MB) |
-| Signed-in first visit: gzip -9 total | 5,610,000 B  | fails; warns from 95 % (5.33 MB) |
+| A guest in a meeting: gzip -9 total  | 6,370,000 B  | fails; warns from 95 % (6.05 MB) |
+| Signed-in first visit: gzip -9 total | 5,590,000 B  | fails; warns from 95 % (5.31 MB) |
 | The call module: gzip -9             | 1,100,000 B  | fails                            |
 
-Both budgets are the sizes of #1699 below plus about 5 % since 2026-11-11. From 2026-11-10 they
+Both budgets are the sizes of #1699 below plus about 5 %, lowered on 2026-11-13 by what #1462 took
+out (what only a member's page asks for and the desktop app's chrome, below): 6.44 and 5.61 MB
+before. They were set on 2026-11-11. From 2026-11-10 they
 were 10 MB: new features (polls #1689, the local search index #1693) had pushed a signed-in first
 visit to 5.39 MB (CI, PR #1692), over its 5.37 MB budget, and a guest's meeting to 6.17 MB of
 6.18 MB; by #1699 they had grown on to 5.56 and 6.33 MB. Before that they were the sizes of #1462 below plus about 6 % for a signed-in first visit and about 5 %
@@ -2764,6 +2766,63 @@ The call module's budget was 1,000,000 B (0.86 MB with the effects' compositors,
 15 %) until the call problem reports (#1762, 2026-11-12) took the module to 1.02 MB; it is
 1,100,000 B since, a decision of the maintainer: the reports pay for themselves in field bugs found
 without asking anybody for logs.
+
+#### What only a member's page asks for, out of a guest's meeting (#1462, 2026-11-13)
+
+What is left of #1462's list after the console's texts and the upkeep's member rounds (both below),
+ranked with `twiggy dominators` over the app's wasm before the split and wasm-opt
+(`teamcraft-ui.wasm`, which the release build links with names). The largest part a guest's meeting
+still carried for nothing was the engine's command dispatch for what only a member's places send:
+`run_shared`, 0.2 MB before wasm-opt with what it alone uses, most of it inlined.
+
+- **What only a member's page asks for** (`CommandPart::Member`): the status and favorites,
+  scheduled messages, saved searches, the directory and call history, the privacy setting's
+  refresh, a direct message's retried setup, and a host's side of meetings (setting up and updating
+  their chats, the lobby, letting people and guests in, the guest link and key code, the hosts,
+  "add to call" and accepting a moved call). They run in the signed-in app's module
+  (`areas::member_command`, in `session`), which a member's page has from the start. None of the
+  places that send them is a guest's; a guest who sent one would load that module for it.
+- **The security settings' devices and the last-seen choice** (`CommandPart::Settings`) run in
+  `settings`, the share links (`CommandPart::Dialogs`: making one, with its password's key
+  derivation, listing and revoking them) in `dialogs`, next to the views that ask for them.
+  Natively nothing changed: `run_ui_command` runs every part.
+- **The desktop app's window controls and its question about links from outside** are a module of
+  their own (`desktop`, `areas::desktop_only`), which a browser never fetches: the controls, the
+  prompt, and taking the links from the shell (`AppLinks::listen`). In the desktop app they show once
+  the module is there, without a placeholder; the shell serves it from the disk.
+
+Release `trunk build` on macOS (trunk 0.22.0, wasm-opt 131, the CI job's commands), gzip -9:
+
+| Download                                      | Before      | After       | Delta      |
+|-----------------------------------------------|-------------|-------------|------------|
+| A guest in a meeting (lobby, meeting, calls)  | 6,207,138 B | 6,133,396 B | −73,742 B  |
+| Signed-in first visit                         | 5,562,964 B | 5,545,503 B | −17,461 B  |
+| The app (in both)                             | 3,034,165 B | 2,946,929 B | −87,236 B  |
+| Signed-in app (pack)                          | 2,032,067 B | 2,101,842 B | +69,775 B  |
+| `desktop` (the desktop app only)              | –           | 17,759 B    |            |
+
+The service worker (428,673 B) and the texts (68,059 B) did not change. A guest's meeting gains less
+than the app loses: some of what left the app went into the chunks the meeting's modules import.
+Measured before the upkeep's member rounds (below) were on `main`, on `main` 85f21dab with this
+change; they move other code, and the two add up.
+
+Both budgets are lowered by these gains (above): 6,370,000 and 5,590,000 B.
+
+Measured and left (#1909):
+
+- **The service worker's REST client** (`reqwest`, `http`'s header table, `url`; about 70 kB of its
+  code before wasm-opt, an estimated 20 to 25 kB gzip): a `fetch` of its own needs a second DPoP flow
+  beside `HttpServerApi` (the answer's nonce and clock, one retry, no redirects with a proof,
+  TLS-only base URLs, the error bodies). Not worth that risk for its size on its own; if it is taken
+  up, then with a test against the fake server's DPoP checks.
+- **Device linking and approvals** (`link_task` 10 kB before wasm-opt; the approver's side is
+  inlined into the core's request loop): a page that was linking resumes it at start
+  (`PendingEnrollment::resume_link`), so the new device's side stays; the approver's side would need
+  a split point per step of the loop, for little.
+- **The guest's join page** (about 50 kB before wasm-opt) out of a member's app: `init.js` would
+  have to fetch its chunk on a meeting link next to the app, so a guest doesn't wait for a round
+  trip before the name form; only a signed-in first visit gains.
+- **The share inbox** is not desktop-only, as #1462 had it: the browser's share target uses it too.
 
 #### The upkeep's member-only rounds out of a guest's meeting (2026-11-13)
 
