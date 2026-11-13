@@ -95,6 +95,8 @@ final class NotificationService: UNNotificationServiceExtension {
       return builder.callAlert(for: notification, base: original)
     case .meeting:
       return builder.meeting(for: notification, base: original)
+    case .meetingHost:
+      return builder.meetingHost(for: notification, base: original)
     case .test:
       return builder.test(for: notification, base: original)
     case .drop:

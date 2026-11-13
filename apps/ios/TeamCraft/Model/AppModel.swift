@@ -1203,7 +1203,7 @@ final class AppModel {
       // what that means.
       ScheduledSealTask.schedule()
       return .failed
-    case .message, .call, .meetingReminder, .meetingStart, .test, .unknown:
+    case .message, .call, .meetingReminder, .meetingStart, .meetingCoHost, .meetingHandover, .test, .unknown:
       // Not sent as background pushes; only the badge is taken.
       await DeliveredNotifications.setBadge(notification.maybeBadge)
       return .noData
@@ -1314,6 +1314,8 @@ final class AppModel {
       maybeContent = builder.test(for: notification, base: base)
     case .meeting:
       maybeContent = builder.meeting(for: notification, base: base)
+    case .meetingHost:
+      maybeContent = builder.meetingHost(for: notification, base: base)
     case .callKit, .callAlert:
       // The open app rings through the gateway (`onIncomingCall`); nothing to add.
       maybeContent = nil

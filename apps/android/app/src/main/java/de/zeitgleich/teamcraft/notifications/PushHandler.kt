@@ -73,6 +73,7 @@ class PushHandler(
       )
       is PushDecision.ShowTest -> notifier.showTest(decision.maybeSentAtMs)
       is PushDecision.ShowMeeting -> notifier.showMeeting(decision.notification)
+      is PushDecision.ShowMeetingHost -> notifier.showMeetingHost(decision.notification)
     }
     handled.update { it + 1 }
   }

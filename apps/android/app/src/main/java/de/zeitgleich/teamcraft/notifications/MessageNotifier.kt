@@ -529,6 +529,31 @@ class MessageNotifier(
     postSafely(MEETING_TAG_PREFIX + (notification.maybeMeetingId ?: conversationId), MEETING_ID, builder.build())
   }
 
+  /**
+   * The user now co-hosts a meeting, or organizes it after a handover (#1720): the meetings channel,
+   * one per meeting, no Join (it may be days away). A tap opens the meeting chat.
+   */
+  fun showMeetingHost(notification: PushNotification) {
+    if (!canPost()) return
+    val isHandover = notification.kind == PushNotificationKind.MEETING_HANDOVER
+    val name = notification.maybeConversationName?.takeIf { it.isNotBlank() }
+    val title = when {
+      isHandover && name != null -> context.getString(R.string.meeting_notification_handover, name)
+      isHandover -> context.getString(R.string.meeting_notification_handover_unnamed)
+      name != null -> context.getString(R.string.meeting_notification_co_host, name)
+      else -> context.getString(R.string.meeting_notification_co_host_unnamed)
+    }
+    val conversationId = notification.conversationId
+    val built = NotificationCompat.Builder(context, NotificationChannels.MEETINGS)
+      .setSmallIcon(R.drawable.ic_notification)
+      .setContentTitle(title)
+      .setCategory(NotificationCompat.CATEGORY_EVENT)
+      .setAutoCancel(true)
+      .setContentIntent(openIntent(conversationId))
+      .build()
+    postSafely(MEETING_HOST_TAG_PREFIX + (notification.maybeMeetingId ?: conversationId), MEETING_ID, built)
+  }
+
   /** A meeting's notice was dealt with on another device (a `dismiss` wake-up): takes it down. */
   fun removeMeeting(meetingId: String) {
     manager.cancel(MEETING_TAG_PREFIX + meetingId, MEETING_ID)
@@ -1003,6 +1028,7 @@ class MessageNotifier(
     private const val OTHER_ID = 3
     private const val MEETING_ID = 5
     private const val MEETING_TAG_PREFIX = "meeting:"
+    private const val MEETING_HOST_TAG_PREFIX = "meeting-host:"
     /** The notice of a started meeting goes away by itself if nobody reacted to it. */
     private const val MEETING_START_TIMEOUT_MS = 60 * 60_000L
     private const val TEST_TAG = "test"

@@ -163,7 +163,14 @@ pub async fn push_preview<A: ServerApi>(
       // A ring names no message; answering joins that conversation's call, which the server controls
       // anyway. It counts as verified when this device knows the conversation as one it is in, so the
       // apps offer answer and decline (Join for a meeting's notice).
-      (PushKind::Call | PushKind::MeetingReminder | PushKind::MeetingStart, _) => (
+      (
+        PushKind::Call
+        | PushKind::MeetingReminder
+        | PushKind::MeetingStart
+        | PushKind::MeetingCoHost
+        | PushKind::MeetingHandover,
+        _,
+      ) => (
         Ok(PreviewContent::Unavailable),
         false,
         maybe_conversation
@@ -216,8 +223,13 @@ pub fn save_device_push_content(store: &impl LocalStore, mode: &PushContentMode)
   records::put_json(store, Table::Account, DEVICE_PUSH_CONTENT_RECORD, mode)
 }
 
+/// A wake-up about a meeting: its reminder or start notice, or the user's new part in it (#1720).
+/// The device names it from the meeting chat, fetched if it doesn't know it yet.
 fn is_meeting_notice(wake_up: &PushWakeUp) -> bool {
-  matches!(wake_up.kind, PushKind::MeetingReminder | PushKind::MeetingStart)
+  matches!(
+    wake_up.kind,
+    PushKind::MeetingReminder | PushKind::MeetingStart | PushKind::MeetingCoHost | PushKind::MeetingHandover
+  )
 }
 
 fn is_message(wake_up: &PushWakeUp) -> bool {

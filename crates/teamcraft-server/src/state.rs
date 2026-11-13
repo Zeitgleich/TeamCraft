@@ -313,7 +313,10 @@ impl PushTtls {
       PushKind::Call => self.call,
       PushKind::Dismiss | PushKind::ScheduledSeal | PushKind::Sync => self.dismiss,
       PushKind::Test => self.test,
-      PushKind::MeetingReminder | PushKind::MeetingStart => self.meeting,
+      PushKind::MeetingReminder
+      | PushKind::MeetingStart
+      | PushKind::MeetingCoHost
+      | PushKind::MeetingHandover => self.meeting,
       PushKind::Message | PushKind::Mention | PushKind::Unknown(_) => self.message,
     }
   }

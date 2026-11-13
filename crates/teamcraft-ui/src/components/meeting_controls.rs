@@ -234,6 +234,39 @@ pub fn handover_offer(
   })
 }
 
+/// The other people in the call of `conversation` who could take the meeting over: no guests, no
+/// bots, not `me`.
+pub fn handover_candidates(
+  state: crate::state::AppState,
+  conversation: ConversationId,
+  me: UserId,
+) -> Vec<crate::model::User> {
+  state.read(|backend| {
+    backend
+      .call_participants(conversation)
+      .into_iter()
+      .filter_map(|participant| backend.user(participant.user))
+      .filter(|user| !user.is_guest && !user.is_bot && user.id != me)
+      .collect()
+  })
+}
+
+/// Leaves the call of `conversation`, or asks the organizer whom to hand the meeting over to first
+/// (into `prompt`) when people wait in its lobby and nobody else hosts it.
+pub fn leave_or_ask(
+  state: crate::state::AppState,
+  maybe_hub: Option<MeetingsHub>,
+  conversation: ConversationId,
+  prompt: RwSignal<Option<HandoverOffer>>,
+) {
+  let me = state.me().id;
+  let candidates = handover_candidates(state, conversation, me);
+  match maybe_hub.and_then(|hub| handover_offer(hub, conversation, me, candidates)) {
+    Some(offer) => prompt.set(Some(offer)),
+    None => state.call.leave(),
+  }
+}
+
 /// Asks the organizer who leaves with people waiting whom to hand the meeting to: each choice
 /// signs the handover (the organizer stays co-host) and leaves; "Leave anyway" just leaves.
 #[component]

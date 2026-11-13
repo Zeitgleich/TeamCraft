@@ -61,6 +61,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
@@ -329,6 +330,8 @@ internal class CallUiActions(
   val maybeOnShareScreen: (() -> Unit)? = null,
   /** "Stop sharing" in the menu and on the sharing bar. */
   val onStopScreenShare: () -> Unit = {},
+  /** "People" in the menu of a meeting's call: who is in it and who hosts (#1720). */
+  val maybeOnShowPeople: (() -> Unit)? = null,
 )
 
 /** The room the header and the bottom (notices and controls) take, so the stage keeps clear of them. */
@@ -1170,6 +1173,9 @@ private fun menuEntries(isDeafened: Boolean, isSharingScreen: Boolean, actions: 
       icon = if (isDeafened) CallIcons.Headset else CallIcons.HeadsetOff,
     ) { actions.onDeafen(!isDeafened) },
   )
+  actions.maybeOnShowPeople?.let { onShowPeople ->
+    add(MenuEntry(stringResource(R.string.call_people), Icons.Filled.Person, onClick = onShowPeople))
+  }
   actions.maybeOnAddPeople?.let { onAddPeople ->
     add(MenuEntry(stringResource(R.string.call_add_people), CallIcons.PersonAdd, onClick = onAddPeople))
   }

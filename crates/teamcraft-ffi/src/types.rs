@@ -591,6 +591,11 @@ pub enum PushNotificationKind {
   MeetingReminder,
   /// A planned meeting has started: a normal notification with Join, on the meetings channel.
   MeetingStart,
+  /// The organizer named the user a co-host of the meeting whose chat is the conversation (#1720):
+  /// a normal notification on the meetings channel, no Join.
+  MeetingCoHost,
+  /// The meeting whose chat is the conversation was handed over to the user (#1720).
+  MeetingHandover,
   /// Remove what was shown: the conversation (or thread) up to `maybe_message_id` was read on
   /// another device, or, with `maybe_call_id`, the ring ended. Never shows anything.
   Dismiss,
@@ -1116,6 +1121,8 @@ pub(crate) fn notification_kind(kind: &PushKind) -> PushNotificationKind {
     PushKind::Call => PushNotificationKind::Call,
     PushKind::MeetingReminder => PushNotificationKind::MeetingReminder,
     PushKind::MeetingStart => PushNotificationKind::MeetingStart,
+    PushKind::MeetingCoHost => PushNotificationKind::MeetingCoHost,
+    PushKind::MeetingHandover => PushNotificationKind::MeetingHandover,
     PushKind::Dismiss => PushNotificationKind::Dismiss,
     PushKind::ScheduledSeal => PushNotificationKind::ScheduledSeal,
     PushKind::Sync => PushNotificationKind::Sync,

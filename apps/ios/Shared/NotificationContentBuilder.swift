@@ -110,6 +110,32 @@ struct NotificationContentBuilder {
     return content
   }
 
+  /// The user now co-hosts a meeting, or organizes it after a handover (#1720): named from the
+  /// meeting chat, no Join (the meeting may be days away). Its own thread, so a withdrawn meeting
+  /// notice doesn't take it along; a tap opens the meeting chat.
+  func meetingHost(for notification: PushNotification, base: UNNotificationContent) -> UNMutableNotificationContent {
+    let name = Self.nonBlank(notification.maybeConversationName)
+    let isHandover = notification.kind == .meetingHandover
+    let content = Self.mutable(base)
+    content.title =
+      switch (isHandover, name) {
+      case (true, let name?): strings.meetingHandover(name)
+      case (true, nil): strings.meetingHandoverUnnamed
+      case (false, let name?): strings.meetingCoHost(name)
+      case (false, nil): strings.meetingCoHostUnnamed
+      }
+    content.subtitle = ""
+    content.body = ""
+    content.threadIdentifier = "meeting-host-\(notification.maybeMeetingId ?? notification.conversationId)"
+    content.targetContentIdentifier = notification.conversationId
+    let tag = NotificationAuthenticator().tag(for: notification.conversationId)
+    content.userInfo = NotificationKeys.userInfo(
+      kind: NotificationKeys.meetingKind, conversationId: notification.conversationId, maybeTag: tag)
+    content.categoryIdentifier = ""
+    Self.apply(.meetingHost, flags: PushFlags(notification), to: content)
+    return content
+  }
+
   /// The diagnostics' test push arrived and was opened end to end.
   func test(for notification: PushNotification, base: UNNotificationContent) -> UNMutableNotificationContent {
     let content = Self.mutable(base)
@@ -149,7 +175,7 @@ struct NotificationContentBuilder {
       content.sound = .defaultRingtone
       content.interruptionLevel = .timeSensitive
       content.relevanceScore = 1
-    case .meeting:
+    case .meeting, .meetingHost:
       // A normal notification with the normal sound: no ringtone, no call screen.
       content.sound = .default
       content.interruptionLevel = .active
@@ -242,6 +268,11 @@ struct NotificationStrings {
   let meetingSoonUnnamed: (Int) -> String
   let testBody: String
   let quietUpdate: String
+  /// The news of a new part in a meeting (#1720); English unless set (the tests leave them).
+  var meetingCoHost: (String) -> String = { "You are now a co-host of \($0)" }
+  var meetingCoHostUnnamed = "You are now a co-host of a meeting"
+  var meetingHandover: (String) -> String = { "\($0) was handed over to you" }
+  var meetingHandoverUnnamed = "A meeting was handed over to you"
 
   static var localized: NotificationStrings {
     NotificationStrings(
@@ -266,6 +297,10 @@ struct NotificationStrings {
       meetingSoon: { String(localized: "notification_meeting_soon \($0) \($1)") },
       meetingSoonUnnamed: { String(localized: "notification_meeting_soon_unnamed \($0)") },
       testBody: String(localized: "notification_test_body"),
-      quietUpdate: String(localized: "notification_quiet_update"))
+      quietUpdate: String(localized: "notification_quiet_update"),
+      meetingCoHost: { String(localized: "notification_meeting_co_host \($0)") },
+      meetingCoHostUnnamed: String(localized: "notification_meeting_co_host_unnamed"),
+      meetingHandover: { String(localized: "notification_meeting_handover \($0)") },
+      meetingHandoverUnnamed: String(localized: "notification_meeting_handover_unnamed"))
   }
 }

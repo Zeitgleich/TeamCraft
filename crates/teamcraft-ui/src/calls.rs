@@ -329,6 +329,9 @@ pub struct CallState {
   /// The tray's "End for everyone…" (#1293): the host controls of the call screen open with the
   /// ending waiting to be confirmed; they reset it.
   pub is_end_for_everyone_asked: RwSignal<bool>,
+  /// The tray's "Leave call…" (#1720): the call screen leaves as its Leave button does, asking the
+  /// organizer whom to hand the meeting over to first; it resets it.
+  pub is_leave_asked: RwSignal<bool>,
   /// When this device entered the call (wall clock), the start of [`CallState::elapsed_ms`]: when
   /// this page joined, or for a call it resumed, when the media layer says the device joined.
   joined_at: StoredValue<Option<TimestampMs>>,
@@ -378,6 +381,7 @@ impl CallState {
       maybe_quality_menu: RwSignal::new(None),
       elapsed_ms: RwSignal::new(None),
       is_end_for_everyone_asked: RwSignal::new(false),
+      is_leave_asked: RwSignal::new(false),
       joined_at: StoredValue::new(None),
       sent_camera: StoredValue::new(String::new()),
       sent_microphone: StoredValue::new(String::new()),
@@ -653,6 +657,7 @@ impl CallState {
     self.joined_at.set_value(None);
     self.elapsed_ms.set(None);
     self.is_end_for_everyone_asked.set(false);
+    self.is_leave_asked.set(false);
     if was_active {
       self.emit(CallEvent::Leave);
     }

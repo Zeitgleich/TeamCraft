@@ -40,6 +40,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -86,6 +87,9 @@ import de.zeitgleich.teamcraft.core.ChatClient
 import de.zeitgleich.teamcraft.notifications.MeetingNoticeReport
 import uniffi.teamcraft_ffi.CallPhase
 import uniffi.teamcraft_ffi.CallStateInfo
+import uniffi.teamcraft_ffi.MeetingHostAction
+import uniffi.teamcraft_ffi.MeetingHosts
+import uniffi.teamcraft_ffi.MeetingPart
 import uniffi.teamcraft_ffi.NotetakerCallInfo
 import uniffi.teamcraft_ffi.NotetakerRefusal
 import uniffi.teamcraft_ffi.newRequestKey
@@ -380,6 +384,50 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
     ?.takeIf { maybeState?.phase == CallPhase.CONNECTED }
     ?.let(::notetakerRefusalText)
 
+  // Who hosts the meeting of this call (#1720), read again on every change of the store and once
+  // a change of the hosts was answered: the "People" sheet with its badges and the organizer's
+  // menu, and the question whom to hand the meeting to before leaving.
+  val hostChanges by calls.hosts.changes.collectAsStateWithLifecycle()
+  val hostAnswers by calls.hosts.answers.collectAsStateWithLifecycle()
+  val maybeHosts by produceState<MeetingHosts?>(null, maybeConversationId, hostChanges, hostAnswers) {
+    value = maybeConversationId?.let { calls.hosts.hosts(it) }
+  }
+  val maybeHostStatus by produceState<HostChangeStatus?>(null, maybeConversationId, hostChanges, hostAnswers) {
+    value = maybeConversationId?.let { calls.hosts.changeStatus(it) }
+  }
+  val canHostIds by produceState(emptySet<String>(), participantIds) {
+    value = calls.hosts.candidates(participantIds).map { it.id }.toSet()
+  }
+  var isShowingPeople by rememberSaveable { mutableStateOf(false) }
+  var maybeLeaveOffer by remember { mutableStateOf<LeaveOffer?>(null) }
+  val hostScope = rememberCoroutineScope()
+  val hosts = maybeHosts
+  if (isShowingPeople && hosts != null && maybeConversationId != null) {
+    val conversationId = maybeConversationId
+    CallPeopleSheet(
+      hosts = hosts,
+      people = participantIds.map { id -> CallPerson(id, names[id].orEmpty(), id in canHostIds) },
+      maybeStatus = maybeHostStatus,
+      onChange = { userId, action -> calls.hosts.change(conversationId, userId, action) },
+      onDismiss = { isShowingPeople = false },
+    )
+  }
+  maybeLeaveOffer?.let { offer ->
+    LeavePromptDialog(
+      offer = offer,
+      onHandOver = { user ->
+        maybeLeaveOffer = null
+        maybeConversationId?.let { calls.hosts.change(it, user.id, MeetingHostAction.HAND_OVER) }
+        calls.hangUp()
+      },
+      onLeave = {
+        maybeLeaveOffer = null
+        calls.hangUp()
+      },
+      onStay = { maybeLeaveOffer = null },
+    )
+  }
+
   val isConnected = maybeState?.phase == CallPhase.CONNECTED
   var maybeStartedAt by remember { mutableStateOf<Long?>(null) }
   var maybeElapsed by remember { mutableStateOf<Long?>(null) }
@@ -445,7 +493,19 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
         { maybeConversationId?.let { calls.moves.addNotetaker(it, notetaker, notetakerRoomTitle, notetakerKey) } }
       },
       maybeNotetakerRefusal = maybeNotetakerRefusal,
-      onHangUp = { calls.hangUp() },
+      onHangUp = {
+        // The organizer leaving with people in the lobby and nobody else to let them in is asked
+        // to hand the meeting over first (#1720), as on desktop and web.
+        val conversationId = maybeConversationId
+        if (hosts?.ownPart != MeetingPart.ORGANIZER || conversationId == null) {
+          calls.hangUp()
+        } else {
+          hostScope.launch {
+            val maybeOffer = calls.hosts.leaveOffer(hosts, conversationId, participantIds)
+            if (maybeOffer == null) calls.hangUp() else maybeLeaveOffer = maybeOffer
+          }
+        }
+      },
       onRetryEncryption = { calls.retryEncryption() },
       maybeOnShareScreen = if (isConnected && screenShareStatus == ScreenShareStatus.Off) {
         {
@@ -458,6 +518,7 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
         null
       },
       onStopScreenShare = { calls.stopScreenShare() },
+      maybeOnShowPeople = if (hosts != null) ({ isShowingPeople = true }) else null,
     ),
     banner = {
       Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {

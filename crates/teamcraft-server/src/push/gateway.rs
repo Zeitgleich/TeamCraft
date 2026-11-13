@@ -88,7 +88,10 @@ struct GatewayInfoKinds {
 /// priority); the real kind is in the sealed wake-up, so a gateway from before them delivers them too.
 fn gateway_kind(kind: &PushKind) -> PushKind {
   match kind {
-    PushKind::MeetingReminder | PushKind::MeetingStart => PushKind::Message,
+    PushKind::MeetingReminder
+    | PushKind::MeetingStart
+    | PushKind::MeetingCoHost
+    | PushKind::MeetingHandover => PushKind::Message,
     other => other.clone(),
   }
 }

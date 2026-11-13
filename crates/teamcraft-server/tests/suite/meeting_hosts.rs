@@ -6,7 +6,8 @@
 
 use crate::common;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -17,12 +18,17 @@ use serde_json::{Value, json};
 use teamcraft_crypto::identity::IdentityKeyPair;
 use teamcraft_crypto::ids::{ConversationId, MeetingId, UserId};
 use teamcraft_crypto::meeting_hosts::{Host, HostsDraft};
+use teamcraft_proto::{PushKind, PushProvider, PushWakeUp};
+use teamcraft_server::auth::BoxFuture;
 use teamcraft_server::config::{MailTexts, MeetingsConfig};
+use teamcraft_server::push::crypto::open_wakeup;
+use teamcraft_server::push::{PushDispatcher, PushError, PushMessage, PushSender, PushTarget};
 use teamcraft_server::testing::{FakeCalendar, FakeMailer, TestApp, TestUser};
 
 const BASE_URL: &str = "https://chat.example.com";
 const STARTS_AT: i64 = 1_893_488_400_000;
 const ENDS_AT: i64 = STARTS_AT + 3_600_000;
+const PUSH_KEY_BYTES: [u8; 32] = [9; 32];
 
 struct Rig {
   app: TestApp,
@@ -31,7 +37,18 @@ struct Rig {
 }
 
 async fn start() -> Option<Rig> {
-  let config = MeetingsConfig {
+  let calendar = Arc::new(FakeCalendar::default());
+  let mailer = Arc::new(FakeMailer::default());
+  let app = TestApp::start_with_meetings(&config(), calendar.clone(), mailer.clone()).await?;
+  Some(Rig {
+    app,
+    calendar,
+    mailer,
+  })
+}
+
+fn config() -> MeetingsConfig {
+  MeetingsConfig {
     public_base_url: BASE_URL.into(),
     organizer_fallback_address: "meetings@example.com".into(),
     caldav: None,
@@ -43,15 +60,7 @@ async fn start() -> Option<Rig> {
     maybe_inbox_token: None,
     smtp: None,
     mail_texts: MailTexts::default(),
-  };
-  let calendar = Arc::new(FakeCalendar::default());
-  let mailer = Arc::new(FakeMailer::default());
-  let app = TestApp::start_with_meetings(&config, calendar.clone(), mailer.clone()).await?;
-  Some(Rig {
-    app,
-    calendar,
-    mailer,
-  })
+  }
 }
 
 macro_rules! rig {
@@ -392,6 +401,98 @@ async fn a_handover_makes_the_new_organizer_and_keeps_the_former_as_co_host() {
   rig.app.stop().await;
 }
 
+#[tokio::test]
+async fn new_hosts_hear_of_it_by_push_and_the_organizer_does_not() {
+  let recorder = Recorder::default();
+  let Some(app) = TestApp::start_with_meetings_and_push(
+    &config(),
+    Arc::new(FakeCalendar::default()),
+    Arc::new(FakeMailer::default()),
+    PushDispatcher::new(8).with_sender(&PushProvider::Fcm, Arc::new(recorder.clone())),
+  )
+  .await
+  else {
+    return;
+  };
+  let rig = Rig {
+    app,
+    calendar: Arc::new(FakeCalendar::default()),
+    mailer: Arc::new(FakeMailer::default()),
+  };
+  let meeting = rig.meeting().await;
+  let (alice, bob, carol) = (&meeting.alice, &meeting.bob, &meeting.carol);
+  let alice_phone = phone(&rig.app, &alice.user).await;
+  let bob_phone = phone(&rig.app, &bob.user).await;
+  let carol_phone = phone(&rig.app, &carol.user).await;
+  let path = format!("/conversations/{}/meeting-hosts", meeting.chat);
+
+  let named = signed(&meeting, alice, alice, &[carol], 1);
+  let put = rig.app.put(&alice.user, &path, json!({"statement": named})).await;
+  assert_eq!(put.status, StatusCode::NO_CONTENT, "{}", put.body);
+  let pushes = recorder.taken().await;
+  assert_eq!(
+    kinds(&pushes),
+    [(carol_phone.clone(), PushKind::MeetingCoHost)],
+    "the new co-host only"
+  );
+  let (_, wake_up) = &pushes[0];
+  assert_eq!(wake_up.conversation_id.to_string(), meeting.chat);
+  assert_eq!(
+    wake_up.maybe_meeting.map(|notice| notice.meeting_id.to_string()),
+    Some(meeting.id.clone())
+  );
+  assert_eq!(wake_up.maybe_message_id, None, "no text, no message");
+
+  // The same co-host again: nothing new to tell.
+  let again = signed(&meeting, alice, alice, &[carol], 2);
+  rig.app.put(&alice.user, &path, json!({"statement": again})).await;
+  assert!(recorder.taken().await.is_empty());
+
+  // A handover: the new organizer hears of it; the former one, now co-host, made it.
+  let handover = signed(&meeting, alice, bob, &[alice, carol], 3);
+  let put = rig
+    .app
+    .put(&alice.user, &path, json!({"statement": handover}))
+    .await;
+  assert_eq!(put.status, StatusCode::NO_CONTENT, "{}", put.body);
+  let kinds = kinds(&recorder.taken().await);
+  assert_eq!(kinds, [(bob_phone, PushKind::MeetingHandover)]);
+  assert!(!kinds.iter().any(|(device, _)| *device == alice_phone));
+  rig.app.stop().await;
+}
+
+/// Records the wake-ups the server sends, opened.
+#[derive(Clone, Default)]
+struct Recorder {
+  seen: Arc<Mutex<Vec<(String, PushWakeUp)>>>,
+}
+
+impl PushSender for Recorder {
+  fn send<'a>(
+    &'a self,
+    target: &'a PushTarget,
+    message: &'a PushMessage,
+  ) -> BoxFuture<'a, Result<(), PushError>> {
+    Box::pin(async move {
+      let wake_up = open_wakeup(&target.push_key, &message.sealed)?;
+      self
+        .seen
+        .lock()
+        .unwrap()
+        .push((target.device.to_string(), wake_up));
+      Ok(())
+    })
+  }
+}
+
+impl Recorder {
+  /// The pushes that arrived so far, after a moment for the ones on their way.
+  async fn taken(&self) -> Vec<(String, PushWakeUp)> {
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    std::mem::take(&mut *self.seen.lock().unwrap())
+  }
+}
+
 impl Rig {
   /// Alice schedules a meeting with Bob and Carol.
   async fn meeting(&self) -> Meeting {
@@ -491,6 +592,28 @@ impl Rig {
       .and_then(|value| value.trim().parse().ok())
       .unwrap_or(0)
   }
+}
+
+async fn phone(app: &TestApp, user: &TestUser) -> String {
+  let device = register_device(app, user).await;
+  let reply = app
+    .put(
+      user,
+      &format!("/devices/{device}/push"),
+      json!({"provider": "fcm", "token": "t", "push_key": STANDARD.encode(PUSH_KEY_BYTES)}),
+    )
+    .await;
+  assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
+  device
+}
+
+fn kinds(pushes: &[(String, PushWakeUp)]) -> Vec<(String, PushKind)> {
+  let mut kinds: Vec<_> = pushes
+    .iter()
+    .map(|(device, wake_up)| (device.clone(), wake_up.kind.clone()))
+    .collect();
+  kinds.sort_by(|a, b| a.0.cmp(&b.0));
+  kinds
 }
 
 /// A host list for the meeting, signed by `signer`'s key as `signer`, naming `organizer` and the

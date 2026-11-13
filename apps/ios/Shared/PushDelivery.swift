@@ -17,6 +17,9 @@ enum PushPresentation: Equatable {
   case callAlert
   /// A planned meeting's reminder or start notice: a normal notification with Join, no ring.
   case meeting
+  /// The user was made a co-host of a meeting, or it was handed over to them (#1720): a normal
+  /// notification without Join.
+  case meetingHost
   /// The diagnostics' test push: a short confirmation.
   case test
   /// Nothing; only possible with the filtering entitlement (an empty content is dropped).
@@ -36,6 +39,9 @@ enum PushPresentation: Equatable {
     case .meetingReminder, .meetingStart:
       if flags.maybeSuppression != nil { return canFilter ? .drop : .quietGeneric }
       return .meeting
+    case .meetingCoHost, .meetingHandover:
+      if flags.maybeSuppression != nil { return canFilter ? .drop : .quietGeneric }
+      return .meetingHost
     case .test:
       return .test
     case .dismiss, .scheduledSeal, .sync, .unknown:

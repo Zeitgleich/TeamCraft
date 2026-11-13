@@ -164,6 +164,17 @@ class PushDecisionTest {
     }
   }
 
+  /** The news of a new part in a meeting shows unless muted (#1720). */
+  @Test
+  fun aNewHostHearsOfIt() {
+    for (kind in listOf(PushNotificationKind.MEETING_CO_HOST, PushNotificationKind.MEETING_HANDOVER)) {
+      val wakeUp = push(kind, maybeMessageId = null)
+      assertEquals(PushDecision.ShowMeetingHost(wakeUp), PushDecision.of(wakeUp))
+      val muted = wakeUp.copy(maybeSuppression = NotificationSuppression.MUTED)
+      assertEquals(PushDecision.Ignore(IgnoreReason.SUPPRESSED), PushDecision.of(muted))
+    }
+  }
+
   companion object {
     const val CONVERSATION = "100"
 

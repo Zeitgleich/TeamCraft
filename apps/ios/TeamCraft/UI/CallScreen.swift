@@ -28,6 +28,11 @@ struct CallScreen: View {
   @State private var maybeSpotlightId: String?
   /// Counts taps on controls, so the chrome stays while the user is busy with it.
   @State private var interactions = 0
+  /// Who hosts the meeting of this call (#1720); `nil` outside a meeting's call.
+  @State private var maybeHosts: MeetingHosts?
+  @State private var isShowingPeople = false
+  /// The organizer leaves with people in the lobby: whom to hand the meeting to first.
+  @State private var maybeLeaveOffer: LeaveOffer?
 
   private static let controlSize: CGFloat = 60
   private static let autoHideDelay: Duration = .seconds(5)
@@ -80,6 +85,23 @@ struct CallScreen: View {
     }
     .sheet(isPresented: $isAddingPeople) { AddPeopleView(conversationId: call.conversationId) }
     .sheet(isPresented: $isEncryptionShown) { encryptionSheet }
+    .sheet(isPresented: $isShowingPeople) {
+      CallPeopleView(conversationId: call.conversationId, participants: call.participantUserIds, names: model.calls.names)
+    }
+    .confirmationDialog(
+      "host_leave_title", isPresented: leaveOfferBinding, titleVisibility: .visible, presenting: maybeLeaveOffer
+    ) { offer in
+      ForEach(offer.candidates, id: \.id) { person in
+        Button("host_leave_hand_over \(person.shownName)") { handOverAndLeave(to: person.id) }
+      }
+      Button("host_leave_anyway", role: .destructive) { model.calls.hangUp() }
+      Button("cancel", role: .cancel) {}
+    } message: { offer in
+      Text("host_leave_body \(offer.waiting)")
+    }
+    .task(id: HostsKey(conversationId: call.conversationId, changes: model.changeCount)) {
+      maybeHosts = await model.meetingHosts(conversationId: call.conversationId)
+    }
     .task(id: call.conversationId) {
       let kind = await model.conversations().first { $0.id == call.conversationId }?.kind
       canAddPeople = kind == .direct || kind == .group
@@ -470,9 +492,15 @@ struct CallScreen: View {
         }
         .opacity(notetakerRefusalKey == nil ? 1 : 0.45)
       }
+      if maybeHosts != nil {
+        Spacer(minLength: 0)
+        RoundControl(system: "person.2.fill", isActive: false, label: "call_people") {
+          interact { isShowingPeople = true }
+        }
+      }
       Spacer(minLength: 0)
       RoundControl(system: "phone.down.fill", isActive: false, label: "call_hang_up", tint: Theme.danger) {
-        model.calls.hangUp()
+        hangUp()
       }
       Spacer(minLength: 0)
     }
@@ -481,6 +509,36 @@ struct CallScreen: View {
       LinearGradient(colors: [.clear, .black.opacity(0.55)], startPoint: .top, endPoint: .bottom)
         .ignoresSafeArea()
     }
+  }
+
+  /// Hangs up, or first asks the organizer whom to hand the meeting to when people wait in its
+  /// lobby and nobody else hosts it (#1720), as on Android, desktop and web.
+  private func hangUp() {
+    guard let hosts = maybeHosts, hosts.ownPart == .organizer else {
+      model.calls.hangUp()
+      return
+    }
+    let conversationId = call.conversationId
+    let participants = call.participantUserIds
+    Task {
+      if let offer = await model.leaveOffer(hosts: hosts, conversationId: conversationId, participants: participants) {
+        maybeLeaveOffer = offer
+      } else {
+        model.calls.hangUp()
+      }
+    }
+  }
+
+  private func handOverAndLeave(to userId: String) {
+    let conversationId = call.conversationId
+    Task {
+      await model.changeMeetingHost(conversationId: conversationId, userId: userId, action: .handOver)
+      model.calls.hangUp()
+    }
+  }
+
+  private var leaveOfferBinding: Binding<Bool> {
+    Binding(get: { maybeLeaveOffer != nil }, set: { if !$0 { maybeLeaveOffer = nil } })
   }
 
   /// "Add people": a DM or group DM call that isn't moving.
@@ -659,6 +717,12 @@ private struct StagePerson: Identifiable {
   let isRejoining: Bool
   let isMuted: Bool
   let isUnverified: Bool
+}
+
+/// Reads the hosts again for another call or after a change of the store.
+private struct HostsKey: Hashable {
+  let conversationId: String
+  let changes: Int
 }
 
 /// Reads the notetaker again for another call or other people in it.

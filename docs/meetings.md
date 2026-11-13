@@ -293,12 +293,25 @@ most 32 times (the chain a guest reads stays short).
 
 **When the organizer leaves.** Leaving the call of a meeting with people in its lobby and nobody
 else to let them in (no co-host) asks first: "Hand over to …" (up to five people of the call, no
-guests) signs the handover and leaves, "Leave anyway" leaves.
+guests) signs the handover and leaves, "Leave anyway" leaves. The same applies to the desktop
+tray's "Leave call…" (it opens the call with the question), Android's hang-up and iOS's hang-up
+(the apps read the lobby's count with `GET /meetings/{id}/lobby` and ask the core's
+`offers_meeting_handover`).
+
+**In the apps.** Desktop and web: the participant menu, badges on tiles, the schedule dialog's
+co-host field. Android and iOS: "People" in a meeting's call lists who is in it with "Host" and
+"Co-host", and the organizer gets a menu per person (make or remove a co-host, hand over after a
+confirmation); the apps have no scheduling dialog, so there is no co-host field there.
 
 **Telling people.** Every change sends `meeting_update` to the organizer, the invitees and the
 co-hosts before and after; a handover also `conversation_update` to the chat's members, whose
 devices then read who organizes the chat. An app that sees its user became a co-host or the
-organizer says so ("You are now a co-host of …"); there is no push for it yet. Every change is an
+organizer says so ("You are now a co-host of …"). A push tells the same to whoever was newly
+named a co-host or handed the meeting (never the one who made the change), so phones and closed
+browsers learn it with the app closed: `meeting_co_host` or `meeting_handover`, naming the meeting
+chat and the meeting, no text; the device names it from the chat as for a reminder. It goes like a
+meeting's notice (a mute or DND without an override keeps it back, an open desktop or web app gets
+no push and says it itself, nobody in the meeting's call is pushed). Every change is an
 audit entry (`meeting_hosts`, `meeting_handover`, with the co-hosts added and removed).
 
 | Condition                                       | What happens                                                                                                    |
@@ -589,10 +602,8 @@ fake calendar and mailer; one test sends through the real SMTP sender to Mailpit
   cancelling one), holidays per organizer, host controls (mute all, remove, lock, end for everyone) and
   meetings created in other CalDAV clients.
 - Per-organizer calendars (see above).
-- Hosts (#1720): a push to a new co-host or organizer whose apps are closed (an open app says so);
-  the Android and iOS apps' screens for naming co-hosts, the leave prompt and the schedule dialog's
-  co-host field (they reach the core's `change_meeting_hosts` through the FFI); the tray's "Leave
-  call" leaves without the handover prompt.
+- Hosts (#1720): the iOS part is written but not yet tried on a device; host badges on the
+  Android and iOS call tiles (they show in "People").
 - Meeting links: member clients reacting to `lobby_decision` instead of asking; making the link
   anew also turning away the guests still waiting from it; the desktop and mobile apps opening
   `/meeting/…` links themselves; hosts seeing how many guests the link let in; a reloaded guest

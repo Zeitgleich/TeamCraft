@@ -181,6 +181,10 @@
   <string name="meeting_notification_started_unnamed">A meeting has started</string>
   <string name="meeting_notification_soon">%1$s starts in %2$d min</string>
   <string name="meeting_notification_soon_unnamed">A meeting starts in %1$d min</string>
+  <string name="meeting_notification_co_host">You are now a co-host of %1$s</string>
+  <string name="meeting_notification_co_host_unnamed">You are now a co-host of a meeting</string>
+  <string name="meeting_notification_handover">%1$s was handed over to you</string>
+  <string name="meeting_notification_handover_unnamed">A meeting was handed over to you</string>
   <string name="notification_mute">Mute for 8 hours</string>
   <string name="notification_new_message">New message</string>
   <string name="notification_added_you">Added you to the conversation</string>

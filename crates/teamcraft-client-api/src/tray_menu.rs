@@ -47,10 +47,13 @@ pub enum TrayAction {
   ResumeNotifications,
   /// The host of a meeting: opens the call with "End for everyone" waiting to be confirmed.
   EndCallForEveryone,
+  /// "Leave call…" of a meeting's organizer while people wait in its lobby and nobody else hosts
+  /// it (#1720): opens the call with the question whom to hand the meeting over to.
+  LeaveCallAsking,
 }
 
 impl TrayAction {
-  pub const ALL: [Self; 26] = [
+  pub const ALL: [Self; 27] = [
     Self::OpenApp,
     Self::CheckForUpdates,
     Self::Quit,
@@ -77,6 +80,7 @@ impl TrayAction {
     Self::PauseNotificationsBriefly,
     Self::ResumeNotifications,
     Self::EndCallForEveryone,
+    Self::LeaveCallAsking,
   ];
 
   /// The menu item's id, and the text of the event.
@@ -108,6 +112,7 @@ impl TrayAction {
       Self::PauseNotificationsBriefly => "pause_notifications_briefly",
       Self::ResumeNotifications => "resume_notifications",
       Self::EndCallForEveryone => "end_call_for_everyone",
+      Self::LeaveCallAsking => "leave_call_asking",
     }
   }
 
@@ -131,6 +136,7 @@ impl TrayAction {
         | Self::SetCustomStatus
         | Self::NewMessage
         | Self::EndCallForEveryone
+        | Self::LeaveCallAsking
     )
   }
 }

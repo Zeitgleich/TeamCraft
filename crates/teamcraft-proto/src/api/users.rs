@@ -309,6 +309,11 @@ wire_enum! {
     MeetingReminder => "meeting_reminder",
     /// A planned meeting has started: a normal notification with Join, no ring.
     MeetingStart => "meeting_start",
+    /// The organizer named the user a co-host of a meeting (docs/meetings.md, "Hosts"): a normal
+    /// notification, so they learn it with the app closed. Names the meeting chat and the meeting.
+    MeetingCoHost => "meeting_co_host",
+    /// The organizer handed a meeting over to the user, who now organizes it: a normal notification.
+    MeetingHandover => "meeting_handover",
     /// The conversation was read on another device, or a ring ended: remove what was shown. Sent
     /// silently (APNs background push, FCM normal priority); never shows anything by itself.
     Dismiss => "dismiss",

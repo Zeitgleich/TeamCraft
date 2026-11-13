@@ -97,6 +97,9 @@ class CallController(
   /** The ongoing-call service keeps the camera alive (it sends). */
   @Volatile private var isCameraKeptAlive = false
 
+  /** Co-hosts and handing the meeting over in a meeting's call (#1720). */
+  val hosts = CallHosts(core, scope)
+
   /** "Add people" and following a move of the call into a meeting room. */
   val moves = CallMoves(
     core,

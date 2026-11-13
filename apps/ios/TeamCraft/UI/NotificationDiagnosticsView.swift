@@ -201,7 +201,8 @@ struct NotificationDiagnosticsView: View {
     switch kind {
     case .message: return String(localized: "diagnostics_kind_message")
     case .call: return String(localized: "diagnostics_kind_call")
-    case .meetingReminder, .meetingStart: return String(localized: "diagnostics_kind_meeting")
+    case .meetingReminder, .meetingStart, .meetingCoHost, .meetingHandover:
+      return String(localized: "diagnostics_kind_meeting")
     case .dismiss: return String(localized: "diagnostics_kind_dismiss")
     case .test: return String(localized: "diagnostics_kind_test")
     case .sync: return String(localized: "diagnostics_kind_sync")

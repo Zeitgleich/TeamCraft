@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="call_people">People</string>
+  <string name="call_people_title">People in the call</string>
+  <string name="host_role_organizer">Host</string>
+  <string name="host_role_co_host">Co-host</string>
+  <string name="host_menu_for">Host options for %1$s</string>
+  <string name="host_make_co_host">Make co-host</string>
+  <string name="host_remove_co_host">Remove as co-host</string>
+  <string name="host_hand_over">Hand over host role</string>
+  <string name="host_hand_over_title">Hand over to %1$s?</string>
+  <string name="host_hand_over_body">%1$s changes and cancels the meeting from now on; you stay co-host.</string>
+  <string name="host_hand_over_confirm">Hand over</string>
+  <string name="host_change_saving">Saving the hosts…</string>
+  <string name="host_change_failed">The hosts could not be changed: %1$s</string>
+  <string name="host_leave_title">People are waiting to join</string>
+  <plurals name="host_leave_body">
+    <item quantity="one">One person is waiting in the lobby, and nobody else here can let them in once you leave.</item>
+    <item quantity="other">%1$d people are waiting in the lobby, and nobody else here can let them in once you leave.</item>
+  </plurals>
+  <string name="host_leave_hand_over">Hand over to %1$s and leave</string>
+  <string name="host_leave_anyway">Leave anyway</string>
+</resources>
