@@ -51,7 +51,7 @@ use crate::dave::{
 };
 use crate::join_probe::{JoinProbe, JoinProbeConfig, LinkMeasurement};
 use crate::nack::NackConfig;
-use crate::rate_probe::{RateProbeConfig, UplinkProbe};
+use crate::rate_probe::{ProbeOutcome, RateProbeConfig, UplinkProbe};
 use crate::rtp::{PayloadType, RtpHeader, RtpPacket, RtpTimestamp, SequenceNumber, Ssrc};
 use crate::share_policy::UplinkTop;
 use crate::uplink_layers::{Adaptation, OwnTrack, UplinkLayers, UplinkPolicy, probe_demand_bps};
@@ -2076,12 +2076,16 @@ impl CallEngine {
       self.apply_uplink_probe(measurement);
     }
     let mut bps = self.uplink.on_feedback(feedback, now, self.uplink_feedback_epoch);
+    let mut maybe_carried_bps = None;
     if let Some(outcome) =
       self
         .uplink_rate_probe
         .on_feedback(&self.uplink_probe_config(), feedback, &mut self.uplink, now)
     {
       bps = self.uplink.estimate_bps();
+      if let ProbeOutcome::Carried { target_bps } = outcome {
+        maybe_carried_bps = Some(target_bps);
+      }
       debug!(
         ?outcome,
         estimate_bps = bps,
@@ -2090,9 +2094,14 @@ impl CallEngine {
     }
     if let Some(capacity_bps) = self.maybe_uplink_capacity_bps {
       bps = capacity_bps;
+      // The fallback's pacer measures what the upload drains: as good as a probe.
+      maybe_carried_bps = Some(capacity_bps);
+    } else if self.maybe_probe_bytes.is_none() {
+      // An SFU that takes no padding: nothing probes, the estimate is all there is.
+      maybe_carried_bps = Some(bps);
     }
     self.uplink_voice.on_feedback(feedback, now);
-    self.follow_voice_steps(bps, now);
+    self.follow_voice_steps(bps, maybe_carried_bps, now);
     let is_held = self.maybe_uplink_capacity_bps.is_none() && self.uplink_voice.is_hurt(now);
     if is_held != self.is_video_held_for_voice && (!is_held || !self.own_tracks.is_empty()) {
       self.is_video_held_for_voice = is_held;
@@ -2122,10 +2131,21 @@ impl CallEngine {
   /// Steps the own voice down on a thin uplink and back up once it has room (#1893). Lost voice
   /// steps it down by itself only while there is no own video: otherwise the video stops first
   /// (#1871), and the estimate tells whether the voice has to give way too.
-  fn follow_voice_steps(&mut self, estimate_bps: u32, now: Instant) {
+  ///
+  /// A step up needs proof: a probe that carried the next step's bound (`maybe_carried_bps`).
+  /// Nothing moves while the microphone is muted: nothing is sent, the estimate grows without
+  /// showing anything, and the voice comes back as it went.
+  fn follow_voice_steps(&mut self, estimate_bps: u32, maybe_carried_bps: Option<u32>, now: Instant) {
+    if self.is_muted {
+      return;
+    }
     let is_voice_hurt = self.own_tracks.is_empty() && self.uplink_voice.is_hurt(now);
     let was_wanted = self.voice_steps.wanted_bps();
-    if let Some(encoding) = self.voice_steps.on_estimate(estimate_bps, is_voice_hurt, now) {
+    let maybe_down = self.voice_steps.on_estimate(estimate_bps, is_voice_hurt, now);
+    let maybe_up = maybe_carried_bps
+      .filter(|_| !self.uplink_voice.is_hurt(now))
+      .and_then(|carried_bps| self.voice_steps.on_carried(carried_bps, now));
+    if let Some(encoding) = maybe_up.or(maybe_down) {
       debug!(
         estimate_bps,
         is_voice_hurt,
@@ -2402,11 +2422,12 @@ impl CallEngine {
     let tracks = own_track_views(&self.own_tracks, &self.adaptive_tracks);
     let maybe_video_demand =
       (!tracks.is_empty()).then(|| probe_demand_bps(&tracks, is_sending_screen_audio, &self.uplink_policy));
-    // A voice below its full step lets the estimate grow to what its next step needs, and no
-    // further (#1893): the video's demand let the estimate of a 64 kbit/s uplink grow past the
-    // camera's lowest layer, and the camera went on sending next to the voice.
+    // A voice below its full step lets the estimate grow by no demand (#1893): the video's
+    // demand let the estimate of a 64 kbit/s uplink grow past the camera's lowest layer, and the
+    // camera went on sending next to the voice. The voice's probes show when there is room.
     let maybe_demand = match self.voice_steps.wanted_bps() {
-      Some(voice_bps) => Some(voice_bps),
+      Some(_) if self.maybe_probe_bytes.is_some() => None,
+      Some(voice_bps) => maybe_video_demand.max(Some(voice_bps)),
       None => maybe_video_demand,
     };
     self.uplink.set_demand_bps(maybe_demand);
@@ -5628,9 +5649,9 @@ mod tests {
       assert!(drain(&mut alice).contains(&EngineOutput::Event(CallEngineEvent::VideoHeldForVoice(false))));
     }
 
-    /// #1893: a voice below its full step caps what the uplink estimate may grow to at its next
-    /// step, own camera or not: the camera's demand let a 64 kbit/s uplink's estimate grow past
-    /// its lowest layer, and the camera went on next to the voice.
+    /// #1893: a voice below its full step lets the uplink estimate grow by no demand, own camera
+    /// or not: the camera's demand let a 64 kbit/s uplink's estimate grow past its lowest layer,
+    /// and the camera went on next to the voice.
     #[test]
     fn a_thin_voice_caps_the_uplink_demand() {
       let now = Instant::now();
@@ -5650,12 +5671,27 @@ mod tests {
       let camera_demand = alice.uplink.demand_bps().unwrap();
       alice.voice_steps.on_estimate(40_000, false, now);
       alice.update_uplink_demand();
-      let voice_demand = alice.uplink.demand_bps().unwrap();
-      assert_eq!(Some(voice_demand), alice.voice_steps.wanted_bps());
-      assert!(
-        voice_demand < camera_demand / 4,
-        "{voice_demand} vs {camera_demand}"
-      );
+      assert!(camera_demand > 1_000_000, "{camera_demand}");
+      // Where the SFU takes padding: the voice's probes show when there is room.
+      alice.maybe_probe_bytes = Some(16_000);
+      alice.update_uplink_demand();
+      assert_eq!(alice.uplink.demand_bps(), None);
+    }
+
+    /// #1893: while the microphone is muted the voice's step stays: nothing is sent, and what
+    /// the estimate does then shows nothing about the voice.
+    #[test]
+    fn a_muted_voice_keeps_its_step() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      alice.set_muted(true);
+      drain(&mut alice);
+      alice.follow_voice_steps(40_000, None, now);
+      assert_eq!(alice.voice_steps.step(), crate::voice_steps::VoiceStep::Full);
+      assert!(drain(&mut alice).is_empty());
+      alice.set_muted(false);
+      alice.follow_voice_steps(40_000, None, now);
+      assert_eq!(alice.voice_steps.step(), crate::voice_steps::VoiceStep::Thinnest);
     }
 
     /// #1893: with every other participant playing long packets, a voice lost on the way while
