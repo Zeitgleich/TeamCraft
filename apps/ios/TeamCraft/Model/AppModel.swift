@@ -261,6 +261,8 @@ final class AppModel {
   @ObservationIgnored private var maybeLastPushAttempt: Date?
   @ObservationIgnored private var maybeLinkExpiry: Task<Void, Never>?
   @ObservationIgnored private var maybeReconcile: Task<Void, Never>?
+  @ObservationIgnored private var isReadingLinkRequests = false
+  @ObservationIgnored private var isLinkRequestsDirty = false
 
   private init() {}
 
@@ -670,9 +672,20 @@ final class AppModel {
       armLinkExpiry()
       return
     }
-    // A failed read keeps what is shown; the next change reads again.
-    guard let requests = try? await core.linkRequests() else { return }
-    applyLinkRequests(requests)
+    // A burst of changes costs at most two reads (issue #1900): a change while one runs only marks
+    // it dirty, and the running one reads once more when it is done.
+    if isReadingLinkRequests {
+      isLinkRequestsDirty = true
+      return
+    }
+    isReadingLinkRequests = true
+    defer { isReadingLinkRequests = false }
+    repeat {
+      isLinkRequestsDirty = false
+      // A failed read keeps what is shown; the next change reads again.
+      guard let requests = try? await core.linkRequests() else { return }
+      applyLinkRequests(requests)
+    } while isLinkRequestsDirty
   }
 
   // MARK: Reading

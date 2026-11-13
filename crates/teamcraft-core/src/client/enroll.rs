@@ -225,6 +225,7 @@ impl PendingEnrollment {
       previewed_draft_files: HashSet::new(),
       is_picked_sweep_due: true,
       maybe_call_sink: None,
+      maybe_event_timer: None,
       link_requests: Default::default(),
       call_ids: HashMap::new(),
       heard_calls: HashMap::new(),
