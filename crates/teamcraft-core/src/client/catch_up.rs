@@ -30,8 +30,8 @@ use teamcraft_proto::{
   ListMlsMessagesQuery, ListMlsMessagesResponse, MlsMessageResponse, Snowflake, UserId,
 };
 
-use super::Client;
 use super::sync::ResyncPart;
+use super::{Client, HistoryReading};
 use crate::api::{ApiError, ServerApi};
 use crate::error::CoreError;
 use crate::records;
@@ -247,8 +247,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.catch_up_each(waiting, &phases).await?;
     phases.lap("content", self.now_ms());
     self.trace_lap("catch-up: content");
-    if self.background_backlogs.is_on {
-      // The host's loop reads them after the sync (issue #1448).
+    if self.background_backlogs.is_on || self.settings.history_reading == HistoryReading::OnDemand {
+      // The host's loop reads them after the sync (issue #1448); where history is read on demand,
+      // slowly, and the reader where they scroll (issue #1910).
       self.leave_backlogs_to_host(conversations)?;
     } else {
       // Boxed: only after a long absence, and it would otherwise sit in every catch-up's future.

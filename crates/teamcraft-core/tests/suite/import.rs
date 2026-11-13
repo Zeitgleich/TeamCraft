@@ -9,13 +9,13 @@ use std::sync::Arc;
 use crate::common;
 
 use common::{Peer, settings, settle};
-use teamcraft_core::ClientSettings;
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::client::import::ImportDraft;
 use teamcraft_core::clock::ManualClock;
 use teamcraft_core::imported::{ImportSource, ImportedAuthor, ImportedOrigin};
 use teamcraft_core::store::{LocalStore, MessageContent, MessageFilter, MessageMeta};
 use teamcraft_core::workspace::RosterRole;
+use teamcraft_core::{ClientSettings, HistoryReading};
 use teamcraft_proto::{AdminSelfJoin, ConversationId, HistoryPolicy, ImportPolicy, UserId, WorkspacePolicy};
 
 /// 2024-05-01.
@@ -447,6 +447,65 @@ mod existing {
     assert_eq!(bob.texts(dm), expected);
     // Done: nothing is read any more.
     assert_eq!(bob.client.page_imported_history().await.unwrap(), 0);
+  }
+
+  /// Issue #1910: a host that reads history on demand (the browser) pages through no import in the
+  /// background. A reader who had reached the DM's beginning gets the top of the feed back, and
+  /// scrolling up reads the import there, page by page.
+  #[tokio::test]
+  async fn a_device_reading_on_demand_reads_an_import_where_the_reader_scrolls() {
+    let server = FakeServer::new();
+    let on_demand = ClientSettings {
+      history_page_size: 2,
+      imported_page_size: 2,
+      history_reading: HistoryReading::OnDemand,
+      ..settings()
+    };
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut importer = Peer::enroll(&server, "Import").await;
+    let mut bob = Peer::enroll_with_settings(&server, "Bob", on_demand).await;
+    sign_import_policy(&mut alice, &mut importer, AdminSelfJoin::Visible).await;
+    let dm = alice.client.open_dm(bob.client.user_id()).await.unwrap();
+    alice.client.send_text(dm, None, "live").await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut importer]).await;
+    bob.client.catch_up_messages(dm).await.unwrap();
+    // The reader scrolls to the top: the beginning.
+    bob.client.load_older_history(dm, 1).await.unwrap();
+
+    let participants = vec![alice.client.user_id(), bob.client.user_id()];
+    assert!(!open_existing(&mut importer, &participants, dm).await);
+    importer.client.request_import_join(dm).await.unwrap();
+    settle(&mut [&mut bob, &mut importer]).await;
+    bob.client.apply_pending_changes().await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut importer]).await;
+    let imported: Vec<String> = (0..7).map(|index| format!("old {index}")).collect();
+    let drafts: Vec<ImportDraft> = imported
+      .iter()
+      .enumerate()
+      .map(|(index, body)| {
+        let offset = i64::try_from(index).unwrap();
+        draft(&index.to_string(), body, ImportedAuthor::Deleted, OLD_MS + offset)
+      })
+      .collect();
+    importer.client.send_imported(dm, &drafts).await.unwrap();
+    importer.client.finish_import(dm).await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut importer]).await;
+    assert_eq!(bob.texts(dm), vec!["old 5", "old 6", "live"], "one page at once");
+
+    let lists = server.message_list_count(bob.client.user_id());
+    assert_eq!(
+      bob.client.page_imported_history().await.unwrap(),
+      0,
+      "nothing in the background"
+    );
+    assert_eq!(server.message_list_count(bob.client.user_id()), lists);
+
+    for request in 2..=4 {
+      bob.client.load_older_history(dm, request).await.unwrap();
+    }
+    let mut expected = imported;
+    expected.push("live".into());
+    assert_eq!(bob.texts(dm), expected);
   }
 
   /// The import's DM or notes of `participants`, which is `existing`; `true` if the import device

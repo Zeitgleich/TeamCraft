@@ -2385,7 +2385,10 @@ group is caught up (or one nothing moved in since the last sync), or none (`live
 welcome, a role log, a deletion and anything of a conversation still to come wait for the end, and so
 does everything behind them. Messages are another matter: their content keys came through the queue,
 so a conversation with many new messages may get its newest page before the rest (the hole is read
-in the same catch-up, or by the app's loop right after it, issue #1448; `history_gaps.rs`). Some
+in the same catch-up, or by the app's loop right after it, issue #1448; in the browser slowly, a
+page every few seconds while the page is in view, or at once where the reader scrolls, issue #1910:
+edits, deletions and pins in a hole arrive by that slow reading or when scrolled to;
+`history_gaps.rs`). Some
 controls in messages depend on their order (pins, bookmarks, channel role entries, §4.6.3): they are
 taken again in their order once the hole is read, so the outcome is the one reading in order gives.
 The same holds for every page read out of order (older history, a jump to a date and its holes, the
@@ -4299,7 +4302,9 @@ ciphertext, in `MessageMeta::imported` (`ImportedOrigin`):
   conversation loads one page of them on that update (or on its next sync when it missed the
   update), then reads the rest in the background, one page per upkeep tick, back to the beginning.
   Where that stands is kept per conversation and import, so it resumes after a restart and a later
-  import is read again.
+  import is read again. The browser keeps no offline copy and reads none of it in the background
+  (issue #1910): the top of its feed asks for older history again, and the import comes in there as
+  the reader scrolls.
   What the import account sends as an ordinary message while its import period lasts (the
   announcements of people it added, of a channel it archived) is synced the same quiet way: the
   server sends `message_create` but no push for it (issue #1079).
