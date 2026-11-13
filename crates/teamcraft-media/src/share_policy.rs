@@ -326,7 +326,17 @@ impl ShareGovernor {
   /// Held (even at its least frame rate) for [`CameraGovernorConfig::load_window`] makes it one
   /// size smaller; carried whole for the calm period makes it one size larger again, with the
   /// same backoff as the encoders' load after a step up that didn't hold.
+  ///
+  /// While the encoders are overloaded, a held top layer doesn't step the size (#1846): a starved
+  /// encoder delivers its frames in bursts, which the uplink's estimate reads as a narrow link,
+  /// and the CPU's own steps already lower what is sent. Stepping on both flapped the size every
+  /// few seconds on a clean uplink, and every change sent the share anew to all its viewers.
   pub fn on_uplink(&mut self, top: UplinkTop, now: Instant) -> bool {
+    let top = if top == UplinkTop::Held && self.load.maybe_reason().is_some() {
+      UplinkTop::Reduced
+    } else {
+      top
+    };
     let sizes = self.ladder.top_sizes.len();
     self.uplink.on_uplink(top, sizes, now, &self.config)
   }
@@ -1397,6 +1407,26 @@ mod tests {
         }
       }
       assert_eq!(ups, vec![900, 1080, 1440, 2160]);
+    }
+
+    /// #1846: while the encoders are overloaded, a held top layer is the starved encoder's bursts,
+    /// not the uplink: the size stays, and the CPU's steps lower what is sent.
+    #[test]
+    fn an_overloaded_encoder_doesnt_step_the_uplink_size() {
+      let start = Instant::now();
+      let mut governor = ShareGovernor::new(plan(QHD, HW, both(VideoCodec::Av1)), start);
+      let config = CameraGovernorConfig::default();
+      let mut now = window(&mut governor, start, overloaded());
+      now = window(&mut governor, now, overloaded());
+      governor.evaluate(now);
+      assert!(governor.limits().maybe_reason.is_some(), "overloaded");
+      let before = top_lines(&governor);
+      for _ in 0..10 {
+        now += config.load_window;
+        assert!(!governor.on_uplink(UplinkTop::Held, now));
+      }
+      assert_eq!(top_lines(&governor), before);
+      assert_eq!(governor.limits().uplink_steps, 0);
     }
 
     /// The uplink's size and the CPU's step combine: the smaller top wins.
