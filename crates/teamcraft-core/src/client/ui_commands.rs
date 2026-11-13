@@ -359,6 +359,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.change_meeting_hosts(&change).await
       },
       CoreCommand::RefreshMembers { conversation } => self.refresh_members(conversation).await,
+      CoreCommand::RefreshChannelAnchor { conversation } => self.refresh_channel_anchor(conversation).await,
       CoreCommand::SetCustomStatus { maybe_status } => {
         let now = self.now_ms();
         self

@@ -27,6 +27,7 @@ device-waiting-body = Du kannst lesen, was deine anderen Geräte lesen konnten. 
 device-waiting-notes-body = Deine Notizen öffnen sich hier, sobald eines deiner anderen Geräte online ist. Wenn du es nicht mehr hast, entferne es unter Einstellungen > Geräte: Dieses Gerät richtet deine Notizen dann von selbst neu ein. Frühere Notizen bleiben lesbar.
 left-in-group-unknown = Jemand
 group-refused = Der Server lässt dieses Gerät die verschlüsselte Gruppe dieser Unterhaltung nicht lesen. Neue Nachrichten fehlen eventuell.
+anchor-refused = Dieses Gerät kann diesen Kanal nicht öffnen: Der Server hat ihm eine verschlüsselte Gruppe angeboten, die deine Geräte für diesen Kanal nicht kennen. Neue Nachrichten bleiben hier unlesbar. Sag einem Workspace-Admin Bescheid.
 waiting-for-admission = Du wirst zu diesem Kanal hinzugefügt. Die App eines Mitglieds, das online ist, fügt dich hinzu, meist innerhalb von Sekunden. Lesbar sind nur Nachrichten ab deinem Beitritt.
 waiting-for-admission-no-member-online = Gerade ist kein Mitglied dieses Kanals online. Du wirst hinzugefügt, sobald eines online ist; diese App behält die Anfrage, auch nach einem Neustart. Lesbar sind nur Nachrichten ab deinem Beitritt.
 waiting-for-admission-not-yet = Du wurdest noch nicht zu diesem Kanal hinzugefügt: Keine App eines Mitglieds hat dich hinzugefügt, vielleicht weil sie die Anfrage abgelehnt haben. Diese App fragt von selbst erneut. Lesbar sind nur Nachrichten ab deinem Beitritt.

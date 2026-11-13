@@ -974,6 +974,15 @@ pub trait ChatBackend {
   fn channel_role_alarms(&self) -> Vec<ConversationId> {
     Vec::new()
   }
+  /// What this device holds of a channel's anchor (e2ee.md §4.6.5): a listed name the anchor
+  /// doesn't hold, who last named the channel, a fork. `None` for a channel that isn't anchored
+  /// here. [`Self::refresh_channel_anchor`] reads it afresh.
+  fn channel_anchor_marks(&self, _conversation: ConversationId) -> Option<crate::model::ChannelAnchorMarks> {
+    None
+  }
+  /// Verifies the channel's anchor again (the channel or its settings opened), at most every few
+  /// minutes per channel.
+  fn refresh_channel_anchor(&self, _conversation: ConversationId) {}
   /// Signs exactly `roles`, as the workspace admin looked at them with the log at `at_cursor`
   /// ([`crate::model::ChannelRolesReview::log_cursor`]); nothing changes on the server. Refused if
   /// the log moved since.

@@ -167,6 +167,78 @@ mod names {
   }
 }
 
+/// What the apps show of the anchor (issue #1749): who last named the channel, a name the server
+/// lists but the anchor doesn't hold, and a channel the pin keeps this device out of.
+mod marks {
+  use super::*;
+  use teamcraft_core::anchoring::NameRole;
+  use teamcraft_core::client::{channel_anchor_marks, is_anchor_refused};
+  use teamcraft_crypto::channel_anchor::{AnchorFloor, AnchorHash, FloorState};
+
+  /// Alice is no workspace admin: her rename is signed as a member's, and Bob's device names her.
+  /// A name the server then lists on its own is stale there.
+  #[tokio::test]
+  async fn a_members_rename_is_named_and_a_server_only_name_is_stale() {
+    let server = anchoring_server();
+    let (mut alice, mut bob) = two(&server).await;
+    let alice_id = alice.client.user_id();
+    let channel = shared_channel(&mut alice, &mut bob, "general").await;
+    let marks = channel_anchor_marks(&*bob.store, channel).unwrap().unwrap();
+    assert_eq!(marks.maybe_name_set_by, Some((alice_id, NameRole::Founder)));
+    assert!(!marks.is_name_stale);
+
+    rename(&mut alice, channel, "announcements").await;
+    settle(&mut [&mut alice, &mut bob]).await;
+    let marks = channel_anchor_marks(&*bob.store, channel).unwrap().unwrap();
+    assert_eq!(marks.maybe_name_set_by, Some((alice_id, NameRole::Member)));
+    assert!(!marks.is_name_stale);
+    assert_eq!(marks.maybe_fork, None);
+
+    let mut listed: ConversationResponse =
+      records::get_json(&*bob.store, Table::Conversations, &channel.to_string())
+        .unwrap()
+        .unwrap();
+    listed.maybe_name = Some("old-test".to_owned());
+    records::put_json(&*bob.store, Table::Conversations, &channel.to_string(), &listed).unwrap();
+    assert!(
+      channel_anchor_marks(&*bob.store, channel)
+        .unwrap()
+        .unwrap()
+        .is_name_stale
+    );
+  }
+
+  /// Bob's devices pinned another founding for this channel: the welcome into Alice's group is
+  /// refused, and the channel shows as unreachable instead of waiting silently.
+  #[tokio::test]
+  async fn a_welcome_the_pin_refuses_leaves_the_channel_unreachable() {
+    let server = anchoring_server();
+    let (mut alice, mut bob) = two(&server).await;
+    let space = alice.space().await;
+    let channel = alice.client.create_channel(space, "general").await.unwrap();
+    let other = AnchorFloor {
+      founding_hash: AnchorHash::from_bytes([9; 32]),
+      properties_version: 1,
+      properties_hash: AnchorHash::from_bytes([9; 32]),
+      epoch: 0,
+      state: FloorState::Agreed,
+    };
+    bob
+      .client
+      .update_account_data(|data, _| data.note_anchor_floor(channel, &other))
+      .unwrap();
+    assert!(!is_anchor_refused(&*bob.store, channel).unwrap());
+    alice
+      .client
+      .add_member(channel, bob.client.user_id())
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    assert!(!bob.client.has_group(channel).unwrap(), "stays out");
+    assert!(is_anchor_refused(&*bob.store, channel).unwrap());
+  }
+}
+
 mod relisted {
   use super::*;
 
