@@ -6,6 +6,7 @@ use teamcraft_client_api::actions::{
   FileFailure, FileInfo, FileSource, FileTransfer, MediaAnchor, MediaPage, OutgoingFile, PixelSize,
   ShareLink, ShareLinkOptions,
 };
+use teamcraft_client_api::files_query::FilesPage;
 use teamcraft_client_api::model::{ConversationId, MessageId, ThreadId, UserId};
 use teamcraft_client_api::voice::Waveform;
 use teamcraft_proto::{AttachmentId, Base64Bytes, ClientMessageId};
@@ -273,18 +274,36 @@ impl<S: LocalStore> CoreChatBackend<S> {
   /// outbox, the sent ones with attachments through the store's index of them, and those whose
   /// uploads failed, by their records; not the whole conversation and a lookup per message.
   pub(crate) fn ui_conversation_files(&self, conversation: ConversationId) -> Vec<FileInfo> {
+    self.newest_conversation_files(conversation, usize::MAX).0
+  }
+
+  /// The newest `limit` files of the conversation, as [`Self::ui_conversation_files`] lists them:
+  /// the Files & links tab pages through them (issue #1814), so a channel with thousands of files
+  /// reads the messages of the page and the index up to them, not all of them.
+  pub(crate) fn ui_conversation_files_page(&self, conversation: ConversationId, limit: usize) -> FilesPage {
+    let (files, sent_messages) = self.newest_conversation_files(conversation, limit.saturating_add(1));
+    let mut page = FilesPage::of_found(files, limit);
+    // A message lists at least one file, so one more message read than asked for means more.
+    page.has_more |= sent_messages > limit;
+    page
+  }
+
+  /// The files of the messages not sent yet, of those whose uploads failed, and of the newest
+  /// `max_sent` sent messages with files, newest first; with the number of sent messages read.
+  fn newest_conversation_files(
+    &self,
+    conversation: ConversationId,
+    max_sent: usize,
+  ) -> (Vec<FileInfo>, usize) {
     let store = self.store_ref();
     let mut messages = self.read(
       store
         .messages_at(conversation, MessageSlot::Pending)
         .map_err(CoreError::from),
     );
-    messages.extend(self.attached_messages(
-      conversation,
-      Attached::Any,
-      AttachedRange::Older(None),
-      usize::MAX,
-    ));
+    let sent = self.attached_messages(conversation, Attached::Any, AttachedRange::Older(None), max_sent);
+    let sent_messages = sent.len();
+    messages.extend(sent);
     let failed_prefix = failed_uploads_prefix(conversation);
     let failed = store
       .list_prefix(Table::FileTransfers, &failed_prefix)
@@ -312,10 +331,11 @@ impl<S: LocalStore> CoreChatBackend<S> {
     messages.sort_by_key(|stored| std::cmp::Reverse(stored.order()));
     messages.dedup_by_key(|stored| stored.client_message_id);
     let maybe_importer = self.importer();
-    messages
+    let files = messages
       .iter()
       .flat_map(|stored| self.files_of(stored, maybe_importer))
-      .collect()
+      .collect();
+    (files, sent_messages)
   }
 
   /// A page of at most `max_messages` messages with pictures or videos at `anchor`, newest first

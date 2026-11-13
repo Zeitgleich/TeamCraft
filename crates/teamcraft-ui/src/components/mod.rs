@@ -106,6 +106,7 @@ pub mod log_view;
 pub mod login;
 pub mod long_press;
 pub mod meeting_controls;
+pub mod meeting_rows;
 pub mod meetings_view;
 pub mod members_panel;
 pub mod message_actions;

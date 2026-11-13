@@ -714,6 +714,13 @@ pub trait ChatBackend {
   fn files_page(&self, query: &FilesQuery<'_>) -> Option<FilesPage> {
     Some(crate::files_query::files_page(self, query))
   }
+  /// The newest `limit` files of a conversation, newest first, and whether older ones exist: the
+  /// Files & links tab pages through them (issue #1814). A core reads only the messages of the
+  /// page through its index of the messages with files; the default reads all of them. `None`
+  /// while a backend that asks the core waits for its answer (a change notification follows).
+  fn conversation_files_page(&self, conversation: ConversationId, limit: usize) -> Option<FilesPage> {
+    Some(FilesPage::of_found(self.conversation_files(conversation), limit))
+  }
   /// The newest `limit` links shared in a conversation, newest first. A core reads them through
   /// its index of the messages with links (issue #609); the default reads the messages newest
   /// first and stops once `limit` links are found. `None` while a backend that asks the core waits

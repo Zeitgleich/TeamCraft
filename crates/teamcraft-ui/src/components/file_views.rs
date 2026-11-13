@@ -18,7 +18,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_client_api::actions::{FileFailure, FileInfo, FileTransfer, LinkPreview, PixelSize};
 use teamcraft_client_api::admin::format_bytes;
-use teamcraft_client_api::files_query::MAX_STARRED_FILES;
+use teamcraft_client_api::files_query::{FILES_PAGE_SIZE, MAX_STARRED_FILES};
 use teamcraft_client_api::links::{LINKS_PER_PAGE, LinkInfo};
 use teamcraft_client_api::media_viewer::{AlbumGrid, MAX_ALBUM_TILES};
 use teamcraft_client_api::upload_pill::UploadPill;
@@ -1762,7 +1762,10 @@ pub fn ChannelFiles(
   let state = use_app_state();
   let i18n = use_i18n();
   let kind = RwSignal::new(SharedKind::Files);
-  let files = Memo::new(move |_| state.read(|backend| backend.conversation_files(conversation)));
+  // A page more at a time (issue #1814): a channel with thousands of files reads only those shown.
+  let limit = RwSignal::new(FILES_PAGE_SIZE);
+  let page =
+    Memo::new(move |_| state.read(|backend| backend.conversation_files_page(conversation, limit.get())));
   view! {
     <div class="channel-files panel-scroll" role="tabpanel" id=panel_id aria-labelledby=labelled_by>
       <div class="segmented shared-kind" role="group" aria-label=move || i18n.t("shared-kind-label")>
@@ -1781,12 +1784,20 @@ pub fn ChannelFiles(
       {move || match kind.get() {
         SharedKind::Files => view! {
           <div class="files-list">
-            <For each=move || files.get() key=|file| (file.message, file.file_id.clone()) let:file>
+            <For each=move || page.get().map(|page| page.files).unwrap_or_default() key=|file| (file.message, file.file_id.clone()) let:file>
               <FileCard file=file />
             </For>
           </div>
-          <Show when=move || files.get().is_empty() fallback=|| ()>
+          // Not read yet is no empty list: the answer and a change notification follow.
+          <Show when=move || page.with(|page| page.as_ref().is_some_and(|page| page.files.is_empty())) fallback=|| ()>
             <EmptyState icon=IconName::Paperclip title_key="files-empty-title" body_key="files-empty" />
+          </Show>
+          <Show when=move || page.with(|page| page.as_ref().is_some_and(|page| page.has_more)) fallback=|| ()>
+            <div class="files-more">
+              <button type="button" class="btn" on:click=move |_| limit.update(|limit| *limit += FILES_PAGE_SIZE)>
+                {move || i18n.t("files-more")}
+              </button>
+            </div>
           </Show>
         }
           .into_any(),

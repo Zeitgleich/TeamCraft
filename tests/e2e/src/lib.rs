@@ -11,6 +11,7 @@ pub mod bridge;
 #[cfg(feature = "browser")]
 pub mod browser;
 pub mod call;
+pub mod demo;
 #[cfg(feature = "desktop")]
 pub mod desktop;
 #[cfg(feature = "browser")]

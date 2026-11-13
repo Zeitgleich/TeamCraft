@@ -41,7 +41,7 @@ use crate::bwe::{BweConfig, FeedbackRecorder, SendSideEstimator};
 use crate::call_auth::{BindingRole, CallKeyAuthenticator, CallKeyError};
 use crate::call_resilience::CallTransport;
 use crate::call_video::{IncomingVideo, OutgoingVideo, ReceivedVideoFrame, ReleasedFrame};
-use crate::capture_health::BufferCounts;
+use crate::capture_health::StallWindow;
 use crate::datagram::{DatagramHeader, MediaDatagram, SimulcastLayer, StreamId, padding_datagram};
 use crate::dave::{
   DaveCallId, DaveEpoch, DaveError, DaveFrameStats, DaveParticipant, DaveParticipantId, FrameCodec, MediaKind,
@@ -257,7 +257,7 @@ pub enum CallEngineEvent {
   /// the judged window. The UI tells the sharer, and the call's crash reports hear of it.
   CaptureStalled {
     kind: VideoTrackKind,
-    window: BufferCounts,
+    window: StallWindow,
   },
   /// Not from the engine but from the media driver: that capture gives pictures again.
   CaptureRecovered(VideoTrackKind),

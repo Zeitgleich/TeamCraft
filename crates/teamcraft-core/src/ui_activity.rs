@@ -14,7 +14,9 @@ use teamcraft_proto::ClientMessageId;
 use crate::imported::Authorship;
 use crate::read_state;
 use crate::readable_text::readable_text;
-use crate::store::{LocalStore, MessageContent, StoreError, StoredMessage, Written};
+use crate::store::{
+  LocalStore, MessageContent, MessageFilter, MessageSlot, StoreError, StoredMessage, UserLink, Written,
+};
 use crate::ui_backend::{CoreChatBackend, CoreCommand, ui_message_id};
 
 /// Entries kept in the feed.
@@ -130,6 +132,12 @@ impl<S: LocalStore> CoreChatBackend<S> {
         },
         Ok(false) => {},
         Err(error) => tracing::debug!(%error, "local store read failed, reading the conversation again"),
+      }
+    }
+    if store.indexes_feed() {
+      match RelevantMessages::indexed(me, store, conversation, maybe_cursor) {
+        Ok(relevant) => return relevant,
+        Err(error) => tracing::debug!(%error, "local store read failed, reading the conversation whole"),
       }
     }
     let mut relevant = RelevantMessages::default();
@@ -394,6 +402,10 @@ pub(crate) struct RelevantMessages {
   messages: HashMap<ClientMessageId, StoredMessage>,
   /// [`newest_top_level_of_others`] of all of the conversation's messages, not only these.
   maybe_newest_top_level: Option<MessageId>,
+  /// `None`: read from all of the conversation's messages, so every thread message is here. Some:
+  /// read through the store's indexes ([`Self::indexed`]), which hold the messages of these threads
+  /// only, the ones an entry can be in (issue #1814).
+  maybe_loaded_threads: Option<HashSet<ThreadId>>,
 }
 
 impl RelevantMessages {
@@ -410,6 +422,49 @@ impl RelevantMessages {
     relevant
   }
 
+  /// The relevant messages of a store that indexes them, without reading the conversation whole
+  /// (issue #1814): the newest [`MAX_ITEMS`] mentions of `me` and posts of theirs, their messages
+  /// not sent yet, the reactions to those posts, the messages of the threads any of them are in
+  /// or started, and the newest top-level row of others, read back from the feed's end. The feed
+  /// keeps the newest [`MAX_ITEMS`] entries, so older mentions and posts matter only in a
+  /// conversation that has more than that of them.
+  ///
+  /// Left out compared to [`Self::of`]: what only the threads of my polls, deleted messages and
+  /// mentions or posts past those limits bring, and hidden top-level messages of others (reactions
+  /// among themselves) as the newest top-level message: replies in a thread nobody follows are
+  /// read up to the newest top-level row instead.
+  fn indexed(
+    me: UserId,
+    store: &impl LocalStore,
+    conversation: ConversationId,
+    maybe_cursor: Option<u64>,
+  ) -> Result<Self, StoreError> {
+    let mut relevant = Self {
+      maybe_cursor,
+      maybe_loaded_threads: Some(HashSet::new()),
+      ..Self::default()
+    };
+    let mentions = store.user_messages(conversation, me, UserLink::Mentioned, MAX_ITEMS)?;
+    let posts = store.user_messages(conversation, me, UserLink::Posted, MAX_ITEMS)?;
+    let pending = store.messages_at(conversation, MessageSlot::Pending)?;
+    let targets: Vec<ClientMessageId> = posts.iter().map(|post| post.client_message_id).collect();
+    let reactions = store.reactions_to(conversation, &targets)?;
+    let found: Vec<&StoredMessage> = mentions
+      .iter()
+      .chain(&posts)
+      .chain(&pending)
+      .chain(&reactions)
+      .collect();
+    for message in &found {
+      relevant.note(me, message);
+    }
+    relevant.load_threads(me, store, conversation, found.iter().copied())?;
+    relevant.maybe_newest_top_level = relevant
+      .maybe_newest_top_level
+      .max(newest_top_level_row_of_others(me, store, conversation)?);
+    Ok(relevant)
+  }
+
   /// Brings them up to date with what the journal says was written: each message as the store
   /// holds it now, or gone. `false`: the journal can't tell which (all of the conversation's
   /// messages went), so they are read whole again.
@@ -420,6 +475,7 @@ impl RelevantMessages {
     conversation: ConversationId,
     written: &[Written],
   ) -> Result<bool, StoreError> {
+    let mut noted = Vec::new();
     for write in written {
       let Written::Message(client_message_id) = write else {
         return Ok(false);
@@ -427,9 +483,41 @@ impl RelevantMessages {
       self.messages.remove(client_message_id);
       if let Some(message) = store.message(conversation, *client_message_id)? {
         self.note(me, &message);
+        noted.push(message);
       }
     }
+    // A thread that became one an entry can be in (my first reply there, a mention in it) brings
+    // its earlier messages, which a read through the indexes didn't keep.
+    self.load_threads(me, store, conversation, noted.iter())?;
     Ok(true)
+  }
+
+  /// Reads the messages of the threads `messages` make relevant ([`entry_threads`]) that were not
+  /// read yet, when these were read through the indexes (all of them are here otherwise).
+  fn load_threads<'a>(
+    &mut self,
+    me: UserId,
+    store: &impl LocalStore,
+    conversation: ConversationId,
+    messages: impl IntoIterator<Item = &'a StoredMessage>,
+  ) -> Result<(), StoreError> {
+    let Some(loaded) = &mut self.maybe_loaded_threads else {
+      return Ok(());
+    };
+    let mut threads = Vec::new();
+    for message in messages {
+      for thread in entry_threads(me, message) {
+        if loaded.insert(thread) {
+          threads.push(thread);
+        }
+      }
+    }
+    for thread in threads {
+      for message in store.messages(conversation, MessageFilter::Thread(thread))? {
+        self.note(me, &message);
+      }
+    }
+    Ok(())
   }
 
   /// Kept in display order, as the entries are built from them.
@@ -520,6 +608,59 @@ fn is_relevant(me: UserId, message: &StoredMessage) -> bool {
       MessageContent::Reaction { .. } => true,
       _ => false,
     }
+}
+
+/// The threads whose messages decide `message`'s entries: those it is in or starts when it is mine
+/// ([`threads_involving`]), the one it is in when it mentions me (its thread's read position).
+fn entry_threads(me: UserId, message: &StoredMessage) -> Vec<ThreadId> {
+  if message.sender_user_id == me && !message.is_hidden() {
+    // A reply starts no thread of its own.
+    return match message.maybe_thread_id {
+      Some(thread) => vec![thread],
+      None => message
+        .maybe_server_id
+        .map(|server_id| ThreadId::from_snowflake(server_id.snowflake()))
+        .into_iter()
+        .collect(),
+    };
+  }
+  if message.mentions_user(me) {
+    return message.maybe_thread_id.into_iter().collect();
+  }
+  Vec::new()
+}
+
+/// Rows of the feed read at first when its newest top-level message of others is looked for from
+/// the end, doubled each time none is found.
+const NEWEST_ROWS_FIRST: usize = 4;
+/// Rows of the feed looked through at most for [`newest_top_level_row_of_others`]: a conversation
+/// whose newest rows are all mine reads no further (my own entries' targets are read anyway).
+const NEWEST_ROWS_MAX: usize = 256;
+
+/// [`newest_top_level_of_others`] among the newest rows of the feed, read from its end a few at a
+/// time: rows are in server order, so the first ones found are the newest.
+fn newest_top_level_row_of_others(
+  me: UserId,
+  store: &impl LocalStore,
+  conversation: ConversationId,
+) -> Result<Option<MessageId>, StoreError> {
+  let mut end = store.feed_len(conversation)?;
+  let floor = end.saturating_sub(NEWEST_ROWS_MAX);
+  let mut chunk = NEWEST_ROWS_FIRST;
+  while end > floor {
+    let start = end.saturating_sub(chunk).max(floor);
+    let rows = store.feed_rows(conversation, start, end - start)?;
+    if rows.is_empty() {
+      break;
+    }
+    let rows: Vec<&StoredMessage> = rows.iter().collect();
+    if let Some(newest) = newest_top_level_of_others(me, &rows) {
+      return Ok(Some(newest));
+    }
+    end = start;
+    chunk = chunk.saturating_mul(2);
+  }
+  Ok(None)
 }
 
 /// The newest top-level message of others with a server ID: read once the server counts nothing
@@ -944,6 +1085,101 @@ mod tests {
           .follow(user(ME), &store, id_from_raw(50), &[Written::Conversation])
           .unwrap()
       );
+    }
+
+    /// Issue #1814: the first build through the store's indexes keeps what the entries of a whole
+    /// read come from, whatever the read state.
+    #[test]
+    fn reading_through_the_indexes_gives_the_entries_a_whole_read_gives() {
+      let store = MemoryStore::new();
+      let mut unsent = reply(15, ME, 190, "unsent", &[], 8);
+      unsent.maybe_server_id = None;
+      write(
+        &store,
+        &[
+          text(1, ME, 100, "ship it", &[], None),
+          reply(2, ANNA, 110, "agreed", &[], 1),
+          reaction(3, ANNA, 115, 1, "🎉", true),
+          text(4, BEN, 120, "their root", &[], None),
+          reply(5, ANNA, 125, "before I joined", &[], 4),
+          reply(6, ME, 130, "i join", &[], 4),
+          reply(7, BEN, 135, "ben too", &[], 4),
+          text(8, BEN, 140, "other root", &[], None),
+          reply(9, BEN, 145, "@me here", &[ME], 8),
+          reply(10, ANNA, 150, "elsewhere", &[], 8),
+          text(11, ANNA, 160, "@me look", &[ME], None),
+          reaction(12, BEN, 165, 4, "👍", true),
+          text(13, BEN, 170, "newest post", &[], None),
+          text(14, ME, 180, "my newest", &[], None),
+          // Not sent yet: its thread concerns me already.
+          unsent,
+          text(16, BEN, 200, "unrelated root", &[], None),
+          reply(17, ANNA, 210, "unrelated reply", &[], 16),
+        ],
+      );
+      let relevant = RelevantMessages::indexed(user(ME), &store, id_from_raw(50), Some(0)).unwrap();
+      assert!(
+        !relevant.messages.contains_key(&client_id(17)),
+        "a thread that concerns no entry is not read"
+      );
+      let all = store
+        .messages(id_from_raw(50), crate::store::MessageFilter::All)
+        .unwrap();
+      for reads in [
+        ConversationReads::default(),
+        ConversationReads {
+          is_caught_up: true,
+          ..ConversationReads::default()
+        },
+        ConversationReads {
+          maybe_last_read: Some(message_id(9)),
+          thread_unread: HashMap::from([(thread(4), 1), (thread(8), 2), (thread(1), 0)]),
+          ..ConversationReads::default()
+        },
+      ] {
+        let whole = conversation_items(user(ME), None, &|_| false, &reads, id_from_raw(50), &all);
+        assert_eq!(whole.len(), 7, "{reads:?}");
+        assert_eq!(
+          sorted(followed_items(&reads, &relevant)),
+          sorted(whole),
+          "{reads:?}"
+        );
+      }
+    }
+
+    #[test]
+    fn a_thread_that_comes_to_concern_me_later_brings_its_earlier_replies() {
+      let store = MemoryStore::new();
+      write(
+        &store,
+        &[
+          text(1, BEN, 100, "their root", &[], None),
+          reply(2, ANNA, 110, "first", &[], 1),
+          reply(3, BEN, 120, "second", &[], 1),
+        ],
+      );
+      let mut relevant = RelevantMessages::indexed(user(ME), &store, id_from_raw(50), Some(0)).unwrap();
+      assert!(relevant.messages.is_empty());
+
+      let joined = reply(4, ME, 130, "i join", &[], 1);
+      write(&store, std::slice::from_ref(&joined));
+      assert!(
+        relevant
+          .follow(
+            user(ME),
+            &store,
+            id_from_raw(50),
+            &[Written::Message(joined.client_message_id)]
+          )
+          .unwrap()
+      );
+      let all = store
+        .messages(id_from_raw(50), crate::store::MessageFilter::All)
+        .unwrap();
+      let reads = ConversationReads::default();
+      let whole = conversation_items(user(ME), None, &|_| false, &reads, id_from_raw(50), &all);
+      assert_eq!(whole.len(), 2);
+      assert_eq!(sorted(followed_items(&reads, &relevant)), sorted(whole));
     }
 
     fn write(store: &MemoryStore, messages: &[StoredMessage]) {

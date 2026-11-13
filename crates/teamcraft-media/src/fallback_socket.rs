@@ -31,6 +31,7 @@ use tracing::debug;
 use web_time::Instant;
 
 use crate::call_resilience::RoundTripTimer;
+use crate::datagram::StreamId;
 use crate::fallback_pacer::{DrainPacer, PacingConfig};
 use crate::fallback_queue::{MediaQueue, MediaQueueConfig};
 
@@ -182,6 +183,12 @@ impl FallbackSender {
   }
 
   /// The rate video is paced to, in bits per second: what the path drains, about. `None` unpaced.
+  /// The streams whose video the queue had to drop since the last call: their receiver needs a
+  /// keyframe of each to show it again (#1845).
+  pub fn take_keyframe_needs(&self) -> Vec<StreamId> {
+    lock(&self.shared.queue).take_keyframe_needs()
+  }
+
   pub fn pacing_rate_bps(&self) -> Option<u32> {
     lock(&self.shared.maybe_pacer).as_ref().map(DrainPacer::rate_bps)
   }

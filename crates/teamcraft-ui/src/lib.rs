@@ -68,6 +68,7 @@ pub mod guest_resume;
 pub mod media_cache;
 pub mod media_formats;
 pub mod media_layout;
+pub mod meeting_list;
 pub mod meeting_reminders;
 pub mod meetings;
 pub mod mention;
@@ -75,6 +76,8 @@ pub mod message_links;
 pub mod message_sounds;
 #[cfg(any(test, feature = "demo"))]
 pub mod mock;
+#[cfg(feature = "demo")]
+pub mod mock_meetings;
 pub mod motion;
 pub mod mute_shortcut;
 pub mod navigation;

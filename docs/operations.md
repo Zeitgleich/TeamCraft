@@ -1447,6 +1447,7 @@ Files in this repository:
 | `dev/demo/teamcraft.demo.toml`   | Server settings that differ from the defaults (identity provider, limits) |
 | `dev/demo/dex.example.yaml`      | Identity provider: Dex with static users and their groups                 |
 | `tests/e2e/src/bin/demo-seed.rs` | The seeding run: real clients make the space, channels, DMs and files     |
+| `tests/e2e/src/demo.rs`          | The seed itself: who writes what where (shared with the e2e check)        |
 | `dev/demo/demo-reset.sh`         | `snapshot` after seeding, `restore` every night, `check`                  |
 | `dev/dev-token.py`               | Signs a user in at the provider (used by the seeding run)                 |
 
@@ -1507,6 +1508,13 @@ undoes everything else. Production keeps Keycloak and the sync.
    starts the server again.
 4. Sign in on a phone as a reviewer (instructions below) and check that the channels, messages and
    files are readable.
+
+The nightly end-to-end suite plays the same seed on a test server (`demo_signin.rs`, issue #1743):
+it dumps and restores the database with the reset's `pg_dump` and `pg_restore` flags, and a new
+device of the first reviewer restores the account from the passphrase and reads a seeded message, a
+direct message and a file with nobody else online. A release that breaks this flow turns the
+nightly run red before a store review finds it. It doesn't touch the demo instance; the step 4
+check above stays for the instance itself.
 
 ### Nightly reset
 

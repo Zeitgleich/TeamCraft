@@ -47,6 +47,7 @@ four-core runner, most of it the browser tests, which share two ports).
 | `display_names.rs`      | Directory policy (name format, full-name and e-mail privacy) in every response that names a person                                          |
 | `email_digest.rs`       | Content-free digest of missed mentions: opt-in, batched, skips what was read in time                                                        |
 | `dependency_outages.rs` | Storage and identity provider cut or hanging, Postgres cut: 503 + Retry-After, `/readyz`, recovery                                          |
+| `demo_signin.rs`        | The demo seed (`demo-seed`) on a test server, database snapshot and restore as `demo-reset.sh` does, a reviewer's new device restores from the passphrase and reads a message, a DM and a file |
 | `server_robustness.rs`  | SIGTERM with clients connected, resume vs. full sync, expired window, retries, Postgres outage, a reader that stalls, RSS/CPU               |
 | `web.rs` (`browser`)    | The web client in headless Chromium: Keycloak login page, welcome screen, the channel list shows the account's channels                     |
 | `web_directory.rs`      | The directory in the web client: people cards, the Channels tab, resending and revoking an invitation |

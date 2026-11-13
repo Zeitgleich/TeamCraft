@@ -49,6 +49,7 @@ shared-kind-links = Links
 links-empty-title = No links yet
 links-empty = Links shared in this conversation show up here.
 links-more = Show more
+files-more = Show more
 links-show-message = Show message
 file-download = Download
 file-progress = Transfer progress
