@@ -13,6 +13,7 @@
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
+use teamcraft_client_api::live::LiveMeetingNoticeDismissal;
 use teamcraft_proto::{MeetingId, MeetingKind, MeetingResponse, MeetingStatus, RsvpStatus};
 
 use crate::meetings::my_rsvp;
@@ -114,6 +115,20 @@ impl FiredReminders {
       .insert((reminder.meeting, reminder.starts_at, reminder.kind));
   }
 
+  /// The user joined or swiped away this occurrence's notice on another device (#1473): what it
+  /// covered doesn't show here any more. A report from before the start covered only the reminder,
+  /// so the notice at the start still comes. Returns whether the notice this device shows of the
+  /// meeting is the one dealt with and goes too: not when the start notice may stand in its place.
+  pub fn note_dismissed(&mut self, dismissal: &LiveMeetingNoticeDismissal, server_now: TimestampMs) -> bool {
+    let (meeting, starts_at) = (dismissal.meeting_id, dismissal.starts_at.0);
+    let covers_start = dismissal.dismissed_at.0 >= starts_at;
+    self.0.insert((meeting, starts_at, ReminderKind::Before));
+    if covers_start {
+      self.0.insert((meeting, starts_at, ReminderKind::AtStart));
+    }
+    covers_start || server_now < starts_at
+  }
+
   /// Drops entries of meetings that started long ago, so the stored list stays small.
   pub fn forget_old(&mut self, server_now: TimestampMs) {
     self
@@ -212,6 +227,55 @@ mod tests {
     maybe_minutes_before: Some(5),
     notifies_at_start: true,
   };
+
+  mod dismissed_elsewhere {
+    use super::*;
+
+    #[test]
+    fn a_reminder_dealt_with_before_the_start_still_lets_the_start_notice_come() {
+      let meetings = [meeting(1, NOON)];
+      let schedule = schedule(&meetings, FIVE_MINUTES);
+      let mut fired = FiredReminders::default();
+      let takes_down = fired.note_dismissed(
+        &dismissal(1, NOON, NOON - 4 * MS_PER_MINUTE),
+        NOON - 4 * MS_PER_MINUTE,
+      );
+      assert!(takes_down);
+      assert!(schedule.due(NOON - 3 * MS_PER_MINUTE, &fired).is_empty());
+      assert_eq!(kinds(&schedule.due(NOON, &fired)), vec![ReminderKind::AtStart]);
+    }
+
+    #[test]
+    fn a_start_notice_dealt_with_does_not_come_here() {
+      let meetings = [meeting(1, NOON)];
+      let schedule = schedule(&meetings, FIVE_MINUTES);
+      let mut fired = FiredReminders::default();
+      assert!(fired.note_dismissed(&dismissal(1, NOON, NOON + MS_PER_MINUTE), NOON + MS_PER_MINUTE));
+      assert!(schedule.due(NOON + 2 * MS_PER_MINUTE, &fired).is_empty());
+    }
+
+    #[test]
+    fn an_old_reminder_report_does_not_take_down_the_start_notice() {
+      // Read again after the start (a reload): the start notice may be what shows now.
+      let mut fired = FiredReminders::default();
+      assert!(!fired.note_dismissed(
+        &dismissal(1, NOON, NOON - 4 * MS_PER_MINUTE),
+        NOON + MS_PER_MINUTE
+      ));
+    }
+
+    #[test]
+    fn another_occurrence_still_reminds() {
+      let meetings = [meeting(1, NOON)];
+      let schedule = schedule(&meetings, FIVE_MINUTES);
+      let mut fired = FiredReminders::default();
+      fired.note_dismissed(
+        &dismissal(1, NOON - 7 * 24 * MS_PER_HOUR, NOON - 7 * 24 * MS_PER_HOUR),
+        NOON,
+      );
+      assert_eq!(kinds(&schedule.due(NOON, &fired)), vec![ReminderKind::AtStart]);
+    }
+  }
 
   mod timing {
     use super::*;
@@ -434,6 +498,14 @@ mod tests {
       maybe_email: None,
       maybe_name: None,
       rsvp,
+    }
+  }
+
+  fn dismissal(id: u64, starts_at: TimestampMs, dismissed_at: TimestampMs) -> LiveMeetingNoticeDismissal {
+    LiveMeetingNoticeDismissal {
+      meeting_id: id_from_raw(id),
+      starts_at: UnixMillis(starts_at),
+      dismissed_at: UnixMillis(dismissed_at),
     }
   }
 

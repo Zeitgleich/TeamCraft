@@ -159,6 +159,29 @@ impl Database {
     })
   }
 
+  /// Whether the notice of this kind and occurrence went to `user` and was reported as dealt with
+  /// since. A notice never sent counts as not dismissed.
+  pub async fn is_meeting_notice_dismissed(
+    &self,
+    meeting: MeetingId,
+    starts_at: OffsetDateTime,
+    kind: MeetingNoticeKind,
+    user: UserId,
+  ) -> Result<bool, DbError> {
+    let is_dismissed = sqlx::query_scalar!(
+      r#"SELECT EXISTS (SELECT 1 FROM meeting_notices
+                        WHERE meeting_id = $1 AND starts_at = $2 AND kind = $3 AND user_id = $4
+                          AND dismissed_at IS NOT NULL) AS "is_dismissed!""#,
+      to_db(meeting),
+      starts_at,
+      kind.as_str(),
+      to_db(user),
+    )
+    .fetch_one(self.pool())
+    .await?;
+    Ok(is_dismissed)
+  }
+
   /// Forgets the notices of occurrences that started before `before`. Returns how many.
   pub async fn delete_old_meeting_notices(&self, before: OffsetDateTime) -> Result<u64, DbError> {
     let result = sqlx::query!("DELETE FROM meeting_notices WHERE starts_at < $1", before)

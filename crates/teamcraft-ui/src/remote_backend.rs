@@ -2773,6 +2773,17 @@ impl ChatBackend for RemoteChat {
       .map_or(0, |live| live.marks.meetings)
   }
 
+  fn meeting_notice_dismissals(&self) -> Vec<teamcraft_client_api::live::LiveMeetingNoticeDismissal> {
+    self
+      .mirror
+      .borrow()
+      .snapshot
+      .maybe_live
+      .as_ref()
+      .map(|live| live.meeting_notice_dismissals.clone())
+      .unwrap_or_default()
+  }
+
   fn link_request_mark(&self) -> u64 {
     self
       .mirror

@@ -12,8 +12,8 @@ use std::collections::HashSet;
 
 use teamcraft_db::{MeetingNoticeDismissal, MeetingNoticeKind, MeetingNoticeRecipient, StoredMeeting};
 use teamcraft_proto::{
-  DEFAULT_MEETING_REMINDER_MINUTES, DismissMeetingNoticeRequest, MAX_MEETING_REMINDER_MINUTES, MeetingId,
-  MeetingStatus, PushKind, PushMeeting, UnixMillis, UserId,
+  DEFAULT_MEETING_REMINDER_MINUTES, DismissMeetingNoticeRequest, GatewayEvent, MAX_MEETING_REMINDER_MINUTES,
+  MeetingId, MeetingStatus, PushKind, PushMeeting, UnixMillis, UserId,
 };
 use time::OffsetDateTime;
 use tracing::warn;
@@ -79,6 +79,15 @@ pub async fn dismiss(
     MeetingNoticeDismissal::NotNotified => Err(ApiError::meeting_not_found()),
     MeetingNoticeDismissal::AlreadyDone => Ok(()),
     MeetingNoticeDismissal::Done => {
+      // Open web tabs and the desktop app take theirs down; phones get the silent wake-up.
+      state.hub.publish(
+        [caller.user.id],
+        &GatewayEvent::MeetingNoticeDismiss {
+          meeting_id: meeting,
+          starts_at: request.starts_at,
+          dismissed_at: unix_millis(OffsetDateTime::now_utc()),
+        },
+      );
       tokio::spawn(routing::dismiss_meeting(
         state.clone(),
         caller.user.id,
@@ -90,6 +99,29 @@ pub async fn dismiss(
       Ok(())
     },
   }
+}
+
+/// Whether the user already dealt with the notice a queued wake-up carries (joined or swiped it away
+/// on another device): sending it now would bring back what they put away. Only that kind's own
+/// notice counts, so a start notice after a dismissed reminder still goes out.
+pub async fn is_notice_dismissed(
+  state: &AppState,
+  user: UserId,
+  kind: &PushKind,
+  notice: PushMeeting,
+) -> Result<bool, ApiError> {
+  let kind = match kind {
+    PushKind::MeetingReminder => MeetingNoticeKind::Reminder,
+    PushKind::MeetingStart => MeetingNoticeKind::Start,
+    _ => return Ok(false),
+  };
+  let starts_at = at(notice.starts_at.0)?;
+  Ok(
+    state
+      .database
+      .is_meeting_notice_dismissed(notice.meeting_id, starts_at, kind, user)
+      .await?,
+  )
 }
 
 /// Whether the occurrence a queued notice tells about still is on: the meeting isn't cancelled and

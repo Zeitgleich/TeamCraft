@@ -823,6 +823,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       GatewayEvent::MeetingUpdate { .. } | GatewayEvent::LobbyJoin { .. } => {
         read_state::update_marks(&self.store, |marks| marks.meetings += 1)
       },
+      // Joined or swiped away on another device (#1473): the UI takes this device's notice down.
+      GatewayEvent::MeetingNoticeDismiss {
+        meeting_id,
+        starts_at,
+        dismissed_at,
+      } => read_state::note_meeting_notice_dismissal(
+        &self.store,
+        teamcraft_proto::live::LiveMeetingNoticeDismissal {
+          meeting_id,
+          starts_at,
+          dismissed_at,
+        },
+      ),
       // The list is read again; the change itself is only a hint (issue #212).
       GatewayEvent::GuestExpired { .. } | GatewayEvent::GuestTermsUpdate => {
         self.are_expiring_guests_stale = true;

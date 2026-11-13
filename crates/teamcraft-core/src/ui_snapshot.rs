@@ -542,6 +542,7 @@ fn live_since<S: LocalStore>(
     receipts: backend.read(crate::read_state::all_read_receipts(store)),
     delivered: backend.read(crate::read_state::all_delivered_to_others(store)),
     marks: backend.read(crate::read_state::marks(store)),
+    meeting_notice_dismissals: backend.read(crate::read_state::meeting_notice_dismissals(store)),
   }
 }
 

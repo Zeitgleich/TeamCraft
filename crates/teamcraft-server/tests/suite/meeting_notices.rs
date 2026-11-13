@@ -13,7 +13,7 @@ use base64::engine::general_purpose::STANDARD;
 use common::*;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
-use teamcraft_proto::{PushKind, PushProvider, PushWakeUp};
+use teamcraft_proto::{GatewayEvent, PushKind, PushMeeting, PushProvider, PushWakeUp, UnixMillis};
 use teamcraft_server::auth::BoxFuture;
 use teamcraft_server::config::{MailTexts, MeetingsConfig};
 use teamcraft_server::push::crypto::open_wakeup;
@@ -500,6 +500,87 @@ mod dismissal {
       other_meeting.body
     );
     assert!(scene.recorder.taken().await.is_empty(), "nothing went out");
+  }
+
+  #[tokio::test]
+  async fn open_tabs_and_the_desktop_learn_it_over_the_gateway() {
+    let Some(scene) = scene().await else { return };
+    let starts_at = now_ms() + 11 * 24 * 60 * MINUTE;
+    let (id, _) = scene.schedule(starts_at, None).await;
+    run_at(&scene.app, starts_at - 5 * MINUTE).await;
+    scene.recorder.taken().await;
+    let mut bobs = ws::connect(&scene.app, &scene.bob, &scene.bob_phone).await;
+    let mut carols = ws::connect(&scene.app, &scene.carol, &scene.carol_phone).await;
+
+    let before = now_ms();
+    let reply = report(&scene, &scene.bob, &id, starts_at).await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
+    let dismissals: Vec<_> = ws::events(&mut bobs, Duration::from_millis(500))
+      .await
+      .into_iter()
+      .filter_map(|event| match event {
+        GatewayEvent::MeetingNoticeDismiss {
+          meeting_id,
+          starts_at,
+          dismissed_at,
+        } => Some((meeting_id.to_string(), starts_at.0, dismissed_at.0)),
+        _ => None,
+      })
+      .collect();
+    assert_eq!(dismissals.len(), 1, "{dismissals:?}");
+    let (meeting, occurrence, dismissed_at) = dismissals[0].clone();
+    assert_eq!((meeting, occurrence), (id.clone(), starts_at));
+    assert!(
+      dismissed_at >= before - 1000 && dismissed_at < starts_at,
+      "the server's time of the report"
+    );
+    let carol_saw = ws::events(&mut carols, Duration::from_millis(200)).await;
+    assert!(
+      !carol_saw
+        .iter()
+        .any(|event| matches!(event, GatewayEvent::MeetingNoticeDismiss { .. })),
+      "only the reporting user's sessions"
+    );
+
+    // A repeat sends nothing again.
+    report(&scene, &scene.bob, &id, starts_at).await;
+    assert!(
+      !ws::events(&mut bobs, Duration::from_millis(300))
+        .await
+        .iter()
+        .any(|event| matches!(event, GatewayEvent::MeetingNoticeDismiss { .. }))
+    );
+  }
+
+  #[tokio::test]
+  async fn a_queued_retry_of_a_dismissed_notice_is_skipped_but_the_later_start_notice_is_not() {
+    let Some(scene) = scene().await else { return };
+    let starts_at = now_ms() + 12 * 24 * 60 * MINUTE;
+    let (id, _) = scene.schedule(starts_at, None).await;
+    run_at(&scene.app, starts_at - 5 * MINUTE).await;
+    scene.recorder.taken().await;
+    let bob: teamcraft_proto::UserId = scene.bob_id.parse().unwrap();
+    let notice = PushMeeting {
+      meeting_id: id.parse().unwrap(),
+      starts_at: UnixMillis(starts_at),
+    };
+    let is_dismissed = |kind: PushKind| {
+      let state = scene.app.state.clone();
+      async move {
+        meeting_notices::is_notice_dismissed(&state, bob, &kind, notice)
+          .await
+          .unwrap()
+      }
+    };
+    assert!(!is_dismissed(PushKind::MeetingReminder).await, "not yet reported");
+
+    report(&scene, &scene.bob, &id, starts_at).await;
+    assert!(is_dismissed(PushKind::MeetingReminder).await);
+    assert!(
+      !is_dismissed(PushKind::MeetingStart).await,
+      "the start notice is still to come"
+    );
+    assert!(!is_dismissed(PushKind::Message).await, "other kinds pass");
   }
 
   #[tokio::test]
