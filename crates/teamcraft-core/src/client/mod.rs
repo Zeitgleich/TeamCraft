@@ -374,6 +374,10 @@ pub struct ClientSettings {
   /// this often, so the UI's input and reads are answered meanwhile. `None` (default): a host with
   /// a thread of its own for the client, where readers have their own thread too.
   pub maybe_thread_turn: Option<std::time::Duration>,
+  /// Whether history this device skipped (a catch-up's backlog, history imported before what it
+  /// held) is read in the background or only when the reader scrolls there. Default
+  /// [`HistoryReading::Background`]; the browser reads on demand ([`Self::with_history_on_demand`]).
+  pub history_reading: HistoryReading,
   /// Make the user's notes to self (a DM with themself) once a sync finds there is none. Off by
   /// default; the apps turn it on with [`ClientSettings::with_notes_to_self`].
   pub creates_notes_to_self: bool,
@@ -418,6 +422,26 @@ impl ClientSettings {
     self.maybe_thread_turn = Some(THREAD_TURN);
     self
   }
+
+  /// The settings of a host that reads skipped history only when the reader scrolls there (web,
+  /// issue #1910): the browser keeps no offline copy, and every page it reads in the background is
+  /// decrypted and stored on the UI's only thread.
+  pub fn with_history_on_demand(mut self) -> Self {
+    self.history_reading = HistoryReading::OnDemand;
+    self
+  }
+}
+
+/// How a client reads history it skipped: a catch-up's backlog (issue #1423) and history imported
+/// before what the device held (e2ee.md §4.10).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HistoryReading {
+  /// Page by page in the background until it is all held, so the device has it offline (apps).
+  #[default]
+  Background,
+  /// Only when the reader scrolls there: a backlog stays a hole in the feed
+  /// (`history_gaps.rs`), imported history is read above the oldest message (`older_history.rs`).
+  OnDemand,
 }
 
 /// [`ClientSettings::maybe_thread_turn`] of the web app: below the 50 ms of a "long task", so the
@@ -625,6 +649,7 @@ impl Default for ClientSettings {
       catch_up_concurrency: 6,
       catch_up_message_pages: None,
       maybe_thread_turn: None,
+      history_reading: HistoryReading::Background,
       creates_notes_to_self: false,
       makes_thumbnails: true,
       // A day: a user who comes back to a failed setup soon picks up its registration.

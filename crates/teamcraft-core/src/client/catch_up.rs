@@ -30,8 +30,8 @@ use teamcraft_proto::{
   ListMlsMessagesQuery, ListMlsMessagesResponse, MlsMessageResponse, Snowflake, UserId,
 };
 
-use super::Client;
 use super::sync::ResyncPart;
+use super::{Client, HistoryReading};
 use crate::api::{ApiError, ServerApi};
 use crate::error::CoreError;
 use crate::records;
@@ -247,7 +247,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.catch_up_each(waiting, &phases).await?;
     phases.lap("content", self.now_ms());
     self.trace_lap("catch-up: content");
-    if self.background_backlogs.is_on {
+    if self.settings.history_reading == HistoryReading::OnDemand {
+      // The reader reads them where they scroll (issue #1910).
+      self.leave_backlogs_to_reader(conversations)?;
+    } else if self.background_backlogs.is_on {
       // The host's loop reads them after the sync (issue #1448).
       self.leave_backlogs_to_host(conversations)?;
     } else {

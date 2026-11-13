@@ -107,8 +107,8 @@ mod trust;
 
 pub use client::{
   AttestationSettings, CallEventSink, CallKeySigner, CallPreparation, Client, ClientSettings,
-  EnrollmentOptions, EnrollmentSecret, FlushReport, GatewayOutcome, GroupAccess, HistoryScan, JwksSource,
-  LinkAnnouncement, LinkCodeKind, LinkOffer, LinkRequestInfo, LinkRequestList, MAX_VIEWER_BYTES,
+  EnrollmentOptions, EnrollmentSecret, FlushReport, GatewayOutcome, GroupAccess, HistoryReading, HistoryScan,
+  JwksSource, LinkAnnouncement, LinkCodeKind, LinkOffer, LinkRequestInfo, LinkRequestList, MAX_VIEWER_BYTES,
   NewBackupSecret, OrgRecoveryUnlock, PendingEnrollment, SyncPhase, parse_recovery_key,
 };
 pub use error::{CoreError, JoinRequestRefusal, UnreadableStore};

@@ -7,7 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::common::{Peer, clock, link_device, settings, settle};
-use teamcraft_core::ClientSettings;
+#[cfg(feature = "ui")]
+use teamcraft_client_api::model::GapEdge;
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::{FakeServer, NetworkCut};
 use teamcraft_core::client::is_catching_up;
@@ -15,7 +16,8 @@ use teamcraft_core::clock::{Clock, ManualClock};
 use teamcraft_core::records;
 use teamcraft_core::runner::{RunnerCommand, RunnerSettings, SyncRunner};
 use teamcraft_core::store::{LocalStore, MessageContent, MessageFilter, StoredMessage, Table, Unreadable};
-use teamcraft_proto::{ClientMessageId, ConversationId, ListMessagesQuery, UserId};
+use teamcraft_core::{ClientSettings, HistoryReading};
+use teamcraft_proto::{ClientMessageId, ConversationId, ListMessagesQuery, MessageId, UserId};
 
 /// How long each member list takes in the tests about the focused conversation.
 const MEMBER_LIST_DELAY: Duration = Duration::from_secs(1);
@@ -379,6 +381,91 @@ async fn a_host_reads_the_backlog_after_the_sync() {
   );
 }
 
+/// Issue #1910: a host that reads history on demand (the browser) reads no backlog in the
+/// background. The sync ends after the newest page; the rest stays a hole the reader fills where
+/// they scroll, oldest first, with the controls in it taken in their order.
+#[cfg(feature = "ui")]
+#[tokio::test]
+async fn a_host_reading_on_demand_leaves_the_backlog_to_the_reader() {
+  let on_demand = ClientSettings {
+    history_reading: HistoryReading::OnDemand,
+    ..capped_settings()
+  };
+  let (server, mut alice, mut carol, channel) = busy_channel_with(on_demand, clock()).await;
+  let target = alice.client.send_text(channel, None, "pin me").await.unwrap();
+  settle(&mut [&mut alice, &mut carol]).await;
+  send_many(&mut alice, channel, "a", 12).await;
+  alice.client.set_pinned(channel, target, true).await.unwrap();
+  send_many(&mut alice, channel, "b", 12).await;
+  alice.client.set_pinned(channel, target, false).await.unwrap();
+  send_many(&mut alice, channel, "c", 2).await;
+
+  let before = server.message_list_count(carol.client.user_id());
+  carol.client.full_sync().await.unwrap();
+  let sync_pages = server.message_list_count(carol.client.user_id()) - before;
+
+  assert_eq!(
+    carol.texts(channel).len(),
+    2 + 10 + 4,
+    "in order up to a 9, and the newest page"
+  );
+  assert!(
+    sync_pages <= 3,
+    "two pages in order and the newest page: {sync_pages}"
+  );
+  assert!(
+    !is_catching_up(carol.client.store(), channel).unwrap(),
+    "nothing waits for the backlog"
+  );
+  assert!(
+    !carol.client.is_background_history_due(),
+    "no page is read in the background"
+  );
+  // The upkeep's paging reads nothing either.
+  assert_eq!(carol.client.page_imported_history().await.unwrap(), 0);
+  assert_eq!(
+    server.message_list_count(carol.client.user_id()) - before,
+    sync_pages
+  );
+
+  // The reader scrolls up into the hole: it fills from its older side, a page per request.
+  let mut request = 0;
+  while let Some(after) = first_gap_after(&carol, channel) {
+    request += 1;
+    assert!(request < 10, "the hole fills");
+    carol
+      .client
+      .fill_history_gap(channel, after, GapEdge::Older, request)
+      .await
+      .unwrap();
+  }
+  let mut everything = vec!["before".to_owned(), "pin me".to_owned()];
+  everything.extend((0..12).map(|index| format!("a {index}")));
+  everything.extend((0..12).map(|index| format!("b {index}")));
+  everything.extend((0..2).map(|index| format!("c {index}")));
+  assert_eq!(carol.texts(channel), everything);
+  assert!(!is_pinned(&carol, channel, target), "the older pin won");
+}
+
+/// Issue #1910: backlogs an earlier run left for the host's loop (before the browser read on
+/// demand) become holes for the reader when the client opens, and stop holding the catch-up mark.
+#[tokio::test]
+async fn backlogs_left_by_an_earlier_run_go_to_the_reader() {
+  let (_server, mut alice, mut carol, channel) = busy_channel().await;
+  carol.client.read_backlogs_in_background().unwrap();
+  send_many(&mut alice, channel, "a", 30).await;
+  carol.client.full_sync().await.unwrap();
+  assert!(is_catching_up(carol.client.store(), channel).unwrap());
+
+  carol.client.leave_stored_backlogs_to_reader().unwrap();
+
+  assert!(!is_catching_up(carol.client.store(), channel).unwrap());
+  assert!(
+    first_gap_after(&carol, channel).is_some(),
+    "the hole stays for the reader"
+  );
+}
+
 /// Issue #1448: a backlog a catch-up cut short left is read by the host's loop from where it stood,
 /// without another catch-up; a page that fails waits for its retry time.
 #[tokio::test]
@@ -622,14 +709,17 @@ async fn busy_channel() -> (FakeServer, Peer, Peer, ConversationId) {
 
 /// [`busy_channel`] with Carol on `carol_clock`.
 async fn busy_channel_on(carol_clock: Box<dyn Clock>) -> (FakeServer, Peer, Peer, ConversationId) {
+  busy_channel_with(capped_settings(), carol_clock).await
+}
+
+/// [`busy_channel`] with Carol on `carol_settings` and `carol_clock`.
+async fn busy_channel_with(
+  carol_settings: ClientSettings,
+  carol_clock: Box<dyn Clock>,
+) -> (FakeServer, Peer, Peer, ConversationId) {
   let server = FakeServer::new();
   let mut alice = Peer::enroll(&server, "Alice").await;
-  let capped = ClientSettings {
-    history_page_size: 5,
-    catch_up_message_pages: Some(2),
-    ..settings()
-  };
-  let mut carol = Peer::enroll_on_clock(server.add_user("Carol"), "Carol", capped, carol_clock).await;
+  let mut carol = Peer::enroll_on_clock(server.add_user("Carol"), "Carol", carol_settings, carol_clock).await;
   let space = alice.space().await;
   let channel = alice.client.create_channel(space, "busy").await.unwrap();
   alice
@@ -642,6 +732,22 @@ async fn busy_channel_on(carol_clock: Box<dyn Clock>) -> (FakeServer, Peer, Peer
   carol.client.full_sync().await.unwrap();
   assert_eq!(carol.texts(channel), vec!["before".to_owned()]);
   (server, alice, carol, channel)
+}
+
+/// Carol's settings in [`busy_channel`]: pages of five, two pages in order before the newest.
+fn capped_settings() -> ClientSettings {
+  ClientSettings {
+    history_page_size: 5,
+    catch_up_message_pages: Some(2),
+    ..settings()
+  }
+}
+
+/// Where the oldest hole of `channel` starts, as the feed sees it.
+fn first_gap_after(peer: &Peer, channel: ConversationId) -> Option<MessageId> {
+  let record: serde_json::Value =
+    records::get_json(&*peer.store, Table::SyncState, &format!("history_gaps/{channel}")).unwrap()?;
+  serde_json::from_value(record["gaps"].get(0)?["after"].clone()).ok()
 }
 
 async fn send_many(peer: &mut Peer, channel: ConversationId, prefix: &str, count: usize) {

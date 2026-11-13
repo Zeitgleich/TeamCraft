@@ -593,6 +593,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       &imported_key(conversation),
       &through,
     )?;
+    self.reopen_older_history(conversation)?;
     Ok(loaded)
   }
 

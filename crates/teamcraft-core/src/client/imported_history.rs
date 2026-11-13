@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{ConversationId, ListMessagesQuery, MessageId};
 
-use super::Client;
+use super::{Client, HistoryReading};
 use crate::api::ServerApi;
 use crate::error::CoreError;
 use crate::records;
@@ -36,7 +36,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// that has some left. Returns how many messages arrived. Without anything left it is a no-op
   /// that reads nothing, not even the store, until the next import finishes.
   pub async fn page_imported_history(&mut self) -> Result<usize, CoreError> {
-    if self.is_imported_history_paged {
+    // On demand (the browser, issue #1910): the reader reads it above the oldest message.
+    if self.is_imported_history_paged || self.settings.history_reading == HistoryReading::OnDemand {
       return Ok(0);
     }
     let Some((conversation, through, maybe_before)) = self.next_imported_page()? else {

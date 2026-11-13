@@ -135,6 +135,25 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
+  /// An import finished (e2ee.md §4.10): its history lies before the beginning the reader may have
+  /// reached, so the top of the feed asks the server again. Where history is read on demand (the
+  /// browser, issue #1910) that is how the import is read.
+  pub(super) fn reopen_older_history(&self, conversation: ConversationId) -> Result<(), CoreError> {
+    let key = record_key(conversation);
+    let Some(record) = records::get_json::<OlderHistoryRecord>(&self.store, Table::SyncState, &key)? else {
+      return Ok(());
+    };
+    if record.maybe_position != Some(PagingPosition::Beginning) {
+      return Ok(());
+    }
+    let reopened = OlderHistoryRecord {
+      maybe_position: None,
+      ..record
+    };
+    records::put_json(&self.store, Table::SyncState, &key, &reopened)?;
+    Ok(())
+  }
+
   /// What is known of a conversation that is gone says nothing about it if it comes back: the
   /// history this user may see can differ then.
   pub(super) fn forget_older_history(&self, conversation: ConversationId) -> Result<(), CoreError> {

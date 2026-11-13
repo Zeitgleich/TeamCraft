@@ -1817,7 +1817,8 @@ impl Core {
         ClientSettings::default()
           .with_notes_to_self()
           .with_capped_catch_up()
-          .with_thread_turns(),
+          .with_thread_turns()
+          .with_history_on_demand(),
       )
     });
     let maybe_client = match opened {
@@ -1853,7 +1854,8 @@ impl Core {
       ClientSettings::default()
         .with_notes_to_self()
         .with_capped_catch_up()
-        .with_thread_turns(),
+        .with_thread_turns()
+        .with_history_on_demand(),
       Argon2Settings::default(),
     )
     .await;
@@ -1950,9 +1952,10 @@ impl Core {
     let mut client = client;
     // Calls ring and show their roster in the tab that runs the core.
     client.set_call_event_sink(Box::new(crate::web_calls::on_gateway_event));
-    // The loop reads what a catch-up leaves, a page per turn (issue #1448).
-    if let Err(error) = client.read_backlogs_in_background() {
-      tracing::warn!(%error, "backlogs left by an earlier run not found; the next catch-up reads them");
+    // History is read where the reader scrolls (issue #1910): backlogs an earlier run left become
+    // holes in the feed, read on demand like the rest.
+    if let Err(error) = client.leave_stored_backlogs_to_reader() {
+      tracing::warn!(%error, "backlogs left by an earlier run not found; the next catch-up leaves them");
     }
     self.client = Some(client);
     self.maybe_push_check_at_ms = Some(i64::MIN);
@@ -2286,7 +2289,8 @@ impl Core {
       Box::new(SystemClock),
       ClientSettings::default()
         .with_capped_catch_up()
-        .with_thread_turns(),
+        .with_thread_turns()
+        .with_history_on_demand(),
       device_name,
       // The key bag is wrapped with a random secret nobody keeps: the cheapest setting is plenty.
       Argon2Settings {
@@ -2336,7 +2340,8 @@ impl Core {
         ClientSettings::default()
           .with_notes_to_self()
           .with_capped_catch_up()
-          .with_thread_turns(),
+          .with_thread_turns()
+          .with_history_on_demand(),
         options,
       )
       .await
