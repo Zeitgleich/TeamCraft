@@ -131,6 +131,19 @@ impl VoiceSteps {
     self.upgrade_after = config.upgrade_after;
   }
 
+  /// Another network or connection: its room is unknown, the voice starts full again (as the
+  /// estimate starts afresh). Returns the new encoding when it changed.
+  pub fn start_afresh(&mut self) -> Option<VoiceEncoding> {
+    let before = self.encoding();
+    self.step = VoiceStep::Full;
+    self.maybe_better_since = None;
+    self.upgrade_after = self.config.upgrade_after;
+    self.maybe_upgraded_at = None;
+    self.maybe_changed_at = None;
+    let after = self.encoding();
+    (after != before).then_some(after)
+  }
+
   /// How the voice is to be encoded now.
   pub fn encoding(&self) -> VoiceEncoding {
     let encoding = match self.step {
@@ -476,6 +489,14 @@ mod tests {
     let wanted = steps.wanted_bps().unwrap();
     assert!(f64::from(wanted) >= f64::from(config.thinnest_below_bps) * config.upgrade_margin);
     assert!(wanted < config.thin_below_bps);
+  }
+
+  #[test]
+  fn another_network_starts_full() {
+    let mut steps = steps(true);
+    steps.on_estimate(THINNEST_BPS, false, Instant::now());
+    assert_eq!(steps.start_afresh(), Some(VoiceStepConfig::default().full));
+    assert_eq!(steps.start_afresh(), None);
   }
 
   #[test]

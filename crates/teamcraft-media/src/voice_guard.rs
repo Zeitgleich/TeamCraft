@@ -184,6 +184,10 @@ impl VoiceGuard {
   /// Forgets what became of the voice so far: the link is measured afresh (a new video track,
   /// after a call of sound only, starts with every layer, #935).
   pub fn forget(&mut self) {
+    // Voice still waiting for a report too: a new connection numbers its datagrams from the
+    // start, and its reports would be read as the fate of the old one's voice.
+    self.pending.clear();
+    self.pending_since.clear();
     self.reports.clear();
     self.delays.clear();
     self.maybe_hurt_at = None;
