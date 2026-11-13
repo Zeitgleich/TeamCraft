@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 use teamcraft_crypto::channel_anchor::{
   AnchorError, AnchorExpectation, AnchorFloor, AnchorHash, AnchorKind, AnchorOrigin, ChannelAnchor,
-  DEFAULT_MAX_ANCHOR_BYTES, ExpectedKind, FloorError, VerifiedAnchor, name_hash,
+  DEFAULT_MAX_ANCHOR_BYTES, ExpectedKind, FloorError, FloorState, NameAuthority, VerifiedAnchor, name_hash,
 };
 use teamcraft_crypto::ids::{MeetingId, UserId};
 use teamcraft_crypto::mls::MlsError;
@@ -317,6 +317,99 @@ pub fn role_founding(
 /// Whether the listed name differs from what the anchor signed: shown to members as a mark.
 pub fn is_listed_name_stale(anchor: &VerifiedAnchor, listed_name: &str) -> bool {
   name_hash(listed_name) != anchor.properties().name_hash
+}
+
+/// What this device last verified of a channel's anchored name (e2ee.md §4.6.5), kept so the apps
+/// can show the marks without verifying again: its hash and who signed it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldName {
+  pub name_hash: AnchorHash,
+  pub set_by: teamcraft_proto::UserId,
+  pub role: NameRole,
+}
+
+/// The role a channel's anchored name was signed in ([`NameAuthority`], kept in the store).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NameRole {
+  Founder,
+  ChannelAdmin,
+  Workspace,
+  /// A member's name: stale for deletions, which take the retention (D5).
+  Member,
+}
+
+/// Which side of the anchor the user's devices saw two of (`FloorState`): it grants nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnchorFork {
+  /// Two foundings no re-founding connects.
+  Founding,
+  /// Two properties (name or space) for one version, until a higher version settles it.
+  Properties,
+}
+
+/// What members and admins are shown of a channel's anchor on this device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AnchorMarks {
+  /// The listed name isn't the anchor's: renamed on the server only, or by an app that couldn't
+  /// sign it.
+  pub is_name_stale: bool,
+  /// Who signed the anchor's name, and in which role; `None` when this device holds no verified
+  /// anchor right now.
+  pub maybe_name_set_by: Option<(teamcraft_proto::UserId, NameRole)>,
+  pub maybe_fork: Option<AnchorFork>,
+}
+
+impl HeldName {
+  /// What a verified anchor says of the name; `None` for a signer whose user ID doesn't convert.
+  pub fn of(anchor: &VerifiedAnchor) -> Option<Self> {
+    let properties = anchor.properties();
+    let set_by = convert::user_from_crypto(properties.name_set_by.user_id).ok()?;
+    Some(Self {
+      name_hash: properties.name_hash,
+      set_by,
+      role: NameRole::of(properties.name_set_by.authority),
+    })
+  }
+}
+
+impl NameRole {
+  pub fn of(authority: NameAuthority) -> Self {
+    match authority {
+      NameAuthority::Founder => Self::Founder,
+      NameAuthority::ChannelAdmin => Self::ChannelAdmin,
+      NameAuthority::Workspace => Self::Workspace,
+      NameAuthority::Member => Self::Member,
+    }
+  }
+}
+
+/// The marks of a channel from what this device holds: the name it last verified in the anchor,
+/// the pin and floor of the user's devices, and the name the server lists. `None` for a channel
+/// with neither (not anchored here). A name is only stale against a verified anchor: one this
+/// device can't verify right now shows no mark (it grants nothing anyway).
+pub fn anchor_marks(
+  maybe_held: Option<&HeldName>,
+  maybe_floor: Option<&AnchorFloor>,
+  maybe_listed_name: Option<&str>,
+) -> Option<AnchorMarks> {
+  if maybe_held.is_none() && maybe_floor.is_none() {
+    return None;
+  }
+  let is_name_stale = maybe_held
+    .zip(maybe_listed_name)
+    .is_some_and(|(held, listed)| name_hash(listed) != held.name_hash);
+  let maybe_fork = maybe_floor.and_then(|floor| match floor.state {
+    FloorState::ForkedFounding => Some(AnchorFork::Founding),
+    FloorState::ForkedProperties => Some(AnchorFork::Properties),
+    // A state a newer app wrote grants nothing too, but this app can't say what it is.
+    FloorState::Agreed | FloorState::Unknown => None,
+  });
+  Some(AnchorMarks {
+    is_name_stale,
+    maybe_name_set_by: maybe_held.map(|held| (held.set_by, held.role)),
+    maybe_fork,
+  })
 }
 
 fn raised(floor: &AnchorFloor, verified: &VerifiedAnchor, epoch: u64) -> AnchorVerdict {

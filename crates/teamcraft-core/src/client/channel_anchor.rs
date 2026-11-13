@@ -17,7 +17,7 @@ use teamcraft_proto::{ConversationId, ConversationKind, ConversationResponse, Me
 
 use super::Client;
 use crate::anchoring::{
-  self, AnchorOutcome, AnchorVerdict, MeetingCheck, MeetingExpectation, ReleaseVersion,
+  self, AnchorMarks, AnchorOutcome, AnchorVerdict, HeldName, MeetingCheck, MeetingExpectation, ReleaseVersion,
 };
 use crate::api::ServerApi;
 use crate::channel_roles::RoleFounding;
@@ -30,6 +30,14 @@ use crate::trust::{PinnedDirectory, WorkspaceAuthority};
 
 /// Where the highest `minimum_client_version` this device has seen is kept (D2: monotonic).
 const MINIMUM_VERSION_KEY: &str = "highest_minimum_client_version";
+
+/// That the pin or floor refused the group state this device was offered last (e2ee.md §4.6.5,
+/// "Stripping and replacing"): it stays out, and the channel shows as unreachable.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct AnchorRefusal {
+  at_ms: i64,
+  reason: String,
+}
 
 /// The channel's anchor as this device holds it now, for decisions that rest on it.
 pub(crate) enum HeldAnchor {
@@ -221,6 +229,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .map(|(_, key)| key.fingerprint());
     let verdict = anchoring::judge_entering(maybe_floor.as_ref(), &outcome, group.epoch());
     let admitted = self.apply_anchor_verdict(conversation, verdict)?;
+    match &admitted {
+      Ok(()) => {
+        self.note_held_name(conversation, outcome.verified())?;
+        self
+          .store
+          .delete(Table::AppliedChanges, &anchor_refused_key(conversation))?;
+      },
+      Err(refusal) => records::put_json(
+        &self.store,
+        Table::AppliedChanges,
+        &anchor_refused_key(conversation),
+        &AnchorRefusal {
+          at_ms: self.now_ms(),
+          reason: refusal.to_string(),
+        },
+      )?,
+    }
     // The meeting's host lists count only from the founder's key now (#1747).
     if admitted.is_ok()
       && let Some(founder) = maybe_meeting_founder
@@ -347,6 +372,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     );
     let epoch = group.epoch();
     let verdict = anchoring::judge_inside(maybe_floor.as_ref(), &outcome, epoch);
+    self.note_held_name(conversation, outcome.verified())?;
     if let Err(error) = self.apply_anchor_verdict(conversation, verdict)? {
       // The commit is merged already, and the crypto layer refuses any commit that touches the
       // founding: another device of the user pinned another founding. Granting nothing is all
@@ -380,6 +406,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       group.verified_anchor(&expected, &directory, &authority),
       maybe_bytes.as_deref(),
     );
+    self.note_held_name(conversation, outcome.verified())?;
     Ok(match (outcome, maybe_floor) {
       (AnchorOutcome::Verified(anchor), maybe_floor) => {
         // A floor of another founding is a fork: the anchor grants nothing.
@@ -523,6 +550,38 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     })
   }
 
+  /// Reads the channel's anchor again for the marks the apps show (the channel or its settings
+  /// opened): what [`channel_anchor_marks`] reads.
+  pub(crate) async fn refresh_channel_anchor(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<(), CoreError> {
+    if !self.has_group(conversation)? {
+      return Ok(());
+    }
+    Box::pin(self.held_anchor(conversation)).await.map(|_| ())
+  }
+
+  /// Keeps what this device verified of the anchor's name, or forgets it when nothing verifies:
+  /// a name is shown as stale only against a verified anchor.
+  fn note_held_name(
+    &self,
+    conversation: ConversationId,
+    maybe_verified: Option<&VerifiedAnchor>,
+  ) -> Result<(), CoreError> {
+    let key = held_name_key(conversation);
+    match maybe_verified.and_then(HeldName::of) {
+      Some(held) => {
+        let maybe_known: Option<HeldName> = records::get_json(&self.store, Table::AppliedChanges, &key)?;
+        if maybe_known != Some(held) {
+          records::put_json(&self.store, Table::AppliedChanges, &key, &held)?;
+        }
+        Ok(())
+      },
+      None => Ok(self.store.delete(Table::AppliedChanges, &key)?),
+    }
+  }
+
   fn listed_name(&self, conversation: ConversationId) -> Result<Option<String>, CoreError> {
     let maybe_known: Option<ConversationResponse> =
       records::get_json(&self.store, Table::Conversations, &conversation.to_string())?;
@@ -598,6 +657,44 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
     }
   }
+}
+
+/// What the apps show of a channel's anchor on this device (e2ee.md §4.6.5): a listed name the
+/// anchor doesn't hold, who signed the anchor's name, and a fork the user's devices saw. `None` for
+/// a channel that isn't anchored here.
+pub fn channel_anchor_marks(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+) -> Result<Option<AnchorMarks>, CoreError> {
+  let maybe_held: Option<HeldName> =
+    records::get_json(store, Table::AppliedChanges, &held_name_key(conversation))?;
+  let maybe_floor = super::stored_account_data(store)?.anchor_floor(conversation);
+  let maybe_known: Option<ConversationResponse> =
+    records::get_json(store, Table::Conversations, &conversation.to_string())?;
+  let maybe_listed_name = maybe_known.as_ref().and_then(|known| known.maybe_name.as_deref());
+  Ok(anchoring::anchor_marks(
+    maybe_held.as_ref(),
+    maybe_floor.as_ref(),
+    maybe_listed_name,
+  ))
+}
+
+/// Whether the channel's pin refused the group state this device was offered last: it stays out
+/// and the channel is unreachable here, rather than waiting silently.
+pub fn is_anchor_refused(store: &impl LocalStore, conversation: ConversationId) -> Result<bool, CoreError> {
+  Ok(
+    store
+      .get(Table::AppliedChanges, &anchor_refused_key(conversation))?
+      .is_some(),
+  )
+}
+
+pub(crate) fn held_name_key(conversation: ConversationId) -> String {
+  format!("anchor_held_name/{conversation}")
+}
+
+pub(crate) fn anchor_refused_key(conversation: ConversationId) -> String {
+  format!("anchor_refused/{conversation}")
 }
 
 /// The users with a leaf in the group.

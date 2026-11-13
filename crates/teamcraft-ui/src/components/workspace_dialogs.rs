@@ -23,6 +23,7 @@ use teamcraft_proto::channel_name::{ChannelNameError, checked_channel_name};
 use teamcraft_proto::{CategoryId, ErrorCode, HistoryPolicy, IdempotencyKey, Permission};
 use wasm_bindgen::JsCast;
 
+use crate::anchor_marks::{self, delete_name_note};
 use crate::channel_access::ChannelAccess;
 use crate::channel_policy::{ChannelPolicyHub, check_retention_field, parse_retention};
 use crate::components::avatar::{Avatar, AvatarSize};
@@ -48,7 +49,7 @@ use crate::model::{
 };
 use crate::reactive::SetIfAlive;
 use crate::space_images::{ImageOwner, use_space_images};
-use crate::state::{Overlay, use_app_state};
+use crate::state::{AppState, Overlay, use_app_state};
 
 /// What the color picker shows for a space without a color of its own.
 const DEFAULT_SPACE_COLOR: &str = "#3b5fa0";
@@ -550,6 +551,15 @@ fn ChannelGeneral(conversation: ConversationId, name: String, topic: String) -> 
   let has_saved = RwSignal::new(false);
   let errors = FormErrors::new();
   Effect::new(move |_| errors.follow(channel_name_errors(i18n, "cs-name", &name.get())));
+  // The name members' apps hold may differ from the server's (e2ee.md §4.6.5): marked at the field.
+  Effect::new(move |_| state.write(|backend| backend.refresh_channel_anchor(conversation)));
+  let is_name_stale = Memo::new(move |_| {
+    anchor_marks::is_name_stale(
+      state
+        .read(|backend| backend.channel_anchor_marks(conversation))
+        .as_ref(),
+    )
+  });
   let save = move |ev: leptos::ev::SubmitEvent| {
     ev.prevent_default();
     let found = channel_name_errors(i18n, "cs-name", &name.get_untracked());
@@ -595,6 +605,12 @@ fn ChannelGeneral(conversation: ConversationId, name: String, topic: String) -> 
           aria-invalid=errors.invalid("cs-name") aria-describedby=errors.described("cs-name")
           prop:value=move || name.get() on:input=move |ev| { has_saved.set(false); name.set(event_target_value(&ev)) } />
         <FieldError errors=errors field="cs-name" />
+        <Show when=move || is_name_stale.get() fallback=|| ()>
+          <p class="hint field-note-warn" role="note">
+            <Icon name=IconName::Alert />
+            <span>{move || i18n.t("channel-name-stale-hint")}</span>
+          </p>
+        </Show>
         <label for="cs-topic">{move || i18n.t("channel-topic")}</label>
         <input id="cs-topic" class="input" maxlength="250" prop:value=move || topic.get() on:input=move |ev| { has_saved.set(false); topic.set(event_target_value(&ev)) } />
       </fieldset>
@@ -683,6 +699,11 @@ fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
   // Only whether there is a review decides the panel: one re-created whenever the review changes
   // (members loaded, a key checked) would close the list the admin just opened.
   let has_roles_review = Memo::new(move |_| roles_review.with(Option::is_some));
+  let anchor_fork_key = Memo::new(move |_| {
+    state
+      .read(|backend| backend.channel_anchor_marks(conversation))
+      .and_then(|marks| anchor_marks::fork_note_key(&marks))
+  });
   let has_role_alarm = Memo::new(move |_| {
     state
       .read(|backend| backend.channel_role_alarms())
@@ -702,6 +723,11 @@ fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
     <p class="hint">{move || if can_manage_roles.get() { i18n.t("channel-roles-hint") } else { i18n.t("channel-roles-read-only") }}</p>
     <Show when=move || has_role_alarm.get() fallback=|| ()>
       <p class="hint" role="status">{move || i18n.t("channel-roles-alarm")}</p>
+    </Show>
+    // Only in a workspace admin's look at the roles (e2ee.md §4.6.5): their devices saw two sides
+    // of the channel's anchor, which then grants nothing.
+    <Show when=move || has_roles_review.get() fallback=|| ()>
+      {move || anchor_fork_key.get().map(|key| view! { <p class="hint" role="status">{move || i18n.t(key)}</p> })}
     </Show>
     <Show when=move || has_roles_review.get() fallback=|| ()>
       <ChannelRolesReviewPanel conversation=conversation roles=roles users=members review=roles_review refreshing=refreshing />
@@ -1346,6 +1372,8 @@ pub fn DeleteChannelSection(conversation: ConversationId, on_deleted: Callback<(
   let i18n = use_i18n();
   let is_confirming = RwSignal::new(false);
   let pending = PendingAction::new();
+  // Who last named the channel, verified again for the confirmation (e2ee.md §4.6.5).
+  Effect::new(move |_| state.write(|backend| backend.refresh_channel_anchor(conversation)));
   let delete = move |_| {
     pending.run_and_then(
       || state.write(|backend| backend.delete_channel(conversation)),
@@ -1360,6 +1388,7 @@ pub fn DeleteChannelSection(conversation: ConversationId, on_deleted: Callback<(
       fallback=move || view! { <button type="button" class="btn btn-danger" on:click=move |_| is_confirming.set(true)>{move || i18n.t("channel-delete-action")}</button> }
     >
       <p role="alert">{move || i18n.t("channel-delete-confirm")}</p>
+      {move || delete_name_note_text(state, i18n, conversation).map(|note| view! { <p class="hint">{note}</p> })}
       <div class="inline-actions">
         <button type="button" class="btn btn-danger" prop:disabled=move || pending.is_pending() on:click=delete>{move || i18n.t("channel-delete-action")}</button>
         <button type="button" class="btn" on:click=move |_| is_confirming.set(false)>{move || i18n.t("cancel")}</button>
@@ -1367,6 +1396,29 @@ pub fn DeleteChannelSection(conversation: ConversationId, on_deleted: Callback<(
       <FailureNote pending=pending />
     </Show>
   }
+}
+
+/// What a channel's deletion confirmation says about its name (e2ee.md §4.6.5, D5): that the name
+/// shown isn't the one members' apps hold, or who last named it, and whether members' devices then
+/// keep its messages for the retention. `None` when this device holds nothing verified.
+pub(crate) fn delete_name_note_text(
+  state: AppState,
+  i18n: I18n,
+  conversation: ConversationId,
+) -> Option<String> {
+  let marks = state.read(|backend| backend.channel_anchor_marks(conversation))?;
+  let note = delete_name_note(&marks)?;
+  Some(match note.maybe_user {
+    Some(user) => {
+      let name = state
+        .read(|backend| backend.user(user))
+        .map(|user| user.display_name)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| i18n.t("channel-roles-review-unknown"));
+      i18n.t_with(note.key, &[("name", &name)])
+    },
+    None => i18n.t(note.key),
+  })
 }
 
 /// The failure of the last run of `pending`, in the dialog (it was shown as a toast too), so the

@@ -185,6 +185,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self
       .store
       .delete(Table::Conversations, &conversation.to_string())?;
+    self.store.delete(
+      Table::AppliedChanges,
+      &super::channel_anchor::anchor_refused_key(conversation),
+    )?;
     self.store.delete(Table::Members, &conversation.to_string())?;
     self.forget_older_history(conversation)?;
     self.forget_invitee_records(conversation)?;
@@ -229,6 +233,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       for marker in super::server_deletions::purge_markers(conversation) {
         client.store.delete(Table::AppliedChanges, &marker)?;
       }
+      client.store.delete(
+        Table::AppliedChanges,
+        &super::channel_anchor::anchor_refused_key(conversation),
+      )?;
       // Last: a conversation without a record is otherwise found by its messages or its marker.
       client.store.delete(Table::Conversations, &id)?;
       Ok(())

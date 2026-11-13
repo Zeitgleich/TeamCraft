@@ -1245,6 +1245,9 @@ pub enum ChatAction {
   RefreshChannelRoles {
     conversation: ConversationId,
   },
+  RefreshChannelAnchor {
+    conversation: ConversationId,
+  },
   RemoveSpaceMember {
     space: SpaceId,
     user: UserId,
@@ -1671,6 +1674,7 @@ impl ChatAction {
         at_cursor,
       } => backend.sign_reviewed_channel_roles(conversation, roles, at_cursor),
       Self::RefreshChannelRoles { conversation } => backend.refresh_channel_roles(conversation),
+      Self::RefreshChannelAnchor { conversation } => backend.refresh_channel_anchor(conversation),
       Self::RemoveSpaceMember { space, user } => backend.remove_space_member(space, user),
       Self::RevokeSpaceInvite { space, invite } => backend.revoke_space_invite(space, invite),
       Self::ResendSpaceInvite { space, invite } => backend.resend_space_invite(space, invite),
@@ -1871,6 +1875,9 @@ pub enum ChatQuery {
     conversation: ConversationId,
   },
   ChannelRoleAlarms,
+  ChannelAnchorMarks {
+    conversation: ConversationId,
+  },
   SpaceInvites {
     space: SpaceId,
   },
@@ -2078,6 +2085,10 @@ pub enum ChatAnswer {
   ChannelRoleAlarms {
     #[serde(default)]
     conversations: Vec<ConversationId>,
+  },
+  ChannelAnchorMarks {
+    #[serde(default)]
+    maybe_marks: Option<crate::model::ChannelAnchorMarks>,
   },
   SpaceInvites {
     invites: Vec<crate::model::PendingInvite>,
@@ -2375,6 +2386,9 @@ impl ChatQuery {
       },
       Self::ChannelRoleAlarms => ChatAnswer::ChannelRoleAlarms {
         conversations: backend.channel_role_alarms(),
+      },
+      Self::ChannelAnchorMarks { conversation } => ChatAnswer::ChannelAnchorMarks {
+        maybe_marks: backend.channel_anchor_marks(conversation),
       },
       Self::SpaceMembers { space } => ChatAnswer::SpaceMembers {
         roster: backend.space_members(space),

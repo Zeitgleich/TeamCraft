@@ -104,6 +104,7 @@ pub use attested::{AttestationSettings, JwksSource};
 pub use calls::{CallEventSink, CallKeySigner, CallMoveRecord, CallPreparation, call_move_announcement};
 pub(crate) use catch_up::CATCHING_UP_PREFIX;
 pub use catch_up::{CatchUpFocus, SyncStopRequest, is_catching_up};
+pub use channel_anchor::{channel_anchor_marks, is_anchor_refused};
 pub use channel_roles::RoleSigning;
 #[cfg(feature = "ui")]
 pub(crate) use channel_roles::{channel_roles_alarmed_key, channel_roles_key, role_key_standings_key};
@@ -966,6 +967,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.store.delete(
       Table::AppliedChanges,
       &group_health::queue_refused_key(conversation),
+    )?;
+    self.store.delete(
+      Table::AppliedChanges,
+      &channel_anchor::held_name_key(conversation),
     )?;
     self
       .store

@@ -17,6 +17,7 @@ use crate::components::long_press::LongPress;
 use crate::components::message_actions::copy_and_confirm;
 use crate::components::sheet::{PopoverBackdrop, Sheet};
 use crate::components::space_invites::web_origin;
+use crate::components::workspace_dialogs::delete_name_note_text;
 use crate::entry_actions::{ConversationMenu, LeaveChoice, MenuEntry, SpaceMenu};
 use crate::feedback::PendingAction;
 use crate::i18n::use_i18n;
@@ -334,6 +335,8 @@ fn ConversationItems(
       MenuPage::ConfirmDelete => view! {
         <p class="menu-confirm" id=format!("entry-menu-confirm-{conversation}")>
           {move || i18n.t_with("entry-menu-delete-channel-confirm", &[("name", &name())])}
+          // Who last named it, and whether members' devices keep it for the retention (#1749).
+          {move || delete_name_note_text(state, i18n, conversation).map(|note| format!(" {note}"))}
         </p>
         <button
           type="button"
@@ -417,7 +420,10 @@ fn ConversationItems(
             }
           }
           {move || can_delete().then(|| view! {
-            <button type="button" class="menu-item is-destructive" role="menuitem" on:click=move |_| page.set(MenuPage::ConfirmDelete)>
+            <button type="button" class="menu-item is-destructive" role="menuitem" on:click=move |_| {
+              state.write(|backend| backend.refresh_channel_anchor(conversation));
+              page.set(MenuPage::ConfirmDelete);
+            }>
               <Icon name=IconName::Trash />
               <span class="menu-label">{move || i18n.t("entry-menu-delete-channel-ellipsis")}</span>
             </button>

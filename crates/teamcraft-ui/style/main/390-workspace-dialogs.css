@@ -77,3 +77,16 @@
 /* New user group: each field keeps its message directly below it (forms.md). */
 .group-create .inline-form { align-items: flex-start; }
 .group-create-field { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+
+/* A channel name members' apps don't hold (#1749): under the name field. */
+.field-note-warn {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--warn-text);
+}
+
+.field-note-warn > svg {
+  flex: none;
+  margin-top: 2px;
+}
