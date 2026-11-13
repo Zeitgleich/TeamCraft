@@ -959,10 +959,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self
       .store
       .delete(Table::AppliedChanges, &key_history::key_history_key(conversation))?;
-    self.store.delete(
-      Table::AppliedChanges,
-      &member_device::current_key_wait_key(conversation),
-    )?;
+    member_device::end_current_key_wait(&self.store, conversation)?;
     self
       .store
       .delete(Table::AppliedChanges, &group_health::leftovers_key(conversation))?;
