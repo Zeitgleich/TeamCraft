@@ -54,9 +54,9 @@ use teamcraft_media::{
   voice_guard::{ArrivingVoice, VoiceGuard, VoiceGuardConfig},
 };
 use teamcraft_proto::{
-  DeviceId, KNOWN_VIDEO_CODECS, MAX_NACK_SEQUENCE_NUMBERS, MAX_SIMULCAST_LAYERS, MediaCapabilities,
-  MediaStreamId, ScreenAudioTrack, TransportFeedback, VideoCodec, VideoLayerInfo, VideoPublicationId,
-  VideoTrack, VideoTrackKind,
+  AudioFeature, DeviceId, KNOWN_VIDEO_CODECS, MAX_NACK_SEQUENCE_NUMBERS, MAX_SIMULCAST_LAYERS,
+  MediaCapabilities, MediaStreamId, ScreenAudioTrack, TransportFeedback, VideoCodec, VideoLayerInfo,
+  VideoPublicationId, VideoTrack, VideoTrackKind,
 };
 use thiserror::Error;
 use tracing::debug;
@@ -466,6 +466,21 @@ impl Forwarder {
       KNOWN_VIDEO_CODECS.to_vec()
     };
     Some(DecodableCodecs { by_all, by_some })
+  }
+
+  /// The audio features every other participant has (#1893): what `device_id`'s voice may use.
+  /// With nobody else, every feature there is. `None` for a participant that isn't there.
+  pub fn audio_features_of_others(&self, device_id: DeviceId) -> Option<Vec<AudioFeature>> {
+    if !self.participants.contains_key(&device_id) {
+      return None;
+    }
+    let mut features = vec![AudioFeature::LongFrames];
+    for (other, participant) in &self.participants {
+      if *other != device_id {
+        features.retain(|feature| participant.capabilities.audio_features.contains(feature));
+      }
+    }
+    Some(features)
   }
 
   /// Removes a participant with its tracks and subscriptions.

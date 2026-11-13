@@ -210,6 +210,7 @@ async fn join(sfu: SocketAddr, certificate_hash: [u8; 32], device: i64, other: i
       max_simulcast_layers: 3,
       max_frame_fragments: teamcraft_proto::MAX_VIDEO_FRAME_FRAGMENTS,
       video_features: Vec::new(),
+      audio_features: Vec::new(),
     },
     bwe: BweConfig::default(),
   };

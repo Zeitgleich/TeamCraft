@@ -108,7 +108,8 @@ use self::switch_back::{Answer, Due, Held, Moved, SwitchBack};
 use self::video::{EncoderGaveUp, FrameDecoder, Publication, TrackSender, VideoView};
 
 use crate::audio_frame::{
-  EncodedAudioFrame, FRAME_SAMPLES_PER_CHANNEL, SAMPLE_RATE_HZ, planned_loss_percent,
+  EncodedAudioFrame, FRAME_SAMPLES_PER_CHANNEL, MAX_PACKET_SAMPLES_PER_CHANNEL, SAMPLE_RATE_HZ,
+  opus_lost_packet_like, opus_packet_samples, planned_loss_percent,
 };
 use crate::audio_io::{AudioDeviceChoice, AudioDeviceId, AudioDeviceInfo, AudioSink, AudioSource, sine_tone};
 use crate::audio_level::{CallMeter, DEFAULT_VOICE_THRESHOLD_DBOV, SharedLevel, measure_audio_level};
@@ -130,9 +131,10 @@ use crate::receive_load::{
   DecodedFrame, FrameInterval, Importance, ReceiveLoad, ReceiveOverload, WatchedStream,
 };
 use crate::resample::MonoResampler;
-use crate::rtp::AudioLevel;
+use crate::rtp::{AudioLevel, SequenceNumber};
 use crate::share_policy::{ShareCodecs, ShareEncoders};
 use crate::video::{EncodedVideoFrame, ScreenProfile, TOP_LAYER, VideoResolution, chosen_layer};
+use crate::voice_steps::{VoiceEncoding, VoiceFrame};
 use crate::web_api::{
   AudioData, AudioDecoder, AudioEncoder, EncodedAudioChunk, QUIC_GLOBAL, WORKLET_SOURCE, WebTransport,
   WebTransportBidirectionalStream, datagram_writable, dictionary, has_global, missing_for_calls,
@@ -153,7 +155,11 @@ const MAX_SIGNALING_BYTES: usize = 1024 * 1024;
 /// The playback worklet holds at most a second of audio divided by this (200 ms, latency bound).
 const MAX_PLAYBACK_PER_SECOND: u32 = 5;
 /// Decoded audio kept per sender before the mixer takes it; more means the sender runs fast.
-const MAX_DECODED_SAMPLES: usize = 5 * FRAME_SAMPLES_PER_CHANNEL;
+const MAX_DECODED_SAMPLES: usize = 8 * FRAME_SAMPLES_PER_CHANNEL;
+/// A remote stream keeps this much decoded or being decoded ahead of what plays: the decoder's
+/// output arrives a turn of the event loop after its input, so the frame that plays next has to
+/// be in it already. A 60 ms packet (#1893) covers this for three frames.
+const DECODE_AHEAD_SAMPLES: usize = 2 * FRAME_SAMPLES_PER_CHANNEL;
 /// Opus bitrate for voice.
 const OPUS_BITRATE_BPS: u32 = 32_000;
 /// Opus bitrate of a shared screen's sound: music and video sound need more than speech (as on
@@ -636,8 +642,11 @@ struct OpusEncoder {
   profile: OpusProfile,
   /// The loss the encoder's in-band FEC is planned for.
   planned_loss_percent: u8,
+  bitrate_bps: u32,
+  /// The length of the packets it puts out (#1893): 20 ms, or 40 or 60 ms on a thin uplink.
+  frame: VoiceFrame,
   pending: Vec<f32>,
-  /// Levels of frames handed to the encoder whose output has not arrived yet (FIFO).
+  /// Levels of 20 ms frames handed to the encoder whose packets have not arrived yet (FIFO).
   levels: VecDeque<AudioLevel>,
   timestamp_us: f64,
   _output: Closure<dyn FnMut(EncodedAudioChunk)>,
@@ -652,6 +661,10 @@ struct RemoteAudio {
   jitter: JitterBuffer<Vec<u8>>,
   decoder: AudioDecoder,
   decoded: VecDeque<f32>,
+  /// Samples handed to the decoder whose output has not arrived yet.
+  decoding_samples: usize,
+  /// The last packet decoded: a lost one is taken to be as long (#1893).
+  maybe_last_packet: Option<Vec<u8>>,
   timestamp_us: f64,
   _output: Closure<dyn FnMut(AudioData)>,
   _error: Closure<dyn FnMut(JsValue)>,
@@ -1480,8 +1493,9 @@ impl CallState<'_> {
         origin: AudioOrigin::Microphone,
         opus,
       } => {
-        // One output per input frame; a stray extra output (encoder flush) counts as silence.
-        let level = self.encoder.levels.pop_front().unwrap_or(AudioLevel::SILENCE);
+        // One output per packet of 20 ms input frames; a stray extra output (encoder flush)
+        // counts as silence.
+        let level = self.encoder.take_level(&opus);
         engine.send_audio(&EncodedAudioFrame { opus, level }, Instant::now());
         self.stats.frames_sent += 1;
       },
@@ -1503,6 +1517,7 @@ impl CallState<'_> {
       },
       Input::Decoded { stream, samples } => {
         if let Some(remote) = self.remotes.get_mut(&stream) {
+          remote.decoding_samples = remote.decoding_samples.saturating_sub(samples.len());
           remote.decoded.extend(samples);
           let excess = remote.decoded.len().saturating_sub(MAX_DECODED_SAMPLES);
           remote.decoded.drain(..excess);
@@ -1894,7 +1909,7 @@ impl CallState<'_> {
               entry.insert(RemoteAudio::new((sender, origin), self.jitter, self.inputs)?)
             },
           };
-          remote.jitter.push(sequence_number, opus);
+          remote.push(sequence_number, opus);
         },
         EngineOutput::Event(CallEngineEvent::VideoFrame(frame)) => {
           let Some(watched) = self.views.get_mut(&frame.stream_id) else {
@@ -1968,6 +1983,7 @@ impl CallState<'_> {
                 self.on_encoders_gave_up(engine, &kind, gave_up);
               }
             },
+            CallEngineEvent::VoiceEncoding(encoding) => self.encoder.set_voice_encoding(*encoding)?,
             CallEngineEvent::UplinkEstimate { loss_percent, .. } => {
               self.encoder.set_measured_loss_percent(*loss_percent)?;
               if let Some(sound) = &mut self.maybe_screen_sound
@@ -3580,13 +3596,21 @@ impl OpusEncoder {
     ])
     .map_err(browser("AudioEncoder"))?;
     let encoder = AudioEncoder::new(&init).map_err(browser("AudioEncoder"))?;
+    let bitrate_bps = profile.bitrate_bps();
     encoder
-      .configure(&opus_config(profile, OPUS_LOSS_FLOOR_PERCENT)?)
+      .configure(&opus_config(
+        profile,
+        bitrate_bps,
+        VoiceFrame::Ms20,
+        OPUS_LOSS_FLOOR_PERCENT,
+      )?)
       .map_err(browser("AudioEncoder"))?;
     Ok(Self {
       encoder,
       profile,
       planned_loss_percent: OPUS_LOSS_FLOOR_PERCENT,
+      bitrate_bps,
+      frame: VoiceFrame::Ms20,
       pending: Vec::with_capacity(2 * FRAME_SAMPLES_PER_CHANNEL),
       levels: VecDeque::new(),
       timestamp_us: 0.0,
@@ -3602,10 +3626,41 @@ impl OpusEncoder {
       return Ok(());
     }
     self.planned_loss_percent = planned;
+    self.configure()
+  }
+
+  /// Encodes at another bitrate and packet length (#1893); the browser takes it from the next
+  /// frame on.
+  fn set_voice_encoding(&mut self, encoding: VoiceEncoding) -> Result<(), WebCallError> {
+    if (encoding.bitrate_bps, encoding.frame) == (self.bitrate_bps, self.frame) {
+      return Ok(());
+    }
+    self.bitrate_bps = encoding.bitrate_bps;
+    self.frame = encoding.frame;
+    self.configure()
+  }
+
+  fn configure(&self) -> Result<(), WebCallError> {
     self
       .encoder
-      .configure(&opus_config(self.profile, planned)?)
+      .configure(&opus_config(
+        self.profile,
+        self.bitrate_bps,
+        self.frame,
+        self.planned_loss_percent,
+      )?)
       .map_err(browser("AudioEncoder"))
+  }
+
+  /// The level of the packet `opus`: the loudest of the 20 ms frames it holds.
+  fn take_level(&mut self, opus: &[u8]) -> AudioLevel {
+    let frames = opus_packet_samples(opus).map_or(1, |samples| samples.div_ceil(FRAME_SAMPLES_PER_CHANNEL));
+    let taken = self.levels.len().min(frames);
+    self
+      .levels
+      .drain(..taken)
+      .max_by_key(|level| level.loudness())
+      .unwrap_or(AudioLevel::SILENCE)
   }
 
   /// Encodes every complete 20 ms frame; the encoded bytes arrive as [`Input::Encoded`].
@@ -3694,12 +3749,18 @@ fn tuning_value(value: TuningValue) -> JsValue {
   }
 }
 
-/// Mono Opus for `profile` in 20 ms frames with in-band FEC planned for `loss_percent` (WebCodecs'
-/// Opus registration).
-fn opus_config(profile: OpusProfile, loss_percent: u8) -> Result<Object, WebCallError> {
+/// Mono Opus for `profile` at `bitrate_bps` in frames of `frame` with in-band FEC planned for
+/// `loss_percent` (WebCodecs' Opus registration).
+fn opus_config(
+  profile: OpusProfile,
+  bitrate_bps: u32,
+  frame: VoiceFrame,
+  loss_percent: u8,
+) -> Result<Object, WebCallError> {
   let tuning = profile.tuning();
+  let frame_us = u32::try_from(frame.duration().as_micros()).unwrap_or(20_000);
   let mut opus_entries = vec![
-    ("frameDuration", JsValue::from(20_000)),
+    ("frameDuration", JsValue::from(frame_us)),
     ("useinbandfec", JsValue::TRUE),
     ("packetlossperc", JsValue::from(loss_percent)),
   ];
@@ -3714,7 +3775,7 @@ fn opus_config(profile: OpusProfile, loss_percent: u8) -> Result<Object, WebCall
     ("codec", JsValue::from_str("opus")),
     ("sampleRate", JsValue::from(SAMPLE_RATE_HZ)),
     ("numberOfChannels", JsValue::from(1)),
-    ("bitrate", JsValue::from(profile.bitrate_bps())),
+    ("bitrate", JsValue::from(bitrate_bps)),
     ("opus", opus.into()),
   ];
   entries.extend(
@@ -3795,28 +3856,70 @@ impl RemoteAudio {
       jitter: JitterBuffer::new(jitter),
       decoder,
       decoded: VecDeque::new(),
+      decoding_samples: 0,
+      maybe_last_packet: None,
       timestamp_us: 0.0,
       _output: output,
       _error: error,
     })
   }
 
-  /// Hands the packet due now to the decoder. WebCodecs has no loss concealment call, so a lost
-  /// packet is a 20 ms gap.
+  /// Buffers a packet; the buffer's depths count packets of its length (#1893).
+  fn push(&mut self, sequence_number: SequenceNumber, opus: Vec<u8>) {
+    if let Some(samples) = opus_packet_samples(&opus) {
+      self
+        .jitter
+        .set_packet_frames(samples.div_ceil(FRAME_SAMPLES_PER_CHANNEL));
+    }
+    self.jitter.push(sequence_number, opus);
+  }
+
+  /// Hands the packets due now to the decoder, until what is decoded or being decoded reaches
+  /// past the next frame: one 20 ms packet a frame, a 60 ms one every third (#1893). WebCodecs has
+  /// no loss concealment call: a lost packet goes in as one of the same length with empty frames,
+  /// which the decoder conceals.
   fn decode_due(&mut self) -> Result<(), WebCallError> {
-    let Some(Playout::Packet { item, .. }) = self.jitter.pop() else {
-      return Ok(());
-    };
+    if self.decoding_samples > 2 * MAX_PACKET_SAMPLES_PER_CHANNEL {
+      // Output the count waits for never came (a packet the decoder refused): count afresh
+      // rather than wait for ever.
+      debug!(
+        samples = self.decoding_samples,
+        "audio decoder output went missing"
+      );
+      self.decoding_samples = 0;
+    }
+    while self.decoded.len() + self.decoding_samples < DECODE_AHEAD_SAMPLES {
+      let packet = match self.jitter.pop() {
+        Some(Playout::Packet { item, .. }) => item,
+        Some(Playout::Missing { .. }) => {
+          match self.maybe_last_packet.as_deref().and_then(opus_lost_packet_like) {
+            Some(lost) => lost,
+            // Nothing played before it: the gap stays a gap.
+            None => continue,
+          }
+        },
+        None => return Ok(()),
+      };
+      let samples = opus_packet_samples(&packet).unwrap_or(FRAME_SAMPLES_PER_CHANNEL);
+      self.decode(&packet, samples)?;
+      self.maybe_last_packet = Some(packet);
+    }
+    Ok(())
+  }
+
+  fn decode(&mut self, packet: &[u8], samples: usize) -> Result<(), WebCallError> {
     let chunk = EncodedAudioChunk::new(
       &dictionary(&[
         ("type", JsValue::from_str("key")),
         ("timestamp", JsValue::from(self.timestamp_us)),
-        ("data", Uint8Array::from(item.as_slice()).into()),
+        ("data", Uint8Array::from(packet).into()),
       ])
       .map_err(browser("EncodedAudioChunk"))?,
     )
     .map_err(browser("EncodedAudioChunk"))?;
-    self.timestamp_us += 20_000.0;
+    // Microseconds of 48 kHz samples.
+    self.timestamp_us += samples as f64 * 1_000_000.0 / f64::from(SAMPLE_RATE_HZ);
+    self.decoding_samples += samples;
     self.decoder.decode(&chunk).map_err(browser("AudioDecoder"))
   }
 }
