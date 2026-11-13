@@ -92,6 +92,8 @@ async fn a_guest_joins_a_meeting_with_the_mailed_link_and_shares_its_call() {
       knock(&page, &origin, link, "Gus (customer)").await;
       // Nobody let the guest in yet: the normal case, said plainly.
       wait_for_text(&page, "Waiting for someone in the meeting to let you in").await;
+      wait_for_element(&page, ".guest-waiting-devices .prejoin-preview").await;
+      guest_shots(&page, "waiting").await;
 
       // The organizer's app sees the guest in the lobby once the guest's page set up its device.
       let deadline = Instant::now() + SETUP_TIMEOUT;
@@ -432,6 +434,7 @@ async fn knock(page: &Page, origin: &str, link: String, name: &str) {
   type_until_kept(page, "#guest-name", name).await;
   click_text(page, "Turn on camera and microphone").await;
   wait_for_element(page, ".prejoin .meter").await;
+  guest_shots(page, "setup").await;
   click_text(page, "Join now").await;
 }
 
@@ -447,6 +450,45 @@ async fn join_call_in_browser(page: &Page) {
     .into_value::<u64>()
     .unwrap();
   assert_eq!(call_starts, 0, "the guest's chat header offers to start a call");
+}
+
+/// With `E2E_GUEST_SHOTS` set, pictures of the guest's screen for a pull request: desktop and
+/// the narrowest phone, light and dark, in `target/e2e-artifacts/guest-<name>-<width>-<scheme>.png`.
+async fn guest_shots(page: &Page, name: &str) {
+  use chromiumoxide::cdp::browser_protocol::emulation::{
+    ClearDeviceMetricsOverrideParams, MediaFeature, SetDeviceMetricsOverrideParams, SetEmulatedMediaParams,
+  };
+  use chromiumoxide::page::ScreenshotParams;
+  if std::env::var_os("E2E_GUEST_SHOTS").is_none() {
+    return;
+  }
+  let dir = teamcraft_e2e::browser::artifact_dir();
+  let _ = std::fs::create_dir_all(&dir);
+  for (width, height, is_phone) in [(1440, 900, false), (320, 640, true)] {
+    page
+      .execute(SetDeviceMetricsOverrideParams::new(width, height, 2.0, is_phone))
+      .await
+      .unwrap();
+    for scheme in ["light", "dark"] {
+      page
+        .execute(
+          SetEmulatedMediaParams::builder()
+            .feature(MediaFeature::new("prefers-color-scheme", scheme))
+            .build(),
+        )
+        .await
+        .unwrap();
+      // Let the layout and the theme's colors settle (no transition is longer than this).
+      tokio::time::sleep(Duration::from_millis(600)).await;
+      let _ = page
+        .save_screenshot(
+          ScreenshotParams::builder().build(),
+          dir.join(format!("guest-{name}-{width}-{scheme}.png")),
+        )
+        .await;
+    }
+  }
+  page.execute(ClearDeviceMetricsOverrideParams::default()).await.unwrap();
 }
 
 /// The native peer listens for [`CALL_DURATION`], then leaves: the DAVE group with the guest was
