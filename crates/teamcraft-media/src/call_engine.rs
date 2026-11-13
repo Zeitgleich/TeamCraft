@@ -42,7 +42,9 @@ use crate::call_auth::{BindingRole, CallKeyAuthenticator, CallKeyError};
 use crate::call_resilience::CallTransport;
 use crate::call_video::{IncomingVideo, OutgoingVideo, ReceivedVideoFrame, ReleasedFrame};
 use crate::capture_health::StallWindow;
-use crate::datagram::{DatagramHeader, MediaDatagram, SimulcastLayer, StreamId, padding_datagram};
+use crate::datagram::{
+  DatagramHeader, MediaDatagram, SimulcastLayer, StreamId, TransportSeq, padding_datagram,
+};
 use crate::dave::{
   DaveCallId, DaveEpoch, DaveError, DaveFrameStats, DaveParticipant, DaveParticipantId, FrameCodec, MediaKind,
 };
@@ -53,6 +55,7 @@ use crate::rtp::{PayloadType, RtpHeader, RtpPacket, RtpTimestamp, SequenceNumber
 use crate::share_policy::UplinkTop;
 use crate::uplink_layers::{Adaptation, OwnTrack, UplinkLayers, UplinkPolicy, probe_demand_bps};
 use crate::video::EncodedVideoFrame;
+use crate::voice_guard::{VoiceGuard, VoiceGuardConfig};
 
 /// How many retired call keys an engine remembers (e2ee.md §8); the oldest goes first. A call with
 /// more departures than this is far beyond any meeting size, and an evicted key still needs its
@@ -190,6 +193,8 @@ pub struct CallEngine {
   maybe_join_retry_after: Option<Duration>,
   has_reported_unauthenticated_keys: bool,
   uplink: SendSideEstimator,
+  /// What becomes of the own voice on the uplink: while it is lost, the own video stops (#1871).
+  uplink_voice: VoiceGuard,
   downlink_feedback: FeedbackRecorder,
   /// Base for the SFU's arrival times in uplink feedback (only differences matter).
   uplink_feedback_epoch: Instant,
@@ -651,6 +656,7 @@ impl CallEngine {
       maybe_join_retry_after: None,
       has_reported_unauthenticated_keys: false,
       uplink,
+      uplink_voice: VoiceGuard::new(VoiceGuardConfig::default()),
       downlink_feedback: FeedbackRecorder::new(now),
       uplink_feedback_epoch: now,
       maybe_probe_bytes: None,
@@ -2040,6 +2046,13 @@ impl CallEngine {
     if let Some(capacity_bps) = self.maybe_uplink_capacity_bps {
       bps = capacity_bps;
     }
+    self.uplink_voice.on_feedback(feedback, now);
+    if self.maybe_uplink_capacity_bps.is_none() && self.uplink_voice.is_hurt(now) {
+      // The own voice is being lost (an uplink that collapsed): the video stops at once, before
+      // the estimate came down, and comes back as after any cut (#1871). A transport that
+      // measures its uplink (the WebSocket fallback's pacer) loses nothing on the way.
+      bps = 0;
+    }
     let is_sending_screen_audio = self.screen_audio != ScreenAudioState::Off;
     let tracks = own_track_views(&self.own_tracks, &self.adaptive_tracks);
     let has_changed =
@@ -3147,6 +3160,7 @@ impl CallEngine {
   fn measure_uplink_afresh(&mut self) {
     self.uplink.measure_afresh();
     self.uplink_layers.measure_afresh(self.uplink.estimate_bps());
+    self.uplink_voice.forget();
     // Tracks that were held back come back as well, with keyframes.
     self.announce_layers(true);
     self.announce_uplink_layers();
@@ -3238,7 +3252,8 @@ impl CallEngine {
     .to_bytes() else {
       return;
     };
-    self.send_media(stream, SimulcastLayer::BASE, &rtp, now);
+    let seq = self.send_media(stream, SimulcastLayer::BASE, &rtp, now);
+    self.uplink_voice.on_send(seq, now);
   }
 
   /// Another device's screen share replaced ours on `takeover.stream_id`: the track and its sound
@@ -3322,8 +3337,15 @@ impl CallEngine {
     }
   }
 
-  /// Wraps one RTP packet in a datagram with a transport sequence number for uplink estimation.
-  fn send_media(&mut self, stream: StreamId, layer: SimulcastLayer, rtp: &[u8], now: Instant) {
+  /// Wraps one RTP packet in a datagram with a transport sequence number for uplink estimation;
+  /// returns that number.
+  fn send_media(
+    &mut self,
+    stream: StreamId,
+    layer: SimulcastLayer,
+    rtp: &[u8],
+    now: Instant,
+  ) -> TransportSeq {
     let datagram_len = rtp.len() + crate::datagram::DATAGRAM_HEADER_BYTES + 2;
     let transport_seq = self.uplink.on_send(datagram_len, now);
     let datagram = MediaDatagram {
@@ -3338,6 +3360,7 @@ impl CallEngine {
       Ok(bytes) => self.outputs.push_back(EngineOutput::Datagram(bytes)),
       Err(error) => warn!(%error, "media datagram too large"),
     }
+    transport_seq
   }
 
   fn add_participant(&mut self, participant: CallParticipant) {
@@ -5415,6 +5438,55 @@ mod tests {
 
   mod uplink {
     use super::*;
+
+    /// #1871: an uplink that collapsed loses the own voice; the camera stops with the first
+    /// feedback that shows it, not once the estimate came down, and stays off for the hold.
+    #[test]
+    fn lost_own_voice_stops_the_camera_at_once() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      ask_for(&mut alice, &video_track(50, 1, 3));
+      alice
+        .handle_signal(
+          event(
+            6,
+            CallEvent::VideoPublished {
+              track: video_track(50, 1, 3),
+            },
+          ),
+          now,
+        )
+        .unwrap();
+      drain(&mut alice);
+      // Half a second of voice, a third of it lost on the way.
+      for _ in 0..25 {
+        alice.send_audio(&frame(), now);
+      }
+      drain(&mut alice);
+      let feedback = TransportFeedback {
+        base_seq: 0,
+        arrivals_us: (0..25u64).map(|i| (i % 3 != 0).then_some(i * 20_000)).collect(),
+      };
+      let at = now + Duration::from_millis(500);
+      alice
+        .handle_signal(event(7, CallEvent::TransportFeedback { feedback }), at)
+        .unwrap();
+      let outputs = drain(&mut alice);
+      assert!(
+        outputs.contains(&EngineOutput::Event(CallEngineEvent::LayersNeeded {
+          stream_id: MediaStreamId(50),
+          layers: Vec::new(),
+        })),
+        "{outputs:?}"
+      );
+      assert!(
+        outputs.contains(&EngineOutput::Event(CallEngineEvent::UplinkEstimate {
+          bps: 0,
+          loss_percent: loss_percent(alice.uplink.loss_ratio()),
+        })),
+        "{outputs:?}"
+      );
+    }
 
     #[test]
     fn lossy_uplink_stops_video_before_audio_and_raises_the_loss_for_fec() {

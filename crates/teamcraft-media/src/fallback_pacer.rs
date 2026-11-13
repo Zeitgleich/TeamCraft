@@ -79,8 +79,10 @@ pub struct PacingConfig {
   pub probe_interval: Duration,
   /// The rate before anything was measured, and the least the ceiling grows to while little is sent.
   pub start_rate_bps: u32,
-  /// The rate never drops below this, so audio and the lowest video layer can still go out and be
-  /// measured.
+  /// The rate never drops below this, so that the path is still measured. Audio isn't held to the
+  /// rate, but it counts: at most this much video goes out besides it. A voice needs about
+  /// 50 kbit/s; at 300 kbit/s the pacer kept more than twice a collapsed link's 120 kbit/s in
+  /// flight, and the voice arrived seconds late (#1871).
   pub min_rate_bps: u32,
   pub max_rate_bps: u32,
   /// How much may wait in the buffers on the path, measured as the round trip above its smallest.
@@ -136,7 +138,7 @@ impl Default for PacingConfig {
     Self {
       probe_interval: Duration::from_millis(250),
       start_rate_bps: 4_000_000,
-      min_rate_bps: 300_000,
+      min_rate_bps: 64_000,
       max_rate_bps: 100_000_000,
       target_queue_delay: Duration::from_millis(120),
       burst: Duration::from_millis(20),
@@ -473,7 +475,7 @@ mod tests {
       let mut pacer = DrainPacer::new(PacingConfig::default());
       pacer.on_probe_sent(0, start);
       pacer.on_answer(0, start + BASE_ROUND_TRIP);
-      for number in 1..20u64 {
+      for number in 1..40u64 {
         pacer.on_probe_sent(number, start + 250 * MS * u32::try_from(number).unwrap());
       }
       assert_eq!(pacer.rate_bps(), PacingConfig::default().min_rate_bps);

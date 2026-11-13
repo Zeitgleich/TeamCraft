@@ -267,7 +267,7 @@ impl LayerAllocator {
         self.upgrade_pending_since.remove(&stream_id);
         current
       };
-      let chosen = self.probe_if_paused_too_long(config, demand, chosen, now);
+      let chosen = self.probe_if_paused_too_long(config, demand, chosen, proof, now);
       result.insert(stream_id, chosen);
     }
     self.current = result.clone();
@@ -311,6 +311,32 @@ impl LayerAllocator {
     }
   }
 
+  /// Pauses every track at once, also those that may not be paused for lack of budget (a screen
+  /// share): the receiver's voice is being lost (#1871, `teamcraft_media::voice_guard`). They come
+  /// back as after any pause.
+  pub fn pause_all(&mut self, demands: &[TrackDemand<'_>], now: Instant) -> Allocation {
+    let layers: HashMap<StreamId, Option<u8>> =
+      demands.iter().map(|demand| (demand.stream_id, None)).collect();
+    for stream_id in layers.keys() {
+      self.paused_since.entry(*stream_id).or_insert(now);
+    }
+    self.upgrade_pending_since.clear();
+    self.downgrade_pending_since.clear();
+    self.pause_pending_since.clear();
+    self.probing_until.clear();
+    self
+      .paused_since
+      .retain(|stream_id, _| layers.contains_key(stream_id));
+    self
+      .resume_wait
+      .retain(|stream_id, _| layers.contains_key(stream_id));
+    self.current = layers.clone();
+    Allocation {
+      layers,
+      maybe_probe: None,
+    }
+  }
+
   /// `wanted` (at most `current`) once the budget has been below `current` for the track's
   /// [`TrackDemand::downswitch_hold`]; `current` until then.
   fn downgrade_after_hold(
@@ -343,6 +369,7 @@ impl LayerAllocator {
     config: &LayerAllocationConfig,
     demand: &TrackDemand<'_>,
     chosen: Option<u8>,
+    proof: UpgradeProof,
     now: Instant,
   ) -> Option<u8> {
     let lowest = demand.layers.first().map(|info| info.layer);
@@ -351,6 +378,13 @@ impl LayerAllocator {
       self.probing_until.remove(&demand.stream_id);
       self.resume_wait.remove(&demand.stream_id);
       return chosen;
+    }
+    if matches!(proof, UpgradeProof::Shown { .. }) {
+      // A link that can be probed resumes once a probe of padding showed it carries the lowest
+      // layer, as it switches up (#1871): the layer itself, sent to find out, took the voice
+      // with it on a link that had collapsed, every few seconds until it came back.
+      self.probing_until.remove(&demand.stream_id);
+      return None;
     }
     if self
       .probing_until
