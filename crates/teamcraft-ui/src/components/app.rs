@@ -29,7 +29,6 @@ use crate::components::edge_swipe::EdgeSwipeBack;
 use crate::components::file_drop;
 use crate::components::first_sync_bar::FirstSyncBar;
 use crate::components::getting_started::GettingStarted;
-use crate::components::guest_join::GuestJoinPage;
 use crate::components::guest_notice::GuestNotice;
 use crate::components::home::{HomeSidebar, HomeStart};
 use crate::components::icons::{Icon, IconName};
@@ -113,7 +112,9 @@ fn screen(settings: Settings) -> AnyView {
   if let Some(link) = guest_link_from_location()
     && (link.maybe_invite_token.is_some() || !is_member_here())
   {
-    return view! { <GuestJoinPage link=link /> }.into_any();
+    // A chunk of its own with the guest's meeting (`areas::guest_join`): a member's first visit
+    // doesn't download the lobby (robustness.md, the signed-in budget).
+    return lazy_area(Place::Screen, move || areas::guest_join(link.clone()));
   }
 
   // A share link needs no sign-in either: the file's key is in the fragment. Its page is a chunk of

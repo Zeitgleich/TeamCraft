@@ -48,6 +48,7 @@ use crate::components::file_preview::FilePreview;
 use crate::components::files_sidebar::FilesSidebar;
 use crate::components::files_view::FilesView;
 use crate::components::guest_devices::{GuestDeviceSetup, GuestDevices, GuestForm, GuestWaitingDevices};
+use crate::components::guest_join::GuestJoinPage;
 use crate::components::guest_meeting::{GuestMeeting, GuestSession};
 use crate::components::home::NewMessageDialog;
 use crate::components::huddle_bar::{CallBar, HuddleBarContent};
@@ -85,6 +86,7 @@ use crate::components::workspace_dialogs::{
 };
 use crate::i18n::use_i18n;
 use crate::lightbox::MediaKey;
+use crate::meetings::GuestLink;
 use crate::model::{ConversationId, MessageId, SpaceId, UserId};
 use crate::reactive::SetIfAlive;
 use crate::session::SessionControl;
@@ -208,6 +210,9 @@ areas! {
   /// wait: in the call screens' module, which the meeting loads next anyway.
   guest_device_setup(form: GuestForm) => calls: view! { <GuestDeviceSetup form=form /> };
   guest_waiting_devices(devices: GuestDevices, name: RwSignal<String>) => calls: view! { <GuestWaitingDevices devices=devices name=name /> };
+  /// The page behind a meeting link: name, lobby, admission. With the meeting in the guest's
+  /// module, not in the app every member's first visit downloads.
+  guest_join(link: GuestLink) => guest: view! { <GuestJoinPage link=link /> };
   directory(_unit: ()) => directory: view! { <DirectoryView /> };
   search(_unit: ()) => search: view! { <SearchView /> };
   /// The top bar's search (Ctrl/Cmd+K), in the chunk of the search results it leads to (#695).

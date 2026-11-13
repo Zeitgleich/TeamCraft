@@ -488,7 +488,10 @@ async fn guest_shots(page: &Page, name: &str) {
         .await;
     }
   }
-  page.execute(ClearDeviceMetricsOverrideParams::default()).await.unwrap();
+  page
+    .execute(ClearDeviceMetricsOverrideParams::default())
+    .await
+    .unwrap();
 }
 
 /// The native peer listens for [`CALL_DURATION`], then leaves: the DAVE group with the guest was
