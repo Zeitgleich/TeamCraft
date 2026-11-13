@@ -163,6 +163,20 @@ impl Default for RateProbeConfig {
   }
 }
 
+impl RateProbeConfig {
+  /// A voice below its full step probing for the next one (#1893): the link is a few tens of
+  /// kilobits, and each cluster that falls short costs the voice that waits behind its padding.
+  /// One every second or two kept a 64 kbit/s uplink too full for the voice it had; a link just
+  /// too thin for the next step is tried again after seconds, then every half minute.
+  pub fn for_voice() -> Self {
+    Self {
+      retry_after: Duration::from_secs(5),
+      max_retry_after: Duration::from_secs(40),
+      ..Self::default()
+    }
+  }
+}
+
 impl RateProbe {
   pub fn new() -> Self {
     Self::default()
@@ -598,6 +612,33 @@ mod tests {
     let mut small = RateProbe::new();
     small.start(800_000, 100_000, 1_000_000, now);
     assert_eq!(small.due_train(&config, now).map(|sizes| sizes.len()), Some(2));
+  }
+
+  /// #1893: a voice's probes that fall short wait seconds, then up to 40 s, not 1 to 2 s.
+  #[test]
+  fn a_voice_probes_a_thin_link_rarely() {
+    let config = RateProbeConfig::for_voice();
+    let mut probe = RateProbe::new();
+    let mut now = Instant::now();
+    let mut waits = Vec::new();
+    for _ in 0..5 {
+      probe.start(80_000, 25_000, 25_000, now);
+      probe.finish(
+        &config,
+        ProbeOutcome::FellShort {
+          target_bps: 80_000,
+          floor_bps: 25_000,
+        },
+        now,
+      );
+      let next = (1..=60)
+        .map(|secs| now + Duration::from_secs(secs))
+        .find(|at| probe.may_start(*at))
+        .unwrap();
+      waits.push(next.duration_since(now).as_secs());
+      now = next;
+    }
+    assert_eq!(waits, vec![5, 10, 20, 40, 40]);
   }
 
   /// #1893: a thin link is probed at its rate, not at two whole datagrams a train. 32 kbit/s of

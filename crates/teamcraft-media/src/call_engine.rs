@@ -2079,7 +2079,7 @@ impl CallEngine {
     if let Some(outcome) =
       self
         .uplink_rate_probe
-        .on_feedback(&RateProbeConfig::default(), feedback, &mut self.uplink, now)
+        .on_feedback(&self.uplink_probe_config(), feedback, &mut self.uplink, now)
     {
       bps = self.uplink.estimate_bps();
       debug!(
@@ -2207,7 +2207,7 @@ impl CallEngine {
       None => maybe_video_bps,
     };
     let datagrams = self.uplink_rate_probe.on_timer(
-      &RateProbeConfig::default(),
+      &self.uplink_probe_config(),
       &mut self.uplink,
       maybe_wanted_bps,
       now,
@@ -2218,6 +2218,15 @@ impl CallEngine {
     self
       .outputs
       .extend(datagrams.into_iter().map(EngineOutput::Datagram));
+  }
+
+  /// How the uplink is probed: rarely while a thin voice probes for its next step (#1893).
+  fn uplink_probe_config(&self) -> RateProbeConfig {
+    if self.voice_steps.wanted_bps().is_some() {
+      RateProbeConfig::for_voice()
+    } else {
+      RateProbeConfig::default()
+    }
   }
 
   /// The uplink probe's result: the estimate starts from it, and the layers follow with the next
