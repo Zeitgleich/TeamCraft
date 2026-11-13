@@ -304,7 +304,11 @@ private fun importanceText(importance: Int): Int = when (importance) {
 private fun kindText(kind: PushNotificationKind): Int = when (kind) {
   PushNotificationKind.MESSAGE -> R.string.push_kind_message
   PushNotificationKind.CALL -> R.string.push_kind_call
-  PushNotificationKind.MEETING_REMINDER, PushNotificationKind.MEETING_START -> R.string.push_kind_meeting
+  PushNotificationKind.MEETING_REMINDER,
+  PushNotificationKind.MEETING_START,
+  PushNotificationKind.MEETING_CO_HOST,
+  PushNotificationKind.MEETING_HANDOVER,
+  -> R.string.push_kind_meeting
   PushNotificationKind.DISMISS -> R.string.push_kind_dismiss
   PushNotificationKind.TEST -> R.string.push_kind_test
   PushNotificationKind.SYNC -> R.string.push_kind_sync

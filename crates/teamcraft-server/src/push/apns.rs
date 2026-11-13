@@ -184,6 +184,8 @@ impl ApnsSender {
       | PushKind::Call
       | PushKind::MeetingReminder
       | PushKind::MeetingStart
+      | PushKind::MeetingCoHost
+      | PushKind::MeetingHandover
       | PushKind::Test
       | PushKind::Unknown(_) => (
         "alert",

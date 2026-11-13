@@ -306,7 +306,12 @@ in the call.
 **Telling people.** Every change sends `meeting_update` to the organizer, the invitees and the
 co-hosts before and after; a handover also `conversation_update` to the chat's members, whose
 devices then read who organizes the chat. An app that sees its user became a co-host or the
-organizer says so ("You are now a co-host of …"); there is no push for it yet. Every change is an
+organizer says so ("You are now a co-host of …"). A push tells the same to whoever was newly
+named a co-host or handed the meeting (never the one who made the change), so phones and closed
+browsers learn it with the app closed: `meeting_co_host` or `meeting_handover`, naming the meeting
+chat and the meeting, no text; the device names it from the chat as for a reminder. It goes like a
+meeting's notice (a mute or DND without an override keeps it back, an open desktop or web app gets
+no push and says it itself, nobody in the meeting's call is pushed). Every change is an
 audit entry (`meeting_hosts`, `meeting_handover`, with the co-hosts added and removed).
 
 | Condition                                       | What happens                                                                                                    |
@@ -597,10 +602,9 @@ fake calendar and mailer; one test sends through the real SMTP sender to Mailpit
   cancelling one), holidays per organizer, host controls (mute all, remove, lock, end for everyone) and
   meetings created in other CalDAV clients.
 - Per-organizer calendars (see above).
-- Hosts (#1720): a push to a new co-host or organizer whose apps are closed (an open app says so);
-  the Android and iOS apps' screens for naming co-hosts, the leave prompt and the schedule dialog's
-  co-host field (they reach the core's `change_meeting_hosts` through the FFI); the tray's "Leave
-  call" leaves without the handover prompt.
+- Hosts (#1720, #1859): the apps have no lobby or admit UI, so a co-host on a phone can't let
+  anybody in; leaving from the system's call UI (CallKit, Android's call notification) doesn't ask
+  about the handover; the apps' schedule dialog has no co-host field.
 - Meeting links: member clients reacting to `lobby_decision` instead of asking; making the link
   anew also turning away the guests still waiting from it; the desktop and mobile apps opening
   `/meeting/…` links themselves; hosts seeing how many guests the link let in; a reloaded guest

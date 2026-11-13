@@ -122,6 +122,8 @@ pub fn local_suppression(
       | PushKind::Call
       | PushKind::MeetingReminder
       | PushKind::MeetingStart
+      | PushKind::MeetingCoHost
+      | PushKind::MeetingHandover
   ) {
     return Ok(None);
   }

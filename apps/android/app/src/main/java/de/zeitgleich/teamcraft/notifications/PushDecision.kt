@@ -78,6 +78,9 @@ sealed interface PushDecision {
   /** A planned meeting starts soon or has started: a normal notification with Join, no ring. */
   data class ShowMeeting(val notification: PushNotification) : PushDecision
 
+  /** The user was made a co-host of a meeting, or it was handed over to them (#1720). */
+  data class ShowMeetingHost(val notification: PushNotification) : PushDecision
+
   companion object {
     /**
      * `isRingOver`: this wake-up was opened so late that a ring in it has ended by now; it is told
@@ -89,6 +92,8 @@ sealed interface PushDecision {
       PushNotificationKind.CALL -> call(notification, isRingOver)
       PushNotificationKind.MEETING_REMINDER, PushNotificationKind.MEETING_START ->
         if (notification.maybeSuppression != null) Ignore(IgnoreReason.SUPPRESSED) else ShowMeeting(notification)
+      PushNotificationKind.MEETING_CO_HOST, PushNotificationKind.MEETING_HANDOVER ->
+        if (notification.maybeSuppression != null) Ignore(IgnoreReason.SUPPRESSED) else ShowMeetingHost(notification)
       PushNotificationKind.DISMISS -> dismiss(notification)
       PushNotificationKind.SCHEDULED_SEAL -> SealScheduled
       PushNotificationKind.SYNC -> CatchUp

@@ -304,6 +304,70 @@
           }
         }
       }
+    },
+    "notification_meeting_co_host %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You are now a co-host of %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Du bist jetzt Co-Gastgeber von %@"
+          }
+        }
+      }
+    },
+    "notification_meeting_co_host_unnamed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You are now a co-host of a meeting"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Du bist jetzt Co-Gastgeber einer Besprechung"
+          }
+        }
+      }
+    },
+    "notification_meeting_handover %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ was handed over to you"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ wurde an dich übergeben"
+          }
+        }
+      }
+    },
+    "notification_meeting_handover_unnamed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A meeting was handed over to you"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Eine Besprechung wurde an dich übergeben"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

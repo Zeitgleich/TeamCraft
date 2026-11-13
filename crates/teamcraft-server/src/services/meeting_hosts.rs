@@ -10,20 +10,25 @@
 //! server's word adds no host for them. A list naming another organizer hands the meeting over:
 //! the organizer changes here too (the calendar event and the invitations follow).
 
+use std::collections::HashSet;
+
 use serde_json::json;
 use teamcraft_crypto::meeting_hosts::{MAX_HANDOVERS, SignedMeetingHosts};
 use teamcraft_db::{Handover, HostListOutcome, NewHostList, StoredMeeting};
 use teamcraft_proto::{
-  Base64Bytes, ConversationId, GatewayEvent, Id, MeetingHostsResponse, MeetingKind, MeetingStatus,
-  PutMeetingHostsRequest, Snowflake, UserId, UserKind,
+  Base64Bytes, ConversationId, GatewayEvent, Id, MeetingHostsResponse, MeetingKind, MeetingStatus, PushKind,
+  PushMeeting, PutMeetingHostsRequest, Snowflake, UserId, UserKind,
 };
+use time::OffsetDateTime;
 use tracing::{info, warn};
 
 use super::audit::{self, Target as AuditTarget};
+use super::convert::unix_millis;
 use super::meeting_admitters::member_meeting;
 use super::meetings;
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
+use crate::push::routing::{self, MeetingNotice};
 use crate::state::AppState;
 
 /// Keeps the organizer's signed host list of the meeting whose chat is `conversation` (the
@@ -158,6 +163,7 @@ pub async fn put_hosts(
     );
     after_handover(state, &meeting).await;
   }
+  tell_new_hosts(state, &meeting, caller.user.id, maybe_new_organizer, &added).await;
   audience.extend(co_hosts_before);
   audience.extend(&co_hosts);
   audience.sort_unstable();
@@ -169,6 +175,47 @@ pub async fn put_hosts(
     },
   );
   Ok(())
+}
+
+/// Pushes the news to whoever got a new part in the meeting (#1720): the new organizer of a
+/// handover and the newly named co-hosts, but not the one who made the change. Open web and
+/// desktop apps say it themselves after the `meeting_update`; the push reaches phones and closed
+/// browsers. Best effort: a failure doesn't undo the change.
+async fn tell_new_hosts(
+  state: &AppState,
+  meeting: &StoredMeeting,
+  caller: UserId,
+  maybe_new_organizer: Option<UserId>,
+  added: &[UserId],
+) {
+  let push_meeting = PushMeeting {
+    meeting_id: meeting.id,
+    starts_at: unix_millis(meeting.starts_at),
+  };
+  let co_hosts: HashSet<UserId> = added
+    .iter()
+    .copied()
+    .filter(|user| *user != caller && Some(*user) != maybe_new_organizer)
+    .collect();
+  let organizer: HashSet<UserId> = maybe_new_organizer.into_iter().collect();
+  for (kind, users) in [
+    (PushKind::MeetingHandover, organizer),
+    (PushKind::MeetingCoHost, co_hosts),
+  ] {
+    if users.is_empty() {
+      continue;
+    }
+    let notice = MeetingNotice {
+      conversation: meeting.conversation,
+      organizer: caller,
+      kind,
+      meeting: push_meeting,
+      users,
+    };
+    if let Err(error) = routing::notify_meeting(state, &notice, OffsetDateTime::now_utc()).await {
+      warn!(%error, meeting_id = %meeting.id, "telling the new hosts failed");
+    }
+  }
 }
 
 /// The host lists of the meeting whose chat is `conversation`: every handover and the newest list,

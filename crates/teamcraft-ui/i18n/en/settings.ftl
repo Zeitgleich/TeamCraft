@@ -351,6 +351,10 @@ notify-meeting-started = { $name } has started
 notify-meeting-started-unnamed = A meeting has started
 notify-meeting-named-soon = { $name } starts in { $minutes } min
 notify-meeting-named-soon-unnamed = A meeting starts in { $minutes } min
+notify-meeting-co-host = You are now a co-host of { $name }
+notify-meeting-co-host-unnamed = You are now a co-host of a meeting
+notify-meeting-handover = { $name } was handed over to you
+notify-meeting-handover-unnamed = A meeting was handed over to you
 
 # Workspace management
 settings-section-overview = Overview

@@ -2,7 +2,7 @@
 //! invitation mail in a browser, waits in the lobby, the organizer's device lets the guest's own
 //! device into the meeting chat's encryption, and the guest's browser and the organizer share the
 //! meeting's call (e2ee.md §4.6, "Meeting guests"); and (#1231) a member, not the organizer, lets
-//! the guest in.
+//! the guest in; and (#1720) a co-host lets the guest in while the organizer is gone.
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -12,7 +12,7 @@ use chromiumoxide::cdp::browser_protocol::browser::{
 use chromiumoxide::page::Page;
 use reqwest::StatusCode;
 use serde_json::json;
-use teamcraft_core::client::admits_link_arrivals;
+use teamcraft_core::client::{HostsChange, admits_link_arrivals};
 use teamcraft_e2e::browser::{BrowserSession, web_dir};
 use teamcraft_e2e::call::{SfuIdentity, join_call};
 use teamcraft_e2e::peer::settle;
@@ -246,6 +246,116 @@ async fn a_member_admits_a_browser_guest_when_the_organizer_has_left_and_they_sh
   // Bob joins natively: he and the guest verify each other's DAVE keys, media flows to him.
   let call = join_call(&mut bob, chat, certificate_hash, 550.0).await;
   expect_secured_call(call, &console, "the admitting member").await;
+
+  browser.close().await;
+  stack.stop().await;
+}
+
+/// #1720: the organizer named a co-host and left the meeting; a guest knocks in the lobby, the
+/// co-host's device lets the guest in, and the guest's browser accepts it by the host list the
+/// organizer signed (checked from the organizer's key in the link, `v`), not by the server's word.
+/// Then the guest shares the call with the co-host, DAVE-secured.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_co_host_admits_a_browser_guest_when_the_organizer_has_left() {
+  let Some(Env {
+    stack,
+    browser,
+    certificate_hash,
+  }) = Env::start().await
+  else {
+    return;
+  };
+  let mut alice = Peer::enroll(&stack, "alice").await;
+  let mut bob = Peer::enroll(&stack, "bob").await;
+  let bob_id = bob.user_id();
+  let starts_at = now_ms() - 60_000;
+  let ends_at = starts_at + MEETING_LENGTH_MS;
+  let meeting = stack
+    .post(
+      &alice.tokens,
+      "/meetings",
+      json!({
+        "title": "Hosted call", "starts_at": starts_at, "ends_at": ends_at,
+        "has_lobby": true,
+        "invitees": [{"kind": "user", "user_id": bob_id.to_string()}],
+      }),
+    )
+    .await
+    .expect(StatusCode::CREATED);
+  let meeting_id: MeetingId = meeting.id().parse().unwrap();
+  let chat: ConversationId = meeting.body["conversation_id"].as_str().unwrap().parse().unwrap();
+  let link = meeting.body["join_url"].as_str().unwrap().to_owned();
+
+  // The organizer's app sets the chat's group up with Bob in it, names Bob co-host (a host list
+  // signed with Alice's identity key) and is gone from here on. No admitters are signed: only the
+  // host list makes Bob's device one the guest accepts.
+  alice.client.set_up_meeting_chat(chat, &[bob_id]).await.unwrap();
+  alice
+    .client
+    .change_meeting_hosts(&HostsChange {
+      meeting: meeting_id,
+      conversation: chat,
+      co_hosts: vec![bob_id],
+      maybe_new_organizer: None,
+    })
+    .await
+    .unwrap();
+  settle(&mut [&mut alice, &mut bob], Duration::from_secs(1)).await;
+  bob.client.full_sync().await.unwrap();
+  assert!(bob.client.has_group(chat).unwrap());
+  drop(alice);
+
+  let origin = stack.base_url.clone();
+  let lobby_path = format!("/meetings/{meeting_id}/lobby");
+  let page = browser.page.clone();
+  let console = console_log(&page).await;
+  grant_media(&page, &origin).await;
+  let access_ends_at = ends_at + GUEST_ACCESS_GRACE_MS;
+  let (stack_ref, bob_ref) = (&stack, &mut bob);
+  browser
+    .screenshot_on_failure("meeting-co-host-admits-guest", |page| async move {
+      knock(&page, &origin, link, "Gus (customer)").await;
+      wait_for_text(&page, "Waiting for someone in the meeting to let you in").await;
+
+      // The co-host hosts the lobby: the server lists the guest to Bob as to a host.
+      let deadline = Instant::now() + SETUP_TIMEOUT;
+      let entry = loop {
+        let lobby = stack_ref
+          .get(&bob_ref.tokens, &lobby_path)
+          .await
+          .expect(StatusCode::OK);
+        assert_eq!(lobby.body["is_host"], true, "{}", lobby.body);
+        let entry = lobby.body["entries"][0].clone();
+        if entry["has_device"] == true && entry["knock_fingerprint"].is_string() {
+          break entry;
+        }
+        assert!(
+          Instant::now() < deadline,
+          "the guest's device never got ready: {}",
+          lobby.body
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+      };
+      let guest: UserId = entry["user"]["id"].as_str().unwrap().parse().unwrap();
+      let fingerprint = entry["knock_fingerprint"].as_str().unwrap().to_owned();
+
+      // Bob admits on the server and adds the guest's device to the chat's group; the guest's
+      // page checks Bob's device against the organizer's signed host list and opens the meeting.
+      stack_ref
+        .post(&bob_ref.tokens, &format!("{lobby_path}/{guest}/admit"), json!({}))
+        .await
+        .expect(StatusCode::NO_CONTENT);
+      bob_ref
+        .client
+        .let_guest_into_meeting_chat(chat, guest, &fingerprint, access_ends_at)
+        .await
+        .unwrap();
+      join_call_in_browser(&page).await;
+    })
+    .await;
+
+  let call = join_call(&mut bob, chat, certificate_hash, 550.0).await;
+  expect_secured_call(call, &console, "the co-host").await;
 
   browser.close().await;
   stack.stop().await;

@@ -79,6 +79,26 @@ pub struct NotificationLabels {
   /// "Join", the notification's button on a meeting; without it there is no button.
   #[serde(rename = "join_meeting", default, skip_serializing_if = "Option::is_none")]
   pub maybe_join_meeting: Option<String>,
+  /// "You are now a co-host of {name}" (#1720).
+  #[serde(rename = "meeting_co_host", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_meeting_co_host: Option<String>,
+  /// "You are now a co-host of a meeting", when its name may not show or isn't known.
+  #[serde(
+    rename = "meeting_co_host_unnamed",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_meeting_co_host_unnamed: Option<String>,
+  /// "{name} was handed over to you" (#1720).
+  #[serde(rename = "meeting_handover", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_meeting_handover: Option<String>,
+  /// "A meeting was handed over to you".
+  #[serde(
+    rename = "meeting_handover_unnamed",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_meeting_handover_unnamed: Option<String>,
 }
 
 /// Title and body of one notification.
@@ -167,6 +187,34 @@ pub fn notification_text(preview: &PushPreview, labels: &NotificationLabels) -> 
       title: match maybe_conversation {
         Some(name) => with_name(&labels.maybe_meeting_started, "{name} has started", name),
         None => label(&labels.maybe_meeting_started_unnamed, "A meeting has started"),
+      },
+      body: String::new(),
+    },
+    PushKind::MeetingCoHost => NotificationText {
+      title: match maybe_conversation {
+        Some(name) => with_name(
+          &labels.maybe_meeting_co_host,
+          "You are now a co-host of {name}",
+          name,
+        ),
+        None => label(
+          &labels.maybe_meeting_co_host_unnamed,
+          "You are now a co-host of a meeting",
+        ),
+      },
+      body: String::new(),
+    },
+    PushKind::MeetingHandover => NotificationText {
+      title: match maybe_conversation {
+        Some(name) => with_name(
+          &labels.maybe_meeting_handover,
+          "{name} was handed over to you",
+          name,
+        ),
+        None => label(
+          &labels.maybe_meeting_handover_unnamed,
+          "A meeting was handed over to you",
+        ),
       },
       body: String::new(),
     },

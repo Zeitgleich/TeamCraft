@@ -124,7 +124,8 @@ pub use service_worker::{
 #[cfg(feature = "service-worker")]
 mod service_worker {
   use teamcraft_proto::{
-    ConversationId, DismissMeetingNoticeRequest, MeetingId, MessageId, SetReadPositionRequest, UnixMillis,
+    ConversationId, DismissMeetingNoticeRequest, MeetingId, MessageId, PushKind, SetReadPositionRequest,
+    UnixMillis,
   };
   use wasm_bindgen::prelude::wasm_bindgen;
   use wasm_bindgen::{JsCast, JsValue};
@@ -156,6 +157,8 @@ mod service_worker {
   /// A meeting's notice replaces what the page showed for that meeting: the page's tag
   /// (`NotificationTag::meeting` in `teamcraft-client-api`) and its Join button.
   const MEETING_TAG_PREFIX: &str = "meeting:";
+  /// The tag of the notice that the user now co-hosts or organizes a meeting (#1720).
+  const MEETING_HOST_TAG_PREFIX: &str = "meeting-host:";
   const JOIN_MEETING_ACTION: &str = "join-meeting";
   /// Keys of a meeting notice's meeting and the start of its occurrence (Unix milliseconds, as text)
   /// in the notification's `data`: Join and closing the notice report them to the server.
@@ -536,7 +539,15 @@ mod service_worker {
       // `NotificationOptions.actions` is behind web-sys' unstable APIs; set the property directly.
       let _ = js_sys::Reflect::set(&options, &"actions".into(), &actions);
     }
-    if let Some(meeting) = preview.wake_up.maybe_meeting {
+    let is_hosting_news = matches!(
+      preview.wake_up.kind,
+      PushKind::MeetingCoHost | PushKind::MeetingHandover
+    );
+    if let Some(meeting) = preview.wake_up.maybe_meeting.filter(|_| is_hosting_news) {
+      // The user's new part in a meeting (#1720): its own tag, no Join, nothing to report on close.
+      options.set_tag(&format!("{MEETING_HOST_TAG_PREFIX}{}", meeting.meeting_id));
+    }
+    if let Some(meeting) = preview.wake_up.maybe_meeting.filter(|_| !is_hosting_news) {
       // One notification per meeting, the start replacing the reminder; a click opens the chat.
       let tag = format!("{MEETING_TAG_PREFIX}{}", meeting.meeting_id);
       options.set_tag(&tag);

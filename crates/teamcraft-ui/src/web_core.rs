@@ -3930,6 +3930,10 @@ fn notification_labels(locale: crate::i18n::Locale) -> NotificationLabels {
       Some(&soon),
     )),
     maybe_join_meeting: translate("meetings-join"),
+    maybe_meeting_co_host: with_name("notify-meeting-co-host"),
+    maybe_meeting_co_host_unnamed: translate("notify-meeting-co-host-unnamed"),
+    maybe_meeting_handover: with_name("notify-meeting-handover"),
+    maybe_meeting_handover_unnamed: translate("notify-meeting-handover-unnamed"),
   }
 }
 
