@@ -61,6 +61,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
@@ -222,6 +223,8 @@ internal class CallUiState(
   val isDirectCall: Boolean = false,
   /** This device shares its screen: the sharing bar shows, the menu offers "Stop sharing". */
   val isSharingScreen: Boolean = false,
+  /** "Host" or "Co-host" (string resources) by user ID, for the tiles of a meeting's call (#1720). */
+  val hostLabels: Map<String, Int> = emptyMap(),
 )
 
 /** Somebody else in the call, as the tiles show them. */
@@ -232,6 +235,8 @@ private class Person(
   val isRejoining: Boolean,
   val isMuted: Boolean = false,
   val isUnverified: Boolean = false,
+  /** "Host" or "Co-host" (a string resource) in a meeting's call (#1720). */
+  val maybeHostLabel: Int? = null,
 )
 
 private fun CallUiState.people(): List<Person> {
@@ -239,7 +244,9 @@ private fun CallUiState.people(): List<Person> {
   val speaking = state.speakingUserIds
   // Speakers first, loudest first; the rest by name.
   return state.participantUserIds
-    .map { id -> Person(id, names[id].orEmpty(), id in speaking, id in state.reconnectingUserIds, id in state.mutedUserIds, id in state.unverifiedUserIds) }
+    .map { id ->
+      Person(id, names[id].orEmpty(), id in speaking, id in state.reconnectingUserIds, id in state.mutedUserIds, id in state.unverifiedUserIds, hostLabels[id])
+    }
     .sortedWith(compareBy({ speaking.indexOf(it.userId).let { index -> if (index < 0) Int.MAX_VALUE else index } }, { it.name.lowercase() }))
 }
 
@@ -329,6 +336,8 @@ internal class CallUiActions(
   val maybeOnShareScreen: (() -> Unit)? = null,
   /** "Stop sharing" in the menu and on the sharing bar. */
   val onStopScreenShare: () -> Unit = {},
+  /** "Hosts" in the menu: the organizer of the call's meeting names co-hosts or hands it over (#1720). */
+  val maybeOnHosts: (() -> Unit)? = null,
 )
 
 /** The room the header and the bottom (notices and controls) take, so the stage keeps clear of them. */
@@ -550,7 +559,7 @@ private fun AvatarTile(person: Person, modifier: Modifier) {
     // As large as the tile allows, within reason: a lone tile's avatar isn't a poster.
     val size = (minOf(maxWidth, maxHeight) * 0.45f).coerceIn(48.dp, 128.dp)
     AvatarImage(person.userId, person.name, size)
-    NameLabel(person.name, person.isMuted, person.isUnverified, Modifier.align(Alignment.BottomStart))
+    NameLabel(person.name, person.isMuted, person.isUnverified, Modifier.align(Alignment.BottomStart), person.maybeHostLabel)
   }
 }
 
@@ -624,9 +633,12 @@ private fun SpeakingAvatar(
   }
 }
 
-/** The name at the tile's bottom left, on a dark pill so it reads on any picture. */
+/**
+ * The name at the tile's bottom left, on a dark pill so it reads on any picture; in a meeting's
+ * call with the person's part after it ("Host", "Co-host", #1720).
+ */
 @Composable
-private fun NameLabel(name: String, isMuted: Boolean, isUnverified: Boolean, modifier: Modifier) {
+private fun NameLabel(name: String, isMuted: Boolean, isUnverified: Boolean, modifier: Modifier, maybeHostLabel: Int? = null) {
   if (name.isEmpty()) return
   // Said as one: who, and what is wrong or switched off.
   val description = when {
@@ -646,7 +658,17 @@ private fun NameLabel(name: String, isMuted: Boolean, isUnverified: Boolean, mod
   ) {
     if (isUnverified) Icon(CallIcons.Warning, contentDescription = null, tint = UNVERIFIED_TINT, modifier = Modifier.size(14.dp))
     if (isMuted) Icon(CallIcons.MicOff, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
-    Text(name, color = Color.White, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    Text(
+      name,
+      color = Color.White,
+      style = MaterialTheme.typography.labelMedium,
+      maxLines = 1,
+      overflow = TextOverflow.Ellipsis,
+      modifier = Modifier.weight(1f, fill = false),
+    )
+    if (maybeHostLabel != null) {
+      Text(stringResource(maybeHostLabel), color = Color.White.copy(alpha = 0.8f), style = MaterialTheme.typography.labelSmall, maxLines = 1)
+    }
   }
 }
 
@@ -700,7 +722,9 @@ private fun VideoTile(
         modifier = Modifier.fillMaxSize(),
       )
     }
-    if (maybeOwner != null) NameLabel(maybeOwner.name, maybeOwner.isMuted, maybeOwner.isUnverified, Modifier.align(Alignment.BottomStart))
+    if (maybeOwner != null) {
+      NameLabel(maybeOwner.name, maybeOwner.isMuted, maybeOwner.isUnverified, Modifier.align(Alignment.BottomStart), maybeOwner.maybeHostLabel)
+    }
   }
 }
 
@@ -1172,6 +1196,9 @@ private fun menuEntries(isDeafened: Boolean, isSharingScreen: Boolean, actions: 
   )
   actions.maybeOnAddPeople?.let { onAddPeople ->
     add(MenuEntry(stringResource(R.string.call_add_people), CallIcons.PersonAdd, onClick = onAddPeople))
+  }
+  actions.maybeOnHosts?.let { onHosts ->
+    add(MenuEntry(stringResource(R.string.call_hosts_title), Icons.Filled.Person, onClick = onHosts))
   }
   actions.maybeOnAddNotetaker?.let { onAddNotetaker ->
     add(MenuEntry(stringResource(R.string.call_notetaker_add), Icons.Filled.Edit, onClick = onAddNotetaker))

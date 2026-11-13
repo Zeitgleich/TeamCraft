@@ -288,7 +288,15 @@ most 32 times (the chain a guest reads stays short).
 
 **When the organizer leaves.** Leaving the call of a meeting with people in its lobby and nobody
 else to let them in (no co-host) asks first: "Hand over to …" (up to five people of the call, no
-guests) signs the handover and leaves, "Leave anyway" leaves.
+guests) signs the handover and leaves, "Leave anyway" leaves. The desktop tray's "Leave call"
+brings the call up with the same question; leaving from the system's call UI (CallKit, Android's
+call notification) doesn't ask.
+
+**In the apps.** Android and iOS label the tiles of a meeting's call "Host" and "Co-host"; its
+organizer gets "Hosts" in the call's controls (each other member in the call: "Make co-host",
+"Remove as co-host", "Hand over host role") and the same question when leaving, the lobby count
+read from `GET /meetings/{id}/lobby`. The apps don't schedule meetings: there, co-hosts are named
+in the call.
 
 **Telling people.** Every change sends `meeting_update` to the organizer, the invitees and the
 co-hosts before and after; a handover also `conversation_update` to the chat's members, whose
