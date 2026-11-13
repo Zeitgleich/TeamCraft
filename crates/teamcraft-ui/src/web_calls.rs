@@ -128,11 +128,18 @@ pub fn applies_effects() -> bool {
 /// (`teamcraft_media::web_api::missing_for_calls`): WebCodecs audio and the AudioWorklet. A browser
 /// without WebTransport calls over the SFU's WebSocket fallback (#1227).
 pub fn support() -> Result<(), CallsUnavailableReason> {
-  if teamcraft_media::web_api::missing_for_calls(teamcraft_media::web_api::has_global).is_some() {
-    return Err(CallsUnavailableReason::BrowserUnsupported);
-  }
+  browser_support()?;
   if !crate::web_core::runs_here() {
     return Err(CallsUnavailableReason::OtherTab);
+  }
+  Ok(())
+}
+
+/// Whether this browser can make calls at all, before the page runs a client core: a meeting
+/// guest's page checks the devices before knocking (#1928) and starts its core only then.
+pub fn browser_support() -> Result<(), CallsUnavailableReason> {
+  if teamcraft_media::web_api::missing_for_calls(teamcraft_media::web_api::has_global).is_some() {
+    return Err(CallsUnavailableReason::BrowserUnsupported);
   }
   Ok(())
 }

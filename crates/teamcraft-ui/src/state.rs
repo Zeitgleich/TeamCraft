@@ -1089,6 +1089,14 @@ impl AppState {
     Some(result)
   }
 
+  /// The same app state with `call` as its call state: a meeting guest's device check carries its
+  /// choices into the call (#1928).
+  #[must_use]
+  pub fn with_call(mut self, call: CallState) -> Self {
+    self.call = call;
+    self
+  }
+
   pub fn me(&self) -> User {
     self.read(|backend| backend.me())
   }

@@ -303,6 +303,8 @@ pub struct CallState {
   pub screen_resolution: RwSignal<ScreenShareResolution>,
   pub has_hand_raised: RwSignal<bool>,
   pub is_deafened: RwSignal<bool>,
+  /// The pre-join screen's "Don't use audio" (#1928): the call starts muted and deafened.
+  pub uses_no_audio: RwSignal<bool>,
   /// An announced move of this call into a meeting room the user hasn't followed yet.
   pub move_offer: RwSignal<Option<MoveOffer>>,
   /// The meeting room this device's DM call moved into to have the notetaker in it (e2ee.md
@@ -370,6 +372,7 @@ impl CallState {
       screen_resolution: RwSignal::new(ScreenShareResolution::default()),
       has_hand_raised: RwSignal::new(false),
       is_deafened: RwSignal::new(false),
+      uses_no_audio: RwSignal::new(false),
       move_offer: RwSignal::new(None),
       notetaker_asked_in: RwSignal::new(None),
       is_camera_menu_open: RwSignal::new(false),
@@ -624,6 +627,10 @@ impl CallState {
           is_camera_on: self.is_camera_on.get_untracked(),
         },
       });
+      // Without audio: nothing from the others plays either, from the start of the call.
+      if self.uses_no_audio.get_untracked() {
+        self.set_deafened(true);
+      }
     }
   }
 

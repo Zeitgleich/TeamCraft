@@ -22,7 +22,7 @@ use teamcraft_media::call_native::NativeCall;
 use teamcraft_proto::{ConversationId, MeetingId, UserId};
 
 use crate::web::{TEST_CSP, click_text, type_until_kept, wait_for_element, wait_for_text};
-use crate::web_calls::{MEDIA_ARGS, click_selector, console_log};
+use crate::web_calls::{MEDIA_ARGS, console_log};
 
 /// Ends a few minutes from now, so the call may start (a meeting that is over can't be joined).
 const MEETING_LENGTH_MS: i64 = 60 * 60_000;
@@ -426,16 +426,19 @@ async fn knock(page: &Page, origin: &str, link: String, name: &str) {
     .await
     .unwrap();
   page.goto(link).await.unwrap();
+  // One screen (#1928): the name under the preview, the devices turned on, "Join now" knocks.
   wait_for_text(page, "Join the meeting").await;
-  wait_for_element(page, "input.input").await;
-  type_until_kept(page, "input.input", name).await;
-  click_text(page, "Ask to join").await;
+  wait_for_element(page, "#guest-name").await;
+  type_until_kept(page, "#guest-name", name).await;
+  click_text(page, "Turn on camera and microphone").await;
+  wait_for_element(page, ".prejoin .meter").await;
+  click_text(page, "Join now").await;
 }
 
-/// The guest, let in, joins the meeting's call from the browser. Admission opens the call's
-/// pre-join screen by itself (#1929): the guest knocked to join the call, not to read the chat.
+/// The guest, let in, is in the meeting's call: admission joins it at once with the devices the
+/// guest set up before knocking (#1929, #1928), without a second pre-join screen.
 async fn join_call_in_browser(page: &Page) {
-  wait_for_element(page, ".prejoin").await;
+  wait_for_element(page, ".call-screen").await;
   // The chat behind the call offers a guest no second way to start a call.
   let call_starts = page
     .evaluate(r#"document.querySelectorAll('.channel-header [aria-label="Start audio call"]').length"#)
@@ -444,8 +447,6 @@ async fn join_call_in_browser(page: &Page) {
     .into_value::<u64>()
     .unwrap();
   assert_eq!(call_starts, 0, "the guest's chat header offers to start a call");
-  click_selector(page, ".prejoin-actions .btn-primary").await;
-  wait_for_element(page, ".call-screen").await;
 }
 
 /// The native peer listens for [`CALL_DURATION`], then leaves: the DAVE group with the guest was

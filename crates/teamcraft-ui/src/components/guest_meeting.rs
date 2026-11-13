@@ -12,9 +12,10 @@ use teamcraft_proto::MeetingId;
 use crate::areas::{self, Place, lazy_area};
 use crate::auth::{AppConfig, Authenticator};
 use crate::backend::Backend;
-use crate::calls::CallPhase;
+use crate::calls::{CallKind, CallPhase, CallRequest};
 use crate::components::app::connect_calls;
 use crate::components::channel_view::ChannelView;
+use crate::components::guest_devices::GuestDevices;
 use crate::components::login::{AuthFrame, load_backend};
 use crate::components::meetings_view::join_meeting;
 use crate::components::settings_tabs::apply_call_prefs;
@@ -33,6 +34,9 @@ pub struct GuestSession {
   pub conversation: ConversationId,
   pub guest_token: String,
   pub auth: Rc<dyn Authenticator>,
+  /// The call module and the choices of the guest's device check (#1928): admission joins the
+  /// call with them. `None` in a browser without calls.
+  pub maybe_devices: Option<GuestDevices>,
 }
 
 #[component]
@@ -40,18 +44,29 @@ pub fn GuestMeeting(session: GuestSession) -> impl IntoView {
   let i18n = use_i18n();
   let backend = RwSignal::new_local(None::<Result<Rc<dyn Backend>, String>>);
   let has_left = RwSignal::new(false);
-  let settings = Settings::load();
+  let settings = session
+    .maybe_devices
+    .as_ref()
+    .map_or_else(Settings::load, |devices| devices.settings);
   let session = StoredValue::new_local(session);
 
   spawn_local(async move {
-    let auth = session.with_value(|session| session.auth.clone());
+    let (auth, maybe_calls) = session.with_value(|session| {
+      (
+        session.auth.clone(),
+        session
+          .maybe_devices
+          .as_ref()
+          .map(|devices| devices.calls.clone()),
+      )
+    });
     let loaded = async {
       let response = auth
         .api_get("/api/v1/me")
         .await
         .map_err(|error| error.to_string())?;
       let me = interpret_me_response(response).map_err(|problem| format!("{problem:?}"))?;
-      load_backend(auth.clone(), &me)
+      load_backend(auth.clone(), &me, maybe_calls)
         .await
         .map_err(|error| error.to_string())
     }
@@ -104,16 +119,21 @@ fn GuestShell(
   has_left: RwSignal<bool>,
 ) -> impl IntoView {
   let i18n = use_i18n();
-  let (conversation, auth, meeting, token) = session.with_value(|session| {
+  let (conversation, auth, meeting, token, maybe_call) = session.with_value(|session| {
     (
       session.conversation,
       session.auth.clone(),
       session.meeting,
       session.guest_token.clone(),
+      session.maybe_devices.as_ref().map(|devices| devices.call),
     )
   });
   let change_source = backend.clone();
-  let state = AppState::new(backend, settings, None);
+  // The device check's call state goes on into the call (#1928): its choices are the call's.
+  let state = match maybe_call {
+    Some(call) => AppState::new(backend, settings, None).with_call(call),
+    None => AppState::new(backend, settings, None),
+  };
   provide_context(state);
   provide_context(MeetingsHub::for_guest(
     MeetingsClient::new(auth.clone()),
@@ -140,11 +160,23 @@ fn GuestShell(
   state.open_conversation(conversation);
   if untrack(|| state.read(|backend| backend.has_calls() && !backend.has_simulated_calls())) {
     connect_calls(state);
-    // The guest knocked to join the call: admission opens it, the chat stays behind it (#1929).
-    join_meeting(state, i18n, conversation);
+    // The guest knocked to join the call (#1929): with the choices of their device check, admission
+    // joins it at once (#1928); without one, the pre-join screen opens. The chat stays behind it.
+    if maybe_call.is_some() {
+      state.call.join(CallRequest {
+        conversation,
+        kind: CallKind::Group,
+      });
+    } else {
+      join_meeting(state, i18n, conversation);
+    }
   }
   let call_prefs = Memo::new(move |_| settings.prefs.get().calls);
+  // A device check applied the settings already, and the guest changed them since (muted, camera
+  // off): they apply again only when they change.
+  let applied = maybe_call.map(|_| untrack(|| call_prefs.get()));
   Effect::new(move |previous: Option<crate::prefs::CallPrefs>| {
+    let previous = previous.or_else(|| applied.clone());
     let calls = call_prefs.get();
     state.call.phase.track();
     apply_call_prefs(state.call, previous.as_ref(), &calls)

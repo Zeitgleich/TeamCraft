@@ -17,6 +17,7 @@ use teamcraft_proto::{ConversationId, LobbyState, MeetingId, UserId};
 use crate::areas::{self, Place, lazy_area};
 use crate::auth::guest::GuestAuth;
 use crate::auth::{AppConfig, Authenticator};
+use crate::components::guest_devices::{FORM_ID, GuestDevices, GuestForm};
 use crate::components::guest_meeting::GuestSession;
 use crate::components::login::AuthFrame;
 use crate::form_errors::{FieldError, FieldErrors, FormErrors};
@@ -27,7 +28,6 @@ use crate::reactive::{SetIfAlive, pause, use_interval};
 use crate::remote_backend;
 
 /// How often the lobby is asked whether the guest was admitted.
-const FORM_ID: &str = "guest-join-form";
 const NAME_ID: &str = "guest-name";
 const POLL_MS: u64 = 2000;
 /// How long the page waits for its client core to open before it gives up.
@@ -47,6 +47,24 @@ enum GuestPhase {
   Admitted,
   Denied,
   Failed(FailureKind),
+}
+
+/// How far the page got: the name and devices, the lobby, or in the meeting. The view is built
+/// anew only when this changes, so the device check keeps running while the knock is sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stage {
+  Ask,
+  Lobby,
+  In,
+}
+
+/// Whether the page has its call module for the device check (#1928).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DevicesState {
+  Loading,
+  Ready,
+  /// No calls in this browser (or the module did not load): the name alone, as before.
+  Unavailable,
 }
 
 /// What went wrong, in terms the guest can act on.
@@ -138,6 +156,25 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
     ..
   } = page;
   crate::startup::first_view();
+  // The device check (#1928) runs on the page's call module, which comes with the call screens'
+  // module: the meeting needs both next anyway.
+  let devices = StoredValue::new_local(None::<GuestDevices>);
+  let devices_state = RwSignal::new(DevicesState::Loading);
+  spawn_local(async move {
+    let state = match areas::guest_devices(()).await {
+      Ok(Some(found)) => {
+        // Gone with the page: nothing left to set up.
+        let _ = devices.try_set_value(Some(found));
+        DevicesState::Ready
+      },
+      Ok(None) => DevicesState::Unavailable,
+      Err(error) => {
+        tracing::warn!(%error, "the guest's device check did not load");
+        DevicesState::Unavailable
+      },
+    };
+    devices_state.set_if_alive(state);
+  });
   match maybe_resumed {
     Some(session) => spawn_local(enter(
       session,
@@ -207,18 +244,54 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
     spawn_local(check_lobby(client.clone(), page));
   });
 
+  let stage = Memo::new(move |_| match phase.get() {
+    GuestPhase::AskName | GuestPhase::Joining => Stage::Ask,
+    GuestPhase::Admitted => Stage::In,
+    GuestPhase::Waiting | GuestPhase::Denied | GuestPhase::Failed(_) => Stage::Lobby,
+  });
+  let is_joining = Signal::derive(move || phase.get() == GuestPhase::Joining);
+  let maybe_sign_in = StoredValue::new((!is_one_time).then(|| sign_in_href.get_value()).flatten());
+
   view! {
     {move || {
-      if phase.get() == GuestPhase::Admitted
-        && let Some(joined) = page.joined.get_value()
-      {
-        let session = GuestSession {
-          meeting: joined.meeting,
-          conversation: joined.conversation_id,
-          guest_token: joined.guest_token,
-          auth: joined.auth,
-        };
-        return lazy_area(Place::Screen, move || areas::guest_meeting(session.clone()));
+      match (stage.get(), devices_state.get()) {
+        (Stage::In, _) => {
+          if let Some(joined) = page.joined.get_value() {
+            let session = GuestSession {
+              meeting: joined.meeting,
+              conversation: joined.conversation_id,
+              guest_token: joined.guest_token,
+              auth: joined.auth,
+              maybe_devices: devices.get_value(),
+            };
+            return lazy_area(Place::Screen, move || areas::guest_meeting(session.clone()));
+          }
+        },
+        (Stage::Ask, DevicesState::Loading) => {
+          return view! {
+            <AuthFrame>
+              <p class="auth-status auth-status-quiet" role="status">
+                <span class="spinner" aria-hidden="true"></span>
+                <span>{move || i18n.t("guest-preparing")}</span>
+              </p>
+            </AuthFrame>
+          }
+          .into_any();
+        },
+        (Stage::Ask, DevicesState::Ready) => {
+          if let Some(found) = devices.get_value() {
+            let form = GuestForm {
+              devices: found,
+              name,
+              errors,
+              is_joining,
+              submit: join,
+              maybe_sign_in: maybe_sign_in.get_value(),
+            };
+            return lazy_area(Place::Screen, move || areas::guest_device_setup(form.clone()));
+          }
+        },
+        _ => {},
       }
       view! {
         <AuthFrame>
@@ -229,27 +302,14 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
                 <form id=FORM_ID class="auth-form" on:submit=move |ev| join.with_value(|join| join(ev))>
                   <h1>{move || i18n.t("guest-title")}</h1>
                   <p class="muted-text">{move || i18n.t("guest-subtitle")}</p>
-                  <label for=NAME_ID>{move || i18n.t("guest-name")}</label>
-                  <input
-                    id=NAME_ID
-                    class="input"
-                    autocomplete="name"
-                    data-autofocus
-                    aria-required="true"
-                    aria-invalid=errors.invalid(NAME_ID)
-                    aria-describedby=errors.described(NAME_ID)
-                    prop:value=move || name.get()
-                    on:input=move |ev| name.set(event_target_value(&ev))
-                  />
-                  <FieldError errors=errors field=NAME_ID />
+                  <GuestNameField name=name errors=errors />
                   <div class="auth-actions">
                     <button type="submit" class="btn btn-primary" prop:disabled=is_joining>
                       {move || i18n.t("guest-join")}
                     </button>
                   </div>
-                  {(!is_one_time)
-                    .then(|| sign_in_href.get_value())
-                    .flatten()
+                  {maybe_sign_in
+                    .get_value()
                     .map(|href| view! {
                       <p class="muted-text small">
                         <a href=href>{move || i18n.t("guest-sign-in")}</a>
@@ -266,6 +326,10 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
                   <span class="spinner" aria-hidden="true"></span>
                   <span>{move || i18n.t("guest-waiting")}</span>
                 </p>
+                // A small preview while waiting; the choices stay changeable (#1928).
+                {devices.get_value().map(|found| {
+                  lazy_area(Place::Inline, move || areas::guest_waiting_devices(found.clone(), name))
+                })}
                 {move || is_organizer_app_outdated.get().then(|| view! {
                   <p role="alert">{move || i18n.t("guest-organizer-app-outdated")}</p>
                 })}
@@ -306,6 +370,27 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
       }
       .into_any()
     }}
+  }
+}
+
+/// The guest's name: what the hosts see in the lobby and everyone in the meeting.
+#[component]
+pub(crate) fn GuestNameField(name: RwSignal<String>, errors: FormErrors) -> impl IntoView {
+  let i18n = use_i18n();
+  view! {
+    <label for=NAME_ID>{move || i18n.t("guest-name")}</label>
+    <input
+      id=NAME_ID
+      class="input"
+      autocomplete="name"
+      data-autofocus
+      aria-required="true"
+      aria-invalid=errors.invalid(NAME_ID)
+      aria-describedby=errors.described(NAME_ID)
+      prop:value=move || name.get()
+      on:input=move |ev| name.set(event_target_value(&ev))
+    />
+    <FieldError errors=errors field=NAME_ID />
   }
 }
 

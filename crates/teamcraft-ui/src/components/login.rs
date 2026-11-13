@@ -1347,9 +1347,12 @@ fn WelcomeScreen(name: String, control: SessionControl) -> impl IntoView {
 
 /// The desktop app reads chat data from the client core in the shell (encrypted store, sync), the
 /// browser build from the core in the page; without a core, spaces and conversations come over REST.
+/// `maybe_page_calls`: a meeting guest's page brings the call module its device check ran on
+/// (#1928), with the browser's media already in use.
 pub(crate) async fn load_backend(
   auth: Rc<dyn crate::auth::Authenticator>,
   me: &GetMeResponse,
+  maybe_page_calls: Option<RemoteCalls>,
 ) -> Result<Rc<dyn Backend>, LoadError> {
   if tauri::has_core() {
     let connecting = RemoteChat::connect();
@@ -1369,6 +1372,8 @@ pub(crate) async fn load_backend(
           hybrid
         },
       }
+    } else if let Some(calls) = maybe_page_calls {
+      hybrid.with_calls(calls)
     } else {
       browser_calls(hybrid)
     };
@@ -1413,7 +1418,7 @@ fn DataGate(me: GetMeResponse, settings: Settings, control: SessionControl) -> i
     let auth = control.authenticator();
     let me = me.get_value();
     leptos::task::spawn_local(async move {
-      backend.set_if_alive(Some(load_backend(auth, &me).await));
+      backend.set_if_alive(Some(load_backend(auth, &me, None).await));
     });
   });
 
