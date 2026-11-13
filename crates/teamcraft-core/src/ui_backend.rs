@@ -352,6 +352,10 @@ pub enum CoreCommand {
   DeleteSpace {
     space: SpaceId,
   },
+  /// Lists what deleting a space takes for its confirmation (`space_deletion_preview`).
+  PrepareSpaceDeletion {
+    space: SpaceId,
+  },
   RefreshCategories {
     space: SpaceId,
   },
@@ -596,6 +600,7 @@ impl CoreCommand {
       | Self::LeaveChannel { .. }
       | Self::DeleteChannel { .. }
       | Self::DeleteSpace { .. }
+      | Self::PrepareSpaceDeletion { .. }
       | Self::RefreshCategories { .. }
       | Self::CreateCategory { .. }
       | Self::RenameCategory { .. }
@@ -3812,6 +3817,41 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn delete_space(&self, space: SpaceId) {
     self.command(CoreCommand::DeleteSpace { space });
+  }
+
+  fn prepare_space_deletion(&self, space: SpaceId) {
+    self.command(CoreCommand::PrepareSpaceDeletion { space });
+  }
+
+  fn space_deletion_preview(
+    &self,
+    space: SpaceId,
+  ) -> Option<teamcraft_client_api::model::SpaceDeletionPreview> {
+    use crate::client::RenamerRole as Role;
+    use teamcraft_client_api::model as ui;
+
+    let preview = crate::client::space_deletion_preview(self.store_ref(), space)?;
+    Some(ui::SpaceDeletionPreview {
+      space: preview.space,
+      is_signed: preview.is_signed,
+      channels: preview
+        .channels
+        .into_iter()
+        .map(|channel| ui::SpaceDeletionPreviewChannel {
+          conversation: channel.conversation,
+          name: channel.name,
+          maybe_renamed_by: channel.maybe_renamed_by.map(|renamer| ui::ChannelRenamer {
+            user: renamer.user,
+            role: match renamer.role {
+              Role::Founder => ui::RenamerRole::Founder,
+              Role::ChannelAdmin => ui::RenamerRole::ChannelAdmin,
+              Role::WorkspaceAdmin => ui::RenamerRole::WorkspaceAdmin,
+              Role::Member => ui::RenamerRole::Member,
+            },
+          }),
+        })
+        .collect(),
+    })
   }
 
   fn categories(&self, space: SpaceId) -> Vec<CategoryInfo> {

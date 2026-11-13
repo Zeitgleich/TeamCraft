@@ -846,6 +846,13 @@ pub trait ChatBackend {
   fn delete_channel(&self, _conversation: ConversationId) {}
   /// Deletes a space with its channels for everybody (`delete_space`), after the user confirmed it.
   fn delete_space(&self, _space: SpaceId) {}
+  /// The user is about to confirm deleting a space: list its channels with who last named each
+  /// ([`Self::space_deletion_preview`] once it is there). The deletion then signs those.
+  fn prepare_space_deletion(&self, _space: SpaceId) {}
+  /// What [`Self::prepare_space_deletion`] found, if it is done.
+  fn space_deletion_preview(&self, _space: SpaceId) -> Option<crate::model::SpaceDeletionPreview> {
+    None
+  }
   fn categories(&self, _space: SpaceId) -> Vec<CategoryInfo> {
     Vec::new()
   }

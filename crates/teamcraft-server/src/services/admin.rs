@@ -638,7 +638,7 @@ async fn delete_direct_conversations(state: &AppState, user: UserId) -> Result<u
       .database
       .delete_direct_conversation(conversation_id, &direct.remaining)
       .await?;
-    super::conversations::announce_deleted_direct(state, conversation_id, &direct.remaining, None);
+    super::conversations::announce_deleted_direct(state, conversation_id, &direct.remaining, None, None);
   }
   Ok(conversations.len())
 }

@@ -38,6 +38,7 @@ use crate::components::modal::Modal;
 use crate::components::pending_button::PendingButton;
 use crate::components::roster_banner::{current_standing, unsigned_reason};
 use crate::components::section_tabs::{Section, SectionTabs};
+use crate::components::space_deletion_list::SpaceDeletionList;
 use crate::components::space_tile::SpaceTile;
 use crate::feedback::{PendingAction, failure_message};
 use crate::form_errors::{FieldError, FieldErrors, FormErrors};
@@ -2194,6 +2195,7 @@ fn SpaceAdvanced(space: Space) -> impl IntoView {
         fallback=move || view! { <button type="button" class="btn btn-danger" on:click=move |_| is_confirming_delete.set(true)>{move || i18n.t("space-delete-action")}</button> }
       >
         <p role="alert">{move || i18n.t_with("space-delete-confirm", &[("count", &channel_count.to_string())])}</p>
+        <SpaceDeletionList space=id />
         <div class="inline-actions">
           <button type="button" class="btn btn-danger" prop:disabled=move || delete_pending.is_pending() on:click=delete>{move || i18n.t("space-delete-action")}</button>
           <button type="button" class="btn" on:click=move |_| is_confirming_delete.set(false)>{move || i18n.t("cancel")}</button>

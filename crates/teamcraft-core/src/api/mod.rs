@@ -37,7 +37,6 @@ pub use http::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use http::{NativeSocket, open_call_socket};
 pub use read_only::ReadOnlyApi;
-use teamcraft_proto::DeleteConversationRequest;
 use teamcraft_proto::{
   AddConversationMemberRequest, AddSpaceMemberRequest, AdminJoinRequestResponse, ClaimKeyPackagesRequest,
   ClaimKeyPackagesResponse, ConversationId, ConversationMemberResponse, ConversationResponse,
@@ -86,6 +85,7 @@ use teamcraft_proto::{
   CreateInstantMeetingRequest, MeetingAdmittersResponse, MeetingHostsResponse, MeetingId, MeetingResponse,
   PutMeetingAdmittersRequest, PutMeetingHostsRequest,
 };
+use teamcraft_proto::{DeleteConversationRequest, DeleteSpaceRequest, SpaceDeletionPreviewResponse};
 use teamcraft_proto::{
   DirectoryChannelsQuery, DirectoryChannelsResponse, DirectoryFiltersQuery, DirectoryFiltersResponse,
   DirectoryInvitationsQuery, DirectoryInvitationsResponse, DirectoryPeopleQuery, DirectoryPeopleResponse,
@@ -414,8 +414,19 @@ pub trait ServerApi {
     space: SpaceId,
   ) -> impl Future<Output = Result<ListConversationsResponse, ApiError>>;
   /// Deletes a space with its channels for everybody (`DELETE /spaces/{id}`, `delete_space`); not
-  /// found once it is gone.
-  fn delete_space(&self, space: SpaceId) -> impl Future<Output = Result<(), ApiError>>;
+  /// found once it is gone. A signed deletion must name each channel's current epoch
+  /// (`409 epoch_conflict` otherwise).
+  fn delete_space(
+    &self,
+    space: SpaceId,
+    request: &DeleteSpaceRequest,
+  ) -> impl Future<Output = Result<(), ApiError>>;
+  /// What deleting a space takes (`GET /spaces/{id}/deletion`): its channels the caller may see,
+  /// with names and epochs, for the confirmation and the signature (e2ee.md §4.6.5, D7).
+  fn space_deletion_preview(
+    &self,
+    space: SpaceId,
+  ) -> impl Future<Output = Result<SpaceDeletionPreviewResponse, ApiError>>;
   fn create_space(
     &self,
     request: &CreateSpaceRequest,

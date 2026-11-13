@@ -1717,16 +1717,17 @@ purge finish after a crash is the same as for the user's own deletion, the serve
 again lifts it, and a replay finds nothing left, without asking the server anything. Verified purges count
 towards the mass notice below, since a real signature on many channels is worth telling too.
 
-When there is no signature: **a space's deletion is never signed.** Which channels are in a space is
-`maybe_space_id`, the server's word, so a server could relabel any conversation into the space being deleted
-and collect a workspace admin's signature for all of them. So its channels stay claims, however the admin
-signs in, **also on the deleter's own device** (issue #1162): nothing a device verified says which space a
-channel is in (channels move between spaces too), so purging what the server lists in the deleted space at
-once would let it relabel a direct message or another space's channel in and destroy the deleter's copy.
-The deleter's device hides those channels with their history kept for the retention, and they count towards
-the mass notice, where a relabel shows as more than the user deleted; a conversation it pinned as direct
-it leaves alone. Binding a channel's space in signed state, which lets this purge at once again, is
-decided in §4.6.5 (signed space deletions, #1727). Other deletions that stay claims: a space admin's, one under a custom permission scheme, the last
+**A space's deletion** is signed only by a workspace owner or admin, and counts only through the channels'
+anchors (§4.6.5, "Signed space deletions", #1727). Which channels are in a space is `maybe_space_id`, the
+server's word, so a server could relabel any conversation into the space being deleted and collect a
+workspace admin's signature for it. So a channel purges at once only where its own anchor places it in that
+space, confirmed; every other channel (no anchor, another space, a move nobody allowed, a name a member set)
+stays a claim, **also on the deleter's own device** (issue #1162), which judges its own signature like any
+member's: purging what the server lists in the deleted space at once would let it relabel a direct message
+or another space's channel in and destroy the deleter's copy. Those channels are hidden with their history
+kept for the retention, and count towards the mass notice, where a relabel shows as more than the user
+deleted; a conversation the device pinned as direct it leaves alone. Other deletions that stay claims: a
+space admin's (and so every channel of a space they delete), one under a custom permission scheme, the last
 member's leave with `delete_if_last`, a channel without signed roles deleted by its channel admin, a direct
 message deleted with an account, and a deletion from a client or against a server from before signed
 deletions. Within 1.x neither side needs the other: a client before this version sends no body and gets the
@@ -1780,9 +1781,9 @@ local copy may be the last copy there is, a claim is not enough to destroy it:
   is the retention; the notice is what makes people react within it. What a single claim shows is the
   conversation going away.
 - **The user's own deletion.** A channel's deletion the user confirmed on this device purges at once
-  there, by a mark set before the request. A space's deletion doesn't: its channels are claims there too
-  (above, issue #1162). The user's other devices verify its signature like anybody's, and treat it
-  as a claim without one.
+  there, by a mark set before the request. A space's deletion doesn't by itself: the device judges its own
+  signature for each channel as a member's device does, and the rest are claims (above, issue #1162).
+  The user's other devices verify its signature like anybody's, and treat it as a claim without one.
 - **What it doesn't protect.** Retention runs on the device's clock, so a clock set forward shortens it.
   Local copies are the only thing kept: what a real deletion removed from the server doesn't come back.
 
@@ -3429,10 +3430,11 @@ encoding, the hashes, the signatures, the verdicts, the pin and floor record, an
 rename commits (#1725, first part). `teamcraft-core` founds channels anchored, checks the anchor against the pin and
 floor on every join path, signs moves and renames, binds a deletion to the name (#1740), and takes only the
 anchored founding in the role log, with `may_anchor` for it (#1748; "Implementation notes" below), and founds
-meeting chats anchored and checks them against the server's meeting and organizer (D10, #1747). Still open: what the
+meeting chats anchored and checks them against the server's meeting and organizer (D10, #1747), and signs space
+deletions, which purge a channel only where its anchor places it in the space (D7, #1727). Still open: what the
 apps show of the anchor and the mobile name checks (#1749), and re-founding with its chain in the account data:
 `AnchorFloor` keeps no re-founding chain yet, so a re-founding is refused as another founding until #1728. The parts
-split off before: #1727 (signed space deletions), #1728 (anchoring older channels and re-founding), #1729 (strict
+split off before: #1728 (anchoring older channels and re-founding), #1729 (strict
 from creation) and #1726 (the meeting invitee list).
 
 **The gap.** Facts that decisions rest on are the server's word, or trust on first use:
@@ -3529,7 +3531,7 @@ struct {
   |--------------------|-------------------------|-------------------|---------------------------------------------------------|
   | The founding       | `ChannelAnchor` (6)     | `format` (1)      | `ChannelAnchorFounding ‖ ChannelProperties` (version 1) |
   | A move or rename   | `ChannelProperties` (7) | the new `version` | `ChannelPropertiesChange` (below)                       |
-  | A space's deletion | `SpaceDeletion` (8)     | `signed_at_ms`    | `SpaceDeletionDocument` (below)                         |
+  | A space's deletion | `SpaceDeletion` (9)     | `signed_at_ms`    | `SpaceDeletionDocument` (below)                         |
 
   The current properties are the last change's, or `founding_properties` while there is none. The founding entry
   covers `founding_properties`, which stay in the anchor, and the last change carries its own signed document. So
@@ -3804,7 +3806,34 @@ and couldn't count for a purge.
   for deletions (below). Every
   other channel is a claim, kept for the retention; a direct message is never purged this way, as it has no anchor.
   The deleter's own device does the same (#1162). A space admin's deletion stays a claim: space roles aren't signed,
-  and signing them (D7's alternative) is much larger.
+  and signing them (D7's alternative) is much larger. After the crypto review (#1717) a channel also takes the
+  retention when its name was last set by a member (`name_set_by`), when the deletion names no name hash for it
+  (a mismatch), when its anchor is below the device's floor, or when its pin marks a fork.
+  - *Built* (#1727). The document is JSON like a channel's deletion (`teamcraft_proto::SpaceDeletionDocument`),
+    signed with the workspace log signature under the log kind `SpaceDeletion` (9), its version the signing time;
+    so it can't pass for a channel's deletion, a role entry or a properties change, nor the other way round.
+    Each channel carries an optional `name_hash`; a missing one is a mismatch on an anchored channel. Before the
+    confirmation, the deleter's device asks `GET /spaces/{id}/deletion` for the channels the deleter may see with
+    their names and current epochs (the server's word), and lists them with who set each name, as the channel's
+    verified anchor on this device says (the founder, an admin, or a member, whose name "keeps the history for a
+    while"); the desktop and web confirmations show that list. It signs exactly those channels, with the name
+    shown and the server's epoch, leaving out a channel whose epoch is more than `MAX_CHANGE_AGE_EPOCHS` from its
+    own group's, and only if the user is an owner or admin of its verified roster, naming that roster's version.
+    `DELETE /spaces/{id}` takes it as an optional body: under the locks of the channels' epochs (taken before the
+    conversations, in a commit's order) every listed channel that is in the space must be at the epoch named, or
+    `409 epoch_conflict`; the device lists again and signs the channels shown before for their new epochs (up to
+    three tries), never a channel or name the server added since. The server keeps the bytes once per space
+    (`space_deletion_signatures`, with `space_deletion_channels` naming its channels), hands them out on each
+    channel's `conversation_delete` (`signed_space_deletion`) and a sync's `signed_space_deletions`, and drops
+    them with the channels' tombstones. A device judges a channel against it (`verify_signed_space_deletion`):
+    named once in the document, known as a channel, its group not past the epoch named, the signature at most
+    `signed_deletion_max_age` old, no alarm, its verified anchor's space the document's and confirmed with the
+    floor granting and the held properties not below the floor, the name counting as for a channel's deletion,
+    a roster at least the version named, and the signer an owner or admin of that roster, fresh, on a device its
+    signed list names. A channel admin's authority doesn't reach a space's deletion, so the channel's role log isn't
+    read or kept for it: a fork alarm of its roles still refuses, a member's newer head merely noted doesn't. The
+    mobile apps sign the same way through the core; their confirmation still shows the channel count only, so
+    there the device signs the server's list as it is at the request (#1875).
 - **The name at a deletion** (D3, #1725). `ChannelDeletionDocument` gains `optional<opaque name_hash[32]>`,
   the hash of the name the deleter was shown, as each entry of a space's deletion has. A member purges at once only
   if it equals its anchor's name hash and that name isn't stale, for deletions neither (a member set it, "A

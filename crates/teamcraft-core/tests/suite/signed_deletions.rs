@@ -555,6 +555,7 @@ mod false_claims {
       &GatewayEvent::ConversationDelete {
         conversation_id: channel,
         maybe_signed_deletion: Some(forged),
+        maybe_signed_space_deletion: None,
       },
     );
     settle(&mut [&mut bob]).await;
@@ -745,10 +746,11 @@ async fn a_verified_purge_that_was_cut_off_is_finished() {
 mod deleting_a_space {
   use super::*;
 
-  /// `maybe_space_id` is the server's word, so a signature for "the channels of this space" could be
-  /// had for any conversation: nothing is signed, also by a workspace admin.
+  /// `maybe_space_id` is the server's word: the owner's signed space deletion (#1727) counts only
+  /// through a channel's anchor, and a channel founded without one stays a claim. No channel's own
+  /// signature is made for it.
   #[tokio::test]
-  async fn it_is_never_signed_so_the_history_stays_for_the_retention() {
+  async fn an_unanchored_channel_stays_a_claim_for_the_retention() {
     let server = FakeServer::new();
     let (mut owner, mut bob) = two(&server).await;
     let channel = channel_with_history(&mut owner, &mut bob).await;

@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::{Base64Bytes, ChannelRole, ConversationId, DeviceId, UnixMillis, UserId};
+use crate::{Base64Bytes, ChannelRole, ConversationId, DeviceId, SpaceId, UnixMillis, UserId};
 
 /// Privileged roles one snapshot may hold; members are implicit and never listed.
 pub const MAX_CHANNEL_ROLE_ASSIGNMENTS: usize = 500;
@@ -84,6 +84,72 @@ pub struct SignedChannelDeletion {
 pub struct DeleteConversationRequest {
   #[serde(rename = "signed_deletion", default, skip_serializing_if = "Option::is_none")]
   pub maybe_signed_deletion: Option<SignedChannelDeletion>,
+}
+
+/// The most channels one space's signed deletion may name; a space with more stays partly claims.
+pub const MAX_SPACE_DELETION_CHANNELS: usize = 1_000;
+
+/// What a signed deletion of a space signs (JSON, the payload; e2ee.md §4.6.5, D7, issue #1727):
+/// the space, and every channel the deleter was shown in it with its epoch and name. A member's
+/// device purges a channel at once only if it is on this list, its anchor places it in this space,
+/// confirmed, and the name hash is the anchor's; every other channel stays a claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SpaceDeletionDocument {
+  pub space_id: SpaceId,
+  /// The version of the signed workspace roster that makes the signer an owner or admin; a device
+  /// whose newest verified roster is older reads the roster first, and refuses otherwise.
+  pub roster_version: u64,
+  /// Every channel the deleter was shown in the space, each once.
+  pub channels: Vec<SpaceDeletionChannel>,
+  /// When the signer's device signed it (its own clock); also the signed entry's version.
+  pub signed_at_ms: i64,
+}
+
+/// One channel of a [`SpaceDeletionDocument`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SpaceDeletionChannel {
+  pub conversation_id: ConversationId,
+  /// The epoch of the channel's group the deleter was told is the current one; the server takes
+  /// the deletion only if it is, so a device whose group has moved past it refuses it as old.
+  pub epoch: u64,
+  /// The labelled hash of the name the deleter was shown. On an anchored channel a deletion
+  /// without it counts as a mismatch.
+  #[serde(rename = "name_hash", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_name_hash: Option<Base64Bytes>,
+}
+
+/// A space's deletion, signed by a device of a workspace owner or admin. `signature` is a signed
+/// log entry of the crypto crate's `WorkspaceLog::SpaceDeletion`, its version the document's
+/// `signed_at_ms`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SignedSpaceDeletion {
+  /// A [`SpaceDeletionDocument`] as JSON, verbatim as signed.
+  pub payload: Base64Bytes,
+  pub signature: Base64Bytes,
+}
+
+/// The optional body of `DELETE /api/v1/spaces/{id}`. Without it (an older client, a space admin,
+/// a custom scheme) the deletion stays the server's word on every device (e2ee.md §4.6).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct DeleteSpaceRequest {
+  #[serde(rename = "signed_deletion", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_signed_deletion: Option<SignedSpaceDeletion>,
+}
+
+/// `GET /api/v1/spaces/{id}/deletion`: what deleting the space takes, for the deleter's
+/// confirmation and signature (`delete_space`). The server's word, which members check.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SpaceDeletionPreviewResponse {
+  /// The space's channels the caller may see, oldest first.
+  pub channels: Vec<SpaceDeletionPreviewChannel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SpaceDeletionPreviewChannel {
+  pub conversation_id: ConversationId,
+  pub name: String,
+  /// The channel's group epoch now (0 before its first commit).
+  pub epoch: u64,
 }
 
 /// A deleted conversation's signed deletion, for a device that was away.
@@ -184,6 +250,61 @@ mod tests {
       serde_json::from_value::<ChannelRolesDocument>(json).unwrap(),
       document
     );
+  }
+
+  /// The space's deletion is signed as JSON: its shape is part of what members verify (#1727).
+  #[test]
+  fn the_signed_space_deletion_keeps_its_wire_shape() {
+    let document = SpaceDeletionDocument {
+      space_id: SpaceId::from_snowflake(Snowflake::new(3).unwrap()),
+      roster_version: 4,
+      channels: vec![
+        SpaceDeletionChannel {
+          conversation_id: ConversationId::from_snowflake(Snowflake::new(7).unwrap()),
+          epoch: 5,
+          maybe_name_hash: Some(Base64Bytes::new(vec![1, 2, 3])),
+        },
+        SpaceDeletionChannel {
+          conversation_id: ConversationId::from_snowflake(Snowflake::new(8).unwrap()),
+          epoch: 0,
+          maybe_name_hash: None,
+        },
+      ],
+      signed_at_ms: 1_000,
+    };
+    let json = serde_json::to_value(&document).unwrap();
+    assert_eq!(
+      json,
+      serde_json::json!({
+        "space_id": "3",
+        "roster_version": 4,
+        "channels": [
+          {"conversation_id": "7", "epoch": 5, "name_hash": "AQID"},
+          {"conversation_id": "8", "epoch": 0},
+        ],
+        "signed_at_ms": 1000,
+      })
+    );
+    assert_eq!(
+      serde_json::from_value::<SpaceDeletionDocument>(json).unwrap(),
+      document
+    );
+  }
+
+  /// A channel's deletion document doesn't read as a space's, nor the other way round: each side
+  /// refuses the other's payload before it looks at the signature.
+  #[test]
+  fn channel_and_space_deletion_documents_do_not_read_as_each_other() {
+    let space = serde_json::json!({"space_id": "3", "roster_version": 1, "channels": [], "signed_at_ms": 1});
+    assert!(serde_json::from_value::<ChannelDeletionDocument>(space).is_err());
+    let channel = serde_json::json!({"conversation_id": "7", "epoch": 1, "signed_at_ms": 1});
+    assert!(serde_json::from_value::<SpaceDeletionDocument>(channel).is_err());
+  }
+
+  #[test]
+  fn a_space_deletion_request_without_a_body_reads_as_unsigned() {
+    let request: DeleteSpaceRequest = serde_json::from_str("{}").unwrap();
+    assert_eq!(request, DeleteSpaceRequest::default());
   }
 
   #[test]

@@ -14,7 +14,7 @@ use teamcraft_crypto::membership::MembershipAction;
 use teamcraft_crypto::mls::MAX_CHANGE_AGE_EPOCHS;
 use teamcraft_proto::{
   Base64Bytes, ConversationId, DeviceId, ErrorCode, ListConversationMembersResponse, MlsMessageKind,
-  PostMlsMessageRequest, SpaceId, UserId,
+  PostMlsMessageRequest, UserId,
 };
 
 use super::Client;
@@ -241,20 +241,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Err(error.into());
     }
     self.purge_conversation(conversation)
-  }
-
-  /// Deletes a space with its channels for everybody (e2ee.md §4.6). Done also when it is gone
-  /// already. Here its channels go as on every member's device, on the server's word
-  /// ([`Self::note_space_deletion`]): which channels are in it is `maybe_space_id`, which nothing
-  /// signed backs (#1162).
-  pub async fn delete_space(&mut self, space: SpaceId) -> Result<(), CoreError> {
-    if let Err(error) = self.api.delete_space(space).await
-      && error.error_code() != Some(&ErrorCode::SpaceNotFound)
-    {
-      return Err(error.into());
-    }
-    self.note_space_deletion(space)?;
-    self.forget_space(&space.to_string())
   }
 
   /// "Retry" on a removal or leave shown as failed, or "remove" on an admin's unconfirmed one

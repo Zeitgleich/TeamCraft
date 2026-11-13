@@ -59,8 +59,9 @@ use teamcraft_proto::{
   UpdateSpaceRequest,
 };
 use teamcraft_proto::{
-  ChannelDeletionDocument, ChannelRoleLogEntryResponse, DeleteConversationRequest,
-  DeletedConversationSignature, SignedChannelDeletion,
+  ChannelDeletionDocument, ChannelRoleLogEntryResponse, DeleteConversationRequest, DeleteSpaceRequest,
+  DeletedConversationSignature, SignedChannelDeletion, SignedSpaceDeletion, SpaceDeletionDocument,
+  SpaceDeletionPreviewChannel, SpaceDeletionPreviewResponse,
 };
 use teamcraft_proto::{CreateDeviceLinkRequest, DeviceLinkClosedReason, DeviceLinkRequest};
 use teamcraft_proto::{
@@ -285,6 +286,8 @@ struct State {
   deleted_conversations: HashMap<UserId, Vec<ConversationId>>,
   /// The signatures deletions came with, or that the server claims they did.
   deletion_signatures: HashMap<ConversationId, SignedChannelDeletion>,
+  /// The signed space deletion each channel went with (#1727).
+  space_deletion_signatures: HashMap<ConversationId, SignedSpaceDeletion>,
   /// The role logs of deleted channels, for devices verifying a signed deletion later.
   deleted_role_logs: HashMap<ConversationId, Vec<ChannelRoleLogEntryResponse>>,
   maybe_delete_answer: Option<(u16, ErrorCode)>,
@@ -1834,6 +1837,12 @@ impl FakeServer {
     self.lock().deletion_signatures.insert(conversation, signed);
   }
 
+  /// A sync's `signed_space_deletions` shows this for the conversation, true or not;
+  /// `claim_deleted` or [`Self::hide_from`] name the conversation.
+  pub fn claim_signed_space_deletion(&self, conversation: ConversationId, signed: SignedSpaceDeletion) {
+    self.lock().space_deletion_signatures.insert(conversation, signed);
+  }
+
   /// The server says from now on that the conversation is a channel, or anything else.
   pub fn relabel_conversation(&self, conversation: ConversationId, kind: ConversationKind) {
     if let Some(entry) = self.lock().conversations.get_mut(&conversation) {
@@ -3301,10 +3310,19 @@ impl ServerApi for FakeServerApi {
             })
         })
         .collect();
+      let mut signed_space_deletions: Vec<SignedSpaceDeletion> = Vec::new();
+      for id in &deleted_conversation_ids {
+        if let Some(signed) = state.space_deletion_signatures.get(id)
+          && !signed_space_deletions.contains(signed)
+        {
+          signed_space_deletions.push(signed.clone());
+        }
+      }
       Ok(ListConversationsResponse {
         conversations,
         deleted_conversation_ids,
         signed_deletions,
+        signed_space_deletions,
       })
     })
   }
@@ -3688,7 +3706,7 @@ impl ServerApi for FakeServerApi {
     })
   }
 
-  async fn delete_space(&self, space: SpaceId) -> Result<(), ApiError> {
+  async fn delete_space(&self, space: SpaceId, request: &DeleteSpaceRequest) -> Result<(), ApiError> {
     self.with(|state, me| {
       let is_space_admin = state.space_roles.get(&(space, me)) == Some(&SpaceRole::SpaceAdmin);
       if !is_space_admin && !state.admins.contains(&me) {
@@ -3698,11 +3716,41 @@ impl ServerApi for FakeServerApi {
           "missing permission delete_space",
         ));
       }
-      let channels: Vec<(ConversationId, Vec<UserId>)> = state
+      if !state.spaces.contains_key(&space) {
+        return Err(ApiError::status(404, ErrorCode::SpaceNotFound, "no such space"));
+      }
+      let channels: Vec<(ConversationId, Vec<UserId>, u64)> = state
         .conversations
         .iter()
         .filter(|(_, entry)| entry.response.maybe_space_id == Some(space))
-        .map(|(id, entry)| (*id, entry.members.keys().copied().collect()))
+        .map(|(id, entry)| (*id, entry.members.keys().copied().collect(), entry.epoch))
+        .collect();
+      if let Some(signed) = &request.maybe_signed_deletion {
+        let document: SpaceDeletionDocument = serde_json::from_slice(signed.payload.as_slice())
+          .map_err(|_| ApiError::status(400, ErrorCode::InvalidRequest, "not a space deletion document"))?;
+        if document.space_id != space {
+          return Err(ApiError::status(
+            400,
+            ErrorCode::InvalidRequest,
+            "the signed deletion is for another space",
+          ));
+        }
+        if let Some((_, _, epoch)) = channels.iter().find(|(id, _, epoch)| {
+          document
+            .channels
+            .iter()
+            .any(|named| named.conversation_id == *id && named.epoch != *epoch)
+        }) {
+          return Err(ApiError::status(
+            409,
+            ErrorCode::EpochConflict,
+            format!("the group is in epoch {epoch}"),
+          ));
+        }
+      }
+      let channels: Vec<(ConversationId, Vec<UserId>)> = channels
+        .into_iter()
+        .map(|(id, members, _)| (id, members))
         .collect();
       let mut told: Vec<UserId> = state
         .space_roles
@@ -3712,7 +3760,7 @@ impl ServerApi for FakeServerApi {
         .collect();
       for (channel, members) in channels {
         told.extend(members.iter().copied());
-        state.delete_channel(channel, members, None);
+        state.delete_channel_of_space(channel, members, request.maybe_signed_deletion.clone());
       }
       if state.spaces.remove(&space).is_none() {
         return Err(ApiError::status(404, ErrorCode::SpaceNotFound, "no such space"));
@@ -3721,6 +3769,34 @@ impl ServerApi for FakeServerApi {
       state.space_roles.retain(|(of, _), _| *of != space);
       state.publish(told, &GatewayEvent::SpaceUpdate { space_id: space });
       Ok(())
+    })
+  }
+
+  async fn space_deletion_preview(&self, space: SpaceId) -> Result<SpaceDeletionPreviewResponse, ApiError> {
+    self.with(|state, me| {
+      let is_space_admin = state.space_roles.get(&(space, me)) == Some(&SpaceRole::SpaceAdmin);
+      if !is_space_admin && !state.admins.contains(&me) {
+        return Err(ApiError::status(
+          403,
+          ErrorCode::Forbidden,
+          "missing permission delete_space",
+        ));
+      }
+      if !state.spaces.contains_key(&space) {
+        return Err(ApiError::status(404, ErrorCode::SpaceNotFound, "no such space"));
+      }
+      let mut channels: Vec<SpaceDeletionPreviewChannel> = state
+        .conversations
+        .iter()
+        .filter(|(_, entry)| entry.response.maybe_space_id == Some(space))
+        .map(|(id, entry)| SpaceDeletionPreviewChannel {
+          conversation_id: *id,
+          name: entry.response.maybe_name.clone().unwrap_or_default(),
+          epoch: entry.epoch,
+        })
+        .collect();
+      channels.sort_by_key(|channel| channel.conversation_id);
+      Ok(SpaceDeletionPreviewResponse { channels })
     })
   }
 
@@ -5146,6 +5222,7 @@ impl ServerApi for FakeServerApi {
         conversations,
         deleted_conversation_ids: Vec::new(),
         signed_deletions: Vec::new(),
+        signed_space_deletions: Vec::new(),
       })
     })
   }
@@ -7587,6 +7664,37 @@ impl State {
       &GatewayEvent::ConversationDelete {
         conversation_id: conversation,
         maybe_signed_deletion,
+        maybe_signed_space_deletion: None,
+      },
+    );
+  }
+
+  /// A channel that goes with its space, with the space's signed deletion if it came with one.
+  fn delete_channel_of_space(
+    &mut self,
+    conversation: ConversationId,
+    members: Vec<UserId>,
+    maybe_signed_space_deletion: Option<SignedSpaceDeletion>,
+  ) {
+    self.conversations.remove(&conversation);
+    if let Some(signed) = &maybe_signed_space_deletion {
+      self
+        .space_deletion_signatures
+        .insert(conversation, signed.clone());
+    }
+    for member in &members {
+      self
+        .deleted_conversations
+        .entry(*member)
+        .or_default()
+        .push(conversation);
+    }
+    self.publish(
+      members,
+      &GatewayEvent::ConversationDelete {
+        conversation_id: conversation,
+        maybe_signed_deletion: None,
+        maybe_signed_space_deletion,
       },
     );
   }
@@ -7736,6 +7844,7 @@ impl State {
           &GatewayEvent::ConversationDelete {
             conversation_id: conversation,
             maybe_signed_deletion: None,
+            maybe_signed_space_deletion: None,
           },
         );
       } else {

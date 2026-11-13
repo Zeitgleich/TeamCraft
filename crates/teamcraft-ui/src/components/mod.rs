@@ -163,6 +163,7 @@ pub mod sidebar;
 pub mod sidebar_resizer;
 pub mod skeleton;
 pub mod sliding_indicator;
+pub mod space_deletion_list;
 pub mod space_invites;
 pub mod space_tile;
 pub mod status_menu;

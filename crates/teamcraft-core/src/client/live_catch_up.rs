@@ -272,6 +272,7 @@ mod tests {
       &event(GatewayEvent::ConversationDelete {
         conversation_id: done,
         maybe_signed_deletion: None,
+        maybe_signed_space_deletion: None,
       }),
       &caught_up
     ));

@@ -5,7 +5,7 @@ use crate::wire_enum::wire_enum;
 use crate::{
   CategoryId, ChannelMentions, ChannelModeration, ChannelRole, ConversationId, ConversationKind,
   ConversationVisibility, DeletedConversationSignature, HistoryPolicy, IdempotencyKey, MeetingId, MessageId,
-  Permission, QuietHours, SpaceId, SpaceImage, UnixMillis, UserId, UserSummary,
+  Permission, QuietHours, SignedSpaceDeletion, SpaceId, SpaceImage, UnixMillis, UserId, UserSummary,
 };
 
 wire_enum! {
@@ -178,6 +178,10 @@ pub struct ListConversationsResponse {
   /// at once. A separate list, so clients and servers before signed deletions just don't see it.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub signed_deletions: Vec<DeletedConversationSignature>,
+  /// The signed deletions of spaces whose channels are among those ids (e2ee.md §4.6.5, D7): each
+  /// names its channels, and a device that verifies one for a channel drops its history at once.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub signed_space_deletions: Vec<SignedSpaceDeletion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -384,6 +388,7 @@ mod tests {
       conversations: Vec::new(),
       deleted_conversation_ids: Vec::new(),
       signed_deletions: Vec::new(),
+      signed_space_deletions: Vec::new(),
     };
     assert_eq!(serde_json::to_string(&empty).unwrap(), r#"{"conversations":[]}"#);
     let listed: ListConversationsResponse =
@@ -392,6 +397,7 @@ mod tests {
     let older: ListConversationsResponse = serde_json::from_str(r#"{"conversations":[]}"#).unwrap();
     assert!(older.deleted_conversation_ids.is_empty());
     assert!(older.signed_deletions.is_empty());
+    assert!(older.signed_space_deletions.is_empty());
   }
 
   /// Signatures stay beside the ids, which is all a client before signed deletions reads.
