@@ -27,6 +27,7 @@ mod enroll;
 pub mod files;
 mod first_sync;
 mod gateway;
+pub use gateway::EventTimer;
 mod group_health;
 mod groups;
 mod guest;
@@ -448,6 +449,8 @@ pub struct Client<A, S> {
   /// upload finished).
   is_picked_sweep_due: bool,
   maybe_call_sink: Option<CallEventSink>,
+  /// Told how long each gateway event took to apply ([`Client::set_event_timer`]).
+  maybe_event_timer: Option<gateway::EventTimer>,
   /// New devices of the user that ask to be linked ([`Client::link_requests`]); in memory only,
   /// the server lists the open ones again on every gateway connection.
   link_requests: linking::LinkRequestList,
@@ -703,6 +706,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       previewed_draft_files: HashSet::new(),
       is_picked_sweep_due: true,
       maybe_call_sink: None,
+      maybe_event_timer: None,
       link_requests: Default::default(),
       call_ids: HashMap::new(),
       heard_calls: HashMap::new(),

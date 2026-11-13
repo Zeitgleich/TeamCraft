@@ -33,7 +33,7 @@ use teamcraft_client_api::model::{
 };
 use teamcraft_client_api::search::parse_query;
 use teamcraft_core::TypingState;
-use teamcraft_core::client::CatchUpFocus;
+use teamcraft_core::client::{CatchUpFocus, LinkRequestList};
 use teamcraft_core::clock::{Clock as _, SystemClock};
 use teamcraft_core::notified;
 use teamcraft_core::notify_rules::load_mention_preferences;
@@ -54,6 +54,7 @@ use crate::engine::{Job, Store, direct_peer, parse_id};
 use crate::error::TeamCraftError;
 use crate::logging::{self, JobClock};
 use crate::perf_jobs::{self, PerfJobKind};
+use crate::types::LinkRequestItem;
 use crate::types::{
   AccountState, ChatPreviewItem, ConversationItem, FirstSyncItem, FirstSyncStageItem, GroupMentionReachItem,
   KeyCatchUpItem, LeaveChoice, MentionSettings, MentionableGroupItem, MessageItem,
@@ -146,6 +147,8 @@ pub(crate) struct Reads {
   /// when the app drops its handle, whatever this thread holds.
   engine: tokio_mpsc::WeakUnboundedSender<Job>,
   maybe_account: Option<ReadAccount>,
+  /// The client's open link requests, shared with it: reading them needs no engine job.
+  link_requests: LinkRequestList,
   /// Set by [`ReadQueue::close`]: the thread ends after this job and answers here.
   maybe_closing: Option<mpsc::Sender<()>>,
 }
@@ -323,6 +326,11 @@ impl ReadQueue {
     });
   }
 
+  /// The open link requests come from the client's shared list (issue #1900).
+  pub(crate) fn follow_link_requests(&self, list: LinkRequestList) {
+    self.post_all(move |reads| reads.link_requests = list.clone());
+  }
+
   /// Queues `job` and answers where its result will arrive; queued at once, before anyone awaits.
   fn queue<R, F>(
     &self,
@@ -467,6 +475,7 @@ fn spawn_lane(
         catch_up_focus,
         engine,
         maybe_account: None,
+        link_requests: LinkRequestList::default(),
         maybe_closing: None,
       };
       loop {
@@ -557,6 +566,11 @@ impl Reads {
       display_name: me.display_name,
       identity_fingerprint: account.identity_fingerprint.clone(),
     })
+  }
+
+  /// The link requests still open, read from the list the client shares.
+  pub(crate) fn link_requests(&self) -> Vec<LinkRequestItem> {
+    crate::engine::open_link_requests(&self.link_requests)
   }
 
   pub(crate) fn backend(&self) -> Result<&CoreChatBackend<Store>, TeamCraftError> {

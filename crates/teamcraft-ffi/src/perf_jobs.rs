@@ -388,6 +388,25 @@ impl Running {
   }
 }
 
+/// Name of the engine lane's gateway event handling, as a lane-blocked report names it.
+const GATEWAY_EVENT_JOB: &str = "gateway.event";
+
+/// A gateway event applied on the engine thread between `started_at_ms` and `done_at_ms` (Unix
+/// milliseconds): remembered as a job of the engine lane, so a job that waited behind it is
+/// reported as blocked by `gateway.event` instead of `unknown` (issue #1900).
+pub(crate) fn gateway_event_applied(started_at_ms: f64, done_at_ms: f64) {
+  if done_at_ms - started_at_ms < duration_ms(MIN_BLOCKER) {
+    return;
+  }
+  remember_lane_run(LaneRun {
+    lane: Lane::Engine,
+    name: GATEWAY_EVENT_JOB,
+    started_at_ms,
+    done_at_ms,
+    waiters: Lane::Engine.depth().load(Ordering::Relaxed),
+  });
+}
+
 fn remember_lane_run(run: LaneRun) {
   let mut runs = LANE_RUNS.lock().unwrap_or_else(PoisonError::into_inner);
   if runs.len() >= MAX_LANE_RUNS {
@@ -629,6 +648,23 @@ mod tests {
     // Another lane's jobs and those before the wait never block.
     assert!(blocker_of(&runs, Lane::Act, 500.0, 4_300.0).is_none());
     assert!(blocker_of(&runs, Lane::Main, 60.0, 90.0).is_none());
+  }
+
+  #[test]
+  fn gateway_event_handling_is_named_as_the_blocker_of_the_engine_lane() {
+    // Far in the future, so no other test's runs overlap this window.
+    let base = 9.0e15;
+    gateway_event_applied(base, base + 80.0);
+    gateway_event_applied(base + 80.0, base + 160.0);
+    let runs = LANE_RUNS.lock().unwrap_or_else(PoisonError::into_inner);
+    let blocker = blocker_of(&runs, Lane::Engine, base + 10.0, base + 170.0).expect("a blocker");
+    assert_eq!(blocker.name, "gateway.event");
+    assert_eq!(blocker.lane, Lane::Engine);
+    // Events too short to matter leave no record.
+    drop(runs);
+    gateway_event_applied(base + 500.0, base + 500.5);
+    let runs = LANE_RUNS.lock().unwrap_or_else(PoisonError::into_inner);
+    assert!(blocker_of(&runs, Lane::Engine, base + 400.0, base + 600.0).is_none());
   }
 
   #[test]

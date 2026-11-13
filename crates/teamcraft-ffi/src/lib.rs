@@ -433,9 +433,9 @@ impl TeamCraft {
   /// New devices of this account that ask to be linked (e2ee.md §5). Read it when the app is told
   /// about a change; the list is empty while nothing waits.
   pub async fn link_requests(&self) -> Result<Vec<LinkRequestItem>, TeamCraftError> {
-    self
-      .call(|engine| Box::pin(async move { Ok(engine.link_requests()) }))
-      .await
+    // The read lane: the list is shared with the client, so a burst of changes never queues
+    // these behind gateway events on the engine (issue #1900).
+    self.read(|reads| Ok(reads.link_requests())).await
   }
 
   /// Existing device: takes up a request from the prompt and joins its relay. The other devices

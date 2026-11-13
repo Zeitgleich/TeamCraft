@@ -61,6 +61,7 @@ use crate::calls::{CallHub, CallPreparation, RunningCalls};
 use crate::device_proofs::{DeviceKeyProofs, DeviceProofKey};
 use crate::error::TeamCraftError;
 use crate::logging::LIFECYCLE;
+use crate::perf_jobs;
 use crate::reads::{ReadLanes, ReadQueue};
 use crate::server_pool::ServerPool;
 use crate::types::{
@@ -176,8 +177,6 @@ pub(crate) struct Engine {
   maybe_link_offer: Option<Rc<LinkOffer>>,
   /// What the new device tells the user's other devices about itself while it waits.
   maybe_link_announcement: Option<LinkAnnouncement>,
-  /// The open link requests of other devices, readable while the sync loop owns the client.
-  link_requests: LinkRequestList,
   /// The new device's wait in the relay, which runs beside the jobs (issue #999).
   new_link: NewLinkWait,
   maybe_approval: Option<PendingApproval>,
@@ -803,7 +802,6 @@ impl Engine {
       maybe_recovery: None,
       maybe_link_offer: None,
       maybe_link_announcement: None,
-      link_requests: LinkRequestList::default(),
       new_link: NewLinkWait::default(),
       maybe_approval: None,
       maybe_receipt: None,
@@ -1059,16 +1057,6 @@ impl Engine {
       .await
   }
 
-  /// The open link requests, read from the shared list (the sync loop keeps running).
-  pub(crate) fn link_requests(&self) -> Vec<LinkRequestItem> {
-    self
-      .link_requests
-      .open(SystemClock.now_ms())
-      .into_iter()
-      .map(LinkRequestItem::from)
-      .collect()
-  }
-
   async fn begin_approval<F>(&mut self, start: F) -> Result<(), TeamCraftError>
   where
     F: for<'a> FnOnce(
@@ -1171,6 +1159,9 @@ impl Engine {
     };
     let mut client = client;
     client.share_catch_up_focus(self.signals.catch_up_focus.clone());
+    client.set_event_timer(Box::new(|_kind, started_ms, done_ms| {
+      perf_jobs::gateway_event_applied(started_ms as f64, done_ms as f64);
+    }));
     let listener = self.listener.clone();
     let (mut runner, handle) = SyncRunner::new(
       *client,
@@ -1777,7 +1768,7 @@ impl Engine {
 
   fn adopt(&mut self, mut client: CoreClient) {
     self.attach_call_sink(&mut client);
-    self.link_requests = client.link_request_list();
+    self.reads.follow_link_requests(client.link_request_list());
     self.set_account(
       client.user_id(),
       client.device_id(),
@@ -2424,6 +2415,15 @@ pub(crate) fn direct_peer(
     maybe_presence: maybe_user.as_ref().map(|user| Presence::from(user.presence)),
     maybe_profile: maybe_user.map(|user| (user.is_bot, user.avatar_hue)),
   })
+}
+
+/// The requests of `list` still open now, for the apps' prompts.
+pub(crate) fn open_link_requests(list: &LinkRequestList) -> Vec<LinkRequestItem> {
+  list
+    .open(SystemClock.now_ms())
+    .into_iter()
+    .map(LinkRequestItem::from)
+    .collect()
 }
 
 #[cfg(test)]

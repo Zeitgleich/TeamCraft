@@ -1519,10 +1519,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   /** Why denying or reviewing a request failed, shown on the prompt. */
   val linkPromptFailure: StateFlow<Int?> = promptFailure
 
-  /** Reads the waiting requests; cheap, called on every store change. */
-  suspend fun refreshLinkRequests() {
+  private val linkRequestRefresh = ConflatedRefresh(viewModelScope) {
     read { linkRequests() }?.let { linkRequestList.value = it }
   }
+
+  /**
+   * Reads the waiting requests; called on every store change, so a burst of changes costs at most
+   * two reads (issue #1900).
+   */
+  fun refreshLinkRequests() = linkRequestRefresh.request()
 
   /** Drops a prompt whose request ran out; a later read confirms it. */
   fun expireLinkRequest(id: String) {

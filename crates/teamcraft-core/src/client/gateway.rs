@@ -25,6 +25,9 @@ use crate::read_state;
 use crate::records::{self, GatewaySession};
 use crate::store::{LocalStore, Table};
 
+/// Hears of a gateway event applied: its kind, start and end in Unix milliseconds.
+pub type EventTimer = Box<dyn FnMut(&'static str, i64, i64)>;
+
 /// How a gateway connection started.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GatewayOutcome {
@@ -526,6 +529,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
   }
 
+  /// `timer` hears of every gateway event applied from now on: its kind and when it started and
+  /// ended (client clock, Unix milliseconds). The app uses it to name what held the sync thread.
+  pub fn set_event_timer(&mut self, timer: EventTimer) {
+    self.maybe_event_timer = Some(timer);
+  }
+
   /// Applies one frame from the server.
   pub async fn handle_frame(&mut self, frame: GatewayServerMessage) -> Result<(), CoreError> {
     self.maybe_last_heard_ms = Some(self.now_ms());
@@ -537,7 +546,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           kind = event.kind(),
           error = tracing::field::Empty
         );
+        let kind = event.kind();
+        let started_ms = self.now_ms();
         let applied = self.apply_event(seq, event).instrument(span.clone()).await;
+        let ended_ms = self.now_ms();
+        if let Some(timer) = &mut self.maybe_event_timer {
+          timer(kind, started_ms, ended_ms);
+        }
         if applied.is_err() {
           span.record("error", "apply");
         }
