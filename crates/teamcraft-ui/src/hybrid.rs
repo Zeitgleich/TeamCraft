@@ -979,6 +979,17 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.delete_space(space);
   }
 
+  fn prepare_space_deletion(&self, space: SpaceId) {
+    self.chat.prepare_space_deletion(space);
+  }
+
+  fn space_deletion_preview(
+    &self,
+    space: SpaceId,
+  ) -> Option<teamcraft_client_api::model::SpaceDeletionPreview> {
+    self.chat.space_deletion_preview(space)
+  }
+
   fn categories(&self, space: SpaceId) -> Vec<CategoryInfo> {
     self.chat.categories(space)
   }

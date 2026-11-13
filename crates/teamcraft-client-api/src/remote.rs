@@ -1079,6 +1079,9 @@ pub enum ChatAction {
   DeleteSpace {
     space: SpaceId,
   },
+  PrepareSpaceDeletion {
+    space: SpaceId,
+  },
   CreateCategory {
     space: SpaceId,
     name: String,
@@ -1555,6 +1558,7 @@ impl ChatAction {
       Self::DismissSuspectDeletions => backend.dismiss_suspect_deletions(),
       Self::DeleteChannel { conversation } => backend.delete_channel(conversation),
       Self::DeleteSpace { space } => backend.delete_space(space),
+      Self::PrepareSpaceDeletion { space } => backend.prepare_space_deletion(space),
       Self::CreateCategory { space, name } => backend.create_category(space, &name),
       Self::RenameCategory {
         space,
@@ -1774,6 +1778,10 @@ pub enum ChatQuery {
   },
   /// [`ChatBackend::first_sync`].
   FirstSync,
+  /// [`ChatBackend::space_deletion_preview`].
+  SpaceDeletionPreview {
+    space: SpaceId,
+  },
   /// The `#fragment` values of a guest link to the meeting, once the core made them.
   GuestLinkFragment {
     meeting: teamcraft_proto::MeetingId,
@@ -2009,6 +2017,10 @@ pub enum ChatAnswer {
   Link {
     maybe_link: Option<String>,
   },
+  SpaceDeletionPreview {
+    #[serde(rename = "preview", default, skip_serializing_if = "Option::is_none")]
+    maybe_preview: Option<crate::model::SpaceDeletionPreview>,
+  },
   PermalinkTarget {
     maybe_target: Option<PermalinkTarget>,
   },
@@ -2212,6 +2224,9 @@ impl ChatQuery {
       },
       Self::LinkedMessage { link } => ChatAnswer::LinkedMessage {
         maybe_linked: backend.linked_message(&link),
+      },
+      Self::SpaceDeletionPreview { space } => ChatAnswer::SpaceDeletionPreview {
+        maybe_preview: backend.space_deletion_preview(space),
       },
       Self::GuestLinkFragment { meeting } => ChatAnswer::Link {
         maybe_link: backend.guest_link_fragment(meeting),

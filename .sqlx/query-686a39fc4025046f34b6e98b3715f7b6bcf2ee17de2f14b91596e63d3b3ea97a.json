@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM space_deletion_signatures s\n         WHERE s.created_at < $1 AND NOT EXISTS\n           (SELECT 1 FROM space_deletion_channels c\n             JOIN deleted_conversations d ON d.conversation_id = c.conversation_id\n             WHERE c.space_id = s.space_id)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "686a39fc4025046f34b6e98b3715f7b6bcf2ee17de2f14b91596e63d3b3ea97a"
+}

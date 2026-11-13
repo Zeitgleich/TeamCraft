@@ -670,9 +670,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       GatewayEvent::ConversationDelete {
         conversation_id,
         maybe_signed_deletion,
+        maybe_signed_space_deletion,
       } => {
         self
-          .note_deletion_event(conversation_id, maybe_signed_deletion)
+          .note_deletion_event(
+            conversation_id,
+            maybe_signed_deletion,
+            maybe_signed_space_deletion,
+          )
           .await
       },
       GatewayEvent::MembershipRemove {

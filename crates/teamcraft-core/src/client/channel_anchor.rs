@@ -47,6 +47,9 @@ pub(crate) enum HeldAnchor {
   Anchored {
     anchor: Box<VerifiedAnchor>,
     floor_grants: bool,
+    /// The anchor this device's group holds is below the floor its user's devices recorded: a
+    /// move or rename another device saw that this one hasn't. Deletions take the retention.
+    is_below_floor: bool,
   },
 }
 
@@ -64,9 +67,13 @@ impl HeldAnchor {
     match self {
       Self::Unanchored => AnchorFacts::Unanchored,
       Self::Unverifiable => AnchorFacts::Unverifiable,
-      Self::Anchored { anchor, floor_grants } => AnchorFacts::Anchored {
+      Self::Anchored {
         anchor,
-        floor_grants: *floor_grants,
+        floor_grants,
+        is_below_floor,
+      } => AnchorFacts::Anchored {
+        anchor,
+        floor_grants: *floor_grants && !*is_below_floor,
         maybe_listed_name,
       },
     }
@@ -402,6 +409,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let directory = self.anchor_directory(maybe_bytes.as_deref(), tree_users).await?;
     let authority = self.anchor_authority()?;
     let group = self.group_or_error(conversation)?;
+    let epoch = group.epoch();
     let outcome = AnchorOutcome::of(
       group.verified_anchor(&expected, &directory, &authority),
       maybe_bytes.as_deref(),
@@ -412,7 +420,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         // A floor of another founding is a fork: the anchor grants nothing.
         let floor_grants =
           maybe_floor.is_none_or(|floor| floor.grants() && floor.founding_hash == anchor.founding_hash());
-        HeldAnchor::Anchored { anchor, floor_grants }
+        // The floor as on entering a group state: a lower properties version, the same under
+        // another hash, or an older epoch than the user's devices saw (#1717).
+        let is_below_floor = maybe_floor.is_some_and(|floor| floor.check_entering(&anchor, epoch).is_err());
+        HeldAnchor::Anchored {
+          anchor,
+          floor_grants,
+          is_below_floor,
+        }
       },
       (_, Some(_)) => HeldAnchor::Unverifiable,
       (_, None) => HeldAnchor::Unanchored,
@@ -444,9 +459,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   ) -> Result<RoleFounding, CoreError> {
     let is_anchored = self.is_anchored_channel(conversation)?;
     Ok(match Box::pin(self.held_anchor(conversation)).await? {
-      HeldAnchor::Anchored { anchor, floor_grants } => {
-        anchoring::role_founding(is_anchored, Some(&anchor), floor_grants)
-      },
+      HeldAnchor::Anchored {
+        anchor, floor_grants, ..
+      } => anchoring::role_founding(is_anchored, Some(&anchor), floor_grants),
       HeldAnchor::Unverifiable | HeldAnchor::Unanchored => anchoring::role_founding(is_anchored, None, false),
     })
   }

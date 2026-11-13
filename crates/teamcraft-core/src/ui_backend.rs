@@ -352,6 +352,10 @@ pub enum CoreCommand {
   DeleteSpace {
     space: SpaceId,
   },
+  /// Lists what deleting a space takes for its confirmation (`space_deletion_preview`).
+  PrepareSpaceDeletion {
+    space: SpaceId,
+  },
   RefreshCategories {
     space: SpaceId,
   },
@@ -564,6 +568,16 @@ pub enum CommandPart {
   Workspace,
   /// The organization's call backgrounds, which only the administration console changes (`admin`).
   Admin,
+  /// This user's devices and who sees when they were last online: the security settings
+  /// (`settings`, #1462).
+  Settings,
+  /// A file's share links: the share link dialog (`dialogs`, #1462).
+  Dialogs,
+  /// What only a member's page asks for: the status, favorites, scheduled messages, saved searches,
+  /// the directory and call history, and a host's side of meetings (their chats, the lobby, the
+  /// hosts). It runs in the signed-in app's module (`session`), which a member's page has from the
+  /// start and a meeting guest's never loads (#1462).
+  Member,
 }
 
 impl CoreCommand {
@@ -586,6 +600,7 @@ impl CoreCommand {
       | Self::LeaveChannel { .. }
       | Self::DeleteChannel { .. }
       | Self::DeleteSpace { .. }
+      | Self::PrepareSpaceDeletion { .. }
       | Self::RefreshCategories { .. }
       | Self::CreateCategory { .. }
       | Self::RenameCategory { .. }
@@ -612,49 +627,26 @@ impl CoreCommand {
       | Self::AddCustomEmoji { .. }
       | Self::RenameCustomEmoji { .. }
       | Self::DeleteCustomEmoji { .. } => CommandPart::Admin,
-      Self::FlushOutbox
-      | Self::Typing { .. }
-      | Self::MarkRead { .. }
-      | Self::SetFavorite { .. }
+      Self::RefreshOwnDevices
+      | Self::RevokeOwnDevice { .. }
+      | Self::RenameOwnDevice { .. }
+      | Self::TestPushOwnDevice { .. }
+      | Self::SetLastSeenVisibility { .. } => CommandPart::Settings,
+      Self::CreateShareLink { .. } | Self::RevokeShareLink { .. } | Self::RefreshShareLinks { .. } => {
+        CommandPart::Dialogs
+      },
+      Self::SetFavorite { .. }
       | Self::SetPresence { .. }
       | Self::SetCustomStatus { .. }
-      | Self::SetSaved { .. }
-      | Self::SetDraft { .. }
-      | Self::TakeDraftFiles { .. }
-      | Self::RemoveDraftFile { .. }
       | Self::ScheduleMessage { .. }
       | Self::UpdateScheduled { .. }
       | Self::CancelScheduled { .. }
       | Self::SendScheduledNow { .. }
-      | Self::QueueBugReport { .. }
       | Self::SaveSearch { .. }
       | Self::DeleteSavedSearch { .. }
-      | Self::WriteSettings { .. }
-      | Self::AddBackground { .. }
-      | Self::DeleteBackground { .. }
-      | Self::SetServerPin { .. }
-      | Self::Acknowledge { .. }
-      | Self::MarkUnread { .. }
-      | Self::MarkReadThrough { .. }
-      | Self::MarkReactionsSeen { .. }
-      | Self::MarkThreadRead { .. }
-      | Self::RefreshPresence { .. }
-      | Self::RefreshReadReceipts { .. }
       | Self::SearchDirectory { .. }
       | Self::RefreshPrivacy
-      | Self::SetLastSeenVisibility { .. }
       | Self::RefreshCallHistory
-      | Self::RefreshOwnDevices
-      | Self::RevokeOwnDevice { .. }
-      | Self::RenameOwnDevice { .. }
-      | Self::TestPushOwnDevice { .. }
-      | Self::UploadFiles
-      | Self::GeneratePreviews
-      | Self::DownloadFile { .. }
-      | Self::ControlDownload { .. }
-      | Self::CreateShareLink { .. }
-      | Self::RevokeShareLink { .. }
-      | Self::RefreshShareLinks { .. }
       | Self::DismissSuspectDeletions
       | Self::RetryDmSetup { .. }
       | Self::SetUpMeetingChat { .. }
@@ -668,7 +660,30 @@ impl CoreCommand {
       | Self::NoteMeetingLobby { .. }
       | Self::SyncMeetingAdmitters { .. }
       | Self::CheckMeetingAdmission { .. }
-      | Self::ChangeMeetingHosts { .. }
+      | Self::ChangeMeetingHosts { .. } => CommandPart::Member,
+      Self::FlushOutbox
+      | Self::Typing { .. }
+      | Self::MarkRead { .. }
+      | Self::SetSaved { .. }
+      | Self::SetDraft { .. }
+      | Self::TakeDraftFiles { .. }
+      | Self::RemoveDraftFile { .. }
+      | Self::QueueBugReport { .. }
+      | Self::WriteSettings { .. }
+      | Self::AddBackground { .. }
+      | Self::DeleteBackground { .. }
+      | Self::SetServerPin { .. }
+      | Self::Acknowledge { .. }
+      | Self::MarkUnread { .. }
+      | Self::MarkReadThrough { .. }
+      | Self::MarkReactionsSeen { .. }
+      | Self::MarkThreadRead { .. }
+      | Self::RefreshPresence { .. }
+      | Self::RefreshReadReceipts { .. }
+      | Self::UploadFiles
+      | Self::GeneratePreviews
+      | Self::DownloadFile { .. }
+      | Self::ControlDownload { .. }
       | Self::RefreshMembers { .. }
       | Self::RefreshChannelAnchor { .. }
       | Self::LoadHistoryAt { .. }
@@ -3809,6 +3824,41 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.command(CoreCommand::DeleteSpace { space });
   }
 
+  fn prepare_space_deletion(&self, space: SpaceId) {
+    self.command(CoreCommand::PrepareSpaceDeletion { space });
+  }
+
+  fn space_deletion_preview(
+    &self,
+    space: SpaceId,
+  ) -> Option<teamcraft_client_api::model::SpaceDeletionPreview> {
+    use crate::client::RenamerRole as Role;
+    use teamcraft_client_api::model as ui;
+
+    let preview = crate::client::space_deletion_preview(self.store_ref(), space)?;
+    Some(ui::SpaceDeletionPreview {
+      space: preview.space,
+      is_signed: preview.is_signed,
+      channels: preview
+        .channels
+        .into_iter()
+        .map(|channel| ui::SpaceDeletionPreviewChannel {
+          conversation: channel.conversation,
+          name: channel.name,
+          maybe_renamed_by: channel.maybe_renamed_by.map(|renamer| ui::ChannelRenamer {
+            user: renamer.user,
+            role: match renamer.role {
+              Role::Founder => ui::RenamerRole::Founder,
+              Role::ChannelAdmin => ui::RenamerRole::ChannelAdmin,
+              Role::WorkspaceAdmin => ui::RenamerRole::WorkspaceAdmin,
+              Role::Member => ui::RenamerRole::Member,
+            },
+          }),
+        })
+        .collect(),
+    })
+  }
+
   fn categories(&self, space: SpaceId) -> Vec<CategoryInfo> {
     self.ui_categories(space)
   }
@@ -5730,9 +5780,8 @@ mod tests {
       .unwrap();
     assert_eq!(categories().await.len(), 2);
 
-    let shared = CoreCommand::SetFavorite {
+    let shared = CoreCommand::MarkRead {
       conversation: channel,
-      is_favorite: true,
     };
     assert_eq!(shared.part(), CommandPart::Shared);
     let refused = client.run_workspace_command(shared.clone()).await;
@@ -5741,6 +5790,17 @@ mod tests {
       "{refused:?}"
     );
     client.run_shared_command(shared).await.unwrap();
+    let member = CoreCommand::SetFavorite {
+      conversation: channel,
+      is_favorite: true,
+    };
+    assert_eq!(member.part(), CommandPart::Member);
+    let refused = client.run_shared_command(member.clone()).await;
+    assert!(
+      matches!(refused, Err(CoreError::InvalidRequest(_))),
+      "{refused:?}"
+    );
+    client.run_member_command(member).await.unwrap();
     assert_eq!(
       CoreCommand::DeleteOrgBackground {
         id: "7".parse().unwrap()
@@ -5748,6 +5808,26 @@ mod tests {
       .part(),
       CommandPart::Admin
     );
+
+    let settings = CoreCommand::RefreshOwnDevices;
+    assert_eq!(settings.part(), CommandPart::Settings);
+    let refused = client.run_shared_command(settings.clone()).await;
+    assert!(
+      matches!(refused, Err(CoreError::InvalidRequest(_))),
+      "{refused:?}"
+    );
+    client.run_settings_command(settings).await.unwrap();
+    let dialogs = CoreCommand::RefreshShareLinks {
+      attachment: AttachmentId::from_snowflake(Snowflake::new(7).unwrap()),
+    };
+    assert_eq!(dialogs.part(), CommandPart::Dialogs);
+    let refused = client.run_settings_command(dialogs.clone()).await;
+    assert!(
+      matches!(refused, Err(CoreError::InvalidRequest(_))),
+      "{refused:?}"
+    );
+    // A file without links asks nothing of the server.
+    client.run_dialogs_command(dialogs).await.unwrap();
   }
 
   #[test]

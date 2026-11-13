@@ -16,6 +16,7 @@ use crate::components::link_menu::placed_with;
 use crate::components::long_press::LongPress;
 use crate::components::message_actions::copy_and_confirm;
 use crate::components::sheet::{PopoverBackdrop, Sheet};
+use crate::components::space_deletion_list::SpaceDeletionList;
 use crate::components::space_invites::web_origin;
 use crate::components::workspace_dialogs::delete_name_note_text;
 use crate::entry_actions::{ConversationMenu, LeaveChoice, MenuEntry, SpaceMenu};
@@ -477,6 +478,7 @@ fn SpaceItems(space: SpaceId, page: RwSignal<MenuPage>, close: Callback<()>) -> 
         <p class="menu-confirm" id=format!("entry-menu-confirm-{space}")>
           {move || i18n.t_with("entry-menu-delete-space-confirm", &[("name", &name()), ("count", &channel_count().to_string())])}
         </p>
+        <div class="menu-confirm"><SpaceDeletionList space=space /></div>
         <button
           type="button"
           class="menu-item is-destructive"

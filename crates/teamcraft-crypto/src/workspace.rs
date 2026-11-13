@@ -1,6 +1,6 @@
 //! Signatures on the workspace's append-only logs: the admin roster and the policy (admin.md §2.3,
 //! e2ee.md §11), each channel's role log (e2ee.md §4.6.1, issue #380), and a channel's deletion
-//! (e2ee.md §4.6, issue #1135) and a custom emoji (e2ee.md §4.13, issue #207), which are entries of
+//! (e2ee.md §4.6, issue #1135), a space's deletion (e2ee.md §4.6.5, issue #1727) and a custom emoji (e2ee.md §4.13, issue #207), which are entries of
 //! no log but signed and verified the same way.
 //!
 //! An entry is signed by a device key over its log, version and payload; the signature travels
@@ -44,6 +44,10 @@ pub enum WorkspaceLog {
   /// payload a `StrictRolesChange` naming the channel. Its own kind, so a §4.6.1 role entry, which
   /// a channel's founder may have signed on trust at first use, never passes for one.
   StrictRoles = 8,
+  /// A space's deletion by a workspace owner or admin (e2ee.md §4.6.5, D7, issue #1727): the
+  /// "version" is its signing time and the payload names the space and every channel the deleter
+  /// was shown in it, so it can't pass for a channel's deletion or the other way round.
+  SpaceDeletion = 9,
 }
 
 /// The signature field of a log entry: the signer's device certificate and its signature.
@@ -221,6 +225,26 @@ mod tests {
         ),
         Err(WorkspaceLogError::InvalidSignature)
       ));
+    }
+
+    /// A channel's deletion can't pass for a space's deletion, nor the other way round, with the
+    /// same version and payload (#1727).
+    #[test]
+    fn channel_and_space_deletions_do_not_verify_as_each_other() {
+      let owner = TestUser::new(1);
+      let directory = TestDirectory::with(&[&owner]);
+      for (signed_as, verified_as) in [
+        (WorkspaceLog::ChannelDeletion, WorkspaceLog::SpaceDeletion),
+        (WorkspaceLog::SpaceDeletion, WorkspaceLog::ChannelDeletion),
+        (WorkspaceLog::ChannelProperties, WorkspaceLog::SpaceDeletion),
+      ] {
+        let signature = sign_log_entry(&owner.device, &owner.certificate, signed_as, 7, PAYLOAD).unwrap();
+        assert!(matches!(
+          verify_log_entry(&signature, verified_as, 7, PAYLOAD, &directory),
+          Err(WorkspaceLogError::InvalidSignature)
+        ));
+        assert!(verify_log_entry(&signature, signed_as, 7, PAYLOAD, &directory).is_ok());
+      }
     }
 
     #[test]

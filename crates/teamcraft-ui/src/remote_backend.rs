@@ -2283,6 +2283,20 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::DeleteSpace { space });
   }
 
+  fn prepare_space_deletion(&self, space: SpaceId) {
+    self.act(ChatAction::PrepareSpaceDeletion { space });
+  }
+
+  fn space_deletion_preview(
+    &self,
+    space: SpaceId,
+  ) -> Option<teamcraft_client_api::model::SpaceDeletionPreview> {
+    match self.ask(ChatQuery::SpaceDeletionPreview { space }) {
+      Some(ChatAnswer::SpaceDeletionPreview { maybe_preview }) => maybe_preview,
+      _ => None,
+    }
+  }
+
   fn categories(&self, space: SpaceId) -> Vec<CategoryInfo> {
     match self.ask(ChatQuery::Categories { space }) {
       Some(ChatAnswer::Categories { categories }) => categories,

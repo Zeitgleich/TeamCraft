@@ -14,7 +14,7 @@ use common::{Peer, settle};
 use teamcraft_core::anchoring::ANCHORING_RELEASE;
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
-use teamcraft_core::client::RoleSigning;
+use teamcraft_core::client::{ChannelRenamer, RenamerRole, RoleSigning, space_deletion_preview};
 use teamcraft_core::clock::ManualClock;
 use teamcraft_core::error::CoreError;
 use teamcraft_core::records;
@@ -22,7 +22,8 @@ use teamcraft_core::store::{LocalStore, MessageFilter, Table};
 use teamcraft_core::workspace::RosterRole;
 use teamcraft_proto::channel_name::ChannelNameError;
 use teamcraft_proto::{
-  ChannelRole, ConversationId, ConversationKind, ConversationResponse, UpdateConversationRequest,
+  ChannelRole, ConversationId, ConversationKind, ConversationResponse, CreateSpaceRequest, JoinPolicy,
+  UpdateConversationRequest,
 };
 
 mod founding {
@@ -288,6 +289,189 @@ mod deletions {
     alice.client.delete_channel(channel).await.unwrap();
     bob.client.full_sync().await.unwrap();
     assert!(!bob.client.has_group(channel).unwrap(), "purged at once");
+  }
+}
+
+/// D7 (#1727): a workspace owner's signed deletion of a space purges its anchored channels at once,
+/// on the members' devices and the deleter's own (#1162); anything the anchor doesn't place there,
+/// or whose name a member set, stays a claim.
+mod space_deletions {
+  use super::*;
+
+  #[tokio::test]
+  async fn the_owners_deletion_purges_the_anchored_channels_everywhere() {
+    let server = anchoring_server();
+    let (mut alice, mut bob) = owner_and_member(&server).await;
+    let channel = shared_channel(&mut alice, &mut bob, "general").await;
+    with_history(&mut alice, &mut bob, channel).await;
+    let space = alice.space().await;
+
+    alice.client.prepare_space_deletion(space).await.unwrap();
+    let preview = space_deletion_preview(&alice.store, space).unwrap();
+    assert!(preview.is_signed);
+    let listed = preview
+      .channels
+      .iter()
+      .find(|listed| listed.conversation == channel)
+      .unwrap();
+    assert_eq!(
+      listed.maybe_renamed_by,
+      Some(ChannelRenamer {
+        user: alice.client.user_id(),
+        role: RenamerRole::Founder,
+      }),
+      "the confirmation names who set the name"
+    );
+    alice.client.delete_space(space).await.unwrap();
+    bob.client.full_sync().await.unwrap();
+
+    assert!(
+      !has_history(&alice, channel),
+      "the deleter's own copy goes at once (#1162)"
+    );
+    assert!(!has_history(&bob, channel), "a member's copy goes at once");
+  }
+
+  /// A commit between the confirmation and the request: the server names the new epoch, and the
+  /// device signs the same channels again for it.
+  #[tokio::test]
+  async fn a_commit_after_the_confirmation_is_signed_for_again() {
+    let server = anchoring_server();
+    let (mut alice, mut bob) = owner_and_member(&server).await;
+    let mut carol = Peer::enroll(&server, "Carol").await;
+    let channel = shared_channel(&mut alice, &mut bob, "general").await;
+    with_history(&mut alice, &mut bob, channel).await;
+    let space = alice.space().await;
+    alice.client.prepare_space_deletion(space).await.unwrap();
+
+    alice
+      .client
+      .add_member(channel, carol.client.user_id())
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    alice.client.delete_space(space).await.unwrap();
+    bob.client.full_sync().await.unwrap();
+
+    assert!(!has_history(&bob, channel));
+  }
+
+  /// The server relabels a channel of another space into the one being deleted: the owner signs
+  /// it, the anchor says otherwise, and nobody loses it at once.
+  #[tokio::test]
+  async fn a_channel_relabelled_into_the_space_stays_a_claim() {
+    let server = anchoring_server();
+    let (mut alice, mut bob) = owner_and_member(&server).await;
+    let channel = shared_channel(&mut alice, &mut bob, "general").await;
+    with_history(&mut alice, &mut bob, channel).await;
+    server.set_admin(alice.client.user_id());
+    let doomed = alice
+      .client
+      .create_space(&CreateSpaceRequest {
+        name: "Old".to_string(),
+        maybe_icon: None,
+        maybe_color: None,
+        maybe_description: None,
+        join_policy: JoinPolicy::InviteOnly,
+        maybe_idempotency_key: None,
+      })
+      .await
+      .unwrap()
+      .id;
+    server.relabel_space(channel, doomed);
+    alice.client.full_sync().await.unwrap();
+    bob.client.full_sync().await.unwrap();
+
+    alice.client.delete_space(doomed).await.unwrap();
+    bob.client.full_sync().await.unwrap();
+
+    assert!(
+      has_history(&alice, channel),
+      "kept for the retention on the deleter's device"
+    );
+    assert!(
+      has_history(&bob, channel),
+      "kept for the retention on a member's device"
+    );
+  }
+
+  /// Bob, a member, renamed the channel: the confirmation says so, and his name purges nothing.
+  #[tokio::test]
+  async fn a_name_a_member_set_stays_a_claim() {
+    let server = anchoring_server();
+    let (mut alice, mut bob) = owner_and_member(&server).await;
+    let channel = shared_channel(&mut alice, &mut bob, "general").await;
+    with_history(&mut alice, &mut bob, channel).await;
+    rename(&mut bob, channel, "old-test").await;
+    settle(&mut [&mut alice, &mut bob]).await;
+    alice.client.full_sync().await.unwrap();
+    let space = alice.space().await;
+
+    alice.client.prepare_space_deletion(space).await.unwrap();
+    let preview = space_deletion_preview(&alice.store, space).unwrap();
+    let listed = preview
+      .channels
+      .iter()
+      .find(|listed| listed.conversation == channel)
+      .unwrap();
+    assert_eq!(
+      listed.maybe_renamed_by,
+      Some(ChannelRenamer {
+        user: bob.client.user_id(),
+        role: RenamerRole::Member,
+      })
+    );
+    alice.client.delete_space(space).await.unwrap();
+    bob.client.full_sync().await.unwrap();
+
+    assert!(has_history(&bob, channel));
+  }
+
+  /// Somebody who isn't on the roster (a space admin) deletes unsigned: claims everywhere.
+  #[tokio::test]
+  async fn an_unsigned_deletion_stays_a_claim() {
+    let server = anchoring_server();
+    let (mut alice, mut bob) = two(&server).await;
+    let channel = shared_channel(&mut alice, &mut bob, "general").await;
+    with_history(&mut alice, &mut bob, channel).await;
+    server.set_admin(alice.client.user_id());
+    let space = alice.space().await;
+
+    alice.client.prepare_space_deletion(space).await.unwrap();
+    assert!(!space_deletion_preview(&alice.store, space).unwrap().is_signed);
+    alice.client.delete_space(space).await.unwrap();
+    bob.client.full_sync().await.unwrap();
+
+    assert!(has_history(&alice, channel));
+    assert!(has_history(&bob, channel));
+  }
+
+  /// Alice owns the workspace (and the fake server lets her delete spaces); Bob holds the roster.
+  async fn owner_and_member(server: &FakeServer) -> (Peer, Peer) {
+    let (mut alice, mut bob) = two(server).await;
+    let alice_id = alice.client.user_id();
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner)])
+      .await
+      .unwrap();
+    server.set_admin(alice_id);
+    bob.client.full_sync().await.unwrap();
+    (alice, bob)
+  }
+
+  async fn with_history(alice: &mut Peer, bob: &mut Peer, channel: ConversationId) {
+    alice.client.send_text(channel, None, "hello").await.unwrap();
+    settle(&mut [&mut *alice, &mut *bob]).await;
+    assert!(has_history(bob, channel));
+  }
+
+  fn has_history(peer: &Peer, channel: ConversationId) -> bool {
+    !peer
+      .store
+      .messages(channel, MessageFilter::TopLevel)
+      .unwrap()
+      .is_empty()
   }
 }
 

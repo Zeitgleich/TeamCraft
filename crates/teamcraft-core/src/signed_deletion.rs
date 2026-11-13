@@ -24,18 +24,25 @@
 //! must list that name: a member's rename, a swapped or missing name, or a forked anchor take the
 //! retention.
 //!
+//! A space's deletion (e2ee.md §4.6.5, D7, #1727) is signed once for the space by a workspace owner
+//! or admin and names every channel the deleter was shown, with its epoch and name hash. It purges
+//! a channel at once only where the channel's anchor places it in that space, confirmed, its name
+//! counts as above, and everything a channel's deletion needs holds; every other channel stays a
+//! claim. A space admin's deletion is never signed.
+//!
 //! The deletion names the channel, the group's epoch, which the server takes only as the current one,
 //! and when it was signed. So a signature the server held back, for example after refusing it, is
 //! refused here once the group has moved on or it got too old. A device without the group judges
 //! nothing, and neither does one that sees a sign of being shown different logs.
 
-use teamcraft_crypto::channel_anchor::{AnchorHash, VerifiedAnchor};
+use teamcraft_crypto::channel_anchor::{AnchorHash, Confidence, VerifiedAnchor};
 use teamcraft_crypto::identity::{DeviceKeyPair, IdentityPublicKey, SignedDeviceCertificate, VerifiedDevice};
 use teamcraft_crypto::membership::IdentityDirectory;
 use teamcraft_crypto::mls::MAX_CHANGE_AGE_EPOCHS;
 use teamcraft_crypto::workspace::{WorkspaceLog, sign_log_entry, verify_log_entry};
 use teamcraft_proto::{
-  Base64Bytes, ChannelDeletionDocument, ChannelRole, ConversationId, SignedChannelDeletion, UserId,
+  Base64Bytes, ChannelDeletionDocument, ChannelRole, ConversationId, SignedChannelDeletion,
+  SignedSpaceDeletion, SpaceDeletionChannel, SpaceDeletionDocument, SpaceId, UserId,
 };
 
 use crate::anchoring::name_counts_for_deletion;
@@ -80,7 +87,8 @@ pub enum AnchorFacts<'a> {
   Unverifiable,
   Anchored {
     anchor: &'a VerifiedAnchor,
-    /// The pin and floor show no fork.
+    /// The pin and floor show no fork, and the anchor this device holds isn't below the floor its
+    /// user's devices recorded (a move or rename it hasn't seen yet).
     floor_grants: bool,
     /// The name the server lists for the channel.
     maybe_listed_name: Option<&'a str>,
@@ -130,6 +138,13 @@ pub enum SignedDeletionError {
   /// or the server lists another one.
   #[error("the signed deletion doesn't name the channel's anchored name")]
   NameMismatch,
+  /// A space's deletion that doesn't name this channel.
+  #[error("the signed space deletion doesn't name this channel")]
+  NotListed,
+  /// D7: the channel has no anchor that verifies here, its anchor places it in another space or
+  /// none, or a move this device can't confirm.
+  #[error("the channel's anchor doesn't place it in the deleted space")]
+  NotInSpace,
 }
 
 /// Checks a signed deletion against what this device verified.
@@ -163,10 +178,14 @@ pub fn verify_signed_deletion(
   {
     return Err(SignedDeletionError::Alarm);
   }
-  if !is_name_as_anchored(&document, verifier.anchor) {
+  if !is_name_as_anchored(document.maybe_name_hash.as_ref(), verifier.anchor) {
     return Err(SignedDeletionError::NameMismatch);
   }
-  if let Some(verified) = verified_by_workspace_admin(signed, &document, verifier) {
+  if let Some(verified) = verified_by_workspace_admin(
+    SignedEntry::of_channel(signed, &document),
+    document.signed_at_ms,
+    verifier,
+  ) {
     return Ok(verified);
   }
   let verified =
@@ -175,6 +194,133 @@ pub fn verify_signed_deletion(
     return Err(SignedDeletionError::NoRecentOtherSigner);
   }
   Ok(verified)
+}
+
+/// Checks a space's signed deletion for the one channel `verifier` is about (D7): it must name the
+/// channel, the channel's anchor must place it in that space (confirmed, the floor granting), its
+/// name count as for a channel's deletion, and the signer be an owner or admin of the fresh roster,
+/// at or after the roster version the document names. Group epoch, age and alarms as for a
+/// channel's deletion. A channel admin's authority doesn't reach a space.
+pub fn verify_signed_space_deletion(
+  signed: &SignedSpaceDeletion,
+  verifier: &DeletionVerifier<'_>,
+) -> Result<VerifiedDeletion, SignedDeletionError> {
+  let document: SpaceDeletionDocument =
+    serde_json::from_slice(signed.payload.as_slice()).map_err(|_| SignedDeletionError::Payload)?;
+  let mut named = document
+    .channels
+    .iter()
+    .filter(|channel| channel.conversation_id == verifier.conversation);
+  let entry = named.next().ok_or(SignedDeletionError::NotListed)?;
+  // A channel named twice was named with two epochs or names: which one the deleter saw is unclear.
+  if named.next().is_some() {
+    return Err(SignedDeletionError::Payload);
+  }
+  if !verifier.is_channel {
+    return Err(SignedDeletionError::NotAChannel);
+  }
+  let group = verifier.maybe_group.ok_or(SignedDeletionError::NoGroup)?;
+  if group.epoch > entry.epoch {
+    return Err(SignedDeletionError::OldEpoch {
+      signed: entry.epoch,
+      local: group.epoch,
+    });
+  }
+  let version = u64::try_from(document.signed_at_ms).map_err(|_| SignedDeletionError::OutOfDate)?;
+  let age_ms = verifier.now_ms.saturating_sub(document.signed_at_ms);
+  if age_ms > verifier.max_age_ms || age_ms < verifier.clock_skew_ms.saturating_neg() {
+    return Err(SignedDeletionError::OutOfDate);
+  }
+  // The channel's roles grant nothing here, and its log isn't kept for a space's deletion: a
+  // member's newer head noted for it is news this device can't read any more, not a sign of a
+  // fork. A fork it saw, and anything about the roster, still refuses.
+  if verifier.roles.maybe_alarm.is_some()
+    || verifier.workspace.maybe_alarm.is_some()
+    || verifier.workspace.maybe_ahead.is_some()
+  {
+    return Err(SignedDeletionError::Alarm);
+  }
+  if !is_in_space(document.space_id, verifier.anchor) {
+    return Err(SignedDeletionError::NotInSpace);
+  }
+  if !is_name_as_anchored(entry.maybe_name_hash.as_ref(), verifier.anchor) {
+    return Err(SignedDeletionError::NameMismatch);
+  }
+  if verifier.workspace.roster.version < document.roster_version {
+    return Err(SignedDeletionError::Unauthorized);
+  }
+  verified_by_workspace_admin(
+    SignedEntry {
+      signature: signed.signature.as_slice(),
+      log: WorkspaceLog::SpaceDeletion,
+      version,
+      payload: signed.payload.as_slice(),
+    },
+    document.signed_at_ms,
+    verifier,
+  )
+  .ok_or(SignedDeletionError::Unauthorized)
+}
+
+/// The signed deletion of `space` with the channels the deleter was shown, by a workspace owner or
+/// admin of `roster_version` (D7). Who may sign is up to the members' devices.
+pub(crate) fn sign_space_deletion(
+  device: &DeviceKeyPair,
+  certificate: &SignedDeviceCertificate,
+  space: SpaceId,
+  roster_version: u64,
+  channels: Vec<SpaceDeletionChannel>,
+  signed_at_ms: i64,
+) -> Result<SignedSpaceDeletion, CoreError> {
+  let version =
+    u64::try_from(signed_at_ms).map_err(|_| CoreError::Corrupt("a signing time before 1970".into()))?;
+  let document = SpaceDeletionDocument {
+    space_id: space,
+    roster_version,
+    channels,
+    signed_at_ms,
+  };
+  let payload = serde_json::to_vec(&document).map_err(|error| CoreError::Corrupt(error.to_string()))?;
+  let signature = sign_log_entry(
+    device,
+    certificate,
+    WorkspaceLog::SpaceDeletion,
+    version,
+    &payload,
+  )?;
+  Ok(SignedSpaceDeletion {
+    payload: Base64Bytes::new(payload),
+    signature: Base64Bytes::new(signature),
+  })
+}
+
+/// Which channels a space's signed deletion names, without verifying anything: what to judge it
+/// for. Empty if the payload doesn't read.
+pub fn space_deletion_channels(signed: &SignedSpaceDeletion) -> Vec<ConversationId> {
+  serde_json::from_slice::<SpaceDeletionDocument>(signed.payload.as_slice())
+    .map(|document| {
+      document
+        .channels
+        .into_iter()
+        .map(|channel| channel.conversation_id)
+        .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// D7: the channel's verified anchor places it in `space`, confirmed, and the floor grants. A
+/// channel without an anchor, or one this device can't verify, is never purged by a space.
+fn is_in_space(space: SpaceId, anchor: AnchorFacts<'_>) -> bool {
+  match anchor {
+    AnchorFacts::Unanchored | AnchorFacts::Unverifiable => false,
+    AnchorFacts::Anchored {
+      anchor, floor_grants, ..
+    } => {
+      floor_grants
+        && anchor.space_confidence() == Confidence::Confirmed
+        && anchor.properties().maybe_space_id == Some(convert::space(space))
+    },
+  }
 }
 
 /// The signed deletion of `conversation` for the group's `epoch`, naming the hash of the name the
@@ -210,7 +356,7 @@ pub(crate) fn sign_channel_deletion(
 /// D3: on an anchored channel the deletion names the anchor's name, which counts for deletions
 /// (`anchoring::name_counts_for_deletion`); a pinned anchor this device can't verify refuses. A
 /// channel without an anchor is judged as before.
-fn is_name_as_anchored(document: &ChannelDeletionDocument, anchor: AnchorFacts<'_>) -> bool {
+fn is_name_as_anchored(maybe_name_hash: Option<&Base64Bytes>, anchor: AnchorFacts<'_>) -> bool {
   match anchor {
     AnchorFacts::Unanchored => true,
     AnchorFacts::Unverifiable => false,
@@ -219,9 +365,7 @@ fn is_name_as_anchored(document: &ChannelDeletionDocument, anchor: AnchorFacts<'
       floor_grants,
       maybe_listed_name,
     } => {
-      let maybe_hash = document
-        .maybe_name_hash
-        .as_ref()
+      let maybe_hash = maybe_name_hash
         .and_then(|hash| <[u8; 32]>::try_from(hash.as_slice()).ok())
         .map(AnchorHash::from_bytes);
       name_counts_for_deletion(anchor, floor_grants, maybe_listed_name, maybe_hash)
@@ -240,11 +384,11 @@ pub(crate) fn is_told_epoch_plausible(own: u64, told: u64) -> bool {
 /// being ahead can only refuse. A roster without a signing time has no freshness to judge, whatever
 /// else may accept it, so it purges nothing.
 fn verified_by_workspace_admin(
-  signed: &SignedChannelDeletion,
-  document: &ChannelDeletionDocument,
+  entry: SignedEntry<'_>,
+  signed_at_ms: i64,
   verifier: &DeletionVerifier<'_>,
 ) -> Option<VerifiedDeletion> {
-  let at_ms = verifier.now_ms.max(document.signed_at_ms);
+  let at_ms = verifier.now_ms.max(signed_at_ms);
   if verifier.workspace.heads.maybe_roster_signed_at_ms.is_none()
     || !verifier
       .workspace
@@ -253,7 +397,7 @@ fn verified_by_workspace_admin(
     return None;
   }
   let admins = KeyDirectory::from_keys(roster_admin_keys(verifier.workspace));
-  let verified = verified_signer(signed, document, &admins, true)?;
+  let verified = verified_signer(entry, &admins, true)?;
   verifier
     .workspace
     .roster
@@ -281,7 +425,7 @@ fn verified_by_channel_admin(
       .iter()
       .filter(|assignment| assignment.role == ChannelRole::Admin),
   );
-  let verified = verified_signer(signed, document, &admins, false)?;
+  let verified = verified_signer(SignedEntry::of_channel(signed, document), &admins, false)?;
   group.users.contains(&verified.signer).then_some(verified)
 }
 
@@ -303,17 +447,36 @@ fn is_vouched_for_lately(
   verifier.roles.has_other_signer_since(verified.signer, since_ms)
 }
 
+/// A signed log entry of a deletion, to verify.
+#[derive(Clone, Copy)]
+struct SignedEntry<'a> {
+  signature: &'a [u8],
+  log: WorkspaceLog,
+  version: u64,
+  payload: &'a [u8],
+}
+
+impl<'a> SignedEntry<'a> {
+  fn of_channel(signed: &'a SignedChannelDeletion, document: &ChannelDeletionDocument) -> Self {
+    Self {
+      signature: signed.signature.as_slice(),
+      log: WorkspaceLog::ChannelDeletion,
+      version: document.epoch,
+      payload: signed.payload.as_slice(),
+    }
+  }
+}
+
 fn verified_signer(
-  signed: &SignedChannelDeletion,
-  document: &ChannelDeletionDocument,
+  entry: SignedEntry<'_>,
   directory: &KeyDirectory,
   is_workspace_admin: bool,
 ) -> Option<VerifiedDeletion> {
   let device = verify_log_entry(
-    signed.signature.as_slice(),
-    WorkspaceLog::ChannelDeletion,
-    document.epoch,
-    signed.payload.as_slice(),
+    entry.signature,
+    entry.log,
+    entry.version,
+    entry.payload,
     directory,
   )
   .ok()?;
@@ -347,6 +510,8 @@ mod tests {
   use crate::workspace::{LogHeads, RosterDocument, RosterMember};
 
   const CHANNEL: i64 = 900;
+  const SPACE: i64 = 40;
+  const OTHER_SPACE: i64 = 41;
   const EPOCH: u64 = 5;
   const NOW_MS: i64 = 1_000_000;
   const MAX_AGE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
@@ -420,6 +585,262 @@ mod tests {
     fn an_unanchored_channel_needs_no_name() {
       let (admin, world) = world_with_workspace_admin();
       assert!(world.verify(&admin.deletion(EPOCH)).is_ok());
+    }
+
+    fn world_with_workspace_admin() -> (Person, World) {
+      let admin = Person::new(9);
+      let mut world = World::default();
+      world.roster_admin(&admin, RosterRole::Admin);
+      (admin, world)
+    }
+  }
+
+  /// D7 (e2ee.md §4.6.5, #1727): a workspace admin's signed deletion of a space purges a channel
+  /// only where its anchor places it in that space, confirmed, under a name that counts.
+  mod space_deletions {
+    use super::*;
+
+    #[test]
+    fn a_workspace_admins_deletion_of_the_anchored_space_purges() {
+      let (admin, mut world) = world_with_workspace_admin();
+      world.anchor_in(SPACE, "general", "general", None);
+      let verified = world
+        .verify_space(&admin.space_deletion(SPACE, &[(CHANNEL, EPOCH, Some("general"))]))
+        .unwrap();
+      assert_eq!(
+        (verified.signer, verified.is_workspace_admin),
+        (admin.user_id, true)
+      );
+    }
+
+    #[test]
+    fn a_channel_the_deletion_doesnt_name_takes_the_retention() {
+      let (admin, mut world) = world_with_workspace_admin();
+      world.anchor_in(SPACE, "general", "general", None);
+      let signed = admin.space_deletion(SPACE, &[(CHANNEL + 1, EPOCH, Some("general"))]);
+      assert_eq!(
+        world.verify_space(&signed).unwrap_err(),
+        SignedDeletionError::NotListed
+      );
+    }
+
+    /// The server relabelled a channel of another space, or one outside any, into the deleted
+    /// space: the admin signed it, the anchor says otherwise.
+    #[test]
+    fn a_channel_anchored_in_another_space_takes_the_retention() {
+      let (admin, mut world) = world_with_workspace_admin();
+      world.anchor_in(OTHER_SPACE, "general", "general", None);
+      let signed = admin.space_deletion(SPACE, &[(CHANNEL, EPOCH, Some("general"))]);
+      assert_eq!(
+        world.verify_space(&signed).unwrap_err(),
+        SignedDeletionError::NotInSpace
+      );
+    }
+
+    #[test]
+    fn an_unanchored_or_unverifiable_channel_takes_the_retention() {
+      let (admin, mut world) = world_with_workspace_admin();
+      let signed = admin.space_deletion(SPACE, &[(CHANNEL, EPOCH, Some("general"))]);
+      assert_eq!(
+        world.verify_space(&signed).unwrap_err(),
+        SignedDeletionError::NotInSpace
+      );
+      world.anchor_in(SPACE, "general", "general", None);
+      world.is_anchor_unverifiable = true;
+      assert_eq!(
+        world.verify_space(&signed).unwrap_err(),
+        SignedDeletionError::NotInSpace
+      );
+    }
+
+    /// A pin that marks a fork, or an anchor below the floor the user's devices recorded.
+    #[test]
+    fn a_forked_anchor_or_one_below_the_floor_takes_the_retention() {
+      let (admin, mut world) = world_with_workspace_admin();
+      world.anchor_in(SPACE, "general", "general", None);
+      world.is_anchor_forked = true;
+      let signed = admin.space_deletion(SPACE, &[(CHANNEL, EPOCH, Some("general"))]);
+      assert_eq!(
+        world.verify_space(&signed).unwrap_err(),
+        SignedDeletionError::NotInSpace
+      );
+    }
+
+    /// D4: a member's move doesn't count for the space; a deletion of the space it names takes
+    /// the retention.
+    #[test]
+    fn a_space_a_member_moved_the_channel_into_is_stale() {
+      let (admin, mut world) = world_with_workspace_admin();
+      world.anchor_in(OTHER_SPACE, "general", "general", Some((Some(SPACE), "general")));
+      let signed = admin.space_deletion(SPACE, &[(CHANNEL, EPOCH, Some("general"))]);
+      assert_eq!(
+        world.verify_space(&signed).unwrap_err(),
+        SignedDeletionError::NotInSpace
+      );
+    }
+
+    /// D5 after the review: a member's name counts for display, never for a purge.
+    #[test]
+    fn a_name_a_member_set_takes_the_retention() {
+      let (admin, mut world) = world_with_workspace_admin();
+      world.anchor_in(SPACE, "general", "old-test", Some((Some(SPACE), "old-test")));
+      let signed = admin.space_deletion(SPACE, &[(CHANNEL, EPOCH, Some("old-test"))]);
+      assert_eq!(
+        world.verify_space(&signed).unwrap_err(),
+        SignedDeletionError::NameMismatch
+      );
+    }
+
+    #[test]
+    fn a_missing_or_swapped_name_takes_the_retention() {
+      let (admin, mut world) = world_with_workspace_admin();
+      world.anchor_in(SPACE, "general", "general", None);
+      let without = admin.space_deletion(SPACE, &[(CHANNEL, EPOCH, None)]);
+      assert_eq!(
+        world.verify_space(&without).unwrap_err(),
+        SignedDeletionError::NameMismatch
+      );
+      let swapped = admin.space_deletion(SPACE, &[(CHANNEL, EPOCH, Some("old-test"))]);
+      assert_eq!(
+        world.verify_space(&swapped).unwrap_err(),
+        SignedDeletionError::NameMismatch
+      );
+    }
+
+    /// Space admins' and channel admins' deletions of a space stay claims.
+    #[test]
+    fn nobody_but_a_workspace_admin_counts() {
+      let (channel_admin, mut world) = world_with_channel_admin();
+      world.anchor_in(SPACE, "general", "general", None);
+      let signed = channel_admin.space_deletion(SPACE, &[(CHANNEL, EPOCH, Some("general"))]);
+      assert_eq!(
+        world.verify_space(&signed).unwrap_err(),
+        SignedDeletionError::Unauthorized
+      );
+    }
+
+    /// The document names a roster this device doesn't have yet (or a withheld one).
+    #[test]
+    fn a_roster_older_than_the_one_named_refuses() {
+      let (admin, mut world) = world_with_workspace_admin();
+      world.anchor_in(SPACE, "general", "general", None);
+      let signed = admin.space_deletion_with(SPACE, 2, NOW_MS, &[(CHANNEL, EPOCH, Some("general"))]);
+      assert_eq!(
+        world.verify_space(&signed).unwrap_err(),
+        SignedDeletionError::Unauthorized
+      );
+    }
+
+    #[test]
+    fn an_old_epoch_an_old_signature_an_alarm_or_no_group_refuses() {
+      let (admin, mut world) = world_with_workspace_admin();
+      world.anchor_in(SPACE, "general", "general", None);
+      let behind = admin.space_deletion(SPACE, &[(CHANNEL, EPOCH - 1, Some("general"))]);
+      assert!(matches!(
+        world.verify_space(&behind).unwrap_err(),
+        SignedDeletionError::OldEpoch { .. }
+      ));
+      // Read past its age: the signature is older than `signed_deletion_max_age` now.
+      let signed = admin.space_deletion(SPACE, &[(CHANNEL, EPOCH, Some("general"))]);
+      world.now_ms = NOW_MS + MAX_SIGNATURE_AGE_MS + 1;
+      assert_eq!(
+        world.verify_space(&signed).unwrap_err(),
+        SignedDeletionError::OutOfDate
+      );
+      world.now_ms = NOW_MS;
+      world.roles.maybe_alarm = Some("forked".into());
+      assert_eq!(
+        world.verify_space(&signed).unwrap_err(),
+        SignedDeletionError::Alarm
+      );
+      world.roles.maybe_alarm = None;
+      // A member's newer role head is only news here: the roles grant nothing for a space.
+      world.roles.maybe_ahead = Some(crate::channel_roles::ChannelRolesHead {
+        version: 9,
+        hash: Base64Bytes::new(vec![1; 32]),
+        needs_review: false,
+      });
+      assert!(world.verify_space(&signed).is_ok());
+      world.roles.maybe_ahead = None;
+      world.is_channel = false;
+      assert_eq!(
+        world.verify_space(&signed).unwrap_err(),
+        SignedDeletionError::NotAChannel
+      );
+      world.is_channel = true;
+      world.has_group = false;
+      assert_eq!(
+        world.verify_space(&signed).unwrap_err(),
+        SignedDeletionError::NoGroup
+      );
+    }
+
+    /// A channel named twice, with two epochs or names, is ambiguous.
+    #[test]
+    fn a_channel_named_twice_refuses() {
+      let (admin, mut world) = world_with_workspace_admin();
+      world.anchor_in(SPACE, "general", "general", None);
+      let signed = admin.space_deletion(
+        SPACE,
+        &[
+          (CHANNEL, EPOCH, Some("general")),
+          (CHANNEL, EPOCH + 1, Some("general")),
+        ],
+      );
+      assert_eq!(
+        world.verify_space(&signed).unwrap_err(),
+        SignedDeletionError::Payload
+      );
+    }
+
+    /// A channel's deletion can't pass for a space's, and a space document signed as a channel's
+    /// deletion doesn't verify as a space's.
+    #[test]
+    fn a_signature_of_another_kind_refuses() {
+      let (admin, mut world) = world_with_workspace_admin();
+      world.anchor_in(SPACE, "general", "general", None);
+      let channel = admin.deletion_named(EPOCH, "general");
+      let as_space = SignedSpaceDeletion {
+        payload: channel.payload,
+        signature: channel.signature,
+      };
+      assert_eq!(
+        world.verify_space(&as_space).unwrap_err(),
+        SignedDeletionError::Payload
+      );
+      let space = admin.space_deletion(SPACE, &[(CHANNEL, EPOCH, Some("general"))]);
+      let document: SpaceDeletionDocument = serde_json::from_slice(space.payload.as_slice()).unwrap();
+      let wrong_kind = sign_log_entry(
+        &admin.device,
+        &admin.certificate,
+        WorkspaceLog::ChannelDeletion,
+        u64::try_from(document.signed_at_ms).unwrap(),
+        space.payload.as_slice(),
+      )
+      .unwrap();
+      let forged = SignedSpaceDeletion {
+        payload: space.payload,
+        signature: Base64Bytes::new(wrong_kind),
+      };
+      assert_eq!(
+        world.verify_space(&forged).unwrap_err(),
+        SignedDeletionError::Unauthorized
+      );
+    }
+
+    #[test]
+    fn the_channels_a_deletion_names_are_read_without_verifying() {
+      let admin = Person::new(9);
+      let signed = admin.space_deletion(SPACE, &[(CHANNEL, EPOCH, None), (CHANNEL + 1, 0, None)]);
+      assert_eq!(
+        space_deletion_channels(&signed),
+        vec![conversation(CHANNEL), conversation(CHANNEL + 1)]
+      );
+      let garbage = SignedSpaceDeletion {
+        payload: Base64Bytes::new(b"{".to_vec()),
+        signature: Base64Bytes::new(Vec::new()),
+      };
+      assert!(space_deletion_channels(&garbage).is_empty());
     }
 
     fn world_with_workspace_admin() -> (Person, World) {
@@ -993,6 +1414,108 @@ mod tests {
       self.maybe_anchor = Some((verified, listed.to_owned()));
     }
 
+    /// Founds the channel anchored in `space` under `name` (by a founder of its own), lists it as
+    /// `listed`, and with `maybe_change` has a member (no workspace admin) move or rename it.
+    fn anchor_in(&mut self, space: i64, name: &str, listed: &str, maybe_change: Option<(Option<i64>, &str)>) {
+      use std::collections::BTreeSet;
+
+      use teamcraft_crypto::channel_anchor::{
+        AnchorExpectation, AnchorKind, ChannelAnchor, ExpectedKind, Founding, Judged, NameAuthority,
+        PropertiesTarget, Standing,
+      };
+      use teamcraft_crypto::membership::{MembershipAction, MembershipAuthority};
+
+      struct People(Vec<(crypto::UserId, IdentityPublicKey)>);
+      impl IdentityDirectory for People {
+        fn pinned_identity(&self, user_id: crypto::UserId) -> Option<IdentityPublicKey> {
+          self.0.iter().find(|(id, _)| *id == user_id).map(|(_, key)| *key)
+        }
+        fn device_listing(&self, _: &VerifiedDevice, _: u64, _: Judged) -> Standing {
+          Standing::Confirmed
+        }
+      }
+      struct Nobody;
+      impl MembershipAuthority for Nobody {
+        fn is_authorized(&self, _: crypto::UserId, _: crypto::ConversationId, _: &MembershipAction) -> bool {
+          false
+        }
+      }
+
+      let founder = Person::new(3);
+      let member = Person::new(4);
+      let conversation_id = convert::conversation(conversation(CHANNEL));
+      let mut anchor = ChannelAnchor::found(
+        &founder.device,
+        &founder.certificate,
+        &Founding {
+          conversation_id,
+          kind: AnchorKind::Channel,
+          device_list_version: 1,
+          signed_at_ms: 1,
+          maybe_space_id: Some(convert::space(space_id(space))),
+          name,
+        },
+      )
+      .unwrap();
+      if let Some((maybe_space, new_name)) = maybe_change {
+        let change = anchor
+          .sign_change(
+            &member.device,
+            &member.certificate,
+            NameAuthority::Member,
+            &PropertiesTarget {
+              maybe_space_id: maybe_space.map(|space| convert::space(space_id(space))),
+              name: new_name,
+            },
+            EPOCH,
+            0,
+          )
+          .unwrap();
+        anchor = anchor.with_change(change);
+      }
+      let people = People(vec![
+        (convert::user(founder.user_id), founder.identity.public_key()),
+        (convert::user(member.user_id), member.identity.public_key()),
+      ]);
+      let tree: BTreeSet<crypto::UserId> = people.0.iter().map(|(id, _)| *id).collect();
+      let verified = anchor
+        .verify(
+          &AnchorExpectation {
+            conversation_id,
+            kind: ExpectedKind::Channel,
+          },
+          EPOCH,
+          &tree,
+          &people,
+          &Nobody,
+        )
+        .unwrap();
+      self.maybe_anchor = Some((verified, listed.to_owned()));
+    }
+
+    fn verify_space(&self, signed: &SignedSpaceDeletion) -> Result<VerifiedDeletion, SignedDeletionError> {
+      verify_signed_space_deletion(
+        signed,
+        &DeletionVerifier {
+          conversation: conversation(CHANNEL),
+          is_channel: self.is_channel,
+          maybe_group: self.has_group.then_some(GroupFacts {
+            epoch: EPOCH,
+            users: &self.group_users,
+          }),
+          roles: &self.roles,
+          workspace: &self.workspace,
+          roster_max_age_ms: MAX_AGE_MS,
+          max_age_ms: MAX_SIGNATURE_AGE_MS,
+          clock_skew_ms: CLOCK_SKEW_MS,
+          now_ms: self.now_ms,
+          channel_roles_max_age_ms: ROLES_MAX_AGE_MS,
+          newest_server_ms: self.newest_server_ms,
+          anchor: self.anchor_facts(),
+        },
+      )
+    }
+
     fn anchor_facts(&self) -> AnchorFacts<'_> {
       match &self.maybe_anchor {
         _ if self.is_anchor_unverifiable => AnchorFacts::Unverifiable,
@@ -1088,6 +1611,43 @@ mod tests {
       .unwrap()
     }
 
+    /// A space's deletion naming `channels` (ID, epoch, name shown), at roster version 1.
+    fn space_deletion(&self, space: i64, channels: &[(i64, u64, Option<&str>)]) -> SignedSpaceDeletion {
+      self.space_deletion_with(space, 1, NOW_MS, channels)
+    }
+
+    fn space_deletion_with(
+      &self,
+      space: i64,
+      roster_version: u64,
+      signed_at_ms: i64,
+      channels: &[(i64, u64, Option<&str>)],
+    ) -> SignedSpaceDeletion {
+      let channels = channels
+        .iter()
+        .map(|(channel, epoch, maybe_name)| SpaceDeletionChannel {
+          conversation_id: conversation(*channel),
+          epoch: *epoch,
+          maybe_name_hash: maybe_name.map(|name| {
+            Base64Bytes::new(
+              teamcraft_crypto::channel_anchor::name_hash(name)
+                .as_bytes()
+                .to_vec(),
+            )
+          }),
+        })
+        .collect();
+      sign_space_deletion(
+        &self.device,
+        &self.certificate,
+        space_id(space),
+        roster_version,
+        channels,
+        signed_at_ms,
+      )
+      .unwrap()
+    }
+
     /// A deletion naming the name the deleter was shown (D3).
     fn deletion_named(&self, epoch: u64, name: &str) -> SignedChannelDeletion {
       sign_channel_deletion(
@@ -1108,5 +1668,9 @@ mod tests {
 
   fn conversation(id: i64) -> ConversationId {
     ConversationId::from_snowflake(Snowflake::new(id).unwrap())
+  }
+
+  fn space_id(id: i64) -> SpaceId {
+    SpaceId::from_snowflake(Snowflake::new(id).unwrap())
   }
 }

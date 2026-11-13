@@ -100,9 +100,12 @@ const MESSAGE_CACHE_BYTES: usize = DEFAULT_MESSAGE_CACHE_BYTES;
 const TICK: Duration = Duration::from_secs(3);
 /// How often the UI is told to read again while a long sync fills the store (issue #247).
 const SYNC_PROGRESS: Duration = Duration::from_secs(1);
-/// Least pause between two pages read in the background (backlogs, older history): the page's own
-/// time, but at least this, so the reading takes at most half of the page's thread (issue #1572).
-const BACKGROUND_PAGE_GAP: Duration = Duration::from_millis(100);
+/// Pause between two pages read in the background (a catch-up's backlog), and at least the page's
+/// own time (issues #1572, #1910): the browser reads
+/// history on demand, so the slow reading is there only for what the backlog's messages change
+/// (deletions, edits, pins) to arrive without the reader scrolling there. A page every few seconds
+/// keeps the page's thread free; the reader fills the hole at once by scrolling to it.
+const BACKLOG_PAGE_GAP: Duration = Duration::from_secs(5);
 /// How often the UI is told to read again while a file goes up or down, for its progress.
 const TRANSFER_PROGRESS: Duration = Duration::from_millis(500);
 /// How long a failed account data sync waits before it is retried; also how often the roster's age
@@ -850,6 +853,9 @@ async fn run_command(client: &mut WebClient, command: CoreCommand) -> Result<(),
     CommandPart::Shared => return client.run_shared_command(command).await,
     CommandPart::Workspace => crate::areas::workspace_command(client, command).await,
     CommandPart::Admin => crate::areas::admin_command(client, command).await,
+    CommandPart::Settings => crate::areas::settings_command(client, command).await,
+    CommandPart::Dialogs => crate::areas::dialogs_command(client, command).await,
+    CommandPart::Member => crate::areas::member_command(client, command).await,
   };
   match running {
     Ok(running) => running.await,
@@ -1817,7 +1823,8 @@ impl Core {
         ClientSettings::default()
           .with_notes_to_self()
           .with_capped_catch_up()
-          .with_thread_turns(),
+          .with_thread_turns()
+          .with_history_on_demand(),
       )
     });
     let maybe_client = match opened {
@@ -1853,7 +1860,8 @@ impl Core {
       ClientSettings::default()
         .with_notes_to_self()
         .with_capped_catch_up()
-        .with_thread_turns(),
+        .with_thread_turns()
+        .with_history_on_demand(),
       Argon2Settings::default(),
     )
     .await;
@@ -1950,7 +1958,9 @@ impl Core {
     let mut client = client;
     // Calls ring and show their roster in the tab that runs the core.
     client.set_call_event_sink(Box::new(crate::web_calls::on_gateway_event));
-    // The loop reads what a catch-up leaves, a page per turn (issue #1448).
+    // The loop reads what a catch-up leaves, slowly, a page now and then while the page is in view
+    // ([`BACKLOG_PAGE_GAP`]); the reader fills a hole at once by scrolling there (issues #1448,
+    // #1910).
     if let Err(error) = client.read_backlogs_in_background() {
       tracing::warn!(%error, "backlogs left by an earlier run not found; the next catch-up reads them");
     }
@@ -2286,7 +2296,8 @@ impl Core {
       Box::new(SystemClock),
       ClientSettings::default()
         .with_capped_catch_up()
-        .with_thread_turns(),
+        .with_thread_turns()
+        .with_history_on_demand(),
       device_name,
       // The key bag is wrapped with a random secret nobody keeps: the cheapest setting is plenty.
       Argon2Settings {
@@ -2336,7 +2347,8 @@ impl Core {
         ClientSettings::default()
           .with_notes_to_self()
           .with_capped_catch_up()
-          .with_thread_turns(),
+          .with_thread_turns()
+          .with_history_on_demand(),
         options,
       )
       .await
@@ -2986,10 +2998,12 @@ impl Core {
   }
 
   /// Whether a page of a catch-up's backlog is due (issue #1448): not while the sync is paused for
-  /// storage space, nor offline.
+  /// storage space, nor offline, nor while the page is out of view (issue #1910; the loop's tick
+  /// notices when it comes back).
   fn is_background_history_due(&self) -> bool {
     !self.is_sync_paused
       && self.connection.is_connected()
+      && is_page_visible()
       && self
         .client
         .as_ref()
@@ -3121,7 +3135,7 @@ impl Core {
   }
 
   /// One page of a backlog; the UI's reads are answered meanwhile.
-  /// Paced ([`BACKGROUND_PAGE_GAP`]), and the UI reads again at most once per [`SYNC_PROGRESS`]
+  /// Paced ([`BACKLOG_PAGE_GAP`]), and the UI reads again at most once per [`SYNC_PROGRESS`]
   /// for what the pages changed, and once more when they are done.
   async fn load_background_history(&mut self, requests: &mut mpsc::UnboundedReceiver<Request>) {
     let started = now_ms();
@@ -3135,7 +3149,7 @@ impl Core {
         .await;
       let ended = now_ms();
       let took = ended.saturating_sub(started);
-      self.background.next_page_ms = ended.saturating_add(took.max(millis(BACKGROUND_PAGE_GAP)));
+      self.background.next_page_ms = ended.saturating_add(took.max(millis(BACKLOG_PAGE_GAP)));
       self.background.is_change_untold |= read == Some(true);
     }
     self.tell_background_change();
