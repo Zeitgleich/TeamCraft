@@ -2119,15 +2119,37 @@ never by the server's member list:
       identity key that certifies their devices. The identity key signs it under a label of its
       own (§2); at most 100 co-hosts and 8 KiB. A list naming another organizer is a
       **handover**; the former organizer stays co-host (the app's choice, which the list carries).
+      Since #1864 a list (version 2) also names **`previous`**: the hash of the handover its signer
+      took the meeting over with (the newest handover before it in the chain; none in the
+      founder's first term). The hash is SHA-256 over
+      `labeled("TeamCraft-v1 meeting hosts hash", statement)`, the statement as signed (version
+      byte included). The version byte is the first byte of the statement, so a list of version 1
+      (no `previous`) decodes and verifies byte for byte as before; an app from before #1864 can't
+      read a list of version 2 and passes it over (it keeps the hosts it verified before, or the
+      anchor alone hosts).
     - *The chain.* From a handover on only the new organizer's key signs. The server keeps every
       handover and the newest list (at most 32 handovers per meeting) and serves them oldest first
       (`GET /conversations/{id}/meeting-hosts`, members and admitted guests). A checker follows
       them from the key it trusts, the **anchor**: in the order of their sequence a list counts
       only if the organizer the counted list before it named (at first the anchor) signed it, and
-      only for this chat (and meeting, where known); every other list is passed over. The newest
-      counted list says who hosts: its organizer (by key) and its co-hosts (by user and key);
-      without one the anchor alone hosts, as before. A newest counted list older than one the
-      checker saw is a rollback: it keeps the hosts it verified before.
+      only for this chat (and meeting, where known); a list of version 2 also only if its
+      `previous` is the newest handover counted before it (the first list counted from the anchor
+      may name any: the chain may have begun before the anchor's term). Since the server keeps
+      every handover and the newest list, the lists it serves link up into one chain. Every other
+      list is passed over. The newest counted list says who hosts: its organizer (by key) and its
+      co-hosts (by user and key); without one the anchor alone hosts, as before. The checker keeps,
+      per anchor, the newest sequence and the newest handover it counted (the **head**). A newest
+      counted list older than the kept sequence is a rollback; a chain that doesn't count the kept
+      head is a **fork** (#1864). Either way the checker keeps the hosts it verified before.
+    - *Kept per key* (#1865). A device keeps one record per key a chain was verified from (the
+      pinned founder's, a guest link's `v`, its own key, an organizer's key the server named before
+      the device had the group; at most 8, the oldest but the founder's go first), each with its
+      own sequence and head, so a chain is only ever checked against what was kept from the same
+      key: a guest whose link was made after a handover keeps the rollback check of the chain from
+      `v` after its device pinned a founder with another key. What counts for the chat in the
+      members' rule (the co-hosts and the organizer the lists name) is the pinned founder's record,
+      or, before a pin, the record kept last. A record from before #1865 (one per chat) reads as
+      the record of the key it names.
     - *Anchors.* A guest's anchor is `v` of its link: a link made before a handover carries the
       former organizer's key and follows the handover to the new one; a link copied afterwards
       carries the new organizer's (a member's app copies the organizer the server names, with the
@@ -2148,7 +2170,9 @@ never by the server's member list:
     - *Handover and the new organizer.* The new organizer's device signs the same hosts again with
       its own key as soon as it sees the handover (with the admitters' upkeep), so that guests of
       links with its key find the co-hosts; until then such a guest accepts the new organizer's
-      devices only. It also signs the admitters from then on; a "no lobby" it has no record of is
+      devices only. An organizer's device finds `previous` from the chain that follows from its own
+      key (a handover back to it, its own lists), else as the newest handover the server holds that
+      names its key as organizer; a wrong one costs only availability (the list is passed over). It also signs the admitters from then on; a "no lobby" it has no record of is
       taken from the admitters the former organizer signed, as this device verified them.
     - *The server* keeps the lists (`PUT /conversations/{id}/meeting-hosts`, the meeting's
       organizer only; a sequence not above the stored one gets `409`), checks their shape (the
@@ -2167,14 +2191,19 @@ never by the server's member list:
       the guest's session ends with the meeting's access, which bounds it, and a member's device
       reads the lists again before it judges a commit. A former organizer can't take the meeting
       back from anybody who saw the handover: their later lists aren't signed by the organizer the
-      handover named. The founder check after a handover is no weaker than before: a server that
+      handover named, and if the server withholds the handover and serves a list the former
+      organizer signed after it (a fork, with a sequence above the newest), the chain lacks the
+      kept head (#1864). A checker that never saw the handover can be shown such a fork, as it can
+      be shown an older chain. Forks within an organizer's own term need no check: only their key
+      signs there, and the sequence orders their lists. The founder check after a handover is no
+      weaker than before: a server that
       can name the organizer could already name a member who founded a group of their own.
 
     | Who                         | Can                                                                                                      | Can't                                                                                                    |
     |-----------------------------|----------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------|
     | A co-host                   | Let guests in like the organizer, make guest links, use the host controls                                | Change or cancel the meeting, name hosts, hand it over; be one for anybody without the organizer's list  |
     | A co-host taken off         | With the server, admit a guest who saw no newer list, until the guest's access ends                      | Fool a guest or member who saw the newer list (sequence)                                                 |
-    | A former organizer          | Admit as a co-host if the new organizer keeps them; with the server, mislead a guest who saw no handover | Take the meeting back: lists they sign after the handover count for nobody who saw it                    |
+    | A former organizer          | Admit as a co-host if the new organizer keeps them; with the server, mislead a guest who saw no handover | Take the meeting back: lists they sign after the handover count for nobody who saw it (fork, #1864)      |
     | A forged or moved host list | –                                                                                                        | Be accepted: signed by the organizer the chain names at that point, for this chat (a guest: and meeting) |
   - *Where `v` comes from.* A link copied in a member's app carries the fingerprint of the
     organizer's key as that device has it pinned; the app waits for it ("Verifying…") and never

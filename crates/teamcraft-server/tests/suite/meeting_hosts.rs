@@ -636,6 +636,7 @@ fn signed(
     signer_user_id: UserId::new(signer.id.parse().unwrap()),
     organizer: host(organizer),
     co_hosts: co_hosts.iter().map(|person| host(person)).collect(),
+    maybe_previous: None,
   }
   .sign(&signer.key)
   .unwrap();
