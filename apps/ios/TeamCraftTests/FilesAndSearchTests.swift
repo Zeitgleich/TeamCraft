@@ -128,6 +128,20 @@ final class FilesAndSearchTests: XCTestCase {
     XCTAssertEqual(meeting.rsvp(of: "2"), .tentative)
     XCTAssertNil(meeting.rsvp(of: "9"))
     XCTAssertEqual(meeting.endDate.timeIntervalSince(meeting.startDate), 3600)
+    XCTAssertEqual(meeting.organizerUserId, "1")
+    XCTAssertFalse(meeting.isRepeating)
+  }
+
+  /// #1841: the organizer edits and cancels; a series asks which of its meetings to cancel.
+  func testMeetingsTellTheOrganizerAndASeries() throws {
+    let json = """
+      {"meetings":[{"id":"5","title":"Weekly","starts_at":1800000000000,"ends_at":1800003600000,
+      "status":"scheduled","organizer_user_id":"1","conversation_id":"77",
+      "recurrence":{"frequency":"weekly","interval":1},"attendees":[]}]}
+      """
+    let meeting = try XCTUnwrap(Wire.decode(MeetingList.self, from: json)?.meetings.first)
+    XCTAssertTrue(meeting.isRepeating)
+    XCTAssertEqual(meeting.organizerUserId, "1")
   }
 
   func testMentionsRankAboveOtherNotifications() {

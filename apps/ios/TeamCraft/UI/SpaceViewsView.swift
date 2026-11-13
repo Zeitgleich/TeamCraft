@@ -166,13 +166,16 @@ private struct SpaceMeetingsList: View {
         } else {
           // A repeating meeting is listed once per occurrence, all with the series' ID.
           List(meetings, id: \.occurrenceKey) { meeting in
-            MeetingRow(account: account, meeting: meeting, onJoin: onJoin) { answer in
-              if await model.setRsvp(meetingId: meeting.id, answer: answer) {
-                maybeMeetings = await model.meetings()
-              } else {
-                isRsvpFailed = true
-              }
-            }
+            MeetingRow(
+              account: account, meeting: meeting, onJoin: onJoin,
+              onChanged: { maybeMeetings = await model.meetings() },
+              onAnswer: { answer in
+                if await model.setRsvp(meetingId: meeting.id, answer: answer) {
+                  maybeMeetings = await model.meetings()
+                } else {
+                  isRsvpFailed = true
+                }
+              })
           }
         }
       } else {

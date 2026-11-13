@@ -972,9 +972,11 @@ final class AppModel {
 
   // MARK: Meetings
 
-  /// The user's meetings that haven't ended, soonest first.
+  /// The user's meetings that haven't ended, soonest first, read through the core's upkeep
+  /// (#1841): the organizer's signed admitters of meetings that run or start within a day stay
+  /// current, and edits whose chat change is still owed are finished.
   func meetings() async -> [Meeting] {
-    guard let json = try? await core().apiRequest(method: "GET", path: "/meetings", maybeBody: nil),
+    guard let json = try? await core().meetingUpkeep(),
       let list = Wire.decode(MeetingList.self, from: json)
     else { return [] }
     return list.meetings.filter { $0.status == "scheduled" }.sorted { $0.startsAt < $1.startsAt }

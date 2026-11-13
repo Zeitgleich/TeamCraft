@@ -736,7 +736,13 @@ data class Meeting(
   @SerialName("conversation_id") val conversationId: String,
   /** The space it was scheduled in; its chat stays outside spaces. */
   @SerialName("space_id") val maybeSpaceId: String? = null,
-)
+  /** Who scheduled it: only they edit and cancel it (#1841). */
+  @SerialName("organizer_user_id") val organizerUserId: String = "",
+  /** The repeat rule of a series (each occurrence is listed); the core reads it, the list only asks whether there is one. */
+  @SerialName("recurrence") val maybeRecurrence: JsonObject? = null,
+) {
+  val isRepeating: Boolean get() = maybeRecurrence != null
+}
 
 @Serializable
 data class MeetingList(val meetings: List<Meeting> = emptyList())

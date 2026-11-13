@@ -248,7 +248,7 @@ private fun SpaceMeetings(viewModel: MainViewModel, spaceId: String, contentPadd
   LazyColumn(Modifier.fillMaxSize(), contentPadding = contentPadding) {
     placeholderItem(read.phase { meetingsOfSpace(it, spaceId) }, read.retry) { EmptyHint(stringResource(R.string.space_meetings_empty)) }
     items(meetings, key = { "${it.id}-${it.startsAt}" }) { meeting ->
-      MeetingRow(viewModel, meeting)
+      MeetingRow(viewModel, meeting, onChanged = read.refresh)
       HorizontalDivider()
     }
   }

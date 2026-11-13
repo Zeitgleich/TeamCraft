@@ -61,11 +61,6 @@ const TAB_FOCUS_RENEW_MS: u64 = 5_000;
 const FIRST_MEETINGS_LOAD: Duration = Duration::from_secs(3);
 /// How early a meeting reminder may show: the clock is re-measured right before.
 const DUE_SLACK_MS: i64 = 2_000;
-/// The organizer's device keeps the signed admitters current for meetings that run or start within
-/// this time (#1103); later ones keep the list signed when they were scheduled or edited.
-const ADMITTERS_LEAD_MS: i64 = 24 * 60 * 60_000;
-/// How often per meeting the organizer's device has the core compare its signed admitters.
-const ADMITTERS_SYNC_INTERVAL_MS: i64 = 10 * 60_000;
 /// Storage key prefix of the reminders shown on this device; the user ID follows.
 const FIRED_REMINDERS_KEY: &str = "teamcraft.meeting_reminders.";
 /// Storage key prefix of the conversation a tab shows in front; the user ID follows.
@@ -789,27 +784,22 @@ impl MeetingWatch {
   /// change (the lobby turned off) counts from the next knock on.
   fn keep_admitters_current(&self, me: UserId) {
     let now = now_ms();
-    let due: Vec<_> = self.hub.meetings.with_untracked(|all| {
-      all
-        .iter()
-        .filter(|meeting| meeting.organizer_user_id == me && !crate::meetings::is_over(meeting, now))
-        .filter(|meeting| meeting.starts_at.0 <= now + ADMITTERS_LEAD_MS)
-        .map(|meeting| (meeting.id, meeting.conversation_id, meeting.ends_at.0))
-        .collect()
-    });
+    let due = self
+      .hub
+      .meetings
+      .with_untracked(|all| teamcraft_client_api::meeting_edits::admitters_due(all, me, now));
     let mut synced = self.admitters_synced_at.borrow_mut();
-    for (meeting, conversation, ends_at) in due {
+    for due in due {
       if synced
-        .get(&meeting)
-        .is_some_and(|at| now - at < ADMITTERS_SYNC_INTERVAL_MS)
+        .get(&due.meeting)
+        .is_some_and(|at| now - at < teamcraft_client_api::meeting_edits::ADMITTERS_SYNC_INTERVAL_MS)
       {
         continue;
       }
-      synced.insert(meeting, now);
-      let until = ends_at + crate::components::meetings_view::GUEST_ACCESS_GRACE_MS;
-      self
-        .state
-        .try_write(|backend| backend.sync_meeting_admitters(meeting, conversation, until));
+      synced.insert(due.meeting, now);
+      self.state.try_write(|backend| {
+        backend.sync_meeting_admitters(due.meeting, due.conversation, due.expires_at_ms)
+      });
     }
     let maybe_call = self
       .state
