@@ -709,28 +709,47 @@ final class AppModel {
     (try? await core().keyCatchUp()) ?? nil
   }
 
-  func messages(conversationId: String, limit: UInt32 = 200) async -> [MessageItem] {
-    ((try? await core().messages(conversationId: conversationId, limit: limit)) ?? []).map {
-      $0.namingDeletedAuthor()
-    }
-  }
-
   /// What a feed that pages back shows (issue #1058): the messages from `maybeOldest` (the oldest
-  /// one it shows) to the newest, and `older` messages before it; `nil` when the read failed.
-  func messages(conversationId: String, from maybeOldest: MessageItem?, older: UInt32) async -> MessagePage? {
-    guard
-      let page = try? await core().messagesFrom(
-        conversationId: conversationId, maybeOldestId: maybeOldest?.id, oldestSentAtMs: maybeOldest?.sentAtMs ?? 0,
-        older: older)
-    else { return nil }
-    return MessagePage(
-      messages: page.messages.map { $0.namingDeletedAuthor() }, hasOlder: page.hasOlder, gaps: page.gaps)
+  /// one it shows) to the newest, and `older` messages before it, named by the authors the read came
+  /// with; `nil` when the read failed. Read and decoded off the main actor: the feed is read again on
+  /// every change.
+  func messages(conversationId: String, from maybeOldest: Message?, older: UInt32) async -> MessagePage? {
+    guard let core = try? core() else { return nil }
+    return await Self.readTail(
+      core, conversationId: conversationId, maybeOldestId: maybeOldest?.id, oldestSentAtMs: maybeOldest?.sentAtMs ?? 0,
+      older: older)
   }
 
-  func thread(conversationId: String, threadId: String) async -> [MessageItem] {
-    ((try? await core().thread(conversationId: conversationId, threadId: threadId)) ?? []).map {
-      $0.namingDeletedAuthor()
-    }
+  /// Root and replies of a thread, oldest first, their authors not named yet (`Message.named`);
+  /// empty when the read failed.
+  func thread(conversationId: String, threadId: String) async -> [Message] {
+    guard let core = try? core() else { return [] }
+    return await Self.readThread(core, query: ChatQuery.thread(conversationId: conversationId, threadId: threadId).json)
+  }
+
+  /// Everyone this device knows by user ID, former accounts included, to name messages' authors.
+  func messageAuthors() async -> [String: MessageAuthor] {
+    guard let json = try? await core().snapshot() else { return [:] }
+    return await Self.decodeAuthors(json)
+  }
+
+  private nonisolated static func readTail(
+    _ core: TeamCraft, conversationId: String, maybeOldestId: String?, oldestSentAtMs: Int64, older: UInt32
+  ) async -> MessagePage? {
+    guard
+      let json = try? await core.messageTail(
+        conversationId: conversationId, maybeOldestId: maybeOldestId, oldestSentAtMs: oldestSentAtMs, older: older)
+    else { return nil }
+    return Wire.decode(MessageTail.self, from: json)?.page
+  }
+
+  private nonisolated static func readThread(_ core: TeamCraft, query: String) async -> [Message] {
+    guard let json = try? await core.query(queryJson: query) else { return [] }
+    return Wire.decode(ChatAnswer.self, from: json)?.messages ?? []
+  }
+
+  private nonisolated static func decodeAuthors(_ json: String) async -> [String: MessageAuthor] {
+    Wire.decode(PeopleSnapshot.self, from: json)?.authorsById ?? [:]
   }
 
   /// The line under each conversation of the chat list, in one local read for the whole list: the
@@ -742,8 +761,8 @@ final class AppModel {
     guard let items = try? await core().chatPreviews(conversationIds: ids) else { return [:] }
     var previews: [String: ChatPreview] = [:]
     for item in items {
-      let message = item.message.namingDeletedAuthor()
-      previews[item.conversationId] = chatPreview(message, myId: myId, isOneToOne: directIds.contains(item.conversationId))
+      previews[item.conversationId] = chatPreview(
+        Message(item.message), myId: myId, isOneToOne: directIds.contains(item.conversationId))
     }
     return previews
   }

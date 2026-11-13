@@ -258,6 +258,8 @@ struct ChatAnswer: Decodable, Sendable {
   var sent: [SentItem]?
   /// `ChatQuery.joinableSpaces`: open spaces the user isn't in (#1526).
   var spaces: [JoinableSpace]?
+  /// `ChatQuery.thread`: root and replies, oldest first, their authors not named yet.
+  var messages: [Message]?
 }
 
 /// An open space the user may join, as "Browse spaces" lists it (#1526).
@@ -365,15 +367,329 @@ struct PeopleSnapshot: Decodable, Sendable {
 
   /// Names by user ID for reply quotes and calls: everyone this device knows, former accounts
   /// included.
-  var namesById: [String: String] {
+  var namesById: [String: String] { authorsById.mapValues { $0.isDeleted == true ? deletedUserName : $0.displayName } }
+
+  /// Everyone this device knows, former accounts included, to name the authors of messages.
+  var authorsById: [String: MessageAuthor] {
     let everyone = (users ?? []) + [me] + (formerUsers ?? [])
-    return Dictionary(everyone.map { ($0.id, $0.shownName) }, uniquingKeysWith: { first, _ in first })
+    return Dictionary(
+      everyone.map { ($0.id, MessageAuthor(id: $0.id, displayName: $0.displayName, isDeleted: $0.isDeleted)) },
+      uniquingKeysWith: { first, _ in first })
   }
 }
 
 /// The app's own name for a deleted account in the user's language, instead of the server's
 /// placeholder (issue #751).
 private var deletedUserName: String { String(localized: "user_deleted_name") }
+
+/// A message as the core reads it (`Message` of teamcraft-client-api, issue #1623), the one
+/// representation the feed, threads and chat list show: a field the core's model gains reaches the
+/// app by declaring it here. The wire names the author by ID only; `authorName` and
+/// `isAuthorDeleted` are filled by `named(_:)` with the names the read came with.
+struct Message: Decodable, Equatable, Identifiable, Sendable {
+  /// Why a message shows as a placeholder (issue #888); a state of a newer core shows as
+  /// `notAvailable`.
+  enum Placeholder: String, Decodable, Equatable, Sendable {
+    /// "Waiting for this message": its key may still come.
+    case waiting
+    /// "Not available on this device": no key is expected here.
+    case notAvailable = "not_available"
+    /// "This message couldn't be decrypted".
+    case failed
+
+    init(from decoder: Decoder) throws {
+      self = Placeholder(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .notAvailable
+    }
+  }
+
+  /// What a system message reports (issue #769); the message's author is who joined, left, renamed
+  /// or changed the topic.
+  enum SystemEvent: Equatable, Sendable {
+    case joined
+    case left
+    case renamed(name: String)
+    case topicChanged(topic: String)
+  }
+
+  /// An integration source a bot's message shows instead of the bot (docs/bridge.md, "Source
+  /// identity").
+  struct Source: Decodable, Equatable, Sendable {
+    let name: String
+    var picture: String?
+
+    private enum CodingKeys: String, CodingKey {
+      case name
+      case picture = "pictureSha256"
+    }
+  }
+
+  /// Where an imported message came from (e2ee.md §4.10); only its author matters to the app.
+  struct Imported: Decodable, Equatable, Sendable {
+    let author: ImportedAuthor
+  }
+
+  let id: String
+  let conversationId: String
+  let authorId: String
+  let sentAtMs: Int64
+  let body: String
+  var isEdited = false
+  var replyCount: UInt32 = 0
+  /// Set on replies: the thread (root message ID) they belong to.
+  var maybeThreadId: String?
+  var reactions: [Reaction] = []
+  /// `nil` for messages people wrote and for changes that come with the extras.
+  var maybeSystemEvent: SystemEvent?
+  /// Set while this device can't read the message: the bubble shows the placeholder's text
+  /// instead of `body` (empty then). It fills in place once readable.
+  var maybePlaceholder: Placeholder?
+  var maybeSource: Source?
+  var maybeImported: Imported?
+  /// Handles of the user groups the sender's device expanded (issue #206): those `@words` show as
+  /// group mentions.
+  var groupMentions: [String] = []
+  /// The sender named this user among the people to notify.
+  var mentionsMe = false
+  /// As the app shows the author: a source's or an imported bot's name, else the account's, with
+  /// the app's own "Deleted user" for a deleted one (issue #751). Not on the wire.
+  var authorName = ""
+  var isAuthorDeleted = false
+
+  /// Written here, not yet accepted by the server: outbox messages carry the core's pending bit
+  /// (`PENDING_ID_BIT`) in their ID.
+  var isPending: Bool { (Int64(id) ?? 0) & (1 << 62) != 0 }
+  /// `authorName` is an integration source's: the bubble shows the bot badge with it.
+  var isAuthorSource: Bool { maybeSource != nil }
+  var maybeSourcePictureSha256: String? { maybeSource?.picture }
+
+  /// The author's name as the app shows it: an integration source's always says it's a bot.
+  var shownAuthorName: String {
+    isAuthorSource ? String(localized: "source_sender \(authorName)") : authorName
+  }
+
+  init(
+    id: String, conversationId: String, authorId: String, sentAtMs: Int64, body: String, authorName: String = "",
+    isEdited: Bool = false, replyCount: UInt32 = 0, maybeThreadId: String? = nil, reactions: [Reaction] = [],
+    maybeSystemEvent: SystemEvent? = nil, maybePlaceholder: Placeholder? = nil, maybeSource: Source? = nil,
+    groupMentions: [String] = [], mentionsMe: Bool = false, isAuthorDeleted: Bool = false
+  ) {
+    self.id = id
+    self.conversationId = conversationId
+    self.authorId = authorId
+    self.sentAtMs = sentAtMs
+    self.body = body
+    self.authorName = authorName
+    self.isEdited = isEdited
+    self.replyCount = replyCount
+    self.maybeThreadId = maybeThreadId
+    self.reactions = reactions
+    self.maybeSystemEvent = maybeSystemEvent
+    self.maybePlaceholder = maybePlaceholder
+    self.maybeSource = maybeSource
+    self.groupMentions = groupMentions
+    self.mentionsMe = mentionsMe
+    self.isAuthorDeleted = isAuthorDeleted
+  }
+
+  /// The message with its author named from `authors` (by user ID), as the core's typed records
+  /// did: a source's or an imported bot's own name first; a deleted account, and somebody imported
+  /// without an account here, as the app's own "Deleted user" (issue #751).
+  func named(_ authors: [String: MessageAuthor]) -> Message {
+    var named = self
+    let maybeAuthor = authors[authorId]
+    named.isAuthorDeleted = maybeAuthor?.isDeleted == true || maybeImported?.author.kind == "deleted"
+    if let source = maybeSource {
+      named.authorName = source.name
+    } else if maybeImported?.author.kind == "named" {
+      named.authorName = maybeImported?.author.name ?? ""
+    } else {
+      named.authorName = maybeAuthor?.displayName ?? ""
+    }
+    if named.isAuthorDeleted { named.authorName = deletedUserName }
+    return named
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case id, body, reactions, groupMentions, mentionsMe, kind, isEdited, replyCount
+    case conversationId = "conversation"
+    case authorId = "author"
+    case sentAtMs = "sentAt"
+    case maybeThreadId = "maybeThread"
+    case maybePlaceholder = "placeholder"
+    case maybeSource = "source"
+    case maybeImported = "imported"
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    id = try container.decode(String.self, forKey: .id)
+    conversationId = try container.decode(String.self, forKey: .conversationId)
+    authorId = try container.decode(String.self, forKey: .authorId)
+    sentAtMs = try container.decode(Int64.self, forKey: .sentAtMs)
+    body = try container.decodeIfPresent(String.self, forKey: .body) ?? ""
+    isEdited = try container.decodeIfPresent(Bool.self, forKey: .isEdited) ?? false
+    replyCount = try container.decodeIfPresent(UInt32.self, forKey: .replyCount) ?? 0
+    maybeThreadId = try container.decodeIfPresent(String.self, forKey: .maybeThreadId)
+    reactions = try container.decodeIfPresent([Reaction].self, forKey: .reactions) ?? []
+    // A kind this version doesn't know is no system event; the message still shows.
+    maybeSystemEvent = (try? container.decodeIfPresent(MessageKind.self, forKey: .kind))?.maybeSystemEvent
+    maybePlaceholder = try container.decodeIfPresent(Placeholder.self, forKey: .maybePlaceholder)
+    maybeSource = try? container.decodeIfPresent(Source.self, forKey: .maybeSource)
+    maybeImported = try? container.decodeIfPresent(Imported.self, forKey: .maybeImported)
+    groupMentions = try container.decodeIfPresent([String].self, forKey: .groupMentions) ?? []
+    mentionsMe = try container.decodeIfPresent(Bool.self, forKey: .mentionsMe) ?? false
+  }
+}
+
+/// A reaction under a message: the emoji (or a custom emoji's `:shortcode:`), how many, and whether
+/// the user is among them.
+struct Reaction: Decodable, Equatable, Sendable {
+  let emoji: String
+  let count: UInt32
+  var reactedByMe = false
+
+  init(emoji: String, count: UInt32, reactedByMe: Bool = false) {
+    self.emoji = emoji
+    self.count = count
+    self.reactedByMe = reactedByMe
+  }
+
+  private enum CodingKeys: String, CodingKey { case emoji, count, reactedByMe }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    emoji = try container.decode(String.self, forKey: .emoji)
+    count = try container.decode(UInt32.self, forKey: .count)
+    reactedByMe = try container.decodeIfPresent(Bool.self, forKey: .reactedByMe) ?? false
+  }
+}
+
+/// `MessageKind` of the core, externally tagged: `"User"`, `"Change"`, `{"System": event}` or
+/// `{"Log": level}`. Only the system events matter to the app.
+private struct MessageKind: Decodable {
+  let maybeSystemEvent: Message.SystemEvent?
+
+  private struct Key: CodingKey {
+    let stringValue: String
+    var intValue: Int? { nil }
+    init(_ stringValue: String) { self.stringValue = stringValue }
+    init(stringValue: String) { self.stringValue = stringValue }
+    init?(intValue: Int) { nil }
+  }
+
+  init(from decoder: Decoder) throws {
+    // "User" and "Change" are plain strings; "Log" carries a level.
+    guard let container = try? decoder.container(keyedBy: Key.self), container.contains(Key("System")) else {
+      maybeSystemEvent = nil
+      return
+    }
+    if let unit = try? container.decode(String.self, forKey: Key("System")) {
+      maybeSystemEvent =
+        switch unit {
+        case "Joined": .joined
+        case "Left": .left
+        default: nil
+        }
+      return
+    }
+    let event = try container.nestedContainer(keyedBy: Key.self, forKey: Key("System"))
+    if event.contains(Key("Renamed")) {
+      let fields = try event.nestedContainer(keyedBy: Key.self, forKey: Key("Renamed"))
+      maybeSystemEvent = .renamed(name: try fields.decode(String.self, forKey: Key("name")))
+    } else if event.contains(Key("TopicChanged")) {
+      let fields = try event.nestedContainer(keyedBy: Key.self, forKey: Key("TopicChanged"))
+      maybeSystemEvent = .topicChanged(topic: try fields.decode(String.self, forKey: Key("topic")))
+    } else {
+      maybeSystemEvent = nil
+    }
+  }
+}
+
+/// Who wrote a message, as a read names them (`User` of the core).
+struct MessageAuthor: Decodable, Equatable, Sendable {
+  let id: String
+  let displayName: String
+  /// Deleted (issue #630): named by the app's own "Deleted user" (issue #751).
+  var isDeleted: Bool?
+}
+
+/// What a feed that pages back shows of a conversation (issue #1058): the messages from the oldest
+/// one it shows to the newest, oldest first, with their authors named.
+struct MessagePage: Equatable, Sendable {
+  var messages: [Message]
+  /// Older messages exist: the list can page further back.
+  var hasOlder: Bool
+  /// History this device never read between these messages, oldest first (#1156).
+  var gaps: [HistoryGap] = []
+}
+
+/// `MessageTail` of the core: a page of the feed with the authors this device knows, so it shows
+/// named without reading the snapshot.
+struct MessageTail: Decodable, Sendable {
+  let messages: [Message]
+  let hasOlder: Bool
+  let gaps: [HistoryGap]?
+  let maybeMe: MessageAuthor?
+  let authors: [MessageAuthor]?
+
+  /// The page with every author named.
+  var page: MessagePage {
+    let everyone = (authors ?? []) + (maybeMe.map { [$0] } ?? [])
+    let byId = Dictionary(everyone.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+    return MessagePage(messages: messages.map { $0.named(byId) }, hasOlder: hasOlder, gaps: gaps ?? [])
+  }
+}
+
+/// A hole in the history among a page's messages (#1156, `HistoryGap` of the core): the list shows
+/// it where it is and asks for it once the reader comes near (`fill_history_gap`).
+struct HistoryGap: Decodable, Equatable, Sendable {
+  /// The newest message before it: what a request names it by.
+  let after: String
+  /// How many of the page's messages come before it (0: above the first).
+  let index: Int
+  /// How the conversation's last request for a hole stands.
+  let status: OlderHistory
+
+  /// Nothing asked yet, or the last request was answered: a reader near it asks.
+  var isAskable: Bool { status == .available || status == .complete }
+}
+
+extension Message {
+  /// The chat list's line from the core's typed record (`ChatPreviewItem`), named there already.
+  init(_ item: MessageItem) {
+    self.init(
+      id: item.id, conversationId: item.conversationId, authorId: item.authorId, sentAtMs: item.sentAtMs,
+      body: item.body, authorName: item.isAuthorDeleted ? deletedUserName : item.authorName,
+      isEdited: item.isEdited, replyCount: item.replyCount, maybeThreadId: item.maybeThreadId,
+      reactions: item.reactions.map { Reaction(emoji: $0.emoji, count: $0.count, reactedByMe: $0.reactedByMe) },
+      maybeSystemEvent: item.maybeSystemEvent.map(Message.SystemEvent.init),
+      maybePlaceholder: item.maybePlaceholder.map(Message.Placeholder.init),
+      maybeSource: item.isAuthorSource
+        ? Message.Source(name: item.authorName, picture: item.maybeSourcePictureSha256) : nil,
+      groupMentions: item.groupMentions, mentionsMe: item.mentionsMe, isAuthorDeleted: item.isAuthorDeleted)
+  }
+}
+
+extension Message.SystemEvent {
+  init(_ item: SystemEventItem) {
+    switch item {
+    case .joined: self = .joined
+    case .left: self = .left
+    case .renamed(let name): self = .renamed(name: name)
+    case .topicChanged(let topic): self = .topicChanged(topic: topic)
+    }
+  }
+}
+
+extension Message.Placeholder {
+  init(_ item: PlaceholderItem) {
+    switch item {
+    case .waiting: self = .waiting
+    case .notAvailable: self = .notAvailable
+    case .failed: self = .failed
+    }
+  }
+}
 
 extension MessageItem {
   /// The author's name as the app shows it: an integration source's always says it's a bot.

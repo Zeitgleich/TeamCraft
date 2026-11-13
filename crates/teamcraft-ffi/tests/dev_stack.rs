@@ -88,9 +88,11 @@ async fn mobile_client_receives_and_answers_a_message() {
   let channel_id = channel.to_string();
   wait_until("the phone shows Alice's message", || async {
     phone
-      .messages(channel_id.clone(), 20)
+      .message_tail(channel_id.clone(), None, 0, 20)
       .await
-      .is_ok_and(|messages| messages.iter().any(|message| message.body == "hello phone"))
+      .ok()
+      .and_then(|json| serde_json::from_str::<teamcraft_client_api::remote::MessageTail>(&json).ok())
+      .is_some_and(|tail| tail.messages.iter().any(|message| message.body == "hello phone"))
   })
   .await;
   assert!(
