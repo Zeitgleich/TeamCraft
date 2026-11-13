@@ -4,13 +4,13 @@
 use std::collections::HashSet;
 
 use teamcraft_db::{
-  CommitOutcome, MlsBacklogQuery, NewMlsMessage, PostOutcome, RewindOutcome, StoredMlsMessage,
+  CommitOutcome, MlsBacklogQuery, NewMlsMessage, PostOutcome, RewindBounds, RewindOutcome, StoredMlsMessage,
 };
 use teamcraft_proto::{
-  Base64Bytes, ConversationId, ConversationKind, DeviceId, ErrorCode, GatewayEvent, ListMlsMessagesQuery,
+  Base64Bytes, ConversationId, ConversationKind, DeviceId, ErrorCode, GatewayEvent, Id, ListMlsMessagesQuery,
   ListMlsMessagesResponse, MlsGroupInfoResponse, MlsMessageId, MlsMessageKind, MlsMessageResponse,
   Permission, PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutMlsGroupInfoRequest,
-  UserId,
+  Snowflake, UserId,
 };
 
 use super::access::{load_conversation, require};
@@ -68,6 +68,12 @@ pub async fn rewind(
   conversation: ConversationId,
   request: PostMlsCommitRequest,
 ) -> Result<PostMlsCommitResponse, ApiError> {
+  // The server can't tell a strict group from another: off, no group is rewound at all.
+  if !state.settings.get().policy.strict_channels {
+    return Err(ApiError::Forbidden(
+      "strict channels are off on this server".into(),
+    ));
+  }
   let access = load_conversation(state, caller, conversation).await?;
   if !access.is_member() {
     return Err(ApiError::Forbidden("only members can commit".into()));
@@ -98,6 +104,7 @@ pub async fn rewind(
       &commit,
       &welcomes,
       checked.maybe_group_info(&request),
+      rewind_bounds(),
       &audit,
     )
     .await?;
@@ -117,6 +124,11 @@ pub async fn rewind(
       new_epoch
     },
     RewindOutcome::EpochConflict { current_epoch } => return Err(ApiError::EpochConflict { current_epoch }),
+    RewindOutcome::TooFarBack { current_epoch } => {
+      return Err(ApiError::InvalidRequest(format!(
+        "a rewind goes back at most {MAX_REWIND_EPOCHS} epochs from epoch {current_epoch} and {MAX_REWIND_AGE_DAYS} days"
+      )));
+    },
   };
   Ok(publish_commit(
     state,
@@ -127,6 +139,31 @@ pub async fn rewind(
     &welcomes,
     new_epoch,
   ))
+}
+
+/// How many epochs behind the group's a rewind may go (e2ee.md §4.6.2, D4). A refused commit stops
+/// every honest device at once, so the last good epoch is a few behind at most: entries built on
+/// the refused commit by the committer, or by what it let in. Anything further back would take
+/// back real changes for devices that are offline, and lose their queue entries.
+pub const MAX_REWIND_EPOCHS: u64 = 8;
+/// How old the oldest dropped commit (the one of the epoch gone back to) may be: a stop waits
+/// for an admin, but not past the time devices keep their queue position.
+pub const MAX_REWIND_AGE_DAYS: i64 = 30;
+
+/// The bounds of a rewind now: [`MAX_REWIND_EPOCHS`] and [`MAX_REWIND_AGE_DAYS`].
+fn rewind_bounds() -> RewindBounds {
+  let now_ms = i64::try_from(
+    std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .unwrap_or_default()
+      .as_millis(),
+  )
+  .unwrap_or(i64::MAX);
+  let cutoff_ms = now_ms.saturating_sub(MAX_REWIND_AGE_DAYS.saturating_mul(24 * 60 * 60 * 1000));
+  RewindBounds {
+    max_epochs: MAX_REWIND_EPOCHS,
+    not_before: MlsMessageId::from_snowflake(Snowflake::cursor_before(cutoff_ms)),
+  }
 }
 
 /// A commit request checked against the conversation's members, with the IDs its entries get.

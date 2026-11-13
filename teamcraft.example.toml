@@ -198,6 +198,9 @@ one_to_one_call_ends_for_both = true
 # Direct messages deleted with a deleted account are remembered this many days for the other
 # participants, so a device offline that long still drops them with their local history.
 deleted_conversations_kept_days = 180
+# Strict channels' rewind of a group to an earlier epoch (e2ee.md §4.6.2). Off until the apps turn
+# strict channels on; the server can't tell a strict group from another.
+strict_channels = false
 
 [limits]
 max_ciphertext_bytes = 1048576

@@ -45,6 +45,17 @@ pub enum RewindOutcome {
   },
   /// The group isn't in that epoch yet.
   EpochConflict { current_epoch: u64 },
+  /// The epoch lies further back than the rewind may go ([`RewindBounds`]).
+  TooFarBack { current_epoch: u64 },
+}
+
+/// How far back a rewind may go: at most `max_epochs` behind the group's epoch, and not past a
+/// commit at or before `not_before` (the oldest commit it would drop is the one of the epoch it
+/// goes back to).
+#[derive(Debug, Clone, Copy)]
+pub struct RewindBounds {
+  pub max_epochs: u64,
+  pub not_before: MlsMessageId,
 }
 
 /// Result of posting a proposal or application message.
@@ -119,7 +130,7 @@ impl Database {
   /// with `audit`, in one transaction. Entries of `epoch` itself other than its commit (proposals,
   /// key messages, the welcomes into it) stay: they belong to the last good epoch. A group already
   /// in `epoch` takes the commit like [`Self::post_mls_commit`]; one behind it is an epoch
-  /// conflict.
+  /// conflict. An epoch past `bounds` changes nothing.
   #[allow(clippy::too_many_arguments)]
   pub async fn rewind_mls(
     &self,
@@ -129,6 +140,7 @@ impl Database {
     commit: &NewMlsMessage<'_>,
     welcomes: &[NewMlsMessage<'_>],
     maybe_group_info: Option<&[u8]>,
+    bounds: RewindBounds,
     audit: &crate::NewAuditEntry<'_>,
   ) -> Result<RewindOutcome, DbError> {
     let epoch_db = epoch_to_db(epoch)?;
@@ -140,10 +152,26 @@ impl Database {
     )
     .fetch_one(&mut *tx)
     .await?;
+    let current_epoch = u64::try_from(current).unwrap_or(u64::MAX);
     if current < epoch_db {
-      return Ok(RewindOutcome::EpochConflict {
-        current_epoch: u64::try_from(current).unwrap_or(u64::MAX),
-      });
+      return Ok(RewindOutcome::EpochConflict { current_epoch });
+    }
+    if current_epoch.saturating_sub(epoch) > bounds.max_epochs {
+      return Ok(RewindOutcome::TooFarBack { current_epoch });
+    }
+    let is_too_old = sqlx::query_scalar!(
+      r#"SELECT EXISTS (
+           SELECT 1 FROM mls_messages
+           WHERE conversation_id = $1 AND epoch = $2 AND kind = 'commit' AND id <= $3
+         ) AS "is_too_old!""#,
+      to_db(conversation),
+      epoch_db,
+      to_db(bounds.not_before),
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if is_too_old {
+      return Ok(RewindOutcome::TooFarBack { current_epoch });
     }
     let dropped = sqlx::query!(
       r#"DELETE FROM mls_messages
@@ -180,7 +208,7 @@ impl Database {
     tx.commit().await?;
     Ok(RewindOutcome::Accepted {
       new_epoch: u64::try_from(new_epoch).unwrap_or(u64::MAX),
-      dropped_from_epoch: u64::try_from(current).unwrap_or(u64::MAX),
+      dropped_from_epoch: current_epoch,
       dropped_entries: dropped,
     })
   }

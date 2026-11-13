@@ -3377,7 +3377,13 @@ independent crypto review of these points is still asked for before any app swit
   from that epoch on and every entry of later epochs (the epoch's own proposals, key messages and the
   welcomes into it stay), drops newer group information, sets the epoch back, appends the commit and
   writes the audit row `mls_group_rewound`. An epoch the group hasn't reached is an epoch conflict; the
-  current one is an ordinary commit. No migration: the audit log is the generic one.
+  current one is an ordinary commit. No migration: the audit log is the generic one. The server can't
+  tell a strict group from another, so the rewind is bounded: it is refused before anything is read
+  unless `[policy] strict_channels` is on (off by default, until the apps turn strict channels on), and
+  it goes back at most `MAX_REWIND_EPOCHS` (8) epochs and not past a commit older than
+  `MAX_REWIND_AGE_DAYS` (30 days). A refused commit stops every honest device at once, so the last good
+  epoch is a few behind at most; further back would take back real changes for devices that are
+  offline and drop their queue entries.
 - **Roles**: `set_strict_roles` signs the change (a channel admin of the context with a leaf, otherwise
   a workspace signer at the newest roster's version, D3), mirrors the role log head, and commits it
   after reading the roster. Only for a private channel (`NotStrictCapable` for DMs, meeting chats, the

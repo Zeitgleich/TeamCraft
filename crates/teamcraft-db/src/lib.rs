@@ -127,7 +127,9 @@ pub use meeting::{
 };
 pub use meeting_notice::{MeetingNoticeDismissal, MeetingNoticeKind, MeetingNoticeRecipient};
 pub use message::{HistoryQuery, NewMessage, StoreOutcome, StoredMessage};
-pub use mls::{CommitOutcome, MlsBacklogQuery, NewMlsMessage, PostOutcome, RewindOutcome, StoredMlsMessage};
+pub use mls::{
+  CommitOutcome, MlsBacklogQuery, NewMlsMessage, PostOutcome, RewindBounds, RewindOutcome, StoredMlsMessage,
+};
 pub use notification::{DeliveryRow, ReceiptRow, StoredSpaceNotifications, StoredUserSettings};
 pub use oidc_sync::{
   BrakeConfirmation, HeldDeactivation, NewHeldDeactivation, OidcSyncRun, OidcSyncStatusRow,
