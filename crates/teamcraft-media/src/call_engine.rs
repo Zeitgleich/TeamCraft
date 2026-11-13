@@ -63,6 +63,9 @@ use crate::voice_guard::{VoiceGuard, VoiceGuardConfig};
 const MAX_RETIRED_CALL_KEYS: usize = 4096;
 /// RTP timestamp increment per 20 ms Opus frame at 48 kHz.
 const OPUS_FRAME_TICKS: u32 = 960;
+/// How long after a probe's padding the own voice isn't judged by the voice guard: a cluster's
+/// trains come a timer tick (~100 ms) apart, and their queue drains within a few hundred ms.
+const PADDING_SHADOW: Duration = Duration::from_millis(400);
 /// Largest datagram the engine produces; audio frames are far below it.
 const MAX_DATAGRAM_BYTES: usize = 1200;
 /// Keyframe requests per received track go out at most this often: the SFU's default limit per
@@ -197,6 +200,8 @@ pub struct CallEngine {
   uplink_voice: VoiceGuard,
   /// Whether the UI was told the own video is held for the voice ([`CallEngineEvent::VideoHeldForVoice`]).
   is_video_held_for_voice: bool,
+  /// When the uplink rate probe last sent padding: voice sent along with it isn't judged.
+  maybe_padding_sent_at: Option<Instant>,
   downlink_feedback: FeedbackRecorder,
   /// Base for the SFU's arrival times in uplink feedback (only differences matter).
   uplink_feedback_epoch: Instant,
@@ -663,6 +668,7 @@ impl CallEngine {
       uplink,
       uplink_voice: VoiceGuard::new(VoiceGuardConfig::default()),
       is_video_held_for_voice: false,
+      maybe_padding_sent_at: None,
       downlink_feedback: FeedbackRecorder::new(now),
       uplink_feedback_epoch: now,
       maybe_probe_bytes: None,
@@ -2127,6 +2133,12 @@ impl CallEngine {
     if self.maybe_probe_bytes.is_none() || is_join_probe_running || !self.is_in_call() {
       return;
     }
+    // While the own voice is being lost (#1871), padding would only take more of the link the
+    // voice is short of: the layers it holds back for the voice don't come back that way. A
+    // camera on a limited link otherwise stayed held for as long as the probes lost the voice.
+    if self.uplink_voice.is_hurt(now) {
+      return;
+    }
     let is_sending_screen_audio = self.screen_audio != ScreenAudioState::Off;
     let tracks = own_track_views(&self.own_tracks, &self.adaptive_tracks);
     let maybe_wanted_bps = self
@@ -2139,6 +2151,9 @@ impl CallEngine {
       maybe_wanted_bps,
       now,
     );
+    if !datagrams.is_empty() {
+      self.maybe_padding_sent_at = Some(now);
+    }
     self
       .outputs
       .extend(datagrams.into_iter().map(EngineOutput::Datagram));
@@ -3264,7 +3279,15 @@ impl CallEngine {
       return;
     };
     let seq = self.send_media(stream, SimulcastLayer::BASE, &rtp, now);
-    self.uplink_voice.on_send(seq, now);
+    // Voice that goes out along with a probe's padding is lost or held up by the padding when the
+    // link doesn't carry the probed rate: the probe's own outcome lowers the estimate then, and
+    // holding the video for it as well kept a camera on a limited link from ever settling.
+    let is_along_padding = self
+      .maybe_padding_sent_at
+      .is_some_and(|sent_at| now.saturating_duration_since(sent_at) < PADDING_SHADOW);
+    if !is_along_padding {
+      self.uplink_voice.on_send(seq, now);
+    }
   }
 
   /// Another device's screen share replaced ours on `takeover.stream_id`: the track and its sound
