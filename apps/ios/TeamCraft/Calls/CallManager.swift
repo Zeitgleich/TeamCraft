@@ -72,6 +72,8 @@ struct RemoteVideoStream: Identifiable {
   let id: String
   let deviceId: String
   let isScreen: Bool
+  /// In a codec the phone decodes; otherwise not watched, and the tile says why (#1838).
+  let isPlayable: Bool
   let renderer: RemoteVideoRenderer
 }
 
@@ -820,13 +822,14 @@ extension CallManager: EncodedVideoListener {
     let renderer = renderers.renderer(for: track.streamId, creating: true)
     DispatchQueue.main.async {
       guard let renderer, self.maybeSession != nil else { return }
+      let stream = RemoteVideoStream(track: track, renderer: renderer)
       if !self.remoteVideo.contains(where: { $0.id == track.streamId }) {
-        self.remoteVideo.append(
-          RemoteVideoStream(
-            id: track.streamId, deviceId: track.deviceId, isScreen: track.isScreen,
-            renderer: renderer))
+        self.remoteVideo.append(stream)
       }
-      self.maybeSession?.watchEncodedVideo(streamId: track.streamId)
+      // A codec the phone doesn't decode (#1838): the SFU refuses it, the tile says why instead.
+      if stream.isPlayable {
+        self.maybeSession?.watchEncodedVideo(streamId: track.streamId)
+      }
     }
   }
 
