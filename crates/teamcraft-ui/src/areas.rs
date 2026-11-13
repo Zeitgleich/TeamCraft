@@ -323,6 +323,10 @@ pub fn admin_task(
 #[cfg(target_arch = "wasm32")]
 pub(crate) type EngineRun<'a> = Pin<Box<dyn Future<Output = Result<(), teamcraft_core::CoreError>> + 'a>>;
 
+/// The member-only rounds of the upkeep on their way: whether the store may have changed.
+#[cfg(target_arch = "wasm32")]
+pub(crate) type MemberRoundsRun<'a> = Pin<Box<dyn Future<Output = bool> + 'a>>;
+
 /// A step of the data export on its way.
 #[cfg(target_arch = "wasm32")]
 pub(crate) type ExportRun<'a> = Pin<
@@ -366,6 +370,17 @@ pub(crate) fn settings_action(
   action: teamcraft_client_api::remote::ChatAction,
 ) -> Result<EngineRun<'_>, SplitLoaderError> {
   Ok(Box::pin(crate::web_core::settings_action(client, action)))
+}
+
+/// The member-only rounds of the core's upkeep (`Upkeep::run_member_rounds`: signing roles, the
+/// roster and channels' role logs, removing leavers), with the signed-in app: a meeting guest's page
+/// never runs them, so it doesn't download them either (docs/performance.md, "Web bundle size").
+#[cfg(target_arch = "wasm32")]
+#[wasm_split(session, wasm_split_path = ::leptos::wasm_split, fallible)]
+pub(crate) fn member_rounds(
+  turn: crate::web_core::MemberRoundsTurn<'_>,
+) -> Result<MemberRoundsRun<'_>, SplitLoaderError> {
+  Ok(Box::pin(turn.upkeep.run_member_rounds(turn.client)))
 }
 
 /// One step of "Export my data" (`web_export.rs`), with the security settings that show its card.

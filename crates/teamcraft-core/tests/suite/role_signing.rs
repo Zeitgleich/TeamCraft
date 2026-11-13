@@ -121,6 +121,43 @@ mod first_roster {
   }
 }
 
+/// The rounds run from the upkeep: in its tick on the native shells, after it from the web client's
+/// signed-in module (`Upkeep::tick_shared` + `run_member_rounds`).
+mod upkeep {
+  use super::*;
+  use std::time::Duration;
+  use teamcraft_core::upkeep::Upkeep;
+
+  #[tokio::test]
+  async fn the_tick_signs_the_owners_role() {
+    let world = World::new();
+    let mut alice = world.peer("Alice").await;
+    world.give_token(&alice, &["owner"], T0);
+
+    assert!(Upkeep::new(Duration::ZERO).tick(&mut alice.client).await);
+
+    assert_eq!(role_of(&alice, alice.client.user_id()), Some(RosterRole::Owner));
+  }
+
+  #[tokio::test]
+  async fn the_shared_tick_leaves_the_signing_to_the_member_rounds() {
+    let world = World::new();
+    let mut alice = world.peer("Alice").await;
+    world.give_token(&alice, &["owner"], T0);
+    let mut upkeep = Upkeep::new(Duration::ZERO);
+
+    upkeep.tick_shared(&mut alice.client).await;
+    assert_eq!(
+      role_of(&alice, alice.client.user_id()),
+      None,
+      "not signed in the shared tick"
+    );
+
+    assert!(upkeep.run_member_rounds(&mut alice.client).await);
+    assert_eq!(role_of(&alice, alice.client.user_id()), Some(RosterRole::Owner));
+  }
+}
+
 mod additions {
   use super::*;
 

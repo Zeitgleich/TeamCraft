@@ -5,6 +5,12 @@
 //! Every shell's loop (the mobile runner, the web client, the desktop app) calls the same
 //! [`Upkeep::tick`], so none of them silently skips a duty (docs/robustness-audit.md).
 //!
+//! The rounds only a workspace member's device has work in (signing roles and the roster, founding
+//! channels' role logs, removing leavers) can be handed to the host: [`Upkeep::tick_shared`] leaves
+//! them out and [`Upkeep::run_member_rounds`] runs them. The web client does that, so their code
+//! loads with the signed-in app and a meeting guest's page never downloads it (docs/performance.md,
+//! "Web bundle size"). Every other shell calls [`Upkeep::tick`], which runs them in place.
+//!
 //! Nothing here asks the server on a timer while all is well (issue #252): account data is read
 //! once after each gateway connection (events in between may be lost) and whenever this device
 //! changed it; `key_bag_update` events bring other devices' changes in between. The timer only
@@ -45,6 +51,9 @@ pub struct Upkeep {
   has_reported_refusal: bool,
   /// When the roster and workspace head were last checked.
   last_local_check_ms: i64,
+  /// [`Self::tick_shared`] came to the workspace's signing (roster, channels' role logs) and left it
+  /// to [`Self::run_member_rounds`], which runs it once and clears this.
+  is_workspace_signing_due: bool,
   /// When scheduled messages were last looked at, to notice this device's clock jumping back.
   #[cfg(feature = "ui")]
   last_scheduled_check_ms: i64,
@@ -86,6 +95,7 @@ impl Upkeep {
       has_failed: false,
       has_reported_refusal: false,
       last_local_check_ms: i64::MIN,
+      is_workspace_signing_due: false,
       #[cfg(feature = "ui")]
       last_scheduled_check_ms: i64::MIN,
       #[cfg(feature = "ui")]
@@ -108,19 +118,55 @@ impl Upkeep {
     self
   }
 
-  /// Runs what is due. Returns whether the store may have changed (the UI re-reads it then).
-  /// Failures are logged and retried on a later tick: offline, every step fails fast.
+  /// Runs what is due, the member-only rounds included. Returns whether the store may have changed
+  /// (the UI re-reads it then). Failures are logged and retried on a later tick: offline, every step
+  /// fails fast.
   pub async fn tick<A: ServerApi, S: LocalStore>(&mut self, client: &mut Client<A, S>) -> bool {
+    self.tick_with::<A, S, true>(client).await
+  }
+
+  /// [`Self::tick`] without the member-only rounds, for a host that runs them itself with
+  /// [`Self::run_member_rounds`] after every tick (the web client, from the signed-in app's module).
+  /// A separate monomorphization: its code doesn't reference theirs.
+  pub async fn tick_shared<A: ServerApi, S: LocalStore>(&mut self, client: &mut Client<A, S>) -> bool {
+    self.tick_with::<A, S, false>(client).await
+  }
+
+  /// The rounds [`Self::tick_shared`] left out, on the same schedule as in [`Self::tick`]: the
+  /// workspace's signing whenever the tick checked the workspace, roles and leavers on every call
+  /// (each paced by its own state). Nothing on a meeting guest's device, which signs nothing
+  /// (e2ee.md §4.6). Returns whether the store may have changed.
+  pub async fn run_member_rounds<A: ServerApi, S: LocalStore>(&mut self, client: &mut Client<A, S>) -> bool {
+    if !runs_member_rounds(client) {
+      self.is_workspace_signing_due = false;
+      return false;
+    }
+    if std::mem::take(&mut self.is_workspace_signing_due) {
+      sign_workspace(client).await;
+    }
+    sign_and_remove(client).await
+  }
+
+  /// Whether the workspace's signing waits for [`Self::run_member_rounds`].
+  pub fn is_workspace_signing_due(&self) -> bool {
+    self.is_workspace_signing_due
+  }
+
+  /// The body of [`Self::tick`] (`MEMBER_ROUNDS`) and [`Self::tick_shared`].
+  async fn tick_with<A: ServerApi, S: LocalStore, const MEMBER_ROUNDS: bool>(
+    &mut self,
+    client: &mut Client<A, S>,
+  ) -> bool {
     let _step = crate::timing::step("upkeep_tick");
     let now = client.now_ms();
     let interval_ms = i64::try_from(self.interval.as_millis()).unwrap_or(i64::MAX);
     let mut is_changed = false;
     if self.is_account_sync_due(client, now, interval_ms) {
-      is_changed |= self.sync_account(client, now).await;
+      is_changed |= self.sync_account::<A, S, MEMBER_ROUNDS>(client, now).await;
     }
     if now.saturating_sub(self.last_local_check_ms) >= interval_ms {
       self.last_local_check_ms = now;
-      check_workspace(client).await;
+      self.check_workspace::<A, S, MEMBER_ROUNDS>(client).await;
       // Conversations a sync had to skip (a 403 right after a removal, a group in a bad state);
       // a local read that asks the server only for conversations that are marked.
       match client.resync_marked_conversations().await {
@@ -144,17 +190,8 @@ impl Upkeep {
         tracing::debug!(%error, "abandoned device registrations not revoked yet");
       }
     }
-    // Roles follow the identity provider (e2ee.md §3.1.3); a local comparison while nothing changed.
-    // Boxed: the round is deep, and this future would sit in every caller's stack.
-    match Box::pin(client.run_role_signing()).await {
-      Ok(changed) => is_changed |= changed,
-      // Paced by its own backoff, so this says it now and then at most: a person's rights may wait on it.
-      Err(error) => tracing::warn!(%error, "roles not signed yet"),
-    }
-    // Leavers leave the groups (docs/provisioning.md §3); nothing while none is listed or due.
-    match Box::pin(client.run_leaver_removal()).await {
-      Ok(round) => is_changed |= round.removed > 0,
-      Err(error) => tracing::warn!(%error, "leavers not removed from the groups yet"),
+    if MEMBER_ROUNDS {
+      is_changed |= sign_and_remove(client).await;
     }
     // Key packages expire; a device that runs for weeks renews them in time (e2ee.md §4.3).
     if let Err(error) = client.renew_key_packages_if_due().await {
@@ -289,7 +326,11 @@ impl Upkeep {
     is_wanted && (!self.has_failed || now.saturating_sub(self.last_attempt_ms) >= interval_ms)
   }
 
-  async fn sync_account<A: ServerApi, S: LocalStore>(&mut self, client: &mut Client<A, S>, now: i64) -> bool {
+  async fn sync_account<A: ServerApi, S: LocalStore, const MEMBER_ROUNDS: bool>(
+    &mut self,
+    client: &mut Client<A, S>,
+    now: i64,
+  ) -> bool {
     self.last_attempt_ms = now;
     let maybe_connection = client.gateway_connections();
     self.has_failed = true;
@@ -319,29 +360,80 @@ impl Upkeep {
     if let Err(error) = client.rewrap_for_current_org_key().await {
       tracing::debug!(%error, "backup key not wrapped to the new org key yet");
     }
-    check_workspace(client).await;
+    self.check_workspace::<A, S, MEMBER_ROUNDS>(client).await;
     true
+  }
+
+  /// Owners keep the signed roster fresh (a no-op for everyone else and while it is), a roster
+  /// newer than the one verified is fetched, and channel admins found the role logs of channels from
+  /// before signed roles. All only ask the server when the local state says so. Without
+  /// `MEMBER_ROUNDS` the signing waits for [`Self::run_member_rounds`].
+  async fn check_workspace<A: ServerApi, S: LocalStore, const MEMBER_ROUNDS: bool>(
+    &mut self,
+    client: &mut Client<A, S>,
+  ) {
+    if MEMBER_ROUNDS {
+      refresh_roster(client).await;
+    } else {
+      self.is_workspace_signing_due = true;
+    }
+    if let Err(error) = client.check_workspace_head().await {
+      tracing::debug!(%error, "workspace head not checked yet");
+    }
+    if let Err(error) = client.check_channel_roles_heads().await {
+      tracing::debug!(%error, "channel role heads not checked yet");
+    }
+    if let Err(error) = client.read_due_channel_roles().await {
+      tracing::debug!(%error, "channel role logs due after a removal not read yet");
+    }
+    if MEMBER_ROUNDS {
+      found_channels(client).await;
+    }
   }
 }
 
-/// Owners keep the signed roster fresh (a no-op for everyone else and while it is), and a roster
-/// newer than the one verified is fetched. Both only ask the server when the local state says so.
-async fn check_workspace<A: ServerApi, S: LocalStore>(client: &mut Client<A, S>) {
+/// Whether a device has the member-only rounds to run: every device but a meeting guest's.
+pub fn runs_member_rounds<A: ServerApi, S: LocalStore>(client: &Client<A, S>) -> bool {
+  // An unreadable store counts as a member's: the rounds then fail and retry like any other step.
+  !client.is_guest_device().unwrap_or(false)
+}
+
+/// The workspace's part of the member-only rounds, where [`Upkeep::check_workspace`] leaves it.
+async fn sign_workspace<A: ServerApi, S: LocalStore>(client: &mut Client<A, S>) {
+  refresh_roster(client).await;
+  found_channels(client).await;
+}
+
+/// Owners sign the roster again before it expires (security review A6).
+async fn refresh_roster<A: ServerApi, S: LocalStore>(client: &mut Client<A, S>) {
   if let Err(error) = client.refresh_workspace_signatures().await {
     tracing::debug!(%error, "roster not re-signed yet");
   }
-  if let Err(error) = client.check_workspace_head().await {
-    tracing::debug!(%error, "workspace head not checked yet");
-  }
-  if let Err(error) = client.check_channel_roles_heads().await {
-    tracing::debug!(%error, "channel role heads not checked yet");
-  }
-  if let Err(error) = client.read_due_channel_roles().await {
-    tracing::debug!(%error, "channel role logs due after a removal not read yet");
-  }
+}
+
+/// Channel admins found the role logs of channels from before signed roles (e2ee.md §4.6.1).
+async fn found_channels<A: ServerApi, S: LocalStore>(client: &mut Client<A, S>) {
   if let Err(error) = client.found_listed_channels().await {
     tracing::debug!(%error, "channels without a role log not founded yet");
   }
+}
+
+/// The member-only rounds of every tick: roles and leavers. Returns whether the store changed.
+async fn sign_and_remove<A: ServerApi, S: LocalStore>(client: &mut Client<A, S>) -> bool {
+  let mut is_changed = false;
+  // Roles follow the identity provider (e2ee.md §3.1.3); a local comparison while nothing changed.
+  // Boxed: the round is deep, and this future would sit in every caller's stack.
+  match Box::pin(client.run_role_signing()).await {
+    Ok(changed) => is_changed |= changed,
+    // Paced by its own backoff, so this says it now and then at most: a person's rights may wait on it.
+    Err(error) => tracing::warn!(%error, "roles not signed yet"),
+  }
+  // Leavers leave the groups (docs/provisioning.md §3); nothing while none is listed or due.
+  match Box::pin(client.run_leaver_removal()).await {
+    Ok(round) => is_changed |= round.removed > 0,
+    Err(error) => tracing::warn!(%error, "leavers not removed from the groups yet"),
+  }
+  is_changed
 }
 
 /// Sends what is waiting: problem reports into their outbox, file uploads, then link previews,

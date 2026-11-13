@@ -1772,13 +1772,7 @@ impl Core {
     let name = format!("teamcraft-{}", self.user);
     announce_database(&name);
     // A guest's device lives as long as the meeting: no browser prompt for it (Firefox asks).
-    let is_member_page = SETUP.with(|setup| {
-      setup
-        .borrow()
-        .as_ref()
-        .is_some_and(|setup| setup.page == PageKind::Member)
-    });
-    if is_member_page {
+    if is_member_page() {
       request_persistent_storage();
     }
     let store = match &self.store {
@@ -3301,7 +3295,16 @@ impl Core {
       return;
     }
     // The upkeep may resync many conversations; heartbeats go on meanwhile.
-    if self.connection.keep_alive(now, self.upkeep.tick(client)).await {
+    let upkeep = &mut self.upkeep;
+    let is_member = is_member_page();
+    let work = async move {
+      let is_changed = upkeep.tick_shared(client).await;
+      if !is_member {
+        return is_changed;
+      }
+      is_changed | run_member_rounds(upkeep, client).await
+    };
+    if self.connection.keep_alive(now, work).await {
       notify_changed();
     }
   }
@@ -3664,6 +3667,37 @@ impl EnginePart {
       | ChatAction::AdminRemoveGroupLeftover { .. } => Some(Self::Admin),
       _ => None,
     }
+  }
+}
+
+/// Whether a member's page runs the core, not a meeting guest's.
+fn is_member_page() -> bool {
+  SETUP.with(|setup| {
+    setup
+      .borrow()
+      .as_ref()
+      .is_some_and(|setup| setup.page == PageKind::Member)
+  })
+}
+
+/// What the member-only rounds of the upkeep run on (`areas::member_rounds`).
+pub(crate) struct MemberRoundsTurn<'a> {
+  pub(crate) upkeep: &'a mut Upkeep,
+  pub(crate) client: &'a mut WebClient,
+}
+
+/// The upkeep's member-only rounds, after every tick of a member's page: their code is in the
+/// signed-in app's module (`session`), which that page loads anyway; a guest's page never calls
+/// this. While the module can't load (offline before it was cached, a deploy in between) they wait:
+/// the workspace's signing stays due and runs once it does, roles and leavers keep their own state.
+async fn run_member_rounds(upkeep: &mut Upkeep, client: &mut WebClient) -> bool {
+  match crate::areas::member_rounds(MemberRoundsTurn { upkeep, client }).await {
+    Ok(running) => running.await,
+    Err(error) => {
+      // The signed-in app is in the same module, so the user sees it didn't load.
+      tracing::debug!(%error, "the signed-in app's module did not load: member rounds wait");
+      false
+    },
   }
 }
 
