@@ -1347,6 +1347,13 @@ pub fn Composer(
       }
       upload_error.set(None);
       leptos::task::spawn_local(async move {
+        // A HEIC photo goes as JPEG where the webview decodes it (#1588), unless the JPEG is over
+        // the limit; otherwise as it is.
+        let file = match raster::heif_as_jpeg(&file).await {
+          Some(jpeg) if limit.is_none_or(|limit| jpeg.size() as u64 <= limit) => jpeg,
+          _ => file,
+        };
+        let size = file.size() as u64;
         let media_type = media_type_for(&file.name(), &file.type_());
         // SVG, AVIF, HEIC: the browser draws the thumbnail the core in the page can't make.
         // Other pictures get one too: the message shows it while the picture goes up (the

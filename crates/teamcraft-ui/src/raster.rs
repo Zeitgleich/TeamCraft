@@ -18,7 +18,9 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
-use crate::media_formats::{displayable_type, is_svg};
+use crate::media_formats::{
+  MAX_HEIF_CONVERT_BYTES, displayable_type, is_heif, is_svg, jpeg_name, media_type_for,
+};
 
 /// Largest SVG the browser is asked to draw; a bigger one shows as a file.
 pub const MAX_SVG_BYTES: u32 = 4 * 1024 * 1024;
@@ -28,6 +30,11 @@ pub const SVG_DISPLAY_SIDE: u32 = 2048;
 const DECODE_TIMEOUT: Duration = Duration::from_secs(10);
 /// JPEG quality of renditions of photos.
 const JPEG_QUALITY: f64 = 0.85;
+/// JPEG quality of a HEIC photo sent as JPEG (#1588): the picture itself, not a rendition.
+const CONVERTED_JPEG_QUALITY: f64 = 0.9;
+/// Longest side of a HEIC photo sent as JPEG; larger ones are scaled down to it (a 48-megapixel
+/// iPhone photo is 8064 pixels wide). The canvas also has to stay within the browser's limits.
+const CONVERTED_MAX_SIDE: u32 = 12_288;
 /// The letters of a generated tile: white (`--on-fill`), bold, in the app's font (`--font-ui`).
 const TILE_TEXT_COLOR: &str = "#ffffff";
 const TILE_FONT: &str =
@@ -89,6 +96,35 @@ pub async fn app_thumbnail(bytes: &[u8], media_type: &str, max_side: u32) -> Opt
   let blob = rasterize(&js_sys::Uint8Array::from(bytes), media_type, max_side, encoding).await?;
   let buffer = JsFuture::from(blob.array_buffer()).await.ok()?;
   Some(js_sys::Uint8Array::new(&buffer).to_vec())
+}
+
+/// A picked HEIC or HEIF photo as a JPEG file, decoded by the webview (#1588): Safari and the macOS
+/// app's WebKit decode HEIC, the client core can't. The `<img>` turns the picture upright by its
+/// EXIF orientation, and the canvas keeps none of its metadata, so the GPS position is gone too.
+/// `None` for any other file, one too large, or where the webview can't decode it (Linux, Windows,
+/// Chrome): the file then goes as it is. The picked file itself stays untouched.
+pub async fn heif_as_jpeg(file: &web_sys::File) -> Option<web_sys::File> {
+  let is_heif_file = is_heif(&media_type_for(&file.name(), &file.type_()));
+  if !is_heif_file || file.size() as u64 > MAX_HEIF_CONVERT_BYTES {
+    return None;
+  }
+  // The webview reads the file through the URL; it never passes through this module's memory.
+  let source = web_sys::Url::create_object_url_with_blob(file).ok()?;
+  let image = web_sys::HtmlImageElement::new().ok()?;
+  image.set_src(&source);
+  let is_decoded = decode_within(&image, DECODE_TIMEOUT).await;
+  let canvas = is_decoded
+    .then(|| draw(&image, CONVERTED_MAX_SIDE, false))
+    .flatten();
+  drop(web_sys::Url::revoke_object_url(&source));
+  image.set_src("");
+  let encoded = to_blob_with_quality(&canvas?, Encoding::Jpeg, CONVERTED_JPEG_QUALITY)?;
+  let blob: web_sys::Blob = JsFuture::from(encoded).await.ok()?.dyn_into().ok()?;
+  let options = web_sys::FilePropertyBag::new();
+  options.set_type("image/jpeg");
+  options.set_last_modified(file.last_modified());
+  let parts = js_sys::Array::of1(&blob);
+  web_sys::File::new_with_blob_sequence_and_options(&parts, &jpeg_name(&file.name()), &options).ok()
 }
 
 /// A picture cut to `frame` and turned `quarter_turns_left` quarters to the left (issue #1354), its
@@ -501,6 +537,15 @@ pub fn target_size(width: u32, height: u32, max_side: u32, is_vector: bool) -> O
 }
 
 fn to_blob(canvas: &web_sys::HtmlCanvasElement, encoding: Encoding) -> Option<js_sys::Promise> {
+  to_blob_with_quality(canvas, encoding, JPEG_QUALITY)
+}
+
+/// [`to_blob`] with the JPEG quality given (PNG ignores it).
+fn to_blob_with_quality(
+  canvas: &web_sys::HtmlCanvasElement,
+  encoding: Encoding,
+  jpeg_quality: f64,
+) -> Option<js_sys::Promise> {
   let canvas = canvas.clone();
   Some(js_sys::Promise::new(&mut |resolve, reject| {
     let on_reject = reject.clone();
@@ -517,7 +562,7 @@ fn to_blob(canvas: &web_sys::HtmlCanvasElement, encoding: Encoding) -> Option<js
       Encoding::Jpeg => canvas.to_blob_with_type_and_encoder_options(
         done.unchecked_ref(),
         "image/jpeg",
-        &JsValue::from_f64(JPEG_QUALITY),
+        &JsValue::from_f64(jpeg_quality),
       ),
     };
     if started.is_err() {
