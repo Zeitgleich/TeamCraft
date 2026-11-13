@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Scheduling, changing, cancelling and starting meetings (#1841), as desktop and web say it. -->
+<resources>
+  <string name="meetings_meet_now">Meet now</string>
+  <string name="meetings_schedule">Schedule</string>
+  <string name="meeting_actions">Meeting actions</string>
+  <string name="meeting_edit">Edit meeting</string>
+  <string name="meeting_cancel">Cancel meeting</string>
+  <string name="meeting_form_title_new">Schedule a meeting</string>
+  <string name="meeting_form_title_edit">Edit meeting</string>
+  <string name="meeting_form_name">Title</string>
+  <string name="meeting_form_description">Description (optional)</string>
+  <string name="meeting_form_start">Starts</string>
+  <string name="meeting_form_duration">Length</string>
+  <string name="meeting_form_minutes">%1$d min</string>
+  <string name="meeting_form_lobby">Guests wait in a lobby until a host lets them in</string>
+  <string name="meeting_form_invite">Invite people</string>
+  <string name="meeting_form_series_hint">This meeting repeats: the change applies to the whole series.</string>
+  <string name="meeting_form_submit">Schedule</string>
+  <string name="meeting_form_save">Save</string>
+  <string name="meeting_error_title">Give the meeting a title.</string>
+  <string name="meeting_error_past">The start is in the past.</string>
+  <string name="meeting_error_duration">Pick a length between a minute and a day.</string>
+  <string name="meeting_cancel_title">Cancel this meeting?</string>
+  <string name="meeting_cancel_title_series">Which meetings do you want to cancel?</string>
+  <string name="meeting_cancel_hint">Everyone invited is told.</string>
+  <string name="meeting_cancel_occurrence">Only this meeting</string>
+  <string name="meeting_cancel_following">This and all following meetings</string>
+  <string name="meeting_cancel_series">All meetings of the series</string>
+  <string name="meeting_cancel_keep">Keep</string>
+  <string name="meeting_cancel_confirm">Cancel meeting</string>
+</resources>

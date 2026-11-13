@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Scheduling, changing, cancelling and starting meetings (#1841), as desktop and web say it. -->
+<resources>
+  <string name="meetings_meet_now">Sofort-Meeting</string>
+  <string name="meetings_schedule">Planen</string>
+  <string name="meeting_actions">Aktionen für das Meeting</string>
+  <string name="meeting_edit">Meeting bearbeiten</string>
+  <string name="meeting_cancel">Meeting absagen</string>
+  <string name="meeting_form_title_new">Meeting planen</string>
+  <string name="meeting_form_title_edit">Meeting bearbeiten</string>
+  <string name="meeting_form_name">Titel</string>
+  <string name="meeting_form_description">Beschreibung (optional)</string>
+  <string name="meeting_form_start">Beginn</string>
+  <string name="meeting_form_duration">Dauer</string>
+  <string name="meeting_form_minutes">%1$d Min.</string>
+  <string name="meeting_form_lobby">Gäste warten in einer Lobby, bis ein Gastgeber sie einlässt</string>
+  <string name="meeting_form_invite">Personen einladen</string>
+  <string name="meeting_form_series_hint">Dieses Meeting wiederholt sich: Die Änderung gilt für die ganze Serie.</string>
+  <string name="meeting_form_submit">Planen</string>
+  <string name="meeting_form_save">Speichern</string>
+  <string name="meeting_error_title">Gib dem Meeting einen Titel.</string>
+  <string name="meeting_error_past">Der Beginn liegt in der Vergangenheit.</string>
+  <string name="meeting_error_duration">Wähle eine Dauer zwischen einer Minute und einem Tag.</string>
+  <string name="meeting_cancel_title">Dieses Meeting absagen?</string>
+  <string name="meeting_cancel_title_series">Welche Meetings möchtest du absagen?</string>
+  <string name="meeting_cancel_hint">Alle Eingeladenen werden benachrichtigt.</string>
+  <string name="meeting_cancel_occurrence">Nur dieses Meeting</string>
+  <string name="meeting_cancel_following">Dieses und alle folgenden Meetings</string>
+  <string name="meeting_cancel_series">Alle Meetings der Serie</string>
+  <string name="meeting_cancel_keep">Behalten</string>
+  <string name="meeting_cancel_confirm">Meeting absagen</string>
+</resources>

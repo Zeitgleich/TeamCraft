@@ -27,6 +27,7 @@ mod markup;
 mod media_viewer;
 mod meeting_hosts;
 mod meeting_lobby;
+mod meetings;
 mod notetaker;
 #[cfg(any(target_os = "ios", test))]
 mod os_log;
@@ -89,6 +90,10 @@ pub use media_viewer::{
 pub use meeting_hosts::{MeetingHostAction, MeetingHosts, MeetingPart};
 pub use meeting_lobby::{
   LobbyDecision, LobbyDecisionOutcome, LobbyLeftWaiting, LobbyPerson, LobbyPersonStatus, MeetingLobby,
+};
+pub use meetings::{
+  MeetingCancelScope, MeetingEditForm, MeetingForm, MeetingFormProblem, MeetingSave, SavedMeeting,
+  meeting_form_problems, new_meeting_form,
 };
 pub use notetaker::{MovedCallHint, NotetakerAddition};
 pub use perf_jobs::{
@@ -1309,6 +1314,105 @@ impl TeamCraft {
             .await
         })
       })
+      .await
+  }
+
+  /// Schedules a meeting from the apps' form (#1841), listed in `maybe_space_id`: the server saves
+  /// it, then the core sets up its chat's encryption group with the members invited here (from
+  /// this request, never the server's member list), anchored with the meeting (#1747), notes the
+  /// lobby as chosen here and signs who may let guests in (#1103). `Refused` sends nothing. A
+  /// retry of the same form (same request key) after a lost answer schedules it once.
+  pub async fn schedule_meeting(
+    &self,
+    form: MeetingForm,
+    maybe_space_id: Option<String>,
+  ) -> Result<MeetingSave, TeamCraftError> {
+    self
+      .call(move |engine| {
+        Box::pin(async move { engine.schedule_meeting(&form, maybe_space_id.as_deref()).await })
+      })
+      .await
+  }
+
+  /// "Meet now" (#1841): a meeting that starts at once with nobody invited yet, its chat set up
+  /// with the organizer alone. `request_key` ([`new_request_key`], made once per tap and kept for
+  /// its retries) makes a retry return the same meeting. The app then joins its call.
+  pub async fn start_meeting_now(
+    &self,
+    maybe_title: Option<String>,
+    maybe_space_id: Option<String>,
+    request_key: String,
+  ) -> Result<SavedMeeting, TeamCraftError> {
+    self
+      .call(move |engine| {
+        Box::pin(async move {
+          engine
+            .start_meeting_now(maybe_title, maybe_space_id.as_deref(), &request_key)
+            .await
+        })
+      })
+      .await
+  }
+
+  /// The edit form of a meeting the user organizes, as the server has it now (#1841).
+  pub async fn meeting_edit_form(&self, meeting_id: String) -> Result<MeetingEditForm, TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.meeting_edit_form(&meeting_id).await }))
+      .await
+  }
+
+  /// Saves the organizer's edit of `meeting_id` (#1841): the invitees go as the whole list (the
+  /// meeting's e-mail invitees and repeat rule stay), and once the server took it the core adds
+  /// the members added here, removes those taken off with a key-rotating commit and signs the
+  /// admitters anew. If the answer is lost or the app dies in between, the removal is finished by
+  /// [`Self::meeting_upkeep`].
+  pub async fn save_meeting_edit(
+    &self,
+    meeting_id: String,
+    form: MeetingForm,
+  ) -> Result<MeetingSave, TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.save_meeting_edit(&meeting_id, &form).await }))
+      .await
+  }
+
+  /// Cancels a meeting the user organizes (#1841): the whole meeting, or of a repeating one the
+  /// occurrence starting at `occurrence_starts_at_ms` (with `Following`, it and every later one).
+  pub async fn cancel_meeting(
+    &self,
+    meeting_id: String,
+    scope: MeetingCancelScope,
+    occurrence_starts_at_ms: i64,
+  ) -> Result<(), TeamCraftError> {
+    self
+      .call(move |engine| {
+        Box::pin(async move {
+          engine
+            .cancel_meeting(&meeting_id, scope, occurrence_starts_at_ms)
+            .await
+        })
+      })
+      .await
+  }
+
+  /// Before joining the call of `meeting_id` from the meeting list (#1841): on the organizer's
+  /// device the core founds the chat's group where a meeting from before 1.0.3 has none, adding
+  /// only the attendees the organizer's signed list names (#1726). Nothing for anybody else's
+  /// meeting or where the group is there. The app joins the call afterwards whatever this says.
+  pub async fn prepare_meeting_join(&self, meeting_id: String) -> Result<(), TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.prepare_meeting_join(&meeting_id).await }))
+      .await
+  }
+
+  /// The user's meetings (`GET /meetings` from an hour ago, JSON as the server sends it), with the
+  /// organizer's upkeep desktop runs on every list (#1841): the signed admitters of meetings that
+  /// run or start within a day are kept current, and edits whose chat change is still owed are
+  /// finished. The apps read their meeting list through this, and call it when they come to the
+  /// foreground.
+  pub async fn meeting_upkeep(&self) -> Result<String, TeamCraftError> {
+    self
+      .call(|engine| Box::pin(async move { engine.meeting_upkeep().await }))
       .await
   }
 

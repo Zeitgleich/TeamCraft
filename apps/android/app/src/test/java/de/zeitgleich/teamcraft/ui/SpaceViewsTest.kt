@@ -6,7 +6,9 @@ import de.zeitgleich.teamcraft.core.MeetingList
 import de.zeitgleich.teamcraft.core.WireJson
 import de.zeitgleich.teamcraft.ui.screens.meetingsOfSpace
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SpaceViewsTest {
@@ -31,11 +33,25 @@ class SpaceViewsTest {
     ).meetings
     assertEquals("9", meetings[0].maybeSpaceId)
     assertNull(meetings[1].maybeSpaceId)
+    assertEquals("", meetings[0].organizerUserId)
+    assertFalse(meetings[0].isRepeating)
     val calls = WireJson.decodeFromString(
       ChatAnswer.serializer(),
       """{"answer":"call_history","calls":[{"id":"7","conversation":"3","direction":"missed","started_at":5,"participants":[]}]}""",
     ).calls
     assertEquals("missed", calls.single().direction)
+  }
+
+  /** #1841: the organizer edits and cancels; a series asks which of its meetings to cancel. */
+  @Test
+  fun meetingsTellTheOrganizerAndASeries() {
+    val meeting = WireJson.decodeFromString(
+      MeetingList.serializer(),
+      """{"meetings":[{"id":"1","title":"Weekly","starts_at":1,"ends_at":2,"conversation_id":"3",
+        "organizer_user_id":"7","recurrence":{"frequency":"weekly","interval":1}}]}""",
+    ).meetings.single()
+    assertEquals("7", meeting.organizerUserId)
+    assertTrue(meeting.isRepeating)
   }
 
   private fun meeting(id: String, startsAt: Long, space: String?, status: String = "scheduled") =

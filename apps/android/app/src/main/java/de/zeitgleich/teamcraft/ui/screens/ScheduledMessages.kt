@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import androidx.annotation.StringRes
 import androidx.compose.foundation.layout.consumeWindowInsets
 import android.text.format.DateUtils
 import androidx.compose.foundation.clickable
@@ -278,14 +279,20 @@ private fun ScheduledEditor(
 /** A date and a time, each on its own button, with the field's error below them. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun DueAtField(dueAtMs: Long, focus: FocusRequester, maybeError: Int?, onChange: (Long) -> Unit) {
+internal fun DueAtField(
+  dueAtMs: Long,
+  focus: FocusRequester,
+  maybeError: Int?,
+  onChange: (Long) -> Unit,
+  @StringRes label: Int = R.string.schedule_custom_label,
+) {
   val context = LocalContext.current
   val zone = ZoneId.systemDefault()
   val shown = Instant.ofEpochMilli(dueAtMs).atZone(zone)
   var isPickingDate by remember { mutableStateOf(false) }
   var isPickingTime by remember { mutableStateOf(false) }
   Column(Modifier.fieldError(maybeError)) {
-    Text(stringResource(R.string.schedule_custom_label), style = MaterialTheme.typography.labelMedium)
+    Text(stringResource(label), style = MaterialTheme.typography.labelMedium)
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
       OutlinedButton(onClick = { isPickingDate = true }, modifier = Modifier.focusRequester(focus)) {
         Text(DateUtils.formatDateTime(context, dueAtMs, DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_ABBREV_ALL))

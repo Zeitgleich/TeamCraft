@@ -23,6 +23,11 @@ import uniffi.teamcraft_ffi.InvitationOutcome
 import uniffi.teamcraft_ffi.InviteOutcome
 import uniffi.teamcraft_ffi.InvitePeopleInput
 import uniffi.teamcraft_ffi.LeaveChoice
+import uniffi.teamcraft_ffi.MeetingCancelScope
+import uniffi.teamcraft_ffi.MeetingEditForm
+import uniffi.teamcraft_ffi.MeetingForm
+import uniffi.teamcraft_ffi.MeetingSave
+import uniffi.teamcraft_ffi.SavedMeeting
 import uniffi.teamcraft_ffi.NewChannelInput
 import uniffi.teamcraft_ffi.NewSpaceInput
 import uniffi.teamcraft_ffi.ReviewedRolesOutcome
@@ -268,6 +273,30 @@ class ChatClient(
       api("PUT", "/me/holiday-region", WireJson.encodeToString(SetHolidayRegion.serializer(), SetHolidayRegion(maybeRegion))),
     )
 
+  /**
+   * The user's meetings, read through the core's upkeep (#1841): the organizer's signed admitters
+   * of meetings that run or start within a day stay current, and edits whose chat change is still
+   * owed are finished.
+   */
   suspend fun meetings(): List<Meeting> =
-    WireJson.decodeFromString(MeetingList.serializer(), api("GET", "/meetings")).meetings
+    WireJson.decodeFromString(MeetingList.serializer(), core().meetingUpkeep()).meetings
+
+  /** Schedules [form]; the core sets up the meeting chat's encryption with the members invited here. */
+  suspend fun scheduleMeeting(form: MeetingForm, maybeSpaceId: String?): MeetingSave =
+    core().scheduleMeeting(form, maybeSpaceId)
+
+  /** "Meet now": [requestKey] is made once per tap, so a retry returns the same meeting. */
+  suspend fun startMeetingNow(maybeSpaceId: String?, requestKey: String): SavedMeeting =
+    core().startMeetingNow(null, maybeSpaceId, requestKey)
+
+  /** The edit form of a meeting the user organizes, as the server has it now. */
+  suspend fun meetingEditForm(meetingId: String): MeetingEditForm = core().meetingEditForm(meetingId)
+
+  suspend fun saveMeetingEdit(meetingId: String, form: MeetingForm): MeetingSave = core().saveMeetingEdit(meetingId, form)
+
+  suspend fun cancelMeeting(meetingId: String, scope: MeetingCancelScope, occurrenceStartsAt: Long) =
+    core().cancelMeeting(meetingId, scope, occurrenceStartsAt)
+
+  /** Before joining a meeting's call: the organizer's device sets up a chat that has no group yet. */
+  suspend fun prepareMeetingJoin(meetingId: String) = core().prepareMeetingJoin(meetingId)
 }

@@ -304,8 +304,21 @@ waiting any more says so instead.
 **In the apps.** Android and iOS label the tiles of a meeting's call "Host" and "Co-host"; its
 organizer gets "Hosts" in the call's controls (each other member in the call: "Make co-host",
 "Remove as co-host", "Hand over host role") and the same question when leaving, the lobby count
-read from `GET /meetings/{id}/lobby`. The apps don't schedule meetings: there, co-hosts are named
-in the call.
+read from `GET /meetings/{id}/lobby`. The apps' schedule form has no co-host field: there,
+co-hosts are named in the call.
+
+**Scheduling in the apps** (#1841). Android and iOS schedule, change and cancel meetings and start
+one with "Meet now" through the core (teamcraft-ffi `schedule_meeting`, `save_meeting_edit`,
+`cancel_meeting`, `start_meeting_now`; the decisions in `teamcraft_client_api::meeting_edits`,
+shared with desktop and web). The form has title, description, start, length, the lobby and the
+invited members; an edit keeps the meeting's e-mail invitees, notetaker and repeat rule (a series
+is changed as a whole, and its cancel asks which meetings). After the server saved it, the core
+sets up or updates the chat's group exactly as desktop does (the invitees by source, #1726;
+founded anchored, #1747), notes the lobby and signs the admitters. The organizer's Join founds the
+group of a meeting from before 1.0.3 first (`prepare_meeting_join`). The apps read their meeting
+list through `meeting_upkeep`, which also keeps the admitters of the organizer's meetings that run
+or start within a day current and finishes edits whose removal is still owed (kept in the store
+before the save, as desktop keeps them in local storage).
 
 **The lobby in the apps** (#1859). The organizer and the co-hosts (and a chat admin the server
 lets host it) see "Lobby" in the controls of the meeting's call with a count of who waits; nobody
@@ -624,6 +637,8 @@ fake calendar and mailer; one test sends through the real SMTP sender to Mailpit
 - Hosts (#1720, #1859): the apps' schedule dialog has no co-host field; the apps show the lobby
   only in the meeting's call, not on the meeting list; the apps' lobby and the reminder after
   leaving from CallKit are untested on an iPhone.
+- The apps' schedule form (#1841) has no repeat rule, e-mail invitees, notetaker or guest links,
+  and doesn't offer the meeting link after scheduling; see the follow-up issue.
 - Meeting links: member clients reacting to `lobby_decision` instead of asking; making the link
   anew also turning away the guests still waiting from it; the desktop and mobile apps opening
   `/meeting/…` links themselves; hosts seeing how many guests the link let in; a reloaded guest

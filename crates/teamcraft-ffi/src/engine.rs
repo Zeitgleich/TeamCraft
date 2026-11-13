@@ -195,6 +195,8 @@ pub(crate) struct Engine {
   /// The engine thread's own queue, for a drain to end itself without the caller (who may be
   /// cancelled by the OS meanwhile). Weak, so the thread still ends once the app drops its handle.
   maybe_jobs: Option<mpsc::WeakUnboundedSender<Job>>,
+  /// When the meeting upkeep last had the core compare each meeting's signed admitters (#1841).
+  pub(crate) meeting_admitters_synced: crate::meetings::AdmittersSyncedAt,
 }
 
 /// What the app's handle shares with every sync loop the engine starts.
@@ -811,6 +813,7 @@ impl Engine {
       is_syncing_for_app: false,
       active_drains: 0,
       maybe_jobs: None,
+      meeting_admitters_synced: Default::default(),
     };
     if let Some(account) = maybe_account {
       engine.know_account(&account);

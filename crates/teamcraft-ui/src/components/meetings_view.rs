@@ -45,9 +45,6 @@ const REFRESH_MS: u64 = 10_000;
 /// is visible. The server also sends them `lobby_decision`, but the client core doesn't hand that
 /// event to the UI yet, so asking is how the screen learns it.
 const KNOCK_POLL_MS: u64 = 3_000;
-/// A first meeting suggestion starts at the next full hour, at least this far ahead.
-const MIN_LEAD_MS: i64 = 10 * 60_000;
-const MS_PER_HOUR: i64 = 3_600_000;
 const DURATIONS: [u32; 6] = [15, 30, 45, 60, 90, 120];
 /// The element of the schedule dialog whose first invalid field gets the focus.
 const SCHEDULE_BODY_ID: &str = "schedule-form-body";
@@ -1012,7 +1009,9 @@ pub fn ScheduleMeetingDialog(
   });
   let form = RwSignal::new(match &maybe_before {
     Some(before) => ScheduleForm::from_meeting(before, me).with_notetaker(notetaker.get_untracked()),
-    None => ScheduleForm::new(format_local_datetime_input(suggested_start(now))),
+    None => ScheduleForm::new(format_local_datetime_input(
+      teamcraft_client_api::meeting_edits::suggested_start(now),
+    )),
   });
   // A notetaker known only after the dialog opened is its entry, not an invisible member (it is a
   // bot: the people list leaves it out).
@@ -1701,12 +1700,6 @@ pub(crate) async fn save_meeting_edit(
   true
 }
 
-/// The next full hour that is at least [`MIN_LEAD_MS`] away.
-fn suggested_start(now: i64) -> i64 {
-  let earliest = now + MIN_LEAD_MS;
-  earliest.div_euclid(MS_PER_HOUR) * MS_PER_HOUR + MS_PER_HOUR
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -1749,15 +1742,6 @@ mod tests {
   use crate::model::id_from_raw;
 
   #[test]
-  fn the_suggested_start_is_a_full_hour_with_some_lead() {
-    let now = 1_792_540_800_000 + 25 * 60_000;
-    let start = suggested_start(now);
-    assert_eq!(start % MS_PER_HOUR, 0);
-    assert!(start - now >= MIN_LEAD_MS);
-    assert!(start - now < MIN_LEAD_MS + MS_PER_HOUR);
-  }
-
-  #[test]
   fn a_space_lists_its_own_meetings_and_outside_spaces_all_show() {
     let space: SpaceId = id_from_raw(5);
     let mut of_space = fixture(1, 1_000);
@@ -1777,7 +1761,7 @@ mod tests {
       title: format!("Meeting {id}"),
       maybe_description: None,
       starts_at: teamcraft_proto::UnixMillis(starts_at),
-      ends_at: teamcraft_proto::UnixMillis(starts_at + MS_PER_HOUR),
+      ends_at: teamcraft_proto::UnixMillis(starts_at + 3_600_000),
       kind: teamcraft_proto::MeetingKind::Scheduled,
       status: teamcraft_proto::MeetingStatus::Scheduled,
       has_lobby: true,

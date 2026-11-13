@@ -66,6 +66,7 @@ import de.zeitgleich.teamcraft.core.DraftFiles
 import de.zeitgleich.teamcraft.ui.media.MediaDraftStore
 import de.zeitgleich.teamcraft.ui.media.SealedCaptures
 import de.zeitgleich.teamcraft.core.ChatClient
+import de.zeitgleich.teamcraft.core.Meeting
 import de.zeitgleich.teamcraft.core.ChatQueries
 import de.zeitgleich.teamcraft.core.FileInfo
 import de.zeitgleich.teamcraft.core.HolidayRegion
@@ -1445,6 +1446,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   /** Joins (or starts) a conversation's call, e.g. a meeting's. */
   fun startCall(conversationId: String, displayName: String, options: CallOptions = CallOptions()) =
     graph.calls.startCall(conversationId, displayName, options)
+
+  /** The signed-in user's ID; `null` before sign-in. */
+  val maybeMyUserId: String? get() = (state.value as? AppState.Ready)?.userId
+
+  /**
+   * Joins a meeting's call (#1841). On its organizer's device the core first sets up a meeting chat
+   * that has no encryption group yet (meetings from before 1.0.3); the call starts either way.
+   */
+  fun joinMeeting(meeting: Meeting) {
+    if (meeting.organizerUserId.isEmpty() || meeting.organizerUserId != maybeMyUserId) {
+      startCall(meeting.conversationId, meeting.title)
+      return
+    }
+    viewModelScope.launch {
+      readChat { prepareMeetingJoin(meeting.id) }
+      startCall(meeting.conversationId, meeting.title)
+    }
+  }
+
+  /** A meeting action of the organizer's (#1841): its answer, or the text of why it failed. */
+  suspend fun <T> tryMeetingAction(block: suspend ChatClient.() -> T): ActionAnswer<T> = tryDirectoryAction(block)
 
   /**
    * Whether the call running in `conversationId` has the notetaker in it, for the pre-join notice

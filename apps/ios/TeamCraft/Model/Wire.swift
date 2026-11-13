@@ -728,6 +728,13 @@ struct Meeting: Decodable, Equatable, Identifiable, Sendable {
   /// The space it was scheduled in; its chat stays outside spaces.
   var spaceId: String?
   let attendees: [MeetingAttendee]?
+  /// Who scheduled it: only they edit and cancel it (#1841). Absent in older test data.
+  var organizerUserId: String?
+  /// The repeat rule of a series (each occurrence is listed); the core reads it, the list only
+  /// asks whether there is one.
+  var recurrence: MeetingRecurrenceMark?
+
+  var isRepeating: Bool { recurrence != nil }
 
   var startDate: Date { Date(timeIntervalSince1970: TimeInterval(startsAt) / 1000) }
   /// One occurrence of a repeating meeting: the series' ID and its start.
@@ -739,6 +746,9 @@ struct Meeting: Decodable, Equatable, Identifiable, Sendable {
     attendees?.first { $0.userId == userId }.map { RsvpAnswer(rawValue: $0.rsvp) ?? .needsAction }
   }
 }
+
+/// That a meeting repeats; what its rule says is the core's to read.
+struct MeetingRecurrenceMark: Decodable, Equatable, Sendable {}
 
 struct MeetingAttendee: Decodable, Equatable, Sendable {
   let userId: String?

@@ -39,6 +39,7 @@ pub mod log;
 pub mod markdown;
 pub mod media;
 pub mod media_viewer;
+pub mod meeting_edits;
 pub mod meeting_hosts;
 pub mod meeting_invitees;
 pub mod message_sound;
