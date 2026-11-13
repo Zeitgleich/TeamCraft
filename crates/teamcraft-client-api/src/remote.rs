@@ -524,6 +524,29 @@ pub struct MessageTail {
   pub authors: Vec<crate::model::User>,
 }
 
+/// The line under each conversation of the mobile chat lists (#1876): per conversation that has
+/// one, the newest message people wrote (a system line only when nothing was written nearby), with
+/// their authors. Read on every change, so it names only these authors, never the whole snapshot.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChatPreviews {
+  /// At most one per conversation, in the order the conversations were asked for.
+  pub messages: Vec<Message>,
+  /// The authors of [`Self::messages`] this device knows, the reader and former accounts included.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub authors: Vec<crate::model::User>,
+}
+
+/// [`SearchResults`] with the authors of the hits this device knows (#1876): the mobile search
+/// names them without decoding the whole snapshot on every keystroke.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NamedSearchResults {
+  #[serde(flatten)]
+  pub results: SearchResults,
+  /// As [`ChatPreviews::authors`].
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub authors: Vec<crate::model::User>,
+}
+
 /// Where the local client stands.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]

@@ -458,27 +458,49 @@ final class ChatModelTests: XCTestCase {
   }
 
   /// Issue #1041: a search hit in the notes (empty name) is called "Notes" like the conversation.
-  func testASearchHitInTheNotesIsNamedLikeTheNotes() {
-    let message = MessageItem(
-      id: "7", conversationId: "5", authorId: "4", authorName: "Sam", sentAtMs: 0, body: "Hello",
-      isEdited: false, isPending: false, replyCount: 0, maybeThreadId: nil, reactions: [], isAuthorDeleted: false)
-    let notes = SearchHitItem(message: message, conversationName: "", isNotesToSelf: true, maybeSpaceName: nil)
-    XCTAssertEqual(notes.listName, String(localized: "notes_title"))
-    let general = SearchHitItem(message: message, conversationName: "general", isNotesToSelf: false, maybeSpaceName: nil)
-    XCTAssertEqual(general.listName, "general")
+  func testASearchHitInTheNotesIsNamedLikeTheNotes() throws {
+    let json = """
+      {"hits": [
+        {"message": {"id": "7", "conversation": "5", "author": "4", "kind": "User", "sent_at": 0, "body": "Hello",
+          "is_edited": false, "reactions": [], "reply_count": 0, "maybe_thread": null},
+          "conversation_name": "", "is_notes_to_self": true, "maybe_space_name": null, "snippet": []},
+        {"message": {"id": "8", "conversation": "6", "author": "4", "kind": "User", "sent_at": 0, "body": "Hello",
+          "is_edited": false, "reactions": [], "reply_count": 0, "maybe_thread": null},
+          "conversation_name": "general", "maybe_space_name": "Ops", "snippet": []}
+      ], "total": 2, "is_pending": false}
+      """
+    let hits = try XCTUnwrap(Wire.decode(NamedSearchResults.self, from: json)).named
+    XCTAssertEqual(hits.map(\.listName), [String(localized: "notes_title"), "general"])
+    XCTAssertEqual(hits[1].maybeSpaceName, "Ops")
+    XCTAssertEqual(hits[1].message.conversationId, "6")
   }
 
-  func testADeletedAuthorGetsTheAppsName() {
-    let message = MessageItem(
-      id: "7", conversationId: "5", authorId: "4", authorName: "Tombstone", sentAtMs: 0, body: "Hello",
-      isEdited: false, isPending: false, replyCount: 0, maybeThreadId: nil, reactions: [], isAuthorDeleted: true)
-    XCTAssertEqual(message.namingDeletedAuthor().authorName, String(localized: "user_deleted_name"))
-    let hit = SearchHitItem(message: message, conversationName: "general", maybeSpaceName: nil)
-    XCTAssertEqual(hit.namingDeletedAuthor().message.authorName, String(localized: "user_deleted_name"))
-
-    var kept = message
-    kept.isAuthorDeleted = false
-    kept.authorName = "Sam Doe"
-    XCTAssertEqual(kept.namingDeletedAuthor().authorName, "Sam Doe")
+  /// Issue #1876: the hits name their authors from the read itself; a deleted one by the app's name.
+  func testSearchHitsNameTheirAuthors() throws {
+    let json = """
+      {"hits": [
+        {"message": {"id": "7", "conversation": "5", "author": "4", "kind": "User", "sent_at": 0, "body": "Hello",
+          "is_edited": false, "reactions": [], "reply_count": 0, "maybe_thread": null},
+          "conversation_name": "general", "maybe_space_name": null, "snippet": []},
+        {"message": {"id": "8", "conversation": "5", "author": "3", "kind": "User", "sent_at": 0, "body": "Hi",
+          "is_edited": false, "reactions": [], "reply_count": 0, "maybe_thread": null},
+          "conversation_name": "general", "maybe_space_name": null, "snippet": []},
+        {"message": {"id": "9", "conversation": "5", "author": "8", "kind": {"Log": "Info"}, "sent_at": 0,
+          "body": "green", "is_edited": false, "reactions": [], "reply_count": 0, "maybe_thread": null,
+          "source": {"name": "CI"}},
+          "conversation_name": "general", "maybe_space_name": null, "snippet": []}
+      ], "total": 3, "authors": [
+        {"id": "4", "username": "", "display_name": "Tombstone", "presence": "Offline", "maybe_custom_status": null,
+          "avatar_hue": 1, "is_guest": false, "is_bot": false, "is_deleted": true},
+        {"id": "3", "username": "sam", "display_name": "Sam Doe", "presence": "Offline", "maybe_custom_status": null,
+          "avatar_hue": 1, "is_guest": false, "is_bot": false}
+      ]}
+      """
+    let hits = try XCTUnwrap(Wire.decode(NamedSearchResults.self, from: json)).named
+    XCTAssertEqual(hits[0].message.authorName, String(localized: "user_deleted_name"))
+    XCTAssertTrue(hits[0].message.isAuthorDeleted)
+    XCTAssertEqual(hits[1].message.authorName, "Sam Doe")
+    XCTAssertEqual(hits[2].message.authorName, "CI")
+    XCTAssertTrue(hits[2].message.isAuthorSource)
   }
 }

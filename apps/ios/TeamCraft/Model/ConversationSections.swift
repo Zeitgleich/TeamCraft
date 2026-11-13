@@ -217,11 +217,6 @@ func conversationListName(_ name: String, isNotesToSelf: Bool) -> String {
   isNotesToSelf ? String(localized: "notes_title") : name
 }
 
-extension SearchHitItem {
-  /// The conversation name a search hit row shows (same rule as `ConversationItem.listName`).
-  var listName: String { conversationListName(conversationName, isNotesToSelf: isNotesToSelf) }
-}
-
 private func byName(_ lhs: ConversationItem, _ rhs: ConversationItem) -> Bool {
   lhs.listName.localizedCaseInsensitiveCompare(rhs.listName) == .orderedAscending
 }

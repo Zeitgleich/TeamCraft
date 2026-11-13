@@ -106,24 +106,38 @@ final class MessageWireTests: XCTestCase {
       ChatQuery.thread(conversationId: "5", threadId: "10").json, #"{"conversation":"5","kind":"thread","thread":"10"}"#)
   }
 
-  func testTheChatListLineKeepsWhatTheTypedRecordSays() {
-    let item = MessageItem(
-      id: "7", conversationId: "5", authorId: "4", authorName: "CI", sentAtMs: 9, body: "", isEdited: true,
-      isPending: false, replyCount: 1, maybeThreadId: nil, reactions: [ReactionItem(emoji: "🎉", count: 1, reactedByMe: false)],
-      isAuthorDeleted: false, maybeSystemEvent: .renamed(name: "Ops"), maybePlaceholder: .waiting, isAuthorSource: true,
-      maybeSourcePictureSha256: "cd", groupMentions: ["ops"], mentionsMe: true)
-    let message = Message(item)
-    XCTAssertEqual(message.authorName, "CI")
-    XCTAssertTrue(message.isAuthorSource)
-    XCTAssertEqual(message.maybeSourcePictureSha256, "cd")
-    XCTAssertEqual(message.maybeSystemEvent, .renamed(name: "Ops"))
-    XCTAssertEqual(message.maybePlaceholder, .waiting)
-    XCTAssertEqual(message.reactions, [Reaction(emoji: "🎉", count: 1)])
-    XCTAssertEqual(message.groupMentions, ["ops"])
-    XCTAssertTrue(message.mentionsMe)
-
-    var deleted = item
-    deleted.isAuthorDeleted = true
-    XCTAssertEqual(Message(deleted).authorName, deletedName)
+  /// Issue #1876: the chat list's lines come as the feed's messages with only their authors.
+  func testTheChatListLinesNameTheirAuthors() throws {
+    let json = """
+      {"messages": [
+        {"id": "7", "conversation": "5", "author": "4", "kind": {"Log": "Info"}, "sent_at": 9, "body": "", "is_edited": true,
+          "reactions": [{"emoji": "🎉", "count": 1, "reacted_by_me": false}], "reply_count": 1, "maybe_thread": null,
+          "placeholder": "waiting", "source": {"name": "CI", "picture_sha256": "cd"}, "group_mentions": ["ops"],
+          "mentions_me": true},
+        {"id": "8", "conversation": "6", "author": "3", "kind": {"System": {"Renamed": {"name": "Ops"}}}, "sent_at": 10,
+          "body": "", "is_edited": false, "reactions": [], "reply_count": 0, "maybe_thread": null},
+        {"id": "9", "conversation": "7", "author": "2", "kind": "User", "sent_at": 11, "body": "Hi", "is_edited": false,
+          "reactions": [], "reply_count": 0, "maybe_thread": null}
+      ], "authors": [
+        {"id": "3", "username": "", "display_name": "Tombstone", "presence": "Offline", "maybe_custom_status": null,
+          "avatar_hue": 1, "is_guest": false, "is_bot": false, "is_deleted": true},
+        {"id": "2", "username": "sam", "display_name": "Sam Doe", "presence": "Offline", "maybe_custom_status": null,
+          "avatar_hue": 1, "is_guest": false, "is_bot": false}
+      ]}
+      """
+    let messages = try XCTUnwrap(Wire.decode(ChatPreviews.self, from: json)).named
+    XCTAssertEqual(messages.map(\.conversationId), ["5", "6", "7"])
+    let source = messages[0]
+    XCTAssertEqual(source.authorName, "CI")
+    XCTAssertTrue(source.isAuthorSource)
+    XCTAssertEqual(source.maybeSourcePictureSha256, "cd")
+    XCTAssertEqual(source.maybePlaceholder, .waiting)
+    XCTAssertEqual(source.reactions, [Reaction(emoji: "🎉", count: 1)])
+    XCTAssertEqual(source.groupMentions, ["ops"])
+    XCTAssertTrue(source.mentionsMe)
+    XCTAssertEqual(messages[1].maybeSystemEvent, .renamed(name: "Ops"))
+    XCTAssertEqual(messages[1].authorName, deletedName)
+    XCTAssertTrue(messages[1].isAuthorDeleted)
+    XCTAssertEqual(messages[2].authorName, "Sam Doe")
   }
 }

@@ -33,8 +33,9 @@ use std::time::{Duration, Instant};
 use teamcraft_client_api::backend::{ChatBackend as _, SearchBackend as _};
 use teamcraft_client_api::entry_rules::{channel_leave, space_leave};
 use teamcraft_client_api::model::{
-  FirstSyncStage, Message as MessageView, MessageKind, SpaceRole, SpaceRoster, TimestampMs, is_pending,
+  FirstSyncStage, Message as MessageView, MessageKind, SpaceRole, SpaceRoster, TimestampMs,
 };
+use teamcraft_client_api::remote::{ChatPreviews, NamedSearchResults};
 use teamcraft_client_api::search::parse_query;
 use teamcraft_core::TypingState;
 use teamcraft_core::chat_list_pass::{ListPass, SliceLimit};
@@ -61,10 +62,9 @@ use crate::logging::{self, JobClock};
 use crate::perf_jobs::{self, PerfJobKind};
 use crate::types::LinkRequestItem;
 use crate::types::{
-  AccountState, ChatPreviewItem, ConversationItem, FirstSyncItem, FirstSyncStageItem, GroupMentionReachItem,
-  KeyCatchUpItem, LeaveChoice, MentionSettings, MentionableGroupItem, MessageItem,
-  NotificationContentSettings, NotifiedConversation, Presence, PushDiagnosticsInfo, SearchHitItem,
-  SegmentPrefetchMode, SpaceMenuItem, share_targets,
+  AccountState, ConversationItem, FirstSyncItem, FirstSyncStageItem, GroupMentionReachItem, KeyCatchUpItem,
+  LeaveChoice, MentionSettings, MentionableGroupItem, NotificationContentSettings, NotifiedConversation,
+  Presence, PushDiagnosticsInfo, SegmentPrefetchMode, SpaceMenuItem, share_targets,
 };
 
 /// How many of a conversation's newest rows a chat list preview looks through for a message people
@@ -929,26 +929,31 @@ impl Reads {
     }))
   }
 
-  /// [`crate::TeamCraft::chat_previews`], a slice at a time (issue #1819): each preview reads a
-  /// conversation's newest rows, 2.8 s for 77 conversations on a phone while a catch-up wrote. IDs
-  /// that aren't conversation IDs are skipped, so one bad entry doesn't cost the list all its
-  /// previews.
+  /// [`crate::TeamCraft::chat_previews`], a slice at a time (issue #1819), as JSON
+  /// ([`ChatPreviews`], #1876): each preview reads a conversation's newest rows, 2.8 s for 77
+  /// conversations on a phone while a catch-up wrote. IDs that aren't conversation IDs are skipped,
+  /// so one bad entry doesn't cost the list all its previews.
   pub(crate) fn chat_previews(
     &mut self,
     mut remaining: std::collections::VecDeque<String>,
-    mut previews: Vec<ChatPreviewItem>,
-  ) -> Slice<Vec<ChatPreviewItem>> {
+    mut messages: Vec<MessageView>,
+  ) -> Slice<String> {
     let limit = match self.maybe_account.as_ref() {
       Some(account) => account.slice_limit,
       None => return Slice::Done(Err(TeamCraftError::NotEnrolled)),
     };
+    let backend = match self.backend() {
+      Ok(backend) => backend,
+      Err(error) => return Slice::Done(Err(error)),
+    };
     let started = Instant::now();
     let mut done = 0;
     while let Some(id) = remaining.pop_front() {
-      match self.chat_preview(&id) {
-        Ok(Some(preview)) => previews.push(preview),
-        Ok(None) => {},
-        Err(error) => return Slice::Done(Err(error)),
+      if let Some(message) = parse_id::<ConversationId>(&id)
+        .ok()
+        .and_then(|conversation| preview_message(backend, conversation))
+      {
+        messages.push(message);
       }
       done += 1;
       if done >= limit.max_entries || is_slice_over(started, limit) {
@@ -956,26 +961,12 @@ impl Reads {
       }
     }
     if remaining.is_empty() {
-      return Slice::Done(Ok(previews));
+      let authors = known_authors(backend, &messages);
+      return Slice::Done(crate::bridge::to_json(&ChatPreviews { messages, authors }));
     }
     Slice::More(Box::new(move |reads: &mut Reads| {
-      reads.chat_previews(remaining, previews)
+      reads.chat_previews(remaining, messages)
     }))
-  }
-
-  /// One conversation's line in the chat list; `None` for an ID that isn't a conversation's or a
-  /// conversation without messages.
-  fn chat_preview(&self, id: &str) -> Result<Option<ChatPreviewItem>, TeamCraftError> {
-    let backend = self.backend()?;
-    let Ok(conversation) = parse_id::<ConversationId>(id) else {
-      return Ok(None);
-    };
-    Ok(
-      preview_message(backend, conversation).map(|message| ChatPreviewItem {
-        conversation_id: id.to_string(),
-        message: self.message_item(backend, &message),
-      }),
-    )
   }
 
   pub(crate) fn send_message(
@@ -1133,19 +1124,12 @@ impl Reads {
     Ok(())
   }
 
-  pub(crate) fn search(&self, query: &str) -> Result<Vec<SearchHitItem>, TeamCraftError> {
+  /// [`crate::TeamCraft::search`], as JSON ([`NamedSearchResults`]).
+  pub(crate) fn search_json(&self, query: &str) -> Result<String, TeamCraftError> {
     let backend = self.backend()?;
     let results = backend.search(&parse_query(query));
-    Ok(
-      results
-        .hits
-        .into_iter()
-        .map(|hit| {
-          let message = self.message_item(backend, &hit.message);
-          SearchHitItem::from_hit(hit, message)
-        })
-        .collect(),
-    )
+    let authors = known_authors(backend, results.hits.iter().map(|hit| &hit.message));
+    crate::bridge::to_json(&NamedSearchResults { results, authors })
   }
 
   /// What the newest notification showed of the conversation, while the store hasn't caught up
@@ -1185,11 +1169,20 @@ impl Reads {
   pub(crate) fn pending_work(&self) -> Result<PendingWork, TeamCraftError> {
     PendingWork::read(&self.store).map_err(TeamCraftError::from)
   }
+}
 
-  fn message_item(&self, backend: &CoreChatBackend<Store>, message: &MessageView) -> MessageItem {
-    let maybe_author = backend.user(message.author);
-    MessageItem::from_view(message, maybe_author.as_ref(), is_pending(message.id))
+/// The authors of `messages` this device knows, the user and former accounts included: one record
+/// per author, never every user (the chat list reads this on every change, #1758).
+fn known_authors<'a>(
+  backend: &CoreChatBackend<Store>,
+  messages: impl IntoIterator<Item = &'a MessageView>,
+) -> Vec<teamcraft_client_api::model::User> {
+  let ids: std::collections::BTreeSet<UserId> = messages.into_iter().map(|message| message.author).collect();
+  let (me, mut authors) = backend.me_and_known_users(&ids);
+  if ids.contains(&me.id) {
+    authors.push(me);
   }
+  authors
 }
 
 /// The newest message people wrote among a conversation's newest rows, else the newest row (a
