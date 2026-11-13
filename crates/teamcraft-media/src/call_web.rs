@@ -49,6 +49,7 @@ mod gl_compositor;
 mod meter;
 #[cfg(feature = "effects")]
 mod picture;
+mod quic_datagrams;
 mod screen_sound;
 #[cfg(feature = "effects")]
 mod segmentation_worker;
@@ -566,7 +567,7 @@ struct Transport {
 enum Writers {
   Quic {
     signaling: WritableStreamDefaultWriter,
-    datagrams: WritableStreamDefaultWriter,
+    datagrams: quic_datagrams::QuicDatagrams,
   },
   Fallback(fallback::FallbackSession),
 }
@@ -3008,6 +3009,7 @@ impl Transport {
     let datagrams = datagram_writable(&datagram_stream)
       .and_then(|stream| stream.get_writer())
       .map_err(browser("datagram stream"))?;
+    let datagrams = quic_datagrams::QuicDatagrams::new(&datagram_stream, datagrams);
     spawn_local(read_signaling(
       stream.readable(),
       transport.closed(),
@@ -3048,10 +3050,7 @@ impl Transport {
 
   fn send_datagram(&self, bytes: &[u8]) {
     match &self.writers {
-      // Unreliable by design: the browser drops datagrams when its queue is full.
-      Writers::Quic { datagrams, .. } => {
-        let _ = datagrams.write_with_chunk(&Uint8Array::from(bytes));
-      },
+      Writers::Quic { datagrams, .. } => datagrams.send(bytes),
       Writers::Fallback(session) => session.send_datagram(bytes),
     }
   }

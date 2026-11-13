@@ -301,6 +301,7 @@ call-connecting = Verbindung wird hergestellt …
 call-reconnecting = Verbindung unterbrochen, wird wiederhergestellt …
 call-limited-network = Eingeschränktes Netzwerk, die Gesprächsqualität kann geringer sein
 call-device-busy = Dein Computer ist ausgelastet: Videoqualität reduziert
+call-video-held-for-voice = Deine Verbindung ist schwach: dein Video pausiert, damit deine Stimme durchkommt
 call-capture-stalled = Die anderen sehen von deinem Bildschirm oder deiner Kamera nur ein Standbild. Beende es und starte es neu.
 call-video-stalled = Das Video von { $name } aktualisiert sich nicht: Du siehst ein Standbild.
 call-video-stalled-unnamed = Ein Video aktualisiert sich nicht: Du siehst ein Standbild.

@@ -134,6 +134,7 @@ pub mod system_audio_pipewire;
 pub mod system_audio_wasapi;
 #[cfg(feature = "voice-decode")]
 pub mod voice_decode;
+pub mod voice_guard;
 #[cfg(feature = "voice")]
 pub mod voice_recording;
 #[cfg(feature = "web-api")]

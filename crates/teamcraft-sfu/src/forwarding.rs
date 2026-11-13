@@ -51,6 +51,7 @@ use teamcraft_media::{
   join_probe::{JoinProbe, JoinProbeConfig, LinkMeasurement},
   rate_probe::{ProbeOutcome, RateProbe, RateProbeConfig},
   rtp::{AudioLevel, RtpError, RtpHeader},
+  voice_guard::{ArrivingVoice, VoiceGuard, VoiceGuardConfig},
 };
 use teamcraft_proto::{
   DeviceId, KNOWN_VIDEO_CODECS, MAX_NACK_SEQUENCE_NUMBERS, MAX_SIMULCAST_LAYERS, MediaCapabilities,
@@ -98,6 +99,8 @@ pub struct ForwardingConfig {
   pub layer_stalled_after: Duration,
   /// Resending lost video packets to the receiver that asks.
   pub retransmit: RetransmitConfig,
+  /// When a receiver's voice counts as hurt and its video yields (#1871).
+  pub voice_guard: VoiceGuardConfig,
   /// Bytes of padding the probe of a participant's link at the start may send, each direction:
   /// the SFU's of the downlink, and what it tells clients they may send for the uplink. Zero
   /// turns both off.
@@ -193,6 +196,11 @@ struct ParticipantRoute {
   maybe_probe_request: Option<ProbeRequest>,
   /// The receiver sent transport feedback: its downlink can be probed.
   has_feedback: bool,
+  /// What becomes of the voice sent to it: while it is lost, its video yields (#1871).
+  voice: VoiceGuard,
+  /// How its own voice arrives: while its upload loses it, it gets no video either, whose
+  /// acknowledgements share that upload (#1889).
+  uplink_voice: ArrivingVoice,
   /// The connection was lost: nothing is sent to it until it is back.
   is_suspended: bool,
   /// What may still be resent to it.
@@ -277,6 +285,7 @@ impl Default for ForwardingConfig {
       probe: RateProbeConfig::default(),
       layer_stalled_after: Duration::from_millis(1500),
       retransmit: RetransmitConfig::default(),
+      voice_guard: VoiceGuardConfig::default(),
       probe_bytes: 15_000,
     }
   }
@@ -321,6 +330,8 @@ impl Forwarder {
       probe: RateProbe::new(),
       maybe_probe_request: None,
       has_feedback: false,
+      voice: VoiceGuard::new(self.config.voice_guard),
+      uplink_voice: ArrivingVoice::new(self.config.voice_guard),
       is_suspended: false,
       retransmit_budget: RetransmitBudget::default(),
       maybe_join_probe: self.new_join_probe(now),
@@ -770,8 +781,19 @@ impl Forwarder {
     if let Some(seq) = header.maybe_transport_seq {
       participant.uplink.on_arrival(seq, now);
     }
+    let was_uplink_hurt = participant.uplink_voice.is_hurt(now);
+    if is_audio {
+      participant
+        .uplink_voice
+        .on_arrival(rtp_header.sequence_number.0, now);
+    }
+    let has_uplink_become_hurt = !was_uplink_hurt && participant.uplink_voice.is_hurt(now);
 
     let mut route = Route::default();
+    if has_uplink_become_hurt {
+      // Its video stops now, not with its next feedback.
+      route.effects.extend(self.reallocate(sender, now));
+    }
     let receivers = if is_screen_audio {
       self.others(sender)
     } else if is_audio {
@@ -791,9 +813,13 @@ impl Forwarder {
       }
       receivers
     };
+    let is_voice = is_audio || is_screen_audio;
     for receiver in receivers {
       if let Some(target) = self.participants.get_mut(&receiver) {
         let seq = target.downlink.on_send(datagram.len() + 2, now);
+        if is_voice {
+          target.voice.on_send(seq, now);
+        }
         route
           .deliveries
           .push((receiver, DatagramHeader::restamp(datagram, seq)?));
@@ -866,6 +892,7 @@ impl Forwarder {
     participant
       .downlink
       .on_feedback(feedback, now, participant.feedback_epoch);
+    participant.voice.on_feedback(feedback, now);
     participant.has_feedback = true;
     let mut effects = Vec::new();
     if let Some(measurement) = participant
@@ -1228,10 +1255,16 @@ impl Forwarder {
     } else {
       UpgradeProof::NotRequired
     };
-    let allocation =
+    // Its voice is being lost (a link that collapsed): the video yields at once, and no probe adds
+    // to the link meanwhile (#1871). So does the video to a participant whose own voice arrives
+    // with gaps: the acknowledgements of what it receives share its collapsed upload (#1889).
+    let allocation = if participant.voice.is_hurt(now) || participant.uplink_voice.is_hurt(now) {
+      participant.allocator.pause_all(&demands, now)
+    } else {
       participant
         .allocator
-        .allocate_with_proof(&layers_config, estimate, proof, &demands, now);
+        .allocate_with_proof(&layers_config, estimate, proof, &demands, now)
+    };
     participant.maybe_probe_request = allocation.maybe_probe;
     let allocation = allocation.layers;
     if participant
@@ -2990,6 +3023,102 @@ mod tests {
         switched_to(&mut forwarder, 2, down_at).is_some(),
         "never switched up again"
       );
+    }
+
+    /// #1871: a receiver whose voice gets lost (a downlink that collapsed from one second to the
+    /// next) gets no video from its next feedback on, not after the estimate came down: the
+    /// voice comes first. No layer is put back to find out during the hold, nor after it while
+    /// no probe showed the link carries it.
+    #[test]
+    fn lost_voice_pauses_the_video_at_once() {
+      let (mut forwarder, now) = video_room();
+      forwarder.subscribe(device(2), VIDEO, Some(2), now).unwrap();
+      forwarder
+        .participants
+        .get_mut(&device(2))
+        .unwrap()
+        .downlink
+        .apply_probe(10_000_000);
+      let up_at = switched_to(&mut forwarder, 2, now).expect("never switched up");
+      assert!(send_frame(&mut forwarder, 2, true, up_at).contains(&device(2)));
+
+      // Device 1 speaks; of what reaches device 2, a third is lost.
+      let mut voice = Vec::new();
+      for index in 0..25u32 {
+        let at = up_at + Duration::from_millis(20) * index;
+        let route = forwarder.route(device(1), &audio(1, 20), at).unwrap();
+        for (receiver, delivered) in route.deliveries {
+          if receiver == device(2) {
+            voice.push(
+              DatagramHeader::parse(&delivered)
+                .unwrap()
+                .maybe_transport_seq
+                .unwrap(),
+            );
+          }
+        }
+      }
+      assert_eq!(voice.len(), 25);
+      let first = voice[0].0;
+      let feedback = TransportFeedback {
+        base_seq: first,
+        arrivals_us: voice
+          .iter()
+          .enumerate()
+          .map(|(index, seq)| (index % 3 != 0).then_some(u64::from(seq.0.wrapping_sub(first)) * 20_000))
+          .collect(),
+      };
+      let reported_at = up_at + Duration::from_millis(600);
+      forwarder.on_transport_feedback(device(2), &feedback, reported_at);
+      assert!(send_frame(&mut forwarder, 2, true, reported_at).is_empty());
+      assert!(send_frame(&mut forwarder, 0, true, reported_at).is_empty());
+
+      // The hold and a while after: no layer comes back on its own.
+      let mut at = reported_at;
+      while at < reported_at + Duration::from_secs(10) {
+        at += Duration::from_millis(100);
+        forwarder.on_timer(device(2), at);
+        for layer in 0..3 {
+          assert!(
+            send_frame(&mut forwarder, layer, true, at).is_empty(),
+            "layer {layer} came back at {:?}",
+            at - reported_at
+          );
+        }
+      }
+    }
+
+    /// #1889: a participant whose upload collapsed loses its own voice on the way to the SFU, also
+    /// after its camera stopped: the acknowledgements of the video it receives share that upload.
+    /// It gets no video from the first gaps on.
+    #[test]
+    fn gaps_in_a_participants_own_voice_pause_its_video() {
+      let (mut forwarder, now) = video_room();
+      forwarder.subscribe(device(2), VIDEO, Some(2), now).unwrap();
+      forwarder
+        .participants
+        .get_mut(&device(2))
+        .unwrap()
+        .downlink
+        .apply_probe(10_000_000);
+      let up_at = switched_to(&mut forwarder, 2, now).expect("never switched up");
+      assert!(send_frame(&mut forwarder, 2, true, up_at).contains(&device(2)));
+
+      // Device 2 speaks; a third of its voice doesn't arrive.
+      let mut at = up_at;
+      for sequence_number in (0..40u16).filter(|seq| seq % 3 != 0) {
+        at = up_at + Duration::from_millis(20) * u32::from(sequence_number);
+        let mut rtp = header();
+        rtp.sequence_number = SequenceNumber(sequence_number);
+        rtp.set_audio_level(AudioLevel::new(20, true).unwrap());
+        forwarder.route(device(2), &rtp_datagram(2, 0, rtp), at).unwrap();
+      }
+      for layer in 0..3 {
+        assert!(
+          send_frame(&mut forwarder, layer, true, at).is_empty(),
+          "layer {layer}"
+        );
+      }
     }
 
     #[test]

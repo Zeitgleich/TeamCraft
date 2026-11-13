@@ -42,7 +42,9 @@ use crate::call_auth::{BindingRole, CallKeyAuthenticator, CallKeyError};
 use crate::call_resilience::CallTransport;
 use crate::call_video::{IncomingVideo, OutgoingVideo, ReceivedVideoFrame, ReleasedFrame};
 use crate::capture_health::StallWindow;
-use crate::datagram::{DatagramHeader, MediaDatagram, SimulcastLayer, StreamId, padding_datagram};
+use crate::datagram::{
+  DatagramHeader, MediaDatagram, SimulcastLayer, StreamId, TransportSeq, padding_datagram,
+};
 use crate::dave::{
   DaveCallId, DaveEpoch, DaveError, DaveFrameStats, DaveParticipant, DaveParticipantId, FrameCodec, MediaKind,
 };
@@ -53,6 +55,7 @@ use crate::rtp::{PayloadType, RtpHeader, RtpPacket, RtpTimestamp, SequenceNumber
 use crate::share_policy::UplinkTop;
 use crate::uplink_layers::{Adaptation, OwnTrack, UplinkLayers, UplinkPolicy, probe_demand_bps};
 use crate::video::EncodedVideoFrame;
+use crate::voice_guard::{VoiceGuard, VoiceGuardConfig};
 
 /// How many retired call keys an engine remembers (e2ee.md §8); the oldest goes first. A call with
 /// more departures than this is far beyond any meeting size, and an evicted key still needs its
@@ -60,6 +63,9 @@ use crate::video::EncodedVideoFrame;
 const MAX_RETIRED_CALL_KEYS: usize = 4096;
 /// RTP timestamp increment per 20 ms Opus frame at 48 kHz.
 const OPUS_FRAME_TICKS: u32 = 960;
+/// How long after a probe's padding the own voice isn't judged by the voice guard: a cluster's
+/// trains come a timer tick (~100 ms) apart, and their queue drains within a few hundred ms.
+const PADDING_SHADOW: Duration = Duration::from_millis(400);
 /// Largest datagram the engine produces; audio frames are far below it.
 const MAX_DATAGRAM_BYTES: usize = 1200;
 /// Keyframe requests per received track go out at most this often: the SFU's default limit per
@@ -190,6 +196,12 @@ pub struct CallEngine {
   maybe_join_retry_after: Option<Duration>,
   has_reported_unauthenticated_keys: bool,
   uplink: SendSideEstimator,
+  /// What becomes of the own voice on the uplink: while it is lost, the own video stops (#1871).
+  uplink_voice: VoiceGuard,
+  /// Whether the UI was told the own video is held for the voice ([`CallEngineEvent::VideoHeldForVoice`]).
+  is_video_held_for_voice: bool,
+  /// When the uplink rate probe last sent padding: voice sent along with it isn't judged.
+  maybe_padding_sent_at: Option<Instant>,
   downlink_feedback: FeedbackRecorder,
   /// Base for the SFU's arrival times in uplink feedback (only differences matter).
   uplink_feedback_epoch: Instant,
@@ -256,6 +268,9 @@ pub enum CallEngineEvent {
   /// receives and asks for lower layers than its tiles want (#1762); `false` once it is back to
   /// what they want. The UI says the computer is busy.
   DecodeLimited(bool),
+  /// The own video is held back while the own voice is lost on the uplink (#1871, #1891): the UI
+  /// says so, so nobody wonders why the camera froze. `false` once it may go out again.
+  VideoHeldForVoice(bool),
   /// Not from the engine but from the media driver: an own track's capture gets buffers from its
   /// source it can't turn into pictures (#1805), so the others see a still picture. What came over
   /// the judged window. The UI tells the sharer, and the call's crash reports hear of it.
@@ -651,6 +666,9 @@ impl CallEngine {
       maybe_join_retry_after: None,
       has_reported_unauthenticated_keys: false,
       uplink,
+      uplink_voice: VoiceGuard::new(VoiceGuardConfig::default()),
+      is_video_held_for_voice: false,
+      maybe_padding_sent_at: None,
       downlink_feedback: FeedbackRecorder::new(now),
       uplink_feedback_epoch: now,
       maybe_probe_bytes: None,
@@ -2040,6 +2058,18 @@ impl CallEngine {
     if let Some(capacity_bps) = self.maybe_uplink_capacity_bps {
       bps = capacity_bps;
     }
+    self.uplink_voice.on_feedback(feedback, now);
+    let is_held = self.maybe_uplink_capacity_bps.is_none() && self.uplink_voice.is_hurt(now);
+    if is_held != self.is_video_held_for_voice && (!is_held || !self.own_tracks.is_empty()) {
+      self.is_video_held_for_voice = is_held;
+      self.event(CallEngineEvent::VideoHeldForVoice(is_held));
+    }
+    if is_held {
+      // The own voice is being lost (an uplink that collapsed): the video stops at once, before
+      // the estimate came down, and comes back as after any cut (#1871). A transport that
+      // measures its uplink (the WebSocket fallback's pacer) loses nothing on the way.
+      bps = 0;
+    }
     let is_sending_screen_audio = self.screen_audio != ScreenAudioState::Off;
     let tracks = own_track_views(&self.own_tracks, &self.adaptive_tracks);
     let has_changed =
@@ -2103,6 +2133,12 @@ impl CallEngine {
     if self.maybe_probe_bytes.is_none() || is_join_probe_running || !self.is_in_call() {
       return;
     }
+    // While the own voice is being lost (#1871), padding would only take more of the link the
+    // voice is short of: the layers it holds back for the voice don't come back that way. A
+    // camera on a limited link otherwise stayed held for as long as the probes lost the voice.
+    if self.uplink_voice.is_hurt(now) {
+      return;
+    }
     let is_sending_screen_audio = self.screen_audio != ScreenAudioState::Off;
     let tracks = own_track_views(&self.own_tracks, &self.adaptive_tracks);
     let maybe_wanted_bps = self
@@ -2115,6 +2151,9 @@ impl CallEngine {
       maybe_wanted_bps,
       now,
     );
+    if !datagrams.is_empty() {
+      self.maybe_padding_sent_at = Some(now);
+    }
     self
       .outputs
       .extend(datagrams.into_iter().map(EngineOutput::Datagram));
@@ -3147,6 +3186,7 @@ impl CallEngine {
   fn measure_uplink_afresh(&mut self) {
     self.uplink.measure_afresh();
     self.uplink_layers.measure_afresh(self.uplink.estimate_bps());
+    self.uplink_voice.forget();
     // Tracks that were held back come back as well, with keyframes.
     self.announce_layers(true);
     self.announce_uplink_layers();
@@ -3238,7 +3278,16 @@ impl CallEngine {
     .to_bytes() else {
       return;
     };
-    self.send_media(stream, SimulcastLayer::BASE, &rtp, now);
+    let seq = self.send_media(stream, SimulcastLayer::BASE, &rtp, now);
+    // Voice that goes out along with a probe's padding is lost or held up by the padding when the
+    // link doesn't carry the probed rate: the probe's own outcome lowers the estimate then, and
+    // holding the video for it as well kept a camera on a limited link from ever settling.
+    let is_along_padding = self
+      .maybe_padding_sent_at
+      .is_some_and(|sent_at| now.saturating_duration_since(sent_at) < PADDING_SHADOW);
+    if !is_along_padding {
+      self.uplink_voice.on_send(seq, now);
+    }
   }
 
   /// Another device's screen share replaced ours on `takeover.stream_id`: the track and its sound
@@ -3322,8 +3371,15 @@ impl CallEngine {
     }
   }
 
-  /// Wraps one RTP packet in a datagram with a transport sequence number for uplink estimation.
-  fn send_media(&mut self, stream: StreamId, layer: SimulcastLayer, rtp: &[u8], now: Instant) {
+  /// Wraps one RTP packet in a datagram with a transport sequence number for uplink estimation;
+  /// returns that number.
+  fn send_media(
+    &mut self,
+    stream: StreamId,
+    layer: SimulcastLayer,
+    rtp: &[u8],
+    now: Instant,
+  ) -> TransportSeq {
     let datagram_len = rtp.len() + crate::datagram::DATAGRAM_HEADER_BYTES + 2;
     let transport_seq = self.uplink.on_send(datagram_len, now);
     let datagram = MediaDatagram {
@@ -3338,6 +3394,7 @@ impl CallEngine {
       Ok(bytes) => self.outputs.push_back(EngineOutput::Datagram(bytes)),
       Err(error) => warn!(%error, "media datagram too large"),
     }
+    transport_seq
   }
 
   fn add_participant(&mut self, participant: CallParticipant) {
@@ -5415,6 +5472,80 @@ mod tests {
 
   mod uplink {
     use super::*;
+
+    /// #1871: an uplink that collapsed loses the own voice; the camera stops with the first
+    /// feedback that shows it, not once the estimate came down, and stays off for the hold.
+    #[test]
+    fn lost_own_voice_stops_the_camera_at_once() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      ask_for(&mut alice, &video_track(50, 1, 3));
+      alice
+        .handle_signal(
+          event(
+            6,
+            CallEvent::VideoPublished {
+              track: video_track(50, 1, 3),
+            },
+          ),
+          now,
+        )
+        .unwrap();
+      drain(&mut alice);
+      // Half a second of voice, a third of it lost on the way.
+      for _ in 0..25 {
+        alice.send_audio(&frame(), now);
+      }
+      drain(&mut alice);
+      let feedback = TransportFeedback {
+        base_seq: 0,
+        arrivals_us: (0..25u64).map(|i| (i % 3 != 0).then_some(i * 20_000)).collect(),
+      };
+      let at = now + Duration::from_millis(500);
+      alice
+        .handle_signal(event(7, CallEvent::TransportFeedback { feedback }), at)
+        .unwrap();
+      let outputs = drain(&mut alice);
+      assert!(
+        outputs.contains(&EngineOutput::Event(CallEngineEvent::LayersNeeded {
+          stream_id: MediaStreamId(50),
+          layers: Vec::new(),
+        })),
+        "{outputs:?}"
+      );
+      assert!(
+        outputs.contains(&EngineOutput::Event(CallEngineEvent::UplinkEstimate {
+          bps: 0,
+          loss_percent: loss_percent(alice.uplink.loss_ratio()),
+        })),
+        "{outputs:?}"
+      );
+      // The UI is told why the camera stopped (#1891), once.
+      let held = outputs
+        .iter()
+        .filter(|output| {
+          matches!(
+            output,
+            EngineOutput::Event(CallEngineEvent::VideoHeldForVoice(true))
+          )
+        })
+        .count();
+      assert_eq!(held, 1, "{outputs:?}");
+      // And when the hold is over, with the next feedback that shows no loss.
+      for index in 0..25u32 {
+        alice.send_audio(&frame(), at + Duration::from_millis(20) * index);
+      }
+      drain(&mut alice);
+      let feedback = TransportFeedback {
+        base_seq: 25,
+        arrivals_us: (0..25u64).map(|i| Some(600_000 + i * 20_000)).collect(),
+      };
+      let later = at + Duration::from_secs(4);
+      alice
+        .handle_signal(event(8, CallEvent::TransportFeedback { feedback }), later)
+        .unwrap();
+      assert!(drain(&mut alice).contains(&EngineOutput::Event(CallEngineEvent::VideoHeldForVoice(false))));
+    }
 
     #[test]
     fn lossy_uplink_stops_video_before_audio_and_raises_the_loss_for_fec() {
