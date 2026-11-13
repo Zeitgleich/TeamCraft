@@ -540,6 +540,11 @@ pub trait ChatBackend {
   fn guest_key_code(&self, _guest: UserId) -> Option<String> {
     None
   }
+  /// Whether the owners' signed roster vouches for `user` as a workspace member: only then does a
+  /// meeting's lobby let them in as a member, never by the server's user kind (#1873).
+  fn is_signed_member(&self, _user: UserId) -> bool {
+    false
+  }
   /// Keeps the lobby setting the organizer chose for a meeting on this device.
   fn note_meeting_lobby(&self, _meeting: teamcraft_proto::MeetingId, _has_lobby: bool) {}
   /// Whether the organizer chose "no lobby" for the meeting on this device: only then does it let

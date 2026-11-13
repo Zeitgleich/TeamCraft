@@ -137,6 +137,11 @@ private fun LobbyRow(person: LobbyPerson, isDeciding: Boolean, isEnabled: Boolea
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
       )
+      LobbyPersonStatus.UnconfirmedMember -> Text(
+        stringResource(R.string.call_lobby_member_unconfirmed),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+      )
       LobbyPersonStatus.Member -> Unit
     }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {

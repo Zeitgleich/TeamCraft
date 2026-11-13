@@ -55,6 +55,8 @@ struct CallLobbySheet: View {
         }
       case .guestDevicePending:
         Text("call_lobby_guest_pending").font(.app(.caption)).foregroundStyle(.secondary)
+      case .unconfirmedMember:
+        Text("call_lobby_member_unconfirmed").font(.app(.caption)).foregroundStyle(.secondary)
       case .member:
         EmptyView()
       }

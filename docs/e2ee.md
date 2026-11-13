@@ -2075,7 +2075,28 @@ never by the server's member list:
     device pins the guest's identity key as the server presents it, admits only if it has the
     fingerprint reported with the knock, records the guest as a guest of this meeting with the
     end of their access, and adds the guest's device to the meeting chat's group with a signed
-    add (§4.6), always with history from the join on. The commit starts a **new epoch**; the
+    add (§4.6), always with history from the join on.
+    *Who is a guest, and until when* (#1873, `teamcraft_core::meeting_lobby`, the one rule of every
+    client's lobby, web, desktop, Android and iOS). The server's user kind decides neither:
+    - Somebody in the lobby is let in **as a member** (their devices, no key check, no end) only
+      if the owners' signed roster vouches for them: an owner or admin, or an account the owners'
+      apps noted (§3.1.4) that no owner removed by hand
+      (`WorkspaceState::vouches_for_member`). Anybody else is a **guest** whatever the server
+      calls them: the reported key, the key code, the end of access, and the record as a guest,
+      which keeps them off the admitters and out of the invitees' carry-over (§4.6.5, "Meetings
+      (D10)"). Somebody the server calls a member, whom the roster doesn't vouch for and who
+      reported no key, can't be admitted from the lobby ("Not confirmed as a member yet"; the
+      organizer invites them instead). A server that relabels a guest gains nothing; one that
+      relabels a member only keeps them waiting, which it can do anyway. Residual: until the
+      owners' apps noted a plain member's account (first come, §3.1.4; never under manual
+      signing), that member can't be let in from the lobby.
+    - **The end of access** the host's app asks for comes from the server's meeting end plus the
+      guests' grace; the core caps it at the end of the organizer-signed admitters (below) this
+      device verified, read afresh, while it lies ahead, and otherwise at the guests' grace (two
+      hours) from the admission (`meeting_lobby::guest_access_end`). A server that lengthens the
+      meeting lengthens nobody's access; withholding the statement only shortens it. Residual: the
+      organizer's device signs the end of the meeting as the meeting list shows it, so a server
+      that lengthens the meeting before the organizer's device signs gets that longer end signed. The commit starts a **new epoch**; the
     welcome is HPKE-encrypted to the init key of the guest's key package (RFC 9420 §12.4.3.1), so
     only the holder of that key can open it. The guest gets the secrets of that epoch and later
     ones, never a content key of an earlier one (no history share, §4.3): what was said before

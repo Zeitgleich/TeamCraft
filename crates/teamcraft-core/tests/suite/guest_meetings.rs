@@ -1033,7 +1033,14 @@ mod hosts {
   /// The phone apps' lobby (#1859): a host admits from the server's lobby entry, and the core
   /// decides by the entry and its own checks how the person gets in.
   mod lobby {
+    use teamcraft_core::meeting_invitees::InviteeList;
+    use teamcraft_core::meeting_lobby::UNSIGNED_GUEST_ACCESS_MS;
+    use teamcraft_core::workspace::RosterRole;
+    use teamcraft_crypto::meeting_admitters::{AdmittersExpectation, SignedMeetingAdmitters};
     use teamcraft_proto::LobbyEntry;
+
+    /// The release whose apps read signed invitees: the instance's minimum here.
+    const SIGNING_RELEASE: &str = "1.0.32";
 
     use super::*;
 
@@ -1125,18 +1132,203 @@ mod hosts {
       assert!(!rig.guest.client.has_group(rig.chat).unwrap());
     }
 
+    /// A hostile server relabels the guest as a member (#1873): the guest path is taken all the
+    /// same, the reported key is checked, and the guest's access ends.
+    #[tokio::test]
+    async fn a_guest_the_server_calls_a_member_is_let_in_as_a_guest() {
+      let mut rig = rig().await;
+      rig.server.show_as_member(rig.guest_id());
+      rig.guest_knows_the_link();
+      rig.server_admits_the_guest().await;
+
+      let other_key = rig.relabelled_entry(Some("ab".repeat(32)));
+      let refused = rig
+        .alice
+        .client
+        .let_in_from_lobby(rig.chat, &other_key, ACCESS_ENDS_MS)
+        .await;
+      assert!(
+        matches!(
+          refused,
+          Err(CoreError::GuestRefused(GuestRefusal::NotTheKnockingKey))
+        ),
+        "the knock's key is checked as for any guest"
+      );
+
+      let entry = rig.relabelled_entry(Some(rig.guest.client.own_fingerprint()));
+      rig
+        .alice
+        .client
+        .let_in_from_lobby(rig.chat, &entry, ACCESS_ENDS_MS)
+        .await
+        .unwrap();
+      settle(&mut [&mut rig.alice, &mut rig.guest]).await;
+      assert_eq!(rig.call_devices().await, 2);
+
+      // No signed end for the meeting on Alice's device: the guest's access lasts the grace from
+      // the admission, not until the far end the server asked for.
+      rig.clock.advance(UNSIGNED_GUEST_ACCESS_MS + 1_000);
+      rig.alice.client.full_sync().await.unwrap();
+      assert_eq!(rig.call_devices().await, 1);
+    }
+
+    /// A hostile server lengthens the meeting (#1873): the organizer's signed admitters' end wins.
+    #[tokio::test]
+    async fn a_longer_end_from_the_server_doesnt_lengthen_a_guests_access() {
+      let mut rig = rig().await;
+      rig
+        .alice
+        .client
+        .sync_meeting_admitters(rig.meeting, rig.chat, NOW_MS + 10_000)
+        .await
+        .unwrap();
+      rig.guest_knows_the_link();
+      rig.server_admits_the_guest().await;
+
+      let entry = rig.lobby_entry(Some(rig.guest.client.own_fingerprint()));
+      rig
+        .alice
+        .client
+        .let_in_from_lobby(rig.chat, &entry, ACCESS_ENDS_MS)
+        .await
+        .unwrap();
+      settle(&mut [&mut rig.alice, &mut rig.guest]).await;
+      rig.clock.advance(5_000);
+      rig.alice.client.full_sync().await.unwrap();
+      assert_eq!(rig.call_devices().await, 2, "still within the signed end");
+
+      rig.clock.advance(10_000);
+      rig.alice.client.full_sync().await.unwrap();
+      assert_eq!(rig.call_devices().await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_member_the_signed_roster_vouches_for_is_let_in_as_a_member() {
+      let mut rig = rig().await;
+      let mut bob = rig.member("Bob").await;
+      let roster = [
+        (rig.alice.client.user_id(), RosterRole::Owner),
+        (bob.client.user_id(), RosterRole::Admin),
+      ];
+      rig.alice.client.publish_roster(&roster).await.unwrap();
+
+      let entry = rig.member_entry(&bob);
+      rig
+        .alice
+        .client
+        .let_in_from_lobby(rig.chat, &entry, ACCESS_ENDS_MS)
+        .await
+        .unwrap();
+      settle(&mut [&mut rig.alice, &mut bob]).await;
+      bob.client.full_sync().await.unwrap();
+
+      assert!(bob.client.has_group(rig.chat).unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_member_the_signed_roster_doesnt_vouch_for_is_not_let_in_as_one() {
+      let mut rig = rig().await;
+      let mut bob = rig.member("Bob").await;
+
+      let entry = rig.member_entry(&bob);
+      let result = rig
+        .alice
+        .client
+        .let_in_from_lobby(rig.chat, &entry, ACCESS_ENDS_MS)
+        .await;
+
+      assert!(matches!(
+        result,
+        Err(CoreError::GuestRefused(GuestRefusal::NotASignedMember))
+      ));
+      settle(&mut [&mut rig.alice, &mut bob]).await;
+      bob.client.full_sync().await.unwrap();
+      assert!(!bob.client.has_group(rig.chat).unwrap());
+    }
+
+    /// The #1839 carry-over (users in the group, guests left out, may stay on the organizer's
+    /// list) doesn't count a guest the server calls a member as an invitee.
+    #[tokio::test]
+    async fn the_carry_over_leaves_out_a_guest_the_server_calls_a_member() {
+      let mut rig = rig().await;
+      rig.server.set_minimum_client_version(SIGNING_RELEASE);
+      rig.server.show_as_member(rig.guest_id());
+      rig.guest_knows_the_link();
+      rig.server_admits_the_guest().await;
+      let entry = rig.relabelled_entry(Some(rig.guest.client.own_fingerprint()));
+      rig
+        .alice
+        .client
+        .let_in_from_lobby(rig.chat, &entry, ACCESS_ENDS_MS)
+        .await
+        .unwrap();
+      settle(&mut [&mut rig.alice, &mut rig.guest]).await;
+
+      // An edit sends the server's list as it stands, the relabelled guest on it.
+      let edit = InviteeList::Chosen {
+        added: Vec::new(),
+        kept: vec![rig.guest_id()],
+      };
+      rig
+        .alice
+        .client
+        .update_meeting_chat_members_from(rig.chat, None, &edit, &[])
+        .await
+        .unwrap();
+      rig.publish_admitters().await;
+
+      let invitees = rig.signed_invitees();
+      assert!(!invitees.contains(&rig.guest_id().to_string().parse().unwrap()));
+    }
+
     impl Rig {
       /// The guest's entry in the lobby as the server lists it, with the fingerprint the server
       /// says the guest's page reported.
       fn lobby_entry(&self, maybe_fingerprint: Option<String>) -> LobbyEntry {
+        self.entry_of(self.guest_id(), "guest", maybe_fingerprint)
+      }
+
+      /// The guest's entry as a hostile server lists it: as a member.
+      fn relabelled_entry(&self, maybe_fingerprint: Option<String>) -> LobbyEntry {
+        self.entry_of(self.guest_id(), "member", maybe_fingerprint)
+      }
+
+      /// A member's knock, without a reported key.
+      fn member_entry(&self, member: &Peer) -> LobbyEntry {
+        self.entry_of(member.client.user_id(), "member", None)
+      }
+
+      fn entry_of(&self, user: UserId, kind: &str, maybe_fingerprint: Option<String>) -> LobbyEntry {
         serde_json::from_value(serde_json::json!({
-          "user": {"id": self.guest_id().to_string(), "display_name": GUEST_NAME, "kind": "guest"},
+          "user": {"id": user.to_string(), "display_name": GUEST_NAME, "kind": kind},
           "requested_at": NOW_MS,
           "is_by_link": true,
           "has_device": maybe_fingerprint.is_some(),
           "knock_fingerprint": maybe_fingerprint,
         }))
         .unwrap()
+      }
+
+      /// The raw invitee IDs of the newest admitters on the server, checked against Alice's key.
+      fn signed_invitees(&self) -> Vec<u64> {
+        let bytes = self.server.meeting_admitters(self.chat).unwrap();
+        let organizer: teamcraft_crypto::identity::IdentityFingerprint = self.fingerprint.parse().unwrap();
+        let verified = SignedMeetingAdmitters::from_bytes(&bytes)
+          .unwrap()
+          .verify(&AdmittersExpectation {
+            organizer: &organizer,
+            maybe_meeting_id: None,
+            conversation_id: SignedChatId::new(self.chat.to_string().parse().unwrap()),
+            now_ms: 0,
+            maybe_seen_sequence: None,
+          })
+          .unwrap();
+        verified
+          .maybe_invitees()
+          .expect("a statement that names the invitees")
+          .iter()
+          .map(|user| user.get())
+          .collect()
       }
     }
   }

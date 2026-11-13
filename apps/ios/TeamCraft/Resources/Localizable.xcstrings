@@ -20209,6 +20209,22 @@
         }
       }
     },
+    "call_lobby_member_unconfirmed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not confirmed as a member yet. Invite them to the meeting instead."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Noch nicht als Mitglied bestätigt. Lade die Person stattdessen zur Besprechung ein."
+          }
+        }
+      }
+    },
     "call_lobby_guest_pending": {
       "localizations": {
         "en": {

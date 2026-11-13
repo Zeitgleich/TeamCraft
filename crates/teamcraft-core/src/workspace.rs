@@ -24,8 +24,9 @@ use teamcraft_proto::{
 };
 
 use crate::convert;
+use crate::meeting_lobby::SignedMembership;
 use crate::records;
-use crate::role_signing::{AutomaticChange, ProviderMark, forget_accounts};
+use crate::role_signing::{AutomaticChange, HandRole, ProviderMark, forget_accounts};
 use crate::store::{LocalStore, Table};
 
 /// Admin tenures a device keeps. Far beyond any instance's turnover; past it the oldest go and the
@@ -350,6 +351,19 @@ impl WorkspaceState {
 
   pub fn is_admin(&self, user: UserId) -> bool {
     self.admins().any(|admin| admin == user)
+  }
+
+  /// Whether the owners' signed roster says `user` is a member of the workspace: an owner or admin,
+  /// or somebody whose account at the identity provider the owners' apps noted (e2ee.md §3.1.4) and
+  /// no owner removed by hand. A meeting guest is neither, whatever the server's user kind says
+  /// (#1873): the lobby lets in as a member only who this vouches for.
+  pub fn vouches_for_member(&self, user: UserId) -> bool {
+    self.roster.members.iter().any(|member| member.user_id == user)
+      || self
+        .roster
+        .provider_marks
+        .get(&user)
+        .is_some_and(|mark| mark.maybe_subject.is_some() && mark.maybe_by_hand != Some(HandRole::Removed))
   }
 
   /// Identity keys the roster vouches for (owners and admins).
@@ -880,6 +894,21 @@ pub fn is_passphrase_allowed(store: &impl LocalStore) -> bool {
     .ok()
     .flatten()
     .is_none_or(|state| state.policy.recovery.is_passphrase_allowed)
+}
+
+/// What the verified roster says of `user` for a meeting's lobby ([`WorkspaceState::vouches_for_member`]).
+/// Not a member before a roster was verified or when the state can't be read: the lobby then
+/// treats them as it treats a guest.
+pub fn signed_membership(store: &impl LocalStore, user: UserId) -> SignedMembership {
+  let is_vouched = records::get_json::<WorkspaceState>(store, Table::Workspace, crate::client::WORKSPACE_KEY)
+    .ok()
+    .flatten()
+    .is_some_and(|state| state.vouches_for_member(user));
+  if is_vouched {
+    SignedMembership::Member
+  } else {
+    SignedMembership::NotSigned
+  }
 }
 
 /// How large screen shares may be under the verified policy (#565), for the share options.

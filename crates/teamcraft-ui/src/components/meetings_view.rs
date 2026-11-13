@@ -9,7 +9,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::meeting_hosts::co_hosts_from_dialog;
-use teamcraft_core::meeting_lobby::LobbyAdmission;
+use teamcraft_core::meeting_lobby::{LobbyAdmission, SignedMembership};
 use teamcraft_crypto::guest_link::code_of_fingerprint;
 use teamcraft_proto::{
   CancelScope, IdempotencyKey, LobbyEntry, LobbyState, MeetingId, MeetingResponse, UnixMillis,
@@ -206,7 +206,7 @@ pub fn Lobby(meeting: MeetingId) -> impl IntoView {
         .find(|item| item.id == meeting)
         .map(|item| (item.conversation_id, item.ends_at.0))
     });
-    let admission = LobbyAdmission::of(entry);
+    let admission = lobby_admission(state, entry);
     spawn_local(async move {
       let client = hub.client();
       let outcome = async move {
@@ -241,11 +241,13 @@ pub fn Lobby(meeting: MeetingId) -> impl IntoView {
                 // A guest's device is let in once their page set it up and reported its key's
                 // fingerprint, and only after the key code is shown, for the host to compare with
                 // the guest's screen (e2ee.md §4.6, "Meeting guests"; the rule all clients share).
-                let is_guest = entry.user.kind == teamcraft_proto::UserKind::Guest;
-                let admission = LobbyAdmission::of(&entry);
-                let is_guest_unproven = !admission.has_device_to_add();
+                // Who is a member is the signed roster's word, not the server's user kind (#1873).
+                let admission = lobby_admission(state, &entry);
+                let is_guest = matches!(admission, LobbyAdmission::Guest { .. });
+                let is_guest_unproven = admission == LobbyAdmission::GuestDevicePending;
+                let is_member_unconfirmed = admission == LobbyAdmission::UnconfirmedMember;
                 let guest_id = entry.user.id;
-                if is_guest && !is_guest_unproven {
+                if is_guest {
                   prepare_key_code(state, hub, guest_id);
                 }
                 let (admit_entry, deny_entry) = (entry.clone(), entry);
@@ -255,7 +257,10 @@ pub fn Lobby(meeting: MeetingId) -> impl IntoView {
                     {is_guest_unproven.then(|| view! {
                       <span class="muted-text small">{move || i18n.t("meetings-guest-device-pending")}</span>
                     })}
-                    {(is_guest && !is_guest_unproven).then(|| view! {
+                    {is_member_unconfirmed.then(|| view! {
+                      <span class="muted-text small">{move || i18n.t("meetings-member-unconfirmed")}</span>
+                    })}
+                    {is_guest.then(|| view! {
                       <span class="muted-text small" title=move || i18n.t("meetings-guest-code-hint")>
                         {move || i18n.t("meetings-guest-code")}
                         " "
@@ -470,9 +475,28 @@ pub(crate) fn MeetingLinkButton(
   }
 }
 
+/// How this device lets `entry` in: [`LobbyAdmission::of`] with what the signed roster says of them.
+fn lobby_admission(state: AppState, entry: &LobbyEntry) -> LobbyAdmission {
+  LobbyAdmission::of(entry, lobby_membership(state, entry))
+}
+
+fn lobby_membership(state: AppState, entry: &LobbyEntry) -> SignedMembership {
+  let user = entry.user.id;
+  signed_membership(state.read(|backend| backend.is_signed_member(user)))
+}
+
+fn signed_membership(is_signed_member: bool) -> SignedMembership {
+  if is_signed_member {
+    SignedMembership::Member
+  } else {
+    SignedMembership::NotSigned
+  }
+}
+
 /// Lets an admitted person's devices into the meeting chat's encryption group from this device, as
 /// [`LobbyAdmission`] says: a guest's own device (with the key their page reported, until the end
-/// of their access), or a member's. The phone apps do the same (`Client::let_in_from_lobby`).
+/// of their access, which the core caps by the organizer's signed admitters), or a member's by
+/// the signed roster. The phone apps do the same (`Client::let_in_from_lobby`).
 fn let_in(state: AppState, chat: ConversationId, user: UserId, admission: LobbyAdmission, ends_at_ms: i64) {
   state.try_write(|backend| match admission {
     LobbyAdmission::Guest { knock_fingerprint } => {
@@ -480,18 +504,22 @@ fn let_in(state: AppState, chat: ConversationId, user: UserId, admission: LobbyA
     },
     LobbyAdmission::Member => backend.let_into_meeting_chat(chat, user),
     // Without a reported key there is nothing to admit; the lobby offers no "admit" then.
-    LobbyAdmission::GuestDevicePending => {},
+    LobbyAdmission::GuestDevicePending | LobbyAdmission::UnconfirmedMember => {},
   });
 }
 
 /// Whether the organizer's device lets a lobby entry in by itself: only when the organizer chose
 /// "no lobby" on this device (`is_open_by_own_record`; the server's `has_lobby` counts for nothing)
 /// and the person came with the meeting link, with a device whose key they reported.
-pub fn admits_by_itself(is_open_by_own_record: bool, entry: &LobbyEntry) -> bool {
+pub fn admits_by_itself(
+  is_open_by_own_record: bool,
+  entry: &LobbyEntry,
+  membership: SignedMembership,
+) -> bool {
   is_open_by_own_record
     && entry.is_by_link
     && entry.has_device
-    && LobbyAdmission::of(entry).has_device_to_add()
+    && LobbyAdmission::of(entry, membership).has_device_to_add()
 }
 
 /// In a meeting the organizer opened without a lobby, the organizer's device lets in by itself
@@ -525,7 +553,7 @@ pub fn admit_link_arrivals(
     };
     for entry in entries
       .into_iter()
-      .filter(|entry| admits_by_itself(is_open, entry))
+      .filter(|entry| admits_by_itself(is_open, entry, lobby_membership(state, entry)))
     {
       let user = entry.user.id;
       let is_new = started
@@ -534,7 +562,7 @@ pub fn admit_link_arrivals(
       if !is_new {
         continue;
       }
-      let admission = LobbyAdmission::of(&entry);
+      let admission = lobby_admission(state, &entry);
       let joined = i18n.t_with("meetings-joined-by-link", &[("name", &entry.user.display_name)]);
       spawn_local(async move {
         match hub.client().admit(meeting, user).await {
@@ -1707,21 +1735,31 @@ mod tests {
   #[test]
   fn only_the_organizers_own_record_lets_the_device_admit_by_itself() {
     let guest = lobby_entry("guest", true, true, Some(&"ab".repeat(32)));
+    let not_signed = SignedMembership::NotSigned;
     // The server says "no lobby" and "came with the link": without the organizer's own record of
     // "no lobby" nobody is let in unattended (#987 review).
-    assert!(!admits_by_itself(false, &guest));
-    assert!(admits_by_itself(true, &guest));
+    assert!(!admits_by_itself(false, &guest, not_signed));
+    assert!(admits_by_itself(true, &guest, not_signed));
     // An old link, a guest without a device or without a reported key: always a click.
     assert!(!admits_by_itself(
       true,
-      &lobby_entry("guest", false, true, Some(&"ab".repeat(32)))
+      &lobby_entry("guest", false, true, Some(&"ab".repeat(32))),
+      not_signed
     ));
     assert!(!admits_by_itself(
       true,
-      &lobby_entry("guest", true, false, Some(&"ab".repeat(32)))
+      &lobby_entry("guest", true, false, Some(&"ab".repeat(32))),
+      not_signed
     ));
-    assert!(!admits_by_itself(true, &lobby_entry("guest", true, true, None)));
-    assert!(admits_by_itself(true, &lobby_entry("member", true, true, None)));
+    assert!(!admits_by_itself(
+      true,
+      &lobby_entry("guest", true, true, None),
+      not_signed
+    ));
+    let member = lobby_entry("member", true, true, None);
+    assert!(admits_by_itself(true, &member, SignedMembership::Member));
+    // The server's word "member" without the signed roster's lets nobody in by itself (#1873).
+    assert!(!admits_by_itself(true, &member, not_signed));
   }
 
   fn lobby_entry(

@@ -1781,6 +1781,9 @@ pub enum ChatQuery {
   GuestKeyCode {
     guest: UserId,
   },
+  IsSignedMember {
+    user: UserId,
+  },
   IsOpenByOwnRecord {
     meeting: teamcraft_proto::MeetingId,
   },
@@ -2215,6 +2218,9 @@ impl ChatQuery {
       },
       Self::GuestKeyCode { guest } => ChatAnswer::Link {
         maybe_link: backend.guest_key_code(guest),
+      },
+      Self::IsSignedMember { user } => ChatAnswer::Flag {
+        value: backend.is_signed_member(user),
       },
       Self::IsOpenByOwnRecord { meeting } => ChatAnswer::Flag {
         value: backend.is_open_by_own_record(meeting),

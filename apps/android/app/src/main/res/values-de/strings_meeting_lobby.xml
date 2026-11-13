@@ -13,6 +13,7 @@
   <string name="call_lobby_guest_code">Gast, Schlüsselcode</string>
   <string name="call_lobby_guest_verifying">Gast, Schlüssel wird geprüft …</string>
   <string name="call_lobby_guest_pending">Gast, richtet sein Gerät noch ein</string>
+  <string name="call_lobby_member_unconfirmed">Noch nicht als Mitglied bestätigt. Lade die Person stattdessen zur Besprechung ein.</string>
   <string name="call_lobby_failed">%1$s: %2$s</string>
   <string name="call_lobby_no_longer_waiting">Die Person wartet nicht mehr.</string>
   <string name="call_lobby_admit_failed">Dieses Gerät konnte die Person nicht einlassen. Versuche es erneut oder frag den Organisator.</string>

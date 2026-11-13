@@ -13,6 +13,7 @@
   <string name="call_lobby_guest_code">Guest, key code</string>
   <string name="call_lobby_guest_verifying">Guest, checking the key…</string>
   <string name="call_lobby_guest_pending">Guest, still setting up their device</string>
+  <string name="call_lobby_member_unconfirmed">Not confirmed as a member yet. Invite them to the meeting instead.</string>
   <string name="call_lobby_failed">%1$s: %2$s</string>
   <string name="call_lobby_no_longer_waiting">They are no longer waiting.</string>
   <string name="call_lobby_admit_failed">This device could not let them in. Try again or ask the organizer.</string>

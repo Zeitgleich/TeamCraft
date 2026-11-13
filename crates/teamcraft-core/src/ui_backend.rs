@@ -3366,6 +3366,11 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     crate::client::guest_key_code(self.store_ref(), guest)
   }
 
+  fn is_signed_member(&self, user: UserId) -> bool {
+    crate::workspace::signed_membership(self.store_ref(), user)
+      == crate::meeting_lobby::SignedMembership::Member
+  }
+
   fn note_meeting_lobby(&self, meeting: teamcraft_proto::MeetingId, has_lobby: bool) {
     self.command(CoreCommand::NoteMeetingLobby { meeting, has_lobby });
   }
