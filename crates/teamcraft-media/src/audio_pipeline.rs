@@ -295,6 +295,7 @@ mod tests {
       let mut mixer = PlaybackMixer::new(JitterBufferConfig {
         target_depth_packets: 1,
         max_depth_packets: 10,
+        max_adaptive_depth_packets: 1,
         max_excess_packets: 10,
       });
       let mut first = CapturePipeline::new(OpusEncoderConfig::default()).unwrap();
@@ -325,6 +326,7 @@ mod tests {
       let mut mixer = PlaybackMixer::new(JitterBufferConfig {
         target_depth_packets: 1,
         max_depth_packets: 10,
+        max_adaptive_depth_packets: 1,
         max_excess_packets: 10,
       });
       let mut voice = CapturePipeline::new(OpusEncoderConfig::default()).unwrap();
@@ -360,6 +362,7 @@ mod tests {
       let mut mixer = PlaybackMixer::new(JitterBufferConfig {
         target_depth_packets: 1,
         max_depth_packets: 10,
+        max_adaptive_depth_packets: 1,
         max_excess_packets: 10,
       });
       let mut capture = CapturePipeline::new(OpusEncoderConfig::default()).unwrap();
