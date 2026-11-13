@@ -14,7 +14,8 @@ use crate::{
   AdminJoinRequestChange, CallEndCause, CallId, CallRosterEntry, ConversationId, CustomStatus,
   DeviceActivity, DeviceId, DeviceLinkClosedReason, DeviceLinkRequest, ErrorBody, LobbyState, MeetingId,
   MessageId, MessageResponse, MlsMessageResponse, PresenceState, RecoveryRequestId, SignedChannelDeletion,
-  SpaceId, SystemEventResponse, ThreadId, UnixMillis, UserGroupId, UserId, UserSummary, WorkspaceLogKind,
+  SignedSpaceDeletion, SpaceId, SystemEventResponse, ThreadId, UnixMillis, UserGroupId, UserId, UserSummary,
+  WorkspaceLogKind,
 };
 
 /// How long a client waits before it reports that the user stopped being attentive, so the server
@@ -147,6 +148,15 @@ pub enum GatewayEvent {
     conversation_id: ConversationId,
     #[serde(rename = "signed_deletion", default, skip_serializing_if = "Option::is_none")]
     maybe_signed_deletion: Option<SignedChannelDeletion>,
+    /// The channel went with its space, whose deletion a workspace admin signed (e2ee.md §4.6.5,
+    /// D7): the device purges at once only if the document names the channel and its anchor places
+    /// it in that space. Clients before signed space deletions ignore the field.
+    #[serde(
+      rename = "signed_space_deletion",
+      default,
+      skip_serializing_if = "Option::is_none"
+    )]
+    maybe_signed_space_deletion: Option<SignedSpaceDeletion>,
   },
   /// The signed roster or policy log has a new entry; fetch entries after the known version.
   WorkspaceUpdate {
@@ -600,6 +610,7 @@ mod tests {
     let event = GatewayEvent::ConversationDelete {
       conversation_id: conversation(),
       maybe_signed_deletion: None,
+      maybe_signed_space_deletion: None,
     };
     let json = serde_json::to_string(&event).unwrap();
     assert_eq!(json, r#"{"type":"conversation_delete","conversation_id":"7"}"#);
@@ -623,6 +634,7 @@ mod tests {
         payload: Base64Bytes::new(vec![1]),
         signature: Base64Bytes::new(vec![2]),
       }),
+      maybe_signed_space_deletion: None,
     };
     let json = serde_json::to_string(&event).unwrap();
     assert_eq!(
@@ -632,6 +644,27 @@ mod tests {
     assert_eq!(serde_json::from_str::<GatewayEvent>(&json).unwrap(), event);
     let OlderEvent::ConversationDelete { conversation_id } = serde_json::from_str(&json).unwrap();
     assert_eq!(conversation_id, conversation());
+  }
+
+  /// A space's signature is one more field (#1727): older clients read the event as before.
+  #[test]
+  fn a_conversation_delete_with_a_space_signature_has_a_stable_wire_format() {
+    use crate::Base64Bytes;
+
+    let event = GatewayEvent::ConversationDelete {
+      conversation_id: conversation(),
+      maybe_signed_deletion: None,
+      maybe_signed_space_deletion: Some(SignedSpaceDeletion {
+        payload: Base64Bytes::new(vec![1]),
+        signature: Base64Bytes::new(vec![2]),
+      }),
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(
+      json,
+      r#"{"type":"conversation_delete","conversation_id":"7","signed_space_deletion":{"payload":"AQ==","signature":"Ag=="}}"#
+    );
+    assert_eq!(serde_json::from_str::<GatewayEvent>(&json).unwrap(), event);
   }
 
   #[test]

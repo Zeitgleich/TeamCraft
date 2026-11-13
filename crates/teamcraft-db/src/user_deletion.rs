@@ -198,6 +198,16 @@ impl Database {
     )
     .fetch_all(&mut *tx)
     .await?;
+    sqlx::query!(
+      r#"DELETE FROM space_deletion_signatures s
+         WHERE s.created_at < $1 AND NOT EXISTS
+           (SELECT 1 FROM space_deletion_channels c
+             JOIN deleted_conversations d ON d.conversation_id = c.conversation_id
+             WHERE c.space_id = s.space_id)"#,
+      before,
+    )
+    .execute(&mut *tx)
+    .await?;
     // A conversation still being cleared keeps its row until then; its sweep takes the log.
     sqlx::query!(
       r#"DELETE FROM channel_role_log l WHERE l.conversation_id = ANY($1) AND NOT EXISTS

@@ -361,6 +361,7 @@ mod server_claims {
       &GatewayEvent::ConversationDelete {
         conversation_id: channel,
         maybe_signed_deletion: None,
+        maybe_signed_space_deletion: None,
       },
     );
     settle(&mut [&mut bob]).await;

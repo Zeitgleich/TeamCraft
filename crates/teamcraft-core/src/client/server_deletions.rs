@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use teamcraft_crypto::channel_anchor::name_hash;
 use teamcraft_proto::{
   ConversationId, ConversationKind, ConversationResponse, DeleteConversationRequest, SignedChannelDeletion,
-  SpaceId,
+  SignedSpaceDeletion, SpaceDeletionDocument, SpaceId,
 };
 
 use super::Client;
@@ -20,8 +20,8 @@ use crate::api::{ApiError, ServerApi};
 use crate::error::CoreError;
 use crate::records;
 use crate::signed_deletion::{
-  DeletionVerifier, GroupFacts, can_sign_deletion, is_told_epoch_plausible, sign_channel_deletion,
-  verify_signed_deletion,
+  DeletionVerifier, GroupFacts, VerifiedDeletion, can_sign_deletion, is_told_epoch_plausible,
+  sign_channel_deletion, verify_signed_deletion, verify_signed_space_deletion,
 };
 use crate::store::{LocalStore, MessageFilter, Table};
 
@@ -35,6 +35,26 @@ pub(crate) const SUSPECT_DELETIONS_KEY: &str = "suspect_deletions";
 /// Tries with fresh epochs of a signed deletion: a commit may come in between, and an admin outside
 /// a group learns its epoch from the first refusal.
 const DELETION_ATTEMPTS: usize = 3;
+
+/// What a deletion the server hands out came signed with: a channel's own deletion, or the
+/// deletion of the space it went with (e2ee.md §4.6.5, D7).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum DeletionProof<'a> {
+  Channel(&'a SignedChannelDeletion),
+  Space(&'a SignedSpaceDeletion),
+}
+
+impl<'a> DeletionProof<'a> {
+  /// The proof a deletion came with: a channel's own signature first, else its space's.
+  pub(crate) fn of(
+    maybe_channel: Option<&'a SignedChannelDeletion>,
+    maybe_space: Option<&'a SignedSpaceDeletion>,
+  ) -> Option<Self> {
+    maybe_channel
+      .map(Self::Channel)
+      .or_else(|| maybe_space.map(Self::Space))
+  }
+}
 
 /// A conversation the server claimed deleted, hidden here until its retention ran out.
 #[derive(Debug, Serialize, Deserialize)]
@@ -57,6 +77,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     &mut self,
     conversation: ConversationId,
     maybe_signed: Option<SignedChannelDeletion>,
+    maybe_signed_space: Option<SignedSpaceDeletion>,
   ) -> Result<(), CoreError> {
     if !self.has_own_deletion(conversation)? {
       match self.api.conversation(conversation).await {
@@ -68,15 +89,31 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         _ => {},
       }
     }
-    if maybe_signed.is_some()
+    let maybe_proof = DeletionProof::of(maybe_signed.as_ref(), maybe_signed_space.as_ref());
+    if maybe_proof.is_some_and(|proof| self.needs_roster_for(proof))
       && let Err(error) = self.sync_workspace().await
     {
       // A sync has just read it; here the event may have come long after the last read.
       tracing::warn!(conversation_id = %conversation, %error, "judging a signed deletion on the roster this device has");
     }
-    self
-      .note_claimed_deletion(conversation, maybe_signed.as_ref())
-      .await
+    self.note_claimed_deletion(conversation, maybe_proof).await
+  }
+
+  /// Whether to read the roster before judging: always for a channel's deletion, whose event may
+  /// come long after the last read; for a space's only if it names a newer roster than this device
+  /// holds, since every one of its channels comes with the same document.
+  fn needs_roster_for(&self, proof: DeletionProof<'_>) -> bool {
+    match proof {
+      DeletionProof::Channel(_) => true,
+      DeletionProof::Space(signed) => {
+        let Ok(document) = serde_json::from_slice::<SpaceDeletionDocument>(signed.payload.as_slice()) else {
+          return false;
+        };
+        self
+          .workspace()
+          .is_ok_and(|workspace| workspace.roster.version < document.roster_version)
+      },
+    }
   }
 
   /// A deletion the server claims, with the signature it came with, if any. One this device verifies
@@ -85,12 +122,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub(crate) async fn note_claimed_deletion(
     &mut self,
     conversation: ConversationId,
-    maybe_signed: Option<&SignedChannelDeletion>,
+    maybe_proof: Option<DeletionProof<'_>>,
   ) -> Result<(), CoreError> {
-    if let Some(signed) = maybe_signed
+    if let Some(proof) = maybe_proof
       && !self.has_own_deletion(conversation)?
     {
-      match self.verifies_signed_deletion(conversation, signed).await {
+      match self.verifies_signed_deletion(conversation, proof).await {
         Ok(true) => {
           self.note_signed_purge()?;
           // The same mark as the user's own deletion: a purge cut off is finished by the next claim,
@@ -118,7 +155,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   async fn verifies_signed_deletion(
     &mut self,
     conversation: ConversationId,
-    signed: &SignedChannelDeletion,
+    proof: DeletionProof<'_>,
   ) -> Result<bool, CoreError> {
     if !self.has_group(conversation)?
       || self.is_pinned(&notes_key(conversation))?
@@ -128,7 +165,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     let maybe_known: Option<ConversationResponse> =
       records::get_json(&self.store, Table::Conversations, &conversation.to_string())?;
-    if let Err(error) = self.sync_channel_roles(conversation).await {
+    // A space's deletion counts only from a workspace admin, and the server keeps no channel's log
+    // for it: its roles add nothing but the alarms the copy here has.
+    if matches!(proof, DeletionProof::Channel(_))
+      && let Err(error) = self.sync_channel_roles(conversation).await
+    {
       tracing::warn!(conversation_id = %conversation, %error, "judging a signed deletion on the roles this device has");
     }
     let roles = self.channel_role_state(conversation)?;
@@ -158,7 +199,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       newest_server_ms: self.newest_server_ms(),
       anchor,
     };
-    let verified = match verify_signed_deletion(signed, &verifier) {
+    let judged: Result<VerifiedDeletion, _> = match proof {
+      DeletionProof::Channel(signed) => verify_signed_deletion(signed, &verifier),
+      DeletionProof::Space(signed) => verify_signed_space_deletion(signed, &verifier),
+    };
+    let verified = match judged {
       Ok(verified) => verified,
       Err(error) => {
         tracing::warn!(conversation_id = %conversation, %error, "a signed deletion doesn't hold; it stays the server's word");
@@ -360,13 +405,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// The user deleted a space here and the server took it. Which channels were in it is
-  /// `maybe_space_id`, the server's word: nothing signed binds a channel to its space yet (#1171),
-  /// and channels move between spaces. A server could relabel any conversation into the space being
-  /// deleted, so purging what it lists there at once would let it destroy the deleter's copies
-  /// (#1162). So they are claims here too: hidden, their history kept for the retention, and counted
-  /// towards the mass notice, where a relabel shows as more than the user deleted. What this device
-  /// saw as direct stays as it is: no space holds one.
-  pub(crate) fn note_space_deletion(&mut self, space: SpaceId) -> Result<(), CoreError> {
+  /// `maybe_space_id`, the server's word, and channels move between spaces: a server could relabel
+  /// any conversation into the space being deleted (#1162). So each channel is judged as on every
+  /// member's device: with the user's own signature (`maybe_signed`, D7), it purges at once only
+  /// where its anchor places it in this space and the rest of a signed deletion holds; everything
+  /// else is a claim, hidden with its history kept for the retention and counted towards the mass
+  /// notice, where a relabel shows as more than the user deleted. What this device saw as direct
+  /// stays as it is: no space holds one.
+  pub(crate) async fn note_space_deletion(
+    &mut self,
+    space: SpaceId,
+    maybe_signed: Option<&SignedSpaceDeletion>,
+  ) -> Result<(), CoreError> {
     let listed: Vec<ConversationId> = self
       .cached_conversations()?
       .into_values()
@@ -378,7 +428,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         tracing::warn!(conversation_id = %channel, "the server lists a direct conversation in a deleted space; left alone");
         continue;
       }
-      self.note_server_deletion(channel)?;
+      self
+        .note_claimed_deletion(channel, maybe_signed.map(DeletionProof::Space))
+        .await?;
     }
     Ok(())
   }

@@ -14,10 +14,12 @@ use super::Client;
 use super::catch_up::FirstPages;
 use super::read_ahead::FirstListing;
 use super::server_changes::Observed;
+use super::server_deletions::DeletionProof;
 use super::workspace_admin::StoredRoster;
 use crate::api::{ApiError, ServerApi};
 use crate::clock::{Clock, SystemClock};
 use crate::error::CoreError;
+use crate::signed_deletion::space_deletion_channels;
 use crate::store::{LocalStore, Table};
 use crate::{read_state, records};
 
@@ -119,7 +121,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .iter()
         .find(|signature| signature.conversation_id == *deleted)
         .map(|signature| &signature.signed_deletion);
-      self.note_claimed_deletion(*deleted, maybe_signed).await?;
+      // Which space's deletion names it is read unverified: the verdict checks it again.
+      let maybe_signed_space = listing
+        .signed_space_deletions
+        .iter()
+        .find(|signed| space_deletion_channels(signed).contains(deleted));
+      self
+        .note_claimed_deletion(*deleted, DeletionProof::of(maybe_signed, maybe_signed_space))
+        .await?;
     }
     self.purge_expired_quarantines()?;
     let conversations = listing.conversations;

@@ -2,14 +2,16 @@ use std::collections::HashMap;
 
 use serde_json::json;
 use teamcraft_db::{
-  ExpiryChange, NewSpace, NewSpaceMember, SpaceChanges, SpaceChannelCounts, SpaceLeft, SpaceListing,
-  SpaceMember, SpaceView,
+  ExpiryChange, NewSpace, NewSpaceMember, SpaceChanges, SpaceChannelCounts, SpaceDeletionSignature,
+  SpaceLeft, SpaceListing, SpaceMember, SpaceView,
 };
 use teamcraft_proto::{
   AddSpaceMemberRequest, CategoryId, CategoryResponse, CreateCategoryRequest, CreateSpaceRequest,
-  GatewayEvent, JoinPolicy, ListCategoriesResponse, ListSpaceMembersResponse, ListSpacesResponse, Permission,
-  RemoveMemberQuery, SpaceId, SpaceMemberResponse, SpaceResponse, SpaceRole, SystemEventKind, UnixMillis,
-  UpdateCategoryRequest, UpdateSpaceMemberRequest, UpdateSpaceRequest, UserId, UserKind,
+  DeleteSpaceRequest, GatewayEvent, JoinPolicy, ListCategoriesResponse, ListSpaceMembersResponse,
+  ListSpacesResponse, MAX_SPACE_DELETION_CHANNELS, Permission, RemoveMemberQuery, SignedSpaceDeletion,
+  SpaceDeletionDocument, SpaceDeletionPreviewChannel, SpaceDeletionPreviewResponse, SpaceId,
+  SpaceMemberResponse, SpaceResponse, SpaceRole, SystemEventKind, UnixMillis, UpdateCategoryRequest,
+  UpdateSpaceMemberRequest, UpdateSpaceRequest, UserId, UserKind,
 };
 use time::OffsetDateTime;
 
@@ -293,22 +295,77 @@ async fn set_archived_with_channels(
   Ok(())
 }
 
+/// The largest signed space deletion's payload: every channel with its ID, epoch and name hash.
+const MAX_SPACE_DELETION_PAYLOAD_BYTES: usize = 256 * 1024;
+/// The largest signature (a device certificate and its signature), as for a channel's deletion.
+const MAX_SPACE_DELETION_SIGNATURE_BYTES: usize = 4096;
+
+/// What deleting a space takes, for the deleter's confirmation and signature (`delete_space`, e2ee.md
+/// §4.6.5, D7): the channels the caller may see, with their names and their groups' epochs now.
+pub async fn space_deletion_preview(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: SpaceId,
+) -> Result<SpaceDeletionPreviewResponse, ApiError> {
+  let access = load_space(state, caller, id).await?;
+  require(state, caller, Permission::DeleteSpace, &access.target())?;
+  let rows = state
+    .database
+    .space_deletion_preview(id, caller.user.id, is_instance_admin(caller))
+    .await?;
+  Ok(SpaceDeletionPreviewResponse {
+    channels: rows
+      .into_iter()
+      .map(|row| SpaceDeletionPreviewChannel {
+        conversation_id: row.conversation,
+        name: row.name,
+        epoch: row.epoch,
+      })
+      .collect(),
+  })
+}
+
 /// Deletes a space with all of its channels for everybody, archived or not, also with people in it
 /// (`delete_space`: workspace admins and owners, and the admins of the space unless it holds a
 /// private channel they aren't in; admin.md §3.1.1). Marks it and its channels in one transaction,
 /// then background work clears them ([`super::conversations::sweep_deleted`]). Answers 404 once it is
-/// gone, which clients take as done.
-pub async fn delete_space(state: &AppState, caller: &AuthenticatedUser, id: SpaceId) -> Result<(), ApiError> {
+/// gone, which clients take as done. A signed deletion must name each channel it lists that is in
+/// the space with its group's epoch at this moment (under the locks), so that a commit since refuses
+/// it on the devices; whom it names is for the members' devices to judge.
+pub async fn delete_space(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: SpaceId,
+  request: DeleteSpaceRequest,
+) -> Result<(), ApiError> {
+  let maybe_checked = request
+    .maybe_signed_deletion
+    .as_ref()
+    .map(|signed| check_signed_space_deletion(signed, id))
+    .transpose()?;
   let access = load_space(state, caller, id).await?;
   require(state, caller, Permission::DeleteSpace, &access.target())?;
   let audit_target = AuditTarget::new("space", id);
   let audit = audit::prepared(state, caller.user.id, "space_deleted", &audit_target)?;
   let sees_all = is_instance_admin(caller);
+  let maybe_signature = maybe_checked.as_ref().map(|(_, signature)| signature);
   let maybe_deletion = state
     .database
-    .delete_space_locked(id, &audit, |channels| {
+    .delete_space_locked(id, &audit, maybe_signature, |channels| {
       if channels.iter().any(|channel| channel.maybe_importer.is_some()) {
         return Err(ApiError::ImportInProgress);
+      }
+      if let Some((document, _)) = &maybe_checked
+        && let Some(stale) = channels.iter().find(|channel| {
+          document
+            .channels
+            .iter()
+            .any(|signed| signed.conversation_id == channel.conversation && signed.epoch != channel.epoch)
+        })
+      {
+        return Err(ApiError::EpochConflict {
+          current_epoch: stale.epoch,
+        });
       }
       let has_hidden = channels
         .iter()
@@ -326,7 +383,13 @@ pub async fn delete_space(state: &AppState, caller: &AuthenticatedUser, id: Spac
     for member in members {
       super::calls::evict_from_call(state, *channel, *member).await;
     }
-    announce_deleted_direct(state, *channel, members, None);
+    announce_deleted_direct(
+      state,
+      *channel,
+      members,
+      None,
+      request.maybe_signed_deletion.clone(),
+    );
     crate::webhooks::emit_for_conversation(
       state,
       teamcraft_proto::WebhookEventKind::ChannelDeleted,
@@ -345,6 +408,52 @@ pub async fn delete_space(state: &AppState, caller: &AuthenticatedUser, id: Spac
   );
   wake_sweep(state);
   Ok(())
+}
+
+/// The checks of a signed space deletion the server can make: sizes, that its document reads, names
+/// this space and each channel once, and not too many. The signature is for the members' devices.
+fn check_signed_space_deletion(
+  signed: &SignedSpaceDeletion,
+  id: SpaceId,
+) -> Result<(SpaceDeletionDocument, SpaceDeletionSignature), ApiError> {
+  if signed.payload.is_empty() || signed.payload.len() > MAX_SPACE_DELETION_PAYLOAD_BYTES {
+    return Err(ApiError::InvalidRequest(
+      "the signed deletion's payload has an invalid size".into(),
+    ));
+  }
+  if signed.signature.is_empty() || signed.signature.len() > MAX_SPACE_DELETION_SIGNATURE_BYTES {
+    return Err(ApiError::InvalidRequest(
+      "the signed deletion's signature has an invalid size".into(),
+    ));
+  }
+  let document: SpaceDeletionDocument = serde_json::from_slice(signed.payload.as_slice())
+    .map_err(|e| ApiError::InvalidRequest(format!("the payload is not a space deletion document: {e}")))?;
+  if document.space_id != id {
+    return Err(ApiError::InvalidRequest(
+      "the signed deletion is for another space".into(),
+    ));
+  }
+  if document.channels.len() > MAX_SPACE_DELETION_CHANNELS {
+    return Err(ApiError::InvalidRequest(
+      "the signed deletion names too many channels".into(),
+    ));
+  }
+  let mut named: Vec<_> = document
+    .channels
+    .iter()
+    .map(|channel| channel.conversation_id)
+    .collect();
+  named.sort_unstable();
+  if named.windows(2).any(|pair| pair[0] == pair[1]) {
+    return Err(ApiError::InvalidRequest(
+      "the signed deletion names a channel twice".into(),
+    ));
+  }
+  let signature = SpaceDeletionSignature {
+    payload: signed.payload.as_slice().to_vec(),
+    signature: signed.signature.as_slice().to_vec(),
+  };
+  Ok((document, signature))
 }
 
 /// Joins an open space as a member. Guests are never self-joining; they are invited.
@@ -629,7 +738,7 @@ async fn announce_left(
     let channel = *channel;
     super::calls::evict_from_call(state, channel, user_id).await;
     if left.deleted.contains(&channel) {
-      announce_deleted_direct(state, channel, &[user_id], None);
+      announce_deleted_direct(state, channel, &[user_id], None, None);
       continue;
     }
     let members = state.database.conversation_member_ids(channel).await?;

@@ -413,6 +413,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       } => self.leave_channel(conversation, deletes_if_last).await,
       CoreCommand::DeleteChannel { conversation } => self.delete_channel(conversation).await,
       CoreCommand::DeleteSpace { space } => self.delete_space(space).await,
+      CoreCommand::PrepareSpaceDeletion { space } => self.prepare_space_deletion(space).await,
       CoreCommand::RefreshCategories { space } => self.refresh_categories(space).await.map(|_| ()),
       CoreCommand::CreateCategory { space, name } => self.create_category(space, &name).await,
       CoreCommand::RenameCategory {

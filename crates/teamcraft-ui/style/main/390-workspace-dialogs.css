@@ -90,3 +90,8 @@
   flex: none;
   margin-top: 2px;
 }
+
+/* A space's deletion: its channels, each with who last named it (#1727). */
+.space-deletion-list { list-style: none; margin: 0 0 var(--space-2); padding: 0; max-height: 14rem; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.space-deletion-list li { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.space-deletion-name { font-weight: 600; overflow-wrap: anywhere; }

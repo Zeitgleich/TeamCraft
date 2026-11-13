@@ -68,6 +68,7 @@ mod self_add;
 mod server_changes;
 pub(crate) mod server_deletions;
 mod sources;
+mod space_deletion;
 mod sync;
 mod sync_progress;
 mod sync_trace;
@@ -156,6 +157,9 @@ pub use role_signing::{RoleSigningProblem, RoleSigningRecord, role_signing_recor
 pub use segments::{SegmentPlan, SegmentPrefetch};
 pub use self_add::{is_waiting_for_admission, self_add_attempts};
 pub use sources::HistoryScan;
+pub use space_deletion::{
+  ChannelRenamer, RenamerRole, SpaceDeletionPreview, SpaceDeletionPreviewChannel, space_deletion_preview,
+};
 pub use sync_progress::{SyncProgressSignal, notify_sync_progress_during};
 pub use sync_trace::SyncPhase;
 use teamcraft_crypto::membership::ChangeId;

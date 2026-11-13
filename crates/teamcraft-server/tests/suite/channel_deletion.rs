@@ -117,29 +117,133 @@ mod signed_deletions {
     );
   }
 
-  /// A space's deletion is never signed: what its channels are is the server's word, so a signature
-  /// for them could be had for anything. Its channels stay claims.
+  /// A space's signed deletion (e2ee.md §4.6.5, D7, #1727): kept once for the space, never
+  /// verified, and listed to the members of its channels; the channels' own signatures stay apart.
   #[tokio::test]
-  async fn a_space_keeps_no_signature() {
+  async fn a_signed_space_deletion_is_kept_once_and_listed_to_the_members() {
     let app = app!();
-    let (server_owner, ann) = (owner(), member("ann"));
+    let (server_owner, ann, bob) = (owner(), member("ann"), member("bob"));
     let ann_id = user_id(&app, &ann).await;
+    let _ = user_id(&app, &bob).await;
     let space = create_space(&app, &server_owner, "Project A", "invite_only").await;
     add_space_member(&app, &server_owner, &space, &ann_id, "member").await;
-    let channel = create_channel(&app, &ann, &space, "general", "private").await;
+    let general = create_channel(&app, &ann, &space, "general", "private").await;
+    let random = create_channel(&app, &ann, &space, "random", "public").await;
 
+    let preview = app.get(&server_owner, &format!("/spaces/{space}/deletion")).await;
+    assert_eq!(preview.status, StatusCode::OK, "{}", preview.body);
+    assert_eq!(
+      preview.body["channels"],
+      json!([
+        {"conversation_id": general, "name": "general", "epoch": 0},
+        {"conversation_id": random, "name": "random", "epoch": 0},
+      ])
+    );
     let done = app
       .delete_json(
         &server_owner,
         &format!("/spaces/{space}"),
-        &json!({"signed_deletions": [signed_deletion(&channel, 0)]}),
+        &signed_space_body(&space, &[(&general, 0), (&random, 0)]),
       )
       .await;
     assert_eq!(done.status, StatusCode::NO_CONTENT, "{}", done.body);
 
     let listed = app.get(&ann, "/conversations").await;
-    assert_eq!(listed.body["deleted_conversation_ids"], json!([channel]));
+    assert_eq!(listed.body["deleted_conversation_ids"], json!([general, random]));
     assert!(listed.body.get("signed_deletions").is_none(), "{}", listed.body);
+    assert_eq!(
+      listed.body["signed_space_deletions"].as_array().map(Vec::len),
+      Some(1),
+      "once for the space: {}",
+      listed.body
+    );
+    assert_eq!(
+      listed.body["signed_space_deletions"][0]["signature"],
+      json!("AQID")
+    );
+    let unrelated = app.get(&bob, "/conversations").await;
+    assert!(
+      unrelated.body.get("signed_space_deletions").is_none(),
+      "{}",
+      unrelated.body
+    );
+
+    sweep_deleted(&app.state).await.unwrap();
+    let later = time::OffsetDateTime::now_utc() + time::Duration::days(1);
+    app
+      .state
+      .database
+      .prune_deleted_conversations(later)
+      .await
+      .unwrap();
+    let pruned = app.get(&ann, "/conversations").await;
+    assert!(
+      pruned.body.get("signed_space_deletions").is_none(),
+      "{}",
+      pruned.body
+    );
+    let kept: Option<i64> = sqlx::query_scalar("SELECT space_id FROM space_deletion_signatures")
+      .fetch_optional(app.sql_pool())
+      .await
+      .unwrap();
+    assert!(kept.is_none(), "the signature goes with the tombstones");
+  }
+
+  /// A signature for another epoch takes `409 epoch_conflict` and deletes nothing; one for another
+  /// space, or naming a channel twice, is refused. Without a body the deletion is unsigned.
+  #[tokio::test]
+  async fn a_space_signature_for_another_epoch_or_space_is_refused() {
+    let app = app!();
+    let (server_owner, ann) = (owner(), member("ann"));
+    let ann_id = user_id(&app, &ann).await;
+    let space = create_space(&app, &server_owner, "Project A", "invite_only").await;
+    let other = create_space(&app, &server_owner, "Project B", "invite_only").await;
+    add_space_member(&app, &server_owner, &space, &ann_id, "member").await;
+    let channel = create_channel(&app, &ann, &space, "general", "private").await;
+
+    for (body, status) in [
+      (signed_space_body(&space, &[(&channel, 3)]), StatusCode::CONFLICT),
+      (
+        signed_space_body(&other, &[(&channel, 0)]),
+        StatusCode::BAD_REQUEST,
+      ),
+      (
+        signed_space_body(&space, &[(&channel, 0), (&channel, 0)]),
+        StatusCode::BAD_REQUEST,
+      ),
+    ] {
+      let reply = app
+        .delete_json(&server_owner, &format!("/spaces/{space}"), &body)
+        .await;
+      assert_eq!(reply.status, status, "{}", reply.body);
+      assert!(is_there(&app, &channel).await);
+    }
+    let conflict = app
+      .delete_json(
+        &server_owner,
+        &format!("/spaces/{space}"),
+        &signed_space_body(&space, &[(&channel, 3)]),
+      )
+      .await;
+    assert_eq!(conflict.body["error_code"], json!("epoch_conflict"));
+
+    let members_view = app.get(&ann, &format!("/spaces/{space}/deletion")).await;
+    assert_eq!(
+      members_view.status,
+      StatusCode::FORBIDDEN,
+      "{}",
+      members_view.body
+    );
+
+    let unsigned = app.delete(&server_owner, &format!("/spaces/{space}")).await;
+    assert_eq!(unsigned.status, StatusCode::NO_CONTENT, "{}", unsigned.body);
+    let listed = app.get(&ann, "/conversations").await;
+    assert_eq!(listed.body["deleted_conversation_ids"], json!([channel]));
+    assert!(
+      listed.body.get("signed_space_deletions").is_none(),
+      "{}",
+      listed.body
+    );
   }
 
   /// Signature and log go with the last tombstone, and nothing reads them after.
@@ -169,6 +273,18 @@ mod signed_deletions {
     assert!(listed.body.get("signed_deletions").is_none(), "{}", listed.body);
     let log = app.get(&bob, &format!("/conversations/{channel}/role-log")).await;
     assert_eq!(log.status, StatusCode::NOT_FOUND);
+  }
+
+  fn signed_space_body(space: &str, channels: &[(&str, u64)]) -> serde_json::Value {
+    let named: Vec<serde_json::Value> = channels
+      .iter()
+      .map(|(channel, epoch)| json!({"conversation_id": channel, "epoch": epoch, "name_hash": "AAAA"}))
+      .collect();
+    let document = json!({"space_id": space, "roster_version": 1, "channels": named, "signed_at_ms": 1});
+    json!({"signed_deletion": {
+      "payload": base64_of(document.to_string().as_bytes()),
+      "signature": "AQID",
+    }})
   }
 
   fn signed_body(channel: &str, epoch: u64) -> serde_json::Value {

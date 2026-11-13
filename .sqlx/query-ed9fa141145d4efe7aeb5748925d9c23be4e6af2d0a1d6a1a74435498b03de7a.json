@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO space_deletion_signatures (space_id, payload, signature)\n           VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Bytea",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ed9fa141145d4efe7aeb5748925d9c23be4e6af2d0a1d6a1a74435498b03de7a"
+}

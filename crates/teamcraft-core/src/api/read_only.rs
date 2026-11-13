@@ -448,8 +448,19 @@ impl<A: ServerApi> ServerApi for ReadOnlyApi<A> {
     self.inner.list_joinable(space)
   }
 
-  fn delete_space(&self, _space: SpaceId) -> impl Future<Output = Result<(), ApiError>> {
+  fn delete_space(
+    &self,
+    _space: SpaceId,
+    _request: &DeleteSpaceRequest,
+  ) -> impl Future<Output = Result<(), ApiError>> {
     self.refused("delete_space")
+  }
+
+  fn space_deletion_preview(
+    &self,
+    space: SpaceId,
+  ) -> impl Future<Output = Result<SpaceDeletionPreviewResponse, ApiError>> {
+    self.inner.space_deletion_preview(space)
   }
 
   fn create_space(

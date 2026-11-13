@@ -6,11 +6,11 @@ use teamcraft_db::{
   StoredRetention, participants_key,
 };
 use teamcraft_proto::{
-  ConversationId, ConversationKind, ConversationResponse, ConversationVisibility, ConvertChannelRequest,
-  CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest, DeleteConversationRequest, GatewayEvent,
-  GuestDmStart, HistoryPolicy, ListConversationsQuery, ListConversationsResponse, MoveChannelRequest,
-  Permission, SignedChannelDeletion, SpaceId, SpaceRole, SystemEventKind, Target, UpdateConversationRequest,
-  UserId, WebhookEventKind,
+  Base64Bytes, ConversationId, ConversationKind, ConversationResponse, ConversationVisibility,
+  ConvertChannelRequest, CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest,
+  DeleteConversationRequest, GatewayEvent, GuestDmStart, HistoryPolicy, ListConversationsQuery,
+  ListConversationsResponse, MoveChannelRequest, Permission, SignedChannelDeletion, SignedSpaceDeletion,
+  SpaceId, SpaceRole, SystemEventKind, Target, UpdateConversationRequest, UserId, WebhookEventKind,
 };
 
 use super::access::{
@@ -88,7 +88,7 @@ pub async fn list_conversations(
     ));
   }
   // Only with the user's own list: the channel browser lists other conversations.
-  let (deleted_conversation_ids, signed_deletions) = if filter.only_joined {
+  let (deleted_conversation_ids, signed_deletions, signed_space_deletions) = if filter.only_joined {
     (
       state.database.deleted_conversations_of(caller.user.id).await?,
       state
@@ -98,14 +98,25 @@ pub async fn list_conversations(
         .into_iter()
         .map(super::channel_roles::deletion_signature_response)
         .collect(),
+      state
+        .database
+        .space_deletion_signatures_of(caller.user.id)
+        .await?
+        .into_iter()
+        .map(|stored| SignedSpaceDeletion {
+          payload: Base64Bytes::new(stored.payload),
+          signature: Base64Bytes::new(stored.signature),
+        })
+        .collect(),
     )
   } else {
-    (Vec::new(), Vec::new())
+    (Vec::new(), Vec::new(), Vec::new())
   };
   Ok(ListConversationsResponse {
     conversations,
     deleted_conversation_ids,
     signed_deletions,
+    signed_space_deletions,
   })
 }
 
@@ -768,7 +779,7 @@ pub(crate) async fn announce_deleted(
   for user in users {
     super::calls::evict_from_call(state, conversation_id, *user).await;
   }
-  announce_deleted_direct(state, conversation_id, users, maybe_signed_deletion);
+  announce_deleted_direct(state, conversation_id, users, maybe_signed_deletion, None);
   wake_sweep(state);
 }
 
@@ -778,12 +789,14 @@ pub(crate) fn announce_deleted_direct(
   conversation_id: ConversationId,
   users: &[UserId],
   maybe_signed_deletion: Option<SignedChannelDeletion>,
+  maybe_signed_space_deletion: Option<SignedSpaceDeletion>,
 ) {
   state.hub.publish(
     users.iter().copied(),
     &GatewayEvent::ConversationDelete {
       conversation_id,
       maybe_signed_deletion,
+      maybe_signed_space_deletion,
     },
   );
   // Clients that don't know `conversation_delete` yet drop a conversation they were removed from.

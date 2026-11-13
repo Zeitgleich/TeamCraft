@@ -240,6 +240,45 @@ pub fn initials(name: &str) -> String {
   letters.into_iter().collect()
 }
 
+/// What deleting a space takes, as the deleter's device prepared it (e2ee.md §4.6.5, D7): the
+/// channels its confirmation names, each with who last set its name, and whether the deletion will
+/// be signed (only a workspace owner's or admin's is). The device signs exactly these channels.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceDeletionPreview {
+  pub space: SpaceId,
+  pub channels: Vec<SpaceDeletionPreviewChannel>,
+  pub is_signed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceDeletionPreviewChannel {
+  pub conversation: ConversationId,
+  /// The name the server shows; what the signature binds.
+  pub name: String,
+  /// Who set the current name, as the channel's anchor on this device says; `None` where the
+  /// device holds no verified anchor (a channel it isn't in, or one from before anchors).
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_renamed_by: Option<ChannelRenamer>,
+}
+
+/// Who set a channel's current name, and in which role (the anchor's `name_set_by`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelRenamer {
+  pub user: UserId,
+  pub role: RenamerRole,
+}
+
+/// A member's name is shown, but its channel's history stays on the members' devices for the
+/// retention when the space is deleted (D5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RenamerRole {
+  Founder,
+  ChannelAdmin,
+  WorkspaceAdmin,
+  Member,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Space {
   pub id: SpaceId,

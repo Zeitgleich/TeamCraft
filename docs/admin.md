@@ -463,15 +463,16 @@ nobody is surprised that a workspace admin, not a channel admin, made an owner:
 #### 3.1.1 Leaving and deleting channels and spaces (issue #1130)
 
 A workspace admin or owner of the roster, or a channel admin whose signed roles go back to one, signs a
-channel's deletion, and members' devices that verify it drop the history at once. Any other deletion,
-every space's deletion among them, is the server's word there: hidden, its history kept for a retention
-(e2ee.md §4.6). For a space that holds on the deleter's own devices too, since which channels are in it is
-the server's word (#1162).
+channel's deletion, and members' devices that verify it drop the history at once. A workspace admin or owner
+also signs a space's deletion, which drops at once only the channels whose anchor places them in that space,
+on the deleter's own devices too (e2ee.md §4.6.5, D7, #1727). Any other deletion, a space admin's space
+deletion among them, is the server's word there: hidden, its history kept for a retention (e2ee.md §4.6).
+The confirmation of a space's deletion lists its channels with who last named each.
 
 | Case                                              | Who                                                                                                             | What happens                                                                                                                         |
 |---------------------------------------------------|-----------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------|
 | Delete a channel (`delete_channel`)               | Channel admin, workspace admin, owner; space admin where they reach it (public, or they are in it)              | Gone for all members, also with people in it, active or archived. A channel the caller can't see answers 404                        |
-| Delete a space (`delete_space`)                   | Workspace admin, owner; space admin unless it holds a private channel they aren't in (409)                      | The space and all of its channels go for everybody in them; the confirmation names how many channels                                |
+| Delete a space (`delete_space`)                   | Workspace admin, owner; space admin unless it holds a private channel they aren't in (409)                      | The space and all of its channels go for everybody in them; the confirmation lists them with who last named each                     |
 | Either, while an import account holds a channel   | Nobody (409 `import_in_progress`)                                                                               | The import finishes first (docs/import-synology.md)                                                                                  |
 | Leave, archived channel                           | Anybody in it, also the last channel admin                                                                      | Allowed: an archived channel takes no role changes. Removing the last admin by somebody else stays refused                           |
 | Leave, last member of a private channel           | The last member, saying so (`delete_if_last`; otherwise 409 `last_member`, older clients leave it without members) | The channel is deleted. Leaving a space does the same for private channels only the leaver is in; its confirmation says so        |

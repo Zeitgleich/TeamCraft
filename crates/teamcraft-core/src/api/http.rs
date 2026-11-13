@@ -10,7 +10,6 @@ use std::time::Duration;
 use reqwest::{Method, RequestBuilder, Response};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use teamcraft_proto::DeleteConversationRequest;
 use teamcraft_proto::RendezvousClientMessage;
 use teamcraft_proto::{
   AddConversationMemberRequest, AddSpaceMemberRequest, ClaimKeyPackagesRequest, ClaimKeyPackagesResponse,
@@ -63,6 +62,7 @@ use teamcraft_proto::{
 use teamcraft_proto::{
   CreateRecoveryRequest, RecoveryRequestId, RecoveryRequestResponse, RecoveryResultPayload,
 };
+use teamcraft_proto::{DeleteConversationRequest, DeleteSpaceRequest, SpaceDeletionPreviewResponse};
 use teamcraft_proto::{DeviceListResponse, PutDeviceListRequest, UserEnrollmentResponse};
 use teamcraft_proto::{
   DirectoryChannelsQuery, DirectoryChannelsResponse, DirectoryFiltersQuery, DirectoryFiltersResponse,
@@ -836,10 +836,16 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
-  async fn delete_space(&self, space: SpaceId) -> Result<(), ApiError> {
+  async fn delete_space(&self, space: SpaceId, request: &DeleteSpaceRequest) -> Result<(), ApiError> {
+    // An unsigned deletion goes without a body, as before signed space deletions.
+    let maybe_body = request.maybe_signed_deletion.as_ref().map(|_| request);
     self
-      .send_without_response::<()>(Method::DELETE, &format!("/spaces/{space}"), None)
+      .send_without_response(Method::DELETE, &format!("/spaces/{space}"), maybe_body)
       .await
+  }
+
+  async fn space_deletion_preview(&self, space: SpaceId) -> Result<SpaceDeletionPreviewResponse, ApiError> {
+    self.get(&format!("/spaces/{space}/deletion")).await
   }
 
   async fn delete_conversation(
