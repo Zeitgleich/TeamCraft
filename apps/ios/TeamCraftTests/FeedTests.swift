@@ -13,10 +13,8 @@ final class FeedTests: XCTestCase {
     return calendar
   }
 
-  private func message(_ id: String, _ author: String, _ sentAtMs: Int64, body: String = "text") -> MessageItem {
-    MessageItem(
-      id: id, conversationId: "c", authorId: author, authorName: "Name \(author)", sentAtMs: sentAtMs, body: body,
-      isEdited: false, isPending: false, replyCount: 0, maybeThreadId: nil, reactions: [])
+  private func message(_ id: String, _ author: String, _ sentAtMs: Int64, body: String = "text") -> Message {
+    Message(id: id, conversationId: "c", authorId: author, sentAtMs: sentAtMs, body: body, authorName: "Name \(author)")
   }
 
   func testOneSectionPerDay() {
@@ -49,8 +47,8 @@ final class FeedTests: XCTestCase {
   func testAHoleSitsAfterTheMessageBeforeItAndBreaksAGroup() {
     let messages = [message("1", "a", dayOne), message("2", "a", dayOne + minute), message("3", "a", dayOne + 2 * minute)]
     let gaps = [
-      HistoryGapItem(after: "0", index: 0, status: .loading), HistoryGapItem(after: "1", index: 1, status: .available),
-      HistoryGapItem(after: "9", index: 4, status: .available),
+      HistoryGap(after: "0", index: 0, status: .loading), HistoryGap(after: "1", index: 1, status: .available),
+      HistoryGap(after: "9", index: 4, status: .available),
     ]
     let placed = PlacedGaps(gaps, among: messages)
     XCTAssertEqual(placed.above.map(\.after), ["0"])
@@ -62,14 +60,14 @@ final class FeedTests: XCTestCase {
 
   func testAHoleNearTheScreenIsReadFromTheReadersSide() {
     // Rows 50 to 60 are on screen.
-    let below = HistoryGapItem(after: "1", index: 70, status: .available)
+    let below = HistoryGap(after: "1", index: 70, status: .available)
     XCTAssertEqual(gapToFill([below], firstVisible: 50, lastVisible: 60, ahead: 40)?.edge, .older)
-    let above = HistoryGapItem(after: "2", index: 20, status: .available)
+    let above = HistoryGap(after: "2", index: 20, status: .available)
     XCTAssertEqual(gapToFill([above], firstVisible: 50, lastVisible: 60, ahead: 40)?.edge, .newer)
     XCTAssertEqual(gapToFill([above], firstVisible: 20, lastVisible: 30, ahead: 40)?.edge, .newer, "right above the screen")
     XCTAssertNil(gapToFill([below], firstVisible: 0, lastVisible: 10, ahead: 40), "too far")
-    for status in [HistoryGapStatus.loading, .failed] {
-      let waiting = HistoryGapItem(after: "1", index: 55, status: status)
+    for status in [OlderHistory.loading, .failed] {
+      let waiting = HistoryGap(after: "1", index: 55, status: status)
       XCTAssertNil(gapToFill([waiting], firstVisible: 50, lastVisible: 60, ahead: 40))
     }
   }

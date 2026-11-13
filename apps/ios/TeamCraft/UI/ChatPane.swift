@@ -12,7 +12,7 @@ struct ChatPane: View {
   let threadId: String?
   let account: Account
 
-  @State private var messages: [MessageItem] = []
+  @State private var messages: [Message] = []
   /// Whether this conversation caught up with the server once open (#1521).
   @State private var maybeCatchUp: CatchUpMeasure?
   /// People in the call running here; 0 without one (issue #1352).
@@ -24,7 +24,7 @@ struct ChatPane: View {
   @State private var isDraftLoaded = false
   /// Whether an edit still waits for the typing pause (#1391).
   @State private var draftSave = DraftSave()
-  @State private var maybeEditing: MessageItem?
+  @State private var maybeEditing: Message?
   @State private var maybeThread: ThreadTarget?
   @State private var extras: [String: MessageExtras] = [:]
   @State private var attachments: [PickedFile] = []
@@ -51,7 +51,7 @@ struct ChatPane: View {
   @State private var isReplyLoaded = false
   @State private var maybeForwardingImage: FileInfo?
   @State private var isPictureGone = false
-  @State private var maybeDeleting: MessageItem?
+  @State private var maybeDeleting: Message?
   @State private var isAtBottom = true
   @State private var newBelowCount = 0
   @State private var isSendFailed = false
@@ -68,6 +68,10 @@ struct ChatPane: View {
   @State private var maybeHighlighted: String?
   @State private var isPermalinkMissing = false
   @State private var displayNames: [String: String] = [:]
+  /// Who wrote the thread's messages (a thread read names no authors), read again only when
+  /// somebody not asked about yet writes.
+  @State private var threadAuthors: [String: MessageAuthor] = [:]
+  @State private var askedThreadAuthors: Set<String> = []
   @State private var maybeForwarding: MessageTarget?
   @State private var maybeViewing: PictureTarget?
   @State private var maybeVideo: FileInfo?
@@ -77,7 +81,7 @@ struct ChatPane: View {
   @State private var hasOlder = false
   @State private var isLoadingOlder = false
   /// Holes in the history among the messages (issue #1438): a catch-up read the newest ones first.
-  @State private var gaps: [HistoryGapItem] = []
+  @State private var gaps: [HistoryGap] = []
   /// A page of a hole was asked for; the next read says how it stands.
   @State private var isFillingGap = false
   /// Older history the store doesn't hold: asked for when the feed reaches the store's end.
@@ -493,7 +497,7 @@ struct ChatPane: View {
     fillGap(request.gap, from: request.edge)
   }
 
-  private func fillGap(_ gap: HistoryGapItem, from edge: GapEdge) {
+  private func fillGap(_ gap: HistoryGap, from edge: GapEdge) {
     isFillingGap = true
     Task { await model.perform(.fillHistoryGap(conversationId: conversation.id, after: gap.after, edge: edge)) }
   }
@@ -501,7 +505,7 @@ struct ChatPane: View {
   /// Where history this device hasn't read yet lies (issue #1438): a quiet loading line while the
   /// catch-up or a request reads it, the failure with "Try again" when the last request failed.
   @ViewBuilder
-  private func gapRow(_ gap: HistoryGapItem) -> some View {
+  private func gapRow(_ gap: HistoryGap) -> some View {
     if gap.status == .failed {
       HStack {
         Text("history_gap_failed")
@@ -736,7 +740,7 @@ struct ChatPane: View {
 
   private var canReply: Bool { threadId == nil && conversation.canPost }
 
-  private func startReply(to message: MessageItem) {
+  private func startReply(to message: Message) {
     maybeReply = ComposerReply(message: message)
     isComposerFocused = true
   }
@@ -960,7 +964,7 @@ struct ChatPane: View {
   /// The long-press menu: only what the user's rights allow (issue #758). Replying, editing and
   /// deleting are messages too, so they need posting.
   @ViewBuilder
-  private func menu(for message: MessageItem) -> some View {
+  private func menu(for message: Message) -> some View {
     if conversation.canReact {
       Menu("react") {
         ForEach(Self.quickReactions, id: \.self) { emoji in
@@ -1072,7 +1076,7 @@ struct ChatPane: View {
 
   /// Forward, pin, save, link, unread from here and the edit history: what Android offers too.
   @ViewBuilder
-  private func sharedMessageActions(for message: MessageItem) -> some View {
+  private func sharedMessageActions(for message: Message) -> some View {
     let maybeExtras = extras[message.id]
     let isPinned = maybeExtras?.isPinned == true
     let isSaved = maybeExtras?.isSaved == true
@@ -1102,7 +1106,7 @@ struct ChatPane: View {
     }
   }
 
-  private func react(_ message: MessageItem, _ emoji: String) {
+  private func react(_ message: Message, _ emoji: String) {
     Task {
       await model.perform(.toggleReaction(conversationId: conversation.id, messageId: message.id, emoji: emoji))
     }
@@ -1343,7 +1347,7 @@ struct ChatPane: View {
 
   /// Performance data (#1521): the switch ends with the first read, a send once the server took it,
   /// the catch-up once the store has what the server has.
-  private func observePerf(_ read: [MessageItem], gaps: [HistoryGapItem]) {
+  private func observePerf(_ read: [Message], gaps: [HistoryGap]) {
     Perf.end(.channelSwitch, key: conversation.id)
     if Perf.isRunning(.messageSend, key: conversation.id) && !read.contains(where: \.isPending) {
       Perf.end(.messageSend, key: conversation.id)
@@ -1364,7 +1368,12 @@ struct ChatPane: View {
       let read = await model.thread(conversationId: conversation.id, threadId: threadId)
       let readExtras = await model.extras(conversationId: conversation.id, messageIds: read.map(\.id))
       await loadDisplayNamesOnce()
-      messages = read
+      let unknown = Set(read.map(\.authorId)).subtracting(threadAuthors.keys)
+      if !unknown.isSubset(of: askedThreadAuthors) {
+        askedThreadAuthors.formUnion(unknown)
+        threadAuthors = await model.messageAuthors()
+      }
+      messages = read.map { $0.named(threadAuthors) }
       extras = readExtras
     } else {
       // A failed read keeps what is shown; the next change reads again.
@@ -1501,7 +1510,7 @@ struct JumpDownButton: View {
 
 /// A message as the item of a sheet.
 struct MessageTarget: Identifiable {
-  let message: MessageItem
+  let message: Message
 
   var id: String { message.id }
 }

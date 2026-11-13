@@ -146,7 +146,7 @@ struct MessageRow: View {
     .frame(maxWidth: .infinity, alignment: .leading)
   }
 
-  private var message: MessageItem { entry.message }
+  private var message: Message { entry.message }
   private var showsSender: Bool { look.showsSenders && !isMine }
 
   private var bubbleRow: some View {
@@ -277,7 +277,7 @@ struct MessageBubble: View {
   private var mediaInset: CGFloat { look.isList ? 0 : bubbleMediaInset }
   private var textInset: CGFloat { look.isList ? 0 : bubbleTextInset }
 
-  private var message: MessageItem { entry.message }
+  private var message: Message { entry.message }
   private var files: [FileInfo] { maybeExtras?.files ?? [] }
   private var images: [FileInfo] { files.filter { $0.isImage && $0.maybeThumbnailData != nil } }
   private var otherFiles: [FileInfo] { files.filter { file in !images.contains(file) } }
@@ -344,7 +344,7 @@ struct MessageBubble: View {
 /// failed with a warning. The clock is still: a row may wait for days, and nothing animates while
 /// the app idles.
 struct PlaceholderLine: View {
-  let placeholder: PlaceholderItem
+  let placeholder: Message.Placeholder
 
   var body: some View {
     Label {
@@ -357,11 +357,11 @@ struct PlaceholderLine: View {
 
   private var text: String { Self.text(placeholder) }
 
-  static func text(_ placeholder: PlaceholderItem) -> String {
+  static func text(_ placeholder: Message.Placeholder) -> String {
     String(localized: resource(placeholder))
   }
 
-  static func resource(_ placeholder: PlaceholderItem) -> String.LocalizationValue {
+  static func resource(_ placeholder: Message.Placeholder) -> String.LocalizationValue {
     switch placeholder {
     case .waiting: "message_placeholder_waiting"
     case .notAvailable: "message_placeholder_not_available"
@@ -529,14 +529,14 @@ enum MarkupCache {
 /// Bottom trailing inside the bubble: pinned, "edited", the time and, for own messages, the state
 /// (sending, sent, not sent), time first and the state at the far edge.
 struct BubbleFooter: View {
-  let message: MessageItem
+  let message: Message
   let maybeExtras: MessageExtras?
   let isMine: Bool
   var showsTime = true
 
   /// Whether the list's footer has anything to say: pinned, edited, or an own message that is
   /// still sending, failed, was delivered or read. The plain "sent" tick alone isn't worth a line.
-  static func hasMarks(message: MessageItem, maybeExtras: MessageExtras?, isMine: Bool) -> Bool {
+  static func hasMarks(message: Message, maybeExtras: MessageExtras?, isMine: Bool) -> Bool {
     let ownState =
       isMine
       && (message.isPending || maybeExtras?.isSendFailed == true || maybeExtras?.isRead == true
@@ -596,7 +596,7 @@ struct DoubleCheckmark: View {
 /// Reactions, "not sent" and the thread link, under the bubble.
 struct BelowBubble: View {
   @Environment(AppModel.self) private var model
-  let message: MessageItem
+  let message: Message
   let maybeExtras: MessageExtras?
   let showsThreadLink: Bool
   let onOpenThread: () -> Void
@@ -661,7 +661,7 @@ struct BelowBubble: View {
 
 /// One reaction: the emoji and how many, outlined in the accent when the user is among them.
 struct ReactionPill: View {
-  let reaction: ReactionItem
+  let reaction: Reaction
   let action: () -> Void
 
   var body: some View {

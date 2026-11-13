@@ -16,10 +16,10 @@ struct FeedSection: Identifiable, Equatable {
 /// `isGroupEnd` when the next one doesn't continue it (the group's last bubble carries the avatar).
 /// `gapsAfter` are the holes in the history right below it (issue #1438).
 struct FeedEntry: Identifiable, Equatable {
-  let message: MessageItem
+  let message: Message
   let isContinuation: Bool
   var isGroupEnd = true
-  var gapsAfter: [HistoryGapItem] = []
+  var gapsAfter: [HistoryGap] = []
 
   var id: String { message.id }
 }
@@ -28,12 +28,12 @@ struct FeedEntry: Identifiable, Equatable {
 /// right before each, so that they stay where the core counted them; those before every message lie
 /// above the first.
 struct PlacedGaps: Equatable {
-  var above: [HistoryGapItem] = []
-  var after: [String: [HistoryGapItem]] = [:]
+  var above: [HistoryGap] = []
+  var after: [String: [HistoryGap]] = [:]
 
   init() {}
 
-  init(_ gaps: [HistoryGapItem], among messages: [MessageItem]) {
+  init(_ gaps: [HistoryGap], among messages: [Message]) {
     for gap in gaps where Int(gap.index) <= messages.count {
       if gap.index == 0 {
         above.append(gap)
@@ -58,29 +58,29 @@ enum GapEdge: String, Sendable {
 /// "Try again" or the next connection). A hole below the first row on screen is read from its older
 /// side, the reader reading down towards it; one above it from its newer side, so what arrives
 /// continues what the reader looks at.
-func gapToFill(_ gaps: [HistoryGapItem], firstVisible: Int, lastVisible: Int, ahead: Int) -> (
-  gap: HistoryGapItem, edge: GapEdge
+func gapToFill(_ gaps: [HistoryGap], firstVisible: Int, lastVisible: Int, ahead: Int) -> (
+  gap: HistoryGap, edge: GapEdge
 )? {
   guard
     let gap = gaps.first(where: { Int($0.index) + ahead >= firstVisible && Int($0.index) <= lastVisible + ahead }),
-    gap.status == .available
+    gap.isAskable
   else { return nil }
   return (gap, gapEdge(gap, firstVisible: firstVisible))
 }
 
 /// The side of `gap` the reader comes from, with `firstVisible` the first row on screen.
-func gapEdge(_ gap: HistoryGapItem, firstVisible: Int) -> GapEdge {
+func gapEdge(_ gap: HistoryGap, firstVisible: Int) -> GapEdge {
   Int(gap.index) > firstVisible ? .older : .newer
 }
 
 /// Lays out a conversation (oldest first): one section per day, and follow-up messages of the same
 /// author grouped into one block of bubbles. Messages without text (joins, renames) never group,
 /// nor do two with a hole in the history between them (`gaps`).
-func feedSections(_ messages: [MessageItem], gaps: PlacedGaps = PlacedGaps(), calendar: Calendar = .current)
+func feedSections(_ messages: [Message], gaps: PlacedGaps = PlacedGaps(), calendar: Calendar = .current)
   -> [FeedSection]
 {
   var sections: [FeedSection] = []
-  var maybePrevious: MessageItem?
+  var maybePrevious: Message?
   for message in messages {
     let day = calendar.startOfDay(for: message.sentDate)
     if sections.last?.day != day {
@@ -101,14 +101,14 @@ func feedSections(_ messages: [MessageItem], gaps: PlacedGaps = PlacedGaps(), ca
   return sections
 }
 
-private func continues(_ previous: MessageItem, _ message: MessageItem) -> Bool {
+private func continues(_ previous: Message, _ message: Message) -> Bool {
   // One bot posts for several sources.
   previous.authorId == message.authorId && previous.authorName == message.authorName
     && !previous.body.isEmpty && !message.body.isEmpty
     && (0...groupWindowMs).contains(message.sentAtMs - previous.sentAtMs)
 }
 
-extension MessageItem {
+extension Message {
   var sentDate: Date { Date(timeIntervalSince1970: TimeInterval(sentAtMs) / 1000) }
 }
 
@@ -126,7 +126,7 @@ struct ChatPreview: Equatable {
     /// No text: a join or rename, or a deleted message (files carry their name as text).
     case noText
     /// Not readable on this device yet (issue #888).
-    case placeholder(PlaceholderItem)
+    case placeholder(Message.Placeholder)
   }
 
   let sender: Sender
@@ -137,7 +137,7 @@ struct ChatPreview: Equatable {
 
 /// In a one-to-one chat the other person's name is the conversation's name already, so only the
 /// user's own messages get a sender ("You: …").
-func chatPreview(_ message: MessageItem, myId: String, isOneToOne: Bool) -> ChatPreview {
+func chatPreview(_ message: Message, myId: String, isOneToOne: Bool) -> ChatPreview {
   let text = oneLine(message.body)
   let sender: ChatPreview.Sender =
     if text.isEmpty && message.maybePlaceholder == nil {
@@ -154,7 +154,7 @@ func chatPreview(_ message: MessageItem, myId: String, isOneToOne: Bool) -> Chat
     messageId: message.id)
 }
 
-private func previewContent(_ message: MessageItem, text: String) -> ChatPreview.Content {
+private func previewContent(_ message: Message, text: String) -> ChatPreview.Content {
   if let placeholder = message.maybePlaceholder { return .placeholder(placeholder) }
   return text.isEmpty ? .noText : .text(text)
 }

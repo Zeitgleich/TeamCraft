@@ -23,7 +23,7 @@ struct MentionNames: Equatable {
   var isMentionedThroughGroup = false
 
   /// These names with the group mentions of `message`.
-  func forMessage(_ message: MessageItem) -> MentionNames {
+  func forMessage(_ message: Message) -> MentionNames {
     guard !message.groupMentions.isEmpty else { return self }
     var names = self
     names.groupHandles = Set(message.groupMentions)

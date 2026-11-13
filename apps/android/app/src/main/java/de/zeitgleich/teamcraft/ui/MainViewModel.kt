@@ -891,12 +891,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   /** How far conversations waiting for message keys have caught up (issue #888); `null` while none waits. */
   suspend fun keyCatchUp(): KeyCatchUpItem? = read { keyCatchUp() }
 
-  suspend fun messages(conversationId: String): List<MessageItem> =
-    read { messages(conversationId, MESSAGE_PAGE.toUInt()) }?.map(::namedAuthor) ?: emptyList()
-
-  suspend fun thread(conversationId: String, threadId: String): List<MessageItem> =
-    read { thread(conversationId, threadId) }?.map(::namedAuthor) ?: emptyList()
-
   /** The hits for [query]; `null` when the search could not run, which is not "no hits" (#297). */
   suspend fun search(query: String): List<SearchHitItem>? =
     if (query.isBlank()) {
@@ -1871,8 +1865,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     "${getApplication<Application>().getString(R.string.device_name)} (${Build.MODEL})"
 
   companion object {
-    const val MESSAGE_PAGE = 200
-
     /** The core's logcat tag too (issue #1067): `adb logcat -s TeamCraft` shows both. */
     private const val TAG = "TeamCraft"
 

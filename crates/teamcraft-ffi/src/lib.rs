@@ -113,12 +113,12 @@ pub use types::{
   AccountState, AppActivity, AppConfig, BrandAccent, BrandLinks, ChatPreviewItem, ConnectionState,
   ConversationItem, ConversationKind, EmojiSuggestion, FirstSyncItem, FirstSyncStageItem,
   GroupMentionReachItem, KeyCatchUpItem, LeaveChoice, LinkPlatform, LinkRequestItem, LoginBrand,
-  MentionSettings, MentionableGroupItem, MentionableGroupKindItem, MessageItem, MessagePage,
-  NetworkInterception, NetworkProxy, NotificationAttachmentKind, NotificationContent,
-  NotificationContentSettings, NotificationGap, NotificationSuppression, NotifiedConversation,
-  NotifiedMessage, OrgRecoveryStart, PendingWorkItem, PlaceholderItem, Presence, PushDiagnosticsInfo,
-  PushNotification, PushNotificationKind, PushService, ReactionItem, SearchHitItem, SegmentPrefetchMode,
-  SegmentPrefetchResult, SpaceMenuItem, StoreProblem, TestPushOutcome, TestPushResult,
+  MentionSettings, MentionableGroupItem, MentionableGroupKindItem, MessageItem, NetworkInterception,
+  NetworkProxy, NotificationAttachmentKind, NotificationContent, NotificationContentSettings,
+  NotificationGap, NotificationSuppression, NotifiedConversation, NotifiedMessage, OrgRecoveryStart,
+  PendingWorkItem, PlaceholderItem, Presence, PushDiagnosticsInfo, PushNotification, PushNotificationKind,
+  PushService, ReactionItem, SearchHitItem, SegmentPrefetchMode, SegmentPrefetchResult, SpaceMenuItem,
+  StoreProblem, TestPushOutcome, TestPushResult,
 };
 
 /// The JNI method that sets up the audio context calls need on Android (cpal through ndk-context):
@@ -610,7 +610,7 @@ impl TeamCraft {
 
   /// The line under each conversation of a chat list, in one read for the whole list: the newest
   /// message people wrote, skipping system lines (joins, renames) where a written one is close by.
-  /// Conversations without messages are left out. Unlike [`Self::messages`] it doesn't move the
+  /// Conversations without messages are left out. Unlike [`Self::message_tail`] it doesn't move the
   /// catch-up focus: listing a conversation isn't opening it.
   pub async fn chat_previews(
     &self,
@@ -626,51 +626,6 @@ impl TeamCraft {
   /// again after each change notification; never waits for the engine.
   pub fn running_calls(&self) -> Vec<RunningCallItem> {
     self.running_calls.list()
-  }
-
-  /// The newest `limit` top-level messages, oldest first.
-  pub async fn messages(
-    &self,
-    conversation_id: String,
-    limit: u32,
-  ) -> Result<Vec<MessageItem>, TeamCraftError> {
-    self
-      .read(move |reads| reads.messages(&conversation_id, limit))
-      .await
-  }
-
-  /// What a conversation list that pages back shows (issue #1058): every message from the oldest
-  /// one it holds (`maybe_oldest_id`, sent at `oldest_sent_at_ms`) to the newest, and `older`
-  /// messages before it. Rereading with the same anchor after a change keeps the rows paged to;
-  /// growing `older` pages further back. Without an anchor it is the newest `older` messages.
-  pub async fn messages_from(
-    &self,
-    conversation_id: String,
-    maybe_oldest_id: Option<String>,
-    oldest_sent_at_ms: i64,
-    older: u32,
-  ) -> Result<MessagePage, TeamCraftError> {
-    self
-      .read(move |reads| {
-        reads.messages_from(
-          &conversation_id,
-          maybe_oldest_id.as_deref(),
-          oldest_sent_at_ms,
-          older,
-        )
-      })
-      .await
-  }
-
-  /// Root and replies of a thread, oldest first.
-  pub async fn thread(
-    &self,
-    conversation_id: String,
-    thread_id: String,
-  ) -> Result<Vec<MessageItem>, TeamCraftError> {
-    self
-      .read(move |reads| reads.thread(&conversation_id, &thread_id))
-      .await
   }
 
   /// Queues a message (sent right away if online, retried otherwise).
@@ -1035,7 +990,11 @@ impl TeamCraft {
       .await
   }
 
-  /// [`Self::messages_from`] as JSON (`MessageTail`), with the messages of the JSON bridge.
+  /// What a conversation feed that pages back shows (issue #1058), as JSON (`MessageTail`): every
+  /// message from the oldest one it holds (`maybe_oldest_id`, sent at `oldest_sent_at_ms`) to the
+  /// newest, and `older` messages before it, with the authors this device knows. Rereading with the
+  /// same anchor after a change keeps the rows paged to; growing `older` pages further back.
+  /// Without an anchor it is the newest `older` messages. Moves the catch-up focus there.
   pub async fn message_tail(
     &self,
     conversation_id: String,
@@ -2142,6 +2101,13 @@ mod tests {
     const UNREACHABLE_SERVER: &str = "http://127.0.0.1:9";
     const CONVERSATION: &str = "42";
 
+    /// The bodies of the conversation's newest messages, as the apps read the feed.
+    async fn tail_bodies(core: &TeamCraft) -> Vec<String> {
+      let json = core.message_tail(CONVERSATION.into(), None, 0, 10).await.unwrap();
+      let tail: teamcraft_client_api::remote::MessageTail = serde_json::from_str(&json).unwrap();
+      tail.messages.into_iter().map(|message| message.body).collect()
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn reads_answer_while_the_engine_thread_is_held() {
       let directory = TestDir::new("held-reads");
@@ -2155,7 +2121,7 @@ mod tests {
       ));
       assert!(core.conversations().await.unwrap().is_empty());
       assert!(!core.snapshot().await.unwrap().is_empty());
-      assert!(core.messages(CONVERSATION.into(), 10).await.unwrap().is_empty());
+      assert!(tail_bodies(&core).await.is_empty());
       assert!(core.join_requests().await.unwrap().is_empty());
 
       held.release().await;
@@ -2174,8 +2140,7 @@ mod tests {
         tokio::spawn(async move { core.send_message(CONVERSATION.into(), None, "hello".into()).await })
       };
       changes.recv().unwrap();
-      let shown = core.messages(CONVERSATION.into(), 10).await.unwrap();
-      assert_eq!(shown.len(), 1, "written locally already");
+      assert_eq!(tail_bodies(&core).await, ["hello"], "written locally already");
       assert!(!sending.is_finished(), "the client hasn't had it yet");
 
       held.release().await;
