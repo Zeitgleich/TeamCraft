@@ -104,11 +104,17 @@ pub enum CallProblem {
   /// A call that went badly, summed up at its end; only over a threshold.
   PoorCall(CallQualitySummary),
   /// An own track's capture got buffers from its source it couldn't turn into pictures (#1805):
-  /// the others saw a still picture while the screen moved. What came over `window_s`.
+  /// the others saw a still picture while the screen moved. What came over `window_s`, the
+  /// frames encoded meanwhile, and the seconds since the last new picture (`None`: none came
+  /// since the capture was first judged).
   CaptureStalled {
     video: VideoTrackKind,
     window: CaptureBufferStats,
     window_s: u32,
+    #[serde(default)]
+    frames_encoded: u64,
+    #[serde(default)]
+    maybe_since_picture_s: Option<u32>,
   },
   #[serde(other)]
   Unknown,
@@ -121,6 +127,8 @@ fn unusable_reason(window: &CaptureBufferStats) -> &'static str {
     (window.unmapped, "unmapped"),
     (window.corrupted, "corrupted"),
     (window.unreadable, "unreadable"),
+    (window.not_ready, "not_ready"),
+    (window.discarded, "discarded"),
   ];
   reasons
     .iter()
@@ -511,14 +519,34 @@ impl CallProblem {
       },
       Self::VideoFreeze { frozen_s, .. } => json!({ "frozen_s": frozen_s }),
       Self::PoorCall(summary) => serde_json::to_value(summary).unwrap_or(Value::Null),
-      Self::CaptureStalled { window, window_s, .. } => json!({
-        "window_s": window_s,
-        "pictures": window.pictures,
-        "cursor_only": window.cursor_only,
-        "corrupted": window.corrupted,
-        "unmapped": window.unmapped,
-        "unreadable": window.unreadable,
-      }),
+      Self::CaptureStalled {
+        window,
+        window_s,
+        frames_encoded,
+        maybe_since_picture_s,
+        ..
+      } => {
+        // Per second over the window, to one decimal: what the source and the encoder managed.
+        let per_second = |count: u64| {
+          let per_tenth = count.saturating_mul(10) / u64::from((*window_s).max(1));
+          per_tenth as f64 / 10.0
+        };
+        json!({
+          "window_s": window_s,
+          "pictures": window.pictures,
+          "cursor_only": window.cursor_only,
+          "corrupted": window.corrupted,
+          "unmapped": window.unmapped,
+          "unreadable": window.unreadable,
+          "taken": window.taken,
+          "not_ready": window.not_ready,
+          "discarded": window.discarded,
+          "frames_encoded": frames_encoded,
+          "capture_fps": per_second(window.pictures),
+          "encode_fps": per_second(*frames_encoded),
+          "since_picture_s": maybe_since_picture_s,
+        })
+      },
       _ => Value::Null,
     }
   }
@@ -563,10 +591,14 @@ impl CallProblem {
         video,
         window,
         window_s,
+        frames_encoded,
+        maybe_since_picture_s,
       } => Self::CaptureStalled {
         video: scrub_kind(video),
         window,
         window_s,
+        frames_encoded,
+        maybe_since_picture_s,
       },
       other => other,
     }
@@ -1035,6 +1067,8 @@ mod tests {
           ..CaptureBufferStats::default()
         },
         window_s: 5,
+        frames_encoded: 5,
+        maybe_since_picture_s: None,
       };
       assert_eq!(
         stalled(150, 3).fingerprint(),
@@ -1046,6 +1080,27 @@ mod tests {
         ["call", "capture_stalled", "screen", "corrupted"]
       );
       assert_eq!(stalled(1, 0).level(), CrashLevel::Error);
+      // The browser: a capture that drops every frame.
+      let dropped = CallProblem::CaptureStalled {
+        video: VideoTrackKind::Screen,
+        window: CaptureBufferStats {
+          taken: 75,
+          discarded: 150,
+          ..CaptureBufferStats::default()
+        },
+        window_s: 5,
+        frames_encoded: 75,
+        maybe_since_picture_s: Some(42),
+      };
+      assert_eq!(
+        dropped.fingerprint(),
+        ["call", "capture_stalled", "screen", "discarded"]
+      );
+      let details = dropped.details();
+      assert_eq!(details["encode_fps"], 15.0);
+      assert_eq!(details["capture_fps"], 0.0);
+      assert_eq!(details["since_picture_s"], 42);
+      assert_eq!(details["discarded"], 150);
     }
   }
 

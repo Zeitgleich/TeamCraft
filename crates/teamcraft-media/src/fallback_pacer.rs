@@ -14,6 +14,12 @@
 //!
 //! - Waiting above [`PacingConfig::target_queue_delay`]: the rate drops below what got through, so
 //!   the buffers empty within a round trip or two.
+//! - A short run of late answers between two that weren't: the cuts it made are undone
+//!   (#1845). That is a stall, not a backlog: TCP recovering a lost or reordered segment (at a low
+//!   rate too few segments are in flight for a fast retransmit), a jittery link or a busy
+//!   receiver, and what got through meanwhile measured the stall, not the link. Growing back only
+//!   by [`RATE_GROWTH`] per answer, each such stall ratcheted the rate down to its floor on a link
+//!   of several Mbit/s with 0.5 % loss. A link that really narrowed keeps the answers late longer.
 //! - Below half of it: the rate grows by [`RATE_GROWTH`] per answer, so a link that recovered is
 //!   used again within seconds. While little is sent the rate isn't held to it: it may grow up to a
 //!   few times what got through recently, at least to [`PacingConfig::start_rate_bps`], so the
@@ -38,6 +44,9 @@ const RATE_GROWTH: f64 = 1.12;
 const DRAIN_BACKOFF: f64 = 0.9;
 /// When they hold several times the target already.
 const DRAIN_BACKOFF_FAST: f64 = 0.7;
+/// A run of at most this many late answers that ends on an empty path is a stall: its cuts are
+/// undone. With a ping every 250 ms, about as long as TCP takes to recover a lost segment.
+const MAX_STALL_ANSWERS: u8 = 3;
 /// Per ping while the oldest one has waited too long for its answer.
 const SILENCE_BACKOFF: f64 = 0.8;
 /// While little is sent, the rate may be this many times what got through recently.
@@ -89,6 +98,17 @@ pub struct DrainPacer {
   maybe_last_answer: Option<Answer>,
   round_trips: VecDeque<(Instant, Duration)>,
   drains: VecDeque<(Instant, f64)>,
+  /// Whether the previous answer was late (its wait above the target).
+  was_late: bool,
+  /// A run of late answers that began on an empty path: the rate before it, and how many.
+  maybe_stall: Option<Stall>,
+}
+
+/// A run of late answers that may be a stall ([`DrainPacer`]): undone if it ends soon.
+#[derive(Debug, Clone, Copy)]
+struct Stall {
+  rate_before_bps: f64,
+  late_answers: u8,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -130,6 +150,8 @@ impl DrainPacer {
       maybe_last_answer: None,
       round_trips: VecDeque::new(),
       drains: VecDeque::new(),
+      was_late: true,
+      maybe_stall: None,
     }
   }
 
@@ -189,12 +211,15 @@ impl DrainPacer {
     let round_trip = now.saturating_duration_since(probe.sent_at);
     self.note_round_trip(round_trip, now);
     let maybe_drain_bps = self.note_drain(probe.written_bytes, now);
-    self.adapt(self.queue_delay(round_trip), maybe_drain_bps, now);
+    let queue_delay = self.queue_delay(round_trip);
+    self.adapt(queue_delay, maybe_drain_bps, now);
   }
 
   fn adapt(&mut self, queue_delay: Duration, maybe_drain_bps: Option<f64>, now: Instant) {
     let target = self.config.target_queue_delay;
-    if queue_delay > target {
+    let is_late = queue_delay > target;
+    if is_late {
+      self.note_late_answer();
       let backoff = if queue_delay > 3 * target {
         DRAIN_BACKOFF_FAST
       } else {
@@ -202,21 +227,45 @@ impl DrainPacer {
       };
       let lowered = maybe_drain_bps.map_or(self.rate_bps * backoff, |drain_bps| drain_bps * backoff);
       self.set_rate(self.rate_bps.min(lowered));
+    } else if let Some(stall) = self.maybe_stall.take() {
+      // A stall that ended: what it cut comes back.
+      self.set_rate(self.rate_bps.max(stall.rate_before_bps));
     } else if queue_delay < target / 2 {
       let ceiling = self.ceiling_bps(now);
       self.set_rate((self.rate_bps * RATE_GROWTH).min(ceiling.max(self.rate_bps)));
+    }
+    self.was_late = is_late;
+  }
+
+  /// Counts a late answer into a possible stall: one after an answer in time starts one, and one
+  /// late answer more than [`MAX_STALL_ANSWERS`] makes it a backlog.
+  fn note_late_answer(&mut self) {
+    match &mut self.maybe_stall {
+      Some(stall) if stall.late_answers < MAX_STALL_ANSWERS => stall.late_answers += 1,
+      Some(_) => self.maybe_stall = None,
+      None if !self.was_late => {
+        self.maybe_stall = Some(Stall {
+          rate_before_bps: self.rate_bps,
+          late_answers: 1,
+        });
+      },
+      None => {},
     }
   }
 
   /// While little is sent, the rate may grow this far without having been used.
   fn ceiling_bps(&self, now: Instant) -> f64 {
-    let recent_max = self
+    (self.recent_drain_bps(now) * IDLE_HEADROOM).max(f64::from(self.config.start_rate_bps))
+  }
+
+  /// The most the path drained within [`DRAIN_WINDOW`].
+  fn recent_drain_bps(&self, now: Instant) -> f64 {
+    self
       .drains
       .iter()
       .filter(|(at, _)| now.saturating_duration_since(*at) < DRAIN_WINDOW)
       .map(|(_, bps)| *bps)
-      .fold(0.0, f64::max);
-    (recent_max * IDLE_HEADROOM).max(f64::from(self.config.start_rate_bps))
+      .fold(0.0, f64::max)
   }
 
   fn note_round_trip(&mut self, round_trip: Duration, now: Instant) {
@@ -331,6 +380,53 @@ mod tests {
         at += 250 * MS;
       }
       assert!(pacer.rate_bps() > 6_000_000, "{}", pacer.rate_bps());
+    }
+
+    /// #1845: round trips that jump by 80–180 ms every few answers while the path drains all
+    /// that is written (a jittery link, a busy receiver) are not this connection's backlog: the
+    /// rate grows to the link instead of ratcheting down to its floor.
+    #[test]
+    fn delay_spikes_on_a_path_that_keeps_up_dont_cut_the_rate() {
+      let start = Instant::now();
+      let mut pacer = DrainPacer::new(PacingConfig::default());
+      pacer.set_rate(600_000.0);
+      let mut at = start;
+      for number in 0..80u64 {
+        // The media written is what the rate allows, and all of it gets through.
+        let sent = pacer.rate_bps() / 8 / 4;
+        pacer.on_probe_sent(number, at);
+        pacer.on_written(sent as usize, at);
+        let spike = match number % 12 {
+          5 => 180 * MS,
+          6 => 80 * MS,
+          _ => Duration::ZERO,
+        };
+        pacer.on_answer(number, at + BASE_ROUND_TRIP + spike);
+        at += 250 * MS;
+      }
+      assert!(pacer.rate_bps() >= 3_000_000, "{}", pacer.rate_bps());
+    }
+
+    /// A path that drains less than is written while the delay grows still brings the rate down,
+    /// spikes or not.
+    #[test]
+    fn a_path_that_falls_behind_still_cuts_the_rate() {
+      let start = Instant::now();
+      let mut pacer = DrainPacer::new(PacingConfig::default());
+      pacer.set_rate(4_000_000.0);
+      // 4 Mbit/s written, 1.5 Mbit/s drained: each answer comes later by what waits.
+      let mut at = start;
+      let mut backlog_bytes = 0.0;
+      for number in 0..24u64 {
+        let sent = 125_000u32;
+        pacer.on_probe_sent(number, at);
+        pacer.on_written(sent as usize, at);
+        backlog_bytes += f64::from(sent) - 1_500_000.0 / 8.0 / 4.0;
+        let waiting = Duration::from_secs_f64(backlog_bytes.max(0.0) * 8.0 / 1_500_000.0);
+        pacer.on_answer(number, at + BASE_ROUND_TRIP + waiting);
+        at += 250 * MS;
+      }
+      assert!(pacer.rate_bps() < 1_500_000, "{}", pacer.rate_bps());
     }
 
     #[test]

@@ -67,7 +67,7 @@ use crate::call_resilience::{
   ReconnectSchedule, RejoinPacer, ResilienceConfig, SWITCH_DRAIN_TIMEOUT, connect_preferring_quic,
   fallback_delay, rejoin_attempt,
 };
-use crate::capture_health::{CaptureStallWatch, StallChange};
+use crate::capture_health::{CaptureSample, CaptureStallWatch, StallChange};
 use crate::fallback_link::{
   FallbackOpener, LoopbackOpener, SignalFrames, SocketEnd, SocketInput, is_allowed_url, is_going_away,
   read_socket,
@@ -2703,8 +2703,13 @@ impl VideoState {
       is_kept
     });
     for (sender, publication) in &self.senders {
-      let Some(counts) = sender.progress().maybe_capture_buffers else {
+      let progress = sender.progress();
+      let Some(buffers) = progress.maybe_capture_buffers else {
         continue;
+      };
+      let sample = CaptureSample {
+        buffers,
+        frames_encoded: progress.pictures_encoded,
       };
       let index = match self
         .capture_watches
@@ -2719,7 +2724,7 @@ impl VideoState {
           self.capture_watches.len() - 1
         },
       };
-      let Some(change) = self.capture_watches[index].2.observe(counts, now) else {
+      let Some(change) = self.capture_watches[index].2.observe(sample, now) else {
         continue;
       };
       let kind = sender.kind.clone();

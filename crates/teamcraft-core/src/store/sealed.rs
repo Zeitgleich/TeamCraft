@@ -3691,7 +3691,8 @@ mod tests {
   /// Issue #1790: what the UI shows of a large conversation through the store's indexes reads what
   /// it shows, not the conversation, also through the UI's message cache (which the conversation
   /// isn't in): the thread view and marking it read, the conversation's last activity, recent
-  /// mentions, the sent list and the conversation's files.
+  /// mentions, the sent list and the conversation's files; the first build of the activity feed and
+  /// a page of the conversation's files (issue #1814).
   #[cfg(feature = "ui")]
   mod ui_reads {
     use teamcraft_client_api::backend::{ChatBackend, SearchBackend};
@@ -3736,7 +3737,7 @@ mod tests {
                 meta: Default::default(),
               };
             }
-            if n == MESSAGES - 6 {
+            if (MESSAGES - 8..=MESSAGES - 6).contains(&n) {
               stored.content = media_content("image/png");
             }
             store.upsert_message(&stored)?;
@@ -3810,11 +3811,29 @@ mod tests {
         let expected: Vec<MessageId> = mine.iter().rev().map(|n| message_id(*n)).collect();
         assert_eq!(sent, expected);
       });
+      // Issue #1814: the first build of the activity feed reads my mentions and posts, the threads
+      // they are in and the feed's newest rows, not the conversation.
+      reads("the activity feed", &mut || {
+        let mut shown: Vec<MessageId> = backend.activity().items.iter().map(|item| item.message).collect();
+        shown.sort_unstable();
+        let expected: Vec<MessageId> = [5, 11, MESSAGES / 2, MESSAGES - 4]
+          .iter()
+          .map(|n| message_id(*n))
+          .collect();
+        assert_eq!(shown, expected);
+      });
+      // The Files & links tab's first page: the index from its end up to the page's messages.
+      reads("a page of the conversation's files", &mut || {
+        let page = backend.conversation_files_page(conversation, 2).unwrap();
+        let shown: Vec<MessageId> = page.files.iter().map(|file| file.message).collect();
+        assert_eq!(shown, [message_id(MESSAGES - 6), message_id(MESSAGES - 7)]);
+        assert!(page.has_more);
+      });
       // All of them: the message index's pages are walked whole (they say which messages have
       // files), but no message without files is read.
       records.reads.set(0);
       let files = backend.conversation_files(conversation);
-      assert_eq!(files.len(), 1);
+      assert_eq!(files.len(), 3);
       assert_eq!(files[0].message, message_id(MESSAGES - 6));
       assert!(
         records.reads.get() <= MAX_READS + usize::try_from(MESSAGES).unwrap() / 100,

@@ -1021,7 +1021,10 @@ reverse proxy as the gateway. Setup and what an existing deployment has to chang
   dropped datagram leaves a gap in the transport sequence numbers, so the bandwidth estimators react as
   to a lost QUIC datagram. The SFU's socket buffer is small (128 KiB, and at most 16 KiB of it not
   yet sent, `TCP_NOTSENT_LOWAT`), since what is inside can't be dropped; a browser can't drop what it
-  buffered, so it stops adding at 64 KiB of video or 256 KiB of audio (`bufferedAmount`).
+  buffered, so it stops adding at 64 KiB of video or 256 KiB of audio (`bufferedAmount`). Video is
+  dropped by frames (#1845): a dropped datagram takes the rest of its layer with it up to the next
+  keyframe, queued or still to come, and the SFU asks the publisher for that keyframe; a frame
+  missing a fragment, and every delta after it, can't be shown anyway.
 - **Pacing to the drain rate** (`fallback_pacer`, #1810): behind the SFU's socket sit the kernel's and
   a reverse proxy's buffers, megabytes that TCP fills as fast as it is given media; on a link that
   dips to 1.5 Mbit/s that was seconds of video with the voice and pings behind it, until the
@@ -1029,9 +1032,15 @@ reverse proxy as the gateway. Setup and what an existing deployment has to chang
   drains, measured end to end with a ping every 250 ms: the bytes written between two pings over
   the time between their answers, and the round trip above its smallest as what waits on the way
   (over 120 ms: the rate drops below what got through; under 60 ms: it grows by 12 % per answer).
+  A run of up to three late answers between answers in time is a stall, not a backlog, and its cuts
+  are undone (#1845): on a link with 1–2 % loss, TCP recovers a lost segment by its retransmission
+  timer at a low rate (too few segments in flight for a fast retransmit), about once a second, and
+  each such stall had ratcheted the rate down to its 300 kbit/s floor on a link of several Mbit/s.
   Audio, signaling and pings aren't held back, but video waits for what they took. The same rate
-  caps the connection's layer allocation (`Forwarder::set_link_capacity`), so the layers step down
-  within a second of a dip and back up within seconds after it. Audio jitter buffers go from 60 ms to 160 ms on this path
+  is the connection's downlink for the layer allocation (`Forwarder::set_link_capacity`), so the
+  layers step down within a second of a dip and back up within seconds after it. The transport
+  feedback's estimate doesn't cap it there: over TCP the queue's drops look like loss and the
+  bursts like a growing delay, and no probe runs (draining is the proof). Audio jitter buffers go from 60 ms to 160 ms on this path
   (`JitterBufferConfig::for_fallback`).
 - **Bounds and hostile peers:** a limit on connections in a call, the message size limit, a write
   timeout that drops a peer that stopped reading, the idle timeout, and everything rooms enforce. A

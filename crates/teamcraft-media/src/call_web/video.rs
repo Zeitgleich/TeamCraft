@@ -60,6 +60,7 @@ use crate::call_video::ReceivedVideoFrame;
 use crate::camera_governor::{
   CameraGovernorConfig, CameraLoad, FrameTally, LayerLimit, LayerRateGuard, LoadStep, OverloadReason,
 };
+use crate::capture_health::{BufferCounts, CaptureSample, CaptureStallWatch, StallChange};
 use crate::share_policy::{
   EncodeTimer, EncoderKind, ShareCodecs, ShareEncoders, ShareGovernor, ShareLimits, SharePlan, UplinkTop,
   share_framerate,
@@ -155,6 +156,12 @@ pub(super) struct TrackSender {
   /// When the share's top layer was given each of its last frames: its encode time is the wait
   /// for the chunk (#1733).
   top_encode_timer: EncodeTimer,
+  /// What the takes from the capture came to (#1805): taken, failed or with nothing to take.
+  takes: BufferCounts,
+  /// Frames the top layer encoded (#1805).
+  frames_encoded: u64,
+  /// Whether the capture still gives pictures (#1805), judged on the call's timer.
+  stall_watch: CaptureStallWatch,
   _ended: Closure<dyn FnMut()>,
 }
 
@@ -457,6 +464,9 @@ impl TrackSender {
       limit,
       maybe_replan: None,
       top_encode_timer: EncodeTimer::default(),
+      takes: BufferCounts::default(),
+      frames_encoded: 0,
+      stall_watch: CaptureStallWatch::new(),
       _ended: ended,
     })
   }
@@ -559,17 +569,24 @@ impl TrackSender {
   /// track has no stream to go out on. A picture that can't be taken is skipped; only encoders
   /// that keep failing end the track.
   pub async fn capture(&mut self) -> Result<(), EncoderGaveUp> {
-    if self.publication.own.maybe_stream_id.is_none() || self.video.video_width() == 0 {
+    if self.publication.own.maybe_stream_id.is_none() {
+      return Ok(());
+    }
+    if self.video.video_width() == 0 {
+      // Published, and the capture has nothing to show (#1805).
+      self.takes.not_ready += 1;
       return Ok(());
     }
     self.follow_source_size()?;
     let frame = match self.next_frame().await {
       Ok(frame) => frame,
       Err(error) => {
+        self.takes.unreadable += 1;
         self.on_picture_failed(&error);
         return Ok(());
       },
     };
+    self.takes.taken += 1;
     self.failed_pictures_in_a_row = 0;
     self.frames_captured += 1;
     // The frame carries the timestamp it was taken with; the next one gets the following.
@@ -612,6 +629,9 @@ impl TrackSender {
       .layers
       .last()
       .is_some_and(|top| top.info.layer == layer);
+    if is_top {
+      self.frames_encoded += 1;
+    }
     if is_top
       && let Some(share) = &mut self.maybe_share
       && let Some(encode_time) = self.top_encode_timer.on_encoded(timestamp_us, now)
@@ -865,6 +885,55 @@ impl TrackSender {
     } else {
       debug!(%error, ?kind, in_a_row = self.failed_pictures_in_a_row, "taking a video picture failed");
     }
+  }
+
+  /// What became of the takes from the capture so far, with what the browser says of its frames
+  /// where it tells (#1805): `deliveredFrames` and `discardedFrames` of the track's `stats`
+  /// (Chrome), else the frames the `<video>` got (`getVideoPlaybackQuality`).
+  pub fn capture_counts(&self) -> BufferCounts {
+    let mut counts = self.takes;
+    let maybe_track = self
+      .stream
+      .get_video_tracks()
+      .get(0)
+      .dyn_into::<MediaStreamTrack>()
+      .ok();
+    let maybe_stats = maybe_track
+      .and_then(|track| js_sys::Reflect::get(&track, &JsValue::from_str("stats")).ok())
+      .filter(JsValue::is_object);
+    let count = |object: &JsValue, key: &str| {
+      js_sys::Reflect::get(object, &JsValue::from_str(key))
+        .ok()
+        .and_then(|value| value.as_f64())
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        // Frame counts, far below 2^53.
+        .map(|value| value as u64)
+    };
+    if let Some(stats) = maybe_stats
+      && let Some(delivered) = count(&stats, "deliveredFrames")
+    {
+      counts.pictures = delivered;
+      counts.discarded = count(&stats, "discardedFrames").unwrap_or(0);
+    } else if let Some(quality) = video_playback_quality(&self.video) {
+      counts.pictures = count(&quality, "totalVideoFrames").unwrap_or(0);
+    }
+    counts
+  }
+
+  /// Judges at `now` whether the capture still gives pictures (#1805); a change, when its state
+  /// changed. Only a published track is judged.
+  pub fn judge_capture(&mut self, now: Instant) -> Option<StallChange> {
+    self.publication.own.maybe_stream_id?;
+    let sample = CaptureSample {
+      buffers: self.capture_counts(),
+      frames_encoded: self.frames_encoded,
+    };
+    self.stall_watch.observe(sample, now)
+  }
+
+  /// Whether the capture is judged stalled now (#1805).
+  pub fn is_capture_stalled(&self) -> bool {
+    self.stall_watch.is_stalled()
   }
 
   /// Stops capturing; the encoders close as they drop.
@@ -2279,6 +2348,13 @@ fn constraint(name: &str, value: u32) -> Result<JsValue, WebCallError> {
 }
 
 /// A muted, detached `<video>` playing the stream, to take frames from.
+/// `video.getVideoPlaybackQuality()`, where the browser has it.
+fn video_playback_quality(video: &HtmlVideoElement) -> Option<JsValue> {
+  let method = js_sys::Reflect::get(video, &JsValue::from_str("getVideoPlaybackQuality")).ok()?;
+  let method: js_sys::Function = method.dyn_into().ok()?;
+  method.call0(video).ok().filter(JsValue::is_object)
+}
+
 pub(super) async fn play_hidden(stream: &MediaStream) -> Result<HtmlVideoElement, WebCallError> {
   let video: HtmlVideoElement = window()?
     .document()

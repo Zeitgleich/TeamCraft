@@ -1832,6 +1832,12 @@ pub enum ChatQuery {
     conversation: ConversationId,
     limit: usize,
   },
+  /// The newest files of a conversation ([`ChatBackend::conversation_files_page`]): the core reads
+  /// them through its index (issue #1814).
+  ConversationFilesPage {
+    conversation: ConversationId,
+    limit: usize,
+  },
   ShareLinks {
     conversation: ConversationId,
     message: MessageId,
@@ -2309,6 +2315,16 @@ impl ChatQuery {
           .conversation_links(conversation, limit)
           .unwrap_or_default(),
       },
+      Self::ConversationFilesPage { conversation, limit } => {
+        // The core reads its own store and always answers.
+        let page = backend
+          .conversation_files_page(conversation, limit)
+          .unwrap_or_default();
+        ChatAnswer::FilesPage {
+          files: page.files,
+          has_more: page.has_more,
+        }
+      },
       Self::ShareLinks {
         conversation,
         message,
@@ -2492,6 +2508,13 @@ mod tests {
         ChatQuery::ConversationLinks {
           conversation: id_from_raw(9),
           limit: 30,
+        },
+      ),
+      (
+        r#"{"kind":"conversation_files_page","conversation":"9","limit":60}"#,
+        ChatQuery::ConversationFilesPage {
+          conversation: id_from_raw(9),
+          limit: 60,
         },
       ),
     ] {

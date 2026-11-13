@@ -313,6 +313,24 @@ impl Stack {
     shutdown
   }
 
+  /// Stops the server with SIGTERM and leaves it stopped (until [`Self::respawn_server`]).
+  pub async fn stop_server(&mut self) {
+    self
+      .server()
+      .terminate(START_TIMEOUT)
+      .await
+      .unwrap_or_else(|error| panic!("stopping the server: {error:#}"));
+  }
+
+  /// The name of the database the server uses; panics for a deployed instance.
+  pub fn database_name(&self) -> &str {
+    &self
+      .maybe_owned
+      .as_ref()
+      .expect("a deployed instance has no database of the test")
+      .database_name
+  }
+
   /// Stops the SFU with SIGTERM (a deploy: it tells the calls it is going away) and starts it again
   /// on the same port with `identity` (certificate and key PEM) as its certificate, or a fresh
   /// self-signed one. Returns the new certificate's SHA-256.

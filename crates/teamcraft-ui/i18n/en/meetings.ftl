@@ -190,3 +190,73 @@ meetings-joined-by-link = { $name } joined with the meeting link
 meetings-remove-joined = Remove
 meetings-visit-from-outside = A link wants to open a meeting. If you aren't in it yet, opening it asks its hosts to let you in.
 meetings-visit-open = Open the meeting
+
+# Meetings page: views, now / next, answers, rows (#956)
+meetings-views = Show meetings
+meetings-tab-upcoming = Upcoming
+meetings-tab-hosted = Hosted by me
+meetings-tab-invited = Invited
+meetings-tab-past = Past
+meetings-hosted-empty-title = Nothing you host
+meetings-hosted-empty = Meetings you organize or co-host show up here.
+meetings-invited-empty-title = No invitations
+meetings-invited-empty = Meetings others invite you to show up here.
+meetings-past-empty-title = No past meetings
+meetings-past-empty = Meetings of the last 30 days show up here once they have ended.
+meetings-show-more = Show more
+meetings-reach = Meetings up to { $date }
+meetings-loading = Loading meetings…
+meetings-hero-now = Now
+meetings-hero-next = Next
+meetings-hero-running = Running · { $time }
+meetings-hero-soon = { $count ->
+    [one] Starts in 1 minute · { $time }
+   *[other] Starts in { $count } minutes · { $time }
+}
+meetings-details = Details
+meetings-more = More actions
+meetings-needs-answer = Needs your answer
+meetings-answer-covers = { $count ->
+    [one] Your answer also covers 1 more date of the series
+   *[other] Your answer also covers { $count } more dates of the series
+}
+meetings-series-daily = { $count ->
+    [one] Every day
+   *[other] Every { $count } days
+}
+meetings-series-workdays = { $count ->
+    [one] Every weekday
+   *[other] Every { $count } days on weekdays
+}
+meetings-series-weekly = { $count ->
+    [one] Every week
+   *[other] Every { $count } weeks
+}
+meetings-series-monthly = { $count ->
+    [one] Every month
+   *[other] Every { $count } months
+}
+meetings-state-soon = { $count ->
+    [one] In 1 min
+   *[other] In { $count } min
+}
+meetings-state-ended = Ended
+meetings-state-waiting = { $count ->
+    [one] 1 waiting
+   *[other] { $count } waiting
+}
+meetings-rsvp-state-accepted = Going
+meetings-rsvp-state-tentative = Maybe
+meetings-rsvp-state-declined = Not going
+meetings-rsvp-state-none = Respond
+meetings-link-copied-toast = Meeting link copied
+meetings-you-host = You host
+meetings-people = { $count ->
+    [one] 1 person
+   *[other] { $count } people
+}
+meetings-duration-minutes = { $minutes } min
+meetings-duration-hours = { $hours } h
+meetings-duration-both = { $hours } h { $minutes } min
+meetings-yesterday = Yesterday
+meetings-when = When
