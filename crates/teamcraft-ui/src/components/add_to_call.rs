@@ -285,7 +285,8 @@ fn MoveCallDialog(conversation: ConversationId) -> impl IntoView {
 }
 
 /// Somebody else moved the DM call this device is in into a meeting room: who did it and whom they
-/// added, from their encrypted announcement, and a tap to follow. Nothing moves before the tap.
+/// added, from their encrypted announcement. The device follows by itself (`follow_moved_calls`);
+/// the banner shows while it does, and stays with its button when following failed.
 #[component]
 pub fn CallMoveBanner() -> impl IntoView {
   let state = use_app_state();

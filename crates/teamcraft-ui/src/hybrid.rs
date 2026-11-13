@@ -1142,6 +1142,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.call_move_offer(from, to)
   }
 
+  fn moved_call(&self, conversation: ConversationId) -> Option<teamcraft_client_api::notetaker::MovedCall> {
+    self.chat.moved_call(conversation)
+  }
+
   fn accept_call_move(&self, from: ConversationId, to: ConversationId) {
     self.chat.accept_call_move(from, to);
   }

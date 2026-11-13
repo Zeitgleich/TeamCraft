@@ -31,7 +31,7 @@
   <string name="call_meeting_title">Call</string>
   <string name="call_move_offer">%1$s moved the call into a meeting room and added %2$s.</string>
   <string name="call_move_join">Join the meeting room</string>
-  <string name="call_move_offer_notetaker">%1$s added the notetaker. The call goes on in a meeting room, where what is said is sent to OpenRouter for a transcript. Your audio reaches it only once you join there.</string>
+  <string name="call_move_offer_notetaker">%1$s added the notetaker. The call goes on in a meeting room, where what is said is sent to OpenRouter for a transcript. You move over with everybody else.</string>
   <string name="call_notetaker_add">Add notetaker</string>
   <string name="call_notetaker_badge">Notetaker in the call – audio goes to OpenRouter</string>
   <string name="call_notetaker_refused_guest">Guests can\'t add the notetaker to a call.</string>

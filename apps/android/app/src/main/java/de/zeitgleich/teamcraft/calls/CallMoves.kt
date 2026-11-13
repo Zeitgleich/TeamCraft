@@ -29,7 +29,7 @@ import uniffi.teamcraft_ffi.TeamCraftException
  * call"). The core starts the room, founds its group and checks every move; this class keeps the
  * dialog's and the banners' state. Nothing moves on the
  * server's `call_move` alone: only an announcement from the DM's group (`callMoveOffer`) that
- * `acceptCallMove` confirmed, and for others only on the user's tap.
+ * `acceptCallMove` confirmed; then every device in the call follows by itself.
  */
 class CallMoves(
   private val core: CoreRepository,
@@ -227,10 +227,15 @@ class CallMoves(
     offer.value = null
   }
 
-  /** Reads the announcement; the mover's own device follows at once, others see the banner. */
+  /**
+   * Reads the announcement; every device in the call follows at once, after the core's check, so
+   * the whole call moves together. Others see the banner (who moved it, where the audio goes) while
+   * their device follows.
+   */
   private suspend fun check() {
     val move = checkLock.withLock { offerFor() } ?: return
-    if (move.isMine) accept(move.move) else offer.value = move.offer
+    if (!move.isMine) offer.value = move.offer
+    accept(move.move)
   }
 
   private suspend fun offerFor(): CheckedMove? {
@@ -249,10 +254,9 @@ class CallMoves(
     val info = maybeInfo ?: return null
     if (pending.value != move) return null
     val maybeSnapshot = readSnapshot()
-    // Only a move this device asked for follows without a tap (not one replayed from earlier,
-    // nor the user's own from another device).
+    // A move this device asked for shows no banner; any other does while this device follows.
     val isMine = info.isRequestedHere
-    // "Add notetaker" moved it: the banner says where the audio goes before the tap.
+    // "Add notetaker" moved it: the banner says where the audio goes.
     val maybeBot = notetaker(move.from, emptyList())?.botUserId
     val offer = CallMoveOffer(
       from = move.from,
