@@ -102,6 +102,21 @@ enum ChatListGrouping: String, CaseIterable {
   static let key = "chat_list_grouping"
 }
 
+/// How the Favorites section of Home (the Channels tab of the spaces layout) is ordered. The choice
+/// follows the account (the desktop's Favorites sort).
+enum FavoritesSort: String, CaseIterable {
+  /// By name (what the section did before there was a choice).
+  case alphabetical
+  /// The favorite with the newest message first.
+  case recent
+
+  static let key = "favorites_sort"
+
+  static func stored(_ maybeRaw: String?) -> FavoritesSort {
+    maybeRaw.flatMap(FavoritesSort.init(rawValue:)) ?? .alphabetical
+  }
+}
+
 /// The floating bottom bar of the chats screen (#1786): Chats (the DMs, the tab the app starts on),
 /// Channels (the selected space's channels, Home before), Meetings and Activity (what waits for the
 /// user). iOS only for now; Android keeps Home, DMs and Activity (#1488).
@@ -208,12 +223,32 @@ private func byName(_ lhs: ConversationItem, _ rhs: ConversationItem) -> Bool {
   lhs.listName.localizedCaseInsensitiveCompare(rhs.listName) == .orderedAscending
 }
 
+/// The favorites in the order the user chose: by name, or the newest message first (one without a
+/// message last, ties by name). The one ordering of every Favorites section of the spaces layout.
+func sortedFavorites(
+  _ favorites: [ConversationItem], by sort: FavoritesSort, lastActivity: [String: Date]
+) -> [ConversationItem] {
+  switch sort {
+  case .alphabetical:
+    return favorites.sorted(by: byName)
+  case .recent:
+    return favorites.sorted { lhs, rhs in
+      let left = lastActivity[lhs.id] ?? .distantPast
+      let right = lastActivity[rhs.id] ?? .distantPast
+      return left == right ? byName(lhs, rhs) : left > right
+    }
+  }
+}
+
 /// Channels of the spaces: favorite channels first, then each space (spaces and channels by name).
 /// Same grouping as the Android app.
-func channelSections(_ conversations: [ConversationItem], listsArchived: Bool = false) -> [ConversationSection] {
+func channelSections(
+  _ conversations: [ConversationItem], listsArchived: Bool = false, favoritesSort: FavoritesSort = .alphabetical,
+  lastActivity: [String: Date] = [:]
+) -> [ConversationSection] {
   // Archived channels leave the lists; Browse finds them (issue #212).
   let channels = conversations.filter { !$0.isDirect && !$0.isArchived }
-  let favorites = channels.filter(\.isFavorite).sorted(by: byName)
+  let favorites = sortedFavorites(channels.filter(\.isFavorite), by: favoritesSort, lastActivity: lastActivity)
   let spaces = Dictionary(grouping: channels.filter { !$0.isFavorite }, by: \.maybeSpaceName)
   let orderedSpaces = spaces.keys.sorted { lhs, rhs in
     switch (lhs, rhs) {
@@ -237,10 +272,11 @@ func channelSections(_ conversations: [ConversationItem], listsArchived: Bool = 
 }
 
 /// Home of the spaces layout (#1488): the DMs with something new (not favorites, the most recent
-/// first), then the favorites (DMs and channels, by name), then each space with its channels, as
+/// first), then the favorites (DMs and channels, by name or the newest first, as chosen), then each space with its channels, as
 /// `channelSections` has them. Read DMs are on the DMs tab. Empty sections are left out.
 func homeSections(
-  _ conversations: [ConversationItem], lastActivity: [String: Date] = [:], listsArchived: Bool = false
+  _ conversations: [ConversationItem], lastActivity: [String: Date] = [:], listsArchived: Bool = false,
+  favoritesSort: FavoritesSort = .alphabetical
 ) -> [ConversationSection] {
   var seen = Set<String>()
   let unique = conversations.filter { seen.insert($0.id).inserted }
@@ -251,7 +287,8 @@ func homeSections(
       let right = lastActivity[rhs.id] ?? .distantPast
       return left == right ? byName(lhs, rhs) : left > right
     }
-  let favorites = unique.filter { $0.isFavorite && !$0.isArchived }.sorted(by: byName)
+  let favorites = sortedFavorites(
+    unique.filter { $0.isFavorite && !$0.isArchived }, by: favoritesSort, lastActivity: lastActivity)
   var sections: [ConversationSection] = []
   if !unreadDirect.isEmpty { sections.append(ConversationSection(title: .unreadDirect, conversations: unreadDirect)) }
   if !favorites.isEmpty { sections.append(ConversationSection(title: .favorites, conversations: favorites)) }
@@ -404,12 +441,14 @@ func hasNewElsewhere(_ spaces: [HomeSpace], selectedId: String?) -> Bool {
 /// selected space's channels under `.spaceChannels`, also when it has none yet. Channels outside any
 /// space stay listed. Same as Android.
 func spaceHomeSections(
-  _ conversations: [ConversationItem], spaceId: String, lastActivity: [String: Date] = [:], listsArchived: Bool = false
+  _ conversations: [ConversationItem], spaceId: String, lastActivity: [String: Date] = [:], listsArchived: Bool = false,
+  favoritesSort: FavoritesSort = .alphabetical
 ) -> [ConversationSection] {
   let shown = conversations.filter {
     $0.isDirect || $0.isFavorite || $0.maybeSpaceId == nil || $0.maybeSpaceId == spaceId
   }
-  let sections = homeSections(shown, lastActivity: lastActivity, listsArchived: listsArchived)
+  let sections = homeSections(
+    shown, lastActivity: lastActivity, listsArchived: listsArchived, favoritesSort: favoritesSort)
   let channels = sections.filter(\.isSpace).flatMap(\.conversations)
   let head = sections.filter { $0.title == .unreadDirect || $0.title == .favorites }
   let tail = sections.filter { $0.title == .channels || $0.title == .archived }

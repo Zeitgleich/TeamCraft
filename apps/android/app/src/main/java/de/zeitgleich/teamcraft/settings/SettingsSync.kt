@@ -2,6 +2,7 @@ package de.zeitgleich.teamcraft.settings
 
 import android.content.Context
 import android.util.Log
+import de.zeitgleich.teamcraft.ui.theme.FavoritesSort
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.debounce
@@ -19,6 +20,7 @@ import de.zeitgleich.teamcraft.ui.theme.AppearancePrefs
 import de.zeitgleich.teamcraft.ui.theme.ChatListGrouping
 import de.zeitgleich.teamcraft.ui.theme.ChatListLayout
 import uniffi.teamcraft_ffi.AppAnimatedImages
+import uniffi.teamcraft_ffi.AppFavoritesSort
 import uniffi.teamcraft_ffi.AppListGrouping
 import uniffi.teamcraft_ffi.AppListLayout
 import uniffi.teamcraft_ffi.MentionSettings
@@ -93,6 +95,10 @@ class SettingsSync(
         ChatListGrouping.Mixed -> AppListGrouping.MIXED
         ChatListGrouping.BySpace -> AppListGrouping.BY_SPACE
       },
+      favoritesSort = when (appearance.favoritesSortChoice.value) {
+        FavoritesSort.Alphabetical -> AppFavoritesSort.ALPHABETICAL
+        FavoritesSort.Recent -> AppFavoritesSort.RECENT
+      },
       animatedImages = when (MediaPrefs.prefs(appContext).animatedImages.value) {
         AnimatedImagesMode.AUTOPLAY -> AppAnimatedImages.AUTOPLAY
         AnimatedImagesMode.ON_TAP -> AppAnimatedImages.ON_TAP
@@ -124,6 +130,14 @@ class SettingsSync(
         when (settings.listGrouping) {
           AppListGrouping.MIXED -> ChatListGrouping.Mixed
           AppListGrouping.BY_SPACE -> ChatListGrouping.BySpace
+        },
+      )
+    }
+    if (settings.favoritesSort != before.favoritesSort) {
+      appearance.setFavoritesSort(
+        when (settings.favoritesSort) {
+          AppFavoritesSort.ALPHABETICAL -> FavoritesSort.Alphabetical
+          AppFavoritesSort.RECENT -> FavoritesSort.Recent
         },
       )
     }

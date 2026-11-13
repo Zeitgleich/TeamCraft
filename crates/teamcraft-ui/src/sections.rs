@@ -99,6 +99,37 @@ impl SidebarOptions {
 /// whatever their unread count or star: they are Chats' conversations, shown here too, and a
 /// space's list shouldn't move them around.
 pub fn build_sections(conversations: &[Conversation], options: &SidebarOptions) -> Vec<Section> {
+  build_sections_by(conversations, options, &FavoritesOrder::default())
+}
+
+/// How the Favorites section of a space's sidebar is ordered: the user's choice, and when it is
+/// "newest first", where each conversation's newest message time comes from.
+#[derive(Clone, Copy)]
+pub struct FavoritesOrder<'a> {
+  pub sort: DmSort,
+  /// The time of a conversation's newest message; read once per favorite, never per conversation.
+  pub recency: &'a dyn Fn(ConversationId) -> Option<TimestampMs>,
+}
+
+impl Default for FavoritesOrder<'_> {
+  /// Alphabetical: what the list does without the choice (by name, or the user's own order).
+  fn default() -> Self {
+    Self {
+      sort: DmSort::Alphabetical,
+      recency: &|_| None,
+    }
+  }
+}
+
+/// [`build_sections`] with the Favorites section in the order the user chose for it
+/// ([`FavoritesOrder`]), through the same [`sort_conversations`] Chats sorts with. Only the
+/// favorites are looked up and sorted, so a new message costs `O(k log k)` for `k` favorites, not
+/// a pass over every conversation.
+pub fn build_sections_by(
+  conversations: &[Conversation],
+  options: &SidebarOptions,
+  favorites: &FavoritesOrder,
+) -> Vec<Section> {
   let mut sections: Vec<Section> = SectionKind::ALL
     .into_iter()
     .map(|kind| Section {
@@ -136,6 +167,17 @@ pub fn build_sections(conversations: &[Conversation], options: &SidebarOptions) 
     }
   }
   for section in &mut sections {
+    if section.kind == SectionKind::Favorites && favorites.sort == DmSort::Recent {
+      let entries = std::mem::take(&mut section.conversations)
+        .into_iter()
+        .map(|conversation| {
+          let at = (favorites.recency)(conversation.id);
+          (conversation, at)
+        })
+        .collect();
+      section.conversations = sort_conversations(entries, DmSort::Recent);
+      continue;
+    }
     let keeps_order = matches!(section.kind, SectionKind::Unreads | SectionKind::DirectMessages);
     if options.sort == SidebarSort::Alphabetical && !keeps_order {
       section
@@ -417,13 +459,22 @@ fn matching_in_order(
 ) -> Vec<Conversation> {
   let needle = filter.trim().to_lowercase();
   let mut seen = HashSet::new();
-  let mut list: Vec<(Conversation, Option<TimestampMs>)> = conversations
+  let list: Vec<(Conversation, Option<TimestampMs>)> = conversations
     .into_iter()
     // Each conversation is one row, however often a caller hands it over (issue #643).
     .filter(|(conversation, _)| seen.insert(conversation.id))
     .filter(|(conversation, _)| chip.matches(conversation))
     .filter(|(conversation, _)| needle.is_empty() || conversation.name.to_lowercase().contains(&needle))
     .collect();
+  sort_conversations(list, sort)
+}
+
+/// The one ordering of conversations by the user's choice, for Chats and for the Favorites of a
+/// space: newest message first (conversations without messages last, ties by name) or by name.
+pub fn sort_conversations(
+  mut list: Vec<(Conversation, Option<TimestampMs>)>,
+  sort: DmSort,
+) -> Vec<Conversation> {
   match sort {
     DmSort::Recent => list.sort_by(|(a, a_at), (b, b_at)| {
       b_at
@@ -543,10 +594,11 @@ pub fn build_grouped(
   spaces: &[(SpaceId, String)],
   conversations: &[Conversation],
   options: &SidebarOptions,
+  favorites: &FavoritesOrder,
 ) -> GroupedSidebar {
   let mut top = Vec::new();
   let mut channels: Vec<Conversation> = Vec::new();
-  for section in build_sections(conversations, options) {
+  for section in build_sections_by(conversations, options, favorites) {
     match section.kind {
       SectionKind::Unreads | SectionKind::Favorites => top.push(section),
       // The grouped sidebar holds the channels of every space; DMs are in Chats.
@@ -814,6 +866,114 @@ mod tests {
       .map(|c| c.name.clone())
       .collect();
     assert_eq!(names, ["Amy", "zed"]);
+  }
+
+  mod favorites_sort {
+    use super::*;
+
+    #[test]
+    fn newest_first_with_ties_by_name_and_conversations_without_messages_last() {
+      let mut entries = vec![
+        (named(1, "zed"), Some(10)),
+        (named(2, "quiet"), None),
+        (named(3, "bob"), Some(20)),
+        (named(4, "amy"), Some(10)),
+        (named(5, "also quiet"), None),
+      ];
+      let recent = sort_conversations(entries.clone(), DmSort::Recent);
+      assert_eq!(raw_ids(&recent), [3, 4, 1, 5, 2]);
+      entries.reverse();
+      assert_eq!(
+        raw_ids(&sort_conversations(entries, DmSort::Recent)),
+        [3, 4, 1, 5, 2],
+        "the input order doesn't matter"
+      );
+    }
+
+    #[test]
+    fn alphabetical_ignores_the_time() {
+      let entries = vec![(named(1, "zed"), Some(30)), (named(2, "Amy"), None)];
+      assert_eq!(
+        raw_ids(&sort_conversations(entries, DmSort::Alphabetical)),
+        [2, 1]
+      );
+    }
+
+    #[test]
+    fn the_favorites_section_follows_the_choice_and_other_sections_do_not() {
+      let list = vec![
+        favorite(1, "amy"),
+        favorite(2, "bob"),
+        favorite(3, "cat"),
+        conversation(4, SidebarCategory::Channels, 0, false),
+        conversation(5, SidebarCategory::Channels, 0, false),
+      ];
+      let at = |id: ConversationId| match crate::model::raw_id(id) {
+        2 => Some(50),
+        3 => Some(60),
+        4 => Some(70),
+        _ => None,
+      };
+      let options = SidebarOptions {
+        sort: SidebarSort::Alphabetical,
+        ..SidebarOptions::plain(false)
+      };
+      let order = |sort| FavoritesOrder { sort, recency: &at };
+      let sections = build_sections_by(&list, &options, &order(DmSort::Recent));
+      assert_eq!(favorites_of(&sections), [3, 2, 1]);
+      assert_eq!(channels_of(&sections), [4, 5], "channels stay by name");
+      let sections = build_sections_by(&list, &options, &order(DmSort::Alphabetical));
+      assert_eq!(favorites_of(&sections), [1, 2, 3]);
+    }
+
+    #[test]
+    fn the_default_is_the_order_the_list_came_in() {
+      let list = vec![favorite(2, "bob"), favorite(1, "amy")];
+      let sections = build_sections(&list, &SidebarOptions::plain(false));
+      assert_eq!(favorites_of(&sections), [2, 1]);
+    }
+
+    #[test]
+    fn the_grouped_sidebar_sorts_its_favorites_too() {
+      let list = vec![favorite(1, "amy"), favorite(2, "bob")];
+      let at = |id: ConversationId| Some(i64::try_from(crate::model::raw_id(id)).unwrap());
+      let favorites = FavoritesOrder {
+        sort: DmSort::Recent,
+        recency: &at,
+      };
+      let grouped = build_grouped(&[], &list, &SidebarOptions::plain(false), &favorites);
+      assert_eq!(favorites_of(&grouped.top), [2, 1]);
+    }
+
+    fn named(id: u64, name: &str) -> Conversation {
+      let mut conversation = conversation(id, SidebarCategory::Channels, 0, true);
+      conversation.name = name.into();
+      conversation
+    }
+
+    fn favorite(id: u64, name: &str) -> Conversation {
+      named(id, name)
+    }
+
+    fn raw_ids(list: &[Conversation]) -> Vec<u64> {
+      list.iter().map(|c| crate::model::raw_id(c.id)).collect()
+    }
+
+    fn section_of(sections: &[Section], kind: SectionKind) -> Vec<u64> {
+      sections
+        .iter()
+        .filter(|section| section.kind == kind)
+        .flat_map(|section| raw_ids(&section.conversations))
+        .collect()
+    }
+
+    fn favorites_of(sections: &[Section]) -> Vec<u64> {
+      section_of(sections, SectionKind::Favorites)
+    }
+
+    fn channels_of(sections: &[Section]) -> Vec<u64> {
+      section_of(sections, SectionKind::Channels)
+    }
   }
 
   /// #1152: the channels a user starred show under Favorites in Chats, next to the favorite DMs.
@@ -1540,7 +1700,12 @@ mod tests {
       (b, "Project B".to_owned()),
       (id_from_raw(3), "Empty".to_owned()),
     ];
-    let grouped = build_grouped(&spaces, &list, &SidebarOptions::plain(true));
+    let grouped = build_grouped(
+      &spaces,
+      &list,
+      &SidebarOptions::plain(true),
+      &FavoritesOrder::default(),
+    );
 
     let top: Vec<SectionKind> = grouped.top.iter().map(|section| section.kind).collect();
     assert_eq!(top, [SectionKind::Unreads, SectionKind::Favorites]);

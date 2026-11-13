@@ -24,7 +24,8 @@ use crate::feedback::{ActionFailure, FailureKind, PendingAction, report_failure}
 use crate::i18n::{Locale, use_i18n};
 use crate::keys::t_with_shortcuts;
 use crate::prefs::{
-  AnimatedImages, CallPrefs, Density, ImageSize, ListGrouping, SidebarLayout, SidebarSort, TextSize, Zoom,
+  AnimatedImages, CallPrefs, Density, DmSort, ImageSize, ListGrouping, SidebarLayout, SidebarSort, TextSize,
+  Zoom,
 };
 use crate::reactive::SetIfAlive;
 use crate::settings::{AudioLimit, MediaCacheLimit, MediaCacheMaxAge, PreviewLimit, SendMode, Theme};
@@ -400,6 +401,17 @@ pub fn PreferencesSection() -> impl IntoView {
         on_change=Callback::new(move |slug: String| {
           if let Some(sort) = SidebarSort::from_slug(&slug) {
             prefs.update(|all| all.sidebar.sort = sort);
+          }
+        })
+      />
+      <SelectRow
+        label="settings-favorites-sort"
+        hint="settings-favorites-sort-hint"
+        options=slug_options(&DmSort::ALL.map(DmSort::slug), "dm-sort-")
+        value=Signal::derive(move || prefs.get().sidebar.favorites_sort.slug().to_owned())
+        on_change=Callback::new(move |slug: String| {
+          if let Some(sort) = DmSort::from_slug(&slug) {
+            prefs.update(|all| all.sidebar.favorites_sort = sort);
           }
         })
       />

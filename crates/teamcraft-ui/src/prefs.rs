@@ -845,6 +845,9 @@ pub struct SidebarPrefs {
   pub sort: SidebarSort,
   /// Order of Home.
   pub dm_sort: DmSort,
+  /// Order of the Favorites section of a space's sidebar (same choice as Home's). Alphabetical is
+  /// the default: by name, or the user's own drag order while the sort above is the default.
+  pub favorites_sort: DmSort,
   /// Direct messages shown before "show more"; 0 shows all.
   pub dm_limit: u32,
   /// One sidebar with the channels of every space grouped by space (Slack style), instead of the
@@ -869,6 +872,7 @@ impl Default for SidebarPrefs {
       list_grouping: ListGrouping::Mixed,
       sort: SidebarSort::Default,
       dm_sort: DmSort::Recent,
+      favorites_sort: DmSort::Alphabetical,
       dm_limit: 0,
       is_grouped_by_space: false,
       reopen_last_conversation: true,

@@ -32,6 +32,7 @@ import de.zeitgleich.teamcraft.ui.AnimatedImagesMode
 import de.zeitgleich.teamcraft.ui.ComposerPrefs
 import de.zeitgleich.teamcraft.ui.MediaPrefs
 import de.zeitgleich.teamcraft.ui.media.MediaQuality
+import de.zeitgleich.teamcraft.ui.theme.FavoritesSort
 import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.ui.theme.AppearancePrefs
 import de.zeitgleich.teamcraft.ui.theme.ChatListGrouping
@@ -221,6 +222,22 @@ fun ChatListGroupingSetting(shapes: ListItemShapes) {
   )
 }
 
+/** How the Favorites of the spaces layout are ordered: by name, or the newest message first. */
+@Composable
+fun FavoritesSortSetting(shapes: ListItemShapes) {
+  val context = LocalContext.current
+  val prefs = remember { AppearancePrefs.prefs(context) }
+  val sort by prefs.favoritesSortChoice.collectAsState()
+  SettingsChoiceRow(
+    shapes,
+    stringResource(R.string.favorites_sort),
+    FAVORITES_SORT_CHOICES,
+    sort,
+    maybeHint = stringResource(R.string.favorites_sort_hint),
+    onSelect = prefs::setFavoritesSort,
+  )
+}
+
 /** Whether the list layout is on, so the page shows [ChatListGroupingSetting] (only the list has an order to choose). */
 @Composable
 fun isChatListLayoutList(): Boolean {
@@ -270,6 +287,11 @@ private val MESSAGE_LAYOUT_CHOICES = listOf(
 private val CHAT_LIST_GROUPING_CHOICES = listOf(
   ChatListGrouping.Mixed to R.string.chat_list_grouping_mixed,
   ChatListGrouping.BySpace to R.string.chat_list_grouping_by_space,
+)
+
+private val FAVORITES_SORT_CHOICES = listOf(
+  FavoritesSort.Recent to R.string.favorites_sort_recent,
+  FavoritesSort.Alphabetical to R.string.favorites_sort_alphabetical,
 )
 
 private val STATUS_SOUND_CHOICES = listOf(

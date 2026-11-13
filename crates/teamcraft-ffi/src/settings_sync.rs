@@ -5,7 +5,8 @@
 use teamcraft_client_api::backend::ChatBackend as _;
 use teamcraft_client_api::calls::CallStatusSounds as CallStatusSoundsApi;
 use teamcraft_client_api::mobile_settings::{
-  AnimatedImages, ListGrouping, ListLayout, MobileSettings, MobileSyncState, sync_mobile_settings,
+  AnimatedImages, FavoritesSort, ListGrouping, ListLayout, MobileSettings, MobileSyncState,
+  sync_mobile_settings,
 };
 
 use crate::TeamCraft;
@@ -17,6 +18,8 @@ use crate::error::TeamCraftError;
 pub struct SyncedAppSettings {
   pub list_layout: AppListLayout,
   pub list_grouping: AppListGrouping,
+  /// How the Favorites section of the spaces layout is ordered.
+  pub favorites_sort: AppFavoritesSort,
   pub animated_images: AppAnimatedImages,
   pub shares_typing: bool,
   pub first_name_is_mention: bool,
@@ -42,6 +45,12 @@ pub enum AppListLayout {
 pub enum AppListGrouping {
   Mixed,
   BySpace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum AppFavoritesSort {
+  Alphabetical,
+  Recent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -127,6 +136,10 @@ impl From<SyncedAppSettings> for MobileSettings {
         AppListGrouping::Mixed => ListGrouping::Mixed,
         AppListGrouping::BySpace => ListGrouping::BySpace,
       },
+      favorites_sort: match app.favorites_sort {
+        AppFavoritesSort::Alphabetical => FavoritesSort::Alphabetical,
+        AppFavoritesSort::Recent => FavoritesSort::Recent,
+      },
       animated_images: match app.animated_images {
         AppAnimatedImages::Autoplay => AnimatedImages::Autoplay,
         AppAnimatedImages::OnTap => AnimatedImages::OnTap,
@@ -161,6 +174,10 @@ impl From<MobileSettings> for SyncedAppSettings {
       list_grouping: match settings.list_grouping {
         ListGrouping::Mixed => AppListGrouping::Mixed,
         ListGrouping::BySpace => AppListGrouping::BySpace,
+      },
+      favorites_sort: match settings.favorites_sort {
+        FavoritesSort::Alphabetical => AppFavoritesSort::Alphabetical,
+        FavoritesSort::Recent => AppFavoritesSort::Recent,
       },
       animated_images: match settings.animated_images {
         AnimatedImages::Autoplay => AppAnimatedImages::Autoplay,

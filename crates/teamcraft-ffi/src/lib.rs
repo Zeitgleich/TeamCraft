@@ -99,7 +99,7 @@ pub use server_entry::{
   check_server_info, normalize_server_address, sign_in_page, sso_only_sign_in_page, stored_server,
 };
 pub use settings_sync::{
-  AppAnimatedImages, AppListGrouping, AppListLayout, SettingsSyncOutcome, SyncedAppSettings,
+  AppAnimatedImages, AppFavoritesSort, AppListGrouping, AppListLayout, SettingsSyncOutcome, SyncedAppSettings,
 };
 use teamcraft_client_api::remote::ChatAction;
 use teamcraft_core::api::proxy::SystemProxy;

@@ -182,6 +182,29 @@ final class ChatModelTests: XCTestCase {
     XCTAssertTrue(directSections([item("5", "release", space: "Project A", favorite: true)]).isEmpty)
   }
 
+  /// The Favorites of Home by the chosen sort: newest message first (ties by name, silent ones
+  /// last) or by name.
+  func testFavoritesFollowTheChosenSort() {
+    let at = { (seconds: TimeInterval) in Date(timeIntervalSince1970: seconds) }
+    let favorites = [
+      item("1", "zed", space: "Project A", favorite: true),
+      item("2", "quiet", space: "Project A", favorite: true),
+      item("3", "bob", kind: .direct, favorite: true),
+      item("4", "amy", space: "Project A", favorite: true),
+      item("5", "also quiet", kind: .group, favorite: true),
+    ]
+    let activity = ["1": at(10), "3": at(20), "4": at(10)]
+    XCTAssertEqual(
+      sortedFavorites(favorites, by: .recent, lastActivity: activity).map(\.name),
+      ["bob", "amy", "zed", "also quiet", "quiet"])
+    XCTAssertEqual(
+      sortedFavorites(favorites, by: .alphabetical, lastActivity: activity).map(\.name),
+      ["also quiet", "amy", "bob", "quiet", "zed"])
+    let home = homeSections(favorites, lastActivity: activity, favoritesSort: .recent)
+    XCTAssertEqual(home.first?.title, .favorites)
+    XCTAssertEqual(home.first?.conversations.map(\.name), ["bob", "amy", "zed", "also quiet", "quiet"])
+  }
+
   /// #1488: a collapsed section still shows what is new and the open conversation.
   func testACollapsedSectionKeepsWhatIsNewAndTheOpenConversation() {
     let section = ConversationSection(
