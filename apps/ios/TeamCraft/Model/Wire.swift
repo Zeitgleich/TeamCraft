@@ -345,8 +345,6 @@ struct PeopleSnapshot: Decodable, Sendable {
     let isDeleted: Bool?
     /// An integration's account: never offered after `@`.
     let isBot: Bool?
-    /// A guest: never offered to host a meeting (#1720).
-    var isGuest: Bool? = nil
 
     /// The name to show: the app's own "Deleted user" for a deleted account, as on desktop and web.
     var shownName: String { isDeleted == true ? deletedUserName : displayName }

@@ -1,134 +1,237 @@
 package de.zeitgleich.teamcraft.calls
 
 import android.util.Log
+import androidx.annotation.StringRes
+import de.zeitgleich.teamcraft.R
+import de.zeitgleich.teamcraft.core.ChatClient
+import de.zeitgleich.teamcraft.core.ChatSnapshot
+import de.zeitgleich.teamcraft.core.CoreRepository
+import de.zeitgleich.teamcraft.core.User
+import de.zeitgleich.teamcraft.core.WireJson
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.Serializable
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.SerializationException
-import kotlinx.serialization.json.JsonElement
-import de.zeitgleich.teamcraft.core.ChatClient
-import de.zeitgleich.teamcraft.core.CoreRepository
-import de.zeitgleich.teamcraft.core.User
-import de.zeitgleich.teamcraft.core.WireJson
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import uniffi.teamcraft_ffi.MeetingHostAction
 import uniffi.teamcraft_ffi.MeetingHosts
+import uniffi.teamcraft_ffi.MeetingPart
 import uniffi.teamcraft_ffi.TeamCraftException
 
 /**
- * Co-hosts and handing a meeting over in its call (#1720; docs/meetings.md, "Hosts"): who hosts
- * the meeting whose chat the call is in, the organizer's participant menu, and the question whom to
- * hand it to when the organizer leaves with people waiting in the lobby. The core signs the host
- * list with the user's identity key and publishes it; this class only reads and asks.
+ * Co-hosts and handing a meeting over in its call (#1720), as desktop and web do it
+ * (docs/meetings.md, "Hosts"): who hosts the meeting of the call, for the tiles' "Host" and
+ * "Co-host", the organizer's "Make co-host", "Remove as co-host" and "Hand over host role" (the
+ * core signs the new host list, e2ee.md §4.6), and the question before the organizer leaves with
+ * people waiting in the lobby and nobody else to let them in.
  */
 class CallHosts(
   private val core: CoreRepository,
   private val scope: CoroutineScope,
 ) {
   private val chat = ChatClient { core.core() }
-  private val answered = MutableStateFlow(0L)
+  private val current = MutableStateFlow<MeetingHosts?>(null)
+  private val changing = MutableStateFlow<HostsChange>(HostsChange.Idle)
 
-  /** Moves on every change of the store: the hosts and the last change's outcome are read again. */
-  val changes: StateFlow<Long> get() = core.changeCount
+  /** Counts the calls: a reading that comes back after the call ended is dropped. */
+  @Volatile private var generation = 0
 
-  /** Moves each time a change of the hosts was answered here, so its outcome is read again. */
-  val answers: StateFlow<Long> = answered
+  /** Who hosts the meeting of the call; `null` for a call outside a meeting (or before it is read). */
+  val hosts: StateFlow<MeetingHosts?> = current
 
-  /** Who hosts the meeting whose chat is `conversationId`; `null` outside a meeting's call. */
-  suspend fun hosts(conversationId: String): MeetingHosts? =
-    quietly("reading the meeting's hosts") { core.core().meetingHosts(conversationId) }
+  /** How the last change of the hosts on this device went. */
+  val change: StateFlow<HostsChange> = changing
 
-  /** How the last change of the hosts went on this device ([HostChangeStatus]); `null` before one. */
-  suspend fun changeStatus(conversationId: String): HostChangeStatus? =
-    quietly("reading the host change") { core.core().meetingHostsChange(conversationId) }
-      ?.let(HostChangeStatus::of)
-
-  /** "Make co-host", "Remove as co-host" or "Hand over host role" for `userId` (organizer only). */
-  fun change(conversationId: String, userId: String, action: MeetingHostAction) {
-    scope.launch {
-      quietly("changing the meeting's hosts") { core.core().changeMeetingHost(conversationId, userId, action) }
-      answered.value += 1
+  /** Reads who hosts the meeting of the call in `conversationId` again (it stays as it was offline). */
+  suspend fun refresh(conversationId: String) {
+    val call = generation
+    try {
+      val read = withContext(Dispatchers.Default) { core.core().meetingHosts(conversationId) }
+      if (call == generation) current.value = read
+    } catch (error: TeamCraftException) {
+      Log.w(TAG, "the meeting's hosts could not be read", error)
+    } catch (error: IllegalStateException) {
+      if (error is CancellationException) throw error
     }
   }
 
-  /** The people in the call who could host: known members, no guests, no bots, not the user. */
-  suspend fun candidates(participantIds: List<String>): List<User> {
-    val snapshot = quietly("reading the people") { withContext(Dispatchers.Default) { chat.snapshot() } } ?: return emptyList()
-    val known = snapshot.users.associateBy { it.id }
-    return participantIds
-      .filter { it != snapshot.me.id }
-      .mapNotNull { known[it] }
-      .filter { !it.isGuest && !it.isBot }
+  /** The call ended: nothing of it is shown in the next one. */
+  fun reset() {
+    generation++
+    current.value = null
+    changing.value = HostsChange.Idle
   }
 
   /**
-   * What to ask when the organizer leaves the call of `conversationId`: people wait in the lobby,
-   * nobody else hosts and somebody in the call could take over (the core's rule, as on desktop and
-   * web). `null`: just leave. A failed read leaves too: the user asked to go.
+   * The organizer's menu on `userId`: the core signs and publishes the new hosts; this follows how
+   * it went and reads the hosts again once it is through.
    */
-  suspend fun leaveOffer(hosts: MeetingHosts, conversationId: String, participantIds: List<String>): LeaveOffer? {
-    val candidates = candidates(participantIds)
-    if (candidates.isEmpty()) return null
-    val waiting = waitingInLobby(hosts.meetingId) ?: return null
-    val isOffered = quietly("checking the handover") {
-      core.core().offersMeetingHandover(conversationId, waiting.toUInt(), candidates.map { it.id })
-    } ?: false
-    return if (isOffered) LeaveOffer(waiting, candidates.take(MAX_HANDOVER_CHOICES)) else null
+  fun change(conversationId: String, userId: String, action: MeetingHostAction) {
+    if (changing.value == HostsChange.Saving) return
+    changing.value = HostsChange.Saving
+    scope.launch {
+      changing.value = try {
+        core.core().changeMeetingHost(conversationId, userId, action)
+        awaitChange(conversationId)
+      } catch (error: TeamCraftException) {
+        Log.w(TAG, "the meeting's hosts could not be changed", error)
+        HostsChange.Failed(null, failureText(error))
+      } catch (error: IllegalStateException) {
+        if (error is CancellationException) throw error
+        HostsChange.Failed(null)
+      }
+      refresh(conversationId)
+    }
   }
 
-  /** How many wait in the meeting's lobby (`GET /meetings/{id}/lobby`, hosts only). */
-  private suspend fun waitingInLobby(meetingId: String): Int? =
-    quietly("reading the lobby") {
-      WireJson.decodeFromString(LobbyList.serializer(), chat.api("GET", "/meetings/$meetingId/lobby")).entries.size
+  /** Waits for the core's signed change to be saved or refused (it runs on its own queue). */
+  private suspend fun awaitChange(conversationId: String): HostsChange {
+    repeat(CHANGE_POLLS) {
+      when (val state = core.core().meetingHostsChange(conversationId)) {
+        null, CHANGE_SAVING -> delay(CHANGE_POLL_MILLIS)
+        CHANGE_SAVED -> return HostsChange.Idle
+        else -> return HostsChange.Failed(state)
+      }
     }
+    return HostsChange.Idle
+  }
 
-  private suspend fun <T> quietly(what: String, read: suspend () -> T): T? =
+  /**
+   * "Hand over to … and leave" (the leave question): the core takes the signed handover on its
+   * own queue, which goes on after the call; then the user leaves. A failure is only logged, as
+   * desktop and web leave at once too.
+   */
+  suspend fun handOverBeforeLeaving(conversationId: String, userId: String) {
     try {
-      read()
+      withTimeoutOrNull(OFFER_TIMEOUT_MILLIS) { core.core().changeMeetingHost(conversationId, userId, MeetingHostAction.HAND_OVER) }
     } catch (error: TeamCraftException) {
-      Log.w(TAG, "$what failed", error)
-      null
-    } catch (error: SerializationException) {
-      Log.w(TAG, "$what failed", error)
-      null
+      Log.w(TAG, "the meeting could not be handed over", error)
     } catch (error: IllegalStateException) {
       if (error is CancellationException) throw error
-      Log.w(TAG, "$what failed", error)
-      null
+    }
+  }
+
+  /** The others in the call, for the host menu; empty while the store can't be read. */
+  suspend fun people(participantIds: List<String>): List<User> =
+    try {
+      val snapshot = withContext(Dispatchers.Default) { chat.snapshot() }
+      participantIds.distinct().filter { it != snapshot.me.id }.mapNotNull { snapshot.user(it) }
+    } catch (error: TeamCraftException) {
+      emptyList()
+    } catch (error: SerializationException) {
+      emptyList()
+    } catch (error: IllegalStateException) {
+      if (error is CancellationException) throw error
+      emptyList()
     }
 
-  @Serializable
-  private class LobbyList(val entries: List<JsonElement> = emptyList())
+  /** The failure shown under the menu goes away. */
+  fun dismissFailure() {
+    if (changing.value is HostsChange.Failed) changing.value = HostsChange.Idle
+  }
+
+  /**
+   * What to ask before the user leaves the call of `conversationId` with `participantIds` in it:
+   * a handover when the user organizes its meeting, people wait in the lobby, nobody else hosts
+   * it and somebody here could (the core decides, as desktop and web). `null` to just leave; also
+   * when the answer takes too long, so leaving never hangs on the network.
+   */
+  suspend fun handoverOffer(conversationId: String, participantIds: List<String>): HandoverOffer? {
+    val hosts = current.value?.takeIf { it.ownPart == MeetingPart.ORGANIZER } ?: return null
+    return withTimeoutOrNull(OFFER_TIMEOUT_MILLIS) {
+      try {
+        val snapshot = withContext(Dispatchers.Default) { chat.snapshot() }
+        val candidates = handoverCandidates(participantIds, snapshot)
+        if (candidates.isEmpty()) return@withTimeoutOrNull null
+        val waiting = lobbyWaitingCount(chat.api("GET", "/meetings/${hosts.meetingId}/lobby")) ?: 0
+        if (waiting == 0) return@withTimeoutOrNull null
+        val offers = core.core().offersMeetingHandover(conversationId, waiting.toUInt(), candidates.map { it.id })
+        if (offers) HandoverOffer(waiting, candidates.take(MAX_HANDOVER_CHOICES)) else null
+      } catch (error: TeamCraftException) {
+        Log.w(TAG, "the handover could not be checked", error)
+        null
+      } catch (error: SerializationException) {
+        null
+      } catch (error: IllegalStateException) {
+        if (error is CancellationException) throw error
+        null
+      }
+    }
+  }
 
   private companion object {
-    const val TAG = "TeamCraftHosts"
+    const val TAG = "TeamCraftCalls"
+    const val CHANGE_SAVING = "saving"
+    const val CHANGE_SAVED = "saved"
+    const val CHANGE_POLLS = 40
+    const val CHANGE_POLL_MILLIS = 250L
+    const val OFFER_TIMEOUT_MILLIS = 4_000L
 
-    /** Up to this many people are offered to hand the meeting to, as on desktop and web. */
-    const val MAX_HANDOVER_CHOICES = 5
-  }
-}
-
-/** Leaving would leave `waiting` people in the lobby without a host: whom to hand the meeting to. */
-data class LeaveOffer(val waiting: Int, val candidates: List<User>)
-
-/** How the last change of the hosts went, as the core says it. */
-sealed interface HostChangeStatus {
-  data object Saving : HostChangeStatus
-
-  data object Saved : HostChangeStatus
-
-  /** The core's words for the failure (shown under a translated lead-in). */
-  data class Failed(val reason: String) : HostChangeStatus
-
-  companion object {
-    fun of(text: String): HostChangeStatus = when (text) {
-      "saving" -> Saving
-      "saved" -> Saved
-      else -> Failed(text)
+    @StringRes
+    fun failureText(error: TeamCraftException): Int = when (error) {
+      is TeamCraftException.Network -> R.string.error_network
+      else -> R.string.error_generic
     }
   }
 }
+
+/** How many people of the call the leave question offers to hand the meeting to, as on desktop. */
+internal const val MAX_HANDOVER_CHOICES = 5
+
+/** How the last change of the hosts went: saving, or why it failed. */
+sealed interface HostsChange {
+  data object Idle : HostsChange
+
+  data object Saving : HostsChange
+
+  /** [maybeReason]: the core's words; without them [fallback] says it. */
+  data class Failed(val maybeReason: String?, @StringRes val fallback: Int = R.string.error_generic) : HostsChange
+}
+
+/** The organizer leaves with `waiting` people in the lobby: whom the meeting can go to. */
+data class HandoverOffer(val waiting: Int, val candidates: List<User>)
+
+/** A person's part in the meeting, as their tile says it; `null` for an ordinary participant. */
+internal fun hostLabelOf(hosts: MeetingHosts?, userId: String): Int? = when {
+  hosts == null -> null
+  hosts.organizerUserId == userId -> R.string.call_tile_host
+  userId in hosts.coHostUserIds -> R.string.call_tile_co_host
+  else -> null
+}
+
+/**
+ * What the organizer's menu offers on somebody: "Make co-host" or "Remove as co-host", and "Hand
+ * over host role". Nothing for anybody else's menu, nor on guests and bots (the server refuses them
+ * as hosts) or the organizer.
+ */
+internal fun hostActionsFor(hosts: MeetingHosts?, user: User): List<MeetingHostAction> {
+  if (hosts == null || hosts.ownPart != MeetingPart.ORGANIZER) return emptyList()
+  if (user.isGuest || user.isBot || user.id == hosts.organizerUserId) return emptyList()
+  val coHost = if (user.id in hosts.coHostUserIds) MeetingHostAction.REMOVE_CO_HOST else MeetingHostAction.MAKE_CO_HOST
+  return listOf(coHost, MeetingHostAction.HAND_OVER)
+}
+
+/** The others in the call who could take the meeting over: members of this server, not guests or bots. */
+internal fun handoverCandidates(participantIds: List<String>, snapshot: ChatSnapshot): List<User> =
+  participantIds
+    .distinct()
+    .filter { it != snapshot.me.id }
+    .mapNotNull { snapshot.user(it) }
+    .filter { !it.isGuest && !it.isBot && it.isOffered }
+
+/** How many wait in a meeting's lobby, from the server's `GET /meetings/{id}/lobby`; `null` if unreadable. */
+internal fun lobbyWaitingCount(json: String): Int? =
+  try {
+    WireJson.parseToJsonElement(json).jsonObject["entries"]?.jsonArray?.size
+  } catch (error: SerializationException) {
+    null
+  } catch (error: IllegalArgumentException) {
+    null
+  }

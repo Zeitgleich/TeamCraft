@@ -1,23 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Co-Gastgeber und Übergabe eines Meetings im Anruf (#1720), wie Desktop und Web es sagen. -->
 <resources>
-  <string name="call_people">Teilnehmende</string>
-  <string name="call_people_title">Im Anruf</string>
-  <string name="host_role_organizer">Gastgeber</string>
-  <string name="host_role_co_host">Co-Gastgeber</string>
-  <string name="host_menu_for">Gastgeber-Optionen für %1$s</string>
-  <string name="host_make_co_host">Zum Co-Gastgeber machen</string>
-  <string name="host_remove_co_host">Als Co-Gastgeber entfernen</string>
-  <string name="host_hand_over">Gastgeberrolle übergeben</string>
-  <string name="host_hand_over_title">An %1$s übergeben?</string>
-  <string name="host_hand_over_body">Ab dann ändert nur noch %1$s das Meeting oder sagt es ab; du bleibst Co-Gastgeber.</string>
-  <string name="host_hand_over_confirm">Übergeben</string>
-  <string name="host_change_saving">Gastgeber werden gespeichert …</string>
-  <string name="host_change_failed">Die Gastgeber konnten nicht geändert werden: %1$s</string>
-  <string name="host_leave_title">Es warten Personen auf Einlass</string>
-  <plurals name="host_leave_body">
-    <item quantity="one">%1$d Person wartet im Warteraum, und niemand sonst hier kann sie einlassen.</item>
-    <item quantity="other">%1$d Personen warten im Warteraum, und niemand sonst hier kann sie einlassen.</item>
+  <string name="call_tile_host">Gastgeber</string>
+  <string name="call_tile_co_host">Co-Gastgeber</string>
+  <string name="call_hosts_title">Gastgeber</string>
+  <string name="call_hosts_hint">Co-Gastgeber lassen Personen ein, erstellen Gastlinks und nutzen die Host-Steuerung. Nur der Gastgeber ändert das Meeting oder sagt es ab.</string>
+  <string name="call_hosts_make_co_host">Zum Co-Gastgeber machen</string>
+  <string name="call_hosts_remove_co_host">Als Co-Gastgeber entfernen</string>
+  <string name="call_hosts_hand_over">Gastgeberrolle übergeben</string>
+  <string name="call_hosts_hand_over_confirm">Das Meeting an %1$s übergeben? Ab dann ändert nur noch diese Person es oder sagt es ab; du bleibst Co-Gastgeber.</string>
+  <string name="call_hosts_hand_over_do">Übergeben</string>
+  <string name="call_hosts_saving">Gastgeber werden gespeichert …</string>
+  <string name="call_hosts_failed">Die Gastgeber konnten nicht geändert werden: %1$s</string>
+  <string name="call_hosts_leave_title">Es warten Personen auf Einlass</string>
+  <plurals name="call_hosts_leave_body">
+    <item quantity="one">%1$d Person wartet in der Lobby, und sobald du gehst, kann sie hier niemand mehr einlassen.</item>
+    <item quantity="other">%1$d Personen warten in der Lobby, und sobald du gehst, kann sie hier niemand mehr einlassen.</item>
   </plurals>
-  <string name="host_leave_hand_over">An %1$s übergeben und gehen</string>
-  <string name="host_leave_anyway">Trotzdem gehen</string>
+  <string name="call_hosts_leave_hand_over">An %1$s übergeben und gehen</string>
+  <string name="call_hosts_leave_anyway">Trotzdem gehen</string>
 </resources>

@@ -81,11 +81,22 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
     }
   });
   let maybe_hub = use_context::<crate::meetings::MeetingsHub>();
-  // The tray's "Leave call…" leaves as the Leave button does: asking first where it applies.
+  // Leaving: the organizer leaving with people in the lobby and nobody else to let them in is
+  // asked to hand the meeting over first (#1720), from the button and the tray's "Leave call".
+  let ask_to_leave = move || {
+    let me = state.me().id;
+    let candidates = crate::components::meeting_controls::handover_candidates(state, request.conversation);
+    match maybe_hub.and_then(|hub| {
+      crate::components::meeting_controls::handover_offer(hub, request.conversation, me, candidates)
+    }) {
+      Some(offer) => leave_prompt.set(Some(offer)),
+      None => call.leave(),
+    }
+  };
   Effect::new(move |_| {
     if call.is_leave_asked.get() {
       call.is_leave_asked.set(false);
-      crate::components::meeting_controls::leave_or_ask(state, maybe_hub, request.conversation, leave_prompt);
+      ask_to_leave();
     }
   });
   // A DM's call moves into a meeting room with the added people; a meeting's organizer invites
@@ -930,11 +941,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         />
         <button
           class="leave-btn"
-          on:click=move |_| {
-            // The organizer leaving with people in the lobby and nobody else to let them in is
-            // asked to hand the meeting over first (#1720).
-            crate::components::meeting_controls::leave_or_ask(state, maybe_hub, request.conversation, leave_prompt);
-          }
+          on:click=move |_| ask_to_leave()
         >
           <Icon name=IconName::Phone class="hangup" />
           <span>{move || i18n.t("call-leave")}</span>

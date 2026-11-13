@@ -13,7 +13,7 @@ use crate::i18n::use_i18n;
 use crate::meetings::MeetingsHub;
 use crate::model::{ConversationId, UserId};
 use crate::reactive::SetIfAlive;
-use crate::state::use_app_state;
+use crate::state::{AppState, use_app_state};
 
 /// Buttons for the host of a running meeting. `conversation` names the call whose participants can
 /// be removed.
@@ -191,6 +191,20 @@ pub fn HostControls(meeting: MeetingId, conversation: ConversationId) -> impl In
   }
 }
 
+/// The others in the call of `conversation` who could take its meeting over: no guests, no bots
+/// (the server refuses them as hosts).
+pub fn handover_candidates(state: AppState, conversation: ConversationId) -> Vec<crate::model::User> {
+  let me = state.me().id;
+  state.read(|backend| {
+    backend
+      .call_participants(conversation)
+      .into_iter()
+      .filter_map(|participant| backend.user(participant.user))
+      .filter(|user| !user.is_guest && !user.is_bot && user.id != me)
+      .collect()
+  })
+}
+
 /// How many people of the call the leave prompt offers to hand the meeting to.
 const MAX_HANDOVER_CHOICES: usize = 5;
 
@@ -232,39 +246,6 @@ pub fn handover_offer(
       candidates: candidates.into_iter().take(MAX_HANDOVER_CHOICES).collect(),
     }
   })
-}
-
-/// The other people in the call of `conversation` who could take the meeting over: no guests, no
-/// bots, not `me`.
-pub fn handover_candidates(
-  state: crate::state::AppState,
-  conversation: ConversationId,
-  me: UserId,
-) -> Vec<crate::model::User> {
-  state.read(|backend| {
-    backend
-      .call_participants(conversation)
-      .into_iter()
-      .filter_map(|participant| backend.user(participant.user))
-      .filter(|user| !user.is_guest && !user.is_bot && user.id != me)
-      .collect()
-  })
-}
-
-/// Leaves the call of `conversation`, or asks the organizer whom to hand the meeting over to first
-/// (into `prompt`) when people wait in its lobby and nobody else hosts it.
-pub fn leave_or_ask(
-  state: crate::state::AppState,
-  maybe_hub: Option<MeetingsHub>,
-  conversation: ConversationId,
-  prompt: RwSignal<Option<HandoverOffer>>,
-) {
-  let me = state.me().id;
-  let candidates = handover_candidates(state, conversation, me);
-  match maybe_hub.and_then(|hub| handover_offer(hub, conversation, me, candidates)) {
-    Some(offer) => prompt.set(Some(offer)),
-    None => state.call.leave(),
-  }
 }
 
 /// Asks the organizer who leaves with people waiting whom to hand the meeting to: each choice

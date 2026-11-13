@@ -47,8 +47,9 @@ pub enum TrayAction {
   ResumeNotifications,
   /// The host of a meeting: opens the call with "End for everyone" waiting to be confirmed.
   EndCallForEveryone,
-  /// "Leave call…" of a meeting's organizer while people wait in its lobby and nobody else hosts
-  /// it (#1720): opens the call with the question whom to hand the meeting over to.
+  /// "Leave call" of the organizer of a meeting whose lobby has people waiting and nobody else to
+  /// let them in: opens the call asking whom to hand the meeting to first, as its button does
+  /// (#1720).
   LeaveCallAsking,
 }
 

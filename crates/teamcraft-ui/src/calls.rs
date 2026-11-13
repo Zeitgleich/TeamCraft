@@ -329,8 +329,8 @@ pub struct CallState {
   /// The tray's "End for everyone…" (#1293): the host controls of the call screen open with the
   /// ending waiting to be confirmed; they reset it.
   pub is_end_for_everyone_asked: RwSignal<bool>,
-  /// The tray's "Leave call…" (#1720): the call screen leaves as its Leave button does, asking the
-  /// organizer whom to hand the meeting over to first; it resets it.
+  /// The tray's "Leave call" of an organizer who would leave people stuck in the lobby (#1720):
+  /// the call screen asks whom to hand the meeting to, as its own button does; it resets it.
   pub is_leave_asked: RwSignal<bool>,
   /// When this device entered the call (wall clock), the start of [`CallState::elapsed_ms`]: when
   /// this page joined, or for a call it resumed, when the media layer says the device joined.

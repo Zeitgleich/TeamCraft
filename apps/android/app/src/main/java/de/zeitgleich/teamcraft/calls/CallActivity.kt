@@ -40,8 +40,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -84,11 +84,10 @@ import de.zeitgleich.teamcraft.ui.toggled
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.core.ChatClient
+import de.zeitgleich.teamcraft.core.User
 import de.zeitgleich.teamcraft.notifications.MeetingNoticeReport
 import uniffi.teamcraft_ffi.CallPhase
 import uniffi.teamcraft_ffi.CallStateInfo
-import uniffi.teamcraft_ffi.MeetingHostAction
-import uniffi.teamcraft_ffi.MeetingHosts
 import uniffi.teamcraft_ffi.MeetingPart
 import uniffi.teamcraft_ffi.NotetakerCallInfo
 import uniffi.teamcraft_ffi.NotetakerRefusal
@@ -384,47 +383,48 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
     ?.takeIf { maybeState?.phase == CallPhase.CONNECTED }
     ?.let(::notetakerRefusalText)
 
-  // Who hosts the meeting of this call (#1720), read again on every change of the store and once
-  // a change of the hosts was answered: the "People" sheet with its badges and the organizer's
-  // menu, and the question whom to hand the meeting to before leaving.
-  val hostChanges by calls.hosts.changes.collectAsStateWithLifecycle()
-  val hostAnswers by calls.hosts.answers.collectAsStateWithLifecycle()
-  val maybeHosts by produceState<MeetingHosts?>(null, maybeConversationId, hostChanges, hostAnswers) {
-    value = maybeConversationId?.let { calls.hosts.hosts(it) }
+  // Who hosts the meeting of the call (#1720), read again when somebody comes or goes: the tiles'
+  // "Host" and "Co-host", the organizer's host menu, and the question before the organizer leaves.
+  val hosts by calls.hosts.hosts.collectAsStateWithLifecycle()
+  val hostsChange by calls.hosts.change.collectAsStateWithLifecycle()
+  LaunchedEffect(maybeConversationId, participantIds) {
+    maybeConversationId?.let { calls.hosts.refresh(it) }
   }
-  val maybeHostStatus by produceState<HostChangeStatus?>(null, maybeConversationId, hostChanges, hostAnswers) {
-    value = maybeConversationId?.let { calls.hosts.changeStatus(it) }
+  val hostLabels = participantIds.mapNotNull { id -> hostLabelOf(hosts, id)?.let { id to it } }.toMap()
+  var isHostsShown by rememberSaveable { mutableStateOf(false) }
+  val hostsPeople by produceState(emptyList<User>(), isHostsShown, participantIds) {
+    value = if (isHostsShown) calls.hosts.people(participantIds) else emptyList()
   }
-  val canHostIds by produceState(emptySet<String>(), participantIds) {
-    value = calls.hosts.candidates(participantIds).map { it.id }.toSet()
-  }
-  var isShowingPeople by rememberSaveable { mutableStateOf(false) }
-  var maybeLeaveOffer by remember { mutableStateOf<LeaveOffer?>(null) }
-  val hostScope = rememberCoroutineScope()
-  val hosts = maybeHosts
-  if (isShowingPeople && hosts != null && maybeConversationId != null) {
-    val conversationId = maybeConversationId
-    CallPeopleSheet(
-      hosts = hosts,
-      people = participantIds.map { id -> CallPerson(id, names[id].orEmpty(), id in canHostIds) },
-      maybeStatus = maybeHostStatus,
-      onChange = { userId, action -> calls.hosts.change(conversationId, userId, action) },
-      onDismiss = { isShowingPeople = false },
+  val maybeShownHosts = hosts?.takeIf { it.ownPart == MeetingPart.ORGANIZER }
+  if (isHostsShown && maybeShownHosts != null && maybeConversationId != null) {
+    HostsDialog(
+      hosts = maybeShownHosts,
+      people = hostsPeople,
+      change = hostsChange,
+      onAction = { user, action -> calls.hosts.change(maybeConversationId, user.id, action) },
+      onDismissFailure = { calls.hosts.dismissFailure() },
+      onClose = { isHostsShown = false },
     )
   }
-  maybeLeaveOffer?.let { offer ->
-    LeavePromptDialog(
+  val scope = rememberCoroutineScope()
+  var isCheckingLeave by remember { mutableStateOf(false) }
+  var maybeHandover by remember { mutableStateOf<HandoverOffer?>(null) }
+  maybeHandover?.let { offer ->
+    LeaveHandoverDialog(
       offer = offer,
       onHandOver = { user ->
-        maybeLeaveOffer = null
-        maybeConversationId?.let { calls.hosts.change(it, user.id, MeetingHostAction.HAND_OVER) }
-        calls.hangUp()
+        maybeHandover = null
+        val conversationId = maybeConversationId
+        scope.launch {
+          if (conversationId != null) calls.hosts.handOverBeforeLeaving(conversationId, user.id)
+          calls.hangUp()
+        }
       },
       onLeave = {
-        maybeLeaveOffer = null
+        maybeHandover = null
         calls.hangUp()
       },
-      onStay = { maybeLeaveOffer = null },
+      onStay = { maybeHandover = null },
     )
   }
 
@@ -477,6 +477,7 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
       // "Add people" is offered in DM and group DM calls only: its choice says which this is.
       isDirectCall = addChoice != null,
       isSharingScreen = screenShareStatus != ScreenShareStatus.Off,
+      hostLabels = hostLabels,
     ),
     actions = CallUiActions(
       onToggleControls = { areControlsShown = !areControlsShown },
@@ -494,15 +495,17 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
       },
       maybeNotetakerRefusal = maybeNotetakerRefusal,
       onHangUp = {
-        // The organizer leaving with people in the lobby and nobody else to let them in is asked
-        // to hand the meeting over first (#1720), as on desktop and web.
+        // The organizer leaving with people in the lobby and nobody else to let them in is asked to
+        // hand the meeting over first (#1720); everybody else just leaves.
         val conversationId = maybeConversationId
-        if (hosts?.ownPart != MeetingPart.ORGANIZER || conversationId == null) {
+        if (conversationId == null || maybeShownHosts == null || !isConnected) {
           calls.hangUp()
-        } else {
-          hostScope.launch {
-            val maybeOffer = calls.hosts.leaveOffer(hosts, conversationId, participantIds)
-            if (maybeOffer == null) calls.hangUp() else maybeLeaveOffer = maybeOffer
+        } else if (!isCheckingLeave) {
+          isCheckingLeave = true
+          scope.launch {
+            val maybeOffer = calls.hosts.handoverOffer(conversationId, participantIds)
+            isCheckingLeave = false
+            if (maybeOffer == null) calls.hangUp() else maybeHandover = maybeOffer
           }
         }
       },
@@ -518,7 +521,7 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
         null
       },
       onStopScreenShare = { calls.stopScreenShare() },
-      maybeOnShowPeople = if (hosts != null) ({ isShowingPeople = true }) else null,
+      maybeOnHosts = if (maybeShownHosts != null && isConnected) ({ isHostsShown = true }) else null,
     ),
     banner = {
       Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {

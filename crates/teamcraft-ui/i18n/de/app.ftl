@@ -131,7 +131,6 @@ tray-resume-notifications = Benachrichtigungen fortsetzen
 tray-call-minutes = { $minutes } Min.
 tray-call-hours = { $hours } Std. { $minutes } Min.
 tray-end-for-everyone = Für alle beenden…
-tray-leave-call-asking = Anruf verlassen…
 tray-call-accept = Annehmen
 tray-check-updates = Nach Updates suchen
 menubar-about = Über { $name }

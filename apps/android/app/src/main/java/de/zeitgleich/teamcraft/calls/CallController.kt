@@ -97,9 +97,6 @@ class CallController(
   /** The ongoing-call service keeps the camera alive (it sends). */
   @Volatile private var isCameraKeptAlive = false
 
-  /** Co-hosts and handing the meeting over in a meeting's call (#1720). */
-  val hosts = CallHosts(core, scope)
-
   /** "Add people" and following a move of the call into a meeting room. */
   val moves = CallMoves(
     core,
@@ -108,6 +105,9 @@ class CallController(
     callPeople = { state.value?.participantUserIds.orEmpty() },
     follow = ::follow,
   )
+
+  /** Who hosts the meeting of the call, the organizer's host menu and the leave question (#1720). */
+  val hosts = CallHosts(core, scope)
 
   /** The call this device is in, as the engine reports it; `null` when idle. */
   val callState: StateFlow<CallStateInfo?> = state
@@ -818,6 +818,7 @@ class CallController(
     }
     maybeTelecomCall = null
     moves.reset()
+    hosts.reset()
     wantsCamera.value = false
     isCameraKeptAlive = false
     tracks.value = emptyList()

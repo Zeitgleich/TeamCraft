@@ -19697,6 +19697,270 @@
         }
       }
     },
+    "call_tile_host": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Host"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gastgeber"
+          }
+        }
+      }
+    },
+    "call_tile_co_host": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Co-host"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Co-Gastgeber"
+          }
+        }
+      }
+    },
+    "call_hosts_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hosts"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gastgeber"
+          }
+        }
+      }
+    },
+    "call_hosts_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Co-hosts let people in, make guest links and use the host controls. Only the host changes or cancels the meeting."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Co-Gastgeber lassen Personen ein, erstellen Gastlinks und nutzen die Host-Steuerung. Nur der Gastgeber ändert das Meeting oder sagt es ab."
+          }
+        }
+      }
+    },
+    "call_hosts_make_co_host": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Make co-host"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zum Co-Gastgeber machen"
+          }
+        }
+      }
+    },
+    "call_hosts_remove_co_host": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove as co-host"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Als Co-Gastgeber entfernen"
+          }
+        }
+      }
+    },
+    "call_hosts_hand_over": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hand over host role"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gastgeberrolle übergeben"
+          }
+        }
+      }
+    },
+    "call_hosts_hand_over_confirm %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hand the meeting over to %@? They change and cancel it from now on; you stay co-host."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das Meeting an %@ übergeben? Ab dann ändert nur noch diese Person es oder sagt es ab; du bleibst Co-Gastgeber."
+          }
+        }
+      }
+    },
+    "call_hosts_hand_over_do": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hand over"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Übergeben"
+          }
+        }
+      }
+    },
+    "call_hosts_saving": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Saving the hosts…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gastgeber werden gespeichert …"
+          }
+        }
+      }
+    },
+    "call_hosts_failed %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The hosts could not be changed: %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Gastgeber konnten nicht geändert werden: %@"
+          }
+        }
+      }
+    },
+    "call_hosts_leave_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "People are waiting to join"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Es warten Personen auf Einlass"
+          }
+        }
+      }
+    },
+    "call_hosts_leave_body %lld": {
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld person is waiting in the lobby, and nobody else here can let them in once you leave."
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld people are waiting in the lobby, and nobody else here can let them in once you leave."
+                }
+              }
+            }
+          }
+        },
+        "de": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld Person wartet in der Lobby, und sobald du gehst, kann sie hier niemand mehr einlassen."
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld Personen warten in der Lobby, und sobald du gehst, kann sie hier niemand mehr einlassen."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "call_hosts_leave_hand_over %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hand over to %@ and leave"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "An %@ übergeben und gehen"
+          }
+        }
+      }
+    },
+    "call_hosts_leave_anyway": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Leave anyway"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Trotzdem gehen"
+          }
+        }
+      }
+    },
     "notification_meeting_co_host %@": {
       "localizations": {
         "en": {
@@ -19757,302 +20021,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Eine Besprechung wurde an dich übergeben"
-          }
-        }
-      }
-    },
-    "call_people": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "People"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Teilnehmende"
-          }
-        }
-      }
-    },
-    "call_people_title": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "People in the call"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Im Anruf"
-          }
-        }
-      }
-    },
-    "host_role_organizer": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Host"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Gastgeber"
-          }
-        }
-      }
-    },
-    "host_role_co_host": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Co-host"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Co-Gastgeber"
-          }
-        }
-      }
-    },
-    "host_menu_for %@": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Host options for %@"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Gastgeber-Optionen für %@"
-          }
-        }
-      }
-    },
-    "host_make_co_host": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Make co-host"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Zum Co-Gastgeber machen"
-          }
-        }
-      }
-    },
-    "host_remove_co_host": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Remove as co-host"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Als Co-Gastgeber entfernen"
-          }
-        }
-      }
-    },
-    "host_hand_over": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Hand over host role"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Gastgeberrolle übergeben"
-          }
-        }
-      }
-    },
-    "host_hand_over_title %@": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Hand over to %@?"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "An %@ übergeben?"
-          }
-        }
-      }
-    },
-    "host_hand_over_body %@": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%@ changes and cancels the meeting from now on; you stay co-host."
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ab dann ändert nur noch %@ das Meeting oder sagt es ab; du bleibst Co-Gastgeber."
-          }
-        }
-      }
-    },
-    "host_hand_over_confirm": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Hand over"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Übergeben"
-          }
-        }
-      }
-    },
-    "host_change_saving": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Saving the hosts…"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Gastgeber werden gespeichert …"
-          }
-        }
-      }
-    },
-    "host_change_failed %@": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "The hosts could not be changed: %@"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Die Gastgeber konnten nicht geändert werden: %@"
-          }
-        }
-      }
-    },
-    "host_leave_title": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "People are waiting to join"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Es warten Personen auf Einlass"
-          }
-        }
-      }
-    },
-    "host_leave_body %lld": {
-      "localizations": {
-        "en": {
-          "variations": {
-            "plural": {
-              "one": {
-                "stringUnit": {
-                  "state": "translated",
-                  "value": "One person is waiting in the lobby, and nobody else here can let them in once you leave."
-                }
-              },
-              "other": {
-                "stringUnit": {
-                  "state": "translated",
-                  "value": "%lld people are waiting in the lobby, and nobody else here can let them in once you leave."
-                }
-              }
-            }
-          }
-        },
-        "de": {
-          "variations": {
-            "plural": {
-              "one": {
-                "stringUnit": {
-                  "state": "translated",
-                  "value": "Eine Person wartet im Warteraum, und niemand sonst hier kann sie einlassen, wenn du gehst."
-                }
-              },
-              "other": {
-                "stringUnit": {
-                  "state": "translated",
-                  "value": "%lld Personen warten im Warteraum, und niemand sonst hier kann sie einlassen, wenn du gehst."
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "host_leave_hand_over %@": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Hand over to %@ and leave"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "An %@ übergeben und gehen"
-          }
-        }
-      }
-    },
-    "host_leave_anyway": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Leave anyway"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Trotzdem gehen"
           }
         }
       }

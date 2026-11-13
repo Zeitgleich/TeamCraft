@@ -43,9 +43,9 @@ pub struct TrayCall {
   /// The user hosts the meeting of this call, so it can end for everyone (the call screen's host
   /// control, confirmed there).
   pub can_end_for_everyone: bool,
-  /// Leaving would leave people in the lobby of the user's meeting without a host: "Leave call…"
-  /// opens the call and asks whom to hand it over to first (#1720), as the call's own Leave does.
-  pub asks_before_leaving: bool,
+  /// Leaving would leave people stuck in the lobby of the meeting the user organizes: "Leave call"
+  /// opens the call asking whom to hand it to first (#1720).
+  pub asks_handover: bool,
   pub is_muted: bool,
   pub is_camera_on: bool,
   pub is_sharing_screen: bool,
@@ -89,11 +89,12 @@ pub fn menu_model(input: &TrayInput, t: &dyn Fn(&str) -> String) -> TrayMenuMode
     } else {
       "call-bar-leave"
     };
-    entries.push(if call.asks_before_leaving {
-      TrayEntry::action(TrayAction::LeaveCallAsking, t("tray-leave-call-asking"))
+    let leave_action = if call.asks_handover {
+      TrayAction::LeaveCallAsking
     } else {
-      TrayEntry::action(TrayAction::LeaveCall, t(leave))
-    });
+      TrayAction::LeaveCall
+    };
+    entries.push(TrayEntry::action(leave_action, t(leave)));
     if call.can_end_for_everyone {
       entries.push(TrayEntry::action(
         TrayAction::EndCallForEveryone,
@@ -243,15 +244,19 @@ pub fn start(state: AppState, i18n: I18n) {
           can_end_for_everyone: maybe_hub
             .and_then(|hub| hub.hosted_meeting_for(request.conversation, state.me().id))
             .is_some(),
-          asks_before_leaving: maybe_hub.is_some_and(|hub| {
-            // Tracked: the item changes as people knock or the hosts change.
+          asks_handover: maybe_hub.is_some_and(|hub| {
+            // Again when the meeting, its lobby or who is in the call changes.
             hub.meetings.track();
             hub.lobbies.track();
-            let me = state.me().id;
             let candidates =
-              crate::components::meeting_controls::handover_candidates(state, request.conversation, me);
-            crate::components::meeting_controls::handover_offer(hub, request.conversation, me, candidates)
-              .is_some()
+              crate::components::meeting_controls::handover_candidates(state, request.conversation);
+            crate::components::meeting_controls::handover_offer(
+              hub,
+              request.conversation,
+              state.me().id,
+              candidates,
+            )
+            .is_some()
           }),
           is_muted: !call.is_mic_on.get(),
           is_camera_on: call.is_camera_on.get(),
@@ -425,15 +430,14 @@ pub fn run(state: AppState, action: TrayAction) {
     TrayAction::CameraOff => call.set_camera(false),
     TrayAction::StopSharing => call.set_screen_share(false),
     TrayAction::LeaveCall => call.leave(),
-    // The call screen asks whom to hand the meeting to (or just leaves if that no longer applies).
-    TrayAction::LeaveCallAsking => {
-      call.is_minimized.set(false);
-      call.is_leave_asked.set(true);
-    },
     TrayAction::OpenCall => call.is_minimized.set(false),
     TrayAction::EndCallForEveryone => {
       call.is_minimized.set(false);
       call.is_end_for_everyone_asked.set(true);
+    },
+    TrayAction::LeaveCallAsking => {
+      call.is_minimized.set(false);
+      call.is_leave_asked.set(true);
     },
     TrayAction::SetCustomStatus => state.overlay.set(Overlay::CustomStatus),
     TrayAction::NewMessage => state.overlay.set(Overlay::NewMessage),
@@ -488,7 +492,7 @@ mod tests {
       maybe_duration: None,
       is_huddle: false,
       can_end_for_everyone: false,
-      asks_before_leaving: false,
+      asks_handover: false,
       is_muted: false,
       is_camera_on: false,
       is_sharing_screen: false,
@@ -591,6 +595,27 @@ mod tests {
         "open_call"
       ]
     );
+  }
+
+  #[test]
+  fn leaving_people_stuck_in_the_lobby_asks_in_the_window_first() {
+    let mut input = input(PresenceStatus::Online);
+    input.maybe_call = Some(TrayCall {
+      asks_handover: true,
+      ..call()
+    });
+    let list = keys(&menu_model(&input, &|key| key.to_owned()));
+    assert_eq!(
+      &list[..5],
+      [
+        "# Call with Bob",
+        "mute",
+        "camera_on",
+        "leave_call_asking",
+        "open_call"
+      ]
+    );
+    assert!(TrayAction::LeaveCallAsking.shows_window() && !TrayAction::LeaveCall.shows_window());
   }
 
   #[test]

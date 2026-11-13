@@ -14,7 +14,8 @@ enum AttachmentError: Error, Equatable {
 
 /// Copies files the user picked (photo library, Files app) into the app's uploads folder, so the
 /// core can read them by path while it encrypts and uploads them in chunks (the picker's own
-/// temporary copy and security scope may be gone by then).
+/// temporary copy and security scope may be gone by then). HEIC photos become JPEG on the way
+/// (`HeicConversion`).
 struct AttachmentImporter {
   let directory: URL
   /// The server's upload limit, if known; larger files are refused before copying.
@@ -49,7 +50,27 @@ struct AttachmentImporter {
     } catch {
       throw AttachmentError.unreadable
     }
-    return PickedFile(fileName: name, mediaType: Self.mediaType(of: target), path: target.path)
+    let file = compatiblePicture(at: target) ?? target
+    return PickedFile(fileName: file.lastPathComponent, mediaType: Self.mediaType(of: file), path: file.path)
+  }
+
+  /// A HEIC or HEIF picture in the uploads folder as a JPEG next to it, which replaces it (#1588);
+  /// `nil` for any other file, or when the conversion fails or the JPEG is over the upload limit
+  /// (the picture then goes as it is). Only the app's own copy is replaced, never the original.
+  private func compatiblePicture(at copy: URL) -> URL? {
+    guard HeicConversion.isConvertible(copy) else { return nil }
+    let jpeg = copy.deletingLastPathComponent()
+      .appendingPathComponent(HeicConversion.jpegName(for: copy.lastPathComponent))
+    // A HEIC already named `.jpg` would be read and written at once.
+    guard jpeg.lastPathComponent != copy.lastPathComponent else { return nil }
+    let isWritten = HeicConversion.writeJpeg(from: copy, to: jpeg)
+    let maybeSize = (try? jpeg.resourceValues(forKeys: [.fileSizeKey]))?.fileSize.map { Int64($0) }
+    guard isWritten, let size = maybeSize, size > 0, maybeLimitBytes.map({ size <= $0 }) ?? true else {
+      try? FileManager.default.removeItem(at: jpeg)
+      return nil
+    }
+    try? FileManager.default.removeItem(at: copy)
+    return jpeg
   }
 
   /// The file name without path parts, never empty.
