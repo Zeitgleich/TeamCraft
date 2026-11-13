@@ -2040,12 +2040,16 @@ impl CallState<'_> {
   /// A signal of the current session.
   fn on_signal(&mut self, engine: &mut CallEngine, message: CallServerMessage) -> Result<Flow, WebCallError> {
     let now = Instant::now();
-    if let CallServerMessage::Pong { id } = message {
+    if let CallServerMessage::Pong {
+      id,
+      maybe_received_us,
+    } = message
+    {
       let is_pacers = [self.sending_transport(), self.maybe_transport.as_ref()]
         .into_iter()
         .flatten()
         .filter_map(Transport::fallback)
-        .any(|session| session.on_pong(id, now));
+        .any(|session| session.on_pong(id, maybe_received_us, now));
       if is_pacers {
         // The upload's pacer pinged: the answer proves the path all the same.
         self.watch.on_heard(now);

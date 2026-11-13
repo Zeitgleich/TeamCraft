@@ -21,8 +21,11 @@ use wtransport::{RecvStream, SendStream};
 pub enum Outgoing {
   Event(CallEvent),
   Error(ErrorBody),
-  /// The answer to a client's ping of this id.
-  Pong(u64),
+  /// The answer to a client's ping of `id`, read at `received_us` on the SFU's clock (#1890).
+  Pong {
+    id: u64,
+    received_us: u64,
+  },
   /// The session moved to another connection (#1309): what was queued before this goes out on the
   /// current one, then its writer hands the queue on ([`SignalQueue::hand_over`]) and closes it.
   HandOver,
@@ -84,7 +87,10 @@ impl EventSequence {
         }
       },
       Outgoing::Error(error) => CallServerMessage::Error { error },
-      Outgoing::Pong(id) => CallServerMessage::Pong { id },
+      Outgoing::Pong { id, received_us } => CallServerMessage::Pong {
+        id,
+        maybe_received_us: Some(received_us),
+      },
       Outgoing::HandOver => return None,
     })
   }
@@ -201,8 +207,14 @@ mod tests {
     let error = sequence.frame(Outgoing::Error(ErrorBody::new(ErrorCode::ProtocolViolation, "x")));
     assert!(matches!(error, Some(CallServerMessage::Error { .. })));
     assert_eq!(
-      sequence.frame(Outgoing::Pong(9)),
-      Some(CallServerMessage::Pong { id: 9 })
+      sequence.frame(Outgoing::Pong {
+        id: 9,
+        received_us: 5
+      }),
+      Some(CallServerMessage::Pong {
+        id: 9,
+        maybe_received_us: Some(5)
+      })
     );
     assert!(matches!(
       sequence.frame(event()),

@@ -111,16 +111,18 @@ impl FallbackSession {
     }
   }
 
-  /// Takes the SFU's answer to one of the pacer's pings; `false` for anybody else's.
-  pub(super) fn on_pong(&self, id: u64, now: Instant) -> bool {
+  /// Takes the SFU's answer to one of the pacer's pings; `false` for anybody else's. An SFU that
+  /// says when it read the ping lets the pacer judge the upload alone (#1890).
+  pub(super) fn on_pong(&self, id: u64, maybe_received_us: Option<u64>, now: Instant) -> bool {
     if id & PACER_PING_FLAG == 0 {
       return false;
     }
-    self
-      .upload
-      .borrow_mut()
-      .pacer
-      .on_answer(id & !PACER_PING_FLAG, now);
+    let number = id & !PACER_PING_FLAG;
+    let pacer = &mut self.upload.borrow_mut().pacer;
+    match maybe_received_us {
+      Some(received_us) => pacer.on_answer_received(number, received_us, now),
+      None => pacer.on_answer(number, now),
+    }
     true
   }
 
