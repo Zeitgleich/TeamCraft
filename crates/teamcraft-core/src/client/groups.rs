@@ -2710,10 +2710,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       }
       if is_waiting {
         ring.set_current(current)?;
-        self.store.delete(
-          Table::AppliedChanges,
-          &super::member_device::current_key_wait_key(conversation),
-        )?;
+        super::member_device::end_current_key_wait(&self.store, conversation)?;
       }
       // The new device has it now; nobody else needs to send it.
       self.drop_current_key_shares(conversation)?;
@@ -2853,10 +2850,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     ring.set_current(key.id())?;
     self.persist_keys()?;
     // A device that joined by external commit has the current key now (#178).
-    self.store.delete(
-      Table::AppliedChanges,
-      &super::member_device::current_key_wait_key(conversation),
-    )?;
+    super::member_device::end_current_key_wait(&self.store, conversation)?;
     self.drop_current_key_shares(conversation)?;
     // A new device of the user won't join from group information older than this (e2ee.md §4.6).
     let epoch = self.group_or_error(conversation)?.epoch();
@@ -2975,10 +2969,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         let joined_epoch = group.epoch();
         // What this device had in an earlier membership doesn't count for this one.
         self.forget_key_history(conversation)?;
-        self.store.delete(
-          Table::AppliedChanges,
-          &super::member_device::current_key_wait_key(conversation),
-        )?;
+        super::member_device::end_current_key_wait(&self.store, conversation)?;
         if !is_rejoin {
           // The key bag's current key may be stale (#178): a member's bundle brings the current
           // one (the adder's history share, or the hand-over to a further device).

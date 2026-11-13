@@ -14,7 +14,7 @@ use teamcraft_proto::{
 
 use super::Client;
 use super::groups::rejoin_key;
-use super::member_device::{current_key_wait_key, device_add_key};
+use super::member_device::device_add_key;
 use crate::api::ServerApi;
 use crate::convert;
 use crate::error::CoreError;
@@ -125,9 +125,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       client
         .store
         .delete(Table::AppliedChanges, &rejoin_key(conversation))?;
-      client
-        .store
-        .delete(Table::AppliedChanges, &current_key_wait_key(conversation))?;
+      super::member_device::end_current_key_wait(&client.store, conversation)?;
       client.start_refounded_key(conversation)
     })
   }
