@@ -2385,8 +2385,10 @@ group is caught up (or one nothing moved in since the last sync), or none (`live
 welcome, a role log, a deletion and anything of a conversation still to come wait for the end, and so
 does everything behind them. Messages are another matter: their content keys came through the queue,
 so a conversation with many new messages may get its newest page before the rest (the hole is read
-in the same catch-up, or by the app's loop right after it, issue #1448; in the browser where the
-reader scrolls, like any other hole, issue #1910; `history_gaps.rs`). Some
+in the same catch-up, or by the app's loop right after it, issue #1448; in the browser slowly, a
+page every few seconds while the page is in view, or at once where the reader scrolls, issue #1910:
+edits, deletions and pins in a hole arrive by that slow reading or when scrolled to;
+`history_gaps.rs`). Some
 controls in messages depend on their order (pins, bookmarks, channel role entries, §4.6.3): they are
 taken again in their order once the hole is read, so the outcome is the one reading in order gives.
 The same holds for every page read out of order (older history, a jump to a date and its holes, the

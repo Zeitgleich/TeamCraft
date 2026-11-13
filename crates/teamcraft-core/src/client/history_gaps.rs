@@ -17,12 +17,13 @@
 //! instead, a page per turn between its other work, so the end of the sync doesn't wait for them;
 //! what an earlier run left is read on the next start, also on a resumed session. A host that reads
 //! history on demand (the browser, [`super::HistoryReading::OnDemand`], issue #1910) reads no
-//! backlog: it becomes a plain hole, read where the reader scrolls (the feed asks ahead of the
-//! viewport). Messages carry state (pins, bookmarks, channel role entries, edits), so on the apps
-//! none may stay unread; in the browser what a hole's messages change (an edit or pin of an older
-//! message) shows once the hole is read, and channel roles come from their own signed log
-//! (`channel_roles.rs`) anyway. Those whose order matters are taken again in their order once the
-//! hole is read (`messaging.rs`, `replay_controls_from`), also from the reader's side
+//! backlog in a hurry: the page's loop reads it slowly, a page every few seconds while the page is
+//! in view, and the reader fills the hole at once where they scroll (the feed asks ahead of the
+//! viewport). Messages carry state (pins, bookmarks, channel role entries, edits, deletions), so
+//! none may stay unread; in the browser what a hole's messages change arrives by that slow reading
+//! or when the reader scrolls there, whichever comes first, and channel roles come from their own
+//! signed log (`channel_roles.rs`) anyway. Those whose order matters are taken again in their order
+//! once the hole is read (`messaging.rs`, `replay_controls_from`), also from the reader's side
 //! (`settle_ordered_controls`).
 
 use std::collections::BTreeSet;
@@ -32,10 +33,10 @@ use serde::{Deserialize, Serialize};
 use teamcraft_client_api::model::GapEdge;
 use teamcraft_proto::{ConversationId, ListMessagesQuery, MessageId, MessageResponse};
 
-use super::Client;
 #[cfg(feature = "ui")]
 use super::older_history::read_connections;
 use super::sync::ResyncPart;
+use super::{Client, HistoryReading};
 #[cfg(feature = "ui")]
 use crate::api::ApiError;
 use crate::api::ServerApi;
@@ -368,6 +369,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         && let Some(Ok(conversation)) = key.strip_prefix(RECORD_PREFIX).map(str::parse)
       {
         self.background_backlogs.due.insert(conversation);
+        self.unmark_slow_backlog(conversation)?;
       }
     }
     Ok(())
@@ -423,6 +425,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     for conversation in conversations {
       if self.has_backlog(*conversation)? {
         self.background_backlogs.due.insert(*conversation);
+        self.unmark_slow_backlog(*conversation)?;
       }
     }
     if !self.background_backlogs.due.is_empty() {
@@ -434,47 +437,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
-  /// The end of a catch-up whose host reads history on demand (issue #1910): the backlogs it left
-  /// become plain holes, read where the reader scrolls (`fill_history_gap`), whose pages take their
-  /// controls in their order like any page read out of order (`settle_ordered_controls`).
-  pub(super) fn leave_backlogs_to_reader(&self, conversations: &[ConversationId]) -> Result<(), CoreError> {
-    for conversation in conversations {
-      if let Some(record) = read_record(&self.store, *conversation)? {
-        self.leave_backlog_to_reader(*conversation, record)?;
-      }
+  /// Where history is read on demand (the browser, issue #1910), the host reads a backlog slowly,
+  /// a page now and then while the page is in view, so what its messages change (a deletion, an
+  /// edit, a pin) still arrives without the reader scrolling there. That can take a while, so the
+  /// conversation doesn't show "catching up" meanwhile: the hole in the feed shows what is missing,
+  /// and the reader fills it at once by scrolling there.
+  fn unmark_slow_backlog(&self, conversation: ConversationId) -> Result<(), CoreError> {
+    if self.settings.history_reading == HistoryReading::OnDemand {
+      self
+        .store
+        .delete(Table::SyncState, &super::catch_up::marker_key(conversation))?;
     }
-    Ok(())
-  }
-
-  /// [`Self::leave_backlogs_to_reader`] for the backlogs an earlier run left (one that read them in
-  /// the background, or was cut short): called once by a host that reads history on demand when it
-  /// opens the client.
-  pub fn leave_stored_backlogs_to_reader(&self) -> Result<(), CoreError> {
-    for (key, record) in
-      records::list_json_with_prefix::<GapsRecord>(&self.store, Table::SyncState, RECORD_PREFIX)?
-    {
-      if let Some(Ok(conversation)) = key.strip_prefix(RECORD_PREFIX).map(str::parse) {
-        self.leave_backlog_to_reader(conversation, record)?;
-      }
-    }
-    Ok(())
-  }
-
-  /// Drops the backlog mark of `record`, keeping its holes, and the conversation's catch-up mark
-  /// that waited for it.
-  fn leave_backlog_to_reader(
-    &self,
-    conversation: ConversationId,
-    mut record: GapsRecord,
-  ) -> Result<(), CoreError> {
-    if record.maybe_backlog.take().is_none() {
-      return Ok(());
-    }
-    write_record(&self.store, conversation, &record)?;
-    self
-      .store
-      .delete(Table::SyncState, &super::catch_up::marker_key(conversation))?;
-    tracing::info!(conversation_id = %conversation, "backlog left to the reader");
     Ok(())
   }
 

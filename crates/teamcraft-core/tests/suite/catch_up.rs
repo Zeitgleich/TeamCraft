@@ -381,9 +381,9 @@ async fn a_host_reads_the_backlog_after_the_sync() {
   );
 }
 
-/// Issue #1910: a host that reads history on demand (the browser) reads no backlog in the
-/// background. The sync ends after the newest page; the rest stays a hole the reader fills where
-/// they scroll, oldest first, with the controls in it taken in their order.
+/// Issue #1910: a host that reads history on demand (the browser) reads no backlog in the sync.
+/// The sync ends after the newest page; the rest stays a hole the reader fills where they scroll,
+/// oldest first, with the controls in it taken in their order.
 #[cfg(feature = "ui")]
 #[tokio::test]
 async fn a_host_reading_on_demand_leaves_the_backlog_to_the_reader() {
@@ -418,8 +418,8 @@ async fn a_host_reading_on_demand_leaves_the_backlog_to_the_reader() {
     "nothing waits for the backlog"
   );
   assert!(
-    !carol.client.is_background_history_due(),
-    "no page is read in the background"
+    carol.client.is_background_history_due(),
+    "the host's loop reads it, slowly"
   );
   // The upkeep's paging reads nothing either.
   assert_eq!(carol.client.page_imported_history().await.unwrap(), 0);
@@ -447,23 +447,49 @@ async fn a_host_reading_on_demand_leaves_the_backlog_to_the_reader() {
   assert!(!is_pinned(&carol, channel, target), "the older pin won");
 }
 
-/// Issue #1910: backlogs an earlier run left for the host's loop (before the browser read on
-/// demand) become holes for the reader when the client opens, and stop holding the catch-up mark.
+/// Issue #1910: where history is read on demand, a deletion and an edit inside the backlog still
+/// apply without the reader scrolling there: the host's loop reads the backlog slowly. The
+/// conversation doesn't show "catching up" meanwhile.
 #[tokio::test]
-async fn backlogs_left_by_an_earlier_run_go_to_the_reader() {
-  let (_server, mut alice, mut carol, channel) = busy_channel().await;
+async fn a_deletion_inside_the_backlog_applies_without_scrolling_when_read_on_demand() {
+  let on_demand = ClientSettings {
+    history_reading: HistoryReading::OnDemand,
+    ..capped_settings()
+  };
+  let (_server, mut alice, mut carol, channel) = busy_channel_with(on_demand, clock()).await;
   carol.client.read_backlogs_in_background().unwrap();
-  send_many(&mut alice, channel, "a", 30).await;
+  let secret = alice.client.send_text(channel, None, "secret").await.unwrap();
+  let typo = alice.client.send_text(channel, None, "tpyo").await.unwrap();
+  settle(&mut [&mut alice, &mut carol]).await;
+  // The deletion and the edit lie in the hole the catch-up leaves.
+  send_many(&mut alice, channel, "a", 12).await;
+  alice.client.delete_message(channel, secret).await.unwrap();
+  alice.client.edit_message(channel, typo, "typo").await.unwrap();
+  send_many(&mut alice, channel, "b", 12).await;
+
   carol.client.full_sync().await.unwrap();
-  assert!(is_catching_up(carol.client.store(), channel).unwrap());
-
-  carol.client.leave_stored_backlogs_to_reader().unwrap();
-
-  assert!(!is_catching_up(carol.client.store(), channel).unwrap());
   assert!(
-    first_gap_after(&carol, channel).is_some(),
-    "the hole stays for the reader"
+    carol.texts(channel).contains(&"secret".to_owned()),
+    "not read yet"
   );
+  assert!(
+    !is_catching_up(carol.client.store(), channel).unwrap(),
+    "no catching up meanwhile"
+  );
+
+  let mut pages = 0;
+  while carol.client.is_background_history_due() {
+    carol.client.load_background_history_page().await;
+    pages += 1;
+    assert!(pages < 20, "the backlog ends");
+  }
+  assert!(
+    !carol.texts(channel).contains(&"secret".to_owned()),
+    "deleted: {:?}",
+    carol.texts(channel)
+  );
+  assert!(carol.texts(channel).contains(&"typo".to_owned()), "edited");
+  assert!(first_gap_after(&carol, channel).is_none(), "the hole is read");
 }
 
 /// Issue #1448: a backlog a catch-up cut short left is read by the host's loop from where it stood,
