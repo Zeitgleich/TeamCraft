@@ -31,6 +31,12 @@ struct AttachmentView: View {
   @State private var animation = AnimationPlayer()
   @State private var playChoice = PlayChoice.unset
   @State private var maybeVideo: FileInfo?
+  /// This tile started the file's download by itself (an animation that plays on its own).
+  @State private var isAutoFetching = false
+  /// The retry round its automatic download failed in, for a reason that passes (#1617).
+  @State private var maybeFailedInRound: Int?
+  /// A file that failed during an outage is asked for once when the tile comes on screen.
+  @State private var mayRetryOnAppear = true
 
   var body: some View {
     withImageMenu(content)
@@ -75,6 +81,7 @@ struct AttachmentView: View {
     .alert("video_unplayable", isPresented: $isPreviewRefused) { Button("done", role: .cancel) {} }
     .fullScreenCover(item: $maybeVideo) { video in VideoViewer(opened: video) }
     .onChange(of: file.transfer.state) { _, state in
+      automaticDownloadMoved(to: state)
       guard isWaitingToOpen, state == "local" || state == "failed" else { return }
       isWaitingToOpen = false
       if state == "local", let path = file.transfer.path { preview(path) }
@@ -142,7 +149,9 @@ struct AttachmentView: View {
 
   /// What `runMotion` depends on; the running task ends when it changes.
   private var motionTask: MotionTask {
-    MotionTask(mayMove: mayMove, state: file.transfer.state, path: localPath, isMoving: isMoving, wantsToMove: wantsToMove)
+    MotionTask(
+      mayMove: mayMove, state: file.transfer.state, path: localPath, isMoving: isMoving, wantsToMove: wantsToMove,
+      maybeWaitingRound: maybeWaitingRound)
   }
 
   private struct MotionTask: Equatable {
@@ -151,6 +160,42 @@ struct AttachmentView: View {
     let path: String?
     let isMoving: Bool
     let wantsToMove: Bool
+    let maybeWaitingRound: Int?
+  }
+
+  // MARK: Retries after an outage (#1617)
+
+  /// The shared retry round, read only while this file's automatic download waits for it.
+  private var maybeWaitingRound: Int? {
+    maybeFailedInRound == nil ? nil : model.pictureRetries.round
+  }
+
+  /// The download failed for a reason that passes, and a round ran since its automatic download
+  /// failed here, or the tile has just come on screen (once).
+  private var isRetryDue: Bool {
+    guard file.transfer.state == "failed", PictureRetries.isTransient(fileFailure: file.transfer.reason) else {
+      return false
+    }
+    guard let failed = maybeFailedInRound else { return mayRetryOnAppear }
+    return model.pictureRetries.round != failed
+  }
+
+  /// How the automatic download ended: one that failed for a reason that passes waits for the next
+  /// shared round; refusals (missing, corrupted) and the user's own downloads aren't asked again.
+  private func automaticDownloadMoved(to state: String) {
+    guard isAutoFetching else { return }
+    switch state {
+    case "local":
+      isAutoFetching = false
+      model.pictureRetries.succeeded()
+    case "failed":
+      isAutoFetching = false
+      guard PictureRetries.isTransient(fileFailure: file.transfer.reason) else { return }
+      maybeFailedInRound = model.pictureRetries.round
+      model.pictureRetries.failed()
+    case "downloading": break
+    default: isAutoFetching = false
+    }
   }
 
   private func toggleMotion() {
@@ -172,7 +217,7 @@ struct AttachmentView: View {
     guard mayMove else { return }
     guard let path = localPath else {
       guard AnimationKind.isAnimation(file.mediaType), wantsToMove, isVisible, playChoice == .unset,
-        file.sizeBytes <= AnimationKind.maxAutomaticBytes, file.transfer.state == "remote"
+        file.sizeBytes <= AnimationKind.maxAutomaticBytes, file.transfer.state == "remote" || isRetryDue
       else { return }
       // Cancelled when the tile leaves, so a tile scrolled past fetches nothing; a fetch once started
       // runs on.
@@ -182,6 +227,9 @@ struct AttachmentView: View {
           setting: OriginalDownloadSetting.current.setting, isMetered: NetworkMonitor.shared.isMetered),
         AutoFetchBudget.shared.take(file.sizeBytes)
       else { return }
+      maybeFailedInRound = nil
+      mayRetryOnAppear = false
+      isAutoFetching = true
       fetchFile()
       return
     }

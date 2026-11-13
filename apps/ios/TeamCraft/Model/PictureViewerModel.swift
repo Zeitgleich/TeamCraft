@@ -86,6 +86,8 @@ final class PictureViewerModel {
   /// Downloads asked for, so a picture isn't asked for again while the core starts it.
   @ObservationIgnored private var fetching: Set<String> = []
   @ObservationIgnored private var decoding: Set<String> = []
+  /// Downloads that failed during an outage, by the retry round they failed in (#1617).
+  @ObservationIgnored private var retryMarks = RetryMarks<String>()
 
   init(target: PictureTarget) {
     self.target = target
@@ -165,6 +167,7 @@ final class PictureViewerModel {
   func fetchOriginal(_ key: String, app: AppModel) async {
     requested.insert(key)
     fetching.remove(key)
+    retryMarks.forget(key)
     await advance(app: app)
   }
 
@@ -173,18 +176,39 @@ final class PictureViewerModel {
   private func advance(app: AppModel) async {
     for (key, file) in files {
       if file.transfer.state == "local", let path = file.transfer.path {
+        // A download of this viewer came through: the next failure starts from the shortest wait.
+        if fetching.remove(key) != nil { app.pictureRetries.succeeded() }
+        retryMarks.forget(key)
         decode(key, path: path)
         continue
       }
-      // Only the picture on screen is fetched; a failed one waits for "Try again".
+      // Only the picture on screen is fetched. A failed one waits for "Try again", or, when its
+      // download failed for a reason that passes, for the next shared retry round (#1617).
+      let isRetry = key == currentKey && isRetryDue(key, file: file, retries: app.pictureRetries)
       let isWanted =
         (file.transfer.state == "remote" && isFetched(key))
-        || (file.transfer.state == "failed" && requested.contains(key))
+        || (file.transfer.state == "failed" && (requested.contains(key) || isRetry))
       guard isWanted, key == currentKey, !fetching.contains(key) else { continue }
       fetching.insert(key)
       await app.perform(
         .downloadAttachment(conversationId: file.conversation, messageId: file.message, fileId: file.fileId))
     }
+  }
+
+  /// A download this viewer started failed for a reason that passes: the first look reports it to
+  /// the shared rounds, a look after the next round asks again. Refusals (missing, corrupted) wait
+  /// for "Try again".
+  private func isRetryDue(_ key: String, file: FileInfo, retries: PictureRetries) -> Bool {
+    guard file.transfer.state == "failed", fetching.contains(key),
+      PictureRetries.isTransient(fileFailure: file.transfer.reason)
+    else { return false }
+    if retryMarks.failed(key, round: retries.round) {
+      retries.failed()
+      return false
+    }
+    guard retryMarks.takeDue(key, round: retries.round) else { return false }
+    fetching.remove(key)
+    return isFetched(key)
   }
 
   /// Whether the original of `key` is fetched without a tap: the setting on this network, or the

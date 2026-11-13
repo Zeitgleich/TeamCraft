@@ -30,10 +30,11 @@ final class NetworkMonitor {
 
   @MainActor
   private func update(isOnline: Bool, isMetered: Bool) {
+    let wasOnline = self.isOnline
     self.isOnline = isOnline
     self.isMetered = isMetered
     // The first path is the state at start, not a change.
-    AppModel.shared.networkPathChanged(isFirstPath: !hasFirstPath)
+    AppModel.shared.networkPathChanged(isFirstPath: !hasFirstPath, cameOnline: isOnline && !wasOnline)
     hasFirstPath = true
   }
 }
