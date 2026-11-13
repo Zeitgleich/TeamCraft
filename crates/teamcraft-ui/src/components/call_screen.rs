@@ -81,6 +81,24 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
     }
   });
   let maybe_hub = use_context::<crate::meetings::MeetingsHub>();
+  // Leaving: the organizer leaving with people in the lobby and nobody else to let them in is
+  // asked to hand the meeting over first (#1720), from the button and the tray's "Leave call".
+  let ask_to_leave = move || {
+    let me = state.me().id;
+    let candidates = crate::components::meeting_controls::handover_candidates(state, request.conversation);
+    match maybe_hub.and_then(|hub| {
+      crate::components::meeting_controls::handover_offer(hub, request.conversation, me, candidates)
+    }) {
+      Some(offer) => leave_prompt.set(Some(offer)),
+      None => call.leave(),
+    }
+  };
+  Effect::new(move |_| {
+    if call.is_leave_asked.get() {
+      call.is_leave_asked.set(false);
+      ask_to_leave();
+    }
+  });
   // A DM's call moves into a meeting room with the added people; a meeting's organizer invites
   // them, anybody else in it hands out its link (#1141).
   let can_add_people = Memo::new(move |_| {
@@ -923,22 +941,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         />
         <button
           class="leave-btn"
-          on:click=move |_| {
-            // The organizer leaving with people in the lobby and nobody else to let them in is
-            // asked to hand the meeting over first (#1720).
-            let me = state.me();
-            let candidates: Vec<crate::model::User> = remote.with_untracked(|tiles| {
-              tiles
-                .iter()
-                .map(|tile| tile.user.clone())
-                .filter(|user| !user.is_guest && !user.is_bot && user.id != me.id)
-                .collect()
-            });
-            match maybe_hub.and_then(|hub| crate::components::meeting_controls::handover_offer(hub, request.conversation, me.id, candidates)) {
-              Some(offer) => leave_prompt.set(Some(offer)),
-              None => call.leave(),
-            }
-          }
+          on:click=move |_| ask_to_leave()
         >
           <Icon name=IconName::Phone class="hangup" />
           <span>{move || i18n.t("call-leave")}</span>

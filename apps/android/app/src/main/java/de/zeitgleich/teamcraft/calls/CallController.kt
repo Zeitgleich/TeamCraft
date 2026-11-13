@@ -106,6 +106,9 @@ class CallController(
     follow = ::follow,
   )
 
+  /** Who hosts the meeting of the call, the organizer's host menu and the leave question (#1720). */
+  val hosts = CallHosts(core, scope)
+
   /** The call this device is in, as the engine reports it; `null` when idle. */
   val callState: StateFlow<CallStateInfo?> = state
 
@@ -815,6 +818,7 @@ class CallController(
     }
     maybeTelecomCall = null
     moves.reset()
+    hosts.reset()
     wantsCamera.value = false
     isCameraKeptAlive = false
     tracks.value = emptyList()

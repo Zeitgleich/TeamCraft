@@ -8,6 +8,8 @@ import SwiftUI
 /// screen, CarPlay) drives the same CallKit actions. DM and group DM calls can add people, which
 /// moves the call into a meeting room (docs/meetings.md, "A call becomes a meeting"), and every
 /// call can get the notetaker for whoever the policy lets ask it in (e2ee.md §8.2, "In every call").
+/// In a meeting's call the tiles say who hosts it, and its organizer names co-hosts, hands it over
+/// and is asked to hand it over before leaving people stuck in the lobby (#1720).
 struct CallScreen: View {
   @Environment(AppModel.self) private var model
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -28,6 +30,13 @@ struct CallScreen: View {
   @State private var maybeSpotlightId: String?
   /// Counts taps on controls, so the chrome stays while the user is busy with it.
   @State private var interactions = 0
+  /// Who hosts the meeting of the call (#1720); `nil` outside a meeting. Read again when somebody
+  /// comes or goes.
+  @State private var maybeHosts: MeetingHosts?
+  @State private var isHostsShown = false
+  /// The organizer is asked whom to hand the meeting to before leaving.
+  @State private var maybeHandover: HandoverOffer?
+  @State private var isCheckingLeave = false
 
   private static let controlSize: CGFloat = 60
   private static let autoHideDelay: Duration = .seconds(5)
@@ -80,6 +89,24 @@ struct CallScreen: View {
     }
     .sheet(isPresented: $isAddingPeople) { AddPeopleView(conversationId: call.conversationId) }
     .sheet(isPresented: $isEncryptionShown) { encryptionSheet }
+    .sheet(isPresented: $isHostsShown) {
+      if let hosts = maybeHosts {
+        CallHostsSheet(
+          conversationId: call.conversationId, participantIds: call.participantUserIds, hosts: hosts
+        ) { await readHosts() }
+      }
+    }
+    .confirmationDialog(
+      "call_hosts_leave_title", isPresented: handoverBinding, titleVisibility: .visible, presenting: maybeHandover
+    ) { offer in
+      ForEach(offer.candidates) { person in
+        Button("call_hosts_leave_hand_over \(person.displayName)") { handOverAndLeave(to: person) }
+      }
+      Button("call_hosts_leave_anyway", role: .destructive) { model.calls.hangUp() }
+      Button("cancel", role: .cancel) {}
+    } message: { offer in
+      Text("call_hosts_leave_body \(offer.waiting)")
+    }
     .task(id: call.conversationId) {
       let kind = await model.conversations().first { $0.id == call.conversationId }?.kind
       canAddPeople = kind == .direct || kind == .group
@@ -92,6 +119,9 @@ struct CallScreen: View {
       maybeNotetaker = await model.notetakerInCall(
         conversationId: call.conversationId, participants: call.participantUserIds)
       if maybeNotetaker?.isPresent == true { model.calls.notetakerArrived() }
+    }
+    .task(id: NotetakerKey(conversationId: call.conversationId, participants: call.participantUserIds)) {
+      await readHosts()
     }
     .onChange(of: call.phase, initial: true) {
       // The clock starts with the first connection and runs through reconnects.
@@ -225,6 +255,7 @@ struct CallScreen: View {
         if person.isUnverified { unverifiedMark }
         if person.isMuted { Image(systemName: "mic.slash.fill").font(.app(.caption2)) }
         Text(person.name).lineLimit(1)
+        hostBadge(of: person.id)
       }
       .font(.app(.caption).weight(.medium))
       .foregroundStyle(.white)
@@ -232,6 +263,17 @@ struct CallScreen: View {
       .padding(.vertical, 2)
       .background(.black.opacity(0.55), in: Capsule())
       .padding(8)
+    }
+  }
+
+  /// "Host" or "Co-host" after the name on a tile of a meeting's call (#1720).
+  @ViewBuilder
+  private func hostBadge(of userId: String) -> some View {
+    if let badge = HostBadge(userId: userId, hosts: maybeHosts) {
+      Text(badge.label)
+        .font(.app(.caption2))
+        .foregroundStyle(.white.opacity(0.8))
+        .lineLimit(1)
     }
   }
 
@@ -288,6 +330,7 @@ struct CallScreen: View {
         if isUnverified(stream) { unverifiedMark }
         if isMuted(stream) { Image(systemName: "mic.slash.fill").font(.app(.caption2)) }
         Text(name).lineLimit(1)
+        if let userId = call.userIdByDevice[stream.deviceId] { hostBadge(of: userId) }
       }
       .font(.app(.caption).weight(.medium))
       .foregroundStyle(.white)
@@ -443,12 +486,19 @@ struct CallScreen: View {
       }
       Spacer(minLength: 0)
       AudioRouteButton().frame(width: Self.controlSize, height: Self.controlSize)
-      if isAddingPeopleOffered && isNotetakerControlShown {
-        // Both in one menu, so the bar keeps its room on small phones.
+      if extraControls > 1 {
+        // Together in one menu, so the bar keeps its room on small phones.
         Spacer(minLength: 0)
         Menu {
-          Button("call_add_people", systemImage: "person.badge.plus") { interact { isAddingPeople = true } }
-          Button("call_notetaker_add", systemImage: "note.text.badge.plus") { interact { pressNotetaker() } }
+          if isAddingPeopleOffered {
+            Button("call_add_people", systemImage: "person.badge.plus") { interact { isAddingPeople = true } }
+          }
+          if isNotetakerControlShown {
+            Button("call_notetaker_add", systemImage: "note.text.badge.plus") { interact { pressNotetaker() } }
+          }
+          if isHostsOffered {
+            Button("call_hosts_title", systemImage: "person.2.badge.gearshape") { interact { isHostsShown = true } }
+          }
         } label: {
           Image(systemName: "plus")
             .font(.app(.title2))
@@ -469,11 +519,17 @@ struct CallScreen: View {
           interact { pressNotetaker() }
         }
         .opacity(notetakerRefusalKey == nil ? 1 : 0.45)
+      } else if isHostsOffered {
+        Spacer(minLength: 0)
+        RoundControl(system: "person.2.badge.gearshape", isActive: false, label: "call_hosts_title") {
+          interact { isHostsShown = true }
+        }
       }
       Spacer(minLength: 0)
       RoundControl(system: "phone.down.fill", isActive: false, label: "call_hang_up", tint: Theme.danger) {
-        model.calls.hangUp()
+        leave()
       }
+      .disabled(isCheckingLeave)
       Spacer(minLength: 0)
     }
     .padding(.vertical, 16)
@@ -481,6 +537,51 @@ struct CallScreen: View {
       LinearGradient(colors: [.clear, .black.opacity(0.55)], startPoint: .top, endPoint: .bottom)
         .ignoresSafeArea()
     }
+  }
+
+  /// How many of "Add people", "Add notetaker" and "Hosts" the bar offers.
+  private var extraControls: Int {
+    [isAddingPeopleOffered, isNotetakerControlShown, isHostsOffered].filter { $0 }.count
+  }
+
+  /// "Hosts" (#1720): the organizer of the call's meeting names co-hosts or hands it over.
+  private var isHostsOffered: Bool {
+    maybeHosts?.ownPart == .organizer && call.phase == .connected
+  }
+
+  private func readHosts() async {
+    let conversationId = call.conversationId
+    let hosts = await model.meetingHosts(conversationId: conversationId)
+    if call.conversationId == conversationId { maybeHosts = hosts }
+  }
+
+  /// Hang up. The organizer leaving with people in the lobby and nobody else to let them in is
+  /// asked to hand the meeting over first, as on desktop and web; everybody else just leaves.
+  private func leave() {
+    guard let hosts = maybeHosts, hosts.ownPart == .organizer, call.phase == .connected else {
+      model.calls.hangUp()
+      return
+    }
+    isCheckingLeave = true
+    let conversationId = call.conversationId
+    let participants = call.participantUserIds
+    Task {
+      let maybeOffer = await model.handoverOffer(conversationId: conversationId, participantIds: participants, hosts: hosts)
+      isCheckingLeave = false
+      if let offer = maybeOffer { maybeHandover = offer } else { model.calls.hangUp() }
+    }
+  }
+
+  private func handOverAndLeave(to person: CallPerson) {
+    let conversationId = call.conversationId
+    Task {
+      await model.handOverBeforeLeaving(conversationId: conversationId, userId: person.id)
+      model.calls.hangUp()
+    }
+  }
+
+  private var handoverBinding: Binding<Bool> {
+    Binding(get: { maybeHandover != nil }, set: { if !$0 { maybeHandover = nil } })
   }
 
   /// "Add people": a DM or group DM call that isn't moving.

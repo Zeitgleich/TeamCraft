@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Co-hosts and handing a meeting over in its call (#1720), as desktop and web say it. -->
+<resources>
+  <string name="call_tile_host">Host</string>
+  <string name="call_tile_co_host">Co-host</string>
+  <string name="call_hosts_title">Hosts</string>
+  <string name="call_hosts_hint">Co-hosts let people in, make guest links and use the host controls. Only the host changes or cancels the meeting.</string>
+  <string name="call_hosts_make_co_host">Make co-host</string>
+  <string name="call_hosts_remove_co_host">Remove as co-host</string>
+  <string name="call_hosts_hand_over">Hand over host role</string>
+  <string name="call_hosts_hand_over_confirm">Hand the meeting over to %1$s? They change and cancel it from now on; you stay co-host.</string>
+  <string name="call_hosts_hand_over_do">Hand over</string>
+  <string name="call_hosts_saving">Saving the hosts…</string>
+  <string name="call_hosts_failed">The hosts could not be changed: %1$s</string>
+  <string name="call_hosts_leave_title">People are waiting to join</string>
+  <plurals name="call_hosts_leave_body">
+    <item quantity="one">%1$d person is waiting in the lobby, and nobody else here can let them in once you leave.</item>
+    <item quantity="other">%1$d people are waiting in the lobby, and nobody else here can let them in once you leave.</item>
+  </plurals>
+  <string name="call_hosts_leave_hand_over">Hand over to %1$s and leave</string>
+  <string name="call_hosts_leave_anyway">Leave anyway</string>
+</resources>
