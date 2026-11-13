@@ -912,8 +912,27 @@
   height: 100%;
 }
 
+/* The shared screen gets the room first (#1801): the people's strip goes beside it or below it,
+   whichever leaves the screen the larger picture (share_stage.rs sets the class and
+   --strip-size from the stage's size), and scrolls rather than growing. */
 .stage-share {
-  grid-template-columns: minmax(0, 1fr) 190px;
+  grid-template-columns: minmax(0, 1fr) var(--strip-size, 190px);
+}
+
+.stage-share.strip-bottom {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) var(--strip-size, 28%);
+}
+
+.stage-share.strip-bottom .filmstrip-side {
+  flex-direction: row;
+  overflow-x: auto;
+  overflow-y: visible;
+}
+
+.stage-share.strip-bottom .filmstrip-side .tile {
+  height: 100%;
+  width: auto;
 }
 
 .filmstrip-side {
@@ -1443,4 +1462,34 @@
   color: var(--call-notice-text);
   font-size: var(--text-xs);
   white-space: nowrap;
+}
+
+/* Short windows (#1801): a laptop window next to a document, a phone on its side. The header,
+   the controls and the frame around the shared screen give up padding before the stage loses
+   height; the buttons keep a 44 px target. */
+@media (max-height: 560px) {
+  .call-header {
+    padding: 4px 16px;
+  }
+
+  .call-controls {
+    padding: 6px 16px 8px;
+  }
+
+  .control-btn {
+    width: 44px;
+    height: 44px;
+  }
+
+  .call-stage-wrap {
+    padding: 0 12px;
+  }
+
+  .share-banner {
+    padding: 4px 12px;
+  }
+
+  .shared-screen {
+    padding: 8px;
+  }
 }
