@@ -63,10 +63,11 @@ SPLIT_MODULE = re.compile(
     r'const src = fetch(?:Part)?\(new URL\("\./([^"]+)".*?\n, \[([^\]]*)\]', re.S)
 # A signed-in first visit (app, the signed-in app's pack, service worker, the texts of one
 # language), gzip -9: 5.34 MB after #1699 (2026-11-11), plus about 5 %; lowered by what #1462 took
-# out of it on 2026-11-13 (about 17 kB, the desktop app's chrome); raised by 10 kB the same day
-# for the lobby's signed-roster checks (#1873, about 4.5 kB). Growth here is a member's, who
+# out of it on 2026-11-13 (about 17 kB, the desktop app's chrome), which left no headroom: main
+# itself grew past it the same day (#1907), and the lobby's signed-roster checks (#1873) add about
+# 6 kB. Raised to 5.63 MB then, about 0.5 % above the app's size. Growth here is a member's, who
 # loads it once and then from the service worker's cache.
-DEFAULT_BUDGET_BYTES = 5_600_000
+DEFAULT_BUDGET_BYTES = 5_630_000
 # The call module's gzip -9 size, decimal megabytes: 0.86 MB with the effects' compositors (#439),
 # plus about 15 %; raised to 1.1 MB when the call problem reports (#1762) took it to 1.02 MB. The
 # segmentation is a module of its own that only loads when an effect starts.

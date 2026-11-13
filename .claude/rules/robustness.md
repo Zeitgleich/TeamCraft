@@ -102,7 +102,7 @@ in [docs/performance.md](../../docs/performance.md) ("Clients"). A change that t
 | Network while idle besides the gateway heartbeat        | none      | none                        | none                                         |
 | In the background                                       | –         | –                           | no wakelocks, no polling; push wakes the app |
 | Download size, a guest in a meeting (compressed)        | –         | ≤ 6.37 MB, gzip -9          | –                                            |
-| Download size, signed-in first visit (compressed)       | –         | ≤ 5.60 MB, gzip -9          | –                                            |
+| Download size, signed-in first visit (compressed)       | –         | ≤ 5.63 MB, gzip -9          | –                                            |
 
 - The strict download budget is a guest's: somebody from outside who opens a meeting link, often
   once and in a browser that never saw the app, waits for the lobby (the app, the service worker
