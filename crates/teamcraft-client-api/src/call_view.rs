@@ -161,6 +161,7 @@ impl CallView {
       unverified: Vec::new(),
       is_on_limited_network: false,
       is_video_limited_by_device: false,
+      is_video_held_for_voice: false,
       is_own_capture_stalled: false,
       stalled_videos: Vec::new(),
       maybe_moved_to: None,

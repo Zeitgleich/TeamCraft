@@ -195,6 +195,8 @@ pub struct CallEngine {
   uplink: SendSideEstimator,
   /// What becomes of the own voice on the uplink: while it is lost, the own video stops (#1871).
   uplink_voice: VoiceGuard,
+  /// Whether the UI was told the own video is held for the voice ([`CallEngineEvent::VideoHeldForVoice`]).
+  is_video_held_for_voice: bool,
   downlink_feedback: FeedbackRecorder,
   /// Base for the SFU's arrival times in uplink feedback (only differences matter).
   uplink_feedback_epoch: Instant,
@@ -261,6 +263,9 @@ pub enum CallEngineEvent {
   /// receives and asks for lower layers than its tiles want (#1762); `false` once it is back to
   /// what they want. The UI says the computer is busy.
   DecodeLimited(bool),
+  /// The own video is held back while the own voice is lost on the uplink (#1871, #1891): the UI
+  /// says so, so nobody wonders why the camera froze. `false` once it may go out again.
+  VideoHeldForVoice(bool),
   /// Not from the engine but from the media driver: an own track's capture gets buffers from its
   /// source it can't turn into pictures (#1805), so the others see a still picture. What came over
   /// the judged window. The UI tells the sharer, and the call's crash reports hear of it.
@@ -657,6 +662,7 @@ impl CallEngine {
       has_reported_unauthenticated_keys: false,
       uplink,
       uplink_voice: VoiceGuard::new(VoiceGuardConfig::default()),
+      is_video_held_for_voice: false,
       downlink_feedback: FeedbackRecorder::new(now),
       uplink_feedback_epoch: now,
       maybe_probe_bytes: None,
@@ -2047,7 +2053,12 @@ impl CallEngine {
       bps = capacity_bps;
     }
     self.uplink_voice.on_feedback(feedback, now);
-    if self.maybe_uplink_capacity_bps.is_none() && self.uplink_voice.is_hurt(now) {
+    let is_held = self.maybe_uplink_capacity_bps.is_none() && self.uplink_voice.is_hurt(now);
+    if is_held != self.is_video_held_for_voice && (!is_held || !self.own_tracks.is_empty()) {
+      self.is_video_held_for_voice = is_held;
+      self.event(CallEngineEvent::VideoHeldForVoice(is_held));
+    }
+    if is_held {
       // The own voice is being lost (an uplink that collapsed): the video stops at once, before
       // the estimate came down, and comes back as after any cut (#1871). A transport that
       // measures its uplink (the WebSocket fallback's pacer) loses nothing on the way.
@@ -5486,6 +5497,31 @@ mod tests {
         })),
         "{outputs:?}"
       );
+      // The UI is told why the camera stopped (#1891), once.
+      let held = outputs
+        .iter()
+        .filter(|output| {
+          matches!(
+            output,
+            EngineOutput::Event(CallEngineEvent::VideoHeldForVoice(true))
+          )
+        })
+        .count();
+      assert_eq!(held, 1, "{outputs:?}");
+      // And when the hold is over, with the next feedback that shows no loss.
+      for index in 0..25u32 {
+        alice.send_audio(&frame(), at + Duration::from_millis(20) * index);
+      }
+      drain(&mut alice);
+      let feedback = TransportFeedback {
+        base_seq: 25,
+        arrivals_us: (0..25u64).map(|i| Some(600_000 + i * 20_000)).collect(),
+      };
+      let later = at + Duration::from_secs(4);
+      alice
+        .handle_signal(event(8, CallEvent::TransportFeedback { feedback }), later)
+        .unwrap();
+      assert!(drain(&mut alice).contains(&EngineOutput::Event(CallEngineEvent::VideoHeldForVoice(false))));
     }
 
     #[test]

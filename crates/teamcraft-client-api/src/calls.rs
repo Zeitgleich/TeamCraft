@@ -736,6 +736,10 @@ pub struct ActiveCall {
   /// the UI says the computer is busy. A calm hint, not an error.
   #[serde(default)]
   pub is_video_limited_by_device: bool,
+  /// This device's own video is held back while its voice is lost on the way to the SFU (#1871,
+  /// #1891): the UI says the voice goes first. A calm hint, not an error.
+  #[serde(default)]
+  pub is_video_held_for_voice: bool,
   /// This device's own camera or screen capture gets buffers it can't turn into pictures
   /// (#1805): the others see a still picture, and the UI tells the sharer to share again.
   #[serde(default)]

@@ -133,6 +133,11 @@ impl CallRoster {
         active.is_on_limited_network = transport == CallTransport::Fallback;
         return true;
       },
+      CallEngineEvent::VideoHeldForVoice(is_held) => {
+        let has_changed = active.is_video_held_for_voice != is_held;
+        active.is_video_held_for_voice = is_held;
+        return has_changed;
+      },
       CallEngineEvent::DecodeLimited(is_limited) => {
         let has_changed = active.is_video_limited_by_device != is_limited;
         active.is_video_limited_by_device = is_limited;

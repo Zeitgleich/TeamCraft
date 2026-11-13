@@ -179,6 +179,14 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         .is_some_and(|active| active.is_video_limited_by_device && !active.is_reconnecting)
     })
   });
+  // #1891: this device's own video waits while its voice is lost on the way.
+  let is_video_held_for_voice = Memo::new(move |_| {
+    state.read(|backend| {
+      backend
+        .active_call()
+        .is_some_and(|active| active.is_video_held_for_voice && !active.is_reconnecting)
+    })
+  });
   // #1805: this device's own capture gives the others a still picture.
   let is_own_capture_stalled = Memo::new(move |_| {
     state.read(|backend| {
@@ -627,6 +635,9 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         </Show>
         <Show when=move || is_on_limited_network.get() fallback=|| ()>
           <span class="muted-text" role="status">{move || i18n.t("call-limited-network")}</span>
+        </Show>
+        <Show when=move || is_video_held_for_voice.get() fallback=|| ()>
+          <span class="muted-text" role="status">{move || i18n.t("call-video-held-for-voice")}</span>
         </Show>
         <Show when=move || is_video_limited_by_device.get() fallback=|| ()>
           <span class="muted-text" role="status">{move || i18n.t("call-device-busy")}</span>

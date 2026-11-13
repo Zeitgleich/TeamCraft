@@ -301,6 +301,7 @@ call-connecting = Connecting…
 call-reconnecting = Connection lost, reconnecting…
 call-limited-network = Limited network, call quality may be lower
 call-device-busy = Your computer is busy: video quality reduced
+call-video-held-for-voice = Your connection is struggling: your video is paused so your voice gets through
 call-capture-stalled = The others see only a still picture of your screen or camera. Stop it and start it again.
 call-video-stalled = { $name }'s video isn't updating: you see a still picture.
 call-video-stalled-unnamed = A video isn't updating: you see a still picture.
