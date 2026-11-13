@@ -283,6 +283,8 @@ enum ChatQuery {
   case draftReply(conversationId: String)
   /// The user's recent messages across the conversations (#1220).
   case sentMessages
+  /// Root and replies of a thread, oldest first.
+  case thread(conversationId: String, threadId: String)
 
   var json: String {
     switch self {
@@ -331,6 +333,8 @@ enum ChatQuery {
       ])
     case .sentMessages:
       return jsonText(["kind": "sent_messages"])
+    case .thread(let conversation, let thread):
+      return jsonText(["kind": "thread", "conversation": conversation, "thread": thread])
     }
   }
 }

@@ -67,9 +67,7 @@ final class PagedFeedTests: XCTestCase {
     MessagePage(messages: ids.map(message), hasOlder: true)
   }
 
-  private func message(_ id: String) -> MessageItem {
-    MessageItem(
-      id: id, conversationId: "c", authorId: "a", authorName: "Name a", sentAtMs: Int64(id) ?? 0, body: "text \(id)",
-      isEdited: false, isPending: false, replyCount: 0, maybeThreadId: nil, reactions: [])
+  private func message(_ id: String) -> Message {
+    Message(id: id, conversationId: "c", authorId: "a", sentAtMs: Int64(id) ?? 0, body: "text \(id)", authorName: "Name a")
   }
 }

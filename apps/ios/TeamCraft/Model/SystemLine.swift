@@ -34,7 +34,7 @@ enum SystemLine: Equatable {
 
   /// `nil` for a message people wrote. `names` are display names by user ID, for the people a
   /// workspace event names.
-  init?(message: MessageItem, maybeExtras: MessageExtras?, names: [String: String]) {
+  init?(message: Message, maybeExtras: MessageExtras?, names: [String: String]) {
     // The core makes the person an event is about its author, so their name is known first.
     let nameOf = { (id: String) in names[id] ?? (id == message.authorId ? message.authorName : "") }
     if let event = maybeExtras?.maybeWorkspaceEvent, let line = SystemLine(event, nameOf: nameOf) {
@@ -80,7 +80,7 @@ enum SystemLine: Equatable {
     }
   }
 
-  private init(_ event: SystemEventItem, name: String) {
+  private init(_ event: Message.SystemEvent, name: String) {
     switch event {
     case .joined: self = .joined(name: name)
     case .left: self = .left(name: name)

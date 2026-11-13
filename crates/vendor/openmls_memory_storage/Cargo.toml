@@ -53,7 +53,7 @@ name = "vc_operation_tree"
 path = "tests/vc_operation_tree.rs"
 
 [dependencies.base64]
-version = "0.22"
+version = "0.23"
 optional = true
 
 [dependencies.hex]

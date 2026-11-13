@@ -2336,7 +2336,7 @@ pub(crate) fn parse_id<T: Id + std::str::FromStr>(text: &str) -> Result<T, TeamC
     .map_err(|_| TeamCraftError::InvalidInput(format!("not an ID: {text}")))
 }
 
-/// The oldest row a paging list holds, as the apps name it ([`crate::TeamCraft::messages_from`]).
+/// The oldest row a paging list holds, as the apps name it ([`crate::TeamCraft::message_tail`]).
 pub(crate) fn feed_anchor(
   maybe_id: Option<&str>,
   sent_at_ms: i64,

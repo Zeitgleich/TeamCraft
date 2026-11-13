@@ -6,12 +6,12 @@ import Foundation
 /// one at a time: a reread that started before a page back can't drop that page again.
 @MainActor
 final class PagedFeed {
-  typealias Read = @MainActor (_ maybeOldest: MessageItem?, _ older: UInt32) async -> MessagePage?
+  typealias Read = @MainActor (_ maybeOldest: Message?, _ older: UInt32) async -> MessagePage?
 
   private let firstPage: UInt32
   private let pageBack: UInt32
   private let read: Read
-  private var maybeOldest: MessageItem?
+  private var maybeOldest: Message?
   private var maybeLastRead: Task<MessagePage?, Never>?
 
   init(firstPage: UInt32 = 200, pageBack: UInt32 = 100, read: @escaping Read) {

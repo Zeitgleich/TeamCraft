@@ -913,21 +913,18 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .collect()
   }
 
-  /// The user and the accounts among `ids` this device knows, former ones included, from one pass
-  /// over the users: a feed draws names and the user's own messages with them before the snapshot
-  /// is read. The user comes first.
+  /// The user and the accounts among `ids` this device knows, former ones included: a feed draws
+  /// names and the user's own messages with them before the snapshot is read. The user comes first.
+  /// One record per author, not every user: the mobile feeds read this on every change (#1623), and
+  /// a page has a few authors where a workspace has thousands of users (as `me()`, issue #1758).
   pub fn me_and_known_users(&self, ids: &BTreeSet<UserId>) -> (User, Vec<User>) {
-    let summaries = self.summaries();
-    let me = summaries
-      .get(&self.me)
-      .map_or_else(|| self.me(), |summary| self.to_user(summary));
     let known = ids
       .iter()
       .filter(|id| **id != self.me)
-      .filter_map(|id| summaries.get(id))
-      .map(|summary| self.to_user(summary))
+      .filter_map(|id| self.summary_of(*id))
+      .map(|summary| self.to_user(&summary))
       .collect();
-    (me, known)
+    (self.me(), known)
   }
 
   pub(crate) fn me_id(&self) -> UserId {

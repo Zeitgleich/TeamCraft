@@ -112,16 +112,14 @@ final class SystemLineTests: XCTestCase {
   }
 
   private func line(
-    event: SystemEventItem? = nil, extras workspace: String? = nil, body: String = "", names: [String: String]? = nil
+    event: Message.SystemEvent? = nil, extras workspace: String? = nil, body: String = "", names: [String: String]? = nil
   ) -> SystemLine? {
     let maybeExtras = workspace.map { extras(#""maybe_workspace_event":"# + $0) } ?? nil
     return SystemLine(message: message(body: body, event: event), maybeExtras: maybeExtras, names: names ?? self.names)
   }
 
-  private func message(body: String, event: SystemEventItem? = nil) -> MessageItem {
-    MessageItem(
-      id: "9", conversationId: "c", authorId: "2", authorName: "Sam", sentAtMs: 0, body: body, isEdited: false,
-      isPending: false, replyCount: 0, maybeThreadId: nil, reactions: [], maybeSystemEvent: event)
+  private func message(body: String, event: Message.SystemEvent? = nil) -> Message {
+    Message(id: "9", conversationId: "c", authorId: "2", sentAtMs: 0, body: body, authorName: "Sam", maybeSystemEvent: event)
   }
 
   /// Extras with `fields` (JSON members after the message ID).

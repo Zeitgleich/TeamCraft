@@ -2225,7 +2225,7 @@ short after one page of the hole, the newest five are there; the next catch-up r
 message once, in order.
 
 The mobile apps turned it on once their feeds showed holes (issue #1438): the FFI's pages
-(`messages_from`, `message_tail`) carry the holes among their messages (`gaps`, each with its place
+(`message_tail`, which both apps read since #1623) carry the holes among their messages (`gaps`, each with its place
 in the page), iOS and Android draw a row there ("Loading messages…", or the failure with "Try
 again"), and a reader within 40 rows of it, not at the bottom of a list that scrolls, asks for a
 page of it from the side they come from, as web and desktop do. Paging back, a jump to a date and

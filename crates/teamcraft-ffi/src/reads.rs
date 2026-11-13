@@ -50,13 +50,13 @@ use teamcraft_proto::{ConversationId, ThreadId, UserId};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 
 use crate::EventListener;
-use crate::engine::{Job, Store, direct_peer, feed_anchor, older_len, parse_id};
+use crate::engine::{Job, Store, direct_peer, parse_id};
 use crate::error::TeamCraftError;
 use crate::logging::{self, JobClock};
 use crate::perf_jobs::{self, PerfJobKind};
 use crate::types::{
   AccountState, ChatPreviewItem, ConversationItem, FirstSyncItem, FirstSyncStageItem, GroupMentionReachItem,
-  KeyCatchUpItem, LeaveChoice, MentionSettings, MentionableGroupItem, MessageItem, MessagePage,
+  KeyCatchUpItem, LeaveChoice, MentionSettings, MentionableGroupItem, MessageItem,
   NotificationContentSettings, NotifiedConversation, Presence, PushDiagnosticsInfo, SearchHitItem,
   SegmentPrefetchMode, SpaceMenuItem, share_targets,
 };
@@ -738,20 +738,6 @@ impl Reads {
     }))
   }
 
-  pub(crate) fn messages(
-    &self,
-    conversation_id: &str,
-    limit: u32,
-  ) -> Result<Vec<MessageItem>, TeamCraftError> {
-    let backend = self.backend()?;
-    let conversation: ConversationId = parse_id(conversation_id)?;
-    self.focus(conversation);
-    // One read for count and page: a separate count could change before the page is read and
-    // shift the window (issue #1060).
-    let tail = backend.feed_tail(conversation, None, usize::try_from(limit).unwrap_or(usize::MAX));
-    Ok(self.message_items(backend, &tail.messages))
-  }
-
   /// [`crate::TeamCraft::chat_previews`]. IDs that aren't conversation IDs are skipped, so one bad
   /// entry doesn't cost the list all its previews.
   pub(crate) fn chat_previews(
@@ -772,41 +758,6 @@ impl Reads {
         })
         .collect(),
     )
-  }
-
-  pub(crate) fn messages_from(
-    &self,
-    conversation_id: &str,
-    maybe_oldest_id: Option<&str>,
-    oldest_sent_at_ms: i64,
-    older: u32,
-  ) -> Result<MessagePage, TeamCraftError> {
-    let backend = self.backend()?;
-    let conversation: ConversationId = parse_id(conversation_id)?;
-    self.focus(conversation);
-    let tail = backend.feed_tail(
-      conversation,
-      feed_anchor(maybe_oldest_id, oldest_sent_at_ms)?,
-      older_len(older),
-    );
-    let gaps = tail.gaps_among(backend.history_gaps(conversation));
-    Ok(MessagePage {
-      messages: self.message_items(backend, &tail.messages),
-      has_older: tail.has_older,
-      gaps: gaps.into_iter().map(Into::into).collect(),
-    })
-  }
-
-  pub(crate) fn thread(
-    &self,
-    conversation_id: &str,
-    thread_id: &str,
-  ) -> Result<Vec<MessageItem>, TeamCraftError> {
-    let backend = self.backend()?;
-    let conversation = parse_id(conversation_id)?;
-    self.focus(conversation);
-    let messages = backend.thread(conversation, parse_id(thread_id)?);
-    Ok(self.message_items(backend, &messages))
   }
 
   pub(crate) fn send_message(
@@ -1015,13 +966,6 @@ impl Reads {
   /// What still waits for the server: the outbox, uploads and queued actions.
   pub(crate) fn pending_work(&self) -> Result<PendingWork, TeamCraftError> {
     PendingWork::read(&self.store).map_err(TeamCraftError::from)
-  }
-
-  fn message_items(&self, backend: &CoreChatBackend<Store>, messages: &[MessageView]) -> Vec<MessageItem> {
-    messages
-      .iter()
-      .map(|message| self.message_item(backend, message))
-      .collect()
   }
 
   fn message_item(&self, backend: &CoreChatBackend<Store>, message: &MessageView) -> MessageItem {

@@ -16,7 +16,7 @@ struct ComposerReply: Equatable {
   /// A target read back: the thumbnail of the quote.
   let maybeThumbnailData: Data?
 
-  init(message: MessageItem) {
+  init(message: Message) {
     messageId = message.id
     maybeAttachmentId = nil
     maybeAuthorName = message.shownAuthorName
