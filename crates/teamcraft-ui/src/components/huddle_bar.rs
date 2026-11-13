@@ -11,8 +11,8 @@ use crate::i18n::use_i18n;
 use crate::model::{ConversationId, ConversationKind};
 use crate::state::{MainView, use_app_state};
 
-/// How the bar words and joins the call of a conversation: a channel has huddles; a DM or group DM
-/// has calls (#1211), joined with the kind the header's call buttons use.
+/// How the bar words and joins the call of a conversation: a channel has huddles; a DM, a group DM
+/// or a meeting's chat has calls (#1211, #1932), joined with the kind the header's call buttons use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct BarKind {
   kind: CallKind,
@@ -23,10 +23,11 @@ struct BarKind {
   label: &'static str,
 }
 
-fn bar_kind(conversation: Option<ConversationKind>) -> BarKind {
+/// `conversation`: its kind and whether it is a meeting's chat.
+fn bar_kind(conversation: Option<(ConversationKind, bool)>) -> BarKind {
   let kind = match conversation {
-    Some(ConversationKind::Direct) => CallKind::Direct,
-    Some(ConversationKind::Group) => CallKind::Group,
+    Some((ConversationKind::Direct, _)) => CallKind::Direct,
+    Some((ConversationKind::Group, _) | (_, true)) => CallKind::Group,
     _ => CallKind::Huddle,
   };
   if kind == CallKind::Huddle {
@@ -53,8 +54,12 @@ fn bar_kind(conversation: Option<ConversationKind>) -> BarKind {
 pub fn HuddleBar(conversation: ConversationId) -> impl IntoView {
   let state = use_app_state();
   let call = state.call;
+  // A meeting guest's page has one way into the meeting's call, its top bar's "Join the call"
+  // (#1932): the bar shows only while this device is in the call.
+  let is_guest_page = use_context::<crate::meetings::MeetingsHub>().is_some_and(|hub| hub.is_guest_page());
   let is_shown = Memo::new(move |_| {
-    call.is_in_call_for(conversation) || state.read(|backend| backend.huddle(conversation)).is_some()
+    call.is_in_call_for(conversation)
+      || (!is_guest_page && state.read(|backend| backend.huddle(conversation)).is_some())
   });
   // The bar loads with the first call it shows (`areas::huddle_bar`), next to the call screens.
   move || {
@@ -74,7 +79,7 @@ pub fn HuddleBarContent(conversation: ConversationId) -> impl IntoView {
     bar_kind(
       state
         .read(|backend| backend.conversation(conversation))
-        .map(|info| info.kind),
+        .map(|info| (info.kind, crate::meetings::is_meeting_chat(&info))),
     )
   });
   let huddle = Memo::new(move |_| state.read(|backend| backend.huddle(conversation)));
@@ -347,7 +352,7 @@ mod tests {
   #[test]
   fn channels_keep_the_huddle() {
     for kind in [ConversationKind::Public, ConversationKind::Private] {
-      let bar = bar_kind(Some(kind));
+      let bar = bar_kind(Some((kind, false)));
       assert_eq!(bar.kind, CallKind::Huddle);
       assert_eq!(bar.join, "huddle-join");
     }
@@ -355,15 +360,26 @@ mod tests {
 
   #[test]
   fn direct_messages_have_calls_not_huddles() {
-    let direct = bar_kind(Some(ConversationKind::Direct));
+    let direct = bar_kind(Some((ConversationKind::Direct, false)));
     assert_eq!(direct.kind, CallKind::Direct);
-    let group = bar_kind(Some(ConversationKind::Group));
+    let group = bar_kind(Some((ConversationKind::Group, false)));
     assert_eq!(group.kind, CallKind::Group);
     for bar in [direct, group] {
       assert_eq!(bar.in_progress, "call-bar-in-progress");
       assert_eq!(bar.join, "call-bar-join");
       assert_eq!(bar.leave, "call-bar-leave");
       assert_eq!(bar.label, "call-bar-label");
+    }
+  }
+
+  /// #1932: whoever (re)joined it and how, a meeting chat's call is the meeting's call.
+  #[test]
+  fn meeting_chats_have_the_meetings_call_not_a_huddle() {
+    for kind in [ConversationKind::Public, ConversationKind::Private] {
+      let bar = bar_kind(Some((kind, true)));
+      assert_eq!(bar.kind, CallKind::Group, "{kind:?}");
+      assert_eq!(bar.in_progress, "call-bar-in-progress");
+      assert_eq!(bar.join, "call-bar-join");
     }
   }
 }
