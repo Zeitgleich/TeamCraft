@@ -32,6 +32,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import de.zeitgleich.teamcraft.ui.forms.AddPeopleFailure
 import de.zeitgleich.teamcraft.ui.theme.Spacing
 import de.zeitgleich.teamcraft.ui.toggled
 import kotlinx.coroutines.launch
@@ -49,7 +50,7 @@ internal fun AddMembersSheet(viewModel: MainViewModel, conversationId: String, m
   val scope = rememberCoroutineScope()
   var picked by remember { mutableStateOf(listOf<String>()) }
   var isAdding by remember { mutableStateOf(false) }
-  var maybeFailure by remember { mutableStateOf<Int?>(null) }
+  var maybeFailure by remember { mutableStateOf<AddPeopleFailure?>(null) }
   val members = memberIds.toSet()
   val add: () -> Unit = add@{
     if (isAdding || picked.isEmpty()) return@add
@@ -86,7 +87,7 @@ internal fun AddMembersSheet(viewModel: MainViewModel, conversationId: String, m
       // Why adding stopped, next to the button (forms.md).
       maybeFailure?.let { failure ->
         Text(
-          stringResource(failure),
+          failure.maybeName?.let { stringResource(failure.text, it) } ?: stringResource(failure.text),
           color = MaterialTheme.colorScheme.error,
           style = MaterialTheme.typography.bodyMedium,
           modifier = Modifier.padding(horizontal = Spacing.l).semantics { liveRegion = LiveRegionMode.Polite },

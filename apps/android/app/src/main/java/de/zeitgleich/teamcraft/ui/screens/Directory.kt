@@ -236,7 +236,7 @@ private fun PeopleList(
     scope.launch {
       when (val result = viewModel.tryCreate { openDirect(listOf(person.userId)) }) {
         is CreateResult.Created -> onOpen(result.id)
-        CreateResult.NameRefused -> viewModel.showFailure(R.string.error_generic)
+        is CreateResult.NameRefused -> viewModel.showFailure(R.string.error_generic)
         is CreateResult.Failed -> viewModel.showFailure(result.text)
       }
       isOpening = false

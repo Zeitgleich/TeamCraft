@@ -11,6 +11,7 @@
 mod app_link;
 mod bridge;
 mod calls;
+mod channel_anchor;
 mod channel_roles;
 mod color_theme;
 mod composer_format;

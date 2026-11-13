@@ -6,6 +6,8 @@ struct ConversationHeader: View {
   let conversation: ConversationItem
   /// Who types in this conversation itself right now (#882); in a direct message the status gives way.
   var typingNames: [String] = []
+  /// The channel's name isn't the one members' apps hold (e2ee.md §4.6.5, #1842): marked under it.
+  var isNameStale = false
 
   var body: some View {
     HStack(spacing: 8) {
@@ -14,7 +16,13 @@ struct ConversationHeader: View {
         Text(conversation.listName)
           .font(.app(.headline))
           .lineLimit(1)
-        if conversation.kind == .direct, !typingNames.isEmpty {
+        if isNameStale {
+          Label("channel_name_stale", systemImage: "exclamationmark.triangle.fill")
+            .font(.app(.caption))
+            .foregroundStyle(Theme.danger)
+            .lineLimit(1)
+            .accessibilityHint(Text("channel_name_stale_hint"))
+        } else if conversation.kind == .direct, !typingNames.isEmpty {
           HStack(spacing: 6) {
             TypingDots()
             Text("typing_direct").italic()

@@ -16,6 +16,7 @@ struct NewChannelView: View {
       nameLabel: "channel_name",
       missingName: "channel_name_missing",
       submit: "create_channel_submit",
+      checksChannelName: true,
       access: {
         Picker("channel_access_label", selection: $isPrivate) {
           AccessOption(title: "channel_access_public", hint: "channel_access_public_hint", symbol: "number")
@@ -90,6 +91,8 @@ private struct CreateForm<Access: View>: View {
   let nameLabel: LocalizedStringKey
   let missingName: String
   let submit: LocalizedStringKey
+  /// A channel's name keeps the channel name rules, checked by the core as it is typed (#1842).
+  var checksChannelName = false
   @ViewBuilder let access: () -> Access
   let create: (String, String, String) async -> CreateResult
   let onCreated: (String) -> Void
@@ -101,7 +104,7 @@ private struct CreateForm<Access: View>: View {
   @State private var requestKey = newRequestKey()
   @State private var hasTried = false
   @State private var isCreating = false
-  @State private var isNameRefused = false
+  @State private var maybeNameRefusal: CreateProblem?
   @State private var maybeFailure: LocalizedStringKey?
   @FocusState private var focused: CreateField?
   @AccessibilityFocusState private var accessibilityFocused: CreateField?
@@ -117,7 +120,7 @@ private struct CreateForm<Access: View>: View {
             .accessibilityFocused($accessibilityFocused, equals: .name)
             .fieldError(errors[.name]?.message)
             .onSubmit { Task { await send() } }
-            .onChange(of: name) { isNameRefused = false }
+            .onChange(of: name) { maybeNameRefusal = nil }
           FieldMessage(maybeError: errors[.name]?.message)
         } header: {
           Text(nameLabel)
@@ -160,11 +163,13 @@ private struct CreateForm<Access: View>: View {
   }
 
   private var checkedErrors: FieldErrors<CreateField, CreateProblem> {
-    CreateRules.errors(name: name, description: description, missing: missingName)
+    CreateRules.errors(
+      name: name, description: description, missing: missingName,
+      maybeChannelProblem: checksChannelName ? ChannelAnchor.problem(of: name) : nil)
   }
 
   private var shownErrors: FieldErrors<CreateField, CreateProblem> {
-    (hasTried ? checkedErrors : FieldErrors()).with(isNameRefused ? .nameRefused : nil, at: .name)
+    (hasTried ? checkedErrors : FieldErrors()).with(maybeNameRefusal, at: .name)
   }
 
   private func send() async {
@@ -183,9 +188,9 @@ private struct CreateForm<Access: View>: View {
       dismiss()
       onCreated(id)
     case .nameRefused:
-      isNameRefused = true
-      requestKey = newRequestKey()
-      focus(.name)
+      refuseName(.nameRefused)
+    case .channelNameRefused(let maybeProblem):
+      refuseName(.channelName(maybeProblem.flatMap(ChannelAnchor.problemKey) ?? "channel_name_error_refused"))
     case .notAllowed:
       maybeFailure = "create_not_allowed"
       requestKey = newRequestKey()
@@ -193,6 +198,12 @@ private struct CreateForm<Access: View>: View {
       maybeFailure = failure.message
     }
     isCreating = false
+  }
+
+  private func refuseName(_ problem: CreateProblem) {
+    maybeNameRefusal = problem
+    requestKey = newRequestKey()
+    focus(.name)
   }
 
   private func focus(_ field: CreateField) {

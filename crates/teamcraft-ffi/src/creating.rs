@@ -22,6 +22,7 @@ use teamcraft_proto::{
 
 use crate::TeamCraft;
 use crate::bridge::to_json;
+use crate::channel_anchor::ChannelNameProblem;
 use crate::engine::{parse_id, parse_ids};
 use crate::error::TeamCraftError;
 use crate::reads::Reads;
@@ -41,6 +42,12 @@ pub enum CreateOutcome {
   NameRefused { detail: String },
   /// The user may not create this here (any more): the role changed since the menu was shown.
   NotAllowed,
+  /// The channel name breaks the name rules (e2ee.md §4.6.5): the problem this device found, shown
+  /// at the name field; `None` when the server refused it (`invalid_channel_name`,
+  /// `channel-name-error-refused`).
+  ChannelNameRefused {
+    maybe_problem: Option<ChannelNameProblem>,
+  },
 }
 
 /// How adding people to a channel ended when the server answered.
@@ -53,6 +60,9 @@ pub enum AddPeopleOutcome {
   NotInSpace,
   /// The user may not add people here (any more).
   NotAllowed,
+  /// Somebody's app is from before the channel anchor and can't join this channel: `name` has to
+  /// update TeamCraft first (`error-must-update`). Nobody was added.
+  MustUpdate { name: String },
 }
 
 /// Whom "Add people" puts into a channel, as the core decides it.
@@ -278,6 +288,9 @@ impl Reads {
 
 /// A refusal of adding people the sheet explains, if it is one.
 fn addition_refusal(error: &CoreError) -> Option<AddPeopleOutcome> {
+  if let CoreError::MustUpdate { name, .. } = error {
+    return Some(AddPeopleOutcome::MustUpdate { name: name.clone() });
+  }
   let CoreError::Api(api @ ApiError::Status { status, .. }) = error else {
     return None;
   };
@@ -309,10 +322,18 @@ fn refusing<T>(result: Result<T, CoreError>) -> Result<Result<T, CreateOutcome>,
 
 /// A refusal of a create request the sheet shows at a field or as "not allowed", if it is one.
 fn create_refusal(error: &CoreError) -> Option<CreateOutcome> {
+  if let CoreError::ChannelName(problem) = error {
+    return Some(CreateOutcome::ChannelNameRefused {
+      maybe_problem: Some(problem.into()),
+    });
+  }
   let CoreError::Api(api @ ApiError::Status { status, .. }) = error else {
     return None;
   };
   match (api.error_code(), *status) {
+    (Some(ErrorCode::InvalidChannelName), _) => {
+      Some(CreateOutcome::ChannelNameRefused { maybe_problem: None })
+    },
     (Some(ErrorCode::InvalidRequest), _) => Some(CreateOutcome::NameRefused {
       detail: api.to_string(),
     }),
@@ -333,6 +354,7 @@ fn non_empty(text: String) -> Option<String> {
 #[cfg(test)]
 mod tests {
   use teamcraft_proto::ErrorBody;
+  use teamcraft_proto::channel_name::ChannelNameError;
 
   use super::*;
 
@@ -342,6 +364,34 @@ mod tests {
       create_refusal(&refused(400, Some(ErrorCode::InvalidRequest))),
       Some(CreateOutcome::NameRefused { .. })
     ));
+  }
+
+  #[test]
+  fn channel_name_rules_go_to_the_name_field_with_their_problem() {
+    assert_eq!(
+      create_refusal(&refused(400, Some(ErrorCode::InvalidChannelName))),
+      Some(CreateOutcome::ChannelNameRefused { maybe_problem: None })
+    );
+    assert_eq!(
+      create_refusal(&CoreError::ChannelName(ChannelNameError::InvisibleCharacter)),
+      Some(CreateOutcome::ChannelNameRefused {
+        maybe_problem: Some(ChannelNameProblem::InvisibleCharacter)
+      })
+    );
+  }
+
+  #[test]
+  fn somebody_who_has_to_update_is_named() {
+    let refused = CoreError::MustUpdate {
+      user: teamcraft_client_api::model::id_from_raw(7),
+      name: "Anna Example".into(),
+    };
+    assert_eq!(
+      addition_refusal(&refused),
+      Some(AddPeopleOutcome::MustUpdate {
+        name: "Anna Example".into()
+      })
+    );
   }
 
   #[test]

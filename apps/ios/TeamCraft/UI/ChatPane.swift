@@ -101,6 +101,8 @@ struct ChatPane: View {
   @State private var maybePreJoin: PreJoinNotice?
   /// Whether voice messages may be recorded here and how long (#204).
   @State private var voicePolicy = VoiceMessagePolicy.fallback
+  /// What the channel shows of its anchor (e2ee.md §4.6.5, #1842): "Name not confirmed" in the header.
+  @State private var maybeAnchorMarks: ChannelAnchorMarksItem?
   @AppStorage("share_typing") private var isSharingTyping = true
   /// Bubbles or the desktop's list (#1488), a setting of this device.
   @AppStorage(MessageLayout.key) private var messageLayoutRaw = MessageLayout.bubbles.rawValue
@@ -133,9 +135,14 @@ struct ChatPane: View {
     .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
       maybeCatchUp?.resumed()
     }
+    .task(id: conversation.id) {
+      // The channel's anchor is verified again as it opens (at most every 5 minutes, the core paces it).
+      if isChannel { await model.refreshChannelAnchor(conversation.id) }
+    }
     .task(id: model.changeCount) {
       await reload()
       await reloadDraftFiles()
+      if isChannel { maybeAnchorMarks = await model.channelAnchorMarks(conversation.id) }
       runningCallCount = await model.runningCalls()[conversation.id] ?? 0
       mentionableGroups = await model.mentionableGroups(conversation.id)
       (mentionPeople, memberCount) = await model.mentionMembers(conversation.id)
@@ -244,6 +251,7 @@ struct ChatPane: View {
       OfflineBanner()
       // Only this conversation's own mark (issue #1457); a thread's pane follows its channel's.
       SyncingLine(isCatchingUp: conversation.isCatchingUp)
+      if isChannel { ChannelUnreachableBanner(conversationId: conversation.id) }
       // Admins asking to join this channel, when the user owns it (admin.md §2.4.1).
       if threadId == nil { JoinRequestBanner(conversationId: conversation.id) }
       // Messages here wait for their keys (a newly linked device, issue #888): they show as
@@ -909,6 +917,10 @@ struct ChatPane: View {
     model.calls.startCall(conversationId: conversation.id, displayName: conversation.name, withVideo: withVideo)
   }
 
+  private var isChannel: Bool {
+    conversation.kind == .public || conversation.kind == .private
+  }
+
   private var deletingBinding: Binding<Bool> {
     Binding(get: { maybeDeleting != nil }, set: { if !$0 { maybeDeleting = nil } })
   }
@@ -924,7 +936,8 @@ struct ChatPane: View {
     ToolbarItem(placement: .principal) {
       ConversationHeader(
         conversation: conversation,
-        typingNames: typingNames(in: model.typingNow, conversation: conversation.id, thread: nil))
+        typingNames: typingNames(in: model.typingNow, conversation: conversation.id, thread: nil),
+        isNameStale: maybeAnchorMarks?.isNameStale == true)
     }
     ToolbarItemGroup(placement: .topBarTrailing) {
       if conversation.kind != .integration {
