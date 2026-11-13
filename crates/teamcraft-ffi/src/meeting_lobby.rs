@@ -38,6 +38,9 @@ pub struct LobbyPerson {
   pub user_id: String,
   pub display_name: String,
   pub status: LobbyPersonStatus,
+  /// Whether "Admit" can be offered: a member at once, a guest only once their key code is shown
+  /// (`LobbyAdmission::can_admit`, the rule every client's lobby shares).
+  pub can_admit: bool,
 }
 
 /// The lobby of a meeting the user hosts.
@@ -117,9 +120,12 @@ impl Engine {
     let Some(entry) = read.entries.into_iter().find(|entry| entry.user.id == user) else {
       return Ok(LobbyDecisionOutcome::NoLongerWaiting);
     };
-    if decision == LobbyDecision::Admit && !LobbyAdmission::of(&entry).can_admit() {
+    // The rule the rows show, checked here too: a guest only once this device made the code of the
+    // key it pinned for them, which the app showed for the host to compare.
+    let has_key_code = self.backend()?.guest_key_code(user).is_some();
+    if decision == LobbyDecision::Admit && !LobbyAdmission::of(&entry).can_admit(has_key_code) {
       return Err(TeamCraftError::InvalidInput(
-        "the guest's device is not set up yet".into(),
+        "the guest's key code isn't shown yet".into(),
       ));
     }
     let meeting = read.meeting;
@@ -189,7 +195,9 @@ impl Engine {
 
 /// A host's row for `entry`, with the key code this device made for a guest, if any yet.
 pub(crate) fn lobby_person(entry: &LobbyEntry, maybe_key_code: Option<String>) -> LobbyPerson {
-  let status = match LobbyAdmission::of(entry) {
+  let admission = LobbyAdmission::of(entry);
+  let can_admit = admission.can_admit(maybe_key_code.is_some());
+  let status = match admission {
     LobbyAdmission::Member => LobbyPersonStatus::Member,
     LobbyAdmission::Guest { .. } => LobbyPersonStatus::Guest { maybe_key_code },
     LobbyAdmission::GuestDevicePending => LobbyPersonStatus::GuestDevicePending,
@@ -198,6 +206,7 @@ pub(crate) fn lobby_person(entry: &LobbyEntry, maybe_key_code: Option<String>) -
     user_id: entry.user.id.to_string(),
     display_name: entry.user.display_name.clone(),
     status,
+    can_admit,
   }
 }
 
@@ -232,11 +241,17 @@ mod tests {
   #[test]
   fn a_row_says_how_somebody_can_be_let_in() {
     let guest = entry("guest", true, Some("ab"));
+    let shown = lobby_person(&guest, Some("12 34".into()));
     assert_eq!(
-      lobby_person(&guest, Some("12 34".into())).status,
+      shown.status,
       LobbyPersonStatus::Guest {
         maybe_key_code: Some("12 34".into())
       }
+    );
+    assert!(shown.can_admit);
+    assert!(
+      !lobby_person(&guest, None).can_admit,
+      "no Admit before the key code is shown"
     );
     assert_eq!(
       lobby_person(&entry("guest", false, None), None).status,
@@ -244,6 +259,7 @@ mod tests {
     );
     let member = lobby_person(&entry("member", false, None), None);
     assert_eq!(member.status, LobbyPersonStatus::Member);
+    assert!(member.can_admit);
     assert_eq!(member.display_name, "Gus");
     assert_eq!(member.user_id, "77");
   }

@@ -22,12 +22,6 @@ struct LobbyHandoverRequest: Identifiable, Equatable {
   var id: String { conversationId }
 }
 
-/// Whether "Admit" can be offered for `person`: everybody but a guest whose device isn't set up.
-func canAdmit(_ person: LobbyPerson) -> Bool {
-  if case .guestDevicePending = person.status { return false }
-  return true
-}
-
 /// Whether a guest of `lobby` is ready to be admitted but its key code isn't made yet.
 func isWaitingForKeyCode(_ lobby: MeetingLobby) -> Bool {
   lobby.people.contains { person in
@@ -75,10 +69,14 @@ extension AppModel {
     guard let left = try? await core().lobbyLeftWaiting(conversationId: conversationId) else { return }
     let waiting = Int(left.waiting)
     let content = UNMutableNotificationContent()
-    content.title =
-      left.meetingTitle.isEmpty
-      ? String(localized: "lobby_left_title_unnamed \(waiting)")
-      : String(localized: "lobby_left_title \(waiting) \(left.meetingTitle)")
+    // One and several as separate strings: the titles don't name the number.
+    let title = left.meetingTitle
+    switch (title.isEmpty, waiting == 1) {
+    case (true, true): content.title = String(localized: "lobby_left_title_unnamed_one")
+    case (true, false): content.title = String(localized: "lobby_left_title_unnamed_other")
+    case (false, true): content.title = String(localized: "lobby_left_title_one \(title)")
+    case (false, false): content.title = String(localized: "lobby_left_title_other \(title)")
+    }
     content.body = String(localized: "lobby_left_body \(waiting)")
     content.categoryIdentifier = NotificationCategories.lobbyLeftCategory
     content.threadIdentifier = NotificationKeys.lobbyLeftKind
@@ -87,9 +85,10 @@ extension AppModel {
       NotificationKeys.kind: NotificationKeys.lobbyLeftKind,
       NotificationKeys.conversation: conversationId,
     ]
-    // The app's own: the server could show an alert with this category, whose action is refused
-    // without the tag.
-    if let tag = NotificationAuthenticator().tag(for: conversationId) {
+    // The app's own: the tag is over the reminder's identifier, which the notification extension
+    // never tags (it tags conversation IDs), so neither a server alert with this category nor a
+    // decrypted push of any kind passes `handleLobbyReminder`'s check.
+    if let tag = NotificationAuthenticator().tag(for: Self.lobbyReminderId(conversationId)) {
       info[NotificationAuthenticator.tagKey] = tag
     }
     content.userInfo = info
@@ -103,9 +102,10 @@ extension AppModel {
   }
 
   /// "Hand over" on the reminder, or a tap on it: the app opens the choice of whom to hand the
-  /// meeting of `conversationId` to. Only for a reminder this app posted.
+  /// meeting of `conversationId` to. Only for a reminder this app posted (its tag over the
+  /// reminder's identifier).
   func handleLobbyReminder(conversationId: String, tag: String?, notificationId: String?) {
-    guard NotificationAuthenticator().isValid(tag: tag, for: conversationId) else { return }
+    guard NotificationAuthenticator().isValid(tag: tag, for: Self.lobbyReminderId(conversationId)) else { return }
     if let notificationId {
       UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [notificationId])
     }
@@ -114,13 +114,15 @@ extension AppModel {
 
   /// Who could take the meeting of `conversationId` over now, read afresh: `nil` when nobody waits
   /// any more or nobody is left in the call; throws when it can't be read.
-  func lobbyHandoverChoice(conversationId: String) async throws -> (waiting: Int, candidates: [CallPerson])? {
+  func lobbyHandoverChoice(conversationId: String) async throws -> (
+    meetingTitle: String, waiting: Int, candidates: [CallPerson]
+  )? {
     guard let left = try await core().lobbyLeftWaiting(conversationId: conversationId) else { return nil }
     guard let json = try? await core().snapshot(), let people = Wire.decode(CallPeopleSnapshot.self, from: json) else {
       return nil
     }
     let candidates = Array(handoverCandidates(left.candidateUserIds, people: people).prefix(maxHandoverChoices))
-    return candidates.isEmpty ? nil : (Int(left.waiting), candidates)
+    return candidates.isEmpty ? nil : (left.meetingTitle, Int(left.waiting), candidates)
   }
 
   /// The reminder of `conversationId` is dealt with.

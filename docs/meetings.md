@@ -311,7 +311,9 @@ in the call.
 lets host it) see "Lobby" in the controls of the meeting's call with a count of who waits; nobody
 else sees it, and the server refuses everybody else's `GET /meetings/{id}/lobby`. Each row is a
 waiting person with "Admit" and "Deny"; a guest's row shows the code of their key to compare with
-the guest's screen, and "Admit" waits until the guest's page set up its device. The core does the
+the guest's screen, and "Admit" waits until that code is shown (the guest's page set up its device
+and this device pinned its key). Desktop, web and the apps share this rule
+(`LobbyAdmission::can_admit`), and the core checks it again before it admits. The core does the
 admitting (`decide_lobby_entry` in the FFI, `Client::let_in_from_lobby`), as desktop and web do: it
 reads the entry afresh (somebody another host decided on is no error), tells the server, then lets
 the person's devices into the chat's encryption on this device's own decision, a guest only with

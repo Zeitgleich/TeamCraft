@@ -9,17 +9,10 @@ import uniffi.teamcraft_ffi.MeetingLobby
 
 /** The lobby of a meeting in its call, for its hosts (#1859), as desktop and web offer it. */
 class CallLobbyTest {
-  private fun person(id: String, status: LobbyPersonStatus) = LobbyPerson(userId = id, displayName = "Person $id", status = status)
+  private fun person(id: String, status: LobbyPersonStatus) =
+    LobbyPerson(userId = id, displayName = "Person $id", status = status, canAdmit = false)
 
   private fun lobby(vararg people: LobbyPerson) = MeetingLobby(meetingId = "7", people = people.toList())
-
-  @Test
-  fun aGuestIsAdmittedOnlyOnceTheirDeviceIsSetUp() {
-    assertTrue(canAdmit(person("1", LobbyPersonStatus.Member)))
-    assertTrue(canAdmit(person("2", LobbyPersonStatus.Guest(maybeKeyCode = null))))
-    assertTrue(canAdmit(person("3", LobbyPersonStatus.Guest(maybeKeyCode = "12345 67890"))))
-    assertFalse(canAdmit(person("4", LobbyPersonStatus.GuestDevicePending)))
-  }
 
   @Test
   fun theLobbyIsReadAgainOnlyWhileAGuestsKeyCodeIsMissing() {

@@ -20209,82 +20209,66 @@
         }
       }
     },
-    "lobby_left_title %lld %@": {
+    "lobby_left_title_one %@": {
       "localizations": {
         "en": {
-          "variations": {
-            "plural": {
-              "one": {
-                "stringUnit": {
-                  "state": "translated",
-                  "value": "Somebody is still waiting in the lobby of %2$@"
-                }
-              },
-              "other": {
-                "stringUnit": {
-                  "state": "translated",
-                  "value": "People are still waiting in the lobby of %2$@"
-                }
-              }
-            }
+          "stringUnit": {
+            "state": "translated",
+            "value": "Somebody is still waiting in the lobby of %@"
           }
         },
         "de": {
-          "variations": {
-            "plural": {
-              "one": {
-                "stringUnit": {
-                  "state": "translated",
-                  "value": "In der Lobby von %2$@ wartet noch jemand"
-                }
-              },
-              "other": {
-                "stringUnit": {
-                  "state": "translated",
-                  "value": "In der Lobby von %2$@ warten noch Personen"
-                }
-              }
-            }
+          "stringUnit": {
+            "state": "translated",
+            "value": "In der Lobby von %@ wartet noch jemand"
           }
         }
       }
     },
-    "lobby_left_title_unnamed %lld": {
+    "lobby_left_title_other %@": {
       "localizations": {
         "en": {
-          "variations": {
-            "plural": {
-              "one": {
-                "stringUnit": {
-                  "state": "translated",
-                  "value": "Somebody is still waiting in the lobby"
-                }
-              },
-              "other": {
-                "stringUnit": {
-                  "state": "translated",
-                  "value": "People are still waiting in the lobby"
-                }
-              }
-            }
+          "stringUnit": {
+            "state": "translated",
+            "value": "People are still waiting in the lobby of %@"
           }
         },
         "de": {
-          "variations": {
-            "plural": {
-              "one": {
-                "stringUnit": {
-                  "state": "translated",
-                  "value": "In der Lobby wartet noch jemand"
-                }
-              },
-              "other": {
-                "stringUnit": {
-                  "state": "translated",
-                  "value": "In der Lobby warten noch Personen"
-                }
-              }
-            }
+          "stringUnit": {
+            "state": "translated",
+            "value": "In der Lobby von %@ warten noch Personen"
+          }
+        }
+      }
+    },
+    "lobby_left_title_unnamed_one": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Somebody is still waiting in the lobby"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In der Lobby wartet noch jemand"
+          }
+        }
+      }
+    },
+    "lobby_left_title_unnamed_other": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "People are still waiting in the lobby"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In der Lobby warten noch Personen"
           }
         }
       }

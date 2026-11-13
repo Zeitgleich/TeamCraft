@@ -242,10 +242,11 @@ pub fn Lobby(meeting: MeetingId) -> impl IntoView {
               .map(|entry| {
                 let name = entry.user.display_name.clone();
                 // A guest's device is let in once their page set it up and reported its key's
-                // fingerprint; the host may compare the key code with the guest's screen first
-                // (e2ee.md §4.6, "Meeting guests").
+                // fingerprint, and only after the key code is shown, for the host to compare with
+                // the guest's screen (e2ee.md §4.6, "Meeting guests"; the rule all clients share).
                 let is_guest = entry.user.kind == teamcraft_proto::UserKind::Guest;
-                let is_guest_unproven = !LobbyAdmission::of(&entry).can_admit();
+                let admission = LobbyAdmission::of(&entry);
+                let is_guest_unproven = !admission.has_device_to_add();
                 let guest_id = entry.user.id;
                 if is_guest && !is_guest_unproven {
                   prepare_key_code(state, hub, guest_id);
@@ -268,7 +269,9 @@ pub fn Lobby(meeting: MeetingId) -> impl IntoView {
                     })}
                     <button
                       class="btn btn-primary"
-                      prop:disabled=is_guest_unproven
+                      prop:disabled=move || {
+                        !admission.can_admit(hub.key_codes.with(|codes| codes.contains_key(&guest_id)))
+                      }
                       on:click=move |_| decide(&admit_entry, true)
                     >
                       {move || i18n.t("meetings-admit")}
@@ -488,7 +491,10 @@ fn let_in(state: AppState, chat: ConversationId, user: UserId, admission: LobbyA
 /// "no lobby" on this device (`is_open_by_own_record`; the server's `has_lobby` counts for nothing)
 /// and the person came with the meeting link, with a device whose key they reported.
 pub fn admits_by_itself(is_open_by_own_record: bool, entry: &LobbyEntry) -> bool {
-  is_open_by_own_record && entry.is_by_link && entry.has_device && LobbyAdmission::of(entry).can_admit()
+  is_open_by_own_record
+    && entry.is_by_link
+    && entry.has_device
+    && LobbyAdmission::of(entry).has_device_to_add()
 }
 
 /// In a meeting the organizer opened without a lobby, the organizer's device lets in by itself

@@ -150,6 +150,3 @@ internal fun isWaitingForKeyCode(lobby: MeetingLobby): Boolean =
     val status = person.status
     status is LobbyPersonStatus.Guest && status.maybeKeyCode == null
   }
-
-/** Whether "Admit" can be offered for `person`: everybody but a guest whose device isn't set up. */
-internal fun canAdmit(person: LobbyPerson): Boolean = person.status !is LobbyPersonStatus.GuestDevicePending

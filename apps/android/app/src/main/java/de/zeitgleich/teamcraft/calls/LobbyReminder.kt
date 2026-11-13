@@ -3,6 +3,7 @@ package de.zeitgleich.teamcraft.calls
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.util.Log
 import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.core.CoreRepository
@@ -18,6 +19,9 @@ import uniffi.teamcraft_ffi.TeamCraftException
  */
 internal object LobbyReminder {
   private const val TAG = "TeamCraftCalls"
+
+  /** The scheme of the reminder intent's data: only this app's explicit intent carries it. */
+  private const val LOBBY_LEFT_SCHEME = "teamcraft-lobby-left"
 
   /** Leaving never waits on this; a slow network just means no reminder. */
   private const val CHECK_TIMEOUT_MILLIS = 15_000L
@@ -40,11 +44,17 @@ internal object LobbyReminder {
     )
   }
 
+  /**
+   * The reminder's intent. Its data names the meeting chat, so the system keeps one intent per
+   * meeting (intents differing in data are different, whatever the request code): a second
+   * meeting's reminder never replaces the first's extras, also across process restarts.
+   */
   private fun handOverIntent(context: Context, conversationId: String): PendingIntent =
     PendingIntent.getActivity(
       context,
-      conversationId.hashCode(),
+      0,
       Intent(context, HandoverActivity::class.java)
+        .setData(Uri.fromParts(LOBBY_LEFT_SCHEME, conversationId, null))
         .putExtra(HandoverActivity.EXTRA_CONVERSATION_ID, conversationId)
         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
       PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,

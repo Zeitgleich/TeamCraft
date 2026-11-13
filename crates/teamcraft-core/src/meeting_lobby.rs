@@ -35,9 +35,22 @@ impl LobbyAdmission {
     }
   }
 
-  /// Whether a host can admit the entry now.
-  pub fn can_admit(&self) -> bool {
+  /// Whether there is anything to add: everybody but a guest whose device isn't set up. Enough for
+  /// the organizer's own "no lobby" admission of link arrivals, which asks nobody.
+  pub fn has_device_to_add(&self) -> bool {
     !matches!(self, Self::GuestDevicePending)
+  }
+
+  /// Whether a host's "Admit" can be offered: a member at once, a guest only once the key code of
+  /// the key this device pinned for them is shown (`has_shown_key_code`), so the host can compare
+  /// it with the guest's screen first. That comparison is the only defence against a guest the
+  /// server made up with its own key (e2ee.md §4.6). Every client's lobby reads this one rule.
+  pub fn can_admit(&self, has_shown_key_code: bool) -> bool {
+    match self {
+      Self::Member => true,
+      Self::Guest { .. } => has_shown_key_code,
+      Self::GuestDevicePending => false,
+    }
   }
 }
 
@@ -55,7 +68,7 @@ mod tests {
     );
     let without_key = LobbyAdmission::of(&entry(UserKind::Guest, true, None));
     assert_eq!(without_key, LobbyAdmission::GuestDevicePending);
-    assert!(!without_key.can_admit());
+    assert!(!without_key.has_device_to_add());
     assert_eq!(
       LobbyAdmission::of(&entry(UserKind::Guest, false, Some("ab"))),
       LobbyAdmission::GuestDevicePending
@@ -66,7 +79,18 @@ mod tests {
   fn a_member_is_admitted_as_a_member_whatever_the_entry_says_of_keys() {
     let member = LobbyAdmission::of(&entry(UserKind::Member, false, Some("ab")));
     assert_eq!(member, LobbyAdmission::Member);
-    assert!(member.can_admit());
+    assert!(member.has_device_to_add());
+    assert!(member.can_admit(false), "members show no key code");
+  }
+
+  #[test]
+  fn a_guest_is_admitted_only_once_the_key_code_is_shown() {
+    let guest = LobbyAdmission::of(&entry(UserKind::Guest, true, Some("ab")));
+    assert!(guest.has_device_to_add());
+    assert!(!guest.can_admit(false), "the host hasn't seen the code yet");
+    assert!(guest.can_admit(true));
+    let pending = LobbyAdmission::of(&entry(UserKind::Guest, false, None));
+    assert!(!pending.can_admit(true), "nothing to add without a device");
   }
 
   fn entry(kind: UserKind, has_device: bool, maybe_fingerprint: Option<&str>) -> LobbyEntry {

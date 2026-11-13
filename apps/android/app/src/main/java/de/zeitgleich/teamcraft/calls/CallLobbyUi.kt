@@ -68,7 +68,7 @@ internal fun LobbyBanner(lobby: MeetingLobby?, onOpen: () -> Unit) {
 /**
  * The lobby of the call's meeting (#1859), as desktop and web show it: each waiting person with
  * "Admit" and "Deny". A guest's row shows the code of their key to compare with the guest's
- * screen; "Admit" waits until the guest's page set up its device.
+ * screen; "Admit" waits until that code is shown (the core's rule, `LobbyPerson.canAdmit`).
  */
 @Composable
 internal fun LobbyDialog(
@@ -140,7 +140,7 @@ private fun LobbyRow(person: LobbyPerson, isDeciding: Boolean, isEnabled: Boolea
       LobbyPersonStatus.Member -> Unit
     }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-      Button(onClick = { onDecide(LobbyDecision.ADMIT) }, enabled = isEnabled && canAdmit(person)) {
+      Button(onClick = { onDecide(LobbyDecision.ADMIT) }, enabled = isEnabled && person.canAdmit) {
         Text(stringResource(R.string.call_lobby_admit))
       }
       OutlinedButton(onClick = { onDecide(LobbyDecision.DENY) }, enabled = isEnabled) {

@@ -2,7 +2,7 @@ import SwiftUI
 
 /// The lobby of the call's meeting (#1859), as desktop and web show it: each waiting person with
 /// "Admit" and "Deny". A guest's row shows the code of their key to compare with the guest's
-/// screen; "Admit" waits until the guest's page set up its device.
+/// screen; "Admit" waits until that code is shown (the core's rule, `LobbyPerson.canAdmit`).
 struct CallLobbySheet: View {
   @Environment(AppModel.self) private var model
   @Environment(\.dismiss) private var dismiss
@@ -61,7 +61,7 @@ struct CallLobbySheet: View {
       HStack(spacing: 8) {
         Button("call_lobby_admit") { decide(person, .admit) }
           .buttonStyle(.borderedProminent)
-          .disabled(isBusy || !canAdmit(person))
+          .disabled(isBusy || !person.canAdmit)
         Button("call_lobby_deny") { decide(person, .deny) }
           .buttonStyle(.bordered)
           .disabled(isBusy)
@@ -130,10 +130,15 @@ struct LobbyHandoverSheet: View {
   }
 
   @State private var step = Step.loading
+  /// Which meeting it is, kept through saving and a failure.
+  @State private var meetingTitle = ""
 
   var body: some View {
     NavigationStack {
       List {
+        if !meetingTitle.isEmpty {
+          Text(verbatim: meetingTitle).font(.app(.headline)).lineLimit(2)
+        }
         switch step {
         case .loading:
           HStack(spacing: 8) {
@@ -180,6 +185,7 @@ struct LobbyHandoverSheet: View {
   private func load() async {
     do {
       if let choice = try await model.lobbyHandoverChoice(conversationId: request.conversationId) {
+        meetingTitle = choice.meetingTitle
         step = .choose(waiting: choice.waiting, candidates: choice.candidates)
       } else {
         step = .nothing

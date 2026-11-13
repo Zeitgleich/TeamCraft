@@ -94,7 +94,8 @@ private sealed interface HandoverStep {
   /** Nobody waits any more, or nobody is left to take the meeting. */
   data object Nothing : HandoverStep
 
-  data class Choose(val waiting: Int, val candidates: List<User>) : HandoverStep
+  /** [meetingTitle]: which meeting it is, shown above the choice (blank if it has none). */
+  data class Choose(val meetingTitle: String, val waiting: Int, val candidates: List<User>) : HandoverStep
 
   /** The core couldn't read it (offline): said, not shown as "nothing to do". */
   data object Unreadable : HandoverStep
@@ -108,8 +109,14 @@ private sealed interface HandoverStep {
 @Composable
 private fun HandoverChoice(core: CoreRepository, conversationId: String, onDone: (String?) -> Unit) {
   var step by remember { mutableStateOf<HandoverStep>(HandoverStep.Loading) }
+  // Kept through saving and a failure, so the dialog always says which meeting it hands over.
+  var meetingTitle by remember { mutableStateOf("") }
   val scope = rememberCoroutineScope()
-  LaunchedEffect(conversationId) { step = loadChoice(core, conversationId) }
+  LaunchedEffect(conversationId) {
+    val loaded = loadChoice(core, conversationId)
+    if (loaded is HandoverStep.Choose) meetingTitle = loaded.meetingTitle
+    step = loaded
+  }
   val handOver = { user: User ->
     step = HandoverStep.Saving(user)
     scope.launch {
@@ -128,6 +135,9 @@ private fun HandoverChoice(core: CoreRepository, conversationId: String, onDone:
     title = { Text(stringResource(R.string.call_hosts_leave_title)) },
     text = {
       Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (meetingTitle.isNotBlank()) {
+          Text(meetingTitle, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
         when (val shown = step) {
           HandoverStep.Loading -> Busy(stringResource(R.string.lobby_left_checking))
           HandoverStep.Nothing -> Text(stringResource(R.string.lobby_left_nothing))
@@ -179,7 +189,7 @@ private suspend fun loadChoice(core: CoreRepository, conversationId: String): Ha
       val left = core.core().lobbyLeftWaiting(conversationId) ?: return@withContext HandoverStep.Nothing
       val snapshot = ChatClient { core.core() }.snapshot()
       val candidates = left.candidateUserIds.mapNotNull { snapshot.user(it) }.take(MAX_HANDOVER_CHOICES)
-      if (candidates.isEmpty()) HandoverStep.Nothing else HandoverStep.Choose(left.waiting.toInt(), candidates)
+      if (candidates.isEmpty()) HandoverStep.Nothing else HandoverStep.Choose(left.meetingTitle, left.waiting.toInt(), candidates)
     }
   } catch (error: TeamCraftException) {
     Log.w(TAG, "could not read whom to hand the meeting to", error)
