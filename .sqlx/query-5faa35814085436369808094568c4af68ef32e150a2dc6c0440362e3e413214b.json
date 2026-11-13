@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT count(*) AS \"count!\" FROM role_evidence WHERE for_account",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "5faa35814085436369808094568c4af68ef32e150a2dc6c0440362e3e413214b"
+}

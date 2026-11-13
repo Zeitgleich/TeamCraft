@@ -327,6 +327,16 @@ pub struct ClientSettings {
   pub role_report_interval: std::time::Duration,
   /// How long role signing waits after a failed round; doubles up to 64 times this.
   pub role_signing_retry: std::time::Duration,
+  /// An owner's app signs a roster only to note accounts of people not on it (issue #1378) once this
+  /// many wait, or one has waited `member_account_wait`: every roster carries every mark.
+  pub member_account_batch: usize,
+  /// How long, by the provider's clock, a member's account waits at most for a batch.
+  pub member_account_wait: std::time::Duration,
+  /// Accounts of people not on the roster noted in one roster at most; the rest follow in the next.
+  pub member_accounts_per_roster: usize,
+  /// Marks a roster carries at most (every person's account and floor). Past it nobody else's account
+  /// is noted and their keys stay pinned on first use; sized to the server's limit for a roster.
+  pub max_provider_marks: usize,
   /// How long before `workspace_max_age` runs out the admin console warns that no owner signed.
   pub workspace_expiry_warning: std::time::Duration,
   /// The identity provider that attests identity keys; `None`: the one the owners pinned in the
@@ -601,6 +611,10 @@ impl Default for ClientSettings {
       role_report_grace: std::time::Duration::from_secs(7 * 24 * 60 * 60),
       role_report_interval: std::time::Duration::from_secs(7 * 24 * 60 * 60),
       role_signing_retry: std::time::Duration::from_secs(60),
+      member_account_batch: 50,
+      member_account_wait: std::time::Duration::from_secs(24 * 60 * 60),
+      member_accounts_per_roster: 200,
+      max_provider_marks: 8_000,
       workspace_expiry_warning: std::time::Duration::from_secs(7 * 24 * 60 * 60),
       maybe_attestation: None,
       attestation_recheck: std::time::Duration::from_secs(24 * 60 * 60),

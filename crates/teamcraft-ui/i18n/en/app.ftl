@@ -299,6 +299,7 @@ admin-integrations-copy = Copy
 announcement-dismiss = Dismiss the announcement
 roster-signing-contradictory = What the identity provider or the server says about { $names } doesn't match the roster. Check their role at the provider and, if needed, change it by hand under Security.
 roster-signing-provider-changed = This app's sign-in comes from another identity provider than the workspace trusts, so roles aren't changed by themselves. Check it under Security.
+roster-signing-account-mismatch = The owners signed another identity provider account for you than the one you sign in with, so colleagues' apps can't confirm your key. Ask an owner to correct it.
 roster-standing-expired-ask = No owner signed the admin roster within 30 days, so admin rights are paused on every app. An owner ({ $owners }) only needs to open TeamCraft on a device with their keys.
 roster-standing-expired-ask-unnamed = No owner signed the admin roster within 30 days, so admin rights are paused on every app. An owner only needs to open TeamCraft on a device with their keys.
 roster-standing-open = Open owners

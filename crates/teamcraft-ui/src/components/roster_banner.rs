@@ -71,7 +71,18 @@ fn banner_line(i18n: I18n, state: AppState) -> Option<(String, bool)> {
   }
   // The owner's lines first: the server alone can raise the next one by showing a fork, and it must
   // not be able to hide these with it.
-  owner_line(i18n, state).or_else(|| role_alarm_line(i18n, state).map(|line| (line, false)))
+  owner_line(i18n, state)
+    .or_else(|| account_line(i18n, state).map(|line| (line, false)))
+    .or_else(|| role_alarm_line(i18n, state).map(|line| (line, false)))
+}
+
+/// What everybody hears about themselves: the owners signed another identity provider account for them
+/// than the one they sign in with (issue #1378), so colleagues can't confirm their key.
+fn account_line(i18n: I18n, state: AppState) -> Option<String> {
+  let status = state.read(|backend| backend.owner_roster())?;
+  status
+    .is_own_account_mismatched
+    .then(|| i18n.t("roster-signing-account-mismatch"))
 }
 
 /// What only an owner can do something about.

@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "(SELECT evidence.user_id AS \"user_id!\", evidence.token AS \"token!\", keys.public_key AS \"public_key!\"\n          FROM role_evidence evidence\n          JOIN identity_keys keys ON keys.user_id = evidence.user_id AND keys.revoked_at IS NULL\n          WHERE NOT evidence.for_account\n          ORDER BY evidence.updated_at DESC LIMIT $1)\n         UNION ALL\n         (SELECT evidence.user_id, evidence.token, keys.public_key\n          FROM role_evidence evidence\n          JOIN identity_keys keys ON keys.user_id = evidence.user_id AND keys.revoked_at IS NULL\n          WHERE evidence.for_account\n          ORDER BY evidence.updated_at ASC LIMIT $2)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "token!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "public_key!",
+        "type_info": "Bytea",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "bf15f3766344ee5c69c026fa15169d5db9f0eee75d8b5a8d36fad5c9d2de2705"
+}

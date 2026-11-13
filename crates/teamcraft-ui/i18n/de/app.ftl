@@ -299,6 +299,7 @@ admin-integrations-copy = Kopieren
 announcement-dismiss = Ankündigung schließen
 roster-signing-contradictory = Was der Identity Provider oder der Server über { $names } sagt, passt nicht zur Admin-Liste. Prüfe die Rolle beim Provider und ändere sie bei Bedarf unter Sicherheit von Hand.
 roster-signing-provider-changed = Die Anmeldung dieser App kommt von einem anderen Identity Provider als dem, dem der Workspace vertraut, daher ändern sich Rollen nicht von selbst. Prüfe das unter Sicherheit.
+roster-signing-account-mismatch = Die Eigentümer haben für dich ein anderes Konto beim Identity Provider signiert als das, mit dem du dich anmeldest, daher können die Apps deiner Kollegen deinen Schlüssel nicht bestätigen. Bitte einen Eigentümer, das zu korrigieren.
 roster-standing-expired-ask = Seit 30 Tagen hat kein Eigentümer die Admin-Liste signiert, daher ruhen die Admin-Rechte in allen Apps. Ein Eigentümer ({ $owners }) muss nur TeamCraft auf einem Gerät mit seinen Schlüsseln öffnen.
 roster-standing-expired-ask-unnamed = Seit 30 Tagen hat kein Eigentümer die Admin-Liste signiert, daher ruhen die Admin-Rechte in allen Apps. Ein Eigentümer muss nur TeamCraft auf einem Gerät mit seinen Schlüsseln öffnen.
 roster-standing-open = Eigentümer öffnen

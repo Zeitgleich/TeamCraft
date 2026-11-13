@@ -88,6 +88,9 @@ pub struct UnverifiedClaims {
   pub maybe_authorized_party: Option<String>,
   pub maybe_issued_at: Option<i64>,
   pub maybe_key_claim: Option<String>,
+  /// The account at the provider (`sub`): for a token this device got itself, to compare with the
+  /// account the owners signed for its user (e2ee.md §3.1).
+  pub maybe_subject: Option<String>,
   /// The client roles (`resource_access.<client>.roles`), whatever the signed policy names: for what
   /// it says, [`unverified_roles`].
   pub maybe_roles: Option<Vec<String>>,
@@ -230,6 +233,7 @@ pub fn unverified_claims(token: &str) -> Result<UnverifiedClaims, AttestationErr
     maybe_authorized_party,
     maybe_issued_at: claims.get("iat").and_then(Value::as_i64),
     maybe_key_claim: key_claim(&claims).map(str::to_string),
+    maybe_subject: claims.get("sub").and_then(Value::as_str).map(str::to_string),
     maybe_roles,
   })
 }

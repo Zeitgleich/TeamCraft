@@ -399,6 +399,10 @@ pub struct OwnerRosterStatus {
   /// The signed policy has owners sign every change by hand (e2ee.md §3.1.3).
   #[serde(default)]
   pub is_signing_manual: bool,
+  /// The owners signed another account at the identity provider for this user than the one they sign in
+  /// with (issue #1378): colleagues can't confirm their key until an owner corrects it.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_own_account_mismatched: bool,
   /// What keeps roles from following the identity provider by themselves, if anything.
   #[serde(rename = "signing_problem", default, skip_serializing_if = "Option::is_none")]
   pub maybe_signing_problem: Option<RoleSigningIssue>,
@@ -1066,6 +1070,7 @@ mod tests {
         unverifiable_owners: Vec::new(),
         is_signing_manual: false,
         maybe_signing_problem: None,
+        is_own_account_mismatched: false,
       };
       assert_eq!(
         roster_changes(&signed_roster(&status), &proposed),
@@ -1189,6 +1194,7 @@ mod tests {
           warning_lead_ms: 0,
           is_signing_manual: false,
           maybe_signing_problem: None,
+          is_own_account_mismatched: false,
         }
       }
     }
@@ -1244,6 +1250,7 @@ mod tests {
         warning_lead_ms: 0,
         is_signing_manual: false,
         maybe_signing_problem: None,
+        is_own_account_mismatched: false,
       };
       let signed = signed_roster(&status);
       assert_eq!(signed, vec![owner(1), owner(2), admin(3)]);
@@ -1408,6 +1415,7 @@ mod tests {
         warning_lead_ms: 7 * DAY_MS,
         is_signing_manual: false,
         maybe_signing_problem: None,
+        is_own_account_mismatched: false,
       }
     }
   }
