@@ -2785,7 +2785,7 @@ the chunks that load later. The limit:
 | Limit                                | Value        | Above it                         |
 |--------------------------------------|--------------|----------------------------------|
 | A guest in a meeting: gzip -9 total  | 6,370,000 B  | fails; warns from 95 % (6.05 MB) |
-| Signed-in first visit: gzip -9 total | 5,590,000 B  | fails; warns from 95 % (5.31 MB) |
+| Signed-in first visit: gzip -9 total | 5,600,000 B  | fails; warns from 95 % (5.32 MB) |
 | The call module: gzip -9             | 1,100,000 B  | fails                            |
 
 Both budgets are the sizes of #1699 below plus about 5 %, lowered on 2026-11-13 by what #1462 took
@@ -2852,7 +2852,9 @@ than the app loses: some of what left the app went into the chunks the meeting's
 Measured before the upkeep's member rounds (below) were on `main`, on `main` 85f21dab with this
 change; they move other code, and the two add up.
 
-Both budgets are lowered by these gains (above): 6,370,000 and 5,590,000 B.
+Both budgets are lowered by these gains (above): 6,370,000 and 5,590,000 B. The signed-in one went
+up to 5,600,000 B the same day: the lobby's signed-roster checks (#1873) add about 4.5 kB gzip to
+the signed-in app, a security fix that left it 1.7 kB over the ceiling #1462 had just set at its size.
 
 Measured and left (#1909):
 
