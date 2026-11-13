@@ -9,9 +9,10 @@
 
 use serde::{Deserialize, Serialize};
 use teamcraft_crypto::channel_anchor::{
-  AnchorExpectation, AnchorFloor, AnchorHash, ChannelAnchor, DEFAULT_MAX_ANCHOR_BYTES, ExpectedKind,
-  FloorError, VerifiedAnchor, name_hash,
+  AnchorError, AnchorExpectation, AnchorFloor, AnchorHash, AnchorKind, AnchorOrigin, ChannelAnchor,
+  DEFAULT_MAX_ANCHOR_BYTES, ExpectedKind, FloorError, VerifiedAnchor, name_hash,
 };
+use teamcraft_crypto::ids::{MeetingId, UserId};
 use teamcraft_crypto::mls::MlsError;
 use teamcraft_proto::channel_name::keeps_channel_name_rules;
 
@@ -29,6 +30,27 @@ pub struct ReleaseVersion {
   pub major: u64,
   pub minor: u64,
   pub patch: u64,
+}
+
+/// What a meeting chat's anchor must name (D10): the meeting and the organizer as founder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MeetingExpectation {
+  pub meeting_id: MeetingId,
+  pub organizer: UserId,
+}
+
+/// What this device can expect of a conversation's anchor when it enters the group, by the
+/// server's answer for the conversation (D10, #1747).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MeetingCheck {
+  /// Not a meeting chat: its anchor must be a channel's.
+  NotAMeeting,
+  /// A meeting chat whose meeting and organizer are known: the anchor must name them.
+  Expect(MeetingExpectation),
+  /// A meeting chat whose organizer (or, without a meeting anchor, whose meeting) the server
+  /// doesn't name: the anchor can't vouch for itself, so it grants nothing and nothing is pinned;
+  /// a pin already held still holds.
+  Unknown,
 }
 
 /// What a group state says about its anchor, before the pin and the floor.
@@ -116,20 +138,81 @@ impl ParsedAnchor {
   }
 }
 
-/// What an anchor of a conversation must name, or `None` to judge it as before anchors. Decided on
-/// what this device holds, never on the server's kind for the conversation: a group that carries an
-/// anchor, or a conversation the user's devices pinned, is checked as a channel (the only kind
-/// anchored so far; meeting chats follow with #1747). A server that relists a pinned channel as a
-/// DM, or a welcome that comes before the conversation's record, can't skip the check.
+/// What an anchor of a conversation must name, or `None` to judge it as before anchors. Whether to
+/// check is decided on what this device holds, never on the server's kind for the conversation: a
+/// group that carries an anchor, or a conversation the user's devices pinned, is checked. A server
+/// that relists a pinned channel as a DM, or a welcome that comes before the conversation's
+/// record, can't skip the check. With `maybe_meeting` the anchor must be the meeting chat's (D10,
+/// #1747), else a channel's.
 pub fn anchor_expectation(
   conversation_id: teamcraft_crypto::ids::ConversationId,
   is_pinned: bool,
   carries_anchor: bool,
+  maybe_meeting: Option<MeetingExpectation>,
 ) -> Option<AnchorExpectation> {
+  let kind = maybe_meeting.map_or(ExpectedKind::Channel, |meeting| ExpectedKind::MeetingChat {
+    meeting_id: meeting.meeting_id,
+    organizer: meeting.organizer,
+  });
   (is_pinned || carries_anchor).then_some(AnchorExpectation {
     conversation_id,
-    kind: ExpectedKind::Channel,
+    kind,
   })
+}
+
+/// The meeting and founder a meeting chat's anchor names about itself, unverified; `None` for
+/// another kind or an anchor that doesn't parse. For a group state the device already holds (a
+/// commit inside it): the founding can't change there, and was checked against the server's
+/// meeting and organizer when the device entered.
+pub fn meeting_named_by(bytes: &[u8]) -> Option<MeetingExpectation> {
+  let anchor = ChannelAnchor::from_bytes(bytes, DEFAULT_MAX_ANCHOR_BYTES).ok()?;
+  let founding = anchor.founding();
+  match (founding.kind, founding.origin) {
+    (AnchorKind::MeetingChat { meeting_id }, AnchorOrigin::Founded { founder_user_id, .. }) => {
+      Some(MeetingExpectation {
+        meeting_id,
+        organizer: founder_user_id,
+      })
+    },
+    _ => None,
+  }
+}
+
+/// Check 6 for a meeting chat whose meeting or organizer the server doesn't name
+/// ([`MeetingCheck::Unknown`]): the anchor isn't checked against itself, so it pins nothing; a pin
+/// the user's devices hold is still held to the floor on the anchor's own unverified word.
+pub fn judge_unknown_meeting(
+  maybe_floor: Option<&AnchorFloor>,
+  maybe_bytes: Option<&[u8]>,
+  epoch: u64,
+) -> AnchorVerdict {
+  let Some(floor) = maybe_floor else {
+    return AnchorVerdict::Unanchored;
+  };
+  let outcome = match maybe_bytes {
+    None => AnchorOutcome::Absent,
+    Some(bytes) => AnchorOutcome::Unverified {
+      maybe_parsed: ParsedAnchor::of(bytes),
+    },
+  };
+  judge_entering(Some(floor), &outcome, epoch)
+}
+
+/// D10: whether a meeting chat's group state is refused for what its anchor names, pin or not. An
+/// anchor of another meeting or conversation, or one whose founder isn't the organizer, is a copy
+/// or a forgery: no honest device makes one. Anything else that doesn't verify (a device list not
+/// fetched, which a server can cause) grants nothing, as for channels.
+pub fn refuses_meeting_anchor(
+  expected: &AnchorExpectation,
+  result: &Result<Option<VerifiedAnchor>, MlsError>,
+) -> bool {
+  matches!(expected.kind, ExpectedKind::MeetingChat { .. })
+    && matches!(
+      result,
+      Err(MlsError::Anchor(
+        AnchorError::WrongKind | AnchorError::NotTheOrganizer | AnchorError::WrongConversation { .. }
+      ))
+    )
 }
 
 /// Whether this device founds a new channel anchored: once the highest `minimum_client_version`

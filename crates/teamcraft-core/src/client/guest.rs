@@ -738,9 +738,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     now_ms: i64,
   ) -> Result<Option<VerifiedMeetingAdmitters>, CoreError> {
-    let Some(organizer) = self.api.conversation(conversation).await?.maybe_organizer_user_id else {
+    let Some(named) = self.api.conversation(conversation).await?.maybe_organizer_user_id else {
       return Ok(None);
     };
+    let organizer = self.trusted_organizer(conversation, named).await?;
     let directory = self.pin_identities([organizer]).await?;
     let organizer_key = directory
       .pinned_identity(convert::user(organizer))
@@ -748,6 +749,44 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self
       .verified_admitters(conversation, None, &organizer_key.fingerprint(), now_ms)
       .await
+  }
+
+  /// Whose key the meeting chat's admitters must carry: the organizer the server names, unless
+  /// this device knows who organizes the meeting otherwise (#1747): the founder of the meeting
+  /// chat's anchor it pinned, or this user while it holds a choice of the organizer's not signed
+  /// yet. Then the server's organizer counts only if the signed host lists hand the meeting from
+  /// that founder to it (#1720); a server that names somebody else, with an insider's statement,
+  /// gets nothing.
+  async fn trusted_organizer(
+    &mut self,
+    conversation: ConversationId,
+    named: UserId,
+  ) -> Result<UserId, CoreError> {
+    let has_own_choice = records::get_json::<ChosenInvitees>(
+      &self.store,
+      Table::SyncState,
+      &format!("{CHOSEN_INVITEES_PREFIX}{conversation}"),
+    )?
+    .is_some();
+    let maybe_founder = match self.pinned_meeting_founder(conversation)? {
+      Some(founder) => Some(founder),
+      None => has_own_choice.then_some(self.account.user_id),
+    };
+    let Some(founder) = maybe_founder.filter(|founder| *founder != named) else {
+      return Ok(named);
+    };
+    let directory = self.pin_identities([founder]).await?;
+    let Some(founder_key) = directory.pinned_identity(convert::user(founder)) else {
+      return Ok(founder);
+    };
+    if self
+      .is_handed_over_from(conversation, &founder_key, named)
+      .await?
+    {
+      return Ok(named);
+    }
+    tracing::warn!(conversation_id = %conversation, "the server names another organizer than the meeting's, without a signed handover; its word is ignored");
+    Ok(founder)
   }
 
   /// The server's newest admitters of the meeting chat, verified against `organizer`, the chat

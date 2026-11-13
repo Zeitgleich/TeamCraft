@@ -9,7 +9,7 @@ use teamcraft_crypto::channel_anchor::{
 use teamcraft_crypto::identity::{
   DeviceKeyPair, IdentityKeyPair, IdentityPublicKey, SignedDeviceCertificate, VerifiedDevice,
 };
-use teamcraft_crypto::ids::{ConversationId, DeviceId, SpaceId, UserId};
+use teamcraft_crypto::ids::{ConversationId, DeviceId, MeetingId, SpaceId, UserId};
 use teamcraft_crypto::membership::{IdentityDirectory, MembershipAction, MembershipAuthority};
 
 use super::*;
@@ -18,6 +18,7 @@ const CONVERSATION: ConversationId = ConversationId::new(40);
 const SPACE: SpaceId = SpaceId::new(5);
 const FOUNDER: u64 = 1;
 const MEMBER: u64 = 2;
+const MEETING: MeetingId = MeetingId::new(70);
 
 mod releases {
   use super::*;
@@ -97,14 +98,14 @@ mod entering {
     let world = World::new();
     let floor = world.floor("general", 9);
     assert_eq!(
-      anchor_expectation(CONVERSATION, false, false),
+      anchor_expectation(CONVERSATION, false, false, None),
       None,
       "nothing pinned or carried"
     );
-    let expected = anchor_expectation(CONVERSATION, true, false).expect("pinned: checked");
+    let expected = anchor_expectation(CONVERSATION, true, false, None).expect("pinned: checked");
     assert_eq!(expected.kind, ExpectedKind::Channel);
     assert!(
-      anchor_expectation(CONVERSATION, false, true).is_some(),
+      anchor_expectation(CONVERSATION, false, true, None).is_some(),
       "carried: checked"
     );
     assert_eq!(
@@ -392,6 +393,135 @@ mod role_founders {
   }
 }
 
+/// Meeting chats (D10, #1747): the anchor names the meeting and the organizer as founder.
+mod meeting_chats {
+  use super::*;
+
+  #[test]
+  fn an_organizers_anchor_is_verified_and_pinned_by_an_invitee() {
+    let world = World::new();
+    let anchor = world.found_meeting(&world.founder, MEETING, CONVERSATION);
+    let expected = meeting_expectation(CONVERSATION, MEETING, FOUNDER);
+    let result = world.check(&anchor, &expected);
+    assert!(!refuses_meeting_anchor(&expected, &result));
+    let outcome = AnchorOutcome::of(result, None);
+    assert!(matches!(
+      judge_entering(None, &outcome, 1),
+      AnchorVerdict::Record(_)
+    ));
+    assert_eq!(
+      meeting_named_by(&anchor.to_bytes().unwrap()),
+      Some(MeetingExpectation {
+        meeting_id: MEETING,
+        organizer: UserId::new(FOUNDER),
+      })
+    );
+  }
+
+  #[test]
+  fn a_meeting_anchor_copied_into_another_meetings_chat_is_refused() {
+    let world = World::new();
+    let anchor = world.found_meeting(&world.founder, MEETING, CONVERSATION);
+    // Another chat of the same organizer: the conversation differs.
+    let other_chat = meeting_expectation(ConversationId::new(41), MeetingId::new(71), FOUNDER);
+    assert!(refuses_meeting_anchor(
+      &other_chat,
+      &world.check(&anchor, &other_chat)
+    ));
+    // The same chat, but the server names another meeting for it.
+    let other_meeting = meeting_expectation(CONVERSATION, MeetingId::new(71), FOUNDER);
+    assert!(refuses_meeting_anchor(
+      &other_meeting,
+      &world.check(&anchor, &other_meeting)
+    ));
+  }
+
+  #[test]
+  fn an_invitee_who_signs_the_anchor_himself_is_refused() {
+    let world = World::new();
+    // The invitee placed the organizer's key package at leaf 0, but the anchor is his signature.
+    let anchor = world.found_meeting(&world.member, MEETING, CONVERSATION);
+    let expected = meeting_expectation(CONVERSATION, MEETING, FOUNDER);
+    let result = world.check(&anchor, &expected);
+    assert!(matches!(
+      result,
+      Err(MlsError::Anchor(AnchorError::NotTheOrganizer))
+    ));
+    assert!(refuses_meeting_anchor(&expected, &result));
+  }
+
+  #[test]
+  fn a_channel_anchor_that_doesnt_verify_still_only_grants_nothing() {
+    let world = World::new();
+    let anchor = world.found_meeting(&world.founder, MEETING, CONVERSATION);
+    let as_channel = anchor_expectation(CONVERSATION, false, true, None).unwrap();
+    let result = world.check(&anchor, &as_channel);
+    assert!(result.is_err(), "a meeting anchor isn't a channel's");
+    assert!(!refuses_meeting_anchor(&as_channel, &result));
+  }
+
+  /// The server names no organizer: the anchor can't vouch for itself, so nothing is pinned, and
+  /// a pin already held still holds.
+  #[test]
+  fn without_the_servers_organizer_a_meeting_anchor_pins_nothing() {
+    let world = World::new();
+    let anchor = world.found_meeting(&world.member, MEETING, CONVERSATION);
+    let bytes = anchor.to_bytes().unwrap();
+    assert_eq!(
+      judge_unknown_meeting(None, Some(&bytes), 1),
+      AnchorVerdict::Unanchored
+    );
+    let pinned = world.floor("general", 3);
+    assert_eq!(
+      judge_unknown_meeting(Some(&pinned), Some(&bytes), 4),
+      AnchorVerdict::Refuse(FloorError::OtherFounding),
+      "another founding than the pinned one"
+    );
+    assert_eq!(
+      judge_unknown_meeting(Some(&pinned), None, 4),
+      AnchorVerdict::Refuse(FloorError::Stripped)
+    );
+  }
+
+  /// A meeting anchor of a newer format than this app reads grants nothing and isn't refused as a
+  /// copy: the app says it has to update.
+  #[test]
+  fn a_newer_meeting_anchor_grants_nothing() {
+    let world = World::new();
+    let mut bytes = world
+      .found_meeting(&world.founder, MEETING, CONVERSATION)
+      .to_bytes()
+      .unwrap();
+    // format (1) ‖ conversation (8) ‖ kind (1) ‖ meeting ID (8) ‖ origin
+    bytes[1 + 8 + 1 + 8] = 4;
+    let expected = meeting_expectation(CONVERSATION, MEETING, FOUNDER);
+    let result = ChannelAnchor::from_bytes(&bytes, DEFAULT_MAX_ANCHOR_BYTES)
+      .map(|_| None)
+      .map_err(MlsError::from);
+    assert!(matches!(result, Err(MlsError::Anchor(AnchorError::MustUpdate))));
+    assert!(!refuses_meeting_anchor(&expected, &result));
+    let outcome = AnchorOutcome::of(result, Some(&bytes));
+    assert_eq!(judge_entering(None, &outcome, 1), AnchorVerdict::Unanchored);
+  }
+
+  fn meeting_expectation(
+    conversation: ConversationId,
+    meeting: MeetingId,
+    organizer: u64,
+  ) -> AnchorExpectation {
+    anchor_expectation(
+      conversation,
+      false,
+      true,
+      Some(MeetingExpectation {
+        meeting_id: meeting,
+        organizer: UserId::new(organizer),
+      }),
+    )
+    .unwrap()
+  }
+}
+
 /// The founder (a member of the channel, not a workspace admin) and a member.
 struct World {
   founder: Person,
@@ -431,6 +561,41 @@ impl World {
       },
     )
     .unwrap()
+  }
+
+  /// `person` founds the chat of `meeting` with an anchor.
+  fn found_meeting(
+    &self,
+    person: &Person,
+    meeting: MeetingId,
+    conversation: ConversationId,
+  ) -> ChannelAnchor {
+    ChannelAnchor::found(
+      &person.device,
+      &person.certificate,
+      &Founding {
+        conversation_id: conversation,
+        kind: AnchorKind::MeetingChat { meeting_id: meeting },
+        device_list_version: 1,
+        signed_at_ms: 1_700_000_000_000,
+        maybe_space_id: None,
+        name: "",
+      },
+    )
+    .unwrap()
+  }
+
+  /// Checks 1 to 5 against `expected`, as a group state's `verified_anchor` answers.
+  fn check(
+    &self,
+    anchor: &ChannelAnchor,
+    expected: &AnchorExpectation,
+  ) -> Result<Option<VerifiedAnchor>, MlsError> {
+    let tree: BTreeSet<UserId> = [self.founder.user_id, self.member.user_id].into_iter().collect();
+    anchor
+      .verify(expected, 0, &tree, self, &NoAdmins)
+      .map(Some)
+      .map_err(MlsError::from)
   }
 
   /// The member renames `anchor` in `epoch`.

@@ -1368,11 +1368,48 @@ impl FakeServer {
     {
       entry.0 = ChannelRole::Admin;
     }
+    let meeting: teamcraft_proto::MeetingId = state.next_id();
     if let Some(conversation) = state.conversations.get_mut(&id) {
       conversation.response.maybe_organizer_user_id = Some(organizer);
+      conversation.response.maybe_meeting_id = Some(meeting);
     }
     state.publish(members, &GatewayEvent::ConversationUpdate { conversation_id: id });
     id
+  }
+
+  /// The meeting a meeting chat belongs to, as the server names it.
+  pub fn meeting_of_chat(&self, chat: ConversationId) -> Option<teamcraft_proto::MeetingId> {
+    self
+      .lock()
+      .conversations
+      .get(&chat)
+      .and_then(|conversation| conversation.response.maybe_meeting_id)
+  }
+
+  /// The server names another organizer for a meeting chat, without any handover (a hostile
+  /// server); that user may then publish the chat's admitters.
+  pub fn set_organizer_of_chat(&self, chat: ConversationId, organizer: UserId) {
+    if let Some(conversation) = self.lock().conversations.get_mut(&chat) {
+      conversation.response.maybe_organizer_user_id = Some(organizer);
+    }
+  }
+
+  /// The server names neither the meeting nor the organizer of a meeting chat (an older or a
+  /// hostile server), or only drops the meeting with `keeps_organizer`.
+  pub fn hide_meeting_of_chat(&self, chat: ConversationId, keeps_organizer: bool) {
+    if let Some(conversation) = self.lock().conversations.get_mut(&chat) {
+      conversation.response.maybe_meeting_id = None;
+      if !keeps_organizer {
+        conversation.response.maybe_organizer_user_id = None;
+      }
+    }
+  }
+
+  /// The server names another meeting for a meeting chat (a hostile server).
+  pub fn set_meeting_of_chat(&self, chat: ConversationId, meeting: teamcraft_proto::MeetingId) {
+    if let Some(conversation) = self.lock().conversations.get_mut(&chat) {
+      conversation.response.maybe_meeting_id = Some(meeting);
+    }
   }
 
   /// An entry the server puts into a channel's role log without any check: a hostile server, or
@@ -4125,6 +4162,9 @@ impl ServerApi for FakeServerApi {
         attendees: Vec::new(),
         undelivered_invitations: Vec::new(),
       };
+      if let Some(conversation) = state.conversations.get_mut(&conversation_id) {
+        conversation.response.maybe_meeting_id = Some(meeting.id);
+      }
       if let Some(key) = &request.maybe_idempotency_key {
         state.instant_meetings.insert(*key, meeting.clone());
       }
@@ -7626,6 +7666,7 @@ impl State {
       is_integration: false,
       contains_guests: false,
       maybe_organizer_user_id: None,
+      maybe_meeting_id: None,
       maybe_my_permissions: None,
       maybe_importer_user_id: None,
       maybe_imported_through: None,

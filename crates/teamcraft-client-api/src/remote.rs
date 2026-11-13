@@ -1109,10 +1109,12 @@ pub enum ChatAction {
   },
   SetUpMeetingChat {
     conversation: ConversationId,
+    meeting: teamcraft_proto::MeetingId,
     invitees: crate::meeting_invitees::ChatInvitees,
   },
   UpdateMeetingChatMembers {
     conversation: ConversationId,
+    meeting: teamcraft_proto::MeetingId,
     invitees: crate::meeting_invitees::ChatInvitees,
     removed: Vec<UserId>,
   },
@@ -1568,13 +1570,15 @@ impl ChatAction {
       Self::RetryDmSetup { conversation } => backend.retry_dm_setup(conversation),
       Self::SetUpMeetingChat {
         conversation,
+        meeting,
         invitees,
-      } => backend.set_up_meeting_chat(conversation, invitees),
+      } => backend.set_up_meeting_chat(conversation, meeting, invitees),
       Self::UpdateMeetingChatMembers {
         conversation,
+        meeting,
         invitees,
         removed,
-      } => backend.update_meeting_chat_members(conversation, invitees, removed),
+      } => backend.update_meeting_chat_members(conversation, meeting, invitees, removed),
       Self::AddPeopleToCall {
         from,
         in_call,

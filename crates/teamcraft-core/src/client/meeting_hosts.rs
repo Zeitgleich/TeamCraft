@@ -36,6 +36,9 @@ type HostsFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 const HOSTS_PREFIX: &str = "meeting-hosts/";
 /// How the last change of a meeting chat's hosts on this device went ([`HostsChangeRecord`]).
 const HOSTS_CHANGE_PREFIX: &str = "meeting-hosts-change/";
+/// The fingerprint (hex) of the identity key that founded a meeting chat's anchor this device
+/// pinned (#1747): only host lists verified from it are kept from then on.
+const PINNED_FOUNDER_PREFIX: &str = "meeting-pinned-founder/";
 
 /// The hosts of a meeting chat as this device verified them last. A later check refuses a list
 /// older than `sequence` (the server bringing back a co-host the organizer took off) and falls
@@ -51,6 +54,9 @@ struct HostsRecord {
   maybe_organizer: Option<UserId>,
   /// The co-hosts with their identity key fingerprints (hex).
   co_hosts: Vec<(UserId, String)>,
+  /// The fingerprint (hex) of the key the chain was verified from; `None` in records from before.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  maybe_anchor: Option<String>,
 }
 
 /// How the last change of a meeting chat's hosts that this device made went, for the UI.
@@ -227,7 +233,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Whether the host lists hand the meeting from `founder_key` to `organizer`'s pinned key.
-  async fn is_handed_over_from(
+  pub(super) async fn is_handed_over_from(
     &mut self,
     conversation: ConversationId,
     founder_key: &IdentityPublicKey,
@@ -239,13 +245,26 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     let statements = self.host_statements(conversation).await?;
     let anchor = founder_key.fingerprint();
+    // Against the newest lists this device kept: a server can't replay a chain that ends at an
+    // organizer the meeting was handed on from since.
     let expectation = HostsExpectation {
       anchor: &anchor,
       maybe_meeting_id: None,
       conversation_id: convert::conversation(conversation),
-      maybe_seen_sequence: None,
+      maybe_seen_sequence: self.seen_hosts_sequence(conversation, &anchor)?,
     };
-    Ok(verify_chain(&statements, &expectation).is_ok_and(|hosts| hosts.is_organizer_key(&organizer_key)))
+    match verify_chain(&statements, &expectation) {
+      Ok(hosts) => {
+        self.keep_hosts(conversation, &hosts, &anchor)?;
+        Ok(hosts.is_organizer_key(&organizer_key))
+      },
+      Err(error) => {
+        // Fails closed: the founder stays the organizer (availability only). A kept list proves
+        // nothing here; it may come from another key.
+        tracing::warn!(conversation_id = %conversation, %error, "the meeting's host lists don't verify; no handover counts");
+        Ok(false)
+      },
+    }
   }
 
   /// Whether `device` hosts the meeting by the lists that follow from `anchor`, and the current
@@ -262,16 +281,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       anchor,
       maybe_meeting_id: meeting.map(convert::meeting),
       conversation_id: convert::conversation(conversation),
-      maybe_seen_sequence: self.hosts_record(conversation)?.map(|record| record.sequence),
+      maybe_seen_sequence: self.seen_hosts_sequence(conversation, anchor)?,
     };
     match verify_chain(&statements, &expectation) {
       Ok(hosts) => {
-        self.keep_hosts(conversation, &hosts)?;
+        self.keep_hosts(conversation, &hosts, anchor)?;
         Ok((hosts.hosts_device(device), *hosts.organizer_fingerprint()))
       },
       Err(error) => {
         tracing::warn!(conversation_id = %conversation, %error, "the meeting's host lists don't verify; the kept ones count");
-        let Some(record) = self.hosts_record(conversation)? else {
+        let Some(record) = self.hosts_record_from(conversation, anchor)? else {
           return Ok((device.identity_key().fingerprint() == *anchor, *anchor));
         };
         let organizer = record
@@ -356,7 +375,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         maybe_seen_sequence: None,
       },
     )?;
-    self.keep_hosts(conversation, &verified)?;
+    // Kept as verified from the chat's pinned founder where this device pinned one (a meeting
+    // handed to this user): the whole chain, so its own rollback check keeps counting.
+    let is_founder = self
+      .pinned_founder_fingerprint(conversation)?
+      .is_none_or(|founder| founder == own.to_string());
+    if is_founder {
+      self.keep_hosts(conversation, &verified, &own)?;
+    } else if let Err(error) = self.member_hosts(conversation, Some(change.meeting)).await {
+      tracing::warn!(conversation_id = %conversation, %error, "could not read the meeting's host lists back");
+    }
     tracing::info!(meeting_id = %change.meeting, sequence, is_handover = change.maybe_new_organizer.is_some(), "published the meeting's hosts");
     Ok(())
   }
@@ -377,11 +405,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       anchor: &anchor,
       maybe_meeting_id: meeting.map(convert::meeting),
       conversation_id: convert::conversation(conversation),
-      maybe_seen_sequence: self.hosts_record(conversation)?.map(|record| record.sequence),
+      maybe_seen_sequence: self.seen_hosts_sequence(conversation, &anchor)?,
     };
     match verify_chain(&statements, &expectation) {
       Ok(hosts) => {
-        self.keep_hosts(conversation, &hosts)?;
+        self.keep_hosts(conversation, &hosts, &anchor)?;
         Ok(Some(hosts))
       },
       Err(error) => {
@@ -474,18 +502,104 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
   }
 
+  /// The kept host lists, unless this device pinned the meeting chat's anchor and they weren't
+  /// verified from its founder's key: a list kept from another key (the server's organizer before
+  /// the device entered the group) counts for nothing then.
   fn hosts_record(&self, conversation: ConversationId) -> Result<Option<HostsRecord>, CoreError> {
-    records::get_json(&self.store, Table::SyncState, &hosts_key(conversation))
+    let maybe_record: Option<HostsRecord> =
+      records::get_json(&self.store, Table::SyncState, &hosts_key(conversation))?;
+    let Some(founder) = self.pinned_founder_fingerprint(conversation)? else {
+      return Ok(maybe_record);
+    };
+    Ok(maybe_record.filter(|record| record.maybe_anchor.as_deref() == Some(founder.as_str())))
   }
 
-  /// Keeps verified hosts unless hosts of a higher sequence are kept already.
+  /// The kept host lists if they were verified from `anchor`.
+  fn hosts_record_from(
+    &self,
+    conversation: ConversationId,
+    anchor: &IdentityFingerprint,
+  ) -> Result<Option<HostsRecord>, CoreError> {
+    let anchor = anchor.to_string();
+    Ok(
+      self
+        .hosts_record(conversation)?
+        .filter(|record| record.maybe_anchor.as_deref() == Some(anchor.as_str())),
+    )
+  }
+
+  /// The newest sequence this device kept from lists that follow from `anchor`: a chain from
+  /// another key neither raises nor blocks it.
+  fn seen_hosts_sequence(
+    &self,
+    conversation: ConversationId,
+    anchor: &IdentityFingerprint,
+  ) -> Result<Option<u64>, CoreError> {
+    Ok(
+      self
+        .hosts_record_from(conversation, anchor)?
+        .map(|record| record.sequence),
+    )
+  }
+
+  fn pinned_founder_fingerprint(&self, conversation: ConversationId) -> Result<Option<String>, CoreError> {
+    records::get_json(
+      &self.store,
+      Table::SyncState,
+      &format!("{PINNED_FOUNDER_PREFIX}{conversation}"),
+    )
+  }
+
+  /// This device pinned the meeting chat's anchor, founded by `founder` (#1747): from now on only
+  /// host lists verified from that key are kept, and lists kept from another key are dropped.
+  pub(crate) fn note_pinned_meeting_founder(
+    &self,
+    conversation: ConversationId,
+    founder: &IdentityFingerprint,
+  ) -> Result<(), CoreError> {
+    let founder = founder.to_string();
+    records::put_json(
+      &self.store,
+      Table::SyncState,
+      &format!("{PINNED_FOUNDER_PREFIX}{conversation}"),
+      &founder,
+    )?;
+    let maybe_record: Option<HostsRecord> =
+      records::get_json(&self.store, Table::SyncState, &hosts_key(conversation))?;
+    if maybe_record.is_some_and(|record| record.maybe_anchor.as_deref() != Some(founder.as_str())) {
+      tracing::info!(conversation_id = %conversation, "dropped host lists kept from another key than the pinned founder's");
+      self.store.delete(Table::SyncState, &hosts_key(conversation))?;
+    }
+    Ok(())
+  }
+
+  /// Forgets the meeting chat's kept host lists and pinned founder with its other records.
+  pub(crate) fn forget_host_records(&self, conversation: ConversationId) -> Result<(), CoreError> {
+    self.store.delete(Table::SyncState, &hosts_key(conversation))?;
+    Ok(self.store.delete(
+      Table::SyncState,
+      &format!("{PINNED_FOUNDER_PREFIX}{conversation}"),
+    )?)
+  }
+
+  /// Keeps hosts verified from `anchor` unless hosts of a higher sequence from the same key are
+  /// kept already. Never over lists of the pinned founder's from another key.
   fn keep_hosts(
     &self,
     conversation: ConversationId,
     verified: &VerifiedMeetingHosts,
+    anchor: &IdentityFingerprint,
   ) -> Result<(), CoreError> {
+    let anchor_hex = anchor.to_string();
     if self
-      .hosts_record(conversation)?
+      .pinned_founder_fingerprint(conversation)?
+      .is_some_and(|founder| founder != anchor_hex)
+    {
+      tracing::warn!(conversation_id = %conversation, "host lists verified from another key than the pinned founder's; not kept");
+      return Ok(());
+    }
+    if self
+      .hosts_record_from(conversation, anchor)?
       .is_some_and(|kept| kept.sequence > verified.sequence())
     {
       return Ok(());
@@ -506,6 +620,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       organizer_fingerprint: verified.organizer_fingerprint().to_string(),
       maybe_organizer,
       co_hosts,
+      maybe_anchor: Some(anchor_hex),
     };
     records::put_json(&self.store, Table::SyncState, &hosts_key(conversation), &record)
   }

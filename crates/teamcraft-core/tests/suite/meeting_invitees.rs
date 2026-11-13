@@ -43,7 +43,7 @@ async fn an_attendee_the_server_slips_in_knocks_while_a_signed_invitee_gets_in()
   // The Join on the organizer's laptop, which never chose a list itself: the server lists
   // Mallory, whom the organizer never invited.
   laptop
-    .set_up_meeting_chat_from(rig.chat, &rig.listed())
+    .set_up_meeting_chat_from(rig.chat, None, &rig.listed())
     .await
     .unwrap();
 
@@ -67,7 +67,7 @@ async fn the_organizers_own_device_holds_to_its_own_choice() {
   rig
     .alice
     .client
-    .set_up_meeting_chat_from(rig.chat, &listed)
+    .set_up_meeting_chat_from(rig.chat, None, &listed)
     .await
     .unwrap();
   rig.mallory.client.full_sync().await.unwrap();
@@ -86,7 +86,7 @@ async fn an_edit_carries_over_only_signed_invitees_from_the_servers_list() {
     kept: vec![rig.bob, rig.mallory_id()],
   };
   laptop
-    .update_meeting_chat_members_from(rig.chat, &edit, &[])
+    .update_meeting_chat_members_from(rig.chat, None, &edit, &[])
     .await
     .unwrap();
   let in_group = laptop.group_users(rig.chat).unwrap();
@@ -139,7 +139,7 @@ mod organizer_devices {
     rig
       .alice
       .client
-      .set_up_meeting_chat_from(chat, &InviteeList::Listed(vec![bob, carol, dave]))
+      .set_up_meeting_chat_from(chat, None, &InviteeList::Listed(vec![bob, carol, dave]))
       .await
       .unwrap();
 
@@ -162,7 +162,7 @@ mod organizer_devices {
     rig
       .alice
       .client
-      .update_meeting_chat_members_from(chat, &edit, &[])
+      .update_meeting_chat_members_from(chat, None, &edit, &[])
       .await
       .unwrap();
     rig.sign().await;
@@ -209,7 +209,7 @@ mod organizer_devices {
     rig
       .alice
       .client
-      .set_up_meeting_chat_from(chat, &listed)
+      .set_up_meeting_chat_from(chat, None, &listed)
       .await
       .unwrap();
 
@@ -247,7 +247,7 @@ mod co_hosts {
 
     bob
       .client
-      .set_up_meeting_chat_from(rig.chat, &rig.listed())
+      .set_up_meeting_chat_from(rig.chat, None, &rig.listed())
       .await
       .unwrap();
 
@@ -296,7 +296,7 @@ mod hostile_statements {
 
     rig.server.set_meeting_admitters(chat, older);
     laptop
-      .set_up_meeting_chat_from(chat, &rig.listed())
+      .set_up_meeting_chat_from(chat, None, &rig.listed())
       .await
       .unwrap();
 
@@ -330,7 +330,7 @@ mod hostile_statements {
     assert!(!laptop.group_users(chat).unwrap().contains(&mallory_id));
 
     laptop
-      .set_up_meeting_chat_from(chat, &rig.listed())
+      .set_up_meeting_chat_from(chat, None, &rig.listed())
       .await
       .unwrap();
 
@@ -368,7 +368,7 @@ mod hostile_statements {
 
     bob
       .client
-      .set_up_meeting_chat_from(chat, &rig.listed())
+      .set_up_meeting_chat_from(chat, None, &rig.listed())
       .await
       .unwrap();
 
@@ -406,7 +406,7 @@ mod hostile_statements {
     rig
       .alice
       .client
-      .set_up_meeting_chat_from(chat, &rig.listed())
+      .set_up_meeting_chat_from(chat, None, &rig.listed())
       .await
       .unwrap();
 
@@ -447,7 +447,7 @@ mod hostile_statements {
     let mut laptop = rig.organizers_laptop().await;
 
     laptop
-      .set_up_meeting_chat_from(rig.chat, &rig.listed())
+      .set_up_meeting_chat_from(rig.chat, None, &rig.listed())
       .await
       .unwrap();
 
@@ -470,7 +470,7 @@ mod hostile_statements {
     let mut laptop = rig.organizers_laptop().await;
 
     laptop
-      .set_up_meeting_chat_from(rig.chat, &rig.listed())
+      .set_up_meeting_chat_from(rig.chat, None, &rig.listed())
       .await
       .unwrap();
 
@@ -487,7 +487,7 @@ mod hostile_statements {
     let mut laptop = rig.organizers_laptop().await;
 
     laptop
-      .set_up_meeting_chat_from(rig.chat, &rig.listed())
+      .set_up_meeting_chat_from(rig.chat, None, &rig.listed())
       .await
       .unwrap();
 
@@ -501,7 +501,7 @@ mod hostile_statements {
     let mut laptop = rig.organizers_laptop().await;
 
     laptop
-      .set_up_meeting_chat_from(rig.chat, &rig.listed())
+      .set_up_meeting_chat_from(rig.chat, None, &rig.listed())
       .await
       .unwrap();
 

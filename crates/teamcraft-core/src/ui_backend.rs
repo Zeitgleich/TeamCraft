@@ -393,11 +393,13 @@ pub enum CoreCommand {
   /// organizer, with the server's attendees.
   SetUpMeetingChat {
     conversation: ConversationId,
+    meeting: teamcraft_proto::MeetingId,
     invitees: InviteeList,
   },
   /// The organizer saved a changed invitee list of a meeting.
   UpdateMeetingChatMembers {
     conversation: ConversationId,
+    meeting: teamcraft_proto::MeetingId,
     invitees: InviteeList,
     removed: Vec<UserId>,
   },
@@ -3121,9 +3123,15 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.command(CoreCommand::RetryDmSetup { conversation });
   }
 
-  fn set_up_meeting_chat(&self, conversation: ConversationId, invitees: ChatInvitees) {
+  fn set_up_meeting_chat(
+    &self,
+    conversation: ConversationId,
+    meeting: teamcraft_proto::MeetingId,
+    invitees: ChatInvitees,
+  ) {
     self.command(CoreCommand::SetUpMeetingChat {
       conversation,
+      meeting,
       invitees: InviteeList::from(invitees),
     });
   }
@@ -3131,11 +3139,13 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
   fn update_meeting_chat_members(
     &self,
     conversation: ConversationId,
+    meeting: teamcraft_proto::MeetingId,
     invitees: ChatInvitees,
     removed: Vec<UserId>,
   ) {
     self.command(CoreCommand::UpdateMeetingChatMembers {
       conversation,
+      meeting,
       invitees: InviteeList::from(invitees),
       removed,
     });
@@ -5206,6 +5216,7 @@ mod tests {
       is_integration: false,
       contains_guests: false,
       maybe_organizer_user_id: None,
+      maybe_meeting_id: None,
       maybe_my_permissions: None,
       maybe_importer_user_id: None,
       maybe_imported_through: None,
@@ -6021,6 +6032,7 @@ mod tests {
         is_integration: false,
         contains_guests: false,
         maybe_organizer_user_id: None,
+        maybe_meeting_id: None,
         maybe_my_permissions: None,
         maybe_importer_user_id: None,
         maybe_imported_through: None,
@@ -6451,6 +6463,7 @@ mod tests {
         is_integration: false,
         contains_guests: false,
         maybe_organizer_user_id: None,
+        maybe_meeting_id: None,
         maybe_my_permissions: None,
         maybe_importer_user_id: None,
         maybe_imported_through: None,

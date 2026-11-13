@@ -290,17 +290,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       CoreCommand::RetryDmSetup { conversation } => self.retry_dm_setup(conversation).await,
       CoreCommand::SetUpMeetingChat {
         conversation,
+        meeting,
         invitees,
       } => self
-        .set_up_meeting_chat_from(conversation, &invitees)
+        .set_up_meeting_chat_from(conversation, Some(meeting), &invitees)
         .await
         .map(|_| ()),
       CoreCommand::UpdateMeetingChatMembers {
         conversation,
+        meeting,
         invitees,
         removed,
       } => self
-        .update_meeting_chat_members_from(conversation, &invitees, &removed)
+        .update_meeting_chat_members_from(conversation, Some(meeting), &invitees, &removed)
         .await
         .map(|_| ()),
       CoreCommand::AddPeopleToCall {

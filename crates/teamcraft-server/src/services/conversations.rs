@@ -117,12 +117,11 @@ pub async fn get_conversation(
   let access = load_conversation(state, caller, id).await?;
   let mut response = respond(state, &access.view).await?;
   response.maybe_my_permissions = Some(channel_permissions(state, caller, &access.target()));
-  if response.kind == ConversationKind::Meeting {
-    response.maybe_organizer_user_id = state
-      .database
-      .get_meeting_by_conversation(id)
-      .await?
-      .map(|meeting| meeting.organizer);
+  if response.kind == ConversationKind::Meeting
+    && let Some(meeting) = state.database.get_meeting_by_conversation(id).await?
+  {
+    response.maybe_organizer_user_id = Some(meeting.organizer);
+    response.maybe_meeting_id = Some(meeting.id);
   }
   Ok(response)
 }
