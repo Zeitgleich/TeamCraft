@@ -581,6 +581,28 @@
   object-fit: contain;
 }
 
+/* The last picture of a track published anew, until the new one draws its own (#1846). */
+.video-handover {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.video-handover.is-idle {
+  display: none;
+}
+
+.video-handover > canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.shared-screen .video-handover > canvas {
+  object-fit: contain;
+}
+
 /* Another device's video got no new picture for a while (#921): a quiet note over the last one,
    styled like the tile's status. Reconnecting says more already. */
 .video-stalled {

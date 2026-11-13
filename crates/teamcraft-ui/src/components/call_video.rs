@@ -25,6 +25,11 @@ use crate::video_stats::StatsTarget;
 const PICTURES_STALLED_AFTER: Duration = Duration::from_secs(3);
 /// How often a shown video's count of pictures is looked at.
 const PICTURE_CHECK_INTERVAL_MS: u64 = 1_000;
+/// How often a video that took over from another of its handover key looks for its first picture.
+const HANDOVER_CHECK_INTERVAL_MS: u64 = 50;
+/// A picture handed over is shown at most this long: a new track without a picture by then shows
+/// what it has (#1846).
+const HANDOVER_MAX: Duration = Duration::from_secs(3);
 /// How long the preview of the own share may have no picture before it says so: a capture that
 /// stopped delivering, not a screen that doesn't change, which is no gap at all.
 const OWN_SCREEN_NO_PICTURE_AFTER: Duration = Duration::from_secs(3);
@@ -236,8 +241,17 @@ fn has_sink_id() -> bool {
 ///
 /// Another device's video that gets no new picture for [`PICTURES_STALLED_AFTER`] says so with a
 /// short hint (#921), and on the desktop asks for a keyframe once more.
+///
+/// With a `handover` key (a person's shared screen), a video that ends leaves its last picture
+/// behind, and the next video of the same key shows it until its own first picture is drawn
+/// (#1846): a share published anew (a new size or codec) goes on without a black gap while its
+/// first keyframe comes.
 #[component]
-pub fn LiveVideo(source: VideoSource, #[prop(into)] is_mirrored: Signal<bool>) -> impl IntoView {
+pub fn LiveVideo(
+  source: VideoSource,
+  #[prop(into)] is_mirrored: Signal<bool>,
+  #[prop(default = None)] handover: Option<String>,
+) -> impl IntoView {
   let i18n = use_i18n();
   let host = NodeRef::<leptos::html::Div>::new();
   let is_page_visible = use_page_visible();
@@ -247,6 +261,38 @@ pub fn LiveVideo(source: VideoSource, #[prop(into)] is_mirrored: Signal<bool>) -
   let picture_watch = StoredValue::new(None::<PictureWatch>);
   let own_picture_watch = StoredValue::new(None::<OwnPictureWatch>);
   let observer = StoredValue::new_local(None::<OnScreenObserver>);
+  let handover_host = NodeRef::<leptos::html::Div>::new();
+  let is_handing_over = RwSignal::new(false);
+  let handover_key = StoredValue::new(handover.filter(|_| matches!(source, VideoSource::Remote(_))));
+  Effect::new(move |_| {
+    let (Some(overlay), Some(key)) = (handover_host.get(), handover_key.get_value()) else {
+      return;
+    };
+    if is_handing_over.get_untracked() {
+      return;
+    }
+    if let Some(picture) = handover::take(&key) {
+      overlay.replace_children_with_node_1(&picture);
+      is_handing_over.set(true);
+    }
+  });
+  let handover_started = crate::motion::now();
+  use_interval_while(
+    HANDOVER_CHECK_INTERVAL_MS,
+    move || is_handing_over.get(),
+    move || {
+      let has_picture = host
+        .get_untracked()
+        .and_then(|element| pictures_drawn(&element))
+        .is_some_and(|drawn| drawn > 0);
+      if has_picture || crate::motion::now().saturating_sub(handover_started) >= HANDOVER_MAX {
+        if let Some(overlay) = handover_host.get_untracked() {
+          overlay.replace_children_with_node_0();
+        }
+        is_handing_over.set(false);
+      }
+    },
+  );
   Effect::new(move |_| {
     let Some(element) = host.get() else {
       return;
@@ -319,6 +365,9 @@ pub fn LiveVideo(source: VideoSource, #[prop(into)] is_mirrored: Signal<bool>) -
     );
   }
   on_cleanup(move || {
+    if let (Some(Some(key)), Some(element)) = (handover_key.try_get_value(), host.get_untracked()) {
+      handover::keep(key, &element);
+    }
     if let Some(Some(observer)) = observer.try_update_value(Option::take) {
       observer.disconnect();
     }
@@ -344,6 +393,7 @@ pub fn LiveVideo(source: VideoSource, #[prop(into)] is_mirrored: Signal<bool>) -
   };
   view! {
     <div class="live-video" class:mirrored=move || is_mirrored.get() node_ref=host aria-hidden="true"></div>
+    <div class="video-handover" class:is-idle=move || !is_handing_over.get() node_ref=handover_host aria-hidden="true"></div>
     <Show when=move || is_stalled.get() fallback=|| ()>
       <span class="video-stalled" role="status">{move || i18n.t(stalled_key)}</span>
     </Show>
@@ -618,6 +668,71 @@ mod shown {
         VideoSource::OwnCamera => {},
       }
     }
+  }
+}
+
+/// The last pictures of videos that ended, by handover key, for the next video of the key (#1846).
+#[cfg(target_arch = "wasm32")]
+mod handover {
+  use std::cell::RefCell;
+  use std::collections::HashMap;
+  use std::time::Duration;
+
+  use wasm_bindgen::JsCast;
+  use web_sys::{CanvasRenderingContext2d, Element, HtmlCanvasElement};
+
+  use super::HANDOVER_MAX;
+
+  thread_local! {
+    static PICTURES: RefCell<HashMap<String, (HtmlCanvasElement, Duration)>> = RefCell::default();
+  }
+
+  /// Keeps a copy of the picture `host` shows, if it shows one in a canvas.
+  pub fn keep(key: String, host: &web_sys::HtmlDivElement) {
+    let Some(canvas) = host
+      .first_element_child()
+      .and_then(|element| element.dyn_into::<HtmlCanvasElement>().ok())
+      .filter(|canvas| canvas.width() > 0 && canvas.height() > 0)
+    else {
+      return;
+    };
+    let Some(copy) = copy_of(&canvas) else {
+      return;
+    };
+    PICTURES.with_borrow_mut(|pictures| {
+      pictures.insert(key, (copy, crate::motion::now()));
+    });
+  }
+
+  /// The picture left for `key`, unless it is older than [`HANDOVER_MAX`].
+  pub fn take(key: &str) -> Option<Element> {
+    let (picture, kept_at) = PICTURES.with_borrow_mut(|pictures| pictures.remove(key))?;
+    (crate::motion::now().saturating_sub(kept_at) < HANDOVER_MAX).then(|| picture.into())
+  }
+
+  fn copy_of(canvas: &HtmlCanvasElement) -> Option<HtmlCanvasElement> {
+    let copy: HtmlCanvasElement = web_sys::window()?
+      .document()?
+      .create_element("canvas")
+      .ok()?
+      .dyn_into()
+      .ok()?;
+    copy.set_width(canvas.width());
+    copy.set_height(canvas.height());
+    let context: CanvasRenderingContext2d = copy.get_context("2d").ok()??.dyn_into().ok()?;
+    context
+      .draw_image_with_html_canvas_element(canvas, 0.0, 0.0)
+      .ok()?;
+    Some(copy)
+  }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+mod handover {
+  pub fn keep(_key: String, _host: &web_sys::HtmlDivElement) {}
+
+  pub fn take(_key: &str) -> Option<web_sys::Element> {
+    None
   }
 }
 

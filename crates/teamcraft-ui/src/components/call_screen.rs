@@ -445,6 +445,9 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
     let remote_tiles = remote_ids.get();
     if is_share_layout() {
       let maybe_screen = shared_screen.get();
+      // The share published anew (another size or codec) keeps its last picture until the new
+      // track's first one (#1846).
+      let handover = sharer.get().map(|(id, _)| format!("screen-{id}"));
       let sharer_name = sharer.get().map(|(_, name)| name).unwrap_or_default();
       let sharer_name_for_wait = sharer_name.clone();
       let is_me_sharing = call.is_sharing_screen.get();
@@ -494,7 +497,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
               {is_me_sharing.then(|| view! { <VideoStatsOverlay target=StatsTarget::OwnScreen /> })}
               {match maybe_screen {
                 Some(source) => view! {
-                  <LiveVideo source=source is_mirrored=false />
+                  <LiveVideo source=source is_mirrored=false handover=handover />
                   {is_me_sharing.then(|| view! { <OwnSharePreview is_over_picture=true /> })}
                 }
                 .into_any(),
