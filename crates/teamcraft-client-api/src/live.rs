@@ -3,7 +3,9 @@
 //! instead of polling the server for it.
 
 use serde::{Deserialize, Serialize};
-pub use teamcraft_proto::live::{AnnouncedPresence, LiveDelivered, LiveMarks, LiveReceipt, RevisedPresence};
+pub use teamcraft_proto::live::{
+  AnnouncedPresence, LiveDelivered, LiveMarks, LiveMeetingNoticeDismissal, LiveReceipt, RevisedPresence,
+};
 use teamcraft_proto::{ThreadSummary, UnreadResponse};
 
 /// What the core knows right now. The UI reads it on every change the core reports.
@@ -28,4 +30,8 @@ pub struct LiveSnapshot {
   pub delivered: Vec<LiveDelivered>,
   #[serde(default)]
   pub marks: LiveMarks,
+  /// Meeting notices the user joined or swiped away on another device, newest last and bounded
+  /// (gateway `meeting_notice_dismiss`, #1473): this device takes its own down.
+  #[serde(default)]
+  pub meeting_notice_dismissals: Vec<LiveMeetingNoticeDismissal>,
 }

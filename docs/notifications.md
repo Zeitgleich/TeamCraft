@@ -826,12 +826,12 @@ list returns a series once).
 **Meeting notices on several devices (#1473).** A reminder or start notice that was dealt with on
 one phone goes away on the user's others. What counts as dealt with, per platform:
 
-| Platform | Reports                                                                              | Removes what it shows on a `dismiss` naming the meeting                                                                                     |
-|----------|--------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------|
-| Android  | Join, and swiping the notice away (`setDeleteIntent`, no permission)                 | the notification with tag `meeting:<id>`                                                                                                    |
-| iOS      | Join, and clearing the notice (`customDismissAction` on the category, no permission) | delivered notifications of thread `meeting-<id>`                                                                                            |
-| Web      | Join and closing a push notice (`notificationclose`), with the stored push session   | nothing: no silent push in browsers, so no `dismiss` goes to Web Push (the notice stays until closed or replaced by the start notice's tag) |
-| Desktop  | nothing: no push, its own reminders                                                  | nothing                                                                                                                                     |
+| Platform | Reports                                                                              | Removes what it shows                                                                                                  |
+|----------|--------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------|
+| Android  | Join, and swiping the notice away (`setDeleteIntent`, no permission)                 | on a `dismiss` naming the meeting: the notification with tag `meeting:<id>`                                            |
+| iOS      | Join, and clearing the notice (`customDismissAction` on the category, no permission) | on a `dismiss` naming the meeting: delivered notifications of thread `meeting-<id>`                                    |
+| Web      | Join and closing a push notice (`notificationclose`), with the stored push session   | on a `meeting_notice_dismiss` gateway event, in every open tab: the page's and the push notice with tag `meeting:<id>` |
+| Desktop  | nothing: no push, its own reminders                                                  | on a `meeting_notice_dismiss` gateway event: its own reminder with tag `meeting:<id>`                                  |
 
 The report is `POST /meetings/{id}/notices/dismiss` with the occurrence's start. It names only an
 occurrence a notice went to the caller for (else 404), is scoped to the caller's account, is
@@ -841,7 +841,16 @@ a `dismiss` wake-up with the meeting and the occurrence's start to the user's ph
 silent withdrawal (APNs, FCM, UnifiedPush), also the one that reported and phones with the app in
 front (they show notices with the app open). It names no conversation (`conversation_id` is `0`) and
 no text, so an app from before it removes nothing; a gateway sees an ordinary withdrawal. The same
-withdrawal drops the notices of that occurrence still waiting in the user's retry queue.
+withdrawal drops the notices of that occurrence still waiting in the user's retry queue; a retry of a
+notice whose row was dismissed meanwhile is skipped too (the browsers', which get no `dismiss`).
+
+Browsers and the desktop app learn it over the gateway instead (Web Push can't withdraw silently):
+`meeting_notice_dismiss` with the meeting, the occurrence's start and the server's time of the report
+goes to the user's sessions. The core keeps the last 16 of them; the UI takes down its notice of the
+meeting and marks what it covered as shown, so its own reminders don't bring it back. A report from
+before the start covered only the reminder: the notice at the start still comes, and a reload after
+the start doesn't take down a start notice for it. Phones with the app in front get the `dismiss`
+wake-up already and don't need the event.
 
 **Several tabs.** In a browser only the tab that owns the account's store (e2ee.md §9.4) shows
 notifications. Each tab records in local storage which conversation it shows while in front, so the

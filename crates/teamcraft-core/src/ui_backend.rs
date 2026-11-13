@@ -3324,11 +3324,16 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       receipts: self.read(crate::read_state::all_read_receipts(&self.store)),
       delivered: self.read(crate::read_state::all_delivered_to_others(&self.store)),
       marks: self.read(crate::read_state::marks(&self.store)),
+      meeting_notice_dismissals: self.read(crate::read_state::meeting_notice_dismissals(&self.store)),
     })
   }
 
   fn meetings_revision(&self) -> u64 {
     self.read(crate::read_state::marks(&self.store)).meetings
+  }
+
+  fn meeting_notice_dismissals(&self) -> Vec<teamcraft_proto::live::LiveMeetingNoticeDismissal> {
+    self.read(crate::read_state::meeting_notice_dismissals(&self.store))
   }
 
   fn link_request_mark(&self) -> u64 {

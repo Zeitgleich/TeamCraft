@@ -154,6 +154,11 @@ async fn attempt_next(state: &AppState, is_user_endpoint: bool) -> Result<bool, 
     claim.complete().await?;
     return Ok(true);
   }
+  if is_meeting_notice_dismissed(state, row.user, &row.wake_up).await {
+    debug!(device_id = %row.device, "the meeting notice was dealt with on another device; retry dropped");
+    claim.complete().await?;
+    return Ok(true);
+  }
   if is_read_meanwhile(state, row.user, &row.wake_up).await {
     debug!(device_id = %row.device, "the message was read meanwhile; retry dropped");
     claim.complete().await?;
@@ -238,6 +243,22 @@ async fn is_meeting_notice_valid(state: &AppState, wake_up: &PushWakeUp) -> bool
     Err(error) => {
       warn!(%error, "checking a meeting for its queued notice failed");
       true
+    },
+  }
+}
+
+/// For a meeting's reminder or start notice: whether the user joined or swiped it away on another
+/// device since it was queued (#1473). Devices that get the silent withdrawal have their retries
+/// dropped then; this covers the others (browsers). A failed check lets it go.
+async fn is_meeting_notice_dismissed(state: &AppState, user: UserId, wake_up: &PushWakeUp) -> bool {
+  let Some(meeting) = wake_up.maybe_meeting else {
+    return false;
+  };
+  match crate::services::meeting_notices::is_notice_dismissed(state, user, &wake_up.kind, meeting).await {
+    Ok(is_dismissed) => is_dismissed,
+    Err(error) => {
+      warn!(%error, "checking whether a queued meeting notice was dismissed failed");
+      false
     },
   }
 }

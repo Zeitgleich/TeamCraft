@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (SELECT 1 FROM meeting_notices\n                        WHERE meeting_id = $1 AND starts_at = $2 AND kind = $3 AND user_id = $4\n                          AND dismissed_at IS NOT NULL) AS \"is_dismissed!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "is_dismissed!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "d3348584d76fb1e61702da17aaff54238ae49635d384808f7d75f2e817f7d9eb"
+}

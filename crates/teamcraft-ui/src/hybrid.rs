@@ -209,6 +209,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.meetings_revision()
   }
 
+  fn meeting_notice_dismissals(&self) -> Vec<teamcraft_client_api::live::LiveMeetingNoticeDismissal> {
+    self.chat.meeting_notice_dismissals()
+  }
+
   fn me(&self) -> User {
     self.with_live_presence(self.chat.me(), &self.chat.presence_policy(), now_ms())
   }

@@ -21,6 +21,7 @@ use leptos::prelude::*;
 use teamcraft_client_api::actions::{MessagePriority, OutgoingMessage};
 use teamcraft_client_api::activity::{JoinRequest, JoinRequestStanding};
 use teamcraft_client_api::call_window::{CallWindow, CallWindowTheme};
+use teamcraft_client_api::live::LiveMeetingNoticeDismissal;
 use teamcraft_client_api::os_notify::{
   NOTIFICATION_ACTION_EVENT, NotificationAction, NotificationActionEvent, NotificationButton,
   NotificationPicture, NotificationSound, NotificationTag, OsNotification, OsNotificationKind, ReplyField,
@@ -728,6 +729,15 @@ fn watch_meetings(state: AppState, i18n: I18n, hub: MeetingsHub) {
       revision
     });
   }
+  // Joined or swiped away on another device (gateway `meeting_notice_dismiss`, #1473): this
+  // device's notice goes, and what it covered doesn't show here later.
+  {
+    let handled = StoredValue::new_local(std::collections::HashSet::new());
+    Effect::new(move |_| {
+      let dismissals = state.read(|backend| backend.meeting_notice_dismissals());
+      take_down_dismissed(state, hub, &dismissals, handled);
+    });
+  }
   // Laptops sleep: on wake or reconnect the timer may be late or stale, so check now.
   for event in ["online", "pageshow"] {
     let watch = watch.clone();
@@ -839,6 +849,36 @@ impl MeetingWatch {
       Ok(handle) => *self.timer.borrow_mut() = Some(handle),
       Err(_) => tracing::debug!("could not plan the next meeting reminder"),
     }
+  }
+}
+
+/// Takes down the notices of meetings the user dealt with on another device, each once per page.
+/// Every tab does it (a browser's push notice shows in any of them), unlike showing reminders.
+fn take_down_dismissed(
+  state: AppState,
+  hub: MeetingsHub,
+  dismissals: &[LiveMeetingNoticeDismissal],
+  handled: StoredValue<std::collections::HashSet<LiveMeetingNoticeDismissal>, LocalStorage>,
+) {
+  let new: Vec<_> = dismissals
+    .iter()
+    .filter(|dismissal| !handled.with_value(|seen| seen.contains(*dismissal)))
+    .copied()
+    .collect();
+  if new.is_empty() {
+    return;
+  }
+  handled.update_value(|seen| seen.extend(new.iter().copied()));
+  let server_now = hub.clock.get_untracked().now(now_ms());
+  let mut fired = load_fired(state);
+  let tags: Vec<_> = new
+    .iter()
+    .filter(|dismissal| fired.note_dismissed(dismissal, server_now))
+    .map(|dismissal| NotificationTag::meeting(dismissal.meeting_id))
+    .collect();
+  store_string(&fired_key(state), &fired.to_json());
+  if !tags.is_empty() {
+    leptos::task::spawn_local(async move { tauri::withdraw_tags(&tags).await });
   }
 }
 

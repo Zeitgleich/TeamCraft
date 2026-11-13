@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
 
-use crate::{ConversationId, MessageId, UserId, UserPresence};
+use crate::{ConversationId, MeetingId, MessageId, UnixMillis, UserId, UserPresence};
 
 /// Counters that move when the UI should read something from the server once: after each gateway
 /// connection (events in between may be lost), when the announcement changed and when a meeting
@@ -37,6 +37,17 @@ pub struct LiveMarks {
   /// the UI asks the core to read them again when it next needs them.
   #[serde(default)]
   pub custom_emoji: u64,
+}
+
+/// A meeting notice the user joined or swiped away on another device, from a
+/// `meeting_notice_dismiss` event (#1473).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LiveMeetingNoticeDismissal {
+  pub meeting_id: MeetingId,
+  /// The start of the occurrence the notice was for.
+  pub starts_at: UnixMillis,
+  /// When the server took the report (its clock).
+  pub dismissed_at: UnixMillis,
 }
 
 /// How far another member of a DM has read, from `read_receipt` events.

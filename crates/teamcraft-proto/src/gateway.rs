@@ -170,6 +170,18 @@ pub enum GatewayEvent {
   MeetingUpdate {
     meeting_id: MeetingId,
   },
+  /// The user dealt with the notice of one occurrence of a meeting on another device (joined it,
+  /// swiped it away; docs/notifications.md, "Meeting notices on several devices"). Sent to the
+  /// user's own sessions, so open web tabs and the desktop app take theirs down too: Web Push can't
+  /// withdraw a notification silently. Carries no title, only which occurrence.
+  MeetingNoticeDismiss {
+    meeting_id: MeetingId,
+    /// The start of the occurrence the notice was for.
+    starts_at: UnixMillis,
+    /// When the server took the report (its clock). Before `starts_at` only the reminder was
+    /// dealt with: the notice at the start still comes.
+    dismissed_at: UnixMillis,
+  },
   /// A guest waits in the lobby of a meeting. Sent to the meeting's hosts.
   LobbyJoin {
     meeting_id: MeetingId,
@@ -385,6 +397,7 @@ impl GatewayEvent {
       Self::LeaverUpdate => "leaver_update",
       Self::ChannelRolesUpdate { .. } => "channel_roles_update",
       Self::MeetingUpdate { .. } => "meeting_update",
+      Self::MeetingNoticeDismiss { .. } => "meeting_notice_dismiss",
       Self::LobbyJoin { .. } => "lobby_join",
       Self::LobbyDecision { .. } => "lobby_decision",
       Self::ProfileUpdate { .. } => "profile_update",
@@ -726,6 +739,19 @@ mod tests {
       serde_json::from_str::<GatewayEvent>(json).unwrap(),
       GatewayEvent::HealthAlertUpdate
     );
+  }
+
+  #[test]
+  fn meeting_notice_dismiss_has_a_stable_wire_format() {
+    let event = GatewayEvent::MeetingNoticeDismiss {
+      meeting_id: MeetingId::from_snowflake(Snowflake::new(5).unwrap()),
+      starts_at: UnixMillis(1_800_000_000_000),
+      dismissed_at: UnixMillis(1_799_999_700_000),
+    };
+    let json = r#"{"type":"meeting_notice_dismiss","meeting_id":"5","starts_at":1800000000000,"dismissed_at":1799999700000}"#;
+    assert_eq!(serde_json::to_string(&event).unwrap(), json);
+    assert_eq!(serde_json::from_str::<GatewayEvent>(json).unwrap(), event);
+    assert_eq!(event.kind(), "meeting_notice_dismiss");
   }
 
   #[test]

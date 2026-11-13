@@ -5,7 +5,9 @@
 use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::live::{AnnouncedPresence, LiveDelivered, LiveMarks, LiveReceipt, RevisedPresence};
+use teamcraft_proto::live::{
+  AnnouncedPresence, LiveDelivered, LiveMarks, LiveMeetingNoticeDismissal, LiveReceipt, RevisedPresence,
+};
 use teamcraft_proto::{
   AdminJoinRequestResponse, ConversationId, ConversationUnread, ExpiringGuestResponse, MessageId,
   MessageResponse, ThreadId, ThreadSummary, UnreadResponse, UserId, UserPresence,
@@ -21,6 +23,11 @@ const MARKS_KEY: &str = "marks";
 const ADMIN_JOIN_REQUESTS_KEY: &str = "admin_join_requests";
 /// The guests ending soon the server last listed (issue #212), next to the counts.
 const EXPIRING_GUESTS_KEY: &str = "expiring_guests";
+/// Meeting notices the user dealt with on another device (gateway `meeting_notice_dismiss`, #1473).
+const MEETING_NOTICE_DISMISSALS_KEY: &str = "meeting_notice_dismissals";
+/// How many of them are kept, newest last: a notice matters for minutes, so a handful is plenty
+/// and the list never grows.
+const MAX_MEETING_NOTICE_DISMISSALS: usize = 16;
 /// The record in [`Table::Presence`] (whose other keys are user IDs) that heads the presence log
 /// in [`Table::AnnouncedPresence`]. Before 1.0.2 it held the whole log; that form reads as a head
 /// with an empty log.
@@ -57,6 +64,29 @@ pub(crate) fn put_admin_join_requests(
     return Ok(());
   }
   records::put_json(store, Table::Unread, ADMIN_JOIN_REQUESTS_KEY, &requests)
+}
+
+/// Meeting notices the user joined or swiped away on another device, newest last and bounded. The
+/// UI takes its own notice of each down (open web tabs, the desktop app) and doesn't show it again.
+pub fn meeting_notice_dismissals(
+  store: &impl LocalStore,
+) -> Result<Vec<LiveMeetingNoticeDismissal>, CoreError> {
+  Ok(records::get_json(store, Table::Unread, MEETING_NOTICE_DISMISSALS_KEY)?.unwrap_or_default())
+}
+
+/// Records one; a repeat of a known one changes nothing.
+pub(crate) fn note_meeting_notice_dismissal(
+  store: &impl LocalStore,
+  dismissal: LiveMeetingNoticeDismissal,
+) -> Result<(), CoreError> {
+  let mut dismissals = meeting_notice_dismissals(store)?;
+  if dismissals.contains(&dismissal) {
+    return Ok(());
+  }
+  dismissals.push(dismissal);
+  let excess = dismissals.len().saturating_sub(MAX_MEETING_NOTICE_DISMISSALS);
+  dismissals.drain(..excess);
+  records::put_json(store, Table::Unread, MEETING_NOTICE_DISMISSALS_KEY, &dismissals)
 }
 
 /// The guests ending soon that concern this user, as the server last listed them (issue #212).
@@ -537,6 +567,30 @@ mod tests {
     assert_eq!(receipts.get(&id(7)), Some(&id(20)));
     assert_eq!(receipts.get(&id(8)), Some(&id(15)));
     assert_eq!(receipts.len(), 2);
+  }
+
+  #[test]
+  fn meeting_notice_dismissals_are_kept_once_and_bounded() {
+    let store = MemoryStore::new();
+    let notice = |meeting: i64, starts_at: i64| LiveMeetingNoticeDismissal {
+      meeting_id: id(meeting),
+      starts_at: teamcraft_proto::UnixMillis(starts_at),
+      dismissed_at: teamcraft_proto::UnixMillis(starts_at - 60_000),
+    };
+    note_meeting_notice_dismissal(&store, notice(1, 100)).unwrap();
+    note_meeting_notice_dismissal(&store, notice(1, 100)).unwrap();
+    note_meeting_notice_dismissal(&store, notice(1, 200)).unwrap();
+    assert_eq!(
+      meeting_notice_dismissals(&store).unwrap(),
+      vec![notice(1, 100), notice(1, 200)]
+    );
+    for meeting in 2..=i64::try_from(MAX_MEETING_NOTICE_DISMISSALS).unwrap() + 1 {
+      note_meeting_notice_dismissal(&store, notice(meeting, 100)).unwrap();
+    }
+    let kept = meeting_notice_dismissals(&store).unwrap();
+    assert_eq!(kept.len(), MAX_MEETING_NOTICE_DISMISSALS);
+    assert!(!kept.contains(&notice(1, 100)), "the oldest went first");
+    assert_eq!(kept.last(), Some(&notice(17, 100)));
   }
 
   #[test]

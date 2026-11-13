@@ -240,6 +240,11 @@ pub trait ChatBackend {
   fn meetings_revision(&self) -> u64 {
     0
   }
+  /// Meeting notices the user joined or swiped away on another device, newest last and bounded
+  /// (#1473): the UI takes this device's notice of each down. Empty without a gateway.
+  fn meeting_notice_dismissals(&self) -> Vec<crate::live::LiveMeetingNoticeDismissal> {
+    Vec::new()
+  }
   /// Moves when the open device link requests changed (e2ee.md §5); the UI then reads them. 0
   /// without a core.
   fn link_request_mark(&self) -> u64 {
