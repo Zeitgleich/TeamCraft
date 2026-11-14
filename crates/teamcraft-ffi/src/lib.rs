@@ -109,7 +109,9 @@ pub use server_entry::{
 pub use settings_sync::{
   AppAnimatedImages, AppFavoritesSort, AppListGrouping, AppListLayout, SettingsSyncOutcome, SyncedAppSettings,
 };
-pub use space_deletion::{ChannelRenamer, ChannelRenamerRole, SpaceDeletionChannel, SpaceDeletionPreview};
+pub use space_deletion::{
+  ChannelRenamer, ChannelRenamerRole, SpaceDeletionChannel, SpaceDeletionHistoryNote, SpaceDeletionPreview,
+};
 use teamcraft_client_api::remote::ChatAction;
 use teamcraft_core::api::proxy::SystemProxy;
 use teamcraft_core::clock::{Clock as _, SystemClock};

@@ -66,6 +66,10 @@ pub enum RenamerRole {
 const DELETION_ATTEMPTS: usize = 3;
 /// How long a prepared list stands for what the user was shown.
 const PREVIEW_MAX_AGE_MS: i64 = 60 * 60 * 1000;
+/// How far in this device's future a prepared list may say it was made: both times are this
+/// device's clock, so more than this means the clock was set back since, and the list's age is
+/// unknown.
+const PREVIEW_FUTURE_LEEWAY_MS: i64 = 60 * 1000;
 
 /// What the device prepared: the preview the UI shows, and per channel the epoch to sign, `None`
 /// where the server's epoch is far from this device's own group (that channel isn't signed).
@@ -127,7 +131,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let now_ms = self.now_ms();
     let maybe_prepared: Option<PreparedSpaceDeletion> =
       records::get_json(&self.store, Table::SyncState, &preview_key(space))?;
-    Ok(maybe_prepared.filter(|prepared| now_ms.saturating_sub(prepared.prepared_at_ms) <= PREVIEW_MAX_AGE_MS))
+    Ok(maybe_prepared.filter(|prepared| is_shown_list_fresh(prepared.prepared_at_ms, now_ms)))
   }
 
   async fn make_space_deletion(&mut self, space: SpaceId) -> Result<PreparedSpaceDeletion, CoreError> {
@@ -308,6 +312,55 @@ fn only_shown(fresh: PreparedSpaceDeletion, shown: &PreparedSpaceDeletion) -> Pr
   }
 }
 
+/// A prepared list stands for what the user saw for at most [`PREVIEW_MAX_AGE_MS`]. One dated in
+/// the future (the clock was set back after it was made) is stale too: otherwise it never ages.
+fn is_shown_list_fresh(prepared_at_ms: i64, now_ms: i64) -> bool {
+  let age_ms = now_ms.saturating_sub(prepared_at_ms);
+  (-PREVIEW_FUTURE_LEEWAY_MS..=PREVIEW_MAX_AGE_MS).contains(&age_ms)
+}
+
 fn preview_key(space: SpaceId) -> String {
   format!("{PREVIEW_PREFIX}{space}")
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  const PREPARED_AT_MS: i64 = 1_800_000_000_000;
+
+  #[test]
+  fn a_list_stands_for_an_hour() {
+    assert!(is_shown_list_fresh(PREPARED_AT_MS, PREPARED_AT_MS));
+    assert!(is_shown_list_fresh(
+      PREPARED_AT_MS,
+      PREPARED_AT_MS + PREVIEW_MAX_AGE_MS
+    ));
+    assert!(!is_shown_list_fresh(
+      PREPARED_AT_MS,
+      PREPARED_AT_MS + PREVIEW_MAX_AGE_MS + 1
+    ));
+  }
+
+  #[test]
+  fn a_clock_set_back_makes_the_list_stale() {
+    assert!(
+      is_shown_list_fresh(PREPARED_AT_MS, PREPARED_AT_MS - PREVIEW_FUTURE_LEEWAY_MS),
+      "a small step back is within the leeway"
+    );
+    assert!(!is_shown_list_fresh(
+      PREPARED_AT_MS,
+      PREPARED_AT_MS - PREVIEW_FUTURE_LEEWAY_MS - 1
+    ));
+    assert!(!is_shown_list_fresh(
+      PREPARED_AT_MS,
+      PREPARED_AT_MS - 24 * PREVIEW_MAX_AGE_MS
+    ));
+  }
+
+  #[test]
+  fn extreme_times_do_not_overflow() {
+    assert!(!is_shown_list_fresh(i64::MIN, i64::MAX));
+    assert!(!is_shown_list_fresh(i64::MAX, i64::MIN));
+  }
 }

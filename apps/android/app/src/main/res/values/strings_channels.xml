@@ -91,6 +91,7 @@
   <string name="space_delete_renamed_by_admin">Last renamed by %1$s, an admin</string>
   <string name="space_delete_renamed_by_member">Last renamed by %1$s, a member</string>
   <string name="space_delete_member_name_kept">A member chose this name, so its members\' devices keep its history for a while before it goes.</string>
+  <string name="space_delete_unconfirmed_may_be_kept">Members\' devices may keep this channel\'s history for a while: this device can\'t confirm its name and space.</string>
   <string name="space_leave_confirm">Leave</string>
   <string name="browse_filter_people">Find a person</string>
   <string name="browse_filter_channels">Find a channel</string>

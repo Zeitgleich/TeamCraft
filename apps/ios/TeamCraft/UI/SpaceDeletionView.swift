@@ -123,13 +123,21 @@ private struct SpaceDeletionRow: View {
           .font(.app(.footnote))
           .foregroundStyle(.secondary)
       }
-      if channel.keepsHistory {
-        Text("space_delete_member_name_kept")
+      if let note = historyNoteText(channel.historyNote) {
+        Text(note)
           .font(.app(.footnote))
           .foregroundStyle(.secondary)
       }
     }
     .accessibilityElement(children: .combine)
+  }
+
+  private func historyNoteText(_ note: SpaceDeletionHistoryNote) -> LocalizedStringKey? {
+    switch note {
+    case .none: return nil
+    case .memberNameKept: return "space_delete_member_name_kept"
+    case .mayBeKept: return "space_delete_unconfirmed_may_be_kept"
+    }
   }
 
   private func renamerText(_ renamer: ChannelRenamer) -> LocalizedStringKey {

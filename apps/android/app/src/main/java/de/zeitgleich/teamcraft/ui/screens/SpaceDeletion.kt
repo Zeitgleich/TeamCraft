@@ -37,6 +37,7 @@ import de.zeitgleich.teamcraft.ui.MainViewModel
 import kotlinx.coroutines.launch
 import uniffi.teamcraft_ffi.ChannelRenamerRole
 import uniffi.teamcraft_ffi.SpaceDeletionChannel
+import uniffi.teamcraft_ffi.SpaceDeletionHistoryNote
 import uniffi.teamcraft_ffi.SpaceDeletionPreview
 
 /** What the confirmation knows of the channels a space's deletion takes. */
@@ -144,14 +145,21 @@ private fun ChannelRow(channel: SpaceDeletionChannel) {
         color = MaterialTheme.colorScheme.onSurfaceVariant,
       )
     }
-    if (channel.keepsHistory) {
+    historyNoteText(channel.historyNote)?.let { note ->
       Text(
-        stringResource(R.string.space_delete_member_name_kept),
+        stringResource(note),
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
       )
     }
   }
+}
+
+@StringRes
+private fun historyNoteText(note: SpaceDeletionHistoryNote): Int? = when (note) {
+  SpaceDeletionHistoryNote.NONE -> null
+  SpaceDeletionHistoryNote.MEMBER_NAME_KEPT -> R.string.space_delete_member_name_kept
+  SpaceDeletionHistoryNote.MAY_BE_KEPT -> R.string.space_delete_unconfirmed_may_be_kept
 }
 
 @StringRes

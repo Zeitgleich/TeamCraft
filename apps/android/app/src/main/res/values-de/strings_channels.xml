@@ -91,6 +91,7 @@
   <string name="space_delete_renamed_by_admin">Zuletzt umbenannt von %1$s, einer Admin-Person</string>
   <string name="space_delete_renamed_by_member">Zuletzt umbenannt von %1$s, einem Mitglied</string>
   <string name="space_delete_member_name_kept">Ein Mitglied hat diesen Namen gewählt, deshalb behalten die Geräte der Mitglieder den Verlauf noch eine Weile, bevor er verschwindet.</string>
+  <string name="space_delete_unconfirmed_may_be_kept">Die Geräte der Mitglieder behalten den Verlauf dieses Kanals möglicherweise noch eine Weile: Dieses Gerät kann seinen Namen und Space nicht bestätigen.</string>
   <string name="space_leave_confirm">Verlassen</string>
   <string name="browse_filter_people">Person suchen</string>
   <string name="browse_filter_channels">Kanal suchen</string>

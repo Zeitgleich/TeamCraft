@@ -259,6 +259,7 @@ space-delete-named-by-founder = Beim Anlegen benannt von { $name }
 space-delete-renamed-by-admin = Zuletzt umbenannt von { $name }, einer Admin-Person
 space-delete-renamed-by-member = Zuletzt umbenannt von { $name }, einem Mitglied
 space-delete-member-name-kept = Ein Mitglied hat diesen Namen gewählt, deshalb behalten die Geräte der Mitglieder den Verlauf noch eine Weile, bevor er verschwindet.
+space-delete-unconfirmed-may-be-kept = Die Geräte der Mitglieder behalten den Verlauf dieses Kanals möglicherweise noch eine Weile: Dieses Gerät kann seinen Namen und Space nicht bestätigen.
 channel-add-people = Personen hinzufügen
 channel-pick-person = Person auswählen
 channel-share-history = Bisherigen Verlauf mit ihnen teilen

@@ -27,9 +27,21 @@ pub struct SpaceDeletionChannel {
   /// Who set the current name; `None` where this device holds no verified anchor for the channel
   /// (one it isn't in, or one from before anchors).
   pub maybe_renamed_by: Option<ChannelRenamer>,
-  /// A member set the name of a signed deletion's channel: members' devices keep its history for
-  /// a while, and the confirmation says so.
-  pub keeps_history: bool,
+  /// What the confirmation says of the channel's history on members' devices.
+  pub history_note: SpaceDeletionHistoryNote,
+}
+
+/// Whether members' devices keep a channel's history for a while after a signed deletion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum SpaceDeletionHistoryNote {
+  /// Nothing to say: the deletion purges it at once, or it is unsigned (every channel is kept for
+  /// the retention then, and the confirmation doesn't single any out).
+  None,
+  /// A member chose the name, so members' devices keep its history for a while.
+  MemberNameKept,
+  /// This device holds no verified anchor for the channel, so it can't tell whether members'
+  /// devices will purge it at once: they may keep its history for a while.
+  MayBeKept,
 }
 
 /// Who set a channel's current name, and in which role.
@@ -71,18 +83,24 @@ pub(crate) fn space_deletion_preview(
           display_name: display_name(renamer.user).unwrap_or_default(),
           role: renamer.role.into(),
         });
-        let keeps_history = is_signed
-          && maybe_renamed_by
-            .as_ref()
-            .is_some_and(|renamer| renamer.role == ChannelRenamerRole::Member);
+        let history_note = history_note(is_signed, maybe_renamed_by.as_ref().map(|renamer| renamer.role));
         SpaceDeletionChannel {
           conversation_id: channel.conversation.to_string(),
           name: channel.name,
           maybe_renamed_by,
-          keeps_history,
+          history_note,
         }
       })
       .collect(),
+  }
+}
+
+fn history_note(is_signed: bool, maybe_role: Option<ChannelRenamerRole>) -> SpaceDeletionHistoryNote {
+  match (is_signed, maybe_role) {
+    (false, _) => SpaceDeletionHistoryNote::None,
+    (true, None) => SpaceDeletionHistoryNote::MayBeKept,
+    (true, Some(ChannelRenamerRole::Member)) => SpaceDeletionHistoryNote::MemberNameKept,
+    (true, Some(_)) => SpaceDeletionHistoryNote::None,
   }
 }
 
@@ -142,8 +160,16 @@ mod tests {
     assert_eq!(member.name, "old-test");
     assert_eq!(member.conversation_id, "4");
     assert_eq!(member.maybe_renamed_by.as_ref().unwrap().display_name, "Member B");
-    assert!(member.keeps_history, "a member's name keeps the history a while");
-    assert!(preview.channels[..3].iter().all(|channel| !channel.keeps_history));
+    assert_eq!(
+      member.history_note,
+      SpaceDeletionHistoryNote::MemberNameKept,
+      "a member's name keeps the history a while"
+    );
+    assert!(
+      preview.channels[..3]
+        .iter()
+        .all(|channel| channel.history_note == SpaceDeletionHistoryNote::None)
+    );
   }
 
   #[test]
@@ -151,21 +177,33 @@ mod tests {
     let preview = space_deletion_preview(
       model(
         false,
-        vec![channel("4", "old-test", Some((MEMBER, RenamerRoleModel::Member)))],
+        vec![
+          channel("4", "old-test", Some((MEMBER, RenamerRoleModel::Member))),
+          channel("5", "general", None),
+        ],
       ),
       known_users,
     );
 
     assert!(!preview.is_signed);
-    assert!(!preview.channels[0].keeps_history);
+    assert!(
+      preview
+        .channels
+        .iter()
+        .all(|channel| channel.history_note == SpaceDeletionHistoryNote::None)
+    );
   }
 
   #[test]
-  fn a_channel_without_an_anchor_names_nobody() {
+  fn a_channel_without_an_anchor_names_nobody_and_may_be_kept() {
     let preview = space_deletion_preview(model(true, vec![channel("1", "general", None)]), known_users);
 
     assert_eq!(preview.channels[0].maybe_renamed_by, None);
-    assert!(!preview.channels[0].keeps_history);
+    assert_eq!(
+      preview.channels[0].history_note,
+      SpaceDeletionHistoryNote::MayBeKept,
+      "without an anchor here, members' devices may keep it"
+    );
   }
 
   #[test]
