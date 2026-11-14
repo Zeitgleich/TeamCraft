@@ -322,6 +322,8 @@ impl WorkerTransport for FetchTransport {
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
+// Test helpers outside `#[test]` functions panic on failure like the tests themselves.
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
   use std::cell::RefCell;
   use std::time::{SystemTime, UNIX_EPOCH};
