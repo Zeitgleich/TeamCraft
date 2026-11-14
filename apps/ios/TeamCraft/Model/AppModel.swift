@@ -1390,6 +1390,16 @@ final class AppModel {
     try await core().joinCall(conversationId: conversationId, isMuted: isMuted)
   }
 
+  /// Measures the link to the call service before a call (#1969): the call then starts on the
+  /// voice step and video the link carries. Once per network (the core keeps it and drops it on a
+  /// change), only in the foreground; nothing waits for it and a failure shows nothing.
+  func measureLink(meetingId: String? = nil) {
+    Task {
+      guard let core = try? core() else { return }
+      await core.measureLink(meetingId: meetingId)
+    }
+  }
+
   /// "Add people" in a DM or group DM call, or "Add notetaker" where the notetaker is no member:
   /// the meeting room the call moves into (docs/meetings.md, "A call becomes a meeting"). The same
   /// `requestKey` gets the same room.
