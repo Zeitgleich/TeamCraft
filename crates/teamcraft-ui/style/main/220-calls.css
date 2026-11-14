@@ -160,7 +160,7 @@
 .prejoin {
   --set-switch-w: 40px;
   --set-switch-h: 24px;
-  --set-switch-off: #3a4458;
+  --set-switch-off: var(--call-switch-off);
   display: grid;
   grid-template-columns: minmax(0, 1.25fr) minmax(320px, 0.75fr);
   grid-template-areas:
@@ -299,7 +299,7 @@
 
 @media (hover: hover) and (pointer: fine) {
   .prejoin .btn:hover:not(:disabled) {
-    background: #202838;
+    background: var(--call-hover);
   }
 }
 
@@ -411,17 +411,17 @@
 }
 
 .prejoin-bar-btn[aria-expanded="true"] {
-  background: #222b3c;
+  background: var(--call-hover);
 }
 
 @media (hover: hover) and (pointer: fine) {
   .prejoin-bar-btn:hover:not(:disabled) {
-    background: #202838;
+    background: var(--call-hover);
   }
 }
 
 .prejoin-bar-btn:active:not(:disabled) {
-  background: #2a3446;
+  background: var(--call-pressed);
 }
 
 .prejoin-bar-btn:disabled {
@@ -587,7 +587,7 @@
   flex: none;
   width: 18px;
   height: 18px;
-  color: #ffb27a;
+  color: var(--call-notice-text);
 }
 
 /* A guest's page has no app bar: the pre-join screen covers the window. */
