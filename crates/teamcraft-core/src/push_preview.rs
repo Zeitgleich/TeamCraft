@@ -4,18 +4,21 @@
 //! Notification extensions and the browser's service worker run next to the app and must not
 //! advance its state, so everything here only reads the store. A message the store doesn't hold is
 //! decrypted from the ciphertext the wake-up carries when it had room for it; otherwise, with a
-//! [`ServerApi`] (a still valid access token, see [`PushSession`]), it is fetched and decrypted.
+//! [`PreviewApi`] (a still valid access token, see [`PushSession`]), it is fetched and decrypted.
 //! Without either, or if that fails, the notification names the conversation and sender only.
+
+use std::future::Future;
 
 use serde::{Deserialize, Serialize};
 use teamcraft_crypto::push::open_wakeup;
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::{
-  Base64Bytes, ConversationKind, ConversationResponse, Id, ListMessagesQuery, MessageId, MessageResponse,
-  PushContentMode, PushKind, PushWakeUp, Snowflake, UserId, UserSummary,
+  Base64Bytes, ConversationId, ConversationKind, ConversationResponse, Id, ListMessagesQuery,
+  ListMessagesResponse, MessageId, MessageResponse, PushContentMode, PushKind, PushWakeUp, Snowflake, UserId,
+  UserSummary,
 };
 
-use crate::api::ServerApi;
+use crate::api::{ApiError, ServerApi};
 use crate::client::decrypt_plaintext;
 use crate::error::CoreError;
 use crate::people_names::shown_name;
@@ -32,6 +35,21 @@ const PUSH_SESSION_RECORD: &str = "push_session";
 const DEVICE_PUSH_CONTENT_RECORD: &str = "device_push_content";
 /// Longest text shown in a notification; the rest is cut at a character boundary.
 pub const MAX_PREVIEW_CHARS: usize = 240;
+
+/// What a preview asks of the server: a planned meeting's chat and the pushed message. Every
+/// [`ServerApi`] answers it, and so does the service worker's own client (`api::worker`, #1909),
+/// which keeps reqwest out of the worker.
+pub trait PreviewApi {
+  fn conversation(
+    &self,
+    conversation: ConversationId,
+  ) -> impl Future<Output = Result<ConversationResponse, ApiError>>;
+  fn list_messages(
+    &self,
+    conversation: ConversationId,
+    query: &ListMessagesQuery,
+  ) -> impl Future<Output = Result<ListMessagesResponse, ApiError>>;
+}
 
 /// The notification for one push.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -126,7 +144,7 @@ pub fn open_push_wakeup(store: &impl LocalStore, sealed: &[u8]) -> Result<PushWa
 
 /// The notification for a sealed push payload. `maybe_api` is used to fetch the message if the
 /// store doesn't have it yet.
-pub async fn push_preview<A: ServerApi>(
+pub async fn push_preview<A: PreviewApi>(
   store: &impl LocalStore,
   maybe_api: Option<&A>,
   sealed: &[u8],
@@ -358,7 +376,7 @@ impl std::fmt::Debug for PushSession {
 /// From the store if the app already has the message, else fetched and decrypted; failures only
 /// cost the preview (and name why). Also whether the sender sent it silently, and whether the
 /// message is known to belong to the wake-up's conversation.
-async fn preview_content<A: ServerApi>(
+async fn preview_content<A: PreviewApi>(
   store: &impl LocalStore,
   maybe_api: Option<&A>,
   wake_up: &PushWakeUp,
@@ -487,7 +505,7 @@ fn is_silent(content: &ShownContent) -> bool {
   matches!(content, ShownContent::Text { is_silent: true, .. })
 }
 
-async fn fetch_and_decrypt<A: ServerApi>(
+async fn fetch_and_decrypt<A: PreviewApi>(
   store: &impl LocalStore,
   api: &A,
   wake_up: &PushWakeUp,
@@ -648,6 +666,23 @@ fn truncate(body: &str) -> String {
   match text.char_indices().nth(MAX_PREVIEW_CHARS) {
     Some((cut, _)) => format!("{}…", &text[..cut]),
     None => text.to_string(),
+  }
+}
+
+impl<A: ServerApi> PreviewApi for A {
+  fn conversation(
+    &self,
+    conversation: ConversationId,
+  ) -> impl Future<Output = Result<ConversationResponse, ApiError>> {
+    ServerApi::conversation(self, conversation)
+  }
+
+  fn list_messages(
+    &self,
+    conversation: ConversationId,
+    query: &ListMessagesQuery,
+  ) -> impl Future<Output = Result<ListMessagesResponse, ApiError>> {
+    ServerApi::list_messages(self, conversation, query)
   }
 }
 

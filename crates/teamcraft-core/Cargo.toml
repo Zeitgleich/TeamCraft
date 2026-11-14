@@ -164,6 +164,12 @@ web-sys = { version = "0.3.83", features = [
   "Window",
   "WindowClient",
   "WorkerGlobalScope",
+  # The service worker's API requests without reqwest (src/api/worker.rs, #1909).
+  "Headers",
+  "Request",
+  "RequestInit",
+  "RequestRedirect",
+  "Response",
   # Blob transfers with progress (fetch reports none for uploads): src/api/xhr.rs.
   "ProgressEvent",
   "XmlHttpRequest",
