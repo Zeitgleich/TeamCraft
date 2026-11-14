@@ -7,7 +7,7 @@
 use leptos::html;
 use leptos::prelude::*;
 use teamcraft_client_api::canvas::{CanvasDoc, MAX_PAGE_TITLE_CHARS, PageEntry, page_title};
-use teamcraft_proto::CanvasPageId;
+use teamcraft_proto::{CanvasPageId, MAX_LISTED_CANVAS_PAGES};
 use wasm_bindgen::JsCast;
 
 use crate::components::icons::{Icon, IconName};
@@ -42,6 +42,8 @@ pub fn CanvasPages(
   let list = StoredValue::new_local(CanvasDoc::new());
   let pages = RwSignal::new(Vec::<PageEntry>::new());
   let dialog = RwSignal::new(None::<PageDialog>);
+  // The list shows at most the limit; at it, no page is added (CanvasDoc::add_page refuses too).
+  let is_full = Memo::new(move |_| pages.with(|pages| pages.len() >= MAX_LISTED_CANVAS_PAGES));
 
   Effect::new(move |_| {
     let updates = stored.with(|stored| stored.updates.clone());
@@ -174,6 +176,8 @@ pub fn CanvasPages(
             class="icon-btn"
             aria-label=move || i18n.t("canvas-page-new")
             title=move || i18n.t("canvas-page-new")
+            disabled=move || is_full.get()
+            aria-describedby=move || is_full.get().then_some("canvas-pages-full")
             on:click=move |_| dialog.set(Some(PageDialog::New))
           >
             <Icon name=IconName::Plus />
@@ -202,6 +206,14 @@ pub fn CanvasPages(
             }
           })}
         </div>
+        <Show when=move || is_full.get() fallback=|| ()>
+          <p id="canvas-pages-full" class="canvas-note canvas-pages-full">
+            {move || {
+              let limit = MAX_LISTED_CANVAS_PAGES.to_string();
+              i18n.t_with("canvas-pages-full", &[("count", limit.as_str())])
+            }}
+          </p>
+        </Show>
       </Show>
       {move || match dialog.get() {
         None => ().into_any(),

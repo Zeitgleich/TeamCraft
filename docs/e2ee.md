@@ -4772,6 +4772,13 @@ list's, not the store's). A client from before pages ignores the `page` field an
 page's updates into its first page, where the `page_blocks` root stays out of sight; its snapshot of
 the first page then carries them along, which costs size but shows nothing.
 
+Both lists are bounded, so a member can't make every other member's device keep or show an unbounded
+number of pages: a channel lists at most 50 further pages (`MAX_LISTED_CANVAS_PAGES`: the first 50
+entries that aren't deleted, in the list's order, so every client shows the same ones; a client adds
+none at the limit and says why), and a device keeps the updates of at most 200 further pages of a
+channel, deleted ones included (`MAX_KEPT_CANVAS_PAGES`): an edit of a page beyond them is dropped.
+The limits are part of the protocol, not settings, because all members' clients must agree on them.
+
 **Moving a block.** Yjs has no move: a moved block is removed and inserted again at its new place
 with its ID, kind (a kind of a newer version too), check mark, text, formatting and file reference.
 Typing into the block on another device while it moves is lost (it lands in the removed copy); two

@@ -53,7 +53,7 @@ pub use history::{
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{Base64Bytes, CanvasPageId, MessageId};
+use teamcraft_proto::{Base64Bytes, CanvasPageId, MAX_LISTED_CANVAS_PAGES, MessageId};
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
 use yrs::undo::{Options as UndoOptions, UndoManager};
@@ -596,8 +596,9 @@ impl CanvasDoc {
     (id, update)
   }
 
-  /// The further pages of the channel, in the order they were added, without deleted ones. Read
-  /// from the first page's document.
+  /// The further pages of the channel, in the order they were added, without deleted ones, at most
+  /// [`MAX_LISTED_CANVAS_PAGES`] (the first ones in the list's order, the same on every device).
+  /// Read from the first page's document.
   pub fn pages(&self) -> Vec<PageEntry> {
     let txn = self.doc.transact();
     let mut pages: Vec<PageEntry> = Vec::new();
@@ -616,12 +617,23 @@ impl CanvasDoc {
         .map(|title| page_title(&title))
         .unwrap_or_default();
       pages.push(PageEntry { id, title });
+      if pages.len() == MAX_LISTED_CANVAS_PAGES {
+        break;
+      }
     }
     pages
   }
 
-  /// Adds a further page to the first page's list; its ID and the update.
+  /// Whether another page can be added: the list holds fewer than [`MAX_LISTED_CANVAS_PAGES`].
+  pub fn can_add_page(&self) -> bool {
+    self.pages().len() < MAX_LISTED_CANVAS_PAGES
+  }
+
+  /// Adds a further page to the first page's list; its ID and the update. `None` at the limit.
   pub fn add_page(&mut self, title: &str) -> Option<(CanvasPageId, Vec<u8>)> {
+    if !self.can_add_page() {
+      return None;
+    }
     let id = self.next_page_id()?;
     let mut txn = self.doc.transact_mut();
     let index = self.pages.len(&txn);
@@ -1992,6 +2004,32 @@ mod tests {
         page.sync(&[&added, &renamed, &deleted, &late]).unwrap();
         assert!(page.pages().is_empty());
       }
+    }
+
+    #[test]
+    fn a_channel_lists_and_adds_pages_up_to_the_limit_alike_everywhere() {
+      let mut alice = CanvasDoc::new();
+      let mut updates = Vec::new();
+      for index in 0..MAX_LISTED_CANVAS_PAGES - 1 {
+        updates.push(alice.add_page(&format!("p{index}")).unwrap().1);
+      }
+      let mut bob = CanvasDoc::from_updates(&updates).unwrap();
+      // Both add the last page at once: the list holds one more than the limit.
+      let (_, from_alice) = alice.add_page("alice").unwrap();
+      let (_, from_bob) = bob.add_page("bob").unwrap();
+      assert!(alice.add_page("more").is_none(), "none beyond the limit");
+      alice.sync(&[&from_bob]).unwrap();
+      bob.sync(&[&from_alice]).unwrap();
+      assert_eq!(alice.pages(), bob.pages());
+      assert_eq!(alice.pages().len(), MAX_LISTED_CANVAS_PAGES);
+      assert!(!bob.can_add_page());
+      // A deletion makes room, and the page left out shows.
+      let first = alice.pages()[0].id.clone();
+      let deleted = alice.delete_page(&first).unwrap();
+      bob.sync(&[&deleted]).unwrap();
+      assert_eq!(alice.pages(), bob.pages());
+      assert_eq!(bob.pages().len(), MAX_LISTED_CANVAS_PAGES);
+      assert!(!bob.can_add_page());
     }
 
     #[test]

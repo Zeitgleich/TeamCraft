@@ -15,7 +15,7 @@
 //! edit messages; each is kept as a record of its own ([`PageKey`]).
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{Base64Bytes, CanvasPageId, ConversationId, UserId};
+use teamcraft_proto::{Base64Bytes, CanvasPageId, ConversationId, MAX_KEPT_CANVAS_PAGES, UserId};
 
 use crate::error::CoreError;
 use crate::records;
@@ -24,6 +24,10 @@ use crate::store::{LocalStore, Table};
 /// The key prefix of a conversation's pages in [`Table::Account`], next to its bookmarks:
 /// `canvas/{conversation}` for the first page, `canvas/{conversation}/{page}` for a further one.
 pub const CANVAS_PREFIX: &str = "canvas/";
+
+/// The key prefix of the list of further pages a conversation has records of, for the bound
+/// [`MAX_KEPT_CANVAS_PAGES`]: `canvas-pages/{conversation}`.
+const KEPT_PAGES_PREFIX: &str = "canvas-pages/";
 
 /// Which page of which conversation a record holds.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,6 +121,10 @@ pub fn take_update(
   if record.updates.contains(update) {
     return Ok(());
   }
+  if record.updates.is_empty() && !keep_page(store, page)? {
+    tracing::warn!(conversation = %page.conversation, "an edit of a page beyond the kept pages was dropped");
+    return Ok(());
+  }
   // A record from before origins: the updates it holds have none.
   let missing = record.updates.len().saturating_sub(record.origins.len());
   if missing > 0 {
@@ -135,6 +143,25 @@ pub fn take_update(
     record.updates_since_snapshot.saturating_add(1)
   };
   records::put_json(store, Table::Account, &key, &record)
+}
+
+/// Whether a page's updates may be kept: the first page always, a further one if it is among the
+/// conversation's kept pages or there is room for it ([`MAX_KEPT_CANVAS_PAGES`]), which it then takes.
+fn keep_page(store: &impl LocalStore, page: &PageKey) -> Result<bool, CoreError> {
+  let Some(id) = &page.maybe_page else {
+    return Ok(true);
+  };
+  let key = format!("{KEPT_PAGES_PREFIX}{}", page.conversation);
+  let mut kept: Vec<CanvasPageId> = records::get_json(store, Table::Account, &key)?.unwrap_or_default();
+  if kept.contains(id) {
+    return Ok(true);
+  }
+  if kept.len() >= MAX_KEPT_CANVAS_PAGES {
+    return Ok(false);
+  }
+  kept.push(id.clone());
+  records::put_json(store, Table::Account, &key, &kept)?;
+  Ok(true)
 }
 
 /// Gives an own update the server's time once it was sent: kept at once with the device's time, it
@@ -320,5 +347,36 @@ mod tests {
     take_update(&store, &hostile, &bytes(b"c"), false, user(), 3).unwrap();
     assert_eq!(load(&store, &hostile).unwrap(), CanvasRecord::default());
     assert!(!compact(&store, &hostile, 0, b"c".to_vec(), Vec::new()).unwrap());
+  }
+
+  #[test]
+  fn a_conversation_keeps_a_bounded_number_of_further_pages() {
+    let store = MemoryStore::new();
+    let conversation = channel().conversation;
+    let page = |index: usize| PageKey::new(conversation, CanvasPageId::parse(&format!("{index:x}")).as_ref());
+    for index in 0..MAX_KEPT_CANVAS_PAGES {
+      take_update(&store, &page(index), &bytes(b"a"), false, user(), 1).unwrap();
+    }
+    take_update(
+      &store,
+      &page(MAX_KEPT_CANVAS_PAGES),
+      &bytes(b"a"),
+      false,
+      user(),
+      1,
+    )
+    .unwrap();
+    assert!(
+      load(&store, &page(MAX_KEPT_CANVAS_PAGES))
+        .unwrap()
+        .updates
+        .is_empty(),
+      "dropped"
+    );
+    // Pages kept already, and the first page, take updates as before.
+    take_update(&store, &page(0), &bytes(b"b"), false, user(), 2).unwrap();
+    assert_eq!(load(&store, &page(0)).unwrap().updates.len(), 2);
+    take_update(&store, &channel(), &bytes(b"c"), false, user(), 3).unwrap();
+    assert_eq!(load(&store, &channel()).unwrap().updates.len(), 1);
   }
 }
