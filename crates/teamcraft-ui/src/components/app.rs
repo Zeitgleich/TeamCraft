@@ -1286,6 +1286,7 @@ pub(crate) fn connect_calls(state: AppState) {
       CallEvent::Speakers(device) => backend.select_speakers(Some(device).filter(|id| !id.is_empty())),
       CallEvent::TestSpeakers(device) => backend.test_speakers(Some(device)),
       CallEvent::RefreshDevices => backend.refresh_media_devices(),
+      CallEvent::MeasureLink(maybe_meeting) => backend.measure_link(maybe_meeting),
       CallEvent::Preview(preview) => backend.set_call_preview(preview),
       CallEvent::Camera(is_on) => backend.set_call_camera(is_on),
       CallEvent::CameraDevice(device) => backend.select_camera(Some(device)),

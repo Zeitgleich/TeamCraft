@@ -424,6 +424,18 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
   SFU announces the bytes it takes in `joined` (`probe_bytes`); clients probe only such SFUs, older
   clients still get (and report) the SFU's trains. WebRTC probes with paced clusters at 3× and 6×
   the start rate instead; trains sent back to back need no pacer and answer in one round trip.
+- **Probe before the call (#1959):** the web client measures its link already on the pre-join
+  screen, and while a guest waits in a meeting's lobby, so the call starts on the voice step and
+  video layers the link carries (#1893). It needs a **link probe ticket** (`POST
+  /api/v1/calls/probe-ticket`): a JWT signed with the join tokens' key under its own audience
+  (`teamcraft-sfu-probe`) and kind, bound to one device, with an id, at most 60 s long. A member
+  gets one for any own active device; a guest only while waiting in, or let into, a meeting that is
+  on and hasn't removed them. It names no call and creates no call state. A connection whose first
+  message is `probe` with such a ticket gets the join's probe both ways and nothing else: no room,
+  no roster, nobody is told; each ticket opens one session, which ends after at most 10 s. The
+  result goes to the next join while it is at most 2 min old (a browser can't tell networks apart:
+  the age alone decides) and replaces the probe at the join; otherwise, and on any failure, the
+  join probes as before. Nothing waits for it. Native apps: #1969.
 - **Layers that are sent (#921):** a publisher's uplink budget pauses its top layers; it tells the
   SFU which layers it carries (`uplink_layers`), and the SFU allocates no higher one. A layer that
   stops arriving while a lower one keeps coming (an older publisher, a failing encoder) is

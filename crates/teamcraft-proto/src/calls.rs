@@ -30,6 +30,9 @@ use crate::{
 
 /// `aud` of call join tokens.
 pub const CALL_JOIN_TOKEN_AUDIENCE: &str = "teamcraft-sfu";
+/// `aud` of link probe tickets (#1959): never accepted where a join token is, and the other way
+/// round.
+pub const CALL_PROBE_TICKET_AUDIENCE: &str = "teamcraft-sfu-probe";
 
 /// QUIC application close code of an SFU that shuts down (a restart, a rolling deploy). Unlike the
 /// SFU's other closes it is not final: clients rejoin with a fresh join token, spread over a short
@@ -93,6 +96,39 @@ pub struct CallJoinClaims {
   /// SFU can't make it up; tokens of older servers lack it.
   #[serde(rename = "conversation_id", default, skip_serializing_if = "Option::is_none")]
   pub maybe_conversation_id: Option<ConversationId>,
+}
+
+/// Claims of a link probe ticket (#1959): a JWT signed by `teamcraft-server` like a join token,
+/// that lets one device measure its link to the SFU on the pre-join screen or in a meeting's lobby,
+/// before it may join anything. It grants padding up to the SFU's probe budget each way, and nothing
+/// else: no call, no room, no participant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallProbeClaims {
+  /// Issuer, the server's public base URL.
+  pub iss: String,
+  /// Always [`CALL_PROBE_TICKET_AUDIENCE`].
+  pub aud: String,
+  /// Issued at, Unix seconds.
+  pub iat: u64,
+  /// Expiry, Unix seconds.
+  pub exp: u64,
+  /// The ticket's id: the SFU takes each ticket once.
+  pub jti: String,
+  /// Always [`CallTokenKind::Probe`]: a second wall next to the audience.
+  pub kind: CallTokenKind,
+  pub user_id: UserId,
+  pub device_id: DeviceId,
+}
+
+/// What a signed call token is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallTokenKind {
+  /// A link probe ticket ([`CallProbeClaims`]).
+  Probe,
+  /// A kind this SFU doesn't know: refused.
+  #[serde(other)]
+  Unknown,
 }
 
 /// Messages from the client to the SFU.
@@ -204,6 +240,13 @@ pub enum CallClientMessage {
   /// a quiet session's path alive in the browser (#841). Older SFUs ignore it.
   Ping {
     id: u64,
+  },
+  /// First message of a connection that only measures the link (#1959): `ticket` is a link probe
+  /// ticket from `teamcraft-server` ([`CallProbeClaims`]). The SFU answers the client's padding
+  /// with [`CallEvent::TransportFeedback`], probes the downlink and reports
+  /// [`CallEvent::DownlinkMeasured`], then closes. An older SFU answers that it expected a join.
+  Probe {
+    ticket: String,
   },
   /// First message of a connection that takes over a session of this device instead of joining
   /// (#1309): `secret` is the session's [`CallEvent::Joined`] `switch_secret`, which went out only
@@ -603,6 +646,7 @@ impl fmt::Debug for CallClientMessage {
         .finish(),
       Self::MoveHere => f.write_str("MoveHere"),
       Self::Ping { id } => f.debug_struct("Ping").field("id", id).finish(),
+      Self::Probe { .. } => f.debug_struct("Probe").field("ticket", &"[redacted]").finish(),
       Self::Switch { .. } => f.debug_struct("Switch").field("secret", &"[redacted]").finish(),
       Self::SetMuted { is_muted } => f.debug_struct("SetMuted").field("is_muted", is_muted).finish(),
       Self::Unknown => f.write_str("Unknown"),
@@ -1198,6 +1242,44 @@ mod tests {
     let older = json.replace(r#","conversation_id":"9""#, "");
     let parsed: CallJoinClaims = serde_json::from_str(&older).unwrap();
     assert_eq!(parsed.maybe_conversation_id, None, "tokens of older servers");
+  }
+
+  /// #1959: a probe ticket has its own audience and kind, and a join token's claims don't parse as
+  /// one (no `jti`, no `kind`).
+  #[test]
+  fn probe_ticket_wire_format() {
+    let claims = CallProbeClaims {
+      iss: "https://chat.example.com".into(),
+      aud: CALL_PROBE_TICKET_AUDIENCE.into(),
+      iat: 100,
+      exp: 130,
+      jti: "abc".into(),
+      kind: CallTokenKind::Probe,
+      user_id: UserId::from_snowflake(Snowflake::new(4).unwrap()),
+      device_id: DeviceId::from_snowflake(Snowflake::new(5).unwrap()),
+    };
+    let json = serde_json::to_string(&claims).unwrap();
+    assert_eq!(
+      json,
+      r#"{"iss":"https://chat.example.com","aud":"teamcraft-sfu-probe","iat":100,"exp":130,"jti":"abc","kind":"probe","user_id":"4","device_id":"5"}"#
+    );
+    assert_ne!(CALL_PROBE_TICKET_AUDIENCE, CALL_JOIN_TOKEN_AUDIENCE);
+    let join = r#"{"iss":"https://chat.example.com","aud":"teamcraft-sfu","iat":100,"exp":160,"call_id":"7","user_id":"4","device_id":"5"}"#;
+    assert!(serde_json::from_str::<CallProbeClaims>(join).is_err());
+    let other_kind = json.replace(r#""kind":"probe""#, r#""kind":"later""#);
+    let parsed: CallProbeClaims = serde_json::from_str(&other_kind).unwrap();
+    assert_eq!(parsed.kind, CallTokenKind::Unknown);
+
+    let probe = CallClientMessage::Probe {
+      ticket: "secret-ticket".into(),
+    };
+    let message = serde_json::to_string(&probe).unwrap();
+    assert_eq!(message, r#"{"type":"probe","ticket":"secret-ticket"}"#);
+    assert_eq!(
+      serde_json::from_str::<CallClientMessage>(&message).unwrap(),
+      probe
+    );
+    assert!(!format!("{probe:?}").contains("secret-ticket"));
   }
 
   #[test]

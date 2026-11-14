@@ -193,6 +193,14 @@ pub enum CallAction {
   SetPreview {
     preview: CallPreview,
   },
+  /// Measures the link to the SFU before the call (#1959): the pre-join screen opened, or the
+  /// meeting's lobby (`maybe_meeting`, which a guest's ticket needs). Answers at once; the call
+  /// joined later starts from what it showed. Nothing waits for it, and a module without it (the
+  /// desktop shell's, older ones) ignores it: the join measures then.
+  MeasureLink {
+    #[serde(rename = "meeting", default, skip_serializing_if = "Option::is_none")]
+    maybe_meeting: Option<teamcraft_proto::MeetingId>,
+  },
   /// Plays a short test sound on the speakers (`None`: the system default); finishes when it
   /// has played, fails when it can't play. The desktop shell's: the browser page plays it itself,
   /// since it has to start inside the click.

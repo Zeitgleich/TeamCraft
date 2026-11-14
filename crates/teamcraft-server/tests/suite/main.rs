@@ -20,6 +20,7 @@ mod caldav_calcraft;
 mod call_e2e;
 mod call_features;
 mod call_move;
+mod call_probe;
 mod call_roster;
 mod calls;
 mod channel_deletion;

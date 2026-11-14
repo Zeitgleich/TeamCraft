@@ -127,6 +127,7 @@ use crate::call_video::ReceivedVideoFrame;
 use crate::capture_health::StallChange;
 use crate::datagram::SimulcastLayer;
 use crate::jitter::{JitterBuffer, JitterBufferConfig, Playout};
+use crate::link_probe::{LinkProbeClient, PriorLink, PriorUplink};
 use crate::receive_load::{
   DecodedFrame, FrameInterval, Importance, ReceiveLoad, ReceiveOverload, WatchedStream,
 };
@@ -146,6 +147,8 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(20);
 const MAX_FRAMES_PER_PULSE: u32 = 5;
 /// Feedback and allocation period.
 const TIMER_INTERVAL: Duration = Duration::from_millis(100);
+/// A link probe before the call looks at its trains and feedback this often (#1959).
+const LINK_PROBE_TICK: Duration = Duration::from_millis(50);
 /// The page timer's pulse period (the fallback clock; throttled in hidden tabs).
 const PULSE_INTERVAL_MS: i32 = 10;
 /// Pulses of the audio clock per second of audio (one every 10 ms).
@@ -230,6 +233,18 @@ pub struct WebCallConfig {
   /// How this browser encodes AV1 and VP9 ([`CodecSupport::share_encoders`]): a screen share's
   /// top layer goes out in them at full size only from a hardware encoder (#1733).
   pub share_encoders: ShareEncoders,
+  /// What a measurement on the pre-join screen or in the lobby showed ([`measure_link`], #1959):
+  /// the join starts from it while it is fresh. A browser can't tell networks apart, so its age
+  /// is all that decides.
+  pub maybe_prior_link: Option<PriorLink>,
+}
+
+/// Where and with what a page measures its link before the call (#1959): from a link probe
+/// ticket of `teamcraft-server`.
+pub struct LinkProbeTarget {
+  pub sfu_url: String,
+  pub ticket: String,
+  pub certificate_hashes: Vec<[u8; 32]>,
 }
 
 /// Gets a fresh join ticket from `teamcraft-server` in the page.
@@ -1211,6 +1226,9 @@ async fn run_call(
     .inspect_err(|error| warn!(%error, "no audio clock; video and timers slow down in a hidden tab"))
     .ok();
   let _pulse_timer = Interval::start(PULSE_INTERVAL_MS, state.pulses.clone())?;
+  if let Some(prior) = config.maybe_prior_link {
+    engine.set_prior_link(prior);
+  }
   engine.join(config.token.clone());
   state.flush(&mut engine)?;
 
@@ -3785,6 +3803,72 @@ fn opus_config(
       .map(|(name, value)| (*name, tuning_value(*value))),
   );
   dictionary(&entries).map_err(browser("AudioEncoder"))
+}
+
+/// Measures the link to the SFU before the call (#1959) over WebTransport: `None` when nothing
+/// came of it (no connection, an SFU that takes no tickets, a refused ticket). Never more than
+/// [`crate::link_probe::LINK_PROBE_TIMEOUT`] once connected; the session closes at the end.
+pub async fn measure_link(target: LinkProbeTarget) -> Option<PriorLink> {
+  let sessions = OpenSessions::default();
+  let (inputs_tx, mut inputs) = mpsc::unbounded();
+  let generation = 0;
+  let transport = match Transport::connect(
+    &target.sfu_url,
+    &target.certificate_hashes,
+    &sessions,
+    &inputs_tx,
+    generation,
+  )
+  .await
+  {
+    Ok(transport) => transport,
+    Err(error) => {
+      debug!(%error, "the link probe didn't connect");
+      return None;
+    },
+  };
+  let probe = CallClientMessage::Probe {
+    ticket: target.ticket,
+  };
+  let mut client = LinkProbeClient::new(Instant::now());
+  if transport.send_signal(&probe).is_ok() {
+    loop {
+      let now = Instant::now();
+      for datagram in client.due_padding(now) {
+        transport.send_datagram(&datagram);
+      }
+      if let Some(feedback) = client.take_feedback(now) {
+        let _ = transport.send_signal(&CallClientMessage::TransportFeedback { feedback });
+      }
+      if client.is_done(now) {
+        break;
+      }
+      match select(inputs.next(), Box::pin(sleep(LINK_PROBE_TICK))).await {
+        Either::Left((Some(input), _)) => match input {
+          Input::Signal {
+            message: CallServerMessage::Event { event, .. },
+            ..
+          } => client.on_event(&event),
+          Input::Signal {
+            message: CallServerMessage::Error { error },
+            ..
+          } => {
+            debug!(error_code = ?error.error_code, "the SFU refused the link probe");
+            break;
+          },
+          Input::Datagram { bytes, read_at, .. } => client.on_datagram(&bytes, read_at),
+          Input::SessionEnded { .. } => break,
+          _ => {},
+        },
+        Either::Left((None, _)) => break,
+        Either::Right(_) => {},
+      }
+    }
+  }
+  sessions.close_all();
+  let result = client.result(Instant::now());
+  let has_shown_anything = result.uplink != PriorUplink::Unknown || result.maybe_downlink.is_some();
+  has_shown_anything.then_some(result)
 }
 
 /// Waits on the page's event loop.

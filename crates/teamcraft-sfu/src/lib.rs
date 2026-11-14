@@ -13,6 +13,7 @@ pub mod forwarding;
 pub mod health;
 pub mod ids;
 pub mod layers;
+pub mod link_probe;
 pub mod metrics;
 pub mod net;
 pub mod prejoin;

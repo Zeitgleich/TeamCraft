@@ -26,7 +26,7 @@ use std::{
   future::Future,
   net::{SocketAddr, UdpSocket},
   sync::{
-    Arc, OnceLock,
+    Arc, Mutex, OnceLock, PoisonError,
     atomic::{AtomicBool, AtomicUsize, Ordering},
   },
   time::{Duration, Instant},
@@ -34,6 +34,7 @@ use std::{
 
 use socket2::{Domain, Protocol, Socket, Type};
 use teamcraft_media::dave::DaveEpoch;
+use teamcraft_media::join_probe::LinkMeasurement;
 
 use teamcraft_media::quic_send::set_datagram_send_buffer;
 use teamcraft_proto::{
@@ -58,6 +59,7 @@ use crate::{
   auth::{JoinGrant, JoinTokenVerifier},
   config::{QuicCongestion, SfuConfig},
   fallback,
+  link_probe::{LinkProbe, LinkProbeConfig, ProbeTickets},
   net::bind_dual_stack,
   prejoin::{PreJoinLimiter, PreJoinSlot},
   quality::{CallQuality, Transport, sample_path},
@@ -66,7 +68,9 @@ use crate::{
   room::{
     JoinOutcome, ParticipantHandle, ParticipantLink, QuicLink, Room, RoomError, RoomStats, Rooms, SessionId,
   },
-  signaling::{Dequeued, Handover, Outgoing, SignalQueue, SignalingError, read_message, write_message},
+  signaling::{
+    Dequeued, EventSequence, Handover, Outgoing, SignalQueue, SignalingError, read_message, write_message,
+  },
   switch::{SwitchRegistration, SwitchSecret, SwitchSecrets, SwitchTarget},
 };
 
@@ -114,6 +118,8 @@ pub(crate) struct Shared {
   pub(crate) has_warned_of_forwarding: AtomicBool,
   /// The secrets that move running sessions to another connection (#1309).
   pub(crate) switch_secrets: SwitchSecrets,
+  /// Link probe tickets taken (#1959): each opens one session.
+  probe_tickets: Mutex<ProbeTickets>,
 }
 
 /// Carries out meeting host controls on this SFU's calls (see [`crate::control`]).
@@ -287,6 +293,7 @@ impl Sfu {
         fallback_connections: AtomicUsize::new(0),
         has_warned_of_forwarding: AtomicBool::new(false),
         switch_secrets: SwitchSecrets::default(),
+        probe_tickets: Mutex::new(ProbeTickets::default()),
       }),
     })
   }
@@ -483,6 +490,9 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
   if let CallClientMessage::Switch { secret } = &first {
     return take_over(shared, connection, (send, recv), secret.as_slice(), prejoin_slot).await;
   }
+  if let CallClientMessage::Probe { ticket } = &first {
+    return measure_link(shared, connection, (send, recv), ticket, prejoin_slot).await;
+  }
 
   let (signal_tx, signal_rx) = mpsc::channel(shared.config.signaling_queue_len.max(1));
   let handle = ParticipantHandle {
@@ -514,6 +524,134 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
   drop(registration);
   release_slot(shared, &room, grant, session_id, end).await;
   result
+}
+
+/// A connection that only measures its client's link (#1959): the ticket is verified and taken
+/// once, then the client's padding gets feedback and the downlink is probed, for at most
+/// `link_probe_length`. It holds its pre-join slot throughout: it counts against its address like
+/// a session that hasn't joined. It enters no room and is reported to nobody.
+async fn measure_link(
+  shared: &Shared,
+  connection: Connection,
+  (mut send, mut recv): (SendStream, RecvStream),
+  ticket: &str,
+  prejoin_slot: PreJoinSlot,
+) -> Result<(), SessionError> {
+  let config = LinkProbeConfig {
+    probe_bytes: shared.config.forwarding.probe_bytes,
+    max_length: shared.config.link_probe_length,
+    max_remembered_tickets: shared.config.max_remembered_probe_tickets,
+  };
+  let refusal = match shared.verifier.verify_probe(ticket) {
+    Ok(grant) if config.probe_bytes == 0 => {
+      debug!(participant_id = %grant.device_id, "link probe refused: probing is off");
+      Some(ErrorBody::new(ErrorCode::Unavailable, "link probes are off"))
+    },
+    Ok(grant) => {
+      let is_new = lock_tickets(&shared.probe_tickets).take(
+        &grant.ticket_id,
+        grant.expires_at_unix_secs,
+        unix_now_secs(),
+        config.max_remembered_tickets,
+      );
+      (!is_new).then(|| ErrorBody::new(ErrorCode::InvalidJoinToken, "probe ticket used"))
+    },
+    Err(error) => {
+      debug!(%error, "link probe ticket refused");
+      Some(ErrorBody::new(ErrorCode::InvalidJoinToken, error.to_string()))
+    },
+  };
+  if let Some(error) = refusal {
+    reject(&mut send, CallServerMessage::Error { error }).await;
+    return Ok(());
+  }
+  let mut probe = LinkProbe::new(config, Instant::now());
+  let mut sequence = EventSequence::default();
+  let mut interval = tokio::time::interval(PERIODIC_INTERVAL);
+  interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+  let max_bytes = shared.config.max_signaling_message_bytes;
+  let result = loop {
+    tokio::select! {
+      message = read_message::<CallClientMessage>(&mut recv, max_bytes) => match message {
+        Ok(CallClientMessage::TransportFeedback { feedback }) => {
+          if let Some(measurement) = probe.on_feedback(&feedback) {
+            send_measured(&mut send, &mut sequence, measurement).await?;
+          }
+        },
+        // Pings and anything else of a measuring client need no answer.
+        Ok(_) => {},
+        Err(error) => break Err(SessionError::from(error)),
+      },
+      datagram = connection.receive_datagram() => match datagram {
+        Ok(datagram) => {
+          if let Err(error) = probe.on_datagram(&datagram.payload(), Instant::now()) {
+            debug!(%error, "dropping a datagram of a link probe");
+          }
+        },
+        Err(error) => break Err(SessionError::from(error)),
+      },
+      _ = interval.tick() => {
+        let tick = probe.on_timer(Instant::now());
+        if let Some(feedback) = tick.maybe_feedback {
+          write_event(&mut send, &mut sequence, CallEvent::TransportFeedback { feedback }).await?;
+        }
+        for datagram in &tick.padding {
+          // A datagram the connection can't take now is padding lost: the probe counts it so.
+          let _ = connection.send_datagram(datagram);
+        }
+        if let Some(measurement) = tick.maybe_measured {
+          send_measured(&mut send, &mut sequence, measurement).await?;
+        }
+        if tick.is_over {
+          break Ok(());
+        }
+      },
+    }
+  };
+  drop(prejoin_slot);
+  let _ = send.finish().await;
+  connection.close(0u32.into(), b"measured");
+  match result {
+    // The client hung up once it had what it needed.
+    Err(SessionError::Connection(_) | SessionError::Signaling(_)) | Ok(()) => Ok(()),
+    Err(error) => Err(error),
+  }
+}
+
+async fn send_measured(
+  send: &mut SendStream,
+  sequence: &mut EventSequence,
+  measurement: LinkMeasurement,
+) -> Result<(), SessionError> {
+  let event = CallEvent::DownlinkMeasured {
+    capacity_bps: measurement.capacity_bps,
+    loss_percent: measurement.loss_percent,
+  };
+  write_event(send, sequence, event).await
+}
+
+async fn write_event(
+  send: &mut SendStream,
+  sequence: &mut EventSequence,
+  event: CallEvent,
+) -> Result<(), SessionError> {
+  if let Some(message) = sequence.frame(Outgoing::Event(event)) {
+    write_message(send, &message).await?;
+  }
+  Ok(())
+}
+
+fn lock_tickets(tickets: &Mutex<ProbeTickets>) -> std::sync::MutexGuard<'_, ProbeTickets> {
+  // Nothing spans a panic point while it is held.
+  tickets.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Now in Unix seconds; a clock before 1970 counts as 0, which keeps every ticket id remembered.
+fn unix_now_secs() -> u64 {
+  std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map(|elapsed| elapsed.as_secs())
+    .unwrap_or_default()
 }
 
 /// A connection that takes over a session of its client instead of joining (#1309): `secret` is

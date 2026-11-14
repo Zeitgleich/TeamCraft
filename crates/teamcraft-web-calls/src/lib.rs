@@ -48,11 +48,12 @@ use teamcraft_media::call_resilience::{
 use teamcraft_media::call_telemetry::{CallTelemetry, STATS_SAMPLE_INTERVAL, TelemetryThresholds};
 use teamcraft_media::call_view::{CallRoster, started_screen_sound, status_cues};
 use teamcraft_media::call_web::{
-  self, CameraEffects, LocalTicketFuture, LocalTrustFuture, MediaAccessReason, MediaInput, MicrophoneMeter,
-  WebCall, WebCallConfig, WebCallError, WebJoinTicketSource, WebTrustSource, decode_picture,
+  self, CameraEffects, LinkProbeTarget, LocalTicketFuture, LocalTrustFuture, MediaAccessReason, MediaInput,
+  MicrophoneMeter, WebCall, WebCallConfig, WebCallError, WebJoinTicketSource, WebTrustSource, decode_picture,
 };
 use teamcraft_media::effects::{BackgroundEffect as MediaEffect, is_photo, needs_picture};
 use teamcraft_media::jitter::JitterBufferConfig;
+use teamcraft_media::link_probe::PriorLink;
 use teamcraft_media::video::{ScreenProfile, VideoResolution, camera_limit};
 use teamcraft_proto::{
   AudioCodec, CallId, CallRosterEntry, DeviceId, MediaCapabilities, MediaStreamId, ScreenContentMode,
@@ -115,6 +116,18 @@ struct Callbacks {
   /// The trusted devices afresh, for a device added to the conversation during the call
   /// (`page_calls`). A page from before it gives none: such a device ends the call then.
   maybe_roster: Option<Function>,
+  /// A ticket for measuring the link before the call (`page_calls`, #1959). A page from before it
+  /// gives none: the call measures at the join then.
+  maybe_probe_ticket: Option<Function>,
+}
+
+/// The link's measurement before the call (#1959).
+#[derive(Default)]
+enum LinkMeasure {
+  #[default]
+  None,
+  Running,
+  Done(PriorLink),
 }
 
 #[derive(Default)]
@@ -133,6 +146,8 @@ struct State {
   requires_background: bool,
   /// The background the user chose; the organization's rule may put another one behind the camera.
   background: BackgroundEffect,
+  /// What the pre-join screen or the lobby measured of the link, for the next join (#1959).
+  link: LinkMeasure,
   /// Whether the camera the call sends goes through the effects (it was started with an effect).
   is_camera_through_effects: bool,
   /// What the effects send, for the self view (a canvas' stream); the camera itself without them.
@@ -251,6 +266,7 @@ pub fn start(callbacks: JsValue) -> Result<(), JsValue> {
     maybe_background_rule: function(&callbacks, "background_rule").ok(),
     maybe_background_picture: function(&callbacks, "background_picture").ok(),
     maybe_roster: function(&callbacks, "roster").ok(),
+    maybe_probe_ticket: function(&callbacks, "probe_ticket").ok(),
   };
   let on_device_change = Closure::<dyn FnMut()>::new(|| {
     if let Ok(host) = host() {
@@ -601,6 +617,7 @@ impl Host {
       status_cues: status_cues(sounds),
       maybe_worklet_url: Some(self.worklet_url.clone()),
       share_encoders: codecs.share_encoders,
+      maybe_prior_link: self.take_prior_link(),
       is_muted_at_start,
     };
     let requires_background = prepared.requires_background;
@@ -809,6 +826,7 @@ impl Host {
           .await;
       },
       CallAction::RefreshDevices => self.refresh_devices(),
+      CallAction::MeasureLink { maybe_meeting } => self.measure_link(maybe_meeting),
       CallAction::SetPreview { preview } => self.set_preview(preview).await?,
       // The page plays the test itself: it has to start inside the click (teamcraft-ui speaker_test).
       CallAction::TestSpeakers { .. } => {
@@ -821,6 +839,55 @@ impl Host {
 
   async fn leave(&self) {
     self.end_media(Control::Leave).await;
+  }
+
+  /// Measures the link to the SFU before the call (#1959), in the background: once per pre-join
+  /// screen or lobby, not during a call, not again while a measurement is fresh. A failure leaves
+  /// the join to measure, silently.
+  fn measure_link(self: &Rc<Self>, maybe_meeting: Option<teamcraft_proto::MeetingId>) {
+    let Some(callback) = self.callbacks.maybe_probe_ticket.clone() else {
+      return;
+    };
+    if self.maybe_media.borrow().is_some() {
+      return;
+    }
+    {
+      let mut state = self.state.borrow_mut();
+      match &state.link {
+        LinkMeasure::Running => return,
+        LinkMeasure::Done(prior) if prior.is_fresh_now() => return,
+        LinkMeasure::None | LinkMeasure::Done(_) => state.link = LinkMeasure::Running,
+      }
+    }
+    let host = Rc::downgrade(self);
+    spawn_local(async move {
+      let maybe_prior = match probe_target(&callback, maybe_meeting).await {
+        Ok(target) => call_web::measure_link(target).await,
+        Err(failure) => {
+          tracing::debug!(?failure, "no ticket to measure the link before the call");
+          None
+        },
+      };
+      if let Some(host) = host.upgrade() {
+        let mut state = host.state.borrow_mut();
+        // A join that came first took nothing; this one counts for the next.
+        state.link = maybe_prior.map_or(LinkMeasure::None, LinkMeasure::Done);
+      }
+    });
+  }
+
+  /// The fresh measurement from before the call, for the join (#1959); used once.
+  fn take_prior_link(&self) -> Option<PriorLink> {
+    let mut state = self.state.borrow_mut();
+    match std::mem::take(&mut state.link) {
+      LinkMeasure::Done(prior) if prior.is_fresh_now() => Some(prior),
+      LinkMeasure::Running => {
+        // Still measuring: the join doesn't wait, and the result comes too late for it.
+        state.link = LinkMeasure::Running;
+        None
+      },
+      LinkMeasure::None | LinkMeasure::Done(_) => None,
+    }
   }
 
   /// Ends the running call with `control` (a leave or a hang-up) and waits until it finished.
@@ -2105,6 +2172,26 @@ fn host() -> Result<Rc<Host>, JsValue> {
 }
 
 /// Calls one of the page's async callbacks; a rejection is `ActionFailure` wire text.
+/// Where and with what to measure the link (#1959): a ticket from the page's core.
+async fn probe_target(
+  callback: &Function,
+  maybe_meeting: Option<teamcraft_proto::MeetingId>,
+) -> Result<LinkProbeTarget, ActionFailure> {
+  let meeting =
+    serde_json::to_string(&maybe_meeting).map_err(|error| ActionFailure::other(error.to_string()))?;
+  let answer = call_promise(callback, &JsValue::from_str(&meeting)).await?;
+  let text = answer
+    .as_string()
+    .ok_or_else(|| ActionFailure::other("the page gave no probe ticket"))?;
+  let ticket: teamcraft_proto::CallProbeTicketResponse =
+    serde_json::from_str(&text).map_err(|error| ActionFailure::other(error.to_string()))?;
+  Ok(LinkProbeTarget {
+    certificate_hashes: certificate_hashes_from_hex(&ticket.sfu_certificate_sha256),
+    sfu_url: ticket.sfu_url,
+    ticket: ticket.ticket,
+  })
+}
+
 async fn call_promise(function: &Function, argument: &JsValue) -> Result<JsValue, ActionFailure> {
   let promise: Promise = function
     .call1(&JsValue::NULL, argument)

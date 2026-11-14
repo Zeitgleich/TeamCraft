@@ -380,6 +380,7 @@ impl RemoteCalls {
     match event {
       CallEvent::Preview(preview) => self.set_preview(preview),
       CallEvent::RefreshDevices => self.act(CallAction::RefreshDevices),
+      CallEvent::MeasureLink(maybe_meeting) => self.act(CallAction::MeasureLink { maybe_meeting }),
       CallEvent::Microphone(device) => self.act(CallAction::SelectMicrophone {
         maybe_device: chosen(device),
       }),

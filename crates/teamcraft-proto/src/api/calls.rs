@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::{CallId, ConversationId, DeviceId, UnixMillis, UserId};
+use crate::{CallId, ConversationId, DeviceId, MeetingId, UnixMillis, UserId};
 
 /// Body of `POST /api/v1/conversations/{conversation_id}/call/join-token`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -39,6 +39,40 @@ pub struct CallJoinTokenResponse {
 }
 
 // Join tokens don't belong in logs.
+/// Body of `POST /api/v1/calls/probe-ticket` (#1959).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CreateCallProbeTicketRequest {
+  /// The caller's device that measures its link.
+  pub device_id: DeviceId,
+  /// The meeting whose lobby the caller waits in. Guests must name it: they get a ticket only
+  /// while they wait in, or were let into, a meeting that isn't over.
+  #[serde(rename = "meeting_id", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_meeting_id: Option<MeetingId>,
+}
+
+/// A short-lived ticket for measuring the link to the SFU before joining (#1959).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CallProbeTicketResponse {
+  /// Signed ticket for `CallClientMessage::Probe`.
+  pub ticket: String,
+  /// WebTransport URL of the SFU, as in [`CallJoinTokenResponse::sfu_url`].
+  pub sfu_url: String,
+  pub expires_at: UnixMillis,
+  /// As in [`CallJoinTokenResponse::sfu_certificate_sha256`].
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub sfu_certificate_sha256: Vec<String>,
+}
+
+impl std::fmt::Debug for CallProbeTicketResponse {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("CallProbeTicketResponse")
+      .field("ticket", &"[redacted]")
+      .field("sfu_url", &self.sfu_url)
+      .field("expires_at", &self.expires_at)
+      .finish()
+  }
+}
+
 impl std::fmt::Debug for CallJoinTokenResponse {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("CallJoinTokenResponse")

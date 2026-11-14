@@ -67,6 +67,8 @@ const READ_WRITE: &[&str] = &[
   "/conversations/{conversation_id}/mls/messages",
   "/conversations/{conversation_id}/mls/group-info",
   "/conversations/{conversation_id}/call/join-token",
+  // Measuring the link while waiting in the lobby (#1959); the route checks the lobby place.
+  "/calls/probe-ticket",
   // Only ever takes the guest's own devices out of the call.
   "/conversations/{conversation_id}/call/leave",
   "/meetings/{meeting_id}/leave",
@@ -97,6 +99,7 @@ mod tests {
     ));
     assert!(allows(&Method::GET, Some("/api/v1/devices/{device_id}/welcomes")));
     assert!(allows(&Method::POST, Some("/api/v1/meetings/{meeting_id}/leave")));
+    assert!(allows(&Method::POST, Some("/api/v1/calls/probe-ticket")));
   }
 
   #[test]

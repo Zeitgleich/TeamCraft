@@ -457,6 +457,14 @@ pub async fn prepare_call(conversation: ConversationId) -> Result<CallPreparatio
   ask(|reply| Request::PrepareCall(conversation, reply)).await?
 }
 
+/// A ticket for measuring the link to the SFU before joining (#1959): on the pre-join screen, or
+/// in `maybe_meeting`'s lobby. Only in the tab that runs the core.
+pub async fn probe_ticket(
+  maybe_meeting: Option<teamcraft_proto::MeetingId>,
+) -> Result<teamcraft_proto::CallProbeTicketResponse, String> {
+  ask(|reply| Request::ProbeTicket(maybe_meeting, reply)).await?
+}
+
 /// The running call's verified devices afresh, after catching up the conversation's group: a
 /// device added during the call joins it (e2ee.md §8.2). Only in the tab that runs the core.
 pub async fn call_devices(conversation: ConversationId) -> Result<Vec<VerifiedDevice>, String> {
@@ -1362,6 +1370,10 @@ enum Request {
   NetworkChanged,
   /// What joining a conversation's call needs (`web_calls`).
   PrepareCall(ConversationId, oneshot::Sender<Result<CallPreparation, String>>),
+  ProbeTicket(
+    Option<teamcraft_proto::MeetingId>,
+    oneshot::Sender<Result<teamcraft_proto::CallProbeTicketResponse, String>>,
+  ),
   CallDevices(
     ConversationId,
     oneshot::Sender<Result<Vec<VerifiedDevice>, String>>,
@@ -2146,6 +2158,16 @@ impl Core {
       Request::PrepareCall(conversation, reply) => {
         let result = match self.client.as_mut() {
           Some(client) => client.prepare_call(conversation).await.map_err(describe_failure),
+          None => Err(not_set_up()),
+        };
+        drop(reply.send(result));
+      },
+      Request::ProbeTicket(maybe_meeting, reply) => {
+        let result = match self.client.as_ref() {
+          Some(client) => client
+            .call_probe_ticket(maybe_meeting)
+            .await
+            .map_err(describe_failure),
           None => Err(not_set_up()),
         };
         drop(reply.send(result));

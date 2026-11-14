@@ -47,8 +47,9 @@ use teamcraft_proto::{
   WebPushKeyResponse,
 };
 use teamcraft_proto::{
-  CallJoinTokenResponse, CallStateResponse, ChangeWebPushSubscriptionRequest, CreateCallJoinTokenRequest,
-  ErrorCode, ListRunningCallsResponse, MoveCallRequest,
+  CallJoinTokenResponse, CallProbeTicketResponse, CallStateResponse, ChangeWebPushSubscriptionRequest,
+  CreateCallJoinTokenRequest, CreateCallProbeTicketRequest, ErrorCode, ListRunningCallsResponse,
+  MoveCallRequest,
 };
 use teamcraft_proto::{
   CategoryId, CategoryResponse, CreateCategoryRequest, CreateInviteRequest, CreateSpaceRequest,
@@ -1042,6 +1043,13 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
         request,
       )
       .await
+  }
+
+  async fn create_call_probe_ticket(
+    &self,
+    request: &CreateCallProbeTicketRequest,
+  ) -> Result<CallProbeTicketResponse, ApiError> {
+    self.send_json(Method::POST, "/calls/probe-ticket", request).await
   }
 
   async fn running_call(&self, conversation: ConversationId) -> Result<Option<CallStateResponse>, ApiError> {

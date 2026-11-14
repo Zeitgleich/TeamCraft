@@ -1265,6 +1265,11 @@ pub trait CallBackend {
   fn select_speakers(&self, _maybe_device: Option<String>) {}
   /// Lists the devices again; [`CallBackend::media_devices`] changes after a notification.
   fn refresh_media_devices(&self) {}
+  /// Measures the link to the SFU before the call (#1959): the pre-join screen opened, or the
+  /// lobby of `maybe_meeting`. Backends without a call module measure nothing.
+  fn measure_link(&self, maybe_meeting: Option<teamcraft_proto::MeetingId>) {
+    let _ = maybe_meeting;
+  }
   /// Plays a short test sound on the speakers; a failure reaches the user.
   fn test_speakers(&self, _maybe_device: Option<String>) {}
   fn set_call_camera(&self, _is_on: bool) {}

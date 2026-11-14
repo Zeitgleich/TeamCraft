@@ -16,6 +16,7 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
     .routes(routes!(handlers::list_running_calls_handler))
     .routes(routes!(handlers::get_call_handler))
     .routes(routes!(handlers::create_call_join_token_handler))
+    .routes(routes!(handlers::create_call_probe_ticket_handler))
     .routes(routes!(handlers::leave_call_everywhere_handler))
     .routes(routes!(handlers::move_call_handler))
     // The notetaker's API key, for its bot account (e2ee.md §8.2).

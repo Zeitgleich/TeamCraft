@@ -47,6 +47,9 @@ pub enum CallEvent {
   TestSpeakers(String),
   /// Lists the devices again.
   RefreshDevices,
+  /// Measures the link to the SFU before the call (#1959): the pre-join screen opened, or the
+  /// lobby of the meeting.
+  MeasureLink(Option<teamcraft_proto::MeetingId>),
   /// Starts, changes or ends the pre-join check of the camera and microphone (#442).
   Preview(CallPreview),
   Camera(bool),
