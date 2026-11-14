@@ -6,14 +6,11 @@ use teamcraft_client_api::meeting_schedule::{self, MeetingSchedule, MeetingTimes
 use teamcraft_proto::{ConversationId, MeetingId};
 
 use super::Client;
+use super::meeting_records::schedule_record_key;
 use crate::api::ServerApi;
 use crate::error::CoreError;
 use crate::records;
 use crate::store::{LocalStore, Table};
-
-/// The schedule of a meeting as the organizer set it on this device: the admitters' signed validity
-/// follows it, never a later end the server reports.
-const SCHEDULE_RECORD_PREFIX: &str = "meeting-schedule-record/";
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Keeps what the organizer set of `meeting`'s schedule on this device: a meeting scheduled here
@@ -24,7 +21,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let Some(schedule) = MeetingSchedule::after(maybe_recorded, note, self.now_ms(), max_instant_ms) else {
       return Ok(());
     };
-    records::put_json(&self.store, Table::SyncState, &record_key(meeting), &schedule)
+    records::put_json(
+      &self.store,
+      Table::SyncState,
+      &schedule_record_key(meeting),
+      &schedule,
+    )
   }
 
   /// [`Client::sync_meeting_admitters`] for the meeting (or occurrence) the server lists with
@@ -49,10 +51,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// The schedule the organizer set for `meeting` on this device, if it did.
   fn meeting_schedule(&self, meeting: MeetingId) -> Result<Option<MeetingSchedule>, CoreError> {
-    records::get_json(&self.store, Table::SyncState, &record_key(meeting))
+    records::get_json(&self.store, Table::SyncState, &schedule_record_key(meeting))
   }
-}
-
-fn record_key(meeting: MeetingId) -> String {
-  format!("{SCHEDULE_RECORD_PREFIX}{meeting}")
 }

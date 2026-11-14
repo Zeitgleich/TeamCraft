@@ -2235,6 +2235,13 @@ never by the server's member list:
       than the rule gives, or one past the rule's `count`. A meeting lengthened on another device
       of the organizer keeps this device's shorter record; a statement signed longer stays in
       force (the device never signs a shorter end over a longer one of its own key).
+    - **When the records go** (#1939). The schedule record and the lobby record (#987) are kept
+      per meeting and dropped when the organizer cancels the whole meeting on this device, ends a
+      meeting that doesn't repeat there ("End for everyone"), or when the meeting chat is purged
+      or forgotten on this device (found through the meeting the app named for the chat at its
+      setup). The server's word about a meeting's status never drops them. A meeting that comes
+      back afterwards (a restored cancellation, a re-added organizer) is one without a record:
+      signed until the server's end, and its link's guests wait in the lobby.
   - *Comparing codes.* The server relays both the guest's key and the fingerprint reported with
     the knock, so binding one to the other stops a swap by anybody but the server, not by the
     server itself. Two codes close that gap for whoever compares them out of band (a phone call,

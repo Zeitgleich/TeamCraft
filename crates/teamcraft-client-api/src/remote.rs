@@ -1158,6 +1158,9 @@ pub enum ChatAction {
     meeting: teamcraft_proto::MeetingId,
     note: crate::meeting_schedule::ScheduleNote,
   },
+  ForgetMeetingRecords {
+    meeting: teamcraft_proto::MeetingId,
+  },
   SyncMeetingAdmitters {
     meeting: teamcraft_proto::MeetingId,
     conversation: ConversationId,
@@ -1612,6 +1615,7 @@ impl ChatAction {
       Self::PrepareGuestKeyCode { guest } => backend.prepare_guest_key_code(guest),
       Self::NoteMeetingLobby { meeting, has_lobby } => backend.note_meeting_lobby(meeting, has_lobby),
       Self::NoteMeetingSchedule { meeting, note } => backend.note_meeting_schedule(meeting, note),
+      Self::ForgetMeetingRecords { meeting } => backend.forget_meeting_records(meeting),
       Self::SyncMeetingAdmitters {
         meeting,
         conversation,

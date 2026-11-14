@@ -780,9 +780,13 @@ pub fn CancelMeetingDialog(meeting: MeetingId, occurrence: i64) -> impl IntoView
     pending.spawn(async move {
       hub
         .client()
-        .cancel(meeting, chosen, UnixMillis(occurrence))
+        .cancel(meeting, chosen.clone(), UnixMillis(occurrence))
         .await
         .map_err(|error| error.to_failure())?;
+      // The whole meeting is cancelled here: its records on this device go with it (#1939).
+      if chosen == CancelScope::Series {
+        state.try_write(|backend| backend.forget_meeting_records(meeting));
+      }
       hub.refresh(me, now_ms()).await;
       state.close_overlay();
       Ok(())

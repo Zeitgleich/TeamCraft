@@ -823,6 +823,109 @@ mod schedule {
     assert_eq!(rig.signed_until(), start + HOUR_MS + GUEST_ACCESS_GRACE_MS);
   }
 
+  /// The records go when the organizer cancels or ends the meeting here, and with its chat (#1939).
+  mod records_go {
+    use teamcraft_core::meeting_invitees::InviteeList;
+    use teamcraft_core::store::{LocalStore, Table};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn a_meeting_cancelled_here_falls_back_to_the_servers_end_and_the_lobby() {
+      let mut rig = rig().await;
+      rig.keep_records_here().await;
+
+      rig.alice.client.forget_meeting_records(rig.meeting).unwrap();
+
+      assert!(rig.has_no_records());
+      assert!(!is_open_by_own_record(rig.alice.store.as_ref(), rig.meeting));
+      // Restored later: signed like a meeting this device has no record of.
+      rig.sign_for(times(NOW_MS, NOW_MS + DAY_MS)).await;
+      assert_eq!(rig.signed_until(), NOW_MS + DAY_MS + GUEST_ACCESS_GRACE_MS);
+    }
+
+    #[tokio::test]
+    async fn a_purged_meeting_chat_takes_its_records_along() {
+      let mut rig = rig().await;
+      rig.keep_records_here().await;
+
+      rig.alice.client.leave_channel(rig.chat, true).await.unwrap();
+
+      assert!(rig.has_no_records());
+      assert!(!rig.has_meeting_of_chat());
+    }
+
+    #[tokio::test]
+    async fn a_forgotten_meeting_chat_takes_its_records_along() {
+      let mut rig = rig().await;
+      rig.keep_records_here().await;
+
+      rig
+        .server
+        .remove_member_as_admin(rig.chat, rig.alice.client.user_id());
+      settle(&mut [&mut rig.alice]).await;
+
+      assert!(!rig.alice.client.has_group(rig.chat).unwrap());
+      assert!(rig.has_no_records());
+      assert!(!rig.has_meeting_of_chat());
+    }
+
+    #[tokio::test]
+    async fn another_meetings_records_stay() {
+      let mut rig = rig().await;
+      rig.keep_records_here().await;
+      let other: MeetingId = "8".parse().unwrap();
+      rig.alice.client.note_meeting_lobby(other, false).unwrap();
+
+      rig.alice.client.leave_channel(rig.chat, true).await.unwrap();
+
+      assert!(is_open_by_own_record(rig.alice.store.as_ref(), other));
+    }
+
+    impl Rig {
+      /// The chat noted with its meeting, as the app's setup does, and both records of it.
+      async fn keep_records_here(&mut self) {
+        let nobody = InviteeList::Chosen {
+          added: Vec::new(),
+          kept: Vec::new(),
+        };
+        self
+          .alice
+          .client
+          .set_up_meeting_chat_from(self.chat, Some(self.meeting), &nobody)
+          .await
+          .unwrap();
+        self.schedule_here(times(NOW_MS, NOW_MS + HOUR_MS), None);
+        self.alice.client.note_meeting_lobby(self.meeting, false).unwrap();
+        assert!(!self.has_no_records());
+        assert!(self.has_meeting_of_chat());
+      }
+
+      fn has_no_records(&self) -> bool {
+        let keys = self.sync_state_keys();
+        !keys.contains(&format!("meeting-lobby-record/{}", self.meeting))
+          && !keys.contains(&format!("meeting-schedule-record/{}", self.meeting))
+      }
+
+      fn has_meeting_of_chat(&self) -> bool {
+        self
+          .sync_state_keys()
+          .contains(&format!("meeting-of-chat/{}", self.chat))
+      }
+
+      fn sync_state_keys(&self) -> Vec<String> {
+        self
+          .alice
+          .store
+          .list(Table::SyncState)
+          .unwrap()
+          .into_iter()
+          .map(|(key, _)| key)
+          .collect()
+      }
+    }
+  }
+
   impl Rig {
     fn schedule_here(&self, times: MeetingTimes, maybe_recurrence: Option<MeetingRecurrence>) {
       let schedule = MeetingSchedule {

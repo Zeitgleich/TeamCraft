@@ -193,6 +193,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.forget_older_history(conversation)?;
     self.forget_invitee_records(conversation)?;
     self.forget_host_records(conversation)?;
+    self.forget_meeting_of_chat(conversation)?;
     Ok(())
   }
 
@@ -211,6 +212,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       client.forget_older_history(conversation)?;
       client.forget_invitee_records(conversation)?;
       client.forget_host_records(conversation)?;
+      client.forget_meeting_of_chat(conversation)?;
       super::messaging::forget_newest_controls(&client.store, conversation)?;
       crate::unseen_reactions::forget(&client.store, conversation)?;
       crate::integration_sources::forget_conversation(&client.store, conversation)?;

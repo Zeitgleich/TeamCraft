@@ -1836,6 +1836,10 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::NoteMeetingSchedule { meeting, note });
   }
 
+  fn forget_meeting_records(&self, meeting: teamcraft_proto::MeetingId) {
+    self.act(ChatAction::ForgetMeetingRecords { meeting });
+  }
+
   fn sync_meeting_admitters(
     &self,
     meeting: teamcraft_proto::MeetingId,
