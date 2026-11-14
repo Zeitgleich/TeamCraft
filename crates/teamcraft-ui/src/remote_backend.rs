@@ -508,7 +508,7 @@ enum PendingExtras {
   /// Nothing: a plain message.
   Plain,
   /// A quote, urgency, an asked acknowledgement or silence, as the core will show them.
-  Held(MessageExtras),
+  Held(Box<MessageExtras>),
   /// The mirror can't tell what the core will show (a quote of a row it doesn't hold).
   Unknown,
 }
@@ -632,7 +632,7 @@ impl Mirror {
     extras.priority = message.priority;
     extras.wants_acknowledgement = message.wants_acknowledgement;
     extras.is_silent = message.is_silent;
-    PendingExtras::Held(extras)
+    PendingExtras::Held(Box::new(extras))
   }
 
   /// A row of `conversation` (its feed or one of its threads) a quote can be made from here: a
@@ -1465,7 +1465,7 @@ impl RemoteChat {
       let mut mirror = self.mirror.borrow_mut();
       let maybe_extras = match mirror.pending_extras_of(message, pending.id) {
         PendingExtras::Plain => None,
-        PendingExtras::Held(extras) => Some(extras),
+        PendingExtras::Held(extras) => Some(*extras),
         PendingExtras::Unknown => return None,
       };
       let row = Message {
