@@ -324,6 +324,11 @@ pub struct PolicyConfig {
   /// participants, so their devices that were offline that long still drop it with its local
   /// history on the next sync (admin.md §3.2.1). After that it only leaves the list.
   pub deleted_conversations_kept_days: u32,
+  /// Strict channels' server part (e2ee.md §4.6.2): the rewind of a group to an earlier epoch
+  /// (`POST /conversations/{id}/mls/rewind`). The server can't tell a strict group from another,
+  /// so it stays off until the apps turn strict channels on; off, the rewind is refused before
+  /// anything is read.
+  pub strict_channels: bool,
 }
 
 /// Size limits of requests and results.
@@ -1770,6 +1775,7 @@ impl Default for PolicyConfig {
       admin_join_request_days: teamcraft_proto::DEFAULT_ADMIN_JOIN_REQUEST_DAYS,
       one_to_one_call_ends_for_both: true,
       deleted_conversations_kept_days: 180,
+      strict_channels: false,
     }
   }
 }

@@ -673,6 +673,13 @@ pub trait ServerApi {
     conversation: ConversationId,
     request: &PostMlsCommitRequest,
   ) -> impl Future<Output = Result<PostMlsCommitResponse, ApiError>>;
+  /// Continues a strict channel's group from `request.epoch` with this admin's commit
+  /// (`POST /conversations/{id}/mls/rewind`, e2ee.md §4.6.2, D4).
+  fn rewind_mls(
+    &self,
+    conversation: ConversationId,
+    request: &PostMlsCommitRequest,
+  ) -> impl Future<Output = Result<PostMlsCommitResponse, ApiError>>;
   fn post_mls_message(
     &self,
     conversation: ConversationId,

@@ -1271,6 +1271,20 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
+  async fn rewind_mls(
+    &self,
+    conversation: ConversationId,
+    request: &PostMlsCommitRequest,
+  ) -> Result<PostMlsCommitResponse, ApiError> {
+    self
+      .send_json(
+        Method::POST,
+        &format!("/conversations/{conversation}/mls/rewind"),
+        request,
+      )
+      .await
+  }
+
   async fn post_mls_message(
     &self,
     conversation: ConversationId,

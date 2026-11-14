@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM mls_messages\n         WHERE conversation_id = $1 AND (epoch > $2 OR (epoch = $2 AND kind = 'commit'))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5615ca87e50f715097eb3a2487af9fe254691a86ff2c068e90d2411ad76a3335"
+}

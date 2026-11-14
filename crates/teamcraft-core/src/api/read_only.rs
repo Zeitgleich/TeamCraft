@@ -799,6 +799,14 @@ impl<A: ServerApi> ServerApi for ReadOnlyApi<A> {
     self.refused("post_mls_commit")
   }
 
+  fn rewind_mls(
+    &self,
+    _conversation: ConversationId,
+    _request: &PostMlsCommitRequest,
+  ) -> impl Future<Output = Result<PostMlsCommitResponse, ApiError>> {
+    self.refused("rewind_mls")
+  }
+
   fn post_mls_message(
     &self,
     _conversation: ConversationId,

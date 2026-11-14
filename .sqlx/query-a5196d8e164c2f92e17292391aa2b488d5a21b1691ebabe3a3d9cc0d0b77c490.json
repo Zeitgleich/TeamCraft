@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (\n           SELECT 1 FROM mls_messages\n           WHERE conversation_id = $1 AND epoch = $2 AND kind = 'commit' AND id <= $3\n         ) AS \"is_too_old!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "is_too_old!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "a5196d8e164c2f92e17292391aa2b488d5a21b1691ebabe3a3d9cc0d0b77c490"
+}

@@ -223,6 +223,19 @@ pub enum CoreError {
   /// leaver can't write in the conversation any more (e2ee.md §4.6).
   #[error("the goodbye in conversation {0} hasn't reached the server yet")]
   GoodbyePending(ConversationId),
+  /// This device stopped at a commit its strict channel's rule refused (e2ee.md §4.6.2, D4): no
+  /// commit of its own until a channel admin or workspace admin continues the group.
+  #[error("conversation {0} stopped at a refused membership change; an admin has to decide")]
+  StrictStopped(ConversationId),
+  /// Strict membership rules are for private channels only: never a DM, a meeting chat, the notes
+  /// or a public channel, and a strict channel turns strict off before it is made public (e2ee.md
+  /// §4.6.2).
+  #[error("conversation {0} can't be a strict channel")]
+  NotStrictCapable(ConversationId),
+  /// Continuing a strict channel's group, or taking a member's welcome back into one, isn't open to
+  /// this device yet.
+  #[error("not possible in strict channel {0} now: {1}")]
+  StrictNotNow(ConversationId, &'static str),
   #[error("gateway: {0}")]
   Gateway(String),
   /// A browser API failed or is missing (no service worker, permission denied, ...).

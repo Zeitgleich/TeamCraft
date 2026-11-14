@@ -115,6 +115,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       None => request,
     };
+    // A strict channel isn't made public: strict is turned off first, which is signed (e2ee.md
+    // §4.6.2, "No self-add").
+    if request.maybe_visibility == Some(teamcraft_proto::ConversationVisibility::Public)
+      && self.is_strict(conversation)?
+    {
+      return Err(CoreError::NotStrictCapable(conversation));
+    }
     let maybe_before: Option<ConversationResponse> =
       records::get_json(&self.store, Table::Conversations, &conversation.to_string())?;
     let after = self.api.update_conversation(conversation, request).await?;

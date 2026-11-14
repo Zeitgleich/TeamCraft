@@ -82,6 +82,13 @@ pub struct AccountData {
   /// next newer device puts it back.
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
   pub anchor_floors: BTreeMap<String, AnchorFloor>,
+  /// Per conversation ID, the newest strict roles one of the user's devices verified in its group
+  /// (e2ee.md §4.6.2, "Falling out in a strict channel"): a welcome back into a strict channel is
+  /// opened only from an admin of these, so a device that fell out isn't brought into a fork. An
+  /// entry without roles: strict was turned off by a commit the device merged. Merged by the
+  /// higher epoch. An older app drops the field on upload, and the next newer device puts it back.
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub strict_roles: BTreeMap<String, KnownStrictRoles>,
   /// When devices left conversations and came back, keyed `conversation/user/device`, in the server
   /// times of the commits, as the user's devices processed them: a new device of the user refuses
   /// messages a device signs while it is out (e2ee.md §4.4). Merging keeps the later time of each,
@@ -231,6 +238,17 @@ pub struct SavedSearchEntry {
   pub query: String,
 }
 
+/// Strict roles a device verified in a conversation's group (e2ee.md §4.6.2), as the account data
+/// carries them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnownStrictRoles {
+  /// The group's epoch they were current in.
+  pub epoch: u64,
+  /// The strict roles extension's content; absent once strict was turned off.
+  #[serde(rename = "roles", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_roles: Option<Base64Bytes>,
+}
+
 impl AccountData {
   /// Decodes the key bag's account data; an empty field (new or version 1 key bag) is empty data.
   pub fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
@@ -276,6 +294,15 @@ impl AccountData {
     for (conversation, epoch) in &other.group_epochs {
       let entry = self.group_epochs.entry(conversation.clone()).or_insert(*epoch);
       *entry = (*entry).max(*epoch);
+    }
+    for (conversation, known) in &other.strict_roles {
+      let entry = self
+        .strict_roles
+        .entry(conversation.clone())
+        .or_insert_with(|| known.clone());
+      if known.epoch > entry.epoch {
+        *entry = known.clone();
+      }
     }
     for (conversation, floor) in &other.anchor_floors {
       self
@@ -450,6 +477,28 @@ impl AccountData {
       Some(existing) => existing.merge(floor),
       None => {
         self.anchor_floors.insert(conversation.to_string(), *floor);
+        true
+      },
+    }
+  }
+
+  /// The newest strict roles the user's devices verified for the conversation, `None` if it was
+  /// never strict on any of them.
+  pub fn known_strict_roles(&self, conversation: ConversationId) -> Option<&KnownStrictRoles> {
+    self.strict_roles.get(&conversation.to_string())
+  }
+
+  /// Takes strict roles this device verified, unless the user's devices know newer ones; returns
+  /// whether that changed anything.
+  pub fn note_strict_roles(&mut self, conversation: ConversationId, known: KnownStrictRoles) -> bool {
+    match self.strict_roles.get_mut(&conversation.to_string()) {
+      Some(existing) if existing.epoch > known.epoch || *existing == known => false,
+      Some(existing) => {
+        *existing = known;
+        true
+      },
+      None => {
+        self.strict_roles.insert(conversation.to_string(), known);
         true
       },
     }

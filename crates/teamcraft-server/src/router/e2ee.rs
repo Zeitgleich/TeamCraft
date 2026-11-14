@@ -14,6 +14,7 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
   OpenApiRouter::with_openapi(Schemas::openapi())
     .routes(routes!(handlers::list_mls_messages_handler))
     .routes(routes!(handlers::post_mls_commit_handler))
+    .routes(routes!(handlers::post_mls_rewind_handler))
     .routes(routes!(
       handlers::get_mls_group_info_handler,
       handlers::put_mls_group_info_handler

@@ -27,6 +27,7 @@ use super::admin_joins::JoinCommit;
 use super::key_history::{SealedShare, ShareGuard};
 use super::meeting_records::meeting_of_chat_key;
 use super::member_device::{GroupInfoOutcome, MemberDeviceJoin};
+use super::strict_channels::{self, StrictWelcome};
 use super::workspace::{PendingChange, SharedKeys};
 use super::{Client, pending_post_key};
 use crate::api::{ApiError, ServerApi};
@@ -1628,6 +1629,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Ok(MlsProgress::Done);
     }
     if message.epoch > epoch {
+      if self.is_strict_stopped(conversation)? {
+        // Stopped at a refused commit: later epochs build on it (e2ee.md §4.6.2, D4). Passed over,
+        // and the next commit for this device's own epoch is taken.
+        self.advance_cursor(conversation, message)?;
+        return Ok(MlsProgress::Done);
+      }
       return Ok(MlsProgress::NeedsBacklog);
     }
 
@@ -1681,6 +1688,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
             share,
           })?;
         }
+        self.note_known_strict_roles(conversation)?;
         return Ok(MlsProgress::Done);
       }
       // Another commit won the epoch.
@@ -1701,7 +1709,30 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .get_mut(&conversation)
       .ok_or(CoreError::NoGroup(conversation))?;
     let before = group.members()?;
-    let result = group.process_message(&self.provider, message.payload.as_slice(), &directory, &authority);
+    let is_strict_commit =
+      strict_channels::ENABLED && group.is_strict() && message.kind == MlsMessageKind::Commit;
+    let mut result =
+      group.process_message(&self.provider, message.payload.as_slice(), &directory, &authority);
+    if is_strict_commit && result.as_ref().is_err_and(MlsError::is_strict_retry) {
+      // A workspace signer's change in a strict channel: judged on the newest roster, read first
+      // (e2ee.md §4.6.2, "Workspace signers"). A failed read holds the entry: the cursor stays.
+      // Boxed: this rare read would otherwise add its size to every entry's future.
+      Box::pin(self.sync_workspace()).await?;
+      let authority = self.group_authority(conversation, at_ms)?;
+      let group = self
+        .groups
+        .get_mut(&conversation)
+        .ok_or(CoreError::NoGroup(conversation))?;
+      result = group.process_message(&self.provider, message.payload.as_slice(), &directory, &authority);
+      if let Err(error) = &result
+        && error.is_strict_retry()
+      {
+        // The roster read, and still none that judges the signer (withheld or stale): this device
+        // can't follow, and is brought back like one that fell out (§4.6.2, "Epoch conflicts").
+        tracing::warn!(conversation_id = %conversation, mls_message_id = %message.id, %error, "no roster to judge a strict channel's commit by");
+        return Ok(MlsProgress::NeedsBacklog);
+      }
+    }
     if result.is_ok() {
       self.remember_member_keys(conversation, &directory, at_ms)?;
     }
@@ -1803,11 +1834,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           self.note_group_leftovers(conversation)?;
         }
       },
+      Err(error) if is_strict_commit => {
+        // A strict channel refuses without coming back: a commit its rule refuses, or one this
+        // device can't read at its own epoch, stops it here (e2ee.md §4.6.2, D4).
+        self.persist_strict_stop_at(message, &error)?;
+        return Ok(MlsProgress::Done);
+      },
       Err(error) => {
         // A rejected commit (unauthorized, forged credential) or undecryptable entry is skipped
         // and reported; the group stays in its epoch (e2ee.md §4.6, admin.md §2.3).
         tracing::warn!(conversation_id = %conversation, mls_message_id = %message.id, %error, "rejected MLS message");
       },
+    }
+    if message.kind == MlsMessageKind::Commit {
+      self.note_known_strict_roles(conversation)?;
     }
     self.persist_group_at(conversation, message)?;
     Ok(MlsProgress::Done)
@@ -2075,6 +2115,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .filter(|info| info.len() <= self.settings.max_group_info_bytes)
         .map(Base64Bytes::new),
     };
+    let is_rewind = self.is_strict_rewind(conversation);
+    if !is_rewind && self.is_strict_stopped(conversation)? {
+      // Stopped at a refused commit: the group is at the last good epoch, and only an admin's
+      // continuation goes out from here (e2ee.md §4.6.2, D4). Keys don't rotate, removals wait.
+      self.discard_pending_commit(conversation)?;
+      return Err(CoreError::StrictStopped(conversation));
+    }
     // Kept before sending, so a restart mid-request still finds the commit.
     self.persist_group(conversation)?;
     records::put_json(
@@ -2083,9 +2130,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       &pending_post_key(conversation),
       &request,
     )?;
-    match self.api.post_mls_commit(conversation, &request).await {
+    let posted = if is_rewind {
+      self.api.rewind_mls(conversation, &request).await
+    } else {
+      self.api.post_mls_commit(conversation, &request).await
+    };
+    match posted {
       Ok(response) => {
         let update = self.merge_own_commit(conversation, &response.commit)?;
+        self.note_known_strict_roles(conversation)?;
         Ok(Some(OwnCommit {
           update,
           at_ms: response.commit.id.snowflake().unix_millis(),
@@ -3125,6 +3178,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Ok(sender) => sender,
       Err(error) => return Ok(WelcomeJoin::Rejected(error)),
     };
+    // Back into a channel the user's devices knew strict: only from an admin of those roles, or on
+    // the user's word (e2ee.md §4.6.2, "Falling out in a strict channel").
+    // Boxed: the check may read the roster, which would add its size to every join's future.
+    match Box::pin(self.check_strict_welcome(conversation, &staged, &directory)).await {
+      Ok(StrictWelcome::Open) => {},
+      Ok(StrictWelcome::Refused(error)) => return Ok(WelcomeJoin::Rejected(error)),
+      // Opened already: be added back once the network is there, as for a failed pin.
+      Err(error) if error.is_transient() => return Ok(WelcomeJoin::KeyPackageSpent),
+      Err(error) => return Err(error),
+    }
     let group = match staged.complete(&self.provider, &directory) {
       Ok(group) => group,
       Err(error) => return Ok(WelcomeJoin::Rejected(error)),
@@ -3547,6 +3610,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     current_epoch: u64,
   ) -> Result<(), CoreError> {
+    if self.is_strict_stopped(conversation)? {
+      // Stopped at a refused commit, not fallen out: asking to be added back would bring this
+      // device into the group that holds what it refused (e2ee.md §4.6.2, D4).
+      tracing::debug!(conversation_id = %conversation, "not asking to be added back: stopped in a strict channel");
+      return Ok(());
+    }
     let now = self.now_ms();
     let maybe_record =
       records::get_json::<RejoinRecord>(&self.store, Table::AppliedChanges, &rejoin_key(conversation))?;
@@ -3691,7 +3760,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     let not_before_ms = self
       .now_ms()
-      .saturating_add(self.commit_delay_ms(conversation, device)?);
+      .saturating_add(self.commit_delay_ms(conversation, device)?)
+      .saturating_add(self.strict_rejoin_delay_ms(conversation)?);
     self.queue_pending(PendingChange::Rejoin {
       conversation_id: conversation,
       user_id: user,
