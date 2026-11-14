@@ -1828,16 +1828,24 @@ impl ChatBackend for RemoteChat {
     )
   }
 
+  fn note_meeting_schedule(
+    &self,
+    meeting: teamcraft_proto::MeetingId,
+    note: teamcraft_client_api::meeting_schedule::ScheduleNote,
+  ) {
+    self.act(ChatAction::NoteMeetingSchedule { meeting, note });
+  }
+
   fn sync_meeting_admitters(
     &self,
     meeting: teamcraft_proto::MeetingId,
     conversation: ConversationId,
-    expires_at_ms: i64,
+    server_times: teamcraft_client_api::meeting_schedule::MeetingTimes,
   ) {
     self.act(ChatAction::SyncMeetingAdmitters {
       meeting,
       conversation,
-      expires_at_ms,
+      server_times,
     });
   }
 

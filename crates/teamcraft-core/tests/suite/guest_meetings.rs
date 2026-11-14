@@ -730,6 +730,134 @@ mod admitters {
 
 /// Co-hosts and handing the meeting over (#1720): the host lists the organizer signs, which a
 /// guest follows from the key of its link and a member from the group's founder.
+/// The organizer's device signs the admitters' validity from the schedule it recorded, not from a
+/// later end the server reports (#1919).
+mod schedule {
+  use teamcraft_client_api::meeting_invitees::GUEST_ACCESS_GRACE_MS;
+  use teamcraft_client_api::meeting_schedule::{MeetingSchedule, MeetingTimes, ScheduleNote};
+  use teamcraft_crypto::ids::ConversationId as SignedChatId;
+  use teamcraft_crypto::meeting_admitters::{AdmittersExpectation, SignedMeetingAdmitters};
+  use teamcraft_proto::{MeetingRecurrence, RecurrenceFrequency};
+
+  use super::*;
+
+  const HOUR_MS: i64 = 60 * 60_000;
+  const DAY_MS: i64 = 24 * HOUR_MS;
+
+  #[tokio::test]
+  async fn a_server_that_lengthens_the_meeting_does_not_lengthen_the_signed_validity() {
+    let mut rig = rig().await;
+    rig.schedule_here(times(NOW_MS, NOW_MS + HOUR_MS), None);
+
+    // The server reports the meeting ten days longer than the organizer scheduled it here.
+    rig.sign_for(times(NOW_MS, NOW_MS + 10 * DAY_MS)).await;
+
+    assert_eq!(rig.signed_until(), NOW_MS + HOUR_MS + GUEST_ACCESS_GRACE_MS);
+  }
+
+  #[tokio::test]
+  async fn an_edit_here_moves_the_signed_end() {
+    let mut rig = rig().await;
+    rig.schedule_here(times(NOW_MS, NOW_MS + HOUR_MS), None);
+    let edit = teamcraft_client_api::meeting_schedule::ScheduleEdit {
+      maybe_times: Some(times(NOW_MS, NOW_MS + 3 * HOUR_MS)),
+      maybe_recurrence: None,
+      maybe_listed_recurrence: None,
+    };
+    rig
+      .alice
+      .client
+      .note_meeting_schedule(rig.meeting, ScheduleNote::Edited { edit })
+      .unwrap();
+
+    rig.sign_for(times(NOW_MS, NOW_MS + 10 * DAY_MS)).await;
+
+    assert_eq!(rig.signed_until(), NOW_MS + 3 * HOUR_MS + GUEST_ACCESS_GRACE_MS);
+  }
+
+  #[tokio::test]
+  async fn a_meeting_without_a_record_here_is_signed_until_the_servers_end() {
+    // Handed over to Alice, or scheduled on another device: no record on this one.
+    let mut rig = rig().await;
+
+    rig.sign_for(times(NOW_MS, NOW_MS + DAY_MS)).await;
+
+    assert_eq!(rig.signed_until(), NOW_MS + DAY_MS + GUEST_ACCESS_GRACE_MS);
+  }
+
+  #[tokio::test]
+  async fn an_occurrence_of_a_series_lasts_as_long_as_recorded() {
+    let mut rig = rig().await;
+    let first_start = NOW_MS - 10 * DAY_MS;
+    rig.schedule_here(times(first_start, first_start + HOUR_MS), Some(daily()));
+
+    // Today's occurrence, five hours long by the server's word.
+    let start = NOW_MS + HOUR_MS;
+    rig.sign_for(times(start, start + 5 * HOUR_MS)).await;
+
+    assert_eq!(rig.signed_until(), start + HOUR_MS + GUEST_ACCESS_GRACE_MS);
+  }
+
+  impl Rig {
+    fn schedule_here(&self, times: MeetingTimes, maybe_recurrence: Option<MeetingRecurrence>) {
+      let schedule = MeetingSchedule {
+        times,
+        maybe_recurrence,
+      };
+      self
+        .alice
+        .client
+        .note_meeting_schedule(self.meeting, ScheduleNote::Scheduled { schedule })
+        .unwrap();
+    }
+
+    async fn sign_for(&mut self, server_times: MeetingTimes) {
+      let is_signed = self
+        .alice
+        .client
+        .sync_scheduled_meeting_admitters(self.meeting, self.chat, server_times)
+        .await
+        .unwrap();
+      assert!(is_signed);
+    }
+
+    /// The end of the newest admitters on the server, checked against Alice's key.
+    fn signed_until(&self) -> i64 {
+      let bytes = self.server.meeting_admitters(self.chat).unwrap();
+      let organizer: teamcraft_crypto::identity::IdentityFingerprint = self.fingerprint.parse().unwrap();
+      let verified = SignedMeetingAdmitters::from_bytes(&bytes)
+        .unwrap()
+        .verify(&AdmittersExpectation {
+          organizer: &organizer,
+          maybe_meeting_id: None,
+          conversation_id: SignedChatId::new(self.chat.to_string().parse().unwrap()),
+          now_ms: 0,
+          maybe_seen_sequence: None,
+        })
+        .unwrap();
+      i64::try_from(verified.expires_at_ms()).unwrap()
+    }
+  }
+
+  fn times(starts_at_ms: i64, ends_at_ms: i64) -> MeetingTimes {
+    MeetingTimes {
+      starts_at_ms,
+      ends_at_ms,
+    }
+  }
+
+  fn daily() -> MeetingRecurrence {
+    MeetingRecurrence {
+      frequency: RecurrenceFrequency::Daily,
+      interval: 1,
+      weekdays: Vec::new(),
+      maybe_count: None,
+      maybe_until: None,
+      skips_holidays: false,
+    }
+  }
+}
+
 mod hosts {
   use rand_core::OsRng;
   use teamcraft_core::client::HostsChange;

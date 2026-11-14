@@ -2212,10 +2212,26 @@ never by the server's member list:
       guests' grace. The core caps it at the end of the organizer-signed admitters this device
       verified, read afresh, while it lies ahead, and otherwise at the guests' grace (two hours)
       from the admission (`meeting_lobby::guest_access_end`). A server that lengthens the meeting
-      lengthens nobody's access; withholding the statement only shortens it. Residual: the
-      organizer's device signs the end of the meeting as its meeting list shows it, so a server
-      that lengthens the meeting before the organizer's device signs gets that longer end signed
-      (#1919).
+      lengthens nobody's access; withholding the statement only shortens it.
+    - **The signed end** (#1919; `teamcraft_client_api::meeting_schedule`, the one rule of the
+      desktop, web and mobile apps, applied by the core's
+      `Client::sync_scheduled_meeting_admitters`). The organizer's device keeps the schedule the
+      organizer set on it: written when the meeting is scheduled there (the request's start, end
+      and repeat rule; for "Meet now" the times the server answered at creation) and changed by
+      the edits saved there (only what they change). The admitters' validity is the end of the
+      meeting as the server lists it, but never later than that record says, plus the guests'
+      grace: a server that lengthens the meeting after it was scheduled on this device gets no
+      longer signature. For an occurrence of a series the record gives its length (the first
+      occurrence's), from the occurrence's start; that start counts only between the series'
+      first start and its `until`, and no further ahead than the upkeep signs (a day), so a server
+      that names a far-off occurrence gets no long signature either.
+    - **Residuals of the signed end.** A meeting the device has no record of (handed over to this
+      user, scheduled on another device of the organizer, or before this record existed) is
+      signed until the server's end. The days of a series aren't expanded on clients (that needs
+      the instance's time zone): within those bounds the server can present a later occurrence
+      than the rule gives, or one past the rule's `count`. A meeting lengthened on another device
+      of the organizer keeps this device's shorter record; a statement signed longer stays in
+      force (the device never signs a shorter end over a longer one of its own key).
   - *Comparing codes.* The server relays both the guest's key and the fingerprint reported with
     the knock, so binding one to the other stops a swap by anybody but the server, not by the
     server itself. Two codes close that gap for whoever compares them out of band (a phone call,

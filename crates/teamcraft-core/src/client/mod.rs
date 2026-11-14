@@ -45,6 +45,8 @@ mod linking;
 pub(crate) mod list_outcomes;
 mod live_catch_up;
 mod meeting_hosts;
+#[cfg(feature = "ui")]
+mod meeting_schedule;
 mod member_device;
 mod messaging;
 mod missing_keys;

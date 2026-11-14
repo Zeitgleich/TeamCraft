@@ -494,12 +494,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       CoreCommand::PrepareGuestKeyCode { guest } => self.prepare_guest_key_code(guest).await,
       CoreCommand::NoteMeetingLobby { meeting, has_lobby } => self.note_meeting_lobby(meeting, has_lobby),
+      CoreCommand::NoteMeetingSchedule { meeting, note } => self.note_meeting_schedule(meeting, note),
       CoreCommand::SyncMeetingAdmitters {
         meeting,
         conversation,
-        expires_at_ms,
+        server_times,
       } => self
-        .sync_meeting_admitters(meeting, conversation, expires_at_ms)
+        .sync_scheduled_meeting_admitters(meeting, conversation, server_times)
         .await
         .map(drop),
       CoreCommand::CheckMeetingAdmission { conversation } => self.check_meeting_admission(conversation).await,

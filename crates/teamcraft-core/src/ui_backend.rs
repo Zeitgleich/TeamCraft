@@ -448,11 +448,17 @@ pub enum CoreCommand {
     meeting: teamcraft_proto::MeetingId,
     has_lobby: bool,
   },
-  /// The organizer's device publishes who may let guests in, if that changed (#1103).
+  /// The schedule the organizer set for a meeting on this device (#1919).
+  NoteMeetingSchedule {
+    meeting: teamcraft_proto::MeetingId,
+    note: teamcraft_client_api::meeting_schedule::ScheduleNote,
+  },
+  /// The organizer's device publishes who may let guests in, if that changed (#1103), valid until
+  /// the meeting's end by its own record (#1919).
   SyncMeetingAdmitters {
     meeting: teamcraft_proto::MeetingId,
     conversation: ConversationId,
-    expires_at_ms: i64,
+    server_times: teamcraft_client_api::meeting_schedule::MeetingTimes,
   },
   /// A member's device checks the organizer-signed admitters (`admits_link_arrivals`).
   CheckMeetingAdmission {
@@ -658,6 +664,7 @@ impl CoreCommand {
       | Self::LetGuestIntoMeetingChat { .. }
       | Self::PrepareGuestKeyCode { .. }
       | Self::NoteMeetingLobby { .. }
+      | Self::NoteMeetingSchedule { .. }
       | Self::SyncMeetingAdmitters { .. }
       | Self::CheckMeetingAdmission { .. }
       | Self::ChangeMeetingHosts { .. } => CommandPart::Member,
@@ -3394,16 +3401,24 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     crate::client::is_open_by_own_record(self.store_ref(), meeting)
   }
 
+  fn note_meeting_schedule(
+    &self,
+    meeting: teamcraft_proto::MeetingId,
+    note: teamcraft_client_api::meeting_schedule::ScheduleNote,
+  ) {
+    self.command(CoreCommand::NoteMeetingSchedule { meeting, note });
+  }
+
   fn sync_meeting_admitters(
     &self,
     meeting: teamcraft_proto::MeetingId,
     conversation: ConversationId,
-    expires_at_ms: i64,
+    server_times: teamcraft_client_api::meeting_schedule::MeetingTimes,
   ) {
     self.command(CoreCommand::SyncMeetingAdmitters {
       meeting,
       conversation,
-      expires_at_ms,
+      server_times,
     });
   }
 

@@ -552,13 +552,23 @@ pub trait ChatBackend {
   fn is_open_by_own_record(&self, _meeting: teamcraft_proto::MeetingId) -> bool {
     false
   }
+  /// Keeps the schedule the organizer set for a meeting on this device: the admitters' signed
+  /// validity follows it, not a later end the server reports (#1919).
+  fn note_meeting_schedule(
+    &self,
+    _meeting: teamcraft_proto::MeetingId,
+    _note: crate::meeting_schedule::ScheduleNote,
+  ) {
+  }
   /// The organizer's device signs and publishes who may let guests into the meeting, if that
-  /// changed or the list ends before `expires_at_ms` (#1103).
+  /// changed or the list ends before the meeting does (#1103). `server_times` is the meeting (or
+  /// occurrence) as the server lists it; the end signed is capped by this device's own record
+  /// (`meeting_schedule::admitters_until`, #1919).
   fn sync_meeting_admitters(
     &self,
     _meeting: teamcraft_proto::MeetingId,
     _conversation: ConversationId,
-    _expires_at_ms: i64,
+    _server_times: crate::meeting_schedule::MeetingTimes,
   ) {
   }
   /// A member's device checks the organizer-signed admitters of the meeting whose chat is

@@ -6,7 +6,8 @@
 //! the one desktop and web choose (`teamcraft_client_api::notetaker::add_route`).
 
 use teamcraft_client_api::backend::ChatBackend as _;
-use teamcraft_client_api::meeting_invitees::{GUEST_ACCESS_GRACE_MS, adding_invitee, saved_change};
+use teamcraft_client_api::meeting_invitees::{adding_invitee, saved_change};
+use teamcraft_client_api::meeting_schedule::MeetingTimes;
 use teamcraft_client_api::model::ConversationKind;
 use teamcraft_client_api::notetaker::{
   AddRoute, ConversationRights, add_route, conversation_rights, may_ask_in, moved_call_hint,
@@ -236,7 +237,7 @@ impl Engine {
     // The bot is the organizer's own addition; the rest is carried over from the server's list.
     let (invitees, removed) = saved_change(&before, &saved, vec![bot]);
     let (meeting, chat) = (saved.id, saved.conversation_id);
-    let until = saved.ends_at.0 + GUEST_ACCESS_GRACE_MS;
+    let times = MeetingTimes::of(&saved);
     self
       .with_client(move |client| {
         Box::pin(async move {
@@ -245,7 +246,10 @@ impl Engine {
             .await?;
           // Who may let guests in changed with the group; a failure here leaves the old statement,
           // which the next edit or start renews.
-          if let Err(error) = client.sync_meeting_admitters(meeting, chat, until).await {
+          if let Err(error) = client
+            .sync_scheduled_meeting_admitters(meeting, chat, times)
+            .await
+          {
             tracing::warn!(%error, "the meeting's admitters could not be renewed");
           }
           Ok(())
