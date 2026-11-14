@@ -142,7 +142,7 @@ user-idle-time = { version = "0.7", default-features = false }
 # the version the notification plugin already pulls in).
 # The managed server from the policy key in HKLM (auth/policy.rs, #220): a safe, read-only registry
 # API (MIT/Apache-2.0; already in the tree through the autostart plugin and hyper-util).
-windows-registry = "0.6"
+windows-registry = "0.100"
 windows = { version = "0.62", features = ["Data_Xml_Dom", "Foundation", "Foundation_Collections", "UI_Notifications"] }
 
 [features]
