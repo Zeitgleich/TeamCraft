@@ -47,6 +47,8 @@ use crate::components::emoji_picker::EmojiPickerPanel;
 use crate::components::file_preview::FilePreview;
 use crate::components::files_sidebar::FilesSidebar;
 use crate::components::files_view::FilesView;
+use crate::components::guest_devices::{GuestDeviceSetup, GuestDevices, GuestForm, GuestWaitingDevices};
+use crate::components::guest_join::GuestJoinPage;
 use crate::components::guest_meeting::{GuestMeeting, GuestSession};
 use crate::components::home::NewMessageDialog;
 use crate::components::huddle_bar::{CallBar, HuddleBarContent};
@@ -84,6 +86,7 @@ use crate::components::workspace_dialogs::{
 };
 use crate::i18n::use_i18n;
 use crate::lightbox::MediaKey;
+use crate::meetings::GuestLink;
 use crate::model::{ConversationId, MessageId, SpaceId, UserId};
 use crate::reactive::SetIfAlive;
 use crate::session::SessionControl;
@@ -203,6 +206,13 @@ areas! {
   /// own, not the signed-in app's: somebody from outside who joins once loads only what the
   /// meeting needs (docs/performance.md, "Web bundle size").
   guest_meeting(session: GuestSession) => guest: view! { <GuestMeeting session=session /> };
+  /// A meeting guest's pre-join screen with their name (#1928), and the small preview while they
+  /// wait: in the call screens' module, which the meeting loads next anyway.
+  guest_device_setup(form: GuestForm) => calls: view! { <GuestDeviceSetup form=form /> };
+  guest_waiting_devices(devices: GuestDevices, name: RwSignal<String>) => calls: view! { <GuestWaitingDevices devices=devices name=name /> };
+  /// The page behind a meeting link: name, lobby, admission. With the meeting in the guest's
+  /// module, not in the app every member's first visit downloads.
+  guest_join(link: GuestLink) => guest: view! { <GuestJoinPage link=link /> };
   directory(_unit: ()) => directory: view! { <DirectoryView /> };
   search(_unit: ()) => search: view! { <SearchView /> };
   /// The top bar's search (Ctrl/Cmd+K), in the chunk of the search results it leads to (#695).
@@ -285,6 +295,13 @@ areas! {
   /// member nor a guest needs it (#1413).
   #[cfg(target_arch = "wasm32")]
   share_download(id: String, fragment: String) => share: view! { <ShareDownloadPage id=id fragment=fragment /> };
+}
+
+/// The page's call module for a meeting guest's device check (#1928), before the guest has an
+/// account; `None` in a browser without calls. With the call screens' module.
+#[wasm_split(calls, wasm_split_path = ::leptos::wasm_split, fallible)]
+pub fn guest_devices(_unit: ()) -> Result<Option<GuestDevices>, SplitLoaderError> {
+  Ok(GuestDevices::for_page())
 }
 
 /// The app's own message sounds (#800), synthesized by teamcraft-media in the page: a first visit

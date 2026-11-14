@@ -89,11 +89,14 @@ async fn a_guest_in_firefox_joins_a_meeting_by_its_link_and_shares_the_call() {
       .await;
     firefox.goto(&link).await;
     firefox.wait_for_text("Join the meeting", WAIT).await;
-    firefox.wait_for_element("input.input", WAIT).await;
-    firefox.fill("input.input", "Gus (Firefox)").await;
-    firefox.click_text("Ask to join").await;
+    // One screen (#1928): the name under the preview, the devices turned on, "Join now" knocks.
+    firefox.wait_for_element("#guest-name", WAIT).await;
+    firefox.fill("#guest-name", "Gus (Firefox)").await;
+    firefox.click_text("Turn on camera and microphone").await;
+    firefox.wait_for_element(".prejoin .meter", WAIT).await;
+    firefox.click_text("Join now").await;
     firefox
-      .wait_for_text("Waiting for someone in the meeting to let you in", WAIT)
+      .wait_for_text("Waiting for someone to let you in", WAIT)
       .await;
 
     let deadline = Instant::now() + WAIT;
@@ -129,9 +132,7 @@ async fn a_guest_in_firefox_joins_a_meeting_by_its_link_and_shares_the_call() {
       .await
       .unwrap();
 
-    // Admission opens the call's pre-join screen by itself (#1929).
-    firefox.wait_for_element(".prejoin", WAIT).await;
-    firefox.click_selector(".prejoin-actions .btn-primary").await;
+    // Admission joins the call at once with the devices the guest set up (#1929, #1928).
     firefox.wait_for_element(".call-screen", WAIT).await;
   })
   .await;

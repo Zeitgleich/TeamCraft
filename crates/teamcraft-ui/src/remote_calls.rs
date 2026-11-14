@@ -370,6 +370,42 @@ impl RemoteCalls {
     });
   }
 
+  /// Carries out the device check's events (#1928) on a meeting guest's page before a host let
+  /// the guest in: there is no backend yet, only this page's call module. Anything else waits for
+  /// the call (`connect_calls` takes over the events then).
+  pub fn device_event(&self, event: crate::calls::CallEvent) {
+    use crate::calls::CallEvent;
+    // An empty id is the system default.
+    let chosen = |device: String| Some(device).filter(|id| !id.is_empty());
+    match event {
+      CallEvent::Preview(preview) => self.set_preview(preview),
+      CallEvent::RefreshDevices => self.act(CallAction::RefreshDevices),
+      CallEvent::Microphone(device) => self.act(CallAction::SelectMicrophone {
+        maybe_device: chosen(device),
+      }),
+      CallEvent::Speakers(device) => self.act(CallAction::SelectSpeakers {
+        maybe_device: chosen(device),
+      }),
+      CallEvent::TestSpeakers(device) => self.test_speakers(Some(device)),
+      CallEvent::Camera(is_on) => self.act(CallAction::SetCamera { is_on }),
+      CallEvent::CameraDevice(device) => self.act(CallAction::SelectCamera {
+        maybe_device: Some(device),
+      }),
+      CallEvent::Effect(effect) => self.act(CallAction::SetBackgroundEffect { effect }),
+      CallEvent::Join { .. }
+      | CallEvent::Leave
+      | CallEvent::Decline(_)
+      | CallEvent::Muted(_)
+      | CallEvent::Deafened(_)
+      | CallEvent::MoveHere
+      | CallEvent::StartScreenShare { .. }
+      | CallEvent::StopScreenShare
+      | CallEvent::StatusSounds(_)
+      | CallEvent::CameraQuality(_)
+      | CallEvent::VideoQuality { .. } => {},
+    }
+  }
+
   pub fn join(&self, request: CallRequest, media: JoinMedia) {
     self.act(CallAction::join(request, media));
   }

@@ -155,11 +155,21 @@
   color: var(--call-text);
 }
 
+/* The pre-join screen (#1928): the title on top; the preview with its video options (and a
+   guest's name) on the left, the audio options and the buttons on the right. */
 .prejoin {
+  --set-switch-w: 40px;
+  --set-switch-h: 24px;
+  --set-switch-off: var(--call-switch-off);
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(340px, 0.8fr);
-  gap: 32px;
-  align-items: center;
+  grid-template-columns: minmax(0, 1.25fr) minmax(320px, 0.75fr);
+  grid-template-areas:
+    "head head"
+    "video panel";
+  column-gap: clamp(24px, 4vw, 56px);
+  row-gap: 24px;
+  align-items: start;
+  align-content: start;
   /* No bottom padding: a sticky footer sticks inside the padding, not at the screen's edge. The
      panel keeps the space below it instead. */
   padding: 32px clamp(16px, 5vw, 72px) 0;
@@ -173,11 +183,31 @@
   color: var(--call-muted);
 }
 
-.prejoin-preview {
-  position: relative;
+.prejoin-head {
+  grid-area: head;
+  text-align: center;
+}
+
+.prejoin-head h1 {
+  font-size: var(--text-2xl);
+  letter-spacing: var(--tracking-2xl);
+  line-height: var(--leading-2xl);
+  margin: 0 0 4px;
+}
+
+.prejoin-video {
+  grid-area: video;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   max-width: 760px;
   width: 100%;
-  justify-self: center;
+  justify-self: end;
+}
+
+.prejoin-preview {
+  position: relative;
+  width: 100%;
 }
 
 .prejoin-preview .tile {
@@ -214,16 +244,6 @@
   animation: motion-fade-in var(--dur-base) var(--ease-standard);
 }
 
-.preview-controls {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 14px;
-  display: flex;
-  justify-content: center;
-  gap: 12px;
-}
-
 .round-btn {
   display: grid;
   place-items: center;
@@ -252,16 +272,12 @@
 }
 
 .prejoin-panel {
+  grid-area: panel;
   max-width: 480px;
   width: 100%;
-  padding-bottom: 32px;
-}
-
-.prejoin-panel h1 {
-  font-size: var(--text-2xl);
-  letter-spacing: var(--tracking-2xl);
-  line-height: var(--leading-2xl);
-  margin-bottom: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .prejoin-panel .field {
@@ -283,7 +299,7 @@
 
 @media (hover: hover) and (pointer: fine) {
   .prejoin .btn:hover:not(:disabled) {
-    background: #202838;
+    background: var(--call-hover);
   }
 }
 
@@ -351,6 +367,262 @@
 
 .effect-more {
   margin-top: 8px;
+}
+
+/* The slim bar under the preview: camera, backgrounds, video settings. */
+.prejoin-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--call-border);
+  border-radius: var(--radius-lg);
+  background: var(--call-surface);
+}
+
+.prejoin-bar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--call-text);
+  font: inherit;
+  cursor: default;
+  transition: background-color var(--dur-fast) var(--ease-standard);
+}
+
+.prejoin-bar-btn.icon-only {
+  width: 40px;
+  padding: 0;
+  justify-content: center;
+}
+
+.prejoin-bar-btn .icon {
+  width: 20px;
+  height: 20px;
+}
+
+.prejoin-bar-btn.off .icon {
+  color: var(--danger);
+}
+
+.prejoin-bar-btn[aria-expanded="true"] {
+  background: var(--call-hover);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .prejoin-bar-btn:hover:not(:disabled) {
+    background: var(--call-hover);
+  }
+}
+
+.prejoin-bar-btn:active:not(:disabled) {
+  background: var(--call-pressed);
+}
+
+.prejoin-bar-btn:disabled {
+  opacity: 0.45;
+}
+
+/* What the bar opens: the backgrounds or the camera choice, right below it. */
+.prejoin-drawer {
+  padding: 4px 4px 8px;
+  animation: motion-fade-in var(--dur-base) var(--ease-standard);
+}
+
+.prejoin-drawer .field {
+  margin: 0 0 12px;
+}
+
+/* A guest's name, under the video. */
+.prejoin-identity {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.prejoin-identity .small {
+  margin: 0;
+}
+
+.prejoin-status {
+  margin: 0;
+}
+
+/* Audio as selectable cards: the chosen one opens with its settings. */
+.audio-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.audio-options legend {
+  padding: 0;
+  margin-bottom: 8px;
+  font-weight: var(--weight-semibold);
+}
+
+.audio-card {
+  border: 1px solid var(--call-border);
+  border-radius: var(--radius-lg);
+  background: var(--call-surface);
+  transition: border-color var(--dur-fast) var(--ease-standard);
+}
+
+.audio-card.selected {
+  border-color: var(--accent);
+}
+
+.audio-card-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  padding: 0 14px;
+  font-weight: var(--weight-medium);
+  cursor: default;
+}
+
+.audio-card-head input {
+  accent-color: var(--accent);
+  margin: 0;
+}
+
+.audio-card-head .icon {
+  width: 20px;
+  height: 20px;
+  color: var(--call-muted);
+}
+
+.audio-card-body {
+  padding: 0 14px 14px;
+  animation: motion-fade-in var(--dur-base) var(--ease-standard);
+}
+
+.audio-card-body .field:first-child {
+  margin-top: 0;
+}
+
+.audio-card-body.muted-text {
+  margin: 0;
+}
+
+.field-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Before a guest turned the devices on: why the page asks (#1928), on the preview's surface. */
+.prejoin-access {
+  display: grid;
+  place-items: center;
+}
+
+.prejoin-access-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  max-width: 420px;
+  padding: 24px;
+  text-align: center;
+}
+
+.prejoin-access-body h2 {
+  margin: 0;
+  font-size: var(--text-lg);
+}
+
+.prejoin-access-body p {
+  margin: 0;
+}
+
+.prejoin-access-icon {
+  width: 32px;
+  height: 32px;
+  color: var(--call-muted);
+}
+
+.prejoin-access-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+/* The browser refused the devices: how to allow them, over the bottom of the preview. */
+.prejoin-blocked {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: rgba(20, 26, 38, 0.92);
+  color: var(--call-text);
+  font-size: var(--text-sm);
+}
+
+.prejoin-blocked p {
+  flex: 1;
+  margin: 0;
+}
+
+.prejoin-blocked .icon {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  color: var(--call-notice-text);
+}
+
+/* A guest's page has no app bar: the pre-join screen covers the window. */
+.guest-prejoin .prejoin {
+  inset: var(--banners-h, 0px) 0 0 0;
+}
+
+/* The small preview while a guest waits, and the options behind a disclosure. */
+.guest-waiting-devices {
+  margin-top: 16px;
+}
+
+.guest-waiting-devices .prejoin-preview {
+  max-width: 280px;
+  margin: 0 auto;
+}
+
+.guest-waiting-devices .prejoin-preview .tile {
+  border-radius: var(--radius-lg);
+}
+
+.guest-device-settings {
+  margin-top: 12px;
+}
+
+.guest-device-settings summary {
+  cursor: default;
+  font-weight: var(--weight-medium);
+}
+
+.guest-device-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 12px;
 }
 
 /* The in-call popover is a dark surface like the pre-join screen, whose buttons are restyled. */

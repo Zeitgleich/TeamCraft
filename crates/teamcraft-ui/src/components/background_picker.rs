@@ -17,7 +17,7 @@ use crate::calls::{BackgroundEffect, BackgroundImageInfo, EffectGroup, EffectsOf
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
 use crate::reactive::SetIfAlive;
-use crate::state::use_app_state;
+use crate::state::AppState;
 
 /// Largest picture the picker offers to upload; matches the server default `max_background_bytes`
 /// (teamcraft.example.toml), which stays the authority.
@@ -47,19 +47,32 @@ enum PickerItem {
   Tile(BackgroundEffect),
 }
 
-/// Radio group of background effects plus an upload tile.
+/// Radio group of background effects plus an upload tile. A meeting guest's page before admission
+/// has no app state (#1928): it offers the built-in effects only, as `maybe_offer` says.
 #[component]
 pub fn BackgroundPicker(
   effect: RwSignal<BackgroundEffect>,
   #[prop(optional)] size: PickerSize,
+  /// The effects the page can run, where there is no app state to ask.
+  #[prop(optional)]
+  maybe_offer: Option<EffectsOffer>,
 ) -> impl IntoView {
-  let state = use_app_state();
+  let maybe_state = use_context::<AppState>();
   let i18n = use_i18n();
-  let own = Memo::new(move |_| state.read(|backend| backend.background_images()));
+  // Own pictures are an account's: none without one.
+  let own = Memo::new(move |_| {
+    maybe_state
+      .map(|state| state.read(|backend| backend.background_images()))
+      .unwrap_or_default()
+  });
   let error = RwSignal::new(None::<String>);
   let file_input = NodeRef::<leptos::html::Input>::new();
   // A browser without the effects' graphics offers none (#439).
-  let offer = untrack(|| state.read(|backend| backend.effects_offer()));
+  let offer = match maybe_state {
+    Some(state) => untrack(|| state.read(|backend| backend.effects_offer())),
+    None => maybe_offer.unwrap_or(EffectsOffer::Unavailable),
+  };
+  let can_upload = maybe_state.is_some();
   let options = Memo::new(move |_| effect_options(&own.get(), offer));
   let is_expanded = RwSignal::new(false);
   let is_collapsed = move || size == PickerSize::Compact && !is_expanded.get();
@@ -119,7 +132,9 @@ pub fn BackgroundPicker(
       match JsFuture::from(file.array_buffer()).await {
         Ok(buffer) => {
           let picture = js_sys::Uint8Array::new(&buffer).to_vec();
-          state.try_write(|backend| backend.add_background_image(&file.name(), picture));
+          if let Some(state) = maybe_state {
+            state.try_write(|backend| backend.add_background_image(&file.name(), picture));
+          }
         },
         Err(_) => error.set_if_alive(Some(i18n.t("effect-upload-unreadable"))),
       }
@@ -153,7 +168,7 @@ pub fn BackgroundPicker(
           },
         }}
       </For>
-      <Show when=move || !is_collapsed() fallback=|| ()>
+      <Show when=move || can_upload && !is_collapsed() fallback=|| ()>
         <button type="button" class="effect-tile" on:click=move |_| {
           if let Some(element) = file_input.get_untracked() {
             element.click();
@@ -197,7 +212,7 @@ pub fn BackgroundPicker(
 /// two combine and opens the system's panel, where they are turned off.
 #[component]
 fn SystemEffectsHint() -> impl IntoView {
-  let state = use_app_state();
+  let maybe_state = use_context::<AppState>();
   let i18n = use_i18n();
   let is_mac_app = crate::auth::tauri::is_available()
     && web_sys::window()
@@ -207,7 +222,11 @@ fn SystemEffectsHint() -> impl IntoView {
     view! {
       <div class="system-effects-hint" role="note">
         <p class="muted-text small">{move || i18n.t("effects-system-hint")}</p>
-        <button class="btn btn-small" on:click=move |_| state.read(|backend| backend.open_system_video_effects())>
+        <button class="btn btn-small" on:click=move |_| {
+          if let Some(state) = maybe_state {
+            state.read(|backend| backend.open_system_video_effects());
+          }
+        }>
           {move || i18n.t("effects-system-open")}
         </button>
       </div>
@@ -224,7 +243,7 @@ fn EffectTile(
   maybe_image: Option<BackgroundImageInfo>,
   error: RwSignal<Option<String>>,
 ) -> impl IntoView {
-  let state = use_app_state();
+  let maybe_state = use_context::<AppState>();
   let i18n = use_i18n();
   let label = match &maybe_image {
     Some(image) => image.name.clone(),
@@ -250,7 +269,9 @@ fn EffectTile(
         aria-label=move || i18n.t_with("effect-delete", &[("name", &name)])
         on:click=move |_| {
           error.set(None);
-          state.write(|backend| backend.delete_background_image(id));
+          if let Some(state) = maybe_state {
+            state.write(|backend| backend.delete_background_image(id));
+          }
         }
       >
         <Icon name=IconName::Trash />

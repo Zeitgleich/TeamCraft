@@ -91,7 +91,10 @@ async fn a_guest_joins_a_meeting_with_the_mailed_link_and_shares_its_call() {
     .screenshot_on_failure("meeting-guest-mail-link", |page| async move {
       knock(&page, &origin, link, "Gus (customer)").await;
       // Nobody let the guest in yet: the normal case, said plainly.
-      wait_for_text(&page, "Waiting for someone in the meeting to let you in").await;
+      wait_for_text(&page, "Waiting for someone to let you in").await;
+      wait_for_element(&page, ".guest-waiting-devices .prejoin-preview").await;
+      expect_no_panic(&page).await;
+      guest_shots(&page, "waiting").await;
 
       // The organizer's app sees the guest in the lobby once the guest's page set up its device.
       let deadline = Instant::now() + SETUP_TIMEOUT;
@@ -115,6 +118,8 @@ async fn a_guest_joins_a_meeting_with_the_mailed_link_and_shares_its_call() {
       // The host's lobby entry shows the same key code as the guest's page.
       alice_ref.client.prepare_guest_key_code(guest).await.unwrap();
       let code = teamcraft_core::client::guest_key_code(alice_ref.store.as_ref(), guest).unwrap();
+      // The codes are behind "Verify the connection" (#1927), for whoever wants to compare.
+      click_selector(&page, ".lobby-verify summary").await;
       wait_for_text(&page, &code).await;
 
       // Admitting makes the guest a member; the organizer's device adds the guest's own device to
@@ -136,6 +141,17 @@ async fn a_guest_joins_a_meeting_with_the_mailed_link_and_shares_its_call() {
   // The organizer joins natively: both verify each other's DAVE keys, media flows both ways.
   let call = join_call(&mut alice, chat, certificate_hash, 550.0).await;
   expect_secured_call(call, &console, "the organizer").await;
+
+  // The guest hangs up: their part is over, said warmly, with a way back in (#1933).
+  browser
+    .screenshot_on_failure("meeting-guest-end", |page| async move {
+      click_selector(&page, ".call-screen .leave-btn").await;
+      wait_for_text(&page, "Thanks for joining.").await;
+      wait_for_text(&page, "Rejoin").await;
+      expect_no_panic(&page).await;
+      guest_shots(&page, "end").await;
+    })
+    .await;
 
   browser.close().await;
   stack.stop().await;
@@ -204,7 +220,7 @@ async fn a_member_admits_a_browser_guest_when_the_organizer_has_left_and_they_sh
   browser
     .screenshot_on_failure("meeting-member-admits-guest", |page| async move {
       knock(&page, &origin, link, "Gus (customer)").await;
-      wait_for_text(&page, "Waiting for someone in the meeting to let you in").await;
+      wait_for_text(&page, "Waiting for someone to let you in").await;
 
       // Bob's app sees the guest, who came with the link, once the guest's device is ready.
       let deadline = Instant::now() + SETUP_TIMEOUT;
@@ -315,7 +331,7 @@ async fn a_co_host_admits_a_browser_guest_when_the_organizer_has_left() {
   browser
     .screenshot_on_failure("meeting-co-host-admits-guest", |page| async move {
       knock(&page, &origin, link, "Gus (customer)").await;
-      wait_for_text(&page, "Waiting for someone in the meeting to let you in").await;
+      wait_for_text(&page, "Waiting for someone to let you in").await;
 
       // The co-host hosts the lobby: the server lists the guest to Bob as to a host.
       let deadline = Instant::now() + SETUP_TIMEOUT;
@@ -426,16 +442,24 @@ async fn knock(page: &Page, origin: &str, link: String, name: &str) {
     .await
     .unwrap();
   page.goto(link).await.unwrap();
+  // One screen (#1928): the name under the preview, the devices turned on, "Join now" knocks.
   wait_for_text(page, "Join the meeting").await;
-  wait_for_element(page, "input.input").await;
-  type_until_kept(page, "input.input", name).await;
-  click_text(page, "Ask to join").await;
+  wait_for_element(page, "#guest-name").await;
+  type_until_kept(page, "#guest-name", name).await;
+  click_text(page, "Turn on camera and microphone").await;
+  wait_for_element(page, ".prejoin .meter").await;
+  // The camera's picture is there too: the preview is live, not only the placeholder.
+  wait_for_element(page, ".prejoin-preview .live-video").await;
+  expect_no_panic(page).await;
+  guest_shots(page, "setup").await;
+  click_text(page, "Join now").await;
 }
 
-/// The guest, let in, joins the meeting's call from the browser. Admission opens the call's
-/// pre-join screen by itself (#1929): the guest knocked to join the call, not to read the chat.
+/// The guest, let in, is in the meeting's call: admission joins it at once with the devices the
+/// guest set up before knocking (#1929, #1928), without a second pre-join screen.
 async fn join_call_in_browser(page: &Page) {
-  wait_for_element(page, ".prejoin").await;
+  wait_for_element(page, ".call-screen").await;
+  expect_no_panic(page).await;
   // The chat behind the call offers a guest no second way to start a call.
   let call_starts = page
     .evaluate(r#"document.querySelectorAll('.channel-header [aria-label="Start audio call"]').length"#)
@@ -444,8 +468,59 @@ async fn join_call_in_browser(page: &Page) {
     .into_value::<u64>()
     .unwrap();
   assert_eq!(call_starts, 0, "the guest's chat header offers to start a call");
-  click_selector(page, ".prejoin-actions .btn-primary").await;
-  wait_for_element(page, ".call-screen").await;
+}
+
+/// The page never showed the reload overlay of a panic (`panic_overlay.rs`).
+async fn expect_no_panic(page: &Page) {
+  let overlays = page
+    .evaluate("document.querySelectorAll('.panic-overlay').length")
+    .await
+    .unwrap()
+    .into_value::<u64>()
+    .unwrap();
+  assert_eq!(overlays, 0, "the guest's page panicked");
+}
+
+/// With `E2E_GUEST_SHOTS` set, pictures of the guest's screen for a pull request: desktop and
+/// the narrowest phone, light and dark, in `target/e2e-artifacts/guest-<name>-<width>-<scheme>.png`.
+async fn guest_shots(page: &Page, name: &str) {
+  use chromiumoxide::cdp::browser_protocol::emulation::{
+    ClearDeviceMetricsOverrideParams, MediaFeature, SetDeviceMetricsOverrideParams, SetEmulatedMediaParams,
+  };
+  use chromiumoxide::page::ScreenshotParams;
+  if std::env::var_os("E2E_GUEST_SHOTS").is_none() {
+    return;
+  }
+  let dir = teamcraft_e2e::browser::artifact_dir();
+  let _ = std::fs::create_dir_all(&dir);
+  for (width, height, is_phone) in [(1440, 900, false), (320, 640, true)] {
+    page
+      .execute(SetDeviceMetricsOverrideParams::new(width, height, 2.0, is_phone))
+      .await
+      .unwrap();
+    for scheme in ["light", "dark"] {
+      page
+        .execute(
+          SetEmulatedMediaParams::builder()
+            .feature(MediaFeature::new("prefers-color-scheme", scheme))
+            .build(),
+        )
+        .await
+        .unwrap();
+      // Let the layout and the theme's colors settle (no transition is longer than this).
+      tokio::time::sleep(Duration::from_millis(600)).await;
+      let _ = page
+        .save_screenshot(
+          ScreenshotParams::builder().build(),
+          dir.join(format!("guest-{name}-{width}-{scheme}.png")),
+        )
+        .await;
+    }
+  }
+  page
+    .execute(ClearDeviceMetricsOverrideParams::default())
+    .await
+    .unwrap();
 }
 
 /// The native peer listens for [`CALL_DURATION`], then leaves: the DAVE group with the guest was

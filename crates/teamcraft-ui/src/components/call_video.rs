@@ -16,7 +16,7 @@ use crate::components::video_stats::VideoStatsOverlay;
 use crate::i18n::use_i18n;
 use crate::model::User;
 use crate::reactive::{use_interval_while, use_page_visible};
-use crate::state::use_app_state;
+use crate::state::AppState;
 use crate::video_stats::StatsTarget;
 
 /// How long a shown video of another device may go without a new picture before its tile says so
@@ -249,15 +249,16 @@ pub fn LiveVideo(source: VideoSource, #[prop(into)] is_mirrored: Signal<bool>) -
   let own_picture_watch = StoredValue::new(None::<OwnPictureWatch>);
   let observer = StoredValue::new_local(None::<OnScreenObserver>);
   // #1793: a track in a codec this device doesn't decode is not watched; the tile says why.
-  let state = use_app_state();
-  let is_undecodable = Memo::new(move |_| match source {
-    VideoSource::Remote(stream_id) => state.read(|backend| {
+  // A meeting guest's own preview before admission has no app state (#1928): no remote videos.
+  let maybe_state = use_context::<AppState>();
+  let is_undecodable = Memo::new(move |_| match (source, maybe_state) {
+    (VideoSource::Remote(stream_id), Some(state)) => state.read(|backend| {
       backend
         .call_video_tracks()
         .iter()
         .any(|track| track.stream_id == stream_id && track.is_undecodable)
     }),
-    VideoSource::OwnCamera | VideoSource::OwnScreen => false,
+    (VideoSource::Remote(_), None) | (VideoSource::OwnCamera | VideoSource::OwnScreen, _) => false,
   });
   Effect::new(move |_| {
     let Some(element) = host.get() else {
