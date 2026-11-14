@@ -81,7 +81,7 @@ rust-ini = "=0.21.3"
 roxmltree = "0.21"
 teamcraft-media = { path = "../../crates/teamcraft-media", features = ["pipewire", "v4l2", "gstreamer"] }
 # Push-to-talk on Wayland through the GlobalShortcuts portal (MIT; already in the tree for capture).
-ashpd = { version = "0.13.13", features = ["global_shortcuts", "background"] }
+ashpd = { version = "0.14.0", features = ["global_shortcuts", "background"] }
 futures-util = "0.3"
 # Idle time, screen lock and replaceable, withdrawable notifications over D-Bus (MIT; already in the
 # tree through ashpd, same version and runtime).
