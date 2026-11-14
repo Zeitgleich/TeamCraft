@@ -202,6 +202,7 @@ warm-up drops the workspace crates from the cargo target before saving, like rus
 | `--filesystem=xdg-run/pipewire-0`            | Screen shares with sound (see below)                                     |
 | `--talk-name=org.freedesktop.secrets`        | The key of the sealed secrets files in the desktop keyring              |
 | `--talk-name=org.freedesktop.Notifications`  | Mention and direct-message notifications                                 |
+| `--talk-name=org.kde.StatusNotifierWatcher`  | The tray icon: registering it with the desktop's tray host               |
 
 No home directory, no `--device=all`: the camera, screen sharing, push-to-talk, file dialogs and
 the browser all go through portals (Camera, ScreenCast, GlobalShortcuts, FileChooser, OpenURI),
@@ -228,6 +229,22 @@ works except the "with sound" option, which then says it is unavailable.
   extension is not used: its version is not one the `openh264` crate verifies.)
 - **Segmentation model:** bundled at `/app/lib/TeamCraft/models/` (Tauri's resource directory for
   `/app/bin`), fetched by flatpak-builder with its SHA-256 pinned in the manifest.
+
+### Tray icon inside the sandbox
+
+The GNOME runtime has no libayatana-appindicator, so the manifest builds it with its dependencies
+(libdbusmenu-gtk3, ayatana-ido, libayatana-indicator; intltool only for libdbusmenu's build) from
+the upstream release archives, each pinned by SHA-256. Two patches in `tray-patches/` make the
+old libdbusmenu and intltool releases build with current autotools and Perl. The app finds the
+library in `/app/lib` and talks to the tray host through `org.kde.StatusNotifierWatcher`.
+
+The appindicator hands the host a file path for the icon image, so inside the sandbox the app
+writes those images to `$XDG_RUNTIME_DIR/app/de.zeitgleich.teamcraft/tray-icon`, the one runtime
+folder Flatpak shares with the host; anywhere else the host would show an empty icon.
+
+Tested on KDE Plasma (Wayland). GNOME needs the AppIndicator extension, as with the native
+packages; without a tray host the app behaves as before (closing quits, "start minimized"
+minimizes to the taskbar).
 
 ### Checks
 
@@ -275,8 +292,8 @@ and `.rpm` and recommends the video decoders (`gstreamer1.0-libav` / `gstreamer1
 and `gstreamer1-plugin-libav`, see "Video attachments"), the VA-API plugin
 (`gstreamer1.0-plugins-bad` / `gstreamer1-plugins-bad-free`) and the tray library
 (`libayatana-appindicator3-1` / `libayatana-appindicator-gtk3`). The tray library is only
-recommended because the app runs without it, just without a tray icon (as in the Flatpak, whose
-runtime doesn't ship it). The release workflow builds them in a Debian 13 container (see the
+recommended because the app runs without it, just without a tray icon (the Flatpak bundles its
+own, see "Tray icon inside the sandbox"). The release workflow builds them in a Debian 13 container (see the
 distribution table for what that implies).
 
 The app only counts a tray library built for its own architecture (a 32-bit one in `/usr/lib`

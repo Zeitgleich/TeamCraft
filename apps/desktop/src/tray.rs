@@ -155,6 +155,10 @@ pub fn install(app: &tauri::App) -> tauri::Result<()> {
       }
     });
   builder = builder.icon(tray_icon(current_style(app.handle()), false, TrayCallState::Idle));
+  #[cfg(target_os = "linux")]
+  if let Some(directory) = flatpak_icon_directory() {
+    builder = builder.temp_dir_path(directory);
+  }
   // macOS draws the menu bar icon as a template in the bar's own colour.
   #[cfg(target_os = "macos")]
   {
@@ -172,6 +176,22 @@ pub fn install(app: &tauri::App) -> tauri::Result<()> {
     quit: _quit,
   });
   Ok(())
+}
+
+/// Flatpak: where the tray icon's image files go. The appindicator hands the tray host a file path,
+/// which the host reads in its own process; the default (`$XDG_RUNTIME_DIR/tray-icon`) is private
+/// to the sandbox, so the host would show an empty icon. `$XDG_RUNTIME_DIR/app/<app ID>` is the
+/// one runtime folder Flatpak shares with the host, under the same path. `None` outside Flatpak.
+#[cfg(target_os = "linux")]
+fn flatpak_icon_directory() -> Option<std::path::PathBuf> {
+  let app_id = std::env::var_os("FLATPAK_ID")?;
+  let runtime = std::env::var_os("XDG_RUNTIME_DIR")?;
+  Some(
+    std::path::PathBuf::from(runtime)
+      .join("app")
+      .join(app_id)
+      .join("tray-icon"),
+  )
 }
 
 /// Asks the session bus in the background, so the start never waits for D-Bus, then follows the

@@ -49,8 +49,10 @@ finish-args:
   - --filesystem=xdg-data/nemo/actions:create
   - --filesystem=xdg-config/caja/scripts:create
   - --filesystem=xdg-config/Thunar:create
-  # No tray icon: the GNOME runtime has no libayatana-appindicator, and the app runs without one
-  # (closing quits, "start minimized" minimizes to the taskbar).
+  # The tray icon (StatusNotifierItem, libayatana-appindicator built below): registering it with
+  # the desktop's tray host. KDE Plasma, GNOME with the AppIndicator extension, and most other
+  # panels implement this watcher.
+  - --talk-name=org.kde.StatusNotifierWatcher
   # Nothing else besides these folders: no home directory, no devices besides the GPU. Screen sharing (ScreenCast),
   # the camera (Camera), push-to-talk on Wayland (GlobalShortcuts), opening the login page
   # (OpenURI) and file dialogs (FileChooser) all go through portals, which need no permission
@@ -70,6 +72,98 @@ build-options:
     RUSTFLAGS: --cfg teamcraft_audio_processing --cfg teamcraft_audio_processing_bundled -L native=/app/lib
 
 modules:
+  # The tray icon: the GNOME runtime has no libayatana-appindicator, which the tray crate loads
+  # with dlopen (the app looks for it in /app/lib, apps/desktop/src/appindicator.rs). Built from
+  # the upstream releases with its dependencies; headers and pkg-config files are only needed
+  # while building and are cleaned up. Without the library the app runs without a tray icon.
+  # intltool: only for libdbusmenu's configure, not shipped.
+  - name: intltool
+    cleanup:
+      - "*"
+    sources:
+      - type: archive
+        url: https://launchpad.net/intltool/trunk/0.51.0/+download/intltool-0.51.0.tar.gz
+        sha256: 67c74d94196b153b774ab9f89b2fa6c6ba79352407037c8c14d5aeb334e959cd
+      # Perl ≥ 5.26 rejects intltool-update's unescaped braces (Debian's fix).
+      - type: patch
+        path: tray-patches/intltool-perl5.26-regex-fixes.patch
+
+  # The menu over D-Bus (the latest release; the project has had none since).
+  - name: libdbusmenu
+    build-options:
+      # Its sources use GLib API that is deprecated by now.
+      cflags: -Wno-error
+    config-opts:
+      - --with-gtk=3
+      - --disable-dumper
+      - --disable-static
+      - --disable-tests
+      - --disable-gtk-doc
+      - --enable-introspection=no
+      - --disable-vala
+    cleanup:
+      - "*.la"
+      - /include
+      - /lib/pkgconfig
+      - /libexec
+      - /share/doc
+      - /share/gtk-doc
+    sources:
+      - type: archive
+        url: https://launchpad.net/libdbusmenu/16.04/16.04.0/+download/libdbusmenu-16.04.0.tar.gz
+        sha256: b9cc4a2acd74509435892823607d966d424bd9ad5d0b00938f27240a1bfa878a
+      # configure fails with --disable-tests: HAVE_VALGRIND is only defined when tests are on.
+      - type: patch
+        path: tray-patches/libdbusmenu-fix-have-valgrind.patch
+
+  - name: ayatana-ido
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+    cleanup:
+      - /include
+      - /lib/pkgconfig
+      - /lib/girepository-1.0
+      - /share/gir-1.0
+      - /share/vala
+    sources:
+      - type: archive
+        url: https://releases.ayatana-indicators.org/source/ayatana-ido/ayatana-ido-0.10.4.tar.gz
+        sha256: df64cb09005d2f273d37c57438216e9239d91ae26c9cd1a4341e8eb8b6c7d88e
+
+  # 0.9.5 and 0.6.1 below are tagged upstream but not yet on releases.ayatana-indicators.org, so
+  # they come from the project's own tag archives.
+  - name: libayatana-indicator
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+    cleanup:
+      - /include
+      - /lib/pkgconfig
+      - /libexec
+      - /share
+    sources:
+      - type: archive
+        url: https://github.com/AyatanaIndicators/libayatana-indicator/archive/refs/tags/0.9.5.tar.gz
+        sha256: 73d71c908b803f12e4a5ecd8392511b58afbdd0c82ad7909611a17bb7847c5c8
+
+  - name: libayatana-appindicator
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DENABLE_BINDINGS_MONO=NO
+      - -DENABLE_BINDINGS_VALA=NO
+      - -DENABLE_GTKDOC=NO
+    cleanup:
+      - /include
+      - /lib/pkgconfig
+      - /lib/girepository-1.0
+      - /share/gir-1.0
+    sources:
+      - type: archive
+        url: https://github.com/AyatanaIndicators/libayatana-appindicator/archive/refs/tags/0.6.1.tar.gz
+        sha256: 56c0b938ffaa3e17b10c38d3e54c16d316f41f0da61949eda028adbf19ee767f
+
   # WebRTC's audio processing (echo cancellation) is C++17, and its Rust bindings are generated
   # with -std=c++17; the SDK's Abseil headers require C++20. A C++17 build of the Abseil release
   # it expects (the one in its meson wrap file) goes first in /app.
