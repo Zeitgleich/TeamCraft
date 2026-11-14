@@ -11066,7 +11066,7 @@ name = "teamcraft-desktop-native"
 version = "1.0.33"
 dependencies = [
  "block2",
- "jni-sys 0.3.1",
+ "jni-sys 0.4.1",
  "ndk-context",
  "objc2",
  "objc2-app-kit",
