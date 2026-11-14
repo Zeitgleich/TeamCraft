@@ -1617,9 +1617,12 @@ Now the UI picks the message's ID (`OutgoingMessage::maybe_client_message_id`), 
 feed in the same call (`RemoteChat::show_pending`), and the core keeps that ID, so its answer
 replaces the row in place (`pending_message_id` is the one function that derives the row's ID from the
 client ID, for both). A send the core refuses takes the row back, and the
-same ID sent twice is one message, also when the first has been sent by then. A message that needs
-more than its text for its row (a reply's quote, files, urgency, silent) appears with the core's
-answer as before. Edits, deletes, reactions, pins and forwards are outbox writes like a new message
+same ID sent twice is one message, also when the first has been sent by then. A reply, an urgent
+message, one that asks for acknowledgement and a silent one show at once as well: the mirror holds
+what the row shows beyond its text (`Mirror::pending_extras`) until the core's answer for the row
+has it, with the quote made from the quoted row by the core's rule (`reply_ref`). A message with
+files, a quote of an album's picture or of a row the mirror doesn't hold, and a thread reply also
+posted to the conversation appear with the core's answer as before. Edits, deletes, reactions, pins and forwards are outbox writes like a new message
 (`ChatAction::is_outbox_write`): the core answers once they are stored and sends them afterwards,
 also while a connection or an upload holds the client.
 
@@ -1651,8 +1654,7 @@ is the framework's work.
   `perf.rs` was not run for this change.
 - **Left:** read markers during a connection (they need the client's account data), reactions and
   edits still read the conversation to find their target and its reactions (a keyed lookup for
-  reactions needs an index of them), a reply, files and urgent messages show with the core's answer,
-  and live events still don't move the sync heads. Covered by tests: `chosen_ids::*` (core),
+  reactions needs an index of them), files show with the core's answer, and live events still don't move the sync heads. Covered by tests: `chosen_ids::*` (core),
   `pending_rows::*` (UI mirror), `changes_that_live_in_the_outbox_answer_before_the_network`
   (client API) and the browser test above, which also sends offline, reloads the page with the
   message queued and checks that it goes out once when the network is back.

@@ -20,12 +20,13 @@ use serde_json::json;
 use teamcraft_client_api::actions::{
   BrowsableChannel, CategoryInfo, ChannelChanges, DownloadControl, DownloadEntry, FileInfo, LinkedMessage,
   MediaAnchor, MediaPage, MessageExtras, MessagePriority, NewChannel, NewSpace, OutgoingMessage,
-  PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges, SpaceInvite,
+  PermalinkTarget, ReplyPreview, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges, SpaceInvite,
 };
 use teamcraft_client_api::backend::{ChatBackend, SearchBackend};
 use teamcraft_client_api::calls::BackgroundImageInfo;
 use teamcraft_client_api::files_query::{FilesPage, FilesQuery};
 use teamcraft_client_api::links::{LinkPage, links_page};
+use teamcraft_client_api::markdown;
 use teamcraft_client_api::model::{
   Conversation, ConversationId, CustomStatus, GapEdge, HistoryGap, InviteId, JoinableSpace, Message,
   MessageId, MessageKind, OlderHistory, PendingInvite, PresenceStatus, Space, SpaceId, SpaceRole,
@@ -39,6 +40,7 @@ use teamcraft_client_api::remote::{
 use teamcraft_client_api::scheduled::ScheduledOverview;
 use teamcraft_client_api::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
+use teamcraft_core::client::REPLY_EXCERPT_CHARS;
 use teamcraft_proto::{
   AttachmentId, BackgroundId, CategoryId, ClientMessageId, HistoryPolicy, ScheduledMessageId,
   WebPushKeyResponse,
@@ -60,6 +62,9 @@ const REFRESH_DELAY: Duration = Duration::from_millis(120);
 /// second) asked every query on every change, an expensive one (the activity feed, for a badge)
 /// back to back. The user's own actions still ask at once.
 const MIN_REQUERY_INTERVAL: Duration = Duration::from_secs(1);
+/// Pending rows whose quote or marks the mirror holds until the core answers: a few sends in a row.
+/// More would mean the core isn't answering, and the oldest then show with the core's answer.
+const MAX_PENDING_EXTRAS: usize = 32;
 
 thread_local! {
   /// The backend the core's events go to (#344). The page subscribes once; a new sign-in connects a
@@ -498,6 +503,16 @@ struct PendingRow {
   id: MessageId,
 }
 
+/// What a pending row shows beyond its text ([`Mirror::pending_extras_of`]).
+enum PendingExtras {
+  /// Nothing: a plain message.
+  Plain,
+  /// A quote, urgency, an asked acknowledgement or silence, as the core will show them.
+  Held(Box<MessageExtras>),
+  /// The mirror can't tell what the core will show (a quote of a row it doesn't hold).
+  Unknown,
+}
+
 /// Where the rows of a hole's page arrive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct GapRows {
@@ -520,6 +535,9 @@ struct Mirror {
   /// Loads asked for again while in flight: their answer may predate a change, so they are read
   /// once more when it arrives.
   outdated: HashSet<LoadKey>,
+  /// What pending rows show beyond their text (a reply's quote, urgency, silence) until the core
+  /// answers for them ([`RemoteChat::show_pending`]), at most [`MAX_PENDING_EXTRAS`].
+  pending_extras: Vec<MessageExtras>,
 }
 
 /// What a refresh reads again: only what the UI showed since its last change (issue #246).
@@ -580,6 +598,93 @@ pub struct RemoteChat {
   refresh_queued: Rc<Cell<bool>>,
   requery_queued: Rc<Cell<bool>>,
   answers: Rc<RefCell<HashMap<String, Slot>>>,
+}
+
+impl Mirror {
+  /// What the row of `message`, shown as `id`, shows beyond its text, as the core will show it: the
+  /// quote from the quoted row the mirror holds (the core's rule: `reply_ref`), the marks from the
+  /// composer.
+  fn pending_extras_of(&self, message: &OutgoingMessage, id: MessageId) -> PendingExtras {
+    let maybe_reply = match message.maybe_reply_to {
+      None => None,
+      Some(quoted) => match self.quotable_row(message.conversation, quoted) {
+        Some(row) => Some(ReplyPreview {
+          maybe_message: Some(row.id),
+          author: row.author,
+          excerpt: markdown::readable_tables(&row.body)
+            .chars()
+            .take(REPLY_EXCERPT_CHARS)
+            .collect(),
+          maybe_attachment: None,
+        }),
+        None => return PendingExtras::Unknown,
+      },
+    };
+    let is_plain = maybe_reply.is_none()
+      && message.priority == MessagePriority::Normal
+      && !message.wants_acknowledgement
+      && !message.is_silent;
+    if is_plain {
+      return PendingExtras::Plain;
+    }
+    let mut extras = MessageExtras::new(id);
+    extras.maybe_reply = maybe_reply;
+    extras.priority = message.priority;
+    extras.wants_acknowledgement = message.wants_acknowledgement;
+    extras.is_silent = message.is_silent;
+    PendingExtras::Held(Box::new(extras))
+  }
+
+  /// A row of `conversation` (its feed or one of its threads) a quote can be made from here: a
+  /// user's text message. Anything else (files, imported, polls, placeholders) is quoted by the core.
+  fn quotable_row(&self, conversation: ConversationId, id: MessageId) -> Option<&Message> {
+    let feed_rows = self
+      .feeds
+      .get(&conversation)
+      .into_iter()
+      .flat_map(|feed| feed.rows.values());
+    let thread_rows = self
+      .threads
+      .iter()
+      .filter(|((held, _), _)| *held == conversation)
+      .flat_map(|(_, replies)| replies.iter());
+    feed_rows.chain(thread_rows).find(|row| {
+      row.id == id
+        && row.kind == MessageKind::User
+        && row.maybe_imported.is_none()
+        && row.maybe_placeholder.is_none()
+        && row.maybe_poll.is_none()
+        && !row.body.trim().is_empty()
+        && !is_pending(row.id)
+    })
+  }
+
+  /// Keeps `extras` for a pending row until the core answers for it; the oldest go first.
+  fn hold_pending_extras(&mut self, extras: MessageExtras) {
+    self.pending_extras.retain(|held| held.message != extras.message);
+    if self.pending_extras.len() >= MAX_PENDING_EXTRAS {
+      self.pending_extras.remove(0);
+    }
+    self.pending_extras.push(extras);
+  }
+
+  /// Adds the held extras of pending rows among `asked` the core's answer doesn't cover yet. Those
+  /// it covers are done: the core shows them from now on.
+  fn add_pending_extras(&mut self, extras: &mut Vec<MessageExtras>, asked: &[MessageId]) {
+    if self.pending_extras.is_empty() {
+      return;
+    }
+    self
+      .pending_extras
+      .retain(|held| !extras.iter().any(|answered| answered.message == held.message));
+    extras.extend(
+      self
+        .pending_extras
+        .iter()
+        .filter(|held| asked.contains(&held.message))
+        .cloned(),
+    );
+  }
 }
 
 impl Feed {
@@ -825,6 +930,7 @@ impl RemoteChat {
         used_threads: HashSet::new(),
         loading: HashSet::new(),
         outdated: HashSet::new(),
+        pending_extras: Vec::new(),
       })),
       notify: Rc::new(RefCell::new(None)),
       maybe_error: Rc::new(RefCell::new(None)),
@@ -1336,19 +1442,18 @@ impl RemoteChat {
     });
   }
 
-  /// Puts a plain message the user just sent into the mirror, in the same frame: its row is the
-  /// outbox message the core writes under the same client ID, so the core's answer replaces it in
-  /// place (issue #778). Messages whose row needs more than the text (a reply's quote, files,
-  /// urgency) appear with the core's answer.
+  /// Puts a message the user just sent into the mirror, in the same frame: its row is the outbox
+  /// message the core writes under the same client ID, so the core's answer replaces it in place
+  /// (issue #778). A reply's quote, urgency, an asked acknowledgement and silence show at once too,
+  /// from [`Mirror::pending_extras`]. Messages with files, a quoted picture of an album, a quote of a
+  /// message the mirror doesn't hold, or a thread reply also posted to the conversation appear with
+  /// the core's answer.
   fn show_pending(&self, message: &OutgoingMessage, id: ClientMessageId) -> Option<PendingRow> {
-    let is_plain = message.files.is_empty()
-      && message.maybe_reply_to.is_none()
-      && message.priority == MessagePriority::Normal
-      && !message.wants_acknowledgement
-      && !message.is_silent
+    let is_shown_at_once = message.files.is_empty()
+      && message.maybe_reply_attachment.is_none()
       && !message.also_send_to_channel
       && !message.body.trim().is_empty();
-    if !is_plain {
+    if !is_shown_at_once {
       return None;
     }
     let pending = PendingRow {
@@ -1358,6 +1463,11 @@ impl RemoteChat {
     };
     let is_shown = {
       let mut mirror = self.mirror.borrow_mut();
+      let maybe_extras = match mirror.pending_extras_of(message, pending.id) {
+        PendingExtras::Plain => None,
+        PendingExtras::Held(extras) => Some(*extras),
+        PendingExtras::Unknown => return None,
+      };
       let row = Message {
         id: pending.id,
         conversation: message.conversation,
@@ -1377,7 +1487,7 @@ impl RemoteChat {
         mentions_me: false,
         maybe_poll: None,
       };
-      match message.maybe_thread {
+      let is_shown = match message.maybe_thread {
         Some(thread) => mirror
           .threads
           .get_mut(&(message.conversation, thread))
@@ -1387,7 +1497,11 @@ impl RemoteChat {
           .feeds
           .get_mut(&message.conversation)
           .is_some_and(|feed| feed.push_pending(row)),
+      };
+      if is_shown && let Some(extras) = maybe_extras {
+        mirror.hold_pending_extras(extras);
       }
+      is_shown
     };
     if is_shown {
       self.changed();
@@ -1404,6 +1518,7 @@ impl RemoteChat {
       crate::perf::PerfStatus::Error,
     );
     let mut mirror = self.mirror.borrow_mut();
+    mirror.pending_extras.retain(|held| held.message != pending.id);
     match pending.maybe_thread {
       Some(thread) => {
         if let Some(replies) = mirror.threads.get_mut(&(pending.conversation, thread)) {
@@ -1469,13 +1584,15 @@ impl ChatBackend for RemoteChat {
   }
 
   fn message_extras(&self, conversation: ConversationId, messages: &[MessageId]) -> Vec<MessageExtras> {
-    match self.ask(ChatQuery::MessageExtras {
+    let mut extras = match self.ask(ChatQuery::MessageExtras {
       conversation,
       messages: messages.to_vec(),
     }) {
       Some(ChatAnswer::MessageExtras { extras }) => extras,
       _ => Vec::new(),
-    }
+    };
+    self.mirror.borrow_mut().add_pending_extras(&mut extras, messages);
+    extras
   }
 
   fn edit_message(&self, conversation: ConversationId, message: MessageId, body: &str) {
@@ -3560,13 +3677,16 @@ mod tests {
     }
 
     #[test]
-    fn a_message_needing_more_than_its_text_waits_for_the_core() {
+    fn a_message_needing_more_than_the_mirror_holds_waits_for_the_core() {
       let backend = backend_with_feed(&["a"]);
       let id = ClientMessageId::from_bytes([3; 16]);
-      let mut reply = outgoing("hello", id);
-      reply.maybe_reply_to = Some(id_from_raw(1));
-      let mut urgent = outgoing("hello", id);
-      urgent.priority = teamcraft_client_api::actions::MessagePriority::Urgent;
+      let mut reply_to_unknown = outgoing("hello", id);
+      reply_to_unknown.maybe_reply_to = Some(id_from_raw(99));
+      let mut album_reply = outgoing("hello", id);
+      album_reply.maybe_reply_to = Some(id_from_raw(1));
+      album_reply.maybe_reply_attachment = Some(id_from_raw(4));
+      let mut also_in_channel = outgoing("hello", id);
+      also_in_channel.also_send_to_channel = true;
       let mut file = outgoing("hello", id);
       file.files.push(teamcraft_client_api::actions::OutgoingFile {
         file_name: "a.txt".into(),
@@ -3579,10 +3699,160 @@ mod tests {
       });
       let blank = outgoing("   ", id);
 
-      for message in [reply, urgent, file, blank] {
+      for message in [reply_to_unknown, album_reply, also_in_channel, file, blank] {
         assert!(backend.show_pending(&message, id).is_none());
       }
       assert_eq!(backend.message_count(id_from_raw(CONVERSATION)), 1);
+      assert!(backend.mirror.borrow().pending_extras.is_empty());
+    }
+
+    mod extras {
+      use super::*;
+
+      #[test]
+      fn a_reply_shows_its_quote_at_once() {
+        let long = format!("| a | b |\n|---|---|\n| {} |", "x".repeat(300));
+        let backend = backend_with_feed(&[&long]);
+        let id = ClientMessageId::from_bytes([3; 16]);
+        let mut reply = outgoing("hello", id);
+        reply.maybe_reply_to = Some(id_from_raw(1));
+
+        let pending = backend.show_pending(&reply, id).expect("shown");
+
+        let extras = held_extras(&backend, pending.id);
+        let quote = extras.maybe_reply.expect("the quote");
+        assert_eq!(quote.maybe_message, Some(id_from_raw(1)));
+        assert_eq!(quote.author, id_from_raw(2));
+        // The core's rule (`reply_ref`): tables as rows, the first characters of that.
+        let expected: String = markdown::readable_tables(&long)
+          .chars()
+          .take(REPLY_EXCERPT_CHARS)
+          .collect();
+        assert_eq!(quote.excerpt, expected);
+        assert!(!quote.excerpt.contains('|'));
+      }
+
+      #[test]
+      fn a_reply_in_a_thread_quotes_a_row_of_the_thread() {
+        let backend = backend();
+        let (conversation, thread) = (
+          id_from_raw(CONVERSATION),
+          crate::model::thread_id_of(id_from_raw(70)),
+        );
+        let quoted = window(1, &["earlier reply"]).messages.remove(0);
+        backend
+          .mirror
+          .borrow_mut()
+          .threads
+          .insert((conversation, thread), vec![quoted]);
+        let id = ClientMessageId::from_bytes([3; 16]);
+        let mut reply = outgoing("answer", id);
+        reply.maybe_thread = Some(thread);
+        reply.maybe_reply_to = Some(id_from_raw(1));
+
+        let pending = backend.show_pending(&reply, id).expect("shown");
+
+        let quote = held_extras(&backend, pending.id).maybe_reply.expect("the quote");
+        assert_eq!(quote.excerpt, "earlier reply");
+      }
+
+      #[test]
+      fn urgency_acknowledgement_and_silence_show_at_once() {
+        let backend = backend_with_feed(&["a"]);
+        let id = ClientMessageId::from_bytes([3; 16]);
+        let mut message = outgoing("now", id);
+        message.priority = MessagePriority::Urgent;
+        message.wants_acknowledgement = true;
+        message.is_silent = true;
+
+        let pending = backend.show_pending(&message, id).expect("shown");
+
+        let extras = held_extras(&backend, pending.id);
+        assert_eq!(extras.priority, MessagePriority::Urgent);
+        assert!(extras.wants_acknowledgement);
+        assert!(extras.is_silent);
+        assert!(extras.maybe_reply.is_none());
+      }
+
+      #[test]
+      fn a_plain_message_holds_nothing() {
+        let backend = backend_with_feed(&["a"]);
+        let id = ClientMessageId::from_bytes([3; 16]);
+
+        assert!(backend.show_pending(&outgoing("hi", id), id).is_some());
+        assert!(backend.mirror.borrow().pending_extras.is_empty());
+      }
+
+      #[test]
+      fn the_cores_answer_takes_over() {
+        let backend = backend_with_feed(&["a"]);
+        let id = ClientMessageId::from_bytes([3; 16]);
+        let mut urgent = outgoing("now", id);
+        urgent.priority = MessagePriority::Urgent;
+        let pending = backend.show_pending(&urgent, id).expect("shown");
+        let mut from_core = MessageExtras::new(pending.id);
+        from_core.priority = MessagePriority::Urgent;
+        from_core.is_send_failed = true;
+
+        let mut answer = vec![from_core.clone()];
+        backend
+          .mirror
+          .borrow_mut()
+          .add_pending_extras(&mut answer, &[pending.id]);
+
+        assert_eq!(answer, vec![from_core]);
+        assert!(backend.mirror.borrow().pending_extras.is_empty());
+      }
+
+      #[test]
+      fn only_the_rows_asked_for_get_them() {
+        let backend = backend_with_feed(&["a"]);
+        let id = ClientMessageId::from_bytes([3; 16]);
+        let mut urgent = outgoing("now", id);
+        urgent.priority = MessagePriority::Urgent;
+        backend.show_pending(&urgent, id).expect("shown");
+
+        let mut answer = Vec::new();
+        backend
+          .mirror
+          .borrow_mut()
+          .add_pending_extras(&mut answer, &[id_from_raw(1)]);
+
+        assert!(answer.is_empty());
+        assert_eq!(backend.mirror.borrow().pending_extras.len(), 1);
+      }
+
+      #[test]
+      fn a_refused_message_takes_its_extras_back() {
+        let backend = backend_with_feed(&["a"]);
+        let id = ClientMessageId::from_bytes([3; 16]);
+        let mut silent = outgoing("psst", id);
+        silent.is_silent = true;
+        let pending = backend.show_pending(&silent, id).expect("shown");
+
+        backend.withdraw_pending(pending);
+
+        assert!(backend.mirror.borrow().pending_extras.is_empty());
+      }
+
+      #[test]
+      fn the_held_extras_are_bounded() {
+        let backend = backend();
+        let mut mirror = backend.mirror.borrow_mut();
+        for raw in 0..(MAX_PENDING_EXTRAS as u64 + 5) {
+          mirror.hold_pending_extras(MessageExtras::new(id_from_raw(1000 + raw)));
+        }
+
+        assert_eq!(mirror.pending_extras.len(), MAX_PENDING_EXTRAS);
+        assert_eq!(mirror.pending_extras[0].message, id_from_raw(1005));
+      }
+
+      fn held_extras(backend: &RemoteChat, id: MessageId) -> MessageExtras {
+        let mut extras = Vec::new();
+        backend.mirror.borrow_mut().add_pending_extras(&mut extras, &[id]);
+        assert_eq!(extras.len(), 1, "one held entry for the row");
+        extras.remove(0)
+      }
     }
 
     #[test]
@@ -3799,6 +4069,7 @@ mod tests {
           used_threads: HashSet::new(),
           loading: HashSet::new(),
           outdated: HashSet::new(),
+          pending_extras: Vec::new(),
         })),
         notify: Rc::new(RefCell::new(None)),
         maybe_error: Rc::new(RefCell::new(None)),
