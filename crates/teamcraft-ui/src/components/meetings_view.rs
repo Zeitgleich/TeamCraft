@@ -97,10 +97,11 @@ pub fn MeetingsView() -> impl IntoView {
             ChatInvitees::chosen(Vec::new()),
           )
         });
-        // The times the server gave the meeting just started are its schedule from here (#1919).
-        let schedule = MeetingSchedule::started(&meeting);
+        // The times the server gave the meeting just started, bounded, are its schedule from here
+        // (#1919).
+        let server_times = MeetingTimes::of(&meeting);
         state.try_write(|backend| {
-          backend.note_meeting_schedule(meeting.id, ScheduleNote::Scheduled { schedule })
+          backend.note_meeting_schedule(meeting.id, ScheduleNote::Started { server_times })
         });
         show_created(state, hub, meeting);
       }

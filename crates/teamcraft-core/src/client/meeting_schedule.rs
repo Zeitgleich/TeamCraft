@@ -19,7 +19,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Keeps what the organizer set of `meeting`'s schedule on this device: a meeting scheduled here
   /// replaces the record, an edit changes what it changed ([`MeetingSchedule::after`]).
   pub fn note_meeting_schedule(&self, meeting: MeetingId, note: ScheduleNote) -> Result<(), CoreError> {
-    let Some(schedule) = MeetingSchedule::after(self.meeting_schedule(meeting)?, note) else {
+    let max_instant_ms = i64::try_from(self.settings.max_instant_meeting.as_millis()).unwrap_or(i64::MAX);
+    let maybe_recorded = self.meeting_schedule(meeting)?;
+    let Some(schedule) = MeetingSchedule::after(maybe_recorded, note, self.now_ms(), max_instant_ms) else {
       return Ok(());
     };
     records::put_json(&self.store, Table::SyncState, &record_key(meeting), &schedule)

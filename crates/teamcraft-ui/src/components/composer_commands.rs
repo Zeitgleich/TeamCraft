@@ -3,7 +3,7 @@
 use leptos::prelude::*;
 use teamcraft_client_api::actions::ChannelChanges;
 use teamcraft_client_api::custom_status::is_allowed;
-use teamcraft_client_api::meeting_schedule::{MeetingSchedule, ScheduleNote};
+use teamcraft_client_api::meeting_schedule::{MeetingTimes, ScheduleNote};
 use teamcraft_proto::{HistoryPolicy, IdempotencyKey, Permission, Role};
 
 use crate::channel_access::may_now;
@@ -355,10 +355,12 @@ fn start_meeting(state: AppState, i18n: I18n) -> Outcome {
           teamcraft_client_api::meeting_invitees::ChatInvitees::chosen(Vec::new()),
         )
       });
-      // The times the server gave the meeting just started are its schedule from here (#1919).
-      let schedule = MeetingSchedule::started(&meeting);
-      state
-        .try_write(|backend| backend.note_meeting_schedule(meeting.id, ScheduleNote::Scheduled { schedule }));
+      // The times the server gave the meeting just started, bounded, are its schedule from here
+      // (#1919).
+      let server_times = MeetingTimes::of(&meeting);
+      state.try_write(|backend| {
+        backend.note_meeting_schedule(meeting.id, ScheduleNote::Started { server_times })
+      });
       state.open_meetings();
     }
   });

@@ -218,11 +218,12 @@ impl Engine {
             kept: Vec::new(),
           },
         },
-        // The times the server gave the meeting just started are its schedule from here (#1919).
+        // The times the server gave the meeting just started, bounded, are its schedule from here
+        // (#1919).
         CoreCommand::NoteMeetingSchedule {
           meeting: meeting.id,
-          note: ScheduleNote::Scheduled {
-            schedule: MeetingSchedule::started(&meeting),
+          note: ScheduleNote::Started {
+            server_times: MeetingTimes::of(&meeting),
           },
         },
         sync_admitters(&meeting),

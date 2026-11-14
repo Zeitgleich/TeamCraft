@@ -49,6 +49,10 @@ pub struct MeetingSchedule {
 pub enum ScheduleNote {
   /// A meeting scheduled here: the whole schedule.
   Scheduled { schedule: MeetingSchedule },
+  /// A meeting started here ("Meet now", a call that grows into a meeting): the request names no
+  /// times, so the server's answer is all there is; the record bounds it
+  /// ([`MeetingSchedule::started`]).
+  Started { server_times: MeetingTimes },
   /// An edit saved here: only what it changed.
   Edited { edit: ScheduleEdit },
 }
@@ -94,20 +98,32 @@ impl MeetingSchedule {
     }
   }
 
-  /// The schedule of a meeting started now ("Meet now"): the request names no times, so the
-  /// server's answer to it is the schedule; later answers no longer lengthen it.
-  pub fn started(meeting: &MeetingResponse) -> Self {
+  /// The schedule of a meeting started at `now_ms` ("Meet now"): the server's answer, but ending
+  /// no later than `max_length_ms` from now, whatever end the server answered. Later answers no
+  /// longer lengthen it.
+  pub fn started(server_times: MeetingTimes, now_ms: i64, max_length_ms: i64) -> Self {
+    let latest_end = now_ms.saturating_add(max_length_ms.max(0));
     Self {
-      times: MeetingTimes::of(meeting),
+      times: MeetingTimes {
+        starts_at_ms: server_times.starts_at_ms.min(now_ms),
+        ends_at_ms: server_times.ends_at_ms.min(latest_end),
+      },
       maybe_recurrence: None,
     }
   }
 
   /// The record after `note`: a new meeting replaces it, an edit changes what it changed. An edit
   /// that moved nothing leaves a device without a record without one (the server's end applies).
-  pub fn after(maybe_recorded: Option<Self>, note: ScheduleNote) -> Option<Self> {
+  /// `now_ms` and `max_instant_ms` bound a meeting started here ([`Self::started`]).
+  pub fn after(
+    maybe_recorded: Option<Self>,
+    note: ScheduleNote,
+    now_ms: i64,
+    max_instant_ms: i64,
+  ) -> Option<Self> {
     match note {
       ScheduleNote::Scheduled { schedule } => Some(schedule),
+      ScheduleNote::Started { server_times } => Some(Self::started(server_times, now_ms, max_instant_ms)),
       ScheduleNote::Edited { edit } => match maybe_recorded {
         Some(recorded) => Some(Self {
           times: edit.maybe_times.unwrap_or(recorded.times),
@@ -265,7 +281,12 @@ mod tests {
         maybe_recurrence: None,
         maybe_listed_recurrence: Some(daily(Some(START_MS))),
       };
-      let after = MeetingSchedule::after(Some(schedule(Some(daily(None)))), ScheduleNote::Edited { edit });
+      let after = MeetingSchedule::after(
+        Some(schedule(Some(daily(None)))),
+        ScheduleNote::Edited { edit },
+        0,
+        0,
+      );
       assert_eq!(
         after,
         Some(MeetingSchedule {
@@ -282,7 +303,10 @@ mod tests {
         maybe_recurrence: Some(daily(None)),
         maybe_listed_recurrence: None,
       };
-      assert_eq!(MeetingSchedule::after(None, ScheduleNote::Edited { edit }), None);
+      assert_eq!(
+        MeetingSchedule::after(None, ScheduleNote::Edited { edit }, 0, 0),
+        None
+      );
       let moved = times(START_MS, END_MS);
       let edit = ScheduleEdit {
         maybe_times: Some(moved),
@@ -290,7 +314,7 @@ mod tests {
         maybe_listed_recurrence: Some(daily(None)),
       };
       assert_eq!(
-        MeetingSchedule::after(None, ScheduleNote::Edited { edit }),
+        MeetingSchedule::after(None, ScheduleNote::Edited { edit }, 0, 0),
         Some(MeetingSchedule {
           times: moved,
           maybe_recurrence: Some(daily(None))
@@ -304,7 +328,7 @@ mod tests {
         schedule: schedule(None),
       };
       assert_eq!(
-        MeetingSchedule::after(Some(schedule(Some(daily(None)))), note),
+        MeetingSchedule::after(Some(schedule(Some(daily(None)))), note, 0, 0),
         Some(schedule(None))
       );
     }
@@ -324,6 +348,38 @@ mod tests {
         r#"{"kind":"edited","edit":{"times":{"starts_at_ms":1,"ends_at_ms":2}}}"#
       );
       assert_eq!(serde_json::from_str::<ScheduleNote>(&json).unwrap(), note);
+    }
+  }
+
+  mod started {
+    use super::*;
+
+    const MAX_MS: i64 = 8 * HOUR_MS;
+
+    #[test]
+    fn a_far_server_end_is_bounded_by_the_maximum_length() {
+      let note = ScheduleNote::Started {
+        server_times: times(START_MS, START_MS + 90 * DAY_MS),
+      };
+      let recorded = MeetingSchedule::after(None, note, START_MS, MAX_MS).unwrap();
+      let lengthened = times(START_MS, START_MS + 90 * DAY_MS);
+      assert_eq!(
+        admitters_until(lengthened, Some(&recorded), START_MS),
+        START_MS + MAX_MS + GUEST_ACCESS_GRACE_MS
+      );
+    }
+
+    #[test]
+    fn a_shorter_server_end_is_kept() {
+      let started = MeetingSchedule::started(times(START_MS, START_MS + HOUR_MS), START_MS, MAX_MS);
+      assert_eq!(started.times, times(START_MS, START_MS + HOUR_MS));
+    }
+
+    #[test]
+    fn a_start_in_the_future_counts_from_now() {
+      let started =
+        MeetingSchedule::started(times(START_MS + DAY_MS, START_MS + 2 * DAY_MS), START_MS, MAX_MS);
+      assert_eq!(started.times, times(START_MS, START_MS + MAX_MS));
     }
   }
 

@@ -776,6 +776,31 @@ mod schedule {
   }
 
   #[tokio::test]
+  async fn a_meeting_started_here_is_signed_no_longer_than_an_instant_meeting_lasts() {
+    let mut rig = rig().await;
+    // "Meet now", answered with an end months away.
+    let answered = times(NOW_MS, NOW_MS + 90 * DAY_MS);
+    rig
+      .alice
+      .client
+      .note_meeting_schedule(
+        rig.meeting,
+        ScheduleNote::Started {
+          server_times: answered,
+        },
+      )
+      .unwrap();
+
+    rig.sign_for(answered).await;
+
+    let max_instant_ms = i64::try_from(common::settings().max_instant_meeting.as_millis()).unwrap();
+    assert_eq!(
+      rig.signed_until(),
+      NOW_MS + max_instant_ms + GUEST_ACCESS_GRACE_MS
+    );
+  }
+
+  #[tokio::test]
   async fn a_meeting_without_a_record_here_is_signed_until_the_servers_end() {
     // Handed over to Alice, or scheduled on another device: no record on this one.
     let mut rig = rig().await;

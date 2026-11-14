@@ -2217,8 +2217,11 @@ never by the server's member list:
       desktop, web and mobile apps, applied by the core's
       `Client::sync_scheduled_meeting_admitters`). The organizer's device keeps the schedule the
       organizer set on it: written when the meeting is scheduled there (the request's start, end
-      and repeat rule; for "Meet now" the times the server answered at creation) and changed by
-      the edits saved there (only what they change). The admitters' validity is the end of the
+      and repeat rule) and changed by the edits saved there (only what they change). A meeting
+      started there ("Meet now", or a call that grows into a meeting) names no times in its
+      request: its record is the server's answer, but ending no later than
+      `ClientSettings::max_instant_meeting` (default eight hours, as long as the server keeps
+      such a meeting open) after the device's own clock at the start. The admitters' validity is the end of the
       meeting as the server lists it, but never later than that record says, plus the guests'
       grace: a server that lengthens the meeting after it was scheduled on this device gets no
       longer signature. For an occurrence of a series the record gives its length (the first
