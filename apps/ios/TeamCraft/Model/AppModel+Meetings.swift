@@ -18,6 +18,16 @@ extension AppModel {
     try await core().startMeetingNow(maybeTitle: nil, maybeSpaceId: nil, requestKey: requestKey)
   }
 
+  /// The notetaker "Notetaker joins the calls" asks in, or nil to hide the box (e2ee.md §8.2).
+  func meetingNotetaker() async -> String? {
+    do {
+      return try await core().meetingNotetaker()
+    } catch {
+      meetingsLog.warning("the notetaker policy could not be read")
+      return nil
+    }
+  }
+
   /// The edit form of a meeting the user organizes, as the server has it now.
   func meetingEditForm(meetingId: String) async throws -> MeetingEditForm {
     try await core().meetingEditForm(meetingId: meetingId)

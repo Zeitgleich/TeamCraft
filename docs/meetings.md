@@ -329,21 +329,28 @@ waiting any more says so instead.
 **In the apps.** Android and iOS label the tiles of a meeting's call "Host" and "Co-host"; its
 organizer gets "Hosts" in the call's controls (each other member in the call: "Make co-host",
 "Remove as co-host", "Hand over host role") and the same question when leaving, the lobby count
-read from `GET /meetings/{id}/lobby`. The apps' schedule form has no co-host field: there,
-co-hosts are named in the call.
+read from `GET /meetings/{id}/lobby`. The apps' schedule form names co-hosts too (#1905), as
+desktop's dialog does.
 
 **Scheduling in the apps** (#1841). Android and iOS schedule, change and cancel meetings and start
 one with "Meet now" through the core (teamcraft-ffi `schedule_meeting`, `save_meeting_edit`,
 `cancel_meeting`, `start_meeting_now`; the decisions in `teamcraft_client_api::meeting_edits`,
-shared with desktop and web). The form has title, description, start, length, the lobby and the
-invited members; an edit keeps the meeting's e-mail invitees, notetaker and repeat rule (a series
-is changed as a whole, and its cancel asks which meetings). After the server saved it, the core
+shared with desktop and web). The form has what desktop's dialog has (#1905): title, description,
+start, length, invited members and e-mail addresses, co-hosts, "Notetaker joins the calls", the
+repeat rule (daily, weekly or monthly, every N, on which days, ending after a count or on a date,
+skipping public holidays) and the lobby. One validation decides for all of them:
+`MeetingDraft` in `meeting_edits`, which desktop's `ScheduleForm` fills from its text inputs and
+the apps through `MeetingForm`. A series' days of the week are the user's local days: the form
+carries the user's UTC offset at the start, set by the app. A series stays a series when edited
+(its cancel asks which meetings). After the server saved it, the core
 sets up or updates the chat's group exactly as desktop does (the invitees by source, #1726;
 founded anchored, #1747), notes the lobby and signs the admitters. The organizer's Join founds the
 group of a meeting from before 1.0.3 first (`prepare_meeting_join`). The apps read their meeting
 list through `meeting_upkeep`, which also keeps the admitters of the organizer's meetings that run
 or start within a day current and finishes edits whose removal is still owed (kept in the store
-before the save, as desktop keeps them in local storage).
+before the save, as desktop keeps them in local storage). The co-hosts as ticked are signed after
+the save (`ChangeMeetingHosts`, #1720); a ticked notetaker is asked into every call after the
+chat's setup, an unticked one is stopped before the edit takes it out of the group.
 
 **The lobby in the apps** (#1859). The organizer and the co-hosts (and a chat admin the server
 lets host it) see "Lobby" in the controls of the meeting's call with a count of who waits; nobody

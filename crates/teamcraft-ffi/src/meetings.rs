@@ -13,13 +13,15 @@
 
 use std::collections::HashMap;
 
-use teamcraft_client_api::backend::ChatBackend as _;
+use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::meeting_edits::{
-  ADMITTERS_SYNC_INTERVAL_MS, DraftProblem, MeetingDraft, PendingEdit, admitters_due, invited_users,
-  invitee_change, noting_pending_edit, plan_reconcile,
+  ADMITTERS_SYNC_INTERVAL_MS, DraftProblem, ExternalInvitee, MeetingDraft, PendingEdit, Repeat, RepeatRule,
+  SeriesEnd, admitters_due, invited_users, invitee_change, noting_pending_edit, plan_reconcile,
 };
+use teamcraft_client_api::meeting_hosts::co_hosts_from_dialog;
 use teamcraft_client_api::meeting_invitees::{ChatInvitees, added_users, attending_users, saved_change};
 use teamcraft_client_api::meeting_schedule::{MeetingSchedule, MeetingTimes, ScheduleEdit, ScheduleNote};
+use teamcraft_client_api::notetaker::may_ask_in;
 use teamcraft_core::clock::{Clock as _, SystemClock};
 use teamcraft_core::meeting_invitees::InviteeList;
 use teamcraft_core::records;
@@ -27,12 +29,13 @@ use teamcraft_core::store::Table;
 use teamcraft_core::ui_backend::CoreCommand;
 use teamcraft_proto::{
   CancelScope, CreateInstantMeetingRequest, IdempotencyKey, ListMeetingsResponse, MeetingControlAction,
-  MeetingControlRequest, MeetingId, MeetingResponse, SpaceId, UserId,
+  MeetingControlRequest, MeetingId, MeetingResponse, NotetakerRequest, NotetakerScope, SpaceId, UserId,
 };
 
 use crate::bridge::{from_json, to_json};
 use crate::engine::{Engine, parse_id, parse_ids};
 use crate::error::TeamCraftError;
+use crate::reads::Reads;
 
 /// Where the edits whose chat change is still owed are kept (`SyncState`).
 const PENDING_EDITS_KEY: &str = "meeting_edits_pending";
@@ -41,29 +44,92 @@ const PENDING_EDITS_KEY: &str = "meeting_edits_pending";
 const LIST_LOOKBACK_MS: i64 = 60 * 60_000;
 const LIST_LIMIT: u32 = 100;
 
-/// The schedule form of the apps: one meeting, invited members, the lobby. Repeats, e-mail
-/// invitees, co-hosts and the notetaker stay on desktop and web for now; an edit keeps what the
-/// meeting has of them.
+/// The schedule form of the apps, as desktop and web have it: one meeting or a series, invited
+/// members and e-mail addresses, co-hosts, the notetaker and the lobby. Checked by the core's one
+/// validation (`teamcraft_client_api::meeting_edits::MeetingDraft`).
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct MeetingForm {
   pub title: String,
   pub description: String,
   pub starts_at_ms: i64,
+  /// The user's offset from UTC at the start, in minutes (east positive): a series' days of the
+  /// week are the user's local days. The app sets it with the start (and after
+  /// [`crate::TeamCraft::meeting_edit_form`], which can't know the time zone).
+  pub utc_offset_minutes: i32,
   pub duration_minutes: u32,
-  /// The invited members, the organizer left out.
+  /// The invited members, the organizer and the notetaker left out.
   pub invitee_user_ids: Vec<String>,
+  /// People invited by e-mail address.
+  pub external_invitees: Vec<MeetingExternalInvitee>,
+  pub repeat_rule: MeetingRepeatForm,
   pub has_lobby: bool,
+  /// "Notetaker joins the calls" ticked: the notetaker of [`crate::TeamCraft::meeting_notetaker`].
+  pub maybe_notetaker_user_id: Option<String>,
+  /// Invited members who host with the organizer (#1720), signed by this device once saved.
+  pub co_host_user_ids: Vec<String>,
   /// Made with a new form and kept for every submit of it, so a retry after a lost answer
   /// schedules the meeting once. `None` in an edit's form.
   pub maybe_request_key: Option<String>,
 }
 
-/// Why a form can't be saved; the app shows each at its field.
+/// Somebody invited by e-mail address; the name may be empty.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct MeetingExternalInvitee {
+  pub email: String,
+  pub name: String,
+}
+
+/// How the meeting repeats: every `interval` days, weeks or months, on which days, until when.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct MeetingRepeatForm {
+  pub frequency: MeetingRepeat,
+  /// Every n-th day, week or month (1 to 100).
+  pub interval: u32,
+  /// Seven entries, Monday first: the days a daily or weekly series meets on.
+  pub weekdays: Vec<bool>,
+  pub ends: MeetingSeriesEnd,
+  /// Number of meetings of a series that ends after a count (1 to 1000).
+  pub count: u32,
+  /// The last second of the last day of a series that ends on a date, in the user's time zone.
+  pub maybe_until_ms: Option<i64>,
+  /// The series leaves out the region's public holidays (#1053).
+  pub skips_holidays: bool,
+}
+
+/// How often a meeting repeats.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum MeetingRepeat {
+  Never,
+  Daily,
+  Weekly,
+  Monthly,
+}
+
+/// How a series ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum MeetingSeriesEnd {
+  Never,
+  AfterCount,
+  OnDate,
+}
+
+/// Why a form can't be saved; the app shows each at its field.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum MeetingFormProblem {
   MissingTitle,
   StartInThePast,
   InvalidDuration,
+  InvalidInterval,
+  NoWeekday,
+  /// The start isn't on one of the chosen days.
+  StartOffWeekdays,
+  InvalidCount,
+  InvalidUntil,
+  UntilBeforeStart,
+  /// One of the e-mail invitees can't be an address.
+  InvalidEmail {
+    email: String,
+  },
 }
 
 /// A meeting the server saved, for the app to show and join.
@@ -110,9 +176,22 @@ pub struct MeetingEditForm {
 }
 
 /// A new form: 30 minutes at the next full hour with some lead, with a lobby and a request key.
+/// `utc_offset_minutes` is the user's offset from UTC at that start.
 #[uniffi::export]
-pub fn new_meeting_form(now_ms: i64) -> MeetingForm {
-  form_of(&MeetingDraft::new(now_ms))
+pub fn new_meeting_form(now_ms: i64, utc_offset_minutes: i32) -> MeetingForm {
+  form_of(&MeetingDraft::new(now_ms, utc_offset_minutes))
+}
+
+/// `form` repeating `frequency`, with the days that go with it: every day for a daily series, the
+/// start's day for a weekly one (as desktop's dialog picks them).
+#[uniffi::export]
+pub fn meeting_form_with_repeat(
+  form: MeetingForm,
+  frequency: MeetingRepeat,
+) -> Result<MeetingForm, TeamCraftError> {
+  let mut draft = draft_of(&form)?;
+  draft.set_repeat(repeat_of(frequency));
+  Ok(form_of(&draft))
 }
 
 /// What keeps `form` from being saved now, in the order of the fields. `maybe_saved_start_ms` is
@@ -139,6 +218,7 @@ impl Engine {
     maybe_space_id: Option<&str>,
   ) -> Result<MeetingSave, TeamCraftError> {
     let draft = draft_of(form)?;
+    self.check_notetaker(&draft)?;
     let mut request = match draft.to_request(SystemClock.now_ms()) {
       Ok(request) => request,
       Err(problems) => {
@@ -182,6 +262,13 @@ impl Engine {
       ])
       .await?;
     self.note_admitters_synced(meeting.id);
+    // Queued behind the chat's setup, so it goes into the group the notetaker is in.
+    if draft.maybe_notetaker.is_some() {
+      self
+        .backend()?
+        .request_notetaker(meeting.conversation_id, every_call());
+    }
+    self.change_co_hosts(&meeting, &draft.co_hosts).await?;
     Ok(MeetingSave::Saved {
       meeting: saved(&meeting),
     })
@@ -237,8 +324,10 @@ impl Engine {
   pub(crate) async fn meeting_edit_form(&self, meeting_id: &str) -> Result<MeetingEditForm, TeamCraftError> {
     let me = self.backend()?.me().id;
     let meeting = self.own_meeting(meeting_id, me).await?;
+    let draft =
+      MeetingDraft::from_meeting(&meeting, me, 0).with_notetaker(askable_notetaker(self.backend()?));
     Ok(MeetingEditForm {
-      form: form_of(&MeetingDraft::from_meeting(&meeting, me)),
+      form: form_of(&draft),
       is_repeating: meeting.maybe_recurrence.is_some(),
     })
   }
@@ -256,6 +345,7 @@ impl Engine {
     // Diffed against the meeting as the server has it now, not a list the app showed earlier.
     let before = self.own_meeting(meeting_id, me).await?;
     let draft = draft_of(form)?;
+    self.check_notetaker(&draft)?;
     let request = match draft.to_update_request(SystemClock.now_ms(), &before) {
       Ok(request) => request,
       Err(problems) => {
@@ -264,6 +354,15 @@ impl Engine {
         });
       },
     };
+    let had_notetaker =
+      askable_notetaker(self.backend()?).is_some_and(|bot| attending_users(&before).contains(&bot));
+    let has_notetaker = draft.maybe_notetaker.is_some();
+    if had_notetaker && !has_notetaker {
+      // Sent while the notetaker is still in the chat's group, before the edit takes it out.
+      self
+        .backend()?
+        .request_notetaker(before.conversation_id, NotetakerRequest::Stop);
+    }
     let added = added_users(&request, &[&before]);
     // Written down before the save: if the answer is lost or the app dies before the chat's group
     // lost the removed users, the upkeep finishes the removal from the list.
@@ -298,6 +397,12 @@ impl Engine {
     self.note_admitters_synced(saved_meeting.id);
     // The core keeps the removal from here on (`update_meeting_chat_members`).
     self.clear_pending_edit(saved_meeting.id)?;
+    self.change_co_hosts(&saved_meeting, &draft.co_hosts).await?;
+    if has_notetaker && !had_notetaker {
+      self
+        .backend()?
+        .request_notetaker(saved_meeting.conversation_id, every_call());
+    }
     Ok(MeetingSave::Saved {
       meeting: saved(&saved_meeting),
     })
@@ -457,6 +562,36 @@ impl Engine {
     Ok(found)
   }
 
+  /// The co-hosts as ticked in the form, signed by this device once the invitees are saved (#1720);
+  /// nothing when they are as the meeting has them.
+  async fn change_co_hosts(
+    &mut self,
+    meeting: &MeetingResponse,
+    picked: &[UserId],
+  ) -> Result<(), TeamCraftError> {
+    let Some(change) = co_hosts_from_dialog(meeting, picked) else {
+      return Ok(());
+    };
+    self
+      .run_commands(vec![CoreCommand::ChangeMeetingHosts {
+        meeting: change.meeting,
+        conversation: change.conversation,
+        co_hosts: change.co_hosts,
+        maybe_new_organizer: change.maybe_new_organizer,
+      }])
+      .await
+  }
+
+  /// Only the notetaker the verified policy lets this user ask in can be ticked.
+  fn check_notetaker(&self, draft: &MeetingDraft) -> Result<(), TeamCraftError> {
+    match draft.maybe_notetaker {
+      Some(bot) if askable_notetaker(self.backend()?) != Some(bot) => Err(TeamCraftError::InvalidInput(
+        "that is not the notetaker you can ask in".into(),
+      )),
+      _ => Ok(()),
+    }
+  }
+
   fn note_admitters_synced(&mut self, meeting: MeetingId) {
     self
       .meeting_admitters_synced
@@ -515,32 +650,138 @@ fn saved(meeting: &MeetingResponse) -> SavedMeeting {
   }
 }
 
+impl Reads {
+  /// The notetaker "Notetaker joins the calls" asks in, when the verified policy has it on and lets
+  /// this user ask it in (e2ee.md §8.2); `None` hides the box.
+  pub(crate) fn meeting_notetaker(&self) -> Result<Option<String>, TeamCraftError> {
+    Ok(askable_notetaker(self.backend()?).map(|bot| bot.to_string()))
+  }
+}
+
+/// The notetaker of the verified policy, if it is on and the policy lets the user ask it in.
+fn askable_notetaker<B: ChatBackend + ?Sized>(backend: &B) -> Option<UserId> {
+  let policy = backend.notetaker_policy()?;
+  let me = backend.me();
+  let may_ask = may_ask_in(
+    &policy,
+    !me.is_guest && !me.is_bot,
+    backend.can_manage_integration_sources(),
+  );
+  policy.active_bot().filter(|_| may_ask)
+}
+
+/// The notetaker's standing request for a meeting's calls (e2ee.md §8.2).
+fn every_call() -> NotetakerRequest {
+  NotetakerRequest::Join {
+    scope: NotetakerScope::EveryCall,
+  }
+}
+
 fn form_of(draft: &MeetingDraft) -> MeetingForm {
+  let rule = &draft.repeat;
   MeetingForm {
     title: draft.title.clone(),
     description: draft.description.clone(),
-    starts_at_ms: draft.starts_at,
+    // Invariant: the core's drafts of the apps always have a start (only desktop's text input can
+    // hold none).
+    starts_at_ms: draft.maybe_starts_at.unwrap_or_default(),
+    utc_offset_minutes: draft.utc_offset_minutes,
     duration_minutes: draft.duration_minutes,
-    invitee_user_ids: draft.members.iter().map(ToString::to_string).collect(),
+    invitee_user_ids: ids_of(&draft.members),
+    external_invitees: draft
+      .externals
+      .iter()
+      .map(|external| MeetingExternalInvitee {
+        email: external.email.clone(),
+        name: external.name.clone(),
+      })
+      .collect(),
+    repeat_rule: MeetingRepeatForm {
+      frequency: match rule.repeat {
+        Repeat::Never => MeetingRepeat::Never,
+        Repeat::Daily => MeetingRepeat::Daily,
+        Repeat::Weekly => MeetingRepeat::Weekly,
+        Repeat::Monthly => MeetingRepeat::Monthly,
+      },
+      interval: rule.interval,
+      weekdays: rule.weekdays.to_vec(),
+      ends: match rule.ends {
+        SeriesEnd::Never => MeetingSeriesEnd::Never,
+        SeriesEnd::AfterCount => MeetingSeriesEnd::AfterCount,
+        SeriesEnd::OnDate => MeetingSeriesEnd::OnDate,
+      },
+      count: rule.count,
+      maybe_until_ms: rule.maybe_until,
+      skips_holidays: rule.skips_holidays,
+    },
     has_lobby: draft.has_lobby,
+    maybe_notetaker_user_id: draft.maybe_notetaker.map(|bot| bot.to_string()),
+    co_host_user_ids: ids_of(&draft.co_hosts),
     maybe_request_key: draft.maybe_idempotency_key.map(|key| key.to_hex()),
   }
 }
 
 fn draft_of(form: &MeetingForm) -> Result<MeetingDraft, TeamCraftError> {
+  let repeat = &form.repeat_rule;
+  let weekdays: [bool; 7] = repeat
+    .weekdays
+    .as_slice()
+    .try_into()
+    .map_err(|_| TeamCraftError::InvalidInput("a week has seven days".into()))?;
   Ok(MeetingDraft {
     title: form.title.clone(),
     description: form.description.clone(),
-    starts_at: form.starts_at_ms,
+    maybe_starts_at: Some(form.starts_at_ms),
+    utc_offset_minutes: form.utc_offset_minutes,
     duration_minutes: form.duration_minutes,
     members: parse_ids(&form.invitee_user_ids)?,
+    externals: form
+      .external_invitees
+      .iter()
+      .map(|external| ExternalInvitee {
+        email: external.email.clone(),
+        name: external.name.clone(),
+      })
+      .collect(),
+    repeat: RepeatRule {
+      repeat: repeat_of(repeat.frequency),
+      interval: repeat.interval,
+      weekdays,
+      ends: match repeat.ends {
+        MeetingSeriesEnd::Never => SeriesEnd::Never,
+        MeetingSeriesEnd::AfterCount => SeriesEnd::AfterCount,
+        MeetingSeriesEnd::OnDate => SeriesEnd::OnDate,
+      },
+      count: repeat.count,
+      maybe_until: repeat.maybe_until_ms,
+      skips_holidays: repeat.skips_holidays,
+    },
     has_lobby: form.has_lobby,
+    maybe_notetaker: form
+      .maybe_notetaker_user_id
+      .as_deref()
+      .map(parse_id::<UserId>)
+      .transpose()?,
+    co_hosts: parse_ids(&form.co_host_user_ids)?,
     maybe_idempotency_key: form
       .maybe_request_key
       .as_deref()
       .map(request_key_of)
       .transpose()?,
   })
+}
+
+fn repeat_of(frequency: MeetingRepeat) -> Repeat {
+  match frequency {
+    MeetingRepeat::Never => Repeat::Never,
+    MeetingRepeat::Daily => Repeat::Daily,
+    MeetingRepeat::Weekly => Repeat::Weekly,
+    MeetingRepeat::Monthly => Repeat::Monthly,
+  }
+}
+
+fn ids_of(users: &[UserId]) -> Vec<String> {
+  users.iter().map(ToString::to_string).collect()
 }
 
 fn request_key_of(text: &str) -> Result<IdempotencyKey, TeamCraftError> {
@@ -552,8 +793,16 @@ fn problems_of(problems: &[DraftProblem]) -> Vec<MeetingFormProblem> {
     .iter()
     .map(|problem| match problem {
       DraftProblem::MissingTitle => MeetingFormProblem::MissingTitle,
-      DraftProblem::StartInThePast => MeetingFormProblem::StartInThePast,
+      // The apps' start is a time picker: a start it can't read is one in the past to them.
+      DraftProblem::InvalidStart | DraftProblem::StartInThePast => MeetingFormProblem::StartInThePast,
       DraftProblem::InvalidDuration => MeetingFormProblem::InvalidDuration,
+      DraftProblem::InvalidInterval => MeetingFormProblem::InvalidInterval,
+      DraftProblem::NoWeekday => MeetingFormProblem::NoWeekday,
+      DraftProblem::StartOffWeekdays => MeetingFormProblem::StartOffWeekdays,
+      DraftProblem::InvalidCount => MeetingFormProblem::InvalidCount,
+      DraftProblem::InvalidUntil => MeetingFormProblem::InvalidUntil,
+      DraftProblem::UntilBeforeStart => MeetingFormProblem::UntilBeforeStart,
+      DraftProblem::InvalidEmail(email) => MeetingFormProblem::InvalidEmail { email: email.clone() },
     })
     .collect()
 }
@@ -569,7 +818,7 @@ mod tests {
 
   #[test]
   fn a_new_form_carries_a_request_key_and_needs_a_title() {
-    let form = new_meeting_form(NOW);
+    let form = new_meeting_form(NOW, 0);
     assert!(
       form
         .maybe_request_key
@@ -587,7 +836,7 @@ mod tests {
 
   #[test]
   fn a_form_in_the_past_is_refused_unless_it_is_the_saved_start() {
-    let mut form = new_meeting_form(NOW);
+    let mut form = new_meeting_form(NOW, 0);
     form.title = "Planning".into();
     form.starts_at_ms = NOW - 30 * 60_000;
     assert_eq!(
@@ -598,12 +847,42 @@ mod tests {
   }
 
   #[test]
+  fn a_series_goes_through_the_core_and_is_checked_like_desktop() {
+    let mut form = new_meeting_form(NOW, 60);
+    form.title = "Planning".into();
+    let form = meeting_form_with_repeat(form, MeetingRepeat::Weekly).expect("readable");
+    assert_eq!(form.repeat_rule.weekdays.iter().filter(|day| **day).count(), 1);
+    let draft = draft_of(&form).expect("readable");
+    assert_eq!(form_of(&draft), form);
+    let mut off_day = form.clone();
+    off_day.repeat_rule.weekdays = off_day.repeat_rule.weekdays.iter().map(|day| !day).collect();
+    off_day.repeat_rule.ends = MeetingSeriesEnd::OnDate;
+    off_day.external_invitees = vec![MeetingExternalInvitee {
+      email: "nobody".into(),
+      name: String::new(),
+    }];
+    assert_eq!(
+      meeting_form_problems(off_day, NOW, None),
+      vec![
+        MeetingFormProblem::StartOffWeekdays,
+        MeetingFormProblem::InvalidUntil,
+        MeetingFormProblem::InvalidEmail {
+          email: "nobody".into()
+        },
+      ]
+    );
+  }
+
+  #[test]
   fn malformed_ids_and_keys_are_the_apps_bug() {
-    let mut form = new_meeting_form(NOW);
+    let mut form = new_meeting_form(NOW, 0);
     form.invitee_user_ids = vec!["nope".into()];
     assert!(matches!(draft_of(&form), Err(TeamCraftError::InvalidInput(_))));
-    let mut form = new_meeting_form(NOW);
+    let mut form = new_meeting_form(NOW, 0);
     form.maybe_request_key = Some("short".into());
+    assert!(matches!(draft_of(&form), Err(TeamCraftError::InvalidInput(_))));
+    let mut form = new_meeting_form(NOW, 0);
+    form.repeat_rule.weekdays.pop();
     assert!(matches!(draft_of(&form), Err(TeamCraftError::InvalidInput(_))));
   }
 }

@@ -29,4 +29,51 @@
   <string name="meeting_cancel_series">All meetings of the series</string>
   <string name="meeting_cancel_keep">Keep</string>
   <string name="meeting_cancel_confirm">Cancel meeting</string>
+  <string name="meeting_form_notetaker">Notetaker joins the calls</string>
+  <string name="meeting_form_notetaker_hint">It makes a transcript of the meeting\'s calls and posts a summary in its chat. Everyone in the call sees that it is there.</string>
+  <string name="meeting_form_co_hosts">Co-hosts</string>
+  <string name="meeting_form_co_hosts_hint">Co-hosts let people in, make guest links and use the host controls. Only you change or cancel the meeting.</string>
+  <string name="meeting_form_unknown_person">Someone invited</string>
+  <string name="meeting_form_external">Invite by email</string>
+  <string name="meeting_form_external_email">Email address</string>
+  <string name="meeting_form_external_name">Name (optional)</string>
+  <string name="meeting_form_external_remove">Remove %1$s</string>
+  <string name="meeting_form_add">Add</string>
+  <string name="meeting_form_repeat">Repeat</string>
+  <string name="meeting_repeat_never">Does not repeat</string>
+  <string name="meeting_repeat_daily">Daily</string>
+  <string name="meeting_repeat_weekly">Weekly</string>
+  <string name="meeting_repeat_monthly">Monthly</string>
+  <string name="meeting_form_every">Every</string>
+  <plurals name="meeting_unit_days">
+    <item quantity="one">day</item>
+    <item quantity="other">days</item>
+  </plurals>
+  <plurals name="meeting_unit_weeks">
+    <item quantity="one">week</item>
+    <item quantity="other">weeks</item>
+  </plurals>
+  <plurals name="meeting_unit_months">
+    <item quantity="one">month</item>
+    <item quantity="other">months</item>
+  </plurals>
+  <plurals name="meeting_unit_meetings">
+    <item quantity="one">meeting</item>
+    <item quantity="other">meetings</item>
+  </plurals>
+  <string name="meeting_form_on_days">On</string>
+  <string name="meeting_form_skip_holidays">Skip public holidays</string>
+  <string name="meeting_form_skip_holidays_hint">Meetings on a public holiday of your region (Settings, Account) or else of the one your admin set are left out. You can still keep one.</string>
+  <string name="meeting_form_ends">Ends</string>
+  <string name="meeting_form_ends_never">Never</string>
+  <string name="meeting_form_ends_after">After</string>
+  <string name="meeting_form_ends_on">On</string>
+  <string name="meeting_form_pick_date">Pick a date</string>
+  <string name="meeting_error_interval">Enter a number from 1 to 100.</string>
+  <string name="meeting_error_no_weekday">Pick at least one day.</string>
+  <string name="meeting_error_start_weekday">The first meeting is on another day: pick its day too, or move the start.</string>
+  <string name="meeting_error_count">Enter how many meetings, from 1 to 1000.</string>
+  <string name="meeting_error_until">Pick the date of the last meeting.</string>
+  <string name="meeting_error_until_before">The last date is before the first meeting.</string>
+  <string name="meeting_error_email">\"%1$s\" is not a valid email address.</string>
 </resources>

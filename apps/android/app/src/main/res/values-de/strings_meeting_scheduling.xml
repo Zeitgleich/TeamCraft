@@ -29,4 +29,51 @@
   <string name="meeting_cancel_series">Alle Meetings der Serie</string>
   <string name="meeting_cancel_keep">Behalten</string>
   <string name="meeting_cancel_confirm">Meeting absagen</string>
+  <string name="meeting_form_notetaker">Notetaker nimmt an den Anrufen teil</string>
+  <string name="meeting_form_notetaker_hint">Er erstellt Transkripte der Anrufe dieses Meetings und schreibt eine Zusammenfassung in den Chat. Alle im Anruf sehen, dass er dabei ist.</string>
+  <string name="meeting_form_co_hosts">Co-Gastgeber</string>
+  <string name="meeting_form_co_hosts_hint">Co-Gastgeber lassen Personen ein, erstellen Gastlinks und nutzen die Host-Steuerung. Nur du änderst das Meeting oder sagst es ab.</string>
+  <string name="meeting_form_unknown_person">Eingeladene Person</string>
+  <string name="meeting_form_external">Per E-Mail einladen</string>
+  <string name="meeting_form_external_email">E-Mail-Adresse</string>
+  <string name="meeting_form_external_name">Name (optional)</string>
+  <string name="meeting_form_external_remove">%1$s entfernen</string>
+  <string name="meeting_form_add">Hinzufügen</string>
+  <string name="meeting_form_repeat">Wiederholung</string>
+  <string name="meeting_repeat_never">Keine Wiederholung</string>
+  <string name="meeting_repeat_daily">Täglich</string>
+  <string name="meeting_repeat_weekly">Wöchentlich</string>
+  <string name="meeting_repeat_monthly">Monatlich</string>
+  <string name="meeting_form_every">Alle</string>
+  <plurals name="meeting_unit_days">
+    <item quantity="one">Tag</item>
+    <item quantity="other">Tage</item>
+  </plurals>
+  <plurals name="meeting_unit_weeks">
+    <item quantity="one">Woche</item>
+    <item quantity="other">Wochen</item>
+  </plurals>
+  <plurals name="meeting_unit_months">
+    <item quantity="one">Monat</item>
+    <item quantity="other">Monate</item>
+  </plurals>
+  <plurals name="meeting_unit_meetings">
+    <item quantity="one">Meeting</item>
+    <item quantity="other">Meetings</item>
+  </plurals>
+  <string name="meeting_form_on_days">An</string>
+  <string name="meeting_form_skip_holidays">Feiertage überspringen</string>
+  <string name="meeting_form_skip_holidays_hint">Meetings an Feiertagen deiner Region (Einstellungen, Konto) oder sonst der, die deine Admins eingestellt haben, fallen aus. Einzelne kannst du trotzdem stattfinden lassen.</string>
+  <string name="meeting_form_ends">Endet</string>
+  <string name="meeting_form_ends_never">Nie</string>
+  <string name="meeting_form_ends_after">Nach</string>
+  <string name="meeting_form_ends_on">Am</string>
+  <string name="meeting_form_pick_date">Datum wählen</string>
+  <string name="meeting_error_interval">Gib eine Zahl von 1 bis 100 ein.</string>
+  <string name="meeting_error_no_weekday">Wähle mindestens einen Tag.</string>
+  <string name="meeting_error_start_weekday">Das erste Meeting liegt an einem anderen Tag: Wähle diesen Tag auch, oder verschiebe den Beginn.</string>
+  <string name="meeting_error_count">Gib die Anzahl der Meetings ein, von 1 bis 1000.</string>
+  <string name="meeting_error_until">Wähle das Datum des letzten Meetings.</string>
+  <string name="meeting_error_until_before">Das letzte Datum liegt vor dem ersten Meeting.</string>
+  <string name="meeting_error_email">„%1$s“ ist keine gültige E-Mail-Adresse.</string>
 </resources>

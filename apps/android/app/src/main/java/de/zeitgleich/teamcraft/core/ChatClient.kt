@@ -314,6 +314,9 @@ class ChatClient(
   suspend fun startMeetingNow(maybeSpaceId: String?, requestKey: String): SavedMeeting =
     core().startMeetingNow(null, maybeSpaceId, requestKey)
 
+  /** The notetaker "Notetaker joins the calls" asks in, or `null` to hide the box (e2ee.md §8.2). */
+  suspend fun meetingNotetaker(): String? = core().meetingNotetaker()
+
   /** The edit form of a meeting the user organizes, as the server has it now. */
   suspend fun meetingEditForm(meetingId: String): MeetingEditForm = core().meetingEditForm(meetingId)
 
