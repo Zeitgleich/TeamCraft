@@ -286,18 +286,59 @@ fn follow_call_end(
       && phase == CallPhase::Idle
       && failures == failures_before
     {
-      let maybe_end = match untrack(|| state.read(|backend| backend.call_end_reason())) {
-        Some(CallEndReason::EndedByHost { .. }) => Some(GuestEnd::Ended),
-        Some(CallEndReason::RemovedByHost { .. }) => Some(GuestEnd::Removed),
-        Some(CallEndReason::ConnectionLost | CallEndReason::OtherSideLeft) => None,
-        None => Some(GuestEnd::Left {
-          maybe_rejoin: rejoin.get_value(),
-        }),
-      };
-      if let Some(end) = maybe_end {
+      let maybe_reason = untrack(|| state.read(|backend| backend.call_end_reason()));
+      if let Some(end) = end_of_call(maybe_reason, rejoin.get_value()) {
         end_session.with_value(|end_session| end_session(end));
       }
     }
     (phase, failures)
   });
+}
+
+/// How a guest's call ending ends their part of the meeting: `None` keeps them in the chat (a
+/// lost connection, which the chat explains).
+fn end_of_call(maybe_reason: Option<CallEndReason>, maybe_rejoin: Option<String>) -> Option<GuestEnd> {
+  match maybe_reason {
+    Some(CallEndReason::EndedByHost { .. }) => Some(GuestEnd::Ended),
+    Some(CallEndReason::RemovedByHost { .. }) => Some(GuestEnd::Removed),
+    Some(CallEndReason::ConnectionLost | CallEndReason::OtherSideLeft) => None,
+    None => Some(GuestEnd::Left { maybe_rejoin }),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use crate::model::id_from_raw;
+
+  use super::*;
+
+  const LINK: &str = "/meeting/abc#v=00ff";
+
+  #[test]
+  fn hanging_up_is_leaving_with_the_link_to_rejoin() {
+    assert_eq!(
+      end_of_call(None, Some(LINK.to_owned())),
+      Some(GuestEnd::Left {
+        maybe_rejoin: Some(LINK.to_owned())
+      })
+    );
+  }
+
+  #[test]
+  fn a_host_ending_or_removing_offers_no_rejoin() {
+    let by = id_from_raw(7);
+    assert_eq!(
+      end_of_call(Some(CallEndReason::EndedByHost { by }), Some(LINK.to_owned())),
+      Some(GuestEnd::Ended)
+    );
+    assert_eq!(
+      end_of_call(Some(CallEndReason::RemovedByHost { by }), Some(LINK.to_owned())),
+      Some(GuestEnd::Removed)
+    );
+  }
+
+  #[test]
+  fn a_lost_connection_keeps_the_guest_in_the_meeting() {
+    assert_eq!(end_of_call(Some(CallEndReason::ConnectionLost), None), None);
+  }
 }

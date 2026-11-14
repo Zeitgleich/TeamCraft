@@ -777,3 +777,11 @@
     background: var(--surface-3);
   }
 }
+
+/* "Rejoin" is a link to the meeting's page, shaped as the screen's one button. */
+.guest-end a.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
