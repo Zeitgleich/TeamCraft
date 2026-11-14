@@ -2334,7 +2334,9 @@ impl CallEngine {
         && self.maybe_probe_bytes.is_some(),
     );
     let was_running = self.uplink_rate_probe.is_running();
-    let is_speaking = self.is_speaking(now);
+    // Only on a thin uplink: on 500 kbit/s a cluster next to the voice costs it nothing, and a
+    // presenter who talked on kept voice and camera down after a drop.
+    let is_speaking = self.is_speaking(now) && self.is_uplink_thin();
     if was_running {
       if is_speaking && self.probe_voice == ProbeVoice::InPause {
         self.probe_voice = ProbeVoice::NextToSpeech;
@@ -2502,6 +2504,12 @@ impl CallEngine {
       && self
         .maybe_spoke_at
         .is_some_and(|spoke_at| now.saturating_duration_since(spoke_at) < SPEECH_HANGOVER)
+  }
+
+  /// Whether the uplink is too thin for the full voice: the join's probe showed it, or the estimate
+  /// is below the thin step's bound. There a cluster next to the own speech costs it (#1893).
+  fn is_uplink_thin(&self) -> bool {
+    self.is_uplink_measured_thin || self.uplink.estimate_bps() < self.uplink_policy.voice.thin_below_bps
   }
 
   /// Whether a talk without a pause has gone on so long that a small cluster may run next to it:
@@ -6081,6 +6089,20 @@ mod tests {
       );
     }
 
+    /// #1893: on an uplink that isn't thin a voice below its full step probes next to its speech
+    /// as before: a presenter who talked on after a drop to 500 kbit/s kept voice and camera down.
+    #[test]
+    fn a_voice_on_a_fast_uplink_probes_next_to_its_speech() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      alice.maybe_probe_bytes = Some(15_000);
+      alice.voice_steps.on_estimate(500_000, true, now);
+      drain(&mut alice);
+      assert!(!alice.is_uplink_thin());
+      let (padding, _) = talk(&mut alice, now, Duration::from_secs(3), &frame());
+      assert!(padding > 0);
+    }
+
     /// #1893: a voice below its full step probes for the next one in a pause of its speech, not
     /// next to it: on a 64 kbit/s uplink every cluster next to the voice cost it a second.
     #[test]
@@ -6088,7 +6110,7 @@ mod tests {
       let now = Instant::now();
       let (mut alice, _bob) = secured_pair(now);
       alice.maybe_probe_bytes = Some(15_000);
-      alice.voice_steps.on_measured(64_000, now);
+      alice.apply_uplink_probe(thin_link(), now);
       drain(&mut alice);
       let (padding, at) = talk(&mut alice, now, Duration::from_secs(3), &frame());
       assert_eq!(padding, 0, "none while speaking");
@@ -6103,7 +6125,7 @@ mod tests {
       let now = Instant::now();
       let (mut alice, _bob) = secured_pair(now);
       alice.maybe_probe_bytes = Some(15_000);
-      alice.voice_steps.on_measured(64_000, now);
+      alice.apply_uplink_probe(thin_link(), now);
       drain(&mut alice);
       let (padding, at) = talk(
         &mut alice,
@@ -6123,7 +6145,7 @@ mod tests {
       let now = Instant::now();
       let (mut alice, _bob) = secured_pair(now);
       alice.maybe_probe_bytes = Some(15_000);
-      alice.voice_steps.on_measured(64_000, now);
+      alice.apply_uplink_probe(thin_link(), now);
       drain(&mut alice);
       let mut at = now;
       while !alice.uplink_rate_probe.is_running() && at < now + Duration::from_secs(5) {
@@ -8483,6 +8505,15 @@ mod tests {
     EncodedAudioFrame {
       opus: vec![0x78, 1, 2, 3, 4, 5, 6, 7, 8, 9],
       level: AudioLevel::new(20, true).unwrap(),
+    }
+  }
+
+  /// What the join's probe shows of a 64 kbit/s uplink behind a small token bucket (#1893).
+  fn thin_link() -> LinkMeasurement {
+    LinkMeasurement {
+      capacity_bps: 130_000,
+      after_burst_bps: 56_000,
+      loss_percent: 0,
     }
   }
 
