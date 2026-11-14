@@ -19,4 +19,11 @@
   </plurals>
   <string name="call_hosts_leave_hand_over">An %1$s übergeben und gehen</string>
   <string name="call_hosts_leave_anyway">Trotzdem gehen</string>
+  <!-- The hang-up of a meeting's hosts: leave, or end the meeting for everyone (#1930). -->
+  <string name="call_leave_options">Weitere Optionen zum Verlassen</string>
+  <string name="call_leave">Verlassen</string>
+  <string name="call_end_for_everyone">Für alle beenden…</string>
+  <string name="call_end_title">Meeting für alle beenden?</string>
+  <string name="call_end_body">Alle werden aus dem Anruf entfernt, und Gäste können nicht mehr beitreten. Der Meeting-Chat bleibt lesbar.</string>
+  <string name="call_end_do">Für alle beenden</string>
 </resources>

@@ -142,6 +142,21 @@ extension AppModel {
     }
   }
 
+  /// "End for everyone" from the hang-up (#1930): the core ends the meeting of the call for
+  /// everybody, the same action as on desktop, web and Android (#1931). `nil` once the server took
+  /// it, else the failure's text.
+  func endMeetingForEveryone(meetingId: String) async -> LocalizedStringKey? {
+    do {
+      try await core().endMeetingForEveryone(meetingId: meetingId)
+      return nil
+    } catch TeamCraftError.Network {
+      return "error_network"
+    } catch {
+      Self.hostsLog.warning("the meeting could not be ended: \(String(describing: error), privacy: .public)")
+      return "error_generic"
+    }
+  }
+
   /// "Hand over to … and leave": the core takes the signed handover on its own queue, which goes on
   /// after the call. A failure is only logged, as desktop and web leave at once too.
   func handOverBeforeLeaving(conversationId: String, userId: String) async {

@@ -41,6 +41,10 @@ struct CallScreen: View {
   /// The organizer is asked whom to hand the meeting to before leaving.
   @State private var maybeHandover: HandoverOffer?
   @State private var isCheckingLeave = false
+  /// "End for everyone…" was chosen on the hang-up (#1930): the question is shown.
+  @State private var isEndAsked = false
+  @State private var isEnding = false
+  @State private var maybeEndFailure: LocalizedStringKey?
 
   private static let controlSize: CGFloat = 60
   private static let autoHideDelay: Duration = .seconds(5)
@@ -115,6 +119,17 @@ struct CallScreen: View {
       Button("cancel", role: .cancel) {}
     } message: { offer in
       Text("call_hosts_leave_body \(offer.waiting)")
+    }
+    .confirmationDialog("call_end_title", isPresented: $isEndAsked, titleVisibility: .visible) {
+      Button("call_end_do", role: .destructive) { endForEveryone() }
+      Button("cancel", role: .cancel) {}
+    } message: {
+      Text("call_end_body")
+    }
+    .alert("call_end_failed", isPresented: endFailureBinding) {
+      Button("done", role: .cancel) {}
+    } message: {
+      if let failure = maybeEndFailure { Text(failure) }
     }
     .task(id: call.conversationId) {
       let kind = await model.conversations().first { $0.id == call.conversationId }?.kind
@@ -571,10 +586,8 @@ struct CallScreen: View {
         }
       }
       Spacer(minLength: 0)
-      RoundControl(system: "phone.down.fill", isActive: false, label: "call_hang_up", tint: Theme.danger) {
-        leave()
-      }
-      .disabled(isCheckingLeave)
+      hangUpControl
+        .disabled(isCheckingLeave || isEnding)
       Spacer(minLength: 0)
     }
     .padding(.vertical, 16)
@@ -635,6 +648,57 @@ struct CallScreen: View {
       isCheckingLeave = false
       if let offer = maybeOffer { maybeHandover = offer } else { model.calls.hangUp() }
     }
+  }
+
+  /// Hang up. For the meeting's hosts a long press opens "Leave" and "End for everyone…" (#1930),
+  /// as the desktop's split hang-up; a tap leaves as before.
+  @ViewBuilder private var hangUpControl: some View {
+    if canEndForEveryone {
+      Menu {
+        Button("call_leave", systemImage: "phone.down") { leave() }
+        Button("call_end_for_everyone", systemImage: "xmark.circle", role: .destructive) { isEndAsked = true }
+      } label: {
+        Image(systemName: "phone.down.fill")
+          .font(.app(.title2))
+          .foregroundStyle(.white)
+          .frame(width: 60, height: 60)
+          .background(Theme.danger, in: Circle())
+          .contentShape(Circle())
+      } primaryAction: {
+        leave()
+      }
+      .menuStyle(.button)
+      .buttonStyle(PressScaleStyle())
+      .accessibilityLabel(Text("call_hang_up"))
+      .accessibilityHint(Text("call_leave_options"))
+      .accessibilityAction(named: Text("call_end_for_everyone")) { isEndAsked = true }
+    } else {
+      RoundControl(system: "phone.down.fill", isActive: false, label: "call_hang_up", tint: Theme.danger) {
+        leave()
+      }
+    }
+  }
+
+  /// The organizer or a co-host of the call's meeting, while connected.
+  private var canEndForEveryone: Bool {
+    guard let hosts = maybeHosts, call.phase == .connected else { return false }
+    return hosts.ownPart == .organizer || hosts.ownPart == .coHost
+  }
+
+  /// "End for everyone" confirmed: the core ends the meeting, then this device leaves; a refusal
+  /// says why and the call goes on.
+  private func endForEveryone() {
+    guard let meetingId = maybeHosts?.meetingId else { return }
+    isEnding = true
+    Task {
+      let maybeFailure = await model.endMeetingForEveryone(meetingId: meetingId)
+      isEnding = false
+      if let failure = maybeFailure { maybeEndFailure = failure } else { model.calls.hangUp() }
+    }
+  }
+
+  private var endFailureBinding: Binding<Bool> {
+    Binding(get: { maybeEndFailure != nil }, set: { if !$0 { maybeEndFailure = nil } })
   }
 
   private func handOverAndLeave(to person: CallPerson) {

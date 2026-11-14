@@ -10,6 +10,7 @@ use crate::components::message_actions::copy_to_clipboard;
 use crate::components::sheet::PopoverBackdrop;
 use crate::external_links::{self, LinkMenuTarget};
 use crate::i18n::use_i18n;
+use crate::reactive::SetIfAlive;
 
 /// Room the menu needs below and to the right of the pointer before it opens the other way.
 const MENU_WIDTH_PX: i32 = 232;
@@ -139,6 +140,41 @@ pub fn move_focus(menu: NodeRef<html::Div>, is_forward: bool) {
     .and_then(|item| item.dyn_into::<web_sys::HtmlElement>().ok())
   {
     drop(item.focus());
+  }
+}
+
+/// The first item takes the focus when a menu opens, so the keyboard goes on from there.
+pub fn focus_first_item_when_open(is_open: RwSignal<bool>, menu: NodeRef<html::Div>) {
+  Effect::new(move |_| {
+    if is_open.get() {
+      focus_first_item(menu);
+    }
+  });
+}
+
+/// The keys of a menu of `[role='menuitem']` buttons: Escape closes it and puts the focus back on
+/// `trigger`, the arrows move between the items, Tab leaves it closed.
+pub fn menu_keydown(
+  ev: web_sys::KeyboardEvent,
+  menu: NodeRef<html::Div>,
+  is_open: RwSignal<bool>,
+  trigger: NodeRef<html::Button>,
+) {
+  match ev.key().as_str() {
+    "Escape" => {
+      ev.stop_propagation();
+      ev.prevent_default();
+      is_open.set(false);
+      if let Some(trigger) = trigger.get_untracked() {
+        drop(trigger.focus());
+      }
+    },
+    "ArrowDown" | "ArrowUp" => {
+      ev.prevent_default();
+      move_focus(menu, ev.key() == "ArrowDown");
+    },
+    "Tab" => is_open.set_if_alive(false),
+    _ => {},
   }
 }
 

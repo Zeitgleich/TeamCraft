@@ -1398,6 +1398,15 @@ impl TeamCraft {
       .await
   }
 
+  /// "End for everyone" (#1930): ends the meeting `meeting_id` for everybody and stops its call,
+  /// also when the user isn't in it (#1931). Offered to hosts only: [`Self::meeting_hosts`] says
+  /// whether the user's own part is organizer or co-host. The app leaves the call afterwards.
+  pub async fn end_meeting_for_everyone(&self, meeting_id: String) -> Result<(), TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.end_meeting_for_everyone(&meeting_id).await }))
+      .await
+  }
+
   /// Before joining the call of `meeting_id` from the meeting list (#1841): on the organizer's
   /// device the core founds the chat's group where a meeting from before 1.0.3 has none, adding
   /// only the attendees the organizer's signed list names (#1726). Nothing for anybody else's

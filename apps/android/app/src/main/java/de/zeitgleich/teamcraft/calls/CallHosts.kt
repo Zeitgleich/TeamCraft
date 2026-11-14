@@ -106,6 +106,29 @@ class CallHosts(
     }
   }
 
+  /** Whether the user may end the meeting of the call for everyone: its organizer or a co-host. */
+  val canEndForEveryone: Boolean
+    get() = current.value?.ownPart.let { it == MeetingPart.ORGANIZER || it == MeetingPart.CO_HOST }
+
+  /**
+   * "End for everyone" (#1930): the core ends the meeting of the call for everybody, the same
+   * action as on desktop and web (#1931). `null` once the server took it, else the failure's text.
+   */
+  @StringRes
+  suspend fun endForEveryone(): Int? {
+    val meetingId = current.value?.takeIf { canEndForEveryone }?.meetingId ?: return R.string.error_generic
+    return try {
+      core.core().endMeetingForEveryone(meetingId)
+      null
+    } catch (error: TeamCraftException) {
+      Log.w(TAG, "the meeting could not be ended", error)
+      failureText(error)
+    } catch (error: IllegalStateException) {
+      if (error is CancellationException) throw error
+      R.string.error_generic
+    }
+  }
+
   /** The others in the call, for the host menu; empty while the store can't be read. */
   suspend fun people(participantIds: List<String>): List<User> =
     try {

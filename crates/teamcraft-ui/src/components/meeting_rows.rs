@@ -15,7 +15,7 @@ use crate::clock::{format_date, format_time, local_day, now_ms};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::empty_state::{EmptyAction, EmptyState};
 use crate::components::icons::{Icon, IconName};
-use crate::components::link_menu::move_focus;
+use crate::components::link_menu::{focus_first_item_when_open, menu_keydown};
 use crate::components::meeting_controls::{HostControls, RsvpList};
 use crate::components::meetings_view::{GuestLinks, Lobby, MeetingLinkButton, join_meeting};
 use crate::components::pending_button::PendingButton;
@@ -29,7 +29,7 @@ use crate::meeting_list::{
 };
 use crate::meetings::{MeetingsHub, attending_users, hosts_lobby, is_over, my_rsvp};
 use crate::model::{SpaceId, TimestampMs};
-use crate::reactive::{SetIfAlive, use_interval_while_visible};
+use crate::reactive::use_interval_while_visible;
 use crate::state::{Overlay, use_app_state};
 
 /// How often "in 12 min" and the running state are brought up to date while the page is visible.
@@ -554,7 +554,7 @@ fn RsvpMenu(meeting: MeetingId, answer: RsvpStatus) -> impl IntoView {
       Ok(())
     });
   };
-  focus_first_item(is_open, menu);
+  focus_first_item_when_open(is_open, menu);
   view! {
     <div class="menu-anchor">
       <button
@@ -677,7 +677,7 @@ fn RowMenu(
     let link = meeting.with_value(|meeting| meeting.join_url.clone());
     copy_meeting_link(state, hub, i18n, id, conversation, link);
   };
-  focus_first_item(is_open, menu);
+  focus_first_item_when_open(is_open, menu);
 
   view! {
     <div class="menu-anchor">
@@ -952,43 +952,4 @@ fn scroll_to_row(row: RowId) {
       element.scroll_into_view_with_scroll_into_view_options(&options);
     }
   });
-}
-
-/// The first item takes the focus when a menu opens, so the keyboard goes on from there.
-fn focus_first_item(is_open: RwSignal<bool>, menu: NodeRef<html::Div>) {
-  use wasm_bindgen::JsCast;
-  Effect::new(move |_| {
-    if is_open.get()
-      && let Some(first) = menu
-        .get()
-        .and_then(|menu| menu.query_selector(".menu-item").ok().flatten())
-      && let Ok(first) = first.dyn_into::<web_sys::HtmlElement>()
-    {
-      drop(first.focus());
-    }
-  });
-}
-
-fn menu_keydown(
-  ev: web_sys::KeyboardEvent,
-  menu: NodeRef<html::Div>,
-  is_open: RwSignal<bool>,
-  trigger: NodeRef<html::Button>,
-) {
-  match ev.key().as_str() {
-    "Escape" => {
-      ev.stop_propagation();
-      ev.prevent_default();
-      is_open.set(false);
-      if let Some(trigger) = trigger.get_untracked() {
-        drop(trigger.focus());
-      }
-    },
-    "ArrowDown" | "ArrowUp" => {
-      ev.prevent_default();
-      move_focus(menu, ev.key() == "ArrowDown");
-    },
-    "Tab" => is_open.set_if_alive(false),
-    _ => {},
-  }
 }

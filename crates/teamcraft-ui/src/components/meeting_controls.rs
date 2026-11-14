@@ -2,6 +2,7 @@
 //! handover, #1720) and the list of answers to an invitation. The server enforces who may do what
 //! (docs/meetings.md), the organizer's device signs who hosts; these are the buttons.
 
+use leptos::html;
 use leptos::prelude::*;
 use teamcraft_client_api::meeting_hosts::{
   HostsChangeState, MeetingHostsChange, MeetingRole, handing_over, making_co_host, removing_co_host, role_of,
@@ -11,10 +12,12 @@ use teamcraft_proto::{
 };
 
 use crate::clock::now_ms;
+use crate::components::pending_button::PendingButton;
 use crate::feedback::{ActionFailure, FailureKind, PendingAction};
 use crate::i18n::use_i18n;
 use crate::meetings::MeetingsHub;
 use crate::model::{ConversationId, UserId};
+use crate::reactive::SetIfAlive;
 use crate::state::{AppState, use_app_state};
 
 /// Ends the meeting for everyone (#1931): stops its call if one runs and closes it for its guests,
@@ -27,6 +30,77 @@ pub async fn end_for_everyone(hub: MeetingsHub, meeting: MeetingId, me: UserId) 
     hub.refresh(me, now_ms()).await;
   }
   result
+}
+
+/// The meeting whose call `conversation` is, if `me` may end it for everyone: as its organizer or
+/// a co-host (the server checks again, docs/meetings.md "Hosts"). Ad-hoc calls have none: their
+/// hang-up only leaves. Reactive.
+pub fn meeting_to_end(hub: MeetingsHub, conversation: ConversationId, me: UserId) -> Option<MeetingId> {
+  hub
+    .hosted_meeting_for(conversation, me)
+    .or_else(|| hub.cohosted_meeting_for(conversation))
+}
+
+/// Asks before ending the meeting for everyone from the call (#1930): the hang-up menu's "End for
+/// everyone…" and the tray's. Says what happens; the focus starts on Cancel, Escape cancels and
+/// the focus goes back to `return_focus`. Once the server took it this device leaves too, also if
+/// the SFU's word is late.
+#[component]
+pub fn EndPrompt(
+  meeting: MeetingId,
+  is_open: RwSignal<bool>,
+  #[prop(optional)] return_focus: Option<NodeRef<html::Button>>,
+) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let hub = expect_context::<MeetingsHub>();
+  let me = state.me().id;
+  let call = state.call;
+  let ending = PendingAction::new();
+  let cancel = NodeRef::<html::Button>::new();
+  Effect::new(move |_| {
+    if let Some(button) = cancel.get() {
+      drop(button.focus());
+    }
+  });
+  let close = move || {
+    is_open.set(false);
+    if let Some(trigger) = return_focus.and_then(|node| node.get_untracked()) {
+      drop(trigger.focus());
+    }
+  };
+  let end = move |_| {
+    ending.spawn(async move {
+      end_for_everyone(hub, meeting, me).await?;
+      is_open.set_if_alive(false);
+      call.leave();
+      Ok(())
+    });
+  };
+  view! {
+    <div
+      class="leave-prompt end-prompt"
+      role="alertdialog"
+      aria-labelledby="end-prompt-title"
+      aria-describedby="end-prompt-body"
+      on:keydown=move |ev: web_sys::KeyboardEvent| {
+        if ev.key() == "Escape" {
+          ev.stop_propagation();
+          ev.prevent_default();
+          close();
+        }
+      }
+    >
+      <h2 id="end-prompt-title">{move || i18n.t("call-end-title")}</h2>
+      <p id="end-prompt-body">{move || i18n.t("host-end-explain")}</p>
+      <div class="leave-prompt-choices">
+        <PendingButton pending=ending class="btn btn-small btn-danger" on_click=end>
+          {move || i18n.t("call-end-do")}
+        </PendingButton>
+        <button class="btn btn-small" node_ref=cancel on:click=move |_| close()>{move || i18n.t("cancel")}</button>
+      </div>
+    </div>
+  }
 }
 
 /// Sends one host control; a refusal becomes a failure the toast words by its `error_code`.
@@ -56,14 +130,7 @@ pub fn HostControls(meeting: MeetingId, conversation: ConversationId) -> impl In
   let hub = expect_context::<MeetingsHub>();
   let is_locked = RwSignal::new(false);
   let is_confirming_end = RwSignal::new(false);
-  // The tray's "End for everyone…" for this call: the confirmation is shown right away.
   let call = state.call;
-  Effect::new(move |_| {
-    if call.is_end_for_everyone_asked.get() && call.is_in_call_for(conversation) {
-      is_confirming_end.set(true);
-      call.is_end_for_everyone_asked.set(false);
-    }
-  });
   let me = state.me().id;
   // A call runs in the meeting: somebody is in it, as the call roster says, or this device is.
   let has_call = Memo::new(move |_| {

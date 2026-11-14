@@ -447,6 +447,35 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
   }
 
   val isConnected = maybeState?.phase == CallPhase.CONNECTED
+  // "End for everyone…" from the hang-up (#1930): the meeting's hosts confirm, then the core ends
+  // it for everybody and this device leaves.
+  var isEndAsked by remember { mutableStateOf(false) }
+  var isEnding by remember { mutableStateOf(false) }
+  var maybeEndFailure by remember { mutableStateOf<Int?>(null) }
+  if (isEndAsked) {
+    EndForEveryoneDialog(
+      isEnding = isEnding,
+      maybeFailure = maybeEndFailure,
+      onEnd = {
+        isEnding = true
+        maybeEndFailure = null
+        scope.launch {
+          val maybeFailure = calls.hosts.endForEveryone()
+          isEnding = false
+          if (maybeFailure == null) {
+            isEndAsked = false
+            calls.hangUp()
+          } else {
+            maybeEndFailure = maybeFailure
+          }
+        }
+      },
+      onCancel = {
+        isEndAsked = false
+        maybeEndFailure = null
+      },
+    )
+  }
   var maybeStartedAt by remember { mutableStateOf<Long?>(null) }
   var maybeElapsed by remember { mutableStateOf<Long?>(null) }
   LaunchedEffect(isConnected) {
@@ -541,6 +570,7 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
       onStopScreenShare = { calls.stopScreenShare() },
       maybeOnHosts = if (maybeShownHosts != null && isConnected) ({ isHostsShown = true }) else null,
       maybeOnLobby = if (maybeShownLobby != null) ({ isLobbyShown = true }) else null,
+      maybeOnEndForEveryone = if (hosts != null && calls.hosts.canEndForEveryone && isConnected) ({ isEndAsked = true }) else null,
     ),
     banner = {
       Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {

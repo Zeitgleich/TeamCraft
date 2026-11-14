@@ -26,8 +26,8 @@ use teamcraft_core::records;
 use teamcraft_core::store::Table;
 use teamcraft_core::ui_backend::CoreCommand;
 use teamcraft_proto::{
-  CancelScope, CreateInstantMeetingRequest, IdempotencyKey, ListMeetingsResponse, MeetingId, MeetingResponse,
-  SpaceId, UserId,
+  CancelScope, CreateInstantMeetingRequest, IdempotencyKey, ListMeetingsResponse, MeetingControlAction,
+  MeetingControlRequest, MeetingId, MeetingResponse, SpaceId, UserId,
 };
 
 use crate::bridge::{from_json, to_json};
@@ -301,6 +301,23 @@ impl Engine {
     Ok(MeetingSave::Saved {
       meeting: saved(&saved_meeting),
     })
+  }
+
+  /// "End for everyone" from the call (#1930): ends the meeting, whether or not a call runs, and
+  /// stops its call (#1931). Hosts only; the server checks who hosts.
+  pub(crate) async fn end_meeting_for_everyone(&self, meeting_id: &str) -> Result<(), TeamCraftError> {
+    let meeting: MeetingId = parse_id(meeting_id)?;
+    let request = MeetingControlRequest {
+      action: MeetingControlAction::End,
+    };
+    self
+      .api_request(
+        "POST",
+        &format!("/meetings/{meeting}/controls"),
+        Some(to_json(&request)?),
+      )
+      .await?;
+    Ok(())
   }
 
   /// Cancels the meeting, or of a repeating one the occurrence starting at `occurrence_ms` (and

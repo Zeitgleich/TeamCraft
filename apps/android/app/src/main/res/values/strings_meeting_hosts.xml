@@ -19,4 +19,11 @@
   </plurals>
   <string name="call_hosts_leave_hand_over">Hand over to %1$s and leave</string>
   <string name="call_hosts_leave_anyway">Leave anyway</string>
+  <!-- The hang-up of a meeting's hosts: leave, or end the meeting for everyone (#1930). -->
+  <string name="call_leave_options">More ways to leave</string>
+  <string name="call_leave">Leave</string>
+  <string name="call_end_for_everyone">End for everyone…</string>
+  <string name="call_end_title">End the meeting for everyone?</string>
+  <string name="call_end_body">Everyone is removed from the call, and guests can no longer join. The meeting chat stays readable.</string>
+  <string name="call_end_do">End for everyone</string>
 </resources>

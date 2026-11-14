@@ -1060,9 +1060,12 @@
   color: var(--on-fill);
 }
 
+/* Wraps into a second row where the controls don't fit (a phone): centred and overflowing, the
+   first and last of them (the microphone, the hang-up) were off the screen. */
 .call-controls {
   flex: none;
   display: flex;
+  flex-wrap: wrap;
   justify-content: center;
   align-items: center;
   gap: 10px;
@@ -1238,9 +1241,63 @@
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .leave-btn:hover {
+  .leave-btn:hover,
+  .leave-menu-btn:hover {
     background: var(--call-danger-hover);
   }
+}
+
+/* Hosts' hang-up (#1930): the red pill splits into "Leave" and an arrow that opens a drop-up with
+   "Leave" and "End for everyone…", like the microphone's device arrow. One control in the bar. */
+.leave-split {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  margin-left: 12px;
+}
+
+.leave-split .leave-btn {
+  margin-left: 0;
+}
+
+.leave-split.has-menu .leave-btn {
+  padding-inline-end: 14px;
+  border-start-end-radius: 0;
+  border-end-end-radius: 0;
+}
+
+.leave-menu-btn {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 46px;
+  padding: 0 4px 0 0;
+  border: 0;
+  border-radius: 0 var(--radius-pill) var(--radius-pill) 0;
+  background: var(--call-danger);
+  color: var(--on-fill);
+}
+
+.leave-menu-btn .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.leave-menu-btn[aria-expanded="true"] {
+  background: var(--call-danger-hover);
+}
+
+/* Above the arrow, right-aligned with the hang-up. */
+.popover.leave-menu {
+  top: auto;
+  bottom: calc(100% + 8px);
+  right: 0;
+}
+
+.leave-menu .hangup {
+  width: 18px;
+  height: 18px;
 }
 
 .effects-popover {
