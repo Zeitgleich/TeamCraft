@@ -499,6 +499,8 @@ mod tests {
       maybe_conversation_name: maybe_conversation.map(str::to_owned),
       maybe_sender_name: maybe_sender.map(str::to_owned),
       is_sender_source: false,
+      maybe_sender_source_picture: None,
+      maybe_channel_image_version: None,
       content,
       is_direct,
       is_silent: false,

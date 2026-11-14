@@ -62,10 +62,19 @@ data class ConversationStyleSpec(
 /** One line of the MessagingStyle; `maybeSender == null` is the user's own reply. */
 data class StyleMessage(val text: String, val sentAtMs: Long, val maybeSender: NotificationSender?)
 
-/** A sender as a notification `Person`: the key picks the avatar (picture or initials). */
-data class NotificationSender(val key: String, val name: String)
+/**
+ * A sender as a notification `Person`: the key picks the avatar (picture or initials); a bot's
+ * message from an integration source names the source's picture, which goes first (#1956).
+ */
+data class NotificationSender(val key: String, val name: String, val maybeSourcePicture: String? = null)
 
-data class ShortcutSpec(val id: String, val label: String, val maybePerson: NotificationSender?)
+/** `maybeChannelImageVersion`: the channel's own picture is the conversation's icon (#1956). */
+data class ShortcutSpec(
+  val id: String,
+  val label: String,
+  val maybePerson: NotificationSender?,
+  val maybeChannelImageVersion: String? = null,
+)
 
 enum class NotificationAlerting {
   /**
@@ -149,9 +158,9 @@ object MessageNotificationSpecs {
   ): MessageNotificationSpec? {
     val received = entry.lines.filter { !it.isOwn }
     val newest = received.lastOrNull() ?: return null
-    val senders = received.mapNotNull { line -> line.maybeSenderKey?.let { NotificationSender(it, line.senderName) } }.distinct()
+    val senders = received.mapNotNull(::sender).distinct()
     val isGroup = entry.maybeTitle != null || senders.map { it.key }.distinct().size > 1
-    val newestSender = newest.maybeSenderKey?.let { NotificationSender(it, newest.senderName) }
+    val newestSender = sender(newest)
     val headline = entry.maybeTitle ?: newest.senderName.ifBlank { labels.appName }
     val (publicTitle, publicText) = if (privacy.showsNames) {
       headline to NotificationText.senderOnly(entry.lines, labels)
@@ -171,7 +180,7 @@ object MessageNotificationSpecs {
         maybeConversationTitle = entry.maybeTitle,
         isGroupConversation = isGroup,
         messages = entry.lines.map { line ->
-          StyleMessage(line.text, line.sentAtMs, line.maybeSenderKey?.let { NotificationSender(it, line.senderName) })
+          StyleMessage(line.text, line.sentAtMs, sender(line))
         },
       )
     } else {
@@ -182,6 +191,7 @@ object MessageNotificationSpecs {
         id = entry.conversationId,
         label = headline,
         maybePerson = newestSender.takeIf { entry.maybeTitle == null },
+        maybeChannelImageVersion = entry.maybeChannelImageVersion.takeIf { entry.maybeTitle != null && !entry.isDirect },
       )
     } else {
       null
@@ -272,4 +282,8 @@ object MessageNotificationSpecs {
 
   private fun newMessages(count: Int, labels: NotificationText.Labels): String =
     if (count <= 1) labels.newMessage else labels.newMessages(count)
+
+  /** Who wrote `line`; `null` for the user's own replies. */
+  private fun sender(line: NotificationLine): NotificationSender? =
+    line.maybeSenderKey?.let { NotificationSender(it, line.senderName, line.maybeSourcePicture) }
 }

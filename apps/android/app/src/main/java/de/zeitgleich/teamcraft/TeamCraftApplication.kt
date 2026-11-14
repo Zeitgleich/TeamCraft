@@ -36,7 +36,7 @@ import de.zeitgleich.teamcraft.core.CoreRepository
 import de.zeitgleich.teamcraft.core.NetworkTrust
 import de.zeitgleich.teamcraft.core.OutboxWork
 import de.zeitgleich.teamcraft.notifications.AvatarCache
-import de.zeitgleich.teamcraft.ui.SpacePictureCache
+import de.zeitgleich.teamcraft.ui.VersionedPictureCache
 import de.zeitgleich.teamcraft.notifications.JoinRequestNotifier
 import de.zeitgleich.teamcraft.notifications.JoinRequestWatcher
 import de.zeitgleich.teamcraft.notifications.MentionPrefs
@@ -47,6 +47,7 @@ import de.zeitgleich.teamcraft.notifications.PlaceholderWatcher
 import de.zeitgleich.teamcraft.notifications.PushHandler
 import de.zeitgleich.teamcraft.notifications.PushStats
 import de.zeitgleich.teamcraft.notifications.ReadWatcher
+import de.zeitgleich.teamcraft.notifications.SourcePictureIcons
 import de.zeitgleich.teamcraft.push.PushManager
 import de.zeitgleich.teamcraft.search.SegmentPrefetch
 import de.zeitgleich.teamcraft.server.ManagedConfig
@@ -75,12 +76,17 @@ class AppGraph(context: Context) {
   /** Profile pictures for screens and notifications; they belong to the signed-in account. `core` is only used when called. */
   val avatars = AvatarCache(context, { core.core() }, pictureRetries)
   /** Pictures of spaces on screen, kept by version (issue #284). */
-  val spacePictures = SpacePictureCache(context, { core.core() }, pictureRetries)
+  val spacePictures = VersionedPictureCache.spaces(context, { core.core() }, pictureRetries)
+  /** Integration sources' pictures in notifications, from the encrypted store (#1956). */
+  val sourcePictures = SourcePictureIcons { core.core() }
+  /** Pictures of channels, for the lists and the notifications, kept by version (#1956). */
+  val channelPictures = VersionedPictureCache.channels(context, { core.core() }, pictureRetries)
   /** The chat list shown last, for the next start's first frame (e2ee.md §9.2). */
   val startCache = StartCacheStore(context.filesDir)
   val auth: AuthRepository = AuthRepository(context, servers, onSignedOut = {
     avatars.clear()
     spacePictures.clear()
+    channelPictures.clear()
     // On every end of a session, also an expired refresh token: what the account showed last and
     // an unsent media flow don't stay for whoever signs in next (e2ee.md §9.2).
     startCache.delete()
@@ -91,10 +97,11 @@ class AppGraph(context: Context) {
     Pictures.clear()
     avatars.clear()
     spacePictures.clear()
+    channelPictures.clear()
   })
   val notificationContent = NotificationContentPrefs(context)
   val carProjection = CarProjection(context)
-  val notifier = MessageNotifier(context, notificationContent, avatars, isInCar = carProjection::isActive)
+  val notifier = MessageNotifier(context, notificationContent, avatars, channelPictures, sourcePictures, isInCar = carProjection::isActive)
   val mentionPrefs = MentionPrefs(context)
   /** Settings that follow the account to the user's other devices (#945). */
   val settingsSync = SettingsSync(context, core, mentionPrefs, scope)

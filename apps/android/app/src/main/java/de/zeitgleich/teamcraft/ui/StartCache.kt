@@ -73,6 +73,7 @@ data class CachedConversation(
   val isNotesToSelf: Boolean = false,
   val maybeDraftPreview: String? = null,
   val maybeSpaceImageVersion: String? = null,
+  val maybeImageVersion: String? = null,
 ) {
   /** `null` for a kind this version doesn't know: a cache written by a newer one. */
   fun item(): ConversationItem? {
@@ -100,6 +101,7 @@ data class CachedConversation(
       isNotesToSelf = isNotesToSelf,
       maybeDraftPreview = maybeDraftPreview,
       maybeSpaceImageVersion = maybeSpaceImageVersion,
+      maybeImageVersion = maybeImageVersion,
     )
   }
 
@@ -124,6 +126,7 @@ data class CachedConversation(
       isNotesToSelf = item.isNotesToSelf,
       maybeDraftPreview = item.maybeDraftPreview,
       maybeSpaceImageVersion = item.maybeSpaceImageVersion,
+      maybeImageVersion = item.maybeImageVersion,
     )
   }
 }

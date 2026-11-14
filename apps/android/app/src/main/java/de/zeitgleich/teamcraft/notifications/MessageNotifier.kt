@@ -40,6 +40,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import de.zeitgleich.teamcraft.ui.VersionedPictureCache
 import uniffi.teamcraft_ffi.NotificationAttachmentKind
 import uniffi.teamcraft_ffi.NotificationGap
 import uniffi.teamcraft_ffi.PushNotification
@@ -60,6 +61,10 @@ class MessageNotifier(
   private val context: Context,
   private val contentPrefs: NotificationContentPrefs,
   private val avatars: AvatarCache,
+  /** The channels' own pictures, the same as the chat list shows (#1956). */
+  private val channelPictures: VersionedPictureCache,
+  /** Integration sources' pictures, from this device's store (#1956). */
+  private val sourcePictures: SourcePictureIcons,
   private val store: NotificationStore = NotificationStore(context),
   /** Whether the phone projects to a car now (Android Auto). */
   private val isInCar: () -> Boolean = { false },
@@ -615,6 +620,7 @@ class MessageNotifier(
       store.delete()
       manager.cancelAll()
       avatars.clear()
+      sourcePictures.clear()
       runCatching { ShortcutManagerCompat.removeAllDynamicShortcuts(context) }
     }
   }
@@ -629,6 +635,12 @@ class MessageNotifier(
     isVerified = notification.isConversationVerified,
     isMention = notification.isMention || notification.isUrgent,
     isDirect = notification.isDirect,
+    // Pictures follow the names: a wake-up that may not name the channel keeps what was shown.
+    maybeChannelImageVersion = if (title(notification) != null) {
+      notification.maybeChannelImageVersion
+    } else {
+      maybePrevious?.maybeChannelImageVersion
+    },
     lines = lines,
   )
 
@@ -643,6 +655,7 @@ class MessageNotifier(
       maybeThreadId = notification.maybeThreadId,
       maybeSenderKey = notification.maybeSenderId ?: text.senderName,
       senderName = text.senderName,
+      maybeSourcePicture = notification.maybeSenderSourcePictureSha256,
       text = text.text,
       sentAtMs = sentAtMs,
       // A kind this version can't show stays "New message", so it is one for bridges too.
@@ -698,7 +711,7 @@ class MessageNotifier(
     postSafely(entry.conversationId, MESSAGE_ID, build(spec, revision))
     confirmLater(entry.conversationId, revision, alerting)
     spec.maybeShortcut?.let(::pushShortcut)
-    if (privacy.showsNames) fetchAvatars(entry)
+    if (privacy.showsNames) fetchPictures(entry)
   }
 
   private fun spec(entry: ConversationNotification, privacy: MessagePrivacy, alerting: NotificationAlerting) =
@@ -771,7 +784,7 @@ class MessageNotifier(
       .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
       .setPublicVersion(publicVersion(spec.channel, spec.publicTitle, spec.publicText))
     if (spec.messageCount > 1) builder.setNumber(spec.messageCount)
-    spec.maybeConversation?.let { conversation -> builder.setStyle(messagingStyle(conversation)) }
+    spec.maybeConversation?.let { conversation -> builder.setStyle(messagingStyle(conversation, spec.conversationId)) }
     spec.maybeLargeIconSender?.let { sender ->
       builder.setLargeIcon(avatars.maybeBitmap(sender.key) ?: PersonIcons.bitmap(sender.key, sender.name))
     }
@@ -809,38 +822,54 @@ class MessageNotifier(
       .build()
   }
 
-  private fun messagingStyle(conversation: ConversationStyleSpec): NotificationCompat.MessagingStyle {
+  private fun messagingStyle(conversation: ConversationStyleSpec, conversationId: String): NotificationCompat.MessagingStyle {
     val me = Person.Builder().setName(context.getString(R.string.you)).setKey(SELF_KEY).build()
     val style = NotificationCompat.MessagingStyle(me)
       .setConversationTitle(conversation.maybeConversationTitle)
       .setGroupConversation(conversation.isGroupConversation)
     conversation.messages.forEach { message ->
-      style.addMessage(highlighted(message.text), message.sentAtMs, message.maybeSender?.let(::person))
+      style.addMessage(highlighted(message.text), message.sentAtMs, message.maybeSender?.let { person(it, conversationId) })
     }
     return style
   }
 
   /**
-   * Fetches the senders' pictures in the background (never from the push); a picture that arrives
-   * replaces the initials in the notification already shown, silently.
+   * Fetches the senders', sources' and channel's pictures in the background (never from the push);
+   * a picture that arrives replaces the initials in the notification already shown, silently.
    */
-  private fun fetchAvatars(entry: ConversationNotification) {
-    val senders = entry.lines.mapNotNull { it.maybeSenderKey }.distinct()
-    senders.forEach { sender ->
-      scope.launch {
-        if (!avatars.refresh(sender)) return@launch
-        synchronized(lock) {
-          shown().conversations[entry.conversationId]?.let { current -> post(current, NotificationAlerting.SILENT) }
-        }
+  private fun fetchPictures(entry: ConversationNotification) {
+    val conversationId = entry.conversationId
+    entry.lines.mapNotNull { it.maybeSenderKey }.distinct().forEach { sender ->
+      postAgainWhen(conversationId) { avatars.refresh(sender) }
+    }
+    entry.lines.mapNotNull { it.maybeSourcePicture }.distinct().forEach { sha256 ->
+      postAgainWhen(conversationId) { sourcePictures.load(conversationId, sha256) }
+    }
+    entry.maybeChannelImageVersion?.let { version ->
+      postAgainWhen(conversationId) { channelPictures.ensure(conversationId, version) }
+    }
+  }
+
+  /** Posts the conversation's notification again, silently, if `fetch` brought a new picture. */
+  private fun postAgainWhen(conversationId: String, fetch: suspend () -> Boolean) {
+    scope.launch {
+      if (!fetch()) return@launch
+      synchronized(lock) {
+        shown().conversations[conversationId]?.let { current -> post(current, NotificationAlerting.SILENT) }
       }
     }
   }
 
-  private fun person(sender: NotificationSender): Person =
+  /** The source's picture for a bot's message, else the sender's, else the initials. */
+  private fun person(sender: NotificationSender, conversationId: String): Person =
     Person.Builder()
       .setName(sender.name)
       .setKey(sender.key)
-      .setIcon(avatars.maybeIcon(sender.key) ?: PersonIcons.of(sender.key, sender.name))
+      .setIcon(
+        sender.maybeSourcePicture?.let { sourcePictures.maybeIcon(conversationId, it) }
+          ?: avatars.maybeIcon(sender.key)
+          ?: PersonIcons.of(sender.key, sender.name),
+      )
       .build()
 
   /** `@mentions` in bold, as in the app. */
@@ -939,7 +968,7 @@ class MessageNotifier(
       .setCategories(setOf(ShareShortcuts.CATEGORY))
       .setIcon(shortcutIcon(spec, label))
       .setIntent(openConversationIntent(spec.id).setAction(Intent.ACTION_VIEW))
-      .apply { spec.maybePerson?.let { setPerson(person(it)) } }
+      .apply { spec.maybePerson?.let { setPerson(person(it, spec.id)) } }
       .build()
     try {
       ShortcutManagerCompat.pushDynamicShortcut(context, shortcut)
@@ -949,10 +978,18 @@ class MessageNotifier(
     }
   }
 
-  /** A person's picture for a one-to-one chat, else the generated avatar of the conversation. */
+  /**
+   * A person's picture for a one-to-one chat, the channel's own picture for a channel (#1956), else
+   * the generated avatar of the conversation.
+   */
   private fun shortcutIcon(spec: ShortcutSpec, label: String): IconCompat {
     val maybeSender = spec.maybePerson
-    return maybeSender?.let { avatars.maybeIcon(it.key) } ?: PersonIcons.of(maybeSender?.key ?: spec.id, label)
+    val maybeChannel = spec.maybeChannelImageVersion
+      ?.let { version -> channelPictures.maybeBitmap(spec.id, version) }
+      ?.let { IconCompat.createWithBitmap(AvatarCache.circle(it)) }
+    return maybeSender?.let { avatars.maybeIcon(it.key) }
+      ?: maybeChannel
+      ?: PersonIcons.of(maybeSender?.key ?: spec.id, label)
   }
 
   private fun postSafely(maybeTag: String?, id: Int, notification: Notification) {

@@ -14,13 +14,14 @@ use teamcraft_crypto::push::open_wakeup;
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::{
   Base64Bytes, ConversationId, ConversationKind, ConversationResponse, Id, ListMessagesQuery,
-  ListMessagesResponse, MessageId, MessageResponse, PushContentMode, PushKind, PushWakeUp, Snowflake, UserId,
-  UserSummary,
+  ListMessagesResponse, MessageId, MessageResponse, PushContentMode, PushKind, PushWakeUp, Snowflake,
+  SourcePictureHash, UserId, UserSummary,
 };
 
 use crate::api::{ApiError, ServerApi};
 use crate::client::decrypt_plaintext;
 use crate::error::CoreError;
+use crate::integration_sources::ShownSource;
 use crate::people_names::shown_name;
 use crate::readable_text::readable_text;
 use crate::records;
@@ -61,6 +62,14 @@ pub struct PushPreview {
   /// The sender's name is an integration source's: the apps mark it as a bot, so it can't pass as
   /// a person (docs/bridge.md, "Source identity").
   pub is_sender_source: bool,
+  /// The picture the source names, kept in this device's store
+  /// ([`crate::integration_sources::source_picture`]): the apps show it in place of the bot's
+  /// avatar, as the message feed does. `None` without a source, or a source without a picture.
+  pub maybe_sender_source_picture: Option<SourcePictureHash>,
+  /// The version of the channel's own picture (`GET /api/v1/conversations/{id}/image`), which the
+  /// apps fetch and cache by it, as for the channel list. `None` for DMs, a channel without one,
+  /// and wherever the conversation's name doesn't show: pictures follow the names.
+  pub maybe_channel_image_version: Option<String>,
   pub content: PreviewContent,
   /// A DM or group DM: the sender's name is the title, no "sender:" prefix needed.
   pub is_direct: bool,
@@ -166,6 +175,11 @@ pub async fn push_preview<A: PreviewApi>(
   let maybe_conversation_name = maybe_conversation
     .as_ref()
     .and_then(|conversation| conversation_name(conversation, maybe_me));
+  let maybe_channel_image_version = maybe_conversation
+    .as_ref()
+    .filter(|_| !is_direct && maybe_conversation_name.is_some())
+    .and_then(|conversation| conversation.maybe_image.as_ref())
+    .map(|image| image.version.clone());
   let maybe_sender_name = match wake_up.maybe_sender_id {
     Some(sender) => records::get_json::<UserSummary>(store, Table::Users, &sender.to_string())?
       .map(|user| shown_name(&user))
@@ -173,7 +187,7 @@ pub async fn push_preview<A: PreviewApi>(
     None => None,
   };
   // Only messages have content to fetch; a withdrawal names the newest message read, not one to show.
-  let (content, is_silent, is_conversation_verified, maybe_source_name) =
+  let (content, is_silent, is_conversation_verified, maybe_source) =
     match (&wake_up.kind, wake_up.maybe_message_id) {
       (PushKind::Message | PushKind::Mention, Some(message_id)) => {
         preview_content(store, maybe_api, &wake_up, message_id).await
@@ -198,8 +212,11 @@ pub async fn push_preview<A: PreviewApi>(
       ),
       _ => (Ok(PreviewContent::Unavailable), false, false, None),
     };
-  let is_sender_source = maybe_source_name.is_some();
-  let maybe_sender_name = maybe_source_name.or(maybe_sender_name);
+  let is_sender_source = maybe_source.is_some();
+  let maybe_sender_source_picture = maybe_source
+    .as_ref()
+    .and_then(|source| source.maybe_picture_sha256);
+  let maybe_sender_name = maybe_source.map(|source| source.name).or(maybe_sender_name);
   let (content, maybe_gap) = match content {
     Ok(PreviewContent::Unavailable) if is_message(&wake_up) => {
       (PreviewContent::Unavailable, Some(PreviewGap::NotShowable))
@@ -212,6 +229,8 @@ pub async fn push_preview<A: PreviewApi>(
     maybe_conversation_name,
     maybe_sender_name,
     is_sender_source,
+    maybe_sender_source_picture,
+    maybe_channel_image_version,
     content,
     is_direct,
     is_silent,
@@ -308,6 +327,9 @@ impl PushPreview {
         self.content = PreviewContent::Unavailable;
         self.maybe_conversation_name = None;
         self.maybe_sender_name = None;
+        // Pictures follow the names.
+        self.maybe_sender_source_picture = None;
+        self.maybe_channel_image_version = None;
       },
     }
     if is_message(&self.wake_up)
@@ -381,7 +403,12 @@ async fn preview_content<A: PreviewApi>(
   maybe_api: Option<&A>,
   wake_up: &PushWakeUp,
   message_id: MessageId,
-) -> (Result<PreviewContent, PreviewGap>, bool, bool, Option<String>) {
+) -> (
+  Result<PreviewContent, PreviewGap>,
+  bool,
+  bool,
+  Option<ShownSource>,
+) {
   let conversation = wake_up.conversation_id;
   // One indexed lookup: the notification extension has little memory (issue #155).
   let local = store
@@ -428,7 +455,12 @@ fn readable_preview(
   store: &impl LocalStore,
   sender: UserId,
   content: &ShownContent,
-) -> (Result<PreviewContent, PreviewGap>, bool, bool, Option<String>) {
+) -> (
+  Result<PreviewContent, PreviewGap>,
+  bool,
+  bool,
+  Option<ShownSource>,
+) {
   if is_hidden_change(content) {
     let gap = if adds_this_user(store, content) {
       PreviewGap::AddedYou
@@ -441,15 +473,15 @@ fn readable_preview(
     Ok(content_preview(content)),
     is_silent(content),
     true,
-    source_name(store, sender, content),
+    shown_source(store, sender, content),
   )
 }
 
-/// The integration source's name a message of a bot shows instead of the bot's.
-fn source_name(store: &impl LocalStore, sender: UserId, content: &ShownContent) -> Option<String> {
+/// The integration source's name and picture a message of a bot shows instead of the bot's.
+fn shown_source(store: &impl LocalStore, sender: UserId, content: &ShownContent) -> Option<ShownSource> {
   let identity = content.source()?;
   let is_bot = crate::integration_sources::is_known_bot(store, sender).unwrap_or(false);
-  crate::integration_sources::shown_source(&identity, is_bot).map(|shown| shown.name)
+  crate::integration_sources::shown_source(&identity, is_bot)
 }
 
 /// Whether this is a change to the conversation rather than something somebody said (which
@@ -739,6 +771,8 @@ mod tests {
       maybe_conversation_name: None,
       maybe_sender_name: None,
       is_sender_source: false,
+      maybe_sender_source_picture: None,
+      maybe_channel_image_version: None,
       content: PreviewContent::Unavailable,
       is_direct: true,
       is_silent: false,
@@ -945,7 +979,9 @@ mod tests {
       },
       maybe_conversation_name: Some("planning".into()),
       maybe_sender_name: Some("Alice".into()),
-      is_sender_source: false,
+      is_sender_source: true,
+      maybe_sender_source_picture: Some(SourcePictureHash::from_bytes([7; 32])),
+      maybe_channel_image_version: Some("v1".into()),
       content: PreviewContent::Text("lunch?".into()),
       is_direct: false,
       is_silent: false,
@@ -956,9 +992,12 @@ mod tests {
     let sender = full.clone().limited_to(&PushContentMode::Sender);
     assert_eq!(sender.content, PreviewContent::Unavailable);
     assert_eq!(sender.maybe_sender_name.as_deref(), Some("Alice"));
+    // Pictures follow the names.
+    assert!(sender.maybe_sender_source_picture.is_some() && sender.maybe_channel_image_version.is_some());
     for mode in [PushContentMode::Generic, PushContentMode::Unknown("x".into())] {
       let generic = full.clone().limited_to(&mode);
       assert!(generic.maybe_sender_name.is_none() && generic.maybe_conversation_name.is_none());
+      assert!(generic.maybe_sender_source_picture.is_none() && generic.maybe_channel_image_version.is_none());
       assert_eq!(generic.content, PreviewContent::Unavailable);
       assert!(generic.is_conversation_verified);
     }
@@ -1006,6 +1045,8 @@ mod tests {
       maybe_conversation_name: None,
       maybe_sender_name: Some("Alice".into()),
       is_sender_source: false,
+      maybe_sender_source_picture: None,
+      maybe_channel_image_version: None,
       content: PreviewContent::Unavailable,
       is_direct: false,
       is_silent: false,
@@ -1052,6 +1093,8 @@ mod tests {
       maybe_conversation_name: Some("Project A".into()),
       maybe_sender_name: Some("Alice".into()),
       is_sender_source: false,
+      maybe_sender_source_picture: None,
+      maybe_channel_image_version: None,
       content: PreviewContent::Unavailable,
       is_direct: false,
       is_silent: false,

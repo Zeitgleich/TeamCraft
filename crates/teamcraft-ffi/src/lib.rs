@@ -1119,6 +1119,21 @@ impl TeamCraft {
       .map_err(TeamCraftError::Network)?
   }
 
+  /// The picture of a channel (image bytes, at most `max_bytes`), or `None` without one. Fetched
+  /// on demand for channels on screen and in notifications; the app keeps its own cache, keyed by
+  /// the version in `ConversationItem.maybe_image_version` or
+  /// `PushNotification.maybe_channel_image_version`.
+  pub async fn channel_picture(
+    &self,
+    conversation_id: String,
+    max_bytes: u32,
+  ) -> Result<Option<Vec<u8>>, TeamCraftError> {
+    let api = self.server_api()?;
+    run_request(async move { bridge::channel_picture(&api, &conversation_id, u64::from(max_bytes)).await })
+      .await
+      .map_err(TeamCraftError::Network)?
+  }
+
   /// An integration source's picture (a small PNG) as this device holds it, or `None`: the app
   /// shows the bot's picture then. `sha256` is what the message names; nothing goes to the server.
   pub async fn integration_source_picture(

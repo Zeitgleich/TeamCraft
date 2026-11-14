@@ -490,6 +490,10 @@ async fn catch_up_for_push(
 fn with_names_of(mut preview: PushPreview, later: PushPreview) -> PushPreview {
   if preview.maybe_sender_name.is_none() {
     preview.is_sender_source = later.is_sender_source;
+    preview.maybe_sender_source_picture = later.maybe_sender_source_picture;
+  }
+  if preview.maybe_conversation_name.is_none() {
+    preview.maybe_channel_image_version = later.maybe_channel_image_version;
   }
   preview.maybe_sender_name = preview.maybe_sender_name.or(later.maybe_sender_name);
   preview.maybe_conversation_name = preview.maybe_conversation_name.or(later.maybe_conversation_name);
