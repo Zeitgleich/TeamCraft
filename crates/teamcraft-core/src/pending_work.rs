@@ -7,6 +7,8 @@
 //! start (or the next background run) sends it, and the client message ID makes a send whose answer
 //! was lost arrive once (robustness.md, "Offline and queued actions").
 
+use teamcraft_proto::ConversationId;
+
 use crate::client::files::PendingUpload;
 use crate::client::pending_action_count;
 use crate::error::CoreError;
@@ -55,5 +57,30 @@ impl PendingWork {
 
   pub fn is_empty(&self) -> bool {
     *self == Self::default()
+  }
+}
+
+/// One conversation's own messages in the outbox: a reply from a notification or the car shows
+/// "sending" until none is left, and "failed" once the server refused one for good (#1972).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConversationOutbox {
+  /// Messages that will be sent (again).
+  pub sending: usize,
+  /// Messages the server refused for good; they wait for the user's "Try again" or "Delete".
+  pub failed: usize,
+}
+
+impl ConversationOutbox {
+  pub fn read(store: &impl LocalStore, conversation: ConversationId) -> Result<Self, CoreError> {
+    let entries = records::outbox(store)?;
+    let mine = entries
+      .iter()
+      .filter(|entry| entry.conversation_id == conversation);
+    let (failed, sending): (Vec<&OutboxEntry>, Vec<&OutboxEntry>) =
+      mine.partition(|entry| entry.maybe_last_error.is_some());
+    Ok(Self {
+      sending: sending.len(),
+      failed: failed.len(),
+    })
   }
 }

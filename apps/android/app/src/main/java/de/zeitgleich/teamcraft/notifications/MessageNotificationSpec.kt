@@ -49,7 +49,31 @@ data class MessageNotificationSpec(
    * a setting or the app lock that hides it).
    */
   val isBubble: Boolean = false,
-)
+  /** An action taken from the notification that runs or failed (#1972); `null`: none. */
+  val maybeActionStatus: ActionStatus? = null,
+  /** The user's newest reply, as the remote-input history shows it while it is sending. */
+  val maybeOwnReply: String? = null,
+) {
+  /** The button shows the action as running ("Marking as read…") and does nothing when tapped. */
+  val maybeRunningAction: MessageAction?
+    get() = maybeActionStatus?.takeIf { !it.isFailed && it.action != MessageAction.REPLY }?.action
+
+  /** The reply shows Android's remote-input spinner until the server took it. */
+  val isReplySending: Boolean get() = maybeActionStatus == ActionStatus.SENDING_REPLY
+
+  /** The action that failed: the notification says so, and a tap opens the conversation. */
+  val maybeFailedAction: MessageAction? get() = maybeActionStatus?.takeIf { it.isFailed }?.action
+}
+
+/** What an action taken from a message notification is doing (#1972). */
+enum class ActionStatus(val action: MessageAction, val isFailed: Boolean) {
+  SENDING_REPLY(MessageAction.REPLY, isFailed = false),
+  REPLY_FAILED(MessageAction.REPLY, isFailed = true),
+  MARKING_READ(MessageAction.MARK_READ, isFailed = false),
+  MARK_READ_FAILED(MessageAction.MARK_READ, isFailed = true),
+  MUTING(MessageAction.MUTE, isFailed = false),
+  MUTE_FAILED(MessageAction.MUTE, isFailed = true),
+}
 
 /** MessagingStyle: the conversation's lines with their senders. */
 data class ConversationStyleSpec(
@@ -155,6 +179,8 @@ object MessageNotificationSpecs {
     labels: NotificationText.Labels,
     /** The user opted in for this conversation and the system allows bubbles (see [BubblePrefs]). */
     canBubble: Boolean = false,
+    /** An action taken from the notification that runs or failed ([NotificationActions]). */
+    maybeActionStatus: ActionStatus? = null,
   ): MessageNotificationSpec? {
     val received = entry.lines.filter { !it.isOwn }
     val newest = received.lastOrNull() ?: return null
@@ -217,6 +243,9 @@ object MessageNotificationSpecs {
       actions = if (privacy.offersActions) listOf(MessageAction.REPLY, MessageAction.MARK_READ, MessageAction.MUTE) else emptyList(),
       maybeReplyThreadId = newest.maybeThreadId,
       isBubble = canBubble && entry.isDirect && privacy.showsContent && shortcut != null && conversation != null,
+      // Only on a notification that acts: one without actions has nothing to show a state for.
+      maybeActionStatus = maybeActionStatus.takeIf { privacy.offersActions },
+      maybeOwnReply = entry.lines.lastOrNull { it.isOwn }?.text?.takeIf { privacy.showsContent },
     )
   }
 

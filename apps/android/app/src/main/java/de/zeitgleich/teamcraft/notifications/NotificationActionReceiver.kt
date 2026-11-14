@@ -10,13 +10,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.core.ChatClient
-import de.zeitgleich.teamcraft.core.ConversationNotificationSettings
 import de.zeitgleich.teamcraft.push.WakeUpWork
 import de.zeitgleich.teamcraft.ui.JoinStep
 import uniffi.teamcraft_ffi.JoinRequestItem
 
 /**
- * "Reply" and "mark as read" from a notification, on the phone or in Android Auto, the
+ * "Reply", "mark as read" and "mute" from a notification ([NotificationActions]), on the phone or in Android Auto, the
  * notification being swiped away, and Approve or Decline of an admin's request to join.
  */
 class NotificationActionReceiver : BroadcastReceiver() {
@@ -28,6 +27,7 @@ class NotificationActionReceiver : BroadcastReceiver() {
     // a core waiting behind a busy store kept the broadcast open until Android declared the app not
     // responding and killed it (a background ANR, with nothing on the main thread). The action goes
     // on without the broadcast while the process lives. A swipe too: the notifier's lock can wait.
+    // The action keeps going after the broadcast's budget: a reply runs the sync until it is out.
     val work = graph.scope.launch { act(context, intent, conversationId) }
     graph.scope.launch {
       try {
@@ -44,29 +44,16 @@ class NotificationActionReceiver : BroadcastReceiver() {
       when (intent.action) {
         // Swiped away: the next message starts a fresh notification.
         ACTION_DISMISSED -> graph.notifier.dismiss(conversationId)
+        // Each shows its state on the notification at once and runs the sync until it is out
+        // (#1972): in the background the sync is stopped, so a reply only waited in the outbox.
         ACTION_REPLY -> {
           val reply = RemoteInput.getResultsFromIntent(intent)?.getCharSequence(KEY_REPLY)
           if (!reply.isNullOrBlank()) {
-            // Through the core's outbox: queued and retried if the phone is offline.
-            graph.core.core().sendMessage(conversationId, intent.getStringExtra(EXTRA_THREAD_ID), reply.toString())
-            graph.notifier.showOwnReply(conversationId, reply)
+            graph.notificationActions.reply(conversationId, intent.getStringExtra(EXTRA_THREAD_ID), reply.toString())
           }
         }
-        ACTION_MUTE -> {
-          // Quiet for a while through the server's per-conversation setting (all devices follow).
-          val mutedUntil = System.currentTimeMillis() + MUTE_DURATION_MS
-          val chat = ChatClient { graph.core.core() }
-          val current = chat.conversationNotifications(conversationId)
-          chat.setConversationNotifications(
-            conversationId,
-            ConversationNotificationSettings(level = current.level, mutedUntil = mutedUntil),
-          )
-          graph.notifier.dismiss(conversationId)
-        }
-        ACTION_MARK_READ -> {
-          graph.core.core().markRead(conversationId)
-          graph.notifier.dismiss(conversationId)
-        }
+        ACTION_MUTE -> graph.notificationActions.mute(conversationId)
+        ACTION_MARK_READ -> graph.notificationActions.markRead(conversationId)
         ACTION_MEETING_DISMISSED -> {
           val meetingId = intent.getStringExtra(EXTRA_MEETING_ID) ?: return
           val startsAtMs = intent.getLongExtra(EXTRA_MEETING_STARTS_AT_MS, -1L).takeIf { it >= 0 } ?: return
@@ -100,7 +87,6 @@ class NotificationActionReceiver : BroadcastReceiver() {
     private const val EXTRA_TAG = "tag"
     private const val EXTRA_MEETING_ID = "meeting_id"
     private const val EXTRA_MEETING_STARTS_AT_MS = "meeting_starts_at_ms"
-    private const val MUTE_DURATION_MS = 8L * 60 * 60 * 1000
     private const val TAG = "TeamCraftNotify"
 
     fun intent(context: Context, action: String, conversationId: String, maybeThreadId: String? = null): Intent =

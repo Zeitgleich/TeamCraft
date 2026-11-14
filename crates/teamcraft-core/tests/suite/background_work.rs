@@ -16,7 +16,7 @@ use teamcraft_client_api::actions::{FileSource, MessagePriority, OutgoingFile, O
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_core::Client;
 use teamcraft_core::api::fake::FakeServer;
-use teamcraft_core::pending_work::PendingWork;
+use teamcraft_core::pending_work::{ConversationOutbox, PendingWork};
 use teamcraft_core::runner::{RunnerCommand, RunnerSettings, SyncRunner};
 use teamcraft_core::upkeep;
 use teamcraft_proto::ConversationId;
@@ -94,6 +94,40 @@ mod restart {
     assert!(
       pending(&alice).is_empty(),
       "it waits for the user's retry or delete, not for background time"
+    );
+    assert_eq!(
+      ConversationOutbox::read(&alice.store, channel).unwrap(),
+      ConversationOutbox {
+        sending: 0,
+        failed: 1
+      },
+      "a reply from a notification shows as failed (#1972)"
+    );
+  }
+
+  #[tokio::test]
+  async fn a_conversations_outbox_counts_what_is_still_sending() {
+    let (server, mut alice, _bob, channel) = channel_with_two().await;
+    let alice_ui = backend_of(&alice);
+    server.lose_send_answers(1);
+    alice_ui.send_message(text(channel, "on its way"));
+    for command in alice_ui.drain_commands() {
+      // The lost answer reads as a network error; the message stays queued.
+      let _ = alice.client.run_ui_command(command).await;
+    }
+    assert_eq!(
+      ConversationOutbox::read(&alice.store, channel).unwrap(),
+      ConversationOutbox {
+        sending: 1,
+        failed: 0
+      },
+      "a reply from a notification shows as sending (#1972)"
+    );
+    assert!(upkeep::flush(&mut alice.client).await);
+    assert_eq!(
+      ConversationOutbox::read(&alice.store, channel).unwrap(),
+      ConversationOutbox::default(),
+      "then as sent"
     );
   }
 }

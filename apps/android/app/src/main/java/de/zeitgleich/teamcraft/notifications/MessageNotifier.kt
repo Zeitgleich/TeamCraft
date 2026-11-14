@@ -71,7 +71,7 @@ class MessageNotifier(
   private val elapsedNow: () -> Long = SystemClock::elapsedRealtime,
   /** Conversations the user opted in to show as bubbles (#591). */
   private val bubbles: BubblePrefs = BubblePrefs(context),
-) {
+) : ActionStatusSink {
   private val manager = NotificationManagerCompat.from(context)
   private val lock = Any()
   private var maybeShown: ShownNotifications? = null
@@ -82,6 +82,9 @@ class MessageNotifier(
   /** Rises with every post; from the clock, so a new process stays above the old one's. */
   private val revisions = AtomicLong(System.currentTimeMillis())
   private val confirms = HashMap<String, PostConfirm>()
+
+  /** Actions taken from a notification that run or failed, by conversation (#1972); under [lock]. */
+  private val actionStatuses = HashMap<String, ActionStatus>()
   private val confirmJobs = HashMap<String, Job>()
 
   /** When the last quiet note went up, so a burst shows one. */
@@ -334,15 +337,40 @@ class MessageNotifier(
     manager.cancel(UNREADABLE_TAG, OTHER_ID)
   }
 
-  /** Adds the user's own reply to the conversation's notification (Android Auto expects this). */
-  fun showOwnReply(conversationId: String, reply: CharSequence) {
+  /**
+   * Adds the user's own reply to the conversation's notification (Android Auto expects this), as
+   * sending until [NotificationActions] knows how it went.
+   */
+  override fun showOwnReply(conversationId: String, reply: CharSequence) {
     synchronized(lock) {
       val shown = shown()
       val entry = shown.conversations[conversationId] ?: return
       val line = NotificationLine(text = reply.toString(), sentAtMs = System.currentTimeMillis())
       val updated = entry.copy(lines = NotificationLines.merge(entry.lines, line))
+      actionStatuses[conversationId] = ActionStatus.SENDING_REPLY
       update(shown.copy(conversations = shown.conversations + (conversationId to updated)))
       post(updated, NotificationAlerting.SILENT)
+    }
+  }
+
+  /**
+   * Shows an action taken from the notification as running or failed, posted again at once: the
+   * user sees it work in the open shade (#1972). A failed reply alerts in the car, so it is heard.
+   */
+  override fun showActionStatus(conversationId: String, status: ActionStatus) {
+    synchronized(lock) {
+      val entry = shown().conversations[conversationId] ?: return
+      actionStatuses[conversationId] = status
+      val isHeardInCar = status == ActionStatus.REPLY_FAILED && isInCar()
+      post(entry, if (isHeardInCar) NotificationAlerting.ALERT else NotificationAlerting.SILENT)
+    }
+  }
+
+  /** The action went through and the notification stays (a reply was sent): its state goes. */
+  override fun clearActionStatus(conversationId: String) {
+    synchronized(lock) {
+      if (actionStatuses.remove(conversationId) == null) return
+      shown().conversations[conversationId]?.let { entry -> post(entry, NotificationAlerting.SILENT) }
     }
   }
 
@@ -374,8 +402,9 @@ class MessageNotifier(
   }
 
   /** The conversation was read here (or its notification swiped away): forget it entirely. */
-  fun dismiss(conversationId: String) {
+  override fun dismiss(conversationId: String) {
     synchronized(lock) {
+      actionStatuses.remove(conversationId)
       val shown = shown()
       if (conversationId !in shown.conversations) return
       update(shown.copy(conversations = shown.conversations - conversationId))
@@ -715,7 +744,14 @@ class MessageNotifier(
   }
 
   private fun spec(entry: ConversationNotification, privacy: MessagePrivacy, alerting: NotificationAlerting) =
-    MessageNotificationSpecs.conversation(entry, privacy, alerting == NotificationAlerting.ALERT, labels(), canBubble(entry))
+    MessageNotificationSpecs.conversation(
+      entry,
+      privacy,
+      alerting == NotificationAlerting.ALERT,
+      labels(),
+      canBubble(entry),
+      maybeActionStatus = actionStatuses[entry.conversationId],
+    )
       ?.let { if (alerting == NotificationAlerting.REFRESH) it.copy(alerting = alerting) else it }
 
   /** Opted in for this conversation, and the system allows bubbles (the privacy rules apply in the spec). */
@@ -784,7 +820,8 @@ class MessageNotifier(
       .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
       .setPublicVersion(publicVersion(spec.channel, spec.publicTitle, spec.publicText))
     if (spec.messageCount > 1) builder.setNumber(spec.messageCount)
-    spec.maybeConversation?.let { conversation -> builder.setStyle(messagingStyle(conversation, spec.conversationId)) }
+    spec.maybeConversation?.let { conversation -> builder.setStyle(messagingStyle(conversation, spec)) }
+    showActionStatus(builder, spec)
     spec.maybeLargeIconSender?.let { sender ->
       builder.setLargeIcon(avatars.maybeBitmap(sender.key) ?: PersonIcons.bitmap(sender.key, sender.name))
     }
@@ -793,6 +830,7 @@ class MessageNotifier(
     spec.actions.forEach { action ->
       builder.addAction(
         when (action) {
+          spec.maybeRunningAction -> runningAction(action)
           MessageAction.REPLY -> replyAction(spec.conversationId, spec.maybeReplyThreadId)
           MessageAction.MARK_READ -> markReadAction(spec.conversationId)
           MessageAction.MUTE -> muteAction(spec.conversationId)
@@ -800,6 +838,45 @@ class MessageNotifier(
       )
     }
     return builder.build()
+  }
+
+  /**
+   * The state of an action taken from the notification (#1972), in the header (`subText`, shown
+   * with every style): "Sending…" with the remote-input spinner under the reply, or what failed
+   * and that a tap opens the conversation, where a failed message offers "Try again".
+   */
+  private fun showActionStatus(builder: NotificationCompat.Builder, spec: MessageNotificationSpec) {
+    val status = spec.maybeActionStatus ?: return
+    builder.setSubText(actionStatusText(status))
+    if (spec.isReplySending) {
+      spec.maybeOwnReply?.let { reply -> builder.setRemoteInputHistory(arrayOf<CharSequence>(reply)) }
+      // `Notification.EXTRA_SHOW_REMOTE_INPUT_SPINNER` is hidden API; SystemUI reads it by name.
+      builder.addExtras(Bundle().apply { putBoolean(EXTRA_REMOTE_INPUT_SPINNER, true) })
+    }
+  }
+
+  private fun actionStatusText(status: ActionStatus): String = context.getString(
+    when (status) {
+      ActionStatus.SENDING_REPLY -> R.string.notification_reply_sending
+      ActionStatus.REPLY_FAILED -> R.string.notification_reply_failed
+      ActionStatus.MARKING_READ -> R.string.notification_marking_read
+      ActionStatus.MARK_READ_FAILED -> R.string.notification_mark_read_failed
+      ActionStatus.MUTING -> R.string.notification_muting
+      ActionStatus.MUTE_FAILED -> R.string.notification_mute_failed
+    },
+  )
+
+  /**
+   * A running action's button: its progress label and no intent, so a second tap does nothing
+   * while the first runs. No semantic action: Android Auto must not offer it as working.
+   */
+  private fun runningAction(action: MessageAction): NotificationCompat.Action {
+    val label = when (action) {
+      MessageAction.MARK_READ -> R.string.notification_marking_read
+      MessageAction.MUTE -> R.string.notification_muting
+      MessageAction.REPLY -> R.string.notification_reply_sending
+    }
+    return NotificationCompat.Action.Builder(R.drawable.ic_notification, context.getString(label), null).build()
   }
 
   /**
@@ -822,13 +899,18 @@ class MessageNotifier(
       .build()
   }
 
-  private fun messagingStyle(conversation: ConversationStyleSpec, conversationId: String): NotificationCompat.MessagingStyle {
+  private fun messagingStyle(conversation: ConversationStyleSpec, spec: MessageNotificationSpec): NotificationCompat.MessagingStyle {
     val me = Person.Builder().setName(context.getString(R.string.you)).setKey(SELF_KEY).build()
     val style = NotificationCompat.MessagingStyle(me)
       .setConversationTitle(conversation.maybeConversationTitle)
       .setGroupConversation(conversation.isGroupConversation)
     conversation.messages.forEach { message ->
-      style.addMessage(highlighted(message.text), message.sentAtMs, message.maybeSender?.let { person(it, conversationId) })
+      style.addMessage(highlighted(message.text), message.sentAtMs, message.maybeSender?.let { person(it, spec.conversationId) })
+    }
+    // Android Auto reads the conversation, not the header: a failed reply is a line it reads out.
+    if (spec.maybeFailedAction == MessageAction.REPLY) {
+      val app = Person.Builder().setName(context.getString(R.string.app_name)).setKey(APP_KEY).build()
+      style.addMessage(context.getString(R.string.notification_reply_failed), System.currentTimeMillis(), app)
     }
     return style
   }
@@ -1032,12 +1114,18 @@ class MessageNotifier(
       .build()
   }
 
+  /**
+   * Mark as read and mute don't ask to unlock (#1972): SystemUI runs an action that requires
+   * authentication through `dismissKeyguardThenExecute` and then closes the shade
+   * (`StatusBarRemoteInputCallback.handleRemoteViewClick`, Android 12+), also on an unlocked phone,
+   * so the user never saw the action work. Neither shows or sends content; the notification's
+   * actions are only offered while the app lock is off ([MessagePrivacy.offersActions]).
+   */
   private fun markReadAction(conversationId: String): NotificationCompat.Action {
     val pending = actionIntent(NotificationActionReceiver.ACTION_MARK_READ, conversationId, isMutable = false)
     return NotificationCompat.Action.Builder(R.drawable.ic_notification, context.getString(R.string.notification_mark_read), pending)
       .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_MARK_AS_READ)
       .setShowsUserInterface(false)
-      .setAuthenticationRequired(true)
       .build()
   }
 
@@ -1046,7 +1134,6 @@ class MessageNotifier(
     return NotificationCompat.Action.Builder(R.drawable.ic_notification, context.getString(R.string.notification_mute), pending)
       .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_MUTE)
       .setShowsUserInterface(false)
-      .setAuthenticationRequired(true)
       .build()
   }
 
@@ -1113,6 +1200,8 @@ class MessageNotifier(
     private const val EXTRA_REVISION = "de.zeitgleich.teamcraft.REVISION"
     private const val GROUP_MESSAGES = "de.zeitgleich.teamcraft.MESSAGES"
     private const val SELF_KEY = "self"
+    private const val APP_KEY = "app"
+    private const val EXTRA_REMOTE_INPUT_SPINNER = "android.remoteInputSpinner"
     private const val URI_SCHEME = "teamcraft-conversation"
     private const val TEST_TIMEOUT_MS = 5L * 60 * 1000
     private const val TAG = "TeamCraftNotify"
