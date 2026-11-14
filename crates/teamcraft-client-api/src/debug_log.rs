@@ -106,6 +106,9 @@ const PLAIN_FIELDS: &[&str] = &[
   "reason",
   "resolution",
   "role",
+  // A place in the code (`teamcraft-core/src/search_index.rs:271`): which group of writes held
+  // the store (`long write group`, issue #1967).
+  "site",
   "state",
   "status",
   "step",
@@ -729,6 +732,23 @@ mod tests {
       });
       assert_absent(&lines, &[BODY, "salary", "Alex Example"]);
       assert!(lines[0].ends_with("send failed body=[redacted]"), "{lines:?}");
+    }
+
+    /// Issue #1967: the code location of a long group of writes reaches the report.
+    #[test]
+    fn a_code_site_is_kept() {
+      let lines = logged(|| {
+        tracing::info!(
+          target: "teamcraft_lifecycle",
+          site = %"teamcraft-core/src/search_index.rs:271",
+          held_ms = 2510_u64,
+          "long write group"
+        );
+      });
+      assert!(
+        lines[0].ends_with("long write group site=teamcraft-core/src/search_index.rs:271 held_ms=2510"),
+        "{lines:?}"
+      );
     }
 
     #[test]

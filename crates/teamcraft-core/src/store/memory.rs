@@ -15,6 +15,9 @@ use super::{
 #[derive(Debug, Default)]
 pub struct MemoryStore {
   inner: Mutex<Inner>,
+  /// How much each group of writes wrote (tests: issue #1967).
+  #[cfg(test)]
+  groups: Mutex<GroupLog>,
 }
 
 #[derive(Debug, Default)]
@@ -25,9 +28,38 @@ struct Inner {
   by_server_id: BTreeMap<(ConversationId, MessageId), [u8; 16]>,
 }
 
+/// What the groups of writes on a [`MemoryStore`] wrote: a test's stand-in for how long a store on
+/// disk would be held (issue #1967). A write outside a group counts as a group of its own.
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct GroupLog {
+  depth: u32,
+  open_bytes: usize,
+  largest_bytes: usize,
+}
+
 impl MemoryStore {
   pub fn new() -> Self {
     Self::default()
+  }
+
+  /// The most bytes one group of writes put since the last [`Self::reset_group_log`].
+  #[cfg(test)]
+  pub(crate) fn largest_group_bytes(&self) -> usize {
+    self.group_log().largest_bytes
+  }
+
+  #[cfg(test)]
+  pub(crate) fn reset_group_log(&self) {
+    self.group_log().largest_bytes = 0;
+  }
+
+  #[cfg(test)]
+  fn group_log(&self) -> MutexGuard<'_, GroupLog> {
+    self
+      .groups
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner())
   }
 
   /// The messages of `conversation` that `keep` picks, in display order.
@@ -53,7 +85,38 @@ impl MemoryStore {
   }
 }
 
+#[cfg(test)]
+impl GroupLog {
+  fn wrote(&mut self, bytes: usize) {
+    if self.depth > 0 {
+      self.open_bytes += bytes;
+    } else {
+      self.largest_bytes = self.largest_bytes.max(bytes);
+    }
+  }
+
+  fn ended(&mut self) {
+    self.depth = self.depth.saturating_sub(1);
+    if self.depth == 0 {
+      self.largest_bytes = self.largest_bytes.max(self.open_bytes);
+      self.open_bytes = 0;
+    }
+  }
+}
+
 impl LocalStore for MemoryStore {
+  #[cfg(test)]
+  fn begin_writes(&self) -> Result<(), StoreError> {
+    self.group_log().depth += 1;
+    Ok(())
+  }
+
+  #[cfg(test)]
+  fn end_writes(&self) -> Result<(), StoreError> {
+    self.group_log().ended();
+    Ok(())
+  }
+
   fn get(&self, table: Table, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
     Ok(self.lock().tables.get(&(table, key.to_string())).cloned())
   }
@@ -61,6 +124,8 @@ impl LocalStore for MemoryStore {
   /// The value replaced is overwritten: the cache of a sealed store holds the MLS storage, whose
   /// deleted key packages must not stay in freed memory (issue #391).
   fn put(&self, table: Table, key: &str, value: &[u8]) -> Result<(), StoreError> {
+    #[cfg(test)]
+    self.group_log().wrote(value.len());
     if let Some(mut old) = self
       .lock()
       .tables

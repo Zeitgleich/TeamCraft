@@ -143,10 +143,7 @@ impl WriteGroup {
     if held < LONG_GROUP {
       return;
     }
-    let site = GroupSite::current().map_or_else(
-      || "unknown".to_owned(),
-      |at| format!("{}:{}", at.file(), at.line()),
-    );
+    let site = GroupSite::current().map_or_else(|| "unknown".to_owned(), site_label);
     tracing::info!(
       target: "teamcraft_lifecycle",
       site = %site,
@@ -179,6 +176,19 @@ impl WriteGroup {
     }
     Ok(())
   }
+}
+
+/// A group's site as the reports show it: the source file from its crate's folder on, and the line
+/// (`teamcraft-core/src/search_index.rs:271`). A place in the code, never data; the debug log keeps
+/// the `site` field (issue #1967). Whatever the build machine's path was before `crates/` goes, and
+/// a file outside the workspace keeps only its name.
+fn site_label(at: &std::panic::Location<'_>) -> String {
+  let file = at.file().replace('\\', "/");
+  let short = match file.rsplit_once("crates/") {
+    Some((_, inside)) => inside,
+    None => file.rsplit('/').next().unwrap_or(&file),
+  };
+  format!("{short}:{}", at.line())
 }
 
 /// SQLite's own corruption reports become [`StoreError::Corrupt`], so the app offers recovery
@@ -499,6 +509,17 @@ pub(crate) mod tests {
     run_migrations(&connection, &with_marker).unwrap();
     assert!(due_upkeep(&connection).is_empty(), "ran once it could");
     assert_eq!(version(&connection), 3);
+  }
+
+  /// Issue #1967: a site names the crate's file and line, without the build machine's folders.
+  #[test]
+  fn a_site_names_the_file_from_its_crate_on() {
+    let here = std::panic::Location::caller();
+    let label = site_label(here);
+    assert_eq!(
+      label,
+      format!("teamcraft-core/src/store/sql_group.rs:{}", here.line())
+    );
   }
 
   /// Outside a group a failed write is lost by itself; inside one it counts once, when the group
