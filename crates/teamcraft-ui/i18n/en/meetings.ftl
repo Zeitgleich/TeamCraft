@@ -153,6 +153,8 @@ host-lock = Lock meeting
 host-unlock = Unlock meeting
 host-end = End for everyone
 host-end-confirm = End the meeting now
+host-end-explain = Everyone is removed from the call, and guests can no longer join. The meeting chat stays readable.
+host-no-call = Nobody is in the call right now. Muting and locking work once somebody joins.
 host-remove = Remove
 # Co-hosts and handing a meeting over (#1720)
 host-role-organizer = Host
@@ -210,6 +212,7 @@ meetings-loading = Loading meetings…
 meetings-hero-now = Now
 meetings-hero-next = Next
 meetings-hero-running = Running · { $time }
+meetings-since = since { $time }
 meetings-hero-soon = { $count ->
     [one] Starts in 1 minute · { $time }
    *[other] Starts in { $count } minutes · { $time }

@@ -3,20 +3,52 @@
 //! (docs/meetings.md), the organizer's device signs who hosts; these are the buttons.
 
 use leptos::prelude::*;
-use leptos::task::spawn_local;
 use teamcraft_client_api::meeting_hosts::{
   HostsChangeState, MeetingHostsChange, MeetingRole, handing_over, making_co_host, removing_co_host, role_of,
 };
-use teamcraft_proto::{ChannelRole, MeetingAttendeeResponse, MeetingControlAction, MeetingId, RsvpStatus};
+use teamcraft_proto::{
+  ChannelRole, ErrorCode, MeetingAttendeeResponse, MeetingControlAction, MeetingId, RsvpStatus,
+};
 
+use crate::clock::now_ms;
+use crate::feedback::{ActionFailure, FailureKind, PendingAction};
 use crate::i18n::use_i18n;
 use crate::meetings::MeetingsHub;
 use crate::model::{ConversationId, UserId};
-use crate::reactive::SetIfAlive;
 use crate::state::{AppState, use_app_state};
 
-/// Buttons for the host of a running meeting. `conversation` names the call whose participants can
-/// be removed.
+/// Ends the meeting for everyone (#1931): stops its call if one runs and closes it for its guests,
+/// whether or not the host is in the call. The one implementation behind the host controls, the
+/// call screen's hang-up menu and the tray. Afterwards (and when the server no longer knows the
+/// meeting) the list is reloaded, so the row shows it ended or drops it.
+pub async fn end_for_everyone(hub: MeetingsHub, meeting: MeetingId, me: UserId) -> Result<(), ActionFailure> {
+  let result = control(hub, meeting, MeetingControlAction::End).await;
+  if result.is_ok() || result.as_ref().is_err_and(is_gone) {
+    hub.refresh(me, now_ms()).await;
+  }
+  result
+}
+
+/// Sends one host control; a refusal becomes a failure the toast words by its `error_code`.
+async fn control(
+  hub: MeetingsHub,
+  meeting: MeetingId,
+  action: MeetingControlAction,
+) -> Result<(), ActionFailure> {
+  hub
+    .client()
+    .control(meeting, action)
+    .await
+    .map_err(|error| error.to_failure())
+}
+
+/// Whether the server no longer knows the meeting (cancelled and removed, or never visible).
+fn is_gone(failure: &ActionFailure) -> bool {
+  failure.kind == FailureKind::Server(ErrorCode::MeetingNotFound)
+}
+
+/// Buttons for the host of a running meeting. `conversation` names the meeting's call: muting,
+/// locking and removing act on it and need it running; ending works without it (#1931).
 #[component]
 pub fn HostControls(meeting: MeetingId, conversation: ConversationId) -> impl IntoView {
   let state = use_app_state();
@@ -32,8 +64,17 @@ pub fn HostControls(meeting: MeetingId, conversation: ConversationId) -> impl In
       call.is_end_for_everyone_asked.set(false);
     }
   });
-  let notice = RwSignal::new(None::<String>);
   let me = state.me().id;
+  // A call runs in the meeting: somebody is in it, as the call roster says, or this device is.
+  let has_call = Memo::new(move |_| {
+    call.is_in_call_for(conversation) || state.read(|backend| backend.huddle(conversation).is_some())
+  });
+  let (muting, locking, removing, ending) = (
+    PendingAction::new(),
+    PendingAction::new(),
+    PendingAction::new(),
+    PendingAction::new(),
+  );
   let the_meeting = Memo::new(move |_| {
     hub
       .meetings
@@ -80,41 +121,71 @@ pub fn HostControls(meeting: MeetingId, conversation: ConversationId) -> impl In
   // How the last change of the hosts went on this device; a saved one shows in the list once the
   // server's `meeting_update` reloaded it.
   let hosts_change = Memo::new(move |_| state.read(|backend| backend.meeting_hosts_change(conversation)));
-  let send = move |action: MeetingControlAction| {
-    spawn_local(async move {
-      match hub.client().control(meeting, action).await {
-        Ok(()) => notice.set_if_alive(None),
-        Err(error) => notice.set_if_alive(Some(error.to_string())),
+  let send = move |pending: PendingAction, action: MeetingControlAction| {
+    pending.spawn(control(hub, meeting, action));
+  };
+  let toggle_lock = move |_| {
+    let lock = !is_locked.get_untracked();
+    is_locked.set(lock);
+    let action = if lock {
+      MeetingControlAction::Lock
+    } else {
+      MeetingControlAction::Unlock
+    };
+    locking.spawn(async move {
+      let result = control(hub, meeting, action).await;
+      if result.is_err() {
+        // The server didn't take it: the button shows what holds.
+        let _ = is_locked.try_set(!lock);
       }
+      result
     });
+  };
+  let end = move |_| {
+    is_confirming_end.set(false);
+    ending.spawn(end_for_everyone(hub, meeting, me));
   };
 
   view! {
     <div class="host-controls" role="group" aria-label=move || i18n.t("host-controls")>
       <h3>{move || i18n.t("host-controls")}</h3>
       <div class="host-buttons">
-        <button class="btn btn-small" on:click=move |_| send(MeetingControlAction::MuteAll)>{move || i18n.t("host-mute-all")}</button>
+        // Muting and locking act on the call: without one they are off, and say why.
+        <button
+          class="btn btn-small"
+          prop:disabled=move || !has_call.get() || muting.is_pending()
+          aria-describedby=move || (!has_call.get()).then_some("host-no-call")
+          on:click=move |_| send(muting, MeetingControlAction::MuteAll)
+        >
+          {move || i18n.t("host-mute-all")}
+        </button>
         <button
           class="btn btn-small"
           aria-pressed=move || is_locked.get().to_string()
-          on:click=move |_| {
-            let lock = !is_locked.get_untracked();
-            is_locked.set(lock);
-            send(if lock { MeetingControlAction::Lock } else { MeetingControlAction::Unlock });
-          }
+          prop:disabled=move || !has_call.get() || locking.is_pending()
+          aria-describedby=move || (!has_call.get()).then_some("host-no-call")
+          on:click=toggle_lock
         >
           {move || if is_locked.get() { i18n.t("host-unlock") } else { i18n.t("host-lock") }}
         </button>
         <Show
           when=move || is_confirming_end.get()
-          fallback=move || view! { <button class="btn btn-small btn-quiet" on:click=move |_| is_confirming_end.set(true)>{move || i18n.t("host-end")}</button> }
+          fallback=move || view! {
+            <button class="btn btn-small btn-quiet" prop:disabled=move || ending.is_pending() on:click=move |_| is_confirming_end.set(true)>
+              {move || i18n.t("host-end")}
+            </button>
+          }
         >
-          <button class="btn btn-small btn-primary" on:click=move |_| { send(MeetingControlAction::End); is_confirming_end.set(false); }>
-            {move || i18n.t("host-end-confirm")}
-          </button>
-          <button class="btn btn-small" on:click=move |_| is_confirming_end.set(false)>{move || i18n.t("cancel")}</button>
+          <div class="host-confirm" role="group" aria-labelledby="host-end-explain">
+            <p id="host-end-explain">{move || i18n.t("host-end-explain")}</p>
+            <button class="btn btn-small btn-danger" on:click=end>{move || i18n.t("host-end-confirm")}</button>
+            <button class="btn btn-small" on:click=move |_| is_confirming_end.set(false)>{move || i18n.t("cancel")}</button>
+          </div>
         </Show>
       </div>
+      <Show when=move || !has_call.get() fallback=|| ()>
+        <p class="muted-text" id="host-no-call">{move || i18n.t("host-no-call")}</p>
+      </Show>
       <ul class="host-participants">
         <For each=move || participants.get() key=|(user, role, is_admin)| (user.id, *role, *is_admin) let:entry>
           {
@@ -130,7 +201,11 @@ pub fn HostControls(meeting: MeetingId, conversation: ConversationId) -> impl In
                 {role_badge(role).map(|key| view! { <span class="badge badge-host">{move || i18n.t(key)}</span> })}
                 <span class="host-participant-actions">
                   {(!is_host).then(|| view! {
-                    <button class="btn btn-small" on:click=move |_| send(MeetingControlAction::RemoveParticipant { user_id: id })>
+                    <button
+                      class="btn btn-small"
+                      prop:disabled=move || removing.is_pending()
+                      on:click=move |_| send(removing, MeetingControlAction::RemoveParticipant { user_id: id })
+                    >
                       {move || i18n.t("host-remove")}
                     </button>
                   })}
@@ -186,7 +261,6 @@ pub fn HostControls(meeting: MeetingId, conversation: ConversationId) -> impl In
         ),
         _ => None,
       }}
-      {move || notice.get().map(|message| view! { <p class="field-error" role="alert">{message}</p> })}
     </div>
   }
 }
@@ -399,6 +473,28 @@ pub fn RsvpList(attendees: Vec<MeetingAttendeeResponse>) -> impl IntoView {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::feedback::failure_message_key;
+  use crate::meetings::MeetingError;
+
+  /// What a refusal of a host control turns into: the toast's key and whether the row is gone.
+  fn refused(status: u16, code: &str) -> (&'static str, bool) {
+    let failure = MeetingError::Refused {
+      status,
+      code: code.to_owned(),
+    }
+    .to_failure();
+    (failure_message_key(&failure), is_gone(&failure))
+  }
+
+  #[test]
+  fn refused_host_controls_are_worded_never_raw() {
+    // #1931: "the server refused the request (404): call_not_found" reached the UI as it was.
+    assert_eq!(refused(404, "call_not_found"), ("error-call-not-running", false));
+    assert_eq!(refused(404, "meeting_not_found"), ("error-meeting-gone", true));
+    assert_eq!(refused(409, "conflict"), ("error-conflict", false));
+    assert_eq!(refused(403, "forbidden"), ("error-forbidden", false));
+    assert_eq!(refused(503, "unavailable"), ("error-server-trouble", false));
+  }
 
   fn attendee(rsvp: RsvpStatus) -> MeetingAttendeeResponse {
     MeetingAttendeeResponse {

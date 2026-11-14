@@ -1,6 +1,8 @@
 /* Meeting responses and host controls */
 .host-controls { margin-top: .5rem; padding: .5rem; border: 1px solid var(--border); border-radius: var(--radius-sm); }
 .host-buttons { display: flex; gap: .35rem; flex-wrap: wrap; }
+/* Muting and locking without a call (#1931): visibly off; the note below says why. */
+.host-buttons .btn:disabled { opacity: .45; }
 .host-participants { list-style: none; margin: .5rem 0 0; padding: 0; }
 .host-participants li { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .35rem; padding: .15rem 0; }
 /* Co-hosts and the handover (#1720): the part in the meeting next to the name, the organizer's buttons after it. */
