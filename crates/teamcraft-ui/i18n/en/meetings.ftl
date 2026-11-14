@@ -124,6 +124,7 @@ meeting-error-email = "{ $email }" is not a valid email address.
 guest-title = Join the meeting
 guest-subtitle = Enter your name so the hosts know who is joining. You do not need an account.
 guest-name = Your name
+guest-name-required = Enter your name.
 guest-join = Ask to join
 guest-sign-in = I have an account: sign in
 guest-waiting-title = Waiting for someone to let you in

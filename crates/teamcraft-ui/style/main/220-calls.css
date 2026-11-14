@@ -291,22 +291,22 @@
   color: var(--call-text);
 }
 
-.prejoin .btn {
+/* Secondary buttons on the call surface. The primary one keeps the shared filled style in every
+   state: a dark hover behind its label (dark in the dark theme) made "Join now" unreadable (#1953). */
+.prejoin .btn:not(.btn-primary) {
   background: var(--call-surface);
   border-color: var(--call-border);
   color: var(--call-text);
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .prejoin .btn:hover:not(:disabled) {
+  .prejoin .btn:not(.btn-primary):hover:not(:disabled) {
     background: var(--call-hover);
   }
 }
 
-.prejoin .btn-primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--on-accent);
+.prejoin .btn:not(.btn-primary):active:not(:disabled) {
+  background: var(--call-pressed);
 }
 
 .field-title {

@@ -28,8 +28,12 @@ use crate::meetings::{GuestClient, GuestLink, MeetingError};
 use crate::reactive::{SetIfAlive, pause, use_interval};
 use crate::remote_backend;
 
-/// How often the lobby is asked whether the guest was admitted.
+/// The id of the guest's name field.
 const NAME_ID: &str = "guest-name";
+/// The longest name a guest may give, in characters: the server's limit
+/// (`meeting_guests::MAX_NAME_CHARS`).
+const MAX_NAME_CHARS: usize = 100;
+/// How often the lobby is asked whether the guest was admitted.
 const POLL_MS: u64 = 2000;
 /// How long the page waits for its client core to open before it gives up.
 const CORE_PATIENCE: Duration = Duration::from_secs(20);
@@ -129,8 +133,8 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
   let errors = FormErrors::new();
   let name_errors = move || {
     let mut found = FieldErrors::new();
-    if name.with(|name| name.trim().is_empty()) {
-      found.push(NAME_ID, i18n.t("form-error-name"));
+    if let Some(key) = name.with(|name| name_error(name)) {
+      found.push(NAME_ID, i18n.t(key));
     }
     found
   };
@@ -209,7 +213,7 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
       strip_link_fragment();
       let (client, config) = (client.clone(), config.clone());
       spawn_local(async move {
-        let display_name = name.get_untracked().trim().to_owned();
+        let display_name = guest_display_name(&name.get_untracked());
         let outcome = client.join(&parts, &display_name).await;
         let response = match outcome {
           Ok(response) => response,
@@ -409,11 +413,30 @@ pub(crate) fn GuestNameField(name: RwSignal<String>, errors: FormErrors) -> impl
       aria-required="true"
       aria-invalid=errors.invalid(NAME_ID)
       aria-describedby=errors.described(NAME_ID)
+      maxlength=MAX_NAME_CHARS
       prop:value=move || name.get()
       on:input=move |ev| name.set(event_target_value(&ev))
     />
     <FieldError errors=errors field=NAME_ID />
   }
+}
+
+/// Why the name can't be sent, as an i18n key: nothing but blanks (#1953). Longer names can't be
+/// typed (`maxlength`) and are cut by [`guest_display_name`].
+fn name_error(name: &str) -> Option<&'static str> {
+  name.trim().is_empty().then_some("guest-name-required")
+}
+
+/// The name as the guest sends it: without surrounding blanks, at most [`MAX_NAME_CHARS`]
+/// characters (a pasted name can be longer than `maxlength` lets one type).
+fn guest_display_name(name: &str) -> String {
+  name
+    .trim()
+    .chars()
+    .take(MAX_NAME_CHARS)
+    .collect::<String>()
+    .trim_end()
+    .to_owned()
 }
 
 /// Carries the guest on from the lobby entry, after joining or after a reload: the page's session
@@ -667,5 +690,24 @@ mod tests {
       failure_of(&MeetingError::Auth(AuthError::Network("down".into()))),
       FailureKind::Network
     );
+  }
+
+  mod guest_name {
+    use super::*;
+
+    #[test]
+    fn an_empty_or_blank_name_is_refused() {
+      for name in ["", " ", "\t \n"] {
+        assert_eq!(name_error(name), Some("guest-name-required"), "{name:?}");
+      }
+    }
+
+    #[test]
+    fn a_name_is_trimmed_and_capped() {
+      assert_eq!(name_error("  Guest A "), None);
+      assert_eq!(guest_display_name("  Guest A "), "Guest A");
+      let long = "x".repeat(MAX_NAME_CHARS + 20);
+      assert_eq!(guest_display_name(&long).chars().count(), MAX_NAME_CHARS);
+    }
   }
 }
