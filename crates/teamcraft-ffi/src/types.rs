@@ -257,6 +257,10 @@ pub struct ConversationItem {
   /// picture by it. `None`: the space has no picture (or this is a DM), the letter tile shows.
   #[uniffi(default = None)]
   pub maybe_space_image_version: Option<String>,
+  /// Version of the channel's own picture (`channel_picture`); the apps cache the picture by it
+  /// and show it in place of the space's. `None`: the channel has none (or this is a DM).
+  #[uniffi(default = None)]
+  pub maybe_image_version: Option<String>,
   /// The core is still catching up this conversation after the device was away (issue #247): the
   /// newest messages may be missing yet, so the apps show that it is loading.
   #[uniffi(default = false)]
@@ -554,6 +558,14 @@ pub struct PushNotification {
   /// build need no change.
   #[uniffi(default = false)]
   pub is_sender_source: bool,
+  /// The source's picture (`integration_source_picture` with this conversation), shown in place of
+  /// the bot's avatar; `None` without one. Defaulted, as above.
+  #[uniffi(default = None)]
+  pub maybe_sender_source_picture_sha256: Option<String>,
+  /// Version of the channel's own picture (`channel_picture`), the app's cache key; `None` for DMs,
+  /// a channel without one, and where the conversation's name doesn't show. Defaulted, as above.
+  #[uniffi(default = None)]
+  pub maybe_channel_image_version: Option<String>,
   /// The decrypted text, if the message could be read.
   pub maybe_text: Option<String>,
   /// A file's name, if the message is a file.
@@ -719,6 +731,7 @@ impl ConversationItem {
       maybe_draft_preview: conversation.maybe_draft_preview,
       maybe_last_activity_ms: None,
       maybe_space_image_version: None,
+      maybe_image_version: conversation.maybe_image_version,
       is_catching_up: conversation.is_catching_up,
     }
   }
@@ -786,6 +799,8 @@ impl From<PushPreview> for PushNotification {
       maybe_sender_id: preview.wake_up.maybe_sender_id.map(|id| id.to_string()),
       maybe_sender_name: preview.maybe_sender_name,
       is_sender_source: preview.is_sender_source,
+      maybe_sender_source_picture_sha256: preview.maybe_sender_source_picture.map(|sha256| sha256.to_hex()),
+      maybe_channel_image_version: preview.maybe_channel_image_version,
       maybe_text,
       maybe_file_name,
       maybe_attachment_kind,

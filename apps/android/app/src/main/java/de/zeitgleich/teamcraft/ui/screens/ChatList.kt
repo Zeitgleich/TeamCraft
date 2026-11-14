@@ -139,6 +139,7 @@ import de.zeitgleich.teamcraft.ui.withEmptySpaces
 import de.zeitgleich.teamcraft.ui.TypingDots
 import de.zeitgleich.teamcraft.ui.typingLine
 import de.zeitgleich.teamcraft.ui.typingText
+import de.zeitgleich.teamcraft.ui.ChannelPicture
 import de.zeitgleich.teamcraft.ui.SpacePicture
 import de.zeitgleich.teamcraft.ui.Section
 import de.zeitgleich.teamcraft.ui.TabBadge
@@ -198,6 +199,9 @@ import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.runtime.derivedStateOf
 
 private val AVATAR_SIZE = 40.dp
+
+/** Channels are rounded squares, people circles: they tell apart at a glance. */
+private val CHANNEL_SHAPE = RoundedCornerShape(12.dp)
 private val BRAND_LOGO_HEIGHT = 28.dp
 private val QUICK_CARD_WIDTH = 148.dp
 
@@ -1568,27 +1572,31 @@ private fun TitleLine(conversation: ConversationItem, maybeEntry: ChatListEntry?
   val context = LocalContext.current
   val isUnread = conversation.unreadCount > 0u
   Row(verticalAlignment = Alignment.CenterVertically) {
-    Text(
-      conversation.listName(stringResource(R.string.notes_title)),
-      // With the space after it, both share the line (same row height as the others); the space
-      // gets the smaller share, so the name is cut last (#1346).
-      modifier = if (maybeSpaceName != null) Modifier.weight(2f, fill = false) else Modifier.weight(1f),
-      maxLines = 1,
-      overflow = TextOverflow.Ellipsis,
-      style = MaterialTheme.typography.titleSmall,
-      fontWeight = if (isUnread) FontWeight.Bold else FontWeight.Normal,
-      color = if (conversation.isMuted) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
-    )
-    if (conversation.isWithBot()) BotBadge()
-    if (maybeSpaceName != null) {
+    // Name and space take the line's free width together, so the marks and the time after them
+    // stay at the right edge (#1957). With the space after it, both share it (same row height as
+    // the others); the space gets the smaller share, so the name is cut last (#1346). Neither
+    // fills its share: a short name leaves no gap before the space.
+    Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
       Text(
-        maybeSpaceName,
-        modifier = Modifier.weight(1f).padding(start = 6.dp),
+        conversation.listName(stringResource(R.string.notes_title)),
+        modifier = Modifier.weight(2f, fill = false),
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
-        style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        style = MaterialTheme.typography.titleSmall,
+        fontWeight = if (isUnread) FontWeight.Bold else FontWeight.Normal,
+        color = if (conversation.isMuted) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
       )
+      if (conversation.isWithBot()) BotBadge()
+      if (maybeSpaceName != null) {
+        Text(
+          maybeSpaceName,
+          modifier = Modifier.weight(1f, fill = false).padding(start = 6.dp),
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+          style = MaterialTheme.typography.labelSmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      }
     }
     if (conversation.isMuted) {
       val mutedLabel = stringResource(R.string.chat_muted)
@@ -1688,8 +1696,8 @@ private fun listTime(context: Context, sentAt: Long): String {
 }
 
 /**
- * A round marker: the DM peer's picture, or the conversation's initial (people) or its kind
- * (channels); the notes show a bookmark.
+ * A round marker: the DM peer's picture, or the conversation's initial (people); a channel shows
+ * its own picture, else its kind; the notes show a bookmark.
  */
 @Composable
 internal fun ConversationAvatar(conversation: ConversationItem) {
@@ -1699,7 +1707,10 @@ internal fun ConversationAvatar(conversation: ConversationItem) {
   }
   val isPerson = conversation.kind == ConversationKind.DIRECT || conversation.kind == ConversationKind.GROUP
   if (conversation.kind == ConversationKind.PUBLIC || conversation.kind == ConversationKind.PRIVATE) {
-    ChannelAvatar(isPrivate = conversation.kind == ConversationKind.PRIVATE)
+    // The same picture as the channel's notifications (#1956); the marker while there is none.
+    ChannelPicture(conversation.id, conversation.maybeImageVersion, CHANNEL_SHAPE, Modifier.size(AVATAR_SIZE)) {
+      ChannelAvatar(isPrivate = conversation.kind == ConversationKind.PRIVATE)
+    }
     return
   }
   val label = conversation.name.firstOrNull()?.uppercase() ?: "?"
@@ -1743,7 +1754,7 @@ internal fun ConversationAvatar(conversation: ConversationItem) {
 private fun ChannelAvatar(isPrivate: Boolean) {
   val colors = MaterialTheme.colorScheme
   Box(
-    Modifier.size(AVATAR_SIZE).background(colors.surfaceContainerHighest, RoundedCornerShape(12.dp)),
+    Modifier.size(AVATAR_SIZE).background(colors.surfaceContainerHighest, CHANNEL_SHAPE),
     contentAlignment = Alignment.Center,
   ) {
     if (isPrivate) {

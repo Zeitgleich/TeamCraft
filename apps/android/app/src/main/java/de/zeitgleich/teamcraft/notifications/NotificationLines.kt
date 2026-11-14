@@ -18,6 +18,8 @@ data class ConversationNotification(
   @SerialName("is_mention") val isMention: Boolean = false,
   /** A one-to-one or group DM: its messages go to the direct messages channel. */
   @SerialName("is_direct") val isDirect: Boolean = false,
+  /** Version of the channel's own picture (#1956); `null` for DMs and channels without one. */
+  @SerialName("channel_image_version") val maybeChannelImageVersion: String? = null,
   val lines: List<NotificationLine> = emptyList(),
 )
 
@@ -30,6 +32,8 @@ data class NotificationLine(
   /** `null` for the user's own replies. */
   @SerialName("sender_key") val maybeSenderKey: String? = null,
   @SerialName("sender_name") val senderName: String = "",
+  /** The picture of the integration source that sent it (SHA-256, hex), shown for the bot (#1956). */
+  @SerialName("source_picture") val maybeSourcePicture: String? = null,
   val text: String,
   @SerialName("sent_at_ms") val sentAtMs: Long,
   /** Shows "New message" for a message that has more: never mirrored to bridges (see the spec). */

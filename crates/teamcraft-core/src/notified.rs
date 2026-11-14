@@ -286,6 +286,8 @@ mod tests {
       maybe_conversation_name: Some("planning".into()),
       maybe_sender_name: Some("Alice".into()),
       is_sender_source: false,
+      maybe_sender_source_picture: None,
+      maybe_channel_image_version: None,
       content: PreviewContent::Text(text.into()),
       is_direct: false,
       is_silent: false,

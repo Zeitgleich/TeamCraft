@@ -755,6 +755,13 @@ keeps the last 32 prepared, so a burst of messages decodes a picture once.
   read the account's media cache with its wrapped key and use the cached picture as it is (PNG, JPEG
   or WebP up to 1 MiB, as the browser shows it: square, no initials tile), with the same order: the
   sender for DMs and calls, the channel's picture, then the space's.
+- **Android (#1956):** a channel's conversation shortcut (the icon the shade shows for the
+  conversation) is the channel's own picture, from the same cache as the chat list (by the version
+  `PushNotification.maybe_channel_image_version` names, fetched through the core in the background,
+  never from the push); without one, the generated initials. A bot's message from an integration
+  source shows the source's picture as the sender (`maybe_sender_source_picture_sha256`, read from the
+  device's encrypted store, no network), else the bot's avatar or the initials. Both follow the names
+  like the rest: the core drops them with the names under "generic".
 
 **Message sounds (#800).** "Sound for new messages" (`message_sound`) is the system's notification
 sound (the default, as before), none, one of the app's own sounds or the user's own file. The app's

@@ -16,6 +16,7 @@ import androidx.compose.runtime.produceState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -32,18 +33,21 @@ import kotlinx.coroutines.withContext
 import uniffi.teamcraft_ffi.TeamCraft
 
 /**
- * The pictures of spaces (issue #284). A picture is kept as a file named by the space and the
- * version the space list names, so a new version is a new file and the old one is deleted; a space
- * whose picture was removed loses its files. Only spaces on screen ask for theirs ([SpacePicture]),
- * never all of a big workspace at once. The disk holds at most [MAX_FILES] pictures (the least
- * recently written go first), memory the last [MEMORY_ENTRIES] decoded ones. A failed download is
- * asked for again in the next shared round ([PictureRetries]), at once when the device comes back
- * online; until then the screen shows no picture.
+ * The pictures of spaces (issue #284) and of channels (#1956), one cache each ([spaces],
+ * [channels]). A picture is kept as a file named by its owner and the version the core names, so a
+ * new version is a new file and the old one is deleted; an owner whose picture was removed loses its
+ * files. Only what is on screen or in a notification asks for its picture, never all of a big
+ * workspace at once; nothing comes with the push. The disk holds at most [MAX_FILES] pictures per
+ * kind (the least recently written go first), memory the last [MEMORY_ENTRIES] decoded ones. A
+ * failed download is asked for again in the next shared round ([PictureRetries]), at once when the
+ * device comes back online; until then the screen shows its stand-in.
  */
-class SpacePictureCache(
+class VersionedPictureCache private constructor(
   private val context: Context,
   private val core: suspend () -> TeamCraft,
   private val retries: PictureRetries,
+  private val directoryName: String,
+  private val fetchPicture: suspend (TeamCraft, String, UInt) -> ByteArray?,
 ) {
   private val inFlight = ConcurrentHashMap.newKeySet<String>()
   private val memory = LruCache<String, Bitmap>(MEMORY_ENTRIES)
@@ -55,45 +59,45 @@ class SpacePictureCache(
   private var generation = 0
   private val writeLock = Any()
 
-  /** The decoded picture of `spaceId` in `version` if it is in memory; never touches the disk. */
-  fun maybeDecoded(spaceId: String, version: String): Bitmap? = memory.get(key(spaceId, version))
+  /** The decoded picture of `ownerId` (space or channel) in `version` if it is in memory; never touches the disk. */
+  fun maybeDecoded(ownerId: String, version: String): Bitmap? = memory.get(key(ownerId, version))
 
   /** The picture from the cache folder; call off the main thread. */
-  fun maybeBitmap(spaceId: String, version: String): Bitmap? {
-    val key = key(spaceId, version)
+  fun maybeBitmap(ownerId: String, version: String): Bitmap? {
+    val key = key(ownerId, version)
     memory.get(key)?.let { return it }
-    val file = pictureFile(spaceId, version) ?: return null
+    val file = pictureFile(ownerId, version) ?: return null
     if (!file.isFile) return null
     return decode(file)?.also { memory.put(key, it) }
   }
 
-  suspend fun loadBitmap(spaceId: String, version: String): Bitmap? =
-    withContext(Dispatchers.IO) { maybeBitmap(spaceId, version) }
+  suspend fun loadBitmap(ownerId: String, version: String): Bitmap? =
+    withContext(Dispatchers.IO) { maybeBitmap(ownerId, version) }
 
   /** Makes sure the picture in `version` is on disk; `true` when it arrived just now. */
-  suspend fun ensure(spaceId: String, version: String): Boolean = withContext(Dispatchers.IO) { fetch(spaceId, version) }
+  suspend fun ensure(ownerId: String, version: String): Boolean = withContext(Dispatchers.IO) { fetch(ownerId, version) }
 
   /** A space without a picture (any more) keeps no file. */
-  suspend fun forget(spaceId: String) = withContext(Dispatchers.IO) {
+  suspend fun forget(ownerId: String) = withContext(Dispatchers.IO) {
     synchronized(writeLock) {
-      if (deleteFilesOf(spaceId, keep = null)) changed()
+      if (deleteFilesOf(ownerId, keep = null)) changed()
     }
   }
 
-  private suspend fun fetch(spaceId: String, version: String): Boolean {
-    val file = pictureFile(spaceId, version) ?: return false
+  private suspend fun fetch(ownerId: String, version: String): Boolean {
+    val file = pictureFile(ownerId, version) ?: return false
     if (file.isFile) return false
-    val flight = key(spaceId, version)
+    val flight = key(ownerId, version)
     if (!inFlight.add(flight)) return false
     val startedIn = synchronized(writeLock) { generation }
     return try {
-      val bytes = core().spacePicture(spaceId, MAX_PICTURE_BYTES)
+      val bytes = fetchPicture(core(), ownerId, MAX_PICTURE_BYTES)
       retries.succeeded()
       synchronized(writeLock) {
         when {
           generation != startedIn -> false
           bytes == null -> {
-            deleteFilesOf(spaceId, keep = null)
+            deleteFilesOf(ownerId, keep = null)
             changed()
             false
           }
@@ -104,7 +108,7 @@ class SpacePictureCache(
             partial.writeBytes(bytes)
             // A rename, so a killed app never leaves half a picture under the real name.
             if (!partial.renameTo(file)) return@synchronized false
-            deleteFilesOf(spaceId, keep = file)
+            deleteFilesOf(ownerId, keep = file)
             trim()
             changed()
             true
@@ -116,7 +120,7 @@ class SpacePictureCache(
     } catch (failure: Exception) {
       // Offline, signed out or a storage error: the screen shows no picture. Trouble that passes is
       // asked for again in the next shared round (issue #1616), the rest at the next look.
-      Log.w(TAG, "space picture not fetched: ${failure.javaClass.simpleName}")
+      Log.w(TAG, "$directoryName not fetched: ${failure.javaClass.simpleName}")
       if (isTransient(failure)) retries.failed()
       false
     } finally {
@@ -139,9 +143,9 @@ class SpacePictureCache(
     changeCount.value++
   }
 
-  /** Deletes the files of `spaceId` except `keep`; answers whether any went. */
-  private fun deleteFilesOf(spaceId: String, keep: File?): Boolean {
-    val files = directory().listFiles { file -> file.name.startsWith("$spaceId-") && file != keep } ?: return false
+  /** Deletes the files of `ownerId` except `keep`; answers whether any went. */
+  private fun deleteFilesOf(ownerId: String, keep: File?): Boolean {
+    val files = directory().listFiles { file -> file.name.startsWith("$ownerId-") && file != keep } ?: return false
     return files.count { it.delete() } > 0
   }
 
@@ -151,17 +155,17 @@ class SpacePictureCache(
     files.sortedBy { it.lastModified() }.take(files.size - MAX_FILES).forEach { it.delete() }
   }
 
-  private fun directory() = File(context.cacheDir, DIRECTORY)
+  private fun directory() = File(context.cacheDir, directoryName)
 
-  /** Only numeric space IDs and plain versions name a file; anything else has no picture. */
-  private fun pictureFile(spaceId: String, version: String): File? {
-    if (spaceId.isEmpty() || !spaceId.all(Char::isDigit)) return null
+  /** Only numeric IDs and plain versions name a file; anything else has no picture. */
+  private fun pictureFile(ownerId: String, version: String): File? {
+    if (ownerId.isEmpty() || !ownerId.all(Char::isDigit)) return null
     val safe = version.filter { it.isLetterOrDigit() }.take(MAX_VERSION_CHARS)
     if (safe.isEmpty()) return null
-    return File(directory(), "$spaceId-$safe$EXTENSION")
+    return File(directory(), "$ownerId-$safe$EXTENSION")
   }
 
-  private fun key(spaceId: String, version: String) = "$spaceId-$version"
+  private fun key(ownerId: String, version: String) = "$ownerId-$version"
 
   private fun isDecodable(bytes: ByteArray): Boolean {
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -179,9 +183,8 @@ class SpacePictureCache(
   }
 
   companion object {
-    private const val DIRECTORY = "space-pictures"
     private const val EXTENSION = ".png"
-    private const val TAG = "TeamCraftSpaces"
+    private const val TAG = "TeamCraftPictures"
 
     /** The server keeps a picture to 512 px; the list shows it at a fraction of that. */
     private const val DECODE_PX = 96
@@ -190,6 +193,14 @@ class SpacePictureCache(
     private const val MAX_FILES = 64
     private const val MEMORY_ENTRIES = 32
     private const val MAX_PICTURE_BYTES = 1_048_576u // unsigned arithmetic is not a constant expression
+
+    /** Pictures of spaces (`TeamCraft.spacePicture`). */
+    fun spaces(context: Context, core: suspend () -> TeamCraft, retries: PictureRetries) =
+      VersionedPictureCache(context, core, retries, "space-pictures") { teamCraft, id, max -> teamCraft.spacePicture(id, max) }
+
+    /** Pictures of channels (`TeamCraft.channelPicture`), for the lists and the notifications. */
+    fun channels(context: Context, core: suspend () -> TeamCraft, retries: PictureRetries) =
+      VersionedPictureCache(context, core, retries, "channel-pictures") { teamCraft, id, max -> teamCraft.channelPicture(id, max) }
   }
 }
 
@@ -200,30 +211,56 @@ class SpacePictureCache(
  */
 @Composable
 fun SpacePicture(spaceId: String, maybeVersion: String?, size: Dp = 24.dp, modifier: Modifier = Modifier) {
+  val pictures = TeamCraftApplication.graph(LocalContext.current).spacePictures
+  VersionedPicture(pictures, spaceId, maybeVersion, modifier.size(size).clip(RoundedCornerShape(size / 4))) {}
+}
+
+/**
+ * A channel's own picture as a rounded square (#1956), from the same cache as its notifications;
+ * [placeholder] (the channel's marker) while it loads, without one, and when it can't be loaded.
+ */
+@Composable
+fun ChannelPicture(conversationId: String, maybeVersion: String?, shape: Shape, modifier: Modifier, placeholder: @Composable () -> Unit) {
+  val pictures = TeamCraftApplication.graph(LocalContext.current).channelPictures
+  VersionedPicture(pictures, conversationId, maybeVersion, modifier.clip(shape), placeholder)
+}
+
+/** The picture of `ownerId` in `maybeVersion` from `pictures`, fetched only while composed. */
+@Composable
+private fun VersionedPicture(
+  pictures: VersionedPictureCache,
+  ownerId: String,
+  maybeVersion: String?,
+  modifier: Modifier,
+  placeholder: @Composable () -> Unit,
+) {
   val graph = TeamCraftApplication.graph(LocalContext.current)
-  val pictures = graph.spacePictures
   val changes by pictures.changes.collectAsState()
   val isOnline by graph.network.isOnline.collectAsState()
   val retryRound by graph.pictureRetries.round.collectAsState()
   val maybePicture by produceState<ImageBitmap?>(
-    maybeVersion?.let { pictures.maybeDecoded(spaceId, it) }?.asImageBitmap(),
-    spaceId,
+    maybeVersion?.let { pictures.maybeDecoded(ownerId, it) }?.asImageBitmap(),
+    ownerId,
     maybeVersion,
     changes,
   ) {
-    value = maybeVersion?.let { pictures.loadBitmap(spaceId, it) }?.asImageBitmap()
+    value = maybeVersion?.let { pictures.loadBitmap(ownerId, it) }?.asImageBitmap()
   }
-  LaunchedEffect(spaceId, maybeVersion, isOnline, retryRound) {
+  LaunchedEffect(ownerId, maybeVersion, isOnline, retryRound) {
     when {
-      maybeVersion == null -> pictures.forget(spaceId)
-      isOnline -> pictures.ensure(spaceId, maybeVersion)
+      maybeVersion == null -> pictures.forget(ownerId)
+      isOnline -> pictures.ensure(ownerId, maybeVersion)
     }
   }
-  val picture = maybePicture ?: return
+  val picture = maybePicture
+  if (picture == null) {
+    placeholder()
+    return
+  }
   Image(
     picture,
     contentDescription = null,
     contentScale = ContentScale.Crop,
-    modifier = modifier.size(size).clip(RoundedCornerShape(size / 4)),
+    modifier = modifier,
   )
 }

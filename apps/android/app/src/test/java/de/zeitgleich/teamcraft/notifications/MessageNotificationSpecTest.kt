@@ -417,6 +417,22 @@ class MessageNotificationSpecTest {
     assertFalse(isBubble(channel(line("1000", "Alice", "first")), content(), canBubble = true))
   }
 
+  @Test
+  fun aChannelShowsItsPictureAndABotItsSourcesPicture() {
+    val bot = line("1000", "Builds", "deployed").copy(maybeSenderKey = "user-bot", maybeSourcePicture = "ab12")
+    val entry = channel(bot, line("2000", "Bob", "thanks")).copy(maybeChannelImageVersion = "v3")
+    val spec = spec(entry)
+    assertEquals("v3", spec.maybeShortcut!!.maybeChannelImageVersion)
+    assertEquals(
+      listOf(NotificationSender("user-bot", "Builds", "ab12"), NotificationSender("user-Bob", "Bob")),
+      spec.maybeConversation!!.messages.map { it.maybeSender },
+    )
+    // A DM never shows a channel's picture; without names there is no shortcut to show one on.
+    assertNull(spec(direct(line("1000", "Alice", "hi")).copy(maybeChannelImageVersion = "v3")).maybeShortcut!!.maybeChannelImageVersion)
+    val hidden = MessagePrivacy.of(NotificationContent.NOTHING, isAppLockOn = false, isVerified = true)
+    assertNull(build(entry, hidden)!!.maybeShortcut)
+  }
+
   private fun assertNoText(spec: MessageNotificationSpec) {
     for (shown in listOf(spec.title, spec.text, spec.publicTitle, spec.publicText)) assertFalse(shown.contains("secret"))
   }

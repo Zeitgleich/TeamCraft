@@ -455,6 +455,25 @@ pub(crate) async fn space_picture(
   }
 }
 
+/// The picture of a channel as image bytes (`GET /conversations/{id}/image`, at most
+/// `max_bytes`); `None` when the channel has none (any more). Like [`space_picture`], the app
+/// caches by the version the conversation names (`ConversationItem.maybe_image_version`).
+pub(crate) async fn channel_picture(
+  api: &Api,
+  conversation: &str,
+  max_bytes: u64,
+) -> Result<Option<Vec<u8>>, TeamCraftError> {
+  let conversation: teamcraft_proto::ConversationId = parse_id(conversation)?;
+  match api
+    .get_bytes_capped(&format!("/conversations/{conversation}/image"), max_bytes)
+    .await
+  {
+    Ok(picture) => Ok(Some(picture)),
+    Err(error) if error.error_code() == Some(&ErrorCode::ChannelImageNotFound) => Ok(None),
+    Err(error) => Err(teamcraft_core::CoreError::from(error).into()),
+  }
+}
+
 /// The download URL and size of `GET /users/{id}/avatar`'s answer; refuses a type that is not a
 /// picture and a URL that is not `https` (`http` only if `is_plain_http_allowed`).
 fn avatar_location(answer: &str, is_plain_http_allowed: bool) -> Result<(String, u64), TeamCraftError> {

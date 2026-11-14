@@ -21,6 +21,7 @@ import de.zeitgleich.teamcraft.calls.IncomingCallNotifier
 import de.zeitgleich.teamcraft.calls.IncomingRing
 import de.zeitgleich.teamcraft.ui.CoreRetryRounds
 import de.zeitgleich.teamcraft.ui.PictureRetries
+import de.zeitgleich.teamcraft.ui.VersionedPictureCache
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -29,9 +30,11 @@ import de.zeitgleich.teamcraft.notifications.HoldEnd
 import de.zeitgleich.teamcraft.notifications.MessageNotifier
 import de.zeitgleich.teamcraft.notifications.NotificationChannels
 import de.zeitgleich.teamcraft.notifications.NotificationContentPrefs
+import de.zeitgleich.teamcraft.notifications.SourcePictureIcons
 import uniffi.teamcraft_ffi.NotificationGap
 import uniffi.teamcraft_ffi.PushNotification
 import uniffi.teamcraft_ffi.PushNotificationKind
+import uniffi.teamcraft_ffi.TeamCraft
 
 /**
  * The notification channels and the notifications themselves on a real system: what
@@ -365,16 +368,18 @@ class NotificationsOnDeviceTest {
     }
   }
 
-  private fun notifier(isInCar: Boolean = false) = MessageNotifier(
-    context,
-    NotificationContentPrefs(context),
-    AvatarCache(
+  private fun notifier(isInCar: Boolean = false): MessageNotifier {
+    val retries = PictureRetries(CoroutineScope(Dispatchers.Default), MutableStateFlow(true), CoreRetryRounds())
+    val noCore: suspend () -> TeamCraft = { error("no core in this test") }
+    return MessageNotifier(
       context,
-      { error("no core in this test") },
-      PictureRetries(CoroutineScope(Dispatchers.Default), MutableStateFlow(true), CoreRetryRounds()),
-    ),
-    isInCar = { isInCar },
-  )
+      NotificationContentPrefs(context),
+      AvatarCache(context, noCore, retries),
+      VersionedPictureCache.channels(context, noCore, retries),
+      SourcePictureIcons(noCore),
+      isInCar = { isInCar },
+    )
+  }
 
   private fun messages() =
     NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(active(CONVERSATION)!!.notification)
