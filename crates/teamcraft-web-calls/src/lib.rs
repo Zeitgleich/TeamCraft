@@ -601,6 +601,7 @@ impl Host {
       status_cues: status_cues(sounds),
       maybe_worklet_url: Some(self.worklet_url.clone()),
       share_encoders: codecs.share_encoders,
+      maybe_prior_link: None,
       is_muted_at_start,
     };
     let requires_background = prepared.requires_background;

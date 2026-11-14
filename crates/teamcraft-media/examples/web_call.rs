@@ -104,6 +104,7 @@ pub async fn join_dev_call(
     // The development page has no Content-Security-Policy.
     maybe_worklet_url: None,
     share_encoders: teamcraft_media::share_policy::ShareEncoders {
+      maybe_prior_link: None,
       av1: teamcraft_media::share_policy::EncoderKind::Unavailable,
       vp9: teamcraft_media::share_policy::EncoderKind::Unavailable,
     },
