@@ -239,13 +239,7 @@ pub struct WebCallConfig {
   pub maybe_prior_link: Option<PriorLink>,
 }
 
-/// Where and with what a page measures its link before the call (#1959): from a link probe
-/// ticket of `teamcraft-server`.
-pub struct LinkProbeTarget {
-  pub sfu_url: String,
-  pub ticket: String,
-  pub certificate_hashes: Vec<[u8; 32]>,
-}
+pub use crate::link_probe::LinkProbeTarget;
 
 /// Gets a fresh join ticket from `teamcraft-server` in the page.
 pub trait WebJoinTicketSource {

@@ -75,6 +75,9 @@ use crate::fallback_link::{
 use crate::fallback_queue::MediaQueueConfig;
 use crate::fallback_socket::{FallbackSender, WriterConfig, run_writer};
 use crate::jitter::JitterBufferConfig;
+use crate::link_probe::{
+  LINK_PROBE_TIMEOUT, LinkProbeClient, LinkProbeTarget, NATIVE_PRIOR_LINK_MAX_AGE, PriorLink, PriorUplink,
+};
 use crate::quic_send::{QuicSender, set_datagram_send_buffer};
 use crate::rtp::RtpTimestamp;
 use crate::send_queue::SendQueueConfig;
@@ -96,6 +99,8 @@ use self::receive::{Asks, RemoteVideo};
 const FRAME_INTERVAL: Duration = Duration::from_millis(20);
 /// Feedback and allocation period.
 const TIMER_INTERVAL: Duration = Duration::from_millis(100);
+/// A link probe before the call looks at its trains and feedback this often (#1969).
+const LINK_PROBE_TICK: Duration = Duration::from_millis(50);
 /// Upper bound of one signaling message.
 const MAX_SIGNALING_BYTES: usize = 1024 * 1024;
 /// At most this much audio waits for the speakers (latency bound).
@@ -170,6 +175,9 @@ pub struct NativeCallConfig {
   /// The microphone is muted from the first frame (the user's choice before joining, or a call
   /// that moves on while muted): nothing of it is sent before a later unmute.
   pub is_muted_at_start: bool,
+  /// What a measurement before the call showed ([`measure_link`], #1969): the join starts from it
+  /// while it is fresh. The caller drops one taken on another network.
+  pub maybe_prior_link: Option<PriorLink>,
 }
 
 /// Gets a fresh join ticket from `teamcraft-server` (a new token, possibly another SFU URL).
@@ -414,6 +422,7 @@ impl NativeCallConfig {
       maybe_trust_source: None,
       status_cues: StatusCues::default(),
       is_muted_at_start: false,
+      maybe_prior_link: None,
     }
   }
 
@@ -793,6 +802,9 @@ async fn run_call(
   let mut tone_position = 0u64;
   let mut frame_tick = tokio::time::interval(FRAME_INTERVAL);
   let mut timer_tick = tokio::time::interval(TIMER_INTERVAL);
+  if let Some(prior) = config.maybe_prior_link {
+    engine.set_prior_link(prior);
+  }
   engine.join(config.token.clone());
   let mut maybe_screen_audio: Option<ScreenAudio> = None;
   let (encoded_tx, mut encoded_rx) = mpsc::unbounded_channel::<(VideoTrackKind, EncodedVideoFrame)>();
@@ -1932,6 +1944,91 @@ impl Link {
       task.abort();
     }
   }
+}
+
+/// Measures the link to the SFU before the call (#1969) over QUIC, as the browser does
+/// (`call_web::measure_link`): `None` when nothing came of it (no connection, an SFU that takes no
+/// tickets, a refused ticket). It ends within [`LINK_PROBE_TIMEOUT`] of connecting; dropping the
+/// future cancels it (the app went to the background, the network changed). The measurement's
+/// lifetime is the apps' ([`NATIVE_PRIOR_LINK_MAX_AGE`]): they drop it when the network changes.
+pub async fn measure_link(target: LinkProbeTarget, resilience: &ResilienceConfig) -> Option<PriorLink> {
+  let (_endpoint, connection) = match connect(&target.sfu_url, &target.certificate_hashes, resilience).await {
+    Ok(connected) => connected,
+    Err(error) => {
+      debug!(%error, "the link probe didn't connect");
+      return None;
+    },
+  };
+  let measured = tokio::time::timeout(
+    LINK_PROBE_TIMEOUT + LINK_PROBE_TICK,
+    run_link_probe(&connection, target.ticket),
+  )
+  .await
+  .ok()
+  .flatten();
+  connection.close(0u32.into(), b"measured");
+  measured.map(|prior| PriorLink {
+    max_age: NATIVE_PRIOR_LINK_MAX_AGE,
+    ..prior
+  })
+}
+
+/// The client's side of a link probe session on an open connection.
+async fn run_link_probe(connection: &Connection, ticket: String) -> Option<PriorLink> {
+  let (mut send, mut recv) = connection.open_bi().await.ok()?.await.ok()?;
+  write_framed(&mut send, &CallClientMessage::Probe { ticket }).await?;
+  let mut client = LinkProbeClient::new(Instant::now());
+  let mut interval = tokio::time::interval(LINK_PROBE_TICK);
+  loop {
+    tokio::select! {
+      message = read_framed(&mut recv) => match message? {
+        CallServerMessage::Event { event, .. } => client.on_event(&event),
+        CallServerMessage::Error { error } => {
+          debug!(error_code = ?error.error_code, "the SFU refused the link probe");
+          break;
+        },
+        _ => {},
+      },
+      datagram = connection.receive_datagram() => client.on_datagram(&datagram.ok()?.payload(), Instant::now()),
+      _ = interval.tick() => {
+        let now = Instant::now();
+        for datagram in client.due_padding(now) {
+          // A datagram the connection can't take now is padding lost: the probe counts it so.
+          let _ = connection.send_datagram(datagram);
+        }
+        if let Some(feedback) = client.take_feedback(now) {
+          write_framed(&mut send, &CallClientMessage::TransportFeedback { feedback }).await?;
+        }
+        if client.is_done(now) {
+          break;
+        }
+      },
+    }
+  }
+  let result = client.result(Instant::now());
+  let has_shown_anything = result.uplink != PriorUplink::Unknown || result.maybe_downlink.is_some();
+  has_shown_anything.then_some(result)
+}
+
+/// Writes one framed signaling message; `None` when the stream is gone.
+async fn write_framed(send: &mut SendStream, message: &CallClientMessage) -> Option<()> {
+  let body = serde_json::to_vec(message).ok()?;
+  let mut framed = u32::try_from(body.len()).ok()?.to_be_bytes().to_vec();
+  framed.extend_from_slice(&body);
+  send.write_all(&framed).await.ok()
+}
+
+/// Reads one framed signaling message; `None` when the stream ended or sent something too large.
+async fn read_framed(recv: &mut RecvStream) -> Option<CallServerMessage> {
+  let mut length = [0u8; 4];
+  recv.read_exact(&mut length).await.ok()?;
+  let length = u32::from_be_bytes(length) as usize;
+  if length > MAX_SIGNALING_BYTES {
+    return None;
+  }
+  let mut body = vec![0u8; length];
+  recv.read_exact(&mut body).await.ok()?;
+  serde_json::from_slice(&body).ok()
 }
 
 /// Races the QUIC handshake over the SFU's addresses (Happy Eyeballs, issue #420): a broken IPv6

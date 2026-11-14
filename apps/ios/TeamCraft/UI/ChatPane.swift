@@ -917,6 +917,8 @@ struct ChatPane: View {
   /// moved into a room that runs now, the notice comes first, as on the pre-join screens of
   /// desktop, web and Android (e2ee.md §8.2, issue #1321); otherwise the call starts.
   private func prepareCall(withVideo: Bool) async {
+    // Measured while the call is prepared (#1969).
+    model.measureLink()
     let isNotetakerIn = await model.isNotetakerInRunningCall(conversationId: conversation.id)
     let maybeMoved = await model.movedCallHint(conversationId: conversation.id)
     if isNotetakerIn || maybeMoved != nil {
@@ -940,6 +942,8 @@ struct ChatPane: View {
     .padding(.horizontal, 16)
     .padding(.vertical, 6)
     .background(.bar)
+    // A call runs here: joining it is likely, so the link is measured ahead (#1969).
+    .task { model.measureLink() }
   }
 
   private func startCall(withVideo: Bool) {

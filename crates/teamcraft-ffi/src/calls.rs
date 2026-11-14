@@ -24,10 +24,12 @@ use teamcraft_media::call_cues::StatusCues;
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent, OwnPublication, OwnVideoEnd};
 use teamcraft_media::call_native::{
   JoinTicketSource, NativeCall, NativeCallConfig, NativeCallError, TicketFuture, TrustFuture, TrustSource,
+  measure_link,
 };
-use teamcraft_media::call_resilience::{CallTransport, JoinTicket, JoinTicketError};
+use teamcraft_media::call_resilience::{CallTransport, JoinTicket, JoinTicketError, ResilienceConfig};
 use teamcraft_media::datagram::SimulcastLayer;
 use teamcraft_media::fallback_link::{FallbackSocket, fallback_opener};
+use teamcraft_media::link_probe::{LinkProbeTarget, PriorLink};
 use teamcraft_media::openh264_library;
 use teamcraft_media::rtp::RtpTimestamp;
 use teamcraft_media::video::{
@@ -41,7 +43,7 @@ use teamcraft_proto::{
   VideoLayerInfo, VideoTrack, VideoTrackKind,
 };
 use tokio::sync::{mpsc, oneshot};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::engine::Job;
 
@@ -678,6 +680,7 @@ impl CallHub {
 pub(crate) async fn join(
   preparation: CallPreparation,
   is_muted: bool,
+  maybe_prior_link: Option<PriorLink>,
   hub: CallHub,
   jobs: mpsc::UnboundedSender<Job>,
   network: &NetworkChanges,
@@ -689,6 +692,7 @@ pub(crate) async fn join(
   let screen_policy = preparation.screen_policy.clone();
   let mut config = native_config(preparation, &jobs)?;
   config.is_muted_at_start = is_muted;
+  config.maybe_prior_link = maybe_prior_link;
   config.maybe_ticket_source = Some(Arc::new(EngineJoinTickets { jobs, conversation }));
   let camera = FrameSlot::default();
   let screen = FrameSlot::default();
@@ -1652,6 +1656,123 @@ fn lock(state: &Mutex<HubState>) -> MutexGuard<'_, HubState> {
   state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// What the app measured of its link before a call (#1969), per network: the next join starts
+/// from it while it is fresh ([`teamcraft_media::link_probe::NATIVE_PRIOR_LINK_MAX_AGE`]) and the
+/// network is still the one it was measured on. Only one measurement runs at a time; going to the
+/// background or a network change cancels it, and one that ends after a change is dropped.
+#[derive(Default)]
+pub(crate) struct LinkMeasures {
+  state: Mutex<LinkState>,
+}
+
+#[derive(Default)]
+enum LinkState {
+  #[default]
+  None,
+  Running {
+    generation: u64,
+    cancel: tokio::sync::oneshot::Sender<()>,
+  },
+  Done {
+    generation: u64,
+    prior: PriorLink,
+  },
+}
+
+impl LinkMeasures {
+  /// Whether a measurement is due on the network `generation`: none runs, and none is fresh.
+  pub(crate) fn is_due(&self, generation: u64) -> bool {
+    match &*self.lock() {
+      LinkState::None => true,
+      LinkState::Running { .. } => false,
+      LinkState::Done {
+        generation: measured_on,
+        prior,
+      } => *measured_on != generation || !prior.is_fresh_now(),
+    }
+  }
+
+  /// Measures towards `target` on a thread of its own, for the network `generation`.
+  pub(crate) fn start(self: &Arc<Self>, target: LinkProbeTarget, generation: u64, network: NetworkChanges) {
+    let (cancel, cancelled) = tokio::sync::oneshot::channel();
+    *self.lock() = LinkState::Running { generation, cancel };
+    let measures = Arc::clone(self);
+    let spawned = std::thread::Builder::new()
+      .name("teamcraft-link-probe".into())
+      .spawn(move || {
+        let maybe_prior = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+          Ok(runtime) => runtime.block_on(async {
+            let resilience = ResilienceConfig::default();
+            tokio::select! {
+              measured = measure_link(target, &resilience) => measured,
+              _ = cancelled => None,
+            }
+          }),
+          Err(error) => {
+            debug!(%error, "no runtime for the link probe");
+            None
+          },
+        };
+        measures.finish(generation, maybe_prior, network.generation());
+      });
+    if let Err(error) = spawned {
+      debug!(%error, "no thread for the link probe");
+      *self.lock() = LinkState::None;
+    }
+  }
+
+  /// Cancels a running measurement and forgets a finished one (the network changed).
+  pub(crate) fn reset(&self) {
+    // A cancelled measurement's thread ends on its own; nobody waits for the answer.
+    *self.lock() = LinkState::None;
+  }
+
+  /// Cancels a running measurement and keeps a finished one (the app went to the background).
+  pub(crate) fn cancel(&self) {
+    let mut state = self.lock();
+    if matches!(*state, LinkState::Running { .. }) {
+      *state = LinkState::None;
+    }
+  }
+
+  /// The measurement for a join on the network `generation`, once, when it is fresh.
+  pub(crate) fn take_fresh(&self, generation: u64) -> Option<PriorLink> {
+    let mut state = self.lock();
+    match std::mem::take(&mut *state) {
+      LinkState::Done {
+        generation: measured_on,
+        prior,
+      } if measured_on == generation && prior.is_fresh_now() => Some(prior),
+      LinkState::Running { generation, cancel } => {
+        // Still measuring: the join doesn't wait; the result counts for a later one.
+        *state = LinkState::Running { generation, cancel };
+        None
+      },
+      LinkState::None | LinkState::Done { .. } => None,
+    }
+  }
+
+  /// A measurement ended: kept only when it is still the one running and the network is the one
+  /// it was measured on.
+  fn finish(&self, generation: u64, maybe_prior: Option<PriorLink>, current_generation: u64) {
+    let mut state = self.lock();
+    let is_current =
+      matches!(*state, LinkState::Running { generation: running, .. } if running == generation);
+    if !is_current {
+      return;
+    }
+    *state = match maybe_prior {
+      Some(prior) if current_generation == generation => LinkState::Done { generation, prior },
+      _ => LinkState::None,
+    };
+  }
+
+  fn lock(&self) -> MutexGuard<'_, LinkState> {
+    // Plain data: a panic while it was held leaves nothing half-changed.
+    self.state.lock().unwrap_or_else(PoisonError::into_inner)
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use std::time::Duration;
@@ -2458,5 +2579,57 @@ mod tests {
 
   fn user(raw: i64) -> UserId {
     UserId::from_snowflake(Snowflake::new(raw).unwrap())
+  }
+
+  /// #1969: a link measured on one network counts for the next join there, once, and not on
+  /// another; one that ends after a change, or that was cancelled, counts for nothing.
+  mod link_measures {
+    use super::*;
+
+    #[test]
+    fn a_measurement_counts_on_its_network_once() {
+      let measures = LinkMeasures::default();
+      assert!(measures.is_due(1));
+      running(&measures, 1);
+      assert!(!measures.is_due(1), "one at a time");
+      measures.finish(1, Some(prior()), 1);
+      assert!(!measures.is_due(1), "fresh");
+      assert!(measures.is_due(2), "another network");
+      assert_eq!(measures.take_fresh(2), None);
+      running(&measures, 1);
+      measures.finish(1, Some(prior()), 1);
+      assert!(measures.take_fresh(1).is_some());
+      assert_eq!(measures.take_fresh(1), None, "used once");
+    }
+
+    #[test]
+    fn a_measurement_that_ends_after_a_change_or_was_cancelled_is_dropped() {
+      let measures = LinkMeasures::default();
+      running(&measures, 1);
+      measures.finish(1, Some(prior()), 2);
+      assert!(measures.is_due(1), "measured across a change: dropped");
+      running(&measures, 1);
+      measures.cancel();
+      measures.finish(1, Some(prior()), 1);
+      assert!(measures.is_due(1), "the background cancelled it");
+      running(&measures, 1);
+      measures.reset();
+      measures.finish(1, Some(prior()), 1);
+      assert_eq!(measures.take_fresh(1), None, "the network changed meanwhile");
+    }
+
+    fn running(measures: &LinkMeasures, generation: u64) {
+      let (cancel, _cancelled) = tokio::sync::oneshot::channel();
+      *measures.lock() = LinkState::Running { generation, cancel };
+    }
+
+    fn prior() -> PriorLink {
+      PriorLink {
+        uplink: teamcraft_media::link_probe::PriorUplink::Lost,
+        maybe_downlink: None,
+        measured_at: std::time::Instant::now(),
+        max_age: teamcraft_media::link_probe::NATIVE_PRIOR_LINK_MAX_AGE,
+      }
+    }
   }
 }

@@ -23,10 +23,13 @@ use crate::bwe::FeedbackRecorder;
 use crate::datagram::{DatagramHeader, PADDING_STREAM, TransportSeq, padding_datagram};
 use crate::join_probe::{JoinProbe, JoinProbeConfig, LinkMeasurement};
 
-/// A measurement before the join counts this long (#1959): a phone that walked out of the Wi-Fi
-/// in the meantime is on another link. Where the platform can't tell networks apart (a browser),
-/// the age is all there is.
+/// How long a measurement before the join counts, in a browser (#1959): it can't tell networks
+/// apart, so the age is all there is, and a laptop that left the Wi-Fi meanwhile is on another
+/// link.
 pub const PRIOR_LINK_MAX_AGE: Duration = Duration::from_secs(120);
+/// How long it counts in the native apps (#1969): they know when the network changes and drop it
+/// then, so only a link that changed on the same network ages it.
+pub const NATIVE_PRIOR_LINK_MAX_AGE: Duration = Duration::from_secs(600);
 /// A probe session the SFU didn't finish within this ends on the client's side.
 pub const LINK_PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -37,6 +40,17 @@ pub struct PriorLink {
   /// What the SFU's probe of the downlink showed; `None` when it said nothing.
   pub maybe_downlink: Option<LinkMeasurement>,
   pub measured_at: Instant,
+  /// How long it counts: [`PRIOR_LINK_MAX_AGE`] in a browser, [`NATIVE_PRIOR_LINK_MAX_AGE`] in the
+  /// apps.
+  pub max_age: Duration,
+}
+
+/// Where and with what a client measures its link before the call (#1959): from a link probe
+/// ticket of `teamcraft-server`.
+pub struct LinkProbeTarget {
+  pub sfu_url: String,
+  pub ticket: String,
+  pub certificate_hashes: Vec<[u8; 32]>,
 }
 
 /// The uplink as the measurement before the join showed it.
@@ -64,7 +78,7 @@ pub struct LinkProbeClient {
 impl PriorLink {
   /// Whether it still counts at `now`.
   pub fn is_fresh(&self, now: Instant) -> bool {
-    now.saturating_duration_since(self.measured_at) <= PRIOR_LINK_MAX_AGE
+    now.saturating_duration_since(self.measured_at) <= self.max_age
   }
 
   /// Whether it still counts now, on this platform's clock.
@@ -158,6 +172,7 @@ impl LinkProbeClient {
       uplink,
       maybe_downlink: self.maybe_downlink,
       measured_at: now,
+      max_age: PRIOR_LINK_MAX_AGE,
     }
   }
 }

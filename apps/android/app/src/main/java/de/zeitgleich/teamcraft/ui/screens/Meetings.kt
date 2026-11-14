@@ -94,6 +94,8 @@ fun MeetingsScreen(viewModel: MainViewModel, onBack: () -> Unit) {
   val meetNow: () -> Unit = meetNow@{
     if (isStarting) return@meetNow
     isStarting = true
+    // Measured while the meeting is set up (#1969).
+    viewModel.measureLink()
     val key = maybeNowKey ?: newRequestKey().also { maybeNowKey = it }
     scope.launch {
       when (val answer = viewModel.tryMeetingAction { startMeetingNow(null, key) }) {
