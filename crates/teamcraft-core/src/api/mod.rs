@@ -72,7 +72,8 @@ use teamcraft_proto::{
   OrgBackgroundId,
 };
 use teamcraft_proto::{
-  CallJoinTokenResponse, CallStateResponse, CreateCallJoinTokenRequest, MoveCallRequest,
+  CallJoinTokenResponse, CallProbeTicketResponse, CallStateResponse, CreateCallJoinTokenRequest,
+  CreateCallProbeTicketRequest, MoveCallRequest,
 };
 use teamcraft_proto::{
   CategoryId, CategoryResponse, CreateCategoryRequest, CreateInviteRequest, CreateSpaceRequest, InviteId,
@@ -529,6 +530,12 @@ pub trait ServerApi {
     conversation: ConversationId,
     request: &CreateCallJoinTokenRequest,
   ) -> impl Future<Output = Result<CallJoinTokenResponse, ApiError>>;
+  /// A ticket for measuring this device's link to the SFU before joining (#1959,
+  /// `POST /calls/probe-ticket`). Starts nothing.
+  fn create_call_probe_ticket(
+    &self,
+    request: &CreateCallProbeTicketRequest,
+  ) -> impl Future<Output = Result<CallProbeTicketResponse, ApiError>>;
 
   /// The call running in the conversation (`GET /conversations/{id}/call`), `None` if none runs.
   /// Unlike a join token it never starts one.

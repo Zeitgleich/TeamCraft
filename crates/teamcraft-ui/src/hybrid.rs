@@ -1584,6 +1584,12 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
     }
   }
 
+  fn measure_link(&self, maybe_meeting: Option<teamcraft_proto::MeetingId>) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::MeasureLink { maybe_meeting });
+    }
+  }
+
   fn test_speakers(&self, maybe_device: Option<String>) {
     if let Some(calls) = &self.maybe_calls {
       calls.test_speakers(maybe_device);

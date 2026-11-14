@@ -84,6 +84,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(self.api.create_call_join_token(conversation, &request).await?)
   }
 
+  /// A ticket for measuring this device's link to the SFU before joining (#1959): on the pre-join
+  /// screen, or in `maybe_meeting`'s lobby (a guest names it). Starts nothing.
+  pub async fn call_probe_ticket(
+    &self,
+    maybe_meeting: Option<teamcraft_proto::MeetingId>,
+  ) -> Result<teamcraft_proto::CallProbeTicketResponse, CoreError> {
+    let request = teamcraft_proto::CreateCallProbeTicketRequest {
+      device_id: self.account.device_id,
+      maybe_meeting_id: maybe_meeting,
+    };
+    Ok(self.api.create_call_probe_ticket(&request).await?)
+  }
+
   /// The call running in the conversation, `None` if none runs. Never starts one (headless
   /// participants such as the notetaker only join calls people started).
   pub async fn running_call(

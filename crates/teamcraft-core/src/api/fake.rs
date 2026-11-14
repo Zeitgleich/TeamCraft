@@ -50,8 +50,8 @@ use teamcraft_proto::{
   OrgBackgroundId,
 };
 use teamcraft_proto::{
-  CallId, CallJoinTokenResponse, CallRosterEntry, CallStateResponse, CreateCallJoinTokenRequest,
-  MoveCallRequest,
+  CallId, CallJoinTokenResponse, CallProbeTicketResponse, CallRosterEntry, CallStateResponse,
+  CreateCallJoinTokenRequest, CreateCallProbeTicketRequest, MoveCallRequest,
 };
 use teamcraft_proto::{
   CategoryId, CategoryResponse, CreateCategoryRequest, CreateInviteRequest, CreateSpaceRequest, InviteMail,
@@ -4159,6 +4159,14 @@ impl ServerApi for FakeServerApi {
       calls.truncate(limit);
       Ok(teamcraft_proto::ListCallHistoryResponse { calls, has_more })
     })
+  }
+
+  /// The fake has no SFU to measure against.
+  async fn create_call_probe_ticket(
+    &self,
+    _request: &CreateCallProbeTicketRequest,
+  ) -> Result<CallProbeTicketResponse, ApiError> {
+    Err(ApiError::status(503, ErrorCode::Unavailable, "no SFU"))
   }
 
   /// A placeholder token: the fake has no SFU, so nothing can join with it.

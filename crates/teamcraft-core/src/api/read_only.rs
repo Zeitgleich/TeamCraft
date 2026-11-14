@@ -626,6 +626,13 @@ impl<A: ServerApi> ServerApi for ReadOnlyApi<A> {
     self.refused("create_call_join_token")
   }
 
+  fn create_call_probe_ticket(
+    &self,
+    _request: &CreateCallProbeTicketRequest,
+  ) -> impl Future<Output = Result<CallProbeTicketResponse, ApiError>> {
+    self.refused("create_call_probe_ticket")
+  }
+
   fn running_call(
     &self,
     conversation: ConversationId,

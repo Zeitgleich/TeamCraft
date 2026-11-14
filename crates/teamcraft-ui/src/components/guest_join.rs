@@ -252,6 +252,24 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
     spawn_local(check_lobby(client.clone(), page));
   });
 
+  // Waiting in the lobby with a device: the link is measured meanwhile (#1959), once, so the call
+  // starts on the voice step and video layers it carries. Nothing waits for it.
+  let has_measured = StoredValue::new(false);
+  Effect::new(move |_| {
+    if phase.get() != GuestPhase::Waiting || !page.is_device_ready.get() || has_measured.get_value() {
+      return;
+    }
+    let maybe_meeting = page
+      .joined
+      .with_value(|joined| joined.as_ref().map(|joined| joined.meeting));
+    if let (Some(meeting), Some(found)) = (maybe_meeting, devices.get_value()) {
+      has_measured.set_value(true);
+      found
+        .call
+        .emit(crate::calls::CallEvent::MeasureLink(Some(meeting)));
+    }
+  });
+
   let stage = Memo::new(move |_| match phase.get() {
     GuestPhase::AskName | GuestPhase::Joining => Stage::Ask,
     GuestPhase::Admitted => Stage::In,

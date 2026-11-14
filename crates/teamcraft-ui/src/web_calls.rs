@@ -97,6 +97,7 @@ struct Callbacks {
   object: Object,
   _changed: Closure<dyn Fn(String)>,
   _prepare: Closure<dyn Fn(String) -> Promise>,
+  _probe_ticket: Closure<dyn Fn(String) -> Promise>,
   _sign: Closure<dyn Fn(String, Uint8Array) -> Result<Uint8Array, JsValue>>,
   _verify: Closure<VerifyCallback>,
   _roster: Closure<dyn Fn(String) -> Promise>,
@@ -633,6 +634,20 @@ impl Callbacks {
         })
       })
     };
+    // A ticket for measuring the link before the call (#1959), from the core: the meeting whose
+    // lobby this page waits in, as JSON (`null` on the pre-join screen).
+    let probe_ticket = Closure::<dyn Fn(String) -> Promise>::new(|meeting: String| {
+      future_to_promise(async move {
+        let maybe_meeting: Option<teamcraft_proto::MeetingId> =
+          serde_json::from_str(&meeting).map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let ticket = crate::web_core::probe_ticket(maybe_meeting)
+          .await
+          .map_err(|error| JsValue::from_str(&error))?;
+        serde_json::to_string(&ticket)
+          .map(|json| JsValue::from_str(&json))
+          .map_err(|error| JsValue::from_str(&error.to_string()))
+      })
+    });
     let roster = {
       let host = host.clone();
       Closure::<dyn Fn(String) -> Promise>::new(move |conversation: String| {
@@ -715,6 +730,7 @@ impl Callbacks {
     for (name, function) in [
       ("changed", changed.as_ref()),
       ("prepare", prepare.as_ref()),
+      ("probe_ticket", probe_ticket.as_ref()),
       ("sign", sign.as_ref()),
       ("verify", verify.as_ref()),
       ("roster", roster.as_ref()),
@@ -728,6 +744,7 @@ impl Callbacks {
       object,
       _changed: changed,
       _prepare: prepare,
+      _probe_ticket: probe_ticket,
       _sign: sign,
       _verify: verify,
       _roster: roster,

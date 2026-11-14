@@ -66,6 +66,11 @@ impl PriorLink {
   pub fn is_fresh(&self, now: Instant) -> bool {
     now.saturating_duration_since(self.measured_at) <= PRIOR_LINK_MAX_AGE
   }
+
+  /// Whether it still counts now, on this platform's clock.
+  pub fn is_fresh_now(&self) -> bool {
+    self.is_fresh(Instant::now())
+  }
 }
 
 impl LinkProbeClient {

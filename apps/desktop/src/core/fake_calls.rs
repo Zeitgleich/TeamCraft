@@ -140,6 +140,7 @@ impl FakeCalls {
       | CallAction::RefreshDevices
       // No camera here, and nothing to measure.
       | CallAction::SetPreview { .. }
+      | CallAction::MeasureLink { .. }
       | CallAction::TestSpeakers { .. }
       | CallAction::Unknown => {},
     }

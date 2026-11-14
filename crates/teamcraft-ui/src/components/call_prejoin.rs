@@ -336,6 +336,9 @@ impl DeviceCheck {
     // The lists may be old: the desktop app lists on request, and a camera may have been plugged
     // in or a permission changed since. Browsers also report changes themselves (`devicechange`).
     call.emit(CallEvent::RefreshDevices);
+    // The call starts on the voice step and video layers the link carries (#1959): measured
+    // while the user looks at the camera. Nothing waits for it.
+    call.emit(CallEvent::MeasureLink(None));
     // Coming back to the window (after allowing the camera in the address bar or the system
     // settings, which fires no `devicechange`) lists them again, while this check runs.
     let refresh_on_return = [

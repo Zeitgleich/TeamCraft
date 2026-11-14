@@ -364,6 +364,8 @@ pub async fn call_action(
     CallAction::SetCameraQuality { quality } => calls.set_camera_quality(quality).await?,
     CallAction::SetVideoQuality { stream_id, quality } => calls.set_video_quality(stream_id, quality).await,
     CallAction::RefreshDevices => drop(calls.refresh_devices().await?),
+    // The native call measures its link at the join (#1969 brings it to the pre-join screen).
+    CallAction::MeasureLink { .. } => {},
     CallAction::SetPreview { preview } => {
       // The current choice under the current rule, as for the call's camera: the check shows
       // what the call would send. A failure still leaves the check running (a picture the
