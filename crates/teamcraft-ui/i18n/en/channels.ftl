@@ -59,6 +59,7 @@ canvas-pages = Pages
 canvas-page-first = Notes
 canvas-page-untitled = Untitled
 canvas-page-new = New page
+canvas-pages-full = A channel has at most { $count } pages. Delete one to add another.
 canvas-page-rename = Rename page
 canvas-page-delete = Delete page
 canvas-page-name = Name

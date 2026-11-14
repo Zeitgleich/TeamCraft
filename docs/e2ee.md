@@ -4772,6 +4772,24 @@ list's, not the store's). A client from before pages ignores the `page` field an
 page's updates into its first page, where the `page_blocks` root stays out of sight; its snapshot of
 the first page then carries them along, which costs size but shows nothing.
 
+Both lists are bounded, so a member can't make every other member's device keep or show an unbounded
+number of pages. A channel lists at most 50 further pages (`MAX_LISTED_CANVAS_PAGES`): the first 50
+entries that aren't deleted, in the list's order, so every client shows the same ones; a client adds
+none at the limit and says why. A member can still put entries at the front and so push others out
+of view, which is no more than a member can do by deleting pages.
+
+Which further pages a device keeps updates of follows the list, which the core can't read itself
+(it is a Yjs document): whenever the editor reads the first page, it tells the core the pages the
+list names and those it names as deleted (`note_canvas_pages`). A listed page's updates are always
+kept; a deleted page's go, with its place. Updates of a page the device doesn't know as listed (they
+arrived before the list's entry, or no editor on this device has read the list yet) share 50 places
+(`MAX_UNLISTED_CANVAS_PAGES`), the least recently edited page going first with its updates. So edits
+for thousands of made-up page IDs cost every device a bounded store and never push out a page the
+editor knows as listed, and deleted pages, which nobody edits any more, are the first to go. What
+stays open: on a device whose editor never read the list, a flood of made-up page IDs can push out a
+real page that nobody edited lately; its edits from before then are missing there. The limits are
+part of the protocol, not settings, because all members' clients must agree on them.
+
 **Moving a block.** Yjs has no move: a moved block is removed and inserted again at its new place
 with its ID, kind (a kind of a newer version too), check mark, text, formatting and file reference.
 Typing into the block on another device while it moves is lost (it lands in the removed copy); two

@@ -59,6 +59,7 @@ canvas-pages = Seiten
 canvas-page-first = Notizen
 canvas-page-untitled = Ohne Titel
 canvas-page-new = Neue Seite
+canvas-pages-full = Ein Kanal hat höchstens { $count } Seiten. Lösche eine, um eine neue anzulegen.
 canvas-page-rename = Seite umbenennen
 canvas-page-delete = Seite löschen
 canvas-page-name = Name

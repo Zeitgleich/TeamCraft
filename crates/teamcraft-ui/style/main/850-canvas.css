@@ -580,3 +580,8 @@ textarea.canvas-input {
     transform: none !important;
   }
 }
+
+/* Under the tabs, on a line of its own, when no page can be added. */
+.canvas-pages-full {
+  flex: 1 1 100%;
+}

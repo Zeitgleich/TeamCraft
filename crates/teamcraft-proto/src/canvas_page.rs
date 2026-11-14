@@ -4,6 +4,19 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The most further pages a channel lists: entries of the first page's list beyond these (in the
+/// list's order, deleted ones not counted) are left out by every client alike, and a client adds no
+/// page at the limit. A protocol limit, not a setting: all members' clients must show the same
+/// pages, as with the limits a receiver puts on polls.
+pub const MAX_LISTED_CANVAS_PAGES: usize = 50;
+
+/// The most further pages of one channel a device keeps updates of while it doesn't know them as
+/// listed: edits that arrive before the list names their page, and on a device whose editor hasn't
+/// read the list. The one edited least recently goes first, so a member sending edits for thousands
+/// of made-up page IDs costs every device a bounded store, and pages the editor knows as listed
+/// (at most [`MAX_LISTED_CANVAS_PAGES`]) are never pushed out.
+pub const MAX_UNLISTED_CANVAS_PAGES: usize = 50;
+
 /// One of a channel's further pages. Another member's client chose it, so a device keeps only IDs
 /// that pass [`CanvasPageId::parse`]: short, lowercase hex digits and dashes, safe in a store key.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]

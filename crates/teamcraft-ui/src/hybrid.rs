@@ -387,6 +387,15 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
       .edit_canvas(conversation, maybe_page, update, is_snapshot);
   }
 
+  fn note_canvas_pages(
+    &self,
+    conversation: ConversationId,
+    listed: &[teamcraft_proto::CanvasPageId],
+    deleted: &[teamcraft_proto::CanvasPageId],
+  ) {
+    self.chat.note_canvas_pages(conversation, listed, deleted);
+  }
+
   fn compact_canvas(
     &self,
     conversation: ConversationId,
