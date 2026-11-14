@@ -24,6 +24,7 @@ pub mod fallback_socket;
 pub mod fragment;
 pub mod jitter;
 pub mod join_probe;
+pub mod link_probe;
 #[cfg(feature = "message-sounds")]
 pub mod message_sounds;
 pub mod nack;

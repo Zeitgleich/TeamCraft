@@ -50,6 +50,7 @@ use crate::dave::{
   DaveCallId, DaveEpoch, DaveError, DaveFrameStats, DaveParticipant, DaveParticipantId, FrameCodec, MediaKind,
 };
 use crate::join_probe::{JoinProbe, JoinProbeConfig, LinkMeasurement};
+use crate::link_probe::{PriorLink, PriorUplink};
 use crate::nack::NackConfig;
 use crate::rate_probe::{ProbeOutcome, RateProbeConfig, UplinkProbe};
 use crate::rtp::{PayloadType, RtpHeader, RtpPacket, RtpTimestamp, SequenceNumber, Ssrc};
@@ -232,6 +233,8 @@ pub struct CallEngine {
   /// The probe at the join showed a thin uplink (#1893): a camera published after it doesn't
   /// start the voice over on its start step, next to the camera.
   is_uplink_measured_thin: bool,
+  /// What a measurement before the join showed (#1959), until the join takes it.
+  maybe_prior_link: Option<PriorLink>,
   /// The own voice's bitrate and packet length on a thin uplink (#1893).
   voice_steps: VoiceSteps,
   downlink_feedback: FeedbackRecorder,
@@ -722,6 +725,7 @@ impl CallEngine {
       maybe_probe_started_at: None,
       probe_voice: ProbeVoice::InPause,
       is_uplink_measured_thin: false,
+      maybe_prior_link: None,
       voice_steps: VoiceSteps::new(UplinkPolicy::default().voice),
       downlink_feedback: FeedbackRecorder::new(now),
       uplink_feedback_epoch: now,
@@ -900,6 +904,12 @@ impl CallEngine {
       self.update_uplink_demand();
       self.start_uplink_probe(now);
     }
+  }
+
+  /// What a measurement on the pre-join screen or in the lobby showed (#1959): the join starts
+  /// from it instead of probing, while it is fresh ([`PriorLink::is_fresh`]). Set before `join`.
+  pub fn set_prior_link(&mut self, prior: PriorLink) {
+    self.maybe_prior_link = Some(prior);
   }
 
   /// What the probe of this device's uplink at the start showed (#1762); `None` before it ended
@@ -1667,7 +1677,9 @@ impl CallEngine {
         self.set_retransmit_window(maybe_retransmit_window_ms);
         self.maybe_probe_bytes = maybe_probe_bytes;
         self.maybe_downlink_measurement = None;
-        self.start_uplink_probe(now);
+        if !self.take_prior_link(now) {
+          self.start_uplink_probe(now);
+        }
         self.maybe_switch_secret = maybe_switch_secret;
         // An SFU from before #978 says nothing and takes three; more than this version plans
         // would be no use.
@@ -2477,9 +2489,13 @@ impl CallEngine {
     }
     // Once a call: worth a line in a bug report's log.
     info!(is_lost, "the uplink's probe at the join measured nothing");
-    if !is_lost {
-      return;
+    if is_lost {
+      self.apply_uplink_lost(now);
     }
+  }
+
+  /// The uplink lost the probe's padding: it is thin, and the voice goes to its thinnest step.
+  fn apply_uplink_lost(&mut self, now: Instant) {
     let was_wanted = self.voice_steps.wanted_bps();
     self.is_uplink_measured_thin = true;
     if let Some(encoding) = self.voice_steps.on_measured(0, now) {
@@ -2488,6 +2504,37 @@ impl CallEngine {
     if self.voice_steps.wanted_bps() != was_wanted {
       self.update_uplink_demand();
     }
+  }
+
+  /// The first join takes a fresh measurement from before it (#1959) instead of probing: the voice,
+  /// the estimate and the downlink start where the link is from the first word. `false` without
+  /// one, where the SFU takes no padding (the fallback measures on its own), or when it said
+  /// nothing of the uplink: the join probes as before. A rejoin or another path probes afresh.
+  fn take_prior_link(&mut self, now: Instant) -> bool {
+    let Some(prior) = self.maybe_prior_link.take() else {
+      return false;
+    };
+    let is_usable = self.maybe_probe_bytes.is_some()
+      && self.maybe_uplink_capacity_bps.is_none()
+      && prior.is_fresh(now)
+      && prior.uplink != PriorUplink::Unknown;
+    if !is_usable {
+      return false;
+    }
+    self.maybe_uplink_probe = None;
+    self.is_uplink_measured_thin = false;
+    info!(
+      age_ms =
+        u64::try_from(now.saturating_duration_since(prior.measured_at).as_millis()).unwrap_or(u64::MAX),
+      "the call starts from the link's measurement before the join"
+    );
+    match prior.uplink {
+      PriorUplink::Measured(measurement) => self.apply_uplink_probe(measurement, now),
+      PriorUplink::Lost => self.apply_uplink_lost(now),
+      PriorUplink::Unknown => {},
+    }
+    self.maybe_downlink_measurement = prior.maybe_downlink;
+    true
   }
 
   /// Notes whether a frame of the own microphone carried speech (#1893).
@@ -6668,6 +6715,69 @@ mod tests {
       assert!(padding_seqs(&drain(&mut engine)).is_empty(), "no more trains");
       let estimate = engine.uplink_estimate_bps();
       assert!((1_700_000..=2_000_000).contains(&estimate), "{estimate}");
+    }
+
+    /// #1959: a fresh measurement from the lobby starts the call: no probe at the join, the voice
+    /// on the step it showed, the downlink known. Stale, or from an SFU that takes no padding, it
+    /// is dropped and the join probes as before.
+    #[test]
+    fn a_fresh_measurement_from_before_the_join_replaces_its_probe() {
+      let start = Instant::now();
+      let measured = |uplink| crate::link_probe::PriorLink {
+        uplink,
+        maybe_downlink: Some(LinkMeasurement {
+          capacity_bps: 3_000_000,
+          after_burst_bps: 3_000_000,
+          loss_percent: 0,
+        }),
+        measured_at: start,
+      };
+      let good = crate::link_probe::PriorUplink::Measured(LinkMeasurement {
+        capacity_bps: 2_000_000,
+        after_burst_bps: 2_000_000,
+        loss_percent: 0,
+      });
+
+      let mut fresh = probing_engine(start, Some(measured(good)), start + Duration::from_secs(30));
+      assert!(
+        padding_seqs(&drain(&mut fresh)).is_empty(),
+        "no probe at the join"
+      );
+      assert_eq!(fresh.voice_steps.step(), crate::voice_steps::VoiceStep::Full);
+      assert_eq!(fresh.downlink_measurement().unwrap().capacity_bps, 3_000_000);
+
+      let lost = measured(crate::link_probe::PriorUplink::Lost);
+      let mut thin = probing_engine(start, Some(lost), start + Duration::from_secs(30));
+      assert!(padding_seqs(&drain(&mut thin)).is_empty());
+      assert_eq!(thin.voice_steps.step(), crate::voice_steps::VoiceStep::Thinnest);
+      assert!(thin.is_uplink_thin());
+
+      let stale_at = start + crate::link_probe::PRIOR_LINK_MAX_AGE + Duration::from_secs(1);
+      let mut stale = probing_engine(start, Some(measured(good)), stale_at);
+      assert_eq!(padding_seqs(&drain(&mut stale)).len(), 5, "the join probes");
+      assert_eq!(stale.voice_steps.step(), crate::voice_steps::VoiceStep::Thin);
+    }
+
+    /// An engine that joins at `at` an SFU taking padding, with `maybe_prior` set before.
+    fn probing_engine(
+      start: Instant,
+      maybe_prior: Option<crate::link_probe::PriorLink>,
+      at: Instant,
+    ) -> CallEngine {
+      let mut engine = engine(1, start);
+      if let Some(prior) = maybe_prior {
+        engine.set_prior_link(prior);
+      }
+      engine.join("t".into());
+      let mut probing = joined(1, &[]);
+      if let CallEvent::Joined {
+        maybe_probe_bytes, ..
+      } = &mut probing
+      {
+        *maybe_probe_bytes = Some(15_000);
+      }
+      engine.handle_signal(event(1, probing), at).unwrap();
+      engine
     }
 
     #[test]
