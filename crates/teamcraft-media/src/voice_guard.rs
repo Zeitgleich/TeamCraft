@@ -189,6 +189,11 @@ impl VoiceGuard {
     self.maybe_hurt_at = None;
   }
 
+  /// When voice was last found hurt (the hold not counted).
+  pub fn last_hurt_at(&self) -> Option<Instant> {
+    self.maybe_hurt_at
+  }
+
   /// Whether voice was hurt within [`VoiceGuardConfig::hold`]: video yields.
   pub fn is_hurt(&self, now: Instant) -> bool {
     self

@@ -337,6 +337,39 @@ impl LayerAllocator {
     }
   }
 
+  /// Every track that is forwarded drops to its lowest layer at once, a paused one stays paused,
+  /// and nothing is probed: the video yields to voice that is being lost (#1871).
+  pub fn keep_lowest_layers(&mut self, demands: &[TrackDemand<'_>], now: Instant) -> Allocation {
+    let layers: HashMap<StreamId, Option<u8>> = demands
+      .iter()
+      .map(|demand| {
+        let is_forwarded = self.current.get(&demand.stream_id).is_some_and(Option::is_some);
+        let maybe_lowest = demand.layers.first().map(|info| info.layer);
+        (demand.stream_id, maybe_lowest.filter(|_| is_forwarded))
+      })
+      .collect();
+    for (stream_id, maybe_layer) in &layers {
+      if maybe_layer.is_none() {
+        self.paused_since.entry(*stream_id).or_insert(now);
+      }
+    }
+    self.upgrade_pending_since.clear();
+    self.downgrade_pending_since.clear();
+    self.pause_pending_since.clear();
+    self.probing_until.clear();
+    self
+      .paused_since
+      .retain(|stream_id, _| layers.get(stream_id).is_some_and(Option::is_none));
+    self
+      .resume_wait
+      .retain(|stream_id, _| layers.contains_key(stream_id));
+    self.current = layers.clone();
+    Allocation {
+      layers,
+      maybe_probe: None,
+    }
+  }
+
   /// `wanted` (at most `current`) once the budget has been below `current` for the track's
   /// [`TrackDemand::downswitch_hold`]; `current` until then.
   fn downgrade_after_hold(
