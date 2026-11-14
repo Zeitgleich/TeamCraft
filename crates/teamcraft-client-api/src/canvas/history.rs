@@ -136,7 +136,7 @@ pub fn page_at(state: &CanvasState, version: &CanvasVersion) -> Result<Vec<Block
     .transact()
     .encode_state_from_snapshot(&version.snapshot, &mut encoder)
     .map_err(|_| CanvasError::Apply)?;
-  Ok(CanvasDoc::from_updates(&[encoder.to_vec()])?.blocks())
+  Ok(CanvasDoc::from_page_updates(state.maybe_page.as_ref(), &[encoder.to_vec()])?.blocks())
 }
 
 /// What the editor hands the core to compact the list: all updates as one, and the history with
@@ -556,6 +556,7 @@ mod tests {
       text: "d".into(),
       is_checked: false,
       spans: Vec::new(),
+      maybe_file: None,
     });
     page.restore(&target).unwrap();
     assert_eq!(page.blocks(), target);

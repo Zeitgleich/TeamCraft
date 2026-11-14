@@ -25,6 +25,25 @@
 //!
 //! A client from before inline formatting reads the text without it, and its edits leave the
 //! formatting of the text around them in place.
+//!
+//! More pages, moved blocks and embedded files (issue #1456):
+//!
+//! - A channel's first page is the document above. Each further page is a Yjs document of its own
+//!   whose root array is `page_blocks` instead of `blocks`, with its edits in the same hidden
+//!   messages carrying the page's ID ([`CanvasPageId`]). A client from before pages ignores the ID
+//!   and merges them into the first page, where a root it doesn't read stays out of sight.
+//! - The first page's document lists the further pages: `pages`, a Y.Array of Y.Map with `id`,
+//!   `title` (string) and `deleted` (bool). A deleted page stays listed as deleted, so an edit of it
+//!   that arrives later can't bring it back.
+//! - Yjs has no move: a moved block is removed and inserted again at its new place with its ID,
+//!   kind, check mark, text and formatting. Typing into the block on another device while it moves
+//!   is lost; two devices moving it at once leave two copies with one ID, of which every client
+//!   shows the first.
+//! - A file of the channel is a block of kind `file` with `file_message` (the message's server ID)
+//!   and `file_id` (the server's attachment ID) as strings; its text is the file's name, which a
+//!   client from before files shows as a paragraph. The file is the channel's encrypted attachment
+//!   as its message names it: the page holds no key, and a device shows the file only if it holds
+//!   that message.
 
 mod history;
 
@@ -34,7 +53,7 @@ pub use history::{
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::Base64Bytes;
+use teamcraft_proto::{Base64Bytes, CanvasPageId, MessageId};
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
 use yrs::undo::{Options as UndoOptions, UndoManager};
@@ -46,13 +65,27 @@ use yrs::{
 
 use crate::markdown;
 
-/// The root array of blocks.
+/// The root array of blocks of a channel's first page.
 const BLOCKS: &str = "blocks";
+/// The root array of blocks of a further page, out of sight of clients from before pages.
+const PAGE_BLOCKS: &str = "page_blocks";
+/// The root array of the first page that lists the further pages.
+const PAGES: &str = "pages";
 /// The keys of a block's map.
 const ID: &str = "id";
 const KIND: &str = "kind";
 const CHECKED: &str = "checked";
 const TEXT: &str = "text";
+/// The keys of a file block's map.
+const FILE_MESSAGE: &str = "file_message";
+const FILE_ID: &str = "file_id";
+/// The keys of a page's entry in the list, besides its ID.
+const TITLE: &str = "title";
+const DELETED: &str = "deleted";
+/// The longest page title kept, in characters.
+pub const MAX_PAGE_TITLE_CHARS: usize = 100;
+/// The longest attachment ID a file block may name (the server's IDs are decimal numbers).
+const MAX_FILE_ID_LEN: usize = 20;
 /// The inline formatting attribute of a link; the marks' are in [`InlineMark::attribute`].
 const LINK: &str = "link";
 /// The origin of updates applied from outside: what undo leaves alone.
@@ -83,6 +116,9 @@ pub struct CanvasState {
   /// before the rest of `updates`.
   #[serde(default)]
   pub history: Vec<CanvasMark>,
+  /// The further page these are the updates of; `None` for the channel's first page.
+  #[serde(rename = "page", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_page: Option<CanvasPageId>,
 }
 
 /// What a block is shown as.
@@ -97,10 +133,12 @@ pub enum BlockKind {
   Check,
   Quote,
   Code,
+  /// A file of the channel shown in the page ([`Block::maybe_file`]).
+  File,
 }
 
 impl BlockKind {
-  pub const ALL: [Self; 9] = [
+  pub const ALL: [Self; 10] = [
     Self::Paragraph,
     Self::Heading,
     Self::Heading2,
@@ -110,6 +148,7 @@ impl BlockKind {
     Self::Check,
     Self::Quote,
     Self::Code,
+    Self::File,
   ];
 
   /// The block's kind as the document stores it.
@@ -124,6 +163,7 @@ impl BlockKind {
       Self::Check => "check",
       Self::Quote => "quote",
       Self::Code => "code",
+      Self::File => "file",
     }
   }
 
@@ -144,6 +184,11 @@ impl BlockKind {
   /// in it.
   pub fn is_code(self) -> bool {
     self == Self::Code
+  }
+
+  /// Whether the block shows something else than its text (a file), which isn't typed into.
+  pub fn is_embed(self) -> bool {
+    self == Self::File
   }
 
   /// The kind typed at the start of a paragraph turns it into ("# ", "- ", "1. ", "[] ", "> ",
@@ -179,6 +224,36 @@ pub struct Block {
   pub is_checked: bool,
   /// The formatted stretches of `text`, in order and not overlapping; the rest is plain.
   pub spans: Vec<TextSpan>,
+  /// The channel's file a [`BlockKind::File`] block shows; `None` for other kinds, and for a file
+  /// block whose reference isn't one (another client's).
+  pub maybe_file: Option<FileRef>,
+}
+
+/// A file of the channel as a page names it: the message it was sent with and its attachment.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FileRef {
+  pub message: MessageId,
+  /// The server's attachment ID (`FileInfo::file_id`).
+  pub file_id: String,
+}
+
+impl FileRef {
+  /// A reference another member's client stored, if it names a sent message and a server file ID.
+  fn read(message: &str, file_id: &str) -> Option<Self> {
+    let is_file_id =
+      !file_id.is_empty() && file_id.len() <= MAX_FILE_ID_LEN && file_id.bytes().all(|b| b.is_ascii_digit());
+    Some(Self {
+      message: message.parse().ok()?,
+      file_id: is_file_id.then(|| file_id.to_owned())?,
+    })
+  }
+}
+
+/// A further page of a channel as the first page lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PageEntry {
+  pub id: CanvasPageId,
+  pub title: String,
 }
 
 impl Block {
@@ -325,6 +400,8 @@ pub enum CanvasError {
 pub struct CanvasDoc {
   doc: Doc,
   blocks: ArrayRef,
+  /// The further pages; only the first page's document lists them.
+  pages: ArrayRef,
   /// Block IDs this instance handed out: with the document's random client ID, unique.
   next_block: u64,
   /// This editor's own edits, for undo and redo ([`CanvasDoc::enable_undo`]).
@@ -346,13 +423,21 @@ impl Default for CanvasDoc {
 }
 
 impl CanvasDoc {
-  /// An empty page under a new random client ID (one per editor instance, as Yjs requires).
+  /// An empty first page of a channel under a new random client ID (one per editor instance, as
+  /// Yjs requires).
   pub fn new() -> Self {
+    Self::for_page(None)
+  }
+
+  /// An empty page: the channel's first one (`None`), or a further one.
+  pub fn for_page(maybe_page: Option<&CanvasPageId>) -> Self {
     let doc = Doc::new();
-    let blocks = doc.get_or_insert_array(BLOCKS);
+    let blocks = doc.get_or_insert_array(if maybe_page.is_some() { PAGE_BLOCKS } else { BLOCKS });
+    let pages = doc.get_or_insert_array(PAGES);
     Self {
       doc,
       blocks,
+      pages,
       next_block: 0,
       maybe_undo: None,
     }
@@ -407,9 +492,17 @@ impl CanvasDoc {
     self.maybe_undo.as_ref().is_some_and(|log| log.manager.can_redo())
   }
 
-  /// The page made of `updates`, in any order.
+  /// The channel's first page made of `updates`, in any order.
   pub fn from_updates<B: AsRef<[u8]>>(updates: &[B]) -> Result<Self, CanvasError> {
-    let mut page = Self::new();
+    Self::from_page_updates(None, updates)
+  }
+
+  /// A page made of `updates`, in any order: the first one (`None`) or a further one.
+  pub fn from_page_updates<B: AsRef<[u8]>>(
+    maybe_page: Option<&CanvasPageId>,
+    updates: &[B],
+  ) -> Result<Self, CanvasError> {
+    let mut page = Self::for_page(maybe_page);
     page.sync(updates)?;
     Ok(page)
   }
@@ -433,16 +526,131 @@ impl CanvasDoc {
       .map_err(|_| CanvasError::Apply)
   }
 
-  /// The blocks in page order.
+  /// The blocks in page order. A block moved on two devices at once is there twice with one ID:
+  /// only the first counts, on every device, and edits find that one.
   pub fn blocks(&self) -> Vec<Block> {
     let txn = self.doc.transact();
     let mut blocks = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for index in 0..self.blocks.len(&txn) {
       if let Some(Out::YMap(map)) = self.blocks.get(&txn, index) {
-        blocks.push(read_block(&txn, &map));
+        let block = read_block(&txn, &map);
+        if seen.insert(block.id.clone()) {
+          blocks.push(block);
+        }
       }
     }
     blocks
+  }
+
+  /// Moves a block right after `maybe_after` (to the top without one), with its ID, kind, check
+  /// mark, text and formatting. `None` when either block is gone or it stays where it is.
+  pub fn move_block(&mut self, id: &str, maybe_after: Option<&str>) -> Option<Vec<u8>> {
+    if maybe_after == Some(id) {
+      return None;
+    }
+    let mut txn = self.doc.transact_mut();
+    let (from, map) = find(&txn, &self.blocks, id)?;
+    let after_index = match maybe_after {
+      Some(after) => Some(find(&txn, &self.blocks, after)?.0),
+      None => None,
+    };
+    let to = match after_index {
+      Some(after) if after < from => after + 1,
+      Some(after) => after,
+      None => 0,
+    };
+    if to == from {
+      return None;
+    }
+    let block = read_block(&txn, &map);
+    // A kind of a newer version reads as a paragraph here; it moves as what it is.
+    let maybe_raw_kind = string(&txn, &map, KIND);
+    self.blocks.remove(&mut txn, from);
+    let moved = insert_block_at(&mut txn, &self.blocks, to, &block);
+    if let Some(raw_kind) = maybe_raw_kind.filter(|raw| raw != block.kind.tag()) {
+      moved.insert(&mut txn, KIND, raw_kind);
+    }
+    Some(txn.encode_update_v1())
+  }
+
+  /// Adds a block showing a file of the channel after `maybe_after` (at the start without one),
+  /// with the file's name as its text.
+  pub fn insert_file(&mut self, maybe_after: Option<&str>, file: FileRef, name: &str) -> (String, Vec<u8>) {
+    let id = self.next_block_id();
+    let mut txn = self.doc.transact_mut();
+    let index = match maybe_after {
+      Some(after) => find(&txn, &self.blocks, after).map_or(self.blocks.len(&txn), |(index, _)| index + 1),
+      None => 0,
+    };
+    let block = Block {
+      id: id.clone(),
+      kind: BlockKind::File,
+      text: name.to_owned(),
+      is_checked: false,
+      spans: Vec::new(),
+      maybe_file: Some(file),
+    };
+    insert_block_at(&mut txn, &self.blocks, index, &block);
+    let update = txn.encode_update_v1();
+    (id, update)
+  }
+
+  /// The further pages of the channel, in the order they were added, without deleted ones. Read
+  /// from the first page's document.
+  pub fn pages(&self) -> Vec<PageEntry> {
+    let txn = self.doc.transact();
+    let mut pages: Vec<PageEntry> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for index in 0..self.pages.len(&txn) {
+      let Some(Out::YMap(map)) = self.pages.get(&txn, index) else {
+        continue;
+      };
+      let Some(id) = string(&txn, &map, ID).and_then(|id| CanvasPageId::parse(&id)) else {
+        continue;
+      };
+      if !seen.insert(id.clone()) || matches!(map.get(&txn, DELETED), Some(Out::Any(Any::Bool(true)))) {
+        continue;
+      }
+      let title = string(&txn, &map, TITLE)
+        .map(|title| page_title(&title))
+        .unwrap_or_default();
+      pages.push(PageEntry { id, title });
+    }
+    pages
+  }
+
+  /// Adds a further page to the first page's list; its ID and the update.
+  pub fn add_page(&mut self, title: &str) -> Option<(CanvasPageId, Vec<u8>)> {
+    let id = self.next_page_id()?;
+    let mut txn = self.doc.transact_mut();
+    let index = self.pages.len(&txn);
+    let map = self.pages.insert(&mut txn, index, MapPrelim::default());
+    map.insert(&mut txn, ID, id.as_str());
+    map.insert(&mut txn, TITLE, page_title(title));
+    map.insert(&mut txn, DELETED, false);
+    let update = txn.encode_update_v1();
+    Some((id, update))
+  }
+
+  /// Renames a further page; `None` when it is gone or the title doesn't change.
+  pub fn rename_page(&mut self, id: &CanvasPageId, title: &str) -> Option<Vec<u8>> {
+    let title = page_title(title);
+    let mut txn = self.doc.transact_mut();
+    let map = find_page(&txn, &self.pages, id)?;
+    if string(&txn, &map, TITLE).as_deref() == Some(title.as_str()) {
+      return None;
+    }
+    map.insert(&mut txn, TITLE, title);
+    Some(txn.encode_update_v1())
+  }
+
+  /// Deletes a further page: it stays listed as deleted, so no later edit brings it back.
+  pub fn delete_page(&mut self, id: &CanvasPageId) -> Option<Vec<u8>> {
+    let mut txn = self.doc.transact_mut();
+    let map = find_page(&txn, &self.pages, id)?;
+    map.insert(&mut txn, DELETED, true);
+    Some(txn.encode_update_v1())
   }
 
   /// Replaces a block's text with `text`, as the change from the current one: the part both
@@ -480,6 +688,7 @@ impl CanvasDoc {
       text: text.to_owned(),
       is_checked: false,
       spans: Vec::new(),
+      maybe_file: None,
     };
     insert_block_at(&mut txn, &self.blocks, index, &block);
     let update = txn.encode_update_v1();
@@ -506,6 +715,7 @@ impl CanvasDoc {
       text: block.text[to..].to_owned(),
       is_checked: false,
       spans: spans_within(&block.spans, to, block.text.len()),
+      maybe_file: None,
     };
     if let Some(Out::YText(text)) = map.get(&txn, TEXT)
       && block.text.len() > from
@@ -637,7 +847,9 @@ impl CanvasDoc {
             write_block(&mut txn, &map, block);
           }
         },
-        None => insert_block_at(&mut txn, &self.blocks, position, block),
+        None => {
+          insert_block_at(&mut txn, &self.blocks, position, block);
+        },
       }
     }
     let length = self.blocks.len(&txn);
@@ -652,6 +864,12 @@ impl CanvasDoc {
     let id = format!("{:x}-{:x}", self.doc.client_id().get(), self.next_block);
     self.next_block += 1;
     id
+  }
+
+  /// Unique like block IDs (the document's random client ID and a counter); lowercase hex digits
+  /// and one dash, within the rules of [`CanvasPageId`].
+  fn next_page_id(&mut self) -> Option<CanvasPageId> {
+    CanvasPageId::parse(&self.next_block_id())
   }
 
   fn format(&mut self, id: &str, start: u32, end: u32, attribute: &str, value: Any) -> Option<Vec<u8>> {
@@ -858,6 +1076,28 @@ fn byte_index(bytes: usize) -> u32 {
   u32::try_from(bytes).unwrap_or(u32::MAX)
 }
 
+/// A page title as kept: one line, trimmed, at most [`MAX_PAGE_TITLE_CHARS`] characters.
+pub fn page_title(title: &str) -> String {
+  let line: String = title
+    .chars()
+    .map(|character| if character.is_control() { ' ' } else { character })
+    .collect();
+  line
+    .trim()
+    .chars()
+    .take(MAX_PAGE_TITLE_CHARS)
+    .collect::<String>()
+    .trim_end()
+    .to_owned()
+}
+
+fn find_page<T: ReadTxn>(txn: &T, pages: &ArrayRef, id: &CanvasPageId) -> Option<MapRef> {
+  (0..pages.len(txn)).find_map(|index| match pages.get(txn, index) {
+    Some(Out::YMap(map)) if string(txn, &map, ID).as_deref() == Some(id.as_str()) => Some(map),
+    _ => None,
+  })
+}
+
 fn find<T: ReadTxn>(txn: &T, blocks: &ArrayRef, id: &str) -> Option<(u32, MapRef)> {
   (0..blocks.len(txn)).find_map(|index| match blocks.get(txn, index) {
     Some(Out::YMap(map)) if string(txn, &map, ID).as_deref() == Some(id) => Some((index, map)),
@@ -874,6 +1114,12 @@ fn write_block(txn: &mut TransactionMut, map: &MapRef, block: &Block) {
   if current.is_checked != block.is_checked {
     map.insert(txn, CHECKED, block.is_checked);
   }
+  if current.maybe_file != block.maybe_file
+    && let Some(file) = &block.maybe_file
+  {
+    map.insert(txn, FILE_MESSAGE, file.message.to_string());
+    map.insert(txn, FILE_ID, file.file_id.as_str());
+  }
   match map.get(txn, TEXT) {
     Some(Out::YText(text)) => {
       if let Some(edit) = TextEdit::between(&current.text, &block.text) {
@@ -889,13 +1135,18 @@ fn write_block(txn: &mut TransactionMut, map: &MapRef, block: &Block) {
 }
 
 /// A new block at `index` of the array, with `block`'s ID, kind, check mark, text and formatting.
-fn insert_block_at(txn: &mut TransactionMut, blocks: &ArrayRef, index: u32, block: &Block) {
+fn insert_block_at(txn: &mut TransactionMut, blocks: &ArrayRef, index: u32, block: &Block) -> MapRef {
   let map = blocks.insert(txn, index, MapPrelim::default());
   map.insert(txn, ID, block.id.as_str());
   map.insert(txn, KIND, block.kind.tag());
   map.insert(txn, CHECKED, block.is_checked);
+  if let Some(file) = &block.maybe_file {
+    map.insert(txn, FILE_MESSAGE, file.message.to_string());
+    map.insert(txn, FILE_ID, file.file_id.as_str());
+  }
   let text = map.insert(txn, TEXT, TextPrelim::new(block.text.as_str()));
   write_spans(txn, &text, &block.spans);
+  map
 }
 
 /// Brings the formatting this version knows of `text` to `target`, stretch by stretch and only
@@ -969,12 +1220,17 @@ fn read_block<T: ReadTxn>(txn: &T, map: &MapRef) -> Block {
     Some(Out::YText(text)) => read_text(txn, &text),
     _ => (String::new(), Vec::new()),
   };
+  let kind = BlockKind::from_tag(&string(txn, map, KIND).unwrap_or_default());
+  let maybe_file = (kind == BlockKind::File)
+    .then(|| FileRef::read(&string(txn, map, FILE_MESSAGE)?, &string(txn, map, FILE_ID)?))
+    .flatten();
   Block {
     id: string(txn, map, ID).unwrap_or_default(),
-    kind: BlockKind::from_tag(&string(txn, map, KIND).unwrap_or_default()),
+    kind,
     text,
     is_checked: matches!(map.get(txn, CHECKED), Some(Out::Any(Any::Bool(true)))),
     spans,
+    maybe_file,
   }
 }
 
@@ -1603,5 +1859,230 @@ mod tests {
     assert_eq!(caret_after_change("one two", "one"), 3);
     assert_eq!(caret_after_change("one", "one two"), 7);
     assert_eq!(caret_after_change("one", "X one"), 2);
+  }
+
+  mod moves {
+    use super::*;
+
+    fn page_of(texts: &[&str]) -> (CanvasDoc, Vec<String>) {
+      let mut page = CanvasDoc::new();
+      let mut ids: Vec<String> = Vec::new();
+      for text in texts {
+        let (id, _) = page.insert_block(ids.last().map(String::as_str), BlockKind::Paragraph, text);
+        ids.push(id);
+      }
+      (page, ids)
+    }
+
+    #[test]
+    fn a_block_moves_with_its_id_kind_and_formatting() {
+      let (mut page, ids) = page_of(&["a", "b", "c"]);
+      page.set_kind(&ids[0], BlockKind::Check).unwrap();
+      page.set_checked(&ids[0], true).unwrap();
+      page.set_mark(&ids[0], 0, 1, InlineMark::Bold, true).unwrap();
+      let before = page.blocks()[0].clone();
+      page.move_block(&ids[0], Some(&ids[2])).unwrap();
+      assert_eq!(texts(&page), ["b", "c", "a"]);
+      assert_eq!(page.blocks()[2], before);
+      page.move_block(&ids[2], None).unwrap();
+      assert_eq!(texts(&page), ["c", "b", "a"]);
+      assert!(page.move_block(&ids[1], Some(&ids[2])).is_none(), "already there");
+      assert_eq!(texts(&page), ["c", "b", "a"]);
+    }
+
+    #[test]
+    fn staying_or_a_gone_neighbour_changes_nothing() {
+      let (mut page, ids) = page_of(&["a", "b"]);
+      assert!(page.move_block(&ids[1], Some(&ids[0])).is_none());
+      assert!(page.move_block(&ids[0], None).is_none());
+      assert!(page.move_block(&ids[0], Some(&ids[0])).is_none());
+      assert!(page.move_block(&ids[0], Some("gone")).is_none());
+      assert_eq!(texts(&page), ["a", "b"]);
+    }
+
+    #[test]
+    fn a_move_goes_to_the_others_and_undoes() {
+      let (mut alice, mut bob) = pair();
+      let first = alice.page.blocks()[0].id.clone();
+      let (second, add) = alice
+        .page
+        .insert_block(Some(&first), BlockKind::Paragraph, "Notes");
+      alice.known.push(add.clone());
+      bob.receive([&add]);
+      alice.page.enable_undo(|| 0);
+      let moved = alice.edit(|page| page.move_block(&second, None)).unwrap();
+      bob.receive([&moved]);
+      assert_eq!(bob.texts(), ["Notes", "Agenda"]);
+      let undone = alice.page.undo().unwrap();
+      bob.receive([&undone]);
+      assert_eq!(bob.texts(), ["Agenda", "Notes"]);
+      assert_eq!(bob.page.blocks()[1].id, second);
+    }
+
+    #[test]
+    fn moved_on_two_devices_at_once_it_shows_once_everywhere() {
+      let (mut alice, mut bob) = pair();
+      let agenda = alice.page.blocks()[0].id.clone();
+      let mut adds = Vec::new();
+      let mut previous = agenda.clone();
+      for text in ["x", "y"] {
+        let (id, update) = alice
+          .page
+          .insert_block(Some(&previous), BlockKind::Paragraph, text);
+        alice.known.push(update.clone());
+        adds.push(update);
+        previous = id;
+      }
+      bob.receive(&adds);
+      let from_alice = alice
+        .edit(|page| page.move_block(&agenda, Some(&previous)))
+        .unwrap();
+      let x = bob.page.blocks()[1].id.clone();
+      let from_bob = bob.edit(|page| page.move_block(&agenda, Some(&x))).unwrap();
+      alice.receive([&from_bob]);
+      bob.receive([&from_alice]);
+      assert_eq!(alice.texts(), bob.texts());
+      assert_eq!(alice.texts().iter().filter(|text| *text == "Agenda").count(), 1);
+      // An edit finds the copy that shows.
+      let typed = alice.edit(|page| page.set_text(&agenda, "Agenda!")).unwrap();
+      bob.receive([&typed]);
+      assert!(bob.texts().contains(&"Agenda!".to_owned()));
+    }
+
+    #[test]
+    fn a_kind_of_a_newer_version_moves_as_it_is() {
+      let (mut page, ids) = page_of(&["a", "b"]);
+      {
+        let mut txn = page.doc.transact_mut();
+        let (_, map) = find(&txn, &page.blocks, &ids[0]).unwrap();
+        map.insert(&mut txn, KIND, "diagram");
+      }
+      page.move_block(&ids[0], Some(&ids[1])).unwrap();
+      let txn = page.doc.transact();
+      let (index, map) = find(&txn, &page.blocks, &ids[0]).unwrap();
+      assert_eq!(index, 1);
+      assert_eq!(string(&txn, &map, KIND).as_deref(), Some("diagram"));
+    }
+  }
+
+  mod pages {
+    use super::*;
+
+    #[test]
+    fn pages_are_added_renamed_and_deleted_for_everyone() {
+      let mut alice = CanvasDoc::new();
+      let (id, added) = alice.add_page("  Minutes\n2026 ").unwrap();
+      assert!(id.is_valid());
+      let mut bob = CanvasDoc::from_updates(std::slice::from_ref(&added)).unwrap();
+      assert_eq!(
+        bob.pages(),
+        [PageEntry {
+          id: id.clone(),
+          title: "Minutes 2026".to_owned()
+        }]
+      );
+      let renamed = bob.rename_page(&id, "Decisions").unwrap();
+      assert!(bob.rename_page(&id, "Decisions").is_none(), "nothing changes");
+      alice.sync(&[&added, &renamed]).unwrap();
+      assert_eq!(alice.pages()[0].title, "Decisions");
+      let deleted = alice.delete_page(&id).unwrap();
+      // A rename that crossed the deletion doesn't bring it back.
+      let late = bob.rename_page(&id, "Late").unwrap();
+      for page in [&mut alice, &mut bob] {
+        page.sync(&[&added, &renamed, &deleted, &late]).unwrap();
+        assert!(page.pages().is_empty());
+      }
+    }
+
+    #[test]
+    fn titles_are_one_trimmed_line_of_bounded_length() {
+      assert_eq!(page_title("  a\tb\n "), "a b");
+      assert_eq!(page_title(&"x".repeat(500)).chars().count(), MAX_PAGE_TITLE_CHARS);
+    }
+
+    #[test]
+    fn listed_ids_that_break_the_rules_are_left_out() {
+      let mut page = CanvasDoc::new();
+      {
+        let mut txn = page.doc.transact_mut();
+        let map = page.pages.insert(&mut txn, 0, MapPrelim::default());
+        map.insert(&mut txn, ID, "../../other");
+      }
+      let (id, _) = page.add_page("Fine").unwrap();
+      assert_eq!(
+        page.pages().iter().map(|entry| &entry.id).collect::<Vec<_>>(),
+        [&id]
+      );
+    }
+
+    #[test]
+    fn a_further_page_is_out_of_sight_on_the_first_one() {
+      let page_id = CanvasPageId::parse("ab-1").unwrap();
+      let mut further = CanvasDoc::for_page(Some(&page_id));
+      let (_, update) = further.insert_block(None, BlockKind::Paragraph, "elsewhere");
+      assert_eq!(texts(&further), ["elsewhere"]);
+      // A client from before pages merges it into the first page: nothing shows there.
+      let mut first = CanvasDoc::new();
+      let (_, own) = first.insert_block(None, BlockKind::Paragraph, "here");
+      first.sync(&[&own, &update]).unwrap();
+      assert_eq!(texts(&first), ["here"]);
+      let again = CanvasDoc::from_page_updates(Some(&page_id), &[&update]).unwrap();
+      assert_eq!(texts(&again), ["elsewhere"]);
+    }
+  }
+
+  mod files {
+    use super::*;
+
+    fn file() -> FileRef {
+      FileRef {
+        message: "1234".parse().unwrap(),
+        file_id: "987".to_owned(),
+      }
+    }
+
+    #[test]
+    fn a_file_block_names_its_message_and_attachment() {
+      let mut page = CanvasDoc::new();
+      let (id, update) = page.insert_file(None, file(), "plan.pdf");
+      let other = CanvasDoc::from_updates(&[update]).unwrap();
+      let block = &other.blocks()[0];
+      assert_eq!(block.id, id);
+      assert_eq!(block.kind, BlockKind::File);
+      assert_eq!(block.text, "plan.pdf", "what a client from before files shows");
+      assert_eq!(block.maybe_file, Some(file()));
+    }
+
+    #[test]
+    fn a_file_block_moves_and_restores_with_its_file() {
+      let mut page = CanvasDoc::new();
+      let (text, _) = page.insert_block(None, BlockKind::Paragraph, "a");
+      let (id, _) = page.insert_file(None, file(), "plan.pdf");
+      let before = page.blocks();
+      page.move_block(&id, Some(&text)).unwrap();
+      assert_eq!(page.blocks()[1].maybe_file, Some(file()));
+      page.remove_block(&id).unwrap();
+      page.restore(&before).unwrap();
+      assert_eq!(page.blocks(), before);
+    }
+
+    #[test]
+    fn a_reference_that_is_none_names_no_file() {
+      let mut page = CanvasDoc::new();
+      let (id, _) = page.insert_file(None, file(), "x");
+      for (message, file_id) in [
+        ("abc", "1"),
+        ("1", "../1"),
+        ("1", ""),
+        ("1", "123456789012345678901"),
+      ] {
+        let mut txn = page.doc.transact_mut();
+        let (_, map) = find(&txn, &page.blocks, &id).unwrap();
+        map.insert(&mut txn, FILE_MESSAGE, message);
+        map.insert(&mut txn, FILE_ID, file_id);
+        drop(txn);
+        assert_eq!(page.blocks()[0].maybe_file, None, "{message} {file_id}");
+      }
+    }
   }
 }

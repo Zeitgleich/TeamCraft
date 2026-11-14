@@ -367,22 +367,46 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.set_bookmarks(conversation, bookmarks);
   }
 
-  fn canvas(&self, conversation: ConversationId) -> teamcraft_client_api::canvas::CanvasState {
-    self.chat.canvas(conversation)
+  fn canvas(
+    &self,
+    conversation: ConversationId,
+    maybe_page: Option<&teamcraft_proto::CanvasPageId>,
+  ) -> teamcraft_client_api::canvas::CanvasState {
+    self.chat.canvas(conversation, maybe_page)
   }
 
-  fn edit_canvas(&self, conversation: ConversationId, update: Vec<u8>, is_snapshot: bool) {
-    self.chat.edit_canvas(conversation, update, is_snapshot);
+  fn edit_canvas(
+    &self,
+    conversation: ConversationId,
+    maybe_page: Option<&teamcraft_proto::CanvasPageId>,
+    update: Vec<u8>,
+    is_snapshot: bool,
+  ) {
+    self
+      .chat
+      .edit_canvas(conversation, maybe_page, update, is_snapshot);
   }
 
   fn compact_canvas(
     &self,
     conversation: ConversationId,
+    maybe_page: Option<&teamcraft_proto::CanvasPageId>,
     revision: u64,
     merged: Vec<u8>,
     history: Vec<teamcraft_client_api::canvas::CanvasMark>,
   ) {
-    self.chat.compact_canvas(conversation, revision, merged, history);
+    self
+      .chat
+      .compact_canvas(conversation, maybe_page, revision, merged, history);
+  }
+
+  fn conversation_file(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: &str,
+  ) -> Option<FileInfo> {
+    self.chat.conversation_file(conversation, message, file_id)
   }
 
   fn remove_member(&self, conversation: ConversationId, user: UserId) {

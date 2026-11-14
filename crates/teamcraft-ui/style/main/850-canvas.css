@@ -316,3 +316,267 @@ textarea.canvas-input {
     max-height: 30vh;
   }
 }
+
+/* ---- Pages, moving blocks and files in the notes (#1456) ---- */
+
+.canvas-page-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.canvas-pages {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* One row that scrolls sideways at phone width instead of wrapping into several. */
+.canvas-page-tabs {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  gap: 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.canvas-page-tab {
+  flex: none;
+  max-width: 14rem;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.canvas-page-tab:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.canvas-page-tab:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.canvas-page-tab[aria-selected="true"] {
+  background: var(--surface-2);
+  color: var(--text);
+  font-weight: var(--weight-semibold);
+}
+
+.canvas-page-actions {
+  flex: none;
+  display: flex;
+  gap: 2px;
+}
+
+.canvas-page-dialog {
+  flex: 1 1 100%;
+  margin: 0;
+}
+
+.canvas-page-dialog-title {
+  margin: 0;
+  font-weight: var(--weight-semibold);
+  overflow-wrap: anywhere;
+}
+
+/* The handle shows where the pointer or the focus is; touch screens always show it. */
+.canvas-handle {
+  flex: none;
+  width: 20px;
+  height: 28px;
+  margin-top: 2px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-muted);
+  display: grid;
+  place-items: center;
+  cursor: grab;
+  opacity: 0;
+  touch-action: none;
+  transition: opacity var(--dur-fast) var(--ease-standard);
+}
+
+.canvas-block:hover .canvas-handle,
+.canvas-block:focus-within .canvas-handle,
+.canvas-handle:focus-visible {
+  opacity: 1;
+}
+
+.canvas-handle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+@media (hover: none) {
+  .canvas-handle {
+    opacity: 0.6;
+  }
+}
+
+.canvas-page.is-dragging,
+.canvas-page.is-dragging .canvas-handle {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.canvas-block {
+  position: relative;
+}
+
+/* The dragged block follows the pointer 1:1 (its transform is set while dragging), lifted. */
+.canvas-block.is-dragged {
+  z-index: 2;
+  opacity: 0.85;
+  border-radius: var(--radius-xs);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+/* Where it lands: a line in the gap. */
+.canvas-block.is-drop-before::before,
+.canvas-block.is-drop-after::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  pointer-events: none;
+}
+
+.canvas-block.is-drop-before::before {
+  top: -2px;
+}
+
+.canvas-block.is-drop-after::after {
+  bottom: -2px;
+}
+
+.canvas-embed {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  outline: none;
+}
+
+.canvas-embed:focus-visible {
+  border-color: var(--accent);
+}
+
+.canvas-file .msg-files {
+  margin: 0;
+}
+
+.canvas-file-missing {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+}
+
+.canvas-file-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+
+.canvas-file-picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.canvas-file-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.canvas-file-picker-head h3 {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+}
+
+.canvas-file-list {
+  max-height: 40vh;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.canvas-file-choice {
+  width: 100%;
+  padding: var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+}
+
+.canvas-file-choice:hover {
+  background: var(--surface-2);
+}
+
+.canvas-file-choice:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.canvas-file-choice .canvas-file-name {
+  flex: 1;
+}
+
+.canvas-file-size {
+  flex: none;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .canvas-handle {
+    transition: none;
+  }
+
+  /* No travelling block: the line alone shows where it lands. */
+  .canvas-block.is-dragged {
+    transform: none !important;
+  }
+}

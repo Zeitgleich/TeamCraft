@@ -10,16 +10,28 @@
 //! With each update the core keeps who sent it and when (issue #1245), and with a compaction the
 //! page's version history the editor made of the compacted updates: what each stretch of edits
 //! changed, as opaque bytes, so the page's earlier versions can still be shown and restored.
+//!
+//! A channel has its first page and, since issue #1456, further pages named by an ID inside their
+//! edit messages; each is kept as a record of its own ([`PageKey`]).
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{Base64Bytes, ConversationId, UserId};
+use teamcraft_proto::{Base64Bytes, CanvasPageId, ConversationId, UserId};
 
 use crate::error::CoreError;
 use crate::records;
 use crate::store::{LocalStore, Table};
 
-/// The key prefix of a conversation's page in [`Table::Account`], next to its bookmarks.
+/// The key prefix of a conversation's pages in [`Table::Account`], next to its bookmarks:
+/// `canvas/{conversation}` for the first page, `canvas/{conversation}/{page}` for a further one.
 pub const CANVAS_PREFIX: &str = "canvas/";
+
+/// Which page of which conversation a record holds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PageKey {
+  pub conversation: ConversationId,
+  /// A further page; `None` for the first. Only IDs that keep [`CanvasPageId::parse`]'s rules.
+  pub maybe_page: Option<CanvasPageId>,
+}
 
 /// Who sent an update and when (`teamcraft_client_api::canvas::CanvasOrigin`, kept here as the
 /// core builds without the UI's types too).
@@ -62,9 +74,29 @@ pub struct CanvasRecord {
   pub history: Vec<CanvasMark>,
 }
 
-/// The page of `conversation` as this device holds it; empty when it holds none.
-pub fn load(store: &impl LocalStore, conversation: ConversationId) -> Result<CanvasRecord, CoreError> {
-  Ok(records::get_json(store, Table::Account, &key(conversation))?.unwrap_or_default())
+impl PageKey {
+  pub fn new(conversation: ConversationId, maybe_page: Option<&CanvasPageId>) -> Self {
+    Self {
+      conversation,
+      maybe_page: maybe_page.cloned(),
+    }
+  }
+
+  fn store_key(&self) -> Option<String> {
+    match &self.maybe_page {
+      None => Some(format!("{CANVAS_PREFIX}{}", self.conversation)),
+      Some(page) if page.is_valid() => Some(format!("{CANVAS_PREFIX}{}/{page}", self.conversation)),
+      Some(_) => None,
+    }
+  }
+}
+
+/// The page as this device holds it; empty when it holds none (or for an ID beyond the rules).
+pub fn load(store: &impl LocalStore, page: &PageKey) -> Result<CanvasRecord, CoreError> {
+  let Some(key) = page.store_key() else {
+    return Ok(CanvasRecord::default());
+  };
+  Ok(records::get_json(store, Table::Account, &key)?.unwrap_or_default())
 }
 
 /// Keeps an update of the page by `by` at `at_ms`: an own edit at once, another member's when it
@@ -72,13 +104,16 @@ pub fn load(store: &impl LocalStore, conversation: ConversationId) -> Result<Can
 /// history read twice) changes nothing.
 pub fn take_update(
   store: &impl LocalStore,
-  conversation: ConversationId,
+  page: &PageKey,
   update: &Base64Bytes,
   is_snapshot: bool,
   by: UserId,
   at_ms: i64,
 ) -> Result<(), CoreError> {
-  let mut record = load(store, conversation)?;
+  let Some(key) = page.store_key() else {
+    return Ok(());
+  };
+  let mut record = load(store, page)?;
   if record.updates.contains(update) {
     return Ok(());
   }
@@ -99,18 +134,21 @@ pub fn take_update(
   } else {
     record.updates_since_snapshot.saturating_add(1)
   };
-  records::put_json(store, Table::Account, &key(conversation), &record)
+  records::put_json(store, Table::Account, &key, &record)
 }
 
 /// Gives an own update the server's time once it was sent: kept at once with the device's time, it
 /// then counts at the time every other device sees for it.
 pub fn settle_time(
   store: &impl LocalStore,
-  conversation: ConversationId,
+  page: &PageKey,
   update: &Base64Bytes,
   at_ms: i64,
 ) -> Result<(), CoreError> {
-  let mut record = load(store, conversation)?;
+  let Some(key) = page.store_key() else {
+    return Ok(());
+  };
+  let mut record = load(store, page)?;
   let missing = record.updates.len().saturating_sub(record.origins.len());
   let maybe_origin = record
     .updates
@@ -123,7 +161,7 @@ pub fn settle_time(
     Some(origin) if origin.at_ms != at_ms => {
       origin.at_ms = at_ms;
       record.revision += 1;
-      records::put_json(store, Table::Account, &key(conversation), &record)
+      records::put_json(store, Table::Account, &key, &record)
     },
     _ => Ok(()),
   }
@@ -134,12 +172,15 @@ pub fn settle_time(
 /// update that arrived since then keeps the list as it is, and the editor compacts again later.
 pub fn compact(
   store: &impl LocalStore,
-  conversation: ConversationId,
+  page: &PageKey,
   revision: u64,
   merged: Vec<u8>,
   history: Vec<CanvasMark>,
 ) -> Result<bool, CoreError> {
-  let mut record = load(store, conversation)?;
+  let Some(key) = page.store_key() else {
+    return Ok(false);
+  };
+  let mut record = load(store, page)?;
   if record.revision != revision || record.updates.is_empty() {
     return Ok(false);
   }
@@ -148,12 +189,8 @@ pub fn compact(
   record.is_compacted = true;
   record.history = history;
   record.revision += 1;
-  records::put_json(store, Table::Account, &key(conversation), &record)?;
+  records::put_json(store, Table::Account, &key, &record)?;
   Ok(true)
-}
-
-fn key(conversation: ConversationId) -> String {
-  format!("{CANVAS_PREFIX}{conversation}")
 }
 
 #[cfg(test)]
@@ -162,8 +199,8 @@ mod tests {
   use crate::store::MemoryStore;
   use teamcraft_proto::{Id, Snowflake};
 
-  fn channel() -> ConversationId {
-    ConversationId::from_snowflake(Snowflake::new(7).unwrap())
+  fn channel() -> PageKey {
+    PageKey::new(ConversationId::from_snowflake(Snowflake::new(7).unwrap()), None)
   }
 
   fn bytes(value: &[u8]) -> Base64Bytes {
@@ -178,10 +215,10 @@ mod tests {
   fn updates_are_kept_once_and_count_towards_a_snapshot() {
     let store = MemoryStore::new();
     let channel = channel();
-    take_update(&store, channel, &bytes(b"a"), false, user(), 1).unwrap();
-    take_update(&store, channel, &bytes(b"b"), false, user(), 2).unwrap();
-    take_update(&store, channel, &bytes(b"a"), false, user(), 1).unwrap();
-    let record = load(&store, channel).unwrap();
+    take_update(&store, &channel, &bytes(b"a"), false, user(), 1).unwrap();
+    take_update(&store, &channel, &bytes(b"b"), false, user(), 2).unwrap();
+    take_update(&store, &channel, &bytes(b"a"), false, user(), 1).unwrap();
+    let record = load(&store, &channel).unwrap();
     assert_eq!(record.updates, [bytes(b"a"), bytes(b"b")]);
     assert_eq!(record.revision, 2);
     assert_eq!(record.updates_since_snapshot, 2);
@@ -202,22 +239,22 @@ mod tests {
       "the first time an update came counts"
     );
 
-    take_update(&store, channel, &bytes(b"whole page"), true, user(), 4).unwrap();
-    assert_eq!(load(&store, channel).unwrap().updates_since_snapshot, 0);
+    take_update(&store, &channel, &bytes(b"whole page"), true, user(), 4).unwrap();
+    assert_eq!(load(&store, &channel).unwrap().updates_since_snapshot, 0);
   }
 
   #[test]
   fn a_sent_update_takes_the_servers_time() {
     let store = MemoryStore::new();
     let channel = channel();
-    take_update(&store, channel, &bytes(b"a"), false, user(), 1).unwrap();
-    settle_time(&store, channel, &bytes(b"a"), 7).unwrap();
-    let record = load(&store, channel).unwrap();
+    take_update(&store, &channel, &bytes(b"a"), false, user(), 1).unwrap();
+    settle_time(&store, &channel, &bytes(b"a"), 7).unwrap();
+    let record = load(&store, &channel).unwrap();
     assert_eq!(record.origins[0].map(|origin| origin.at_ms), Some(7));
     assert_eq!(record.revision, 2);
     // Gone in a compaction meanwhile: nothing to settle.
-    settle_time(&store, channel, &bytes(b"b"), 8).unwrap();
-    assert_eq!(load(&store, channel).unwrap().revision, 2);
+    settle_time(&store, &channel, &bytes(b"b"), 8).unwrap();
+    assert_eq!(load(&store, &channel).unwrap().revision, 2);
   }
 
   #[test]
@@ -229,9 +266,9 @@ mod tests {
       updates: vec![bytes(b"a"), bytes(b"b")],
       ..CanvasRecord::default()
     };
-    records::put_json(&store, Table::Account, &key(channel), &old).unwrap();
-    take_update(&store, channel, &bytes(b"c"), false, user(), 5).unwrap();
-    let record = load(&store, channel).unwrap();
+    records::put_json(&store, Table::Account, &channel.store_key().unwrap(), &old).unwrap();
+    take_update(&store, &channel, &bytes(b"c"), false, user(), 5).unwrap();
+    let record = load(&store, &channel).unwrap();
     assert_eq!(record.origins.len(), 3);
     assert_eq!(record.origins[..2], [None, None]);
     assert_eq!(record.origins[2].map(|origin| origin.at_ms), Some(5));
@@ -241,12 +278,12 @@ mod tests {
   fn a_compaction_waits_for_the_list_it_read() {
     let store = MemoryStore::new();
     let channel = channel();
-    take_update(&store, channel, &bytes(b"a"), false, user(), 1).unwrap();
-    take_update(&store, channel, &bytes(b"b"), false, user(), 2).unwrap();
+    take_update(&store, &channel, &bytes(b"a"), false, user(), 1).unwrap();
+    take_update(&store, &channel, &bytes(b"b"), false, user(), 2).unwrap();
     // An update arrived after the editor read revision 2.
-    take_update(&store, channel, &bytes(b"c"), false, user(), 3).unwrap();
-    assert!(!compact(&store, channel, 2, b"ab".to_vec(), Vec::new()).unwrap());
-    assert_eq!(load(&store, channel).unwrap().updates.len(), 3);
+    take_update(&store, &channel, &bytes(b"c"), false, user(), 3).unwrap();
+    assert!(!compact(&store, &channel, 2, b"ab".to_vec(), Vec::new()).unwrap());
+    assert_eq!(load(&store, &channel).unwrap().updates.len(), 3);
 
     let history = vec![CanvasMark {
       maybe_by: Some(user()),
@@ -254,13 +291,34 @@ mod tests {
       until_ms: 3,
       changes: bytes(b"marks"),
     }];
-    assert!(compact(&store, channel, 3, b"abc".to_vec(), history.clone()).unwrap());
-    let record = load(&store, channel).unwrap();
+    assert!(compact(&store, &channel, 3, b"abc".to_vec(), history.clone()).unwrap());
+    let record = load(&store, &channel).unwrap();
     assert_eq!(record.updates, [bytes(b"abc")]);
     assert_eq!(record.origins, [None]);
     assert!(record.is_compacted);
     assert_eq!(record.history, history);
     assert_eq!(record.revision, 4);
     assert_eq!(record.updates_since_snapshot, 3, "a compaction is no snapshot");
+  }
+
+  #[test]
+  fn each_page_keeps_its_own_updates_and_ids_beyond_the_rules_none() {
+    let store = MemoryStore::new();
+    let first = channel();
+    let further = PageKey::new(first.conversation, CanvasPageId::parse("ab-1").as_ref());
+    take_update(&store, &first, &bytes(b"a"), false, user(), 1).unwrap();
+    take_update(&store, &further, &bytes(b"b"), false, user(), 2).unwrap();
+    assert_eq!(load(&store, &first).unwrap().updates, [bytes(b"a")]);
+    assert_eq!(load(&store, &further).unwrap().updates, [bytes(b"b")]);
+    assert_eq!(
+      further.store_key().unwrap(),
+      format!("canvas/{}/ab-1", first.conversation)
+    );
+
+    let hostile: CanvasPageId = serde_json::from_str(r#""../../keys""#).unwrap();
+    let hostile = PageKey::new(first.conversation, Some(&hostile));
+    take_update(&store, &hostile, &bytes(b"c"), false, user(), 3).unwrap();
+    assert_eq!(load(&store, &hostile).unwrap(), CanvasRecord::default());
+    assert!(!compact(&store, &hostile, 0, b"c".to_vec(), Vec::new()).unwrap());
   }
 }

@@ -14,7 +14,7 @@ use teamcraft_client_api::polls::{NewPoll, PollLimits};
 use teamcraft_client_api::receipts::{is_delivered, is_read_by_all, seen_by};
 use teamcraft_client_api::scheduled::{ScheduledMessage, ScheduledOverview, ScheduledStatus, status_of};
 use teamcraft_proto::{
-  Base64Bytes, ClientMessageId, ConversationResponse, LinkPreviewPolicy, SourceChange, SourceId,
+  Base64Bytes, CanvasPageId, ClientMessageId, ConversationResponse, LinkPreviewPolicy, SourceChange, SourceId,
 };
 
 use crate::client::previews::queue_preview;
@@ -448,10 +448,16 @@ impl<S: LocalStore> CoreChatBackend<S> {
     self.control(conversation, MessageContent::Bookmarks { items });
   }
 
-  /// The channel's shared page as this device holds it (e2ee.md §4.11).
-  pub(crate) fn ui_canvas(&self, conversation: ConversationId) -> CanvasState {
-    let record = self.read(crate::canvas::load(self.store_ref(), conversation));
+  /// A page of the channel's shared notes as this device holds it (e2ee.md §4.11).
+  pub(crate) fn ui_canvas(
+    &self,
+    conversation: ConversationId,
+    maybe_page: Option<&CanvasPageId>,
+  ) -> CanvasState {
+    let page = crate::canvas::PageKey::new(conversation, maybe_page);
+    let record = self.read(crate::canvas::load(self.store_ref(), &page));
     CanvasState {
+      maybe_page: page.maybe_page,
       revision: record.revision,
       updates: record.updates,
       updates_since_snapshot: record.updates_since_snapshot,
@@ -482,7 +488,17 @@ impl<S: LocalStore> CoreChatBackend<S> {
 
   /// Keeps an edit of the page and sends it to the other members, where the user may post: the
   /// server refuses the message of anybody else, and the editor is read-only for them.
-  pub(crate) fn ui_edit_canvas(&self, conversation: ConversationId, update: Vec<u8>, is_snapshot: bool) {
+  pub(crate) fn ui_edit_canvas(
+    &self,
+    conversation: ConversationId,
+    maybe_page: Option<&CanvasPageId>,
+    update: Vec<u8>,
+    is_snapshot: bool,
+  ) {
+    if maybe_page.is_some_and(|page| !page.is_valid()) {
+      tracing::warn!(%conversation, "a page edit naming an invalid page was not sent");
+      return;
+    }
     let may_post = self
       .conversations_raw()
       .iter()
@@ -496,6 +512,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       MessageContent::Canvas {
         update: Base64Bytes::new(update),
         is_snapshot,
+        maybe_page: maybe_page.cloned(),
       },
     );
   }
@@ -505,6 +522,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
   pub(crate) fn ui_compact_canvas(
     &self,
     conversation: ConversationId,
+    maybe_page: Option<&CanvasPageId>,
     revision: u64,
     merged: Vec<u8>,
     history: Vec<CanvasMark>,
@@ -518,7 +536,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
         changes: mark.changes,
       })
       .collect();
-    if let Err(error) = crate::canvas::compact(self.store_ref(), conversation, revision, merged, history) {
+    let page = crate::canvas::PageKey::new(conversation, maybe_page);
+    if let Err(error) = crate::canvas::compact(self.store_ref(), &page, revision, merged, history) {
       tracing::error!(%error, "could not compact the page");
     }
   }

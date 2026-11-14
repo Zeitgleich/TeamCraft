@@ -1,5 +1,6 @@
 //! The formatting toolbar of the shared notes (issue #1456): the composer's buttons and shortcuts
-//! with a checklist and undo and redo added.
+//! with a checklist, a file of the channel, and undo and redo added. Moving a block up or down has
+//! shortcuts of its own (Ctrl or Cmd+Shift+Up and Down) and the block's handle.
 
 use leptos::html;
 use leptos::prelude::*;
@@ -19,6 +20,11 @@ use crate::keys::{Key, Modifier, Platform, Shortcut, shortcut_text};
 pub enum CanvasAction {
   Format(FormatAction),
   Check,
+  /// Shows a file of the channel in the page.
+  InsertFile,
+  /// Moves the block with the caret one place up or down.
+  MoveUp,
+  MoveDown,
   Undo,
   Redo,
 }
@@ -28,6 +34,8 @@ const CHECK_SHORTCUT: Shortcut = Shortcut::new(&[Modifier::Primary, Modifier::Al
 const UNDO_SHORTCUT: Shortcut = Shortcut::primary("Z");
 const REDO_SHORTCUT: Shortcut = Shortcut::new(&[Modifier::Primary, Modifier::Shift], Key::Char("Z"));
 const REDO_SHORTCUT_OTHER: Shortcut = Shortcut::primary("Y");
+pub const MOVE_UP_SHORTCUT: Shortcut = Shortcut::new(&[Modifier::Primary, Modifier::Shift], Key::Up);
+pub const MOVE_DOWN_SHORTCUT: Shortcut = Shortcut::new(&[Modifier::Primary, Modifier::Shift], Key::Down);
 
 /// The styles of the text style menu.
 const TEXT_STYLES: [BlockKind; 4] = [
@@ -70,6 +78,10 @@ pub fn canvas_action_for(ev: &web_sys::KeyboardEvent) -> Option<CanvasAction> {
     Some(CanvasAction::Redo)
   } else if matches(CHECK_SHORTCUT) {
     Some(CanvasAction::Check)
+  } else if matches(MOVE_UP_SHORTCUT) {
+    Some(CanvasAction::MoveUp)
+  } else if matches(MOVE_DOWN_SHORTCUT) {
+    Some(CanvasAction::MoveDown)
   } else {
     format_action_for(ev).map(CanvasAction::Format)
   }
@@ -220,6 +232,15 @@ pub fn CanvasToolbar(active: Memo<CanvasActive>, on_action: Callback<CanvasActio
       {kind_button(CanvasAction::Check, IconName::Check, BlockKind::Check)}
       {kind_button(CanvasAction::Format(FormatAction::Block(BlockFormat::Quote)), IconName::Quote, BlockKind::Quote)}
       {kind_button(CanvasAction::Format(FormatAction::Block(BlockFormat::CodeBlock)), IconName::CodeBlock, BlockKind::Code)}
+      {tool_button(
+        i18n,
+        CanvasAction::InsertFile,
+        view! { <Icon name=IconName::Paperclip /> }.into_any(),
+        Signal::derive(|| false),
+        Signal::derive(|| true),
+        on_action,
+        false,
+      )}
       <span class="format-sep" aria-hidden="true"></span>
       {history_button(i18n, CanvasAction::Undo, IconName::Undo, Signal::derive(move || active.get().can_undo), on_action)}
       {history_button(i18n, CanvasAction::Redo, IconName::Redo, Signal::derive(move || active.get().can_redo), on_action)}
@@ -239,6 +260,7 @@ pub fn kind_label(kind: BlockKind) -> &'static str {
     BlockKind::Check => "canvas-kind-check",
     BlockKind::Quote => "format-quote",
     BlockKind::Code => "format-code-block",
+    BlockKind::File => "canvas-kind-file",
   }
 }
 
@@ -255,7 +277,7 @@ fn format_of(kind: BlockKind) -> BlockFormat {
     BlockKind::Numbered => BlockFormat::Numbered,
     BlockKind::Quote => BlockFormat::Quote,
     BlockKind::Code => BlockFormat::CodeBlock,
-    BlockKind::Paragraph | BlockKind::Check => BlockFormat::Paragraph,
+    BlockKind::Paragraph | BlockKind::Check | BlockKind::File => BlockFormat::Paragraph,
   }
 }
 
@@ -273,6 +295,9 @@ fn action_shortcut(action: CanvasAction) -> Option<Shortcut> {
     CanvasAction::Undo => Some(UNDO_SHORTCUT),
     CanvasAction::Redo => Some(REDO_SHORTCUT),
     CanvasAction::Check => Some(CHECK_SHORTCUT),
+    CanvasAction::MoveUp => Some(MOVE_UP_SHORTCUT),
+    CanvasAction::MoveDown => Some(MOVE_DOWN_SHORTCUT),
+    CanvasAction::InsertFile => None,
     CanvasAction::Format(format) => crate::components::composer_toolbar::shortcut_for(format),
   }
 }
@@ -281,6 +306,9 @@ fn label_of(action: CanvasAction) -> &'static str {
   match action {
     CanvasAction::Format(format) => action_label(format),
     CanvasAction::Check => "canvas-kind-check",
+    CanvasAction::InsertFile => "canvas-insert-file",
+    CanvasAction::MoveUp => "canvas-move-up",
+    CanvasAction::MoveDown => "canvas-move-down",
     CanvasAction::Undo => "canvas-undo",
     CanvasAction::Redo => "canvas-redo",
   }
@@ -317,7 +345,12 @@ fn tool_button(
   let maybe_shortcut = action_shortcut(action);
   let is_toggle = !matches!(
     action,
-    CanvasAction::Undo | CanvasAction::Redo | CanvasAction::Format(FormatAction::Link)
+    CanvasAction::Undo
+      | CanvasAction::Redo
+      | CanvasAction::InsertFile
+      | CanvasAction::MoveUp
+      | CanvasAction::MoveDown
+      | CanvasAction::Format(FormatAction::Link)
   );
   let tooltip = move || match maybe_shortcut {
     Some(shortcut) => format!("{} ({})", i18n.t(label), shortcut_text(&shortcut, i18n.locale())),

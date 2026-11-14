@@ -1203,6 +1203,8 @@ pub enum ChatAction {
   /// [`ChatBackend::edit_canvas`].
   EditCanvas {
     conversation: ConversationId,
+    #[serde(rename = "page", default, skip_serializing_if = "Option::is_none")]
+    maybe_page: Option<teamcraft_proto::CanvasPageId>,
     update: teamcraft_proto::Base64Bytes,
     #[serde(default)]
     is_snapshot: bool,
@@ -1210,6 +1212,8 @@ pub enum ChatAction {
   /// [`ChatBackend::compact_canvas`].
   CompactCanvas {
     conversation: ConversationId,
+    #[serde(rename = "page", default, skip_serializing_if = "Option::is_none")]
+    maybe_page: Option<teamcraft_proto::CanvasPageId>,
     revision: u64,
     merged: teamcraft_proto::Base64Bytes,
     #[serde(default)]
@@ -1652,15 +1656,23 @@ impl ChatAction {
       } => backend.set_bookmarks(conversation, bookmarks),
       Self::EditCanvas {
         conversation,
+        maybe_page,
         update,
         is_snapshot,
-      } => backend.edit_canvas(conversation, update.into_vec(), is_snapshot),
+      } => backend.edit_canvas(conversation, maybe_page.as_ref(), update.into_vec(), is_snapshot),
       Self::CompactCanvas {
         conversation,
+        maybe_page,
         revision,
         merged,
         history,
-      } => backend.compact_canvas(conversation, revision, merged.into_vec(), history),
+      } => backend.compact_canvas(
+        conversation,
+        maybe_page.as_ref(),
+        revision,
+        merged.into_vec(),
+        history,
+      ),
       Self::AddIntegrationSource { conversation, source } => {
         backend.add_integration_source(conversation, source)
       },
@@ -1760,6 +1772,14 @@ pub enum ChatQuery {
   /// [`ChatBackend::canvas`].
   Canvas {
     conversation: ConversationId,
+    #[serde(rename = "page", default, skip_serializing_if = "Option::is_none")]
+    maybe_page: Option<teamcraft_proto::CanvasPageId>,
+  },
+  /// [`ChatBackend::conversation_file`].
+  ConversationFile {
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: String,
   },
   SavedItems,
   /// [`ChatBackend::scheduled_overview`].
@@ -2027,6 +2047,11 @@ pub enum ChatAnswer {
     #[serde(default)]
     state: crate::canvas::CanvasState,
   },
+  ConversationFile {
+    #[serde(rename = "file", default, skip_serializing_if = "Option::is_none")]
+    // Boxed: a file is far larger than the other answers.
+    maybe_file: Option<Box<FileInfo>>,
+  },
   SavedItems {
     items: Vec<SavedItem>,
   },
@@ -2219,8 +2244,20 @@ impl ChatQuery {
       Self::PinnedMessages { conversation } => ChatAnswer::Messages {
         messages: backend.pinned_messages(conversation),
       },
-      Self::Canvas { conversation } => ChatAnswer::Canvas {
-        state: backend.canvas(conversation),
+      Self::Canvas {
+        conversation,
+        maybe_page,
+      } => ChatAnswer::Canvas {
+        state: backend.canvas(conversation, maybe_page.as_ref()),
+      },
+      Self::ConversationFile {
+        conversation,
+        message,
+        file_id,
+      } => ChatAnswer::ConversationFile {
+        maybe_file: backend
+          .conversation_file(conversation, message, &file_id)
+          .map(Box::new),
       },
       Self::SavedItems => ChatAnswer::SavedItems {
         items: backend.saved_items(),

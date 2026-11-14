@@ -1060,8 +1060,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         )?;
       }
       // An own page edit counts from the server's time from now on, as on every other device.
-      if let MessageContent::Canvas { update, .. } = &stored.content {
-        crate::canvas::settle_time(&self.store, entry.conversation_id, update, stored.sent_at_ms)?;
+      if let MessageContent::Canvas {
+        update, maybe_page, ..
+      } = &stored.content
+      {
+        let page = crate::canvas::PageKey::new(entry.conversation_id, maybe_page.as_ref());
+        crate::canvas::settle_time(&self.store, &page, update, stored.sent_at_ms)?;
       }
       // Pins and bookmarks the same way, unless a later own one waits (issue #1448).
       settle_sent_control(
@@ -1287,9 +1291,20 @@ fn apply_control_with(
     records::put_json(store, Table::Account, &bookmarks_key(conversation), items)?;
     return newest.note(store, conversation, maybe_server_id);
   }
-  if let MessageContent::Canvas { update, is_snapshot } = content {
+  if let MessageContent::Canvas {
+    update,
+    is_snapshot,
+    maybe_page,
+  } = content
+  {
     // Decrypted in the conversation's group, so `sender` is a member of it; the server let it post.
-    return crate::canvas::take_update(store, conversation, update, *is_snapshot, sender, at_ms);
+    // A page ID another client made up beyond the rules is dropped, never used as a store key.
+    if maybe_page.as_ref().is_some_and(|page| !page.is_valid()) {
+      tracing::warn!(%conversation, "a page edit naming an invalid page was dropped");
+      return Ok(());
+    }
+    let page = crate::canvas::PageKey::new(conversation, maybe_page.as_ref());
+    return crate::canvas::take_update(store, &page, update, *is_snapshot, sender, at_ms);
   }
   if let MessageContent::IntegrationSource { change } = content {
     // Decrypted in the conversation's group, so `sender` is a member of it; who may do what is

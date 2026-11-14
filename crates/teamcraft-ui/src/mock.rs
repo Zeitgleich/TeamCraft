@@ -227,7 +227,11 @@ struct State {
   /// Who types where (tests set it; the demo has nobody typing).
   typing: Vec<crate::model::TypingNow>,
   /// Channels' shared pages as the updates the editor sent (the demo's only editor is the user).
-  canvases: HashMap<ConversationId, teamcraft_client_api::canvas::CanvasState>,
+  /// The pages of notes by conversation and page (`None`: the first).
+  canvases: HashMap<
+    (ConversationId, Option<teamcraft_proto::CanvasPageId>),
+    teamcraft_client_api::canvas::CanvasState,
+  >,
 }
 
 impl MockBackend {
@@ -372,18 +376,30 @@ impl MockBackend {
 }
 
 impl ChatBackend for MockBackend {
-  fn canvas(&self, conversation: ConversationId) -> teamcraft_client_api::canvas::CanvasState {
-    self
+  fn canvas(
+    &self,
+    conversation: ConversationId,
+    maybe_page: Option<&teamcraft_proto::CanvasPageId>,
+  ) -> teamcraft_client_api::canvas::CanvasState {
+    let mut canvas = self
       .state
       .borrow()
       .canvases
-      .get(&conversation)
+      .get(&(conversation, maybe_page.cloned()))
       .cloned()
-      .unwrap_or_default()
+      .unwrap_or_default();
+    canvas.maybe_page = maybe_page.cloned();
+    canvas
   }
 
   /// Kept like the core keeps them: where the user may post.
-  fn edit_canvas(&self, conversation: ConversationId, update: Vec<u8>, is_snapshot: bool) {
+  fn edit_canvas(
+    &self,
+    conversation: ConversationId,
+    maybe_page: Option<&teamcraft_proto::CanvasPageId>,
+    update: Vec<u8>,
+    is_snapshot: bool,
+  ) {
     let mut state = self.state.borrow_mut();
     let may_post = state
       .conversations
@@ -392,7 +408,10 @@ impl ChatBackend for MockBackend {
     if !may_post {
       return;
     }
-    let canvas = state.canvases.entry(conversation).or_default();
+    let canvas = state
+      .canvases
+      .entry((conversation, maybe_page.cloned()))
+      .or_default();
     canvas.updates.push(update.into());
     canvas
       .origins
@@ -412,12 +431,13 @@ impl ChatBackend for MockBackend {
   fn compact_canvas(
     &self,
     conversation: ConversationId,
+    maybe_page: Option<&teamcraft_proto::CanvasPageId>,
     revision: u64,
     merged: Vec<u8>,
     history: Vec<teamcraft_client_api::canvas::CanvasMark>,
   ) {
     let mut state = self.state.borrow_mut();
-    if let Some(canvas) = state.canvases.get_mut(&conversation)
+    if let Some(canvas) = state.canvases.get_mut(&(conversation, maybe_page.cloned()))
       && canvas.revision == revision
     {
       canvas.updates = vec![merged.into()];
