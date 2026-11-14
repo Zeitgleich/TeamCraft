@@ -18,6 +18,8 @@ mod read_only;
 mod tls;
 #[cfg(target_arch = "wasm32")]
 mod web_socket;
+#[cfg(any(test, all(target_arch = "wasm32", feature = "service-worker")))]
+pub mod worker;
 #[cfg(target_arch = "wasm32")]
 mod xhr;
 

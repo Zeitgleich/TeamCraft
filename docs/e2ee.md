@@ -638,7 +638,8 @@ desktop: `apps/desktop/src/auth`; iOS: `apps/ios/Shared/DeviceProofKey.swift`, `
   native requests with a proof don't follow one to another origin (it reads as a captive portal). In the
   browser the core's `fetch` follows redirects by itself, with no option through reqwest: the proof goes
   along only if the target's CORS rule allows `DPoP`. Only the server or something terminating its TLS can
-  send that redirect, and the token stays behind.
+  send that redirect, and the token stays behind. The service worker's requests (`api::worker`, #1909)
+  use the browser's `fetch` directly with `redirect: "error"`: a redirect fails them.
 - **Never a loop.** One retry per request or connection. What stays refused is an error: `use_dpop_nonce`
   and `invalid_dpop_proof` are no sign-in problem, since another token wouldn't help. The session
   stays, the app retries with backoff, and the banner names a proxy or the server's address

@@ -2793,13 +2793,14 @@ the chunks that load later. The limit:
 
 | Limit                                | Value        | Above it                         |
 |--------------------------------------|--------------|----------------------------------|
-| A guest in a meeting: gzip -9 total  | 6,370,000 B  | fails; warns from 95 % (6.05 MB) |
-| Signed-in first visit: gzip -9 total | 5,630,000 B  | fails; warns from 95 % (5.35 MB) |
+| A guest in a meeting: gzip -9 total  | 6,340,000 B  | fails; warns from 95 % (6.02 MB) |
+| Signed-in first visit: gzip -9 total | 5,600,000 B  | fails; warns from 95 % (5.32 MB) |
 | The call module: gzip -9             | 1,100,000 B  | fails                            |
 
 Both budgets are the sizes of #1699 below plus about 5 %, lowered on 2026-11-13 by what #1462 took
 out (what only a member's page asks for and the desktop app's chrome, below): 6.44 and 5.61 MB
-before. They were set on 2026-11-11. From 2026-11-10 they
+before; the signed-in one raised to 5.63 MB the same day (below). On 2026-11-14 the service worker's
+own `fetch` (#1909, below) lowered both by 30 kB, from 6.37 and 5.63 MB. They were set on 2026-11-11. From 2026-11-10 they
 were 10 MB: new features (polls #1689, the local search index #1693) had pushed a signed-in first
 visit to 5.39 MB (CI, PR #1692), over its 5.37 MB budget, and a guest's meeting to 6.17 MB of
 6.18 MB; by #1699 they had grown on to 5.56 and 6.33 MB. Before that they were the sizes of #1462 below plus about 6 % for a signed-in first visit and about 5 %
@@ -2821,6 +2822,38 @@ The call module's budget was 1,000,000 B (0.86 MB with the effects' compositors,
 15 %) until the call problem reports (#1762, 2026-11-12) took the module to 1.02 MB; it is
 1,100,000 B since, a decision of the maintainer: the reports pay for themselves in field bugs found
 without asking anybody for logs.
+
+#### The service worker's own fetch in place of reqwest (#1909, 2026-11-14)
+
+The service worker sent its few API requests (the message a push names, a planned meeting's chat,
+the read position, a meeting notice dealt with, a rotated subscription) through `HttpServerApi`,
+which brought reqwest, `http`'s header table and most of `url` into the worker. The worker is in
+both budgets: every visitor installs it, a meeting's guest too. It now has a client of its own over
+the browser's `fetch` (`teamcraft-core` `api::worker`, `WorkerApi`) with the same DPoP rules as the
+app's (e2ee.md §3.1.2): the proof from this browser's key only, the answer's nonce and clock kept,
+one more try when the answer gave what a refused proof lacked, never more; no redirects (`fetch`
+with `redirect: "error"`); tokens only to `https://` or a loopback `http://`; the server's error
+bodies and `Retry-After`. The proof flow is written against a transport trait and tested natively
+against the server's own proof check (`teamcraft_crypto::dpop::verify_proof`) and nonces: a nonce
+challenge, one that never ends, a refused proof without news, the nonce kept for the next request,
+tokens bound to another key or without the key, bearer tokens. The push preview asks for what it
+uses only (`push_preview::PreviewApi`), which every `ServerApi` and the worker's client answer.
+
+Release `trunk build` on Linux (trunk 0.22.0, in the CI image with its commands,
+`tests/e2e/web/build.sh`), `main` 14ab2a27, gzip -9:
+
+| Download                                      | Before      | After       | Delta     |
+|-----------------------------------------------|-------------|-------------|-----------|
+| A guest in a meeting (lobby, meeting, calls)  | 6,127,525 B | 6,094,273 B | −33,252 B |
+| Signed-in first visit                         | 5,619,700 B | 5,586,448 B | −33,252 B |
+| The service worker (in both)                  | 430,419 B   | 397,167 B   | −33,252 B |
+
+The app, the signed-in app's pack and the texts did not change. The worker's uncompressed size went
+from 0.99 to 0.92 MB. Both budgets went down by 30 kB.
+
+Left in the worker: `url` and `idna` (about 46 kB before wasm-opt), which `teamcraft-crypto`'s
+`DpopProofDraft::new` uses to drop a proof's query and fragment from `htu`. Taking them out is a
+change to how proofs are made, for its own review.
 
 #### What only a member's page asks for, out of a guest's meeting (#1462, 2026-11-13)
 
@@ -2869,10 +2902,7 @@ signed-in first visit then (5.60 MB).
 Measured and left (#1909):
 
 - **The service worker's REST client** (`reqwest`, `http`'s header table, `url`; about 70 kB of its
-  code before wasm-opt, an estimated 20 to 25 kB gzip): a `fetch` of its own needs a second DPoP flow
-  beside `HttpServerApi` (the answer's nonce and clock, one retry, no redirects with a proof,
-  TLS-only base URLs, the error bodies). Not worth that risk for its size on its own; if it is taken
-  up, then with a test against the fake server's DPoP checks.
+  code before wasm-opt): taken out by #1909 (above), 33 kB gzip.
 - **Device linking and approvals** (`link_task` 10 kB before wasm-opt; the approver's side is
   inlined into the core's request loop): a page that was linking resumes it at start
   (`PendingEnrollment::resume_link`), so the new device's side stays; the approver's side would need
@@ -3035,7 +3065,7 @@ Together they take the worker's code before wasm-opt from 1.57 to 1.22 MB.
 What is left in the worker is mostly its job: the encrypted store, the key bag, the wake-up's
 crypto, Web Crypto, IndexedDB, and the REST client with DPoP for fetching the message, marking it
 read and a rotated subscription (`reqwest`, `http`'s header table, `url`, about 70 kB before
-wasm-opt; a fetch of its own would drop them, #1462). Release verification is in
+wasm-opt; a fetch of its own dropped them in #1909). Release verification is in
 `sw.js` and unchanged.
 
 Release `trunk build` on macOS (trunk 0.22.0, wasm-opt 131, the CI job's commands), `main`

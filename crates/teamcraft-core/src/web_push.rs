@@ -133,8 +133,9 @@ mod service_worker {
   use web_sys::{NotificationOptions, ServiceWorkerGlobalScope};
 
   use crate::api::ApiError;
+  use crate::api::ProvenToken;
   use crate::api::dpop::Authorization;
-  use crate::api::{HttpServerApi, ProvenToken, ServerApi, change_web_push_subscription};
+  use crate::api::worker::{FetchTransport, WorkerApi, change_web_push_subscription};
   use crate::clock::{Clock, SystemClock};
   use crate::error::CoreError;
   use crate::media_cache::{BrowserMediaCache, MAX_MEDIA_MAX_AGE, MediaKey};
@@ -329,21 +330,16 @@ mod service_worker {
     let unreadable = || CoreError::Corrupt("unreadable notification data".into());
     let meeting: MeetingId = meeting.parse().map_err(|_| unreadable())?;
     let starts_at: i64 = starts_at.parse().map_err(|_| unreadable())?;
-    let body = serde_json::to_string(&DismissMeetingNoticeRequest {
+    let request = DismissMeetingNoticeRequest {
       starts_at: UnixMillis(starts_at),
-    })
-    .map_err(|_| unreadable())?;
+    };
     let key = browser_database_key_without_upgrade(database_name).await?;
     let store = IndexedDbStore::open_without_upgrade(database_name, &key).await?;
     let session = push_session(&store, SystemClock.now_ms())?
       .ok_or_else(|| CoreError::Browser("no valid push session".into()))?;
     session_api(session)
       .await
-      .raw_request(
-        "POST",
-        &format!("/meetings/{meeting}/notices/dismiss"),
-        Some(body),
-      )
+      .dismiss_meeting_notice(meeting, &request)
       .await?;
     Ok(())
   }
@@ -404,7 +400,8 @@ mod service_worker {
     let Some(change) = subscription_change(&store, token)? else {
       return Ok(false);
     };
-    let error = match change_web_push_subscription(&change.server_url, &change.request).await {
+    let error = match change_web_push_subscription(&FetchTransport, &change.server_url, &change.request).await
+    {
       Ok(()) => return Ok(true),
       Err(error) => error,
     };
@@ -421,7 +418,7 @@ mod service_worker {
     let Some(retry) = maybe_retry else {
       return Err(error.into());
     };
-    change_web_push_subscription(&retry.server_url, &retry.request).await?;
+    change_web_push_subscription(&FetchTransport, &retry.server_url, &retry.request).await?;
     Ok(true)
   }
 
@@ -440,7 +437,7 @@ mod service_worker {
 
   /// The API with the stored session's token and, for a bound one, this browser's key. Without the
   /// key the server refuses the token, and the notification goes without what it would have read.
-  async fn session_api(session: PushSession) -> HttpServerApi<ProvenToken> {
+  async fn session_api(session: PushSession) -> WorkerApi<FetchTransport> {
     let maybe_prover = match Authorization::of(&session.access_token) {
       Authorization::Bearer => None,
       Authorization::Bound(_) => browser_dpop_prover().await.unwrap_or_else(|error| {
@@ -448,12 +445,13 @@ mod service_worker {
         None
       }),
     };
-    HttpServerApi::new(
+    WorkerApi::new(
       &session.server_url,
       ProvenToken {
         token: session.access_token,
         maybe_prover,
       },
+      FetchTransport,
     )
   }
 
