@@ -18,6 +18,7 @@ use crate::areas::{self, Place, lazy_area};
 use crate::auth::guest::GuestAuth;
 use crate::auth::{AppConfig, Authenticator};
 use crate::components::guest_devices::{FORM_ID, GuestDevices, GuestForm};
+use crate::components::guest_end::{GuestEnd, GuestEndCard};
 use crate::components::guest_meeting::GuestSession;
 use crate::components::login::AuthFrame;
 use crate::form_errors::{FieldError, FieldErrors, FormErrors};
@@ -141,6 +142,9 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
       .map(|path| format!("{path}?{SIGN_IN_QUERY}")),
   );
   let is_one_time = link.maybe_invite_token.is_some();
+  // After leaving, the guest may knock again with the same link (#1933), the organizer's key
+  // fingerprint included; a one-time invitation is spent.
+  let maybe_rejoin = StoredValue::new((!is_one_time).then(|| rejoin_href(&link)).flatten());
   let link = StoredValue::new(link);
   let page = LobbyPage {
     phase,
@@ -263,6 +267,7 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
               guest_token: joined.guest_token,
               auth: joined.auth,
               maybe_devices: devices.get_value(),
+              maybe_rejoin: maybe_rejoin.get_value(),
             };
             return lazy_area(Place::Screen, move || areas::guest_meeting(session.clone()));
           }
@@ -320,29 +325,43 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
               .into_any()
             },
             GuestPhase::Waiting | GuestPhase::Admitted => {
+              // One line that says where things stand (#1927), announced as it changes.
+              let status = move || {
+                if is_organizer_app_outdated.get() {
+                  i18n.t("guest-organizer-app-outdated")
+                } else if page.is_device_ready.get() {
+                  i18n.t("guest-status-waiting")
+                } else {
+                  i18n.t("guest-status-securing")
+                }
+              };
               view! {
-                <h1>{move || i18n.t("guest-waiting-title")}</h1>
-                <p class="auth-status" role="status">
-                  <span class="spinner" aria-hidden="true"></span>
-                  <span>{move || i18n.t("guest-waiting")}</span>
-                </p>
-                // A small preview while waiting; the choices stay changeable (#1928).
-                {devices.get_value().map(|found| {
-                  lazy_area(Place::Inline, move || areas::guest_waiting_devices(found.clone(), name))
-                })}
-                {move || is_organizer_app_outdated.get().then(|| view! {
-                  <p role="alert">{move || i18n.t("guest-organizer-app-outdated")}</p>
-                })}
-                <p class="muted-text small">{move || i18n.t("guest-waiting-encryption")}</p>
-                {move || codes.get().map(|(own, organizer)| view! {
-                  <dl class="guest-codes">
-                    <dt>{move || i18n.t("guest-own-code")}</dt>
-                    <dd class="mono" translate="no">{own}</dd>
-                    <dt>{move || i18n.t("guest-organizer-code")}</dt>
-                    <dd class="mono" translate="no">{organizer}</dd>
-                  </dl>
-                  <p class="muted-text small">{move || i18n.t("guest-codes-hint")}</p>
-                })}
+                <div class="lobby-wait">
+                  <div class="lobby-pulse" aria-hidden="true"></div>
+                  <h1>{move || i18n.t("guest-waiting-title")}</h1>
+                  <p class="lobby-status" role="status" aria-live="polite">{status}</p>
+                  // A small preview while waiting; the choices stay changeable (#1928).
+                  {devices.get_value().map(|found| {
+                    lazy_area(Place::Inline, move || areas::guest_waiting_devices(found.clone(), name))
+                  })}
+                  // The key codes, for the careful few (#987): collapsed, two labelled rows.
+                  {move || codes.get().map(|(own, organizer)| view! {
+                    <details class="lobby-verify">
+                      <summary>{move || i18n.t("guest-verify-title")}</summary>
+                      <p class="muted-text small">{move || i18n.t("guest-verify-hint")}</p>
+                      <dl class="guest-codes">
+                        <div class="guest-code">
+                          <dt>{move || i18n.t("guest-own-code")}</dt>
+                          <dd class="mono" translate="no">{own}</dd>
+                        </div>
+                        <div class="guest-code">
+                          <dt>{move || i18n.t("guest-organizer-code")}</dt>
+                          <dd class="mono" translate="no">{organizer}</dd>
+                        </div>
+                      </dl>
+                    </details>
+                  })}
+                </div>
               }
               .into_any()
             },
@@ -352,6 +371,9 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
                 <p role="alert">{move || i18n.t("guest-denied")}</p>
               }
               .into_any()
+            },
+            GuestPhase::Failed(FailureKind::LinkUnusable) => {
+              view! { <GuestEndCard end=GuestEnd::LinkExpired /> }.into_any()
             },
             GuestPhase::Failed(kind) => {
               let key = match kind {
@@ -561,6 +583,16 @@ async fn report_device(
       false
     },
   }
+}
+
+/// The meeting link to knock with again: the page's own path and the organizer's fingerprint
+/// (`#v=`), which the page removed from the address once it knocked.
+fn rejoin_href(link: &GuestLink) -> Option<String> {
+  let path = web_sys::window()?.location().pathname().ok()?;
+  Some(match &link.maybe_organizer_fingerprint {
+    Some(fingerprint) => format!("{path}#v={fingerprint}"),
+    None => path,
+  })
 }
 
 /// Loads the plain meeting link again (without the resume key), so the guest knocks as new.

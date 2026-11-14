@@ -12,10 +12,11 @@ use teamcraft_proto::MeetingId;
 use crate::areas::{self, Place, lazy_area};
 use crate::auth::{AppConfig, Authenticator};
 use crate::backend::Backend;
-use crate::calls::{CallKind, CallPhase, CallRequest};
+use crate::calls::{CallEndReason, CallKind, CallPhase, CallRequest};
 use crate::components::app::connect_calls;
 use crate::components::channel_view::ChannelView;
 use crate::components::guest_devices::GuestDevices;
+use crate::components::guest_end::{GuestEnd, GuestEndScreen};
 use crate::components::login::{AuthFrame, load_backend};
 use crate::components::meetings_view::join_meeting;
 use crate::components::settings_tabs::apply_call_prefs;
@@ -37,13 +38,16 @@ pub struct GuestSession {
   /// The call module and the choices of the guest's device check (#1928): admission joins the
   /// call with them. `None` in a browser without calls.
   pub maybe_devices: Option<GuestDevices>,
+  /// The meeting link to knock again with after leaving (#1933); none for a one-time invitation.
+  pub maybe_rejoin: Option<String>,
 }
 
 #[component]
 pub fn GuestMeeting(session: GuestSession) -> impl IntoView {
   let i18n = use_i18n();
   let backend = RwSignal::new_local(None::<Result<Rc<dyn Backend>, String>>);
-  let has_left = RwSignal::new(false);
+  // How the guest's part ended, and the meeting's title for the end screen (#1933).
+  let maybe_end = RwSignal::new(None::<(GuestEnd, String)>);
   let settings = session
     .maybe_devices
     .as_ref()
@@ -76,14 +80,8 @@ pub fn GuestMeeting(session: GuestSession) -> impl IntoView {
 
   view! {
     {move || {
-      if has_left.get() {
-        return view! {
-          <AuthFrame>
-            <h1>{move || i18n.t("guest-left-title")}</h1>
-            <p role="status">{move || i18n.t("guest-left")}</p>
-          </AuthFrame>
-        }
-        .into_any();
+      if let Some((end, title)) = maybe_end.get() {
+        return view! { <GuestEndScreen end=end maybe_title=title /> }.into_any();
       }
       match backend.get() {
         None => view! {
@@ -95,7 +93,7 @@ pub fn GuestMeeting(session: GuestSession) -> impl IntoView {
           </AuthFrame>
         }
         .into_any(),
-        Some(Ok(loaded)) => view! { <GuestShell backend=loaded settings=settings session=session has_left=has_left /> }.into_any(),
+        Some(Ok(loaded)) => view! { <GuestShell backend=loaded settings=settings session=session maybe_end=maybe_end /> }.into_any(),
         Some(Err(detail)) => {
           tracing::warn!(%detail, "could not open the guest's meeting");
           view! {
@@ -116,16 +114,17 @@ fn GuestShell(
   backend: Rc<dyn Backend>,
   settings: Settings,
   session: StoredValue<GuestSession, LocalStorage>,
-  has_left: RwSignal<bool>,
+  maybe_end: RwSignal<Option<(GuestEnd, String)>>,
 ) -> impl IntoView {
   let i18n = use_i18n();
-  let (conversation, auth, meeting, token, maybe_call) = session.with_value(|session| {
+  let (conversation, auth, meeting, token, maybe_call, maybe_rejoin) = session.with_value(|session| {
     (
       session.conversation,
       session.auth.clone(),
       session.meeting,
       session.guest_token.clone(),
       session.maybe_devices.as_ref().map(|devices| devices.call),
+      session.maybe_rejoin.clone(),
     )
   });
   let change_source = backend.clone();
@@ -188,22 +187,38 @@ fn GuestShell(
       .map(|conversation| conversation.name)
       .unwrap_or_default()
   };
+  // The guest's part is over (left, ended, removed): the session ends and this device's keys
+  // and data go, then the end screen shows (#1933). Once only.
   let is_leaving = RwSignal::new(false);
-  let leave = move |_| {
-    is_leaving.set(true);
-    let (auth, token) = (auth.clone(), token.clone());
-    spawn_local(async move {
-      let client = GuestClient::new(AppConfig::load());
-      // The server ends the session either way; this device's keys and data go with the page.
-      let _ = client.leave(meeting, &token).await;
-      crate::guest_resume::StoredGuestSession::forget();
-      if let Err(error) = crate::remote_backend::wipe_guest_store().await {
-        tracing::warn!(%error, "could not delete the guest device's local data");
+  let end_session: StoredValue<Rc<dyn Fn(GuestEnd)>, LocalStorage> =
+    StoredValue::new_local(Rc::new(move |end| {
+      if is_leaving.get_untracked() {
+        return;
       }
-      let _ = auth.logout().await;
-      has_left.set_if_alive(true);
-    });
+      is_leaving.set(true);
+      let meeting_title = untrack(title);
+      let (auth, token) = (auth.clone(), token.clone());
+      spawn_local(async move {
+        let client = GuestClient::new(AppConfig::load());
+        // The server ends the session either way; this device's keys and data go with the page.
+        let _ = client.leave(meeting, &token).await;
+        crate::guest_resume::StoredGuestSession::forget();
+        if let Err(error) = crate::remote_backend::wipe_guest_store().await {
+          tracing::warn!(%error, "could not delete the guest device's local data");
+        }
+        let _ = auth.logout().await;
+        maybe_end.set_if_alive(Some((end, meeting_title)));
+      });
+    }));
+  let rejoin = StoredValue::new(maybe_rejoin);
+  let leave = move |_| {
+    end_session.with_value(|end| {
+      end(GuestEnd::Left {
+        maybe_rejoin: rejoin.get_value(),
+      })
+    })
   };
+  follow_call_end(state, end_session, rejoin);
 
   view! {
     <div class="app guest-meeting">
@@ -215,7 +230,7 @@ fn GuestShell(
         <button class="btn btn-primary" on:click=move |_| join_meeting(state, i18n, conversation)>
           {move || i18n.t("guest-join-call")}
         </button>
-        <button class="btn" prop:disabled=move || is_leaving.get() on:click=leave.clone()>
+        <button class="btn" prop:disabled=move || is_leaving.get() on:click=leave>
           {move || i18n.t("guest-leave")}
         </button>
       </header>
@@ -252,5 +267,78 @@ fn GuestShell(
         </For>
       </div>
     </div>
+  }
+}
+
+/// A guest's call ending is their part of the meeting ending (#1933): hanging up, a host ending
+/// the meeting for everyone or removing them shows the end screen. A join that failed or a lost
+/// connection keeps the guest in the meeting's chat, which says why (`connect_calls`).
+fn follow_call_end(
+  state: AppState,
+  end_session: StoredValue<Rc<dyn Fn(GuestEnd)>, LocalStorage>,
+  rejoin: StoredValue<Option<String>>,
+) {
+  let call = state.call;
+  Effect::new(move |previous: Option<(CallPhase, u64)>| {
+    let phase = call.phase.get();
+    let failures = untrack(|| state.read(|backend| backend.call_join_failures()));
+    if let Some((CallPhase::Active, failures_before)) = previous
+      && phase == CallPhase::Idle
+      && failures == failures_before
+    {
+      let maybe_reason = untrack(|| state.read(|backend| backend.call_end_reason()));
+      if let Some(end) = end_of_call(maybe_reason, rejoin.get_value()) {
+        end_session.with_value(|end_session| end_session(end));
+      }
+    }
+    (phase, failures)
+  });
+}
+
+/// How a guest's call ending ends their part of the meeting: `None` keeps them in the chat (a
+/// lost connection, which the chat explains).
+fn end_of_call(maybe_reason: Option<CallEndReason>, maybe_rejoin: Option<String>) -> Option<GuestEnd> {
+  match maybe_reason {
+    Some(CallEndReason::EndedByHost { .. }) => Some(GuestEnd::Ended),
+    Some(CallEndReason::RemovedByHost { .. }) => Some(GuestEnd::Removed),
+    Some(CallEndReason::ConnectionLost | CallEndReason::OtherSideLeft) => None,
+    None => Some(GuestEnd::Left { maybe_rejoin }),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use crate::model::id_from_raw;
+
+  use super::*;
+
+  const LINK: &str = "/meeting/abc#v=00ff";
+
+  #[test]
+  fn hanging_up_is_leaving_with_the_link_to_rejoin() {
+    assert_eq!(
+      end_of_call(None, Some(LINK.to_owned())),
+      Some(GuestEnd::Left {
+        maybe_rejoin: Some(LINK.to_owned())
+      })
+    );
+  }
+
+  #[test]
+  fn a_host_ending_or_removing_offers_no_rejoin() {
+    let by = id_from_raw(7);
+    assert_eq!(
+      end_of_call(Some(CallEndReason::EndedByHost { by }), Some(LINK.to_owned())),
+      Some(GuestEnd::Ended)
+    );
+    assert_eq!(
+      end_of_call(Some(CallEndReason::RemovedByHost { by }), Some(LINK.to_owned())),
+      Some(GuestEnd::Removed)
+    );
+  }
+
+  #[test]
+  fn a_lost_connection_keeps_the_guest_in_the_meeting() {
+    assert_eq!(end_of_call(Some(CallEndReason::ConnectionLost), None), None);
   }
 }

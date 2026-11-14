@@ -22,7 +22,7 @@ use teamcraft_media::call_native::NativeCall;
 use teamcraft_proto::{ConversationId, MeetingId, UserId};
 
 use crate::web::{TEST_CSP, click_text, type_until_kept, wait_for_element, wait_for_text};
-use crate::web_calls::{MEDIA_ARGS, console_log};
+use crate::web_calls::{MEDIA_ARGS, click_selector, console_log};
 
 /// Ends a few minutes from now, so the call may start (a meeting that is over can't be joined).
 const MEETING_LENGTH_MS: i64 = 60 * 60_000;
@@ -91,7 +91,7 @@ async fn a_guest_joins_a_meeting_with_the_mailed_link_and_shares_its_call() {
     .screenshot_on_failure("meeting-guest-mail-link", |page| async move {
       knock(&page, &origin, link, "Gus (customer)").await;
       // Nobody let the guest in yet: the normal case, said plainly.
-      wait_for_text(&page, "Waiting for someone in the meeting to let you in").await;
+      wait_for_text(&page, "Waiting for someone to let you in").await;
       wait_for_element(&page, ".guest-waiting-devices .prejoin-preview").await;
       expect_no_panic(&page).await;
       guest_shots(&page, "waiting").await;
@@ -118,6 +118,8 @@ async fn a_guest_joins_a_meeting_with_the_mailed_link_and_shares_its_call() {
       // The host's lobby entry shows the same key code as the guest's page.
       alice_ref.client.prepare_guest_key_code(guest).await.unwrap();
       let code = teamcraft_core::client::guest_key_code(alice_ref.store.as_ref(), guest).unwrap();
+      // The codes are behind "Verify the connection" (#1927), for whoever wants to compare.
+      click_selector(&page, ".lobby-verify summary").await;
       wait_for_text(&page, &code).await;
 
       // Admitting makes the guest a member; the organizer's device adds the guest's own device to
@@ -139,6 +141,17 @@ async fn a_guest_joins_a_meeting_with_the_mailed_link_and_shares_its_call() {
   // The organizer joins natively: both verify each other's DAVE keys, media flows both ways.
   let call = join_call(&mut alice, chat, certificate_hash, 550.0).await;
   expect_secured_call(call, &console, "the organizer").await;
+
+  // The guest hangs up: their part is over, said warmly, with a way back in (#1933).
+  browser
+    .screenshot_on_failure("meeting-guest-end", |page| async move {
+      click_selector(&page, ".call-screen .leave-btn").await;
+      wait_for_text(&page, "Thanks for joining.").await;
+      wait_for_text(&page, "Rejoin").await;
+      expect_no_panic(&page).await;
+      guest_shots(&page, "end").await;
+    })
+    .await;
 
   browser.close().await;
   stack.stop().await;
@@ -207,7 +220,7 @@ async fn a_member_admits_a_browser_guest_when_the_organizer_has_left_and_they_sh
   browser
     .screenshot_on_failure("meeting-member-admits-guest", |page| async move {
       knock(&page, &origin, link, "Gus (customer)").await;
-      wait_for_text(&page, "Waiting for someone in the meeting to let you in").await;
+      wait_for_text(&page, "Waiting for someone to let you in").await;
 
       // Bob's app sees the guest, who came with the link, once the guest's device is ready.
       let deadline = Instant::now() + SETUP_TIMEOUT;
@@ -318,7 +331,7 @@ async fn a_co_host_admits_a_browser_guest_when_the_organizer_has_left() {
   browser
     .screenshot_on_failure("meeting-co-host-admits-guest", |page| async move {
       knock(&page, &origin, link, "Gus (customer)").await;
-      wait_for_text(&page, "Waiting for someone in the meeting to let you in").await;
+      wait_for_text(&page, "Waiting for someone to let you in").await;
 
       // The co-host hosts the lobby: the server lists the guest to Bob as to a host.
       let deadline = Instant::now() + SETUP_TIMEOUT;
