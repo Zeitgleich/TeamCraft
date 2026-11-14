@@ -73,6 +73,9 @@ const MAX_VIDEO_TRACKS_PER_PARTICIPANT: usize = 4;
 const FAST_START_UPSWITCH_HOLD: Duration = Duration::from_millis(500);
 /// How often a receiver's layer allocation logs its inputs (debug).
 const ALLOCATION_LOG_INTERVAL: Duration = Duration::from_secs(1);
+/// How long video kept at its lowest layer has to clear the link before voice still lost to a
+/// receiver pauses it: what the higher layers queued drains, the lowest layer's keyframe arrives.
+const VOICE_HURT_AT_LOWEST_AFTER: Duration = Duration::from_millis(1500);
 
 /// Routing state of one room.
 #[derive(Debug)]
@@ -198,6 +201,9 @@ struct ParticipantRoute {
   has_feedback: bool,
   /// What becomes of the voice sent to it: while it is lost, its video yields (#1871).
   voice: VoiceGuard,
+  /// Since when its video yields to its voice at the lowest layers: voice still lost
+  /// [`VOICE_HURT_AT_LOWEST_AFTER`] later pauses the video.
+  maybe_video_yielded_at: Option<Instant>,
   /// How its own voice arrives: while its upload loses it, it gets no video either, whose
   /// acknowledgements share that upload (#1889).
   uplink_voice: ArrivingVoice,
@@ -331,6 +337,7 @@ impl Forwarder {
       maybe_probe_request: None,
       has_feedback: false,
       voice: VoiceGuard::new(self.config.voice_guard),
+      maybe_video_yielded_at: None,
       uplink_voice: ArrivingVoice::new(self.config.voice_guard),
       is_suspended: false,
       retransmit_budget: RetransmitBudget::default(),
@@ -1255,12 +1262,28 @@ impl Forwarder {
     } else {
       UpgradeProof::NotRequired
     };
-    // Its voice is being lost (a link that collapsed): the video yields at once, and no probe adds
-    // to the link meanwhile (#1871). So does the video to a participant whose own voice arrives
-    // with gaps: the acknowledgements of what it receives share its collapsed upload (#1889).
-    let allocation = if participant.voice.is_hurt(now) || participant.uplink_voice.is_hurt(now) {
+    // Its voice is being lost: the video yields at once to the lowest layers, and no probe adds to
+    // the link meanwhile; voice still lost there (a link that collapsed) pauses it (#1871). A link
+    // that merely dropped below the top layer keeps a picture (paused, a viewer whose link fell to
+    // 500 kbit/s stood still for 5 s). The video to a participant whose own voice arrives with gaps pauses at
+    // once: the acknowledgements of what it receives share its collapsed upload (#1889).
+    let mut is_yielding = false;
+    let allocation = if participant.uplink_voice.is_hurt(now) {
       participant.allocator.pause_all(&demands, now)
+    } else if participant.voice.is_hurt(now) {
+      let yielded_at = *participant.maybe_video_yielded_at.get_or_insert(now);
+      let is_hurt_at_lowest = participant
+        .voice
+        .last_hurt_at()
+        .is_some_and(|at| at >= yielded_at + VOICE_HURT_AT_LOWEST_AFTER);
+      if is_hurt_at_lowest {
+        participant.allocator.pause_all(&demands, now)
+      } else {
+        is_yielding = true;
+        participant.allocator.keep_lowest_layers(&demands, now)
+      }
     } else {
+      participant.maybe_video_yielded_at = None;
       participant
         .allocator
         .allocate_with_proof(&layers_config, estimate, proof, &demands, now)
@@ -1298,6 +1321,11 @@ impl Forwarder {
         subscription.current = None;
         continue;
       };
+      // Yielding to lost voice, a higher layer stops at once instead of until the lowest layer's
+      // keyframe: that is what loses the voice.
+      if is_yielding && subscription.current.is_some_and(|current| current > layer) {
+        subscription.current = None;
+      }
       let current = subscription.current;
       let publisher = route.track.device_id;
       // While the target doesn't flow, the best lower layer that does stands in (it needs a
@@ -3025,12 +3053,10 @@ mod tests {
       );
     }
 
-    /// #1871: a receiver whose voice gets lost (a downlink that collapsed from one second to the
-    /// next) gets no video from its next feedback on, not after the estimate came down: the
-    /// voice comes first. No layer is put back to find out during the hold, nor after it while
-    /// no probe showed the link carries it.
+    /// #1871: voice lost to a receiver takes its video down to the lowest layer at once; voice
+    /// still lost there (a collapsed link) pauses it.
     #[test]
-    fn lost_voice_pauses_the_video_at_once() {
+    fn lost_voice_takes_the_video_to_the_lowest_layer_then_pauses_it() {
       let (mut forwarder, now) = video_room();
       forwarder.subscribe(device(2), VIDEO, Some(2), now).unwrap();
       forwarder
@@ -3043,34 +3069,15 @@ mod tests {
       assert!(send_frame(&mut forwarder, 2, true, up_at).contains(&device(2)));
 
       // Device 1 speaks; of what reaches device 2, a third is lost.
-      let mut voice = Vec::new();
-      for index in 0..25u32 {
-        let at = up_at + Duration::from_millis(20) * index;
-        let route = forwarder.route(device(1), &audio(1, 20), at).unwrap();
-        for (receiver, delivered) in route.deliveries {
-          if receiver == device(2) {
-            voice.push(
-              DatagramHeader::parse(&delivered)
-                .unwrap()
-                .maybe_transport_seq
-                .unwrap(),
-            );
-          }
-        }
-      }
-      assert_eq!(voice.len(), 25);
-      let first = voice[0].0;
-      let feedback = TransportFeedback {
-        base_seq: first,
-        arrivals_us: voice
-          .iter()
-          .enumerate()
-          .map(|(index, seq)| (index % 3 != 0).then_some(u64::from(seq.0.wrapping_sub(first)) * 20_000))
-          .collect(),
-      };
       let reported_at = up_at + Duration::from_millis(600);
-      forwarder.on_transport_feedback(device(2), &feedback, reported_at);
+      lose_a_third_of_the_voice(&mut forwarder, up_at, reported_at);
       assert!(send_frame(&mut forwarder, 2, true, reported_at).is_empty());
+      assert!(send_frame(&mut forwarder, 0, true, reported_at).contains(&device(2)));
+
+      // Still lost at the lowest layer: the video pauses.
+      let start = reported_at + VOICE_HURT_AT_LOWEST_AFTER;
+      let reported_at = start + Duration::from_millis(600);
+      lose_a_third_of_the_voice(&mut forwarder, start, reported_at);
       assert!(send_frame(&mut forwarder, 0, true, reported_at).is_empty());
 
       // The hold and a while after: no layer comes back on its own.
@@ -3883,6 +3890,37 @@ mod tests {
   }
 
   /// Sends one single-fragment frame on `layer` of [`VIDEO`]; returns who receives it.
+  /// Device 1 speaks for half a second from `from`; device 2 reports a third of it lost at
+  /// `reported_at`.
+  fn lose_a_third_of_the_voice(forwarder: &mut Forwarder, from: Instant, reported_at: Instant) {
+    let mut voice = Vec::new();
+    for index in 0..25u32 {
+      let at = from + Duration::from_millis(20) * index;
+      let route = forwarder.route(device(1), &audio(1, 20), at).unwrap();
+      for (receiver, delivered) in route.deliveries {
+        if receiver == device(2) {
+          voice.push(
+            DatagramHeader::parse(&delivered)
+              .unwrap()
+              .maybe_transport_seq
+              .unwrap(),
+          );
+        }
+      }
+    }
+    assert_eq!(voice.len(), 25);
+    let first = voice[0].0;
+    let feedback = TransportFeedback {
+      base_seq: first,
+      arrivals_us: voice
+        .iter()
+        .enumerate()
+        .map(|(index, seq)| (index % 3 != 0).then_some(u64::from(seq.0.wrapping_sub(first)) * 20_000))
+        .collect(),
+    };
+    forwarder.on_transport_feedback(device(2), &feedback, reported_at);
+  }
+
   fn send_frame(forwarder: &mut Forwarder, layer: u8, is_keyframe: bool, now: Instant) -> Vec<DeviceId> {
     send_fragment(forwarder, layer, is_keyframe, 1, now)
   }
