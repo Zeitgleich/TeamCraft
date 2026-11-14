@@ -173,6 +173,10 @@
   --call-muted: #9aa6ba;
   --call-danger: #d64533;
   --call-danger-hover: #a93226;
+  /* A control on the call's surfaces under the pointer, and while pressed or open. */
+  --call-hover: #202838;
+  --call-pressed: #2a3446;
+  --call-switch-off: #3a4458;
   /* Notices that a call is not end-to-end encrypted towards someone (the notetaker, e2ee.md §8.2). */
   --call-notice-bg: #3a2614;
   --call-notice-text: #ffc58f;
