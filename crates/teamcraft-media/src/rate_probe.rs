@@ -178,6 +178,17 @@ impl RateProbeConfig {
       ..Self::default()
     }
   }
+
+  /// A cluster next to speech that had no pause for long (#1893): two trains of small datagrams
+  /// instead of three of large ones, so what it puts into a thin link's queue in front of the
+  /// voice stays small.
+  pub fn small(base: Self) -> Self {
+    Self {
+      trains: 2,
+      datagram_bytes: base.min_datagram_bytes.max(300),
+      ..base
+    }
+  }
 }
 
 impl RateProbe {
@@ -386,6 +397,11 @@ impl UplinkProbe {
       self.probe.sent(first, &sizes, now);
     }
     datagrams
+  }
+
+  /// Whether a cluster is in flight.
+  pub fn is_running(&self) -> bool {
+    self.probe.is_running()
   }
 
   /// Whether a cluster runs for the wanted rate also while the estimate is above it (#1893): a thin

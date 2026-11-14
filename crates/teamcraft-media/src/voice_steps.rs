@@ -15,6 +15,11 @@
 //! Voice the receivers lose or get late ([`crate::voice_guard`]) steps down too, one step at a
 //! time, without waiting for the estimate.
 //!
+//! A call starts on [`VoiceStepConfig::start`] (the thin step), not the full one: on a 64 kbit/s
+//! link the full voice lost the first seconds of the first turn before anything showed the link
+//! was thin. The probe at the join ([`crate::join_probe`]) then puts it on the step the link
+//! carries ([`VoiceSteps::on_measured`]), a second or so in: full on a good link.
+//!
 //! Packets longer than 20 ms are only sent while every other participant plays them
 //! ([`teamcraft_proto::AudioFeature::LongFrames`]); otherwise the steps keep their bitrates in
 //! 20 ms packets.
@@ -46,7 +51,9 @@ pub struct VoiceSteps {
 /// Settings of the voice steps.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VoiceStepConfig {
-  /// The voice on a link with room: the call's default.
+  /// The step a call, or a new path, starts on before anything measured the uplink.
+  pub start: VoiceStep,
+  /// The voice on a link with room.
   pub full: VoiceEncoding,
   pub thin: VoiceEncoding,
   pub thinnest: VoiceEncoding,
@@ -100,6 +107,7 @@ pub enum VoiceStep {
 impl Default for VoiceStepConfig {
   fn default() -> Self {
     Self {
+      start: VoiceStep::Thin,
       full: VoiceEncoding {
         bitrate_bps: 32_000,
         frame: VoiceFrame::Ms20,
@@ -129,7 +137,7 @@ impl VoiceSteps {
   pub fn new(config: VoiceStepConfig) -> Self {
     Self {
       config,
-      step: VoiceStep::Full,
+      step: config.start,
       has_long_frames: false,
       maybe_below_since: None,
       upgrade_after: config.upgrade_after,
@@ -144,11 +152,11 @@ impl VoiceSteps {
     self.upgrade_after = config.upgrade_after;
   }
 
-  /// Another network or connection: its room is unknown, the voice starts full again (as the
-  /// estimate starts afresh). Returns the new encoding when it changed.
+  /// Another network or connection: its room is unknown, the voice starts on its start step again
+  /// (as the estimate starts afresh). Returns the new encoding when it changed.
   pub fn start_afresh(&mut self) -> Option<VoiceEncoding> {
     let before = self.encoding();
-    self.step = VoiceStep::Full;
+    self.step = self.config.start;
     self.maybe_below_since = None;
     self.upgrade_after = self.config.upgrade_after;
     self.maybe_upgraded_at = None;
@@ -246,6 +254,25 @@ impl VoiceSteps {
     (after != before).then_some(after)
   }
 
+  /// The probe at the join (or after a new path) measured the uplink's capacity: the voice goes
+  /// to the step that carries with the margin, up or down, at once. A step up this way counts as
+  /// an upgrade: one the link didn't carry makes the next wait longer. Returns the new encoding
+  /// when it changed.
+  pub fn on_measured(&mut self, capacity_bps: u32, now: Instant) -> Option<VoiceEncoding> {
+    let before = self.encoding();
+    let target = self.step_for(f64::from(capacity_bps) / self.config.upgrade_margin);
+    if target != self.step {
+      if target > self.step {
+        self.maybe_upgraded_at = Some(now);
+      }
+      self.step = target;
+      self.maybe_below_since = None;
+      self.maybe_changed_at = Some(now);
+    }
+    let after = self.encoding();
+    (after != before).then_some(after)
+  }
+
   /// The step an estimate of `estimate_bps` carries.
   fn step_for(&self, estimate_bps: f64) -> VoiceStep {
     if estimate_bps < f64::from(self.config.thinnest_below_bps) {
@@ -321,6 +348,70 @@ mod tests {
   const THIN_BPS: u32 = 100_000;
   const THINNEST_BPS: u32 = 40_000;
 
+  /// A call starts thin, not full: on a 64 kbit/s link the full voice lost the first seconds of
+  /// the first turn. The join's probe then puts it on the step the link carries, either way.
+  mod start {
+    use super::*;
+
+    #[test]
+    fn a_call_starts_on_the_thin_step() {
+      let config = VoiceStepConfig::default();
+      let mut steps = VoiceSteps::new(config);
+      steps.set_long_frames(true);
+      assert_eq!(steps.step(), VoiceStep::Thin);
+      assert_eq!(steps.encoding(), config.thin);
+      assert!(steps.wanted_bps().is_some(), "it probes for the full step");
+      // A new path starts there again.
+      steps.on_measured(GOOD_BPS, Instant::now());
+      assert_eq!(steps.start_afresh(), Some(config.thin));
+    }
+
+    #[test]
+    fn the_join_measurement_puts_a_good_link_on_the_full_step_at_once() {
+      let config = VoiceStepConfig::default();
+      let mut steps = VoiceSteps::new(config);
+      let start = Instant::now();
+      assert_eq!(steps.on_measured(GOOD_BPS, start), Some(config.full));
+      assert_eq!(steps.wanted_bps(), None);
+    }
+
+    #[test]
+    fn the_join_measurement_puts_a_thin_link_on_the_thinnest_step_at_once() {
+      let config = VoiceStepConfig::default();
+      let mut steps = VoiceSteps::new(config);
+      steps.set_long_frames(true);
+      let start = Instant::now();
+      // A 64 kbit/s link: below the thin step's bound with the margin.
+      assert_eq!(steps.on_measured(64_000, start), Some(config.thinnest));
+      // Just above the thin step's bound but short of the margin stays thin.
+      let mut middle = VoiceSteps::new(config);
+      assert_eq!(middle.on_measured(config.thin_below_bps, start), None);
+      assert_eq!(middle.step(), VoiceStep::Thin);
+    }
+
+    /// A measurement that put the voice up counts as an upgrade: lost right after it, the next
+    /// try waits the longer wait.
+    #[test]
+    fn a_join_measurement_the_link_didnt_carry_makes_the_next_upgrade_wait() {
+      let config = VoiceStepConfig::default();
+      let mut steps = VoiceSteps::new(config);
+      let start = Instant::now();
+      steps.on_measured(GOOD_BPS, start);
+      steps.on_estimate(GOOD_BPS, true, start + Duration::from_secs(2));
+      assert_eq!(steps.step(), VoiceStep::Thin);
+      let after_wait = start + Duration::from_secs(2) + config.upgrade_after;
+      assert_eq!(steps.on_carried(GOOD_BPS, after_wait), None);
+      assert!(
+        steps
+          .on_carried(
+            GOOD_BPS,
+            start + Duration::from_secs(2) + config.first_failed_upgrade_wait
+          )
+          .is_some()
+      );
+    }
+  }
+
   #[test]
   fn a_link_with_room_keeps_the_full_voice() {
     let mut steps = steps(true);
@@ -355,7 +446,7 @@ mod tests {
   /// steps down only once the estimate stayed below the bound.
   #[test]
   fn a_short_dip_of_the_estimate_keeps_the_voice() {
-    let config = VoiceStepConfig::default();
+    let config = full_start();
     let mut steps = VoiceSteps::new(config);
     steps.set_long_frames(true);
     let start = Instant::now();
@@ -526,10 +617,18 @@ mod tests {
   fn steps(has_long_frames: bool) -> VoiceSteps {
     let mut steps = VoiceSteps::new(VoiceStepConfig {
       downgrade_after: Duration::ZERO,
-      ..VoiceStepConfig::default()
+      ..full_start()
     });
     steps.set_long_frames(has_long_frames);
     steps
+  }
+
+  /// Steps that start full, as the tests of what comes after the start take them.
+  fn full_start() -> VoiceStepConfig {
+    VoiceStepConfig {
+      start: VoiceStep::Full,
+      ..VoiceStepConfig::default()
+    }
   }
 
   /// `tick` feedback intervals of 100 ms after `start`.

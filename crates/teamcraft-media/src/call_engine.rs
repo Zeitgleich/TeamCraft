@@ -74,6 +74,14 @@ const VIDEO_YIELDED_AFTER: Duration = Duration::from_secs(2);
 /// How long after a probe's padding the own voice isn't judged by the voice guard: a cluster's
 /// trains come a timer tick (~100 ms) apart, and their queue drains within a few hundred ms.
 const PADDING_SHADOW: Duration = Duration::from_millis(400);
+/// The own voice counts as speaking until this long after its last frame with voice activity: the
+/// gaps between words are shorter, a pause is longer (#1893).
+const SPEECH_HANGOVER: Duration = Duration::from_millis(400);
+/// A voice below its full step probes for the next one only in a pause of its speech (#1893): a
+/// cluster next to the voice on a 64 kbit/s uplink cost it seconds at every turn, and what such a
+/// cluster showed was no proof. Someone who talks this long without a pause gets a small one
+/// anyway, so a long talk doesn't keep the voice down for good.
+const PROBE_IN_SPEECH_AFTER: Duration = Duration::from_secs(20);
 /// Largest datagram the engine produces; audio frames are far below it.
 const MAX_DATAGRAM_BYTES: usize = 1200;
 /// Keyframe requests per received track go out at most this often: the SFU's default limit per
@@ -213,6 +221,14 @@ pub struct CallEngine {
   is_video_proof_wanted: bool,
   /// When the uplink rate probe last sent padding: voice sent along with it isn't judged.
   maybe_padding_sent_at: Option<Instant>,
+  /// The own voice's last frame with voice activity, and since when it speaks without a pause.
+  maybe_spoke_at: Option<Instant>,
+  maybe_speaking_since: Option<Instant>,
+  /// When the last uplink rate probe's cluster started.
+  maybe_probe_started_at: Option<Instant>,
+  /// How the running cluster stands to the own voice: what it shows counts for the voice's step
+  /// only when it ran in a pause, or was the small one a long talk gets.
+  probe_voice: ProbeVoice,
   /// The own voice's bitrate and packet length on a thin uplink (#1893).
   voice_steps: VoiceSteps,
   downlink_feedback: FeedbackRecorder,
@@ -554,6 +570,17 @@ enum ScreenAudioState {
   Publishing(StreamId),
 }
 
+/// How an uplink rate probe's cluster stands to the own speech (#1893).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeVoice {
+  /// It ran in a pause: what it showed counts.
+  InPause,
+  /// The own voice spoke while it ran: what it showed is no proof for the voice's step.
+  NextToSpeech,
+  /// The small cluster a long talk without a pause gets: it counts.
+  LongSpeech,
+}
+
 /// A video publication asked for whose answer (the SFU's `video_published`) hasn't arrived yet.
 struct PendingPublication {
   id: VideoPublicationId,
@@ -687,6 +714,10 @@ impl CallEngine {
       maybe_video_held_since: None,
       is_video_proof_wanted: false,
       maybe_padding_sent_at: None,
+      maybe_spoke_at: None,
+      maybe_speaking_since: None,
+      maybe_probe_started_at: None,
+      probe_voice: ProbeVoice::InPause,
       voice_steps: VoiceSteps::new(UplinkPolicy::default().voice),
       downlink_feedback: FeedbackRecorder::new(now),
       uplink_feedback_epoch: now,
@@ -1168,6 +1199,7 @@ impl CallEngine {
     if self.is_muted {
       return;
     }
+    self.note_speech(frame.level.has_voice_activity, now);
     self.send_audio_frame(audio_stream, AudioOrigin::Microphone, frame, now);
   }
 
@@ -2084,10 +2116,14 @@ impl CallEngine {
       .as_mut()
       .and_then(|probe| probe.on_feedback(feedback))
     {
-      self.apply_uplink_probe(measurement);
+      self.apply_uplink_probe(measurement, now);
     }
     let mut bps = self.uplink.on_feedback(feedback, now, self.uplink_feedback_epoch);
     let mut maybe_carried_bps = None;
+    // A cluster next to the own speech is no proof for the voice's step (#1893): on a 64 kbit/s
+    // link one at the start of a turn showed 80 kbit/s carried. It is for held video, whose
+    // proof is room next to the voice.
+    let mut is_voice_proof = true;
     if let Some(outcome) =
       self
         .uplink_rate_probe
@@ -2096,9 +2132,11 @@ impl CallEngine {
       bps = self.uplink.estimate_bps();
       if let ProbeOutcome::Carried { target_bps } = outcome {
         maybe_carried_bps = Some(target_bps);
+        is_voice_proof = self.probe_voice != ProbeVoice::NextToSpeech;
       }
       debug!(
         ?outcome,
+        probe_voice = ?self.probe_voice,
         estimate_bps = bps,
         "uplink probed while layers are held back"
       );
@@ -2112,7 +2150,7 @@ impl CallEngine {
       maybe_carried_bps = Some(bps);
     }
     self.uplink_voice.on_feedback(feedback, now);
-    self.follow_voice_steps(bps, maybe_carried_bps, now);
+    self.follow_voice_steps(bps, maybe_carried_bps.filter(|_| is_voice_proof), now);
     let is_hurt = self.maybe_uplink_capacity_bps.is_none() && self.uplink_voice.is_hurt(now);
     self.follow_video_proof(is_hurt, maybe_carried_bps);
     // A voice on its thinnest step: the uplink has no room for video next to it (#1893). And
@@ -2226,7 +2264,7 @@ impl CallEngine {
       return;
     };
     if let Some(measurement) = probe.on_timer(now) {
-      self.apply_uplink_probe(measurement);
+      self.apply_uplink_probe(measurement, now);
       return;
     }
     let Some(sizes) = probe.due_train(now) else {
@@ -2282,12 +2320,36 @@ impl CallEngine {
       (self.voice_steps.wanted_bps().is_some() || self.is_video_proof_wanted)
         && self.maybe_probe_bytes.is_some(),
     );
-    let datagrams = self.uplink_rate_probe.on_timer(
-      &self.uplink_probe_config(),
-      &mut self.uplink,
-      maybe_wanted_bps,
-      now,
-    );
+    let was_running = self.uplink_rate_probe.is_running();
+    let is_speaking = self.is_speaking(now);
+    if was_running {
+      if is_speaking && self.probe_voice == ProbeVoice::InPause {
+        self.probe_voice = ProbeVoice::NextToSpeech;
+      }
+    } else if is_speaking {
+      // Held-back video probes next to speech, as it always did; a voice below its full step
+      // waits for a pause.
+      self.probe_voice = if self.voice_steps.wanted_bps().is_none() {
+        ProbeVoice::NextToSpeech
+      } else if self.is_long_speech_probe_due(now) {
+        ProbeVoice::LongSpeech
+      } else {
+        return;
+      };
+    } else {
+      self.probe_voice = ProbeVoice::InPause;
+    }
+    let config = if self.probe_voice == ProbeVoice::LongSpeech {
+      RateProbeConfig::small(self.uplink_probe_config())
+    } else {
+      self.uplink_probe_config()
+    };
+    let datagrams = self
+      .uplink_rate_probe
+      .on_timer(&config, &mut self.uplink, maybe_wanted_bps, now);
+    if !was_running && self.uplink_rate_probe.is_running() {
+      self.maybe_probe_started_at = Some(now);
+    }
     if !datagrams.is_empty() {
       self.maybe_padding_sent_at = Some(now);
     }
@@ -2345,7 +2407,7 @@ impl CallEngine {
 
   /// The uplink probe's result: the estimate starts from it, and the layers follow with the next
   /// feedback.
-  fn apply_uplink_probe(&mut self, measurement: LinkMeasurement) {
+  fn apply_uplink_probe(&mut self, measurement: LinkMeasurement, now: Instant) {
     let bps = self.uplink.apply_probe(measurement.capacity_bps);
     debug!(
       capacity_bps = measurement.capacity_bps,
@@ -2354,6 +2416,51 @@ impl CallEngine {
       "uplink probed"
     );
     self.maybe_uplink_measurement = Some(measurement);
+    // The voice starts on its thin step; the measurement puts it where the link carries it
+    // (#1893): full a second or so into a call on a good link, thinnest on 64 kbit/s.
+    let was_wanted = self.voice_steps.wanted_bps();
+    if let Some(encoding) = self.voice_steps.on_measured(measurement.capacity_bps, now) {
+      info!(
+        capacity_bps = measurement.capacity_bps,
+        bitrate_bps = encoding.bitrate_bps,
+        frame = ?encoding.frame,
+        "the own voice changes its encoding on the uplink's measurement"
+      );
+      self.event(CallEngineEvent::VoiceEncoding(encoding));
+    }
+    if self.voice_steps.wanted_bps() != was_wanted {
+      self.update_uplink_demand();
+    }
+  }
+
+  /// Notes whether a frame of the own microphone carried speech (#1893).
+  fn note_speech(&mut self, has_voice_activity: bool, now: Instant) {
+    if !has_voice_activity {
+      return;
+    }
+    if !self.is_speaking(now) {
+      self.maybe_speaking_since = Some(now);
+    }
+    self.maybe_spoke_at = Some(now);
+  }
+
+  /// Whether the own microphone speaks now: unmuted, with voice activity within the hangover.
+  fn is_speaking(&self, now: Instant) -> bool {
+    !self.is_muted
+      && self
+        .maybe_spoke_at
+        .is_some_and(|spoke_at| now.saturating_duration_since(spoke_at) < SPEECH_HANGOVER)
+  }
+
+  /// Whether a talk without a pause has gone on so long that a small cluster may run next to it:
+  /// it began [`PROBE_IN_SPEECH_AFTER`] ago, and so did the last cluster.
+  fn is_long_speech_probe_due(&self, now: Instant) -> bool {
+    let is_long_ago = |maybe_at: Option<Instant>| {
+      maybe_at.is_none_or(|at| now.saturating_duration_since(at) >= PROBE_IN_SPEECH_AFTER)
+    };
+    self.maybe_speaking_since.is_some()
+      && is_long_ago(self.maybe_speaking_since)
+      && is_long_ago(self.maybe_probe_started_at)
   }
 
   /// How the uplink treats the top layer of the own track on `stream_id` now (#1733): a share's
@@ -5836,12 +5943,91 @@ mod tests {
       alice.set_muted(true);
       drain(&mut alice);
       alice.follow_voice_steps(40_000, None, now);
-      assert_eq!(alice.voice_steps.step(), crate::voice_steps::VoiceStep::Full);
+      // The step a call starts on.
+      assert_eq!(alice.voice_steps.step(), crate::voice_steps::VoiceStep::Thin);
       assert!(drain(&mut alice).is_empty());
       alice.set_muted(false);
       alice.follow_voice_steps(40_000, None, now);
       alice.follow_voice_steps(40_000, None, now + Duration::from_secs(2));
       assert_eq!(alice.voice_steps.step(), crate::voice_steps::VoiceStep::Thinnest);
+    }
+
+    /// #1893: the call's voice starts thin; the measurement at the join puts it on the step the
+    /// uplink carries at once, full on a good link and thinnest on 64 kbit/s, and the UI hears.
+    #[test]
+    fn the_join_measurement_sets_the_voice_step() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      drain(&mut alice);
+      let good = LinkMeasurement {
+        capacity_bps: 2_000_000,
+        loss_percent: 0,
+      };
+      alice.apply_uplink_probe(good, now);
+      assert_eq!(alice.voice_steps.step(), crate::voice_steps::VoiceStep::Full);
+      let full = UplinkPolicy::default().voice.full;
+      assert!(drain(&mut alice).contains(&EngineOutput::Event(CallEngineEvent::VoiceEncoding(full))));
+      let thin = LinkMeasurement {
+        capacity_bps: 64_000,
+        loss_percent: 0,
+      };
+      alice.apply_uplink_probe(thin, now + Duration::from_secs(1));
+      assert_eq!(alice.voice_steps.step(), crate::voice_steps::VoiceStep::Thinnest);
+    }
+
+    /// #1893: a voice below its full step probes for the next one in a pause of its speech, not
+    /// next to it: on a 64 kbit/s uplink every cluster next to the voice cost it a second.
+    #[test]
+    fn a_thin_voice_probes_in_a_pause_of_its_speech() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      alice.maybe_probe_bytes = Some(15_000);
+      alice.voice_steps.on_measured(64_000, now);
+      drain(&mut alice);
+      let (padding, at) = talk(&mut alice, now, Duration::from_secs(3), &frame());
+      assert_eq!(padding, 0, "none while speaking");
+      let (padding, _) = talk(&mut alice, at, Duration::from_secs(2), &silence());
+      assert!(padding > 0, "in the pause");
+    }
+
+    /// #1893: someone who talks on without a pause doesn't keep the voice down for good: after a
+    /// while a small cluster runs next to the speech.
+    #[test]
+    fn a_long_talk_gets_a_small_probe() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      alice.maybe_probe_bytes = Some(15_000);
+      alice.voice_steps.on_measured(64_000, now);
+      drain(&mut alice);
+      let (padding, at) = talk(
+        &mut alice,
+        now,
+        PROBE_IN_SPEECH_AFTER - Duration::from_secs(1),
+        &frame(),
+      );
+      assert_eq!(padding, 0);
+      let (padding, _) = talk(&mut alice, at, Duration::from_secs(2), &frame());
+      assert!(padding > 0, "after {PROBE_IN_SPEECH_AFTER:?}");
+      assert_eq!(alice.probe_voice, ProbeVoice::LongSpeech);
+    }
+
+    /// #1893: a cluster that started in a pause and ran into speech is no proof for the voice.
+    #[test]
+    fn a_probe_that_runs_into_speech_is_no_proof_for_the_voice() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      alice.maybe_probe_bytes = Some(15_000);
+      alice.voice_steps.on_measured(64_000, now);
+      drain(&mut alice);
+      let mut at = now;
+      while !alice.uplink_rate_probe.is_running() && at < now + Duration::from_secs(5) {
+        let (_, next) = talk(&mut alice, at, Duration::from_millis(100), &silence());
+        at = next;
+      }
+      assert!(alice.uplink_rate_probe.is_running());
+      assert_eq!(alice.probe_voice, ProbeVoice::InPause);
+      talk(&mut alice, at, Duration::from_millis(100), &frame());
+      assert_eq!(alice.probe_voice, ProbeVoice::NextToSpeech);
     }
 
     /// #1893: with every other participant playing long packets, a voice lost on the way while
@@ -5851,6 +6037,11 @@ mod tests {
     fn lost_voice_without_video_steps_down_to_longer_packets() {
       let now = Instant::now();
       let (mut alice, _bob) = secured_pair(now);
+      // A voice on its full step, as on a good link.
+      alice.voice_steps = VoiceSteps::new(crate::voice_steps::VoiceStepConfig {
+        start: VoiceStep::Full,
+        ..UplinkPolicy::default().voice
+      });
       let features = CallEvent::AudioFeatures {
         features: vec![AudioFeature::LongFrames],
       };
@@ -8187,6 +8378,44 @@ mod tests {
       opus: vec![0x78, 1, 2, 3, 4, 5, 6, 7, 8, 9],
       level: AudioLevel::new(20, true).unwrap(),
     }
+  }
+
+  /// A frame of a pause: no voice activity.
+  fn silence() -> EncodedAudioFrame {
+    EncodedAudioFrame {
+      opus: vec![0x78, 1, 2],
+      level: AudioLevel::new(127, false).unwrap(),
+    }
+  }
+
+  /// Sends `frame` every 20 ms for `length` from `from`, with the timer every 100 ms: the padding
+  /// datagrams sent meanwhile, and when it ended.
+  fn talk(
+    engine: &mut CallEngine,
+    from: Instant,
+    length: Duration,
+    frame: &EncodedAudioFrame,
+  ) -> (usize, Instant) {
+    let mut padding = 0;
+    let mut at = from;
+    let mut tick = 0u32;
+    while at < from + length {
+      engine.send_audio(frame, at);
+      if tick.is_multiple_of(5) {
+        engine.on_timer(at);
+      }
+      padding += drain(engine)
+        .iter()
+        .filter_map(|output| match output {
+          EngineOutput::Datagram(bytes) => MediaDatagram::parse(bytes).ok(),
+          _ => None,
+        })
+        .filter(|datagram| datagram.header.stream_id == crate::datagram::PADDING_STREAM)
+        .count();
+      at += Duration::from_millis(20);
+      tick += 1;
+    }
+    (padding, at)
   }
 
   fn call() -> CallId {
