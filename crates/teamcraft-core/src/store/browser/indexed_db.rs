@@ -217,6 +217,11 @@ impl SealedStore<IndexedDbRecords> {
 }
 
 impl RecordBackend for IndexedDbRecords {
+  /// No tantivy in the browser: its search reads the word index (issue #1833).
+  fn indexes_words(&self) -> bool {
+    true
+  }
+
   fn put_record(&self, id: &LookupId, sealed: &[u8]) -> Result<(), StoreError> {
     self.write(
       format_id(id),

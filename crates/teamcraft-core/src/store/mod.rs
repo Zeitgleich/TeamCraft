@@ -51,6 +51,7 @@ mod sqlite_log;
 ))]
 mod sqlite_wipe;
 mod tracked;
+mod word_filter;
 #[cfg(any(test, target_arch = "wasm32"))]
 mod write_queue;
 
@@ -80,6 +81,7 @@ pub use secret_vault::{Keystore, OsKeystore, SecretVault, SessionNote, TokenKind
 #[cfg(all(feature = "sqlcipher", not(target_arch = "wasm32")))]
 pub use sqlite::SqlCipherStore;
 pub use tracked::{DEFAULT_MESSAGE_CACHE_BYTES, RemovedRendition, StoreChanges, TrackedStore};
+pub use word_filter::WordProbe;
 
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{ClientMessageId, ConversationId, MessageId, MlsMessageId, ThreadId, UserId};
@@ -1115,6 +1117,18 @@ pub trait LocalStore {
     linked.truncate(limit);
     Ok(linked)
   }
+  /// The texts and files of `conversation` whose words may start with what `probe` asks for, from
+  /// the store's index of word prefixes (issue #1833), in display order: every message that has
+  /// them, and a few that don't, which the caller checks against the text. `None` when the store
+  /// keeps no such index, or it isn't complete: the caller reads the conversation instead.
+  fn word_candidates(
+    &self,
+    conversation: ConversationId,
+    probe: &WordProbe,
+  ) -> Result<Option<Vec<StoredMessage>>, StoreError> {
+    let _ = (conversation, probe);
+    Ok(None)
+  }
   /// The reactions to any of `targets`, in display order (the latest of a person's counts).
   fn reactions_to(
     &self,
@@ -1548,6 +1562,14 @@ macro_rules! forward_local_store {
         limit: usize,
       ) -> Result<Vec<StoredMessage>, StoreError> {
         (**self).user_messages(conversation, user, link, limit)
+      }
+
+      fn word_candidates(
+        &self,
+        conversation: ConversationId,
+        probe: &WordProbe,
+      ) -> Result<Option<Vec<StoredMessage>>, StoreError> {
+        (**self).word_candidates(conversation, probe)
       }
 
       fn reactions_to(

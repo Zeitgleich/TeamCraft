@@ -2,8 +2,9 @@
 //!
 //! Terms are matched by the tantivy index ([`crate::search`], with English and German word forms);
 //! the UI's filters (`from:`, `in:`, `has:`, dates, `is:thread`) are applied to the decrypted message
-//! with the same rules the UI's own search uses. In the browser, where tantivy doesn't run, terms are
-//! matched as plain substrings instead.
+//! with the same rules the UI's own search uses. In the browser, where tantivy doesn't run, the
+//! store's index of word prefixes picks the candidates (issue #1833), which are then matched as
+//! plain substrings.
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::cell::RefCell;
@@ -22,7 +23,7 @@ use crate::client::stored_account_data;
 use crate::error::CoreError;
 use crate::records;
 use crate::search_scope::ConversationScope;
-use crate::store::{LocalStore, MessageContent, StoredMessage, Table, UserLink};
+use crate::store::{LocalStore, MessageContent, StoredMessage, Table, UserLink, WordProbe};
 use crate::ui_backend::{CoreChatBackend, CoreCommand, UnreadCounts};
 
 /// Hits shown per search.
@@ -193,19 +194,36 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .collect()
   }
 
-  /// Browser: plain substring matching over the local store.
   #[cfg(target_arch = "wasm32")]
   fn term_candidates(&self, query: &ParsedQuery, scope: &ConversationScope) -> Vec<StoredMessage> {
+    self.word_index_candidates(query, scope)
+  }
+
+  /// Browser: the messages the store's word index lets through ([`LocalStore::word_candidates`]),
+  /// then matched as substrings. A conversation the store has no complete index of is read whole.
+  #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+  pub(crate) fn word_index_candidates(
+    &self,
+    query: &ParsedQuery,
+    scope: &ConversationScope,
+  ) -> Vec<StoredMessage> {
     let terms = query.terms();
+    let probe = WordProbe::of_terms(terms.iter().copied());
     self
       .conversation_ids()
       .into_iter()
       .filter(|conversation| scope.includes(*conversation))
-      .flat_map(|conversation| self.stored(conversation))
+      .flat_map(|conversation| match self.store_ref().word_candidates(conversation, &probe) {
+        Ok(Some(candidates)) => candidates,
+        Ok(None) => self.stored(conversation),
+        Err(error) => {
+          tracing::warn!(conversation_id = %conversation, %error, "the word index failed; reading the conversation");
+          self.stored(conversation)
+        },
+      })
       .filter(|stored| {
-        terms
-          .iter()
-          .all(|term| find_ci(&searchable_text(stored), term).is_some())
+        let text = stored.searchable_text().unwrap_or_default();
+        terms.iter().all(|term| find_ci(text, term).is_some())
       })
       .collect()
   }
@@ -309,8 +327,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .collect()
   }
 
-  /// All of a conversation's messages: the browser's search, which has no index of terms yet.
-  #[cfg(target_arch = "wasm32")]
+  /// All of a conversation's messages: the browser's search where the store has no word index.
+  #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
   fn stored(&self, conversation: ConversationId) -> Vec<StoredMessage> {
     self
       .store_ref()
@@ -356,15 +374,6 @@ fn conversation_scope(query: &ParsedQuery, context: &HitContext) -> Conversation
 /// `in:name` matches a conversation whose name contains `name`, ignoring case.
 fn is_named(conversation: &Conversation, name: &str) -> bool {
   find_ci(&conversation.name, name).is_some()
-}
-
-#[cfg(target_arch = "wasm32")]
-fn searchable_text(stored: &StoredMessage) -> String {
-  match &stored.content {
-    MessageContent::Text { body, .. } => body.clone(),
-    MessageContent::File { attachment } => attachment.file_name.clone(),
-    _ => String::new(),
-  }
 }
 
 #[cfg(test)]

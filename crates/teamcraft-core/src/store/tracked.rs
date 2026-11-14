@@ -34,7 +34,8 @@ use teamcraft_proto::{AttachmentId, ClientMessageId, ConversationId, MessageId, 
 use super::message_cache::MessageCache;
 use super::{
   Attached, AttachedRange, AttachmentRef, FeedVersion, LocalStore, MessageContent, MessageEdge,
-  MessageFilter, MessageOrder, MessageSlot, StoreError, StoredMessage, Table, UserLink, WriteTally, Written,
+  MessageFilter, MessageOrder, MessageSlot, StoreError, StoredMessage, Table, UserLink, WordProbe,
+  WriteTally, Written,
 };
 use crate::records::draft_reply_key;
 
@@ -923,6 +924,14 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     limit: usize,
   ) -> Result<Vec<StoredMessage>, StoreError> {
     self.inner.user_messages(conversation, user, link, limit)
+  }
+
+  fn word_candidates(
+    &self,
+    conversation: ConversationId,
+    probe: &WordProbe,
+  ) -> Result<Option<Vec<StoredMessage>>, StoreError> {
+    self.inner.word_candidates(conversation, probe)
   }
 
   fn reactions_to(

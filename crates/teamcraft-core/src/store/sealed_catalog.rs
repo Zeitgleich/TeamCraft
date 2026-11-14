@@ -7,7 +7,8 @@
 //! `<generation>/m/<conversation>/…` (a conversation's messages), `<generation>/f/<conversation>/…`
 //! (the rows of its feed, whose page lengths count positions) and `<generation>/x/<conversation>/…`
 //! (its reactions by target, replies by thread, events, pinned messages, messages by thread, and
-//! mentions and posts by person), plus the record [`META_KEY`] saying
+//! mentions and posts by person), in the browser `<generation>/w/<conversation>/…` (the word prefixes
+//! of its texts and files, [`super::word_filter`], issue #1833), plus the record [`META_KEY`] saying
 //! which generation is current, what it holds and whether it is complete. The catalog is derived
 //! from the records: a damaged or older one is built again under a new generation, and the build
 //! deletes the nodes of older ones. Nothing about the catalog is readable without the database key:
@@ -23,6 +24,7 @@ use teamcraft_proto::{ClientMessageId, ConversationId, Id, MessageId, ThreadId, 
 
 use super::lru::Lru;
 use super::sealed_index::{HeapBytes, IndexNodes, IndexPage, IndexRoot};
+use super::word_filter::WordFilter;
 use super::{Attached, MessageFilter, MessageOrder, StoreError, StoredMessage, UserLink};
 
 /// The reserved table the catalog's records are entries of.
@@ -39,6 +41,8 @@ pub(crate) const DIRECTORY_KIND: &str = "d";
 pub(crate) const FEED_KIND: &str = "f";
 /// Prefix of a conversation's relations index.
 pub(crate) const RELATIONS_KIND: &str = "x";
+/// Prefix of a conversation's word index ([`WordFilter`] by message, issue #1833).
+pub(crate) const WORDS_KIND: &str = "w";
 /// Prefix of a conversation's [`super::FeedVersion`] counts.
 pub(crate) const FEED_VERSION_KIND: &str = "v";
 /// What a complete catalog holds. A store with an older one builds it again when it opens.
@@ -47,6 +51,8 @@ pub(crate) const FEED_VERSION_KIND: &str = "v";
 /// ([`MessageFlags::LINKS`], issue #609); 5: which messages are pinned ([`Relation::Pinned`],
 /// issue #1757); 6: the messages of each thread ([`Relation::InThread`]), and whom a message
 /// mentions and who posted it ([`Relation::Mentions`], [`Relation::PostedBy`], issue #1790).
+/// Whether a catalog holds word indexes ([`CatalogState::has_words`]) is apart from its version:
+/// only stores without tantivy keep them (the browser's), and one without them builds them once.
 pub(crate) const CATALOG_VERSION: u32 = 6;
 
 /// How far the catalog of a store is built, and its generation (random, so a catalog built again
@@ -63,11 +69,16 @@ pub(crate) enum CatalogState {
     /// [`CATALOG_VERSION`] of the build; the first version wrote none.
     #[serde(default = "first_catalog_version")]
     version: u32,
+    /// Builds the word indexes too ([`WORDS_KIND`]); stores before issue #1833 wrote none.
+    #[serde(default, skip_serializing_if = "is_false")]
+    has_words: bool,
   },
   Complete {
     generation: u64,
     #[serde(default = "first_catalog_version")]
     version: u32,
+    #[serde(default, skip_serializing_if = "is_false")]
+    has_words: bool,
   },
 }
 
@@ -76,6 +87,20 @@ impl CatalogState {
     match self {
       Self::Building { generation, .. } | Self::Complete { generation, .. } => *generation,
     }
+  }
+
+  /// Whether the catalog holds word indexes, complete ones once the catalog is complete.
+  pub(crate) fn has_words(&self) -> bool {
+    match self {
+      Self::Building { has_words, .. } | Self::Complete { has_words, .. } => *has_words,
+    }
+  }
+
+  /// Whether the catalog is complete, of this version, and holds word indexes exactly when
+  /// `has_words`.
+  pub(crate) fn is_complete_for(&self, has_words: bool) -> bool {
+    matches!(self, Self::Complete { version, .. } if *version == CATALOG_VERSION)
+      && self.has_words() == has_words
   }
 }
 
@@ -168,6 +193,11 @@ pub(crate) struct ScopedNodes<'a, K, V> {
 impl HeapBytes for MessageKey {}
 impl HeapBytes for MessageEntry {}
 impl HeapBytes for RelationKey {}
+impl HeapBytes for WordFilter {
+  fn heap_bytes(&self) -> usize {
+    WordFilter::heap_bytes(self)
+  }
+}
 
 impl Relation {
   /// The relations `message` has.
@@ -552,6 +582,10 @@ fn first_catalog_version() -> u32 {
   1
 }
 
+fn is_false(value: &bool) -> bool {
+  !*value
+}
+
 fn raw_thread(thread: ThreadId) -> i64 {
   thread.snowflake().get()
 }
@@ -568,7 +602,8 @@ mod tests {
       decoded,
       CatalogState::Complete {
         generation: 7,
-        version: 1
+        version: 1,
+        has_words: false
       }
     );
     let decoded: CatalogState = decode(br#"{"state":"building","generation":7,"after":"00"}"#).unwrap();
@@ -577,7 +612,8 @@ mod tests {
       CatalogState::Building {
         generation: 7,
         maybe_after: Some("00".into()),
-        version: 1
+        version: 1,
+        has_words: false
       }
     );
   }

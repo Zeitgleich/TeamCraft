@@ -2396,7 +2396,16 @@ TEAMCRAFT_SEARCH_DIR=$TMPDIR TEAMCRAFT_SEARCH_MESSAGES=100000 cargo test --relea
 - **On the SD card** of the same laptop (the default target directory) the searches are the same,
   but steps that save a merged segment wait for SQLite's log (one took 13 s): the writes are a few
   MB, the card's sync is slow. Phones' flash is far faster; not measured on a phone yet.
-- **The browser** keeps its substring scan (tantivy doesn't target wasm32) and writes no queue.
+- **The browser** (tantivy doesn't target wasm32) writes no queue. Since issue #1833 its sealed
+  catalog keeps a word index per conversation: a Bloom filter of word prefixes per text, about
+  8 bits per distinct prefix of up to six characters (8 to 256 bytes per message; about 2.4 % false
+  positives per term). A search reads the index's pages and the messages it lets through, then
+  matches substrings: 129 record reads instead of 20,126 for one term in a 20,000-message channel
+  (`ui_reads::a_search_reads_the_word_index_not_every_message`). It still walks each conversation's
+  whole index (about one page per 256 messages); a full inverted index (prefix to messages) would
+  read less per search but takes about ten entries per message, and the browser holds every
+  record's ciphertext in memory. A store without the index builds its catalog again once, in the
+  sliced build of issue #1127.
 - **Still open** (#154): full-history search on a new device (segments are fetched on mobile, but
   no app publishes them), search off the UI thread on the desktop, a measured 500,000-message run.
 
