@@ -54,7 +54,9 @@ pub async fn create_probe_ticket(
 }
 
 /// A guest measures only while waiting in, or let into, a meeting that is on and that hasn't
-/// removed them: a refused guest, or one of a meeting that ended, gets nothing.
+/// removed them: a refused guest, or one of a meeting that ended, gets nothing. The guest's own
+/// lobby place is looked at first, and every refusal answers the same "not found": an id of a
+/// meeting the guest isn't in tells nothing about whether it exists or has ended.
 async fn check_guest_in_lobby(
   state: &AppState,
   caller: &AuthenticatedUser,
@@ -62,33 +64,28 @@ async fn check_guest_in_lobby(
 ) -> Result<(), ApiError> {
   let meeting_id =
     maybe_meeting_id.ok_or_else(|| ApiError::Forbidden("a guest names their meeting".into()))?;
-  let meeting = state
+  let is_in_lobby = state
     .database
-    .get_meeting(meeting_id)
+    .get_lobby_entry(meeting_id, caller.user.id)
     .await?
-    .ok_or_else(ApiError::meeting_not_found)?;
-  if meeting.status != MeetingStatus::Scheduled.as_str() {
-    return Err(ApiError::Conflict("the meeting is over".into()));
+    .is_some_and(|row| {
+      matches!(
+        LobbyState::from(row.state),
+        LobbyState::Waiting | LobbyState::Admitted
+      )
+    });
+  if !is_in_lobby {
+    return Err(ApiError::meeting_not_found());
   }
-  let row = state
-    .database
-    .get_lobby_entry(meeting.id, caller.user.id)
-    .await?
-    .ok_or_else(ApiError::meeting_not_found)?;
-  if !matches!(
-    LobbyState::from(row.state),
-    LobbyState::Waiting | LobbyState::Admitted
-  ) {
-    return Err(ApiError::Forbidden("the guest wasn't let in".into()));
-  }
+  let Some(meeting) = state.database.get_meeting(meeting_id).await? else {
+    return Err(ApiError::meeting_not_found());
+  };
   let is_removed = state
     .maybe_calls
     .as_ref()
     .is_some_and(|calls| calls.is_removed(meeting.conversation, caller.user.id));
-  if is_removed {
-    return Err(ApiError::Forbidden(
-      "the host removed you from the meeting".into(),
-    ));
+  if meeting.status != MeetingStatus::Scheduled.as_str() || is_removed {
+    return Err(ApiError::meeting_not_found());
   }
   Ok(())
 }

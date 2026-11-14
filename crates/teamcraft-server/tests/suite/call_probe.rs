@@ -120,19 +120,33 @@ async fn a_guest_gets_one_only_while_waiting_in_a_meeting_that_is_on() {
   )
   .await;
   assert_eq!(waiting.0, StatusCode::OK, "{}", waiting.1);
+  // Another meeting that exists, one that ended and a made-up id answer alike: nothing tells
+  // whether a meeting the guest isn't in exists or is over.
   let other_meeting = schedule(&app, &alice).await;
-  let elsewhere = request(
-    &app,
-    &guest_token,
-    json!({ "device_id": device, "meeting_id": other_meeting }),
-  )
-  .await;
-  assert_eq!(
-    elsewhere.0,
-    StatusCode::NOT_FOUND,
-    "not in that lobby: {}",
-    elsewhere.1
-  );
+  let ended_meeting = schedule(&app, &alice).await;
+  let ended = app
+    .post(
+      &alice,
+      &format!("/meetings/{ended_meeting}/controls"),
+      json!({"action": "end"}),
+    )
+    .await;
+  assert_eq!(ended.status, StatusCode::NO_CONTENT, "{}", ended.body);
+  let mut answers = Vec::new();
+  for meeting_id in [other_meeting.as_str(), ended_meeting.as_str(), "123456789012345"] {
+    answers.push(
+      request(
+        &app,
+        &guest_token,
+        json!({ "device_id": device, "meeting_id": meeting_id }),
+      )
+      .await,
+    );
+  }
+  for (status, body) in &answers {
+    assert_eq!(*status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(*body, answers[0].1, "the same answer");
+  }
 
   // A refused guest's session ends: no ticket.
   let guest_id = joined["user_id"].as_str().unwrap();
