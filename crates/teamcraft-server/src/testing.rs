@@ -308,6 +308,8 @@ impl TestApp {
       roster_grace_secs: 60,
       roster_timeout_secs: 120,
       max_devices_per_user_per_call: 3,
+      probe_ticket_ttl_secs: 30,
+      probe_tickets_per_device_per_minute: 6,
     };
     Self::start_with_calls_config(&config, signing_key_pem).await
   }

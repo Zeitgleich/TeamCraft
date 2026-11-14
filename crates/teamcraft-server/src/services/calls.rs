@@ -26,11 +26,11 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use secrecy::ExposeSecret;
 use subtle::ConstantTimeEq;
 use teamcraft_proto::{
-  CALL_JOIN_TOKEN_AUDIENCE, CallEndCause, CallId, CallJoinClaims, CallJoinTokenResponse, CallRosterEntry,
-  CallStateResponse, ChannelRole, ConversationId, ConversationKind, CreateCallJoinTokenRequest,
-  DependencyName, DeviceId, GatewayEvent, ListRunningCallsResponse, MoveCallRequest, SfuControlAction,
-  SfuControlRequest, SfuParticipantReport, SfuRosterReport, UnixMillis, UserId, WebhookEventData,
-  WebhookEventKind,
+  CALL_JOIN_TOKEN_AUDIENCE, CALL_PROBE_TICKET_AUDIENCE, CallEndCause, CallId, CallJoinClaims,
+  CallJoinTokenResponse, CallProbeClaims, CallProbeTicketResponse, CallRosterEntry, CallStateResponse,
+  CallTokenKind, ChannelRole, ConversationId, ConversationKind, CreateCallJoinTokenRequest, DependencyName,
+  DeviceId, GatewayEvent, ListRunningCallsResponse, MoveCallRequest, SfuControlAction, SfuControlRequest,
+  SfuParticipantReport, SfuRosterReport, UnixMillis, UserId, WebhookEventData, WebhookEventKind,
 };
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -61,6 +61,9 @@ const STARTUP_ROSTER_RETRIES: [Duration; 6] = [
   Duration::from_secs(30),
 ];
 
+/// The longest a link probe ticket lives (#1959), whatever the configuration says.
+pub(crate) const MAX_PROBE_TICKET_TTL: Duration = Duration::from_secs(60);
+
 /// Signs join tokens and tracks the active call of each conversation.
 pub struct CallService {
   signing_key: EncodingKey,
@@ -70,6 +73,10 @@ pub struct CallService {
   /// The SFU certificates' SHA-256s (lowercase hex) for browsers, when they are self-signed.
   sfu_certificate_sha256: Vec<String>,
   token_ttl: Duration,
+  /// Lifetime of a link probe ticket (#1959), at most [`MAX_PROBE_TICKET_TTL`].
+  probe_ticket_ttl: Duration,
+  /// Link probe tickets one device may get per minute; 0: none.
+  pub(crate) probe_tickets_per_device_per_minute: u32,
   call_idle_timeout: Duration,
   ring_timeout: Duration,
   max_devices_per_user: usize,
@@ -263,6 +270,8 @@ impl CallService {
         .map(normalized_sha256)
         .collect::<Result<_, _>>()?,
       token_ttl: Duration::from_secs(config.join_token_ttl_secs),
+      probe_ticket_ttl: Duration::from_secs(config.probe_ticket_ttl_secs).min(MAX_PROBE_TICKET_TTL),
+      probe_tickets_per_device_per_minute: config.probe_tickets_per_device_per_minute,
       call_idle_timeout: Duration::from_secs(config.call_idle_secs),
       ring_timeout: Duration::from_secs(config.ring_timeout_secs),
       max_devices_per_user: config.max_devices_per_user_per_call,
@@ -1032,6 +1041,35 @@ impl CallService {
       device_id,
       maybe_conversation_id: Some(conversation_id),
     }
+  }
+
+  /// A link probe ticket for one device (#1959), valid from `now_unix_secs` for its lifetime:
+  /// signed like a join token, with its own audience and kind, and a fresh id.
+  pub(crate) fn probe_ticket(
+    &self,
+    user_id: UserId,
+    device_id: DeviceId,
+    jti: String,
+    now_unix_secs: u64,
+  ) -> Result<CallProbeTicketResponse, ApiError> {
+    let claims = CallProbeClaims {
+      iss: self.issuer.clone(),
+      aud: CALL_PROBE_TICKET_AUDIENCE.to_owned(),
+      iat: now_unix_secs,
+      exp: now_unix_secs + self.probe_ticket_ttl.as_secs(),
+      jti,
+      kind: CallTokenKind::Probe,
+      user_id,
+      device_id,
+    };
+    let ticket = jsonwebtoken::encode(&Header::new(Algorithm::EdDSA), &claims, &self.signing_key)
+      .map_err(|error| ApiError::Internal(format!("signing a probe ticket failed: {error}")))?;
+    Ok(CallProbeTicketResponse {
+      ticket,
+      sfu_url: self.sfu_url.clone(),
+      expires_at: UnixMillis(i64::try_from(claims.exp).unwrap_or(i64::MAX).saturating_mul(1000)),
+      sfu_certificate_sha256: self.sfu_certificate_sha256.clone(),
+    })
   }
 
   fn sign(&self, claims: &CallJoinClaims) -> Result<String, ApiError> {
@@ -1858,7 +1896,7 @@ fn state_response(snapshot: CallSnapshot) -> CallStateResponse {
   }
 }
 
-fn unix_now_secs() -> Result<u64, ApiError> {
+pub(crate) fn unix_now_secs() -> Result<u64, ApiError> {
   SystemTime::now()
     .duration_since(UNIX_EPOCH)
     .map(|elapsed| elapsed.as_secs())
@@ -2879,6 +2917,8 @@ MCowBQYDK2VwAyEA8YVjY2Zv9XPhv003tFAgzW7J6gfDn+ICj5xCB2LXMVg=
       roster_grace_secs: 60,
       roster_timeout_secs: 120,
       max_devices_per_user_per_call: 3,
+      probe_ticket_ttl_secs: 30,
+      probe_tickets_per_device_per_minute: 6,
     }
   }
 

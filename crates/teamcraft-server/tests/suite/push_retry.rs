@@ -661,6 +661,8 @@ MC4CAQAwBQYDK2VwBCIEIAxxS2yuWa9SUUAfZhI0772UQ48VXZLz45+L2A5IfcWA
       roster_grace_secs: 60,
       roster_timeout_secs: 120,
       max_devices_per_user_per_call: 3,
+      probe_ticket_ttl_secs: 30,
+      probe_tickets_per_device_per_minute: 6,
     }
   }
 }

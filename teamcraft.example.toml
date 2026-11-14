@@ -735,6 +735,11 @@ is_enabled = true
 # signing_key_path = "/etc/teamcraft/call-signing.pem"
 # Join tokens are only checked when joining, so keep them short-lived.
 # join_token_ttl_secs = 60
+# A device measures its link to the SFU on the pre-join screen or in a meeting's lobby with a probe
+# ticket: it grants padding up to the SFU's probe budget, nothing else. At most 60 s.
+# probe_ticket_ttl_secs = 30
+# Probe tickets one device may get per minute; 0 turns measuring before the join off.
+# probe_tickets_per_device_per_minute = 6
 # A conversation's call gets a new id once no join token was issued for this long.
 # call_idle_secs = 43200
 # The SFU reports who joins and leaves calls to /api/internal/v1/calls/participants/{joined,left}

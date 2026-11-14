@@ -17,7 +17,7 @@ use axum::http::header::{
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use teamcraft_proto::{ScimClientId, UserId};
+use teamcraft_proto::{DeviceId, ScimClientId, UserId};
 
 use crate::auth::{DPOP_HEADER, note_nonce_header};
 use crate::config::RateLimitConfig;
@@ -65,6 +65,9 @@ pub struct RateLimits {
   /// Requests each SCIM client may still make (docs/provisioning.md §7). Only authenticated clients
   /// get a bucket, and an instance has a handful of them.
   scim_buckets: Mutex<HashMap<ScimClientId, Bucket>>,
+  /// Link probe tickets each device may still get (#1959). A quota like `mail_budgets`: it bounds
+  /// what the SFU pads towards one device, and applies even when rate limits are switched off.
+  probe_ticket_buckets: Mutex<HashMap<DeviceId, Bucket>>,
 }
 
 impl RateLimits {
@@ -76,6 +79,29 @@ impl RateLimits {
       large_mention_budgets: Mutex::new(HashMap::new()),
       import_addresses: Mutex::new(HashMap::new()),
       scim_buckets: Mutex::new(HashMap::new()),
+      probe_ticket_buckets: Mutex::new(HashMap::new()),
+    }
+  }
+
+  /// Takes one link probe ticket of the device's `per_minute` (also its burst); 429 when used up.
+  pub fn check_probe_ticket(&self, device: DeviceId, per_minute: u32, now: Instant) -> Result<(), ApiError> {
+    let rate = f64::from(per_minute.max(1));
+    let mut buckets = self
+      .probe_ticket_buckets
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner);
+    // Buckets that refilled hold nothing worth keeping: drop them, so the map stays bounded.
+    buckets.retain(|_, bucket| now.saturating_duration_since(bucket.updated_at) < Duration::from_secs(60));
+    let bucket = buckets.entry(device).or_insert(Bucket {
+      tokens: rate,
+      updated_at: now,
+    });
+    refill(bucket, rate, now);
+    if bucket.tokens >= 1.0 {
+      bucket.tokens -= 1.0;
+      Ok(())
+    } else {
+      Err(retry_after(bucket.tokens, rate))
     }
   }
 

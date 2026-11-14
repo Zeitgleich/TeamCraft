@@ -1622,6 +1622,14 @@ pub struct CallsConfig {
   /// Configure the SFU with the same value (`TEAMCRAFT_SFU_MAX_DEVICES_PER_USER_PER_CALL`).
   #[serde(default = "default_max_devices_per_user_per_call")]
   pub max_devices_per_user_per_call: usize,
+  /// Lifetime of a link probe ticket (#1959): a device measures its link to the SFU on the
+  /// pre-join screen or in a meeting's lobby with it. At most 60.
+  #[serde(default = "default_probe_ticket_ttl_secs")]
+  pub probe_ticket_ttl_secs: u64,
+  /// Link probe tickets one device may get per minute; `0` turns measuring before the join off
+  /// (clients then measure at the join, as before).
+  #[serde(default = "default_probe_tickets_per_device_per_minute")]
+  pub probe_tickets_per_device_per_minute: u32,
 }
 
 impl CallsConfig {
@@ -2025,6 +2033,14 @@ fn default_join_token_ttl_secs() -> u64 {
   60
 }
 
+fn default_probe_ticket_ttl_secs() -> u64 {
+  30
+}
+
+fn default_probe_tickets_per_device_per_minute() -> u32 {
+  6
+}
+
 fn default_guest_grace_secs() -> u64 {
   2 * 3600
 }
@@ -2166,6 +2182,8 @@ mod call_fallback_url {
       roster_grace_secs: 60,
       roster_timeout_secs: 120,
       max_devices_per_user_per_call: 3,
+      probe_ticket_ttl_secs: 30,
+      probe_tickets_per_device_per_minute: 6,
     }
   }
 
