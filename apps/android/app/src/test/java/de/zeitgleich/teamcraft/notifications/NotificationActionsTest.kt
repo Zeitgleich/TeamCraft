@@ -27,6 +27,7 @@ class NotificationActionsTest {
     actions.reply(CONVERSATION, null, "on my way")
 
     assertEquals(listOf("on my way"), core.sent)
+    assertEquals("read only once the reply is out", emptyList<String>(), core.read)
     assertEquals("scheduled right after the send", 1, enqueued)
     assertEquals("the sync ran for it", listOf(NotificationActions.REPLY_FLUSH_MS), core.flushes)
     assertEquals(listOf("reply:on my way"), sink.events)
@@ -38,6 +39,7 @@ class NotificationActionsTest {
     val sink = RecordingSink()
     NotificationActions({ core }, sink, enqueueOutbox = {}).reply(CONVERSATION, null, "on my way")
     assertEquals(listOf("reply:on my way", "clear"), sink.events)
+    assertEquals("a sent reply marks the conversation read", listOf(CONVERSATION), core.read)
   }
 
   @Test
@@ -46,6 +48,7 @@ class NotificationActionsTest {
     val sink = RecordingSink()
     NotificationActions({ core }, sink, enqueueOutbox = {}).reply(CONVERSATION, null, "on my way")
     assertEquals(listOf("reply:on my way", "status:REPLY_FAILED"), sink.events)
+    assertEquals("the notification stays to say so", emptyList<String>(), core.read)
   }
 
   @Test
@@ -112,7 +115,6 @@ class NotificationActionsTest {
 
     val sending = spec(ActionStatus.SENDING_REPLY)
     assertTrue(sending.isReplySending)
-    assertEquals("on my way", sending.maybeOwnReply)
 
     assertEquals(MessageAction.MARK_READ, spec(ActionStatus.MARK_READ_FAILED).maybeFailedAction)
     assertEquals(MessageAction.REPLY, spec(ActionStatus.REPLY_FAILED).maybeFailedAction)

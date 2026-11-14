@@ -77,6 +77,7 @@ class NotificationActions(
         ReplyOutcome.SENT -> {
           sendingReplies.remove(conversationId)
           status.clearActionStatus(conversationId)
+          markReadAfterReply(core, conversationId)
         }
         ReplyOutcome.FAILED -> {
           sendingReplies.remove(conversationId)
@@ -84,6 +85,18 @@ class NotificationActions(
         }
         ReplyOutcome.SENDING -> Unit
       }
+    }
+  }
+
+  /**
+   * Who answered has read what they answered: the others see it read, like after a reply in the
+   * app, and the notification goes. Only once the reply is out, so a reply that fails still has
+   * its notification to say so.
+   */
+  private suspend fun markReadAfterReply(core: NotificationCore, conversationId: String) {
+    runCatching {
+      core.markRead(conversationId)
+      core.flush(ACTION_FLUSH_MS)
     }
   }
 

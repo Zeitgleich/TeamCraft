@@ -841,18 +841,16 @@ class MessageNotifier(
   }
 
   /**
-   * The state of an action taken from the notification (#1972), in the header (`subText`, shown
-   * with every style): "Sending…" with the remote-input spinner under the reply, or what failed
-   * and that a tap opens the conversation, where a failed message offers "Try again".
+   * The state of an action taken from the notification (#1972), in the header (`subText`; the
+   * conversation layout shows it as a line instead, see [messagingStyle]): "Sending…", or what
+   * failed and that a tap opens the conversation, where a failed message offers "Try again".
+   * No remote-input history: `NotificationCompat.setRemoteInputHistory` makes Android 13's
+   * `NotificationManagerService` throw (`ClassCastException` in `Notification.visitUris`, found on
+   * a device), and the whole update is dropped; the reply is a line of the conversation anyway.
    */
   private fun showActionStatus(builder: NotificationCompat.Builder, spec: MessageNotificationSpec) {
     val status = spec.maybeActionStatus ?: return
     builder.setSubText(actionStatusText(status))
-    if (spec.isReplySending) {
-      spec.maybeOwnReply?.let { reply -> builder.setRemoteInputHistory(arrayOf<CharSequence>(reply)) }
-      // `Notification.EXTRA_SHOW_REMOTE_INPUT_SPINNER` is hidden API; SystemUI reads it by name.
-      builder.addExtras(Bundle().apply { putBoolean(EXTRA_REMOTE_INPUT_SPINNER, true) })
-    }
   }
 
   private fun actionStatusText(status: ActionStatus): String = context.getString(
@@ -907,10 +905,14 @@ class MessageNotifier(
     conversation.messages.forEach { message ->
       style.addMessage(highlighted(message.text), message.sentAtMs, message.maybeSender?.let { person(it, spec.conversationId) })
     }
-    // Android Auto reads the conversation, not the header: a failed reply is a line it reads out.
-    if (spec.maybeFailedAction == MessageAction.REPLY) {
-      val app = Person.Builder().setName(context.getString(R.string.app_name)).setKey(APP_KEY).build()
-      style.addMessage(context.getString(R.string.notification_reply_failed), System.currentTimeMillis(), app)
+    // The conversation layout (Android 11+) and Android Auto show no header text: a reply on its way
+    // and a failed action are a line from the app, which the car also reads out (#1972). A running
+    // mark as read or mute shows on its button.
+    if (spec.isReplySending || spec.maybeFailedAction != null) {
+      spec.maybeActionStatus?.let { status ->
+        val app = Person.Builder().setName(context.getString(R.string.app_name)).setKey(APP_KEY).build()
+        style.addMessage(actionStatusText(status), System.currentTimeMillis(), app)
+      }
     }
     return style
   }
@@ -1201,7 +1203,6 @@ class MessageNotifier(
     private const val GROUP_MESSAGES = "de.zeitgleich.teamcraft.MESSAGES"
     private const val SELF_KEY = "self"
     private const val APP_KEY = "app"
-    private const val EXTRA_REMOTE_INPUT_SPINNER = "android.remoteInputSpinner"
     private const val URI_SCHEME = "teamcraft-conversation"
     private const val TEST_TIMEOUT_MS = 5L * 60 * 1000
     private const val TAG = "TeamCraftNotify"

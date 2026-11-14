@@ -51,14 +51,12 @@ data class MessageNotificationSpec(
   val isBubble: Boolean = false,
   /** An action taken from the notification that runs or failed (#1972); `null`: none. */
   val maybeActionStatus: ActionStatus? = null,
-  /** The user's newest reply, as the remote-input history shows it while it is sending. */
-  val maybeOwnReply: String? = null,
 ) {
   /** The button shows the action as running ("Marking as read…") and does nothing when tapped. */
   val maybeRunningAction: MessageAction?
     get() = maybeActionStatus?.takeIf { !it.isFailed && it.action != MessageAction.REPLY }?.action
 
-  /** The reply shows Android's remote-input spinner until the server took it. */
+  /** The reply shows as sending ("Sending…") until the server took it. */
   val isReplySending: Boolean get() = maybeActionStatus == ActionStatus.SENDING_REPLY
 
   /** The action that failed: the notification says so, and a tap opens the conversation. */
@@ -245,7 +243,6 @@ object MessageNotificationSpecs {
       isBubble = canBubble && entry.isDirect && privacy.showsContent && shortcut != null && conversation != null,
       // Only on a notification that acts: one without actions has nothing to show a state for.
       maybeActionStatus = maybeActionStatus.takeIf { privacy.offersActions },
-      maybeOwnReply = entry.lines.lastOrNull { it.isOwn }?.text?.takeIf { privacy.showsContent },
     )
   }
 
