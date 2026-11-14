@@ -2024,7 +2024,7 @@ mod tests {
       for page in [&mut alice, &mut bob] {
         page.sync(&[&added, &renamed, &deleted, &late]).unwrap();
         assert!(page.pages().is_empty());
-        assert_eq!(page.deleted_pages(), [id.clone()]);
+        assert_eq!(page.deleted_pages(), std::slice::from_ref(&id));
       }
     }
 
