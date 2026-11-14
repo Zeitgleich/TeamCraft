@@ -190,6 +190,14 @@ pub fn note_pages(
   listed: &[CanvasPageId],
   deleted: &[CanvasPageId],
 ) -> Result<(), CoreError> {
+  // A page named both listed and deleted stays: a reading can't be trusted to delete what it shows.
+  let listed_set: std::collections::HashSet<&CanvasPageId> = listed.iter().collect();
+  let deleted: Vec<CanvasPageId> = deleted
+    .iter()
+    .filter(|id| !listed_set.contains(id))
+    .cloned()
+    .collect();
+  let deleted = deleted.as_slice();
   let before = load_kept(store, conversation)?;
   let mut kept = before.clone();
   // Only pages with a record cost anything to drop: a long list of deleted entries is looked up,
@@ -539,6 +547,16 @@ mod tests {
       take_update(&store, &channel(), &bytes(b"c"), false, user(), 3).unwrap();
       note_pages(&store, conversation, &[], &[]).unwrap();
       assert_eq!(load(&store, &channel()).unwrap().updates.len(), 1);
+    }
+
+    #[test]
+    fn a_page_named_listed_and_deleted_keeps_its_updates() {
+      let store = MemoryStore::new();
+      let conversation = channel().conversation;
+      take_update(&store, &page(conversation, "a1"), &bytes(b"x"), false, user(), 1).unwrap();
+      note_pages(&store, conversation, &[id("a1")], &[id("a1")]).unwrap();
+      assert_eq!(load(&store, &page(conversation, "a1")).unwrap().updates.len(), 1);
+      assert_eq!(load_kept(&store, conversation).unwrap().listed, [id("a1")]);
     }
 
     #[test]

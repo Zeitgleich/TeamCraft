@@ -624,20 +624,21 @@ impl CanvasDoc {
     pages
   }
 
-  /// The further pages the list names as deleted: what a device drops the updates of.
+  /// The further pages the list names as deleted: what a device drops the updates of. Like
+  /// [`Self::pages`], the first entry of an ID decides: a later entry marking a listed page deleted
+  /// (no client of this version writes one) deletes nothing.
   pub fn deleted_pages(&self) -> Vec<CanvasPageId> {
     let txn = self.doc.transact();
     let mut deleted: Vec<CanvasPageId> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for index in 0..self.pages.len(&txn) {
       let Some(Out::YMap(map)) = self.pages.get(&txn, index) else {
         continue;
       };
-      if !matches!(map.get(&txn, DELETED), Some(Out::Any(Any::Bool(true)))) {
+      let Some(id) = string(&txn, &map, ID).and_then(|id| CanvasPageId::parse(&id)) else {
         continue;
-      }
-      if let Some(id) = string(&txn, &map, ID).and_then(|id| CanvasPageId::parse(&id))
-        && !deleted.contains(&id)
-      {
+      };
+      if seen.insert(id.clone()) && matches!(map.get(&txn, DELETED), Some(Out::Any(Any::Bool(true)))) {
         deleted.push(id);
       }
     }
@@ -2051,6 +2052,23 @@ mod tests {
       assert_eq!(alice.pages(), bob.pages());
       assert_eq!(bob.pages().len(), MAX_LISTED_CANVAS_PAGES);
       assert!(!bob.can_add_page());
+    }
+
+    #[test]
+    fn a_later_entry_marking_a_page_deleted_deletes_nothing() {
+      let mut page = CanvasDoc::new();
+      let (id, _) = page.add_page("Minutes").unwrap();
+      {
+        let mut txn = page.doc.transact_mut();
+        let index = page.pages.len(&txn);
+        let map = page.pages.insert(&mut txn, index, MapPrelim::default());
+        map.insert(&mut txn, ID, id.as_str());
+        map.insert(&mut txn, DELETED, true);
+      }
+      assert_eq!(page.pages().len(), 1);
+      assert!(page.deleted_pages().is_empty());
+      page.delete_page(&id).unwrap();
+      assert_eq!(page.deleted_pages(), [id]);
     }
 
     #[test]
