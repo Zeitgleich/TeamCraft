@@ -566,7 +566,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Reads the channel's anchor again for the marks the apps show (the channel or its settings
-  /// opened): what [`channel_anchor_marks`] reads.
+  /// opened): what [`channel_anchor_marks`] reads. Only the UI adapter asks for it.
+  #[cfg(feature = "ui")]
   pub(crate) async fn refresh_channel_anchor(
     &mut self,
     conversation: ConversationId,
