@@ -18,6 +18,7 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
+import de.zeitgleich.teamcraft.ui.listName
 import uniffi.teamcraft_ffi.CallPhase
 import uniffi.teamcraft_ffi.ConversationItem
 import uniffi.teamcraft_ffi.ConversationKind
@@ -74,11 +75,14 @@ private class ContactsScreen(carContext: CarContext) : Screen(carContext) {
     val builder = ListTemplate.Builder().setHeader(header(R.string.call_car_title))
     val conversations = maybeConversations ?: return builder.setLoading(true).build()
     val list = ItemList.Builder().setNoItemsMessage(carContext.getString(R.string.no_conversations))
+    val notesTitle = carContext.getString(R.string.notes_title)
+    val unnamedTitle = carContext.getString(R.string.call_car_unnamed_conversation)
     for (conversation in conversations.take(MAX_ROWS)) {
+      val title = carRowTitle(conversation.listName(notesTitle), unnamedTitle)
       list.addItem(
         Row.Builder()
-          .setTitle(conversation.name)
-          .setOnClickListener { graph.calls.startCall(conversation.id, conversation.name) }
+          .setTitle(title)
+          .setOnClickListener { graph.calls.startCall(conversation.id, title) }
           .build(),
       )
     }

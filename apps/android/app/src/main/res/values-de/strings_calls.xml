@@ -92,6 +92,7 @@
   <string name="call_unmute">Stumm aus</string>
   <string name="call_hang_up">Auflegen</string>
   <string name="call_car_title">Anrufen</string>
+  <string name="call_car_unnamed_conversation">Unbenannte Unterhaltung</string>
   <plurals name="call_people">
     <item quantity="one">%d Person</item>
     <item quantity="other">%d Personen</item>
