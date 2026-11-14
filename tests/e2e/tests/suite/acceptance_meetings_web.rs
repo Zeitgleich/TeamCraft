@@ -93,6 +93,7 @@ async fn a_guest_joins_a_meeting_with_the_mailed_link_and_shares_its_call() {
       // Nobody let the guest in yet: the normal case, said plainly.
       wait_for_text(&page, "Waiting for someone in the meeting to let you in").await;
       wait_for_element(&page, ".guest-waiting-devices .prejoin-preview").await;
+      expect_no_panic(&page).await;
       guest_shots(&page, "waiting").await;
 
       // The organizer's app sees the guest in the lobby once the guest's page set up its device.
@@ -434,6 +435,9 @@ async fn knock(page: &Page, origin: &str, link: String, name: &str) {
   type_until_kept(page, "#guest-name", name).await;
   click_text(page, "Turn on camera and microphone").await;
   wait_for_element(page, ".prejoin .meter").await;
+  // The camera's picture is there too: the preview is live, not only the placeholder.
+  wait_for_element(page, ".prejoin-preview .live-video").await;
+  expect_no_panic(page).await;
   guest_shots(page, "setup").await;
   click_text(page, "Join now").await;
 }
@@ -442,6 +446,7 @@ async fn knock(page: &Page, origin: &str, link: String, name: &str) {
 /// guest set up before knocking (#1929, #1928), without a second pre-join screen.
 async fn join_call_in_browser(page: &Page) {
   wait_for_element(page, ".call-screen").await;
+  expect_no_panic(page).await;
   // The chat behind the call offers a guest no second way to start a call.
   let call_starts = page
     .evaluate(r#"document.querySelectorAll('.channel-header [aria-label="Start audio call"]').length"#)
@@ -450,6 +455,17 @@ async fn join_call_in_browser(page: &Page) {
     .into_value::<u64>()
     .unwrap();
   assert_eq!(call_starts, 0, "the guest's chat header offers to start a call");
+}
+
+/// The page never showed the reload overlay of a panic (`panic_overlay.rs`).
+async fn expect_no_panic(page: &Page) {
+  let overlays = page
+    .evaluate("document.querySelectorAll('.panic-overlay').length")
+    .await
+    .unwrap()
+    .into_value::<u64>()
+    .unwrap();
+  assert_eq!(overlays, 0, "the guest's page panicked");
 }
 
 /// With `E2E_GUEST_SHOTS` set, pictures of the guest's screen for a pull request: desktop and

@@ -5,8 +5,8 @@ use leptos::ev;
 use leptos::prelude::*;
 
 use crate::calls::{
-  AudioKind, CallEvent, CallKind, CallPreview, CallRequest, CallState, DevicePresence, MediaDevice,
-  MediaDevices, PreviewCamera, selected_camera_is_rear,
+  AudioKind, CallEvent, CallKind, CallPreview, CallRequest, CallState, DevicePresence, EffectsOffer,
+  MediaDevice, MediaDevices, PreviewCamera, selected_camera_is_rear,
 };
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::call_video::{
@@ -175,6 +175,7 @@ pub struct DeviceCheck {
   preview_camera: Memo<PreviewCamera>,
   level: RwSignal<usize>,
   is_real: bool,
+  effects_offer: EffectsOffer,
   has_effects: bool,
 }
 
@@ -192,10 +193,11 @@ impl DeviceCheck {
       DeviceFeed::App(state) => !untrack(|| state.read(|backend| backend.has_simulated_calls())),
       DeviceFeed::Page(_) => true,
     };
-    let has_effects = match &feed {
-      DeviceFeed::App(state) => untrack(|| state.read(|backend| backend.effects_offer().has_preview())),
-      DeviceFeed::Page(page) => page.calls.effects_offer().has_preview(),
+    let effects_offer = match &feed {
+      DeviceFeed::App(state) => untrack(|| state.read(|backend| backend.effects_offer())),
+      DeviceFeed::Page(page) => page.calls.effects_offer(),
     };
+    let has_effects = effects_offer.has_preview();
     let feed = StoredValue::new_local(feed);
     // Browsers name their devices only once the page may use them, so the lists can fill in later.
     let devices =
@@ -228,11 +230,17 @@ impl DeviceCheck {
       preview_camera,
       level: RwSignal::new(0),
       is_real,
+      effects_offer,
       has_effects,
     };
     check.follow_devices();
     check.run_preview();
     check
+  }
+
+  /// The background effects this device can put behind the camera image.
+  fn effects_offer(&self) -> EffectsOffer {
+    self.effects_offer
   }
 
   /// Whether the check runs: always in the app, on a guest's page once they answered.
@@ -564,7 +572,7 @@ pub fn VideoOptions(check: DeviceCheck) -> impl IntoView {
     </div>
     <Show when=move || open.get() == Some(VideoPanel::Effects) fallback=|| ()>
       <div id="prejoin-effects" class="prejoin-drawer">
-        <BackgroundPicker effect=call.effect size=PickerSize::Compact />
+        <BackgroundPicker effect=call.effect size=PickerSize::Compact maybe_offer=check.effects_offer() />
         <p class="muted-text small">{move || i18n.t("prejoin-effects-hint")}</p>
       </div>
     </Show>
