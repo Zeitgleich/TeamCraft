@@ -2373,9 +2373,12 @@ impl CallEngine {
       .extend(datagrams.into_iter().map(EngineOutput::Datagram));
   }
 
-  /// How the uplink is probed: rarely while the voice is on its thinnest step (#1893).
+  /// How the uplink is probed: rarely while the voice is on its thinnest step or video waits for
+  /// proof (#1893), on a thin uplink. On a faster one a voice stepped down by a drop probes as
+  /// often as ever: a presenter whose uplink fell to 500 kbit/s otherwise waited 5 s and more for
+  /// the camera to come back.
   fn uplink_probe_config(&self) -> RateProbeConfig {
-    if self.is_voice_starved() || self.is_video_proof_wanted {
+    if (self.is_voice_starved() || self.is_video_proof_wanted) && self.is_uplink_thin() {
       RateProbeConfig::for_voice()
     } else {
       RateProbeConfig::default()
@@ -2685,8 +2688,9 @@ impl CallEngine {
       (!tracks.is_empty()).then(|| probe_demand_bps(&tracks, is_sending_screen_audio, &self.uplink_policy));
     // A voice on its thinnest step lets the estimate grow by no demand (#1893): the video's
     // demand let the estimate of a 64 kbit/s uplink grow past the camera's lowest layer, and the
-    // camera went on sending next to the voice. The voice's probes show when there is room.
-    let is_proving = self.is_voice_starved() || self.is_video_proof_wanted;
+    // camera went on sending next to the voice. The voice's probes show when there is room. Only
+    // on a thin uplink: on 500 kbit/s the camera stayed on its lowest layer after a drop.
+    let is_proving = (self.is_voice_starved() || self.is_video_proof_wanted) && self.is_uplink_thin();
     let maybe_demand = if is_proving && self.maybe_probe_bytes.is_some() {
       None
     } else {
@@ -5943,14 +5947,19 @@ mod tests {
         )
         .unwrap();
       let camera_demand = alice.uplink.demand_bps().unwrap();
-      alice.voice_steps.on_estimate(40_000, false, now);
+      assert!(camera_demand > 1_000_000, "{camera_demand}");
+      // A voice stepped down on an uplink that isn't thin (a drop to 500 kbit/s) keeps the demand:
+      // the camera's layers come back with the estimate.
+      alice.maybe_probe_bytes = Some(16_000);
+      alice.voice_steps.on_estimate(40_000, true, now);
       alice
         .voice_steps
-        .on_estimate(40_000, false, now + Duration::from_secs(2));
+        .on_estimate(40_000, true, now + Duration::from_secs(2));
       alice.update_uplink_demand();
-      assert!(camera_demand > 1_000_000, "{camera_demand}");
-      // Where the SFU takes padding: the voice's probes show when there is room.
-      alice.maybe_probe_bytes = Some(16_000);
+      assert!(alice.uplink.demand_bps().is_some());
+      // Where the SFU takes padding, on an uplink the join showed thin: the voice's probes show
+      // when there is room.
+      alice.apply_uplink_probe(thin_link(), now + Duration::from_secs(3));
       alice.update_uplink_demand();
       assert_eq!(alice.uplink.demand_bps(), None);
     }
