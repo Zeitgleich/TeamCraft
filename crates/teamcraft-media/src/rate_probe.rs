@@ -56,6 +56,9 @@ pub struct RateProbeConfig {
   pub train_spacing: Duration,
   /// Bytes per padding datagram: large enough that QUIC sends each in a packet of its own.
   pub datagram_bytes: usize,
+  /// The smallest padding datagram: a train whose padding is less than `min_datagrams` of
+  /// `datagram_bytes` sends `min_datagrams` this small or larger instead (#1893).
+  pub min_datagram_bytes: usize,
   /// Datagrams per train, at least (the least delay of a train needs a few) and at most.
   pub min_datagrams: usize,
   pub max_datagrams: usize,
@@ -101,6 +104,9 @@ pub struct RateProbe {
 #[derive(Debug, Default)]
 pub struct UplinkProbe {
   probe: RateProbe,
+  /// The sender wants a cluster's proof of the wanted rate, whatever the estimate says
+  /// ([`UplinkProbe::set_proof_wanted`]).
+  is_proof_wanted: bool,
 }
 
 /// What a cluster showed.
@@ -147,6 +153,7 @@ impl Default for RateProbeConfig {
       trains: 3,
       train_spacing: Duration::from_millis(100),
       datagram_bytes: 1000,
+      min_datagram_bytes: 100,
       min_datagrams: 2,
       max_datagrams: 100,
       max_queue_growth: Duration::from_millis(25),
@@ -155,6 +162,20 @@ impl Default for RateProbeConfig {
       max_retry_after: Duration::from_secs(2),
       timeout: Duration::from_secs(1),
       step_factors: [1.25, 1.5, 2.0],
+    }
+  }
+}
+
+impl RateProbeConfig {
+  /// A voice below its full step probing for the next one (#1893): the link is a few tens of
+  /// kilobits, and each cluster that falls short costs the voice that waits behind its padding.
+  /// One every second or two kept a 64 kbit/s uplink too full for the voice it had; a link just
+  /// too thin for the next step is tried again after seconds, then every half minute.
+  pub fn for_voice() -> Self {
+    Self {
+      retry_after: Duration::from_secs(5),
+      max_retry_after: Duration::from_secs(40),
+      ..Self::default()
     }
   }
 }
@@ -241,7 +262,12 @@ impl RateProbe {
     // Saturating float-to-int conversion is intended.
     let count = ((bytes / config.datagram_bytes as f64).ceil() as usize)
       .clamp(config.min_datagrams, config.max_datagrams);
-    Some(vec![config.datagram_bytes; count])
+    // A thin link's train is its padding in smaller datagrams, not `min_datagrams` whole ones:
+    // two of 1000 bytes every 100 ms are 160 kbit/s, and probing a 64 kbit/s link for a voice's
+    // next step flooded it for half a second with every cluster (#1893).
+    let size =
+      ((bytes / count as f64).ceil() as usize).clamp(config.min_datagram_bytes, config.datagram_bytes);
+    Some(vec![size; count])
   }
 
   /// A train of `sizes` went out at `now`, numbered from `first_seq` on.
@@ -362,6 +388,14 @@ impl UplinkProbe {
     datagrams
   }
 
+  /// Whether a cluster runs for the wanted rate also while the estimate is above it (#1893): a thin
+  /// voice steps up only on a cluster that carried, and an estimate grown while little was sent
+  /// shows nothing. Without it a voice cut by lost packets on a link of 500 kbit/s, its estimate
+  /// still above what it wanted, waited for a cluster that never came.
+  pub fn set_proof_wanted(&mut self, is_proof_wanted: bool) {
+    self.is_proof_wanted = is_proof_wanted;
+  }
+
   /// Notes `feedback` and answers a cluster it completes on `uplink`.
   pub fn on_feedback(
     &mut self,
@@ -394,7 +428,8 @@ impl UplinkProbe {
       return false;
     };
     let estimate_bps = uplink.estimate_bps();
-    if estimate_bps >= wanted_bps || uplink.is_in_fast_start() || !self.probe.may_start(now) {
+    let is_shown_by_estimate = estimate_bps >= wanted_bps && !self.is_proof_wanted;
+    if is_shown_by_estimate || uplink.is_in_fast_start() || !self.probe.may_start(now) {
       return false;
     }
     let sending_bps = uplink.sent_bps(now);
@@ -589,6 +624,50 @@ mod tests {
     let mut small = RateProbe::new();
     small.start(800_000, 100_000, 1_000_000, now);
     assert_eq!(small.due_train(&config, now).map(|sizes| sizes.len()), Some(2));
+  }
+
+  /// #1893: a voice's probes that fall short wait seconds, then up to 40 s, not 1 to 2 s.
+  #[test]
+  fn a_voice_probes_a_thin_link_rarely() {
+    let config = RateProbeConfig::for_voice();
+    let mut probe = RateProbe::new();
+    let mut now = Instant::now();
+    let mut waits = Vec::new();
+    for _ in 0..5 {
+      probe.start(80_000, 25_000, 25_000, now);
+      probe.finish(
+        &config,
+        ProbeOutcome::FellShort {
+          target_bps: 80_000,
+          floor_bps: 25_000,
+        },
+        now,
+      );
+      let next = (1..=60)
+        .map(|secs| now + Duration::from_secs(secs))
+        .find(|at| probe.may_start(*at))
+        .unwrap();
+      waits.push(next.duration_since(now).as_secs());
+      now = next;
+    }
+    assert_eq!(waits, vec![5, 10, 20, 40, 40]);
+  }
+
+  /// #1893: a thin link is probed at its rate, not at two whole datagrams a train. 32 kbit/s of
+  /// padding for 100 ms are 400 bytes: two of 200; less than two of the smallest gets those.
+  #[test]
+  fn trains_of_a_thin_link_are_small() {
+    let config = RateProbeConfig::default();
+    let now = Instant::now();
+    let mut thin = RateProbe::new();
+    thin.start(50_000, 18_000, 18_000, now);
+    assert_eq!(thin.due_train(&config, now), Some(vec![200, 200]));
+    let mut thinnest = RateProbe::new();
+    thinnest.start(20_000, 18_000, 18_000, now);
+    assert_eq!(
+      thinnest.due_train(&config, now),
+      Some(vec![config.min_datagram_bytes; 2])
+    );
   }
 
   #[test]

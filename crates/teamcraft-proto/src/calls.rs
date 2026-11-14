@@ -24,8 +24,8 @@ use std::{fmt, num::NonZeroU16};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-  Base64Bytes, CallId, ConversationId, DeviceId, ErrorBody, MediaCapabilities, TransportFeedback, UserId,
-  VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrack, VideoTrackKind,
+  AudioFeature, Base64Bytes, CallId, ConversationId, DeviceId, ErrorBody, MediaCapabilities,
+  TransportFeedback, UserId, VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrack, VideoTrackKind,
 };
 
 /// `aud` of call join tokens.
@@ -428,6 +428,12 @@ pub enum CallEvent {
     /// codec only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     decodable_by_some: Vec<VideoCodec>,
+  },
+  /// The audio features every other participant in the call has (#1893): what this client's
+  /// voice may use. Sent after `joined` and whenever it changes (a participant joins, leaves or
+  /// rejoins with other capabilities). Older SFUs send none: a client then keeps to 20 ms frames.
+  AudioFeatures {
+    features: Vec<AudioFeature>,
   },
   /// Arrival times of the datagrams this client sent (uplink estimation, done by the client).
   TransportFeedback {
@@ -1000,6 +1006,16 @@ mod tests {
   }
 
   /// Older clients read the event as `Unknown` and keep their codec (H.264).
+  #[test]
+  fn audio_features_event_wire_format() {
+    let event = CallEvent::AudioFeatures {
+      features: vec![AudioFeature::LongFrames],
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(json, r#"{"type":"audio_features","features":["long_frames"]}"#);
+    assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), event);
+  }
+
   #[test]
   fn decodable_codecs_wire_format() {
     let event = CallEvent::DecodableVideoCodecs {

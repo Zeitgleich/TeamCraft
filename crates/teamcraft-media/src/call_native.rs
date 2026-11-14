@@ -2391,6 +2391,7 @@ impl Sinks {
             CallEngineEvent::UplinkEstimate { loss_percent, .. } => {
               capture.set_measured_loss_percent(*loss_percent)?;
             },
+            CallEngineEvent::VoiceEncoding(encoding) => capture.set_voice_encoding(*encoding)?,
             _ => {},
           }
           self.cues.on_event(&event);
