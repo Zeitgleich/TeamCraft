@@ -58,6 +58,10 @@ pub struct VoiceStepConfig {
   pub upgrade_margin: f64,
   /// The least time after the last change before a step up.
   pub upgrade_after: Duration,
+  /// The wait after the first upgrade the link didn't carry: a probe on a thin link can show room
+  /// it doesn't have (a short cluster vanishes into a token bucket in front of it), and every
+  /// upgrade that fails costs seconds of voice.
+  pub first_failed_upgrade_wait: Duration,
   /// The longest the wait grows to after upgrades the link didn't carry.
   pub max_upgrade_after: Duration,
   /// A step down within this long after a step up shows the link didn't carry it.
@@ -112,8 +116,9 @@ impl Default for VoiceStepConfig {
       thinnest_below_bps: 60_000,
       upgrade_margin: 1.25,
       upgrade_after: Duration::from_secs(5),
-      max_upgrade_after: Duration::from_secs(80),
-      failed_upgrade_within: Duration::from_secs(15),
+      first_failed_upgrade_wait: Duration::from_secs(30),
+      max_upgrade_after: Duration::from_secs(300),
+      failed_upgrade_within: Duration::from_secs(60),
       hurt_step_interval: Duration::from_secs(1),
       downgrade_after: Duration::from_secs(2),
     }
@@ -262,7 +267,9 @@ impl VoiceSteps {
     if let Some(upgraded_at) = self.maybe_upgraded_at.take()
       && now.saturating_duration_since(upgraded_at) < self.config.failed_upgrade_within
     {
-      self.upgrade_after = (self.upgrade_after * 2).min(self.config.max_upgrade_after);
+      self.upgrade_after = (self.upgrade_after * 2)
+        .max(self.config.first_failed_upgrade_wait)
+        .min(self.config.max_upgrade_after);
     }
     self.step = target;
     self.maybe_below_since = None;
@@ -436,7 +443,7 @@ mod tests {
       now += Duration::from_secs(2);
       steps.on_estimate(THIN_BPS, false, now);
     }
-    assert_eq!(waits, vec![5, 10, 20, 40, 80, 80]);
+    assert_eq!(waits, vec![5, 30, 60, 120, 240, 300]);
     // This time it holds; after the next dip the wait is short again.
     now += config.max_upgrade_after;
     assert!(steps.on_carried(GOOD_BPS, now).is_some());
