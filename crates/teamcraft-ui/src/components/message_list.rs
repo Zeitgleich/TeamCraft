@@ -616,7 +616,10 @@ pub fn MessageList(
       return;
     };
     let fits = heights.with_value(|heights| f64::from(heights.iter().sum::<f32>())) <= viewport.get();
-    if gap.status == OlderHistory::Available && (!stick_to_bottom.get() || fits) {
+    // A hole the reader already sees is read at once, also at the bottom (a catch-up's backlog
+    // right above the newest page, issue #1951): no scroll would ever ask for it.
+    let is_wanted = !stick_to_bottom.get() || fits || is_on_screen(&gap, &window);
+    if gap.status == OlderHistory::Available && is_wanted {
       // A request, not a change, like older history above.
       untrack(|| state.read(|backend| backend.fill_history_gap(conversation, gap, edge)));
     }
@@ -1098,6 +1101,12 @@ fn gap_near(gaps: &[HistoryGap], window: &Window, ahead: usize) -> Option<(Histo
     GapEdge::Newer
   };
   Some((*gap, edge))
+}
+
+/// Whether `gap` lies among the rows on screen: below the first one the viewport shows and not
+/// past the rendered ones.
+fn is_on_screen(gap: &HistoryGap, window: &Window) -> bool {
+  gap.index >= window.first_visible && gap.index <= window.end
 }
 
 /// The name of the round "jump to latest" button, which has no text of its own.
@@ -1844,6 +1853,35 @@ mod tests {
       gap_near(&[gap], &window(60, 70, 90), 0),
       None,
       "no status that far"
+    );
+  }
+
+  /// Issue #1951: a backlog right above the newest page is on screen at the bottom of the list,
+  /// where no scroll asks for it: it is read at once. One above the viewport waits for the reader.
+  #[test]
+  fn a_hole_the_reader_sees_is_on_screen() {
+    let gap = HistoryGap {
+      after: crate::model::id_from_raw(5),
+      index: 120,
+      status: OlderHistory::Available,
+    };
+    let window = |first: usize, first_visible: usize, end: usize| Window {
+      first,
+      end,
+      pad_top: 0.0,
+      pad_bottom: 0.0,
+      total: 0.0,
+      first_visible,
+    };
+    assert!(is_on_screen(&gap, &window(100, 110, 140)));
+    assert!(
+      is_on_screen(&gap, &window(100, 120, 140)),
+      "right above the first row shown"
+    );
+    assert!(!is_on_screen(&gap, &window(110, 125, 140)), "above the viewport");
+    assert!(
+      !is_on_screen(&gap, &window(60, 70, 100)),
+      "below the rendered rows"
     );
   }
 
