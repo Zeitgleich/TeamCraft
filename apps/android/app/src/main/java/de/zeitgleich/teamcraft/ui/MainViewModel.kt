@@ -110,6 +110,7 @@ import uniffi.teamcraft_ffi.FirstSyncItem
 import uniffi.teamcraft_ffi.KeyCatchUpItem
 import uniffi.teamcraft_ffi.NotificationContent
 import uniffi.teamcraft_ffi.NotifiedConversation
+import uniffi.teamcraft_ffi.SpaceDeletionPreview
 import uniffi.teamcraft_ffi.SpaceMenuItem
 import uniffi.teamcraft_ffi.Presence
 import uniffi.teamcraft_ffi.PushDiagnosticsInfo
@@ -949,6 +950,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     readChat { leaveChoice(conversationId) } ?: LeaveChoice.HIDDEN
 
   suspend fun spaceMenu(spaceId: String): SpaceMenuItem? = readChat { spaceMenu(spaceId) }
+
+  /** The channels a space's deletion takes, for its confirmation; `null` when the core can't list them. */
+  suspend fun prepareSpaceDeletion(spaceId: String): SpaceDeletionPreview? = readChat { prepareSpaceDeletion(spaceId) }
 
   /** A channel's members section (#1262); `null` when the core can't answer. */
   suspend fun channelMembers(conversationId: String): ChannelMembersInfo? = readChat { channelMembers(conversationId) }

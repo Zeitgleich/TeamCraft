@@ -325,6 +325,7 @@ mod space_deletions {
     alice.client.delete_space(space).await.unwrap();
     bob.client.full_sync().await.unwrap();
 
+    assert!(server.space_deletion_signature(channel).is_some());
     assert!(
       !has_history(&alice, channel),
       "the deleter's own copy goes at once (#1162)"
@@ -382,8 +383,14 @@ mod space_deletions {
     alice.client.full_sync().await.unwrap();
     bob.client.full_sync().await.unwrap();
 
+    alice.client.prepare_space_deletion(doomed).await.unwrap();
     alice.client.delete_space(doomed).await.unwrap();
     bob.client.full_sync().await.unwrap();
+
+    assert!(
+      server.space_deletion_signature(channel).is_some(),
+      "the owner signed what the server listed"
+    );
 
     assert!(
       has_history(&alice, channel),
@@ -425,6 +432,55 @@ mod space_deletions {
     bob.client.full_sync().await.unwrap();
 
     assert!(has_history(&bob, channel));
+  }
+
+  /// The owner deletes without a list shown first (#1875): nothing is signed, so every channel
+  /// stays a claim, also on the deleter's own device.
+  #[tokio::test]
+  async fn a_deletion_without_a_shown_list_is_unsigned() {
+    let server = anchoring_server();
+    let (mut alice, mut bob) = owner_and_member(&server).await;
+    let channel = shared_channel(&mut alice, &mut bob, "general").await;
+    with_history(&mut alice, &mut bob, channel).await;
+    let space = alice.space().await;
+
+    alice.client.delete_space(space).await.unwrap();
+    bob.client.full_sync().await.unwrap();
+
+    assert!(server.space_deletion_signature(channel).is_none());
+    assert!(has_history(&alice, channel));
+    assert!(has_history(&bob, channel));
+  }
+
+  /// A space without channels lists none, and its deletion goes through.
+  #[tokio::test]
+  async fn an_empty_space_lists_no_channels() {
+    let server = anchoring_server();
+    let (mut alice, _bob) = owner_and_member(&server).await;
+    let empty = alice
+      .client
+      .create_space(&CreateSpaceRequest {
+        name: "Empty".to_string(),
+        maybe_icon: None,
+        maybe_color: None,
+        maybe_description: None,
+        join_policy: JoinPolicy::InviteOnly,
+        maybe_idempotency_key: None,
+      })
+      .await
+      .unwrap()
+      .id;
+
+    alice.client.prepare_space_deletion(empty).await.unwrap();
+    let preview = space_deletion_preview(&alice.store, empty).unwrap();
+    assert!(preview.channels.is_empty());
+    assert!(preview.is_signed);
+    alice.client.delete_space(empty).await.unwrap();
+
+    assert!(
+      space_deletion_preview(&alice.store, empty).is_none(),
+      "the list goes with the deletion"
+    );
   }
 
   /// Somebody who isn't on the roster (a space admin) deletes unsigned: claims everywhere.

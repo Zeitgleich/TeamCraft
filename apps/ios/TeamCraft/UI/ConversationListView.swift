@@ -38,6 +38,8 @@ struct ConversationListView: View {
   @State private var channelSpaceIds: Set<String> = []
   @State private var canCreateSpaces = false
   @State private var maybeNewChannelSpace: SpaceChoice?
+  /// The space whose deletion is being confirmed (#1875): a sheet, since it lists the channels.
+  @State private var maybeSpaceDeletion: SpaceDeletionChoice?
   @State private var isCreatingSpace = false
   /// "New space" was picked in the switcher: its sheet comes once the switcher is gone.
   @State private var createsSpaceNext = false
@@ -269,6 +271,7 @@ struct ConversationListView: View {
         tab = .channels
       }
     }
+    .sheet(item: $maybeSpaceDeletion) { choice in SpaceDeletionView(choice: choice) }
     .sheet(item: $maybeNewChannelSpace) { space in
       NewChannelView(spaceId: space.id, spaceName: space.name) { conversationId in selection = conversationId }
     }
@@ -890,7 +893,7 @@ struct ConversationListView: View {
     }
     if menu?.canDelete == true {
       Button("entry_delete_space", systemImage: "trash", role: .destructive) {
-        maybeLeaving = .spaceDeletion(id: spaceId, name: name, channels: menu?.channelCount ?? 0)
+        maybeSpaceDeletion = SpaceDeletionChoice(id: spaceId, name: name, channelCount: menu?.channelCount ?? 0)
       }
     }
   }
@@ -921,7 +924,7 @@ struct ConversationListView: View {
   private var leaveTitle: LocalizedStringKey {
     switch maybeLeaving {
     case .channel(_, let name), .lastMember(_, let name): return "entry_leave_channel_title \(name)"
-    case .deletion(_, let name), .spaceDeletion(_, let name, _): return "entry_delete_channel_title \(name)"
+    case .deletion(_, let name): return "entry_delete_channel_title \(name)"
     case .space(_, let name): return "entry_leave_space_title \(name)"
     case nil: return ""
     }
@@ -932,7 +935,6 @@ struct ConversationListView: View {
     case .space: return "entry_leave_space_text"
     case .lastMember: return "entry_leave_last_member_text"
     case .deletion: return "entry_delete_channel_text"
-    case .spaceDeletion(_, _, let channels): return "entry_delete_space_text \(channels)"
     case .channel, nil: return "entry_leave_channel_text"
     }
   }
@@ -945,7 +947,6 @@ struct ConversationListView: View {
       case .channel(let id, _): maybeActionFailure = await model.leaveChannel(id)
       case .lastMember(let id, _): maybeActionFailure = await model.leaveChannel(id, deletesIfLast: true)
       case .deletion(let id, _): maybeActionFailure = await model.deleteChannel(id)
-      case .spaceDeletion(let id, _, _): maybeActionFailure = await model.deleteSpace(id)
       case .space(let id, _): maybeActionFailure = await model.leaveSpace(id)
       }
     }
@@ -1283,12 +1284,11 @@ private enum LeaveTarget {
   /// Nobody else is in the channel: leaving deletes it.
   case lastMember(id: String, name: String)
   case deletion(id: String, name: String)
-  case spaceDeletion(id: String, name: String, channels: UInt32)
   case space(id: String, name: String)
 
   var isDeletion: Bool {
     switch self {
-    case .deletion, .spaceDeletion: return true
+    case .deletion: return true
     case .channel, .lastMember, .space: return false
     }
   }

@@ -186,13 +186,7 @@ fun SpaceEntryMenu(
   }
   if (isMuting) SpaceMuteDialog(viewModel, spaceId, name) { isMuting = false }
   if (isConfirmingDelete) {
-    ConfirmDialog(
-      title = stringResource(R.string.space_delete_title, name),
-      text = stringResource(R.string.space_delete_text, maybeMenu?.channelCount?.toInt() ?: 0),
-      confirmLabel = stringResource(R.string.channel_delete_confirm),
-      onConfirm = { viewModel.act(ChatActions.deleteSpace(spaceId)) },
-      onDismiss = { isConfirmingDelete = false },
-    )
+    SpaceDeleteDialog(viewModel, spaceId, name, maybeMenu?.channelCount?.toInt() ?: 0) { isConfirmingDelete = false }
   }
   if (isConfirmingLeave) {
     ConfirmDialog(

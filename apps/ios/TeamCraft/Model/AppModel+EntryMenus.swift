@@ -31,6 +31,12 @@ extension AppModel {
     await performReporting(.deleteChannel(conversationId: conversationId))
   }
 
+  /// Lists what deleting the space takes for its confirmation; the deletion then signs exactly
+  /// that (#1875). `nil` when the core can't list it: the deletion is then unsigned.
+  func prepareSpaceDeletion(_ spaceId: String) async -> SpaceDeletionPreview? {
+    try? await core().prepareSpaceDeletion(spaceId: spaceId)
+  }
+
   func deleteSpace(_ spaceId: String) async -> AppFailure? {
     await performReporting(.deleteSpace(spaceId: spaceId))
   }

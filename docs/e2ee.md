@@ -4029,8 +4029,8 @@ and couldn't count for a purge.
     confirmation, the deleter's device asks `GET /spaces/{id}/deletion` for the channels the deleter may see with
     their names and current epochs (the server's word), and lists them with who set each name, as the channel's
     verified anchor on this device says (the founder, an admin, or a member, whose name "keeps the history for a
-    while"); the desktop and web confirmations show that list. It signs exactly those channels, with the name
-    shown and the server's epoch, leaving out a channel whose epoch is more than `MAX_CHANGE_AGE_EPOCHS` from its
+    while"); the desktop, web, Android and iOS confirmations show that list (#1875), and "Delete" waits for it on
+    the phones. It signs exactly those channels, with the name shown and the server's epoch, leaving out a channel whose epoch is more than `MAX_CHANGE_AGE_EPOCHS` from its
     own group's, and only if the user is an owner or admin of its verified roster, naming that roster's version.
     `DELETE /spaces/{id}` takes it as an optional body: under the locks of the channels' epochs (taken before the
     conversations, in a commit's order) every listed channel that is in the space must be at the epoch named, or
@@ -4045,8 +4045,10 @@ and couldn't count for a purge.
     a roster at least the version named, and the signer an owner or admin of that roster, fresh, on a device its
     signed list names. A channel admin's authority doesn't reach a space's deletion, so the channel's role log isn't
     read or kept for it: a fork alarm of its roles still refuses, a member's newer head merely noted doesn't. The
-    mobile apps sign the same way through the core; their confirmation still shows the channel count only, so
-    there the device signs the server's list as it is at the request (#1875).
+    device signs only a list it prepared for a confirmation, at most an hour before the request (#1875): a
+    deletion without one (an older UI, a list that failed or went stale) is sent unsigned, and its channels take
+    the retention everywhere, rather than signing names nobody was shown. The core ships with the UI that shows
+    the list, so no app version signs blind.
 - **The name at a deletion** (D3, #1725). `ChannelDeletionDocument` gains `optional<opaque name_hash[32]>`,
   the hash of the name the deleter was shown, as each entry of a space's deletion has. A member purges at once only
   if it equals its anchor's name hash and that name isn't stale, for deletions neither (a member set it, "A

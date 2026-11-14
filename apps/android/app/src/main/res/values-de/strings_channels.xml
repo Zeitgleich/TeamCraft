@@ -84,6 +84,13 @@
   <string name="space_delete">Space löschen</string>
   <string name="space_delete_title">%1$s für alle löschen?</string>
   <string name="space_delete_text">Kanäle, die mit verschwinden: %1$d, mit ihren Nachrichten und Dateien für alle ihre Mitglieder. Das lässt sich nicht rückgängig machen.</string>
+  <!-- A space's deletion lists its channels with who last named each (e2ee.md §4.6.5, #1875), worded as on desktop and web. -->
+  <string name="space_delete_listing">Kanäle werden aufgelistet …</string>
+  <string name="space_delete_channels">Kanäle, die mit dem Space verschwinden</string>
+  <string name="space_delete_named_by_founder">Beim Anlegen benannt von %1$s</string>
+  <string name="space_delete_renamed_by_admin">Zuletzt umbenannt von %1$s, einer Admin-Person</string>
+  <string name="space_delete_renamed_by_member">Zuletzt umbenannt von %1$s, einem Mitglied</string>
+  <string name="space_delete_member_name_kept">Ein Mitglied hat diesen Namen gewählt, deshalb behalten die Geräte der Mitglieder den Verlauf noch eine Weile, bevor er verschwindet.</string>
   <string name="space_leave_confirm">Verlassen</string>
   <string name="browse_filter_people">Person suchen</string>
   <string name="browse_filter_channels">Kanal suchen</string>

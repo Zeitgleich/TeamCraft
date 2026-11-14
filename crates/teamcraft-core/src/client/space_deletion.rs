@@ -4,7 +4,8 @@
 //! the confirmation names them. A workspace owner or admin then signs exactly those channels with
 //! their epochs and name hashes; the members' devices, the deleter's own included, purge a channel
 //! at once only where its anchor places it in the space (`crate::signed_deletion`). Anybody else
-//! (a space admin, a custom scheme) deletes unsigned, and every channel stays a claim.
+//! (a space admin, a custom scheme) deletes unsigned, and every channel stays a claim; so does a
+//! deletion whose confirmation listed nothing (#1875).
 
 use serde::{Deserialize, Serialize};
 use teamcraft_crypto::channel_anchor::{NameAuthority, name_hash};
@@ -84,24 +85,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Deletes a space with its channels for everybody (e2ee.md §4.6). Done also when it is gone
-  /// already. Signed if this user is a workspace owner or admin, over the channels the confirmation
-  /// named (or, without one, the server's list now); each channel then goes on this device as on
-  /// every member's ([`Self::note_space_deletion`], #1162).
+  /// already. Signed only over a list the confirmation showed ([`Self::prepare_space_deletion`],
+  /// at most an hour old) and only if this user is a workspace owner or admin (#1875): a deletion
+  /// without one is unsigned, and its channels stay claims, rather than signing names the user
+  /// never saw. Each channel then goes on this device as on every member's
+  /// ([`Self::note_space_deletion`], #1162).
   pub async fn delete_space(&mut self, space: SpaceId) -> Result<(), CoreError> {
-    let now_ms = self.now_ms();
-    let maybe_shown: Option<PreparedSpaceDeletion> =
-      records::get_json(&self.store, Table::SyncState, &preview_key(space))?.filter(
-        |prepared: &PreparedSpaceDeletion| {
-          now_ms.saturating_sub(prepared.prepared_at_ms) <= PREVIEW_MAX_AGE_MS
-        },
-      );
-    let mut prepared = match &maybe_shown {
-      Some(shown) => shown.clone(),
-      None => self.make_space_deletion(space).await?,
-    };
+    let maybe_shown = self.shown_space_deletion(space)?;
+    if maybe_shown.is_none() {
+      tracing::info!(space_id = %space, "no list was shown for the space's deletion; it is unsigned");
+    }
+    let mut maybe_prepared = maybe_shown.clone();
     let mut attempts = 1;
     let maybe_used = loop {
-      let maybe_signed = self.signed_space_deletion_if_allowed(space, &prepared);
+      let maybe_signed = maybe_prepared
+        .as_ref()
+        .and_then(|prepared| self.signed_space_deletion_if_allowed(space, prepared));
       let request = DeleteSpaceRequest {
         maybe_signed_deletion: maybe_signed.clone(),
       };
@@ -109,11 +108,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         Ok(()) => break maybe_signed,
         Err(error) if error.error_code() == Some(&ErrorCode::SpaceNotFound) => break None,
         Err(error) if error.is_epoch_conflict() && attempts < DELETION_ATTEMPTS => {
-          let fresh = self.make_space_deletion(space).await?;
-          prepared = match &maybe_shown {
-            Some(shown) => only_shown(fresh, shown),
-            None => fresh,
-          };
+          if let Some(shown) = &maybe_shown {
+            let fresh = self.make_space_deletion(space).await?;
+            maybe_prepared = Some(only_shown(fresh, shown));
+          }
           attempts += 1;
         },
         Err(error) => return Err(error.into()),
@@ -122,6 +120,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.note_space_deletion(space, maybe_used.as_ref()).await?;
     self.store.delete(Table::SyncState, &preview_key(space))?;
     self.forget_space(&space.to_string())
+  }
+
+  /// The list the confirmation showed, while it still stands for what the user saw.
+  fn shown_space_deletion(&self, space: SpaceId) -> Result<Option<PreparedSpaceDeletion>, CoreError> {
+    let now_ms = self.now_ms();
+    let maybe_prepared: Option<PreparedSpaceDeletion> =
+      records::get_json(&self.store, Table::SyncState, &preview_key(space))?;
+    Ok(maybe_prepared.filter(|prepared| now_ms.saturating_sub(prepared.prepared_at_ms) <= PREVIEW_MAX_AGE_MS))
   }
 
   async fn make_space_deletion(&mut self, space: SpaceId) -> Result<PreparedSpaceDeletion, CoreError> {

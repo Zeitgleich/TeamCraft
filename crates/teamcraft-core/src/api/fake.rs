@@ -1896,6 +1896,11 @@ impl FakeServer {
     }
   }
 
+  /// The space's signed deletion kept with a conversation, if the deleter signed one.
+  pub fn space_deletion_signature(&self, conversation: ConversationId) -> Option<SignedSpaceDeletion> {
+    self.lock().space_deletion_signatures.get(&conversation).cloned()
+  }
+
   /// The signature kept with a conversation's deletion.
   pub fn deletion_signature(&self, conversation: ConversationId) -> Option<SignedChannelDeletion> {
     self.lock().deletion_signatures.get(&conversation).cloned()
