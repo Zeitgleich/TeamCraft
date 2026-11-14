@@ -58,6 +58,11 @@ pub struct JoinProbeConfig {
 pub struct LinkMeasurement {
   /// What the link carries, in bit/s: the median of the trains' spreads.
   pub capacity_bps: u32,
+  /// What it carries once a token bucket in front of it passed its burst: the median of the
+  /// trains' second halves (#1893). A small bucket lets the head of a train through at line rate:
+  /// on a 64 kbit/s link with a 3 kB bucket a train of 5 kB showed about twice the link's rate.
+  /// At most `capacity_bps`.
+  pub after_burst_bps: u32,
   /// Padding datagrams lost, in percent of those sent.
   pub loss_percent: u8,
 }
@@ -83,7 +88,10 @@ struct Train {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Report {
   Pending,
+  /// The feedback said it didn't arrive.
   Lost,
+  /// No feedback came in time.
+  GivenUp,
   /// Arrival in µs on the receiver's clock.
   Arrived(u64),
 }
@@ -174,7 +182,7 @@ impl JoinProbe {
       if now.saturating_duration_since(train.sent_at) >= self.config.timeout {
         for (_, report) in &mut train.datagrams {
           if *report == Report::Pending {
-            *report = Report::Lost;
+            *report = Report::GivenUp;
           }
         }
       }
@@ -190,6 +198,23 @@ impl JoinProbe {
   /// Every train went out and was reported (or given up).
   pub fn is_over(&self) -> bool {
     self.is_over
+  }
+
+  /// The probe is over without a result because the link didn't take its padding (#1893): every
+  /// train lost too much to be measured, or its feedback came too late. A link that can't take a
+  /// few trains of a few kilobytes is thin: on 64 kbit/s the trains queued behind each other for
+  /// two seconds, and the later ones were given up. A fast link with random loss still gets most
+  /// of each train through and is measured.
+  pub fn is_lost_on_the_way(&self) -> bool {
+    self.is_over
+      && self.maybe_result.is_none()
+      && !self.trains.is_empty()
+      && self.trains.iter().all(|train| {
+        train
+          .datagrams
+          .iter()
+          .any(|(_, report)| matches!(report, Report::Lost | Report::GivenUp))
+      })
   }
 
   fn finish_if_reported(&mut self) -> Option<LinkMeasurement> {
@@ -208,16 +233,22 @@ impl JoinProbe {
     rates.sort_unstable();
     // The lower median: of two, the smaller one.
     let capacity_bps = *rates.get(rates.len().saturating_sub(1) / 2)?;
+    let mut tails: Vec<u32> = self.trains.iter().filter_map(Train::tail_rate_bps).collect();
+    tails.sort_unstable();
+    let after_burst_bps = tails
+      .get(tails.len().saturating_sub(1) / 2)
+      .map_or(capacity_bps, |tail_bps| (*tail_bps).min(capacity_bps));
     let sent: usize = self.trains.iter().map(|train| train.datagrams.len()).sum();
     let lost = self
       .trains
       .iter()
       .flat_map(|train| &train.datagrams)
-      .filter(|(_, report)| *report == Report::Lost)
+      .filter(|(_, report)| matches!(report, Report::Lost | Report::GivenUp))
       .count();
     let loss_percent = u8::try_from(lost * 100 / sent.max(1)).unwrap_or(100);
     self.maybe_result = Some(LinkMeasurement {
       capacity_bps,
+      after_burst_bps,
       loss_percent,
     });
     self.maybe_result
@@ -226,18 +257,31 @@ impl JoinProbe {
 
 impl Train {
   fn rate_bps(&self) -> Option<u32> {
+    let arrivals = self.measurable_arrivals()?;
+    train_rate_bps(&arrivals)
+  }
+
+  /// The rate of the train's second half, from its middle arrival on.
+  fn tail_rate_bps(&self) -> Option<u32> {
+    let mut arrivals = self.measurable_arrivals()?;
+    arrivals.sort_unstable();
+    train_rate_bps(&arrivals[arrivals.len().saturating_sub(1) / 2..])
+  }
+
+  /// The arrivals (µs, bytes), when enough of the train arrived to measure it.
+  fn measurable_arrivals(&self) -> Option<Vec<(u64, usize)>> {
     let arrivals: Vec<(u64, usize)> = self
       .datagrams
       .iter()
       .filter_map(|(bytes, report)| match report {
         Report::Arrived(arrival_us) => Some((*arrival_us, *bytes)),
-        Report::Pending | Report::Lost => None,
+        Report::Pending | Report::Lost | Report::GivenUp => None,
       })
       .collect();
     if (arrivals.len() as f64) < MIN_RECEIVED_SHARE * self.datagrams.len() as f64 {
       return None;
     }
-    train_rate_bps(&arrivals)
+    Some(arrivals)
   }
 }
 
@@ -330,6 +374,8 @@ mod tests {
       assert_eq!(result.loss_percent, 20);
       // Three datagrams after the first in 16 ms: 1.5 Mbit/s.
       assert_eq!(result.capacity_bps, 1_500_000);
+      // A fast link with random loss is measured, not taken for a thin one (#1893).
+      assert!(!probe.is_lost_on_the_way());
     }
 
     #[test]
@@ -344,6 +390,44 @@ mod tests {
       };
       assert_eq!(probe.on_feedback(&feedback), None);
       assert!(probe.is_over());
+      assert!(probe.is_lost_on_the_way(), "the link lost the train (#1893)");
+    }
+
+    /// #1893: trains whose feedback came too late (they queued behind each other on a thin
+    /// link) count as lost on the way too.
+    #[test]
+    fn a_probe_whose_feedback_came_too_late_is_lost_on_the_way() {
+      let now = Instant::now();
+      let mut probe = JoinProbe::new(one_train(), now);
+      let sizes = probe.due_train(now).unwrap();
+      probe.sent(TransportSeq(0), &sizes, now);
+      let feedback = TransportFeedback {
+        base_seq: 0,
+        arrivals_us: vec![Some(0), Some(125_000)],
+      };
+      assert_eq!(probe.on_feedback(&feedback), None);
+      probe.on_timer(now + Duration::from_secs(1));
+      assert!(probe.is_over());
+      assert!(probe.is_lost_on_the_way());
+    }
+
+    /// #1893: a 64 kbit/s link behind a 3 kB token bucket passes a train's first three datagrams
+    /// at once and the rest at its rate: the whole train shows about twice the link, its second
+    /// half the link.
+    #[test]
+    fn a_token_buckets_burst_shows_in_the_whole_train_not_its_second_half() {
+      let now = Instant::now();
+      let mut probe = JoinProbe::new(one_train(), now);
+      let sizes = probe.due_train(now).unwrap();
+      probe.sent(TransportSeq(0), &sizes, now);
+      // 1000 bytes at 64 kbit/s take 125 ms.
+      let feedback = TransportFeedback {
+        base_seq: 0,
+        arrivals_us: vec![Some(0), Some(100), Some(200), Some(125_200), Some(250_200)],
+      };
+      let result = probe.on_feedback(&feedback).unwrap();
+      assert!(result.capacity_bps > 120_000, "{result:?}");
+      assert!((60_000..=70_000).contains(&result.after_burst_bps), "{result:?}");
     }
 
     #[test]

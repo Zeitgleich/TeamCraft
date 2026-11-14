@@ -31,8 +31,8 @@ use teamcraft_media::{
   send_queue::SendQueueConfig,
 };
 use teamcraft_proto::{
-  Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallRosterEntry, ConversationId,
-  DaveTransitionId, DaveTransitionMode, DeviceId, ErrorBody, ErrorCode, MAX_SIMULCAST_LAYERS,
+  AudioFeature, Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallRosterEntry,
+  ConversationId, DaveTransitionId, DaveTransitionMode, DeviceId, ErrorBody, ErrorCode, MAX_SIMULCAST_LAYERS,
   MediaCapabilities, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, ScreenShareTakeover, SfuCallIncidents,
   SfuCallRoster, SfuControlAction, TransportFeedback, UnixMillis, UserId, VideoCodec, VideoLayerInfo,
   VideoPublicationId, VideoTrackKind,
@@ -157,6 +157,8 @@ struct RoomState {
   /// The video codecs each device was last told the others decode (#565); a device without an
   /// entry hears them with its next (re)join.
   decodable_announced: HashMap<DeviceId, DecodableCodecs>,
+  /// The audio features each participant was last told the others have (#1893).
+  audio_features_announced: HashMap<DeviceId, Vec<AudioFeature>>,
   /// Each device's last screen share another device's replaced, kept for the call (one per
   /// device, also after it left): a device that was away when it happened hears it with its next
   /// `joined` and doesn't publish that share again. Dropped when the device shares again.
@@ -592,6 +594,7 @@ impl Room {
       )?,
       next_stream_id: 1,
       decodable_announced: HashMap::new(),
+      audio_features_announced: HashMap::new(),
       screen_shares_taken_over: HashMap::new(),
       quality,
     };
@@ -989,6 +992,7 @@ impl Room {
         state.welcome(self.call_id, participant_id, welcome);
         // Its capabilities may differ on the new connection: the others' codecs may change too.
         state.announce_decodable_codecs(Some(participant_id));
+        state.announce_audio_features(Some(participant_id));
         // After `joined`: what its tracks need now, which may have changed while it was away.
         state.apply(resumed.effects);
         if resumed.was_reconnecting {
@@ -1038,6 +1042,7 @@ impl Room {
           state.broadcast_except(participant_id, CallEvent::ParticipantJoined { participant });
         }
         state.announce_decodable_codecs(Some(participant_id));
+        state.announce_audio_features(Some(participant_id));
         JoinOutcome::Joined
       },
     };
@@ -1444,6 +1449,8 @@ impl RoomState {
     self.dispatch(outbound);
     self.decodable_announced.remove(&participant_id);
     self.announce_decodable_codecs(None);
+    self.audio_features_announced.remove(&participant_id);
+    self.announce_audio_features(None);
     info!(call_id = %call_id, participant_id = %participant_id, "participant left");
   }
 
@@ -1580,6 +1587,30 @@ impl RoomState {
         },
       );
       self.decodable_announced.insert(device_id, codecs);
+    }
+  }
+
+  /// Tells each connected participant the audio features the others have (#1893) when they
+  /// changed since it was last told, and `maybe_fresh` (a device that just joined or rejoined) in
+  /// any case. A reconnecting device hears them when it is back.
+  fn announce_audio_features(&mut self, maybe_fresh: Option<DeviceId>) {
+    let devices: Vec<DeviceId> = self.participants.keys().copied().collect();
+    for device_id in devices {
+      let maybe_features = self.forwarder.audio_features_of_others(device_id);
+      let Some(features) = maybe_features.filter(|_| self.handle_of(device_id).is_some()) else {
+        self.audio_features_announced.remove(&device_id);
+        continue;
+      };
+      if maybe_fresh != Some(device_id) && self.audio_features_announced.get(&device_id) == Some(&features) {
+        continue;
+      }
+      self.send_to(
+        device_id,
+        CallEvent::AudioFeatures {
+          features: features.clone(),
+        },
+      );
+      self.audio_features_announced.insert(device_id, features);
     }
   }
 
@@ -2139,6 +2170,67 @@ mod tests {
       assert!(rooms.leave(&room, id(30), carol_session));
       assert_eq!(announced(&drain(&mut alice_rx)), vec![both.to_vec()]);
       assert_eq!(announced(&drain(&mut bob_rx)), vec![both.to_vec()]);
+    }
+  }
+
+  mod audio_features {
+    use super::*;
+
+    fn long_frames() -> MediaCapabilities {
+      MediaCapabilities {
+        audio_features: vec![AudioFeature::LongFrames],
+        ..MediaCapabilities::default()
+      }
+    }
+
+    fn announced(events: &[CallEvent]) -> Vec<Vec<AudioFeature>> {
+      events
+        .iter()
+        .filter_map(|event| match event {
+          CallEvent::AudioFeatures { features } => Some(features.clone()),
+          _ => None,
+        })
+        .collect()
+    }
+
+    /// Long voice frames are for calls where every other participant plays them (#1893): an
+    /// older client joining takes them away from everyone else, and its leaving gives them back.
+    #[test]
+    fn a_voice_hears_what_the_others_play() {
+      let rooms = Rooms::new(SfuConfig::default());
+      let (mut alice_rx, room, _) = join_capable(&rooms, 1, 10, long_frames());
+      assert_eq!(
+        announced(&drain(&mut alice_rx)),
+        vec![vec![AudioFeature::LongFrames]],
+        "alone: anything goes"
+      );
+      let (mut bob_rx, _, _) = join_capable(&rooms, 2, 20, long_frames());
+      assert!(
+        announced(&drain(&mut alice_rx)).is_empty(),
+        "nothing changed for alice"
+      );
+      assert_eq!(
+        announced(&drain(&mut bob_rx)),
+        vec![vec![AudioFeature::LongFrames]]
+      );
+
+      let (mut older_rx, _, older_session) = join_capable(&rooms, 3, 30, MediaCapabilities::default());
+      assert_eq!(announced(&drain(&mut alice_rx)), vec![Vec::new()]);
+      assert_eq!(announced(&drain(&mut bob_rx)), vec![Vec::new()]);
+      assert_eq!(
+        announced(&drain(&mut older_rx)),
+        vec![vec![AudioFeature::LongFrames]]
+      );
+
+      assert!(rooms.leave(&room, id(30), older_session));
+      assert_eq!(
+        announced(&drain(&mut alice_rx)),
+        vec![vec![AudioFeature::LongFrames]]
+      );
+      assert_eq!(
+        announced(&drain(&mut bob_rx)),
+        vec![vec![AudioFeature::LongFrames]]
+      );
     }
   }
 

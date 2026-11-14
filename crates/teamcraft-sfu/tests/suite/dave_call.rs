@@ -507,6 +507,8 @@ fn handle_event(
         .insert(StreamId(participant.audio_stream_id.0), participant.device_id);
     },
     CallEvent::ActiveSpeakers { device_ids } => state.active_speakers = device_ids,
+    // What the others' playout takes (#1893): this test's voice stays at 20 ms.
+    CallEvent::AudioFeatures { .. } => {},
     CallEvent::ParticipantLeft { .. } => {},
     other => panic!("unexpected event {other:?}"),
   }

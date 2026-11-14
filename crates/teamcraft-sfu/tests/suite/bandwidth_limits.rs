@@ -830,7 +830,7 @@ fn luma_psnr(source: &VideoFrame, decoded: &VideoFrame) -> f64 {
   10.0 * (255.0f64.powi(2) / mse.max(1e-9)).log10()
 }
 
-async fn wait_until_secured(call: &mut NativeCall) {
+pub(crate) async fn wait_until_secured(call: &mut NativeCall) {
   let deadline = tokio::time::Instant::now() + STEP_DEADLINE;
   loop {
     assert!(
@@ -845,7 +845,12 @@ async fn wait_until_secured(call: &mut NativeCall) {
   }
 }
 
-async fn join(sfu: SocketAddr, certificate_hash: [u8; 32], device: i64, others: &[i64]) -> NativeCall {
+pub(crate) async fn join(
+  sfu: SocketAddr,
+  certificate_hash: [u8; 32],
+  device: i64,
+  others: &[i64],
+) -> NativeCall {
   let engine = CallEngineConfig {
     user_id: id(device),
     device_id: id(device),
@@ -856,6 +861,7 @@ async fn join(sfu: SocketAddr, certificate_hash: [u8; 32], device: i64, others: 
       max_simulcast_layers: 3,
       max_frame_fragments: teamcraft_proto::MAX_VIDEO_FRAME_FRAGMENTS,
       video_features: Vec::new(),
+      audio_features: Vec::new(),
     },
     bwe: BweConfig::default(),
   };
@@ -870,7 +876,7 @@ async fn join(sfu: SocketAddr, certificate_hash: [u8; 32], device: i64, others: 
   NativeCall::join(config).await.unwrap()
 }
 
-async fn start_sfu() -> (u16, [u8; 32]) {
+pub(crate) async fn start_sfu() -> (u16, [u8; 32]) {
   let config = SfuConfig {
     bind_addr: SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
     ..SfuConfig::default()

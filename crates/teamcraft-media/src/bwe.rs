@@ -419,6 +419,11 @@ impl SendSideEstimator {
   }
 
   /// What the sender would like to send; lets the estimate grow past the delivered rate up to it.
+  /// The demand set last ([`Self::set_demand_bps`]).
+  pub fn demand_bps(&self) -> Option<u32> {
+    self.maybe_demand_bps
+  }
+
   pub fn set_demand_bps(&mut self, maybe_demand_bps: Option<u32>) {
     self.maybe_demand_bps = maybe_demand_bps;
   }

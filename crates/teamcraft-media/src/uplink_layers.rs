@@ -30,6 +30,7 @@ use teamcraft_proto::{VideoLayerInfo, VideoTrackKind};
 use web_time::Instant;
 
 use crate::datagram::StreamId;
+use crate::voice_steps::VoiceStepConfig;
 
 /// Limits of the uplink allocation.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -91,6 +92,8 @@ pub struct UplinkPolicy {
   /// upper layers make room first, at once; stopping the picture needs the uplink to stay that
   /// poor, not one cut of an estimate that grows back within seconds.
   pub camera_pause_hold: Duration,
+  /// The own voice's steps on a thin uplink (#1893).
+  pub voice: VoiceStepConfig,
 }
 
 /// A screen share's layers stop without [`UplinkPolicy::screen_downswitch_hold`] when the
@@ -172,6 +175,7 @@ impl Default for UplinkPolicy {
       in_place_share_downswitch_hold: Duration::ZERO,
       probe_proof: Duration::from_secs(4),
       camera_pause_hold: Duration::from_secs(5),
+      voice: VoiceStepConfig::default(),
     }
   }
 }

@@ -214,6 +214,7 @@ async fn screen_share_reaches_a_subscriber_through_the_sfu() {
         max_simulcast_layers: 1,
         max_frame_fragments: teamcraft_proto::MAX_VIDEO_FRAME_FRAGMENTS,
         video_features: Vec::new(),
+        audio_features: Vec::new(),
       },
       bwe: BweConfig::default(),
     };
