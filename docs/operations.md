@@ -514,6 +514,15 @@ depend on any of it.
   video layers) start from that. `TEAMCRAFT_SFU_PROBE_BYTES` bounds it per direction (default
   15000: three trains of five 1000-byte datagrams within half a second; at most 100000; `0` turns
   it off, and clients then don't probe either). The results show in the call's stats for nerds.
+- **Links are probed before the call, too (#1959).** The web client measures its link on the
+  pre-join screen and in a meeting's lobby with a short-lived **link probe ticket** from the server
+  (`[calls] probe_ticket_ttl_secs`, default 30, at most 60; `probe_tickets_per_device_per_minute`,
+  default 6, `0` turns it off). The SFU answers such a connection with the same probe as at the
+  join and nothing else, for at most `TEAMCRAFT_SFU_LINK_PROBE_SECS` (default 10); each ticket
+  opens one session, and the SFU remembers up to `TEAMCRAFT_SFU_MAX_REMEMBERED_PROBE_TICKETS`
+  (default 100000) ticket ids until they expire. It counts against the same per-address limit as
+  connections that haven't joined. Padding goes only to a client that showed a valid ticket on a
+  QUIC connection whose handshake validated its address, so it can't be aimed at a third party.
 - Keep the SFU's UDP port out of anything that tracks UDP "connections" by address and port (a
   load balancer without QUIC connection-ID routing, a strict stateful firewall): when a client
   changes networks its QUIC connection continues from a new address (connection migration,
