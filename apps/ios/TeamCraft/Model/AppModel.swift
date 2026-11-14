@@ -771,18 +771,29 @@ final class AppModel {
   func chatPreviews(_ conversations: [ConversationItem], myId: String) async -> [String: ChatPreview] {
     let ids = conversations.map(\.id)
     let directIds = Set(conversations.filter { $0.kind == .direct }.map(\.id))
-    guard let items = try? await core().chatPreviews(conversationIds: ids) else { return [:] }
+    guard let core = try? core() else { return [:] }
     var previews: [String: ChatPreview] = [:]
-    for item in items {
-      previews[item.conversationId] = chatPreview(
-        Message(item.message), myId: myId, isOneToOne: directIds.contains(item.conversationId))
+    for message in await Self.readPreviews(core, conversationIds: ids) {
+      previews[message.conversationId] = chatPreview(
+        message, myId: myId, isOneToOne: directIds.contains(message.conversationId))
     }
     return previews
   }
 
-  func search(_ query: String) async -> [SearchHitItem] {
-    guard !query.trimmingCharacters(in: .whitespaces).isEmpty else { return [] }
-    return ((try? await core().search(query: query)) ?? []).map { $0.namingDeletedAuthor() }
+  func search(_ query: String) async -> [SearchHit] {
+    guard !query.trimmingCharacters(in: .whitespaces).isEmpty, let core = try? core() else { return [] }
+    return await Self.readSearch(core, query: query)
+  }
+
+  /// Decoded off the main actor: the chat list reads this at start and on every change (#1758).
+  private nonisolated static func readPreviews(_ core: TeamCraft, conversationIds: [String]) async -> [Message] {
+    guard let json = try? await core.chatPreviews(conversationIds: conversationIds) else { return [] }
+    return Wire.decode(ChatPreviews.self, from: json)?.named ?? []
+  }
+
+  private nonisolated static func readSearch(_ core: TeamCraft, query: String) async -> [SearchHit] {
+    guard let json = try? await core.search(query: query) else { return [] }
+    return Wire.decode(NamedSearchResults.self, from: json)?.named ?? []
   }
 
   // MARK: Acting

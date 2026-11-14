@@ -3,8 +3,6 @@ package de.zeitgleich.teamcraft.ui
 import de.zeitgleich.teamcraft.core.LoadFailure
 import de.zeitgleich.teamcraft.core.Message
 import uniffi.teamcraft_ffi.ConversationItem
-import uniffi.teamcraft_ffi.MessageItem
-import uniffi.teamcraft_ffi.PlaceholderItem
 
 /** Longest preview text kept; the row ellipsizes anyway, this only bounds the work. */
 private const val MAX_PREVIEW_CHARS = 160
@@ -47,60 +45,23 @@ sealed interface PreviewContent {
  * The preview of a conversation's newest message. In a one-to-one chat the other person's name is
  * the conversation's name already, so only the user's own messages get a sender ("You: …").
  */
-fun chatPreview(message: Message, myId: String, authorName: String, isOneToOne: Boolean): ChatPreview = chatPreview(
-  isEvent = message.maybeSystemEvent != null,
-  authorId = message.author,
-  body = message.body,
-  maybePlaceholder = message.maybePlaceholder,
-  sentAt = message.sentAt,
-  myId = myId,
-  authorName = authorName,
-  isOneToOne = isOneToOne,
-)
-
-/** The same from the core's typed item ([uniffi.teamcraft_ffi.TeamCraft.chatPreviews]). */
-fun chatPreview(item: MessageItem, myId: String, isOneToOne: Boolean): ChatPreview = chatPreview(
-  isEvent = item.maybeSystemEvent != null,
-  authorId = item.authorId,
-  body = item.body,
-  maybePlaceholder = item.maybePlaceholder?.let(::placeholderState),
-  sentAt = item.sentAtMs,
-  myId = myId,
-  authorName = item.authorName,
-  isOneToOne = isOneToOne,
-)
-
-private fun chatPreview(
-  isEvent: Boolean,
-  authorId: String,
-  body: String,
-  maybePlaceholder: String?,
-  sentAt: Long,
-  myId: String,
-  authorName: String,
-  isOneToOne: Boolean,
-): ChatPreview {
+fun chatPreview(message: Message, myId: String, authorName: String, isOneToOne: Boolean): ChatPreview {
+  val isEvent = message.maybeSystemEvent != null
   val sender = when {
     isEvent -> PreviewSender.None
-    authorId == myId -> PreviewSender.Me
+    message.author == myId -> PreviewSender.Me
     isOneToOne -> PreviewSender.None
     else -> PreviewSender.Other(authorName)
   }
-  val text = oneLine(body)
+  val text = oneLine(message.body)
+  val maybePlaceholder = message.maybePlaceholder
   val content = when {
     isEvent -> PreviewContent.Event
     maybePlaceholder != null -> PreviewContent.Placeholder(maybePlaceholder)
     text.isEmpty() -> PreviewContent.Deleted
     else -> PreviewContent.Text(text)
   }
-  return ChatPreview(sender, content, sentAt)
-}
-
-/** The bridge's name for a placeholder state ([Message.maybePlaceholder]). */
-private fun placeholderState(placeholder: PlaceholderItem): String = when (placeholder) {
-  PlaceholderItem.WAITING -> "waiting"
-  PlaceholderItem.NOT_AVAILABLE -> "not_available"
-  PlaceholderItem.FAILED -> "failed"
+  return ChatPreview(sender, content, message.sentAt)
 }
 
 /** Markdown-ish text folded into one short line. */

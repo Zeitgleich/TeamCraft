@@ -634,9 +634,55 @@ struct MessageTail: Decodable, Sendable {
 
   /// The page with every author named.
   var page: MessagePage {
-    let everyone = (authors ?? []) + (maybeMe.map { [$0] } ?? [])
-    let byId = Dictionary(everyone.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+    let byId = authorsById((authors ?? []) + (maybeMe.map { [$0] } ?? []))
     return MessagePage(messages: messages.map { $0.named(byId) }, hasOlder: hasOlder, gaps: gaps ?? [])
+  }
+}
+
+/// `authors` by user ID, the first of each.
+func authorsById(_ authors: [MessageAuthor]) -> [String: MessageAuthor] {
+  Dictionary(authors.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+}
+
+/// `ChatPreviews` of the core (#1876): the line under each conversation of the chat list, at most
+/// one message per conversation, with only their authors (never the whole snapshot).
+struct ChatPreviews: Decodable, Sendable {
+  let messages: [Message]
+  let authors: [MessageAuthor]?
+
+  /// The messages with their authors named.
+  var named: [Message] {
+    let byId = authorsById(authors ?? [])
+    return messages.map { $0.named(byId) }
+  }
+}
+
+/// A message the search found (`SearchHit` of the core) and where it is.
+struct SearchHit: Decodable, Sendable {
+  var message: Message
+  let conversationName: String
+  /// In the user's notes to themself: `conversationName` is empty, the app names it (issue #1041).
+  var isNotesToSelf: Bool?
+  let maybeSpaceName: String?
+
+  /// The conversation name the hit's row shows (same rule as `ConversationItem.listName`).
+  var listName: String { conversationListName(conversationName, isNotesToSelf: isNotesToSelf == true) }
+}
+
+/// `NamedSearchResults` of the core (#1876): the hits with the authors this device knows, so a
+/// keystroke doesn't decode the whole snapshot.
+struct NamedSearchResults: Decodable, Sendable {
+  let hits: [SearchHit]
+  let authors: [MessageAuthor]?
+
+  /// The hits with their authors named.
+  var named: [SearchHit] {
+    let byId = authorsById(authors ?? [])
+    return hits.map { hit in
+      var named = hit
+      named.message = hit.message.named(byId)
+      return named
+    }
   }
 }
 
@@ -652,67 +698,6 @@ struct HistoryGap: Decodable, Equatable, Sendable {
 
   /// Nothing asked yet, or the last request was answered: a reader near it asks.
   var isAskable: Bool { status == .available || status == .complete }
-}
-
-extension Message {
-  /// The chat list's line from the core's typed record (`ChatPreviewItem`), named there already.
-  init(_ item: MessageItem) {
-    self.init(
-      id: item.id, conversationId: item.conversationId, authorId: item.authorId, sentAtMs: item.sentAtMs,
-      body: item.body, authorName: item.isAuthorDeleted ? deletedUserName : item.authorName,
-      isEdited: item.isEdited, replyCount: item.replyCount, maybeThreadId: item.maybeThreadId,
-      reactions: item.reactions.map { Reaction(emoji: $0.emoji, count: $0.count, reactedByMe: $0.reactedByMe) },
-      maybeSystemEvent: item.maybeSystemEvent.map(Message.SystemEvent.init),
-      maybePlaceholder: item.maybePlaceholder.map(Message.Placeholder.init),
-      maybeSource: item.isAuthorSource
-        ? Message.Source(name: item.authorName, picture: item.maybeSourcePictureSha256) : nil,
-      groupMentions: item.groupMentions, mentionsMe: item.mentionsMe, isAuthorDeleted: item.isAuthorDeleted)
-  }
-}
-
-extension Message.SystemEvent {
-  init(_ item: SystemEventItem) {
-    switch item {
-    case .joined: self = .joined
-    case .left: self = .left
-    case .renamed(let name): self = .renamed(name: name)
-    case .topicChanged(let topic): self = .topicChanged(topic: topic)
-    }
-  }
-}
-
-extension Message.Placeholder {
-  init(_ item: PlaceholderItem) {
-    switch item {
-    case .waiting: self = .waiting
-    case .notAvailable: self = .notAvailable
-    case .failed: self = .failed
-    }
-  }
-}
-
-extension MessageItem {
-  /// The author's name as the app shows it: an integration source's always says it's a bot.
-  var shownAuthorName: String {
-    isAuthorSource ? String(localized: "source_sender \(authorName)") : authorName
-  }
-
-  /// The message with `deletedUserName` as its author's name when the author's account was deleted.
-  func namingDeletedAuthor() -> MessageItem {
-    guard isAuthorDeleted else { return self }
-    var named = self
-    named.authorName = deletedUserName
-    return named
-  }
-}
-
-extension SearchHitItem {
-  /// The hit with `deletedUserName` as its author's name when the author's account was deleted.
-  func namingDeletedAuthor() -> SearchHitItem {
-    var named = self
-    named.message = message.namingDeletedAuthor()
-    return named
-  }
 }
 
 /// A meeting as the server lists it (`GET /meetings`).

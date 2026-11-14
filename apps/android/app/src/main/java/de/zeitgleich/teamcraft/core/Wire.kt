@@ -160,9 +160,23 @@ data class Message(
   @SerialName("group_mentions") val groupMentions: List<String> = emptyList(),
   /** The sender named this user among the people to notify, by name or through a group. */
   @SerialName("mentions_me") val mentionsMe: Boolean = false,
+  /** Where an imported message came from (e2ee.md §4.10); only its author matters to the app. */
+  @SerialName("imported") val maybeImported: ImportedMark? = null,
 ) {
   /** Outbox messages carry the pending bit in their ID until the server accepted them. */
   val isPending: Boolean get() = (id.toLongOrNull() ?: 0L) and PENDING_ID_BIT != 0L
+
+  /**
+   * The author as the lists name them, from [authors] by user ID: a source's or an imported bot's
+   * own name first; a deleted account, and somebody imported without an account here, as
+   * [deletedUserName], the app's own "Deleted user" (issue #751).
+   */
+  fun authorName(authors: Map<String, User>, deletedUserName: String): String {
+    val maybeAuthor = authors[author]
+    maybeSource?.let { return it.name }
+    maybeImported?.author?.standInName(deletedUserName)?.let { return it }
+    return if (maybeAuthor?.isDeleted == true) deletedUserName else maybeAuthor?.displayName.orEmpty()
+  }
 
   /** A join, leave, rename or topic change. */
   val maybeSystemEvent: JsonElement?
@@ -283,6 +297,24 @@ data class MessageTail(
 }
 
 /**
+ * The line under each conversation of the chat list (the core's `ChatPreviews`, #1876): at most one
+ * message per conversation, with only their authors, never the whole snapshot.
+ */
+@Serializable
+data class ChatPreviews(
+  val messages: List<Message> = emptyList(),
+  /** The authors of [messages] this device knows, the reader and former accounts included. */
+  val authors: List<User> = emptyList(),
+)
+
+/** The search's hits with the authors this device knows (the core's `NamedSearchResults`, #1876). */
+@Serializable
+data class NamedSearchResults(
+  val hits: List<SearchHit> = emptyList(),
+  val authors: List<User> = emptyList(),
+)
+
+/**
  * A hole in the history among a [MessageTail]'s messages: a catch-up after a long absence read a
  * busy conversation's newest page ahead of the rest, and reads the rest by itself; a reader who
  * comes near asks for a page of it ([ChatActions.fillHistoryGap]).
@@ -393,6 +425,10 @@ data class FileInfo(
   /** A video that opens in the player: on the server or here, not one still going up. */
   val opensInVideoPlayer: Boolean get() = isVideo && transfer.state in setOf("local", "remote", "downloading", "failed")
 }
+
+/** What a [Message] says of its import (the core's `ImportedMark`). */
+@Serializable
+data class ImportedMark(val author: ImportedAuthor)
 
 /** Who wrote an imported message: `person` (the file's sender), `deleted` or `named` (a bot). */
 @Serializable
@@ -597,11 +633,16 @@ data class PermalinkTarget(
   @SerialName("maybe_thread") val maybeThread: String? = null,
 )
 
+/** A message the search found (the core's `SearchHit`) and where it is. */
 @Serializable
 data class SearchHit(
   val message: Message,
   @SerialName("conversation_name") val conversationName: String = "",
+  /** In the user's notes to themself: [conversationName] is empty, the app names it (issue #1041). */
   @SerialName("is_notes_to_self") val isNotesToSelf: Boolean = false,
+  @SerialName("maybe_space_name") val maybeSpaceName: String? = null,
+  /** As [Message.authorName] names the author (the search, #1876). Not on the wire. */
+  @kotlinx.serialization.Transient val authorName: String = "",
 )
 
 @Serializable

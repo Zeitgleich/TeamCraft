@@ -74,6 +74,7 @@ import de.zeitgleich.teamcraft.core.NetworkTrust
 import de.zeitgleich.teamcraft.core.OwnProfile
 import de.zeitgleich.teamcraft.core.PermalinkTarget
 import de.zeitgleich.teamcraft.core.PickedFile
+import de.zeitgleich.teamcraft.core.SearchHit
 import de.zeitgleich.teamcraft.core.TypingPlace
 import de.zeitgleich.teamcraft.push.UnifiedPushBackend
 import de.zeitgleich.teamcraft.push.UnifiedPushStatus
@@ -107,7 +108,6 @@ import uniffi.teamcraft_ffi.MovedCallHint
 import de.zeitgleich.teamcraft.core.LoadFailure
 import uniffi.teamcraft_ffi.FirstSyncItem
 import uniffi.teamcraft_ffi.KeyCatchUpItem
-import uniffi.teamcraft_ffi.MessageItem
 import uniffi.teamcraft_ffi.NotificationContent
 import uniffi.teamcraft_ffi.NotifiedConversation
 import uniffi.teamcraft_ffi.SpaceMenuItem
@@ -115,7 +115,6 @@ import uniffi.teamcraft_ffi.Presence
 import uniffi.teamcraft_ffi.PushDiagnosticsInfo
 import uniffi.teamcraft_ffi.PushService
 import uniffi.teamcraft_ffi.ReviewedRolesOutcome
-import uniffi.teamcraft_ffi.SearchHitItem
 import uniffi.teamcraft_ffi.ServerEntryException
 import uniffi.teamcraft_ffi.SignInPageInfo
 import uniffi.teamcraft_ffi.StoreProblem
@@ -874,10 +873,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
    */
   suspend fun chatPreviews(conversations: List<ConversationItem>, myId: String): Map<String, ChatListEntry> {
     val isOneToOne = conversations.associate { it.id to (it.kind == ConversationKind.DIRECT) }
-    val items = read { chatPreviews(conversations.map { it.id }) } ?: return emptyMap()
-    return items.associate { item ->
-      val message = namedAuthor(item.message)
-      item.conversationId to ChatListEntry(chatPreview(message, myId, isOneToOne[item.conversationId] == true), message.id)
+    val read = readChat { chatPreviews(conversations.map { it.id }) } ?: return emptyMap()
+    val authors = read.authors.associateBy { it.id }
+    val deleted = deletedUserName()
+    return read.messages.associate { message ->
+      val preview = chatPreview(message, myId, message.authorName(authors, deleted), isOneToOne[message.conversation] == true)
+      message.conversation to ChatListEntry(preview, message.id)
     }
   }
 
@@ -895,19 +896,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   suspend fun keyCatchUp(): KeyCatchUpItem? = read { keyCatchUp() }
 
   /** The hits for [query]; `null` when the search could not run, which is not "no hits" (#297). */
-  suspend fun search(query: String): List<SearchHitItem>? =
+  suspend fun search(query: String): List<SearchHit>? =
     if (query.isBlank()) {
       emptyList()
     } else {
-      read { search(query) }?.map { it.copy(message = namedAuthor(it.message)) }
+      readChat { search(query) }?.let { results ->
+        val authors = results.authors.associateBy { it.id }
+        val deleted = deletedUserName()
+        results.hits.map { it.copy(authorName = it.message.authorName(authors, deleted)) }
+      }
     }
 
   /** The app's own "Deleted user" in the user's language (issue #751). */
   private fun deletedUserName(): String = getApplication<Application>().getString(R.string.user_deleted_name)
-
-  /** [message] with [deletedUserName] instead of the server's placeholder when its author was deleted. */
-  private fun namedAuthor(message: MessageItem): MessageItem =
-    if (message.isAuthorDeleted) message.copy(authorName = deletedUserName()) else message
 
   fun send(conversationId: String, maybeThreadId: String?, body: String) = viewModelScope.launch {
     runCatching { graph.core.core().sendMessage(conversationId, maybeThreadId, body) }

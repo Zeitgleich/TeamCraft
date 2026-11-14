@@ -112,6 +112,17 @@ class ChatClient(
     return deletedUserName?.let { snapshot.namingDeletedUsers(it()) } ?: snapshot
   }
 
+  /**
+   * The line under each of [conversations] in the chat list, in one local read for the whole list
+   * (#1876). It doesn't move the catch-up focus: listing a conversation isn't opening it.
+   */
+  suspend fun chatPreviews(conversations: List<String>): ChatPreviews =
+    WireJson.decodeFromString(ChatPreviews.serializer(), core().chatPreviews(conversations))
+
+  /** The hits for [query] (`from:`, `in:` and the other filters), with their authors. */
+  suspend fun search(query: String): NamedSearchResults =
+    WireJson.decodeFromString(NamedSearchResults.serializer(), core().search(query))
+
   /** The newest [len] messages, read ahead without moving the catch-up focus (the user isn't there yet). */
   suspend fun tailAhead(conversation: String, len: Int): MessageTail =
     WireJson.decodeFromString(MessageTail.serializer(), core().messageTailAhead(conversation, len.toUInt()))

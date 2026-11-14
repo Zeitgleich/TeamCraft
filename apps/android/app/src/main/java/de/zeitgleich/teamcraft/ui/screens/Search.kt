@@ -56,14 +56,14 @@ import de.zeitgleich.teamcraft.ui.listPhase
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.SearchFilters
 import de.zeitgleich.teamcraft.ui.hitLocation
-import uniffi.teamcraft_ffi.SearchHitItem
+import de.zeitgleich.teamcraft.core.SearchHit
 
 private const val TYPING_PAUSE_MS = 250L
 
 @Composable
 fun SearchScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () -> Unit) {
   var query by rememberSaveable { mutableStateOf("") }
-  var read by remember { mutableStateOf<Read<List<SearchHitItem>>>(Read.Loaded(emptyList())) }
+  var read by remember { mutableStateOf<Read<List<SearchHit>>>(Read.Loaded(emptyList())) }
   var attempt by remember { mutableIntStateOf(0) }
   var snapshot by remember { mutableStateOf<ChatSnapshot?>(null) }
   // Results come from this device's history, which the first sync is still filling (#297).
@@ -122,7 +122,7 @@ fun SearchScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
       }
       LazyColumn(contentPadding = padding.bottomOnly()) {
         items(hits, key = { it.message.id }) { hit ->
-          Column(Modifier.fillMaxWidth().clickable { onOpen(hit.message.conversationId) }) {
+          Column(Modifier.fillMaxWidth().clickable { onOpen(hit.message.conversation) }) {
             Text(
               hitLocation(hit.maybeSpaceName, hit.conversationName, hit.isNotesToSelf, stringResource(R.string.notes_title)),
               style = MaterialTheme.typography.labelMedium,
@@ -130,10 +130,10 @@ fun SearchScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
               modifier = Modifier.padding(start = 16.dp, top = 8.dp),
             )
             Text(
-              if (hit.message.isAuthorSource) {
-                stringResource(R.string.source_sender, hit.message.authorName)
+              if (hit.message.maybeSource != null) {
+                stringResource(R.string.source_sender, hit.authorName)
               } else {
-                hit.message.authorName
+                hit.authorName
               },
               style = MaterialTheme.typography.labelLarge,
               modifier = Modifier.padding(start = 16.dp, top = 2.dp),

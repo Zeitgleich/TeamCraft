@@ -117,15 +117,14 @@ use teamcraft_media::openh264_library::{self, OpenH264Binary};
 use tokio::sync::{mpsc, oneshot};
 use tracing::Instrument as _;
 pub use types::{
-  AccountState, AppActivity, AppConfig, BrandAccent, BrandLinks, ChatPreviewItem, ConnectionState,
-  ConversationItem, ConversationKind, EmojiSuggestion, FirstSyncItem, FirstSyncStageItem,
-  GroupMentionReachItem, KeyCatchUpItem, LeaveChoice, LinkPlatform, LinkRequestItem, LoginBrand,
-  MentionSettings, MentionableGroupItem, MentionableGroupKindItem, MessageItem, NetworkInterception,
-  NetworkProxy, NotificationAttachmentKind, NotificationContent, NotificationContentSettings,
-  NotificationGap, NotificationSuppression, NotifiedConversation, NotifiedMessage, OrgRecoveryStart,
-  PendingWorkItem, PlaceholderItem, Presence, PushDiagnosticsInfo, PushNotification, PushNotificationKind,
-  PushService, ReactionItem, SearchHitItem, SegmentPrefetchMode, SegmentPrefetchResult, SpaceMenuItem,
-  StoreProblem, TestPushOutcome, TestPushResult,
+  AccountState, AppActivity, AppConfig, BrandAccent, BrandLinks, ConnectionState, ConversationItem,
+  ConversationKind, EmojiSuggestion, FirstSyncItem, FirstSyncStageItem, GroupMentionReachItem,
+  KeyCatchUpItem, LeaveChoice, LinkPlatform, LinkRequestItem, LoginBrand, MentionSettings,
+  MentionableGroupItem, MentionableGroupKindItem, NetworkInterception, NetworkProxy,
+  NotificationAttachmentKind, NotificationContent, NotificationContentSettings, NotificationGap,
+  NotificationSuppression, NotifiedConversation, NotifiedMessage, OrgRecoveryStart, PendingWorkItem,
+  Presence, PushDiagnosticsInfo, PushNotification, PushNotificationKind, PushService, SegmentPrefetchMode,
+  SegmentPrefetchResult, SpaceMenuItem, StoreProblem, TestPushOutcome, TestPushResult,
 };
 
 /// The JNI method that sets up the audio context calls need on Android (cpal through ndk-context):
@@ -617,12 +616,10 @@ impl TeamCraft {
 
   /// The line under each conversation of a chat list, in one read for the whole list: the newest
   /// message people wrote, skipping system lines (joins, renames) where a written one is close by.
-  /// Conversations without messages are left out. Unlike [`Self::message_tail`] it doesn't move the
-  /// catch-up focus: listing a conversation isn't opening it.
-  pub async fn chat_previews(
-    &self,
-    conversation_ids: Vec<String>,
-  ) -> Result<Vec<ChatPreviewItem>, TeamCraftError> {
+  /// Conversations without messages are left out. As JSON (`ChatPreviews`): the core's messages
+  /// with the authors this device knows, as a feed reads them (#1876). Unlike [`Self::message_tail`]
+  /// it doesn't move the catch-up focus: listing a conversation isn't opening it.
+  pub async fn chat_previews(&self, conversation_ids: Vec<String>) -> Result<String, TeamCraftError> {
     let ids = conversation_ids.into_iter().collect();
     self
       .read_queue()?
@@ -731,9 +728,10 @@ impl TeamCraft {
       .await
   }
 
-  /// Full-text search over decrypted messages (`from:`, `in:` and the other filters work).
-  pub async fn search(&self, query: String) -> Result<Vec<SearchHitItem>, TeamCraftError> {
-    self.read(move |reads| reads.search(&query)).await
+  /// Full-text search over decrypted messages (`from:`, `in:` and the other filters work), as JSON
+  /// (`NamedSearchResults`): the hits as desktop and web read them, with their authors (#1876).
+  pub async fn search(&self, query: String) -> Result<String, TeamCraftError> {
+    self.read(move |reads| reads.search_json(&query)).await
   }
 
   /// Registers the device's push channel (e2ee.md §7): with a fresh push key the first time, under
@@ -2270,6 +2268,43 @@ mod tests {
 
       held.release().await;
       sending.await.unwrap().unwrap();
+    }
+
+    /// Issue #1876: the chat list's lines are the feed's messages with their authors, in one read;
+    /// a bad ID costs only its own line.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn chat_previews_name_their_authors() {
+      let directory = TestDir::new("chat-previews");
+      enroll(&directory).await;
+      let core = open_with(&directory, Arc::new(NoTokens), Arc::new(Quiet));
+      core
+        .send_message(CONVERSATION.into(), None, "hello".into())
+        .await
+        .unwrap();
+
+      let json = core
+        .chat_previews(vec!["not an id".into(), CONVERSATION.into(), "43".into()])
+        .await
+        .unwrap();
+      let previews: teamcraft_client_api::remote::ChatPreviews = serde_json::from_str(&json).unwrap();
+      let [message] = previews.messages.as_slice() else {
+        panic!("one line: {json}");
+      };
+      assert_eq!(message.body, "hello");
+      assert_eq!(message.conversation.to_string(), CONVERSATION);
+      assert_eq!(
+        previews
+          .authors
+          .iter()
+          .map(|author| author.id)
+          .collect::<Vec<_>>(),
+        [message.author],
+        "the user, who wrote it"
+      );
+
+      let json = core.search(String::new()).await.unwrap();
+      let results: teamcraft_client_api::remote::NamedSearchResults = serde_json::from_str(&json).unwrap();
+      assert!(results.results.hits.is_empty() && results.authors.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -263,55 +263,6 @@ pub struct ConversationItem {
   pub is_catching_up: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct MessageItem {
-  pub id: String,
-  pub conversation_id: String,
-  pub author_id: String,
-  pub author_name: String,
-  pub sent_at_ms: i64,
-  pub body: String,
-  pub is_edited: bool,
-  /// Written here, not yet accepted by the server.
-  pub is_pending: bool,
-  pub reply_count: u32,
-  /// Set on replies: the thread (root message ID) they belong to.
-  pub maybe_thread_id: Option<String>,
-  pub reactions: Vec<ReactionItem>,
-  /// The author's account was deleted (issue #630): the app shows its own "Deleted user" instead of
-  /// `author_name`, the server's placeholder (issue #751). Defaulted, so items the apps
-  /// build in tests need no change.
-  #[uniffi(default = false)]
-  pub is_author_deleted: bool,
-  /// What a system message reports (a join, a rename), shown as a line instead of a bubble; `None`
-  /// for messages people wrote. Membership and channel changes by someone else come with the
-  /// message's extras (`maybe_workspace_event`). Defaulted, so items the apps build need no change.
-  #[uniffi(default = None)]
-  pub maybe_system_event: Option<SystemEventItem>,
-  /// Set while this device can't read the message (issue #888): the app shows a bubble with the
-  /// placeholder's text instead of `body` (empty then). It fills in place once readable.
-  /// Defaulted, so items the apps build need no change.
-  #[uniffi(default = None)]
-  pub maybe_placeholder: Option<PlaceholderItem>,
-  /// `author_name` is an integration source's, on a bot's message: the app shows the bot badge
-  /// with it (docs/bridge.md, "Source identity"). Defaulted, so items the apps build need no change.
-  #[uniffi(default = false)]
-  pub is_author_source: bool,
-  /// The source's picture, for [`crate::TeamCraftCore::integration_source_picture`]; without one
-  /// the app shows the bot's. Defaulted, so items the apps build need no change.
-  #[uniffi(default = None)]
-  pub maybe_source_picture_sha256: Option<String>,
-  /// Handles of the user groups the sender's device expanded (`accounting`, `admins`), from inside
-  /// the ciphertext: the app shows those `@words` as group mentions (issue #206). Defaulted, so
-  /// items the apps build need no change.
-  #[uniffi(default = [])]
-  pub group_mentions: Vec<String>,
-  /// The sender named this user among the people to notify (by `@username` or through a group):
-  /// the app highlights the group mention like a mention of the user. Defaulted.
-  #[uniffi(default = false)]
-  pub mentions_me: bool,
-}
-
 /// A user group the composer offers after `@` in a conversation (issue #206): only where the user
 /// may mention groups, and a mention of it notifies `notified_count` people there.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -359,17 +310,6 @@ impl From<&teamcraft_client_api::model::MentionableGroup> for MentionableGroupIt
       outside_count: group.outside_count,
     }
   }
-}
-
-/// Why a message shows as a placeholder ([`MessageItem::maybe_placeholder`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
-pub enum PlaceholderItem {
-  /// "Waiting for this message", with a subtle pending mark: its key may still come.
-  Waiting,
-  /// "Not available on this device": no key is expected here.
-  NotAvailable,
-  /// "This message couldn't be decrypted".
-  Failed,
 }
 
 /// How far conversations with messages waiting for keys have caught up (issue #888).
@@ -425,25 +365,6 @@ impl From<PendingWork> for PendingWorkItem {
   }
 }
 
-/// The line under a conversation in the chat lists ([`crate::TeamCraft::chat_previews`]).
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct ChatPreviewItem {
-  pub conversation_id: String,
-  /// The newest message people wrote, or the newest system line when the conversation's last rows
-  /// are all system lines.
-  pub message: MessageItem,
-}
-
-/// The system events of [`MessageItem::maybe_system_event`]; the message's author is who joined,
-/// left, renamed or changed the topic (issue #769).
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
-pub enum SystemEventItem {
-  Joined,
-  Left,
-  Renamed { name: String },
-  TopicChanged { topic: String },
-}
-
 /// An emoji the composer offers for a typed `:name`.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct EmojiSuggestion {
@@ -496,35 +417,6 @@ pub struct BrandLinks {
   pub maybe_privacy: Option<String>,
   pub maybe_terms: Option<String>,
   pub maybe_imprint: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct ReactionItem {
-  pub emoji: String,
-  pub count: u32,
-  pub reacted_by_me: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct SearchHitItem {
-  pub message: MessageItem,
-  pub conversation_name: String,
-  /// The hit is in the user's notes to themself: `conversation_name` is empty, the apps name it
-  /// in the user's language (as for [`ConversationItem::is_notes_to_self`]).
-  #[uniffi(default = false)]
-  pub is_notes_to_self: bool,
-  pub maybe_space_name: Option<String>,
-}
-
-impl SearchHitItem {
-  pub(crate) fn from_hit(hit: teamcraft_client_api::search::SearchHit, message: MessageItem) -> Self {
-    Self {
-      message,
-      conversation_name: hit.conversation_name,
-      is_notes_to_self: hit.is_notes_to_self,
-      maybe_space_name: hit.maybe_space_name,
-    }
-  }
 }
 
 /// What a wake-up asks the app to do (notifications.md, "Mobile push delivery").
@@ -862,82 +754,6 @@ impl ConversationKind {
       ConversationKindView::Group => Self::Group,
       ConversationKindView::Integration => Self::Integration,
     }
-  }
-}
-
-impl MessageItem {
-  /// `maybe_author` is looked up by the caller (the view model only has the ID); an unknown author
-  /// has no name yet.
-  pub(crate) fn from_view(
-    message: &view::Message,
-    maybe_author: Option<&view::User>,
-    is_pending: bool,
-  ) -> Self {
-    Self {
-      id: message.id.to_string(),
-      conversation_id: message.conversation.to_string(),
-      author_id: message.author.to_string(),
-      author_name: match (
-        &message.maybe_source,
-        message.maybe_imported.as_ref().map(|mark| &mark.author),
-      ) {
-        (Some(source), _) => source.name.clone(),
-        // An imported bot's or webhook's name; the apps don't know imported messages yet.
-        (None, Some(view::ImportedAuthorView::Named { name })) => name.clone(),
-        _ => maybe_author
-          .map(|author| author.display_name.clone())
-          .unwrap_or_default(),
-      },
-      is_author_source: message.maybe_source.is_some(),
-      maybe_source_picture_sha256: message
-        .maybe_source
-        .as_ref()
-        .and_then(|source| source.maybe_picture_sha256)
-        .map(|sha256| sha256.to_hex()),
-      sent_at_ms: message.sent_at,
-      body: message.body.clone(),
-      is_edited: message.is_edited,
-      is_pending,
-      reply_count: message.reply_count,
-      maybe_thread_id: message.maybe_thread.map(|thread| thread.to_string()),
-      maybe_system_event: SystemEventItem::of(&message.kind),
-      maybe_placeholder: message.maybe_placeholder.map(|placeholder| match placeholder {
-        view::Placeholder::Waiting => PlaceholderItem::Waiting,
-        view::Placeholder::NotAvailable | view::Placeholder::Unknown => PlaceholderItem::NotAvailable,
-        view::Placeholder::Failed => PlaceholderItem::Failed,
-      }),
-      reactions: message
-        .reactions
-        .iter()
-        .map(|reaction| ReactionItem {
-          emoji: reaction.emoji.clone(),
-          count: reaction.count,
-          reacted_by_me: reaction.reacted_by_me,
-        })
-        .collect(),
-      group_mentions: message.group_mentions.clone(),
-      mentions_me: message.mentions_me,
-      // Somebody without an account here is shown like a deleted account (e2ee.md §4.10).
-      is_author_deleted: maybe_author.is_some_and(|author| author.is_deleted)
-        || matches!(
-          message.maybe_imported.as_ref().map(|mark| &mark.author),
-          Some(view::ImportedAuthorView::Deleted)
-        ),
-    }
-  }
-}
-
-impl SystemEventItem {
-  fn of(kind: &view::MessageKind) -> Option<Self> {
-    let view::MessageKind::System(event) = kind else {
-      return None;
-    };
-    Some(match event {
-      view::SystemEvent::Joined => Self::Joined,
-      view::SystemEvent::Left => Self::Left,
-      view::SystemEvent::Renamed { name } => Self::Renamed { name: name.clone() },
-      view::SystemEvent::TopicChanged { topic } => Self::TopicChanged { topic: topic.clone() },
-    })
   }
 }
 
@@ -1322,74 +1138,6 @@ impl From<LinkRequestInfo> for LinkRequestItem {
 mod tests {
   use super::*;
 
-  mod system_events {
-    use super::*;
-
-    #[test]
-    fn each_kind_reaches_the_apps_with_its_text() {
-      let cases = [
-        (view::SystemEvent::Joined, SystemEventItem::Joined),
-        (view::SystemEvent::Left, SystemEventItem::Left),
-        (
-          view::SystemEvent::Renamed {
-            name: "Project A".into(),
-          },
-          SystemEventItem::Renamed {
-            name: "Project A".into(),
-          },
-        ),
-        (
-          view::SystemEvent::TopicChanged {
-            topic: "Launch plan".into(),
-          },
-          SystemEventItem::TopicChanged {
-            topic: "Launch plan".into(),
-          },
-        ),
-      ];
-      for (event, expected) in cases {
-        let item = MessageItem::from_view(&message_of(view::MessageKind::System(event)), None, false);
-        assert_eq!(item.maybe_system_event, Some(expected));
-      }
-    }
-
-    /// A change (archived, an admin who joined) is read from the extras' workspace event, as the
-    /// apps do already.
-    #[test]
-    fn written_messages_log_lines_and_changes_are_no_system_events() {
-      for kind in [
-        view::MessageKind::User,
-        view::MessageKind::Log(view::LogLevel::Info),
-        view::MessageKind::Change,
-      ] {
-        let item = MessageItem::from_view(&message_of(kind), None, false);
-        assert_eq!(item.maybe_system_event, None);
-      }
-    }
-
-    fn message_of(kind: view::MessageKind) -> view::Message {
-      view::Message {
-        id: view::id_from_raw(7),
-        conversation: view::id_from_raw(5),
-        author: view::id_from_raw(3),
-        kind,
-        sent_at: 0,
-        body: String::new(),
-        is_edited: false,
-        reactions: Vec::new(),
-        reply_count: 0,
-        maybe_thread: None,
-        maybe_imported: None,
-        maybe_source: None,
-        maybe_placeholder: None,
-        group_mentions: Vec::new(),
-        custom_emoji: Vec::new(),
-        mentions_me: false,
-        maybe_poll: None,
-      }
-    }
-  }
-
   #[test]
   fn conversation_items_carry_what_the_user_may_do() {
     let item = |kind, maybe_permissions, is_guest| {
@@ -1515,38 +1263,6 @@ mod tests {
     );
   }
 
-  #[test]
-  fn a_deleted_author_is_flagged_for_the_apps_own_name() {
-    let message = message();
-    let mut author = author();
-    assert!(!MessageItem::from_view(&message, Some(&author), false).is_author_deleted);
-
-    author.is_deleted = true;
-    author.display_name = "Deleted user".into();
-    let item = MessageItem::from_view(&message, Some(&author), false);
-    assert!(item.is_author_deleted);
-    assert_eq!(item.author_name, "Deleted user");
-
-    let unknown = MessageItem::from_view(&message, None, false);
-    assert!(!unknown.is_author_deleted);
-    assert_eq!(unknown.author_name, "");
-  }
-
-  /// Issue #1041: a search hit in the notes carries the mark too (its conversation name is empty).
-  #[test]
-  fn a_search_hit_in_the_notes_is_marked() {
-    let hit = |is_notes_to_self| teamcraft_client_api::search::SearchHit {
-      message: message(),
-      conversation_name: String::new(),
-      is_notes_to_self,
-      maybe_space_name: None,
-      snippet: Vec::new(),
-    };
-    let item = |hit| SearchHitItem::from_hit(hit, MessageItem::from_view(&message(), None, false));
-    assert!(item(hit(true)).is_notes_to_self);
-    assert!(!item(hit(false)).is_notes_to_self);
-  }
-
   /// Issue #829: the notes reach the apps marked as such (their name is empty).
   #[test]
   fn the_notes_item_is_marked() {
@@ -1589,46 +1305,6 @@ mod tests {
       ]);
       assert_eq!(targets.len(), 1);
       assert!(targets[0].is_notes_to_self);
-    }
-  }
-
-  fn message() -> view::Message {
-    view::Message {
-      id: view::id_from_raw(7),
-      conversation: view::id_from_raw(5),
-      author: view::id_from_raw(3),
-      kind: view::MessageKind::User,
-      sent_at: 0,
-      body: "Hello".into(),
-      is_edited: false,
-      reactions: Vec::new(),
-      reply_count: 0,
-      maybe_thread: None,
-      maybe_imported: None,
-      maybe_source: None,
-      maybe_placeholder: None,
-      group_mentions: Vec::new(),
-      custom_emoji: Vec::new(),
-      mentions_me: false,
-      maybe_poll: None,
-    }
-  }
-
-  fn author() -> view::User {
-    view::User {
-      id: view::id_from_raw(3),
-      username: "sam".into(),
-      display_name: "Sam Doe".into(),
-      presence: PresenceStatus::Offline,
-      maybe_custom_status: None,
-      avatar_hue: 0,
-      is_guest: false,
-      is_bot: false,
-      maybe_organization: None,
-      is_deactivated: false,
-      is_deleted: false,
-      device_setup: view::DeviceSetup::Unknown,
-      maybe_email: None,
     }
   }
 

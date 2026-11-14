@@ -16,7 +16,7 @@ struct ConversationListView: View {
   @State private var selection: String?
   @State private var isShowingDrafts = false
   @State private var query = ""
-  @State private var hits: [SearchHitItem] = []
+  @State private var hits: [SearchHit] = []
   @State private var isShowingSettings = false
   @State private var isShowingDirectory = false
   @State private var isShowingFilters = false
@@ -1258,8 +1258,8 @@ struct BotBadge: View {
 
 /// The messages the search found, as rows of the search's list (#1786): conversation, author, text.
 struct SearchHitRows: View {
-  let hits: [SearchHitItem]
-  let onSelect: (SearchHitItem) -> Void
+  let hits: [SearchHit]
+  let onSelect: (SearchHit) -> Void
 
   var body: some View {
     ForEach(hits, id: \.message.id) { hit in
