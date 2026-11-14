@@ -124,6 +124,7 @@ meeting-error-email = „{ $email }" ist keine gültige E-Mail-Adresse.
 guest-title = Dem Meeting beitreten
 guest-subtitle = Gib deinen Namen ein, damit die Gastgeber wissen, wer beitritt. Du brauchst kein Konto.
 guest-name = Dein Name
+guest-name-required = Gib deinen Namen ein.
 guest-join = Beitritt anfragen
 guest-sign-in = Ich habe ein Konto: anmelden
 guest-waiting-title = Warten, bis dich jemand einlässt

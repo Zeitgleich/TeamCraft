@@ -65,10 +65,19 @@
   font-weight: var(--weight-semibold);
 }
 
+/* Hover and press only change the fill: the label stays `--on-accent`, at least 4.5:1 on both
+   fills in light and dark. A container that restyles its buttons leaves `.btn-primary` out
+   (`:not(.btn-primary)`), or its states would win over these (#1953). */
 @media (hover: hover) and (pointer: fine) {
-  .btn-primary:hover {
+  .btn-primary:hover:not(:disabled) {
     background: var(--accent-strong);
+    border-color: var(--accent-strong);
   }
+}
+
+.btn-primary:active:not(:disabled) {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
 }
 
 .btn-quiet {

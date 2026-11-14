@@ -21,7 +21,7 @@ use teamcraft_media::call_engine::CallEngineEvent;
 use teamcraft_media::call_native::NativeCall;
 use teamcraft_proto::{ConversationId, MeetingId, UserId};
 
-use crate::web::{TEST_CSP, click_text, type_until_kept, wait_for_element, wait_for_text};
+use crate::web::{TEST_CSP, body_text, click_text, type_until_kept, wait_for_element, wait_for_text};
 use crate::web_calls::{MEDIA_ARGS, click_selector, console_log};
 
 /// Ends a few minutes from now, so the call may start (a meeting that is over can't be joined).
@@ -31,6 +31,8 @@ const MEETING_LENGTH_MS: i64 = 60 * 60_000;
 const GUEST_ACCESS_GRACE_MS: i64 = 2 * 60 * 60_000;
 const SETUP_TIMEOUT: Duration = Duration::from_secs(60);
 const CALL_DURATION: Duration = Duration::from_secs(8);
+/// The guest page's refusal of a knock without a name (#1953).
+const NAME_REQUIRED: &str = "Enter your name.";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_guest_joins_a_meeting_with_the_mailed_link_and_shares_its_call() {
@@ -445,14 +447,174 @@ async fn knock(page: &Page, origin: &str, link: String, name: &str) {
   // One screen (#1928): the name under the preview, the devices turned on, "Join now" knocks.
   wait_for_text(page, "Join the meeting").await;
   wait_for_element(page, "#guest-name").await;
-  type_until_kept(page, "#guest-name", name).await;
   click_text(page, "Turn on camera and microphone").await;
   wait_for_element(page, ".prejoin .meter").await;
   // The camera's picture is there too: the preview is live, not only the placeholder.
   wait_for_element(page, ".prejoin-preview .live-video").await;
+  expect_join_readable_on_hover(page).await;
+  expect_nameless_knock_refused(page).await;
+  type_until_kept(page, "#guest-name", name).await;
+  // The error follows the input: gone once there is a name.
+  wait_until(page, "!document.querySelector('#guest-name[aria-invalid]')").await;
   expect_no_panic(page).await;
   guest_shots(page, "setup").await;
   click_text(page, "Join now").await;
+}
+
+/// "Join now" without a name, or with blanks only, stays on the page: the error is at the name
+/// field, which is marked invalid and has the focus (#1953, forms.md).
+async fn expect_nameless_knock_refused(page: &Page) {
+  for blanks in ["", "   "] {
+    let field = wait_for_element(page, "#guest-name").await;
+    field.click().await.unwrap();
+    if !blanks.is_empty() {
+      field.type_str(blanks).await.unwrap();
+    }
+    click_text(page, "Join now").await;
+    wait_for_text(page, NAME_REQUIRED).await;
+    wait_until(
+      page,
+      "(() => { const field = document.querySelector('#guest-name'); \
+       return field.getAttribute('aria-invalid') === 'true' \
+         && field.getAttribute('aria-describedby') === 'guest-name-error' \
+         && document.getElementById('guest-name-error').innerText.length > 0 \
+         && document.activeElement === field; })()",
+    )
+    .await;
+    assert!(
+      !body_text(page)
+        .await
+        .contains("Waiting for someone to let you in"),
+      "a guest without a name ({blanks:?}) knocked"
+    );
+  }
+  // Clears the blanks the loop typed, as the guest would.
+  page
+    .evaluate(
+      "(() => { const field = document.querySelector('#guest-name'); field.value = ''; \
+       field.dispatchEvent(new Event('input', { bubbles: true })); })()",
+    )
+    .await
+    .unwrap();
+}
+
+/// The pointer on "Join now" keeps its label readable (#1953: the call surface's hover turned it
+/// dark on dark): the fill changes, and label and fill stay at least 4.5:1 apart, in light and
+/// dark. With `E2E_GUEST_SHOTS`, a picture of each.
+async fn expect_join_readable_on_hover(page: &Page) {
+  use chromiumoxide::cdp::browser_protocol::emulation::{
+    ClearDeviceMetricsOverrideParams, MediaFeature, SetDeviceMetricsOverrideParams, SetEmulatedMediaParams,
+  };
+  use chromiumoxide::page::ScreenshotParams;
+  const COLORS: &str = "(() => { const button = document.querySelector('.prejoin-actions .btn-primary'); \
+    const style = getComputedStyle(button); \
+    return [matchMedia('(hover: hover) and (pointer: fine)').matches, button.matches(':hover'), \
+      style.color, style.backgroundColor]; })()";
+  page
+    .execute(SetDeviceMetricsOverrideParams::new(1440, 900, 1.0, false))
+    .await
+    .unwrap();
+  let button = wait_for_element(page, ".prejoin-actions .btn-primary").await;
+  for scheme in ["light", "dark"] {
+    // A desktop with a mouse: the hover styles apply only there.
+    page
+      .execute(
+        SetEmulatedMediaParams::builder()
+          .feature(MediaFeature::new("prefers-color-scheme", scheme))
+          .feature(MediaFeature::new("hover", "hover"))
+          .feature(MediaFeature::new("pointer", "fine"))
+          .build(),
+      )
+      .await
+      .unwrap();
+    // Away from the button first, for its fill at rest.
+    wait_for_element(page, "#prejoin-title")
+      .await
+      .hover()
+      .await
+      .unwrap();
+    // The theme's colours settle (no transition is longer than this).
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let (is_desktop, _, _, rest_fill) = button_colors(page, COLORS).await;
+    assert!(is_desktop, "the page doesn't see a mouse that hovers");
+    button.scroll_into_view().await.unwrap();
+    button.hover().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let (_, is_hovered, label, fill) = button_colors(page, COLORS).await;
+    assert!(is_hovered, "the pointer is not on \"Join now\"");
+    assert_ne!(fill, rest_fill, "\"Join now\" shows no hover in {scheme}");
+    let ratio = contrast(&label, &fill);
+    assert!(
+      ratio >= 4.5,
+      "\"Join now\" on hover in {scheme}: {label} on {fill} is {ratio:.2}:1"
+    );
+    if std::env::var_os("E2E_GUEST_SHOTS").is_some() {
+      let dir = teamcraft_e2e::browser::artifact_dir();
+      let _ = std::fs::create_dir_all(&dir);
+      let _ = page
+        .save_screenshot(
+          ScreenshotParams::builder().build(),
+          dir.join(format!("guest-join-hover-{scheme}.png")),
+        )
+        .await;
+    }
+  }
+  page
+    .execute(ClearDeviceMetricsOverrideParams::default())
+    .await
+    .unwrap();
+}
+
+/// Whether the page sees a hovering mouse, whether "Join now" is hovered, its label and its fill.
+async fn button_colors(page: &Page, script: &str) -> (bool, bool, String, String) {
+  page
+    .evaluate(script)
+    .await
+    .unwrap()
+    .into_value::<(bool, bool, String, String)>()
+    .unwrap()
+}
+
+/// The WCAG contrast ratio of two opaque `rgb(r, g, b)` colours as `getComputedStyle` gives them.
+fn contrast(first: &str, second: &str) -> f64 {
+  let luminance = |color: &str| {
+    let channels: Vec<f64> = color
+      .trim_start_matches("rgba(")
+      .trim_start_matches("rgb(")
+      .trim_end_matches(')')
+      .split(',')
+      .take(3)
+      .map(|channel| channel.trim().parse::<f64>().unwrap() / 255.0)
+      .map(|c| {
+        if c <= 0.039_28 {
+          c / 12.92
+        } else {
+          ((c + 0.055) / 1.055).powf(2.4)
+        }
+      })
+      .collect();
+    0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+  };
+  let (a, b) = (luminance(first), luminance(second));
+  (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// Waits until the page's `expression` is true.
+async fn wait_until(page: &Page, expression: &str) {
+  let deadline = Instant::now() + SETUP_TIMEOUT;
+  loop {
+    let is_true = page
+      .evaluate(expression)
+      .await
+      .ok()
+      .and_then(|value| value.into_value::<bool>().ok())
+      .unwrap_or(false);
+    if is_true {
+      return;
+    }
+    assert!(Instant::now() < deadline, "never true: {expression}");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+  }
 }
 
 /// The guest, let in, is in the meeting's call: admission joins it at once with the devices the

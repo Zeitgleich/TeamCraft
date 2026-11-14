@@ -40,8 +40,9 @@
 .lightbox-main .icon-btn:disabled { opacity: .35; }
 .lightbox-main .icon-btn.is-active { background: rgba(255, 255, 255, .2); color: var(--on-fill); }
 .lightbox-main .icon-btn:focus-visible, .lightbox-main .btn:focus-visible, .lightbox-nav:focus-visible, .lightbox-strip-tile:focus-visible, .lightbox-slider:focus-visible { outline: var(--focus-width) solid var(--on-fill); outline-offset: var(--focus-offset); }
-.lightbox-main .btn { background: rgba(255, 255, 255, .08); border-color: rgba(255, 255, 255, .2); color: inherit; }
-@media (hover: hover) and (pointer: fine) { .lightbox-main .btn:hover:not(:disabled) { background: rgba(255, 255, 255, .16); } }
+/* Secondary buttons tinted on the dark stage; a primary one keeps its fill (#1953). */
+.lightbox-main .btn:not(.btn-primary) { background: rgba(255, 255, 255, .08); border-color: rgba(255, 255, 255, .2); color: inherit; }
+@media (hover: hover) and (pointer: fine) { .lightbox-main .btn:not(.btn-primary):hover:not(:disabled) { background: rgba(255, 255, 255, .16); } }
 .lightbox-main .btn[aria-pressed="true"] { background: rgba(255, 255, 255, .24); }
 .lightbox-zoom { min-width: 4.5rem; font-variant-numeric: tabular-nums; }
 .lightbox-body { flex: 1; min-height: 0; position: relative; display: flex; }
