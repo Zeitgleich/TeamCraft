@@ -560,9 +560,9 @@ pub trait ChatBackend {
     _note: crate::meeting_schedule::ScheduleNote,
   ) {
   }
-  /// Drops this device's lobby and schedule records of a meeting the organizer cancelled or ended
-  /// for good here (#1939). Called after this device's own cancel or end, never on the server's
-  /// word about a meeting's status.
+  /// Closes a meeting the organizer cancelled or ended for good here (#1939): its lobby and
+  /// schedule records go, and a mark caps any later signed validity at this moment. Called after
+  /// this device's own cancel or end, never on the server's word about a meeting's status.
   fn forget_meeting_records(&self, _meeting: teamcraft_proto::MeetingId) {}
   /// The organizer's device signs and publishes who may let guests into the meeting, if that
   /// changed or the list ends before the meeting does (#1103). `server_times` is the meeting (or

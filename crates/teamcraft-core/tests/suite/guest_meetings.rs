@@ -831,16 +831,53 @@ mod schedule {
     use super::*;
 
     #[tokio::test]
-    async fn a_meeting_cancelled_here_falls_back_to_the_servers_end_and_the_lobby() {
+    async fn a_meeting_closed_here_and_revived_is_signed_no_longer_than_the_close() {
       let mut rig = rig().await;
       rig.keep_records_here().await;
+      let closed_at = NOW_MS;
 
+      // Cancelled or ended for everyone here.
       rig.alice.client.forget_meeting_records(rig.meeting).unwrap();
+      rig.clock.advance(60_000);
 
       assert!(rig.has_no_records());
       assert!(!is_open_by_own_record(rig.alice.store.as_ref(), rig.meeting));
-      // Restored later: signed like a meeting this device has no record of.
+      assert_eq!(rig.closed_at(), Some(closed_at));
+      // The server brings it back, months long: nothing is signed past the close.
+      rig.sign_for(times(NOW_MS, NOW_MS + 90 * DAY_MS)).await;
+      assert_eq!(rig.signed_until(), closed_at);
+    }
+
+    #[tokio::test]
+    async fn notes_after_the_close_keep_no_record() {
+      let rig = rig().await;
+      rig.alice.client.forget_meeting_records(rig.meeting).unwrap();
+
+      rig.schedule_here(times(NOW_MS, NOW_MS + HOUR_MS), None);
+
+      assert!(rig.has_no_records());
+      assert_eq!(rig.closed_at(), Some(NOW_MS));
+    }
+
+    #[tokio::test]
+    async fn a_second_close_keeps_the_first_time() {
+      let rig = rig().await;
+      rig.alice.client.forget_meeting_records(rig.meeting).unwrap();
+      rig.clock.advance(HOUR_MS);
+
+      rig.alice.client.forget_meeting_records(rig.meeting).unwrap();
+
+      assert_eq!(rig.closed_at(), Some(NOW_MS));
+    }
+
+    #[tokio::test]
+    async fn a_new_meeting_is_not_capped_by_a_closed_one() {
+      let mut rig = rig().await;
+      let closed: MeetingId = "8".parse().unwrap();
+      rig.alice.client.forget_meeting_records(closed).unwrap();
+
       rig.sign_for(times(NOW_MS, NOW_MS + DAY_MS)).await;
+
       assert_eq!(rig.signed_until(), NOW_MS + DAY_MS + GUEST_ACCESS_GRACE_MS);
     }
 
@@ -853,6 +890,7 @@ mod schedule {
 
       assert!(rig.has_no_records());
       assert!(!rig.has_meeting_of_chat());
+      assert_eq!(rig.closed_at(), Some(NOW_MS));
     }
 
     #[tokio::test]
@@ -868,6 +906,9 @@ mod schedule {
       assert!(!rig.alice.client.has_group(rig.chat).unwrap());
       assert!(rig.has_no_records());
       assert!(!rig.has_meeting_of_chat());
+      // On the server's word alone: the mark stays, so a re-added organizer's device signs the
+      // meeting no longer than until now, however long the server says it runs.
+      assert_eq!(rig.closed_at(), Some(NOW_MS));
     }
 
     #[tokio::test]
@@ -905,6 +946,18 @@ mod schedule {
         let keys = self.sync_state_keys();
         !keys.contains(&format!("meeting-lobby-record/{}", self.meeting))
           && !keys.contains(&format!("meeting-schedule-record/{}", self.meeting))
+      }
+
+      /// When Alice's device closed the meeting, from its mark.
+      fn closed_at(&self) -> Option<i64> {
+        let bytes = self
+          .alice
+          .store
+          .get(Table::SyncState, &format!("meeting-closed/{}", self.meeting))
+          .unwrap()?;
+        let mark: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(mark["meeting"], serde_json::json!(self.meeting));
+        mark["closed_at_ms"].as_i64()
       }
 
       fn has_meeting_of_chat(&self) -> bool {

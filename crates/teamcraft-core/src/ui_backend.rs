@@ -453,7 +453,7 @@ pub enum CoreCommand {
     meeting: teamcraft_proto::MeetingId,
     note: teamcraft_client_api::meeting_schedule::ScheduleNote,
   },
-  /// Drop the lobby and schedule records of a meeting cancelled or ended here (#1939).
+  /// Close a meeting cancelled or ended here: its records go, a mark caps it (#1939).
   ForgetMeetingRecords {
     meeting: teamcraft_proto::MeetingId,
   },
