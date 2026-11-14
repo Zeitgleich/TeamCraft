@@ -107,7 +107,9 @@ class ConversationScreenshots {
     val instrumentation = InstrumentationRegistry.getInstrumentation()
     ActivityScenario.launch(MainActivity::class.java).use { scenario ->
       scenario.onActivity { activity ->
-        if (isLandscape) activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        // Explicit both ways: on a device the rotation of the previous picture would carry over.
+        activity.requestedOrientation =
+          if (isLandscape) ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
       }
       instrumentation.waitForIdleSync()
       scenario.onActivity { activity ->
@@ -150,7 +152,7 @@ class ConversationScreenshots {
       MessageFeed(
         viewModel = viewModel,
         snapshot = SNAPSHOT,
-        messages = messages(),
+        messages = if (maybeFocusMessage == null) messages() else messages() + followUps(),
         extras = extras(),
         firstUnread = FirstUnread.None,
         sentCount = 0,
@@ -176,6 +178,24 @@ class ConversationScreenshots {
       message("5", SAM, 9, ""),
       message("6", ME, 12, "Sending the draft in a minute"),
     )
+  }
+
+  /** More of the conversation, so the scrolled pictures have messages behind the composer. */
+  private fun followUps(): List<Message> {
+    val start = System.currentTimeMillis() - 15 * MINUTE_MILLIS
+    val lines = listOf(
+      SAM to "Perfect, take your time",
+      ME to "Draft is in the shared folder",
+      SAM to "Read it, two small comments",
+      ME to "Fixed both",
+      SAM to "Looks good to me",
+      ME to "Sending it out this afternoon",
+      SAM to "Thanks!",
+      ME to "Done, it went out",
+    )
+    return lines.mapIndexed { i, (author, body) ->
+      Message(id = "f$i", conversation = CONVERSATION, author = author, sentAt = start + i * MINUTE_MILLIS, body = body, reactions = emptyList())
+    }
   }
 
   private fun extras(): Map<String, MessageExtras> {
