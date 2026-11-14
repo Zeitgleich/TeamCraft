@@ -493,6 +493,20 @@ struct Feed {
   /// A page of a hole was asked for and no answer read since says how that stands, as
   /// [`Self::is_asking_older`].
   is_asking_gap: bool,
+  /// The snapshot's count of this feed when the core last answered a page of it, if the snapshot
+  /// didn't change while it was read. While the snapshot still says that, the page's total is the
+  /// newer word (issue #1951): a count above it would leave rows past the end that no read fills.
+  maybe_counted_at_read: Option<usize>,
+}
+
+/// What [`Feed::apply`] did with a page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Applied {
+  /// Taken; whether a row or the total changed.
+  Taken(bool),
+  /// Left out: the total jumped to this and the page shows none of the rows held, so where they
+  /// went is told only by the newest rows ([`RemoteChat::follow_moved_rows`]).
+  Jumped(usize),
 }
 
 /// A row shown for a message the core has not answered for yet ([`RemoteChat::show_pending`]).
@@ -688,18 +702,27 @@ impl Mirror {
 }
 
 impl Feed {
-  /// Takes a page read from the core; returns whether any row or the total changed. A page from
-  /// after a jump of the total that shows none of the rows held can't say where those went, and
-  /// its rows would land among them at the wrong places: it is left out until the newest rows
-  /// have told ([`Self::take_newest`]).
-  fn apply(&mut self, window: MessageWindow) -> bool {
+  /// Takes a page read from the core. A page from after a jump of the total that shows none of
+  /// the rows held can't say where those went, and its rows would land among them at the wrong
+  /// places: it is left out until the newest rows have told ([`Self::take_newest`]), and the
+  /// caller reads them.
+  fn apply(&mut self, window: MessageWindow) -> Applied {
     if self.is_jump(&window) {
       match self.shift_in(&window) {
         Some(shift) => self.move_rows(shift),
-        None => return false,
+        None => return Applied::Jumped(window.total),
       }
     }
-    self.store(window)
+    Applied::Taken(self.store(window))
+  }
+
+  /// The feed's length as the UI pages it, given the snapshot's count: the larger, unless the core
+  /// answered a page since the snapshot last counted it ([`Self::maybe_counted_at_read`]).
+  fn len_given(&self, maybe_snapshot_count: Option<usize>) -> usize {
+    match maybe_snapshot_count {
+      Some(count) if self.maybe_counted_at_read != Some(count) => count.max(self.total),
+      _ => self.total,
+    }
   }
 
   /// Takes the newest rows after the total jumped: what arrived before the rows held moved them.
@@ -1261,11 +1284,17 @@ impl RemoteChat {
   /// Reads the newest rows of a feed whose total jumped to `total`, which tell where the rows held
   /// are now; returns whether anything changed.
   async fn follow_moved_rows(&self, conversation: ConversationId, total: usize) -> bool {
+    let count_before = self.snapshot_count(conversation);
     let outcome = read_messages(conversation, total.saturating_sub(PAGE), PAGE).await;
     let mut mirror = self.mirror.borrow_mut();
+    let mirror = &mut *mirror;
+    let is_snapshot_unmoved = mirror.snapshot.message_count(conversation) == count_before;
     let feed = mirror.feeds.entry(conversation).or_default();
     match outcome {
-      Ok(window) => feed.take_newest(window),
+      Ok(window) => {
+        feed.maybe_counted_at_read = count_before.filter(|_| is_snapshot_unmoved);
+        feed.take_newest(window)
+      },
       Err(error) => {
         tracing::warn!(%error, %conversation, "could not load messages");
         feed.is_moving = false;
@@ -1322,6 +1351,11 @@ impl RemoteChat {
       .is_some_and(|feed| feed.shown_pages.contains(&page))
   }
 
+  /// The snapshot's count of a feed's rows, if it has one.
+  fn snapshot_count(&self, conversation: ConversationId) -> Option<usize> {
+    self.mirror.borrow().snapshot.message_count(conversation)
+  }
+
   fn feed_total(&self, conversation: ConversationId) -> usize {
     let mirror = self.mirror.borrow();
     mirror.feeds.get(&conversation).map_or(0, |feed| feed.total)
@@ -1334,8 +1368,10 @@ impl RemoteChat {
       return false;
     }
     let mut is_changed = false;
+    let mut has_followed_jump = false;
     loop {
       let started_ms = crate::perf::now_ms();
+      let count_before = self.snapshot_count(conversation);
       let outcome = read_messages(conversation, page * PAGE, PAGE).await;
       // A switch whose rows weren't in the mirror: the read from the core's store is a step of it.
       crate::perf::with_pending(
@@ -1351,11 +1387,38 @@ impl RemoteChat {
           measure.tag("source", "store");
         },
       );
-      let mut mirror = self.mirror.borrow_mut();
-      match outcome {
-        Ok(window) => is_changed |= mirror.feeds.entry(conversation).or_default().apply(window),
-        Err(error) => tracing::warn!(%error, %conversation, "could not load messages"),
+      let maybe_jump = match outcome {
+        Ok(window) => {
+          let mut mirror = self.mirror.borrow_mut();
+          let mirror = &mut *mirror;
+          let is_snapshot_unmoved = mirror.snapshot.message_count(conversation) == count_before;
+          let feed = mirror.feeds.entry(conversation).or_default();
+          match feed.apply(window) {
+            Applied::Taken(is_taken_changed) => {
+              is_changed |= is_taken_changed;
+              feed.maybe_counted_at_read = count_before.filter(|_| is_snapshot_unmoved);
+              None
+            },
+            Applied::Jumped(total) => Some(total),
+          }
+        },
+        Err(error) => {
+          tracing::warn!(%error, %conversation, "could not load messages");
+          None
+        },
+      };
+      // The core's feed grew without a word to the UI (a page of a backlog read in the background,
+      // issue #1951): left out, the page's rows would stay placeholders until the next change.
+      // The newest rows tell where the rows held went, then the page is read again; once, so a
+      // core that keeps jumping can't hold the load.
+      if let Some(total) = maybe_jump
+        && !has_followed_jump
+      {
+        has_followed_jump = true;
+        is_changed |= self.follow_moved_rows(conversation, total).await;
+        continue;
       }
+      let mut mirror = self.mirror.borrow_mut();
       if !mirror.outdated.remove(&key) {
         mirror.loading.remove(&key);
         return is_changed;
@@ -3061,11 +3124,11 @@ impl ChatBackend for RemoteChat {
     if let Some(feed) = maybe_feed.filter(|feed| feed.is_moving) {
       return feed.total;
     }
-    mirror
-      .snapshot
-      .message_count(conversation)
-      .unwrap_or(0)
-      .max(maybe_feed.map_or(0, |feed| feed.total))
+    let maybe_snapshot_count = mirror.snapshot.message_count(conversation);
+    match maybe_feed {
+      Some(feed) => feed.len_given(maybe_snapshot_count),
+      None => maybe_snapshot_count.unwrap_or(0),
+    }
   }
 
   fn rows_prepended(&self, conversation: ConversationId) -> usize {
@@ -3562,16 +3625,16 @@ mod tests {
     #[test]
     fn the_same_page_again_is_no_change() {
       let mut feed = Feed::default();
-      assert!(feed.apply(window(3, &["a", "b", "c"])));
-      assert!(!feed.apply(window(3, &["a", "b", "c"])));
+      assert_eq!(feed.apply(window(3, &["a", "b", "c"])), Applied::Taken(true));
+      assert_eq!(feed.apply(window(3, &["a", "b", "c"])), Applied::Taken(false));
     }
 
     #[test]
     fn an_edited_row_or_a_new_total_is_a_change() {
       let mut feed = Feed::default();
       feed.apply(window(3, &["a", "b", "c"]));
-      assert!(feed.apply(window(3, &["a", "B", "c"])));
-      assert!(feed.apply(window(4, &["a", "B", "c"])));
+      assert_eq!(feed.apply(window(3, &["a", "B", "c"])), Applied::Taken(true));
+      assert_eq!(feed.apply(window(4, &["a", "B", "c"])), Applied::Taken(true));
     }
 
     #[test]
@@ -3656,7 +3719,11 @@ mod tests {
       let mut answer = window(3, &["a", "b"]);
       answer.messages.push(from_core.clone());
 
-      assert!(feed.apply(answer), "the row differs in its time");
+      assert_eq!(
+        feed.apply(answer),
+        Applied::Taken(true),
+        "the row differs in its time"
+      );
       assert_eq!(feed.total, 3);
       assert_eq!(feed.rows.get(&2), Some(&from_core));
     }
@@ -4381,9 +4448,37 @@ mod tests {
         start: 100,
         ..with_rows(window(203, &[]), &[50])
       };
-      assert!(!feed.apply(elsewhere));
+      assert_eq!(
+        feed.apply(elsewhere),
+        Applied::Jumped(203),
+        "the caller reads the newest rows"
+      );
       assert_eq!(feed.total, 3);
       assert_eq!(feed.rows.len(), 3);
+    }
+
+    /// Issue #1951: the core read a backlog page in the background and told nobody. The page the
+    /// UI then asks for is left out, the newest rows tell where the held ones went, and the page
+    /// asked again lands: no row stays a placeholder.
+    #[test]
+    fn a_page_left_out_after_a_silent_jump_lands_once_the_newest_rows_told() {
+      let mut feed = feed_of(&["a", "b", "c"]);
+      // 200 rows arrived that the UI wasn't told of.
+      let page_above = MessageWindow {
+        start: 100,
+        ..with_rows(window(203, &[]), &[50])
+      };
+      assert_eq!(feed.apply(page_above.clone()), Applied::Jumped(203));
+      let newest = MessageWindow {
+        start: 202,
+        ..with_rows(window(203, &[]), &[3])
+      };
+      assert!(feed.take_newest(newest));
+
+      assert_eq!(feed.apply(page_above), Applied::Taken(true));
+      assert_eq!(feed.total, 203);
+      assert!(feed.rows.contains_key(&100), "the page asked for is held");
+      assert!(feed.rows.contains_key(&202), "the newest row moved to the end");
     }
 
     #[test]
@@ -4393,14 +4488,34 @@ mod tests {
         start: 202,
         ..with_rows(window(203, &[]), &[3])
       };
-      assert!(feed.apply(newest));
+      assert_eq!(feed.apply(newest), Applied::Taken(true));
       assert_eq!(feed.prepended, 200);
+    }
+
+    /// Issue #1951: a snapshot that counts more rows than the core's page says would leave rows
+    /// past the end that no read fills, placeholders for good. Once the core answered a page since
+    /// the snapshot counted, the page's total holds.
+    #[test]
+    fn a_page_read_since_the_snapshot_counted_is_the_feeds_length() {
+      let mut feed = feed_of(&["a", "b", "c"]);
+      assert_eq!(feed.len_given(Some(6)), 6, "a snapshot newer than the page");
+      feed.maybe_counted_at_read = Some(6);
+      assert_eq!(feed.len_given(Some(6)), 3);
+      assert_eq!(feed.len_given(Some(7)), 7, "the snapshot moved since: new rows");
+      assert_eq!(feed.len_given(None), 3);
+    }
+
+    #[test]
+    fn a_feed_ahead_of_the_snapshot_keeps_its_rows() {
+      // A message sent from here shows before the snapshot counts it (issue #778).
+      let feed = feed_of(&["a", "b", "c"]);
+      assert_eq!(feed.len_given(Some(2)), 3);
     }
 
     #[test]
     fn the_first_page_of_a_feed_is_no_jump() {
       let mut feed = Feed::default();
-      assert!(feed.apply(window(500, &["a"])));
+      assert_eq!(feed.apply(window(500, &["a"])), Applied::Taken(true));
       assert_eq!(feed.prepended, 0);
       assert_eq!(feed.total, 500);
     }
@@ -4412,7 +4527,7 @@ mod tests {
         start: 3,
         ..with_rows(window(4, &[]), &[4])
       };
-      assert!(feed.apply(elsewhere));
+      assert_eq!(feed.apply(elsewhere), Applied::Taken(true));
       assert_eq!(feed.total, 4);
       assert_eq!(feed.prepended, 0);
     }
