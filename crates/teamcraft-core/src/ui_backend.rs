@@ -3596,6 +3596,20 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     Some(self.ui_conversation_files_page(conversation, limit))
   }
 
+  fn conversation_file(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: &str,
+  ) -> Option<FileInfo> {
+    // One keyed read of the message, not the conversation's files.
+    let stored = self.find_stored(conversation, message)?;
+    self
+      .files_of(&stored, self.importer())
+      .into_iter()
+      .find(|file| file.file_id == file_id)
+  }
+
   fn conversation_links(
     &self,
     conversation: ConversationId,
@@ -3918,22 +3932,33 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.ui_set_bookmarks(conversation, bookmarks);
   }
 
-  fn canvas(&self, conversation: ConversationId) -> teamcraft_client_api::canvas::CanvasState {
-    self.ui_canvas(conversation)
+  fn canvas(
+    &self,
+    conversation: ConversationId,
+    maybe_page: Option<&teamcraft_proto::CanvasPageId>,
+  ) -> teamcraft_client_api::canvas::CanvasState {
+    self.ui_canvas(conversation, maybe_page)
   }
 
-  fn edit_canvas(&self, conversation: ConversationId, update: Vec<u8>, is_snapshot: bool) {
-    self.ui_edit_canvas(conversation, update, is_snapshot);
+  fn edit_canvas(
+    &self,
+    conversation: ConversationId,
+    maybe_page: Option<&teamcraft_proto::CanvasPageId>,
+    update: Vec<u8>,
+    is_snapshot: bool,
+  ) {
+    self.ui_edit_canvas(conversation, maybe_page, update, is_snapshot);
   }
 
   fn compact_canvas(
     &self,
     conversation: ConversationId,
+    maybe_page: Option<&teamcraft_proto::CanvasPageId>,
     revision: u64,
     merged: Vec<u8>,
     history: Vec<teamcraft_client_api::canvas::CanvasMark>,
   ) {
-    self.ui_compact_canvas(conversation, revision, merged, history);
+    self.ui_compact_canvas(conversation, maybe_page, revision, merged, history);
   }
 
   fn remove_member(&self, conversation: ConversationId, user: UserId) {

@@ -344,11 +344,16 @@ pub enum MessageContent {
   /// Replaces the conversation's bookmarks bar for everyone (the newest message wins).
   Bookmarks { items: Vec<BookmarkItem> },
   /// An edit of the channel's shared page (e2ee.md §4.11): a Yjs update the core keeps
-  /// ([`crate::canvas`]) but never reads; `is_snapshot` when it holds the whole page.
+  /// ([`crate::canvas`]) but never reads; `is_snapshot` when it holds the whole page. The page is
+  /// the channel's first one, or the further page `maybe_page` names (issue #1456); a version from
+  /// before further pages ignores the field and merges the update into the first page, where its
+  /// blocks stay out of sight.
   Canvas {
     update: teamcraft_proto::Base64Bytes,
     #[serde(default, skip_serializing_if = "is_false")]
     is_snapshot: bool,
+    #[serde(rename = "page", default, skip_serializing_if = "Option::is_none")]
+    maybe_page: Option<teamcraft_proto::CanvasPageId>,
   },
   /// A change to the conversation, announced by whoever made it (shown as a system message).
   Event { event: ConversationEvent },

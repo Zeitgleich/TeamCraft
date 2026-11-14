@@ -779,6 +779,20 @@ pub trait ChatBackend {
       max_messages,
     ))
   }
+  /// One file of a message of the conversation (`file_id` of [`FileInfo`]), if this device holds
+  /// the message and it still has the file: what a page of notes shows for a file it names. A core
+  /// reads the one message; the default looks through the conversation's files.
+  fn conversation_file(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: &str,
+  ) -> Option<FileInfo> {
+    self
+      .conversation_files(conversation)
+      .into_iter()
+      .find(|file| file.message == message && file.file_id == file_id)
+  }
   /// Fetches and decrypts a file; its [`FileInfo::transfer`] reports progress and the local path.
   fn download_file(&self, _conversation: ConversationId, _message: MessageId) {}
   /// Like [`Self::download_file`], for one file of the message (`file_id` of [`FileInfo`]).
@@ -882,20 +896,33 @@ pub trait ChatBackend {
   fn add_member_with_history(&self, _conversation: ConversationId, _user: UserId, _history: HistoryPolicy) {}
   /// Replaces the conversation's bookmarks bar (links and files shown under the header).
   fn set_bookmarks(&self, _conversation: ConversationId, _bookmarks: Vec<crate::model::Bookmark>) {}
-  /// The channel's shared page as the updates this device holds (e2ee.md §4.11); the page's
-  /// editor reads them with [`crate::canvas::CanvasDoc`].
-  fn canvas(&self, _conversation: ConversationId) -> crate::canvas::CanvasState {
+  /// A page of the channel's shared notes as the updates this device holds (e2ee.md §4.11): the
+  /// first page (`None`) or a further one; the page's editor reads them with
+  /// [`crate::canvas::CanvasDoc`].
+  fn canvas(
+    &self,
+    _conversation: ConversationId,
+    _maybe_page: Option<&teamcraft_proto::CanvasPageId>,
+  ) -> crate::canvas::CanvasState {
     crate::canvas::CanvasState::default()
   }
-  /// Sends an edit of the channel's page (a Yjs update; `is_snapshot`: the whole page) as an
+  /// Sends an edit of a page of the channel (a Yjs update; `is_snapshot`: the whole page) as an
   /// encrypted, hidden message and keeps it at once. Refused where the user may not post.
-  fn edit_canvas(&self, _conversation: ConversationId, _update: Vec<u8>, _is_snapshot: bool) {}
+  fn edit_canvas(
+    &self,
+    _conversation: ConversationId,
+    _maybe_page: Option<&teamcraft_proto::CanvasPageId>,
+    _update: Vec<u8>,
+    _is_snapshot: bool,
+  ) {
+  }
   /// Replaces the page's updates with `merged` (all of them as one) and its version history with
   /// `history` (the old one with the merged updates' marks added, [`crate::canvas::compaction`]),
   /// if the list is still the one of `revision`: the editor compacts what the core can't read.
   fn compact_canvas(
     &self,
     _conversation: ConversationId,
+    _maybe_page: Option<&teamcraft_proto::CanvasPageId>,
     _revision: u64,
     _merged: Vec<u8>,
     _history: Vec<crate::canvas::CanvasMark>,

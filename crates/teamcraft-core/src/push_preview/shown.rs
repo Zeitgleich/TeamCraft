@@ -350,6 +350,7 @@ mod tests {
       MessageContent::Canvas {
         update: Base64Bytes::new(vec![1]),
         is_snapshot: true,
+        maybe_page: None,
       },
       MessageContent::Event {
         event: ConversationEvent::MemberAdded {

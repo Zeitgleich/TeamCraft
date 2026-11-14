@@ -8,6 +8,7 @@ mod bytes;
 mod call_fallback;
 mod call_media;
 mod calls;
+mod canvas_page;
 pub mod channel_name;
 mod conversation;
 pub mod custom_emoji_set;
@@ -48,6 +49,7 @@ pub use calls::{
   SFU_GOING_AWAY_CLOSE_CODE, SFU_SWITCHED_CLOSE_CODE, SWITCH_SECRET_BYTES, ScreenAudioTrack,
   ScreenContentMode, ScreenShareTakeover,
 };
+pub use canvas_page::CanvasPageId;
 pub use conversation::{ConversationKind, ConversationVisibility, HistoryPolicy};
 pub use error::{ErrorBody, ErrorCode, SignInReason};
 pub use gateway::{

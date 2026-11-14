@@ -3370,16 +3370,52 @@ impl ChatBackend for RemoteChat {
     });
   }
 
-  fn canvas(&self, conversation: ConversationId) -> teamcraft_client_api::canvas::CanvasState {
-    match self.ask(ChatQuery::Canvas { conversation }) {
+  fn canvas(
+    &self,
+    conversation: ConversationId,
+    maybe_page: Option<&teamcraft_proto::CanvasPageId>,
+  ) -> teamcraft_client_api::canvas::CanvasState {
+    // A core from before further pages answers with the first page whatever was asked; the view
+    // tells by the page the answer names (`CanvasState::maybe_page`).
+    match self.ask(ChatQuery::Canvas {
+      conversation,
+      maybe_page: maybe_page.cloned(),
+    }) {
       Some(ChatAnswer::Canvas { state }) => state,
-      _ => teamcraft_client_api::canvas::CanvasState::default(),
+      _ => teamcraft_client_api::canvas::CanvasState {
+        maybe_page: maybe_page.cloned(),
+        ..Default::default()
+      },
     }
   }
 
-  fn edit_canvas(&self, conversation: ConversationId, update: Vec<u8>, is_snapshot: bool) {
+  fn conversation_file(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: &str,
+  ) -> Option<FileInfo> {
+    match self.ask(ChatQuery::ConversationFile {
+      conversation,
+      message,
+      file_id: file_id.to_owned(),
+    })? {
+      ChatAnswer::ConversationFile { maybe_file } => maybe_file.map(|file| *file),
+      // An answer of another kind (an older core): the file isn't shown.
+      _ => None,
+    }
+  }
+
+  fn edit_canvas(
+    &self,
+    conversation: ConversationId,
+    maybe_page: Option<&teamcraft_proto::CanvasPageId>,
+    update: Vec<u8>,
+    is_snapshot: bool,
+  ) {
     self.act(ChatAction::EditCanvas {
       conversation,
+      maybe_page: maybe_page.cloned(),
       update: update.into(),
       is_snapshot,
     });
@@ -3388,12 +3424,14 @@ impl ChatBackend for RemoteChat {
   fn compact_canvas(
     &self,
     conversation: ConversationId,
+    maybe_page: Option<&teamcraft_proto::CanvasPageId>,
     revision: u64,
     merged: Vec<u8>,
     history: Vec<teamcraft_client_api::canvas::CanvasMark>,
   ) {
     self.act(ChatAction::CompactCanvas {
       conversation,
+      maybe_page: maybe_page.cloned(),
       revision,
       merged: merged.into(),
       history,

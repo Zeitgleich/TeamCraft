@@ -121,6 +121,8 @@ pub enum IconName {
   Redo,
   /// Bars of different lengths on an axis: a poll.
   Poll,
+  /// Two columns of three dots: a handle that moves what it sits on.
+  Grip,
 }
 
 impl IconName {
@@ -260,6 +262,7 @@ impl IconName {
       Self::Undo => "M9 14 4 9l5-5 M4 9h10.5a5.5 5.5 0 0 1 0 11H11",
       Self::Redo => "M15 14l5-5-5-5 M20 9H9.5a5.5 5.5 0 0 0 0 11H13",
       Self::Poll => "M4 4v16 M8 7h9 M8 12h12 M8 17h5",
+      Self::Grip => "M9 6h.01 M15 6h.01 M9 12h.01 M15 12h.01 M9 18h.01 M15 18h.01",
       Self::Alert => {
         "M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z M12 9v4 M12 17h.01"
       },

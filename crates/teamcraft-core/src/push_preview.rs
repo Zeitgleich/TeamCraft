@@ -857,6 +857,7 @@ mod tests {
       MessageContent::Canvas {
         update: teamcraft_proto::Base64Bytes::new(vec![1]),
         is_snapshot: false,
+        maybe_page: None,
       },
       MessageContent::ChannelRolesEntry {
         version: 2,

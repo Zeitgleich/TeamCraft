@@ -205,6 +205,17 @@ pub fn shortcut_groups() -> Vec<ShortcutGroup> {
         .map(|(action, shortcut)| (vec![shortcut], action_label(action)))
         .collect(),
     },
+    ShortcutGroup {
+      heading_key: "shortcuts-notes",
+      // The shared notes' own (canvas_toolbar.rs, MOVE_UP_SHORTCUT and MOVE_DOWN_SHORTCUT).
+      rows: vec![(
+        vec![
+          Shortcut::new(&[Modifier::Primary, Modifier::Shift], Key::Up),
+          Shortcut::new(&[Modifier::Primary, Modifier::Shift], Key::Down),
+        ],
+        "shortcut-move-block",
+      )],
+    },
   ]
 }
 

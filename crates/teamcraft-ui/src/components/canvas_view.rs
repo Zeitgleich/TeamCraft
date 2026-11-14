@@ -18,27 +18,38 @@
 //! input the view reads its text and writes the change to the document, and the document's content
 //! comes back into the element when it differs. Undo and redo are the document's, of this editor's
 //! own edits (`CanvasDoc::undo`), and go to the other members like any edit.
+//!
+//! A channel has more than one page (issue #1456): tabs above the page switch between the first
+//! one and the further ones its document lists ([`canvas_pages`]); each page is edited by a view
+//! of its own. A block moves with its handle (dragged, or with the arrow keys while the handle has
+//! the focus) or with Ctrl or Cmd+Shift+Up and Down ([`canvas_move`]); a file of the channel shows
+//! in a block of its own ([`canvas_file`]).
 
 use std::time::Duration;
 
 use leptos::html;
 use leptos::leptos_dom::helpers::{TimeoutHandle, set_timeout_with_handle};
 use leptos::prelude::*;
+use teamcraft_client_api::actions::FileInfo;
 use teamcraft_client_api::canvas::{
-  Block, BlockKind, CanvasDoc, CanvasState, CanvasVersion, InlineMark, TextStyle, byte_offset,
+  Block, BlockKind, CanvasDoc, CanvasState, CanvasVersion, FileRef, InlineMark, TextStyle, byte_offset,
   caret_after_change, compaction, editors_since, is_page_link, merge_updates, page_at, typed_range, versions,
 };
 use teamcraft_client_api::model::OlderHistory;
+use teamcraft_proto::CanvasPageId;
 use wasm_bindgen::JsCast;
 
 use crate::components::canvas_editor::{self, Caret};
+use crate::components::canvas_file::{CanvasFile, CanvasFilePicker};
+use crate::components::canvas_move::{self, MoveTarget};
+use crate::components::canvas_pages::CanvasPages;
 use crate::components::canvas_toolbar::{
   CanvasAction, CanvasActive, CanvasToolbar, canvas_action_for, kind_label, kind_of, mark_of,
 };
 use crate::components::composer::with_scheme;
 use crate::components::composer_toolbar::FormatAction;
 use crate::components::empty_state::EmptyState;
-use crate::components::icons::IconName;
+use crate::components::icons::{Icon, IconName};
 use crate::i18n::{I18n, use_i18n};
 use crate::model::{ConversationId, UserId};
 use crate::state::{AppState, use_app_state};
@@ -61,9 +72,11 @@ const EDITING_WINDOW_MS: i64 = 2 * 60 * 1000;
 const EDITING_CHECK_MS: u64 = 20_000;
 /// The element IDs of the blocks' text fields.
 const BLOCK_ID_PREFIX: &str = "canvas-block-";
+/// How far the pointer moves on a block's handle before the block follows it, in CSS pixels: a
+/// press that stays put is no drag.
+const DRAG_THRESHOLD_PX: f64 = 4.0;
 
 /// The page as this view edits it.
-#[derive(Default)]
 struct Editor {
   page: CanvasDoc,
   /// Own updates the core doesn't hold yet.
@@ -73,6 +86,14 @@ struct Editor {
 }
 
 impl Editor {
+  fn new(maybe_page: Option<&CanvasPageId>) -> Self {
+    Self {
+      page: CanvasDoc::for_page(maybe_page),
+      unsent: Vec::new(),
+      maybe_unsent_since: None,
+    }
+  }
+
   /// Brings the page up to the core's updates and the own ones not sent yet.
   fn sync(&mut self, stored: &CanvasState) -> Vec<Block> {
     let mut all: Vec<&[u8]> = stored.updates.iter().map(AsRef::as_ref).collect();
@@ -114,7 +135,10 @@ impl Editor {
 #[derive(Clone, Copy)]
 struct Canvas {
   state: AppState,
+  i18n: I18n,
   conversation: ConversationId,
+  /// The page: the channel's first (`None`) or a further one.
+  page: StoredValue<Option<CanvasPageId>>,
   editor: StoredValue<Editor, LocalStorage>,
   blocks: RwSignal<Vec<Block>>,
   stored: Memo<CanvasState>,
@@ -130,6 +154,35 @@ struct Canvas {
   can_redo: RwSignal<bool>,
   is_composing: StoredValue<bool>,
   timer: StoredValue<Option<TimeoutHandle>, LocalStorage>,
+  /// Whether the list of the channel's files to add one from is open.
+  show_files: RwSignal<bool>,
+  /// What a screen reader is told after a block moved.
+  announcement: RwSignal<String>,
+  /// The block being dragged by its handle.
+  drag: RwSignal<Option<Drag>>,
+  /// Where the line showing its landing place is: before a block, or after the last one.
+  drop_line: Memo<Option<DropLine>>,
+}
+
+/// The block a drop line is drawn at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DropLine {
+  Before(String),
+  AfterLast(String),
+}
+
+/// A block on its way to another place, dragged by its handle.
+#[derive(Clone, Debug, PartialEq)]
+struct Drag {
+  id: String,
+  pointer: i32,
+  start_y: f64,
+  /// How far the pointer moved since the press; the block follows it 1:1.
+  offset_y: f64,
+  /// Past [`DRAG_THRESHOLD_PX`]: the press became a drag.
+  is_moving: bool,
+  /// The gap between blocks it would land in ([`canvas_move::drop_gap`]).
+  maybe_gap: Option<usize>,
 }
 
 /// A selection in one of the page's blocks.
@@ -169,21 +222,55 @@ impl PendingMarks {
   }
 }
 
+/// The Notes tab: the page tabs and the page picked.
 #[component]
 pub fn CanvasView(conversation: ConversationId) -> impl IntoView {
   let state = use_app_state();
-  let i18n = use_i18n();
   let info = Memo::new(move |_| state.read(|backend| backend.conversation(conversation)));
-  let mut editor = Editor::default();
+  let may_post = Memo::new(move |_| info.get().is_some_and(|conv| conv.can_post && !conv.is_archived));
+  let selected = RwSignal::new(None::<CanvasPageId>);
+  view! {
+    <div class="canvas-view">
+      <CanvasPages conversation=conversation selected=selected can_edit=may_post />
+      // A page of its own per pick: its edits go out when it is left.
+      {move || {
+        let page = selected.get();
+        view! { <PageEditor conversation=conversation maybe_page=page may_post=may_post /> }
+      }}
+    </div>
+  }
+}
+
+/// One page of the notes, edited.
+#[component]
+fn PageEditor(
+  conversation: ConversationId,
+  maybe_page: Option<CanvasPageId>,
+  may_post: Memo<bool>,
+) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let mut editor = Editor::new(maybe_page.as_ref());
   editor.page.enable_undo(|| js_sys::Date::now() as u64);
+  let page = StoredValue::new(maybe_page);
+  let stored = Memo::new(move |_| {
+    page.with_value(|maybe_page| state.read(|backend| backend.canvas(conversation, maybe_page.as_ref())))
+  });
+  // A core from before further pages answers with the first page: such a page can't be edited here.
+  let is_supported =
+    Memo::new(move |_| stored.with(|stored| page.with_value(|page| stored.maybe_page == *page)));
+  let drag = RwSignal::new(None::<Drag>);
+  let blocks = RwSignal::new(Vec::<Block>::new());
   let canvas = Canvas {
     state,
+    i18n,
     conversation,
+    page,
     editor: StoredValue::new_local(editor),
-    blocks: RwSignal::new(Vec::new()),
-    stored: Memo::new(move |_| state.read(|backend| backend.canvas(conversation))),
+    blocks,
+    stored,
     older: Memo::new(move |_| state.read(|backend| backend.older_history(conversation))),
-    can_edit: Memo::new(move |_| info.get().is_some_and(|conv| conv.can_post && !conv.is_archived)),
+    can_edit: Memo::new(move |_| may_post.get() && is_supported.get()),
     selection: RwSignal::new(None),
     pending: RwSignal::new(PendingMarks::default()),
     link_target: RwSignal::new(None),
@@ -191,11 +278,18 @@ pub fn CanvasView(conversation: ConversationId) -> impl IntoView {
     can_redo: RwSignal::new(false),
     is_composing: StoredValue::new(false),
     timer: StoredValue::new_local(None),
+    show_files: RwSignal::new(false),
+    announcement: RwSignal::new(String::new()),
+    drag,
+    drop_line: Memo::new(move |_| drop_line_of(drag, blocks)),
   };
 
   // Every change of the core's list: merged in, the caret kept, a long list compacted.
   Effect::new(move |_| {
     let stored = canvas.stored.get();
+    if !is_supported.get_untracked() {
+      return;
+    }
     let next = canvas.editor.try_update_value(|editor| editor.sync(&stored));
     if let Some(next) = next {
       canvas.blocks.set(next);
@@ -251,8 +345,10 @@ pub fn CanvasView(conversation: ConversationId) -> impl IntoView {
   let has_blocks = move || canvas.blocks.with(|blocks| !blocks.is_empty());
   let active = Memo::new(move |_| canvas.active());
   let on_action = Callback::new(move |action: CanvasAction| canvas.run_action(action));
+  let pick_file = Callback::new(move |file: FileInfo| canvas.insert_file(&file));
+  let close_files = Callback::new(move |()| canvas.show_files.set(false));
   view! {
-    <div class="canvas-view">
+    <div class="canvas-page-editor">
       <div class="canvas-bar">
         <Show when=move || canvas.can_edit.get() && !show_history.get() fallback=|| ()>
           <CanvasToolbar active=active on_action=on_action />
@@ -273,6 +369,9 @@ pub fn CanvasView(conversation: ConversationId) -> impl IntoView {
           if !canvas.can_edit.get() {
             parts.push(i18n.t("canvas-read-only"));
           }
+          if !is_supported.get() {
+            parts.push(i18n.t("canvas-page-needs-update"));
+          }
           match canvas.older.get() {
             OlderHistory::Loading => parts.push(i18n.t("canvas-loading-history")),
             OlderHistory::Failed => parts.push(i18n.t("canvas-history-failed")),
@@ -282,11 +381,16 @@ pub fn CanvasView(conversation: ConversationId) -> impl IntoView {
         }}
       </p>
       <p class="canvas-presence" aria-live="polite">{editing}</p>
+      <p class="visually-hidden" aria-live="polite">{move || canvas.announcement.get()}</p>
+      <Show when=move || canvas.show_files.get() && canvas.can_edit.get() && !show_history.get() fallback=|| ()>
+        <CanvasFilePicker conversation=conversation on_pick=pick_file on_close=close_files />
+      </Show>
       <Show when=move || show_history.get() fallback=|| ()>
         <CanvasHistory canvas=canvas open=show_history />
       </Show>
       <div
         class="canvas-page"
+        class:is-dragging=move || canvas.drag.with(|drag| drag.as_ref().is_some_and(|drag| drag.is_moving))
         role="group"
         aria-label=move || i18n.t("canvas-page-label")
         hidden=move || show_history.get()
@@ -429,9 +533,10 @@ fn preview_blocks(blocks: &[Block]) -> impl Iterator<Item = AnyView> + '_ {
         view! { <input type="checkbox" class="canvas-check" disabled=true prop:checked=block.is_checked /> }
           .into_any()
       },
+      BlockKind::File => view! { <span class="canvas-marker"><Icon name=IconName::File /></span> }.into_any(),
       _ => ().into_any(),
     };
-    let runs = if block.kind.is_code() {
+    let runs = if block.kind.is_code() || block.kind.is_embed() {
       vec![(block.text.clone(), None)]
     } else {
       block
@@ -605,6 +710,7 @@ fn LinkDialog(canvas: Canvas, target: BlockSelection) -> impl IntoView {
 fn BlockRow(canvas: Canvas, id: String) -> impl IntoView {
   let i18n = use_i18n();
   let row_id = id.clone();
+  let row_key = id.clone();
   // The block, and its number in a run of numbered items.
   let row = Memo::new(move |_| {
     canvas.blocks.with(|blocks| {
@@ -644,8 +750,48 @@ fn BlockRow(canvas: Canvas, id: String) -> impl IntoView {
   let select_key = select_id.clone();
   let select_up = select_id.clone();
   let select_focus = select_id;
+  let drag_id = id.clone();
+  let is_dragged = move || {
+    canvas.drag.with(|drag| {
+      drag
+        .as_ref()
+        .is_some_and(|drag| drag.is_moving && drag.id == drag_id)
+    })
+  };
+  let follow_id = id.clone();
+  let offset = move || {
+    canvas.drag.with(|drag| match drag {
+      Some(drag) if drag.is_moving && drag.id == follow_id => format!("translateY({}px)", drag.offset_y),
+      _ => String::new(),
+    })
+  };
+  let gap_id = id.clone();
+  let is_drop_before = move || {
+    canvas
+      .drop_line
+      .with(|line| matches!(line, Some(DropLine::Before(at)) if *at == gap_id))
+  };
+  let end_id = id.clone();
+  let is_drop_after = move || {
+    canvas
+      .drop_line
+      .with(|line| matches!(line, Some(DropLine::AfterLast(at)) if *at == end_id))
+  };
+  let file_id = id.clone();
+  let text_id = id.clone();
+  let is_file = move || kind() == BlockKind::File;
   view! {
-    <div class=move || format!("canvas-block canvas-block-{}", kind().tag())>
+    <div
+      class=move || format!("canvas-block canvas-block-{}", kind().tag())
+      class:is-dragged=is_dragged
+      class:is-drop-before=is_drop_before
+      class:is-drop-after=is_drop_after
+      data-block=id.clone()
+      style:transform=offset
+    >
+      <Show when=move || canvas.can_edit.get() fallback=|| ()>
+        <BlockHandle canvas=canvas id=file_id.clone() />
+      </Show>
       {move || match kind() {
         BlockKind::Bullet => view! { <span class="canvas-marker" aria-hidden="true">"•"</span> }.into_any(),
         BlockKind::Numbered => {
@@ -669,10 +815,34 @@ fn BlockRow(canvas: Canvas, id: String) -> impl IntoView {
           }
             .into_any()
         },
+        BlockKind::File => {
+          let maybe_file = row.get().and_then(|(block, _)| block.maybe_file);
+          let name = Signal::derive(move || row.get().map(|(block, _)| block.text).unwrap_or_default());
+          let element_id = block_element_id(&row_key);
+          let key_id = row_key.clone();
+          view! {
+            <div
+              id=element_id
+              class="canvas-embed"
+              tabindex="0"
+              role="group"
+              aria-label=move || format!("{}: {}", i18n.t("canvas-kind-file"), name.get())
+              on:keydown=move |ev: web_sys::KeyboardEvent| canvas.on_embed_keydown(&key_id, &ev)
+            >
+              {match maybe_file {
+                Some(file) => view! { <CanvasFile conversation=canvas.conversation file=file name=name /> }.into_any(),
+                None => view! { <span class="canvas-file-name">{move || name.get()}</span> }.into_any(),
+              }}
+            </div>
+          }
+          .into_any()
+        },
         _ => ().into_any(),
       }}
+      // A file block shows the file instead of its text (its name, for clients from before files).
       <div
-        id=block_element_id(&id)
+        id=move || (!is_file()).then(|| block_element_id(&text_id))
+        hidden=is_file
         class="canvas-input"
         node_ref=field
         role="textbox"
@@ -720,6 +890,71 @@ fn BlockRow(canvas: Canvas, id: String) -> impl IntoView {
       ></div>
     </div>
   }
+}
+
+/// A block's handle: dragged, the block follows the pointer and lands in the gap it is let go
+/// over; with the focus, the arrow keys move it a place up or down.
+#[component]
+fn BlockHandle(canvas: Canvas, id: String) -> impl IntoView {
+  let i18n = use_i18n();
+  let handle = NodeRef::<html::Button>::new();
+  let (down_id, key_id) = (id.clone(), id);
+  view! {
+    <button
+      type="button"
+      class="canvas-handle"
+      node_ref=handle
+      aria-label=move || i18n.t("canvas-move-handle")
+      title=move || i18n.t("canvas-move-handle-hint")
+      aria-keyshortcuts="ArrowUp ArrowDown"
+      on:pointerdown=move |ev: web_sys::PointerEvent| {
+        if ev.button() != 0 {
+          return;
+        }
+        if let Some(element) = handle.get_untracked() {
+          drop(element.set_pointer_capture(ev.pointer_id()));
+        }
+        canvas.drag.set(Some(Drag {
+          id: down_id.clone(),
+          pointer: ev.pointer_id(),
+          start_y: f64::from(ev.client_y()),
+          offset_y: 0.0,
+          is_moving: false,
+          maybe_gap: None,
+        }));
+      }
+      on:pointermove=move |ev: web_sys::PointerEvent| canvas.drag_to(&ev, handle)
+      on:pointerup=move |ev: web_sys::PointerEvent| canvas.drop_dragged(ev.pointer_id())
+      on:pointercancel=move |_| canvas.drag.set(None)
+      on:lostpointercapture=move |_| canvas.drag.set(None)
+      on:keydown=move |ev: web_sys::KeyboardEvent| {
+        let step = match ev.key().as_str() {
+          "ArrowUp" => -1,
+          "ArrowDown" => 1,
+          "Escape" if canvas.drag.get_untracked().is_some() => {
+            canvas.drag.set(None);
+            return;
+          },
+          _ => return,
+        };
+        ev.prevent_default();
+        canvas.move_by(&key_id, step, FocusAfterMove::Handle);
+      }
+    >
+      <Icon name=IconName::Grip />
+    </button>
+  }
+}
+
+/// What gets the focus after a block moved from the keyboard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FocusAfterMove {
+  /// The block's text, with the caret where it was.
+  Text(Caret),
+  /// The block's handle, which was used.
+  Handle,
+  /// The block itself (a file).
+  Block,
 }
 
 /// Ctrl or Cmd and a click open a link in an editable block; a plain click puts the caret there.
@@ -812,6 +1047,13 @@ impl Canvas {
       CanvasAction::Undo => self.undo_or_redo(false),
       CanvasAction::Redo => self.undo_or_redo(true),
       CanvasAction::Check => self.toggle_kind(BlockKind::Check),
+      CanvasAction::InsertFile => self.show_files.set(true),
+      CanvasAction::MoveUp | CanvasAction::MoveDown => {
+        let step = if action == CanvasAction::MoveUp { -1 } else { 1 };
+        if let Some(selection) = self.current_selection() {
+          self.move_by(&selection.id, step, FocusAfterMove::Text(selection.caret));
+        }
+      },
       CanvasAction::Format(FormatAction::Inline(style)) => {
         if let Some(mark) = mark_of(style) {
           self.toggle_mark(mark);
@@ -1236,6 +1478,11 @@ impl Canvas {
       )
     });
     match (maybe_kind, maybe_previous) {
+      // Text doesn't join a file: the file block above takes the focus.
+      (Some(_), Some(previous)) if previous.kind.is_embed() => {
+        focus_block_later(previous.id, Caret { start: 0, end: 0 });
+        true
+      },
       (Some(kind), _) if kind != BlockKind::Paragraph => {
         self.edit(|page| page.set_kind(&id, BlockKind::Paragraph).into_iter().collect());
         true
@@ -1351,14 +1598,17 @@ impl Canvas {
       return;
     };
     let conversation = self.conversation;
+    let Some(page) = self.page.try_get_value() else {
+      return;
+    };
     let sent = self
       .state
-      .try_write(|backend| backend.edit_canvas(conversation, update.clone(), is_snapshot));
+      .try_write(|backend| backend.edit_canvas(conversation, page.as_ref(), update.clone(), is_snapshot));
     if sent.is_none() {
       // The app is going away: the backend may still take it.
       let _ = self
         .state
-        .try_read(|backend| backend.edit_canvas(conversation, update, is_snapshot));
+        .try_read(|backend| backend.edit_canvas(conversation, page.as_ref(), update, is_snapshot));
     }
   }
 
@@ -1376,10 +1626,220 @@ impl Canvas {
       },
     };
     let (state, conversation, revision) = (self.state, self.conversation, stored.revision);
+    let page = stored.maybe_page.clone();
     request_animation_frame(move || {
-      let _ = state.try_write(|backend| backend.compact_canvas(conversation, revision, merged, history));
+      let _ = state
+        .try_write(|backend| backend.compact_canvas(conversation, page.as_ref(), revision, merged, history));
     });
   }
+
+  /// Shows a file of the channel after the block last in use (at the end without one).
+  fn insert_file(self, file: &FileInfo) {
+    self.show_files.set(false);
+    let reference = FileRef {
+      message: file.message,
+      file_id: file.file_id.clone(),
+    };
+    let maybe_after = self
+      .selection
+      .get_untracked()
+      .map(|selection| selection.id)
+      .or_else(|| {
+        self
+          .blocks
+          .with_untracked(|blocks| blocks.last().map(|block| block.id.clone()))
+      });
+    let mut maybe_new = None;
+    self.edit(|page| {
+      let (id, update) = page.insert_file(maybe_after.as_deref(), reference, &file.file_name);
+      maybe_new = Some(id);
+      vec![update]
+    });
+    if let Some(id) = maybe_new {
+      focus_block_later(id, Caret { start: 0, end: 0 });
+    }
+  }
+
+  /// Moves a block one place up (`step` −1) or down (+1).
+  fn move_by(self, id: &str, step: isize, focus: FocusAfterMove) {
+    let maybe_target = self.blocks.with_untracked(|blocks| {
+      let ids: Vec<&str> = blocks.iter().map(|block| block.id.as_str()).collect();
+      canvas_move::step_target(&ids, id, step)
+    });
+    if let Some(target) = maybe_target {
+      self.move_to(id, &target, focus);
+    }
+  }
+
+  /// Moves a block, tells a screen reader its new place, and gives the focus back.
+  fn move_to(self, id: &str, target: &MoveTarget, focus: FocusAfterMove) {
+    let maybe_place = self.blocks.with_untracked(|blocks| {
+      let ids: Vec<&str> = blocks.iter().map(|block| block.id.as_str()).collect();
+      canvas_move::place_after(&ids, id, target)
+    });
+    let id = id.to_owned();
+    self.edit(|page| page.move_block(&id, target.after()).into_iter().collect());
+    if let Some((position, count)) = maybe_place {
+      let (position, count) = (position.to_string(), count.to_string());
+      let text = self.i18n.t_with(
+        "canvas-moved",
+        &[("position", position.as_str()), ("count", count.as_str())],
+      );
+      self.announcement.set(text);
+    }
+    match focus {
+      FocusAfterMove::Text(caret) => focus_block_later(id, caret),
+      FocusAfterMove::Block => focus_block_later(id, Caret { start: 0, end: 0 }),
+      FocusAfterMove::Handle => focus_handle_later(id),
+    }
+  }
+
+  /// The block follows the pointer; past the threshold the press is a drag and the gap it would
+  /// land in is marked.
+  fn drag_to(self, ev: &web_sys::PointerEvent, handle: NodeRef<html::Button>) {
+    let Some(mut drag) = self.drag.get_untracked() else {
+      return;
+    };
+    if drag.pointer != ev.pointer_id() {
+      return;
+    }
+    drag.offset_y = f64::from(ev.client_y()) - drag.start_y;
+    drag.is_moving |= drag.offset_y.abs() > DRAG_THRESHOLD_PX;
+    if drag.is_moving {
+      ev.prevent_default();
+      let rows = handle
+        .get_untracked()
+        .and_then(|element| element.closest(".canvas-page").ok().flatten())
+        .map(|page| block_middles(&page, &drag))
+        .unwrap_or_default();
+      drag.maybe_gap = Some(canvas_move::drop_gap(&rows, f64::from(ev.client_y())));
+    }
+    self.drag.set(Some(drag));
+  }
+
+  /// Let go: the block lands in the marked gap; a press that never moved changes nothing.
+  fn drop_dragged(self, pointer: i32) {
+    let Some(drag) = self.drag.get_untracked() else {
+      return;
+    };
+    self.drag.set(None);
+    if drag.pointer != pointer || !drag.is_moving {
+      return;
+    }
+    let Some(target) = self.drop_target_of(&drag) else {
+      return;
+    };
+    self.move_to(&drag.id, &target, FocusAfterMove::Handle);
+  }
+
+  fn drop_target_of(self, drag: &Drag) -> Option<MoveTarget> {
+    self.blocks.with_untracked(|blocks| drop_target_in(blocks, drag))
+  }
+
+  /// Keys on a file block: it moves like any block, goes with Delete or Backspace, Enter adds a
+  /// paragraph after it, and the arrow keys go to the blocks around it.
+  fn on_embed_keydown(self, id: &str, ev: &web_sys::KeyboardEvent) {
+    let can_edit = self.can_edit.get_untracked();
+    if can_edit && let Some(action) = canvas_action_for(ev) {
+      match action {
+        CanvasAction::MoveUp => self.move_by(id, -1, FocusAfterMove::Block),
+        CanvasAction::MoveDown => self.move_by(id, 1, FocusAfterMove::Block),
+        CanvasAction::Undo => self.undo_or_redo(false),
+        CanvasAction::Redo => self.undo_or_redo(true),
+        _ => return,
+      }
+      ev.prevent_default();
+      return;
+    }
+    match ev.key().as_str() {
+      "ArrowUp" => self.focus_neighbour(id, -1),
+      "ArrowDown" => self.focus_neighbour(id, 1),
+      "Backspace" | "Delete" if can_edit => {
+        let maybe_neighbour = self.blocks.with_untracked(|blocks| {
+          let index = blocks.iter().position(|block| block.id == id)?;
+          index
+            .checked_sub(1)
+            .and_then(|before| blocks.get(before))
+            .or_else(|| blocks.get(index + 1))
+            .map(|block| (block.id.clone(), utf16_len(&block.text)))
+        });
+        let id = id.to_owned();
+        self.edit(|page| page.remove_block(&id).into_iter().collect());
+        if let Some((neighbour, end)) = maybe_neighbour {
+          focus_block_later(neighbour, Caret { start: end, end });
+        }
+      },
+      "Enter" if can_edit => {
+        let mut maybe_new = None;
+        let id = id.to_owned();
+        self.edit(|page| {
+          let (new_id, update) = page.insert_block(Some(&id), BlockKind::Paragraph, "");
+          maybe_new = Some(new_id);
+          vec![update]
+        });
+        if let Some(new_id) = maybe_new {
+          focus_block_later(new_id, Caret { start: 0, end: 0 });
+        }
+      },
+      _ => return,
+    }
+    ev.prevent_default();
+  }
+}
+
+/// Where a drop of `drag` would land, if it moves the block.
+fn drop_target_in(blocks: &[Block], drag: &Drag) -> Option<MoveTarget> {
+  let gap = drag.maybe_gap?;
+  let ids: Vec<&str> = blocks.iter().map(|block| block.id.as_str()).collect();
+  canvas_move::drop_target(&ids, &drag.id, gap)
+}
+
+/// The line of the gap a drag would land in; none while the drop would leave the block in place.
+fn drop_line_of(drag: RwSignal<Option<Drag>>, blocks: RwSignal<Vec<Block>>) -> Option<DropLine> {
+  drag.with(|maybe_drag| {
+    let drag = maybe_drag.as_ref().filter(|drag| drag.is_moving)?;
+    blocks.with(|blocks| {
+      drop_target_in(blocks, drag)?;
+      let gap = drag.maybe_gap?;
+      match blocks.get(gap) {
+        Some(block) => Some(DropLine::Before(block.id.clone())),
+        None => blocks.last().map(|block| DropLine::AfterLast(block.id.clone())),
+      }
+    })
+  })
+}
+
+/// Every block of the page with the vertical middle of its place on screen; the dragged one where
+/// it stood before it followed the pointer.
+fn block_middles(page: &web_sys::Element, drag: &Drag) -> Vec<(String, f64)> {
+  let Ok(rows) = page.query_selector_all(".canvas-block[data-block]") else {
+    return Vec::new();
+  };
+  (0..rows.length())
+    .filter_map(|index| rows.item(index))
+    .filter_map(|node| node.dyn_into::<web_sys::Element>().ok())
+    .filter_map(|row| {
+      let id = row.get_attribute("data-block")?;
+      let rect = row.get_bounding_client_rect();
+      let shift = if id == drag.id { drag.offset_y } else { 0.0 };
+      Some((id, rect.top() + rect.height() / 2.0 - shift))
+    })
+    .collect()
+}
+
+/// Puts the focus on a block's handle once it is rendered at its new place.
+fn focus_handle_later(id: String) {
+  leptos::task::spawn_local(async move {
+    leptos::task::tick().await;
+    let selector = format!(".canvas-block[data-block=\"{id}\"] .canvas-handle");
+    let maybe_handle = web_sys::window()
+      .and_then(|window| window.document())
+      .and_then(|document| document.query_selector(&selector).ok().flatten())
+      .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok());
+    if let Some(handle) = maybe_handle {
+      drop(handle.focus());
+    }
+  });
 }
 
 fn block_element_id(id: &str) -> String {
@@ -1457,7 +1917,10 @@ fn focus_block(id: &str, caret: Caret) -> bool {
     return false;
   };
   drop(element.focus());
-  canvas_editor::set_selection(&element, caret);
+  // A file block takes the focus as a whole.
+  if element.is_content_editable() {
+    canvas_editor::set_selection(&element, caret);
+  }
   true
 }
 
@@ -1515,6 +1978,7 @@ mod tests {
       text: text.to_owned(),
       is_checked: false,
       spans: Vec::new(),
+      maybe_file: None,
     }
   }
 
@@ -1558,7 +2022,7 @@ mod tests {
 
   #[test]
   fn edits_go_out_merged_and_a_snapshot_when_due() {
-    let mut editor = Editor::default();
+    let mut editor = Editor::new(None);
     let (id, first) = editor.page.insert_block(None, BlockKind::Paragraph, "a");
     let second = editor.page.set_text(&id, "ab").unwrap();
     editor.unsent = vec![first, second];

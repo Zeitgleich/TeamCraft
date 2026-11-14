@@ -4713,9 +4713,10 @@ from the join on once they are a guest, and gets the import's keys if the import
 
 ### 4.11 A channel's shared notes (issue #1221)
 
-A channel of a space has one page of notes (the "Notes" tab of its header: headings, paragraphs,
-quotes, code blocks, bulleted and numbered lists, checklists, with bold, italic, struck-through and
-inline code text and links) that its members edit together. It is end-to-end
+A channel of a space has pages of notes (the "Notes" tab of its header: headings, paragraphs,
+quotes, code blocks, bulleted and numbered lists, checklists and files of the channel, with bold,
+italic, struck-through and inline code text and links) that its members edit together: the first
+page, and further pages they add (issue #1456). It is end-to-end
 encrypted like the channel's messages, and the server learns nothing it doesn't learn from a
 message: every change of the page *is* a message.
 
@@ -4729,7 +4730,8 @@ Offline edits are updates like any other and merge when they arrive.
 
 **Schema (issue #1456).** The root is `blocks`, a Y.Array of Y.Map. Block keys: `id` (string),
 `kind` (string: `paragraph`, `heading`, `heading2`, `heading3`, `bullet`, `numbered`, `check`,
-`quote`, `code`), `checked` (bool), `text` (Y.Text). Inline formatting is the Y.Text's own
+`quote`, `code`, `file`), `checked` (bool), `text` (Y.Text); a `file` block also has
+`file_message` and `file_id` (below). Inline formatting is the Y.Text's own
 formatting: `bold`, `italic`, `strike`, `code` (`true`) and `link` (the address as a string), the
 names Quill and y-prosemirror use. A link is shown only when its address is a web address
 (`http://` or `https://`); whatever another member's client stored, no other scheme becomes a link.
@@ -4750,6 +4752,41 @@ The schema grows without breaking clients that don't know the new parts:
 - A later version must keep every block's Y.Text a sequence of characters: no embeds. All clients
   address a block's text by its characters, and an embed would shift those offsets on clients that
   don't know it. An inline object (a mention, a file reference) is text carrying an attribute.
+
+**More pages.** Each further page is a Yjs document of its own, with the same schema except that its
+root array is `page_blocks`. Its edits are `canvas` messages like the first page's, encrypted and
+signed the same way, whose content names the page: `MessageContent::Canvas { update, is_snapshot,
+page }`, `page` a `CanvasPageId` the adding client makes (the document's random client ID and a
+counter, lowercase hex and a dash, at most 40 characters). The ID is inside the ciphertext: the
+server sees an ordinary message of the channel, as before, and learns neither that a channel has
+more pages nor which one an edit belongs to. A receiving device keeps each page's updates as a
+record of its own in its encrypted store (`canvas/{conversation}/{page}`); a page ID beyond the
+rules (another member's client could send anything) is dropped, never used as a key. Snapshots,
+compaction, the version history and who may edit work per page as described below for the page.
+
+The first page's document lists the further pages: a root `pages`, a Y.Array of Y.Map with `id`,
+`title` (one line, at most 100 characters) and `deleted` (bool). Adding, renaming and deleting a
+page are edits of the first page. A deleted page stays listed as deleted, so a rename or an edit of
+it that crosses the deletion can't bring it back; the device keeps its updates (the deletion is the
+list's, not the store's). A client from before pages ignores the `page` field and merges a further
+page's updates into its first page, where the `page_blocks` root stays out of sight; its snapshot of
+the first page then carries them along, which costs size but shows nothing.
+
+**Moving a block.** Yjs has no move: a moved block is removed and inserted again at its new place
+with its ID, kind (a kind of a newer version too), check mark, text, formatting and file reference.
+Typing into the block on another device while it moves is lost (it lands in the removed copy); two
+devices moving the same block at once leave two blocks with one ID, of which every client shows the
+first and edits the first. The undo log undoes a move as one step.
+
+**Files of the channel.** A `file` block shows a file that was sent in the channel: `file_message` is
+the server ID of the message (decimal), `file_id` the server's attachment ID (decimal, at most 20
+digits), and the block's text the file's name, which a client from before files shows as a
+paragraph. The page holds no key and no copy of the file: a device shows it from the message it was
+sent with, decrypted with that message's key as always (§4.5), and only if it holds that message in
+this channel. A device that joined after it (history from the join on), or holds no such message,
+shows the name and says that the file isn't there; so does every device once the message is
+deleted. Nothing new reaches the server: opening the file downloads the attachment like opening it
+from the message does.
 
 **Undo and redo** are per editor: yrs's `UndoManager` over the blocks, tracking only this editor's own
 transactions (updates from others are applied under an origin it ignores). An undo is an ordinary
@@ -4851,8 +4888,8 @@ carets) and sends nothing: an encrypted, ephemeral awareness channel over the ga
 later.
 
 **Not in this step** (issue #1245 and its follow-up): presence beyond recent edits (who has the page
-open, carets), quotes, code, links, mentions, embedded files, more pages per channel and pages for
-DMs and meetings, the notetaker writing its summary onto the meeting's page, "Pin to page", search
+open, carets), mentions, pages for DMs and meetings, renaming the first page, dropping a deleted
+page's updates from the store, uploading a file straight into a page, the notetaker writing its summary onto the meeting's page, "Pin to page", search
 over pages, the mobile apps, a snapshot when a member joins, stopping the history read at the newest
 snapshot, and not waking phones for page edits: today a page edit is a message like a reaction, so
 a phone of a member whose level is "all" gets a push for it (docs/notifications.md, "Push routing").
