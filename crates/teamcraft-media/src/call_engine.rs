@@ -229,6 +229,9 @@ pub struct CallEngine {
   /// How the running cluster stands to the own voice: what it shows counts for the voice's step
   /// only when it ran in a pause, or was the small one a long talk gets.
   probe_voice: ProbeVoice,
+  /// The probe at the join showed a thin uplink (#1893): a camera published after it doesn't
+  /// start the voice over on its start step, next to the camera.
+  is_uplink_measured_thin: bool,
   /// The own voice's bitrate and packet length on a thin uplink (#1893).
   voice_steps: VoiceSteps,
   downlink_feedback: FeedbackRecorder,
@@ -718,6 +721,7 @@ impl CallEngine {
       maybe_speaking_since: None,
       maybe_probe_started_at: None,
       probe_voice: ProbeVoice::InPause,
+      is_uplink_measured_thin: false,
       voice_steps: VoiceSteps::new(UplinkPolicy::default().voice),
       downlink_feedback: FeedbackRecorder::new(now),
       uplink_feedback_epoch: now,
@@ -2254,6 +2258,7 @@ impl CallEngine {
   /// waits for the result.
   fn start_uplink_probe(&mut self, now: Instant) {
     self.maybe_uplink_measurement = None;
+    self.is_uplink_measured_thin = false;
     self.maybe_uplink_probe = self
       .maybe_probe_bytes
       .and_then(|bytes| JoinProbeConfig::default().within_bytes(usize::try_from(bytes).unwrap_or(usize::MAX)))
@@ -2429,6 +2434,7 @@ impl CallEngine {
     // link carries after a token bucket's burst: the voice flows for minutes, not a burst.
     let was_wanted = self.voice_steps.wanted_bps();
     let maybe_encoding = self.voice_steps.on_measured(measurement.after_burst_bps, now);
+    self.is_uplink_measured_thin = self.voice_steps.step() == VoiceStep::Thinnest;
     // Once a call: worth a line in a bug report's log.
     info!(
       capacity_bps = measurement.capacity_bps,
@@ -2470,6 +2476,7 @@ impl CallEngine {
       return;
     }
     let was_wanted = self.voice_steps.wanted_bps();
+    self.is_uplink_measured_thin = true;
     if let Some(encoding) = self.voice_steps.on_measured(0, now) {
       self.event(CallEngineEvent::VoiceEncoding(encoding));
     }
@@ -3532,8 +3539,12 @@ impl CallEngine {
     self.uplink.measure_afresh();
     self.uplink_layers.measure_afresh(self.uplink.estimate_bps());
     self.uplink_voice.forget();
-    // The voice starts full again as well (#1893): it measures the uplink with the rest.
-    if let Some(encoding) = self.voice_steps.start_afresh() {
+    // The voice starts over as well (#1893): it measures the uplink with the rest. Not on an
+    // uplink the join's probe showed thin: the camera published after it took the voice back
+    // to its thin step next to the camera, and the first turn was lost.
+    if !self.is_uplink_measured_thin
+      && let Some(encoding) = self.voice_steps.start_afresh()
+    {
       self.event(CallEngineEvent::VoiceEncoding(encoding));
     }
     // Tracks that were held back come back as well, with keyframes.
@@ -6021,6 +6032,53 @@ mod tests {
       };
       alice.apply_uplink_probe(thin, now + Duration::from_secs(1));
       assert_eq!(alice.voice_steps.step(), crate::voice_steps::VoiceStep::Thinnest);
+    }
+
+    /// #1893: a camera published after the join's probe showed a thin uplink leaves the voice on
+    /// its thinnest step (and so holds the camera); on a link not measured thin it starts over.
+    #[test]
+    fn a_camera_after_a_thin_measurement_keeps_the_voice_thinnest() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      let thin = LinkMeasurement {
+        capacity_bps: 130_000,
+        after_burst_bps: 56_000,
+        loss_percent: 50,
+      };
+      alice.apply_uplink_probe(thin, now);
+      ask_for(&mut alice, &video_track(50, 1, 3));
+      alice
+        .handle_signal(
+          event(
+            6,
+            CallEvent::VideoPublished {
+              track: video_track(50, 1, 3),
+            },
+          ),
+          now,
+        )
+        .unwrap();
+      assert_eq!(alice.voice_steps.step(), crate::voice_steps::VoiceStep::Thinnest);
+
+      let (mut carol, _dave) = secured_pair(now);
+      carol.voice_steps.on_estimate(40_000, true, now);
+      ask_for(&mut carol, &video_track(50, 1, 3));
+      carol
+        .handle_signal(
+          event(
+            6,
+            CallEvent::VideoPublished {
+              track: video_track(50, 1, 3),
+            },
+          ),
+          now,
+        )
+        .unwrap();
+      assert_eq!(
+        carol.voice_steps.step(),
+        crate::voice_steps::VoiceStep::Thin,
+        "starts over"
+      );
     }
 
     /// #1893: a voice below its full step probes for the next one in a pause of its speech, not
