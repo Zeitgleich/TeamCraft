@@ -38,6 +38,8 @@ private const val MINUTE_MILLIS = 60_000L
 /** Long side of the sample thumbnails, as senders make them since #315. */
 private const val THUMBNAIL_PX = 640
 private const val CONVERSATION = "c1"
+/** The oldest sample message: the scrolled pictures show it at the top. */
+private const val FIRST_MESSAGE = "1"
 /** The largest text size Android's settings offer. */
 private const val LARGE_FONT_SCALE = 2f
 
@@ -71,6 +73,16 @@ class ConversationScreenshots {
       ReplyTarget.current.value = null
     }
     shoot("conversation-large-text-light", isDark = false, fontScale = LARGE_FONT_SCALE) { viewModel -> ConversationSample(viewModel) }
+    // Scrolled back, so newer messages run on behind the composer and the navigation bar under one
+    // scrim, with no solid band at the bottom edge.
+    for (isDark in listOf(false, true)) {
+      shoot("conversation-scrolled-${if (isDark) "dark" else "light"}", isDark) { viewModel ->
+        ConversationSample(viewModel, maybeFocusMessage = FIRST_MESSAGE)
+      }
+    }
+    shoot("conversation-scrolled-landscape-light", isDark = false, isLandscape = true) { viewModel ->
+      ConversationSample(viewModel, maybeFocusMessage = FIRST_MESSAGE)
+    }
     // The desktop's comfortable and compact lists instead of bubbles (#598, #1488).
     val layout = MessageLayoutPrefs.of(InstrumentationRegistry.getInstrumentation().targetContext)
     try {
@@ -125,10 +137,11 @@ class ConversationScreenshots {
 
   /**
    * The conversation screen's parts with sample data (the screen itself reads the core), in the
-   * screen's own scaffold: the list runs on behind the floating composer.
+   * screen's own scaffold: the list runs on behind the floating composer. With [maybeFocusMessage]
+   * the list opens with that message at the top instead of at the end.
    */
   @Composable
-  private fun ConversationSample(viewModel: MainViewModel) {
+  private fun ConversationSample(viewModel: MainViewModel, maybeFocusMessage: String? = null) {
     ChatScaffold(
       viewModel = viewModel,
       topBar = { ChromeTopBar(title = "Sam Doe", maybeOnBack = {}) },
@@ -146,6 +159,7 @@ class ConversationScreenshots {
         onLongPress = {},
         modifier = Modifier.weight(1f),
         bottomInset = listBottomInset,
+        maybeFocusMessage = maybeFocusMessage,
       )
     }
   }
@@ -155,7 +169,7 @@ class ConversationScreenshots {
     fun message(id: String, author: String, minute: Int, body: String, reactions: List<Reaction> = emptyList()) =
       Message(id = id, conversation = CONVERSATION, author = author, sentAt = start + minute * MINUTE_MILLIS, body = body, reactions = reactions)
     return listOf(
-      message("1", SAM, 0, "Here are the photos from the site visit"),
+      message(FIRST_MESSAGE, SAM, 0, "Here are the photos from the site visit"),
       message("2", SAM, 1, ""),
       message("3", SAM, 2, ""),
       message("4", ME, 6, "Great, thanks! The second one is perfect for the report", listOf(Reaction("👍", 1, false))),
