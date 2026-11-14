@@ -771,7 +771,9 @@ thread_local! {
 #[cfg(test)]
 #[cfg(all(feature = "sealed-sqlite", feature = "sqlcipher", not(target_arch = "wasm32")))]
 mod tests {
+  use std::cell::RefCell;
   use std::path::PathBuf;
+  use std::rc::Rc;
   use std::sync::Arc;
   use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -790,7 +792,7 @@ mod tests {
     ConversationEvent, EditRecord, FeedChange, MemoryStore, MessageContent, MessageMeta, SealedSqliteStore,
     SqlCipherStore, StaticKeySource, StoreChanges, TrackedStore, Unreadable,
   };
-  use crate::ui_backend::CoreChatBackend;
+  use crate::ui_backend::{CoreChatBackend, CountedTallies};
   use crate::ui_snapshot::SnapshotCache;
   use crate::workspace::WorkspaceState;
 
@@ -1489,6 +1491,27 @@ mod tests {
           None
         );
       }
+    }
+
+    /// Issue #1962: a backend on a read thread hands what it counted to a keeper and takes no write
+    /// lock; what the keeper writes is the tally a later read finds.
+    #[test]
+    fn a_backend_with_a_keeper_hands_its_tallies_over_and_writes_nothing() {
+      let (store, _dir) = sealed_store();
+      let mut fixture = Fixture::new(store);
+      let handed = Rc::new(RefCell::new(CountedTallies::default()));
+      let keeper_handed = Rc::clone(&handed);
+      fixture.backend = backend_on(fixture.store.clone()).with_tally_keeper(Box::new(move |tallies| {
+        keeper_handed.borrow_mut().add_newer(tallies);
+      }));
+      assert_eq!(fixture.check(), 1, "the first read counts every row");
+      assert!(kept_tally(fixture.store.as_ref(), conversation()).is_none());
+      assert_eq!(handed.borrow().len(), 1);
+      assert_eq!(fixture.check(), 1, "not kept yet: counted again");
+
+      handed.borrow().write(fixture.store.as_ref()).unwrap();
+      assert!(kept_tally(fixture.store.as_ref(), conversation()).is_some());
+      assert_eq!(fixture.check(), 0, "the keeper's write is the tally");
     }
 
     #[test]
