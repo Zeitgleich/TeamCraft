@@ -79,6 +79,7 @@
   <string name="call_connecting">Connecting…</string>
   <string name="call_reconnecting">Connection lost, reconnecting…</string>
   <string name="call_limited_network">Limited network, call quality may be lower</string>
+  <string name="call_video_held_for_voice">Your connection is struggling: your video is paused so your voice gets through</string>
   <string name="call_securing">Securing the call…</string>
   <string name="call_secured">End-to-end encrypted</string>
   <string name="call_ended">Call ended</string>

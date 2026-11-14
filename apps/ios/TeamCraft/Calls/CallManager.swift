@@ -39,6 +39,9 @@ struct ActiveCall: Identifiable, Equatable {
   /// The call runs on the WebSocket fallback for networks that block UDP (ARCHITECTURE.md §6.6):
   /// the call screen says quality may be lower.
   var isOnLimitedNetwork = false
+  /// The own video is held back while the own voice is lost on the uplink (#1871): the call screen
+  /// says the voice comes first, so nobody wonders why the camera froze.
+  var isVideoHeldForVoice = false
 }
 
 /// A move of the call into a meeting room that somebody else announced in the conversation's
@@ -767,6 +770,7 @@ extension CallManager: CallListener {
       if hasNewPeople { Task { @MainActor in self.names = await AppModel.shared.displayNames() } }
       call.maybePrivacyCode = state.maybePrivacyCode
       call.isOnLimitedNetwork = state.isOnLimitedNetwork
+      call.isVideoHeldForVoice = state.isVideoHeldForVoice
       switch state.phase {
       case .connected: call.phase = .connected
       // The connection broke; the core rejoins (the others keep this device's place meanwhile).
