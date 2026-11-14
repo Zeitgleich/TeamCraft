@@ -124,6 +124,13 @@
   white-space: nowrap;
 }
 
+/* A guest's page has no app bar above the call: the pre-join and call screens cover the whole
+   window, not the chat's header in the bar's row (#1929). */
+.app.guest-meeting .prejoin,
+.app.guest-meeting .call-screen {
+  inset: var(--banners-h, 0px) 0 0 0;
+}
+
 .guest-meeting > .main {
   min-height: 0;
   display: flex;

@@ -687,6 +687,14 @@ impl FakeServer {
     }
   }
 
+  /// The server shows `user` as a member (kind `member`) from now on, whatever they were: a hostile
+  /// server relabelling a guest (#1873).
+  pub fn show_as_member(&self, user: UserId) {
+    if let Some(entry) = self.lock().users.get_mut(&user) {
+      entry.kind = UserKind::Member;
+    }
+  }
+
   /// From now on the server answers "not found" when asked who `user` is (`GET /users/{id}`).
   pub fn hide_user(&self, user: UserId) {
     self.lock().hidden_users.insert(user);
@@ -1725,6 +1733,28 @@ impl FakeServer {
       maybe_recipient_device_id: Some(device),
       payload: Base64Bytes::new(payload),
     });
+  }
+
+  /// Puts a proposal into `conversation`'s queue at its current epoch in the name of `sender`, a
+  /// device the server may have made up, as a malicious server might, and tells the members.
+  pub fn inject_proposal(&self, conversation: ConversationId, sender: DeviceId, payload: Vec<u8>) {
+    let mut state = self.lock();
+    let id = state.next_id();
+    let Some(entry) = state.conversations.get_mut(&conversation) else {
+      return;
+    };
+    let message = MlsMessageResponse {
+      id,
+      conversation_id: conversation,
+      epoch: entry.epoch,
+      kind: MlsMessageKind::Proposal,
+      sender_device_id: sender,
+      maybe_recipient_device_id: None,
+      payload: Base64Bytes::new(payload),
+    };
+    entry.mls.push(message.clone());
+    let members: Vec<UserId> = entry.members.keys().copied().collect();
+    state.publish(members, &GatewayEvent::MlsMessage { message });
   }
 
   /// The welcomes stored for `device`, oldest first.

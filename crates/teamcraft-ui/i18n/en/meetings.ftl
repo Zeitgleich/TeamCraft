@@ -56,6 +56,7 @@ meetings-visit-failed = The meeting couldn't be opened. Check the link or try ag
 meetings-lobby = Waiting to join
 meetings-admit = Let in
 meetings-guest-device-pending = Waiting for the guest's device to set up encryption
+meetings-member-unconfirmed = Not confirmed as a member yet. Invite them to the meeting instead.
 meetings-deny = Turn away
 meetings-error = Meetings could not be updated: { $detail }
 schedule-title = Schedule a meeting

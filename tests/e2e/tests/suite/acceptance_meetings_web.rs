@@ -432,11 +432,18 @@ async fn knock(page: &Page, origin: &str, link: String, name: &str) {
   click_text(page, "Ask to join").await;
 }
 
-/// The guest, let in, joins the meeting's call from the browser.
+/// The guest, let in, joins the meeting's call from the browser. Admission opens the call's
+/// pre-join screen by itself (#1929): the guest knocked to join the call, not to read the chat.
 async fn join_call_in_browser(page: &Page) {
-  wait_for_text(page, "Join the call").await;
-  click_text(page, "Join the call").await;
   wait_for_element(page, ".prejoin").await;
+  // The chat behind the call offers a guest no second way to start a call.
+  let call_starts = page
+    .evaluate(r#"document.querySelectorAll('.channel-header [aria-label="Start audio call"]').length"#)
+    .await
+    .unwrap()
+    .into_value::<u64>()
+    .unwrap();
+  assert_eq!(call_starts, 0, "the guest's chat header offers to start a call");
   click_selector(page, ".prejoin-actions .btn-primary").await;
   wait_for_element(page, ".call-screen").await;
 }

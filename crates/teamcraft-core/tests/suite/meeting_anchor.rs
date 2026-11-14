@@ -15,6 +15,7 @@ use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::client::HostsChange;
 use teamcraft_core::clock::ManualClock;
 use teamcraft_core::meeting_invitees::InviteeList;
+use teamcraft_core::workspace::RosterRole;
 use teamcraft_proto::{ConversationId, MeetingId};
 
 const ACCESS_ENDS_MS: i64 = 4_000_000_000_000;
@@ -508,6 +509,18 @@ mod handovers {
       carol.client.user_id(),
       erin.client.user_id(),
     );
+    // Colleagues on the roster Alice signs: each organizer's device vouches for them, so Erin
+    // is on Carol's admitters later (#1873).
+    alice
+      .client
+      .publish_roster(&[
+        (alice.client.user_id(), RosterRole::Owner),
+        (bob_id, RosterRole::Admin),
+        (carol_id, RosterRole::Admin),
+        (erin_id, RosterRole::Admin),
+      ])
+      .await
+      .unwrap();
     let chat = server.create_meeting_chat(alice.client.user_id(), &[bob_id, carol_id, erin_id, dave]);
     let meeting = server.meeting_of_chat(chat).unwrap();
     alice

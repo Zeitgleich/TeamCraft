@@ -478,6 +478,12 @@ impl MeetingsHub {
     }
   }
 
+  /// Whether this is a meeting guest's page (no account, only the meeting's chat and call).
+  /// [`is_meeting_chat`] says whether a conversation is a meeting's.
+  pub fn is_guest_page(&self) -> bool {
+    self.maybe_guest_chat.is_some()
+  }
+
   pub fn title_for(&self, conversation: ConversationId) -> Option<String> {
     self.meetings.with(|all| {
       all
@@ -1333,6 +1339,18 @@ pub fn holiday_region_key(code: &str) -> String {
 
 fn to_json<T: serde::Serialize>(value: &T) -> Result<String, MeetingError> {
   serde_json::to_string(value).map_err(|error| MeetingError::Unreadable(error.to_string()))
+}
+
+/// Whether `conversation` is a meeting's chat (#1932): the UI sees it as a channel outside every
+/// space (the core's `view_kind`), and only meeting chats live outside spaces besides DMs and
+/// group DMs (`Conversation::has_channel_settings`). Its call is the meeting's call, never a
+/// huddle.
+pub fn is_meeting_chat(conversation: &crate::model::Conversation) -> bool {
+  use crate::model::ConversationKind;
+  matches!(
+    conversation.kind,
+    ConversationKind::Public | ConversationKind::Private
+  ) && conversation.maybe_space.is_none()
 }
 
 #[cfg(test)]

@@ -1614,6 +1614,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           .note_device_add_request(conversation, message.sender_device_id, user)
           .await?;
       }
+      if message.payload.as_slice() == super::key_reask::CURRENT_KEY_REQUEST_MAGIC {
+        self.note_current_key_request(conversation, message.sender_device_id)?;
+      }
       self.advance_cursor(conversation, message)?;
       return Ok(MlsProgress::Done);
     }

@@ -56,6 +56,7 @@ meetings-visit-failed = Das Meeting konnte nicht geöffnet werden. Prüfe den Li
 meetings-lobby = Wartet auf Einlass
 meetings-admit = Einlassen
 meetings-guest-device-pending = Das Gerät des Gasts richtet gerade die Verschlüsselung ein
+meetings-member-unconfirmed = Noch nicht als Mitglied bestätigt. Lade die Person stattdessen zur Besprechung ein.
 meetings-deny = Abweisen
 meetings-error = Meetings konnten nicht aktualisiert werden: { $detail }
 schedule-title = Meeting planen

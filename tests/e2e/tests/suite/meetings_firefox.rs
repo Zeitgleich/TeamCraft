@@ -129,8 +129,7 @@ async fn a_guest_in_firefox_joins_a_meeting_by_its_link_and_shares_the_call() {
       .await
       .unwrap();
 
-    firefox.wait_for_text("Join the call", WAIT).await;
-    firefox.click_text("Join the call").await;
+    // Admission opens the call's pre-join screen by itself (#1929).
     firefox.wait_for_element(".prejoin", WAIT).await;
     firefox.click_selector(".prejoin-actions .btn-primary").await;
     firefox.wait_for_element(".call-screen", WAIT).await;

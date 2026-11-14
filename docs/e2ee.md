@@ -1837,6 +1837,92 @@ meanwhile doesn't make it skip keys sealed to it before that request. The keys o
 it missed are sealed to it after the commit (above, "Keys a device added back missed"); the user's
 key bag may hold them too.
 
+**Asking again for a lost hand-over (issue #1878).** Every way into a group above ends with one
+member's device doing one thing: committing an addition it holds, adding a further device, or
+handing over the current key. When that one thing is lost (the member's device was offline when the
+`device_add` event went by, its queued hand-over was dropped, an app was reinstalled), the waiting
+device used to wait for good, with its messages held back unsent. So a device that is a member on
+the server but can't write asks again, in two states:
+
+- **In the group, without a current key** (it joined and no hand-over came, "The current key of a
+  further device"): it posts a *current-key request* (`TCKR`, no payload) into the group's queue.
+  A member's device that reads it checks that the sending device is in its own group's tree at the
+  current epoch, and queues the same hand-over it queues for a further device's join, ranked
+  (`device_add_stagger` per rank, online users first), so normally one member sends. The bundle
+  goes to the group over MLS as before and the first current key a member sends ends the wait.
+- **Not in the group** (no welcome came, no rejoin request is under way and it didn't open the DM
+  itself, whose setup retries on its own; a channel's self-add doesn't count, since members may
+  refuse that while a member holding the user's addition still commits it): it posts the
+  device-add request (`TCDA`, its user ID) whether or not its user has another device in the
+  group. Members handle it as before when the user has a device in the group (a further device).
+  When the user has none, a member's device acts only if it holds that user's **pending addition**
+  for this conversation (§4.3, "Nobody to add yet"): the addition it decided on and signs when it
+  commits. The request makes it due now, keeping its attempts (so a request never resets the
+  backoff of a user whose devices have no key package), at most once per `rejoin_retry` per
+  conversation and user, whatever device the request names; it is then committed with the
+  usual checks (the server still lists the user, the device passes the pinned identity and the
+  signed device list). A member without a pending addition does nothing: a request never makes
+  anybody decide to add a user.
+
+When: the device notes the state the first time it sees it, while a message waits in its outbox for
+a key or it waits for a current key, and asks once that lasted `key_reask_retry` (client, 2
+minutes). Each further request waits twice as long as the one before, up to `key_reask_retry_max`
+(client, 1 hour), for as long as the state lasts; a new gateway connection (a reconnect, a resume
+from sleep or the background, an app start) asks at once, but never twice within
+`key_reask_retry`. The note goes once the device can write (a current key, a group) or is no
+longer a member, and with it the backoff. A device outside the group that hasn't written anything
+there doesn't ask on its own (a first device may be listed in a hundred imported conversations): it
+reads with the key bag, and a pending addition still wakes on `device_add` and full syncs. Neither request is retried on a failed post beyond this
+schedule; a post refused for an epoch conflict waits for the next turn too.
+
+Idempotency: a request only ever makes due what a member already has queued or would queue for a
+join, and each kind is deduplicated where it lands. A member handles one device's `TCKR` once per
+`key_reask_retry` and its `TCDA` once per `rejoin_retry` in each conversation (repeats and replays
+cost it no requests, #187), and wakes a user's pending addition once per `rejoin_retry` whatever
+device the requests name, since the server can invent device IDs; the hand-over is one queued entry per (conversation, device) and is
+dropped once any current key arrives or the group switches keys; the pending addition is one entry
+per (conversation, user), gone once the user is in the group, and committed with a fresh signed
+change whose freshness rules (above) stop a second commit for the same user. So a member coming
+online to a queue full of requests from a device that asked many times sends one hand-over or
+commits one addition.
+
+Rate limits: the device's own schedule is the main one (at most one request per conversation per
+`key_reask_retry`, then one per hour). The server counts each post against the user's write limit
+(`[security]`, per user per minute, 429 beyond it) like any message; the device takes a 429 as a
+failed post and keeps to its schedule. The server needs no new endpoint and stores the requests as
+proposals in the group's queue, which it already accepts from members of the conversation.
+
+What a hostile server can do with it, and what it can't:
+
+- It can withhold or delay requests and answers, as any queue entry: the device keeps waiting and
+  says so (#1882), no worse than before.
+- It can replay old requests or forge new ones in a device's name: neither carries a signature,
+  since neither asks for anything a member wouldn't do anyway. A forged `TCKR` makes members hand
+  the current key to the group's own members over MLS, at most once per device per
+  `key_reask_retry`; nobody outside the group learns a key. A forged `TCDA` for a user with a
+  device in the group is the existing device-add request: the device is added only if its user's
+  signed device list names it (§4.6, "A further device joins on its own"). A forged `TCDA` for a
+  user without a device in the group only makes a member commit, sooner, an addition that member
+  already decided on, for a device that passes the same checks, at most once per `rejoin_retry`
+  per user and without resetting its backoff, so a flood of made-up device IDs costs the member
+  one try per window; a member without such a decision ignores it.
+- It can't get a device added that no member approved: a request adds nothing on its own, the
+  server's member list is never taken as a member's decision, and every addition still carries
+  either the user's own signed device list (a further device) or a member's signed change (a new
+  user), which members check when they merge.
+- It learns that a device can't write in a conversation, which it already saw: no messages from that
+  device arrive.
+
+A DM whose adder is still alone in its group (a founded group of one, waiting for the only other
+person's first device) doesn't read its queue until the founding is settled (above), so it doesn't
+see the request either; there the adder's full sync, which asks again whether waiting people have a
+device by now, finds the device.
+
+What it doesn't fix: when the only device holding a pending addition never comes back (the
+import device of §4.10 stopped for good, an adder who left), nobody else holds the decision, so
+the request goes unanswered. The conversation keeps saying that the device waits to be let in, and
+a member can add the person again, which makes a new decision.
+
 **Notes to self.** Every user has a DM with themself (`POST /dms` with their own ID; the server
 returns the same conversation every time). Its only participant is the user, so its group holds only
 that user's devices: the device that finds none after a sync founds the group like any DM's, and
@@ -2092,6 +2178,44 @@ never by the server's member list:
     chat, the member list and the call, and verify the certificate chain (identity key → device
     key → MLS leaf) exactly as for members. An identity key change for a pinned guest is refused
     like for anybody else (the server also refuses `replace` for guests).
+  - *Who is a guest, and until when* (#1873; `teamcraft_core::meeting_lobby`, the one rule of
+    every client's lobby: web, desktop, Android and iOS). The server's user kind decides neither.
+    A member is somebody the owners' signed roster vouches for (`WorkspaceState::vouches_for_member`):
+    an owner or admin, or an account the owners' apps noted (§3.1.4) that no owner removed by hand.
+    - **On the admitting device** (a host's "admit", or a link arrival let in by itself), somebody
+      in the lobby is let in **as a member** (their devices, no key check, no end) only if the
+      roster vouches for them. Anybody else is let in **as a guest** whatever the server calls
+      them: only with the key their page reported, after the key code was shown, until the end of
+      access, and recorded on that device as a guest. Somebody the server calls a member, whom the
+      roster doesn't vouch for and who reported no key, can't be admitted from the lobby ("Not
+      confirmed as a member yet"; the organizer invites them instead).
+    - **On the organizer's devices**, what they sign vouches for nobody by the server's word: the
+      admitters (below) and the invitees an edit carries over from the group (§4.6.5, "Meetings
+      (D10)") are only users the roster vouches for, the organizer and co-hosts of the host lists
+      the device verified, and never a guest it knows of (`Client::vouched_meeting_users`). So a
+      guest another device admitted, whom the server calls a member, is neither signed as an
+      admitter nor carried over as an invitee.
+    - **Not yet everywhere.** Elsewhere a device still counts as guests only those the server
+      calls guests and those it let in itself (`guest_users`): the guest set of the member
+      directory that judges commits, and the guests of the membership rule. In meeting chats the
+      membership rule already lets only roster members, the organizer, the co-hosts and the signed
+      admitters manage others (`for_meeting_chat`), so a relabelled guest adds nobody. Treating
+      everybody the roster doesn't vouch for as a guest in meeting chats everywhere waits until
+      plain members' accounts are broadly noted (#1926), as it would demote every member whose
+      account isn't noted yet.
+    - **Residuals.** A plain member whose account the owners' apps haven't noted yet (first come,
+      §3.1.4; never under manual signing) can't be let in from the lobby, and the organizer's
+      device no longer names them in a new admitters statement: they don't admit guests or people
+      of the link until their account is noted. Admitters an earlier statement named keep
+      working while it is in force.
+    - **The end of access** the host's app asks for comes from the server's meeting end plus the
+      guests' grace. The core caps it at the end of the organizer-signed admitters this device
+      verified, read afresh, while it lies ahead, and otherwise at the guests' grace (two hours)
+      from the admission (`meeting_lobby::guest_access_end`). A server that lengthens the meeting
+      lengthens nobody's access; withholding the statement only shortens it. Residual: the
+      organizer's device signs the end of the meeting as its meeting list shows it, so a server
+      that lengthens the meeting before the organizer's device signs gets that longer end signed
+      (#1919).
   - *Comparing codes.* The server relays both the guest's key and the fingerprint reported with
     the knock, so binding one to the other stops a swap by anybody but the server, not by the
     server itself. Two codes close that gap for whoever compares them out of band (a phone call,
@@ -2134,8 +2258,9 @@ never by the server's member list:
       invited.
     - *Who is on it.* An organizer's device lists everybody with a device in the meeting chat's
       group as it sees it (the people the organizer's and hosts' own signed adds brought in) but
-      itself and guests ("who counts as a guest", below), each with the identity key that device
-      pinned. "No lobby" is that device's own record, as for its own admissions; a device without
+      itself and guests ("who counts as a guest", below), and only those it vouches for as
+      members: the signed roster's, or hosts by the verified host lists ("Who is a guest, and until
+      when" above, #1873), each with the identity key that device pinned. "No lobby" is that device's own record, as for its own admissions; a device without
       one keeps what the organizer's key signed before. It signs anew only when the list or the
       flag changed, or to make the list last until the meeting's access ends (its end plus the
       guest grace, also for a series' next meeting); the sequence is above the server's and the
@@ -4554,7 +4679,7 @@ probe doing only the `serde_json` part (2026-11-04):
 | `automerge` 0.6.1                              | +930,498 B   | +284,962 B    | merges per character                |
 | Own op log, last writer wins per block         | a few kB     | a few kB      | one side's typing in the block lost |
 
-Neither CRDT breaks the budget of a signed-in first visit (5.59 MB gzip, docs/performance.md,
+Neither CRDT breaks the budget of a signed-in first visit (5.63 MB gzip, docs/performance.md,
 "Web bundle size"), and the editor doesn't count towards it anyway (below). `yrs` costs less than a
 third of `automerge` and speaks the Yjs format, which has editors and tooling around it. The op
 log would cost nothing, but it loses typing exactly where a meeting's notes are written: several
