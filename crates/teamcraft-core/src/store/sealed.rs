@@ -52,9 +52,10 @@ use super::lru::Lru;
 use super::sealed_catalog::{
   CATALOG_TABLE, CATALOG_VERSION, CatalogState, DIRECTORY_KIND, FEED_KIND, FEED_VERSION_KIND, MESSAGES_KIND,
   META_KEY, MessageEntry, MessageKey, NodeCache, NodeChange, RELATIONS_KIND, Relation, RelationKey,
-  ScopedNodes, decode, encode, encode_node, generation_prefix, is_current_node, messages_scope,
+  ScopedNodes, WORDS_KIND, decode, encode, encode_node, generation_prefix, is_current_node, messages_scope,
 };
 use super::sealed_index::{self, Direction};
+use super::word_filter::{WordFilter, WordProbe};
 use super::{
   Attached, AttachedRange, FeedChange, FeedVersion, LocalStore, MessageEdge, MessageFilter, MessageOrder,
   MessageSlot, StoreError, StoredMessage, Table, UserLink, WriteTally,
@@ -108,6 +109,8 @@ struct State<B> {
   directory_nodes: NodeCache<String, ()>,
   feed_nodes: NodeCache<MessageKey, ()>,
   relation_nodes: NodeCache<RelationKey, ()>,
+  /// The word index of each conversation, where the catalog has them ([`CatalogState::has_words`]).
+  word_nodes: NodeCache<MessageKey, WordFilter>,
   /// Writes per conversation since the caches were last dropped ([`LocalStore::message_revision`]).
   revisions: HashMap<ConversationId, u64>,
   /// The catalog's [`FeedVersion`] counts as read or written, by conversation; none on disk is zero.
@@ -185,6 +188,12 @@ pub trait RecordBackend {
     maybe_after: Option<&LookupId>,
     limit: usize,
   ) -> Result<Vec<(LookupId, Vec<u8>)>, StoreError>;
+
+  /// Whether the catalog keeps an index of word prefixes for search ([`LocalStore::word_candidates`],
+  /// issue #1833): only where no tantivy index does that job, the browser.
+  fn indexes_words(&self) -> bool {
+    false
+  }
 
   /// See [`LocalStore::purge_freed`]; backends without such files do nothing.
   fn purge_freed(&self) -> Result<(), StoreError> {
@@ -424,6 +433,7 @@ impl<B: RecordBackend> SealedStore<B> {
         directory_nodes: NodeCache::new(DIRECTORY_KIND, limits.max_index_node_bytes),
         feed_nodes: NodeCache::new(FEED_KIND, limits.max_index_node_bytes),
         relation_nodes: NodeCache::new(RELATIONS_KIND, limits.max_index_node_bytes),
+        word_nodes: NodeCache::new(WORDS_KIND, limits.max_index_node_bytes),
         revisions: HashMap::new(),
         feed_versions: HashMap::new(),
         epoch: 0,
@@ -520,8 +530,9 @@ impl<B: RecordBackend> SealedStore<B> {
   /// The build this store needs, if any: a new one, or the one that was interrupted. Run it with
   /// [`Self::step_catalog_build`] until it is complete, before anything else uses the store.
   pub(crate) fn start_catalog_build(&self) -> Result<Option<CatalogBuild>, StoreError> {
+    let has_words = self.backend.indexes_words();
     let (generation, maybe_after) = match self.read_catalog_state()? {
-      Some(complete @ CatalogState::Complete { version, .. }) if version == CATALOG_VERSION => {
+      Some(complete) if complete.is_complete_for(has_words) => {
         self.lock().set_catalog(Some(complete));
         return Ok(None);
       },
@@ -529,12 +540,16 @@ impl<B: RecordBackend> SealedStore<B> {
         generation,
         maybe_after,
         version,
-      }) if version == CATALOG_VERSION => match maybe_after.as_deref().map(parse_id) {
-        Some(None) => (new_generation(), None),
-        Some(Some(after)) => (generation, Some(after)),
-        None => (generation, None),
+        has_words: was_with_words,
+      }) if version == CATALOG_VERSION && was_with_words == has_words => {
+        match maybe_after.as_deref().map(parse_id) {
+          Some(None) => (new_generation(), None),
+          Some(Some(after)) => (generation, Some(after)),
+          None => (generation, None),
+        }
       },
-      // None, or a catalog of another version: its nodes go with the build.
+      // None, or a catalog of another version or without the word indexes: its nodes go with the
+      // build.
       Some(_) | None => (new_generation(), None),
     };
     Ok(Some(self.begin_build(generation, maybe_after, true)))
@@ -601,6 +616,7 @@ impl<B: RecordBackend> SealedStore<B> {
       generation,
       maybe_after: maybe_after.as_ref().map(format_id),
       version: CATALOG_VERSION,
+      has_words: self.backend.indexes_words(),
     }));
     state.is_building = true;
     CatalogBuild {
@@ -649,6 +665,7 @@ impl<B: RecordBackend> SealedStore<B> {
         generation,
         maybe_after: Some(format_id(&last)),
         version: CATALOG_VERSION,
+        has_words: self.backend.indexes_words(),
       };
       self.write_named(CATALOG_TABLE, META_KEY, &encode(&progress)?)
     })?;
@@ -663,6 +680,7 @@ impl<B: RecordBackend> SealedStore<B> {
     let complete = CatalogState::Complete {
       generation: build.generation,
       version: CATALOG_VERSION,
+      has_words: self.backend.indexes_words(),
     };
     self.grouped(|state| {
       state.note_everything();
@@ -790,7 +808,39 @@ impl<B: RecordBackend> SealedStore<B> {
         Ok(())
       })?;
     }
-    Ok(())
+    self.note_words(state, conversation, maybe_earlier, maybe_message)
+  }
+
+  /// Moves a message in its conversation's word index, where the catalog keeps one: a new text,
+  /// an edit, a deletion.
+  fn note_words(
+    &self,
+    state: &mut State<B>,
+    conversation: ConversationId,
+    maybe_earlier: Option<&StoredMessage>,
+    maybe_message: Option<&StoredMessage>,
+  ) -> Result<(), StoreError> {
+    if !state.maybe_catalog.as_ref().is_some_and(CatalogState::has_words) {
+      return Ok(());
+    }
+    let entry =
+      |message: &StoredMessage| WordFilter::of(message).map(|filter| (MessageKey::of(message), filter));
+    let earlier = maybe_earlier.and_then(entry);
+    let new = maybe_message.and_then(entry);
+    if earlier == new {
+      return Ok(());
+    }
+    self.words(state, conversation, |nodes| {
+      if let Some((key, _)) = &earlier
+        && new.as_ref().is_none_or(|(new_key, _)| new_key != key)
+      {
+        sealed_index::remove(nodes, key)?;
+      }
+      if let Some((key, filter)) = new {
+        sealed_index::upsert(nodes, key, filter)?;
+      }
+      Ok(())
+    })
   }
 
   /// Counts `change` in the group of writes that makes it, so the count can't get ahead of or fall
@@ -1099,6 +1149,28 @@ impl<B: RecordBackend> SealedStore<B> {
     let scope = messages_scope(conversation);
     let result = step(&mut ScopedNodes {
       cache: &mut state.relation_nodes,
+      scope: &scope,
+      read: &read,
+    });
+    state.note_catalog_result(&result);
+    result
+  }
+
+  /// Runs `step` on `conversation`'s word index.
+  fn words<T>(
+    &self,
+    state: &mut State<B>,
+    conversation: ConversationId,
+    step: impl FnOnce(&mut ScopedNodes<'_, MessageKey, WordFilter>) -> Result<T, StoreError>,
+  ) -> Result<T, StoreError> {
+    let read = |key: &str| {
+      self
+        .read_named(CATALOG_TABLE, key)
+        .map(|value| value.map(|value| value.to_vec()))
+    };
+    let scope = messages_scope(conversation);
+    let result = step(&mut ScopedNodes {
+      cache: &mut state.word_nodes,
       scope: &scope,
       read: &read,
     });
@@ -1415,6 +1487,7 @@ impl<B: RecordBackend> SealedStore<B> {
       written.scopes[1].extend(state.directory_nodes.dirty_scopes());
       written.scopes[2].extend(state.feed_nodes.dirty_scopes());
       written.scopes[3].extend(state.relation_nodes.dirty_scopes());
+      written.scopes[4].extend(state.word_nodes.dirty_scopes());
     }
     let changes = state
       .message_nodes
@@ -1422,7 +1495,8 @@ impl<B: RecordBackend> SealedStore<B> {
       .into_iter()
       .chain(state.directory_nodes.take_dirty()?)
       .chain(state.feed_nodes.take_dirty()?)
-      .chain(state.relation_nodes.take_dirty()?);
+      .chain(state.relation_nodes.take_dirty()?)
+      .chain(state.word_nodes.take_dirty()?);
     for NodeChange { key, maybe_value } in changes {
       match maybe_value {
         Some(value) => self.write_named(CATALOG_TABLE, &key, &value)?,
@@ -1523,6 +1597,7 @@ impl<B> State<B> {
     self.directory_nodes.clear();
     self.feed_nodes.clear();
     self.relation_nodes.clear();
+    self.word_nodes.clear();
     self.revisions.clear();
     self.feed_versions.clear();
     self.epoch += 1;
@@ -1535,6 +1610,7 @@ impl<B> State<B> {
     self.directory_nodes.set_generation(maybe_generation);
     self.feed_nodes.set_generation(maybe_generation);
     self.relation_nodes.set_generation(maybe_generation);
+    self.word_nodes.set_generation(maybe_generation);
     self.feed_versions.clear();
     self.maybe_catalog = maybe_catalog;
   }
@@ -1606,6 +1682,9 @@ impl<B> State<B> {
     }
     for scope in &written.scopes[3] {
       self.relation_nodes.forget_scope(scope);
+    }
+    for scope in &written.scopes[4] {
+      self.word_nodes.forget_scope(scope);
     }
     false
   }
@@ -1979,6 +2058,36 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     })
   }
 
+  /// Issue #1833: the word index's pages, then only the messages whose filter passes.
+  fn word_candidates(
+    &self,
+    conversation: ConversationId,
+    probe: &WordProbe,
+  ) -> Result<Option<Vec<StoredMessage>>, StoreError> {
+    self.reading(|state| {
+      let has_complete_words = state
+        .maybe_catalog
+        .as_ref()
+        .is_some_and(|catalog| catalog.is_complete_for(true));
+      if !has_complete_words {
+        return Ok(None);
+      }
+      let mut keys = Vec::new();
+      self.words(state, conversation, |nodes| {
+        sealed_index::scan(nodes, Bound::Unbounded, Direction::Forward, &mut |key, filter| {
+          if filter.may_contain(probe) {
+            keys.push(*key);
+          }
+          true
+        })
+      })?;
+      let messages = self.load_listed(state, conversation, &keys, |message| {
+        message.searchable_text().is_some()
+      })?;
+      Ok(Some(messages))
+    })
+  }
+
   fn reactions_to(
     &self,
     conversation: ConversationId,
@@ -2033,6 +2142,7 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
       self.index(state, conversation, |nodes| sealed_index::clear(nodes))?;
       self.feed(state, conversation, |nodes| sealed_index::clear(nodes))?;
       self.relations(state, conversation, |nodes| sealed_index::clear(nodes))?;
+      self.words(state, conversation, |nodes| sealed_index::clear(nodes))?;
       self.sweep_messages(state, conversation)?;
       self.note_feed_change(state, conversation, FeedChange::Reshaped)?;
       state.messages.retain(|(held, _)| *held != conversation);
@@ -2150,7 +2260,8 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
       && (state.message_nodes.has_dirty()
         || state.directory_nodes.has_dirty()
         || state.feed_nodes.has_dirty()
-        || state.relation_nodes.has_dirty())
+        || state.relation_nodes.has_dirty()
+        || state.word_nodes.has_dirty())
     {
       // A panic here must still end the group: left open, every later group would nest in it, report
       // success and never commit. It fails the group, and goes on once the group has ended.
@@ -3309,6 +3420,256 @@ mod tests {
     }
   }
 
+  /// Issue #1833: the browser's index of word prefixes, which its search reads instead of every
+  /// message.
+  mod words {
+    use teamcraft_client_api::search::find_ci;
+
+    use super::*;
+    use crate::store::MessageContent;
+
+    const CHANNEL: i64 = 1;
+    const TEXTS: [&str; 8] = [
+      "Meeting notes from Monday",
+      "please review the PR before lunch",
+      "Rechnung 2026-11 an Kunde A",
+      "größere Änderung am Server",
+      "the build broke again, see build-log",
+      "Lunch? Pizza at noon",
+      "",
+      "notes: server restart at 23:00",
+    ];
+
+    /// What the index lets through, checked against the text, is what substring search finds
+    /// where the term starts a word, and never less.
+    #[test]
+    fn candidates_agree_with_substring_search_on_word_prefixes() {
+      let records = with_words();
+      let key = SymmetricKey::generate(&mut OsRng);
+      let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::default()).unwrap();
+      write_texts(&store);
+      let mut file = numbered(CHANNEL, 50);
+      file.content = media_content("application/pdf");
+      store.upsert_message(&file).unwrap();
+      let file_name = file.searchable_text().unwrap().to_string();
+      let mut event = numbered(CHANNEL, 51);
+      event.content = MessageContent::Deleted;
+      store.upsert_message(&event).unwrap();
+      let all = store.messages(id(CHANNEL), MessageFilter::All).unwrap();
+
+      let file_word = file_name
+        .split(|character: char| !character.is_alphanumeric())
+        .find(|word| !word.is_empty())
+        .unwrap()
+        .to_string();
+      for term in [
+        "mee", "notes", "MON", "pr", "lunch", "rech", "2026", "11", "kunde", "grö", "ÄND", "serv", "server",
+        "build", "build-l", "log", "23:00", "pizza", "zebra", "a", "n", &file_word,
+      ] {
+        let found = found(&store, term);
+        let starting_a_word: Vec<ClientMessageId> = all
+          .iter()
+          .filter(|message| {
+            message
+              .searchable_text()
+              .is_some_and(|text| starts_a_word(text, term))
+          })
+          .map(|message| message.client_message_id)
+          .collect();
+        let substring: Vec<ClientMessageId> = all
+          .iter()
+          .filter(|message| {
+            message
+              .searchable_text()
+              .is_some_and(|text| find_ci(text, term).is_some())
+          })
+          .map(|message| message.client_message_id)
+          .collect();
+        assert!(
+          starting_a_word.iter().all(|wanted| found.contains(wanted)),
+          "{term}: {found:?} misses some of {starting_a_word:?}"
+        );
+        assert!(
+          found.iter().all(|hit| substring.contains(hit)),
+          "{term}: {found:?} beyond {substring:?}"
+        );
+      }
+    }
+
+    #[test]
+    fn edits_and_deletions_move_the_index() {
+      let records = with_words();
+      let key = SymmetricKey::generate(&mut OsRng);
+      let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::default()).unwrap();
+      let mut stored = text(CHANNEL, 1, "alpha beta");
+      store.upsert_message(&stored).unwrap();
+      store.upsert_message(&text(CHANNEL, 2, "alphabet soup")).unwrap();
+      assert_eq!(found(&store, "alp").len(), 2);
+
+      stored.content = text(CHANNEL, 1, "gamma delta").content;
+      store.upsert_message(&stored).unwrap();
+      assert_eq!(found(&store, "alp"), [client_id(CHANNEL, 2)]);
+      assert_eq!(found(&store, "gam"), [client_id(CHANNEL, 1)]);
+
+      store.delete_message(id(CHANNEL), client_id(CHANNEL, 1)).unwrap();
+      assert!(found(&store, "gam").is_empty());
+      let mut tombstone = text(CHANNEL, 2, "");
+      tombstone.content = MessageContent::Deleted;
+      store.upsert_message(&tombstone).unwrap();
+      assert!(found(&store, "alp").is_empty());
+
+      store.upsert_message(&text(CHANNEL, 3, "omega")).unwrap();
+      store.delete_messages(id(CHANNEL)).unwrap();
+      assert!(found(&store, "ome").is_empty());
+      drop(store);
+      let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::default()).unwrap();
+      assert!(found(&store, "ome").is_empty());
+    }
+
+    /// A store from before the index (or any store without it) builds it once when the browser opens
+    /// it; one whose backend keeps none has none to offer.
+    #[test]
+    fn a_catalog_without_word_indexes_gets_them_once() {
+      let records = Records::default();
+      let key = SymmetricKey::generate(&mut OsRng);
+      let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::default()).unwrap();
+      write_texts(&store);
+      assert_eq!(store.word_candidates(id(CHANNEL), &probe("notes")).unwrap(), None);
+      let old_generation = store.read_catalog_state().unwrap().unwrap().generation();
+      drop(store);
+
+      records.indexes_words.set(true);
+      let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::default()).unwrap();
+      let state = store.read_catalog_state().unwrap().unwrap();
+      assert!(state.is_complete_for(true));
+      assert_ne!(state.generation(), old_generation, "built again");
+      assert_eq!(
+        found(&store, "notes"),
+        [client_id(CHANNEL, 0), client_id(CHANNEL, 7)]
+      );
+      drop(store);
+
+      let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::default()).unwrap();
+      assert_eq!(
+        store.read_catalog_state().unwrap().unwrap().generation(),
+        state.generation(),
+        "built once"
+      );
+    }
+
+    /// A build of the word indexes stopped midway (a reload) goes on from there, and finds all.
+    #[test]
+    fn an_interrupted_build_of_the_word_indexes_goes_on() {
+      let records = Records::default();
+      let key = SymmetricKey::generate(&mut OsRng);
+      let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::default()).unwrap();
+      fill(&store);
+      write_texts(&store);
+      drop(store);
+
+      records.indexes_words.set(true);
+      let store = SealedStore::unbuilt(&records, &key, SealedStoreLimits::default()).unwrap();
+      assert_eq!(store.build_catalog(Some(1)).unwrap(), BuildProgress::Interrupted);
+      let maybe_state = store.read_catalog_state().unwrap();
+      assert!(matches!(
+        maybe_state,
+        Some(CatalogState::Building { has_words: true, .. })
+      ));
+      drop(store);
+
+      let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::default()).unwrap();
+      let state = store.read_catalog_state().unwrap().unwrap();
+      assert!(state.is_complete_for(true));
+      assert_eq!(state.generation(), maybe_state.unwrap().generation(), "went on");
+      assert_eq!(
+        found(&store, "notes"),
+        [client_id(CHANNEL, 0), client_id(CHANNEL, 7)]
+      );
+      assert_eq!(
+        found(&store, "message").len(),
+        usize::try_from(MESSAGES_PER_CONVERSATION).unwrap() - TEXTS.len()
+      );
+    }
+
+    #[test]
+    fn a_damaged_word_index_is_built_again() {
+      let records = with_words();
+      let key = SymmetricKey::generate(&mut OsRng);
+      let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::default()).unwrap();
+      write_texts(&store);
+      let generation = store.read_catalog_state().unwrap().unwrap().generation();
+      drop(store);
+      let root = store_entry(&records, &key, &format!("{generation:016x}/w/{CHANNEL}/r"));
+      records.map.lock().unwrap().insert(root, vec![1; 64]);
+
+      let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::default()).unwrap();
+      assert_eq!(
+        found(&store, "notes"),
+        [client_id(CHANNEL, 0), client_id(CHANNEL, 7)]
+      );
+      assert_ne!(
+        store.read_catalog_state().unwrap().unwrap().generation(),
+        generation,
+        "built again"
+      );
+    }
+
+    fn with_words() -> Records {
+      let records = Records::default();
+      records.indexes_words.set(true);
+      records
+    }
+
+    fn write_texts(store: &SealedStore<&Records>) {
+      for (n, body) in (0..).zip(TEXTS) {
+        store.upsert_message(&text(CHANNEL, n, body)).unwrap();
+      }
+    }
+
+    fn text(conversation: i64, n: i64, body: &str) -> StoredMessage {
+      let mut stored = numbered(conversation, n);
+      stored.content = MessageContent::Text {
+        body: body.into(),
+        mentions: Vec::new(),
+        meta: Default::default(),
+      };
+      stored
+    }
+
+    fn probe(term: &str) -> WordProbe {
+      WordProbe::of_terms([term])
+    }
+
+    /// The messages the index lets through for `term` that hold it, as search checks them.
+    fn found(store: &SealedStore<&Records>, term: &str) -> Vec<ClientMessageId> {
+      store
+        .word_candidates(id(CHANNEL), &probe(term))
+        .unwrap()
+        .unwrap()
+        .into_iter()
+        .filter(|message| find_ci(message.searchable_text().unwrap(), term).is_some())
+        .map(|message| message.client_message_id)
+        .collect()
+    }
+
+    /// Whether `term` occurs in `text` where a word starts.
+    fn starts_a_word(text: &str, term: &str) -> bool {
+      text.char_indices().any(|(offset, _)| {
+        let is_word_start = text[..offset]
+          .chars()
+          .next_back()
+          .is_none_or(|before| !before.is_alphanumeric());
+        is_word_start && find_ci(&text[offset..], term).is_some_and(|(start, _)| start == 0)
+      })
+    }
+
+    fn store_entry(records: &Records, key: &SymmetricKey, name: &str) -> LookupId {
+      SealedStore::unbuilt(records, key, SealedStoreLimits::default())
+        .unwrap()
+        .entry_id(CATALOG_TABLE, name)
+    }
+  }
+
   /// The catalog is derived data: whatever happens to it, the records decide and the store goes on.
   mod repair {
     use super::*;
@@ -3631,6 +3992,8 @@ mod tests {
     /// How the next lazy put goes wrong, if it does.
     put_trouble: Cell<PutTrouble>,
     failed_groups: Cell<usize>,
+    /// Keeps word indexes, as the browser's backend does.
+    indexes_words: Cell<bool>,
   }
 
   #[derive(Clone, Copy, Default)]
@@ -3642,6 +4005,10 @@ mod tests {
   }
 
   impl RecordBackend for &Records {
+    fn indexes_words(&self) -> bool {
+      self.indexes_words.get()
+    }
+
     fn put_record(&self, id: &LookupId, sealed: &[u8]) -> Result<(), StoreError> {
       self.map.lock().unwrap().insert(*id, sealed.to_vec());
       Ok(())
@@ -3839,6 +4206,76 @@ mod tests {
         records.reads.get() <= MAX_READS + usize::try_from(MESSAGES).unwrap() / 100,
         "the conversation's files: {} reads",
         records.reads.get()
+      );
+    }
+
+    /// Issue #1833: the browser's search reads the conversation's word index and the messages it
+    /// lets through, not every message as it did before.
+    #[test]
+    fn a_search_reads_the_word_index_not_every_message() {
+      let me = id::<UserId>(2);
+      let needles = [3, MESSAGES / 2, MESSAGES - 1];
+      let records: &'static Records = Box::leak(Box::default());
+      records.indexes_words.set(true);
+      let key = SymmetricKey::generate(&mut OsRng);
+      let store = SealedStore::open_backend(records, &key, SealedStoreLimits::default()).unwrap();
+      for start in (0..MESSAGES).step_by(5_000) {
+        crate::store::write_group(&store, || {
+          for n in start..start + 5_000 {
+            let mut stored = numbered(CHANNEL, n);
+            let body = if needles.contains(&n) {
+              format!("found the Needle-{n}")
+            } else {
+              format!("message number {n} about haystacks")
+            };
+            stored.content = MessageContent::Text {
+              body,
+              mentions: Vec::new(),
+              meta: Default::default(),
+            };
+            store.upsert_message(&stored)?;
+          }
+          Ok::<_, StoreError>(())
+        })
+        .unwrap();
+      }
+      crate::records::put_json(
+        &store,
+        Table::Conversations,
+        &id::<ConversationId>(CHANNEL).to_string(),
+        &channel(),
+      )
+      .unwrap();
+      drop(store);
+
+      let search = |term: &str| {
+        let store = SealedStore::open_backend(records, &key, SealedStoreLimits::minimal()).unwrap();
+        let tracked = TrackedStore::with_message_cache(store, DEFAULT_MESSAGE_CACHE_BYTES);
+        let backend = CoreChatBackend::new(tracked, me, Box::new(crate::clock::ManualClock::new(0)));
+        records.reads.set(0);
+        let query = teamcraft_client_api::search::parse_query(term);
+        let mut found: Vec<ClientMessageId> = backend
+          .word_index_candidates(&query, &crate::search_scope::ConversationScope::All)
+          .iter()
+          .map(|message| message.client_message_id)
+          .collect();
+        found.sort_unstable_by_key(|client| *client.as_bytes());
+        (found, records.reads.get())
+      };
+      let expected: Vec<ClientMessageId> = needles.iter().map(|n| client_id(CHANNEL, *n)).collect();
+      let (found, reads) = search("needl");
+      assert_eq!(found, expected);
+      // The index's root and pages (about 80 for 20,000 messages) and the few messages it passes.
+      let index_reads = MAX_READS + usize::try_from(MESSAGES).unwrap() / 100;
+      assert!(reads <= index_reads, "with the word index: {reads} reads");
+
+      // Before: a store without the index reads every message of the conversation.
+      records.indexes_words.set(false);
+      let (found, reads) = search("needl");
+      assert_eq!(found, expected);
+      assert!(
+        reads >= usize::try_from(MESSAGES).unwrap(),
+        "without the word index: {reads} reads"
       );
     }
 

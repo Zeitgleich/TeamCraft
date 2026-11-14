@@ -6503,7 +6503,11 @@ The browser has neither SQLCipher nor an OS keystore. The web client keeps the s
    messages in display order with server ID, thread and a few flags (hidden, media, files, documents,
    web links, unreadable; files and documents since catalog version 3, issue #1509; web links since
    version 4, issue #609), the
-   rows of its feed, and its reactions by target, replies by thread and events.
+   rows of its feed, and its reactions by target, replies by thread and events. The browser's store
+   (no tantivy there) also keeps a word index per conversation (issue #1833): for each text and file
+   a Bloom filter of the first one to six characters of its words, lowercased, which its search
+   reads instead of every message. It is derived from the text and sealed with it, so it adds
+   nothing readable without the key; a store without it builds it once (catalog state `has_words`).
    Each is a paged index: a root listing pages of up to 256 entries. Table, conversation and message
    IDs stay inside the sealed plaintext. The catalog is derived from the records: a node that is
    damaged, or disagrees with them, is built again under a new random generation, and never makes
@@ -7349,8 +7353,11 @@ Implemented (`teamcraft-core::search`, first version):
 - A store from before the index (or one whose index is damaged or of another format) starts over:
   the indexer queues every conversation, and searches read those from the store until they are
   indexed.
-- The browser has no tantivy (it doesn't target wasm32) and scans the store instead; it writes no
-  queue.
+- The browser has no tantivy (it doesn't target wasm32) and writes no queue. Its store's catalog
+  keeps a word index (§9.1, issue #1833): a search reads each conversation's filters of word
+  prefixes and only the messages they let through, then matches the terms as substrings. A term is
+  found where it starts a word, not in the middle of one; a conversation without a complete index
+  is read whole.
 - Finding segments: when a device stores a segment announcement (received, or its own on
   publishing), it also records the announced segment under `conversation/month` in the encrypted
   store's `segment_announcements` table, in the same group of writes as the message; of two

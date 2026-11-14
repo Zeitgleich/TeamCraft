@@ -11,7 +11,7 @@ use teamcraft_proto::{ClientMessageId, ConversationId, MessageId, ThreadId, User
 
 use super::{
   Attached, AttachedRange, FeedVersion, LocalStore, MessageEdge, MessageFilter, MessageOrder, MessageSlot,
-  SealedSqliteStore, StoreError, StoredMessage, Table, UserLink, WriteTally, Written,
+  SealedSqliteStore, StoreError, StoredMessage, Table, UserLink, WordProbe, WriteTally, Written,
 };
 use crate::push_preview::ShownMessage;
 
@@ -265,6 +265,14 @@ impl LocalStore for LaneStore {
     limit: usize,
   ) -> Result<Vec<StoredMessage>, StoreError> {
     self.reading().user_messages(conversation, user, link, limit)
+  }
+
+  fn word_candidates(
+    &self,
+    conversation: ConversationId,
+    probe: &WordProbe,
+  ) -> Result<Option<Vec<StoredMessage>>, StoreError> {
+    self.reading().word_candidates(conversation, probe)
   }
 
   fn reactions_to(

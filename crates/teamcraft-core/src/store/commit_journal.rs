@@ -49,8 +49,9 @@ pub(crate) struct WriteSet {
   pub(crate) wiped: BTreeSet<ConversationId>,
   /// Conversations whose messages or feed changed: their revision and feed version move.
   pub(crate) conversations: BTreeSet<ConversationId>,
-  /// Index scopes whose nodes were written, per kind of index (messages, directory, feed, relations).
-  pub(crate) scopes: [BTreeSet<String>; 4],
+  /// Index scopes whose nodes were written, per kind of index (messages, directory, feed, relations,
+  /// words).
+  pub(crate) scopes: [BTreeSet<String>; 5],
   /// The catalog itself changed (built, started over): nothing cached of it holds.
   pub(crate) is_everything: bool,
 }
