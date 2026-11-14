@@ -195,6 +195,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .await?;
     // The meeting the room's founding names in its anchor (D10, #1747).
     self.note_meeting_of_chat(meeting.conversation_id, meeting.id)?;
+    // Started here: the server's times, bounded, are its schedule from now on (#1919).
+    #[cfg(feature = "ui")]
+    self.note_meeting_schedule(
+      meeting.id,
+      teamcraft_client_api::meeting_schedule::ScheduleNote::Started {
+        server_times: teamcraft_client_api::meeting_schedule::MeetingTimes::of(&meeting),
+      },
+    )?;
     let result = self
       .move_call_to_meeting(from, meeting.conversation_id, in_call, added)
       .await;

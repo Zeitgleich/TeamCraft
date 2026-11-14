@@ -201,6 +201,8 @@ struct State {
   call_rosters: BTreeMap<ConversationId, CallStateResponse>,
   /// Instant meetings by the idempotency key they were created with.
   instant_meetings: HashMap<IdempotencyKey, MeetingResponse>,
+  /// The start and end the server answers an instant meeting's create with (default: none).
+  maybe_instant_times: Option<(i64, i64)>,
   /// Calls moved into a meeting (`move_call`), in order.
   call_moves: Vec<(ConversationId, MoveCallRequest)>,
   /// REST calls per user, also those that failed (tests about idle traffic).
@@ -1417,6 +1419,11 @@ impl FakeServer {
   }
 
   /// The server names another meeting for a meeting chat (a hostile server).
+  /// The start and end the server answers the next instant meetings' creates with.
+  pub fn set_instant_meeting_times(&self, starts_at_ms: i64, ends_at_ms: i64) {
+    self.lock().maybe_instant_times = Some((starts_at_ms, ends_at_ms));
+  }
+
   pub fn set_meeting_of_chat(&self, chat: ConversationId, meeting: teamcraft_proto::MeetingId) {
     if let Some(conversation) = self.lock().conversations.get_mut(&chat) {
       conversation.response.maybe_meeting_id = Some(meeting);
@@ -4251,8 +4258,8 @@ impl ServerApi for FakeServerApi {
         id: state.next_id(),
         title,
         maybe_description: None,
-        starts_at: UnixMillis(0),
-        ends_at: UnixMillis(0),
+        starts_at: UnixMillis(state.maybe_instant_times.map_or(0, |(starts_at, _)| starts_at)),
+        ends_at: UnixMillis(state.maybe_instant_times.map_or(0, |(_, ends_at)| ends_at)),
         kind: MeetingKind::Instant,
         status: MeetingStatus::Scheduled,
         has_lobby: true,

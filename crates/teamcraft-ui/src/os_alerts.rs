@@ -704,9 +704,9 @@ fn watch_meetings(state: AppState, i18n: I18n, hub: MeetingsHub) {
           continue;
         }
         if let Some(meeting) = current.iter().find(|meeting| meeting.id == news.meeting) {
-          let until = meeting.ends_at.0 + crate::components::meetings_view::GUEST_ACCESS_GRACE_MS;
+          let times = teamcraft_client_api::meeting_schedule::MeetingTimes::of(meeting);
           let (id, conversation) = (meeting.id, meeting.conversation_id);
-          state.try_write(|backend| backend.sync_meeting_admitters(id, conversation, until));
+          state.try_write(|backend| backend.sync_meeting_admitters(id, conversation, times));
         }
       }
     }
@@ -797,9 +797,9 @@ impl MeetingWatch {
         continue;
       }
       synced.insert(due.meeting, now);
-      self.state.try_write(|backend| {
-        backend.sync_meeting_admitters(due.meeting, due.conversation, due.expires_at_ms)
-      });
+      self
+        .state
+        .try_write(|backend| backend.sync_meeting_admitters(due.meeting, due.conversation, due.server_times));
     }
     let maybe_call = self
       .state

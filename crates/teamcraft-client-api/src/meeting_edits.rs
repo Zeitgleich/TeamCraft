@@ -13,7 +13,8 @@ use teamcraft_proto::{
   UnixMillis, UpdateMeetingRequest,
 };
 
-use crate::meeting_invitees::{GUEST_ACCESS_GRACE_MS, attending_users};
+use crate::meeting_invitees::attending_users;
+use crate::meeting_schedule::MeetingTimes;
 use crate::model::{ConversationId, TimestampMs, UserId};
 
 pub const MS_PER_MINUTE: i64 = 60_000;
@@ -226,17 +227,14 @@ pub fn is_over(meeting: &MeetingResponse, now: TimestampMs) -> bool {
   meeting.status != MeetingStatus::Scheduled || meeting.ends_at.0 <= now
 }
 
-/// Until when the organizer's signed admitters of `meeting` last: its end and the guests' grace.
-pub fn admitters_until(meeting: &MeetingResponse) -> TimestampMs {
-  meeting.ends_at.0 + GUEST_ACCESS_GRACE_MS
-}
-
 /// A meeting whose signed admitters the organizer's device compares now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AdmittersDue {
   pub meeting: MeetingId,
   pub conversation: ConversationId,
-  pub expires_at_ms: TimestampMs,
+  /// The meeting's (occurrence's) times as the server lists them; the core caps the signed end
+  /// by its own record (`meeting_schedule::admitters_until`).
+  pub server_times: MeetingTimes,
 }
 
 /// The meetings `me` organizes that run or start within [`ADMITTERS_LEAD_MS`] and aren't over:
@@ -256,7 +254,7 @@ pub fn admitters_due(meetings: &[MeetingResponse], me: UserId, now: TimestampMs)
     due.push(AdmittersDue {
       meeting: meeting.id,
       conversation: meeting.conversation_id,
-      expires_at_ms: admitters_until(meeting),
+      server_times: MeetingTimes::of(meeting),
     });
   }
   due
@@ -505,7 +503,7 @@ mod tests {
       vec![AdmittersDue {
         meeting: soon.id,
         conversation: soon.conversation_id,
-        expires_at_ms: soon.ends_at.0 + GUEST_ACCESS_GRACE_MS,
+        server_times: MeetingTimes::of(&soon),
       }]
     );
   }

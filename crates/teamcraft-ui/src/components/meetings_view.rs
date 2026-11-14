@@ -9,6 +9,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::meeting_hosts::co_hosts_from_dialog;
+use teamcraft_client_api::meeting_schedule::{MeetingSchedule, MeetingTimes, ScheduleEdit, ScheduleNote};
 use teamcraft_core::meeting_lobby::{LobbyAdmission, SignedMembership};
 use teamcraft_crypto::guest_link::code_of_fingerprint;
 use teamcraft_proto::{
@@ -95,6 +96,12 @@ pub fn MeetingsView() -> impl IntoView {
             meeting.id,
             ChatInvitees::chosen(Vec::new()),
           )
+        });
+        // The times the server gave the meeting just started, bounded, are its schedule from here
+        // (#1919).
+        let server_times = MeetingTimes::of(&meeting);
+        state.try_write(|backend| {
+          backend.note_meeting_schedule(meeting.id, ScheduleNote::Started { server_times })
         });
         show_created(state, hub, meeting);
       }
@@ -1187,10 +1194,16 @@ pub fn ScheduleMeetingDialog(
             // decides whether this device lets guests of the link in by itself (#987 review).
             let has_lobby = request.has_lobby;
             state.try_write(|backend| backend.note_meeting_lobby(meeting.id, has_lobby));
-            // Who besides this device may let guests in, signed while the organizer is here (#1103).
-            let until = meeting.ends_at.0 + GUEST_ACCESS_GRACE_MS;
+            // The schedule as chosen here, never as the server reports it later, bounds the
+            // admitters' validity (#1919).
+            let schedule = MeetingSchedule::scheduled(&request);
             state.try_write(|backend| {
-              backend.sync_meeting_admitters(meeting.id, meeting.conversation_id, until)
+              backend.note_meeting_schedule(meeting.id, ScheduleNote::Scheduled { schedule })
+            });
+            // Who besides this device may let guests in, signed while the organizer is here (#1103).
+            let times = MeetingTimes::of(&meeting);
+            state.try_write(|backend| {
+              backend.sync_meeting_admitters(meeting.id, meeting.conversation_id, times)
             });
             // Queued behind the chat's setup, so it goes into the group the notetaker is in.
             if has_notetaker {
@@ -1717,13 +1730,16 @@ pub(crate) async fn save_meeting_edit(
   if let Some(has_lobby) = request.maybe_has_lobby {
     state.try_write(|backend| backend.note_meeting_lobby(saved.id, has_lobby));
   }
+  if let Some(edit) = ScheduleEdit::of(&before, &request) {
+    state.try_write(|backend| backend.note_meeting_schedule(saved.id, ScheduleNote::Edited { edit }));
+  }
   // From the saved meeting, which is what the server holds now.
   let (invitees, removed) = saved_change(&before, &saved, added);
   state.try_write(|backend| {
     backend.update_meeting_chat_members(saved.conversation_id, saved.id, invitees, removed)
   });
-  let until = saved.ends_at.0 + GUEST_ACCESS_GRACE_MS;
-  state.try_write(|backend| backend.sync_meeting_admitters(saved.id, saved.conversation_id, until));
+  let times = MeetingTimes::of(&saved);
+  state.try_write(|backend| backend.sync_meeting_admitters(saved.id, saved.conversation_id, times));
   clear_pending_edit(before.id);
   true
 }

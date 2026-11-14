@@ -15,10 +15,11 @@ use std::collections::HashMap;
 
 use teamcraft_client_api::backend::ChatBackend as _;
 use teamcraft_client_api::meeting_edits::{
-  ADMITTERS_SYNC_INTERVAL_MS, DraftProblem, MeetingDraft, PendingEdit, admitters_due, admitters_until,
-  invited_users, invitee_change, noting_pending_edit, plan_reconcile,
+  ADMITTERS_SYNC_INTERVAL_MS, DraftProblem, MeetingDraft, PendingEdit, admitters_due, invited_users,
+  invitee_change, noting_pending_edit, plan_reconcile,
 };
 use teamcraft_client_api::meeting_invitees::{ChatInvitees, added_users, attending_users, saved_change};
+use teamcraft_client_api::meeting_schedule::{MeetingSchedule, MeetingTimes, ScheduleEdit, ScheduleNote};
 use teamcraft_core::clock::{Clock as _, SystemClock};
 use teamcraft_core::meeting_invitees::InviteeList;
 use teamcraft_core::records;
@@ -169,6 +170,14 @@ impl Engine {
           meeting: meeting.id,
           has_lobby: request.has_lobby,
         },
+        // The schedule as chosen here, never as the server reports it later, bounds the
+        // admitters' validity (#1919).
+        CoreCommand::NoteMeetingSchedule {
+          meeting: meeting.id,
+          note: ScheduleNote::Scheduled {
+            schedule: MeetingSchedule::scheduled(&request),
+          },
+        },
         sync_admitters(&meeting),
       ])
       .await?;
@@ -207,6 +216,14 @@ impl Engine {
           invitees: InviteeList::Chosen {
             added: Vec::new(),
             kept: Vec::new(),
+          },
+        },
+        // The times the server gave the meeting just started, bounded, are its schedule from here
+        // (#1919).
+        CoreCommand::NoteMeetingSchedule {
+          meeting: meeting.id,
+          note: ScheduleNote::Started {
+            server_times: MeetingTimes::of(&meeting),
           },
         },
         sync_admitters(&meeting),
@@ -262,6 +279,12 @@ impl Engine {
       commands.push(CoreCommand::NoteMeetingLobby {
         meeting: saved_meeting.id,
         has_lobby,
+      });
+    }
+    if let Some(edit) = ScheduleEdit::of(&before, &request) {
+      commands.push(CoreCommand::NoteMeetingSchedule {
+        meeting: saved_meeting.id,
+        note: ScheduleNote::Edited { edit },
       });
     }
     commands.push(CoreCommand::UpdateMeetingChatMembers {
@@ -355,7 +378,7 @@ impl Engine {
       commands.push(CoreCommand::SyncMeetingAdmitters {
         meeting: due.meeting,
         conversation: due.conversation,
-        expires_at_ms: due.expires_at_ms,
+        server_times: due.server_times,
       });
     }
     let edits = self.pending_edits()?;
@@ -437,7 +460,7 @@ fn sync_admitters(meeting: &MeetingResponse) -> CoreCommand {
   CoreCommand::SyncMeetingAdmitters {
     meeting: meeting.id,
     conversation: meeting.conversation_id,
-    expires_at_ms: admitters_until(meeting),
+    server_times: MeetingTimes::of(meeting),
   }
 }
 

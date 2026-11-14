@@ -699,15 +699,23 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.is_open_by_own_record(meeting)
   }
 
+  fn note_meeting_schedule(
+    &self,
+    meeting: teamcraft_proto::MeetingId,
+    note: teamcraft_client_api::meeting_schedule::ScheduleNote,
+  ) {
+    self.chat.note_meeting_schedule(meeting, note);
+  }
+
   fn sync_meeting_admitters(
     &self,
     meeting: teamcraft_proto::MeetingId,
     conversation: ConversationId,
-    expires_at_ms: i64,
+    server_times: teamcraft_client_api::meeting_schedule::MeetingTimes,
   ) {
     self
       .chat
-      .sync_meeting_admitters(meeting, conversation, expires_at_ms);
+      .sync_meeting_admitters(meeting, conversation, server_times);
   }
 
   fn check_meeting_admission(&self, conversation: ConversationId) {

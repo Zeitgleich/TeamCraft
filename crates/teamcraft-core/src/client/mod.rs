@@ -45,6 +45,8 @@ mod linking;
 pub(crate) mod list_outcomes;
 mod live_catch_up;
 mod meeting_hosts;
+#[cfg(feature = "ui")]
+mod meeting_schedule;
 mod member_device;
 mod messaging;
 mod missing_keys;
@@ -253,6 +255,11 @@ pub struct ClientSettings {
   pub key_reask_retry: std::time::Duration,
   /// The wait before the next such request doubles with each one, up to this.
   pub key_reask_retry_max: std::time::Duration,
+  /// The longest a meeting started on this device ("Meet now", a call that grows into a meeting)
+  /// lasts by the device's own record (#1919): its guests' signed access ends no later than this
+  /// after it started plus the guests' grace, whatever end the server answered. The server opens
+  /// such meetings for eight hours.
+  pub max_instant_meeting: std::time::Duration,
   /// Somebody added to a conversation who has no device for this long is shown as having never set
   /// up the app, and the wait for their first device ends (their first device still gets them in,
   /// should it ever appear).
@@ -619,6 +626,7 @@ impl Default for ClientSettings {
       self_add_retry_max: std::time::Duration::from_secs(24 * 60 * 60),
       key_reask_retry: std::time::Duration::from_secs(2 * 60),
       key_reask_retry_max: std::time::Duration::from_secs(60 * 60),
+      max_instant_meeting: std::time::Duration::from_secs(8 * 60 * 60),
       pending_addition_expiry: std::time::Duration::from_secs(90 * 24 * 60 * 60),
       rejoin_cooldown: std::time::Duration::from_secs(30 * 60),
       change_announcement_window: std::time::Duration::from_secs(10 * 60),

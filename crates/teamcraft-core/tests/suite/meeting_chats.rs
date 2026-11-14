@@ -744,6 +744,78 @@ mod call_moves {
     bob.client.accept_call_move(dm, room).await.unwrap();
   }
 
+  /// A server that answers the room's create with an end months away doesn't lengthen how long
+  /// the organizer's device signs its guests in for (#1919).
+  #[cfg(feature = "ui")]
+  #[tokio::test]
+  async fn a_room_started_for_a_call_is_signed_no_longer_than_an_instant_meeting_lasts() {
+    use teamcraft_client_api::meeting_invitees::GUEST_ACCESS_GRACE_MS;
+    use teamcraft_client_api::meeting_schedule::MeetingTimes;
+    use teamcraft_crypto::ids::ConversationId as SignedChatId;
+    use teamcraft_crypto::meeting_admitters::{AdmittersExpectation, SignedMeetingAdmitters};
+
+    let (server, mut alice, mut bob, carol, _) = dm_call().await;
+    let dm = in_dm_call(&mut alice, &mut bob).await;
+    let far_end = NOW_MS + 90 * 24 * 60 * 60_000;
+    server.set_instant_meeting_times(NOW_MS, far_end);
+    let (alice_id, bob_id, carol_id) = (
+      alice.client.user_id(),
+      bob.client.user_id(),
+      carol.client.user_id(),
+    );
+
+    let room = alice
+      .client
+      .add_people_to_call(
+        dm,
+        &[alice_id, bob_id],
+        &[carol_id],
+        None,
+        IdempotencyKey::random(),
+      )
+      .await
+      .unwrap();
+    let meeting = alice
+      .api
+      .conversation(room)
+      .await
+      .unwrap()
+      .maybe_meeting_id
+      .unwrap();
+    // The fake makes the room without naming its organizer, as the server names Alice.
+    server.set_organizer_of_chat(room, alice_id);
+    let server_times = MeetingTimes {
+      starts_at_ms: NOW_MS,
+      ends_at_ms: far_end,
+    };
+    assert!(
+      alice
+        .client
+        .sync_scheduled_meeting_admitters(meeting, room, server_times)
+        .await
+        .unwrap()
+    );
+
+    let bytes = server.meeting_admitters(room).unwrap();
+    let organizer: teamcraft_crypto::identity::IdentityFingerprint =
+      alice.client.own_fingerprint().parse().unwrap();
+    let verified = SignedMeetingAdmitters::from_bytes(&bytes)
+      .unwrap()
+      .verify(&AdmittersExpectation {
+        organizer: &organizer,
+        maybe_meeting_id: None,
+        conversation_id: SignedChatId::new(room.to_string().parse().unwrap()),
+        now_ms: 0,
+        maybe_seen_sequence: None,
+      })
+      .unwrap();
+    let max_instant_ms = i64::try_from(settings().max_instant_meeting.as_millis()).unwrap();
+    assert_eq!(
+      i64::try_from(verified.expires_at_ms()).unwrap(),
+      NOW_MS + max_instant_ms + GUEST_ACCESS_GRACE_MS
+    );
+  }
+
   #[tokio::test]
   async fn a_move_is_followed_once() {
     let (server, mut alice, mut bob, _, _) = dm_call().await;

@@ -42,6 +42,7 @@ pub mod media_viewer;
 pub mod meeting_edits;
 pub mod meeting_hosts;
 pub mod meeting_invitees;
+pub mod meeting_schedule;
 pub mod message_sound;
 pub mod mobile_settings;
 pub mod model;

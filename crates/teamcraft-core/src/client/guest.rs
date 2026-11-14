@@ -383,7 +383,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// record, as the organizer's key signed it before). Signs anew only when that differs from the
   /// server's newest statement or the statement ends before `expires_at_ms`; `Ok(true)` when it
   /// published one. Another device of the organizer publishing at the same time is no error: the
-  /// next call compares again.
+  /// next call compares again. The apps sign through `sync_scheduled_meeting_admitters`, which
+  /// takes the end from the schedule recorded on this device (#1919).
   pub async fn sync_meeting_admitters(
     &mut self,
     meeting: MeetingId,

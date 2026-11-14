@@ -1154,10 +1154,14 @@ pub enum ChatAction {
     meeting: teamcraft_proto::MeetingId,
     has_lobby: bool,
   },
+  NoteMeetingSchedule {
+    meeting: teamcraft_proto::MeetingId,
+    note: crate::meeting_schedule::ScheduleNote,
+  },
   SyncMeetingAdmitters {
     meeting: teamcraft_proto::MeetingId,
     conversation: ConversationId,
-    expires_at_ms: i64,
+    server_times: crate::meeting_schedule::MeetingTimes,
   },
   CheckMeetingAdmission {
     conversation: ConversationId,
@@ -1607,11 +1611,12 @@ impl ChatAction {
       } => backend.let_guest_into_meeting_chat(conversation, guest, knock_fingerprint, access_ends_at_ms),
       Self::PrepareGuestKeyCode { guest } => backend.prepare_guest_key_code(guest),
       Self::NoteMeetingLobby { meeting, has_lobby } => backend.note_meeting_lobby(meeting, has_lobby),
+      Self::NoteMeetingSchedule { meeting, note } => backend.note_meeting_schedule(meeting, note),
       Self::SyncMeetingAdmitters {
         meeting,
         conversation,
-        expires_at_ms,
-      } => backend.sync_meeting_admitters(meeting, conversation, expires_at_ms),
+        server_times,
+      } => backend.sync_meeting_admitters(meeting, conversation, server_times),
       Self::CheckMeetingAdmission { conversation } => backend.check_meeting_admission(conversation),
       Self::ChangeMeetingHosts { change } => backend.change_meeting_hosts(change),
       Self::SetBookmarks {
