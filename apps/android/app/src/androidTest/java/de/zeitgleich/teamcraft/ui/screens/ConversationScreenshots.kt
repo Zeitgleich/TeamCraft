@@ -3,6 +3,8 @@ package de.zeitgleich.teamcraft.ui.screens
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.graphics.Bitmap
+import android.os.SystemClock
+import android.view.MotionEvent
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -38,8 +40,9 @@ private const val MINUTE_MILLIS = 60_000L
 /** Long side of the sample thumbnails, as senders make them since #315. */
 private const val THUMBNAIL_PX = 640
 private const val CONVERSATION = "c1"
-/** The oldest sample message: the scrolled pictures show it at the top. */
-private const val FIRST_MESSAGE = "1"
+/** The scrolled pictures drag the list in this many moves, [DRAG_STEP_MILLIS] apart. */
+private const val DRAG_STEPS = 30
+private const val DRAG_STEP_MILLIS = 16L
 /** The largest text size Android's settings offer. */
 private const val LARGE_FONT_SCALE = 2f
 
@@ -76,12 +79,12 @@ class ConversationScreenshots {
     // Scrolled back, so newer messages run on behind the composer and the navigation bar under one
     // scrim, with no solid band at the bottom edge.
     for (isDark in listOf(false, true)) {
-      shoot("conversation-scrolled-${if (isDark) "dark" else "light"}", isDark) { viewModel ->
-        ConversationSample(viewModel, maybeFocusMessage = FIRST_MESSAGE)
+      shoot("conversation-scrolled-${if (isDark) "dark" else "light"}", isDark, isScrolledBack = true) { viewModel ->
+        ConversationSample(viewModel, isLong = true)
       }
     }
-    shoot("conversation-scrolled-landscape-light", isDark = false, isLandscape = true) { viewModel ->
-      ConversationSample(viewModel, maybeFocusMessage = FIRST_MESSAGE)
+    shoot("conversation-scrolled-landscape-light", isDark = false, isLandscape = true, isScrolledBack = true) { viewModel ->
+      ConversationSample(viewModel, isLong = true)
     }
     // The desktop's comfortable and compact lists instead of bubbles (#598, #1488).
     val layout = MessageLayoutPrefs.of(InstrumentationRegistry.getInstrumentation().targetContext)
@@ -102,6 +105,7 @@ class ConversationScreenshots {
     isDark: Boolean,
     isLandscape: Boolean = false,
     fontScale: Float = 1f,
+    isScrolledBack: Boolean = false,
     content: @Composable (MainViewModel) -> Unit,
   ) {
     val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -131,6 +135,11 @@ class ConversationScreenshots {
       instrumentation.waitForIdleSync()
       // Not timing a result: lets decoding, the sheet's animation and fonts settle before the picture.
       Thread.sleep(4_000)
+      if (isScrolledBack) {
+        scrollBack(scenario)
+        // Not timing a result: lets the list come to rest after the drag.
+        Thread.sleep(1_000)
+      }
       val bitmap = instrumentation.uiAutomation.takeScreenshot()
       val directory = File(instrumentation.targetContext.getExternalFilesDir(null), "screenshots").apply { mkdirs() }
       File(directory, "$name.png").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
@@ -138,12 +147,42 @@ class ConversationScreenshots {
   }
 
   /**
+   * Drags the list down by a third of the screen, slowly and with a pause before lifting, so it
+   * moves back in history without a fling.
+   */
+  private fun scrollBack(scenario: ActivityScenario<MainActivity>) {
+    val instrumentation = InstrumentationRegistry.getInstrumentation()
+    var width = 0
+    var height = 0
+    scenario.onActivity { activity ->
+      width = activity.window.decorView.width
+      height = activity.window.decorView.height
+    }
+    val x = width / 2f
+    val fromY = height * 0.35f
+    val toY = fromY + height / 3f
+    val downAt = SystemClock.uptimeMillis()
+    fun send(action: Int, y: Float, at: Long) {
+      val event = MotionEvent.obtain(downAt, at, action, x, y, 0)
+      instrumentation.sendPointerSync(event)
+      event.recycle()
+    }
+    send(MotionEvent.ACTION_DOWN, fromY, downAt)
+    for (step in 1..DRAG_STEPS) {
+      send(MotionEvent.ACTION_MOVE, fromY + (toY - fromY) * step / DRAG_STEPS, downAt + step * DRAG_STEP_MILLIS)
+    }
+    // Held still before lifting: no velocity left for a fling.
+    send(MotionEvent.ACTION_MOVE, toY, downAt + (DRAG_STEPS + 20) * DRAG_STEP_MILLIS)
+    send(MotionEvent.ACTION_UP, toY, downAt + (DRAG_STEPS + 21) * DRAG_STEP_MILLIS)
+  }
+
+  /**
    * The conversation screen's parts with sample data (the screen itself reads the core), in the
-   * screen's own scaffold: the list runs on behind the floating composer. With [maybeFocusMessage]
-   * the list opens with that message at the top instead of at the end.
+   * screen's own scaffold: the list runs on behind the floating composer. [isLong] adds more
+   * messages, enough to scroll.
    */
   @Composable
-  private fun ConversationSample(viewModel: MainViewModel, maybeFocusMessage: String? = null) {
+  private fun ConversationSample(viewModel: MainViewModel, isLong: Boolean = false) {
     ChatScaffold(
       viewModel = viewModel,
       topBar = { ChromeTopBar(title = "Sam Doe", maybeOnBack = {}) },
@@ -152,7 +191,7 @@ class ConversationScreenshots {
       MessageFeed(
         viewModel = viewModel,
         snapshot = SNAPSHOT,
-        messages = if (maybeFocusMessage == null) messages() else messages() + followUps(),
+        messages = if (isLong) messages() + followUps() else messages(),
         extras = extras(),
         firstUnread = FirstUnread.None,
         sentCount = 0,
@@ -161,7 +200,6 @@ class ConversationScreenshots {
         onLongPress = {},
         modifier = Modifier.weight(1f),
         bottomInset = listBottomInset,
-        maybeFocusMessage = maybeFocusMessage,
       )
     }
   }
@@ -171,7 +209,7 @@ class ConversationScreenshots {
     fun message(id: String, author: String, minute: Int, body: String, reactions: List<Reaction> = emptyList()) =
       Message(id = id, conversation = CONVERSATION, author = author, sentAt = start + minute * MINUTE_MILLIS, body = body, reactions = reactions)
     return listOf(
-      message(FIRST_MESSAGE, SAM, 0, "Here are the photos from the site visit"),
+      message("1", SAM, 0, "Here are the photos from the site visit"),
       message("2", SAM, 1, ""),
       message("3", SAM, 2, ""),
       message("4", ME, 6, "Great, thanks! The second one is perfect for the report", listOf(Reaction("👍", 1, false))),
