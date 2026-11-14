@@ -189,6 +189,12 @@ async fn run() -> anyhow::Result<()> {
     );
     config.forwarding.probe_bytes = bytes;
   }
+  if let Some(secs) = env_count("TEAMCRAFT_SFU_LINK_PROBE_SECS")? {
+    config.link_probe_length = Duration::from_secs(u64::try_from(secs).unwrap_or(u64::MAX));
+  }
+  if let Some(tickets) = env_count("TEAMCRAFT_SFU_MAX_REMEMBERED_PROBE_TICKETS")? {
+    config.max_remembered_probe_tickets = tickets;
+  }
   if let Some(devices) = env_count("TEAMCRAFT_SFU_MAX_DEVICES_PER_USER_PER_CALL")? {
     config.max_devices_per_user_per_call = devices;
   }

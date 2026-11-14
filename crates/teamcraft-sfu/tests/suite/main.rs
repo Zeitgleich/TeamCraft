@@ -12,6 +12,7 @@ mod fallback;
 mod handover;
 mod handshake_frames;
 mod host_controls;
+mod link_probe;
 mod multi_device;
 mod native_client;
 mod reconnect;

@@ -28,6 +28,11 @@ pub struct SfuConfig {
   pub forwarding: ForwardingConfig,
   /// Time a new session has to send its `join` message.
   pub join_timeout: Duration,
+  /// A link probe session (#1959) ends this long after its ticket was taken, whatever it measured.
+  pub link_probe_length: Duration,
+  /// Link probe ticket ids remembered at once (each opens one session); a ticket that finds the
+  /// memory full is refused, and its client measures at the join instead.
+  pub max_remembered_probe_tickets: usize,
   /// Unjoined sessions one source address may hold at the same time.
   pub max_prejoin_sessions_per_ip: usize,
   /// Devices of one account that may be in the same call at once. A further device is refused
@@ -237,6 +242,8 @@ impl Default for SfuConfig {
       maybe_dev_http_addr: None,
       forwarding: ForwardingConfig::default(),
       join_timeout: Duration::from_secs(10),
+      link_probe_length: Duration::from_secs(10),
+      max_remembered_probe_tickets: 100_000,
       max_prejoin_sessions_per_ip: 16,
       max_devices_per_user_per_call: 3,
       signaling_queue_len: 256,
