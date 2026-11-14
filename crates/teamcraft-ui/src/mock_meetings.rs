@@ -6,8 +6,9 @@
 use std::cell::RefCell;
 
 use teamcraft_proto::{
-  ListLobbyResponse, ListMeetingsResponse, MeetingAttendeeResponse, MeetingKind, MeetingRecurrence,
-  MeetingResponse, MeetingStatus, RecurrenceFrequency, RsvpStatus, SetRsvpRequest, UnixMillis, Weekday,
+  ListLobbyResponse, ListMeetingsResponse, MeetingAttendeeResponse, MeetingControlAction,
+  MeetingControlRequest, MeetingKind, MeetingRecurrence, MeetingResponse, MeetingStatus, RecurrenceFrequency,
+  RsvpStatus, SetRsvpRequest, UnixMillis, Weekday,
 };
 
 use crate::auth::{ApiMethod, ApiResponse, AuthError, Authenticator, LocalFuture, SignInLook};
@@ -55,6 +56,18 @@ impl MockMeetings {
         meeting.is_occurrence_cancelled = false;
         meeting.is_occurrence_holiday = false;
       }),
+      // Host controls: ending closes the meeting (#1931); the others act on a call the demo
+      // doesn't have and are taken as done.
+      (ApiMethod::Post, ["", id, "controls"]) => {
+        let is_end = maybe_body
+          .and_then(|body| serde_json::from_str::<MeetingControlRequest>(&body).ok())
+          .is_some_and(|request| request.action == MeetingControlAction::End);
+        if is_end {
+          self.change(id, |meeting| meeting.status = MeetingStatus::Ended)
+        } else {
+          status(STATUS_NO_CONTENT)
+        }
+      },
       (ApiMethod::Post, ["", id, "hide"]) => {
         self
           .meetings

@@ -58,6 +58,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
@@ -340,6 +341,11 @@ internal class CallUiActions(
   val maybeOnHosts: (() -> Unit)? = null,
   /** "Lobby" in the menu: the meeting's hosts see who waits and admit or deny them (#1859). */
   val maybeOnLobby: (() -> Unit)? = null,
+  /**
+   * "End for everyone…" (#1930): offered to the meeting's hosts, whose hang-up then opens a menu
+   * with "Leave" and this; everybody else's hang-up just leaves.
+   */
+  val maybeOnEndForEveryone: (() -> Unit)? = null,
 )
 
 /** The room the header and the bottom (notices and controls) take, so the stage keeps clear of them. */
@@ -1093,7 +1099,7 @@ private fun ControlBar(ui: CallUiState, actions: CallUiActions, modifier: Modifi
       actions.onSpeaker(it)
     }
     MoreButton(state?.isDeafened == true, ui.isSharingScreen, actions)
-    HangUpButton(actions.onHangUp)
+    HangUpButton(actions.onHangUp, actions.maybeOnEndForEveryone)
   }
 }
 
@@ -1213,23 +1219,60 @@ private fun menuEntries(isDeafened: Boolean, isSharingScreen: Boolean, actions: 
   }
 }
 
-/** Hang up: Material's filled icon button, wide and red, as Google Phone's. */
+/**
+ * Hang up: Material's filled icon button, wide and red, as Google Phone's. For a meeting's hosts
+ * ([maybeOnEndForEveryone]) it opens a menu with "Leave" and "End for everyone…" (#1930), as the
+ * desktop's split hang-up does.
+ */
 @Composable
-private fun HangUpButton(onHangUp: () -> Unit) {
+private fun HangUpButton(onHangUp: () -> Unit, maybeOnEndForEveryone: (() -> Unit)?) {
   val haptics = LocalHapticFeedback.current
-  FilledIconButton(
-    onClick = {
-      haptics.performHapticFeedback(HapticFeedbackType.Reject)
-      onHangUp()
-    },
-    shapes = IconButtonDefaults.shapes(
-      shape = IconButtonDefaults.mediumRoundShape,
-      pressedShape = IconButtonDefaults.mediumPressedShape,
-    ),
-    modifier = Modifier.size(IconButtonDefaults.mediumContainerSize(IconButtonWidthOption.Wide)),
-    colors = IconButtonDefaults.filledIconButtonColors(containerColor = HANG_UP_RED, contentColor = Color.White),
-  ) {
-    Icon(CallIcons.CallEnd, contentDescription = stringResource(R.string.call_hang_up), modifier = Modifier.size(IconButtonDefaults.mediumIconSize))
+  var isMenuOpen by remember { mutableStateOf(false) }
+  val label = stringResource(if (maybeOnEndForEveryone == null) R.string.call_hang_up else R.string.call_leave_options)
+  Box {
+    FilledIconButton(
+      onClick = {
+        if (maybeOnEndForEveryone == null) {
+          haptics.performHapticFeedback(HapticFeedbackType.Reject)
+          onHangUp()
+        } else {
+          isMenuOpen = true
+        }
+      },
+      shapes = IconButtonDefaults.shapes(
+        shape = IconButtonDefaults.mediumRoundShape,
+        pressedShape = IconButtonDefaults.mediumPressedShape,
+      ),
+      modifier = Modifier.size(IconButtonDefaults.mediumContainerSize(IconButtonWidthOption.Wide)),
+      colors = IconButtonDefaults.filledIconButtonColors(containerColor = HANG_UP_RED, contentColor = Color.White),
+    ) {
+      Icon(CallIcons.CallEnd, contentDescription = label, modifier = Modifier.size(IconButtonDefaults.mediumIconSize))
+    }
+    if (maybeOnEndForEveryone != null) {
+      DropdownMenuPopup(expanded = isMenuOpen, onDismissRequest = { isMenuOpen = false }) {
+        DropdownMenuGroup(shapes = MenuDefaults.groupShape(index = 0, count = 1)) {
+          DropdownMenuItem(
+            onClick = {
+              isMenuOpen = false
+              haptics.performHapticFeedback(HapticFeedbackType.Reject)
+              onHangUp()
+            },
+            text = { Text(stringResource(R.string.call_leave)) },
+            shape = MenuDefaults.itemShape(index = 0, count = 2).shape,
+            leadingIcon = { Icon(CallIcons.CallEnd, contentDescription = null) },
+          )
+          DropdownMenuItem(
+            onClick = {
+              isMenuOpen = false
+              maybeOnEndForEveryone()
+            },
+            text = { Text(stringResource(R.string.call_end_for_everyone), color = MaterialTheme.colorScheme.error) },
+            shape = MenuDefaults.itemShape(index = 1, count = 2).shape,
+            leadingIcon = { Icon(Icons.Filled.Close, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+          )
+        }
+      }
+    }
   }
 }
 

@@ -242,7 +242,9 @@ pub fn start(state: AppState, i18n: I18n) {
           }),
           is_huddle: request.kind == CallKind::Huddle,
           can_end_for_everyone: maybe_hub
-            .and_then(|hub| hub.hosted_meeting_for(request.conversation, state.me().id))
+            .and_then(|hub| {
+              crate::components::meeting_controls::meeting_to_end(hub, request.conversation, state.me().id)
+            })
             .is_some(),
           asks_handover: maybe_hub.is_some_and(|hub| {
             // Again when the meeting, its lobby or who is in the call changes.

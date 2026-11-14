@@ -1265,6 +1265,118 @@
         }
       }
     },
+    "call_leave": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Leave"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verlassen"
+          }
+        }
+      }
+    },
+    "call_leave_options": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hold for more ways to leave"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Halten für weitere Optionen zum Verlassen"
+          }
+        }
+      }
+    },
+    "call_end_for_everyone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "End for everyone…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Für alle beenden…"
+          }
+        }
+      }
+    },
+    "call_end_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "End the meeting for everyone?"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Meeting für alle beenden?"
+          }
+        }
+      }
+    },
+    "call_end_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Everyone is removed from the call, and guests can no longer join. The meeting chat stays readable."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Alle werden aus dem Anruf entfernt, und Gäste können nicht mehr beitreten. Der Meeting-Chat bleibt lesbar."
+          }
+        }
+      }
+    },
+    "call_end_do": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "End for everyone"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Für alle beenden"
+          }
+        }
+      }
+    },
+    "call_end_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The meeting could not be ended"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das Meeting konnte nicht beendet werden"
+          }
+        }
+      }
+    },
     "call_incoming_placeholder": {
       "localizations": {
         "en": {

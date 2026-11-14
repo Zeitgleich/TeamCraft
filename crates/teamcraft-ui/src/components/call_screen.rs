@@ -74,13 +74,28 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
   let host_open = RwSignal::new(false);
   // The organizer asked to hand the meeting over before leaving (#1720).
   let leave_prompt = RwSignal::new(None::<crate::components::meeting_controls::HandoverOffer>);
-  // The tray's "End for everyone…" opens the host controls, which ask to confirm.
+  let maybe_hub = use_context::<crate::meetings::MeetingsHub>();
+  // The meeting this user may end for everyone (#1930): the hang-up gets its menu, else it only
+  // leaves. Hosts only; ad-hoc calls have none.
+  let meeting_to_end = Memo::new(move |_| {
+    maybe_hub.and_then(|hub| {
+      crate::components::meeting_controls::meeting_to_end(hub, request.conversation, state.me().id)
+    })
+  });
+  let is_leave_menu_open = RwSignal::new(false);
+  let is_end_asked = RwSignal::new(false);
+  let (leave_menu, leave_trigger) = (
+    NodeRef::<leptos::html::Div>::new(),
+    NodeRef::<leptos::html::Button>::new(),
+  );
+  crate::components::link_menu::focus_first_item_when_open(is_leave_menu_open, leave_menu);
+  // The tray's "End for everyone…" asks the same question as the hang-up menu.
   Effect::new(move |_| {
     if call.is_end_for_everyone_asked.get() {
-      host_open.set(true);
+      call.is_end_for_everyone_asked.set(false);
+      is_end_asked.set(true);
     }
   });
-  let maybe_hub = use_context::<crate::meetings::MeetingsHub>();
   // Leaving: the organizer leaving with people in the lobby and nobody else to let them in is
   // asked to hand the meeting over first (#1720), from the button and the tray's "Leave call".
   let ask_to_leave = move || {
@@ -680,6 +695,10 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         })
       }}
       {move || leave_prompt.get().map(|offer| view! { <crate::components::meeting_controls::LeavePrompt offer=offer prompt=leave_prompt /> })}
+      {move || {
+        let meeting = meeting_to_end.get().filter(|_| is_end_asked.get())?;
+        Some(view! { <crate::components::meeting_controls::EndPrompt meeting=meeting is_open=is_end_asked return_focus=leave_trigger /> })
+      }}
       <crate::components::add_to_call::CallMoveBanner />
       <crate::components::call_encryption::EncryptionFailureBanner request=request />
       <NotetakerBanner conversation=request.conversation notetaker=notetaker is_asked=notetaker_invite.is_asked />
@@ -950,13 +969,57 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
           label=Signal::derive(move || i18n.t("call-minimize"))
           on_press=move || call.is_minimized.set(true)
         />
-        <button
-          class="leave-btn"
-          on:click=move |_| ask_to_leave()
-        >
-          <Icon name=IconName::Phone class="hangup" />
-          <span>{move || i18n.t("call-leave")}</span>
-        </button>
+        // Hang-up: leaves. Hosts get an arrow beside it with "Leave" and "End for everyone…"
+        // (#1930), like the microphone's device arrow.
+        <div class="leave-split" class:has-menu=move || meeting_to_end.get().is_some()>
+          <button
+            class="leave-btn"
+            on:click=move |_| ask_to_leave()
+          >
+            <Icon name=IconName::Phone class="hangup" />
+            <span>{move || i18n.t("call-leave")}</span>
+          </button>
+          <Show when=move || meeting_to_end.get().is_some() fallback=|| ()>
+            <button
+              type="button"
+              class="leave-menu-btn"
+              node_ref=leave_trigger
+              aria-label=move || i18n.t("call-leave-options")
+              title=move || i18n.t("call-leave-options")
+              aria-haspopup="menu"
+              aria-expanded=move || is_leave_menu_open.get().to_string()
+              aria-controls="leave-menu"
+              on:click=move |_| is_leave_menu_open.update(|open| *open = !*open)
+            >
+              <Icon name=IconName::ChevronDown class="is-flipped" />
+            </button>
+          </Show>
+          <Show when=move || is_leave_menu_open.get() fallback=|| ()>
+            <crate::components::sheet::PopoverBackdrop
+              on_close=Callback::new(move |()| is_leave_menu_open.set(false))
+              popover=leave_menu
+            />
+            // A chosen item closes the menu (its click bubbles up here).
+            <div
+              class="popover menu-popover opens-up leave-menu"
+              id="leave-menu"
+              role="menu"
+              node_ref=leave_menu
+              aria-label=move || i18n.t("call-leave-options")
+              on:keydown=move |ev| crate::components::link_menu::menu_keydown(ev, leave_menu, is_leave_menu_open, leave_trigger)
+              on:click=move |_| is_leave_menu_open.set(false)
+            >
+              <button type="button" class="menu-item" role="menuitem" on:click=move |_| ask_to_leave()>
+                <Icon name=IconName::Phone class="hangup" />
+                <span class="menu-label">{move || i18n.t("call-leave")}</span>
+              </button>
+              <button type="button" class="menu-item is-danger" role="menuitem" on:click=move |_| is_end_asked.set(true)>
+                <Icon name=IconName::Close />
+                <span class="menu-label">{move || i18n.t("call-end-for-everyone")}</span>
+              </button>
+            </div>
+          </Show>
+        </div>
       </footer>
     </section>
   }

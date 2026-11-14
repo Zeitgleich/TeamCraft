@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.calls
 
+import androidx.annotation.StringRes
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -183,5 +184,44 @@ internal fun LeaveHandoverDialog(
       }
     },
     confirmButton = { TextButton(onClick = onStay) { Text(stringResource(R.string.cancel)) } },
+  )
+}
+
+/**
+ * Before a host ends the meeting for everyone from the hang-up (#1930): says what happens, as
+ * desktop and web do. Stays open while it runs and with the failure if the server refused.
+ */
+@Composable
+internal fun EndForEveryoneDialog(
+  isEnding: Boolean,
+  @StringRes maybeFailure: Int?,
+  onEnd: () -> Unit,
+  onCancel: () -> Unit,
+) {
+  AlertDialog(
+    onDismissRequest = { if (!isEnding) onCancel() },
+    title = { Text(stringResource(R.string.call_end_title)) },
+    text = {
+      Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(stringResource(R.string.call_end_body))
+        maybeFailure?.let { failure ->
+          Text(
+            stringResource(failure),
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+          )
+        }
+      }
+    },
+    confirmButton = {
+      TextButton(onClick = onEnd, enabled = !isEnding) {
+        if (isEnding) {
+          CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+        } else {
+          Text(stringResource(R.string.call_end_do), color = MaterialTheme.colorScheme.error)
+        }
+      }
+    },
+    dismissButton = { TextButton(onClick = onCancel, enabled = !isEnding) { Text(stringResource(R.string.cancel)) } },
   )
 }

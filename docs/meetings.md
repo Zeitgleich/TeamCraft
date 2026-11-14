@@ -274,6 +274,13 @@ and a running call is stopped on the SFU (a call the SFU no longer knows is fine
 and removing act on the call and answer `call_not_found` without one; the apps only offer them
 while a call runs. Every refusal reaches the user worded by its `error_code`.
 
+The apps offer it where people look for it (#1930): beside the call's hang-up for the meeting's
+hosts (organizer and co-hosts). Desktop and web split the red button: the main part leaves, its
+arrow opens a menu with "Leave" and "End for everyone…"; Android's hang-up opens that menu for
+hosts, iOS's on a long press (a tap leaves). Everybody else's hang-up only leaves. "End for
+everyone…" asks first and says what happens; the tray's entry asks the same question. All of them
+run the one action above; the organizer's handover question (#1720) still comes with "Leave".
+
 A "Meet now" meeting stays open for eight hours at most (its `ends_at`): long enough for a working
 day, short enough that a forgotten one doesn't keep its guest link working for days. It doesn't
 end when its call empties, because people drop out and come back (a lost connection, a moved
