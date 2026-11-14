@@ -15,7 +15,9 @@
 //! edit messages; each is kept as a record of its own ([`PageKey`]).
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{Base64Bytes, CanvasPageId, ConversationId, MAX_KEPT_CANVAS_PAGES, UserId};
+use teamcraft_proto::{
+  Base64Bytes, CanvasPageId, ConversationId, MAX_LISTED_CANVAS_PAGES, MAX_UNLISTED_CANVAS_PAGES, UserId,
+};
 
 use crate::error::CoreError;
 use crate::records;
@@ -25,9 +27,25 @@ use crate::store::{LocalStore, Table};
 /// `canvas/{conversation}` for the first page, `canvas/{conversation}/{page}` for a further one.
 pub const CANVAS_PREFIX: &str = "canvas/";
 
-/// The key prefix of the list of further pages a conversation has records of, for the bound
-/// [`MAX_KEPT_CANVAS_PAGES`]: `canvas-pages/{conversation}`.
+/// The key prefix of the further pages a conversation has records of ([`KeptPages`]):
+/// `canvas-pages/{conversation}`.
 const KEPT_PAGES_PREFIX: &str = "canvas-pages/";
+
+/// Which further pages of a conversation this device keeps updates of. The core can't read the
+/// first page's list of pages (a Yjs document), so the page's editor tells it ([`note_pages`]):
+/// pages the list names are kept, a deleted one goes with its updates. Pages not known as listed
+/// (their edits came before the list's, or no editor read the list on this device) share
+/// [`MAX_UNLISTED_CANVAS_PAGES`] places, the least recently edited going first. Every further page
+/// with a record is in here.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeptPages {
+  /// The pages the list names, as the editor last read it (at most [`MAX_LISTED_CANVAS_PAGES`]).
+  #[serde(default)]
+  pub listed: Vec<CanvasPageId>,
+  /// The others with a record, least recently edited first.
+  #[serde(default)]
+  pub unlisted: Vec<CanvasPageId>,
+}
 
 /// Which page of which conversation a record holds.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,10 +139,7 @@ pub fn take_update(
   if record.updates.contains(update) {
     return Ok(());
   }
-  if record.updates.is_empty() && !keep_page(store, page)? {
-    tracing::warn!(conversation = %page.conversation, "an edit of a page beyond the kept pages was dropped");
-    return Ok(());
-  }
+  keep_page(store, page)?;
   // A record from before origins: the updates it holds have none.
   let missing = record.updates.len().saturating_sub(record.origins.len());
   if missing > 0 {
@@ -145,23 +160,99 @@ pub fn take_update(
   records::put_json(store, Table::Account, &key, &record)
 }
 
-/// Whether a page's updates may be kept: the first page always, a further one if it is among the
-/// conversation's kept pages or there is room for it ([`MAX_KEPT_CANVAS_PAGES`]), which it then takes.
-fn keep_page(store: &impl LocalStore, page: &PageKey) -> Result<bool, CoreError> {
+/// Makes room for a further page's update: a listed page has its place; an unlisted one moves to
+/// the most recently edited end, and the least recently edited beyond the bound goes with its
+/// updates. The first page always has its place.
+fn keep_page(store: &impl LocalStore, page: &PageKey) -> Result<(), CoreError> {
   let Some(id) = &page.maybe_page else {
-    return Ok(true);
+    return Ok(());
   };
-  let key = format!("{KEPT_PAGES_PREFIX}{}", page.conversation);
-  let mut kept: Vec<CanvasPageId> = records::get_json(store, Table::Account, &key)?.unwrap_or_default();
-  if kept.contains(id) {
-    return Ok(true);
+  let mut kept = load_kept(store, page.conversation)?;
+  if kept.listed.contains(id) || kept.unlisted.last() == Some(id) {
+    return Ok(());
   }
-  if kept.len() >= MAX_KEPT_CANVAS_PAGES {
-    return Ok(false);
+  kept.unlisted.retain(|unlisted| unlisted != id);
+  kept.unlisted.push(id.clone());
+  while kept.unlisted.len() > MAX_UNLISTED_CANVAS_PAGES {
+    let evicted = kept.unlisted.remove(0);
+    tracing::warn!(conversation = %page.conversation, "a page not known as listed was dropped for room");
+    drop_record(store, page.conversation, evicted)?;
   }
-  kept.push(id.clone());
-  records::put_json(store, Table::Account, &key, &kept)?;
-  Ok(true)
+  save_kept(store, page.conversation, &kept)
+}
+
+/// Takes the editor's reading of the first page's list: `listed` the pages it names (at most
+/// [`MAX_LISTED_CANVAS_PAGES`] are kept as listed), `deleted` those it names as deleted, whose
+/// updates go. Deletion is final in the list, so a stale reading never deletes a page that lives.
+pub fn note_pages(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  listed: &[CanvasPageId],
+  deleted: &[CanvasPageId],
+) -> Result<(), CoreError> {
+  let before = load_kept(store, conversation)?;
+  let mut kept = before.clone();
+  // Only pages with a record cost anything to drop: a long list of deleted entries is looked up,
+  // not written.
+  for id in deleted {
+    if kept.listed.contains(id) || kept.unlisted.contains(id) {
+      drop_record(store, conversation, id.clone())?;
+    }
+  }
+  kept.listed = listed
+    .iter()
+    .filter(|id| id.is_valid() && !deleted.contains(id))
+    .take(MAX_LISTED_CANVAS_PAGES)
+    .cloned()
+    .collect();
+  // A page that was listed and no longer is (beyond the list's limit) keeps its record as unlisted.
+  let no_longer_listed: Vec<CanvasPageId> = before
+    .listed
+    .into_iter()
+    .filter(|id| !kept.listed.contains(id) && !deleted.contains(id))
+    .collect();
+  kept
+    .unlisted
+    .retain(|id| !kept.listed.contains(id) && !deleted.contains(id));
+  for id in no_longer_listed.into_iter().rev() {
+    kept.unlisted.insert(0, id);
+  }
+  while kept.unlisted.len() > MAX_UNLISTED_CANVAS_PAGES {
+    let evicted = kept.unlisted.remove(0);
+    drop_record(store, conversation, evicted)?;
+  }
+  if kept == load_kept(store, conversation)? {
+    return Ok(());
+  }
+  save_kept(store, conversation, &kept)
+}
+
+/// The further pages of a conversation this device keeps.
+pub fn load_kept(store: &impl LocalStore, conversation: ConversationId) -> Result<KeptPages, CoreError> {
+  Ok(records::get_json(store, Table::Account, &kept_key(conversation))?.unwrap_or_default())
+}
+
+fn save_kept(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  kept: &KeptPages,
+) -> Result<(), CoreError> {
+  records::put_json(store, Table::Account, &kept_key(conversation), kept)
+}
+
+fn kept_key(conversation: ConversationId) -> String {
+  format!("{KEPT_PAGES_PREFIX}{conversation}")
+}
+
+fn drop_record(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  id: CanvasPageId,
+) -> Result<(), CoreError> {
+  if let Some(key) = PageKey::new(conversation, Some(&id)).store_key() {
+    store.delete(Table::Account, &key)?;
+  }
+  Ok(())
 }
 
 /// Gives an own update the server's time once it was sent: kept at once with the device's time, it
@@ -349,34 +440,138 @@ mod tests {
     assert!(!compact(&store, &hostile, 0, b"c".to_vec(), Vec::new()).unwrap());
   }
 
-  #[test]
-  fn a_conversation_keeps_a_bounded_number_of_further_pages() {
-    let store = MemoryStore::new();
-    let conversation = channel().conversation;
-    let page = |index: usize| PageKey::new(conversation, CanvasPageId::parse(&format!("{index:x}")).as_ref());
-    for index in 0..MAX_KEPT_CANVAS_PAGES {
-      take_update(&store, &page(index), &bytes(b"a"), false, user(), 1).unwrap();
+  mod kept_pages {
+    use super::*;
+
+    fn page(conversation: ConversationId, name: &str) -> PageKey {
+      PageKey::new(conversation, CanvasPageId::parse(name).as_ref())
     }
-    take_update(
-      &store,
-      &page(MAX_KEPT_CANVAS_PAGES),
-      &bytes(b"a"),
-      false,
-      user(),
-      1,
-    )
-    .unwrap();
-    assert!(
-      load(&store, &page(MAX_KEPT_CANVAS_PAGES))
-        .unwrap()
-        .updates
-        .is_empty(),
-      "dropped"
-    );
-    // Pages kept already, and the first page, take updates as before.
-    take_update(&store, &page(0), &bytes(b"b"), false, user(), 2).unwrap();
-    assert_eq!(load(&store, &page(0)).unwrap().updates.len(), 2);
-    take_update(&store, &channel(), &bytes(b"c"), false, user(), 3).unwrap();
-    assert_eq!(load(&store, &channel()).unwrap().updates.len(), 1);
+
+    fn id(name: &str) -> CanvasPageId {
+      CanvasPageId::parse(name).unwrap()
+    }
+
+    fn bogus(index: usize) -> String {
+      format!("b{index:x}")
+    }
+
+    #[test]
+    fn made_up_page_ids_never_push_out_a_listed_page() {
+      let store = MemoryStore::new();
+      let conversation = channel().conversation;
+      take_update(&store, &page(conversation, "a1"), &bytes(b"x"), false, user(), 1).unwrap();
+      note_pages(&store, conversation, &[id("a1")], &[]).unwrap();
+      for index in 0..200 {
+        take_update(
+          &store,
+          &page(conversation, &bogus(index)),
+          &bytes(b"y"),
+          false,
+          user(),
+          2,
+        )
+        .unwrap();
+      }
+      take_update(&store, &page(conversation, "a1"), &bytes(b"z"), false, user(), 3).unwrap();
+      assert_eq!(load(&store, &page(conversation, "a1")).unwrap().updates.len(), 2);
+      let kept = load_kept(&store, conversation).unwrap();
+      assert_eq!(kept.unlisted.len(), MAX_UNLISTED_CANVAS_PAGES);
+      // The oldest made-up pages went with their updates.
+      assert!(
+        load(&store, &page(conversation, &bogus(0)))
+          .unwrap()
+          .updates
+          .is_empty()
+      );
+      assert!(
+        !load(&store, &page(conversation, &bogus(199)))
+          .unwrap()
+          .updates
+          .is_empty()
+      );
+      // A page edited before the list names it still finds room, and the list then keeps it.
+      take_update(
+        &store,
+        &page(conversation, "c1"),
+        &bytes(b"early"),
+        false,
+        user(),
+        4,
+      )
+      .unwrap();
+      note_pages(&store, conversation, &[id("a1"), id("c1")], &[]).unwrap();
+      for index in 200..400 {
+        take_update(
+          &store,
+          &page(conversation, &bogus(index)),
+          &bytes(b"y"),
+          false,
+          user(),
+          5,
+        )
+        .unwrap();
+      }
+      assert_eq!(load(&store, &page(conversation, "c1")).unwrap().updates.len(), 1);
+    }
+
+    #[test]
+    fn a_deleted_page_frees_its_place_and_its_updates() {
+      let store = MemoryStore::new();
+      let conversation = channel().conversation;
+      take_update(&store, &page(conversation, "a1"), &bytes(b"x"), false, user(), 1).unwrap();
+      take_update(&store, &page(conversation, "a2"), &bytes(b"x"), false, user(), 1).unwrap();
+      note_pages(&store, conversation, &[id("a1"), id("a2")], &[]).unwrap();
+      note_pages(&store, conversation, &[id("a2")], &[id("a1")]).unwrap();
+      assert!(
+        load(&store, &page(conversation, "a1"))
+          .unwrap()
+          .updates
+          .is_empty()
+      );
+      assert_eq!(
+        load_kept(&store, conversation).unwrap(),
+        KeptPages {
+          listed: vec![id("a2")],
+          unlisted: Vec::new(),
+        }
+      );
+      // The first page is never touched.
+      take_update(&store, &channel(), &bytes(b"c"), false, user(), 3).unwrap();
+      note_pages(&store, conversation, &[], &[]).unwrap();
+      assert_eq!(load(&store, &channel()).unwrap().updates.len(), 1);
+    }
+
+    #[test]
+    fn devices_keep_the_same_listed_pages_whatever_order_edits_arrive_in() {
+      let conversation = channel().conversation;
+      let mut edits: Vec<(String, &[u8])> = vec![("a1".into(), b"1"), ("a2".into(), b"2")];
+      edits.extend((0..40).map(|index| (bogus(index), b"y".as_slice())));
+      let one = MemoryStore::new();
+      let other = MemoryStore::new();
+      for (name, update) in &edits {
+        take_update(&one, &page(conversation, name), &bytes(update), false, user(), 1).unwrap();
+      }
+      for (name, update) in edits.iter().rev() {
+        take_update(
+          &other,
+          &page(conversation, name),
+          &bytes(update),
+          false,
+          user(),
+          1,
+        )
+        .unwrap();
+      }
+      for store in [&one, &other] {
+        note_pages(store, conversation, &[id("a1"), id("a2")], &[]).unwrap();
+      }
+      for name in ["a1", "a2"] {
+        assert_eq!(
+          load(&one, &page(conversation, name)).unwrap(),
+          load(&other, &page(conversation, name)).unwrap()
+        );
+        assert_eq!(load(&one, &page(conversation, name)).unwrap().updates.len(), 1);
+      }
+    }
   }
 }

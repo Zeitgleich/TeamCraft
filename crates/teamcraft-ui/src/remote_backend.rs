@@ -3484,6 +3484,19 @@ impl ChatBackend for RemoteChat {
     });
   }
 
+  fn note_canvas_pages(
+    &self,
+    conversation: ConversationId,
+    listed: &[teamcraft_proto::CanvasPageId],
+    deleted: &[teamcraft_proto::CanvasPageId],
+  ) {
+    self.act(ChatAction::NoteCanvasPages {
+      conversation,
+      listed: listed.to_vec(),
+      deleted: deleted.to_vec(),
+    });
+  }
+
   fn compact_canvas(
     &self,
     conversation: ConversationId,

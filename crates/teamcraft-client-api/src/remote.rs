@@ -1209,6 +1209,14 @@ pub enum ChatAction {
     #[serde(default)]
     is_snapshot: bool,
   },
+  /// [`ChatBackend::note_canvas_pages`].
+  NoteCanvasPages {
+    conversation: ConversationId,
+    #[serde(default)]
+    listed: Vec<teamcraft_proto::CanvasPageId>,
+    #[serde(default)]
+    deleted: Vec<teamcraft_proto::CanvasPageId>,
+  },
   /// [`ChatBackend::compact_canvas`].
   CompactCanvas {
     conversation: ConversationId,
@@ -1660,6 +1668,11 @@ impl ChatAction {
         update,
         is_snapshot,
       } => backend.edit_canvas(conversation, maybe_page.as_ref(), update.into_vec(), is_snapshot),
+      Self::NoteCanvasPages {
+        conversation,
+        listed,
+        deleted,
+      } => backend.note_canvas_pages(conversation, &listed, &deleted),
       Self::CompactCanvas {
         conversation,
         maybe_page,

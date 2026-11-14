@@ -624,6 +624,26 @@ impl CanvasDoc {
     pages
   }
 
+  /// The further pages the list names as deleted: what a device drops the updates of.
+  pub fn deleted_pages(&self) -> Vec<CanvasPageId> {
+    let txn = self.doc.transact();
+    let mut deleted: Vec<CanvasPageId> = Vec::new();
+    for index in 0..self.pages.len(&txn) {
+      let Some(Out::YMap(map)) = self.pages.get(&txn, index) else {
+        continue;
+      };
+      if !matches!(map.get(&txn, DELETED), Some(Out::Any(Any::Bool(true)))) {
+        continue;
+      }
+      if let Some(id) = string(&txn, &map, ID).and_then(|id| CanvasPageId::parse(&id))
+        && !deleted.contains(&id)
+      {
+        deleted.push(id);
+      }
+    }
+    deleted
+  }
+
   /// Whether another page can be added: the list holds fewer than [`MAX_LISTED_CANVAS_PAGES`].
   pub fn can_add_page(&self) -> bool {
     self.pages().len() < MAX_LISTED_CANVAS_PAGES
@@ -2003,6 +2023,7 @@ mod tests {
       for page in [&mut alice, &mut bob] {
         page.sync(&[&added, &renamed, &deleted, &late]).unwrap();
         assert!(page.pages().is_empty());
+        assert_eq!(page.deleted_pages(), [id.clone()]);
       }
     }
 

@@ -42,6 +42,25 @@ pub fn CanvasPages(
   let list = StoredValue::new_local(CanvasDoc::new());
   let pages = RwSignal::new(Vec::<PageEntry>::new());
   let dialog = RwSignal::new(None::<PageDialog>);
+  // The core keeps the updates of the pages the list names and drops those of deleted ones; it
+  // can't read the list itself. Told a frame later, not while the list is read, and only on change.
+  let noted = StoredValue::new_local(None::<(Vec<CanvasPageId>, Vec<CanvasPageId>)>);
+  let note_pages = move || {
+    let Some(reading) = list.try_with_value(|doc| {
+      let listed: Vec<CanvasPageId> = doc.pages().into_iter().map(|entry| entry.id).collect();
+      (listed, doc.deleted_pages())
+    }) else {
+      return;
+    };
+    if noted.try_with_value(|last| last.as_ref() == Some(&reading)) != Some(false) {
+      return;
+    }
+    noted.set_value(Some(reading.clone()));
+    request_animation_frame(move || {
+      let (listed, deleted) = reading;
+      let _ = state.try_write(|backend| backend.note_canvas_pages(conversation, &listed, &deleted));
+    });
+  };
   // The list shows at most the limit; at it, no page is added (CanvasDoc::add_page refuses too).
   let is_full = Memo::new(move |_| pages.with(|pages| pages.len() >= MAX_LISTED_CANVAS_PAGES));
 
@@ -56,6 +75,7 @@ pub fn CanvasPages(
     if let Some(next) = next {
       pages.set(next);
     }
+    note_pages();
   });
   // The page shown was deleted: back to the first.
   Effect::new(move |_| {
@@ -74,6 +94,7 @@ pub fn CanvasPages(
     };
     pages.set(list.with_value(CanvasDoc::pages));
     let _ = state.try_write(|backend| backend.edit_canvas(conversation, None, update, false));
+    note_pages();
   };
 
   let title_of = move |entry: &PageEntry| {

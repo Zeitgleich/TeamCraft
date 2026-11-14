@@ -916,6 +916,16 @@ pub trait ChatBackend {
     _is_snapshot: bool,
   ) {
   }
+  /// The editor's reading of the first page's list of pages: the pages it names (`listed`) and
+  /// those it names as deleted. The core can't read the list; it keeps the updates of listed pages
+  /// and drops those of deleted ones (e2ee.md §4.11).
+  fn note_canvas_pages(
+    &self,
+    _conversation: ConversationId,
+    _listed: &[teamcraft_proto::CanvasPageId],
+    _deleted: &[teamcraft_proto::CanvasPageId],
+  ) {
+  }
   /// Replaces the page's updates with `merged` (all of them as one) and its version history with
   /// `history` (the old one with the merged updates' marks added, [`crate::canvas::compaction`]),
   /// if the list is still the one of `revision`: the editor compacts what the core can't read.

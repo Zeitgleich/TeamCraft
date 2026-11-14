@@ -49,7 +49,7 @@ pub use calls::{
   SFU_GOING_AWAY_CLOSE_CODE, SFU_SWITCHED_CLOSE_CODE, SWITCH_SECRET_BYTES, ScreenAudioTrack,
   ScreenContentMode, ScreenShareTakeover,
 };
-pub use canvas_page::{CanvasPageId, MAX_KEPT_CANVAS_PAGES, MAX_LISTED_CANVAS_PAGES};
+pub use canvas_page::{CanvasPageId, MAX_LISTED_CANVAS_PAGES, MAX_UNLISTED_CANVAS_PAGES};
 pub use conversation::{ConversationKind, ConversationVisibility, HistoryPolicy};
 pub use error::{ErrorBody, ErrorCode, SignInReason};
 pub use gateway::{
