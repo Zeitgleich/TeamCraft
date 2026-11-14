@@ -32,6 +32,7 @@ import uniffi.teamcraft_ffi.SavedMeeting
 import uniffi.teamcraft_ffi.NewChannelInput
 import uniffi.teamcraft_ffi.NewSpaceInput
 import uniffi.teamcraft_ffi.ReviewedRolesOutcome
+import uniffi.teamcraft_ffi.SpaceDeletionPreview
 import uniffi.teamcraft_ffi.SpaceMenuItem
 import uniffi.teamcraft_ffi.TeamCraft
 
@@ -234,6 +235,9 @@ class ChatClient(
     uniffi.teamcraft_ffi.conversationLink(origin, conversation)
 
   suspend fun spaceMenu(space: String): SpaceMenuItem? = core().spaceMenu(space)
+
+  /** Lists what deleting the space takes for its confirmation; the deletion then signs exactly that (#1875). */
+  suspend fun prepareSpaceDeletion(space: String): SpaceDeletionPreview = core().prepareSpaceDeletion(space)
 
   /** The channel's members section: members with roles, the alarm line, a workspace admin's look (#1262). */
   suspend fun channelMembers(conversation: String): ChannelMembersInfo = core().channelMembers(conversation)

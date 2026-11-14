@@ -11769,6 +11769,118 @@
         }
       }
     },
+    "space_delete_listing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Listing the channels…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kanäle werden aufgelistet …"
+          }
+        }
+      }
+    },
+    "space_delete_channels": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Channels that go with the space"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kanäle, die mit dem Space verschwinden"
+          }
+        }
+      }
+    },
+    "space_delete_named_by_founder %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Named by %@, who created it"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Beim Anlegen benannt von %@"
+          }
+        }
+      }
+    },
+    "space_delete_renamed_by_admin %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Last renamed by %@, an admin"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zuletzt umbenannt von %@, einer Admin-Person"
+          }
+        }
+      }
+    },
+    "space_delete_renamed_by_member %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Last renamed by %@, a member"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zuletzt umbenannt von %@, einem Mitglied"
+          }
+        }
+      }
+    },
+    "space_delete_member_name_kept": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A member chose this name, so its members' devices keep its history for a while before it goes."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ein Mitglied hat diesen Namen gewählt, deshalb behalten die Geräte der Mitglieder den Verlauf noch eine Weile, bevor er verschwindet."
+          }
+        }
+      }
+    },
+    "space_delete_unconfirmed_may_be_kept": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Members' devices may keep this channel's history for a while: this device can't confirm its name and space."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Geräte der Mitglieder behalten den Verlauf dieses Kanals möglicherweise noch eine Weile: Dieses Gerät kann seinen Namen und Space nicht bestätigen."
+          }
+        }
+      }
+    },
     "entry_leave_channel": {
       "localizations": {
         "en": {

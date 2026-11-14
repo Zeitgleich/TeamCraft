@@ -42,6 +42,7 @@ mod screen_audio;
 mod server_entry;
 mod server_pool;
 mod settings_sync;
+mod space_deletion;
 mod types;
 mod video;
 mod voice;
@@ -107,6 +108,9 @@ pub use server_entry::{
 };
 pub use settings_sync::{
   AppAnimatedImages, AppFavoritesSort, AppListGrouping, AppListLayout, SettingsSyncOutcome, SyncedAppSettings,
+};
+pub use space_deletion::{
+  ChannelRenamer, ChannelRenamerRole, SpaceDeletionChannel, SpaceDeletionHistoryNote, SpaceDeletionPreview,
 };
 use teamcraft_client_api::remote::ChatAction;
 use teamcraft_core::api::proxy::SystemProxy;
@@ -694,6 +698,39 @@ impl TeamCraft {
   /// What a space's menu needs; `None` for a space the account isn't in.
   pub async fn space_menu(&self, space_id: String) -> Result<Option<SpaceMenuItem>, TeamCraftError> {
     self.read(move |reads| reads.space_menu(&space_id)).await
+  }
+
+  /// Lists what deleting the space takes, for its confirmation (e2ee.md §4.6.5, #1875): the
+  /// channels with who last set each name. Call it when the confirmation opens; the deletion
+  /// (`delete_space` action) then signs exactly these channels, and without it it is unsigned.
+  pub async fn prepare_space_deletion(
+    &self,
+    space_id: String,
+  ) -> Result<SpaceDeletionPreview, TeamCraftError> {
+    let space: teamcraft_proto::SpaceId = engine::parse_id(&space_id)?;
+    self
+      .call(move |engine| {
+        Box::pin(async move {
+          engine
+            .with_client(|client| Box::pin(async move { client.prepare_space_deletion(space).await }))
+            .await
+        })
+      })
+      .await?;
+    self
+      .space_deletion_preview(space_id)
+      .await?
+      .ok_or_else(|| TeamCraftError::InvalidInput("the space's deletion was not prepared".into()))
+  }
+
+  /// What [`Self::prepare_space_deletion`] listed for the space, while it stands.
+  pub async fn space_deletion_preview(
+    &self,
+    space_id: String,
+  ) -> Result<Option<SpaceDeletionPreview>, TeamCraftError> {
+    self
+      .read(move |reads| reads.space_deletion_preview(&space_id))
+      .await
   }
 
   /// Marks every unread channel of the space as read (queued offline like `mark_read`).

@@ -1173,6 +1173,22 @@ impl Reads {
     }))
   }
 
+  pub(crate) fn space_deletion_preview(
+    &self,
+    space_id: &str,
+  ) -> Result<Option<crate::space_deletion::SpaceDeletionPreview>, TeamCraftError> {
+    let backend = self.backend()?;
+    Ok(
+      backend
+        .space_deletion_preview(parse_id(space_id)?)
+        .map(|preview| {
+          crate::space_deletion::space_deletion_preview(preview, |user| {
+            backend.user(user).map(|known| known.display_name)
+          })
+        }),
+    )
+  }
+
   pub(crate) fn mark_space_read(&self, space_id: String) -> Result<(), TeamCraftError> {
     let backend = self.backend()?;
     for conversation in backend.space_conversations(parse_id(&space_id)?) {

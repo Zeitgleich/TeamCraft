@@ -757,6 +757,7 @@ mod deleting_a_space {
     let space = owner.space().await;
     server.set_admin(owner.client.user_id());
 
+    owner.client.prepare_space_deletion(space).await.unwrap();
     owner.client.delete_space(space).await.unwrap();
 
     assert!(server.deletion_signature(channel).is_none());

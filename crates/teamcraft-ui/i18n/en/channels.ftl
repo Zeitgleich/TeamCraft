@@ -259,6 +259,7 @@ space-delete-named-by-founder = Named by { $name }, who created it
 space-delete-renamed-by-admin = Last renamed by { $name }, an admin
 space-delete-renamed-by-member = Last renamed by { $name }, a member
 space-delete-member-name-kept = A member chose this name, so its members' devices keep its history for a while before it goes.
+space-delete-unconfirmed-may-be-kept = Members' devices may keep this channel's history for a while: this device can't confirm its name and space.
 channel-add-people = Add people
 channel-pick-person = Choose a person
 channel-share-history = Share the earlier history with them

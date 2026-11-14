@@ -467,7 +467,8 @@ channel's deletion, and members' devices that verify it drop the history at once
 also signs a space's deletion, which drops at once only the channels whose anchor places them in that space,
 on the deleter's own devices too (e2ee.md §4.6.5, D7, #1727). Any other deletion, a space admin's space
 deletion among them, is the server's word there: hidden, its history kept for a retention (e2ee.md §4.6).
-The confirmation of a space's deletion lists its channels with who last named each.
+The confirmation of a space's deletion lists its channels with who last named each, on every platform; the
+device signs only that list, and a deletion confirmed without it stays unsigned (#1875).
 
 | Case                                              | Who                                                                                                             | What happens                                                                                                                         |
 |---------------------------------------------------|-----------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------|

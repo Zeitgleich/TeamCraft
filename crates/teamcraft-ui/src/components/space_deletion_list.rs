@@ -1,7 +1,8 @@
 //! The channels a space's deletion takes, in its confirmation (e2ee.md §4.6.5, D7, issue #1727):
 //! each with who last set its name, as the channel's anchor on this device says. A name a member
 //! set doesn't let the deletion purge at once, so the list says so; members' devices keep that
-//! channel's history for a while. The device signs exactly the channels listed here.
+//! channel's history for a while; so may they where this device holds no verified anchor. The
+//! device signs exactly the channels listed here.
 
 use leptos::prelude::*;
 use teamcraft_client_api::model::{RenamerRole, SpaceDeletionPreviewChannel};
@@ -42,6 +43,8 @@ pub fn SpaceDeletionList(space: SpaceId) -> impl IntoView {
 fn SpaceDeletionRow(channel: SpaceDeletionPreviewChannel, is_signed: bool) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
+  // Without a verified anchor here, this device can't tell whether members' devices purge it.
+  let is_unconfirmed = is_signed && channel.maybe_renamed_by.is_none();
   let renamer = channel.maybe_renamed_by.map(|renamer| {
     let name = state
       .read(|backend| backend.user(renamer.user))
@@ -52,6 +55,7 @@ fn SpaceDeletionRow(channel: SpaceDeletionPreviewChannel, is_signed: bool) -> im
   view! {
     <li>
       <span class="space-deletion-name" translate="no">{format!("#{}", channel.name)}</span>
+      {is_unconfirmed.then(|| view! { <span class="hint">{move || i18n.t("space-delete-unconfirmed-may-be-kept")}</span> })}
       {renamer.map(|(name, role)| {
         let key = match role {
           RenamerRole::Founder => "space-delete-named-by-founder",
