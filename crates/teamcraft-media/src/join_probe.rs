@@ -200,17 +200,21 @@ impl JoinProbe {
     self.is_over
   }
 
-  /// The probe is over without a result because the link lost its padding (#1893): every train
-  /// lost too much to be measured, as the feedback said. A link that can't take a train of a few
-  /// kilobytes is thin: on 64 kbit/s with a small token bucket each train overflowed it.
+  /// The probe is over without a result because the link didn't take its padding (#1893): every
+  /// train lost too much to be measured, or its feedback came too late. A link that can't take a
+  /// few trains of a few kilobytes is thin: on 64 kbit/s the trains queued behind each other for
+  /// two seconds, and the later ones were given up. A fast link with random loss still gets most
+  /// of each train through and is measured.
   pub fn is_lost_on_the_way(&self) -> bool {
     self.is_over
       && self.maybe_result.is_none()
       && !self.trains.is_empty()
-      && self
-        .trains
-        .iter()
-        .all(|train| train.datagrams.iter().any(|(_, report)| *report == Report::Lost))
+      && self.trains.iter().all(|train| {
+        train
+          .datagrams
+          .iter()
+          .any(|(_, report)| matches!(report, Report::Lost | Report::GivenUp))
+      })
   }
 
   fn finish_if_reported(&mut self) -> Option<LinkMeasurement> {
@@ -370,6 +374,8 @@ mod tests {
       assert_eq!(result.loss_percent, 20);
       // Three datagrams after the first in 16 ms: 1.5 Mbit/s.
       assert_eq!(result.capacity_bps, 1_500_000);
+      // A fast link with random loss is measured, not taken for a thin one (#1893).
+      assert!(!probe.is_lost_on_the_way());
     }
 
     #[test]
@@ -387,16 +393,22 @@ mod tests {
       assert!(probe.is_lost_on_the_way(), "the link lost the train (#1893)");
     }
 
-    /// #1893: a train whose feedback never came says nothing about the link.
+    /// #1893: trains whose feedback came too late (they queued behind each other on a thin
+    /// link) count as lost on the way too.
     #[test]
-    fn a_probe_without_feedback_is_not_lost_on_the_way() {
+    fn a_probe_whose_feedback_came_too_late_is_lost_on_the_way() {
       let now = Instant::now();
       let mut probe = JoinProbe::new(one_train(), now);
       let sizes = probe.due_train(now).unwrap();
       probe.sent(TransportSeq(0), &sizes, now);
+      let feedback = TransportFeedback {
+        base_seq: 0,
+        arrivals_us: vec![Some(0), Some(125_000)],
+      };
+      assert_eq!(probe.on_feedback(&feedback), None);
       probe.on_timer(now + Duration::from_secs(1));
       assert!(probe.is_over());
-      assert!(!probe.is_lost_on_the_way());
+      assert!(probe.is_lost_on_the_way());
     }
 
     /// #1893: a 64 kbit/s link behind a 3 kB token bucket passes a train's first three datagrams

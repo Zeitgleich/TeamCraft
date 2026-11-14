@@ -2457,16 +2457,20 @@ impl CallEngine {
       .maybe_uplink_probe
       .as_ref()
       .is_some_and(JoinProbe::is_lost_on_the_way);
-    if was_over || !is_lost {
+    let is_unmeasured = self
+      .maybe_uplink_probe
+      .as_ref()
+      .is_some_and(|probe| probe.is_over() && probe.result().is_none());
+    if was_over || !is_unmeasured {
+      return;
+    }
+    // Once a call: worth a line in a bug report's log.
+    info!(is_lost, "the uplink's probe at the join measured nothing");
+    if !is_lost {
       return;
     }
     let was_wanted = self.voice_steps.wanted_bps();
     if let Some(encoding) = self.voice_steps.on_measured(0, now) {
-      info!(
-        bitrate_bps = encoding.bitrate_bps,
-        frame = ?encoding.frame,
-        "the own voice changes its encoding: the uplink lost the probe at the join"
-      );
       self.event(CallEngineEvent::VoiceEncoding(encoding));
     }
     if self.voice_steps.wanted_bps() != was_wanted {
