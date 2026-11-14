@@ -495,6 +495,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       CoreCommand::PrepareGuestKeyCode { guest } => self.prepare_guest_key_code(guest).await,
       CoreCommand::NoteMeetingLobby { meeting, has_lobby } => self.note_meeting_lobby(meeting, has_lobby),
       CoreCommand::NoteMeetingSchedule { meeting, note } => self.note_meeting_schedule(meeting, note),
+      CoreCommand::ForgetMeetingRecords { meeting } => self.forget_meeting_records(meeting),
       CoreCommand::SyncMeetingAdmitters {
         meeting,
         conversation,

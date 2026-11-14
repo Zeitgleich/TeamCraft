@@ -25,6 +25,7 @@ use teamcraft_proto::{
 
 use super::admin_joins::JoinCommit;
 use super::key_history::{SealedShare, ShareGuard};
+use super::meeting_records::meeting_of_chat_key;
 use super::member_device::{GroupInfoOutcome, MemberDeviceJoin};
 use super::workspace::{PendingChange, SharedKeys};
 use super::{Client, pending_post_key};
@@ -68,9 +69,6 @@ const GROUP_INFO_PUBLISHED_PREFIX: &str = "group-info-published/";
 /// Key prefix of the lists of users taken off a meeting's invitees whom this device still has to
 /// remove from the chat's group, in [`Table::SyncState`].
 const MEETING_REMOVALS_PREFIX: &str = "meeting-removals/";
-/// Key prefix of the meeting a meeting chat belongs to, as the app handed it to the setup: the
-/// founding's anchor names it (D10, #1747), also when a later sync finishes the founding.
-const MEETING_OF_CHAT_PREFIX: &str = "meeting-of-chat/";
 
 /// This device's commit, merged: what it did and when the server stored it.
 pub(super) struct OwnCommit {
@@ -376,21 +374,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Notes the meeting the app named for a meeting chat, for its founding.
   pub(super) fn note_meeting_of_chat(&self, id: ConversationId, meeting: MeetingId) -> Result<(), CoreError> {
-    records::put_json(
-      &self.store,
-      Table::SyncState,
-      &format!("{MEETING_OF_CHAT_PREFIX}{id}"),
-      &meeting,
-    )
+    records::put_json(&self.store, Table::SyncState, &meeting_of_chat_key(id), &meeting)
   }
 
   /// The meeting a meeting chat's founding names: the app's, else the server's for the chat.
   async fn meeting_of_chat(&mut self, id: ConversationId) -> Result<Option<MeetingId>, CoreError> {
-    let maybe_noted: Option<MeetingId> = records::get_json(
-      &self.store,
-      Table::SyncState,
-      &format!("{MEETING_OF_CHAT_PREFIX}{id}"),
-    )?;
+    let maybe_noted = self.noted_meeting_of_chat(id)?;
     if maybe_noted.is_some() {
       return Ok(maybe_noted);
     }

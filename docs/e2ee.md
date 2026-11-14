@@ -2236,6 +2236,27 @@ never by the server's member list:
       than the rule gives, or one past the rule's `count`. A meeting lengthened on another device
       of the organizer keeps this device's shorter record; a statement signed longer stays in
       force (the device never signs a shorter end over a longer one of its own key).
+    - **When the records go** (#1939). The device closes a meeting when the organizer cancels the
+      whole meeting there, ends a meeting that doesn't repeat there ("End for everyone"), or when
+      the meeting chat is purged or forgotten there (the meeting found through the one the app
+      named for the chat at its setup). The last two also follow the server's word alone: its
+      removal event, a refused queue, an unsigned deletion. Closing drops the lobby record (#987)
+      and the schedule record, and first leaves a mark of the meeting (`meeting-closed/<meeting>`,
+      its ID and this device's time of the close; the first close counts). The admitters' validity
+      never runs past that time again (`meeting_schedule::admitters_until`), whoever brings the
+      meeting back: a server that fakes a removal, re-adds the organizer and reports a longer
+      meeting gets no longer signature than the meeting had when this device closed it, and a
+      restored cancellation is signed no further either. Without its lobby record the meeting's
+      link guests wait in the lobby. Marks are kept for good (a few dozen bytes per meeting
+      closed); dropping one would hand the server that lengthening back. Notes of a schedule for
+      a closed meeting keep no record.
+    - **Residuals of closing.** "Doesn't repeat", for "End for everyone", is the server's word: a
+      server that lists a series as a one-off makes ending one occurrence close the whole series
+      on this device. That only shortens: the series' later occurrences are signed no longer than
+      until the close (the organizer schedules a new meeting). A cancel on another device of the
+      organizer leaves this device's records until the chat goes. Records from before #1747 have
+      no note of the chat's meeting and stay. A statement already signed longer stays in force
+      until its own end (no shorter end is signed over a longer one of the device's own key).
   - *Comparing codes.* The server relays both the guest's key and the fingerprint reported with
     the knock, so binding one to the other stops a swap by anybody but the server, not by the
     server itself. Two codes close that gap for whoever compares them out of band (a phone call,

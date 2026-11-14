@@ -304,8 +304,9 @@ impl Engine {
   }
 
   /// "End for everyone" from the call (#1930): ends the meeting, whether or not a call runs, and
-  /// stops its call (#1931). Hosts only; the server checks who hosts.
-  pub(crate) async fn end_meeting_for_everyone(&self, meeting_id: &str) -> Result<(), TeamCraftError> {
+  /// stops its call (#1931). Hosts only; the server checks who hosts. A meeting that doesn't repeat
+  /// is over for good: this device's records of it go (#1939); a series goes on.
+  pub(crate) async fn end_meeting_for_everyone(&mut self, meeting_id: &str) -> Result<(), TeamCraftError> {
     let meeting: MeetingId = parse_id(meeting_id)?;
     let request = MeetingControlRequest {
       action: MeetingControlAction::End,
@@ -317,6 +318,22 @@ impl Engine {
         Some(to_json(&request)?),
       )
       .await?;
+    // The meeting ended either way: a failed read only keeps its records until the chat goes.
+    let read = self
+      .api_request("GET", &format!("/meetings/{meeting}"), None)
+      .await
+      .and_then(|json| from_json::<MeetingResponse>(&json));
+    match read {
+      Ok(ended) if ended.maybe_recurrence.is_none() => {
+        self
+          .run_commands(vec![CoreCommand::ForgetMeetingRecords { meeting }])
+          .await?;
+      },
+      Ok(_) => {},
+      Err(error) => {
+        tracing::warn!(meeting_id = %meeting, %error, "could not read the ended meeting; its records stay");
+      },
+    }
     Ok(())
   }
 
@@ -324,7 +341,7 @@ impl Engine {
   /// with [`MeetingCancelScope::Following`] every one after it). The chat stays; the server tells
   /// everybody.
   pub(crate) async fn cancel_meeting(
-    &self,
+    &mut self,
     meeting_id: &str,
     scope: MeetingCancelScope,
     occurrence_ms: i64,
@@ -346,6 +363,12 @@ impl Engine {
       },
     };
     self.api_request("DELETE", &path, None).await?;
+    // The whole meeting is cancelled here: its records on this device go with it (#1939).
+    if scope == MeetingCancelScope::Series {
+      self
+        .run_commands(vec![CoreCommand::ForgetMeetingRecords { meeting }])
+        .await?;
+    }
     Ok(())
   }
 

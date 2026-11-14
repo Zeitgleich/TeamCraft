@@ -16,14 +16,24 @@ use crate::meeting_invitees::GUEST_ACCESS_GRACE_MS;
 /// only where it is earlier than the recorded one: a server that lengthens a meeting gets no longer
 /// signature. Without a record (a meeting handed to this user, or scheduled on another device) the
 /// server's end is all the device knows.
-pub fn admitters_until(server: MeetingTimes, maybe_recorded: Option<&MeetingSchedule>, now_ms: i64) -> i64 {
+///
+/// With `maybe_closed_at_ms`, the time this device closed the meeting (cancelled or ended it here,
+/// or lost its chat, #1939), nothing is signed past that moment, guests' grace included: a meeting
+/// that comes back, whoever brings it back, is never signed longer than it ran here.
+pub fn admitters_until(
+  server: MeetingTimes,
+  maybe_recorded: Option<&MeetingSchedule>,
+  maybe_closed_at_ms: Option<i64>,
+  now_ms: i64,
+) -> i64 {
   let end = match maybe_recorded {
     Some(recorded) => server
       .ends_at_ms
       .min(recorded.occurrence_end(server.starts_at_ms, now_ms)),
     None => server.ends_at_ms,
   };
-  end.saturating_add(GUEST_ACCESS_GRACE_MS)
+  let until = end.saturating_add(GUEST_ACCESS_GRACE_MS);
+  maybe_closed_at_ms.map_or(until, |closed_at_ms| until.min(closed_at_ms))
 }
 
 /// A meeting's (or one occurrence's) start and end, in milliseconds since the epoch.
@@ -199,7 +209,7 @@ mod tests {
       let recorded = schedule(None);
       let lengthened = times(START_MS, END_MS + 10 * DAY_MS);
       assert_eq!(
-        admitters_until(lengthened, Some(&recorded), START_MS),
+        admitters_until(lengthened, Some(&recorded), None, START_MS),
         END_MS + GUEST_ACCESS_GRACE_MS
       );
     }
@@ -209,8 +219,39 @@ mod tests {
       let recorded = schedule(None);
       let shortened = times(START_MS, END_MS - HOUR_MS / 2);
       assert_eq!(
-        admitters_until(shortened, Some(&recorded), START_MS),
+        admitters_until(shortened, Some(&recorded), None, START_MS),
         END_MS - HOUR_MS / 2 + GUEST_ACCESS_GRACE_MS
+      );
+    }
+
+    #[test]
+    fn a_meeting_closed_here_is_never_signed_past_the_close() {
+      let recorded = schedule(None);
+      let closed_at = START_MS + HOUR_MS / 4;
+      let revived = times(START_MS, END_MS + 90 * DAY_MS);
+      assert_eq!(
+        admitters_until(revived, Some(&recorded), Some(closed_at), START_MS),
+        closed_at
+      );
+      // The record is gone with the close: the mark alone caps the server's end.
+      assert_eq!(
+        admitters_until(revived, None, Some(closed_at), START_MS),
+        closed_at
+      );
+    }
+
+    #[test]
+    fn a_close_after_the_end_and_grace_changes_nothing() {
+      let recorded = schedule(None);
+      let closed_at = END_MS + 2 * GUEST_ACCESS_GRACE_MS;
+      assert_eq!(
+        admitters_until(
+          times(START_MS, END_MS),
+          Some(&recorded),
+          Some(closed_at),
+          START_MS
+        ),
+        END_MS + GUEST_ACCESS_GRACE_MS
       );
     }
 
@@ -218,7 +259,7 @@ mod tests {
     fn without_a_record_the_server_end_counts() {
       let handed_over = times(START_MS, END_MS + DAY_MS);
       assert_eq!(
-        admitters_until(handed_over, None, START_MS),
+        admitters_until(handed_over, None, None, START_MS),
         END_MS + DAY_MS + GUEST_ACCESS_GRACE_MS
       );
     }
@@ -232,7 +273,7 @@ mod tests {
       let recorded = schedule(Some(daily(None)));
       let third = times(START_MS + 2 * DAY_MS, START_MS + 2 * DAY_MS + 5 * HOUR_MS);
       assert_eq!(
-        admitters_until(third, Some(&recorded), START_MS + 2 * DAY_MS),
+        admitters_until(third, Some(&recorded), None, START_MS + 2 * DAY_MS),
         START_MS + 2 * DAY_MS + HOUR_MS + GUEST_ACCESS_GRACE_MS
       );
     }
@@ -243,7 +284,7 @@ mod tests {
       let now = START_MS + DAY_MS;
       let far_off = times(START_MS + 400 * DAY_MS, START_MS + 400 * DAY_MS + HOUR_MS);
       assert_eq!(
-        admitters_until(far_off, Some(&recorded), now),
+        admitters_until(far_off, Some(&recorded), None, now),
         now + ADMITTERS_LEAD_MS + HOUR_MS + GUEST_ACCESS_GRACE_MS
       );
     }
@@ -254,7 +295,7 @@ mod tests {
       let recorded = schedule(Some(daily(Some(until))));
       let after_until = times(START_MS + 5 * DAY_MS, START_MS + 5 * DAY_MS + HOUR_MS);
       assert_eq!(
-        admitters_until(after_until, Some(&recorded), START_MS + 5 * DAY_MS),
+        admitters_until(after_until, Some(&recorded), None, START_MS + 5 * DAY_MS),
         until + HOUR_MS + GUEST_ACCESS_GRACE_MS
       );
     }
@@ -264,7 +305,7 @@ mod tests {
       let recorded = schedule(Some(daily(None)));
       let now = START_MS - 30 * DAY_MS;
       assert_eq!(
-        admitters_until(times(START_MS, END_MS), Some(&recorded), now),
+        admitters_until(times(START_MS, END_MS), Some(&recorded), None, now),
         END_MS + GUEST_ACCESS_GRACE_MS
       );
     }
@@ -364,7 +405,7 @@ mod tests {
       let recorded = MeetingSchedule::after(None, note, START_MS, MAX_MS).unwrap();
       let lengthened = times(START_MS, START_MS + 90 * DAY_MS);
       assert_eq!(
-        admitters_until(lengthened, Some(&recorded), START_MS),
+        admitters_until(lengthened, Some(&recorded), None, START_MS),
         START_MS + MAX_MS + GUEST_ACCESS_GRACE_MS
       );
     }

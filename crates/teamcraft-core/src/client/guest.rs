@@ -28,6 +28,7 @@ use teamcraft_proto::{
 };
 use zeroize::Zeroizing;
 
+use super::meeting_records::lobby_record_key;
 use super::{Client, ClientSettings, EnrollmentOptions, EnrollmentSecret, PendingEnrollment};
 use crate::api::ServerApi;
 use crate::clock::Clock;
@@ -44,9 +45,6 @@ const LINK_FRAGMENT_PREFIX: &str = "guest-link-fragment/";
 const ORGANIZER_ANCHOR_PREFIX: &str = "guest-organizer-anchor/";
 /// The key code of a waiting guest's key as this device pinned it, for the lobby entry.
 const GUEST_KEY_CODE_PREFIX: &str = "guest-key-code/";
-/// The lobby setting of a meeting as the organizer chose it on this device (#987 review): only this
-/// record, never the server's `has_lobby`, lets the device admit guests of the link by itself.
-const LOBBY_RECORD_PREFIX: &str = "meeting-lobby-record/";
 /// The name of the organizer's fingerprint in a meeting link's fragment, and the name links of
 /// older apps used for it.
 pub const VERIFIER_KEY: &str = "v";
@@ -295,7 +293,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     records::put_json(
       &self.store,
       Table::SyncState,
-      &format!("{LOBBY_RECORD_PREFIX}{meeting}"),
+      &lobby_record_key(meeting),
       &has_lobby,
     )
   }
@@ -416,19 +414,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         LinkAdmission::Lobby
       }
     });
-    let link_admission = match records::get_json::<bool>(
-      &self.store,
-      Table::SyncState,
-      &format!("{LOBBY_RECORD_PREFIX}{meeting}"),
-    )? {
-      Some(false) => LinkAdmission::ByThemselves,
-      Some(true) => LinkAdmission::Lobby,
-      None => maybe_current
-        .as_ref()
-        .map(VerifiedMeetingAdmitters::link_admission)
-        .or(maybe_kept_admission)
-        .unwrap_or(LinkAdmission::Lobby),
-    };
+    let link_admission =
+      match records::get_json::<bool>(&self.store, Table::SyncState, &lobby_record_key(meeting))? {
+        Some(false) => LinkAdmission::ByThemselves,
+        Some(true) => LinkAdmission::Lobby,
+        None => maybe_current
+          .as_ref()
+          .map(VerifiedMeetingAdmitters::link_admission)
+          .or(maybe_kept_admission)
+          .unwrap_or(LinkAdmission::Lobby),
+      };
     let maybe_invitees: Option<Vec<teamcraft_crypto::ids::UserId>> = self
       .invitees_to_sign(conversation)
       .await?
@@ -1135,13 +1130,9 @@ pub fn guest_key_code<S: LocalStore>(store: &S, guest: UserId) -> Option<String>
 /// Whether the organizer chose "no lobby" for `meeting` on this device: the only case in which the
 /// device admits guests of the link by itself. Unknown means no.
 pub fn is_open_by_own_record<S: LocalStore>(store: &S, meeting: MeetingId) -> bool {
-  records::get_json::<bool>(
-    store,
-    Table::SyncState,
-    &format!("{LOBBY_RECORD_PREFIX}{meeting}"),
-  )
-  .ok()
-  .flatten()
+  records::get_json::<bool>(store, Table::SyncState, &lobby_record_key(meeting))
+    .ok()
+    .flatten()
     == Some(false)
 }
 

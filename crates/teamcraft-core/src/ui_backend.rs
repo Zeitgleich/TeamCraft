@@ -453,6 +453,10 @@ pub enum CoreCommand {
     meeting: teamcraft_proto::MeetingId,
     note: teamcraft_client_api::meeting_schedule::ScheduleNote,
   },
+  /// Close a meeting cancelled or ended here: its records go, a mark caps it (#1939).
+  ForgetMeetingRecords {
+    meeting: teamcraft_proto::MeetingId,
+  },
   /// The organizer's device publishes who may let guests in, if that changed (#1103), valid until
   /// the meeting's end by its own record (#1919).
   SyncMeetingAdmitters {
@@ -665,6 +669,7 @@ impl CoreCommand {
       | Self::PrepareGuestKeyCode { .. }
       | Self::NoteMeetingLobby { .. }
       | Self::NoteMeetingSchedule { .. }
+      | Self::ForgetMeetingRecords { .. }
       | Self::SyncMeetingAdmitters { .. }
       | Self::CheckMeetingAdmission { .. }
       | Self::ChangeMeetingHosts { .. } => CommandPart::Member,
@@ -3407,6 +3412,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     note: teamcraft_client_api::meeting_schedule::ScheduleNote,
   ) {
     self.command(CoreCommand::NoteMeetingSchedule { meeting, note });
+  }
+
+  fn forget_meeting_records(&self, meeting: teamcraft_proto::MeetingId) {
+    self.command(CoreCommand::ForgetMeetingRecords { meeting });
   }
 
   fn sync_meeting_admitters(

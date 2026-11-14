@@ -23,9 +23,23 @@ use crate::state::{AppState, use_app_state};
 /// Ends the meeting for everyone (#1931): stops its call if one runs and closes it for its guests,
 /// whether or not the host is in the call. The one implementation behind the host controls, the
 /// call screen's hang-up menu and the tray. Afterwards (and when the server no longer knows the
-/// meeting) the list is reloaded, so the row shows it ended or drops it.
-pub async fn end_for_everyone(hub: MeetingsHub, meeting: MeetingId, me: UserId) -> Result<(), ActionFailure> {
+/// meeting) the list is reloaded, so the row shows it ended or drops it. A meeting that doesn't
+/// repeat is over for good: this device's records of it go (#1939); a series goes on.
+pub async fn end_for_everyone(
+  state: AppState,
+  hub: MeetingsHub,
+  meeting: MeetingId,
+  me: UserId,
+) -> Result<(), ActionFailure> {
+  let is_one_off = hub.meetings.with_untracked(|all| {
+    all
+      .iter()
+      .any(|item| item.id == meeting && item.maybe_recurrence.is_none())
+  });
   let result = control(hub, meeting, MeetingControlAction::End).await;
+  if result.is_ok() && is_one_off {
+    state.try_write(|backend| backend.forget_meeting_records(meeting));
+  }
   if result.is_ok() || result.as_ref().is_err_and(is_gone) {
     hub.refresh(me, now_ms()).await;
   }
@@ -71,7 +85,7 @@ pub fn EndPrompt(
   };
   let end = move |_| {
     ending.spawn(async move {
-      end_for_everyone(hub, meeting, me).await?;
+      end_for_everyone(state, hub, meeting, me).await?;
       is_open.set_if_alive(false);
       call.leave();
       Ok(())
@@ -210,7 +224,7 @@ pub fn HostControls(meeting: MeetingId, conversation: ConversationId) -> impl In
   };
   let end = move |_| {
     is_confirming_end.set(false);
-    ending.spawn(end_for_everyone(hub, meeting, me));
+    ending.spawn(end_for_everyone(state, hub, meeting, me));
   };
 
   view! {

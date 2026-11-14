@@ -707,6 +707,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.note_meeting_schedule(meeting, note);
   }
 
+  fn forget_meeting_records(&self, meeting: teamcraft_proto::MeetingId) {
+    self.chat.forget_meeting_records(meeting);
+  }
+
   fn sync_meeting_admitters(
     &self,
     meeting: teamcraft_proto::MeetingId,
