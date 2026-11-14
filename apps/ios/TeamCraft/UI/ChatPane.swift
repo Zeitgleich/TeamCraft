@@ -114,6 +114,10 @@ struct ChatPane: View {
   private static let quickReactions = ["👍", "❤️", "😂", "🎉", "😮", "🙏"]
   /// How long typing pauses before the draft is saved.
   private static let draftSaveDelay = Duration.milliseconds(800)
+  /// Over this height at its top the composer's scrim fades in from clear (#1966).
+  private static let scrimFade: CGFloat = 24
+  /// How much of the background the scrim lets through below its fade: messages stay a hint.
+  private static let scrimBodyOpacity = 0.88
   /// The reaction a double tap toggles, as in most chat apps.
   private static let quickReaction = "👍"
 
@@ -278,16 +282,9 @@ struct ChatPane: View {
           ImageActions(
             maybeReply: canReply ? startImageReply : nil,
             forward: { file in maybeForwardingImage = file }))
-      if let line = typingText(typingNames(in: model.typingNow, conversation: conversation.id, thread: threadId)) {
-        Text(line)
-          .font(.app(.caption).italic())
-          .foregroundStyle(Theme.textMuted)
-          .lineLimit(1)
-          .frame(maxWidth: .infinity, alignment: .leading)
-          .padding(.horizontal)
-          .padding(.vertical, 2)
-      }
-      composer
+        // The composer floats over the end of the list (#1966): the messages scroll on behind it
+        // and fade out under its scrim, and the list's inset follows its height.
+        .safeAreaInset(edge: .bottom, spacing: 0) { floatingComposer }
     }
     .background(Theme.background)
     .navigationTitle(threadId == nil ? conversation.listName : String(localized: "thread_title"))
@@ -604,6 +601,39 @@ struct ChatPane: View {
       .id(message.id)
   }
 
+  /// The typing line and the composer over a scrim from the background colour: clear at the top,
+  /// so the messages behind fade out, nearly opaque below. Drawn once per size, not per scroll.
+  private var floatingComposer: some View {
+    VStack(spacing: 0) {
+      if let line = typingText(typingNames(in: model.typingNow, conversation: conversation.id, thread: threadId)) {
+        Text(line)
+          .font(.app(.caption).italic())
+          .foregroundStyle(Theme.textMuted)
+          .lineLimit(1)
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .padding(.horizontal)
+          .padding(.vertical, 2)
+      }
+      composer
+    }
+    .padding(.top, Self.scrimFade)
+    .background {
+      VStack(spacing: 0) {
+        LinearGradient(
+          colors: [Theme.background.opacity(0), Theme.background.opacity(Self.scrimBodyOpacity)],
+          startPoint: .top, endPoint: .bottom
+        )
+        .frame(height: Self.scrimFade)
+        LinearGradient(
+          colors: [Theme.background.opacity(Self.scrimBodyOpacity), Theme.background],
+          startPoint: .top, endPoint: .bottom)
+      }
+      // Under the home indicator too; the keyboard covers the rest.
+      .ignoresSafeArea(.container, edges: .bottom)
+      .allowsHitTesting(false)
+    }
+  }
+
   /// The message field as in the common messengers (#713): a rounded field with attach on the
   /// leading side and the camera on the trailing side inside it, and a round send button beside
   /// it, filled while there is something to send.
@@ -633,7 +663,6 @@ struct ChatPane: View {
       }
       .padding(.horizontal, 10)
       .padding(.vertical, 8)
-      .background(.bar)
     } else {
       Text(LocalizedStringKey(conversation.isArchived ? "read_only_archived" : "read_only_channel")).font(.app(.footnote)).foregroundStyle(Theme.textMuted).padding()
     }

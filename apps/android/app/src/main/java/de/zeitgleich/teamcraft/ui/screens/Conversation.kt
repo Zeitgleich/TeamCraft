@@ -49,6 +49,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -134,6 +136,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.ui.SharedFiles
 import androidx.core.graphics.PaintCompat
@@ -382,7 +385,16 @@ fun ConversationScreen(
         ConversationMenu(viewModel, conversationId, conversation, rights, onOpenFiles, onOpenConversation)
       }
     },
-  ) {
+    bottomBar = {
+      NotifiedMessageRow(maybeNotified, isLoading = conversation == null || messages.isEmpty())
+      TypingIndicator(viewModel, conversationId, snapshot)
+      if (conversation?.canPost != false) {
+        Composer(viewModel, conversationId, maybeThread = null, snapshot = snapshot, onSent = { sentCount++ })
+      } else {
+        ReadOnlyNote(isArchived = conversation?.isArchived == true)
+      }
+    },
+  ) { listBottomInset ->
     SyncingLine(isCatchingUp = conversation?.isCatchingUp == true)
     if (isChannel) ChannelUnreachableBanner(viewModel, conversationId)
     RunningCallBanner(viewModel, conversationId, conversation?.name.orEmpty(), runningCallCount)
@@ -417,6 +429,7 @@ fun ConversationScreen(
       }.takeIf { rights.canPost },
       rights = rights,
       modifier = Modifier.weight(1f),
+      bottomInset = listBottomInset,
       maybeFocusMessage = maybeFocusMessage,
       onOpenPermalink = onOpenPermalink,
       onOpenConversation = onOpenConversation,
@@ -449,13 +462,6 @@ fun ConversationScreen(
         }
       },
     )
-    NotifiedMessageRow(maybeNotified, isLoading = conversation == null || messages.isEmpty())
-    TypingIndicator(viewModel, conversationId, snapshot)
-    if (conversation?.canPost != false) {
-      Composer(viewModel, conversationId, maybeThread = null, snapshot = snapshot, onSent = { sentCount++ })
-    } else {
-      ReadOnlyNote(isArchived = conversation?.isArchived == true)
-    }
   }
 }
 
@@ -499,7 +505,15 @@ fun ThreadScreen(
         }
       }
     },
-  ) {
+    bottomBar = {
+      TypingIndicator(viewModel, conversationId, snapshot, maybeThread = threadId)
+      if (rights.canPost) {
+        Composer(viewModel, conversationId, maybeThread = threadId, snapshot = snapshot, onSent = { sentCount++ })
+      } else {
+        ReadOnlyNote()
+      }
+    },
+  ) { listBottomInset ->
     MessageList(
       viewModel = viewModel,
       conversationId = conversationId,
@@ -512,15 +526,10 @@ fun ThreadScreen(
       maybeOnReply = null,
       rights = rights,
       modifier = Modifier.weight(1f),
+      bottomInset = listBottomInset,
       maybeFocusMessage = maybeFocusMessage,
       onOpenPermalink = onOpenPermalink,
     )
-    TypingIndicator(viewModel, conversationId, snapshot, maybeThread = threadId)
-    if (rights.canPost) {
-      Composer(viewModel, conversationId, maybeThread = threadId, snapshot = snapshot, onSent = { sentCount++ })
-    } else {
-      ReadOnlyNote()
-    }
   }
 }
 
@@ -592,23 +601,40 @@ private fun TypingIndicator(viewModel: MainViewModel, conversationId: String, sn
   )
 }
 
-/** Top bar, failure snackbar and the column the screens fill. */
+/**
+ * Top bar, failure snackbar, the column the screens fill and the composer floating over its end
+ * (#1966). The column reaches the bottom of the screen; [content] gets the floating part's height
+ * (keyboard and gesture bar included) as the inset its list keeps clear at the end.
+ */
 @Composable
-private fun ChatScaffold(
+internal fun ChatScaffold(
   viewModel: MainViewModel,
   topBar: @Composable () -> Unit,
-  content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit,
+  bottomBar: @Composable ColumnScope.() -> Unit,
+  content: @Composable ColumnScope.(listBottomInset: Dp) -> Unit,
 ) {
   val snackbars = rememberFailureSnackbars(viewModel)
+  var bottomBarHeight by remember { mutableStateOf(0.dp) }
+  val background = MaterialTheme.colorScheme.background
   Scaffold(
-    contentWindowInsets = ScreenInsets,
+    // The bottom inset is the floating composer's: the list runs on behind the gesture bar.
+    contentWindowInsets = ScreenInsets.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
     topBar = topBar,
-    snackbarHost = { SnackbarHost(snackbars) },
+    snackbarHost = { SnackbarHost(snackbars, Modifier.padding(bottom = bottomBarHeight)) },
+    containerColor = background,
   ) { padding ->
-    // The insets include the keyboard: the composer rides on top of it as it slides in (#309).
-    Column(Modifier.fillMaxSize().padding(padding)) {
-      OfflineBanner(onSignInAgain = { viewModel.signOut() })
-      content()
+    Box(Modifier.fillMaxSize().padding(padding)) {
+      Column(Modifier.fillMaxSize()) {
+        OfflineBanner(onSignInAgain = { viewModel.signOut() })
+        content(bottomBarHeight)
+      }
+      // The insets include the keyboard: the composer rides on top of it as it slides in (#309).
+      FloatingComposer(
+        background = background,
+        onHeightChange = { bottomBarHeight = it },
+        modifier = Modifier.align(Alignment.BottomCenter),
+        content = bottomBar,
+      )
     }
   }
 }
@@ -869,6 +895,7 @@ private fun MessageList(
   maybeOnReplyImage: ((FileInfo) -> Unit)? = null,
   rights: ConversationRights,
   modifier: Modifier,
+  bottomInset: Dp,
   maybeFocusMessage: String?,
   onOpenPermalink: (String) -> Unit,
   onOpenConversation: (String) -> Unit = {},
@@ -910,6 +937,7 @@ private fun MessageList(
     maybeOpenPicture = maybeViewingFromSheet,
     onPictureOpened = { maybeViewingFromSheet = null },
     modifier = modifier,
+    bottomInset = bottomInset,
     maybeFocusMessage = maybeFocusMessage,
     onOpenPermalink = onOpenPermalink,
     onOpenConversation = onOpenConversation,

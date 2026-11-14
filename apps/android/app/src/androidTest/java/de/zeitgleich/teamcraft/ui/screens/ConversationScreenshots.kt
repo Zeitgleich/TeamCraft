@@ -4,14 +4,12 @@ import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 import androidx.lifecycle.ViewModelProvider
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -40,6 +38,8 @@ private const val MINUTE_MILLIS = 60_000L
 /** Long side of the sample thumbnails, as senders make them since #315. */
 private const val THUMBNAIL_PX = 640
 private const val CONVERSATION = "c1"
+/** The largest text size Android's settings offer. */
+private const val LARGE_FONT_SCALE = 2f
 
 /**
  * Screenshots of a conversation (#315, #309) in light and dark: image previews, the composer, the
@@ -61,6 +61,16 @@ class ConversationScreenshots {
       }
     }
     shoot("conversation-landscape-light", isDark = false, isLandscape = true) { viewModel -> ConversationSample(viewModel) }
+    // The floating composer (#1966): with the reply bar above the field, and at the largest text.
+    try {
+      ReplyTarget.set(CONVERSATION, messages().first(), "Sam Doe")
+      for (isDark in listOf(false, true)) {
+        shoot("conversation-reply-${if (isDark) "dark" else "light"}", isDark) { viewModel -> ConversationSample(viewModel) }
+      }
+    } finally {
+      ReplyTarget.current.value = null
+    }
+    shoot("conversation-large-text-light", isDark = false, fontScale = LARGE_FONT_SCALE) { viewModel -> ConversationSample(viewModel) }
     // The desktop's comfortable and compact lists instead of bubbles (#598, #1488).
     val layout = MessageLayoutPrefs.of(InstrumentationRegistry.getInstrumentation().targetContext)
     try {
@@ -79,6 +89,7 @@ class ConversationScreenshots {
     name: String,
     isDark: Boolean,
     isLandscape: Boolean = false,
+    fontScale: Float = 1f,
     content: @Composable (MainViewModel) -> Unit,
   ) {
     val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -94,7 +105,11 @@ class ConversationScreenshots {
             uiMode = (uiMode and Configuration.UI_MODE_NIGHT_MASK.inv()) or
               (if (isDark) Configuration.UI_MODE_NIGHT_YES else Configuration.UI_MODE_NIGHT_NO)
           }
-          CompositionLocalProvider(LocalConfiguration provides configuration) {
+          val density = LocalDensity.current
+          CompositionLocalProvider(
+            LocalConfiguration provides configuration,
+            LocalDensity provides Density(density.density, density.fontScale * fontScale),
+          ) {
             TeamCraftTheme { content(viewModel) }
           }
         }
@@ -108,28 +123,30 @@ class ConversationScreenshots {
     }
   }
 
-  /** The conversation screen's parts with sample data (the screen itself reads the core). */
+  /**
+   * The conversation screen's parts with sample data (the screen itself reads the core), in the
+   * screen's own scaffold: the list runs on behind the floating composer.
+   */
   @Composable
   private fun ConversationSample(viewModel: MainViewModel) {
-    Scaffold(
+    ChatScaffold(
+      viewModel = viewModel,
       topBar = { ChromeTopBar(title = "Sam Doe", maybeOnBack = {}) },
-      contentWindowInsets = ScreenInsets,
-    ) { padding ->
-      Column(Modifier.fillMaxSize().padding(padding)) {
-        MessageFeed(
-          viewModel = viewModel,
-          snapshot = SNAPSHOT,
-          messages = messages(),
-          extras = extras(),
-          firstUnread = FirstUnread.None,
-          sentCount = 0,
-          onOpenThread = {},
-          maybeOnReply = {},
-          onLongPress = {},
-          modifier = Modifier.weight(1f),
-        )
-        Composer(viewModel, CONVERSATION, maybeThread = null, snapshot = SNAPSHOT)
-      }
+      bottomBar = { Composer(viewModel, CONVERSATION, maybeThread = null, snapshot = SNAPSHOT) },
+    ) { listBottomInset ->
+      MessageFeed(
+        viewModel = viewModel,
+        snapshot = SNAPSHOT,
+        messages = messages(),
+        extras = extras(),
+        firstUnread = FirstUnread.None,
+        sentCount = 0,
+        onOpenThread = {},
+        maybeOnReply = {},
+        onLongPress = {},
+        modifier = Modifier.weight(1f),
+        bottomInset = listBottomInset,
+      )
     }
   }
 

@@ -41,6 +41,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -296,6 +297,8 @@ fun MessageFeed(
   maybeOpenPicture: PictureTarget? = null,
   onPictureOpened: () -> Unit = {},
   modifier: Modifier = Modifier,
+  /** Kept clear at the end of the list: the floating composer over it (#1966). */
+  bottomInset: Dp = 0.dp,
   maybeFocusMessage: String? = null,
   onOpenPermalink: (String) -> Unit = {},
   /** Opens another conversation: the room a call moved into (issue #1290). */
@@ -452,6 +455,9 @@ fun MessageFeed(
       LazyColumn(
         Modifier.fillMaxSize().onGloballyPositioned { stickyEdge.maybeFeed = it },
         state = listState,
+        // Scrolled to the end, the newest message sits above the floating composer; older ones
+        // run on behind it.
+        contentPadding = PaddingValues(bottom = bottomInset),
         reverseLayout = true,
       ) {
         // Rows of one kind reuse each other's layout when they scroll in.
@@ -495,7 +501,8 @@ fun MessageFeed(
     }
     FloatingDay(listState, items, Modifier.align(Alignment.TopCenter))
     Column(
-      Modifier.align(Alignment.BottomEnd).padding(16.dp),
+      // Above the floating composer and its scrim, not under them.
+      Modifier.align(Alignment.BottomEnd).padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = maxOf(16.dp, bottomInset)),
       horizontalAlignment = Alignment.End,
       verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -707,8 +714,10 @@ private suspend fun showAtTop(listState: LazyListState, index: Int) {
   listState.scrollToItem(index)
   val info = listState.layoutInfo
   val itemSize = info.visibleItemsInfo.firstOrNull { it.index == index }?.size ?: 0
+  // The part of the screen rows show in, without the inset kept clear under the composer.
+  val shownPx = info.viewportEndOffset - info.viewportStartOffset - info.beforeContentPadding - info.afterContentPadding
   // In a reversed list a negative scroll moves toward the newest messages.
-  listState.scrollBy(-(info.viewportEndOffset - info.viewportStartOffset - itemSize).toFloat())
+  listState.scrollBy(-(shownPx - itemSize).toFloat())
 }
 
 /** A local file opens in another app; anything else is downloaded first (a second tap opens it). */
