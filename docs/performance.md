@@ -2594,8 +2594,19 @@ A read thread used to run an action's local half (`ReadQueue::act`), which waits
 lock: while the engine held a group of writes (a catch-up), every read queued behind the action
 waited with it, up to 21 s for 3 ms of work in the crash reports. Actions now have a thread of their
 own (`teamcraft-actions`, span `queue.act`), which reads and writes through the writer inside its
-group. The chat list pass keeps the sidebar's counts (`flush_entry_tallies`) only when the lock is
-free (`LocalStore::try_begin_writes`); otherwise they wait for the next pass, since they are a cache.
+group.
+
+The read threads write nothing since issue #1962. Trying for the lock wasn't enough: once a cache
+write had the group it held it while it wrote, and on Android 1.0.33 the tally write took 937 ms of a
+1084 ms chat list read (21 ms CPU), with the engine and three reads waiting behind it. The unread
+tallies (`flush_entry_tallies`, through `CoreChatBackend::with_tally_keeper`) and the chat list kept
+for the next start go to `CacheWrites`, which queues one write at a time on the actions' thread;
+what a read hands over meanwhile joins it, newer over older. Until it is written a later read counts
+again what it would have found (a cache miss, no wrong number). Effect on the budgets
+(robustness.md, Performance): a channel switch and a chat list read no longer include a write group,
+so neither waits for the engine's groups nor for the disk; an action queued right after a cache
+write waits for it (a few ms usually), and actions still wait for the engine's groups, which keeps
+their order and their read-your-write.
 
 ### Signed-in start: the MLS state on demand, the kept chat list (issue #1758)
 

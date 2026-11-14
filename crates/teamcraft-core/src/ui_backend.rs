@@ -67,7 +67,7 @@ use crate::records::{self, Draft};
 use crate::store::{
   BookmarkItem, ConversationEvent, FeedVersion, LocalStore, MessageContent, MessageEdge, MessageFilter,
   MessageMeta, MessageOrder, MessageSlot, StoreError, StoredMessage, Table, Unreadable, read_together,
-  try_write_group,
+  try_write_group, write_group,
 };
 
 /// Rows read at a time when a list's anchor is looked for by its time ([`FeedAnchor`]).
@@ -792,6 +792,48 @@ impl std::fmt::Debug for RedactedText {
   }
 }
 
+/// Where a backend hands the tallies it counted instead of writing them itself
+/// ([`CoreChatBackend::with_tally_keeper`]).
+pub type TallyKeeper = Box<dyn Fn(CountedTallies)>;
+
+/// Unread tallies a backend counted and didn't write (issue #1962): a read thread hands them to the
+/// thread that writes, which keeps them with [`Self::write`]. They are a cache: one that never gets
+/// written is counted again.
+#[derive(Default)]
+pub struct CountedTallies {
+  tallies: BTreeMap<ConversationId, EntryTally>,
+}
+
+impl CountedTallies {
+  pub fn is_empty(&self) -> bool {
+    self.tallies.is_empty()
+  }
+
+  /// How many conversations' tallies these are.
+  pub fn len(&self) -> usize {
+    self.tallies.len()
+  }
+
+  /// Adds tallies counted after these: for a conversation in both, the newer one wins.
+  pub fn add_newer(&mut self, newer: Self) {
+    self.tallies.extend(newer.tallies);
+  }
+
+  /// Writes them, in one group: a start counts many at once, and each on its own would wait for the
+  /// disk.
+  pub fn write<S: LocalStore + ?Sized>(&self, store: &S) -> Result<(), CoreError> {
+    if self.tallies.is_empty() {
+      return Ok(());
+    }
+    write_group(store, || {
+      for (conversation, tally) in &self.tallies {
+        store.put(Table::EntryTallies, &conversation.to_string(), &tally.to_bytes())?;
+      }
+      Ok(())
+    })
+  }
+}
+
 pub struct CoreChatBackend<S> {
   store: S,
   me: UserId,
@@ -815,6 +857,8 @@ pub struct CoreChatBackend<S> {
   pub(crate) files_page_kept: RefCell<Option<crate::ui_files_page::KeptFilesPage>>,
   /// Tallies counted and not kept yet ([`Self::flush_entry_tallies`]).
   entry_tallies: RefCell<BTreeMap<ConversationId, EntryTally>>,
+  /// Who writes the tallies instead of this backend ([`Self::with_tally_keeper`]).
+  maybe_tally_keeper: Option<TallyKeeper>,
   /// What the snapshot's entries count ([`Self::with_entry_need`]).
   entry_need: EntryNeed,
   /// The unread rows of conversations whose counts follow the store's journal of writes
@@ -924,6 +968,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       space_members_kept: RefCell::default(),
       files_page_kept: RefCell::default(),
       entry_tallies: RefCell::default(),
+      maybe_tally_keeper: None,
       entry_need: EntryNeed::Everything,
       live_unread: RefCell::default(),
       followed_kept_at: std::cell::Cell::new(None),
@@ -950,6 +995,14 @@ impl<S: LocalStore> CoreChatBackend<S> {
   #[must_use]
   pub fn with_entry_need(mut self, need: EntryNeed) -> Self {
     self.entry_need = need;
+    self
+  }
+
+  /// Hands the tallies a flush would write to `keeper` instead ([`CountedTallies`]): a backend on
+  /// a thread whose reads must not wait for the store's write lock never takes it (issue #1962).
+  #[must_use]
+  pub fn with_tally_keeper(mut self, keeper: TallyKeeper) -> Self {
+    self.maybe_tally_keeper = Some(keeper);
     self
   }
 
@@ -1510,11 +1563,16 @@ impl<S: LocalStore> CoreChatBackend<S> {
   /// Keeps the tallies counted since the last call, in one group: a start counts many at once, and
   /// each on its own would wait for the disk. They are a cache: one not kept is counted again.
   /// While another thread holds the store's group they stay for the next call: a read pass that
-  /// waited for the write lock here held up every read behind it (issue #1756).
+  /// waited for the write lock here held up every read behind it (issue #1756). With a
+  /// [`Self::with_tally_keeper`] they go to the keeper, and this backend writes nothing.
   pub(crate) fn flush_entry_tallies(&self) {
     let _step = crate::timing::step("flush_entry_tallies");
     let tallies = std::mem::take(&mut *self.entry_tallies.borrow_mut());
     if tallies.is_empty() {
+      return;
+    }
+    if let Some(keeper) = &self.maybe_tally_keeper {
+      keeper(CountedTallies { tallies });
       return;
     }
     let result: Result<Option<()>, CoreError> = try_write_group(&self.store, || {

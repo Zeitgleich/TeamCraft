@@ -22,6 +22,12 @@
 //! A pass and the chat previews run in slices ([`Slice`], issue #1819): each slice is a job of its
 //! own and queues the next behind what waits by then, so a read the app queued meanwhile waits one
 //! slice, not the whole pass (1.7–2.7 s on phones in 1.0.32).
+//!
+//! The two read threads never write (issue #1962). What a read computes for later (the unread
+//! tallies, the chat list kept for the next start) is a cache; they hand it to the actions' thread
+//! ([`CacheWrites`]), which writes it in a group of its own. A write there, even one that only tries
+//! for the lock, holds the store's group while it writes, and the engine and every read waited for
+//! it (937 ms inside a chat list read on 1.0.33).
 
 use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
@@ -48,9 +54,9 @@ use teamcraft_core::prefetch::load_segment_prefetch;
 use teamcraft_core::push_guard;
 use teamcraft_core::push_preview::{device_push_content, push_content_mode};
 use teamcraft_core::records;
-use teamcraft_core::store::{Table, read_together, try_write_group, write_group};
+use teamcraft_core::store::{Table, read_together, write_group};
 use teamcraft_core::transfers::Transfers;
-use teamcraft_core::ui_backend::{CoreChatBackend, EntryNeed};
+use teamcraft_core::ui_backend::{CoreChatBackend, CountedTallies, EntryNeed};
 use teamcraft_core::ui_snapshot::SnapshotCache;
 use teamcraft_proto::{ConversationId, SpaceId, ThreadId, UserId};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
@@ -119,6 +125,22 @@ pub(crate) struct ReadLanes {
   pub(crate) act: Store,
 }
 
+/// Caches the read threads computed, waiting for the actions' thread to write them (issue #1962).
+/// One write is queued at a time: what comes meanwhile joins it.
+struct CacheWrites {
+  pending: Mutex<PendingCache>,
+  act_jobs: mpsc::Sender<ReadJob>,
+}
+
+/// What [`CacheWrites`] holds until its write runs.
+#[derive(Default)]
+struct PendingCache {
+  tallies: CountedTallies,
+  maybe_chat_list: Option<KeptChatList>,
+  /// A write is queued on the actions' thread and hasn't taken these yet.
+  is_queued: bool,
+}
+
 /// Which read thread runs a job.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Lane {
@@ -174,6 +196,9 @@ pub(crate) struct Reads {
   link_requests: LinkRequestList,
   /// Set by [`ReadQueue::close`]: the thread ends after this job and answers here.
   maybe_closing: Option<mpsc::Sender<()>>,
+  /// Where a read thread's caches go to be written; `None` on the actions' thread, which writes
+  /// them itself (issue #1962).
+  maybe_cache_writes: Option<Arc<CacheWrites>>,
 }
 
 /// The enrolled account as the read thread has it.
@@ -216,7 +241,7 @@ enum ChatListAtStart {
 }
 
 /// The chat list as a pass kept it.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct KeptChatList {
   items: Vec<ConversationItem>,
 }
@@ -234,21 +259,32 @@ impl ReadQueue {
     catch_up_focus: CatchUpFocus,
     engine: tokio_mpsc::WeakUnboundedSender<Job>,
   ) -> Result<Self, TeamCraftError> {
+    let act_jobs = spawn_lane(
+      "teamcraft-actions",
+      lanes.act,
+      listener.clone(),
+      catch_up_focus.clone(),
+      engine.clone(),
+      None,
+    )?;
+    // Only the read threads hold the actions' queue: the actions' thread ends once they did.
+    let cache_writes = Arc::new(CacheWrites::new(act_jobs.clone()));
     let jobs = spawn_lane(
       "teamcraft-reads",
       lanes.main,
       listener.clone(),
       catch_up_focus.clone(),
       engine.clone(),
+      Some(cache_writes.clone()),
     )?;
     let query_jobs = spawn_lane(
       "teamcraft-queries",
       lanes.query,
-      listener.clone(),
-      catch_up_focus.clone(),
-      engine.clone(),
+      listener,
+      catch_up_focus,
+      engine,
+      Some(cache_writes),
     )?;
-    let act_jobs = spawn_lane("teamcraft-actions", lanes.act, listener, catch_up_focus, engine)?;
     Ok(Self {
       jobs,
       query_jobs,
@@ -350,8 +386,11 @@ impl ReadQueue {
       }
       // The apps show no message count or last activity of the snapshot: their counts never read
       // history older than the read position (issue #1466).
-      let backend = CoreChatBackend::new(reads.store.clone(), user, Box::new(SystemClock))
+      let mut backend = CoreChatBackend::new(reads.store.clone(), user, Box::new(SystemClock))
         .with_entry_need(EntryNeed::Unread);
+      if let Some(cache_writes) = reads.maybe_cache_writes.clone() {
+        backend = backend.with_tally_keeper(Box::new(move |tallies| cache_writes.keep_tallies(tallies)));
+      }
       reads.maybe_account = Some(ReadAccount {
         backend,
         snapshots: SnapshotCache::new(u64::try_from(SystemClock.now_ms()).unwrap_or_default()),
@@ -547,6 +586,7 @@ fn spawn_lane(
   listener: Arc<dyn EventListener>,
   catch_up_focus: CatchUpFocus,
   engine: tokio_mpsc::WeakUnboundedSender<Job>,
+  maybe_cache_writes: Option<Arc<CacheWrites>>,
 ) -> Result<mpsc::Sender<ReadJob>, TeamCraftError> {
   let (queue, jobs) = mpsc::channel::<ReadJob>();
   std::thread::Builder::new()
@@ -561,6 +601,7 @@ fn spawn_lane(
         maybe_account: None,
         link_requests: LinkRequestList::default(),
         maybe_closing: None,
+        maybe_cache_writes,
       };
       loop {
         let job = match jobs.try_recv() {
@@ -592,6 +633,61 @@ fn spawn_lane(
     })
     .map_err(|error| TeamCraftError::Core(error.to_string()))?;
   Ok(queue)
+}
+
+impl CacheWrites {
+  fn new(act_jobs: mpsc::Sender<ReadJob>) -> Self {
+    Self {
+      pending: Mutex::new(PendingCache::default()),
+      act_jobs,
+    }
+  }
+
+  /// Tallies a read counted: written with what else waits, newer ones over older.
+  fn keep_tallies(self: &Arc<Self>, tallies: CountedTallies) {
+    let mut pending = self.lock();
+    pending.tallies.add_newer(tallies);
+    self.queue_write(&mut pending);
+  }
+
+  /// The chat list for the next start: the newest one wins.
+  fn keep_chat_list(self: &Arc<Self>, kept: KeptChatList) {
+    let mut pending = self.lock();
+    pending.maybe_chat_list = Some(kept);
+    self.queue_write(&mut pending);
+  }
+
+  /// Queues the write on the actions' thread unless one is queued already.
+  fn queue_write(self: &Arc<Self>, pending: &mut PendingCache) {
+    if pending.is_queued {
+      return;
+    }
+    let cache_writes = Arc::clone(self);
+    let job: ReadJob = Box::new(move |reads: &mut Reads| cache_writes.write(&reads.store));
+    // Refused only once the actions' thread ended: nothing writes any more, and a cache may be lost.
+    pending.is_queued = self.act_jobs.send(job).is_ok();
+  }
+
+  /// On the actions' thread: writes what waits, in one group. A failure is logged and dropped: it is
+  /// a cache, and the reads count again what isn't there.
+  fn write(&self, store: &Store) {
+    let taken = std::mem::take(&mut *self.lock());
+    let written = write_group(store, || -> Result<(), TeamCraftError> {
+      taken.tallies.write(store)?;
+      if let Some(kept) = &taken.maybe_chat_list {
+        records::put_json(store, Table::Account, KEPT_CHAT_LIST_KEY, kept)?;
+      }
+      Ok(())
+    });
+    if let Err(error) = written {
+      tracing::debug!(%error, tallies = taken.tallies.len(), "could not keep the read threads' caches");
+    }
+  }
+
+  fn lock(&self) -> std::sync::MutexGuard<'_, PendingCache> {
+    // Invariant-free data: at worst a cache is lost and counted again.
+    self.pending.lock().unwrap_or_else(PoisonError::into_inner)
+  }
 }
 
 impl ChatListRun {
@@ -856,6 +952,7 @@ impl Reads {
   fn finish_chat_list(&mut self, run: ChatListRun) -> Result<Vec<ConversationItem>, TeamCraftError> {
     let items = run.into_items();
     let store = self.store.clone();
+    let maybe_cache_writes = self.maybe_cache_writes.clone();
     let account = self.maybe_account.as_mut().ok_or(TeamCraftError::NotEnrolled)?;
     account.chat_list = ChatListAtStart::Passed;
     let is_due = account.maybe_kept.as_ref() != Some(&items)
@@ -865,17 +962,19 @@ impl Reads {
     if !is_due {
       return Ok(items);
     }
+    account.maybe_kept = Some(items.clone());
+    account.maybe_kept_at = Some(Instant::now());
     let kept = KeptChatList { items };
-    // Only when the write lock is free: the engine's catch-up may hold it, and this is a cache.
-    match try_write_group(&store, || {
-      records::put_json(&store, Table::Account, KEPT_CHAT_LIST_KEY, &kept)
-    }) {
-      Ok(Some(())) => {
-        account.maybe_kept = Some(kept.items.clone());
-        account.maybe_kept_at = Some(Instant::now());
+    match &maybe_cache_writes {
+      // A read thread doesn't take the write lock (issue #1962).
+      Some(cache_writes) => cache_writes.keep_chat_list(kept.clone()),
+      None => {
+        if let Err(error) = write_group(&store, || {
+          records::put_json(&store, Table::Account, KEPT_CHAT_LIST_KEY, &kept)
+        }) {
+          tracing::debug!(%error, "could not keep the chat list");
+        }
       },
-      Ok(None) => {},
-      Err(error) => tracing::debug!(%error, "could not keep the chat list"),
     }
     Ok(kept.items)
   }
@@ -1534,6 +1633,54 @@ mod tests {
         files.engine.get(Table::Users, "a").unwrap(),
         Some(b"acted".to_vec())
       );
+      files.finish();
+    }
+
+    /// Issue #1962: a read that keeps a cache (the chat list for the next start, the unread
+    /// tallies) doesn't take the store's write lock while the engine holds a group of writes, and
+    /// the reads behind it don't wait either. The actions' thread writes the cache once the group
+    /// ended, before the actions queued after it.
+    #[tokio::test]
+    async fn a_read_keeping_a_cache_waits_for_no_write_lock() {
+      let files = FileLanes::open();
+      let engine = files.engine.clone();
+      let (held, is_held) = mpsc::channel();
+      let (release, released) = mpsc::channel::<()>();
+      let catch_up = std::thread::spawn(move || {
+        write_group(&engine, || {
+          engine.put(Table::Users, "engine", b"1")?;
+          held.send(()).map_err(|_| TeamCraftError::EngineStopped)?;
+          // Deliberately ignored: the test ends the wait either way.
+          let _ = released.recv();
+          Ok::<_, TeamCraftError>(())
+        })
+        .unwrap();
+      });
+      is_held.recv().unwrap();
+
+      let kept = KeptChatList { items: Vec::new() };
+      let keeping = files.queue.read(move |reads| {
+        let cache_writes = reads
+          .maybe_cache_writes
+          .clone()
+          .ok_or(TeamCraftError::NotEnrolled)?;
+        cache_writes.keep_chat_list(kept);
+        Ok(())
+      });
+      let behind = files.queue.read(|_| Ok(()));
+      tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        keeping.await.unwrap();
+        behind.await.unwrap();
+      })
+      .await
+      .expect("neither read waits for the engine's group");
+
+      release.send(()).unwrap();
+      catch_up.join().unwrap();
+      // Queued after the cache's write on the same thread: it ran once this answers. No engine here
+      // to take what the action hands on, so it fails after its local half.
+      assert!(files.queue.act(|_| Ok(())).await.is_err());
+      assert_eq!(kept_chat_list(&files.engine), Some(Vec::new()));
       files.finish();
     }
 
