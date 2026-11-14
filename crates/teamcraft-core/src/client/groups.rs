@@ -27,7 +27,7 @@ use super::admin_joins::JoinCommit;
 use super::key_history::{SealedShare, ShareGuard};
 use super::meeting_records::meeting_of_chat_key;
 use super::member_device::{GroupInfoOutcome, MemberDeviceJoin};
-use super::strict_channels::StrictWelcome;
+use super::strict_channels::{self, StrictWelcome};
 use super::workspace::{PendingChange, SharedKeys};
 use super::{Client, pending_post_key};
 use crate::api::{ApiError, ServerApi};
@@ -1629,7 +1629,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Ok(MlsProgress::Done);
     }
     if message.epoch > epoch {
-      if self.strict_stop(conversation)?.is_some() {
+      if self.is_strict_stopped(conversation)? {
         // Stopped at a refused commit: later epochs build on it (e2ee.md §4.6.2, D4). Passed over,
         // and the next commit for this device's own epoch is taken.
         self.advance_cursor(conversation, message)?;
@@ -1709,7 +1709,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .get_mut(&conversation)
       .ok_or(CoreError::NoGroup(conversation))?;
     let before = group.members()?;
-    let is_strict_commit = group.is_strict() && message.kind == MlsMessageKind::Commit;
+    let is_strict_commit =
+      strict_channels::ENABLED && group.is_strict() && message.kind == MlsMessageKind::Commit;
     let mut result =
       group.process_message(&self.provider, message.payload.as_slice(), &directory, &authority);
     if is_strict_commit && result.as_ref().is_err_and(MlsError::is_strict_retry) {
@@ -2114,8 +2115,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .filter(|info| info.len() <= self.settings.max_group_info_bytes)
         .map(Base64Bytes::new),
     };
-    let is_rewind = self.maybe_strict_rewind == Some(conversation);
-    if !is_rewind && self.strict_stop(conversation)?.is_some() {
+    let is_rewind = self.is_strict_rewind(conversation);
+    if !is_rewind && self.is_strict_stopped(conversation)? {
       // Stopped at a refused commit: the group is at the last good epoch, and only an admin's
       // continuation goes out from here (e2ee.md §4.6.2, D4). Keys don't rotate, removals wait.
       self.discard_pending_commit(conversation)?;
@@ -3609,7 +3610,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     current_epoch: u64,
   ) -> Result<(), CoreError> {
-    if self.strict_stop(conversation)?.is_some() {
+    if self.is_strict_stopped(conversation)? {
       // Stopped at a refused commit, not fallen out: asking to be added back would bring this
       // device into the group that holds what it refused (e2ee.md §4.6.2, D4).
       tracing::debug!(conversation_id = %conversation, "not asking to be added back: stopped in a strict channel");

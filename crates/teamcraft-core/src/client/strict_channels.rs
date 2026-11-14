@@ -89,7 +89,21 @@ pub(super) enum StrictWelcome {
   Refused(MlsError),
 }
 
+/// Whether the app follows strict channels (Cargo.toml, `strict-channels`; `strict_channels_off.rs`).
+pub(super) const ENABLED: bool = true;
+
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
+  /// Whether this device stopped in the conversation's strict channel ([`Self::strict_stop`]).
+  pub(super) fn is_strict_stopped(&mut self, conversation: ConversationId) -> Result<bool, CoreError> {
+    Ok(self.strict_stop(conversation)?.is_some())
+  }
+
+  /// Whether this device's next commit in the conversation continues its strict channel from the
+  /// stop ([`Self::continue_strict_channel`]).
+  pub(super) fn is_strict_rewind(&self, conversation: ConversationId) -> bool {
+    self.maybe_strict_rewind == Some(conversation)
+  }
+
   /// Where this device stopped in the conversation's strict channel, if it did and the group is
   /// still there (e2ee.md §4.6.2, D4). A commit for the stopped epoch that this device takes (an
   /// admin's continuation) ends the stop with the epoch.

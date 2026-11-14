@@ -73,6 +73,11 @@ mod server_changes;
 pub(crate) mod server_deletions;
 mod sources;
 mod space_deletion;
+#[cfg(any(not(target_arch = "wasm32"), feature = "strict-channels"))]
+mod strict_channels;
+// Strict channels off on the web (Cargo.toml, `strict-channels`): the hooks are no-ops.
+#[cfg(not(any(not(target_arch = "wasm32"), feature = "strict-channels")))]
+#[path = "strict_channels_off.rs"]
 mod strict_channels;
 mod sync;
 mod sync_progress;
@@ -166,6 +171,7 @@ pub use sources::HistoryScan;
 pub use space_deletion::{
   ChannelRenamer, RenamerRole, SpaceDeletionPreview, SpaceDeletionPreviewChannel, space_deletion_preview,
 };
+#[cfg(any(not(target_arch = "wasm32"), feature = "strict-channels"))]
 pub use strict_channels::{StrictRejoinHold, StrictRejoinPrompt, StrictStop};
 pub use sync_progress::{SyncProgressSignal, notify_sync_progress_during};
 pub use sync_trace::SyncPhase;
@@ -555,6 +561,7 @@ pub struct Client<A, S> {
   mls_current: std::collections::BTreeSet<ConversationId>,
   /// The strict channel whose group this device is continuing from its stop (e2ee.md §4.6.2, D4):
   /// its next commit goes to the rewind instead of the queue's next epoch.
+  #[cfg(any(not(target_arch = "wasm32"), feature = "strict-channels"))]
   maybe_strict_rewind: Option<ConversationId>,
   /// What one pass over a conversation's MLS queue read for all its entries (issue #972); `None`
   /// outside of a pass, where each entry reads afresh.
@@ -796,6 +803,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       leavers: Default::default(),
       last_key_package_check_ms: i64::MIN,
       mls_current: Default::default(),
+      #[cfg(any(not(target_arch = "wasm32"), feature = "strict-channels"))]
       maybe_strict_rewind: None,
       maybe_backlog_reads: None,
       thread_turn_began_ms: i64::MIN,
