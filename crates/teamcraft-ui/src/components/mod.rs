@@ -87,6 +87,7 @@ pub mod files_view;
 pub mod first_sync_bar;
 pub mod getting_started;
 pub mod guest_devices;
+pub mod guest_end;
 pub mod guest_join;
 pub mod guest_meeting;
 pub mod guest_notice;

@@ -96,7 +96,7 @@ async fn a_guest_in_firefox_joins_a_meeting_by_its_link_and_shares_the_call() {
     firefox.wait_for_element(".prejoin .meter", WAIT).await;
     firefox.click_text("Join now").await;
     firefox
-      .wait_for_text("Waiting for someone in the meeting to let you in", WAIT)
+      .wait_for_text("Waiting for someone to let you in", WAIT)
       .await;
 
     let deadline = Instant::now() + WAIT;
