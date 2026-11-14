@@ -32,7 +32,7 @@ use teamcraft_proto::{
   VideoPublicationId, VideoTrack, VideoTrackKind,
 };
 use thiserror::Error;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 // `std::time::Instant` on native; the browser clock on wasm, where `std` has none.
 use web_time::Instant;
 
@@ -2118,6 +2118,13 @@ impl CallEngine {
     if is_held != self.is_video_held_for_voice && (!is_held || !self.own_tracks.is_empty()) {
       self.is_video_held_for_voice = is_held;
       self.maybe_video_held_since = is_held.then_some(now);
+      info!(
+        is_held,
+        is_hurt,
+        estimate_bps = self.uplink.estimate_bps(),
+        voice_step = ?self.voice_steps.step(),
+        "the own video waits for the voice"
+      );
       self.event(CallEngineEvent::VideoHeldForVoice(is_held));
     }
     if is_held {
@@ -2179,8 +2186,10 @@ impl CallEngine {
       .filter(|_| !self.uplink_voice.is_hurt(now))
       .and_then(|carried_bps| self.voice_steps.on_carried(carried_bps, now));
     if let Some(encoding) = maybe_up.or(maybe_down) {
-      debug!(
+      // A rare change of what the call sounds like: worth a line in a bug report's log.
+      info!(
         estimate_bps,
+        ?maybe_carried_bps,
         is_voice_hurt,
         bitrate_bps = encoding.bitrate_bps,
         frame = ?encoding.frame,
