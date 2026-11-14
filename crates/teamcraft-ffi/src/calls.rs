@@ -279,6 +279,10 @@ pub struct CallStateInfo {
   /// quality may be lower.
   #[uniffi(default = false)]
   pub is_on_limited_network: bool,
+  /// The own video is held back while the own voice is lost on the uplink (#1871, #1891): the app
+  /// says so, so nobody wonders why the camera froze.
+  #[uniffi(default = false)]
+  pub is_video_held_for_voice: bool,
   /// The code participants compare to rule out a man in the middle (once secured).
   pub maybe_privacy_code: Option<String>,
   /// Why the call ended (with [`CallPhase::Ended`]).
@@ -716,6 +720,7 @@ pub(crate) async fn join(
     reconnecting_user_ids: Vec::new(),
     unverified_user_ids: Vec::new(),
     is_on_limited_network: false,
+    is_video_held_for_voice: false,
     maybe_privacy_code: None,
     maybe_end_reason: None,
     maybe_encryption_retry_after_secs: None,
@@ -1313,6 +1318,7 @@ fn apply_event(
     CallEngineEvent::TransportChanged(transport) => {
       state.is_on_limited_network = transport == CallTransport::Fallback;
     },
+    CallEngineEvent::VideoHeldForVoice(is_held) => state.is_video_held_for_voice = is_held,
     CallEngineEvent::ParticipantReconnecting(device_id) => {
       reconnecting.insert(device_id);
     },
@@ -1444,6 +1450,7 @@ fn ended(conversation: ConversationId, reason: CallEndReason) -> CallStateInfo {
     reconnecting_user_ids: Vec::new(),
     unverified_user_ids: Vec::new(),
     is_on_limited_network: false,
+    is_video_held_for_voice: false,
     maybe_privacy_code: None,
     maybe_end_reason: Some(reason),
     maybe_encryption_retry_after_secs: None,
@@ -2127,6 +2134,34 @@ mod tests {
         None
       );
       assert_eq!(state.is_on_limited_network, is_limited);
+      assert_eq!(state.phase, CallPhase::Connected);
+    }
+  }
+
+  /// The apps' voice-first note follows the engine's hold (#1902): on with the hold, off with its
+  /// end.
+  #[test]
+  fn the_held_own_video_shows_until_the_hold_ends() {
+    let mut state = ended(conversation(5), CallEndReason::Left);
+    let mut reconnecting = BTreeSet::new();
+    let mut roster = BTreeMap::new();
+    let mut muted = BTreeSet::new();
+    let mut refused = BTreeSet::new();
+    state.phase = CallPhase::Connected;
+    assert!(!state.is_video_held_for_voice);
+    for is_held in [true, false] {
+      assert_eq!(
+        apply_event(
+          &mut state,
+          &mut reconnecting,
+          &mut roster,
+          &mut muted,
+          &mut refused,
+          CallEngineEvent::VideoHeldForVoice(is_held)
+        ),
+        None
+      );
+      assert_eq!(state.is_video_held_for_voice, is_held);
       assert_eq!(state.phase, CallPhase::Connected);
     }
   }

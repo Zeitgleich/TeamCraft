@@ -9217,6 +9217,22 @@
         }
       }
     },
+    "call_video_held_for_voice": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your connection is struggling: your video is paused so your voice gets through"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Verbindung ist schwach: dein Video pausiert, damit deine Stimme durchkommt"
+          }
+        }
+      }
+    },
     "call_audio_route": {
       "localizations": {
         "en": {

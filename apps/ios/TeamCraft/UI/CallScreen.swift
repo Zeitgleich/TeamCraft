@@ -493,14 +493,17 @@ struct CallScreen: View {
     }
   }
 
-  /// What matters while talking: that the connection is gone, that nobody hears you, and that the
-  /// call runs on the fallback for networks that block UDP (as on Android, desktop and web).
+  /// What matters while talking: that the connection is gone, that nobody hears you, that the own
+  /// video waits so the voice gets through (#1902), and that the call runs on the fallback for
+  /// networks that block UDP (as on Android, desktop and web).
   @ViewBuilder
   private var statusHint: some View {
     if call.phase == .reconnecting {
       hint("call_reconnecting")
     } else if call.isMuted && call.phase == .connected {
       hint("call_you_muted")
+    } else if call.isVideoHeldForVoice && call.phase == .connected {
+      hint("call_video_held_for_voice")
     } else if call.isOnLimitedNetwork && call.phase == .connected {
       hint("call_limited_network")
     }

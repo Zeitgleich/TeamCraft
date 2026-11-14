@@ -969,17 +969,20 @@ private fun ScreenShareBar(isShown: Boolean, isSoundShared: Boolean, reduceMotio
 }
 
 /**
- * The hints that matter while talking: reconnecting, that nobody hears you, and a limited
- * network; a small floating pill above the controls, clear of the tiles.
+ * The hints that matter while talking: reconnecting, that nobody hears you, that the own video
+ * waits for the voice, and a limited network; a small floating pill above the controls, clear of
+ * the tiles.
  */
 @Composable
 private fun StatusHint(maybeState: CallStateInfo?) {
-  val textRes = when {
-    maybeState?.phase == CallPhase.RECONNECTING -> R.string.call_reconnecting
-    maybeState?.isMuted == true && maybeState.phase == CallPhase.CONNECTED -> R.string.call_you_muted
-    maybeState?.isOnLimitedNetwork == true && maybeState.phase == CallPhase.CONNECTED -> R.string.call_limited_network
-    else -> null
-  } ?: return
+  val state = maybeState ?: return
+  val textRes =
+    statusHintRes(
+      phase = state.phase,
+      isMuted = state.isMuted,
+      isVideoHeldForVoice = state.isVideoHeldForVoice,
+      isOnLimitedNetwork = state.isOnLimitedNetwork,
+    ) ?: return
   Surface(
     color = MaterialTheme.colorScheme.inverseSurface,
     contentColor = MaterialTheme.colorScheme.inverseOnSurface,
@@ -1043,6 +1046,24 @@ private fun EncryptionFailureBanner(maybeState: CallStateInfo?, onRetry: () -> U
       }
     }
   }
+}
+
+/**
+ * The one hint the call screen shows, most pressing first. The voice-first note (#1902) comes
+ * before the limited network: it says what happens to the own video and why.
+ */
+internal fun statusHintRes(
+  phase: CallPhase,
+  isMuted: Boolean,
+  isVideoHeldForVoice: Boolean,
+  isOnLimitedNetwork: Boolean,
+): Int? = when {
+  phase == CallPhase.RECONNECTING -> R.string.call_reconnecting
+  phase != CallPhase.CONNECTED -> null
+  isMuted -> R.string.call_you_muted
+  isVideoHeldForVoice -> R.string.call_video_held_for_voice
+  isOnLimitedNetwork -> R.string.call_limited_network
+  else -> null
 }
 
 /** "Try again" works once the wait has passed. */
