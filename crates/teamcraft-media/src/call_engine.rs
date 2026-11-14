@@ -209,6 +209,8 @@ pub struct CallEngine {
   /// Whether the UI was told the own video is held for the voice ([`CallEngineEvent::VideoHeldForVoice`]).
   is_video_held_for_voice: bool,
   maybe_video_held_since: Option<Instant>,
+  /// The own video waits for a probe's proof of room next to the voice (#1893).
+  is_video_proof_wanted: bool,
   /// When the uplink rate probe last sent padding: voice sent along with it isn't judged.
   maybe_padding_sent_at: Option<Instant>,
   /// The own voice's bitrate and packet length on a thin uplink (#1893).
@@ -683,6 +685,7 @@ impl CallEngine {
       uplink_voice: VoiceGuard::new(VoiceGuardConfig::losses_only()),
       is_video_held_for_voice: false,
       maybe_video_held_since: None,
+      is_video_proof_wanted: false,
       maybe_padding_sent_at: None,
       voice_steps: VoiceSteps::new(UplinkPolicy::default().voice),
       downlink_feedback: FeedbackRecorder::new(now),
@@ -763,6 +766,7 @@ impl CallEngine {
     self.uplink_layers = UplinkLayers::new(self.config.bwe.start_bps);
     // Voice sent while the connection was gone says nothing about the new one's room.
     self.uplink_voice.forget();
+    self.is_video_proof_wanted = false;
     // The SFU of the new connection says anew what the others play, and the voice starts full
     // on the new network.
     let long_off = self.voice_steps.set_long_frames(false);
@@ -2110,11 +2114,13 @@ impl CallEngine {
     self.uplink_voice.on_feedback(feedback, now);
     self.follow_voice_steps(bps, maybe_carried_bps, now);
     let is_hurt = self.maybe_uplink_capacity_bps.is_none() && self.uplink_voice.is_hurt(now);
-    // A voice on its thinnest step: the uplink has no room for video next to it (#1893). On a
-    // 64 kbit/s uplink the camera came back after every hold, at the start of every turn its
-    // owner talked, on an estimate grown from the voice alone, and took the voice with it again.
-    // It comes back once a probe showed room for more voice.
-    let is_held = is_hurt || self.is_voice_starved();
+    self.follow_video_proof(is_hurt, maybe_carried_bps);
+    // A voice on its thinnest step: the uplink has no room for video next to it (#1893). And
+    // video that took the voice down waits for a probe's proof of room for both: on a 64 kbit/s
+    // uplink the camera's lowest layer fits alone, its demand let the estimate grow to megabits
+    // while the microphone was muted, and the camera came back at the start of every turn and
+    // took the voice with it again.
+    let is_held = is_hurt || self.is_voice_starved() || self.is_video_proof_wanted;
     if is_held != self.is_video_held_for_voice && (!is_held || !self.own_tracks.is_empty()) {
       self.is_video_held_for_voice = is_held;
       self.maybe_video_held_since = is_held.then_some(now);
@@ -2266,13 +2272,16 @@ impl CallEngine {
     // video kept a 64 kbit/s uplink full. Above it, held-back video probes as well.
     let maybe_wanted_bps = if self.is_voice_starved() {
       self.voice_steps.wanted_bps()
+    } else if self.is_video_proof_wanted {
+      Some(self.video_proof_bps()).max(self.voice_steps.wanted_bps())
     } else {
       maybe_video_bps.max(self.voice_steps.wanted_bps())
     };
     // A thin voice wants a cluster's proof before it steps up, whatever the estimate says.
-    self
-      .uplink_rate_probe
-      .set_proof_wanted(self.voice_steps.wanted_bps().is_some() && self.maybe_probe_bytes.is_some());
+    self.uplink_rate_probe.set_proof_wanted(
+      (self.voice_steps.wanted_bps().is_some() || self.is_video_proof_wanted)
+        && self.maybe_probe_bytes.is_some(),
+    );
     let datagrams = self.uplink_rate_probe.on_timer(
       &self.uplink_probe_config(),
       &mut self.uplink,
@@ -2289,11 +2298,43 @@ impl CallEngine {
 
   /// How the uplink is probed: rarely while the voice is on its thinnest step (#1893).
   fn uplink_probe_config(&self) -> RateProbeConfig {
-    if self.is_voice_starved() {
+    if self.is_voice_starved() || self.is_video_proof_wanted {
       RateProbeConfig::for_voice()
     } else {
       RateProbeConfig::default()
     }
+  }
+
+  /// Video held because the voice was lost comes back only on a probe that carried the voice and
+  /// the lowest layers of the own tracks (#1893), where something probes: an SFU that takes
+  /// padding, not the fallback (its pacer measures what the upload drains).
+  fn follow_video_proof(&mut self, is_hurt: bool, maybe_carried_bps: Option<u32>) {
+    let can_probe = self.maybe_probe_bytes.is_some() && self.maybe_uplink_capacity_bps.is_none();
+    if is_hurt && can_probe && !self.own_tracks.is_empty() && !self.is_video_proof_wanted {
+      self.is_video_proof_wanted = true;
+      self.update_uplink_demand();
+    }
+    if !self.is_video_proof_wanted {
+      return;
+    }
+    let is_proven = maybe_carried_bps.is_some_and(|carried_bps| carried_bps >= self.video_proof_bps());
+    if is_proven || !can_probe || self.own_tracks.is_empty() {
+      self.is_video_proof_wanted = false;
+      self.update_uplink_demand();
+    }
+  }
+
+  /// What the uplink has to carry for held video to come back: the voice's reserve and the least
+  /// the lowest layer of each own track is sent at, with the margin a layer needs to come back.
+  fn video_proof_bps(&self) -> u32 {
+    let lowest: f64 = self
+      .own_tracks
+      .values()
+      .filter_map(|track| track.layers.iter().min_by_key(|info| info.layer))
+      .map(|info| f64::from(info.max_bitrate_bps) * self.uplink_policy.camera_bitrate_shares[0])
+      .sum();
+    // Saturating float-to-int conversion is intended.
+    ((f64::from(self.uplink_policy.audio_reserve_bps) + lowest) * self.uplink_policy.upgrade_margin) as u32
   }
 
   /// Whether the own voice is on its thinnest step (#1893): the uplink is too thin for even the
@@ -2478,7 +2519,8 @@ impl CallEngine {
     // A voice on its thinnest step lets the estimate grow by no demand (#1893): the video's
     // demand let the estimate of a 64 kbit/s uplink grow past the camera's lowest layer, and the
     // camera went on sending next to the voice. The voice's probes show when there is room.
-    let maybe_demand = if self.is_voice_starved() && self.maybe_probe_bytes.is_some() {
+    let is_proving = self.is_voice_starved() || self.is_video_proof_wanted;
+    let maybe_demand = if is_proving && self.maybe_probe_bytes.is_some() {
       None
     } else {
       maybe_video_demand.max(self.voice_steps.wanted_bps())
