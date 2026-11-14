@@ -36,9 +36,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import de.zeitgleich.teamcraft.ui.channelAnchorForkText
 import de.zeitgleich.teamcraft.ui.channelRoleAppointedByText
 import de.zeitgleich.teamcraft.ui.channelRoleLabel
 import de.zeitgleich.teamcraft.ui.droppedRoleNames
+import de.zeitgleich.teamcraft.ui.rememberChannelAnchorMarks
 import de.zeitgleich.teamcraft.ui.reviewedRolesMessage
 import de.zeitgleich.teamcraft.ui.roleKeyMarkLabel
 import de.zeitgleich.teamcraft.ui.roleReviewRefusalText
@@ -66,6 +68,8 @@ fun ChannelMembersSheet(viewModel: MainViewModel, conversationId: String, onDism
   // The members and the signed roles are read afresh while the section is open.
   LaunchedEffect(conversationId) { viewModel.refreshChannelMembers(conversationId) }
   LaunchedEffect(conversationId, changes) { maybeInfo = viewModel.channelMembers(conversationId) }
+  // A forked anchor grants nothing: a workspace admin's look at the roles says so (#1842).
+  val maybeAnchorMarks = rememberChannelAnchorMarks(viewModel, conversationId, isShown = true)
   // Held here, not in the list's item: scrolling the review away doesn't close it.
   val shownReview = remember(conversationId) { mutableStateOf<ChannelRolesReviewItem?>(null) }
   // "Add people", where the server says the user may (#1534).
@@ -111,6 +115,9 @@ fun ChannelMembersSheet(viewModel: MainViewModel, conversationId: String, onDism
         item { Hint(stringResource(R.string.channel_roles_alarm), isStatus = true) }
       }
       info.maybeReview?.let { review ->
+        maybeAnchorMarks?.maybeFork?.let { fork ->
+          item { Hint(stringResource(channelAnchorForkText(fork)), isStatus = true) }
+        }
         item { RolesReview(viewModel, conversationId, review, shownReview) }
       }
       items(info.members, key = { it.userId }) { member -> MemberRow(member) }

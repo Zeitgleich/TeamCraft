@@ -34,6 +34,30 @@ final class CreateTests: XCTestCase {
     XCTAssertEqual(CreateResult(.created(id: "42")), .created("42"))
     XCTAssertEqual(CreateResult(.nameRefused(detail: "too long")), .nameRefused)
     XCTAssertEqual(CreateResult(.notAllowed), .notAllowed)
+    XCTAssertEqual(
+      CreateResult(.channelNameRefused(maybeProblem: .bidiControl)), .channelNameRefused(.bidiControl))
+    XCTAssertEqual(CreateResult(.channelNameRefused(maybeProblem: nil)), .channelNameRefused(nil))
+  }
+
+  /// The channel name rules are the core's (#1842): each problem has its text at the field, an empty
+  /// name keeps the form's own.
+  func testAChannelNameShowsTheProblemTheCoreFound() {
+    XCTAssertEqual(ChannelAnchor.problem(of: "a\u{200B}b"), .invisibleCharacter)
+    XCTAssertEqual(ChannelAnchor.problem(of: "a\u{202E}b"), .bidiControl)
+    XCTAssertNil(ChannelAnchor.problem(of: "Team \u{1F469}\u{200D}\u{1F4BB}"))
+    let errors = CreateRules.errors(
+      name: "a\u{200B}b", description: "", missing: "m", maybeChannelProblem: ChannelAnchor.problem(of: "a\u{200B}b"))
+    XCTAssertEqual(errors[.name], .channelName("channel_name_error_invisible"))
+    let empty = CreateRules.errors(name: " ", description: "", missing: "m", maybeChannelProblem: .empty)
+    XCTAssertEqual(empty[.name], .nameMissing("m"))
+  }
+
+  func testTheDeleteNoteNamesWhoLastRenamed() {
+    XCTAssertEqual(ChannelAnchor.deleteNoteKey(.renamedByMember(maybeName: "Anna")).key, "channel_delete_renamed_by_member %@")
+    XCTAssertEqual(ChannelAnchor.deleteNoteKey(.nameStale).key, "channel_delete_name_stale")
+    XCTAssertTrue(ChannelAnchor.deleteNote(.renamedByWorkspace(maybeName: "Anna")).contains("Anna"))
+    XCTAssertFalse(ChannelAnchor.deleteNote(.namedByFounder(maybeName: nil)).contains("%@"))
+    XCTAssertEqual(ChannelAnchor.forkKey(.founding), "channel_anchor_forked_founding")
   }
 
   func testAddPeopleShowsOnlyWhereTheServerSaysSo() throws {

@@ -16,6 +16,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -32,6 +33,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -64,6 +66,8 @@ fun ConversationTopBar(
   onBack: () -> Unit,
   /** Who types in this conversation itself right now (#882); in a direct message the status gives way. */
   typing: List<String> = emptyList(),
+  /** The channel's name isn't the one members' apps hold (e2ee.md §4.6.5, #1842): marked under it. */
+  isNameStale: Boolean = false,
   actions: @Composable RowScope.() -> Unit,
 ) {
   val maybePeer = maybeConversation?.takeIf { it.kind == "Direct" }?.let { conversation ->
@@ -95,7 +99,9 @@ fun ConversationTopBar(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.semantics { heading() },
           )
-          if (isTypingInDirect) {
+          if (isNameStale) {
+            NameStaleLine()
+          } else if (isTypingInDirect) {
             Row(verticalAlignment = Alignment.CenterVertically) {
               TypingDots()
               Text(
@@ -191,3 +197,24 @@ private fun wireKind(kind: ConversationKind): String? = when (kind) {
 }
 
 private val HEADER_AVATAR = 36.dp
+
+/** "Name not confirmed" under a channel's name, as on desktop and web; the hint says why. */
+@Composable
+private fun NameStaleLine() {
+  val label = stringResource(R.string.channel_name_stale)
+  val hint = stringResource(R.string.channel_name_stale_hint)
+  Row(
+    verticalAlignment = Alignment.CenterVertically,
+    modifier = Modifier.clearAndSetSemantics { contentDescription = "$label. $hint" },
+  ) {
+    Icon(Icons.Filled.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(14.dp))
+    Text(
+      label,
+      modifier = Modifier.padding(start = 4.dp),
+      maxLines = 1,
+      overflow = TextOverflow.Ellipsis,
+      style = MaterialTheme.typography.bodySmall,
+      color = MaterialTheme.colorScheme.error,
+    )
+  }
+}

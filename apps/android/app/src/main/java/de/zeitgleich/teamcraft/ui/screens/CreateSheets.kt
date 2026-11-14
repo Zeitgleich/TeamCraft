@@ -67,7 +67,9 @@ import de.zeitgleich.teamcraft.ui.forms.focusFirst
 import de.zeitgleich.teamcraft.ui.forms.supportingText
 import de.zeitgleich.teamcraft.ui.theme.Spacing
 import kotlinx.coroutines.launch
+import uniffi.teamcraft_ffi.ChannelNameCheck
 import uniffi.teamcraft_ffi.CreateOutcome
+import uniffi.teamcraft_ffi.checkChannelName
 import uniffi.teamcraft_ffi.NewChannelInput
 import uniffi.teamcraft_ffi.NewSpaceInput
 import uniffi.teamcraft_ffi.newRequestKey
@@ -140,6 +142,7 @@ internal fun NewChannelSheet(
       second = R.string.channel_access_private to R.string.channel_access_private_hint,
       onPick = { isFirst -> isPrivate = !isFirst },
     ),
+    checksChannelName = true,
     create = { name, description, key ->
       createChannel(NewChannelInput(spaceId, name.trim(), isPrivate, description, key))
     },
@@ -189,6 +192,7 @@ private fun CreateFormSheet(
   @StringRes whenNameEmpty: Int,
   @StringRes submit: Int,
   access: AccessChoice,
+  checksChannelName: Boolean = false,
   create: suspend ChatClient.(String, String, String) -> CreateOutcome,
   onCreated: (String) -> Unit,
   onDismiss: () -> Unit,
@@ -204,7 +208,11 @@ private fun CreateFormSheet(
   var maybeNameRefusal by remember { mutableStateOf<Int?>(null) }
   var maybeFailure by remember { mutableStateOf<Int?>(null) }
   val requesters = remember { CreateField.entries.associateWith { FocusRequester() } }
-  val checked = createErrors(name, description, whenNameEmpty)
+  // A channel's name keeps the channel name rules, checked by the core as it is typed (#1842).
+  val maybeNameProblem = remember(name, checksChannelName) {
+    if (checksChannelName) (checkChannelName(name) as? ChannelNameCheck.Refused)?.problem else null
+  }
+  val checked = createErrors(name, description, whenNameEmpty, maybeNameProblem)
   val shown = (if (hasTried) checked else FieldErrors.of<CreateField>())
     .withServerError(CreateField.NAME, maybeNameRefusal)
   val send: () -> Unit = send@{
@@ -219,8 +227,8 @@ private fun CreateFormSheet(
     scope.launch {
       when (val result = viewModel.tryCreate { create(name, description.trim(), requestKey) }) {
         is CreateResult.Created -> onCreated(result.id)
-        CreateResult.NameRefused -> {
-          maybeNameRefusal = R.string.create_name_refused
+        is CreateResult.NameRefused -> {
+          maybeNameRefusal = result.text
           requestKey = newRequestKey()
           requesters[CreateField.NAME]?.requestFocus()
         }

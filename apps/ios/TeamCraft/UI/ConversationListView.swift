@@ -71,6 +71,8 @@ struct ConversationListView: View {
   @State private var leaveChoices: [String: LeaveChoice] = [:]
   @State private var spaceMenus: [String: SpaceMenuItem] = [:]
   @State private var maybeLeaving: LeaveTarget?
+  /// What a channel's deletion confirmation adds about its name (e2ee.md §4.6.5, #1842).
+  @State private var maybeDeleteNote: String?
   /// A first sync's progress, shown under the title.
   @State private var maybeFirstSync: FirstSyncItem?
 
@@ -130,7 +132,11 @@ struct ConversationListView: View {
             confirmLeave()
           }
         } message: {
-          Text(leaveMessage)
+          if case .deletion = maybeLeaving, let note = maybeDeleteNote {
+            Text(verbatim: String(localized: "entry_delete_channel_text") + " " + note)
+          } else {
+            Text(leaveMessage)
+          }
         }
     } detail: {
       if let conversation = conversations.first(where: { $0.id == selection }) {
@@ -761,6 +767,8 @@ struct ConversationListView: View {
     if conversation.canDeleteChannel {
       Button("entry_delete_channel", systemImage: "trash", role: .destructive) {
         maybeLeaving = .deletion(id: conversation.id, name: conversation.name)
+        maybeDeleteNote = nil
+        Task { maybeDeleteNote = await model.channelDeleteNote(conversation.id) }
       }
     }
   }

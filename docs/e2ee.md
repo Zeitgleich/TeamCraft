@@ -3643,8 +3643,9 @@ rename commits (#1725, first part). `teamcraft-core` founds channels anchored, c
 floor on every join path, signs moves and renames, binds a deletion to the name (#1740), and takes only the
 anchored founding in the role log, with `may_anchor` for it (#1748; "Implementation notes" below), and founds
 meeting chats anchored and checks them against the server's meeting and organizer (D10, #1747), and signs space
-deletions, which purge a channel only where its anchor places it in the space (D7, #1727). Still open: what the
-apps show of the anchor and the mobile name checks (#1749), and re-founding with its chain in the account data:
+deletions, which purge a channel only where its anchor places it in the space (D7, #1727). The apps show the anchor
+and check names on desktop and web (#1749) and on Android and iOS (#1842). Still open: re-founding with its chain in
+the account data:
 `AnchorFloor` keeps no re-founding chain yet, so a re-founding is refused as another founding until #1728. The parts
 split off before: #1728 (anchoring older channels and re-founding), #1729 (strict
 from creation) and #1726 (the meeting invitee list).

@@ -88,12 +88,14 @@ import de.zeitgleich.teamcraft.server.serverEntryErrorText
 import de.zeitgleich.teamcraft.server.transportErrorText
 import uniffi.teamcraft_ffi.AccountState
 import uniffi.teamcraft_ffi.AddPeopleOutcome
+import uniffi.teamcraft_ffi.ChannelAnchorMarksItem
 import uniffi.teamcraft_ffi.ChannelMembersInfo
 import uniffi.teamcraft_ffi.ChannelRolesReviewItem
 import uniffi.teamcraft_ffi.CheckedServer
 import uniffi.teamcraft_ffi.ConversationItem
 import uniffi.teamcraft_ffi.ConversationKind
 import uniffi.teamcraft_ffi.CreateOutcome
+import de.zeitgleich.teamcraft.ui.forms.AddPeopleFailure
 import de.zeitgleich.teamcraft.ui.forms.CreateResult
 import uniffi.teamcraft_ffi.LeaveChoice
 import uniffi.teamcraft_ffi.GroupMentionReachItem
@@ -955,6 +957,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     reportFailure { chat.refreshChannelMembers(conversationId) }
   }
 
+  /** What a channel shows of its anchor (#1842); `null` for a DM, nothing held, or no answer. */
+  suspend fun channelAnchorMarks(conversationId: String): ChannelAnchorMarksItem? = readChat { channelAnchorMarks(conversationId) }
+
+  /** A channel, its members or its deletion opened: its anchor is verified again, as on desktop and web. */
+  suspend fun refreshChannelAnchor(conversationId: String) {
+    readChat { refreshChannelAnchor(conversationId) }
+  }
+
+  /** Whether the channel can't be read on this device (the anchor refused the group it was offered). */
+  suspend fun isChannelUnreachable(conversationId: String): Boolean = readChat { isChannelUnreachable(conversationId) } ?: false
+
   /** Confirms the roles a workspace admin looked at; `null` after a failure, shown as [lastFailure]. */
   suspend fun signReviewedChannelRoles(conversationId: String, review: ChannelRolesReviewItem): ReviewedRolesOutcome? =
     try {
@@ -1058,7 +1071,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     try {
       when (val outcome = withContext(Dispatchers.Default) { chat.create() }) {
         is CreateOutcome.Created -> CreateResult.Created(outcome.id)
-        is CreateOutcome.NameRefused -> CreateResult.NameRefused
+        is CreateOutcome.NameRefused -> CreateResult.NameRefused(R.string.create_name_refused)
+        is CreateOutcome.ChannelNameRefused ->
+          CreateResult.NameRefused(outcome.maybeProblem?.let(::channelNameProblemText) ?: R.string.channel_name_error_refused)
         is CreateOutcome.NotAllowed -> CreateResult.Failed(R.string.create_not_allowed)
       }
     } catch (failure: CancellationException) {
@@ -1070,20 +1085,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
   /** Adds people to a channel (#1534); answers why it failed, or null once everybody is in. */
-  @StringRes
-  suspend fun tryAddPeople(conversation: String, users: List<String>): Int? =
+  suspend fun tryAddPeople(conversation: String, users: List<String>): AddPeopleFailure? =
     try {
-      when (withContext(Dispatchers.Default) { chat.addPeopleToChannel(conversation, users) }) {
-        AddPeopleOutcome.ADDED -> null
-        AddPeopleOutcome.NOT_IN_SPACE -> R.string.members_add_not_in_space
-        AddPeopleOutcome.NOT_ALLOWED -> R.string.create_not_allowed
+      when (val outcome = withContext(Dispatchers.Default) { chat.addPeopleToChannel(conversation, users) }) {
+        is AddPeopleOutcome.Added -> null
+        is AddPeopleOutcome.NotInSpace -> AddPeopleFailure(R.string.members_add_not_in_space)
+        is AddPeopleOutcome.NotAllowed -> AddPeopleFailure(R.string.create_not_allowed)
+        // Their app is from before the channel anchor (e2ee.md §4.6.5): named, nobody was added.
+        is AddPeopleOutcome.MustUpdate -> AddPeopleFailure(R.string.error_must_update, outcome.name)
       }
     } catch (failure: CancellationException) {
       throw failure
     } catch (failure: TeamCraftException) {
-      errorText(failure)
+      AddPeopleFailure(errorText(failure))
     } catch (failure: IllegalStateException) {
-      R.string.error_signed_out
+      AddPeopleFailure(R.string.error_signed_out)
     }
 
   /** Whether "New space" shows; false while the server can't tell (offline). */

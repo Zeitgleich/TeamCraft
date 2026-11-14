@@ -217,7 +217,7 @@ struct BrowseView: View {
     Task {
       switch await model.openDirect(userIds) {
       case .created(let id): open(id)
-      case .nameRefused, .notAllowed: maybeDmFailure = .generic
+      case .nameRefused, .channelNameRefused, .notAllowed: maybeDmFailure = .generic
       case .failed(let failure): maybeDmFailure = failure
       }
       isOpening = false

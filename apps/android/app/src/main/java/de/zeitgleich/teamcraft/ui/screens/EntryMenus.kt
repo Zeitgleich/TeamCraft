@@ -35,6 +35,8 @@ import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.ui.EntryAction
 import de.zeitgleich.teamcraft.ui.EntryItem
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import de.zeitgleich.teamcraft.ui.channelDeleteText
+import de.zeitgleich.teamcraft.ui.rememberChannelAnchorMarks
 import de.zeitgleich.teamcraft.ui.conversationMenu
 import de.zeitgleich.teamcraft.ui.spaceMenu
 import uniffi.teamcraft_ffi.ConversationItem
@@ -95,10 +97,12 @@ fun ConversationEntryMenu(
       onDismiss = { isConfirmingLeave = false },
     )
   }
+  // The deletion confirmation names who last named the channel (e2ee.md §4.6.5, D5).
+  val maybeAnchorMarks = rememberChannelAnchorMarks(viewModel, conversation.id, isShown = isConfirmingDelete)
   if (isConfirmingDelete) {
     ConfirmDialog(
       title = stringResource(R.string.channel_delete_title, conversation.name),
-      text = stringResource(R.string.channel_delete_text),
+      text = channelDeleteText(maybeAnchorMarks),
       confirmLabel = stringResource(R.string.channel_delete_confirm),
       onConfirm = { viewModel.act(ChatActions.deleteChannel(conversation.id)) },
       onDismiss = { isConfirmingDelete = false },

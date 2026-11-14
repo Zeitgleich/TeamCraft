@@ -173,7 +173,10 @@ import de.zeitgleich.teamcraft.ui.ServerHistory
 import de.zeitgleich.teamcraft.ui.olderState
 import de.zeitgleich.teamcraft.ui.ComposerPrefs
 import de.zeitgleich.teamcraft.ui.ConversationRights
+import de.zeitgleich.teamcraft.ui.ChannelUnreachableBanner
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import de.zeitgleich.teamcraft.ui.channelDeleteText
+import de.zeitgleich.teamcraft.ui.rememberChannelAnchorMarks
 import de.zeitgleich.teamcraft.ui.media.MediaDraftKey
 import de.zeitgleich.teamcraft.ui.media.MediaFlow
 import de.zeitgleich.teamcraft.ui.media.MediaFlowLaunch
@@ -360,16 +363,28 @@ fun ConversationScreen(
       onBack()
     }
   }
+  // A channel's anchor (e2ee.md §4.6.5, #1842): verified again as it opens, marked in the header.
+  val isChannel = conversation?.kind == "Public" || conversation?.kind == "Private"
+  val maybeAnchorMarks = rememberChannelAnchorMarks(viewModel, conversationId, isShown = isChannel)
   ChatScaffold(
     viewModel = viewModel,
     topBar = {
       val typingPlaces by viewModel.typingPlaces.collectAsState()
-      ConversationTopBar(snapshot, conversation, maybeNotified, maybeListed, onBack, typing = typingIn(typingPlaces, conversationId)) {
+      ConversationTopBar(
+        snapshot,
+        conversation,
+        maybeNotified,
+        maybeListed,
+        onBack,
+        typing = typingIn(typingPlaces, conversationId),
+        isNameStale = maybeAnchorMarks?.isNameStale == true,
+      ) {
         ConversationMenu(viewModel, conversationId, conversation, rights, onOpenFiles, onOpenConversation)
       }
     },
   ) {
     SyncingLine(isCatchingUp = conversation?.isCatchingUp == true)
+    if (isChannel) ChannelUnreachableBanner(viewModel, conversationId)
     RunningCallBanner(viewModel, conversationId, conversation?.name.orEmpty(), runningCallCount)
     if (pinned.isNotEmpty()) PinnedBanner(pinned.last())
     JoinRequestBanner(joinRequests, viewModel.joinRequests)
@@ -621,6 +636,8 @@ private fun ConversationMenu(
   val isChannel = maybeConversation?.kind == "Public" || maybeConversation?.kind == "Private"
   var isShowingMembers by remember { mutableStateOf(false) }
   var maybeConfirming by remember { mutableStateOf<ChannelConfirmation?>(null) }
+  // The deletion confirmation names who last named the channel (e2ee.md §4.6.5, D5).
+  val maybeAnchorMarks = rememberChannelAnchorMarks(viewModel, conversationId, isShown = maybeConfirming == ChannelConfirmation.Delete)
   var isPreparingCall by remember { mutableStateOf(false) }
   IconButton(onClick = { isPreparingCall = true }) {
     Icon(Icons.Filled.Call, contentDescription = stringResource(R.string.call_start))
@@ -725,6 +742,7 @@ private fun ConversationMenu(
       confirmation = confirmation,
       name = name,
       leave = leave,
+      deleteText = channelDeleteText(maybeAnchorMarks),
       onConfirm = {
         when (confirmation) {
           ChannelConfirmation.Archive -> viewModel.act(ChatActions.archiveChannel(conversationId))
@@ -745,6 +763,7 @@ private fun ChannelConfirmationDialog(
   confirmation: ChannelConfirmation,
   name: String,
   leave: LeaveChoice,
+  deleteText: String,
   onConfirm: () -> Unit,
   onDismiss: () -> Unit,
 ) {
@@ -761,7 +780,7 @@ private fun ChannelConfirmationDialog(
     )
     ChannelConfirmation.Delete -> Triple(
       stringResource(R.string.channel_delete_title, name),
-      stringResource(R.string.channel_delete_text),
+      deleteText,
       stringResource(R.string.channel_delete_confirm),
     )
   }

@@ -8,6 +8,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import uniffi.teamcraft_ffi.AddPeopleOutcome
+import uniffi.teamcraft_ffi.ChannelAnchorMarksItem
 import uniffi.teamcraft_ffi.GroupMentionReachItem
 import uniffi.teamcraft_ffi.MentionableGroupItem
 import uniffi.teamcraft_ffi.ChannelMembersInfo
@@ -228,6 +229,15 @@ class ChatClient(
 
   /** Reads the channel's members and signed roles afresh; the change arrives as a store update. */
   suspend fun refreshChannelMembers(conversation: String) = core().refreshChannelMembers(conversation)
+
+  /** What the channel shows of its anchor (#1842); `null` for a DM or a channel without one. */
+  suspend fun channelAnchorMarks(conversation: String): ChannelAnchorMarksItem? = core().channelAnchorMarks(conversation)
+
+  /** Verifies the channel's anchor again, at most every 5 minutes; the marks change with a store update. */
+  suspend fun refreshChannelAnchor(conversation: String) = core().refreshChannelAnchor(conversation)
+
+  /** The channel can't be read on this device: the server offered a group the user's devices didn't pin. */
+  suspend fun isChannelUnreachable(conversation: String): Boolean = core().isChannelUnreachable(conversation)
 
   /** Confirms exactly the roles of [review] as the admin opened it; nothing is signed if the log moved. */
   suspend fun signReviewedChannelRoles(conversation: String, review: ChannelRolesReviewItem): ReviewedRolesOutcome =

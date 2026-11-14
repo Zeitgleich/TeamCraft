@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- A channel's name rules and anchor (e2ee.md §4.6.5, issue #1842), worded as on desktop and web. -->
+  <string name="channel_name_error_bidi">Entferne das Zeichen, das die Schreibrichtung ändert.</string>
+  <string name="channel_name_error_control">Entferne den Zeilenumbruch oder das Steuerzeichen.</string>
+  <string name="channel_name_error_invisible">Entferne das unsichtbare Zeichen, zum Beispiel ein Leerzeichen ohne Breite.</string>
+  <string name="channel_name_error_refused">Verwende einen Namen ohne unsichtbare, Steuer- oder richtungsändernde Zeichen.</string>
+  <string name="error_must_update">%1$s muss TeamCraft erst aktualisieren, dann kannst du die Person zu diesem Kanal hinzufügen.</string>
+  <string name="channel_delete_name_stale">Der angezeigte Name ist nicht der, den die Apps der Mitglieder für diesen Kanal kennen. Ihre Geräte behalten die Nachrichten deshalb noch 30 Tage, bevor sie sie entfernen.</string>
+  <string name="channel_delete_named_by_founder">%1$s hat diesen Kanal beim Erstellen benannt.</string>
+  <string name="channel_delete_renamed_by_workspace">Zuletzt umbenannt von %1$s als Workspace-Admin.</string>
+  <string name="channel_delete_renamed_by_channel_admin">Zuletzt umbenannt von %1$s als Kanal-Admin.</string>
+  <string name="channel_delete_renamed_by_member">Zuletzt umbenannt von %1$s als Mitglied. Die Geräte der Mitglieder behalten die Nachrichten deshalb noch 30 Tage, bevor sie sie entfernen.</string>
+  <string name="channel_delete_renamed_by">Zuletzt umbenannt von %1$s.</string>
+  <string name="channel_name_stale">Name nicht bestätigt</string>
+  <string name="channel_name_stale_hint">Die Apps der Mitglieder kennen für diesen Kanal einen anderen Namen: Dieser wurde nur auf dem Server geändert oder von einer App, die ihn nicht bestätigen konnte.</string>
+  <string name="channel_anchor_forked_founding">Deine Geräte haben zwei verschiedene Gründungen dieses Kanals gesehen: Womöglich hat jemand eine Kopie seiner verschlüsselten Gruppe angelegt. Bis das geklärt ist, bestätigt sie auf deinen Geräten weder, wer den Kanal gegründet hat, noch wie er heißt.</string>
+  <string name="channel_anchor_forked_properties">Deine Geräte haben für denselben Stand zwei verschiedene Namen oder Spaces dieses Kanals gesehen: Womöglich hat jemand eine Kopie seiner verschlüsselten Gruppe angelegt. Eine spätere Umbenennung oder Verschiebung klärt das; bis dahin bestätigt sie auf deinen Geräten weder Namen noch Space.</string>
+  <string name="channel_anchor_forked">Deine Geräte sind sich über die verschlüsselte Gruppe dieses Kanals uneinig, eine neuere App kann mehr dazu sagen. Bis dahin bestätigt sie auf deinen Geräten weder, wer den Kanal gegründet hat, noch wie er heißt.</string>
+  <string name="anchor_refused">Dieses Gerät kann diesen Kanal nicht öffnen: Der Server hat ihm eine verschlüsselte Gruppe angeboten, die deine Geräte für diesen Kanal nicht kennen. Neue Nachrichten bleiben hier unlesbar. Sag einem Workspace-Admin Bescheid.</string>
+</resources>

@@ -17,6 +17,8 @@ struct ChannelMembersView: View {
   /// "Add people", where the server says the user may (#1534).
   @State private var canAdd = false
   @State private var isAdding = false
+  /// A forked anchor grants nothing: a workspace admin's look at the roles says so (#1842).
+  @State private var maybeFork: ChannelAnchorForkItem?
 
   var body: some View {
     NavigationStack {
@@ -32,6 +34,7 @@ struct ChannelMembersView: View {
           }
           if let review = info.maybeReview {
             Section {
+              if let fork = maybeFork { status(ChannelAnchor.forkKey(fork)) }
               reviewContent(live: review)
             } header: {
               Text("channel_roles_review_title")
@@ -62,9 +65,13 @@ struct ChannelMembersView: View {
       .toolbar { ToolbarItem(placement: .confirmationAction) { Button("done") { dismiss() } } }
     }
     // The members and the signed roles are read afresh while the section is open.
-    .task(id: conversationId) { await model.refreshChannelMembers(conversationId) }
+    .task(id: conversationId) {
+      await model.refreshChannelMembers(conversationId)
+      await model.refreshChannelAnchor(conversationId)
+    }
     .task(id: model.changeCount) {
       maybeInfo = await model.channelMembers(conversationId) ?? maybeInfo
+      maybeFork = await model.channelAnchorMarks(conversationId)?.maybeFork
       canAdd = await model.browseSnapshot()?.conversations?.first { $0.id == conversationId }?.canAddMembers ?? canAdd
     }
     .sheet(isPresented: $isAdding) {

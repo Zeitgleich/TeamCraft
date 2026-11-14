@@ -5,6 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import uniffi.teamcraft_ffi.ChannelNameProblem
 
 class CreateFormsTest {
   @Test
@@ -30,6 +31,22 @@ class CreateFormsTest {
   @Test
   fun controlCharactersAreRefusedLikeTheServerDoes() {
     assertEquals(R.string.create_name_invalid, createErrors("a\u0007b", "", R.string.channel_name_missing)[CreateField.NAME])
+  }
+
+  @Test
+  fun aChannelNameShowsTheProblemTheCoreFound() {
+    val errors = createErrors("a\u200Bb", "", R.string.channel_name_missing, ChannelNameProblem.INVISIBLE_CHARACTER)
+    assertEquals(R.string.channel_name_error_invisible, errors[CreateField.NAME])
+    assertEquals(
+      R.string.channel_name_error_control,
+      createErrors("a\u0007b", "", R.string.channel_name_missing, ChannelNameProblem.CONTROL_CHARACTER)[CreateField.NAME],
+    )
+  }
+
+  @Test
+  fun anEmptyChannelNameStillSaysWhatToEnter() {
+    val errors = createErrors("  ", "", R.string.channel_name_missing, ChannelNameProblem.EMPTY)
+    assertEquals(R.string.channel_name_missing, errors[CreateField.NAME])
   }
 
   @Test

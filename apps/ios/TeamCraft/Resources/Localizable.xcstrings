@@ -16233,6 +16233,278 @@
         }
       }
     },
+    "channel_name_error_bidi": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove the character that changes the writing direction."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Entferne das Zeichen, das die Schreibrichtung ändert."
+          }
+        }
+      }
+    },
+    "channel_name_error_control": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove the line break or control character."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Entferne den Zeilenumbruch oder das Steuerzeichen."
+          }
+        }
+      }
+    },
+    "channel_name_error_invisible": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove the invisible character, such as a zero-width space."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Entferne das unsichtbare Zeichen, zum Beispiel ein Leerzeichen ohne Breite."
+          }
+        }
+      }
+    },
+    "channel_name_error_refused": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Use a name without invisible, control or direction-changing characters."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verwende einen Namen ohne unsichtbare, Steuer- oder richtungsändernde Zeichen."
+          }
+        }
+      }
+    },
+    "error_must_update %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ has to update TeamCraft before they can be added to this channel."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ muss TeamCraft erst aktualisieren, dann kannst du die Person zu diesem Kanal hinzufügen."
+          }
+        }
+      }
+    },
+    "channel_delete_name_stale": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The name shown isn't the one members' apps hold for this channel, so their devices keep its messages for 30 days before removing them."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der angezeigte Name ist nicht der, den die Apps der Mitglieder für diesen Kanal kennen. Ihre Geräte behalten die Nachrichten deshalb noch 30 Tage, bevor sie sie entfernen."
+          }
+        }
+      }
+    },
+    "channel_delete_named_by_founder %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ named this channel when creating it."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ hat diesen Kanal beim Erstellen benannt."
+          }
+        }
+      }
+    },
+    "channel_delete_renamed_by_workspace %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Last renamed by %@, as a workspace admin."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zuletzt umbenannt von %@ als Workspace-Admin."
+          }
+        }
+      }
+    },
+    "channel_delete_renamed_by_channel_admin %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Last renamed by %@, as a channel admin."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zuletzt umbenannt von %@ als Kanal-Admin."
+          }
+        }
+      }
+    },
+    "channel_delete_renamed_by_member %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Last renamed by %@, as a member, so members' devices keep its messages for 30 days before removing them."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zuletzt umbenannt von %@ als Mitglied. Die Geräte der Mitglieder behalten die Nachrichten deshalb noch 30 Tage, bevor sie sie entfernen."
+          }
+        }
+      }
+    },
+    "channel_delete_renamed_by %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Last renamed by %@."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zuletzt umbenannt von %@."
+          }
+        }
+      }
+    },
+    "channel_name_stale": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Name not confirmed"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Name nicht bestätigt"
+          }
+        }
+      }
+    },
+    "channel_name_stale_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Members' apps hold another name for this channel: this one was changed on the server only, or by an app that couldn't confirm it."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Apps der Mitglieder kennen für diesen Kanal einen anderen Namen: Dieser wurde nur auf dem Server geändert oder von einer App, die ihn nicht bestätigen konnte."
+          }
+        }
+      }
+    },
+    "channel_anchor_forked_founding": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your devices have seen two different foundings of this channel: someone may have set up a copy of its encrypted group. Until that is settled, it confirms neither who founded the channel nor its name on your devices."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Geräte haben zwei verschiedene Gründungen dieses Kanals gesehen: Womöglich hat jemand eine Kopie seiner verschlüsselten Gruppe angelegt. Bis das geklärt ist, bestätigt sie auf deinen Geräten weder, wer den Kanal gegründet hat, noch wie er heißt."
+          }
+        }
+      }
+    },
+    "channel_anchor_forked_properties": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your devices have seen two different names or spaces of this channel at the same step: someone may have set up a copy of its encrypted group. A later rename or move settles it; until then it confirms neither the name nor the space on your devices."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Geräte haben für denselben Stand zwei verschiedene Namen oder Spaces dieses Kanals gesehen: Womöglich hat jemand eine Kopie seiner verschlüsselten Gruppe angelegt. Eine spätere Umbenennung oder Verschiebung klärt das; bis dahin bestätigt sie auf deinen Geräten weder Namen noch Space."
+          }
+        }
+      }
+    },
+    "channel_anchor_forked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your devices disagree about this channel's encrypted group, and a newer app can say more. Until then it confirms neither who founded the channel nor its name on your devices."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Geräte sind sich über die verschlüsselte Gruppe dieses Kanals uneinig, eine neuere App kann mehr dazu sagen. Bis dahin bestätigt sie auf deinen Geräten weder, wer den Kanal gegründet hat, noch wie er heißt."
+          }
+        }
+      }
+    },
+    "anchor_refused": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This device can't open this channel: the server offered it an encrypted group your devices don't know for it. New messages stay unreadable here. Tell a workspace admin."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Gerät kann diesen Kanal nicht öffnen: Der Server hat ihm eine verschlüsselte Gruppe angeboten, die deine Geräte für diesen Kanal nicht kennen. Neue Nachrichten bleiben hier unlesbar. Sag einem Workspace-Admin Bescheid."
+          }
+        }
+      }
+    },
     "create_not_allowed": {
       "localizations": {
         "en": {

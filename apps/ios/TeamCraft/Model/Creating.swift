@@ -39,6 +39,8 @@ extension AppModel {
       case .added: return nil
       case .notInSpace: return "members_add_not_in_space"
       case .notAllowed: return "create_not_allowed"
+      // Their app is from before the channel anchor (e2ee.md §4.6.5): named, nobody was added.
+      case .mustUpdate(let name): return "error_must_update \(name)"
       }
     } catch {
       return AppFailure(CoreFailure(error)).message
@@ -65,6 +67,9 @@ enum CreateResult: Equatable {
   case created(String)
   /// The server refused the name: shown at the name field.
   case nameRefused
+  /// The channel name breaks the name rules (#1842): the problem this device found, or `nil` when
+  /// the server refused it.
+  case channelNameRefused(ChannelNameProblem?)
   /// The role no longer allows it: shown next to the button.
   case notAllowed
   case failed(AppFailure)
@@ -73,6 +78,7 @@ enum CreateResult: Equatable {
     switch outcome {
     case .created(let id): self = .created(id)
     case .nameRefused: self = .nameRefused
+    case .channelNameRefused(let maybeProblem): self = .channelNameRefused(maybeProblem)
     case .notAllowed: self = .notAllowed
     }
   }
@@ -89,10 +95,12 @@ enum CreateProblem: FieldProblem {
   /// The key of what to enter.
   case nameMissing(String)
   case nameTooLong, nameInvalid, descriptionTooLong, nameRefused
+  /// A channel name breaking the name rules (#1842): the key of its text.
+  case channelName(String)
 
   var message: LocalizedStringKey {
     switch self {
-    case .nameMissing(let key): return LocalizedStringKey(key)
+    case .nameMissing(let key), .channelName(let key): return LocalizedStringKey(key)
     case .nameTooLong: return "create_name_too_long"
     case .nameInvalid: return "create_name_invalid"
     case .descriptionTooLong: return "create_description_too_long"
@@ -107,14 +115,20 @@ enum CreateRules {
   /// Longest description the server takes (`max_text_length`, default 1000).
   static let maxDescriptionCharacters = 1000
 
-  /// The checks of a new channel's or space's name and description, the same as the server's.
-  static func errors(name: String, description: String, missing key: String) -> FieldErrors<CreateField, CreateProblem> {
+  /// The checks of a new channel's or space's name and description, the same as the server's. A
+  /// channel's name also keeps the channel name rules (e2ee.md §4.6.5): `maybeChannelProblem` is
+  /// what the core's check found (`ChannelAnchor.problem(of:)`).
+  static func errors(
+    name: String, description: String, missing key: String, maybeChannelProblem: ChannelNameProblem? = nil
+  ) -> FieldErrors<CreateField, CreateProblem> {
     let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
     var nameProblem: CreateProblem?
     if trimmed.isEmpty {
       nameProblem = .nameMissing(key)
     } else if trimmed.count > maxNameCharacters {
       nameProblem = .nameTooLong
+    } else if let problem = maybeChannelProblem, let ruleKey = ChannelAnchor.problemKey(problem) {
+      nameProblem = .channelName(ruleKey)
     } else if name.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }) {
       nameProblem = .nameInvalid
     }

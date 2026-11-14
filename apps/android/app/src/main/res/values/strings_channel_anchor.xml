@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- A channel's name rules and anchor (e2ee.md §4.6.5, issue #1842), worded as on desktop and web. -->
+  <string name="channel_name_error_bidi">Remove the character that changes the writing direction.</string>
+  <string name="channel_name_error_control">Remove the line break or control character.</string>
+  <string name="channel_name_error_invisible">Remove the invisible character, such as a zero-width space.</string>
+  <string name="channel_name_error_refused">Use a name without invisible, control or direction-changing characters.</string>
+  <string name="error_must_update">%1$s has to update TeamCraft before they can be added to this channel.</string>
+  <string name="channel_delete_name_stale">The name shown isn\'t the one members\' apps hold for this channel, so their devices keep its messages for 30 days before removing them.</string>
+  <string name="channel_delete_named_by_founder">%1$s named this channel when creating it.</string>
+  <string name="channel_delete_renamed_by_workspace">Last renamed by %1$s, as a workspace admin.</string>
+  <string name="channel_delete_renamed_by_channel_admin">Last renamed by %1$s, as a channel admin.</string>
+  <string name="channel_delete_renamed_by_member">Last renamed by %1$s, as a member, so members\' devices keep its messages for 30 days before removing them.</string>
+  <string name="channel_delete_renamed_by">Last renamed by %1$s.</string>
+  <string name="channel_name_stale">Name not confirmed</string>
+  <string name="channel_name_stale_hint">Members\' apps hold another name for this channel: this one was changed on the server only, or by an app that couldn\'t confirm it.</string>
+  <string name="channel_anchor_forked_founding">Your devices have seen two different foundings of this channel: someone may have set up a copy of its encrypted group. Until that is settled, it confirms neither who founded the channel nor its name on your devices.</string>
+  <string name="channel_anchor_forked_properties">Your devices have seen two different names or spaces of this channel at the same step: someone may have set up a copy of its encrypted group. A later rename or move settles it; until then it confirms neither the name nor the space on your devices.</string>
+  <string name="channel_anchor_forked">Your devices disagree about this channel\'s encrypted group, and a newer app can say more. Until then it confirms neither who founded the channel nor its name on your devices.</string>
+  <string name="anchor_refused">This device can\'t open this channel: the server offered it an encrypted group your devices don\'t know for it. New messages stay unreadable here. Tell a workspace admin.</string>
+</resources>
