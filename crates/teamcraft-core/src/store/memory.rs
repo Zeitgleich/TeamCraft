@@ -44,12 +44,14 @@ impl MemoryStore {
   }
 
   /// The most bytes one group of writes put since the last [`Self::reset_group_log`].
-  #[cfg(test)]
+  // Used by the search index's tests, which are native only.
+  #[cfg(all(test, not(target_arch = "wasm32")))]
   pub(crate) fn largest_group_bytes(&self) -> usize {
     self.group_log().largest_bytes
   }
 
-  #[cfg(test)]
+  // Used by the search index's tests, which are native only.
+  #[cfg(all(test, not(target_arch = "wasm32")))]
   pub(crate) fn reset_group_log(&self) {
     self.group_log().largest_bytes = 0;
   }
