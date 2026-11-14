@@ -191,6 +191,13 @@
   <string name="notification_file">%1$s</string>
   <string name="notification_reply">Reply</string>
   <string name="notification_mark_read">Mark as read</string>
+  <!-- The state of an action taken from a message notification (#1972). -->
+  <string name="notification_marking_read">Marking as read…</string>
+  <string name="notification_mark_read_failed">Couldn\'t mark as read. Tap to open</string>
+  <string name="notification_muting">Muting…</string>
+  <string name="notification_mute_failed">Couldn\'t mute. Tap to open</string>
+  <string name="notification_reply_sending">Sending…</string>
+  <string name="notification_reply_failed">Couldn\'t send your reply. Tap to retry</string>
   <string name="push_always">Push notifications always</string>
   <string name="push_away_only">Push notifications only when I\'m away from the desktop</string>
 </resources>

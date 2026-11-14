@@ -184,6 +184,12 @@
   <string name="notification_file">%1$s</string>
   <string name="notification_reply">Antworten</string>
   <string name="notification_mark_read">Als gelesen markieren</string>
+  <string name="notification_marking_read">Wird als gelesen markiert …</string>
+  <string name="notification_mark_read_failed">Konnte nicht als gelesen markiert werden. Zum Öffnen tippen</string>
+  <string name="notification_muting">Wird stummgeschaltet …</string>
+  <string name="notification_mute_failed">Konnte nicht stummgeschaltet werden. Zum Öffnen tippen</string>
+  <string name="notification_reply_sending">Wird gesendet …</string>
+  <string name="notification_reply_failed">Antwort nicht gesendet. Zum Wiederholen tippen</string>
   <string name="push_always">Push-Benachrichtigungen immer</string>
   <string name="push_away_only">Push-Benachrichtigungen nur, wenn ich nicht am Desktop bin</string>
 </resources>

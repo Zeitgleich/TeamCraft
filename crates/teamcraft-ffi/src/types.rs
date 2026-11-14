@@ -9,7 +9,7 @@ use teamcraft_core::notified::{
   NotifiedContent, NotifiedConversation as NotifiedConversationCore, NotifiedMessage as NotifiedMessageCore,
 };
 use teamcraft_core::notify_rules::MentionPreferences;
-use teamcraft_core::pending_work::PendingWork;
+use teamcraft_core::pending_work::{ConversationOutbox, PendingWork};
 use teamcraft_core::prefetch::SegmentPrefetch;
 use teamcraft_core::push_guard::{PushDiagnostics, Suppression};
 use teamcraft_core::push_preview::{AttachmentKind, PreviewContent, PreviewGap, PushPreview};
@@ -365,6 +365,26 @@ impl From<PendingWork> for PendingWorkItem {
       uploads: count(work.uploads),
       actions: count(work.actions),
       is_empty: work.is_empty(),
+    }
+  }
+}
+
+/// One conversation's own messages in the outbox (#1972): a reply from a notification or the car
+/// shows "sending" while `sending` is above 0, and "failed" once `failed` rose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ConversationOutboxItem {
+  /// Messages that will be sent (again).
+  pub sending: u32,
+  /// Messages the server refused for good; they wait for "Try again" or "Delete" in the app.
+  pub failed: u32,
+}
+
+impl From<ConversationOutbox> for ConversationOutboxItem {
+  fn from(outbox: ConversationOutbox) -> Self {
+    let count = |value: usize| u32::try_from(value).unwrap_or(u32::MAX);
+    Self {
+      sending: count(outbox.sending),
+      failed: count(outbox.failed),
     }
   }
 }

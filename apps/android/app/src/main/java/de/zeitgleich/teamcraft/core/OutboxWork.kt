@@ -58,7 +58,13 @@ object OutboxWork {
     override suspend fun doWork(): Result {
       val graph = TeamCraftApplication.graph(applicationContext)
       val maybeRemaining = if (graph.auth.isSignedIn.value) flush(graph.core) else null
-      return when (outcome(maybeRemaining, runAttemptCount)) {
+      val outcome = outcome(maybeRemaining, runAttemptCount)
+      // A reply from a notification or the car shows as sent or failed now (#1972); after the last
+      // run, one still waiting shows as failed: only the app sends it then.
+      if (maybeRemaining != null) {
+        runCatching { graph.notificationActions.settleReplies(isLastTry = outcome == Outcome.Done && !maybeRemaining.isEmpty) }
+      }
+      return when (outcome) {
         Outcome.Done -> Result.success()
         Outcome.Retry -> Result.retry()
       }

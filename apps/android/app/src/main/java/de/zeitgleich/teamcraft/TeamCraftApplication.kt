@@ -42,6 +42,8 @@ import de.zeitgleich.teamcraft.notifications.JoinRequestWatcher
 import de.zeitgleich.teamcraft.notifications.MentionPrefs
 import de.zeitgleich.teamcraft.notifications.MessageNotifier
 import de.zeitgleich.teamcraft.notifications.NotificationContentPrefs
+import de.zeitgleich.teamcraft.notifications.NotificationActions
+import de.zeitgleich.teamcraft.notifications.CoreNotificationActions
 import de.zeitgleich.teamcraft.notifications.CarProjection
 import de.zeitgleich.teamcraft.notifications.PlaceholderWatcher
 import de.zeitgleich.teamcraft.notifications.PushHandler
@@ -102,6 +104,12 @@ class AppGraph(context: Context) {
   val notificationContent = NotificationContentPrefs(context)
   val carProjection = CarProjection(context)
   val notifier = MessageNotifier(context, notificationContent, avatars, channelPictures, sourcePictures, isInCar = carProjection::isActive)
+  /** Reply, mark as read and mute from a notification, with their state on it (#1972). */
+  val notificationActions = NotificationActions(
+    core = { CoreNotificationActions(core.core()) },
+    status = notifier,
+    enqueueOutbox = { OutboxWork.enqueue(context) },
+  )
   val mentionPrefs = MentionPrefs(context)
   /** Settings that follow the account to the user's other devices (#945). */
   val settingsSync = SettingsSync(context, core, mentionPrefs, scope)

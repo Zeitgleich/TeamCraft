@@ -122,9 +122,9 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::Instrument as _;
 pub use types::{
   AccountState, AppActivity, AppConfig, BrandAccent, BrandLinks, ConnectionState, ConversationItem,
-  ConversationKind, EmojiSuggestion, FirstSyncItem, FirstSyncStageItem, GroupMentionReachItem,
-  KeyCatchUpItem, LeaveChoice, LinkPlatform, LinkRequestItem, LoginBrand, MentionSettings,
-  MentionableGroupItem, MentionableGroupKindItem, NetworkInterception, NetworkProxy,
+  ConversationKind, ConversationOutboxItem, EmojiSuggestion, FirstSyncItem, FirstSyncStageItem,
+  GroupMentionReachItem, KeyCatchUpItem, LeaveChoice, LinkPlatform, LinkRequestItem, LoginBrand,
+  MentionSettings, MentionableGroupItem, MentionableGroupKindItem, NetworkInterception, NetworkProxy,
   NotificationAttachmentKind, NotificationContent, NotificationContentSettings, NotificationGap,
   NotificationSuppression, NotifiedConversation, NotifiedMessage, OrgRecoveryStart, PendingWorkItem,
   Presence, PushDiagnosticsInfo, PushNotification, PushNotificationKind, PushService, SegmentPrefetchMode,
@@ -567,6 +567,18 @@ impl TeamCraft {
       .read(|reads| reads.pending_work())
       .await
       .map(PendingWorkItem::from)
+  }
+
+  /// One conversation's own messages in the outbox (#1972): a reply from a notification or the car
+  /// shows "sending" until none is left there, and "failed" once one more was refused for good.
+  pub async fn conversation_outbox(
+    &self,
+    conversation_id: String,
+  ) -> Result<ConversationOutboxItem, TeamCraftError> {
+    self
+      .read(move |reads| reads.conversation_outbox(&conversation_id))
+      .await
+      .map(ConversationOutboxItem::from)
   }
 
   /// Syncs until nothing waits for the server or `max_wait_ms` has passed, and answers with what is

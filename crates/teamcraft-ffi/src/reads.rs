@@ -49,7 +49,7 @@ use teamcraft_core::client::{CatchUpFocus, LinkRequestList};
 use teamcraft_core::clock::{Clock as _, SystemClock};
 use teamcraft_core::notified;
 use teamcraft_core::notify_rules::load_mention_preferences;
-use teamcraft_core::pending_work::PendingWork;
+use teamcraft_core::pending_work::{ConversationOutbox, PendingWork};
 use teamcraft_core::prefetch::load_segment_prefetch;
 use teamcraft_core::push_guard;
 use teamcraft_core::push_preview::{device_push_content, push_content_mode};
@@ -1283,6 +1283,14 @@ impl Reads {
   /// What still waits for the server: the outbox, uploads and queued actions.
   pub(crate) fn pending_work(&self) -> Result<PendingWork, TeamCraftError> {
     PendingWork::read(&self.store).map_err(TeamCraftError::from)
+  }
+
+  /// One conversation's own messages in the outbox: still sending, or refused for good (#1972).
+  pub(crate) fn conversation_outbox(
+    &self,
+    conversation_id: &str,
+  ) -> Result<ConversationOutbox, TeamCraftError> {
+    ConversationOutbox::read(&self.store, parse_id(conversation_id)?).map_err(TeamCraftError::from)
   }
 }
 
