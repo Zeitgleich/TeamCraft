@@ -118,6 +118,8 @@ async fn a_guest_joins_a_meeting_with_the_mailed_link_and_shares_its_call() {
       // The host's lobby entry shows the same key code as the guest's page.
       alice_ref.client.prepare_guest_key_code(guest).await.unwrap();
       let code = teamcraft_core::client::guest_key_code(alice_ref.store.as_ref(), guest).unwrap();
+      // The codes are behind "Verify the connection" (#1927), for whoever wants to compare.
+      click_selector(&page, ".lobby-verify summary").await;
       wait_for_text(&page, &code).await;
 
       // Admitting makes the guest a member; the organizer's device adds the guest's own device to
