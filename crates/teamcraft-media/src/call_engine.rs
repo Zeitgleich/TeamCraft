@@ -1759,6 +1759,7 @@ impl CallEngine {
         loss_percent,
       } => {
         self.maybe_downlink_measurement = Some(LinkMeasurement {
+          after_burst_bps: capacity_bps,
           capacity_bps,
           loss_percent,
         });
@@ -2111,6 +2112,7 @@ impl CallEngine {
   /// New uplink feedback: the estimate decides which own video layers fit next to the audio, the
   /// loss how much forward error correction the audio carries.
   fn on_uplink_feedback(&mut self, feedback: &TransportFeedback, now: Instant) {
+    let was_over = self.is_uplink_probe_over();
     if let Some(measurement) = self
       .maybe_uplink_probe
       .as_mut()
@@ -2118,6 +2120,7 @@ impl CallEngine {
     {
       self.apply_uplink_probe(measurement, now);
     }
+    self.note_uplink_probe_lost(was_over, now);
     let mut bps = self.uplink.on_feedback(feedback, now, self.uplink_feedback_epoch);
     let mut maybe_carried_bps = None;
     // A cluster next to the own speech is no proof for the voice's step (#1893): on a 64 kbit/s
@@ -2260,6 +2263,7 @@ impl CallEngine {
 
   /// Sends the uplink probe's train that is due, and gives up trains whose feedback didn't come.
   fn run_uplink_probe(&mut self, now: Instant) {
+    let was_over = self.is_uplink_probe_over();
     let Some(probe) = self.maybe_uplink_probe.as_mut() else {
       return;
     };
@@ -2267,6 +2271,10 @@ impl CallEngine {
       self.apply_uplink_probe(measurement, now);
       return;
     }
+    self.note_uplink_probe_lost(was_over, now);
+    let Some(probe) = self.maybe_uplink_probe.as_mut() else {
+      return;
+    };
     let Some(sizes) = probe.due_train(now) else {
       return;
     };
@@ -2417,14 +2425,47 @@ impl CallEngine {
     );
     self.maybe_uplink_measurement = Some(measurement);
     // The voice starts on its thin step; the measurement puts it where the link carries it
-    // (#1893): full a second or so into a call on a good link, thinnest on 64 kbit/s.
+    // (#1893): full a second or so into a call on a good link, thinnest on 64 kbit/s. What the
+    // link carries after a token bucket's burst: the voice flows for minutes, not a burst.
     let was_wanted = self.voice_steps.wanted_bps();
-    if let Some(encoding) = self.voice_steps.on_measured(measurement.capacity_bps, now) {
+    let maybe_encoding = self.voice_steps.on_measured(measurement.after_burst_bps, now);
+    // Once a call: worth a line in a bug report's log.
+    info!(
+      capacity_bps = measurement.capacity_bps,
+      after_burst_bps = measurement.after_burst_bps,
+      loss_percent = measurement.loss_percent,
+      voice_step = ?self.voice_steps.step(),
+      "the uplink was measured at the join"
+    );
+    if let Some(encoding) = maybe_encoding {
+      self.event(CallEngineEvent::VoiceEncoding(encoding));
+    }
+    if self.voice_steps.wanted_bps() != was_wanted {
+      self.update_uplink_demand();
+    }
+  }
+
+  fn is_uplink_probe_over(&self) -> bool {
+    self.maybe_uplink_probe.as_ref().is_some_and(JoinProbe::is_over)
+  }
+
+  /// The probe at the join just ended without a result because the link lost its padding: the
+  /// uplink is thin (#1893), and the voice goes to its thinnest step (which holds the camera)
+  /// before the first words, instead of losing them on the thin step next to the camera.
+  fn note_uplink_probe_lost(&mut self, was_over: bool, now: Instant) {
+    let is_lost = self
+      .maybe_uplink_probe
+      .as_ref()
+      .is_some_and(JoinProbe::is_lost_on_the_way);
+    if was_over || !is_lost {
+      return;
+    }
+    let was_wanted = self.voice_steps.wanted_bps();
+    if let Some(encoding) = self.voice_steps.on_measured(0, now) {
       info!(
-        capacity_bps = measurement.capacity_bps,
         bitrate_bps = encoding.bitrate_bps,
         frame = ?encoding.frame,
-        "the own voice changes its encoding on the uplink's measurement"
+        "the own voice changes its encoding: the uplink lost the probe at the join"
       );
       self.event(CallEngineEvent::VoiceEncoding(encoding));
     }
@@ -5961,6 +6002,7 @@ mod tests {
       drain(&mut alice);
       let good = LinkMeasurement {
         capacity_bps: 2_000_000,
+        after_burst_bps: 2_000_000,
         loss_percent: 0,
       };
       alice.apply_uplink_probe(good, now);
@@ -5968,7 +6010,9 @@ mod tests {
       let full = UplinkPolicy::default().voice.full;
       assert!(drain(&mut alice).contains(&EngineOutput::Event(CallEngineEvent::VoiceEncoding(full))));
       let thin = LinkMeasurement {
-        capacity_bps: 64_000,
+        // A train's head went through a token bucket at the line rate.
+        capacity_bps: 130_000,
+        after_burst_bps: 64_000,
         loss_percent: 0,
       };
       alice.apply_uplink_probe(thin, now + Duration::from_secs(1));
