@@ -28,7 +28,7 @@ use crate::components::pending_button::PendingButton;
 use crate::components::tab_elsewhere::TabGate;
 use crate::feedback::PendingAction;
 use crate::hybrid::Hybrid;
-use crate::i18n::{I18n, use_i18n};
+use crate::i18n::use_i18n;
 use crate::meetings::{MeetingsClient, MeetingsHub};
 use crate::notify_sync::NotificationSync;
 use crate::reactive::SetIfAlive;
@@ -168,7 +168,13 @@ pub(crate) fn AuthFrame(
           <div class="auth-brand" translate="no">
             {move || brand_mark(brand)}
           </div>
-          <p class="auth-welcome" translate="no">{move || welcome(brand, i18n, language())}</p>
+          // The screen's own heading says what it is (#1927): a line above it only where the brand
+          // set its own sign-in title.
+          {move || {
+            brand
+              .with(|view| view.login_title(language()).map(str::to_owned))
+              .map(|title| view! { <p class="auth-welcome" translate="no">{title}</p> })
+          }}
           {move || {
             brand
               .with(|view| view.login_text(language()).map(str::to_owned))
@@ -197,47 +203,22 @@ pub(crate) fn AuthFrame(
   }
 }
 
-/// The line under the brand's mark: the brand's own sign-in title, else a welcome to this server
-/// (the brand's name is said here once; the marks above are pictures only).
-fn welcome(brand: RwSignal<BrandView>, i18n: I18n, language: &str) -> String {
-  brand.with(|view| {
-    if let Some(title) = view.login_title(language) {
-      title.to_owned()
-    } else if view.is_product() {
-      i18n.t("login-welcome")
-    } else {
-      i18n.t_with("login-welcome-brand", &[("brand", &view.display_name)])
-    }
-  })
-}
-
-/// The top of the card: no server brand → the product mark. A server brand → the product's tile
-/// and the brand's beside it, like two app icons (issue #463). The welcome line below names them.
+/// The one mark on top of the card (#1927): the server's own icon when it has one, else the
+/// product's. Named for screen readers by the brand's name.
 fn brand_mark(brand: RwSignal<BrandView>) -> AnyView {
-  let name = move || brand.with(|view| view.display_name.clone());
+  let name = brand.with(|view| view.display_name.clone());
   if brand.with(BrandView::is_product) {
-    return view! { <img class="auth-logo-img auth-product-icon" src=crate::brand::product_icon() alt="" /> }
+    return view! { <img class="auth-logo-img auth-product-icon" src=crate::brand::product_icon() alt=name /> }
       .into_any();
   }
-  let initial = move || {
-    name()
-      .chars()
-      .next()
-      .map(|first| first.to_uppercase().collect::<String>())
-  };
   view! {
-    <div class="auth-tiles" aria-hidden="true">
-      <span class="auth-tile auth-tile-product">
-        <img class="auth-tile-img auth-product-icon" src=crate::brand::product_icon() alt="" />
-      </span>
-      <span class="auth-tile auth-tile-brand">
-        <BrandLogo
-          class="auth-tile-img"
-          image=BrandImage::Icon
-          fallback=move || view! { <span class="auth-tile-initial">{initial}</span> }
-        />
-      </span>
-    </div>
+    <span class="auth-mark" role="img" aria-label=name>
+      <BrandLogo
+        class="auth-mark-img"
+        image=BrandImage::Icon
+        fallback=move || view! { <img class="auth-mark-img auth-product-icon" src=crate::brand::product_icon() alt="" /> }
+      />
+    </span>
   }
   .into_any()
 }
