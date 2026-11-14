@@ -408,7 +408,7 @@ impl Env {
       .with_env("TEAMCRAFT_WEB__CONTENT_SECURITY_POLICY", TEST_CSP)
       .start()
       .await?;
-    let browser = BrowserSession::launch_with(&MEDIA_ARGS).await?;
+    let browser = BrowserSession::launch_with(&guest_browser_args()).await?;
     let certificate_hash = stack.maybe_sfu.as_ref().unwrap().certificate_hash;
     Some(Self {
       stack,
@@ -416,6 +416,17 @@ impl Env {
       certificate_hash,
     })
   }
+}
+
+/// The call's fake devices, and a mouse: headless Chromium reports no hovering pointer, so
+/// `(hover: hover) and (pointer: fine)` styles (a button's hover) would never apply, and CDP's
+/// media emulation doesn't cover these two features.
+fn guest_browser_args() -> Vec<&'static str> {
+  let mut args = MEDIA_ARGS.to_vec();
+  args.push(
+    "--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4",
+  );
+  args
 }
 
 /// Headless Chromium denies the microphone and camera unless the origin has them.
@@ -516,13 +527,10 @@ async fn expect_join_readable_on_hover(page: &Page) {
     .unwrap();
   let button = wait_for_element(page, ".prejoin-actions .btn-primary").await;
   for scheme in ["light", "dark"] {
-    // A desktop with a mouse: the hover styles apply only there.
     page
       .execute(
         SetEmulatedMediaParams::builder()
           .feature(MediaFeature::new("prefers-color-scheme", scheme))
-          .feature(MediaFeature::new("hover", "hover"))
-          .feature(MediaFeature::new("pointer", "fine"))
           .build(),
       )
       .await
@@ -536,7 +544,10 @@ async fn expect_join_readable_on_hover(page: &Page) {
     // The theme's colours settle (no transition is longer than this).
     tokio::time::sleep(Duration::from_millis(600)).await;
     let (is_desktop, _, _, rest_fill) = button_colors(page, COLORS).await;
-    assert!(is_desktop, "the page doesn't see a mouse that hovers");
+    assert!(
+      is_desktop,
+      "the page doesn't see a mouse that hovers (guest_browser_args)"
+    );
     button.scroll_into_view().await.unwrap();
     button.hover().await.unwrap();
     tokio::time::sleep(Duration::from_millis(600)).await;
