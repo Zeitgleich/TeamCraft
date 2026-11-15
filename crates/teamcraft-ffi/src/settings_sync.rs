@@ -163,7 +163,11 @@ impl From<SyncedAppSettings> for MobileSettings {
         Ok(font) => font,
       },
       // An ID that doesn't parse can't name a conversation: dropped.
-      favorite_order: app.favorite_order.iter().filter_map(|id| id.parse().ok()).collect(),
+      favorite_order: app
+        .favorite_order
+        .iter()
+        .filter_map(|id| id.parse().ok())
+        .collect(),
     }
   }
 }

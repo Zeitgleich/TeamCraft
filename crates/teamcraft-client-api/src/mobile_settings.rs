@@ -12,8 +12,8 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use teamcraft_proto::{ConversationId, UserId};
 use teamcraft_proto::synced_settings::{SettingWrite, SyncedSettings};
+use teamcraft_proto::{ConversationId, UserId};
 
 use crate::calls::CallStatusSounds;
 use crate::color_theme::ColorTheme;
@@ -328,7 +328,10 @@ mod tests {
       assert_eq!(read(KEY_CALL_STATUS_SOUNDS), json!("own_only"));
       assert_eq!(read(KEY_COLOR_THEME), json!("preset:pine"));
       assert_eq!(read(KEY_FONT), json!("lexend"));
-      assert_eq!(read(KEY_FAVORITE_ORDER), serde_json::to_value(vec![conversation(7), conversation(3)]).unwrap());
+      assert_eq!(
+        read(KEY_FAVORITE_ORDER),
+        serde_json::to_value(vec![conversation(7), conversation(3)]).unwrap()
+      );
     }
 
     #[test]

@@ -141,11 +141,6 @@ final class VoiceRecorder {
   @ObservationIgnored private var maybeMaxSeconds: UInt32?
   @ObservationIgnored private var hasAudioSession = false
   @ObservationIgnored private var interruptionObserver: NSObjectProtocol?
-  /// The voice messages of the open conversation, oldest first, and who set them (#2054): after one
-  /// ends the next unplayed one starts.
-  @ObservationIgnored private var queue: [FileInfo] = []
-  @ObservationIgnored private var queueOwner: String?
-  @ObservationIgnored private var played = Set<String>()
 
   private init() {
     // A phone call or another app taking the audio stops the recording; the take stays.
@@ -440,6 +435,11 @@ final class VoicePlayer {
   @ObservationIgnored private var maybeTick: Task<Void, Never>?
   @ObservationIgnored private var hasAudioSession = false
   @ObservationIgnored private var interruptionObserver: NSObjectProtocol?
+  /// The voice messages of the open conversation, oldest first, and who set them (#2054): after one
+  /// ends the next unplayed one starts.
+  @ObservationIgnored private var queue: [FileInfo] = []
+  @ObservationIgnored private var queueOwner: String?
+  @ObservationIgnored private var played = Set<String>()
 
   private init() {
     interruptionObserver = NotificationCenter.default.addObserver(
