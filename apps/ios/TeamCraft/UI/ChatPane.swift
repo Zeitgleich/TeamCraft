@@ -53,6 +53,10 @@ struct ChatPane: View {
   @State private var isPictureGone = false
   @State private var maybeDeleting: Message?
   @State private var isAtBottom = true
+  /// The oldest unread message when the conversation was opened, with the divider above it (#2013).
+  @State private var maybeFirstUnreadId: String?
+  /// The opening read looked for unread messages already.
+  @State private var hasLookedForUnread = false
   /// The pictures of the chat and the viewer zooming out of them (#2012).
   @Namespace private var pictureZoom
   @State private var newBelowCount = 0
@@ -424,6 +428,7 @@ struct ChatPane: View {
                 ForEach(section.entries) { entry in
                   // One container whether or not a hole follows, so a row keeps its identity.
                   VStack(alignment: .leading, spacing: 0) {
+                    if entry.id == maybeFirstUnreadId { UnreadDivider() }
                     entryRow(entry, look: look, listWidth: listWidth)
                     ForEach(entry.gapsAfter, id: \.after) { gap in gapRow(gap) }
                   }
@@ -476,6 +481,11 @@ struct ChatPane: View {
           focusReactionTarget(proxy)
         }
         .onChange(of: model.focusMessageId) { _, _ in focusLinkedMessage(proxy) }
+        // Opens at the first unread message when it is loaded; otherwise at the end (#2013).
+        .onChange(of: maybeFirstUnreadId) { _, id in
+          guard let id, model.focusMessageId == nil, messages.contains(where: { $0.id == id }) else { return }
+          DispatchQueue.main.async { proxy.scrollTo(id, anchor: .top) }
+        }
         .onChange(of: maybeQuoteTarget) { _, target in
           guard let target else { return }
           maybeQuoteTarget = nil
@@ -1463,6 +1473,13 @@ struct ChatPane: View {
     } else {
       // A failed read keeps what is shown; the next change reads again.
       guard let page = await pagedFeed().reread() else { return }
+      // Before the first messages show, and before they are marked read below.
+      if !hasLookedForUnread {
+        hasLookedForUnread = true
+        if conversation.unreadCount > 0 {
+          maybeFirstUnreadId = await model.firstUnread(conversationId: conversation.id)
+        }
+      }
       let readExtras = await model.extras(conversationId: conversation.id, messageIds: page.messages.map(\.id))
       await loadDisplayNamesOnce()
       messages = page.messages

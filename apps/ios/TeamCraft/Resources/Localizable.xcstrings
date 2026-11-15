@@ -22536,6 +22536,22 @@
           }
         }
       }
+    },
+    "unread_divider": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New messages"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Neue Nachrichten"
+          }
+        }
+      }
     }
   },
   "version": "1.0"
