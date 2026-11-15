@@ -691,7 +691,7 @@ pub fn NewMessageDialog() -> impl IntoView {
       }>
         <header class="modal-head">
           <h2 id="new-message-title">{move || i18n.t("dm-new")}</h2>
-          <button type="button" class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+          <button type="button" class="icon-btn" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=move |_| state.close_overlay()>
             <Icon name=IconName::Close />
           </button>
         </header>

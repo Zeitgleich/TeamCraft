@@ -654,7 +654,7 @@ fn KeywordRow(
                   <button
                     type="button"
                     class="icon-btn icon-btn-small"
-                    aria-label=move || i18n.t_with("keyword-remove", &[("word", &remove_label)])
+                    aria-label={ let remove_label = remove_label.clone(); move || i18n.t_with("keyword-remove", &[("word", &remove_label)]) } title=move || i18n.t_with("keyword-remove", &[("word", &remove_label)])
                     on:click=move |_| on_remove.run(index)
                   >
                     <Icon name=IconName::Close />
@@ -779,7 +779,7 @@ fn DndCard() -> impl IntoView {
                     <button
                       type="button"
                       class="icon-btn icon-btn-small"
-                      aria-label=move || i18n.t_with("notif-dnd-allow-remove", &[("name", &remove_label)])
+                      aria-label={ let remove_label = remove_label.clone(); move || i18n.t_with("notif-dnd-allow-remove", &[("name", &remove_label)]) } title=move || i18n.t_with("notif-dnd-allow-remove", &[("name", &remove_label)])
                       on:click=move |_| edit(Box::new(move |dnd| dnd.allow_user_ids.retain(|allowed| *allowed != id)))
                     >
                       <Icon name=IconName::Close />

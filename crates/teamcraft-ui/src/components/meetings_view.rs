@@ -723,7 +723,7 @@ pub fn MeetingCreatedDialog() -> impl IntoView {
     <Modal labelled_by="meeting-created-title">
       <header class="modal-head">
         <h2 id="meeting-created-title">{move || i18n.t("meetings-created-title")}</h2>
-        <button type="button" class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+        <button type="button" class="icon-btn" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=move |_| state.close_overlay()>
           <Icon name=IconName::Close />
         </button>
       </header>
@@ -801,7 +801,7 @@ pub fn CancelMeetingDialog(meeting: MeetingId, occurrence: i64) -> impl IntoView
     <Modal labelled_by="cancel-meeting-title">
       <header class="modal-head">
         <h2 id="cancel-meeting-title">{move || i18n.t(if is_series { "meetings-cancel-title-series" } else { "meetings-cancel-title" })}</h2>
-        <button type="button" class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+        <button type="button" class="icon-btn" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=move |_| state.close_overlay()>
           <Icon name=IconName::Close />
         </button>
       </header>
@@ -985,7 +985,7 @@ fn LinkVisitBanner(hub: MeetingsHub, visit: RwSignal<LinkVisit>) -> impl IntoVie
       view! {
         <div class="auth-alert meetings-visit" role="alert">
           <span class="grow">{move || i18n.t(key)}</span>
-          <button type="button" class="icon-btn" aria-label=move || i18n.t("close") on:click=stop>
+          <button type="button" class="icon-btn" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=stop>
             <Icon name=IconName::Close />
           </button>
         </div>
@@ -1230,7 +1230,7 @@ pub fn ScheduleMeetingDialog(
       <form on:submit=submit>
         <header class="modal-head">
           <h2 id="schedule-title">{move || i18n.t(if is_edit { "schedule-edit-title" } else { "schedule-title" })}</h2>
-          <button type="button" class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+          <button type="button" class="icon-btn" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=move |_| state.close_overlay()>
             <Icon name=IconName::Close />
           </button>
         </header>
@@ -1423,7 +1423,7 @@ pub fn ScheduleMeetingDialog(
                         <button
                           type="button"
                           class="icon-btn"
-                          aria-label=move || i18n.t("schedule-remove")
+                          aria-label=move || i18n.t("schedule-remove") title=move || i18n.t("schedule-remove")
                           on:click=move |_| form.update(|form| drop(form.externals.remove(index)))
                         >
                           <Icon name=IconName::Close />
