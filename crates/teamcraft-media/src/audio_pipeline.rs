@@ -414,6 +414,35 @@ mod tests {
       assert!(pipeline.take_thin_frames().unwrap().is_empty(), "stopped");
     }
 
+    /// #1893 step 3: muted, nothing of the microphone reaches the thin copy's encoder either: it
+    /// stays as an object for the next turn, and only what comes after the unmute is encoded.
+    #[test]
+    fn muted_the_thin_copy_encodes_nothing() {
+      let mut pipeline = CapturePipeline::new(OpusEncoderConfig::default()).unwrap();
+      pipeline.set_thin_voice(true).unwrap();
+      // Half a packet before the mute: dropped with it, not sent after it.
+      pipeline
+        .push(&sine_tone(440.0, 0.5, 0, 2 * FRAME_SAMPLES_PER_CHANNEL))
+        .unwrap();
+      pipeline.set_muted(true);
+      assert!(
+        pipeline
+          .push(&sine_tone(440.0, 0.5, 0, 9 * FRAME_SAMPLES_PER_CHANNEL))
+          .unwrap()
+          .is_empty()
+      );
+      assert!(pipeline.take_thin_frames().unwrap().is_empty());
+      pipeline.set_muted(false);
+      pipeline
+        .push(&sine_tone(440.0, 0.5, 0, 3 * FRAME_SAMPLES_PER_CHANNEL))
+        .unwrap();
+      assert_eq!(
+        pipeline.take_thin_frames().unwrap().len(),
+        1,
+        "only what came after the unmute"
+      );
+    }
+
     #[test]
     fn muted_capture_produces_nothing() {
       let mut pipeline = CapturePipeline::new(OpusEncoderConfig::default()).unwrap();

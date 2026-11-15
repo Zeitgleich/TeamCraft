@@ -7083,7 +7083,10 @@ mod tests {
         !drain(&mut alice).contains(&EngineOutput::Event(CallEngineEvent::ThinVoice(false))),
         "the encoder stays for the next turn"
       );
+      // Muted means no microphone audio leaves the device, the thin copy included: a packet its
+      // encoder still puts out from before the mute goes nowhere.
       alice.send_thin_audio(&frame(), now);
+      alice.send_audio(&frame(), now);
       assert!(
         !drain(&mut alice)
           .iter()
