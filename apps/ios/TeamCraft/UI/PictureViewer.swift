@@ -19,6 +19,8 @@ struct PictureViewer: View {
   @State private var swipeOffset: CGFloat = 0
   @State private var viewerHeight: CGFloat = 0
   @State private var maybeForwarding: ForwardTarget?
+  /// How saving to Photos went, until the alert or the tick is dismissed (#2011).
+  @State private var maybeSaveOutcome: PhotosSaver.Outcome?
   @State private var displayNames: [String: String] = [:]
 
   /// Starts a reply to the picture on screen; nil where the user can't reply.
@@ -91,6 +93,8 @@ struct PictureViewer: View {
       ForwardSheet(
         fromConversationId: target.conversationId, messageId: target.messageId, maybeAttachmentId: target.fileId)
     }
+    .photosSaveAlert($maybeSaveOutcome)
+    .onChange(of: model.currentFile?.fileId) { _, _ in maybeSaveOutcome = nil }
   }
 
   private var swipeProgress: Double { SwipeDismiss.progress(offset: swipeOffset, extent: viewerHeight) }
@@ -188,6 +192,15 @@ struct PictureViewer: View {
           Image(systemName: "square.and.arrow.up").frame(width: 44, height: 44)
         }
         .accessibilityLabel(Text("picture_share"))
+        if let file = model.currentFile, file.isImage || file.isVideo {
+          Button {
+            Task { await save(url, mediaType: file.mediaType) }
+          } label: {
+            Image(systemName: maybeSaveOutcome == .saved ? "checkmark" : "square.and.arrow.down")
+              .frame(width: 44, height: 44)
+          }
+          .accessibilityLabel(Text("picture_save_to_photos"))
+        }
       }
       if let file = model.currentFile ?? (model.items.isEmpty ? model.target.file : nil) {
         if let reply = maybeOnReply {
@@ -228,6 +241,12 @@ struct PictureViewer: View {
 
   private var sentDate: Date? {
     shownFile?.maybeSentAt.map { Date(timeIntervalSince1970: TimeInterval($0) / 1000) }
+  }
+
+  private func save(_ url: URL, mediaType: String) async {
+    let outcome = await PhotosSaver.save(fileAt: url, mediaType: mediaType)
+    maybeSaveOutcome = outcome
+    if outcome == .saved { UINotificationFeedbackGenerator().notificationOccurred(.success) }
   }
 
   /// The downloaded original, to share (save to Photos, send elsewhere): the user's explicit choice.
