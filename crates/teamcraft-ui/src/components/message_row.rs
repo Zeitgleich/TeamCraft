@@ -431,7 +431,12 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
   let time = format_time(message.sent_at, locale);
   // Where an imported message comes from, on its time: the original author and time are the import
   // account's statement (e2ee.md §4.10).
-  let imported_title = maybe_imported.as_ref().map(imported_origin_text);
+  // Every message's time says its full date on hover; an imported one also names its origin.
+  let full_time = crate::clock::format_date_time(message.sent_at, locale);
+  let time_title = match maybe_imported.as_ref().map(imported_origin_text) {
+    Some(origin) => format!("{full_time}\n{origin}"),
+    None => full_time,
+  };
   let thread_root = message.maybe_thread.unwrap_or_else(|| thread_id_of(message.id));
   let conversation = message.conversation;
   let message_id = message.id;
@@ -479,7 +484,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
     },
     _ => {
       let time = time.clone();
-      let title = imported_title.clone();
+      let title = time_title.clone();
       view! { <time class="hover-time" title=title>{time}</time> }.into_any()
     },
   };
@@ -571,7 +576,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
         {badge_bot.then(|| view! { <span class="badge">{move || i18n.t("badge-bot")}</span> })}
         {badge_guest.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
         {status.filter(|_| state.settings.prefs.get_untracked().display.show_status_in_messages).map(|status| view! { <span class="msg-status" title=status.text>{status.emoji}</span> })}
-        <time class="msg-time" datetime=message.sent_at.to_string() title=imported_title.clone()>
+        <time class="msg-time" datetime=message.sent_at.to_string() title=time_title.clone()>
           {time.clone()}
         </time>
       </div>
