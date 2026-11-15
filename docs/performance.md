@@ -2821,7 +2821,7 @@ the chunks that load later. The limit:
 | Limit                                | Value        | Above it                         |
 |--------------------------------------|--------------|----------------------------------|
 | A guest in a meeting: gzip -9 total  | 6,340,000 B  | fails; warns from 95 % (6.02 MB) |
-| Signed-in first visit: gzip -9 total | 5,600,000 B  | fails; warns from 95 % (5.32 MB) |
+| Signed-in first visit: gzip -9 total | 5,650,000 B  | fails; warns from 95 % (5.37 MB) |
 | The call module: gzip -9             | 1,100,000 B  | fails                            |
 
 Both budgets are the sizes of #1699 below plus about 5 %, lowered on 2026-11-13 by what #1462 took
@@ -2953,6 +2953,9 @@ Both budgets are lowered by these gains (above): 6,370,000 and 5,590,000 B. The 
 up to 5,630,000 B the same day: #1462 had set it at the app's size, main grew past it (#1907), and
 the lobby's signed-roster checks (#1873) add about 6 kB gzip. 5.63 MB is about 0.5 % above the
 signed-in first visit then (5.60 MB).
+
+On 2026-11-15 `main` was at the limit again (5,606,405 B, `Web wasm size` failing on unrelated pull
+requests), and the signed-in budget went up to 5,650,000 B, about 0.8 % above.
 
 Measured and left (#1909):
 
