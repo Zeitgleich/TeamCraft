@@ -260,6 +260,17 @@ pub fn LiveVideo(source: VideoSource, #[prop(into)] is_mirrored: Signal<bool>) -
     }),
     (VideoSource::Remote(_), None) | (VideoSource::OwnCamera | VideoSource::OwnScreen, _) => false,
   });
+  // #1891: its publisher holds its video back for its voice; the tile says so at once instead of
+  // a frozen picture that only later counts as stalled.
+  let is_paused_by_publisher = Memo::new(move |_| match (source, maybe_state) {
+    (VideoSource::Remote(stream_id), Some(state)) => state.read(|backend| {
+      backend
+        .call_video_tracks()
+        .iter()
+        .any(|track| track.stream_id == stream_id && track.is_paused_by_publisher)
+    }),
+    (VideoSource::Remote(_), None) | (VideoSource::OwnCamera | VideoSource::OwnScreen, _) => false,
+  });
   Effect::new(move |_| {
     let Some(element) = host.get() else {
       return;
@@ -361,8 +372,17 @@ pub fn LiveVideo(source: VideoSource, #[prop(into)] is_mirrored: Signal<bool>) -
       when=move || is_undecodable.get()
       fallback=move || {
         view! {
-          <Show when=move || is_stalled.get() fallback=|| ()>
-            <span class="video-stalled" role="status">{move || i18n.t(stalled_key)}</span>
+          <Show
+            when=move || is_paused_by_publisher.get()
+            fallback=move || {
+              view! {
+                <Show when=move || is_stalled.get() fallback=|| ()>
+                  <span class="video-stalled" role="status">{move || i18n.t(stalled_key)}</span>
+                </Show>
+              }
+            }
+          >
+            <span class="video-stalled" role="status">{move || i18n.t("video-paused-by-publisher")}</span>
           </Show>
         }
       }

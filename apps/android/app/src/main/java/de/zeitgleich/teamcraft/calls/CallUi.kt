@@ -226,7 +226,11 @@ internal class CallUiState(
   val isSharingScreen: Boolean = false,
   /** "Host" or "Co-host" (string resources) by user ID, for the tiles of a meeting's call (#1720). */
   val hostLabels: Map<String, Int> = emptyMap(),
-)
+) {
+  /** Its publisher holds the track's video back for its voice (#1891): the tile says so. */
+  fun isPausedByPublisher(track: VideoTrackInfo): Boolean =
+    maybeState?.pausedVideoStreamIds?.contains(track.streamId.toString()) == true
+}
 
 /** Somebody else in the call, as the tiles show them. */
 private class Person(
@@ -449,6 +453,7 @@ private fun Stage(
         modifier = Modifier.fillMaxSize(),
         scale = ContentScale.Crop,
         shape = RectangleShape,
+        isPausedByPublisher = ui.isPausedByPublisher(layout.tile.track),
       )
       is StageLayout.Solo -> SoloStage(ui, layout.person, status, chrome, reduceMotion)
       is StageLayout.Grid -> GridStage(ui, layout.tiles, chrome, reduceMotion)
@@ -464,7 +469,15 @@ private fun SpotlightStage(ui: CallUiState, chrome: ChromeRoom) {
   val spotlight = ordered.firstOrNull { it.streamId.toLong() == maybeSpotlight } ?: ordered.firstOrNull() ?: return
   val filmstrip = ordered.filter { it != spotlight }
   val people = ui.people()
-  VideoTile(spotlight, ui.frames[spotlight.streamId], ui.ownerOf(spotlight, people), Modifier.fillMaxSize(), ContentScale.Fit, RectangleShape)
+  VideoTile(
+    spotlight,
+    ui.frames[spotlight.streamId],
+    ui.ownerOf(spotlight, people),
+    Modifier.fillMaxSize(),
+    ContentScale.Fit,
+    RectangleShape,
+    ui.isPausedByPublisher(spotlight),
+  )
   if (filmstrip.isNotEmpty()) {
     Filmstrip(filmstrip, ui, people, chrome.bottom, onPick = { maybeSpotlight = it.streamId.toLong() })
   }
@@ -549,7 +562,15 @@ private fun animatedRoom(chrome: ChromeRoom, reduceMotion: Boolean): PaddingValu
 @Composable
 private fun StageTileView(tile: StageTile, ui: CallUiState, modifier: Modifier) {
   when (tile) {
-    is StageTile.Camera -> VideoTile(tile.track, ui.frames[tile.track.streamId], tile.maybeOwner, modifier, ContentScale.Crop, TILE_SHAPE)
+    is StageTile.Camera -> VideoTile(
+      tile.track,
+      ui.frames[tile.track.streamId],
+      tile.maybeOwner,
+      modifier,
+      ContentScale.Crop,
+      TILE_SHAPE,
+      ui.isPausedByPublisher(tile.track),
+    )
     is StageTile.Avatar -> AvatarTile(tile.person, modifier)
   }
 }
@@ -697,6 +718,7 @@ private fun Filmstrip(tracks: List<VideoTrackInfo>, ui: CallUiState, people: Lis
           Modifier.size(FILMSTRIP_TILE_WIDTH, FILMSTRIP_TILE_HEIGHT).clickable(onClickLabel = label) { onPick(track) },
           ContentScale.Crop,
           FILMSTRIP_SHAPE,
+          ui.isPausedByPublisher(track),
         )
       }
     }
@@ -711,6 +733,7 @@ private fun VideoTile(
   modifier: Modifier,
   scale: ContentScale,
   shape: Shape,
+  isPausedByPublisher: Boolean = false,
 ) {
   val description = stringResource(if (track.isScreen) R.string.call_video_screen else R.string.call_video_camera)
   Box(
@@ -729,6 +752,22 @@ private fun VideoTile(
         contentScale = scale,
         modifier = Modifier.fillMaxSize(),
       )
+    }
+    if (isPausedByPublisher) {
+      // #1891: the picture stands still because its sender's voice comes first, not a broken call.
+      Surface(
+        color = Color.Black.copy(alpha = 0.6f),
+        contentColor = Color.White,
+        shape = CircleShape,
+        modifier = Modifier.padding(12.dp).semantics { liveRegion = LiveRegionMode.Polite },
+      ) {
+        Text(
+          stringResource(R.string.call_video_paused_by_publisher),
+          Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+          style = MaterialTheme.typography.labelMedium,
+          textAlign = TextAlign.Center,
+        )
+      }
     }
     if (maybeOwner != null) {
       NameLabel(maybeOwner.name, maybeOwner.isMuted, maybeOwner.isUnverified, Modifier.align(Alignment.BottomStart), maybeOwner.maybeHostLabel)
@@ -981,6 +1020,7 @@ private fun StatusHint(maybeState: CallStateInfo?) {
       phase = state.phase,
       isMuted = state.isMuted,
       isVideoHeldForVoice = state.isVideoHeldForVoice,
+      isVideoYieldedForVoice = state.isVideoYieldedForVoice,
       isOnLimitedNetwork = state.isOnLimitedNetwork,
     ) ?: return
   Surface(
@@ -1056,12 +1096,14 @@ internal fun statusHintRes(
   phase: CallPhase,
   isMuted: Boolean,
   isVideoHeldForVoice: Boolean,
+  isVideoYieldedForVoice: Boolean,
   isOnLimitedNetwork: Boolean,
 ): Int? = when {
   phase == CallPhase.RECONNECTING -> R.string.call_reconnecting
   phase != CallPhase.CONNECTED -> null
   isMuted -> R.string.call_you_muted
   isVideoHeldForVoice -> R.string.call_video_held_for_voice
+  isVideoYieldedForVoice -> R.string.call_video_yielded_for_voice
   isOnLimitedNetwork -> R.string.call_limited_network
   else -> null
 }

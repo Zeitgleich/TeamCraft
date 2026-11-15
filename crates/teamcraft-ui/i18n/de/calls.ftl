@@ -125,6 +125,7 @@ tile-notetaker = Notetaker – transkribiert
 tile-host = Gastgeber
 tile-co-host = Co-Gastgeber
 video-undecodable = Dieses Video kann hier nicht gezeigt werden: Es kommt in einem Format, das dieses Gerät nicht abspielt
+video-paused-by-publisher = Video pausiert: Die Verbindung ist schwach, die Stimme hat Vorrang
 video-stalled = Video pausiert: schwache Verbindung
 
 ## Videoqualität (#967): wie scharf das Video einer anderen Person ankommt, wie im Menü eines Videoplayers
@@ -320,6 +321,7 @@ call-reconnecting = Verbindung unterbrochen, wird wiederhergestellt …
 call-limited-network = Eingeschränktes Netzwerk, die Gesprächsqualität kann geringer sein
 call-device-busy = Dein Computer ist ausgelastet: Videoqualität reduziert
 call-video-held-for-voice = Deine Verbindung ist schwach: dein Video pausiert, damit deine Stimme durchkommt
+call-video-yielded-for-voice = Deine Verbindung ist schwach: Das Video der anderen pausiert, damit du sie hörst
 call-capture-stalled = Die anderen sehen von deinem Bildschirm oder deiner Kamera nur ein Standbild. Beende es und starte es neu.
 call-video-stalled = Das Video von { $name } aktualisiert sich nicht: Du siehst ein Standbild.
 call-video-stalled-unnamed = Ein Video aktualisiert sich nicht: Du siehst ein Standbild.

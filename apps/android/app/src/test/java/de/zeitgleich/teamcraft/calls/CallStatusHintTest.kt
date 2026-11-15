@@ -19,6 +19,13 @@ class CallStatusHintTest {
   }
 
   @Test
+  fun othersVideoYieldingToTheOwnVoiceSaysSo() {
+    assertEquals(R.string.call_video_yielded_for_voice, hint(isVideoYieldedForVoice = true))
+    assertEquals(R.string.call_video_yielded_for_voice, hint(isVideoYieldedForVoice = true, isOnLimitedNetwork = true))
+    assertEquals(R.string.call_video_held_for_voice, hint(isVideoHeldForVoice = true, isVideoYieldedForVoice = true))
+  }
+
+  @Test
   fun reconnectingAndMutedStayFirst() {
     assertEquals(R.string.call_reconnecting, hint(phase = CallPhase.RECONNECTING, isVideoHeldForVoice = true))
     assertEquals(R.string.call_you_muted, hint(isMuted = true, isVideoHeldForVoice = true))
@@ -35,6 +42,7 @@ class CallStatusHintTest {
     phase: CallPhase = CallPhase.CONNECTED,
     isMuted: Boolean = false,
     isVideoHeldForVoice: Boolean = false,
+    isVideoYieldedForVoice: Boolean = false,
     isOnLimitedNetwork: Boolean = false,
-  ): Int? = statusHintRes(phase, isMuted, isVideoHeldForVoice, isOnLimitedNetwork)
+  ): Int? = statusHintRes(phase, isMuted, isVideoHeldForVoice, isVideoYieldedForVoice, isOnLimitedNetwork)
 }

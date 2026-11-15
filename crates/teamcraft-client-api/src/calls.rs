@@ -740,6 +740,10 @@ pub struct ActiveCall {
   /// #1891): the UI says the voice goes first. A calm hint, not an error.
   #[serde(default)]
   pub is_video_held_for_voice: bool,
+  /// The SFU holds the video it sends this device back while this device's voice is lost on the
+  /// way (#1891): the UI says the voice goes first, so nobody wonders why the others froze.
+  #[serde(default)]
+  pub is_video_yielded_for_voice: bool,
   /// This device's own camera or screen capture gets buffers it can't turn into pictures
   /// (#1805): the others see a still picture, and the UI tells the sharer to share again.
   #[serde(default)]
@@ -912,6 +916,10 @@ pub struct RemoteVideoTrack {
   /// sends AV1 or VP9): the tile says why it shows no video.
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub is_undecodable: bool,
+  /// Its publisher's uplink holds its video back now, typically for its voice (#1891): the tile
+  /// says so instead of showing a frozen picture.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_paused_by_publisher: bool,
 }
 
 /// A call running in a conversation (server roster), whether or not this device is in it.
