@@ -111,6 +111,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -155,6 +157,10 @@ import de.zeitgleich.teamcraft.ui.forms.fieldError
 import de.zeitgleich.teamcraft.ui.forms.requiredTextError
 import de.zeitgleich.teamcraft.ui.forms.supportingText
 import de.zeitgleich.teamcraft.R
+import de.zeitgleich.teamcraft.ui.ChatDrop
+import de.zeitgleich.teamcraft.ui.ChatShortcuts
+import de.zeitgleich.teamcraft.ui.isEditLastShortcut
+import de.zeitgleich.teamcraft.ui.isSendShortcut
 import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.calls.CallOptions
 import de.zeitgleich.teamcraft.core.Bookmark
@@ -630,6 +636,7 @@ internal fun ChatScaffold(
 ) {
   val snackbars = rememberFailureSnackbars(viewModel)
   var bottomBarHeight by remember { mutableStateOf(0.dp) }
+  val drop = remember { ChatDrop() }
   val background = MaterialTheme.colorScheme.background
   Scaffold(
     // The bottom inset is the floating composer's: the list runs on behind the gesture bar.
@@ -638,18 +645,19 @@ internal fun ChatScaffold(
     snackbarHost = { SnackbarHost(snackbars, Modifier.padding(bottom = bottomBarHeight)) },
     containerColor = background,
   ) { padding ->
-    Box(Modifier.fillMaxSize().padding(padding)) {
+    Box(Modifier.fillMaxSize().padding(padding).chatDropTarget(drop)) {
       Column(Modifier.fillMaxSize()) {
         OfflineBanner(onSignInAgain = { viewModel.signOut() })
-        content(bottomBarHeight)
+        CompositionLocalProvider(LocalChatDrop provides drop) { content(bottomBarHeight) }
       }
       // The insets include the keyboard: the composer rides on top of it as it slides in (#309).
       FloatingComposer(
         background = background,
         onHeightChange = { bottomBarHeight = it },
         modifier = Modifier.align(Alignment.BottomCenter),
-        content = bottomBar,
+        content = { CompositionLocalProvider(LocalChatDrop provides drop) { bottomBar() } },
       )
+      if (drop.isOver) DropHighlight()
     }
   }
 }
@@ -925,6 +933,28 @@ private fun MessageList(
   onFillGap: (GapRequest) -> Unit = {},
 ) {
   var maybeSelected by remember { mutableStateOf<Message?>(null) }
+  var maybeEditingLast by remember { mutableStateOf<Message?>(null) }
+  val latestMessages by rememberUpdatedState(messages)
+  val latestExtras by rememberUpdatedState(extras)
+  val myId = snapshot?.me?.id
+  LaunchedEffect(rights.canPost, myId) {
+    // Up in the empty composer: the user's newest message that can still be edited (#2075).
+    ChatShortcuts.editLast.collect {
+      maybeEditingLast = latestMessages.lastOrNull { it.author == myId && latestExtras[it.id]?.isDeleted != true && it.maybePlaceholder == null }
+    }
+  }
+  maybeEditingLast?.let { message ->
+    TextDialog(
+      title = R.string.action_edit,
+      label = R.string.message_edit_label,
+      whenEmpty = R.string.message_edit_empty,
+      initial = message.body,
+      onConfirm = { body ->
+        viewModel.tryAct(ChatActions.edit(conversationId, message.id, body)).also { if (it == null) maybeEditingLast = null }
+      },
+      onDismiss = { maybeEditingLast = null },
+    )
+  }
   var maybeSelectedImage by remember { mutableStateOf<FileInfo?>(null) }
   val imageScope = rememberCoroutineScope()
   val imageContext = LocalContext.current
@@ -1361,6 +1391,12 @@ internal fun Composer(
   var maybeMediaFlow by rememberSaveable(conversationId, maybeThread, stateSaver = MediaFlowLaunch.saver) { mutableStateOf<MediaFlowLaunch?>(null) }
   val pickers = rememberAttachmentPickers(viewModel, onMediaFlow = { maybeMediaFlow = it }) { picked -> files = files + picked }
   val focus = remember { FocusRequester() }
+  val chatDrop = LocalChatDrop.current
+  val dropScope = rememberCoroutineScope()
+  DisposableEffect(chatDrop, viewModel) {
+    chatDrop?.maybeHandler = { event -> acceptDroppedFiles(context, event, dropScope) { uri -> viewModel.importFile(uri)?.let { files = files + it } } }
+    onDispose { chatDrop?.maybeHandler = null }
+  }
   val composerPrefs = remember { ComposerPrefs.prefs(context) }
   var isFormatBarOpen by remember { mutableStateOf(composerPrefs.isFormatBarOpen) }
   val isSendWithEnter = remember { ComposerPrefs.prefs(context).isSendWithEnter }
@@ -1957,10 +1993,13 @@ private fun ComposerField(
               rest
             }
             .onPreviewKeyEvent { event ->
-              // Hardware keyboards: Enter sends when the user chose so; Shift+Enter is a new line.
-              val isSendKey = isSendWithEnter && event.type == KeyEventType.KeyDown && event.key == Key.Enter && !event.isShiftPressed
+              // Hardware keyboards: Enter sends when the user chose so, Ctrl+Enter always; Shift+Enter
+              // is a new line; Up in an empty field edits the last message (#2075).
+              val isSendKey = isSendShortcut(event, isSendWithEnter)
               if (isSendKey && canSend) onSend()
-              isSendKey
+              val isEditLast = isEditLastShortcut(event, text.isEmpty())
+              if (isEditLast) ChatShortcuts.editLast.tryEmit(Unit)
+              isSendKey || isEditLast
             },
           maxLines = 6,
           colors = TextFieldDefaults.colors(

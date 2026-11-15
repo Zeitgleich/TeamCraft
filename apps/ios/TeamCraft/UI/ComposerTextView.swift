@@ -32,6 +32,9 @@ struct ComposerTextView: UIViewRepresentable {
   let accessibilityLabel: String
   /// Pictures pasted into the field, or inserted by the keyboard (GIFs, stickers); the field has none of its own.
   var onPasteImages: ([PastedImage]) -> Void = { _ in }
+  /// Hardware keyboard (#2075): Command-Return sends; Up in an empty field edits the last message.
+  var onSend: () -> Void = {}
+  var onEditLast: () -> Void = {}
 
   @Environment(\.colorScheme) private var colorScheme
   @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -45,6 +48,8 @@ struct ComposerTextView: UIViewRepresentable {
   func makeUIView(context: Context) -> UITextView {
     let view = PastingTextView()
     view.onPasteImages = onPasteImages
+    view.onSend = onSend
+    view.onEditLast = onEditLast
     view.delegate = context.coordinator
     view.backgroundColor = .clear
     view.textContainerInset = UIEdgeInsets(top: Self.verticalInset, left: 0, bottom: Self.verticalInset, right: 0)
@@ -64,6 +69,8 @@ struct ComposerTextView: UIViewRepresentable {
     coordinator.parent = self
     coordinator.install(on: controller)
     (view as? PastingTextView)?.onPasteImages = onPasteImages
+    (view as? PastingTextView)?.onSend = onSend
+    (view as? PastingTextView)?.onEditLast = onEditLast
     // A text set from outside (a mention picked, the draft restored, the field cleared). Not while the
     // keyboard composes: that text is the keyboard's.
     if view.markedTextRange == nil, !(view.text as NSString).isEqual(to: text) {
@@ -239,6 +246,28 @@ struct ComposerTextView: UIViewRepresentable {
 /// for a picture, and a picture without text goes to `onPasteImages` instead of into the text.
 final class PastingTextView: UITextView {
   var onPasteImages: ([PastedImage]) -> Void = { _ in }
+  var onSend: () -> Void = {}
+  var onEditLast: () -> Void = {}
+
+  /// The shortcuts of the field (#2075), listed in the iPad's shortcut overlay. Up is the field's only
+  /// while it is empty: otherwise it moves the caret.
+  override var keyCommands: [UIKeyCommand]? {
+    var commands = super.keyCommands ?? []
+    let send = UIKeyCommand(input: "\r", modifierFlags: .command, action: #selector(sendFromKeyboard))
+    send.discoverabilityTitle = String(localized: "shortcut_send")
+    send.wantsPriorityOverSystemBehavior = true
+    commands.append(send)
+    if text.isEmpty {
+      let edit = UIKeyCommand(input: UIKeyCommand.inputUpArrow, modifierFlags: [], action: #selector(editLastFromKeyboard))
+      edit.discoverabilityTitle = String(localized: "shortcut_edit_last")
+      edit.wantsPriorityOverSystemBehavior = true
+      commands.append(edit)
+    }
+    return commands
+  }
+
+  @objc private func sendFromKeyboard() { onSend() }
+  @objc private func editLastFromKeyboard() { onEditLast() }
 
   override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
     if action == #selector(paste(_:)), UIPasteboard.general.hasImages { return true }

@@ -29,6 +29,11 @@ private const val TAG = "VoicePlayer"
 /** How often the position is read while playing, for the waveform's progress. */
 private const val POSITION_MS = 100L
 
+private val SPEAKER_ATTRIBUTES =
+  AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_SPEECH).build()
+private val EARPIECE_ATTRIBUTES =
+  AudioAttributes.Builder().setUsage(C.USAGE_VOICE_COMMUNICATION).setContentType(C.AUDIO_CONTENT_TYPE_SPEECH).build()
+
 /** What the voice player holds: which message, where it stands. */
 data class VoicePlayback(
   val key: String,
@@ -50,6 +55,7 @@ class VoicePlayer(private val context: Context, private val scope: CoroutineScop
   private val state = MutableStateFlow<VoicePlayback?>(null)
   private var maybePlayer: ExoPlayer? = null
   private var maybeTicker: Job? = null
+  private val proximity = VoiceProximity(context) { onEarpiece -> routeTo(onEarpiece) }
 
   val playback: StateFlow<VoicePlayback?> = state
 
@@ -108,10 +114,19 @@ class VoicePlayer(private val context: Context, private val scope: CoroutineScop
   }
 
   fun release() {
+    proximity.stop()
     maybeTicker?.cancel()
     maybePlayer?.release()
     maybePlayer = null
     state.value = null
+  }
+
+  /** Near the ear: voice-call attributes send the sound to the earpiece (#2068); otherwise media to the speaker. */
+  private fun routeTo(isEarpiece: Boolean) {
+    val player = maybePlayer ?: return
+    val attributes = if (isEarpiece) EARPIECE_ATTRIBUTES else SPEAKER_ATTRIBUTES
+    if (player.audioAttributes == attributes) return
+    player.setAudioAttributes(attributes, true)
   }
 
   private fun player(): ExoPlayer = maybePlayer ?: newPlayer()
@@ -121,7 +136,7 @@ class VoicePlayer(private val context: Context, private val scope: CoroutineScop
     MediaLog.setLogLevel(MediaLog.LOG_LEVEL_OFF)
     return ExoPlayer.Builder(context)
       .setAudioAttributes(
-        AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_SPEECH).build(),
+        SPEAKER_ATTRIBUTES,
         // handleAudioFocus
         true,
       )
@@ -133,6 +148,7 @@ class VoicePlayer(private val context: Context, private val scope: CoroutineScop
             state.value = state.value?.copy(isPlaying = isPlaying, positionMs = player.currentPosition)
             maybeTicker?.cancel()
             if (isPlaying) maybeTicker = scope.launch { follow(player) }
+            if (isPlaying) proximity.start() else proximity.stop()
           }
 
           override fun onPlaybackStateChanged(playbackState: Int) {

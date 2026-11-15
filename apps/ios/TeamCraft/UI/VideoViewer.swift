@@ -37,6 +37,8 @@ struct VideoViewer: View {
       }
       .foregroundStyle(.white)
       .accessibilityLabel(Text("picture_close"))
+      // Esc on a hardware keyboard closes the viewer (#2075).
+      .keyboardShortcut(.cancelAction)
       .opacity(1 - swipeProgress)
     }
     // Clear, so the fading backdrop shows what is behind it.
