@@ -65,6 +65,8 @@ struct ConversationListView: View {
   @Environment(\.scenePhase) private var scenePhase
   /// A mute from the long-press menu the server didn't take (#903).
   @State private var isMuteFailed = false
+  /// The conversation a swipe asked to mute: the time to mute it for is asked next (#2007).
+  @State private var maybeMuting: ConversationItem?
   @State private var maybeFilters: ConversationFiltersTarget?
   /// An entry-menu action the core or server refused (#1105, #322).
   @State private var maybeActionFailure: AppFailure?
@@ -116,6 +118,12 @@ struct ConversationListView: View {
         .toolbar(.hidden, for: .navigationBar)
         .navigationTitle(Text(shownTab.titleKey))
         .alert("dnd_save_failed", isPresented: $isMuteFailed) {}
+        .confirmationDialog("mute_title", isPresented: isMuteDialogShown, titleVisibility: .visible, presenting: maybeMuting) {
+          conversation in
+          ForEach(MutePreset.allCases) { preset in
+            Button(preset.title) { setMuted(conversation, until: preset.mutedUntil(now: Date(), calendar: .current)) }
+          }
+        }
         .sheet(item: $maybeFilters) { ConversationFiltersView(conversationId: $0.id) }
         .alert("deletions_suspect \(suspectDeletions)", isPresented: isSuspectDeletionsShown) {}
         .task(id: shownSections.count) {
@@ -508,7 +516,10 @@ struct ConversationListView: View {
     .listRowBackground(background)
     .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
     .swipeActions(edge: .leading) { readButton(for: conversation) }
-    .swipeActions(edge: .trailing) { favoriteButton(for: conversation) }
+    .swipeActions(edge: .trailing) {
+      favoriteButton(for: conversation)
+      muteSwipeButton(for: conversation)
+    }
     .task(id: conversation.id) { await loadLeaveChoice(for: conversation) }
     .contextMenu {
       readButton(for: conversation)
@@ -714,6 +725,20 @@ struct ConversationListView: View {
     } label: {
       Label("mute_title", systemImage: conversation.isMuted ? "bell.slash" : "bell")
     }
+  }
+
+  /// The swipe's mute: ends a mute at once, otherwise asks for how long.
+  private func muteSwipeButton(for conversation: ConversationItem) -> some View {
+    Button {
+      if conversation.isMuted { setMuted(conversation, until: nil) } else { maybeMuting = conversation }
+    } label: {
+      Label(conversation.isMuted ? "mute_end" : "mute_title", systemImage: conversation.isMuted ? "bell" : "bell.slash")
+    }
+    .tint(.indigo)
+  }
+
+  private var isMuteDialogShown: Binding<Bool> {
+    Binding(get: { maybeMuting != nil }, set: { if !$0 { maybeMuting = nil } })
   }
 
   private func setMuted(_ conversation: ConversationItem, until maybeDate: Date?) {

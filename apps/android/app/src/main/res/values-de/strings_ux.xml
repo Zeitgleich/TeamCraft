@@ -320,6 +320,11 @@
   <string name="push_mode_title">Push-Benachrichtigungen</string>
   <string name="push_service_title">Push-Dienst</string>
   <string name="search_prefetch_limit">Speicherlimit</string>
+  <string name="chat_swipe_setting">Wischen nach links im Chat</string>
+  <string name="chat_swipe_hint">Legt fest, was das Wischen nach links tut. Nach rechts wischen markiert immer als gelesen oder ungelesen.</string>
+  <string name="chat_swipe_favorite">Favorit</string>
+  <string name="chat_swipe_mute">Stummschalten</string>
+  <string name="chat_swipe_notifications">Benachrichtigungen</string>
   <string name="profile_message">Nachricht</string>
   <string name="profile_call">Anrufen</string>
   <string name="profile_open">Profil von %1$s öffnen</string>
