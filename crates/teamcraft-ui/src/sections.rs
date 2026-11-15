@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use teamcraft_client_api::activity::{ActivityItem, ActivityKind};
 
 use crate::model::{Conversation, ConversationId, ConversationKind, SidebarCategory, SpaceId, TimestampMs};
-use crate::prefs::{DmSort, SidebarSort};
+use crate::prefs::{DmSort, NotificationPrefs, NotifyLevel, SidebarSort};
 
 // The rule lives in core, shared with the mobile apps (#897).
 pub use teamcraft_core::row_badge::{RowBadge, RowBadgeTone, row_badge};
@@ -522,8 +522,9 @@ pub fn has_urgent_activity(items: &[ActivityItem], is_direct: impl Fn(Conversati
     .any(|item| item.kind == ActivityKind::Mention || is_direct(item.conversation))
 }
 
-/// The number on the app's badge (dock, taskbar, tray): mentions everywhere plus unread direct and
-/// group messages, as people know it from other chat apps. Muted conversations count only mentions.
+/// The rail's and the bottom bar's count: mentions everywhere plus unread direct and group
+/// messages, as people know it from other chat apps. Muted conversations count only mentions. The
+/// app's badge follows the notification settings instead ([`app_badge_count`]).
 pub fn badge_count(conversations: &[Conversation]) -> u32 {
   conversations
     .iter()
@@ -541,6 +542,42 @@ pub fn badge_count(conversations: &[Conversation]) -> u32 {
       }
     })
     .sum()
+}
+
+/// The number on the app's badge (dock, taskbar, tray, the browser tab's dot): what the user's
+/// notification settings let through, as the desktop notifications decide it (#1995). A
+/// conversation at "all messages" counts every unread message; DMs and group DMs always do (they
+/// notify at "mentions" too); anything else counts its mentions. Muted conversations count only
+/// mentions, and integration channels too, which notify only for mentions (`notifier::decide`).
+pub fn app_badge_count(conversations: &[Conversation], prefs: &NotificationPrefs) -> u32 {
+  conversations
+    .iter()
+    // No list row to clear it from.
+    .filter(|conversation| !conversation.is_archived)
+    .map(|conversation| {
+      if counts_every_unread(conversation, prefs) {
+        conversation.unread_count.max(conversation.mention_count)
+      } else {
+        conversation.mention_count
+      }
+    })
+    .sum()
+}
+
+/// Whether every unread message of `conversation` counts on the app's badge, not only mentions.
+fn counts_every_unread(conversation: &Conversation, prefs: &NotificationPrefs) -> bool {
+  let id = conversation.id.to_string();
+  let maybe_space = conversation.maybe_space.map(|space| space.to_string());
+  if conversation.is_muted || prefs.is_muted_in(&id, maybe_space.as_deref()) {
+    return false;
+  }
+  match conversation.kind {
+    ConversationKind::Direct | ConversationKind::Group => true,
+    ConversationKind::Integration => false,
+    ConversationKind::Public | ConversationKind::Private => {
+      prefs.effective_level_in(&id, maybe_space.as_deref()) == NotifyLevel::All
+    },
+  }
 }
 
 /// Puts the favorites of `list` into the user's own order (IDs in `order` first, in that order; the
@@ -641,6 +678,93 @@ mod tests {
     muted_direct.mention_count = 1;
     assert_eq!(badge_count(&[channel, direct, muted_direct]), 2 + 3 + 1);
     assert_eq!(badge_count(&[]), 0);
+  }
+
+  /// The app's badge follows the notification settings (#1995): a channel at "all messages" counts
+  /// its unread messages, in a space or not, as a DM does.
+  mod app_badge {
+    use crate::prefs::{ConversationNotify, MuteFor};
+
+    use super::*;
+
+    #[test]
+    fn at_all_messages_space_channels_other_channels_and_dms_count_every_unread() {
+      let prefs = NotificationPrefs::default();
+      let mut space_channel = conversation(1, SidebarCategory::Channels, 4, false);
+      space_channel.maybe_space = Some(id_from_raw(10));
+      let channel = conversation(2, SidebarCategory::Channels, 2, false);
+      let direct = direct(3, 1);
+      assert_eq!(app_badge_count(&[space_channel], &prefs), 4);
+      assert_eq!(app_badge_count(&[channel], &prefs), 2);
+      assert_eq!(app_badge_count(&[direct], &prefs), 1);
+      assert_eq!(app_badge_count(&[], &prefs), 0);
+    }
+
+    #[test]
+    fn at_mentions_a_channel_counts_its_mentions_and_a_dm_still_counts() {
+      let prefs = NotificationPrefs {
+        desktop: NotifyLevel::Mentions,
+        ..NotificationPrefs::default()
+      };
+      let mut channel = conversation(1, SidebarCategory::Channels, 7, false);
+      channel.mention_count = 2;
+      assert_eq!(app_badge_count(&[channel, direct(2, 3)], &prefs), 2 + 3);
+    }
+
+    #[test]
+    fn a_channel_or_space_setting_overrides_the_global_level() {
+      let mut prefs = NotificationPrefs {
+        desktop: NotifyLevel::Mentions,
+        ..NotificationPrefs::default()
+      };
+      let own = conversation(1, SidebarCategory::Channels, 5, false);
+      prefs.set_conversation(&own.id.to_string(), level(NotifyLevel::All));
+      let mut in_space = conversation(2, SidebarCategory::Channels, 3, false);
+      in_space.maybe_space = Some(id_from_raw(10));
+      prefs.set_space("10", level(NotifyLevel::All));
+      let quiet = conversation(3, SidebarCategory::Channels, 9, false);
+      assert_eq!(app_badge_count(&[own, in_space, quiet.clone()], &prefs), 5 + 3);
+
+      prefs.desktop = NotifyLevel::All;
+      prefs.set_conversation(&quiet.id.to_string(), level(NotifyLevel::Mentions));
+      assert_eq!(app_badge_count(&[quiet], &prefs), 0);
+    }
+
+    #[test]
+    fn muted_integration_and_archived_conversations_count_only_mentions() {
+      let mut prefs = NotificationPrefs::default();
+      let mut muted_here = conversation(1, SidebarCategory::Channels, 6, false);
+      muted_here.mention_count = 1;
+      prefs.set_conversation(
+        &muted_here.id.to_string(),
+        ConversationNotify {
+          maybe_level: None,
+          mute: MuteFor::Forever,
+        },
+      );
+      let mut muted_on_server = direct(2, 4);
+      muted_on_server.is_muted = true;
+      let mut integration = conversation(3, SidebarCategory::Integrations, 8, false);
+      integration.kind = ConversationKind::Integration;
+      let mut archived = conversation(4, SidebarCategory::Channels, 5, false);
+      archived.is_archived = true;
+      archived.mention_count = 1;
+      let list = [muted_here, muted_on_server, integration, archived];
+      assert_eq!(app_badge_count(&list, &prefs), 1);
+    }
+
+    fn direct(id: u64, unread: u32) -> Conversation {
+      let mut direct = conversation(id, SidebarCategory::DirectMessages, unread, false);
+      direct.kind = ConversationKind::Direct;
+      direct
+    }
+
+    fn level(level: NotifyLevel) -> ConversationNotify {
+      ConversationNotify {
+        maybe_level: Some(level),
+        mute: MuteFor::Off,
+      }
+    }
   }
 
   mod urgent_activity {
