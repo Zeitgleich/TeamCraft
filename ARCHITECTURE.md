@@ -958,8 +958,8 @@ that changes its address (migration) or drops everything (rejoin). Real radios:
 Calls prefer UDP to the SFU's QUIC port (default 3478: the STUN/TURN port Teams, Zoom and WebRTC
 services use, so restrictive networks often allow it already; 443/udp is taken by the proxy's
 HTTP/3). Some corporate, hotel and guest networks block UDP or everything but 80/443 over TCP. There
-the call runs on a **WebSocket fallback**: one TLS connection on 443, through the same kind of
-reverse proxy as the gateway. Setup and what an existing deployment has to change: docs/operations.md.
+the call runs on a **WebSocket fallback**: one TLS connection on 443 (and a second one for the own
+voice, below), through the same kind of reverse proxy as the gateway. Setup and what an existing deployment has to change: docs/operations.md.
 
 **Why a WebSocket.** Decided on these findings (2026-11):
 
@@ -1039,6 +1039,26 @@ reverse proxy as the gateway. Setup and what an existing deployment has to chang
   dropped by frames (#1845): a dropped datagram takes the rest of its layer with it up to the next
   keyframe, queued or still to come, and the SFU asks the publisher for that keyframe; a frame
   missing a fragment, and every delta after it, can't be shown anyway.
+- **The own voice on a connection of its own** (#1979): the queues above order what waits in front of
+  a socket, but not what TCP holds once it is written. With a camera on, a lost segment of its video
+  held up the voice behind it until TCP resent it: voice reached the SFU in bursts 250–750 ms late,
+  and listeners heard it concealed. So right after the join the SFU hands a fallback session a random
+  secret (`audio_socket`, 32 bytes, not an event, only over that session's connection). The client
+  opens a second WebSocket to the same address, with the same join token in the upgrade, whose first
+  frame is `attach_audio` with the secret, and sends its own audio datagrams there from then on; its
+  voice waits only for its own losses. The SFU finds the session as it finds a switch's
+  (`sfu/src/audio_socket.rs`: the first 8 bytes pick the entry, the whole secret is compared in
+  constant time), and a token shown at the upgrade must be the same device's in the same call. The
+  secret stays good while the session runs on its connection, so an audio connection that broke can
+  attach again, and a later one ends the earlier one. On the SFU the audio connection is no session:
+  no slot, no DAVE leaf, no events. It carries datagrams to its session's task and nothing else
+  (anything else ends it), holds a place among the call's connections (`max_connections`; when none
+  is left, the voice stays on the session's connection), and ends with its session, its move to
+  QUIC included. The client sends audio there only while it is up and, in the browser, while it holds
+  under half a second of audio (`bufferedAmount`); otherwise, and with an SFU from before (which sends
+  no secret), the audio goes on the session's connection as before. The upload pacer then counts only
+  what goes on the session's connection. The SFU's audio toward the client stays on the session's
+  connection, ahead of video in its queue and paced around it.
 - **Pacing to the drain rate** (`fallback_pacer`, #1810): behind the SFU's socket sit the kernel's and
   a reverse proxy's buffers, megabytes that TCP fills as fast as it is given media; on a link that
   dips to 1.5 Mbit/s that was seconds of video with the voice and pings behind it, until the

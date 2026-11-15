@@ -162,7 +162,7 @@ the start; only an IPv6 address that fails after another one worked is skipped (
 | `teamcraft_health_probe_milliseconds`          | gauge     | `probe`                   | server         | How long the last answered probe took                                             |
 | `teamcraft_sfu_rooms`                          | gauge     |                           | SFU            | Calls running                                                                     |
 | `teamcraft_sfu_participants`                   | gauge     |                           | SFU            | Devices in those calls, reconnecting ones included                                |
-| `teamcraft_sfu_fallback_connections`           | gauge     |                           | SFU            | Open connections on the WebSocket fallback, for networks that block UDP           |
+| `teamcraft_sfu_fallback_connections`           | gauge     |                           | SFU            | Open connections on the WebSocket fallback (two per device: session and voice)    |
 | `teamcraft_sfu_rtt_seconds`                    | histogram |                           | SFU            | Round-trip time of its QUIC paths, per session every 10 s (10 ms to 2 s)          |
 | `teamcraft_sfu_downlink_loss_ratio`            | histogram |                           | SFU            | Share of its packets to a client lost, per session that sent ≥ 100 in 10 s        |
 | `teamcraft_sfu_keyframe_requests_total`        | counter   |                           | SFU            | Keyframes asked of publishers: the SFU's PLI                                      |
@@ -463,7 +463,8 @@ depend on any of it.
   - **Turning it off:** `[calls] sfu_fallback_enabled = false` on the server stops offering it, and
     `TEAMCRAFT_SFU_FALLBACK_ENABLED=0` on the SFU closes the listener. Without an offer, clients behave
     as if there were no fallback; QUIC's behaviour doesn't depend on it either way.
-  - Bounds, each with a setting: `TEAMCRAFT_SFU_FALLBACK_MAX_CONNECTIONS` (in a call, default 1024),
+  - Bounds, each with a setting: `TEAMCRAFT_SFU_FALLBACK_MAX_CONNECTIONS` (in a call, default 1024;
+    a device on the fallback holds two, its session's and its voice's, #1979),
     `TEAMCRAFT_SFU_FALLBACK_MAX_UNJOINED_CONNECTIONS` (not yet in a call, default 128),
     `TEAMCRAFT_SFU_FALLBACK_HANDSHAKE_TIMEOUT_MILLIS` (the upgrade, default 3000),
     `TEAMCRAFT_SFU_FALLBACK_FIRST_FRAME_TIMEOUT_MILLIS` (the `join` of a connection that showed no

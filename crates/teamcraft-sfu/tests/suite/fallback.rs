@@ -558,6 +558,21 @@ mod audio_socket {
     );
   }
 
+  /// Native clients on the fallback each open their audio connection, and the call's audio comes
+  /// through: two connections per client.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+  async fn native_clients_send_their_audio_on_a_connection_of_its_own() {
+    let sfu = start_sfu(SfuConfig::default()).await;
+    let black_hole = UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
+    let quic_url = format!("https://{}{CALL_PATH}", black_hole.local_addr().unwrap());
+    let (mut alice, mut bob) = two_clients(&sfu, &quic_url).await;
+    assert_eq!(wait_for_transport(&mut alice).await, CallTransport::Fallback);
+    assert_eq!(wait_for_transport(&mut bob).await, CallTransport::Fallback);
+    wait_until(|| sfu.control.fallback_connections() == 4).await;
+    let report = run_call(alice, bob).await;
+    report.assert_media_flowed();
+  }
+
   #[tokio::test]
   async fn an_unknown_secret_is_refused() {
     let sfu = start_sfu(SfuConfig::default()).await;
@@ -1144,7 +1159,8 @@ mod switch_back {
     assert_eq!(wait_for_transport(&mut alice).await, CallTransport::Fallback);
     assert_eq!(wait_for_transport(&mut bob).await, CallTransport::Quic);
     let epoch = wait_until_secured(&mut alice, &mut bob).await;
-    assert_eq!(sfu.control.fallback_connections(), 1);
+    // The session's connection and its audio's (#1979); both go once the call is on QUIC.
+    wait_until(|| sfu.control.fallback_connections() == 2).await;
     // Tries that don't get through leave the call where it is.
     let closed_for = tokio::time::sleep(Duration::from_secs(2));
     tokio::pin!(closed_for);
