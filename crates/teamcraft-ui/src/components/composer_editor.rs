@@ -381,6 +381,13 @@ pub fn insert_link(url: &str, label: &str) {
   );
 }
 
+/// Replaces `start..end` (UTF-16 offsets) of `text` with `label` linked to `url`.
+pub fn replace_in_text_with_link(text: &web_sys::Text, start: usize, end: usize, url: &str, label: &str) {
+  if select_in_text(text, start, end) {
+    insert_link(url, label);
+  }
+}
+
 /// The selected text, for the link dialog's label.
 pub fn selected_text() -> String {
   selection()

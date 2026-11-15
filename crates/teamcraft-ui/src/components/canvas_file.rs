@@ -93,7 +93,7 @@ pub fn CanvasFilePicker(
           type="button"
           class="icon-btn"
           node_ref=close
-          aria-label=move || i18n.t("close")
+          aria-label=move || i18n.t("close") title=move || i18n.t("close")
           on:click=move |_| on_close.run(())
         >
           <Icon name=IconName::Close />

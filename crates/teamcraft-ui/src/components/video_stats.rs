@@ -133,7 +133,7 @@ pub fn VideoStatsOverlay(
     let copied = crate::components::message_actions::copy_text(&text);
     leptos::task::spawn_local(async move {
       if copied.await && state.is_alive() {
-        state.show_toast(i18n.t("stats-copied"));
+        state.show_brief_toast(i18n.t("stats-copied"));
       }
     });
   };

@@ -1,7 +1,5 @@
 package de.zeitgleich.teamcraft.ui.screens
 
-import android.content.ClipData
-import android.content.ClipboardManager
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -52,6 +50,7 @@ import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SegmentedButton
 import de.zeitgleich.teamcraft.R
+import de.zeitgleich.teamcraft.ui.copyText
 import de.zeitgleich.teamcraft.ui.theme.AppearancePrefs
 import de.zeitgleich.teamcraft.ui.theme.LocalThemePolicy
 import de.zeitgleich.teamcraft.ui.theme.brandArgb
@@ -293,7 +292,7 @@ private fun CustomTheme(value: String, onChoose: (String) -> Unit) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 4.dp)) {
       OutlinedButton(onClick = {
         colorThemeShareCode(value)?.let { code ->
-          context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText(code, code))
+          copyText(context, code)
         }
       }) { Text(stringResource(R.string.color_theme_copy)) }
       OutlinedButton(onClick = {

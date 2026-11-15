@@ -1345,7 +1345,8 @@ impl AppState {
     });
   }
 
-  /// Shows a toast until the user closes it.
+  /// Shows a toast until the user closes it: for what needs attention (a reminder, a refusal). A
+  /// confirmation of something the user just did ("Link copied") is a [`Self::show_brief_toast`].
   pub fn show_toast(&self, text: String) {
     self.push_toast(text, None);
   }
@@ -3310,6 +3311,39 @@ mod tests {
         state.toasts.get_untracked().is_empty(),
         "the second toast closed on time"
       );
+    }
+
+    /// Issue #2038: "Link copied" and the like stayed until closed, because they used
+    /// `show_toast`. A confirmation of what the user just did is a brief toast.
+    #[test]
+    fn confirmations_are_brief_toasts() {
+      const CONFIRMATIONS: [&str; 5] = [
+        "show_toast(copied)",
+        "show_toast(renewed)",
+        "show_toast(done)",
+        "show_toast(i18n.t(\"stats-copied\"))",
+        "show_toast(i18n.t(\"report-queued\"))",
+      ];
+      let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+      let mut pending = vec![root];
+      while let Some(path) = pending.pop() {
+        if path.is_dir() {
+          pending.extend(
+            std::fs::read_dir(&path)
+              .expect("a readable source directory")
+              .map(|entry| entry.expect("an entry").path()),
+          );
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+          let text = std::fs::read_to_string(&path).expect("a readable source file");
+          for confirmation in CONFIRMATIONS {
+            assert!(
+              !text.contains(&format!(".{confirmation}")),
+              "{}: `{confirmation}` is a confirmation, use show_brief_toast",
+              path.display()
+            );
+          }
+        }
+      }
     }
 
     #[test]

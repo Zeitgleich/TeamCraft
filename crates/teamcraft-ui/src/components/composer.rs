@@ -43,7 +43,7 @@ use crate::markdown;
 use crate::media_formats::{displayable_type, essence, is_svg, media_type_for, needs_app_thumbnail};
 use crate::media_layout::{APP_THUMBNAIL_SIDE, thumbnail_type};
 use crate::mention::{self, TriggerKind};
-use crate::model::{ConversationId, ThreadId};
+use crate::model::{Conversation, ConversationId, ConversationKind, ThreadId};
 use crate::model::{MessageKind, User};
 use crate::notifier::{
   GroupMentionReach, group_mention_reach, needs_channel_confirmation, needs_group_confirmation,
@@ -263,6 +263,39 @@ fn mention_suggestions(
     .into_iter()
     .map(|(_, suggestion)| suggestion)
     .take(MAX_SUGGESTIONS)
+    .collect()
+}
+
+/// Channels the user can see whose name starts with, or else contains, what was typed after `#`.
+/// Picking one inserts a link to it ([`teamcraft_client_api::markdown::PERMALINK_PREFIX`]).
+fn channel_suggestions(query: &str, channels: &[Conversation]) -> Vec<Suggestion> {
+  let needle = query.to_lowercase();
+  let mut ranked: Vec<(u8, &Conversation)> = channels
+    .iter()
+    .filter(|channel| {
+      matches!(channel.kind, ConversationKind::Public | ConversationKind::Private) && !channel.is_archived
+    })
+    .filter_map(|channel| {
+      let name = channel.name.to_lowercase();
+      if name.starts_with(&needle) {
+        Some((0, channel))
+      } else {
+        name.contains(&needle).then_some((1, channel))
+      }
+    })
+    .collect();
+  ranked.sort_by_key(|(score, channel)| (*score, channel.name.to_lowercase()));
+  ranked
+    .into_iter()
+    .take(MAX_SUGGESTIONS)
+    .map(|(_, channel)| Suggestion {
+      insert: format!("{}{}", markdown::PERMALINK_PREFIX, channel.id),
+      label: format!("#{}", channel.name),
+      detail: String::new(),
+      person: None,
+      maybe_custom: None,
+      is_exact: false,
+    })
     .collect()
 }
 
@@ -992,6 +1025,16 @@ pub fn Composer(
         };
         mention_suggestions(&found.query, &people, &groups, &labels)
       },
+      TriggerKind::Channel => {
+        let channels = state.read(|backend| {
+          backend
+            .spaces()
+            .into_iter()
+            .flat_map(|space| backend.space_conversations(space.id))
+            .collect::<Vec<_>>()
+        });
+        channel_suggestions(&found.query, &channels)
+      },
       TriggerKind::Emoji => {
         crate::custom_emoji::want_set();
         let set = state.read(|backend| backend.custom_emoji());
@@ -1055,9 +1098,24 @@ pub fn Composer(
     if let Some(caret) = composer_editor::caret_text(&element)
       && let Some(found) = mention::trigger(&caret.before, caret.before.encode_utf16().count())
     {
+      if found.kind == TriggerKind::Channel {
+        let start = caret.window_start + found.start;
+        composer_editor::replace_in_text_with_link(
+          &caret.node,
+          start,
+          caret.offset,
+          &chosen.insert,
+          &chosen.label,
+        );
+        composer_editor::insert_text(" ");
+        after_edit();
+        suggestions.set(Vec::new());
+        return;
+      }
       let replacement = match found.kind {
         TriggerKind::Mention => format!("@{} ", chosen.insert),
         TriggerKind::Command => format!("/{} ", chosen.insert),
+        TriggerKind::Channel => return,
         TriggerKind::Emoji => {
           state.settings.remember_emoji(&chosen.insert);
           format!("{} ", chosen.insert)
@@ -1669,7 +1727,7 @@ pub fn Composer(
                     <span class="chip-name">{name}</span>
                     <button
                       class="icon-btn icon-btn-small"
-                      aria-label=move || i18n.t("composer-remove-attachment")
+                      aria-label=move || i18n.t("composer-remove-attachment") title=move || i18n.t("composer-remove-attachment")
                       on:click=move |_| attachments.update(|list| { if index < list.len() { list.remove(index); } })
                     >
                       <Icon name=IconName::Close />
@@ -1698,7 +1756,7 @@ pub fn Composer(
                     {maybe_status.map(|key| view! { <span class="chip-status">{move || i18n.t(key)}</span> })}
                     <button
                       class="icon-btn icon-btn-small"
-                      aria-label=move || i18n.t("composer-remove-attachment")
+                      aria-label=move || i18n.t("composer-remove-attachment") title=move || i18n.t("composer-remove-attachment")
                       on:click=move |_| {
                         gone_ids.update_value(|gone| gone.push(id.clone()));
                         state.write(|backend| backend.remove_draft_file(conversation, maybe_thread, &id));
@@ -1776,7 +1834,7 @@ pub fn Composer(
                   <span class="grow" translate="no">
                     {i18n.t_with("quote-replying-to", &[("name", &target.author_name)])} " — " {target.excerpt}
                   </span>
-                  <button class="icon-btn icon-btn-small" aria-label=move || i18n.t("quote-cancel") on:click=move |_| state.reply_target.set(None)>
+                  <button class="icon-btn icon-btn-small" aria-label=move || i18n.t("quote-cancel") title=move || i18n.t("quote-cancel") on:click=move |_| state.reply_target.set(None)>
                     <Icon name=IconName::Close />
                   </button>
                 </div>
@@ -1794,7 +1852,7 @@ pub fn Composer(
                   <button
                     type="button"
                     class="icon-btn icon-btn-small"
-                    aria-label=move || i18n.t("close")
+                    aria-label=move || i18n.t("close") title=move || i18n.t("close")
                     on:mousedown=|ev| ev.prevent_default()
                     on:click=move |_| close_notice(NoticeEvent::CloseButton)
                   >
@@ -2102,7 +2160,17 @@ pub fn Composer(
                 disabled=move || is_empty.get() && !has_files()
                 aria-label=move || i18n.t("composer-send")
                 title=move || i18n.t("composer-send")
-                on:click=move |_| send()
+                on:click=move |_| {
+                  send();
+                  // The click left the focus on the button, which the send disables: the next
+                  // message goes on typing. Not on touch, where it would pop the keyboard.
+                  if !is_touch_primary()
+                    && pending_confirm.with_untracked(Option::is_none)
+                    && let Some(element) = editor.get_untracked()
+                  {
+                    drop(element.focus());
+                  }
+                }
               >
                 <Icon name=IconName::Send />
               </button>

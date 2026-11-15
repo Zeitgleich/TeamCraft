@@ -934,6 +934,11 @@ final class AppModel {
     await answer(.unseenReactions(conversationId: conversationId))?.unseen ?? UnseenReactions()
   }
 
+  /// The oldest message not read yet, which a conversation opens at (#2013); nil when all is read.
+  func firstUnread(conversationId: String) async -> String? {
+    await answer(.firstUnread(conversationId: conversationId))?.maybeMessage
+  }
+
   /// Files, link previews and other extras of the given messages, by message id.
   func extras(conversationId: String, messageIds: [String]) async -> [String: MessageExtras] {
     guard !messageIds.isEmpty,

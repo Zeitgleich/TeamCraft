@@ -185,7 +185,7 @@ pub fn QuietHoursDialog(conversation: ConversationId) -> impl IntoView {
     <Modal labelled_by="quiet-hours-title" class="modal-small quiet-hours">
       <header class="modal-head">
         <h2 id="quiet-hours-title">{move || i18n.t("notif-quiet-title")}</h2>
-        <button class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+        <button class="icon-btn" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=move |_| state.close_overlay()>
           <Icon name=IconName::Close />
         </button>
       </header>

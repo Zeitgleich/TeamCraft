@@ -142,7 +142,7 @@ pub fn SearchView() -> impl IntoView {
                   </button>
                   <button
                     class="icon-btn icon-btn-small"
-                    aria-label=move || i18n.t_with("search-saved-delete", &[("name", &delete_label)])
+                    aria-label={ let delete_label = delete_label.clone(); move || i18n.t_with("search-saved-delete", &[("name", &delete_label)]) } title=move || i18n.t_with("search-saved-delete", &[("name", &delete_label)])
                     on:click=move |_| state.write(|backend| backend.delete_saved_search(id))
                   >
                     <Icon name=IconName::Trash />
@@ -257,7 +257,7 @@ pub fn SearchView() -> impl IntoView {
                       <button
                         type="button"
                         class="icon-btn icon-btn-small"
-                        aria-label=move || i18n.t_with("search-remove-filter", &[("filter", &label_raw)])
+                        aria-label={ let label_raw = label_raw.clone(); move || i18n.t_with("search-remove-filter", &[("filter", &label_raw)]) } title=move || i18n.t_with("search-remove-filter", &[("filter", &label_raw)])
                         on:click=move |_| query.set(parsed.get_untracked().without_token(index))
                       >
                         <Icon name=IconName::Close />
