@@ -2799,7 +2799,6 @@ impl CallState<'_> {
 
   /// Sends the screen share's sound. Only with a running share: a share stopped meanwhile took its
   /// sound with it.
-
   fn start_screen_sound(
     &mut self,
     engine: &mut CallEngine,
