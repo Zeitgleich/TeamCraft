@@ -34,6 +34,8 @@ struct ChatPane: View {
   @State private var goneDraftIds: Set<String> = []
   @State private var attachmentError: AttachmentError?
   @State private var isPickingPhoto = false
+  /// Files are being dragged over the conversation (#2074).
+  @State private var isDropTargeted = false
   @State private var isPickingDocument = false
   @AppStorage(AttachKind.storageKey) private var lastAttachRaw = AttachKind.photo.rawValue
   @State private var isSchedulingSend = false
@@ -355,6 +357,24 @@ struct ChatPane: View {
       result in
       Task { await attach(documents: result) }
     }
+    // Files dragged in from another app, in split view or on the iPad (#2074): the same path as a picked file.
+    .dropDestination(for: URL.self) { urls, _ in
+      guard conversation.canPost, !urls.isEmpty else { return false }
+      Task { await attach(documents: .success(urls)) }
+      return true
+    } isTargeted: { isDropTargeted = $0 && conversation.canPost }
+    .overlay { if isDropTargeted { dropHighlight } }
+  }
+
+  /// The frame and label shown while files are dragged over the conversation.
+  private var dropHighlight: some View {
+    RoundedRectangle(cornerRadius: 20, style: .continuous)
+      .fill(Theme.accent.opacity(0.12))
+      .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(Theme.accent, lineWidth: 2))
+      .overlay { Text("drop_files_here").font(.app(.headline)).foregroundStyle(Theme.accent) }
+      .padding(8)
+      .allowsHitTesting(false)
+      .transition(.opacity)
   }
 
   /// `screen` with its confirmations, alerts and the in-app handling of message links.
@@ -843,7 +863,9 @@ struct ChatPane: View {
         ComposerTextView(
           text: $draft, isFocused: $isComposerFocused, controller: formatController,
           accessibilityLabel: String(localized: "composer_hint"),
-          onPasteImages: { images in Task { await attach(pasted: images) } })
+          onPasteImages: { images in Task { await attach(pasted: images) } },
+          onSend: { if canSubmit { Task { await confirmThenSend(dueAtMs: nil) } } },
+          onEditLast: editLastMessage)
       }
       .frame(maxWidth: .infinity)
       .onChange(of: draft) { _, text in
@@ -1152,6 +1174,17 @@ struct ChatPane: View {
       }
       Button("delete", systemImage: "trash", role: .destructive) { maybeDeleting = message }
     }
+  }
+
+  /// Up in the empty composer: the user's newest message that can still be edited (#2075).
+  private func editLastMessage() {
+    guard maybeEditing == nil, conversation.canPost,
+      let message = messages.last(where: {
+        $0.authorId == account.userId && !$0.isPending && !$0.body.isEmpty && $0.maybePlaceholder == nil
+      })
+    else { return }
+    maybeEditing = message
+    draft = message.body
   }
 
   /// A menu for each link, phone number, e-mail and address of the message (#2047, #2048): open,

@@ -398,6 +398,51 @@ func nextUnplayedVoice(order: [String], endedKey: String, played: Set<String>) -
   return order.dropFirst(at + 1).first { !played.contains($0) }
 }
 
+/// Holding the phone to the ear while a voice message plays (#2068): the proximity sensor is on
+/// only while a message plays; near, the sound moves from the speaker to the receiver (the system
+/// turns the screen off with the sensor), far it moves back. Headphones, Bluetooth, AirPlay and the
+/// like keep the route they have.
+@MainActor
+final class VoiceProximity {
+  private var observer: NSObjectProtocol?
+
+  /// Ports of the phone itself; any other output is something the user connected.
+  private static let builtInPorts: Set<AVAudioSession.Port> = [.builtInSpeaker, .builtInReceiver]
+
+  func start() {
+    guard observer == nil else { return }
+    UIDevice.current.isProximityMonitoringEnabled = true
+    observer = NotificationCenter.default.addObserver(
+      forName: UIDevice.proximityStateDidChangeNotification, object: nil, queue: .main
+    ) { [weak self] _ in
+      MainActor.assumeIsolated { self?.route(isNear: UIDevice.current.proximityState) }
+    }
+  }
+
+  /// Playback ended or paused: the sensor goes off and the speaker route comes back.
+  func stop() {
+    guard let observer else { return }
+    NotificationCenter.default.removeObserver(observer)
+    self.observer = nil
+    let wasNear = UIDevice.current.proximityState
+    UIDevice.current.isProximityMonitoringEnabled = false
+    if wasNear { route(isNear: false) }
+  }
+
+  private func route(isNear: Bool) {
+    let session = AVAudioSession.sharedInstance()
+    if isNear {
+      let outputs = session.currentRoute.outputs
+      guard outputs.allSatisfy({ Self.builtInPorts.contains($0.portType) }) else { return }
+      // Play and record without the speaker option plays through the receiver.
+      try? session.setCategory(.playAndRecord, mode: .voiceChat, options: [])
+    } else {
+      try? session.setCategory(.playback, mode: .spokenAudio)
+    }
+    try? session.setActive(true)
+  }
+}
+
 /// The app's one voice message player: one plays at a time, and it pauses for a recording, a
 /// call, the background and the lock.
 @MainActor
@@ -434,6 +479,7 @@ final class VoicePlayer {
   @ObservationIgnored private var maybeLoad: Task<Void, Never>?
   @ObservationIgnored private var maybeTick: Task<Void, Never>?
   @ObservationIgnored private var hasAudioSession = false
+  @ObservationIgnored private let proximity = VoiceProximity()
   @ObservationIgnored private var interruptionObserver: NSObjectProtocol?
   /// The voice messages of the open conversation, oldest first, and who set them (#2054): after one
   /// ends the next unplayed one starts.
@@ -587,6 +633,7 @@ final class VoicePlayer {
       return
     }
     state = .playing
+    proximity.start()
     startTicking(player)
   }
 
@@ -640,6 +687,7 @@ final class VoicePlayer {
   }
 
   private func endAudioSession() {
+    proximity.stop()
     guard hasAudioSession else { return }
     hasAudioSession = false
     guard AppModel.shared.calls.activeCall == nil, VoiceRecorder.shared.phase == .idle || isReviewing else { return }

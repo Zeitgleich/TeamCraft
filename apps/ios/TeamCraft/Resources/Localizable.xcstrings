@@ -145,6 +145,22 @@
         }
       }
     },
+    "drop_files_here": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Drop files to attach them"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dateien hier ablegen, um sie anzuhängen"
+          }
+        }
+      }
+    },
     "favorites_sort": {
       "localizations": {
         "en": {
@@ -7581,6 +7597,70 @@
           "stringUnit": {
             "state": "translated",
             "value": "Anderen zeigen, wenn ich schreibe"
+          }
+        }
+      }
+    },
+    "shortcut_edit_last": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Edit last message"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Letzte Nachricht bearbeiten"
+          }
+        }
+      }
+    },
+    "shortcut_next_unread": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Next unread conversation"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nächste ungelesene Unterhaltung"
+          }
+        }
+      }
+    },
+    "shortcut_search": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Search"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Suchen"
+          }
+        }
+      }
+    },
+    "shortcut_send": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Send message"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nachricht senden"
           }
         }
       }

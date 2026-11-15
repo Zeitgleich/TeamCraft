@@ -263,6 +263,7 @@ struct ConversationListView: View {
         initialSpaceId: choice.id, initialTab: spaceViewTab
       ) { conversationId in selection = conversationId }
     }
+    .background { keyboardShortcuts }
     // The app icon's "New message" and "Search" (#2061), also when they started the app.
     .onChange(of: QuickActions.shared.pending, initial: true) { _, action in
       guard let action else { return }
@@ -1036,6 +1037,24 @@ struct ConversationListView: View {
     }
   }
 
+  /// Hardware keyboard (#2075): Command-K goes to the search, Option-Shift-Down to the next
+  /// conversation with unread messages. Real buttons, so the iPad's shortcut overlay lists them.
+  private var keyboardShortcuts: some View {
+    Group {
+      Button("shortcut_search") { searchFocusRequest += 1 }
+        .keyboardShortcut("k", modifiers: .command)
+      Button("shortcut_next_unread") {
+        if let next = UnreadShortcut.next(in: conversations.map { ($0.id, $0.unreadCount) }, after: selection) {
+          selection = next
+        }
+      }
+      .keyboardShortcut(.downArrow, modifiers: [.option, .shift])
+    }
+    .frame(width: 0, height: 0)
+    .opacity(0)
+    .accessibilityHidden(true)
+  }
+
   private func openPendingConversation() {
     guard let id = QuickActions.shared.pendingConversation, !conversations.isEmpty else { return }
     QuickActions.shared.pendingConversation = nil
@@ -1546,5 +1565,17 @@ private struct FavoriteMoveActions: ViewModifier {
     } else {
       content
     }
+  }
+}
+
+/// Which conversation Option-Shift-Down opens (#2075).
+enum UnreadShortcut {
+  /// The conversation after `current` in list order that has unread messages, wrapping around;
+  /// `nil` when no other one has any.
+  static func next<Count: BinaryInteger>(in order: [(String, Count)], after current: String?) -> String? {
+    guard !order.isEmpty else { return nil }
+    let start = order.firstIndex(where: { $0.0 == current })
+    let rotated = start.map { Array(order[($0 + 1)...] + order[..<$0]) } ?? order
+    return rotated.first(where: { $0.1 > 0 && $0.0 != current })?.0
   }
 }

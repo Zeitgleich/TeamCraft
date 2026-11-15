@@ -1,7 +1,12 @@
 package de.zeitgleich.teamcraft.ui
 
 import android.content.Intent
+import androidx.compose.foundation.focusable
 import androidx.compose.runtime.Composable
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.platform.LocalConfiguration
@@ -303,7 +308,32 @@ private fun ReadyNavigation(
   }
   CrashReportsNotice(viewModel.crashReports, onSettings = { navigation.navigate("settings/security") })
   val transitions = rememberScreenTransitions()
+  // Hardware keyboard (#2075): the shortcuts that work on every screen. The root holds the focus
+  // until a field takes it, so the keys arrive without one.
+  val rootFocus = remember { FocusRequester() }
+  LaunchedEffect(Unit) { runCatching { rootFocus.requestFocus() } }
+  val currentEntry by navigation.currentBackStackEntryAsState()
+  val currentRoute = currentEntry?.destination?.route
+  val currentConversation = currentEntry?.arguments?.getString("id").takeIf { currentRoute?.startsWith("conversation/") == true }
   NavHost(
+    modifier = Modifier
+      .focusRequester(rootFocus)
+      .focusable()
+      .onPreviewKeyEvent { event ->
+        when (shortcutFor(event)) {
+          ShortcutAction.Search -> {
+            if (currentRoute != "search") navigation.navigate("search") { launchSingleTop = true }
+            true
+          }
+          ShortcutAction.NextUnread -> {
+            val order = viewModel.chatList.value.maybeConversations.orEmpty().map { it.id to it.unreadCount.toInt() }
+            nextUnreadAfter(order, currentConversation)?.let { navigation.navigate("conversation/$it") }
+            true
+          }
+          ShortcutAction.Close -> currentRoute != "chats" && navigation.popBackStack()
+          null -> false
+        }
+      },
     navController = navigation,
     startDestination = "chats",
     enterTransition = { transitions.enter },

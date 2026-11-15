@@ -154,6 +154,8 @@ struct PictureViewer: View {
         Image(systemName: "xmark").font(.app(.body).weight(.semibold)).frame(width: 44, height: 44)
       }
       .accessibilityLabel(Text("picture_close"))
+      // Esc on a hardware keyboard closes the viewer (#2075).
+      .keyboardShortcut(.cancelAction)
       VStack(alignment: .leading, spacing: 1) {
         if let name = senderName {
           Text(name).font(.app(.subheadline).weight(.semibold)).lineLimit(1)
