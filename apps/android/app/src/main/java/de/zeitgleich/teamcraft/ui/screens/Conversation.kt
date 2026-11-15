@@ -435,6 +435,9 @@ fun ConversationScreen(
       modifier = Modifier.weight(1f),
       bottomInset = listBottomInset,
       maybeFocusMessage = maybeFocusMessage,
+      onRefresh = {
+        if (!viewModel.refreshConnection()) viewModel.showFailure(R.string.refresh_failed)
+      },
       onOpenPermalink = onOpenPermalink,
       onOpenConversation = onOpenConversation,
       unseenReactions = unseenReactions,
@@ -903,6 +906,7 @@ private fun MessageList(
   modifier: Modifier,
   bottomInset: Dp,
   maybeFocusMessage: String?,
+  onRefresh: (suspend () -> Unit)? = null,
   onOpenPermalink: (String) -> Unit,
   onOpenConversation: (String) -> Unit = {},
   older: OlderMessages = OlderMessages.None,
@@ -945,6 +949,7 @@ private fun MessageList(
     modifier = modifier,
     bottomInset = bottomInset,
     maybeFocusMessage = maybeFocusMessage,
+    onRefresh = onRefresh,
     onOpenPermalink = onOpenPermalink,
     onOpenConversation = onOpenConversation,
     canReact = rights.canReact,

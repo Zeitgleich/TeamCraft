@@ -432,6 +432,7 @@ struct ChatPane: View {
           .padding(.bottom, 8)
         }
         .scrollPosition(id: $maybeTopRowId, anchor: .top)
+        .refreshesConnection()
         // Opens at the newest message, offline too (the messages come from the local store).
         .defaultScrollAnchor(.bottom)
         .scrollDismissesKeyboard(.interactively)

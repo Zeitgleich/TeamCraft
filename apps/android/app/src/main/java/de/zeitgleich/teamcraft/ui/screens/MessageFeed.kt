@@ -161,6 +161,7 @@ import de.zeitgleich.teamcraft.ui.PictureTarget
 import de.zeitgleich.teamcraft.ui.Pictures
 import de.zeitgleich.teamcraft.ui.PlacedGap
 import de.zeitgleich.teamcraft.ui.PlayChoice
+import de.zeitgleich.teamcraft.ui.PullRefreshIndicator
 import de.zeitgleich.teamcraft.ui.ServerHistory
 import de.zeitgleich.teamcraft.ui.SourceAvatar
 import de.zeitgleich.teamcraft.ui.SystemLine
@@ -183,9 +184,11 @@ import de.zeitgleich.teamcraft.ui.localizedText
 import de.zeitgleich.teamcraft.ui.mayBeAnimated
 import de.zeitgleich.teamcraft.ui.newerMessages
 import de.zeitgleich.teamcraft.ui.pinnedDay
+import de.zeitgleich.teamcraft.ui.pullRefresh
 import de.zeitgleich.teamcraft.ui.reactionsInView
 import de.zeitgleich.teamcraft.ui.rememberAnimation
 import de.zeitgleich.teamcraft.ui.rememberMotionReduced
+import de.zeitgleich.teamcraft.ui.rememberPullRefresh
 import de.zeitgleich.teamcraft.ui.rememberThumbnail
 import de.zeitgleich.teamcraft.ui.rowOf
 import de.zeitgleich.teamcraft.ui.showsSenders
@@ -300,6 +303,8 @@ fun MessageFeed(
   /** Kept clear at the end of the list: the floating composer over it (#1966). */
   bottomInset: Dp = 0.dp,
   maybeFocusMessage: String? = null,
+  /** Pull to refresh at the oldest end (#2006); null where the feed has none. */
+  onRefresh: (suspend () -> Unit)? = null,
   onOpenPermalink: (String) -> Unit = {},
   /** Opens another conversation: the room a call moved into (issue #1290). */
   onOpenConversation: (String) -> Unit = {},
@@ -433,7 +438,9 @@ fun MessageFeed(
   val messageLayout by remember { MessageLayoutPrefs.of(context) }.layout.collectAsState()
   val isList = messageLayout.isList
   val isCompact = messageLayout == MessageLayout.Compact
-  BoxWithConstraints(modifier.fillMaxSize()) {
+  val pullRefresh = rememberPullRefresh(onRefresh)
+  BoxWithConstraints(modifier.fillMaxSize().pullRefresh(pullRefresh)) {
+    PullRefreshIndicator(pullRefresh)
     val bubbleMax = if (isList) {
       val (avatar, gap, padding) = if (isCompact) {
         Triple(COMPACT_AVATAR_SIZE, COMPACT_AVATAR_GAP, COMPACT_PADDING_H)

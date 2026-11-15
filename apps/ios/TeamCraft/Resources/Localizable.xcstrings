@@ -6473,6 +6473,22 @@
         }
       }
     },
+    "refresh_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn't refresh. Check your connection."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aktualisieren nicht möglich. Prüfe deine Verbindung."
+          }
+        }
+      }
+    },
     "permalink_unavailable": {
       "localizations": {
         "en": {

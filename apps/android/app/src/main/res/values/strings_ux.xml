@@ -324,4 +324,5 @@
   <string name="push_mode_title">Push notifications</string>
   <string name="push_service_title">Push service</string>
   <string name="search_prefetch_limit">Storage limit</string>
+  <string name="refresh_failed">Couldn't refresh. Check your connection.</string>
 </resources>
