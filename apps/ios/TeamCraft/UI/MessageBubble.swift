@@ -786,6 +786,27 @@ struct ImageGrid: View {
 }
 
 /// "Today", "Yesterday" or the date, as a small centred pill; pinned while its day scrolls by.
+/// The message lifted above the long-press menu (#2015): who wrote it and what it says, at most
+/// a few lines; a message of files alone says so.
+struct MessageMenuPreview: View {
+  let name: String
+  let text: String
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 4) {
+      Text(verbatim: name).font(.app(.caption).weight(.semibold)).foregroundStyle(Theme.textMuted).lineLimit(1)
+      if text.isEmpty {
+        Text("message_preview_attachment").font(.app(.body)).foregroundStyle(.secondary)
+      } else {
+        Text(verbatim: text).font(.app(.body)).lineLimit(12)
+      }
+    }
+    .padding(14)
+    .frame(maxWidth: 320, alignment: .leading)
+    .background(Theme.surface)
+  }
+}
+
 struct DayPill: View {
   let date: Date
 

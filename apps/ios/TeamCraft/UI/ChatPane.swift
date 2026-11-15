@@ -588,7 +588,11 @@ struct ChatPane: View {
         TapGesture(count: 2).onEnded { react(message, Self.quickReaction) },
         including: conversation.canReact ? .all : .subviews
       )
-      .contextMenu { menu(for: message) }
+      .contextMenu {
+        menu(for: message)
+      } preview: {
+        MessageMenuPreview(name: message.shownAuthorName, text: message.body)
+      }
       .accessibilityActions {
         if conversation.canPost {
           Button("reply") {
@@ -1007,7 +1011,8 @@ struct ChatPane: View {
   @ViewBuilder
   private func menu(for message: Message) -> some View {
     if conversation.canReact {
-      Menu("react") {
+      // One row of reactions at the top of the menu instead of a nested menu (#2015).
+      ControlGroup {
         ForEach(Self.quickReactions, id: \.self) { emoji in
           Button(emoji) { react(message, emoji) }
         }

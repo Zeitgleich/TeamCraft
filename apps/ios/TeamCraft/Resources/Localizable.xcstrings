@@ -6473,6 +6473,22 @@
         }
       }
     },
+    "message_preview_attachment": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Attachment"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Anhang"
+          }
+        }
+      }
+    },
     "permalink_unavailable": {
       "localizations": {
         "en": {
