@@ -235,6 +235,13 @@ pub enum CallClientMessage {
   SetMuted {
     is_muted: bool,
   },
+  /// This device's own voice is being lost or held up on its upload (an uplink that collapsed),
+  /// or recovered (#1889). While it is, the SFU sends it no video: the acknowledgements of what it
+  /// receives share the upload its voice is short of. Sent when it changes; a new connection
+  /// starts without.
+  UplinkHurt {
+    is_hurt: bool,
+  },
   /// Takes the call over to this device: the SFU closes the account's other devices in the call
   /// with [`CallEvent::ConnectionReplaced`] (#505). Only the account's own devices are affected.
   MoveHere,
@@ -694,6 +701,7 @@ impl fmt::Debug for CallClientMessage {
         .field("secret", &"[redacted]")
         .finish(),
       Self::SetMuted { is_muted } => f.debug_struct("SetMuted").field("is_muted", is_muted).finish(),
+      Self::UplinkHurt { is_hurt } => f.debug_struct("UplinkHurt").field("is_hurt", is_hurt).finish(),
       Self::Unknown => f.write_str("Unknown"),
     }
   }
@@ -990,6 +998,14 @@ mod tests {
     assert_eq!(
       serde_json::to_string(&message).unwrap(),
       r#"{"type":"error","error":{"error_code":"invalid_join_token","message":"expired"}}"#
+    );
+  }
+
+  #[test]
+  fn uplink_hurt_wire_format() {
+    assert_eq!(
+      serde_json::to_string(&CallClientMessage::UplinkHurt { is_hurt: true }).unwrap(),
+      r#"{"type":"uplink_hurt","is_hurt":true}"#
     );
   }
 

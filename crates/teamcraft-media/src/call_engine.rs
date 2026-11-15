@@ -75,6 +75,11 @@ const VIDEO_YIELDED_AFTER: Duration = Duration::from_secs(2);
 /// How long after a probe's padding the own voice isn't judged by the voice guard: a cluster's
 /// trains come a timer tick (~100 ms) apart, and their queue drains within a few hundred ms.
 const PADDING_SHADOW: Duration = Duration::from_millis(400);
+/// Voice waits unreported this long after an own frame the uplink has to queue, and still arrives
+/// (#1889): a slide change's picture of up to a second of its bitrate.
+const OWN_BURST_SHADOW: Duration = Duration::from_secs(1);
+/// An own frame larger than this share of a second at the estimate is a burst the uplink queues.
+const OWN_BURST_SHARE: f64 = 0.25;
 /// The own voice counts as speaking until this long after its last frame with voice activity: the
 /// gaps between words are shorter, a pause is longer (#1893).
 const SPEECH_HANGOVER: Duration = Duration::from_millis(400);
@@ -226,6 +231,11 @@ pub struct CallEngine {
   uplink_voice: VoiceGuard,
   /// Whether the UI was told the own video is held for the voice ([`CallEngineEvent::VideoHeldForVoice`]).
   is_video_held_for_voice: bool,
+  /// What the SFU was last told of the uplink's voice ([`CallClientMessage::UplinkHurt`]).
+  is_uplink_hurt_told: bool,
+  /// When an own video frame went out that the uplink has to queue (#1889): voice behind it
+  /// waits and still arrives.
+  maybe_burst_sent_at: Option<Instant>,
   maybe_video_held_since: Option<Instant>,
   /// The own video waits for a probe's proof of room next to the voice (#1893).
   is_video_proof_wanted: bool,
@@ -761,8 +771,10 @@ impl CallEngine {
       maybe_join_retry_after: None,
       has_reported_unauthenticated_keys: false,
       uplink,
-      uplink_voice: VoiceGuard::new(VoiceGuardConfig::losses_only()),
+      uplink_voice: VoiceGuard::new(VoiceGuardConfig::own_uplink()),
       is_video_held_for_voice: false,
+      is_uplink_hurt_told: false,
+      maybe_burst_sent_at: None,
       maybe_video_held_since: None,
       is_video_proof_wanted: false,
       maybe_padding_sent_at: None,
@@ -857,6 +869,8 @@ impl CallEngine {
     self.uplink_layers = UplinkLayers::new(self.config.bwe.start_bps);
     // Voice sent while the connection was gone says nothing about the new one's room.
     self.uplink_voice.forget();
+    // The SFU of the new connection knows nothing of it either.
+    self.is_uplink_hurt_told = false;
     self.is_video_proof_wanted = false;
     // The SFU of the new connection says anew what the others play, and the voice starts full
     // on the new network.
@@ -1551,6 +1565,11 @@ impl CallEngine {
       },
     };
     track.count_sent(frame.layer, frame.is_keyframe, &packets);
+    // Saturating float-to-int conversion is intended.
+    let burst_bytes = (f64::from(self.uplink.estimate_bps()) / 8.0 * OWN_BURST_SHARE) as usize;
+    if encrypted.len() > burst_bytes {
+      self.maybe_burst_sent_at = Some(now);
+    }
     for rtp in packets {
       self.send_media(stream, frame.layer, &rtp, now);
     }
@@ -1686,6 +1705,7 @@ impl CallEngine {
     self.execute_overdue_transition(now);
     self.check_encryption_setup(now);
     self.follow_thin_voice(now);
+    self.watch_unreported_voice(now);
   }
 
   /// Tells the driver whether to encode the own voice's thin copy (#1893 step 3): while a receiver
@@ -2283,8 +2303,35 @@ impl CallEngine {
     self.note_estimate(now);
     self.uplink_voice.on_feedback(feedback, now);
     self.follow_voice_steps(bps, maybe_carried_bps.filter(|_| is_voice_proof), now);
-    let is_hurt = self.maybe_uplink_capacity_bps.is_none() && self.uplink_voice.is_hurt(now);
+    let is_hurt = self.is_uplink_voice_hurt(now);
     self.follow_video_proof(is_hurt, maybe_carried_bps);
+    if self.follow_uplink_hold(is_hurt, now) {
+      // The own voice is being lost (an uplink that collapsed), or thin: the video stops at once,
+      // before the estimate came down, and comes back as after any cut (#1871). A transport that
+      // measures its uplink (the WebSocket fallback's pacer) loses nothing on the way.
+      bps = 0;
+    }
+    self.apply_uplink_layers(bps, now);
+    let loss_percent = loss_percent(self.uplink.loss_ratio());
+    self.event(CallEngineEvent::UplinkEstimate { bps, loss_percent });
+  }
+
+  /// The own voice is being lost on the way (#1871), or waits unreported in a queue the uplink
+  /// no longer drains (#1889). Not on a transport that measures its uplink (the WebSocket
+  /// fallback's pacer): nothing is lost there.
+  fn is_uplink_voice_hurt(&self, now: Instant) -> bool {
+    self.maybe_uplink_capacity_bps.is_none() && self.uplink_voice.is_hurt(now)
+  }
+
+  /// Holds the own video for the voice, or lets it go: while the voice is hurt, thin, or video
+  /// waits for a probe's proof. Tells the SFU when the uplink's voice became hurt or recovered,
+  /// so it pauses the video to this device meanwhile: the acknowledgements of what it receives
+  /// share the collapsed upload (#1889). Returns whether the video is held.
+  fn follow_uplink_hold(&mut self, is_hurt: bool, now: Instant) -> bool {
+    if is_hurt != self.is_uplink_hurt_told {
+      self.is_uplink_hurt_told = is_hurt;
+      self.signal(CallClientMessage::UplinkHurt { is_hurt });
+    }
     // A voice on its thinnest step: the uplink has no room for video next to it (#1893). And
     // video that took the voice down waits for a probe's proof of room for both: on a 64 kbit/s
     // uplink the camera's lowest layer fits alone, its demand let the estimate grow to megabits
@@ -2303,12 +2350,11 @@ impl CallEngine {
       );
       self.event(CallEngineEvent::VideoHeldForVoice(is_held));
     }
-    if is_held {
-      // The own voice is being lost (an uplink that collapsed), or thin: the video stops at once,
-      // before the estimate came down, and comes back as after any cut (#1871). A transport that
-      // measures its uplink (the WebSocket fallback's pacer) loses nothing on the way.
-      bps = 0;
-    }
+    is_held
+  }
+
+  /// Lets the own tracks' layers follow `bps` (zero: none while the video is held).
+  fn apply_uplink_layers(&mut self, bps: u32, now: Instant) {
     let is_sending_screen_audio = self.screen_audio != ScreenAudioState::Off;
     let tracks = own_track_views(&self.own_tracks, &self.adaptive_tracks);
     let has_changed =
@@ -2320,8 +2366,28 @@ impl CallEngine {
       self.announce_uplink_layers();
     }
     self.note_held_back_layers(now);
-    let loss_percent = loss_percent(self.uplink.loss_ratio());
-    self.event(CallEngineEvent::UplinkEstimate { bps, loss_percent });
+  }
+
+  /// Voice that waits unreported in the uplink's queue (#1889): checked every tick, not only when
+  /// a feedback comes, since a collapsed uplink delivers little to report on. The video stops at
+  /// once and the SFU hears it; the feedback that follows takes it on from there. Voice behind
+  /// an own burst (a slide change, a keyframe) still arrives and doesn't count.
+  fn watch_unreported_voice(&mut self, now: Instant) {
+    if !self.is_in_call() || self.is_muted {
+      return;
+    }
+    let has_sent_burst = self
+      .maybe_burst_sent_at
+      .is_some_and(|at| now.saturating_duration_since(at) < OWN_BURST_SHADOW);
+    self.uplink_voice.on_timer(has_sent_burst, now);
+    let is_hurt = self.is_uplink_voice_hurt(now);
+    if !is_hurt || self.is_uplink_hurt_told {
+      return;
+    }
+    self.follow_video_proof(true, None);
+    if self.follow_uplink_hold(true, now) {
+      self.apply_uplink_layers(0, now);
+    }
   }
 
   /// Steps the own voice down on a thin uplink and back up once it has room (#1893). Lost voice
@@ -6837,6 +6903,34 @@ mod tests {
     /// Below what the full voice takes on the wire: it is lost on the way.
     const COLLAPSED_BPS: u32 = 24_000;
 
+    /// An uplink with a deep buffer collapses: the voice waits in its queue for seconds before
+    /// anything is lost. The camera stops and the SFU hears it within a second, by the voice that
+    /// goes unreported (#1889), not after the buffer overflowed.
+    #[test]
+    fn a_collapse_into_a_deep_buffer_is_seen_within_a_second() {
+      let start = Instant::now();
+      let (mut alice, _bob) = secured_pair(start);
+      alice.maybe_probe_bytes = Some(15_000);
+      publish_camera(&mut alice, start);
+      alice.apply_uplink_probe(fast_link(), start);
+      let mut link = ShapedUplink::new(FAST_BPS, start);
+      link.max_queue = Duration::from_secs(3);
+      let at = link.run(&mut alice, start, Duration::from_secs(10), &frame());
+      assert!(!alice.is_video_held_for_voice);
+      assert!(!alice.is_uplink_hurt_told);
+
+      // A third of what the voice takes on the wire: the queue grows by two seconds a second.
+      link.rate_bps = 20_000;
+      let held_at = link
+        .run_until(&mut alice, at, Duration::from_secs(5), &frame(), |engine| {
+          engine.is_video_held_for_voice
+        })
+        .expect("the camera was never held");
+      let after = held_at.saturating_duration_since(at);
+      assert!(after <= Duration::from_secs(1), "held after {after:?}");
+      assert!(alice.is_uplink_hurt_told, "and the SFU heard it");
+    }
+
     /// A measurement at the join (or in the lobby) said the uplink is fast; it collapses for
     /// 20 s and comes back. The voice steps up and the camera returns within seconds of the link,
     /// while the own microphone talks on.
@@ -6916,6 +7010,8 @@ mod tests {
       /// Sent and not yet reported: the arrival, `None` when lost.
       in_flight: VecDeque<(u16, Option<Instant>)>,
       signal_seq: u64,
+      /// What the link's buffer holds before it drops, in time at its rate.
+      max_queue: Duration,
     }
 
     impl ShapedUplink {
@@ -6929,6 +7025,7 @@ mod tests {
           free_at: origin,
           in_flight: VecDeque::new(),
           signal_seq: 7,
+          max_queue: Self::MAX_QUEUE,
         }
       }
 
@@ -6991,7 +7088,7 @@ mod tests {
             continue;
           };
           let start = self.free_at.max(now);
-          let maybe_arrival = (start.saturating_duration_since(now) <= Self::MAX_QUEUE).then(|| {
+          let maybe_arrival = (start.saturating_duration_since(now) <= self.max_queue).then(|| {
             // Wire size with IPv6, UDP and QUIC.
             let wire_bits = (bytes.len() as u64 + 60) * 8;
             self.free_at = start + Duration::from_micros(wire_bits * 1_000_000 / u64::from(self.rate_bps));

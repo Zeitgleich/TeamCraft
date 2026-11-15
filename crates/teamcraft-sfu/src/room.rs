@@ -714,6 +714,10 @@ impl Room {
         self.set_muted(participant_id, is_muted, now);
         Ok(())
       },
+      CallClientMessage::UplinkHurt { is_hurt } => {
+        self.set_uplink_hurt(participant_id, is_hurt, now);
+        Ok(())
+      },
       CallClientMessage::MoveHere => {
         self.close_other_devices_of(participant_id);
         Ok(())
@@ -877,6 +881,13 @@ impl Room {
       Err(ForwardError::UnknownTrack(_)) => Ok(()),
       Err(error) => Err(error.into()),
     }
+  }
+
+  /// The device says its upload's voice is hurt or recovered (#1889): no video to it meanwhile.
+  fn set_uplink_hurt(&self, device_id: DeviceId, is_hurt: bool, now: Instant) {
+    let mut state = lock(&self.state);
+    let effects = state.forwarder.set_uplink_hurt(device_id, is_hurt, now);
+    state.apply(effects);
   }
 
   pub fn on_transport_feedback(&self, receiver: DeviceId, feedback: &TransportFeedback, now: Instant) {

@@ -254,6 +254,8 @@ struct ParticipantRoute {
   maybe_thin_voice_at: Option<Instant>,
   /// When a voice last went to it: its recovery from a thin downlink counts only then.
   maybe_voice_sent_at: Option<Instant>,
+  /// It says its own upload's voice is hurt (#1889): it gets no video meanwhile.
+  is_uplink_reported_hurt: bool,
   /// On a thin downlink: its way back by its voices, without padding (#1893 step 3).
   thin_recovery: ThinRecovery,
   is_thin_downlink: bool,
@@ -401,6 +403,7 @@ impl Forwarder {
       voice_sequences: HashMap::new(),
       maybe_thin_voice_at: None,
       maybe_voice_sent_at: None,
+      is_uplink_reported_hurt: false,
       thin_recovery: ThinRecovery::default(),
       is_thin_downlink: false,
       maybe_measured_downlink_bps: None,
@@ -912,7 +915,7 @@ impl Forwarder {
     if let Some(seq) = header.maybe_transport_seq {
       participant.uplink.on_arrival(seq, now);
     }
-    let was_uplink_hurt = participant.uplink_voice.is_hurt(now);
+    let was_uplink_hurt = participant.is_uplink_hurt(now);
     // A voice's thin copy (#1893) counts for neither its upload's check nor the speakers: the
     // sender's own layer does.
     let voice_layer = if is_audio { header.layer.value() } else { 0 };
@@ -944,7 +947,7 @@ impl Forwarder {
         .maybe_voice_resumed_at
         .is_some_and(|at| now.saturating_duration_since(at) < audio_layers.thin_resume_grace);
     let has_thin_voice = is_thin_flowing || is_thin_expected;
-    let has_uplink_become_hurt = !was_uplink_hurt && participant.uplink_voice.is_hurt(now);
+    let has_uplink_become_hurt = !was_uplink_hurt && participant.is_uplink_hurt(now);
 
     let mut route = Route::default();
     if has_uplink_become_hurt {
@@ -1119,6 +1122,20 @@ impl Forwarder {
       effects.extend(self.update_layers_needed(stream_id, now));
     }
     effects
+  }
+
+  /// `device` says its own upload's voice is hurt, or recovered (#1889): while it is, it gets no
+  /// video, whose acknowledgements share that upload. Its arriving voice shows the same only once
+  /// the upload's queue overflowed, seconds later.
+  pub fn set_uplink_hurt(&mut self, device: DeviceId, is_hurt: bool, now: Instant) -> Vec<Effect> {
+    let Some(participant) = self.participants.get_mut(&device) else {
+      return Vec::new();
+    };
+    if participant.is_uplink_reported_hurt == is_hurt {
+      return Vec::new();
+    }
+    participant.is_uplink_reported_hurt = is_hurt;
+    self.reallocate(device, now)
   }
 
   /// Feedback for the datagrams `sender` sent since the last call (its uplink estimation).
@@ -1444,7 +1461,7 @@ impl Forwarder {
     // A receiver that takes the thin voices has no room for video next to them: the link's budget
     // went to probes and video bursts, and its voice paid for each (#1893 step 3).
     let is_thin = participant.is_thin_downlink;
-    let allocation = if is_thin || participant.uplink_voice.is_hurt(now) {
+    let allocation = if is_thin || participant.is_uplink_hurt(now) {
       participant.allocator.pause_all(&demands, now)
     } else if participant.voice.is_hurt(now) {
       let yielded_at = *participant.maybe_video_yielded_at.get_or_insert(now);
@@ -1467,8 +1484,8 @@ impl Forwarder {
     participant.maybe_probe_request = if is_thin { None } else { allocation.maybe_probe };
     let allocation = allocation.layers;
     // The receiver says why its pictures stopped or went coarse (#1891): only while it gets video.
-    let is_yielded = !demands.is_empty()
-      && (is_thin || participant.uplink_voice.is_hurt(now) || participant.voice.is_hurt(now));
+    let is_yielded =
+      !demands.is_empty() && (is_thin || participant.is_uplink_hurt(now) || participant.voice.is_hurt(now));
     let maybe_yield_change = (is_yielded != participant.is_video_yielded_for_voice).then(|| {
       participant.is_video_yielded_for_voice = is_yielded;
       Effect::VideoYieldedForVoice { receiver, is_yielded }
@@ -1644,6 +1661,11 @@ impl ParticipantRoute {
     self
       .maybe_link_capacity_bps
       .unwrap_or_else(|| self.downlink.estimate_bps())
+  }
+
+  /// Its own upload loses its voice (the SFU sees gaps, #1889) or it says so itself.
+  fn is_uplink_hurt(&self, now: Instant) -> bool {
+    self.is_uplink_reported_hurt || self.uplink_voice.is_hurt(now)
   }
 
   /// It takes the thin voices because its downlink is thin: the probe at its join said so, or the
@@ -3838,6 +3860,38 @@ mod tests {
       assert!(forwarder.participants[&device(2)].is_video_yielded_for_voice);
       let later = reported_at + Duration::from_secs(5);
       let effects = forwarder.on_timer(device(2), later);
+      assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::VideoYieldedForVoice { receiver, is_yielded: false } if *receiver == device(2)
+      )));
+    }
+
+    /// #1889: a receiver that says its own upload's voice is hurt gets no video until it says
+    /// it recovered: the acknowledgements of that video share its upload. At once, before its
+    /// arriving voice shows gaps.
+    #[test]
+    fn a_receiver_whose_upload_is_hurt_gets_no_video_until_it_recovers() {
+      let (mut forwarder, now) = video_room();
+      forwarder.subscribe(device(2), VIDEO, Some(2), now).unwrap();
+      forwarder.on_timer(device(2), now);
+      assert!(send_frame(&mut forwarder, 0, true, now).contains(&device(2)));
+      let effects = forwarder.set_uplink_hurt(device(2), true, now);
+      assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::VideoYieldedForVoice { receiver, is_yielded: true } if *receiver == device(2)
+      )));
+      for layer in 0..3 {
+        assert!(
+          !send_frame(&mut forwarder, layer, true, now).contains(&device(2)),
+          "layer {layer}"
+        );
+      }
+      assert!(
+        forwarder.set_uplink_hurt(device(2), true, now).is_empty(),
+        "said once"
+      );
+      let later = now + Duration::from_secs(1);
+      let effects = forwarder.set_uplink_hurt(device(2), false, later);
       assert!(effects.iter().any(|effect| matches!(
         effect,
         Effect::VideoYieldedForVoice { receiver, is_yielded: false } if *receiver == device(2)
