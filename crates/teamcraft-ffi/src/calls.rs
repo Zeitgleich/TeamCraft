@@ -285,6 +285,14 @@ pub struct CallStateInfo {
   /// says so, so nobody wonders why the camera froze.
   #[uniffi(default = false)]
   pub is_video_held_for_voice: bool,
+  /// The SFU holds the others' video back while this device's voice is lost on the way (#1891):
+  /// the app says the voice goes first.
+  #[uniffi(default = false)]
+  pub is_video_yielded_for_voice: bool,
+  /// Others' video tracks ([`RemoteVideoTrack::stream_id`]) whose publisher holds them back now,
+  /// typically for its voice (#1891): their tiles say so instead of a frozen picture.
+  #[uniffi(default)]
+  pub paused_video_stream_ids: Vec<String>,
   /// The code participants compare to rule out a man in the middle (once secured).
   pub maybe_privacy_code: Option<String>,
   /// Why the call ended (with [`CallPhase::Ended`]).
@@ -725,6 +733,8 @@ pub(crate) async fn join(
     unverified_user_ids: Vec::new(),
     is_on_limited_network: false,
     is_video_held_for_voice: false,
+    is_video_yielded_for_voice: false,
+    paused_video_stream_ids: Vec::new(),
     maybe_privacy_code: None,
     maybe_end_reason: None,
     maybe_encryption_retry_after_secs: None,
@@ -1317,12 +1327,27 @@ fn apply_event(
       // Who else is away, and who is muted, comes again with the SFU's answer to the rejoin.
       reconnecting.clear();
       muted.clear();
+      // As do the pauses (#1891).
+      state.is_video_yielded_for_voice = false;
+      state.paused_video_stream_ids.clear();
     },
     CallEngineEvent::Reconnected => state.phase = CallPhase::Connected,
     CallEngineEvent::TransportChanged(transport) => {
       state.is_on_limited_network = transport == CallTransport::Fallback;
     },
     CallEngineEvent::VideoHeldForVoice(is_held) => state.is_video_held_for_voice = is_held,
+    CallEngineEvent::VideoYieldedForVoice(is_yielded) => state.is_video_yielded_for_voice = is_yielded,
+    CallEngineEvent::VideoUnpublished(stream_id) => {
+      let id = stream_id.0.to_string();
+      state.paused_video_stream_ids.retain(|paused| *paused != id);
+    },
+    CallEngineEvent::RemoteVideoPaused { stream_id, is_paused } => {
+      let id = stream_id.0.to_string();
+      state.paused_video_stream_ids.retain(|paused| *paused != id);
+      if is_paused {
+        state.paused_video_stream_ids.push(id);
+      }
+    },
     CallEngineEvent::ParticipantReconnecting(device_id) => {
       reconnecting.insert(device_id);
     },
@@ -1455,6 +1480,8 @@ fn ended(conversation: ConversationId, reason: CallEndReason) -> CallStateInfo {
     unverified_user_ids: Vec::new(),
     is_on_limited_network: false,
     is_video_held_for_voice: false,
+    is_video_yielded_for_voice: false,
+    paused_video_stream_ids: Vec::new(),
     maybe_privacy_code: None,
     maybe_end_reason: Some(reason),
     maybe_encryption_retry_after_secs: None,
@@ -2286,6 +2313,28 @@ mod tests {
       assert_eq!(state.is_video_held_for_voice, is_held);
       assert_eq!(state.phase, CallPhase::Connected);
     }
+    // #1891: why the others' pictures stopped.
+    let mut apply = |state: &mut CallStateInfo, event| {
+      apply_event(
+        state,
+        &mut reconnecting,
+        &mut roster,
+        &mut muted,
+        &mut refused,
+        event,
+      )
+    };
+    apply(&mut state, CallEngineEvent::VideoYieldedForVoice(true));
+    assert!(state.is_video_yielded_for_voice);
+    let paused = |is_paused| CallEngineEvent::RemoteVideoPaused {
+      stream_id: MediaStreamId(7),
+      is_paused,
+    };
+    apply(&mut state, paused(true));
+    apply(&mut state, paused(true));
+    assert_eq!(state.paused_video_stream_ids, ["7"]);
+    apply(&mut state, paused(false));
+    assert!(state.paused_video_stream_ids.is_empty());
   }
 
   #[test]

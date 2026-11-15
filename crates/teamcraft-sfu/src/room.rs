@@ -1049,6 +1049,16 @@ impl Room {
       },
     };
     state.latest_sessions.insert(participant_id, session);
+    // Pictures held back by their publishers say so on this device's tiles too (#1891).
+    for stream_id in state.forwarder.paused_video_tracks() {
+      state.send_to(
+        participant_id,
+        CallEvent::VideoPausedByPublisher {
+          stream_id: MediaStreamId(stream_id.0),
+          is_paused: true,
+        },
+      );
+    }
     drop(state);
     self.joins.notify_waiters();
     info!(call_id = %self.call_id, participant_id = %participant_id, ?outcome, "participant joined");
@@ -1519,6 +1529,20 @@ impl RoomState {
     for effect in effects {
       match effect {
         Effect::ActiveSpeakers(device_ids) => self.broadcast(CallEvent::ActiveSpeakers { device_ids }),
+        Effect::VideoPausedByPublisher {
+          publisher,
+          stream_id,
+          is_paused,
+        } => self.broadcast_except(
+          publisher,
+          CallEvent::VideoPausedByPublisher {
+            stream_id: MediaStreamId(stream_id.0),
+            is_paused,
+          },
+        ),
+        Effect::VideoYieldedForVoice { receiver, is_yielded } => {
+          self.send_to(receiver, CallEvent::VideoYieldedForVoice { is_yielded })
+        },
         Effect::KeyframeRequest {
           publisher,
           stream_id,

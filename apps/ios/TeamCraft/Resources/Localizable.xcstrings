@@ -9233,6 +9233,38 @@
         }
       }
     },
+    "call_video_yielded_for_voice": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your connection is struggling: the others' video is paused so you can hear them"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Verbindung ist schwach: Das Video der anderen pausiert, damit du sie hörst"
+          }
+        }
+      }
+    },
+    "call_video_paused_by_publisher": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Video paused: their connection is weak, their voice comes first"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Video pausiert: Die Verbindung ist schwach, die Stimme hat Vorrang"
+          }
+        }
+      }
+    },
     "call_audio_route": {
       "localizations": {
         "en": {

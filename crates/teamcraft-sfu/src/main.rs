@@ -66,6 +66,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use teamcraft_media::voice_guard::VoiceGuardConfig;
 use teamcraft_ops::metrics::{bind_metrics, spawn_metrics_endpoint};
 use teamcraft_ops::{DEFAULT_TIMEOUT, probe, probe_target, shutdown_signal};
 use teamcraft_sfu::{
@@ -200,6 +201,7 @@ async fn run() -> anyhow::Result<()> {
   }
 
   apply_retransmit_env(&mut config.forwarding.retransmit)?;
+  apply_voice_guard_env(&mut config.forwarding.voice_guard)?;
   apply_fallback_env(&mut config.fallback)?;
 
   let identity = load_identity().await?;
@@ -425,6 +427,25 @@ fn env_addr(name: &str) -> anyhow::Result<Option<SocketAddr>> {
 }
 
 /// A count of at least one; zero would keep every device out of every call.
+/// When a receiver's voice counts as lost and its video yields to it (#1871, #1891): the share of
+/// voice packets lost or late in percent, how late is late, and how long the video stays back.
+fn apply_voice_guard_env(guard: &mut VoiceGuardConfig) -> anyhow::Result<()> {
+  if let Some(percent) = env_count("TEAMCRAFT_SFU_VOICE_GUARD_MAX_LOSS_PERCENT")? {
+    anyhow::ensure!(
+      (1..=100).contains(&percent),
+      "TEAMCRAFT_SFU_VOICE_GUARD_MAX_LOSS_PERCENT must be 1 to 100"
+    );
+    guard.max_loss = f64::from(u32::try_from(percent).unwrap_or(100)) / 100.0;
+  }
+  if let Some(delay) = env_duration_millis("TEAMCRAFT_SFU_VOICE_GUARD_MAX_DELAY_MS")? {
+    guard.max_delay = delay;
+  }
+  if let Some(hold) = env_duration_millis("TEAMCRAFT_SFU_VOICE_GUARD_HOLD_MS")? {
+    guard.hold = hold;
+  }
+  Ok(())
+}
+
 fn env_count(name: &str) -> anyhow::Result<Option<usize>> {
   match std::env::var(name) {
     Ok(value) => {

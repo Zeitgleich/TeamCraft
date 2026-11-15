@@ -572,6 +572,12 @@ depend on any of it.
   roster over `[calls] sfu_control_url` (and otherwise from the SFU's next roster) and takes over
   the calls that kept running, without ringing again. Calls whose join tokens came from a server
   before 1.0.8 can't be taken over (the tokens don't name the conversation).
+- **Voice first** (#1871, #1891): while a receiver's voice is lost on the way, the SFU holds its
+  video back and tells it so; its tiles and the others' say why pictures stopped.
+  `TEAMCRAFT_SFU_VOICE_GUARD_MAX_LOSS_PERCENT` (voice packets lost or late from which it counts,
+  default 10), `TEAMCRAFT_SFU_VOICE_GUARD_MAX_DELAY_MS` (how late is late, default 150) and
+  `TEAMCRAFT_SFU_VOICE_GUARD_HOLD_MS` (how long the video stays back after the last loss,
+  default 3000) tune it.
 
 ### Call fallback through the proxy
 
