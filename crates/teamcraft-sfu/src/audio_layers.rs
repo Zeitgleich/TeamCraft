@@ -59,7 +59,7 @@ impl Default for AudioLayerConfig {
       full_above_bps: 300_000,
       full_after: Duration::from_secs(5),
       thin_stale_after: Duration::from_millis(500),
-      thin_resume_grace: Duration::from_millis(300),
+      thin_resume_grace: Duration::from_millis(500),
       thin_known_for: Duration::from_secs(30),
     }
   }

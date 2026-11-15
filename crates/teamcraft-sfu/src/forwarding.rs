@@ -68,6 +68,14 @@ use crate::layers::{
 use crate::retransmit::{PacketHistory, RetransmitBudget, RetransmitConfig};
 use crate::speakers::{SpeakerSelectionConfig, SpeakerSelector};
 
+/// An estimate below the thin bound makes a downlink thin only after this long; a probe at the
+/// join that measured it thin does at once.
+const THIN_DOWNLINK_SUSTAINED: Duration = Duration::from_secs(10);
+/// A receiver on thin voices is probed only after a voice to it was silent this long.
+const THIN_PROBE_SILENCE: Duration = Duration::from_secs(1);
+/// And then rarely: after a cluster got through this soon again, after one fell short later.
+const THIN_PROBE_RETRY_AFTER: Duration = Duration::from_secs(3);
+const THIN_PROBE_MAX_RETRY_AFTER: Duration = Duration::from_secs(12);
 /// Where an RTP header keeps its sequence number.
 const RTP_SEQUENCE_OFFSET: usize = 2;
 /// Video tracks (camera, screen share) one participant may publish at the same time.
@@ -244,6 +252,12 @@ struct ParticipantRoute {
   voice_sequences: HashMap<DeviceId, VoiceSequence>,
   /// When its own thin voice last arrived: while it flows, receivers on thin links get it.
   maybe_thin_voice_at: Option<Instant>,
+  /// When a voice last went to it: a thin receiver is probed only in silence (#1893 step 3).
+  maybe_voice_sent_at: Option<Instant>,
+  /// What the probe at its join showed its downlink carries, until it took the full voices again.
+  maybe_measured_downlink_bps: Option<u32>,
+  /// Since when its downlink estimate is below the thin bound.
+  maybe_estimate_thin_since: Option<Instant>,
   /// When its own voice (layer 0) last arrived, and when it came back after a pause.
   maybe_voice_at: Option<Instant>,
   maybe_voice_resumed_at: Option<Instant>,
@@ -383,6 +397,9 @@ impl Forwarder {
       voice_layer: VoiceLayerChoice::default(),
       voice_sequences: HashMap::new(),
       maybe_thin_voice_at: None,
+      maybe_voice_sent_at: None,
+      maybe_measured_downlink_bps: None,
+      maybe_estimate_thin_since: None,
       maybe_voice_at: None,
       maybe_voice_resumed_at: None,
       is_suspended: false,
@@ -966,6 +983,7 @@ impl Forwarder {
         let seq = target.downlink.on_send(datagram.len() + 2, now);
         if is_voice {
           target.voice.on_send(seq, now);
+          target.maybe_voice_sent_at = Some(now);
         }
         let mut delivery = DatagramHeader::restamp(datagram, seq)?;
         if let Some(sequence_number) = maybe_voice_sequence {
@@ -1051,7 +1069,8 @@ impl Forwarder {
     {
       effects.push(Self::apply_join_probe(receiver, participant, measurement, now));
     }
-    match participant.probe.on_feedback(&self.config.probe, feedback, now) {
+    let probe_config = participant.downlink_probe_config(&self.config.probe, &self.config.audio_layers, now);
+    match participant.probe.on_feedback(&probe_config, feedback, now) {
       // During the fast start the estimate triples every second on its own; jumping ahead of it
       // switched a screen share's viewer to the sharp layer before the presenter's uplink
       // estimate (in its own fast start) carried that layer, and the presenter stopped it again
@@ -1180,6 +1199,7 @@ impl Forwarder {
   ) -> Effect {
     let estimate_bps = participant.downlink.apply_probe(measurement.capacity_bps);
     participant.probe.note_shown(estimate_bps, now);
+    participant.maybe_measured_downlink_bps = Some(measurement.after_burst_bps);
     Effect::DownlinkMeasured {
       receiver,
       measurement,
@@ -1189,8 +1209,8 @@ impl Forwarder {
   /// The next train of padding for the probe `receiver`'s allocation waits for, when one is due:
   /// a cluster starts when the allocation asks for one and the last is long enough ago.
   fn probe_downlink(&mut self, receiver: DeviceId, now: Instant) -> Option<Effect> {
-    let config = self.config.probe;
     let participant = self.participants.get_mut(&receiver)?;
+    let config = participant.downlink_probe_config(&self.config.probe, &self.config.audio_layers, now);
     participant.probe.on_timer(&config, now);
     if participant.is_suspended {
       return None;
@@ -1414,7 +1434,10 @@ impl Forwarder {
     // 500 kbit/s stood still for 5 s). The video to a participant whose own voice arrives with gaps pauses at
     // once: the acknowledgements of what it receives share its collapsed upload (#1889).
     let mut is_yielding = false;
-    let allocation = if participant.uplink_voice.is_hurt(now) {
+    // A receiver that takes the thin voices has no room for video next to them: the link's budget
+    // went to probes and video bursts, and its voice paid for each (#1893 step 3).
+    let is_thin = participant.is_on_thin_downlink(&self.config.audio_layers, now);
+    let allocation = if is_thin || participant.uplink_voice.is_hurt(now) {
       participant.allocator.pause_all(&demands, now)
     } else if participant.voice.is_hurt(now) {
       let yielded_at = *participant.maybe_video_yielded_at.get_or_insert(now);
@@ -1434,11 +1457,15 @@ impl Forwarder {
         .allocator
         .allocate_with_proof(&layers_config, estimate, proof, &demands, now)
     };
-    participant.maybe_probe_request = allocation.maybe_probe;
+    participant.maybe_probe_request = if is_thin {
+      participant.thin_probe_request(&self.config.audio_layers, now)
+    } else {
+      allocation.maybe_probe
+    };
     let allocation = allocation.layers;
     // The receiver says why its pictures stopped or went coarse (#1891): only while it gets video.
-    let is_yielded =
-      !demands.is_empty() && (participant.uplink_voice.is_hurt(now) || participant.voice.is_hurt(now));
+    let is_yielded = !demands.is_empty()
+      && (is_thin || participant.uplink_voice.is_hurt(now) || participant.voice.is_hurt(now));
     let maybe_yield_change = (is_yielded != participant.is_video_yielded_for_voice).then(|| {
       participant.is_video_yielded_for_voice = is_yielded;
       Effect::VideoYieldedForVoice { receiver, is_yielded }
@@ -1616,11 +1643,69 @@ impl ParticipantRoute {
       .unwrap_or_else(|| self.downlink.estimate_bps())
   }
 
+  /// How its downlink is probed: as configured, but while it takes the thin voices, small clusters
+  /// that come rarely (#1893 step 3). Both a cluster's start and its judgement use this, so a
+  /// cluster is judged by the trains it was sent with.
+  fn downlink_probe_config(
+    &self,
+    base: &RateProbeConfig,
+    audio_layers: &AudioLayerConfig,
+    now: Instant,
+  ) -> RateProbeConfig {
+    if self.is_on_thin_downlink(audio_layers, now) {
+      RateProbeConfig::small(RateProbeConfig {
+        retry_after: THIN_PROBE_RETRY_AFTER,
+        max_retry_after: THIN_PROBE_MAX_RETRY_AFTER,
+        ..*base
+      })
+    } else {
+      *base
+    }
+  }
+
+  /// It takes the thin voices because its downlink is thin: the probe at its join said so, or the
+  /// estimate stayed below the bound for [`THIN_DOWNLINK_SUSTAINED`]. Not because a voice to it
+  /// was lost a moment on a fast link: #1871 handles that, video yields to the lowest layers first
+  /// and comes back within seconds. Then it gets no video and is probed rarely (#1893 step 3).
+  fn is_on_thin_downlink(&self, audio_layers: &AudioLayerConfig, now: Instant) -> bool {
+    let is_measured_thin = self
+      .maybe_measured_downlink_bps
+      .is_some_and(|bps| bps < audio_layers.thin_below_bps);
+    let is_estimate_thin = self
+      .maybe_estimate_thin_since
+      .is_some_and(|since| now.saturating_duration_since(since) >= THIN_DOWNLINK_SUSTAINED);
+    self.voice_layer.is_thin() && (is_measured_thin || is_estimate_thin)
+  }
+
+  /// What a receiver on thin voices probes for: room for the full voices again, and only in a
+  /// silence of the voices to it, so a cluster never queues in front of one (#1893 step 3). A
+  /// link that became fast shows it within a few clusters, each a step above the last that got
+  /// through.
+  fn thin_probe_request(&self, config: &AudioLayerConfig, now: Instant) -> Option<ProbeRequest> {
+    let is_silent = self
+      .maybe_voice_sent_at
+      .is_none_or(|at| now.saturating_duration_since(at) >= THIN_PROBE_SILENCE);
+    is_silent.then(|| ProbeRequest {
+      target_bps: config.full_above_bps.saturating_mul(5) / 4,
+      floor_bps: 0,
+    })
+  }
+
   /// Follows its downlink: whether it takes the thin voices (#1893 step 3).
   fn update_voice_layer(&mut self, config: &AudioLayerConfig, now: Instant) -> bool {
     let estimate_bps = self.downlink_bps();
+    if estimate_bps < config.thin_below_bps {
+      self.maybe_estimate_thin_since.get_or_insert(now);
+    } else {
+      self.maybe_estimate_thin_since = None;
+    }
     let is_voice_hurt = self.voice.is_hurt(now);
-    self.voice_layer.update(config, estimate_bps, is_voice_hurt, now)
+    let is_thin = self.voice_layer.update(config, estimate_bps, is_voice_hurt, now);
+    if !is_thin {
+      // Back on the full voices: what the join's probe showed is past.
+      self.maybe_measured_downlink_bps = None;
+    }
+    is_thin
   }
 
   /// The layer of a sender's voice it gets now (#1893): the thin copy while its downlink is thin
@@ -3209,6 +3294,153 @@ mod tests {
       assert_eq!(wanted(&removal.effects), Some(false));
     }
 
+    /// A receiver on thin voices gets no video, and hears why: the others' video yields for its
+    /// voice.
+    #[test]
+    fn a_thin_receiver_gets_no_video_and_hears_why() {
+      let (mut forwarder, now) = video_room();
+      forwarder.subscribe(device(2), VIDEO, Some(2), now).unwrap();
+      forwarder
+        .participants
+        .get_mut(&device(2))
+        .unwrap()
+        .maybe_link_capacity_bps = Some(64_000);
+      forwarder
+        .participants
+        .get_mut(&device(2))
+        .unwrap()
+        .maybe_measured_downlink_bps = Some(64_000);
+      let effects = forwarder.on_timer(device(2), now);
+      assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::VideoYieldedForVoice { receiver, is_yielded: true } if *receiver == device(2)
+      )));
+      for layer in 0..3 {
+        assert!(
+          !send_frame(&mut forwarder, layer, true, now).contains(&device(2)),
+          "layer {layer}"
+        );
+      }
+    }
+
+    /// A receiver on thin voices is probed only in a silence of the voices to it, with small
+    /// clusters.
+    #[test]
+    fn a_thin_receiver_is_probed_only_in_silence() {
+      let (mut forwarder, now) = video_room();
+      forwarder.subscribe(device(2), VIDEO, Some(2), now).unwrap();
+      forwarder
+        .participants
+        .get_mut(&device(2))
+        .unwrap()
+        .maybe_link_capacity_bps = Some(64_000);
+      forwarder
+        .participants
+        .get_mut(&device(2))
+        .unwrap()
+        .maybe_measured_downlink_bps = Some(64_000);
+      // The probe at the join is another matter (#1762).
+      forwarder
+        .participants
+        .get_mut(&device(2))
+        .unwrap()
+        .maybe_join_probe = None;
+      // Device 1 speaks to it from the start: no padding meanwhile.
+      let mut at = now;
+      for _ in 0..20 {
+        at += Duration::from_millis(50);
+        forwarder.route(device(1), &audio(1, 20), at).unwrap();
+        assert!(
+          padding_to(&forwarder.on_timer(device(2), at), 2).is_empty(),
+          "next to a voice"
+        );
+      }
+      // A second of silence: a small cluster.
+      let mut padding = Vec::new();
+      for _ in 0..15 {
+        at += Duration::from_millis(100);
+        padding.extend(padding_to(&forwarder.on_timer(device(2), at), 2));
+      }
+      assert!(!padding.is_empty(), "in silence");
+      assert!(
+        padding.iter().all(|datagram| datagram.len() <= 400),
+        "small datagrams"
+      );
+    }
+
+    /// A receiver on thin voices whose link turned fast gets the full voices and video back within
+    /// about half a minute, by the clusters it gets in silence.
+    #[test]
+    fn a_thin_receiver_whose_link_turned_fast_recovers() {
+      let (mut forwarder, now) = video_room();
+      forwarder.subscribe(device(2), VIDEO, Some(2), now).unwrap();
+      let epoch = forwarder.participants[&device(2)].feedback_epoch;
+      forwarder
+        .participants
+        .get_mut(&device(2))
+        .unwrap()
+        .downlink
+        .apply_probe(64_000);
+      forwarder
+        .participants
+        .get_mut(&device(2))
+        .unwrap()
+        .maybe_measured_downlink_bps = Some(64_000);
+      forwarder
+        .participants
+        .get_mut(&device(2))
+        .unwrap()
+        .maybe_join_probe = None;
+      forwarder.on_timer(device(2), now);
+      assert!(forwarder.participants[&device(2)].voice_layer.is_thin());
+      // A fast link from now on: everything sent arrives at once, reported every 100 ms.
+      let (mut sent, mut next_to_report) = (0u16, 0u16);
+      let mut maybe_full_at = None;
+      for round in 1..400u16 {
+        let at = now + Duration::from_millis(100 * u64::from(round));
+        let since_epoch = u64::try_from(at.saturating_duration_since(epoch).as_micros()).unwrap();
+        let feedback = TransportFeedback {
+          base_seq: next_to_report,
+          arrivals_us: (0..u64::from(sent - next_to_report))
+            .map(|i| Some(since_epoch + i * 50))
+            .collect(),
+        };
+        next_to_report = sent;
+        let mut effects = forwarder.on_transport_feedback(device(2), &feedback, at);
+        effects.extend(forwarder.on_timer(device(2), at));
+        sent += u16::try_from(padding_to(&effects, 2).len()).unwrap();
+        if !forwarder.participants[&device(2)].voice_layer.is_thin() {
+          maybe_full_at = Some(at);
+          // And its video with it.
+          assert!(effects.iter().any(|effect| matches!(
+            effect,
+            Effect::VideoYieldedForVoice {
+              is_yielded: false,
+              ..
+            }
+          )));
+          break;
+        }
+      }
+      let full_at = maybe_full_at.expect("never back to the full voices");
+      let after = full_at.saturating_duration_since(now);
+      assert!(after <= Duration::from_secs(30), "back after {after:?}");
+    }
+
+    fn padding_to(effects: &[Effect], receiver: u64) -> Vec<Vec<u8>> {
+      effects
+        .iter()
+        .filter_map(|effect| match effect {
+          Effect::Padding {
+            receiver: to,
+            datagrams,
+          } if *to == device(receiver) => Some(datagrams.clone()),
+          _ => None,
+        })
+        .flatten()
+        .collect()
+    }
+
     /// Device 1 speaks; device 2 has a fast downlink, device 3 a thin one. All play long packets.
     fn three_listeners() -> (Forwarder, Instant) {
       let now = Instant::now();
@@ -3228,6 +3460,11 @@ mod tests {
         .get_mut(&device(3))
         .unwrap()
         .maybe_link_capacity_bps = Some(64_000);
+      forwarder
+        .participants
+        .get_mut(&device(3))
+        .unwrap()
+        .maybe_measured_downlink_bps = Some(64_000);
       (forwarder, now)
     }
 
