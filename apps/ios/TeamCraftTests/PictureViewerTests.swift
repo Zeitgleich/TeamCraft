@@ -53,6 +53,23 @@ final class PictureViewerTests: XCTestCase {
     XCTAssertTrue(file.isViewablePicture)
   }
 
+  func testASwipeClosesTheViewerPastADistanceOrWithAFling() {
+    let extent: CGFloat = 800
+    XCTAssertTrue(SwipeDismiss.shouldDismiss(offset: 300, velocity: 0, extent: extent))
+    XCTAssertTrue(SwipeDismiss.shouldDismiss(offset: -300, velocity: 0, extent: extent))
+    XCTAssertFalse(SwipeDismiss.shouldDismiss(offset: 80, velocity: 100, extent: extent))
+    XCTAssertTrue(SwipeDismiss.shouldDismiss(offset: 60, velocity: 2500, extent: extent))
+    XCTAssertFalse(SwipeDismiss.shouldDismiss(offset: 300, velocity: -2500, extent: extent))
+    XCTAssertFalse(SwipeDismiss.shouldDismiss(offset: 500, velocity: 5000, extent: 0))
+  }
+
+  func testTheBackdropFadesWithTheSwipe() {
+    XCTAssertEqual(SwipeDismiss.progress(offset: 0, extent: 800), 0, accuracy: 0.0001)
+    XCTAssertEqual(SwipeDismiss.progress(offset: -200, extent: 800), 0.5, accuracy: 0.0001)
+    XCTAssertEqual(SwipeDismiss.progress(offset: 2000, extent: 800), 1, accuracy: 0.0001)
+    XCTAssertEqual(SwipeDismiss.progress(offset: 200, extent: 0), 0, accuracy: 0.0001)
+  }
+
   func testOneFileOfAMessageIsDownloaded() throws {
     let action = ChatAction.downloadAttachment(conversationId: "1", messageId: "2", fileId: "22")
     let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(action.json.utf8)) as? [String: String])

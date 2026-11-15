@@ -15,6 +15,9 @@ struct PictureViewer: View {
   @State private var isChromeShown = true
   /// The page that is zoomed in: it pans instead of turning the page.
   @State private var maybeZoomedKey: String?
+  /// How far a vertical swipe has carried the picture; the viewer closes past a distance (#1999).
+  @State private var swipeOffset: CGFloat = 0
+  @State private var viewerHeight: CGFloat = 0
   @State private var maybeForwarding: ForwardTarget?
   @State private var displayNames: [String: String] = [:]
 
@@ -29,26 +32,36 @@ struct PictureViewer: View {
   var body: some View {
     @Bindable var model = model
     ZStack {
-      Color.black.ignoresSafeArea()
-      if model.items.isEmpty {
-        // The opened message is still being read: its thumbnail stands in.
-        page(key: model.target.id, file: model.target.file)
-      } else {
-        pager(position: $model.currentKey)
+      // The backdrop fades with the swipe.
+      Color.black.opacity(1 - swipeProgress).ignoresSafeArea()
+      Group {
+        if model.items.isEmpty {
+          // The opened message is still being read: its thumbnail stands in.
+          page(key: model.target.id, file: model.target.file)
+        } else {
+          pager(position: $model.currentKey)
+        }
       }
+      .offset(y: swipeOffset)
+      .swipeDismiss(offset: $swipeOffset, extent: viewerHeight, isEnabled: maybeZoomedKey == nil) { dismiss() }
       if isChromeShown {
-        chrome.transition(.opacity)
+        chrome.transition(.opacity).opacity(1 - swipeProgress)
       }
     }
+    // Clear, so the fading backdrop shows what is behind it.
+    .presentationBackground(.clear)
     .animation(.easeOut(duration: 0.2), value: isChromeShown)
     .environment(\.colorScheme, .dark)
     .statusBarHidden(!isChromeShown)
     .persistentSystemOverlays(isChromeShown ? .automatic : .hidden)
     .background {
       GeometryReader { proxy in
-        Color.clear.onAppear {
-          model.maxDecodePixels = PictureDecoder.maxPixels(screen: proxy.size, scale: displayScale)
-        }
+        Color.clear
+          .onAppear {
+            model.maxDecodePixels = PictureDecoder.maxPixels(screen: proxy.size, scale: displayScale)
+            viewerHeight = proxy.size.height
+          }
+          .onChange(of: proxy.size) { _, size in viewerHeight = size.height }
       }
     }
     .task {
@@ -79,6 +92,8 @@ struct PictureViewer: View {
         fromConversationId: target.conversationId, messageId: target.messageId, maybeAttachmentId: target.fileId)
     }
   }
+
+  private var swipeProgress: Double { SwipeDismiss.progress(offset: swipeOffset, extent: viewerHeight) }
 
   private func pager(position: Binding<String?>) -> some View {
     ScrollView(.horizontal) {
