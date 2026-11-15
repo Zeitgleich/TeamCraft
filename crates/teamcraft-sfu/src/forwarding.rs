@@ -61,12 +61,15 @@ use teamcraft_proto::{
 use thiserror::Error;
 use tracing::debug;
 
+use crate::audio_layers::{AudioLayerConfig, THIN_VOICE_LAYER, VoiceLayerChoice, VoiceSequence};
 use crate::layers::{
   LayerAllocationConfig, LayerAllocator, ProbeRequest, TrackDemand, UpgradeProof, full_demand_bps,
 };
 use crate::retransmit::{PacketHistory, RetransmitBudget, RetransmitConfig};
 use crate::speakers::{SpeakerSelectionConfig, SpeakerSelector};
 
+/// Where an RTP header keeps its sequence number.
+const RTP_SEQUENCE_OFFSET: usize = 2;
 /// Video tracks (camera, screen share) one participant may publish at the same time.
 const MAX_VIDEO_TRACKS_PER_PARTICIPANT: usize = 4;
 /// The upswitch hold while a receiver's downlink estimate is in its fast start.
@@ -108,6 +111,8 @@ pub struct ForwardingConfig {
   /// the SFU's of the downlink, and what it tells clients they may send for the uplink. Zero
   /// turns both off.
   pub probe_bytes: u32,
+  /// Which receivers get the thin copies of the voices (#1893).
+  pub audio_layers: AudioLayerConfig,
 }
 
 /// How often publishers are asked for keyframes. Keyframes are large: a receiver that keeps
@@ -218,6 +223,12 @@ struct ParticipantRoute {
   maybe_link_capacity_bps: Option<u32>,
   /// When its allocation's inputs were last logged (at most once a second, debug).
   maybe_allocation_logged_at: Option<Instant>,
+  /// Whether it takes the others' thin voices (#1893).
+  voice_layer: VoiceLayerChoice,
+  /// The others' voices as it gets them: numbered on across their layers.
+  voice_sequences: HashMap<DeviceId, VoiceSequence>,
+  /// When its own thin voice last arrived: while it flows, receivers on thin links get it.
+  maybe_thin_voice_at: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -293,6 +304,7 @@ impl Default for ForwardingConfig {
       retransmit: RetransmitConfig::default(),
       voice_guard: VoiceGuardConfig::default(),
       probe_bytes: 15_000,
+      audio_layers: AudioLayerConfig::default(),
     }
   }
 }
@@ -325,6 +337,10 @@ impl Forwarder {
     capabilities: MediaCapabilities,
     now: Instant,
   ) {
+    // A new session's voice numbers from scratch: the others start over with it.
+    for route in self.participants.values_mut() {
+      route.voice_sequences.remove(&device_id);
+    }
     let route = ParticipantRoute {
       audio_stream,
       maybe_screen_audio: None,
@@ -339,6 +355,9 @@ impl Forwarder {
       voice: VoiceGuard::new(self.config.voice_guard),
       maybe_video_yielded_at: None,
       uplink_voice: ArrivingVoice::new(self.config.voice_guard),
+      voice_layer: VoiceLayerChoice::default(),
+      voice_sequences: HashMap::new(),
+      maybe_thin_voice_at: None,
       is_suspended: false,
       retransmit_budget: RetransmitBudget::default(),
       maybe_join_probe: self.new_join_probe(now),
@@ -489,6 +508,10 @@ impl Forwarder {
       .participants
       .remove(&device_id)
       .and_then(|route| route.maybe_screen_audio);
+    // Its voice numbers from scratch if it comes back.
+    for route in self.participants.values_mut() {
+      route.voice_sequences.remove(&device_id);
+    }
     let mut effects = Vec::new();
     if let Some(speakers) = self.speakers.remove(device_id, now) {
       effects.push(Effect::ActiveSpeakers(speakers));
@@ -804,11 +827,20 @@ impl Forwarder {
       participant.uplink.on_arrival(seq, now);
     }
     let was_uplink_hurt = participant.uplink_voice.is_hurt(now);
-    if is_audio {
+    // A voice's thin copy (#1893) counts for neither its upload's check nor the speakers: the
+    // sender's own layer does.
+    let voice_layer = if is_audio { header.layer.value() } else { 0 };
+    if is_audio && voice_layer == THIN_VOICE_LAYER {
+      participant.maybe_thin_voice_at = Some(now);
+    } else if is_audio {
       participant
         .uplink_voice
         .on_arrival(rtp_header.sequence_number.0, now);
     }
+    let thin_stale_after = self.config.audio_layers.thin_stale_after;
+    let has_thin_voice = participant
+      .maybe_thin_voice_at
+      .is_some_and(|at| now.saturating_duration_since(at) < thin_stale_after);
     let has_uplink_become_hurt = !was_uplink_hurt && participant.uplink_voice.is_hurt(now);
 
     let mut route = Route::default();
@@ -819,9 +851,11 @@ impl Forwarder {
     let receivers = if is_screen_audio {
       self.others(sender)
     } else if is_audio {
-      let level = rtp_header.audio_level().unwrap_or(AudioLevel::SILENCE);
-      if let Some(speakers) = self.speakers.record(sender, level, now) {
-        route.effects.push(Effect::ActiveSpeakers(speakers));
+      if voice_layer != THIN_VOICE_LAYER {
+        let level = rtp_header.audio_level().unwrap_or(AudioLevel::SILENCE);
+        if let Some(speakers) = self.speakers.record(sender, level, now) {
+          route.effects.push(Effect::ActiveSpeakers(speakers));
+        }
       }
       if self.speakers.is_selected(sender) {
         self.others(sender)
@@ -836,15 +870,28 @@ impl Forwarder {
       receivers
     };
     let is_voice = is_audio || is_screen_audio;
+    let audio_layers = self.config.audio_layers;
     for receiver in receivers {
       if let Some(target) = self.participants.get_mut(&receiver) {
+        let maybe_voice_sequence = if is_audio {
+          let wanted = target.wanted_voice_layer(&audio_layers, has_thin_voice, now);
+          if wanted != voice_layer {
+            continue;
+          }
+          let sequence = target.voice_sequences.entry(sender).or_default();
+          Some(sequence.map(voice_layer, rtp_header.sequence_number.0))
+        } else {
+          None
+        };
         let seq = target.downlink.on_send(datagram.len() + 2, now);
         if is_voice {
           target.voice.on_send(seq, now);
         }
-        route
-          .deliveries
-          .push((receiver, DatagramHeader::restamp(datagram, seq)?));
+        let mut delivery = DatagramHeader::restamp(datagram, seq)?;
+        if let Some(sequence_number) = maybe_voice_sequence {
+          renumber_rtp(&mut delivery, sequence_number)?;
+        }
+        route.deliveries.push((receiver, delivery));
       }
     }
     Ok(route)
@@ -1477,6 +1524,36 @@ impl ParticipantRoute {
       .maybe_link_capacity_bps
       .unwrap_or_else(|| self.downlink.estimate_bps())
   }
+
+  /// The layer of a sender's voice it gets now (#1893): the thin copy while its downlink is thin
+  /// or its voice is lost, if it plays long packets and the sender sends that copy.
+  fn wanted_voice_layer(&mut self, config: &AudioLayerConfig, has_thin_voice: bool, now: Instant) -> u8 {
+    let estimate_bps = self.downlink_bps();
+    let is_voice_hurt = self.voice.is_hurt(now);
+    let is_thin = self.voice_layer.update(config, estimate_bps, is_voice_hurt, now);
+    if is_thin && has_thin_voice && self.capabilities.has_long_audio_frames() {
+      THIN_VOICE_LAYER
+    } else {
+      0
+    }
+  }
+}
+
+/// Writes `sequence_number` into the RTP header of a datagram (#1893): DAVE covers only the
+/// payload, the header is the SFU's to rewrite.
+fn renumber_rtp(datagram: &mut [u8], sequence_number: u16) -> Result<(), ForwardError> {
+  let header = DatagramHeader::parse(datagram)?;
+  let at = header.encoded_len() + RTP_SEQUENCE_OFFSET;
+  let actual_bytes = datagram.len();
+  let Some(field) = datagram.get_mut(at..at + 2) else {
+    // The header was parsed before: this can't be short, but the datagram is no reason to panic.
+    return Err(ForwardError::Rtp(RtpError::Truncated {
+      needed_bytes: at + 2,
+      actual_bytes,
+    }));
+  };
+  field.copy_from_slice(&sequence_number.to_be_bytes());
+  Ok(())
 }
 
 impl VideoTrackRoute {
@@ -2861,6 +2938,149 @@ mod tests {
           _ => None,
         })
         .collect()
+    }
+  }
+
+  /// #1893 step 3: a receiver on a thin downlink gets the others' thin voices, numbered on.
+  mod voice_layers {
+    use teamcraft_proto::AudioFeature;
+
+    use super::*;
+    use crate::audio_layers::THIN_VOICE_LAYER;
+
+    #[test]
+    fn each_receiver_gets_the_voice_its_downlink_carries() {
+      let (mut forwarder, now) = three_listeners();
+      let mut fast = Vec::new();
+      let mut thin = Vec::new();
+      for index in 0..9u16 {
+        let at = now + Duration::from_millis(20) * u32::from(index);
+        let mut sent = vec![voice(0, 100 + index)];
+        if index % 3 == 0 {
+          sent.push(voice(THIN_VOICE_LAYER, 50 + index / 3));
+        }
+        for datagram in sent {
+          for (receiver, delivered) in forwarder.route(device(1), &datagram, at).unwrap().deliveries {
+            let packet = received(&delivered);
+            if receiver == device(2) {
+              fast.push(packet);
+            } else if receiver == device(3) {
+              thin.push(packet);
+            }
+          }
+        }
+      }
+      assert!(fast.iter().all(|(layer, _)| *layer == 0), "{fast:?}");
+      assert_eq!(fast.len(), 9);
+      // Its voice as it is until the first thin copy came, then the thin one, numbered on.
+      assert_eq!(
+        thin,
+        vec![
+          (0, 100),
+          (THIN_VOICE_LAYER, 101),
+          (THIN_VOICE_LAYER, 102),
+          (THIN_VOICE_LAYER, 103)
+        ]
+      );
+    }
+
+    /// While the sender sends no thin copy, a thin receiver gets its voice as it is; when the copy
+    /// starts, the numbers go on from the last one the receiver got.
+    #[test]
+    fn a_thin_receiver_gets_the_voice_as_it_is_until_the_thin_copy_comes() {
+      let (mut forwarder, now) = three_listeners();
+      let mut thin = Vec::new();
+      let mut at = now;
+      for index in 0..3u16 {
+        at = now + Duration::from_millis(20) * u32::from(index);
+        thin.extend(to(&mut forwarder, 3, &voice(0, 700 + index), at));
+      }
+      at += Duration::from_millis(20);
+      thin.extend(to(&mut forwarder, 3, &voice(THIN_VOICE_LAYER, 5), at));
+      thin.extend(to(&mut forwarder, 3, &voice(0, 703), at));
+      thin.extend(to(
+        &mut forwarder,
+        3,
+        &voice(THIN_VOICE_LAYER, 6),
+        at + Duration::from_millis(60),
+      ));
+      assert_eq!(
+        thin,
+        vec![
+          (0, 700),
+          (0, 701),
+          (0, 702),
+          (THIN_VOICE_LAYER, 703),
+          (THIN_VOICE_LAYER, 704)
+        ]
+      );
+
+      // The copy stops: back to the voice as it is, numbered on.
+      let later = at + Duration::from_secs(1);
+      assert_eq!(to(&mut forwarder, 3, &voice(0, 760), later), vec![(0, 705)]);
+    }
+
+    /// The thin copy counts for neither the speakers nor the sender's upload check: a lone copy
+    /// doesn't make anybody a speaker.
+    #[test]
+    fn a_thin_copy_makes_nobody_a_speaker() {
+      let (mut forwarder, now) = three_listeners();
+      let route = forwarder
+        .route(device(1), &voice(THIN_VOICE_LAYER, 1), now)
+        .unwrap();
+      assert!(
+        !route
+          .effects
+          .iter()
+          .any(|effect| matches!(effect, Effect::ActiveSpeakers(_)))
+      );
+    }
+
+    /// Device 1 speaks; device 2 has a fast downlink, device 3 a thin one. All play long packets.
+    fn three_listeners() -> (Forwarder, Instant) {
+      let now = Instant::now();
+      let mut forwarder = Forwarder::new(ForwardingConfig::default());
+      let capabilities = MediaCapabilities {
+        audio_features: vec![AudioFeature::LongFrames],
+        ..MediaCapabilities::default()
+      };
+      for n in 1..=3 {
+        forwarder.add_participant(device(n), stream(n), capabilities.clone(), now);
+      }
+      let fast = forwarder.participants.get_mut(&device(2)).unwrap();
+      fast.downlink.apply_probe(10_000_000);
+      fast.maybe_link_capacity_bps = Some(10_000_000);
+      forwarder
+        .participants
+        .get_mut(&device(3))
+        .unwrap()
+        .maybe_link_capacity_bps = Some(64_000);
+      (forwarder, now)
+    }
+
+    fn voice(layer: u8, sequence_number: u16) -> Vec<u8> {
+      let mut rtp = header();
+      rtp.sequence_number = SequenceNumber(sequence_number);
+      rtp.set_audio_level(AudioLevel::new(20, true).unwrap());
+      stamped(rtp_datagram(1, layer, rtp), sequence_number)
+    }
+
+    /// What `receiver` got of `datagram`: layer and RTP sequence number.
+    fn to(forwarder: &mut Forwarder, receiver: u64, datagram: &[u8], at: Instant) -> Vec<(u8, u16)> {
+      forwarder
+        .route(device(1), datagram, at)
+        .unwrap()
+        .deliveries
+        .into_iter()
+        .filter(|(to, _)| *to == device(receiver))
+        .map(|(_, delivered)| received(&delivered))
+        .collect()
+    }
+
+    fn received(datagram: &[u8]) -> (u8, u16) {
+      let header = DatagramHeader::parse(datagram).unwrap();
+      let (rtp, _) = RtpHeader::parse(&datagram[header.encoded_len()..]).unwrap();
+      (header.layer.value(), rtp.sequence_number.0)
     }
   }
 
