@@ -3757,14 +3757,6 @@ impl OpusEncoder {
 }
 
 impl OpusProfile {
-  /// Which of this device's streams the packets go out on.
-  fn origin(self) -> AudioOrigin {
-    match self {
-      Self::Voice | Self::ThinVoice => AudioOrigin::Microphone,
-      Self::ScreenSound => AudioOrigin::Screen,
-    }
-  }
-
   fn bitrate_bps(self) -> u32 {
     match self {
       Self::Voice => OPUS_BITRATE_BPS,
@@ -4444,7 +4436,6 @@ mod tests {
     #[test]
     fn the_microphone_keeps_its_voice_configuration() {
       let voice = OpusProfile::Voice;
-      assert_eq!(voice.origin(), AudioOrigin::Microphone);
       assert_eq!(voice.bitrate_bps(), 32_000);
       assert_eq!(voice.tuning(), OpusTuning::default());
     }
@@ -4452,7 +4443,6 @@ mod tests {
     #[test]
     fn screen_sound_goes_out_tuned_for_music() {
       let sound = OpusProfile::ScreenSound;
-      assert_eq!(sound.origin(), AudioOrigin::Screen);
       assert_eq!(sound.bitrate_bps(), 64_000);
       let tuning = sound.tuning();
       // A constant bitrate: packet sizes would tell what plays.
