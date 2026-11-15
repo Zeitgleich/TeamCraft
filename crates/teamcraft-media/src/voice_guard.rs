@@ -48,6 +48,11 @@ pub struct VoiceGuardConfig {
   /// Video stays off this long after voice was last hurt: a link that collapsed doesn't come back
   /// within a second, and switching video on and off sends a keyframe each time.
   pub hold: Duration,
+  /// Voice that no feedback reported this much later than the fastest report lately is hurt as
+  /// well ([`VoiceGuard::on_timer`]): it waits in a queue the link no longer drains (#1889). The
+  /// fastest report is the link's round trip and the feedback's interval: a link across the
+  /// world reports later than one next door.
+  pub max_unreported: Duration,
 }
 
 /// The voice datagrams sent on one link and what became of them.
@@ -62,6 +67,9 @@ pub struct VoiceGuard {
   /// One-way delays of reported voice (receiver's clock minus the sender's, in microseconds: only
   /// differences count), for the baseline.
   delays: VecDeque<(Instant, i64)>,
+  /// How long reports of voice took (from its sending to its feedback), for the baseline of
+  /// [`VoiceGuardConfig::max_unreported`].
+  report_times: VecDeque<(Instant, Duration)>,
   /// The sender's clock base for those delays.
   maybe_epoch: Option<Instant>,
   maybe_hurt_at: Option<Instant>,
@@ -75,20 +83,26 @@ impl Default for VoiceGuardConfig {
       max_loss: 0.1,
       max_delay: Duration::from_millis(150),
       hold: Duration::from_secs(3),
+      max_unreported: Duration::MAX,
     }
   }
 }
 
 impl VoiceGuardConfig {
-  /// The own voice on the client's uplink: only lost voice counts, late voice doesn't. The
+  /// The own voice on the client's uplink: lost voice counts, voice that arrives late doesn't. The
   /// client sends its voice first (its send queue), so voice that comes late waited behind the
   /// client's own video in the link's queue: a screen share's slide change (a picture of up to a
-  /// second of its bitrate) on a limited uplink, which the uplink allocation rides out (#941). A
-  /// collapsed uplink overflows its queue and loses voice. Judged by lateness as well, every slide
-  /// change stopped the share (#1888).
-  pub fn losses_only() -> Self {
+  /// second of its bitrate) on a limited uplink, which the uplink allocation rides out (#941).
+  /// Judged by lateness as well, every slide change stopped the share (#1888).
+  ///
+  /// Voice that no feedback reported for [`VoiceGuardConfig::max_unreported`] counts, unless the
+  /// client itself just sent such a burst ([`VoiceGuard::on_timer`]): a collapsed uplink holds it
+  /// in the link's queue for seconds before it overflows and loses it, and judged by losses only,
+  /// the call was silent for 4 s before the camera stopped (#1889).
+  pub fn own_uplink() -> Self {
     Self {
       max_delay: Duration::MAX,
+      max_unreported: Duration::from_millis(400),
       ..Self::default()
     }
   }
@@ -102,6 +116,7 @@ impl VoiceGuard {
       pending_since: HashMap::new(),
       reports: VecDeque::new(),
       delays: VecDeque::new(),
+      report_times: VecDeque::new(),
       maybe_epoch: None,
       maybe_hurt_at: None,
     }
@@ -128,6 +143,9 @@ impl VoiceGuard {
       };
       let seq = feedback.base_seq.wrapping_add(offset);
       if let Some(sent_at) = self.pending_since.remove(&seq) {
+        self
+          .report_times
+          .push_back((now, now.saturating_duration_since(sent_at)));
         let is_hurt = match maybe_arrival {
           Some(arrival_us) => self.is_late(sent_at, *arrival_us, now),
           None => true,
@@ -135,9 +153,21 @@ impl VoiceGuard {
         self.reports.push_back((now, is_hurt));
       }
     }
-    if !self.pending.is_empty() {
-      let pending_since = &self.pending_since;
-      self.pending.retain(|seq| pending_since.contains_key(&seq.0));
+    // Voice numbered before what the feedback starts with was skipped by it: no report will come.
+    let pending_since = &mut self.pending_since;
+    self.pending.retain(|seq| {
+      let is_skipped = (feedback.base_seq.wrapping_sub(seq.0) as i16) > 0;
+      if is_skipped {
+        pending_since.remove(&seq.0);
+      }
+      !is_skipped && pending_since.contains_key(&seq.0)
+    });
+    while self
+      .report_times
+      .front()
+      .is_some_and(|(at, _)| now.saturating_duration_since(*at) > BASELINE_WINDOW)
+    {
+      self.report_times.pop_front();
     }
     let window = self.config.window;
     while self
@@ -181,6 +211,29 @@ impl VoiceGuard {
     delay_us.saturating_sub(fastest_us) > max_delay_us
   }
 
+  /// Periodic check (every ~100 ms): voice that no feedback reported
+  /// [`VoiceGuardConfig::max_unreported`] later than the fastest report lately is hurt, unless
+  /// `has_sent_burst`: the client itself just sent a burst the link has to queue (a slide
+  /// change, a keyframe), behind which voice waits and still arrives. Nothing before the first
+  /// reports: there is no baseline yet.
+  pub fn on_timer(&mut self, has_sent_burst: bool, now: Instant) {
+    let Some(fastest) = self.report_times.iter().map(|(_, took)| *took).min() else {
+      return;
+    };
+    if has_sent_burst {
+      return;
+    }
+    let bound = fastest.saturating_add(self.config.max_unreported);
+    let is_stuck = self
+      .pending
+      .front()
+      .and_then(|seq| self.pending_since.get(&seq.0))
+      .is_some_and(|sent_at| now.saturating_duration_since(*sent_at) > bound);
+    if is_stuck {
+      self.maybe_hurt_at = Some(now);
+    }
+  }
+
   /// Forgets what became of the voice so far: the link is measured afresh (a new video track,
   /// after a call of sound only, starts with every layer, #935).
   pub fn forget(&mut self) {
@@ -190,6 +243,7 @@ impl VoiceGuard {
     self.pending_since.clear();
     self.reports.clear();
     self.delays.clear();
+    self.report_times.clear();
     self.maybe_hurt_at = None;
   }
 
@@ -396,7 +450,7 @@ mod tests {
   #[test]
   fn held_back_voice_doesnt_count_where_only_losses_do() {
     let start = Instant::now();
-    let mut guard = VoiceGuard::new(VoiceGuardConfig::losses_only());
+    let mut guard = VoiceGuard::new(VoiceGuardConfig::own_uplink());
     let on_time = send_voice(&mut guard, 0, 50, start, |_| true);
     guard.on_feedback(&on_time, start + Duration::from_secs(1));
     let later = start + Duration::from_secs(1);
@@ -417,6 +471,86 @@ mod tests {
     });
     guard.on_feedback(&lossy, later + Duration::from_millis(1500));
     assert!(guard.is_hurt(later + Duration::from_millis(1500)));
+  }
+
+  /// A collapsed uplink holds the voice in its queue: hurt once it went unreported for the bound,
+  /// before any loss is reported.
+  #[test]
+  fn voice_unreported_too_long_is_hurt() {
+    let start = Instant::now();
+    let mut guard = VoiceGuard::new(VoiceGuardConfig::own_uplink());
+    let on_time = send_voice(&mut guard, 0, 25, start, |_| true);
+    guard.on_feedback(&on_time, start + 500 * MS);
+    let stuck_from = start + 500 * MS;
+    guard.on_send(TransportSeq(25), stuck_from);
+    // The fastest report took 20 ms (the last packet, sent 480 ms in): 420 ms is the bound.
+    guard.on_timer(false, stuck_from + 420 * MS);
+    assert!(!guard.is_hurt(stuck_from + 420 * MS));
+    guard.on_timer(false, stuck_from + 500 * MS);
+    assert!(guard.is_hurt(stuck_from + 500 * MS));
+  }
+
+  /// A link that reports late anyway (a long round trip) has a later bound.
+  #[test]
+  fn a_slow_link_has_a_later_bound() {
+    let start = Instant::now();
+    let mut guard = VoiceGuard::new(VoiceGuardConfig::own_uplink());
+    let on_time = send_voice(&mut guard, 0, 25, start, |_| true);
+    // The last packet (480 ms in) reported 400 ms later.
+    guard.on_feedback(&on_time, start + 880 * MS);
+    let stuck_from = start + Duration::from_secs(1);
+    guard.on_send(TransportSeq(25), stuck_from);
+    guard.on_timer(false, stuck_from + 700 * MS);
+    assert!(!guard.is_hurt(stuck_from + 700 * MS));
+    guard.on_timer(false, stuck_from + 900 * MS);
+    assert!(guard.is_hurt(stuck_from + 900 * MS));
+  }
+
+  /// Before any report there is no baseline: nothing counts as unreported.
+  #[test]
+  fn no_reports_yet_is_no_sign() {
+    let start = Instant::now();
+    let mut guard = VoiceGuard::new(VoiceGuardConfig::own_uplink());
+    guard.on_send(TransportSeq(0), start);
+    guard.on_timer(false, start + Duration::from_secs(2));
+    assert!(!guard.is_hurt(start + Duration::from_secs(2)));
+  }
+
+  /// Behind the client's own burst voice waits and arrives: not hurt meanwhile.
+  #[test]
+  fn voice_behind_an_own_burst_is_not_hurt_while_unreported() {
+    let start = Instant::now();
+    let mut guard = VoiceGuard::new(VoiceGuardConfig::own_uplink());
+    let on_time = send_voice(&mut guard, 0, 25, start, |_| true);
+    guard.on_feedback(&on_time, start + 500 * MS);
+    guard.on_send(TransportSeq(25), start + 500 * MS);
+    guard.on_timer(true, start + Duration::from_secs(2));
+    assert!(!guard.is_hurt(start + Duration::from_secs(2)));
+  }
+
+  /// Voice a feedback skipped gets no report: it is forgotten, not stuck for ever.
+  #[test]
+  fn voice_a_feedback_skipped_is_not_stuck() {
+    let start = Instant::now();
+    let mut guard = VoiceGuard::new(VoiceGuardConfig::own_uplink());
+    guard.on_send(TransportSeq(0), start);
+    let later = send_voice(&mut guard, 1, 25, start + 20 * MS, |_| true);
+    let skipping = TransportFeedback { base_seq: 1, ..later };
+    guard.on_feedback(&skipping, start + 600 * MS);
+    guard.on_timer(false, start + Duration::from_secs(2));
+    assert!(!guard.is_hurt(start + Duration::from_secs(2)));
+  }
+
+  /// Without the bound (the SFU's receivers, the default) unreported voice is no sign.
+  #[test]
+  fn unreported_voice_counts_only_with_a_bound() {
+    let start = Instant::now();
+    let mut guard = VoiceGuard::new(VoiceGuardConfig::default());
+    let on_time = send_voice(&mut guard, 0, 25, start, |_| true);
+    guard.on_feedback(&on_time, start + 500 * MS);
+    guard.on_send(TransportSeq(25), start + 500 * MS);
+    guard.on_timer(false, start + Duration::from_secs(5));
+    assert!(!guard.is_hurt(start + Duration::from_secs(5)));
   }
 
   #[test]
