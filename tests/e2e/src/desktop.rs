@@ -25,6 +25,9 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use crate::process::{Service, free_tcp_port};
 
+/// The session's ALSA default: a device that takes and gives silence, so a call opens its
+/// microphone and speakers without a sound server.
+const NULL_AUDIO: &str = "pcm.!default { type null }\n";
 /// The desktop binary under test.
 pub const BINARY_VARIABLE: &str = "E2E_DESKTOP_BIN";
 /// The app's identifier: its config directory below `XDG_CONFIG_HOME`.
@@ -114,6 +117,9 @@ impl DesktopSession {
     }
     set_private(&dir.join("run"))?;
     write_fake_browser(&dir)?;
+    // No sound server in this session: calls get ALSA's null device for microphone and speakers,
+    // never the machine's own.
+    std::fs::write(dir.join("home/.asoundrc"), NULL_AUDIO)?;
     let bus_path = dir.join("run").join("bus");
     let bus_address = format!("unix:path={}", bus_path.display());
     let bus = Command::new("dbus-daemon")
@@ -385,6 +391,22 @@ impl DesktopApp {
   /// How many pages (windows) the app shows right now.
   pub async fn window_count(&self) -> usize {
     list_pages(self.inspector_port).await.len()
+  }
+
+  /// The value of `expression` in every window's page (for a failure's message).
+  pub async fn evaluate_in_every_window(&self, expression: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    for path in list_pages(self.inspector_port).await {
+      let value = match Inspector::connect_to(self.inspector_port, &path).await {
+        Ok(mut inspector) => match inspector.evaluate(expression).await {
+          Ok(value) => value.to_string(),
+          Err(error) => format!("{error:#}"),
+        },
+        Err(error) => format!("{error:#}"),
+      };
+      values.push(value);
+    }
+    values
   }
 
   /// The value of `expression` in the first window whose page has an element matching `selector`

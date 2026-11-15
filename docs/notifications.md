@@ -823,7 +823,9 @@ place is no longer on a screen), doesn't take the focus, and closes when the cal
 window gets the focus back. Setting `calls.small_window`: `when_away` (default), `always` (for the
 whole call) or `never`. The call keeps running only with the main window: its page sends what the
 small window shows to the shell whenever that changes (not every second; the window counts the time
-from the join itself), the shell decides from the main window's focus events when it shows, and the
+from the join itself), the shell decides from the main window's focus events and its page's
+visibility (minimized or hidden to the tray, which not every window manager reports as a focus
+change) when it shows, and the
 small window's buttons go back to the page as the tray menu's call actions (`tray-action`), so they
 take the path of the tray's controls (hang up asks the organizer whom to hand the meeting to, in the
 main window, #1720). The global mute shortcut works while it has the focus as everywhere else. In a

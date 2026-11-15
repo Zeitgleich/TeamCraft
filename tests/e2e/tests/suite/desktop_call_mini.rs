@@ -10,7 +10,7 @@
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use teamcraft_e2e::call::{hold_call, join_call};
+use teamcraft_e2e::call::{SfuIdentity, hold_call, join_call};
 use teamcraft_e2e::desktop::{DesktopApp, DesktopSession};
 use teamcraft_e2e::{Peer, Stack};
 
@@ -26,7 +26,14 @@ async fn the_small_call_window_follows_the_main_window_and_controls_the_call() {
   let Some(session) = DesktopSession::start("call-mini").await else {
     return;
   };
-  let Some(stack) = Stack::builder().with_calls().start().await else {
+  // The app pins the SFU's certificate by the hash the server hands out with the join token.
+  let sfu = SfuIdentity::generate();
+  let Some(stack) = Stack::builder()
+    .with_calls()
+    .with_sfu_identity(sfu.certificate_pem, sfu.key_pem, sfu.sha256_hex)
+    .start()
+    .await
+  else {
     return;
   };
   let certificate_hash = stack.maybe_sfu.as_ref().unwrap().certificate_hash;
@@ -38,16 +45,25 @@ async fn the_small_call_window_follows_the_main_window_and_controls_the_call() {
   let mut app = session.launch(&stack.base_url).await.unwrap();
   sign_in_and_unlock(&session, &mut app).await;
 
-  // Alice is in the DM's call; Carol joins it from the app, as its call screen's Join does.
+  // Carol starts the DM's call from the app, as its call screen's Join does, once Alice's client
+  // took the app's new device into the conversation's encryption; then Alice comes in.
+  let join = json!({ "action": { "action": "join", "request": { "conversation": dm, "kind": "direct" } } });
+  let deadline = Instant::now() + WAIT;
+  loop {
+    alice.pump().await;
+    match app.invoke("call_action", join.clone()).await {
+      Ok(_) => break,
+      Err(error) if error.to_string().contains("call_encryption_pending") && Instant::now() < deadline => {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+      },
+      Err(error) => panic!("joining from the app: {error:#}"),
+    }
+  }
+  // The page takes over a call the shell runs when it loads (#824), as after a reload.
+  app.evaluate("location.reload()").await.unwrap();
+  app.detach_inspector();
   let alice_call = join_call(&mut alice, dm, certificate_hash, 330.0).await;
   let alice_holds = tokio::spawn(hold_call(alice_call, ALICE_STAYS));
-  app
-    .invoke(
-      "call_action",
-      json!({ "action": { "action": "join", "request": { "conversation": dm, "kind": "direct" } } }),
-    )
-    .await
-    .unwrap();
   wait_for(
     &mut app,
     "the call screen",
@@ -61,10 +77,7 @@ async fn the_small_call_window_follows_the_main_window_and_controls_the_call() {
   );
 
   eprintln!("call mini: minimizing the main window");
-  app
-    .invoke("window_action", json!({ "action": "minimize" }))
-    .await
-    .unwrap();
+  minimize(&mut app).await;
   let title = wait_for_small_window(&app, "document.querySelector('.call-mini-title').textContent").await;
   assert!(title.as_str().is_some_and(|title| !title.is_empty()), "{title:?}");
 
@@ -74,10 +87,7 @@ async fn the_small_call_window_follows_the_main_window_and_controls_the_call() {
     "document.querySelector('.call-mini-controls .round-btn').click()",
   )
   .await;
-  wait_until(&mut app, "the call to be muted", |snapshot| {
-    snapshot["maybe_active"]["is_muted"] == json!(true)
-  })
-  .await;
+  // The window shows the mute only once the main window's call took it (its state comes back).
   let pressed = wait_for_small_window(
     &app,
     "document.querySelector('.call-mini-controls .round-btn').getAttribute('aria-pressed') === 'true' || null",
@@ -96,21 +106,40 @@ async fn the_small_call_window_follows_the_main_window_and_controls_the_call() {
   .await;
 
   eprintln!("call mini: hanging up from the small window");
-  app
-    .invoke("window_action", json!({ "action": "minimize" }))
-    .await
-    .unwrap();
+  minimize(&mut app).await;
   wait_for_small_window(&app, "true").await;
   in_small_window(&app, "document.querySelector('.call-mini-hangup').click()").await;
-  wait_until(&mut app, "the call to end", |snapshot| {
-    snapshot["maybe_active"].is_null()
-  })
-  .await;
+  // The call ended in the main window: it hands over "no call", and the window goes.
   wait_for_window_count(&app, 1).await;
+  // The server's roster has Carol no more.
+  let deadline = Instant::now() + WAIT;
+  loop {
+    let roster = stack
+      .get(&alice.tokens, &format!("/conversations/{dm}/call"))
+      .await;
+    if !roster.body.to_string().contains(&carol.to_string()) {
+      break;
+    }
+    assert!(
+      Instant::now() < deadline,
+      "Carol is still in the call: {}",
+      roster.body
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+  }
 
   alice_holds.abort();
   app.quit().await.unwrap();
   stack.stop().await;
+}
+
+/// Minimizes the main window as its title bar's button does. A minimized page may not run its
+/// scripts any more, so the answer isn't waited for.
+async fn minimize(app: &mut DesktopApp) {
+  app
+    .evaluate("window.__TAURI_INTERNALS__.invoke('window_action', { action: 'minimize' }), true")
+    .await
+    .unwrap();
 }
 
 /// Evaluates `expression` in the small window once it is there.
@@ -122,11 +151,17 @@ async fn wait_for_small_window(app: &DesktopApp, expression: &str) -> Value {
     {
       return value;
     }
-    assert!(
-      Instant::now() < deadline,
-      "no small call window; the app's log: {}",
-      app.log()
-    );
+    if Instant::now() > deadline {
+      let windows = app.window_count().await;
+      let pages = app
+        .evaluate_in_every_window(
+          "[location.href, document.documentElement.className, !!document.querySelector('.call-mini'), \
+           (document.querySelector('.panic-details') || {}).value || '', \
+           [...document.querySelectorAll('script,link')].map(e => e.src || e.href).filter(Boolean).join(',')].join(' | ')",
+        )
+        .await;
+      panic!("no small call window ({windows} windows: {pages:#?})");
+    }
     tokio::time::sleep(Duration::from_millis(200)).await;
   }
 }
@@ -155,19 +190,6 @@ async fn wait_for(app: &mut DesktopApp, what: &str, expression: &str) {
       "no {what}; the page shows {:?}",
       app.text().await
     );
-    tokio::time::sleep(Duration::from_millis(200)).await;
-  }
-}
-
-/// Waits until the shell's call state (`call_snapshot`) satisfies `is_done`.
-async fn wait_until(app: &mut DesktopApp, what: &str, is_done: impl Fn(&Value) -> bool) {
-  let deadline = Instant::now() + WAIT;
-  loop {
-    let snapshot = app.invoke("call_snapshot", json!({})).await.unwrap_or_default();
-    if is_done(&snapshot) {
-      return;
-    }
-    assert!(Instant::now() < deadline, "waited for {what}: {snapshot}");
     tokio::time::sleep(Duration::from_millis(200)).await;
   }
 }

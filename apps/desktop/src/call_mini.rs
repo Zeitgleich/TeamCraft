@@ -16,6 +16,7 @@
 
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tauri::{
@@ -35,6 +36,9 @@ const MARGIN: f64 = 16.0;
 /// Room left for the incoming-call window in the same corner (its height and margin), so a second
 /// call that rings during this one doesn't cover the window.
 const INCOMING_ROOM: f64 = 96.0;
+/// How long a close waits for a decision to show the window again (see
+/// [`close_unless_wanted_again`]): short enough that it still feels immediate.
+const CLOSE_GRACE: Duration = Duration::from_millis(400);
 /// Where the window was last left, in the app's config directory.
 const POSITION_FILE: &str = "call-mini.json";
 
@@ -53,6 +57,10 @@ struct Inner {
   maybe_is_main_away: Option<bool>,
   /// Where the user moved the window (logical pixels), kept for the next call.
   maybe_position: Option<SavedPosition>,
+  /// The main window's page is out of sight (minimized, hidden to the tray), as it reports it.
+  is_main_hidden: bool,
+  /// Counts the decisions, so a delayed close only happens when nothing was decided since.
+  generation: u64,
 }
 
 /// The window's place, as stored.
@@ -62,18 +70,22 @@ struct SavedPosition {
   y: f64,
 }
 
-/// The UI's call changed (or ended: `None`), or the user's choice of when the window shows.
+/// The UI's call changed (or ended: `None`), the user's choice of when the window shows, or
+/// whether the main window's page is out of sight (it says so whenever that changes: not every
+/// window manager moves the focus with a minimize).
 #[tauri::command(rename_all = "snake_case")]
 pub fn call_mini_set(
   app: AppHandle,
   state: State<'_, CallMiniState>,
   maybe_call: Option<CallMini>,
   policy: CallMiniPolicy,
+  is_main_hidden: bool,
 ) {
   {
     let mut inner = state.lock();
     inner.maybe_call = maybe_call;
     inner.policy = policy;
+    inner.is_main_hidden = is_main_hidden;
   }
   reconcile(&app);
 }
@@ -104,6 +116,17 @@ pub fn call_mini_action(app: AppHandle, window: WebviewWindow, action: TrayActio
   }
   if action.shows_window() {
     crate::tray::show_main_window(&app);
+    // The user asked for the main window: it counts as in front even where the window manager
+    // keeps the focus where it was (focus stealing prevention); losing the focus later shows the
+    // small window again.
+    {
+      let state = app.state::<CallMiniState>();
+      let mut inner = state.lock();
+      inner.maybe_is_main_away = Some(false);
+      // Its page says it is out of sight again when it is (it may still say so a moment longer).
+      inner.is_main_hidden = false;
+    }
+    reconcile(&app);
   }
   if let Err(error) = app.emit_to(MAIN_WINDOW, TRAY_ACTION_EVENT, action.id()) {
     tracing::debug!(%error, "could not hand the small call window's button to the main window");
@@ -120,7 +143,12 @@ pub fn main_focus_changed(app: &AppHandle, is_focused: bool) {
 /// take the window's buttons until the new page runs. The window closes; the new page hands the
 /// call over again if it still runs (the call itself runs in the shell and goes on).
 pub fn main_page_started(app: &AppHandle) {
-  app.state::<CallMiniState>().lock().maybe_call = None;
+  {
+    let state = app.state::<CallMiniState>();
+    let mut inner = state.lock();
+    inner.maybe_call = None;
+    inner.is_main_hidden = false;
+  }
   reconcile(app);
 }
 
@@ -158,15 +186,25 @@ fn is_window_action(action: TrayAction) -> bool {
 /// Opens, updates or closes the window to match the call, the policy and the main window.
 fn reconcile(app: &AppHandle) {
   let state = app.state::<CallMiniState>();
+  // The focus events say whether the main window is behind others; out of sight it is away
+  // whatever they said (a window manager may not have given it the focus to lose).
   let is_main_away = {
-    let maybe_known = state.lock().maybe_is_main_away;
-    maybe_known.unwrap_or_else(|| is_main_away(app))
+    let (maybe_known, is_hidden) = {
+      let inner = state.lock();
+      (inner.maybe_is_main_away, inner.is_main_hidden)
+    };
+    maybe_known.unwrap_or_else(|| is_main_away(app)) || is_hidden
   };
-  let should_show = {
+  let (should_show, generation) = {
     let mut inner = state.lock();
     inner.maybe_is_main_away = Some(is_main_away);
-    inner.maybe_call.is_some() && inner.policy.shows(is_main_away)
+    inner.generation += 1;
+    (
+      inner.maybe_call.is_some() && inner.policy.shows(is_main_away),
+      inner.generation,
+    )
   };
+  tracing::debug!(should_show, is_main_away, "small call window");
   match (should_show, app.get_webview_window(CALL_MINI_LABEL)) {
     (true, Some(_)) => {
       if let Err(error) = app.emit_to(CALL_MINI_LABEL, CALL_MINI_CHANGED_EVENT, ()) {
@@ -174,13 +212,29 @@ fn reconcile(app: &AppHandle) {
       }
     },
     (true, None) => {
+      tracing::info!("opening the small call window");
       if let Err(error) = create(app) {
         tracing::warn!(%error, "could not open the small call window");
       }
     },
-    (false, Some(window)) => close(app, &window),
+    (false, Some(_)) => close_unless_wanted_again(app, generation),
     (false, None) => {},
   }
+}
+
+/// Closes the window after [`CLOSE_GRACE`] unless something was decided since: the page hands
+/// over "no call" for a moment when its signed-in part starts again, and a window closed and opened
+/// again within milliseconds would flicker (and lose its page while it loads).
+fn close_unless_wanted_again(app: &AppHandle, generation: u64) {
+  let app = app.clone();
+  tauri::async_runtime::spawn(async move {
+    tokio::time::sleep(CLOSE_GRACE).await;
+    let is_latest = app.state::<CallMiniState>().lock().generation == generation;
+    if is_latest && let Some(window) = app.get_webview_window(CALL_MINI_LABEL) {
+      tracing::info!("closing the small call window");
+      close(&app, &window);
+    }
+  });
 }
 
 /// The main window is not in front: hidden (to the tray), minimized or without the focus.

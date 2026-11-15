@@ -704,15 +704,18 @@ pub async fn tray_menu_set(model: &teamcraft_client_api::tray_menu::TrayMenuMode
   }
 }
 
-/// Desktop only: what the small call window shows (`None`: no call) and when it shows (#2077).
+/// Desktop only: what the small call window shows (`None`: no call), when it shows, and whether
+/// the main window's page is out of sight (#2077).
 pub async fn call_mini_set(
   maybe_call: Option<&teamcraft_client_api::call_mini::CallMini>,
   policy: teamcraft_client_api::call_mini::CallMiniPolicy,
+  is_main_hidden: bool,
 ) {
   if !is_available() {
     return;
   }
-  let args = serde_json::json!({ "maybe_call": maybe_call, "policy": policy });
+  let args =
+    serde_json::json!({ "maybe_call": maybe_call, "policy": policy, "is_main_hidden": is_main_hidden });
   if let Err(error) = call::<()>("call_mini_set", &args).await {
     tracing::debug!(%error, "could not update the small call window");
   }

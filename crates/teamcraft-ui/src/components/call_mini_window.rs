@@ -12,7 +12,7 @@ use teamcraft_client_api::tray_menu::TrayAction;
 use crate::auth::tauri;
 use crate::components::icons::{Icon, IconName};
 use crate::components::incoming_call::apply_window_theme;
-use crate::i18n::use_i18n;
+use crate::i18n::provide_i18n;
 
 /// How often the window's clock ticks.
 const TICK: Duration = Duration::from_secs(1);
@@ -33,7 +33,8 @@ pub fn mount() {
 
 #[component]
 fn CallMiniWindow() -> impl IntoView {
-  let i18n = use_i18n();
+  // A page of its own: the user's language as the main window stored it.
+  let i18n = provide_i18n(crate::settings::stored_locale());
   let shown = RwSignal::new(None::<CallMini>);
   let now_ms = RwSignal::new(js_sys::Date::now());
   read_call(shown, true);
