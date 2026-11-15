@@ -43,6 +43,7 @@ mod server_entry;
 mod server_pool;
 mod settings_sync;
 mod space_deletion;
+mod status_presets;
 mod types;
 mod video;
 mod voice;

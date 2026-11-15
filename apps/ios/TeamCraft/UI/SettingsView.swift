@@ -197,6 +197,24 @@ struct SettingsView: View {
 
   private var customStatusSection: some View {
     Section("custom_status_title") {
+      // The core's list, so every client offers the same statuses (#2072): a pick fills emoji,
+      // text and end, which stay editable.
+      VStack(alignment: .leading, spacing: 8) {
+        Text("status_presets_title")
+          .font(.footnote)
+          .foregroundStyle(.secondary)
+        ScrollView(.horizontal, showsIndicators: false) {
+          HStack(spacing: 8) {
+            ForEach(statusPresets(), id: \.id) { preset in
+              Button { pick(preset) } label: {
+                Text("\(preset.emoji) \(StatusPresetText.text(for: preset.id))")
+              }
+              .buttonStyle(.bordered)
+              .controlSize(.small)
+            }
+          }
+        }
+      }
       LabeledContent("custom_status_emoji_label") {
         TextField("custom_status_emoji", text: $statusEmoji)
           .multilineTextAlignment(.trailing)
@@ -225,6 +243,13 @@ struct SettingsView: View {
       }
       .disabled(isSavingStatus)
     }
+  }
+
+  private func pick(_ preset: StatusPresetInfo) {
+    statusEmoji = preset.emoji
+    statusText = StatusPresetText.text(for: preset.id)
+    statusExpiry = StatusExpiryValue(rawValue: preset.expiry) ?? .today
+    maybeStatusProblem = nil
   }
 
   /// An empty status is said at the text field; so is the core's refusal, with the input kept.
@@ -511,6 +536,20 @@ enum PresenceChoice: String, CaseIterable, Identifiable {
     case .beRightBack: return .beRightBack
     case .away: return .away
     case .offline: return .offline
+    }
+  }
+}
+
+/// The text of a built-in status preset of the core (`status_preset_<id>`), resolved here so the
+/// string catalog check sees every key.
+enum StatusPresetText {
+  static func text(for id: String) -> String {
+    switch id {
+    case "meeting": return String(localized: "status_preset_meeting")
+    case "commuting": return String(localized: "status_preset_commuting")
+    case "focusing": return String(localized: "status_preset_focusing")
+    case "sick": return String(localized: "status_preset_sick")
+    default: return String(localized: "status_preset_vacation")
     }
   }
 }

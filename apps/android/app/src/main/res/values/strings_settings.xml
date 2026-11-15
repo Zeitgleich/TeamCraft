@@ -49,6 +49,13 @@
   <string name="custom_status_clear">Clear</string>
   <string name="custom_status_emoji">Emoji</string>
   <string name="custom_status_text">Status</string>
+  <string name="status_presets_title">Quick statuses</string>
+  <string name="custom_status_clear_after">Clear after</string>
+  <string name="status_preset_meeting">In a meeting</string>
+  <string name="status_preset_commuting">Commuting</string>
+  <string name="status_preset_focusing">Focusing</string>
+  <string name="status_preset_sick">Out sick</string>
+  <string name="status_preset_vacation">On vacation</string>
   <string name="custom_status_missing">Enter a status text.</string>
   <string name="profile_name_change">Change name</string>
   <string name="profile_name_label">Your name</string>

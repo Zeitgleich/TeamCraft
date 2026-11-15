@@ -160,6 +160,13 @@ pub trait ChatBackend {
   /// Feed rows `start..start + len`, oldest first, counted as [`Self::message_count`] counts
   /// them. Out-of-range parts are clipped.
   fn messages(&self, conversation: ConversationId, start: usize, len: usize) -> Vec<Message>;
+  /// The newest `len` feed rows this backend already holds, oldest first (#2078: the sidebar's
+  /// preview of a conversation). A look at the store and nothing else: it loads nothing, doesn't
+  /// say the feed is wanted and marks nothing read. Fewer rows (or none) when less is held; only
+  /// rows that are contiguous up to the newest one are returned.
+  fn held_recent_messages(&self, _conversation: ConversationId, _len: usize) -> Vec<Message> {
+    Vec::new()
+  }
   /// Messages `start..start + len` will be read soon (the rows just beyond what the feed shows):
   /// a backend that loads them asynchronously starts now, so they are there when scrolled to
   /// (issue #1050). Like a read, it says the rows are wanted: asked again after every change, so
