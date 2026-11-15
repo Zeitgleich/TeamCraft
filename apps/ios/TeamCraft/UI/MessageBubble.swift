@@ -688,11 +688,16 @@ struct BubbleReplyQuote: View {
   var maybeImage: ReplyAttachmentPreview?
 
   @Environment(\.openQuotedPicture) private var maybeOpenQuoted
+  @Environment(\.openQuotedMessage) private var maybeJumpToQuoted
 
   var body: some View {
     if let image = maybeImage, image.canOpen == true, let messageId = maybeMessageId, let open = maybeOpenQuoted {
       Button { open(messageId, image.fileId) } label: { quote }
         .buttonStyle(.plain)
+    } else if let messageId = maybeMessageId, let jump = maybeJumpToQuoted {
+      Button { jump(messageId) } label: { quote }
+        .buttonStyle(.plain)
+        .accessibilityHint(Text("quote_show_original"))
     } else {
       quote
     }
@@ -785,7 +790,33 @@ struct ImageGrid: View {
   }
 }
 
-/// "Today", "Yesterday" or the date, as a small centred pill; pinned while its day scrolls by.
+/// The pill that confirms a copy (#2014).
+struct CopiedPill: View {
+  var body: some View {
+    Label("copied", systemImage: "checkmark")
+      .font(.app(.footnote).weight(.medium))
+      .padding(.horizontal, 12).padding(.vertical, 6)
+      .background(.regularMaterial, in: Capsule())
+      .accessibilityAddTraits(.updatesFrequently)
+  }
+}
+
+/// The line above the first message the user had not read when the conversation opened (#2013).
+struct UnreadDivider: View {
+  var body: some View {
+    HStack(spacing: 8) {
+      Rectangle().fill(Theme.accent.opacity(0.4)).frame(height: 1)
+      Text("unread_divider")
+        .font(.app(.footnote).weight(.medium))
+        .foregroundStyle(Theme.accent)
+      Rectangle().fill(Theme.accent.opacity(0.4)).frame(height: 1)
+    }
+    .padding(.vertical, 8)
+    .accessibilityElement(children: .combine)
+    .accessibilityAddTraits(.isHeader)
+  }
+}
+
 /// The message lifted above the long-press menu (#2015): who wrote it and what it says, at most
 /// a few lines; a message of files alone says so.
 struct MessageMenuPreview: View {
@@ -807,6 +838,35 @@ struct MessageMenuPreview: View {
   }
 }
 
+/// Rows with the shape of what is on its way, instead of a spinner (#2008): an avatar and two
+/// lines, as the web's skeleton. Read out once as "Loading".
+struct ListSkeleton: View {
+  var rows = 7
+
+  var body: some View {
+    VStack(spacing: 0) {
+      ForEach(0..<rows, id: \.self) { index in
+        HStack(spacing: 12) {
+          Circle().fill(Color.secondary.opacity(0.2)).frame(width: 40, height: 40)
+          VStack(alignment: .leading, spacing: 6) {
+            Text(verbatim: "Placeholder name").font(.app(.footnote))
+            Text(verbatim: index.isMultiple(of: 2) ? "A longer placeholder line of text that stands in" : "A shorter placeholder line")
+              .font(.app(.body))
+              .lineLimit(1)
+          }
+          Spacer(minLength: 0)
+        }
+        .padding(.vertical, 10)
+      }
+    }
+    .redacted(reason: .placeholder)
+    .allowsHitTesting(false)
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel(Text("loading"))
+  }
+}
+
+/// "Today", "Yesterday" or the date, as a small centred pill; pinned while its day scrolls by.
 struct DayPill: View {
   let date: Date
 
@@ -846,9 +906,21 @@ struct SenderAvatar: View {
   var size: CGFloat = senderAvatarSize
 
   @Environment(AppModel.self) private var model
+  @Environment(\.openProfile) private var maybeOpenProfile
   @State private var maybePicture: UIImage?
 
   var body: some View {
+    // The avatar opens the person's profile (#2002); an integration source has none.
+    if let open = maybeOpenProfile, maybeSourcePictureSha256 == nil, !userId.isEmpty {
+      Button { open(userId) } label: { avatar }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text("profile_open \(name)"))
+    } else {
+      avatar.accessibilityHidden(true)
+    }
+  }
+
+  private var avatar: some View {
     Group {
       if let maybePicture {
         Image(uiImage: maybePicture).resizable().scaledToFill()
@@ -862,7 +934,6 @@ struct SenderAvatar: View {
           .background(PersonColor.avatar(userId), in: Circle())
       }
     }
-    .accessibilityHidden(true)
     .task(id: maybeSourcePictureSha256) {
       guard let sha256 = maybeSourcePictureSha256 else {
         maybePicture = nil

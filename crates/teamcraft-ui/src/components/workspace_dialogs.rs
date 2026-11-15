@@ -153,7 +153,7 @@ pub(crate) fn Dialog(
     <Modal labelled_by="ws-dialog-title" class=class>
       <header class="modal-head">
         <h2 id="ws-dialog-title">{move || i18n.t(title_key)}</h2>
-        <button type="button" class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+        <button type="button" class="icon-btn" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=move |_| state.close_overlay()>
           <Icon name=IconName::Close />
         </button>
       </header>
@@ -2403,7 +2403,7 @@ fn CategoryRow(space: SpaceId, category: CategoryInfo) -> impl IntoView {
   view! {
     <li class="category-row">
       <input class="input" aria-label=move || i18n.t("space-category-rename") prop:value=move || name.get() on:input=move |ev| name.set(event_target_value(&ev)) on:change=rename />
-      <button class="icon-btn" aria-label=move || i18n.t("space-category-delete") on:click=move |_| state.write(|backend| backend.delete_category(space, id))>
+      <button class="icon-btn" aria-label=move || i18n.t("space-category-delete") title=move || i18n.t("space-category-delete") on:click=move |_| state.write(|backend| backend.delete_category(space, id))>
         <Icon name=IconName::Trash />
       </button>
     </li>

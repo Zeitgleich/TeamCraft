@@ -1,6 +1,7 @@
 package de.zeitgleich.teamcraft.ui.screens
 
 import de.zeitgleich.teamcraft.ui.PresenceDot
+import de.zeitgleich.teamcraft.ui.PullRefreshIndicator
 import de.zeitgleich.teamcraft.ui.presenceLabel
 import androidx.compose.ui.semantics.heading
 import androidx.compose.animation.core.Spring
@@ -98,6 +99,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import de.zeitgleich.teamcraft.ui.pullRefresh
+import de.zeitgleich.teamcraft.ui.rememberPullRefresh
 import de.zeitgleich.teamcraft.ui.theme.FavoritesSort
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.Image
@@ -128,8 +131,10 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.Dp
+import de.zeitgleich.teamcraft.ui.ChatSwipePrefs
 import de.zeitgleich.teamcraft.ui.HomeSpace
 import de.zeitgleich.teamcraft.ui.SelectedSpace
+import de.zeitgleich.teamcraft.ui.SwipeEndAction
 import de.zeitgleich.teamcraft.ui.hasNewElsewhere
 import de.zeitgleich.teamcraft.ui.homeSpaces
 import de.zeitgleich.teamcraft.ui.selectedSpace
@@ -323,6 +328,9 @@ fun ChatListScreen(
     maybeConversations = loaded,
     isSyncing = maybeFirstSync != null,
     maybeReadFailure = kept.maybeReadFailure,
+    onRefresh = {
+      if (!viewModel.refreshConnection()) viewModel.showFailure(R.string.refresh_failed)
+    },
     onRetry = {
       viewModel.retryChatList()
       scope.launch { viewModel.refreshChatList(accountUserId) }
@@ -333,7 +341,9 @@ fun ChatListScreen(
       typing = typing,
       maybeSelectedId = maybeSelectedId,
       selection = selection,
-      actionsFor = { conversation, maybeEntry -> rowActions(viewModel, conversation, maybeEntry) },
+      actionsFor = { conversation, maybeEntry ->
+        rowActions(viewModel, conversation, maybeEntry, onMute = { maybeNotifying = conversation.id })
+      },
       onOpen = { id -> if (selection.isEmpty()) onOpen(id) else selection = toggled(selection, id) },
       onLongPress = { id -> selection = toggled(selection, id) },
       conversationMenu = { conversation, isOpen, onDismiss ->
@@ -528,6 +538,8 @@ internal fun MainScaffold(
   /** Home's button: the "New" menu (#1534). */
   onCreate: () -> Unit = {},
   banners: @Composable () -> Unit = {},
+  /** Pull to refresh (#2006); null where the list has none. */
+  onRefresh: (suspend () -> Unit)? = null,
   /** The first sync is running: an empty list is not known to be empty yet (#297). */
   isSyncing: Boolean = false,
   /** Set when there are no conversations and reading them failed. */
@@ -578,10 +590,12 @@ internal fun MainScaffold(
     },
     snackbarHost = snackbarHost,
   ) { padding ->
+    val pullRefresh = rememberPullRefresh(onRefresh)
     Box(Modifier.fillMaxSize().padding(padding)) {
       Column(
         Modifier
           .fillMaxSize()
+          .pullRefresh(pullRefresh)
           .clip(RoundedCornerShape(topStart = CONTENT_CARD_RADIUS, topEnd = CONTENT_CARD_RADIUS))
           .background(MaterialTheme.colorScheme.background),
       ) {
@@ -601,6 +615,7 @@ internal fun MainScaffold(
           else -> ActivityTab(maybeConversations, list, onNavigate, joinRequestCount, joinRequests, guestNotices = guestNotices, guestNoticeCount = guestNoticeCount, isSyncing = isSyncing)
         }
       }
+      PullRefreshIndicator(pullRefresh)
       if (maybeSelectionBar == null) {
         val barModifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars).padding(bottom = FloatingToolbarDefaults.ScreenOffset)
         FloatingTabBar(
@@ -1365,8 +1380,9 @@ private fun sectionTitleText(title: SectionTitle): String =
   }
 
 /**
- * Swipe right toggles read/unread, swipe left toggles the favorite; both snap back. The same
- * actions are in the long-press menu and in the accessibility actions.
+ * Swipe right toggles read/unread, swipe left toggles the favorite, or opens the notification
+ * settings (mute) when the device is set to that (#2007); both snap back. The same actions are in
+ * the long-press menu and in the accessibility actions.
  */
 @Composable
 private fun SwipeableConversationRow(
@@ -1389,16 +1405,21 @@ private fun SwipeableConversationRow(
   // While rows are being selected, a long-press keeps toggling; otherwise it opens the menu.
   var isMenuOpen by remember { mutableStateOf(false) }
   val state = rememberSwipeToDismissBoxState()
+  val context = LocalContext.current
+  val endAction by remember { ChatSwipePrefs.of(context).endAction }.collectAsState()
   SwipeToDismissBox(
     state = state,
     modifier = modifier,
     gesturesEnabled = !isSelecting,
     enableDismissFromStartToEnd = actions.toggleRead != null,
-    backgroundContent = { SwipeBackground(state.dismissDirection, conversation, isUnread = actions.isUnread) },
+    backgroundContent = { SwipeBackground(state.dismissDirection, conversation, isUnread = actions.isUnread, endAction = endAction) },
     onDismiss = { direction ->
       when (direction) {
         SwipeToDismissBoxValue.StartToEnd -> actions.toggleRead?.invoke()
-        SwipeToDismissBoxValue.EndToStart -> actions.toggleFavorite()
+        SwipeToDismissBoxValue.EndToStart -> when (endAction) {
+          SwipeEndAction.Favorite -> actions.toggleFavorite()
+          SwipeEndAction.Mute -> actions.mute()
+        }
         SwipeToDismissBoxValue.Settled -> Unit
       }
       // The swipe did its action (Material haptics: confirm, not a long press).
@@ -1430,9 +1451,16 @@ internal class RowActions(
   val isUnread: Boolean,
   val toggleRead: (() -> Unit)?,
   val toggleFavorite: () -> Unit,
+  /** Opens the conversation's notification settings, where it is muted (#2007). */
+  val mute: () -> Unit,
 )
 
-private fun rowActions(viewModel: MainViewModel, conversation: ConversationItem, maybeEntry: ChatListEntry?): RowActions {
+private fun rowActions(
+  viewModel: MainViewModel,
+  conversation: ConversationItem,
+  maybeEntry: ChatListEntry?,
+  onMute: () -> Unit,
+): RowActions {
   val isUnread = conversation.unreadCount > 0u
   val toggleRead: (() -> Unit)? = when {
     isUnread -> ({ viewModel.markRead(conversation.id) })
@@ -1443,11 +1471,17 @@ private fun rowActions(viewModel: MainViewModel, conversation: ConversationItem,
     isUnread = isUnread,
     toggleRead = toggleRead,
     toggleFavorite = { viewModel.act(ChatActions.setFavorite(conversation.id, !conversation.isFavorite)) },
+    mute = onMute,
   )
 }
 
 @Composable
-private fun SwipeBackground(direction: SwipeToDismissBoxValue, conversation: ConversationItem, isUnread: Boolean) {
+private fun SwipeBackground(
+  direction: SwipeToDismissBoxValue,
+  conversation: ConversationItem,
+  isUnread: Boolean,
+  endAction: SwipeEndAction,
+) {
   val (color, icon, label, alignment) = when (direction) {
     SwipeToDismissBoxValue.StartToEnd -> SwipeLook(
       MaterialTheme.colorScheme.primary,
@@ -1455,12 +1489,20 @@ private fun SwipeBackground(direction: SwipeToDismissBoxValue, conversation: Con
       if (isUnread) R.string.chat_mark_read else R.string.chat_mark_unread,
       Alignment.CenterStart,
     )
-    SwipeToDismissBoxValue.EndToStart -> SwipeLook(
-      MaterialTheme.colorScheme.tertiary,
-      Icons.Filled.Star,
-      if (conversation.isFavorite) R.string.favorite_remove else R.string.favorite_add,
-      Alignment.CenterEnd,
-    )
+    SwipeToDismissBoxValue.EndToStart -> when (endAction) {
+      SwipeEndAction.Favorite -> SwipeLook(
+        MaterialTheme.colorScheme.tertiary,
+        Icons.Filled.Star,
+        if (conversation.isFavorite) R.string.favorite_remove else R.string.favorite_add,
+        Alignment.CenterEnd,
+      )
+      SwipeEndAction.Mute -> SwipeLook(
+        MaterialTheme.colorScheme.tertiary,
+        Icons.Filled.Notifications,
+        R.string.chat_swipe_notifications,
+        Alignment.CenterEnd,
+      )
+    }
     SwipeToDismissBoxValue.Settled -> return
   }
   Box(Modifier.fillMaxSize().background(color).padding(horizontal = 24.dp), contentAlignment = alignment) {

@@ -295,6 +295,7 @@ private fun ChatsPage(viewModel: MainViewModel) {
     row { ChatListLayoutSetting(it) }
     if (isList) row { ChatListGroupingSetting(it) } else row { FavoritesSortSetting(it) }
     row { MessageLayoutSetting(it) }
+    row { ChatSwipeSetting(it) }
   }
   ColorThemeSetting()
   SettingsGroup(R.string.settings_group_media) {

@@ -19,7 +19,9 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -93,6 +95,7 @@ import uniffi.teamcraft_ffi.ChannelAnchorMarksItem
 import uniffi.teamcraft_ffi.ChannelMembersInfo
 import uniffi.teamcraft_ffi.ChannelRolesReviewItem
 import uniffi.teamcraft_ffi.CheckedServer
+import uniffi.teamcraft_ffi.ConnectionState
 import uniffi.teamcraft_ffi.ConversationItem
 import uniffi.teamcraft_ffi.ConversationKind
 import uniffi.teamcraft_ffi.CreateOutcome
@@ -170,6 +173,10 @@ data class LinkReview(
   /** The typed code is being checked: the confirm button waits. */
   val isConfirming: Boolean = false,
 )
+
+/** Pull to refresh waits this long for the connection, and shows its indicator at least [REFRESH_MIN_MS] (#2006). */
+private const val REFRESH_WAIT_MS = 8_000L
+private const val REFRESH_MIN_MS = 600L
 
 /** What typing the new device's code did. */
 enum class LinkConfirmation { CONFIRMED, WRONG_CODE, ATTEMPT_ENDED, FAILED }
@@ -1167,6 +1174,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     } catch (failure: IllegalStateException) {
       // Signed out meanwhile: no account to act for.
     }
+  }
+
+  /**
+   * Pull to refresh (#2006): the gateway checks its connection now instead of after its backoff,
+   * which also catches up what was missed. `false` when the connection didn't come up within
+   * [REFRESH_WAIT_MS] or needs a sign-in; the caller says so. Lasts at least [REFRESH_MIN_MS], so
+   * the indicator doesn't flash when the connection is up already.
+   */
+  suspend fun refreshConnection(): Boolean = coroutineScope {
+    val minimum = launch { delay(REFRESH_MIN_MS) }
+    graph.core.networkChanged()
+    val maybeSettled = withTimeoutOrNull(REFRESH_WAIT_MS) {
+      graph.core.connectionState.first {
+        it is ConnectionState.Connected || it is ConnectionState.Slow ||
+          it is ConnectionState.SignInRequired || it is ConnectionState.NoRoleLeft
+      }
+    }
+    minimum.join()
+    maybeSettled is ConnectionState.Connected || maybeSettled is ConnectionState.Slow
   }
 
   /** Shows a message once, like a failed action. */
