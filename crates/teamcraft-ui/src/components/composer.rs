@@ -2102,7 +2102,17 @@ pub fn Composer(
                 disabled=move || is_empty.get() && !has_files()
                 aria-label=move || i18n.t("composer-send")
                 title=move || i18n.t("composer-send")
-                on:click=move |_| send()
+                on:click=move |_| {
+                  send();
+                  // The click left the focus on the button, which the send disables: the next
+                  // message goes on typing. Not on touch, where it would pop the keyboard.
+                  if !is_touch_primary()
+                    && pending_confirm.with_untracked(Option::is_none)
+                    && let Some(element) = editor.get_untracked()
+                  {
+                    drop(element.focus());
+                  }
+                }
               >
                 <Icon name=IconName::Send />
               </button>
