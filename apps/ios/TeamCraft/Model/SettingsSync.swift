@@ -200,7 +200,8 @@ final class AppSettingsStores: SettingsSyncStores {
       confirmChannelOver: Self.confirmChannelOver(in: defaults),
       callStatusSounds: CallStatusSoundsSetting.stored(defaults.string(forKey: CallStatusSoundsSetting.key)).sounds,
       colorTheme: ColorThemeSetting.stored(in: defaults),
-      font: defaults.string(forKey: Self.fontKey) ?? Self.defaultFont
+      font: defaults.string(forKey: Self.fontKey) ?? Self.defaultFont,
+      favoriteOrder: FavoriteOrder.ids(defaults.string(forKey: FavoriteOrder.key) ?? "")
     )
   }
 
@@ -231,6 +232,9 @@ final class AppSettingsStores: SettingsSyncStores {
     }
     if settings.font != before.font {
       defaults.set(settings.font, forKey: Self.fontKey)
+    }
+    if settings.favoriteOrder != before.favoriteOrder {
+      defaults.set(FavoriteOrder.raw(settings.favoriteOrder), forKey: FavoriteOrder.key)
     }
     if settings.firstNameIsMention != before.firstNameIsMention
       || settings.channelMentionsNotify != before.channelMentionsNotify

@@ -58,7 +58,7 @@ private func styledRun(
   var piece: AttributedString
   switch run.kind {
   case .text:
-    piece = AttributedString(run.text)
+    piece = detectedText(run.text, colors: colors)
   case .code:
     // A space each side gives the code's background room.
     piece = AttributedString(" \(run.text) ")
@@ -112,4 +112,25 @@ private func link(
   piece.foregroundColor = colors.link
   piece.underlineStyle = Text.LineStyle.single
   return piece
+}
+
+/// Plain text with its phone numbers, e-mail and postal addresses as links (issue #2047): `tel:`,
+/// `mailto:` and a map search, which the system opens.
+private func detectedText(_ text: String, colors: MarkupColors) -> AttributedString {
+  let found = findDetected(text)
+  guard !found.isEmpty else { return AttributedString(text) }
+  var result = AttributedString()
+  var at = 0
+  let ns = text as NSString
+  for item in found {
+    result.append(AttributedString(ns.substring(with: NSRange(location: at, length: item.range.location - at))))
+    var piece = AttributedString(ns.substring(with: item.range))
+    piece.link = item.url
+    piece.foregroundColor = colors.link
+    piece.underlineStyle = Text.LineStyle.single
+    result.append(piece)
+    at = item.range.location + item.range.length
+  }
+  result.append(AttributedString(ns.substring(from: at)))
+  return result
 }

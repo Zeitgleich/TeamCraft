@@ -67,6 +67,14 @@ final class BubblesTests: XCTestCase {
     XCTAssertEqual(strong, ["Bold", "@alex"])
   }
 
+  func testPhoneNumbersAndEmailInPlainTextBecomeLinksButNotInCode() {
+    let line = MarkupLine(runs: [
+      run(.text, "Call 0170 1234567 or mail a@example.com "), run(.code, "0170 7654321"),
+    ])
+    let text = markupText([line], colors: colors, names: MentionNames(), permalinkLabel: "Link")
+    XCTAssertEqual(text.runs.compactMap(\.link).map(\.absoluteString), ["tel:01701234567", "mailto:a@example.com"])
+  }
+
   func testPermalinksShowTheirLabel() {
     let line = MarkupLine(runs: [run(.link(url: "teamcraft:/c/12/m/34", isLabeled: false), "teamcraft:/c/12/m/34")])
     let text = markupText([line], colors: colors, names: MentionNames(), permalinkLabel: "Link to a message")

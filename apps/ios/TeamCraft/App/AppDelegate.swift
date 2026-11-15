@@ -23,7 +23,18 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     // Background tasks must be registered before launch finishes.
     SegmentPrefetchTask.register()
     ScheduledSealTask.register()
+    QuickActions.shared.publish()
     return true
+  }
+
+  /// The scene's delegate takes the app icon's quick actions (#2061); SwiftUI still makes the window.
+  func application(
+    _ application: UIApplication, configurationForConnecting connectingSceneSession: UISceneSession,
+    options: UIScene.ConnectionOptions
+  ) -> UISceneConfiguration {
+    let configuration = UISceneConfiguration(name: nil, sessionRole: connectingSceneSession.role)
+    configuration.delegateClass = QuickActionSceneDelegate.self
+    return configuration
   }
 
   func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {

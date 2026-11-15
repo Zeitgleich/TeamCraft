@@ -54,4 +54,31 @@ final class GroupMentionsTests: XCTestCase {
     XCTAssertNil(MentionConfirmation.needed(body: "@team", memberCount: 5, notified: 10, confirmOver: 10))
     XCTAssertNil(MentionConfirmation.needed(body: "@team", memberCount: 5, notified: 99, confirmOver: 0))
   }
+
+  func testSuggestionsWorkAtTheCaretAndReplaceOnlyThatWord() {
+    let text = "hi @an and more"
+    XCTAssertEqual(activeMentionQuery(text, caret: 6), "an")
+    XCTAssertNil(activeMentionQuery(text, caret: 10))
+    let done = completingMention(in: text, handle: "anna", caret: 6)
+    XCTAssertEqual(done.text, "hi @anna and more")
+    XCTAssertEqual(done.caret, "hi @anna ".utf16.count)
+  }
+
+  func testRankedPeopleComeFirstAndOthersKeepTheirOrder() {
+    let people = [person("bob", "Bob"), person("bella", "Bella"), person("ben", "Ben")]
+    XCTAssertEqual(personSuggestions(query: "b", people: people, priority: ["Ben", "bella"]).map(\.username), ["ben", "bella", "bob"])
+    XCTAssertEqual(personSuggestions(query: "b", people: people).map(\.username), ["bob", "bella", "ben"])
+  }
+
+  func testPriorityIsRecentSendersThenRecentlyMentionedWithoutMe() {
+    let people = [person("me", "Me"), person("anna", "Anna"), person("tom", "Tom"), person("eva", "Eva")]
+    let messages = [
+      Message(id: "1", conversationId: "c", authorId: "tom", sentAtMs: 0, body: "a"),
+      Message(id: "2", conversationId: "c", authorId: "anna", sentAtMs: 1, body: "b"),
+      Message(id: "3", conversationId: "c", authorId: "me", sentAtMs: 2, body: "c"),
+    ]
+    XCTAssertEqual(
+      mentionPriority(messages: messages, myId: "me", people: people, recentlyMentioned: ["eva", "Anna"]),
+      ["anna", "tom", "eva"])
+  }
 }

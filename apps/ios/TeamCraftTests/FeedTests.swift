@@ -221,6 +221,8 @@ final class FeedTests: XCTestCase {
     XCTAssertNil(activeEmojiQuery("time 10:30"))
     XCTAssertEqual(completeEmoji(in: "great :thu", with: "👍"), "great 👍 ")
     XCTAssertEqual(completeEmoji(in: ":thu", with: "👍"), "👍 ")
+    XCTAssertEqual(activeEmojiQuery("a :thu b", caret: 6), "thu")
+    XCTAssertEqual(completeEmoji(in: "a :thu b", with: "👍", caret: 6), "a 👍 b")
   }
 
   func testAppLockClock() {

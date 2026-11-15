@@ -228,6 +228,12 @@ final class ChatModelTests: XCTestCase {
     XCTAssertEqual(
       sortedFavorites(favorites, by: .alphabetical, lastActivity: activity).map(\.name),
       ["also quiet", "amy", "bob", "quiet", "zed"])
+    // The order the user chose by hand comes first, the rest behind it as sorted (#2057).
+    XCTAssertEqual(
+      sortedFavorites(favorites, by: .alphabetical, lastActivity: activity, order: [favorites[2].id]).first?.id,
+      favorites[2].id)
+    XCTAssertEqual(FavoriteOrder.moved(["a", "b", "c"], id: "b", up: true), ["b", "a", "c"])
+    XCTAssertNil(FavoriteOrder.moved(["a", "b"], id: "a", up: true))
     let home = homeSections(favorites, lastActivity: activity, favoritesSort: .recent)
     XCTAssertEqual(home.first?.title, .favorites)
     XCTAssertEqual(home.first?.conversations.map(\.name), ["bob", "amy", "zed", "also quiet", "quiet"])

@@ -40,6 +40,37 @@ struct DiagnosticsExportRow: View {
   }
 }
 
+/// The app's version and build in Settings (issue #2056); a tap copies them, for a bug report.
+struct AppVersionRow: View {
+  @State private var isCopied = false
+
+  var body: some View {
+    Button {
+      UIPasteboard.general.string = DiagnosticsExport.appVersion
+      isCopied = true
+    } label: {
+      LabeledContent {
+        if isCopied {
+          Text("settings_version_copied").foregroundStyle(Theme.accent)
+        } else {
+          Text(verbatim: DiagnosticsExport.appVersion).foregroundStyle(Theme.textMuted)
+        }
+      } label: {
+        Text("settings_version_title")
+      }
+    }
+    .foregroundStyle(.primary)
+    .accessibilityHint(Text("settings_version_copy_hint"))
+    .sensoryFeedback(.success, trigger: isCopied) { _, copied in copied }
+    // The confirmation goes back to the version after a moment.
+    .task(id: isCopied) {
+      guard isCopied else { return }
+      try? await Task.sleep(for: .seconds(2))
+      isCopied = false
+    }
+  }
+}
+
 /// Builds the exported text and writes it to the temporary directory.
 enum DiagnosticsExport {
   static let fileName = "teamcraft-diagnostics.txt"
