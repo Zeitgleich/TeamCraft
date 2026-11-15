@@ -318,4 +318,5 @@
   <string name="push_mode_title">Push-Benachrichtigungen</string>
   <string name="push_service_title">Push-Dienst</string>
   <string name="search_prefetch_limit">Speicherlimit</string>
+  <string name="copied">Kopiert</string>
 </resources>
