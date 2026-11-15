@@ -688,11 +688,16 @@ struct BubbleReplyQuote: View {
   var maybeImage: ReplyAttachmentPreview?
 
   @Environment(\.openQuotedPicture) private var maybeOpenQuoted
+  @Environment(\.openQuotedMessage) private var maybeJumpToQuoted
 
   var body: some View {
     if let image = maybeImage, image.canOpen == true, let messageId = maybeMessageId, let open = maybeOpenQuoted {
       Button { open(messageId, image.fileId) } label: { quote }
         .buttonStyle(.plain)
+    } else if let messageId = maybeMessageId, let jump = maybeJumpToQuoted {
+      Button { jump(messageId) } label: { quote }
+        .buttonStyle(.plain)
+        .accessibilityHint(Text("quote_show_original"))
     } else {
       quote
     }
@@ -841,9 +846,21 @@ struct SenderAvatar: View {
   var size: CGFloat = senderAvatarSize
 
   @Environment(AppModel.self) private var model
+  @Environment(\.openProfile) private var maybeOpenProfile
   @State private var maybePicture: UIImage?
 
   var body: some View {
+    // The avatar opens the person's profile (#2002); an integration source has none.
+    if let open = maybeOpenProfile, maybeSourcePictureSha256 == nil, !userId.isEmpty {
+      Button { open(userId) } label: { avatar }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text("profile_open \(name)"))
+    } else {
+      avatar.accessibilityHidden(true)
+    }
+  }
+
+  private var avatar: some View {
     Group {
       if let maybePicture {
         Image(uiImage: maybePicture).resizable().scaledToFill()
@@ -857,7 +874,6 @@ struct SenderAvatar: View {
           .background(PersonColor.avatar(userId), in: Circle())
       }
     }
-    .accessibilityHidden(true)
     .task(id: maybeSourcePictureSha256) {
       guard let sha256 = maybeSourcePictureSha256 else {
         maybePicture = nil

@@ -58,7 +58,10 @@ final class BubblesTests: XCTestCase {
     let text = markupText([line], colors: colors, names: MentionNames(usernames: ["alex"], myUsername: "me"), permalinkLabel: "Link")
     let plain = String(text.characters)
     XCTAssertEqual(plain, "Bold code example.com/…/document-name.htmllabel@alex")
-    XCTAssertEqual(text.runs.compactMap(\.link).map(\.absoluteString), ["https://example.com/a/very/long/path/to/some/document-name.html"])
+    // A known person's mention opens their profile (#2002).
+    XCTAssertEqual(
+      text.runs.compactMap(\.link).map(\.absoluteString),
+      ["https://example.com/a/very/long/path/to/some/document-name.html", "teamcraft:/u/alex"])
     let strong = text.runs.filter { $0.inlinePresentationIntent?.contains(.stronglyEmphasized) == true }
       .map { String(text[$0.range].characters) }
     XCTAssertEqual(strong, ["Bold", "@alex"])

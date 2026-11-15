@@ -1669,7 +1669,7 @@ pub fn Composer(
                     <span class="chip-name">{name}</span>
                     <button
                       class="icon-btn icon-btn-small"
-                      aria-label=move || i18n.t("composer-remove-attachment")
+                      aria-label=move || i18n.t("composer-remove-attachment") title=move || i18n.t("composer-remove-attachment")
                       on:click=move |_| attachments.update(|list| { if index < list.len() { list.remove(index); } })
                     >
                       <Icon name=IconName::Close />
@@ -1698,7 +1698,7 @@ pub fn Composer(
                     {maybe_status.map(|key| view! { <span class="chip-status">{move || i18n.t(key)}</span> })}
                     <button
                       class="icon-btn icon-btn-small"
-                      aria-label=move || i18n.t("composer-remove-attachment")
+                      aria-label=move || i18n.t("composer-remove-attachment") title=move || i18n.t("composer-remove-attachment")
                       on:click=move |_| {
                         gone_ids.update_value(|gone| gone.push(id.clone()));
                         state.write(|backend| backend.remove_draft_file(conversation, maybe_thread, &id));
@@ -1776,7 +1776,7 @@ pub fn Composer(
                   <span class="grow" translate="no">
                     {i18n.t_with("quote-replying-to", &[("name", &target.author_name)])} " — " {target.excerpt}
                   </span>
-                  <button class="icon-btn icon-btn-small" aria-label=move || i18n.t("quote-cancel") on:click=move |_| state.reply_target.set(None)>
+                  <button class="icon-btn icon-btn-small" aria-label=move || i18n.t("quote-cancel") title=move || i18n.t("quote-cancel") on:click=move |_| state.reply_target.set(None)>
                     <Icon name=IconName::Close />
                   </button>
                 </div>
@@ -1794,7 +1794,7 @@ pub fn Composer(
                   <button
                     type="button"
                     class="icon-btn icon-btn-small"
-                    aria-label=move || i18n.t("close")
+                    aria-label=move || i18n.t("close") title=move || i18n.t("close")
                     on:mousedown=|ev| ev.prevent_default()
                     on:click=move |_| close_notice(NoticeEvent::CloseButton)
                   >
@@ -2102,7 +2102,17 @@ pub fn Composer(
                 disabled=move || is_empty.get() && !has_files()
                 aria-label=move || i18n.t("composer-send")
                 title=move || i18n.t("composer-send")
-                on:click=move |_| send()
+                on:click=move |_| {
+                  send();
+                  // The click left the focus on the button, which the send disables: the next
+                  // message goes on typing. Not on touch, where it would pop the keyboard.
+                  if !is_touch_primary()
+                    && pending_confirm.with_untracked(Option::is_none)
+                    && let Some(element) = editor.get_untracked()
+                  {
+                    drop(element.focus());
+                  }
+                }
               >
                 <Icon name=IconName::Send />
               </button>

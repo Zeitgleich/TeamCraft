@@ -301,7 +301,7 @@ pub fn OpenInAppButton() -> impl IntoView {
           {move || i18n.t("open-in-app")}
         </a>
         <span class="grow"></span>
-        <button type="button" class="icon-btn" aria-label=move || i18n.t("close") on:click=dismiss>
+        <button type="button" class="icon-btn" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=dismiss>
           <Icon name=IconName::Close />
         </button>
       </div>
