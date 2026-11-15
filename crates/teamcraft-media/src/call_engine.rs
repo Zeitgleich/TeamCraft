@@ -1679,14 +1679,16 @@ impl CallEngine {
     self.follow_thin_voice(now);
   }
 
-  /// Tells the driver whether to send the own voice's thin copy (#1893 step 3): while a receiver
+  /// Tells the driver whether to encode the own voice's thin copy (#1893 step 3): while a receiver
   /// on a thin downlink takes it (the SFU says so), the voice is on its full step, the others play
   /// long packets, and the uplink has room (not thin, no voice lost). A thin own voice is cheap
-  /// already; a thin uplink has no room for a copy.
+  /// already; a thin uplink has no room for a copy. Muting sends nothing of either copy
+  /// ([`Self::send_thin_audio`]) but keeps the copy's encoder.
   fn follow_thin_voice(&mut self, now: Instant) {
+    // Not stopped while muted: a turn that starts sends both copies from its first packet, and a
+    // thin receiver doesn't get the full voice meanwhile (#1893 step 3).
     let is_wanted = self.is_thin_voice_wanted
       && self.is_in_call()
-      && !self.is_muted
       && self.voice_steps.step() == VoiceStep::Full
       && self.voice_steps.has_long_frames()
       && !self.is_uplink_thin()
@@ -7077,7 +7079,10 @@ mod tests {
       alice.on_timer(now);
       alice.set_muted(true);
       alice.on_timer(now);
-      assert!(drain(&mut alice).contains(&EngineOutput::Event(CallEngineEvent::ThinVoice(false))));
+      assert!(
+        !drain(&mut alice).contains(&EngineOutput::Event(CallEngineEvent::ThinVoice(false))),
+        "the encoder stays for the next turn"
+      );
       alice.send_thin_audio(&frame(), now);
       assert!(
         !drain(&mut alice)

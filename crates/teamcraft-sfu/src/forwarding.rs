@@ -59,7 +59,7 @@ use teamcraft_proto::{
   VideoPublicationId, VideoTrack, VideoTrackKind,
 };
 use thiserror::Error;
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::audio_layers::{AudioLayerConfig, THIN_VOICE_LAYER, VoiceLayerChoice, VoiceSequence};
 use crate::layers::{
@@ -233,6 +233,9 @@ struct ParticipantRoute {
   voice_sequences: HashMap<DeviceId, VoiceSequence>,
   /// When its own thin voice last arrived: while it flows, receivers on thin links get it.
   maybe_thin_voice_at: Option<Instant>,
+  /// When its own voice (layer 0) last arrived, and when it came back after a pause.
+  maybe_voice_at: Option<Instant>,
+  maybe_voice_resumed_at: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -368,6 +371,8 @@ impl Forwarder {
       voice_layer: VoiceLayerChoice::default(),
       voice_sequences: HashMap::new(),
       maybe_thin_voice_at: None,
+      maybe_voice_at: None,
+      maybe_voice_resumed_at: None,
       is_suspended: false,
       retransmit_budget: RetransmitBudget::default(),
       maybe_join_probe: self.new_join_probe(now),
@@ -857,17 +862,34 @@ impl Forwarder {
     // A voice's thin copy (#1893) counts for neither its upload's check nor the speakers: the
     // sender's own layer does.
     let voice_layer = if is_audio { header.layer.value() } else { 0 };
+    let audio_layers = self.config.audio_layers;
     if is_audio && voice_layer == THIN_VOICE_LAYER {
       participant.maybe_thin_voice_at = Some(now);
     } else if is_audio {
       participant
         .uplink_voice
         .on_arrival(rtp_header.sequence_number.0, now);
+      // A voice back after a pause (a new turn) starts both copies at once, its thin one a packet
+      // or two later: a thin receiver waits for that rather than taking the full voice it can't
+      // carry.
+      let is_resumed = participant
+        .maybe_voice_at
+        .is_none_or(|at| now.saturating_duration_since(at) >= audio_layers.thin_stale_after);
+      if is_resumed {
+        participant.maybe_voice_resumed_at = Some(now);
+      }
+      participant.maybe_voice_at = Some(now);
     }
-    let thin_stale_after = self.config.audio_layers.thin_stale_after;
-    let has_thin_voice = participant
+    let is_thin_flowing = participant
       .maybe_thin_voice_at
-      .is_some_and(|at| now.saturating_duration_since(at) < thin_stale_after);
+      .is_some_and(|at| now.saturating_duration_since(at) < audio_layers.thin_stale_after);
+    let is_thin_expected = participant
+      .maybe_thin_voice_at
+      .is_some_and(|at| now.saturating_duration_since(at) < audio_layers.thin_known_for)
+      && participant
+        .maybe_voice_resumed_at
+        .is_some_and(|at| now.saturating_duration_since(at) < audio_layers.thin_resume_grace);
+    let has_thin_voice = is_thin_flowing || is_thin_expected;
     let has_uplink_become_hurt = !was_uplink_hurt && participant.uplink_voice.is_hurt(now);
 
     let mut route = Route::default();
@@ -897,7 +919,6 @@ impl Forwarder {
       receivers
     };
     let is_voice = is_audio || is_screen_audio;
-    let audio_layers = self.config.audio_layers;
     for receiver in receivers {
       if let Some(target) = self.participants.get_mut(&receiver) {
         let maybe_voice_sequence = if is_audio {
@@ -3051,9 +3072,63 @@ mod tests {
         ]
       );
 
-      // The copy stops: back to the voice as it is, numbered on.
-      let later = at + Duration::from_secs(1);
-      assert_eq!(to(&mut forwarder, 3, &voice(0, 760), later), vec![(0, 705)]);
+      // The copy stops while the voice goes on: back to the voice as it is, numbered on, once the
+      // copy counts as stopped.
+      let mut got = Vec::new();
+      for index in 1..=40u16 {
+        let later = at + Duration::from_millis(20) * u32::from(index);
+        got.extend(to(&mut forwarder, 3, &voice(0, 703 + index), later));
+      }
+      assert_eq!(got.first(), Some(&(0, 705)), "{got:?}");
+      assert_eq!(got.last(), Some(&(0, 705 + got.len() as u16 - 1)));
+    }
+
+    /// A new turn: the voice comes back with its full copy a packet or two before the thin one. A
+    /// thin receiver waits for the thin one instead of taking the full voice it can't carry.
+    #[test]
+    fn a_new_turn_reaches_a_thin_receiver_as_its_thin_copy() {
+      let (mut forwarder, now) = three_listeners();
+      to(&mut forwarder, 3, &voice(0, 100), now);
+      assert_eq!(
+        to(&mut forwarder, 3, &voice(THIN_VOICE_LAYER, 10), now),
+        vec![(THIN_VOICE_LAYER, 101)]
+      );
+      // A pause of two seconds, then the next turn.
+      let turn = now + Duration::from_secs(2);
+      assert!(
+        to(&mut forwarder, 3, &voice(0, 101), turn).is_empty(),
+        "the thin copy is coming"
+      );
+      assert!(
+        to(
+          &mut forwarder,
+          3,
+          &voice(0, 102),
+          turn + Duration::from_millis(20)
+        )
+        .is_empty()
+      );
+      assert_eq!(
+        to(
+          &mut forwarder,
+          3,
+          &voice(THIN_VOICE_LAYER, 11),
+          turn + Duration::from_millis(60)
+        ),
+        vec![(THIN_VOICE_LAYER, 102)]
+      );
+      // A sender that stopped its thin copy: after the grace, the voice as it is.
+      let later = turn + Duration::from_secs(40);
+      to(&mut forwarder, 3, &voice(0, 200), later);
+      assert_eq!(
+        to(
+          &mut forwarder,
+          3,
+          &voice(0, 201),
+          later + Duration::from_millis(400)
+        ),
+        vec![(0, 104)]
+      );
     }
 
     /// The thin copy counts for neither the speakers nor the sender's upload check: a lone copy

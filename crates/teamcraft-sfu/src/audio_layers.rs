@@ -30,6 +30,11 @@ pub struct AudioLayerConfig {
   /// A sender's thin copy counts as stopped when none came for this long: its receivers get its
   /// own voice then.
   pub thin_stale_after: Duration,
+  /// A sender whose voice comes back after a pause (a new turn) and that sent thin copies within
+  /// [`Self::thin_known_for`] starts its thin copy too, a packet or two after the voice: for this
+  /// long a thin receiver waits for it instead of taking the full voice it can't carry.
+  pub thin_resume_grace: Duration,
+  pub thin_known_for: Duration,
 }
 
 /// Whether a receiver takes the thin voices now.
@@ -54,6 +59,8 @@ impl Default for AudioLayerConfig {
       full_above_bps: 300_000,
       full_after: Duration::from_secs(5),
       thin_stale_after: Duration::from_millis(500),
+      thin_resume_grace: Duration::from_millis(300),
+      thin_known_for: Duration::from_secs(30),
     }
   }
 }
