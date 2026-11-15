@@ -15,6 +15,18 @@ data class Detected(val kind: DetectedKind, val range: IntRange, val value: Stri
     }
 }
 
+/**
+ * What kind of thing a link annotation's tag is (the [Detected.uri] it was made from), or null for
+ * others (message links, mentions). The value to act on is the link's own text, or the URL itself.
+ */
+fun detectedKindOfUri(uri: String): DetectedKind? = when {
+  uri.startsWith("http://", ignoreCase = true) || uri.startsWith("https://", ignoreCase = true) -> DetectedKind.WEB
+  uri.startsWith("tel:") -> DetectedKind.PHONE
+  uri.startsWith("mailto:") -> DetectedKind.EMAIL
+  uri.startsWith("geo:") -> DetectedKind.ADDRESS
+  else -> null
+}
+
 private val PHONE = Regex("""(?<![\w+])(?:\+|0|\()\d?[\d ()/.\-]{5,18}\d(?![\w])""")
 private val EMAIL = Regex("""[\w.+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)+""")
 

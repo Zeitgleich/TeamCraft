@@ -1,3 +1,4 @@
+import Contacts
 import XCTest
 
 @testable import TeamCraft
@@ -38,5 +39,14 @@ final class DetectedItemsTests: XCTestCase {
     XCTAssertEqual(quotedPart(of: "hello big world", range: NSRange(location: 6, length: 3)), "big")
     XCTAssertEqual(quotedPart(of: "hello big world", range: NSRange(location: 5, length: 0)), "hello big world")
     XCTAssertEqual(quotedPart(of: "hello big world", range: NSRange(location: 5, length: 1)), "hello big world")
+  }
+
+  func testAPhoneAndAnEmailBecomeAContactToAdd() throws {
+    let found = findDetected("Call +49 170 1234567 or write to anna@example.com. Visit Hauptstrasse 12, 10115 Berlin.")
+    let phone = try XCTUnwrap(unknownContact(for: found[0]))
+    XCTAssertEqual(phone.phoneNumbers.first?.value.stringValue, "+49 170 1234567")
+    let email = try XCTUnwrap(unknownContact(for: found[1]))
+    XCTAssertEqual(email.emailAddresses.first?.value as String?, "anna@example.com")
+    XCTAssertNil(unknownContact(for: found[2]))
   }
 }

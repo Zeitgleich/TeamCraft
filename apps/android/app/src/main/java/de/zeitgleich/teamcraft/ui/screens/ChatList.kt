@@ -14,6 +14,8 @@ import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.semantics.stateDescription
 import android.content.Context
 import android.text.format.DateUtils
@@ -179,6 +181,7 @@ import de.zeitgleich.teamcraft.ui.CollapsedSections
 import de.zeitgleich.teamcraft.ui.collapseKey
 import de.zeitgleich.teamcraft.ui.homeSections
 import de.zeitgleich.teamcraft.ui.recentActivityHomeRows
+import de.zeitgleich.teamcraft.ui.ShareShortcuts
 import de.zeitgleich.teamcraft.ui.recentActivitySection
 import de.zeitgleich.teamcraft.ui.visibleRows
 import de.zeitgleich.teamcraft.core.ScheduledOverview
@@ -309,6 +312,16 @@ fun ChatListScreen(
     previews.mapValues { it.value.preview.sentAt },
     shownFavoriteOrder,
   ).map { it.id }
+  // The most recent conversations, as the app icon's menu offers them (#2061): names only.
+  val notesTitle = stringResource(R.string.notes_title)
+  val launcherRecent = remember(loaded, previews, notesTitle) {
+    loaded?.let { items ->
+      recentActivitySection(items, previews.mapValues { it.value.preview.sentAt }, isShowingAll = false)
+        .conversations.take(ShareShortcuts.MAX_LAUNCHER)
+        .map { ShareShortcuts.Target(it.id, it.listName(notesTitle)) }
+    }.orEmpty()
+  }
+  LaunchedEffect(launcherRecent) { if (launcherRecent.isNotEmpty()) ShareShortcuts.publish(context, launcherRecent) }
   // The read the attention banner made already: its counts feed the Scheduled card too (#1466).
   val maybeScheduled = rememberScheduledOverview(viewModel)
   // The list is usable once its rows and their last lines are there (start-up measurements, Play vitals).
@@ -990,6 +1003,11 @@ private fun LazyListScope.collapsibleRows(
         onClick = { list.onOpen(conversation.id) },
         onLongPress = { list.onLongPress(conversation.id) },
         menu = { isOpen, onDismiss -> list.conversationMenu(conversation, isOpen, onDismiss) },
+        maybeReorder = if (section.title is SectionTitle.Favorites && !isCollapsed) {
+          rememberFavoriteReorder(conversation.id, section.conversations.map { it.id })
+        } else {
+          null
+        },
         modifier = Modifier.animateItem(),
       )
     }
@@ -1411,6 +1429,7 @@ private fun SwipeableConversationRow(
   onClick: () -> Unit,
   onLongPress: () -> Unit,
   menu: @Composable (Boolean, () -> Unit) -> Unit,
+  maybeReorder: FavoriteReorder? = null,
   modifier: Modifier = Modifier,
 ) {
   val haptics = LocalHapticFeedback.current
@@ -1420,10 +1439,22 @@ private fun SwipeableConversationRow(
   val state = rememberSwipeToDismissBoxState()
   val context = LocalContext.current
   val endAction by remember { ChatSwipePrefs.of(context).endAction }.collectAsState()
+  // A dragged row is placed by the drag, not by the list's own move animation.
+  val isDragging = maybeReorder?.state?.isDragging == true
   SwipeToDismissBox(
     state = state,
-    modifier = modifier,
-    gesturesEnabled = !isSelecting,
+    modifier = (if (isDragging) Modifier else modifier)
+      .then(
+        if (maybeReorder == null) {
+          Modifier
+        } else {
+          Modifier
+            .onSizeChanged { maybeReorder.state.height = it.height }
+            .zIndex(if (isDragging) 1f else 0f)
+            .graphicsLayer { translationY = maybeReorder.state.offset }
+        },
+      ),
+    gesturesEnabled = !isSelecting && !isDragging,
     enableDismissFromStartToEnd = actions.toggleRead != null,
     backgroundContent = { SwipeBackground(state.dismissDirection, conversation, isUnread = actions.isUnread, endAction = endAction) },
     onDismiss = { direction ->
@@ -1453,6 +1484,7 @@ private fun SwipeableConversationRow(
         typing,
         onClick,
         onLongPress = { if (isSelecting) onLongPress() else isMenuOpen = true },
+        maybeReorder = maybeReorder.takeIf { !isSelecting },
       )
       menu(isMenuOpen) { isMenuOpen = false }
     }
@@ -1546,8 +1578,11 @@ private fun ConversationRow(
   typing: List<String>,
   onClick: () -> Unit,
   onLongPress: () -> Unit,
+  maybeReorder: FavoriteReorder? = null,
 ) {
   val haptics = LocalHapticFeedback.current
+  val moveUpLabel = stringResource(R.string.favorite_move_up)
+  val moveDownLabel = stringResource(R.string.favorite_move_down)
   val readLabel = stringResource(if (actions.isUnread) R.string.chat_mark_read else R.string.chat_mark_unread)
   val favoriteLabel = stringResource(if (conversation.isFavorite) R.string.favorite_remove else R.string.favorite_add)
   Box {
@@ -1574,6 +1609,8 @@ private fun ConversationRow(
           customActions = listOfNotNull(
             actions.toggleRead?.let { toggle -> CustomAccessibilityAction(readLabel) { toggle(); true } },
             CustomAccessibilityAction(favoriteLabel) { actions.toggleFavorite(); true },
+            maybeReorder?.let { reorder -> CustomAccessibilityAction(moveUpLabel) { reorder.onMove(true) } },
+            maybeReorder?.let { reorder -> CustomAccessibilityAction(moveDownLabel) { reorder.onMove(false) } },
           )
         }
         .padding(horizontal = 16.dp, vertical = 8.dp),
@@ -1584,6 +1621,7 @@ private fun ConversationRow(
         TitleLine(conversation, maybeEntry, maybeSpaceName = conversation.maybeSpaceName.takeIf { showsSpace }, callCount = callCount)
         PreviewLine(conversation, maybeEntry, typing)
       }
+      if (maybeReorder != null) FavoriteDragHandle(maybeReorder, Modifier.padding(start = 4.dp))
     }
   }
 }

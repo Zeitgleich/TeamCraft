@@ -1153,8 +1153,11 @@ private fun MessageRow(
       // Without the right to react, a tap doesn't wait to tell a double tap apart either.
       onDoubleClick = reactQuickly.takeIf { canReact && !isPlaceholder },
       onLongClick = {
-        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-        onLongPress()
+        // A long-press on a link in the text opens the link's own menu (#2048), not the message's.
+        if (!LinkPress.isActive) {
+          haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+          onLongPress()
+        }
       }.takeIf { !isPlaceholder },
     )
     .semantics {
