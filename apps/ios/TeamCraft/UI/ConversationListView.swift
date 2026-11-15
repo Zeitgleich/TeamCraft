@@ -365,7 +365,7 @@ struct ConversationListView: View {
       if hasLoaded {
         EmptyChatsView { tab in maybeBrowseTab = tab }
       } else {
-        Color.clear
+        ListSkeleton().padding(.horizontal, 16).frame(maxHeight: .infinity, alignment: .top)
       }
     } else if shownTab == .meetings {
       MeetingsView(account: account)

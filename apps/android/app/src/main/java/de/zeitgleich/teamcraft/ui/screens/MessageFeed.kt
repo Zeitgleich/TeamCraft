@@ -300,6 +300,8 @@ fun MessageFeed(
   /** Kept clear at the end of the list: the floating composer over it (#1966). */
   bottomInset: Dp = 0.dp,
   maybeFocusMessage: String? = null,
+  /** The first read of the conversation hasn't come yet: placeholders stand in for the messages (#2008). */
+  isLoading: Boolean = false,
   onOpenPermalink: (String) -> Unit = {},
   /** Opens another conversation: the room a call moved into (issue #1290). */
   onOpenConversation: (String) -> Unit = {},
@@ -451,6 +453,7 @@ fun MessageFeed(
         listState.firstVisibleItemScrollOffset
       }
     }
+    if (isLoading && items.isEmpty()) ListSkeleton(Modifier.align(Alignment.BottomStart).padding(bottom = bottomInset))
     CompositionLocalProvider(LocalFeedMotion provides feedMotion, LocalStickyEdge provides stickyEdge) {
       LazyColumn(
         Modifier.fillMaxSize().onGloballyPositioned { stickyEdge.maybeFeed = it },

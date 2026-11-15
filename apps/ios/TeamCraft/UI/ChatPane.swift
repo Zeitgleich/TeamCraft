@@ -53,6 +53,8 @@ struct ChatPane: View {
   @State private var isPictureGone = false
   @State private var maybeDeleting: Message?
   @State private var isAtBottom = true
+  /// The first read of the messages came back (#2008): until then placeholders stand in for them.
+  @State private var hasLoadedMessages = false
   @State private var newBelowCount = 0
   @State private var isSendFailed = false
   @State private var isScheduleTooLarge = false
@@ -380,6 +382,7 @@ struct ChatPane: View {
         ScrollView {
           // One section per day: its date pill stays at the top while the day scrolls by.
           LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+            if threadId == nil && !hasLoadedMessages && messages.isEmpty { ListSkeleton() }
             // Above the oldest row: seen only when the reader is faster than the core.
             if (hasOlder && isLoadingOlder) || (!hasOlder && serverHistory == .loading) {
               ProgressView()
@@ -1422,6 +1425,7 @@ struct ChatPane: View {
       let readExtras = await model.extras(conversationId: conversation.id, messageIds: page.messages.map(\.id))
       await loadDisplayNamesOnce()
       messages = page.messages
+      hasLoadedMessages = true
       extras = readExtras
       hasOlder = page.hasOlder
       gaps = page.gaps

@@ -786,6 +786,34 @@ struct ImageGrid: View {
 }
 
 /// "Today", "Yesterday" or the date, as a small centred pill; pinned while its day scrolls by.
+/// Rows with the shape of what is on its way, instead of a spinner (#2008): an avatar and two
+/// lines, as the web's skeleton. Read out once as "Loading".
+struct ListSkeleton: View {
+  var rows = 7
+
+  var body: some View {
+    VStack(spacing: 0) {
+      ForEach(0..<rows, id: \.self) { index in
+        HStack(spacing: 12) {
+          Circle().fill(Color.secondary.opacity(0.2)).frame(width: 40, height: 40)
+          VStack(alignment: .leading, spacing: 6) {
+            Text(verbatim: "Placeholder name").font(.app(.footnote))
+            Text(verbatim: index.isMultiple(of: 2) ? "A longer placeholder line of text that stands in" : "A shorter placeholder line")
+              .font(.app(.body))
+              .lineLimit(1)
+          }
+          Spacer(minLength: 0)
+        }
+        .padding(.vertical, 10)
+      }
+    }
+    .redacted(reason: .placeholder)
+    .allowsHitTesting(false)
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel(Text("loading"))
+  }
+}
+
 struct DayPill: View {
   let date: Date
 
