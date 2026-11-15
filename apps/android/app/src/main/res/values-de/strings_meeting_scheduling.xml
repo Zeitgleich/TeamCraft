@@ -76,4 +76,20 @@
   <string name="meeting_error_until">Wähle das Datum des letzten Meetings.</string>
   <string name="meeting_error_until_before">Das letzte Datum liegt vor dem ersten Meeting.</string>
   <string name="meeting_error_email">„%1$s“ ist keine gültige E-Mail-Adresse.</string>
+  <string name="meetings_tab_upcoming">Anstehend</string>
+  <string name="meetings_tab_past">Vergangen</string>
+  <string name="meetings_past_empty">Meetings der letzten 30 Tage erscheinen hier, sobald sie vorbei sind.</string>
+  <string name="meeting_cancelled">Abgesagt</string>
+  <string name="meeting_holiday">Feiertag</string>
+  <string name="meeting_restore">Wiederherstellen</string>
+  <string name="meeting_restore_holiday">Trotzdem treffen</string>
+  <string name="meeting_remove">Aus der Liste entfernen</string>
+  <string name="meeting_copy_link">Link kopieren</string>
+  <string name="meeting_link_copied">Kopiert</string>
+  <string name="meeting_share_link">Teilen</string>
+  <string name="meeting_link_verifying">Wird geprüft …</string>
+  <string name="meeting_link_unverified">Dieses Gerät konnte den Meeting-Link nicht prüfen, deshalb wird er nicht weitergegeben. Versuche es noch einmal.</string>
+  <string name="meeting_link_hint">Für alle, auch für Gäste ohne Konto. Wer nicht im Meeting ist, wartet, bis ein Gastgeber ihn einlässt. Der Link enthält keinen Schlüssel: Gäste bekommen ihren beim Einlassen.</string>
+  <string name="meeting_created_title">Dein Meeting ist bereit</string>
+  <string name="meeting_created_hint">Schicke den Link an alle, mit denen du dich treffen willst.</string>
 </resources>

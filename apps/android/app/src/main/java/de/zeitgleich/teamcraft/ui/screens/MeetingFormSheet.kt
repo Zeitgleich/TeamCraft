@@ -81,6 +81,7 @@ import uniffi.teamcraft_ffi.MeetingForm
 import uniffi.teamcraft_ffi.MeetingFormProblem
 import uniffi.teamcraft_ffi.MeetingRepeat
 import uniffi.teamcraft_ffi.MeetingSave
+import uniffi.teamcraft_ffi.SavedMeeting
 import uniffi.teamcraft_ffi.MeetingSeriesEnd
 import uniffi.teamcraft_ffi.meetingFormProblems
 import uniffi.teamcraft_ffi.meetingFormWithRepeat
@@ -146,7 +147,7 @@ internal fun endOfDayMs(date: LocalDate, zone: ZoneId = ZoneId.systemDefault()):
   date.atTime(23, 59, 59).atZone(zone).toInstant().toEpochMilli()
 
 /**
- * Schedules a meeting ([maybeMeeting] `null`) or changes the user's own, with what desktop's dialog
+ * Schedules a meeting ([maybeMeeting] `null`; listed in the space [maybeSpaceId]) or changes the user's own, with what desktop's dialog
  * has: title, description, start, length, invited people and e-mail addresses, co-hosts, the
  * notetaker, the repeat rule and the lobby. The checks are the core's (`meetingFormProblems`).
  * Errors show at their field once a save was refused, the first invalid field takes the focus
@@ -154,7 +155,13 @@ internal fun endOfDayMs(date: LocalDate, zone: ZoneId = ZoneId.systemDefault()):
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun MeetingFormSheet(viewModel: MainViewModel, maybeMeeting: Meeting?, onSaved: () -> Unit, onDismiss: () -> Unit) {
+internal fun MeetingFormSheet(
+  viewModel: MainViewModel,
+  maybeMeeting: Meeting?,
+  onSaved: (SavedMeeting) -> Unit,
+  onDismiss: () -> Unit,
+  maybeSpaceId: String? = null,
+) {
   val changes by viewModel.changeCount.collectAsState()
   val scope = rememberCoroutineScope()
   var maybeForm by remember {
@@ -219,11 +226,11 @@ internal fun MeetingFormSheet(viewModel: MainViewModel, maybeMeeting: Meeting?, 
       maybeFailure = null
       scope.launch {
         val answer = viewModel.tryMeetingAction {
-          if (maybeMeeting == null) scheduleMeeting(form, null) else saveMeetingEdit(maybeMeeting.id, form)
+          if (maybeMeeting == null) scheduleMeeting(form, maybeSpaceId) else saveMeetingEdit(maybeMeeting.id, form)
         }
         when (answer) {
-          is ActionAnswer.Answered -> when (answer.value) {
-            is MeetingSave.Saved -> onSaved()
+          is ActionAnswer.Answered -> when (val outcome = answer.value) {
+            is MeetingSave.Saved -> onSaved(outcome.meeting)
             is MeetingSave.Refused -> wasRefused = true
           }
           is ActionAnswer.Failed -> maybeFailure = answer.text

@@ -70,7 +70,11 @@ struct MeetingFormView: View {
   @Environment(\.dismiss) private var dismiss
   let account: Account
   let maybeMeeting: Meeting?
+  /// A new meeting is listed in this space (its meetings tab).
+  var maybeSpaceId: String?
   let onSaved: () async -> Void
+  /// A new meeting was scheduled: the caller hands out its link once this sheet is gone.
+  var onCreated: (SavedMeeting) -> Void = { _ in }
 
   @State private var maybeForm: MeetingForm?
   @State private var maybeSavedStartMs: Int64?
@@ -429,12 +433,13 @@ struct MeetingFormView: View {
         if let meeting = maybeMeeting {
           outcome = try await model.saveMeetingEdit(meetingId: meeting.id, form: form)
         } else {
-          outcome = try await model.scheduleMeeting(form)
+          outcome = try await model.scheduleMeeting(form, spaceId: maybeSpaceId)
         }
         switch outcome {
-        case .saved:
+        case .saved(let saved):
           await onSaved()
           dismiss()
+          if maybeMeeting == nil { onCreated(saved) }
         case .refused:
           wasRefused = true
         }

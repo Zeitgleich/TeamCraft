@@ -14,6 +14,9 @@ pub use teamcraft_client_api::meeting_edits::{
 pub use teamcraft_client_api::meeting_invitees::{
   ChatInvitees, added_users, adding_invitee, adding_invitees, attending_users, saved_change,
 };
+pub use teamcraft_client_api::meeting_links::with_verifier;
+use teamcraft_client_api::meeting_links::{LEGACY_ORGANIZER_FRAGMENT_KEY, VERIFIER_FRAGMENT_KEY};
+use teamcraft_client_api::meeting_rows::{PAST_LIST_LIMIT, PAST_LOOKBACK_MS};
 use teamcraft_client_api::model::SpaceId;
 use teamcraft_proto::{
   CancelScope, CreateGuestLinkRequest, CreateInstantMeetingRequest, CreateMeetingRequest, ErrorBody,
@@ -42,17 +45,9 @@ pub const STATUS_CONFLICT: u16 = 409;
 /// Meetings that ended less than this long ago are still listed.
 const LIST_LOOKBACK_MS: i64 = 60 * 60_000;
 const LIST_LIMIT: u32 = 100;
-/// How far back the Past view of the meetings page reaches (#956).
-const PAST_LOOKBACK_MS: i64 = 30 * 24 * 60 * 60_000;
-/// The server's own maximum: a month of daily series still fits.
-const PAST_LIST_LIMIT: u32 = 500;
 /// Prefix of the page of a meeting; the guest token follows in the fragment (`#invite=`).
 const MEETING_PATH_PREFIX: &str = "/meeting/";
 const INVITE_FRAGMENT_KEY: &str = "invite=";
-/// The organizer's identity key fingerprint in a meeting link's fragment, and its name in links of
-/// older apps.
-const VERIFIER_FRAGMENT_KEY: &str = "v=";
-const LEGACY_ORGANIZER_FRAGMENT_KEY: &str = "o=";
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum MeetingError {
@@ -906,26 +901,6 @@ pub fn parse_guest_link(path: &str, fragment: &str) -> Option<GuestLink> {
   })
 }
 
-/// `link` with `fragment` (`v=<fingerprint>`) as its verifier, replacing any `v` the server put
-/// there: the copying device's pinned key wins over the server's word.
-pub fn with_verifier(link: &str, fragment: &str) -> String {
-  let (path, maybe_rest) = match link.split_once('#') {
-    Some((path, rest)) => (path, Some(rest)),
-    None => (link, None),
-  };
-  let mut parts: Vec<&str> = maybe_rest
-    .into_iter()
-    .flat_map(|rest| rest.split('&'))
-    .filter(|part| {
-      !part.is_empty()
-        && !part.starts_with(VERIFIER_FRAGMENT_KEY)
-        && !part.starts_with(LEGACY_ORGANIZER_FRAGMENT_KEY)
-    })
-    .collect();
-  parts.push(fragment);
-  format!("{path}#{}", parts.join("&"))
-}
-
 /// Requests of a guest. They carry no member account: the link's token is traded for a session.
 #[derive(Clone)]
 pub struct GuestClient {
@@ -1337,20 +1312,6 @@ mod tests {
     assert_eq!(by_id.maybe_invite_token, None);
     assert_eq!(by_id.maybe_resume_key.as_deref().map(String::as_str), Some("k3y"));
     assert!(parse_guest_link("/meeting/123456789", "#r=").is_none());
-  }
-
-  #[test]
-  fn the_copying_devices_fingerprint_replaces_the_servers() {
-    let base = format!("https://chat.example.com/meeting/{TOKEN}");
-    assert_eq!(with_verifier(&base, "v=11"), format!("{base}#v=11"));
-    assert_eq!(
-      with_verifier(&format!("{base}#v=22"), "v=11"),
-      format!("{base}#v=11")
-    );
-    assert_eq!(
-      with_verifier(&format!("{base}#invite=abc&v=22"), "v=11"),
-      format!("{base}#invite=abc&v=11")
-    );
   }
 
   #[test]

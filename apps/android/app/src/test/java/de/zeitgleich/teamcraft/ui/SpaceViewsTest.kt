@@ -5,6 +5,7 @@ import de.zeitgleich.teamcraft.core.Meeting
 import de.zeitgleich.teamcraft.core.MeetingList
 import de.zeitgleich.teamcraft.core.WireJson
 import de.zeitgleich.teamcraft.ui.screens.meetingsOfSpace
+import de.zeitgleich.teamcraft.ui.screens.upcomingMeetings
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -19,9 +20,20 @@ class SpaceViewsTest {
       meeting("2", startsAt = 100, space = "9"),
       meeting("3", startsAt = 50, space = "8"),
       meeting("4", startsAt = 60, space = null),
-      meeting("5", startsAt = 70, space = "9", status = "cancelled"),
+      meeting("5", startsAt = 70, space = "9", status = "ended"),
     )
-    assertEquals(listOf("2", "1"), meetingsOfSpace(meetings, "9").map { it.id })
+    assertEquals(listOf("2", "1"), meetingsOfSpace(meetings, "9", nowMs = 0).map { it.id })
+  }
+
+  /** #1905: a cancelled meeting stays listed until it would have ended, so it can be restored. */
+  @Test
+  fun aCancelledMeetingStaysUntilItWouldHaveEnded() {
+    val meetings = listOf(
+      meeting("1", startsAt = 200, space = null, status = "cancelled"),
+      meeting("2", startsAt = 100, space = null),
+      meeting("3", startsAt = 10, space = null),
+    )
+    assertEquals(listOf("2", "1"), upcomingMeetings(meetings, nowMs = 50).map { it.id })
   }
 
   @Test
@@ -52,6 +64,7 @@ class SpaceViewsTest {
     ).meetings.single()
     assertEquals("7", meeting.organizerUserId)
     assertTrue(meeting.isRepeating)
+    assertFalse(meeting.isOccurrenceCancelled)
   }
 
   private fun meeting(id: String, startsAt: Long, space: String?, status: String = "scheduled") =

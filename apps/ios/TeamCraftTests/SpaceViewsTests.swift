@@ -57,6 +57,22 @@ final class SpaceViewsTests: XCTestCase {
     XCTAssertNil(list.meetings[1].spaceId)
   }
 
+  /// #1905: a cancelled meeting stays listed until it would have ended, so it can be restored.
+  func testACancelledMeetingStaysUntilItWouldHaveEnded() throws {
+    let json = """
+      {"meetings":[
+        {"id":"1","title":"Off","starts_at":200,"ends_at":201,"status":"cancelled","conversation_id":"3",
+         "is_occurrence_cancelled":true},
+        {"id":"2","title":"Sync","starts_at":100,"ends_at":101,"status":"scheduled","conversation_id":"4"},
+        {"id":"3","title":"Done","starts_at":10,"ends_at":11,"status":"scheduled","conversation_id":"5"},
+        {"id":"4","title":"Ended","starts_at":100,"ends_at":101,"status":"ended","conversation_id":"6"}
+      ]}
+      """
+    let list = try XCTUnwrap(Wire.decode(MeetingList.self, from: json))
+    XCTAssertEqual(upcomingMeetings(list.meetings, nowMs: 50).map(\.id), ["2", "1"])
+    XCTAssertEqual(list.meetings[0].isOccurrenceCancelled, true)
+  }
+
   func testCallAndSavedAnswersDecode() throws {
     let calls = #"{"answer":"call_history","calls":[{"id":"7","conversation":"3","direction":"missed","started_at":5,"participants":[]}]}"#
     XCTAssertEqual(try XCTUnwrap(Wire.decode(ChatAnswer.self, from: calls)?.calls).first?.direction, "missed")

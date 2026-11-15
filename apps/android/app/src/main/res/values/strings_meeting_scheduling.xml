@@ -76,4 +76,20 @@
   <string name="meeting_error_until">Pick the date of the last meeting.</string>
   <string name="meeting_error_until_before">The last date is before the first meeting.</string>
   <string name="meeting_error_email">\"%1$s\" is not a valid email address.</string>
+  <string name="meetings_tab_upcoming">Upcoming</string>
+  <string name="meetings_tab_past">Past</string>
+  <string name="meetings_past_empty">Meetings of the last 30 days show up here once they have ended.</string>
+  <string name="meeting_cancelled">Cancelled</string>
+  <string name="meeting_holiday">Public holiday</string>
+  <string name="meeting_restore">Restore</string>
+  <string name="meeting_restore_holiday">Meet anyway</string>
+  <string name="meeting_remove">Remove from list</string>
+  <string name="meeting_copy_link">Copy link</string>
+  <string name="meeting_link_copied">Copied</string>
+  <string name="meeting_share_link">Share</string>
+  <string name="meeting_link_verifying">Verifying…</string>
+  <string name="meeting_link_unverified">This device couldn\'t verify the meeting link, so it isn\'t handed out. Try again.</string>
+  <string name="meeting_link_hint">For everybody, also guests without an account. Anyone who isn\'t in the meeting waits until a host lets them in. The link holds no key: guests get theirs when they are let in.</string>
+  <string name="meeting_created_title">Your meeting is ready</string>
+  <string name="meeting_created_hint">Send the link to the people you want to meet.</string>
 </resources>

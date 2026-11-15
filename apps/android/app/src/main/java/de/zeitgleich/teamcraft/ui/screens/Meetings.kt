@@ -1,7 +1,11 @@
 package de.zeitgleich.teamcraft.ui.screens
 
-import androidx.compose.foundation.layout.consumeWindowInsets
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.text.format.DateUtils
+import androidx.annotation.StringRes
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -21,7 +25,9 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -29,6 +35,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -39,24 +46,34 @@ import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
+import de.zeitgleich.teamcraft.core.ChatClient
 import de.zeitgleich.teamcraft.core.Meeting
 import de.zeitgleich.teamcraft.ui.ActionAnswer
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.theme.Spacing
 import kotlinx.coroutines.launch
 import uniffi.teamcraft_ffi.MeetingCancelScope
+import uniffi.teamcraft_ffi.SavedMeeting
+import uniffi.teamcraft_ffi.meetingRowActions
 import uniffi.teamcraft_ffi.newRequestKey
 
+/** The meetings screen's views, as desktop's (#956): what is still on, and what ended lately. */
+private enum class MeetingsView(@StringRes val label: Int) { UPCOMING(R.string.meetings_tab_upcoming), PAST(R.string.meetings_tab_past) }
+
 /**
- * Upcoming and running meetings: join one (its conversation's call), start one now, schedule one,
- * and change or cancel the user's own (#1841). The core saves them and sets up their encrypted
- * chats; this is the form and the list.
+ * Upcoming and running meetings, and the past ones: join one (its conversation's call), start one
+ * now, schedule one (then its link is handed out), and change, cancel, restore or remove the user's
+ * own (#1841, #1905). The core saves them and sets up their encrypted chats; this is the list.
  */
 @Composable
 fun MeetingsScreen(viewModel: MainViewModel, onBack: () -> Unit) {
+  var view by rememberSaveable { mutableStateOf(MeetingsView.UPCOMING) }
   val read = rememberRead(viewModel) { meetings() }
+  // The past list is only read once it is looked at.
+  val past = rememberRead(viewModel, enabled = view == MeetingsView.PAST) { pastMeetings() }
   val scope = rememberCoroutineScope()
   var isFormOpen by remember { mutableStateOf(false) }
+  var maybeCreated by remember { mutableStateOf<SavedMeeting?>(null) }
   var isStarting by remember { mutableStateOf(false) }
   // One key per "Meet now" until it went through: a retry after a lost answer starts no second one.
   var maybeNowKey by remember { mutableStateOf<String?>(null) }
@@ -91,42 +108,90 @@ fun MeetingsScreen(viewModel: MainViewModel, onBack: () -> Unit) {
     },
     contentWindowInsets = ScreenInsets,
   ) { padding ->
-    LazyColumn(Modifier.fillMaxSize().consumeWindowInsets(padding), contentPadding = padding) {
-      val list = upcomingMeetings(read.maybeValue.orEmpty())
-      placeholderItem(read.phase { upcomingMeetings(it) }, read.retry) { EmptyText(R.string.meetings_empty) }
-      // A repeating meeting is listed once per occurrence, all with the series' ID.
-      items(list, key = { "${it.id}-${it.startsAt}" }) { meeting ->
-        MeetingRow(viewModel, meeting, onChanged = read.refresh)
-        HorizontalDivider()
+    Column(Modifier.fillMaxSize().padding(padding.withoutBottom()).consumeWindowInsets(padding)) {
+      PrimaryTabRow(selectedTabIndex = view.ordinal) {
+        MeetingsView.entries.forEach { choice ->
+          Tab(selected = view == choice, onClick = { view = choice }, text = { Text(stringResource(choice.label)) })
+        }
+      }
+      LazyColumn(Modifier.fillMaxSize(), contentPadding = padding.bottomOnly()) {
+        if (view == MeetingsView.UPCOMING) {
+          placeholderItem(read.phase { upcomingMeetings(it) }, read.retry) { EmptyText(R.string.meetings_empty) }
+          // A repeating meeting is listed once per occurrence, all with the series' ID.
+          items(upcomingMeetings(read.maybeValue.orEmpty()), key = { "${it.id}-${it.startsAt}" }) { meeting ->
+            MeetingRow(viewModel, meeting, onChanged = read.refresh)
+            HorizontalDivider()
+          }
+        } else {
+          placeholderItem(past.phase { it }, past.retry) { EmptyText(R.string.meetings_past_empty) }
+          items(past.maybeValue.orEmpty(), key = { "${it.id}-${it.startsAt}" }) { meeting ->
+            MeetingRow(viewModel, meeting, onChanged = past.refresh)
+            HorizontalDivider()
+          }
+        }
       }
     }
   }
   if (isFormOpen) {
-    MeetingFormSheet(viewModel, maybeMeeting = null, onSaved = {
+    MeetingFormSheet(viewModel, maybeMeeting = null, onSaved = { saved ->
       isFormOpen = false
+      maybeCreated = saved
       read.refresh()
     }, onDismiss = { isFormOpen = false })
   }
+  maybeCreated?.let { saved -> MeetingCreatedSheet(viewModel, saved, onDismiss = { maybeCreated = null }) }
 }
 
-/** What is still on, soonest first. */
-fun upcomingMeetings(meetings: List<Meeting>): List<Meeting> =
-  meetings.filter { it.status != "cancelled" && it.status != "ended" }.sortedBy { it.startsAt }
+/**
+ * What is still on, soonest first: also a cancelled meeting until it would have ended, so its
+ * organizer can restore it (as desktop lists it). One that was ended early is gone.
+ */
+fun upcomingMeetings(meetings: List<Meeting>, nowMs: Long = System.currentTimeMillis()): List<Meeting> =
+  meetings.filter { it.status != "ended" && it.endsAt > nowMs }.sortedBy { it.startsAt }
 
 /**
- * A meeting's title and time, with the button to join its call; its organizer also gets "Edit
- * meeting" and "Cancel meeting". [onChanged] runs once one of them went through.
+ * A meeting's title and time, with the button to join its call while it is on, and its menu: "Copy
+ * link", and for its organizer "Edit meeting", "Cancel meeting", "Restore" and "Remove from list",
+ * as the core's rules for the row say (`meetingRowActions`). [onChanged] runs once one went through.
  */
 @Composable
 fun MeetingRow(viewModel: MainViewModel, meeting: Meeting, onChanged: () -> Unit = {}) {
   val context = LocalContext.current
+  val scope = rememberCoroutineScope()
   val isOrganizer = meeting.organizerUserId.isNotEmpty() && meeting.organizerUserId == viewModel.maybeMyUserId
+  val isCancelled = meeting.status == "cancelled"
+  val actions = meetingRowActions(
+    isOrganizer = isOrganizer,
+    isCancelled = isCancelled,
+    isOccurrenceCancelled = meeting.isOccurrenceCancelled,
+    isEnded = meeting.status == "ended",
+    endsAtMs = meeting.endsAt,
+    nowMs = System.currentTimeMillis(),
+  )
+  val hasMenu = actions.canCopyLink || actions.canChange || actions.canRestore || actions.canHide
   var isMenuOpen by remember { mutableStateOf(false) }
   var isEditing by remember { mutableStateOf(false) }
   var isCancelling by remember { mutableStateOf(false) }
+  var isBusy by remember { mutableStateOf(false) }
+  val act: (suspend ChatClient.() -> Unit) -> Unit = { action ->
+    if (!isBusy) {
+      isBusy = true
+      scope.launch {
+        when (val answer = viewModel.tryMeetingAction(action)) {
+          is ActionAnswer.Answered -> onChanged()
+          is ActionAnswer.Failed -> viewModel.showFailure(answer.text)
+        }
+        isBusy = false
+      }
+    }
+  }
   Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
     Column(Modifier.weight(1f)) {
-      Text(meeting.title, style = MaterialTheme.typography.titleMedium)
+      Text(
+        meeting.title,
+        style = MaterialTheme.typography.titleMedium,
+        color = if (actions.canCopyLink) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+      )
       Text(
         DateUtils.formatDateRange(
           context,
@@ -136,23 +201,59 @@ fun MeetingRow(viewModel: MainViewModel, meeting: Meeting, onChanged: () -> Unit
         ),
         style = MaterialTheme.typography.bodySmall,
       )
+      if (isCancelled) {
+        Text(
+          stringResource(if (meeting.isOccurrenceHoliday) R.string.meeting_holiday else R.string.meeting_cancelled),
+          style = MaterialTheme.typography.labelMedium,
+          color = MaterialTheme.colorScheme.error,
+        )
+      }
     }
-    Button(onClick = { viewModel.joinMeeting(meeting) }) {
-      Text(stringResource(R.string.meeting_join))
+    if (actions.canCopyLink) {
+      Button(onClick = { viewModel.joinMeeting(meeting) }) {
+        Text(stringResource(R.string.meeting_join))
+      }
     }
-    if (isOrganizer) {
-      IconButton(onClick = { isMenuOpen = true }) {
+    if (hasMenu) {
+      IconButton(onClick = { isMenuOpen = true }, enabled = !isBusy) {
         Icon(Icons.Filled.MoreVert, contentDescription = stringResource(R.string.meeting_actions))
       }
       DropdownMenu(expanded = isMenuOpen, onDismissRequest = { isMenuOpen = false }) {
-        DropdownMenuItem(text = { Text(stringResource(R.string.meeting_edit)) }, onClick = {
-          isMenuOpen = false
-          isEditing = true
-        })
-        DropdownMenuItem(text = { Text(stringResource(R.string.meeting_cancel)) }, onClick = {
-          isMenuOpen = false
-          isCancelling = true
-        })
+        if (actions.canCopyLink) {
+          DropdownMenuItem(text = { Text(stringResource(R.string.meeting_copy_link)) }, onClick = {
+            isMenuOpen = false
+            scope.launch { copyMeetingLink(viewModel, context, meeting.id) }
+          })
+        }
+        if (actions.canChange) {
+          DropdownMenuItem(text = { Text(stringResource(R.string.meeting_edit)) }, onClick = {
+            isMenuOpen = false
+            isEditing = true
+          })
+          DropdownMenuItem(text = { Text(stringResource(R.string.meeting_cancel)) }, onClick = {
+            isMenuOpen = false
+            isCancelling = true
+          })
+        }
+        if (actions.canRestore) {
+          DropdownMenuItem(
+            text = { Text(stringResource(if (meeting.isOccurrenceHoliday) R.string.meeting_restore_holiday else R.string.meeting_restore)) },
+            onClick = {
+              isMenuOpen = false
+              val maybeOccurrence = if (meeting.isOccurrenceCancelled) meeting.startsAt else null
+              act { restoreMeeting(meeting.id, maybeOccurrence) }
+            },
+          )
+        }
+        if (actions.canHide) {
+          DropdownMenuItem(
+            text = { Text(stringResource(R.string.meeting_remove), color = MaterialTheme.colorScheme.error) },
+            onClick = {
+              isMenuOpen = false
+              act { hideMeeting(meeting.id) }
+            },
+          )
+        }
       }
     }
   }
@@ -168,6 +269,22 @@ fun MeetingRow(viewModel: MainViewModel, meeting: Meeting, onChanged: () -> Unit
       if (wasCancelled) onChanged()
     })
   }
+}
+
+/**
+ * "Copy link": the core makes it with the organizer's key fingerprint as this device pinned it
+ * (e2ee.md §4.6), never the server's; without that, nothing is copied and the user is told.
+ */
+private suspend fun copyMeetingLink(viewModel: MainViewModel, context: Context, meetingId: String) {
+  when (val answer = viewModel.tryMeetingAction { meetingLink(meetingId) }) {
+    is ActionAnswer.Answered -> copyText(context, answer.value)
+    is ActionAnswer.Failed -> viewModel.showFailure(R.string.meeting_link_unverified)
+  }
+}
+
+/** Puts a meeting link on the clipboard (Android 13+ confirms it itself). */
+internal fun copyText(context: Context, text: String) {
+  context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText(text, text))
 }
 
 /** Asks before cancelling; of a series, which of its meetings. */
