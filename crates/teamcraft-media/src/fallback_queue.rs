@@ -267,7 +267,7 @@ pub fn may_buffer(buffered_bytes: u32, datagram: &[u8]) -> bool {
 }
 
 /// Whether a datagram carries audio. A datagram this can't read goes with the video, dropped first.
-fn is_audio(datagram: &[u8]) -> bool {
+pub fn is_audio(datagram: &[u8]) -> bool {
   let Ok(header) = DatagramHeader::parse(datagram) else {
     return false;
   };

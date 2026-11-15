@@ -12,6 +12,10 @@
 //! encoder) and goes no faster than the path drains, measured with the session's own pings
 //! ([`DrainPacer`]); audio and signaling aren't held back. The pacer's rate is also what the own
 //! layers are planned for ([`crate::call_engine::CallEngine::set_uplink_capacity`]).
+//!
+//! The own audio takes a second connection once the SFU offers one ([`AudioSocket`], #1979), so
+//! the voice waits for no lost segment of the video; until then, and whenever that connection can't
+//! take it, the audio goes here as before. The pacer counts only what is written here.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -26,10 +30,11 @@ use wasm_bindgen::prelude::Closure;
 use web_sys::{BinaryType, MessageEvent, WebSocket};
 use web_time::Instant;
 
+use super::audio_socket::AudioSocket;
 use super::{Input, LEAVE_CLOSE_CODE, MAX_SIGNALING_BYTES, SessionEnd, WebCallError, session_end};
 use crate::datagram::StreamId;
 use crate::fallback_pacer::{DrainPacer, PacingConfig};
-use crate::fallback_queue::{MediaQueue, MediaQueueConfig, may_buffer};
+use crate::fallback_queue::{MediaQueue, MediaQueueConfig, is_audio, may_buffer};
 
 /// A close code as the WebSocket itself says "on purpose".
 const NORMAL_CLOSURE: u16 = 1000;
@@ -43,6 +48,8 @@ pub(super) struct FallbackSession {
   on_message: Closure<dyn FnMut(MessageEvent)>,
   on_close: Closure<dyn FnMut()>,
   upload: RefCell<Box<UploadPacing>>,
+  /// The own audio's connection, once the SFU offered one (#1979).
+  audio: Rc<AudioSocket>,
 }
 
 /// The upload's queue and pacer (#1848).
@@ -55,15 +62,24 @@ struct UploadPacing {
 
 impl FallbackSession {
   /// Resolves when the socket is open. `socket` is the caller's to close if this future is dropped.
+  /// `url` and `protocols` are what it was opened with: the audio connection opens the same way.
   pub(super) async fn open(
     socket: WebSocket,
+    url: &str,
+    protocols: Vec<String>,
     inputs: &mpsc::UnboundedSender<Input>,
     generation: u64,
   ) -> Result<Self, WebCallError> {
     socket.set_binary_type(BinaryType::Arraybuffer);
     wait_until_open(&socket).await?;
     let has_ended = Rc::new(Cell::new(false));
-    let on_message = message_handler(inputs.clone(), generation, Rc::clone(&has_ended));
+    let audio = Rc::new(AudioSocket::new(url, protocols));
+    let on_message = message_handler(
+      inputs.clone(),
+      generation,
+      Rc::clone(&has_ended),
+      Rc::clone(&audio),
+    );
     let on_close = close_handler(inputs.clone(), generation, has_ended);
     socket.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
     socket.set_onclose(Some(on_close.as_ref().unchecked_ref()));
@@ -77,6 +93,7 @@ impl FallbackSession {
         next_probe: 0,
         maybe_probe_sent_at: None,
       })),
+      audio,
     })
   }
 
@@ -105,6 +122,9 @@ impl FallbackSession {
       let Some(datagram) = maybe_datagram else {
         return;
       };
+      if is_audio(&datagram) && self.audio.try_send(&datagram) {
+        continue;
+      }
       if may_buffer(self.socket.buffered_amount(), &datagram) {
         self.write(&FallbackFrame::Datagram(&datagram).encode(), now);
       }
@@ -177,6 +197,7 @@ impl Drop for FallbackSession {
     // The handlers go with this value: the socket may still fire.
     self.socket.set_onmessage(None);
     self.socket.set_onclose(None);
+    self.audio.close();
     // Keeps the closures' last use in one place; they are dropped after this.
     let _ = (&self.on_message, &self.on_close);
   }
@@ -228,6 +249,7 @@ fn message_handler(
   inputs: mpsc::UnboundedSender<Input>,
   generation: u64,
   has_ended: Rc<Cell<bool>>,
+  audio: Rc<AudioSocket>,
 ) -> Closure<dyn FnMut(MessageEvent)> {
   Closure::new(move |event: MessageEvent| {
     let Ok(buffer) = event.data().dyn_into::<ArrayBuffer>() else {
@@ -248,6 +270,8 @@ fn message_handler(
         warn!(length = body.len(), "signaling message too large");
       },
       Ok(FallbackFrame::Signal(body)) => match serde_json::from_slice::<CallServerMessage>(body) {
+        // The SFU offers the own audio a connection of its own (#1979): the session's, not the call's.
+        Ok(CallServerMessage::AudioSocket { secret }) => audio.attach(secret),
         Ok(message) => {
           let _ = inputs.unbounded_send(Input::Signal { generation, message });
         },

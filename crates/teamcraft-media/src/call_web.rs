@@ -38,6 +38,7 @@
 //! the new session's signals reach the engine, so the engine sees one event sequence without a gap
 //! (`switch_back`). The call keeps its slot and its DAVE group, and the others notice nothing.
 
+mod audio_socket;
 mod cadence;
 #[cfg(feature = "effects")]
 mod effects_preview;
@@ -2975,7 +2976,9 @@ impl Transport {
       session: session.clone(),
       is_open: false,
     };
-    let writers = Writers::Fallback(fallback::FallbackSession::open(socket, inputs, generation).await?);
+    let protocols = teamcraft_proto::fallback_protocols(token).to_vec();
+    let writers =
+      Writers::Fallback(fallback::FallbackSession::open(socket, url, protocols, inputs, generation).await?);
     opening.is_open = true;
     Ok(Self { session, writers })
   }
