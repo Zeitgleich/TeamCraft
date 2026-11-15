@@ -9,6 +9,8 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -31,6 +33,7 @@ import androidx.compose.ui.res.stringResource
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.ui.EntryAction
+import de.zeitgleich.teamcraft.ui.FavoriteOrder
 import de.zeitgleich.teamcraft.ui.EntryItem
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.channelDeleteText
@@ -54,6 +57,7 @@ fun ConversationEntryMenu(
   onDismiss: () -> Unit,
   onSelect: () -> Unit,
   onNotifications: () -> Unit,
+  favoritesShown: List<String> = emptyList(),
 ) {
   val context = LocalContext.current
   var leave by remember(conversation.id) { mutableStateOf(LeaveChoice.HIDDEN) }
@@ -67,7 +71,7 @@ fun ConversationEntryMenu(
     maybeLink = viewModel.conversationLink(conversation.id)
   }
   DropdownMenu(expanded = isOpen, onDismissRequest = onDismiss) {
-    for (entry in conversationMenu(conversation, leave, hasLink = maybeLink != null)) {
+    for (entry in conversationMenu(conversation, leave, hasLink = maybeLink != null, favoritesShown = favoritesShown)) {
       val lastAdminHint = if (conversation.canDeleteChannel) {
         R.string.entry_leave_last_channel_admin_or_delete
       } else {
@@ -80,6 +84,10 @@ fun ConversationEntryMenu(
           EntryAction.MarkRead -> viewModel.markRead(conversation.id)
           EntryAction.Notifications -> onNotifications()
           EntryAction.CopyLink -> maybeLink?.let { copyText(context, it) }
+          EntryAction.MoveFavoriteUp, EntryAction.MoveFavoriteDown -> {
+            val up = entry.action == EntryAction.MoveFavoriteUp
+            FavoriteOrder.moved(favoritesShown, conversation.id, up)?.let { FavoriteOrder.of(context).set(it) }
+          }
           EntryAction.LeaveChannel -> isConfirmingLeave = true
           EntryAction.DeleteChannel -> isConfirmingDelete = true
           else -> Unit
@@ -232,6 +240,8 @@ private fun look(action: EntryAction): Pair<Int, MenuGlyph> = when (action) {
   EntryAction.MarkRead -> R.string.chat_mark_read to MenuGlyph.Vector(Icons.Filled.Done)
   EntryAction.Notifications -> R.string.notifications_conversation to MenuGlyph.Vector(Icons.Filled.Notifications)
   EntryAction.CopyLink -> R.string.entry_copy_link to MenuGlyph.Vector(Icons.Filled.Share)
+  EntryAction.MoveFavoriteUp -> R.string.favorite_move_up to MenuGlyph.Vector(Icons.Filled.KeyboardArrowUp)
+  EntryAction.MoveFavoriteDown -> R.string.favorite_move_down to MenuGlyph.Vector(Icons.Filled.KeyboardArrowDown)
   EntryAction.LeaveChannel -> R.string.leave_channel to MenuGlyph.Vector(Icons.Filled.Close)
   EntryAction.DeleteChannel -> R.string.channel_delete to MenuGlyph.Vector(Icons.Filled.Delete)
   EntryAction.MuteSpace -> R.string.entry_mute_space to MenuGlyph.Drawable(R.drawable.ic_notifications_off)

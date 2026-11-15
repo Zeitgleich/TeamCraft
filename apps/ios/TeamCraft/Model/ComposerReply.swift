@@ -16,12 +16,13 @@ struct ComposerReply: Equatable {
   /// A target read back: the thumbnail of the quote.
   let maybeThumbnailData: Data?
 
-  init(message: Message) {
+  /// `quoting`: the part of the message the reply quotes (issue #2050); the whole body by default.
+  init(message: Message, quoting maybeQuote: String? = nil) {
     messageId = message.id
     maybeAttachmentId = nil
     maybeAuthorName = message.shownAuthorName
     maybeAuthorId = nil
-    excerpt = oneLine(message.body)
+    excerpt = oneLine(maybeQuote ?? message.body)
     maybeFile = nil
     maybeThumbnailData = nil
   }

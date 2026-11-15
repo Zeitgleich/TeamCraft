@@ -12,8 +12,8 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use teamcraft_proto::UserId;
 use teamcraft_proto::synced_settings::{SettingWrite, SyncedSettings};
+use teamcraft_proto::{ConversationId, UserId};
 
 use crate::calls::CallStatusSounds;
 use crate::color_theme::ColorTheme;
@@ -32,9 +32,10 @@ pub const KEY_CONFIRM_CHANNEL_OVER: &str = "notifications.confirm_channel_over";
 pub const KEY_CALL_STATUS_SOUNDS: &str = "calls.status_sounds";
 pub const KEY_COLOR_THEME: &str = "display.color_theme";
 pub const KEY_FONT: &str = "display.font";
+pub const KEY_FAVORITE_ORDER: &str = "favorite_order";
 
 /// Every account key the mobile apps read and write, in the order of [`MobileSettings`].
-pub const MOBILE_KEYS: [&str; 12] = [
+pub const MOBILE_KEYS: [&str; 13] = [
   KEY_LIST_LAYOUT,
   KEY_LIST_GROUPING,
   KEY_FAVORITES_SORT,
@@ -47,11 +48,12 @@ pub const MOBILE_KEYS: [&str; 12] = [
   KEY_CALL_STATUS_SOUNDS,
   KEY_COLOR_THEME,
   KEY_FONT,
+  KEY_FAVORITE_ORDER,
 ];
 
-/// Lists that say what a person watches for: an upload carries everything in them, so values of
-/// unknown origin never go to the account (as on web, `PRIVATE_KEYS`).
-const PRIVATE_KEYS: [&str; 1] = [KEY_KEYWORDS];
+/// Lists that say what a person watches for or which conversations they use: an upload carries
+/// everything in them, so values of unknown origin never go to the account (as on web, `PRIVATE_KEYS`).
+const PRIVATE_KEYS: [&str; 2] = [KEY_KEYWORDS, KEY_FAVORITE_ORDER];
 
 /// The settings of a phone that follow the account, with the phone's defaults.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -71,6 +73,9 @@ pub struct MobileSettings {
   pub color_theme: ColorTheme,
   /// The interface font (#1494).
   pub font: UiFont,
+  /// The favorites in the order the person dragged them into (#2057), as on desktop and web; empty
+  /// until they did. Favorites not in it follow the section's sort.
+  pub favorite_order: Vec<ConversationId>,
 }
 
 /// How the conversations are listed. Wire values as `teamcraft-ui` `SidebarLayout`.
@@ -149,6 +154,7 @@ impl Default for MobileSettings {
       call_status_sounds: CallStatusSounds::All,
       color_theme: ColorTheme::Brand,
       font: UiFont::System,
+      favorite_order: Vec::new(),
     }
   }
 }
@@ -223,6 +229,7 @@ impl SyncedValues for MobileSettings {
       KEY_CALL_STATUS_SOUNDS => serde_json::to_value(self.call_status_sounds).ok()?,
       KEY_COLOR_THEME => serde_json::to_value(&self.color_theme).ok()?,
       KEY_FONT => serde_json::to_value(&self.font).ok()?,
+      KEY_FAVORITE_ORDER => serde_json::to_value(&self.favorite_order).ok()?,
       _ => return None,
     };
     Some(value)
@@ -259,6 +266,7 @@ impl SyncedValues for MobileSettings {
           .is_some_and(|text| !matches!(text.parse(), Ok(UiFont::Unknown(_))));
         is_known && assign(&mut self.font, value)
       },
+      KEY_FAVORITE_ORDER => assign(&mut self.favorite_order, value),
       _ => false,
     }
   }
@@ -307,6 +315,7 @@ mod tests {
         call_status_sounds: CallStatusSounds::OwnOnly,
         color_theme: "preset:pine".parse().unwrap(),
         font: UiFont::Lexend,
+        favorite_order: vec![conversation(7), conversation(3)],
       };
       let read = |key| settings.read(key).unwrap();
       assert_eq!(read(KEY_LIST_LAYOUT), json!("list"));
@@ -319,6 +328,10 @@ mod tests {
       assert_eq!(read(KEY_CALL_STATUS_SOUNDS), json!("own_only"));
       assert_eq!(read(KEY_COLOR_THEME), json!("preset:pine"));
       assert_eq!(read(KEY_FONT), json!("lexend"));
+      assert_eq!(
+        read(KEY_FAVORITE_ORDER),
+        serde_json::to_value(vec![conversation(7), conversation(3)]).unwrap()
+      );
     }
 
     #[test]
@@ -329,6 +342,7 @@ mod tests {
         call_status_sounds: CallStatusSounds::Off,
         color_theme: "custom:#1b2233,#2f66e0,#2eb67d,#d1453b".parse().unwrap(),
         font: UiFont::Inter,
+        favorite_order: vec![conversation(2), conversation(1)],
         ..MobileSettings::default()
       };
       let mut copy = MobileSettings::default();
@@ -566,5 +580,9 @@ mod tests {
       value,
       kind: SettingWriteKind::Change,
     }
+  }
+
+  fn conversation(raw: i64) -> ConversationId {
+    ConversationId::from_snowflake(Snowflake::new(raw).unwrap())
   }
 }

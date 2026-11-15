@@ -8,6 +8,11 @@ import androidx.compose.ui.semantics.isTraversalGroup
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
+import androidx.compose.foundation.content.consume
+import androidx.compose.foundation.content.contentReceiver
+import android.net.Uri
 import androidx.compose.ui.text.style.TextDecoration
 import de.zeitgleich.teamcraft.ui.ComposerStyleColors
 import de.zeitgleich.teamcraft.ui.ComposerStyleTransformation
@@ -173,6 +178,7 @@ import de.zeitgleich.teamcraft.core.VoiceMessagePolicy
 import de.zeitgleich.teamcraft.ui.rememberThumbnail
 import de.zeitgleich.teamcraft.ui.ServerHistory
 import de.zeitgleich.teamcraft.ui.olderState
+import de.zeitgleich.teamcraft.ui.Completion
 import de.zeitgleich.teamcraft.ui.ComposerPrefs
 import de.zeitgleich.teamcraft.ui.ConversationRights
 import de.zeitgleich.teamcraft.ui.ChannelUnreachableBanner
@@ -189,6 +195,7 @@ import de.zeitgleich.teamcraft.ui.EmojiInput
 import de.zeitgleich.teamcraft.ui.FeedSeed
 import de.zeitgleich.teamcraft.ui.FirstUnread
 import de.zeitgleich.teamcraft.ui.Mentions
+import de.zeitgleich.teamcraft.ui.findActionable
 import de.zeitgleich.teamcraft.ui.GapRequest
 import de.zeitgleich.teamcraft.ui.PagedFeed
 import de.zeitgleich.teamcraft.ui.PlacedGap
@@ -997,6 +1004,7 @@ private fun MessageActions(
   val isMine = message.author == snapshot?.me?.id
   var isEditing by remember { mutableStateOf(false) }
   var isForwarding by remember { mutableStateOf(false) }
+  var isSelectingText by remember { mutableStateOf(false) }
   var isConfirmingDelete by remember { mutableStateOf(false) }
   val actions = messageActions(
     rights = rights,
@@ -1048,9 +1056,13 @@ private fun MessageActions(
               onDismiss()
             }
           }
-          MessageAction.CopyText -> SheetItem(R.string.action_copy_text) {
-            copyText(context, message.body)
-            onDismiss()
+          MessageAction.CopyText -> {
+            SheetItem(R.string.action_copy_text) {
+              copyText(context, message.body)
+              onDismiss()
+            }
+            SheetItem(R.string.action_select_text) { isSelectingText = true }
+            DetectedRows(remember(message.body) { findActionable(message.body) }, onDone = onDismiss)
           }
           MessageAction.MarkUnread -> SheetItem(R.string.action_mark_unread) {
             viewModel.act(ChatActions.markUnread(conversationId, message.id))
@@ -1094,6 +1106,16 @@ private fun MessageActions(
         viewModel.tryAct(ChatActions.edit(conversationId, message.id, body)).also { if (it == null) onDismiss() }
       },
       onDismiss = { isEditing = false },
+    )
+  }
+  if (isSelectingText) {
+    SelectTextDialog(
+      body = message.body,
+      onQuote = { quoted ->
+        ReplyTarget.set(conversationId, message, snapshot?.name(message.author).orEmpty(), excerpt = quoted)
+        onDismiss()
+      },
+      onDismiss = { isSelectingText = false },
     )
   }
   if (isForwarding && snapshot != null) {
@@ -1269,8 +1291,9 @@ object ReplyTarget {
 
   val current = kotlinx.coroutines.flow.MutableStateFlow<Target?>(null)
 
-  fun set(conversation: String, message: Message, authorName: String) {
-    current.value = Target(conversation, message.id, message.body, authorName)
+  /** [excerpt]: the part of the message the reply quotes (#2050); the whole body by default. */
+  fun set(conversation: String, message: Message, authorName: String, excerpt: String = message.body) {
+    current.value = Target(conversation, message.id, excerpt, authorName)
   }
 
   fun setImage(file: FileInfo, authorName: String) {
@@ -1415,7 +1438,10 @@ internal fun Composer(
     val thread = maybeThread
     onDispose { draftSave.takePending()?.let { viewModel.act(ChatActions.setDraft(conversation, thread, it)) } }
   }
-  val maybeQuery = Mentions.activeQuery(text)
+  // Where the caret is in this text, reported by the field; a text set from outside has it at the end.
+  var maybeCaretAt by remember { mutableStateOf<Pair<String, Int>?>(null) }
+  val caret = maybeCaretAt?.takeIf { it.first == text }?.second ?: text.length
+  val maybeQuery = Mentions.activeQuery(text, caret)
   val members = snapshot?.conversation(conversationId)?.memberIds?.mapNotNull { snapshot.user(it) } ?: emptyList()
   // The groups the user may mention here (#206), read again whenever an `@` starts.
   val groups by produceState(emptyList<MentionableGroupItem>(), conversationId, maybeQuery != null) {
@@ -1611,13 +1637,26 @@ internal fun Composer(
   // or take of this composer keeps it whatever the policy says now.
   val showsVoice = voice.isActive || (voicePolicy.enabled && !canSend && !isSending)
   fun trySend() = confirmThenSend(null)
+  fun pick(done: Completion) {
+    text = done.text
+    maybeCaretAt = done.text to done.caret
+  }
   Column(Modifier.fillMaxWidth()) {
-    EmojiSuggestions(text) { emoji -> text = EmojiInput.complete(text, emoji) }
+    EmojiSuggestions(text, caret) { emoji -> pick(EmojiInput.complete(text, emoji, caret)) }
     if (maybeQuery != null) {
-      Mentions.suggestions(maybeQuery, members).forEach { user ->
+      val priority = Mentions.priority(
+        viewModel.feedSeed(conversationId)?.messages.orEmpty(),
+        snapshot?.me?.id.orEmpty(),
+        members,
+        composerPrefs.recentMentions,
+      )
+      Mentions.suggestions(maybeQuery, members, priority = priority).forEach { user ->
         Text(
           "@${user.username} · ${user.displayName}",
-          modifier = Modifier.fillMaxWidth().clickable { text = Mentions.complete(text, user) }.padding(horizontal = 16.dp, vertical = 8.dp),
+          modifier = Modifier.fillMaxWidth().clickable {
+            composerPrefs.noteMention(user.username)
+            pick(Mentions.complete(text, user, caret))
+          }.padding(horizontal = 16.dp, vertical = 8.dp),
         )
       }
       val adminsName = stringResource(R.string.group_mention_admins)
@@ -1626,7 +1665,7 @@ internal fun Composer(
         Text(
           "@${group.handle} · ${Mentions.shownName(group, adminsName)} · " +
             pluralStringResource(R.plurals.group_mention_people, notified, notified),
-          modifier = Modifier.fillMaxWidth().clickable { text = Mentions.complete(text, group.handle) }.padding(horizontal = 16.dp, vertical = 8.dp),
+          modifier = Modifier.fillMaxWidth().clickable { pick(Mentions.complete(text, group.handle, caret)) }.padding(horizontal = 16.dp, vertical = 8.dp),
         )
       }
     }
@@ -1721,6 +1760,8 @@ internal fun Composer(
     }
     ComposerField(
       text = text,
+      caret = caret,
+      onCaretChange = { maybeCaretAt = text to it },
       onTextChange = {
         text = it
         if (maybeScheduleAttempt?.first != it) maybeScheduleAttempt = null
@@ -1729,6 +1770,11 @@ internal fun Composer(
           maybeLastTypingAt = now
           viewModel.act(ChatActions.typing(conversationId, maybeThread))
         }
+      },
+      onPasteFiles = { uris ->
+        // The keyboard's permission to read these ends when the receiver returns: copy them now.
+        val picked = runBlocking(Dispatchers.IO) { uris.mapNotNull { viewModel.importFile(it) } }
+        if (picked.isNotEmpty()) files = files + picked
       },
       canSend = canSend,
       isSending = isSending,
@@ -1829,10 +1875,14 @@ internal fun Composer(
  * take shows in the pill instead of the field ([maybeVoiceBar]). A long-press on send opens how the
  * message is sent (priority, receipts, silent), as Telegram's and Signal's send buttons do.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ComposerField(
   text: String,
   onTextChange: (String) -> Unit,
+  caret: Int,
+  onCaretChange: (Int) -> Unit,
+  onPasteFiles: (List<Uri>) -> Unit,
   canSend: Boolean,
   isSending: Boolean,
   isSendWithEnter: Boolean,
@@ -1849,7 +1899,7 @@ private fun ComposerField(
   // The field's own text and selection: formatting acts on the selection. A text set from outside
   // (a mention picked, a draft restored, the field cleared) puts the caret at its end.
   var field by remember { mutableStateOf(TextFieldValue(text, TextRange(text.length))) }
-  val value = if (field.text == text) field else TextFieldValue(text, TextRange(text.length))
+  val value = if (field.text == text) field else TextFieldValue(text, TextRange(caret.coerceIn(0, text.length)))
   val scheme = MaterialTheme.colorScheme
   val styleColors = ComposerStyleColors(
     marker = scheme.onSurfaceVariant,
@@ -1865,6 +1915,7 @@ private fun ComposerField(
   fun update(next: TextFieldValue) {
     field = next
     if (next.text != text) onTextChange(next.text)
+    if (next.selection.collapsed) onCaretChange(next.selection.end)
   }
   val active = if (isFormatBarOpen) remember(value.text, value.selection) { value.activeFormats() } else emptySet()
   Column {
@@ -1898,6 +1949,13 @@ private fun ComposerField(
           modifier = Modifier
             .weight(1f)
             .focusRequester(focus)
+            // Pasted pictures and what the keyboard inserts (GIFs, stickers) become attachments (#2053).
+            .contentReceiver { content ->
+              val uris = mutableListOf<Uri>()
+              val rest = content.consume { item -> item.uri?.also { uris += it } != null }
+              if (uris.isNotEmpty()) onPasteFiles(uris)
+              rest
+            }
             .onPreviewKeyEvent { event ->
               // Hardware keyboards: Enter sends when the user chose so; Shift+Enter is a new line.
               val isSendKey = isSendWithEnter && event.type == KeyEventType.KeyDown && event.key == Key.Enter && !event.isShiftPressed
@@ -2030,8 +2088,8 @@ private fun SendFailure(@StringRes reason: Int, onRetry: () -> Unit, onDismiss: 
  * emoji in. Emoji newer than the device's font are left out: they would show as empty boxes.
  */
 @Composable
-private fun EmojiSuggestions(text: String, onPick: (String) -> Unit) {
-  val maybeQuery = EmojiInput.activeQuery(text) ?: return
+private fun EmojiSuggestions(text: String, caret: Int, onPick: (String) -> Unit) {
+  val maybeQuery = EmojiInput.activeQuery(text, caret) ?: return
   val suggestions = remember(maybeQuery) {
     val paint = Paint()
     emojiSuggestions(maybeQuery, (MAX_EMOJI_SUGGESTIONS * 4).toUInt())

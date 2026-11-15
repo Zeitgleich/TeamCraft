@@ -125,4 +125,7 @@
   <string name="call_share_screen_failed">Your screen couldn\'t be shared. Try again from the call\'s menu.</string>
   <string name="call_share_taken_over">%1$s is now sharing their screen, so your share ended.</string>
   <string name="call_share_taken_over_unnamed">Someone else is now sharing their screen, so your share ended.</string>
+  <string name="call_audio_route">Audio output</string>
+  <string name="call_audio_route_current">Selected</string>
+  <string name="call_route_earpiece">Phone earpiece</string>
 </resources>

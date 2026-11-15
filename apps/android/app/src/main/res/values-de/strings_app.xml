@@ -17,4 +17,8 @@
   <string name="user_deleted_name">Gelöschter Nutzer</string>
   <string name="ok">OK</string>
   <string name="more">Mehr</string>
+  <string name="settings_version_title">App-Version</string>
+  <string name="settings_version_summary">%1$s (%2$s) · Zum Kopieren tippen</string>
+  <string name="favorite_move_up">Favorit nach oben</string>
+  <string name="favorite_move_down">Favorit nach unten</string>
 </resources>

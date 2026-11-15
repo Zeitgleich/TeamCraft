@@ -33,6 +33,8 @@ pub struct SyncedAppSettings {
   /// The interface font (#1494), as stored: its wire name (`system`, `inter`, …); an unknown one
   /// shows the system font.
   pub font: String,
+  /// The favorites in the order the person chose (#2057): conversation IDs, as on desktop and web.
+  pub favorite_order: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -160,6 +162,12 @@ impl From<SyncedAppSettings> for MobileSettings {
       font: match app.font.parse() {
         Ok(font) => font,
       },
+      // An ID that doesn't parse can't name a conversation: dropped.
+      favorite_order: app
+        .favorite_order
+        .iter()
+        .filter_map(|id| id.parse().ok())
+        .collect(),
     }
   }
 }
@@ -196,6 +204,7 @@ impl From<MobileSettings> for SyncedAppSettings {
       },
       color_theme: settings.color_theme.to_string(),
       font: settings.font.to_string(),
+      favorite_order: settings.favorite_order.iter().map(ToString::to_string).collect(),
     }
   }
 }

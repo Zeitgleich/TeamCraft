@@ -391,6 +391,13 @@ final class VoiceRecorder {
   }
 }
 
+/// The voice message that plays after `endedKey` (issue #2054): the next one of `order` (oldest
+/// first) that was not played yet, or nil at the end. Messages the user skipped stay skipped.
+func nextUnplayedVoice(order: [String], endedKey: String, played: Set<String>) -> String? {
+  guard let at = order.firstIndex(of: endedKey) else { return nil }
+  return order.dropFirst(at + 1).first { !played.contains($0) }
+}
+
 /// The app's one voice message player: one plays at a time, and it pauses for a recording, a
 /// call, the background and the lock.
 @MainActor
@@ -428,6 +435,11 @@ final class VoicePlayer {
   @ObservationIgnored private var maybeTick: Task<Void, Never>?
   @ObservationIgnored private var hasAudioSession = false
   @ObservationIgnored private var interruptionObserver: NSObjectProtocol?
+  /// The voice messages of the open conversation, oldest first, and who set them (#2054): after one
+  /// ends the next unplayed one starts.
+  @ObservationIgnored private var queue: [FileInfo] = []
+  @ObservationIgnored private var queueOwner: String?
+  @ObservationIgnored private var played = Set<String>()
 
   private init() {
     interruptionObserver = NotificationCenter.default.addObserver(
@@ -440,6 +452,19 @@ final class VoicePlayer {
   }
 
   static func key(of file: FileInfo) -> String { "\(file.message)/\(file.fileId)" }
+
+  /// The voice messages the player plays on through, from the view `owner` (a conversation or thread).
+  func setQueue(_ files: [FileInfo], owner: String) {
+    queue = files
+    queueOwner = owner
+  }
+
+  /// The view `owner` left: its messages are not played on through any more.
+  func clearQueue(owner: String) {
+    guard queueOwner == owner else { return }
+    queue = []
+    queueOwner = nil
+  }
 
   /// Where the player stands with `file`; `.idle` while it holds another or none.
   func state(of file: FileInfo) -> State {
@@ -515,6 +540,7 @@ final class VoicePlayer {
     // The recording goes first; a call owns the audio.
     guard model.calls.activeCall == nil, VoiceRecorder.shared.phase == .idle || isReviewing else { return }
     maybeKey = Self.key(of: file)
+    played.insert(Self.key(of: file))
     durationMs = file.maybeDurationMs ?? 0
     state = .loading
     maybeLoad = Task { [weak self] in
@@ -572,15 +598,25 @@ final class VoicePlayer {
         guard let self else { return }
         positionMs = Int64(player.currentTime * 1000)
         if !player.isPlaying && state == .playing {
+          let endedKey = maybeKey
           player.currentTime = 0
           positionMs = 0
           state = .paused
           endAudioSession()
+          if let endedKey { playOn(after: endedKey) }
           return
         }
         try? await Task.sleep(for: .milliseconds(100))
       }
     }
+  }
+
+  /// The next voice message that wasn't played starts, as in the common messengers (#2054).
+  private func playOn(after endedKey: String) {
+    guard let next = nextUnplayedVoice(order: queue.map(Self.key(of:)), endedKey: endedKey, played: played),
+      let file = queue.first(where: { Self.key(of: $0) == next })
+    else { return }
+    load(file, model: AppModel.shared, startFraction: 0)
   }
 
   private func stopTicking() {

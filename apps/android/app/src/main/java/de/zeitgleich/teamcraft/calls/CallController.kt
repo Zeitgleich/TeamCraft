@@ -67,6 +67,8 @@ class CallController(
   private val tracks = MutableStateFlow<List<VideoTrackInfo>>(emptyList())
   private val frames = MutableStateFlow<Map<UInt, Bitmap>>(emptyMap())
   private val speaker = MutableStateFlow(false)
+  private val routes = MutableStateFlow<List<AudioRoute>>(emptyList())
+  private val currentRouteId = MutableStateFlow<String?>(null)
   @Volatile private var maybeSession: CallSession? = null
   @Volatile private var maybeTelecomJob: Job? = null
   @Volatile private var maybeTelecomCall: CallControlScope? = null
@@ -129,6 +131,12 @@ class CallController(
 
   /** Audio goes to the loudspeaker. */
   val isSpeakerOn: StateFlow<Boolean> = speaker
+
+  /** The places the sound can go to now: earpiece, loudspeaker, headsets (#2060). */
+  val audioRoutes: StateFlow<List<AudioRoute>> = routes
+
+  /** The [AudioRoute.id] the sound goes to now. */
+  val audioRouteId: StateFlow<String?> = currentRouteId
 
   /** The call ringing on this device, until answered, declined or ended elsewhere. */
   val incomingRing: StateFlow<IncomingRing?> = ringing
@@ -433,6 +441,13 @@ class CallController(
     scope.launch { call.requestEndpointChange(target) }
   }
 
+  /** Sends the sound to the route the user picked from [audioRoutes]. */
+  fun selectAudioRoute(id: String) {
+    val call = maybeTelecomCall ?: return
+    val target = endpoints.firstOrNull { it.identifier.toString() == id } ?: return
+    scope.launch { call.requestEndpointChange(target) }
+  }
+
   /**
    * Leaves the call; the engine's ended state then ends the Telecom call and the ongoing-call
    * notification. While still joining it cancels the join; while ringing it declines.
@@ -588,8 +603,18 @@ class CallController(
           }
           launch { endWithEngine(this@addCall) }
           launch { isMuted.collect { maybeSession?.setMuted(it) } }
-          launch { availableEndpoints.collect { endpoints = it } }
-          launch { currentCallEndpoint.collect { speaker.value = it.type == CallEndpointCompat.TYPE_SPEAKER } }
+          launch {
+            availableEndpoints.collect { list ->
+              endpoints = list
+              routes.value = list.map { AudioRoute(it.identifier.toString(), routeKindOf(it.type), it.name.toString()) }
+            }
+          }
+          launch {
+            currentCallEndpoint.collect {
+              speaker.value = it.type == CallEndpointCompat.TYPE_SPEAKER
+              currentRouteId.value = it.identifier.toString()
+            }
+          }
         }
       } catch (error: Exception) {
         // Also a cancellation: declined, rang out or ended elsewhere.

@@ -6,6 +6,8 @@ struct ChatSearchField: View {
   @Binding var text: String
   let hasFilters: Bool
   let onFilters: () -> Void
+  /// Counts up to put the cursor in the field (the app icon's "Search", #2061).
+  var focusRequest = 0
 
   @FocusState private var isFocused: Bool
 
@@ -55,6 +57,7 @@ struct ChatSearchField: View {
       }
     }
     .animation(.snappy(duration: 0.2), value: isFocused)
+    .onChange(of: focusRequest) { _, _ in isFocused = true }
   }
 }
 

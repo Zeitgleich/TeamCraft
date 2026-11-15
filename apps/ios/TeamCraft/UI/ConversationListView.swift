@@ -16,6 +16,7 @@ struct ConversationListView: View {
   @State private var selection: String?
   @State private var isShowingDrafts = false
   @State private var query = ""
+  @State private var searchFocusRequest = 0
   @State private var hits: [SearchHit] = []
   @State private var isShowingSettings = false
   @State private var isShowingDirectory = false
@@ -59,6 +60,7 @@ struct ConversationListView: View {
   @AppStorage(ChatListLayout.key) private var layoutRaw = ChatListLayout.spaces.rawValue
   @AppStorage(ChatListGrouping.key) private var groupingRaw = ChatListGrouping.mixed.rawValue
   @AppStorage(FavoritesSort.key) private var favoritesSortRaw = FavoritesSort.alphabetical.rawValue
+  @AppStorage(FavoriteOrder.key) private var favoriteOrderRaw = ""
   /// The user's own presence, as Settings set it: on the avatar in the header (#1786).
   @AppStorage("presence") private var presenceRaw = PresenceChoice.online.rawValue
   @Environment(\.horizontalSizeClass) private var sizeClass
@@ -98,7 +100,7 @@ struct ConversationListView: View {
             if let progress = maybeFirstSync { FirstSyncBar(progress: progress) }
             NotificationPromptCard()
             if !conversations.isEmpty || isSearching {
-              ChatSearchField(text: $query, hasFilters: !filters.isEmpty) { isShowingFilters = true }
+              ChatSearchField(text: $query, hasFilters: !filters.isEmpty, onFilters: { isShowingFilters = true }, focusRequest: searchFocusRequest)
                 .padding(.horizontal, 16)
                 .padding(.bottom, isFilterShown && !isSearching ? 0 : 8)
             }
@@ -258,6 +260,15 @@ struct ConversationListView: View {
         initialSpaceId: choice.id, initialTab: spaceViewTab
       ) { conversationId in selection = conversationId }
     }
+    // The app icon's "New message" and "Search" (#2061), also when they started the app.
+    .onChange(of: QuickActions.shared.pending, initial: true) { _, action in
+      guard let action else { return }
+      QuickActions.shared.pending = nil
+      switch action {
+      case .newMessage: maybeBrowseTab = .people
+      case .search: searchFocusRequest += 1
+      }
+    }
     .sheet(item: $maybeBrowseTab, onDismiss: { maybeBrowseSpaceId = nil }) { tab in
       BrowseView(tab: tab, maybeInitialSpaceId: maybeBrowseSpaceId) { conversationId in selection = conversationId }
     }
@@ -300,6 +311,15 @@ struct ConversationListView: View {
   private var isList: Bool { layoutRaw == ChatListLayout.list.rawValue }
 
   private var favoritesSort: FavoritesSort { FavoritesSort.stored(favoritesSortRaw) }
+  private var favoriteOrder: [String] { FavoriteOrder.ids(favoriteOrderRaw) }
+
+  /// The favorites as the Favorites section shows them, so a move goes one place in what the user sees (#2057).
+  private var shownFavorites: [String] {
+    sortedFavorites(
+      conversations.filter { $0.isFavorite && !$0.isArchived }, by: favoritesSort,
+      lastActivity: previews.mapValues(\.sentDate), order: favoriteOrder
+    ).map(\.id)
+  }
   private var isBySpace: Bool { isList && groupingRaw == ChatListGrouping.bySpace.rawValue }
 
   /// The spaces the user belongs to, by name, with what is new in each (#1526).
@@ -531,6 +551,7 @@ struct ConversationListView: View {
       levelMenu(for: conversation)
       Button("notify_filters_title", systemImage: "bell.badge") { maybeFilters = ConversationFiltersTarget(id: conversation.id) }
       favoriteButton(for: conversation)
+      moveFavoriteButtons(for: conversation)
       copyLinkButton(for: conversation)
       leaveButton(for: conversation)
       deleteButton(for: conversation)
@@ -590,11 +611,12 @@ struct ConversationListView: View {
         return head
           + spaceHomeSections(
             conversations, spaceId: space.id, lastActivity: lastActivity, listsArchived: !canBrowseChannels,
-            favoritesSort: favoritesSort)
+            favoritesSort: favoritesSort, favoriteOrder: favoriteOrder)
       }
       return head
         + homeSections(
-          conversations, lastActivity: lastActivity, listsArchived: !canBrowseChannels, favoritesSort: favoritesSort)
+          conversations, lastActivity: lastActivity, listsArchived: !canBrowseChannels, favoritesSort: favoritesSort,
+          favoriteOrder: favoriteOrder)
     case .meetings:
       return []
     case .activity:
@@ -982,6 +1004,18 @@ struct ConversationListView: View {
       case .lastMember(let id, _): maybeActionFailure = await model.leaveChannel(id, deletesIfLast: true)
       case .deletion(let id, _): maybeActionFailure = await model.deleteChannel(id)
       case .space(let id, _): maybeActionFailure = await model.leaveSpace(id)
+      }
+    }
+  }
+
+  private func moveFavoriteButtons(for conversation: ConversationItem) -> some View {
+    let shown = shownFavorites
+    return Group {
+      if let up = FavoriteOrder.moved(shown, id: conversation.id, up: true) {
+        Button("favorite_move_up", systemImage: "arrow.up") { favoriteOrderRaw = FavoriteOrder.raw(up) }
+      }
+      if let down = FavoriteOrder.moved(shown, id: conversation.id, up: false) {
+        Button("favorite_move_down", systemImage: "arrow.down") { favoriteOrderRaw = FavoriteOrder.raw(down) }
       }
     }
   }

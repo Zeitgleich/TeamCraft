@@ -15,6 +15,7 @@ import de.zeitgleich.teamcraft.core.CoreRepository
 import de.zeitgleich.teamcraft.notifications.MentionPrefs
 import de.zeitgleich.teamcraft.ui.AnimatedImagesMode
 import de.zeitgleich.teamcraft.ui.ComposerPrefs
+import de.zeitgleich.teamcraft.ui.FavoriteOrder
 import de.zeitgleich.teamcraft.ui.MediaPrefs
 import de.zeitgleich.teamcraft.ui.theme.AppearancePrefs
 import de.zeitgleich.teamcraft.ui.theme.ChatListGrouping
@@ -111,6 +112,7 @@ class SettingsSync(
       callStatusSounds = CallSoundPrefs.prefs(appContext).statusSounds,
       colorTheme = appearance.colorThemeValue.value,
       font = appearance.fontValue.value,
+      favoriteOrder = FavoriteOrder.of(appContext).order.value,
     )
   }
 
@@ -162,6 +164,7 @@ class SettingsSync(
     if (settings.callStatusSounds != before.callStatusSounds) CallSoundPrefs.prefs(appContext).setStatusSounds(settings.callStatusSounds)
     if (settings.colorTheme != before.colorTheme) appearance.setColorTheme(settings.colorTheme)
     if (settings.font != before.font) appearance.setFont(settings.font)
+    if (settings.favoriteOrder != before.favoriteOrder) FavoriteOrder.of(appContext).set(settings.favoriteOrder)
   }
 
   private companion object {

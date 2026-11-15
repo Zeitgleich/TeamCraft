@@ -332,6 +332,8 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
   val frames by calls.videoFrames.collectAsStateWithLifecycle()
   val isCameraWanted by calls.isCameraWanted.collectAsStateWithLifecycle()
   val isSpeakerOn by calls.isSpeakerOn.collectAsStateWithLifecycle()
+  val audioRoutes by calls.audioRoutes.collectAsStateWithLifecycle()
+  val audioRouteId by calls.audioRouteId.collectAsStateWithLifecycle()
   val isAwaitingEncryption by calls.isAwaitingEncryption.collectAsStateWithLifecycle()
   var isFrontCamera by rememberSaveable { mutableStateOf(true) }
   val context = LocalContext.current
@@ -518,6 +520,8 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
       frames = frames,
       isCameraOn = isCameraWanted,
       isSpeakerOn = isSpeakerOn,
+      audioRoutes = audioRoutes,
+      audioRouteId = audioRouteId,
       elapsedSeconds = maybeElapsed,
       areControlsShown = areControlsShown,
       names = names,
@@ -538,6 +542,7 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
       },
       onFlipCamera = { isFrontCamera = !isFrontCamera },
       onSpeaker = { calls.setSpeakerOn(it) },
+      onAudioRoute = { calls.selectAudioRoute(it) },
       maybeOnAddPeople = if (canAddPeople) ({ isAddingPeople = true }) else null,
       maybeOnAddNotetaker = maybeNotetaker?.takeIf { canAddNotetaker }?.let { notetaker ->
         { maybeConversationId?.let { calls.moves.addNotetaker(it, notetaker, notetakerRoomTitle, notetakerKey) } }

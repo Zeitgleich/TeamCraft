@@ -68,6 +68,7 @@ struct SettingsView: View {
         }
         Section {
           DiagnosticsExportRow()
+          AppVersionRow()
         }
         Section {
           Button("sign_out", role: .destructive) {

@@ -647,6 +647,7 @@ struct CallScreen: View {
   /// Hang up. The organizer leaving with people in the lobby and nobody else to let them in is
   /// asked to hand the meeting over first, as on desktop and web; everybody else just leaves.
   private func leave() {
+    UIImpactFeedbackGenerator(style: .light).impactOccurred()
     guard let hosts = maybeHosts, hosts.ownPart == .organizer, call.phase == .connected else {
       model.calls.hangUp()
       return
@@ -944,7 +945,12 @@ private struct RoundControl: View {
   let action: () -> Void
 
   var body: some View {
-    Button(action: action) {
+    // A light tap with every press of a call control (#2058). UIKit's generator follows the
+    // system's haptics setting: it does nothing where the user turned haptics off.
+    Button {
+      UIImpactFeedbackGenerator(style: .light).impactOccurred()
+      action()
+    } label: {
       Image(systemName: system)
         .font(.app(.title2))
         .foregroundStyle(tint != nil ? .white : (isActive ? Color.black : .white))

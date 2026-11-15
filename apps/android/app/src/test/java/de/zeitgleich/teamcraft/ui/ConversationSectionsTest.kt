@@ -26,6 +26,18 @@ class ConversationSectionsTest {
   }
 
   @Test
+  fun favoritesFollowTheOrderTheUserChose() {
+    val favorites = listOf(
+      item("1", "Alpha", ConversationKind.PUBLIC, isFavorite = true),
+      item("2", "Beta", ConversationKind.PUBLIC, isFavorite = true),
+      item("3", "Gamma", ConversationKind.PUBLIC, isFavorite = true),
+    )
+    val sorted = sortFavorites(favorites, FavoritesSort.Alphabetical, emptyMap(), order = listOf("3", "1"))
+    // Those in the order first, then the rest as the sort puts them.
+    assertEquals(listOf("3", "1", "2"), sorted.map { it.id })
+  }
+
+  @Test
   fun aSearchHitInTheNotesIsNamedByTheNotesTitle() {
     assertEquals("Notes", conversationListName("", isNotesToSelf = true, notesTitle = "Notes"))
     assertEquals("general", conversationListName("general", isNotesToSelf = false, notesTitle = "Notes"))

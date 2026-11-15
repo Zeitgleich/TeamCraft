@@ -93,6 +93,14 @@ internal fun VoiceCard(viewModel: MainViewModel, file: FileInfo, content: Color,
       viewModel.voicePlayer.toggle(key, File(maybePath), durationMs, speed, maybeSeekTo)
     }
   }
+  // The message before this one ended and nothing newer was played yet: it plays on by itself (#2054).
+  val autoPlay by viewModel.voicePlayer.autoPlay.collectAsState()
+  LaunchedEffect(autoPlay) {
+    if (autoPlay == key) {
+      viewModel.voicePlayer.autoPlay.value = null
+      play()
+    }
+  }
   LaunchedEffect(file.transfer.state) {
     // A download that failed asks for a new press (the card offers "Try again").
     if (file.transfer.state == "failed") wantsPlay = false

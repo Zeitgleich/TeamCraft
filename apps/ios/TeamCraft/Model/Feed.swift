@@ -205,18 +205,22 @@ func typingRowText(_ names: [String], isDirect: Bool) -> LocalizedStringKey? {
   return typingText(names)
 }
 
-/// The `:name` being typed at the end of the composer text (two characters at least, so `:)` and
-/// `:D` stay emoticons), or nothing.
-func activeEmojiQuery(_ text: String) -> String? {
-  let word = text.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\t" }).last.map(String.init) ?? ""
-  guard text.last.map({ !$0.isWhitespace }) ?? false, word.hasPrefix(":") else { return nil }
+/// The `:name` being typed at the caret of the composer text (the end by default; two characters at
+/// least, so `:)` and `:D` stay emoticons), or nothing.
+func activeEmojiQuery(_ text: String, caret: Int? = nil) -> String? {
+  let word = typedWord(in: text, caret: caret)
+  guard word.hasPrefix(":") else { return nil }
   let name = word.dropFirst()
   let isName = name.count >= 2 && name.allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "+" || $0 == "-" }
   return isName ? String(name) : nil
 }
 
-/// Replaces the typed `:name` at the end with the emoji.
-func completeEmoji(in text: String, with emoji: String) -> String {
-  guard let start = text.lastIndex(where: { $0 == " " || $0 == "\n" || $0 == "\t" }) else { return emoji + " " }
-  return String(text[...start]) + emoji + " "
+/// Replaces the typed `:name` with the emoji.
+func completeEmoji(in text: String, with emoji: String, caret: Int? = nil) -> String {
+  completingEmoji(in: text, with: emoji, caret: caret).text
+}
+
+/// Like `completeEmoji`, with the caret behind the emoji.
+func completingEmoji(in text: String, with emoji: String, caret: Int? = nil) -> TextCompletion {
+  replaceWord(in: text, caret: caret, with: emoji)
 }

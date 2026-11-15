@@ -83,6 +83,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
+import de.zeitgleich.teamcraft.ui.ReadingPlaces
+import de.zeitgleich.teamcraft.ui.nextUnplayedVoice
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -341,6 +343,18 @@ fun MessageFeed(
   }
   val listState = rememberLazyListState()
   val scope = rememberCoroutineScope()
+  val readingPlaces = ReadingPlaces.of(LocalContext.current)
+  // A conversation's own feed, not a thread's (threads are short and open at their end).
+  val maybePlaceKey = messages.firstOrNull()?.conversation?.takeIf { onOpenThread != null }
+  // After a voice message the next unplayed one of the conversation starts (#2054).
+  val voiceOrder by rememberUpdatedState(
+    messages.flatMap { message -> extras[message.id]?.files.orEmpty().filter { it.isVoice }.map { "${it.message}/${it.fileId}" } },
+  )
+  LaunchedEffect(viewModel) {
+    viewModel.voicePlayer.ended.collect { endedKey ->
+      nextUnplayedVoice(voiceOrder, endedKey, viewModel.voicePlayer.played)?.let { viewModel.voicePlayer.autoPlay.value = it }
+    }
+  }
   // Saveable: coming back from a thread or a rotation doesn't jump to the unread line again.
   var scrollState by rememberSaveable(stateSaver = FeedScrollStateSaver) { mutableStateOf(FeedScrollState()) }
   val newestSeen = remember { NewestSeen() }
@@ -373,7 +387,13 @@ fun MessageFeed(
     val action = if (!scrollState.isOpened) {
       val focusIndex = maybeFocusMessage?.let { id -> items.indexOfFirst { it is FeedItem.Entry && it.message.id == id } } ?: -1
       val unreadIndex = items.indexOf(FeedItem.Unread)
-      decide(FeedScrollEvent.Opened(focusIndex.takeIf { it >= 0 }, unreadIndex.takeIf { it >= 0 }), wasNearBottom)
+      // Only without anything unread: the unread line wins over where the user stopped.
+      val placeIndex = if (unreadIndex < 0 && maybePlaceKey != null) {
+        readingPlaces.messageOf(maybePlaceKey)?.let { id -> items.indexOfFirst { it is FeedItem.Entry && it.message.id == id } } ?: -1
+      } else {
+        -1
+      }
+      decide(FeedScrollEvent.Opened(focusIndex.takeIf { it >= 0 }, unreadIndex.takeIf { it >= 0 }, placeIndex.takeIf { it >= 0 }), wasNearBottom)
     } else {
       val newer = newerMessages(messages, maybePrevious)
       if (newer.isEmpty()) return@LaunchedEffect
@@ -382,6 +402,17 @@ fun MessageFeed(
       decide(event, wasNearBottom)
     }
     listState.perform(action)
+  }
+  // Where the user stops scrolling is kept per conversation, off the end only (#2055).
+  val currentItems by rememberUpdatedState(items)
+  LaunchedEffect(listState, maybePlaceKey) {
+    if (maybePlaceKey == null) return@LaunchedEffect
+    snapshotFlow { listState.isScrollInProgress }.collect { isScrolling ->
+      if (isScrolling || !scrollState.isOpened) return@collect
+      val isAtEnd = listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset <= AT_BOTTOM_SLOP_PX
+      val top = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index?.let { currentItems.getOrNull(it) }
+      readingPlaces.set(maybePlaceKey, if (isAtEnd) null else (top as? FeedItem.Entry)?.message?.id)
+    }
   }
   LaunchedEffect(sentCount) {
     if (sentCount == 0) return@LaunchedEffect

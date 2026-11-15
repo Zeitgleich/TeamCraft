@@ -35,6 +35,7 @@ struct ChatPane: View {
   @State private var attachmentError: AttachmentError?
   @State private var isPickingPhoto = false
   @State private var isPickingDocument = false
+  @AppStorage(AttachKind.storageKey) private var lastAttachRaw = AttachKind.photo.rawValue
   @State private var isSchedulingSend = false
   /// This text's message ID until the server took it, so a retry after a lost answer holds one message.
   @State private var maybeScheduleAttempt: (body: String, id: String)?
@@ -47,6 +48,7 @@ struct ChatPane: View {
   @State private var isShowingMembers = false
   /// What the next message replies to; kept in the core with the draft (#1115).
   @State private var maybeReply: ComposerReply?
+  @State private var maybeSelectingText: Message?
   /// The stored reply target was read; saving before that would forget it.
   @State private var isReplyLoaded = false
   @State private var maybeForwardingImage: FileInfo?
@@ -258,10 +260,13 @@ struct ChatPane: View {
       await model.perform(.refreshReadReceipts(conversationId: conversation.id))
     }
     .onAppear { model.visibleConversationId = conversation.id }
+    // After a voice message the next unplayed one of the conversation starts (#2054).
+    .onChange(of: voiceFiles, initial: true) { _, files in VoicePlayer.shared.setQueue(files, owner: draftKey) }
     .onDisappear {
       if model.visibleConversationId == conversation.id { model.visibleConversationId = nil }
       // A recording stops when the user leaves; the take waits here for their return (#204).
       VoiceRecorder.shared.interrupt(.left, owner: draftKey)
+      VoicePlayer.shared.clearQueue(owner: draftKey)
       // Text typed less than the pause ago is stored now; the pause's task goes with the view.
       Task { await saveDraft() }
     }
@@ -328,6 +333,12 @@ struct ChatPane: View {
     }
     .navigationDestination(isPresented: $isShowingFiles) { FilesGalleryView(conversation: conversation) }
     .sheet(isPresented: $isShowingFilters) { ConversationFiltersView(conversationId: conversation.id) }
+    .sheet(item: $maybeSelectingText) { message in
+      SelectTextSheet(text: message.body) { quoted in
+        maybeReply = ComposerReply(message: message, quoting: quoted)
+        isComposerFocused = true
+      }
+    }
     .photosPicker(
       isPresented: $isPickingPhoto, selection: $photoSelection, maxSelectionCount: 10,
       matching: .any(of: [.images, .videos])
@@ -657,6 +668,11 @@ struct ChatPane: View {
       .id(message.id)
   }
 
+  /// The conversation's voice messages, oldest first.
+  private var voiceFiles: [FileInfo] {
+    messages.flatMap { message in (extras[message.id]?.files ?? []).filter(\.isVoiceMessage) }
+  }
+
   /// The typing line and the composer over a scrim from the background colour: one gradient from
   /// clear at the top to nearly opaque at the screen's bottom edge, so the messages behind fade out
   /// down to the home indicator without a solid band. Drawn once per size, not per scroll.
@@ -692,9 +708,21 @@ struct ChatPane: View {
     if conversation.canPost {
       VStack(alignment: .leading, spacing: 6) {
         if let reply = maybeReply { replyBar(reply) }
-        EmojiSuggestionBar(text: draft) { emoji in draft = completeEmoji(in: draft, with: emoji) }
-        MentionSuggestionBar(text: draft, people: mentionPeople, groups: mentionableGroups) { handle in
-          draft = completeMention(in: draft, handle: handle)
+        EmojiSuggestionBar(text: draft, caret: formatController.caret) { emoji in
+          let done = completingEmoji(in: draft, with: emoji, caret: formatController.caret)
+          formatController.place(caret: done.caret)
+          draft = done.text
+        }
+        MentionSuggestionBar(
+          text: draft, caret: formatController.caret, people: mentionPeople, groups: mentionableGroups,
+          priority: mentionPriority(
+            messages: Array(messages.suffix(200)), myId: account.userId, people: mentionPeople,
+            recentlyMentioned: MentionHistory.recent)
+        ) { handle in
+          let done = completingMention(in: draft, handle: handle, caret: formatController.caret)
+          MentionHistory.note(handle)
+          formatController.place(caret: done.caret)
+          draft = done.text
         }
         if groupReach.outsideCount > 0 {
           Text("group_mention_outside \(Int(groupReach.outsideCount))")
@@ -751,6 +779,30 @@ struct ChatPane: View {
     }
   }
 
+  /// One entry of the attach menu; choosing it also becomes the entry listed first next time (#2062).
+  @ViewBuilder
+  private func attachButton(_ kind: AttachKind) -> some View {
+    switch kind {
+    case .photo:
+      Button("attach_photo", systemImage: "photo.on.rectangle") {
+        lastAttachRaw = kind.rawValue
+        isPickingPhoto = true
+      }
+    case .camera:
+      if CameraPicker.isAvailable {
+        Button("attach_camera", systemImage: "camera") {
+          lastAttachRaw = kind.rawValue
+          isTakingPhoto = true
+        }
+      }
+    case .file:
+      Button("attach_file", systemImage: "doc") {
+        lastAttachRaw = kind.rawValue
+        isPickingDocument = true
+      }
+    }
+  }
+
   /// The rounded field with attach on the leading side and the camera on the trailing side.
   private var messageField: some View {
     HStack(alignment: .bottom, spacing: 0) {
@@ -759,11 +811,9 @@ struct ChatPane: View {
           .accessibilityLabel(Text("cancel"))
       } else {
         Menu {
-          Button("attach_photo", systemImage: "photo.on.rectangle") { isPickingPhoto = true }
-          if CameraPicker.isAvailable {
-            Button("attach_camera", systemImage: "camera") { isTakingPhoto = true }
+          ForEach(AttachKind.ordered(last: AttachKind.parse(lastAttachRaw)), id: \.self) { kind in
+            attachButton(kind)
           }
-          Button("attach_file", systemImage: "doc") { isPickingDocument = true }
           if isSchedulingAllowed {
             Divider()
             // Text waits in the account data; with files or nothing to send there is nothing it can keep.
@@ -787,7 +837,8 @@ struct ChatPane: View {
         }
         ComposerTextView(
           text: $draft, isFocused: $isComposerFocused, controller: formatController,
-          accessibilityLabel: String(localized: "composer_hint"))
+          accessibilityLabel: String(localized: "composer_hint"),
+          onPasteImages: { images in Task { await attach(pasted: images) } })
       }
       .frame(maxWidth: .infinity)
       .onChange(of: draft) { _, text in
@@ -1082,6 +1133,10 @@ struct ChatPane: View {
       confirmCopy()
     }
     if !message.body.isEmpty && message.maybePlaceholder == nil {
+      Button("select_text", systemImage: "text.cursor") { maybeSelectingText = message }
+      detectedActions(for: message)
+    }
+    if !message.body.isEmpty && message.maybePlaceholder == nil {
       ShareLink(item: message.body) { Label("message_share", systemImage: "square.and.arrow.up") }
     }
     if !message.isPending { sharedMessageActions(for: message) }
@@ -1091,6 +1146,33 @@ struct ChatPane: View {
         draft = message.body
       }
       Button("delete", systemImage: "trash", role: .destructive) { maybeDeleting = message }
+    }
+  }
+
+  /// A menu for each link, phone number, e-mail and address of the message (#2047, #2048): open,
+  /// copy and, for a link, share. At most three, one for each value.
+  @ViewBuilder
+  private func detectedActions(for message: Message) -> some View {
+    let items = uniqueDetected(findActionable(message.body))
+    ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+      Menu {
+        if let url = item.url {
+          Button(action: { UIApplication.shared.open(url) }) {
+            Label(detectedOpenTitle(item.kind), systemImage: detectedSymbol(item.kind))
+          }
+        }
+        Button("copy", systemImage: "doc.on.doc") {
+          UIPasteboard.general.string = item.value
+          confirmCopy()
+        }
+        if item.kind == .web { ShareLink(item: item.value) { Label("message_share", systemImage: "square.and.arrow.up") } }
+      } label: {
+        Label {
+          Text(verbatim: shortenedValue(item.value))
+        } icon: {
+          Image(systemName: detectedSymbol(item.kind))
+        }
+      }
     }
   }
 
@@ -1343,9 +1425,11 @@ struct ChatPane: View {
     }
   }
 
-  /// A light tap as the message leaves the composer (#2004).
+  /// A light tap as the message leaves the composer (#2004), and the share sheet learns the user
+  /// writes here (#2059).
   private func feelSend() {
     UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    SendDonation.donate(conversationId: conversation.id, title: conversation.name, isDirect: conversation.isDirect)
   }
 
   /// Sends the recorded take of this composer as a voice message, with the reply it answers.
@@ -1388,6 +1472,24 @@ struct ChatPane: View {
       }
     }
     photoSelection = []
+  }
+
+  /// Pictures pasted or inserted by the keyboard: written to a file, as they came, and attached like a picked one (#2053).
+  private func attach(pasted images: [PastedImage]) async {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    do {
+      try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+      let importer = await model.attachmentImporter()
+      for (index, image) in images.enumerated() {
+        let file = folder.appendingPathComponent(image.fileName(index: index))
+        try image.data.write(to: file)
+        await attach([try importer.importPickedMedia(PickedMedia(url: file))])
+      }
+    } catch let error as AttachmentError {
+      attachmentError = error
+    } catch {
+      attachmentError = .unreadable
+    }
   }
 
   /// A photo just taken: saved as a JPEG and attached like a picked one.
@@ -1733,10 +1835,11 @@ struct EditHistorySheet: View {
 /// Emoji for the `:name` being typed, from the core's catalog; a tap puts the emoji in.
 struct EmojiSuggestionBar: View {
   let text: String
+  var caret: Int?
   let onPick: (String) -> Void
 
   var body: some View {
-    if let query = activeEmojiQuery(text) {
+    if let query = activeEmojiQuery(text, caret: caret) {
       let suggestions = emojiSuggestions(query: query, limit: 8)
       if !suggestions.isEmpty {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -1805,14 +1908,16 @@ struct MentionConfirmationAlert: ViewModifier {
 /// People and groups to mention after `@` (issues #206, #1619), the groups with how many they notify here.
 struct MentionSuggestionBar: View {
   let text: String
+  var caret: Int?
   let people: [PeopleSnapshot.Person]
   let groups: [MentionableGroupItem]
+  var priority: [String] = []
   let onPick: (String) -> Void
 
   var body: some View {
-    if let query = activeMentionQuery(text) {
+    if let query = activeMentionQuery(text, caret: caret) {
       let adminsName = String(localized: "group_mention_admins")
-      let shownPeople = personSuggestions(query: query, people: people)
+      let shownPeople = personSuggestions(query: query, people: people, priority: priority)
       let shownGroups = groupSuggestions(query: query, groups: groups, adminsName: adminsName)
       if !shownPeople.isEmpty || !shownGroups.isEmpty {
         ScrollView(.horizontal, showsIndicators: false) {

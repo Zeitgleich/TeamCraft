@@ -378,6 +378,11 @@ struct PlaceholderLine: View {
   }
 }
 
+private struct BodyHeightKey: PreferenceKey {
+  static let defaultValue: CGFloat = 0
+  static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
 /// A message body in the shared Markdown subset, rendered like desktop and web: paragraphs,
 /// headings, quotes, lists and code blocks. The core parses (`messageMarkup`), so every platform
 /// reads a body the same way.
@@ -392,7 +397,46 @@ struct MessageBodyView: View {
   /// The core decides, as on web, desktop and Android.
   private var jumbo: CGFloat { CGFloat(jumboEmojiScale(text: text)) }
 
+  /// Lines of text a body shows before it collapses (issue #2049).
+  private static let collapsedLines: CGFloat = 14
+  /// A body only just over the limit isn't collapsed: hiding a line or two isn't worth a button.
+  private static let longSlack: CGFloat = 1.2
+
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @State private var isExpanded = false
+  @State private var fullHeight: CGFloat = 0
+
+  private var collapsedHeight: CGFloat { bodySize * 1.3 * Self.collapsedLines }
+  private var isLong: Bool { fullHeight > collapsedHeight * Self.longSlack }
+
   var body: some View {
+    VStack(alignment: .leading, spacing: 4) {
+      content
+        // The full height is measured at its natural size, then the frame shows the first lines.
+        .fixedSize(horizontal: false, vertical: true)
+        .background(
+          GeometryReader { Color.clear.preference(key: BodyHeightKey.self, value: $0.size.height) }
+        )
+        .frame(maxHeight: isLong && !isExpanded ? collapsedHeight : nil, alignment: .top)
+        .clipped()
+        .onPreferenceChange(BodyHeightKey.self) { fullHeight = $0 }
+      if isLong {
+        Button {
+          withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { isExpanded.toggle() }
+        } label: {
+          Text(isExpanded ? "message_show_less" : "message_show_more")
+            .font(.app(.subheadline).weight(.semibold))
+            .foregroundStyle(colors.link)
+            .frame(minHeight: 32)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint(Text(isExpanded ? "message_show_less_hint" : "message_show_more_hint"))
+      }
+    }
+  }
+
+  private var content: some View {
     VStack(alignment: .leading, spacing: 6) {
       ForEach(Array(MarkupCache.blocks(text).enumerated()), id: \.offset) { _, block in
         blockView(block)

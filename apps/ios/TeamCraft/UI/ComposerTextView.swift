@@ -7,6 +7,17 @@ final class ComposerFormatController: ObservableObject {
   /// The formats the selection has now (the buttons' pressed state).
   @Published fileprivate(set) var active: Set<ComposerFormat> = []
   fileprivate var applyHandler: ((ComposerFormat) -> Void)?
+  /// Where the caret is in the text now (a UTF-16 offset), for the suggestions at the cursor (#2051).
+  /// Nil until the field reported it: the end of the text.
+  @Published fileprivate(set) var caret: Int?
+  /// Where the caret goes the next time the text is set from outside (a suggestion picked).
+  fileprivate var pendingCaret: Int?
+
+  /// A text set by `pick` puts the caret at `offset` instead of the end.
+  func place(caret offset: Int) {
+    pendingCaret = offset
+    caret = offset
+  }
 
   func apply(_ format: ComposerFormat) { applyHandler?(format) }
 }
@@ -19,6 +30,8 @@ struct ComposerTextView: UIViewRepresentable {
   @Binding var isFocused: Bool
   let controller: ComposerFormatController
   let accessibilityLabel: String
+  /// Pictures pasted into the field, or inserted by the keyboard (GIFs, stickers); the field has none of its own.
+  var onPasteImages: ([PastedImage]) -> Void = { _ in }
 
   @Environment(\.colorScheme) private var colorScheme
   @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -30,7 +43,8 @@ struct ComposerTextView: UIViewRepresentable {
   func makeCoordinator() -> Coordinator { Coordinator(self) }
 
   func makeUIView(context: Context) -> UITextView {
-    let view = UITextView()
+    let view = PastingTextView()
+    view.onPasteImages = onPasteImages
     view.delegate = context.coordinator
     view.backgroundColor = .clear
     view.textContainerInset = UIEdgeInsets(top: Self.verticalInset, left: 0, bottom: Self.verticalInset, right: 0)
@@ -49,11 +63,14 @@ struct ComposerTextView: UIViewRepresentable {
     let coordinator = context.coordinator
     coordinator.parent = self
     coordinator.install(on: controller)
+    (view as? PastingTextView)?.onPasteImages = onPasteImages
     // A text set from outside (a mention picked, the draft restored, the field cleared). Not while the
     // keyboard composes: that text is the keyboard's.
     if view.markedTextRange == nil, !(view.text as NSString).isEqual(to: text) {
       view.text = text
-      view.selectedRange = NSRange(location: (text as NSString).length, length: 0)
+      let end = (text as NSString).length
+      view.selectedRange = NSRange(location: min(controller.pendingCaret ?? end, end), length: 0)
+      controller.pendingCaret = nil
       coordinator.restyle(view, force: true)
       coordinator.refreshActive(view)
     } else if coordinator.lookKey != "\(colorScheme)/\(dynamicTypeSize)" {
@@ -102,7 +119,11 @@ struct ComposerTextView: UIViewRepresentable {
       refreshActive(view)
     }
 
-    func textViewDidChangeSelection(_ view: UITextView) { refreshActive(view) }
+    func textViewDidChangeSelection(_ view: UITextView) {
+      refreshActive(view)
+      let end = view.selectedRange.location + view.selectedRange.length
+      if parent.controller.caret != end { parent.controller.caret = end }
+    }
 
     func textViewDidBeginEditing(_ view: UITextView) {
       if !parent.isFocused { parent.isFocused = true }
@@ -211,6 +232,29 @@ struct ComposerTextView: UIViewRepresentable {
       }
       return UIFont.preferredFont(forTextStyle: .body)
     }
+  }
+}
+
+/// A text view that takes pictures from the pasteboard as attachments (issue #2053): Paste is offered
+/// for a picture, and a picture without text goes to `onPasteImages` instead of into the text.
+final class PastingTextView: UITextView {
+  var onPasteImages: ([PastedImage]) -> Void = { _ in }
+
+  override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+    if action == #selector(paste(_:)), UIPasteboard.general.hasImages { return true }
+    return super.canPerformAction(action, withSender: sender)
+  }
+
+  override func paste(_ sender: Any?) {
+    let pasteboard = UIPasteboard.general
+    if !pasteboard.hasStrings {
+      let images = PastedImage.read(from: pasteboard)
+      if !images.isEmpty {
+        onPasteImages(images)
+        return
+      }
+    }
+    super.paste(sender)
   }
 }
 

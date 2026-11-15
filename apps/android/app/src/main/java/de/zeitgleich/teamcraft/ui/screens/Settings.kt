@@ -70,7 +70,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
+import de.zeitgleich.teamcraft.BuildConfig
 import de.zeitgleich.teamcraft.R
+import de.zeitgleich.teamcraft.ui.copyText
 import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.core.CustomStatus
@@ -238,6 +240,16 @@ private fun SettingsHub(
         stringResource(R.string.export_diagnostics_summary),
         leadingContent = { Icon(Icons.Filled.Share, contentDescription = null) },
         onClick = { exportDiagnostics(context) },
+      )
+    }
+    // The version and build, for a bug report or the question "is mine current?" (#2056).
+    row { shapes ->
+      val version = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
+      SettingsLinkRow(
+        shapes,
+        stringResource(R.string.settings_version_title),
+        stringResource(R.string.settings_version_summary, BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE.toString()),
+        onClick = { copyText(context, version) },
       )
     }
     // Every member can report; guests share no DM with the organization's admins.

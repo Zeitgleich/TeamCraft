@@ -22,6 +22,16 @@ enum class VoiceSpeed(val rate: Float, val label: String) {
   }
 }
 
+/**
+ * The voice message that plays after [endedKey] (#2054): the next one of [order] (oldest first)
+ * that was not played yet, or `null` at the end. Messages the user skipped past stay skipped.
+ */
+fun nextUnplayedVoice(order: List<String>, endedKey: String, played: Set<String>): String? {
+  val at = order.indexOf(endedKey)
+  if (at < 0) return null
+  return order.drop(at + 1).firstOrNull { it !in played }
+}
+
 /** Where a finger held on the record button has gone. */
 enum class HoldGesture { RECORDING, CANCEL, LOCK }
 

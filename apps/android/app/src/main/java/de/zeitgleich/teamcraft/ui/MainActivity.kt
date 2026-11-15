@@ -124,6 +124,8 @@ class MainActivity : FragmentActivity() {
       null -> appLinkOf(intent)
       else -> savedInstanceState.getString(KEY_APP_LINK)
     }
+    if (savedInstanceState == null) LaunchShortcut.of(intent)?.let { LaunchShortcut.pending.value = it }
+    TeamCraftApplication.graph(this).scope.launch { AppShortcuts.publish(applicationContext) }
     setContent {
       // The server's brand colors the whole app (branding.md §5), not only the sign-in screen.
       val maybeBrand by viewModel.loginBrand.collectAsState()
@@ -266,6 +268,7 @@ class MainActivity : FragmentActivity() {
     conversationToOpen(intent)?.let { openConversation.value = it }
     sharedContent(intent, packageName)?.let(viewModel::receiveShare)
     appLinkOf(intent)?.let { appLink.value = it }
+    LaunchShortcut.of(intent)?.let { LaunchShortcut.pending.value = it }
   }
 
   /**

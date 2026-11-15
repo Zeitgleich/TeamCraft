@@ -47,7 +47,7 @@ sealed interface FeedScrollEvent {
    * The first messages are there and the unread position is known. Indices are into the
    * newest-first list; `null` when there is no such row.
    */
-  data class Opened(val maybeFocusIndex: Int?, val maybeUnreadIndex: Int?) : FeedScrollEvent
+  data class Opened(val maybeFocusIndex: Int?, val maybeUnreadIndex: Int?, val maybePlaceIndex: Int? = null) : FeedScrollEvent
 
   /** The user sent a message from this screen's composer. */
   data object Sent : FeedScrollEvent
@@ -99,6 +99,8 @@ private fun opened(state: FeedScrollState, event: FeedScrollEvent.Opened): FeedS
     event.maybeFocusIndex != null -> FeedScrollAction.ShowAtTop(event.maybeFocusIndex)
     // The unread line at index 0 would have nothing below it; that only happens while loading.
     event.maybeUnreadIndex != null && event.maybeUnreadIndex > 0 -> FeedScrollAction.ShowAtTop(event.maybeUnreadIndex)
+    // Nothing unread: back to where the user was reading (#2055).
+    event.maybePlaceIndex != null && event.maybePlaceIndex > 0 -> FeedScrollAction.ShowAtTop(event.maybePlaceIndex)
     else -> FeedScrollAction.ToBottom(isAnimated = false)
   }
   return FeedScrollDecision(state.copy(isOpened = true), action)
