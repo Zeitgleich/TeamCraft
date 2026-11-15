@@ -985,7 +985,7 @@ private struct AudioRouteButton: View {
 
   private struct RoutePicker: UIViewRepresentable {
     func makeUIView(context: Context) -> AVRoutePickerView {
-      let picker = AVRoutePickerView()
+      let picker = HapticRoutePickerView()
       picker.tintColor = .white
       picker.activeTintColor = .white
       picker.prioritizesVideoDevices = false
@@ -993,6 +993,22 @@ private struct AudioRouteButton: View {
     }
 
     func updateUIView(_ view: AVRoutePickerView, context: Context) {}
+  }
+}
+
+/// The route picker with the light tap of the other call controls (#2058). The picker's own button
+/// stays the one that is tapped: a second touch-down action is added to it, so the system's picker
+/// opens as before and the tap is not intercepted. The button is found among the subviews once they
+/// exist; where the system changes that, the picker simply has no haptic.
+private final class HapticRoutePickerView: AVRoutePickerView {
+  private var hasHaptic = false
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    guard !hasHaptic, let button = subviews.compactMap({ $0 as? UIButton }).first else { return }
+    hasHaptic = true
+    button.addAction(
+      UIAction { _ in MainActor.assumeIsolated { UIImpactFeedbackGenerator(style: .light).impactOccurred() } }, for: .touchDown)
   }
 }
 

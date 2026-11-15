@@ -1,3 +1,4 @@
+import Contacts
 import Foundation
 
 /// What a message's text names besides web links (issues #2047, #2048): something to act on.
@@ -22,6 +23,21 @@ struct DetectedItem: Equatable, Sendable {
       value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed).flatMap { URL(string: "https://maps.apple.com/?q=" + $0) }
     }
   }
+}
+
+/// A contact holding just this phone number or e-mail address, for "Add to contacts" (#2047); nil for
+/// the other kinds. The system's sheet asks where to put it (new or existing contact).
+func unknownContact(for item: DetectedItem) -> CNMutableContact? {
+  let contact = CNMutableContact()
+  switch item.kind {
+  case .phone:
+    contact.phoneNumbers = [CNLabeledValue(label: CNLabelPhoneNumberMobile, value: CNPhoneNumber(stringValue: item.value))]
+  case .email:
+    contact.emailAddresses = [CNLabeledValue(label: CNLabelWork, value: item.value as NSString)]
+  case .web, .address:
+    return nil
+  }
+  return contact
 }
 
 private let webPattern = try? NSRegularExpression(pattern: #"https?://[^\s<>"]+"#, options: [.caseInsensitive])

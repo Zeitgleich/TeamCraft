@@ -26,13 +26,24 @@ object ShareShortcuts {
   /** Most conversations offered; the share sheet shows only a few per app anyway. */
   const val MAX_TARGETS = 4
 
+  /**
+   * Conversations the launcher's app icon menu gets (#2061). Launchers show about four shortcuts, and
+   * [AppShortcuts] takes the first [FIRST_CONVERSATION_RANK] places (new message, search).
+   */
+  const val MAX_LAUNCHER = 2
+
+  /** The rank of the first conversation: the app's own shortcuts rank before it, the launcher shows lower ranks first. */
+  const val FIRST_CONVERSATION_RANK = 2
+
   private const val TAG = "ShareShortcuts"
 
   /** A conversation for the share sheet. */
   data class Target(val conversationId: String, val label: String)
 
   /**
-   * Offers [targets] (the first [MAX_TARGETS]) in the share sheet. Not while the app lock is on:
+   * Offers [targets] (the first [MAX_TARGETS]) in the share sheet, and the first [MAX_LAUNCHER] of
+   * them in the app icon's menu too: they are the same dynamic shortcuts, ranked in the list's order
+   * after the app's own (#2061). Only names: a shortcut never carries message text. Not while the app lock is on:
    * the share sheet would show conversation names of the locked app, and a pick reaches into it.
    * Off the main thread: every shortcut call waits for the system's shortcut service, which can
    * take seconds while it is busy (the share sheet asking it at the same time); on the main thread
@@ -40,13 +51,14 @@ object ShareShortcuts {
    */
   suspend fun publish(context: Context, targets: List<Target>): Unit = withContext(Dispatchers.IO) {
     if (AppLockPrefs.prefs(context).isEnabled) return@withContext
-    for (target in targets.filter { it.label.isNotBlank() }.take(MAX_TARGETS)) {
+    for ((index, target) in targets.filter { it.label.isNotBlank() }.take(MAX_TARGETS).withIndex()) {
       val label = target.label
       val shortcut = ShortcutInfoCompat.Builder(context, target.conversationId)
         .setShortLabel(label)
         .setLongLived(true)
         .setLocusId(LocusIdCompat(target.conversationId))
         .setCategories(setOf(CATEGORY))
+        .setRank(FIRST_CONVERSATION_RANK + index)
         .setIcon(PersonIcons.of(target.conversationId, label))
         .setIntent(openIntent(context, target.conversationId))
         .build()

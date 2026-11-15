@@ -124,17 +124,17 @@ fun MessageBody(
     ) {
       for (block in blocks) {
         when (block) {
-          is MarkupBlock.Paragraph -> Text(
+          is MarkupBlock.Paragraph -> LinkText(
             remember(block, colors, names) { annotatedLines(block.lines, colors, names, links, permalinkLabel) },
             style = paragraphStyle,
           )
-          is MarkupBlock.Heading -> Text(
+          is MarkupBlock.Heading -> LinkText(
             remember(block, colors, names) { annotatedLine(block.line, colors, names, links, permalinkLabel) },
             style = headingStyle(block.level.toInt()).copy(color = textColor),
           )
           is MarkupBlock.Quote -> Row(Modifier.height(IntrinsicSize.Min)) {
             Box(Modifier.width(QUOTE_BAR).fillMaxHeight().background(textColor.copy(alpha = QUOTE_BAR_ALPHA), RoundedCornerShape(2.dp)))
-            Text(
+            LinkText(
               remember(block, colors, names) { annotatedLines(block.lines, colors, names, links, permalinkLabel) },
               style = bodyStyle.copy(color = textColor.copy(alpha = QUOTE_TEXT_ALPHA)),
               modifier = Modifier.padding(start = 8.dp),
@@ -148,7 +148,7 @@ fun MessageBody(
               }
               Row {
                 Text(marker, style = bodyStyle, modifier = Modifier.padding(end = 6.dp))
-                Text(remember(item, colors, names) { annotatedLine(item, colors, names, links, permalinkLabel) }, style = bodyStyle)
+                LinkText(remember(item, colors, names) { annotatedLine(item, colors, names, links, permalinkLabel) }, style = bodyStyle)
               }
             }
           }

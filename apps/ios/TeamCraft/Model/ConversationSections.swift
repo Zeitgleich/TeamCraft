@@ -267,6 +267,13 @@ enum FavoriteOrder {
   }
 }
 
+/// `ids` after the rows at `source` were dragged to `destination` (the offsets `onMove` reports).
+func movedFavorites(_ ids: [String], from source: IndexSet, to destination: Int) -> [String] {
+  var next = ids
+  next.move(fromOffsets: source, toOffset: destination)
+  return next
+}
+
 /// Channels of the spaces: favorite channels first, then each space (spaces and channels by name).
 /// Same grouping as the Android app.
 func channelSections(

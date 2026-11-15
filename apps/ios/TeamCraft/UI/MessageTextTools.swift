@@ -1,3 +1,5 @@
+import Contacts
+import ContactsUI
 import SwiftUI
 import UIKit
 
@@ -100,4 +102,25 @@ func detectedSymbol(_ kind: DetectedKind) -> String {
   case .email: "envelope"
   case .address: "map"
   }
+}
+
+/// A phone number or e-mail address to add to the contacts (#2047).
+struct NewContactTarget: Identifiable {
+  let id = UUID()
+  let contact: CNMutableContact
+}
+
+/// The system's "Create New Contact / Add to Existing Contact" screen for one value. It needs no
+/// permission to read the contacts: the system shows and saves it.
+struct UnknownContactView: UIViewControllerRepresentable {
+  let contact: CNMutableContact
+
+  func makeUIViewController(context: Context) -> UINavigationController {
+    let controller = CNContactViewController(forUnknownContact: contact)
+    controller.contactStore = CNContactStore()
+    controller.allowsActions = false
+    return UINavigationController(rootViewController: controller)
+  }
+
+  func updateUIViewController(_ controller: UINavigationController, context: Context) {}
 }

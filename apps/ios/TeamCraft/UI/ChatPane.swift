@@ -49,6 +49,8 @@ struct ChatPane: View {
   /// What the next message replies to; kept in the core with the draft (#1115).
   @State private var maybeReply: ComposerReply?
   @State private var maybeSelectingText: Message?
+  /// The number or address the user is adding to the contacts (#2047).
+  @State private var maybeNewContact: NewContactTarget?
   /// The stored reply target was read; saving before that would forget it.
   @State private var isReplyLoaded = false
   @State private var maybeForwardingImage: FileInfo?
@@ -333,6 +335,9 @@ struct ChatPane: View {
     }
     .navigationDestination(isPresented: $isShowingFiles) { FilesGalleryView(conversation: conversation) }
     .sheet(isPresented: $isShowingFilters) { ConversationFiltersView(conversationId: conversation.id) }
+    .sheet(item: $maybeNewContact) { target in
+      UnknownContactView(contact: target.contact).ignoresSafeArea()
+    }
     .sheet(item: $maybeSelectingText) { message in
       SelectTextSheet(text: message.body) { quoted in
         maybeReply = ComposerReply(message: message, quoting: quoted)
@@ -1166,6 +1171,11 @@ struct ChatPane: View {
           confirmCopy()
         }
         if item.kind == .web { ShareLink(item: item.value) { Label("message_share", systemImage: "square.and.arrow.up") } }
+        if let contact = unknownContact(for: item) {
+          Button("detected_add_contact", systemImage: "person.crop.circle.badge.plus") {
+            maybeNewContact = NewContactTarget(contact: contact)
+          }
+        }
       } label: {
         Label {
           Text(verbatim: shortenedValue(item.value))

@@ -237,6 +237,8 @@ final class ChatModelTests: XCTestCase {
     let home = homeSections(favorites, lastActivity: activity, favoritesSort: .recent)
     XCTAssertEqual(home.first?.title, .favorites)
     XCTAssertEqual(home.first?.conversations.map(\.name), ["bob", "amy", "zed", "also quiet", "quiet"])
+    XCTAssertEqual(movedFavorites(["a", "b", "c"], from: IndexSet(integer: 0), to: 3), ["b", "c", "a"])
+    XCTAssertEqual(movedFavorites(["a", "b", "c"], from: IndexSet(integer: 2), to: 0), ["c", "a", "b"])
   }
 
   /// #1488: a collapsed section still shows what is new and the open conversation.

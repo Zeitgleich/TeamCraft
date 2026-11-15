@@ -61,6 +61,9 @@ struct ConversationListView: View {
   @AppStorage(ChatListGrouping.key) private var groupingRaw = ChatListGrouping.mixed.rawValue
   @AppStorage(FavoritesSort.key) private var favoritesSortRaw = FavoritesSort.alphabetical.rawValue
   @AppStorage(FavoriteOrder.key) private var favoriteOrderRaw = ""
+  /// Active while the user drags the favorites into their order (#2057): the list's own edit mode,
+  /// which gives the rows that can move their handles.
+  @State private var editMode: EditMode = .inactive
   /// The user's own presence, as Settings set it: on the avatar in the header (#1786).
   @AppStorage("presence") private var presenceRaw = PresenceChoice.online.rawValue
   @Environment(\.horizontalSizeClass) private var sizeClass
@@ -268,6 +271,13 @@ struct ConversationListView: View {
       case .newMessage: maybeBrowseTab = .people
       case .search: searchFocusRequest += 1
       }
+    }
+    // A recent conversation of the icon's menu (#2061): opened once the list has it, dropped if it is gone.
+    .onChange(of: QuickActions.shared.pendingConversation, initial: true) { _, _ in openPendingConversation() }
+    .onChange(of: conversations.count) { _, _ in openPendingConversation() }
+    // The menu names the newest conversations as the app leaves: nothing while the app lock is on.
+    .onChange(of: scenePhase) { _, phase in
+      if phase == .background { publishRecentShortcuts() }
     }
     .sheet(item: $maybeBrowseTab, onDismiss: { maybeBrowseSpaceId = nil }) { tab in
       BrowseView(tab: tab, maybeInitialSpaceId: maybeBrowseSpaceId) { conversationId in selection = conversationId }
@@ -487,6 +497,9 @@ struct ConversationListView: View {
       }
     }
     .listStyle(.plain)
+    .environment(\.editMode, $editMode)
+    // With fewer than two favorites there is nothing to move, and no "Done" button left to end it.
+    .onChange(of: shownFavorites.count) { _, count in if count < 2 { editMode = .inactive } }
     .animation(.snappy(duration: 0.25), value: collapsedRaw)
   }
 
@@ -513,8 +526,16 @@ struct ConversationListView: View {
         // A space's section names it in its header, so its rows don't (#1345).
         showsSpace: isRecent || section.title == .favorites || (isList && !section.isSpace),
         // The Favorites section says it already (#1786).
-        showsPin: conversation.isFavorite && section.title != .favorites)
+        showsPin: conversation.isFavorite && section.title != .favorites
+      )
+      .modifier(
+        FavoriteMoveActions(
+          isEnabled: section.title == .favorites && !isCollapsed,
+          moveUp: { moveFavorite(conversation.id, among: shownRows, up: true) },
+          moveDown: { moveFavorite(conversation.id, among: shownRows, up: false) }))
     }
+    // Only the Favorites section moves (#2057); the other rows are not part of this ForEach, so they get no handle.
+    .onMove(perform: section.title == .favorites && !isCollapsed ? { from, to in moveFavorites(shownRows, from: from, to: to) } : nil)
     if isRecent && !isCollapsed && section.conversations.count > recentActivityHomeRowCount {
       let label: LocalizedStringKey =
         isShowingAllRecent ? "recent_activity_fewer" : "recent_activity_all \(section.conversations.count)"
@@ -869,6 +890,7 @@ struct ConversationListView: View {
         if case .space(let name) = section.title, let spaceId = section.spaceId {
           spaceOptionsButton(spaceId: spaceId, name: name, section: section)
         }
+        reorderButton(section)
       }
     } else if case .space(let name) = section.title, let spaceId = section.spaceId {
       HStack {
@@ -876,6 +898,12 @@ struct ConversationListView: View {
         Text(title(of: section.title))
         Spacer()
         spaceOptionsButton(spaceId: spaceId, name: name, section: section)
+      }
+    } else if section.title == .favorites {
+      HStack {
+        Text(title(of: section.title))
+        Spacer()
+        reorderButton(section)
       }
     } else {
       Text(title(of: section.title))
@@ -1005,6 +1033,44 @@ struct ConversationListView: View {
       case .deletion(let id, _): maybeActionFailure = await model.deleteChannel(id)
       case .space(let id, _): maybeActionFailure = await model.leaveSpace(id)
       }
+    }
+  }
+
+  private func openPendingConversation() {
+    guard let id = QuickActions.shared.pendingConversation, !conversations.isEmpty else { return }
+    QuickActions.shared.pendingConversation = nil
+    if conversations.contains(where: { $0.id == id }) { selection = id }
+  }
+
+  private func publishRecentShortcuts() {
+    let isLockOn = UserDefaults.standard.bool(forKey: AppLock.enabledKey)
+    let recent =
+      isLockOn
+      ? []
+      : recentActivitySection(conversations, lastActivity: previews.mapValues(\.sentDate), isShowingAll: false).conversations
+        .map { RecentConversationShortcut(conversationId: $0.id, title: conversationListName($0.name, isNotesToSelf: $0.isNotesToSelf)) }
+    QuickActions.shared.publish(recent: recent)
+  }
+
+  /// Puts the dragged rows where they were dropped; the order is what the section showed, as for the menu's moves.
+  private func moveFavorites(_ rows: [ConversationItem], from source: IndexSet, to destination: Int) {
+    favoriteOrderRaw = FavoriteOrder.raw(movedFavorites(rows.map(\.id), from: source, to: destination))
+  }
+
+  private func moveFavorite(_ id: String, among rows: [ConversationItem], up: Bool) {
+    guard let next = FavoriteOrder.moved(rows.map(\.id), id: id, up: up) else { return }
+    withAnimation(.snappy(duration: 0.25)) { favoriteOrderRaw = FavoriteOrder.raw(next) }
+  }
+
+  /// The "Reorder" / "Done" button of the Favorites header; one place to move needs two favorites.
+  @ViewBuilder
+  private func reorderButton(_ section: ConversationSection) -> some View {
+    if section.title == .favorites && section.conversations.count > 1 {
+      Button(editMode.isEditing ? "done" : "favorites_reorder") {
+        withAnimation(.snappy(duration: 0.25)) { editMode = editMode.isEditing ? .inactive : .active }
+      }
+      .font(.app(.footnote))
+      .textCase(nil)
     }
   }
 
@@ -1463,4 +1529,22 @@ private struct QuickAccessCardLabel: View {
 private struct ListRefresh: Equatable {
   let changeCount: Int
   let isInBackground: Bool
+}
+
+/// "Move favorite up / down" for VoiceOver on a favorite's row (#2057): the drag has no equivalent there.
+private struct FavoriteMoveActions: ViewModifier {
+  let isEnabled: Bool
+  let moveUp: () -> Void
+  let moveDown: () -> Void
+
+  @ViewBuilder
+  func body(content: Content) -> some View {
+    if isEnabled {
+      content
+        .accessibilityAction(named: Text("favorite_move_up"), moveUp)
+        .accessibilityAction(named: Text("favorite_move_down"), moveDown)
+    } else {
+      content
+    }
+  }
 }
