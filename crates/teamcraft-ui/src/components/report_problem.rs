@@ -104,7 +104,7 @@ pub fn ReportProblemDialog() -> impl IntoView {
       move || state.write(|backend| backend.send_bug_report(report)),
       move || {
         state.close_overlay();
-        state.show_toast(i18n.t("report-queued"));
+        state.show_brief_toast(i18n.t("report-queued"));
       },
     );
   };
