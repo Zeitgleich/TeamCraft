@@ -1,5 +1,6 @@
 import QuickLook
 import SwiftUI
+import UIKit
 
 /// A file in a message: images as a large preview, other files with icon, name and size; progress
 /// while it moves. A tap on a picture opens the image viewer where the screen offers it (#240);
@@ -28,6 +29,8 @@ struct AttachmentView: View {
   @State private var maybePreviewURL: URL?
   @State private var isPreviewRefused = false
   @State private var isWaitingToOpen = false
+  /// How saving to Photos went from the tile's menu (#2011).
+  @State private var maybeSaveOutcome: PhotosSaver.Outcome?
   @Environment(\.pictureZoomNamespace) private var pictureZoom
   @State private var animation = AnimationPlayer()
   @State private var playChoice = PlayChoice.unset
@@ -41,6 +44,7 @@ struct AttachmentView: View {
 
   var body: some View {
     withImageMenu(content)
+      .photosSaveAlert($maybeSaveOutcome)
   }
 
   /// A tile of an album has its own menu on a long press (#241); everything else keeps the message's.
@@ -54,6 +58,18 @@ struct AttachmentView: View {
         Button("image_forward_one", systemImage: "arrowshape.turn.up.right") { actions.forward(file) }
         if file.transfer.state == "local", let path = file.transfer.path {
           ShareLink(item: URL(fileURLWithPath: path)) { Label("picture_share", systemImage: "square.and.arrow.up") }
+          if file.isImage || file.isVideo {
+            Button("picture_save_to_photos", systemImage: "square.and.arrow.down") {
+              Task {
+                let outcome = await PhotosSaver.save(fileAt: URL(fileURLWithPath: path), mediaType: file.mediaType)
+                if outcome == .saved {
+                  UINotificationFeedbackGenerator().notificationOccurred(.success)
+                } else {
+                  maybeSaveOutcome = outcome
+                }
+              }
+            }
+          }
         } else {
           Button("file_download", systemImage: "arrow.down.circle") {
             Task {
