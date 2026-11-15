@@ -1,7 +1,5 @@
 package de.zeitgleich.teamcraft.ui.screens
 
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Context
 import android.text.format.DateUtils
 import androidx.annotation.StringRes
@@ -50,6 +48,7 @@ import de.zeitgleich.teamcraft.core.ChatClient
 import de.zeitgleich.teamcraft.core.Meeting
 import de.zeitgleich.teamcraft.ui.ActionAnswer
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import de.zeitgleich.teamcraft.ui.copyText
 import de.zeitgleich.teamcraft.ui.theme.Spacing
 import kotlinx.coroutines.launch
 import uniffi.teamcraft_ffi.MeetingCancelScope
@@ -282,11 +281,6 @@ private suspend fun copyMeetingLink(viewModel: MainViewModel, context: Context, 
     is ActionAnswer.Answered -> copyText(context, answer.value)
     is ActionAnswer.Failed -> viewModel.showFailure(R.string.meeting_link_unverified)
   }
-}
-
-/** Puts a meeting link on the clipboard (Android 13+ confirms it itself). */
-internal fun copyText(context: Context, text: String) {
-  context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText(text, text))
 }
 
 /** Asks before cancelling; of a series, which of its meetings. */

@@ -6,12 +6,14 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.os.Build
 import android.os.PersistableBundle
+import android.widget.Toast
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
+import de.zeitgleich.teamcraft.R
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
@@ -28,6 +30,19 @@ fun sensitiveClip(text: String): ClipData = ClipData.newPlainText("TeamCraft", t
       // The same key before the constant existed; keyboards check it on older versions too.
       putBoolean("android.content.extra.IS_SENSITIVE", true)
     }
+  }
+}
+
+/**
+ * Copies ordinary text (a link, a message, a share code): not marked sensitive, so Android 13+
+ * shows its own preview of it. Before 13 nothing confirms the copy, so a short toast does (#2009).
+ * Secrets go through [SecretClipboard] instead.
+ */
+fun copyText(context: Context, text: String) {
+  val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return
+  clipboard.setPrimaryClip(ClipData.newPlainText("TeamCraft", text))
+  if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+    Toast.makeText(context, R.string.copied, Toast.LENGTH_SHORT).show()
   }
 }
 

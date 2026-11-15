@@ -31,7 +31,6 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.contentDescription
-import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Paint
@@ -200,7 +199,7 @@ import de.zeitgleich.teamcraft.ui.shouldNotifyTyping
 import de.zeitgleich.teamcraft.ui.typingIn
 import de.zeitgleich.teamcraft.ui.typingLine
 import de.zeitgleich.teamcraft.ui.entry
-import de.zeitgleich.teamcraft.ui.sensitiveClip
+import de.zeitgleich.teamcraft.ui.copyText
 import de.zeitgleich.teamcraft.ui.requestsIn
 import uniffi.teamcraft_ffi.LeaveChoice
 import uniffi.teamcraft_ffi.ConnectionState
@@ -1035,15 +1034,13 @@ private fun MessageActions(
           MessageAction.CopyLink -> SheetItem(R.string.action_copy_link) {
             scope.launch {
               viewModel.readChat { query(ChatQueries.permalink(conversationId, message.id)).maybeLink }?.let { link ->
-                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                clipboard.setPrimaryClip(sensitiveClip(link))
+                copyText(context, link)
               }
               onDismiss()
             }
           }
           MessageAction.CopyText -> SheetItem(R.string.action_copy_text) {
-            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            clipboard.setPrimaryClip(sensitiveClip(message.body))
+            copyText(context, message.body)
             onDismiss()
           }
           MessageAction.MarkUnread -> SheetItem(R.string.action_mark_unread) {
