@@ -6825,22 +6825,6 @@
         }
       }
     },
-    "react": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "React"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Reagieren"
-          }
-        }
-      }
-    },
     "react_quick %@": {
       "localizations": {
         "en": {
@@ -22677,6 +22661,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Aktualisieren nicht möglich. Prüfe deine Verbindung."
+          }
+        }
+      }
+    },
+    "message_preview_attachment": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Attachment"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Anhang"
           }
         }
       }
