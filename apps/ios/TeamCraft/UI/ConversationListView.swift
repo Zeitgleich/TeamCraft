@@ -388,7 +388,12 @@ struct ConversationListView: View {
       }
       if !hits.isEmpty {
         Section("search_section_messages") {
-          SearchHitRows(hits: hits) { hit in
+          SearchHitRows(hits: hits, terms: SearchFilters.terms(in: query)) { hit in
+            // At the message, flashed, in its thread when it is in one (#2003).
+            model.focusMessageId = hit.message.id
+            if let thread = hit.message.maybeThreadId {
+              model.openedPlace = OpenedPlace(conversationId: hit.message.conversationId, maybeThreadId: thread)
+            }
             query = ""
             filters = SearchFilters()
             selection = hit.message.conversationId
@@ -1260,6 +1265,8 @@ struct BotBadge: View {
 /// The messages the search found, as rows of the search's list (#1786): conversation, author, text.
 struct SearchHitRows: View {
   let hits: [SearchHit]
+  /// The words searched for, emphasised in the text (#2003).
+  var terms: [String] = []
   let onSelect: (SearchHit) -> Void
 
   var body: some View {
@@ -1268,7 +1275,7 @@ struct SearchHitRows: View {
         VStack(alignment: .leading, spacing: 2) {
           Text(hit.listName).font(.app(.caption)).foregroundStyle(Theme.textMuted)
           Text(verbatim: hit.message.shownAuthorName).font(.app(.subheadline).weight(.semibold))
-          Text(hit.message.body).lineLimit(3)
+          Text(SearchHighlight.attributed(hit.message.body, terms: terms)).lineLimit(3)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
