@@ -32,6 +32,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -65,7 +66,10 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.graphics.Color
@@ -94,6 +98,7 @@ import de.zeitgleich.teamcraft.ui.rememberIsOnline
 import uniffi.teamcraft_ffi.Presence
 import uniffi.teamcraft_ffi.PushService
 import uniffi.teamcraft_ffi.TeamCraftException
+import uniffi.teamcraft_ffi.statusPresets
 import de.zeitgleich.teamcraft.security.AppLockPrefs
 import de.zeitgleich.teamcraft.ui.theme.AppearancePrefs
 import de.zeitgleich.teamcraft.ui.theme.Spacing
@@ -672,17 +677,55 @@ private fun Chevron(isOpen: Boolean = false) {
   )
 }
 
+/** The "clear after" choices of a custom status: the core's `StatusExpiry` names and their labels. */
+private val STATUS_EXPIRIES = listOf(
+  "ThirtyMinutes" to R.string.status_duration_30m,
+  "OneHour" to R.string.status_duration_1h,
+  "Today" to R.string.status_duration_today,
+  "ThisWeek" to R.string.status_duration_week,
+  "Never" to R.string.status_duration_never,
+)
+
+/** The text of a built-in preset of the core (`status_preset_<id>`). */
+private fun statusPresetLabel(id: String): Int = when (id) {
+  "meeting" -> R.string.status_preset_meeting
+  "commuting" -> R.string.status_preset_commuting
+  "focusing" -> R.string.status_preset_focusing
+  "sick" -> R.string.status_preset_sick
+  else -> R.string.status_preset_vacation
+}
+
 /** An emoji and text shown next to the user's name, cleared after the chosen time. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun CustomStatusSection(viewModel: MainViewModel) {
   val scope = rememberCoroutineScope()
   var emoji by rememberSaveable { mutableStateOf("") }
   var text by rememberSaveable { mutableStateOf("") }
+  var expiry by rememberSaveable { mutableStateOf("Today") }
   var hasTried by remember { mutableStateOf(false) }
   var isSaving by remember { mutableStateOf(false) }
   var maybeFailure by remember { mutableStateOf<Int?>(null) }
+  val presets = remember { statusPresets() }
   val textFocus = remember { FocusRequester() }
   val maybeTextError = requiredTextError(text, R.string.custom_status_missing).takeIf { hasTried } ?: maybeFailure
+  Text(stringResource(R.string.status_presets_title), style = MaterialTheme.typography.titleSmall)
+  // The shared list of the core: a preset fills emoji, text and end, all still editable.
+  FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.selectableGroup()) {
+    for (preset in presets) {
+      val label = stringResource(statusPresetLabel(preset.id))
+      FilterChip(
+        selected = emoji == preset.emoji && text == label,
+        onClick = {
+          emoji = preset.emoji
+          text = label
+          expiry = preset.expiry
+          maybeFailure = null
+        },
+        label = { Text("${preset.emoji} $label") },
+      )
+    }
+  }
   Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
     OutlinedTextField(
       value = emoji,
@@ -706,6 +749,12 @@ private fun CustomStatusSection(viewModel: MainViewModel) {
       modifier = Modifier.weight(1f).focusRequester(textFocus).fieldError(maybeTextError),
     )
   }
+  Text(stringResource(R.string.custom_status_clear_after), style = MaterialTheme.typography.titleSmall)
+  FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.selectableGroup()) {
+    for ((value, label) in STATUS_EXPIRIES) {
+      FilterChip(selected = expiry == value, onClick = { expiry = value }, label = { Text(stringResource(label)) })
+    }
+  }
   Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
     Button(
       onClick = {
@@ -715,7 +764,7 @@ private fun CustomStatusSection(viewModel: MainViewModel) {
         } else {
           isSaving = true
           scope.launch {
-            maybeFailure = viewModel.tryAct(ChatActions.setCustomStatus(CustomStatus(emoji, text.trim(), "Today")))
+            maybeFailure = viewModel.tryAct(ChatActions.setCustomStatus(CustomStatus(emoji, text.trim(), expiry)))
             if (maybeFailure != null) textFocus.requestFocus()
             isSaving = false
           }

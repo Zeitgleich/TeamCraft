@@ -375,6 +375,13 @@ impl ChatBackend for RestChat {
       .map_or(0, Vec::len)
   }
 
+  fn held_recent_messages(&self, conversation: ConversationId, len: usize) -> Vec<Message> {
+    let local = self.local_messages.borrow();
+    local
+      .get(&conversation)
+      .map_or_else(Vec::new, |all| all[all.len().saturating_sub(len)..].to_vec())
+  }
+
   fn messages(&self, conversation: ConversationId, start: usize, len: usize) -> Vec<Message> {
     let local = self.local_messages.borrow();
     let Some(all) = local.get(&conversation) else {

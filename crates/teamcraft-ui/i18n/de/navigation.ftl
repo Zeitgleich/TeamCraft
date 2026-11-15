@@ -291,3 +291,5 @@ health-alerts-badge = { $count ->
     [one] Eine Systemwarnung
    *[other] { $count } Systemwarnungen
 }
+conversation-preview-label = Letzte Nachrichten in { $name }
+conversation-preview-empty = Noch nichts zu zeigen. Öffne die Unterhaltung, um sie zu lesen.

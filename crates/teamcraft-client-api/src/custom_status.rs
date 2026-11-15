@@ -6,6 +6,48 @@ use teamcraft_proto::{CustomStatus as CustomStatusWire, PresencePolicy, SetCusto
 
 use crate::model::{CustomStatus, StatusExpiry, TimestampMs};
 
+/// A status every client offers while the workspace configured no presets of its own (#2072).
+/// The one list for web, desktop and both phone apps: the text is a string of each client's i18n,
+/// named after [`BuiltInStatusPreset::id`] (`status-preset-<id>`, `status_preset_<id>` on Android).
+/// Workspace presets (`PresencePolicy::presets`) replace the list; they carry their own text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BuiltInStatusPreset {
+  /// Stable identifier, also the end of the i18n key.
+  pub id: &'static str,
+  pub emoji: &'static str,
+  /// When the status clears itself unless the user picks another end.
+  pub expiry: StatusExpiry,
+}
+
+/// The built-in presets in the order they are offered.
+pub const BUILT_IN_PRESETS: [BuiltInStatusPreset; 5] = [
+  BuiltInStatusPreset {
+    id: "meeting",
+    emoji: "🗓️",
+    expiry: StatusExpiry::OneHour,
+  },
+  BuiltInStatusPreset {
+    id: "commuting",
+    emoji: "🚌",
+    expiry: StatusExpiry::OneHour,
+  },
+  BuiltInStatusPreset {
+    id: "focusing",
+    emoji: "🎧",
+    expiry: StatusExpiry::OneHour,
+  },
+  BuiltInStatusPreset {
+    id: "sick",
+    emoji: "🤒",
+    expiry: StatusExpiry::Today,
+  },
+  BuiltInStatusPreset {
+    id: "vacation",
+    emoji: "🌴",
+    expiry: StatusExpiry::ThisWeek,
+  },
+];
+
 /// A status whose end passed by the local clock is still shown this long. The server decides when
 /// a status ends and announces it; the margin keeps a device whose clock runs ahead from hiding a
 /// status early, while one that is offline still stops showing it soon after.
@@ -238,6 +280,20 @@ mod tests {
         maybe_activity: Some(teamcraft_proto::PresenceActivity::InCall),
       };
       assert_eq!(CustomStatus::from_wire(&wire), None);
+    }
+  }
+
+  mod built_in {
+    use super::*;
+
+    #[test]
+    fn ids_are_unique_and_every_preset_has_an_emoji_and_an_end() {
+      let ids: std::collections::HashSet<_> = BUILT_IN_PRESETS.iter().map(|preset| preset.id).collect();
+      assert_eq!(ids.len(), BUILT_IN_PRESETS.len());
+      for preset in BUILT_IN_PRESETS {
+        assert!(!preset.emoji.is_empty());
+        assert_ne!(preset.expiry, StatusExpiry::Never);
+      }
     }
   }
 

@@ -49,6 +49,13 @@
   <string name="custom_status_clear">Entfernen</string>
   <string name="custom_status_emoji">Emoji</string>
   <string name="custom_status_text">Status</string>
+  <string name="status_presets_title">Schnellauswahl</string>
+  <string name="custom_status_clear_after">Entfernen nach</string>
+  <string name="status_preset_meeting">In einem Meeting</string>
+  <string name="status_preset_commuting">Unterwegs</string>
+  <string name="status_preset_focusing">Konzentriert</string>
+  <string name="status_preset_sick">Krank</string>
+  <string name="status_preset_vacation">Im Urlaub</string>
   <string name="custom_status_missing">Gib einen Statustext ein.</string>
   <string name="profile_name_change">Namen ändern</string>
   <string name="profile_name_label">Dein Name</string>

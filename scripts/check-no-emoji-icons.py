@@ -37,7 +37,6 @@ CFG_TEST = re.compile(r"#\[cfg\(test\)\]")
 ALLOWED = {
   "crates/teamcraft-ui/src/mock.rs": "mock backend: demo data, never compiled into shipped builds",
   "crates/teamcraft-ui/src/components/message_toolbar.rs": "default quick reactions: reactions are user content",
-  "crates/teamcraft-ui/src/components/status_menu.rs": "custom status presets: the emoji becomes part of the user's status",
   "crates/teamcraft-ui/src/slash.rs": "/status parses a custom status emoji the user types",
   "apps/desktop/src/core/dev_bridge.rs": "dev-only bridge sets demo custom statuses",
   "apps/ios/TeamCraft/Model/ChatActions.swift": "doc comment example of a custom status: user content",

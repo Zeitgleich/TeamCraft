@@ -321,6 +321,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.prefetch_messages(conversation, start, len);
   }
 
+  fn held_recent_messages(&self, conversation: ConversationId, len: usize) -> Vec<Message> {
+    self.chat.held_recent_messages(conversation, len)
+  }
+
   fn messages(&self, conversation: ConversationId, start: usize, len: usize) -> Vec<Message> {
     let messages = self.chat.messages(conversation, start, len);
     // Integration channels are fed by bridges that write `[LEVEL] text`; show them as log lines.

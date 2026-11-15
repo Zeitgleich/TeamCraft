@@ -9,6 +9,9 @@ use crate::activity_place::ActivityFilter;
 use crate::channel_access::{can_create_channel_in, can_invite_to, is_guest};
 use crate::components::avatar::PresenceDot;
 use crate::components::channel_glyph::{ChannelGlyph, channel_fallback_icon};
+use crate::components::conversation_preview::{
+  ConversationPreview, PREVIEW_DELAY, PREVIEW_GRACE, PREVIEW_HEIGHT_PX,
+};
 use crate::components::count_badge::{BadgeTone, CountBadge};
 use crate::components::entry_menu::EntryMenuTrigger;
 use crate::components::icons::{Icon, IconName};
@@ -1130,6 +1133,10 @@ pub fn SidebarItem(
     None => view! { <span class="sb-name" translate="no">{move || name.get()}</span> }.into_any(),
   };
 
+  let preview = RowPreview::new();
+  let preview_id = format!("sb-preview-{id}");
+  let described_by = preview_id.clone();
+
   view! {
     <button
       class="sb-item"
@@ -1141,14 +1148,46 @@ pub fn SidebarItem(
       data-conversation=id.to_string()
       aria-current=move || is_current().then_some("page")
       aria-label=label
-      on:pointerdown=move |ev| menu.on_pointerdown(&ev)
+      aria-describedby=move || preview.is_shown().then(|| described_by.clone())
+      on:pointerdown=move |ev| {
+        preview.hide_now();
+        menu.on_pointerdown(&ev)
+      }
+      on:pointerenter=move |ev| {
+        // A finger has no hover; a tap opens the conversation.
+        if ev.pointer_type() == "mouse" && !is_current() {
+          preview.show_soon(event_target::<web_sys::Element>(&ev));
+        }
+      }
+      on:pointerleave=move |_| preview.hide_soon()
+      on:focus=move |ev| {
+        // Keyboard focus only: a click focuses the row too and would open the card at once.
+        let element = event_target::<web_sys::Element>(&ev);
+        if !is_current() && element.matches(":focus-visible").unwrap_or(false) {
+          preview.show_soon(element);
+        }
+      }
+      on:blur=move |_| preview.hide_now()
       on:pointermove=move |ev| menu.on_pointermove(&ev)
       on:pointerup=move |_| menu.on_pointerup()
       on:pointercancel=move |_| menu.on_pointerup()
-      on:contextmenu=move |ev| menu.on_contextmenu(&ev)
-      on:keydown=move |ev| menu.on_keydown(&ev)
+      on:contextmenu=move |ev| {
+        preview.hide_now();
+        menu.on_contextmenu(&ev)
+      }
+      on:keydown=move |ev| {
+        // Esc dismisses the card without moving the focus (WCAG 1.4.13).
+        if ev.key() == "Escape" && preview.is_shown() {
+          ev.stop_propagation();
+          preview.hide_now();
+        }
+        menu.on_keydown(&ev)
+      }
       on:click:capture=move |ev| menu.on_click_capture(&ev)
-      on:click=move |_| state.open_conversation(id)
+      on:click=move |_| {
+        preview.hide_now();
+        state.open_conversation(id)
+      }
     >
       {leading} {name_view} {move || status_emoji.get().map(|emoji| view! { <span class="sb-status" aria-hidden="true">{emoji}</span> })}
       {move || {
@@ -1176,6 +1215,85 @@ pub fn SidebarItem(
       {move || is_catching_up.get().then(|| view! { <span class="sb-catching-up" aria-hidden="true" title=i18n.t("catching-up")><Icon name=IconName::Clock /></span> })}
       <CountBadge count=badge_count tone=badge_tone is_decorative=true maybe_cap=SIDEBAR_BADGE_CAP />
     </button>
+    {move || preview.position().map(|(top, left)| view! {
+      <ConversationPreview
+        conversation=id
+        name=name.get_untracked()
+        top=top
+        left=left
+        id=preview_id.clone()
+        on_enter=Callback::new(move |()| preview.cancel())
+        on_leave=Callback::new(move |()| preview.hide_soon())
+      />
+    })}
+  }
+}
+
+/// The hover and focus preview of one row (#2078): where the card is while it shows, and the timer
+/// that opens or closes it. Each new start or stop cancels the one before it.
+#[derive(Clone, Copy)]
+struct RowPreview {
+  maybe_position: RwSignal<Option<(f64, f64)>>,
+  generation: StoredValue<u32>,
+}
+
+impl RowPreview {
+  fn new() -> Self {
+    Self {
+      maybe_position: RwSignal::new(None),
+      generation: StoredValue::new(0),
+    }
+  }
+
+  fn position(self) -> Option<(f64, f64)> {
+    self.maybe_position.get()
+  }
+
+  fn is_shown(self) -> bool {
+    self.maybe_position.get().is_some()
+  }
+
+  /// Opens the card beside `anchor` once it rested for [`PREVIEW_DELAY`].
+  fn show_soon(self, anchor: web_sys::Element) {
+    self.after(PREVIEW_DELAY, move || {
+      let rect = anchor.get_bounding_client_rect();
+      let window_height = web_sys::window()
+        .and_then(|window| window.inner_height().ok())
+        .and_then(|height| height.as_f64())
+        .unwrap_or(f64::MAX);
+      // Right of the row, with its top at the row's, moved up where the card would leave the window.
+      let top = rect.top().min(window_height - PREVIEW_HEIGHT_PX - 8.0).max(4.0);
+      self.maybe_position.try_set(Some((top, rect.right() + 8.0)));
+    });
+  }
+
+  fn hide_soon(self) {
+    self.after(PREVIEW_GRACE, move || {
+      self.maybe_position.try_set(None);
+    });
+  }
+
+  fn hide_now(self) {
+    self.cancel();
+    self.maybe_position.try_set(None);
+  }
+
+  /// Keeps the card: the pointer reached it.
+  fn cancel(self) {
+    self.generation.try_update_value(|generation| *generation += 1);
+  }
+
+  fn after(self, delay: Duration, action: impl FnOnce() + 'static) {
+    self.cancel();
+    let generation = self.generation.try_get_value();
+    set_timeout(
+      move || {
+        if generation.is_some() && self.generation.try_get_value() == generation {
+          action();
+        }
+      },
+      delay,
+    );
   }
 }
 

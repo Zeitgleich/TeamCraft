@@ -49,6 +49,7 @@ status-expiry-today = Heute
 status-expiry-week = Diese Woche
 status-preset-meeting = In einem Meeting
 status-preset-commuting = Unterwegs
+status-preset-focusing = Konzentriert
 status-preset-sick = Krank
 status-preset-vacation = Im Urlaub
 status-until = bis { $time }

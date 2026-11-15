@@ -2,6 +2,7 @@ use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
+use teamcraft_client_api::custom_status::BUILT_IN_PRESETS;
 use teamcraft_proto::Role;
 
 use crate::admin::AdminSection;
@@ -28,14 +29,6 @@ pub(crate) const MS_PER_HOUR: TimestampMs = 3_600_000;
 /// The shortest pause of notifications and the shortest "Reset after": focus button, tray and the
 /// status's duration offer it.
 pub(crate) const FOCUS_SHORT_MS: TimestampMs = 30 * 60_000;
-
-/// Suggestions while the workspace configured no presets of its own; the label is an i18n key.
-const STATUS_PRESETS: [(&str, &str); 4] = [
-  ("🗓️", "status-preset-meeting"),
-  ("🚌", "status-preset-commuting"),
-  ("🤒", "status-preset-sick"),
-  ("🌴", "status-preset-vacation"),
-];
 
 /// Popover under the avatar: the status list (#1578), custom status and account shortcuts.
 #[component]
@@ -544,12 +537,13 @@ pub fn CustomStatusDialog() -> impl IntoView {
   let has_current = current.is_some();
   let presets: Vec<Preset> = if policy.presets.is_empty() {
     if can_write_own {
-      STATUS_PRESETS
+      BUILT_IN_PRESETS
         .into_iter()
-        .map(|(emoji, key)| Preset {
-          emoji: emoji.to_owned(),
-          text: i18n.t(key),
+        .map(|preset| Preset {
+          emoji: preset.emoji.to_owned(),
+          text: i18n.t(&format!("status-preset-{}", preset.id)),
           maybe_duration_minutes: None,
+          maybe_expiry: Some(preset.expiry),
         })
         .collect()
     } else {
@@ -563,6 +557,7 @@ pub fn CustomStatusDialog() -> impl IntoView {
         emoji: preset.maybe_emoji.clone().unwrap_or_default(),
         text: preset.text.clone(),
         maybe_duration_minutes: preset.maybe_duration_minutes,
+        maybe_expiry: None,
       })
       .collect()
   };
@@ -628,7 +623,7 @@ pub fn CustomStatusDialog() -> impl IntoView {
             {presets
               .into_iter()
               .map(|preset| {
-                let Preset { emoji: preset_emoji, text: preset_text, maybe_duration_minutes } = preset;
+                let Preset { emoji: preset_emoji, text: preset_text, maybe_duration_minutes, maybe_expiry } = preset;
                 let shown_emoji = preset_emoji.clone();
                 let shown_text = preset_text.clone();
                 let is_picked = {
@@ -647,6 +642,10 @@ pub fn CustomStatusDialog() -> impl IntoView {
                         // A preset's duration is its end, unless the user picks another below.
                         if let Some(minutes) = maybe_duration_minutes {
                           chosen_end.set(Some(now_ms() + i64::from(minutes) * 60_000));
+                        } else if let Some(preset_expiry) = maybe_expiry {
+                          // A built-in preset's default, which the user can still change.
+                          expiry.set(preset_expiry);
+                          chosen_end.set(None);
                         }
                       }
                     >
@@ -778,6 +777,8 @@ struct Preset {
   emoji: String,
   text: String,
   maybe_duration_minutes: Option<u32>,
+  /// The "clear after" of a built-in preset; workspace presets carry minutes instead.
+  maybe_expiry: Option<StatusExpiry>,
 }
 
 fn move_focus(ev: &web_sys::KeyboardEvent, menu: NodeRef<html::Div>, key: &str) {

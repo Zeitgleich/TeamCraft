@@ -3328,6 +3328,21 @@ impl ChatBackend for RemoteChat {
     }
   }
 
+  fn held_recent_messages(&self, conversation: ConversationId, len: usize) -> Vec<Message> {
+    // Read only: no `is_used`, no page load. Walks back from the newest row while rows are held.
+    let total = self.message_count(conversation);
+    let mirror = self.mirror.borrow();
+    let Some(feed) = mirror.feeds.get(&conversation) else {
+      return Vec::new();
+    };
+    let mut recent: Vec<Message> = (total.saturating_sub(len)..total)
+      .rev()
+      .map_while(|index| feed.rows.get(&index).cloned())
+      .collect();
+    recent.reverse();
+    recent
+  }
+
   fn messages(&self, conversation: ConversationId, start: usize, len: usize) -> Vec<Message> {
     let total = self.message_count(conversation);
     let end = total.min(start.saturating_add(len));

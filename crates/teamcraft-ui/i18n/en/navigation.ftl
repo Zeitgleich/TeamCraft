@@ -291,3 +291,5 @@ health-alerts-badge = { $count ->
     [one] One health alert
    *[other] { $count } health alerts
 }
+conversation-preview-label = Latest messages in { $name }
+conversation-preview-empty = Nothing to show yet. Open the conversation to read it.

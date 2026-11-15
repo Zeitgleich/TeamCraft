@@ -30,3 +30,38 @@
   justify-content: flex-end;
 }
 
+
+/* Last messages of a conversation beside its sidebar row (#2078). */
+.conversation-preview {
+  gap: 8px;
+  width: 320px;
+  pointer-events: auto;
+}
+
+.conversation-preview-line p {
+  margin: 0;
+}
+
+.conversation-preview-meta {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.conversation-preview-body {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .conversation-preview {
+    animation: conversation-preview-in 120ms ease-out;
+  }
+}
+
+@keyframes conversation-preview-in {
+  from {
+    opacity: 0;
+  }
+}
