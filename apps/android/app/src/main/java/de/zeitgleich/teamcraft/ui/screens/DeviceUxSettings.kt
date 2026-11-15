@@ -37,8 +37,10 @@ import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.ui.theme.AppearancePrefs
 import de.zeitgleich.teamcraft.ui.theme.ChatListGrouping
 import de.zeitgleich.teamcraft.ui.theme.ChatListLayout
+import de.zeitgleich.teamcraft.ui.ChatSwipePrefs
 import de.zeitgleich.teamcraft.ui.MessageLayout
 import de.zeitgleich.teamcraft.ui.MessageLayoutPrefs
+import de.zeitgleich.teamcraft.ui.SwipeEndAction
 import uniffi.teamcraft_ffi.CallStatusSounds
 import uniffi.teamcraft_ffi.OriginalDownload
 import androidx.compose.material3.ListItemShapes
@@ -206,6 +208,22 @@ fun MessageLayoutSetting(shapes: ListItemShapes) {
   )
 }
 
+/** What swiping a chat to the left does: star it, or open its notification settings (#2007). */
+@Composable
+fun ChatSwipeSetting(shapes: ListItemShapes) {
+  val context = LocalContext.current
+  val prefs = remember { ChatSwipePrefs.of(context) }
+  val action by prefs.endAction.collectAsState()
+  SettingsChoiceRow(
+    shapes,
+    stringResource(R.string.chat_swipe_setting),
+    CHAT_SWIPE_CHOICES,
+    action,
+    maybeHint = stringResource(R.string.chat_swipe_hint),
+    onSelect = prefs::setEndAction,
+  )
+}
+
 /** In the list layout: DMs and channels together, or the channels grouped by space (#1345). */
 @Composable
 fun ChatListGroupingSetting(shapes: ListItemShapes) {
@@ -282,6 +300,11 @@ private val MESSAGE_LAYOUT_CHOICES = listOf(
   MessageLayout.Bubbles to R.string.message_layout_bubbles,
   MessageLayout.Comfortable to R.string.message_layout_comfortable,
   MessageLayout.Compact to R.string.message_layout_compact,
+)
+
+private val CHAT_SWIPE_CHOICES = listOf(
+  SwipeEndAction.Favorite to R.string.chat_swipe_favorite,
+  SwipeEndAction.Mute to R.string.chat_swipe_mute,
 )
 
 private val CHAT_LIST_GROUPING_CHOICES = listOf(
