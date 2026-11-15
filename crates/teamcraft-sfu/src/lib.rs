@@ -3,6 +3,7 @@
 //! The SFU reads the TeamCraft datagram header and the RTP header (for the audio level) and never
 //! decrypts or decodes media. In this spike it also acts as DAVE external sender, see SPIKE.md.
 
+mod audio_socket;
 pub mod auth;
 pub mod config;
 pub mod control;

@@ -104,7 +104,9 @@ pub struct FallbackConfig {
   /// `main` opens it unless told not to).
   pub maybe_bind_addr: Option<SocketAddr>,
   /// Connections in a call at once. A further join is turned away without a verdict on the call: a
-  /// client that is rejoining tries again. Mind the process's descriptor limit.
+  /// client that is rejoining tries again. A device holds two, its session's and its voice's
+  /// (#1979); with none left for the voice, it stays on the session's. Mind the process's
+  /// descriptor limit.
   pub max_connections: usize,
   /// Connections that haven't joined yet, at once; one more is closed before a byte is read. Anybody
   /// can open these, with no token: small, and apart from `max_connections`, so that a flood of them

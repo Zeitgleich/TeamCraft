@@ -49,6 +49,9 @@ pub const MAX_NACK_SEQUENCE_NUMBERS: usize = 256;
 
 /// Bytes of the secret that lets a session move to another connection ([`CallEvent::Joined`]).
 pub const SWITCH_SECRET_BYTES: usize = 32;
+/// Bytes of the secret that lets a second connection carry a fallback session's audio
+/// ([`CallServerMessage::AudioSocket`], #1979).
+pub const AUDIO_SOCKET_SECRET_BYTES: usize = 32;
 
 /// A DAVE transition: the switch of every member's encryption key to a new epoch (DAVE's
 /// `transition_id`, e2ee.md §8). Members install the new epoch's decryption keys when they get the
@@ -256,6 +259,16 @@ pub enum CallClientMessage {
   Switch {
     secret: Base64Bytes,
   },
+  /// First message of a second WebSocket fallback connection that carries the audio of a session
+  /// of this device (#1979): `secret` is the session's [`CallServerMessage::AudioSocket`] secret.
+  /// On one TCP connection a lost segment holds up the voice behind the video it carries; on its
+  /// own connection the voice waits only for its own. The connection then carries the session's
+  /// own media datagrams to the SFU, nothing else; the SFU sends nothing on it but its close. An
+  /// SFU from before answers that it expected a join and closes, and the audio stays on the
+  /// session's connection.
+  AttachAudio {
+    secret: Base64Bytes,
+  },
   #[serde(other)]
   Unknown,
 }
@@ -285,6 +298,14 @@ pub enum CallServerMessage {
   /// an event either: the events still queued for the old connection go out there, up to its close
   /// with [`SFU_SWITCHED_CLOSE_CODE`], and the next one comes here with the next number.
   Switched,
+  /// Sent on a WebSocket fallback session's connection right after the join (#1979):
+  /// [`AUDIO_SOCKET_SECRET_BYTES`] random bytes that let a second connection carry this session's
+  /// audio ([`CallClientMessage::AttachAudio`]). Not an event: it takes no sequence number. The
+  /// secret is good for as long as the session runs on this connection. SFUs from before send
+  /// none, and clients from before ignore it.
+  AudioSocket {
+    secret: Base64Bytes,
+  },
   #[serde(other)]
   Unknown,
 }
@@ -648,6 +669,10 @@ impl fmt::Debug for CallClientMessage {
       Self::Ping { id } => f.debug_struct("Ping").field("id", id).finish(),
       Self::Probe { .. } => f.debug_struct("Probe").field("ticket", &"[redacted]").finish(),
       Self::Switch { .. } => f.debug_struct("Switch").field("secret", &"[redacted]").finish(),
+      Self::AttachAudio { .. } => f
+        .debug_struct("AttachAudio")
+        .field("secret", &"[redacted]")
+        .finish(),
       Self::SetMuted { is_muted } => f.debug_struct("SetMuted").field("is_muted", is_muted).finish(),
       Self::Unknown => f.write_str("Unknown"),
     }
@@ -1220,6 +1245,25 @@ mod tests {
       serde_json::from_str::<CallServerMessage>(&switched).unwrap(),
       CallServerMessage::Switched
     );
+  }
+
+  /// #1979: the SFU hands a fallback session the secret of its audio connection, which names it
+  /// first. Neither is an event, and the secret never shows in a debug print.
+  #[test]
+  fn audio_socket_wire_format() {
+    let offer = CallServerMessage::AudioSocket {
+      secret: Base64Bytes::new(vec![1, 2]),
+    };
+    let json = serde_json::to_string(&offer).unwrap();
+    assert_eq!(json, r#"{"type":"audio_socket","secret":"AQI="}"#);
+    assert_eq!(serde_json::from_str::<CallServerMessage>(&json).unwrap(), offer);
+    let attach = CallClientMessage::AttachAudio {
+      secret: Base64Bytes::new(vec![1, 2]),
+    };
+    let json = serde_json::to_string(&attach).unwrap();
+    assert_eq!(json, r#"{"type":"attach_audio","secret":"AQI="}"#);
+    assert_eq!(serde_json::from_str::<CallClientMessage>(&json).unwrap(), attach);
+    assert!(!format!("{attach:?}").contains("AQI="), "the secret is redacted");
   }
 
   #[test]

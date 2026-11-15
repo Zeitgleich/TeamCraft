@@ -69,10 +69,10 @@ use crate::call_resilience::{
 };
 use crate::capture_health::{CaptureSample, CaptureStallWatch, StallChange};
 use crate::fallback_link::{
-  FallbackOpener, LoopbackOpener, SignalFrames, SocketEnd, SocketInput, is_allowed_url, is_going_away,
-  read_socket,
+  AudioLink, FallbackOpener, LoopbackOpener, SignalFrames, SocketEnd, SocketInput, is_allowed_url,
+  is_going_away, read_socket,
 };
-use crate::fallback_queue::MediaQueueConfig;
+use crate::fallback_queue::{MediaQueueConfig, is_audio};
 use crate::fallback_socket::{FallbackSender, WriterConfig, run_writer};
 use crate::jitter::JitterBufferConfig;
 use crate::link_probe::{
@@ -1177,6 +1177,8 @@ enum LinkPath {
     sender: FallbackSender,
     /// Frames read so far: the path's sign of life.
     received: Arc<AtomicU64>,
+    /// The own audio's connection, once the SFU offered one (#1979).
+    audio: Arc<AudioLink>,
   },
 }
 
@@ -1825,6 +1827,12 @@ impl Link {
       ping_interval: resilience.echo_interval,
       write_timeout: FALLBACK_WRITE_TIMEOUT,
     };
+    let audio = Arc::new(AudioLink::new(
+      url,
+      protocols.to_vec(),
+      maybe_opener.cloned(),
+      writer_config,
+    ));
     tokio::spawn(run_writer(
       socket.sink,
       SignalFrames(signal_out_rx),
@@ -1835,10 +1843,15 @@ impl Link {
       socket.stream,
       Arc::clone(&received),
       sender.clone(),
+      Arc::clone(&audio),
       input_tx,
     ));
     Ok(Self {
-      path: LinkPath::Fallback { sender, received },
+      path: LinkPath::Fallback {
+        sender,
+        received,
+        audio,
+      },
       signal_out,
       inputs,
       tasks: vec![reader],
@@ -1928,14 +1941,21 @@ impl Link {
   fn send_datagram(&self, bytes: &[u8]) {
     match &self.path {
       LinkPath::Quic { sender, .. } => sender.send_datagram(bytes),
-      LinkPath::Fallback { sender, .. } => sender.send_datagram(bytes),
+      LinkPath::Fallback { sender, audio, .. } => {
+        if !(is_audio(bytes) && audio.try_send(bytes)) {
+          sender.send_datagram(bytes);
+        }
+      },
     }
   }
 
   fn close_as_leave(&self) {
     match &self.path {
       LinkPath::Quic { connection, .. } => connection.close(LEAVE.into(), b"leave"),
-      LinkPath::Fallback { sender, .. } => sender.close(LEAVE, b"leave"),
+      LinkPath::Fallback { sender, audio, .. } => {
+        audio.close();
+        sender.close(LEAVE, b"leave");
+      },
     }
   }
 
@@ -3139,11 +3159,17 @@ async fn read_fallback(
   >,
   received: Arc<AtomicU64>,
   sender: FallbackSender,
+  audio: Arc<AudioLink>,
   inputs: mpsc::UnboundedSender<LinkInput>,
 ) {
   let delivering = inputs.clone();
   let end = read_socket(stream, received, sender, move |input| {
     let input = match input {
+      // The SFU offers the own audio a connection of its own (#1979): the session's, not the call's.
+      SocketInput::Signal(CallServerMessage::AudioSocket { secret }) => {
+        audio.attach(secret);
+        return true;
+      },
       SocketInput::Signal(message) => LinkInput::Signal(message),
       SocketInput::Datagram(bytes) => LinkInput::Datagram(ReadDatagram {
         bytes,
@@ -3411,6 +3437,15 @@ mod tests {
         path: LinkPath::Fallback {
           sender: FallbackSender::new(MediaQueueConfig::default()),
           received: Arc::new(AtomicU64::new(0)),
+          audio: Arc::new(AudioLink::new(
+            "ws://127.0.0.1:1/call",
+            Vec::new(),
+            None,
+            WriterConfig {
+              ping_interval: Duration::from_secs(1),
+              write_timeout: Duration::from_secs(1),
+            },
+          )),
         },
         signal_out,
         inputs,

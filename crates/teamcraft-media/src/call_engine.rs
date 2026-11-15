@@ -1206,6 +1206,9 @@ impl CallEngine {
         debug!("ignoring a switch confirmation outside a switch");
         Ok(())
       },
+      // The secret of a fallback session's audio connection (#1979): the fallback driver takes it
+      // before it gets here.
+      CallServerMessage::AudioSocket { .. } => Ok(()),
       CallServerMessage::Unknown => {
         debug!("ignoring unknown signaling frame");
         Ok(())

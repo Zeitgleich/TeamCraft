@@ -56,6 +56,7 @@ use wtransport::{
 };
 
 use crate::{
+  audio_socket::AudioSockets,
   auth::{JoinGrant, JoinTokenVerifier},
   config::{QuicCongestion, SfuConfig},
   fallback,
@@ -118,6 +119,8 @@ pub(crate) struct Shared {
   pub(crate) has_warned_of_forwarding: AtomicBool,
   /// The secrets that move running sessions to another connection (#1309).
   pub(crate) switch_secrets: SwitchSecrets,
+  /// The secrets that let a second connection carry a fallback session's audio (#1979).
+  pub(crate) audio_sockets: AudioSockets,
   /// Link probe tickets taken (#1959): each opens one session.
   probe_tickets: Mutex<ProbeTickets>,
 }
@@ -293,6 +296,7 @@ impl Sfu {
         fallback_connections: AtomicUsize::new(0),
         has_warned_of_forwarding: AtomicBool::new(false),
         switch_secrets: SwitchSecrets::default(),
+        audio_sockets: AudioSockets::default(),
         probe_tickets: Mutex::new(ProbeTickets::default()),
       }),
     })

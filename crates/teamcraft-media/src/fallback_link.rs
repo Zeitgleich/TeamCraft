@@ -1,14 +1,19 @@
 //! The native clients' side of a call's WebSocket fallback (ARCHITECTURE.md §6.6): opening the
 //! socket and reading from it. The call driver sees a link like its QUIC one.
+//!
+//! Once the SFU offers the session an audio connection of its own (#1979, [`AudioLink`]), the own
+//! audio goes there, so the voice waits for no lost segment of the camera's video.
 
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
-use futures_util::{Sink, Stream, StreamExt};
-use teamcraft_proto::{CallClientMessage, CallServerMessage, FallbackFrame, SFU_GOING_AWAY_CLOSE_CODE};
+use futures_util::{Sink, SinkExt, Stream, StreamExt};
+use teamcraft_proto::{
+  Base64Bytes, CallClientMessage, CallServerMessage, FallbackFrame, SFU_GOING_AWAY_CLOSE_CODE,
+};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -17,7 +22,8 @@ use tokio_tungstenite::tungstenite::{Bytes, Error as WebSocketError, Message};
 use tracing::{debug, warn};
 use url::{Host, Url};
 
-use crate::fallback_socket::{ControlFrames, FallbackSender};
+use crate::fallback_queue::MediaQueueConfig;
+use crate::fallback_socket::{ControlFrames, FallbackSender, WriterConfig, run_writer};
 
 /// How a call socket is opened: plain, only to a loopback address, in development tools and tests.
 /// The apps bring their own, with their trust store and the system's proxy. `protocols` go in the
@@ -50,6 +56,26 @@ impl FallbackSocket {
       stream: Box::pin(stream),
     }
   }
+}
+
+/// A fallback session's connection for its own audio (#1979): opened once the SFU offers it
+/// ([`CallServerMessage::AudioSocket`]), the same way as the session's (same address, same opener,
+/// the join token in the upgrade). Its first frame names the secret; the own audio datagrams go
+/// there from then on. Until it is up, and once it ended or was refused, the audio goes on the
+/// session's connection. It closes when the link drops it.
+pub(crate) struct AudioLink {
+  url: String,
+  protocols: Vec<String>,
+  maybe_opener: Option<Arc<dyn FallbackOpener>>,
+  writer_config: WriterConfig,
+  maybe_attached: Mutex<Option<AttachedAudio>>,
+}
+
+/// An audio connection that opens or runs.
+struct AttachedAudio {
+  sender: FallbackSender,
+  /// It is open and its first frame named the secret; cleared when it ends.
+  is_up: Arc<AtomicBool>,
 }
 
 /// [`FallbackOpener`] without TLS, for loopback addresses.
@@ -120,6 +146,128 @@ impl FallbackOpener for LoopbackOpener {
       Ok(FallbackSocket::new(socket))
     })
   }
+}
+
+impl AudioLink {
+  pub(crate) fn new(
+    url: &str,
+    protocols: Vec<String>,
+    maybe_opener: Option<Arc<dyn FallbackOpener>>,
+    writer_config: WriterConfig,
+  ) -> Self {
+    Self {
+      url: url.to_owned(),
+      protocols,
+      maybe_opener,
+      writer_config,
+      maybe_attached: Mutex::new(None),
+    }
+  }
+
+  /// Opens the audio connection for the session's `secret`, in place of any earlier one. Runs in
+  /// the background; nothing waits for it.
+  pub(crate) fn attach(&self, secret: Base64Bytes) {
+    self.close();
+    let sender = FallbackSender::new(MediaQueueConfig::default());
+    let is_up = Arc::new(AtomicBool::new(false));
+    let opening = match &self.maybe_opener {
+      Some(opener) => opener.open(&self.url, &self.protocols),
+      None => LoopbackOpener.open(&self.url, &self.protocols),
+    };
+    tokio::spawn(run_audio_link(
+      opening,
+      secret,
+      sender.clone(),
+      Arc::clone(&is_up),
+      self.writer_config,
+    ));
+    *lock(&self.maybe_attached) = Some(AttachedAudio { sender, is_up });
+  }
+
+  /// Sends an audio datagram on the audio connection; `false` when it isn't up, and the session's
+  /// connection should take it.
+  pub(crate) fn try_send(&self, datagram: &[u8]) -> bool {
+    let attached = lock(&self.maybe_attached);
+    let Some(attached) = attached.as_ref() else {
+      return false;
+    };
+    if !attached.is_up.load(Ordering::Acquire) {
+      return false;
+    }
+    attached.sender.send_datagram(datagram);
+    true
+  }
+
+  /// Closes the audio connection, if there is one.
+  pub(crate) fn close(&self) {
+    if let Some(attached) = lock(&self.maybe_attached).take() {
+      attached.is_up.store(false, Ordering::Release);
+      attached.sender.close(0, b"closing");
+    }
+  }
+}
+
+impl Drop for AudioLink {
+  fn drop(&mut self) {
+    self.close();
+  }
+}
+
+impl fmt::Debug for AudioLink {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.debug_struct("AudioLink").finish_non_exhaustive()
+  }
+}
+
+/// Opens an audio connection, names the secret first, then writes what `sender` queues until the
+/// connection ends or the sender closes. Whatever the SFU sends on it is read only to see it end.
+async fn run_audio_link(
+  opening: Pin<Box<dyn Future<Output = Result<FallbackSocket, String>> + Send>>,
+  secret: Base64Bytes,
+  sender: FallbackSender,
+  is_up: Arc<AtomicBool>,
+  writer_config: WriterConfig,
+) {
+  let mut socket = match opening.await {
+    Ok(socket) => socket,
+    Err(error) => {
+      debug!(%error, "the audio connection could not be opened");
+      return;
+    },
+  };
+  let Ok(attach) = serde_json::to_vec(&CallClientMessage::AttachAudio { secret }) else {
+    return;
+  };
+  // Before any datagram: the SFU takes the first frame as the name of the session.
+  let attach = Message::Binary(Bytes::from(FallbackFrame::Signal(&attach).encode()));
+  if let Err(error) = socket.sink.send(attach).await {
+    debug!(%error, "the audio connection failed before it carried anything");
+    return;
+  }
+  is_up.store(true, Ordering::Release);
+  debug!("the audio connection is open");
+  let mut stream = socket.stream;
+  let reading = async { while let Some(Ok(_)) = stream.next().await {} };
+  tokio::select! {
+    _ = run_writer(socket.sink, NoControlFrames, sender, writer_config) => {},
+    () = reading => {},
+  }
+  is_up.store(false, Ordering::Release);
+  debug!("the audio connection ended: the audio goes on the session's connection");
+}
+
+/// An audio connection sends no signaling.
+struct NoControlFrames;
+
+impl ControlFrames for NoControlFrames {
+  async fn next_frame(&mut self) -> Option<Vec<u8>> {
+    std::future::pending().await
+  }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+  // Nothing spans a panic point while it is held.
+  mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// A call socket carries the join token in the clear unless it is TLS: `wss://`, or `ws://` to the

@@ -45,10 +45,11 @@ pub use call_media::{
   VideoTrackKind,
 };
 pub use calls::{
-  CALL_JOIN_TOKEN_AUDIENCE, CALL_PROBE_TICKET_AUDIENCE, CallClientMessage, CallEvent, CallJoinClaims,
-  CallParticipant, CallProbeClaims, CallServerMessage, CallTokenKind, DaveKeyBinding, DaveTransitionId,
-  DaveTransitionMode, MAX_NACK_SEQUENCE_NUMBERS, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE,
-  SFU_SWITCHED_CLOSE_CODE, SWITCH_SECRET_BYTES, ScreenAudioTrack, ScreenContentMode, ScreenShareTakeover,
+  AUDIO_SOCKET_SECRET_BYTES, CALL_JOIN_TOKEN_AUDIENCE, CALL_PROBE_TICKET_AUDIENCE, CallClientMessage,
+  CallEvent, CallJoinClaims, CallParticipant, CallProbeClaims, CallServerMessage, CallTokenKind,
+  DaveKeyBinding, DaveTransitionId, DaveTransitionMode, MAX_NACK_SEQUENCE_NUMBERS, MediaStreamId,
+  SFU_GOING_AWAY_CLOSE_CODE, SFU_SWITCHED_CLOSE_CODE, SWITCH_SECRET_BYTES, ScreenAudioTrack,
+  ScreenContentMode, ScreenShareTakeover,
 };
 pub use canvas_page::{CanvasPageId, MAX_LISTED_CANVAS_PAGES, MAX_UNLISTED_CANVAS_PAGES};
 pub use conversation::{ConversationKind, ConversationVisibility, HistoryPolicy};
