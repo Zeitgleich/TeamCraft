@@ -4,6 +4,7 @@
 
 use std::collections::HashSet;
 
+use teamcraft_client_api::meeting_rows::past_meetings;
 use teamcraft_proto::{MeetingId, MeetingResponse, MeetingStatus, RecurrenceFrequency, RsvpStatus};
 
 use crate::clock::local_day;
@@ -119,6 +120,9 @@ impl MeetingsTab {
   /// The tab's meetings among `meetings` (the upcoming list, or the past one for [`Self::Past`]),
   /// in the order they are shown.
   pub fn select(self, meetings: &[MeetingResponse], me: UserId, now: TimestampMs) -> Vec<MeetingResponse> {
+    if self == Self::Past {
+      return past_meetings(meetings, now);
+    }
     let is_hosted = |meeting: &MeetingResponse| is_hosted_by(meeting, me);
     let mut selected: Vec<MeetingResponse> = meetings
       .iter()
@@ -127,14 +131,11 @@ impl MeetingsTab {
         Self::Upcoming => meeting.ends_at.0 > now,
         Self::Hosted => meeting.ends_at.0 > now && is_hosted(meeting),
         Self::Invited => meeting.ends_at.0 > now && meeting.organizer_user_id != me,
-        Self::Past => meeting.ends_at.0 <= now,
+        Self::Past => false,
       })
       .cloned()
       .collect();
-    match self {
-      Self::Past => selected.sort_by_key(|meeting| std::cmp::Reverse((meeting.starts_at.0, meeting.id))),
-      _ => selected.sort_by_key(|meeting| (meeting.starts_at.0, meeting.id)),
-    }
+    selected.sort_by_key(|meeting| (meeting.starts_at.0, meeting.id));
     selected
   }
 }

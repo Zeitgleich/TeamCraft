@@ -781,6 +781,10 @@ data class Meeting(
   @SerialName("organizer_user_id") val organizerUserId: String = "",
   /** The repeat rule of a series (each occurrence is listed); the core reads it, the list only asks whether there is one. */
   @SerialName("recurrence") val maybeRecurrence: JsonObject? = null,
+  /** Of a series: only this occurrence is cancelled (its organizer can restore just it). */
+  @SerialName("is_occurrence_cancelled") val isOccurrenceCancelled: Boolean = false,
+  /** Of a series that skips public holidays: this occurrence is left out as one. */
+  @SerialName("is_occurrence_holiday") val isOccurrenceHoliday: Boolean = false,
 ) {
   val isRepeating: Boolean get() = maybeRecurrence != null
 }

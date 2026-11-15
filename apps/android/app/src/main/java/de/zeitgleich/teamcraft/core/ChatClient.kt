@@ -322,6 +322,20 @@ class ChatClient(
 
   suspend fun saveMeetingEdit(meetingId: String, form: MeetingForm): MeetingSave = core().saveMeetingEdit(meetingId, form)
 
+  /** The Past view: meetings of the last 30 days that ended, latest first (#1905). */
+  suspend fun pastMeetings(): List<Meeting> =
+    WireJson.decodeFromString(MeetingList.serializer(), core().pastMeetings()).meetings
+
+  /** The meeting's link with the organizer's key fingerprint as this device pinned it; fails without. */
+  suspend fun meetingLink(meetingId: String): String = core().meetingLink(meetingId)
+
+  /** Takes a cancellation back: the meeting's, or with [maybeOccurrenceStartsAt] that occurrence's. */
+  suspend fun restoreMeeting(meetingId: String, maybeOccurrenceStartsAt: Long?) =
+    core().restoreMeeting(meetingId, maybeOccurrenceStartsAt)
+
+  /** "Remove from list": a cancelled meeting the user organizes. */
+  suspend fun hideMeeting(meetingId: String) = core().hideMeeting(meetingId)
+
   suspend fun cancelMeeting(meetingId: String, scope: MeetingCancelScope, occurrenceStartsAt: Long) =
     core().cancelMeeting(meetingId, scope, occurrenceStartsAt)
 

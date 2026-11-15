@@ -96,8 +96,8 @@ pub use meeting_lobby::{
 };
 pub use meetings::{
   MeetingCancelScope, MeetingEditForm, MeetingExternalInvitee, MeetingForm, MeetingFormProblem,
-  MeetingRepeat, MeetingRepeatForm, MeetingSave, MeetingSeriesEnd, SavedMeeting, meeting_form_problems,
-  meeting_form_with_repeat, new_meeting_form,
+  MeetingRepeat, MeetingRepeatForm, MeetingRowActions, MeetingSave, MeetingSeriesEnd, SavedMeeting,
+  meeting_form_problems, meeting_form_with_repeat, meeting_row_actions, new_meeting_form,
 };
 pub use notetaker::{MovedCallHint, NotetakerAddition};
 pub use perf_jobs::{
@@ -1451,6 +1451,48 @@ impl TeamCraft {
   ) -> Result<MeetingSave, TeamCraftError> {
     self
       .call(move |engine| Box::pin(async move { engine.save_meeting_edit(&meeting_id, &form).await }))
+      .await
+  }
+
+  /// The meeting's link to hand out (#1905): the server's address with the organizer's key
+  /// fingerprint as this device has it pinned (`v=`, e2ee.md §4.6), never the server's. An error
+  /// when this device can't pin the organizer's key: then the app hands out no link.
+  pub async fn meeting_link(&self, meeting_id: String) -> Result<String, TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.meeting_link(&meeting_id).await }))
+      .await
+  }
+
+  /// Takes the cancellation of a meeting the user organizes back (#1905): the whole meeting, or
+  /// with `maybe_occurrence_starts_at_ms` that occurrence of a series (a skipped holiday's too).
+  pub async fn restore_meeting(
+    &self,
+    meeting_id: String,
+    maybe_occurrence_starts_at_ms: Option<i64>,
+  ) -> Result<(), TeamCraftError> {
+    self
+      .call(move |engine| {
+        Box::pin(async move {
+          engine
+            .restore_meeting(&meeting_id, maybe_occurrence_starts_at_ms)
+            .await
+        })
+      })
+      .await
+  }
+
+  /// "Remove" (#1905): takes a cancelled meeting the user organizes off their lists.
+  pub async fn hide_meeting(&self, meeting_id: String) -> Result<(), TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.hide_meeting(&meeting_id).await }))
+      .await
+  }
+
+  /// The Past view (#1905): the user's meetings of the last 30 days that ended, latest first, as
+  /// `GET /meetings` JSON, as desktop lists them.
+  pub async fn past_meetings(&self) -> Result<String, TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.past_meetings().await }))
       .await
   }
 

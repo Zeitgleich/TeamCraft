@@ -352,6 +352,15 @@ before the save, as desktop keeps them in local storage). The co-hosts as ticked
 the save (`ChangeMeetingHosts`, #1720); a ticked notetaker is asked into every call after the
 chat's setup, an unticked one is stopped before the edit takes it out of the group.
 
+After scheduling, the apps show "Your meeting is ready" with the link to copy or share, and a
+row's menu has "Copy link" (#1905). The link is made by the core (`meeting_link`: the organizer's
+key fingerprint as this device pinned it, `teamcraft_client_api::meeting_links::with_verifier`,
+which desktop uses too); without it nothing is handed out. A space's meetings tab schedules into
+that space. The organizer restores a cancelled meeting or occurrence ("Meet anyway" for a skipped
+holiday) and removes a cancelled meeting from the lists; the Past view lists the meetings of the
+last 30 days that ended. Which row offers what, and what the Past view lists, is
+`teamcraft_client_api::meeting_rows`, shared with desktop.
+
 **The lobby in the apps** (#1859). The organizer and the co-hosts (and a chat admin the server
 lets host it) see "Lobby" in the controls of the meeting's call with a count of who waits; nobody
 else sees it, and the server refuses everybody else's `GET /meetings/{id}/lobby`. Each row is a

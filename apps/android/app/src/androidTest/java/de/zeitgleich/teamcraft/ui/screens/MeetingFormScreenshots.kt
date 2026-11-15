@@ -23,10 +23,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.ViewModelProvider
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import de.zeitgleich.teamcraft.core.Meeting
 import de.zeitgleich.teamcraft.ui.MainActivity
+import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.theme.TeamCraftTheme
 import org.junit.Assume.assumeTrue
 import org.junit.Test
@@ -37,6 +40,7 @@ import uniffi.teamcraft_ffi.MeetingFormProblem
 import uniffi.teamcraft_ffi.MeetingRepeat
 import uniffi.teamcraft_ffi.MeetingRepeatForm
 import uniffi.teamcraft_ffi.MeetingSeriesEnd
+import uniffi.teamcraft_ffi.SavedMeeting
 import java.io.File
 import java.time.LocalDate
 
@@ -66,18 +70,31 @@ class MeetingFormScreenshots {
     shoot("meeting-form-errors-light", isDark = false, broken, problems)
   }
 
+  /** "Your meeting is ready" with its link, and rows of a cancelled meeting and a skipped holiday. */
+  @Test
+  fun meetingLinks() {
+    assumeTrue(InstrumentationRegistry.getArguments().getString("screenshots") == "meeting-links")
+    shootContent("meeting-created-light", isDark = false) { LinksSample(it) }
+    shootContent("meeting-created-dark", isDark = true) { LinksSample(it) }
+  }
+
   private fun shoot(name: String, isDark: Boolean, form: MeetingForm, problems: List<MeetingFormProblem>) {
+    shootContent(name, isDark) { Sample(form, problems) }
+  }
+
+  private fun shootContent(name: String, isDark: Boolean, content: @Composable (MainViewModel) -> Unit) {
     val instrumentation = InstrumentationRegistry.getInstrumentation()
     ActivityScenario.launch(MainActivity::class.java).use { scenario ->
       instrumentation.waitForIdleSync()
       scenario.onActivity { activity ->
+        val viewModel = ViewModelProvider(activity)[MainViewModel::class.java]
         activity.setContent {
           val configuration = Configuration(LocalConfiguration.current).apply {
             uiMode = (uiMode and Configuration.UI_MODE_NIGHT_MASK.inv()) or
               (if (isDark) Configuration.UI_MODE_NIGHT_YES else Configuration.UI_MODE_NIGHT_NO)
           }
           CompositionLocalProvider(LocalConfiguration provides configuration) {
-            TeamCraftTheme { Sample(form, problems) }
+            TeamCraftTheme { content(viewModel) }
           }
         }
       }
@@ -110,6 +127,33 @@ class MeetingFormScreenshots {
     }
   }
 
+  @Composable
+  private fun LinksSample(viewModel: MainViewModel) {
+    val start = System.currentTimeMillis() + 2 * HOUR_MS
+    val saved = SavedMeeting("7", "8", "Weekly planning", start, start + HOUR_MS / 2, "")
+    Surface(Modifier.fillMaxSize()) {
+      Column(Modifier.verticalScroll(rememberScrollState()).padding(vertical = 48.dp)) {
+        MeetingCreatedContent(
+          saved = saved,
+          link = LinkState.Ready("https://chat.example.com/meeting/AbCdEfGhIjKlMnOpQrSt#v=3f9a1c0b7e2d4a56"),
+          isCopied = false,
+          onRetry = {},
+          onCopy = {},
+          onDismiss = {},
+          onJoin = {},
+        )
+        HorizontalDivider()
+        MeetingRow(viewModel, Meeting("1", "Design review", start + DAY_MS, start + DAY_MS + HOUR_MS, "cancelled", "c1"))
+        HorizontalDivider()
+        MeetingRow(
+          viewModel,
+          Meeting("2", "Team sync", start + 2 * DAY_MS, start + 2 * DAY_MS + HOUR_MS, "cancelled", "c2", isOccurrenceHoliday = true, isOccurrenceCancelled = true),
+        )
+        HorizontalDivider()
+      }
+    }
+  }
+
   private fun sample() = MeetingForm(
     title = "Weekly planning",
     description = "",
@@ -134,6 +178,8 @@ class MeetingFormScreenshots {
   )
 
   private companion object {
+    const val HOUR_MS = 3_600_000L
+    const val DAY_MS = 24 * HOUR_MS
     val NAMES = mapOf("2" to "Alex Example", "3" to "Sam Sample")
   }
 }

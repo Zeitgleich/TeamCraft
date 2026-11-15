@@ -126,6 +126,12 @@ struct SpaceDirectSnapshot: Decodable, Sendable {
   let spaces: [Space]
 }
 
+/// What is still on, soonest first: also a cancelled meeting until it would have ended, so its
+/// organizer can restore it (as desktop lists it, #1905). One that was ended early is gone.
+func upcomingMeetings(_ meetings: [Meeting], nowMs: Int64) -> [Meeting] {
+  meetings.filter { $0.status != "ended" && $0.endsAt > nowMs }.sorted { $0.startsAt < $1.startsAt }
+}
+
 /// The meetings listed in a space: those scheduled in it.
 func meetingsOfSpace(_ meetings: [Meeting], spaceId: String) -> [Meeting] {
   meetings.filter { $0.spaceId == spaceId }

@@ -1,19 +1,22 @@
 package de.zeitgleich.teamcraft.ui.screens
 
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.consumeWindowInsets
 import android.text.format.DateUtils
 import androidx.annotation.StringRes
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.DateRange
@@ -22,6 +25,7 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -58,9 +62,10 @@ import de.zeitgleich.teamcraft.core.Meeting
 import de.zeitgleich.teamcraft.core.Space
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.Read
+import de.zeitgleich.teamcraft.ui.SpacePicture
 import de.zeitgleich.teamcraft.ui.listPhase
 import de.zeitgleich.teamcraft.ui.spaceDirectMessages
-import de.zeitgleich.teamcraft.ui.SpacePicture
+import uniffi.teamcraft_ffi.SavedMeeting
 import uniffi.teamcraft_ffi.rowBadge
 
 /** The views of one space, in the order of the sidebar on the desktop. */
@@ -87,8 +92,8 @@ fun SpaceViewIcon(tab: SpaceViewTab) {
 }
 
 /** The upcoming meetings of a space, soonest first; a meeting belongs to the space it was scheduled in. */
-fun meetingsOfSpace(meetings: List<Meeting>, spaceId: String): List<Meeting> =
-  upcomingMeetings(meetings).filter { it.maybeSpaceId == spaceId }
+fun meetingsOfSpace(meetings: List<Meeting>, spaceId: String, nowMs: Long = System.currentTimeMillis()): List<Meeting> =
+  upcomingMeetings(meetings, nowMs).filter { it.maybeSpaceId == spaceId }
 
 /**
  * People, calls, meetings, saved messages and files of one space (#954). Home's entries stay global;
@@ -241,17 +246,36 @@ private fun callDirectionLabel(direction: String): Int = when (direction) {
   else -> R.string.space_call_incoming
 }
 
+/** The space's meetings, and "Schedule" for one listed in this space (#1905), as desktop's tab. */
 @Composable
 private fun SpaceMeetings(viewModel: MainViewModel, spaceId: String, contentPadding: PaddingValues) {
   val read = rememberRead(viewModel) { meetings() }
   val meetings = meetingsOfSpace(read.maybeValue.orEmpty(), spaceId)
+  var isFormOpen by remember { mutableStateOf(false) }
+  var maybeCreated by remember { mutableStateOf<SavedMeeting?>(null) }
   LazyColumn(Modifier.fillMaxSize(), contentPadding = contentPadding) {
+    item(key = "schedule") {
+      Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.End) {
+        FilledTonalButton(onClick = { isFormOpen = true }) {
+          Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.padding(end = 8.dp).size(18.dp))
+          Text(stringResource(R.string.meetings_schedule))
+        }
+      }
+    }
     placeholderItem(read.phase { meetingsOfSpace(it, spaceId) }, read.retry) { EmptyHint(stringResource(R.string.space_meetings_empty)) }
     items(meetings, key = { "${it.id}-${it.startsAt}" }) { meeting ->
       MeetingRow(viewModel, meeting, onChanged = read.refresh)
       HorizontalDivider()
     }
   }
+  if (isFormOpen) {
+    MeetingFormSheet(viewModel, maybeMeeting = null, maybeSpaceId = spaceId, onSaved = { saved ->
+      isFormOpen = false
+      maybeCreated = saved
+      read.refresh()
+    }, onDismiss = { isFormOpen = false })
+  }
+  maybeCreated?.let { saved -> MeetingCreatedSheet(viewModel, saved, onDismiss = { maybeCreated = null }) }
 }
 
 @Composable

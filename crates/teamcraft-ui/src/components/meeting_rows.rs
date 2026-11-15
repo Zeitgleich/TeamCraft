@@ -9,6 +9,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use leptos::html;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use teamcraft_client_api::meeting_rows::MeetingActions;
 use teamcraft_proto::{MeetingId, MeetingKind, MeetingResponse, RsvpStatus};
 
 use crate::clock::{format_date, format_time, local_day, now_ms};
@@ -621,32 +622,19 @@ fn RowMenu(
   let is_open = RwSignal::new(false);
   let trigger = NodeRef::<html::Button>::new();
   let menu = NodeRef::<html::Div>::new();
-  let (
-    id,
-    conversation,
-    starts_at,
-    is_host,
-    is_hosting,
-    is_cancelled,
-    is_occurrence_cancelled,
-    is_holiday,
-    ends_at,
-  ) = meeting.with_value(|meeting| {
-    (
-      meeting.id,
-      meeting.conversation_id,
-      meeting.starts_at.0,
-      meeting.organizer_user_id == me,
-      is_hosted_by(meeting, me),
-      meeting.status == teamcraft_proto::MeetingStatus::Cancelled,
-      meeting.is_occurrence_cancelled,
-      meeting.is_occurrence_holiday,
-      meeting.ends_at.0,
-    )
-  });
-  let is_over_now = move || meeting.with_value(|meeting| is_over(meeting, now.get()));
-  // A cancellation can be taken back while what it cancelled is still to come.
-  let can_restore = move || is_host && is_cancelled && ends_at > now.get();
+  let (id, conversation, starts_at, is_hosting, is_occurrence_cancelled, is_holiday) =
+    meeting.with_value(|meeting| {
+      (
+        meeting.id,
+        meeting.conversation_id,
+        meeting.starts_at.0,
+        is_hosted_by(meeting, me),
+        meeting.is_occurrence_cancelled,
+        meeting.is_occurrence_holiday,
+      )
+    });
+  // The rules are the core's, shared with the phone apps (`meeting_rows::MeetingActions`).
+  let actions = move || meeting.with_value(|meeting| MeetingActions::of(meeting, me, now.get()));
   let (restoring, hiding) = (PendingAction::new(), PendingAction::new());
   let restore = move |_| {
     restoring.spawn(async move {
@@ -712,19 +700,19 @@ fn RowMenu(
             <Icon name=IconName::Info />
             <span class="menu-label">{move || i18n.t("meetings-details")}</span>
           </button>
-          {move || (!is_over_now()).then(|| view! {
+          {move || actions().can_copy_link.then(|| view! {
             <button type="button" class="menu-item" role="menuitem" on:click=copy_link>
               <Icon name=IconName::Copy />
               <span class="menu-label">{move || i18n.t("meetings-copy-link")}</span>
             </button>
           })}
-          {move || (!is_over_now() && is_hosting).then(|| view! {
+          {move || (actions().can_copy_link && is_hosting).then(|| view! {
             <button type="button" class="menu-item" role="menuitem" on:click=invite_guests>
               <Icon name=IconName::UserPlus />
               <span class="menu-label">{move || i18n.t("meetings-invite-guests")}</span>
             </button>
           })}
-          {move || (!is_over_now() && is_host).then(|| view! {
+          {move || actions().can_change.then(|| view! {
             <button type="button" class="menu-item" role="menuitem" on:click=move |_| state.overlay.set(Overlay::EditMeeting(id))>
               <Icon name=IconName::Compose />
               <span class="menu-label">{move || i18n.t("meetings-edit")}</span>
@@ -735,13 +723,13 @@ fn RowMenu(
               <span class="menu-label">{move || i18n.t("meetings-cancel")}</span>
             </button>
           })}
-          {move || can_restore().then(|| view! {
+          {move || actions().can_restore.then(|| view! {
             <button type="button" class="menu-item" role="menuitem" prop:disabled=move || restoring.is_pending() on:click=restore>
               <Icon name=IconName::Undo />
               <span class="menu-label">{move || i18n.t(if is_holiday { "meetings-restore-holiday" } else { "meetings-restore" })}</span>
             </button>
           })}
-          {(is_host && is_cancelled && !is_occurrence_cancelled).then(|| view! {
+          {move || actions().can_hide.then(|| view! {
             <button type="button" class="menu-item is-danger" role="menuitem" prop:disabled=move || hiding.is_pending() on:click=hide>
               <Icon name=IconName::Trash />
               <span class="menu-label">{move || i18n.t("meetings-remove")}</span>

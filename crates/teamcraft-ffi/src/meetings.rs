@@ -20,8 +20,13 @@ use teamcraft_client_api::meeting_edits::{
 };
 use teamcraft_client_api::meeting_hosts::co_hosts_from_dialog;
 use teamcraft_client_api::meeting_invitees::{ChatInvitees, added_users, attending_users, saved_change};
+use teamcraft_client_api::meeting_links::with_verifier;
+use teamcraft_client_api::meeting_rows::{
+  MeetingActions, PAST_LIST_LIMIT, PAST_LOOKBACK_MS, RowFacts, past_meetings,
+};
 use teamcraft_client_api::meeting_schedule::{MeetingSchedule, MeetingTimes, ScheduleEdit, ScheduleNote};
 use teamcraft_client_api::notetaker::may_ask_in;
+use teamcraft_core::client::guest_link_fragment;
 use teamcraft_core::clock::{Clock as _, SystemClock};
 use teamcraft_core::meeting_invitees::InviteeList;
 use teamcraft_core::records;
@@ -29,7 +34,8 @@ use teamcraft_core::store::Table;
 use teamcraft_core::ui_backend::CoreCommand;
 use teamcraft_proto::{
   CancelScope, CreateInstantMeetingRequest, IdempotencyKey, ListMeetingsResponse, MeetingControlAction,
-  MeetingControlRequest, MeetingId, MeetingResponse, NotetakerRequest, NotetakerScope, SpaceId, UserId,
+  MeetingControlRequest, MeetingId, MeetingResponse, NotetakerRequest, NotetakerScope, RestoreMeetingRequest,
+  SpaceId, UnixMillis, UserId,
 };
 
 use crate::bridge::{from_json, to_json};
@@ -167,6 +173,19 @@ pub enum MeetingCancelScope {
   Following,
 }
 
+/// What a meeting's row offers the user now (`teamcraft_client_api::meeting_rows`, as desktop).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct MeetingRowActions {
+  /// "Copy link": while the meeting is still to come or runs.
+  pub can_copy_link: bool,
+  /// "Edit" and "Cancel": its organizer, while it is still to come or runs.
+  pub can_change: bool,
+  /// Take the cancellation back (of the meeting or of this occurrence).
+  pub can_restore: bool,
+  /// "Remove" a cancelled meeting from the lists.
+  pub can_hide: bool,
+}
+
 /// A meeting the user organizes, as its edit form opens.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct MeetingEditForm {
@@ -206,6 +225,37 @@ pub fn meeting_form_problems(
     Ok(draft) => problems_of(&draft.problems(now_ms, maybe_saved_start_ms)),
     // Malformed IDs are the app's bug, not the user's: the save reports them.
     Err(_) => Vec::new(),
+  }
+}
+
+/// What the row of a meeting offers, from what the app's list has of it: `is_organizer` (the user
+/// organizes it), whether it or only this occurrence is cancelled, whether it ended or was cancelled
+/// (`status` other than scheduled, or `ends_at_ms` passed) and when it ends, at `now_ms` (the
+/// server's clock where the app has it).
+#[uniffi::export]
+pub fn meeting_row_actions(
+  is_organizer: bool,
+  is_cancelled: bool,
+  is_occurrence_cancelled: bool,
+  is_ended: bool,
+  ends_at_ms: i64,
+  now_ms: i64,
+) -> MeetingRowActions {
+  let actions = MeetingActions::from_facts(
+    RowFacts {
+      is_organizer,
+      is_cancelled,
+      is_occurrence_cancelled,
+      is_over: is_cancelled || is_ended || ends_at_ms <= now_ms,
+      ends_at: ends_at_ms,
+    },
+    now_ms,
+  );
+  MeetingRowActions {
+    can_copy_link: actions.can_copy_link,
+    can_change: actions.can_change,
+    can_restore: actions.can_restore,
+    can_hide: actions.can_hide,
   }
 }
 
@@ -546,6 +596,72 @@ impl Engine {
     Ok(json)
   }
 
+  /// The meeting's link to hand out: the server's address with the organizer's key fingerprint as
+  /// this device has it pinned (`v=`, e2ee.md §4.6), never the server's. Fails when this device
+  /// can't pin the organizer's key: then no link is handed out (#987 review).
+  pub(crate) async fn meeting_link(&mut self, meeting_id: &str) -> Result<String, TeamCraftError> {
+    let meeting: MeetingId = parse_id(meeting_id)?;
+    let found: MeetingResponse = from_json(
+      &self
+        .api_request("GET", &format!("/meetings/{meeting}"), None)
+        .await?,
+    )?;
+    let conversation = found.conversation_id;
+    self
+      .with_client(move |client| {
+        Box::pin(async move { client.prepare_guest_link(conversation, meeting).await })
+      })
+      .await?;
+    let fragment = guest_link_fragment(&self.store, meeting)
+      .ok_or_else(|| TeamCraftError::InvalidInput("this device could not verify the meeting link".into()))?;
+    Ok(with_verifier(&found.join_url, &fragment))
+  }
+
+  /// Takes a cancellation back: of the whole meeting, or with `maybe_occurrence_ms` of that
+  /// occurrence of a series (a holiday's too). Its organizer only; the server tells everybody.
+  pub(crate) async fn restore_meeting(
+    &mut self,
+    meeting_id: &str,
+    maybe_occurrence_ms: Option<i64>,
+  ) -> Result<(), TeamCraftError> {
+    let meeting: MeetingId = parse_id(meeting_id)?;
+    let request = RestoreMeetingRequest {
+      maybe_occurrence: maybe_occurrence_ms.map(UnixMillis),
+    };
+    self
+      .api_request(
+        "POST",
+        &format!("/meetings/{meeting}/restore"),
+        Some(to_json(&request)?),
+      )
+      .await?;
+    Ok(())
+  }
+
+  /// "Remove": takes a cancelled meeting off the organizer's lists.
+  pub(crate) async fn hide_meeting(&mut self, meeting_id: &str) -> Result<(), TeamCraftError> {
+    let meeting: MeetingId = parse_id(meeting_id)?;
+    self
+      .api_request("POST", &format!("/meetings/{meeting}/hide"), None)
+      .await?;
+    Ok(())
+  }
+
+  /// The Past view: the user's meetings of the last 30 days that ended, latest first, as the
+  /// list's JSON (`{"meetings": [...]}`), the way desktop lists them.
+  pub(crate) async fn past_meetings(&self) -> Result<String, TeamCraftError> {
+    let now = SystemClock.now_ms();
+    let path = format!(
+      "/meetings?from={}&to={now}&limit={PAST_LIST_LIMIT}",
+      now - PAST_LOOKBACK_MS
+    );
+    let list: ListMeetingsResponse = from_json(&self.api_request("GET", &path, None).await?)?;
+    to_json(&ListMeetingsResponse {
+      meetings: past_meetings(&list.meetings, now),
+      ..list
+    })
+  }
+
   /// The meeting `meeting_id` if `me` organizes it.
   async fn own_meeting(&self, meeting_id: &str, me: UserId) -> Result<MeetingResponse, TeamCraftError> {
     let meeting: MeetingId = parse_id(meeting_id)?;
@@ -871,6 +987,17 @@ mod tests {
         },
       ]
     );
+  }
+
+  #[test]
+  fn row_actions_are_the_cores_rules() {
+    let later = NOW + 60 * 60_000;
+    let organizer = meeting_row_actions(true, false, false, false, later, NOW);
+    assert!(organizer.can_copy_link && organizer.can_change && !organizer.can_restore);
+    let cancelled = meeting_row_actions(true, true, true, false, later, NOW);
+    assert!(!cancelled.can_change && cancelled.can_restore && !cancelled.can_hide);
+    let ended = meeting_row_actions(false, false, false, true, later, NOW);
+    assert!(!ended.can_copy_link && !ended.can_change);
   }
 
   #[test]
