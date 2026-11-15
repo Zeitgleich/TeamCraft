@@ -416,3 +416,59 @@ async fn the_device_settings_list_own_devices_and_sign_one_out() {
     "the signed device list was published without the laptop"
   );
 }
+
+/// #2079: "Mark as read" on a notification shows messages the sync has not brought yet. The read
+/// position must reach the newest of them, not stop at the newest one in the local store, or the
+/// server counts the rest unread again.
+#[tokio::test]
+async fn marking_read_from_a_notification_reads_up_to_a_message_the_store_does_not_have_yet() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let channel = alice
+    .client
+    .create_channel(alice.space().await, "team")
+    .await
+    .unwrap();
+  alice
+    .client
+    .add_member(channel, bob.client.user_id())
+    .await
+    .unwrap();
+  settle(&mut [&mut alice, &mut bob]).await;
+  let (alice_ui, bob_ui) = (backend_of(&alice), backend_of(&bob));
+  bob_ui.post_message(channel, None, "one");
+  run_commands(&mut bob, &bob_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  server.set_unread(alice.client.user_id(), unread_counts(channel, 1, 0));
+  alice.client.full_sync().await.unwrap();
+  assert_eq!(alice_ui.conversation(channel).unwrap().unread_count, 1);
+  let stored_newest = alice_ui.messages(channel, 0, 10).last().unwrap().id;
+
+  // Two more arrive; the push notification shows them, Alice's store does not hold them (her
+  // gateway frames are not processed).
+  bob_ui.post_message(channel, None, "two");
+  bob_ui.post_message(channel, None, "three");
+  run_commands(&mut bob, &bob_ui).await;
+  let notified_newest = bob_ui.messages(channel, 0, 10).last().unwrap().id;
+  assert!(notified_newest > stored_newest);
+  assert_eq!(
+    alice_ui.messages(channel, 0, 10).last().unwrap().id,
+    stored_newest
+  );
+
+  alice_ui.mark_read_notified(channel, notified_newest);
+  run_commands(&mut alice, &alice_ui).await;
+  alice.client.flush_pending_actions().await.unwrap();
+
+  assert_eq!(
+    server.read_position(channel, alice.client.user_id()),
+    Some(notified_newest)
+  );
+  assert_eq!(alice_ui.conversation(channel).unwrap().unread_count, 0);
+  // The server's next unread answer counts nothing after that position; the badge stays clear.
+  server.set_unread(alice.client.user_id(), unread_counts(channel, 0, 0));
+  alice.client.full_sync().await.unwrap();
+  settle(&mut [&mut alice, &mut bob]).await;
+  assert_eq!(alice_ui.conversation(channel).unwrap().unread_count, 0);
+}

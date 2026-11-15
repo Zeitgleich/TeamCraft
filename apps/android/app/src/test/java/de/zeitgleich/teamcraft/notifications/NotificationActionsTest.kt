@@ -91,6 +91,16 @@ class NotificationActionsTest {
   }
 
   @Test
+  fun markAsReadFromANotificationReadsThroughItsNewestMessageEvenWhenTheStoreLacksIt() = runTest {
+    val core = FakeCore(sendsGoOut = true)
+    val sink = RecordingSink()
+    NotificationActions({ core }, sink, enqueueOutbox = {}).markRead(CONVERSATION, "9000")
+    assertEquals(listOf(CONVERSATION to "9000"), core.readThrough)
+    assertEquals("the plain mark-read is not used", emptyList<String>(), core.read)
+    assertEquals(listOf("status:MARKING_READ", "dismiss"), sink.events)
+  }
+
+  @Test
   fun aFailedMarkAsReadOrMuteStaysAndSaysSo() = runTest {
     val core = FakeCore(sendsGoOut = true, failsActions = true)
     val sink = RecordingSink()
@@ -149,6 +159,7 @@ class NotificationActionsTest {
   ) : NotificationCore {
     val sent = mutableListOf<String>()
     val read = mutableListOf<String>()
+    val readThrough = mutableListOf<Pair<String, String>>()
     val flushes = mutableListOf<Long>()
     private var queued = 0u
     private var refused = 0u
@@ -167,6 +178,11 @@ class NotificationActionsTest {
     override suspend fun markRead(conversationId: String) {
       if (failsActions) error("store busy")
       read += conversationId
+    }
+
+    override suspend fun markReadThrough(conversationId: String, messageId: String) {
+      if (failsActions) error("store busy")
+      readThrough += conversationId to messageId
     }
 
     override suspend fun mute(conversationId: String) {

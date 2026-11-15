@@ -7,6 +7,13 @@ import org.junit.Test
 
 class NotificationLinesTest {
   @Test
+  fun markAsReadReadsThroughTheNewestMessageTheNotificationShows() {
+    val lines = listOf(line("900", sentAtMs = 10), line("1100", sentAtMs = 30), line("1000", sentAtMs = 20))
+    assertEquals("1100", MessageNotificationSpecs.newestMessageId(lines))
+    assertNull(MessageNotificationSpecs.newestMessageId(emptyList()))
+  }
+
+  @Test
   fun linesAreOrderedBySendTimeNotByArrival() {
     val later = line("2000", sentAtMs = 20)
     val earlier = line("1000", sentAtMs = 10)

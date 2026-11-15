@@ -53,7 +53,8 @@ class NotificationActionReceiver : BroadcastReceiver() {
           }
         }
         ACTION_MUTE -> graph.notificationActions.mute(conversationId)
-        ACTION_MARK_READ -> graph.notificationActions.markRead(conversationId)
+        ACTION_MARK_READ ->
+          graph.notificationActions.markRead(conversationId, intent.getStringExtra(EXTRA_THROUGH_MESSAGE_ID))
         ACTION_MEETING_DISMISSED -> {
           val meetingId = intent.getStringExtra(EXTRA_MEETING_ID) ?: return
           val startsAtMs = intent.getLongExtra(EXTRA_MEETING_STARTS_AT_MS, -1L).takeIf { it >= 0 } ?: return
@@ -83,17 +84,28 @@ class NotificationActionReceiver : BroadcastReceiver() {
     const val KEY_REPLY = "reply"
     private const val EXTRA_CONVERSATION_ID = "conversation_id"
     private const val EXTRA_THREAD_ID = "thread_id"
+    /** The newest message a "Mark as read" notification shows (#2079). */
+    const val EXTRA_THROUGH_MESSAGE_ID = "through_message_id"
     private const val EXTRA_USER_ID = "user_id"
     private const val EXTRA_TAG = "tag"
     private const val EXTRA_MEETING_ID = "meeting_id"
     private const val EXTRA_MEETING_STARTS_AT_MS = "meeting_starts_at_ms"
     private const val TAG = "TeamCraftNotify"
 
-    fun intent(context: Context, action: String, conversationId: String, maybeThreadId: String? = null): Intent =
+    fun intent(
+      context: Context,
+      action: String,
+      conversationId: String,
+      maybeThreadId: String? = null,
+      maybeThroughMessageId: String? = null,
+    ): Intent =
       Intent(context, NotificationActionReceiver::class.java)
         .setAction(action)
         .putExtra(EXTRA_CONVERSATION_ID, conversationId)
-        .apply { maybeThreadId?.let { putExtra(EXTRA_THREAD_ID, it) } }
+        .apply {
+          maybeThreadId?.let { putExtra(EXTRA_THREAD_ID, it) }
+          maybeThroughMessageId?.let { putExtra(EXTRA_THROUGH_MESSAGE_ID, it) }
+        }
 
     /** The meeting notice of [meetingId] (the occurrence starting at [startsAtMs]) was swiped away. */
     fun meetingDismissedIntent(context: Context, conversationId: String, meetingId: String, startsAtMs: Long): Intent =

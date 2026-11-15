@@ -95,6 +95,14 @@ pub enum CoreCommand {
   MarkRead {
     conversation: ConversationId,
   },
+  /// The conversation was read from a notification (#2079): like [`Self::MarkRead`], but the read
+  /// position is at least `message`, the newest one the notification showed. It may not be in the
+  /// local store yet (the notification comes from the push, the sync later); a position at an older
+  /// message would bring the unread count back.
+  MarkReadNotified {
+    conversation: ConversationId,
+    message: MessageId,
+  },
   SetFavorite {
     conversation: ConversationId,
     is_favorite: bool,
@@ -676,6 +684,7 @@ impl CoreCommand {
       Self::FlushOutbox
       | Self::Typing { .. }
       | Self::MarkRead { .. }
+      | Self::MarkReadNotified { .. }
       | Self::SetSaved { .. }
       | Self::SetDraft { .. }
       | Self::TakeDraftFiles { .. }
@@ -2846,6 +2855,13 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn mark_read(&self, conversation: ConversationId) {
     self.command(CoreCommand::MarkRead { conversation });
+  }
+
+  fn mark_read_notified(&self, conversation: ConversationId, message: MessageId) {
+    self.command(CoreCommand::MarkReadNotified {
+      conversation,
+      message,
+    });
   }
 
   fn mark_read_through(&self, conversation: ConversationId, message: MessageId) {

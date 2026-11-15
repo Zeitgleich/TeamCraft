@@ -49,9 +49,14 @@ class NotificationActions(
     settleReplies(core, isLastTry = false)
   }
 
-  suspend fun markRead(conversationId: String) =
+  /**
+   * [maybeThroughMessageId]: the newest message the notification shows. The push brought it before
+   * the sync did, so the store may not hold it yet, and a read position at the store's newest would
+   * leave the rest unread (#2079).
+   */
+  suspend fun markRead(conversationId: String, maybeThroughMessageId: String? = null) =
     quickAction(conversationId, ActionStatus.MARKING_READ, ActionStatus.MARK_READ_FAILED) { core ->
-      core.markRead(conversationId)
+      if (maybeThroughMessageId != null) core.markReadThrough(conversationId, maybeThroughMessageId) else core.markRead(conversationId)
       // Queued in the core's store, so it survives the process; sent now, or by the outbox work.
       enqueueOutbox()
       runCatching { core.flush(ACTION_FLUSH_MS) }
@@ -147,6 +152,9 @@ interface NotificationCore {
 
   suspend fun markRead(conversationId: String)
 
+  /** Marks read at least through `messageId`, which the store may not hold yet (#2079). */
+  suspend fun markReadThrough(conversationId: String, messageId: String)
+
   /** Quiet for a while, through the server's per-conversation setting (all devices follow). */
   suspend fun mute(conversationId: String)
 
@@ -175,6 +183,9 @@ class CoreNotificationActions(private val core: TeamCraft) : NotificationCore {
     core.sendMessage(conversationId, maybeThreadId, body)
 
   override suspend fun markRead(conversationId: String) = core.markRead(conversationId)
+
+  override suspend fun markReadThrough(conversationId: String, messageId: String) =
+    core.markReadNotified(conversationId, messageId)
 
   override suspend fun mute(conversationId: String) {
     val chat = ChatClient { core }

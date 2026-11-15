@@ -182,6 +182,11 @@ pub trait ChatBackend {
   fn post_message(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>, body: &str);
   fn toggle_reaction(&self, conversation: ConversationId, message: MessageId, emoji: &str);
   fn mark_read(&self, conversation: ConversationId);
+  /// Marks the conversation read from a notification that showed messages up to `message`, which
+  /// the local store may not hold yet: the read position is at least that message (#2079).
+  fn mark_read_notified(&self, conversation: ConversationId, _message: MessageId) {
+    self.mark_read(conversation);
+  }
   /// The user looked at `message` (an opened activity entry): the conversation's read position
   /// moves up to it, not to the end. Never moves back.
   fn mark_read_through(&self, _conversation: ConversationId, _message: MessageId) {}
