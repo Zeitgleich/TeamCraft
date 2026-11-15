@@ -3,14 +3,14 @@
 //! admitters of meetings that run or start soon (#1103). Desktop and web (`teamcraft-ui`) and the
 //! mobile apps (through teamcraft-ffi) decide alike; the app keeps the records where it can.
 //!
-//! [`MeetingDraft`] is the mobile apps' schedule form, in plain times: desktop and web keep their
-//! own form of text inputs (`teamcraft_ui::meetings::ScheduleForm`), with repeats and e-mail
-//! invitees, and check the same rules.
+//! [`MeetingDraft`] is the schedule form in plain times, with its one validation: the mobile apps
+//! fill it through teamcraft-ffi, desktop and web from their text inputs
+//! (`teamcraft_ui::meetings::ScheduleForm`).
 
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{
-  CreateMeetingRequest, IdempotencyKey, MeetingId, MeetingInvitee, MeetingResponse, MeetingStatus,
-  UnixMillis, UpdateMeetingRequest,
+  CreateMeetingRequest, IdempotencyKey, MeetingId, MeetingInvitee, MeetingRecurrence, MeetingResponse,
+  MeetingStatus, RecurrenceFrequency, UnixMillis, UpdateMeetingRequest, Weekday,
 };
 
 use crate::meeting_invitees::attending_users;
@@ -19,8 +19,22 @@ use crate::model::{ConversationId, TimestampMs, UserId};
 
 pub const MS_PER_MINUTE: i64 = 60_000;
 const MS_PER_HOUR: i64 = 3_600_000;
+const MS_PER_DAY: i64 = 24 * MS_PER_HOUR;
 /// How long a meeting may be scheduled for in one go (the server's limit).
 pub const MAX_DURATION_MINUTES: u32 = 24 * 60;
+/// Largest "every N days, weeks or months" and number of meetings of a series (the server's limits).
+pub const MAX_INTERVAL: u32 = 100;
+pub const MAX_COUNT: u32 = 1_000;
+/// The days of the week, Monday first, as the wire names them.
+pub const WEEKDAYS: [Weekday; 7] = [
+  Weekday::Monday,
+  Weekday::Tuesday,
+  Weekday::Wednesday,
+  Weekday::Thursday,
+  Weekday::Friday,
+  Weekday::Saturday,
+  Weekday::Sunday,
+];
 /// A new meeting starts at least this far ahead of now, at a full hour.
 const MIN_LEAD_MS: i64 = 10 * 60_000;
 /// The organizer's device keeps the signed admitters current for meetings that run or start within
@@ -34,45 +48,133 @@ const PENDING_EDIT_GRACE_MS: i64 = 2 * 60_000;
 /// A pending edit older than this is dropped: the meeting is long gone from the list.
 const PENDING_EDIT_MAX_AGE_MS: i64 = 7 * 24 * 3_600_000;
 
-/// A meeting the organizer schedules or changes, as the mobile apps' form collects it.
+/// A meeting the organizer schedules or changes, as a form collects it: the apps' sheet and,
+/// through `teamcraft_ui::meetings::ScheduleForm`, the dialog of desktop and web.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MeetingDraft {
   pub title: String,
   pub description: String,
-  pub starts_at: TimestampMs,
+  /// `None` while the start field holds no time (a text input).
+  pub maybe_starts_at: Option<TimestampMs>,
+  /// The start's offset from UTC in the user's time zone, in minutes (east positive): a series'
+  /// days of the week are the user's local days.
+  pub utc_offset_minutes: i32,
   pub duration_minutes: u32,
   /// The invited TeamCraft users, the organizer left out.
   pub members: Vec<UserId>,
+  /// People invited by e-mail address (no account).
+  pub externals: Vec<ExternalInvitee>,
+  pub repeat: RepeatRule,
   pub has_lobby: bool,
+  /// The notetaker's account when "Notetaker joins the calls" is ticked (e2ee.md §8.2): invited
+  /// like a member, so it is in the chat's group before any call.
+  pub maybe_notetaker: Option<UserId>,
+  /// Invited people who host with the organizer (#1720); signed by the organizer's device once the
+  /// meeting is saved (`meeting_hosts::co_hosts_from_dialog`).
+  pub co_hosts: Vec<UserId>,
   /// Made when the form opens and kept for every submit of it, so a retry after a lost answer
   /// schedules the meeting only once. `None` for an edit.
   pub maybe_idempotency_key: Option<IdempotencyKey>,
 }
 
-/// Why a draft can't be saved; the form shows each at its field.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// How a meeting repeats, as the form has it: every `interval` days, weeks or months, on which days
+/// of the week, and until when.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepeatRule {
+  pub repeat: Repeat,
+  /// Every n-th day, week or month; 0 when the field holds no number.
+  pub interval: u32,
+  /// The days of the week a daily or weekly series meets on, Monday first. All of them: every day.
+  pub weekdays: [bool; 7],
+  pub ends: SeriesEnd,
+  /// Number of meetings of a series that ends after a count; 0 when the field holds no number.
+  pub count: u32,
+  /// The last moment of the last day of a series that ends on a date, local time; `None` while the
+  /// field holds no date.
+  pub maybe_until: Option<TimestampMs>,
+  /// The series leaves out public holidays (#1053).
+  pub skips_holidays: bool,
+}
+
+/// How often a meeting repeats, as the form offers it: the unit of "every N …".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Repeat {
+  Never,
+  Daily,
+  Weekly,
+  Monthly,
+}
+
+/// How a series ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeriesEnd {
+  Never,
+  AfterCount,
+  OnDate,
+}
+
+/// Somebody invited by e-mail address.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExternalInvitee {
+  pub email: String,
+  pub name: String,
+}
+
+/// Why a draft can't be saved; the form shows each at its field ([`DraftProblem::field`]).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum DraftProblem {
   MissingTitle,
+  /// The start field holds no time.
+  InvalidStart,
   StartInThePast,
   InvalidDuration,
+  InvalidInterval,
+  NoWeekday,
+  /// The first meeting is the start itself: a start off the chosen days would surprise.
+  StartOffWeekdays,
+  InvalidCount,
+  InvalidUntil,
+  UntilBeforeStart,
+  /// This address can't be one.
+  InvalidEmail(String),
+}
+
+/// The fields of the form a problem can belong to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DraftField {
+  Title,
+  Start,
+  Duration,
+  Interval,
+  Weekdays,
+  Count,
+  Until,
+  Externals,
 }
 
 impl MeetingDraft {
-  /// A new meeting: 30 minutes at the next full hour with some lead, with a lobby.
-  pub fn new(now: TimestampMs) -> Self {
+  /// A new meeting: 30 minutes at the next full hour with some lead, with a lobby. `utc_offset_minutes`
+  /// is the user's offset at that start.
+  pub fn new(now: TimestampMs, utc_offset_minutes: i32) -> Self {
     Self {
       title: String::new(),
       description: String::new(),
-      starts_at: suggested_start(now),
+      maybe_starts_at: Some(suggested_start(now)),
+      utc_offset_minutes,
       duration_minutes: 30,
       members: Vec::new(),
+      externals: Vec::new(),
+      repeat: RepeatRule::default(),
       has_lobby: true,
+      maybe_notetaker: None,
+      co_hosts: Vec::new(),
       maybe_idempotency_key: Some(IdempotencyKey::random()),
     }
   }
 
   /// The form of an edit: what the saved meeting says now. The organizer `me` is no invitee.
-  pub fn from_meeting(meeting: &MeetingResponse, me: UserId) -> Self {
+  /// `utc_offset_minutes` is the user's offset at the meeting's start.
+  pub fn from_meeting(meeting: &MeetingResponse, me: UserId, utc_offset_minutes: i32) -> Self {
     let minutes = (meeting.ends_at.0 - meeting.starts_at.0) / MS_PER_MINUTE;
     let mut members = Vec::new();
     for user in attending_users(meeting) {
@@ -80,105 +182,357 @@ impl MeetingDraft {
         members.push(user);
       }
     }
+    let externals = meeting
+      .attendees
+      .iter()
+      .filter_map(|attendee| match (attendee.maybe_user_id, &attendee.maybe_email) {
+        (None, Some(email)) => Some(ExternalInvitee {
+          email: email.clone(),
+          name: attendee.maybe_name.clone().unwrap_or_default(),
+        }),
+        _ => None,
+      })
+      .collect();
     Self {
       title: meeting.title.clone(),
       description: meeting.maybe_description.clone().unwrap_or_default(),
-      starts_at: meeting.starts_at.0,
+      maybe_starts_at: Some(meeting.starts_at.0),
+      utc_offset_minutes,
       duration_minutes: u32::try_from(minutes).unwrap_or(0),
       members,
+      externals,
+      repeat: meeting
+        .maybe_recurrence
+        .as_ref()
+        .map(RepeatRule::of)
+        .unwrap_or_default(),
       has_lobby: meeting.has_lobby,
+      maybe_notetaker: None,
+      co_hosts: meeting.co_host_user_ids.clone(),
       maybe_idempotency_key: None,
     }
+  }
+
+  /// The notetaker `maybe_bot` attends: it is the "Notetaker joins the calls" box, not a member in
+  /// the people list.
+  pub fn with_notetaker(mut self, maybe_bot: Option<UserId>) -> Self {
+    if let Some(bot) = maybe_bot
+      && self.members.contains(&bot)
+    {
+      self.members.retain(|member| *member != bot);
+      self.maybe_notetaker = Some(bot);
+    }
+    self
+  }
+
+  /// Picks how the meeting repeats, with the days that go with it: every day for a daily series,
+  /// the start's day for a weekly one.
+  pub fn set_repeat(&mut self, repeat: Repeat) {
+    if repeat == self.repeat.repeat {
+      return;
+    }
+    self.repeat.repeat = repeat;
+    self.repeat.weekdays = match (repeat, self.start_weekday()) {
+      (Repeat::Weekly, Some(day)) => only_day(day),
+      _ => [true; 7],
+    };
   }
 
   /// What keeps the draft from being saved, in the order of the fields. `maybe_saved_start` is the
   /// start of the meeting being edited: unchanged, it may lie in the past (a meeting under way can
   /// still get a new invitee).
   pub fn problems(&self, now: TimestampMs, maybe_saved_start: Option<TimestampMs>) -> Vec<DraftProblem> {
-    let mut problems = Vec::new();
-    if self.title.trim().is_empty() {
-      problems.push(DraftProblem::MissingTitle);
+    match self.checked(now, maybe_saved_start) {
+      Ok(_) => Vec::new(),
+      Err(problems) => problems,
     }
-    let is_unchanged = maybe_saved_start.is_some_and(|saved| (self.starts_at - saved).abs() < MS_PER_MINUTE);
-    if self.starts_at < now - MS_PER_MINUTE && !is_unchanged {
-      problems.push(DraftProblem::StartInThePast);
-    }
-    if self.duration_minutes == 0 || self.duration_minutes > MAX_DURATION_MINUTES {
-      problems.push(DraftProblem::InvalidDuration);
-    }
-    problems
   }
 
   /// The request that schedules the meeting, or every reason it can't be sent.
   pub fn to_request(&self, now: TimestampMs) -> Result<CreateMeetingRequest, Vec<DraftProblem>> {
-    let problems = self.problems(now, None);
-    if !problems.is_empty() {
-      return Err(problems);
-    }
-    Ok(CreateMeetingRequest {
-      title: self.title.trim().to_owned(),
-      maybe_description: Some(self.description.trim().to_owned()).filter(|text| !text.is_empty()),
-      starts_at: UnixMillis(self.starts_at),
-      ends_at: UnixMillis(self.ends_at()),
-      invitees: self.user_invitees(),
-      maybe_recurrence: None,
-      has_lobby: self.has_lobby,
-      maybe_space: None,
-      maybe_idempotency_key: self.maybe_idempotency_key,
-    })
+    self.checked(now, None)
   }
 
-  /// The change to save to `before`: the time only when it moved, the invitees as the whole list
-  /// with the e-mail invitees `before` has (the form offers none), the repeat rule untouched.
+  /// The change to save to `before`: the time only when it moved, the invitees as the whole list,
+  /// the repeat rule when it changed.
   pub fn to_update_request(
     &self,
     now: TimestampMs,
     before: &MeetingResponse,
   ) -> Result<UpdateMeetingRequest, Vec<DraftProblem>> {
-    let problems = self.problems(now, Some(before.starts_at.0));
-    if !problems.is_empty() {
-      return Err(problems);
-    }
+    let create = self.checked(now, Some(before.starts_at.0))?;
     // Whole minutes: seconds of the saved times are not a change.
-    let has_moved = (self.starts_at - before.starts_at.0).abs() >= MS_PER_MINUTE
-      || (self.ends_at() - before.ends_at.0).abs() >= MS_PER_MINUTE;
-    let mut invitees = self.user_invitees();
-    invitees.extend(before.attendees.iter().filter_map(|attendee| {
-      match (attendee.maybe_user_id, &attendee.maybe_email) {
-        (None, Some(email)) => Some(MeetingInvitee::External {
-          email: email.clone(),
-          maybe_name: attendee.maybe_name.clone().filter(|name| !name.is_empty()),
-        }),
-        _ => None,
-      }
-    }));
+    let has_moved = (create.starts_at.0 - before.starts_at.0).abs() >= MS_PER_MINUTE
+      || (create.ends_at.0 - before.ends_at.0).abs() >= MS_PER_MINUTE;
     Ok(UpdateMeetingRequest {
-      maybe_title: Some(self.title.trim().to_owned()),
-      maybe_description: Some(self.description.trim().to_owned()),
-      maybe_starts_at: has_moved.then_some(UnixMillis(self.starts_at)),
-      maybe_ends_at: has_moved.then_some(UnixMillis(self.ends_at())),
-      maybe_invitees: Some(invitees),
-      maybe_has_lobby: Some(self.has_lobby),
-      maybe_recurrence: None,
+      maybe_title: Some(create.title),
+      maybe_description: Some(create.maybe_description.unwrap_or_default()),
+      maybe_starts_at: has_moved.then_some(create.starts_at),
+      maybe_ends_at: has_moved.then_some(create.ends_at),
+      maybe_invitees: Some(create.invitees),
+      maybe_has_lobby: Some(create.has_lobby),
+      maybe_recurrence: create
+        .maybe_recurrence
+        .filter(|recurrence| before.maybe_recurrence.as_ref() != Some(recurrence)),
     })
   }
 
-  fn ends_at(&self) -> TimestampMs {
-    self.starts_at + i64::from(self.duration_minutes) * MS_PER_MINUTE
+  /// The local day of the week of the start, Monday first.
+  pub fn start_weekday(&self) -> Option<usize> {
+    let start = self.maybe_starts_at?;
+    let local_day = (start + i64::from(self.utc_offset_minutes) * MS_PER_MINUTE).div_euclid(MS_PER_DAY);
+    // 1970-01-01 was a Thursday.
+    usize::try_from((local_day + 3).rem_euclid(7)).ok()
   }
 
-  fn user_invitees(&self) -> Vec<MeetingInvitee> {
+  /// The create request, or every problem in the order of the fields. `maybe_unchanged_start` needs
+  /// no future check (the saved start of a meeting being edited).
+  fn checked(
+    &self,
+    now: TimestampMs,
+    maybe_unchanged_start: Option<TimestampMs>,
+  ) -> Result<CreateMeetingRequest, Vec<DraftProblem>> {
+    let mut problems = Vec::new();
+    let title = self.title.trim();
+    if title.is_empty() {
+      problems.push(DraftProblem::MissingTitle);
+    }
+    match self.maybe_starts_at {
+      None => problems.push(DraftProblem::InvalidStart),
+      Some(starts_at) => {
+        let is_unchanged =
+          maybe_unchanged_start.is_some_and(|saved| (starts_at - saved).abs() < MS_PER_MINUTE);
+        if starts_at < now - MS_PER_MINUTE && !is_unchanged {
+          problems.push(DraftProblem::StartInThePast);
+        }
+      },
+    }
+    if self.duration_minutes == 0 || self.duration_minutes > MAX_DURATION_MINUTES {
+      problems.push(DraftProblem::InvalidDuration);
+    }
+    let maybe_recurrence = self.recurrence(&mut problems);
+    let invitees = self.invitees(&mut problems);
+    let Some(starts_at) = self.maybe_starts_at.filter(|_| problems.is_empty()) else {
+      return Err(problems);
+    };
+    Ok(CreateMeetingRequest {
+      title: title.to_owned(),
+      maybe_description: Some(self.description.trim().to_owned()).filter(|text| !text.is_empty()),
+      starts_at: UnixMillis(starts_at),
+      ends_at: UnixMillis(starts_at + i64::from(self.duration_minutes) * MS_PER_MINUTE),
+      invitees,
+      maybe_recurrence,
+      has_lobby: self.has_lobby,
+      // The caller sets it: the form doesn't know where it is opened.
+      maybe_space: None,
+      maybe_idempotency_key: self.maybe_idempotency_key,
+    })
+  }
+
+  /// The repeat rule of the draft, noting what is wrong with it.
+  fn recurrence(&self, problems: &mut Vec<DraftProblem>) -> Option<MeetingRecurrence> {
+    let rule = &self.repeat;
+    let frequency = rule.repeat.frequency()?;
+    if rule.interval == 0 || rule.interval > MAX_INTERVAL {
+      problems.push(DraftProblem::InvalidInterval);
+    }
+    let maybe_start_day = self.start_weekday();
+    // Every day, or a weekly series on its start's day: the rule needs no days.
+    let is_plain = !rule.weekdays.contains(&false)
+      || (rule.repeat == Repeat::Weekly && maybe_start_day.map(only_day) == Some(rule.weekdays));
+    let weekdays: Vec<Weekday> = if rule.repeat.has_weekdays() && !is_plain {
+      WEEKDAYS
+        .into_iter()
+        .zip(rule.weekdays)
+        .filter_map(|(day, is_on)| is_on.then_some(day))
+        .collect()
+    } else {
+      Vec::new()
+    };
+    if rule.repeat.has_weekdays() && !rule.weekdays.contains(&true) {
+      problems.push(DraftProblem::NoWeekday);
+    } else if rule.repeat.has_weekdays()
+      && let Some(day) = maybe_start_day
+      && !rule.weekdays[day]
+    {
+      problems.push(DraftProblem::StartOffWeekdays);
+    }
+    let (mut maybe_count, mut maybe_until) = (None, None);
+    match rule.ends {
+      SeriesEnd::Never => {},
+      SeriesEnd::AfterCount if (1..=MAX_COUNT).contains(&rule.count) => maybe_count = Some(rule.count),
+      SeriesEnd::AfterCount => problems.push(DraftProblem::InvalidCount),
+      SeriesEnd::OnDate => match rule.maybe_until {
+        None => problems.push(DraftProblem::InvalidUntil),
+        Some(until) if self.maybe_starts_at.is_some_and(|start| until < start) => {
+          problems.push(DraftProblem::UntilBeforeStart);
+        },
+        Some(until) => maybe_until = Some(UnixMillis(until)),
+      },
+    }
+    Some(MeetingRecurrence {
+      frequency,
+      interval: rule.interval,
+      weekdays,
+      maybe_count,
+      maybe_until,
+      skips_holidays: rule.skips_holidays,
+    })
+  }
+
+  /// Everyone the draft invites, each once: the members, the notetaker, the e-mail addresses
+  /// (noting the ones that can't be addresses).
+  fn invitees(&self, problems: &mut Vec<DraftProblem>) -> Vec<MeetingInvitee> {
     let mut users: Vec<UserId> = Vec::new();
-    for user in &self.members {
+    for user in self.members.iter().chain(&self.maybe_notetaker) {
       if !users.contains(user) {
         users.push(*user);
       }
     }
-    users
+    let mut invitees: Vec<MeetingInvitee> = users
       .into_iter()
       .map(|user_id| MeetingInvitee::User { user_id })
-      .collect()
+      .collect();
+    for external in &self.externals {
+      let email = external.email.trim();
+      if !is_plausible_email(email) {
+        problems.push(DraftProblem::InvalidEmail(email.to_owned()));
+        continue;
+      }
+      invitees.push(MeetingInvitee::External {
+        email: email.to_owned(),
+        maybe_name: Some(external.name.trim().to_owned()).filter(|name| !name.is_empty()),
+      });
+    }
+    invitees
   }
+}
+
+impl Default for RepeatRule {
+  /// A meeting that doesn't repeat; once it does, every day or week until cancelled.
+  fn default() -> Self {
+    Self {
+      repeat: Repeat::Never,
+      interval: 1,
+      weekdays: [true; 7],
+      ends: SeriesEnd::Never,
+      count: 10,
+      maybe_until: None,
+      skips_holidays: false,
+    }
+  }
+}
+
+impl RepeatRule {
+  /// The form of a saved series' rule.
+  fn of(recurrence: &MeetingRecurrence) -> Self {
+    let mut rule = Self {
+      repeat: Repeat::of(&recurrence.frequency),
+      interval: recurrence.interval,
+      skips_holidays: recurrence.skips_holidays,
+      ..Self::default()
+    };
+    if !recurrence.weekdays.is_empty() {
+      rule.weekdays = WEEKDAYS.map(|day| recurrence.weekdays.contains(&day));
+    }
+    if let Some(count) = recurrence.maybe_count {
+      rule.ends = SeriesEnd::AfterCount;
+      rule.count = count;
+    }
+    if let Some(until) = recurrence.maybe_until {
+      rule.ends = SeriesEnd::OnDate;
+      rule.maybe_until = Some(until.0);
+    }
+    rule
+  }
+}
+
+impl Repeat {
+  pub const ALL: [Repeat; 4] = [Self::Never, Self::Daily, Self::Weekly, Self::Monthly];
+
+  pub fn slug(self) -> &'static str {
+    match self {
+      Self::Never => "never",
+      Self::Daily => "daily",
+      Self::Weekly => "weekly",
+      Self::Monthly => "monthly",
+    }
+  }
+
+  pub fn from_slug(slug: &str) -> Option<Self> {
+    Self::ALL.into_iter().find(|repeat| repeat.slug() == slug)
+  }
+
+  /// Whether the series can be limited to days of the week.
+  pub fn has_weekdays(self) -> bool {
+    matches!(self, Self::Daily | Self::Weekly)
+  }
+
+  fn frequency(self) -> Option<RecurrenceFrequency> {
+    match self {
+      Self::Never => None,
+      Self::Daily => Some(RecurrenceFrequency::Daily),
+      Self::Weekly => Some(RecurrenceFrequency::Weekly),
+      Self::Monthly => Some(RecurrenceFrequency::Monthly),
+    }
+  }
+
+  fn of(frequency: &RecurrenceFrequency) -> Self {
+    match frequency {
+      RecurrenceFrequency::Daily => Self::Daily,
+      RecurrenceFrequency::Weekly => Self::Weekly,
+      RecurrenceFrequency::Monthly => Self::Monthly,
+      RecurrenceFrequency::Unknown(_) => Self::Never,
+    }
+  }
+}
+
+impl SeriesEnd {
+  pub const ALL: [SeriesEnd; 3] = [Self::Never, Self::AfterCount, Self::OnDate];
+
+  pub fn slug(self) -> &'static str {
+    match self {
+      Self::Never => "never",
+      Self::AfterCount => "count",
+      Self::OnDate => "date",
+    }
+  }
+}
+
+impl DraftProblem {
+  pub fn field(&self) -> DraftField {
+    match self {
+      Self::MissingTitle => DraftField::Title,
+      Self::InvalidStart | Self::StartInThePast => DraftField::Start,
+      Self::InvalidDuration => DraftField::Duration,
+      Self::InvalidInterval => DraftField::Interval,
+      Self::NoWeekday | Self::StartOffWeekdays => DraftField::Weekdays,
+      Self::InvalidCount => DraftField::Count,
+      Self::InvalidUntil | Self::UntilBeforeStart => DraftField::Until,
+      Self::InvalidEmail(_) => DraftField::Externals,
+    }
+  }
+}
+
+/// A cheap sanity check; the server and the mail system decide whether an address works.
+pub fn is_plausible_email(text: &str) -> bool {
+  let Some((local, domain)) = text.split_once('@') else {
+    return false;
+  };
+  !local.is_empty()
+    && !text.contains(char::is_whitespace)
+    && domain.contains('.')
+    && !domain.starts_with('.')
+    && !domain.ends_with('.')
+    && !domain.contains('@')
+}
+
+fn only_day(day: usize) -> [bool; 7] {
+  let mut only = [false; 7];
+  if let Some(slot) = only.get_mut(day) {
+    *slot = true;
+  }
+  only
 }
 
 /// The next full hour that is at least ten minutes away.
@@ -353,6 +707,8 @@ mod tests {
   use super::*;
 
   const NOW: TimestampMs = 1_800_000_000_000;
+  /// 2027-01-18 00:00 UTC, a Monday after `NOW`.
+  const MONDAY_UTC: TimestampMs = 1_800_230_400_000;
 
   fn id<T: Id>(raw: i64) -> T {
     T::from_snowflake(Snowflake::new(raw).unwrap())
@@ -391,19 +747,26 @@ mod tests {
     }
   }
 
+  fn filled_draft() -> MeetingDraft {
+    let mut draft = MeetingDraft::new(NOW, 0);
+    draft.title = "Planning".into();
+    draft
+  }
+
   #[test]
   fn a_new_draft_starts_at_a_full_hour_with_some_lead() {
-    let draft = MeetingDraft::new(NOW);
-    assert_eq!(draft.starts_at % MS_PER_HOUR, 0);
-    assert!(draft.starts_at >= NOW + MIN_LEAD_MS);
+    let draft = MeetingDraft::new(NOW, 0);
+    let start = draft.maybe_starts_at.expect("a start");
+    assert_eq!(start % MS_PER_HOUR, 0);
+    assert!(start >= NOW + MIN_LEAD_MS);
     assert!(draft.maybe_idempotency_key.is_some());
     assert_eq!(draft.problems(NOW, None), vec![DraftProblem::MissingTitle]);
   }
 
   #[test]
   fn a_draft_is_refused_for_what_the_server_would_refuse() {
-    let mut draft = MeetingDraft::new(NOW);
-    draft.starts_at = NOW - 5 * MS_PER_MINUTE;
+    let mut draft = MeetingDraft::new(NOW, 0);
+    draft.maybe_starts_at = Some(NOW - 5 * MS_PER_MINUTE);
     draft.duration_minutes = 0;
     assert_eq!(
       draft.to_request(NOW),
@@ -419,7 +782,7 @@ mod tests {
 
   #[test]
   fn a_valid_draft_invites_each_member_once() {
-    let mut draft = MeetingDraft::new(NOW);
+    let mut draft = MeetingDraft::new(NOW, 0);
     draft.title = "  Planning ".into();
     draft.members = vec![id(2), id(3), id(2)];
     draft.duration_minutes = 45;
@@ -432,7 +795,7 @@ mod tests {
   }
 
   #[test]
-  fn an_edit_keeps_the_email_invitees_and_sends_the_time_only_when_it_moved() {
+  fn an_edit_sends_the_whole_invitee_list_and_the_time_only_when_it_moved() {
     let organizer = id(1);
     let mut before = meeting(organizer);
     before.attendees = vec![
@@ -440,8 +803,9 @@ mod tests {
       attendee(Some(id(2)), None),
       attendee(None, Some("guest@example.com")),
     ];
-    let mut draft = MeetingDraft::from_meeting(&before, organizer);
+    let mut draft = MeetingDraft::from_meeting(&before, organizer, 0);
     assert_eq!(draft.members, vec![id(2)]);
+    assert_eq!(draft.externals.len(), 1);
     assert_eq!(draft.duration_minutes, 30);
     draft.members = vec![id(3)];
     let request = draft.to_update_request(NOW, &before).expect("valid");
@@ -474,14 +838,218 @@ mod tests {
     let mut before = meeting(id(1));
     before.starts_at = UnixMillis(NOW - 10 * MS_PER_MINUTE);
     before.ends_at = UnixMillis(NOW + 20 * MS_PER_MINUTE);
-    let mut draft = MeetingDraft::from_meeting(&before, id(1));
+    let mut draft = MeetingDraft::from_meeting(&before, id(1), 0);
     draft.title = "Renamed".into();
     assert!(draft.to_update_request(NOW, &before).is_ok());
-    draft.starts_at = NOW - 60 * MS_PER_MINUTE;
+    draft.maybe_starts_at = Some(NOW - 60 * MS_PER_MINUTE);
     assert_eq!(
       draft.to_update_request(NOW, &before),
       Err(vec![DraftProblem::StartInThePast])
     );
+  }
+
+  #[test]
+  fn emails_need_a_local_part_and_a_dotted_domain() {
+    for good in ["a@b.co", "first.last@example.com"] {
+      assert!(is_plausible_email(good), "{good}");
+    }
+    for bad in ["", "a", "@b.co", "a@b", "a@.co", "a@b.", "a b@c.de", "a@b@c.de"] {
+      assert!(!is_plausible_email(bad), "{bad}");
+    }
+  }
+
+  #[test]
+  fn the_draft_refuses_what_the_server_would() {
+    type Edit = fn(&mut MeetingDraft);
+    let cases: [(Edit, DraftProblem); 11] = [
+      (|draft| draft.title = "  ".into(), DraftProblem::MissingTitle),
+      (|draft| draft.maybe_starts_at = None, DraftProblem::InvalidStart),
+      (
+        |draft| draft.maybe_starts_at = Some(NOW - MS_PER_HOUR),
+        DraftProblem::StartInThePast,
+      ),
+      (|draft| draft.duration_minutes = 0, DraftProblem::InvalidDuration),
+      (
+        |draft| {
+          draft.set_repeat(Repeat::Daily);
+          draft.repeat.interval = MAX_INTERVAL + 1;
+        },
+        DraftProblem::InvalidInterval,
+      ),
+      (
+        |draft| {
+          draft.set_repeat(Repeat::Daily);
+          draft.repeat.weekdays = [false; 7];
+        },
+        DraftProblem::NoWeekday,
+      ),
+      (
+        |draft| {
+          draft.set_repeat(Repeat::Weekly);
+          draft.repeat.weekdays = only_day((draft.start_weekday().unwrap() + 1) % 7);
+        },
+        DraftProblem::StartOffWeekdays,
+      ),
+      (
+        |draft| {
+          draft.set_repeat(Repeat::Monthly);
+          draft.repeat.ends = SeriesEnd::AfterCount;
+          draft.repeat.count = 0;
+        },
+        DraftProblem::InvalidCount,
+      ),
+      (
+        |draft| {
+          draft.set_repeat(Repeat::Monthly);
+          draft.repeat.ends = SeriesEnd::OnDate;
+        },
+        DraftProblem::InvalidUntil,
+      ),
+      (
+        |draft| {
+          draft.set_repeat(Repeat::Monthly);
+          draft.repeat.ends = SeriesEnd::OnDate;
+          draft.repeat.maybe_until = Some(NOW);
+        },
+        DraftProblem::UntilBeforeStart,
+      ),
+      (
+        |draft| {
+          draft.externals = vec![ExternalInvitee {
+            email: " nobody ".into(),
+            name: String::new(),
+          }]
+        },
+        DraftProblem::InvalidEmail("nobody".into()),
+      ),
+    ];
+    for (edit, expected) in cases {
+      let mut draft = filled_draft();
+      edit(&mut draft);
+      let field = expected.field();
+      assert_eq!(draft.to_request(NOW), Err(vec![expected]));
+      assert_eq!(draft.problems(NOW, None)[0].field(), field);
+    }
+  }
+
+  mod repeat {
+    use super::*;
+
+    #[test]
+    fn the_days_of_the_week_are_the_users_local_days() {
+      // 23:30 UTC on a Monday is Tuesday in UTC+1.
+      let mut draft = filled_draft();
+      draft.maybe_starts_at = Some(MONDAY_UTC + 23 * MS_PER_HOUR + 30 * MS_PER_MINUTE);
+      assert_eq!(draft.start_weekday(), Some(0));
+      draft.utc_offset_minutes = 60;
+      assert_eq!(draft.start_weekday(), Some(1));
+      draft.set_repeat(Repeat::Weekly);
+      assert_eq!(draft.repeat.weekdays, only_day(1));
+    }
+
+    #[test]
+    fn a_daily_series_on_work_days_names_them() {
+      let mut draft = monday_draft();
+      draft.set_repeat(Repeat::Daily);
+      draft.repeat.weekdays = [true, true, true, true, true, false, false];
+      let recurrence = draft.to_request(NOW).unwrap().maybe_recurrence.unwrap();
+      assert_eq!(recurrence.weekdays, WEEKDAYS[..5].to_vec());
+      draft.repeat.weekdays = [true; 7];
+      let every_day = draft.to_request(NOW).unwrap().maybe_recurrence.unwrap();
+      assert!(every_day.weekdays.is_empty());
+    }
+
+    #[test]
+    fn a_weekly_series_on_its_start_day_names_no_days_and_can_add_others() {
+      let mut draft = monday_draft();
+      draft.set_repeat(Repeat::Weekly);
+      assert_eq!(draft.repeat.weekdays, only_day(0));
+      assert!(
+        draft
+          .to_request(NOW)
+          .unwrap()
+          .maybe_recurrence
+          .unwrap()
+          .weekdays
+          .is_empty()
+      );
+      draft.repeat.weekdays[3] = true;
+      let recurrence = draft.to_request(NOW).unwrap().maybe_recurrence.unwrap();
+      assert_eq!(recurrence.weekdays, vec![Weekday::Monday, Weekday::Thursday]);
+    }
+
+    #[test]
+    fn a_series_ends_after_a_count_or_on_a_day() {
+      let mut draft = monday_draft();
+      draft.set_repeat(Repeat::Daily);
+      draft.repeat.skips_holidays = true;
+      draft.repeat.ends = SeriesEnd::OnDate;
+      let until = MONDAY_UTC + 4 * MS_PER_DAY - 1_000;
+      draft.repeat.maybe_until = Some(until);
+      let recurrence = draft.to_request(NOW).unwrap().maybe_recurrence.unwrap();
+      assert_eq!(recurrence.maybe_until, Some(UnixMillis(until)));
+      assert!(recurrence.skips_holidays);
+      draft.repeat.ends = SeriesEnd::AfterCount;
+      draft.repeat.count = 3;
+      let counted = draft.to_request(NOW).unwrap().maybe_recurrence.unwrap();
+      assert_eq!((counted.maybe_count, counted.maybe_until), (Some(3), None));
+    }
+
+    #[test]
+    fn a_saved_series_comes_back_into_the_draft_and_is_not_sent_unchanged() {
+      let organizer = id(1);
+      let mut draft = monday_draft();
+      draft.set_repeat(Repeat::Daily);
+      draft.repeat.weekdays = [true, true, true, true, true, false, false];
+      draft.repeat.ends = SeriesEnd::AfterCount;
+      draft.repeat.count = 20;
+      let request = draft.to_request(NOW).unwrap();
+      let mut saved = meeting(organizer);
+      saved.starts_at = request.starts_at;
+      saved.ends_at = request.ends_at;
+      saved.maybe_recurrence = request.maybe_recurrence.clone();
+      let mut again = MeetingDraft::from_meeting(&saved, organizer, 0);
+      assert_eq!(again.repeat, draft.repeat);
+      assert_eq!(
+        again.to_update_request(NOW, &saved).unwrap().maybe_recurrence,
+        None
+      );
+      again.repeat.interval = 2;
+      assert!(
+        again
+          .to_update_request(NOW, &saved)
+          .unwrap()
+          .maybe_recurrence
+          .is_some()
+      );
+    }
+
+    /// A Monday, 10:00 UTC, well after `NOW`.
+    fn monday_draft() -> MeetingDraft {
+      let mut draft = filled_draft();
+      draft.maybe_starts_at = Some(MONDAY_UTC + 10 * MS_PER_HOUR);
+      draft
+    }
+  }
+
+  #[test]
+  fn the_notetaker_is_its_box_and_invited_like_a_member() {
+    let organizer = id(1);
+    let bot = id(4);
+    let mut before = meeting(organizer);
+    before.attendees = vec![attendee(Some(organizer), None), attendee(Some(bot), None)];
+    before.co_host_user_ids = vec![id(2)];
+    let draft = MeetingDraft::from_meeting(&before, organizer, 0).with_notetaker(Some(bot));
+    assert_eq!(
+      (draft.members.clone(), draft.maybe_notetaker),
+      (Vec::new(), Some(bot))
+    );
+    assert_eq!(draft.co_hosts, vec![id(2)]);
+    let mut draft = filled_draft();
+    draft.members = vec![id(2)];
+    draft.maybe_notetaker = Some(bot);
+    let request = draft.to_request(NOW).unwrap();
+    assert_eq!(invited_users(&request), vec![id(2), bot]);
   }
 
   #[test]

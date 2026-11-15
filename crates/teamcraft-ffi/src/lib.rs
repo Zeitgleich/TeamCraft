@@ -95,8 +95,9 @@ pub use meeting_lobby::{
   LobbyDecision, LobbyDecisionOutcome, LobbyLeftWaiting, LobbyPerson, LobbyPersonStatus, MeetingLobby,
 };
 pub use meetings::{
-  MeetingCancelScope, MeetingEditForm, MeetingForm, MeetingFormProblem, MeetingSave, SavedMeeting,
-  meeting_form_problems, new_meeting_form,
+  MeetingCancelScope, MeetingEditForm, MeetingExternalInvitee, MeetingForm, MeetingFormProblem,
+  MeetingRepeat, MeetingRepeatForm, MeetingRowActions, MeetingSave, MeetingSeriesEnd, SavedMeeting,
+  meeting_form_problems, meeting_form_with_repeat, meeting_row_actions, new_meeting_form,
 };
 pub use notetaker::{MovedCallHint, NotetakerAddition};
 pub use perf_jobs::{
@@ -1441,8 +1442,9 @@ impl TeamCraft {
   /// Schedules a meeting from the apps' form (#1841), listed in `maybe_space_id`: the server saves
   /// it, then the core sets up its chat's encryption group with the members invited here (from
   /// this request, never the server's member list), anchored with the meeting (#1747), notes the
-  /// lobby as chosen here and signs who may let guests in (#1103). `Refused` sends nothing. A
-  /// retry of the same form (same request key) after a lost answer schedules it once.
+  /// lobby as chosen here and signs who may let guests in (#1103), then asks the notetaker in and
+  /// signs the co-hosts where the form has them (#1720). `Refused` sends nothing. A retry of the
+  /// same form (same request key) after a lost answer schedules it once.
   pub async fn schedule_meeting(
     &self,
     form: MeetingForm,
@@ -1475,18 +1477,28 @@ impl TeamCraft {
       .await
   }
 
-  /// The edit form of a meeting the user organizes, as the server has it now (#1841).
+  /// The notetaker "Notetaker joins the calls" in the schedule form asks in (e2ee.md §8.2): its
+  /// user ID while the verified policy has it on and lets this user ask it in, `None` to hide the
+  /// box. Ticked, it goes into the form's `maybe_notetaker_user_id` and out of the people picker.
+  pub async fn meeting_notetaker(&self) -> Result<Option<String>, TeamCraftError> {
+    self.read(|reads| reads.meeting_notetaker()).await
+  }
+
+  /// The edit form of a meeting the user organizes, as the server has it now (#1841): its repeat
+  /// rule, e-mail invitees, co-hosts and the notetaker too. Its `utc_offset_minutes` is 0: the app
+  /// sets its own for the start.
   pub async fn meeting_edit_form(&self, meeting_id: String) -> Result<MeetingEditForm, TeamCraftError> {
     self
       .call(move |engine| Box::pin(async move { engine.meeting_edit_form(&meeting_id).await }))
       .await
   }
 
-  /// Saves the organizer's edit of `meeting_id` (#1841): the invitees go as the whole list (the
-  /// meeting's e-mail invitees and repeat rule stay), and once the server took it the core adds
-  /// the members added here, removes those taken off with a key-rotating commit and signs the
-  /// admitters anew. If the answer is lost or the app dies in between, the removal is finished by
-  /// [`Self::meeting_upkeep`].
+  /// Saves the organizer's edit of `meeting_id` (#1841): the invitees go as the whole list (members
+  /// and e-mail addresses), the repeat rule when it changed, and once the server took it the core
+  /// adds the members added here, removes those taken off with a key-rotating commit, signs the
+  /// admitters and the co-hosts as ticked anew. Unticking the notetaker stops it before the save;
+  /// ticking it asks it in after. If the answer is lost or the app dies in between, the removal is
+  /// finished by [`Self::meeting_upkeep`].
   pub async fn save_meeting_edit(
     &self,
     meeting_id: String,
@@ -1494,6 +1506,48 @@ impl TeamCraft {
   ) -> Result<MeetingSave, TeamCraftError> {
     self
       .call(move |engine| Box::pin(async move { engine.save_meeting_edit(&meeting_id, &form).await }))
+      .await
+  }
+
+  /// The meeting's link to hand out (#1905): the server's address with the organizer's key
+  /// fingerprint as this device has it pinned (`v=`, e2ee.md §4.6), never the server's. An error
+  /// when this device can't pin the organizer's key: then the app hands out no link.
+  pub async fn meeting_link(&self, meeting_id: String) -> Result<String, TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.meeting_link(&meeting_id).await }))
+      .await
+  }
+
+  /// Takes the cancellation of a meeting the user organizes back (#1905): the whole meeting, or
+  /// with `maybe_occurrence_starts_at_ms` that occurrence of a series (a skipped holiday's too).
+  pub async fn restore_meeting(
+    &self,
+    meeting_id: String,
+    maybe_occurrence_starts_at_ms: Option<i64>,
+  ) -> Result<(), TeamCraftError> {
+    self
+      .call(move |engine| {
+        Box::pin(async move {
+          engine
+            .restore_meeting(&meeting_id, maybe_occurrence_starts_at_ms)
+            .await
+        })
+      })
+      .await
+  }
+
+  /// "Remove" (#1905): takes a cancelled meeting the user organizes off their lists.
+  pub async fn hide_meeting(&self, meeting_id: String) -> Result<(), TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.hide_meeting(&meeting_id).await }))
+      .await
+  }
+
+  /// The Past view (#1905): the user's meetings of the last 30 days that ended, latest first, as
+  /// `GET /meetings` JSON, as desktop lists them.
+  pub async fn past_meetings(&self) -> Result<String, TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.past_meetings().await }))
       .await
   }
 

@@ -7,27 +7,31 @@ use std::rc::Rc;
 
 use leptos::prelude::*;
 pub use teamcraft_client_api::meeting_edits::{
-  MAX_DURATION_MINUTES, MS_PER_MINUTE, OwedChatChange, PendingEdit, invited_users, invitee_change, is_over,
-  noting_pending_edit, plan_reconcile,
+  DraftField as FormField, DraftProblem as FormError, ExternalInvitee, MAX_DURATION_MINUTES, MS_PER_MINUTE,
+  MeetingDraft, OwedChatChange, PendingEdit, Repeat, RepeatRule, SeriesEnd, WEEKDAYS, invited_users,
+  invitee_change, is_over, is_plausible_email, noting_pending_edit, plan_reconcile,
 };
 pub use teamcraft_client_api::meeting_invitees::{
   ChatInvitees, added_users, adding_invitee, adding_invitees, attending_users, saved_change,
 };
+pub use teamcraft_client_api::meeting_links::with_verifier;
+use teamcraft_client_api::meeting_links::{LEGACY_ORGANIZER_FRAGMENT_KEY, VERIFIER_FRAGMENT_KEY};
+use teamcraft_client_api::meeting_rows::{PAST_LIST_LIMIT, PAST_LOOKBACK_MS};
 use teamcraft_client_api::model::SpaceId;
 use teamcraft_proto::{
   CancelScope, CreateGuestLinkRequest, CreateInstantMeetingRequest, CreateMeetingRequest, ErrorBody,
   ErrorCode, GuestLinkResponse, HolidayRegionResponse, IdempotencyKey, JoinMeetingRequest,
   JoinMeetingResponse, KnockByLinkResponse, ListLobbyResponse, ListMeetingsResponse, LobbyEntry, LobbyState,
-  LobbyStateResponse, MeetingControlAction, MeetingControlRequest, MeetingId, MeetingInvitee,
-  MeetingRecurrence, MeetingResponse, RecurrenceFrequency, RestoreMeetingRequest, RsvpStatus,
-  SetHolidayRegionRequest, SetRsvpRequest, UnixMillis, UpdateMeetingRequest, Weekday,
+  LobbyStateResponse, MeetingControlAction, MeetingControlRequest, MeetingId, MeetingResponse,
+  RestoreMeetingRequest, RsvpStatus, SetHolidayRegionRequest, SetRsvpRequest, UnixMillis,
+  UpdateMeetingRequest,
 };
 
 use zeroize::Zeroizing;
 
 use crate::auth::fetch::fetch;
 use crate::auth::{ApiMethod, ApiResponse, AppConfig, AuthError, Authenticator};
-use crate::clock::{format_local_datetime_input, local_day, now_ms, parse_local_datetime};
+use crate::clock::{format_local_datetime_input, local_utc_offset_minutes, now_ms, parse_local_datetime};
 use crate::feedback::{ActionFailure, FailureKind};
 use crate::meeting_reminders::ServerClock;
 use crate::model::{ConversationId, TimestampMs, UserId};
@@ -41,20 +45,9 @@ pub const STATUS_CONFLICT: u16 = 409;
 /// Meetings that ended less than this long ago are still listed.
 const LIST_LOOKBACK_MS: i64 = 60 * 60_000;
 const LIST_LIMIT: u32 = 100;
-/// How far back the Past view of the meetings page reaches (#956).
-const PAST_LOOKBACK_MS: i64 = 30 * 24 * 60 * 60_000;
-/// The server's own maximum: a month of daily series still fits.
-const PAST_LIST_LIMIT: u32 = 500;
-/// Largest "every N days, weeks or months" and number of meetings of a series (the server's limits).
-const MAX_INTERVAL: u32 = 100;
-const MAX_COUNT: u32 = 1_000;
 /// Prefix of the page of a meeting; the guest token follows in the fragment (`#invite=`).
 const MEETING_PATH_PREFIX: &str = "/meeting/";
 const INVITE_FRAGMENT_KEY: &str = "invite=";
-/// The organizer's identity key fingerprint in a meeting link's fragment, and its name in links of
-/// older apps.
-const VERIFIER_FRAGMENT_KEY: &str = "v=";
-const LEGACY_ORGANIZER_FRAGMENT_KEY: &str = "o=";
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum MeetingError {
@@ -655,93 +648,9 @@ pub fn my_rsvp(meeting: &MeetingResponse, me: UserId) -> Option<RsvpStatus> {
 
 // ---- The schedule form --------------------------------------------------------------------------
 
-/// How often a meeting repeats, as the dialog offers it: the unit of "every N …".
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Repeat {
-  Never,
-  Daily,
-  Weekly,
-  Monthly,
-}
-
-impl Repeat {
-  pub const ALL: [Repeat; 4] = [Self::Never, Self::Daily, Self::Weekly, Self::Monthly];
-
-  pub fn slug(self) -> &'static str {
-    match self {
-      Self::Never => "never",
-      Self::Daily => "daily",
-      Self::Weekly => "weekly",
-      Self::Monthly => "monthly",
-    }
-  }
-
-  pub fn from_slug(slug: &str) -> Option<Self> {
-    Self::ALL.into_iter().find(|repeat| repeat.slug() == slug)
-  }
-
-  /// Whether the series can be limited to days of the week.
-  pub fn has_weekdays(self) -> bool {
-    matches!(self, Self::Daily | Self::Weekly)
-  }
-
-  fn frequency(self) -> Option<RecurrenceFrequency> {
-    match self {
-      Self::Never => None,
-      Self::Daily => Some(RecurrenceFrequency::Daily),
-      Self::Weekly => Some(RecurrenceFrequency::Weekly),
-      Self::Monthly => Some(RecurrenceFrequency::Monthly),
-    }
-  }
-
-  fn of(frequency: &RecurrenceFrequency) -> Self {
-    match frequency {
-      RecurrenceFrequency::Daily => Self::Daily,
-      RecurrenceFrequency::Weekly => Self::Weekly,
-      RecurrenceFrequency::Monthly => Self::Monthly,
-      RecurrenceFrequency::Unknown(_) => Self::Never,
-    }
-  }
-}
-
-/// How a series ends.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SeriesEnd {
-  Never,
-  AfterCount,
-  OnDate,
-}
-
-impl SeriesEnd {
-  pub const ALL: [SeriesEnd; 3] = [Self::Never, Self::AfterCount, Self::OnDate];
-
-  pub fn slug(self) -> &'static str {
-    match self {
-      Self::Never => "never",
-      Self::AfterCount => "count",
-      Self::OnDate => "date",
-    }
-  }
-}
-
-/// The days of the week, Monday first, as the wire names them.
-pub const WEEKDAYS: [Weekday; 7] = [
-  Weekday::Monday,
-  Weekday::Tuesday,
-  Weekday::Wednesday,
-  Weekday::Thursday,
-  Weekday::Friday,
-  Weekday::Saturday,
-  Weekday::Sunday,
-];
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ExternalInvitee {
-  pub email: String,
-  pub name: String,
-}
-
-/// What the schedule dialog collects.
+/// What the schedule dialog collects, as its inputs hold it (times as `datetime-local` and `date`
+/// text). The rules are the core's: every check goes through [`MeetingDraft`] ([`Self::draft`]), the
+/// one validation the mobile apps use too.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScheduleForm {
   pub title: String,
@@ -764,8 +673,7 @@ pub struct ScheduleForm {
   /// The series leaves out public holidays (#1053).
   pub skips_holidays: bool,
   pub has_lobby: bool,
-  /// The notetaker's account when "Notetaker joins the calls" is ticked (e2ee.md §8.2): invited like
-  /// a member, so it is in the chat's group before any call.
+  /// The notetaker's account when "Notetaker joins the calls" is ticked (e2ee.md §8.2).
   pub maybe_notetaker: Option<UserId>,
   /// Invited people who host with the organizer (#1720); signed by the organizer's device once the
   /// meeting is saved (`co_hosts_from_dialog`).
@@ -777,6 +685,7 @@ pub struct ScheduleForm {
 
 impl ScheduleForm {
   pub fn new(starts_at: String) -> Self {
+    let rule = RepeatRule::default();
     Self {
       title: String::new(),
       description: String::new(),
@@ -784,13 +693,13 @@ impl ScheduleForm {
       duration_minutes: 30,
       members: Vec::new(),
       externals: Vec::new(),
-      repeat: Repeat::Never,
-      interval: 1,
-      weekdays: [true; 7],
-      ends: SeriesEnd::Never,
-      count: 10,
+      repeat: rule.repeat,
+      interval: rule.interval,
+      weekdays: rule.weekdays,
+      ends: rule.ends,
+      count: rule.count,
       until: String::new(),
-      skips_holidays: false,
+      skips_holidays: rule.skips_holidays,
       has_lobby: true,
       maybe_notetaker: None,
       co_hosts: Vec::new(),
@@ -801,69 +710,24 @@ impl ScheduleForm {
   /// The form of the edit dialog: what the saved meeting says now (the organizer `me` is not an
   /// invitee in the list).
   pub fn from_meeting(meeting: &MeetingResponse, me: UserId) -> Self {
-    let minutes = (meeting.ends_at.0 - meeting.starts_at.0) / MS_PER_MINUTE;
-    let mut form = Self::new(format_local_datetime_input(meeting.starts_at.0));
-    form.title = meeting.title.clone();
-    form.description = meeting.maybe_description.clone().unwrap_or_default();
-    form.duration_minutes = u32::try_from(minutes).unwrap_or(0);
-    form.has_lobby = meeting.has_lobby;
-    form.co_hosts = meeting.co_host_user_ids.clone();
-    form.maybe_idempotency_key = None;
-    if let Some(recurrence) = &meeting.maybe_recurrence {
-      form.set_repeat(Repeat::of(&recurrence.frequency));
-      form.interval = recurrence.interval;
-      form.skips_holidays = recurrence.skips_holidays;
-      if !recurrence.weekdays.is_empty() {
-        form.weekdays = WEEKDAYS.map(|day| recurrence.weekdays.contains(&day));
-      }
-      if let Some(count) = recurrence.maybe_count {
-        form.ends = SeriesEnd::AfterCount;
-        form.count = count;
-      }
-      if let Some(until) = recurrence.maybe_until {
-        form.ends = SeriesEnd::OnDate;
-        form.until = date_input_of(until.0);
-      }
-    }
-    for attendee in &meeting.attendees {
-      match (attendee.maybe_user_id, &attendee.maybe_email) {
-        (Some(user), _) if user != me => form.members.push(user),
-        (None, Some(email)) => form.externals.push(ExternalInvitee {
-          email: email.clone(),
-          name: attendee.maybe_name.clone().unwrap_or_default(),
-        }),
-        _ => {},
-      }
-    }
-    form
+    let offset = i32::from(local_utc_offset_minutes(meeting.starts_at.0));
+    Self::of_draft(MeetingDraft::from_meeting(meeting, me, offset))
   }
 
-  /// Picks how the meeting repeats, with the days that go with it: every day for a daily series, the
-  /// start's day for a weekly one.
+  /// Picks how the meeting repeats, with the days that go with it (`MeetingDraft::set_repeat`).
   pub fn set_repeat(&mut self, repeat: Repeat) {
-    if repeat == self.repeat {
-      return;
-    }
-    self.repeat = repeat;
-    self.weekdays = match (repeat, self.start_weekday()) {
-      (Repeat::Weekly, Some(day)) => {
-        let mut only = [false; 7];
-        only[day] = true;
-        only
-      },
-      _ => [true; 7],
-    };
+    let mut draft = self.draft();
+    draft.set_repeat(repeat);
+    self.repeat = draft.repeat.repeat;
+    self.weekdays = draft.repeat.weekdays;
   }
 
   /// The notetaker `maybe_bot` attends: it is the "Notetaker joins the calls" box, not a member in
   /// the people list.
   pub fn with_notetaker(mut self, maybe_bot: Option<UserId>) -> Self {
-    if let Some(bot) = maybe_bot
-      && self.members.contains(&bot)
-    {
-      self.members.retain(|member| *member != bot);
-      self.maybe_notetaker = Some(bot);
-    }
+    let draft = self.draft().with_notetaker(maybe_bot);
+    self.members = draft.members;
+    self.maybe_notetaker = draft.maybe_notetaker;
     self
   }
 
@@ -874,157 +738,73 @@ impl ScheduleForm {
     now: TimestampMs,
     before: &MeetingResponse,
   ) -> Result<UpdateMeetingRequest, Vec<FormError>> {
-    let create = self.to_request_inner(now, Some(before.starts_at.0))?;
-    // The input has minute precision: seconds of the saved times are not a change.
-    let has_moved = (create.starts_at.0 - before.starts_at.0).abs() >= MS_PER_MINUTE
-      || (create.ends_at.0 - before.ends_at.0).abs() >= MS_PER_MINUTE;
-    Ok(UpdateMeetingRequest {
-      maybe_title: Some(create.title),
-      maybe_description: Some(create.maybe_description.unwrap_or_default()),
-      maybe_starts_at: has_moved.then_some(create.starts_at),
-      maybe_ends_at: has_moved.then_some(create.ends_at),
-      maybe_invitees: Some(create.invitees),
-      maybe_has_lobby: Some(create.has_lobby),
-      maybe_recurrence: create
-        .maybe_recurrence
-        .filter(|recurrence| before.maybe_recurrence.as_ref() != Some(recurrence)),
-    })
+    self.draft().to_update_request(now, before)
   }
 
   /// The request, or every reason it can't be sent, in the order of the fields.
   pub fn to_request(&self, now: TimestampMs) -> Result<CreateMeetingRequest, Vec<FormError>> {
-    self.to_request_inner(now, None)
-  }
-
-  /// `maybe_unchanged_start` is a start that needs no future check (the saved start of a meeting being
-  /// edited).
-  fn to_request_inner(
-    &self,
-    now: TimestampMs,
-    maybe_unchanged_start: Option<TimestampMs>,
-  ) -> Result<CreateMeetingRequest, Vec<FormError>> {
-    let mut errors = Vec::new();
-    let title = self.title.trim();
-    if title.is_empty() {
-      errors.push(FormError::MissingTitle);
-    }
-    let maybe_start = parse_local_datetime(&self.starts_at);
-    match maybe_start {
-      None => errors.push(FormError::InvalidStart),
-      Some(starts_at) => {
-        // The input has minute precision: the saved start (with seconds) counts as unchanged.
-        let is_unchanged =
-          maybe_unchanged_start.is_some_and(|saved| (starts_at - saved).abs() < MS_PER_MINUTE);
-        if starts_at < now - MS_PER_MINUTE && !is_unchanged {
-          errors.push(FormError::StartInThePast);
-        }
-      },
-    }
-    if self.duration_minutes == 0 || self.duration_minutes > MAX_DURATION_MINUTES {
-      errors.push(FormError::InvalidDuration);
-    }
-    let maybe_recurrence = self.recurrence(maybe_start, &mut errors);
-    let mut invitees: Vec<MeetingInvitee> = self
-      .members
-      .iter()
-      .map(|user_id| MeetingInvitee::User { user_id: *user_id })
-      .collect();
-    if let Some(bot) = self.maybe_notetaker.filter(|bot| !self.members.contains(bot)) {
-      invitees.push(MeetingInvitee::User { user_id: bot });
-    }
-    for external in &self.externals {
-      let email = external.email.trim();
-      if !is_plausible_email(email) {
-        errors.push(FormError::InvalidEmail(email.to_owned()));
-        continue;
-      }
-      invitees.push(MeetingInvitee::External {
-        email: email.to_owned(),
-        maybe_name: Some(external.name.trim().to_owned()).filter(|name| !name.is_empty()),
-      });
-    }
-    let Some(starts_at) = maybe_start.filter(|_| errors.is_empty()) else {
-      return Err(errors);
-    };
-    Ok(CreateMeetingRequest {
-      title: title.to_owned(),
-      maybe_description: Some(self.description.trim().to_owned()).filter(|text| !text.is_empty()),
-      starts_at: UnixMillis(starts_at),
-      ends_at: UnixMillis(starts_at + i64::from(self.duration_minutes) * MS_PER_MINUTE),
-      invitees,
-      maybe_recurrence,
-      has_lobby: self.has_lobby,
-      // The dialog sets it: the form doesn't know where it is opened.
-      maybe_space: None,
-      maybe_idempotency_key: self.maybe_idempotency_key,
-    })
-  }
-
-  /// The repeat rule of the form, noting what is wrong with it.
-  fn recurrence(
-    &self,
-    maybe_start: Option<TimestampMs>,
-    errors: &mut Vec<FormError>,
-  ) -> Option<MeetingRecurrence> {
-    let frequency = self.repeat.frequency()?;
-    if self.interval == 0 || self.interval > MAX_INTERVAL {
-      errors.push(FormError::InvalidInterval);
-    }
-    let only_start_day = self.start_weekday().map(|start| {
-      let mut only = [false; 7];
-      only[start] = true;
-      only
-    });
-    // Every day, or a weekly series on its start's day: the rule needs no days.
-    let is_plain = !self.weekdays.contains(&false)
-      || (self.repeat == Repeat::Weekly && only_start_day == Some(self.weekdays));
-    let weekdays: Vec<Weekday> = if self.repeat.has_weekdays() && !is_plain {
-      WEEKDAYS
-        .into_iter()
-        .zip(self.weekdays)
-        .filter_map(|(day, is_on)| is_on.then_some(day))
-        .collect()
-    } else {
-      Vec::new()
-    };
-    if self.repeat.has_weekdays() && !self.weekdays.contains(&true) {
-      errors.push(FormError::NoWeekday);
-    } else if self.repeat.has_weekdays()
-      && let Some(day) = self.start_weekday()
-      && !self.weekdays[day]
-    {
-      // The first meeting is the start itself; on another day the series would surprise.
-      errors.push(FormError::StartOffWeekdays);
-    }
-    let (mut maybe_count, mut maybe_until) = (None, None);
-    match self.ends {
-      SeriesEnd::Never => {},
-      SeriesEnd::AfterCount if (1..=MAX_COUNT).contains(&self.count) => maybe_count = Some(self.count),
-      SeriesEnd::AfterCount => errors.push(FormError::InvalidCount),
-      SeriesEnd::OnDate => match parse_local_datetime(&format!("{}T23:59", self.until)) {
-        None => errors.push(FormError::InvalidUntil),
-        Some(day_end) if maybe_start.is_some_and(|start| day_end < start) => {
-          errors.push(FormError::UntilBeforeStart);
-        },
-        // The whole last day counts.
-        Some(day_end) => maybe_until = Some(UnixMillis(day_end + MS_PER_MINUTE - 1_000)),
-      },
-    }
-    Some(MeetingRecurrence {
-      frequency,
-      interval: self.interval,
-      weekdays,
-      maybe_count,
-      maybe_until,
-      skips_holidays: self.skips_holidays,
-    })
+    self.draft().to_request(now)
   }
 
   /// The local day of the week of the start, Monday first.
-  fn start_weekday(&self) -> Option<usize> {
-    let start = parse_local_datetime(&self.starts_at)?;
-    // 1970-01-01 was a Thursday.
-    usize::try_from((local_day(start) + 3).rem_euclid(7)).ok()
+  pub fn start_weekday(&self) -> Option<usize> {
+    self.draft().start_weekday()
+  }
+
+  /// The form in plain times: the start as the input holds it, a series' last day until its end.
+  pub fn draft(&self) -> MeetingDraft {
+    let maybe_starts_at = parse_local_datetime(&self.starts_at);
+    let utc_offset_minutes = maybe_starts_at.map_or(0, |start| i32::from(local_utc_offset_minutes(start)));
+    // The whole last day counts.
+    let maybe_until =
+      parse_local_datetime(&format!("{}T23:59", self.until)).map(|day_end| day_end + MS_PER_MINUTE - 1_000);
+    MeetingDraft {
+      title: self.title.clone(),
+      description: self.description.clone(),
+      maybe_starts_at,
+      utc_offset_minutes,
+      duration_minutes: self.duration_minutes,
+      members: self.members.clone(),
+      externals: self.externals.clone(),
+      repeat: RepeatRule {
+        repeat: self.repeat,
+        interval: self.interval,
+        weekdays: self.weekdays,
+        ends: self.ends,
+        count: self.count,
+        maybe_until,
+        skips_holidays: self.skips_holidays,
+      },
+      has_lobby: self.has_lobby,
+      maybe_notetaker: self.maybe_notetaker,
+      co_hosts: self.co_hosts.clone(),
+      maybe_idempotency_key: self.maybe_idempotency_key,
+    }
+  }
+
+  fn of_draft(draft: MeetingDraft) -> Self {
+    Self {
+      title: draft.title,
+      description: draft.description,
+      starts_at: draft
+        .maybe_starts_at
+        .map(format_local_datetime_input)
+        .unwrap_or_default(),
+      duration_minutes: draft.duration_minutes,
+      members: draft.members,
+      externals: draft.externals,
+      repeat: draft.repeat.repeat,
+      interval: draft.repeat.interval,
+      weekdays: draft.repeat.weekdays,
+      ends: draft.repeat.ends,
+      count: draft.repeat.count,
+      until: draft.repeat.maybe_until.map(date_input_of).unwrap_or_default(),
+      skips_holidays: draft.repeat.skips_holidays,
+      has_lobby: draft.has_lobby,
+      maybe_notetaker: draft.maybe_notetaker,
+      co_hosts: draft.co_hosts,
+      maybe_idempotency_key: draft.maybe_idempotency_key,
+    }
   }
 }
 
@@ -1036,94 +816,35 @@ fn date_input_of(ts: TimestampMs) -> String {
     .unwrap_or_default()
 }
 
-/// Why a form cannot be sent; the dialog shows each at its field.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FormError {
-  MissingTitle,
-  InvalidStart,
-  StartInThePast,
-  InvalidDuration,
-  InvalidInterval,
-  NoWeekday,
-  StartOffWeekdays,
-  InvalidCount,
-  InvalidUntil,
-  UntilBeforeStart,
-  InvalidEmail(String),
-}
-
-/// The fields of the schedule dialog an error can belong to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FormField {
-  Title,
-  Start,
-  Duration,
-  Interval,
-  Weekdays,
-  Count,
-  Until,
-  Externals,
-}
-
-impl FormField {
-  /// The id of the field's element in the dialog.
-  pub fn id(self) -> &'static str {
-    match self {
-      Self::Title => "meeting-title",
-      Self::Start => "meeting-start",
-      Self::Duration => "meeting-duration",
-      Self::Interval => "meeting-interval",
-      Self::Weekdays => "meeting-weekdays",
-      Self::Count => "meeting-count",
-      Self::Until => "meeting-until",
-      Self::Externals => "meeting-externals",
-    }
+/// The id of a field's element in the dialog.
+pub fn field_id(field: FormField) -> &'static str {
+  match field {
+    FormField::Title => "meeting-title",
+    FormField::Start => "meeting-start",
+    FormField::Duration => "meeting-duration",
+    FormField::Interval => "meeting-interval",
+    FormField::Weekdays => "meeting-weekdays",
+    FormField::Count => "meeting-count",
+    FormField::Until => "meeting-until",
+    FormField::Externals => "meeting-externals",
   }
 }
 
-impl FormError {
-  /// Fluent key of the message.
-  pub fn key(&self) -> &'static str {
-    match self {
-      Self::MissingTitle => "meeting-error-title",
-      Self::InvalidStart => "meeting-error-start",
-      Self::StartInThePast => "meeting-error-past",
-      Self::InvalidDuration => "meeting-error-duration",
-      Self::InvalidInterval => "meeting-error-interval",
-      Self::NoWeekday => "meeting-error-no-weekday",
-      Self::StartOffWeekdays => "meeting-error-start-weekday",
-      Self::InvalidCount => "meeting-error-count",
-      Self::InvalidUntil => "meeting-error-until",
-      Self::UntilBeforeStart => "meeting-error-until-before",
-      Self::InvalidEmail(_) => "meeting-error-email",
-    }
+/// Fluent key of a form error's message.
+pub fn error_key(error: &FormError) -> &'static str {
+  match error {
+    FormError::MissingTitle => "meeting-error-title",
+    FormError::InvalidStart => "meeting-error-start",
+    FormError::StartInThePast => "meeting-error-past",
+    FormError::InvalidDuration => "meeting-error-duration",
+    FormError::InvalidInterval => "meeting-error-interval",
+    FormError::NoWeekday => "meeting-error-no-weekday",
+    FormError::StartOffWeekdays => "meeting-error-start-weekday",
+    FormError::InvalidCount => "meeting-error-count",
+    FormError::InvalidUntil => "meeting-error-until",
+    FormError::UntilBeforeStart => "meeting-error-until-before",
+    FormError::InvalidEmail(_) => "meeting-error-email",
   }
-
-  pub fn field(&self) -> FormField {
-    match self {
-      Self::MissingTitle => FormField::Title,
-      Self::InvalidStart | Self::StartInThePast => FormField::Start,
-      Self::InvalidDuration => FormField::Duration,
-      Self::InvalidInterval => FormField::Interval,
-      Self::NoWeekday | Self::StartOffWeekdays => FormField::Weekdays,
-      Self::InvalidCount => FormField::Count,
-      Self::InvalidUntil | Self::UntilBeforeStart => FormField::Until,
-      Self::InvalidEmail(_) => FormField::Externals,
-    }
-  }
-}
-
-/// A cheap sanity check; the server and the mail system decide whether an address works.
-pub fn is_plausible_email(text: &str) -> bool {
-  let Some((local, domain)) = text.split_once('@') else {
-    return false;
-  };
-  !local.is_empty()
-    && !text.contains(char::is_whitespace)
-    && domain.contains('.')
-    && !domain.starts_with('.')
-    && !domain.ends_with('.')
-    && !domain.contains('@')
 }
 
 // ---- The guest side -----------------------------------------------------------------------------
@@ -1178,26 +899,6 @@ pub fn parse_guest_link(path: &str, fragment: &str) -> Option<GuestLink> {
       .or_else(|| value(LEGACY_ORGANIZER_FRAGMENT_KEY)),
     maybe_resume_key,
   })
-}
-
-/// `link` with `fragment` (`v=<fingerprint>`) as its verifier, replacing any `v` the server put
-/// there: the copying device's pinned key wins over the server's word.
-pub fn with_verifier(link: &str, fragment: &str) -> String {
-  let (path, maybe_rest) = match link.split_once('#') {
-    Some((path, rest)) => (path, Some(rest)),
-    None => (link, None),
-  };
-  let mut parts: Vec<&str> = maybe_rest
-    .into_iter()
-    .flat_map(|rest| rest.split('&'))
-    .filter(|part| {
-      !part.is_empty()
-        && !part.starts_with(VERIFIER_FRAGMENT_KEY)
-        && !part.starts_with(LEGACY_ORGANIZER_FRAGMENT_KEY)
-    })
-    .collect();
-  parts.push(fragment);
-  format!("{path}#{}", parts.join("&"))
 }
 
 /// Requests of a guest. They carry no member account: the link's token is traded for a session.
@@ -1355,6 +1056,8 @@ pub fn is_meeting_chat(conversation: &crate::model::Conversation) -> bool {
 
 #[cfg(test)]
 mod tests {
+  use teamcraft_proto::{MeetingInvitee, RecurrenceFrequency, Weekday};
+
   use super::*;
   use crate::model::id_from_raw;
   use crate::route::LinkToken;
@@ -1554,17 +1257,7 @@ mod tests {
     form.duration_minutes = 0;
     let errors = form.to_request(NOW).unwrap_err();
     assert_eq!(errors, vec![FormError::MissingTitle, FormError::InvalidDuration]);
-    assert_eq!(errors[0].field().id(), "meeting-title");
-  }
-
-  #[test]
-  fn emails_need_a_local_part_and_a_dotted_domain() {
-    for good in ["a@b.co", "first.last@example.com"] {
-      assert!(is_plausible_email(good), "{good}");
-    }
-    for bad in ["", "a", "@b.co", "a@b", "a@.co", "a@b.", "a b@c.de", "a@b@c.de"] {
-      assert!(!is_plausible_email(bad), "{bad}");
-    }
+    assert_eq!(field_id(errors[0].field()), "meeting-title");
   }
 
   const TOKEN: &str = "AbCdEfGhIjKlMnOpQrStUvWxYz012345";
@@ -1619,20 +1312,6 @@ mod tests {
     assert_eq!(by_id.maybe_invite_token, None);
     assert_eq!(by_id.maybe_resume_key.as_deref().map(String::as_str), Some("k3y"));
     assert!(parse_guest_link("/meeting/123456789", "#r=").is_none());
-  }
-
-  #[test]
-  fn the_copying_devices_fingerprint_replaces_the_servers() {
-    let base = format!("https://chat.example.com/meeting/{TOKEN}");
-    assert_eq!(with_verifier(&base, "v=11"), format!("{base}#v=11"));
-    assert_eq!(
-      with_verifier(&format!("{base}#v=22"), "v=11"),
-      format!("{base}#v=11")
-    );
-    assert_eq!(
-      with_verifier(&format!("{base}#invite=abc&v=22"), "v=11"),
-      format!("{base}#invite=abc&v=11")
-    );
   }
 
   #[test]

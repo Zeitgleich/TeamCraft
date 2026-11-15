@@ -718,6 +718,10 @@ struct Meeting: Decodable, Equatable, Identifiable, Sendable {
   /// The repeat rule of a series (each occurrence is listed); the core reads it, the list only
   /// asks whether there is one.
   var recurrence: MeetingRecurrenceMark?
+  /// Of a series: only this occurrence is cancelled (its organizer can restore just it, #1905).
+  var isOccurrenceCancelled: Bool?
+  /// Of a series that skips public holidays: this occurrence is left out as one.
+  var isOccurrenceHoliday: Bool?
 
   var isRepeating: Bool { recurrence != nil }
 

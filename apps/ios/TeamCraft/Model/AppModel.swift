@@ -1003,7 +1003,7 @@ final class AppModel {
     guard let json = try? await core().meetingUpkeep(),
       let list = Wire.decode(MeetingList.self, from: json)
     else { return [] }
-    return list.meetings.filter { $0.status == "scheduled" }.sorted { $0.startsAt < $1.startsAt }
+    return upcomingMeetings(list.meetings, nowMs: Int64(Date().timeIntervalSince1970 * 1000))
   }
 
   func setRsvp(meetingId: String, answer: RsvpAnswer) async -> Bool {

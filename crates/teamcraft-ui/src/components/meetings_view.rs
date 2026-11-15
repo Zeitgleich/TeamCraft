@@ -32,7 +32,7 @@ use crate::form_errors::{error_id, focus_first_invalid};
 use crate::i18n::{I18n, use_i18n};
 use crate::meetings::{
   ChatInvitees, ExternalInvitee, FormError, FormField, MeetingError, MeetingsHub, Repeat, STATUS_CONFLICT,
-  STATUS_NOT_FOUND, ScheduleForm, SeriesEnd, WEEKDAYS, is_over, with_verifier,
+  STATUS_NOT_FOUND, ScheduleForm, SeriesEnd, WEEKDAYS, error_key, field_id, is_over, with_verifier,
 };
 use crate::model::{ConversationId, SpaceId, UserId};
 use crate::reactive::{SetIfAlive, UpdateIfAlive, pause, use_interval_while_visible};
@@ -1403,7 +1403,7 @@ pub fn ScheduleMeetingDialog(
           }}
           <fieldset
             class="field"
-            id=FormField::Externals.id()
+            id=field_id(FormField::Externals)
             tabindex="-1"
             aria-invalid=invalid(errors, FormField::Externals)
             aria-describedby=described(errors, FormField::Externals)
@@ -1547,7 +1547,7 @@ fn RepeatFields(
           <div class="repeat-row">
             <span id="meeting-weekdays-label">{move || i18n.t("schedule-on-days")}</span>
             <div
-              id=FormField::Weekdays.id()
+              id=field_id(FormField::Weekdays)
               class="set-chips"
               role="group"
               tabindex="-1"
@@ -1608,7 +1608,7 @@ fn RepeatFields(
                     SeriesEnd::Never => ().into_any(),
                     SeriesEnd::AfterCount => view! {
                       <input
-                        id=FormField::Count.id()
+                        id=field_id(FormField::Count)
                         class="input narrow"
                         type="number"
                         inputmode="numeric"
@@ -1632,7 +1632,7 @@ fn RepeatFields(
                     .into_any(),
                     SeriesEnd::OnDate => view! {
                       <input
-                        id=FormField::Until.id()
+                        id=field_id(FormField::Until)
                         class="input"
                         type="date"
                         aria-label=move || i18n.t("schedule-ends-date")
@@ -1664,14 +1664,14 @@ fn FieldError(errors: RwSignal<Vec<FormError>>, field: FormField) -> impl IntoVi
   let i18n = use_i18n();
   let maybe_error = move || errors.with(|all| all.iter().find(|error| error.field() == field).cloned());
   view! {
-    <p class="field-error" id=error_id(field.id())>
+    <p class="field-error" id=error_id(field_id(field))>
       {move || {
         maybe_error().map(|error| {
           let detail = match &error {
             FormError::InvalidEmail(email) => email.clone(),
             _ => String::new(),
           };
-          i18n.t_with(error.key(), &[("email", &detail)])
+          i18n.t_with(error_key(&error), &[("email", &detail)])
         })
       }}
     </p>
@@ -1689,7 +1689,7 @@ fn invalid(errors: RwSignal<Vec<FormError>>, field: FormField) -> impl Fn() -> O
 
 /// `aria-describedby` of a field: its message while it has an error.
 fn described(errors: RwSignal<Vec<FormError>>, field: FormField) -> impl Fn() -> Option<String> + Copy {
-  move || invalid(errors, field)().map(|_| error_id(field.id()))
+  move || invalid(errors, field)().map(|_| error_id(field_id(field)))
 }
 
 /// The notetaker's standing request for a meeting's calls (e2ee.md §8.2).

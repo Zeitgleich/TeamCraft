@@ -156,8 +156,36 @@ private struct SpaceMeetingsList: View {
 
   @State private var maybeMeetings: [Meeting]?
   @State private var isRsvpFailed = false
+  @State private var isFormOpen = false
+  @State private var maybeCreated: SavedMeeting?
 
   var body: some View {
+    VStack(spacing: 0) {
+      // Scheduled here, it is listed in this space (#1905), as on desktop's meetings tab.
+      HStack {
+        Spacer()
+        Button {
+          isFormOpen = true
+        } label: {
+          Label("meetings_schedule", systemImage: "calendar.badge.plus")
+        }
+        .buttonStyle(.bordered)
+      }
+      .padding(.horizontal)
+      .padding(.vertical, 8)
+      meetingsList
+    }
+    .sheet(isPresented: $isFormOpen) {
+      MeetingFormView(
+        account: account, maybeMeeting: nil, maybeSpaceId: spaceId,
+        onSaved: { maybeMeetings = await model.meetings() }, onCreated: { maybeCreated = $0 })
+    }
+    .sheet(item: $maybeCreated) { saved in
+      MeetingCreatedView(account: account, saved: saved)
+    }
+  }
+
+  private var meetingsList: some View {
     Group {
       if let all = maybeMeetings {
         let meetings = meetingsOfSpace(all, spaceId: spaceId)
