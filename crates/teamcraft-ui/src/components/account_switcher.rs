@@ -214,7 +214,7 @@ pub fn AccountsDialog() -> impl IntoView {
     <Modal labelled_by="accounts-title" class="modal-notice accounts-dialog">
       <header class="modal-head">
         <h2 id="accounts-title">{move || i18n.t("accounts-title")}</h2>
-        <button class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+        <button class="icon-btn" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=move |_| state.close_overlay()>
           <Icon name=IconName::Close />
         </button>
       </header>

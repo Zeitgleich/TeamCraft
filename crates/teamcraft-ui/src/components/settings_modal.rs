@@ -69,7 +69,7 @@ pub fn SettingsModal() -> impl IntoView {
         <nav class="set-nav" aria-labelledby="settings-title">
           <header class="set-nav-head">
             <h2 id="settings-title">{move || i18n.t("settings-title")}</h2>
-            <button type="button" class="icon-btn set-nav-close" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+            <button type="button" class="icon-btn set-nav-close" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=move |_| state.close_overlay()>
               <Icon name=IconName::Close />
             </button>
           </header>
@@ -129,11 +129,11 @@ pub fn SettingsModal() -> impl IntoView {
         </nav>
         <section class="set-page" aria-labelledby=page_title_id>
           <header class="set-page-head">
-            <button type="button" class="icon-btn set-back" aria-label=move || i18n.t("settings-back-to-list") on:click=back_to_list>
+            <button type="button" class="icon-btn set-back" aria-label=move || i18n.t("settings-back-to-list") title=move || i18n.t("settings-back-to-list") on:click=back_to_list>
               <Icon name=IconName::ChevronLeft />
             </button>
             <h2 id=page_title_id>{move || i18n.t(&section_label_key(shown_tab.get()))}</h2>
-            <button type="button" class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+            <button type="button" class="icon-btn" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=move |_| state.close_overlay()>
               <Icon name=IconName::Close />
             </button>
           </header>

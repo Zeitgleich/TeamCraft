@@ -478,7 +478,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
                     {move || i18n.t(action.label_key())}
                   </button>
                 })}
-                <button class="icon-btn icon-btn-small" aria-label=move || i18n.t("close") on:click=move |_| state.dismiss_toast(id)>
+                <button class="icon-btn icon-btn-small" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=move |_| state.dismiss_toast(id)>
                   <Icon name=IconName::Close />
                 </button>
               </div>

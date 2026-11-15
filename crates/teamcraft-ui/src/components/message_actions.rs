@@ -412,7 +412,7 @@ pub fn EditHistoryDialog(conversation: ConversationId, message: MessageId) -> im
     <Modal labelled_by="history-title">
       <header class="modal-head">
         <h2 id="history-title">{move || i18n.t("history-title")}</h2>
-        <button type="button" class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+        <button type="button" class="icon-btn" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=move |_| state.close_overlay()>
           <Icon name=IconName::Close />
         </button>
       </header>
@@ -513,7 +513,7 @@ pub fn ForwardDialog(
       <form on:submit=send>
         <header class="modal-head">
           <h2 id="forward-title">{move || i18n.t(title_key)}</h2>
-          <button type="button" class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+          <button type="button" class="icon-btn" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=move |_| state.close_overlay()>
             <Icon name=IconName::Close />
           </button>
         </header>
@@ -726,7 +726,7 @@ pub fn PinsPanel(conversation: ConversationId) -> impl IntoView {
     <aside class="side-panel" aria-label=move || i18n.t("pins-title")>
       <header class="panel-header">
         <div class="panel-title"><h2>{move || i18n.t("pins-title")}</h2></div>
-        <button class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.panel.set(SidePanel::Closed)>
+        <button class="icon-btn" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=move |_| state.panel.set(SidePanel::Closed)>
           <Icon name=IconName::Close />
         </button>
       </header>

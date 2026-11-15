@@ -255,7 +255,7 @@ pub fn QuickSwitcher() -> impl IntoView {
                   <button
                     type="button"
                     class="icon-btn icon-btn-small"
-                    aria-label=move || i18n.t_with("search-remove-filter", &[("filter", &remove_label)])
+                    aria-label={ let remove_label = remove_label.clone(); move || i18n.t_with("search-remove-filter", &[("filter", &remove_label)]) } title=move || i18n.t_with("search-remove-filter", &[("filter", &remove_label)])
                     on:click=move |_| {
                       chips.update(|chips| chips.retain(|existing| *existing != removed));
                       focus_field();
