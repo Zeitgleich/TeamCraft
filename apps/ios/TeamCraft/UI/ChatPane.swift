@@ -96,6 +96,10 @@ struct ChatPane: View {
   @State private var rowsOnScreen: Set<String> = []
   /// The message the heart button goes to, until its row is loaded.
   @State private var maybeReactionTarget: String?
+  /// A reply's quote was tapped (#2001): its original, handed to the same jump as the heart button.
+  @State private var maybeQuoteTarget: String?
+  /// The jump under way came from a quote, so a missing original is told.
+  @State private var isQuoteJump = false
   /// A call about to be joined whose running call has the notetaker in it: the user confirms
   /// after the notice (`true`: with video).
   @State private var maybePreJoin: PreJoinNotice?
@@ -278,6 +282,7 @@ struct ChatPane: View {
         .environment(\.areAnimationsCovered, maybeViewing != nil || maybeVideo != nil)
         .environment(\.openVideo, OpenPictureAction { file in maybeVideo = file })
         .environment(\.openQuotedPicture, OpenQuotedPictureAction(run: openQuotedPicture))
+        .environment(\.openQuotedMessage, OpenQuotedMessageAction { id in maybeQuoteTarget = id })
         .environment(
           \.imageActions,
           ImageActions(
@@ -456,6 +461,13 @@ struct ChatPane: View {
           focusReactionTarget(proxy)
         }
         .onChange(of: model.focusMessageId) { _, _ in focusLinkedMessage(proxy) }
+        .onChange(of: maybeQuoteTarget) { _, target in
+          guard let target else { return }
+          maybeQuoteTarget = nil
+          maybeReactionTarget = target
+          isQuoteJump = true
+          focusReactionTarget(proxy)
+        }
         .onChange(of: messages.last?.id) { _, last in
           guard last != nil, model.focusMessageId == nil, maybeHighlighted == nil else { return }
           // Own messages always come into view; others' only while reading at the bottom.
@@ -1096,10 +1108,17 @@ struct ChatPane: View {
     guard let target = maybeReactionTarget else { return }
     guard messages.contains(where: { $0.id == target }) else {
       // Older than what is loaded: page back until it is, or give up at the start.
-      if hasOlder { Task { await loadOlder() } } else { maybeReactionTarget = nil }
+      if hasOlder {
+        Task { await loadOlder() }
+      } else {
+        maybeReactionTarget = nil
+        if isQuoteJump { isPermalinkMissing = true }
+        isQuoteJump = false
+      }
       return
     }
     maybeReactionTarget = nil
+    isQuoteJump = false
     maybeHighlighted = target
     withAnimation(scrollAnimation) { proxy.scrollTo(target, anchor: .center) }
     Task {

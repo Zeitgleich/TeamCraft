@@ -561,6 +561,17 @@ private struct OpenQuotedPictureKey: EnvironmentKey {
   static let defaultValue: OpenQuotedPictureAction? = nil
 }
 
+/// Jumps to the message a reply's text quote points at and flashes it (#2001): the message's ID.
+struct OpenQuotedMessageAction {
+  let run: (String) -> Void
+
+  func callAsFunction(_ messageId: String) { run(messageId) }
+}
+
+private struct OpenQuotedMessageKey: EnvironmentKey {
+  static let defaultValue: OpenQuotedMessageAction? = nil
+}
+
 /// What a long press on a picture of an album offers (#241).
 struct ImageActions {
   /// Nil where the user can't reply here.
@@ -581,6 +592,11 @@ extension EnvironmentValues {
   var openQuotedPicture: OpenQuotedPictureAction? {
     get { self[OpenQuotedPictureKey.self] }
     set { self[OpenQuotedPictureKey.self] = newValue }
+  }
+
+  var openQuotedMessage: OpenQuotedMessageAction? {
+    get { self[OpenQuotedMessageKey.self] }
+    set { self[OpenQuotedMessageKey.self] = newValue }
   }
 
   var imageActions: ImageActions? {
