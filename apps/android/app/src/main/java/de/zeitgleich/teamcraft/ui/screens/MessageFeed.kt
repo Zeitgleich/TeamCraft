@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Build
 import android.text.format.DateUtils
 import android.text.format.Formatter
+import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
@@ -74,6 +75,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -212,6 +214,12 @@ private const val QUICK_REACTION = "👍"
 /** A new message fades in this long, and the rows it pushes slide for [FEED_PLACE_MS] (#2005). */
 private const val FEED_FADE_MS = 150
 private const val FEED_PLACE_MS = 200
+
+/**
+ * Jumps to the message a reply quotes and flashes it; set by the feed (#2001). Without a feed
+ * around (a thread view) the quote isn't tappable.
+ */
+private val LocalQuoteJump = compositionLocalOf<((String) -> Unit)?> { null }
 
 /** How long a message opened from a link stays highlighted. */
 private const val HIGHLIGHT_MS = 2500L
@@ -396,20 +404,27 @@ fun MessageFeed(
   }
   // The message the heart button goes to, until its row is loaded.
   var maybeReactionTarget by remember { mutableStateOf<String?>(null) }
-  LaunchedEffect(maybeReactionTarget, items, older.hasOlder, older.isLoading) {
-    val target = maybeReactionTarget ?: return@LaunchedEffect
+  // The original a reply's quote was tapped on (#2001): same jump, but it says when it is gone.
+  var maybeQuoteTarget by remember { mutableStateOf<String?>(null) }
+  val context = LocalContext.current
+  LaunchedEffect(maybeReactionTarget, maybeQuoteTarget, items, older.hasOlder, older.isLoading) {
+    val target = maybeReactionTarget ?: maybeQuoteTarget ?: return@LaunchedEffect
     val maybeRow = rowOf(items, target)
     when {
       maybeRow != null -> {
         maybeReactionTarget = null
+        maybeQuoteTarget = null
         maybeHighlighted = target
         showAtTop(listState, maybeRow)
       }
       older.hasOlder -> if (!older.isLoading) older.onNearOldest()
-      else -> maybeReactionTarget = null
+      else -> {
+        if (maybeQuoteTarget != null) Toast.makeText(context, R.string.quote_original_gone, Toast.LENGTH_SHORT).show()
+        maybeReactionTarget = null
+        maybeQuoteTarget = null
+      }
     }
   }
-  val context = LocalContext.current
   val onOpenFile: (FileInfo) -> Unit = remember(viewModel, context) {
     { file ->
       // Pictures open in the viewer at once (it shows the thumbnail and fetches the original).
@@ -419,6 +434,14 @@ fun MessageFeed(
         else -> openOrDownload(viewModel, file, context)
       }
     }
+  }
+  // The person whose profile a tapped @mention or avatar opened (#2002).
+  var maybeProfileUser by remember { mutableStateOf<User?>(null) }
+  val openProfile = remember(snapshot) {
+    OpenProfile(
+      byId = { id -> maybeProfileUser = snapshot?.user(id) },
+      byUsername = { name -> maybeProfileUser = snapshot?.users?.firstOrNull { it.username.equals(name, ignoreCase = true) } },
+    )
   }
   val mediaPrefs = remember(context) { MediaPrefs.prefs(context) }
   val animatedImages by mediaPrefs.animatedImages.collectAsState()
@@ -455,7 +478,12 @@ fun MessageFeed(
         listState.firstVisibleItemScrollOffset
       }
     }
-    CompositionLocalProvider(LocalFeedMotion provides feedMotion, LocalStickyEdge provides stickyEdge) {
+    CompositionLocalProvider(
+      LocalFeedMotion provides feedMotion,
+      LocalStickyEdge provides stickyEdge,
+      LocalOpenProfile provides openProfile,
+      LocalQuoteJump provides { id -> maybeQuoteTarget = id },
+    ) {
       LazyColumn(
         Modifier.fillMaxSize().onGloballyPositioned { stickyEdge.maybeFeed = it },
         state = listState,
@@ -512,6 +540,9 @@ fun MessageFeed(
       }
     }
     FloatingDay(listState, items, Modifier.align(Alignment.TopCenter))
+    maybeProfileUser?.let { user ->
+      ProfileSheet(viewModel, snapshot, user, onOpenConversation, onDismiss = { maybeProfileUser = null })
+    }
     Column(
       // Above the floating composer and its scrim, not under them.
       Modifier.align(Alignment.BottomEnd).padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = maxOf(16.dp, bottomInset)),
@@ -1062,7 +1093,10 @@ private fun MessageRow(
     else -> 4.dp
   }
   val alignment = if (isMine) Alignment.End else Alignment.Start
-  val reactQuickly: () -> Unit = { viewModel.act(ChatActions.react(message.conversation, message.id, QUICK_REACTION)) }
+  val reactQuickly: () -> Unit = {
+    haptics.performHapticFeedback(HapticFeedbackType.Confirm)
+    viewModel.act(ChatActions.react(message.conversation, message.id, QUICK_REACTION))
+  }
   // Not readable yet (issue #888): no reactions, replies or actions until it is.
   val isPlaceholder = message.maybePlaceholder != null
   val rowModifier = Modifier
@@ -1450,6 +1484,7 @@ private fun BelowBubble(
   canReact: Boolean,
   maybeOnAddReaction: (() -> Unit)? = null,
 ) {
+  val haptics = LocalHapticFeedback.current
   if (maybeExtras?.isSendFailed == true) NotSentLine(viewModel, message)
   if (message.reactions.isNotEmpty()) {
     FlowRow(
@@ -1459,6 +1494,7 @@ private fun BelowBubble(
     ) {
       for (reaction in message.reactions) {
         ReactionPill(reaction.emoji, reaction.count, reaction.reactedByMe, isEnabled = canReact) {
+          haptics.performHapticFeedback(HapticFeedbackType.Confirm)
           viewModel.act(ChatActions.react(message.conversation, message.id, reaction.emoji))
         }
       }
@@ -1636,8 +1672,15 @@ private fun SenderAvatar(maybeUser: User?, name: String, message: Message, size:
     }
   }
   val maybeSourcePicture = message.maybeSource?.maybePictureSha256
+  val maybeOpenProfile = LocalOpenProfile.current
+  val profileLabel = stringResource(R.string.profile_open, name)
   if (maybeSourcePicture != null) {
     SourceAvatar(message.conversation, maybeSourcePicture, Modifier.size(size), account)
+  } else if (maybeUser != null && message.maybeSource == null && maybeOpenProfile != null) {
+    // The avatar opens the person's profile (#2002); a bot's source has none.
+    Box(Modifier.clip(CircleShape).clickable(role = Role.Button, onClickLabel = profileLabel) { maybeOpenProfile.byId(maybeUser.id) }) {
+      account()
+    }
   } else {
     account()
   }
@@ -1802,11 +1845,20 @@ private fun ReplyQuote(
     reply.maybeMessage?.let { message -> PictureTarget(conversation, message, quoted.fileId) }
   }
   val openLabel = stringResource(R.string.file_open)
+  val jumpLabel = stringResource(R.string.quote_show_original)
+  val maybeJump = LocalQuoteJump.current
+  val maybeOriginal = reply.maybeMessage
   Row(
     modifier
       .clip(RoundedCornerShape(BUBBLE_CORNER_INNER))
       .background(colors.content.copy(alpha = QUOTE_BACKGROUND_ALPHA))
-      .then(if (maybeTarget != null) Modifier.clickable(onClickLabel = openLabel) { onOpenPicture(maybeTarget) } else Modifier)
+      .then(
+        when {
+          maybeTarget != null -> Modifier.clickable(onClickLabel = openLabel) { onOpenPicture(maybeTarget) }
+          maybeJump != null && maybeOriginal != null -> Modifier.clickable(onClickLabel = jumpLabel) { maybeJump(maybeOriginal) }
+          else -> Modifier
+        },
+      )
       .height(IntrinsicSize.Min),
     verticalAlignment = Alignment.CenterVertically,
   ) {

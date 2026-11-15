@@ -160,13 +160,13 @@ pub fn BookmarksDialog(conversation: ConversationId) -> impl IntoView {
                   aria-invalid=errors.invalid(url_id.clone()) aria-describedby=errors.described(url_id.clone()) placeholder="https://" prop:value=entry.url.clone()
                   on:change=move |ev| list.update(|entries| entries[index].url = event_target_value(&ev)) />
               })}
-              <button type="button" class="icon-btn" aria-label=move || i18n.t("bookmarks-up") on:click=move |_| list.update(|entries| move_entry(entries, index, -1))>
+              <button type="button" class="icon-btn" aria-label=move || i18n.t("bookmarks-up") title=move || i18n.t("bookmarks-up") on:click=move |_| list.update(|entries| move_entry(entries, index, -1))>
                 <span aria-hidden="true">"↑"</span>
               </button>
-              <button type="button" class="icon-btn" aria-label=move || i18n.t("bookmarks-down") on:click=move |_| list.update(|entries| move_entry(entries, index, 1))>
+              <button type="button" class="icon-btn" aria-label=move || i18n.t("bookmarks-down") title=move || i18n.t("bookmarks-down") on:click=move |_| list.update(|entries| move_entry(entries, index, 1))>
                 <span aria-hidden="true">"↓"</span>
               </button>
-              <button type="button" class="icon-btn" aria-label=move || i18n.t("bookmarks-remove") on:click=move |_| list.update(|entries| { if index < entries.len() { entries.remove(index); } })>
+              <button type="button" class="icon-btn" aria-label=move || i18n.t("bookmarks-remove") title=move || i18n.t("bookmarks-remove") on:click=move |_| list.update(|entries| { if index < entries.len() { entries.remove(index); } })>
                 <Icon name=IconName::Trash />
               </button>
             </div>
@@ -182,7 +182,7 @@ pub fn BookmarksDialog(conversation: ConversationId) -> impl IntoView {
       <form id=BOOKMARKS_FORM_ID on:submit=save>
         <header class="modal-head">
           <h2 id="bookmarks-title-heading">{move || i18n.t("bookmarks-edit-title")}</h2>
-          <button type="button" class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+          <button type="button" class="icon-btn" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=move |_| state.close_overlay()>
             <Icon name=IconName::Close />
           </button>
         </header>

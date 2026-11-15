@@ -89,7 +89,7 @@ pub fn ShareLinkDialog(
     <Modal labelled_by="share-title" class="modal-small">
       <header class="modal-head">
         <h2 id="share-title">{move || i18n.t("share-title")}</h2>
-        <button type="button" class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+        <button type="button" class="icon-btn" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=move |_| state.close_overlay()>
           <Icon name=IconName::Close />
         </button>
       </header>

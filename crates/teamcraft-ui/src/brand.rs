@@ -307,6 +307,11 @@ async fn fetch_brand(config: &AppConfig) -> Result<String, String> {
 }
 
 thread_local! {
+  /// The unread count and open conversation the page title carries, kept so a brand change
+  /// rebuilds the title with them.
+  static TITLE_STATE: RefCell<(u32, Option<String>)> = const { RefCell::new((0, None)) };
+  /// The brand's page title the decorated title is built from.
+  static BASE_TITLE: RefCell<String> = const { RefCell::new(String::new()) };
   /// Custom properties set by the last [`apply_to_document`], so a theme switch removes stale ones.
   static APPLIED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
@@ -338,7 +343,41 @@ fn apply_to_document(view: &BrandView, theme: &[(&'static str, String)], is_dark
       }
     });
   }
-  document.set_title(&view.page_title());
+  BASE_TITLE.with(|base| *base.borrow_mut() = view.page_title());
+  refresh_title(&document);
+}
+
+/// Puts the unread count and the open conversation into the tab's (and window's) title, as
+/// "(3) #general – TeamCraft".
+pub fn show_state_in_title(unread: u32, maybe_conversation: Option<String>) {
+  TITLE_STATE.with(|state| *state.borrow_mut() = (unread, maybe_conversation));
+  if let Some(document) = web_sys::window().and_then(|window| window.document()) {
+    refresh_title(&document);
+  }
+}
+
+fn refresh_title(document: &web_sys::Document) {
+  let base = BASE_TITLE.with(|base| base.borrow().clone());
+  if base.is_empty() {
+    return;
+  }
+  let (unread, maybe_conversation) = TITLE_STATE.with(|state| state.borrow().clone());
+  document.set_title(&window_title(&base, unread, maybe_conversation.as_deref()));
+}
+
+/// The title of the window: "(unread) conversation – base"; the count and the conversation are left
+/// out when there is none.
+pub fn window_title(base: &str, unread: u32, maybe_conversation: Option<&str>) -> String {
+  let mut title = String::new();
+  if unread > 0 {
+    title.push_str(&format!("({unread}) "));
+  }
+  if let Some(conversation) = maybe_conversation.filter(|name| !name.is_empty()) {
+    title.push_str(conversation);
+    title.push_str(" – ");
+  }
+  title.push_str(base);
+  title
 }
 
 /// The tab's icon: always the product's mark, so people find TeamCraft among their tabs whatever
@@ -392,5 +431,24 @@ fn watch_system_scheme(signal: RwSignal<bool>) {
   {
     // The listener lives as long as the page.
     handler.forget();
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn the_title_carries_the_count_and_the_conversation() {
+    assert_eq!(
+      window_title("TeamCraft", 3, Some("#general")),
+      "(3) #general – TeamCraft"
+    );
+    assert_eq!(
+      window_title("TeamCraft", 0, Some("#general")),
+      "#general – TeamCraft"
+    );
+    assert_eq!(window_title("TeamCraft", 5, None), "(5) TeamCraft");
+    assert_eq!(window_title("TeamCraft", 0, Some("")), "TeamCraft");
   }
 }

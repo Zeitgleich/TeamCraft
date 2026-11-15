@@ -37,7 +37,7 @@ pub fn CallsUnavailableDialog() -> impl IntoView {
     <Modal labelled_by="calls-unavailable-title" class="modal-notice">
       <header class="modal-head">
         <h2 id="calls-unavailable-title">{move || i18n.t(title_key)}</h2>
-        <button class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+        <button class="icon-btn" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=move |_| state.close_overlay()>
           <Icon name=IconName::Close />
         </button>
       </header>
