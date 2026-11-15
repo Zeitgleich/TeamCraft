@@ -984,6 +984,7 @@ private fun MessageActions(
   onDismiss: () -> Unit,
 ) {
   val context = LocalContext.current
+  val haptics = LocalHapticFeedback.current
   val scope = rememberCoroutineScope()
   val isMine = message.author == snapshot?.me?.id
   var isEditing by remember { mutableStateOf(false) }
@@ -1001,6 +1002,7 @@ private fun MessageActions(
       // One row, spread over the width: the reactions are the sheet's most used part.
       if (rights.canReact) {
         QuickReactions { emoji ->
+          haptics.performHapticFeedback(HapticFeedbackType.Confirm)
           viewModel.act(ChatActions.react(conversationId, message.id, emoji))
           onDismiss()
         }
@@ -2184,7 +2186,13 @@ private fun SendButton(canSend: Boolean, isSending: Boolean, onSend: () -> Unit,
         role = Role.Button,
         onClickLabel = stringResource(R.string.send),
         onLongClickLabel = stringResource(R.string.send_options),
-        onClick = { if (canSend && !isSending) onSend() },
+        onClick = {
+          if (canSend && !isSending) {
+            // A light tap as the message leaves; the system's touch-feedback setting decides if it is felt (#2004).
+            haptics.performHapticFeedback(HapticFeedbackType.ContextClick)
+            onSend()
+          }
+        },
         onLongClick = {
           haptics.performHapticFeedback(HapticFeedbackType.LongPress)
           onSendOptions()

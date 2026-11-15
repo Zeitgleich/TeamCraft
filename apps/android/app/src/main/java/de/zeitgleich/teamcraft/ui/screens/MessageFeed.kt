@@ -1069,7 +1069,10 @@ private fun MessageRow(
     else -> 4.dp
   }
   val alignment = if (isMine) Alignment.End else Alignment.Start
-  val reactQuickly: () -> Unit = { viewModel.act(ChatActions.react(message.conversation, message.id, QUICK_REACTION)) }
+  val reactQuickly: () -> Unit = {
+    haptics.performHapticFeedback(HapticFeedbackType.Confirm)
+    viewModel.act(ChatActions.react(message.conversation, message.id, QUICK_REACTION))
+  }
   // Not readable yet (issue #888): no reactions, replies or actions until it is.
   val isPlaceholder = message.maybePlaceholder != null
   val rowModifier = Modifier
@@ -1457,6 +1460,7 @@ private fun BelowBubble(
   canReact: Boolean,
   maybeOnAddReaction: (() -> Unit)? = null,
 ) {
+  val haptics = LocalHapticFeedback.current
   if (maybeExtras?.isSendFailed == true) NotSentLine(viewModel, message)
   if (message.reactions.isNotEmpty()) {
     FlowRow(
@@ -1466,6 +1470,7 @@ private fun BelowBubble(
     ) {
       for (reaction in message.reactions) {
         ReactionPill(reaction.emoji, reaction.count, reaction.reactedByMe, isEnabled = canReact) {
+          haptics.performHapticFeedback(HapticFeedbackType.Confirm)
           viewModel.act(ChatActions.react(message.conversation, message.id, reaction.emoji))
         }
       }
