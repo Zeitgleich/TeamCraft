@@ -1,7 +1,7 @@
 //! Runs the requests the UI adapter queued ([`CoreCommand`]) against the server.
 
 use teamcraft_client_api::list_load::{ListLoad, LoadingList};
-use teamcraft_client_api::model::PresenceStatus;
+use teamcraft_client_api::model::{ConversationId, MessageId, PresenceStatus};
 use teamcraft_proto::{ManualPresence, SetPresenceRequest, UnixMillis, UpdateConversationMemberRequest};
 
 use super::{Client, PendingAction, list_outcomes};
@@ -22,6 +22,34 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       CommandPart::Settings => self.run_settings_command(command).await,
       CommandPart::Dialogs => self.run_dialogs_command(command).await,
       CommandPart::Member => self.run_member_command(command).await,
+    }
+  }
+
+  /// Marks the conversation read: the badge clears at once and the read position is queued at the
+  /// newest message in the local store, or at `maybe_notified` when that is newer (a notification
+  /// shows messages the sync has not brought yet, #2079).
+  async fn mark_read_through_newest(
+    &mut self,
+    conversation: ConversationId,
+    maybe_notified: Option<MessageId>,
+  ) -> Result<(), CoreError> {
+    self.update_account_data(|data, now| data.clear_unread_mark(conversation, now))?;
+    // The badge clears now; the server's `unread_update` confirms it.
+    crate::read_state::note_unread(&self.store, conversation, 0, 0)?;
+    let messages = self.store.messages(conversation, MessageFilter::All)?;
+    note_lines_read(&self.store, conversation, &messages)?;
+    let maybe_latest = newest_server_id(&messages).max(maybe_notified);
+    match maybe_latest {
+      // Queued: offline, it reaches the server (and the other devices) once back.
+      Some(message) => {
+        self
+          .queue_action(PendingAction::ReadPosition {
+            conversation,
+            message,
+          })
+          .await
+      },
+      None => Ok(()),
     }
   }
 
@@ -114,26 +142,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         edge,
         request,
       } => self.fill_history_gap(conversation, after, edge, request).await,
-      CoreCommand::MarkRead { conversation } => {
-        self.update_account_data(|data, now| data.clear_unread_mark(conversation, now))?;
-        // The badge clears now; the server's `unread_update` confirms it.
-        crate::read_state::note_unread(&self.store, conversation, 0, 0)?;
-        let messages = self.store.messages(conversation, MessageFilter::All)?;
-        note_lines_read(&self.store, conversation, &messages)?;
-        let maybe_latest = newest_server_id(&messages);
-        match maybe_latest {
-          // Queued: offline, it reaches the server (and the other devices) once back.
-          Some(message) => {
-            self
-              .queue_action(PendingAction::ReadPosition {
-                conversation,
-                message,
-              })
-              .await
-          },
-          None => Ok(()),
-        }
-      },
+      CoreCommand::MarkRead { conversation } => self.mark_read_through_newest(conversation, None).await,
+      CoreCommand::MarkReadNotified {
+        conversation,
+        message,
+      } => self.mark_read_through_newest(conversation, Some(message)).await,
       #[cfg(not(target_arch = "wasm32"))]
       CoreCommand::FetchSearchHits { hits } => self.fetch_search_hits(&hits).await.map(|_| ()),
       CoreCommand::SetSaved {

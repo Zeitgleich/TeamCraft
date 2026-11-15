@@ -51,6 +51,11 @@ data class MessageNotificationSpec(
   val isBubble: Boolean = false,
   /** An action taken from the notification that runs or failed (#1972); `null`: none. */
   val maybeActionStatus: ActionStatus? = null,
+  /**
+   * The newest message this notification shows, which "Mark as read" reads through (#2079): the
+   * push brings it before the sync, so the store may not hold it yet.
+   */
+  val maybeNewestMessageId: String? = null,
 ) {
   /** The button shows the action as running ("Marking as read…") and does nothing when tapped. */
   val maybeRunningAction: MessageAction?
@@ -243,6 +248,7 @@ object MessageNotificationSpecs {
       isBubble = canBubble && entry.isDirect && privacy.showsContent && shortcut != null && conversation != null,
       // Only on a notification that acts: one without actions has nothing to show a state for.
       maybeActionStatus = maybeActionStatus.takeIf { privacy.offersActions },
+      maybeNewestMessageId = newestMessageId(entry.lines),
     )
   }
 
@@ -305,6 +311,10 @@ object MessageNotificationSpecs {
       else -> NotificationAlerting.REFRESH
     }
   }
+
+  /** The newest message a notification's lines name (IDs grow with time), for "Mark as read" (#2079). */
+  internal fun newestMessageId(lines: List<NotificationLine>): String? =
+    lines.mapNotNull { it.maybeMessageId }.maxByOrNull { it.toLongOrNull() ?: Long.MIN_VALUE }
 
   private fun newMessages(count: Int, labels: NotificationText.Labels): String =
     if (count <= 1) labels.newMessage else labels.newMessages(count)

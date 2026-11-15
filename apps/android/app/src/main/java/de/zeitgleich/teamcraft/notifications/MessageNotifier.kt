@@ -832,7 +832,7 @@ class MessageNotifier(
         when (action) {
           spec.maybeRunningAction -> runningAction(action)
           MessageAction.REPLY -> replyAction(spec.conversationId, spec.maybeReplyThreadId)
-          MessageAction.MARK_READ -> markReadAction(spec.conversationId)
+          MessageAction.MARK_READ -> markReadAction(spec.conversationId, spec.maybeNewestMessageId)
           MessageAction.MUTE -> muteAction(spec.conversationId)
         },
       )
@@ -1123,8 +1123,13 @@ class MessageNotifier(
    * so the user never saw the action work. Neither shows or sends content; the notification's
    * actions are only offered while the app lock is off ([MessagePrivacy.offersActions]).
    */
-  private fun markReadAction(conversationId: String): NotificationCompat.Action {
-    val pending = actionIntent(NotificationActionReceiver.ACTION_MARK_READ, conversationId, isMutable = false)
+  private fun markReadAction(conversationId: String, maybeNewestMessageId: String?): NotificationCompat.Action {
+    val pending = actionIntent(
+      NotificationActionReceiver.ACTION_MARK_READ,
+      conversationId,
+      isMutable = false,
+      maybeThroughMessageId = maybeNewestMessageId,
+    )
     return NotificationCompat.Action.Builder(R.drawable.ic_notification, context.getString(R.string.notification_mark_read), pending)
       .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_MARK_AS_READ)
       .setShowsUserInterface(false)
@@ -1145,8 +1150,9 @@ class MessageNotifier(
     conversationId: String,
     isMutable: Boolean,
     maybeThreadId: String? = null,
+    maybeThroughMessageId: String? = null,
   ): PendingIntent {
-    val intent = NotificationActionReceiver.intent(context, action, conversationId, maybeThreadId)
+    val intent = NotificationActionReceiver.intent(context, action, conversationId, maybeThreadId, maybeThroughMessageId)
       .setData(conversationUri(conversationId))
     val mutability = if (isMutable) PendingIntent.FLAG_MUTABLE else PendingIntent.FLAG_IMMUTABLE
     return PendingIntent.getBroadcast(context, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or mutability)

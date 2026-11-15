@@ -812,8 +812,15 @@ final class AppModel {
     }
   }
 
-  func markRead(conversationId: String) async {
-    try? await core().markRead(conversationId: conversationId)
+  /// `maybeThroughMessageId`: from a notification, the message it shows. The push brought it before
+  /// the sync did, so the store may not hold it yet, and a read position at the store's newest
+  /// would leave it unread (#2079).
+  func markRead(conversationId: String, maybeThroughMessageId: String? = nil) async {
+    if let maybeThroughMessageId {
+      try? await core().markReadNotified(conversationId: conversationId, messageId: maybeThroughMessageId)
+    } else {
+      try? await core().markRead(conversationId: conversationId)
+    }
     UNUserNotificationCenter.current().removeDeliveredNotifications(
       withIdentifiers: await deliveredIdentifiers(forConversation: conversationId))
   }
@@ -1193,7 +1200,7 @@ final class AppModel {
   /// conversation the user is in.
   func handle(
     notificationAction identifier: String, conversationId: String, tag: String?, replyText: String?,
-    maybeThreadId: String? = nil, notificationId: String? = nil
+    maybeThreadId: String? = nil, notificationId: String? = nil, maybeMessageId: String? = nil
   ) async {
     guard let conversation = await conversations().first(where: { $0.id == conversationId }) else {
       if identifier == UNNotificationDefaultActionIdentifier, await notifiedConversation(conversationId) != nil {
@@ -1208,7 +1215,7 @@ final class AppModel {
         await send(conversationId: conversationId, threadId: maybeThreadId, body: replyText)
       }
     case NotificationCategories.markReadAction:
-      if isAuthentic { await markRead(conversationId: conversationId) }
+      if isAuthentic { await markRead(conversationId: conversationId, maybeThroughMessageId: maybeMessageId) }
     case NotificationCategories.answerCallAction:
       removeDelivered(notificationId)
       openConversationId = conversationId

@@ -1088,6 +1088,17 @@ impl Reads {
     Ok(())
   }
 
+  pub(crate) fn mark_read_notified(
+    &self,
+    conversation_id: String,
+    message_id: String,
+  ) -> Result<(), TeamCraftError> {
+    self
+      .backend()?
+      .mark_read_notified(parse_id(&conversation_id)?, parse_id(&message_id)?);
+    Ok(())
+  }
+
   /// Whether the conversation's menu offers "Leave" (#1105). Channel roles are read afresh while
   /// they are not known, so a later ask has the last-admin answer.
   /// The groups the composer offers after `@` here: none without `use_group_mentions` (issue #206).

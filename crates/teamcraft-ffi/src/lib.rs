@@ -758,6 +758,20 @@ impl TeamCraft {
       .await
   }
 
+  /// "Mark as read" on a notification (#2079): like [`Self::mark_read`], but the read position is at
+  /// least `message_id`, the newest message the notification showed. It may not be in the store yet
+  /// (the notification comes from the push, the sync later), and a position at an older message
+  /// would bring the unread count back. The conversation's other devices follow the same position.
+  pub async fn mark_read_notified(
+    &self,
+    conversation_id: String,
+    message_id: String,
+  ) -> Result<(), TeamCraftError> {
+    self
+      .act_locally(move |reads| reads.mark_read_notified(conversation_id, message_id))
+      .await
+  }
+
   /// How many conversations the server just claimed deleted at once, if that looks suspect (e2ee.md
   /// §4.6); 0 otherwise. The app tells the user once.
   pub async fn take_suspect_deletions(&self) -> Result<u32, TeamCraftError> {

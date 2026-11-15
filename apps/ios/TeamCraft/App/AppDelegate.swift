@@ -92,6 +92,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     await AppModel.shared.handle(
       notificationAction: response.actionIdentifier, conversationId: conversationId, tag: tag,
       replyText: reply, maybeThreadId: info[NotificationKeys.thread] as? String,
-      notificationId: response.notification.request.identifier)
+      notificationId: response.notification.request.identifier,
+      maybeMessageId: info[NotificationKeys.message] as? String)
   }
 }
