@@ -57,7 +57,7 @@ use crate::navigation::Step;
 use crate::notify_sync::NotificationSync;
 use crate::prefs::{CallPrefs, Zoom};
 use crate::reactive::{OwnerLiveness, use_interval};
-use crate::sections::badge_count;
+use crate::sections::app_badge_count;
 use crate::settings::{Settings, Theme};
 use crate::share_into::{ShareInbox, ShareNotice};
 use crate::state::{AppState, MainView, Overlay, RailEntry, SidePanel, ToastAction, ToastTone};
@@ -991,20 +991,29 @@ fn menu_bar_labels(i18n: crate::i18n::I18n, name: &str) -> serde_json::Value {
 /// The browser tab's icon gets a red dot while the tray would show a count.
 fn sync_favicon(state: AppState) {
   Effect::new(move |previous: Option<bool>| {
-    let has_unread = state.read(|backend| {
+    let has_unread = app_badge(state) > 0;
+    if previous != Some(has_unread) {
+      crate::brand::show_unread_in_favicon(has_unread);
+    }
+    has_unread
+  });
+}
+
+/// The app's badge (tray, dock, taskbar, the tab's dot): the conversations the lists show, counted
+/// by the user's notification settings (#1995). Tracked, so new messages, reads and a changed
+/// setting update it.
+fn app_badge(state: AppState) -> u32 {
+  state.settings.prefs.with(|prefs| {
+    state.read(|backend| {
       let mut list: Vec<_> = backend
         .spaces()
         .into_iter()
         .flat_map(|space| backend.space_conversations(space.id))
         .collect();
       list.extend(backend.direct_conversations());
-      badge_count(&list) > 0
-    });
-    if previous != Some(has_unread) {
-      crate::brand::show_unread_in_favicon(has_unread);
-    }
-    has_unread
-  });
+      app_badge_count(&list, &prefs.notifications)
+    })
+  })
 }
 
 /// A download the webview started by itself (the shell saves it in the downloads folder, #719)
@@ -1033,15 +1042,7 @@ fn report_webview_downloads(state: AppState, i18n: crate::i18n::I18n) {
 fn sync_tray(state: AppState, i18n: crate::i18n::I18n) {
   let brand = crate::brand::Brand::use_current();
   Effect::new(move |previous: Option<(u32, String, String)>| {
-    let unread = state.read(|backend| {
-      let mut list: Vec<_> = backend
-        .spaces()
-        .into_iter()
-        .flat_map(|space| backend.space_conversations(space.id))
-        .collect();
-      list.extend(backend.direct_conversations());
-      badge_count(&list)
-    });
+    let unread = app_badge(state);
     let current = (
       unread,
       i18n.locale().tag().to_owned(),
