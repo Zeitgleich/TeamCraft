@@ -280,6 +280,14 @@ private fun ReadyNavigation(
       onCancel = { maybeMeetingLinkUrl = null },
     )
   }
+  // An app icon shortcut (#2061): taken once, whatever the screen the app was left on.
+  val maybeShortcut by LaunchShortcut.pending.collectAsState()
+  LaunchedEffect(maybeShortcut) {
+    maybeShortcut?.let {
+      LaunchShortcut.pending.value = null
+      navigation.navigate(it.route)
+    }
+  }
   LaunchedEffect(maybeConversationToOpen) {
     maybeConversationToOpen?.let {
       // A notification opened it: it has news the kept feed lacks, so the feed opens with its first

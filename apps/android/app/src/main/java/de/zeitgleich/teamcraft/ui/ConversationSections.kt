@@ -113,13 +113,19 @@ fun sortFavorites(
   favorites: List<ConversationItem>,
   sort: FavoritesSort,
   lastActivity: Map<String, Long>,
+  /** The order the user chose by hand (#2057): those in it come first, in that order. */
+  order: List<String> = emptyList(),
 ): List<ConversationItem> {
   val byName = compareBy<ConversationItem, String>(String.CASE_INSENSITIVE_ORDER) { it.name }
-  return when (sort) {
+  val sorted = when (sort) {
     FavoritesSort.Alphabetical -> favorites.sortedWith(byName)
     FavoritesSort.Recent ->
       favorites.sortedWith(compareByDescending<ConversationItem> { lastActivity[it.id] ?: Long.MIN_VALUE }.then(byName))
   }
+  if (order.isEmpty()) return sorted
+  val rank = order.withIndex().associate { (index, id) -> id to index }
+  // Stable: favorites outside the order keep the sort's order behind it.
+  return sorted.sortedBy { rank[it.id] ?: Int.MAX_VALUE }
 }
 
 /** Channels of the spaces: favorite channels first, then each space (spaces and channels by name). */
@@ -127,12 +133,13 @@ fun channelSections(
   conversations: List<ConversationItem>,
   listsArchived: Boolean = false,
   favoritesSort: FavoritesSort = FavoritesSort.Alphabetical,
+  favoriteOrder: List<String> = emptyList(),
   lastActivity: Map<String, Long> = emptyMap(),
 ): List<Section> {
   val byName = compareBy<ConversationItem, String>(String.CASE_INSENSITIVE_ORDER) { it.name }
   // Archived channels leave the lists; Browse finds them (issue #212).
   val channels = conversations.filterNot { it.isDirect || it.isArchived }
-  val favorites = sortFavorites(channels.filter { it.isFavorite }, favoritesSort, lastActivity)
+  val favorites = sortFavorites(channels.filter { it.isFavorite }, favoritesSort, lastActivity, favoriteOrder)
   val bySpace = channels
     .filterNot { it.isFavorite }
     .groupBy { it.maybeSpaceName }
@@ -159,12 +166,13 @@ fun homeSections(
   lastActivity: Map<String, Long> = emptyMap(),
   listsArchived: Boolean = false,
   favoritesSort: FavoritesSort = FavoritesSort.Alphabetical,
+  favoriteOrder: List<String> = emptyList(),
 ): List<Section> {
   val byName = compareBy<ConversationItem, String>(String.CASE_INSENSITIVE_ORDER) { it.name }
   val byRecency = compareByDescending<ConversationItem> { lastActivity[it.id] ?: Long.MIN_VALUE }.then(byName)
   val unique = conversations.distinctBy { it.id }
   val unreadDirect = unique.filter { it.isDirect && !it.isFavorite && HomeFilter.Unread.matches(it) }.sortedWith(byRecency)
-  val favorites = sortFavorites(unique.filter { it.isFavorite && !it.isArchived }, favoritesSort, lastActivity)
+  val favorites = sortFavorites(unique.filter { it.isFavorite && !it.isArchived }, favoritesSort, lastActivity, favoriteOrder)
   return buildList {
     if (unreadDirect.isNotEmpty()) add(Section(SectionTitle.UnreadDirect, unreadDirect))
     if (favorites.isNotEmpty()) add(Section(SectionTitle.Favorites, favorites))
@@ -184,9 +192,10 @@ fun spaceHomeSections(
   lastActivity: Map<String, Long> = emptyMap(),
   listsArchived: Boolean = false,
   favoritesSort: FavoritesSort = FavoritesSort.Alphabetical,
+  favoriteOrder: List<String> = emptyList(),
 ): List<Section> {
   val shown = conversations.filter { it.isDirect || it.isFavorite || it.maybeSpaceId == null || it.maybeSpaceId == spaceId }
-  val sections = homeSections(shown, lastActivity, listsArchived, favoritesSort)
+  val sections = homeSections(shown, lastActivity, listsArchived, favoritesSort, favoriteOrder)
   val channels = sections.filter { it.title is SectionTitle.Space }.flatMap { it.conversations }
   val head = sections.filter { it.title == SectionTitle.UnreadDirect || it.title == SectionTitle.Favorites }
   val tail = sections.filter { it.title == SectionTitle.Channels || it.title == SectionTitle.Archived }

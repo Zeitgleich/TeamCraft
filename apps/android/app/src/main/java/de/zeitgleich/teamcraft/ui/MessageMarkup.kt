@@ -62,6 +62,8 @@ class LinkHandlers(
   val onOpenPermalink: (String) -> Unit,
   /** Opens the profile of a mentioned person by username (#2002); null where there is none to open. */
   val maybeOnOpenMention: ((String) -> Unit)? = null,
+  /** Opens a phone number, e-mail or postal address found in plain text (#2047); null: not tappable. */
+  val maybeOnOpenDetected: ((Detected) -> Unit)? = null,
 )
 
 /**
@@ -130,7 +132,7 @@ private fun AnnotatedString.Builder.appendRun(
   permalinkLabel: String,
 ) {
   when (val kind = run.kind) {
-    MarkupRunKind.Text -> append(run.text)
+    MarkupRunKind.Text -> appendText(run.text, colors, links)
     // A thin space each side gives the code box room without changing what is copied much.
     MarkupRunKind.Code -> withStyle(SpanStyle(fontFamily = FontFamily.Monospace, background = colors.codeBackground)) {
       append(" ${run.text} ")
@@ -158,6 +160,24 @@ private fun AnnotatedString.Builder.appendRun(
       }
     }
   }
+}
+
+/** Plain text, with the phone numbers, e-mail and postal addresses in it tappable (#2047). */
+private fun AnnotatedString.Builder.appendText(text: String, colors: MarkupColors, links: LinkHandlers) {
+  val open = links.maybeOnOpenDetected
+  val found = if (open == null) emptyList() else findDetected(text)
+  if (found.isEmpty()) {
+    append(text)
+    return
+  }
+  val styles = TextLinkStyles(SpanStyle(color = colors.link, textDecoration = TextDecoration.Underline))
+  var at = 0
+  for (item in found) {
+    append(text.substring(at, item.range.first))
+    withLink(LinkAnnotation.Clickable(tag = item.uri, styles = styles) { open?.invoke(item) }) { append(text.substring(item.range)) }
+    at = item.range.last + 1
+  }
+  append(text.substring(at))
 }
 
 private fun AnnotatedString.Builder.appendLink(

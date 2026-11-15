@@ -11,6 +11,9 @@ enum class EntryAction {
   /** The conversation's level (all, mentions, nothing) and mute time. */
   Notifications,
   CopyLink,
+  /** Moves a favorite one place up or down (#2057): the way to reorder without dragging. */
+  MoveFavoriteUp,
+  MoveFavoriteDown,
   LeaveChannel,
   DeleteChannel,
   MuteSpace,
@@ -26,11 +29,20 @@ data class EntryItem(val action: EntryAction, val isEnabled: Boolean = true)
  * The menu of a channel or chat, only with what the user may do (#691). The leave rule is the
  * core's ([LeaveChoice]); this only turns it into entries.
  */
-fun conversationMenu(conversation: ConversationItem, leave: LeaveChoice, hasLink: Boolean): List<EntryItem> = buildList {
+fun conversationMenu(
+  conversation: ConversationItem,
+  leave: LeaveChoice,
+  hasLink: Boolean,
+  /** The favorites as shown, when this conversation is among them. */
+  favoritesShown: List<String> = emptyList(),
+): List<EntryItem> = buildList {
   add(EntryItem(EntryAction.Select))
   if (conversation.unreadCount > 0u || conversation.mentionCount > 0u) add(EntryItem(EntryAction.MarkRead))
   add(EntryItem(EntryAction.Notifications))
   if (hasLink) add(EntryItem(EntryAction.CopyLink))
+  val favoriteAt = favoritesShown.indexOf(conversation.id)
+  if (favoriteAt > 0) add(EntryItem(EntryAction.MoveFavoriteUp))
+  if (favoriteAt >= 0 && favoriteAt < favoritesShown.lastIndex) add(EntryItem(EntryAction.MoveFavoriteDown))
   leaveEntry(EntryAction.LeaveChannel, leave)?.let(::add)
   if (conversation.canDeleteChannel) add(EntryItem(EntryAction.DeleteChannel))
 }

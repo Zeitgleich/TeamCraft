@@ -95,4 +95,19 @@
   <string name="composer_format_link">Link</string>
   <string name="composer_format_state_on">On</string>
   <string name="composer_format_state_off">Off</string>
+  <string name="action_select_text">Select text</string>
+  <string name="select_text_title">Select text</string>
+  <string name="select_text_quote">Quote selection</string>
+  <string name="select_text_hint">Select the words to quote, or quote the whole message.</string>
+  <string name="detected_open_web">Open %1$s</string>
+  <string name="detected_call">Call %1$s</string>
+  <string name="detected_write">Write to %1$s</string>
+  <string name="detected_map">Show %1$s on the map</string>
+  <string name="detected_copy">Copy %1$s</string>
+  <string name="detected_share">Share %1$s</string>
+  <string name="detected_add_contact">Add %1$s to contacts</string>
+  <string name="message_show_more">Show more</string>
+  <string name="message_show_less">Show less</string>
+  <string name="shortcut_new_message">New message</string>
+  <string name="shortcut_search">Search</string>
 </resources>

@@ -18,4 +18,8 @@
   <string name="user_deleted_name">Deleted user</string>
   <string name="ok">OK</string>
   <string name="more">More</string>
+  <string name="settings_version_title">App version</string>
+  <string name="settings_version_summary">%1$s (%2$s) · Tap to copy</string>
+  <string name="favorite_move_up">Move favorite up</string>
+  <string name="favorite_move_down">Move favorite down</string>
 </resources>

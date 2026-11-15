@@ -95,4 +95,19 @@
   <string name="composer_format_link">Link</string>
   <string name="composer_format_state_on">Ein</string>
   <string name="composer_format_state_off">Aus</string>
+  <string name="action_select_text">Text auswählen</string>
+  <string name="select_text_title">Text auswählen</string>
+  <string name="select_text_quote">Auswahl zitieren</string>
+  <string name="select_text_hint">Wähle die Worte zum Zitieren, oder zitiere die ganze Nachricht.</string>
+  <string name="detected_open_web">%1$s öffnen</string>
+  <string name="detected_call">%1$s anrufen</string>
+  <string name="detected_write">An %1$s schreiben</string>
+  <string name="detected_map">%1$s auf der Karte zeigen</string>
+  <string name="detected_copy">%1$s kopieren</string>
+  <string name="detected_share">%1$s teilen</string>
+  <string name="detected_add_contact">%1$s zu Kontakten hinzufügen</string>
+  <string name="message_show_more">Mehr anzeigen</string>
+  <string name="message_show_less">Weniger anzeigen</string>
+  <string name="shortcut_new_message">Neue Nachricht</string>
+  <string name="shortcut_search">Suchen</string>
 </resources>

@@ -146,7 +146,9 @@ import de.zeitgleich.teamcraft.ui.typingLine
 import de.zeitgleich.teamcraft.ui.typingText
 import de.zeitgleich.teamcraft.ui.ChannelPicture
 import de.zeitgleich.teamcraft.ui.SpacePicture
+import de.zeitgleich.teamcraft.ui.FavoriteOrder
 import de.zeitgleich.teamcraft.ui.Section
+import de.zeitgleich.teamcraft.ui.sortFavorites
 import de.zeitgleich.teamcraft.ui.TabBadge
 import de.zeitgleich.teamcraft.ui.activityConversations
 import de.zeitgleich.teamcraft.ui.theme.Spacing
@@ -298,6 +300,15 @@ fun ChatListScreen(
     }
   }
   val loaded = conversations
+  // The favorites as the Favorites section shows them, so a move goes one place in what the user sees (#2057).
+  val shownFavoriteSort by remember { AppearancePrefs.prefs(context).favoritesSortChoice }.collectAsState()
+  val shownFavoriteOrder by remember { FavoriteOrder.of(context).order }.collectAsState()
+  val shownFavorites = sortFavorites(
+    loaded.orEmpty().filter { it.isFavorite && !it.isArchived },
+    shownFavoriteSort,
+    previews.mapValues { it.value.preview.sentAt },
+    shownFavoriteOrder,
+  ).map { it.id }
   // The read the attention banner made already: its counts feed the Scheduled card too (#1466).
   val maybeScheduled = rememberScheduledOverview(viewModel)
   // The list is usable once its rows and their last lines are there (start-up measurements, Play vitals).
@@ -354,6 +365,7 @@ fun ChatListScreen(
           onDismiss = onDismiss,
           onSelect = { selection = toggled(selection, conversation.id) },
           onNotifications = { maybeNotifying = conversation.id },
+          favoritesShown = shownFavorites,
         )
       },
       spaceMenu = { spaceId, name, isOpen, onDismiss ->
@@ -687,9 +699,10 @@ private fun HomeTab(
   // Without spaces (yet), Home lists what there is.
   val context = LocalContext.current
   val favoritesSort by remember { AppearancePrefs.prefs(context).favoritesSortChoice }.collectAsState()
+  val favoriteOrder by remember { FavoriteOrder.of(context).order }.collectAsState()
   val sections = maybeSpace
-    ?.let { spaceHomeSections(conversations, it.id, list.lastActivity, listsArchived = !canBrowse, favoritesSort = favoritesSort) }
-    ?: homeSections(conversations, list.lastActivity, listsArchived = !canBrowse, favoritesSort = favoritesSort)
+    ?.let { spaceHomeSections(conversations, it.id, list.lastActivity, listsArchived = !canBrowse, favoritesSort = favoritesSort, favoriteOrder = favoriteOrder) }
+    ?: homeSections(conversations, list.lastActivity, listsArchived = !canBrowse, favoritesSort = favoritesSort, favoriteOrder = favoriteOrder)
   val collapsing = remember { CollapsedSections.of(context) }
   val collapsed by collapsing.collapsed.collectAsState()
   // Where something happened last, across every space (#1906): the newest few, all on request.

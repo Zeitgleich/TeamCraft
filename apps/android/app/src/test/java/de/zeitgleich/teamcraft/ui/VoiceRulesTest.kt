@@ -87,4 +87,13 @@ class VoiceRulesTest {
     assertNull(plainFile["duration_ms"])
     assertNull(plainFile["waveform"])
   }
+
+  @Test
+  fun playsOnToTheNextUnplayedMessage() {
+    val order = listOf("a", "b", "c", "d")
+    assertEquals("b", nextUnplayedVoice(order, "a", emptySet()))
+    assertEquals("c", nextUnplayedVoice(order, "a", setOf("b")))
+    assertEquals(null, nextUnplayedVoice(order, "d", emptySet()))
+    assertEquals(null, nextUnplayedVoice(order, "x", emptySet()))
+  }
 }

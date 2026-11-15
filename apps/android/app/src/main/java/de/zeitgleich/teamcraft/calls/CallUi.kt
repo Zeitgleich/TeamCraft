@@ -58,6 +58,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Lock
@@ -211,6 +212,9 @@ internal class CallUiState(
   val frames: Map<UInt, Bitmap>,
   val isCameraOn: Boolean,
   val isSpeakerOn: Boolean,
+  /** Where the sound can go (#2060); the speaker switch becomes a list with more than two. */
+  val audioRoutes: List<AudioRoute> = emptyList(),
+  val audioRouteId: String? = null,
   val elapsedSeconds: Long?,
   val areControlsShown: Boolean,
   /** Display names by user ID; people not in it show without a name. */
@@ -328,6 +332,7 @@ internal class CallUiActions(
   val onCamera: (Boolean) -> Unit,
   val onFlipCamera: () -> Unit,
   val onSpeaker: (Boolean) -> Unit,
+  val onAudioRoute: (String) -> Unit = {},
   val maybeOnAddPeople: (() -> Unit)?,
   val onHangUp: () -> Unit,
   /** "Try again" on the encryption failure banner: rejoins the call in place (#1624). */
@@ -1156,18 +1161,69 @@ private fun ControlBar(ui: CallUiState, actions: CallUiActions, modifier: Modifi
       actions.onInteraction()
       actions.onCamera(!it)
     }
-    CallToggle(
-      icon = CallIcons.VolumeUp,
-      label = stringResource(R.string.call_speaker),
-      isChecked = ui.isSpeakerOn,
-      isOffSwitch = false,
-    ) {
-      actions.onInteraction()
-      actions.onSpeaker(it)
+    if (needsRoutePicker(ui.audioRoutes)) {
+      AudioRouteButton(ui, actions)
+    } else {
+      CallToggle(
+        icon = CallIcons.VolumeUp,
+        label = stringResource(R.string.call_speaker),
+        isChecked = ui.isSpeakerOn,
+        isOffSwitch = false,
+      ) {
+        actions.onInteraction()
+        actions.onSpeaker(it)
+      }
     }
     MoreButton(state?.isDeafened == true, ui.isSharingScreen, actions)
     HangUpButton(actions.onHangUp, actions.maybeOnEndForEveryone)
   }
+}
+
+/** The sound's route: a button that opens the list of places it can go to, the current one marked (#2060). */
+@Composable
+private fun AudioRouteButton(ui: CallUiState, actions: CallUiActions) {
+  var isOpen by remember { mutableStateOf(false) }
+  val label = stringResource(R.string.call_audio_route)
+  val current = ui.audioRoutes.firstOrNull { it.id == ui.audioRouteId }
+  Box {
+    CallToggle(
+      icon = CallIcons.VolumeUp,
+      label = label,
+      isChecked = current?.kind == AudioRouteKind.SPEAKER,
+      isOffSwitch = false,
+    ) {
+      actions.onInteraction()
+      isOpen = true
+    }
+    DropdownMenuPopup(expanded = isOpen, onDismissRequest = { isOpen = false }) {
+      DropdownMenuGroup(shapes = MenuDefaults.groupShape(index = 0, count = 1)) {
+        ui.audioRoutes.forEachIndexed { index, route ->
+          DropdownMenuItem(
+            onClick = {
+              isOpen = false
+              actions.onInteraction()
+              actions.onAudioRoute(route.id)
+            },
+            text = { Text(routeLabel(route)) },
+            shape = MenuDefaults.itemShape(index = index, count = ui.audioRoutes.size).shape,
+            trailingContent = if (route.id == ui.audioRouteId) {
+              { Icon(Icons.Filled.Check, contentDescription = stringResource(R.string.call_audio_route_current)) }
+            } else {
+              null
+            },
+          )
+        }
+      }
+    }
+  }
+}
+
+/** The app's words for the built-in routes; a headset keeps the name the system gives it. */
+@Composable
+private fun routeLabel(route: AudioRoute): String = when (route.kind) {
+  AudioRouteKind.EARPIECE -> stringResource(R.string.call_route_earpiece)
+  AudioRouteKind.SPEAKER -> stringResource(R.string.call_speaker)
+  else -> route.name
 }
 
 /**

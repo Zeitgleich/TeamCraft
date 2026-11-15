@@ -24,6 +24,12 @@ class EmojiInputTest {
 
   @Test
   fun completingReplacesTheTypedName() {
-    assertEquals("great 👍 ", EmojiInput.complete("great :thu", "👍"))
+    assertEquals("great 👍 ", EmojiInput.complete("great :thu", "👍").text)
+  }
+
+  @Test
+  fun worksInTheMiddleOfTheText() {
+    assertEquals("thu", EmojiInput.activeQuery("a :thu b", caret = 6))
+    assertEquals("a 👍 b", EmojiInput.complete("a :thu b", "👍", caret = 6).text)
   }
 }

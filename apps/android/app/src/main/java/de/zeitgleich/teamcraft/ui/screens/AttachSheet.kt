@@ -53,6 +53,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import de.zeitgleich.teamcraft.ui.AttachKind
+import de.zeitgleich.teamcraft.ui.ComposerPrefs
 import de.zeitgleich.teamcraft.ui.MediaAccess
 import de.zeitgleich.teamcraft.ui.RecentMediaItem
 import de.zeitgleich.teamcraft.ui.recentMedia
@@ -104,6 +106,7 @@ fun rememberAttachmentPickers(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AttachSheet(pickers: AttachmentPickers, onDismiss: () -> Unit) {
+  val context = LocalContext.current
   ModalBottomSheet(onDismissRequest = onDismiss) {
     // Not in the Play build: there the gallery tile opens the system photo picker.
     if (MediaAccess.isOffered) {
@@ -114,21 +117,33 @@ fun AttachSheet(pickers: AttachmentPickers, onDismiss: () -> Unit) {
         },
       )
     }
+    val prefs = remember { ComposerPrefs.prefs(context) }
+    // The option used last comes first, so it is where the thumb already is (#2062).
+    val kinds = remember { AttachKind.ordered(prefs.lastAttach) }
     Row(
       Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 28.dp),
       horizontalArrangement = Arrangement.SpaceEvenly,
     ) {
-      AttachOption(R.drawable.ic_photo_camera, R.string.attach_camera) {
-        onDismiss()
-        pickers.openCamera()
-      }
-      AttachOption(R.drawable.ic_image, R.string.attach_gallery) {
-        onDismiss()
-        pickers.openGallery()
-      }
-      AttachOption(R.drawable.ic_description, R.string.attach_file) {
-        onDismiss()
-        pickers.pickFiles()
+      for (kind in kinds) {
+        val icon = when (kind) {
+          AttachKind.CAMERA -> R.drawable.ic_photo_camera
+          AttachKind.GALLERY -> R.drawable.ic_image
+          AttachKind.FILE -> R.drawable.ic_description
+        }
+        val label = when (kind) {
+          AttachKind.CAMERA -> R.string.attach_camera
+          AttachKind.GALLERY -> R.string.attach_gallery
+          AttachKind.FILE -> R.string.attach_file
+        }
+        AttachOption(icon, label) {
+          prefs.lastAttach = kind
+          onDismiss()
+          when (kind) {
+            AttachKind.CAMERA -> pickers.openCamera()
+            AttachKind.GALLERY -> pickers.openGallery()
+            AttachKind.FILE -> pickers.pickFiles()
+          }
+        }
       }
     }
   }

@@ -19,6 +19,7 @@ import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -52,6 +53,15 @@ class VoicePlayer(private val context: Context, private val scope: CoroutineScop
 
   val playback: StateFlow<VoicePlayback?> = state
 
+  /** Keys of the messages played to their end or started; the next one to play on is not among them (#2054). */
+  val played: MutableSet<String> = java.util.Collections.synchronizedSet(HashSet())
+
+  /** A message played to its end: the feed picks the one that follows. */
+  val ended = MutableSharedFlow<String>(extraBufferCapacity = 1)
+
+  /** The message that should start by itself (the one after an ended one); its card takes it and clears it. */
+  val autoPlay = MutableStateFlow<String?>(null)
+
   /** Plays [file] for [key] from [fromFraction] of its length, or pauses and resumes the one held. */
   fun toggle(key: String, file: File, durationHintMs: Long, speed: VoiceSpeed, fromFraction: Float? = null) {
     val now = state.value
@@ -69,6 +79,8 @@ class VoicePlayer(private val context: Context, private val scope: CoroutineScop
     player.prepare()
     player.play()
     state.value = VoicePlayback(key, isPlaying = true, positionMs = 0, durationMs = durationHintMs)
+    played += key
+    if (autoPlay.value == key) autoPlay.value = null
   }
 
   /** Moves the held message to [fraction] of its length. */
@@ -130,8 +142,10 @@ class VoicePlayer(private val context: Context, private val scope: CoroutineScop
             }
             if (playbackState == Player.STATE_ENDED) {
               // Back to the start, ready for the next press.
+              val endedKey = state.value?.key
               player.pause()
               player.seekTo(0)
+              endedKey?.let { ended.tryEmit(it) }
               state.value = state.value?.copy(isPlaying = false, positionMs = 0)
             }
           }

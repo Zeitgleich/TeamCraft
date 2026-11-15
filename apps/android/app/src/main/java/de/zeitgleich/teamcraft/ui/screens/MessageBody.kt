@@ -8,6 +8,13 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -83,6 +90,7 @@ fun MessageBody(
       onOpenWeb = { openLink(context, it) },
       onOpenPermalink = onOpenPermalink,
       maybeOnOpenMention = maybeProfile?.byUsername,
+      maybeOnOpenDetected = { startDetected(context, it) },
     )
   }
   val permalinkLabel = stringResource(R.string.message_link_label)
@@ -96,41 +104,64 @@ fun MessageBody(
   } else {
     bodyStyle
   }
-  Column(modifier, verticalArrangement = Arrangement.spacedBy(BLOCK_GAP)) {
-    for (block in blocks) {
-      when (block) {
-        is MarkupBlock.Paragraph -> Text(
-          remember(block, colors, names) { annotatedLines(block.lines, colors, names, links, permalinkLabel) },
-          style = paragraphStyle,
-        )
-        is MarkupBlock.Heading -> Text(
-          remember(block, colors, names) { annotatedLine(block.line, colors, names, links, permalinkLabel) },
-          style = headingStyle(block.level.toInt()).copy(color = textColor),
-        )
-        is MarkupBlock.Quote -> Row(Modifier.height(IntrinsicSize.Min)) {
-          Box(Modifier.width(QUOTE_BAR).fillMaxHeight().background(textColor.copy(alpha = QUOTE_BAR_ALPHA), RoundedCornerShape(2.dp)))
-          Text(
+  // Long bodies collapse after COLLAPSED_LINES lines of text with a "Show more" button (#2049).
+  val collapsedHeight = with(LocalDensity.current) { bodyStyle.lineHeight.toPx() * COLLAPSED_LINES }
+  var isExpanded by rememberSaveable(body) { mutableStateOf(false) }
+  var fullHeight by remember(body) { mutableFloatStateOf(0f) }
+  val isLong = fullHeight > collapsedHeight * LONG_SLACK
+  val isCollapsed = isLong && !isExpanded
+  Column(modifier) {
+    Column(
+      Modifier
+        .clipToBounds()
+        .layout { measurable, constraints ->
+          val placeable = measurable.measure(constraints.copy(maxHeight = Constraints.Infinity))
+          fullHeight = placeable.height.toFloat()
+          val height = if (isCollapsed) collapsedHeight.roundToInt().coerceAtMost(placeable.height) else placeable.height
+          layout(placeable.width, height) { placeable.place(0, 0) }
+        },
+      verticalArrangement = Arrangement.spacedBy(BLOCK_GAP),
+    ) {
+      for (block in blocks) {
+        when (block) {
+          is MarkupBlock.Paragraph -> Text(
             remember(block, colors, names) { annotatedLines(block.lines, colors, names, links, permalinkLabel) },
-            style = bodyStyle.copy(color = textColor.copy(alpha = QUOTE_TEXT_ALPHA)),
-            modifier = Modifier.padding(start = 8.dp),
+            style = paragraphStyle,
           )
-        }
-        is MarkupBlock.Items -> Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-          block.items.forEachIndexed { index, item ->
-            val marker = when (val kind = block.kind) {
-              MarkupListKind.Bulleted -> "•"
-              is MarkupListKind.Numbered -> "${kind.start.toLong() + index}."
-            }
-            Row {
-              Text(marker, style = bodyStyle, modifier = Modifier.padding(end = 6.dp))
-              Text(remember(item, colors, names) { annotatedLine(item, colors, names, links, permalinkLabel) }, style = bodyStyle)
+          is MarkupBlock.Heading -> Text(
+            remember(block, colors, names) { annotatedLine(block.line, colors, names, links, permalinkLabel) },
+            style = headingStyle(block.level.toInt()).copy(color = textColor),
+          )
+          is MarkupBlock.Quote -> Row(Modifier.height(IntrinsicSize.Min)) {
+            Box(Modifier.width(QUOTE_BAR).fillMaxHeight().background(textColor.copy(alpha = QUOTE_BAR_ALPHA), RoundedCornerShape(2.dp)))
+            Text(
+              remember(block, colors, names) { annotatedLines(block.lines, colors, names, links, permalinkLabel) },
+              style = bodyStyle.copy(color = textColor.copy(alpha = QUOTE_TEXT_ALPHA)),
+              modifier = Modifier.padding(start = 8.dp),
+            )
+          }
+          is MarkupBlock.Items -> Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            block.items.forEachIndexed { index, item ->
+              val marker = when (val kind = block.kind) {
+                MarkupListKind.Bulleted -> "•"
+                is MarkupListKind.Numbered -> "${kind.start.toLong() + index}."
+              }
+              Row {
+                Text(marker, style = bodyStyle, modifier = Modifier.padding(end = 6.dp))
+                Text(remember(item, colors, names) { annotatedLine(item, colors, names, links, permalinkLabel) }, style = bodyStyle)
+              }
             }
           }
+          is MarkupBlock.Code -> CodeBlock(block.code, textColor, colors.codeBackground)
+          is MarkupBlock.Table -> MarkupTable(block, textColor, colors.surface, bodyStyle) { line ->
+            remember(line, colors, names) { annotatedLine(line, colors, names, links, permalinkLabel) }
+          }
         }
-        is MarkupBlock.Code -> CodeBlock(block.code, textColor, colors.codeBackground)
-        is MarkupBlock.Table -> MarkupTable(block, textColor, colors.surface, bodyStyle) { line ->
-          remember(line, colors, names) { annotatedLine(line, colors, names, links, permalinkLabel) }
-        }
+      }
+    }
+    if (isLong) {
+      TextButton(onClick = { isExpanded = !isExpanded }, contentPadding = PaddingValues(horizontal = 0.dp)) {
+        Text(stringResource(if (isExpanded) R.string.message_show_less else R.string.message_show_more), color = colors.link)
       }
     }
   }
@@ -256,6 +287,11 @@ private fun headingStyle(level: Int): TextStyle = when (level) {
   else -> MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold)
 }
 
+/** Lines of text a body shows before it collapses. */
+private const val COLLAPSED_LINES = 14
+
+/** A body only just over the limit isn't collapsed: hiding a line or two isn't worth a button. */
+private const val LONG_SLACK = 1.2f
 private val BLOCK_GAP = 6.dp
 private val BODY_TRACKING = 0.15.sp
 

@@ -20,7 +20,7 @@ class MentionsTest {
     assertNull(Mentions.activeQuery("hello bob"))
     assertNull(Mentions.activeQuery("mail@example.com"))
     assertEquals(listOf("bob"), Mentions.suggestions("bu", people).map { it.username })
-    assertEquals("hello @bob ", Mentions.complete("hello @bo", people[1]))
+    assertEquals("hello @bob ", Mentions.complete("hello @bo", people[1]).text)
   }
 
   @Test
@@ -44,6 +44,24 @@ class MentionsTest {
     // The built-in group is found by the app's own name for it.
     assertEquals(listOf("admins"), Mentions.groupSuggestions("administ", groups, "Administratoren").map { it.handle })
     assertEquals("Administratoren", Mentions.shownName(groups[1], "Administratoren"))
-    assertEquals("ping @accounting ", Mentions.complete("ping @acc", "accounting"))
+    assertEquals("ping @accounting ", Mentions.complete("ping @acc", "accounting").text)
+  }
+
+  @Test
+  fun suggestionsWorkAtTheCursorAndReplaceOnlyThatWord() {
+    val text = "hi @bo and more"
+    assertEquals("bo", Mentions.activeQuery(text, caret = 6))
+    assertNull(Mentions.activeQuery(text, caret = 11))
+    val done = Mentions.complete(text, people[1], caret = 6)
+    assertEquals("hi @bob and more", done.text)
+    assertEquals("hi @bob ".length, done.caret)
+  }
+
+  @Test
+  fun rankedPeopleComeFirst() {
+    val more = people + User(id = "6", username = "bella", displayName = "Bella")
+    assertEquals(listOf("bob", "bella"), Mentions.suggestions("b", more, priority = listOf("Bob")).map { it.username })
+    assertEquals(listOf("bella", "bob"), Mentions.suggestions("b", more, priority = listOf("bella")).map { it.username })
+    assertEquals(listOf("bob", "bella"), Mentions.suggestions("b", more).map { it.username })
   }
 }
