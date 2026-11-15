@@ -68,7 +68,7 @@ final class NotificationService: UNNotificationServiceExtension {
     // A DM with a deleted account is named in the user's language (#1066).
     setDeletedUserName(name: String(localized: "user_deleted_name"))
     guard let sealed = PushPayload.sealedBytes(from: original.userInfo),
-      let notification = await decrypt(sealed)
+      let (notification, maybeSenderPicture) = await decrypt(sealed)
     else {
       return builder.generic(from: original, keepsSealed: true)
     }
@@ -84,7 +84,8 @@ final class NotificationService: UNNotificationServiceExtension {
     switch presentation {
     case .message, .quietMessage:
       await DeliveredNotifications.removeEarlier(of: notification)
-      let (content, maybeIntent) = builder.message(for: notification, presentation: presentation, base: original)
+      let (content, maybeIntent) = builder.message(
+        for: notification, presentation: presentation, base: original, maybeSenderPicture: maybeSenderPicture)
       return await builder.communicationStyled(
         content, intent: maybeIntent, presentation: presentation, flags: flags)
     case .callKit:
@@ -111,8 +112,9 @@ final class NotificationService: UNNotificationServiceExtension {
 
   /// Opens the core under the cross-process lock; `nil` if not signed in, locked out or failed.
   /// A store that still needs a layout step fails here too: the extension doesn't migrate it (no
-  /// `VACUUM` under its limits, #1198) and the app does on its next start.
-  private static func decrypt(_ sealed: Data) async -> PushNotification? {
+  /// `VACUUM` under its limits, #1198) and the app does on its next start. Also the picture of the
+  /// integration source a bot's message names, as this device holds it (it never comes in the push).
+  private static func decrypt(_ sealed: Data) async -> (PushNotification, Data?)? {
     let container = SharedContainer()
     guard let account = container.activeAccount else { return nil }
     let lock = ProcessLock(fileURL: container.lockFileURL)
@@ -135,7 +137,13 @@ final class NotificationService: UNNotificationServiceExtension {
       }
       // The app reloads what the extension stored.
       StoreChangeNotifier().post()
-      return notification
+      // A picture, nothing depends on it: the initials stay when the device doesn't hold it.
+      var maybeSenderPicture: Data?
+      if let sha256 = notification.maybeSenderSourcePictureSha256 {
+        maybeSenderPicture = try? await core.integrationSourcePicture(
+          conversationId: notification.conversationId, sha256: sha256)
+      }
+      return (notification, maybeSenderPicture)
     } catch {
       return nil
     }
