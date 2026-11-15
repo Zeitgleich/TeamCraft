@@ -63,6 +63,8 @@
   <!-- Accessibility action: toggles a reaction with the given emoji -->
   <string name="react_quick">React with %1$s</string>
   <string name="file_open">Open</string>
+  <string name="quote_show_original">Show original message</string>
+  <string name="quote_original_gone">Original not available</string>
   <string name="image_unreadable">This image can\'t be shown.</string>
   <string name="video_play">Play video</string>
   <string name="video_unplayable">This video can\'t be played on this device.</string>

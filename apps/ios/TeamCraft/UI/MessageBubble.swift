@@ -688,11 +688,16 @@ struct BubbleReplyQuote: View {
   var maybeImage: ReplyAttachmentPreview?
 
   @Environment(\.openQuotedPicture) private var maybeOpenQuoted
+  @Environment(\.openQuotedMessage) private var maybeJumpToQuoted
 
   var body: some View {
     if let image = maybeImage, image.canOpen == true, let messageId = maybeMessageId, let open = maybeOpenQuoted {
       Button { open(messageId, image.fileId) } label: { quote }
         .buttonStyle(.plain)
+    } else if let messageId = maybeMessageId, let jump = maybeJumpToQuoted {
+      Button { jump(messageId) } label: { quote }
+        .buttonStyle(.plain)
+        .accessibilityHint(Text("quote_show_original"))
     } else {
       quote
     }

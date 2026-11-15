@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Build
 import android.text.format.DateUtils
 import android.text.format.Formatter
+import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
@@ -74,6 +75,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -208,6 +210,12 @@ import uniffi.teamcraft_ffi.isOpenableLink
 
 /** The reaction a double tap toggles, as in most chat apps. */
 private const val QUICK_REACTION = "👍"
+
+/**
+ * Jumps to the message a reply quotes and flashes it; set by the feed (#2001). Without a feed
+ * around (a thread view) the quote isn't tappable.
+ */
+private val LocalQuoteJump = compositionLocalOf<((String) -> Unit)?> { null }
 
 /** How long a message opened from a link stays highlighted. */
 private const val HIGHLIGHT_MS = 2500L
@@ -392,20 +400,27 @@ fun MessageFeed(
   }
   // The message the heart button goes to, until its row is loaded.
   var maybeReactionTarget by remember { mutableStateOf<String?>(null) }
-  LaunchedEffect(maybeReactionTarget, items, older.hasOlder, older.isLoading) {
-    val target = maybeReactionTarget ?: return@LaunchedEffect
+  // The original a reply's quote was tapped on (#2001): same jump, but it says when it is gone.
+  var maybeQuoteTarget by remember { mutableStateOf<String?>(null) }
+  val context = LocalContext.current
+  LaunchedEffect(maybeReactionTarget, maybeQuoteTarget, items, older.hasOlder, older.isLoading) {
+    val target = maybeReactionTarget ?: maybeQuoteTarget ?: return@LaunchedEffect
     val maybeRow = rowOf(items, target)
     when {
       maybeRow != null -> {
         maybeReactionTarget = null
+        maybeQuoteTarget = null
         maybeHighlighted = target
         showAtTop(listState, maybeRow)
       }
       older.hasOlder -> if (!older.isLoading) older.onNearOldest()
-      else -> maybeReactionTarget = null
+      else -> {
+        if (maybeQuoteTarget != null) Toast.makeText(context, R.string.quote_original_gone, Toast.LENGTH_SHORT).show()
+        maybeReactionTarget = null
+        maybeQuoteTarget = null
+      }
     }
   }
-  val context = LocalContext.current
   val onOpenFile: (FileInfo) -> Unit = remember(viewModel, context) {
     { file ->
       // Pictures open in the viewer at once (it shows the thumbnail and fetches the original).
@@ -451,7 +466,11 @@ fun MessageFeed(
         listState.firstVisibleItemScrollOffset
       }
     }
-    CompositionLocalProvider(LocalFeedMotion provides feedMotion, LocalStickyEdge provides stickyEdge) {
+    CompositionLocalProvider(
+      LocalFeedMotion provides feedMotion,
+      LocalStickyEdge provides stickyEdge,
+      LocalQuoteJump provides { id -> maybeQuoteTarget = id },
+    ) {
       LazyColumn(
         Modifier.fillMaxSize().onGloballyPositioned { stickyEdge.maybeFeed = it },
         state = listState,
@@ -1790,11 +1809,20 @@ private fun ReplyQuote(
     reply.maybeMessage?.let { message -> PictureTarget(conversation, message, quoted.fileId) }
   }
   val openLabel = stringResource(R.string.file_open)
+  val jumpLabel = stringResource(R.string.quote_show_original)
+  val maybeJump = LocalQuoteJump.current
+  val maybeOriginal = reply.maybeMessage
   Row(
     modifier
       .clip(RoundedCornerShape(BUBBLE_CORNER_INNER))
       .background(colors.content.copy(alpha = QUOTE_BACKGROUND_ALPHA))
-      .then(if (maybeTarget != null) Modifier.clickable(onClickLabel = openLabel) { onOpenPicture(maybeTarget) } else Modifier)
+      .then(
+        when {
+          maybeTarget != null -> Modifier.clickable(onClickLabel = openLabel) { onOpenPicture(maybeTarget) }
+          maybeJump != null && maybeOriginal != null -> Modifier.clickable(onClickLabel = jumpLabel) { maybeJump(maybeOriginal) }
+          else -> Modifier
+        },
+      )
       .height(IntrinsicSize.Min),
     verticalAlignment = Alignment.CenterVertically,
   ) {
