@@ -786,6 +786,22 @@ struct ImageGrid: View {
 }
 
 /// "Today", "Yesterday" or the date, as a small centred pill; pinned while its day scrolls by.
+/// The line above the first message the user had not read when the conversation opened (#2013).
+struct UnreadDivider: View {
+  var body: some View {
+    HStack(spacing: 8) {
+      Rectangle().fill(Theme.accent.opacity(0.4)).frame(height: 1)
+      Text("unread_divider")
+        .font(.app(.footnote).weight(.medium))
+        .foregroundStyle(Theme.accent)
+      Rectangle().fill(Theme.accent.opacity(0.4)).frame(height: 1)
+    }
+    .padding(.vertical, 8)
+    .accessibilityElement(children: .combine)
+    .accessibilityAddTraits(.isHeader)
+  }
+}
+
 struct DayPill: View {
   let date: Date
 

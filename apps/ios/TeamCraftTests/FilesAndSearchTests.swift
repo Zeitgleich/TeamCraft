@@ -151,4 +151,9 @@ final class FilesAndSearchTests: XCTestCase {
     XCTAssertGreaterThan(urgent, mention)
     XCTAssertGreaterThan(mention, plain)
   }
+
+  func testFirstUnreadAnswerDecodes() throws {
+    let answer = try XCTUnwrap(Wire.decode(ChatAnswer.self, from: #"{"answer":"message","maybe_message":"42"}"#))
+    XCTAssertEqual(answer.maybeMessage, "42")
+  }
 }
