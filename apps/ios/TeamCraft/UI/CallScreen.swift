@@ -44,6 +44,8 @@ struct CallScreen: View {
   @State private var isEndAsked = false
   @State private var isEnding = false
   @State private var maybeEndFailure: LocalizedStringKey?
+  /// The floating window when the app goes to the background during a video call (#2067).
+  @State private var pictureInPicture = CallPictureInPicture()
 
   private static let controlSize: CGFloat = 60
   private static let autoHideDelay: Duration = .seconds(5)
@@ -52,6 +54,9 @@ struct CallScreen: View {
   var body: some View {
     ZStack {
       stageColor.ignoresSafeArea()
+      PictureInPictureSource(pictureInPicture: pictureInPicture)
+        .ignoresSafeArea()
+        .accessibilityHidden(true)
       stage
         .ignoresSafeArea()
         .contentShape(Rectangle())
@@ -69,6 +74,10 @@ struct CallScreen: View {
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .preferredColorScheme(.dark)
+    .onChange(of: pictureInPictureStream?.id, initial: true) {
+      pictureInPicture.show(pictureInPictureStream?.renderer)
+    }
+    .onDisappear { pictureInPicture.stop() }
     .alert("call_camera_denied", isPresented: cameraDeniedBinding) {
       Button("push_denied_open_settings") {
         if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
@@ -410,6 +419,13 @@ struct CallScreen: View {
   }
 
   private var hasRemoteVideo: Bool { !model.calls.remoteVideo.isEmpty }
+
+  /// What picture-in-picture shows: a shared screen, else the video of whoever talks, else the
+  /// first video. `nil` without video to show: an audio call gets no floating window.
+  private var pictureInPictureStream: RemoteVideoStream? {
+    CallPictureInPictureChoice.stream(
+      among: orderedStreams, speaking: call.speakingUserIds, userIdByDevice: call.userIdByDevice)
+  }
 
   // MARK: Chrome
 
