@@ -370,7 +370,7 @@ pub(crate) fn GuestLinks(meeting: MeetingId, conversation: ConversationId) -> im
         .map_err(|error| error.to_failure())?;
       hub.refresh(me, now_ms()).await;
       if state.is_alive() {
-        state.show_toast(renewed);
+        state.show_brief_toast(renewed);
       }
       Ok(())
     });

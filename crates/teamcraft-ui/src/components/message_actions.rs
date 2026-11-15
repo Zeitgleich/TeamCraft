@@ -326,7 +326,7 @@ pub(crate) fn copy_and_confirm(text: String) {
     match wasm_bindgen_futures::JsFuture::from(promise).await {
       Ok(_) => {
         if state.is_alive() {
-          state.show_toast(copied);
+          state.show_brief_toast(copied);
         }
       },
       Err(_) => state.show_error(failed, String::new()),
