@@ -39,7 +39,7 @@ pub fn start(state: AppState, i18n: I18n) {
   on_cleanup(move || handle.remove());
   Effect::new(
     move |previous: Option<(Option<CallMini>, CallMiniPolicy, bool, u32)>| {
-      call_minutes.track();
+      let _ = call_minutes.get();
       let policy = state.settings.prefs.with(|prefs| prefs.calls.small_window);
       let maybe_mini = (call.phase.get() == CallPhase::Active)
         .then(|| call.maybe_request.get())
