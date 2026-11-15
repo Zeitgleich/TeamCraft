@@ -1693,7 +1693,11 @@ impl CallEngine {
       && !self.uplink_voice.is_hurt(now);
     if is_wanted != self.is_thin_voice_sent {
       self.is_thin_voice_sent = is_wanted;
-      debug!(is_wanted, "the own voice's thin copy");
+      // A rare change of what goes out: worth a line in a bug report's log.
+      info!(
+        is_wanted,
+        "the own voice's thin copy for receivers on thin downlinks"
+      );
       self.event(CallEngineEvent::ThinVoice(is_wanted));
     }
   }
@@ -1809,6 +1813,10 @@ impl CallEngine {
         Ok(())
       },
       CallEvent::ThinVoiceWanted { is_wanted } => {
+        debug!(
+          is_wanted,
+          "a receiver on a thin downlink takes the voices' thin copies"
+        );
         self.is_thin_voice_wanted = is_wanted;
         Ok(())
       },

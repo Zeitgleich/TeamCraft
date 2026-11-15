@@ -816,6 +816,11 @@ impl Forwarder {
       return None;
     }
     self.is_thin_voice_wanted = is_wanted;
+    // Rare: a receiver's downlink turned thin, or the last thin one left or recovered.
+    info!(
+      is_wanted,
+      "receivers on thin downlinks take the voices' thin copies"
+    );
     Some(Effect::ThinVoiceWanted(is_wanted))
   }
 
