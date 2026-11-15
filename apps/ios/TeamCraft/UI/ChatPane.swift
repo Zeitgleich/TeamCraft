@@ -114,10 +114,11 @@ struct ChatPane: View {
   private static let quickReactions = ["👍", "❤️", "😂", "🎉", "😮", "🙏"]
   /// How long typing pauses before the draft is saved.
   private static let draftSaveDelay = Duration.milliseconds(800)
-  /// Over this height at its top the composer's scrim fades in from clear (#1966).
-  private static let scrimFade: CGFloat = 24
-  /// How much of the background the scrim lets through below its fade: messages stay a hint.
-  private static let scrimBodyOpacity = 0.88
+  /// Room above the composer where its scrim begins, still clear (#1966).
+  private static let scrimLead: CGFloat = 24
+  /// The scrim's opacity down its height: clear at the top, denser toward the bottom edge, never
+  /// solid. Messages stay legible as a fading hint behind the composer and the home indicator.
+  private static let scrimStops: [(location: CGFloat, opacity: Double)] = [(0, 0), (0.3, 0.25), (0.65, 0.6), (1, 0.9)]
   /// The reaction a double tap toggles, as in most chat apps.
   private static let quickReaction = "👍"
 
@@ -601,8 +602,9 @@ struct ChatPane: View {
       .id(message.id)
   }
 
-  /// The typing line and the composer over a scrim from the background colour: clear at the top,
-  /// so the messages behind fade out, nearly opaque below. Drawn once per size, not per scroll.
+  /// The typing line and the composer over a scrim from the background colour: one gradient from
+  /// clear at the top to nearly opaque at the screen's bottom edge, so the messages behind fade out
+  /// down to the home indicator without a solid band. Drawn once per size, not per scroll.
   private var floatingComposer: some View {
     VStack(spacing: 0) {
       if let line = typingText(typingNames(in: model.typingNow, conversation: conversation.id, thread: threadId)) {
@@ -616,18 +618,11 @@ struct ChatPane: View {
       }
       composer
     }
-    .padding(.top, Self.scrimFade)
+    .padding(.top, Self.scrimLead)
     .background {
-      VStack(spacing: 0) {
-        LinearGradient(
-          colors: [Theme.background.opacity(0), Theme.background.opacity(Self.scrimBodyOpacity)],
-          startPoint: .top, endPoint: .bottom
-        )
-        .frame(height: Self.scrimFade)
-        LinearGradient(
-          colors: [Theme.background.opacity(Self.scrimBodyOpacity), Theme.background],
-          startPoint: .top, endPoint: .bottom)
-      }
+      LinearGradient(
+        stops: Self.scrimStops.map { .init(color: Theme.background.opacity($0.opacity), location: $0.location) },
+        startPoint: .top, endPoint: .bottom)
       // Under the home indicator too; the keyboard covers the rest.
       .ignoresSafeArea(.container, edges: .bottom)
       .allowsHitTesting(false)
