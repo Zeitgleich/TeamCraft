@@ -55,6 +55,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -118,6 +119,8 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontStyle
@@ -310,6 +313,11 @@ fun MessageFeed(
   maybeOnReplyImage: ((FileInfo) -> Unit)? = null,
   /** A long press on a picture of an album. */
   onLongPressImage: (FileInfo) -> Unit = {},
+  /** The IDs picked in selection mode (issue #2070); null while it is off. */
+  selection: Set<String>? = null,
+  onToggleSelect: (Message) -> Unit = {},
+  /** Starts selection mode with a message: the row's accessibility action; null where there is none. */
+  maybeOnStartSelect: ((Message) -> Unit)? = null,
   /** Opens the viewer from outside the feed (the picture's action sheet). */
   maybeOpenPicture: PictureTarget? = null,
   onPictureOpened: () -> Unit = {},
@@ -552,7 +560,13 @@ fun MessageFeed(
                 onFillGap(GapRequest(item.gap, gapEdge(row, topVisible)))
               }
               // A placeholder (issue #888) has nothing to reply to or act on yet.
-              is FeedItem.Entry -> SwipeToReply(item.message, maybeOnReply.takeIf { item.message.maybePlaceholder == null }) {
+              is FeedItem.Entry -> SelectableRow(
+                message = item.message,
+                extras = extras[item.message.id],
+                snapshot = snapshot,
+                selection = selection,
+                onToggle = onToggleSelect,
+              ) { SwipeToReply(item.message, maybeOnReply.takeIf { item.message.maybePlaceholder == null && selection == null }) {
                 MessageRow(
                   viewModel = viewModel,
                   entry = item,
@@ -570,8 +584,9 @@ fun MessageFeed(
                   onOpenPermalink = onOpenPermalink,
                   onOpenConversation = onOpenConversation,
                   canReact = canReact,
+                  maybeOnStartSelect = maybeOnStartSelect?.let { start -> { start(item.message) } },
                 )
-              }
+              } }
             }
           }
         }
@@ -1096,6 +1111,7 @@ private fun MessageRow(
   onOpenPermalink: (String) -> Unit,
   onOpenConversation: (String) -> Unit,
   canReact: Boolean,
+  maybeOnStartSelect: (() -> Unit)? = null,
 ) {
   val message = entry.message
   val maybeSystemLine = systemLine(message, maybeExtras) { snapshot?.user(it)?.displayName.orEmpty() }
@@ -1125,6 +1141,7 @@ private fun MessageRow(
   val replyLabel = stringResource(R.string.action_reply)
   val reactLabel = stringResource(R.string.react_quick, QUICK_REACTION)
   val moreLabel = stringResource(R.string.more)
+  val selectLabel = stringResource(R.string.action_select)
   val showsSender = look.showsSenders && !isMine
   val maybeAuthor = snapshot?.user(message.author)
   // The bubble and the avatar share a row; reactions and the thread link go below, in line with the bubble.
@@ -1166,6 +1183,7 @@ private fun MessageRow(
         maybeOnReply?.let { reply -> CustomAccessibilityAction(replyLabel) { reply(message); true } },
         CustomAccessibilityAction(reactLabel) { reactQuickly(); true }.takeIf { canReact },
         CustomAccessibilityAction(moreLabel) { onLongPress(); true },
+        maybeOnStartSelect?.let { start -> CustomAccessibilityAction(selectLabel) { start(); true } },
       )
     }
   // The long-press menu has every reaction; the pill after the reactions opens it too.
@@ -2229,6 +2247,60 @@ private fun LinkPreviewCard(preview: LinkPreview, colors: BubbleColors) {
       preview.maybeDescription?.let {
         Text(it, style = MaterialTheme.typography.bodySmall, color = colors.muted, maxLines = 3, overflow = TextOverflow.Ellipsis)
       }
+    }
+  }
+}
+
+/**
+ * A feed row in selection mode (issue #2070): a tap anywhere on a user message picks it, whatever
+ * is under the finger (links and pictures included), with a check on the picked ones. The row
+ * announces itself as a checkbox, checked or not.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun SelectableRow(
+  message: Message,
+  extras: MessageExtras?,
+  snapshot: ChatSnapshot?,
+  selection: Set<String>?,
+  onToggle: (Message) -> Unit,
+  content: @Composable () -> Unit,
+) {
+  val isSelectable = selection != null && message.maybePlaceholder == null &&
+    systemLine(message, extras) { snapshot?.user(it)?.displayName.orEmpty() } == null
+  if (!isSelectable) {
+    content()
+    return
+  }
+  val isSelected = message.id in selection.orEmpty()
+  val description = "${snapshot?.name(message.author).orEmpty()}, ${message.body}"
+  Box(
+    Modifier.background(
+      animateColorAsState(
+        if (isSelected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
+        label = "selected",
+      ).value,
+    ),
+  ) {
+    content()
+    Box(
+      Modifier
+        .matchParentSize()
+        .semantics(mergeDescendants = true) {
+          contentDescription = description
+          selected = isSelected
+          role = Role.Checkbox
+        }
+        // A long press picks too, as a tap does.
+        .combinedClickable(onClick = { onToggle(message) }, onLongClick = { onToggle(message) }),
+    )
+    if (isSelected) {
+      Icon(
+        Icons.Filled.CheckCircle,
+        contentDescription = null,
+        tint = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.align(Alignment.CenterEnd).padding(end = 8.dp).size(22.dp),
+      )
     }
   }
 }

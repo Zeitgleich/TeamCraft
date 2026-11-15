@@ -452,7 +452,41 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
     .as_ref()
     .map(|user| user.display_name.clone())
     .unwrap_or_default();
-  let aria_label = format!("{author_name}, {time}");
+  let aria_label_base = format!("{author_name}, {time}");
+  // Selection mode (issue #2070): a tap toggles the row, and a screen reader hears its state.
+  let is_selecting = Memo::new(move |_| {
+    state
+      .selection
+      .with(|selection| selection.is_active_in(conversation))
+  });
+  let is_selected = Memo::new(move |_| {
+    state
+      .selection
+      .with(|selection| selection.is_selected(message_id))
+  });
+  let aria_label = move || {
+    if is_selected.get() {
+      format!("{aria_label_base}, {}", i18n.t("selection-row-selected"))
+    } else {
+      aria_label_base.clone()
+    }
+  };
+  // Shift extends from the last toggled message to this one, in the order of the feed.
+  let toggle_selection = move |extend: bool| {
+    if extend {
+      let order: Vec<_> = state
+        .try_read(|backend| backend.messages(conversation, 0, usize::MAX))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|message| message.id)
+        .collect();
+      state
+        .selection
+        .update(|selection| selection.extend_to(message_id, &order));
+    } else {
+      state.selection.update(|selection| selection.toggle(message_id));
+    }
+  };
   // Replies, pins, history and the rest come from the backend per visible message.
   let extras = Memo::new(move |_| {
     state
@@ -797,6 +831,10 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
     host.refresh(active.get_value());
   }
   let show_toolbar = move || {
+    // Selection mode has no hover toolbar: the row is a target to pick.
+    if is_selecting.get_untracked() {
+      return;
+    }
     if let Some(host) = maybe_host {
       host.show(active.get_value());
     }
@@ -813,6 +851,11 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
       .try_with_untracked(|extras| extras.as_ref().is_some_and(|extras| extras.is_deleted))
       .unwrap_or(true);
     if is_deleted {
+      return;
+    }
+    // In selection mode a long press picks the row like a tap does.
+    if is_selecting.get_untracked() {
+      toggle_selection(false);
       return;
     }
     if let Some(host) = maybe_host {
@@ -1053,9 +1096,18 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
       return;
     }
     let key = ev.key();
+    // Keyboard selection: X starts it, Space and Enter pick the focused row, with Shift a range.
+    if is_selecting.get_untracked() {
+      if matches!(key.as_str(), " " | "Enter" | "x" | "X") {
+        ev.prevent_default();
+        toggle_selection(ev.shift_key());
+      }
+      return;
+    }
     let maybe_action = match key.as_str() {
       "Enter" | "t" | "T" if !in_thread => Some(MessageAction::Thread),
       "r" | "R" => Some(MessageAction::Quote),
+      "x" | "X" if !in_thread => Some(MessageAction::Select),
       _ => None,
     };
     if let Some(action) = maybe_action {
@@ -1091,6 +1143,8 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
       class:msg-arriving=motion.entrance == Entrance::Arriving
       class:msg-settling=motion.entrance == Entrance::Settling
       class:msg-active=is_toolbar_on
+      class:msg-selecting=move || is_selecting.get()
+      class:msg-selected=move || is_selected.get()
       class:is-pressing=move || long_press.is_pressing.get()
       class:msg-highlight=move || state.highlighted.get() == Some(message_id)
       hidden=move || state.hidden_messages.with(|hidden| hidden.contains(&message_id))
@@ -1154,6 +1208,22 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
         }
       }
     >
+      <Show when=move || is_selecting.get() && !extras.with(|extras| extras.as_ref().is_some_and(|extras| extras.is_deleted)) fallback=|| ()>
+        // The whole row is the target while picking; the keyboard uses the row itself.
+        <button
+          type="button"
+          class="msg-select-hit"
+          tabindex="-1"
+          aria-hidden="true"
+          on:click=move |ev| {
+            ev.prevent_default();
+            toggle_selection(ev.shift_key());
+          }
+        ></button>
+        <span class="msg-select-mark" aria-hidden="true">
+          <Show when=move || is_selected.get() fallback=|| ()><Icon name=IconName::Check /></Show>
+        </span>
+      </Show>
       <div class="msg-gutter">{gutter}</div>
       <div class="msg-main">
         <div class="msg-bubble">

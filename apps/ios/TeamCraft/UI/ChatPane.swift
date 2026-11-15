@@ -58,6 +58,10 @@ struct ChatPane: View {
   @State private var maybeForwardingImage: FileInfo?
   @State private var isPictureGone = false
   @State private var maybeDeleting: Message?
+  /// Several messages picked at once (#2070), with their delete confirmation and forward sheet.
+  @State private var selection = MessageSelection()
+  @State private var isConfirmingSelectionDelete = false
+  @State private var forwardingSelection: [String] = []
   @State private var isAtBottom = true
   /// The first read of the messages came back (#2008): until then placeholders stand in for them.
   @State private var hasLoadedMessages = false
@@ -244,6 +248,11 @@ struct ChatPane: View {
     .sheet(item: $maybeForwarding) { target in
       ForwardSheet(fromConversationId: conversation.id, messageId: target.message.id)
     }
+    .sheet(isPresented: forwardingSelectionBinding) {
+      ForwardSheet(
+        fromConversationId: conversation.id, messageId: forwardingSelection.first ?? "", batchIds: forwardingSelection,
+        onForwarded: { selection.clear() })
+    }
     .sheet(item: $maybeForwardingImage) { file in
       ForwardSheet(fromConversationId: file.conversation, messageId: file.message, maybeAttachmentId: file.fileId)
     }
@@ -268,6 +277,7 @@ struct ChatPane: View {
     .onChange(of: voiceFiles, initial: true) { _, files in VoicePlayer.shared.setQueue(files, owner: draftKey) }
     .onDisappear {
       if model.visibleConversationId == conversation.id { model.visibleConversationId = nil }
+      selection.clear()
       // A recording stops when the user leaves; the take waits here for their return (#204).
       VoiceRecorder.shared.interrupt(.left, owner: draftKey)
       VoicePlayer.shared.clearQueue(owner: draftKey)
@@ -299,6 +309,15 @@ struct ChatPane: View {
         .padding(.horizontal)
         .padding(.vertical, 6)
       }
+      if selection.isActive && selection.count > 0 && !canDeleteSelection {
+        Text("selection_delete_refused")
+          .font(.app(.footnote))
+          .foregroundStyle(Theme.textMuted)
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .padding(.horizontal)
+          .padding(.vertical, 6)
+          .accessibilityIdentifier("selection_delete_hint")
+      }
       messageList
         .overlay(alignment: .top) {
           if isCopiedShown {
@@ -324,9 +343,22 @@ struct ChatPane: View {
         .safeAreaInset(edge: .bottom, spacing: 0) { floatingComposer }
     }
     .background(Theme.background)
-    .navigationTitle(threadId == nil ? conversation.listName : String(localized: "thread_title"))
+    .navigationTitle(
+      selection.isActive
+        ? String(localized: "selection_count \(selection.count)")
+        : (threadId == nil ? conversation.listName : String(localized: "thread_title"))
+    )
     .navigationBarTitleDisplayMode(.inline)
-    .toolbar { if threadId == nil { toolbarItems } }
+    .navigationBarBackButtonHidden(selection.isActive)
+    .toolbar {
+      if selection.isActive {
+        selectionToolbar
+      } else if threadId == nil {
+        toolbarItems
+      }
+    }
+    // Leaving the conversation ends selection mode with it.
+    .onChange(of: conversation.id) { _, _ in selection.clear() }
     .fullScreenCover(isPresented: $isTakingPhoto) {
       CameraPicker { image in Task { await attach(photo: image) } }
         .ignoresSafeArea()
@@ -387,6 +419,12 @@ struct ChatPane: View {
       }
     } message: { _ in
       Text("delete_confirm_text")
+    }
+    .confirmationDialog(
+      Text("selection_delete_confirm \(selection.count)"), isPresented: $isConfirmingSelectionDelete,
+      titleVisibility: .visible
+    ) {
+      Button("delete", role: .destructive) { deleteSelection() }
     }
     .sheet(isPresented: $isSchedulingSend) {
       SendLaterSheet { dueAtMs in Task { await confirmThenSend(dueAtMs: dueAtMs) } }
@@ -662,25 +700,47 @@ struct ChatPane: View {
   private func actionableRow(_ row: MessageRow, entry: FeedEntry) -> some View {
     let message = entry.message
     let highlight: Color = maybeHighlighted == message.id ? Theme.accentSoft : .clear
-    return SwipeToReply(isEnabled: threadId == nil && !message.isPending && conversation.canPost) {
+    let isPicked = selection.isSelected(message.id)
+    return SwipeToReply(isEnabled: threadId == nil && !message.isPending && conversation.canPost && !selection.isActive) {
       startReply(to: message)
     } content: {
       row
     }
       .padding(.top, entry.isContinuation ? 2 : 8)
       .background(highlight)
+      .background(isPicked ? Theme.accentSoft : .clear)
       .contentShape(Rectangle())
       // Without the right to react, a tap doesn't wait to tell a double tap apart either.
       .gesture(
         TapGesture(count: 2).onEnded { react(message, Self.quickReaction) },
-        including: conversation.canReact ? .all : .subviews
+        including: conversation.canReact && !selection.isActive ? .all : .subviews
       )
+      // Picking: a tap anywhere on the row toggles it, over links and pictures too; the mark
+      // sits at the trailing edge. The overlay is only there in selection mode.
+      .overlay {
+        if selection.isActive && MessageSelection.isSelectable(message) {
+          Color.clear
+            .contentShape(Rectangle())
+            .onTapGesture { toggleSelection(message) }
+            .overlay(alignment: .trailing) { selectionMark(isPicked: isPicked) }
+            .accessibilityHidden(true)
+        }
+      }
+      .accessibilityAddTraits(selection.isActive && isPicked ? .isSelected : [])
       .contextMenu {
-        menu(for: message)
+        // An empty menu doesn't open: while picking, a long press does nothing more.
+        if !selection.isActive { menu(for: message) }
       } preview: {
         MessageMenuPreview(name: message.shownAuthorName, text: message.body)
       }
       .accessibilityActions {
+        if selection.isActive {
+          if MessageSelection.isSelectable(message) {
+            Button(LocalizedStringKey(isPicked ? "deselect" : "select")) { toggleSelection(message) }
+          }
+        } else if threadId == nil && MessageSelection.isSelectable(message) {
+          Button("select") { startSelecting(message) }
+        }
         if conversation.canPost {
           Button("reply") {
             startReply(to: message)
@@ -691,6 +751,16 @@ struct ChatPane: View {
         }
       }
       .id(message.id)
+  }
+
+  /// The ring at the row's trailing edge: filled with a check once picked, as in Photos and Mail.
+  private func selectionMark(isPicked: Bool) -> some View {
+    Image(systemName: isPicked ? "checkmark.circle.fill" : "circle")
+      .font(.system(size: 22))
+      .foregroundStyle(isPicked ? Theme.accent : Theme.textMuted)
+      .padding(.trailing, 12)
+      .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: isPicked)
+      .allowsHitTesting(false)
   }
 
   /// The conversation's voice messages, oldest first.
@@ -1086,8 +1156,81 @@ struct ChatPane: View {
     Binding(get: { maybeDeleting != nil }, set: { if !$0 { maybeDeleting = nil } })
   }
 
+  private var forwardingSelectionBinding: Binding<Bool> {
+    Binding(get: { !forwardingSelection.isEmpty }, set: { if !$0 { forwardingSelection = [] } })
+  }
+
   private var attachmentErrorBinding: Binding<Bool> {
     Binding(get: { attachmentError != nil }, set: { if !$0 { attachmentError = nil } })
+  }
+
+  /// The picked messages, oldest first.
+  private var selectedMessages: [Message] { selection.ordered(in: messages) }
+
+  /// Delete is offered only when every picked message may be deleted by this user (#2070).
+  private var canDeleteSelection: Bool {
+    MessageSelection.canDeleteAll(selectedMessages, me: account.userId, canPost: conversation.canPost)
+  }
+
+  /// Selection mode's top bar: Cancel, then Forward, Copy and Delete. The count is the title.
+  @ToolbarContentBuilder
+  private var selectionToolbar: some ToolbarContent {
+    ToolbarItem(placement: .topBarLeading) {
+      Button("cancel") { selection.clear() }
+    }
+    ToolbarItemGroup(placement: .topBarTrailing) {
+      Button {
+        forwardingSelection = selectedMessages.map(\.id)
+      } label: {
+        Image(systemName: "arrowshape.turn.up.right")
+      }
+      .disabled(selection.count == 0)
+      .accessibilityLabel(Text("forward"))
+      Button {
+        copySelection()
+      } label: {
+        Image(systemName: "doc.on.doc")
+      }
+      .disabled(selection.count == 0)
+      .accessibilityLabel(Text("copy"))
+      Button(role: .destructive) {
+        isConfirmingSelectionDelete = true
+      } label: {
+        Image(systemName: "trash")
+      }
+      .disabled(!canDeleteSelection)
+      .accessibilityLabel(Text("delete"))
+    }
+  }
+
+  private func copySelection() {
+    let text = MessageSelection.copyText(selectedMessages) {
+      Date(timeIntervalSince1970: TimeInterval($0) / 1000).formatted(date: .abbreviated, time: .shortened)
+    }
+    UIPasteboard.general.string = text
+    selection.clear()
+    confirmCopy()
+  }
+
+  /// Deletes the picked messages through the single-message delete, one after the other. The
+  /// right to delete is checked again here: the button was only enabled for what was picked then.
+  private func deleteSelection() {
+    let picked = selectedMessages
+    guard MessageSelection.canDeleteAll(picked, me: account.userId, canPost: conversation.canPost) else { return }
+    let conversationId = conversation.id
+    selection.clear()
+    Task {
+      for message in picked {
+        await model.perform(.deleteMessage(conversationId: conversationId, messageId: message.id))
+      }
+    }
+  }
+
+  /// Messages deleted meanwhile (by their author, here or elsewhere) leave the selection.
+  private func dropGoneFromSelection() {
+    guard selection.isActive else { return }
+    let present = Set(messages.map(\.id))
+    selection.forget { id in !present.contains(id) || extras[id]?.isDeleted == true }
   }
 
   /// A calm header: the conversation's avatar (with the person's presence in a direct message),
@@ -1167,6 +1310,9 @@ struct ChatPane: View {
       ShareLink(item: message.body) { Label("message_share", systemImage: "square.and.arrow.up") }
     }
     if !message.isPending { sharedMessageActions(for: message) }
+    if threadId == nil && MessageSelection.isSelectable(message) && !selection.isActive {
+      Button("select", systemImage: "checkmark.circle") { startSelecting(message) }
+    }
     if message.authorId == account.userId && !message.isPending && conversation.canPost {
       Button("edit", systemImage: "pencil") {
         maybeEditing = message
@@ -1174,6 +1320,16 @@ struct ChatPane: View {
       }
       Button("delete", systemImage: "trash", role: .destructive) { maybeDeleting = message }
     }
+  }
+
+  private func startSelecting(_ message: Message) {
+    UISelectionFeedbackGenerator().selectionChanged()
+    selection.start(with: message.id)
+  }
+
+  private func toggleSelection(_ message: Message) {
+    UISelectionFeedbackGenerator().selectionChanged()
+    selection.toggle(message.id)
   }
 
   /// Up in the empty composer: the user's newest message that can still be edited (#2075).
@@ -1651,6 +1807,7 @@ struct ChatPane: View {
       }
       messages = read.map { $0.named(threadAuthors) }
       extras = readExtras
+      dropGoneFromSelection()
     } else {
       // A failed read keeps what is shown; the next change reads again.
       guard let page = await pagedFeed().reread() else { return }
@@ -1670,6 +1827,7 @@ struct ChatPane: View {
       withAnimation(isArrival ? .easeOut(duration: 0.2) : nil) { messages = page.messages }
       hasLoadedMessages = true
       extras = readExtras
+      dropGoneFromSelection()
       hasOlder = page.hasOlder
       gaps = page.gaps
       observePerf(page.messages, gaps: page.gaps)
@@ -1734,6 +1892,7 @@ struct ChatPane: View {
 
   private func reloadExtras() async {
     extras = await model.extras(conversationId: conversation.id, messageIds: messages.map(\.id))
+    dropGoneFromSelection()
   }
 
   /// While a file moves, its progress is re-read every second (the core reports changes in the
@@ -1811,6 +1970,9 @@ struct ForwardSheet: View {
   let messageId: String
   /// Only this file of the message (#241).
   var maybeAttachmentId: String?
+  /// The messages of a selection (#2070), oldest first: each goes through the single-message forward.
+  var batchIds: [String] = []
+  var onForwarded: () -> Void = {}
 
   @State private var targets: [ConversationItem] = []
   @State private var isFileGone = false
@@ -1822,7 +1984,7 @@ struct ForwardSheet: View {
           Task { await forward(to: target.id) }
         }
       }
-      .navigationTitle(maybeAttachmentId == nil ? LocalizedStringKey("forward") : LocalizedStringKey("image_forward_one"))
+      .navigationTitle(forwardTitle)
       .navigationBarTitleDisplayMode(.inline)
       .toolbar { ToolbarItem(placement: .cancellationAction) { Button("cancel") { dismiss() } } }
       .alert("file_gone", isPresented: $isFileGone) { Button("done", role: .cancel) { dismiss() } }
@@ -1830,11 +1992,25 @@ struct ForwardSheet: View {
     .task { targets = await model.conversations().filter(\.canPost) }
   }
 
+  private var forwardTitle: LocalizedStringKey {
+    if batchIds.count > 1 { return "forward_many \(batchIds.count)" }
+    return maybeAttachmentId == nil ? "forward" : "image_forward_one"
+  }
+
   /// The core sends nothing for a file that went meanwhile (never the album instead): says so here.
   private func forward(to target: String) async {
+    if batchIds.count > 1 {
+      for id in batchIds {
+        await model.perform(.forward(fromConversationId: fromConversationId, messageId: id, toConversationId: target))
+      }
+      onForwarded()
+      dismiss()
+      return
+    }
     guard let attachmentId = maybeAttachmentId else {
       await model.perform(
         .forward(fromConversationId: fromConversationId, messageId: messageId, toConversationId: target))
+      onForwarded()
       dismiss()
       return
     }

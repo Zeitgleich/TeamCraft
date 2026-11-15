@@ -16,6 +16,7 @@ use crate::components::huddle_bar::HuddleBar;
 use crate::components::icons::{Icon, IconName};
 use crate::components::log_view::ChannelFeed;
 use crate::components::security_ui::KeyChangeBanner;
+use crate::components::selection_bar::SelectionBar;
 use crate::components::sheet::MenuSurface;
 use crate::components::sliding_indicator::SlidingIndicator;
 use crate::components::tab_list::{on_tab_keys, roving_tabindex};
@@ -103,6 +104,8 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
     // Files dropped anywhere on the conversation go to its composer.
     let zone = FileDrop::provide(can_post);
     let tab = RwSignal::new(ChannelTab::Messages);
+    // Selection mode belongs to the conversation: leaving it ends it (issue #2070).
+    on_cleanup(move || state.end_selection_in(conversation));
     Some(view! {
       <section
         class="channel-view"
@@ -136,6 +139,7 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
                 id=ChannelTab::Messages.panel_id()
                 aria-labelledby=ChannelTab::Messages.tab_id()
               >
+                <SelectionBar conversation=conversation />
                 <ChannelFeed conversation=conversation />
                 {(!is_notes_to_self).then(|| view! { <TypingIndicator conversation=conversation /> })}
                 <SeenLine conversation=conversation />

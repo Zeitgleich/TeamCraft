@@ -37,6 +37,7 @@ import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.contentDescription
 import android.content.Context
+import android.text.format.DateUtils
 import android.content.Intent
 import android.graphics.Paint
 import androidx.compose.foundation.background
@@ -86,6 +87,7 @@ import de.zeitgleich.teamcraft.ui.Pictures
 import androidx.compose.material3.Button
 import uniffi.teamcraft_ffi.CallPhase
 import uniffi.teamcraft_ffi.MovedCallHint
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -197,6 +199,11 @@ import de.zeitgleich.teamcraft.ui.media.MediaFlowLaunch
 import de.zeitgleich.teamcraft.ui.MessageAction
 import de.zeitgleich.teamcraft.ui.VoiceOwner
 import de.zeitgleich.teamcraft.ui.messageActions
+import de.zeitgleich.teamcraft.ui.toggled
+import de.zeitgleich.teamcraft.ui.surviving
+import de.zeitgleich.teamcraft.ui.selectedInOrder
+import de.zeitgleich.teamcraft.ui.copiedText
+import de.zeitgleich.teamcraft.ui.canDeleteAll
 import de.zeitgleich.teamcraft.ui.EmojiInput
 import de.zeitgleich.teamcraft.ui.FeedSeed
 import de.zeitgleich.teamcraft.ui.FirstUnread
@@ -385,20 +392,60 @@ fun ConversationScreen(
   // A channel's anchor (e2ee.md §4.6.5, #1842): verified again as it opens, marked in the header.
   val isChannel = conversation?.kind == "Public" || conversation?.kind == "Private"
   val maybeAnchorMarks = rememberChannelAnchorMarks(viewModel, conversationId, isShown = isChannel)
+  // Selection mode (issue #2070): the messages picked, null while it is off. It belongs to this
+  // conversation: leaving it ends the mode, and a message deleted meanwhile drops out.
+  var maybeSelection by remember(conversationId) { mutableStateOf<Set<String>?>(null) }
+  var isForwardingSelection by remember(conversationId) { mutableStateOf(false) }
+  LaunchedEffect(messages, extras) {
+    maybeSelection?.let { picked ->
+      val kept = picked.surviving(messages, extras)
+      if (kept.size != picked.size) maybeSelection = kept
+    }
+  }
+  BackHandler(enabled = maybeSelection != null) { maybeSelection = null }
+  val selectionContext = LocalContext.current
+  val selectionScope = rememberCoroutineScope()
   ChatScaffold(
     viewModel = viewModel,
     topBar = {
       val typingPlaces by viewModel.typingPlaces.collectAsState()
-      ConversationTopBar(
-        snapshot,
-        conversation,
-        maybeNotified,
-        maybeListed,
-        onBack,
-        typing = typingIn(typingPlaces, conversationId),
-        isNameStale = maybeAnchorMarks?.isNameStale == true,
-      ) {
-        ConversationMenu(viewModel, conversationId, conversation, rights, onOpenFiles, onOpenConversation)
+      val picked = maybeSelection
+      if (picked != null) {
+        val selected = selectedInOrder(messages, picked)
+        MessageSelectionBar(
+          count = picked.size,
+          canDelete = canDeleteAll(selected, snapshot?.me?.id, rights.canPost),
+          onCancel = { maybeSelection = null },
+          onForward = { isForwardingSelection = true },
+          onCopy = {
+            copyText(
+              selectionContext,
+              copiedText(
+                selected,
+                nameOf = { snapshot?.name(it).orEmpty() },
+                timeOf = { DateUtils.formatDateTime(selectionContext, it, DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_TIME) },
+              ),
+            )
+            maybeSelection = null
+          },
+          onDelete = {
+            // The single-message delete path, once per message.
+            selected.forEach { viewModel.act(ChatActions.delete(conversationId, it.id)) }
+            maybeSelection = null
+          },
+        )
+      } else {
+        ConversationTopBar(
+          snapshot,
+          conversation,
+          maybeNotified,
+          maybeListed,
+          onBack,
+          typing = typingIn(typingPlaces, conversationId),
+          isNameStale = maybeAnchorMarks?.isNameStale == true,
+        ) {
+          ConversationMenu(viewModel, conversationId, conversation, rights, onOpenFiles, onOpenConversation)
+        }
       }
     },
     bottomBar = {
@@ -428,6 +475,16 @@ fun ConversationScreen(
         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
       )
     }
+    if (isForwardingSelection && naming != null) {
+      ForwardDialog(naming, onPick = { target ->
+        // The single-message forward, once per message, oldest first.
+        selectedInOrder(messages, maybeSelection.orEmpty()).forEach {
+          viewModel.act(ChatActions.forward(conversationId, it.id, target, ""))
+        }
+        isForwardingSelection = false
+        maybeSelection = null
+      }, onDismiss = { isForwardingSelection = false })
+    }
     MessageList(
       viewModel = viewModel,
       conversationId = conversationId,
@@ -444,6 +501,8 @@ fun ConversationScreen(
         ReplyTarget.setImage(file, file.maybeSender?.let { naming?.name(it) }.orEmpty())
       }.takeIf { rights.canPost },
       rights = rights,
+      selection = maybeSelection,
+      maybeOnSelectionChange = { maybeSelection = it },
       modifier = Modifier.weight(1f),
       bottomInset = listBottomInset,
       maybeFocusMessage = maybeFocusMessage,
@@ -931,6 +990,10 @@ private fun MessageList(
   onReactionsSeen: (List<String>) -> Unit = {},
   gaps: List<PlacedGap> = emptyList(),
   onFillGap: (GapRequest) -> Unit = {},
+  /** The messages picked in selection mode (issue #2070); null while it is off. */
+  selection: Set<String>? = null,
+  /** Changes the selection; null where selection mode isn't on offer (a thread). */
+  maybeOnSelectionChange: ((Set<String>?) -> Unit)? = null,
 ) {
   var maybeSelected by remember { mutableStateOf<Message?>(null) }
   var maybeEditingLast by remember { mutableStateOf<Message?>(null) }
@@ -981,8 +1044,12 @@ private fun MessageList(
     onOpenThread = onOpenThread,
     maybeOnReply = maybeOnReply,
     maybeOnReplyImage = maybeOnReplyImage,
+    // In selection mode a long press picks the row instead (the feed's overlay), so this isn't reached.
     onLongPress = { maybeSelected = it },
     onLongPressImage = { maybeSelectedImage = it },
+    selection = selection,
+    onToggleSelect = { message -> maybeOnSelectionChange?.invoke(selection.orEmpty().toggled(message.id)) },
+    maybeOnStartSelect = maybeOnSelectionChange?.let { change -> { message: Message -> change(setOf(message.id)) } },
     maybeOpenPicture = maybeViewingFromSheet,
     onPictureOpened = { maybeViewingFromSheet = null },
     modifier = modifier,
@@ -1009,6 +1076,7 @@ private fun MessageList(
       rights = rights,
       onOpenThread = onOpenThread,
       onDismiss = { maybeSelected = null },
+      maybeOnSelect = maybeOnSelectionChange?.let { change -> { change(setOf(message.id)) } },
     )
   }
 }
@@ -1027,6 +1095,8 @@ private fun MessageActions(
   rights: ConversationRights,
   onOpenThread: ((String) -> Unit)?,
   onDismiss: () -> Unit,
+  /** Starts selection mode with this message (issue #2070); null where it isn't on offer. */
+  maybeOnSelect: (() -> Unit)? = null,
 ) {
   val context = LocalContext.current
   val haptics = LocalHapticFeedback.current
@@ -1042,6 +1112,7 @@ private fun MessageActions(
     isDeleted = maybeExtras?.isDeleted == true,
     hasThreads = onOpenThread != null,
     wantsAcknowledgement = maybeExtras?.wantsAcknowledgement == true,
+    canSelect = maybeOnSelect != null,
   )
   ModalBottomSheet(onDismissRequest = onDismiss) {
     Column(Modifier.padding(bottom = 24.dp)) {
@@ -1066,6 +1137,10 @@ private fun MessageActions(
           MessageAction.Edit -> SheetItem(R.string.action_edit) { isEditing = true }
           MessageAction.Delete -> SheetItem(R.string.action_delete) { isConfirmingDelete = true }
           MessageAction.Forward -> SheetItem(R.string.action_forward) { isForwarding = true }
+          MessageAction.Select -> SheetItem(R.string.action_select) {
+            maybeOnSelect?.invoke()
+            onDismiss()
+          }
           MessageAction.Pin -> SheetItem(if (maybeExtras?.isPinned == true) R.string.action_unpin else R.string.action_pin) {
             viewModel.act(ChatActions.setPinned(conversationId, message.id, maybeExtras?.isPinned != true))
             onDismiss()

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- Selecting several messages (issue #2070) -->
+  <string name="action_select">Select</string>
+  <string name="selection_copy">Copy</string>
+  <string name="selection_row_checkbox">Select message</string>
+  <string name="selection_delete_refused">Only your own messages can be deleted.</string>
+  <plurals name="selection_count">
+    <item quantity="one">%d selected</item>
+    <item quantity="other">%d selected</item>
+  </plurals>
+  <plurals name="selection_delete_confirm">
+    <item quantity="one">Delete %d message for everyone?</item>
+    <item quantity="other">Delete %d messages for everyone?</item>
+  </plurals>
+</resources>
