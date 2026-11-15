@@ -6473,34 +6473,66 @@
         }
       }
     },
-    "copied": {
+    "quote_show_original": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Copied"
+            "value": "Shows the original message"
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Kopiert"
+            "value": "Zeigt die Originalnachricht"
           }
         }
       }
     },
-    "message_share": {
+    "profile_message": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Share"
+            "value": "Message"
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Teilen"
+            "value": "Nachricht"
+          }
+        }
+      }
+    },
+    "profile_call": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Call"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Anrufen"
+          }
+        }
+      }
+    },
+    "profile_open %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open profile of %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Profil von %@ öffnen"
           }
         }
       }
@@ -22501,6 +22533,54 @@
           "stringUnit": {
             "state": "translated",
             "value": "Schicke den Link an alle, mit denen du dich treffen willst."
+          }
+        }
+      }
+    },
+    "unread_divider": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New messages"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Neue Nachrichten"
+          }
+        }
+      }
+    },
+    "copied": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copied"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kopiert"
+          }
+        }
+      }
+    },
+    "message_share": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Share"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Teilen"
           }
         }
       }

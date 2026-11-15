@@ -239,6 +239,42 @@ struct PictureViewer: View {
   }
 }
 
+/// The namespace the chat's pictures and the viewer share, so the viewer can zoom out of the
+/// picture that was tapped and back into it on close (#2012).
+private struct PictureZoomNamespaceKey: EnvironmentKey {
+  static let defaultValue: Namespace.ID? = nil
+}
+
+extension EnvironmentValues {
+  var pictureZoomNamespace: Namespace.ID? {
+    get { self[PictureZoomNamespaceKey.self] }
+    set { self[PictureZoomNamespaceKey.self] = newValue }
+  }
+}
+
+extension View {
+  /// Marks a picture as where the viewer zooms from (iOS 18 and later; earlier, the viewer just covers).
+  @ViewBuilder
+  func pictureZoomSource(id: String, in namespace: Namespace.ID?) -> some View {
+    if #available(iOS 18.0, *), let namespace {
+      matchedTransitionSource(id: id, in: namespace)
+    } else {
+      self
+    }
+  }
+
+  /// The viewer grows out of its source picture and shrinks back into it; without the iOS 18
+  /// transition, or with Reduce Motion, the default presentation (a fade or a slide) stays.
+  @ViewBuilder
+  func pictureZoomTransition(id: String, in namespace: Namespace.ID, reduceMotion: Bool) -> some View {
+    if #available(iOS 18.0, *), !reduceMotion {
+      navigationTransition(.zoom(sourceID: id, in: namespace))
+    } else {
+      self
+    }
+  }
+}
+
 /// A picture to forward from the viewer.
 private struct ForwardTarget: Identifiable {
   let conversationId: String
@@ -561,6 +597,17 @@ private struct OpenQuotedPictureKey: EnvironmentKey {
   static let defaultValue: OpenQuotedPictureAction? = nil
 }
 
+/// Jumps to the message a reply's text quote points at and flashes it (#2001): the message's ID.
+struct OpenQuotedMessageAction {
+  let run: (String) -> Void
+
+  func callAsFunction(_ messageId: String) { run(messageId) }
+}
+
+private struct OpenQuotedMessageKey: EnvironmentKey {
+  static let defaultValue: OpenQuotedMessageAction? = nil
+}
+
 /// What a long press on a picture of an album offers (#241).
 struct ImageActions {
   /// Nil where the user can't reply here.
@@ -581,6 +628,11 @@ extension EnvironmentValues {
   var openQuotedPicture: OpenQuotedPictureAction? {
     get { self[OpenQuotedPictureKey.self] }
     set { self[OpenQuotedPictureKey.self] = newValue }
+  }
+
+  var openQuotedMessage: OpenQuotedMessageAction? {
+    get { self[OpenQuotedMessageKey.self] }
+    set { self[OpenQuotedMessageKey.self] = newValue }
   }
 
   var imageActions: ImageActions? {

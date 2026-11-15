@@ -28,6 +28,7 @@ struct AttachmentView: View {
   @State private var maybePreviewURL: URL?
   @State private var isPreviewRefused = false
   @State private var isWaitingToOpen = false
+  @Environment(\.pictureZoomNamespace) private var pictureZoom
   @State private var animation = AnimationPlayer()
   @State private var playChoice = PlayChoice.unset
   @State private var maybeVideo: FileInfo?
@@ -107,6 +108,7 @@ struct AttachmentView: View {
       }
     }
     .buttonStyle(.plain)
+    .pictureZoomSource(id: "\(file.message):\(file.fileId)", in: file.isViewablePicture ? pictureZoom : nil)
     .accessibilityLabel(Text(file.fileName))
     .accessibilityValue(maybeHiddenCount.map { Text("album_more_pictures \($0)") } ?? Text(verbatim: ""))
     // Beside the picture's button, not in it: a tap here stops or starts it (#201), a tap on the

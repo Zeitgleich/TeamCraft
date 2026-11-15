@@ -37,6 +37,29 @@ struct SearchFilters: Equatable {
       .components(separatedBy: .whitespacesAndNewlines).joined()
   }
 
+  /// The words and phrases typed, without hand-typed filter tokens and quotes (#2003).
+  static func terms(in text: String) -> [String] {
+    var tokens: [String] = []
+    var current = ""
+    var isQuoted = false
+    for char in text {
+      if char == "\"" {
+        isQuoted.toggle()
+      } else if char.isWhitespace && !isQuoted {
+        if !current.isEmpty { tokens.append(current) }
+        current = ""
+      } else {
+        current.append(char)
+      }
+    }
+    if !current.isEmpty { tokens.append(current) }
+    let filterKeys = ["from:", "in:", "after:", "before:", "has:"]
+    return tokens.filter { token in
+      let lower = token.lowercased()
+      return lower != "in-thread" && !filterKeys.contains { lower.hasPrefix($0) }
+    }
+  }
+
   /// The calendar day the user picked (in their time zone), as `YYYY-MM-DD`.
   static func day(_ date: Date, calendar: Calendar = .current) -> String {
     let parts = calendar.dateComponents([.year, .month, .day], from: date)
