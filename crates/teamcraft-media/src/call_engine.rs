@@ -268,6 +268,12 @@ pub struct CallEngine {
   /// When the engine was made: the base of arrival times for the jitter of received video.
   started_at: Instant,
   microphone_rtp: AudioRtpState,
+  /// The own voice's thin copy counts on its own (#1893 step 3).
+  thin_voice_rtp: AudioRtpState,
+  /// Whether the driver was told to send the thin copy.
+  is_thin_voice_sent: bool,
+  /// A receiver in the call is on a thin downlink and takes the thin copies (the SFU says so).
+  is_thin_voice_wanted: bool,
   screen_rtp: AudioRtpState,
   last_event_seq: u64,
   is_muted: bool,
@@ -324,6 +330,11 @@ pub enum CallEngineEvent {
   /// How the own voice is to be encoded from now on (#1893): a lower bitrate in longer packets
   /// while the uplink is thin, the full voice again once it has room.
   VoiceEncoding(VoiceEncoding),
+  /// Whether the own voice is to be sent a second time, at the thinnest step, for receivers on
+  /// thin downlinks (#1893 step 3): the driver runs a second encoder while it is, and hands its
+  /// frames to [`CallEngine::send_thin_audio`]. Only while the own voice is on its full step and
+  /// the uplink has room for both.
+  ThinVoice(bool),
   /// Not from the engine but from the media driver: an own track's capture gets buffers from its
   /// source it can't turn into pictures (#1805), so the others see a still picture. What came over
   /// the judged window. The UI tells the sharer, and the call's crash reports hear of it.
@@ -632,6 +643,17 @@ struct RejoinedState {
 }
 
 /// RTP numbering of one outgoing audio stream.
+/// Which of the own audio a packet is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AudioCopy {
+  /// The microphone's voice, as its voice step says.
+  Voice,
+  /// The voice's thin copy for receivers on thin downlinks (#1893 step 3).
+  ThinVoice,
+  /// The shared screen's sound.
+  Screen,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct AudioRtpState {
   sequence: SequenceNumber,
@@ -754,6 +776,9 @@ impl CallEngine {
       maybe_downlink_measurement: None,
       started_at: now,
       microphone_rtp: AudioRtpState::new(),
+      thin_voice_rtp: AudioRtpState::new(),
+      is_thin_voice_sent: false,
+      is_thin_voice_wanted: false,
       screen_rtp: AudioRtpState::new(),
       last_event_seq: 0,
       is_muted: false,
@@ -1235,7 +1260,19 @@ impl CallEngine {
       return;
     }
     self.note_speech(frame.level.has_voice_activity, now);
-    self.send_audio_frame(audio_stream, AudioOrigin::Microphone, frame, now);
+    self.send_audio_frame(audio_stream, AudioCopy::Voice, frame, now);
+  }
+
+  /// Encrypts and sends one packet of the own voice's thin copy (#1893 step 3), while
+  /// [`CallEngineEvent::ThinVoice`] said to send it.
+  pub fn send_thin_audio(&mut self, frame: &EncodedAudioFrame, now: Instant) {
+    let Phase::Joined { audio_stream, .. } = self.phase else {
+      return;
+    };
+    if self.is_muted || !self.is_thin_voice_sent {
+      return;
+    }
+    self.send_audio_frame(audio_stream, AudioCopy::ThinVoice, frame, now);
   }
 
   /// Asks the SFU for a stream for the shared screen's sound; frames flow after
@@ -1266,7 +1303,7 @@ impl CallEngine {
   /// Encrypts and sends one 20 ms frame of the shared screen's sound.
   pub fn send_screen_audio(&mut self, frame: &EncodedAudioFrame, now: Instant) {
     if let ScreenAudioState::Publishing(stream) = self.screen_audio {
-      self.send_audio_frame(stream, AudioOrigin::Screen, frame, now);
+      self.send_audio_frame(stream, AudioCopy::Screen, frame, now);
     }
   }
 
@@ -1639,6 +1676,26 @@ impl CallEngine {
     self.run_uplink_rate_probe(now);
     self.execute_overdue_transition(now);
     self.check_encryption_setup(now);
+    self.follow_thin_voice(now);
+  }
+
+  /// Tells the driver whether to send the own voice's thin copy (#1893 step 3): while a receiver
+  /// on a thin downlink takes it (the SFU says so), the voice is on its full step, the others play
+  /// long packets, and the uplink has room (not thin, no voice lost). A thin own voice is cheap
+  /// already; a thin uplink has no room for a copy.
+  fn follow_thin_voice(&mut self, now: Instant) {
+    let is_wanted = self.is_thin_voice_wanted
+      && self.is_in_call()
+      && !self.is_muted
+      && self.voice_steps.step() == VoiceStep::Full
+      && self.voice_steps.has_long_frames()
+      && !self.is_uplink_thin()
+      && !self.uplink_voice.is_hurt(now);
+    if is_wanted != self.is_thin_voice_sent {
+      self.is_thin_voice_sent = is_wanted;
+      debug!(is_wanted, "the own voice's thin copy");
+      self.event(CallEngineEvent::ThinVoice(is_wanted));
+    }
   }
 
   /// Frames DAVE couldn't encrypt or decrypt during this call, by cause (all its DAVE sessions).
@@ -1698,6 +1755,8 @@ impl CallEngine {
         self.set_retransmit_window(maybe_retransmit_window_ms);
         self.maybe_probe_bytes = maybe_probe_bytes;
         self.maybe_downlink_measurement = None;
+        // The SFU says again after the join whether a thin receiver takes the thin copies.
+        self.is_thin_voice_wanted = false;
         if !self.take_prior_link(now) {
           self.start_uplink_probe(now);
         }
@@ -1747,6 +1806,10 @@ impl CallEngine {
       },
       CallEvent::ActiveSpeakers { device_ids } => {
         self.event(CallEngineEvent::ActiveSpeakers(device_ids));
+        Ok(())
+      },
+      CallEvent::ThinVoiceWanted { is_wanted } => {
+        self.is_thin_voice_wanted = is_wanted;
         Ok(())
       },
       CallEvent::DaveExternalSender { package } => self.on_external_sender(package.as_slice()),
@@ -3716,13 +3779,7 @@ impl CallEngine {
   /// Encrypts one audio frame and sends it on `stream`. Dropped before DAVE is ready (there is no
   /// unencrypted fallback, ARCHITECTURE.md §6.2). Both of a device's audio streams share its DAVE
   /// audio encryptor, so their nonces never repeat.
-  fn send_audio_frame(
-    &mut self,
-    stream: StreamId,
-    origin: AudioOrigin,
-    frame: &EncodedAudioFrame,
-    now: Instant,
-  ) {
+  fn send_audio_frame(&mut self, stream: StreamId, copy: AudioCopy, frame: &EncodedAudioFrame, now: Instant) {
     if self.is_compromised {
       return;
     }
@@ -3736,9 +3793,10 @@ impl CallEngine {
         return;
       },
     };
-    let rtp_state = match origin {
-      AudioOrigin::Microphone => &mut self.microphone_rtp,
-      AudioOrigin::Screen => &mut self.screen_rtp,
+    let rtp_state = match copy {
+      AudioCopy::Voice => &mut self.microphone_rtp,
+      AudioCopy::ThinVoice => &mut self.thin_voice_rtp,
+      AudioCopy::Screen => &mut self.screen_rtp,
     };
     let mut header = RtpHeader::new(
       PayloadType::OPUS,
@@ -3759,7 +3817,16 @@ impl CallEngine {
     .to_bytes() else {
       return;
     };
-    let seq = self.send_media(stream, SimulcastLayer::BASE, &rtp, now);
+    let layer = if copy == AudioCopy::ThinVoice {
+      SimulcastLayer::THIN_VOICE
+    } else {
+      SimulcastLayer::BASE
+    };
+    let seq = self.send_media(stream, layer, &rtp, now);
+    // The thin copy tells nothing the voice doesn't: the voice guard watches the voice.
+    if copy == AudioCopy::ThinVoice {
+      return;
+    }
     // Voice that goes out along with a probe's padding is lost or held up by the padding when the
     // link doesn't carry the probed rate: the probe's own outcome lowers the estimate then, and
     // holding the video for it as well kept a camera on a limited link from ever settling.
@@ -6955,6 +7022,118 @@ mod tests {
 
   /// Issue #929: every answer of the SFU belongs to exactly the publication that asked for it, and
   /// one whose track was stopped before it came is unpublished at once.
+  /// #1893 step 3: the own voice's thin copy for receivers on thin downlinks.
+  mod thin_voice {
+    use super::*;
+    use crate::voice_steps::VoiceStep;
+
+    #[test]
+    fn a_full_voice_with_room_sends_its_thin_copy_on_its_own_layer() {
+      let now = Instant::now();
+      let mut alice = with_room(now);
+      alice.on_timer(now);
+      assert!(drain(&mut alice).contains(&EngineOutput::Event(CallEngineEvent::ThinVoice(true))));
+      let voice_sequence = alice.microphone_rtp.sequence;
+
+      alice.send_thin_audio(&frame(), now);
+      alice.send_thin_audio(&frame(), now);
+      let copies: Vec<(u8, u16)> = drain(&mut alice)
+        .iter()
+        .filter_map(|output| match output {
+          EngineOutput::Datagram(bytes) => MediaDatagram::parse(bytes).ok(),
+          _ => None,
+        })
+        .map(|datagram| {
+          let (rtp, _) = RtpHeader::parse(datagram.rtp).unwrap();
+          (datagram.header.layer.value(), rtp.sequence_number.0)
+        })
+        .collect();
+      let first = copies[0].1;
+      assert_eq!(
+        copies,
+        vec![
+          (SimulcastLayer::THIN_VOICE.value(), first),
+          (SimulcastLayer::THIN_VOICE.value(), first.wrapping_add(1))
+        ]
+      );
+      assert_eq!(
+        alice.microphone_rtp.sequence, voice_sequence,
+        "the voice counts on its own"
+      );
+    }
+
+    #[test]
+    fn muted_or_thin_there_is_no_copy() {
+      let now = Instant::now();
+      let mut alice = with_room(now);
+      alice.on_timer(now);
+      alice.set_muted(true);
+      alice.on_timer(now);
+      assert!(drain(&mut alice).contains(&EngineOutput::Event(CallEngineEvent::ThinVoice(false))));
+      alice.send_thin_audio(&frame(), now);
+      assert!(
+        !drain(&mut alice)
+          .iter()
+          .any(|output| matches!(output, EngineOutput::Datagram(_)))
+      );
+
+      // A thin uplink: its own voice steps down, and there is no room for a copy.
+      let mut bob = with_room(now);
+      bob.apply_uplink_probe(thin_link(), now);
+      bob.on_timer(now);
+      assert_ne!(bob.voice_steps.step(), VoiceStep::Full);
+      assert!(!drain(&mut bob).contains(&EngineOutput::Event(CallEngineEvent::ThinVoice(true))));
+    }
+
+    /// Nobody on a thin downlink: no copy, which would cost the uplink for nothing.
+    #[test]
+    fn no_copy_unless_a_thin_receiver_takes_it() {
+      let now = Instant::now();
+      let mut alice = with_room(now);
+      alice
+        .handle_signal(event(7, CallEvent::ThinVoiceWanted { is_wanted: false }), now)
+        .unwrap();
+      alice.on_timer(now);
+      assert!(!drain(&mut alice).contains(&EngineOutput::Event(CallEngineEvent::ThinVoice(true))));
+    }
+
+    #[test]
+    fn nobody_who_plays_long_packets_gets_no_copy() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      alice.maybe_probe_bytes = Some(15_000);
+      alice.apply_uplink_probe(fast_link(), now);
+      alice
+        .handle_signal(event(6, CallEvent::ThinVoiceWanted { is_wanted: true }), now)
+        .unwrap();
+      drain(&mut alice);
+      alice.on_timer(now);
+      assert!(!drain(&mut alice).contains(&EngineOutput::Event(CallEngineEvent::ThinVoice(true))));
+    }
+
+    /// In a call, on a fast uplink, with others who play long packets.
+    fn with_room(now: Instant) -> CallEngine {
+      let (mut alice, _bob) = secured_pair(now);
+      alice.maybe_probe_bytes = Some(15_000);
+      alice.voice_steps.set_long_frames(true);
+      alice.apply_uplink_probe(fast_link(), now);
+      assert_eq!(alice.voice_steps.step(), VoiceStep::Full);
+      alice
+        .handle_signal(event(6, CallEvent::ThinVoiceWanted { is_wanted: true }), now)
+        .unwrap();
+      drain(&mut alice);
+      alice
+    }
+
+    fn fast_link() -> LinkMeasurement {
+      LinkMeasurement {
+        capacity_bps: 5_000_000,
+        after_burst_bps: 5_000_000,
+        loss_percent: 0,
+      }
+    }
+  }
+
   /// The probe of the links at the start (#1762).
   mod join_probe {
     use super::*;

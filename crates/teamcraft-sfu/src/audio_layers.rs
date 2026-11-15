@@ -158,6 +158,15 @@ mod tests {
     }
   }
 
+  /// The layer is the one senders put their thin copy on.
+  #[test]
+  fn the_thin_layer_is_the_senders() {
+    assert_eq!(
+      THIN_VOICE_LAYER,
+      teamcraft_media::datagram::SimulcastLayer::THIN_VOICE.value()
+    );
+  }
+
   mod sequence {
     use super::*;
 

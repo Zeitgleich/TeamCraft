@@ -83,6 +83,8 @@ const VOICE_HURT_AT_LOWEST_AFTER: Duration = Duration::from_millis(1500);
 /// Routing state of one room.
 #[derive(Debug)]
 pub struct Forwarder {
+  /// A receiver takes the voices' thin copies: senders send them (#1893 step 3).
+  is_thin_voice_wanted: bool,
   config: ForwardingConfig,
   participants: HashMap<DeviceId, ParticipantRoute>,
   video_tracks: BTreeMap<StreamId, VideoTrackRoute>,
@@ -168,6 +170,8 @@ pub enum Effect {
     receiver: DeviceId,
     datagrams: Vec<Vec<u8>>,
   },
+  /// Whether a receiver takes the voices' thin copies now (to everyone, #1893 step 3).
+  ThinVoiceWanted(bool),
 }
 
 /// What a leaving participant took with it.
@@ -327,7 +331,13 @@ impl Forwarder {
       video_tracks: BTreeMap::new(),
       speakers: SpeakerSelector::new(config.speakers),
       last_keyframe_requests: HashMap::new(),
+      is_thin_voice_wanted: false,
     }
+  }
+
+  /// Whether a receiver takes the voices' thin copies now (#1893 step 3).
+  pub fn is_thin_voice_wanted(&self) -> bool {
+    self.is_thin_voice_wanted
   }
 
   pub fn add_participant(
@@ -512,7 +522,7 @@ impl Forwarder {
     for route in self.participants.values_mut() {
       route.voice_sequences.remove(&device_id);
     }
-    let mut effects = Vec::new();
+    let mut effects: Vec<Effect> = self.follow_thin_voice().into_iter().collect();
     if let Some(speakers) = self.speakers.remove(device_id, now) {
       effects.push(Effect::ActiveSpeakers(speakers));
     }
@@ -797,6 +807,18 @@ impl Forwarder {
       .collect()
   }
 
+  /// Whether some receiver takes the thin voices, when that changed (#1893 step 3).
+  fn follow_thin_voice(&mut self) -> Option<Effect> {
+    let is_wanted = self.participants.values().any(|participant| {
+      participant.voice_layer.is_thin() && participant.capabilities.has_long_audio_frames()
+    });
+    if is_wanted == self.is_thin_voice_wanted {
+      return None;
+    }
+    self.is_thin_voice_wanted = is_wanted;
+    Some(Effect::ThinVoiceWanted(is_wanted))
+  }
+
   /// Decides where one datagram from `sender` goes.
   pub fn route(&mut self, sender: DeviceId, datagram: &[u8], now: Instant) -> Result<Route, ForwardError> {
     let header = DatagramHeader::parse(datagram)?;
@@ -999,6 +1021,10 @@ impl Forwarder {
   /// get their resume probe even when no feedback arrives.
   pub fn on_timer(&mut self, receiver: DeviceId, now: Instant) -> Vec<Effect> {
     let mut effects: Vec<Effect> = self.run_join_probe(receiver, now).into_iter().collect();
+    if let Some(participant) = self.participants.get_mut(&receiver) {
+      participant.update_voice_layer(&self.config.audio_layers, now);
+    }
+    effects.extend(self.follow_thin_voice());
     effects.extend(self.reallocate(receiver, now));
     effects.extend(self.probe_downlink(receiver, now));
     let streams: Vec<StreamId> = self
@@ -1525,12 +1551,17 @@ impl ParticipantRoute {
       .unwrap_or_else(|| self.downlink.estimate_bps())
   }
 
+  /// Follows its downlink: whether it takes the thin voices (#1893 step 3).
+  fn update_voice_layer(&mut self, config: &AudioLayerConfig, now: Instant) -> bool {
+    let estimate_bps = self.downlink_bps();
+    let is_voice_hurt = self.voice.is_hurt(now);
+    self.voice_layer.update(config, estimate_bps, is_voice_hurt, now)
+  }
+
   /// The layer of a sender's voice it gets now (#1893): the thin copy while its downlink is thin
   /// or its voice is lost, if it plays long packets and the sender sends that copy.
   fn wanted_voice_layer(&mut self, config: &AudioLayerConfig, has_thin_voice: bool, now: Instant) -> u8 {
-    let estimate_bps = self.downlink_bps();
-    let is_voice_hurt = self.voice.is_hurt(now);
-    let is_thin = self.voice_layer.update(config, estimate_bps, is_voice_hurt, now);
+    let is_thin = self.update_voice_layer(config, now);
     if is_thin && has_thin_voice && self.capabilities.has_long_audio_frames() {
       THIN_VOICE_LAYER
     } else {
@@ -3034,6 +3065,29 @@ mod tests {
           .iter()
           .any(|effect| matches!(effect, Effect::ActiveSpeakers(_)))
       );
+    }
+
+    /// Senders hear that a receiver takes thin copies as soon as one does, and that none does
+    /// once it left.
+    #[test]
+    fn senders_hear_when_a_receiver_takes_thin_voices() {
+      let (mut forwarder, now) = three_listeners();
+      let wanted = |effects: &[Effect]| {
+        effects.iter().find_map(|effect| match effect {
+          Effect::ThinVoiceWanted(is_wanted) => Some(*is_wanted),
+          _ => None,
+        })
+      };
+      assert_eq!(
+        wanted(&forwarder.on_timer(device(2), now)),
+        None,
+        "a fast receiver"
+      );
+      assert_eq!(wanted(&forwarder.on_timer(device(3), now)), Some(true));
+      assert_eq!(wanted(&forwarder.on_timer(device(3), now)), None, "said once");
+      assert!(forwarder.is_thin_voice_wanted());
+      let removal = forwarder.remove_participant(device(3), now);
+      assert_eq!(wanted(&removal.effects), Some(false));
     }
 
     /// Device 1 speaks; device 2 has a fast downlink, device 3 a thin one. All play long packets.

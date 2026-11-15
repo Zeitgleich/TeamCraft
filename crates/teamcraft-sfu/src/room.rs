@@ -1049,6 +1049,10 @@ impl Room {
       },
     };
     state.latest_sessions.insert(participant_id, session);
+    // A receiver on a thin downlink takes the thin voices: this device sends its own too.
+    if state.forwarder.is_thin_voice_wanted() {
+      state.send_to(participant_id, CallEvent::ThinVoiceWanted { is_wanted: true });
+    }
     drop(state);
     self.joins.notify_waiters();
     info!(call_id = %self.call_id, participant_id = %participant_id, ?outcome, "participant joined");
@@ -1519,6 +1523,7 @@ impl RoomState {
     for effect in effects {
       match effect {
         Effect::ActiveSpeakers(device_ids) => self.broadcast(CallEvent::ActiveSpeakers { device_ids }),
+        Effect::ThinVoiceWanted(is_wanted) => self.broadcast(CallEvent::ThinVoiceWanted { is_wanted }),
         Effect::KeyframeRequest {
           publisher,
           stream_id,
