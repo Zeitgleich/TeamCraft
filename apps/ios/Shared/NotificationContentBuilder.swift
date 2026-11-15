@@ -27,8 +27,11 @@ struct NotificationContentBuilder {
   }
 
   /// A message notification (`presentation` is `.message` or `.quietMessage`).
+  /// `maybeSenderPicture` is an integration source's picture (a small PNG) as the device holds it;
+  /// the communication notification shows it as the sender's image in place of the initials.
   func message(
-    for notification: PushNotification, presentation: PushPresentation, base: UNNotificationContent
+    for notification: PushNotification, presentation: PushPresentation, base: UNNotificationContent,
+    maybeSenderPicture: Data? = nil
   ) -> (content: UNMutableNotificationContent, maybeIntent: INSendMessageIntent?) {
     let tag = NotificationAuthenticator().tag(for: notification.conversationId)
     let text = NotificationText(
@@ -58,7 +61,7 @@ struct NotificationContentBuilder {
     content.categoryIdentifier =
       tag != nil && notification.isConversationVerified ? NotificationCategories.messageCategory : ""
     Self.apply(presentation, flags: PushFlags(notification), to: content)
-    let maybeIntent = presentation == .message ? intent(for: notification, text: text) : nil
+    let maybeIntent = presentation == .message ? intent(for: notification, text: text, maybeSenderPicture: maybeSenderPicture) : nil
     return (content, maybeIntent)
   }
 
@@ -225,11 +228,14 @@ struct NotificationContentBuilder {
     }
   }
 
-  private func intent(for notification: PushNotification, text: NotificationText) -> INSendMessageIntent? {
+  private func intent(
+    for notification: PushNotification, text: NotificationText, maybeSenderPicture: Data?
+  ) -> INSendMessageIntent? {
     guard let senderId = notification.maybeSenderId else { return nil }
     let handle = INPersonHandle(value: senderId, type: .unknown)
     let sender = INPerson(
-      personHandle: handle, nameComponents: nil, displayName: text.senderName, image: nil,
+      personHandle: handle, nameComponents: nil, displayName: text.senderName,
+      image: maybeSenderPicture.map { INImage(imageData: $0) },
       contactIdentifier: nil, customIdentifier: senderId)
     let group = text.maybeConversationTitle.map { INSpeakableString(spokenPhrase: $0) }
     // No message text: the intent is donated to the system (Siri suggestions, search), which must

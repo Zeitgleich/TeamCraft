@@ -555,7 +555,7 @@ pub(crate) fn take_message_source(
 
 /// Keeps the picture a received message carries for devices that never read the source's
 /// announcement: only from a bot, only a valid picture that is the one the message names.
-fn take_message_picture(
+pub(crate) fn take_message_picture(
   store: &impl LocalStore,
   conversation: ConversationId,
   sender: UserId,

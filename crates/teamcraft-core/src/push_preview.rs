@@ -416,14 +416,14 @@ async fn preview_content<A: PreviewApi>(
     .ok()
     .flatten();
   if let Some(message) = local {
-    return readable_preview(store, message.sender_user_id, &message.content);
+    return readable_preview(store, conversation, message.sender_user_id, &message.content);
   }
   // The ciphertext the wake-up carries, read like a fetched message: no token, no connection
   // (issue #1670). If this device can't read it yet (a key or a sender's device it doesn't know),
   // it goes the way it went without it: the fetch, then the catch-up.
   if let Some(message) = pushed_message(wake_up, message_id) {
     match check_and_decrypt(store, wake_up, &message) {
-      Ok((sender, content)) => return readable_preview(store, sender, &content),
+      Ok((sender, content)) => return readable_preview(store, conversation, sender, &content),
       Err(error) => tracing::info!(
         target: "teamcraft_lifecycle",
         cause = failure_class(&error),
@@ -436,7 +436,7 @@ async fn preview_content<A: PreviewApi>(
     return (Err(PreviewGap::NoSession), false, false, None);
   };
   match fetch_and_decrypt(store, api, wake_up, message_id).await {
-    Ok((sender, content)) => readable_preview(store, sender, &content),
+    Ok((sender, content)) => readable_preview(store, conversation, sender, &content),
     Err(error) => {
       // The class of failure only: what the store or the server said may name more than it should.
       tracing::info!(
@@ -453,6 +453,7 @@ async fn preview_content<A: PreviewApi>(
 /// What a message this device could read shows: a hidden change names [`PreviewGap::Hidden`].
 fn readable_preview(
   store: &impl LocalStore,
+  conversation: ConversationId,
   sender: UserId,
   content: &ShownContent,
 ) -> (
@@ -473,13 +474,31 @@ fn readable_preview(
     Ok(content_preview(content)),
     is_silent(content),
     true,
-    shown_source(store, sender, content),
+    shown_source(store, conversation, sender, content),
   )
 }
 
 /// The integration source's name and picture a message of a bot shows instead of the bot's.
-fn shown_source(store: &impl LocalStore, sender: UserId, content: &ShownContent) -> Option<ShownSource> {
+///
+/// A message read from the push or the server (not yet in the store) carries the picture itself now
+/// and then: it is kept here exactly as the app keeps it on receipt, so the apps can read it by its
+/// hash. A message already stored had its picture kept and stripped when it arrived.
+fn shown_source(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  sender: UserId,
+  content: &ShownContent,
+) -> Option<ShownSource> {
   let identity = content.source()?;
+  if let Err(error) = crate::integration_sources::take_message_picture(store, conversation, sender, &identity)
+  {
+    tracing::info!(
+      target: "teamcraft_lifecycle",
+      cause = failure_class(&error),
+      conversation_id = %conversation,
+      "source picture of the push not kept"
+    );
+  }
   let is_bot = crate::integration_sources::is_known_bot(store, sender).unwrap_or(false);
   crate::integration_sources::shown_source(&identity, is_bot)
 }
@@ -902,14 +921,64 @@ mod tests {
     let store = crate::store::MemoryStore::new();
     for content in &hidden {
       assert_eq!(
-        readable_preview(&store, crate::store::nobody(), &shown(content)).0,
+        readable_preview(&store, conversation(), crate::store::nobody(), &shown(content)).0,
         Err(PreviewGap::Hidden)
       );
     }
     // A kind from a newer client may be a message: it still shows that something came.
     assert_eq!(
-      readable_preview(&store, crate::store::nobody(), &ShownContent::Unknown).0,
+      readable_preview(
+        &store,
+        conversation(),
+        crate::store::nobody(),
+        &ShownContent::Unknown
+      )
+      .0,
       Ok(PreviewContent::Unavailable)
+    );
+  }
+
+  #[test]
+  fn a_bots_source_picture_reaches_the_preview_and_is_kept_for_the_apps() {
+    let picture = png();
+    let sha256 = SourcePictureHash::from_bytes(teamcraft_crypto::source_token::source_picture_sha256(
+      picture.as_slice(),
+    ));
+    let bot = bot_id();
+    let store = crate::store::MemoryStore::new();
+    records::put_json(&store, Table::Users, &bot.to_string(), &bot_summary(bot)).unwrap();
+    let text = |maybe_picture: Option<teamcraft_proto::Base64Bytes>| ShownContent::Text {
+      body: "build failed".into(),
+      is_silent: false,
+      maybe_file: None,
+      maybe_forwarded_body: None,
+      maybe_source: Some(Box::new(teamcraft_proto::SourceIdentity {
+        maybe_id: None,
+        name: "ci".into(),
+        maybe_picture_sha256: Some(sha256),
+        maybe_picture,
+      })),
+    };
+
+    // Read from the push: the picture it carries is kept, and the hash is named.
+    let shown_source = readable_preview(&store, conversation(), bot, &text(Some(picture.clone()))).3;
+    assert_eq!(
+      shown_source.as_ref().and_then(|s| s.maybe_picture_sha256),
+      Some(sha256)
+    );
+    assert_eq!(
+      crate::integration_sources::source_picture(&store, conversation(), sha256).unwrap(),
+      Some(picture.into_vec())
+    );
+    // Read from the store (the picture was stripped on receipt): same hash.
+    let stored = readable_preview(&store, conversation(), bot, &text(None)).3;
+    assert_eq!(stored.and_then(|s| s.maybe_picture_sha256), Some(sha256));
+    // A person posting under the source's name shows no source at all.
+    let member = crate::store::nobody();
+    assert!(
+      readable_preview(&store, conversation(), member, &text(None))
+        .3
+        .is_none()
     );
   }
 
@@ -1150,5 +1219,41 @@ mod tests {
     save_push_session(&store, &session).unwrap();
     assert_eq!(push_session(&store, 999).unwrap(), Some(session));
     assert_eq!(push_session(&store, 1_000).unwrap(), None);
+  }
+
+  fn conversation() -> ConversationId {
+    ConversationId::from_snowflake(Snowflake::new(1).unwrap())
+  }
+
+  fn bot_id() -> teamcraft_proto::UserId {
+    teamcraft_proto::UserId::from_snowflake(Snowflake::new(60).unwrap())
+  }
+
+  fn bot_summary(id: teamcraft_proto::UserId) -> teamcraft_proto::UserSummary {
+    teamcraft_proto::UserSummary {
+      id,
+      maybe_username: None,
+      display_name: "bot".into(),
+      kind: teamcraft_proto::UserKind::Bot,
+      maybe_email: None,
+      maybe_organization: None,
+      maybe_has_devices: None,
+      is_awaiting_first_sign_in: false,
+      is_deactivated: false,
+      is_deleted: false,
+    }
+  }
+
+  /// A valid header and an empty image chunk.
+  fn png() -> teamcraft_proto::Base64Bytes {
+    let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13];
+    bytes.extend(*b"IHDR");
+    bytes.extend(8_u32.to_be_bytes());
+    bytes.extend(8_u32.to_be_bytes());
+    bytes.extend([1; 9]);
+    bytes.extend(0_u32.to_be_bytes());
+    bytes.extend(*b"IDAT");
+    bytes.extend([0; 4]);
+    teamcraft_proto::Base64Bytes::new(bytes)
   }
 }
