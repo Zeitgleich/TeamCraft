@@ -260,6 +260,16 @@
   color: var(--accent-strong);
 }
 
+button.mention-link {
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+  transition: filter var(--dur-fast, .12s) ease;
+}
+
+button.mention-link:hover { filter: brightness(.95); }
+button.mention-link:active { opacity: .7; }
+
 .mention-group {
   font-weight: 600;
 }
