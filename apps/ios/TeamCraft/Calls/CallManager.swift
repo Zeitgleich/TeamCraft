@@ -47,6 +47,9 @@ struct ActiveCall: Identifiable, Equatable {
   var isVideoYieldedForVoice = false
   /// Others' video streams their senders hold back for their voice (#1891): the tile says so.
   var pausedVideoStreamIds: Set<String> = []
+  /// The join waits for this device's way into the call's encryption (just added to a meeting
+  /// chat, #1994): the call screen says "Getting the call ready…".
+  var isAwaitingEncryption = false
 }
 
 /// A move of the call into a meeting room that somebody else announced in the conversation's
@@ -401,7 +404,8 @@ final class CallManager: NSObject, @unchecked Sendable {
     }
     do {
       // Muted from the first frame: no audio slips out before the mute is applied.
-      let session = try await AppModel.shared.joinCall(conversationId: conversationId, isMuted: wasMuted)
+      let session = try await AppModel.shared.joinCall(
+        conversationId: conversationId, isMuted: wasMuted, progress: self)
       guard activeCall?.id == call.id else {
         // Hung up while joining.
         session.leave()
@@ -506,7 +510,7 @@ final class CallManager: NSObject, @unchecked Sendable {
         return
       }
       do {
-        let session = try await AppModel.shared.joinCall(conversationId: call.conversationId)
+        let session = try await AppModel.shared.joinCall(conversationId: call.conversationId, progress: self)
         maybeSession = session
         configure(session)
         if var current = activeCall {
@@ -751,6 +755,18 @@ extension CallManager: PKPushRegistryDelegate {
     provider.reportCall(with: uuid, updated: update)
     // Answered while it was being opened: join now.
     joinIfReady()
+  }
+}
+
+// MARK: - The join's wait for the call's encryption (#1994)
+
+extension CallManager: JoinProgress {
+  func onAwaitingEncryption(isAwaiting: Bool) {
+    DispatchQueue.main.async {
+      guard var call = self.activeCall, call.isAwaitingEncryption != isAwaiting else { return }
+      call.isAwaitingEncryption = isAwaiting
+      self.activeCall = call
+    }
   }
 }
 

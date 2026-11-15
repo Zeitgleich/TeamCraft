@@ -194,6 +194,39 @@ pub enum AccessToken {
   SignedOut,
 }
 
+/// Told how a join gets on before it connects (#1994). Called from the engine's runtime;
+/// implementations hand over to their UI thread.
+#[uniffi::export(with_foreign)]
+pub trait JoinProgress: Send + Sync {
+  /// `true` while the join waits for this device's way into the call's encryption group (just
+  /// added to a meeting chat, the welcome still on its way): the call screen says it gets the call
+  /// ready instead of "Connecting". `false` once the wait is over, however it ended.
+  fn on_awaiting_encryption(&self, is_awaiting: bool);
+}
+
+/// The app hears `true` when a join starts waiting for the encryption group, and `false` when this
+/// is dropped: prepared, failed, or the join cancelled.
+struct AwaitingEncryption {
+  maybe_progress: Option<Arc<dyn JoinProgress>>,
+}
+
+impl AwaitingEncryption {
+  fn begin(maybe_progress: Option<Arc<dyn JoinProgress>>) -> Self {
+    if let Some(progress) = &maybe_progress {
+      progress.on_awaiting_encryption(true);
+    }
+    Self { maybe_progress }
+  }
+}
+
+impl Drop for AwaitingEncryption {
+  fn drop(&mut self) {
+    if let Some(progress) = &self.maybe_progress {
+      progress.on_awaiting_encryption(false);
+    }
+  }
+}
+
 /// Told when the local store changed, so the UI re-reads what it shows. Called on the engine
 /// thread; implementations hand over to their UI thread.
 #[uniffi::export(with_foreign)]
@@ -1777,14 +1810,19 @@ impl TeamCraft {
 
   /// Joins (or starts) the conversation's call; returns once connected. `is_muted`: the
   /// microphone stays muted from the first frame (a muted call moving into a meeting room), so
-  /// nothing is sent before an unmute.
-  #[uniffi::method(default(is_muted = false))]
+  /// nothing is sent before an unmute. `maybe_progress` hears when the join waits for this
+  /// device's way into the call's encryption (#1994), so the call screen can say it gets the call
+  /// ready.
+  #[uniffi::method(default(is_muted = false, maybe_progress = None))]
   pub async fn join_call(
     &self,
     conversation_id: String,
     is_muted: bool,
+    maybe_progress: Option<Arc<dyn JoinProgress>>,
   ) -> Result<Arc<CallSession>, TeamCraftError> {
-    let (preparation, hub) = self.prepare_call_awaiting_group(conversation_id).await?;
+    let (preparation, hub) = self
+      .prepare_call_awaiting_group(conversation_id, maybe_progress)
+      .await?;
     let maybe_prior_link = self.link.take_fresh(self.network.generation());
     calls::join(
       preparation,
@@ -2082,9 +2120,12 @@ impl TeamCraft {
   async fn prepare_call_awaiting_group(
     &self,
     conversation_id: String,
+    maybe_progress: Option<Arc<dyn JoinProgress>>,
   ) -> Result<(calls::CallPreparation, calls::CallHub), TeamCraftError> {
     let clock = SystemClock;
     let mut maybe_wait: Option<CallGroupWait<'_>> = None;
+    // Tells the app the wait is over however it ends: prepared, failed, or the join cancelled.
+    let mut maybe_waiting: Option<AwaitingEncryption> = None;
     loop {
       let conversation_id = conversation_id.clone();
       let result = self
@@ -2100,12 +2141,16 @@ impl TeamCraft {
       };
       let wait =
         maybe_wait.get_or_insert_with(|| CallGroupWait::start(&clock, CallGroupWaitSettings::default()));
+      if maybe_waiting.is_none() {
+        maybe_waiting = Some(AwaitingEncryption::begin(maybe_progress.clone()));
+      }
       let Some(pause) = wait.next_pause() else {
         return Err(TeamCraftError::CallEncryptionPending(detail));
       };
       teamcraft_core::platform::sleep(pause).await;
     }
   }
+
   /// Runs `job` on the engine thread and waits for its result.
   async fn call<R, F>(&self, job: F) -> Result<R, TeamCraftError>
   where
@@ -2211,6 +2256,26 @@ mod tests {
 
   const ACCOUNT: &str = "alice";
   const KEY: [u8; 32] = [7; 32];
+
+  /// #1994: the app hears that a join waits for the call's encryption, and that the wait is over
+  /// however it ended (prepared, failed, cancelled: the guard is dropped).
+  #[test]
+  fn the_app_hears_when_the_wait_for_the_encryption_begins_and_ends() {
+    #[derive(Default)]
+    struct Heard(std::sync::Mutex<Vec<bool>>);
+    impl JoinProgress for Heard {
+      fn on_awaiting_encryption(&self, is_awaiting: bool) {
+        self.0.lock().unwrap().push(is_awaiting);
+      }
+    }
+    let heard = Arc::new(Heard::default());
+    let waiting = AwaitingEncryption::begin(Some(heard.clone()));
+    assert_eq!(*heard.0.lock().unwrap(), vec![true]);
+    drop(waiting);
+    assert_eq!(*heard.0.lock().unwrap(), vec![true, false]);
+    // No listener: nothing to tell.
+    drop(AwaitingEncryption::begin(None));
+  }
 
   /// #1105: the apps get the core's leave rules and link, not their own copies.
   mod entry_menu {

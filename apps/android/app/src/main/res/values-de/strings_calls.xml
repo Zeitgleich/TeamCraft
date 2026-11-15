@@ -77,6 +77,7 @@
   <string name="call_channel">Anrufe</string>
   <string name="call_ongoing">TeamCraft-Anruf</string>
   <string name="call_connecting">Verbinde…</string>
+  <string name="call_getting_ready">Anruf wird vorbereitet…</string>
   <string name="call_reconnecting">Verbindung unterbrochen, wird wiederhergestellt…</string>
   <string name="call_limited_network">Eingeschränktes Netzwerk, die Gesprächsqualität kann geringer sein</string>
   <string name="call_video_held_for_voice">Deine Verbindung ist schwach: dein Video pausiert, damit deine Stimme durchkommt</string>
