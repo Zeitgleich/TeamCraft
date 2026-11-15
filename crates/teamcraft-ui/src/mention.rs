@@ -1,4 +1,4 @@
-//! Finding the `@mention`, `/command` or `:emoji` being typed in the composer, on UTF-16 offsets
+//! Finding the `@mention`, `#channel`, `/command` or `:emoji` being typed in the composer, on UTF-16 offsets
 //! (what the browser's selection reports).
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -7,6 +7,8 @@ pub enum TriggerKind {
   Command,
   /// `:po`: emoji whose shortcode or name starts with it.
   Emoji,
+  /// `#ge`: channels whose name starts with it; picking one inserts a link to the channel.
+  Channel,
 }
 
 /// Letters typed after `:` before emoji are suggested, so `:)` and `12:30` stay quiet.
@@ -16,9 +18,9 @@ const MIN_EMOJI_QUERY_CHARS: usize = 2;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Trigger {
   pub kind: TriggerKind,
-  /// What was typed after the `@`, `/` or `:`.
+  /// What was typed after the `@`, `#`, `/` or `:`.
   pub query: String,
-  /// UTF-16 offset of the `@`, `/` or `:`.
+  /// UTF-16 offset of the `@`, `#`, `/` or `:`.
   pub start: usize,
 }
 
@@ -58,6 +60,11 @@ pub fn trigger(text: &str, cursor: usize) -> Option<Trigger> {
       kind: TriggerKind::Command,
       query,
       start: 0,
+    }),
+    '#' if preceded_by_boundary && !query.contains('.') => Some(Trigger {
+      kind: TriggerKind::Channel,
+      query,
+      start: marker_at,
     }),
     ':' if preceded_by_boundary && is_emoji_query(&query) => Some(Trigger {
       kind: TriggerKind::Emoji,
@@ -115,5 +122,21 @@ mod tests {
     assert!(trigger("see http://example", 18).is_none());
     assert!(trigger("hi :-)", 6).is_none());
     assert!(trigger(":tada: ", 7).is_none());
+  }
+
+  #[test]
+  fn channels_open_after_a_boundary_only() {
+    let found = trigger("see #ge", 7).expect("a channel");
+    assert_eq!(
+      (found.kind, found.query.as_str(), found.start),
+      (TriggerKind::Channel, "ge", 4)
+    );
+    assert_eq!(
+      trigger("#", 1).map(|found| found.kind),
+      Some(TriggerKind::Channel)
+    );
+    assert!(trigger("issue#12", 8).is_none());
+    assert!(trigger("a #b.c", 6).is_none());
+    assert!(trigger("see #general now", 16).is_none());
   }
 }

@@ -43,7 +43,7 @@ use crate::markdown;
 use crate::media_formats::{displayable_type, essence, is_svg, media_type_for, needs_app_thumbnail};
 use crate::media_layout::{APP_THUMBNAIL_SIDE, thumbnail_type};
 use crate::mention::{self, TriggerKind};
-use crate::model::{ConversationId, ThreadId};
+use crate::model::{Conversation, ConversationId, ConversationKind, ThreadId};
 use crate::model::{MessageKind, User};
 use crate::notifier::{
   GroupMentionReach, group_mention_reach, needs_channel_confirmation, needs_group_confirmation,
@@ -263,6 +263,39 @@ fn mention_suggestions(
     .into_iter()
     .map(|(_, suggestion)| suggestion)
     .take(MAX_SUGGESTIONS)
+    .collect()
+}
+
+/// Channels the user can see whose name starts with, or else contains, what was typed after `#`.
+/// Picking one inserts a link to it ([`teamcraft_client_api::markdown::PERMALINK_PREFIX`]).
+fn channel_suggestions(query: &str, channels: &[Conversation]) -> Vec<Suggestion> {
+  let needle = query.to_lowercase();
+  let mut ranked: Vec<(u8, &Conversation)> = channels
+    .iter()
+    .filter(|channel| {
+      matches!(channel.kind, ConversationKind::Public | ConversationKind::Private) && !channel.is_archived
+    })
+    .filter_map(|channel| {
+      let name = channel.name.to_lowercase();
+      if name.starts_with(&needle) {
+        Some((0, channel))
+      } else {
+        name.contains(&needle).then_some((1, channel))
+      }
+    })
+    .collect();
+  ranked.sort_by_key(|(score, channel)| (*score, channel.name.to_lowercase()));
+  ranked
+    .into_iter()
+    .take(MAX_SUGGESTIONS)
+    .map(|(_, channel)| Suggestion {
+      insert: format!("{}{}", markdown::PERMALINK_PREFIX, channel.id),
+      label: format!("#{}", channel.name),
+      detail: String::new(),
+      person: None,
+      maybe_custom: None,
+      is_exact: false,
+    })
     .collect()
 }
 
@@ -992,6 +1025,16 @@ pub fn Composer(
         };
         mention_suggestions(&found.query, &people, &groups, &labels)
       },
+      TriggerKind::Channel => {
+        let channels = state.read(|backend| {
+          backend
+            .spaces()
+            .into_iter()
+            .flat_map(|space| backend.space_conversations(space.id))
+            .collect::<Vec<_>>()
+        });
+        channel_suggestions(&found.query, &channels)
+      },
       TriggerKind::Emoji => {
         crate::custom_emoji::want_set();
         let set = state.read(|backend| backend.custom_emoji());
@@ -1055,9 +1098,24 @@ pub fn Composer(
     if let Some(caret) = composer_editor::caret_text(&element)
       && let Some(found) = mention::trigger(&caret.before, caret.before.encode_utf16().count())
     {
+      if found.kind == TriggerKind::Channel {
+        let start = caret.window_start + found.start;
+        composer_editor::replace_in_text_with_link(
+          &caret.node,
+          start,
+          caret.offset,
+          &chosen.insert,
+          &chosen.label,
+        );
+        composer_editor::insert_text(" ");
+        after_edit();
+        suggestions.set(Vec::new());
+        return;
+      }
       let replacement = match found.kind {
         TriggerKind::Mention => format!("@{} ", chosen.insert),
         TriggerKind::Command => format!("/{} ", chosen.insert),
+        TriggerKind::Channel => return,
         TriggerKind::Emoji => {
           state.settings.remember_emoji(&chosen.insert);
           format!("{} ", chosen.insert)
