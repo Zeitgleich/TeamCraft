@@ -270,6 +270,8 @@ enum ChatQuery {
   case joinableSpaces
   /// Others' reactions to the user's messages here that the user hasn't seen.
   case unseenReactions(conversationId: String)
+  /// The oldest message of the conversation the user has not read (#2013).
+  case firstUnread(conversationId: String)
   case olderHistory(conversationId: String)
   /// The composer text left unsent here, from this or another device of the user.
   case draft(conversationId: String, maybeThreadId: String?)
@@ -314,6 +316,8 @@ enum ChatQuery {
       return jsonText(["kind": "joinable_spaces"])
     case .unseenReactions(let conversation):
       return jsonText(["kind": "unseen_reactions", "conversation": conversation])
+    case .firstUnread(let conversation):
+      return jsonText(["kind": "first_unread", "conversation": conversation])
     case .olderHistory(let conversation):
       return jsonText(["kind": "older_history", "conversation": conversation])
     case .scheduledMessages:

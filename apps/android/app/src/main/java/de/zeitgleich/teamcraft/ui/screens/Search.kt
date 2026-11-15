@@ -42,7 +42,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import java.time.LocalDate
 import kotlinx.coroutines.delay
@@ -61,7 +67,7 @@ import de.zeitgleich.teamcraft.core.SearchHit
 private const val TYPING_PAUSE_MS = 250L
 
 @Composable
-fun SearchScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () -> Unit) {
+fun SearchScreen(viewModel: MainViewModel, onOpen: (SearchHit) -> Unit, onBack: () -> Unit) {
   var query by rememberSaveable { mutableStateOf("") }
   var read by remember { mutableStateOf<Read<List<SearchHit>>>(Read.Loaded(emptyList())) }
   var attempt by remember { mutableIntStateOf(0) }
@@ -122,7 +128,7 @@ fun SearchScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
       }
       LazyColumn(contentPadding = padding.bottomOnly()) {
         items(hits, key = { it.message.id }) { hit ->
-          Column(Modifier.fillMaxWidth().clickable { onOpen(hit.message.conversation) }) {
+          Column(Modifier.fillMaxWidth().clickable { onOpen(hit) }) {
             Text(
               hitLocation(hit.maybeSpaceName, hit.conversationName, hit.isNotesToSelf, stringResource(R.string.notes_title)),
               style = MaterialTheme.typography.labelMedium,
@@ -138,11 +144,33 @@ fun SearchScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
               style = MaterialTheme.typography.labelLarge,
               modifier = Modifier.padding(start = 16.dp, top = 2.dp),
             )
-            Text(hit.message.body, modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 8.dp))
+            val markColor = MaterialTheme.colorScheme.primary
+            Text(
+              remember(hit.message.body, query, markColor) { highlighted(hit.message.body, SearchFilters.terms(query), markColor) },
+              modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
+            )
           }
         }
       }
     }
+  }
+}
+
+/** [body] with every occurrence of the searched [terms] emphasised, as the web's `<mark>` does (#2003). */
+internal fun highlighted(body: String, terms: List<String>, color: Color): AnnotatedString {
+  val ranges = terms.flatMap { term ->
+    Regex(Regex.escape(term), RegexOption.IGNORE_CASE).findAll(body).map { it.range }.toList()
+  }.sortedBy { it.first }
+  return buildAnnotatedString {
+    var at = 0
+    for (range in ranges) {
+      // Overlapping hits of two terms are emphasised once.
+      if (range.first < at) continue
+      append(body.substring(at, range.first))
+      withStyle(SpanStyle(fontWeight = FontWeight.Bold, color = color)) { append(body.substring(range.first, range.last + 1)) }
+      at = range.last + 1
+    }
+    append(body.substring(at))
   }
 }
 

@@ -143,6 +143,7 @@ targets:
         ITSAppUsesNonExemptEncryption: true
         NSMicrophoneUsageDescription: "TeamCraft uses the microphone for calls and for voice messages you record."
         NSCameraUsageDescription: "TeamCraft uses the camera for video calls, for photos you send and to scan the code of a new device you link."
+        NSPhotoLibraryAddUsageDescription: "TeamCraft saves pictures and videos you choose to your photo library."
         NSFaceIDUsageDescription: "TeamCraft uses Face ID to unlock the app when the app lock is on."
         NSUserActivityTypes: [INSendMessageIntent, INStartCallIntent]
         # CFBundleURLTypes: the OIDC redirect (ASWebAuthenticationSession handles it itself, but a

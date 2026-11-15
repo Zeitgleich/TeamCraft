@@ -667,7 +667,7 @@ fn FileDetails(actions: MediaActions, is_open: RwSignal<bool>) -> impl IntoView 
     <section class="lightbox-details" aria-labelledby="lightbox-details-title" on:keydown=on_keydown>
       <header class="lightbox-details-head">
         <h3 id="lightbox-details-title">{move || i18n.t("lightbox-details")}</h3>
-        <button class="icon-btn" node_ref=close_button aria-label=move || i18n.t("lightbox-details-close") on:click=move |_| close()>
+        <button class="icon-btn" node_ref=close_button aria-label=move || i18n.t("lightbox-details-close") title=move || i18n.t("lightbox-details-close") on:click=move |_| close()>
           <Icon name=IconName::Close />
         </button>
       </header>

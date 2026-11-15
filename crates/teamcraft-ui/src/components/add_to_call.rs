@@ -144,7 +144,7 @@ fn InviteToMeetingDialog(meeting: MeetingId) -> impl IntoView {
       }
       let _ = state.overlay.try_set(crate::state::Overlay::None);
       if state.is_alive() {
-        state.show_toast(done);
+        state.show_brief_toast(done);
       }
       Ok(())
     });

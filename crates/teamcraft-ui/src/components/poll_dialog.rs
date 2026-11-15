@@ -92,7 +92,8 @@ pub fn PollDialog(conversation: ConversationId) -> impl IntoView {
                 <button
                   type="button"
                   class="icon-btn"
-                  aria-label=remove_label
+                  aria-label=remove_label.clone()
+                  title=remove_label
                   on:click=move |_| options.update(|list| if index < list.len() { list.remove(index); })
                 >
                   <Icon name=IconName::Trash />
@@ -110,7 +111,7 @@ pub fn PollDialog(conversation: ConversationId) -> impl IntoView {
       <form id=POLL_FORM_ID on:submit=send novalidate>
         <header class="modal-head">
           <h2 id="poll-dialog-heading">{move || i18n.t("poll-new-title")}</h2>
-          <button type="button" class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+          <button type="button" class="icon-btn" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=move |_| state.close_overlay()>
             <Icon name=IconName::Close />
           </button>
         </header>
