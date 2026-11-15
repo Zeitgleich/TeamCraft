@@ -486,6 +486,9 @@ fn DesktopCard() -> impl IntoView {
   let is_autostart_supported = RwSignal::new(true);
   // The tray icon's look can be chosen on Linux and Windows; macOS colours its template icon itself.
   let has_tray_icon_style = RwSignal::new(false);
+  // Spell checking is the shell's to set up on Linux only (webview_spellcheck.rs); elsewhere the
+  // system's own languages apply.
+  let has_spell_check_language = RwSignal::new(false);
   let saving_prefs = PendingAction::new();
   let saving_autostart = PendingAction::new();
   // "Send to TeamCraft" in the file manager exists on Linux only; shown where the shell answers.
@@ -493,10 +496,10 @@ fn DesktopCard() -> impl IntoView {
   let saving_send_to = PendingAction::new();
   leptos::task::spawn_local(async move {
     prefs.set_if_alive(tauri::shell_prefs().await);
-    let is_mac = tauri::window_chrome()
-      .await
-      .is_none_or(|chrome| chrome.platform == WindowPlatform::Macos);
+    let platform = tauri::window_chrome().await.map(|chrome| chrome.platform);
+    let is_mac = platform.is_none_or(|platform| platform == WindowPlatform::Macos);
     has_tray_icon_style.set_if_alive(!is_mac);
+    has_spell_check_language.set_if_alive(platform == Some(WindowPlatform::Linux));
     match tauri::autostart().await {
       Ok(Some(is_on)) => autostart.set_if_alive(Some(is_on)),
       Ok(None) => is_autostart_supported.set_if_alive(false),
@@ -512,9 +515,9 @@ fn DesktopCard() -> impl IntoView {
     let Some(before) = prefs.get_untracked() else {
       return;
     };
-    let mut next = before;
+    let mut next = before.clone();
     change(&mut next);
-    prefs.set(Some(next));
+    prefs.set(Some(next.clone()));
     saving_prefs.spawn(async move {
       if let Err(error) = tauri::set_shell_prefs(next).await {
         prefs.set_if_alive(Some(before));
@@ -560,6 +563,17 @@ fn DesktopCard() -> impl IntoView {
   };
   let is_busy = Signal::derive(move || prefs.get().is_none() || saving_prefs.is_pending());
   let current = move || prefs.get().unwrap_or_default();
+  let i18n = use_i18n();
+  // The system's language first, then the languages dictionaries usually exist for, by their own name.
+  let spell_check_options = move || {
+    std::iter::once((String::new(), i18n.t("settings-spell-check-system")))
+      .chain(
+        SPELL_CHECK_LANGUAGES
+          .iter()
+          .map(|(locale, name)| ((*locale).to_owned(), (*name).to_owned())),
+      )
+      .collect::<Vec<_>>()
+  };
 
   view! {
     <SettingsCard heading="settings-desktop">
@@ -602,6 +616,19 @@ fn DesktopCard() -> impl IntoView {
           save(|prefs, on| prefs.title_bar = if on { TitleBar::System } else { TitleBar::Custom }, on)
         })
       />
+      <Show when=move || has_spell_check_language.get()>
+        <SelectRow
+          label="settings-spell-check-language"
+          hint="settings-spell-check-language-hint"
+          options=spell_check_options()
+          is_raw_labels=true
+          is_disabled=is_busy
+          value=Signal::derive(move || current().spell_check_language)
+          on_change=Callback::new(move |locale: String| {
+            save_with(&move |prefs: &mut tauri::ShellPrefs| prefs.spell_check_language.clone_from(&locale));
+          })
+        />
+      </Show>
       <Show when=move || has_tray_icon_style.get()>
         <SegmentedRow
           label="settings-tray-icon"
@@ -620,6 +647,23 @@ fn DesktopCard() -> impl IntoView {
     </SettingsCard>
   }
 }
+
+/// Languages the spell checking setting offers: the locale WebKit's dictionaries are found by, and
+/// the language's own name.
+const SPELL_CHECK_LANGUAGES: [(&str, &str); 12] = [
+  ("en_US", "English (US)"),
+  ("en_GB", "English (UK)"),
+  ("de_DE", "Deutsch"),
+  ("fr_FR", "Français"),
+  ("es_ES", "Español"),
+  ("it_IT", "Italiano"),
+  ("nl_NL", "Nederlands"),
+  ("pt_BR", "Português (Brasil)"),
+  ("pl_PL", "Polski"),
+  ("sv_SE", "Svenska"),
+  ("cs_CZ", "Čeština"),
+  ("tr_TR", "Türkçe"),
+];
 
 /// The tray icon style's value in the settings' choices; a style of a newer app shows as colour.
 fn tray_icon_slug(style: TrayIconStyle) -> &'static str {

@@ -1,11 +1,15 @@
 //! Tray icon, unread badge and showing the window again. The UI sends the unread count and the
 //! menu texts in its language (`tray_update`); the shell owns the OS side.
 //!
-//! | Platform | Unread badge                                     | Tray click                  |
-//! |----------|--------------------------------------------------|-----------------------------|
-//! | Linux    | launcher badge (LauncherEntry signal), tray dot  | menu only (no click events) |
-//! | macOS    | dock badge, tray dot and count in the menu bar   | left click shows the window |
-//! | Windows  | taskbar overlay dot, tray dot                    | left click shows the window |
+//! | Platform | Unread badge                                     | Tray click                              |
+//! |----------|--------------------------------------------------|-----------------------------------------|
+//! | Linux    | launcher badge (LauncherEntry signal), tray dot  | menu only (no click events)             |
+//! | macOS    | dock badge, tray dot and count in the menu bar   | left click shows or hides the window    |
+//! | Windows  | taskbar overlay dot, tray dot                    | left click shows or hides the window    |
+//!
+//! Linux: the tray goes through libayatana-appindicator, which has no StatusNotifierItem
+//! `Activate` (no click event at all), so a click there only opens the menu. Toggling on a click
+//! would need a StatusNotifierItem of our own over D-Bus instead of the appindicator (#2065).
 //!
 //! The tray dot is a red dot drawn into the tray icon's top right while anything is unread (in the
 //! menu bar's own colour on macOS, where the icon is a template).
@@ -151,7 +155,7 @@ pub fn install(app: &tauri::App) -> tauri::Result<()> {
         ..
       } = event
       {
-        show_main_window(tray.app_handle());
+        toggle_main_window(tray.app_handle());
       }
     });
   builder = builder.icon(tray_icon(current_style(app.handle()), false, TrayCallState::Idle));
@@ -426,6 +430,43 @@ fn parse_language(locale: &str) -> MenuLanguage {
     MenuLanguage::German
   } else {
     MenuLanguage::English
+  }
+}
+
+/// What a tray click does to the main window (#2065).
+#[derive(Debug, PartialEq, Eq)]
+enum TrayToggle {
+  Show,
+  Hide,
+}
+
+/// A click hides the window only while the user is looking at it (shown, not minimized, focused);
+/// hidden, minimized or behind other windows it comes to the front.
+fn tray_toggle(is_visible: bool, is_minimized: bool, is_focused: bool) -> TrayToggle {
+  if is_visible && !is_minimized && is_focused {
+    TrayToggle::Hide
+  } else {
+    TrayToggle::Show
+  }
+}
+
+/// Left click on the tray icon: hides the window when it is in front, else shows it.
+fn toggle_main_window(app: &AppHandle) {
+  let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
+    return;
+  };
+  let toggle = tray_toggle(
+    window.is_visible().unwrap_or(false),
+    window.is_minimized().unwrap_or(false),
+    window.is_focused().unwrap_or(false),
+  );
+  match toggle {
+    TrayToggle::Show => show_main_window(app),
+    TrayToggle::Hide => {
+      if let Err(error) = window.hide() {
+        tracing::debug!(%error, "could not hide the window");
+      }
+    },
   }
 }
 
@@ -780,6 +821,15 @@ impl Dot {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn a_tray_click_hides_the_window_only_while_it_is_in_front() {
+    assert_eq!(tray_toggle(true, false, true), TrayToggle::Hide);
+    // Hidden, minimized or behind other windows: it comes to the front.
+    assert_eq!(tray_toggle(false, false, false), TrayToggle::Show);
+    assert_eq!(tray_toggle(true, true, true), TrayToggle::Show);
+    assert_eq!(tray_toggle(true, false, false), TrayToggle::Show);
+  }
 
   #[test]
   fn parses_posix_locales() {

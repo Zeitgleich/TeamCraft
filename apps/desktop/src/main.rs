@@ -50,6 +50,7 @@ mod webview_menu;
 mod webview_recovery;
 #[cfg(target_os = "linux")]
 mod webview_scrolling;
+mod webview_spellcheck;
 mod window_chrome;
 #[cfg(windows)]
 mod windows_shell;
@@ -549,10 +550,12 @@ fn create_main_window(app: &tauri::AppHandle, maybe_was_visible: Option<bool>) -
   {
     let dropped = app.state::<Arc<DroppedFilesState>>().inner().clone();
     let handle = app.clone();
+    let spell_check_language = app.state::<ShellPrefsState>().get().spell_check_language;
     let configured = window.with_webview(move |webview| {
       let webview = webview.inner();
       webview_memory::configure(&webview);
       webview_scrolling::configure(&webview);
+      webview_spellcheck::configure(&webview, &spell_check_language);
       webview_menu::filter_menus(&webview);
       webview_recovery::watch(&webview, handle.clone());
       dropped_files::watch(&webview, dropped, handle);

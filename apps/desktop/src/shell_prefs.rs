@@ -15,7 +15,7 @@ use crate::window_chrome::{self, TITLE_BAR_ENV};
 
 const FILE_NAME: &str = "shell.json";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ShellPrefs {
   /// Closing the window hides it; the app keeps running (and notifying) in the tray.
@@ -26,6 +26,8 @@ pub struct ShellPrefs {
   pub title_bar: TitleBar,
   /// The tray icon's look on Linux and Windows (#726).
   pub tray_icon: TrayIconStyle,
+  /// The language spell checking uses, a locale such as `de_DE`; empty: the system's (#2064).
+  pub spell_check_language: String,
 }
 
 impl Default for ShellPrefs {
@@ -36,6 +38,7 @@ impl Default for ShellPrefs {
       is_start_minimized: false,
       title_bar: default_title_bar(),
       tray_icon: TrayIconStyle::default(),
+      spell_check_language: String::new(),
     }
   }
 }
@@ -68,7 +71,11 @@ impl ShellPrefsState {
   }
 
   pub fn get(&self) -> ShellPrefs {
-    *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    self
+      .0
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clone()
   }
 
   fn set(&self, prefs: ShellPrefs) {
@@ -88,7 +95,7 @@ pub fn shell_prefs_set(
   prefs: ShellPrefs,
 ) -> Result<(), ShellPrefsError> {
   let previous = state.get();
-  state.set(prefs);
+  state.set(prefs.clone());
   if prefs.title_bar != previous.title_bar
     && let Some(window) = app.get_webview_window(MAIN_WINDOW)
   {
@@ -96,6 +103,17 @@ pub fn shell_prefs_set(
   }
   if prefs.tray_icon != previous.tray_icon {
     crate::tray::refresh_icon(&app);
+  }
+  #[cfg(target_os = "linux")]
+  if prefs.spell_check_language != previous.spell_check_language
+    && let Some(window) = app.get_webview_window(MAIN_WINDOW)
+  {
+    let language = prefs.spell_check_language.clone();
+    if let Err(error) = window.with_webview(move |webview| {
+      crate::webview_spellcheck::configure(&webview.inner(), &language);
+    }) {
+      tracing::warn!(%error, "could not change the spell checking language");
+    }
   }
   let path = path(&app).ok_or_else(|| ShellPrefsError {
     kind: "failed",
@@ -147,6 +165,7 @@ mod tests {
       is_start_minimized: true,
       title_bar: TitleBar::System,
       tray_icon: TrayIconStyle::White,
+      spell_check_language: "de_DE".to_owned(),
     };
     let text = serde_json::to_string(&prefs).unwrap_or_default();
     assert_eq!(parse(&text), prefs);

@@ -734,7 +734,7 @@ pub async fn set_zoom(percent: u16) {
 
 /// The desktop shell's own preferences (closing to the tray, starting minimized, the title bar,
 /// the tray icon's look). Sent back whole, so every field the shell has must be here.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellPrefs {
   pub is_close_to_tray: bool,
   pub is_start_minimized: bool,
@@ -742,6 +742,9 @@ pub struct ShellPrefs {
   pub title_bar: TitleBar,
   #[serde(default)]
   pub tray_icon: TrayIconStyle,
+  /// The spell checking language as a locale (`de_DE`); empty: the system's (#2064).
+  #[serde(default)]
+  pub spell_check_language: String,
 }
 
 /// Desktop only: who draws the title bar and which window controls the UI shows.

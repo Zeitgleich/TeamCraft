@@ -150,30 +150,42 @@ fn custom_emoji_suggestions(query: &str, set: &CustomEmojiSet) -> Vec<Suggestion
     .collect()
 }
 
-/// Emoji whose shortcode or name starts with what was typed after `:`, best first, in the user's
-/// skin tone; only those the device's font draws.
-fn emoji_suggestions(query: &str, tone: SkinTone) -> Vec<Suggestion> {
+/// Emoji whose shortcode or name starts with what was typed after `:`, in the user's skin tone;
+/// only those the device's font draws. The ones used recently (`recent`, newest first, as the
+/// pickers keep them) come first, then the catalog's order (#2063).
+fn emoji_suggestions(query: &str, tone: SkinTone, recent: &[String]) -> Vec<Suggestion> {
   let maybe_newest = emoji_support::newest_drawable();
-  emoji_catalog::search(query)
+  let mut drawn: Vec<(&emoji_catalog::CatalogEmoji, &'static str)> = emoji_catalog::search(query)
     .into_iter()
     .filter(|entry| emoji_support::can_draw(entry, maybe_newest))
-    .take(MAX_SUGGESTIONS)
     .map(|entry| {
       let emoji = if emoji_support::can_draw_skin_tones(entry, maybe_newest) {
         entry.with_skin_tone(tone)
       } else {
         entry.emoji
       };
-      Suggestion {
-        insert: emoji.to_owned(),
-        label: entry
-          .shortcode()
-          .map_or_else(|| emoji.to_owned(), |code| format!("{emoji} :{code}:")),
-        detail: String::new(),
-        person: None,
-        maybe_custom: None,
-        is_exact: false,
-      }
+      (entry, emoji)
+    })
+    .collect();
+  // Stable: what was not used recently keeps the catalog's relevance order.
+  drawn.sort_by_key(|(entry, emoji)| {
+    recent
+      .iter()
+      .position(|used| used == emoji || used == entry.emoji)
+      .unwrap_or(usize::MAX)
+  });
+  drawn
+    .into_iter()
+    .take(MAX_SUGGESTIONS)
+    .map(|(entry, emoji)| Suggestion {
+      insert: emoji.to_owned(),
+      label: entry
+        .shortcode()
+        .map_or_else(|| emoji.to_owned(), |code| format!("{emoji} :{code}:")),
+      detail: String::new(),
+      person: None,
+      maybe_custom: None,
+      is_exact: false,
     })
     .collect()
 }
@@ -1042,6 +1054,7 @@ pub fn Composer(
         list.extend(emoji_suggestions(
           &found.query,
           state.settings.emoji_skin_tone.get_untracked(),
+          &state.settings.recent_emoji.get_untracked(),
         ));
         list.truncate(MAX_SUGGESTIONS);
         list
@@ -2455,13 +2468,33 @@ mod tests {
 
   #[test]
   fn emoji_suggestions_insert_the_emoji_in_the_skin_tone() {
-    let found = emoji_suggestions("poo", SkinTone::Default);
+    let found = emoji_suggestions("poo", SkinTone::Default, &[]);
     assert_eq!(found.first().map(|item| item.insert.as_str()), Some("💩"));
     assert_eq!(found.first().map(|item| item.label.as_str()), Some("💩 :hankey:"));
     assert!(found.len() <= MAX_SUGGESTIONS);
-    let waves = emoji_suggestions("wave", SkinTone::Medium);
+    let waves = emoji_suggestions("wave", SkinTone::Medium, &[]);
     assert_eq!(waves.first().map(|item| item.insert.as_str()), Some("👋🏽"));
-    assert!(emoji_suggestions("nothing_like_this", SkinTone::Default).is_empty());
+    assert!(emoji_suggestions("nothing_like_this", SkinTone::Default, &[]).is_empty());
+  }
+
+  #[test]
+  fn recently_used_emoji_come_first_newest_first_and_the_rest_keep_their_order() {
+    let plain = emoji_suggestions("smile", SkinTone::Default, &[]);
+    assert!(plain.len() >= 3, "the catalog has several smile emoji");
+    let last = plain.last().map(|item| item.insert.clone()).unwrap_or_default();
+    let middle = plain[1].insert.clone();
+    let recent = vec![last.clone(), middle.clone()];
+    let ranked = emoji_suggestions("smile", SkinTone::Default, &recent);
+    let inserts: Vec<&str> = ranked.iter().map(|item| item.insert.as_str()).collect();
+    assert_eq!(&inserts[..2], [last.as_str(), middle.as_str()]);
+    // Everything else stays in the catalog's order.
+    let rest: Vec<&str> = inserts[2..].to_vec();
+    let expected: Vec<&str> = plain
+      .iter()
+      .map(|item| item.insert.as_str())
+      .filter(|insert| *insert != last && *insert != middle)
+      .collect();
+    assert_eq!(rest, expected[..rest.len()]);
   }
 
   #[test]
