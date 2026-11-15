@@ -72,7 +72,7 @@ pub fn ShortcutsModal() -> impl IntoView {
     <Modal labelled_by="shortcuts-modal-title" class="modal-small">
       <header class="modal-head">
         <h2 id="shortcuts-modal-title">{move || i18n.t("shortcuts-title")}</h2>
-        <button class="icon-btn" aria-label=move || i18n.t("close") data-autofocus on:click=move |_| state.close_overlay()>
+        <button class="icon-btn" aria-label=move || i18n.t("close") title=move || i18n.t("close") data-autofocus on:click=move |_| state.close_overlay()>
           <Icon name=IconName::Close />
         </button>
       </header>

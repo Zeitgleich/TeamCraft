@@ -79,6 +79,12 @@ private func styledRun(
     } else if isGroup || names.usernames.contains(lowered) {
       piece.inlinePresentationIntent = .stronglyEmphasized
       piece.foregroundColor = colors.mention
+      // A person's mention opens their profile (#2002); the conversation's link handler takes it.
+      if !isGroup, let encoded = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+        let target = URL(string: profilePrefix + encoded)
+      {
+        piece.link = target
+      }
     }
   }
   var intent = piece.inlinePresentationIntent ?? []

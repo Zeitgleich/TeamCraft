@@ -352,7 +352,7 @@ pub fn ShareNotice(inbox: ShareInbox) -> impl IntoView {
             <button
               type="button"
               class="icon-btn"
-              aria-label=move || i18n.t("close")
+              aria-label=move || i18n.t("close") title=move || i18n.t("close")
               on:click=move |_| inbox.maybe_failure.set(None)
             >
               <Icon name=IconName::Close />
@@ -467,7 +467,7 @@ pub fn ShareDialog() -> impl IntoView {
     <Modal labelled_by="share-into-title" class="modal-small">
       <header class="modal-head">
         <h2 id="share-into-title">{move || i18n.t("share-into-title")}</h2>
-        <button type="button" class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+        <button type="button" class="icon-btn" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=move |_| state.close_overlay()>
           <Icon name=IconName::Close />
         </button>
       </header>

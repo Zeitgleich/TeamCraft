@@ -53,6 +53,14 @@ struct ChatPane: View {
   @State private var isPictureGone = false
   @State private var maybeDeleting: Message?
   @State private var isAtBottom = true
+  /// A copy just happened: the "Copied" pill shows for a moment (#2014).
+  @State private var isCopiedShown = false
+  /// The oldest unread message when the conversation was opened, with the divider above it (#2013).
+  @State private var maybeFirstUnreadId: String?
+  /// The opening read looked for unread messages already.
+  @State private var hasLookedForUnread = false
+  /// The pictures of the chat and the viewer zooming out of them (#2012).
+  @Namespace private var pictureZoom
   @State private var newBelowCount = 0
   @State private var isSendFailed = false
   @State private var isScheduleTooLarge = false
@@ -96,6 +104,12 @@ struct ChatPane: View {
   @State private var rowsOnScreen: Set<String> = []
   /// The message the heart button goes to, until its row is loaded.
   @State private var maybeReactionTarget: String?
+  /// The person whose profile an @mention or an avatar opened (#2002).
+  @State private var maybeProfile: PeopleSnapshot.Person?
+  /// A reply's quote was tapped (#2001): its original, handed to the same jump as the heart button.
+  @State private var maybeQuoteTarget: String?
+  /// The jump under way came from a quote, so a missing original is told.
+  @State private var isQuoteJump = false
   /// A call about to be joined whose running call has the notetaker in it: the user confirms
   /// after the notice (`true`: with video).
   @State private var maybePreJoin: PreJoinNotice?
@@ -228,6 +242,7 @@ struct ChatPane: View {
     .alert("file_gone", isPresented: $isPictureGone) { Button("done", role: .cancel) {} }
     .fullScreenCover(item: $maybeViewing) { target in
       PictureViewer(target: target, maybeOnReply: canReply ? startImageReply : nil)
+        .pictureZoomTransition(id: target.id, in: pictureZoom, reduceMotion: reduceMotion)
     }
     .fullScreenCover(item: $maybeVideo) { video in VideoViewer(opened: video) }
     .sheet(item: $maybeShowingEdits) { target in
@@ -274,10 +289,20 @@ struct ChatPane: View {
         .padding(.vertical, 6)
       }
       messageList
+        .overlay(alignment: .top) {
+          if isCopiedShown {
+            CopiedPill()
+              .padding(.top, 8)
+              .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
+          }
+        }
         .environment(\.openPicture, OpenPictureAction { file in maybeViewing = PictureTarget(file: file) })
+        .environment(\.pictureZoomNamespace, pictureZoom)
         .environment(\.areAnimationsCovered, maybeViewing != nil || maybeVideo != nil)
         .environment(\.openVideo, OpenPictureAction { file in maybeVideo = file })
         .environment(\.openQuotedPicture, OpenQuotedPictureAction(run: openQuotedPicture))
+        .environment(\.openProfile, OpenProfileAction { id in Task { maybeProfile = await model.person(userId: id) } })
+        .environment(\.openQuotedMessage, OpenQuotedMessageAction { id in maybeQuoteTarget = id })
         .environment(
           \.imageActions,
           ImageActions(
@@ -348,12 +373,20 @@ struct ChatPane: View {
     .alert("error_too_large", isPresented: $isScheduleTooLarge) {
       Button("done", role: .cancel) {}
     }
+    .sheet(item: $maybeProfile) { person in
+      ProfileSheet(person: person) { conversationId in model.openConversationId = conversationId }
+    }
     .alert("permalink_unavailable", isPresented: $isPermalinkMissing) {
       Button("done", role: .cancel) {}
     }
     // Message links open in the app; web links go to the browser as usual.
     .environment(\.openURL, OpenURLAction { url in
       guard url.scheme == "teamcraft" else { return .systemAction }
+      if url.absoluteString.hasPrefix(profilePrefix) {
+        let username = String(url.absoluteString.dropFirst(profilePrefix.count)).removingPercentEncoding
+        Task { maybeProfile = await model.person(username: username) }
+        return .handled
+      }
       Task { await openPermalink(url.absoluteString) }
       return .handled
     })
@@ -404,6 +437,7 @@ struct ChatPane: View {
                 ForEach(section.entries) { entry in
                   // One container whether or not a hole follows, so a row keeps its identity.
                   VStack(alignment: .leading, spacing: 0) {
+                    if entry.id == maybeFirstUnreadId { UnreadDivider() }
                     entryRow(entry, look: look, listWidth: listWidth)
                     ForEach(entry.gapsAfter, id: \.after) { gap in gapRow(gap) }
                   }
@@ -414,6 +448,7 @@ struct ChatPane: View {
                     fillGapIfNear()
                   }
                   .onDisappear { rowsOnScreen.remove(entry.id) }
+                  .transition(reduceMotion ? .identity : .opacity.combined(with: .scale(scale: 0.96, anchor: .bottom)))
                 }
               } header: {
                 DayPill(date: section.day)
@@ -456,6 +491,18 @@ struct ChatPane: View {
           focusReactionTarget(proxy)
         }
         .onChange(of: model.focusMessageId) { _, _ in focusLinkedMessage(proxy) }
+        // Opens at the first unread message when it is loaded; otherwise at the end (#2013).
+        .onChange(of: maybeFirstUnreadId) { _, id in
+          guard let id, model.focusMessageId == nil, messages.contains(where: { $0.id == id }) else { return }
+          DispatchQueue.main.async { proxy.scrollTo(id, anchor: .top) }
+        }
+        .onChange(of: maybeQuoteTarget) { _, target in
+          guard let target else { return }
+          maybeQuoteTarget = nil
+          maybeReactionTarget = target
+          isQuoteJump = true
+          focusReactionTarget(proxy)
+        }
         .onChange(of: messages.last?.id) { _, last in
           guard last != nil, model.focusMessageId == nil, maybeHighlighted == nil else { return }
           // Own messages always come into view; others' only while reading at the bottom.
@@ -1021,7 +1068,13 @@ struct ChatPane: View {
         maybeThread = ThreadTarget(threadId: message.maybeThreadId ?? message.id)
       }
     }
-    Button("copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = message.body }
+    Button("copy", systemImage: "doc.on.doc") {
+      UIPasteboard.general.string = message.body
+      confirmCopy()
+    }
+    if !message.body.isEmpty && message.maybePlaceholder == nil {
+      ShareLink(item: message.body) { Label("message_share", systemImage: "square.and.arrow.up") }
+    }
     if !message.isPending { sharedMessageActions(for: message) }
     if message.authorId == account.userId && !message.isPending && conversation.canPost {
       Button("edit", systemImage: "pencil") {
@@ -1096,10 +1149,17 @@ struct ChatPane: View {
     guard let target = maybeReactionTarget else { return }
     guard messages.contains(where: { $0.id == target }) else {
       // Older than what is loaded: page back until it is, or give up at the start.
-      if hasOlder { Task { await loadOlder() } } else { maybeReactionTarget = nil }
+      if hasOlder {
+        Task { await loadOlder() }
+      } else {
+        maybeReactionTarget = nil
+        if isQuoteJump { isPermalinkMissing = true }
+        isQuoteJump = false
+      }
       return
     }
     maybeReactionTarget = nil
+    isQuoteJump = false
     maybeHighlighted = target
     withAnimation(scrollAnimation) { proxy.scrollTo(target, anchor: .center) }
     Task {
@@ -1136,6 +1196,7 @@ struct ChatPane: View {
       Task {
         if let link = await model.permalink(conversationId: conversation.id, messageId: message.id) {
           UIPasteboard.general.string = link
+          confirmCopy()
         }
       }
     }
@@ -1148,6 +1209,8 @@ struct ChatPane: View {
   }
 
   private func react(_ message: Message, _ emoji: String) {
+    // Light, like the system's own toggles; UIKit leaves it out when the user turned haptics off (#2004).
+    UISelectionFeedbackGenerator().selectionChanged()
     Task {
       await model.perform(.toggleReaction(conversationId: conversation.id, messageId: message.id, emoji: emoji))
     }
@@ -1219,6 +1282,7 @@ struct ChatPane: View {
     if let editing = maybeEditing {
       guard !body.isEmpty else { return }
       draft = ""
+      feelSend()
       maybeEditing = nil
       await model.perform(.editMessage(conversationId: conversation.id, messageId: editing.id, body: body))
     } else if otherFiles.contains(where: { $0.fileState == .expired }) {
@@ -1228,6 +1292,7 @@ struct ChatPane: View {
     } else if attachments.isEmpty && sendableOtherFiles.isEmpty && maybeReply == nil {
       guard !body.isEmpty else { return }
       draft = ""
+      feelSend()
       if !(await model.send(conversationId: conversation.id, threadId: threadId, body: body)) {
         // Nothing was sent: the text stays for another try.
         draft = body
@@ -1240,6 +1305,7 @@ struct ChatPane: View {
       let sentIds = Set(files.compactMap(\.maybeDraftId) + fromDraft.map(\.id))
       let replying = maybeReply
       draft = ""
+      feelSend()
       attachments = []
       goneDraftIds.formUnion(sentIds)
       maybeReply = nil
@@ -1256,6 +1322,21 @@ struct ChatPane: View {
       }
     }
     await reload()
+  }
+
+  /// Says a copy worked: a success tap and a short "Copied" pill, as iOS has nothing of its own for it.
+  private func confirmCopy() {
+    UINotificationFeedbackGenerator().notificationOccurred(.success)
+    withAnimation(reduceMotion ? nil : .spring(duration: 0.3, bounce: 0)) { isCopiedShown = true }
+    Task {
+      try? await Task.sleep(for: .seconds(1.5))
+      withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { isCopiedShown = false }
+    }
+  }
+
+  /// A light tap as the message leaves the composer (#2004).
+  private func feelSend() {
+    UIImpactFeedbackGenerator(style: .light).impactOccurred()
   }
 
   /// Sends the recorded take of this composer as a voice message, with the reply it answers.
@@ -1419,9 +1500,20 @@ struct ChatPane: View {
     } else {
       // A failed read keeps what is shown; the next change reads again.
       guard let page = await pagedFeed().reread() else { return }
+      // Before the first messages show, and before they are marked read below.
+      if !hasLookedForUnread {
+        hasLookedForUnread = true
+        if conversation.unreadCount > 0 {
+          maybeFirstUnreadId = await model.firstUnread(conversationId: conversation.id)
+        }
+      }
       let readExtras = await model.extras(conversationId: conversation.id, messageIds: page.messages.map(\.id))
       await loadDisplayNamesOnce()
-      messages = page.messages
+      // A message that arrives at the end eases in; the first load and history paging don't animate (#2005).
+      let isArrival =
+        !reduceMotion && !messages.isEmpty && page.messages.first?.id == messages.first?.id
+        && page.messages.count > messages.count && page.messages.last?.id != messages.last?.id
+      withAnimation(isArrival ? .easeOut(duration: 0.2) : nil) { messages = page.messages }
       extras = readExtras
       hasOlder = page.hasOlder
       gaps = page.gaps
