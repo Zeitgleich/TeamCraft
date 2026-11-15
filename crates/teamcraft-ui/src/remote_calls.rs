@@ -23,7 +23,7 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use futures_channel::oneshot;
-use futures_util::future::select;
+use futures_util::future::{Either, select};
 use js_sys::Promise;
 use leptos::task::spawn_local;
 use serde_json::json;
@@ -373,7 +373,10 @@ impl RemoteCalls {
       let Some(pause) = wait.next_pause() else {
         break;
       };
-      self.pause_for_group(pause).await;
+      if self.pause_for_group(pause).await && !self.is_group_wait_ended() {
+        // Woken by a change: still no sooner than the shortest pause after the last attempt.
+        teamcraft_core::platform::sleep(wait.after_wake()).await;
+      }
       if self.is_group_wait_ended() {
         result = Ok(None);
         break;
@@ -384,14 +387,16 @@ impl RemoteCalls {
     result
   }
 
-  /// Waits `pause`, or less when the core's data changes or the user leaves.
-  async fn pause_for_group(&self, pause: std::time::Duration) {
+  /// Waits `pause`, or less when the core's data changes or the user leaves; returns whether it
+  /// was woken before the pause was over.
+  async fn pause_for_group(&self, pause: std::time::Duration) -> bool {
     let (wake, woken) = oneshot::channel();
     self.group_wakes.borrow_mut().push(wake);
     let sleep = Box::pin(teamcraft_core::platform::sleep(pause));
     // Woken or not: the receiver goes here, so a waker left behind is dropped below.
-    drop(select(sleep, woken).await);
+    let is_woken = matches!(select(sleep, woken).await, Either::Right(_));
     self.group_wakes.borrow_mut().retain(|wake| !wake.is_canceled());
+    is_woken
   }
 
   /// Whether the user left or joined anew since the waiting join started: it gives up.

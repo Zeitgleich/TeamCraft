@@ -33,6 +33,8 @@ pub struct CallGroupWait<'c> {
   clock: &'c dyn Clock,
   settings: CallGroupWaitSettings,
   started_ms: i64,
+  /// When the pause before the next attempt began (right after the last attempt).
+  paused_at_ms: i64,
   next_pause: Duration,
 }
 
@@ -53,6 +55,7 @@ impl<'c> CallGroupWait<'c> {
       clock,
       settings,
       started_ms: clock.now_ms(),
+      paused_at_ms: clock.now_ms(),
       next_pause: settings.first_pause,
     }
   }
@@ -71,8 +74,20 @@ impl<'c> CallGroupWait<'c> {
     }
     let left = Duration::from_millis(u64::try_from(left_ms).unwrap_or(0));
     let pause = self.next_pause.min(left);
+    self.paused_at_ms = now_ms;
     self.next_pause = (self.next_pause * 2).min(self.settings.max_pause);
     Some(pause)
+  }
+
+  /// How much longer to wait after a change of the core's data woke the pause: a wake-up brings the
+  /// next attempt no closer than [`CallGroupWaitSettings::first_pause`] to the last one. A server
+  /// that pushes events all the time (or a busy sync) can't make the app prepare the call back to
+  /// back for the whole wait.
+  pub fn after_wake(&self) -> Duration {
+    let now_ms = self.clock.now_ms();
+    let since_ms = now_ms.saturating_sub(self.paused_at_ms).max(0);
+    let left_ms = millis(self.settings.first_pause).saturating_sub(since_ms).max(0);
+    Duration::from_millis(u64::try_from(left_ms).unwrap_or(0))
   }
 }
 
@@ -96,6 +111,41 @@ mod tests {
       30_000,
       "the last pause ends at the bound"
     );
+  }
+
+  /// Wake-ups every 10 ms (a flood of gateway events) keep the attempts at least `first_pause`
+  /// apart: at most four a second, and the wait still ends at the bound.
+  #[test]
+  fn wake_ups_keep_the_attempts_apart() {
+    let clock = ManualClock::new(1_000);
+    let settings = CallGroupWaitSettings::default();
+    let mut wait = CallGroupWait::start(&clock, settings);
+    let mut attempts_ms = Vec::new();
+    while let Some(pause) = wait.next_pause() {
+      let woken_after_ms = 10.min(millis(pause));
+      clock.advance(woken_after_ms);
+      if woken_after_ms < millis(pause) {
+        clock.advance(millis(wait.after_wake()));
+      }
+      attempts_ms.push(clock.now_ms());
+    }
+    let first_second = attempts_ms.iter().filter(|at| **at <= 2_000).count();
+    assert!(first_second <= 4, "{first_second} attempts in the first second");
+    assert!(
+      attempts_ms
+        .windows(2)
+        .all(|pair| pair[1] - pair[0] >= millis(settings.first_pause))
+    );
+    let bound_ms = millis(settings.bound);
+    let most = usize::try_from(bound_ms / millis(settings.first_pause)).unwrap() + 1;
+    assert!(
+      attempts_ms.len() <= most,
+      "{} attempts in the wait",
+      attempts_ms.len()
+    );
+    // The last attempt comes at the bound, at most one shortest pause later.
+    let last_ms = *attempts_ms.last().unwrap();
+    assert!((1_000 + bound_ms..=1_000 + bound_ms + millis(settings.first_pause)).contains(&last_ms));
   }
 
   #[test]
