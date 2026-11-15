@@ -3,6 +3,8 @@ use teamcraft_client_api::custom_emoji::{EmojiSegment, segments};
 use teamcraft_proto::CustomEmojiRef;
 use wasm_bindgen::JsCast;
 
+use crate::components::icons::{Icon, IconName};
+use crate::components::message_actions::copy_and_confirm;
 use crate::custom_emoji::CustomEmojiGlyph;
 
 use crate::highlight::{TokenKind, highlight};
@@ -78,18 +80,30 @@ pub fn RichText(
       },
       Block::Code { maybe_language, code } => {
         let tokens = highlight(maybe_language.as_deref(), &code);
+        let label = i18n.t("code-copy");
         view! {
-          <pre class="md-code" data-language=maybe_language.unwrap_or_default()>
-            <code>
-              {tokens
-                .into_iter()
-                .map(|token| match token.kind {
-                  TokenKind::Plain => token.text.into_any(),
-                  kind => view! { <span class=token_class(kind)>{token.text}</span> }.into_any(),
-                })
-                .collect_view()}
-            </code>
-          </pre>
+          <div class="md-code-wrap">
+            <pre class="md-code" data-language=maybe_language.unwrap_or_default()>
+              <code>
+                {tokens
+                  .into_iter()
+                  .map(|token| match token.kind {
+                    TokenKind::Plain => token.text.into_any(),
+                    kind => view! { <span class=token_class(kind)>{token.text}</span> }.into_any(),
+                  })
+                  .collect_view()}
+              </code>
+            </pre>
+            <button
+              type="button"
+              class="md-code-copy icon-btn"
+              aria-label=label.clone()
+              title=label
+              on:click=move |_| copy_and_confirm(code.clone())
+            >
+              <Icon name=IconName::Copy />
+            </button>
+          </div>
         }
         .into_any()
       },

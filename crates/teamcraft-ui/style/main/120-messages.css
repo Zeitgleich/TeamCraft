@@ -226,8 +226,8 @@
 }
 
 .md-p + .md-p,
-.md-p + .md-code,
-.md-code + .md-p {
+.md-p + .md-code-wrap,
+.md-code-wrap + .md-p {
   margin-top: 4px;
 }
 
@@ -241,6 +241,22 @@
   font: var(--text-xs)/1.5 var(--font-mono);
   overflow-x: auto;
 }
+
+.md-code-wrap { position: relative; }
+
+.md-code-copy {
+  position: absolute;
+  inset-block-start: 8px;
+  inset-inline-end: 6px;
+  opacity: 0;
+  transition: opacity var(--dur-fast, .12s) ease;
+}
+
+.md-code-wrap:hover .md-code-copy,
+.md-code-copy:focus-visible { opacity: 1; }
+
+/* Touch has no hover: the button stays visible. */
+@media (hover: none) { .md-code-copy { opacity: 1; } }
 
 .md-inline-code {
   padding: 1px 5px;
