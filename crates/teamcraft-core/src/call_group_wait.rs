@@ -30,7 +30,7 @@ pub struct CallGroupWaitSettings {
 
 /// One join's wait: when the next attempt is due, and when to give up.
 pub struct CallGroupWait<'c> {
-  clock: &'c dyn Clock,
+  clock: &'c (dyn Clock + Sync),
   settings: CallGroupWaitSettings,
   started_ms: i64,
   /// When the pause before the next attempt began (right after the last attempt).
@@ -50,7 +50,7 @@ impl Default for CallGroupWaitSettings {
 
 impl<'c> CallGroupWait<'c> {
   /// Starts the wait now, after the first attempt found no group.
-  pub fn start(clock: &'c dyn Clock, settings: CallGroupWaitSettings) -> Self {
+  pub fn start(clock: &'c (dyn Clock + Sync), settings: CallGroupWaitSettings) -> Self {
     Self {
       clock,
       settings,

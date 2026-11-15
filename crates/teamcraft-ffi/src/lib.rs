@@ -115,6 +115,7 @@ pub use space_deletion::{
 };
 use teamcraft_client_api::remote::ChatAction;
 use teamcraft_core::api::proxy::SystemProxy;
+use teamcraft_core::call_group_wait::{CallGroupWait, CallGroupWaitSettings};
 use teamcraft_core::clock::{Clock as _, SystemClock};
 use teamcraft_core::connection::{ConnectionStatus, NetworkChanges};
 use teamcraft_core::device_activity::ActivityReports;
@@ -1783,14 +1784,7 @@ impl TeamCraft {
     conversation_id: String,
     is_muted: bool,
   ) -> Result<Arc<CallSession>, TeamCraftError> {
-    let (preparation, hub) = self
-      .call(move |engine| {
-        Box::pin(async move {
-          let preparation = engine.prepare_call(&conversation_id).await?;
-          Ok((preparation, engine.calls().clone()))
-        })
-      })
-      .await?;
+    let (preparation, hub) = self.prepare_call_awaiting_group(conversation_id).await?;
     let maybe_prior_link = self.link.take_fresh(self.network.generation());
     calls::join(
       preparation,
@@ -2079,6 +2073,39 @@ impl TeamCraft {
       .map(PendingWorkItem::from)
   }
 
+  /// Prepares the conversation's call; one that finds no encryption group for this device yet
+  /// (just added to a meeting chat, the welcome still on its way) tries again after a pause that
+  /// doubles, within a bound (#1990, `teamcraft_core::call_group_wait`). Between attempts the
+  /// engine syncs, so a welcome on the gateway lets the device in; each attempt also fetches
+  /// waiting welcomes. Never founds a group. Cancelling the join (the app's coroutine or task)
+  /// ends the wait.
+  async fn prepare_call_awaiting_group(
+    &self,
+    conversation_id: String,
+  ) -> Result<(calls::CallPreparation, calls::CallHub), TeamCraftError> {
+    let clock = SystemClock;
+    let mut maybe_wait: Option<CallGroupWait<'_>> = None;
+    loop {
+      let conversation_id = conversation_id.clone();
+      let result = self
+        .call(move |engine| {
+          Box::pin(async move {
+            let preparation = engine.prepare_call(&conversation_id).await?;
+            Ok((preparation, engine.calls().clone()))
+          })
+        })
+        .await;
+      let Err(TeamCraftError::CallEncryptionPending(detail)) = result else {
+        return result;
+      };
+      let wait =
+        maybe_wait.get_or_insert_with(|| CallGroupWait::start(&clock, CallGroupWaitSettings::default()));
+      let Some(pause) = wait.next_pause() else {
+        return Err(TeamCraftError::CallEncryptionPending(detail));
+      };
+      teamcraft_core::platform::sleep(pause).await;
+    }
+  }
   /// Runs `job` on the engine thread and waits for its result.
   async fn call<R, F>(&self, job: F) -> Result<R, TeamCraftError>
   where
