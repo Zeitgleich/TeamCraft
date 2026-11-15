@@ -53,6 +53,8 @@ struct ChatPane: View {
   @State private var isPictureGone = false
   @State private var maybeDeleting: Message?
   @State private var isAtBottom = true
+  /// A copy just happened: the "Copied" pill shows for a moment (#2014).
+  @State private var isCopiedShown = false
   /// The oldest unread message when the conversation was opened, with the divider above it (#2013).
   @State private var maybeFirstUnreadId: String?
   /// The opening read looked for unread messages already.
@@ -287,6 +289,13 @@ struct ChatPane: View {
         .padding(.vertical, 6)
       }
       messageList
+        .overlay(alignment: .top) {
+          if isCopiedShown {
+            CopiedPill()
+              .padding(.top, 8)
+              .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
+          }
+        }
         .environment(\.openPicture, OpenPictureAction { file in maybeViewing = PictureTarget(file: file) })
         .environment(\.pictureZoomNamespace, pictureZoom)
         .environment(\.areAnimationsCovered, maybeViewing != nil || maybeVideo != nil)
@@ -1058,7 +1067,13 @@ struct ChatPane: View {
         maybeThread = ThreadTarget(threadId: message.maybeThreadId ?? message.id)
       }
     }
-    Button("copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = message.body }
+    Button("copy", systemImage: "doc.on.doc") {
+      UIPasteboard.general.string = message.body
+      confirmCopy()
+    }
+    if !message.body.isEmpty && message.maybePlaceholder == nil {
+      ShareLink(item: message.body) { Label("message_share", systemImage: "square.and.arrow.up") }
+    }
     if !message.isPending { sharedMessageActions(for: message) }
     if message.authorId == account.userId && !message.isPending && conversation.canPost {
       Button("edit", systemImage: "pencil") {
@@ -1180,6 +1195,7 @@ struct ChatPane: View {
       Task {
         if let link = await model.permalink(conversationId: conversation.id, messageId: message.id) {
           UIPasteboard.general.string = link
+          confirmCopy()
         }
       }
     }
@@ -1305,6 +1321,16 @@ struct ChatPane: View {
       }
     }
     await reload()
+  }
+
+  /// Says a copy worked: a success tap and a short "Copied" pill, as iOS has nothing of its own for it.
+  private func confirmCopy() {
+    UINotificationFeedbackGenerator().notificationOccurred(.success)
+    withAnimation(reduceMotion ? nil : .spring(duration: 0.3, bounce: 0)) { isCopiedShown = true }
+    Task {
+      try? await Task.sleep(for: .seconds(1.5))
+      withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { isCopiedShown = false }
+    }
   }
 
   /// A light tap as the message leaves the composer (#2004).
