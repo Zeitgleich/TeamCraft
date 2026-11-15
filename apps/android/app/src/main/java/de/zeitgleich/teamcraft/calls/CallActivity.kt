@@ -13,6 +13,7 @@ import android.view.WindowManager
 import android.view.WindowManager.LayoutParams.FLAG_SECURE
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -74,6 +75,7 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import de.zeitgleich.teamcraft.ui.avatarColor
+import de.zeitgleich.teamcraft.ui.MainActivity
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.security.ScreenPrefs.Companion.prefs
@@ -154,7 +156,7 @@ class CallActivity : ComponentActivity() {
         } else if (failure != null && !isJoining) {
           JoinFailedScreen(failure, onClose = { calls.dismissJoinFailure() })
         } else {
-          CallScreen(calls, maybeState)
+          CallScreen(calls, maybeState, onMinimise = ::minimise)
         }
       }
     }
@@ -168,6 +170,18 @@ class CallActivity : ComponentActivity() {
   override fun onStop() {
     calls.onCallScreenVisible(false)
     super.onStop()
+  }
+
+  /**
+   * Puts the call screen away and shows the app, as on iOS (#2066): the call goes on in the
+   * controller and its service, and the app's bar or the call notification lead back. The app opens
+   * also when this screen came from a notification without the app behind it.
+   */
+  private fun minimise() {
+    runCatching {
+      startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
+    }.onFailure { Log.w(TAG, "minimise: app not opened", it) }
+    finish()
   }
 
   override fun onNewIntent(intent: Intent) {
@@ -327,7 +341,7 @@ private fun RingButton(icon: ImageVector, label: String, color: Color, haptic: H
 private val INCOMING_AVATAR_SIZE = 128.dp
 
 @Composable
-private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
+private fun CallScreen(calls: CallController, maybeState: CallStateInfo?, onMinimise: () -> Unit) {
   val tracks by calls.videoTracks.collectAsStateWithLifecycle()
   val frames by calls.videoFrames.collectAsStateWithLifecycle()
   val isCameraWanted by calls.isCameraWanted.collectAsStateWithLifecycle()
@@ -450,6 +464,9 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
   }
 
   val isConnected = maybeState?.phase == CallPhase.CONNECTED
+  // A running call can be put away (#2066); back does the same instead of leaving the app.
+  val canMinimise = maybeState != null && maybeState.phase != CallPhase.ENDED
+  BackHandler(enabled = canMinimise, onBack = onMinimise)
   // "End for everyone…" from the hang-up (#1930): the meeting's hosts confirm, then the core ends
   // it for everybody and this device leaves.
   var isEndAsked by remember { mutableStateOf(false) }
@@ -479,12 +496,10 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
       },
     )
   }
-  var maybeStartedAt by remember { mutableStateOf<Long?>(null) }
+  // The clock starts with the first connection and runs through reconnects; the controller keeps
+  // it, so it goes on after the screen was put away and brought back (#2066).
+  val maybeStartedAt by calls.connectedAtMs.collectAsStateWithLifecycle()
   var maybeElapsed by remember { mutableStateOf<Long?>(null) }
-  LaunchedEffect(isConnected) {
-    // The clock starts with the first connection and runs through reconnects.
-    if (isConnected && maybeStartedAt == null) maybeStartedAt = SystemClock.elapsedRealtime()
-  }
   LaunchedEffect(maybeStartedAt) {
     val startedAt = maybeStartedAt ?: return@LaunchedEffect
     while (true) {
@@ -578,6 +593,7 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
       maybeOnHosts = if (maybeShownHosts != null && isConnected) ({ isHostsShown = true }) else null,
       maybeOnLobby = if (maybeShownLobby != null) ({ isLobbyShown = true }) else null,
       maybeOnEndForEveryone = if (hosts != null && calls.hosts.canEndForEveryone && isConnected) ({ isEndAsked = true }) else null,
+      maybeOnMinimise = if (canMinimise) onMinimise else null,
     ),
     banner = {
       Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {

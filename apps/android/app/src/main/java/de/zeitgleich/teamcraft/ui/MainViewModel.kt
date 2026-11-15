@@ -1487,9 +1487,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   suspend fun runningCalls(): Map<String, Int> =
     read { runningCalls() }?.associate { it.conversationId to it.participantUserIds.size } ?: emptyMap()
 
-  /** Brings the call screen of this device's call to the front. */
-  fun showCall() = graph.calls.bringToFront()
-
   /** Joins (or starts) a conversation's call, e.g. a meeting's. */
   fun startCall(conversationId: String, displayName: String, options: CallOptions = CallOptions()) =
     graph.calls.startCall(conversationId, displayName, options)

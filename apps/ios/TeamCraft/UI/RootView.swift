@@ -3,6 +3,7 @@ import SwiftUI
 /// The top level: server entry, sign-in, enrollment or the chats, by the account's state.
 struct RootView: View {
   @Environment(AppModel.self) private var model
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   /// The interface font the views were built with (#1494). A font chosen in Settings applies when
   /// Settings closes: the screens are built again, which a change underneath the open sheet would
   /// close.
@@ -82,6 +83,13 @@ struct RootView: View {
     case .ready(let account):
       ConversationListView(account: account)
         .id(appliedFont)
+        // The call screen was put away: a bar at the top leads back to it (#2066).
+        .safeAreaInset(edge: .top, spacing: 0) {
+          if let call = model.calls.activeCall, model.calls.isMinimised {
+            CallReturnBar(call: call).transition(.move(edge: .top).combined(with: .opacity))
+          }
+        }
+        .animation(callBarAnimation, value: model.calls.isMinimised && model.calls.activeCall != nil)
         // A new device asks to be linked: a card on every signed-in device (docs/e2ee.md §5).
         .overlay(alignment: .top) { LinkPromptOverlay() }
     case .failed(let failure):
@@ -124,8 +132,16 @@ struct RootView: View {
     return false
   }
 
+  /// The call screen, unless it was put away (#2066); a dismissal by the system puts it away too,
+  /// the call goes on.
   private var callBinding: Binding<ActiveCall?> {
-    Binding(get: { model.calls.activeCall }, set: { _ in })
+    Binding(
+      get: { model.calls.isMinimised ? nil : model.calls.activeCall },
+      set: { if $0 == nil { model.calls.minimise() } })
+  }
+
+  private var callBarAnimation: Animation {
+    reduceMotion ? .easeInOut(duration: 0.2) : .spring(response: 0.35, dampingFraction: 1)
   }
 }
 

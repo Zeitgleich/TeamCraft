@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.media.projection.MediaProjection
 import android.net.Uri
+import android.os.SystemClock
 import android.telecom.DisconnectCause
 import android.util.Log
 import android.widget.Toast
@@ -63,6 +64,7 @@ class CallController(
 ) {
   private val callsManager = CallsManager(context)
   private val state = MutableStateFlow<CallStateInfo?>(null)
+  private val connectedAt = MutableStateFlow<Long?>(null)
   private val wantsCamera = MutableStateFlow(false)
   private val tracks = MutableStateFlow<List<VideoTrackInfo>>(emptyList())
   private val frames = MutableStateFlow<Map<UInt, Bitmap>>(emptyMap())
@@ -119,6 +121,13 @@ class CallController(
 
   /** The call this device is in, as the engine reports it; `null` when idle. */
   val callState: StateFlow<CallStateInfo?> = state
+
+  /**
+   * When the call first connected ([SystemClock.elapsedRealtime]): the clock of the call screen and
+   * of the app's return bar (#2066) starts here and runs through reconnects and a move into a
+   * meeting room; `null` while not connected yet or idle.
+   */
+  val connectedAtMs: StateFlow<Long?> = connectedAt
 
   /** The user turned the camera on; the call screen captures while it is shown. */
   val isCameraWanted: StateFlow<Boolean> = wantsCamera
@@ -913,6 +922,11 @@ class CallController(
       }
       val wasSharing = this@CallController.state.value?.isSharingScreen == true
       this@CallController.state.value = state
+      when (state.phase) {
+        CallPhase.CONNECTED -> if (connectedAt.value == null) connectedAt.value = SystemClock.elapsedRealtime()
+        CallPhase.ENDED -> connectedAt.value = null
+        CallPhase.CONNECTING, CallPhase.RECONNECTING -> Unit
+      }
       // The engine ended the share by itself (its encoder kept failing, a turn's restart failed,
       // or another device's share replaced it: a call has one at a time).
       if (wasSharing && !state.isSharingScreen) {

@@ -2513,29 +2513,26 @@ internal fun PreJoinDialog(
 }
 
 /**
- * A call runs in this conversation: who is in it and a Join button, or "Back to the call" when
- * this device is in it. Joining from here starts with the microphone on and the camera off.
+ * A call runs in this conversation: who is in it and a Join button. When this device is in it, the
+ * app-wide bar leads back to it instead (#2066). Joining from here starts with the microphone on
+ * and the camera off.
  */
 @Composable
 private fun RunningCallBanner(viewModel: MainViewModel, conversationId: String, name: String, count: Int) {
   val calls = TeamCraftApplication.graph(LocalContext.current).calls
   val maybeState by calls.callState.collectAsState()
   val isHere = maybeState?.conversationId == conversationId && maybeState?.phase != CallPhase.ENDED
-  if (count == 0 && !isHere) return
+  if (count == 0 || isHere) return
   Surface(color = MaterialTheme.colorScheme.secondaryContainer, modifier = Modifier.fillMaxWidth()) {
     Row(Modifier.padding(start = 16.dp, end = 8.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
       Icon(Icons.Filled.Call, contentDescription = null, tint = MaterialTheme.colorScheme.onSecondaryContainer, modifier = Modifier.size(18.dp))
       Text(
-        if (isHere) stringResource(R.string.call_in_this_call) else pluralStringResource(R.plurals.call_running_people, count, count),
+        pluralStringResource(R.plurals.call_running_people, count, count),
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSecondaryContainer,
         modifier = Modifier.weight(1f).padding(start = 8.dp),
       )
-      if (isHere) {
-        TextButton(onClick = { viewModel.showCall() }) { Text(stringResource(R.string.call_back_to)) }
-      } else {
-        Button(onClick = { viewModel.startCall(conversationId, name) }) { Text(stringResource(R.string.call_prejoin_join)) }
-      }
+      Button(onClick = { viewModel.startCall(conversationId, name) }) { Text(stringResource(R.string.call_prejoin_join)) }
     }
   }
 }

@@ -15,7 +15,11 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.annotation.RequiresApi
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -29,6 +33,7 @@ import java.time.Instant
 import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
+import de.zeitgleich.teamcraft.calls.CallReturnBar
 import de.zeitgleich.teamcraft.notifications.LaunchToken
 import de.zeitgleich.teamcraft.security.AppLockPrefs
 import de.zeitgleich.teamcraft.security.AppLockState
@@ -40,6 +45,7 @@ import de.zeitgleich.teamcraft.ui.screens.ShareWaitingNotice
 import de.zeitgleich.teamcraft.ui.screens.SplashHandoff
 import de.zeitgleich.teamcraft.ui.theme.TeamCraftTheme
 import uniffi.teamcraft_ffi.AppActivity
+import uniffi.teamcraft_ffi.CallPhase
 import uniffi.teamcraft_ffi.setDeletedUserName
 
 /** The system splash's assembly ends here (scripts/brand/mark_parts.py); the mark rests from then. */
@@ -57,6 +63,7 @@ private const val KEY_APP_LINK = "app_link"
 /** A [FragmentActivity] because the app lock's system prompt needs one. */
 class MainActivity : FragmentActivity() {
   private val viewModel: MainViewModel by viewModels()
+  private val calls by lazy { TeamCraftApplication.graph(this).calls }
   /** A conversation to open, from a notification tap. */
   private val openConversation = mutableStateOf<String?>(null)
   /** The share of the intent this activity started with; the system hands that one back after a kill. */
@@ -155,15 +162,24 @@ class MainActivity : FragmentActivity() {
             LockScreen(onUnlock = ::unlock, isUnlockRefused = isUnlockRefused.value)
             maybeShare?.let { ShareWaitingNotice(onDiscard = viewModel::discardShare, Modifier.align(Alignment.TopCenter)) }
           } else {
-            AppRoot(
-              viewModel = viewModel,
-              maybeConversationToOpen = openConversation.value,
-              onConversationOpened = { openConversation.value = null },
-              maybeShare = maybeShare,
-              maybeAppLink = appLink.value,
-              onAppLinkHandled = { appLink.value = null },
-              onLogin = { intent -> loginLauncher.launch(intent) },
-            )
+            // A running call whose screen was put away: a bar on top of every screen leads back
+            // (#2066). It takes the status bar's inset; the screens below get the rest.
+            val maybeCallState by calls.callState.collectAsState()
+            val isCallBarShown = !isSettingUp && maybeCallState.let { it != null && it.phase != CallPhase.ENDED }
+            Column(Modifier.fillMaxSize()) {
+              if (!isSettingUp) CallReturnBar(calls)
+              Box(Modifier.weight(1f).then(if (isCallBarShown) Modifier.consumeWindowInsets(WindowInsets.statusBars) else Modifier)) {
+                AppRoot(
+                  viewModel = viewModel,
+                  maybeConversationToOpen = openConversation.value,
+                  onConversationOpened = { openConversation.value = null },
+                  maybeShare = maybeShare,
+                  maybeAppLink = appLink.value,
+                  onAppLinkHandled = { appLink.value = null },
+                  onLogin = { intent -> loginLauncher.launch(intent) },
+                )
+              }
+            }
           }
           // The animated mark while the core starts, from where the system splash left it (#463).
           LoadingMarkOverlay(isLoading = state == AppState.Starting, maybeHandoff = splashHandoff.value)
