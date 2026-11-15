@@ -57,6 +57,10 @@ object SearchFilters {
   /** The filter tokens of [query], in order, for showing them as removable chips. */
   fun active(query: String): List<String> = tokens(query).filter { isFilter(it) }
 
+  /** The words and phrases searched for, without the filter tokens and the quotes (#2003). */
+  fun terms(query: String): List<String> =
+    tokens(query).filterNot { isFilter(it) }.map { it.trim('"') }.filter { it.isNotEmpty() }
+
   /** Splits on whitespace but keeps `"quoted phrases"` together, like the core's tokenizer. */
   fun tokens(query: String): List<String> {
     val tokens = mutableListOf<String>()

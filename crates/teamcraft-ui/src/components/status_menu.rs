@@ -425,7 +425,7 @@ pub fn StatusDurationDialog() -> impl IntoView {
       >
         <header class="modal-head">
           <h2 id="status-duration-title">{move || i18n.t("status-duration-title")}</h2>
-          <button type="button" class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+          <button type="button" class="icon-btn" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=move |_| state.close_overlay()>
             <Icon name=IconName::Close />
           </button>
         </header>
@@ -597,7 +597,7 @@ pub fn CustomStatusDialog() -> impl IntoView {
       >
         <header class="modal-head">
           <h2 id="custom-status-title">{move || i18n.t("status-custom-title")}</h2>
-          <button type="button" class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+          <button type="button" class="icon-btn" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=move |_| state.close_overlay()>
             <Icon name=IconName::Close />
           </button>
         </header>

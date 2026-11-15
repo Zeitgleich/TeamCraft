@@ -31,7 +31,6 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.contentDescription
-import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Paint
@@ -200,7 +199,7 @@ import de.zeitgleich.teamcraft.ui.shouldNotifyTyping
 import de.zeitgleich.teamcraft.ui.typingIn
 import de.zeitgleich.teamcraft.ui.typingLine
 import de.zeitgleich.teamcraft.ui.entry
-import de.zeitgleich.teamcraft.ui.sensitiveClip
+import de.zeitgleich.teamcraft.ui.copyText
 import de.zeitgleich.teamcraft.ui.requestsIn
 import uniffi.teamcraft_ffi.LeaveChoice
 import uniffi.teamcraft_ffi.ConnectionState
@@ -438,6 +437,7 @@ fun ConversationScreen(
       onRefresh = {
         if (!viewModel.refreshConnection()) viewModel.showFailure(R.string.refresh_failed)
       },
+      isLoading = snapshot == null && messages.isEmpty(),
       onOpenPermalink = onOpenPermalink,
       onOpenConversation = onOpenConversation,
       unseenReactions = unseenReactions,
@@ -535,6 +535,7 @@ fun ThreadScreen(
       modifier = Modifier.weight(1f),
       bottomInset = listBottomInset,
       maybeFocusMessage = maybeFocusMessage,
+      isLoading = false,
       onOpenPermalink = onOpenPermalink,
     )
   }
@@ -907,6 +908,7 @@ private fun MessageList(
   bottomInset: Dp,
   maybeFocusMessage: String?,
   onRefresh: (suspend () -> Unit)? = null,
+  isLoading: Boolean,
   onOpenPermalink: (String) -> Unit,
   onOpenConversation: (String) -> Unit = {},
   older: OlderMessages = OlderMessages.None,
@@ -950,6 +952,7 @@ private fun MessageList(
     bottomInset = bottomInset,
     maybeFocusMessage = maybeFocusMessage,
     onRefresh = onRefresh,
+    isLoading = isLoading,
     onOpenPermalink = onOpenPermalink,
     onOpenConversation = onOpenConversation,
     canReact = rights.canReact,
@@ -989,6 +992,7 @@ private fun MessageActions(
   onDismiss: () -> Unit,
 ) {
   val context = LocalContext.current
+  val haptics = LocalHapticFeedback.current
   val scope = rememberCoroutineScope()
   val isMine = message.author == snapshot?.me?.id
   var isEditing by remember { mutableStateOf(false) }
@@ -1006,6 +1010,7 @@ private fun MessageActions(
       // One row, spread over the width: the reactions are the sheet's most used part.
       if (rights.canReact) {
         QuickReactions { emoji ->
+          haptics.performHapticFeedback(HapticFeedbackType.Confirm)
           viewModel.act(ChatActions.react(conversationId, message.id, emoji))
           onDismiss()
         }
@@ -1038,15 +1043,13 @@ private fun MessageActions(
           MessageAction.CopyLink -> SheetItem(R.string.action_copy_link) {
             scope.launch {
               viewModel.readChat { query(ChatQueries.permalink(conversationId, message.id)).maybeLink }?.let { link ->
-                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                clipboard.setPrimaryClip(sensitiveClip(link))
+                copyText(context, link)
               }
               onDismiss()
             }
           }
           MessageAction.CopyText -> SheetItem(R.string.action_copy_text) {
-            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            clipboard.setPrimaryClip(sensitiveClip(message.body))
+            copyText(context, message.body)
             onDismiss()
           }
           MessageAction.MarkUnread -> SheetItem(R.string.action_mark_unread) {
@@ -2189,7 +2192,13 @@ private fun SendButton(canSend: Boolean, isSending: Boolean, onSend: () -> Unit,
         role = Role.Button,
         onClickLabel = stringResource(R.string.send),
         onLongClickLabel = stringResource(R.string.send_options),
-        onClick = { if (canSend && !isSending) onSend() },
+        onClick = {
+          if (canSend && !isSending) {
+            // A light tap as the message leaves; the system's touch-feedback setting decides if it is felt (#2004).
+            haptics.performHapticFeedback(HapticFeedbackType.ContextClick)
+            onSend()
+          }
+        },
         onLongClick = {
           haptics.performHapticFeedback(HapticFeedbackType.LongPress)
           onSendOptions()

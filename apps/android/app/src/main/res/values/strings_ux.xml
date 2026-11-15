@@ -63,6 +63,8 @@
   <!-- Accessibility action: toggles a reaction with the given emoji -->
   <string name="react_quick">React with %1$s</string>
   <string name="file_open">Open</string>
+  <string name="quote_show_original">Show original message</string>
+  <string name="quote_original_gone">Original not available</string>
   <string name="image_unreadable">This image can\'t be shown.</string>
   <string name="video_play">Play video</string>
   <string name="video_unplayable">This video can\'t be played on this device.</string>
@@ -325,4 +327,13 @@
   <string name="push_service_title">Push service</string>
   <string name="search_prefetch_limit">Storage limit</string>
   <string name="refresh_failed">Couldn't refresh. Check your connection.</string>
+  <string name="chat_swipe_setting">Swipe left on a chat</string>
+  <string name="chat_swipe_hint">Choose what a swipe to the left does. Swiping right always marks as read or unread.</string>
+  <string name="chat_swipe_favorite">Favorite</string>
+  <string name="chat_swipe_mute">Mute</string>
+  <string name="chat_swipe_notifications">Notifications</string>
+  <string name="profile_message">Message</string>
+  <string name="profile_call">Call</string>
+  <string name="profile_open">Open profile of %1$s</string>
+  <string name="copied">Copied</string>
 </resources>

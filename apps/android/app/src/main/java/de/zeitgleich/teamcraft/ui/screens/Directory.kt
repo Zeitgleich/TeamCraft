@@ -72,7 +72,6 @@ import de.zeitgleich.teamcraft.ui.ListPhase
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.PageAnswer
 import de.zeitgleich.teamcraft.ui.UserAvatar
-import de.zeitgleich.teamcraft.ui.forms.CreateResult
 import de.zeitgleich.teamcraft.ui.theme.Spacing
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -228,17 +227,10 @@ private fun PeopleList(
   val me = snapshot?.me?.id
   val message: (DirectoryPersonItem) -> Unit = message@{ person ->
     if (isOpening) return@message
-    snapshot?.let { directWith(it, listOf(person.userId)) }?.let { existing ->
-      onOpen(existing)
-      return@message
-    }
+    val current = snapshot ?: return@message
     isOpening = true
     scope.launch {
-      when (val result = viewModel.tryCreate { openDirect(listOf(person.userId)) }) {
-        is CreateResult.Created -> onOpen(result.id)
-        is CreateResult.NameRefused -> viewModel.showFailure(R.string.error_generic)
-        is CreateResult.Failed -> viewModel.showFailure(result.text)
-      }
+      openDirectConversation(viewModel, current, person.userId)?.let(onOpen)
       isOpening = false
     }
   }

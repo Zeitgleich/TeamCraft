@@ -19,6 +19,8 @@ struct PictureViewer: View {
   @State private var swipeOffset: CGFloat = 0
   @State private var viewerHeight: CGFloat = 0
   @State private var maybeForwarding: ForwardTarget?
+  /// How saving to Photos went, until the alert or the tick is dismissed (#2011).
+  @State private var maybeSaveOutcome: PhotosSaver.Outcome?
   @State private var displayNames: [String: String] = [:]
 
   /// Starts a reply to the picture on screen; nil where the user can't reply.
@@ -91,6 +93,8 @@ struct PictureViewer: View {
       ForwardSheet(
         fromConversationId: target.conversationId, messageId: target.messageId, maybeAttachmentId: target.fileId)
     }
+    .photosSaveAlert($maybeSaveOutcome)
+    .onChange(of: model.currentFile?.fileId) { _, _ in maybeSaveOutcome = nil }
   }
 
   private var swipeProgress: Double { SwipeDismiss.progress(offset: swipeOffset, extent: viewerHeight) }
@@ -188,6 +192,15 @@ struct PictureViewer: View {
           Image(systemName: "square.and.arrow.up").frame(width: 44, height: 44)
         }
         .accessibilityLabel(Text("picture_share"))
+        if let file = model.currentFile, file.isImage || file.isVideo {
+          Button {
+            Task { await save(url, mediaType: file.mediaType) }
+          } label: {
+            Image(systemName: maybeSaveOutcome == .saved ? "checkmark" : "square.and.arrow.down")
+              .frame(width: 44, height: 44)
+          }
+          .accessibilityLabel(Text("picture_save_to_photos"))
+        }
       }
       if let file = model.currentFile ?? (model.items.isEmpty ? model.target.file : nil) {
         if let reply = maybeOnReply {
@@ -230,12 +243,54 @@ struct PictureViewer: View {
     shownFile?.maybeSentAt.map { Date(timeIntervalSince1970: TimeInterval($0) / 1000) }
   }
 
+  private func save(_ url: URL, mediaType: String) async {
+    let outcome = await PhotosSaver.save(fileAt: url, mediaType: mediaType)
+    maybeSaveOutcome = outcome
+    if outcome == .saved { UINotificationFeedbackGenerator().notificationOccurred(.success) }
+  }
+
   /// The downloaded original, to share (save to Photos, send elsewhere): the user's explicit choice.
   private var localURL: URL? {
     guard let file = model.currentFile, file.transfer.state == "local", let path = file.transfer.path else {
       return nil
     }
     return URL(fileURLWithPath: path)
+  }
+}
+
+/// The namespace the chat's pictures and the viewer share, so the viewer can zoom out of the
+/// picture that was tapped and back into it on close (#2012).
+private struct PictureZoomNamespaceKey: EnvironmentKey {
+  static let defaultValue: Namespace.ID? = nil
+}
+
+extension EnvironmentValues {
+  var pictureZoomNamespace: Namespace.ID? {
+    get { self[PictureZoomNamespaceKey.self] }
+    set { self[PictureZoomNamespaceKey.self] = newValue }
+  }
+}
+
+extension View {
+  /// Marks a picture as where the viewer zooms from (iOS 18 and later; earlier, the viewer just covers).
+  @ViewBuilder
+  func pictureZoomSource(id: String, in namespace: Namespace.ID?) -> some View {
+    if #available(iOS 18.0, *), let namespace {
+      matchedTransitionSource(id: id, in: namespace)
+    } else {
+      self
+    }
+  }
+
+  /// The viewer grows out of its source picture and shrinks back into it; without the iOS 18
+  /// transition, or with Reduce Motion, the default presentation (a fade or a slide) stays.
+  @ViewBuilder
+  func pictureZoomTransition(id: String, in namespace: Namespace.ID, reduceMotion: Bool) -> some View {
+    if #available(iOS 18.0, *), !reduceMotion {
+      navigationTransition(.zoom(sourceID: id, in: namespace))
+    } else {
+      self
+    }
   }
 }
 
@@ -561,6 +616,17 @@ private struct OpenQuotedPictureKey: EnvironmentKey {
   static let defaultValue: OpenQuotedPictureAction? = nil
 }
 
+/// Jumps to the message a reply's text quote points at and flashes it (#2001): the message's ID.
+struct OpenQuotedMessageAction {
+  let run: (String) -> Void
+
+  func callAsFunction(_ messageId: String) { run(messageId) }
+}
+
+private struct OpenQuotedMessageKey: EnvironmentKey {
+  static let defaultValue: OpenQuotedMessageAction? = nil
+}
+
 /// What a long press on a picture of an album offers (#241).
 struct ImageActions {
   /// Nil where the user can't reply here.
@@ -581,6 +647,11 @@ extension EnvironmentValues {
   var openQuotedPicture: OpenQuotedPictureAction? {
     get { self[OpenQuotedPictureKey.self] }
     set { self[OpenQuotedPictureKey.self] = newValue }
+  }
+
+  var openQuotedMessage: OpenQuotedMessageAction? {
+    get { self[OpenQuotedMessageKey.self] }
+    set { self[OpenQuotedMessageKey.self] = newValue }
   }
 
   var imageActions: ImageActions? {

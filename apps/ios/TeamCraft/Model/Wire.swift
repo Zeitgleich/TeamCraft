@@ -248,6 +248,8 @@ struct ChatAnswer: Decodable, Sendable {
   let guests: [ExpiringGuest]?
   let unseen: UnseenReactions?
   let maybeBody: String?
+  /// `ChatQuery.firstUnread`: the oldest message not read yet.
+  let maybeMessage: String?
   /// `ChatQuery.draftReply`: what the composer replies to.
   let maybeReply: ReplyPreview?
   let olderHistory: OlderHistory?
@@ -339,7 +341,7 @@ struct VoiceMessagePolicy: Decodable, Equatable, Sendable {
 /// The people part of the core's chat snapshot: who can be mentioned, and the former accounts that
 /// only name their old messages.
 struct PeopleSnapshot: Decodable, Sendable {
-  struct Person: Decodable, Sendable {
+  struct Person: Decodable, Identifiable, Sendable {
     let id: String
     let username: String
     let displayName: String
@@ -347,6 +349,14 @@ struct PeopleSnapshot: Decodable, Sendable {
     let isDeleted: Bool?
     /// An integration's account: never offered after `@`.
     let isBot: Bool?
+    /// The core's name of the presence (`Online`, `DoNotDisturb`, …), for the profile (#2002).
+    var presence: String?
+    var maybeCustomStatus: Status?
+
+    struct Status: Decodable, Sendable {
+      let emoji: String
+      let text: String
+    }
 
     /// The name to show: the app's own "Deleted user" for a deleted account, as on desktop and web.
     var shownName: String { isDeleted == true ? deletedUserName : displayName }

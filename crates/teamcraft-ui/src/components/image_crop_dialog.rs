@@ -448,7 +448,7 @@ pub fn ImageCropDialog(
         >
           <header class="modal-head">
             <h2 id="crop-title">{move || i18n.t(target.title_key())}</h2>
-            <button type="button" class="icon-btn" aria-label=move || i18n.t("cancel") prop:disabled=busy on:click=move |_| cancel()>
+            <button type="button" class="icon-btn" aria-label=move || i18n.t("cancel") title=move || i18n.t("cancel") prop:disabled=busy on:click=move |_| cancel()>
               <Icon name=IconName::Close />
             </button>
           </header>
@@ -484,7 +484,7 @@ pub fn ImageCropDialog(
               <button
                 type="button"
                 class="icon-btn"
-                aria-label=move || i18n.t("crop-zoom-out")
+                aria-label=move || i18n.t("crop-zoom-out") title=move || i18n.t("crop-zoom-out")
                 prop:disabled=move || { !is_ready() || view.get().zoom() <= 1.0 }
                 on:click=move |_| zoom_by(1.0 / ZOOM_STEP)
               >
@@ -509,7 +509,7 @@ pub fn ImageCropDialog(
               <button
                 type="button"
                 class="icon-btn"
-                aria-label=move || i18n.t("crop-zoom-in")
+                aria-label=move || i18n.t("crop-zoom-in") title=move || i18n.t("crop-zoom-in")
                 prop:disabled=move || { !is_ready() || view.get().zoom() >= view.get().max_zoom() }
                 on:click=move |_| zoom_by(ZOOM_STEP)
               >

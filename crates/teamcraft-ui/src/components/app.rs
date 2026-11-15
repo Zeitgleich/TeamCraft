@@ -51,7 +51,7 @@ use crate::history::{Travel, travel};
 use crate::i18n::{I18n, provide_i18n, use_i18n};
 use crate::meetings::parse_guest_link;
 use crate::model::TimestampMs;
-use crate::model::{ConversationId, SpaceId, UserId};
+use crate::model::{ConversationId, ConversationKind, SpaceId, UserId};
 use crate::motion::use_leave_ghost;
 use crate::navigation::Step;
 use crate::notify_sync::NotificationSync;
@@ -210,6 +210,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   }
   crate::calls::run_call_clock(state.call);
   crate::share_quality::run(state);
+  sync_title(state);
   if tauri::is_available() {
     sync_tray(state, i18n);
     crate::tray_menu::start(state, i18n);
@@ -477,7 +478,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
                     {move || i18n.t(action.label_key())}
                   </button>
                 })}
-                <button class="icon-btn icon-btn-small" aria-label=move || i18n.t("close") on:click=move |_| state.dismiss_toast(id)>
+                <button class="icon-btn icon-btn-small" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=move |_| state.dismiss_toast(id)>
                   <Icon name=IconName::Close />
                 </button>
               </div>
@@ -986,6 +987,22 @@ fn menu_bar_labels(i18n: crate::i18n::I18n, name: &str) -> serde_json::Value {
     "zoom": plain("menubar-zoom"),
     "help": plain("menubar-help"),
   })
+}
+
+/// The tab's title carries the unread count (the app badge's) and the open conversation.
+fn sync_title(state: AppState) {
+  Effect::new(move |_| {
+    let unread = app_badge(state);
+    let maybe_name = state.current_conversation_id().and_then(|id| {
+      state
+        .read(|backend| backend.conversation(id))
+        .map(|conversation| match conversation.kind {
+          ConversationKind::Public | ConversationKind::Private => format!("#{}", conversation.name),
+          _ => conversation.name,
+        })
+    });
+    crate::brand::show_state_in_title(unread, maybe_name);
+  });
 }
 
 /// The browser tab's icon gets a red dot while the tray would show a count.
