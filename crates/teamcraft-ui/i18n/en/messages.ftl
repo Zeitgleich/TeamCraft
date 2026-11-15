@@ -95,6 +95,7 @@ action-copy-link = Copy link
 action-mark-unread = Mark as unread
 action-edit = Edit
 action-delete = Delete
+code-copy = Copy code
 quote-unavailable = Original message not available
 quote-jump = Go to the original message
 quote-replying-to = Replying to { $name }
