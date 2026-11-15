@@ -1204,6 +1204,13 @@ pub trait CallBackend {
     0
   }
 
+  /// Whether a join waits for this device's way into the call's encryption group (#1990): a
+  /// meeting guest just let in, or a member just added, whose welcome is still on its way. The
+  /// call screen says "Getting the call ready" meanwhile instead of failing.
+  fn is_call_awaiting_encryption(&self) -> bool {
+    false
+  }
+
   /// Whether call actions the user took are still being carried out. Until they are, the UI keeps
   /// its own idea of the camera and screen share instead of the media layer's.
   fn has_pending_call_actions(&self) -> bool {

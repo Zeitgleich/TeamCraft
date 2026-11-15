@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use teamcraft_client_api::failure::{CallFailure, FailureKind};
 use teamcraft_proto::MeetingId;
 
 use crate::areas::{self, Place, lazy_area};
@@ -155,7 +156,14 @@ fn GuestShell(
   // The call's duration ticks for a guest too (the member app starts it in `app.rs`).
   crate::calls::run_call_clock(state.call);
   change_source.set_change_notifier(Rc::new(move || state.backend_changed()));
-  crate::feedback::set_failure_sink(move |failure| state.show_failure(i18n, &failure));
+  crate::feedback::set_failure_sink(move |failure| {
+    // A guest has no other device and can't wait for a member: their host's app lets them in.
+    if failure.kind == FailureKind::Call(CallFailure::EncryptionPending) {
+      state.show_failure_worded(i18n.t("error-call-encryption-pending-guest"), &failure);
+    } else {
+      state.show_failure(i18n, &failure);
+    }
+  });
   state.open_conversation(conversation);
   if untrack(|| state.read(|backend| backend.has_calls() && !backend.has_simulated_calls())) {
     connect_calls(state);
@@ -258,6 +266,11 @@ fn GuestShell(
             view! {
               <div class=if is_error { "toast toast-error" } else { "toast" } role=is_error.then_some("alert")>
                 <div class="toast-body"><span>{toast.text}</span></div>
+                {toast.maybe_action.map(|action| view! {
+                  <button class="btn btn-small" on:click=move |_| state.run_toast_action(id, action)>
+                    {move || i18n.t(action.label_key())}
+                  </button>
+                })}
                 <button class="btn btn-small" on:click=move |_| state.dismiss_toast(id)>
                   {move || i18n.t("close")}
                 </button>

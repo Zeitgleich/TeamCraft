@@ -156,6 +156,18 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     if let Some(calls) = &self.maybe_calls {
       calls.set_change_notifier(notify.clone());
     }
+    // A join waiting for the call's encryption group tries again when the core saw a change: a
+    // welcome on the gateway joins the group there (#1990).
+    let notify: Rc<dyn Fn()> = match &self.maybe_calls {
+      Some(calls) => {
+        let calls = calls.clone();
+        Rc::new(move || {
+          calls.core_changed();
+          notify();
+        })
+      },
+      None => notify,
+    };
     let Some(live) = &self.maybe_live else {
       self.chat.set_change_notifier(notify);
       return;
@@ -1479,6 +1491,13 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
 
   fn call_join_failures(&self) -> u64 {
     self.maybe_calls.as_ref().map_or(0, RemoteCalls::join_failures)
+  }
+
+  fn is_call_awaiting_encryption(&self) -> bool {
+    self
+      .maybe_calls
+      .as_ref()
+      .is_some_and(RemoteCalls::is_awaiting_encryption)
   }
 
   fn has_pending_call_actions(&self) -> bool {

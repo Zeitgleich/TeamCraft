@@ -317,6 +317,8 @@ calls-background-hint = Applied on your device before your video is sent.
 ## First-run key setup
 # ---- Meetings ----
 call-connecting = Connecting…
+call-getting-ready = Getting the call ready…
+call-retry-join = Try again
 call-reconnecting = Connection lost, reconnecting…
 call-limited-network = Limited network, call quality may be lower
 call-device-busy = Your computer is busy: video quality reduced
@@ -382,6 +384,7 @@ error-call-server-unreachable = The call server can't be reached. The network ma
 error-call-background-required = Your organization requires a background behind your camera, which can't be added here. Backgrounds need a current Chrome, Edge, Firefox or Safari with graphics acceleration turned on, or the TeamCraft app.
 error-call-effects-unavailable = The background effect couldn't start here, so your camera is on without it.
 error-call-encryption-pending = This device can't join the call yet: it is still being let into the conversation's encryption. Keep TeamCraft open on another of your devices, or wait for a member to come online, then join again. For a meeting, its organizer may have to open it once first.
+error-call-encryption-pending-guest = The host's app hasn't let this device into the call's encryption yet. Ask the host to keep TeamCraft open, then try again.
 error-call-move-refused = The call wasn't moved: the meeting room doesn't match what was announced in the conversation. Stay in this call, or join the meeting room from the list if you trust it.
 error-call-speakers-unavailable = The chosen speakers can't be used here. The test sound played on the default output.
 error-call-speakers-missing = No speakers were found. Connect speakers or headphones and try again.
