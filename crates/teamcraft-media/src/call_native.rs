@@ -863,6 +863,9 @@ async fn run_call(
             engine.send_audio(&frame, Instant::now());
             sinks.stats.frames_sent += 1;
           }
+          for frame in capture.take_thin_frames()? {
+            engine.send_thin_audio(&frame, Instant::now());
+          }
         }
       },
       _ = frame_tick.tick() => {
@@ -872,6 +875,9 @@ async fn run_call(
           for frame in capture.push(&samples)? {
             engine.send_audio(&frame, Instant::now());
             sinks.stats.frames_sent += 1;
+          }
+          for frame in capture.take_thin_frames()? {
+            engine.send_thin_audio(&frame, Instant::now());
           }
         }
         let mix = sinks.next_playback_frame()?;
@@ -2509,6 +2515,7 @@ impl Sinks {
               capture.set_measured_loss_percent(*loss_percent)?;
             },
             CallEngineEvent::VoiceEncoding(encoding) => capture.set_voice_encoding(*encoding)?,
+            CallEngineEvent::ThinVoice(is_sent) => capture.set_thin_voice(*is_sent)?,
             _ => {},
           }
           self.cues.on_event(&event);

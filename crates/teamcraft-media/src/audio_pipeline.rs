@@ -19,7 +19,7 @@ use crate::audio_processing::{AudioProcessingError, AudioProcessor, PROCESSING_F
 use crate::call_engine::AudioOrigin;
 use crate::jitter::{JitterBuffer, JitterBufferConfig, Playout};
 use crate::rtp::SequenceNumber;
-use crate::voice_steps::VoiceEncoding;
+use crate::voice_steps::{VoiceEncoding, VoiceStepConfig};
 
 /// Microphone side: processes samples in 20 ms frames and encodes them in packets of the
 /// encoder's length.
@@ -30,6 +30,17 @@ pub struct CapturePipeline {
   processed: Vec<f32>,
   is_muted: bool,
   maybe_processor: Option<std::sync::Arc<AudioProcessor>>,
+  /// How the voice's encoder was set up: the thin copy's starts the same.
+  encoder_config: OpusEncoderConfig,
+  /// The voice's thin copy while it is sent (#1893 step 3).
+  maybe_thin: Option<ThinCopy>,
+}
+
+/// The voice a second time at the thinnest step, for receivers on thin downlinks (#1893 step 3):
+/// its own encoder, fed the same processed samples.
+struct ThinCopy {
+  encoder: OpusEncoder,
+  processed: Vec<f32>,
 }
 
 /// At most this much of the own shared screen's sound waits to be added to the echo reference.
@@ -66,15 +77,18 @@ pub enum AudioPipelineError {
 
 impl CapturePipeline {
   pub fn new(config: OpusEncoderConfig) -> Result<Self, AudioPipelineError> {
+    let encoder_config = OpusEncoderConfig {
+      channels: AudioChannels::Mono,
+      ..config
+    };
     Ok(Self {
-      encoder: OpusEncoder::new(OpusEncoderConfig {
-        channels: AudioChannels::Mono,
-        ..config
-      })?,
+      encoder: OpusEncoder::new(encoder_config)?,
       pending: Vec::with_capacity(2 * FRAME_SAMPLES_PER_CHANNEL),
       processed: Vec::new(),
       is_muted: false,
       maybe_processor: None,
+      encoder_config,
+      maybe_thin: None,
     })
   }
 
@@ -89,6 +103,9 @@ impl CapturePipeline {
     self.is_muted = is_muted;
     self.pending.clear();
     self.processed.clear();
+    if let Some(thin) = &mut self.maybe_thin {
+      thin.processed.clear();
+    }
     if let Some(processor) = &self.maybe_processor {
       processor.set_capture_muted(is_muted);
     }
@@ -108,6 +125,42 @@ impl CapturePipeline {
     Ok(self.encoder.set_encoding(encoding)?)
   }
 
+  /// Starts or stops encoding the voice's thin copy (#1893 step 3): the thinnest step, from the
+  /// next samples on.
+  pub fn set_thin_voice(&mut self, is_sent: bool) -> Result<(), AudioPipelineError> {
+    if !is_sent {
+      self.maybe_thin = None;
+      return Ok(());
+    }
+    if self.maybe_thin.is_none() {
+      let mut encoder = OpusEncoder::new(self.encoder_config)?;
+      encoder.set_encoding(VoiceStepConfig::default().thinnest)?;
+      self.maybe_thin = Some(ThinCopy {
+        encoder,
+        processed: Vec::new(),
+      });
+    }
+    Ok(())
+  }
+
+  /// The thin copy's packets that became complete with what [`Self::push`] took.
+  pub fn take_thin_frames(&mut self) -> Result<Vec<EncodedAudioFrame>, AudioPipelineError> {
+    let Some(thin) = &mut self.maybe_thin else {
+      return Ok(Vec::new());
+    };
+    let packet_samples = thin.encoder.frame_samples_per_channel();
+    let mut frames = Vec::new();
+    while thin.processed.len() >= packet_samples {
+      let pcm: Vec<i16> = thin.processed.drain(..packet_samples).map(to_i16).collect();
+      let level = measure_audio_level(&pcm, DEFAULT_VOICE_THRESHOLD_DBOV);
+      frames.push(EncodedAudioFrame {
+        opus: thin.encoder.encode(&pcm)?,
+        level,
+      });
+    }
+    Ok(frames)
+  }
+
   /// Feeds mono 48 kHz samples (any chunk size); returns the packets that became complete.
   pub fn push(&mut self, samples: &[f32]) -> Result<Vec<EncodedAudioFrame>, AudioPipelineError> {
     if self.is_muted {
@@ -117,6 +170,9 @@ impl CapturePipeline {
     while self.pending.len() >= FRAME_SAMPLES_PER_CHANNEL {
       let mut frame: Vec<f32> = self.pending.drain(..FRAME_SAMPLES_PER_CHANNEL).collect();
       self.process(&mut frame)?;
+      if let Some(thin) = &mut self.maybe_thin {
+        thin.processed.extend_from_slice(&frame);
+      }
       self.processed.extend(frame);
     }
     let packet_samples = self.encoder.frame_samples_per_channel();
@@ -331,6 +387,31 @@ mod tests {
           .iter()
           .all(|frame| frame.level.level_dbov() <= 10 && frame.level.has_voice_activity)
       );
+    }
+
+    /// #1893 step 3: the thin copy encodes the same samples in 60 ms packets next to the voice.
+    #[test]
+    fn the_thin_copy_encodes_the_same_samples_in_60_ms_packets() {
+      let mut pipeline = CapturePipeline::new(OpusEncoderConfig::default()).unwrap();
+      assert!(pipeline.take_thin_frames().unwrap().is_empty(), "not sent yet");
+      pipeline.set_thin_voice(true).unwrap();
+      let voice = pipeline
+        .push(&sine_tone(440.0, 0.5, 0, 6 * FRAME_SAMPLES_PER_CHANNEL))
+        .unwrap();
+      let thin = pipeline.take_thin_frames().unwrap();
+      assert_eq!(voice.len(), 6);
+      assert_eq!(thin.len(), 2);
+      assert!(
+        thin
+          .iter()
+          .all(|frame| opus_packet_samples(&frame.opus) == Some(2880))
+      );
+      assert!(thin.iter().all(|frame| frame.level.has_voice_activity));
+      pipeline.set_thin_voice(false).unwrap();
+      pipeline
+        .push(&sine_tone(440.0, 0.5, 0, 3 * FRAME_SAMPLES_PER_CHANNEL))
+        .unwrap();
+      assert!(pipeline.take_thin_frames().unwrap().is_empty(), "stopped");
     }
 
     #[test]
