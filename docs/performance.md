@@ -2850,6 +2850,34 @@ The call module's budget was 1,000,000 B (0.86 MB with the effects' compositors,
 1,100,000 B since, a decision of the maintainer: the reports pay for themselves in field bugs found
 without asking anybody for logs.
 
+#### The screen shares' meter in the call module (2026-11-15)
+
+The phone meeting form's parity (#1981) took a signed-in first visit 83 bytes over its ceiling, and
+with it the `Web wasm size` check of every pull request red. The budget stays: the screen shares'
+meter (`share_quality`, #1733) left the signed-in app instead. The app's shell starts it, and every
+two seconds while a screen is shared it read the media layer's video report from JSON: the
+report's readers (`VideoStatsReport` and its tracks, about 37 kB before wasm-opt, with serde's
+helpers for them) were in a chunk the signed-in app shared with the call screens. The shell still
+watches whether a screen is shared and asks for the report; reading it and measuring the shares is
+a split point in `calls` now (`areas::share_report`), which a call's screens have loaded already.
+After a share it asks once more, so a page that never had one doesn't load the module for it.
+While the module can't load, the share isn't measured: these are performance data only.
+
+Release `trunk build` on Linux (trunk 0.22.0, in the local CI web image with the job's commands),
+`main` 177a2327, gzip -9:
+
+| Download                                      | Before      | After       | Delta     |
+|-----------------------------------------------|-------------|-------------|-----------|
+| A guest in a meeting (lobby, meeting, calls)  | 6,195,974 B | 6,196,941 B | +967 B    |
+| Signed-in first visit                         | 5,604,601 B | 5,571,668 B | −32,933 B |
+| The app (in both)                             | 2,862,432 B | 2,862,141 B | −291 B    |
+| Signed-in app (pack)                          | 2,275,441 B | 2,242,799 B | −32,642 B |
+| `calls` (the call screens' module)            | 252,091 B   | 280,268 B   | +28,177 B |
+
+The service worker (396,750 B) and the texts (69,978 B) did not change; CI's image measured
+`main` 4.5 kB smaller (5,600,083 B). A guest pays about 1 kB: the meter now compresses in the call
+screens' module rather than in a chunk it shared with them. The budgets did not change.
+
 #### The service worker's own fetch in place of reqwest (#1909, 2026-11-14)
 
 The service worker sent its few API requests (the message a push names, a planned meeting's chat,

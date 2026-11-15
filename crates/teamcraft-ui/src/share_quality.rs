@@ -11,7 +11,8 @@ use std::cell::{Cell, RefCell};
 
 use teamcraft_client_api::crash_reporting::PerfUnit;
 use teamcraft_client_api::video_stats::{
-  EncoderImplementation, ReceivedVideoStats, SentVideoStats, VideoSize, VideoStatsReport, VideoTrackStats,
+  EncoderImplementation, ReceivedVideoStats, SentVideoStats, VideoSize, VideoStatsJson, VideoStatsReport,
+  VideoTrackStats,
 };
 use teamcraft_proto::{MediaStreamId, VideoCodec, VideoTrackKind};
 
@@ -721,28 +722,45 @@ pub fn run(state: crate::state::AppState) {
       })
   });
   crate::reactive::use_interval_while(POLL_MS, move || is_sharing.get(), move || poll(state));
-  // The last report of a share that just ended is at most one poll old.
-  Effect::new(move |_| {
-    if !is_sharing.get() {
-      finish(METER.with(|meter| meter.borrow_mut().finish_all()));
+  // The last report of a share that just ended is at most one poll old. Only after a share: the
+  // work is in the call module, which a page without a call doesn't load.
+  Effect::new(move |was_sharing: Option<bool>| {
+    let is_now = is_sharing.get();
+    if was_sharing == Some(true) && !is_now {
+      take(None);
     }
+    is_now
   });
 }
 
 fn poll(state: crate::state::AppState) {
   state.read(|backend| {
-    backend.fetch_call_video_stats(Box::new(|maybe_json| {
-      match maybe_json.and_then(|json| json.read()) {
-        Some(report) => {
-          let (started, ended) = METER.with(|meter| meter.borrow_mut().observe(&report));
-          finish(ended);
-          start(started);
-        },
-        // Outside a call: whatever ran ended.
-        None => finish(METER.with(|meter| meter.borrow_mut().finish_all())),
-      }
-    }));
+    backend.fetch_call_video_stats(Box::new(take));
   });
+}
+
+/// Hands a report to the meter in the call module (`areas::share_report`): its readers and the
+/// meter are only needed while a screen is shared in a call, so the signed-in app doesn't carry
+/// them. While the module can't load, the share is not measured (performance data only).
+fn take(maybe_json: Option<VideoStatsJson>) {
+  leptos::task::spawn_local(async move {
+    if let Err(error) = crate::areas::share_report(maybe_json).await {
+      tracing::debug!(%error, "the screen share's report waits for the call module");
+    }
+  });
+}
+
+/// A report of the media layer for the meter: shares that started are measured, those that ended
+/// are sent. `None` (outside a call, or the share ended): whatever ran ended.
+pub fn observe(maybe_json: Option<VideoStatsJson>) {
+  match maybe_json.and_then(|json| json.read()) {
+    Some(report) => {
+      let (started, ended) = METER.with(|meter| meter.borrow_mut().observe(&report));
+      finish(ended);
+      start(started);
+    },
+    None => finish(METER.with(|meter| meter.borrow_mut().finish_all())),
+  }
 }
 
 fn start(started: Vec<ShareKey>) {
