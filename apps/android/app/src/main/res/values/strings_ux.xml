@@ -324,4 +324,7 @@
   <string name="push_mode_title">Push notifications</string>
   <string name="push_service_title">Push service</string>
   <string name="search_prefetch_limit">Storage limit</string>
+  <string name="profile_message">Message</string>
+  <string name="profile_call">Call</string>
+  <string name="profile_open">Open profile of %1$s</string>
 </resources>

@@ -76,8 +76,14 @@ fun MessageBody(
 ) {
   val context = LocalContext.current
   val blocks = remember(body) { messageMarkup(body) }
-  val links = remember(context, onOpenPermalink) {
-    LinkHandlers(isOpenable = ::isOpenableLink, onOpenWeb = { openLink(context, it) }, onOpenPermalink = onOpenPermalink)
+  val maybeProfile = LocalOpenProfile.current
+  val links = remember(context, onOpenPermalink, maybeProfile) {
+    LinkHandlers(
+      isOpenable = ::isOpenableLink,
+      onOpenWeb = { openLink(context, it) },
+      onOpenPermalink = onOpenPermalink,
+      maybeOnOpenMention = maybeProfile?.byUsername,
+    )
   }
   val permalinkLabel = stringResource(R.string.message_link_label)
   // bodyLarge with chat-style tracking: the scale's 0.5 sp reads airy in a bubble.

@@ -60,6 +60,8 @@ class LinkHandlers(
   val isOpenable: (String) -> Boolean,
   val onOpenWeb: (String) -> Unit,
   val onOpenPermalink: (String) -> Unit,
+  /** Opens the profile of a mentioned person by username (#2002); null where there is none to open. */
+  val maybeOnOpenMention: ((String) -> Unit)? = null,
 )
 
 /**
@@ -142,7 +144,15 @@ private fun AnnotatedString.Builder.appendRun(
         isMe -> withStyle(SpanStyle(color = colors.mentionMe, background = colors.mentionMeBackground, fontWeight = FontWeight.Bold)) {
           append(run.text)
         }
-        isGroup || name in names.usernames -> withStyle(SpanStyle(color = colors.mention, fontWeight = FontWeight.Bold)) { append(run.text) }
+        isGroup || name in names.usernames -> {
+          val style = SpanStyle(color = colors.mention, fontWeight = FontWeight.Bold)
+          val maybeOpen = links.maybeOnOpenMention.takeIf { !isGroup }
+          if (maybeOpen != null) {
+            withLink(LinkAnnotation.Clickable(tag = run.text, styles = TextLinkStyles(style)) { maybeOpen(kind.name) }) { append(run.text) }
+          } else {
+            withStyle(style) { append(run.text) }
+          }
+        }
         // Not a member's name (an address, a handle elsewhere): plain text.
         else -> append(run.text)
       }

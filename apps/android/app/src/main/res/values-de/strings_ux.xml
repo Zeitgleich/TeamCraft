@@ -318,4 +318,7 @@
   <string name="push_mode_title">Push-Benachrichtigungen</string>
   <string name="push_service_title">Push-Dienst</string>
   <string name="search_prefetch_limit">Speicherlimit</string>
+  <string name="profile_message">Nachricht</string>
+  <string name="profile_call">Anrufen</string>
+  <string name="profile_open">Profil von %1$s öffnen</string>
 </resources>

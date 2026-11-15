@@ -96,6 +96,8 @@ struct ChatPane: View {
   @State private var rowsOnScreen: Set<String> = []
   /// The message the heart button goes to, until its row is loaded.
   @State private var maybeReactionTarget: String?
+  /// The person whose profile an @mention or an avatar opened (#2002).
+  @State private var maybeProfile: PeopleSnapshot.Person?
   /// A call about to be joined whose running call has the notetaker in it: the user confirms
   /// after the notice (`true`: with video).
   @State private var maybePreJoin: PreJoinNotice?
@@ -278,6 +280,7 @@ struct ChatPane: View {
         .environment(\.areAnimationsCovered, maybeViewing != nil || maybeVideo != nil)
         .environment(\.openVideo, OpenPictureAction { file in maybeVideo = file })
         .environment(\.openQuotedPicture, OpenQuotedPictureAction(run: openQuotedPicture))
+        .environment(\.openProfile, OpenProfileAction { id in Task { maybeProfile = await model.person(userId: id) } })
         .environment(
           \.imageActions,
           ImageActions(
@@ -348,12 +351,20 @@ struct ChatPane: View {
     .alert("error_too_large", isPresented: $isScheduleTooLarge) {
       Button("done", role: .cancel) {}
     }
+    .sheet(item: $maybeProfile) { person in
+      ProfileSheet(person: person) { conversationId in model.openConversationId = conversationId }
+    }
     .alert("permalink_unavailable", isPresented: $isPermalinkMissing) {
       Button("done", role: .cancel) {}
     }
     // Message links open in the app; web links go to the browser as usual.
     .environment(\.openURL, OpenURLAction { url in
       guard url.scheme == "teamcraft" else { return .systemAction }
+      if url.absoluteString.hasPrefix(profilePrefix) {
+        let username = String(url.absoluteString.dropFirst(profilePrefix.count)).removingPercentEncoding
+        Task { maybeProfile = await model.person(username: username) }
+        return .handled
+      }
       Task { await openPermalink(url.absoluteString) }
       return .handled
     })
