@@ -214,6 +214,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   if tauri::is_available() {
     sync_tray(state, i18n);
     crate::tray_menu::start(state, i18n);
+    crate::call_mini::start(state, i18n);
     crate::mute_shortcut::start(state);
   } else {
     sync_favicon(state);

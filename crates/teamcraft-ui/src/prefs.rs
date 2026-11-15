@@ -483,6 +483,9 @@ pub struct CallPrefs {
   pub status_sounds: teamcraft_client_api::calls::CallStatusSounds,
   /// The highest quality the camera is sent at (#967).
   pub camera_quality: teamcraft_client_api::calls::VideoQuality,
+  /// Desktop: when the small call window shows during a call (#2077): only while the main window
+  /// is away (the default), always, or never.
+  pub small_window: teamcraft_client_api::call_mini::CallMiniPolicy,
 }
 
 impl Default for CallPrefs {
@@ -506,6 +509,7 @@ impl Default for CallPrefs {
       screen_resolution: teamcraft_client_api::calls::ScreenShareResolution::Standard,
       status_sounds: teamcraft_client_api::calls::CallStatusSounds::All,
       camera_quality: teamcraft_client_api::calls::VideoQuality::Auto,
+      small_window: teamcraft_client_api::call_mini::CallMiniPolicy::WhenAway,
     }
   }
 }

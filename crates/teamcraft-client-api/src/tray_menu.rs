@@ -51,10 +51,15 @@ pub enum TrayAction {
   /// let them in: opens the call asking whom to hand the meeting to first, as its button does
   /// (#1720).
   LeaveCallAsking,
+  /// Not a menu item: the small call window's sound button turns the call's sound off (deafen,
+  /// #2077).
+  SoundOff,
+  /// Not a menu item: the small call window's sound button turns the call's sound on again.
+  SoundOn,
 }
 
 impl TrayAction {
-  pub const ALL: [Self; 27] = [
+  pub const ALL: [Self; 29] = [
     Self::OpenApp,
     Self::CheckForUpdates,
     Self::Quit,
@@ -82,6 +87,8 @@ impl TrayAction {
     Self::ResumeNotifications,
     Self::EndCallForEveryone,
     Self::LeaveCallAsking,
+    Self::SoundOff,
+    Self::SoundOn,
   ];
 
   /// The menu item's id, and the text of the event.
@@ -114,6 +121,8 @@ impl TrayAction {
       Self::ResumeNotifications => "resume_notifications",
       Self::EndCallForEveryone => "end_call_for_everyone",
       Self::LeaveCallAsking => "leave_call_asking",
+      Self::SoundOff => "sound_off",
+      Self::SoundOn => "sound_on",
     }
   }
 

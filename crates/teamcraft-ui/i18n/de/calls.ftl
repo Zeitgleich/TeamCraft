@@ -420,3 +420,12 @@ calls-mute-shortcut-press = Tasten drücken…
 calls-mute-shortcut-taken = Eine andere App nutzt dieses Tastenkürzel schon. Wähle ein anderes.
 calls-mute-shortcut-invalid = Dieses Tastenkürzel versteht das System nicht.
 calls-mute-shortcut-unavailable = Dieser Desktop erlaubt Apps nicht, im Hintergrund auf Tasten zu lauschen. Das Tastenkürzel ist hier nicht verfügbar.
+# Das kleine Anruffenster der Desktop-App (#2077).
+calls-small-window = Kleines Anruffenster
+calls-small-window-hint = Ein kleines Fenster über allen anderen mit Stummschalten und Auflegen, während du in einem Anruf bist.
+calls-small-window-always = Während jedes Anrufs
+calls-small-window-when-away = Wenn TeamCraft im Hintergrund ist
+calls-small-window-never = Nie
+call-mini-back = Zurück zum Anruf
+call-mini-reconnecting = Verbindet neu…
+call-mini-label = Anrufsteuerung

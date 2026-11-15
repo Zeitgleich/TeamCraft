@@ -20,7 +20,7 @@ use leptos::leptos_dom::helpers::{TimeoutHandle, set_timeout_with_handle};
 use leptos::prelude::*;
 use teamcraft_client_api::actions::{MessagePriority, OutgoingMessage};
 use teamcraft_client_api::activity::{JoinRequest, JoinRequestStanding};
-use teamcraft_client_api::call_window::{CallWindow, CallWindowTheme};
+use teamcraft_client_api::call_window::CallWindow;
 use teamcraft_client_api::live::LiveMeetingNoticeDismissal;
 use teamcraft_client_api::os_notify::{
   NOTIFICATION_ACTION_EVENT, NotificationAction, NotificationActionEvent, NotificationButton,
@@ -50,7 +50,7 @@ use crate::notifier::{
   needs_channel_confirmation, needs_group_confirmation, notifications_for,
 };
 use crate::reactive::OwnerLiveness;
-use crate::settings::{Theme, load_string, store_string};
+use crate::settings::{load_string, store_string};
 use crate::state::{AppState, MainView};
 
 /// How long another tab's "I show this conversation" counts without being renewed.
@@ -583,11 +583,7 @@ fn call_window(state: AppState, i18n: I18n, call: &IncomingCall) -> Option<CallW
   } else {
     "incoming-audio"
   };
-  let theme = match state.settings.theme.get_untracked() {
-    Theme::System => CallWindowTheme::System,
-    Theme::Light => CallWindowTheme::Light,
-    Theme::Dark => CallWindowTheme::Dark,
-  };
+  let theme = crate::call_mini::window_theme(state.settings.theme.get_untracked());
   Some(CallWindow {
     tag: NotificationTag::call(call.conversation),
     title: i18n.t("incoming-title"),

@@ -138,8 +138,9 @@ fn IncomingCallWindow() -> impl IntoView {
   }
 }
 
-/// The main window's theme: "system" leaves `data-theme` unset, so the CSS media queries apply.
-fn apply_window_theme(theme: CallWindowTheme) {
+/// The main window's theme in a call window: "system" leaves `data-theme` unset, so the CSS media
+/// queries apply.
+pub(crate) fn apply_window_theme(theme: CallWindowTheme) {
   let Some(root) = web_sys::window()
     .and_then(|window| window.document())
     .and_then(|document| document.document_element())
@@ -151,9 +152,12 @@ fn apply_window_theme(theme: CallWindowTheme) {
     CallWindowTheme::Light => Some("light"),
     CallWindowTheme::Dark => Some("dark"),
   };
-  if let Some(slug) = maybe_slug
-    && root.set_attribute("data-theme", slug).is_err()
-  {
-    tracing::debug!("could not apply the theme to the incoming-call window");
+  // A window that stays open (the small call window) may go back to the system's theme.
+  let applied = match maybe_slug {
+    Some(slug) => root.set_attribute("data-theme", slug),
+    None => root.remove_attribute("data-theme"),
+  };
+  if applied.is_err() {
+    tracing::debug!("could not apply the theme to the call window");
   }
 }

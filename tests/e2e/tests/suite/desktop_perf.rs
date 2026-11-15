@@ -123,7 +123,7 @@ async fn the_desktop_app_hidden_in_the_tray_stays_idle() {
 
 /// Signs in through Keycloak in the "system browser" and unlocks the account's keys with the
 /// recovery passphrase.
-async fn sign_in_and_unlock(session: &DesktopSession, app: &mut DesktopApp) {
+pub(crate) async fn sign_in_and_unlock(session: &DesktopSession, app: &mut DesktopApp) {
   // The server the environment names, confirmed once (desktop.rs).
   app
     .wait_for_text("Continue to sign-in", Duration::from_secs(60))

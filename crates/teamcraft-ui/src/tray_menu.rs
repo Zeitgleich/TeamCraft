@@ -15,14 +15,14 @@ use teamcraft_client_api::tray_menu::{
 use teamcraft_client_api::updates::{UpdateBlocker, UpdateState};
 
 use crate::auth::tauri;
-use crate::calls::{CallKind, CallPhase};
+use crate::calls::{CallKind, CallPhase, CallRequest};
 use crate::clock::{now_ms, tomorrow_at};
 use crate::components::call_prejoin::call_heading;
 use crate::components::status_menu::{FOCUS_SHORT_MS, MORNING_MINUTE, MS_PER_HOUR};
 use crate::i18n::I18n;
 use crate::meetings::MeetingsHub;
-use crate::model::PresenceStatus;
 use crate::model::TimestampMs;
+use crate::model::{ConversationId, PresenceStatus};
 use crate::state::{AppState, Overlay};
 
 const MS_PER_MINUTE: u64 = 60_000;
@@ -205,6 +205,34 @@ pub fn duration_text(minutes: u64, t_with: &TranslateWith<'_>) -> Option<String>
   }
 }
 
+/// "Call with Bob", or the meeting's title: the call's heading as the call screen has it.
+pub fn call_title(
+  state: AppState,
+  i18n: I18n,
+  maybe_hub: Option<MeetingsHub>,
+  request: &CallRequest,
+) -> String {
+  let maybe_meeting_title = maybe_hub.and_then(|hub| hub.title_for(request.conversation));
+  let name = state
+    .read(|backend| backend.conversation(request.conversation))
+    .map(|conversation| conversation.name)
+    .unwrap_or_default();
+  call_heading(i18n, request.kind, maybe_meeting_title.as_deref(), &name)
+}
+
+/// Leaving the call would leave people stuck in the lobby of the meeting the user organizes, with
+/// nobody else to let them in (#1720): a hang-up outside the call screen opens it asking first.
+pub fn asks_handover(state: AppState, maybe_hub: Option<MeetingsHub>, conversation: ConversationId) -> bool {
+  maybe_hub.is_some_and(|hub| {
+    // Again when the meeting, its lobby or who is in the call changes.
+    hub.meetings.track();
+    hub.lobbies.track();
+    let candidates = crate::components::meeting_controls::handover_candidates(state, conversation);
+    crate::components::meeting_controls::handover_offer(hub, conversation, state.me().id, candidates)
+      .is_some()
+  })
+}
+
 /// Keeps the shell's tray menu in step with the state (desktop app): rebuilt when the presence,
 /// the call (its duration once a minute), a ringing call or the language changes. Chosen items
 /// come back through [`run`].
@@ -229,41 +257,21 @@ pub fn start(state: AppState, i18n: I18n) {
     let maybe_call = (call.phase.get() == CallPhase::Active)
       .then(|| call.maybe_request.get())
       .flatten()
-      .map(|request| {
-        let maybe_meeting_title = maybe_hub.and_then(|hub| hub.title_for(request.conversation));
-        let name = state
-          .read(|backend| backend.conversation(request.conversation))
-          .map(|conversation| conversation.name)
-          .unwrap_or_default();
-        TrayCall {
-          title: call_heading(i18n, request.kind, maybe_meeting_title.as_deref(), &name),
-          maybe_duration: duration_text(call_minutes.get().unwrap_or(0), &|key, args| {
-            i18n.t_with(key, args)
-          }),
-          is_huddle: request.kind == CallKind::Huddle,
-          can_end_for_everyone: maybe_hub
-            .and_then(|hub| {
-              crate::components::meeting_controls::meeting_to_end(hub, request.conversation, state.me().id)
-            })
-            .is_some(),
-          asks_handover: maybe_hub.is_some_and(|hub| {
-            // Again when the meeting, its lobby or who is in the call changes.
-            hub.meetings.track();
-            hub.lobbies.track();
-            let candidates =
-              crate::components::meeting_controls::handover_candidates(state, request.conversation);
-            crate::components::meeting_controls::handover_offer(
-              hub,
-              request.conversation,
-              state.me().id,
-              candidates,
-            )
-            .is_some()
-          }),
-          is_muted: !call.is_mic_on.get(),
-          is_camera_on: call.is_camera_on.get(),
-          is_sharing_screen: call.is_sharing_screen.get(),
-        }
+      .map(|request| TrayCall {
+        title: call_title(state, i18n, maybe_hub, &request),
+        maybe_duration: duration_text(call_minutes.get().unwrap_or(0), &|key, args| {
+          i18n.t_with(key, args)
+        }),
+        is_huddle: request.kind == CallKind::Huddle,
+        can_end_for_everyone: maybe_hub
+          .and_then(|hub| {
+            crate::components::meeting_controls::meeting_to_end(hub, request.conversation, state.me().id)
+          })
+          .is_some(),
+        asks_handover: asks_handover(state, maybe_hub, request.conversation),
+        is_muted: !call.is_mic_on.get(),
+        is_camera_on: call.is_camera_on.get(),
+        is_sharing_screen: call.is_sharing_screen.get(),
       });
     let input = TrayInput {
       presence,
@@ -432,6 +440,8 @@ pub fn run(state: AppState, action: TrayAction) {
     TrayAction::CameraOff => call.set_camera(false),
     TrayAction::StopSharing => call.set_screen_share(false),
     TrayAction::LeaveCall => call.leave(),
+    TrayAction::SoundOff => call.set_deafened(true),
+    TrayAction::SoundOn => call.set_deafened(false),
     TrayAction::OpenCall => call.is_minimized.set(false),
     TrayAction::EndCallForEveryone => {
       call.is_minimized.set(false);

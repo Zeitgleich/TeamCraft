@@ -139,3 +139,101 @@ html.call-window body {
   }
 }
 
+
+/* The desktop shell's small call window (#2077): who talks and the call's time on top, the
+   controls below; the whole window can be dragged except its buttons. */
+.call-mini {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 10px;
+  height: 100%;
+  padding: 12px 14px;
+  cursor: default;
+  user-select: none;
+}
+
+.call-mini-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.call-mini-glyph {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--online);
+  color: var(--on-fill);
+}
+
+.call-mini-glyph .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.call-mini-head .avatar.is-speaking {
+  flex: none;
+  box-shadow: 0 0 0 2px var(--online);
+}
+
+.call-mini-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.call-mini-title,
+.call-mini-status {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.call-mini-title {
+  font-weight: var(--weight-semibold);
+}
+
+.call-mini-status {
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.call-mini-back {
+  flex: none;
+}
+
+.call-mini-controls {
+  display: flex;
+  gap: 8px;
+}
+
+.call-mini .round-btn {
+  width: 36px;
+  height: 36px;
+}
+
+.call-mini .round-btn .icon {
+  width: 18px;
+  height: 18px;
+}
+
+.call-mini .round-btn {
+  transition: transform 100ms var(--ease-standard);
+}
+
+.call-mini .round-btn:active {
+  transform: scale(0.94);
+}
+
+.call-mini .round-btn.call-mini-hangup {
+  margin-left: auto;
+  width: 52px;
+  border-radius: var(--radius-pill);
+  background: var(--call-danger);
+}

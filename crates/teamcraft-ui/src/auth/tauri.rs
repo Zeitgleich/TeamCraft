@@ -704,6 +704,20 @@ pub async fn tray_menu_set(model: &teamcraft_client_api::tray_menu::TrayMenuMode
   }
 }
 
+/// Desktop only: what the small call window shows (`None`: no call) and when it shows (#2077).
+pub async fn call_mini_set(
+  maybe_call: Option<&teamcraft_client_api::call_mini::CallMini>,
+  policy: teamcraft_client_api::call_mini::CallMiniPolicy,
+) {
+  if !is_available() {
+    return;
+  }
+  let args = serde_json::json!({ "maybe_call": maybe_call, "policy": policy });
+  if let Err(error) = call::<()>("call_mini_set", &args).await {
+    tracing::debug!(%error, "could not update the small call window");
+  }
+}
+
 /// Desktop only: asks the shell for the global mute shortcut (`None` releases it). With
 /// `is_active` false the shortcut is only tried, so the settings can say whether it can be had.
 pub async fn mute_shortcut_set(
