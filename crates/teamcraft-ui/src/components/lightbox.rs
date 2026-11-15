@@ -23,7 +23,6 @@
 //! decrypted ever goes to the server: "open in a new window" hands the same in-memory URL to a
 //! blank window of this page.
 
-use std::cell::Cell;
 use std::rc::Rc;
 
 use leptos::html;
@@ -63,13 +62,9 @@ use crate::state::use_app_state;
 /// Pixels per line of a wheel event that scrolls by lines (Firefox with a mouse wheel).
 const WHEEL_LINE_PX: f64 = 16.0;
 
-/// Below this window width the thread panel starts hidden: the picture needs the room.
+/// Below this window width the thread panel starts hidden: the picture needs the room. The
+/// stored choice (`Settings::is_lightbox_thread_shown`) is left as it is.
 const THREAD_PANEL_MIN_WIDTH_PX: f64 = 1200.0;
-
-thread_local! {
-  /// Whether the user last showed or hid the thread panel, for the next lightbox of this session.
-  static IS_THREAD_SHOWN: Cell<Option<bool>> = const { Cell::new(None) };
-}
 
 /// The full-size bytes of the file on screen.
 #[derive(Clone)]
@@ -207,7 +202,9 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
   let track = NodeRef::<html::Div>::new();
   let image = NodeRef::<html::Img>::new();
   let video = NodeRef::<html::Video>::new();
-  let is_thread_shown = RwSignal::new(IS_THREAD_SHOWN.get().unwrap_or_else(is_wide_window));
+  // Off by default; what the user chose last (#2080), when the window has room for the panel.
+  let is_thread_shown =
+    RwSignal::new(state.settings.is_lightbox_thread_shown.get_untracked() && is_wide_window());
   let modifier = modifier_style();
 
   load_current(LoadInputs {
@@ -263,7 +260,7 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
   let toggle_thread = move || {
     let shown = !is_thread_shown.get_untracked();
     is_thread_shown.set(shown);
-    IS_THREAD_SHOWN.set(Some(shown));
+    state.settings.is_lightbox_thread_shown.set(shown);
   };
   let actions = MediaActions {
     state,

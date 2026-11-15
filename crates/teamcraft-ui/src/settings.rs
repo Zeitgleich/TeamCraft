@@ -24,6 +24,7 @@ const KEY_PREFS: &str = "teamcraft.prefs";
 const KEY_RECENT_CONVERSATIONS: &str = "teamcraft.recent_conversations";
 const KEY_RECENT_EMOJI: &str = "teamcraft.recent_emoji";
 const KEY_EMOJI_SKIN_TONE: &str = "teamcraft.emoji_skin_tone";
+const KEY_LIGHTBOX_THREAD: &str = "teamcraft.lightbox_thread";
 const KEY_FAVORITE_ORDER: &str = "teamcraft.favorite_order";
 const KEY_MEDIA_CACHE_LIMIT: &str = "teamcraft.media_cache_limit";
 const KEY_MEDIA_CACHE_MAX_AGE: &str = "teamcraft.media_cache_max_age";
@@ -416,6 +417,10 @@ pub struct Settings {
   pub recent_emoji: RwSignal<Vec<String>>,
   /// The skin tone the emoji picker puts on emoji that have one.
   pub emoji_skin_tone: RwSignal<SkinTone>,
+  /// Whether the lightbox shows its thread panel (#2080): off until the user shows it, then it
+  /// stays as they left it, also after a restart. A window too narrow for the panel starts it
+  /// hidden without changing this.
+  pub is_lightbox_thread_shown: RwSignal<bool>,
   /// The user's own order of favorites in the sidebar (this device).
   pub favorite_order: RwSignal<Vec<ConversationId>>,
 }
@@ -456,6 +461,7 @@ impl Settings {
       recent_conversations: RwSignal::new(load(KEY_RECENT_CONVERSATIONS, from_json).unwrap_or_default()),
       recent_emoji: RwSignal::new(load(KEY_RECENT_EMOJI, from_json).unwrap_or_default()),
       emoji_skin_tone: RwSignal::new(load(KEY_EMOJI_SKIN_TONE, SkinTone::from_slug).unwrap_or_default()),
+      is_lightbox_thread_shown: RwSignal::new(load(KEY_LIGHTBOX_THREAD, parse_bool).unwrap_or(false)),
       favorite_order: RwSignal::new(load(KEY_FAVORITE_ORDER, from_json).unwrap_or_default()),
     };
     persist(KEY_THEME, settings.theme, |theme| theme.slug().to_owned());
@@ -471,6 +477,9 @@ impl Settings {
     persist(KEY_RECENT_EMOJI, settings.recent_emoji, |list| to_json(&list));
     persist(KEY_EMOJI_SKIN_TONE, settings.emoji_skin_tone, |tone| {
       tone.slug().to_owned()
+    });
+    persist(KEY_LIGHTBOX_THREAD, settings.is_lightbox_thread_shown, |value| {
+      value.to_string()
     });
     persist(KEY_FAVORITE_ORDER, settings.favorite_order, |list| to_json(&list));
     settings
@@ -496,6 +505,7 @@ impl Settings {
       recent_conversations: RwSignal::new(Vec::new()),
       recent_emoji: RwSignal::new(Vec::new()),
       emoji_skin_tone: RwSignal::new(SkinTone::Default),
+      is_lightbox_thread_shown: RwSignal::new(false),
       favorite_order: RwSignal::new(Vec::new()),
     }
   }
