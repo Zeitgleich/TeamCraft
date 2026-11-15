@@ -6473,6 +6473,22 @@
         }
       }
     },
+    "quote_show_original": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Shows the original message"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zeigt die Originalnachricht"
+          }
+        }
+      }
+    },
     "profile_message": {
       "localizations": {
         "en": {

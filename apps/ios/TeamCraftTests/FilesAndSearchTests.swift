@@ -151,4 +151,15 @@ final class FilesAndSearchTests: XCTestCase {
     XCTAssertGreaterThan(urgent, mention)
     XCTAssertGreaterThan(mention, plain)
   }
+
+  func testSearchTermsLeaveOutFiltersAndQuotes() {
+    XCTAssertEqual(SearchFilters.terms(in: "\"quarter plan\" from:alice budget in-thread"), ["quarter plan", "budget"])
+    XCTAssertEqual(SearchFilters.terms(in: "  "), [])
+  }
+
+  func testSearchHighlightEmphasisesEveryOccurrence() {
+    let text = SearchHighlight.attributed("Budget and budget", terms: ["budget"])
+    let emphasised = text.runs.filter { $0.inlinePresentationIntent == .stronglyEmphasized }
+    XCTAssertEqual(emphasised.count, 2)
+  }
 }

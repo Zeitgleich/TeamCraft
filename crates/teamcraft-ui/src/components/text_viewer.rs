@@ -434,7 +434,7 @@ fn text_pane(state: AppState, i18n: I18n, prepared: &Prepared, name: String) -> 
       // `show_error` does nothing once the shell is gone (issue #322); the toast checks first.
       if copying.await {
         if state.is_alive() {
-          state.show_toast(copied);
+          state.show_brief_toast(copied);
         }
       } else {
         state.show_error(failed, String::new());

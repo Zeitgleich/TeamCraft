@@ -18,6 +18,12 @@ class SearchFiltersTest {
   }
 
   @Test
+  fun termsLeaveOutFiltersAndQuotes() {
+    assertEquals(listOf("quarter plan", "budget"), SearchFilters.terms("\"quarter plan\" from:alice budget in-thread"))
+    assertEquals(emptyList<String>(), SearchFilters.terms("has:file"))
+  }
+
+  @Test
   fun datesUseIsoDays() {
     assertEquals("after:2026-03-01", SearchFilters.after(LocalDate.of(2026, 3, 1)))
     assertEquals("before:2026-12-31", SearchFilters.before(LocalDate.of(2026, 12, 31)))

@@ -1,7 +1,5 @@
 package de.zeitgleich.teamcraft.ui.screens
 
-import android.content.ClipData
-import android.content.ClipboardManager
 import androidx.compose.foundation.layout.Column
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -36,6 +34,7 @@ import de.zeitgleich.teamcraft.ui.EntryAction
 import de.zeitgleich.teamcraft.ui.EntryItem
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.channelDeleteText
+import de.zeitgleich.teamcraft.ui.copyText
 import de.zeitgleich.teamcraft.ui.rememberChannelAnchorMarks
 import de.zeitgleich.teamcraft.ui.conversationMenu
 import de.zeitgleich.teamcraft.ui.spaceMenu
@@ -80,7 +79,7 @@ fun ConversationEntryMenu(
           EntryAction.Select -> onSelect()
           EntryAction.MarkRead -> viewModel.markRead(conversation.id)
           EntryAction.Notifications -> onNotifications()
-          EntryAction.CopyLink -> maybeLink?.let { copyLink(context, it) }
+          EntryAction.CopyLink -> maybeLink?.let { copyText(context, it) }
           EntryAction.LeaveChannel -> isConfirmingLeave = true
           EntryAction.DeleteChannel -> isConfirmingDelete = true
           else -> Unit
@@ -265,8 +264,4 @@ private fun ConfirmDialog(title: String, text: String, confirmLabel: String, onC
     },
     dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
   )
-}
-
-private fun copyLink(context: android.content.Context, link: String) {
-  context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText(link, link))
 }

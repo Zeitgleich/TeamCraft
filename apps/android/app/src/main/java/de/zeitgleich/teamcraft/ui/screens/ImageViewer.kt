@@ -63,6 +63,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
@@ -112,6 +113,9 @@ import de.zeitgleich.teamcraft.ui.isAppResumed
 import de.zeitgleich.teamcraft.ui.mayBeAnimated
 import de.zeitgleich.teamcraft.ui.rememberAnimation
 import de.zeitgleich.teamcraft.ui.rememberMotionReduced
+import de.zeitgleich.teamcraft.ui.rememberSwipeDismissState
+import de.zeitgleich.teamcraft.ui.swipeDismiss
+import de.zeitgleich.teamcraft.ui.swipeDismissLayer
 import de.zeitgleich.teamcraft.ui.wantsToMove
 import de.zeitgleich.teamcraft.ui.PictureTarget
 import de.zeitgleich.teamcraft.ui.PictureViewerState
@@ -228,7 +232,10 @@ fun ImageViewer(
     properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
   ) {
     ImmersiveDialogWindow()
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    val dismissal = rememberSwipeDismissState()
+    val isMotionReduced = rememberMotionReduced()
+    // The backdrop fades with the swipe, the picture follows the finger (#1999).
+    Box(Modifier.fillMaxSize().drawBehind { drawRect(Color.Black, alpha = 1f - dismissal.progress) }) {
       val isAutomatic = remember(state.currentIndex, changes) { prefs.fetchesOriginalNow() }
       if (state.items.isEmpty()) {
         // The opened message is still being read: nothing to page through yet.
@@ -240,7 +247,10 @@ fun ImageViewer(
           // A zoomed picture pans instead of turning the page.
           userScrollEnabled = !isZoomed,
           beyondViewportPageCount = 1,
-          modifier = Modifier.fillMaxSize(),
+          modifier = Modifier
+            .fillMaxSize()
+            .swipeDismiss(dismissal, isEnabled = !isZoomed, isMotionReduced = isMotionReduced, onDismiss = onDismiss)
+            .swipeDismissLayer(dismissal),
         ) { page ->
           val key = state.items.getOrNull(page)?.key ?: return@HorizontalPager
           val isCurrent = page == pager.currentPage
@@ -260,7 +270,7 @@ fun ImageViewer(
           )
         }
       }
-      AnimatedVisibility(visible = isBarShown, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.TopCenter)) {
+      AnimatedVisibility(visible = isBarShown, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.TopCenter).graphicsLayer { alpha = 1f - dismissal.progress }) {
         TopBar(
           maybeFile = state.currentFile,
           snapshot = snapshot,
@@ -269,7 +279,7 @@ fun ImageViewer(
           onDismiss = onDismiss,
         )
       }
-      AnimatedVisibility(visible = isBarShown, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.BottomCenter)) {
+      AnimatedVisibility(visible = isBarShown, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.BottomCenter).graphicsLayer { alpha = 1f - dismissal.progress }) {
         BottomBar(
           maybeFile = state.currentFile,
           maybeScope = state.scope.takeIf { state.canSwitchScope },

@@ -132,7 +132,7 @@ fn LinkUnavailableDialog() -> impl IntoView {
     <Modal labelled_by="link-title" class="modal-link">
       <header class="modal-head">
         <h2 id="link-title">{move || i18n.t("link-title")}</h2>
-        <button class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+        <button class="icon-btn" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=move |_| state.close_overlay()>
           <Icon name=IconName::Close />
         </button>
       </header>
@@ -272,7 +272,7 @@ fn ApproveLinkDialog() -> impl IntoView {
     <Modal labelled_by="approve-link-title" class="modal-small">
       <header class="modal-head">
         <h2 id="approve-link-title">{move || i18n.t("approve-link-title")}</h2>
-        <button class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| close()>
+        <button class="icon-btn" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=move |_| close()>
           <Icon name=IconName::Close />
         </button>
       </header>
@@ -415,7 +415,7 @@ fn DemoLinkDialog() -> impl IntoView {
     <Modal labelled_by="link-title" class="modal-link">
       <header class="modal-head">
         <h2 id="link-title">{move || i18n.t("link-title")}</h2>
-        <button class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+        <button class="icon-btn" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=move |_| state.close_overlay()>
           <Icon name=IconName::Close />
         </button>
       </header>
@@ -530,7 +530,7 @@ pub fn VerifyKeyDialog(conversation: ConversationId) -> impl IntoView {
     <Modal labelled_by="verify-title" class="modal-small">
       <header class="modal-head">
         <h2 id="verify-title" translate="no">{move || i18n.t_with("key-verify-title", &[("name", &name)])}</h2>
-        <button class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+        <button class="icon-btn" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=move |_| state.close_overlay()>
           <Icon name=IconName::Close />
         </button>
       </header>
@@ -576,7 +576,7 @@ pub fn VerifyContactDialog(user: UserId) -> impl IntoView {
     <Modal labelled_by="verify-contact-title" class="modal-small">
       <header class="modal-head">
         <h2 id="verify-contact-title" translate="no">{move || i18n.t_with("contact-verify-title", &[("name", &title_name)])}</h2>
-        <button class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+        <button class="icon-btn" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=move |_| state.close_overlay()>
           <Icon name=IconName::Close />
         </button>
       </header>

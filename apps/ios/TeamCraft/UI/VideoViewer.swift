@@ -19,11 +19,17 @@ struct VideoViewer: View {
   @State private var attempt = 0
   /// This viewer set the audio session up, so closing it lets go of the session.
   @State private var hasAudioSession = false
+  /// How far a vertical swipe has carried the video; the viewer closes past a distance (#1999).
+  @State private var swipeOffset: CGFloat = 0
+  @State private var viewerHeight: CGFloat = 0
 
   var body: some View {
     ZStack(alignment: .topLeading) {
-      Color.black.ignoresSafeArea()
+      // The backdrop fades with the swipe.
+      Color.black.opacity(1 - swipeProgress).ignoresSafeArea()
       content.frame(maxWidth: .infinity, maxHeight: .infinity)
+        .offset(y: swipeOffset)
+        .swipeDismiss(offset: $swipeOffset, extent: viewerHeight, isEnabled: true) { dismiss() }
       Button {
         dismiss()
       } label: {
@@ -31,7 +37,11 @@ struct VideoViewer: View {
       }
       .foregroundStyle(.white)
       .accessibilityLabel(Text("picture_close"))
+      .opacity(1 - swipeProgress)
     }
+    // Clear, so the fading backdrop shows what is behind it.
+    .presentationBackground(.clear)
+    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewerHeight = $0 }
     .task(id: attempt) { await follow() }
     .onDisappear(perform: stop)
     // Nothing of the video stays on screen or in the speakers behind the lock, picture in picture
@@ -54,6 +64,8 @@ struct VideoViewer: View {
       dismiss()
     }
   }
+
+  private var swipeProgress: Double { SwipeDismiss.progress(offset: swipeOffset, extent: viewerHeight) }
 
   @ViewBuilder
   private var content: some View {

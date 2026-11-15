@@ -388,7 +388,13 @@ private fun ReadyNavigation(
     composable("search") {
       SearchScreen(
         viewModel = viewModel,
-        onOpen = { navigation.navigate("conversation/$it") },
+        // At the message, flashed, in its thread when it is in one (#2003).
+        onOpen = { hit ->
+          navigation.navigate(
+            hit.message.maybeThread?.let { thread -> "thread/${hit.message.conversation}/$thread?focus=${hit.message.id}" }
+              ?: "conversation/${hit.message.conversation}?focus=${hit.message.id}",
+          )
+        },
         onBack = { navigation.popBackStack() },
       )
     }

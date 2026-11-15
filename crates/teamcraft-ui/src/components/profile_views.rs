@@ -113,7 +113,7 @@ pub fn UserProfileDialog(user: UserId) -> impl IntoView {
   });
   view! {
     <Modal labelled_by="profile-card-title" class="modal-small modal-profile">
-      <button type="button" class="icon-btn profile-close" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+      <button type="button" class="icon-btn profile-close" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=move |_| state.close_overlay()>
         <Icon name=IconName::Close />
       </button>
       <div class="modal-body profile-card">

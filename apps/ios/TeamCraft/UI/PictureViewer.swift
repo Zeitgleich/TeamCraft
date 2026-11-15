@@ -15,6 +15,9 @@ struct PictureViewer: View {
   @State private var isChromeShown = true
   /// The page that is zoomed in: it pans instead of turning the page.
   @State private var maybeZoomedKey: String?
+  /// How far a vertical swipe has carried the picture; the viewer closes past a distance (#1999).
+  @State private var swipeOffset: CGFloat = 0
+  @State private var viewerHeight: CGFloat = 0
   @State private var maybeForwarding: ForwardTarget?
   @State private var displayNames: [String: String] = [:]
 
@@ -29,26 +32,36 @@ struct PictureViewer: View {
   var body: some View {
     @Bindable var model = model
     ZStack {
-      Color.black.ignoresSafeArea()
-      if model.items.isEmpty {
-        // The opened message is still being read: its thumbnail stands in.
-        page(key: model.target.id, file: model.target.file)
-      } else {
-        pager(position: $model.currentKey)
+      // The backdrop fades with the swipe.
+      Color.black.opacity(1 - swipeProgress).ignoresSafeArea()
+      Group {
+        if model.items.isEmpty {
+          // The opened message is still being read: its thumbnail stands in.
+          page(key: model.target.id, file: model.target.file)
+        } else {
+          pager(position: $model.currentKey)
+        }
       }
+      .offset(y: swipeOffset)
+      .swipeDismiss(offset: $swipeOffset, extent: viewerHeight, isEnabled: maybeZoomedKey == nil) { dismiss() }
       if isChromeShown {
-        chrome.transition(.opacity)
+        chrome.transition(.opacity).opacity(1 - swipeProgress)
       }
     }
+    // Clear, so the fading backdrop shows what is behind it.
+    .presentationBackground(.clear)
     .animation(.easeOut(duration: 0.2), value: isChromeShown)
     .environment(\.colorScheme, .dark)
     .statusBarHidden(!isChromeShown)
     .persistentSystemOverlays(isChromeShown ? .automatic : .hidden)
     .background {
       GeometryReader { proxy in
-        Color.clear.onAppear {
-          model.maxDecodePixels = PictureDecoder.maxPixels(screen: proxy.size, scale: displayScale)
-        }
+        Color.clear
+          .onAppear {
+            model.maxDecodePixels = PictureDecoder.maxPixels(screen: proxy.size, scale: displayScale)
+            viewerHeight = proxy.size.height
+          }
+          .onChange(of: proxy.size) { _, size in viewerHeight = size.height }
       }
     }
     .task {
@@ -79,6 +92,8 @@ struct PictureViewer: View {
         fromConversationId: target.conversationId, messageId: target.messageId, maybeAttachmentId: target.fileId)
     }
   }
+
+  private var swipeProgress: Double { SwipeDismiss.progress(offset: swipeOffset, extent: viewerHeight) }
 
   private func pager(position: Binding<String?>) -> some View {
     ScrollView(.horizontal) {
@@ -221,6 +236,42 @@ struct PictureViewer: View {
       return nil
     }
     return URL(fileURLWithPath: path)
+  }
+}
+
+/// The namespace the chat's pictures and the viewer share, so the viewer can zoom out of the
+/// picture that was tapped and back into it on close (#2012).
+private struct PictureZoomNamespaceKey: EnvironmentKey {
+  static let defaultValue: Namespace.ID? = nil
+}
+
+extension EnvironmentValues {
+  var pictureZoomNamespace: Namespace.ID? {
+    get { self[PictureZoomNamespaceKey.self] }
+    set { self[PictureZoomNamespaceKey.self] = newValue }
+  }
+}
+
+extension View {
+  /// Marks a picture as where the viewer zooms from (iOS 18 and later; earlier, the viewer just covers).
+  @ViewBuilder
+  func pictureZoomSource(id: String, in namespace: Namespace.ID?) -> some View {
+    if #available(iOS 18.0, *), let namespace {
+      matchedTransitionSource(id: id, in: namespace)
+    } else {
+      self
+    }
+  }
+
+  /// The viewer grows out of its source picture and shrinks back into it; without the iOS 18
+  /// transition, or with Reduce Motion, the default presentation (a fade or a slide) stays.
+  @ViewBuilder
+  func pictureZoomTransition(id: String, in namespace: Namespace.ID, reduceMotion: Bool) -> some View {
+    if #available(iOS 18.0, *), !reduceMotion {
+      navigationTransition(.zoom(sourceID: id, in: namespace))
+    } else {
+      self
+    }
   }
 }
 
@@ -546,6 +597,17 @@ private struct OpenQuotedPictureKey: EnvironmentKey {
   static let defaultValue: OpenQuotedPictureAction? = nil
 }
 
+/// Jumps to the message a reply's text quote points at and flashes it (#2001): the message's ID.
+struct OpenQuotedMessageAction {
+  let run: (String) -> Void
+
+  func callAsFunction(_ messageId: String) { run(messageId) }
+}
+
+private struct OpenQuotedMessageKey: EnvironmentKey {
+  static let defaultValue: OpenQuotedMessageAction? = nil
+}
+
 /// What a long press on a picture of an album offers (#241).
 struct ImageActions {
   /// Nil where the user can't reply here.
@@ -566,6 +628,11 @@ extension EnvironmentValues {
   var openQuotedPicture: OpenQuotedPictureAction? {
     get { self[OpenQuotedPictureKey.self] }
     set { self[OpenQuotedPictureKey.self] = newValue }
+  }
+
+  var openQuotedMessage: OpenQuotedMessageAction? {
+    get { self[OpenQuotedMessageKey.self] }
+    set { self[OpenQuotedMessageKey.self] = newValue }
   }
 
   var imageActions: ImageActions? {

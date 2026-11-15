@@ -42,6 +42,7 @@ import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.Meeting
 import de.zeitgleich.teamcraft.ui.ActionAnswer
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import de.zeitgleich.teamcraft.ui.copyText
 import de.zeitgleich.teamcraft.ui.theme.Spacing
 import uniffi.teamcraft_ffi.SavedMeeting
 

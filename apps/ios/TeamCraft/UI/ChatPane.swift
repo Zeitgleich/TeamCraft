@@ -53,6 +53,8 @@ struct ChatPane: View {
   @State private var isPictureGone = false
   @State private var maybeDeleting: Message?
   @State private var isAtBottom = true
+  /// The pictures of the chat and the viewer zooming out of them (#2012).
+  @Namespace private var pictureZoom
   @State private var newBelowCount = 0
   @State private var isSendFailed = false
   @State private var isScheduleTooLarge = false
@@ -98,6 +100,10 @@ struct ChatPane: View {
   @State private var maybeReactionTarget: String?
   /// The person whose profile an @mention or an avatar opened (#2002).
   @State private var maybeProfile: PeopleSnapshot.Person?
+  /// A reply's quote was tapped (#2001): its original, handed to the same jump as the heart button.
+  @State private var maybeQuoteTarget: String?
+  /// The jump under way came from a quote, so a missing original is told.
+  @State private var isQuoteJump = false
   /// A call about to be joined whose running call has the notetaker in it: the user confirms
   /// after the notice (`true`: with video).
   @State private var maybePreJoin: PreJoinNotice?
@@ -230,6 +236,7 @@ struct ChatPane: View {
     .alert("file_gone", isPresented: $isPictureGone) { Button("done", role: .cancel) {} }
     .fullScreenCover(item: $maybeViewing) { target in
       PictureViewer(target: target, maybeOnReply: canReply ? startImageReply : nil)
+        .pictureZoomTransition(id: target.id, in: pictureZoom, reduceMotion: reduceMotion)
     }
     .fullScreenCover(item: $maybeVideo) { video in VideoViewer(opened: video) }
     .sheet(item: $maybeShowingEdits) { target in
@@ -277,10 +284,12 @@ struct ChatPane: View {
       }
       messageList
         .environment(\.openPicture, OpenPictureAction { file in maybeViewing = PictureTarget(file: file) })
+        .environment(\.pictureZoomNamespace, pictureZoom)
         .environment(\.areAnimationsCovered, maybeViewing != nil || maybeVideo != nil)
         .environment(\.openVideo, OpenPictureAction { file in maybeVideo = file })
         .environment(\.openQuotedPicture, OpenQuotedPictureAction(run: openQuotedPicture))
         .environment(\.openProfile, OpenProfileAction { id in Task { maybeProfile = await model.person(userId: id) } })
+        .environment(\.openQuotedMessage, OpenQuotedMessageAction { id in maybeQuoteTarget = id })
         .environment(
           \.imageActions,
           ImageActions(
@@ -467,6 +476,13 @@ struct ChatPane: View {
           focusReactionTarget(proxy)
         }
         .onChange(of: model.focusMessageId) { _, _ in focusLinkedMessage(proxy) }
+        .onChange(of: maybeQuoteTarget) { _, target in
+          guard let target else { return }
+          maybeQuoteTarget = nil
+          maybeReactionTarget = target
+          isQuoteJump = true
+          focusReactionTarget(proxy)
+        }
         .onChange(of: messages.last?.id) { _, last in
           guard last != nil, model.focusMessageId == nil, maybeHighlighted == nil else { return }
           // Own messages always come into view; others' only while reading at the bottom.
@@ -1107,10 +1123,17 @@ struct ChatPane: View {
     guard let target = maybeReactionTarget else { return }
     guard messages.contains(where: { $0.id == target }) else {
       // Older than what is loaded: page back until it is, or give up at the start.
-      if hasOlder { Task { await loadOlder() } } else { maybeReactionTarget = nil }
+      if hasOlder {
+        Task { await loadOlder() }
+      } else {
+        maybeReactionTarget = nil
+        if isQuoteJump { isPermalinkMissing = true }
+        isQuoteJump = false
+      }
       return
     }
     maybeReactionTarget = nil
+    isQuoteJump = false
     maybeHighlighted = target
     withAnimation(scrollAnimation) { proxy.scrollTo(target, anchor: .center) }
     Task {
@@ -1159,6 +1182,8 @@ struct ChatPane: View {
   }
 
   private func react(_ message: Message, _ emoji: String) {
+    // Light, like the system's own toggles; UIKit leaves it out when the user turned haptics off (#2004).
+    UISelectionFeedbackGenerator().selectionChanged()
     Task {
       await model.perform(.toggleReaction(conversationId: conversation.id, messageId: message.id, emoji: emoji))
     }
@@ -1230,6 +1255,7 @@ struct ChatPane: View {
     if let editing = maybeEditing {
       guard !body.isEmpty else { return }
       draft = ""
+      feelSend()
       maybeEditing = nil
       await model.perform(.editMessage(conversationId: conversation.id, messageId: editing.id, body: body))
     } else if otherFiles.contains(where: { $0.fileState == .expired }) {
@@ -1239,6 +1265,7 @@ struct ChatPane: View {
     } else if attachments.isEmpty && sendableOtherFiles.isEmpty && maybeReply == nil {
       guard !body.isEmpty else { return }
       draft = ""
+      feelSend()
       if !(await model.send(conversationId: conversation.id, threadId: threadId, body: body)) {
         // Nothing was sent: the text stays for another try.
         draft = body
@@ -1251,6 +1278,7 @@ struct ChatPane: View {
       let sentIds = Set(files.compactMap(\.maybeDraftId) + fromDraft.map(\.id))
       let replying = maybeReply
       draft = ""
+      feelSend()
       attachments = []
       goneDraftIds.formUnion(sentIds)
       maybeReply = nil
@@ -1267,6 +1295,11 @@ struct ChatPane: View {
       }
     }
     await reload()
+  }
+
+  /// A light tap as the message leaves the composer (#2004).
+  private func feelSend() {
+    UIImpactFeedbackGenerator(style: .light).impactOccurred()
   }
 
   /// Sends the recorded take of this composer as a voice message, with the reply it answers.

@@ -3,12 +3,15 @@ use teamcraft_client_api::custom_emoji::{EmojiSegment, segments};
 use teamcraft_proto::CustomEmojiRef;
 use wasm_bindgen::JsCast;
 
+use crate::components::icons::{Icon, IconName};
+use crate::components::message_actions::copy_and_confirm;
 use crate::custom_emoji::CustomEmojiGlyph;
 
 use crate::highlight::{TokenKind, highlight};
 use crate::i18n::use_i18n;
 use crate::markdown::{self, Alignment, Block, Inline, ListKind, PERMALINK_PREFIX, Table};
-use crate::state::use_app_state;
+use crate::model::UserId;
+use crate::state::{Overlay, use_app_state};
 
 /// The CSS variable that moves a table's header row down to the message list's top edge.
 const HEAD_SHIFT_PROPERTY: &str = "--md-head-shift";
@@ -78,18 +81,30 @@ pub fn RichText(
       },
       Block::Code { maybe_language, code } => {
         let tokens = highlight(maybe_language.as_deref(), &code);
+        let label = i18n.t("code-copy");
         view! {
-          <pre class="md-code" data-language=maybe_language.unwrap_or_default()>
-            <code>
-              {tokens
-                .into_iter()
-                .map(|token| match token.kind {
-                  TokenKind::Plain => token.text.into_any(),
-                  kind => view! { <span class=token_class(kind)>{token.text}</span> }.into_any(),
-                })
-                .collect_view()}
-            </code>
-          </pre>
+          <div class="md-code-wrap">
+            <pre class="md-code" data-language=maybe_language.unwrap_or_default()>
+              <code>
+                {tokens
+                  .into_iter()
+                  .map(|token| match token.kind {
+                    TokenKind::Plain => token.text.into_any(),
+                    kind => view! { <span class=token_class(kind)>{token.text}</span> }.into_any(),
+                  })
+                  .collect_view()}
+              </code>
+            </pre>
+            <button
+              type="button"
+              class="md-code-copy icon-btn"
+              aria-label=label.clone()
+              title=label
+              on:click=move |_| copy_and_confirm(code.clone())
+            >
+              <Icon name=IconName::Copy />
+            </button>
+          </div>
         }
         .into_any()
       },
@@ -258,10 +273,42 @@ fn render_inlines(inlines: Vec<Inline>, me: MentionMarks) -> Vec<AnyView> {
           (false, true) => "mention mention-me",
           (false, false) => "mention",
         };
-        view! { <span class=class translate="no">{format!("@{name}")}</span> }.into_any()
+        let label = format!("@{name}");
+        // A mention of a person opens the profile the author's name opens.
+        let maybe_user = (!is_group).then(|| mentioned_user(&name)).flatten();
+        match maybe_user {
+          Some(user) => {
+            let state = use_app_state();
+            view! {
+              <button
+                type="button"
+                class=format!("{class} mention-link")
+                translate="no"
+                aria-haspopup="dialog"
+                on:click=move |_| state.overlay.set(Overlay::UserProfile(user))
+              >
+                {label}
+              </button>
+            }
+            .into_any()
+          },
+          None => view! { <span class=class translate="no">{label}</span> }.into_any(),
+        }
       },
     })
     .collect()
+}
+
+/// The person a `@username` names, when the directory knows them.
+fn mentioned_user(username: &str) -> Option<UserId> {
+  let state = use_app_state();
+  state.read(|backend| {
+    backend
+      .users()
+      .into_iter()
+      .find(|user| user.username.eq_ignore_ascii_case(username))
+      .map(|user| user.id)
+  })
 }
 
 /// Text with the `:shortcode:` words of custom emoji as their pictures.
