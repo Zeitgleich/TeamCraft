@@ -96,6 +96,7 @@ action-mark-unread = Als ungelesen markieren
 action-edit = Bearbeiten
 action-delete = Löschen
 quote-unavailable = Originalnachricht nicht verfügbar
+quote-jump = Zur Originalnachricht springen
 quote-replying-to = Antwort an { $name }
 quote-cancel = Antwort abbrechen
 forwarded-from = Weitergeleitet von { $name } { $conversation }

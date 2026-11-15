@@ -600,13 +600,27 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
           <QuotedImage conversation=conversation maybe_message=reply.maybe_message name=name excerpt=reply.excerpt image=image />
         }
         .into_any(),
-        None => view! {
-          <blockquote class="msg-quote">
+        None => {
+          let text = if reply.excerpt.is_empty() { i18n.t("quote-unavailable") } else { reply.excerpt };
+          let inner = view! {
             <span class="quote-author" translate="no">{name}</span>
-            <span class="quote-text" translate="no">
-              {if reply.excerpt.is_empty() { i18n.t("quote-unavailable") } else { reply.excerpt }}
-            </span>
-          </blockquote>
+            <span class="quote-text" translate="no">{text}</span>
+          };
+          match reply.maybe_message {
+            // Tapping the quote jumps to the original and flashes it, as a permalink does.
+            Some(original) => view! {
+              <button
+                type="button"
+                class="msg-quote msg-quote-jump"
+                aria-label=move || i18n.t("quote-jump")
+                on:click=move |_| state.open_message(conversation, original, None)
+              >
+                {inner}
+              </button>
+            }
+            .into_any(),
+            None => view! { <blockquote class="msg-quote">{inner}</blockquote> }.into_any(),
+          }
         }
         .into_any(),
       }
