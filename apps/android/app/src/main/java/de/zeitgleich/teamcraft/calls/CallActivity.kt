@@ -332,6 +332,7 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
   val frames by calls.videoFrames.collectAsStateWithLifecycle()
   val isCameraWanted by calls.isCameraWanted.collectAsStateWithLifecycle()
   val isSpeakerOn by calls.isSpeakerOn.collectAsStateWithLifecycle()
+  val isAwaitingEncryption by calls.isAwaitingEncryption.collectAsStateWithLifecycle()
   var isFrontCamera by rememberSaveable { mutableStateOf(true) }
   val context = LocalContext.current
   var hasCamera by remember {
@@ -525,6 +526,7 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
       isDirectCall = addChoice != null,
       isSharingScreen = screenShareStatus != ScreenShareStatus.Off,
       hostLabels = hostLabels,
+      isAwaitingEncryption = isAwaitingEncryption,
     ),
     actions = CallUiActions(
       onToggleControls = { areControlsShown = !areControlsShown },

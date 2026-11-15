@@ -625,9 +625,9 @@ A guest's page keeps going after "You are in" (#446; design in e2ee.md §4.6, "M
    TeamCraft open, with "Try again". Hanging up ends the wait. The wait never founds a group (only
    the scheduler's device does, e2ee.md §8). Members joining a meeting call whose chat they were
    just added to wait the same way and keep the member wording after the bound. The phones wait in
-   the shared core binding (`TeamCraft::join_call`): between attempts the engine syncs, so the
-   gateway's welcome gets through, and the app's "Connecting" state covers the wait; cancelling the
-   join ends it.
+   the shared core binding (`TeamCraft::join_call`, #1994): between attempts the engine syncs, so
+   the gateway's welcome gets through; its `JoinProgress` listener lets Android and iOS say "Getting
+   the call ready…" meanwhile, and cancelling the join ends the wait.
 4. "Leave" calls `POST .../leave`, deletes the page's database (its keys and messages) and shows a
    goodbye. Closing the page without leaving keeps the encrypted data in the browser until the next
    guest page is opened here, which deletes it (or the guest clears site data); nothing reuses it.

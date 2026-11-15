@@ -40,6 +40,7 @@ import uniffi.teamcraft_ffi.CallPhase
 import uniffi.teamcraft_ffi.MeetingPart
 import uniffi.teamcraft_ffi.ConversationKind
 import uniffi.teamcraft_ffi.CallSession
+import uniffi.teamcraft_ffi.JoinProgress
 import uniffi.teamcraft_ffi.CallStateInfo
 import uniffi.teamcraft_ffi.CameraFrame
 import uniffi.teamcraft_ffi.IncomingCallInfo
@@ -78,6 +79,7 @@ class CallController(
   @Volatile private var maybeRingTimeout: Job? = null
   private val ringing = MutableStateFlow<IncomingRing?>(null)
   private val joining = MutableStateFlow(false)
+  private val awaitingEncryption = MutableStateFlow(false)
   /** The engine's join while it connects; hanging up cancels it. */
   @Volatile private var maybePendingJoin: Deferred<CallSession>? = null
   /** Hang up came while joining: a join that finishes anyway leaves at once. */
@@ -136,6 +138,12 @@ class CallController(
 
   /** Joining a call (answered, not connected yet). */
   val isJoining: StateFlow<Boolean> = joining
+
+  /**
+   * The join waits for this device's way into the call's encryption (just added to a meeting chat,
+   * #1994): the call screen says "Getting the call ready…" instead of "Connecting…".
+   */
+  val isAwaitingEncryption: StateFlow<Boolean> = awaitingEncryption
 
   /** Why the last join failed, until the user closed it; the call screen shows it. */
   val joinFailure: StateFlow<JoinFailure?> = failure
@@ -638,7 +646,12 @@ class CallController(
     // Muted from the first frame (a muted call moving into a meeting room): no audio slips out.
     val isMuted = options.isMuted
     Log.i(TAG, "join: connecting")
-    val pending = scope.async { core.core().joinCall(conversationId, isMuted) }
+    val progress = object : JoinProgress {
+      override fun onAwaitingEncryption(isAwaiting: Boolean) {
+        awaitingEncryption.value = isAwaiting
+      }
+    }
+    val pending = scope.async { core.core().joinCall(conversationId, isMuted, progress) }
     maybePendingJoin = pending
     val session = try {
       pending.await()

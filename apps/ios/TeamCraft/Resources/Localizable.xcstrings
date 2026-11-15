@@ -1201,6 +1201,22 @@
         }
       }
     },
+    "call_getting_ready": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Getting the call ready…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Anruf wird vorbereitet …"
+          }
+        }
+      }
+    },
     "call_device_limit": {
       "localizations": {
         "en": {

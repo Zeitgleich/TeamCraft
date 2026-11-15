@@ -479,6 +479,7 @@ struct CallScreen: View {
     } else {
       switch call.phase {
       case .ringing: Text("call_ringing")
+      case .connecting where call.isAwaitingEncryption: Text("call_getting_ready")
       case .connecting: Text(LocalizedStringKey(call.isSecured ? "call_connecting" : "call_securing"))
       case .reconnecting: Text("call_reconnecting")
       case .connected:
