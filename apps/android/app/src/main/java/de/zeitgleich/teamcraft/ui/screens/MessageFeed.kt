@@ -431,6 +431,14 @@ fun MessageFeed(
       }
     }
   }
+  // The person whose profile a tapped @mention or avatar opened (#2002).
+  var maybeProfileUser by remember { mutableStateOf<User?>(null) }
+  val openProfile = remember(snapshot) {
+    OpenProfile(
+      byId = { id -> maybeProfileUser = snapshot?.user(id) },
+      byUsername = { name -> maybeProfileUser = snapshot?.users?.firstOrNull { it.username.equals(name, ignoreCase = true) } },
+    )
+  }
   val mediaPrefs = remember(context) { MediaPrefs.prefs(context) }
   val animatedImages by mediaPrefs.animatedImages.collectAsState()
   val isMotionReduced = rememberMotionReduced()
@@ -469,6 +477,7 @@ fun MessageFeed(
     CompositionLocalProvider(
       LocalFeedMotion provides feedMotion,
       LocalStickyEdge provides stickyEdge,
+      LocalOpenProfile provides openProfile,
       LocalQuoteJump provides { id -> maybeQuoteTarget = id },
     ) {
       LazyColumn(
@@ -519,6 +528,9 @@ fun MessageFeed(
       }
     }
     FloatingDay(listState, items, Modifier.align(Alignment.TopCenter))
+    maybeProfileUser?.let { user ->
+      ProfileSheet(viewModel, snapshot, user, onOpenConversation, onDismiss = { maybeProfileUser = null })
+    }
     Column(
       // Above the floating composer and its scrim, not under them.
       Modifier.align(Alignment.BottomEnd).padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = maxOf(16.dp, bottomInset)),
@@ -1648,8 +1660,15 @@ private fun SenderAvatar(maybeUser: User?, name: String, message: Message, size:
     }
   }
   val maybeSourcePicture = message.maybeSource?.maybePictureSha256
+  val maybeOpenProfile = LocalOpenProfile.current
+  val profileLabel = stringResource(R.string.profile_open, name)
   if (maybeSourcePicture != null) {
     SourceAvatar(message.conversation, maybeSourcePicture, Modifier.size(size), account)
+  } else if (maybeUser != null && message.maybeSource == null && maybeOpenProfile != null) {
+    // The avatar opens the person's profile (#2002); a bot's source has none.
+    Box(Modifier.clip(CircleShape).clickable(role = Role.Button, onClickLabel = profileLabel) { maybeOpenProfile.byId(maybeUser.id) }) {
+      account()
+    }
   } else {
     account()
   }
