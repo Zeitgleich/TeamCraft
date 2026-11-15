@@ -381,6 +381,21 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
 
 - Forwards encrypted frames, never decodes.
 - **Audio:** forward the 3–5 loudest speakers based on the audio-level header extension; in large calls nobody receives dozens of audio streams.
+- **Voices on thin downlinks** (#1893 step 3, `sfu/src/audio_layers.rs`): with DAVE the SFU can't
+  re-encode a voice for a receiver on a thin link, so a sender may send its voice twice: layer 0 as
+  its own voice step says, and layer 1 at the thinnest step (12 kbit/s in 60 ms packets, about
+  25 kbit/s on the wire instead of about 70). The SFU follows each receiver's downlink (estimate or
+  fallback drain rate, and whether its voice is being lost): below 200 kbit/s, or with its voice
+  lost, it takes the thin copies; back to the full voices once it stayed above 300 kbit/s for 5 s.
+  While some receiver takes them, the SFU tells everyone (`thin_voice_wanted`), and senders whose
+  own voice is full, whose uplink has room and whose others play long packets run a second Opus
+  encoder on the same processed samples (`CallEngineEvent::ThinVoice`); without such a receiver the
+  copy costs nothing. Each receiver gets one layer of each sender, the thin one only while it
+  flows. Receivers order a voice by its RTP sequence number alone, and the layers count on their
+  own, so the SFU renumbers each sender's voice per receiver: a switch goes on from the last number
+  it got, gaps within a layer stay gaps (DAVE covers only the payload). Their jitter buffers already
+  take packets of any length. The thin copy counts for neither the speaker selection nor the
+  sender's upload voice check.
 - **Video:** simulcast (up to 4 layers) from each sender; the SFU picks the layer per receiver from its bandwidth estimate and viewport size ("last-N" for gallery view).
 - **Layer limit (#978):** the SFU says in `joined` how many layers per track it takes
   (`maybe_max_simulcast_layers`, 4). SFUs from before say nothing and take 3: a client then plans
