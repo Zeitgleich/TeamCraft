@@ -414,6 +414,7 @@ struct ChatPane: View {
                     fillGapIfNear()
                   }
                   .onDisappear { rowsOnScreen.remove(entry.id) }
+                  .transition(reduceMotion ? .identity : .opacity.combined(with: .scale(scale: 0.96, anchor: .bottom)))
                 }
               } header: {
                 DayPill(date: section.day)
@@ -1421,7 +1422,11 @@ struct ChatPane: View {
       guard let page = await pagedFeed().reread() else { return }
       let readExtras = await model.extras(conversationId: conversation.id, messageIds: page.messages.map(\.id))
       await loadDisplayNamesOnce()
-      messages = page.messages
+      // A message that arrives at the end eases in; the first load and history paging don't animate (#2005).
+      let isArrival =
+        !reduceMotion && !messages.isEmpty && page.messages.first?.id == messages.first?.id
+        && page.messages.count > messages.count && page.messages.last?.id != messages.last?.id
+      withAnimation(isArrival ? .easeOut(duration: 0.2) : nil) { messages = page.messages }
       extras = readExtras
       hasOlder = page.hasOlder
       gaps = page.gaps

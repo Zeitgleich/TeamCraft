@@ -209,6 +209,10 @@ import uniffi.teamcraft_ffi.isOpenableLink
 /** The reaction a double tap toggles, as in most chat apps. */
 private const val QUICK_REACTION = "👍"
 
+/** A new message fades in this long, and the rows it pushes slide for [FEED_PLACE_MS] (#2005). */
+private const val FEED_FADE_MS = 150
+private const val FEED_PLACE_MS = 200
+
 /** How long a message opened from a link stays highlighted. */
 private const val HIGHLIGHT_MS = 2500L
 
@@ -462,35 +466,43 @@ fun MessageFeed(
       ) {
         // Rows of one kind reuse each other's layout when they scroll in.
         items(items, key = { it.key }, contentType = { it.contentType }) { item ->
-          when (item) {
-            is FeedItem.Day -> DayPill(item.date, Modifier.fillMaxWidth().padding(vertical = DAY_DIVIDER_PADDING))
-            FeedItem.Unread -> UnreadDivider()
-            is FeedItem.Gap -> GapRow(item.gap) {
-              // From the side the reader is on now.
-              val row = items.indexOf(item)
-              val topVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: row
-              onFillGap(GapRequest(item.gap, gapEdge(row, topVisible)))
-            }
-            // A placeholder (issue #888) has nothing to reply to or act on yet.
-            is FeedItem.Entry -> SwipeToReply(item.message, maybeOnReply.takeIf { item.message.maybePlaceholder == null }) {
-              MessageRow(
-                viewModel = viewModel,
-                entry = item,
-                maybeExtras = extras[item.message.id],
-                extras = extras,
-                snapshot = snapshot,
-                look = look,
-                onOpenThread = onOpenThread,
-                onOpenFile = onOpenFile,
-                onOpenPicture = { target -> maybeViewing = target.toList() },
-                onLongPress = { onLongPress(item.message) },
-                onLongPressImage = onLongPressImage,
-                maybeOnReply = maybeOnReply,
-                isHighlighted = item.message.id == maybeHighlighted,
-                onOpenPermalink = onOpenPermalink,
-                onOpenConversation = onOpenConversation,
-                canReact = canReact,
-              )
+          // A new message slides the rows up and fades in; the first load and no-motion settings don't animate (#2005).
+          val itemMotion = if (isMotionReduced) {
+            Modifier
+          } else {
+            Modifier.animateItem(fadeInSpec = tween(FEED_FADE_MS), placementSpec = tween(FEED_PLACE_MS), fadeOutSpec = null)
+          }
+          Box(Modifier.fillMaxWidth().then(itemMotion)) {
+            when (item) {
+              is FeedItem.Day -> DayPill(item.date, Modifier.fillMaxWidth().padding(vertical = DAY_DIVIDER_PADDING))
+              FeedItem.Unread -> UnreadDivider()
+              is FeedItem.Gap -> GapRow(item.gap) {
+                // From the side the reader is on now.
+                val row = items.indexOf(item)
+                val topVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: row
+                onFillGap(GapRequest(item.gap, gapEdge(row, topVisible)))
+              }
+              // A placeholder (issue #888) has nothing to reply to or act on yet.
+              is FeedItem.Entry -> SwipeToReply(item.message, maybeOnReply.takeIf { item.message.maybePlaceholder == null }) {
+                MessageRow(
+                  viewModel = viewModel,
+                  entry = item,
+                  maybeExtras = extras[item.message.id],
+                  extras = extras,
+                  snapshot = snapshot,
+                  look = look,
+                  onOpenThread = onOpenThread,
+                  onOpenFile = onOpenFile,
+                  onOpenPicture = { target -> maybeViewing = target.toList() },
+                  onLongPress = { onLongPress(item.message) },
+                  onLongPressImage = onLongPressImage,
+                  maybeOnReply = maybeOnReply,
+                  isHighlighted = item.message.id == maybeHighlighted,
+                  onOpenPermalink = onOpenPermalink,
+                  onOpenConversation = onOpenConversation,
+                  canReact = canReact,
+                )
+              }
             }
           }
         }
