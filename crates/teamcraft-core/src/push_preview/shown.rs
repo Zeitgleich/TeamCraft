@@ -45,8 +45,9 @@ pub enum ShownContent {
     maybe_file: Option<ShownFile>,
     /// What a forward without a text of its own shows.
     maybe_forwarded_body: Option<String>,
-    /// The name of the integration source that posted it (believed only from a bot account).
-    maybe_source_name: Option<String>,
+    /// The integration source that posted it (believed only from a bot account): its name, and the
+    /// picture's hash and, now and then, the picture ([`crate::integration_sources`]).
+    maybe_source: Option<Box<SourceIdentity>>,
   },
   File(ShownFile),
   /// Somebody was added to the conversation.
@@ -67,19 +68,10 @@ pub struct ShownFile {
 impl ShownContent {
   /// The integration source as [`crate::integration_sources::shown_source`] takes it.
   pub(crate) fn source(&self) -> Option<SourceIdentity> {
-    let Self::Text {
-      maybe_source_name: Some(name),
-      ..
-    } = self
-    else {
+    let Self::Text { maybe_source, .. } = self else {
       return None;
     };
-    Some(SourceIdentity {
-      maybe_id: None,
-      name: name.clone(),
-      maybe_picture_sha256: None,
-      maybe_picture: None,
-    })
+    maybe_source.as_deref().cloned()
   }
 }
 
@@ -100,7 +92,7 @@ impl From<&MessageContent> for ShownContent {
         is_silent: meta.is_silent,
         maybe_file: meta.attachments.first().map(ShownFile::from),
         maybe_forwarded_body: meta.maybe_forwarded.as_ref().map(|forwarded| forwarded.body.clone()),
-        maybe_source_name: meta.maybe_source.as_ref().map(|source| source.name.clone()),
+        maybe_source: meta.maybe_source.clone(),
       },
       MessageContent::File { attachment } => Self::File(ShownFile::from(attachment)),
       MessageContent::Event {
@@ -170,17 +162,12 @@ struct MetaWire {
   #[serde(default)]
   attachments: Vec<ShownFile>,
   #[serde(rename = "source", default)]
-  maybe_source: Option<SourceWire>,
+  maybe_source: Option<Box<SourceIdentity>>,
 }
 
 #[derive(Deserialize)]
 struct ForwardedWire {
   body: String,
-}
-
-#[derive(Deserialize)]
-struct SourceWire {
-  name: String,
 }
 
 /// [`ConversationEvent`]: only being added is announced.
@@ -202,7 +189,7 @@ impl From<ContentWire> for ShownContent {
         is_silent: meta.is_silent,
         maybe_file: meta.attachments.into_iter().next(),
         maybe_forwarded_body: meta.maybe_forwarded.map(|forwarded| forwarded.body),
-        maybe_source_name: meta.maybe_source.map(|source| source.name),
+        maybe_source: meta.maybe_source,
       },
       ContentWire::File { attachment } => Self::File(attachment),
       ContentWire::Event {
@@ -419,19 +406,22 @@ mod tests {
           media_type: "image/png".into(),
         }),
         maybe_forwarded_body: None,
-        maybe_source_name: None,
+        maybe_source: None,
       }
     );
     let ShownContent::Text {
       maybe_forwarded_body,
-      maybe_source_name,
+      maybe_source,
       ..
     } = ShownContent::from(&contents[2])
     else {
       panic!("a text");
     };
     assert_eq!(maybe_forwarded_body.as_deref(), Some("lunch?"));
-    assert_eq!(maybe_source_name.as_deref(), Some("Monitoring"));
+    assert_eq!(
+      maybe_source.map(|source| source.name).as_deref(),
+      Some("Monitoring")
+    );
     assert_eq!(
       ShownContent::from(&contents[11]),
       ShownContent::MemberAdded(id(5))
@@ -458,7 +448,7 @@ mod tests {
         is_silent: true,
         maybe_file: None,
         maybe_forwarded_body: None,
-        maybe_source_name: None,
+        maybe_source: None,
       }
     );
   }
