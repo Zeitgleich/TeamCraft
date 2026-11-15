@@ -71,8 +71,10 @@ use crate::speakers::{SpeakerSelectionConfig, SpeakerSelector};
 /// An estimate below the thin bound makes a downlink thin only after this long; a probe at the
 /// join that measured it thin does at once.
 const THIN_DOWNLINK_SUSTAINED: Duration = Duration::from_secs(10);
-/// A receiver on thin voices is probed only after a voice to it was silent this long.
+/// A receiver on thin voices is probed while it speaks itself and the voices to it were silent this
+/// long, or once they were silent [`THIN_PROBE_LONG_SILENCE`].
 const THIN_PROBE_SILENCE: Duration = Duration::from_secs(1);
+const THIN_PROBE_LONG_SILENCE: Duration = Duration::from_secs(10);
 /// And then rarely: after a cluster got through this soon again, after one fell short later.
 const THIN_PROBE_RETRY_AFTER: Duration = Duration::from_secs(3);
 const THIN_PROBE_MAX_RETRY_AFTER: Duration = Duration::from_secs(12);
@@ -1677,15 +1679,23 @@ impl ParticipantRoute {
     self.voice_layer.is_thin() && (is_measured_thin || is_estimate_thin)
   }
 
-  /// What a receiver on thin voices probes for: room for the full voices again, and only in a
-  /// silence of the voices to it, so a cluster never queues in front of one (#1893 step 3). A
-  /// link that became fast shows it within a few clusters, each a step above the last that got
-  /// through.
+  /// What a receiver on thin voices probes for: room for the full voices again, and only while
+  /// no voice goes to it: while it speaks itself, or after a long silence, so a cluster never
+  /// queues in front of a voice (#1893 step 3). A link that became fast shows it within a few
+  /// clusters, each a step above the last that got through.
   fn thin_probe_request(&self, config: &AudioLayerConfig, now: Instant) -> Option<ProbeRequest> {
-    let is_silent = self
+    let silent_for = self
       .maybe_voice_sent_at
-      .is_none_or(|at| now.saturating_duration_since(at) >= THIN_PROBE_SILENCE);
-    is_silent.then(|| ProbeRequest {
+      .map_or(Duration::MAX, |at| now.saturating_duration_since(at));
+    // It speaks itself: in a conversation the others listen then, and a cluster queues in front of
+    // nobody's voice. A pause between two others' turns was too short: the next turn waited
+    // behind the cluster's padding.
+    let is_speaking = self
+      .maybe_voice_at
+      .is_some_and(|at| now.saturating_duration_since(at) < THIN_PROBE_SILENCE);
+    let may_probe =
+      (is_speaking && silent_for >= THIN_PROBE_SILENCE) || silent_for >= THIN_PROBE_LONG_SILENCE;
+    may_probe.then(|| ProbeRequest {
       target_bps: config.full_above_bps.saturating_mul(5) / 4,
       floor_bps: 0,
     })
@@ -3323,10 +3333,10 @@ mod tests {
       }
     }
 
-    /// A receiver on thin voices is probed only in a silence of the voices to it, with small
-    /// clusters.
+    /// A receiver on thin voices is probed only while no voice goes to it, with small clusters:
+    /// while it speaks itself, not in a short pause between two others' turns.
     #[test]
-    fn a_thin_receiver_is_probed_only_in_silence() {
+    fn a_thin_receiver_is_probed_only_while_no_voice_goes_to_it() {
       let (mut forwarder, now) = video_room();
       forwarder.subscribe(device(2), VIDEO, Some(2), now).unwrap();
       forwarder
@@ -3355,13 +3365,22 @@ mod tests {
           "next to a voice"
         );
       }
-      // A second of silence: a small cluster.
+      // A pause between two turns: still nothing, the next turn would wait behind a cluster.
+      for _ in 0..15 {
+        at += Duration::from_millis(100);
+        assert!(
+          padding_to(&forwarder.on_timer(device(2), at), 2).is_empty(),
+          "a short pause"
+        );
+      }
+      // It speaks itself, the others listen: a small cluster.
       let mut padding = Vec::new();
       for _ in 0..15 {
         at += Duration::from_millis(100);
+        forwarder.route(device(2), &audio(2, 20), at).unwrap();
         padding.extend(padding_to(&forwarder.on_timer(device(2), at), 2));
       }
-      assert!(!padding.is_empty(), "in silence");
+      assert!(!padding.is_empty(), "while it speaks");
       assert!(
         padding.iter().all(|datagram| datagram.len() <= 400),
         "small datagrams"
