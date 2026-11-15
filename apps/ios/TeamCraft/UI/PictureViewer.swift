@@ -239,6 +239,42 @@ struct PictureViewer: View {
   }
 }
 
+/// The namespace the chat's pictures and the viewer share, so the viewer can zoom out of the
+/// picture that was tapped and back into it on close (#2012).
+private struct PictureZoomNamespaceKey: EnvironmentKey {
+  static let defaultValue: Namespace.ID? = nil
+}
+
+extension EnvironmentValues {
+  var pictureZoomNamespace: Namespace.ID? {
+    get { self[PictureZoomNamespaceKey.self] }
+    set { self[PictureZoomNamespaceKey.self] = newValue }
+  }
+}
+
+extension View {
+  /// Marks a picture as where the viewer zooms from (iOS 18 and later; earlier, the viewer just covers).
+  @ViewBuilder
+  func pictureZoomSource(id: String, in namespace: Namespace.ID?) -> some View {
+    if #available(iOS 18.0, *), let namespace {
+      matchedTransitionSource(id: id, in: namespace)
+    } else {
+      self
+    }
+  }
+
+  /// The viewer grows out of its source picture and shrinks back into it; without the iOS 18
+  /// transition, or with Reduce Motion, the default presentation (a fade or a slide) stays.
+  @ViewBuilder
+  func pictureZoomTransition(id: String, in namespace: Namespace.ID, reduceMotion: Bool) -> some View {
+    if #available(iOS 18.0, *), !reduceMotion {
+      navigationTransition(.zoom(sourceID: id, in: namespace))
+    } else {
+      self
+    }
+  }
+}
+
 /// A picture to forward from the viewer.
 private struct ForwardTarget: Identifiable {
   let conversationId: String

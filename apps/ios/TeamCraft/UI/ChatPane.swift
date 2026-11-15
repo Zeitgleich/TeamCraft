@@ -53,6 +53,8 @@ struct ChatPane: View {
   @State private var isPictureGone = false
   @State private var maybeDeleting: Message?
   @State private var isAtBottom = true
+  /// The pictures of the chat and the viewer zooming out of them (#2012).
+  @Namespace private var pictureZoom
   @State private var newBelowCount = 0
   @State private var isSendFailed = false
   @State private var isScheduleTooLarge = false
@@ -228,6 +230,7 @@ struct ChatPane: View {
     .alert("file_gone", isPresented: $isPictureGone) { Button("done", role: .cancel) {} }
     .fullScreenCover(item: $maybeViewing) { target in
       PictureViewer(target: target, maybeOnReply: canReply ? startImageReply : nil)
+        .pictureZoomTransition(id: target.id, in: pictureZoom, reduceMotion: reduceMotion)
     }
     .fullScreenCover(item: $maybeVideo) { video in VideoViewer(opened: video) }
     .sheet(item: $maybeShowingEdits) { target in
@@ -275,6 +278,7 @@ struct ChatPane: View {
       }
       messageList
         .environment(\.openPicture, OpenPictureAction { file in maybeViewing = PictureTarget(file: file) })
+        .environment(\.pictureZoomNamespace, pictureZoom)
         .environment(\.areAnimationsCovered, maybeViewing != nil || maybeVideo != nil)
         .environment(\.openVideo, OpenPictureAction { file in maybeVideo = file })
         .environment(\.openQuotedPicture, OpenQuotedPictureAction(run: openQuotedPicture))
