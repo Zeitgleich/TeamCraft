@@ -434,6 +434,7 @@ fun ConversationScreen(
       modifier = Modifier.weight(1f),
       bottomInset = listBottomInset,
       maybeFocusMessage = maybeFocusMessage,
+      isLoading = snapshot == null && messages.isEmpty(),
       onOpenPermalink = onOpenPermalink,
       onOpenConversation = onOpenConversation,
       unseenReactions = unseenReactions,
@@ -531,6 +532,7 @@ fun ThreadScreen(
       modifier = Modifier.weight(1f),
       bottomInset = listBottomInset,
       maybeFocusMessage = maybeFocusMessage,
+      isLoading = false,
       onOpenPermalink = onOpenPermalink,
     )
   }
@@ -902,6 +904,7 @@ private fun MessageList(
   modifier: Modifier,
   bottomInset: Dp,
   maybeFocusMessage: String?,
+  isLoading: Boolean,
   onOpenPermalink: (String) -> Unit,
   onOpenConversation: (String) -> Unit = {},
   older: OlderMessages = OlderMessages.None,
@@ -944,6 +947,7 @@ private fun MessageList(
     modifier = modifier,
     bottomInset = bottomInset,
     maybeFocusMessage = maybeFocusMessage,
+    isLoading = isLoading,
     onOpenPermalink = onOpenPermalink,
     onOpenConversation = onOpenConversation,
     canReact = rights.canReact,

@@ -53,6 +53,8 @@ struct ChatPane: View {
   @State private var isPictureGone = false
   @State private var maybeDeleting: Message?
   @State private var isAtBottom = true
+  /// The first read of the messages came back (#2008): until then placeholders stand in for them.
+  @State private var hasLoadedMessages = false
   /// A copy just happened: the "Copied" pill shows for a moment (#2014).
   @State private var isCopiedShown = false
   /// The oldest unread message when the conversation was opened, with the divider above it (#2013).
@@ -413,6 +415,7 @@ struct ChatPane: View {
         ScrollView {
           // One section per day: its date pill stays at the top while the day scrolls by.
           LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+            if threadId == nil && !hasLoadedMessages && messages.isEmpty { ListSkeleton() }
             // Above the oldest row: seen only when the reader is faster than the core.
             if (hasOlder && isLoadingOlder) || (!hasOlder && serverHistory == .loading) {
               ProgressView()
@@ -1514,6 +1517,7 @@ struct ChatPane: View {
         !reduceMotion && !messages.isEmpty && page.messages.first?.id == messages.first?.id
         && page.messages.count > messages.count && page.messages.last?.id != messages.last?.id
       withAnimation(isArrival ? .easeOut(duration: 0.2) : nil) { messages = page.messages }
+      hasLoadedMessages = true
       extras = readExtras
       hasOlder = page.hasOlder
       gaps = page.gaps

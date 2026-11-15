@@ -3,11 +3,14 @@ package de.zeitgleich.teamcraft.ui.screens
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -41,6 +44,7 @@ import uniffi.teamcraft_ffi.FirstSyncStageItem
 import de.zeitgleich.teamcraft.ui.failureText
 
 private const val SKELETON_ROWS = 6
+private val SKELETON_AVATAR = 40.dp
 
 /**
  * Placeholder rows for a list that has no answer yet (issue #297). Static on purpose: calm, and
@@ -51,10 +55,14 @@ fun ListSkeleton(modifier: Modifier = Modifier, rows: Int = SKELETON_ROWS) {
   val loading = stringResource(R.string.list_loading)
   Column(modifier.fillMaxWidth().semantics { contentDescription = loading }) {
     repeat(rows) { index ->
-      Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
-        SkeletonBar(0.35f, 12.dp)
-        Box(Modifier.height(8.dp))
-        SkeletonBar(if (index % 2 == 0) 0.9f else 0.7f, 14.dp)
+      // An avatar and two lines, the shape of a row or a message (the web's skeleton, #2008).
+      Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(SKELETON_AVATAR).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant))
+        Column(Modifier.padding(start = 12.dp).weight(1f)) {
+          SkeletonBar(0.35f, 12.dp)
+          Box(Modifier.height(8.dp))
+          SkeletonBar(if (index % 2 == 0) 0.9f else 0.7f, 14.dp)
+        }
       }
     }
   }
