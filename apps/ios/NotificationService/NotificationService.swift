@@ -68,10 +68,11 @@ final class NotificationService: UNNotificationServiceExtension {
     // A DM with a deleted account is named in the user's language (#1066).
     setDeletedUserName(name: String(localized: "user_deleted_name"))
     guard let sealed = PushPayload.sealedBytes(from: original.userInfo),
-      let (notification, maybeSenderPicture) = await decrypt(sealed)
+      let decrypted = await decrypt(sealed)
     else {
       return builder.generic(from: original, keepsSealed: true)
     }
+    let notification = decrypted.notification
     let flags = PushFlags(notification)
     // App lock on: the lock screen must not show what the locked app hides. Calls still ring.
     if SharedContainer().isAppLockOn && notification.kind == .message
@@ -85,7 +86,7 @@ final class NotificationService: UNNotificationServiceExtension {
     case .message, .quietMessage:
       await DeliveredNotifications.removeEarlier(of: notification)
       let (content, maybeIntent) = builder.message(
-        for: notification, presentation: presentation, base: original, maybeSenderPicture: maybeSenderPicture)
+        for: notification, presentation: presentation, base: original, maybeSenderPicture: decrypted.maybeSenderPicture)
       return await builder.communicationStyled(
         content, intent: maybeIntent, presentation: presentation, flags: flags)
     case .callKit:
@@ -114,7 +115,7 @@ final class NotificationService: UNNotificationServiceExtension {
   /// A store that still needs a layout step fails here too: the extension doesn't migrate it (no
   /// `VACUUM` under its limits, #1198) and the app does on its next start. Also the picture of the
   /// integration source a bot's message names, as this device holds it (it never comes in the push).
-  private static func decrypt(_ sealed: Data) async -> (PushNotification, Data?)? {
+  private static func decrypt(_ sealed: Data) async -> DecryptedPush? {
     let container = SharedContainer()
     guard let account = container.activeAccount else { return nil }
     let lock = ProcessLock(fileURL: container.lockFileURL)
@@ -143,7 +144,7 @@ final class NotificationService: UNNotificationServiceExtension {
         maybeSenderPicture = try? await core.integrationSourcePicture(
           conversationId: notification.conversationId, sha256: sha256)
       }
-      return (notification, maybeSenderPicture)
+      return DecryptedPush(notification: notification, maybeSenderPicture: maybeSenderPicture)
     } catch {
       return nil
     }
@@ -182,4 +183,10 @@ private final class DeliveryGate: @unchecked Sendable {
     isClaimed = true
     return true
   }
+}
+
+/// A push the core could read, with the integration source's picture as this device holds it.
+private struct DecryptedPush {
+  let notification: PushNotification
+  let maybeSenderPicture: Data?
 }
