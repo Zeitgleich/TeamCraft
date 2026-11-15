@@ -6777,22 +6777,6 @@
         }
       }
     },
-    "react": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "React"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Reagieren"
-          }
-        }
-      }
-    },
     "react_quick %@": {
       "localizations": {
         "en": {
