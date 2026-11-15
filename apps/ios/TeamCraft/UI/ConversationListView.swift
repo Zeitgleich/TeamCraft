@@ -415,6 +415,10 @@ struct ConversationListView: View {
   }
 
   private var conversationList: some View {
+    conversationListBody.refreshesConnection()
+  }
+
+  private var conversationListBody: some View {
     List(selection: $selection) {
       if showsChannels {
         quickAccessCards

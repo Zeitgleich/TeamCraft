@@ -1,6 +1,7 @@
 package de.zeitgleich.teamcraft.ui.screens
 
 import de.zeitgleich.teamcraft.ui.PresenceDot
+import de.zeitgleich.teamcraft.ui.PullRefreshIndicator
 import de.zeitgleich.teamcraft.ui.presenceLabel
 import androidx.compose.ui.semantics.heading
 import androidx.compose.animation.core.Spring
@@ -98,6 +99,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import de.zeitgleich.teamcraft.ui.pullRefresh
+import de.zeitgleich.teamcraft.ui.rememberPullRefresh
 import de.zeitgleich.teamcraft.ui.theme.FavoritesSort
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.Image
@@ -325,6 +328,9 @@ fun ChatListScreen(
     maybeConversations = loaded,
     isSyncing = maybeFirstSync != null,
     maybeReadFailure = kept.maybeReadFailure,
+    onRefresh = {
+      if (!viewModel.refreshConnection()) viewModel.showFailure(R.string.refresh_failed)
+    },
     onRetry = {
       viewModel.retryChatList()
       scope.launch { viewModel.refreshChatList(accountUserId) }
@@ -532,6 +538,8 @@ internal fun MainScaffold(
   /** Home's button: the "New" menu (#1534). */
   onCreate: () -> Unit = {},
   banners: @Composable () -> Unit = {},
+  /** Pull to refresh (#2006); null where the list has none. */
+  onRefresh: (suspend () -> Unit)? = null,
   /** The first sync is running: an empty list is not known to be empty yet (#297). */
   isSyncing: Boolean = false,
   /** Set when there are no conversations and reading them failed. */
@@ -582,10 +590,12 @@ internal fun MainScaffold(
     },
     snackbarHost = snackbarHost,
   ) { padding ->
+    val pullRefresh = rememberPullRefresh(onRefresh)
     Box(Modifier.fillMaxSize().padding(padding)) {
       Column(
         Modifier
           .fillMaxSize()
+          .pullRefresh(pullRefresh)
           .clip(RoundedCornerShape(topStart = CONTENT_CARD_RADIUS, topEnd = CONTENT_CARD_RADIUS))
           .background(MaterialTheme.colorScheme.background),
       ) {
@@ -605,6 +615,7 @@ internal fun MainScaffold(
           else -> ActivityTab(maybeConversations, list, onNavigate, joinRequestCount, joinRequests, guestNotices = guestNotices, guestNoticeCount = guestNoticeCount, isSyncing = isSyncing)
         }
       }
+      PullRefreshIndicator(pullRefresh)
       if (maybeSelectionBar == null) {
         val barModifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars).padding(bottom = FloatingToolbarDefaults.ScreenOffset)
         FloatingTabBar(

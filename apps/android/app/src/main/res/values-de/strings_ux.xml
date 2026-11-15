@@ -320,6 +320,7 @@
   <string name="push_mode_title">Push-Benachrichtigungen</string>
   <string name="push_service_title">Push-Dienst</string>
   <string name="search_prefetch_limit">Speicherlimit</string>
+  <string name="refresh_failed">Aktualisieren nicht möglich. Prüfe deine Verbindung.</string>
   <string name="chat_swipe_setting">Wischen nach links im Chat</string>
   <string name="chat_swipe_hint">Legt fest, was das Wischen nach links tut. Nach rechts wischen markiert immer als gelesen oder ungelesen.</string>
   <string name="chat_swipe_favorite">Favorit</string>
