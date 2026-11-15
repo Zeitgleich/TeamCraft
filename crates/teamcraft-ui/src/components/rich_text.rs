@@ -10,7 +10,7 @@ use crate::custom_emoji::CustomEmojiGlyph;
 use crate::highlight::{TokenKind, highlight};
 use crate::i18n::use_i18n;
 use crate::markdown::{self, Alignment, Block, Inline, ListKind, PERMALINK_PREFIX, Table};
-use crate::model::UserId;
+use crate::model::{ConversationId, UserId};
 use crate::state::{Overlay, use_app_state};
 
 /// The CSS variable that moves a table's header row down to the message list's top edge.
@@ -323,13 +323,39 @@ fn render_text_with_emoji(text: &str, refs: &[CustomEmojiRef]) -> AnyView {
     .into_any()
 }
 
+/// The conversation a link names without a message (`teamcraft:/c/<id>`).
+fn channel_link_target(link: &str) -> Option<ConversationId> {
+  link
+    .strip_prefix(PERMALINK_PREFIX)
+    .filter(|rest| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()))
+    .and_then(|rest| rest.parse().ok())
+}
+
 /// A permalink to a message: names the conversation and opens it; links the user can't open say so.
 #[component]
 fn PermalinkChip(link: String) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
+  // `teamcraft:/c/<id>` alone is a link to a channel (the composer's `#` picker inserts these).
+  if let Some(conversation) = channel_link_target(&link) {
+    return (move || match state.read(|backend| backend.conversation(conversation)) {
+      Some(found) => view! {
+        <button class="md-link permalink-chip" on:click=move |_| state.open_conversation(conversation)>
+          <span translate="no">{format!("#{}", found.name)}</span>
+        </button>
+      }
+      .into_any(),
+      None => view! {
+        <span class="permalink-unavailable" title=move || i18n.t("permalink-unavailable")>
+          {move || i18n.t("permalink-hidden")}
+        </span>
+      }
+      .into_any(),
+    })
+    .into_any();
+  }
   let target = Memo::new(move |_| state.read(|backend| backend.resolve_permalink(&link)));
-  move || match target.get() {
+  (move || match target.get() {
     Some(target) => {
       let name = state
         .read(|backend| backend.conversation(target.conversation))
@@ -352,5 +378,6 @@ fn PermalinkChip(link: String) -> impl IntoView {
       </span>
     }
     .into_any(),
-  }
+  })
+  .into_any()
 }
