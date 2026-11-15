@@ -16,7 +16,6 @@ use crate::components::huddle_bar::HuddleBar;
 use crate::components::icons::{Icon, IconName};
 use crate::components::log_view::ChannelFeed;
 use crate::components::security_ui::KeyChangeBanner;
-use crate::components::selection_bar::SelectionBar;
 use crate::components::sheet::MenuSurface;
 use crate::components::sliding_indicator::SlidingIndicator;
 use crate::components::tab_list::{on_tab_keys, roving_tabindex};
@@ -139,7 +138,7 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
                 id=ChannelTab::Messages.panel_id()
                 aria-labelledby=ChannelTab::Messages.tab_id()
               >
-                <SelectionBar conversation=conversation />
+                <SelectionHost conversation=conversation />
                 <ChannelFeed conversation=conversation />
                 {(!is_notes_to_self).then(|| view! { <TypingIndicator conversation=conversation /> })}
                 <SeenLine conversation=conversation />
@@ -1196,5 +1195,22 @@ mod date_search_tests {
   #[test]
   fn an_unloaded_probe_means_ask_again_later() {
     assert_eq!(first_index_at_or_after(5, |_| None, 5), DateSearch::Pending);
+  }
+}
+
+/// Holds the place of the selection bar: the bar's code loads when selection mode starts (#2070),
+/// so a first visit doesn't download it.
+#[component]
+fn SelectionHost(conversation: ConversationId) -> impl IntoView {
+  let state = use_app_state();
+  let is_active = Memo::new(move |_| {
+    state
+      .selection
+      .with(|selection| selection.is_active_in(conversation))
+  });
+  move || {
+    is_active
+      .get()
+      .then(|| lazy_area(Place::Inline, move || areas::selection_bar(conversation)))
   }
 }

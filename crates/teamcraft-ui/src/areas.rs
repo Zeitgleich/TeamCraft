@@ -73,6 +73,7 @@ use crate::components::search_view::SearchView;
 use crate::components::security_ui::{
   DeviceApprovalDialog, LinkDeviceDialog, VerifyContactDialog, VerifyKeyDialog,
 };
+use crate::components::selection_bar::SelectionBar;
 use crate::components::settings_modal::{SettingsModal, ShortcutsModal};
 #[cfg(target_arch = "wasm32")]
 use crate::components::share_download::ShareDownloadPage;
@@ -223,6 +224,8 @@ areas! {
   share_into(_unit: ()) => dialogs: view! { <ShareDialog /> };
   /// Dialogs a first visit doesn't open: on a message, a file or a contact's keys (#695).
   forward(from: ConversationId, message: MessageId, maybe_attachment: Option<AttachmentId>) => dialogs: view! { <ForwardDialog from=from message=message maybe_attachment=maybe_attachment /> };
+  /// The bar of selection mode (issue #2070), loaded when the user starts selecting.
+  selection_bar(conversation: ConversationId) => dialogs: view! { <SelectionBar conversation=conversation /> };
   forward_selection(from: ConversationId) => dialogs: view! { <ForwardSelectionDialog from=from /> };
   edit_history(conversation: ConversationId, message: MessageId) => dialogs: view! { <EditHistoryDialog conversation=conversation message=message /> };
   bookmarks(conversation: ConversationId) => dialogs: view! { <BookmarksDialog conversation=conversation /> };
