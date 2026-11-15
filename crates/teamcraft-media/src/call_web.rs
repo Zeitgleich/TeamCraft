@@ -164,6 +164,9 @@ const MAX_DECODED_SAMPLES: usize = 8 * FRAME_SAMPLES_PER_CHANNEL;
 /// output arrives a turn of the event loop after its input, so the frame that plays next has to
 /// be in it already. A 60 ms packet (#1893) covers this for three frames.
 const DECODE_AHEAD_SAMPLES: usize = 2 * FRAME_SAMPLES_PER_CHANNEL;
+/// A thin copy whose encoder failed starts again this much later (#1893 step 3): soon, but not
+/// once per microphone frame while the browser refuses it.
+const THIN_VOICE_RESTART_AFTER: Duration = Duration::from_secs(1);
 /// Opus bitrate for voice.
 const OPUS_BITRATE_BPS: u32 = 32_000;
 /// Opus bitrate of a shared screen's sound: music and video sound need more than speech (as on
@@ -1190,6 +1193,8 @@ async fn run_call(
     jitter: config.jitter,
     encoder: OpusEncoder::new(&inputs, OpusProfile::Voice)?,
     maybe_thin_voice: None,
+    is_thin_voice_sent: false,
+    maybe_thin_voice_restart_at: None,
     maybe_screen_sound: None,
     remotes: BTreeMap::new(),
     meter,
@@ -1336,6 +1341,10 @@ struct CallState<'a> {
   encoder: OpusEncoder,
   /// The microphone's thin copy, while the engine asks for it (#1893 step 3).
   maybe_thin_voice: Option<OpusEncoder>,
+  /// The engine asks for the thin copy: one whose encoder failed starts again
+  /// [`THIN_VOICE_RESTART_AFTER`] later.
+  is_thin_voice_sent: bool,
+  maybe_thin_voice_restart_at: Option<Instant>,
   /// The running screen share's sound, while it is sent.
   maybe_screen_sound: Option<ScreenSound>,
   remotes: BTreeMap<RemoteStream, RemoteAudio>,
@@ -2741,37 +2750,55 @@ impl CallState<'_> {
     }
   }
 
-  /// Sends the screen share's sound. Only with a running share: a share stopped meanwhile took its
-  /// sound with it.
-  /// Starts or stops the microphone's thin copy (#1893 step 3). A copy that can't be encoded is
-  /// no loss: its receivers get the voice as it is.
+  /// Starts or stops the microphone's thin copy (#1893 step 3). While it can't be encoded, its
+  /// receivers get the voice as it is, the full one their link can't carry: so a failed copy
+  /// starts again, and says so in the log.
   fn set_thin_voice(&mut self, is_sent: bool) {
+    self.is_thin_voice_sent = is_sent;
+    self.maybe_thin_voice_restart_at = None;
     if !is_sent {
       self.maybe_thin_voice = None;
       return;
     }
-    if self.maybe_thin_voice.is_some() {
-      return;
+    if self.maybe_thin_voice.is_none() {
+      self.start_thin_voice(Instant::now());
     }
+  }
+
+  /// Feeds the thin copy what the microphone's encoder got; one that failed starts again a moment
+  /// later.
+  fn push_thin_voice(&mut self, samples: &[f32]) {
+    if self.is_thin_voice_sent && self.maybe_thin_voice.is_none() {
+      let now = Instant::now();
+      if self.maybe_thin_voice_restart_at.is_none_or(|at| now >= at) {
+        self.start_thin_voice(now);
+      }
+    }
+    if let Some(thin) = &mut self.maybe_thin_voice
+      && let Err(error) = thin.push(samples)
+    {
+      warn!(%error, "the voice's thin copy failed; it starts again");
+      self.maybe_thin_voice = None;
+      self.maybe_thin_voice_restart_at = Some(Instant::now() + THIN_VOICE_RESTART_AFTER);
+    }
+  }
+
+  fn start_thin_voice(&mut self, now: Instant) {
     let started = OpusEncoder::new(self.inputs, OpusProfile::ThinVoice).and_then(|mut encoder| {
       encoder.set_voice_encoding(VoiceStepConfig::default().thinnest)?;
       Ok(encoder)
     });
     match started {
       Ok(encoder) => self.maybe_thin_voice = Some(encoder),
-      Err(error) => debug!(%error, "the voice's thin copy can't be encoded"),
+      Err(error) => {
+        warn!(%error, "the voice's thin copy can't be encoded; it is tried again");
+        self.maybe_thin_voice_restart_at = Some(now + THIN_VOICE_RESTART_AFTER);
+      },
     }
   }
 
-  /// Feeds the thin copy what the microphone's encoder got; one that fails stops.
-  fn push_thin_voice(&mut self, samples: &[f32]) {
-    if let Some(thin) = &mut self.maybe_thin_voice
-      && let Err(error) = thin.push(samples)
-    {
-      debug!(%error, "the voice's thin copy stopped");
-      self.maybe_thin_voice = None;
-    }
-  }
+  /// Sends the screen share's sound. Only with a running share: a share stopped meanwhile took its
+  /// sound with it.
 
   fn start_screen_sound(
     &mut self,

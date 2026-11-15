@@ -395,7 +395,14 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
   own, so the SFU renumbers each sender's voice per receiver: a switch goes on from the last number
   it got, gaps within a layer stay gaps (DAVE covers only the payload). Their jitter buffers already
   take packets of any length. The thin copy counts for neither the speaker selection nor the
-  sender's upload voice check.
+  sender's upload voice check. A receiver whose downlink is thin (the probe at its join said so,
+  or its estimate stayed below 200 kbit/s for 10 s) gets no video ("video paused for your
+  connection") and no padding at all: probe bursts and video queued in front of its voices. Its
+  voices are the probe instead: once they arrived without loss or delay for 10 s of speech it gets
+  the full voices, once those did for another 10 s its downlink counts as recovered and video and
+  the usual probing come back (about 20 s on a link that turned fast). Lost voice on the way goes
+  back to the thin voices, and each failed trial (or a relapse within a minute) doubles the hold,
+  up to 80 s. A web sender whose thin copy's encoder fails starts it again a second later.
 - **Video:** simulcast (up to 4 layers) from each sender; the SFU picks the layer per receiver from its bandwidth estimate and viewport size ("last-N" for gallery view).
 - **Layer limit (#978):** the SFU says in `joined` how many layers per track it takes
   (`maybe_max_simulcast_layers`, 4). SFUs from before say nothing and take 3: a client then plans
