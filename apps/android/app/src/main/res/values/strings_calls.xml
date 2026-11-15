@@ -77,6 +77,7 @@
   <string name="call_channel">Calls</string>
   <string name="call_ongoing">TeamCraft call</string>
   <string name="call_connecting">Connecting…</string>
+  <string name="call_getting_ready">Getting the call ready…</string>
   <string name="call_reconnecting">Connection lost, reconnecting…</string>
   <string name="call_limited_network">Limited network, call quality may be lower</string>
   <string name="call_video_held_for_voice">Your connection is struggling: your video is paused so your voice gets through</string>

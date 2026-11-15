@@ -1386,8 +1386,11 @@ final class AppModel {
 
   /// Joins the conversation's call (CallKit asked: answered, or started by the user).
   /// `isMuted`: the microphone stays muted from the first frame.
-  func joinCall(conversationId: String, isMuted: Bool = false) async throws -> CallSession {
-    try await core().joinCall(conversationId: conversationId, isMuted: isMuted)
+  /// `progress` hears while the join waits for this device's way into the call's encryption (#1994).
+  func joinCall(
+    conversationId: String, isMuted: Bool = false, progress: JoinProgress? = nil
+  ) async throws -> CallSession {
+    try await core().joinCall(conversationId: conversationId, isMuted: isMuted, maybeProgress: progress)
   }
 
   /// Measures the link to the call service before a call (#1969): the call then starts on the

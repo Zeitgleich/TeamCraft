@@ -226,6 +226,8 @@ internal class CallUiState(
   val isSharingScreen: Boolean = false,
   /** "Host" or "Co-host" (string resources) by user ID, for the tiles of a meeting's call (#1720). */
   val hostLabels: Map<String, Int> = emptyMap(),
+  /** The join waits for this device's way into the call's encryption (#1994). */
+  val isAwaitingEncryption: Boolean = false,
 ) {
   /** Its publisher holds the track's video back for its voice (#1891): the tile says so. */
   fun isPausedByPublisher(track: VideoTrackInfo): Boolean =
@@ -944,7 +946,9 @@ private fun callStatus(ui: CallUiState): CallStatus {
   }
   val time = ui.elapsedSeconds?.let { formatDuration(it) }
   val text = when (state?.phase) {
-    null, CallPhase.CONNECTING -> stringResource(R.string.call_connecting)
+    null, CallPhase.CONNECTING -> stringResource(
+      if (ui.isAwaitingEncryption) R.string.call_getting_ready else R.string.call_connecting,
+    )
     CallPhase.RECONNECTING -> stringResource(R.string.call_reconnecting)
     CallPhase.ENDED -> stringResource(
       when (state.maybeEndReason) {
