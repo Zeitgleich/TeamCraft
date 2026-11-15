@@ -83,6 +83,15 @@ const SPEECH_HANGOVER: Duration = Duration::from_millis(400);
 /// cluster showed was no proof. Someone who talks this long without a pause gets a small one
 /// anyway, so a long talk doesn't keep the voice down for good.
 const PROBE_IN_SPEECH_AFTER: Duration = Duration::from_secs(20);
+/// After a small cluster next to a long talk got through, the next may follow this soon (#1889):
+/// a link measured thin that turned fast climbs back step by step within half a minute, not one
+/// step every [`PROBE_IN_SPEECH_AFTER`].
+const PROBE_IN_SPEECH_AFTER_CARRIED: Duration = Duration::from_secs(2);
+/// An estimate below the thin step's bound makes the uplink thin only once it stayed there this
+/// long (#1889): a collapse of a fast uplink cuts the estimate at once, and treating it as thin
+/// (probes only in pauses and rarely, no demand) kept a presenter's voice and camera down for
+/// good after the link came back.
+const THIN_ESTIMATE_SUSTAINED: Duration = Duration::from_secs(30);
 /// Largest datagram the engine produces; audio frames are far below it.
 const MAX_DATAGRAM_BYTES: usize = 1200;
 /// Keyframe requests per received track go out at most this often: the SFU's default limit per
@@ -227,6 +236,12 @@ pub struct CallEngine {
   maybe_speaking_since: Option<Instant>,
   /// When the last uplink rate probe's cluster started.
   maybe_probe_started_at: Option<Instant>,
+  /// Whether the last cluster got through: the next small one next to a long talk may come sooner.
+  has_last_probe_carried: bool,
+  /// Since when the uplink estimate is below the thin step's bound (#1889).
+  maybe_estimate_thin_since: Option<Instant>,
+  /// It stayed there for [`THIN_ESTIMATE_SUSTAINED`]: the uplink is thin by its estimate.
+  is_estimate_thin_sustained: bool,
   /// How the running cluster stands to the own voice: what it shows counts for the voice's step
   /// only when it ran in a pause, or was the small one a long talk gets.
   probe_voice: ProbeVoice,
@@ -723,6 +738,9 @@ impl CallEngine {
       maybe_spoke_at: None,
       maybe_speaking_since: None,
       maybe_probe_started_at: None,
+      has_last_probe_carried: false,
+      maybe_estimate_thin_since: None,
+      is_estimate_thin_sustained: false,
       probe_voice: ProbeVoice::InPause,
       is_uplink_measured_thin: false,
       maybe_prior_link: None,
@@ -2146,9 +2164,10 @@ impl CallEngine {
     if let Some(outcome) =
       self
         .uplink_rate_probe
-        .on_feedback(&self.uplink_probe_config(), feedback, &mut self.uplink, now)
+        .on_feedback(&self.cluster_config(), feedback, &mut self.uplink, now)
     {
       bps = self.uplink.estimate_bps();
+      self.has_last_probe_carried = matches!(outcome, ProbeOutcome::Carried { .. });
       if let ProbeOutcome::Carried { target_bps } = outcome {
         maybe_carried_bps = Some(target_bps);
         is_voice_proof = self.probe_voice != ProbeVoice::NextToSpeech;
@@ -2168,6 +2187,7 @@ impl CallEngine {
       // An SFU that takes no padding: nothing probes, the estimate is all there is.
       maybe_carried_bps = Some(bps);
     }
+    self.note_estimate(now);
     self.uplink_voice.on_feedback(feedback, now);
     self.follow_voice_steps(bps, maybe_carried_bps.filter(|_| is_voice_proof), now);
     let is_hurt = self.maybe_uplink_capacity_bps.is_none() && self.uplink_voice.is_hurt(now);
@@ -2248,6 +2268,11 @@ impl CallEngine {
     let maybe_up = maybe_carried_bps
       .filter(|_| !self.uplink_voice.is_hurt(now))
       .and_then(|carried_bps| self.voice_steps.on_carried(carried_bps, now));
+    if maybe_up.is_some() && self.voice_steps.step() == VoiceStep::Full {
+      // A cluster proved room for the full voice: what the measurement before showed is past
+      // (#1889), and the uplink probes as any other again.
+      self.is_uplink_measured_thin = false;
+    }
     if let Some(encoding) = maybe_up.or(maybe_down) {
       // A rare change of what the call sounds like: worth a line in a bug report's log.
       info!(
@@ -2271,6 +2296,7 @@ impl CallEngine {
   fn start_uplink_probe(&mut self, now: Instant) {
     self.maybe_uplink_measurement = None;
     self.is_uplink_measured_thin = false;
+    self.forget_thin_estimate();
     self.maybe_uplink_probe = self
       .maybe_probe_bytes
       .and_then(|bytes| JoinProbeConfig::default().within_bytes(usize::try_from(bytes).unwrap_or(usize::MAX)))
@@ -2333,7 +2359,7 @@ impl CallEngine {
       .then(|| probe_demand_bps(&tracks, is_sending_screen_audio, &self.uplink_policy));
     // A voice on its thinnest step probes for its next step only (#1893): padding for held-back
     // video kept a 64 kbit/s uplink full. Above it, held-back video probes as well.
-    let maybe_wanted_bps = if self.is_voice_starved() {
+    let maybe_wanted_bps = if self.is_voice_starved() && self.is_uplink_thin() {
       self.voice_steps.wanted_bps()
     } else if self.is_video_proof_wanted {
       Some(self.video_proof_bps()).max(self.voice_steps.wanted_bps())
@@ -2366,11 +2392,7 @@ impl CallEngine {
     } else {
       self.probe_voice = ProbeVoice::InPause;
     }
-    let config = if self.probe_voice == ProbeVoice::LongSpeech {
-      RateProbeConfig::small(self.uplink_probe_config())
-    } else {
-      self.uplink_probe_config()
-    };
+    let config = self.cluster_config();
     let datagrams = self
       .uplink_rate_probe
       .on_timer(&config, &mut self.uplink, maybe_wanted_bps, now);
@@ -2383,6 +2405,17 @@ impl CallEngine {
     self
       .outputs
       .extend(datagrams.into_iter().map(EngineOutput::Datagram));
+  }
+
+  /// How the running (or next) cluster probes: the small one next to a long talk, or as
+  /// [`Self::uplink_probe_config`] says. Its feedback is judged with the same: a small cluster has
+  /// two trains, and judged as one of three it never finished, nor lifted the estimate (#1889).
+  fn cluster_config(&self) -> RateProbeConfig {
+    if self.probe_voice == ProbeVoice::LongSpeech {
+      RateProbeConfig::small(self.uplink_probe_config())
+    } else {
+      self.uplink_probe_config()
+    }
   }
 
   /// How the uplink is probed: rarely while the voice is on its thinnest step or video waits for
@@ -2523,6 +2556,7 @@ impl CallEngine {
     }
     self.maybe_uplink_probe = None;
     self.is_uplink_measured_thin = false;
+    self.forget_thin_estimate();
     info!(
       age_ms =
         u64::try_from(now.saturating_duration_since(prior.measured_at).as_millis()).unwrap_or(u64::MAX),
@@ -2559,18 +2593,39 @@ impl CallEngine {
   /// Whether the uplink is too thin for the full voice: the join's probe showed it, or the estimate
   /// is below the thin step's bound. There a cluster next to the own speech costs it (#1893).
   fn is_uplink_thin(&self) -> bool {
-    self.is_uplink_measured_thin || self.uplink.estimate_bps() < self.uplink_policy.voice.thin_below_bps
+    self.is_uplink_measured_thin || self.is_estimate_thin_sustained
+  }
+
+  /// Follows how long the estimate stays below the thin step's bound (#1889).
+  fn note_estimate(&mut self, now: Instant) {
+    if self.uplink.estimate_bps() < self.uplink_policy.voice.thin_below_bps {
+      let since = *self.maybe_estimate_thin_since.get_or_insert(now);
+      self.is_estimate_thin_sustained = now.saturating_duration_since(since) >= THIN_ESTIMATE_SUSTAINED;
+    } else {
+      self.forget_thin_estimate();
+    }
+  }
+
+  fn forget_thin_estimate(&mut self) {
+    self.maybe_estimate_thin_since = None;
+    self.is_estimate_thin_sustained = false;
   }
 
   /// Whether a talk without a pause has gone on so long that a small cluster may run next to it:
-  /// it began [`PROBE_IN_SPEECH_AFTER`] ago, and so did the last cluster.
+  /// it began [`PROBE_IN_SPEECH_AFTER`] ago, and so did the last cluster, or
+  /// [`PROBE_IN_SPEECH_AFTER_CARRIED`] when that one got through (#1889).
   fn is_long_speech_probe_due(&self, now: Instant) -> bool {
-    let is_long_ago = |maybe_at: Option<Instant>| {
-      maybe_at.is_none_or(|at| now.saturating_duration_since(at) >= PROBE_IN_SPEECH_AFTER)
+    let is_ago = |maybe_at: Option<Instant>, wait: Duration| {
+      maybe_at.is_none_or(|at| now.saturating_duration_since(at) >= wait)
+    };
+    let probe_wait = if self.has_last_probe_carried {
+      PROBE_IN_SPEECH_AFTER_CARRIED
+    } else {
+      PROBE_IN_SPEECH_AFTER
     };
     self.maybe_speaking_since.is_some()
-      && is_long_ago(self.maybe_speaking_since)
-      && is_long_ago(self.maybe_probe_started_at)
+      && is_ago(self.maybe_speaking_since, PROBE_IN_SPEECH_AFTER)
+      && is_ago(self.maybe_probe_started_at, probe_wait)
   }
 
   /// How the uplink treats the top layer of the own track on `stream_id` now (#1733): a share's
@@ -6670,6 +6725,228 @@ mod tests {
       };
       alice.handle_signal(event(5, needed), now).unwrap();
       assert!(drain(&mut alice).is_empty());
+    }
+  }
+
+  /// #1889: a voice and camera taken down by a collapse of the uplink come back with the link,
+  /// also while the own microphone talks without a pause.
+  mod drop_recovery {
+    use std::collections::VecDeque;
+
+    use super::*;
+    use crate::voice_steps::VoiceStep;
+
+    const FAST_BPS: u32 = 5_000_000;
+    /// Below what the full voice takes on the wire: it is lost on the way.
+    const COLLAPSED_BPS: u32 = 24_000;
+
+    /// A measurement at the join (or in the lobby) said the uplink is fast; it collapses for
+    /// 20 s and comes back. The voice steps up and the camera returns within seconds of the link,
+    /// while the own microphone talks on.
+    #[test]
+    fn a_collapse_on_a_fast_uplink_recovers_within_seconds() {
+      let start = Instant::now();
+      let (mut alice, _bob) = secured_pair(start);
+      alice.maybe_probe_bytes = Some(15_000);
+      publish_camera(&mut alice, start);
+      alice.apply_uplink_probe(fast_link(), start);
+      let mut link = ShapedUplink::new(FAST_BPS, start);
+      let at = link.run(&mut alice, start, Duration::from_secs(10), &frame());
+      assert_eq!(alice.voice_steps.step(), VoiceStep::Full);
+
+      link.rate_bps = COLLAPSED_BPS;
+      let at = link.run(&mut alice, at, Duration::from_secs(20), &frame());
+      assert_ne!(
+        alice.voice_steps.step(),
+        VoiceStep::Full,
+        "the collapse took the voice down"
+      );
+      assert!(alice.is_video_held_for_voice, "and held the camera");
+
+      // The voice guard holds the voice hurt for 3 s after its last loss (#1871); the probes
+      // start after that.
+      link.rate_bps = FAST_BPS;
+      let back = at;
+      let camera = link
+        .run_until(&mut alice, at, Duration::from_secs(30), &frame(), |engine| {
+          !engine.is_video_held_for_voice
+        })
+        .expect("the camera came back");
+      let after = camera.saturating_duration_since(back);
+      assert!(after <= Duration::from_secs(6), "the camera back after {after:?}");
+      let voice = link
+        .run_until(&mut alice, camera, Duration::from_secs(30), &frame(), |engine| {
+          engine.voice_steps.step() == VoiceStep::Full
+        })
+        .expect("the full voice came back");
+      let after = voice.saturating_duration_since(back);
+      assert!(
+        after <= Duration::from_secs(8),
+        "the full voice back after {after:?}"
+      );
+    }
+
+    /// The lobby measured the uplink thin; then the link turned fast (a congested link that
+    /// cleared, Wi-Fi without a reported network change). A microphone that talks without a
+    /// pause climbs back with the small probes a long talk gets.
+    #[test]
+    fn a_link_measured_thin_that_turns_fast_recovers_while_talking() {
+      let start = Instant::now();
+      let (mut alice, _bob) = secured_pair(start);
+      alice.maybe_probe_bytes = Some(15_000);
+      publish_camera(&mut alice, start);
+      alice.apply_uplink_probe(thin_link(), start);
+      assert_eq!(alice.voice_steps.step(), VoiceStep::Thinnest);
+      let mut link = ShapedUplink::new(FAST_BPS, start);
+      let recovered = link.run_until(&mut alice, start, Duration::from_secs(60), &frame(), |engine| {
+        engine.voice_steps.step() == VoiceStep::Full && !engine.is_video_held_for_voice
+      });
+      // The first small cluster comes after 20 s of talk; each that gets through lets the next
+      // follow 2 s later.
+      let after = recovered
+        .expect("voice and camera came back")
+        .saturating_duration_since(start);
+      assert!(after <= Duration::from_secs(32), "back after {after:?}");
+    }
+
+    /// An uplink of `rate_bps` behind a FIFO queue that holds at most 200 ms, 20 ms away: what
+    /// the engine sends arrives or is lost as on such a link, and the SFU's feedback reports it
+    /// every 100 ms.
+    struct ShapedUplink {
+      rate_bps: u32,
+      origin: Instant,
+      free_at: Instant,
+      /// Sent and not yet reported: the arrival, `None` when lost.
+      in_flight: VecDeque<(u16, Option<Instant>)>,
+      signal_seq: u64,
+    }
+
+    impl ShapedUplink {
+      const BASE_DELAY: Duration = Duration::from_millis(20);
+      const MAX_QUEUE: Duration = Duration::from_millis(200);
+
+      fn new(rate_bps: u32, origin: Instant) -> Self {
+        Self {
+          rate_bps,
+          origin,
+          free_at: origin,
+          in_flight: VecDeque::new(),
+          signal_seq: 7,
+        }
+      }
+
+      /// Talks with `frame` every 20 ms for `length` from `from`; returns when it ended.
+      fn run(
+        &mut self,
+        engine: &mut CallEngine,
+        from: Instant,
+        length: Duration,
+        frame: &EncodedAudioFrame,
+      ) -> Instant {
+        self.run_until(engine, from, length, frame, |_| false);
+        from + length
+      }
+
+      /// As [`Self::run`], until `is_done`: when it was.
+      fn run_until(
+        &mut self,
+        engine: &mut CallEngine,
+        from: Instant,
+        length: Duration,
+        frame: &EncodedAudioFrame,
+        is_done: impl Fn(&CallEngine) -> bool,
+      ) -> Option<Instant> {
+        let mut at = from;
+        let mut tick = 0u32;
+        while at < from + length {
+          engine.send_audio(frame, at);
+          if tick.is_multiple_of(5) {
+            engine.on_timer(at);
+            if let Some(feedback) = self.feedback(at) {
+              engine
+                .handle_signal(
+                  event(self.signal_seq, CallEvent::TransportFeedback { feedback }),
+                  at,
+                )
+                .unwrap();
+              self.signal_seq += 1;
+            }
+          }
+          self.send(&drain(engine), at);
+          if is_done(engine) {
+            return Some(at);
+          }
+          at += Duration::from_millis(20);
+          tick += 1;
+        }
+        None
+      }
+
+      fn send(&mut self, outputs: &[EngineOutput], now: Instant) {
+        for output in outputs {
+          let EngineOutput::Datagram(bytes) = output else {
+            continue;
+          };
+          let Some(seq) = MediaDatagram::parse(bytes)
+            .ok()
+            .and_then(|datagram| datagram.header.maybe_transport_seq)
+          else {
+            continue;
+          };
+          let start = self.free_at.max(now);
+          let maybe_arrival = (start.saturating_duration_since(now) <= Self::MAX_QUEUE).then(|| {
+            // Wire size with IPv6, UDP and QUIC.
+            let wire_bits = (bytes.len() as u64 + 60) * 8;
+            self.free_at = start + Duration::from_micros(wire_bits * 1_000_000 / u64::from(self.rate_bps));
+            self.free_at + Self::BASE_DELAY
+          });
+          self.in_flight.push_back((seq.0, maybe_arrival));
+        }
+      }
+
+      /// The SFU's feedback at `now`: every datagram up to the first still on the way.
+      fn feedback(&mut self, now: Instant) -> Option<TransportFeedback> {
+        let base_seq = self.in_flight.front()?.0;
+        let mut arrivals_us = Vec::new();
+        while let Some((_, maybe_arrival)) = self.in_flight.front() {
+          if maybe_arrival.is_some_and(|arrival| arrival > now) {
+            break;
+          }
+          let arrival_us = maybe_arrival.map(|arrival| {
+            u64::try_from(arrival.saturating_duration_since(self.origin).as_micros()).unwrap()
+          });
+          arrivals_us.push(arrival_us);
+          self.in_flight.pop_front();
+        }
+        (!arrivals_us.is_empty()).then_some(TransportFeedback {
+          base_seq,
+          arrivals_us,
+        })
+      }
+    }
+
+    fn publish_camera(engine: &mut CallEngine, now: Instant) {
+      ask_for(engine, &video_track(50, 1, 3));
+      engine
+        .handle_signal(
+          event(
+            6,
+            CallEvent::VideoPublished {
+              track: video_track(50, 1, 3),
+            },
+          ),
+          now,
+        )
+        .unwrap();
+      drain(engine);
+    }
+
+    fn fast_link() -> LinkMeasurement {
+      LinkMeasurement {
+        capacity_bps: FAST_BPS,
+        after_burst_bps: FAST_BPS,
+        loss_percent: 0,
+      }
     }
   }
 

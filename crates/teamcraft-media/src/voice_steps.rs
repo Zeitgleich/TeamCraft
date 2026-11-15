@@ -73,6 +73,11 @@ pub struct VoiceStepConfig {
   pub max_upgrade_after: Duration,
   /// A step down within this long after a step up shows the link didn't carry it.
   pub failed_upgrade_within: Duration,
+  /// A measurement or probe that showed this many times what a step needs is clear room
+  /// (#1889): the step up is taken without waiting, and a step down later is the link changing,
+  /// not an upgrade the link didn't carry. A collapse half a minute after a join that measured
+  /// 5 Mbit/s made the next step up wait 30 s.
+  pub clear_room_factor: f64,
   /// The estimate steps the voice down once it stayed below the step's bound this long: the
   /// estimator's first cut at a sudden drop is often a step it takes back within seconds (#939).
   pub downgrade_after: Duration,
@@ -127,6 +132,7 @@ impl Default for VoiceStepConfig {
       first_failed_upgrade_wait: Duration::from_secs(30),
       max_upgrade_after: Duration::from_secs(300),
       failed_upgrade_within: Duration::from_secs(60),
+      clear_room_factor: 3.0,
       hurt_step_interval: Duration::from_secs(1),
       downgrade_after: Duration::from_secs(2),
     }
@@ -242,12 +248,14 @@ impl VoiceSteps {
     let before = self.encoding();
     self.forget_held_upgrade(now);
     let with_margin = self.step_for(f64::from(carried_bps) / self.config.upgrade_margin);
-    let is_due = self
-      .maybe_changed_at
-      .is_none_or(|changed_at| now.saturating_duration_since(changed_at) >= self.upgrade_after);
+    let is_clear = self.is_clear_room(carried_bps, with_margin);
+    let is_due = is_clear
+      || self
+        .maybe_changed_at
+        .is_none_or(|changed_at| now.saturating_duration_since(changed_at) >= self.upgrade_after);
     if with_margin > self.step && is_due {
       self.step = with_margin;
-      self.maybe_upgraded_at = Some(now);
+      self.maybe_upgraded_at = (!is_clear).then_some(now);
       self.maybe_changed_at = Some(now);
     }
     let after = self.encoding();
@@ -263,7 +271,7 @@ impl VoiceSteps {
     let target = self.step_for(f64::from(capacity_bps) / self.config.upgrade_margin);
     if target != self.step {
       if target > self.step {
-        self.maybe_upgraded_at = Some(now);
+        self.maybe_upgraded_at = (!self.is_clear_room(capacity_bps, target)).then_some(now);
       }
       self.step = target;
       self.maybe_below_since = None;
@@ -282,6 +290,17 @@ impl VoiceSteps {
     } else {
       VoiceStep::Full
     }
+  }
+
+  /// Whether `shown_bps` is clear room for `step`: [`VoiceStepConfig::clear_room_factor`] times
+  /// the bound it needs.
+  fn is_clear_room(&self, shown_bps: u32, step: VoiceStep) -> bool {
+    let needed_bps = match step {
+      VoiceStep::Thinnest => return true,
+      VoiceStep::Thin => self.config.thinnest_below_bps,
+      VoiceStep::Full => self.config.thin_below_bps,
+    };
+    f64::from(shown_bps) >= f64::from(needed_bps) * self.config.upgrade_margin * self.config.clear_room_factor
   }
 
   fn may_step_down_for_hurt(&self, now: Instant) -> bool {
@@ -344,6 +363,9 @@ mod tests {
   use super::*;
 
   const GOOD_BPS: u32 = 1_000_000;
+  /// What a probe for the full step shows of a link with just room for it: no clear room
+  /// ([`VoiceStepConfig::clear_room_factor`]).
+  const PROVEN_BPS: u32 = 250_000;
   /// Between the thin and the thinnest bound.
   const THIN_BPS: u32 = 100_000;
   const THINNEST_BPS: u32 = 40_000;
@@ -396,17 +418,35 @@ mod tests {
       let config = VoiceStepConfig::default();
       let mut steps = VoiceSteps::new(config);
       let start = Instant::now();
-      steps.on_measured(GOOD_BPS, start);
+      steps.on_measured(PROVEN_BPS, start);
       steps.on_estimate(GOOD_BPS, true, start + Duration::from_secs(2));
       assert_eq!(steps.step(), VoiceStep::Thin);
       let after_wait = start + Duration::from_secs(2) + config.upgrade_after;
-      assert_eq!(steps.on_carried(GOOD_BPS, after_wait), None);
+      assert_eq!(steps.on_carried(PROVEN_BPS, after_wait), None);
       assert!(
         steps
           .on_carried(
-            GOOD_BPS,
+            PROVEN_BPS,
             start + Duration::from_secs(2) + config.first_failed_upgrade_wait
           )
+          .is_some()
+      );
+    }
+
+    /// #1889: a measurement with clear room is no try: a collapse half a minute later is the link
+    /// changing, and the voice steps up again on the first proof.
+    #[test]
+    fn a_join_measurement_with_clear_room_doesnt_make_the_next_upgrade_wait() {
+      let config = VoiceStepConfig::default();
+      let mut steps = VoiceSteps::new(config);
+      let start = Instant::now();
+      steps.on_measured(5_000_000, start);
+      let collapse = start + Duration::from_secs(30);
+      steps.on_estimate(GOOD_BPS, true, collapse);
+      assert_eq!(steps.step(), VoiceStep::Thin);
+      assert!(
+        steps
+          .on_carried(PROVEN_BPS, collapse + config.upgrade_after)
           .is_some()
       );
     }
@@ -488,12 +528,12 @@ mod tests {
       "as far as it carries"
     );
     assert_eq!(
-      steps.on_carried(GOOD_BPS, later + config.upgrade_after / 2),
+      steps.on_carried(PROVEN_BPS, later + config.upgrade_after / 2),
       None,
       "the next one waits"
     );
     assert_eq!(
-      steps.on_carried(GOOD_BPS, later + config.upgrade_after),
+      steps.on_carried(PROVEN_BPS, later + config.upgrade_after),
       Some(config.full)
     );
     let mut collapsed = self::steps(true);
@@ -505,14 +545,45 @@ mod tests {
     );
   }
 
+  /// #1889: a probe that showed clear room steps up without waiting for the last change, and
+  /// isn't a try the link may not carry.
+  #[test]
+  fn a_probe_with_clear_room_steps_up_at_once() {
+    let config = VoiceStepConfig::default();
+    let mut steps = steps(true);
+    let start = Instant::now();
+    steps.on_estimate(THINNEST_BPS, false, start);
+    let later = start + config.downgrade_after;
+    steps.on_estimate(THINNEST_BPS, false, later);
+    assert_eq!(steps.step(), VoiceStep::Thinnest);
+    assert_eq!(
+      steps.on_carried(config.thin_below_bps, later + config.upgrade_after),
+      Some(config.thin)
+    );
+    assert_eq!(
+      steps.on_carried(
+        GOOD_BPS,
+        later + config.upgrade_after + Duration::from_millis(500)
+      ),
+      Some(config.full)
+    );
+  }
+
   #[test]
   fn a_probe_right_after_a_step_down_waits() {
     let config = VoiceStepConfig::default();
     let mut steps = steps(true);
     let start = Instant::now();
     steps.on_estimate(THIN_BPS, false, start);
-    assert_eq!(steps.on_carried(GOOD_BPS, start + config.upgrade_after / 2), None);
-    assert!(steps.on_carried(GOOD_BPS, start + config.upgrade_after).is_some());
+    assert_eq!(
+      steps.on_carried(PROVEN_BPS, start + config.upgrade_after / 2),
+      None
+    );
+    assert!(
+      steps
+        .on_carried(PROVEN_BPS, start + config.upgrade_after)
+        .is_some()
+    );
   }
 
   /// A link just too thin for the next step: each failed try doubles the wait, and an upgrade that
@@ -526,7 +597,7 @@ mod tests {
     let mut waits = Vec::new();
     for _ in 0..6 {
       let down_at = now;
-      while steps.on_carried(GOOD_BPS, now).is_none() {
+      while steps.on_carried(PROVEN_BPS, now).is_none() {
         now += Duration::from_millis(100);
       }
       waits.push(now.duration_since(down_at).as_secs());
@@ -537,10 +608,10 @@ mod tests {
     assert_eq!(waits, vec![5, 30, 60, 120, 240, 300]);
     // This time it holds; after the next dip the wait is short again.
     now += config.max_upgrade_after;
-    assert!(steps.on_carried(GOOD_BPS, now).is_some());
+    assert!(steps.on_carried(PROVEN_BPS, now).is_some());
     now += config.failed_upgrade_within;
     steps.on_estimate(THIN_BPS, false, now);
-    assert!(steps.on_carried(GOOD_BPS, now + config.upgrade_after).is_some());
+    assert!(steps.on_carried(PROVEN_BPS, now + config.upgrade_after).is_some());
   }
 
   /// Lost voice steps down before the estimate says anything, a step at a time.
