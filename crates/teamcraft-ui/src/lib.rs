@@ -110,6 +110,7 @@ pub mod route;
 pub mod scroll_perf;
 pub mod search_scope;
 pub mod sections;
+pub mod selection;
 pub mod server_backend;
 pub mod session;
 pub mod settings;

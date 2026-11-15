@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- Mehrere Nachrichten auswählen (Issue #2070) -->
+  <string name="action_select">Auswählen</string>
+  <string name="selection_copy">Kopieren</string>
+  <string name="selection_row_checkbox">Nachricht auswählen</string>
+  <string name="selection_delete_refused">Nur eigene Nachrichten können gelöscht werden.</string>
+  <plurals name="selection_count">
+    <item quantity="one">%d ausgewählt</item>
+    <item quantity="other">%d ausgewählt</item>
+  </plurals>
+  <plurals name="selection_delete_confirm">
+    <item quantity="one">%d Nachricht für alle löschen?</item>
+    <item quantity="other">%d Nachrichten für alle löschen?</item>
+  </plurals>
+</resources>

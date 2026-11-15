@@ -33,7 +33,7 @@ data class ConversationRights(
 }
 
 /** An entry of a message's action sheet, below the quick reactions. */
-enum class MessageAction { Reply, ReplyInThread, Edit, Delete, Forward, Pin, Save, Acknowledge, CopyLink, CopyText, MarkUnread }
+enum class MessageAction { Reply, ReplyInThread, Edit, Delete, Forward, Select, Pin, Save, Acknowledge, CopyLink, CopyText, MarkUnread }
 
 /** What a message's action sheet offers, in order: only what the user's rights allow. */
 fun messageActions(
@@ -42,6 +42,8 @@ fun messageActions(
   isDeleted: Boolean,
   hasThreads: Boolean,
   wantsAcknowledgement: Boolean,
+  /** Selection mode is on offer here (the conversation's feed, not a thread's), issue #2070. */
+  canSelect: Boolean = false,
 ): List<MessageAction> = buildList {
   if (rights.canPost) add(MessageAction.Reply)
   if (rights.canPost && hasThreads) add(MessageAction.ReplyInThread)
@@ -56,4 +58,5 @@ fun messageActions(
   add(MessageAction.CopyLink)
   add(MessageAction.CopyText)
   add(MessageAction.MarkUnread)
+  if (canSelect && !isDeleted) add(MessageAction.Select)
 }

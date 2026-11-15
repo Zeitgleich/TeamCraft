@@ -361,3 +361,26 @@ poll-voters-more = { $count ->
 poll-close = Umfrage beenden
 poll-close-confirm = Für alle beenden? Spätere Stimmen zählen nicht.
 poll-unknown-choice = Zum Abstimmen braucht diese Umfrage eine neuere Version von TeamCraft.
+
+# Mehrere Nachrichten auswählen (Issue #2070)
+action-select = Auswählen
+selection-toolbar = Ausgewählte Nachrichten
+selection-count = { $count ->
+    [one] { $count } ausgewählt
+   *[other] { $count } ausgewählt
+  }
+selection-row-selected = ausgewählt
+selection-copy = Kopieren
+selection-delete-refused = Nur eigene Nachrichten können gelöscht werden.
+selection-delete-confirm = { $count ->
+    [one] { $count } Nachricht für alle löschen?
+   *[other] { $count } Nachrichten für alle löschen?
+  }
+selection-deleted-toast = { $count ->
+    [one] { $count } Nachricht gelöscht
+   *[other] { $count } Nachrichten gelöscht
+  }
+forward-many-title = { $count ->
+    [one] { $count } Nachricht weiterleiten
+   *[other] { $count } Nachrichten weiterleiten
+  }

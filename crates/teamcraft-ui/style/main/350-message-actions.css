@@ -33,3 +33,19 @@ button.msg-quote-jump:hover { color: var(--text); }
 .reply-banner { display: flex; align-items: center; gap: .5rem; padding: .3rem .6rem; border-inline-start: 3px solid var(--border-strong); color: var(--text-muted); font-size: var(--text-sm); }
 .reply-banner .grow { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+
+/* Selection mode (issue #2070): a bar above the feed, rows that take a tap, a mark at the end. */
+.selection-bar { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; padding: .5rem 1rem; border-bottom: 1px solid var(--border); background: var(--surface-2); }
+.selection-bar .btn { display: inline-flex; align-items: center; gap: .35rem; }
+.selection-bar .btn .icon { width: 1rem; height: 1rem; }
+.selection-count { font-weight: 600; font-variant-numeric: tabular-nums; }
+.selection-hint { color: var(--text-muted); font-size: var(--text-xs); letter-spacing: var(--tracking-xs); }
+.msg-select-hit { position: absolute; inset: 0; z-index: 2; width: 100%; padding: 0; border: 0; background: none; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.msg-selecting .msg-main { user-select: none; }
+.msg-select-mark { position: absolute; inset-inline-end: 1rem; top: 50%; z-index: 3; display: grid; place-items: center; width: 1.375rem; height: 1.375rem; margin-top: -.6875rem; border: 2px solid var(--border-strong); border-radius: 50%; color: var(--on-accent); pointer-events: none; transition: background-color var(--dur-fast, .12s) ease, border-color var(--dur-fast, .12s) ease; }
+.msg-select-mark .icon { width: .875rem; height: .875rem; }
+.msg-selected { background: var(--accent-soft); }
+.msg-selected .msg-select-mark { border-color: var(--accent); background: var(--accent); }
+.msg-selecting:active .msg-select-mark { transform: scale(.92); }
+@media (prefers-reduced-motion: reduce) { .msg-select-mark { transition: none; } }
+@media (hover: hover) and (pointer: fine) { .msg-selecting:hover { background: var(--surface-2); } .msg-selected:hover { background: var(--accent-soft); } }

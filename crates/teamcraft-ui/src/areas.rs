@@ -60,7 +60,9 @@ use crate::components::meetings_view::{
   CancelMeetingDialog, MeetingCreatedDialog, MeetingsView, ScheduleMeetingDialog,
 };
 use crate::components::members_panel::MembersPanel;
-use crate::components::message_actions::{EditHistoryDialog, ForwardDialog, PinsPanel, SavedView};
+use crate::components::message_actions::{
+  EditHistoryDialog, ForwardDialog, ForwardSelectionDialog, PinsPanel, SavedView,
+};
 use crate::components::onboarding::EnrollScreen;
 use crate::components::poll_dialog::PollDialog;
 use crate::components::profile_views::UserProfileDialog;
@@ -221,6 +223,7 @@ areas! {
   share_into(_unit: ()) => dialogs: view! { <ShareDialog /> };
   /// Dialogs a first visit doesn't open: on a message, a file or a contact's keys (#695).
   forward(from: ConversationId, message: MessageId, maybe_attachment: Option<AttachmentId>) => dialogs: view! { <ForwardDialog from=from message=message maybe_attachment=maybe_attachment /> };
+  forward_selection(from: ConversationId) => dialogs: view! { <ForwardSelectionDialog from=from /> };
   edit_history(conversation: ConversationId, message: MessageId) => dialogs: view! { <EditHistoryDialog conversation=conversation message=message /> };
   bookmarks(conversation: ConversationId) => dialogs: view! { <BookmarksDialog conversation=conversation /> };
   /// A new poll (issue #205).

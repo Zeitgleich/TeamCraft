@@ -56,6 +56,8 @@ pub enum MessageAction {
   CopyLink,
   CopyText,
   MarkUnread,
+  /// Starts selection mode with this message selected (issue #2070).
+  Select,
   Edit,
   Delete,
 }
@@ -130,6 +132,10 @@ pub fn message_actions(context: ActionContext, surface: ActionSurface) -> Vec<Me
     MessageAction::CopyText,
     MessageAction::MarkUnread,
   ]);
+  // Several messages are picked in the conversation's feed, not in a thread's panel.
+  if !context.in_thread {
+    actions.push(MessageAction::Select);
+  }
   if permissions.can_manage_bookmarks {
     actions.push(if context.is_pinned {
       MessageAction::Unpin
@@ -163,6 +169,7 @@ impl MessageAction {
       Self::CopyLink => "action-copy-link",
       Self::CopyText => "action-copy-text",
       Self::MarkUnread => "action-mark-unread",
+      Self::Select => "action-select",
       Self::Edit => "action-edit",
       Self::Delete => "action-delete",
     }
@@ -178,6 +185,7 @@ impl MessageAction {
       Self::CopyLink => IconName::Link,
       Self::CopyText => IconName::Copy,
       Self::MarkUnread => IconName::EyeOff,
+      Self::Select => IconName::Check,
       Self::Edit => IconName::Compose,
       Self::Delete => IconName::Trash,
     }
@@ -188,6 +196,7 @@ impl MessageAction {
     match self {
       Self::Thread => Some("T"),
       Self::Quote => Some("R"),
+      Self::Select => Some("X"),
       _ => None,
     }
   }
@@ -307,6 +316,9 @@ pub fn run_message_action(action: MessageAction, message: &Message, maybe_extras
     },
     MessageAction::CopyText => copy_and_confirm(message.body.clone()),
     MessageAction::MarkUnread => state.write(|backend| backend.mark_unread(conversation, id)),
+    MessageAction::Select => state
+      .selection
+      .set(crate::selection::MessageSelection::start(conversation, id)),
     MessageAction::Edit => state.edit_request.set(Some(id)),
     MessageAction::Delete => state.delete_with_undo(conversation, id, i18n.t("message-deleted-toast")),
   }
@@ -456,13 +468,21 @@ pub fn ForwardDialog(
   from: ConversationId,
   message: MessageId,
   maybe_attachment: Option<AttachmentId>,
+  /// The messages of a selection (issue #2070), oldest first; empty for a single message.
+  #[prop(optional)]
+  batch: Vec<MessageId>,
 ) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let pending = PendingAction::new();
+  let batch_size = batch.len();
   let title_key = match maybe_attachment.is_some() && files_of(state, from, message).len() > 1 {
     true => "image-forward",
     false => "forward-title",
+  };
+  let title = move || match batch_size {
+    0 | 1 => i18n.t(title_key),
+    count => i18n.t_count("forward-many-title", count),
   };
   let filter = RwSignal::new(String::new());
   let comment = RwSignal::new(String::new());
@@ -485,10 +505,31 @@ pub fn ForwardDialog(
     ev.prevent_default();
     let Some(to) = chosen.get_untracked() else { return };
     let note = comment.get_untracked();
+    if batch_size > 1 {
+      // One single-message forward after the other, in the order given; the note goes with the first.
+      let batch = batch.clone();
+      pending.run_and_then(
+        move || {
+          state.write(|backend| {
+            for (index, id) in batch.iter().enumerate() {
+              backend.forward_message(from, *id, to, if index == 0 { &note } else { "" });
+            }
+          })
+        },
+        move || {
+          close_forward_dialog(state);
+          state.end_selection_in(from);
+        },
+      );
+      return;
+    }
     let Some(attachment) = maybe_attachment else {
       pending.run_and_then(
         || state.write(|backend| backend.forward_message(from, message, to, &note)),
-        move || close_forward_dialog(state),
+        move || {
+          close_forward_dialog(state);
+          state.end_selection_in(from);
+        },
       );
       return;
     };
@@ -512,7 +553,7 @@ pub fn ForwardDialog(
     <Modal labelled_by="forward-title" class="modal-small">
       <form on:submit=send>
         <header class="modal-head">
-          <h2 id="forward-title">{move || i18n.t(title_key)}</h2>
+          <h2 id="forward-title">{title}</h2>
           <button type="button" class="icon-btn" aria-label=move || i18n.t("close") title=move || i18n.t("close") on:click=move |_| state.close_overlay()>
             <Icon name=IconName::Close />
           </button>
@@ -527,7 +568,7 @@ pub fn ForwardDialog(
             prop:value=move || filter.get()
             on:input=move |ev| filter.set(event_target_value(&ev))
           />
-          <ul class="forward-list" role="listbox" aria-label=move || i18n.t(title_key)>
+          <ul class="forward-list" role="listbox" aria-label=title>
             <For each=move || targets.get() key=|conversation| conversation.id let:conversation>
               {
                 let id = conversation.id;
@@ -575,6 +616,36 @@ pub fn ForwardDialog(
   }
 }
 
+/// Forwards the messages selected in `from` (issue #2070), oldest first, as the single-message
+/// forward does each of them. Selection mode ends when they are sent.
+#[component]
+pub fn ForwardSelectionDialog(from: ConversationId) -> impl IntoView {
+  let state = use_app_state();
+  let batch: Vec<MessageId> = state.selection.with_untracked(|selection| {
+    if !selection.is_active_in(from) {
+      return Vec::new();
+    }
+    let feed = state
+      .try_read(|backend| backend.messages(from, 0, usize::MAX))
+      .unwrap_or_default();
+    selection
+      .in_order(&feed)
+      .iter()
+      .map(|message| message.id)
+      .collect()
+  });
+  match batch.first().copied() {
+    Some(first) => {
+      view! { <ForwardDialog from=from message=first maybe_attachment=None batch=batch /> }.into_any()
+    },
+    // The selection went (the conversation was left) before the dialog loaded.
+    None => {
+      state.close_overlay();
+      ().into_any()
+    },
+  }
+}
+
 /// The files of a message on this device.
 fn files_of(state: AppState, conversation: ConversationId, message: MessageId) -> Vec<FileInfo> {
   state
@@ -587,7 +658,10 @@ fn files_of(state: AppState, conversation: ConversationId, message: MessageId) -
 
 /// Closes the forward dialog once the core has the forward; it may have gone by itself by then.
 fn close_forward_dialog(state: AppState) {
-  if matches!(state.overlay.try_get_untracked(), Some(Overlay::Forward(..))) {
+  if matches!(
+    state.overlay.try_get_untracked(),
+    Some(Overlay::Forward(..) | Overlay::ForwardSelection(..))
+  ) {
     state.close_overlay();
   }
 }
@@ -778,9 +852,24 @@ mod tests {
         MessageAction::CopyLink,
         MessageAction::CopyText,
         MessageAction::MarkUnread,
+        MessageAction::Select,
         MessageAction::Pin,
       ]
     );
+  }
+
+  #[test]
+  fn selecting_is_offered_in_the_feed_but_not_inside_a_thread() {
+    let in_feed = message_actions(allowed(), ActionSurface::Sheet);
+    assert!(in_feed.contains(&MessageAction::Select));
+    let in_thread = message_actions(
+      ActionContext {
+        in_thread: true,
+        ..allowed()
+      },
+      ActionSurface::Sheet,
+    );
+    assert!(!in_thread.contains(&MessageAction::Select));
   }
 
   #[test]

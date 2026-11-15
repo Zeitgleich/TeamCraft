@@ -111,6 +111,9 @@ pub enum ToastTone {
 pub enum Undo {
   /// Keep a message whose deletion is still waiting.
   RestoreMessage(MessageId),
+  /// Keep the messages of a selection whose deletion is still waiting (`delete_many_with_undo`);
+  /// the number names the batch.
+  RestoreMessages(u64),
   /// Stay in a channel whose leaving is still waiting.
   StayInChannel(ConversationId),
 }
@@ -265,6 +268,8 @@ pub enum Overlay {
   MeetingCreated,
   /// Pick a conversation to forward a message to, or one file of it.
   Forward(ConversationId, MessageId, Option<teamcraft_proto::AttachmentId>),
+  /// Pick a conversation to forward the selected messages of this one to (issue #2070).
+  ForwardSelection(ConversationId),
   /// The public links of one file of a message: new ones with options, the live ones with Revoke.
   ShareFile(ConversationId, MessageId, teamcraft_proto::AttachmentId),
   NewSpace,
@@ -391,6 +396,10 @@ pub struct AppState {
   toast_clock: StoredValue<ToastClock, LocalStorage>,
   /// Messages deleted with an undo window: hidden now, deleted when the window ends.
   pub hidden_messages: RwSignal<HashSet<MessageId>>,
+  /// The messages picked in selection mode (issue #2070).
+  pub selection: RwSignal<crate::selection::MessageSelection>,
+  /// The messages of each deletion batch that waits for its undo window, by batch number.
+  deletion_batches: StoredValue<HashMap<u64, Vec<MessageId>>>,
   /// Channels left with an undo window: gone from the sidebar now, left when the window ends.
   pub hidden_conversations: RwSignal<HashSet<ConversationId>>,
   /// A conversation to open as soon as it appears in the lists (after joining it).
@@ -528,6 +537,8 @@ impl AppState {
       next_toast: StoredValue::new(0),
       toast_clock: StoredValue::new_local(ToastClock::default()),
       hidden_messages: RwSignal::new(HashSet::new()),
+      selection: RwSignal::new(crate::selection::MessageSelection::default()),
+      deletion_batches: StoredValue::new(HashMap::new()),
       hidden_conversations: RwSignal::new(HashSet::new()),
       pending_open: RwSignal::new(None),
       pending_creation: RwSignal::new(None),
@@ -1539,9 +1550,69 @@ impl AppState {
     });
   }
 
+  /// Deletes the selected messages of selection mode (issue #2070) as one step: hidden now, one
+  /// Undo for all of them, deleted one by one (the single-message path) when the window ends.
+  pub fn delete_many_with_undo(&self, conversation: ConversationId, messages: Vec<MessageId>, text: String) {
+    if messages.is_empty() {
+      return;
+    }
+    let state = *self;
+    // The toast pushed below gets this number: it names the batch.
+    let Some(batch) = self.next_toast.try_get_value() else {
+      return;
+    };
+    self
+      .hidden_messages
+      .update(|hidden| hidden.extend(messages.iter().copied()));
+    self.deletion_batches.update_value(|batches| {
+      batches.insert(batch, messages);
+    });
+    let toast = self.push_toast(text, Some(Undo::RestoreMessages(batch)));
+    self.close_toast_after(toast, UNDO_WINDOW, move || {
+      let maybe_messages = state
+        .deletion_batches
+        .try_update_value(|batches| batches.remove(&batch))
+        .flatten();
+      // Taken by the Undo: nothing to delete.
+      let Some(messages) = maybe_messages else { return };
+      for message in messages {
+        let is_still_deleted = state
+          .hidden_messages
+          .try_update(|hidden| hidden.remove(&message))
+          .unwrap_or(false);
+        if is_still_deleted {
+          state.try_write(|backend| backend.delete_message(conversation, message));
+        }
+      }
+    });
+  }
+
+  /// Leaves selection mode if it is in `conversation` (the user left it).
+  pub fn end_selection_in(&self, conversation: ConversationId) {
+    if self
+      .selection
+      .try_with_untracked(|selection| selection.is_active_in(conversation))
+      .unwrap_or(false)
+    {
+      self.selection.try_update(|selection| selection.clear());
+    }
+  }
+
   /// Runs the Undo of a toast and closes it.
   pub fn undo(&self, toast: u64, undo: Undo) {
     match undo {
+      Undo::RestoreMessages(batch) => {
+        let messages = self
+          .deletion_batches
+          .try_update_value(|batches| batches.remove(&batch))
+          .flatten()
+          .unwrap_or_default();
+        self.hidden_messages.update(|hidden| {
+          for message in &messages {
+            hidden.remove(message);
+          }
+        });
+      },
       Undo::RestoreMessage(message) => self.hidden_messages.update(|hidden| {
         hidden.remove(&message);
       }),

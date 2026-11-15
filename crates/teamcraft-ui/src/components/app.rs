@@ -509,6 +509,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::Forward(from, message, maybe_attachment) => {
           lazy_area(Place::Overlay, move || areas::forward(from, message, maybe_attachment))
         },
+        Overlay::ForwardSelection(from) => lazy_area(Place::Overlay, move || areas::forward_selection(from)),
         Overlay::Lightbox(conversation, start) => lazy_area(Place::Overlay, move || areas::lightbox(conversation, start)),
         Overlay::FilePreview(conversation, key) => lazy_area(Place::Overlay, move || areas::file_preview(conversation, key)),
         Overlay::NewSpace => lazy_area(Place::Overlay, || areas::new_space(())),

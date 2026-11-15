@@ -361,3 +361,26 @@ poll-voters-more = { $count ->
 poll-close = Close poll
 poll-close-confirm = Close for everyone? Later votes won't count.
 poll-unknown-choice = This poll needs a newer version of TeamCraft to vote.
+
+# Selecting several messages (issue #2070)
+action-select = Select
+selection-toolbar = Selected messages
+selection-count = { $count ->
+    [one] { $count } selected
+   *[other] { $count } selected
+  }
+selection-row-selected = selected
+selection-copy = Copy
+selection-delete-refused = Only your own messages can be deleted.
+selection-delete-confirm = { $count ->
+    [one] Delete { $count } message for everyone?
+   *[other] Delete { $count } messages for everyone?
+  }
+selection-deleted-toast = { $count ->
+    [one] { $count } message deleted
+   *[other] { $count } messages deleted
+  }
+forward-many-title = { $count ->
+    [one] Forward { $count } message
+   *[other] Forward { $count } messages
+  }
