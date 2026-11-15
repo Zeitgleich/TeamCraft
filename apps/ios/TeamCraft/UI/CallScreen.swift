@@ -26,7 +26,6 @@ struct CallScreen: View {
   @State private var isNotetakerRefusalShown = false
   @State private var areControlsShown = true
   @State private var isEncryptionShown = false
-  @State private var maybeConnectedAt: Date?
   @State private var maybeSpotlightId: String?
   /// Counts taps on controls, so the chrome stays while the user is busy with it.
   @State private var interactions = 0
@@ -149,10 +148,6 @@ struct CallScreen: View {
     }
     .task(id: LobbyKey(conversationId: call.conversationId, participants: call.participantUserIds, knocks: model.calls.lobbyKnocks)) {
       await readLobby()
-    }
-    .onChange(of: call.phase, initial: true) {
-      // The clock starts with the first connection and runs through reconnects.
-      if call.phase == .connected && maybeConnectedAt == nil { maybeConnectedAt = Date() }
     }
     .task(id: AutoHideKey(isShown: areControlsShown, hasVideo: hasRemoteVideo, phase: call.phase, interactions: interactions)) {
       // The chrome steps aside when there is video to look at; without video it stays.
@@ -463,12 +458,32 @@ struct CallScreen: View {
         .accessibilityHint(Text("call_encryption_open"))
       }
     }
-    .padding(.horizontal, 16)
+    .padding(.horizontal, 64)
     .padding(.top, 8)
     .frame(maxWidth: .infinity)
+    .overlay(alignment: .topLeading) { minimiseButton }
     .background(alignment: .top) {
       LinearGradient(colors: [.black.opacity(0.5), .clear], startPoint: .top, endPoint: .bottom)
         .ignoresSafeArea()
+    }
+  }
+
+  /// Puts the call screen away to use the app while the call goes on (#2066); a ringing call waits
+  /// for an answer and can't be put away.
+  @ViewBuilder
+  private var minimiseButton: some View {
+    if call.phase != .ringing {
+      Button { model.calls.minimise() } label: {
+        Image(systemName: "chevron.down")
+          .font(.system(size: 17, weight: .semibold))
+          .foregroundStyle(.white)
+          .frame(width: 44, height: 44)
+          .background(.ultraThinMaterial, in: Circle())
+      }
+      .buttonStyle(PressScaleStyle())
+      .padding(.leading, 12)
+      .padding(.top, 4)
+      .accessibilityLabel(Text("call_minimise"))
     }
   }
 
@@ -484,7 +499,7 @@ struct CallScreen: View {
       case .reconnecting: Text("call_reconnecting")
       case .connected:
         HStack(spacing: 4) {
-          if let start = maybeConnectedAt {
+          if let start = call.maybeConnectedAt {
             TimelineView(.periodic(from: start, by: 1)) { context in
               Text(Self.format(context.date.timeIntervalSince(start)))
                 .monospacedDigit()
@@ -872,7 +887,7 @@ struct CallScreen: View {
     Binding(get: { model.calls.isCameraDenied }, set: { if !$0 { model.calls.dismissCameraDenied() } })
   }
 
-  private static func format(_ interval: TimeInterval) -> String {
+  static func format(_ interval: TimeInterval) -> String {
     let seconds = max(0, Int(interval))
     let (hours, minutes, rest) = (seconds / 3600, seconds % 3600 / 60, seconds % 60)
     return hours > 0

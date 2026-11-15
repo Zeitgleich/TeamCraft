@@ -1649,6 +1649,54 @@
         }
       }
     },
+    "call_minimise": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Minimise the call"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Anruf verkleinern"
+          }
+        }
+      }
+    },
+    "call_return %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Back to the call with %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zurück zum Anruf mit %@"
+          }
+        }
+      }
+    },
+    "call_return_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Opens the call screen"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Öffnet den Anruf"
+          }
+        }
+      }
+    },
     "call_on_hold": {
       "localizations": {
         "en": {

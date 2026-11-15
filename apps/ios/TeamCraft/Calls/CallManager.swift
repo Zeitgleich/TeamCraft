@@ -50,6 +50,15 @@ struct ActiveCall: Identifiable, Equatable {
   /// The join waits for this device's way into the call's encryption (just added to a meeting
   /// chat, #1994): the call screen says "Getting the call ready…".
   var isAwaitingEncryption = false
+  /// When the call first connected: the clock on the call screen and the return bar starts here
+  /// and runs through reconnects and a move into a meeting room.
+  var maybeConnectedAt: Date?
+
+  /// The call is connected; the first time also starts its clock.
+  mutating func markConnected(at now: Date = Date()) {
+    phase = .connected
+    if maybeConnectedAt == nil { maybeConnectedAt = now }
+  }
 }
 
 /// A move of the call into a meeting room that somebody else announced in the conversation's
@@ -103,6 +112,9 @@ final class CallManager: NSObject, @unchecked Sendable {
 
   /// Main-thread state; the in-call screen observes it.
   private(set) var activeCall: ActiveCall?
+  /// The call screen is put away while the call goes on (#2066): the app shows a bar to return.
+  /// A new call always opens its screen.
+  private(set) var isMinimised = false
   /// Why the last call ended, shown briefly on the screen.
   private(set) var maybeEndNote: LocalizedStringResource?
   /// Tracks of other participants that arrived, in the order they were published.
@@ -215,6 +227,18 @@ final class CallManager: NSObject, @unchecked Sendable {
     }
     isCameraOn = isEnabled
     reportHasVideo(isEnabled)
+  }
+
+  /// Puts the call screen away; the call goes on and a bar at the top leads back (#2066). A ringing
+  /// call stays in front: it waits for an answer.
+  func minimise() {
+    guard let call = activeCall, call.phase != .ringing else { return }
+    isMinimised = true
+  }
+
+  /// Brings the call screen back.
+  func restore() {
+    isMinimised = false
   }
 
   func flipCamera() {
@@ -415,7 +439,7 @@ final class CallManager: NSObject, @unchecked Sendable {
       configure(session)
       if call.isOnHold { session.setHeld(isHeld: true) }
       if var current = activeCall {
-        current.phase = .connected
+        current.markConnected()
         activeCall = current
       }
       if wasCameraOn {
@@ -514,7 +538,7 @@ final class CallManager: NSObject, @unchecked Sendable {
         maybeSession = session
         configure(session)
         if var current = activeCall {
-          current.phase = .connected
+          current.markConnected()
           activeCall = current
         }
         if call.isOutgoing { provider.reportOutgoingCall(with: call.id, connectedAt: Date()) }
@@ -582,6 +606,7 @@ final class CallManager: NSObject, @unchecked Sendable {
       self.isNotetakerAsked = false
       self.maybeNotetakerFailure = nil
       self.isEndingFromApp = false
+      self.isMinimised = false
       self.activeCall = nil
     }
   }
@@ -795,7 +820,7 @@ extension CallManager: CallListener {
       call.isVideoYieldedForVoice = state.isVideoYieldedForVoice
       call.pausedVideoStreamIds = Set(state.pausedVideoStreamIds)
       switch state.phase {
-      case .connected: call.phase = .connected
+      case .connected: call.markConnected()
       // The connection broke; the core rejoins (the others keep this device's place meanwhile).
       case .reconnecting: call.phase = .reconnecting
       case .connecting, .ended: break

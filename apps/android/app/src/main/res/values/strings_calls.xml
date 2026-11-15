@@ -128,4 +128,8 @@
   <string name="call_audio_route">Audio output</string>
   <string name="call_audio_route_current">Selected</string>
   <string name="call_route_earpiece">Phone earpiece</string>
+  <!-- The call screen put away while the call goes on, and the bar that leads back (#2066). -->
+  <string name="call_minimise">Minimise the call</string>
+  <string name="call_return_to">Back to the call with %1$s</string>
+  <string name="call_bar_reconnecting">Reconnecting…</string>
 </resources>

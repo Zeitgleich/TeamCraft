@@ -61,6 +61,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Person
@@ -357,6 +358,8 @@ internal class CallUiActions(
    * with "Leave" and this; everybody else's hang-up just leaves.
    */
   val maybeOnEndForEveryone: (() -> Unit)? = null,
+  /** Puts the call screen away while the call goes on (#2066); a bar in the app leads back. */
+  val maybeOnMinimise: (() -> Unit)? = null,
 )
 
 /** The room the header and the bottom (notices and controls) take, so the stage keeps clear of them. */
@@ -828,6 +831,11 @@ private fun TopBar(ui: CallUiState, layout: StageLayout, status: CallStatus, act
         StatusLine(status, layout.maybeOther(), MaterialTheme.typography.bodyMedium)
       }
       EncryptionIndicator(ui)
+    }
+    actions.maybeOnMinimise?.let { onMinimise ->
+      IconButton(onClick = onMinimise, shapes = IconButtonDefaults.shapes(), modifier = Modifier.align(Alignment.TopStart)) {
+        Icon(Icons.Filled.KeyboardArrowDown, contentDescription = stringResource(R.string.call_minimise))
+      }
     }
     if (ui.isCameraOn) {
       IconButton(
