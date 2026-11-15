@@ -1148,6 +1148,8 @@ struct ChatPane: View {
   }
 
   private func react(_ message: Message, _ emoji: String) {
+    // Light, like the system's own toggles; UIKit leaves it out when the user turned haptics off (#2004).
+    UISelectionFeedbackGenerator().selectionChanged()
     Task {
       await model.perform(.toggleReaction(conversationId: conversation.id, messageId: message.id, emoji: emoji))
     }
@@ -1219,6 +1221,7 @@ struct ChatPane: View {
     if let editing = maybeEditing {
       guard !body.isEmpty else { return }
       draft = ""
+      feelSend()
       maybeEditing = nil
       await model.perform(.editMessage(conversationId: conversation.id, messageId: editing.id, body: body))
     } else if otherFiles.contains(where: { $0.fileState == .expired }) {
@@ -1228,6 +1231,7 @@ struct ChatPane: View {
     } else if attachments.isEmpty && sendableOtherFiles.isEmpty && maybeReply == nil {
       guard !body.isEmpty else { return }
       draft = ""
+      feelSend()
       if !(await model.send(conversationId: conversation.id, threadId: threadId, body: body)) {
         // Nothing was sent: the text stays for another try.
         draft = body
@@ -1240,6 +1244,7 @@ struct ChatPane: View {
       let sentIds = Set(files.compactMap(\.maybeDraftId) + fromDraft.map(\.id))
       let replying = maybeReply
       draft = ""
+      feelSend()
       attachments = []
       goneDraftIds.formUnion(sentIds)
       maybeReply = nil
@@ -1256,6 +1261,11 @@ struct ChatPane: View {
       }
     }
     await reload()
+  }
+
+  /// A light tap as the message leaves the composer (#2004).
+  private func feelSend() {
+    UIImpactFeedbackGenerator(style: .light).impactOccurred()
   }
 
   /// Sends the recorded take of this composer as a voice message, with the reply it answers.
