@@ -386,6 +386,13 @@ pub enum CallEvent {
   ActiveSpeakers {
     device_ids: Vec<DeviceId>,
   },
+  /// Whether a receiver in the call is on a thin downlink and takes the voices' thin copies
+  /// (#1893 step 3): while one is, senders whose own voice is full and whose uplink has room send
+  /// their voice a second time, at the thinnest step. Sent when it changes, and to a device that
+  /// joins while it holds.
+  ThinVoiceWanted {
+    is_wanted: bool,
+  },
   /// The publisher of `stream_id` sends none of its layers now (#1891): its own uplink holds its
   /// video back, typically to keep its voice through. Viewers say so on its tile instead of a
   /// frozen picture. Sent to everyone else when it starts and when it ends.

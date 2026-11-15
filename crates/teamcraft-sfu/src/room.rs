@@ -1049,6 +1049,10 @@ impl Room {
       },
     };
     state.latest_sessions.insert(participant_id, session);
+    // A receiver on a thin downlink takes the thin voices: this device sends its own too.
+    if state.forwarder.is_thin_voice_wanted() {
+      state.send_to(participant_id, CallEvent::ThinVoiceWanted { is_wanted: true });
+    }
     // Pictures held back by their publishers say so on this device's tiles too (#1891).
     for stream_id in state.forwarder.paused_video_tracks() {
       state.send_to(
@@ -1529,6 +1533,7 @@ impl RoomState {
     for effect in effects {
       match effect {
         Effect::ActiveSpeakers(device_ids) => self.broadcast(CallEvent::ActiveSpeakers { device_ids }),
+        Effect::ThinVoiceWanted(is_wanted) => self.broadcast(CallEvent::ThinVoiceWanted { is_wanted }),
         Effect::VideoPausedByPublisher {
           publisher,
           stream_id,

@@ -192,6 +192,9 @@ impl TransportSeq {
 
 impl SimulcastLayer {
   pub const BASE: Self = Self(0);
+  /// A voice's thin copy (#1893 step 3): the thinnest voice step, sent next to the voice for
+  /// receivers on thin downlinks; the SFU gives each receiver one of the two.
+  pub const THIN_VOICE: Self = Self(1);
 
   pub fn new(value: u8) -> Result<Self, DatagramError> {
     if value > MAX_LAYER {

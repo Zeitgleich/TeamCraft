@@ -59,14 +59,25 @@ use teamcraft_proto::{
   VideoPublicationId, VideoTrack, VideoTrackKind,
 };
 use thiserror::Error;
-use tracing::debug;
+use tracing::{debug, info};
 
+use crate::audio_layers::{
+  AudioLayerConfig, RecoveryStage, THIN_VOICE_LAYER, ThinRecovery, VoiceLayerChoice, VoiceSequence,
+};
 use crate::layers::{
   LayerAllocationConfig, LayerAllocator, ProbeRequest, TrackDemand, UpgradeProof, full_demand_bps,
 };
 use crate::retransmit::{PacketHistory, RetransmitBudget, RetransmitConfig};
 use crate::speakers::{SpeakerSelectionConfig, SpeakerSelector};
 
+/// An estimate below the thin bound makes a downlink thin only after this long; a probe at the
+/// join that measured it thin does at once.
+const THIN_DOWNLINK_SUSTAINED: Duration = Duration::from_secs(10);
+/// A voice went to a receiver this recently: what its feedback says counts for its recovery from a
+/// thin downlink.
+const VOICE_FLOWING_WITHIN: Duration = Duration::from_secs(1);
+/// Where an RTP header keeps its sequence number.
+const RTP_SEQUENCE_OFFSET: usize = 2;
 /// Video tracks (camera, screen share) one participant may publish at the same time.
 const MAX_VIDEO_TRACKS_PER_PARTICIPANT: usize = 4;
 /// The upswitch hold while a receiver's downlink estimate is in its fast start.
@@ -80,6 +91,8 @@ const VOICE_HURT_AT_LOWEST_AFTER: Duration = Duration::from_millis(1500);
 /// Routing state of one room.
 #[derive(Debug)]
 pub struct Forwarder {
+  /// A receiver takes the voices' thin copies: senders send them (#1893 step 3).
+  is_thin_voice_wanted: bool,
   config: ForwardingConfig,
   participants: HashMap<DeviceId, ParticipantRoute>,
   video_tracks: BTreeMap<StreamId, VideoTrackRoute>,
@@ -108,6 +121,8 @@ pub struct ForwardingConfig {
   /// the SFU's of the downlink, and what it tells clients they may send for the uplink. Zero
   /// turns both off.
   pub probe_bytes: u32,
+  /// Which receivers get the thin copies of the voices (#1893).
+  pub audio_layers: AudioLayerConfig,
 }
 
 /// How often publishers are asked for keyframes. Keyframes are large: a receiver that keeps
@@ -163,6 +178,8 @@ pub enum Effect {
     receiver: DeviceId,
     datagrams: Vec<Vec<u8>>,
   },
+  /// Whether a receiver takes the voices' thin copies now (to everyone, #1893 step 3).
+  ThinVoiceWanted(bool),
   /// A publisher's uplink carries none of the layers of `stream_id` now, or does again (to
   /// everyone but the publisher, #1891).
   VideoPausedByPublisher {
@@ -229,6 +246,24 @@ struct ParticipantRoute {
   maybe_link_capacity_bps: Option<u32>,
   /// When its allocation's inputs were last logged (at most once a second, debug).
   maybe_allocation_logged_at: Option<Instant>,
+  /// Whether it takes the others' thin voices (#1893).
+  voice_layer: VoiceLayerChoice,
+  /// The others' voices as it gets them: numbered on across their layers.
+  voice_sequences: HashMap<DeviceId, VoiceSequence>,
+  /// When its own thin voice last arrived: while it flows, receivers on thin links get it.
+  maybe_thin_voice_at: Option<Instant>,
+  /// When a voice last went to it: its recovery from a thin downlink counts only then.
+  maybe_voice_sent_at: Option<Instant>,
+  /// On a thin downlink: its way back by its voices, without padding (#1893 step 3).
+  thin_recovery: ThinRecovery,
+  is_thin_downlink: bool,
+  /// What the probe at its join showed its downlink carries, until it took the full voices again.
+  maybe_measured_downlink_bps: Option<u32>,
+  /// Since when its downlink estimate is below the thin bound.
+  maybe_estimate_thin_since: Option<Instant>,
+  /// When its own voice (layer 0) last arrived, and when it came back after a pause.
+  maybe_voice_at: Option<Instant>,
+  maybe_voice_resumed_at: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -304,6 +339,7 @@ impl Default for ForwardingConfig {
       retransmit: RetransmitConfig::default(),
       voice_guard: VoiceGuardConfig::default(),
       probe_bytes: 15_000,
+      audio_layers: AudioLayerConfig::default(),
     }
   }
 }
@@ -326,7 +362,13 @@ impl Forwarder {
       video_tracks: BTreeMap::new(),
       speakers: SpeakerSelector::new(config.speakers),
       last_keyframe_requests: HashMap::new(),
+      is_thin_voice_wanted: false,
     }
+  }
+
+  /// Whether a receiver takes the voices' thin copies now (#1893 step 3).
+  pub fn is_thin_voice_wanted(&self) -> bool {
+    self.is_thin_voice_wanted
   }
 
   pub fn add_participant(
@@ -336,6 +378,10 @@ impl Forwarder {
     capabilities: MediaCapabilities,
     now: Instant,
   ) {
+    // A new session's voice numbers from scratch: the others start over with it.
+    for route in self.participants.values_mut() {
+      route.voice_sequences.remove(&device_id);
+    }
     let route = ParticipantRoute {
       audio_stream,
       maybe_screen_audio: None,
@@ -351,6 +397,16 @@ impl Forwarder {
       maybe_video_yielded_at: None,
       is_video_yielded_for_voice: false,
       uplink_voice: ArrivingVoice::new(self.config.voice_guard),
+      voice_layer: VoiceLayerChoice::default(),
+      voice_sequences: HashMap::new(),
+      maybe_thin_voice_at: None,
+      maybe_voice_sent_at: None,
+      thin_recovery: ThinRecovery::default(),
+      is_thin_downlink: false,
+      maybe_measured_downlink_bps: None,
+      maybe_estimate_thin_since: None,
+      maybe_voice_at: None,
+      maybe_voice_resumed_at: None,
       is_suspended: false,
       retransmit_budget: RetransmitBudget::default(),
       maybe_join_probe: self.new_join_probe(now),
@@ -501,7 +557,11 @@ impl Forwarder {
       .participants
       .remove(&device_id)
       .and_then(|route| route.maybe_screen_audio);
-    let mut effects = Vec::new();
+    // Its voice numbers from scratch if it comes back.
+    for route in self.participants.values_mut() {
+      route.voice_sequences.remove(&device_id);
+    }
+    let mut effects: Vec<Effect> = self.follow_thin_voice().into_iter().collect();
     if let Some(speakers) = self.speakers.remove(device_id, now) {
       effects.push(Effect::ActiveSpeakers(speakers));
     }
@@ -806,6 +866,23 @@ impl Forwarder {
       .collect()
   }
 
+  /// Whether some receiver takes the thin voices, when that changed (#1893 step 3).
+  fn follow_thin_voice(&mut self) -> Option<Effect> {
+    let is_wanted = self.participants.values().any(|participant| {
+      participant.voice_layer.is_thin() && participant.capabilities.has_long_audio_frames()
+    });
+    if is_wanted == self.is_thin_voice_wanted {
+      return None;
+    }
+    self.is_thin_voice_wanted = is_wanted;
+    // Rare: a receiver's downlink turned thin, or the last thin one left or recovered.
+    info!(
+      is_wanted,
+      "receivers on thin downlinks take the voices' thin copies"
+    );
+    Some(Effect::ThinVoiceWanted(is_wanted))
+  }
+
   /// Decides where one datagram from `sender` goes.
   pub fn route(&mut self, sender: DeviceId, datagram: &[u8], now: Instant) -> Result<Route, ForwardError> {
     let header = DatagramHeader::parse(datagram)?;
@@ -836,11 +913,37 @@ impl Forwarder {
       participant.uplink.on_arrival(seq, now);
     }
     let was_uplink_hurt = participant.uplink_voice.is_hurt(now);
-    if is_audio {
+    // A voice's thin copy (#1893) counts for neither its upload's check nor the speakers: the
+    // sender's own layer does.
+    let voice_layer = if is_audio { header.layer.value() } else { 0 };
+    let audio_layers = self.config.audio_layers;
+    if is_audio && voice_layer == THIN_VOICE_LAYER {
+      participant.maybe_thin_voice_at = Some(now);
+    } else if is_audio {
       participant
         .uplink_voice
         .on_arrival(rtp_header.sequence_number.0, now);
+      // A voice back after a pause (a new turn) starts both copies at once, its thin one a packet
+      // or two later: a thin receiver waits for that rather than taking the full voice it can't
+      // carry.
+      let is_resumed = participant
+        .maybe_voice_at
+        .is_none_or(|at| now.saturating_duration_since(at) >= audio_layers.thin_stale_after);
+      if is_resumed {
+        participant.maybe_voice_resumed_at = Some(now);
+      }
+      participant.maybe_voice_at = Some(now);
     }
+    let is_thin_flowing = participant
+      .maybe_thin_voice_at
+      .is_some_and(|at| now.saturating_duration_since(at) < audio_layers.thin_stale_after);
+    let is_thin_expected = participant
+      .maybe_thin_voice_at
+      .is_some_and(|at| now.saturating_duration_since(at) < audio_layers.thin_known_for)
+      && participant
+        .maybe_voice_resumed_at
+        .is_some_and(|at| now.saturating_duration_since(at) < audio_layers.thin_resume_grace);
+    let has_thin_voice = is_thin_flowing || is_thin_expected;
     let has_uplink_become_hurt = !was_uplink_hurt && participant.uplink_voice.is_hurt(now);
 
     let mut route = Route::default();
@@ -851,9 +954,11 @@ impl Forwarder {
     let receivers = if is_screen_audio {
       self.others(sender)
     } else if is_audio {
-      let level = rtp_header.audio_level().unwrap_or(AudioLevel::SILENCE);
-      if let Some(speakers) = self.speakers.record(sender, level, now) {
-        route.effects.push(Effect::ActiveSpeakers(speakers));
+      if voice_layer != THIN_VOICE_LAYER {
+        let level = rtp_header.audio_level().unwrap_or(AudioLevel::SILENCE);
+        if let Some(speakers) = self.speakers.record(sender, level, now) {
+          route.effects.push(Effect::ActiveSpeakers(speakers));
+        }
       }
       if self.speakers.is_selected(sender) {
         self.others(sender)
@@ -870,13 +975,26 @@ impl Forwarder {
     let is_voice = is_audio || is_screen_audio;
     for receiver in receivers {
       if let Some(target) = self.participants.get_mut(&receiver) {
+        let maybe_voice_sequence = if is_audio {
+          let wanted = target.wanted_voice_layer(&audio_layers, has_thin_voice, now);
+          if wanted != voice_layer {
+            continue;
+          }
+          let sequence = target.voice_sequences.entry(sender).or_default();
+          Some(sequence.map(voice_layer, rtp_header.sequence_number.0))
+        } else {
+          None
+        };
         let seq = target.downlink.on_send(datagram.len() + 2, now);
         if is_voice {
           target.voice.on_send(seq, now);
+          target.maybe_voice_sent_at = Some(now);
         }
-        route
-          .deliveries
-          .push((receiver, DatagramHeader::restamp(datagram, seq)?));
+        let mut delivery = DatagramHeader::restamp(datagram, seq)?;
+        if let Some(sequence_number) = maybe_voice_sequence {
+          renumber_rtp(&mut delivery, sequence_number)?;
+        }
+        route.deliveries.push((receiver, delivery));
       }
     }
     Ok(route)
@@ -984,6 +1102,11 @@ impl Forwarder {
   /// get their resume probe even when no feedback arrives.
   pub fn on_timer(&mut self, receiver: DeviceId, now: Instant) -> Vec<Effect> {
     let mut effects: Vec<Effect> = self.run_join_probe(receiver, now).into_iter().collect();
+    if let Some(participant) = self.participants.get_mut(&receiver) {
+      participant.update_voice_layer(&self.config.audio_layers, now);
+      participant.follow_thin_recovery(&self.config.audio_layers, now);
+    }
+    effects.extend(self.follow_thin_voice());
     effects.extend(self.reallocate(receiver, now));
     effects.extend(self.probe_downlink(receiver, now));
     let streams: Vec<StreamId> = self
@@ -1081,6 +1204,7 @@ impl Forwarder {
   ) -> Effect {
     let estimate_bps = participant.downlink.apply_probe(measurement.capacity_bps);
     participant.probe.note_shown(estimate_bps, now);
+    participant.maybe_measured_downlink_bps = Some(measurement.after_burst_bps);
     Effect::DownlinkMeasured {
       receiver,
       measurement,
@@ -1090,10 +1214,12 @@ impl Forwarder {
   /// The next train of padding for the probe `receiver`'s allocation waits for, when one is due:
   /// a cluster starts when the allocation asks for one and the last is long enough ago.
   fn probe_downlink(&mut self, receiver: DeviceId, now: Instant) -> Option<Effect> {
-    let config = self.config.probe;
     let participant = self.participants.get_mut(&receiver)?;
+    let config = self.config.probe;
     participant.probe.on_timer(&config, now);
-    if participant.is_suspended {
+    // A thin downlink gets no padding at all, not even the rest of a cluster: its bursts queued in
+    // front of the voices (#1893 step 3). Its voices show when it recovered.
+    if participant.is_suspended || participant.is_thin_downlink {
       return None;
     }
     if !participant.probe.is_running() {
@@ -1315,7 +1441,10 @@ impl Forwarder {
     // 500 kbit/s stood still for 5 s). The video to a participant whose own voice arrives with gaps pauses at
     // once: the acknowledgements of what it receives share its collapsed upload (#1889).
     let mut is_yielding = false;
-    let allocation = if participant.uplink_voice.is_hurt(now) {
+    // A receiver that takes the thin voices has no room for video next to them: the link's budget
+    // went to probes and video bursts, and its voice paid for each (#1893 step 3).
+    let is_thin = participant.is_thin_downlink;
+    let allocation = if is_thin || participant.uplink_voice.is_hurt(now) {
       participant.allocator.pause_all(&demands, now)
     } else if participant.voice.is_hurt(now) {
       let yielded_at = *participant.maybe_video_yielded_at.get_or_insert(now);
@@ -1335,11 +1464,11 @@ impl Forwarder {
         .allocator
         .allocate_with_proof(&layers_config, estimate, proof, &demands, now)
     };
-    participant.maybe_probe_request = allocation.maybe_probe;
+    participant.maybe_probe_request = if is_thin { None } else { allocation.maybe_probe };
     let allocation = allocation.layers;
     // The receiver says why its pictures stopped or went coarse (#1891): only while it gets video.
-    let is_yielded =
-      !demands.is_empty() && (participant.uplink_voice.is_hurt(now) || participant.voice.is_hurt(now));
+    let is_yielded = !demands.is_empty()
+      && (is_thin || participant.uplink_voice.is_hurt(now) || participant.voice.is_hurt(now));
     let maybe_yield_change = (is_yielded != participant.is_video_yielded_for_voice).then(|| {
       participant.is_video_yielded_for_voice = is_yielded;
       Effect::VideoYieldedForVoice { receiver, is_yielded }
@@ -1516,6 +1645,102 @@ impl ParticipantRoute {
       .maybe_link_capacity_bps
       .unwrap_or_else(|| self.downlink.estimate_bps())
   }
+
+  /// It takes the thin voices because its downlink is thin: the probe at its join said so, or the
+  /// estimate stayed below the bound for [`THIN_DOWNLINK_SUSTAINED`]. Not because a voice to it
+  /// was lost a moment on a fast link: #1871 handles that, video yields to the lowest layers first
+  /// and comes back within seconds. Then it gets no video and no padding (#1893 step 3).
+  fn is_on_thin_downlink(&self, audio_layers: &AudioLayerConfig, now: Instant) -> bool {
+    let is_measured_thin = self
+      .maybe_measured_downlink_bps
+      .is_some_and(|bps| bps < audio_layers.thin_below_bps);
+    let is_estimate_thin = self
+      .maybe_estimate_thin_since
+      .is_some_and(|since| now.saturating_duration_since(since) >= THIN_DOWNLINK_SUSTAINED);
+    self.voice_layer.is_thin() && (is_measured_thin || is_estimate_thin)
+  }
+
+  /// Follows its voices while its downlink is thin, without padding (#1893 step 3): clean thin
+  /// voices for a hold bring the full voices back, clean full voices for another the video and the
+  /// usual probing. Entered whenever its downlink became thin.
+  fn follow_thin_recovery(&mut self, config: &AudioLayerConfig, now: Instant) {
+    let is_thin = self.is_on_thin_downlink(config, now);
+    if is_thin && !self.is_thin_downlink {
+      self.thin_recovery.enter(config, now);
+    }
+    self.is_thin_downlink = is_thin;
+    if !is_thin {
+      return;
+    }
+    let is_voice_flowing = self
+      .maybe_voice_sent_at
+      .is_some_and(|at| now.saturating_duration_since(at) < VOICE_FLOWING_WITHIN);
+    let stage = self
+      .thin_recovery
+      .update(config, is_voice_flowing, self.voice.is_hurt(now), now);
+    if stage == RecoveryStage::Recovered {
+      info!("a thin downlink carried the full voices: video and probing come back");
+      self.voice_layer.set_full();
+      self.maybe_measured_downlink_bps = None;
+      self.maybe_estimate_thin_since = None;
+      self.is_thin_downlink = false;
+      // At the thin bound, not below it: the usual probing finds out how much more it carries.
+      self.downlink.raise_to(config.thin_below_bps);
+    }
+  }
+
+  /// Follows its downlink: whether it takes the thin voices (#1893 step 3).
+  fn update_voice_layer(&mut self, config: &AudioLayerConfig, now: Instant) -> bool {
+    if self.is_thin_downlink {
+      // Its estimate grows on the voices alone, which show nothing beyond them: only its
+      // recovery by the voices leads off a thin downlink ([`Self::follow_thin_recovery`]).
+      let is_voice_hurt = self.voice.is_hurt(now);
+      return self.voice_layer.update(config, 0, is_voice_hurt, now);
+    }
+    let estimate_bps = self.downlink_bps();
+    if estimate_bps < config.thin_below_bps {
+      self.maybe_estimate_thin_since.get_or_insert(now);
+    } else {
+      self.maybe_estimate_thin_since = None;
+    }
+    let is_voice_hurt = self.voice.is_hurt(now);
+    let is_thin = self.voice_layer.update(config, estimate_bps, is_voice_hurt, now);
+    if !is_thin {
+      // Back on the full voices: what the join's probe showed is past.
+      self.maybe_measured_downlink_bps = None;
+    }
+    is_thin
+  }
+
+  /// The layer of a sender's voice it gets now (#1893): the thin copy while its downlink is thin
+  /// or its voice is lost, if it plays long packets and the sender sends that copy.
+  fn wanted_voice_layer(&mut self, config: &AudioLayerConfig, has_thin_voice: bool, now: Instant) -> u8 {
+    let is_thin = self.update_voice_layer(config, now);
+    let is_trying_full_voices =
+      self.is_thin_downlink && self.thin_recovery.stage() == RecoveryStage::FullVoices;
+    if is_thin && !is_trying_full_voices && has_thin_voice && self.capabilities.has_long_audio_frames() {
+      THIN_VOICE_LAYER
+    } else {
+      0
+    }
+  }
+}
+
+/// Writes `sequence_number` into the RTP header of a datagram (#1893): DAVE covers only the
+/// payload, the header is the SFU's to rewrite.
+fn renumber_rtp(datagram: &mut [u8], sequence_number: u16) -> Result<(), ForwardError> {
+  let header = DatagramHeader::parse(datagram)?;
+  let at = header.encoded_len() + RTP_SEQUENCE_OFFSET;
+  let actual_bytes = datagram.len();
+  let Some(field) = datagram.get_mut(at..at + 2) else {
+    // The header was parsed before: this can't be short, but the datagram is no reason to panic.
+    return Err(ForwardError::Rtp(RtpError::Truncated {
+      needed_bytes: at + 2,
+      actual_bytes,
+    }));
+  };
+  field.copy_from_slice(&sequence_number.to_be_bytes());
+  Ok(())
 }
 
 impl VideoTrackRoute {
@@ -2900,6 +3125,460 @@ mod tests {
           _ => None,
         })
         .collect()
+    }
+  }
+
+  /// #1893 step 3: a receiver on a thin downlink gets the others' thin voices, numbered on.
+  mod voice_layers {
+    use teamcraft_proto::AudioFeature;
+
+    use super::*;
+    use crate::audio_layers::THIN_VOICE_LAYER;
+
+    #[test]
+    fn each_receiver_gets_the_voice_its_downlink_carries() {
+      let (mut forwarder, now) = three_listeners();
+      let mut fast = Vec::new();
+      let mut thin = Vec::new();
+      for index in 0..9u16 {
+        let at = now + Duration::from_millis(20) * u32::from(index);
+        let mut sent = vec![voice(0, 100 + index)];
+        if index % 3 == 0 {
+          sent.push(voice(THIN_VOICE_LAYER, 50 + index / 3));
+        }
+        for datagram in sent {
+          for (receiver, delivered) in forwarder.route(device(1), &datagram, at).unwrap().deliveries {
+            let packet = received(&delivered);
+            if receiver == device(2) {
+              fast.push(packet);
+            } else if receiver == device(3) {
+              thin.push(packet);
+            }
+          }
+        }
+      }
+      assert!(fast.iter().all(|(layer, _)| *layer == 0), "{fast:?}");
+      assert_eq!(fast.len(), 9);
+      // Its voice as it is until the first thin copy came, then the thin one, numbered on.
+      assert_eq!(
+        thin,
+        vec![
+          (0, 100),
+          (THIN_VOICE_LAYER, 101),
+          (THIN_VOICE_LAYER, 102),
+          (THIN_VOICE_LAYER, 103)
+        ]
+      );
+    }
+
+    /// While the sender sends no thin copy, a thin receiver gets its voice as it is; when the copy
+    /// starts, the numbers go on from the last one the receiver got.
+    #[test]
+    fn a_thin_receiver_gets_the_voice_as_it_is_until_the_thin_copy_comes() {
+      let (mut forwarder, now) = three_listeners();
+      let mut thin = Vec::new();
+      let mut at = now;
+      for index in 0..3u16 {
+        at = now + Duration::from_millis(20) * u32::from(index);
+        thin.extend(to(&mut forwarder, 3, &voice(0, 700 + index), at));
+      }
+      at += Duration::from_millis(20);
+      thin.extend(to(&mut forwarder, 3, &voice(THIN_VOICE_LAYER, 5), at));
+      thin.extend(to(&mut forwarder, 3, &voice(0, 703), at));
+      thin.extend(to(
+        &mut forwarder,
+        3,
+        &voice(THIN_VOICE_LAYER, 6),
+        at + Duration::from_millis(60),
+      ));
+      assert_eq!(
+        thin,
+        vec![
+          (0, 700),
+          (0, 701),
+          (0, 702),
+          (THIN_VOICE_LAYER, 703),
+          (THIN_VOICE_LAYER, 704)
+        ]
+      );
+
+      // The copy stops while the voice goes on: back to the voice as it is, numbered on, once the
+      // copy counts as stopped.
+      let mut got = Vec::new();
+      for index in 1..=40u16 {
+        let later = at + Duration::from_millis(20) * u32::from(index);
+        got.extend(to(&mut forwarder, 3, &voice(0, 703 + index), later));
+      }
+      assert_eq!(got.first(), Some(&(0, 705)), "{got:?}");
+      assert_eq!(got.last(), Some(&(0, 705 + got.len() as u16 - 1)));
+    }
+
+    /// A new turn: the voice comes back with its full copy a packet or two before the thin one. A
+    /// thin receiver waits for the thin one instead of taking the full voice it can't carry.
+    #[test]
+    fn a_new_turn_reaches_a_thin_receiver_as_its_thin_copy() {
+      let (mut forwarder, now) = three_listeners();
+      to(&mut forwarder, 3, &voice(0, 100), now);
+      assert_eq!(
+        to(&mut forwarder, 3, &voice(THIN_VOICE_LAYER, 10), now),
+        vec![(THIN_VOICE_LAYER, 101)]
+      );
+      // A pause of two seconds, then the next turn.
+      let turn = now + Duration::from_secs(2);
+      assert!(
+        to(&mut forwarder, 3, &voice(0, 101), turn).is_empty(),
+        "the thin copy is coming"
+      );
+      assert!(
+        to(
+          &mut forwarder,
+          3,
+          &voice(0, 102),
+          turn + Duration::from_millis(20)
+        )
+        .is_empty()
+      );
+      assert_eq!(
+        to(
+          &mut forwarder,
+          3,
+          &voice(THIN_VOICE_LAYER, 11),
+          turn + Duration::from_millis(60)
+        ),
+        vec![(THIN_VOICE_LAYER, 102)]
+      );
+      // A sender that stopped its thin copy: after the grace, the voice as it is.
+      let later = turn + Duration::from_secs(40);
+      to(&mut forwarder, 3, &voice(0, 200), later);
+      assert_eq!(
+        to(
+          &mut forwarder,
+          3,
+          &voice(0, 201),
+          later + Duration::from_millis(400)
+        ),
+        vec![(0, 104)]
+      );
+    }
+
+    /// The thin copy counts for neither the speakers nor the sender's upload check: a lone copy
+    /// doesn't make anybody a speaker.
+    #[test]
+    fn a_thin_copy_makes_nobody_a_speaker() {
+      let (mut forwarder, now) = three_listeners();
+      let route = forwarder
+        .route(device(1), &voice(THIN_VOICE_LAYER, 1), now)
+        .unwrap();
+      assert!(
+        !route
+          .effects
+          .iter()
+          .any(|effect| matches!(effect, Effect::ActiveSpeakers(_)))
+      );
+    }
+
+    /// Senders hear that a receiver takes thin copies as soon as one does, and that none does
+    /// once it left.
+    #[test]
+    fn senders_hear_when_a_receiver_takes_thin_voices() {
+      let (mut forwarder, now) = three_listeners();
+      let wanted = |effects: &[Effect]| {
+        effects.iter().find_map(|effect| match effect {
+          Effect::ThinVoiceWanted(is_wanted) => Some(*is_wanted),
+          _ => None,
+        })
+      };
+      assert_eq!(
+        wanted(&forwarder.on_timer(device(2), now)),
+        None,
+        "a fast receiver"
+      );
+      assert_eq!(wanted(&forwarder.on_timer(device(3), now)), Some(true));
+      assert_eq!(wanted(&forwarder.on_timer(device(3), now)), None, "said once");
+      assert!(forwarder.is_thin_voice_wanted());
+      let removal = forwarder.remove_participant(device(3), now);
+      assert_eq!(wanted(&removal.effects), Some(false));
+    }
+
+    /// A receiver on thin voices gets no video, and hears why: the others' video yields for its
+    /// voice.
+    #[test]
+    fn a_thin_receiver_gets_no_video_and_hears_why() {
+      let (mut forwarder, now) = video_room();
+      forwarder.subscribe(device(2), VIDEO, Some(2), now).unwrap();
+      forwarder
+        .participants
+        .get_mut(&device(2))
+        .unwrap()
+        .maybe_link_capacity_bps = Some(64_000);
+      forwarder
+        .participants
+        .get_mut(&device(2))
+        .unwrap()
+        .maybe_measured_downlink_bps = Some(64_000);
+      let effects = forwarder.on_timer(device(2), now);
+      assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::VideoYieldedForVoice { receiver, is_yielded: true } if *receiver == device(2)
+      )));
+      for layer in 0..3 {
+        assert!(
+          !send_frame(&mut forwarder, layer, true, now).contains(&device(2)),
+          "layer {layer}"
+        );
+      }
+    }
+
+    /// A receiver on a thin downlink gets no padding: not next to a voice, not in a pause, not
+    /// while it speaks itself, not after a long silence.
+    #[test]
+    fn a_thin_receiver_gets_no_padding() {
+      let (mut forwarder, now) = thin_video_receiver();
+      let mut at = now;
+      for step in 0..600u16 {
+        at += Duration::from_millis(100);
+        // Device 1 speaks the first 10 s, device 2 itself the next 10 s, then silence.
+        if step < 100 {
+          forwarder.route(device(1), &voice(0, step), at).unwrap();
+        } else if step < 200 {
+          forwarder.route(device(2), &audio(2, 20), at).unwrap();
+        }
+        assert!(
+          padding_to(&forwarder.on_timer(device(2), at), 2).is_empty(),
+          "padding after {:?}",
+          at.saturating_duration_since(now)
+        );
+      }
+    }
+
+    /// A thin receiver whose link turned fast gets the full voices back within a hold of clean
+    /// voices, and its video within another: under 30 s, without a single padding packet.
+    #[test]
+    fn a_thin_receiver_whose_link_turned_fast_recovers() {
+      let (mut forwarder, now) = thin_video_receiver();
+      let outcome = talk_to(&mut forwarder, now, Duration::from_secs(60), |_, _| true);
+      let config = AudioLayerConfig::default();
+      let full_voices_after = outcome
+        .maybe_full_voices_at
+        .expect("never the full voices")
+        .saturating_duration_since(now);
+      assert!(
+        full_voices_after <= config.recovery_hold + Duration::from_secs(1),
+        "full voices after {full_voices_after:?}"
+      );
+      let video_after = outcome
+        .maybe_video_at
+        .expect("never back to video")
+        .saturating_duration_since(now);
+      assert!(
+        video_after <= Duration::from_secs(30),
+        "video after {video_after:?}"
+      );
+      assert!(!forwarder.participants[&device(2)].voice_layer.is_thin());
+      assert_eq!(outcome.padding_before_video, 0);
+    }
+
+    /// A thin receiver whose link stays thin (a quarter of its voice lost) stays on the thin
+    /// voices without video, and gets no padding.
+    #[test]
+    fn a_thin_receiver_whose_link_stays_thin_stays() {
+      let (mut forwarder, now) = thin_video_receiver();
+      let outcome = talk_to(&mut forwarder, now, Duration::from_secs(120), |seq, _| {
+        seq % 4 != 0
+      });
+      assert_eq!(outcome.maybe_full_voices_at, None);
+      assert_eq!(outcome.maybe_video_at, None);
+      assert_eq!(outcome.padding_before_video, 0);
+      assert!(forwarder.participants[&device(2)].is_thin_downlink);
+    }
+
+    /// Full voices that a thin link can't carry (a quarter of them lost, the thin ones arrive) go
+    /// back to the thin ones, and the next trial waits twice the hold. No video, no padding.
+    #[test]
+    fn full_voices_a_thin_link_loses_go_back_to_thin() {
+      let (mut forwarder, now) = thin_video_receiver();
+      let config = AudioLayerConfig::default();
+      let outcome = talk_to(&mut forwarder, now, Duration::from_secs(60), |seq, stage| {
+        stage != RecoveryStage::FullVoices || seq % 4 != 0
+      });
+      assert_eq!(outcome.maybe_video_at, None);
+      assert_eq!(outcome.padding_before_video, 0);
+      let [first, second, ..] = outcome.trials_at[..] else {
+        panic!("trials at {:?}", outcome.trials_at);
+      };
+      assert!(first.saturating_duration_since(now) <= config.recovery_hold + Duration::from_secs(1));
+      assert!(second.saturating_duration_since(first) >= 2 * config.recovery_hold);
+    }
+
+    fn padding_to(effects: &[Effect], receiver: u64) -> Vec<Vec<u8>> {
+      effects
+        .iter()
+        .filter_map(|effect| match effect {
+          Effect::Padding {
+            receiver: to,
+            datagrams,
+          } if *to == device(receiver) => Some(datagrams.clone()),
+          _ => None,
+        })
+        .flatten()
+        .collect()
+    }
+
+    /// Device 1 speaks; device 2 has a fast downlink, device 3 a thin one. All play long packets.
+    fn three_listeners() -> (Forwarder, Instant) {
+      let now = Instant::now();
+      let mut forwarder = Forwarder::new(ForwardingConfig::default());
+      let capabilities = MediaCapabilities {
+        audio_features: vec![AudioFeature::LongFrames],
+        ..MediaCapabilities::default()
+      };
+      for n in 1..=3 {
+        forwarder.add_participant(device(n), stream(n), capabilities.clone(), now);
+      }
+      let fast = forwarder.participants.get_mut(&device(2)).unwrap();
+      fast.downlink.apply_probe(10_000_000);
+      fast.maybe_link_capacity_bps = Some(10_000_000);
+      forwarder
+        .participants
+        .get_mut(&device(3))
+        .unwrap()
+        .maybe_link_capacity_bps = Some(64_000);
+      forwarder
+        .participants
+        .get_mut(&device(3))
+        .unwrap()
+        .maybe_measured_downlink_bps = Some(64_000);
+      (forwarder, now)
+    }
+
+    /// Device 1 publishes a camera; device 2 watches it on a downlink its join measured thin.
+    fn thin_video_receiver() -> (Forwarder, Instant) {
+      let (mut forwarder, now) = video_room();
+      forwarder.subscribe(device(2), VIDEO, Some(2), now).unwrap();
+      let receiver = forwarder.participants.get_mut(&device(2)).unwrap();
+      receiver.downlink.apply_probe(64_000);
+      receiver.maybe_measured_downlink_bps = Some(64_000);
+      // The probe at the join is another matter (#1762).
+      receiver.maybe_join_probe = None;
+      forwarder.on_timer(device(2), now);
+      assert!(forwarder.participants[&device(2)].is_thin_downlink);
+      (forwarder, now)
+    }
+
+    /// What became of a thin receiver while device 1 spoke to it for `talk`.
+    struct Recovery {
+      maybe_full_voices_at: Option<Instant>,
+      maybe_video_at: Option<Instant>,
+      padding_before_video: usize,
+      /// When it started each trial of the full voices.
+      trials_at: Vec<Instant>,
+    }
+
+    /// Device 1 speaks to device 2 in 20 ms packets for `talk`; device 2 reports every 100 ms which
+    /// of the datagrams it got arrived (`arrives` by transport sequence number and the stage of its
+    /// recovery when it was sent), at once.
+    fn talk_to(
+      forwarder: &mut Forwarder,
+      now: Instant,
+      talk: Duration,
+      arrives: impl Fn(u16, RecoveryStage) -> bool,
+    ) -> Recovery {
+      let epoch = forwarder.participants[&device(2)].feedback_epoch;
+      let mut outcome = Recovery {
+        maybe_full_voices_at: None,
+        maybe_video_at: None,
+        padding_before_video: 0,
+        trials_at: Vec::new(),
+      };
+      let (mut sent, mut next_to_report) = (0u16, 0u16);
+      let mut stage_of: HashMap<u16, RecoveryStage> = HashMap::new();
+      let mut last_stage = RecoveryStage::Thin;
+      let steps = u32::try_from(talk.as_millis() / 20).unwrap();
+      for step in 1..=steps {
+        let at = now + Duration::from_millis(20) * step;
+        let packet = u16::try_from(step % 60_000).unwrap();
+        let route = forwarder.route(device(1), &voice(0, packet), at).unwrap();
+        let stage = forwarder.participants[&device(2)].thin_recovery.stage();
+        for (_, delivered) in route.deliveries.iter().filter(|(to, _)| *to == device(2)) {
+          let seq = DatagramHeader::parse(delivered)
+            .unwrap()
+            .maybe_transport_seq
+            .unwrap();
+          assert_eq!(seq.0, sent, "numbered in order");
+          stage_of.insert(sent, stage);
+          sent = sent.wrapping_add(1);
+        }
+        if step % 5 != 0 {
+          continue;
+        }
+        let since_epoch = u64::try_from(at.saturating_duration_since(epoch).as_micros()).unwrap();
+        let feedback = TransportFeedback {
+          base_seq: next_to_report,
+          arrivals_us: (next_to_report..sent)
+            .map(|seq| {
+              let stage = stage_of.remove(&seq).unwrap_or(RecoveryStage::Thin);
+              arrives(seq, stage).then_some(since_epoch)
+            })
+            .collect(),
+        };
+        next_to_report = sent;
+        let mut effects = forwarder.on_transport_feedback(device(2), &feedback, at);
+        effects.extend(forwarder.on_timer(device(2), at));
+        let padding = u16::try_from(padding_to(&effects, 2).len()).unwrap();
+        sent = sent.wrapping_add(padding);
+        let receiver = &forwarder.participants[&device(2)];
+        let stage = receiver.thin_recovery.stage();
+        if stage == RecoveryStage::FullVoices && last_stage != stage {
+          outcome.trials_at.push(at);
+        }
+        last_stage = stage;
+        if (stage == RecoveryStage::FullVoices && receiver.is_thin_downlink) || !receiver.is_thin_downlink {
+          outcome.maybe_full_voices_at.get_or_insert(at);
+        }
+        if outcome.maybe_video_at.is_none() {
+          let is_unyielded = effects.iter().any(|effect| {
+            matches!(
+              effect,
+              Effect::VideoYieldedForVoice {
+                is_yielded: false,
+                ..
+              }
+            )
+          });
+          if is_unyielded {
+            // The usual probing comes back with the video, in the same tick.
+            outcome.maybe_video_at = Some(at);
+          } else {
+            outcome.padding_before_video += usize::from(padding);
+          }
+        }
+      }
+      outcome
+    }
+
+    fn voice(layer: u8, sequence_number: u16) -> Vec<u8> {
+      let mut rtp = header();
+      rtp.sequence_number = SequenceNumber(sequence_number);
+      rtp.set_audio_level(AudioLevel::new(20, true).unwrap());
+      stamped(rtp_datagram(1, layer, rtp), sequence_number)
+    }
+
+    /// What `receiver` got of `datagram`: layer and RTP sequence number.
+    fn to(forwarder: &mut Forwarder, receiver: u64, datagram: &[u8], at: Instant) -> Vec<(u8, u16)> {
+      forwarder
+        .route(device(1), datagram, at)
+        .unwrap()
+        .deliveries
+        .into_iter()
+        .filter(|(to, _)| *to == device(receiver))
+        .map(|(_, delivered)| received(&delivered))
+        .collect()
+    }
+
+    fn received(datagram: &[u8]) -> (u8, u16) {
+      let header = DatagramHeader::parse(datagram).unwrap();
+      let (rtp, _) = RtpHeader::parse(&datagram[header.encoded_len()..]).unwrap();
+      (header.layer.value(), rtp.sequence_number.0)
     }
   }
 

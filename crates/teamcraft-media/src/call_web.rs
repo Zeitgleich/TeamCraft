@@ -136,7 +136,7 @@ use crate::resample::MonoResampler;
 use crate::rtp::{AudioLevel, SequenceNumber};
 use crate::share_policy::{ShareCodecs, ShareEncoders};
 use crate::video::{EncodedVideoFrame, ScreenProfile, TOP_LAYER, VideoResolution, chosen_layer};
-use crate::voice_steps::{VoiceEncoding, VoiceFrame};
+use crate::voice_steps::{VoiceEncoding, VoiceFrame, VoiceStepConfig};
 use crate::web_api::{
   AudioData, AudioDecoder, AudioEncoder, EncodedAudioChunk, QUIC_GLOBAL, WORKLET_SOURCE, WebTransport,
   WebTransportBidirectionalStream, datagram_writable, dictionary, has_global, missing_for_calls,
@@ -164,6 +164,9 @@ const MAX_DECODED_SAMPLES: usize = 8 * FRAME_SAMPLES_PER_CHANNEL;
 /// output arrives a turn of the event loop after its input, so the frame that plays next has to
 /// be in it already. A 60 ms packet (#1893) covers this for three frames.
 const DECODE_AHEAD_SAMPLES: usize = 2 * FRAME_SAMPLES_PER_CHANNEL;
+/// A thin copy whose encoder failed starts again this much later (#1893 step 3): soon, but not
+/// once per microphone frame while the browser refuses it.
+const THIN_VOICE_RESTART_AFTER: Duration = Duration::from_secs(1);
 /// Opus bitrate for voice.
 const OPUS_BITRATE_BPS: u32 = 32_000;
 /// Opus bitrate of a shared screen's sound: music and video sound need more than speech (as on
@@ -409,9 +412,9 @@ enum Input {
     origin: AudioOrigin,
     samples: Vec<f32>,
   },
-  /// An Opus packet of the microphone or of a shared screen's sound.
+  /// An Opus packet of the microphone (or its thin copy, #1893) or of a shared screen's sound.
   Encoded {
-    origin: AudioOrigin,
+    profile: OpusProfile,
     opus: Vec<u8>,
   },
   /// The browser ended the shared screen's sound by itself.
@@ -641,6 +644,9 @@ enum CaptureMix {
 enum OpusProfile {
   /// The microphone: speech at a variable bitrate.
   Voice,
+  /// The microphone's thin copy for receivers on thin downlinks (#1893 step 3): speech at the
+  /// thinnest step.
+  ThinVoice,
   /// A shared screen's sound: music and video at a constant bitrate (packet sizes would tell what
   /// plays), like the desktop's.
   ScreenSound,
@@ -1186,6 +1192,9 @@ async fn run_call(
     events: &events,
     jitter: config.jitter,
     encoder: OpusEncoder::new(&inputs, OpusProfile::Voice)?,
+    maybe_thin_voice: None,
+    is_thin_voice_sent: false,
+    maybe_thin_voice_restart_at: None,
     maybe_screen_sound: None,
     remotes: BTreeMap::new(),
     meter,
@@ -1330,6 +1339,12 @@ struct CallState<'a> {
   /// Safari before 26.4 has no WebTransport: a call there stays on the fallback.
   has_webtransport: bool,
   encoder: OpusEncoder,
+  /// The microphone's thin copy, while the engine asks for it (#1893 step 3).
+  maybe_thin_voice: Option<OpusEncoder>,
+  /// The engine asks for the thin copy: one whose encoder failed starts again
+  /// [`THIN_VOICE_RESTART_AFTER`] later.
+  is_thin_voice_sent: bool,
+  maybe_thin_voice_restart_at: Option<Instant>,
   /// The running screen share's sound, while it is sent.
   maybe_screen_sound: Option<ScreenSound>,
   remotes: BTreeMap<RemoteStream, RemoteAudio>,
@@ -1487,6 +1502,7 @@ impl CallState<'_> {
         self.meter.push(&samples, Instant::now());
         if !self.is_muted {
           self.encoder.push(&samples)?;
+          self.push_thin_voice(&samples);
         }
       },
       // Not muted with the microphone, like the desktop's.
@@ -1503,7 +1519,7 @@ impl CallState<'_> {
         }
       },
       Input::Encoded {
-        origin: AudioOrigin::Microphone,
+        profile: OpusProfile::Voice,
         opus,
       } => {
         // One output per packet of 20 ms input frames; a stray extra output (encoder flush)
@@ -1513,7 +1529,17 @@ impl CallState<'_> {
         self.stats.frames_sent += 1;
       },
       Input::Encoded {
-        origin: AudioOrigin::Screen,
+        profile: OpusProfile::ThinVoice,
+        opus,
+      } => {
+        // A packet a stopped copy's encoder still put out goes nowhere.
+        if let Some(thin) = &mut self.maybe_thin_voice {
+          let level = thin.take_level(&opus);
+          engine.send_thin_audio(&EncodedAudioFrame { opus, level }, Instant::now());
+        }
+      },
+      Input::Encoded {
+        profile: OpusProfile::ScreenSound,
         opus,
       } => {
         // A packet a stopped sound's encoder still put out goes nowhere.
@@ -1997,6 +2023,7 @@ impl CallState<'_> {
               }
             },
             CallEngineEvent::VoiceEncoding(encoding) => self.encoder.set_voice_encoding(*encoding)?,
+            CallEngineEvent::ThinVoice(is_sent) => self.set_thin_voice(*is_sent),
             CallEngineEvent::UplinkEstimate { loss_percent, .. } => {
               self.encoder.set_measured_loss_percent(*loss_percent)?;
               if let Some(sound) = &mut self.maybe_screen_sound
@@ -2458,6 +2485,7 @@ impl CallState<'_> {
       self.tone_position += FRAME_SAMPLES_PER_CHANNEL as u64;
       if !self.is_muted {
         self.encoder.push(&samples)?;
+        self.push_thin_voice(&samples);
       }
     }
     let mut mix = vec![0.0f32; FRAME_SAMPLES_PER_CHANNEL];
@@ -2719,6 +2747,53 @@ impl CallState<'_> {
         },
         Err(error) => warn!(%error, "new video encoders didn't open; the track keeps its layers"),
       }
+    }
+  }
+
+  /// Starts or stops the microphone's thin copy (#1893 step 3). While it can't be encoded, its
+  /// receivers get the voice as it is, the full one their link can't carry: so a failed copy
+  /// starts again, and says so in the log.
+  fn set_thin_voice(&mut self, is_sent: bool) {
+    self.is_thin_voice_sent = is_sent;
+    self.maybe_thin_voice_restart_at = None;
+    if !is_sent {
+      self.maybe_thin_voice = None;
+      return;
+    }
+    if self.maybe_thin_voice.is_none() {
+      self.start_thin_voice(Instant::now());
+    }
+  }
+
+  /// Feeds the thin copy what the microphone's encoder got; one that failed starts again a moment
+  /// later.
+  fn push_thin_voice(&mut self, samples: &[f32]) {
+    if self.is_thin_voice_sent && self.maybe_thin_voice.is_none() {
+      let now = Instant::now();
+      if self.maybe_thin_voice_restart_at.is_none_or(|at| now >= at) {
+        self.start_thin_voice(now);
+      }
+    }
+    if let Some(thin) = &mut self.maybe_thin_voice
+      && let Err(error) = thin.push(samples)
+    {
+      warn!(%error, "the voice's thin copy failed; it starts again");
+      self.maybe_thin_voice = None;
+      self.maybe_thin_voice_restart_at = Some(Instant::now() + THIN_VOICE_RESTART_AFTER);
+    }
+  }
+
+  fn start_thin_voice(&mut self, now: Instant) {
+    let started = OpusEncoder::new(self.inputs, OpusProfile::ThinVoice).and_then(|mut encoder| {
+      encoder.set_voice_encoding(VoiceStepConfig::default().thinnest)?;
+      Ok(encoder)
+    });
+    match started {
+      Ok(encoder) => self.maybe_thin_voice = Some(encoder),
+      Err(error) => {
+        warn!(%error, "the voice's thin copy can't be encoded; it is tried again");
+        self.maybe_thin_voice_restart_at = Some(now + THIN_VOICE_RESTART_AFTER);
+      },
     }
   }
 
@@ -3585,14 +3660,13 @@ fn detach_port(node: &AudioWorkletNode) {
 
 impl OpusEncoder {
   fn new(inputs: &mpsc::UnboundedSender<Input>, profile: OpusProfile) -> Result<Self, WebCallError> {
-    let origin = profile.origin();
     let sender = inputs.clone();
     let output = Closure::<dyn FnMut(EncodedAudioChunk)>::new(move |chunk: EncodedAudioChunk| {
       let bytes = Uint8Array::new_with_length(chunk.byte_length());
       match chunk.copy_to(&bytes) {
         Ok(()) => {
           let _ = sender.unbounded_send(Input::Encoded {
-            origin,
+            profile,
             opus: bytes.to_vec(),
           });
         },
@@ -3709,17 +3783,10 @@ impl OpusEncoder {
 }
 
 impl OpusProfile {
-  /// Which of this device's streams the packets go out on.
-  fn origin(self) -> AudioOrigin {
-    match self {
-      Self::Voice => AudioOrigin::Microphone,
-      Self::ScreenSound => AudioOrigin::Screen,
-    }
-  }
-
   fn bitrate_bps(self) -> u32 {
     match self {
       Self::Voice => OPUS_BITRATE_BPS,
+      Self::ThinVoice => VoiceStepConfig::default().thinnest.bitrate_bps,
       Self::ScreenSound => SCREEN_SOUND_BITRATE_BPS,
     }
   }
@@ -3730,7 +3797,7 @@ impl OpusProfile {
   /// don't know a member ignore it.
   fn tuning(self) -> OpusTuning {
     match self {
-      Self::Voice => OpusTuning::default(),
+      Self::Voice | Self::ThinVoice => OpusTuning::default(),
       Self::ScreenSound => OpusTuning {
         config: &[("bitrateMode", TuningValue::Text("constant"))],
         opus: &[
@@ -4395,7 +4462,6 @@ mod tests {
     #[test]
     fn the_microphone_keeps_its_voice_configuration() {
       let voice = OpusProfile::Voice;
-      assert_eq!(voice.origin(), AudioOrigin::Microphone);
       assert_eq!(voice.bitrate_bps(), 32_000);
       assert_eq!(voice.tuning(), OpusTuning::default());
     }
@@ -4403,7 +4469,6 @@ mod tests {
     #[test]
     fn screen_sound_goes_out_tuned_for_music() {
       let sound = OpusProfile::ScreenSound;
-      assert_eq!(sound.origin(), AudioOrigin::Screen);
       assert_eq!(sound.bitrate_bps(), 64_000);
       let tuning = sound.tuning();
       // A constant bitrate: packet sizes would tell what plays.

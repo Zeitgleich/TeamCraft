@@ -188,6 +188,11 @@ impl VoiceSteps {
     }
   }
 
+  /// Whether every other participant plays packets longer than 20 ms.
+  pub fn has_long_frames(&self) -> bool {
+    self.has_long_frames
+  }
+
   pub fn step(&self) -> VoiceStep {
     self.step
   }
