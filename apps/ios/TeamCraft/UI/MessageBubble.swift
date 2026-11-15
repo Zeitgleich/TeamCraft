@@ -786,6 +786,17 @@ struct ImageGrid: View {
 }
 
 /// "Today", "Yesterday" or the date, as a small centred pill; pinned while its day scrolls by.
+/// The pill that confirms a copy (#2014).
+struct CopiedPill: View {
+  var body: some View {
+    Label("copied", systemImage: "checkmark")
+      .font(.app(.footnote).weight(.medium))
+      .padding(.horizontal, 12).padding(.vertical, 6)
+      .background(.regularMaterial, in: Capsule())
+      .accessibilityAddTraits(.updatesFrequently)
+  }
+}
+
 struct DayPill: View {
   let date: Date
 
