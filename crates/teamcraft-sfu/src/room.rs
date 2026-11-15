@@ -660,7 +660,7 @@ impl Room {
       // Only the first message of a connection that measures (#1959).
       CallClientMessage::Probe { .. } => Err(ErrorBody::new(ErrorCode::ProtocolViolation, "already joined")),
       // Only the first message of a connection moves a session (#1309).
-      CallClientMessage::Switch { .. } => Err(ErrorBody::new(
+      CallClientMessage::Switch { .. } | CallClientMessage::AttachAudio { .. } => Err(ErrorBody::new(
         ErrorCode::ProtocolViolation,
         "already in the call",
       )),

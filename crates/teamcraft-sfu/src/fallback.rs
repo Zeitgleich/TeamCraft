@@ -24,6 +24,12 @@
 //! Limits as on QUIC: the join timeout, the signaling message size and queue, and everything rooms
 //! enforce (they don't know which transport a participant uses).
 //!
+//! A session's audio may take a second connection of its own (#1979, [`crate::audio_socket`]): the
+//! SFU hands the secret for it right after the join, and a connection that starts with
+//! `attach_audio` and that secret carries the session's datagrams from then on, so its voice waits
+//! for no lost segment of its video. It holds a slot of the call's connections and ends with its
+//! session.
+//!
 //! A session here moves to QUIC once its client gets through there (#1309, [`crate::switch`]): the
 //! writer sends what was queued before the move, hands the queue on and closes with
 //! [`SFU_SWITCHED_CLOSE_CODE`]. What the client sent before it learned of the move may still be on
@@ -57,6 +63,7 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::{Bytes, Error as WebSocketError, Message, error::ProtocolError};
 use tracing::{Instrument, debug, info_span, warn};
 
+use crate::audio_socket::{AudioSocketSecret, AudioTarget};
 use crate::auth::{JoinGrant, JoinTokenVerifier};
 use crate::config::FallbackConfig;
 use crate::prejoin::PreJoinSlot;
@@ -89,6 +96,12 @@ const MAX_UNJOINED_PER_DEVICE: usize = 2;
 /// How long a connection whose session moved to QUIC is still read, for what its client sent before
 /// it learned of the move; the client closes it as soon as it read the close.
 const SWITCH_LINGER: Duration = Duration::from_secs(5);
+/// Datagrams of a session's audio connection that wait for its session's task: a second of a voice
+/// in 20 ms packets. More waiting is a session that stalled, and what comes then is dropped.
+const AUDIO_SOCKET_QUEUE: usize = 64;
+/// How often an audio connection looks whether it is still the one its session uses.
+const AUDIO_SOCKET_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+
 /// What the kernel may hold of a connection's data that it hasn't sent yet (`TCP_NOTSENT_LOWAT`):
 /// beyond it a write waits, and what waits can still be dropped in the queue (#1810). A few
 /// datagrams, so a write never waits for the next round trip.
@@ -331,6 +344,25 @@ async fn handle_connection(
     close_now(&mut sink, REFUSED, b"expected join").await;
     return None;
   };
+  if let CallClientMessage::AttachAudio { secret } = &first {
+    let joined_slot = match maybe_joined_slot {
+      Some(joined_slot) => joined_slot,
+      None => {
+        let Ok(joined_slot) = Arc::clone(joined_slots).try_acquire_owned() else {
+          debug!("too many joined connections on the fallback");
+          return None;
+        };
+        joined_slot
+      },
+    };
+    drop(maybe_address_slot);
+    drop(maybe_device_slot);
+    drop(unjoined_slot);
+    let maybe_upgrade_grant = maybe_upgrade_token.map(|(_, grant)| grant);
+    run_audio_connection(shared, secret.as_slice(), maybe_upgrade_grant, sink, source).await;
+    drop(joined_slot);
+    return None;
+  }
   if let Some((token, _)) = &maybe_upgrade_token
     && !is_join_with(&first, token)
   {
@@ -339,7 +371,7 @@ async fn handle_connection(
       ErrorCode::InvalidJoinToken,
       "the join token differs from the upgrade's",
     );
-    send_refusal(&mut sink, &CallServerMessage::Error { error }).await;
+    send_now(&mut sink, &CallServerMessage::Error { error }).await;
     close_now(&mut sink, REFUSED, b"refused").await;
     return None;
   }
@@ -364,7 +396,7 @@ async fn handle_connection(
   let admitted = match admit(shared, first, handle).await {
     Admission::Admitted(admitted) => admitted,
     Admission::Refused(refusal) => {
-      send_refusal(&mut sink, &refusal.message()).await;
+      send_now(&mut sink, &refusal.message()).await;
       close_now(&mut sink, REFUSED, b"refused").await;
       if let Err(error) = refusal.result {
         debug!(%error, "fallback session refused");
@@ -395,6 +427,25 @@ async fn handle_connection(
     &handover,
   );
   let session = ParticipantSession::new(Arc::clone(&room), grant, signal_tx, shared);
+  // The session's audio may come on a second connection (#1979); dropped with this connection, so a
+  // session that moved or ended takes none any more.
+  let (audio_tx, mut audio_rx) = mpsc::channel(AUDIO_SOCKET_QUEUE);
+  let maybe_audio_secret = AudioSocketSecret::random();
+  let maybe_audio_registration = maybe_audio_secret.as_ref().and_then(|secret| {
+    shared
+      .audio_sockets
+      .register(secret, AudioTarget::new(grant, audio_tx))
+  });
+  if let (Some(secret), Some(_)) = (&maybe_audio_secret, &maybe_audio_registration) {
+    // Before the writer takes the connection: the client may open the audio connection at once.
+    send_now(
+      &mut sink,
+      &CallServerMessage::AudioSocket {
+        secret: secret.to_wire(),
+      },
+    )
+    .await;
+  }
   let writer_config = WriterConfig {
     ping_interval: config.fallback.ping_interval,
     write_timeout: config.fallback.write_timeout,
@@ -406,7 +457,16 @@ async fn handle_connection(
     has_moved: Arc::clone(&has_moved),
   };
   let writer = tokio::spawn(run_writer(sink, frames, sender.clone(), writer_config));
-  let mut end = run_session(&session, &mut source, writer, &sender, config.idle_timeout).await;
+  let mut end = run_session(
+    &session,
+    &mut source,
+    &mut audio_rx,
+    writer,
+    &sender,
+    config.idle_timeout,
+  )
+  .await;
+  drop(maybe_audio_registration);
   // Its next connection measures its own, or (QUIC) needs no cap.
   session.set_link_capacity(None);
   if has_moved.load(Ordering::Acquire) {
@@ -431,6 +491,7 @@ async fn handle_connection(
 async fn run_session(
   session: &ParticipantSession,
   source: &mut Source,
+  audio: &mut mpsc::Receiver<Bytes>,
   mut writer: tokio::task::JoinHandle<WriterEnd>,
   sender: &FallbackSender,
   idle_timeout: Duration,
@@ -442,6 +503,7 @@ async fn run_session(
     },
     () = session.periodic() => SessionEnd::Closed,
     () = report_link_capacity(session, sender) => SessionEnd::Closed,
+    () = take_attached_audio(session, audio) => SessionEnd::Closed,
     written = &mut writer => match written {
       // The SFU closed it (a host control, a replaced connection).
       Ok(WriterEnd::Closed) => SessionEnd::Closed,
@@ -463,6 +525,80 @@ async fn run_session(
   writer.abort();
   debug!(?end, "fallback session closed");
   end
+}
+
+/// The datagrams the session's audio connection brings, as the session's own (#1979). Never ends: a
+/// session without an audio connection keeps waiting here.
+async fn take_attached_audio(session: &ParticipantSession, audio: &mut mpsc::Receiver<Bytes>) {
+  while let Some(datagram) = audio.recv().await {
+    session.on_datagram(&datagram);
+  }
+  std::future::pending::<()>().await;
+}
+
+/// A connection that carries a session's audio (#1979): `secret` must be one of a session that
+/// runs on its connection, and a token shown at the upgrade must be the same device's in the same
+/// call. From then on its datagrams go to that session, until the session ends, another audio
+/// connection takes its place, or the client closes it. Anything but datagrams ends it.
+async fn run_audio_connection(
+  shared: &Shared,
+  secret: &[u8],
+  maybe_upgrade_grant: Option<JoinGrant>,
+  mut sink: Sink,
+  mut source: Source,
+) {
+  let maybe_target = shared.audio_sockets.find(secret).filter(|target| {
+    maybe_upgrade_grant
+      .is_none_or(|grant| grant.call_id == target.grant.call_id && grant.device_id == target.grant.device_id)
+  });
+  let Some(target) = maybe_target else {
+    debug!("audio connection refused: no running session of this device has this secret");
+    let error = ErrorBody::new(
+      ErrorCode::InvalidJoinToken,
+      "no session for this audio connection",
+    );
+    send_now(&mut sink, &CallServerMessage::Error { error }).await;
+    close_now(&mut sink, REFUSED, b"refused").await;
+    return;
+  };
+  let number = target.attach();
+  debug!(call_id = %target.grant.call_id, participant_id = %target.grant.device_id, "audio connection attached");
+  forward_audio(&target, number, &mut source).await;
+  close_now(&mut sink, REFUSED, b"closing").await;
+}
+
+/// Hands the audio connection's datagrams to its session, for as long as it is the session's.
+async fn forward_audio(target: &AudioTarget, number: u64, source: &mut Source) {
+  loop {
+    if !target.is_current(number) || target.datagrams.is_closed() {
+      debug!("audio connection replaced, or its session ended");
+      return;
+    }
+    let maybe_item = match tokio::time::timeout(AUDIO_SOCKET_CHECK_INTERVAL, source.next()).await {
+      Ok(maybe_item) => maybe_item,
+      Err(_) => continue,
+    };
+    let message = match maybe_item {
+      Some(Ok(message)) => message,
+      None | Some(Err(_)) => return,
+    };
+    match message {
+      Message::Binary(bytes) => match FallbackFrame::decode(&bytes) {
+        Ok(FallbackFrame::Datagram(datagram)) => {
+          // A full queue is a session that stalled: this datagram is dropped, as it would be late.
+          if let Err(mpsc::error::TrySendError::Closed(_)) =
+            target.datagrams.try_send(Bytes::copy_from_slice(datagram))
+          {
+            return;
+          }
+        },
+        // Signaling, a close, or anything else has no place here.
+        _ => return,
+      },
+      Message::Ping(_) | Message::Pong(_) => {},
+      Message::Close(_) | Message::Text(_) | Message::Frame(_) => return,
+    }
+  }
 }
 
 /// The session moved to QUIC (#1309): what its client sent here before it learned of that still
@@ -635,8 +771,8 @@ async fn close_now(sink: &mut Sink, code: u32, reason: &[u8]) {
 }
 
 /// Best effort, like the refusal on QUIC's signaling stream.
-async fn send_refusal(sink: &mut Sink, error: &CallServerMessage) {
-  let Ok(body) = serde_json::to_vec(error) else {
+async fn send_now(sink: &mut Sink, message: &CallServerMessage) {
+  let Ok(body) = serde_json::to_vec(message) else {
     return;
   };
   let frame = FallbackFrame::Signal(&body).encode();

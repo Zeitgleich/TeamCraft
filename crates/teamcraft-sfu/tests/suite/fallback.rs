@@ -513,6 +513,138 @@ mod slots {
   }
 }
 
+/// A session's audio on a second connection of its own (#1979): its voice waits for no lost segment
+/// of its video.
+mod audio_socket {
+  use teamcraft_media::datagram::{TransportSeq, padding_datagram};
+  use teamcraft_proto::{Base64Bytes, CallEvent};
+
+  use super::*;
+
+  /// The secret comes right after the join; a second connection that names it carries datagrams the
+  /// session takes as its own: the SFU's transport feedback on the session's connection reports
+  /// them.
+  #[tokio::test]
+  async fn the_second_connection_carries_the_sessions_datagrams() {
+    let sfu = start_sfu(SfuConfig::default()).await;
+    let (mut session, _) = sfu.connect_with_token(&token(ALICE)).await.unwrap();
+    send_join(&mut session, &token(ALICE)).await;
+    let secret = wait_for_audio_secret(&mut session).await;
+    wait_for_joined(&mut session).await;
+
+    let (mut audio, _) = sfu.connect_with_token(&token(ALICE)).await.unwrap();
+    send_attach(&mut audio, secret).await;
+    for seq in 0..20u16 {
+      send_frame(
+        &mut audio,
+        FallbackFrame::Datagram(&padding_datagram(200, TransportSeq(seq))),
+      )
+      .await;
+    }
+    wait_for_signal(&mut session, |message| {
+      matches!(
+        message,
+        CallServerMessage::Event {
+          event: CallEvent::TransportFeedback { .. },
+          ..
+        }
+      )
+    })
+    .await;
+    assert_eq!(
+      sfu.control.fallback_connections(),
+      2,
+      "the audio connection holds a slot"
+    );
+  }
+
+  #[tokio::test]
+  async fn an_unknown_secret_is_refused() {
+    let sfu = start_sfu(SfuConfig::default()).await;
+    let (mut audio, _) = sfu.connect_with_token(&token(ALICE)).await.unwrap();
+    send_attach(&mut audio, Base64Bytes::new(vec![7; 32])).await;
+    let (error_code, close_code) = read_refusal(&mut audio).await;
+    assert_eq!(error_code, Some(ErrorCode::InvalidJoinToken));
+    assert_eq!(close_code, Some(0));
+  }
+
+  /// The secret alone isn't enough when the upgrade showed another device's token.
+  #[tokio::test]
+  async fn another_devices_token_cant_attach() {
+    let sfu = start_sfu(SfuConfig::default()).await;
+    let (mut session, _) = sfu.connect_with_token(&token(ALICE)).await.unwrap();
+    send_join(&mut session, &token(ALICE)).await;
+    let secret = wait_for_audio_secret(&mut session).await;
+
+    let (mut audio, _) = sfu.connect_with_token(&token(BOB)).await.unwrap();
+    send_attach(&mut audio, secret).await;
+    let (error_code, _) = read_refusal(&mut audio).await;
+    assert_eq!(error_code, Some(ErrorCode::InvalidJoinToken));
+  }
+
+  /// Signaling has no place on an audio connection: it ends it.
+  #[tokio::test]
+  async fn signaling_on_the_audio_connection_ends_it() {
+    let sfu = start_sfu(SfuConfig::default()).await;
+    let (mut session, _) = sfu.connect_with_token(&token(ALICE)).await.unwrap();
+    send_join(&mut session, &token(ALICE)).await;
+    let secret = wait_for_audio_secret(&mut session).await;
+
+    let (mut audio, _) = sfu.connect_with_token(&token(ALICE)).await.unwrap();
+    send_attach(&mut audio, secret).await;
+    let ping = serde_json::to_vec(&CallClientMessage::Ping { id: 1 }).unwrap();
+    send_frame(&mut audio, FallbackFrame::Signal(&ping)).await;
+    let (_, close_code) = read_refusal(&mut audio).await;
+    assert_eq!(close_code, Some(0));
+  }
+
+  /// The audio connection goes with its session, and a later one takes the place of an earlier one.
+  #[tokio::test]
+  async fn the_audio_connection_ends_with_its_session_or_a_later_one() {
+    let sfu = start_sfu(SfuConfig::default()).await;
+    let (mut session, _) = sfu.connect_with_token(&token(ALICE)).await.unwrap();
+    send_join(&mut session, &token(ALICE)).await;
+    let secret = wait_for_audio_secret(&mut session).await;
+
+    let (mut first, _) = sfu.connect_with_token(&token(ALICE)).await.unwrap();
+    send_attach(&mut first, secret.clone()).await;
+    let (mut second, _) = sfu.connect_with_token(&token(ALICE)).await.unwrap();
+    send_attach(&mut second, secret).await;
+    let (_, close_code) = read_refusal(&mut first).await;
+    assert_eq!(close_code, Some(0), "replaced");
+
+    let leave = FallbackFrame::Close {
+      code: 0,
+      reason: b"leave",
+    };
+    send_frame(&mut session, leave).await;
+    let (_, close_code) = read_refusal(&mut second).await;
+    assert_eq!(close_code, Some(0), "gone with its session");
+  }
+
+  async fn wait_for_audio_secret(socket: &mut Socket) -> Base64Bytes {
+    let reading = async {
+      loop {
+        let message = socket.next().await.expect("socket ended").expect("socket failed");
+        if let Message::Binary(bytes) = message
+          && let FallbackFrame::Signal(body) = FallbackFrame::decode(&bytes).unwrap()
+          && let CallServerMessage::AudioSocket { secret } = serde_json::from_slice(body).unwrap()
+        {
+          return secret;
+        }
+      }
+    };
+    tokio::time::timeout(Duration::from_secs(5), reading)
+      .await
+      .expect("no audio socket secret in time")
+  }
+
+  async fn send_attach(socket: &mut Socket, secret: Base64Bytes) {
+    let body = serde_json::to_vec(&CallClientMessage::AttachAudio { secret }).unwrap();
+    send_frame(socket, FallbackFrame::Signal(&body)).await;
+  }
+}
+
 /// Joins are paced per call and device (#1227), the same on both transports: a member who loops
 /// connect, join, drop can't make the call's DAVE group re-key with every cycle.
 mod join_pace {
