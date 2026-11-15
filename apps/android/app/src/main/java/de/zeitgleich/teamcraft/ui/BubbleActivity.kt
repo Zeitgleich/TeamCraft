@@ -2,6 +2,7 @@ package de.zeitgleich.teamcraft.ui
 
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager.LayoutParams.FLAG_SECURE
 import androidx.activity.compose.setContent
@@ -66,6 +67,9 @@ class BubbleActivity : FragmentActivity() {
     }
     if (prefs(this).isSecureScreen) window.addFlags(FLAG_SECURE)
     enableEdgeToEdge()
+    // The conversation's list runs on behind the navigation bar under the composer's scrim (#1966):
+    // no system scrim of its own over it with three-button navigation.
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) window.isNavigationBarContrastEnforced = false
     // No share of its own, and it must not drop one that waits for the main activity.
     viewModel.onActivityCreated(isFreshStartWithoutShare = false)
     setContent {

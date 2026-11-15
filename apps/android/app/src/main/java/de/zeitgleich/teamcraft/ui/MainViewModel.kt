@@ -1468,6 +1468,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   fun startCall(conversationId: String, displayName: String, options: CallOptions = CallOptions()) =
     graph.calls.startCall(conversationId, displayName, options)
 
+  /**
+   * Measures the link to the server's call service before a call (#1969): the call then starts on
+   * the voice step and video it carries. Once per network (the core keeps it and drops it on a
+   * change), only in the foreground; nothing waits for it and a failure shows nothing.
+   */
+  fun measureLink(meetingId: String? = null) {
+    viewModelScope.launch {
+      try {
+        graph.core.core().measureLink(meetingId)
+      } catch (failure: CancellationException) {
+        throw failure
+      } catch (failure: Exception) {
+        Log.d(TAG, "no measurement of the link before the call", failure)
+      }
+    }
+  }
+
   /** The signed-in user's ID; `null` before sign-in. */
   val maybeMyUserId: String? get() = (state.value as? AppState.Ready)?.userId
 
@@ -1476,6 +1493,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
    * that has no encryption group yet (meetings from before 1.0.3); the call starts either way.
    */
   fun joinMeeting(meeting: Meeting) {
+    measureLink(meeting.id)
     if (meeting.organizerUserId.isEmpty() || meeting.organizerUserId != maybeMyUserId) {
       startCall(meeting.conversationId, meeting.title)
       return

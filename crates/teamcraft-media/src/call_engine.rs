@@ -6731,6 +6731,7 @@ mod tests {
           loss_percent: 0,
         }),
         measured_at: start,
+        max_age: crate::link_probe::PRIOR_LINK_MAX_AGE,
       };
       let good = crate::link_probe::PriorUplink::Measured(LinkMeasurement {
         capacity_bps: 2_000_000,

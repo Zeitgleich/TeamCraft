@@ -102,6 +102,9 @@ pub struct ConnectionStatus(Arc<Mutex<ConnectionState>>);
 #[derive(Clone, Debug, Default)]
 pub struct NetworkChanges {
   subscribers: Arc<Mutex<Vec<mpsc::UnboundedSender<()>>>>,
+  /// How many changes were reported: what was measured of one network is dropped on the next
+  /// (#1969).
+  generation: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Keeps one gateway connection alive; see the module docs.
@@ -197,9 +200,16 @@ impl NetworkChanges {
 
   /// Reports a change to every subscriber.
   pub fn notify(&self) {
+    self.generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if let Ok(mut subscribers) = self.subscribers.lock() {
       subscribers.retain(|subscriber| subscriber.unbounded_send(()).is_ok());
     }
+  }
+
+  /// The network as of now: it changes with every reported change (a new network, a wake-up, a VPN
+  /// that came or went, wherever the platform reports one).
+  pub fn generation(&self) -> u64 {
+    self.generation.load(std::sync::atomic::Ordering::Relaxed)
   }
 
   /// One item per change from now on; dropping the receiver unsubscribes.
@@ -814,6 +824,16 @@ fn millis(duration: Duration) -> i64 {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// #1969: every reported change is a new network for what was measured of the old one.
+  #[test]
+  fn every_reported_change_is_a_new_generation() {
+    let network = NetworkChanges::new();
+    let before = network.generation();
+    network.notify();
+    network.clone().notify();
+    assert_eq!(network.generation(), before + 2, "clones share it");
+  }
 
   #[test]
   fn network_changes_reach_every_subscriber() {

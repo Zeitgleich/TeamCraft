@@ -2608,6 +2608,20 @@ so neither waits for the engine's groups nor for the disk; an action queued righ
 write waits for it (a few ms usually), and actions still wait for the engine's groups, which keeps
 their order and their read-your-write.
 
+The engine's groups those actions wait for are kept short instead (issue #1967). Android 1.0.33
+logged `long write group held_ms=2510` (and 1.0.32 an action waiting 5.3 s with 5 ms of CPU) right
+after a catch-up, with the group's `site` redacted: the debug log now keeps the field, as
+`teamcraft-core/src/…rs:line`. The one engine group whose size grew with the data was the local
+search index's save (`search_index.rs`, on the upkeep's tick): it wrote every new file of the index
+in one group, and after a burst of messages tantivy's merge makes a segment of megabytes. A save now
+writes new files in groups of at most `MAX_GROUP_BYTES` (two chunks, 1 MiB) before the small group
+that names them and drops the queue records, and deletes the files that went afterwards; the
+manifest notes both, so a crash leaves nothing the next step doesn't delete. Effect on the budgets
+(robustness.md, Performance): an action or engine step queued during a save waits for at most one
+such group (tens of milliseconds on a phone) instead of the whole save; the save itself takes about
+as long, with one commit per group. A channel switch and the idle budgets are unchanged (nothing on
+those paths); memory unchanged (the files were in memory before too).
+
 ### Signed-in start: the MLS state on demand, the kept chat list (issue #1758)
 
 Android 1.0.30 (POCO F3, 83 conversations) reported `mls_storage_load` 4.7 s on the engine thread

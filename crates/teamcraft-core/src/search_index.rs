@@ -11,7 +11,11 @@
 //!   group of writes ([`crate::store::TrackedStore`]); a conversation whose messages all go leaves
 //!   one for the conversation. [`SearchIndexer::step`] (from the upkeep's tick) takes a bounded
 //!   number of them, indexes what the store holds *now*, and saves the index's new files and drops
-//!   the records it handled in one group of writes. A record only says "look again": handling it is
+//!   the records it handled. The save never holds the store for the size of the index (issue
+//!   #1967): new files are written in groups of their own, at most [`MAX_GROUP_BYTES`] each, before
+//!   the small group that names them in the manifest and drops the records; the files that
+//!   went are deleted after it. The manifest notes both (`pending`, `retired`), so whatever a crash
+//!   leaves of them is deleted by the next step. A record only says "look again": handling it is
 //!   idempotent and the order doesn't matter, so a crash at any point loses nothing.
 //! - **Complete at search time.** A search ([`crate::search::SearchService::search`]) asks the
 //!   saved index for everything except what still waits in the queue, and reads what waits from the
@@ -57,6 +61,13 @@ const FILE_PREFIX: &str = "file/";
 /// The most of a file one record holds: big enough that a file is a few records, small enough that
 /// no record is a burden to seal or to read back.
 const CHUNK_BYTES: usize = 512 * 1024;
+/// The most of the index's files one group of writes holds while it saves (issue #1967): every
+/// action of the app and every engine step waits for a group. Two chunks: tens of milliseconds to
+/// seal and write on a phone, where a merged segment of many megabytes in one group held the store
+/// for seconds.
+const MAX_GROUP_BYTES: usize = 2 * CHUNK_BYTES;
+/// Chunks of files that went deleted in one group: deletions are cheap, but not free.
+const DELETES_PER_GROUP: usize = 256;
 /// Messages one [`SearchIndexer::step`] indexes by default (a conversation queued whole counts all
 /// of its messages, and is taken whole). About 50 ms of indexing on a laptop.
 pub const DEFAULT_STEP_MESSAGES: usize = 5_000;
@@ -91,6 +102,13 @@ struct Manifest {
   /// Counts the saves; a reader whose copy is of this generation has nothing to read.
   generation: u64,
   files: BTreeMap<String, FileRecord>,
+  /// New files a save is writing, before the manifest names them in `files`: deleted by the next
+  /// step if the save didn't finish (issue #1967).
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pending: BTreeMap<String, FileRecord>,
+  /// Files a save dropped from `files`, whose chunks are deleted after it.
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  retired: BTreeMap<String, FileRecord>,
 }
 
 /// One file of the index in the store.
@@ -121,9 +139,10 @@ pub(crate) struct LoadedIndex {
 
 /// Keeps the local index up to date; one per writing client ([`crate::Client::index_search_step`]).
 /// Holds the index in memory while there is work and lets it go once the queue is empty.
-#[derive(Default)]
 pub struct SearchIndexer {
   maybe_loaded: Option<LoadedIndex>,
+  /// [`MAX_GROUP_BYTES`]; smaller in tests.
+  max_group_bytes: usize,
 }
 
 /// What one [`SearchIndexer::step`] did.
@@ -147,6 +166,15 @@ impl SearchIndexer {
     Self::default()
   }
 
+  /// Saves with groups of at most `max_group_bytes` of the index's files (at least one chunk).
+  #[cfg(test)]
+  fn with_max_group_bytes(max_group_bytes: usize) -> Self {
+    Self {
+      maybe_loaded: None,
+      max_group_bytes,
+    }
+  }
+
   /// Indexes what waits in the queue, up to `budget` messages, and saves the index. Starts the
   /// index over when the store has none of this format.
   pub fn step(&mut self, store: &impl LocalStore, budget: usize) -> Result<IndexStep, CoreError> {
@@ -159,6 +187,16 @@ impl SearchIndexer {
         return Ok(IndexStep::default());
       },
       Err(error) => return Err(error),
+    };
+    let manifest = if manifest.has_leftovers() {
+      finish_leftovers(store, &manifest)?;
+      match read_manifest(store)? {
+        Some(manifest) if manifest.format == FORMAT => manifest,
+        // Changed meanwhile: the next step looks again.
+        _ => return Ok(IndexStep::default()),
+      }
+    } else {
+      manifest
     };
     let pending = read_pending(store)?;
     if pending.is_empty() {
@@ -268,9 +306,18 @@ impl SearchIndexer {
     writer.wait_merging_threads().map_err(search_error)?;
     before_save();
     let live = loaded.live_files()?;
-    let maybe_saved = write_group(store, || save(store, manifest, &loaded, &live, &batch))?;
+    let maybe_saved = save(store, manifest, &loaded, &live, &batch, self.max_group_bytes)?;
     self.maybe_loaded = maybe_saved.map(|saved| loaded.after_save(saved));
     Ok(batch.conversations.len() + batch.messages.len())
+  }
+}
+
+impl Default for SearchIndexer {
+  fn default() -> Self {
+    Self {
+      maybe_loaded: None,
+      max_group_bytes: MAX_GROUP_BYTES,
+    }
   }
 }
 
@@ -279,6 +326,13 @@ impl std::fmt::Debug for SearchIndexer {
     f.debug_struct("SearchIndexer")
       .field("is_loaded", &self.maybe_loaded.is_some())
       .finish()
+  }
+}
+
+impl Manifest {
+  /// Whether a save left files to delete ([`finish_leftovers`]).
+  fn has_leftovers(&self) -> bool {
+    !self.pending.is_empty() || !self.retired.is_empty()
   }
 }
 
@@ -673,7 +727,7 @@ fn start_over(store: &impl LocalStore) -> Result<(), CoreError> {
       &Manifest {
         format: FORMAT,
         generation: previous.generation + 1,
-        files: BTreeMap::new(),
+        ..Manifest::default()
       },
     )
   })?;
@@ -685,24 +739,88 @@ fn start_over(store: &impl LocalStore) -> Result<(), CoreError> {
 }
 
 /// Saves the committed index and drops the queue records `batch` handled, unless somebody wrote
-/// them again meanwhile. Returns what it saved; `None` (and saves nothing) if another writer saved
-/// first.
+/// them again meanwhile. Returns what it saved; `None` (and keeps nothing it wrote) if another
+/// writer saved first.
+///
+/// No group holds more than `max_group_bytes` of the index's files (issue #1967): the new files,
+/// under names no manifest lists yet, are noted as pending and written in groups of their own;
+/// one small group then names them, writes the files tantivy rewrites under their names
+/// (`meta.json`, a few hundred bytes) and drops the records; the files that went are deleted after.
 fn save(
   store: &impl LocalStore,
   read: &Manifest,
   loaded: &LoadedIndex,
   live: &BTreeSet<PathBuf>,
   batch: &Batch,
+  max_group_bytes: usize,
 ) -> Result<Option<Manifest>, CoreError> {
-  if read_manifest(store)?.as_ref() != Some(read) {
+  let generation = read.generation + 1;
+  let mut added = BTreeMap::new();
+  let mut added_data = Vec::new();
+  for path in live {
+    let name = path.to_string_lossy().into_owned();
+    if read.files.contains_key(&name) || is_rewritten(&name) {
+      continue;
+    }
+    let data = loaded.directory.read(path)?;
+    added.insert(name.clone(), file_record(&data, generation));
+    added_data.push((name, data));
+  }
+  let in_flight = Manifest {
+    pending: added.clone(),
+    ..read.clone()
+  };
+  let expected = if added.is_empty() {
+    read
+  } else {
+    if !write_group(store, || replace_manifest(store, read, &in_flight))? {
+      tracing::debug!("the local search index was saved by another writer; this step is dropped");
+      return Ok(None);
+    }
+    for (name, data) in &added_data {
+      write_chunks(store, name, data, max_group_bytes)?;
+    }
+    &in_flight
+  };
+  let maybe_saved = write_group(store, || {
+    name_files(store, expected, loaded, live, batch, &added, generation)
+  })?;
+  let Some(saved) = maybe_saved else {
     tracing::debug!("the local search index was saved by another writer; this step is dropped");
+    // What this save wrote is listed nowhere the next step looks.
+    delete_files(store, &added, &BTreeMap::new())?;
+    return Ok(None);
+  };
+  finish_leftovers(store, &saved)?;
+  Ok(Some(Manifest {
+    retired: BTreeMap::new(),
+    ..saved
+  }))
+}
+
+/// In one group: the manifest names the files of the committed index, the rewritten ones are
+/// written, and the queue records `batch` handled are dropped. `None`, and nothing written, if the
+/// store's manifest isn't `expected` any more.
+fn name_files(
+  store: &impl LocalStore,
+  expected: &Manifest,
+  loaded: &LoadedIndex,
+  live: &BTreeSet<PathBuf>,
+  batch: &Batch,
+  added: &BTreeMap<String, FileRecord>,
+  generation: u64,
+) -> Result<Option<Manifest>, CoreError> {
+  if read_manifest(store)?.as_ref() != Some(expected) {
     return Ok(None);
   }
-  let generation = read.generation + 1;
   let mut files = BTreeMap::new();
   for path in live {
     let name = path.to_string_lossy().into_owned();
-    match read.files.get(&name) {
+    if let Some(record) = added.get(&name) {
+      files.insert(name, *record);
+      continue;
+    }
+    match expected.files.get(&name) {
       Some(record) if !is_rewritten(&name) => {
         files.insert(name, *record);
       },
@@ -713,15 +831,19 @@ fn save(
       },
     }
   }
-  for (name, record) in &read.files {
+  let mut retired = expected.retired.clone();
+  for (name, record) in &expected.files {
     if !files.contains_key(name) {
-      delete_file(store, name, record)?;
+      retired.insert(name.clone(), *record);
     }
   }
+  retired.retain(|name, _| !files.contains_key(name));
   let saved = Manifest {
     format: FORMAT,
     generation,
     files,
+    pending: BTreeMap::new(),
+    retired,
   };
   write_manifest(store, &saved)?;
   for (conversation, nonce) in &batch.conversations {
@@ -735,6 +857,81 @@ fn save(
     )?;
   }
   Ok(Some(saved))
+}
+
+/// Deletes what a save left behind (`pending` of one that didn't finish, `retired` of one that
+/// did) in small groups, then clears both from the manifest unless it changed meanwhile.
+fn finish_leftovers(store: &impl LocalStore, manifest: &Manifest) -> Result<(), CoreError> {
+  if !manifest.has_leftovers() {
+    return Ok(());
+  }
+  delete_files(store, &manifest.pending, &manifest.files)?;
+  delete_files(store, &manifest.retired, &manifest.files)?;
+  let cleared = Manifest {
+    pending: BTreeMap::new(),
+    retired: BTreeMap::new(),
+    ..manifest.clone()
+  };
+  write_group(store, || replace_manifest(store, manifest, &cleared))?;
+  Ok(())
+}
+
+/// Writes `next` if the store's manifest is `expected`; whether it did.
+fn replace_manifest(
+  store: &impl LocalStore,
+  expected: &Manifest,
+  next: &Manifest,
+) -> Result<bool, CoreError> {
+  if read_manifest(store)?.as_ref() != Some(expected) {
+    return Ok(false);
+  }
+  write_manifest(store, next)?;
+  Ok(true)
+}
+
+/// Writes a new file's chunks, at most `max_group_bytes` (at least one chunk) per group.
+fn write_chunks(
+  store: &impl LocalStore,
+  name: &str,
+  data: &[u8],
+  max_group_bytes: usize,
+) -> Result<(), CoreError> {
+  let per_group = (max_group_bytes / CHUNK_BYTES).max(1);
+  let chunks: Vec<&[u8]> = data.chunks(CHUNK_BYTES).collect();
+  for (group_at, group) in chunks.chunks(per_group).enumerate() {
+    write_group(store, || -> Result<(), CoreError> {
+      for (offset, chunk) in group.iter().enumerate() {
+        let at = u32::try_from(group_at * per_group + offset)
+          .map_err(|_| CoreError::Corrupt(format!("search index file {name} too large")))?;
+        store.put(Table::SearchIndex, &chunk_key(name, at), chunk)?;
+      }
+      Ok(())
+    })?;
+  }
+  Ok(())
+}
+
+/// Deletes the chunks of `doomed`, [`DELETES_PER_GROUP`] per group; a file `kept` lists (written
+/// again under its name since) stays.
+fn delete_files(
+  store: &impl LocalStore,
+  doomed: &BTreeMap<String, FileRecord>,
+  kept: &BTreeMap<String, FileRecord>,
+) -> Result<(), CoreError> {
+  let keys: Vec<String> = doomed
+    .iter()
+    .filter(|(name, _)| !kept.contains_key(*name))
+    .flat_map(|(name, record)| (0..record.chunks).map(move |chunk| chunk_key(name, chunk)))
+    .collect();
+  for group in keys.chunks(DELETES_PER_GROUP) {
+    write_group(store, || -> Result<(), CoreError> {
+      for key in group {
+        store.delete(Table::SearchIndex, key)?;
+      }
+      Ok(())
+    })?;
+  }
+  Ok(())
 }
 
 /// Files tantivy writes again under the same name.
@@ -788,11 +985,7 @@ fn write_file(
   generation: u64,
   maybe_old: Option<FileRecord>,
 ) -> Result<FileRecord, CoreError> {
-  let record = FileRecord {
-    len: data.len() as u64,
-    chunks: chunk_count(data.len() as u64),
-    generation,
-  };
+  let record = file_record(data, generation);
   for (at, chunk) in data.chunks(CHUNK_BYTES).enumerate() {
     let at =
       u32::try_from(at).map_err(|_| CoreError::Corrupt(format!("search index file {name} too large")))?;
@@ -807,11 +1000,12 @@ fn write_file(
   Ok(record)
 }
 
-fn delete_file(store: &impl LocalStore, name: &str, record: &FileRecord) -> Result<(), CoreError> {
-  for chunk in 0..record.chunks {
-    store.delete(Table::SearchIndex, &chunk_key(name, chunk))?;
+fn file_record(data: &[u8], generation: u64) -> FileRecord {
+  FileRecord {
+    len: data.len() as u64,
+    chunks: chunk_count(data.len() as u64),
+    generation,
   }
-  Ok(())
 }
 
 fn chunk_key(name: &str, chunk: u32) -> String {
@@ -1088,6 +1282,112 @@ mod tests {
     let chunks: usize = manifest.files.values().map(|record| record.chunks as usize).sum();
     assert_eq!(records.len(), chunks + 1);
     assert!(records.iter().all(|(_, value)| value.len() <= CHUNK_BYTES));
+  }
+
+  mod short_groups {
+    use super::*;
+
+    /// Issue #1967: indexing a burst of messages never holds the store for the size of the index.
+    /// New files go in groups of their own (here one chunk each), and the group that names them
+    /// holds only the manifest and what tantivy rewrites under its name.
+    #[test]
+    fn a_save_holds_the_store_for_a_chunk_not_for_the_index() {
+      let store = store_with(4, 1_500);
+      let mut indexer = SearchIndexer::with_max_group_bytes(1);
+      store.inner().reset_group_log();
+      while !indexer.step(&store, 100_000).unwrap().is_done {}
+      let largest_group = store.inner().largest_group_bytes();
+
+      let manifest = read_manifest(&store).unwrap().unwrap();
+      let total: u64 = manifest.files.values().map(|record| record.len).sum();
+      let largest_chunk = manifest
+        .files
+        .values()
+        .map(|record| record.len.min(CHUNK_BYTES as u64))
+        .max()
+        .unwrap();
+      let rewritten: u64 = manifest
+        .files
+        .iter()
+        .filter(|(name, _)| is_rewritten(name))
+        .map(|(_, record)| record.len)
+        .sum();
+      let manifest_bytes = serde_json::to_vec(&manifest).unwrap().len() as u64;
+      let bound = largest_chunk.max(rewritten + manifest_bytes);
+      assert!(
+        largest_group as u64 <= bound,
+        "a group wrote {largest_group} bytes, more than {bound}"
+      );
+      assert!(
+        (largest_group as u64) < total,
+        "one group wrote the whole index ({total} bytes)"
+      );
+      // The saved index answers (a full comparison is in the tests above, on fewer messages).
+      assert!(!search(&mut SearchService::new(), &store, &["invoice"]).is_empty());
+    }
+
+    /// A save cut short (a crash) leaves new files the manifest doesn't name yet, or files that
+    /// went but weren't deleted: the next step deletes them, and searches never saw them.
+    #[test]
+    fn what_a_save_left_is_deleted_by_the_next_step() {
+      let store = store_with(2, 50);
+      let mut indexer = SearchIndexer::new();
+      while !indexer.step(&store, 1_000).unwrap().is_done {}
+      let before = search(&mut SearchService::new(), &store, &["budget"]);
+
+      let mut manifest = read_manifest(&store).unwrap().unwrap();
+      let cut = vec![7; CHUNK_BYTES + 10];
+      let gone = vec![8; 10];
+      write_chunks(&store, "cut.idx", &cut, MAX_GROUP_BYTES).unwrap();
+      write_chunks(&store, "gone.idx", &gone, MAX_GROUP_BYTES).unwrap();
+      manifest
+        .pending
+        .insert("cut.idx".into(), file_record(&cut, manifest.generation + 1));
+      manifest
+        .retired
+        .insert("gone.idx".into(), file_record(&gone, manifest.generation));
+      write_manifest(&store, &manifest).unwrap();
+      assert_eq!(search(&mut SearchService::new(), &store, &["budget"]), before);
+
+      store.upsert_message(&message(1, 900, "a late invoice")).unwrap();
+      while !indexer.step(&store, 1_000).unwrap().is_done {}
+      let saved = read_manifest(&store).unwrap().unwrap();
+      assert!(!saved.has_leftovers());
+      assert_holds_only_named_files(&store, &saved);
+      assert_eq!(search(&mut SearchService::new(), &store, &["late"]).len(), 1);
+    }
+
+    /// A save that finds the manifest changed (another writer saved first) keeps nothing it
+    /// wrote, and its records stay queued for the next step.
+    #[test]
+    fn a_save_after_another_writers_keeps_nothing() {
+      let store = store_with(1, 20);
+      let mut indexer = SearchIndexer::new();
+      while !indexer.step(&store, 1_000).unwrap().is_done {}
+      let stale = read_manifest(&store).unwrap().unwrap();
+      store.upsert_message(&message(1, 500, "first budget")).unwrap();
+      let pending = read_pending(&store).unwrap();
+      // Another writer saves meanwhile.
+      store.upsert_message(&message(1, 501, "second budget")).unwrap();
+      while !SearchIndexer::new().step(&store, 1_000).unwrap().is_done {}
+      let theirs = read_manifest(&store).unwrap().unwrap();
+
+      indexer.apply(&store, &stale, pending, 1_000, || {}).unwrap();
+      assert_eq!(read_manifest(&store).unwrap().unwrap(), theirs);
+      assert_holds_only_named_files(&store, &theirs);
+    }
+  }
+
+  /// The store holds the manifest and the chunks of the files it names, nothing else.
+  fn assert_holds_only_named_files(store: &Store, manifest: &Manifest) {
+    let records = store.list(Table::SearchIndex).unwrap();
+    let chunks: usize = manifest.files.values().map(|record| record.chunks as usize).sum();
+    assert_eq!(
+      records.len(),
+      chunks + 1,
+      "{:?}",
+      records.iter().map(|(key, _)| key).collect::<Vec<_>>()
+    );
   }
 
   fn assert_matches_reference(store: &Store, service: &mut SearchService) {

@@ -39,6 +39,10 @@ struct TeamCraftApp: App {
             // The share extension may have left something, while the app slept or wasn't running.
             model.loadWaitingShare()
             model.reportActivity(.foreground)
+            // Back from the background: the network may be another one than when the app left
+            // (Android reports this the same way); the gateway checks at once, and what was
+            // measured of the old link is dropped (#1969).
+            model.networkChanged()
           case .background:
             // First, before anything else runs: the background time for pending sends (#158).
             model.sceneWillEnterBackground()

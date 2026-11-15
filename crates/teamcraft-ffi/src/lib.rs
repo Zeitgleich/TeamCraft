@@ -167,6 +167,10 @@ pub struct TeamCraft {
   activity: Mutex<ActivityReports>,
   /// The calls running in the user's conversations, read without the engine (issue #1352).
   running_calls: calls::RunningCalls,
+  /// What the app measured of its link before a call, per network (#1969).
+  link: Arc<calls::LinkMeasures>,
+  /// Whether the app is in the foreground: only then does it measure its link.
+  is_foreground: std::sync::atomic::AtomicBool,
 }
 
 /// Supplies the current OIDC access token. The app owns login and refresh (AppAuth on Android).
@@ -252,6 +256,44 @@ impl TeamCraft {
   /// Cheap; call it on every change.
   pub fn network_changed(&self) {
     self.network.notify();
+    // What was measured of the link belongs to the network before (#1969).
+    self.link.reset();
+  }
+
+  /// Measures the link to the SFU before a call (#1969): when the pre-join dialog opens, a
+  /// meeting's join is tapped, or the conversation of a running call opens. `meeting_id`: the
+  /// meeting about to be joined, if any. Once per network: it does nothing while a measurement
+  /// runs or a fresh one exists for this network, nor in the background. The join never waits
+  /// for it, and nothing of it shows: a failure leaves the join to measure, as before.
+  #[uniffi::method(default(meeting_id = None))]
+  pub async fn measure_link(&self, meeting_id: Option<String>) {
+    let generation = self.network.generation();
+    if !self.is_foreground.load(std::sync::atomic::Ordering::Relaxed) || !self.link.is_due(generation) {
+      return;
+    }
+    let maybe_meeting = meeting_id.and_then(|id| id.parse().ok());
+    let ticket = self
+      .call(move |engine| Box::pin(async move { engine.call_probe_ticket(maybe_meeting).await }))
+      .await;
+    let ticket = match ticket {
+      Ok(ticket) => ticket,
+      Err(error) => {
+        tracing::debug!(%error, "no ticket to measure the link before the call");
+        return;
+      },
+    };
+    // The network may have changed while the ticket came.
+    if generation != self.network.generation() || !self.link.is_due(generation) {
+      return;
+    }
+    let target = teamcraft_media::link_probe::LinkProbeTarget {
+      certificate_hashes: teamcraft_media::call_resilience::certificate_hashes_from_hex(
+        &ticket.sfu_certificate_sha256,
+      ),
+      sfu_url: ticket.sfu_url,
+      ticket: ticket.ticket,
+    };
+    self.link.start(target, generation, self.network.clone());
   }
 
   /// Where the gateway connection stands, for the banner. Changes are announced through
@@ -265,6 +307,19 @@ impl TeamCraft {
   /// The server derives the user's presence from it and ends an away timeout at once when the app
   /// comes back. Cheap and never waits: input reports at most every 30 s.
   pub fn report_activity(&self, activity: AppActivity) {
+    // The link is measured only in the foreground (#1969): battery.
+    match activity {
+      AppActivity::Foreground => self
+        .is_foreground
+        .store(true, std::sync::atomic::Ordering::Relaxed),
+      AppActivity::Background => {
+        self
+          .is_foreground
+          .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.link.cancel();
+      },
+      AppActivity::Interaction => {},
+    }
     // Plain data: a panic elsewhere while it was locked leaves nothing half-changed.
     let maybe_due = self
       .activity
@@ -1736,9 +1791,11 @@ impl TeamCraft {
         })
       })
       .await?;
+    let maybe_prior_link = self.link.take_fresh(self.network.generation());
     calls::join(
       preparation,
       is_muted,
+      maybe_prior_link,
       hub,
       self.engine_jobs()?.clone(),
       &self.network,
@@ -2005,6 +2062,8 @@ impl TeamCraft {
       id_tokens,
       activity: Mutex::default(),
       running_calls,
+      link: Arc::default(),
+      is_foreground: std::sync::atomic::AtomicBool::new(true),
     }))
   }
 

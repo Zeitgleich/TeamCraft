@@ -234,6 +234,10 @@ fun ConversationScreen(
   /** Opens another conversation: the room a call moved into (issue #1290). */
   onOpenConversation: (String) -> Unit = {},
 ) {
+  // A call runs here: joining it is likely, so the link is measured ahead (#1969).
+  LaunchedEffect(conversationId) {
+    if ((viewModel.runningCalls()[conversationId] ?: 0) > 0) viewModel.measureLink()
+  }
   val changes by viewModel.changeCount.collectAsState()
   var snapshot by remember { mutableStateOf(viewModel.chat.maybeKeptSnapshot()) }
   // Names the messages until a snapshot that knows their authors is read (from the tail itself).
@@ -669,6 +673,8 @@ private fun ConversationMenu(
     Icon(Icons.Filled.Call, contentDescription = stringResource(R.string.call_start))
   }
   if (isPreparingCall) {
+    // Measured while the user picks camera and microphone (#1969).
+    LaunchedEffect(conversationId) { viewModel.measureLink() }
     val isNotetakerInCall by produceState(false, conversationId) {
       value = viewModel.isNotetakerInRunningCall(conversationId)
     }

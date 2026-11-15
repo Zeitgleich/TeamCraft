@@ -67,6 +67,7 @@ extension AppModel {
   /// Joins a meeting's call. On its organizer's device the core first sets up a meeting chat that
   /// has no encryption group yet (meetings from before 1.0.3); the call starts either way.
   func joinMeeting(_ meeting: Meeting, userId: String) {
+    measureLink(meetingId: meeting.id)
     guard meeting.organizerUserId == userId else {
       calls.startCall(conversationId: meeting.conversationId, displayName: meeting.title)
       return

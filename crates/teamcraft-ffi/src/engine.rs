@@ -1414,6 +1414,21 @@ impl Engine {
     Ok(token.map_err(CoreError::from)?)
   }
 
+  /// A ticket for measuring this device's link to the SFU before a call (#1969). A plain
+  /// request, like a join token's.
+  pub(crate) async fn call_probe_ticket(
+    &mut self,
+    maybe_meeting: Option<teamcraft_proto::MeetingId>,
+  ) -> Result<teamcraft_proto::CallProbeTicketResponse, TeamCraftError> {
+    let device_id = self.maybe_device_id.ok_or(TeamCraftError::NotEnrolled)?;
+    let request = teamcraft_proto::CreateCallProbeTicketRequest {
+      device_id,
+      maybe_meeting_id: maybe_meeting,
+    };
+    let ticket = self.api().create_call_probe_ticket(&request).await;
+    Ok(ticket.map_err(CoreError::from)?)
+  }
+
   pub(crate) fn calls(&self) -> &CallHub {
     &self.calls
   }

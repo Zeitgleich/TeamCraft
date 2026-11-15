@@ -121,6 +121,8 @@ struct MeetingsView: View {
     isStarting = true
     let key = maybeNowKey ?? newRequestKey()
     maybeNowKey = key
+    // Measured while the meeting is set up (#1969).
+    model.measureLink()
     Task {
       defer { isStarting = false }
       do {
