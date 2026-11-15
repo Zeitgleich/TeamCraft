@@ -172,6 +172,15 @@ pub enum Effect {
   },
   /// Whether a receiver takes the voices' thin copies now (to everyone, #1893 step 3).
   ThinVoiceWanted(bool),
+  /// A publisher's uplink carries none of the layers of `stream_id` now, or does again (to
+  /// everyone but the publisher, #1891).
+  VideoPausedByPublisher {
+    publisher: DeviceId,
+    stream_id: StreamId,
+    is_paused: bool,
+  },
+  /// The video to `receiver` yields to its voice, or no longer does (to that receiver, #1891).
+  VideoYieldedForVoice { receiver: DeviceId, is_yielded: bool },
 }
 
 /// What a leaving participant took with it.
@@ -213,6 +222,8 @@ struct ParticipantRoute {
   /// Since when its video yields to its voice at the lowest layers: voice still lost
   /// [`VOICE_HURT_AT_LOWEST_AFTER`] later pauses the video.
   maybe_video_yielded_at: Option<Instant>,
+  /// It was told its video yields to its voice (#1891).
+  is_video_yielded_for_voice: bool,
   /// How its own voice arrives: while its upload loses it, it gets no video either, whose
   /// acknowledgements share that upload (#1889).
   uplink_voice: ArrivingVoice,
@@ -367,6 +378,7 @@ impl Forwarder {
       has_feedback: false,
       voice: VoiceGuard::new(self.config.voice_guard),
       maybe_video_yielded_at: None,
+      is_video_yielded_for_voice: false,
       uplink_voice: ArrivingVoice::new(self.config.voice_guard),
       voice_layer: VoiceLayerChoice::default(),
       voice_sequences: HashMap::new(),
@@ -725,14 +737,34 @@ impl Forwarder {
     if carried == route.uplink_layers {
       return Ok(Vec::new());
     }
+    let was_paused = route.uplink_layers == 0;
     route.uplink_layers = carried;
     let receivers: Vec<DeviceId> = route.subscribers.keys().copied().collect();
     let mut effects = Vec::new();
+    // Viewers say why the picture stopped (#1891).
+    if was_paused != (carried == 0) {
+      effects.push(Effect::VideoPausedByPublisher {
+        publisher: owner,
+        stream_id,
+        is_paused: carried == 0,
+      });
+    }
     for receiver in receivers {
       effects.extend(self.reallocate(receiver, now));
     }
     effects.extend(self.update_layers_needed(stream_id, now));
     Ok(effects)
+  }
+
+  /// The video tracks whose publisher's uplink carries none of their layers now (#1891): a device
+  /// that joins hears of them.
+  pub fn paused_video_tracks(&self) -> Vec<StreamId> {
+    self
+      .video_tracks
+      .iter()
+      .filter(|(_, route)| route.uplink_layers == 0)
+      .map(|(&stream_id, _)| stream_id)
+      .collect()
   }
 
   /// Starts, changes or (with `None`) stops receiving a video track.
@@ -1404,6 +1436,13 @@ impl Forwarder {
     };
     participant.maybe_probe_request = allocation.maybe_probe;
     let allocation = allocation.layers;
+    // The receiver says why its pictures stopped or went coarse (#1891): only while it gets video.
+    let is_yielded =
+      !demands.is_empty() && (participant.uplink_voice.is_hurt(now) || participant.voice.is_hurt(now));
+    let maybe_yield_change = (is_yielded != participant.is_video_yielded_for_voice).then(|| {
+      participant.is_video_yielded_for_voice = is_yielded;
+      Effect::VideoYieldedForVoice { receiver, is_yielded }
+    });
     if participant
       .maybe_allocation_logged_at
       .is_none_or(|at| now.saturating_duration_since(at) >= ALLOCATION_LOG_INTERVAL)
@@ -1422,7 +1461,7 @@ impl Forwarder {
     }
 
     let stalled_after = self.config.layer_stalled_after;
-    let mut effects = Vec::new();
+    let mut effects: Vec<Effect> = maybe_yield_change.into_iter().collect();
     for (stream_id, target) in allocation {
       let Some(route) = self.video_tracks.get_mut(&stream_id) else {
         continue;
@@ -3462,6 +3501,48 @@ mod tests {
           );
         }
       }
+    }
+
+    /// #1891: a receiver whose video yields to its voice hears so, and hears when it ends.
+    #[test]
+    fn a_receiver_is_told_while_its_video_yields_to_its_voice() {
+      let (mut forwarder, now) = video_room();
+      forwarder.subscribe(device(2), VIDEO, Some(2), now).unwrap();
+      let reported_at = now + Duration::from_millis(600);
+      lose_a_third_of_the_voice(&mut forwarder, now, reported_at);
+      assert!(forwarder.participants[&device(2)].is_video_yielded_for_voice);
+      let later = reported_at + Duration::from_secs(5);
+      let effects = forwarder.on_timer(device(2), later);
+      assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::VideoYieldedForVoice { receiver, is_yielded: false } if *receiver == device(2)
+      )));
+    }
+
+    /// #1891: viewers hear when a publisher's uplink carries none of its layers, and when it does
+    /// again.
+    #[test]
+    fn viewers_hear_when_a_publisher_holds_its_video() {
+      let (mut forwarder, now) = video_room();
+      forwarder.subscribe(device(2), VIDEO, Some(2), now).unwrap();
+      let paused = |effects: &[Effect]| {
+        effects.iter().find_map(|effect| match effect {
+          Effect::VideoPausedByPublisher {
+            publisher,
+            stream_id,
+            is_paused,
+          } if *publisher == device(1) && *stream_id == VIDEO => Some(*is_paused),
+          _ => None,
+        })
+      };
+      let effects = forwarder.set_uplink_layers(device(1), VIDEO, &[0], now).unwrap();
+      assert_eq!(paused(&effects), None, "fewer layers, still a picture");
+      let effects = forwarder.set_uplink_layers(device(1), VIDEO, &[], now).unwrap();
+      assert_eq!(paused(&effects), Some(true));
+      let effects = forwarder
+        .set_uplink_layers(device(1), VIDEO, &[0, 1], now)
+        .unwrap();
+      assert_eq!(paused(&effects), Some(false));
     }
 
     /// #1889: a participant whose upload collapsed loses its own voice on the way to the SFU, also

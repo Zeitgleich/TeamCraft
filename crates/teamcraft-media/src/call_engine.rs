@@ -327,6 +327,15 @@ pub enum CallEngineEvent {
   /// The own video is held back while the own voice is lost on the uplink (#1871, #1891): the UI
   /// says so, so nobody wonders why the camera froze. `false` once it may go out again.
   VideoHeldForVoice(bool),
+  /// A publisher's uplink carries none of the layers of `stream_id` now, or does again (#1891):
+  /// its tile says why the picture stopped.
+  RemoteVideoPaused {
+    stream_id: MediaStreamId,
+    is_paused: bool,
+  },
+  /// The SFU holds the video it sends this device back while this device's voice is being lost
+  /// (#1891): the call screen says so.
+  VideoYieldedForVoice(bool),
   /// How the own voice is to be encoded from now on (#1893): a lower bitrate in longer packets
   /// while the uplink is thin, the full voice again once it has room.
   VoiceEncoding(VoiceEncoding),
@@ -1820,6 +1829,14 @@ impl CallEngine {
           "a receiver on a thin downlink takes the voices' thin copies"
         );
         self.is_thin_voice_wanted = is_wanted;
+        Ok(())
+      },
+      CallEvent::VideoPausedByPublisher { stream_id, is_paused } => {
+        self.event(CallEngineEvent::RemoteVideoPaused { stream_id, is_paused });
+        Ok(())
+      },
+      CallEvent::VideoYieldedForVoice { is_yielded } => {
+        self.event(CallEngineEvent::VideoYieldedForVoice(is_yielded));
         Ok(())
       },
       CallEvent::DaveExternalSender { package } => self.on_external_sender(package.as_slice()),

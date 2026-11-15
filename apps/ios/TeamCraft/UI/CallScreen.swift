@@ -317,7 +317,7 @@ struct CallScreen: View {
   /// small tiles show a sign and keep the sentence for VoiceOver.
   @ViewBuilder
   private func videoNotice(for stream: RemoteVideoStream, isCompact: Bool = false) -> some View {
-    if let notice = stream.maybeNotice {
+    if let notice = stream.maybeNotice ?? pausedNotice(for: stream) {
       if isCompact {
         Image(systemName: "video.slash.fill")
           .font(.app(.body))
@@ -334,6 +334,11 @@ struct CallScreen: View {
           .padding(16)
       }
     }
+  }
+
+  /// Its sender holds the video back for its voice (#1891): a still picture that isn't a fault.
+  private func pausedNotice(for stream: RemoteVideoStream) -> LocalizedStringKey? {
+    call.pausedVideoStreamIds.contains(stream.id) ? "call_video_paused_by_publisher" : nil
   }
 
   private func isUnverified(_ stream: RemoteVideoStream) -> Bool {
@@ -504,6 +509,8 @@ struct CallScreen: View {
       hint("call_you_muted")
     } else if call.isVideoHeldForVoice && call.phase == .connected {
       hint("call_video_held_for_voice")
+    } else if call.isVideoYieldedForVoice && call.phase == .connected {
+      hint("call_video_yielded_for_voice")
     } else if call.isOnLimitedNetwork && call.phase == .connected {
       hint("call_limited_network")
     }

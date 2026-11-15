@@ -42,6 +42,11 @@ struct ActiveCall: Identifiable, Equatable {
   /// The own video is held back while the own voice is lost on the uplink (#1871): the call screen
   /// says the voice comes first, so nobody wonders why the camera froze.
   var isVideoHeldForVoice = false
+  /// The SFU holds the others' video back while this device's voice is lost on the way (#1891):
+  /// the call screen says the voice comes first.
+  var isVideoYieldedForVoice = false
+  /// Others' video streams their senders hold back for their voice (#1891): the tile says so.
+  var pausedVideoStreamIds: Set<String> = []
 }
 
 /// A move of the call into a meeting room that somebody else announced in the conversation's
@@ -771,6 +776,8 @@ extension CallManager: CallListener {
       call.maybePrivacyCode = state.maybePrivacyCode
       call.isOnLimitedNetwork = state.isOnLimitedNetwork
       call.isVideoHeldForVoice = state.isVideoHeldForVoice
+      call.isVideoYieldedForVoice = state.isVideoYieldedForVoice
+      call.pausedVideoStreamIds = Set(state.pausedVideoStreamIds)
       switch state.phase {
       case .connected: call.phase = .connected
       // The connection broke; the core rejoins (the others keep this device's place meanwhile).

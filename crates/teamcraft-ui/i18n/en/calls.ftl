@@ -126,6 +126,7 @@ tile-host = Host
 tile-co-host = Co-host
 video-stalled = Video paused: weak connection
 video-undecodable = This video can't be shown here: it comes in a format this device doesn't play
+video-paused-by-publisher = Video paused: their connection is weak, their voice comes first
 
 ## Video quality (#967): how sharp another person's video comes, like a video player's menu
 video-quality = Video quality
@@ -320,6 +321,7 @@ call-reconnecting = Connection lost, reconnecting…
 call-limited-network = Limited network, call quality may be lower
 call-device-busy = Your computer is busy: video quality reduced
 call-video-held-for-voice = Your connection is struggling: your video is paused so your voice gets through
+call-video-yielded-for-voice = Your connection is struggling: the others' video is paused so you can hear them
 call-capture-stalled = The others see only a still picture of your screen or camera. Stop it and start it again.
 call-video-stalled = { $name }'s video isn't updating: you see a still picture.
 call-video-stalled-unnamed = A video isn't updating: you see a still picture.

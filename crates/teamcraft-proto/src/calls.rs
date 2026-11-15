@@ -393,6 +393,19 @@ pub enum CallEvent {
   ThinVoiceWanted {
     is_wanted: bool,
   },
+  /// The publisher of `stream_id` sends none of its layers now (#1891): its own uplink holds its
+  /// video back, typically to keep its voice through. Viewers say so on its tile instead of a
+  /// frozen picture. Sent to everyone else when it starts and when it ends.
+  VideoPausedByPublisher {
+    stream_id: MediaStreamId,
+    is_paused: bool,
+  },
+  /// The SFU holds the video it sends this device back because this device's voice is being lost
+  /// on the way (#1891, #1871): the voice comes first. Sent to this device when it starts and
+  /// ends.
+  VideoYieldedForVoice {
+    is_yielded: bool,
+  },
   /// Serialized MLS `ExternalSender` the client installs before creating its key package. Sent
   /// again when the call's DAVE group starts over because nobody committed its proposals (#1555):
   /// the client drops its DAVE session, keys included, and answers with a fresh key package.
@@ -1271,6 +1284,25 @@ mod tests {
     assert_eq!(json, r#"{"type":"attach_audio","secret":"AQI="}"#);
     assert_eq!(serde_json::from_str::<CallClientMessage>(&json).unwrap(), attach);
     assert!(!format!("{attach:?}").contains("AQI="), "the secret is redacted");
+  }
+
+  /// #1891: why a picture stopped, for the viewer.
+  #[test]
+  fn video_pause_reasons_wire_format() {
+    let paused = CallEvent::VideoPausedByPublisher {
+      stream_id: MediaStreamId(7),
+      is_paused: true,
+    };
+    let json = serde_json::to_string(&paused).unwrap();
+    assert_eq!(
+      json,
+      r#"{"type":"video_paused_by_publisher","stream_id":7,"is_paused":true}"#
+    );
+    assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), paused);
+    let yielded = CallEvent::VideoYieldedForVoice { is_yielded: false };
+    let json = serde_json::to_string(&yielded).unwrap();
+    assert_eq!(json, r#"{"type":"video_yielded_for_voice","is_yielded":false}"#);
+    assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), yielded);
   }
 
   #[test]

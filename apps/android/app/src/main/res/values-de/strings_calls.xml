@@ -80,6 +80,8 @@
   <string name="call_reconnecting">Verbindung unterbrochen, wird wiederhergestellt…</string>
   <string name="call_limited_network">Eingeschränktes Netzwerk, die Gesprächsqualität kann geringer sein</string>
   <string name="call_video_held_for_voice">Deine Verbindung ist schwach: dein Video pausiert, damit deine Stimme durchkommt</string>
+  <string name="call_video_yielded_for_voice">Deine Verbindung ist schwach: Das Video der anderen pausiert, damit du sie hörst</string>
+  <string name="call_video_paused_by_publisher">Video pausiert: Die Verbindung ist schwach, die Stimme hat Vorrang</string>
   <string name="call_securing">Anruf wird abgesichert…</string>
   <string name="call_secured">Ende-zu-Ende-verschlüsselt</string>
   <string name="call_ended">Anruf beendet</string>

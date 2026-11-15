@@ -118,6 +118,11 @@ impl CallRoster {
       },
       CallEngineEvent::Reconnecting => {
         active.is_reconnecting = true;
+        // The SFU says again after the rejoin what is paused (#1891).
+        active.is_video_yielded_for_voice = false;
+        for track in view.video_tracks.values_mut() {
+          track.is_paused_by_publisher = false;
+        }
         // The SFU's answer to the rejoin names the muted devices again.
         roster.muted.clear();
         // Who else is away comes again with the SFU's answer to the rejoin.
@@ -138,6 +143,13 @@ impl CallRoster {
         active.is_video_held_for_voice = is_held;
         return has_changed;
       },
+      CallEngineEvent::VideoYieldedForVoice(is_yielded) => {
+        let has_changed = active.is_video_yielded_for_voice != is_yielded;
+        active.is_video_yielded_for_voice = is_yielded;
+        return has_changed;
+      },
+      // The track's flag changed above.
+      CallEngineEvent::RemoteVideoPaused { .. } => return true,
       CallEngineEvent::DecodeLimited(is_limited) => {
         let has_changed = active.is_video_limited_by_device != is_limited;
         active.is_video_limited_by_device = is_limited;
@@ -302,8 +314,14 @@ impl CallRoster {
                 .collect(),
               // The base layer is in the track's codec; every viewer must decode that one.
               is_undecodable: !self.video_decoders.is_empty() && !self.video_decoders.contains(&track.codec),
+              is_paused_by_publisher: false,
             },
           );
+        }
+      },
+      CallEngineEvent::RemoteVideoPaused { stream_id, is_paused } => {
+        if let Some(track) = tracks.get_mut(stream_id) {
+          track.is_paused_by_publisher = *is_paused;
         }
       },
       CallEngineEvent::VideoUnpublished(stream_id) => {
