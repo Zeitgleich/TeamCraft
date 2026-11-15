@@ -304,6 +304,17 @@ pub fn guest_devices(_unit: ()) -> Result<Option<GuestDevices>, SplitLoaderError
   Ok(GuestDevices::for_page())
 }
 
+/// A media report for the screen shares' meter (`share_quality`, #1733): the report's readers and
+/// the meter only run while a screen is shared in a call, so they are in the call screens' module,
+/// not in the signed-in app.
+#[wasm_split(calls, wasm_split_path = ::leptos::wasm_split, fallible)]
+pub fn share_report(
+  maybe_json: Option<teamcraft_client_api::video_stats::VideoStatsJson>,
+) -> Result<(), SplitLoaderError> {
+  crate::share_quality::observe(maybe_json);
+  Ok(())
+}
+
 /// The app's own message sounds (#800), synthesized by teamcraft-media in the page: a first visit
 /// doesn't need them, so they load with the first sound (the page keeps each one once made).
 #[cfg(target_arch = "wasm32")]
