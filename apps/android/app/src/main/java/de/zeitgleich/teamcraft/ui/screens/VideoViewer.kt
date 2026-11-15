@@ -40,7 +40,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -72,6 +74,10 @@ import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.FileInfo
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.PictureTarget
+import de.zeitgleich.teamcraft.ui.rememberMotionReduced
+import de.zeitgleich.teamcraft.ui.rememberSwipeDismissState
+import de.zeitgleich.teamcraft.ui.swipeDismiss
+import de.zeitgleich.teamcraft.ui.swipeDismissLayer
 import java.io.File
 import kotlinx.coroutines.delay
 
@@ -95,9 +101,21 @@ fun VideoViewer(viewModel: MainViewModel, target: PictureTarget, onDismiss: () -
     properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
   ) {
     ImmersiveDialogWindow()
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
-      VideoContent(viewModel, target)
-      IconButton(onClick = onDismiss, modifier = Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(4.dp)) {
+    val dismissal = rememberSwipeDismissState()
+    // Swipe up or down: the video follows the finger and the backdrop fades (#1999).
+    Box(Modifier.fillMaxSize().drawBehind { drawRect(Color.Black, alpha = 1f - dismissal.progress) }) {
+      Box(
+        Modifier
+          .fillMaxSize()
+          .swipeDismiss(dismissal, isEnabled = true, isMotionReduced = rememberMotionReduced(), onDismiss = onDismiss)
+          .swipeDismissLayer(dismissal),
+      ) {
+        VideoContent(viewModel, target)
+      }
+      IconButton(
+        onClick = onDismiss,
+        modifier = Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(4.dp).graphicsLayer { alpha = 1f - dismissal.progress },
+      ) {
         Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.close), tint = Color.White)
       }
     }
