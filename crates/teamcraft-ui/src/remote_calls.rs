@@ -12,11 +12,18 @@
 //! browser the picker opens in the click itself, before the action is queued: Safari refuses it
 //! once the click's user activation is gone (issue #930); the chosen screen is shared when the
 //! action's turn comes.
+//!
+//! A join whose device isn't in the call's encryption group yet (a meeting guest just let in, a
+//! member just added: the welcome is still on its way) waits for it, within a bound (#1990,
+//! `teamcraft_core::call_group_wait`), and the call screen says it gets the call ready. Leaving
+//! ends the wait.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 
+use futures_channel::oneshot;
+use futures_util::future::select;
 use js_sys::Promise;
 use leptos::task::spawn_local;
 use serde_json::json;
@@ -24,10 +31,12 @@ use teamcraft_client_api::calls::{
   ActiveCall, CallEndReason, CallPreview, CallRequest, CameraFallback, EffectsOffer, HuddleInfo,
   IncomingCall, JoinMedia, MediaDevices, OwnCallDevices, Participant, PreviewCamera, RemoteVideoTrack,
 };
-use teamcraft_client_api::failure::ActionFailure;
+use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
 use teamcraft_client_api::model::{ConversationId, UserId};
 use teamcraft_client_api::remote::{CALL_CHANGED_EVENT, CallAction, CallActionAnswer, CallSnapshot};
 use teamcraft_client_api::video_stats::VideoStatsJson;
+use teamcraft_core::call_group_wait::{CallGroupWait, CallGroupWaitSettings};
+use teamcraft_core::clock::SystemClock;
 use teamcraft_proto::{ScreenContentMode, ScreenShareResolution};
 
 use crate::auth::tauri::{call, invoke, listen};
@@ -45,6 +54,12 @@ pub struct RemoteCalls {
   /// Screen share starts running beside the queue (their picker is open); pending all the same.
   screen_shares_starting: Rc<Cell<u32>>,
   join_failures: Rc<Cell<u64>>,
+  /// How long a join waits for this device's way into the call's encryption group (#1990).
+  group_wait: CallGroupWaitSettings,
+  /// The join that waits for the call's encryption group, if one does.
+  awaiting_group: Rc<Cell<bool>>,
+  /// Ends the waiting join's pause early: the core saw a change, or the user left or joined again.
+  group_wakes: Rc<RefCell<Vec<oneshot::Sender<()>>>>,
   /// The pre-join check's microphone level from the desktop shell (#442).
   #[cfg(target_arch = "wasm32")]
   shell_level: crate::shell_level::ShellLevel,
@@ -110,6 +125,9 @@ impl RemoteCalls {
       screen_shares_starting: Rc::default(),
       is_draining: Rc::default(),
       join_failures: Rc::default(),
+      group_wait: CallGroupWaitSettings::default(),
+      awaiting_group: Rc::default(),
+      group_wakes: Rc::default(),
       #[cfg(target_arch = "wasm32")]
       shell_level: crate::shell_level::ShellLevel::default(),
     }
@@ -136,6 +154,20 @@ impl RemoteCalls {
 
   pub fn join_failures(&self) -> u64 {
     self.join_failures.get()
+  }
+
+  /// Whether a join waits for this device's way into the call's encryption group (#1990).
+  pub fn is_awaiting_encryption(&self) -> bool {
+    self.awaiting_group.get()
+  }
+
+  /// The core's data changed: a join waiting for the call's encryption group tries again now (a
+  /// welcome on the gateway may have let this device in).
+  pub fn core_changed(&self) {
+    for wake in self.group_wakes.borrow_mut().drain(..) {
+      // A pause that ended already dropped its receiver: nothing to wake.
+      let _ = wake.send(());
+    }
   }
 
   pub fn has_pending_actions(&self) -> bool {
@@ -248,7 +280,13 @@ impl RemoteCalls {
   }
 
   fn enqueue(&self, queued: QueuedAction) {
+    let ends_wait = ends_group_wait(&queued.action);
     self.queue.borrow_mut().push_back(queued);
+    // Leaving or joining anew doesn't wait behind a join that waits for the encryption group: that
+    // join ends now.
+    if ends_wait && self.awaiting_group.get() {
+      self.core_changed();
+    }
     if self.is_draining.replace(true) {
       return;
     }
@@ -264,7 +302,11 @@ impl RemoteCalls {
           continue;
         }
         let is_join = matches!(queued.action, CallAction::Join { .. });
-        let result = calls.carry_out(queued.action).await;
+        let result = if is_join {
+          calls.join_awaiting_group(queued.action).await
+        } else {
+          calls.carry_out(queued.action).await
+        };
         calls.report_outcome(result, is_join);
       }
       // async-ok: a Cell the calls share, not a signal.
@@ -309,6 +351,63 @@ impl RemoteCalls {
       calls.report_outcome(result, false);
       calls.refresh();
     });
+  }
+
+  /// Carries out a join; one that finds no encryption group for this device yet tries again when
+  /// the core saw a change, or after a pause, until the wait's bound (#1990). Never founds a group:
+  /// each attempt only prepares the call as a click on "Join" would. A join the user left while it
+  /// waited answers with nothing: there is nothing to tell. So does one the user joined anew.
+  async fn join_awaiting_group(&self, join: CallAction) -> Result<CallActionAnswer, String> {
+    let mut result = self.carry_out(join.clone()).await;
+    if !is_encryption_pending(&result) {
+      return result;
+    }
+    let clock = SystemClock;
+    let mut wait = CallGroupWait::start(&clock, self.group_wait);
+    self.set_awaiting_group(true);
+    while is_encryption_pending(&result) {
+      if self.is_group_wait_ended() {
+        result = Ok(None);
+        break;
+      }
+      let Some(pause) = wait.next_pause() else {
+        break;
+      };
+      self.pause_for_group(pause).await;
+      if self.is_group_wait_ended() {
+        result = Ok(None);
+        break;
+      }
+      result = self.carry_out(join.clone()).await;
+    }
+    self.set_awaiting_group(false);
+    result
+  }
+
+  /// Waits `pause`, or less when the core's data changes or the user leaves.
+  async fn pause_for_group(&self, pause: std::time::Duration) {
+    let (wake, woken) = oneshot::channel();
+    self.group_wakes.borrow_mut().push(wake);
+    let sleep = Box::pin(teamcraft_core::platform::sleep(pause));
+    // Woken or not: the receiver goes here, so a waker left behind is dropped below.
+    drop(select(sleep, woken).await);
+    self.group_wakes.borrow_mut().retain(|wake| !wake.is_canceled());
+  }
+
+  /// Whether the user left or joined anew since the waiting join started: it gives up.
+  fn is_group_wait_ended(&self) -> bool {
+    self
+      .queue
+      .borrow()
+      .iter()
+      .any(|queued| ends_group_wait(&queued.action))
+  }
+
+  fn set_awaiting_group(&self, is_awaiting: bool) {
+    // async-ok: a Cell the calls share, not a signal.
+    if self.awaiting_group.replace(is_awaiting) != is_awaiting {
+      self.notify_changed();
+    }
   }
 
   /// Tells the user about a failed action, or the part of one that failed.
@@ -565,6 +664,19 @@ fn roster_of(snapshot: &CallSnapshot, conversation: ConversationId) -> Vec<UserI
   users
 }
 
+/// Whether a join failed only because this device isn't in the call's encryption group yet.
+fn is_encryption_pending(result: &Result<CallActionAnswer, String>) -> bool {
+  result.as_ref().is_err_and(|wire| {
+    ActionFailure::from_wire(wire).kind == FailureKind::Call(CallFailure::EncryptionPending)
+  })
+}
+
+/// Whether `action`, queued behind a join that waits for the encryption group, ends that wait: the
+/// user left, or joined (this or another call) anew.
+fn ends_group_wait(action: &CallAction) -> bool {
+  matches!(action, CallAction::Leave | CallAction::Join { .. })
+}
+
 /// Whether `action` runs beside the queue once its turn comes: a screen share's start waits for
 /// the user in the system's picker, which nobody may answer for a long time (issue #683: every
 /// later action, leaving included, waited with it).
@@ -599,6 +711,30 @@ mod tests {
     assert!(!browser_effects_offer(false).has_picker());
     assert!(!browser_effects_offer(false).has_preview());
     assert!(browser_effects_offer(true).has_preview());
+  }
+
+  /// #1990: only a join that found no encryption group for this device waits and tries again.
+  #[test]
+  fn only_a_missing_encryption_group_makes_a_join_wait() {
+    let failed =
+      |failure: CallFailure| Err(ActionFailure::new(FailureKind::Call(failure), "detail").to_wire());
+    assert!(is_encryption_pending(&failed(CallFailure::EncryptionPending)));
+    assert!(!is_encryption_pending(&failed(CallFailure::ServerUnreachable)));
+    assert!(!is_encryption_pending(&failed(CallFailure::MicrophoneDenied)));
+    assert!(!is_encryption_pending(&Err(ActionFailure::other("x").to_wire())));
+    assert!(!is_encryption_pending(&Ok(None)));
+  }
+
+  #[test]
+  fn leaving_or_joining_anew_ends_the_wait_for_the_group() {
+    assert!(ends_group_wait(&CallAction::Leave));
+    let request = CallRequest {
+      conversation: id_from_raw(7),
+      kind: CallKind::Group,
+    };
+    assert!(ends_group_wait(&CallAction::join(request, JoinMedia::default())));
+    assert!(!ends_group_wait(&CallAction::SetMuted { is_muted: true }));
+    assert!(!ends_group_wait(&CallAction::SetCamera { is_on: true }));
   }
 
   #[test]

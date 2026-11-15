@@ -10,7 +10,7 @@ use crate::activity_place::ActivityFilter;
 use crate::admin::AdminSection;
 use crate::audio_player::AudioPlayer;
 use crate::backend::Backend;
-use crate::calls::CallState;
+use crate::calls::{CallRequest, CallState};
 use crate::lightbox::MediaKey;
 use crate::model::{
   Conversation, ConversationId, MessageId, PresenceStatus, SpaceId, ThreadId, TimestampMs, User, UserId,
@@ -30,6 +30,7 @@ use crate::toast_timer::{Hold, ToastClock};
 use crate::unread_divider::{DividerEvent, next_divider};
 use crate::viewport::{CompactDepth, CompactPane, Layout, current_layout};
 use teamcraft_client_api::actions::{NewChannel, NewSpace, PermalinkTarget};
+use teamcraft_client_api::failure::{CallFailure, FailureKind};
 use teamcraft_client_api::files_query::{FileKind, FileScope};
 use teamcraft_proto::{MeetingId, Role};
 
@@ -72,6 +73,8 @@ pub enum ToastAction {
   },
   /// Opens the crash reports switch from the first-start notice (docs/crash-reports.md).
   OpenCrashReportSettings,
+  /// Joins the call again whose join waited for this device's encryption in vain (#1990).
+  RetryJoin(CallRequest),
 }
 
 impl ToastAction {
@@ -83,6 +86,7 @@ impl ToastAction {
       Self::UseAudioDevice => "call-audio-use",
       Self::RemoveFromMeeting { .. } => "meetings-remove-joined",
       Self::OpenCrashReportSettings => "crash-reports-notice-settings",
+      Self::RetryJoin(_) => "call-retry-join",
     }
   }
 
@@ -1388,17 +1392,29 @@ impl AppState {
   /// for the next step: "Choose camera" for a camera that didn't open while a call or its
   /// pre-join screen is up (#819).
   pub fn show_failure(&self, i18n: crate::i18n::I18n, failure: &crate::feedback::ActionFailure) {
+    self.show_failure_worded(crate::feedback::failure_message(i18n, failure), failure);
+  }
+
+  /// [`Self::show_failure`] with the page's own words for it (a meeting guest's, #1990).
+  pub fn show_failure_worded(&self, text: String, failure: &crate::feedback::ActionFailure) {
     let is_in_call = self
       .call
       .phase
       .try_get_untracked()
       .is_some_and(|phase| phase != crate::calls::CallPhase::Idle);
-    let maybe_action = crate::feedback::failure_action(failure).filter(|_| is_in_call);
-    self.show_error_with(
-      crate::feedback::failure_message(i18n, failure),
-      failure.detail.clone(),
-      maybe_action,
-    );
+    let maybe_action = if failure.kind == FailureKind::Call(CallFailure::EncryptionPending) {
+      // The join waited for this device's encryption in vain (#1990): it can be tried again,
+      // also once the failed join closed the call screen.
+      self
+        .call
+        .maybe_request
+        .try_get_untracked()
+        .flatten()
+        .map(ToastAction::RetryJoin)
+    } else {
+      crate::feedback::failure_action(failure).filter(|_| is_in_call)
+    };
+    self.show_error_with(text, failure.detail.clone(), maybe_action);
   }
 
   /// Carries out a toast's action and closes the toast, unless its steps stay needed.
@@ -1410,6 +1426,7 @@ impl AppState {
       ToastAction::ChooseCamera => self.call.is_camera_menu_open.set(true),
       ToastAction::OpenScreenSettings => crate::external_links::open_screen_recording_settings(),
       ToastAction::OpenCrashReportSettings => self.open_settings_at(SettingsTab::Security),
+      ToastAction::RetryJoin(request) => self.call.join(request),
       ToastAction::RemoveFromMeeting { conversation, user } => {
         self.write(|backend| backend.remove_member(conversation, user));
       },

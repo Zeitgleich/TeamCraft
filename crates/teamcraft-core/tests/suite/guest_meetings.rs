@@ -13,11 +13,13 @@ use common::{Peer, settle};
 use teamcraft_core::PendingEnrollment;
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
+use teamcraft_core::call_group_wait::{CallGroupWait, CallGroupWaitSettings};
 use teamcraft_core::client::{
   VERIFIER_KEY, admits_link_arrivals, guest_key_code, guest_link_fragment, is_open_by_own_record,
 };
-use teamcraft_core::clock::ManualClock;
+use teamcraft_core::clock::{Clock, ManualClock};
 use teamcraft_core::error::{CoreError, GuestRefusal};
+use teamcraft_core::retry::millis;
 use teamcraft_core::store::MemoryStore;
 use teamcraft_core::upkeep::{self, Upkeep};
 use teamcraft_core::workspace::RosterRole;
@@ -101,6 +103,71 @@ async fn a_guest_is_told_clearly_until_the_organizer_let_them_in() {
   rig.organizer_lets_the_guest_in(NOW_MS + 3_600_000).await.unwrap();
   let prepared = rig.guest.client.prepare_call(rig.chat).await.unwrap();
   assert_eq!(prepared.devices.len(), 2, "the retry gets in");
+}
+
+/// #1990: admitted, the guest's page joins the call while the organizer's add is still on its
+/// way. It waits for the welcome instead of failing, and the call is prepared once it came.
+#[tokio::test]
+async fn a_guest_joins_the_call_once_the_welcome_came_within_the_wait() {
+  let mut rig = rig().await;
+  rig.guest_knows_the_link();
+  rig.server_admits_the_guest().await;
+
+  let clock = rig.guest_clock.clone();
+  let mut wait = CallGroupWait::start(&*clock, CallGroupWaitSettings::default());
+  let mut pauses = 0;
+  let prepared = loop {
+    match rig.guest.client.prepare_call(rig.chat).await {
+      Err(CoreError::CallEncryptionPending(id)) if id == rig.chat => {
+        let pause = wait.next_pause().expect("still within the wait");
+        clock.advance(millis(pause));
+        pauses += 1;
+        // A few seconds late, as after a real admission.
+        if pauses == 3 {
+          rig.organizer_lets_the_guest_in(ACCESS_ENDS_MS).await.unwrap();
+        }
+      },
+      other => break other.unwrap(),
+    }
+  };
+
+  assert_eq!(pauses, 3, "joined at the first attempt after the welcome");
+  assert_eq!(prepared.devices.len(), 2);
+}
+
+/// #1990: nobody lets the guest in. The failure stands once the wait's bound passed, never before,
+/// and the guest never founds the group meanwhile.
+#[tokio::test]
+async fn a_guest_nobody_lets_in_is_told_once_the_wait_ran_out() {
+  let mut rig = rig().await;
+  rig.guest_knows_the_link();
+  rig.server_admits_the_guest().await;
+  let settings = CallGroupWaitSettings::default();
+
+  let clock = rig.guest_clock.clone();
+  let started_ms = clock.now_ms();
+  let mut wait = CallGroupWait::start(&*clock, settings);
+  let failure = loop {
+    let result = rig.guest.client.prepare_call(rig.chat).await;
+    let Err(CoreError::CallEncryptionPending(id)) = result else {
+      panic!("only the pending failure while nobody lets the guest in");
+    };
+    match wait.next_pause() {
+      Some(pause) => clock.advance(millis(pause)),
+      None => break id,
+    }
+  };
+
+  assert_eq!(failure, rig.chat);
+  assert_eq!(
+    clock.now_ms() - started_ms,
+    millis(settings.bound),
+    "the failure stands at the bound"
+  );
+  assert!(
+    !rig.guest.client.has_group(rig.chat).unwrap(),
+    "a guest never founds"
+  );
 }
 
 #[tokio::test]

@@ -614,7 +614,18 @@ A guest's page keeps going after "You are in" (#446; design in e2ee.md §4.6, "M
    guest's device is ready, or by itself without a lobby; `LetGuestIntoMeetingChat`), the page
    shows the slim meeting view: the meeting's name, the chat, "Join the call" and "Leave the
    meeting". The call is the browser call engine; the guest's call key binding is signed by the
-   guest's device.
+   guest's device. Admission goes straight into the call (#1929): the page joins it at once.
+   **Waiting for the welcome** (#1990): the server's admission comes before the admitter's device
+   committed the guest's add, so the first join usually finds no group yet. The join then waits
+   instead of failing, and the call screen says "Getting the call ready…": it tries again whenever
+   the core saw a change (a welcome on the gateway joins the group there) and, in case none comes
+   that way, after a pause that doubles from 250 ms to 4 s (each attempt fetches waiting welcomes).
+   After 30 s (`CallGroupWaitSettings`, `teamcraft_core::call_group_wait`) the failure stands: the
+   guest reads that the host's app hasn't let this device in yet and the host should keep
+   TeamCraft open, with "Try again". Hanging up ends the wait. The wait never founds a group (only
+   the scheduler's device does, e2ee.md §8). Members joining a meeting call whose chat they were
+   just added to wait the same way (desktop and web; the phones still fail at once and offer a
+   retry); after the bound they keep the member wording.
 4. "Leave" calls `POST .../leave`, deletes the page's database (its keys and messages) and shows a
    goodbye. Closing the page without leaving keeps the encrypted data in the browser until the next
    guest page is opened here, which deletes it (or the guest clears site data); nothing reuses it.

@@ -648,7 +648,17 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
           </span>
         </Show>
         <Show when=move || is_connecting.get() fallback=|| ()>
-          <span class="muted-text" role="status">{move || i18n.t("call-connecting")}</span>
+          // Waiting for this device's way into the call's encryption (#1990): calm, no error.
+          <span class="muted-text" role="status">
+            {move || {
+              let key = if state.read(|backend| backend.is_call_awaiting_encryption()) {
+                "call-getting-ready"
+              } else {
+                "call-connecting"
+              };
+              i18n.t(key)
+            }}
+          </span>
         </Show>
         <Show when=move || call.has_ended.get() fallback=|| ()>
           <span class="muted-text" role="status">{move || i18n.t("call-ended")}</span>

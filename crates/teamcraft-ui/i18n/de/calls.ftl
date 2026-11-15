@@ -317,6 +317,8 @@ calls-background-hint = Wird auf deinem Gerät angewendet, bevor dein Video gese
 ## Einrichtung der Schlüssel
 # ---- Meetings ----
 call-connecting = Verbindung wird hergestellt …
+call-getting-ready = Anruf wird vorbereitet …
+call-retry-join = Erneut versuchen
 call-reconnecting = Verbindung unterbrochen, wird wiederhergestellt …
 call-limited-network = Eingeschränktes Netzwerk, die Gesprächsqualität kann geringer sein
 call-device-busy = Dein Computer ist ausgelastet: Videoqualität reduziert
@@ -382,6 +384,7 @@ error-call-server-unreachable = Der Anrufserver ist nicht erreichbar. Das Netzwe
 error-call-background-required = Deine Organisation verlangt einen Hintergrund hinter deinem Kamerabild, der hier nicht eingefügt werden kann. Hintergründe brauchen ein aktuelles Chrome, Edge, Firefox oder Safari mit eingeschalteter Grafikbeschleunigung oder die TeamCraft-App.
 error-call-effects-unavailable = Der Hintergrundeffekt konnte hier nicht starten, deine Kamera läuft deshalb ohne ihn.
 error-call-encryption-pending = Dieses Gerät kann dem Anruf noch nicht beitreten: Es wird gerade in die Verschlüsselung der Unterhaltung aufgenommen. Lass TeamCraft auf einem anderen deiner Geräte geöffnet oder warte, bis ein Mitglied online ist, und tritt dann erneut bei. Bei einem Meeting muss eventuell zuerst der Organisator es einmal öffnen.
+error-call-encryption-pending-guest = Die App des Gastgebers hat dieses Gerät noch nicht in die Verschlüsselung des Anrufs aufgenommen. Bitte den Gastgeber, TeamCraft geöffnet zu lassen, und versuche es dann erneut.
 error-call-move-refused = Der Anruf wurde nicht verschoben: Der Meetingraum passt nicht zu dem, was in der Unterhaltung angekündigt wurde. Bleib in diesem Anruf oder tritt dem Meetingraum über die Liste bei, wenn du ihm vertraust.
 error-call-speakers-unavailable = Die gewählten Lautsprecher lassen sich hier nicht nutzen. Der Testton lief über die Standardausgabe.
 error-call-speakers-missing = Es wurden keine Lautsprecher gefunden. Schließe Lautsprecher oder Kopfhörer an und versuche es erneut.

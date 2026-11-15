@@ -31,6 +31,8 @@ const MEETING_LENGTH_MS: i64 = 60 * 60_000;
 const GUEST_ACCESS_GRACE_MS: i64 = 2 * 60 * 60_000;
 const SETUP_TIMEOUT: Duration = Duration::from_secs(60);
 const CALL_DURATION: Duration = Duration::from_secs(8);
+/// How long after the server's admission the host's app lets the guest's device in (#1990).
+const HOST_ADD_DELAY: Duration = Duration::from_secs(3);
 /// The guest page's refusal of a knock without a name (#1953).
 const NAME_REQUIRED: &str = "Enter your name.";
 
@@ -131,12 +133,24 @@ async fn a_guest_joins_a_meeting_with_the_mailed_link_and_shares_its_call() {
         .post(&tokens, &format!("{lobby_path}/{guest}/admit"), json!({}))
         .await
         .expect(StatusCode::NO_CONTENT);
+      // The host's app adds the guest's device seconds after the server's admission (#1990): the
+      // guest's page goes into the call and gets it ready meanwhile, without an error.
+      wait_for_text(&page, "Getting the call ready").await;
+      tokio::time::sleep(HOST_ADD_DELAY).await;
+      expect_no_error_toast(&page).await;
       alice_ref
         .client
         .let_guest_into_meeting_chat(chat, guest, &fingerprint, ends_at + GUEST_ACCESS_GRACE_MS)
         .await
         .unwrap();
       join_call_in_browser(&page).await;
+      // The welcome came: the guest is in the call without a click, and was never told otherwise.
+      wait_until(
+        &page,
+        "!document.querySelector('.call-screen')?.textContent.includes('Getting the call ready')",
+      )
+      .await;
+      expect_no_error_toast(&page).await;
     })
     .await;
 
@@ -641,6 +655,19 @@ async fn join_call_in_browser(page: &Page) {
     .into_value::<u64>()
     .unwrap();
   assert_eq!(call_starts, 0, "the guest's chat header offers to start a call");
+}
+
+/// The page shows no error toast (a join that failed, #1990).
+async fn expect_no_error_toast(page: &Page) {
+  let errors = page
+    .evaluate(
+      "Array.from(document.querySelectorAll('.toast-error')).map(toast => toast.textContent).join(' | ')",
+    )
+    .await
+    .unwrap()
+    .into_value::<String>()
+    .unwrap();
+  assert!(errors.is_empty(), "the guest's page shows an error: {errors}");
 }
 
 /// The page never showed the reload overlay of a panic (`panic_overlay.rs`).
