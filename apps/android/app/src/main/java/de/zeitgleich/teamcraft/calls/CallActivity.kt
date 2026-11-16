@@ -2,13 +2,18 @@ package de.zeitgleich.teamcraft.calls
 
 import android.Manifest
 import android.app.Activity
+import android.app.PictureInPictureParams
+import android.app.RemoteAction
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.graphics.drawable.Icon as GraphicsIcon
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.util.Log
+import android.util.Rational
 import android.view.WindowManager
 import android.view.WindowManager.LayoutParams.FLAG_SECURE
 import androidx.activity.ComponentActivity
@@ -110,6 +115,12 @@ class CallActivity : ComponentActivity() {
    */
   private var maybeAnswerAfterPermission: String? = null
 
+  /** Shown as picture-in-picture: the screen shows only the stage (#2067). */
+  private val isInPictureInPicture = mutableStateOf(false)
+
+  /** What picture-in-picture offers: auto-enter only with video to show, and the mute action's state. */
+  private var pip = PipState(hasVideo = false, isMuted = false)
+
   private val microphonePermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
     calls.onMicrophonePermission(it)
     maybeAnswerAfterPermission?.let { conversationId ->
@@ -156,7 +167,13 @@ class CallActivity : ComponentActivity() {
         } else if (failure != null && !isJoining) {
           JoinFailedScreen(failure, onClose = { calls.dismissJoinFailure() })
         } else {
-          CallScreen(calls, maybeState, onMinimise = ::minimise)
+          CallScreen(
+            calls,
+            maybeState,
+            onMinimise = ::minimise,
+            isInPictureInPicture = isInPictureInPicture.value,
+            onPipState = ::updatePictureInPicture,
+          )
         }
       }
     }
@@ -182,6 +199,59 @@ class CallActivity : ComponentActivity() {
       startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
     }.onFailure { Log.w(TAG, "minimise: app not opened", it) }
     finish()
+  }
+
+  /**
+   * Leaving the app during a video call shows it as picture-in-picture (#2067): Android 12+ enters
+   * by itself (`setAutoEnterEnabled`), older versions here. Audio-only calls stay out of it; the
+   * app's bar and the call notification lead back to them.
+   */
+  override fun onUserLeaveHint() {
+    super.onUserLeaveHint()
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S && pip.hasVideo && !isInPictureInPicture.value && canPictureInPicture()) {
+      // Refused where the user turned picture-in-picture off for the app: the call goes on behind.
+      runCatching { enterPictureInPictureMode(pictureInPictureParams()) }
+        .onFailure { Log.i(TAG, "picture-in-picture: not entered", it) }
+    }
+  }
+
+  override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
+    super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+    isInPictureInPicture.value = isInPictureInPictureMode
+  }
+
+  /** The call screen's state for picture-in-picture: whether there is video, and the mute. */
+  private fun updatePictureInPicture(state: PipState) {
+    if (state == pip) return
+    pip = state
+    if (!canPictureInPicture()) return
+    runCatching { setPictureInPictureParams(pictureInPictureParams()) }
+      .onFailure { Log.i(TAG, "picture-in-picture: parameters not taken", it) }
+  }
+
+  private fun canPictureInPicture(): Boolean = packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
+
+  /** A portrait tile with mute and hang up, as the call notification has them. */
+  private fun pictureInPictureParams(): PictureInPictureParams {
+    val mute = RemoteAction(
+      GraphicsIcon.createWithResource(this, if (pip.isMuted) R.drawable.ic_mic_off else R.drawable.ic_mic),
+      getString(if (pip.isMuted) R.string.call_unmute else R.string.call_mute),
+      getString(if (pip.isMuted) R.string.call_unmute else R.string.call_mute),
+      CallService.toggleMuteIntent(this),
+    )
+    val hangUp = RemoteAction(
+      GraphicsIcon.createWithResource(this, R.drawable.ic_call_end),
+      getString(R.string.call_hang_up),
+      getString(R.string.call_hang_up),
+      CallService.hangUpIntent(this),
+    )
+    val builder = PictureInPictureParams.Builder()
+      .setAspectRatio(Rational(PIP_WIDTH, PIP_HEIGHT))
+      .setActions(listOf(mute, hangUp))
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      builder.setAutoEnterEnabled(pip.hasVideo).setSeamlessResizeEnabled(true)
+    }
+    return builder.build()
   }
 
   override fun onNewIntent(intent: Intent) {
@@ -245,9 +315,15 @@ class CallActivity : ComponentActivity() {
     const val EXTRA_MEETING_ID = "meeting_id"
     const val EXTRA_MEETING_STARTS_AT_MS = "meeting_starts_at_ms"
     private const val STATE_ANSWER_AFTER_PERMISSION = "answer_after_permission"
+    /** Picture-in-picture's shape: a portrait tile, as the phone holds a call. */
+    private const val PIP_WIDTH = 3
+    private const val PIP_HEIGHT = 4
     private const val TAG = "TeamCraftCalls"
   }
 }
+
+/** What picture-in-picture needs from the call screen (#2067). */
+internal data class PipState(val hasVideo: Boolean, val isMuted: Boolean)
 
 /** Why answering didn't get into the call, until the user closes it (#1272). */
 @Composable
@@ -341,7 +417,13 @@ private fun RingButton(icon: ImageVector, label: String, color: Color, haptic: H
 private val INCOMING_AVATAR_SIZE = 128.dp
 
 @Composable
-private fun CallScreen(calls: CallController, maybeState: CallStateInfo?, onMinimise: () -> Unit) {
+private fun CallScreen(
+  calls: CallController,
+  maybeState: CallStateInfo?,
+  onMinimise: () -> Unit,
+  isInPictureInPicture: Boolean,
+  onPipState: (PipState) -> Unit,
+) {
   val tracks by calls.videoTracks.collectAsStateWithLifecycle()
   val frames by calls.videoFrames.collectAsStateWithLifecycle()
   val isCameraWanted by calls.isCameraWanted.collectAsStateWithLifecycle()
@@ -521,6 +603,11 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?, onMini
     }
   }
   if (hasVideo && !areControlsShown) ImmersiveWindow()
+  // Picture-in-picture (#2067): offered with video to show (others' or the own camera), its mute
+  // action follows the microphone.
+  val isMuted = maybeState?.isMuted == true
+  val hasPipVideo = isConnected && (hasVideo || isCameraWanted)
+  LaunchedEffect(hasPipVideo, isMuted) { onPipState(PipState(hasVideo = hasPipVideo, isMuted = isMuted)) }
 
   val selfView: (@Composable (Modifier) -> Unit)? = if (isCameraWanted && hasCamera) {
     { modifier: Modifier -> CameraFeed(calls = calls, isFrontCamera = isFrontCamera, modifier = modifier) }
@@ -538,7 +625,8 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?, onMini
       audioRoutes = audioRoutes,
       audioRouteId = audioRouteId,
       elapsedSeconds = maybeElapsed,
-      areControlsShown = areControlsShown,
+      // In picture-in-picture only the stage: its actions are the window's own.
+      areControlsShown = areControlsShown && !isInPictureInPicture,
       names = names,
       isNotetakerPresent = maybeNotetaker?.isPresent == true,
       // "Add people" is offered in DM and group DM calls only: its choice says which this is.
@@ -596,10 +684,13 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?, onMini
       maybeOnMinimise = if (canMinimise) onMinimise else null,
     ),
     banner = {
-      Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        LobbyBanner(maybeShownLobby) { isLobbyShown = true }
-        NotetakerBanner(calls.moves, maybeConversationId, maybeNotetaker)
-        CallMoveBanner(calls.moves)
+      // Picture-in-picture shows the stage only.
+      if (!isInPictureInPicture) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+          LobbyBanner(maybeShownLobby) { isLobbyShown = true }
+          NotetakerBanner(calls.moves, maybeConversationId, maybeNotetaker)
+          CallMoveBanner(calls.moves)
+        }
       }
     },
     selfView = selfView,

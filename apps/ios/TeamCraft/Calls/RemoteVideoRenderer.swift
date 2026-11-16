@@ -13,6 +13,8 @@ final class RemoteVideoRenderer: @unchecked Sendable {
   private var maybeFormat: CMVideoFormatDescription?
   private var maybeSequenceSet: Data?
   private var maybePictureSet: Data?
+  /// A second layer that shows the same video: picture-in-picture's (#2067). Only touched on `queue`.
+  private var maybeMirror: AVSampleBufferDisplayLayer?
 
   init() {
     layer.videoGravity = .resizeAspect
@@ -43,6 +45,18 @@ final class RemoteVideoRenderer: @unchecked Sendable {
       else { return }
       if layer.status == .failed { layer.flush() }
       layer.enqueue(sample)
+      if let mirror = maybeMirror {
+        if mirror.status == .failed { mirror.flush() }
+        mirror.enqueue(sample)
+      }
+    }
+  }
+
+  /// Shows the video in `maybeMirror` too (picture-in-picture), from the next frame; `nil` stops.
+  func setMirror(_ maybeMirror: AVSampleBufferDisplayLayer?) {
+    queue.async { [self] in
+      if self.maybeMirror !== maybeMirror { self.maybeMirror?.flushAndRemoveImage() }
+      self.maybeMirror = maybeMirror
     }
   }
 
