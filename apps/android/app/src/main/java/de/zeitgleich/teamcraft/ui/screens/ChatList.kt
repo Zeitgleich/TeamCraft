@@ -7,6 +7,8 @@ import androidx.compose.ui.semantics.heading
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.snap
+import de.zeitgleich.teamcraft.ui.rememberReducedMotion
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -1441,6 +1443,13 @@ private fun SwipeableConversationRow(
   val endAction by remember { ChatSwipePrefs.of(context).endAction }.collectAsState()
   // A dragged row is placed by the drag, not by the list's own move animation.
   val isDragging = maybeReorder?.state?.isDragging == true
+  // Lifted a little while dragged; with motion reduced it just snaps.
+  val isReduced = rememberReducedMotion()
+  val lift by animateFloatAsState(
+    targetValue = if (isDragging) LIFT_SCALE else 1f,
+    animationSpec = if (isReduced) snap() else spring(stiffness = Spring.StiffnessMedium),
+    label = "favorite-lift",
+  )
   SwipeToDismissBox(
     state = state,
     modifier = (if (isDragging) Modifier else modifier)
@@ -1451,7 +1460,12 @@ private fun SwipeableConversationRow(
           Modifier
             .onSizeChanged { maybeReorder.state.height = it.height }
             .zIndex(if (isDragging) 1f else 0f)
-            .graphicsLayer { translationY = maybeReorder.state.offset }
+            .graphicsLayer {
+              translationY = maybeReorder.state.offset
+              scaleX = lift
+              scaleY = lift
+              shadowElevation = (lift - 1f) / (LIFT_SCALE - 1f) * LIFT_SHADOW_PX
+            }
         },
       ),
     gesturesEnabled = !isSelecting && !isDragging,
@@ -1490,6 +1504,9 @@ private fun SwipeableConversationRow(
     }
   }
 }
+
+private const val LIFT_SCALE = 1.02f
+private const val LIFT_SHADOW_PX = 16f
 
 /** What can be done with a row, shared by swipe, menu and accessibility. */
 internal class RowActions(
@@ -1599,11 +1616,17 @@ private fun ConversationRow(
         )
         .combinedClickable(
           onClick = onClick,
-          onLongClick = {
-            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-            onLongPress()
+          // A favorite's long-press is told apart from a drag by the gesture below.
+          onLongClick = if (maybeReorder == null) {
+            {
+              haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+              onLongPress()
+            }
+          } else {
+            null
           },
         )
+        .then(if (maybeReorder != null) Modifier.favoriteLongPressDrag(maybeReorder, onLongPress) else Modifier)
         .semantics { selected = isChecked }
         .semantics {
           customActions = listOfNotNull(
@@ -1621,7 +1644,6 @@ private fun ConversationRow(
         TitleLine(conversation, maybeEntry, maybeSpaceName = conversation.maybeSpaceName.takeIf { showsSpace }, callCount = callCount)
         PreviewLine(conversation, maybeEntry, typing)
       }
-      if (maybeReorder != null) FavoriteDragHandle(maybeReorder, Modifier.padding(start = 4.dp))
     }
   }
 }

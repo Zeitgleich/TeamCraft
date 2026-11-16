@@ -1,11 +1,9 @@
 package de.zeitgleich.teamcraft.ui.screens
 
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
-import androidx.compose.foundation.layout.size
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
+import androidx.compose.foundation.gestures.drag
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -15,12 +13,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.composed
+import androidx.compose.ui.hapticfeedback.HapticFeedback
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.ui.FavoriteOrder
+import kotlin.math.abs
 
 /**
  * Drag to reorder a favorite (#2057). The row follows the finger; each time it has moved past half a
@@ -63,31 +64,51 @@ internal class FavoriteDragState {
 /** A favorite row that can move: its drag state and the step to a neighbouring place (false at an end). */
 internal class FavoriteReorder(val state: FavoriteDragState, val onMove: (up: Boolean) -> Boolean)
 
-/** The handle at the row's end that starts a drag; its job for assistive tech is the row's move actions. */
-@Composable
-internal fun FavoriteDragHandle(reorder: FavoriteReorder, modifier: Modifier = Modifier) {
-  val haptics = LocalHapticFeedback.current
-  val onMove by rememberUpdatedState(reorder.onMove)
-  Icon(
-    Icons.Filled.Menu,
-    contentDescription = null,
-    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-    modifier = modifier
-      .size(40.dp)
-      .pointerInput(reorder.state) {
-        detectVerticalDragGestures(
-          onDragStart = {
-            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-            reorder.state.isDragging = true
-          },
-          onDragEnd = { reorder.state.end() },
-          onDragCancel = { reorder.state.end() },
-        ) { change, delta ->
+/**
+ * Long-press then move to drag a favorite (#2057): the row lifts, follows the finger and drops into
+ * place. A long-press released without moving past touch slop calls [onLongPress] (the entry menu);
+ * a swipe before the long-press time is the list's scroll. Sits inside the row's click handling and
+ * consumes the gesture once it has taken it, so the release is no tap and the list doesn't scroll.
+ * Its job for assistive tech is the row's move actions.
+ */
+internal fun Modifier.favoriteLongPressDrag(reorder: FavoriteReorder, onLongPress: () -> Unit): Modifier =
+  composed {
+    val haptics = LocalHapticFeedback.current
+    val onMove by rememberUpdatedState(reorder.onMove)
+    val onLongPressNow by rememberUpdatedState(onLongPress)
+    pointerInput(reorder.state) {
+      awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        val longPress = awaitLongPressOrCancellation(down.id) ?: return@awaitEachGesture
+        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+        longPress.consume()
+        var moved = 0f
+        var isDragging = false
+        drag(longPress.id) { change ->
           change.consume()
-          reorder.state.dragBy(delta) { up -> onMove(up) }
+          val delta = change.positionChange().y
+          moved += delta
+          if (!isDragging && abs(moved) > viewConfiguration.touchSlop) {
+            isDragging = true
+            reorder.state.isDragging = true
+            // The slop already travelled counts, so the row doesn't jump when it picks up.
+            reorder.state.dragBy(moved) { up -> stepWithTick(haptics, onMove, up) }
+          } else if (isDragging) {
+            reorder.state.dragBy(delta) { up -> stepWithTick(haptics, onMove, up) }
+          }
         }
-      },
-  )
+        // The release (or cancel) belongs to this gesture: no tap, no fling.
+        currentEvent.changes.forEach { it.consume() }
+        if (isDragging) reorder.state.end() else onLongPressNow()
+      }
+    }
+  }
+
+/** One place further, with a tick each time the row passes a neighbour. */
+private fun stepWithTick(haptics: HapticFeedback, onMove: (Boolean) -> Boolean, up: Boolean): Boolean {
+  val didMove = onMove(up)
+  if (didMove) haptics.performHapticFeedback(HapticFeedbackType.SegmentTick)
+  return didMove
 }
 
 /**
