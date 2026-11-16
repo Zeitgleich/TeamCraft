@@ -19,8 +19,12 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.Person
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.mapLatest
@@ -42,17 +46,27 @@ import uniffi.teamcraft_ffi.CallPhase
 class CallService : Service() {
   /** What the notification shows, kept in step with the call while the service runs. */
   private var shown = Shown()
-  private var maybeWatch: Job? = null
+
+  /**
+   * The service's own work, on the main thread like its lifecycle: an update of the notification
+   * can't run between `stopService` and [onDestroy], or before [onStartCommand] made it a
+   * foreground service.
+   */
+  private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+  /** In the foreground with its notification: only then may it post that notification again. */
+  private var isForeground = false
 
   override fun onBind(intent: Intent?): IBinder? = null
 
   override fun onCreate() {
     super.onCreate()
-    maybeWatch = watchCall()
+    watchCall()
   }
 
   override fun onDestroy() {
-    maybeWatch?.cancel()
+    isForeground = false
+    serviceScope.cancel()
     super.onDestroy()
   }
 
@@ -75,6 +89,7 @@ class CallService : Service() {
     val hasScreen = intent?.getBooleanExtra(EXTRA_SCREEN, false) == true || maybeConsent != null
     shown = shown.copy(isSharingScreen = hasScreen)
     ServiceCompat.startForeground(this, NOTIFICATION_ID, notification(shown), types(hasCamera, hasScreen))
+    isForeground = true
     if (intent != null && maybeConsent != null) {
       takeProjection(intent.getIntExtra(EXTRA_PROJECTION_RESULT, 0), maybeConsent)
     }
@@ -108,9 +123,8 @@ class CallService : Service() {
    */
   @OptIn(ExperimentalCoroutinesApi::class)
   private fun watchCall(): Job {
-    val graph = TeamCraftApplication.graph(this)
-    val calls = graph.calls
-    return graph.scope.launch {
+    val calls = TeamCraftApplication.graph(this).calls
+    return serviceScope.launch {
       combine(calls.callState, calls.connectedAtMs) { maybeState, maybeConnectedAt -> maybeState to maybeConnectedAt }
         .mapLatest { (maybeState, maybeConnectedAt) ->
           val isRunning = maybeState != null && maybeState.phase != CallPhase.ENDED
@@ -129,16 +143,27 @@ class CallService : Service() {
         }
         .collect { next ->
           shown = next.copy(isSharingScreen = shown.isSharingScreen)
-          repost()
+          // An ended call stops the service right away: its notification goes with it.
+          if (calls.callState.value.let { it != null && it.phase != CallPhase.ENDED }) repost()
         }
     }
   }
 
-  /** The notification again, as it is now (without notification permission it can't change). */
+  /**
+   * The notification again, as it is now (without notification permission it can't change). Only
+   * while the service is in the foreground: Android refuses a CallStyle notification of anything
+   * else with an exception, which ended the app (and the call with it) when a call ended or
+   * reconnected while the name or the mute changed.
+   */
   private fun repost() {
+    if (!isForeground) return
     val isAllowed = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
       ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
-    if (isAllowed) NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, notification(shown))
+    if (!isAllowed) return
+    // The system may still refuse it in the moment the service leaves the foreground: the
+    // notification is only a nicer copy of the one shown, so it stays as it was.
+    runCatching { NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, notification(shown)) }
+      .onFailure { Log.w(TAG, "call notification not updated", it) }
   }
 
   private fun notification(shown: Shown): Notification {
