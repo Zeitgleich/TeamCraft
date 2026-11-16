@@ -334,6 +334,7 @@ call-encryption-retry-in = { $count ->
    *[other] You can try again in { $count } minutes.
   }
 call-ended = Call ended
+call-no-answer = No answer
 control-deafen = Mute the call audio
 control-undeafen = Unmute the call audio
 

@@ -5,7 +5,7 @@ use leptos::prelude::*;
 use teamcraft_proto::VideoTrackKind;
 
 use crate::calls::{
-  CallEvent, CallKind, CallLayout, CallRequest, MediaDevice, Participant, ScreenContentMode,
+  CallEndReason, CallEvent, CallKind, CallLayout, CallRequest, MediaDevice, Participant, ScreenContentMode,
   ScreenShareResolution, ScreenShareSound, selected_camera_is_rear,
 };
 use crate::components::add_to_call::AddPeople;
@@ -661,7 +661,13 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
           </span>
         </Show>
         <Show when=move || call.has_ended.get() fallback=|| ()>
-          <span class="muted-text" role="status">{move || i18n.t("call-ended")}</span>
+          <span class="muted-text" role="status">
+            {move || {
+              // Nobody answered the ring: said as a phone says it, not as a plain end.
+              let is_unanswered = state.read(|backend| backend.call_end_reason()) == Some(CallEndReason::NoAnswer);
+              i18n.t(if is_unanswered { "call-no-answer" } else { "call-ended" })
+            }}
+          </span>
         </Show>
         <Show when=move || is_reconnecting.get() fallback=|| ()>
           <span class="muted-text" role="status">{move || i18n.t("call-reconnecting")}</span>

@@ -877,6 +877,9 @@ pub enum CallEndReason {
   ConnectionLost,
   /// The other side of a 1:1 call left, so the call ended for both (issue #997).
   OtherSideLeft,
+  /// Nobody answered: the ring of this device's 1:1 call ended (timed out or declined) with nobody
+  /// else in the call, so the caller left instead of waiting in an empty call.
+  NoAnswer,
 }
 
 /// Push-to-talk: the microphone is open only while the shortcut is held.

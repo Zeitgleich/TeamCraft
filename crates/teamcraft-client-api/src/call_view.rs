@@ -12,8 +12,8 @@ use crate::crash_reporting::CallReport;
 use crate::model::TimestampMs;
 
 use crate::calls::{
-  ActiveCall, BackgroundEffect, CallEndReason, CallRequest, IncomingCall, RemoteVideoTrack, RunningCall,
-  ScreenShareSound,
+  ActiveCall, BackgroundEffect, CallEndReason, CallKind, CallRequest, IncomingCall, RemoteVideoTrack,
+  RunningCall, ScreenShareSound,
 };
 
 /// Calls of the user's conversations and the call this device is in.
@@ -225,21 +225,53 @@ impl CallView {
     is_other_side_in && !is_another_own_device_in
   }
 
-  /// The signal ends the call this device is in for both (issue #997): the other side of the 1:1
-  /// call left. The device then leaves with the hang-up tone. A call that moved into a meeting
-  /// isn't ended that way; the device follows it there.
+  /// The signal ends the call this device is in: the other side of the 1:1 call left, so it ended
+  /// for both (issue #997), or nobody answered ([`Self::is_unanswered`]). The device then leaves
+  /// with the hang-up tone. A call that moved into a meeting isn't ended that way; the device
+  /// follows it there.
   pub fn is_end_of_active(&self, signal: &CallSignal) -> bool {
-    let CallSignal::Ended {
-      conversation,
-      cause: CallEndCause::OneSideLeft,
-    } = signal
-    else {
-      return false;
-    };
-    self
+    self.end_of_active(signal).is_some()
+  }
+
+  /// Why the signal ends the call this device is in, if it does.
+  fn end_of_active(&self, signal: &CallSignal) -> Option<CallEndReason> {
+    let active = self
       .maybe_active
       .as_ref()
-      .is_some_and(|active| active.conversation == *conversation && active.maybe_moved_to.is_none())
+      .filter(|active| active.maybe_moved_to.is_none())?;
+    match signal {
+      CallSignal::Ended {
+        conversation,
+        cause: CallEndCause::OneSideLeft,
+      } if active.conversation == *conversation => Some(CallEndReason::OtherSideLeft),
+      CallSignal::Running {
+        conversation,
+        is_ringing: false,
+        devices,
+        ..
+      } if active.conversation == *conversation && self.is_unanswered(active, devices) => {
+        Some(CallEndReason::NoAnswer)
+      },
+      _ => None,
+    }
+  }
+
+  /// This device's 1:1 call stopped ringing the other side (the ring timed out, or they declined)
+  /// while nobody but the user's own devices is in it: nobody answered. The ring stops for good the
+  /// moment somebody joins, so a call that rang before and doesn't now, with only the user in it,
+  /// is one the other side never came to. Phones and desktop alike then say "No answer" and leave,
+  /// as a phone does, instead of showing "Calling…" in an empty call.
+  fn is_unanswered(&self, active: &ActiveCall, devices: &[CallRosterEntry]) -> bool {
+    let Some(this_device) = self.maybe_this_device else {
+      return false;
+    };
+    let was_ringing = self
+      .running
+      .get(&active.conversation)
+      .is_some_and(|running| running.is_ringing);
+    active.kind == CallKind::Direct
+      && was_ringing
+      && devices.iter().all(|entry| entry.user_id == this_device.user_id)
   }
 
   /// Stops ringing on this device; the call goes on for the others.
@@ -261,6 +293,10 @@ impl CallView {
 
   /// Applies a call event; `true` if the UI should read again.
   pub fn apply_signal(&mut self, signal: CallSignal) -> bool {
+    // Read before the signal changes the roster: whether the call rang until now decides it.
+    if let Some(reason) = self.end_of_active(&signal) {
+      self.maybe_end_reason = Some(reason);
+    }
     match signal {
       CallSignal::Running {
         conversation,
@@ -281,10 +317,7 @@ impl CallView {
           },
         );
       },
-      CallSignal::Ended { conversation, cause } => {
-        if self.is_end_of_active(&CallSignal::Ended { conversation, cause }) {
-          self.maybe_end_reason = Some(CallEndReason::OtherSideLeft);
-        }
+      CallSignal::Ended { conversation, .. } => {
         self.running.remove(&conversation);
         self.incoming.remove(&conversation);
       },
@@ -550,6 +583,56 @@ mod tests {
       assert!(!view.is_end_of_active(&newer));
       view.apply_signal(newer);
       assert_eq!(view.maybe_end_reason, None);
+    }
+
+    #[test]
+    fn a_ring_that_ends_with_nobody_else_in_the_call_is_no_answer() {
+      let mut view = ringing_view();
+      let signal = running(false, &[entry(1, 10)]);
+
+      assert!(view.is_end_of_active(&signal));
+      assert!(view.apply_signal(signal));
+      assert_eq!(view.maybe_end_reason, Some(CallEndReason::NoAnswer));
+    }
+
+    #[test]
+    fn an_answered_ring_a_call_that_never_rang_and_a_group_call_are_not_no_answer() {
+      let view = ringing_view();
+      assert!(
+        !view.is_end_of_active(&running(false, &[entry(1, 10), entry(2, 20)])),
+        "answered"
+      );
+      assert!(
+        !view.is_end_of_active(&running(true, &[entry(1, 10)])),
+        "still ringing"
+      );
+      assert!(
+        !direct_view(&[entry(1, 10)]).is_end_of_active(&running(false, &[entry(1, 10)])),
+        "never rang"
+      );
+      let mut group = active_view();
+      group.set_this_device(entry(1, 10));
+      group.apply_signal(running(true, &[entry(1, 10)]));
+      assert!(
+        !group.is_end_of_active(&running(false, &[entry(1, 10)])),
+        "a group call"
+      );
+    }
+
+    /// [`direct_view`] alone in the call, ringing the other side.
+    fn ringing_view() -> CallView {
+      let mut view = direct_view(&[entry(1, 10)]);
+      view.apply_signal(running(true, &[entry(1, 10)]));
+      view
+    }
+
+    fn running(is_ringing: bool, devices: &[CallRosterEntry]) -> CallSignal {
+      CallSignal::Running {
+        conversation: conversation(5),
+        participants: devices.iter().map(|entry| entry.user_id).collect(),
+        is_ringing,
+        devices: devices.to_vec(),
+      }
     }
 
     /// This device (user 1, device 10) in the DM call of conversation 5 with `devices` in it.
