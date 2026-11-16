@@ -50,6 +50,7 @@ pub mod call_mini_window;
 pub mod call_notetaker;
 pub mod call_prejoin;
 pub mod call_screen;
+pub mod call_tile;
 pub mod call_video;
 pub mod calls_unavailable;
 pub mod calls_view;
