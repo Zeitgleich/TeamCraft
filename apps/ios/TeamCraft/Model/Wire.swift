@@ -450,6 +450,9 @@ struct Message: Decodable, Equatable, Identifiable, Sendable {
   var reactions: [Reaction] = []
   /// `nil` for messages people wrote and for changes that come with the extras.
   var maybeSystemEvent: SystemEvent?
+  /// A call in the conversation, shown as a tile at its start (docs/notifications.md, "Calls in
+  /// the timeline"); `authorId` is who started it.
+  var maybeCall: CallTile?
   /// Set while this device can't read the message: the bubble shows the placeholder's text
   /// instead of `body` (empty then). It fills in place once readable.
   var maybePlaceholder: Placeholder?
@@ -542,7 +545,9 @@ struct Message: Decodable, Equatable, Identifiable, Sendable {
     maybeThreadId = try container.decodeIfPresent(String.self, forKey: .maybeThreadId)
     reactions = try container.decodeIfPresent([Reaction].self, forKey: .reactions) ?? []
     // A kind this version doesn't know is no system event; the message still shows.
-    maybeSystemEvent = (try? container.decodeIfPresent(MessageKind.self, forKey: .kind))?.maybeSystemEvent
+    let maybeKind = try? container.decodeIfPresent(MessageKind.self, forKey: .kind)
+    maybeSystemEvent = maybeKind?.maybeSystemEvent
+    maybeCall = maybeKind?.maybeCall
     maybePlaceholder = try container.decodeIfPresent(Placeholder.self, forKey: .maybePlaceholder)
     maybeSource = try? container.decodeIfPresent(Source.self, forKey: .maybeSource)
     maybeImported = try? container.decodeIfPresent(Imported.self, forKey: .maybeImported)
@@ -574,10 +579,45 @@ struct Reaction: Decodable, Equatable, Sendable {
   }
 }
 
-/// `MessageKind` of the core, externally tagged: `"User"`, `"Change"`, `{"System": event}` or
-/// `{"Log": level}`. Only the system events matter to the app.
+/// A call's tile in the timeline: the core's `CallTile`.
+struct CallTile: Decodable, Equatable, Sendable {
+  enum State: Equatable, Sendable {
+    case ongoing
+    /// `nil`: the server lost the end, so there is no duration.
+    case ended(maybeDurationMs: Int64?)
+  }
+
+  let call: String
+  let state: State
+  /// The call rang the user and they never joined.
+  var isMissed = false
+
+  init(call: String, state: State, isMissed: Bool = false) {
+    self.call = call
+    self.state = state
+    self.isMissed = isMissed
+  }
+
+  private enum CodingKeys: String, CodingKey { case call, state, isMissed }
+  private enum StateKeys: String, CodingKey { case state, durationMs }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    call = try container.decode(String.self, forKey: .call)
+    isMissed = try container.decodeIfPresent(Bool.self, forKey: .isMissed) ?? false
+    let fields = try container.nestedContainer(keyedBy: StateKeys.self, forKey: .state)
+    let name = try fields.decode(String.self, forKey: .state)
+    let maybeDurationMs = try fields.decodeIfPresent(Int64.self, forKey: .durationMs)
+    // An unknown state of a newer core reads as over, without a duration.
+    state = name == "ongoing" ? .ongoing : .ended(maybeDurationMs: maybeDurationMs)
+  }
+}
+
+/// `MessageKind` of the core, externally tagged: `"User"`, `"Change"`, `{"System": event}`,
+/// `{"Call": tile}` or `{"Log": level}`. Only the system events and calls matter to the app.
 private struct MessageKind: Decodable {
-  let maybeSystemEvent: Message.SystemEvent?
+  var maybeSystemEvent: Message.SystemEvent?
+  var maybeCall: CallTile?
 
   private struct Key: CodingKey {
     let stringValue: String
@@ -589,6 +629,10 @@ private struct MessageKind: Decodable {
 
   init(from decoder: Decoder) throws {
     // "User" and "Change" are plain strings; "Log" carries a level.
+    if let container = try? decoder.container(keyedBy: Key.self), container.contains(Key("Call")) {
+      maybeCall = try? container.decode(CallTile.self, forKey: Key("Call"))
+      return
+    }
     guard let container = try? decoder.container(keyedBy: Key.self), container.contains(Key("System")) else {
       maybeSystemEvent = nil
       return

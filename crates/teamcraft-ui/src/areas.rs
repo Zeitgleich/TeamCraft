@@ -34,6 +34,7 @@ use crate::components::admin_console::AdminConsole;
 use crate::components::bookmarks::BookmarksDialog;
 use crate::components::call_prejoin::PreJoinScreen;
 use crate::components::call_screen::CallScreen;
+use crate::components::call_tile::CallTileRow;
 use crate::components::calls_unavailable::CallsUnavailableDialog;
 use crate::components::calls_view::CallsView;
 use crate::components::canvas_view::CanvasView;
@@ -90,7 +91,7 @@ use crate::components::workspace_dialogs::{
 use crate::i18n::use_i18n;
 use crate::lightbox::MediaKey;
 use crate::meetings::GuestLink;
-use crate::model::{ConversationId, MessageId, SpaceId, UserId};
+use crate::model::{CallTile, ConversationId, Message, MessageId, SpaceId, UserId};
 use crate::reactive::SetIfAlive;
 use crate::session::SessionControl;
 use crate::settings::Settings;
@@ -196,6 +197,9 @@ areas! {
   call_screen(request: CallRequest) => calls: view! { <CallScreen request=request /> };
   /// "Add to call" is a member's: in `dialogs`, not in the call screens' module a guest loads (#1413).
   add_to_call(conversation: ConversationId) => dialogs: view! { <AddToCallDialog conversation=conversation /> };
+  /// A call's tile in the timeline (docs/notifications.md, "Calls in the timeline"), with the first
+  /// one shown. Not in `calls`, which a guest's meeting loads.
+  call_tile(message: Message, tile: CallTile) => call_tiles: view! { <CallTileRow message=message tile=tile /> };
   /// The bar of a call going on in a conversation, once there is one: it leads to the call screens.
   huddle_bar(conversation: ConversationId) => calls: view! { <HuddleBarContent conversation=conversation /> };
   /// The bar of a minimized call above the app (#1141).

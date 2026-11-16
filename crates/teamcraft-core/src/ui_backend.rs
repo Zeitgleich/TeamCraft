@@ -24,12 +24,12 @@ use teamcraft_client_api::files_query::{FilesPage, FilesQuery};
 use teamcraft_client_api::live::LiveSnapshot;
 use teamcraft_client_api::meeting_invitees::ChatInvitees;
 use teamcraft_client_api::model::{
-  Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, DeviceSetup, GapEdge,
-  HistoryGap, ImportedAuthorView, ImportedFrom, ImportedMark, InviteMailState, JoinableSpace,
-  MembershipIssue, MentionableGroup, Message, MessageKind, OlderHistory, PENDING_ID_BIT, PendingInvite,
-  Placeholder, PresenceStatus, Reaction, SidebarCategory, Space, SpaceId, SpaceMember, SpaceRoster,
-  SystemEvent, ThreadId, ThreadSummary, TimestampMs, TypingNow, UnseenReactions, User, UserId, hue_from_hex,
-  pending_message_id,
+  Bookmark, BookmarkKind, CallTile, CallTileState, Conversation, ConversationId, ConversationKind,
+  CustomStatus, DeviceSetup, GapEdge, HistoryGap, ImportedAuthorView, ImportedFrom, ImportedMark,
+  InviteMailState, JoinableSpace, MembershipIssue, MentionableGroup, Message, MessageKind, OlderHistory,
+  PENDING_ID_BIT, PendingInvite, Placeholder, PresenceStatus, Reaction, SidebarCategory, Space, SpaceId,
+  SpaceMember, SpaceRoster, SystemEvent, ThreadId, ThreadSummary, TimestampMs, TypingNow, UnseenReactions,
+  User, UserId, hue_from_hex, pending_message_id,
 };
 use teamcraft_proto::synced_settings::{SettingWrite, SyncedSettings};
 use teamcraft_proto::{
@@ -65,9 +65,9 @@ use crate::notify_rules::{MentionPreferences, load_mention_preferences};
 use crate::people_names::shown_name;
 use crate::records::{self, Draft};
 use crate::store::{
-  BookmarkItem, ConversationEvent, FeedVersion, LocalStore, MessageContent, MessageEdge, MessageFilter,
-  MessageMeta, MessageOrder, MessageSlot, StoreError, StoredMessage, Table, Unreadable, read_together,
-  try_write_group, write_group,
+  BookmarkItem, CallLine, CallLineState, ConversationEvent, FeedVersion, LocalStore, MessageContent,
+  MessageEdge, MessageFilter, MessageMeta, MessageOrder, MessageSlot, StoreError, StoredMessage, Table,
+  Unreadable, read_together, try_write_group, write_group,
 };
 
 /// Rows read at a time when a list's anchor is looked for by its time ([`FeedAnchor`]).
@@ -1935,6 +1935,11 @@ impl<S: LocalStore> CoreChatBackend<S> {
     // the import account adding people: they are part of the import.
     let maybe_importer = self.importer();
     move |message: &StoredMessage| {
+      // A call's line is no news to read: its start rang or showed in the conversation already,
+      // and the server doesn't count it either (docs/notifications.md, "Calls in the timeline").
+      if message.maybe_call_line().is_some() {
+        return false;
+      }
       // Not readable yet: it may turn out to be a reaction or an edit, so it counts once it is
       // decrypted (issue #888).
       if message.maybe_unreadable.is_some() {
@@ -2012,6 +2017,12 @@ impl<S: LocalStore> CoreChatBackend<S> {
     // Shown with its original author and time only from the import account (e2ee.md §4.10).
     let authorship = Authorship::of(stored, relations.maybe_importer);
     let (kind, author) = match &stored.content {
+      MessageContent::Event {
+        event: ConversationEvent::Call(line),
+      } => (
+        MessageKind::Call(call_tile(line)),
+        line.maybe_started_by.unwrap_or(stored.sender_user_id),
+      ),
       MessageContent::Event { event } => system_view(event, stored.sender_user_id),
       _ => (MessageKind::User, authorship.author),
     };
@@ -4335,7 +4346,27 @@ fn system_view(event: &ConversationEvent, sender: UserId) -> (MessageKind, UserI
     | ConversationEvent::Moved { .. }
     | ConversationEvent::AdminJoined { .. }
     | ConversationEvent::CallMoved { .. } => (MessageKind::Change, sender),
+    ConversationEvent::Call(line) => (
+      MessageKind::Call(call_tile(line)),
+      line.maybe_started_by.unwrap_or(sender),
+    ),
     ConversationEvent::Unknown => (MessageKind::User, sender),
+  }
+}
+
+/// How a call line shows (docs/notifications.md, "Calls in the timeline").
+fn call_tile(line: &CallLine) -> CallTile {
+  let state = match line.state {
+    CallLineState::Ongoing => CallTileState::Ongoing,
+    CallLineState::Ended { maybe_ended_at_ms } => CallTileState::Ended {
+      maybe_duration_ms: maybe_ended_at_ms
+        .and_then(|ended_at| u64::try_from(ended_at.saturating_sub(line.started_at_ms)).ok()),
+    },
+  };
+  CallTile {
+    call: line.call,
+    state,
+    is_missed: line.is_missed,
   }
 }
 

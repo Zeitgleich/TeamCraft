@@ -906,6 +906,33 @@ pub enum MessageKind {
   Change,
   /// One line of an integration channel, rendered in the compact log view.
   Log(LogLevel),
+  /// A call in the conversation, shown as a tile at its start (docs/notifications.md, "Calls in the
+  /// timeline"). `author` is who started it.
+  Call(CallTile),
+}
+
+/// What a call's tile in the timeline shows.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallTile {
+  pub call: teamcraft_proto::CallId,
+  pub state: CallTileState,
+  /// The call rang the user and they never joined.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_missed: bool,
+}
+
+/// Whether a call goes on, as its tile shows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CallTileState {
+  /// Running: the tile offers to join.
+  Ongoing,
+  /// Over. `duration_ms` is absent when the server didn't record the end (a call it lost in a
+  /// restart).
+  Ended {
+    #[serde(rename = "duration_ms", default, skip_serializing_if = "Option::is_none")]
+    maybe_duration_ms: Option<u64>,
+  },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1403,5 +1430,32 @@ mod tests {
     for expiry in StatusExpiry::ALL {
       assert_eq!(StatusExpiry::from_slug(expiry.slug()), expiry);
     }
+  }
+
+  /// The apps read call tiles from this JSON (docs/notifications.md, "Calls in the timeline").
+  #[test]
+  fn call_tiles_keep_their_wire_format() {
+    let call: teamcraft_proto::CallId = serde_json::from_value(serde_json::json!("7")).unwrap();
+    let ongoing = MessageKind::Call(CallTile {
+      call,
+      state: CallTileState::Ongoing,
+      is_missed: false,
+    });
+    assert_eq!(
+      serde_json::to_value(&ongoing).unwrap(),
+      serde_json::json!({ "Call": { "call": "7", "state": { "state": "ongoing" } } })
+    );
+    let ended = MessageKind::Call(CallTile {
+      call,
+      state: CallTileState::Ended {
+        maybe_duration_ms: Some(185_000),
+      },
+      is_missed: true,
+    });
+    let json = serde_json::json!({
+      "Call": { "call": "7", "state": { "state": "ended", "duration_ms": 185_000 }, "is_missed": true }
+    });
+    assert_eq!(serde_json::to_value(&ended).unwrap(), json);
+    assert_eq!(serde_json::from_value::<MessageKind>(json).unwrap(), ended);
   }
 }

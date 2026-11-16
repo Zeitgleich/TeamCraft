@@ -1361,12 +1361,12 @@ fn newest_readable_at(rows: &[MessageView]) -> Option<TimestampMs> {
     .max()
 }
 
-/// The newest row that isn't a system line (a join, a rename), of rows oldest first.
+/// The newest row that isn't a system line (a join, a rename) or a call's tile, of rows oldest first.
 fn newest_written(rows: &[MessageView]) -> Option<&MessageView> {
   rows
     .iter()
     .rev()
-    .find(|message| !matches!(message.kind, MessageKind::System(_)))
+    .find(|message| !matches!(message.kind, MessageKind::System(_) | MessageKind::Call(_)))
 }
 
 #[cfg(test)]

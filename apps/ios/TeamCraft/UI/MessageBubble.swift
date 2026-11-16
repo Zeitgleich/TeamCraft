@@ -82,9 +82,16 @@ struct MessageRow: View {
   /// The reactions the add-reaction pill offers, and how to react; nil where the user can't.
   var quickReactions: [String] = []
   var maybeOnReact: ((String) -> Void)?
+  /// Joins the conversation's call from its tile; the conversation is a channel (a huddle).
+  var onJoinCall: () -> Void = {}
+  var isChannel = false
 
   var body: some View {
-    if let line = SystemLine(message: message, maybeExtras: maybeExtras, names: displayNames) {
+    if let call = message.maybeCall {
+      CallTileRow(
+        call: call, starterName: message.authorName, sentDate: message.sentDate, isChannel: isChannel,
+        onJoin: onJoinCall)
+    } else if let line = SystemLine(message: message, maybeExtras: maybeExtras, names: displayNames) {
       VStack(spacing: 2) {
         Text(line.text)
           .font(.app(.footnote).italic())

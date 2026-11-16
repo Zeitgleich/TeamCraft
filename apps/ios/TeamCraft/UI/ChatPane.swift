@@ -685,9 +685,14 @@ struct ChatPane: View {
       canReact: conversation.canReact,
       onOpenConversation: { model.openConversationId = $0 },
       quickReactions: Self.quickReactions,
-      maybeOnReact: conversation.canReact && message.maybePlaceholder == nil ? { react(message, $0) } : nil
+      maybeOnReact: conversation.canReact && message.maybePlaceholder == nil ? { react(message, $0) } : nil,
+      onJoinCall: {
+        model.calls.startCall(conversationId: message.conversationId, displayName: conversation.name)
+      },
+      isChannel: !conversation.isDirect
     )
-    if message.maybePlaceholder != nil {
+    // A call's tile (docs/notifications.md, "Calls in the timeline") is no message to reply to or act on.
+    if message.maybePlaceholder != nil || message.maybeCall != nil {
       row
         .padding(.top, entry.isContinuation ? 2 : 8)
         .background(maybeHighlighted == message.id ? Theme.accentSoft : .clear)

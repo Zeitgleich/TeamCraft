@@ -12,6 +12,7 @@ mod attachments;
 mod attested;
 mod backgrounds;
 pub mod bug_reports;
+mod call_lines;
 mod calls;
 mod catch_up;
 mod channel_anchor;
@@ -528,6 +529,8 @@ pub struct Client<A, S> {
   /// The calls the call event sink last heard of, per conversation: what [`Client::reconcile_calls`]
   /// compares with the server's list (issue #976).
   heard_calls: HashMap<ConversationId, calls::HeardCall>,
+  /// A call ended since the upkeep last read the call history ([`Client::take_call_lines_stale`]).
+  are_call_lines_stale: bool,
   maybe_preview_fetcher: Option<Box<dyn crate::link_preview::PreviewFetcher>>,
   maybe_jwks_source: Option<Box<dyn JwksSource>>,
   /// Boxed: a client is moved around by value, and this is seldom touched.
@@ -797,6 +800,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       link_requests: Default::default(),
       call_ids: HashMap::new(),
       heard_calls: HashMap::new(),
+      are_call_lines_stale: false,
       maybe_preview_fetcher,
       maybe_jwks_source: None,
       role_signing: Default::default(),

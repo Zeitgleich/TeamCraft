@@ -75,6 +75,10 @@ pub struct Upkeep {
   /// The gateway connection the list of scheduled messages was read for.
   #[cfg(feature = "ui")]
   maybe_scheduled_connection: Option<u64>,
+  /// The gateway connection the call history was read for (docs/notifications.md, "Calls in the timeline").
+  maybe_call_lines_connection: Option<u64>,
+  /// When reading the call history last failed.
+  maybe_call_lines_failed_ms: Option<i64>,
   uploads: UploadMode,
 }
 
@@ -112,6 +116,8 @@ impl Upkeep {
       last_scheduled_event_read_ms: i64::MIN,
       #[cfg(feature = "ui")]
       maybe_scheduled_connection: None,
+      maybe_call_lines_connection: None,
+      maybe_call_lines_failed_ms: None,
       uploads: UploadMode::Inline,
     }
   }
@@ -218,6 +224,8 @@ impl Upkeep {
     if let Err(error) = client.index_search_step(crate::search_index::DEFAULT_STEP_MESSAGES) {
       tracing::warn!(%error, "the local search index was not brought up to date");
     }
+    // On the heap: the read is rare, and its future would add to every tick's frame.
+    is_changed |= Box::pin(self.tend_call_lines(client, now, interval_ms)).await;
     #[cfg(feature = "ui")]
     {
       // On the heap: sealing catches groups up, too big a future for the frame of every tick's caller.
@@ -228,6 +236,45 @@ impl Upkeep {
       UploadMode::Host => flush_sends(client).await,
     };
     is_changed | is_flushed
+  }
+
+  /// Keeps the calls in the timeline (docs/notifications.md, "Calls in the timeline"): the call history is
+  /// read once per gateway connection (gateway call events bring starts and ends in between) and
+  /// after a call ended, for when it ended. After a failed read not before the interval.
+  async fn tend_call_lines<A: ServerApi, S: LocalStore>(
+    &mut self,
+    client: &mut Client<A, S>,
+    now: i64,
+    interval_ms: i64,
+  ) -> bool {
+    let maybe_connection = client.gateway_connections();
+    let is_new_connection =
+      maybe_connection.is_some() && maybe_connection != self.maybe_call_lines_connection;
+    let has_failed_lately = self
+      .maybe_call_lines_failed_ms
+      .is_some_and(|failed| now.abs_diff(failed) < interval_ms.unsigned_abs());
+    if has_failed_lately {
+      return false;
+    }
+    let is_stale = client.take_call_lines_stale();
+    if !is_new_connection && !is_stale {
+      return false;
+    }
+    match client.sync_call_lines().await {
+      Ok(changed) => {
+        self.maybe_call_lines_connection = maybe_connection;
+        self.maybe_call_lines_failed_ms = None;
+        changed > 0
+      },
+      Err(error) => {
+        self.maybe_call_lines_failed_ms = Some(now);
+        if is_stale {
+          client.mark_call_lines_stale();
+        }
+        tracing::debug!(%error, "the call history was not read yet");
+        false
+      },
+    }
   }
 
   /// Asks the members again where this device can't write (e2ee.md §4.6, "Asking again for a lost

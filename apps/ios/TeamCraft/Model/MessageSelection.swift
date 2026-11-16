@@ -40,6 +40,7 @@ struct MessageSelection: Equatable {
   /// can read, not a system line.
   static func isSelectable(_ message: Message) -> Bool {
     message.maybePlaceholder == nil && !message.isPending && message.maybeSystemEvent == nil
+      && message.maybeCall == nil
   }
 
   /// The picked messages of `feed`, oldest first: the order they are forwarded and copied in.

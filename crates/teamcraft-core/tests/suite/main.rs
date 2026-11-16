@@ -13,6 +13,7 @@ mod admin_joins;
 mod background_work;
 mod backgrounds;
 mod bug_reports;
+mod call_lines;
 mod calls;
 mod canvas;
 mod catch_up;

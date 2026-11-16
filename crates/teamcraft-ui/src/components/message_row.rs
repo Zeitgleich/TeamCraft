@@ -9,6 +9,7 @@ use teamcraft_client_api::model::{ConversationId, MessageSource};
 use teamcraft_client_api::upload_pill::UploadPill;
 use teamcraft_proto::HistoryPolicy;
 
+use crate::areas::{self, Place, lazy_area};
 use crate::channel_access::can_react_in;
 use crate::clock::{format_relative_short, format_time, format_time_seconds, local_day, now_ms};
 use crate::components::avatar::{Avatar, AvatarSize};
@@ -103,6 +104,13 @@ pub fn MessageRow(
     // Decided by the kind, not the extras: a backend that loads them later (the desktop app's)
     // shows the line as soon as they arrive.
     MessageKind::Change => workspace_text_line(workspace_text(&message)).into_any(),
+    // Loaded with the first call tile shown (`areas::call_tile`): a first visit doesn't need it.
+    MessageKind::Call(tile) => {
+      let (message, tile) = (message.clone(), tile.clone());
+      lazy_area(Place::Inline, move || {
+        areas::call_tile(message.clone(), tile.clone())
+      })
+    },
     MessageKind::User => {
       let is_grouped = is_grouped(&message, maybe_prev.as_ref());
       match message.maybe_placeholder {

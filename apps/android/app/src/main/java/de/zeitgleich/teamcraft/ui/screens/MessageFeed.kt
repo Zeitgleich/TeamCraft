@@ -1114,6 +1114,17 @@ private fun MessageRow(
   maybeOnStartSelect: (() -> Unit)? = null,
 ) {
   val message = entry.message
+  message.maybeCall?.let { call ->
+    val conversationName = snapshot?.conversation(message.conversation)?.name.orEmpty()
+    CallTileRow(
+      call = call,
+      starterName = snapshot?.user(message.author)?.displayName.orEmpty(),
+      sentAt = message.sentAt,
+      isChannel = snapshot?.conversation(message.conversation)?.let { !it.isDirect } == true,
+      onJoin = { viewModel.startCall(message.conversation, conversationName) },
+    )
+    return
+  }
   val maybeSystemLine = systemLine(message, maybeExtras) { snapshot?.user(it)?.displayName.orEmpty() }
   if (maybeSystemLine != null) {
     // Joins, renames, who added whom: a quiet centred line in the desktop and web wording (#769).
@@ -2266,7 +2277,7 @@ private fun SelectableRow(
   onToggle: (Message) -> Unit,
   content: @Composable () -> Unit,
 ) {
-  val isSelectable = selection != null && message.maybePlaceholder == null &&
+  val isSelectable = selection != null && message.maybePlaceholder == null && message.maybeCall == null &&
     systemLine(message, extras) { snapshot?.user(it)?.displayName.orEmpty() } == null
   if (!isSelectable) {
     content()

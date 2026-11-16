@@ -182,9 +182,34 @@ data class Message(
   val maybeSystemEvent: JsonElement?
     get() = (kind as? JsonObject)?.get("System")
 
+  /**
+   * A call in the conversation, shown as a tile at its start (docs/notifications.md, "Calls in the
+   * timeline"); [author] is who started it. `null` for anything else.
+   */
+  val maybeCall: CallTile?
+    get() = (kind as? JsonObject)?.get("Call")?.let { runCatching { WireJson.decodeFromJsonElement(CallTile.serializer(), it) }.getOrNull() }
+
   companion object {
     const val PENDING_ID_BIT = 1L shl 62
   }
+}
+
+/** A call's tile in the timeline: the core's `CallTile`. */
+@Serializable
+data class CallTile(
+  val call: String,
+  val state: CallTileState,
+  /** The call rang the user and they never joined. */
+  @SerialName("is_missed") val isMissed: Boolean = false,
+)
+
+/** `{"state":"ongoing"}` or `{"state":"ended","duration_ms":…}` (no duration: the server lost the end). */
+@Serializable
+data class CallTileState(
+  val state: String,
+  @SerialName("duration_ms") val maybeDurationMs: Long? = null,
+) {
+  val isOngoing: Boolean get() = state == "ongoing"
 }
 
 @Serializable
