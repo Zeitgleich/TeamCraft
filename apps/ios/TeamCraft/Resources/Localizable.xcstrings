@@ -1473,6 +1473,22 @@
         }
       }
     },
+    "call_no_answer": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No answer"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keine Antwort"
+          }
+        }
+      }
+    },
     "call_notetaker_add": {
       "localizations": {
         "en": {

@@ -109,6 +109,8 @@ final class CallManager: NSObject, @unchecked Sendable {
   private static let leaveTimeout: Duration = .seconds(5)
   /// How long "being added" shows after asking, if the notetaker doesn't come.
   private static let notetakerAskedNotice: Duration = .seconds(90)
+  /// How long a call whose ring ended waits for somebody who answered at the last moment.
+  private static let unansweredGrace: Duration = .seconds(3)
 
   /// Main-thread state; the in-call screen observes it.
   private(set) var activeCall: ActiveCall? {
@@ -161,6 +163,8 @@ final class CallManager: NSObject, @unchecked Sendable {
   /// announcement is in and `acceptCallMove` checked it.
   @ObservationIgnored private var maybeAnnouncedMove: CallMove?
   @ObservationIgnored private var maybeLeaveWaiter: LeaveWaiter?
+  /// This device hangs up because nobody answered: the end note says "No answer".
+  @ObservationIgnored private var isEndingUnanswered = false
   /// The screen goes off at the ear while a call runs on the receiver; made on the main thread.
   @ObservationIgnored private var maybeProximity: CallProximity?
   @ObservationIgnored private var proximityState: CallProximityState?
@@ -271,6 +275,19 @@ final class CallManager: NSObject, @unchecked Sendable {
     guard let call = activeCall else { return }
     isEndingFromApp = true
     controller.request(CXTransaction(action: CXEndCallAction(call: call.id)), completion: { _ in })
+  }
+
+  /// The ring of this device's one-to-one call ended (ring timeout, declined everywhere): unless
+  /// somebody came in within a grace period, the call ends with "No answer", as on a phone,
+  /// instead of waiting in an empty call.
+  @MainActor
+  private func endIfUnanswered(_ callId: UUID) async {
+    try? await Task.sleep(for: Self.unansweredGrace)
+    guard let call = activeCall, call.id == callId, call.phase == .connected, call.participantCount == 0 else { return }
+    let isDirect = await AppModel.shared.conversations().first { $0.id == call.conversationId }?.kind == .direct
+    guard isDirect, activeCall?.id == callId, activeCall?.participantCount == 0 else { return }
+    isEndingUnanswered = true
+    hangUp()
   }
 
   // MARK: Moving into a meeting room
@@ -867,7 +884,8 @@ extension CallManager: CallListener {
       }
       self.activeCall = call
       if state.phase == .ended {
-        self.maybeEndNote = Self.note(for: state.maybeEndReason)
+        self.maybeEndNote = self.isEndingUnanswered ? "call_no_answer" : Self.note(for: state.maybeEndReason)
+        self.isEndingUnanswered = false
         self.provider.reportCall(with: call.id, endedAt: Date(), reason: Self.reason(for: state.maybeEndReason))
         self.maybeSession = nil
         self.clear()
@@ -884,7 +902,12 @@ extension CallManager: CallListener {
 
   func onRingEnded(conversationId: String) {
     DispatchQueue.main.async {
-      guard let call = self.activeCall, call.conversationId == conversationId, call.phase == .ringing else { return }
+      guard let call = self.activeCall, call.conversationId == conversationId else { return }
+      guard call.phase == .ringing else {
+        // This device's own call stopped ringing the others: maybe nobody answered.
+        if call.isOutgoing { Task { @MainActor in await self.endIfUnanswered(call.id) } }
+        return
+      }
       // Answered on another device, declined or over: stop ringing here.
       self.provider.reportCall(with: call.id, endedAt: Date(), reason: .answeredElsewhere)
       self.clear()

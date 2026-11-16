@@ -833,6 +833,28 @@ class CallController(
     }
   }
 
+  /**
+   * The ring of this device's one-to-one call ended: unless somebody came in (within
+   * [UNANSWERED_GRACE_MS]), the caller hears "No answer" and the call ends.
+   */
+  private fun endIfUnanswered(conversationId: String) {
+    scope.launch {
+      delay(UNANSWERED_GRACE_MS)
+      val now = state.value ?: return@launch
+      if (now.conversationId != conversationId || now.phase != CallPhase.CONNECTED || maybeSession == null) return@launch
+      val isOneToOne = runCatching {
+        core.conversations().firstOrNull { it.id == conversationId }?.kind == ConversationKind.DIRECT
+      }.getOrDefault(false)
+      val hadOthers = hadOthersIn == conversationId
+      if (!isUnanswered(isOneToOne, hadOthers, now.participantCount.toInt(), now.reconnectingCount.toInt())) return@launch
+      Log.i(TAG, "nobody answered: ending the call")
+      ContextCompat.getMainExecutor(context).execute {
+        Toast.makeText(context, R.string.call_no_answer, Toast.LENGTH_LONG).show()
+      }
+      hangUp()
+    }
+  }
+
   /** The name of a conversation this device knows (the notes by their title); `null` for one it doesn't. */
   private suspend fun conversationNameOf(conversationId: String): String? =
     runCatching {
@@ -998,6 +1020,8 @@ class CallController(
     override fun onRingEnded(conversationId: String) {
       // Answered on another device, declined or over: stop ringing here.
       if (ringing.value?.conversationId == conversationId) endRing()
+      // This device's own call stopped ringing the others: maybe nobody answered.
+      if (state.value?.conversationId == conversationId && maybeSession != null) endIfUnanswered(conversationId)
     }
 
     override fun onCallMoved(fromConversationId: String, toConversationId: String) {
