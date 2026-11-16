@@ -1,5 +1,6 @@
 //! The periodic upkeep asks the server nothing on a timer while all is well (issue #252): account
-//! data is read once per gateway connection and when this device changed it.
+//! data and the call history are read once per gateway connection, account data also when this
+//! device changed it.
 // Test helpers outside `#[test]` functions panic on failure like the tests themselves.
 #![allow(clippy::unwrap_used)]
 
@@ -50,8 +51,9 @@ async fn each_new_connection_reads_the_account_data_once() {
 
   assert_eq!(
     server.rest_call_count(user),
-    before + 1 + u64::from(cfg!(feature = "ui")),
-    "one key bag read for the new connection, and with a UI one read of the scheduled messages"
+    before + 2 + u64::from(cfg!(feature = "ui")),
+    "one key bag read and one call history read (docs/notifications.md, \"Calls in the timeline\") \
+     for the new connection, and with a UI one read of the scheduled messages"
   );
 }
 

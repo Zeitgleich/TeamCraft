@@ -224,7 +224,8 @@ impl Upkeep {
     if let Err(error) = client.index_search_step(crate::search_index::DEFAULT_STEP_MESSAGES) {
       tracing::warn!(%error, "the local search index was not brought up to date");
     }
-    is_changed |= self.tend_call_lines(client, now, interval_ms).await;
+    // On the heap: the read is rare, and its future would add to every tick's frame.
+    is_changed |= Box::pin(self.tend_call_lines(client, now, interval_ms)).await;
     #[cfg(feature = "ui")]
     {
       // On the heap: sealing catches groups up, too big a future for the frame of every tick's caller.
