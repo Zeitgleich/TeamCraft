@@ -111,7 +111,9 @@ final class CallManager: NSObject, @unchecked Sendable {
   private static let notetakerAskedNotice: Duration = .seconds(90)
 
   /// Main-thread state; the in-call screen observes it.
-  private(set) var activeCall: ActiveCall?
+  private(set) var activeCall: ActiveCall? {
+    didSet { followProximity() }
+  }
   /// The call screen is put away while the call goes on (#2066): the app shows a bar to return.
   /// A new call always opens its screen.
   private(set) var isMinimised = false
@@ -159,6 +161,9 @@ final class CallManager: NSObject, @unchecked Sendable {
   /// announcement is in and `acceptCallMove` checked it.
   @ObservationIgnored private var maybeAnnouncedMove: CallMove?
   @ObservationIgnored private var maybeLeaveWaiter: LeaveWaiter?
+  /// The screen goes off at the ear while a call runs on the receiver; made on the main thread.
+  @ObservationIgnored private var maybeProximity: CallProximity?
+  @ObservationIgnored private var proximityState: CallProximityState?
 
   override init() {
     let configuration = CXProviderConfiguration()
@@ -170,6 +175,19 @@ final class CallManager: NSObject, @unchecked Sendable {
     provider = CXProvider(configuration: configuration)
     super.init()
     provider.setDelegate(self, queue: .main)
+  }
+
+  /// Follows the call with the screen-off at the ear (`CallProximity`), on the main thread.
+  private func followProximity() {
+    let state = activeCall.map { CallProximityState(isRingingIn: $0.phase == .ringing && !$0.isOutgoing) }
+    guard state != proximityState else { return }
+    proximityState = state
+    DispatchQueue.main.async {
+      MainActor.assumeIsolated {
+        if self.maybeProximity == nil { self.maybeProximity = CallProximity() }
+        self.maybeProximity?.follow(state)
+      }
+    }
   }
 
   /// Registers for the forwarded wake-ups; call at launch, before the app finished starting, so a

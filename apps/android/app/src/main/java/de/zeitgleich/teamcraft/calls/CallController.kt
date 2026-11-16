@@ -70,6 +70,9 @@ class CallController(
   private val frames = MutableStateFlow<Map<UInt, Bitmap>>(emptyMap())
   private val speaker = MutableStateFlow(false)
   private val routes = MutableStateFlow<List<AudioRoute>>(emptyList())
+  private val proximity = CallProximity(context)
+  /** The call's sound comes from the earpiece now (Telecom's current endpoint). */
+  @Volatile private var isOnEarpiece = false
   private val currentRouteId = MutableStateFlow<String?>(null)
   @Volatile private var maybeSession: CallSession? = null
   @Volatile private var maybeTelecomJob: Job? = null
@@ -631,6 +634,8 @@ class CallController(
             currentCallEndpoint.collect {
               speaker.value = it.type == CallEndpointCompat.TYPE_SPEAKER
               currentRouteId.value = it.identifier.toString()
+              isOnEarpiece = it.type == CallEndpointCompat.TYPE_EARPIECE
+              followProximity()
             }
           }
         }
@@ -677,6 +682,7 @@ class CallController(
   private suspend fun joinOnce(conversationId: String): Boolean {
     if (conversationId == maybeLeftConversation) maybeLeftConversation = null
     showCall()
+    followProximity()
     if (!hasMicrophone() && !requestMicrophone()) {
       Log.i(TAG, "join: no microphone")
       if (!isJoinAbandoned) report(JoinFailure.MICROPHONE)
@@ -731,6 +737,7 @@ class CallController(
     options = CallOptions()
     isCameraKeptAlive = false
     keepCallAlive()
+    followProximity()
     return true
   }
 
@@ -915,6 +922,8 @@ class CallController(
       session.close()
     }
     maybeTelecomCall = null
+    isOnEarpiece = false
+    proximity.update(isInCall = false, isOnEarpiece = false)
     hadOthersIn = null
     maybeAloneEnd?.cancel()
     maybeAloneEnd = null
@@ -926,6 +935,14 @@ class CallController(
     tracks.value = emptyList()
     frames.value = emptyMap()
     CallService.stop(context)
+  }
+
+  /**
+   * The screen goes off at the ear while this device calls, joins or is in a call on the earpiece;
+   * an incoming call that only rings keeps it on, so it can be answered.
+   */
+  private fun followProximity() {
+    proximity.update(isInCall = maybeSession != null || joining.value, isOnEarpiece = isOnEarpiece)
   }
 
   /** The session, once: whoever takes it leaves and closes it. */
