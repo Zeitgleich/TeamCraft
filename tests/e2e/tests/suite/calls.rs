@@ -75,7 +75,7 @@ async fn a_non_member_gets_no_join_token_for_a_dm_call() {
   };
   let mut alice = Peer::enroll(&stack, "alice").await;
   let mut carol = Peer::enroll(&stack, "carol").await;
-  let bob = Peer::enroll(&stack, "bob").await;
+  let mut bob = Peer::enroll(&stack, "bob").await;
   let dm = alice.client.open_dm(carol.user_id()).await.unwrap();
   carol.wait_joined(dm).await;
 
