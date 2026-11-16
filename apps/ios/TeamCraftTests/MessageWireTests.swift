@@ -59,6 +59,33 @@ final class MessageWireTests: XCTestCase {
     XCTAssertTrue(page.messages[3].isPending)
   }
 
+  /// docs/notifications.md, "Calls in the timeline".
+  func testCallTilesDecodeFromTheMessageKind() throws {
+    let json = """
+      {
+        "conversation": "5", "has_older": false, "undecrypted": 0, "gaps": [], "authors": [],
+        "messages": [
+          {"id": "20", "conversation": "5", "author": "2", "kind": {"Call": {"call": "20", "state": {"state": "ongoing"}}},
+            "sent_at": 1000, "body": "", "is_edited": false, "reactions": [], "reply_count": 0, "maybe_thread": null},
+          {"id": "21", "conversation": "5", "author": "2",
+            "kind": {"Call": {"call": "21", "state": {"state": "ended", "duration_ms": 185000}, "is_missed": true}},
+            "sent_at": 2000, "body": "", "is_edited": false, "reactions": [], "reply_count": 0, "maybe_thread": null},
+          {"id": "22", "conversation": "5", "author": "2", "kind": {"Call": {"call": "22", "state": {"state": "ended"}}},
+            "sent_at": 3000, "body": "", "is_edited": false, "reactions": [], "reply_count": 0, "maybe_thread": null}
+        ]
+      }
+      """
+    let messages = try XCTUnwrap(Wire.decode(MessageTail.self, from: json)).page.messages
+    XCTAssertEqual(messages[0].maybeCall, CallTile(call: "20", state: .ongoing))
+    XCTAssertEqual(
+      messages[1].maybeCall, CallTile(call: "21", state: .ended(maybeDurationMs: 185_000), isMissed: true))
+    XCTAssertEqual(messages[2].maybeCall?.state, .ended(maybeDurationMs: nil))
+    XCTAssertNil(messages[0].maybeSystemEvent)
+    XCTAssertFalse(MessageSelection.isSelectable(messages[0]))
+    XCTAssertEqual(callDuration(185_000), "3:05")
+    XCTAssertEqual(callDuration(3_723_000), "1:02:03")
+  }
+
   func testPlaceholdersSourcesAndImportedAuthors() throws {
     let json = """
       {"answer": "messages", "messages": [

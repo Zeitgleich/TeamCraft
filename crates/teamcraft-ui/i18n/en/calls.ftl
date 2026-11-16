@@ -429,3 +429,11 @@ calls-small-window-never = Never
 call-mini-back = Back to the call
 call-mini-reconnecting = Reconnecting…
 call-mini-label = Call controls
+
+## A call in the timeline (docs/notifications.md, "Calls in the timeline").
+call-tile-call = Call
+call-tile-huddle = Huddle
+call-tile-missed = Missed call
+call-tile-ongoing = Ongoing
+call-tile-ended = Ended
+call-tile-join = Join

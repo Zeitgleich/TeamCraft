@@ -1196,6 +1196,7 @@ fn workspace_event(event: &ConversationEvent, stored: &StoredMessage) -> Option<
     | ConversationEvent::Left
     | ConversationEvent::Renamed { .. }
     | ConversationEvent::TopicChanged { .. }
+    | ConversationEvent::Call(_)
     | ConversationEvent::Unknown => return None,
   })
 }

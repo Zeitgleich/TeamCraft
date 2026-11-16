@@ -9,6 +9,7 @@ use teamcraft_client_api::model::{ConversationId, MessageSource};
 use teamcraft_client_api::upload_pill::UploadPill;
 use teamcraft_proto::HistoryPolicy;
 
+use crate::calls::{CallKind, CallPhase, CallRequest};
 use crate::channel_access::can_react_in;
 use crate::clock::{format_relative_short, format_time, format_time_seconds, local_day, now_ms};
 use crate::components::avatar::{Avatar, AvatarSize};
@@ -27,10 +28,12 @@ use crate::delivery::{Delivery, ReadIndicator, is_delivered, is_read_by_all};
 use crate::feed_motion::{Entrance, RowMotion};
 use crate::i18n::use_i18n;
 use crate::markdown;
+use crate::media_layout::format_duration;
 use crate::message_links::{as_permalink, own_hosts};
 use crate::model::{
-  DeviceSetup, Id, ImportedAuthorView, ImportedFrom, ImportedMark, LogLevel, Message, MessageKind,
-  Placeholder, PresenceStatus, SystemEvent, User, UserId, is_pending, thread_id_of,
+  CallTile, CallTileState, ConversationKind, DeviceSetup, Id, ImportedAuthorView, ImportedFrom, ImportedMark,
+  LogLevel, Message, MessageKind, Placeholder, PresenceStatus, SystemEvent, User, UserId, is_pending,
+  thread_id_of,
 };
 use crate::reactive::use_interval;
 use crate::state::{Overlay, use_app_state};
@@ -103,6 +106,7 @@ pub fn MessageRow(
     // Decided by the kind, not the extras: a backend that loads them later (the desktop app's)
     // shows the line as soon as they arrive.
     MessageKind::Change => workspace_text_line(workspace_text(&message)).into_any(),
+    MessageKind::Call(tile) => call_tile_line(&message, tile.clone(), locale).into_any(),
     MessageKind::User => {
       let is_grouped = is_grouped(&message, maybe_prev.as_ref());
       match message.maybe_placeholder {
@@ -296,6 +300,94 @@ fn LogCopyButton(line: String) -> impl IntoView {
     <button type="button" class="log-copy" aria-label=move || i18n.t("log-copy-line") title=move || i18n.t("log-copy-line") on:click=copy>
       <Icon name=IconName::Copy />
     </button>
+  }
+}
+
+/// A call in the conversation (docs/notifications.md, "Calls in the timeline"): a tile at its start with
+/// who started it and how it stands; a call that goes on offers to join while this device isn't in
+/// it. A channel's call is a huddle, as its bar names it.
+fn call_tile_line(message: &Message, tile: CallTile, locale: &'static str) -> impl IntoView + use<> {
+  let i18n = use_i18n();
+  let state = use_app_state();
+  let call = state.call;
+  let conversation = message.conversation;
+  let message_id = message.id;
+  let maybe_conversation = state.read(|backend| backend.conversation(conversation));
+  let kind = match maybe_conversation
+    .as_ref()
+    .map(|info| (info.kind, crate::meetings::is_meeting_chat(info)))
+  {
+    Some((ConversationKind::Direct, _)) => CallKind::Direct,
+    Some((ConversationKind::Group, _) | (_, true)) => CallKind::Group,
+    _ => CallKind::Huddle,
+  };
+  let starter = state
+    .read(|backend| backend.user(message.author))
+    .map(|user| user.display_name)
+    .unwrap_or_default();
+  let title_key = match (tile.is_missed, kind) {
+    (true, _) => "call-tile-missed",
+    (false, CallKind::Huddle) => "call-tile-huddle",
+    (false, _) => "call-tile-call",
+  };
+  let is_ongoing = tile.state == CallTileState::Ongoing;
+  let state_text = match tile.state {
+    CallTileState::Ongoing => i18n.t("call-tile-ongoing"),
+    CallTileState::Ended {
+      maybe_duration_ms: Some(duration_ms),
+    } => format_duration(duration_ms),
+    CallTileState::Ended {
+      maybe_duration_ms: None,
+    } => i18n.t("call-tile-ended"),
+  };
+  let detail = if starter.is_empty() {
+    state_text
+  } else {
+    format!("{starter} · {state_text}")
+  };
+  let time = format_time(message.sent_at, locale);
+  let title = i18n.t(title_key);
+  let aria_label = format!("{title}, {detail}, {time}");
+  let has_calls = state.read(|backend| backend.has_calls());
+  // Join only while the call still runs here and this device isn't in it.
+  let can_join = Memo::new(move |_| {
+    is_ongoing
+      && !call.is_in_call_for(conversation)
+      && state.read(|backend| backend.huddle(conversation)).is_some()
+  });
+  let join = move |_| {
+    call.is_camera_on.set(false);
+    call.join(CallRequest { conversation, kind });
+  };
+  view! {
+    <div
+      class="msg msg-call"
+      class:msg-highlight=move || state.highlighted.get() == Some(message_id)
+      tabindex="-1"
+      data-nav="row"
+      data-msg-id=message_id.to_string()
+      aria-label=aria_label
+    >
+      <div class="call-tile" class:is-ongoing=is_ongoing class:is-missed=tile.is_missed>
+        <span class="call-tile-icon" aria-hidden="true">
+          <Icon name=if kind == CallKind::Direct { IconName::Phone } else { IconName::Video } />
+        </span>
+        <span class="call-tile-text">
+          <strong class="call-tile-title">{title}</strong>
+          <span class="call-tile-detail" translate="no">{detail}</span>
+        </span>
+        <Show when=move || can_join.get() fallback=|| ()>
+          <button
+            class="btn btn-primary btn-small call-tile-join"
+            disabled=move || !has_calls || call.phase.get() != CallPhase::Idle
+            on:click=join
+          >
+            {move || i18n.t("call-tile-join")}
+          </button>
+        </Show>
+        <time class="call-tile-time" datetime=message.sent_at.to_string()>{time}</time>
+      </div>
+    </div>
   }
 }
 

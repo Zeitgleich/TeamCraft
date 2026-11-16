@@ -434,3 +434,75 @@ button.mention-link:active { opacity: .7; }
   width: 14px;
   height: 14px;
 }
+
+/* A call in the timeline (docs/notifications.md, "Calls in the timeline"): one quiet tile at the call's
+   start; only a call that goes on draws the eye, with its icon in the accent and a Join button. */
+.msg-call {
+  padding: 4px 16px;
+}
+
+.call-tile {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: 26rem;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.call-tile-icon {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+
+.call-tile.is-ongoing .call-tile-icon {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.call-tile.is-missed .call-tile-icon,
+.call-tile.is-missed .call-tile-title {
+  color: var(--danger);
+}
+
+.call-tile-text {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.call-tile-title {
+  font-weight: 600;
+}
+
+.call-tile-detail {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.call-tile-join {
+  flex: none;
+}
+
+.call-tile-time {
+  flex: none;
+  align-self: flex-start;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: var(--tracking-xs);
+}

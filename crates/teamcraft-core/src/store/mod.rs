@@ -471,9 +471,40 @@ pub enum ConversationEvent {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     is_approved: bool,
   },
+  /// A call in the conversation (docs/notifications.md, "Calls in the timeline"), as the server's call
+  /// history records it. Never sent: only a line this device derives from the server's record
+  /// ([`StoredMessage::maybe_server_change`]) shows it, so a member's message can't make one up.
+  Call(CallLine),
   /// From a newer client.
   #[serde(other)]
   Unknown,
+}
+
+/// A call as its line shows it: who started it, when, and how it stands.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallLine {
+  pub call: teamcraft_proto::CallId,
+  #[serde(rename = "started_by", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_started_by: Option<UserId>,
+  /// On the server's clock.
+  pub started_at_ms: i64,
+  pub state: CallLineState,
+  /// The call rang the user and they never joined.
+  #[serde(default, skip_serializing_if = "is_false")]
+  pub is_missed: bool,
+}
+
+/// Whether a call goes on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CallLineState {
+  Ongoing,
+  /// Over; when, on the server's clock, if the server recorded it (a call the server lost in a
+  /// restart has no end).
+  Ended {
+    #[serde(rename = "ended_at_ms", default, skip_serializing_if = "Option::is_none")]
+    maybe_ended_at_ms: Option<i64>,
+  },
 }
 
 /// The optional parts of a text message. Everything is inside the ciphertext; only the urgency bit
@@ -1687,6 +1718,25 @@ impl ConversationEvent {
   }
 }
 
+impl ConversationEvent {
+  /// A call line's event: shown only as a line this device derived.
+  pub fn is_call(&self) -> bool {
+    matches!(self, Self::Call(_))
+  }
+}
+
+impl StoredMessage {
+  /// The call this message is the line of, if it is a call line this device derived.
+  pub fn maybe_call_line(&self) -> Option<&CallLine> {
+    match &self.content {
+      MessageContent::Event {
+        event: ConversationEvent::Call(line),
+      } if self.maybe_server_change.is_some() => Some(line),
+      _ => None,
+    }
+  }
+}
+
 fn is_false(value: &bool) -> bool {
   !*value
 }
@@ -1790,7 +1840,9 @@ impl StoredMessage {
       MessageContent::Event {
         event: ConversationEvent::AdminJoined { .. },
       } => self.maybe_verified_commit.is_none(),
-      MessageContent::Event { event } if event.is_server_change() => self.maybe_server_change.is_none(),
+      MessageContent::Event { event } if event.is_server_change() || event.is_call() => {
+        self.maybe_server_change.is_none()
+      },
       content => matches!(
         content,
         MessageContent::Reaction { .. }

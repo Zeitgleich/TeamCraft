@@ -229,6 +229,7 @@ impl PendingEnrollment {
       link_requests: Default::default(),
       call_ids: HashMap::new(),
       heard_calls: HashMap::new(),
+      are_call_lines_stale: false,
       maybe_preview_fetcher,
       maybe_jwks_source: None,
       role_signing: Default::default(),

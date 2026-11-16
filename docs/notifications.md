@@ -1057,3 +1057,41 @@ and the button goes away at zero.
 client shows them as missed (rang the caller, never joined), incoming and outgoing, with a button to
 call back.
 
+### Calls in the timeline
+
+Every call of a conversation shows in its timeline as a tile at the call's start, like a message:
+an icon, "Call" (a DM, group DM or meeting chat) or "Huddle" (a channel), "Missed call" when it
+rang the user and they never joined, who started it, the time, and either "Ongoing" with a Join
+button (while the call runs and this device isn't in it) or the call's duration once it ended.
+
+**Where the record comes from.** The server's call history (above), not a message. The server
+learns all of it anyway: it hands out the call tokens, sees who joins and leaves through the SFU,
+and rings the members. So no member sends anything for the tile, and nothing about the call is
+encrypted that wasn't before: the server learns nothing new. In return the tile can't be made up
+or hidden by a member, and it is there for a call nobody posted about. Each device derives the
+tile itself, as a line in its local store at the call's place among the messages (call IDs are the
+server's time-ordered snowflakes, like message IDs), the same way it derives the lines about changes
+the server reports of a channel (issue #818). A message a member sends that claims to be a call's
+line is hidden.
+
+**How a device keeps it current.**
+
+| Source                                      | What it does                                                   |
+|---------------------------------------------|----------------------------------------------------------------|
+| Gateway `call_start`                        | The tile appears at once, ongoing                              |
+| Gateway `call_end`                          | The tile ends at once; the history is read again soon          |
+| `GET /calls/history`, once per connection   | Calls missed while offline, and their ends and durations       |
+| `GET /calls` (running calls), with the read | A record without an end whose call no longer runs is ended     |
+
+- The history is read by the upkeep, not on the start path: the newest 50 calls, and older pages
+  while they bring calls this device didn't know, at most 4 pages (200 calls). A device new to the
+  account shows tiles for those calls; older history has none.
+- A tile never goes back from ended to ongoing, and a known end stays known, so reads in any order
+  converge. A failed read is retried after the upkeep's interval, and on the next connection.
+- A call the server lost in a restart has no end in the history; it shows as ended, without a
+  duration, once the list of running calls no longer has it.
+- Tiles count as neither unread nor as the conversation's last message in previews: the call rang
+  or showed already, and the server's unread counts don't include calls either.
+- Like messages, a call from before the user joined shows only in conversations that share their
+  full history, and never to guests (the history's own rule).
+

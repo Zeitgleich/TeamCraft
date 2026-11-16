@@ -429,3 +429,11 @@ calls-small-window-never = Nie
 call-mini-back = Zurück zum Anruf
 call-mini-reconnecting = Verbindet neu…
 call-mini-label = Anrufsteuerung
+
+## A call in the timeline (docs/notifications.md, "Calls in the timeline").
+call-tile-call = Anruf
+call-tile-huddle = Huddle
+call-tile-missed = Verpasster Anruf
+call-tile-ongoing = Läuft
+call-tile-ended = Beendet
+call-tile-join = Beitreten

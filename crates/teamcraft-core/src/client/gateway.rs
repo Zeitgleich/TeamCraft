@@ -904,13 +904,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         ..
       } => {
         self.forget_call(conversation_id, call_id)?;
+        // The timeline's line of the call ends with it (docs/notifications.md, "Calls in the timeline").
+        self.note_call_end(conversation_id, call_id)?;
         self.emit_call_event(&event);
         Ok(())
       },
-      GatewayEvent::CallStart { .. }
-      | GatewayEvent::CallUpdate { .. }
-      | GatewayEvent::CallRing { .. }
-      | GatewayEvent::CallMove { .. } => {
+      GatewayEvent::CallStart {
+        conversation_id,
+        call_id,
+        started_by,
+        started_at,
+        ..
+      } => {
+        self.note_call_start(conversation_id, call_id, started_by, started_at)?;
+        self.emit_call_event(&event);
+        Ok(())
+      },
+      GatewayEvent::CallUpdate { .. } | GatewayEvent::CallRing { .. } | GatewayEvent::CallMove { .. } => {
         self.emit_call_event(&event);
         Ok(())
       },

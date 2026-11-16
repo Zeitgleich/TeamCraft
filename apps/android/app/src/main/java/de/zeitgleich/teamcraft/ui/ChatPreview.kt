@@ -46,7 +46,7 @@ sealed interface PreviewContent {
  * the conversation's name already, so only the user's own messages get a sender ("You: …").
  */
 fun chatPreview(message: Message, myId: String, authorName: String, isOneToOne: Boolean): ChatPreview {
-  val isEvent = message.maybeSystemEvent != null
+  val isEvent = message.maybeSystemEvent != null || message.maybeCall != null
   val sender = when {
     isEvent -> PreviewSender.None
     message.author == myId -> PreviewSender.Me

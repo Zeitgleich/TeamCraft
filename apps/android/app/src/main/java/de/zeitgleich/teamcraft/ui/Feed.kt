@@ -46,7 +46,7 @@ sealed interface FeedItem {
     override val key: String get() = message.id
     override val contentType: FeedContentType
       get() = when {
-        message.maybeSystemEvent != null -> FeedContentType.Event
+        message.maybeSystemEvent != null || message.maybeCall != null -> FeedContentType.Event
         isContinuation -> FeedContentType.FollowUp
         else -> FeedContentType.Message
       }
@@ -113,6 +113,8 @@ private fun continues(previous: Message, message: Message): Boolean =
     previous.maybeSource == message.maybeSource &&
     previous.maybeSystemEvent == null &&
     message.maybeSystemEvent == null &&
+    previous.maybeCall == null &&
+    message.maybeCall == null &&
     message.sentAt - previous.sentAt in 0..GROUP_WINDOW_MS
 
 /**

@@ -132,4 +132,11 @@
   <string name="call_minimise">Anruf verkleinern</string>
   <string name="call_return_to">Zurück zum Anruf mit %1$s</string>
   <string name="call_bar_reconnecting">Verbindet neu…</string>
+  <!-- A call in the timeline (docs/notifications.md, "Calls in the timeline"). -->
+  <string name="call_tile_call">Anruf</string>
+  <string name="call_tile_huddle">Huddle</string>
+  <string name="call_tile_missed">Verpasster Anruf</string>
+  <string name="call_tile_ongoing">Läuft</string>
+  <string name="call_tile_ended">Beendet</string>
+  <string name="call_tile_join">Beitreten</string>
 </resources>
