@@ -46,6 +46,7 @@ pub mod bundle_banner;
 pub mod call_audio_menu;
 pub mod call_chat;
 pub mod call_encryption;
+pub mod call_mini_window;
 pub mod call_notetaker;
 pub mod call_prejoin;
 pub mod call_screen;

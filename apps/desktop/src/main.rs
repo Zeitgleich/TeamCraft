@@ -12,6 +12,7 @@ mod appindicator;
 mod attention;
 mod auth;
 mod autostart;
+mod call_mini;
 mod call_window;
 mod calls;
 mod clipboard;
@@ -150,6 +151,7 @@ fn main() -> anyhow::Result<()> {
     .manage(notifications::ShownNotifications::default())
     .manage(notifications::pictures::NotificationPictures::default())
     .manage(call_window::CallWindowState::default())
+    .manage(call_mini::CallMiniState::default())
     .manage(ringtone::RingtoneState::default())
     .manage(message_sound::MessageSoundState::default())
     .manage(calls::push_to_talk::PushToTalkState::default())
@@ -244,6 +246,7 @@ fn main() -> anyhow::Result<()> {
       }
       if webview.label() == tray::MAIN_WINDOW && payload.event() == PageLoadEvent::Started {
         webview_recovery::page_started(webview.app_handle());
+        call_mini::main_page_started(webview.app_handle());
       }
     })
     .on_window_event(|window, event| {
@@ -264,6 +267,15 @@ fn main() -> anyhow::Result<()> {
       }
       if matches!(event, WindowEvent::Focused(false)) && window.label() == tray::MAIN_WINDOW {
         draft_flush::persist(window);
+      }
+      // The small call window shows while the main window is away during a call (#2077).
+      if let WindowEvent::Focused(is_focused) = event
+        && window.label() == tray::MAIN_WINDOW
+      {
+        call_mini::main_focus_changed(window.app_handle(), *is_focused);
+      }
+      if let WindowEvent::Moved(position) = event {
+        call_mini::moved(window, *position);
       }
       // Closing keeps the app running in the tray (notifications keep coming) when the user wants it.
       // Without a tray icon it closes as usual, which quits the app, once the drafts are stored.
@@ -389,6 +401,10 @@ fn main() -> anyhow::Result<()> {
       call_window::call_window_info,
       call_window::call_window_ready,
       call_window::call_window_action,
+      call_mini::call_mini_set,
+      call_mini::call_mini_info,
+      call_mini::call_mini_ready,
+      call_mini::call_mini_action,
       ringtone::set_ringtone,
       message_sound::message_sound_play,
       message_sound::message_sound_pick,

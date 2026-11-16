@@ -814,6 +814,24 @@ here, answered by someone else (group calls), cancelled or timed out. A call nob
 user did not decline here leaves a "missed call" notification with Call back, under the direct-message
 rules again. Names appear only where the lock-screen policy allows sender names.
 
+**Small call window (desktop, #2077).** During a call, while the main window is away (minimized,
+hidden to the tray or without the focus behind other windows), a small borderless window above all
+others shows the call: who talks (the loudest other person, else how many are in it), the call's
+time, and mute, camera, sound (deafen), hang up and "back to the call". It opens where the user last
+dragged it (kept in the shell's config directory; the corner of the incoming-call window when that
+place is no longer on a screen), doesn't take the focus, and closes when the call ends or the main
+window gets the focus back. Setting `calls.small_window`: `when_away` (default), `always` (for the
+whole call) or `never`. The call keeps running only with the main window: its page sends what the
+small window shows to the shell whenever that changes (not every second; the window counts the time
+from the join itself), the shell decides from the main window's focus events and its page's
+visibility (minimized or hidden to the tray, which not every window manager reports as a focus
+change) when it shows, and the
+small window's buttons go back to the page as the tray menu's call actions (`tray-action`), so they
+take the path of the tray's controls (hang up asks the organizer whom to hand the meeting to, in the
+main window, #1720). The global mute shortcut works while it has the focus as everywhere else. In a
+Wayland session no client can place itself or stay above others, so the compositor decides where the
+window opens and whether it stays on top (KWin may open it behind the active window).
+
 **Meeting reminders.** Phones, and browsers without an open tab, get the server's push at the
 scheduled time (meetings.md, "Starting"), which also carries the settings below to every device.
 An open desktop or web app reminds by itself, as described here: for meetings the user is invited

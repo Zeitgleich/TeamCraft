@@ -53,6 +53,7 @@ four-core runner, most of it the browser tests, which share two ports).
 | `web_directory.rs`      | The directory in the web client: people cards, the Channels tab, resending and revoking an invitation |
 | `web_single_image.rs`   | One picture of an album in the web client: tile menu, a quote with its picture that opens it, a forward of it alone |
 | `desktop_perf.rs` (`desktop`) | The Linux desktop app on a large workspace, visible and closed to the tray: CPU, wakeups, memory per process, the server's requests (#1022) |
+| `desktop_call_mini.rs` (`desktop`) | The small call window (#2077): appears when the main window is minimized, mutes the call, "back to the call" and hang up; run it under a window manager that moves the focus (`kwin_wayland --virtual --xwayland`) |
 
 The `acceptance_*` scenarios cover the v1 sections of PLAN.md one by one; what each proves, the known gaps
 and the bugs found are in [docs/acceptance.md](../../docs/acceptance.md).

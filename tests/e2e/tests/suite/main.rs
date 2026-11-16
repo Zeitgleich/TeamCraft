@@ -30,6 +30,8 @@ mod demo_signin;
 mod dependency_outages;
 mod deployed;
 #[cfg(feature = "desktop")]
+mod desktop_call_mini;
+#[cfg(feature = "desktop")]
 mod desktop_perf;
 mod devices;
 mod display_names;

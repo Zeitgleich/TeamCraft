@@ -106,7 +106,7 @@ jobs:
           libasound2-dev libpipewire-0.3-dev libspa-0.2-dev
           libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
           libclang-dev cmake pkg-config libssl-dev
-          xvfb xauth dbus-daemon gnome-keyring
+          xvfb xauth dbus-daemon gnome-keyring openbox
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: e2e-web
@@ -121,6 +121,12 @@ jobs:
         run: |
           export E2E_DESKTOP_BIN="$GITHUB_WORKSPACE/target/debug/teamcraft-desktop" E2E_DESKTOP_REQUIRED=1
           xvfb-run -a -s "-screen 0 1600x1000x24" scripts/e2e.sh --prebuilt-web --desktop -- desktop_perf::
+      - name: The small call window (#2077), under a window manager that moves the focus
+        timeout-minutes: 20
+        run: |
+          export E2E_DESKTOP_BIN="$GITHUB_WORKSPACE/target/debug/teamcraft-desktop" E2E_DESKTOP_REQUIRED=1
+          xvfb-run -a -s "-screen 0 1600x1000x24" sh -c \
+            'openbox & scripts/e2e.sh --prebuilt-web --desktop -- desktop_call_mini::'
       - name: The numbers and, on failure, the process logs
         if: always()
         run: |

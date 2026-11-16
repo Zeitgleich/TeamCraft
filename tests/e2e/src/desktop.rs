@@ -25,6 +25,9 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use crate::process::{Service, free_tcp_port};
 
+/// The session's ALSA default: a device that takes and gives silence, so a call opens its
+/// microphone and speakers without a sound server.
+const NULL_AUDIO: &str = "pcm.!default { type null }\n";
 /// The desktop binary under test.
 pub const BINARY_VARIABLE: &str = "E2E_DESKTOP_BIN";
 /// The app's identifier: its config directory below `XDG_CONFIG_HOME`.
@@ -114,6 +117,9 @@ impl DesktopSession {
     }
     set_private(&dir.join("run"))?;
     write_fake_browser(&dir)?;
+    // No sound server in this session: calls get ALSA's null device for microphone and speakers,
+    // never the machine's own.
+    std::fs::write(dir.join("home/.asoundrc"), NULL_AUDIO)?;
     let bus_path = dir.join("run").join("bus");
     let bus_address = format!("unix:path={}", bus_path.display());
     let bus = Command::new("dbus-daemon")
@@ -382,6 +388,47 @@ impl DesktopApp {
 
   /// Closes the inspector connection: an attached inspector instruments the page, which costs CPU
   /// of its own, so nothing is measured while one is attached. The next call connects again.
+  /// How many pages (windows) the app shows right now.
+  pub async fn window_count(&self) -> usize {
+    list_pages(self.inspector_port).await.len()
+  }
+
+  /// The value of `expression` in every window's page (for a failure's message).
+  pub async fn evaluate_in_every_window(&self, expression: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    for path in list_pages(self.inspector_port).await {
+      let value = match Inspector::connect_to(self.inspector_port, &path).await {
+        Ok(mut inspector) => match inspector.evaluate(expression).await {
+          Ok(value) => value.to_string(),
+          Err(error) => format!("{error:#}"),
+        },
+        Err(error) => format!("{error:#}"),
+      };
+      values.push(value);
+    }
+    values
+  }
+
+  /// The value of `expression` in the first window whose page has an element matching `selector`
+  /// (another window than the main one, such as the small call window); `None` without such a
+  /// window.
+  pub async fn evaluate_in_window_with(
+    &self,
+    selector: &str,
+    expression: &str,
+  ) -> anyhow::Result<Option<Value>> {
+    let probe = format!("document.querySelector({}) !== null", json!(selector));
+    for path in list_pages(self.inspector_port).await {
+      let Ok(mut inspector) = Inspector::connect_to(self.inspector_port, &path).await else {
+        continue;
+      };
+      if inspector.evaluate(&probe).await.ok() == Some(Value::Bool(true)) {
+        return inspector.evaluate(expression).await.map(Some);
+      }
+    }
+    Ok(None)
+  }
+
   pub fn detach_inspector(&mut self) {
     self.maybe_inspector = None;
   }
@@ -395,16 +442,13 @@ impl DesktopApp {
 }
 
 impl Inspector {
-  /// The inspector's start page lists one socket per page target; the app has one page.
+  /// The inspector's start page lists one socket per page target; the main window's page is the
+  /// first.
   async fn connect(port: u16) -> anyhow::Result<Self> {
     let base = format!("127.0.0.1:{port}");
     let deadline = Instant::now() + WAIT;
     let path = loop {
-      let page = match reqwest::get(format!("http://{base}/")).await {
-        Ok(response) => response.text().await.unwrap_or_default(),
-        Err(_) => String::new(),
-      };
-      if let Some(path) = page_socket(&page) {
+      if let Some(path) = list_pages(port).await.into_iter().next() {
         break path;
       }
       if Instant::now() > deadline {
@@ -412,6 +456,12 @@ impl Inspector {
       }
       tokio::time::sleep(Duration::from_millis(250)).await;
     };
+    Self::connect_to(port, &path).await
+  }
+
+  /// Connects to the page behind the inspector socket `path`.
+  async fn connect_to(port: u16, path: &str) -> anyhow::Result<Self> {
+    let base = format!("127.0.0.1:{port}");
     let mut request = format!("ws://{base}{path}").into_client_request()?;
     request
       .headers_mut()
@@ -492,12 +542,32 @@ impl Inspector {
   }
 }
 
-/// `/socket/<connection>/<target>/WebPage` from the inspector's start page.
-fn page_socket(page: &str) -> Option<String> {
-  let start = page.find("/socket/")?;
-  let rest = &page[start..];
-  let end = rest.find("/WebPage")? + "/WebPage".len();
-  Some(rest[..end].to_owned())
+/// The inspector sockets of the app's pages (one per window), in the order the inspector lists
+/// them; none while it doesn't answer.
+async fn list_pages(port: u16) -> Vec<String> {
+  let page = match reqwest::get(format!("http://127.0.0.1:{port}/")).await {
+    Ok(response) => response.text().await.unwrap_or_default(),
+    Err(_) => String::new(),
+  };
+  page_sockets(&page)
+}
+
+/// Every `/socket/<connection>/<target>/WebPage` of the inspector's start page.
+fn page_sockets(page: &str) -> Vec<String> {
+  let mut sockets = Vec::new();
+  let mut rest = page;
+  while let Some(start) = rest.find("/socket/") {
+    let tail = &rest[start..];
+    let Some(end) = tail.find("/WebPage").map(|end| end + "/WebPage".len()) else {
+      break;
+    };
+    let socket = tail[..end].to_owned();
+    if !sockets.contains(&socket) {
+      sockets.push(socket);
+    }
+    rest = &tail[end..];
+  }
+  sockets
 }
 
 /// Logs into Keycloak's form like a browser: its cookies, the form, and the redirect to the app.

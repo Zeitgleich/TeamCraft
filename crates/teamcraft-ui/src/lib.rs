@@ -26,6 +26,7 @@ pub mod auth;
 pub mod brand;
 pub mod bundle;
 pub mod call_alerts;
+pub mod call_mini;
 pub mod calls;
 pub mod channel_access;
 pub mod channel_policy;
@@ -175,6 +176,11 @@ fn mount_with_texts() {
   // The desktop shell's incoming-call window shows only the call's card (#650).
   if auth::tauri::window_label().as_deref() == Some(teamcraft_client_api::call_window::CALL_WINDOW_LABEL) {
     components::incoming_call::mount_call_window();
+    return;
+  }
+  // The small call window shows only the call's controls (#2077).
+  if auth::tauri::window_label().as_deref() == Some(teamcraft_client_api::call_mini::CALL_MINI_LABEL) {
+    components::call_mini_window::mount();
     return;
   }
   #[cfg(feature = "demo")]

@@ -420,3 +420,12 @@ calls-mute-shortcut-press = Press the keys…
 calls-mute-shortcut-taken = Another app already uses this shortcut. Pick a different one.
 calls-mute-shortcut-invalid = This is not a shortcut the system understands.
 calls-mute-shortcut-unavailable = This desktop doesn't let apps listen for keys in the background, so the shortcut isn't available here.
+# The small call window of the desktop app (#2077).
+calls-small-window = Small call window
+calls-small-window-hint = A small window above all others with mute and hang up, while you're in a call.
+calls-small-window-always = Always during a call
+calls-small-window-when-away = When TeamCraft is in the background
+calls-small-window-never = Never
+call-mini-back = Back to the call
+call-mini-reconnecting = Reconnecting…
+call-mini-label = Call controls

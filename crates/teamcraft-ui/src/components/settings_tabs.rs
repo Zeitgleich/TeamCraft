@@ -4,6 +4,7 @@
 //! `settings_keyboard`).
 
 use leptos::prelude::*;
+use teamcraft_client_api::call_mini::CallMiniPolicy;
 use teamcraft_client_api::calls::{CallStatusSounds, VideoQuality};
 use teamcraft_client_api::window_chrome::{TitleBar, TrayIconStyle, WindowPlatform};
 use teamcraft_proto::BrandLinks;
@@ -792,6 +793,21 @@ pub fn AudioVideoSection() -> impl IntoView {
         on_change=Callback::new(move |value: bool| prefs.update(|all| all.calls.push_to_talk = value))
       />
       {tauri::is_available().then(|| view! { <crate::mute_shortcut::MuteShortcutRows /> })}
+      // The small call window of the desktop app (#2077).
+      {tauri::is_available().then(|| view! {
+        <SelectRow
+          label="calls-small-window"
+          hint="calls-small-window-hint"
+          options=CallMiniPolicy::ALL
+            .into_iter()
+            .map(|policy| (policy.slug().to_owned(), format!("calls-small-window-{}", policy.slug())))
+            .collect()
+          value=Signal::derive(move || calls.get().small_window.slug().to_owned())
+          on_change=Callback::new(move |slug: String| {
+            prefs.update(|all| all.calls.small_window = CallMiniPolicy::from_slug(&slug))
+          })
+        />
+      })}
       <SelectRow
         label="calls-status-sounds"
         hint="calls-status-sounds-hint"

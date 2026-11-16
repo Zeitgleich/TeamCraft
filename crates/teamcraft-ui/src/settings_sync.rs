@@ -156,6 +156,7 @@ synced_prefs! {
   "calls.mirror_self_view" => calls.mirror_self_view,
   "calls.push_to_talk" => calls.push_to_talk,
   "calls.status_sounds" => calls.status_sounds,
+  "calls.small_window" => calls.small_window,
   "onboarding.done" => onboarding.done,
   "onboarding.is_dismissed" => onboarding.is_dismissed,
   "files.sort" => files.sort,

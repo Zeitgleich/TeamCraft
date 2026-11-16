@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "call-mini",
+  "description": "What the small call window may call (#2077): read the call it shows, appear once rendered, hear when the call changed, hand its call buttons to the main window and be dragged. Nothing else of the shell.",
+  "windows": [
+    "call-mini"
+  ],
+  "permissions": [
+    "core:window:allow-start-dragging",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-call-mini-info",
+    "allow-call-mini-ready",
+    "allow-call-mini-action"
+  ]
+}

@@ -673,6 +673,12 @@ impl CallState {
     }
   }
 
+  /// When this device entered the call (wall clock), the start of [`CallState::elapsed_ms`];
+  /// `None` outside a call. Not reactive: read it where `elapsed_ms` is tracked.
+  pub fn joined_at(&self) -> Option<TimestampMs> {
+    self.joined_at.try_get_value().flatten()
+  }
+
   /// Starts counting the call's duration; a call that is already running (it moves on into a
   /// meeting room) keeps its count.
   fn start_clock(&self) {
