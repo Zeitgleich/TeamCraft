@@ -37,7 +37,7 @@ enum AppFailure: Error, Equatable {
     case .linkCodeForNewDevice: self = .linkCodeForNewDevice
     case .linkCodeForSignedInDevice: self = .linkCodeForSignedInDevice
     case .linkCodeExpired: self = .linkCodeExpired
-    case .notEnrolled, .linkCodeRejected, .linkAttemptEnded, .other: self = .generic
+    case .notEnrolled, .linkCodeRejected, .linkAttemptEnded, .callEnded, .other: self = .generic
     }
   }
 
@@ -1403,6 +1403,15 @@ final class AppModel {
     conversationId: String, isMuted: Bool = false, progress: JoinProgress? = nil
   ) async throws -> CallSession {
     try await core().joinCall(conversationId: conversationId, isMuted: isMuted, maybeProgress: progress)
+  }
+
+  /// Answers a ring: joins only while the call that rang (`maybeCallId`, when the ring named it)
+  /// still runs. A ring whose call is over throws `CallEnded` and starts no call of its own.
+  func answerCall(
+    conversationId: String, maybeCallId: String?, isMuted: Bool = false, progress: JoinProgress? = nil
+  ) async throws -> CallSession {
+    try await core().answerCall(
+      conversationId: conversationId, maybeCallId: maybeCallId, isMuted: isMuted, maybeProgress: progress)
   }
 
   /// Measures the link to the call service before a call (#1969): the call then starts on the

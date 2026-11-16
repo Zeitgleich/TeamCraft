@@ -534,7 +534,15 @@ final class CallManager: NSObject, @unchecked Sendable {
         return
       }
       do {
-        let session = try await AppModel.shared.joinCall(conversationId: call.conversationId, progress: self)
+        // Answering joins only the call that rang: a ring that outlived its call would otherwise
+        // start a new call that rings the caller back instead of reaching them.
+        let session: CallSession
+        if call.isOutgoing {
+          session = try await AppModel.shared.joinCall(conversationId: call.conversationId, progress: self)
+        } else {
+          session = try await AppModel.shared.answerCall(
+            conversationId: call.conversationId, maybeCallId: call.maybeCallId, progress: self)
+        }
         maybeSession = session
         configure(session)
         if var current = activeCall {
@@ -549,9 +557,23 @@ final class CallManager: NSObject, @unchecked Sendable {
           await setCameraEnabled(true)
         }
       } catch {
-        failCall(call, reason: .failed)
+        if CoreFailure(error) == .callEnded {
+          endAnsweredLate(call)
+        } else {
+          failCall(call, reason: .failed)
+        }
       }
     }
+  }
+
+  /// The ring was answered after its call ended: CallKit hears the caller hung up, the screen says
+  /// the call ended. Nothing was joined.
+  private func endAnsweredLate(_ call: ActiveCall) {
+    maybePendingAction?.fail()
+    maybePendingAction = nil
+    provider.reportCall(with: call.id, endedAt: Date(), reason: .remoteEnded)
+    maybeEndNote = "call_ended_before_answer"
+    clear()
   }
 
   /// What every joined session of this manager gets: the status sounds and the encoded video path.

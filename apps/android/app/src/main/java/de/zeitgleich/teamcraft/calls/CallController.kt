@@ -86,6 +86,8 @@ class CallController(
   private val awaitingEncryption = MutableStateFlow(false)
   /** The engine's join while it connects; hanging up cancels it. */
   @Volatile private var maybePendingJoin: Deferred<CallSession>? = null
+  /** The ring being answered, until its join starts: that join answers only the call that rang. */
+  @Volatile private var maybeAnswering: AnsweredRing? = null
   /** Hang up came while joining: a join that finishes anyway leaves at once. */
   @Volatile private var isJoinAbandoned = false
   private val incomingNotifier = IncomingCallNotifier(context)
@@ -264,6 +266,8 @@ class CallController(
       return
     }
     Log.i(TAG, "answer ($source): $route")
+    // The call the ring named, before the ring goes: the join answers that call and no other.
+    maybeAnswering = AnsweredRing(conversationId, ringing.value?.takeIf { it.conversationId == conversationId }?.maybeCallId)
     failure.value = null
     incomingNotifier.cancelJoinFailed()
     clearRing()
@@ -319,6 +323,7 @@ class CallController(
     }
     failure.value = null
     options = callOptions
+    maybeAnswering = null
     addTelecomCall(conversationId, displayName, CallAttributesCompat.DIRECTION_OUTGOING)
   }
 
@@ -689,7 +694,17 @@ class CallController(
         awaitingEncryption.value = isAwaiting
       }
     }
-    val pending = scope.async { core.core().joinCall(conversationId, isMuted, progress) }
+    // Answering joins only the call that rang: a ring that outlived its call would otherwise start
+    // a new call that rings the caller back instead of reaching them.
+    val maybeAnswer = maybeAnswering?.takeIf { it.conversationId == conversationId }
+    maybeAnswering = null
+    val pending = scope.async {
+      if (maybeAnswer != null) {
+        core.core().answerCall(conversationId, maybeAnswer.maybeCallId, isMuted, progress)
+      } else {
+        core.core().joinCall(conversationId, isMuted, progress)
+      }
+    }
     maybePendingJoin = pending
     val session = try {
       pending.await()
@@ -852,6 +867,7 @@ class CallController(
     is TeamCraftException.Network -> JoinFailure.NETWORK
     is TeamCraftException.CallDeviceLimit -> JoinFailure.DEVICE_LIMIT
     is TeamCraftException.CallEncryptionPending -> JoinFailure.ENCRYPTION_PENDING
+    is TeamCraftException.CallEnded -> JoinFailure.CALL_ENDED
     else -> JoinFailure.OTHER
   }
 
@@ -1018,3 +1034,6 @@ enum class ScreenShareStatus {
 
 /** What the user chose before joining. */
 data class CallOptions(val isCameraOn: Boolean = false, val isMuted: Boolean = false)
+
+/** A ring that was answered: its conversation, and the call it named (a push names one). */
+private data class AnsweredRing(val conversationId: String, val maybeCallId: String?)

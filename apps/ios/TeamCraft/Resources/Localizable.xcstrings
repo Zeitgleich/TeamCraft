@@ -1249,6 +1249,22 @@
         }
       }
     },
+    "call_ended_before_answer": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The call ended before you answered."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Anruf wurde beendet, bevor du angenommen hast."
+          }
+        }
+      }
+    },
     "call_ended_by_host": {
       "localizations": {
         "en": {

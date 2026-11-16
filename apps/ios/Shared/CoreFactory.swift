@@ -152,6 +152,8 @@ enum CoreFailure: Equatable {
   case tooLarge
   /// The call needs the conversation's encryption group, which this device is not in yet: try again shortly.
   case callEncryptionPending
+  /// The call that rang is over: answering started nothing, the call screen says the call ended.
+  case callEnded
   /// Device linking: the typed code is not the one on the new device (try again), or the last try failed.
   case linkCodeRejected, linkAttemptEnded
   /// Device linking: not a link code; a code for the other side (issue #998); a code that ran out.
@@ -184,6 +186,8 @@ enum CoreFailure: Equatable {
       self = .callMoveRefused
     } else if name.hasPrefix("callencryptionpending") {
       self = .callEncryptionPending
+    } else if name.hasPrefix("callended") {
+      self = .callEnded
     } else if name.hasPrefix("calldevicelimit") {
       self = .callDeviceLimit
     } else if name.hasPrefix("toolarge") {

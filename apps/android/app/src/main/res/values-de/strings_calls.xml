@@ -117,6 +117,7 @@
   <string name="call_join_failed_title">Anruf nicht verbunden</string>
   <string name="call_join_failed">Der Beitritt zum Anruf hat nicht geklappt. Ruf aus der Unterhaltung zurück.</string>
   <string name="call_join_failed_microphone">TeamCraft braucht das Mikrofon, um einem Anruf beizutreten. Erlaube es und ruf dann aus der Unterhaltung zurück.</string>
+  <string name="call_join_failed_ended">Der Anruf wurde beendet, bevor du angenommen hast. Ruf aus der Unterhaltung zurück.</string>
   <string name="call_join_failed_network">Keine Verbindung zum Server. Prüf das Netzwerk und ruf dann aus der Unterhaltung zurück.</string>
   <string name="call_share_screen">Bildschirm teilen</string>
   <string name="call_stop_sharing">Teilen beenden</string>
