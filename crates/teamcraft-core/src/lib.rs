@@ -6,6 +6,7 @@ pub mod account_data;
 pub mod anchoring;
 pub mod api;
 pub mod attestation;
+pub mod call_answer;
 pub mod call_group_wait;
 pub mod canvas;
 pub mod channel_roles;

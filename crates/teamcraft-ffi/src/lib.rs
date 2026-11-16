@@ -1823,6 +1823,28 @@ impl TeamCraft {
       .await
   }
 
+  /// Answers a ring: joins the conversation's call only while the call that rang still runs.
+  /// `maybe_call_id` is the call the ring named (a push names it; a ring from the gateway names
+  /// only the conversation). A ring whose call is over fails with `CallEnded` and starts nothing:
+  /// joining alone would start a new call that rings the caller back instead of reaching them
+  /// (`teamcraft_core::call_answer`). Otherwise as [`Self::join_call`].
+  #[uniffi::method(default(maybe_call_id = None, is_muted = false, maybe_progress = None))]
+  pub async fn answer_call(
+    &self,
+    conversation_id: String,
+    maybe_call_id: Option<String>,
+    is_muted: bool,
+    maybe_progress: Option<Arc<dyn JoinProgress>>,
+  ) -> Result<Arc<CallSession>, TeamCraftError> {
+    let checked = conversation_id.clone();
+    self
+      .call(move |engine| {
+        Box::pin(async move { engine.check_ring_answer(&checked, maybe_call_id.as_deref()).await })
+      })
+      .await?;
+    self.join_call(conversation_id, is_muted, maybe_progress).await
+  }
+
   /// Joins (or starts) the conversation's call; returns once connected. `is_muted`: the
   /// microphone stays muted from the first frame (a muted call moving into a meeting room), so
   /// nothing is sent before an unmute. `maybe_progress` hears when the join waits for this

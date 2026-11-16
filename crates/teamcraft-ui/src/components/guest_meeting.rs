@@ -314,7 +314,7 @@ fn end_of_call(maybe_reason: Option<CallEndReason>, maybe_rejoin: Option<String>
   match maybe_reason {
     Some(CallEndReason::EndedByHost { .. }) => Some(GuestEnd::Ended),
     Some(CallEndReason::RemovedByHost { .. }) => Some(GuestEnd::Removed),
-    Some(CallEndReason::ConnectionLost | CallEndReason::OtherSideLeft) => None,
+    Some(CallEndReason::ConnectionLost | CallEndReason::OtherSideLeft | CallEndReason::NoAnswer) => None,
     None => Some(GuestEnd::Left { maybe_rejoin }),
   }
 }

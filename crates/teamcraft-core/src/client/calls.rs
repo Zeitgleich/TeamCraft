@@ -73,15 +73,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.maybe_call_sink = Some(sink);
   }
 
-  /// A token for joining (or starting) the conversation's call with this device.
+  /// A token for joining (or starting) the conversation's call with this device. Remembers the
+  /// call it names as this device's call of the conversation: "Add people" announces a move of
+  /// that very call, and a move is followed only for it. Every app's join goes through here, the
+  /// phones' as well, which prepare the call in the FFI and never moved a call before (#493).
   pub async fn call_join_token(
-    &self,
+    &mut self,
     conversation: ConversationId,
   ) -> Result<CallJoinTokenResponse, CoreError> {
     let request = CreateCallJoinTokenRequest {
       device_id: self.account.device_id,
     };
-    Ok(self.api.create_call_join_token(conversation, &request).await?)
+    let join = self.api.create_call_join_token(conversation, &request).await?;
+    self.call_ids.insert(conversation, join.call_id);
+    Ok(join)
   }
 
   /// A ticket for measuring this device's link to the SFU before joining (#1959): on the pre-join
@@ -126,7 +131,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub async fn prepare_call(&mut self, conversation: ConversationId) -> Result<CallPreparation, CoreError> {
     self.ensure_call_group(conversation).await?;
     let join = self.call_join_token(conversation).await?;
-    self.call_ids.insert(conversation, join.call_id);
     let devices = self.verified_call_devices(conversation).await?;
     Ok(CallPreparation {
       join,

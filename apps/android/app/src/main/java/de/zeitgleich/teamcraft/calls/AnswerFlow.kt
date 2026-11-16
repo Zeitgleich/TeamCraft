@@ -87,5 +87,8 @@ enum class JoinFailure(@StringRes val text: Int) {
   NETWORK(R.string.call_join_failed_network),
   DEVICE_LIMIT(R.string.error_call_device_limit),
   ENCRYPTION_PENDING(R.string.error_call_encryption_pending),
+
+  /** The call that rang was over when it was answered: nothing was joined or started. */
+  CALL_ENDED(R.string.call_join_failed_ended),
   OTHER(R.string.call_join_failed),
 }

@@ -14,10 +14,11 @@ use teamcraft_client_api::notetaker::{
 };
 use teamcraft_core::CoreError;
 use teamcraft_core::api::ServerApi as _;
+use teamcraft_core::call_answer::{RingAnswer, ring_answer};
 use teamcraft_core::clock::{Clock as _, SystemClock};
 use teamcraft_core::meeting_invitees::InviteeList;
 use teamcraft_proto::{
-  CallStateResponse, ConversationId, HistoryPolicy, ListMeetingsResponse, MeetingResponse, UserId,
+  CallId, CallStateResponse, ConversationId, HistoryPolicy, ListMeetingsResponse, MeetingResponse, UserId,
 };
 
 use crate::bridge::from_json;
@@ -83,6 +84,31 @@ impl Engine {
         by_user_id: moved.by.to_string(),
       }),
     )
+  }
+
+  /// Whether a ring of `conversation_id` (of the call `maybe_call_id`, if it named one) may be
+  /// answered: `CallEnded` once that call is over, as the server says. Never starts a call.
+  pub(crate) async fn check_ring_answer(
+    &self,
+    conversation_id: &str,
+    maybe_call_id: Option<&str>,
+  ) -> Result<(), TeamCraftError> {
+    let conversation: ConversationId = parse_id(conversation_id)?;
+    // A call ID this app can't read (a newer push format) names no call: what runs is answered.
+    let maybe_rung: Option<CallId> = maybe_call_id.and_then(|text| parse_id(text).ok());
+    let maybe_running = self
+      .api()
+      .running_call(conversation)
+      .await
+      .map_err(CoreError::from)?
+      .map(|call| call.call_id);
+    match ring_answer(maybe_running, maybe_rung) {
+      RingAnswer::Join => Ok(()),
+      RingAnswer::Ended => {
+        tracing::info!(conversation_id = %conversation, "answer: the call that rang is over");
+        Err(TeamCraftError::CallEnded)
+      },
+    }
   }
 
   /// The others in the call running in `conversation_id`, as the server's roster lists them; empty

@@ -4,6 +4,7 @@
 
 use crate::common;
 
+use std::any::Any;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -14,7 +15,7 @@ use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::{FakeServer, FakeServerApi};
 use teamcraft_core::client::PushRegistrar;
 use teamcraft_core::clock::SystemClock;
-use teamcraft_core::runner::{RunnerCommand, RunnerSettings, SyncRunner};
+use teamcraft_core::runner::{ClientJob, RunnerCommand, RunnerSettings, SyncRunner};
 use teamcraft_core::store::{LocalStore, MemoryStore, MessageFilter};
 use teamcraft_core::{Client, PendingEnrollment};
 use teamcraft_proto::{DeviceActivity, GatewayEvent, PushProvider};
@@ -59,6 +60,47 @@ async fn push_work_beside_the_runner_leaves_its_connection_open() {
 
   assert_eq!(server.gateway_connect_count(), 1);
   assert_eq!(server.push_registration(device).unwrap().token, "token");
+}
+
+/// A call's preparation runs on the client inside the running loop: the loop keeps its one
+/// connection, instead of a stop, a reconnect and a whole upkeep before the call's next step.
+#[tokio::test]
+async fn a_client_job_runs_inside_the_loop_without_a_reconnect() {
+  let server = FakeServer::new();
+  let api = server.add_user("Alice");
+  let client = PendingEnrollment::new()
+    .complete(
+      api,
+      Arc::new(MemoryStore::new()),
+      clock(),
+      settings(),
+      options(PASSPHRASE),
+    )
+    .await
+    .unwrap();
+  let me = client.user_id();
+  let (runner, handle) = SyncRunner::new(client, RunnerSettings::default(), Box::new(|| {}));
+  let work = async {
+    while server.gateway_connect_count() == 0 {
+      tokio::task::yield_now().await;
+    }
+    let (reply, answer) = futures_channel::oneshot::channel();
+    let job = ClientJob::new(move |client: &mut dyn Any| {
+      Box::pin(async move {
+        let client = client
+          .downcast_mut::<Client<FakeServerApi, Arc<MemoryStore>>>()
+          .unwrap();
+        let _ = reply.send(client.user_id());
+      })
+    });
+    assert!(handle.send(RunnerCommand::WithClient(job)));
+    assert_eq!(answer.await.unwrap(), me, "ran on the loop's client");
+    assert!(handle.send(RunnerCommand::Stop));
+  };
+
+  let (_client, ()) = tokio::join!(runner.run(), work);
+
+  assert_eq!(server.gateway_connect_count(), 1, "the loop kept its connection");
 }
 
 #[tokio::test]

@@ -19,7 +19,7 @@ async fn a_dm_call_rings_starts_updates_and_ends_through_the_gateway() {
   let hash = stack.maybe_sfu.as_ref().unwrap().certificate_hash;
   let mut alice = Peer::enroll(&stack, "alice").await;
   let mut carol = Peer::enroll(&stack, "carol").await;
-  let erin = Peer::enroll(&stack, "erin").await;
+  let mut erin = Peer::enroll(&stack, "erin").await;
   let dm = alice.client.open_dm(carol.user_id()).await.unwrap();
   carol.wait_joined(dm).await;
   let events = Rc::new(RefCell::new(Vec::<String>::new()));

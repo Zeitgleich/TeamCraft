@@ -109,9 +109,13 @@ final class CallManager: NSObject, @unchecked Sendable {
   private static let leaveTimeout: Duration = .seconds(5)
   /// How long "being added" shows after asking, if the notetaker doesn't come.
   private static let notetakerAskedNotice: Duration = .seconds(90)
+  /// How long a call whose ring ended waits for somebody who answered at the last moment.
+  private static let unansweredGrace: Duration = .seconds(3)
 
   /// Main-thread state; the in-call screen observes it.
-  private(set) var activeCall: ActiveCall?
+  private(set) var activeCall: ActiveCall? {
+    didSet { followProximity() }
+  }
   /// The call screen is put away while the call goes on (#2066): the app shows a bar to return.
   /// A new call always opens its screen.
   private(set) var isMinimised = false
@@ -159,6 +163,11 @@ final class CallManager: NSObject, @unchecked Sendable {
   /// announcement is in and `acceptCallMove` checked it.
   @ObservationIgnored private var maybeAnnouncedMove: CallMove?
   @ObservationIgnored private var maybeLeaveWaiter: LeaveWaiter?
+  /// This device hangs up because nobody answered: the end note says "No answer".
+  @ObservationIgnored private var isEndingUnanswered = false
+  /// The screen goes off at the ear while a call runs on the receiver; made on the main thread.
+  @ObservationIgnored private var maybeProximity: CallProximity?
+  @ObservationIgnored private var proximityState: CallProximityState?
 
   override init() {
     let configuration = CXProviderConfiguration()
@@ -170,6 +179,19 @@ final class CallManager: NSObject, @unchecked Sendable {
     provider = CXProvider(configuration: configuration)
     super.init()
     provider.setDelegate(self, queue: .main)
+  }
+
+  /// Follows the call with the screen-off at the ear (`CallProximity`), on the main thread.
+  private func followProximity() {
+    let state = activeCall.map { CallProximityState(isRingingIn: $0.phase == .ringing && !$0.isOutgoing) }
+    guard state != proximityState else { return }
+    proximityState = state
+    DispatchQueue.main.async {
+      MainActor.assumeIsolated {
+        if self.maybeProximity == nil { self.maybeProximity = CallProximity() }
+        self.maybeProximity?.follow(state)
+      }
+    }
   }
 
   /// Registers for the forwarded wake-ups; call at launch, before the app finished starting, so a
@@ -253,6 +275,19 @@ final class CallManager: NSObject, @unchecked Sendable {
     guard let call = activeCall else { return }
     isEndingFromApp = true
     controller.request(CXTransaction(action: CXEndCallAction(call: call.id)), completion: { _ in })
+  }
+
+  /// The ring of this device's one-to-one call ended (ring timeout, declined everywhere): unless
+  /// somebody came in within a grace period, the call ends with "No answer", as on a phone,
+  /// instead of waiting in an empty call.
+  @MainActor
+  private func endIfUnanswered(_ callId: UUID) async {
+    try? await Task.sleep(for: Self.unansweredGrace)
+    guard let call = activeCall, call.id == callId, call.phase == .connected, call.participantCount == 0 else { return }
+    let isDirect = await AppModel.shared.conversations().first { $0.id == call.conversationId }?.kind == .direct
+    guard isDirect, activeCall?.id == callId, activeCall?.participantCount == 0 else { return }
+    isEndingUnanswered = true
+    hangUp()
   }
 
   // MARK: Moving into a meeting room
@@ -534,7 +569,15 @@ final class CallManager: NSObject, @unchecked Sendable {
         return
       }
       do {
-        let session = try await AppModel.shared.joinCall(conversationId: call.conversationId, progress: self)
+        // Answering joins only the call that rang: a ring that outlived its call would otherwise
+        // start a new call that rings the caller back instead of reaching them.
+        let session: CallSession
+        if call.isOutgoing {
+          session = try await AppModel.shared.joinCall(conversationId: call.conversationId, progress: self)
+        } else {
+          session = try await AppModel.shared.answerCall(
+            conversationId: call.conversationId, maybeCallId: call.maybeCallId, progress: self)
+        }
         maybeSession = session
         configure(session)
         if var current = activeCall {
@@ -549,9 +592,23 @@ final class CallManager: NSObject, @unchecked Sendable {
           await setCameraEnabled(true)
         }
       } catch {
-        failCall(call, reason: .failed)
+        if CoreFailure(error) == .callEnded {
+          endAnsweredLate(call)
+        } else {
+          failCall(call, reason: .failed)
+        }
       }
     }
+  }
+
+  /// The ring was answered after its call ended: CallKit hears the caller hung up, the screen says
+  /// the call ended. Nothing was joined.
+  private func endAnsweredLate(_ call: ActiveCall) {
+    maybePendingAction?.fail()
+    maybePendingAction = nil
+    provider.reportCall(with: call.id, endedAt: Date(), reason: .remoteEnded)
+    maybeEndNote = "call_ended_before_answer"
+    clear()
   }
 
   /// What every joined session of this manager gets: the status sounds and the encoded video path.
@@ -827,7 +884,8 @@ extension CallManager: CallListener {
       }
       self.activeCall = call
       if state.phase == .ended {
-        self.maybeEndNote = Self.note(for: state.maybeEndReason)
+        self.maybeEndNote = self.isEndingUnanswered ? "call_no_answer" : Self.note(for: state.maybeEndReason)
+        self.isEndingUnanswered = false
         self.provider.reportCall(with: call.id, endedAt: Date(), reason: Self.reason(for: state.maybeEndReason))
         self.maybeSession = nil
         self.clear()
@@ -844,7 +902,12 @@ extension CallManager: CallListener {
 
   func onRingEnded(conversationId: String) {
     DispatchQueue.main.async {
-      guard let call = self.activeCall, call.conversationId == conversationId, call.phase == .ringing else { return }
+      guard let call = self.activeCall, call.conversationId == conversationId else { return }
+      guard call.phase == .ringing else {
+        // This device's own call stopped ringing the others: maybe nobody answered.
+        if call.isOutgoing { Task { @MainActor in await self.endIfUnanswered(call.id) } }
+        return
+      }
       // Answered on another device, declined or over: stop ringing here.
       self.provider.reportCall(with: call.id, endedAt: Date(), reason: .answeredElsewhere)
       self.clear()

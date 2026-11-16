@@ -86,6 +86,7 @@
   <string name="call_securing">Securing the call…</string>
   <string name="call_secured">End-to-end encrypted</string>
   <string name="call_ended">Call ended</string>
+  <string name="call_no_answer">No answer</string>
   <string name="call_failed">The call was interrupted.</string>
   <string name="call_server_lost">The call server can\'t be reached anymore, so the call ended. Try again in a moment.</string>
   <string name="call_removed_by_host">The host removed you from the call.</string>
@@ -117,6 +118,7 @@
   <string name="call_join_failed_title">Couldn\'t join the call</string>
   <string name="call_join_failed">Joining the call didn\'t work. Call back from the conversation.</string>
   <string name="call_join_failed_microphone">TeamCraft needs the microphone to join a call. Allow it, then call back from the conversation.</string>
+  <string name="call_join_failed_ended">The call ended before you answered. Call back from the conversation.</string>
   <string name="call_join_failed_network">No connection to the server. Check the network, then call back from the conversation.</string>
   <string name="call_share_screen">Share screen</string>
   <string name="call_stop_sharing">Stop sharing</string>

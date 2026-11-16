@@ -87,6 +87,10 @@ pub enum TeamCraftError {
   /// (`call_device_limit`, HTTP 409 on the join token): leave on one of them first.
   #[error("call device limit reached: {0}")]
   CallDeviceLimit(String),
+  /// The call that rang is over (the caller hung up or dropped, or the ring came late): answering
+  /// starts no call of its own; the app says the call ended.
+  #[error("the call ended")]
+  CallEnded,
   /// The server refused it as too large (`payload_too_large`, HTTP 413): a scheduled message over its
   /// cap, say. The app says it is too long instead of a generic failure.
   #[error("too large: {0}")]

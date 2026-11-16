@@ -1437,7 +1437,7 @@ pub(crate) fn connect_calls(state: AppState) {
     {
       let maybe_reason = untrack(|| state.read(|backend| backend.call_end_reason()));
       match maybe_reason {
-        Some(CallEndReason::OtherSideLeft) => call.show_ended(),
+        Some(CallEndReason::OtherSideLeft | CallEndReason::NoAnswer) => call.show_ended(),
         Some(CallEndReason::ConnectionLost) => {
           call.leave();
           report_lost_call();

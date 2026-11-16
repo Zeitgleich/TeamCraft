@@ -85,6 +85,7 @@
   <string name="call_video_paused_by_publisher">Video pausiert: Die Verbindung ist schwach, die Stimme hat Vorrang</string>
   <string name="call_securing">Anruf wird abgesichert…</string>
   <string name="call_secured">Ende-zu-Ende-verschlüsselt</string>
+  <string name="call_no_answer">Keine Antwort</string>
   <string name="call_ended">Anruf beendet</string>
   <string name="call_failed">Der Anruf wurde unterbrochen.</string>
   <string name="call_server_lost">Der Anrufserver ist zurzeit nicht mehr erreichbar, der Anruf wurde deshalb beendet. Versuche es gleich noch einmal.</string>
@@ -117,6 +118,7 @@
   <string name="call_join_failed_title">Anruf nicht verbunden</string>
   <string name="call_join_failed">Der Beitritt zum Anruf hat nicht geklappt. Ruf aus der Unterhaltung zurück.</string>
   <string name="call_join_failed_microphone">TeamCraft braucht das Mikrofon, um einem Anruf beizutreten. Erlaube es und ruf dann aus der Unterhaltung zurück.</string>
+  <string name="call_join_failed_ended">Der Anruf wurde beendet, bevor du angenommen hast. Ruf aus der Unterhaltung zurück.</string>
   <string name="call_join_failed_network">Keine Verbindung zum Server. Prüf das Netzwerk und ruf dann aus der Unterhaltung zurück.</string>
   <string name="call_share_screen">Bildschirm teilen</string>
   <string name="call_stop_sharing">Teilen beenden</string>

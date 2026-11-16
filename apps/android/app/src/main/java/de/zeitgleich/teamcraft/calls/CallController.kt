@@ -70,6 +70,9 @@ class CallController(
   private val frames = MutableStateFlow<Map<UInt, Bitmap>>(emptyMap())
   private val speaker = MutableStateFlow(false)
   private val routes = MutableStateFlow<List<AudioRoute>>(emptyList())
+  private val proximity = CallProximity(context)
+  /** The call's sound comes from the earpiece now (Telecom's current endpoint). */
+  @Volatile private var isOnEarpiece = false
   private val currentRouteId = MutableStateFlow<String?>(null)
   @Volatile private var maybeSession: CallSession? = null
   @Volatile private var maybeTelecomJob: Job? = null
@@ -86,6 +89,8 @@ class CallController(
   private val awaitingEncryption = MutableStateFlow(false)
   /** The engine's join while it connects; hanging up cancels it. */
   @Volatile private var maybePendingJoin: Deferred<CallSession>? = null
+  /** The ring being answered, until its join starts: that join answers only the call that rang. */
+  @Volatile private var maybeAnswering: AnsweredRing? = null
   /** Hang up came while joining: a join that finishes anyway leaves at once. */
   @Volatile private var isJoinAbandoned = false
   private val incomingNotifier = IncomingCallNotifier(context)
@@ -94,7 +99,11 @@ class CallController(
   private val failure = MutableStateFlow<JoinFailure?>(null)
   /** [CallActivity] is on screen; a failure it can't show goes to a notification. */
   @Volatile private var isCallScreenVisible = false
-  /** The call somebody else was in with this device: only then does being alone end it. */
+  /**
+   * The conversation whose current call somebody else was in with this device: only then does
+   * being alone end it. Cleared when the call is left, so the next call in the same DM rings until
+   * it is answered instead of ending as "left alone" a few seconds in.
+   */
   @Volatile private var hadOthersIn: String? = null
   @Volatile private var maybeAloneEnd: Job? = null
   /** "Try again" is rejoining; the old session's ended state is awaited here and not shown (#1624). */
@@ -260,6 +269,8 @@ class CallController(
       return
     }
     Log.i(TAG, "answer ($source): $route")
+    // The call the ring named, before the ring goes: the join answers that call and no other.
+    maybeAnswering = AnsweredRing(conversationId, ringing.value?.takeIf { it.conversationId == conversationId }?.maybeCallId)
     failure.value = null
     incomingNotifier.cancelJoinFailed()
     clearRing()
@@ -315,6 +326,7 @@ class CallController(
     }
     failure.value = null
     options = callOptions
+    maybeAnswering = null
     addTelecomCall(conversationId, displayName, CallAttributesCompat.DIRECTION_OUTGOING)
   }
 
@@ -622,6 +634,8 @@ class CallController(
             currentCallEndpoint.collect {
               speaker.value = it.type == CallEndpointCompat.TYPE_SPEAKER
               currentRouteId.value = it.identifier.toString()
+              isOnEarpiece = it.type == CallEndpointCompat.TYPE_EARPIECE
+              followProximity()
             }
           }
         }
@@ -668,6 +682,7 @@ class CallController(
   private suspend fun joinOnce(conversationId: String): Boolean {
     if (conversationId == maybeLeftConversation) maybeLeftConversation = null
     showCall()
+    followProximity()
     if (!hasMicrophone() && !requestMicrophone()) {
       Log.i(TAG, "join: no microphone")
       if (!isJoinAbandoned) report(JoinFailure.MICROPHONE)
@@ -685,7 +700,17 @@ class CallController(
         awaitingEncryption.value = isAwaiting
       }
     }
-    val pending = scope.async { core.core().joinCall(conversationId, isMuted, progress) }
+    // Answering joins only the call that rang: a ring that outlived its call would otherwise start
+    // a new call that rings the caller back instead of reaching them.
+    val maybeAnswer = maybeAnswering?.takeIf { it.conversationId == conversationId }
+    maybeAnswering = null
+    val pending = scope.async {
+      if (maybeAnswer != null) {
+        core.core().answerCall(conversationId, maybeAnswer.maybeCallId, isMuted, progress)
+      } else {
+        core.core().joinCall(conversationId, isMuted, progress)
+      }
+    }
     maybePendingJoin = pending
     val session = try {
       pending.await()
@@ -712,6 +737,7 @@ class CallController(
     options = CallOptions()
     isCameraKeptAlive = false
     keepCallAlive()
+    followProximity()
     return true
   }
 
@@ -807,6 +833,28 @@ class CallController(
     }
   }
 
+  /**
+   * The ring of this device's one-to-one call ended: unless somebody came in (within
+   * [UNANSWERED_GRACE_MS]), the caller hears "No answer" and the call ends.
+   */
+  private fun endIfUnanswered(conversationId: String) {
+    scope.launch {
+      delay(UNANSWERED_GRACE_MS)
+      val now = state.value ?: return@launch
+      if (now.conversationId != conversationId || now.phase != CallPhase.CONNECTED || maybeSession == null) return@launch
+      val isOneToOne = runCatching {
+        core.conversations().firstOrNull { it.id == conversationId }?.kind == ConversationKind.DIRECT
+      }.getOrDefault(false)
+      val hadOthers = hadOthersIn == conversationId
+      if (!isUnanswered(isOneToOne, hadOthers, now.participantCount.toInt(), now.reconnectingCount.toInt())) return@launch
+      Log.i(TAG, "nobody answered: ending the call")
+      ContextCompat.getMainExecutor(context).execute {
+        Toast.makeText(context, R.string.call_no_answer, Toast.LENGTH_LONG).show()
+      }
+      hangUp()
+    }
+  }
+
   /** The name of a conversation this device knows (the notes by their title); `null` for one it doesn't. */
   private suspend fun conversationNameOf(conversationId: String): String? =
     runCatching {
@@ -848,6 +896,7 @@ class CallController(
     is TeamCraftException.Network -> JoinFailure.NETWORK
     is TeamCraftException.CallDeviceLimit -> JoinFailure.DEVICE_LIMIT
     is TeamCraftException.CallEncryptionPending -> JoinFailure.ENCRYPTION_PENDING
+    is TeamCraftException.CallEnded -> JoinFailure.CALL_ENDED
     else -> JoinFailure.OTHER
   }
 
@@ -895,6 +944,11 @@ class CallController(
       session.close()
     }
     maybeTelecomCall = null
+    isOnEarpiece = false
+    proximity.update(isInCall = false, isOnEarpiece = false)
+    hadOthersIn = null
+    maybeAloneEnd?.cancel()
+    maybeAloneEnd = null
     moves.reset()
     hosts.reset()
     lobby.reset()
@@ -903,6 +957,14 @@ class CallController(
     tracks.value = emptyList()
     frames.value = emptyMap()
     CallService.stop(context)
+  }
+
+  /**
+   * The screen goes off at the ear while this device calls, joins or is in a call on the earpiece;
+   * an incoming call that only rings keeps it on, so it can be answered.
+   */
+  private fun followProximity() {
+    proximity.update(isInCall = maybeSession != null || joining.value, isOnEarpiece = isOnEarpiece)
   }
 
   /** The session, once: whoever takes it leaves and closes it. */
@@ -958,6 +1020,8 @@ class CallController(
     override fun onRingEnded(conversationId: String) {
       // Answered on another device, declined or over: stop ringing here.
       if (ringing.value?.conversationId == conversationId) endRing()
+      // This device's own call stopped ringing the others: maybe nobody answered.
+      if (state.value?.conversationId == conversationId && maybeSession != null) endIfUnanswered(conversationId)
     }
 
     override fun onCallMoved(fromConversationId: String, toConversationId: String) {
@@ -1011,3 +1075,6 @@ enum class ScreenShareStatus {
 
 /** What the user chose before joining. */
 data class CallOptions(val isCameraOn: Boolean = false, val isMuted: Boolean = false)
+
+/** A ring that was answered: its conversation, and the call it named (a push names one). */
+private data class AnsweredRing(val conversationId: String, val maybeCallId: String?)
