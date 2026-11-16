@@ -7,11 +7,13 @@
 //! The runner is a plain future without `Send` bounds: native apps poll it on a tokio task, the
 //! browser with `wasm_bindgen_futures::spawn_local` (ARCHITECTURE.md §7, one engine for all shells).
 
+use std::any::Any;
+use std::fmt;
 use std::time::Duration;
 
 use futures_channel::mpsc;
 use futures_util::StreamExt;
-use futures_util::future::{Either, select};
+use futures_util::future::{Either, LocalBoxFuture, select};
 use teamcraft_proto::{DeviceActivity, GatewayClientMessage, GatewayServerMessage};
 
 use crate::api::{ApiError, ServerApi};
@@ -111,8 +113,32 @@ pub enum RunnerCommand {
   /// the background to fetch what came meanwhile keeps its time until then (notifications.md,
   /// "Sync wake-ups"). Whoever asks bounds the wait.
   CatchUp(futures_channel::oneshot::Sender<()>),
+  /// Work on the client between two of the loop's steps, with the loop going on (a call's
+  /// preparation): stopping the loop for it, as before, closed the gateway connection, and the
+  /// loop started again reconnected, caught up and ran its whole upkeep, which held up the next
+  /// such step for seconds (a call taking 13 s to start).
+  WithClient(ClientJob),
   /// Ends [`SyncRunner::run`], which hands the client back.
   Stop,
+}
+
+/// What [`RunnerCommand::WithClient`] runs: it gets the client as `&mut dyn Any` (the runner's
+/// `Client<A, S>`, for the host to downcast to its own), and answers through a channel of its own.
+pub struct ClientJob(Box<ClientJobFn>);
+
+/// The work of a [`ClientJob`].
+type ClientJobFn = dyn for<'a> FnOnce(&'a mut dyn Any) -> LocalBoxFuture<'a, ()> + Send;
+
+impl ClientJob {
+  pub fn new(job: impl for<'a> FnOnce(&'a mut dyn Any) -> LocalBoxFuture<'a, ()> + Send + 'static) -> Self {
+    Self(Box::new(job))
+  }
+}
+
+impl fmt::Debug for ClientJob {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter.write_str("ClientJob")
+  }
 }
 
 /// What woke the runner.
@@ -137,7 +163,7 @@ impl Default for RunnerSettings {
   }
 }
 
-impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
+impl<A: ServerApi + 'static, S: LocalStore + 'static> SyncRunner<A, S> {
   /// `on_change` runs after anything that may have changed the store (the UI re-reads it).
   pub fn new(
     mut client: Client<A, S>,
@@ -381,6 +407,12 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
           tracing::warn!(%error, "UI command failed");
         }
         // It may have answered a read, also as failed (a list's status): read again.
+        self.changed();
+      },
+      RunnerCommand::WithClient(job) => {
+        let now = self.client.now_ms();
+        // A call's preparation asks the server; heartbeats go on meanwhile.
+        self.connection.keep_alive(now, (job.0)(&mut self.client)).await;
         self.changed();
       },
       // Handled by `run`.

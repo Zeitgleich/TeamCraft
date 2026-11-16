@@ -2,6 +2,7 @@
 //! handle posts, one at a time, on a current-thread runtime. What the app reads from the local store
 //! doesn't wait for it ([`crate::reads`]).
 
+use std::any::Any;
 use std::cell::RefCell;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
@@ -37,7 +38,7 @@ use teamcraft_core::push_preview::{
 };
 use teamcraft_core::push_probe::{PROBE_OVERLAY_BYTES, probe_push};
 use teamcraft_core::records;
-use teamcraft_core::runner::{RunnerCommand, RunnerHandle, RunnerSettings, SyncRunner};
+use teamcraft_core::runner::{ClientJob, RunnerCommand, RunnerHandle, RunnerSettings, SyncRunner};
 use teamcraft_core::store::{
   CommitJournal, DEFAULT_MESSAGE_CACHE_BYTES, LaneStore, LocalStore as _, OverlayStore, SealedSqliteStore,
   SealedStoreLimits, StaticKeySource, TrackedStore,
@@ -1338,14 +1339,54 @@ impl Engine {
     conversation_id: &str,
   ) -> Result<CallPreparation, TeamCraftError> {
     let conversation: ConversationId = parse_id(conversation_id)?;
+    self
+      .on_client(move |client| Box::pin(prepare_call(client, conversation)))
+      .await?
+  }
+
+  /// Runs `job` on the client without stopping the sync loop: inside the running loop, between two
+  /// of its steps ([`RunnerCommand::WithClient`]), or on the idle client. Stopping the loop for a
+  /// call's steps closed the gateway connection, and the loop started again reconnected, caught up
+  /// and ran its whole upkeep, which held up the call's next step: a call took 13 s to start.
+  async fn on_client<R: Send + 'static>(
+    &mut self,
+    job: impl for<'a> FnOnce(&'a mut CoreClient) -> LocalFuture<'a, R> + Send + 'static,
+  ) -> Result<R, TeamCraftError> {
+    // Shared with the loop's job, so a loop that ends before it ran it leaves it for here.
+    let job = Arc::new(Mutex::new(Some(job)));
+    if let ClientSlot::Running { handle, .. } = &self.client {
+      let (reply, answer) = oneshot::channel();
+      let in_loop = Arc::clone(&job);
+      let is_sent = handle.send(RunnerCommand::WithClient(ClientJob::new(
+        move |client: &mut dyn Any| {
+          Box::pin(async move {
+            let maybe_job = in_loop.lock().unwrap_or_else(PoisonError::into_inner).take();
+            match (maybe_job, client.downcast_mut::<CoreClient>()) {
+              (Some(job), Some(client)) => {
+                // The caller may have given up waiting; nothing to tell it then.
+                let _ = reply.send(job(client).await);
+              },
+              // Invariant: the engine's loop runs a `CoreClient`; a job taken already ran.
+              _ => tracing::error!("a client job found no client of the engine's type"),
+            }
+          })
+        },
+      )));
+      if is_sent && let Ok(result) = answer.await {
+        return Ok(result);
+      }
+    }
+    let Some(job) = job.lock().unwrap_or_else(PoisonError::into_inner).take() else {
+      return Err(TeamCraftError::EngineStopped);
+    };
     let was_running = matches!(self.client, ClientSlot::Running { .. });
     let mut client = self.take_client().await?;
-    let result = prepare_call(&mut client, conversation).await;
+    let result = job(&mut client).await;
     self.client = ClientSlot::Idle(client);
     if was_running {
       self.start().await?;
     }
-    result
+    Ok(result)
   }
 
   /// "Add people" in the DM call of `conversation_id`: a meeting room with everybody in the call
@@ -1392,14 +1433,11 @@ impl Engine {
     &mut self,
     conversation: ConversationId,
   ) -> Result<Vec<teamcraft_crypto::identity::VerifiedDevice>, TeamCraftError> {
-    let was_running = matches!(self.client, ClientSlot::Running { .. });
-    let mut client = self.take_client().await?;
-    let result = client.refresh_call_devices(conversation).await;
-    self.client = ClientSlot::Idle(client);
-    if was_running {
-      self.start().await?;
-    }
-    Ok(result?)
+    Ok(
+      self
+        .on_client(move |client| Box::pin(async move { client.refresh_call_devices(conversation).await }))
+        .await??,
+    )
   }
 
   /// A fresh join token for the conversation's call, to rejoin after a lost connection.
