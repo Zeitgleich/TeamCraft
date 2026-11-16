@@ -94,7 +94,11 @@ class CallController(
   private val failure = MutableStateFlow<JoinFailure?>(null)
   /** [CallActivity] is on screen; a failure it can't show goes to a notification. */
   @Volatile private var isCallScreenVisible = false
-  /** The call somebody else was in with this device: only then does being alone end it. */
+  /**
+   * The conversation whose current call somebody else was in with this device: only then does
+   * being alone end it. Cleared when the call is left, so the next call in the same DM rings until
+   * it is answered instead of ending as "left alone" a few seconds in.
+   */
   @Volatile private var hadOthersIn: String? = null
   @Volatile private var maybeAloneEnd: Job? = null
   /** "Try again" is rejoining; the old session's ended state is awaited here and not shown (#1624). */
@@ -895,6 +899,9 @@ class CallController(
       session.close()
     }
     maybeTelecomCall = null
+    hadOthersIn = null
+    maybeAloneEnd?.cancel()
+    maybeAloneEnd = null
     moves.reset()
     hosts.reset()
     lobby.reset()
