@@ -18,3 +18,6 @@ crates/teamcraft-ui/gen/
 *.p12
 *.jks
 *.keystore
+
+# graphify knowledge graph output (local, regenerated)
+graphify-out/
