@@ -744,6 +744,40 @@ mod call_moves {
     bob.client.accept_call_move(dm, room).await.unwrap();
   }
 
+  /// The phones prepare a call in the FFI from the group and a join token, not through
+  /// `prepare_call`: the token alone makes it this device's call, so "Add people" moves it and the
+  /// other phone follows (both were refused as "this device isn't in that call").
+  #[tokio::test]
+  async fn a_call_joined_with_a_token_alone_can_be_moved_and_followed() {
+    let (_server, mut alice, mut bob, carol, _) = dm_call().await;
+    let dm = alice.client.open_dm(bob.client.user_id()).await.unwrap();
+    bob.client.full_sync().await.unwrap();
+    for peer in [&mut alice, &mut bob] {
+      peer.client.ensure_call_group(dm).await.unwrap();
+      peer.client.call_join_token(dm).await.unwrap();
+    }
+    let (alice_id, bob_id, carol_id) = (
+      alice.client.user_id(),
+      bob.client.user_id(),
+      carol.client.user_id(),
+    );
+
+    let room = alice
+      .client
+      .add_people_to_call(
+        dm,
+        &[alice_id, bob_id],
+        &[carol_id],
+        None,
+        IdempotencyKey::random(),
+      )
+      .await
+      .unwrap();
+
+    bob.client.full_sync().await.unwrap();
+    bob.client.accept_call_move(dm, room).await.unwrap();
+  }
+
   /// A server that answers the room's create with an end months away doesn't lengthen how long
   /// the organizer's device signs its guests in for (#1919).
   #[cfg(feature = "ui")]
