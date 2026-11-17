@@ -171,10 +171,10 @@ mod http {
   use super::*;
   use crate::common::member;
 
-  /// The API side of a storage outage: completing an avatar fails with 503 and `Retry-After`, after
-  /// three failures new uploads are refused at once (no URL that would fail), `/readyz` stays 200
-  /// but says `degraded` with the storage down, and after the storage is back an upload goes
-  /// through and readiness is `ok` again, without a restart.
+  /// The API side of a storage outage: storing an avatar fails with 503 and `Retry-After`, after
+  /// three failures new uploads are refused at once (before any decoding), `/readyz` stays 200 but
+  /// says `degraded` with the storage down, and after the storage is back an upload goes through
+  /// and readiness is `ok` again, without a restart.
   #[tokio::test]
   async fn a_storage_outage_answers_503_with_retry_after_and_heals() {
     let (fake, endpoint) = FakeStorage::start().await;
@@ -189,17 +189,12 @@ mod http {
       return;
     };
     let carol = member("carol");
-    let upload = start_avatar_upload(&app, &carol).await;
-    assert_eq!(upload.status, StatusCode::CREATED, "{}", upload.body);
-    let url = upload.body["upload_url"].as_str().unwrap().to_owned();
 
     fake.set_failing(true);
-    for _ in 0..3 {
-      let reply = app.post(&carol, "/me/avatar/complete", json!({})).await;
-      assert_unavailable(&reply.status, &reply.body);
+    for _ in 0..4 {
+      let (status, body) = put_avatar(&app, &carol).await;
+      assert_unavailable(&status, &body);
     }
-    let refused = start_avatar_upload(&app, &carol).await;
-    assert_unavailable(&refused.status, &refused.body);
     let ready = readiness(&app).await;
     assert_eq!(ready.status, HealthStatus::Degraded);
     assert!(
@@ -213,13 +208,8 @@ mod http {
 
     fake.set_failing(false);
     clock.advance(OPEN_FOR);
-    let upload = start_avatar_upload(&app, &carol).await;
-    assert_eq!(upload.status, StatusCode::CREATED, "{}", upload.body);
-    let url_after = upload.body["upload_url"].as_str().unwrap().to_owned();
-    assert_ne!(url, url_after);
-    put(&url_after, 4).await;
-    let completed = app.post(&carol, "/me/avatar/complete", json!({})).await;
-    assert_eq!(completed.status, StatusCode::OK, "{}", completed.body);
+    let (status, body) = put_avatar(&app, &carol).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(readiness(&app).await.status, HealthStatus::Ok);
     app.stop().await;
   }
@@ -276,8 +266,6 @@ mod http {
       return;
     };
     let carol = member("carol");
-    let upload = start_avatar_upload(&app, &carol).await;
-    assert_eq!(upload.status, StatusCode::CREATED, "{}", upload.body);
     let background = app
       .post(&carol, "/me/backgrounds", json!({"size_bytes": 10}))
       .await;
@@ -328,18 +316,14 @@ mod http {
       return;
     };
     let carol = member("carol");
-    let first = start_avatar_upload(&app, &carol).await;
-    put(first.body["upload_url"].as_str().unwrap(), 4).await;
-    let completed = app.post(&carol, "/me/avatar/complete", json!({})).await;
-    assert_eq!(completed.status, StatusCode::OK, "{}", completed.body);
+    let (status, body) = put_avatar(&app, &carol).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
     let old_key = fake.only_key();
 
     // The new picture replaces the old one while the storage can't delete anything.
-    let second = start_avatar_upload(&app, &carol).await;
-    put(second.body["upload_url"].as_str().unwrap(), 4).await;
     fake.set_refusing_deletes(true);
-    let replaced = app.post(&carol, "/me/avatar/complete", json!({})).await;
-    assert_eq!(replaced.status, StatusCode::OK, "{}", replaced.body);
+    let (status, body) = put_avatar(&app, &carol).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
     let queued = app.state.database.storage_cleanups(10).await.unwrap();
     assert_eq!(queued.len(), 1, "{queued:?}");
 
@@ -365,17 +349,12 @@ mod http {
     );
   }
 
-  async fn start_avatar_upload(
+  async fn put_avatar(
     app: &TestApp,
     user: &teamcraft_server::testing::TestUser,
-  ) -> teamcraft_server::testing::Reply {
-    app
-      .post(
-        user,
-        "/me/avatar",
-        json!({"content_type": "image/png", "size_bytes": 4}),
-      )
-      .await
+  ) -> (StatusCode, serde_json::Value) {
+    let png = crate::space_images::picture(4, 4, image::ImageFormat::Png);
+    crate::space_images::put_image(app, user, "/me/avatar", "image/png", &png).await
   }
 
   /// The real stack with the database's breaker open: requests that need the database answer at
@@ -452,17 +431,6 @@ mod http {
       .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     response.json().await.unwrap()
-  }
-
-  async fn put(url: &str, length: usize) {
-    let response = reqwest::Client::new()
-      .put(url)
-      .header("content-type", "image/png")
-      .body(vec![0_u8; length])
-      .send()
-      .await
-      .unwrap();
-    assert!(response.status().is_success());
   }
 }
 

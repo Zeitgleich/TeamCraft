@@ -114,6 +114,26 @@ class AvatarCache(
     }
   }
 
+  /**
+   * Puts the member's own new picture in place right away ([picture] `null`: removed), so the
+   * screens show it before the next refresh would.
+   */
+  suspend fun replace(userId: String, picture: ByteArray?) = withContext(Dispatchers.IO) {
+    val file = pictureFile(userId) ?: return@withContext
+    val missing = missingFile(userId) ?: return@withContext
+    synchronized(writeLock) {
+      file.parentFile?.mkdirs()
+      if (picture != null && isDecodable(picture)) {
+        file.writeBytes(picture)
+        missing.delete()
+      } else {
+        file.delete()
+        missing.writeBytes(ByteArray(0))
+      }
+      changed(userId)
+    }
+  }
+
   /** Forgets every picture (sign-out): they belong to the account that is gone. */
   fun clear() {
     synchronized(writeLock) {

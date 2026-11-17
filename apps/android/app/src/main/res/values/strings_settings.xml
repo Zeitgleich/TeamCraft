@@ -64,6 +64,15 @@
   <string name="profile_name_empty">Enter a name, or use the name from your sign-in.</string>
   <string name="profile_name_invalid">The name can\'t contain control characters.</string>
   <string name="profile_name_rejected">The name was refused. It may be too long, or your organization no longer allows changing it.</string>
+  <string name="profile_picture_change">Change picture</string>
+  <string name="profile_picture_remove">Remove picture</string>
+  <string name="profile_picture_from_provider">Your picture comes from your organization\'s sign-in and can only be changed there.</string>
+  <string name="profile_picture_crop_title">Move and zoom</string>
+  <string name="profile_picture_crop_area">Picture, drag to move, pinch to zoom</string>
+  <string name="profile_picture_zoom">Zoom</string>
+  <string name="profile_picture_use">Use picture</string>
+  <string name="profile_picture_unreadable">This picture can\'t be opened. Pick a PNG, JPEG or WebP picture.</string>
+  <string name="profile_picture_rejected">The picture was refused. Pick another one, or your organization may no longer allow changing it.</string>
   <string name="export_diagnostics">Export diagnostics</string>
   <string name="export_diagnostics_summary">Share the app and system version and recent log lines with support. Nothing is sent until you pick an app.</string>
   <string name="export_diagnostics_share_title">TeamCraft diagnostics</string>

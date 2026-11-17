@@ -6,8 +6,6 @@
 //! SHA-256 is stored, so a database leak does not yield working tokens, and tokens can be rotated
 //! and revoked without an identity provider.
 
-use std::time::Duration;
-
 use aws_lc_rs::digest;
 use axum::body::Bytes;
 use base64::Engine;
@@ -24,7 +22,6 @@ use super::admin::{AfterDeactivation, deactivate_user};
 use super::audit::{self, Target as AuditTarget};
 use super::convert::unix_millis;
 use super::profiles;
-use super::space_images::{run_limited, sanitize};
 use super::validate_name;
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
@@ -172,27 +169,7 @@ pub async fn put_bot_avatar(
 ) -> Result<(), ApiError> {
   require(state, caller, Permission::ManageUsers, &Target::Instance)?;
   ensure_active_bot(state, bot).await?;
-  let (max_bytes, timeout) = {
-    let limits = &state.settings.get().limits;
-    (
-      limits.max_avatar_bytes,
-      Duration::from_secs(limits.image_decode_timeout_secs),
-    )
-  };
-  if bytes.is_empty() {
-    return Err(ApiError::InvalidRequest("the picture is empty".into()));
-  }
-  if bytes.len() as u64 > max_bytes {
-    return Err(ApiError::PayloadTooLarge(format!(
-      "avatars are limited to {max_bytes} bytes"
-    )));
-  }
-  let declared_type = declared_type.to_owned();
-  let png = run_limited(&state.image_decodes, timeout, move || {
-    sanitize(&bytes, &declared_type)
-  })
-  .await?
-  .map_err(|error| ApiError::InvalidRequest(error.to_string()))?;
+  let png = profiles::sanitized_avatar(state, declared_type.to_owned(), bytes).await?;
   profiles::store_avatar(state, bot, png).await?;
   audit::record(
     state,

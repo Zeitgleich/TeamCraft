@@ -7,6 +7,19 @@ use crate::wire_enum::wire_enum;
 use crate::{UnixMillis, UserId, Weekday};
 
 wire_enum! {
+  /// Where people's pictures come from (`directory.avatar_source`, issue #2071).
+  #[derive(Default)]
+  pub enum AvatarSource {
+    /// Everybody uploads their own picture (the default).
+    #[default]
+    User => "user",
+    /// The identity provider's picture (OIDC `picture` claim, SCIM `photos`); a person without one
+    /// keeps their own picture or the initials.
+    IdentityProvider => "identity_provider",
+  }
+}
+
+wire_enum! {
   /// Image types accepted for avatars.
   pub enum AvatarContentType {
     Png => "image/png",
@@ -58,6 +71,16 @@ pub struct ProfileResponse {
   /// older servers and when there is no picture.
   #[serde(rename = "avatar_version", default, skip_serializing_if = "Option::is_none")]
   pub maybe_avatar_version: Option<String>,
+  /// Whether the person may set or remove their own picture (`PUT`/`DELETE /me/avatar`): not
+  /// while the workspace takes pictures from the identity provider without overrides and the
+  /// provider supplied one (`directory.avatar_source`, issue #2071). Clients then show the picture
+  /// read-only and say where it comes from. Absent from older servers: yes.
+  #[serde(default = "default_true")]
+  pub can_change_avatar: bool,
+}
+
+fn default_true() -> bool {
+  true
 }
 
 /// `PUT /api/v1/me/profile`: replaces the profile; fields left out are cleared.
@@ -92,21 +115,6 @@ impl From<&ProfileResponse> for UpdateProfileRequest {
       maybe_working_hours: profile.maybe_working_hours.clone(),
     }
   }
-}
-
-/// `POST /api/v1/me/avatar`: announces an upload.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct CreateAvatarUploadRequest {
-  pub content_type: AvatarContentType,
-  pub size_bytes: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct CreateAvatarUploadResponse {
-  /// `PUT` the image here with exactly this `Content-Type` and `Content-Length`.
-  pub upload_url: String,
-  pub content_type: AvatarContentType,
-  pub expires_at: UnixMillis,
 }
 
 /// `GET /api/v1/users/{id}/avatar`

@@ -206,6 +206,7 @@ private fun SettingsHub(
       }
     }
   }
+  ProfilePictureSection(viewModel, account.userId)
   DisplayNameSection(viewModel)
   var isEditingStatus by rememberSaveable { mutableStateOf(false) }
   SettingsGroup(R.string.settings_group_profile) {

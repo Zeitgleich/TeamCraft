@@ -9,7 +9,7 @@ use teamcraft_client_api::actions::FileInfo;
 use teamcraft_client_api::oidc_login::shown_error_code;
 use teamcraft_client_api::video_playback::VideoPlayback;
 use teamcraft_client_api::window_chrome::{TitleBar, TrayIconStyle, WindowAction, WindowChrome};
-use teamcraft_proto::{AvatarContentType, UserId};
+use teamcraft_proto::UserId;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
@@ -213,24 +213,6 @@ pub async fn avatar_download(user: UserId) -> Result<ApiBytes, AuthError> {
     status: response.status,
     maybe_content_type: response.content_type,
     body,
-  })
-}
-
-/// Makes `bytes` the signed-in user's picture through the shell (announce, upload, complete). The
-/// answer is the first refusal or the completion's, like an API call's.
-pub async fn avatar_upload(content_type: &AvatarContentType, bytes: &[u8]) -> Result<ApiResponse, AuthError> {
-  use base64::Engine;
-
-  let invalid = |_| AuthError::InvalidResponse("could not build the request".to_owned());
-  let args = js_sys::Object::new();
-  let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-  js_sys::Reflect::set(&args, &"content_type".into(), &content_type.as_str().into()).map_err(invalid)?;
-  js_sys::Reflect::set(&args, &"body_base64".into(), &encoded.into()).map_err(invalid)?;
-  let value = invoke("avatar_upload", args.into()).await?;
-  let response: ApiPayload = serde_wasm_json(&value)?;
-  Ok(ApiResponse {
-    status: response.status,
-    body: response.body,
   })
 }
 

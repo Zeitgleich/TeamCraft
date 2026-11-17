@@ -321,6 +321,7 @@ async fn run() -> anyhow::Result<()> {
     )),
     holiday_feed: Arc::default(),
     holiday_resync: Arc::default(),
+    provider_pictures: Arc::default(),
     crash_relay: Arc::new(
       teamcraft_server::services::crash_reports::CrashRelay::new(false)
         .context("building the crash reports relay client")?,

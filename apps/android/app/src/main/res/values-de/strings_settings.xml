@@ -64,6 +64,15 @@
   <string name="profile_name_empty">Gib einen Namen ein oder verwende den Namen aus deiner Anmeldung.</string>
   <string name="profile_name_invalid">Der Name darf keine Steuerzeichen enthalten.</string>
   <string name="profile_name_rejected">Der Name wurde abgelehnt. Er ist vielleicht zu lang, oder deine Organisation erlaubt die Änderung nicht mehr.</string>
+  <string name="profile_picture_change">Bild ändern</string>
+  <string name="profile_picture_remove">Bild entfernen</string>
+  <string name="profile_picture_from_provider">Dein Bild kommt aus der Anmeldung deiner Organisation und lässt sich nur dort ändern.</string>
+  <string name="profile_picture_crop_title">Bewegen und zoomen</string>
+  <string name="profile_picture_crop_area">Bild, zum Verschieben ziehen, zum Zoomen mit zwei Fingern spreizen</string>
+  <string name="profile_picture_zoom">Zoom</string>
+  <string name="profile_picture_use">Bild verwenden</string>
+  <string name="profile_picture_unreadable">Dieses Bild lässt sich nicht öffnen. Wähle ein PNG-, JPEG- oder WebP-Bild.</string>
+  <string name="profile_picture_rejected">Das Bild wurde abgelehnt. Wähle ein anderes, oder deine Organisation erlaubt die Änderung nicht mehr.</string>
   <string name="export_diagnostics">Diagnose exportieren</string>
   <string name="export_diagnostics_summary">Teilt App- und Systemversion sowie die letzten Protokollzeilen mit dem Support. Es wird nichts gesendet, bis du eine App auswählst.</string>
   <string name="export_diagnostics_share_title">TeamCraft-Diagnose</string>

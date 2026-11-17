@@ -407,6 +407,22 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
     String::from_utf8(body).map_err(|error| ApiError::Decode(error.to_string()))
   }
 
+  /// An authenticated `PUT /api/v1{path}` with a binary body of `content_type` (a picture), answered
+  /// with the raw JSON text.
+  pub async fn put_bytes(&self, path: &str, content_type: &str, bytes: Vec<u8>) -> Result<String, ApiError> {
+    if !path.starts_with('/') || path.contains("..") {
+      return Err(ApiError::Decode(format!("not an API path: {path}")));
+    }
+    self.before_change(&Method::PUT).await;
+    let request = self
+      .request(Method::PUT, path)
+      .await?
+      .header(reqwest::header::CONTENT_TYPE, content_type)
+      .body(bytes);
+    let body = read_api_body(self.call(request).await?).await?;
+    String::from_utf8(body).map_err(|error| ApiError::Decode(error.to_string()))
+  }
+
   /// An authenticated GET of `/api/v1{path}` answered with the raw body, refused above
   /// `max_bytes`: for pictures the server serves itself (a space's picture). `method` is GET.
   pub async fn get_bytes_capped(&self, path: &str, max_bytes: u64) -> Result<Vec<u8>, ApiError> {

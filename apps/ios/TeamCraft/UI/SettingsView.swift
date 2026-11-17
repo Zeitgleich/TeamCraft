@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Settings as a hub, like the Android app: name, presence and status on top, then one page each
 /// for notifications, chats, privacy and security and devices, and sign-out.
@@ -16,6 +17,7 @@ struct SettingsView: View {
   @State private var maybeStatusProblem: TextProblem?
   @State private var isSavingStatus = false
   @State private var maybeProfileJSON: String?
+  @State private var maybeOwnPicture: UIImage?
   @State private var isEditingName = false
   @State private var nameText = ""
   @State private var maybeNameProblem: TextProblem?
@@ -30,7 +32,16 @@ struct SettingsView: View {
       Form {
         Section {
           HStack(spacing: 12) {
-            AvatarView(name: account.displayName, size: 44)
+            if let picture = maybeOwnPicture {
+              Image(uiImage: picture)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 44, height: 44)
+                .clipShape(Circle())
+                .accessibilityHidden(true)
+            } else {
+              AvatarView(name: account.displayName, size: 44)
+            }
             VStack(alignment: .leading, spacing: 2) {
               Text(account.displayName).font(.app(.headline))
               HStack(spacing: 6) {
@@ -38,6 +49,11 @@ struct SettingsView: View {
                 Text(currentPresence.pickTitle).font(.app(.subheadline)).foregroundStyle(Theme.textMuted)
               }
             }
+          }
+        }
+        if let profile = maybeProfileJSON {
+          ProfilePictureSection(account: account, profileJSON: profile, maybePicture: $maybeOwnPicture) {
+            maybeProfileJSON = await model.ownProfileJSON()
           }
         }
         if let profile = maybeProfileJSON, OwnProfileDocument.canOverrideDisplayName(in: profile) {
@@ -85,6 +101,15 @@ struct SettingsView: View {
       .onDisappear { NotificationCenter.default.post(name: AppFont.mayHaveChanged, object: nil) }
       // The name changes through the profile update event; the profile is read again with it.
       .task(id: account.displayName) { maybeProfileJSON = await model.ownProfileJSON() }
+      // The picture shown follows the profile's version: a new one, or one the provider sent.
+      .task(id: maybeProfileJSON.flatMap(OwnProfileDocument.avatarVersion(in:))) {
+        guard let profile = maybeProfileJSON else { return }
+        if OwnProfileDocument.hasAvatar(in: profile), let data = await model.ownAvatarData(userId: account.userId) {
+          maybeOwnPicture = UIImage(data: data)
+        } else if !OwnProfileDocument.hasAvatar(in: profile) {
+          maybeOwnPicture = nil
+        }
+      }
       .toolbar {
         ToolbarItem(placement: .confirmationAction) { Button("done") { dismiss() } }
       }

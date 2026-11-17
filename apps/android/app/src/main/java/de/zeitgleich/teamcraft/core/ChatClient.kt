@@ -194,6 +194,14 @@ class ChatClient(
 
   suspend fun ownProfile(): OwnProfile = OwnProfile.parse(api("GET", "/me/profile"))
 
+  /** Makes [png] (a square the app cropped) the member's own picture; the server re-encodes it. */
+  suspend fun setOwnAvatar(png: ByteArray): OwnProfile = OwnProfile.parse(core().setOwnAvatar(png))
+
+  /** Removes the member's own picture. */
+  suspend fun removeOwnAvatar() {
+    api("DELETE", "/me/avatar")
+  }
+
   /** Saves [maybeName] as the member's name, or with `null` goes back to the sign-in name. */
   suspend fun setDisplayName(profile: OwnProfile, maybeName: String?) {
     api("PUT", "/me/profile", profile.updateBody(maybeName))

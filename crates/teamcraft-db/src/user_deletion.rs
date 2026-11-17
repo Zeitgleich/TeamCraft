@@ -225,8 +225,8 @@ impl Database {
     let keys = sqlx::query_scalar!(
       r#"SELECT avatar_key AS "key!" FROM user_profiles WHERE user_id = $1 AND avatar_key IS NOT NULL
          UNION ALL
-         SELECT pending_avatar_key AS "key!" FROM user_profiles
-           WHERE user_id = $1 AND pending_avatar_key IS NOT NULL
+         SELECT provider_avatar_key AS "key!" FROM user_profiles
+           WHERE user_id = $1 AND provider_avatar_key IS NOT NULL
          UNION ALL
          SELECT s3_key AS "key!" FROM user_backgrounds WHERE user_id = $1"#,
       to_db(user),

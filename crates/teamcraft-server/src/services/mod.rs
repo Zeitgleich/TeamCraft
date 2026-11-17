@@ -61,6 +61,7 @@ pub mod permission_scheme;
 pub mod personal_data;
 pub mod presence;
 pub mod profiles;
+pub mod provider_avatars;
 pub mod provider_events;
 pub mod push_diagnostics;
 pub mod retention;

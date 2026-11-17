@@ -1264,6 +1264,17 @@ impl TeamCraft {
       .map_err(TeamCraftError::Network)?
   }
 
+  /// Makes `png` (a square the app cropped) the signed-in person's own picture and answers the
+  /// profile JSON (`/me/profile` shape). Refused with `avatar_from_identity_provider` while the
+  /// workspace shows the provider's picture without overrides (`can_change_avatar` false).
+  /// Removing goes through `api_request("DELETE", "/me/avatar")`.
+  pub async fn set_own_avatar(&self, png: Vec<u8>) -> Result<String, TeamCraftError> {
+    let api = self.server_api()?;
+    run_request(async move { bridge::set_own_avatar(&api, png).await })
+      .await
+      .map_err(TeamCraftError::Network)?
+  }
+
   /// The picture of a space (PNG bytes, at most `max_bytes`), or `None` without one. Fetched on
   /// demand for spaces on screen; the app keeps its own cache, keyed by the version in
   /// `ConversationItem.maybe_space_image_version`.
