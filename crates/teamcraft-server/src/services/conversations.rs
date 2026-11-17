@@ -69,6 +69,7 @@ pub async fn list_conversations(
   let views = state.database.list_conversations(caller.user.id, &filter).await?;
   let mut conversations = respond_all(state, &views).await?;
   let mut space_roles: HashMap<SpaceId, Option<SpaceRole>> = HashMap::new();
+  let mut managed_channels = Vec::new();
   for (view, response) in views.iter().zip(conversations.iter_mut()) {
     let maybe_space_role = match view.conversation.maybe_space_id {
       Some(space) => match space_roles.get(&space) {
@@ -81,11 +82,19 @@ pub async fn list_conversations(
       },
       None => None,
     };
-    response.maybe_my_permissions = Some(channel_permissions(
-      state,
-      caller,
-      &channel_target(view, maybe_space_role),
-    ));
+    let permissions = channel_permissions(state, caller, &channel_target(view, maybe_space_role));
+    if view.conversation.kind == ConversationKind::Channel
+      && view.maybe_membership.is_some()
+      && permissions.contains(&Permission::ManageChannelProperties)
+    {
+      managed_channels.push((view.conversation.id, view.conversation.is_archived));
+    }
+    response.maybe_my_permissions = Some(permissions);
+  }
+  // The owners' notice (issue #212): only for channels the caller manages.
+  let mut inactivity = super::inactivity::statuses_for(state, &managed_channels).await?;
+  for response in &mut conversations {
+    response.maybe_inactivity = inactivity.remove(&response.id);
   }
   // Only with the user's own list: the channel browser lists other conversations.
   let (deleted_conversation_ids, signed_deletions, signed_space_deletions) = if filter.only_joined {
@@ -127,7 +136,17 @@ pub async fn get_conversation(
 ) -> Result<ConversationResponse, ApiError> {
   let access = load_conversation(state, caller, id).await?;
   let mut response = respond(state, &access.view).await?;
-  response.maybe_my_permissions = Some(channel_permissions(state, caller, &access.target()));
+  let permissions = channel_permissions(state, caller, &access.target());
+  if response.kind == ConversationKind::Channel
+    && response.maybe_my_membership.is_some()
+    && permissions.contains(&Permission::ManageChannelProperties)
+  {
+    let channel = [(id, response.is_archived)];
+    response.maybe_inactivity = super::inactivity::statuses_for(state, &channel)
+      .await?
+      .remove(&id);
+  }
+  response.maybe_my_permissions = Some(permissions);
   if response.kind == ConversationKind::Meeting
     && let Some(meeting) = state.database.get_meeting_by_conversation(id).await?
   {

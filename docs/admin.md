@@ -583,7 +583,13 @@ The job runs every `[inactivity] check_interval_secs` (default one hour):
    `channel_inactivity_snoozed`) defers everything until the snooze ends and forgets a notice already
    sent. After it a channel that is still quiet is noticed afresh and gets the full M days, so a snooze
    of 60 days with M = 30 defers the archiving by about 90. The console's channel page shows when a
-   channel is archived or deleted and has "Keep open". Restoring a channel by hand, or a space with its
+   channel is archived or deleted and has "Keep open". The owners see the same in the channel itself on
+   web, desktop, Android and iOS: `GET`/list of conversations carry `inactivity` (the status above)
+   **only for callers who hold `manage_channel_properties` in a channel they are in**, so other members
+   learn nothing; the server tells the channel's devices (`ConversationUpdate`) when a notice goes out
+   or a snooze is set. The apps show a banner with "Keep open" (for an archived channel: "Postpone
+   deletion", only while a deletion is due) that calls the snooze endpoint; the rule is
+   `teamcraft_client_api::inactivity_notice`, shared by all shells. Restoring a channel by hand, or a space with its
    channels, snoozes the restored channels for `snooze_days`, so they aren't archived again at the next
    run.
 4. **Delete (retention step).** Only with `delete_after_archived_days`, and only channels **the policy

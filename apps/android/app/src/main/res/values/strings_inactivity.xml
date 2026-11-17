@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="inactivity_notice_quiet">Nobody has written in this channel for a while.</string>
+  <string name="inactivity_notice_archive_on">Nobody has written in this channel for a while. It is archived on %1$s unless somebody writes in it or keeps it open.</string>
+  <string name="inactivity_notice_archived">This channel was archived automatically because it was quiet.</string>
+  <string name="inactivity_notice_delete_on">This channel was archived because it was quiet. It is deleted on %1$s unless somebody restores it or postpones the deletion.</string>
+  <string name="inactivity_notice_kept_open">This channel is kept open until %1$s.</string>
+  <string name="inactivity_notice_keep">Keep open</string>
+  <string name="inactivity_notice_postpone">Postpone deletion</string>
+</resources>

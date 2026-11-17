@@ -42,6 +42,7 @@ mod first_sync;
 mod group_mentions;
 mod guest_meetings;
 mod import;
+mod inactivity_notice;
 mod key_packages;
 mod key_placeholders;
 mod key_reask;

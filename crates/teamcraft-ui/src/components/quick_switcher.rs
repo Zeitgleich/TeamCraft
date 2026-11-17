@@ -1026,6 +1026,7 @@ mod tests {
   fn conversation(id: u64, kind: ConversationKind, name: &str, members: &[u64]) -> Conversation {
     Conversation {
       maybe_draft_preview: None,
+      maybe_inactivity: None,
       id: id_from_raw(id),
       maybe_space: None,
       kind,

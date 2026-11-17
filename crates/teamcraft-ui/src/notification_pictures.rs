@@ -274,6 +274,7 @@ mod tests {
   fn channel() -> Conversation {
     Conversation {
       maybe_draft_preview: None,
+      maybe_inactivity: None,
       id: id_from_raw(7),
       maybe_space: Some(id_from_raw(3)),
       kind: ConversationKind::Public,

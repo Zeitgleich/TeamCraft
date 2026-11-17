@@ -30,7 +30,7 @@ authenticate with a bearer token).
 | Create space, channel, category; rename; topic | Client (channel and space settings) | `POST /spaces`, `/spaces/{id}/channels`, `PATCH /conversations/{id}`   |
 | Archive, unarchive                             | Client (channel settings)           | `PATCH /conversations/{id}` (`is_archived`)                            |
 | Archive, restore a space with its channels     | Console (Spaces)                    | `PATCH /spaces/{id}` (`is_archived`)                                   |
-| Keep a quiet channel open (snooze)             | Console (Channels)                  | `POST /conversations/{id}/inactivity/snooze`                           |
+| Keep a quiet channel open (snooze)             | Console (Channels), channel banner  | `POST /conversations/{id}/inactivity/snooze`                           |
 | Make public / private                          | Client (channel settings)           | `PUT /conversations/{id}/visibility`                                   |
 | Flag as integration channel                    | API                                 | `PATCH /conversations/{id}` (`is_integration`)                         |
 | Add or remove members, change roles            | Client (members panel)              | `/spaces/{id}/members`, `/conversations/{id}/members`                  |

@@ -265,6 +265,48 @@ pub struct ConversationItem {
   /// newest messages may be missing yet, so the apps show that it is loading.
   #[uniffi(default = false)]
   pub is_catching_up: bool,
+  /// What the owners of a quiet channel are told (issue #212), as of when the item was made; the
+  /// rule is `teamcraft_client_api::inactivity_notice`. Only for who may manage the channel.
+  #[uniffi(default = None)]
+  #[serde(default)]
+  pub maybe_inactivity_notice: Option<InactivityNoticeItem>,
+}
+
+/// The inactivity notice of a channel (issue #212): the apps draw its text and, when
+/// `offers_keep_open`, a button that sends the `snooze_channel_inactivity` action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Record)]
+pub struct InactivityNoticeItem {
+  pub kind: InactivityNoticeKindItem,
+  /// Quiet: when it is archived (none: the policy only notices). Archived by the policy: when it is
+  /// deleted (none: it is not deleted). Kept open: until when.
+  pub maybe_at_ms: Option<i64>,
+  /// "Keep open" (for an archived channel: "postpone deletion") is offered.
+  pub offers_keep_open: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, uniffi::Enum)]
+pub enum InactivityNoticeKindItem {
+  Quiet,
+  ArchivedByPolicy,
+  KeptOpen,
+}
+
+impl InactivityNoticeItem {
+  fn from_notice(notice: teamcraft_client_api::inactivity_notice::InactivityNotice) -> Self {
+    use teamcraft_client_api::inactivity_notice::InactivityNotice;
+    let (kind, maybe_at) = match notice {
+      InactivityNotice::Quiet { archive_at } => (InactivityNoticeKindItem::Quiet, archive_at),
+      InactivityNotice::ArchivedByPolicy { delete_at } => {
+        (InactivityNoticeKindItem::ArchivedByPolicy, delete_at)
+      },
+      InactivityNotice::KeptOpen { until } => (InactivityNoticeKindItem::KeptOpen, Some(until)),
+    };
+    Self {
+      kind,
+      maybe_at_ms: maybe_at.map(|at| at.0),
+      offers_keep_open: notice.offers_keep_open(),
+    }
+  }
 }
 
 /// A user group the composer offers after `@` in a conversation (issue #206): only where the user
@@ -721,7 +763,11 @@ impl ConversationItem {
     maybe_peer: Option<DirectPeer>,
     is_guest: bool,
   ) -> Self {
+    let maybe_inactivity_notice = conversation
+      .inactivity_notice(now_ms())
+      .map(InactivityNoticeItem::from_notice);
     Self {
+      maybe_inactivity_notice,
       can_react: conversation.can_react(),
       can_manage_bookmarks: conversation.can_manage_bookmarks(is_guest),
       can_manage_channel: conversation.can_manage_channel(),
@@ -755,6 +801,15 @@ impl ConversationItem {
       is_catching_up: conversation.is_catching_up,
     }
   }
+}
+
+/// Milliseconds since the Unix epoch, for what a notice says at the time an item is made.
+fn now_ms() -> i64 {
+  std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map_or(0, |elapsed| {
+      i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+    })
 }
 
 /// Where a share from another app can go (issue #829): the conversations the user may post in,
@@ -1178,6 +1233,7 @@ mod tests {
     let item = |kind, maybe_permissions, is_guest| {
       let conversation = view::Conversation {
         maybe_draft_preview: None,
+        maybe_inactivity: None,
         id: view::id_from_raw(5),
         maybe_space: Some(view::id_from_raw(2)),
         kind,
@@ -1240,6 +1296,7 @@ mod tests {
   fn a_direct_conversation_item_names_its_peer() {
     let conversation = view::Conversation {
       maybe_draft_preview: None,
+      maybe_inactivity: None,
       id: view::id_from_raw(5),
       maybe_space: None,
       kind: ConversationKindView::Direct,
@@ -1280,6 +1337,55 @@ mod tests {
     let unknown = ConversationItem::from_view(conversation, None, None, false);
     assert_eq!((unknown.maybe_peer_id, unknown.maybe_peer_presence), (None, None));
     assert_eq!(unknown.maybe_peer, None);
+  }
+
+  /// Issue #212: the owners of a quiet channel get the notice with the item, nobody else.
+  #[test]
+  fn a_quiet_channel_item_carries_the_notice_for_its_managers() {
+    let quiet = |permission: teamcraft_proto::Permission| {
+      let mut conversation = view::Conversation {
+        maybe_draft_preview: None,
+        maybe_inactivity: Some(teamcraft_proto::ChannelInactivityStatus {
+          maybe_notified_at: Some(teamcraft_proto::UnixMillis(10)),
+          maybe_archive_at: Some(teamcraft_proto::UnixMillis(i64::MAX)),
+          ..teamcraft_proto::ChannelInactivityStatus::default()
+        }),
+        id: view::id_from_raw(5),
+        maybe_space: Some(view::id_from_raw(2)),
+        kind: ConversationKindView::Public,
+        category: view::SidebarCategory::Channels,
+        name: "general".into(),
+        topic: String::new(),
+        member_ids: Vec::new(),
+        unread_count: 0,
+        mention_count: 0,
+        is_favorite: false,
+        is_muted: false,
+        can_post: true,
+        bookmarks: Vec::new(),
+        is_catching_up: false,
+        maybe_image_version: None,
+        is_notes_to_self: false,
+        is_archived: false,
+        is_imported: false,
+        maybe_permissions: None,
+        has_only_deactivated_others: false,
+      };
+      conversation.maybe_permissions = Some(vec![permission]);
+      ConversationItem::from_view(conversation, None, None, false)
+    };
+    assert_eq!(
+      quiet(teamcraft_proto::Permission::ManageChannelProperties).maybe_inactivity_notice,
+      Some(InactivityNoticeItem {
+        kind: InactivityNoticeKindItem::Quiet,
+        maybe_at_ms: Some(i64::MAX),
+        offers_keep_open: true,
+      })
+    );
+    assert_eq!(
+      quiet(teamcraft_proto::Permission::CreatePost).maybe_inactivity_notice,
+      None
+    );
   }
 
   #[test]
@@ -1356,6 +1462,7 @@ mod tests {
   fn conversation_view(id: u64, name: &str) -> view::Conversation {
     view::Conversation {
       maybe_draft_preview: None,
+      maybe_inactivity: None,
       id: view::id_from_raw(id),
       maybe_space: None,
       kind: ConversationKindView::Public,

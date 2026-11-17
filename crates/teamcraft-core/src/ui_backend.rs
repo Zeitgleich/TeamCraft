@@ -320,6 +320,9 @@ pub enum CoreCommand {
     conversation: ConversationId,
     request: MoveChannelRequest,
   },
+  SnoozeChannelInactivity {
+    conversation: ConversationId,
+  },
   RefreshChannelBrowser {
     space: SpaceId,
   },
@@ -618,6 +621,7 @@ impl CoreCommand {
       | Self::CreateChannelWith { .. }
       | Self::UpdateChannel { .. }
       | Self::MoveChannel { .. }
+      | Self::SnoozeChannelInactivity { .. }
       | Self::RefreshChannelBrowser { .. }
       | Self::JoinChannel { .. }
       | Self::ExtendGuest { .. }
@@ -1722,6 +1726,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       }),
       maybe_image_version: response.maybe_image.as_ref().map(|image| image.version.clone()),
       maybe_draft_preview: None,
+      maybe_inactivity: response.maybe_inactivity.clone(),
     }
   }
 
@@ -3882,6 +3887,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.command(CoreCommand::JoinChannel { conversation });
   }
 
+  fn snooze_channel_inactivity(&self, conversation: ConversationId) {
+    self.command(CoreCommand::SnoozeChannelInactivity { conversation });
+  }
+
   fn join_requests(&self) -> Vec<teamcraft_client_api::activity::JoinRequest> {
     self.ui_join_requests()
   }
@@ -5646,6 +5655,7 @@ mod tests {
       maybe_my_permissions: None,
       maybe_importer_user_id: None,
       maybe_imported_through: None,
+      maybe_inactivity: None,
       maybe_my_membership: None,
       participants: vec![participant(1, "Alice Example"), participant(2, "Bob Example")],
       maybe_image: None,
@@ -6493,6 +6503,7 @@ mod tests {
         maybe_my_permissions: None,
         maybe_importer_user_id: None,
         maybe_imported_through: None,
+        maybe_inactivity: None,
         maybe_my_membership: None,
         participants: Vec::new(),
         maybe_image: None,
@@ -6924,6 +6935,7 @@ mod tests {
         maybe_my_permissions: None,
         maybe_importer_user_id: None,
         maybe_imported_through: None,
+        maybe_inactivity: None,
         maybe_my_membership: None,
         participants: Vec::new(),
         maybe_image: None,

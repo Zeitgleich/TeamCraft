@@ -7,8 +7,10 @@
 //! message's ID. The policy is off unless the signed workspace policy turns it on; every run is
 //! bounded (`max_per_run`) and every step has an audit entry without an actor.
 
+use std::collections::HashMap;
+
 use serde_json::json;
-use teamcraft_db::{InactivityCandidate, NewAuditEntry, PolicyArchivedChannel};
+use teamcraft_db::{InactivityCandidate, InactivityState, NewAuditEntry, PolicyArchivedChannel};
 use teamcraft_proto::{
   ChannelInactivityStatus, ConversationId, ConversationKind, DeactivationReason, GatewayEvent,
   INACTIVITY_DELETE_NOTICE_DAYS, InactivityPolicy, MAX_INACTIVITY_SNOOZE_DAYS, Permission,
@@ -227,6 +229,7 @@ async fn send_notice(
     }),
   )
   .await?;
+  announce_change(state, conversation).await;
   Ok(true)
 }
 
@@ -373,7 +376,22 @@ async fn warn_of_deletion(
     }),
   )
   .await?;
+  announce_change(state, channel.id).await;
   Ok(true)
+}
+
+/// Tells the members' devices to read the channel again, so that its owners see the notice (or that
+/// it was kept open) at once. A failure only delays that until the next sync.
+async fn announce_change(state: &AppState, conversation: ConversationId) {
+  match state.database.conversation_member_ids(conversation).await {
+    Ok(members) => state.hub.publish(
+      members,
+      &GatewayEvent::ConversationUpdate {
+        conversation_id: conversation,
+      },
+    ),
+    Err(error) => warn!(%error, conversation_id = %conversation, "announcing an inactivity change failed"),
+  }
 }
 
 /// Deletes a channel the policy archived, as `delete_channel` does for an admin, with an audit entry
@@ -515,6 +533,7 @@ pub async fn snooze(
     &json!({"days": days}),
   )
   .await?;
+  announce_change(state, id).await;
   Ok(ChannelInactivityStatus {
     maybe_snoozed_until: Some(unix_millis(until)),
     is_archived_by_policy: false,
@@ -538,13 +557,55 @@ pub fn status_of(
   policy: &InactivityPolicy,
   row: &teamcraft_db::AdminConversationRow,
 ) -> Option<ChannelInactivityStatus> {
-  let archive_at = (policy.archives() && !row.is_archived)
-    .then_some(row.maybe_inactivity_notified_at)
+  status_from_state(
+    policy,
+    row.is_archived,
+    &InactivityState {
+      maybe_notified_at: row.maybe_inactivity_notified_at,
+      maybe_snoozed_until: row.maybe_inactivity_snoozed_until,
+      maybe_archived_at: row.maybe_archived_at,
+      is_archived_by_policy: row.is_archived_by_policy,
+    },
+  )
+}
+
+/// The inactivity notes for the owners of these channels in the apps: the states the policy
+/// recorded, for the `channels` the caller may manage. Nothing while the policy is off and nothing
+/// was recorded, so an instance that doesn't use it pays one indexed query per list.
+pub async fn statuses_for(
+  state: &AppState,
+  channels: &[(ConversationId, bool)],
+) -> Result<HashMap<ConversationId, ChannelInactivityStatus>, ApiError> {
+  if channels.is_empty() {
+    return Ok(HashMap::new());
+  }
+  let managed: Vec<ConversationId> = channels.iter().map(|(id, _)| *id).collect();
+  let policy = state.policy.get().inactivity.clone();
+  let states = state.database.inactivity_states_of(&managed).await?;
+  let is_archived: HashMap<ConversationId, bool> = channels.iter().copied().collect();
+  Ok(
+    states
+      .into_iter()
+      .filter_map(|(id, recorded)| {
+        let status = status_from_state(&policy, is_archived.get(&id).copied().unwrap_or(false), &recorded)?;
+        Some((id, status))
+      })
+      .collect(),
+  )
+}
+
+fn status_from_state(
+  policy: &InactivityPolicy,
+  is_archived: bool,
+  state: &InactivityState,
+) -> Option<ChannelInactivityStatus> {
+  let archive_at = (policy.archives() && !is_archived)
+    .then_some(state.maybe_notified_at)
     .flatten()
     .map(|notified| unix_millis(notified + Duration::days(i64::from(policy.archive_after_more_days))));
-  let delete_at = row
+  let delete_at = state
     .is_archived_by_policy
-    .then_some(row.maybe_archived_at)
+    .then_some(state.maybe_archived_at)
     .flatten()
     .zip(
       policy
@@ -553,10 +614,10 @@ pub fn status_of(
     )
     .map(|(archived, days)| unix_millis(archived + Duration::days(i64::from(days))));
   let status = ChannelInactivityStatus {
-    maybe_notified_at: row.maybe_inactivity_notified_at.map(unix_millis),
+    maybe_notified_at: state.maybe_notified_at.map(unix_millis),
     maybe_archive_at: archive_at,
-    maybe_snoozed_until: row.maybe_inactivity_snoozed_until.map(unix_millis),
-    is_archived_by_policy: row.is_archived_by_policy,
+    maybe_snoozed_until: state.maybe_snoozed_until.map(unix_millis),
+    is_archived_by_policy: state.is_archived_by_policy,
     maybe_delete_at: delete_at,
   };
   (status != ChannelInactivityStatus::default()).then_some(status)
@@ -598,4 +659,65 @@ pub async fn deactivate_idle_guest_accounts(
     }
   }
   Ok(deactivated)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  const AT: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
+
+  #[test]
+  fn a_noticed_channel_names_its_archive_date_when_the_policy_archives() {
+    let policy = InactivityPolicy {
+      is_enabled: true,
+      archive_after_more_days: 30,
+      ..InactivityPolicy::default()
+    };
+    let state = InactivityState {
+      maybe_notified_at: Some(AT),
+      ..InactivityState::default()
+    };
+    let status = status_from_state(&policy, false, &state).unwrap();
+    assert_eq!(status.maybe_notified_at, Some(unix_millis(AT)));
+    assert_eq!(
+      status.maybe_archive_at,
+      Some(unix_millis(AT + Duration::days(30)))
+    );
+    let notices_only = InactivityPolicy {
+      archive_after_more_days: 0,
+      ..policy
+    };
+    assert_eq!(
+      status_from_state(&notices_only, false, &state)
+        .unwrap()
+        .maybe_archive_at,
+      None
+    );
+  }
+
+  #[test]
+  fn nothing_recorded_says_nothing() {
+    assert_eq!(
+      status_from_state(&InactivityPolicy::default(), false, &InactivityState::default()),
+      None
+    );
+  }
+
+  #[test]
+  fn a_channel_the_policy_archived_names_its_deletion() {
+    let policy = InactivityPolicy {
+      is_enabled: true,
+      maybe_delete_after_archived_days: Some(60),
+      ..InactivityPolicy::default()
+    };
+    let state = InactivityState {
+      maybe_archived_at: Some(AT),
+      is_archived_by_policy: true,
+      ..InactivityState::default()
+    };
+    let status = status_from_state(&policy, true, &state).unwrap();
+    assert!(status.is_archived_by_policy);
+    assert_eq!(status.maybe_delete_at, Some(unix_millis(AT + Duration::days(60))));
+  }
 }

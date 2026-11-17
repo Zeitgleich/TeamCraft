@@ -258,6 +258,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         conversation,
         request,
       } => self.move_channel(conversation, &request).await,
+      CoreCommand::SnoozeChannelInactivity { conversation } => {
+        self.snooze_channel_inactivity(conversation).await
+      },
       CoreCommand::RefreshChannelBrowser { space } => self.refresh_channel_browser(space).await.map(|_| ()),
       CoreCommand::JoinChannel { conversation } => self.join_channel(conversation).await,
       CoreCommand::ExtendGuest {

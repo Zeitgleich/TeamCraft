@@ -472,3 +472,11 @@ channel-sources-bridge-instance-hint = Die Bridge läuft neben dem Server (Deplo
 channel-sources-bridge-loopback-hint = Die Bridge läuft neben den Quellen und lauscht auf ihrer lokalen Standardadresse. Wurde ihr Listener geöffnet, die eigene Adresse der Bridge verwenden.
 channel-sources-bridge-configured = Unter der eingestellten Adresse
 channel-sources-bridge-configured-hint = Die Bridge läuft auf einem eigenen Host, Quellen senden an { $url }, die Adresse, die die Admins eingestellt haben.
+
+inactivity-notice-quiet = In diesem Kanal hat länger niemand geschrieben.
+inactivity-notice-archive-on = In diesem Kanal hat länger niemand geschrieben. Er wird am { $date } archiviert, wenn niemand darin schreibt oder ihn offen hält.
+inactivity-notice-archived = Dieser Kanal wurde automatisch archiviert, weil es still war.
+inactivity-notice-delete-on = Dieser Kanal wurde archiviert, weil es still war. Er wird am { $date } gelöscht, wenn ihn niemand wiederherstellt oder das Löschen aufschiebt.
+inactivity-notice-kept-open = Dieser Kanal bleibt bis zum { $date } offen.
+inactivity-notice-keep = Offen halten
+inactivity-notice-postpone = Löschen aufschieben

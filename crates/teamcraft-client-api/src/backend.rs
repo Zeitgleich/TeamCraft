@@ -891,6 +891,10 @@ pub trait ChatBackend {
     Vec::new()
   }
   fn join_channel(&self, _conversation: ConversationId) {}
+  /// Keeps a quiet channel open (or postpones the deletion of one the inactivity policy archived)
+  /// for the policy's snooze period, for the channel's owners (issue #212). A server record; the
+  /// channel's notice follows with the refresh.
+  fn snooze_channel_inactivity(&self, _conversation: ConversationId) {}
   /// Guest memberships ending soon that concern the user: their own, sponsored, or in a space they
   /// administer (issue #212).
   fn expiring_guests(&self) -> Vec<teamcraft_proto::ExpiringGuestResponse> {

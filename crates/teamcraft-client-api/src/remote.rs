@@ -1108,6 +1108,9 @@ pub enum ChatAction {
   JoinChannel {
     conversation: ConversationId,
   },
+  SnoozeChannelInactivity {
+    conversation: ConversationId,
+  },
   JoinSpace {
     space: SpaceId,
   },
@@ -1626,6 +1629,7 @@ impl ChatAction {
         changes,
       } => backend.update_channel(conversation, changes),
       Self::JoinChannel { conversation } => backend.join_channel(conversation),
+      Self::SnoozeChannelInactivity { conversation } => backend.snooze_channel_inactivity(conversation),
       Self::JoinSpace { space } => backend.join_space(space),
       Self::LeaveChannel {
         conversation,

@@ -433,6 +433,14 @@ impl<A: ServerApi> ServerApi for ReadOnlyApi<A> {
     self.refused("update_conversation")
   }
 
+  fn snooze_inactivity(
+    &self,
+    _conversation: ConversationId,
+    _request: &teamcraft_proto::SnoozeInactivityRequest,
+  ) -> impl Future<Output = Result<teamcraft_proto::ChannelInactivityStatus, ApiError>> {
+    self.refused("snooze_inactivity")
+  }
+
   fn move_conversation(
     &self,
     _conversation: ConversationId,

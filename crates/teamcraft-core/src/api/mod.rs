@@ -405,6 +405,13 @@ pub trait ServerApi {
     conversation: ConversationId,
     request: &UpdateConversationRequest,
   ) -> impl Future<Output = Result<ConversationResponse, ApiError>>;
+  /// Keeps a channel open for a while: the inactivity policy leaves it alone
+  /// (`POST /conversations/{id}/inactivity/snooze`, issue #212).
+  fn snooze_inactivity(
+    &self,
+    conversation: ConversationId,
+    request: &teamcraft_proto::SnoozeInactivityRequest,
+  ) -> impl Future<Output = Result<teamcraft_proto::ChannelInactivityStatus, ApiError>>;
   /// Moves a channel to another space (`PUT /conversations/{id}/space`).
   fn move_conversation(
     &self,

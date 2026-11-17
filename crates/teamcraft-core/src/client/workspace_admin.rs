@@ -157,6 +157,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
+  /// Keeps a channel open for the policy's snooze period, or postpones the deletion of one the
+  /// inactivity policy archived (issue #212), then reads the channel again so that its notice is
+  /// the server's word. A server record: no group state is involved.
+  pub async fn snooze_channel_inactivity(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    self
+      .api
+      .snooze_inactivity(conversation, &teamcraft_proto::SnoozeInactivityRequest::default())
+      .await?;
+    self.refresh_conversation(conversation).await
+  }
+
   /// Moves a channel to another space and announces it. The encryption group stays as it is.
   pub async fn move_channel(
     &mut self,

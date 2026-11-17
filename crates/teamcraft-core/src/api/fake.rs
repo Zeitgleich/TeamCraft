@@ -1270,6 +1270,27 @@ impl FakeServer {
     }
   }
 
+  /// The inactivity policy's note on a channel, as the server shows it to who manage the channel
+  /// (issue #212); `None` clears it.
+  pub fn set_inactivity(
+    &self,
+    conversation: teamcraft_proto::ConversationId,
+    maybe_status: Option<teamcraft_proto::ChannelInactivityStatus>,
+  ) {
+    let mut state = self.lock();
+    let Some(entry) = state.conversations.get_mut(&conversation) else {
+      return;
+    };
+    entry.response.maybe_inactivity = maybe_status;
+    let members: Vec<UserId> = entry.members.keys().copied().collect();
+    state.publish(
+      members,
+      &GatewayEvent::ConversationUpdate {
+        conversation_id: conversation,
+      },
+    );
+  }
+
   /// Deletes every scheduled message, as the purge or a cancel elsewhere does.
   pub fn purge_scheduled(&self) {
     self.lock().scheduled.clear();
@@ -5291,6 +5312,33 @@ impl ServerApi for FakeServerApi {
     })
   }
 
+  async fn snooze_inactivity(
+    &self,
+    conversation: ConversationId,
+    request: &teamcraft_proto::SnoozeInactivityRequest,
+  ) -> Result<teamcraft_proto::ChannelInactivityStatus, ApiError> {
+    self.with(|state, me| {
+      let now_ms = state.now_ms();
+      let entry = state.member_conversation_mut(conversation, me)?;
+      let days = request
+        .maybe_days
+        .unwrap_or(teamcraft_proto::DEFAULT_INACTIVITY_SNOOZE_DAYS);
+      let status = teamcraft_proto::ChannelInactivityStatus {
+        maybe_snoozed_until: Some(UnixMillis(now_ms.saturating_add(i64::from(days) * 86_400_000))),
+        ..teamcraft_proto::ChannelInactivityStatus::default()
+      };
+      entry.response.maybe_inactivity = Some(status.clone());
+      let members: Vec<UserId> = entry.members.keys().copied().collect();
+      state.publish(
+        members,
+        &GatewayEvent::ConversationUpdate {
+          conversation_id: conversation,
+        },
+      );
+      Ok(status)
+    })
+  }
+
   async fn move_conversation(
     &self,
     conversation: ConversationId,
@@ -7884,6 +7932,7 @@ impl State {
       maybe_my_permissions: None,
       maybe_importer_user_id: None,
       maybe_imported_through: None,
+      maybe_inactivity: None,
       maybe_my_membership: None,
       participants: Vec::new(),
       maybe_image: None,

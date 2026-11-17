@@ -2471,6 +2471,10 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::JoinChannel { conversation });
   }
 
+  fn snooze_channel_inactivity(&self, conversation: ConversationId) {
+    self.act(ChatAction::SnoozeChannelInactivity { conversation });
+  }
+
   fn joinable_spaces(&self) -> Vec<JoinableSpace> {
     match self.ask(ChatQuery::JoinableSpaces) {
       Some(ChatAnswer::JoinableSpaces { spaces }) => spaces,
