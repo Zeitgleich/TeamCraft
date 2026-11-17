@@ -303,6 +303,7 @@ pub fn set_maximize_button(
   Ok(())
 }
 
+#[cfg(any(target_os = "linux", windows))]
 fn failed(error: &impl std::fmt::Display) -> WindowChromeError {
   WindowChromeError {
     kind: "failed",
