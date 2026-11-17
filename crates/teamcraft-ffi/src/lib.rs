@@ -17,6 +17,7 @@ mod color_theme;
 mod composer_format;
 mod crash_reports;
 mod creating;
+mod custom_emoji;
 mod device_proofs;
 mod directory;
 mod engine;
@@ -757,6 +758,32 @@ impl TeamCraft {
     self
       .act_locally(move |reads| reads.send_message(conversation_id, maybe_thread_id, body))
       .await
+  }
+
+  /// The workspace's custom emoji (issue #207) whose names match `query` (what was typed after `:`;
+  /// empty lists them by name), at most `limit`, from what the core holds: never waits for the server.
+  pub async fn custom_emoji(
+    &self,
+    query: String,
+    limit: u32,
+  ) -> Result<Vec<custom_emoji::CustomEmojiItem>, TeamCraftError> {
+    self
+      .read(move |reads| reads.custom_emoji(&query, usize::try_from(limit).unwrap_or(usize::MAX)))
+      .await
+  }
+
+  /// The app needs the set (the picker, the `:` suggestions, a picture it lacks): the core reads it
+  /// from the server unless it did lately and nothing changed, then reports a change. Returns once
+  /// that read is done, so call it without waiting; failures are the core's to retry.
+  pub async fn want_custom_emoji(&self) -> Result<(), TeamCraftError> {
+    self.act_locally(|reads| reads.want_custom_emoji()).await
+  }
+
+  /// A custom emoji's picture (PNG or WebP bytes) when this device holds it, checked against its
+  /// hash (`sha256`, as the message JSON and [`Self::custom_emoji`] give it); `None` before the core
+  /// downloaded it. Also for emoji deleted since, which earlier messages still show.
+  pub async fn custom_emoji_picture(&self, sha256: String) -> Result<Option<Vec<u8>>, TeamCraftError> {
+    self.read(move |reads| reads.custom_emoji_picture(&sha256)).await
   }
 
   pub async fn mark_read(&self, conversation_id: String) -> Result<(), TeamCraftError> {

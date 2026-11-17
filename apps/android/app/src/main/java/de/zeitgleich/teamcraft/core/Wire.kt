@@ -124,7 +124,18 @@ data class Bookmark(
 }
 
 @Serializable
-data class Reaction(val emoji: String, val count: Int, @SerialName("reacted_by_me") val reactedByMe: Boolean = false)
+data class Reaction(
+  /** The emoji, or a workspace emoji's `:shortcode:`. */
+  val emoji: String,
+  val count: Int,
+  @SerialName("reacted_by_me") val reactedByMe: Boolean = false,
+  /** A workspace emoji's picture, when the reaction named one (issue #207). */
+  @SerialName("custom") val maybeCustom: CustomEmojiRef? = null,
+)
+
+/** A workspace emoji a message or reaction uses: the name it had and the hash of its picture (issue #207). */
+@Serializable
+data class CustomEmojiRef(val shortcode: String, val sha256: String)
 
 @Serializable
 data class MessageSource(
@@ -158,6 +169,8 @@ data class Message(
   @SerialName("source") val maybeSource: MessageSource? = null,
   /** Handles of the groups the sender's device expanded (`accounting`), from the ciphertext (#206). */
   @SerialName("group_mentions") val groupMentions: List<String> = emptyList(),
+  /** The workspace emoji the text names by `:shortcode:` (#207), from the ciphertext. */
+  @SerialName("custom_emoji") val customEmoji: List<CustomEmojiRef> = emptyList(),
   /** The sender named this user among the people to notify, by name or through a group. */
   @SerialName("mentions_me") val mentionsMe: Boolean = false,
   /** Where an imported message came from (e2ee.md §4.10); only its author matters to the app. */

@@ -5063,8 +5063,10 @@ emoji; the storage host learns that a device read the set.
 device holds it: pictures stay on the device after their emoji is renamed or deleted (those of the
 set and up to 200 more), so earlier messages look the same. A device without the picture (new, or
 the emoji was deleted before it fetched it) shows the `:shortcode:` text, and so do apps that don't
-know custom emoji: older versions, and for now the Android and iOS apps, whose rendering is left for
-#207.
+know custom emoji: older versions. The Android and iOS apps show them too: the same core verifies
+the set and keeps the pictures (`teamcraft-ffi`'s `custom_emoji`), the apps draw them in message
+text and reactions, list them in the reaction menu and the `:` suggestions, and cannot add, rename
+or delete emoji (the admin console is on desktop and web).
 
 **Accepted risks.** A compromised server can withhold emoji, serve a renamed emoji's older document
 (its old name) or a deleted emoji's last one (it shows again): everything it can show was signed by

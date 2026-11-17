@@ -122,6 +122,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.State
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -153,6 +154,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import java.io.File
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import de.zeitgleich.teamcraft.core.FileInfo
@@ -166,6 +168,8 @@ import de.zeitgleich.teamcraft.ui.ChatShortcuts
 import de.zeitgleich.teamcraft.ui.isEditLastShortcut
 import de.zeitgleich.teamcraft.ui.isSendShortcut
 import de.zeitgleich.teamcraft.TeamCraftApplication
+import de.zeitgleich.teamcraft.ui.CustomEmoji
+import de.zeitgleich.teamcraft.ui.CustomEmojiPicture
 import de.zeitgleich.teamcraft.calls.CallOptions
 import de.zeitgleich.teamcraft.core.Bookmark
 import de.zeitgleich.teamcraft.core.ChatActions
@@ -230,6 +234,7 @@ import uniffi.teamcraft_ffi.ConnectionState
 import uniffi.teamcraft_ffi.JoinRequestItem
 import uniffi.teamcraft_ffi.KeyCatchUpItem
 import uniffi.teamcraft_ffi.NotifiedConversation
+import uniffi.teamcraft_ffi.CustomEmojiItem
 import uniffi.teamcraft_ffi.emojiConvert
 import uniffi.teamcraft_ffi.emojiSuggestions
 import uniffi.teamcraft_ffi.needsChannelConfirmation
@@ -1128,6 +1133,11 @@ private fun MessageActions(
           viewModel.act(ChatActions.react(conversationId, message.id, emoji))
           onDismiss()
         }
+        WorkspaceReactions { emoji ->
+          haptics.performHapticFeedback(HapticFeedbackType.Confirm)
+          viewModel.act(ChatActions.react(conversationId, message.id, emoji))
+          onDismiss()
+        }
       }
       for (action in actions) {
         when (action) {
@@ -1290,6 +1300,72 @@ private fun QuickReactions(onReact: (String) -> Unit) {
         // "React with 👍": TalkBack names the emoji and says what the button does.
         modifier = Modifier.weight(1f).semantics(mergeDescendants = true) { contentDescription = label },
       ) { Text(emoji, style = MaterialTheme.typography.titleLarge) }
+    }
+  }
+}
+
+/**
+ * The workspace's own emoji (issue #207) under the quick reactions, scrolled sideways, when it has
+ * any. A tap reacts with its `:shortcode:`; the core adds the picture's hash for the others.
+ */
+@Composable
+private fun WorkspaceReactions(onReact: (String) -> Unit) {
+  val emoji by rememberWorkspaceEmoji("", CustomEmoji.SHEET_LIMIT)
+  if (emoji.isEmpty()) return
+  Column(Modifier.padding(top = 4.dp)) {
+    Text(
+      stringResource(R.string.react_workspace_emoji),
+      style = MaterialTheme.typography.labelMedium,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+      modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp),
+    )
+    LazyRow(
+      contentPadding = PaddingValues(horizontal = 16.dp),
+      horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+      items(emoji, key = { it.sha256 + it.shortcode }) { item ->
+        val name = ":${item.shortcode}:"
+        val label = stringResource(R.string.react_quick, name)
+        Box(
+          Modifier
+            .size(WORKSPACE_EMOJI_TARGET)
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(role = Role.Button, onClickLabel = label) { onReact(name) },
+          contentAlignment = Alignment.Center,
+        ) {
+          CustomEmojiPicture(
+            item.sha256,
+            name,
+            Modifier.size(WORKSPACE_EMOJI_SIZE),
+            fallback = { Text(name, style = MaterialTheme.typography.labelSmall, maxLines = 1) },
+          )
+        }
+      }
+    }
+  }
+}
+
+/** A tap target of a workspace emoji in the sheet, and the picture inside it. */
+private val WORKSPACE_EMOJI_TARGET = 48.dp
+private val WORKSPACE_EMOJI_SIZE = 32.dp
+
+/**
+ * The workspace emoji whose names match [query] (all by name when empty), from what the core
+ * holds: asks it to read the set again (it paces itself) and reads again when the store changes,
+ * so a picture or emoji that arrives later shows without reopening.
+ */
+@Composable
+private fun rememberWorkspaceEmoji(query: String, limit: Int): State<List<CustomEmojiItem>> {
+  val graph = TeamCraftApplication.graph(LocalContext.current)
+  return produceState(emptyList(), query, limit) {
+    try {
+      val core = graph.core.core()
+      launch { CustomEmoji.want(core) }
+      graph.core.changeCount.collect { value = core.customEmoji(query, limit.toUInt()) }
+    } catch (cancelled: CancellationException) {
+      throw cancelled
+    } catch (_: Exception) {
+      // Not signed in, or the core closed: no workspace emoji to offer.
     }
   }
 }
@@ -2245,11 +2321,23 @@ private fun EmojiSuggestions(text: String, caret: Int, onPick: (String) -> Unit)
       .filter { PaintCompat.hasGlyph(paint, it.emoji) }
       .take(MAX_EMOJI_SUGGESTIONS)
   }
-  if (suggestions.isEmpty()) return
+  // The workspace's own emoji first (issue #207): they are what somebody typing a name there means.
+  val custom by rememberWorkspaceEmoji(maybeQuery, MAX_EMOJI_SUGGESTIONS)
+  if (suggestions.isEmpty() && custom.isEmpty()) return
   LazyRow(
     Modifier.fillMaxWidth().padding(horizontal = 8.dp),
     horizontalArrangement = Arrangement.spacedBy(6.dp),
   ) {
+    items(custom, key = { "custom:" + it.sha256 + it.shortcode }) { item ->
+      val name = ":${item.shortcode}:"
+      AssistChip(
+        onClick = { onPick(name) },
+        leadingIcon = {
+          CustomEmojiPicture(item.sha256, name, Modifier.size(WORKSPACE_SUGGESTION_SIZE))
+        },
+        label = { Text(name) },
+      )
+    }
     items(suggestions, key = { it.emoji }) { suggestion ->
       AssistChip(
         onClick = { onPick(suggestion.emoji) },
@@ -2577,6 +2665,9 @@ private val COMPOSER_CORNER = 28.dp
 
 /** The round send button beside the composer pill. */
 private val SEND_BUTTON_SIZE = 48.dp
+
+/** A workspace emoji's picture in a `:` suggestion chip. */
+private val WORKSPACE_SUGGESTION_SIZE = 20.dp
 
 /** Emoji offered for a typed `:name`. */
 private const val MAX_EMOJI_SUGGESTIONS = 8

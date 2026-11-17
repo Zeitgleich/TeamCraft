@@ -2,6 +2,7 @@ package de.zeitgleich.teamcraft
 
 import de.zeitgleich.teamcraft.settings.SettingsSync
 import de.zeitgleich.teamcraft.ui.CoreRetryRounds
+import de.zeitgleich.teamcraft.ui.CustomEmoji
 import de.zeitgleich.teamcraft.ui.PictureRetries
 import de.zeitgleich.teamcraft.ui.ShareReceiver
 import de.zeitgleich.teamcraft.ui.StartCacheStore
@@ -100,6 +101,7 @@ class AppGraph(context: Context) {
   // Decrypted pictures leave memory with the account they belong to.
   val core: CoreRepository = CoreRepository(context, auth, onAccountClosed = {
     Pictures.clear()
+    CustomEmoji.clear()
     avatars.clear()
     spacePictures.clear()
     channelPictures.clear()
