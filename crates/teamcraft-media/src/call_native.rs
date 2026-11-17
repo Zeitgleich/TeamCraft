@@ -32,6 +32,7 @@ use std::thread::JoinHandle as ThreadHandle;
 use std::time::{Duration, Instant};
 
 use socket2::{Domain, Protocol, Socket, Type};
+use teamcraft_net::traffic::TrafficClass;
 use teamcraft_net::{ATTEMPT_DELAY, RaceError, interleave, race};
 use teamcraft_proto::{
   Base64Bytes, CallClientMessage, CallServerMessage, DeviceId, ErrorCode, MediaStreamId,
@@ -1821,8 +1822,9 @@ impl Link {
     }
     let protocols = fallback_protocols(token);
     let opening = match maybe_opener {
-      Some(opener) => opener.open(url, &protocols),
-      None => LoopbackOpener.open(url, &protocols),
+      // The session's socket carries video too: unmarked.
+      Some(opener) => opener.open(url, &protocols, TrafficClass::BestEffort),
+      None => LoopbackOpener.open(url, &protocols, TrafficClass::BestEffort),
     };
     let socket = opening.await.map_err(NativeCallError::Connect)?;
     let sender = FallbackSender::new(MediaQueueConfig::default());

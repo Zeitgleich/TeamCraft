@@ -11209,6 +11209,7 @@ name = "teamcraft-net"
 version = "1.0.36"
 dependencies = [
  "futures-util",
+ "socket2",
  "thiserror 2.0.21",
  "tokio",
 ]

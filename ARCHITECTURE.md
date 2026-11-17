@@ -1081,6 +1081,14 @@ voice, below), through the same kind of reverse proxy as the gateway. Setup and 
   no secret), the audio goes on the session's connection as before. The upload pacer then counts only
   what goes on the session's connection. The SFU's audio toward the client stays on the session's
   connection, ahead of video in its queue and paced around it.
+- **The voice connection is marked for the voice queue** (#1989): the native apps mark the packets
+  of the audio connection DSCP Expedited Forwarding (`teamcraft-net` `traffic.rs`, `IP_TOS` /
+  `IPV6_TCLASS`), the session's connection stays unmarked (it carries video, RFC 8837). A home
+  router's Wi-Fi (WMM) and many office switches serve it first; the Internet beyond mostly clears
+  the mark, and the TLS proxy in front of the SFU starts a connection of its own, so only the hops up
+  to the proxy see it. Browsers have no API for it. QUIC isn't marked: quinn-udp writes the TOS byte
+  of every datagram with its ECN bits only, and one QUIC packet may carry voice and video together;
+  marking needs a QUIC connection of the voice alone.
 - **Pacing to the drain rate** (`fallback_pacer`, #1810): behind the SFU's socket sit the kernel's and
   a reverse proxy's buffers, megabytes that TCP fills as fast as it is given media; on a link that
   dips to 1.5 Mbit/s that was seconds of video with the voice and pings behind it, until the

@@ -22,18 +22,22 @@ use tokio_tungstenite::tungstenite::{Bytes, Error as WebSocketError, Message};
 use tracing::{debug, warn};
 use url::{Host, Url};
 
+use teamcraft_net::traffic::{TrafficClass, mark_tcp};
+
 use crate::fallback_queue::MediaQueueConfig;
 use crate::fallback_socket::{ControlFrames, FallbackSender, WriterConfig, run_writer};
 
 /// How a call socket is opened: plain, only to a loopback address, in development tools and tests.
 /// The apps bring their own, with their trust store and the system's proxy. `protocols` go in the
 /// upgrade's `Sec-WebSocket-Protocol`: the join token, for the SFU to check before the upgrade
-/// ([`teamcraft_proto::fallback_protocols`]).
+/// ([`teamcraft_proto::fallback_protocols`]). `class` says what the socket carries: the audio
+/// connection's packets are marked for the voice queue on the way (#1989).
 pub trait FallbackOpener: fmt::Debug + Send + Sync {
   fn open(
     &self,
     url: &str,
     protocols: &[String],
+    class: TrafficClass,
   ) -> Pin<Box<dyn Future<Output = Result<FallbackSocket, String>> + Send>>;
 }
 
@@ -60,7 +64,8 @@ impl FallbackSocket {
 
 /// A fallback session's connection for its own audio (#1979): opened once the SFU offers it
 /// ([`CallServerMessage::AudioSocket`]), the same way as the session's (same address, same opener,
-/// the join token in the upgrade). Its first frame names the secret; the own audio datagrams go
+/// the join token in the upgrade), its packets marked Expedited Forwarding (#1989): it carries
+/// nothing but voice. Its first frame names the secret; the own audio datagrams go
 /// there from then on. Until it is up, and once it ended or was refused, the audio goes on the
 /// session's connection. It closes when the link drops it.
 pub(crate) struct AudioLink {
@@ -117,6 +122,7 @@ impl FallbackOpener for LoopbackOpener {
     &self,
     url: &str,
     protocols: &[String],
+    class: TrafficClass,
   ) -> Pin<Box<dyn Future<Output = Result<FallbackSocket, String>> + Send>> {
     let url = url.to_owned();
     let offered = protocols.join(", ");
@@ -140,6 +146,9 @@ impl FallbackOpener for LoopbackOpener {
       let stream = TcpStream::connect(addresses.as_slice())
         .await
         .map_err(|error| error.to_string())?;
+      if let Err(error) = mark_tcp(&stream, class) {
+        debug!(%error, ?class, "could not mark the call socket's packets");
+      }
       let (socket, _) = tokio_tungstenite::client_async(request, stream)
         .await
         .map_err(|error| error.to_string())?;
@@ -171,8 +180,8 @@ impl AudioLink {
     let sender = FallbackSender::new(MediaQueueConfig::default());
     let is_up = Arc::new(AtomicBool::new(false));
     let opening = match &self.maybe_opener {
-      Some(opener) => opener.open(&self.url, &self.protocols),
-      None => LoopbackOpener.open(&self.url, &self.protocols),
+      Some(opener) => opener.open(&self.url, &self.protocols, TrafficClass::Voice),
+      None => LoopbackOpener.open(&self.url, &self.protocols, TrafficClass::Voice),
     };
     tokio::spawn(run_audio_link(
       opening,
@@ -369,7 +378,7 @@ pub(crate) fn is_going_away(code: u32) -> bool {
 /// A [`FallbackOpener`] from a function, for the apps: their HTTP stack opens the socket.
 pub fn fallback_opener<F, Opened>(open: F) -> Arc<dyn FallbackOpener>
 where
-  F: Fn(String, Vec<String>) -> Opened + Send + Sync + 'static,
+  F: Fn(String, Vec<String>, TrafficClass) -> Opened + Send + Sync + 'static,
   Opened: Future<Output = Result<FallbackSocket, String>> + Send + 'static,
 {
   Arc::new(FnOpener(open))
@@ -385,15 +394,16 @@ impl<F> fmt::Debug for FnOpener<F> {
 
 impl<F, Opened> FallbackOpener for FnOpener<F>
 where
-  F: Fn(String, Vec<String>) -> Opened + Send + Sync,
+  F: Fn(String, Vec<String>, TrafficClass) -> Opened + Send + Sync,
   Opened: Future<Output = Result<FallbackSocket, String>> + Send + 'static,
 {
   fn open(
     &self,
     url: &str,
     protocols: &[String],
+    class: TrafficClass,
   ) -> Pin<Box<dyn Future<Output = Result<FallbackSocket, String>> + Send>> {
-    Box::pin((self.0)(url.to_owned(), protocols.to_vec()))
+    Box::pin((self.0)(url.to_owned(), protocols.to_vec(), class))
   }
 }
 
