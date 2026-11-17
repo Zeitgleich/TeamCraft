@@ -9,6 +9,7 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.runBlocking
 import androidx.compose.foundation.content.consume
 import androidx.compose.foundation.content.contentReceiver
@@ -153,6 +154,7 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import de.zeitgleich.teamcraft.core.FileInfo
 import de.zeitgleich.teamcraft.ui.PictureTarget
 import de.zeitgleich.teamcraft.ui.forms.fieldError
@@ -1511,27 +1513,32 @@ internal fun Composer(
   val maybePendingShare by PendingShare.current.collectAsState()
   LaunchedEffect(maybePendingShare, isDraftLoaded) {
     // Text and files shared from another app land in the composer; the user sends them.
-    val share = maybePendingShare?.takeIf { it.conversation == conversationId && maybeThread == null } ?: return@LaunchedEffect
-    if (!isDraftLoaded) return@LaunchedEffect
-    val (taken, failed) = share.content.files
-      .map { it to viewModel.importSharedFile(share.content, it) }
-      .partition { (_, maybePicked) -> maybePicked != null }
-    val imported = taken.mapNotNull { (_, maybePicked) -> maybePicked }
-    text = listOf(text, share.content.text).filter { it.isNotBlank() }.joinToString("\n")
-    files = files + imported
-    // At once: when files failed the picker comes back right now, and the draft's pause never ends.
-    viewModel.act(ChatActions.setDraft(conversationId, maybeThread, text))
-    draftSave.stored(text)
-    val failedCount = failed.size
-    if (failedCount > 0) {
-      val failed = context.resources.getQuantityString(R.plurals.share_import_failed, failedCount, failedCount)
-      Toast.makeText(context, failed, Toast.LENGTH_LONG).show()
+    if (!isDraftLoaded || maybeThread != null) return@LaunchedEffect
+    if (maybePendingShare?.conversation != conversationId) return@LaunchedEffect
+    // Taken before the draft changes: a second copy of this screen (recreated during a transition)
+    // finds nothing and can't append the share to the draft this one saves.
+    val share = PendingShare.claim(conversationId) ?: return@LaunchedEffect
+    // The claim restarts this effect; what was taken is put into the draft all the same.
+    withContext(NonCancellable) {
+      val (taken, failed) = share.files
+        .map { it to viewModel.importSharedFile(share, it) }
+        .partition { (_, maybePicked) -> maybePicked != null }
+      val imported = taken.mapNotNull { (_, maybePicked) -> maybePicked }
+      text = listOf(text, share.text).filter { it.isNotBlank() }.joinToString("\n")
+      files = files + imported
+      // At once: when files failed the picker comes back right now, and the draft's pause never ends.
+      viewModel.act(ChatActions.setDraft(conversationId, maybeThread, text))
+      draftSave.stored(text)
+      val failedCount = failed.size
+      if (failedCount > 0) {
+        val failed = context.resources.getQuantityString(R.plurals.share_import_failed, failedCount, failedCount)
+        Toast.makeText(context, failed, Toast.LENGTH_LONG).show()
+      }
+      // What failed stays in the inbox, and the picker comes back with it.
+      viewModel.finishShare(share, failed.map { (file, _) -> file })
+      // The screen may be gone by now.
+      runCatching { focus.requestFocus() }
     }
-    // What failed stays in the inbox, and the picker comes back with it.
-    viewModel.finishShare(share.content, failed.map { (file, _) -> file })
-    // Cleared last: clearing restarts this effect, which would cancel the import.
-    PendingShare.current.value = null
-    focus.requestFocus()
   }
   LaunchedEffect(text) {
     if (!isDraftLoaded) return@LaunchedEffect

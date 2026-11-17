@@ -1,6 +1,7 @@
 package de.zeitgleich.teamcraft.ui
 
 import android.content.Intent
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.focusable
 import androidx.compose.runtime.Composable
 import androidx.navigation.compose.currentBackStackEntryAsState
@@ -77,6 +78,7 @@ import de.zeitgleich.teamcraft.ui.screens.SharePickerScreen
 import de.zeitgleich.teamcraft.ui.screens.ShareWaitingNotice
 import de.zeitgleich.teamcraft.ui.screens.StoreRecoveryScreen
 import de.zeitgleich.teamcraft.ui.screens.ThreadScreen
+import de.zeitgleich.teamcraft.ui.screens.findActivity
 
 @Composable
 fun AppRoot(
@@ -241,6 +243,8 @@ private fun ReadyNavigation(
 ) {
   val navigation = rememberNavController()
   val scope = rememberCoroutineScope()
+  // The conversation a share opened, until it is left (its back stack entry).
+  var maybeShareEntry by rememberSaveable { mutableStateOf<String?>(null) }
   val context = LocalContext.current
   var maybeMeetingLinkUrl by remember { mutableStateOf<String?>(null) }
   // A message link in a message: open its conversation (or thread) at the message, if readable here.
@@ -395,12 +399,23 @@ private fun ReadyNavigation(
       arguments = listOf(navArgument("id") { type = NavType.StringType }, focusArgument()),
     ) { entry ->
       val conversationId = entry.arguments?.getString("id").orEmpty()
+      // A share's conversation: Back goes back to the app that shared, as the share sheet expects;
+      // the app stays where it was, at the chat list.
+      val isFromShare = entry.id == maybeShareEntry
+      val back = {
+        navigation.popBackStack()
+        if (isFromShare) {
+          maybeShareEntry = null
+          context.findActivity()?.moveTaskToBack(true)
+        }
+      }
+      BackHandler(enabled = isFromShare) { back() }
       ConversationScreen(
         viewModel = viewModel,
         conversationId = conversationId,
         onOpenThread = { threadId -> navigation.navigate("thread/$conversationId/$threadId") },
         onOpenFiles = { navigation.navigate("files/$conversationId") },
-        onBack = { navigation.popBackStack() },
+        onBack = { back() },
         maybeFocusMessage = entry.arguments?.getString("focus"),
         onOpenPermalink = openPermalink,
         onOpenConversation = { navigation.navigate("conversation/$it") },
@@ -513,18 +528,28 @@ private fun ReadyNavigation(
         onBack = { navigation.popBackStack() },
       )
     }
-    composable("share") {
+    composable("share") { entry ->
       val content = maybeShare
       if (content == null) {
-        LaunchedEffect(Unit) { navigation.popBackStack() }
+        // Only while the picker is on top: on its way out (the pick opened a conversation) the
+        // share is gone too, and popping then closed the conversation it opened.
+        LaunchedEffect(Unit) {
+          if (navigation.currentBackStackEntry?.id == entry.id) navigation.popBackStack()
+        }
       } else {
         SharePickerScreen(
           viewModel = viewModel,
           state = content,
           onPick = { share, conversation ->
-            PendingShare.current.value = PendingShare.Target(conversation, share)
-            viewModel.handOverShare(share)
-            navigation.navigate("conversation/$conversation") { popUpTo("chats") }
+            // Once per share: a second pick would open the conversation again.
+            if (PendingShare.offer(conversation, share)) {
+              viewModel.handOverShare(share)
+              navigation.navigate("conversation/$conversation") {
+                popUpTo("chats")
+                launchSingleTop = true
+              }
+              maybeShareEntry = navigation.currentBackStackEntry?.id
+            }
           },
           onBack = {
             viewModel.discardShare()

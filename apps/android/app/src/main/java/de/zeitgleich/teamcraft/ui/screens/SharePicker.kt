@@ -84,6 +84,8 @@ fun SharePickerScreen(
   var filter by rememberSaveable { mutableStateOf("") }
   // Once per visit: the order rarely changes while the picker is open.
   var hasPublished by remember { mutableStateOf(false) }
+  // The share sheet's direct share target is taken without showing the list.
+  var hasPickedTarget by rememberSaveable(maybeContent?.id) { mutableStateOf(false) }
   val pick: (String) -> Unit = { conversation ->
     // In the app's scope: the picker leaves with the pick, the report goes on without it.
     TeamCraftApplication.graph(context).scope.launch { ShareShortcuts.reportUsed(context, conversation) }
@@ -98,7 +100,12 @@ fun SharePickerScreen(
         return@collect
       }
       maybeContent?.maybeTarget?.takeIf { target -> maybeTargets.any { it.id == target } }?.let { target ->
-        pick(target)
+        // Once: every change (a sync step) comes here again while the picker leaves, and each
+        // repeated pick opened the conversation once more.
+        if (!hasPickedTarget) {
+          hasPickedTarget = true
+          pick(target)
+        }
         return@collect
       }
       targets = ShareTargets.Loaded(maybeTargets)

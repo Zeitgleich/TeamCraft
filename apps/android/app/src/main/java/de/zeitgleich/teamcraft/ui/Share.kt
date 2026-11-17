@@ -4,6 +4,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 
 /** Most files one share brings into the composer; more is almost certainly a mistake. */
 const val MAX_SHARED_FILES = 10
@@ -31,11 +32,56 @@ sealed interface ShareState {
   data class Ready(val share: StagedShare) : ShareState
 }
 
-/** The shared content the composer of `conversation` picks up once (set by the share picker). */
-object PendingShare {
+/** The shared content the composer of a conversation picks up once (set by the share picker). */
+object PendingShare : ShareHandOff()
+
+/**
+ * Hands a picked share to one conversation's composer, which takes it exactly once. A composer can
+ * be composed twice (a screen recreated during a transition, a repeated pick), and each copy would
+ * otherwise append the share to the draft the other one already saved.
+ */
+open class ShareHandOff {
   data class Target(val conversation: String, val content: StagedShare)
 
-  val current = MutableStateFlow<Target?>(null)
+  private val target = MutableStateFlow<Target?>(null)
+
+  /** Shares offered so far; the same share offered again (a repeated pick) is refused. */
+  private val offered = ArrayDeque<StagedShare>()
+
+  val current: StateFlow<Target?> = target
+
+  /**
+   * Offers [content] to the composer of [conversation]; false when this very share was offered
+   * before. A share whose files failed comes back changed (without its text), and may be offered.
+   */
+  @Synchronized
+  fun offer(conversation: String, content: StagedShare): Boolean {
+    if (content in offered) return false
+    offered.addLast(content)
+    while (offered.size > MAX_REMEMBERED_OFFERS) offered.removeFirst()
+    target.value = Target(conversation, content)
+    return true
+  }
+
+  /** Takes the share waiting for [conversation]: the first caller gets it, every later one nothing. */
+  fun claim(conversation: String): StagedShare? {
+    while (true) {
+      val waiting = target.value?.takeIf { it.conversation == conversation } ?: return null
+      if (target.compareAndSet(waiting, null)) return waiting.content
+    }
+  }
+
+  /** Nothing waits any more (the session ended). */
+  @Synchronized
+  fun clear() {
+    target.value = null
+    offered.clear()
+  }
+
+  private companion object {
+    /** Offers remembered to refuse a repeat; a repeat follows its first offer within seconds. */
+    const val MAX_REMEMBERED_OFFERS = 16
+  }
 }
 
 /**
