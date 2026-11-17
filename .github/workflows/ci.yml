@@ -144,6 +144,42 @@ jobs:
           -p teamcraft-proto -p teamcraft-crypto -p teamcraft-media -p teamcraft-core -p teamcraft-ui
           -- -D warnings
 
+  # Per-crate clippy on the feature sets the workspace builds each crate with (#1817). The workspace
+  # run above unifies features across crates, so a backend-specific item that is only live with
+  # another feature looks used there; `cargo clippy -p <crate>` doesn't unify and finds it (#1774).
+  # The crates named here are the dead-code-prone ones; the script alone (no arguments) runs all.
+  feature-combos:
+    needs: [plan]
+    if: needs.plan.outputs.run_ci == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container:
+      image: ghcr.io/zeitgleich/teamcraft-ci@sha256:24fe71e069885c93b38cc6997f8005fb06b94e501dde7a07ce39c04c46d03e40
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      volumes:
+        - /usr/share/dotnet:/host/dotnet
+        - /usr/local/lib/android:/host/android
+        - /opt/ghc:/host/ghc
+        - /opt/hostedtoolcache:/host/toolcache
+    env:
+      SQLX_OFFLINE: "true"
+    steps:
+      - name: Free disk space on the runner
+        run: nohup sh -c 'find /host/dotnet /host/android /host/ghc /host/toolcache -mindepth 1 -delete' > /dev/null 2>&1 &
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: v1-rust
+          key: feature-combos
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-bin: "false"
+      - name: Placeholder UI bundle (the desktop build embeds crates/teamcraft-ui/dist)
+        run: mkdir -p crates/teamcraft-ui/dist
+      - name: Clippy per crate and feature set
+        run: scripts/check-feature-combos.sh teamcraft-core teamcraft-ffi
+
   # Tests in their own job: a fresh disk, and test binaries without debug info (every integration
   # test binary links the whole dependency tree). cargo-nextest runs every test in its own process
   # and in parallel across binaries; it does not run doctests, so those run separately.
@@ -572,7 +608,7 @@ jobs:
   ci-gate:
     name: ${{ contains(needs.*.result, 'cancelled') && 'ci-gate (cancelled run)' || 'ci-gate' }}
     if: always()
-    needs: [plan, check, test, browser-tests, audio-processing, windows, macos, deny, versions, vendored-and-fuzz]
+    needs: [plan, check, feature-combos, test, browser-tests, audio-processing, windows, macos, deny, versions, vendored-and-fuzz]
     runs-on: ubuntu-latest
     steps:
       - name: Every job that ran passed
