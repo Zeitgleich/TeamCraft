@@ -465,6 +465,11 @@ pub enum CoreCommand {
   ForgetMeetingRecords {
     meeting: teamcraft_proto::MeetingId,
   },
+  /// Lift the close mark of a meeting its organizer restored here (#1983).
+  ReopenMeetingRecords {
+    meeting: teamcraft_proto::MeetingId,
+    organizer: UserId,
+  },
   /// The organizer's device publishes who may let guests in, if that changed (#1103), valid until
   /// the meeting's end by its own record (#1919).
   SyncMeetingAdmitters {
@@ -678,6 +683,7 @@ impl CoreCommand {
       | Self::NoteMeetingLobby { .. }
       | Self::NoteMeetingSchedule { .. }
       | Self::ForgetMeetingRecords { .. }
+      | Self::ReopenMeetingRecords { .. }
       | Self::SyncMeetingAdmitters { .. }
       | Self::CheckMeetingAdmission { .. }
       | Self::ChangeMeetingHosts { .. } => CommandPart::Member,
@@ -3501,6 +3507,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn forget_meeting_records(&self, meeting: teamcraft_proto::MeetingId) {
     self.command(CoreCommand::ForgetMeetingRecords { meeting });
+  }
+
+  fn reopen_meeting_records(&self, meeting: teamcraft_proto::MeetingId, organizer: UserId) {
+    self.command(CoreCommand::ReopenMeetingRecords { meeting, organizer });
   }
 
   fn sync_meeting_admitters(

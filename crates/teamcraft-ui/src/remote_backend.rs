@@ -2020,6 +2020,10 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::ForgetMeetingRecords { meeting });
   }
 
+  fn reopen_meeting_records(&self, meeting: teamcraft_proto::MeetingId, organizer: UserId) {
+    self.act(ChatAction::ReopenMeetingRecords { meeting, organizer });
+  }
+
   fn sync_meeting_admitters(
     &self,
     meeting: teamcraft_proto::MeetingId,
