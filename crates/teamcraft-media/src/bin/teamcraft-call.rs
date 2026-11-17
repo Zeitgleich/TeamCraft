@@ -5,7 +5,7 @@
 //! teamcraft-call --sfu https://127.0.0.1:4433/call --token dev:1:1:1 --user 1 --device 1 \
 //!   [--cert-hash <64 hex chars>] [--source tone:440 | mic[:<id>] | silence] \
 //!   [--sink discard | speakers[:<id>]] [--seconds 10] [--roster 2,3] [--muted] [--watch-video]
-//!   [--send-video] [--then-source <source>]
+//!   [--send-video] [--then-source <source>] [--fallback ws://127.0.0.1:4434/call/ws]
 //! teamcraft-call --list-devices
 //! ```
 //!
@@ -156,6 +156,7 @@ impl Options {
   fn parse(mut args: impl Iterator<Item = String>) -> anyhow::Result<Self> {
     let (mut maybe_sfu, mut maybe_token, mut maybe_user, mut maybe_device) = (None, None, None, None);
     let mut maybe_certificate_hash = None;
+    let mut maybe_fallback_url = None;
     let mut source = AudioSource::Tone {
       frequency_hz: 440.0,
       amplitude: 0.3,
@@ -183,6 +184,7 @@ impl Options {
       let value = args.next().with_context(|| format!("{flag} needs a value"))?;
       match flag.as_str() {
         "--sfu" => maybe_sfu = Some(value),
+        "--fallback" => maybe_fallback_url = Some(value),
         "--token" => maybe_token = Some(value),
         "--user" => maybe_user = Some(value.parse::<UserId>().context("--user")?),
         "--device" => maybe_device = Some(value.parse::<DeviceId>().context("--device")?),
@@ -223,6 +225,7 @@ impl Options {
       engine,
     );
     config.maybe_certificate_hash = maybe_certificate_hash;
+    config.maybe_fallback_url = maybe_fallback_url;
     if matches!(source, AudioSource::Microphone(_)) {
       config.maybe_processing = Some(teamcraft_media::audio_processing::AudioProcessingConfig::default());
     }
