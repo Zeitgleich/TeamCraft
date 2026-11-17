@@ -1675,8 +1675,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // the clock of the device that makes them (a skewed clock would split the group).
     let at_ms = message.id.snowflake().unix_millis();
     // Who is a guest in the commit's conversation (#1926): in a meeting chat everybody the signed
-    // roster doesn't vouch for, also where the server calls them a member.
-    let directory = directory.with_guests(self.guests_in(conversation, named, at_ms)?);
+    // roster doesn't vouch for, also where the server calls them a member. Judged over the group's
+    // own users too: a guest the server leaves out of its member list is in the tree all the same,
+    // and may be the committer.
+    let mut judged = named;
+    if self.has_group(conversation)? {
+      for user in self.group_users(conversation)? {
+        if !judged.contains(&user) {
+          judged.push(user);
+        }
+      }
+    }
+    let directory = directory.with_guests(self.guests_in(conversation, judged, at_ms)?);
     if message.kind == MlsMessageKind::Commit
       && let Some(pending) = self.group_or_error(conversation)?.pending_commit()
     {
@@ -3465,7 +3475,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.account.user_id,
       conversation,
       member_users.iter().copied(),
-      at_ms,
+      self.meeting_time(at_ms),
     )?;
     let guests = match &maybe_standings {
       Some(standings) => standings
@@ -3497,6 +3507,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           .map(|(user, _)| user)
           .chain(workspace.roster.members.iter().map(|member| member.user_id))
           .chain(super::meeting_hosts::meeting_host_users(
+            &self.store,
+            conversation,
+            &workspace,
+            self.meeting_time(at_ms),
+          )?)
+          .chain(super::meeting_hosts::own_organizer(
             &self.store,
             self.account.user_id,
             conversation,

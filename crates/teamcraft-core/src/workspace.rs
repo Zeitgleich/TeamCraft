@@ -1276,6 +1276,29 @@ mod tests {
       assert_eq!(state.provider_marks[&bob], mark("sub-b", 100));
     }
 
+    /// A meeting chat's members are who the roster vouches for (#1926): a server that replays the
+    /// roster from before the owners' apps noted an account doesn't demote that member.
+    #[test]
+    fn a_replayed_older_roster_doesnt_take_back_a_members_vouch() {
+      let alice = Owner::new(1);
+      let bob = UserId::from_snowflake(Snowflake::new(2).unwrap());
+      let mut state = WorkspaceState::default();
+      let first = roster(1, &[&alice], None, &state);
+      let entry_1 = alice.sign(WorkspaceLogKind::Roster, 1, &first);
+      state.apply_entries(vec![entry_1.clone()]).unwrap();
+      let mut noted = roster(2, &[&alice], None, &state);
+      noted.provider_marks.insert(bob, mark("sub-b", 100));
+      state
+        .apply_entries(vec![alice.sign(WorkspaceLogKind::Roster, 2, &noted)])
+        .unwrap();
+      assert!(state.vouches_for_member(bob));
+
+      state.apply_entries(vec![entry_1]).unwrap();
+
+      assert_eq!(state.roster.version, 2);
+      assert!(state.vouches_for_member(bob));
+    }
+
     /// A state whose verified policy counts `moves` provider moves.
     fn with_counted_moves(moves: u64) -> WorkspaceState {
       let mut state = WorkspaceState::default();

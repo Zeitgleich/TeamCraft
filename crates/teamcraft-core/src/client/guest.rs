@@ -36,7 +36,7 @@ use crate::convert;
 use crate::error::{CoreError, GuestRefusal};
 use crate::meeting_invitees::{self, ChosenInvitees, InviteeFacts, InviteeList, SignedInvitees};
 use crate::meeting_lobby::{self, LobbyAdmission, SignedMembership};
-use crate::meeting_standing::{MeetingStanding, MeetingVouchers};
+use crate::meeting_standing::{MeetingStanding, MeetingTime, MeetingVouchers};
 use crate::records;
 use crate::store::{LocalStore, Table};
 use crate::workspace::WorkspaceState;
@@ -622,19 +622,28 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     at_ms: i64,
   ) -> Result<BTreeMap<UserId, MeetingStanding>, CoreError> {
     let users: Vec<UserId> = users.into_iter().collect();
+    let time = self.meeting_time(at_ms);
     if let Some(standings) = meeting_standings(
       &self.store,
       self.account.user_id,
       conversation,
       users.iter().copied(),
-      at_ms,
+      time,
     )? {
       return Ok(standings);
     }
     let known: BTreeSet<UserId> = self.guest_users(users.iter().copied())?.into_iter().collect();
+    let workspace = self.workspace()?;
+    let mut hosts = super::meeting_hosts::meeting_host_users(&self.store, conversation, &workspace, time)?;
+    hosts.extend(super::meeting_hosts::own_organizer(
+      &self.store,
+      self.account.user_id,
+      conversation,
+    )?);
     let vouchers = MeetingVouchers::new(
-      self.workspace()?,
-      super::meeting_hosts::meeting_host_users(&self.store, self.account.user_id, conversation)?,
+      workspace,
+      time,
+      hosts,
       self.meeting_admitters_at(conversation, at_ms)?,
     );
     Ok(
@@ -643,6 +652,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .map(|user| (user, vouchers.standing(user, known.contains(&user))))
         .collect(),
     )
+  }
+
+  /// [`MeetingTime`] at the server's time `at_ms`, with this device's `workspace_max_age`.
+  pub(crate) fn meeting_time(&self, at_ms: i64) -> MeetingTime {
+    MeetingTime {
+      at_ms,
+      roster_max_age_ms: i64::try_from(self.settings.workspace_max_age.as_millis()).unwrap_or(i64::MAX),
+    }
   }
 
   /// The guests among `users` of `conversation` on this device at the server's time `at_ms`: in a
@@ -661,7 +678,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.account.user_id,
       conversation,
       users.iter().copied(),
-      at_ms,
+      self.meeting_time(at_ms),
     )? {
       Some(standings) => Ok(
         standings
@@ -1208,14 +1225,18 @@ pub fn is_meeting_guest<S: LocalStore>(
   user: UserId,
   now_ms: i64,
 ) -> bool {
-  match meeting_standings(store, me, conversation, [user], now_ms) {
+  let time = MeetingTime {
+    at_ms: now_ms,
+    roster_max_age_ms: i64::try_from(super::DEFAULT_WORKSPACE_MAX_AGE.as_millis()).unwrap_or(i64::MAX),
+  };
+  match meeting_standings(store, me, conversation, [user], time) {
     Ok(Some(standings)) => standings.get(&user) == Some(&MeetingStanding::Guest),
     Ok(None) | Err(_) => false,
   }
 }
 
 /// What each of `users` is in the meeting chat `conversation` on this device, with the organizer's
-/// admitters in force at `at_ms` ([`MeetingVouchers::standing`]); `None` for a conversation that is
+/// admitters in force at `time` ([`MeetingVouchers::standing`]); `None` for a conversation that is
 /// no meeting chat, where the server's word and this device's own admissions decide
 /// ([`known_guests`]).
 pub(crate) fn meeting_standings<S: LocalStore>(
@@ -1223,9 +1244,9 @@ pub(crate) fn meeting_standings<S: LocalStore>(
   me: UserId,
   conversation: ConversationId,
   users: impl IntoIterator<Item = UserId>,
-  at_ms: i64,
+  time: MeetingTime,
 ) -> Result<Option<BTreeMap<UserId, MeetingStanding>>, CoreError> {
-  let Some(vouchers) = meeting_vouchers(store, me, conversation, at_ms)? else {
+  let Some(vouchers) = meeting_vouchers(store, me, conversation, time)? else {
     return Ok(None);
   };
   let users: Vec<UserId> = users.into_iter().collect();
@@ -1250,7 +1271,7 @@ fn meeting_vouchers<S: LocalStore>(
   store: &S,
   me: UserId,
   conversation: ConversationId,
-  at_ms: i64,
+  time: MeetingTime,
 ) -> Result<Option<MeetingVouchers>, CoreError> {
   let maybe_admitters = admitters_record_in(store, conversation)?;
   let is_meeting_by_server = records::get_json::<teamcraft_proto::ConversationResponse>(
@@ -1267,13 +1288,16 @@ fn meeting_vouchers<S: LocalStore>(
   }
   let workspace: WorkspaceState =
     records::get_json(store, Table::Workspace, super::WORKSPACE_KEY)?.unwrap_or_default();
-  let hosts = super::meeting_hosts::meeting_host_users(store, me, conversation)?;
-  let admitters = maybe_admitters
-    .filter(|record| at_ms <= record.expires_at_ms)
+  let mut hosts = super::meeting_hosts::meeting_host_users(store, conversation, &workspace, time)?;
+  let admitters: Vec<UserId> = maybe_admitters
+    .filter(|record| time.at_ms <= record.expires_at_ms)
     .map(|record| record.admitters)
     .unwrap_or_default();
-  let vouchers = MeetingVouchers::new(workspace, hosts, admitters);
-  Ok((!vouchers.vouches_for_nobody()).then_some(vouchers))
+  if MeetingVouchers::new(workspace.clone(), time, hosts.iter().copied(), []).vouches_for_nobody() {
+    return Ok(None);
+  }
+  hosts.extend(super::meeting_hosts::own_organizer(store, me, conversation)?);
+  Ok(Some(MeetingVouchers::new(workspace, time, hosts, admitters)))
 }
 
 /// The users among `users` this device knows as guests: those the server's user kind says are

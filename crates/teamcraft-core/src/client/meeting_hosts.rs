@@ -25,10 +25,11 @@ use super::Client;
 use crate::api::ServerApi;
 use crate::convert;
 use crate::error::CoreError;
-use crate::meeting_standing::{MeetingStanding, MeetingVouchers};
+use crate::meeting_standing::{MeetingStanding, MeetingTime, MeetingVouchers};
 use crate::records;
 use crate::store::{LocalStore, Table};
 use crate::trust::PinnedDirectory;
+use crate::workspace::WorkspaceState;
 
 /// The futures this module hands to the sync, catch-up and command paths, boxed where they are
 /// made: the callers' futures, and their frames while polled, hold a pointer instead of the
@@ -338,7 +339,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // Before this device verified a roster, only the guests it knows of are refused.
     let named = change.co_hosts.iter().copied().chain(change.maybe_new_organizer);
     let known = self.guest_users(named.clone())?;
-    let vouchers = MeetingVouchers::new(self.workspace()?, [], []);
+    let vouchers = MeetingVouchers::new(self.workspace()?, self.meeting_time(self.now_ms()), [], []);
     let is_vouched = |user: &UserId| {
       let is_known_guest = known.contains(user);
       if vouchers.vouches_for_nobody() {
@@ -714,15 +715,17 @@ fn hosts_key(conversation: ConversationId) -> String {
 }
 
 /// The hosts of the meeting chat on this device (#1926): the organizer and the co-hosts of the
-/// host lists that count for it ([`hosts_record_in`]). Before this device verified any list,
-/// the organizer the server names, but where this device pinned the chat's founder (#1747) only if
-/// that is the key this device pinned for them: a server that names a guest the organizer makes
-/// no host of them once anything verified says otherwise. `me` counts where the server names this
-/// device's user: that only decides how this device judges itself.
+/// host lists that count for it ([`hosts_record_in`]). Before this device verified any list, the
+/// organizer the server names counts only with evidence besides the server's word: the key this
+/// device pinned for them is the chat's founder's (#1747, verified from the group's anchor), or the
+/// signed roster vouches for them ([`MeetingVouchers::standing`] without hosts). A server that names
+/// a guest the organizer makes no host of them. Evidence only: being this device's own user is
+/// none ([`own_organizer`]).
 pub(crate) fn meeting_host_users(
   store: &impl LocalStore,
-  me: UserId,
   conversation: ConversationId,
+  workspace: &WorkspaceState,
+  time: MeetingTime,
 ) -> Result<BTreeSet<UserId>, CoreError> {
   if let Some(record) = hosts_record_in(store, conversation)? {
     return Ok(
@@ -742,9 +745,7 @@ pub(crate) fn meeting_host_users(
   .and_then(|response| response.maybe_organizer_user_id) else {
     return Ok(BTreeSet::new());
   };
-  let is_host = match pinned_founder_in(store, conversation)? {
-    None => true,
-    Some(_) if organizer == me => true,
+  let is_founder = match pinned_founder_in(store, conversation)? {
     Some(founder) => records::pinned_identities(store)?
       .get(&organizer)
       .is_some_and(|pinned| {
@@ -753,12 +754,35 @@ pub(crate) fn meeting_host_users(
           .to_string()
           == founder
       }),
+    None => false,
   };
-  Ok(if is_host {
+  let is_vouched = MeetingVouchers::new(workspace.clone(), time, [], []).standing(organizer, false)
+    == MeetingStanding::Member;
+  Ok(if is_founder || is_vouched {
     BTreeSet::from([organizer])
   } else {
     BTreeSet::new()
   })
+}
+
+/// This device's user, where the server names them the meeting chat's organizer: a host for how
+/// this device judges itself, never for whether anything vouches for anybody
+/// ([`MeetingVouchers::vouches_for_nobody`]), so this device switches the rule on exactly where the
+/// others' devices do.
+pub(crate) fn own_organizer(
+  store: &impl LocalStore,
+  me: UserId,
+  conversation: ConversationId,
+) -> Result<Option<UserId>, CoreError> {
+  Ok(
+    records::get_json::<teamcraft_proto::ConversationResponse>(
+      store,
+      Table::Conversations,
+      &conversation.to_string(),
+    )?
+    .and_then(|response| response.maybe_organizer_user_id)
+    .filter(|organizer| *organizer == me),
+  )
 }
 
 /// Whether this device pinned the meeting chat's anchor (#1747): only meeting chats have one.

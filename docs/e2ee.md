@@ -2199,19 +2199,24 @@ never by the server's member list:
       admitter nor carried over as an invitee.
     - **In the meeting chat, on every device** (#1926; `teamcraft_core::meeting_standing`, one
       rule for every decision a device makes in a meeting chat). A user is a **member** there if
-      the signed roster vouches for them or they are the organizer or a co-host of the host lists
-      the device verified. Before it verified any list, the organizer is the one the server names,
-      but where the device pinned the chat's founder (§4.6.5) only if that is the key it pinned for
-      them. Somebody neither, but named by the organizer's admitters in force, is an **admitter**:
+      the signed roster vouches for them (an owner or admin; a noted account only while the roster
+      is fresh, `workspace_max_age` at the commit's time) or they are the organizer or a co-host of
+      the host lists the device verified. Before it verified any list, the organizer the server
+      names counts only with evidence besides that word: the roster vouches for them, or the key
+      the device pinned for them is the chat's founder's (§4.6.5). A device's own user named the
+      organizer counts for how it judges itself, but not for whether the rule applies at all (see
+      below). Somebody neither, but named by the organizer's admitters in force, is an **admitter**:
       they let people in and take guests out, nothing else. Everybody else is a **guest**, whatever
       the server calls them. The server calling somebody a guest, or the device having let them in
       as one, makes a guest of anybody but an owner, an admin or a host. Where a device verified no
-      roster and knows no host, nothing vouches for anybody and the rule of other conversations
-      applies, as the membership rule of meeting chats did before (an instance has a roster once
-      its first owner set it up, and a server can't take a verified roster away). The rule decides:
+      roster and holds no evidence of a host, nothing vouches for anybody and the rule of other
+      conversations applies, as the membership rule of meeting chats did before (an instance has a
+      roster once its first owner set it up, a server can't take a verified roster away, and an
+      older roster replayed is refused). The rule decides:
       - the guests of the member directory that judges commits, so a guest's commit that touches
         anybody else is refused (`GuestOverreach`), also of a guest another device admitted whom
-        the server calls a member;
+        the server calls a member. Judged over the group's own users as well as the server's list,
+        so a guest the server leaves out of the list is judged all the same;
       - who manages others under the membership rule (members) and who only lets people in and
         takes guests out (admitters);
       - whether the device leaves others' changes to the members: a device whose user is a guest
@@ -2225,7 +2230,9 @@ never by the server's member list:
       Outside meeting chats a device still counts as guests only those the server calls guests and
       those it let in itself. Whether a conversation is a meeting chat is the server's word, but a
       device that verified admitters for it or pinned its founder applies the rule whatever the
-      server says now.
+      server says now; a device with neither falls back to the rule of other conversations when
+      the server relabels the chat (known gap). The apps' "Guest" mark shows no mark where nothing
+      can be read (it fails open; display only, every decision above fails closed).
     - **Rollout.** No minimum version gate (the instances run one alpha release). Devices can still
       judge a commit differently while one of them hasn't read a newer roster yet (a member whose
       account was just noted): the same held for the membership rule of meeting chats before, and

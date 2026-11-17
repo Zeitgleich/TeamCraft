@@ -190,6 +190,10 @@ use crate::records::{self, Account, PinnedIdentity, SyncState};
 use crate::store::{LocalStore, Table};
 use crate::trust::PinnedDirectory;
 
+/// [`ClientSettings::workspace_max_age`] by default; also what the apps' "Guest" marks judge the
+/// roster's age by ([`is_meeting_guest`]).
+pub const DEFAULT_WORKSPACE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 60 * 60);
+
 /// Tunables of the engine. Configurable, with defaults that suit a desktop client.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientSettings {
@@ -680,7 +684,7 @@ impl Default for ClientSettings {
       maybe_upload_staging_dir: None,
       link_previews: previews::LinkPreviewSettings::default(),
       device_add_max_rank: 3,
-      workspace_max_age: std::time::Duration::from_secs(30 * 24 * 60 * 60),
+      workspace_max_age: DEFAULT_WORKSPACE_MAX_AGE,
       channel_roles_max_age: std::time::Duration::from_secs(30 * 24 * 60 * 60),
       role_evidence_max_age: std::time::Duration::from_secs(30 * 24 * 60 * 60),
       role_evidence_refresh: std::time::Duration::from_secs(24 * 60 * 60),
