@@ -60,6 +60,10 @@ pub struct WindowChrome {
   pub controls: ControlLayout,
   pub is_maximized: bool,
   pub is_fullscreen: bool,
+  /// Windows 11's snap layouts take over the hit test of the maximize button, so the page no
+  /// longer sees the pointer over it; the shell says so the button can look hovered.
+  #[serde(default)]
+  pub is_maximize_hovered: bool,
   /// Whether switching the title bar applies at once or at the next start.
   pub is_live_switchable: bool,
 }
@@ -110,6 +114,9 @@ pub enum WindowButton {
 pub enum WindowAction {
   Minimize,
   ToggleMaximize,
+  /// A double-click on an empty part of the title bar: what the desktop does there (macOS follows
+  /// System Settings: zoom, minimize or nothing; elsewhere it toggles maximize).
+  TitleBarDoubleClick,
   /// Same as the system's close button: may only hide the window to the tray.
   Close,
   /// Moves the window with the pointer (a press on an empty part of the title bar).

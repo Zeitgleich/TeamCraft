@@ -5,6 +5,7 @@
 
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::{AppHandle, Emitter, Manager, Runtime, State, WebviewWindow, WebviewWindowBuilder, Window};
 use teamcraft_client_api::window_chrome::{
@@ -12,6 +13,7 @@ use teamcraft_client_api::window_chrome::{
 };
 
 use crate::shell_prefs::ShellPrefsState;
+use crate::title_bar_action::DoubleClickAction;
 
 /// Emitted when the window chrome changed (maximized, fullscreen, title bar); the UI asks again.
 pub const WINDOW_CHROME_EVENT: &str = "window-chrome-changed";
@@ -30,6 +32,8 @@ const TRAFFIC_LIGHT_INSET: f64 = 16.0;
 pub struct WindowChromeState {
   title_bar: TitleBar,
   last_state: Mutex<Option<(bool, bool)>>,
+  /// Windows: the pointer is over the maximize button, which the page can't see (snap layouts).
+  is_maximize_hovered: AtomicBool,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -43,12 +47,33 @@ impl WindowChromeState {
     Self {
       title_bar,
       last_state: Mutex::new(None),
+      is_maximize_hovered: AtomicBool::new(false),
     }
   }
 
   /// The title bar the window was created with.
   pub fn title_bar(&self) -> TitleBar {
     self.title_bar
+  }
+}
+
+/// Windows: sets up the snap layouts flyout on the maximize button (#173). Call on the main thread,
+/// after the window exists.
+#[cfg(windows)]
+pub fn install_snap_layouts<R: Runtime>(window: &WebviewWindow<R>) {
+  let Ok(hwnd) = window.hwnd() else {
+    return;
+  };
+  let app = window.app_handle().clone();
+  let installed = teamcraft_desktop_native::install_snap_layouts(hwnd.0 as isize, move |is_hovered| {
+    app
+      .state::<WindowChromeState>()
+      .is_maximize_hovered
+      .store(is_hovered, Ordering::Relaxed);
+    notify(&app);
+  });
+  if let Err(error) = installed {
+    tracing::warn!(%error, "the maximize button will not show snap layouts");
   }
 }
 
@@ -151,6 +176,7 @@ pub fn window_chrome(
     controls,
     is_maximized: window.is_maximized().unwrap_or(false),
     is_fullscreen: window.is_fullscreen().unwrap_or(false),
+    is_maximize_hovered: chrome.is_maximize_hovered.load(Ordering::Relaxed),
     is_live_switchable: is_live_switchable(),
   }
 }
@@ -160,6 +186,7 @@ pub fn window_action(window: WebviewWindow, action: WindowAction) -> Result<(), 
   let result = match action {
     WindowAction::Minimize => window.minimize(),
     WindowAction::ToggleMaximize => toggle_maximize(&window),
+    WindowAction::TitleBarDoubleClick => double_click(&window),
     // Goes through `CloseRequested`, so closing to the tray still applies.
     WindowAction::Close => window.close(),
     WindowAction::StartDragging => window.start_dragging(),
@@ -168,6 +195,42 @@ pub fn window_action(window: WebviewWindow, action: WindowAction) -> Result<(), 
     kind: "failed",
     message: error.to_string(),
   })
+}
+
+/// The desktop's own choice (#174): maximize, minimize, lower the window or nothing.
+fn double_click(window: &WebviewWindow) -> tauri::Result<()> {
+  #[cfg(target_os = "linux")]
+  let action = DoubleClickAction::current(linux_desktop());
+  #[cfg(not(target_os = "linux"))]
+  let action = DoubleClickAction::current();
+  match action {
+    DoubleClickAction::ToggleMaximize => toggle_maximize(window),
+    DoubleClickAction::Minimize => window.minimize(),
+    DoubleClickAction::Lower => lower(window),
+    DoubleClickAction::Nothing => Ok(()),
+  }
+}
+
+#[cfg(target_os = "linux")]
+fn lower(window: &WebviewWindow) -> tauri::Result<()> {
+  use gtk::prelude::WidgetExt;
+
+  // GTK objects belong to the main thread.
+  let target = window.clone();
+  window.run_on_main_thread(move || {
+    if let Some(gdk_window) = target
+      .gtk_window()
+      .ok()
+      .and_then(|gtk_window| gtk_window.window())
+    {
+      gdk_window.lower();
+    }
+  })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn lower(_window: &WebviewWindow) -> tauri::Result<()> {
+  Ok(())
 }
 
 fn toggle_maximize(window: &WebviewWindow) -> tauri::Result<()> {
@@ -179,6 +242,71 @@ fn toggle_maximize(window: &WebviewWindow) -> tauri::Result<()> {
     window.unmaximize()
   } else {
     window.maximize()
+  }
+}
+
+/// Opens the system's window menu where the pointer is: a right-click on the custom title bar
+/// (#174). macOS has the real title bar's own.
+#[tauri::command(rename_all = "snake_case")]
+pub fn show_window_menu(window: WebviewWindow) -> Result<(), WindowChromeError> {
+  #[cfg(target_os = "linux")]
+  {
+    // GTK objects belong to the main thread, where the press that asks for the menu was seen.
+    let target = window.clone();
+    window
+      .run_on_main_thread(move || {
+        let is_shown = target
+          .gtk_window()
+          .is_ok_and(|gtk_window| crate::window_menu::show(&gtk_window));
+        if !is_shown {
+          tracing::debug!("the window manager did not open a window menu");
+        }
+      })
+      .map_err(|error| failed(&error))?;
+  }
+  #[cfg(windows)]
+  {
+    let hwnd = window.hwnd().map_err(|error| failed(&error))?.0 as isize;
+    // Blocks in the menu's own message loop, so not on a command's thread.
+    window
+      .run_on_main_thread(move || teamcraft_desktop_native::show_window_menu(hwnd))
+      .map_err(|error| failed(&error))?;
+  }
+  #[cfg(not(any(target_os = "linux", windows)))]
+  drop(window);
+  Ok(())
+}
+
+/// Windows: where the page drew the maximize button, in physical pixels of the client area, or
+/// `None` without one. The snap layouts flyout opens over it (#173).
+#[tauri::command(rename_all = "snake_case")]
+pub fn set_maximize_button(
+  window: WebviewWindow,
+  maybe_rect: Option<[i32; 4]>,
+) -> Result<(), WindowChromeError> {
+  #[cfg(windows)]
+  window
+    .run_on_main_thread(move || {
+      let maybe_rect = maybe_rect.map(
+        |[left, top, right, bottom]| teamcraft_desktop_native::ButtonRect {
+          left,
+          top,
+          right,
+          bottom,
+        },
+      );
+      teamcraft_desktop_native::set_maximize_button(maybe_rect);
+    })
+    .map_err(|error| failed(&error))?;
+  #[cfg(not(windows))]
+  drop((window, maybe_rect));
+  Ok(())
+}
+
+fn failed(error: &impl std::fmt::Display) -> WindowChromeError {
+  WindowChromeError {
+    kind: "failed",
+    message: error.to_string(),
   }
 }
 
@@ -222,7 +350,7 @@ fn linux_layout(window: &WebviewWindow, desktop: LinuxDesktop) -> ControlLayout 
 }
 
 /// `$XDG_CONFIG_HOME/kwinrc`, or `$HOME/.config/kwinrc`.
-fn kwinrc_path() -> Option<PathBuf> {
+pub(crate) fn kwinrc_path() -> Option<PathBuf> {
   let maybe_config = std::env::var_os("XDG_CONFIG_HOME")
     .map(PathBuf::from)
     .filter(|path| path.is_absolute());

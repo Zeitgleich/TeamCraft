@@ -160,6 +160,8 @@ const COMMANDS: &[&str] = &[
   "webview_codec_probe_end",
   "window_chrome",
   "window_action",
+  "show_window_menu",
+  "set_maximize_button",
 ];
 
 fn main() {

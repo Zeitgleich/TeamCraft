@@ -40,6 +40,7 @@ mod shortcut_portal;
 mod single_instance;
 #[cfg(target_os = "linux")]
 mod startup_env;
+mod title_bar_action;
 mod tray;
 mod updates;
 mod video_playback;
@@ -53,6 +54,8 @@ mod webview_recovery;
 mod webview_scrolling;
 mod webview_spellcheck;
 mod window_chrome;
+#[cfg(target_os = "linux")]
+mod window_menu;
 #[cfg(windows)]
 mod windows_shell;
 
@@ -444,6 +447,8 @@ fn main() -> anyhow::Result<()> {
       webview_recovery::webview_codec_probe_end,
       window_chrome::window_chrome,
       window_chrome::window_action,
+      window_chrome::show_window_menu,
+      window_chrome::set_maximize_button,
     ])
     .build(tauri::generate_context!())
     .context("failed to build the TeamCraft desktop shell")?
@@ -572,6 +577,7 @@ fn create_main_window(app: &tauri::AppHandle, maybe_was_visible: Option<bool>) -
       webview_scrolling::configure(&webview);
       webview_spellcheck::configure(&webview, &spell_check_language);
       webview_menu::filter_menus(&webview);
+      window_menu::watch(&webview);
       webview_recovery::watch(&webview, handle.clone());
       dropped_files::watch(&webview, dropped, handle);
     });
@@ -579,6 +585,9 @@ fn create_main_window(app: &tauri::AppHandle, maybe_was_visible: Option<bool>) -
       tracing::warn!(%error, "could not set up the webview's memory caches, scrolling, menus and file drops");
     }
   }
+  // Windows 11's snap layouts need the window procedure to answer for the maximize button (#173).
+  #[cfg(windows)]
+  window_chrome::install_snap_layouts(&window);
   // WebView2 reports a dead page with `ProcessFailed`, which neither wry nor Tauri hand on (#1214).
   #[cfg(windows)]
   {
