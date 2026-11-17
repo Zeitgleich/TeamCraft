@@ -14,7 +14,7 @@ use teamcraft_e2e::browser::{BrowserSession, WebPortLease, lease_web_port, web_d
 use teamcraft_e2e::peer::PASSPHRASE;
 use teamcraft_e2e::scenario::{channel_with, space_with};
 use teamcraft_e2e::{Peer, Stack, StackBuilder};
-use teamcraft_proto::{ConversationId, DeviceLinkPlatform};
+use teamcraft_proto::{ConversationId, DeviceLinkPlatform, SpaceId};
 
 pub(crate) const WEB_ORIGIN: &str = "http://127.0.0.1:8082";
 /// The default policy only lets pages talk to https: and wss: origins; the dev Keycloak is plain http.
@@ -427,6 +427,7 @@ pub(crate) struct Rig {
   pub(crate) browser: BrowserSession,
   pub(crate) alice: Peer,
   pub(crate) carol: Peer,
+  pub(crate) space: SpaceId,
   pub(crate) channel: ConversationId,
   _turn: WebPortLease,
 }
@@ -475,6 +476,7 @@ impl Rig {
       browser,
       alice,
       carol,
+      space,
       channel,
       _turn: turn,
     })
@@ -574,9 +576,28 @@ pub(crate) async fn sign_in_as_alice(page: &Page) {
     .unwrap();
 
   // The account already has keys (the test enrolled it): this browser is a new device and unlocks
-  // them with the recovery passphrase (the field also takes a recovery kit's key).
+  // them with the recovery passphrase (the field also takes a recovery kit's key), which it asks
+  // for once the recovery kit is picked among the ways to bring the key.
+  pick_recovery_kit(page).await;
   type_until_kept(page, "#enroll-secret", PASSPHRASE).await;
   click_text(page, "Unlock").await;
+}
+
+/// Picks the recovery kit on the "Unlock your messages here" screen, once it or the passphrase
+/// field shows.
+async fn pick_recovery_kit(page: &Page) {
+  let deadline = Instant::now() + WAIT;
+  loop {
+    if page.find_element("#enroll-secret").await.is_ok() {
+      return;
+    }
+    if body_text(page).await.contains("Use my recovery kit") {
+      click_text(page, "Use my recovery kit").await;
+      return;
+    }
+    assert!(Instant::now() < deadline, "no way to unlock the keys showed");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+  }
 }
 
 /// Types into a field and checks that the text stayed. The app re-renders the screen while the core

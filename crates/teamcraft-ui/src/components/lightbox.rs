@@ -36,7 +36,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
 use crate::clock::{format_date_time, format_relative, now_ms};
-use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::avatar::{AvatarSize, MaybeAvatar};
 use crate::components::icons::{Icon, IconName};
 use crate::components::lightbox_controls::{
   Controls, MediaActions, Notice, ThumbnailStrip, still_frame, tooltip,
@@ -380,7 +380,7 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
         <div class="lightbox-main">
           <header class="lightbox-top">
             <div class="lightbox-origin">
-              {move || sender.get().map(|user| view! { <Avatar user=user size=AvatarSize::Medium /> })}
+              <MaybeAvatar user=sender size=AvatarSize::Medium />
               <div class="lightbox-origin-text">
                 <span class="lightbox-sender" translate="no">
                   {move || sender.get().map(|user| user.display_name).unwrap_or_default()}

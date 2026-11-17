@@ -75,6 +75,8 @@ mod web_mobile;
 #[cfg(feature = "browser")]
 mod web_new_device;
 #[cfg(feature = "browser")]
+mod web_render_stability;
+#[cfg(feature = "browser")]
 mod web_scroll_older;
 #[cfg(feature = "browser")]
 mod web_single_image;

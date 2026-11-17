@@ -4,7 +4,7 @@ use crate::admission::{Admission, admission};
 use crate::areas::{self, Place, lazy_area};
 use crate::calls::{CallKind, CallPhase, CallRequest};
 use crate::channel_access::ChannelAccess;
-use crate::components::avatar::{Avatar, AvatarSize, PresenceDot};
+use crate::components::avatar::{AvatarSize, AvatarStack, PresenceDot};
 use crate::components::bookmarks::BookmarksBar;
 use crate::components::channel_glyph::{ChannelGlyph, channel_fallback_icon};
 use crate::components::compact_back::CompactBack;
@@ -835,13 +835,7 @@ fn ChannelHeader(
         >
           <Icon name=IconName::Users class="header-members-icon" />
           <span class="avatar-stack header-avatars" aria-hidden="true">
-            {move || {
-              header_people
-                .get()
-                .into_iter()
-                .map(|user| view! { <Avatar user=user size=AvatarSize::Small /> })
-                .collect_view()
-            }}
+            <AvatarStack users=header_people size=AvatarSize::Small />
           </span>
           <span>{member_count}</span>
         </button>

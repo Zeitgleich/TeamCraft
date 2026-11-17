@@ -8,7 +8,7 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
 use crate::channel_access::{can_invite_to, can_start_any_direct, is_guest};
-use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::avatar::{Avatar, AvatarSize, MaybeAvatar};
 use crate::components::channel_view::shown_name;
 use crate::components::entry_menu::EntryMenuTrigger;
 use crate::components::icons::{Icon, IconName};
@@ -536,11 +536,7 @@ fn DirectItem(#[prop(into)] conversation: Signal<Conversation>) -> impl IntoView
     // Presence arrives later than the row is built, so the avatar is read reactively.
     Some(_) => view! {
       <span class="home-avatar">
-        {move || {
-          maybe_other_user
-            .get()
-            .map(|user| view! { <Avatar user=user size=AvatarSize::Small show_presence=true /> })
-        }}
+        <MaybeAvatar user=maybe_other_user size=AvatarSize::Small show_presence=true />
       </span>
     }
     .into_any(),
