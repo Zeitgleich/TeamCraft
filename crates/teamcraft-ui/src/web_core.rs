@@ -2690,6 +2690,7 @@ impl Core {
       maybe_screen_share_policy: teamcraft_core::workspace::screen_share_policy(client.store()),
       maybe_voice_message_policy: teamcraft_core::workspace::voice_message_policy(client.store()),
       maybe_call_recording_policy: teamcraft_core::workspace::call_recording_policy(client.store()),
+      legal_holds: teamcraft_core::workspace::legal_holds(client.store()),
       maybe_notetaker: teamcraft_core::notetaker::notetaker_policy(client.store()),
       bug_report_recipients: teamcraft_core::client::bug_reports::recipients(
         client.store(),

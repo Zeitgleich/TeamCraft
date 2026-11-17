@@ -284,9 +284,11 @@ async fn delete_step(
   };
   let after = Duration::days(i64::from(after_days));
   let lead = Duration::days(i64::from(INACTIVITY_DELETE_NOTICE_DAYS));
+  // data-export.md §4.2: held channels are neither warned about nor deleted, and don't take slots.
+  let held = super::legal_hold::held_conversations(state).await?;
   let channels = state
     .database
-    .list_policy_archived_channels(now, now - (after - lead), ARCHIVED_LIMIT)
+    .list_policy_archived_channels(now, now - (after - lead), ARCHIVED_LIMIT, &held)
     .await?;
   for channel in channels {
     let outcome = Box::pin(delete_one(state, &channel, after, lead, now, limit, run)).await;
@@ -401,6 +403,7 @@ async fn delete_channel(
   channel: &PolicyArchivedChannel,
   warned_at: OffsetDateTime,
 ) -> Result<bool, ApiError> {
+  let held = super::legal_hold::held_conversations(state).await?;
   let id = state
     .ids
     .next_snowflake()
@@ -428,12 +431,18 @@ async fn delete_channel(
       if facts.maybe_importer.is_some() {
         return Err(ApiError::ImportInProgress);
       }
+      // data-export.md §4.2: a hold placed since the list was read; the channel stays archived.
+      if held.contains(&channel.id) {
+        return Err(ApiError::LegalHold);
+      }
       Ok(())
     })
     .await;
   let members = match outcome {
     Ok(Some(members)) => members,
-    Ok(None) | Err(ApiError::Conflict(_) | ApiError::ImportInProgress) => return Ok(false),
+    Ok(None) | Err(ApiError::Conflict(_) | ApiError::ImportInProgress | ApiError::LegalHold) => {
+      return Ok(false);
+    },
     Err(error) => return Err(error),
   };
   conversations::announce_deleted(state, channel.id, &members, None).await;

@@ -1,6 +1,7 @@
 use teamcraft_proto::{DeviceId, WorkspaceLogKind};
 use time::OffsetDateTime;
 
+use crate::audit::NewAuditEntry;
 use crate::database::Database;
 use crate::error::DbError;
 use crate::ids::{from_db_opt, to_db};
@@ -27,7 +28,8 @@ pub enum AppendOutcome {
 
 impl Database {
   /// Appends `expected_version + 1` if the log is still at `expected_version`. Concurrent appends of
-  /// the same version race on the primary key and exactly one wins.
+  /// the same version race on the primary key and exactly one wins. `audit` rows are written in the
+  /// same transaction, only when the entry is.
   pub async fn append_workspace_log(
     &self,
     kind: &WorkspaceLogKind,
@@ -35,9 +37,11 @@ impl Database {
     payload: &[u8],
     signature: &[u8],
     signer: DeviceId,
+    audit: &[NewAuditEntry<'_>],
   ) -> Result<AppendOutcome, DbError> {
     let expected =
       i64::try_from(expected_version).map_err(|_| DbError::InvalidStoredValue("version".into()))?;
+    let mut tx = self.pool().begin().await?;
     let result = sqlx::query!(
       r#"INSERT INTO workspace_log (kind, version, payload, signature, signer_device_id)
          SELECT $1, $2::bigint + 1, $3, $4, $5
@@ -49,11 +53,17 @@ impl Database {
       signature,
       to_db(signer),
     )
-    .execute(self.pool())
+    .execute(&mut *tx)
     .await?;
     if result.rows_affected() == 1 {
+      // The entry and what it is audited as go together (data-export.md §4.2).
+      for entry in audit {
+        Self::record_audit_in(&mut tx, entry).await?;
+      }
+      tx.commit().await?;
       return Ok(AppendOutcome::Appended);
     }
+    tx.rollback().await?;
     let current = self.workspace_log_version(kind).await?;
     Ok(AppendOutcome::VersionConflict {
       current_version: current,

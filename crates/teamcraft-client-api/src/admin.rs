@@ -241,6 +241,10 @@ pub enum AuditAction {
   InactivitySnoozed,
   /// A run of the inactivity policy stopped at its limit.
   InactivityLimited,
+  /// An owner placed a legal hold on a conversation (data-export.md §4.2).
+  LegalHoldPlaced,
+  /// An owner released a legal hold.
+  LegalHoldReleased,
   /// A space was archived with its channels.
   SpaceArchived,
   /// A space was restored with the channels it had archived.
@@ -268,7 +272,7 @@ pub enum AuditAction {
 }
 
 impl AuditAction {
-  pub const ALL: [AuditAction; 38] = [
+  pub const ALL: [AuditAction; 40] = [
     Self::PolicyChanged,
     Self::RetentionChanged,
     Self::DeviceRemoved,
@@ -290,6 +294,8 @@ impl AuditAction {
     Self::ChannelAutoDeleted,
     Self::InactivitySnoozed,
     Self::InactivityLimited,
+    Self::LegalHoldPlaced,
+    Self::LegalHoldReleased,
     Self::SpaceArchived,
     Self::SpaceRestored,
     Self::MemberAdded,
@@ -332,6 +338,8 @@ impl AuditAction {
       Self::ChannelAutoDeleted => "channel-auto-deleted",
       Self::InactivitySnoozed => "inactivity-snoozed",
       Self::InactivityLimited => "inactivity-limited",
+      Self::LegalHoldPlaced => "legal-hold-placed",
+      Self::LegalHoldReleased => "legal-hold-released",
       Self::SpaceArchived => "space-archived",
       Self::SpaceRestored => "space-restored",
       Self::MemberAdded => "member-added",

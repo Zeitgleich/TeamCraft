@@ -261,6 +261,7 @@ error-role-change-not-confirmed = Die Rolle wurde geändert, aber dieses Gerät 
 error-channel-roles-disputed = Nicht zugestimmt: Die Apps der Mitglieder zeigen für diesen Kanal unterschiedliche Rollen, und signierte Einträge belegen das. Ein Workspace-Admin kann die Rollen hier prüfen; bis dahin kannst du nur ablehnen.
 error-last-member = Sonst ist niemand in diesem Kanal, daher wird er beim Verlassen gelöscht. Wähle zum Bestätigen „Verlassen“ in seinem Menü.
 error-import-in-progress = In diesen Kanal läuft gerade ein Import. Lösche ihn, sobald der Import fertig ist.
+error-legal-hold = Für dieses Gespräch gilt eine Aufbewahrungsanordnung (Legal Hold). Es kann erst gelöscht werden, wenn ein Inhaber sie aufhebt.
 error-space-has-hidden-channels = Dieser Space enthält private Kanäle, in denen du nicht bist. Bitte einen Workspace-Admin, ihn zu löschen.
 error-channel-needs-admin = Dieser Kanal hat keinen Admin. Ein Workspace-Admin muss einen bestimmen, bevor er wiederhergestellt werden kann.
 error-not-a-channel = Das geht nur bei Kanälen, nicht bei Direktnachrichten.

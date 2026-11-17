@@ -108,6 +108,9 @@ wire_enum! {
     LastMember => "last_member",
     /// An import account holds the channel (docs/import-synology.md): it can't be deleted now.
     ImportInProgress => "import_in_progress",
+    /// The conversation is under legal hold (data-export.md §4.2): it can't be deleted until the
+    /// hold is released.
+    LegalHold => "legal_hold",
     /// The space holds private channels the space admin isn't in; a workspace admin deletes it.
     SpaceHasHiddenChannels => "space_has_hidden_channels",
     /// A channel with members and no channel admin is restored once a workspace admin assigned one.

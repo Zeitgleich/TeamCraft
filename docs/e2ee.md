@@ -7723,9 +7723,15 @@ protocol change:
   deletion for selected users/conversations) and retention enforcement on its copy.
 - Credential type `system:archive` is reserved in the MLS credentials from the start.
 
-Not built yet (issue #211). What exists: each user's own export, written by their own device from
-what it can decrypt, and the server's record of them (`GET /me/personal-data`); see
-[data-export.md](data-export.md). Without the vault node an admin can't export anybody's messages.
+The full design of the archive, its export requests and what the server learns is in
+[data-export.md](data-export.md) §4.1; the vault node is not built yet (issue #211). What exists:
+each user's own export, written by their own device from what it can decrypt, the server's record
+of them (`GET /me/personal-data`), and **legal hold** (data-export.md §4.2): a list of conversations
+in the same signed `compliance_archive` group that the server keeps whatever retention or a deletion
+would do, shown to their members as held. Like every policy group, it is verified from the owner's
+signature, so the server can't forge a hold; like any policy update, it can delay or withhold a
+newer policy (and so a new hold or a release) from a member. Without the vault
+node an admin can't export anybody's messages.
 
 ## 12. Link previews
 

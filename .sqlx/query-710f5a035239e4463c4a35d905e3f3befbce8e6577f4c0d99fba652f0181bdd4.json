@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, archived_at AS \"archived_at!\", inactivity_notified_at\n         FROM conversations\n         WHERE archive_origin = 'inactivity' AND archived_at IS NOT NULL AND deleted_at IS NULL\n           AND archived_at <= $2\n           AND (inactivity_snoozed_until IS NULL OR inactivity_snoozed_until <= $1)\n         ORDER BY archived_at, id LIMIT $3",
+  "query": "SELECT id, archived_at AS \"archived_at!\", inactivity_notified_at\n         FROM conversations\n         WHERE archive_origin = 'inactivity' AND archived_at IS NOT NULL AND deleted_at IS NULL\n           AND archived_at <= $2\n           AND (inactivity_snoozed_until IS NULL OR inactivity_snoozed_until <= $1)\n           AND NOT (id = ANY($4))\n         ORDER BY archived_at, id LIMIT $3",
   "describe": {
     "columns": [
       {
@@ -41,7 +41,8 @@
       "Left": [
         "Timestamptz",
         "Timestamptz",
-        "Int8"
+        "Int8",
+        "Int8Array"
       ]
     },
     "nullable": [
@@ -50,5 +51,5 @@
       true
     ]
   },
-  "hash": "883699d3ccaa939e1cb9f062741f35ad4b8cb92c65f4db7f931d7ff669f41576"
+  "hash": "710f5a035239e4463c4a35d905e3f3befbce8e6577f4c0d99fba652f0181bdd4"
 }

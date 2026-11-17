@@ -89,6 +89,8 @@ pub enum ApiError {
   LastMember,
   #[error("an import account holds this channel")]
   ImportInProgress,
+  #[error("the conversation is under legal hold")]
+  LegalHold,
   #[error("the space holds private channels you aren't in")]
   SpaceHasHiddenChannels,
   #[error("assign a channel admin before restoring this channel")]
@@ -445,6 +447,7 @@ impl ApiError {
       | Self::LastChannelAdmin
       | Self::LastMember
       | Self::ImportInProgress
+      | Self::LegalHold
       | Self::SpaceHasHiddenChannels
       | Self::ChannelNeedsAdmin
       | Self::ImportWindowFull
@@ -504,6 +507,7 @@ impl ApiError {
       Self::LastChannelAdmin => ErrorCode::LastChannelAdmin,
       Self::LastMember => ErrorCode::LastMember,
       Self::ImportInProgress => ErrorCode::ImportInProgress,
+      Self::LegalHold => ErrorCode::LegalHold,
       Self::SpaceHasHiddenChannels => ErrorCode::SpaceHasHiddenChannels,
       Self::ChannelNeedsAdmin => ErrorCode::ChannelNeedsAdmin,
       Self::NotAChannel => ErrorCode::NotAChannel,

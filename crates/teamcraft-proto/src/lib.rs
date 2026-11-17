@@ -18,6 +18,7 @@ mod gateway;
 mod id;
 mod import;
 mod integration;
+mod legal_hold;
 pub mod live;
 mod log_level;
 mod notetaker;
@@ -80,6 +81,10 @@ pub use integration::{
   MAX_SOURCE_PICTURE_BYTES, MAX_SOURCE_PICTURE_SIDE_PX, MAX_SOURCE_RATE_LIMIT_PER_MINUTE, SourceChange,
   SourceId, SourceIdentity, SourceKind, SourceOptions, SourcePictureError, SourcePictureHash,
   SourceTokenHash, SourceTokenHashError, check_source_picture, clean_source_name,
+};
+pub use legal_hold::{
+  LegalHold, LegalHoldError, MAX_LEGAL_HOLD_REFERENCE_CHARS, MAX_LEGAL_HOLDS, check_legal_holds,
+  legal_hold_changes, legal_hold_of,
 };
 pub use log_level::{LevelMatch, LogLevel, find_level, level_from_number, parse_level_field};
 pub use notetaker::{

@@ -9,8 +9,9 @@ can produce neither alone: content can only be exported by a client that holds t
 |------------------------------------|---------------------------|------------------------------------------------------------|
 | Personal export ("Export my data") | the user, on their device | Implemented on desktop and web (this document)             |
 | Server-held personal data          | the user, through the API | Implemented: `GET /api/v1/me/personal-data`                |
-| Compliance export, legal hold      | admins, through a vault   | Not implemented: needs the vault node (e2ee.md §11)        |
-| Audit log CSV                      | admins                    | Not implemented (docs/guide/admin/users-devices-guests.md) |
+| Legal hold                         | owners, by signed policy  | Implemented on the server, desktop and web (§4.2)          |
+| Compliance export                  | admins, through a vault   | Designed (§4.1); needs the vault node (e2ee.md §11)        |
+| Audit log CSV                      | admins                    | Not implemented (#2137)                                    |
 
 ## 1. Personal export
 
@@ -181,21 +182,117 @@ what admins did as the actor of the instance's audit log.
 | Art. 17 (erasure)            | Account deletion by an admin (admin.md §3.2.1); self-service: not yet       |
 | Art. 5(1)(e) (storage limit) | Retention policies (admin.md); deleted content is not exported              |
 
-## 4. Compliance export (not implemented)
+## 4. Compliance export and legal hold
 
 An admin can't export content: the server has none in plaintext, and admins hold no keys (admin.md).
-The design is in e2ee.md §11: when the signed workspace policy turns `compliance_archive` on, a vault
-node (`teamcraft-vault`, a member device on company hardware with the reserved credential
-`system:archive`) is added to every covered conversation, receives the content keys through MLS like
-any member, and exports EML or JSON per conversation, with legal hold suspending its retention.
-Members see a banner that the conversation is archived. Without it:
+An organisation that must be able to hand conversations to an auditor or a court therefore needs a
+member that keeps them: the **vault node** (e2ee.md §10.2, §11). Its design is below (§4.1); legal
+hold (§4.2) works without it and is built.
+
+Without the vault node:
 
 - an admin's own personal export holds only what that admin can read, like anyone's;
-- there is no way, for an admin or the server operator, to export other people's messages.
+- there is no way, for an admin or the server operator, to export other people's messages;
+- a legal hold keeps the ciphertext on the server, so the vault (later) or a member's own device
+  (now) can still read what the hold kept.
 
-What remains (issue #211): the vault node and its export job API (admin-approved, optional two-person
-rule, an audit entry per export with its scope), legal hold, the audit log CSV export, and the
-member-visible banner.
+### 4.1 Compliance archive (design, issue #211; not built yet)
+
+**Who holds the keys.** Only the vault node. It is a TeamCraft device of a dedicated **archive
+account** (a system account, MLS credential type `system:archive`), running `teamcraft-vault` on the
+organisation's own hardware: the shared core (`teamcraft-core`) without a UI, with its own encrypted
+store. It joins conversations like a member device and receives the content keys through MLS like any
+member (e2ee.md §4.3). Admins, owners and the server operator hold no archive keys; whoever runs the
+vault's machine does, which is why it is on company hardware and not on the VPS.
+
+**Turning it on.** Only by the signed workspace policy (`compliance_archive`):
+
+| Field     | Meaning                                                                                    |
+|-----------|--------------------------------------------------------------------------------------------|
+| `mode`    | `off` (default) or `on`; the server refuses `on` until the vault node ships                |
+| `archive` | the archive account's user ID and the fingerprint of its identity key, as the owner pinned |
+| `covers`  | `all` conversations (DMs too), or the IDs of the spaces whose channels it covers           |
+
+The fingerprint is in the owner's signature, so the server can't swap in another "archive" device: a
+member app adds only devices of that account whose identity key matches. Every member app shows a
+line in each covered conversation when archiving starts or stops; the server can't switch it on
+silently (admin.md §2.3).
+
+**What member apps do.** In a covered conversation they add the archive account's devices (the
+workspace admins' signature on the policy is the authority, e2ee.md §4.6), share the history with
+them, and refuse to send while the archive is missing from the group for more than a short grace
+(the composer says "Waiting for the archive"), so the archive is complete. They show a banner
+"Messages in this conversation are archived by your organization", from the verified policy, which
+the server can neither hide nor fake. Guests are told before they join a covered conversation.
+
+**Exporting.** An admin asks for an export in the console: which conversations or people, which
+period, and a reference. A second admin approves it (`exports.approvals_required`, default 2, in the
+signed policy). Both are signed with the admins' device keys; the server only relays the request.
+The vault verifies the signatures against the verified roster and the policy itself, then writes an
+archive in the format of §1.1 (`scope`: `compliance`, with the request in `manifest.json`),
+encrypted to the recipient key named in the request, and hands it out through the server (which sees
+its size, never its content). Whether the people concerned are told is a policy setting
+(`exports.notify_people`, default on).
+
+**What the server learns.** That archiving is on and which account and devices archive (they are
+members like any other); export requests: who asked, who approved, the scope, the reference, when
+it ran and how large the result was. Never content, never keys, never the recipient's private key.
+
+**Audit.** Turning archiving on or off, every export request, approval, refusal and completion,
+and every legal hold placed or released are entries of the audit log (admin.md §4), metadata only.
+
+**Retention on the archive.** The vault applies its own retention to its copy (the policy's
+`retention`, plus a separate archive period), and a legal hold suspends it there too.
+
+### 4.2 Legal hold (implemented)
+
+A legal hold keeps a conversation: what retention, the inactivity policy or a deletion would remove
+stays on the server until the hold is released. Holds are part of the signed policy
+(`compliance_archive.legal_holds`), placed and released by owners in Administration > Retention.
+
+| Field             | Meaning                                                                      |
+|-------------------|------------------------------------------------------------------------------|
+| `conversation_id` | the held channel; the server refuses DMs, groups and meeting chats           |
+| `reference`       | the organisation's case reference, 1 to 64 characters, read by every member  |
+| `placed_at`       | when the owner placed it, by the owner's clock; shown only                   |
+
+At most 500 holds, each conversation once, each an existing channel: direct messages, groups and
+meeting chats are removed by paths a hold can't stop (account deletion, meetings), so a hold on them
+is refused. The server and the owners' apps refuse other values.
+
+**What a hold does on the server.**
+
+- Retention skips the conversation: no message, attachment or search index segment of it is deleted.
+- The inactivity policy may archive it but doesn't delete it.
+- Deleting the channel, deleting its space, and the last member's leave that would delete a private
+  channel are refused with `legal_hold`; the apps say why.
+- Releasing the hold returns it to the normal rules; the next retention run catches up.
+
+**Who is told.** Every member of a held conversation sees a banner "This conversation is under legal
+hold (reference). Retention doesn't delete its messages." It comes from the verified policy, so the
+server can't show it for a conversation nobody held; like any policy update, it can delay or
+withhold a newer policy (a new hold or a release) from a member. Holds are not
+secret: the signed policy is readable by every signed-in user, which is why the console asks for a
+reference and not a name or a reason.
+
+**Audit.** Every hold placed or released is an audit entry (`legal_hold_placed`,
+`legal_hold_released`) with the signing owner, the conversation, the reference and the policy
+version.
+
+**Limits.** The server is untrusted: a hostile server can delete ciphertext whatever the policy says.
+A hold protects against the routine deletions, not against the operator; the vault's own copy (§4.1)
+is what protects against that. A member can still delete their own messages (a signed deletion,
+e2ee.md §4.6); keeping those under a hold, holds on people (all their conversations) and on direct
+messages, and the banner on Android and iOS are later steps.
+
+### 4.3 What remains
+
+| What                                                          | Issue |
+|---------------------------------------------------------------|-------|
+| Vault node, archive mode and approved export requests (§4.1)  | #2134 |
+| Legal hold on people and DMs, keeping signed deletions        | #2135 |
+| Legal hold banner on Android and iOS                          | #2136 |
+| Audit log CSV export                                          | #2137 |
 
 ## 5. Manual test steps
 
@@ -221,3 +318,11 @@ holds (scroll up to see that it loads more), one file sent by the account and on
       written, no `.part` file stays.
 - [ ] Web: reload during an export: the card shows the start again, nothing is left.
 - [ ] German: the card and the archive's `index.html` are in German.
+
+Legal hold (an owner's account on desktop or web, a member's account in a second browser):
+
+- [ ] Administration > Retention > Legal hold: place a hold on a channel with a reference. An empty or
+      too long reference shows its error at the field and nothing is signed.
+- [ ] The member opens the channel: the banner names the reference. Release the hold: the banner goes.
+- [ ] With the hold in place, deleting the channel or its space is refused with "under legal hold".
+- [ ] Administration > Audit log lists "Legal hold placed" and "Legal hold released" with the owner.

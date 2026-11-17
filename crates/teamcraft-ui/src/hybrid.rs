@@ -490,6 +490,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.call_recording_policy()
   }
 
+  fn legal_hold(&self, conversation: ConversationId) -> Option<teamcraft_proto::LegalHold> {
+    self.chat.legal_hold(conversation)
+  }
+
   fn set_activity(&self, is_idle: bool) {
     self.chat.set_activity(is_idle);
   }

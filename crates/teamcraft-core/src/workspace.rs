@@ -952,6 +952,17 @@ pub fn call_recording_allowance(store: &impl LocalStore, user: UserId, now_ms: i
   policy.allows(role).then(|| policy.max_seconds())
 }
 
+/// The legal holds of the verified policy (data-export.md §4.2), for the banner in held
+/// conversations. Empty before a workspace was verified or when the state can't be read: only an
+/// owner's signature shows a conversation as held, never the server's word.
+pub fn legal_holds(store: &impl LocalStore) -> Vec<teamcraft_proto::LegalHold> {
+  records::get_json::<WorkspaceState>(store, Table::Workspace, crate::client::WORKSPACE_KEY)
+    .ok()
+    .flatten()
+    .map(|state| state.policy.compliance_archive.legal_holds)
+    .unwrap_or_default()
+}
+
 /// Who may record calls under the verified policy (e2ee.md §8.3). `None` before a workspace was
 /// verified or when the state can't be read: nobody, as the default says.
 pub fn call_recording_policy(store: &impl LocalStore) -> Option<teamcraft_proto::CallRecordingPolicy> {

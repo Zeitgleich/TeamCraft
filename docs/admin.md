@@ -1298,6 +1298,29 @@ under Administration → Security → Call recording. It is **off by default**.
   starts, and leaving people out of it (#2115); saving as a local file, keeping a recording a crash
   left, video (#2116); an audit entry and an unattended recorder bot (#2117).
 
+### 3.14 Legal hold and compliance archive (issue #211)
+
+A **legal hold** keeps a channel for a case: retention doesn't delete its messages, files or search
+segments, the inactivity policy doesn't delete it, and deleting it (or its space) is refused until
+the hold is released. Holds are part of the signed workspace policy (`compliance_archive.legal_holds`,
+§2.3), under Administration → Retention → Legal hold.
+
+- **Who:** owners place and release holds; their app signs the policy. Admins see the list read-only.
+- **Reference:** each hold carries the organisation's case reference (1 to 64 characters). Every member
+  of the channel sees it in a banner, and the signed policy is readable by everybody signed in: use a
+  case number, never a person's name or the reason.
+- **Members are told:** a held channel shows "This conversation is under legal hold" with the reference
+  to every member, from the verified policy: the server can't fake it, though like any policy update
+  it can delay or withhold a newer one. Desktop and web show it; Android and iOS follow.
+- **Audit:** placing and releasing a hold are audit entries with the owner who signed it.
+- **Limits:** a hold keeps what is on the server against the routine deletions; members can still
+  delete their own messages, and holds on people or direct messages are later steps
+  (data-export.md §4.2).
+
+The **compliance archive** (an archive device that keeps every covered conversation and exports it
+for auditors) is designed in data-export.md §4.1 and not built yet: `compliance_archive.mode` stays
+`off`, and the server refuses anything else.
+
 ## 4. Audit log
 
 Every admin action, recovery, device change and role change is logged with actor, target and time.
@@ -1310,6 +1333,8 @@ Every admin action, recovery, device change and role change is logged with actor
   properties are signed, the change itself is the server's word.
 - Users see actions affecting themselves (device removed, recovery started) in their security settings.
 - The log contains metadata only, never message content.
+- Legal holds placed and released (`legal_hold_placed`, `legal_hold_released`) name the owner who
+  signed the policy, the conversation and the case reference (§3.14).
 
 ### 4.1 Server API of the admin features
 
