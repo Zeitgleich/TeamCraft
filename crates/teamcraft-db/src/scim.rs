@@ -307,6 +307,17 @@ impl Database {
     Ok(rows.pop())
   }
 
+  /// Whether a SCIM client manages the account (of any client).
+  pub async fn is_scim_managed(&self, user: UserId) -> Result<bool, DbError> {
+    let is_managed = sqlx::query_scalar!(
+      r#"SELECT EXISTS (SELECT 1 FROM scim_users WHERE user_id = $1) AS "is_managed!""#,
+      to_db(user),
+    )
+    .fetch_one(self.pool())
+    .await?;
+    Ok(is_managed)
+  }
+
   /// The client's accounts a lookup names, ordered by account.
   pub async fn find_scim_users(
     &self,

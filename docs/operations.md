@@ -48,6 +48,9 @@ found:
   others (they hold no secrets; pass secrets as podman secrets or environment variables).
 - When the identity provider runs on the same host, point `[oidc] jwks_uri` at its loopback address:
   the server then fetches keys without a round trip through the proxy (and without trusting its CA).
+- With profile pictures from the identity provider (admin.md §3.12), the server fetches the URL the
+  `picture` claim or SCIM `photos` names, also on the identity provider's own origin. Map them only
+  from an attribute admins set: one users can edit lets a member aim the server's requests.
 
 The playbook's dry run (`test/dry-run.sh` there) deploys to a throwaway container and uses this
 repository's end-to-end harness against it (`tests/e2e/tests/suite/deployed.rs`, `E2E_DEPLOYED_URL`,

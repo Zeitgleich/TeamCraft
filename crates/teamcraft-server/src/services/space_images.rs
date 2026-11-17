@@ -87,7 +87,7 @@ pub async fn put_space_image(
     )));
   }
   let declared_type = declared_type.to_owned();
-  let png = run_limited(&state.image_decodes, timeout, move || {
+  let png = run_limited(&state.image_decodes, WhenBusy::Refuse, timeout, move || {
     sanitize(&bytes, &declared_type)
   })
   .await?
@@ -240,20 +240,33 @@ fn encode_png(picture: DynamicImage) -> Result<Vec<u8>, SpaceImageError> {
   Ok(out.into_inner())
 }
 
+/// What a picture job does when every decoding permit is taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WhenBusy {
+  /// Answer busy at once: a person's upload, which the app retries.
+  Refuse,
+  /// Wait for a permit: background work nobody retries, such as provider pictures.
+  Wait,
+}
+
 /// Runs `job` on the blocking pool, at most as many at once as `permits` has, for at most
-/// `timeout`. Busy (503 with `Retry-After`) when all permits are taken or the job takes too long.
-/// A job that times out keeps its permit until it really ends, so slow decodes can't pile up.
+/// `timeout`. Busy (503 with `Retry-After`) when the job takes too long, or when all permits are
+/// taken and `when_busy` is [`WhenBusy::Refuse`]. A job that times out keeps its permit until it
+/// really ends, so slow decodes can't pile up.
 pub async fn run_limited<T: Send + 'static>(
   permits: &Arc<Semaphore>,
+  when_busy: WhenBusy,
   timeout: Duration,
   job: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, ApiError> {
-  let busy = ApiError::Busy {
+  let busy = || ApiError::Busy {
     what: "picture processing",
     retry_after_secs: BUSY_RETRY_AFTER_SECS,
   };
-  let Ok(permit) = Arc::clone(permits).try_acquire_owned() else {
-    return Err(busy);
+  let permit = match when_busy {
+    WhenBusy::Refuse => Arc::clone(permits).try_acquire_owned().map_err(|_| busy())?,
+    // Only a closed semaphore fails; the server never closes it.
+    WhenBusy::Wait => Arc::clone(permits).acquire_owned().await.map_err(|_| busy())?,
   };
   let task = tokio::task::spawn_blocking(move || {
     let result = job();
@@ -270,7 +283,7 @@ pub async fn run_limited<T: Send + 'static>(
         timeout_secs = timeout.as_secs(),
         "decoding a picture took too long"
       );
-      Err(busy)
+      Err(busy())
     },
   }
 }
@@ -468,7 +481,7 @@ mod tests {
     #[tokio::test]
     async fn a_job_runs_when_a_permit_is_free() {
       let permits = Arc::new(Semaphore::new(1));
-      let result = run_limited(&permits, Duration::from_secs(5), || 42).await;
+      let result = run_limited(&permits, WhenBusy::Refuse, Duration::from_secs(5), || 42).await;
       assert_eq!(result.unwrap(), 42);
       assert_eq!(permits.available_permits(), 1);
     }
@@ -477,7 +490,7 @@ mod tests {
     async fn without_a_free_permit_the_server_is_busy() {
       let permits = Arc::new(Semaphore::new(1));
       let _held = Arc::clone(&permits).try_acquire_owned().unwrap();
-      let result = run_limited(&permits, Duration::from_secs(5), || 42).await;
+      let result = run_limited(&permits, WhenBusy::Refuse, Duration::from_secs(5), || 42).await;
       assert!(
         matches!(
           result,
@@ -490,6 +503,20 @@ mod tests {
       );
     }
 
+    #[tokio::test]
+    async fn a_waiting_job_runs_once_a_permit_is_free() {
+      let permits = Arc::new(Semaphore::new(1));
+      let held = Arc::clone(&permits).try_acquire_owned().unwrap();
+      let waiting = tokio::spawn({
+        let permits = Arc::clone(&permits);
+        async move { run_limited(&permits, WhenBusy::Wait, Duration::from_secs(5), || 42).await }
+      });
+      tokio::task::yield_now().await;
+      assert!(!waiting.is_finished());
+      drop(held);
+      assert_eq!(waiting.await.unwrap().unwrap(), 42);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_job_that_takes_too_long_is_busy_and_keeps_its_permit_until_it_ends() {
       let permits = Arc::new(Semaphore::new(1));
@@ -498,7 +525,12 @@ mod tests {
       let (release, wait) = std::sync::mpsc::channel::<()>();
       let call = tokio::spawn({
         let permits = Arc::clone(&permits);
-        async move { run_limited(&permits, Duration::from_secs(5), move || wait.recv().is_ok()).await }
+        async move {
+          run_limited(&permits, WhenBusy::Refuse, Duration::from_secs(5), move || {
+            wait.recv().is_ok()
+          })
+          .await
+        }
       });
       // Paused time doesn't advance on its own while a blocking task runs: move the clock by hand,
       // in steps, until the call gave up (bounded: 20 steps of a second cover the 5 s timeout).

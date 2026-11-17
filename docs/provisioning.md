@@ -284,8 +284,11 @@ change later: a different subject is a different person at sign-in.
 - **Photos.** While the workspace takes pictures from the identity provider (admin.md §3.12), a
   user's `photos` (the primary one, else type `photo`, else the first; a URL or a `data:` URI) becomes
   their picture, imported in the background and re-encoded like an upload. A `PUT` or `POST` without
-  `photos` removes it; a `PATCH` that doesn't touch `photos` keeps it. A failed import doesn't fail
-  the request.
+  `photos` removes it; a `PATCH` that doesn't touch `photos` keeps it, and a `PATCH` that adds
+  `photos` replaces it (TeamCraft keeps one picture). A failed import doesn't fail the request; a
+  write waits while `max_concurrent_avatar_imports` imports run. For a person SCIM manages, the
+  `picture` claim of their token is ignored. The attribute behind `photos` must be one only admins
+  set (admin.md §3.12).
 - Attributes TeamCraft doesn't keep (the enterprise extension, phone numbers, addresses, a password)
   are accepted and dropped.
 

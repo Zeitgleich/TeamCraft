@@ -22,6 +22,7 @@ use super::admin::{AfterDeactivation, deactivate_user};
 use super::audit::{self, Target as AuditTarget};
 use super::convert::unix_millis;
 use super::profiles;
+use super::space_images::WhenBusy;
 use super::validate_name;
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
@@ -169,7 +170,7 @@ pub async fn put_bot_avatar(
 ) -> Result<(), ApiError> {
   require(state, caller, Permission::ManageUsers, &Target::Instance)?;
   ensure_active_bot(state, bot).await?;
-  let png = profiles::sanitized_avatar(state, declared_type.to_owned(), bytes).await?;
+  let png = profiles::sanitized_avatar(state, declared_type.to_owned(), bytes, WhenBusy::Refuse).await?;
   profiles::store_avatar(state, bot, png).await?;
   audit::record(
     state,

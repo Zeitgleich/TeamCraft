@@ -351,7 +351,7 @@ mod avatars {
     }
   }
 
-  async fn scim_token(app: &TestApp) -> String {
+  pub(super) async fn scim_token(app: &TestApp) -> String {
     user_id(app, &admin()).await;
     let reply = app
       .post(
@@ -364,7 +364,7 @@ mod avatars {
     reply.body["token"].as_str().unwrap().to_owned()
   }
 
-  async fn scim_send(
+  pub(super) async fn scim_send(
     app: &TestApp,
     token: &str,
     method: reqwest::Method,
@@ -382,5 +382,205 @@ mod avatars {
       .unwrap();
     let status = response.status();
     (status, response.json().await.unwrap_or(Value::Null))
+  }
+}
+
+/// Imports of provider pictures under races, a bulk sync and two sources (issue #2125), steered
+/// through the import probe instead of sleeping.
+mod provider_imports {
+  use std::str::FromStr;
+  use std::sync::atomic::Ordering;
+
+  use teamcraft_proto::UserId;
+  use teamcraft_server::services::provider_avatars::{ImportProbe, ProviderPictures};
+
+  use super::avatars::{scim_send, scim_token};
+  use super::*;
+
+  const CLAIM: &str = "https://pictures.example.com/claim.png";
+
+  #[tokio::test]
+  async fn a_removal_during_an_import_wins_and_the_newest_photo_is_imported_next() {
+    let app = app!();
+    identity_provider_pictures(&app).await;
+    let scim = scim_token(&app).await;
+    let probe = app.state.provider_pictures.probe();
+
+    // The provider removes the photo while its import runs: nothing comes back.
+    probe.is_pausing.store(true, Ordering::SeqCst);
+    let user = scim_user(&app, &scim, "frank", Some(&photo(300, 200))).await;
+    paused(probe).await;
+    put_user(&app, &scim, &user, "frank", None).await;
+    probe.resume.add_permits(1);
+    finished(probe, 1).await;
+    assert_eq!(probe.superseded.load(Ordering::SeqCst), 1);
+    assert_eq!(stored_source(&app, &user).await, None);
+
+    // Two photos while an import runs: the running one is dropped, the newest is imported.
+    put_user(&app, &scim, &user, "frank", Some(&photo(300, 200))).await;
+    paused(probe).await;
+    let newest = photo(120, 90);
+    put_user(&app, &scim, &user, "frank", Some(&newest)).await;
+    probe.is_pausing.store(false, Ordering::SeqCst);
+    probe.resume.add_permits(1);
+    finished(probe, 2).await;
+    assert_eq!(probe.superseded.load(Ordering::SeqCst), 2);
+    assert_eq!(probe.stored.load(Ordering::SeqCst), 1);
+    assert_eq!(stored_source(&app, &user).await, Some(sri(&newest)));
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_bulk_sync_imports_every_photo_with_no_more_imports_at_once_than_the_cap() {
+    const PEOPLE: usize = 8;
+    let app = app!(|settings| {
+      settings.limits.max_concurrent_avatar_imports = 2;
+      settings.limits.max_concurrent_image_decodes = 1;
+    });
+    identity_provider_pictures(&app).await;
+    let scim = scim_token(&app).await;
+    let probe = app.state.provider_pictures.probe();
+    let picture = photo(300, 200);
+    let names: Vec<String> = (0..PEOPLE).map(|n| format!("bulk-{n}")).collect();
+    let people = futures_util::future::join_all(
+      names
+        .iter()
+        .map(|name| scim_user(&app, &scim, name, Some(&picture))),
+    )
+    .await;
+    finished(probe, PEOPLE).await;
+    assert_eq!(probe.failed.load(Ordering::SeqCst), 0, "none failed as busy");
+    assert_eq!(probe.stored.load(Ordering::SeqCst), PEOPLE);
+    assert!(probe.most_at_once.load(Ordering::SeqCst) <= 2);
+    for user in &people {
+      assert_eq!(stored_source(&app, user).await, Some(sri(&picture)));
+    }
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_scim_photo_and_a_differing_claim_dont_take_turns() {
+    let app = app!();
+    identity_provider_pictures(&app).await;
+    let scim = scim_token(&app).await;
+    let probe = app.state.provider_pictures.probe();
+    let picture = photo(300, 200);
+    let user = scim_user(&app, &scim, "grace", Some(&picture)).await;
+    finished(probe, 1).await;
+    for _ in 0..3 {
+      ProviderPictures::note_sign_in(&app.state, user.id, Some(CLAIM));
+      put_user(&app, &scim, &user, "grace", Some(&picture)).await;
+    }
+    assert_eq!(
+      probe.started.load(Ordering::SeqCst),
+      1,
+      "only the SCIM photo was imported"
+    );
+    assert_eq!(stored_source(&app, &user).await, Some(sri(&picture)));
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_claim_of_a_person_scim_manages_is_left_to_scim_without_a_remembered_source() {
+    let app = app!();
+    let scim = scim_token(&app).await;
+    // Written while people chose their own pictures: this run remembers nothing of them.
+    let user = scim_user(&app, &scim, "heidi", None).await;
+    identity_provider_pictures(&app).await;
+    let probe = app.state.provider_pictures.probe();
+    ProviderPictures::note_sign_in(&app.state, user.id, Some(CLAIM));
+    finished(probe, 1).await;
+    assert_eq!(probe.left_to_scim.load(Ordering::SeqCst), 1);
+    assert_eq!(stored_source(&app, &user).await, None);
+    // Remembered from now on: the next claim costs a map lookup.
+    ProviderPictures::note_sign_in(&app.state, user.id, Some(CLAIM));
+    assert_eq!(probe.started.load(Ordering::SeqCst), 1);
+    app.stop().await;
+  }
+
+  /// A user a SCIM client wrote.
+  struct ScimUser {
+    id: UserId,
+  }
+
+  async fn identity_provider_pictures(app: &TestApp) {
+    publish_policy(app, 1, |p| {
+      p["directory"]["avatar_source"] = json!("identity_provider")
+    })
+    .await;
+  }
+
+  async fn scim_user(app: &TestApp, scim: &str, name: &str, maybe_photo: Option<&str>) -> ScimUser {
+    let (status, body) = scim_send(
+      app,
+      scim,
+      reqwest::Method::POST,
+      "/Users",
+      &user_resource(name, maybe_photo),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    ScimUser {
+      id: UserId::from_str(body["id"].as_str().unwrap()).unwrap(),
+    }
+  }
+
+  async fn put_user(app: &TestApp, scim: &str, user: &ScimUser, name: &str, maybe_photo: Option<&str>) {
+    let (status, body) = scim_send(
+      app,
+      scim,
+      reqwest::Method::PUT,
+      &format!("/Users/{}", user.id),
+      &user_resource(name, maybe_photo),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+  }
+
+  fn user_resource(name: &str, maybe_photo: Option<&str>) -> Value {
+    let mut resource = json!({
+      "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+      "userName": name,
+      "active": true,
+    });
+    if let Some(photo) = maybe_photo {
+      resource["photos"] = json!([{"value": photo, "type": "photo", "primary": true}]);
+    }
+    resource
+  }
+
+  fn photo(width: u32, height: u32) -> String {
+    format!(
+      "data:image/jpeg;base64,{}",
+      STANDARD.encode(picture(width, height, ImageFormat::Jpeg))
+    )
+  }
+
+  /// What the server keeps to recognize an inline photo.
+  fn sri(data_uri: &str) -> String {
+    teamcraft_crypto::account::subresource_integrity(data_uri.as_bytes())
+  }
+
+  async fn stored_source(app: &TestApp, user: &ScimUser) -> Option<String> {
+    app.state.database.provider_picture_source(user.id).await.unwrap()
+  }
+
+  async fn paused(probe: &ImportProbe) {
+    tokio::time::timeout(Duration::from_secs(30), probe.paused.acquire())
+      .await
+      .expect("an import pauses before storing")
+      .unwrap()
+      .forget();
+  }
+
+  async fn finished(probe: &ImportProbe, count: usize) {
+    tokio::time::timeout(
+      Duration::from_secs(60),
+      probe.finished.acquire_many(u32::try_from(count).unwrap()),
+    )
+    .await
+    .expect("the imports finish")
+    .unwrap()
+    .forget();
   }
 }

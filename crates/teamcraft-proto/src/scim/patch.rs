@@ -15,6 +15,9 @@ use super::filter::{AttrPath, CompValue, CompareOp, Filter, PatchPath};
 use super::resource::{ScimInputError, member_values};
 use super::{ENTERPRISE_USER_SCHEMA, MAX_MEMBERS_PER_REQUEST, MAX_PATCH_OPERATIONS, is_core_schema};
 
+/// The user's pictures (keys lower-cased); TeamCraft keeps one.
+const PHOTOS: &str = "photos";
+
 /// A PATCH body after [`super::normalize_keys`].
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct PatchRequest {
@@ -174,6 +177,16 @@ fn apply_plain(
     Op::Replace => {
       let value = maybe_value.ok_or(ScimInputError::InvalidValue("value"))?;
       target.insert(key.to_owned(), value.clone());
+    },
+    // TeamCraft keeps one photo, which a PATCH starts from as the primary one: an added photo
+    // without `primary` would lose to it, so adding photos replaces it (issue #2125).
+    Op::Add if attr.maybe_sub.is_none() && key == PHOTOS => {
+      let value = maybe_value.ok_or(ScimInputError::InvalidValue("value"))?;
+      let photos = match value {
+        Value::Array(_) => value.clone(),
+        single => Value::Array(vec![single.clone()]),
+      };
+      target.insert(key.to_owned(), photos);
     },
     Op::Add => {
       let value = maybe_value.ok_or(ScimInputError::InvalidValue("value"))?;
@@ -422,6 +435,33 @@ mod tests {
 
   mod users {
     use super::*;
+
+    #[test]
+    fn an_added_photo_without_primary_replaces_the_kept_one() {
+      let mut kept =
+        UserAttributes::from_resource(&normalize_keys(serde_json::from_str(FULL_USER).unwrap()).unwrap())
+          .unwrap();
+      kept.maybe_photo = Some("https://pictures.example.com/old.png".into());
+      for operation in [
+        json!({"op": "add", "path": "photos", "value": [{"value": "https://pictures.example.com/new.png", "type": "photo"}]}),
+        json!({"op": "add", "path": "photos", "value": {"value": "https://pictures.example.com/new.png"}}),
+        json!({"op": "add", "value": {"photos": [{"value": "https://pictures.example.com/new.png"}]}}),
+      ] {
+        let mut resource = kept.to_patchable();
+        let request: PatchRequest =
+          serde_json::from_value(normalize_keys(json!({"schemas": [], "Operations": [operation]})).unwrap())
+            .unwrap();
+        apply_user_patch(&mut resource, &request.operations).unwrap();
+        assert_eq!(
+          UserAttributes::from_resource(&resource)
+            .unwrap()
+            .maybe_photo
+            .as_deref(),
+          Some("https://pictures.example.com/new.png"),
+          "{operation}"
+        );
+      }
+    }
 
     #[test]
     fn entra_id_disables_with_active_as_text() {
