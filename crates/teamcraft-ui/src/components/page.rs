@@ -5,7 +5,7 @@
 use leptos::prelude::*;
 
 use crate::clock::{format_date, local_day, now_ms};
-use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::avatar::{AvatarSize, MaybeAvatar};
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::I18n;
 use crate::model::{Conversation, ConversationKind, TimestampMs};
@@ -47,7 +47,7 @@ pub fn ConversationPortrait(
       let person = Memo::new(move |_| state.read(|backend| backend.user(other)));
       view! {
         <span class="page-portrait">
-          {move || person.get().map(|user| view! { <Avatar user=user size=size show_presence=true /> })}
+          <MaybeAvatar user=person size=size show_presence=true />
         </span>
       }
       .into_any()

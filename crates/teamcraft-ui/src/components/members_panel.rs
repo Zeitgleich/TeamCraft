@@ -93,7 +93,7 @@ pub fn MembersPanel(conversation: ConversationId) -> impl IntoView {
                   aria-label=move || user.with(|user| i18n.t_with("profile-open", &[("name", &user.display_name)]))
                   on:click=move |_| state.overlay.set(Overlay::UserProfile(id))
                 >
-                  {move || view! { <Avatar user=user.get() size=AvatarSize::Medium show_presence=true /> }}
+                  <Avatar user=user size=AvatarSize::Medium show_presence=true />
                   <span class="member-name" translate="no">
                     {move || user.with(|user| user.display_name.clone())}
                   </span>

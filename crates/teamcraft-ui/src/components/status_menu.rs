@@ -110,13 +110,13 @@ pub fn StatusMenu() -> impl IntoView {
       on_keydown=Callback::new(on_keydown)
     >
       <div class="menu-user">
-        {move || view! { <Avatar user=me.get() size=AvatarSize::Large /> }}
+        <Avatar user=me size=AvatarSize::Large />
         <div>
           <div class="menu-user-name" translate="no">
             {move || me.get().display_name}
           </div>
           <div class="menu-user-sub menu-user-status">
-            {move || view! { <PresenceDot presence=me.get().presence /> }}
+            <PresenceDot presence=Signal::derive(move || me.with(|me| me.presence)) />
             <span>
               {move || i18n.t(&format!("presence-{}", me.get().presence.slug()))}
               {move || status_end_label(state, i18n).map(|until| format!(" · {until}"))}

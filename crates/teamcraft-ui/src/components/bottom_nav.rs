@@ -118,7 +118,7 @@ pub fn BottomNav() -> impl IntoView {
           });
         })
       >
-        {move || view! { <Avatar user=me.get() size=AvatarSize::Small show_presence=true /> }}
+        <Avatar user=me size=AvatarSize::Small show_presence=true />
       </NavTab>
     </nav>
   }
