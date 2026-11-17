@@ -102,8 +102,13 @@ final class HomeWidgetUpdater {
     }
   }
 
+  /// The completion form: the async `currentConfigurations()` needs iOS 18.
   private func isPlaced() async -> Bool {
-    let configurations = (try? await WidgetCenter.shared.currentConfigurations()) ?? []
+    let configurations = await withCheckedContinuation { (continuation: CheckedContinuation<[WidgetInfo], Never>) in
+      WidgetCenter.shared.getCurrentConfigurations { result in
+        continuation.resume(returning: (try? result.get()) ?? [])
+      }
+    }
     return configurations.contains { $0.kind == HomeWidget.kind }
   }
 }
