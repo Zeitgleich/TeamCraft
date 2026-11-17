@@ -1395,7 +1395,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     shares.stopCopies()
     withContext(Dispatchers.IO) { shares.inbox.wipe() }
     shares.forgetHandedOver()
-    PendingShare.current.value = null
+    PendingShare.clear()
     shareState.value = null
   }
 
@@ -1924,7 +1924,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       shareOfOtherAccount.value = true
       // The folder of one on its way into a composer went too.
       shares.forgetHandedOver()
-      PendingShare.current.value = null
+      PendingShare.clear()
       refreshShare()
     }
     // Also started on every foreground, which keeps trying and tells the user (issue #1142).
