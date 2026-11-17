@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -151,6 +152,7 @@ fun PollSheet(viewModel: MainViewModel, conversationId: String, onDismiss: () ->
         .fillMaxWidth()
         .verticalScroll(rememberScrollState())
         .imePadding()
+        .navigationBarsPadding()
         .padding(horizontal = 24.dp)
         .padding(bottom = 24.dp),
       verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -299,6 +301,7 @@ fun PollRow(onOpen: () -> Unit) {
   Row(
     Modifier
       .fillMaxWidth()
+      .padding(bottom = 16.dp)
       .clickable(onClick = onOpen)
       .padding(horizontal = 24.dp, vertical = 12.dp),
     verticalAlignment = Alignment.CenterVertically,
