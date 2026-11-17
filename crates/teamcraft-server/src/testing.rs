@@ -2,8 +2,10 @@
 //! throwaway Postgres database and tokens signed with the throwaway test key.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::print_stderr)]
 
-use std::sync::Arc;
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
 use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use jsonwebtoken::jwk::JwkSet;
@@ -933,7 +935,16 @@ fn test_settings_key() -> teamcraft_crypto::server_secret::SettingsSealingKey {
   )
 }
 
+/// A worker ID no other test process is likely to use at the same time. nextest runs every test in
+/// its own process, all sharing one S3 bucket whose object keys are derived from the IDs: with a
+/// counter starting at 1 in each process, two processes created IDs (and so object keys) that were
+/// equal when they ran in the same millisecond, and overwrote or aborted each other's uploads.
 fn next_worker_id() -> u16 {
-  static NEXT: AtomicU16 = AtomicU16::new(1);
-  NEXT.fetch_add(1, Ordering::Relaxed) % 1024
+  static NEXT: AtomicU16 = AtomicU16::new(0);
+  // `RandomState` is seeded randomly per process.
+  static BASE: LazyLock<u16> = LazyLock::new(|| {
+    let hash = RandomState::new().hash_one(std::process::id());
+    (hash % 1024) as u16
+  });
+  BASE.wrapping_add(NEXT.fetch_add(1, Ordering::Relaxed)) % 1024
 }
