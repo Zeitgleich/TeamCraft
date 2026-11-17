@@ -142,7 +142,7 @@ struct MessageRow: View {
         }
         MessageBubble(
           entry: entry, maybeExtras: maybeExtras, isMine: isMine, look: look, showsName: false,
-          displayNames: displayNames)
+          displayNames: displayNames, canVote: canReact)
         BelowBubble(
           message: message, maybeExtras: maybeExtras, showsThreadLink: showsThreadLink, onOpenThread: onOpenThread,
           canReact: canReact, quickReactions: quickReactions, maybeOnReact: maybeOnReact)
@@ -175,7 +175,7 @@ struct MessageRow: View {
         }
         MessageBubble(
           entry: entry, maybeExtras: maybeExtras, isMine: isMine, look: look,
-          showsName: showsSender && !entry.isContinuation, displayNames: displayNames)
+          showsName: showsSender && !entry.isContinuation, displayNames: displayNames, canVote: canReact)
         if !isMine { Spacer(minLength: look.gutter(listWidth: listWidth)) }
       }
       BelowBubble(
@@ -197,6 +197,8 @@ struct MessageBubble: View {
   let look: BubbleLook
   let showsName: Bool
   let displayNames: [String: String]
+  /// Votes in a poll are taken here (#205): the same right as reacting.
+  var canVote = true
 
   var body: some View {
     BubbleStack {
@@ -239,6 +241,10 @@ struct MessageBubble: View {
         Text("message_deleted")
           .font(.app(.body).italic())
           .foregroundStyle(.secondary)
+          .padding(.horizontal, textInset)
+          .padding(.top, 3)
+      } else if let poll = message.maybePoll {
+        PollCardView(message: message, poll: poll, canVote: canVote, displayNames: displayNames)
           .padding(.horizontal, textInset)
           .padding(.top, 3)
       } else if hasText {

@@ -20,6 +20,10 @@ pub const DEFAULT_MAX_POLL_OPTIONS: usize = 12;
 pub const DEFAULT_MAX_POLL_QUESTION_CHARS: usize = 300;
 /// Default of [`PollLimits::max_option_chars`].
 pub const DEFAULT_MAX_POLL_OPTION_CHARS: usize = 100;
+/// Default of [`PollLimits::max_open_days`].
+pub const DEFAULT_MAX_POLL_OPEN_DAYS: u32 = 365;
+/// Milliseconds of a day, for [`PollLimits::max_open_days`].
+const DAY_MS: i64 = 24 * 60 * 60 * 1_000;
 
 /// A poll as its creator sent it. It never changes: an edit of the message replaces only the text
 /// older versions show, and options are named by their position.
@@ -29,6 +33,14 @@ pub struct PollSpec {
   pub options: Vec<String>,
   pub choice: PollChoice,
   pub voters: PollVoters,
+  /// When the poll closes by itself, in Unix milliseconds as the creator picked it. The server's
+  /// time decides: a vote counts when the server took it at or before this time, whatever any
+  /// device's clock says (e2ee.md §4.12).
+  #[serde(rename = "closes_at", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_closes_at_ms: Option<i64>,
+  /// When people see the counts.
+  #[serde(default, skip_serializing_if = "PollResults::is_always")]
+  pub results: PollResults,
 }
 
 wire_enum! {
@@ -52,6 +64,21 @@ wire_enum! {
   }
 }
 
+wire_enum! {
+  /// When the poll shows its counts. Like [`PollVoters::Hidden`] it is a promise of the clients'
+  /// display: every member's device receives each vote (e2ee.md §4.12).
+  #[derive(Default)]
+  pub enum PollResults {
+    /// From the start.
+    #[default]
+    Always => "always",
+    /// To each person once they voted, and to everybody once the poll is closed.
+    AfterVote => "after_vote",
+    /// Once the poll is closed.
+    AfterClose => "after_close",
+  }
+}
+
 /// How large a poll a sender may make. Receivers only apply the wider
 /// [`MAX_RECEIVED_POLL_OPTIONS`] and [`MAX_RECEIVED_POLL_TEXT_CHARS`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +86,8 @@ pub struct PollLimits {
   pub max_options: usize,
   pub max_question_chars: usize,
   pub max_option_chars: usize,
+  /// How far ahead the closing time may be.
+  pub max_open_days: u32,
 }
 
 /// Why a poll can't be sent as it is. `index` counts options from 0.
@@ -78,6 +107,10 @@ pub enum PollError {
   OptionTooLong { index: usize, max: usize },
   #[error("option {index} repeats an earlier one")]
   DuplicateOption { index: usize },
+  #[error("the closing time has passed")]
+  ClosingPassed,
+  #[error("the closing time is more than {max_days} days ahead")]
+  ClosingTooFar { max_days: u32 },
 }
 
 impl Default for PollLimits {
@@ -86,6 +119,7 @@ impl Default for PollLimits {
       max_options: DEFAULT_MAX_POLL_OPTIONS,
       max_question_chars: DEFAULT_MAX_POLL_QUESTION_CHARS,
       max_option_chars: DEFAULT_MAX_POLL_OPTION_CHARS,
+      max_open_days: DEFAULT_MAX_POLL_OPEN_DAYS,
     }
   }
 }
@@ -103,10 +137,23 @@ impl PollSpec {
         .collect(),
       choice,
       voters,
+      maybe_closes_at_ms: None,
+      results: PollResults::Always,
     }
   }
 
-  /// Whether this may be sent under `limits`; the first problem found otherwise.
+  /// Whether this may be sent under `limits` at `now_ms` (the sender's best idea of the time):
+  /// [`Self::check`], and a closing time ahead but not too far. The first problem found otherwise.
+  pub fn check_at(&self, limits: &PollLimits, now_ms: i64) -> Result<(), PollError> {
+    self.check(limits)?;
+    match self.maybe_closes_at_ms {
+      Some(closes_at) => closing_problem(closes_at, limits, now_ms).map_or(Ok(()), Err),
+      None => Ok(()),
+    }
+  }
+
+  /// Whether the question and options may be sent under `limits`; the first problem found
+  /// otherwise. The closing time is [`Self::check_at`]'s.
   pub fn check(&self, limits: &PollLimits) -> Result<(), PollError> {
     let question = self.question.trim();
     if question.is_empty() {
@@ -158,6 +205,20 @@ impl PollSpec {
   }
 }
 
+/// What is wrong with closing at `closes_at` (Unix milliseconds) when it is `now_ms`, if anything.
+pub fn closing_problem(closes_at: i64, limits: &PollLimits, now_ms: i64) -> Option<PollError> {
+  let max_ahead_ms = i64::from(limits.max_open_days).saturating_mul(DAY_MS);
+  if closes_at <= now_ms {
+    Some(PollError::ClosingPassed)
+  } else if closes_at > now_ms.saturating_add(max_ahead_ms) {
+    Some(PollError::ClosingTooFar {
+      max_days: limits.max_open_days,
+    })
+  } else {
+    None
+  }
+}
+
 impl PollChoice {
   /// Whether `choices` (option positions) is a vote this poll takes: distinct, each an option of
   /// the poll, one at most for a single choice. None withdraws a vote. A mode of a newer version
@@ -174,6 +235,23 @@ impl PollChoice {
       Self::Unknown(_) => false,
     };
     fits && is_distinct && choices.iter().all(is_known_option)
+  }
+}
+
+impl PollResults {
+  /// Whether counts show from the start: what a poll without the field means.
+  pub fn is_always(&self) -> bool {
+    matches!(self, Self::Always)
+  }
+
+  /// Whether the counts show to somebody who `has_voted`, while the poll `is_closed` or not. A
+  /// mode of a newer version shows them only once the poll is closed: it may promise more.
+  pub fn are_shown(&self, has_voted: bool, is_closed: bool) -> bool {
+    match self {
+      Self::Always => true,
+      Self::AfterVote => has_voted || is_closed,
+      Self::AfterClose | Self::Unknown(_) => is_closed,
+    }
   }
 }
 
@@ -214,6 +292,31 @@ mod tests {
     }
 
     #[test]
+    fn closing_time_and_results_keep_their_wire_names() {
+      let poll = PollSpec {
+        maybe_closes_at_ms: Some(1_800_000_000_000),
+        results: PollResults::AfterVote,
+        ..spec(&["Yes", "No"])
+      };
+      let json = serde_json::to_string(&poll).unwrap();
+      assert!(
+        json.ends_with(r#""voters":"shown","closes_at":1800000000000,"results":"after_vote"}"#),
+        "{json}"
+      );
+      assert_eq!(serde_json::from_str::<PollSpec>(&json).unwrap(), poll);
+      let json = serde_json::to_string(&PollResults::AfterClose).unwrap();
+      assert_eq!(json, r#""after_close""#);
+    }
+
+    #[test]
+    fn a_poll_without_the_newer_fields_never_closes_and_always_shows_counts() {
+      let json = r#"{"question":"Q","options":["A","B"],"choice":"single","voters":"shown"}"#;
+      let poll: PollSpec = serde_json::from_str(json).unwrap();
+      assert_eq!(poll.maybe_closes_at_ms, None);
+      assert_eq!(poll.results, PollResults::Always);
+    }
+
+    #[test]
     fn modes_of_a_newer_version_are_kept_and_promise_nothing() {
       let json = r#"{"question":"Q","options":["A","B"],"choice":"ranked","voters":"blinded","since":1}"#;
       let poll: PollSpec = serde_json::from_str(json).unwrap();
@@ -221,6 +324,62 @@ mod tests {
       assert_eq!(poll.voters, PollVoters::Unknown("blinded".into()));
       assert!(!poll.voters.are_shown());
       assert!(!poll.choice.allows(&[0], 2));
+      let json =
+        r#"{"question":"Q","options":["A","B"],"choice":"single","voters":"shown","results":"weekly"}"#;
+      let poll: PollSpec = serde_json::from_str(json).unwrap();
+      assert_eq!(poll.results, PollResults::Unknown("weekly".into()));
+      assert!(!poll.results.are_shown(true, false));
+      assert!(poll.results.are_shown(false, true));
+    }
+  }
+
+  mod closing {
+    use super::*;
+
+    const NOW_MS: i64 = 1_800_000_000_000;
+
+    #[test]
+    fn a_closing_time_must_be_ahead_and_not_too_far() {
+      let limits = PollLimits {
+        max_open_days: 2,
+        ..PollLimits::default()
+      };
+      let mut poll = spec(&["A", "B"]);
+      assert_eq!(poll.check_at(&limits, NOW_MS), Ok(()));
+      poll.maybe_closes_at_ms = Some(NOW_MS);
+      assert_eq!(poll.check_at(&limits, NOW_MS), Err(PollError::ClosingPassed));
+      poll.maybe_closes_at_ms = Some(NOW_MS + 2 * DAY_MS);
+      assert_eq!(poll.check_at(&limits, NOW_MS), Ok(()));
+      poll.maybe_closes_at_ms = Some(NOW_MS + 2 * DAY_MS + 1);
+      assert_eq!(
+        poll.check_at(&limits, NOW_MS),
+        Err(PollError::ClosingTooFar { max_days: 2 })
+      );
+    }
+
+    #[test]
+    fn the_question_is_checked_before_the_closing_time() {
+      let mut poll = spec(&["A", "B"]);
+      poll.question = String::new();
+      poll.maybe_closes_at_ms = Some(NOW_MS - 1);
+      assert_eq!(
+        poll.check_at(&PollLimits::default(), NOW_MS),
+        Err(PollError::EmptyQuestion)
+      );
+    }
+  }
+
+  mod results {
+    use super::*;
+
+    #[test]
+    fn each_mode_shows_counts_when_it_promised() {
+      assert!(PollResults::Always.are_shown(false, false));
+      assert!(!PollResults::AfterVote.are_shown(false, false));
+      assert!(PollResults::AfterVote.are_shown(true, false));
+      assert!(PollResults::AfterVote.are_shown(false, true));
+      assert!(!PollResults::AfterClose.are_shown(true, false));
+      assert!(PollResults::AfterClose.are_shown(false, true));
     }
   }
 
@@ -251,6 +410,7 @@ mod tests {
         max_options: 3,
         max_question_chars: 5,
         max_option_chars: 4,
+        ..PollLimits::default()
       };
       let mut poll = spec(&["A", "B"]);
       poll.question = " ".into();
@@ -328,6 +488,8 @@ mod tests {
       options: options.iter().map(|option| (*option).to_owned()).collect(),
       choice: PollChoice::Single,
       voters: PollVoters::Shown,
+      maybe_closes_at_ms: None,
+      results: PollResults::Always,
     }
   }
 }

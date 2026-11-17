@@ -160,7 +160,9 @@
 }
 
 @media (hover: hover) and (pointer: fine) {
-  :root[data-platform="windows"] .window-btn:hover {
+  :root[data-platform="windows"] .window-btn:hover,
+  :root[data-platform="windows"] .window-btn.snap-hover {
+    color: var(--chrome-strong);
     background-color: color-mix(in srgb, currentColor 9%, transparent);
   }
 }

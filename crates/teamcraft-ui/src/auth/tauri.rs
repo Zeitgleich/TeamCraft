@@ -764,6 +764,28 @@ pub async fn window_action(action: WindowAction) {
   }
 }
 
+/// Desktop only: opens the system's window menu (restore, move, size, close) where the pointer
+/// is; the answer to a right-click on the title bar.
+pub async fn show_window_menu() {
+  if let Err(error) = call::<()>("show_window_menu", &serde_json::json!({})).await {
+    tracing::debug!(%error, "window menu failed");
+  }
+}
+
+/// Windows desktop only: where the maximize button is, in physical pixels of the window's client
+/// area (left, top, right, bottom), `None` when there is none. Windows 11 opens its snap layouts
+/// over that rectangle.
+pub async fn set_maximize_button(maybe_rect: Option<[i32; 4]>) {
+  if let Err(error) = call::<()>(
+    "set_maximize_button",
+    &serde_json::json!({ "maybe_rect": maybe_rect }),
+  )
+  .await
+  {
+    tracing::debug!(%error, "could not place the maximize button");
+  }
+}
+
 /// `None` outside the desktop app.
 pub async fn shell_prefs() -> Option<ShellPrefs> {
   if !is_available() {

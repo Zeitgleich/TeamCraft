@@ -26,6 +26,7 @@ use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
 use crate::state::AppState;
 use crate::storage::BlobStore;
+use crate::time_zone;
 use teamcraft_proto::Weekday;
 
 const MAX_PHONE_CHARS: usize = 40;
@@ -331,7 +332,7 @@ fn clean_time_zone(maybe_zone: Option<String>) -> Result<Option<String>, ApiErro
   if zone.is_empty() {
     return Ok(None);
   }
-  if zone.len() <= MAX_TIME_ZONE_CHARS && zone.parse::<chrono_tz::Tz>().is_ok() {
+  if zone.len() <= MAX_TIME_ZONE_CHARS && time_zone::is_known(zone) {
     Ok(Some(zone.to_owned()))
   } else {
     Err(ApiError::InvalidRequest("invalid time_zone".into()))
@@ -441,8 +442,16 @@ mod tests {
         "America/Argentina/Buenos_Aires",
         "Etc/GMT+5",
         "Asia/Kolkata",
+        // Links of the IANA database stay valid names.
+        "US/Eastern",
+        "Europe/Kiev",
+        "GMT",
       ] {
         assert!(clean_time_zone(Some(good.into())).unwrap().is_some(), "{good}");
+        assert_eq!(
+          clean_time_zone(Some(format!(" {good} "))).unwrap().as_deref(),
+          Some(good)
+        );
       }
       for bad in [
         "Europe//Berlin",
@@ -454,6 +463,10 @@ mod tests {
         "Mars/Base",
         "Europe/Berlinn",
         "Europe/Berlin/Mitte",
+        // Names are stored as given: only the database's own spelling is one.
+        "europe/berlin",
+        "EUROPE/BERLIN",
+        "utc",
       ] {
         assert!(clean_time_zone(Some(bad.into())).is_err(), "{bad}");
       }

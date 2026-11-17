@@ -192,6 +192,8 @@ import de.zeitgleich.teamcraft.ui.mayBeAnimated
 import de.zeitgleich.teamcraft.ui.newerMessages
 import de.zeitgleich.teamcraft.ui.pinnedDay
 import de.zeitgleich.teamcraft.ui.pullRefresh
+import de.zeitgleich.teamcraft.ui.PollCard
+import de.zeitgleich.teamcraft.ui.PollColors
 import de.zeitgleich.teamcraft.ui.reactionsInView
 import de.zeitgleich.teamcraft.ui.rememberAnimation
 import de.zeitgleich.teamcraft.ui.rememberMotionReduced
@@ -1232,6 +1234,7 @@ private fun MessageRow(
           look = look,
           isMine = isMine,
           showsName = showsSender && !entry.isContinuation,
+          canVote = canReact,
           onOpenFile = onOpenFile,
           onOpenPicture = onOpenPicture,
           onLongPressImage = onLongPressImage,
@@ -1296,6 +1299,7 @@ private fun ListMessageRow(
           look = look,
           isMine = isMine,
           showsName = false,
+          canVote = canReact,
           onOpenFile = onOpenFile,
           onOpenPicture = onOpenPicture,
           onLongPressImage = onLongPressImage,
@@ -1341,6 +1345,8 @@ private fun Bubble(
   look: FeedLook,
   isMine: Boolean,
   showsName: Boolean,
+  /** Votes in a poll are taken here (#205): the same right as reacting. */
+  canVote: Boolean,
   onOpenFile: (FileInfo) -> Unit,
   onOpenPicture: (PictureTarget) -> Unit,
   onLongPressImage: (FileInfo) -> Unit,
@@ -1370,7 +1376,8 @@ private fun Bubble(
   }
   // Short text: the time sits on the text's line instead of a line of its own (the list has it
   // next to the name).
-  val isTextOnly = !look.isList && hasText && others.isEmpty() && maybeExtras?.maybeLinkPreview == null && !hasTransfers && message.maybePlaceholder == null
+  val isTextOnly = !look.isList && hasText && others.isEmpty() && maybeExtras?.maybeLinkPreview == null && !hasTransfers && message.maybePlaceholder == null &&
+    message.maybePoll == null
   Surface(color = colors.container, contentColor = colors.content, shape = shape) {
     val mediaPadding = if (look.isList) 0.dp else BUBBLE_MEDIA_PADDING
     Column(Modifier.padding(mediaPadding)) {
@@ -1427,6 +1434,14 @@ private fun Bubble(
             style = MaterialTheme.typography.bodyLarge,
             fontStyle = FontStyle.Italic,
             color = colors.muted,
+          )
+          message.maybePoll != null -> PollCard(
+            viewModel = viewModel,
+            message = message,
+            poll = message.maybePoll,
+            canVote = canVote,
+            colors = PollColors(colors.content, colors.muted, colors.accent),
+            nameOf = { snapshot?.name(it).orEmpty() },
           )
           isTextOnly && images.isEmpty() && videos.isEmpty() -> TextWithTime(
             body = { MessageBody(message.body, colors.content, colors.markup, look.names.forMessage(message), onOpenPermalink) },

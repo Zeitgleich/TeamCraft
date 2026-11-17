@@ -16,7 +16,8 @@ pub mod resync;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use chrono::NaiveDate;
+use jiff::Span;
+use jiff::civil::{Date, Weekday};
 use teamcraft_proto::HolidaySettings;
 
 pub use bundled::{BundledHolidays, HolidayRegion};
@@ -28,7 +29,7 @@ use crate::state::AppState;
 pub trait HolidaySource: Send + Sync {
   /// The public holidays from `from` to `to`, both included, as dates of the wall clock they are
   /// celebrated on. Never waits for the network.
-  fn holidays_between(&self, from: NaiveDate, to: NaiveDate) -> BTreeSet<NaiveDate>;
+  fn holidays_between(&self, from: Date, to: Date) -> BTreeSet<Date>;
 }
 
 /// The region's table and the feed's copy together.
@@ -38,7 +39,7 @@ struct InstanceHolidays {
 }
 
 impl HolidaySource for InstanceHolidays {
-  fn holidays_between(&self, from: NaiveDate, to: NaiveDate) -> BTreeSet<NaiveDate> {
+  fn holidays_between(&self, from: Date, to: Date) -> BTreeSet<Date> {
     let mut holidays = self
       .maybe_table
       .map(|table| table.holidays_between(from, to))
@@ -83,14 +84,35 @@ pub fn source_from(
   }))
 }
 
+/// The date, if the calendar has it (no 30 February, no year past 9999).
+pub(crate) fn civil_date(year: i32, month: u32, day: u32) -> Option<Date> {
+  Date::new(
+    i16::try_from(year).ok()?,
+    i8::try_from(month).ok()?,
+    i8::try_from(day).ok()?,
+  )
+  .ok()
+}
+
+/// `date` moved by `days` (back when negative), if the calendar goes that far.
+pub(crate) fn add_days(date: Date, days: i64) -> Option<Date> {
+  date.checked_add(Span::new().try_days(days).ok()?).ok()
+}
+
+/// The `n`th `weekday` of a month: from the start for a positive `n`, from the end for a negative
+/// one; `None` when the month has fewer.
+pub(crate) fn nth_weekday(year: i32, month: u32, weekday: Weekday, n: i8) -> Option<Date> {
+  civil_date(year, month, 1)?.nth_weekday_of_month(n, weekday).ok()
+}
+
 #[cfg(test)]
 mod tests {
   use time::OffsetDateTime;
 
   use super::*;
 
-  fn date(year: i32, month: u32, day: u32) -> NaiveDate {
-    NaiveDate::from_ymd_opt(year, month, day).unwrap()
+  fn date(year: i32, month: u32, day: u32) -> Date {
+    civil_date(year, month, day).unwrap()
   }
 
   #[test]

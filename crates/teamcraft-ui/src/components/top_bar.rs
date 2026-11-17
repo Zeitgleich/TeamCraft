@@ -9,7 +9,7 @@ use crate::components::brand_logo::BrandLogo;
 use crate::components::channel_glyph::{ChannelGlyph, channel_fallback_icon};
 use crate::components::icons::{Icon, IconName};
 use crate::components::rail_menus::FocusMenu;
-use crate::components::window_controls::{ClickOrDrag, window_drag_handler};
+use crate::components::window_controls::{ClickOrDrag, window_drag_handler, window_menu_handler};
 use crate::history::{Travel, travel};
 use crate::i18n::use_i18n;
 use crate::keys::{QUICK_SWITCHER, ShortcutKeys};
@@ -26,13 +26,14 @@ pub fn TopBar() -> impl IntoView {
   let me = Memo::new(move |_| state.me());
   let menu_open = move || matches!(state.overlay.get(), Overlay::StatusMenu);
   let on_drag = window_drag_handler();
+  let on_menu = window_menu_handler();
   let brand = Brand::use_current().0;
   let press = ClickOrDrag::new();
   // The browser has its own buttons; the desktop webview has none (#874).
   let has_history_buttons = tauri::is_available();
 
   view! {
-    <header class="top-bar" data-window-drag="" on:mousedown=on_drag>
+    <header class="top-bar" data-window-drag="" on:mousedown=on_drag on:contextmenu=on_menu>
       <a
         class="brand"
         href="/home"

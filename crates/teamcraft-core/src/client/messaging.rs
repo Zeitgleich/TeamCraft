@@ -155,7 +155,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Sends a poll (issue #205, e2ee.md §4.12): a text message carrying `spec`, whose text
-  /// `fallback` is what versions before polls show. Refused when `spec` breaks the default limits.
+  /// `fallback` is what versions before polls show. Refused when `spec` breaks the default limits
+  /// or its closing time has passed.
   pub async fn post_poll(
     &mut self,
     conversation: ConversationId,
@@ -163,7 +164,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     fallback: &str,
   ) -> Result<ClientMessageId, CoreError> {
     spec
-      .check(&teamcraft_proto::PollLimits::default())
+      .check_at(&teamcraft_proto::PollLimits::default(), self.now_ms())
       .map_err(|error| CoreError::InvalidRequest(error.to_string()))?;
     let content = MessageContent::Text {
       body: fallback.to_owned(),

@@ -4942,14 +4942,15 @@ the options, who voted, or for what.
 **Wire format.** Three encrypted messages, all signed by their sender's device like every message
 (§4.4, "Sender signatures"):
 
-| Message                         | Content                                                                                                                    | Shown as                 |
-|---------------------------------|----------------------------------------------------------------------------------------------------------------------------|--------------------------|
-| The poll                        | a text message whose `meta.poll` holds question, options, `choice` (`single`, `multiple`) and `voters` (`shown`, `hidden`) | the poll                 |
-| `poll_vote { target, choices }` | the sender's choices by option position; none withdraws the vote                                                           | hidden (like a reaction) |
-| `poll_close { target }`         | ends the poll                                                                                                              | hidden                   |
+| Message                         | Content                                                                                                                                                                                                         | Shown as                 |
+|---------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------|
+| The poll                        | a text message whose `meta.poll` holds question, options, `choice` (`single`, `multiple`), `voters` (`shown`, `hidden`), optionally `closes_at` (Unix ms) and `results` (`always`, `after_vote`, `after_close`) | the poll                 |
+| `poll_vote { target, choices }` | the sender's choices by option position; none withdraws the vote                                                                                                                                                | hidden (like a reaction) |
+| `poll_close { target }`         | ends the poll                                                                                                                                                                                                   | hidden                   |
 
-`choice` and `voters` are wire enums with a catch-all: a mode of a newer version shows the results
-of such a poll but takes no votes, and an unknown `voters` names nobody. The poll never changes:
+`choice`, `voters` and `results` are wire enums with a catch-all: a mode of a newer version shows
+the results of such a poll but takes no votes, an unknown `voters` names nobody, and an unknown
+`results` shows counts only once the poll is closed. The poll never changes:
 options are named by position, and an edit of the message replaces only the text versions before
 polls show (below).
 
@@ -4963,8 +4964,21 @@ messages show the same result whatever order they arrived in:
   (§4.4),
 - the first `poll_close` by the poll's sender closes it, and votes the server ordered after it don't
   count, also on devices that read them before the close; a close by anybody else changes nothing,
-- a vote still in this device's outbox counts as the newest until the server orders it. Votes and
-  closes go through the outbox like reactions, so a vote made offline is sent later, once.
+- with `closes_at`, a vote counts only when the server took it at or before that time: the time in
+  the vote's server ID (a Snowflake), so the server's clock decides, never a device's. Every device
+  counts the same votes whatever its own clock says. A device shows the poll closed once its own
+  clock passed the time or it holds an event of the poll the server took later; a clock running
+  behind only lets the user send a vote that then doesn't count anywhere, and the vote's own server
+  time closes the poll on that device too. The creator picks the time on their device; senders
+  refuse a time that passed or lies more than `max_open_days` (365) ahead,
+- a vote still in this device's outbox counts as the newest until the server orders it, unless the
+  poll is closed. Votes and closes go through the outbox like reactions, so a vote made offline is
+  sent later, once.
+
+**Results after voting.** `results: after_vote` shows the counts to each person once they voted,
+`after_close` once the poll is closed; both show them to everybody once it is closed. Until then
+the core hands the UI no counts and no names, only how many voted and the user's own choice. Like
+hidden voters this is a promise of the clients' display: every member's device holds every vote.
 
 Receivers also bound what they count: a poll with fewer than 2 or more than 32 options, or a
 question or option of more than 1000 characters, isn't taken as a poll (its text shows). Senders

@@ -3,7 +3,7 @@
 //! older versions show, the shares of the bars).
 
 use serde::{Deserialize, Serialize};
-pub use teamcraft_proto::{PollChoice, PollError, PollLimits, PollSpec, PollVoters};
+pub use teamcraft_proto::{PollChoice, PollError, PollLimits, PollResults, PollSpec, PollVoters};
 
 use crate::model::UserId;
 
@@ -14,8 +14,20 @@ pub struct PollView {
   pub options: Vec<PollOptionView>,
   pub choice: PollChoice,
   pub voters: PollVoters,
+  /// When people see the counts.
+  #[serde(default, skip_serializing_if = "PollResults::is_always")]
+  pub results: PollResults,
+  /// Whether the user sees the counts now ([`PollResults::are_shown`]). While not, every option's
+  /// `count` is 0 and `voters` empty, so hidden counts never reach the UI; `voter_count` and the
+  /// user's own `is_chosen` still are.
+  #[serde(default = "shown")]
+  pub are_results_shown: bool,
+  /// When the poll closes by itself (Unix milliseconds; the server's time decides).
+  #[serde(rename = "closes_at", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_closes_at_ms: Option<i64>,
   /// People whose vote counts.
   pub voter_count: u32,
+  /// Closed by its creator, or its closing time passed.
   pub is_closed: bool,
   /// The user made it, so may close it.
   pub is_mine: bool,
@@ -33,6 +45,35 @@ pub struct PollOptionView {
   /// empty otherwise, so a hidden poll's names never reach the UI.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub voters: Vec<UserId>,
+}
+
+/// What the poll dialog holds, as typed, on every platform: options in their fields (empty ones
+/// are left out of the poll) and the closing time already turned into Unix milliseconds.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PollDraft {
+  pub question: String,
+  pub options: Vec<String>,
+  pub choice: PollChoice,
+  pub voters: PollVoters,
+  pub results: PollResults,
+  #[serde(rename = "closes_at", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_closes_at_ms: Option<i64>,
+}
+
+/// A field of the poll dialog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum PollField {
+  Question,
+  /// The option field at this position, as typed (counting empty fields).
+  Option(usize),
+  Closing,
+}
+
+/// One problem of a [`PollDraft`], at its field. The `error`'s option index is the field's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PollProblem {
+  pub field: PollField,
+  pub error: PollError,
 }
 
 /// A poll the user sends.
@@ -87,11 +128,7 @@ impl PollView {
   /// An option's share of the voters, in whole percent (rounded down, so shares never add up to
   /// more than 100 with a single choice). With several choices shares may add up to more.
   pub fn share_percent(&self, option: &PollOptionView) -> u32 {
-    if self.voter_count == 0 {
-      return 0;
-    }
-    let share = u64::from(option.count) * 100 / u64::from(self.voter_count);
-    u32::try_from(share.min(100)).unwrap_or(100)
+    share_percent(option.count, self.voter_count)
   }
 
   /// The option with the most votes, if exactly one has the most (and any vote at all).
@@ -110,6 +147,135 @@ impl PollView {
     let (at, _) = leaders.next()?;
     leaders.next().is_none().then_some(at)
   }
+}
+
+impl PollDraft {
+  /// The poll to send: question and options trimmed, empty option fields left out.
+  pub fn spec(&self) -> PollSpec {
+    PollSpec {
+      maybe_closes_at_ms: self.maybe_closes_at_ms,
+      results: self.results.clone(),
+      ..PollSpec::from_input(
+        &self.question,
+        &self.options,
+        self.choice.clone(),
+        self.voters.clone(),
+      )
+    }
+  }
+
+  /// Every problem at once, at its field, in the order of the form (forms.md): the question, the
+  /// option fields top down, the closing time. `now_ms` is the sender's best idea of the time.
+  pub fn problems(&self, limits: &PollLimits, now_ms: i64) -> Vec<PollProblem> {
+    let mut problems = self.text_problems(limits);
+    if let Some(error) = self
+      .maybe_closes_at_ms
+      .and_then(|closes_at| teamcraft_proto::closing_problem(closes_at, limits, now_ms))
+    {
+      problems.push(PollProblem {
+        field: PollField::Closing,
+        error,
+      });
+    }
+    problems.sort_by_key(|problem| problem.field);
+    problems
+  }
+
+  /// The question's and options' problems. [`PollSpec::check`] names the first one; setting it
+  /// right and checking again finds the next.
+  fn text_problems(&self, limits: &PollLimits) -> Vec<PollProblem> {
+    let mut problems = Vec::new();
+    // The typed field each option of the spec came from (empty fields are left out of it).
+    let fields: Vec<usize> = self
+      .options
+      .iter()
+      .enumerate()
+      .filter(|(_, option)| !option.trim().is_empty())
+      .map(|(at, _)| at)
+      .collect();
+    let field_of = |index: usize| fields.get(index).copied().unwrap_or(index);
+    let mut checked = self.spec();
+    for _ in 0..=self.options.len() + 1 {
+      let Err(found) = checked.check(limits) else {
+        break;
+      };
+      let (field, error) = match found {
+        PollError::EmptyQuestion | PollError::QuestionTooLong { .. } => (PollField::Question, found),
+        PollError::TooFewOptions { .. } => {
+          let first_empty = self
+            .options
+            .iter()
+            .position(|option| option.trim().is_empty())
+            .unwrap_or(self.options.len().saturating_sub(1));
+          (PollField::Option(first_empty), found)
+        },
+        PollError::TooManyOptions { .. } => (PollField::Option(self.options.len().saturating_sub(1)), found),
+        PollError::EmptyOption { index } => {
+          let field = field_of(index);
+          (PollField::Option(field), PollError::EmptyOption { index: field })
+        },
+        PollError::OptionTooLong { index, max } => {
+          let field = field_of(index);
+          (
+            PollField::Option(field),
+            PollError::OptionTooLong { index: field, max },
+          )
+        },
+        PollError::DuplicateOption { index } => {
+          let field = field_of(index);
+          (
+            PollField::Option(field),
+            PollError::DuplicateOption { index: field },
+          )
+        },
+        PollError::ClosingPassed | PollError::ClosingTooFar { .. } => (PollField::Closing, found),
+      };
+      problems.push(PollProblem { field, error });
+      // The spec's own index, not the field's: settling sets right the option the check named.
+      if !settle(&mut checked, found) {
+        break;
+      }
+    }
+    problems
+  }
+}
+
+/// Sets right what `error` names in `spec`, so the next check finds the next problem. `false` when
+/// nothing further can be found.
+fn settle(spec: &mut PollSpec, error: PollError) -> bool {
+  match error {
+    PollError::EmptyQuestion | PollError::QuestionTooLong { .. } => {
+      "?".clone_into(&mut spec.question);
+      true
+    },
+    PollError::OptionTooLong { index, .. }
+    | PollError::DuplicateOption { index }
+    | PollError::EmptyOption { index } => {
+      if let Some(option) = spec.options.get_mut(index) {
+        *option = format!("\u{0}{index}");
+      }
+      true
+    },
+    PollError::TooFewOptions { .. }
+    | PollError::TooManyOptions { .. }
+    | PollError::ClosingPassed
+    | PollError::ClosingTooFar { .. } => false,
+  }
+}
+
+/// `count` people's share of `voter_count`, in whole percent, rounded down (so shares never add up
+/// to more than 100 with a single choice). 0 without voters.
+pub fn share_percent(count: u32, voter_count: u32) -> u32 {
+  if voter_count == 0 {
+    return 0;
+  }
+  let share = u64::from(count) * 100 / u64::from(voter_count);
+  u32::try_from(share.min(100)).unwrap_or(100)
+}
+
+/// Serde's default of [`PollView::are_results_shown`]: a view without the field shows counts.
+fn shown() -> bool {
+  true
 }
 
 /// The text versions before polls show for `spec`, as Markdown: `title` ("Poll") and the
@@ -206,6 +372,104 @@ mod tests {
     }
   }
 
+  mod drafts {
+    use super::*;
+
+    const NOW_MS: i64 = 1_800_000_000_000;
+
+    #[test]
+    fn a_complete_draft_has_no_problems() {
+      assert!(
+        draft("Lunch?", &["Pizza", "", "Salad"])
+          .problems(&PollLimits::default(), NOW_MS)
+          .is_empty()
+      );
+    }
+
+    #[test]
+    fn problems_land_on_the_fields_as_typed() {
+      let problems = draft(" ", &["Pizza", "", "pizza"]).problems(&PollLimits::default(), NOW_MS);
+      assert_eq!(
+        problems,
+        [
+          PollProblem {
+            field: PollField::Question,
+            error: PollError::EmptyQuestion
+          },
+          PollProblem {
+            field: PollField::Option(2),
+            error: PollError::DuplicateOption { index: 2 }
+          },
+        ]
+      );
+    }
+
+    #[test]
+    fn too_few_options_point_at_the_first_empty_field() {
+      let problems = draft("Lunch?", &["Pizza", " "]).problems(&PollLimits::default(), NOW_MS);
+      assert_eq!(problems[0].field, PollField::Option(1));
+      assert_eq!(problems[0].error, PollError::TooFewOptions { min: 2 });
+    }
+
+    #[test]
+    fn each_long_field_is_named() {
+      let limits = PollLimits {
+        max_option_chars: 3,
+        ..PollLimits::default()
+      };
+      let problems = draft("Q", &["Long", "No", "Longer"]).problems(&limits, NOW_MS);
+      let fields: Vec<PollField> = problems.iter().map(|problem| problem.field).collect();
+      assert_eq!(fields, [PollField::Option(0), PollField::Option(2)]);
+    }
+
+    #[test]
+    fn a_closing_time_in_the_past_is_named_last_with_the_others() {
+      let mut typed = draft(" ", &["A", "B"]);
+      typed.maybe_closes_at_ms = Some(NOW_MS - 1);
+      let fields: Vec<PollField> = typed
+        .problems(&PollLimits::default(), NOW_MS)
+        .iter()
+        .map(|problem| problem.field)
+        .collect();
+      assert_eq!(fields, [PollField::Question, PollField::Closing]);
+    }
+
+    #[test]
+    fn the_spec_carries_every_choice_of_the_dialog() {
+      let mut typed = draft("Q", &["A", "", "B"]);
+      typed.choice = PollChoice::Multiple;
+      typed.voters = PollVoters::Hidden;
+      typed.results = PollResults::AfterVote;
+      typed.maybe_closes_at_ms = Some(NOW_MS + 1);
+      let spec = typed.spec();
+      assert_eq!(spec.options, ["A", "B"]);
+      assert_eq!(spec.choice, PollChoice::Multiple);
+      assert_eq!(spec.voters, PollVoters::Hidden);
+      assert_eq!(spec.results, PollResults::AfterVote);
+      assert_eq!(spec.maybe_closes_at_ms, Some(NOW_MS + 1));
+    }
+
+    fn draft(question: &str, options: &[&str]) -> PollDraft {
+      PollDraft {
+        question: question.to_owned(),
+        options: options.iter().map(|option| (*option).to_owned()).collect(),
+        choice: PollChoice::Single,
+        voters: PollVoters::Shown,
+        results: PollResults::Always,
+        maybe_closes_at_ms: None,
+      }
+    }
+  }
+
+  #[test]
+  fn a_view_without_the_newer_fields_shows_counts() {
+    let json = r#"{"question":"Q","options":[],"choice":"single","voters":"shown","voter_count":0,"is_closed":false,"is_mine":false}"#;
+    let poll: PollView = serde_json::from_str(json).unwrap();
+    assert!(poll.are_results_shown);
+    assert_eq!(poll.results, PollResults::Always);
+    assert_eq!(poll.maybe_closes_at_ms, None);
+  }
+
   #[test]
   fn older_versions_read_the_poll_as_text() {
     let spec = PollSpec {
@@ -213,6 +477,8 @@ mod tests {
       options: vec!["Pizza".into(), "Salad".into()],
       choice: PollChoice::Single,
       voters: PollVoters::Shown,
+      maybe_closes_at_ms: None,
+      results: PollResults::Always,
     };
     assert_eq!(
       fallback_text(&spec, "Poll", "Update TeamCraft to vote."),
@@ -235,6 +501,9 @@ mod tests {
         .collect(),
       choice,
       voters: PollVoters::Shown,
+      results: PollResults::Always,
+      are_results_shown: true,
+      maybe_closes_at_ms: None,
       voter_count: 1,
       is_closed: false,
       is_mine: false,

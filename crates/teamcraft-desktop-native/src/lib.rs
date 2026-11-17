@@ -11,8 +11,11 @@
 //! | [`install_notification_delegate`]         | macOS    | `notification_delegate`   |
 //! | `notification_attachment`: a picture      | macOS    | `notification_attachment` |
 //! | `notification_authorization`: allowed?    | macOS    | `notification_settings`   |
+//! | `apple_action_on_double_click`: setting   | macOS    | `double_click`            |
 //! | `webkit_version`: the library in use      | Linux    | `webkit_version`          |
 //! | `watch_process_failed`: page process died | Windows  | `webview2_process`        |
+//! | `show_window_menu`: system menu           | Windows  | `window_menu`             |
+//! | `install_snap_layouts`: maximize button   | Windows  | `snap_layouts`            |
 //! | JNI: audio context for cpal (calls)       | Android  | `android_context`         |
 //! | `set_openh264_rate`: rate in place        | all      | `openh264_rate`           |
 //!
@@ -22,6 +25,8 @@
 
 #[cfg(target_os = "android")]
 mod android_context;
+#[cfg(all(feature = "shell", target_os = "macos"))]
+mod double_click;
 #[cfg(feature = "shell")]
 mod network;
 #[cfg(feature = "shell")]
@@ -34,11 +39,17 @@ mod notification_settings;
 mod openh264_rate;
 #[cfg(feature = "shell")]
 mod resume;
+#[cfg(feature = "shell")]
+mod snap_layouts;
 #[cfg(all(feature = "shell", target_os = "linux"))]
 mod webkit_version;
 #[cfg(feature = "shell")]
 mod webview2_process;
+#[cfg(feature = "shell")]
+mod window_menu;
 
+#[cfg(all(feature = "shell", target_os = "macos"))]
+pub use double_click::apple_action_on_double_click;
 #[cfg(feature = "shell")]
 pub use notification_attachment::AttachmentError;
 #[cfg(all(feature = "shell", target_os = "macos"))]
@@ -58,9 +69,15 @@ pub use android_context::Java_de_zeitgleich_teamcraft_calls_AudioContext_initial
 pub use network::{NetworkWatchError, watch_network_up};
 #[cfg(feature = "shell")]
 pub use resume::{ResumeWatchError, watch_resume};
+#[cfg(feature = "shell")]
+pub use snap_layouts::ButtonRect;
+#[cfg(all(feature = "shell", windows))]
+pub use snap_layouts::{SnapLayoutsError, install_snap_layouts, set_maximize_button};
 #[cfg(all(feature = "shell", target_os = "linux"))]
 pub use webkit_version::webkit_version;
 #[cfg(all(feature = "shell", windows))]
 pub use webview2_process::{ProcessFailedWatchError, watch_process_failed};
 #[cfg(feature = "shell")]
 pub use webview2_process::{WebviewProcessFailure, WebviewProcessKind};
+#[cfg(all(feature = "shell", windows))]
+pub use window_menu::show_window_menu;

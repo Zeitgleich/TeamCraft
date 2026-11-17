@@ -50,6 +50,7 @@ pub fn WindowControls() -> impl IntoView {
     return ().into_any();
   };
   let on_drag = window_drag_handler();
+  let on_menu = window_menu_handler();
   Effect::new(move |_| apply_root_attributes(state.0.get().as_ref()));
   let custom = move || {
     state
@@ -65,7 +66,7 @@ pub fn WindowControls() -> impl IntoView {
       let right = (!chrome.controls.right.is_empty())
         .then(|| view! { <ControlGroup buttons=chrome.controls.right.clone() side="right" style=style /> });
       view! {
-        <div class="window-drag-strip" data-window-drag="" on:mousedown=on_drag></div>
+        <div class="window-drag-strip" data-window-drag="" on:mousedown=on_drag on:contextmenu=on_menu></div>
         {left}
         {right}
       }
@@ -84,6 +85,21 @@ pub fn window_drag_handler() -> impl Fn(MouseEvent) + Copy + 'static {
       .is_some_and(|chrome| chrome.title_bar == TitleBar::Custom);
     if is_custom {
       start_window_drag(&event);
+    }
+  }
+}
+
+/// A `contextmenu` handler that opens the system's window menu on a right-click on an element
+/// marked with [`DRAG_ATTRIBUTE`], as a native title bar does. macOS has none on its title bar.
+pub fn window_menu_handler() -> impl Fn(MouseEvent) + Copy + 'static {
+  let maybe_state = use_context::<WindowChromeState>();
+  move |event| {
+    let has_menu = maybe_state
+      .and_then(|state| state.0.get_untracked())
+      .is_some_and(|chrome| chrome.title_bar == TitleBar::Custom && chrome.platform != WindowPlatform::Macos);
+    if has_menu && is_drag_target(&event) {
+      event.prevent_default();
+      leptos::task::spawn_local(tauri::show_window_menu());
     }
   }
 }
@@ -169,20 +185,23 @@ fn start_window_drag(event: &MouseEvent) {
   if event.button() != 0 {
     return;
   }
-  let is_drag_target = event
-    .target()
-    .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
-    .is_some_and(|element| element.has_attribute(DRAG_ATTRIBUTE));
-  if !is_drag_target {
+  if !is_drag_target(event) {
     return;
   }
   event.prevent_default();
   let action = if event.detail() == 2 {
-    WindowAction::ToggleMaximize
+    WindowAction::TitleBarDoubleClick
   } else {
     WindowAction::StartDragging
   };
   leptos::task::spawn_local(tauri::window_action(action));
+}
+
+fn is_drag_target(event: &MouseEvent) -> bool {
+  event
+    .target()
+    .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+    .is_some_and(|element| element.has_attribute(DRAG_ATTRIBUTE))
 }
 
 /// The group's own padding (the margin to the window edge on Linux) still moves the window.
@@ -190,6 +209,7 @@ fn start_window_drag(event: &MouseEvent) {
 fn ControlGroup(buttons: Vec<WindowButton>, side: &'static str, style: ControlStyle) -> impl IntoView {
   let i18n = use_i18n();
   let on_drag = window_drag_handler();
+  let on_menu = window_menu_handler();
   view! {
     <div
       class=format!("window-controls {side}")
@@ -197,6 +217,7 @@ fn ControlGroup(buttons: Vec<WindowButton>, side: &'static str, style: ControlSt
       aria-label=move || i18n.t("window-controls")
       data-window-drag=""
       on:mousedown=on_drag
+      on:contextmenu=on_menu
     >
       {buttons
         .into_iter()
@@ -235,8 +256,23 @@ fn ControlButton(button: WindowButton, style: ControlStyle) -> impl IntoView {
   };
   let glyph = style.glyph();
   let path = move || glyph.path(button, is_maximized());
+  let node = NodeRef::<leptos::html::Button>::new();
+  // Windows 11's snap layouts open over the maximize button, which the shell answers for (#173):
+  // it needs to know where the button is, and tells when the pointer is over it.
+  let has_snap_layouts = button == WindowButton::Maximize && style == ControlStyle::Windows;
+  if has_snap_layouts {
+    report_button_rect(node, is_maximized);
+  }
+  let is_snap_hovered = move || {
+    has_snap_layouts
+      && maybe_state
+        .and_then(|state| state.0.get())
+        .is_some_and(|chrome| chrome.is_maximize_hovered)
+  };
   view! {
     <button
+      node_ref=node
+      class:snap-hover=is_snap_hovered
       type="button"
       class=class
       aria-label=label
@@ -261,6 +297,33 @@ fn ControlButton(button: WindowButton, style: ControlStyle) -> impl IntoView {
       </svg>
     </button>
   }
+}
+
+/// Tells the shell where the maximize button is whenever it may have moved (layout, window size,
+/// zoom: all of them fire `resize`), and that it is gone when the button leaves.
+fn report_button_rect(node: NodeRef<leptos::html::Button>, is_maximized: impl Fn() -> bool + 'static) {
+  let report = move || {
+    let Some(button) = node.get_untracked() else {
+      return;
+    };
+    let rect = button.get_bounding_client_rect();
+    let scale = web_sys::window().map_or(1.0, |window| window.device_pixel_ratio());
+    // Rounded outwards by the shell's own hit test being in whole pixels.
+    let to_px = |css: f64| (css * scale).round() as i32;
+    let physical = [rect.left(), rect.top(), rect.right(), rect.bottom()].map(to_px);
+    leptos::task::spawn_local(tauri::set_maximize_button(Some(physical)));
+  };
+  // After the render that placed the button, and again when the window changed (maximized or not).
+  Effect::new(move |_| {
+    node.track();
+    let _is_tracked = is_maximized();
+    request_animation_frame(report);
+  });
+  let on_resize = window_event_listener(leptos::ev::resize, move |_| report());
+  on_cleanup(move || {
+    on_resize.remove();
+    leptos::task::spawn_local(tauri::set_maximize_button(None));
+  });
 }
 
 /// Whose window buttons the controls look like.

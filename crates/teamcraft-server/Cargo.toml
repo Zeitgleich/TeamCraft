@@ -32,8 +32,7 @@ teamcraft-net.workspace = true
 anyhow.workspace = true
 aws-lc-rs.workspace = true
 time.workspace = true
-chrono-tz.workspace = true
-chrono.workspace = true
+jiff.workspace = true
 axum.workspace = true
 figment.workspace = true
 # Watches a request's body for progress (src/outage_gate.rs); already in the tree through axum.

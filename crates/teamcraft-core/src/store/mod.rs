@@ -2213,6 +2213,8 @@ pub(crate) mod tests {
             options: vec!["Pizza".into(), "Salad".into()],
             choice: teamcraft_proto::PollChoice::Single,
             voters: teamcraft_proto::PollVoters::Hidden,
+            maybe_closes_at_ms: None,
+            results: teamcraft_proto::PollResults::Always,
           })),
           ..MessageMeta::default()
         },

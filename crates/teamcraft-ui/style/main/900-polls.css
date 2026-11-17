@@ -126,6 +126,11 @@
   white-space: nowrap;
 }
 
+/* Counts held back until the user votes or the poll closes: no empty bar row. */
+.poll-options:not(.is-counting) .poll-option {
+  grid-template-rows: auto;
+}
+
 .poll-bar {
   grid-column: 2 / 4;
   height: 4px;

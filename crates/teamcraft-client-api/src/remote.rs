@@ -2851,13 +2851,15 @@ mod tests {
           options: vec!["A".into(), "B".into()],
           choice: crate::polls::PollChoice::Single,
           voters: crate::polls::PollVoters::Hidden,
+          maybe_closes_at_ms: Some(1_800_000_000_000),
+          results: crate::polls::PollResults::AfterVote,
         },
         fallback: "Poll: Q".into(),
       },
     };
     assert_eq!(
       serde_json::to_string(&post).unwrap(),
-      r#"{"action":"post_poll","conversation":"7","poll":{"spec":{"question":"Q","options":["A","B"],"choice":"single","voters":"hidden"},"fallback":"Poll: Q"}}"#
+      r#"{"action":"post_poll","conversation":"7","poll":{"spec":{"question":"Q","options":["A","B"],"choice":"single","voters":"hidden","closes_at":1800000000000,"results":"after_vote"},"fallback":"Poll: Q"}}"#
     );
     assert!(post.is_outbox_write());
   }

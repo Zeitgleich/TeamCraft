@@ -1291,6 +1291,12 @@ final class AppModel {
     return []
   }
 
+  /// A time the screens show passed (a poll's closing, #205): they read again, as after a change,
+  /// and the core counts with the new time.
+  func noteTimePassed() {
+    changeCount += 1
+  }
+
   // MARK: Delivered notifications and badge
 
   /// The store changed (this process's core, or the extension): screens re-read, and notifications of

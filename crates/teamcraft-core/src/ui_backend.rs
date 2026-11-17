@@ -2076,6 +2076,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
           spec,
           relations.reactions_to(stored.client_message_id),
           self.me,
+          self.now_ms(),
         ))
       }),
     }
