@@ -533,6 +533,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if state.roster.version > 0 && !self.is_verified_owner(&state) {
       return Err(CoreError::NotAnOwner);
     }
+    // data-export.md §4.2: nothing is signed that the server and every app would have to refuse.
+    teamcraft_proto::check_legal_holds(&policy.compliance_archive.legal_holds)
+      .map_err(|error| CoreError::InvalidRequest(error.to_string()))?;
     if policy.maybe_role_signing.is_none() {
       policy.maybe_role_signing = state.policy.maybe_role_signing.clone();
     }

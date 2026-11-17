@@ -138,6 +138,14 @@ pub async fn run_once(state: &AppState, now: OffsetDateTime) -> Result<Retention
   let mut report = RetentionReport::default();
 
   for target in state.database.list_retention_targets().await? {
+    // data-export.md §4.2: a held conversation keeps everything until the hold is released.
+    if policy
+      .compliance_archive
+      .legal_hold(target.conversation)
+      .is_some()
+    {
+      continue;
+    }
     // The limit also holds for settings made before it was lowered.
     let effective = limited(
       effective(target.own, target.space, retention.default),

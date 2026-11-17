@@ -754,6 +754,7 @@ pub async fn delete_channel(
     return Err(ApiError::NotAChannel);
   }
   require(state, caller, Permission::DeleteChannel, &access.target())?;
+  super::legal_hold::refuse_if_held(state, id).await?;
   let audit_target = AuditTarget::new("conversation", id);
   let audit = audit::prepared(state, caller.user.id, "channel_deleted", &audit_target)?;
   let maybe_members = state

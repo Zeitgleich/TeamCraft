@@ -335,6 +335,10 @@ pub struct SecuritySnapshot {
     skip_serializing_if = "Option::is_none"
   )]
   pub maybe_call_recording_policy: Option<teamcraft_proto::CallRecordingPolicy>,
+  /// The legal holds of the verified policy (data-export.md §4.2): held conversations show a
+  /// banner. Empty before one was verified, or from an older shell.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub legal_holds: Vec<teamcraft_proto::LegalHold>,
   /// The notetaker group of the verified policy (e2ee.md §8.2); `None` before a policy was
   /// verified (or from an older shell), which shows no notetaker controls.
   #[serde(rename = "notetaker", default, skip_serializing_if = "Option::is_none")]

@@ -50,6 +50,7 @@ mod integration_channels;
 mod key_bag;
 mod key_packages;
 mod last_seen;
+mod legal_hold;
 mod local_accounts;
 mod log_hygiene;
 mod meeting_guests;

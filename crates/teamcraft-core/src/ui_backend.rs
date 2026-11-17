@@ -2958,6 +2958,14 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.verified_policy().call_recording
   }
 
+  fn legal_hold(&self, conversation: ConversationId) -> Option<teamcraft_proto::LegalHold> {
+    self
+      .verified_policy()
+      .compliance_archive
+      .legal_hold(conversation)
+      .cloned()
+  }
+
   fn set_custom_status(&self, maybe_status: Option<CustomStatus>) {
     self.command(CoreCommand::SetCustomStatus { maybe_status });
   }

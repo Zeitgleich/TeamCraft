@@ -226,6 +226,11 @@ pub trait ChatBackend {
   fn call_recording_policy(&self) -> teamcraft_proto::CallRecordingPolicy {
     teamcraft_proto::CallRecordingPolicy::default()
   }
+  /// The legal hold on `conversation` under the verified policy (data-export.md §4.2): every member
+  /// of a held conversation sees it. `None` when nothing verified holds it.
+  fn legal_hold(&self, _conversation: ConversationId) -> Option<teamcraft_proto::LegalHold> {
+    None
+  }
 
   /// Whether the user follows the thread (followed threads feed the threads inbox).
   fn is_thread_followed(&self, _conversation: ConversationId, _thread: ThreadId) -> bool {

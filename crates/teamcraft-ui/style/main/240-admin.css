@@ -357,3 +357,25 @@
   padding-block: var(--space-3);
   border-top: 1px solid var(--border);
 }
+
+/* Legal hold (admin.md §3.14): below the retention table, the held channels and the form. */
+.legal-holds {
+  margin-top: 28px;
+  max-width: 760px;
+}
+
+.legal-holds > h3 {
+  margin: 0 0 4px;
+}
+
+.legal-hold-form {
+  margin-top: 16px;
+}
+
+.legal-hold-form .field + .field {
+  margin-top: 12px;
+}
+
+.legal-hold-form .btn-primary {
+  margin-top: 16px;
+}

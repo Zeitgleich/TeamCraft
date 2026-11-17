@@ -2922,6 +2922,8 @@ pub fn action_from_wire(action: &str) -> AuditAction {
     "channel_inactivity_deleted" => AuditAction::ChannelAutoDeleted,
     "channel_inactivity_snoozed" => AuditAction::InactivitySnoozed,
     "inactivity_run_limited" => AuditAction::InactivityLimited,
+    "legal_hold_placed" => AuditAction::LegalHoldPlaced,
+    "legal_hold_released" => AuditAction::LegalHoldReleased,
     "space_archived" => AuditAction::SpaceArchived,
     "space_restored" => AuditAction::SpaceRestored,
     "space_created" => AuditAction::SpaceCreated,

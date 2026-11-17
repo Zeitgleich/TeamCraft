@@ -349,11 +349,20 @@ pub async fn delete_space(
   let audit = audit::prepared(state, caller.user.id, "space_deleted", &audit_target)?;
   let sees_all = is_instance_admin(caller);
   let maybe_signature = maybe_checked.as_ref().map(|(_, signature)| signature);
+  let (_, policy, _) = super::workspace::current_policy(state).await?;
+  let holds = &policy.compliance_archive.legal_holds;
   let maybe_deletion = state
     .database
     .delete_space_locked(id, &audit, maybe_signature, |channels| {
       if channels.iter().any(|channel| channel.maybe_importer.is_some()) {
         return Err(ApiError::ImportInProgress);
+      }
+      // data-export.md §4.2: a space with a held channel stays.
+      if channels
+        .iter()
+        .any(|channel| teamcraft_proto::legal_hold_of(holds, channel.conversation).is_some())
+      {
+        return Err(ApiError::LegalHold);
       }
       if let Some((document, _)) = &maybe_checked
         && let Some(stale) = channels.iter().find(|channel| {

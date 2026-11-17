@@ -261,6 +261,7 @@ error-role-change-not-confirmed = The role changed, but this device couldn't con
 error-channel-roles-disputed = Not approved: members' apps show different roles for this channel, and signed entries prove it. A workspace admin can check the roles here; until then you can only decline.
 error-last-member = Nobody else is in this channel, so leaving deletes it. Choose Leave in its menu to confirm.
 error-import-in-progress = An import is running into this channel. Delete it once the import is done.
+error-legal-hold = This conversation is under legal hold. It can be deleted once an owner releases the hold.
 error-space-has-hidden-channels = This space holds private channels you aren't in. Ask a workspace admin to delete it.
 error-channel-needs-admin = This channel has no admin. A workspace admin assigns one before it can be restored.
 error-not-a-channel = This only works for channels, not for direct messages.

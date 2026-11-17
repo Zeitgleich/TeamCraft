@@ -95,6 +95,10 @@ pub async fn append(
   }
 
   let version = request.expected_version + 1;
+  let maybe_previous = maybe_document.as_ref().map(|_| state.policy.get());
+  if let (Some(previous), Some(document)) = (&maybe_previous, &maybe_document) {
+    super::legal_hold::record_changes(state, caller.user.id, previous, &document.policy, version).await?;
+  }
   let maybe_self_join = maybe_document.map(|document| {
     let self_join = document.policy.admin_self_join.clone();
     state.policy.set(document.policy);
@@ -399,6 +403,8 @@ fn check_policy_payload(payload: &[u8], expected_new_version: u64) -> Result<Pol
       "scheduled_messages limits are out of range".into(),
     ));
   }
+  teamcraft_proto::check_legal_holds(&policy.compliance_archive.legal_holds)
+    .map_err(|error| ApiError::InvalidRequest(format!("compliance_archive: {error}")))?;
   // Clients read the group from the signature anyway; this keeps owners from publishing one no app
   // understands (e2ee.md §8.3).
   if !policy.call_recording.is_valid() {

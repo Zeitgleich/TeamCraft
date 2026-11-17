@@ -41,7 +41,8 @@ wire_enum! {
 }
 
 wire_enum! {
-  /// Compliance archive (e2ee.md §11). Reserved: only `off` is accepted today.
+  /// Compliance archive (e2ee.md §11). Reserved: only `off` is accepted until the vault node exists
+  /// (data-export.md §4.1); legal holds work without it.
   pub enum ComplianceArchiveMode {
     Off => "off",
   }
@@ -85,9 +86,21 @@ pub struct LinkPreviewPolicy {
   pub domains: Vec<String>,
 }
 
+/// The `compliance_archive` group (e2ee.md §11, data-export.md §4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ComplianceArchivePolicy {
   pub mode: ComplianceArchiveMode,
+  /// Conversations under legal hold (data-export.md §4.2): kept on the server whatever retention,
+  /// the inactivity policy or a channel deletion would do, and shown as held to their members.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub legal_holds: Vec<crate::LegalHold>,
+}
+
+impl ComplianceArchivePolicy {
+  /// The hold on `conversation`, if the policy places one.
+  pub fn legal_hold(&self, conversation: crate::ConversationId) -> Option<&crate::LegalHold> {
+    crate::legal_hold_of(&self.legal_holds, conversation)
+  }
 }
 
 wire_enum! {
@@ -990,6 +1003,7 @@ impl Default for WorkspacePolicy {
       },
       compliance_archive: ComplianceArchivePolicy {
         mode: ComplianceArchiveMode::Off,
+        legal_holds: Vec::new(),
       },
       maybe_role_signing: None,
       session: SessionPolicy::default(),

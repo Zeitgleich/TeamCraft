@@ -3646,6 +3646,10 @@ impl ChatBackend for RemoteChat {
       .unwrap_or_default()
   }
 
+  fn legal_hold(&self, conversation: ConversationId) -> Option<teamcraft_proto::LegalHold> {
+    teamcraft_proto::legal_hold_of(&self.mirror.borrow().snapshot.security.legal_holds, conversation).cloned()
+  }
+
   fn presence_policy(&self) -> teamcraft_proto::PresencePolicy {
     self
       .mirror

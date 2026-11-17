@@ -208,6 +208,7 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       ErrorCode::LastChannelAdmin => "error-last-channel-admin",
       ErrorCode::LastMember => "error-last-member",
       ErrorCode::ImportInProgress => "error-import-in-progress",
+      ErrorCode::LegalHold => "error-legal-hold",
       ErrorCode::SpaceHasHiddenChannels => "error-space-has-hidden-channels",
       ErrorCode::ChannelNeedsAdmin => "error-channel-needs-admin",
       ErrorCode::NotAChannel => "error-not-a-channel",

@@ -401,6 +401,12 @@ async fn delete_channel(
   channel: &PolicyArchivedChannel,
   warned_at: OffsetDateTime,
 ) -> Result<bool, ApiError> {
+  // data-export.md §4.2: a held channel stays archived; the next run looks again.
+  match super::legal_hold::refuse_if_held(state, channel.id).await {
+    Err(ApiError::LegalHold) => return Ok(false),
+    Err(error) => return Err(error),
+    Ok(()) => {},
+  }
   let id = state
     .ids
     .next_snowflake()

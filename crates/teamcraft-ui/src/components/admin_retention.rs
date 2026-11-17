@@ -2,6 +2,7 @@ use leptos::prelude::*;
 
 use crate::admin::{AdminChannel, AdminChannelFilter, AdminChannelQuery, Retention};
 use crate::components::admin_console::{ListMore, SectionHeader};
+use crate::components::admin_legal_hold::LegalHoldPanel;
 use crate::form_errors::{FieldError, FieldErrors, FormErrors};
 use crate::i18n::use_i18n;
 use crate::model::ConversationKind;
@@ -85,6 +86,7 @@ pub fn RetentionSection() -> impl IntoView {
       has_more=Signal::derive(move || state.read(|backend| backend.admin_channels_have_more()))
       on_more=Callback::new(move |()| state.write(|backend| backend.admin_load_more_channels()))
     />
+    <LegalHoldPanel />
   }
 }
 
