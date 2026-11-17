@@ -1,7 +1,10 @@
 package de.zeitgleich.teamcraft.notifications
 
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import java.security.SecureRandom
+import de.zeitgleich.teamcraft.ui.MainActivity
 
 /**
  * A random secret of this installation that the app's own notification intents carry. The main
@@ -33,3 +36,18 @@ object LaunchToken {
     return java.security.MessageDigest.isEqual(token.toByteArray(), of(context).toByteArray())
   }
 }
+
+/**
+ * Opens [conversationId] in the main activity: the one entry path of the app's notifications and its
+ * home screen widget (#2076). Each conversation's intent differs in its data URI, so their
+ * PendingIntents never collide; an open app shows it on top of what it showed.
+ */
+fun openConversationIntent(context: Context, conversationId: String): Intent =
+  Intent(context, MainActivity::class.java)
+    .putExtra(MainActivity.EXTRA_CONVERSATION_ID, conversationId)
+    .putExtra(MainActivity.EXTRA_LAUNCH_TOKEN, LaunchToken.of(context))
+    .setData(Uri.fromParts(CONVERSATION_URI_SCHEME, conversationId, null))
+    .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+
+/** The scheme of a conversation's intents (notification actions and opening it). */
+const val CONVERSATION_URI_SCHEME = "teamcraft-conversation"

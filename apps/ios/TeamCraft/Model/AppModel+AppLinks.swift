@@ -1,15 +1,38 @@
 import Foundation
+import UserNotifications
 
 /// Links the system hands to the app (docs/app-links.md). The core decides what a link means
 /// (`openAppLink`); the link itself is never logged, since it can hold a key.
 extension AppModel {
   /// A link arrived (Universal Link or `teamcraft://`). It waits until it can be acted on.
   func receiveAppLink(_ url: URL) {
+    // The home screen widget's taps (#2076) are the app's own, not links to resolve.
+    if let route = HomeWidget.route(of: url) {
+      openFromWidget(route)
+      return
+    }
     // Never swaps a question being read: what the user answers must be what they read.
     guard appLinkQuestion == nil, !isAskingAboutMeetingLink else { return }
     pendingAppLink = url.absoluteString
     isHostQuestionHandled = false
     Task { await actOnAppLink() }
+  }
+
+  /// A widget tap: a conversation opens the way its notification's tap opens it (the same checks,
+  /// also at a cold start and behind the app lock), "New message" like the app icon's quick action.
+  func openFromWidget(_ route: WidgetRoute) {
+    switch route {
+    case .conversation(let conversationId):
+      Task {
+        await handle(
+          notificationAction: UNNotificationDefaultActionIdentifier, conversationId: conversationId, tag: nil,
+          replyText: nil)
+      }
+    case .newMessage:
+      QuickActions.shared.pending = .newMessage
+    case .app:
+      break
+    }
   }
 
   /// Takes the waiting link as far as it can go now: the question at once, the place once signed in.
