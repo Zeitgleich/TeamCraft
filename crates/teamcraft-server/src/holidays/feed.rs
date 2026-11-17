@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration as StdDuration;
 
-use chrono::NaiveDate;
+use jiff::civil::Date;
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{HolidayFeedError, HolidayFeedStatus, HolidaySettings};
@@ -23,8 +23,8 @@ use tokio::sync::Notify;
 use tracing::{info, warn};
 use url::Url;
 
-use super::HolidaySource;
 use super::ics::{MAX_FEED_DATES, ParseError, parse_holidays};
+use super::{HolidaySource, civil_date};
 use crate::outbound::{PublicOnlyResolver, check_public_url, check_public_url_text};
 use crate::services::convert::unix_millis;
 use crate::state::AppState;
@@ -76,11 +76,11 @@ pub struct FeedCopy {
   /// The URL it was fetched from: a copy of another URL than the settings name is not used.
   pub url: String,
   pub fetched_at: OffsetDateTime,
-  pub dates: BTreeSet<NaiveDate>,
+  pub dates: BTreeSet<Date>,
 }
 
 impl HolidaySource for FeedCopy {
-  fn holidays_between(&self, from: NaiveDate, to: NaiveDate) -> BTreeSet<NaiveDate> {
+  fn holidays_between(&self, from: Date, to: Date) -> BTreeSet<Date> {
     if from > to {
       return BTreeSet::new();
     }
@@ -354,11 +354,11 @@ pub async fn fetch_holidays(
   url: &Url,
   limits: &FetchLimits,
   now: OffsetDateTime,
-) -> Result<BTreeSet<NaiveDate>, FeedError> {
+) -> Result<BTreeSet<Date>, FeedError> {
   let text = fetch(client, url, limits).await?;
   let year = now.year();
-  let window = NaiveDate::from_ymd_opt(year - YEARS_BACK, 1, 1).unwrap_or(NaiveDate::MIN)
-    ..=NaiveDate::from_ymd_opt(year + YEARS_AHEAD, 12, 31).unwrap_or(NaiveDate::MAX);
+  let window = civil_date(year - YEARS_BACK, 1, 1).unwrap_or(Date::MIN)
+    ..=civil_date(year + YEARS_AHEAD, 12, 31).unwrap_or(Date::MAX);
   Ok(parse_holidays(&text, &window)?)
 }
 
@@ -479,6 +479,16 @@ fn stored_value(copy: &FeedCopy) -> serde_json::Result<String> {
   })
 }
 
+/// A stored `YYYY-MM-DD` date (four-digit year, as [`stored_value`] writes it).
+fn parse_stored_date(text: &str) -> Option<Date> {
+  let (year, rest) = text.split_once('-')?;
+  let (month, day) = rest.split_once('-')?;
+  if year.len() != 4 || !(1..=2).contains(&month.len()) || !(1..=2).contains(&day.len()) {
+    return None;
+  }
+  civil_date(year.parse().ok()?, month.parse().ok()?, day.parse().ok()?)
+}
+
 /// A stored copy, if it reads and keeps the bounds.
 fn parse_stored(value: &str) -> Option<FeedCopy> {
   let stored: StoredCopy = serde_json::from_str(value).ok()?;
@@ -488,7 +498,7 @@ fn parse_stored(value: &str) -> Option<FeedCopy> {
   let dates = stored
     .dates
     .iter()
-    .map(|date| NaiveDate::parse_from_str(date, "%Y-%m-%d").ok())
+    .map(|date| parse_stored_date(date))
     .collect::<Option<BTreeSet<_>>>()?;
   let fetched_at =
     OffsetDateTime::from_unix_timestamp_nanos(i128::from(stored.fetched_at_ms) * 1_000_000).ok()?;
@@ -544,7 +554,7 @@ mod tests {
     )
   }
 
-  async fn fetched(answer: String) -> Result<BTreeSet<NaiveDate>, FeedError> {
+  async fn fetched(answer: String) -> Result<BTreeSet<Date>, FeedError> {
     let url = serve(answer, StdDuration::ZERO).await;
     let client = build_client(&limits(), true).unwrap();
     let now = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
@@ -558,7 +568,7 @@ mod tests {
       .unwrap();
     // Fetched in 2026: 2026 to 2036.
     assert_eq!(dates.len(), 11);
-    assert!(dates.contains(&NaiveDate::from_ymd_opt(2036, 10, 3).unwrap()));
+    assert!(dates.contains(&civil_date(2036, 10, 3).unwrap()));
   }
 
   #[tokio::test]
@@ -651,7 +661,7 @@ mod tests {
 
   #[test]
   fn the_copy_answers_its_range_and_only_for_its_url() {
-    let date = |day| NaiveDate::from_ymd_opt(2026, 10, day).unwrap();
+    let date = |day| civil_date(2026, 10, day).unwrap();
     let copy = FeedCopy {
       url: "https://a.example.com/x.ics".into(),
       fetched_at: OffsetDateTime::UNIX_EPOCH,
@@ -700,7 +710,7 @@ mod tests {
     let copy = FeedCopy {
       url: "https://a.example.com/x.ics".into(),
       fetched_at: OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap(),
-      dates: [NaiveDate::from_ymd_opt(2026, 10, 3).unwrap()].into(),
+      dates: [civil_date(2026, 10, 3).unwrap()].into(),
     };
     let stored = StoredCopy {
       url: copy.url.clone(),

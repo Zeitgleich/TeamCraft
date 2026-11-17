@@ -10,7 +10,9 @@
 use std::collections::BTreeSet;
 use std::ops::RangeInclusive;
 
-use chrono::{Datelike, Duration, NaiveDate, Weekday};
+use jiff::civil::{Date, Weekday};
+
+use super::{add_days, civil_date, nth_weekday};
 
 /// Most holidays one copy keeps.
 pub const MAX_FEED_DATES: usize = 5000;
@@ -36,10 +38,7 @@ pub enum ParseError {
 }
 
 /// The holidays of a feed within `window` (both ends included).
-pub fn parse_holidays(
-  text: &str,
-  window: &RangeInclusive<NaiveDate>,
-) -> Result<BTreeSet<NaiveDate>, ParseError> {
+pub fn parse_holidays(text: &str, window: &RangeInclusive<Date>) -> Result<BTreeSet<Date>, ParseError> {
   let text = text.strip_prefix('\u{feff}').unwrap_or(text);
   let starts_as_calendar = text
     .trim_start()
@@ -71,29 +70,29 @@ pub fn parse_holidays(
 }
 
 struct Parser<'a> {
-  window: &'a RangeInclusive<NaiveDate>,
+  window: &'a RangeInclusive<Date>,
   /// The components open, outermost first, upper case.
   stack: Vec<String>,
   /// The `VEVENT` being read.
   maybe_event: Option<Event>,
   /// `END:VCALENDAR` was read.
   is_closed: bool,
-  dates: BTreeSet<NaiveDate>,
+  dates: BTreeSet<Date>,
 }
 
 /// What a `VEVENT` says about its dates.
 #[derive(Default)]
 struct Event {
   maybe_start: Option<Start>,
-  maybe_end: Option<NaiveDate>,
+  maybe_end: Option<Date>,
   maybe_days: Option<i64>,
   maybe_rule: Option<String>,
-  excluded: BTreeSet<NaiveDate>,
+  excluded: BTreeSet<Date>,
   is_cancelled: bool,
 }
 
 enum Start {
-  Date(NaiveDate),
+  Date(Date),
   /// A date with a time: an appointment, not a holiday.
   Timed,
 }
@@ -102,7 +101,7 @@ enum Start {
 struct Yearly {
   interval: i32,
   maybe_count: Option<u32>,
-  maybe_until: Option<NaiveDate>,
+  maybe_until: Option<Date>,
   /// The day in each year; `None`: the start's month and day.
   maybe_day: Option<YearDay>,
 }
@@ -184,7 +183,7 @@ impl Event {
   }
 
   /// Adds the event's days within `window` to `into`.
-  fn dates(self, window: &RangeInclusive<NaiveDate>, into: &mut BTreeSet<NaiveDate>) {
+  fn dates(self, window: &RangeInclusive<Date>, into: &mut BTreeSet<Date>) {
     let Some(Start::Date(start)) = self.maybe_start else {
       return;
     };
@@ -192,7 +191,7 @@ impl Event {
       return;
     }
     let days = match (self.maybe_end, self.maybe_days) {
-      (Some(end), _) => (end - start).num_days(),
+      (Some(end), _) => start.until(end).map_or(i64::MAX, |span| i64::from(span.get_days())),
       (None, Some(days)) => days,
       (None, None) => 1,
     }
@@ -201,12 +200,12 @@ impl Event {
     if days > MAX_EVENT_DAYS {
       return;
     }
-    let starts: Vec<NaiveDate> = match self.maybe_rule.as_deref().and_then(yearly) {
+    let starts: Vec<Date> = match self.maybe_rule.as_deref().and_then(yearly) {
       Some(rule) => rule.starts(start, window),
       None => vec![start],
     };
     for first in starts.into_iter().filter(|first| !self.excluded.contains(first)) {
-      let days_of_event = (0..days).filter_map(|offset| first.checked_add_signed(Duration::days(offset)));
+      let days_of_event = (0..days).filter_map(|offset| add_days(first, offset));
       for day in days_of_event.filter(|day| window.contains(day)) {
         into.insert(day);
         if into.len() > MAX_FEED_DATES {
@@ -219,19 +218,19 @@ impl Event {
 
 impl Yearly {
   /// The starts of the series up to the end of `window`; the first is `start`.
-  fn starts(&self, start: NaiveDate, window: &RangeInclusive<NaiveDate>) -> Vec<NaiveDate> {
+  fn starts(&self, start: Date, window: &RangeInclusive<Date>) -> Vec<Date> {
     let last = self
       .maybe_until
       .map_or(*window.end(), |until| until.min(*window.end()));
     let mut starts = vec![start];
-    let mut year = start.year();
+    let mut year = i32::from(start.year());
     let mut count = 1;
     loop {
       year = match year.checked_add(self.interval) {
         Some(next) => next,
         None => break,
       };
-      if year > last.year() || self.maybe_count.is_some_and(|max| count >= max) {
+      if year > i32::from(last.year()) || self.maybe_count.is_some_and(|max| count >= max) {
         break;
       }
       // A day the year doesn't have (29 February) is no occurrence and doesn't count.
@@ -249,11 +248,15 @@ impl Yearly {
     starts
   }
 
-  fn day_in(&self, year: i32, start: NaiveDate) -> Option<NaiveDate> {
+  fn day_in(&self, year: i32, start: Date) -> Option<Date> {
     match self.maybe_day {
-      None => NaiveDate::from_ymd_opt(year, start.month(), start.day()),
-      Some(YearDay::Fixed { month, day }) => NaiveDate::from_ymd_opt(year, month, day),
-      Some(YearDay::Weekday { month, weekday, n }) => nth_weekday_of_month(year, month, weekday, n),
+      None => civil_date(
+        year,
+        start.month().unsigned_abs().into(),
+        start.day().unsigned_abs().into(),
+      ),
+      Some(YearDay::Fixed { month, day }) => civil_date(year, month, day),
+      Some(YearDay::Weekday { month, weekday, n }) => nth_weekday(year, month, weekday, n),
     }
   }
 }
@@ -317,32 +320,16 @@ fn ordinal_weekday(value: &str) -> Option<(i8, Weekday)> {
     return None;
   }
   let weekday = match day {
-    "MO" => Weekday::Mon,
-    "TU" => Weekday::Tue,
-    "WE" => Weekday::Wed,
-    "TH" => Weekday::Thu,
-    "FR" => Weekday::Fri,
-    "SA" => Weekday::Sat,
-    "SU" => Weekday::Sun,
+    "MO" => Weekday::Monday,
+    "TU" => Weekday::Tuesday,
+    "WE" => Weekday::Wednesday,
+    "TH" => Weekday::Thursday,
+    "FR" => Weekday::Friday,
+    "SA" => Weekday::Saturday,
+    "SU" => Weekday::Sunday,
     _ => return None,
   };
   Some((n, weekday))
-}
-
-fn nth_weekday_of_month(year: i32, month: u32, weekday: Weekday, n: i8) -> Option<NaiveDate> {
-  if n > 0 {
-    return NaiveDate::from_weekday_of_month_opt(year, month, weekday, n.unsigned_abs());
-  }
-  let first_of_next = if month == 12 {
-    NaiveDate::from_ymd_opt(year.checked_add(1)?, 1, 1)?
-  } else {
-    NaiveDate::from_ymd_opt(year, month + 1, 1)?
-  };
-  let last = first_of_next.pred_opt()?;
-  let back = (7 + last.weekday().num_days_from_monday() - weekday.num_days_from_monday()) % 7;
-  let from_end = i64::from(n.unsigned_abs() - 1) * 7 + i64::from(back);
-  let date = last.checked_sub_signed(Duration::days(from_end))?;
-  (date.month() == month).then_some(date)
 }
 
 /// `DTSTART`: a date (`VALUE=DATE`, or eight digits) or a date with a time.
@@ -359,15 +346,16 @@ fn start_of(params: &str, value: &str) -> Start {
 }
 
 /// A `DATE` value: exactly eight digits.
-fn date_of(value: &str) -> Option<NaiveDate> {
+fn date_of(value: &str) -> Option<Date> {
   if value.len() != 8 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
     return None;
   }
-  NaiveDate::parse_from_str(value, "%Y%m%d").ok()
+  let number = |range: std::ops::Range<usize>| value.get(range)?.parse::<u32>().ok();
+  civil_date(i32::try_from(number(0..4)?).ok()?, number(4..6)?, number(6..8)?)
 }
 
 /// The date of a `DATE` or `DATE-TIME` value (`20261225`, `20261225T000000Z`).
-fn date_prefix(value: &str) -> Option<NaiveDate> {
+fn date_prefix(value: &str) -> Option<Date> {
   date_of(value.get(..8)?).filter(|_| value.len() == 8 || value.as_bytes().get(8) == Some(&b'T'))
 }
 
@@ -426,11 +414,11 @@ fn unfolded(text: &str) -> impl Iterator<Item = String> + '_ {
 mod tests {
   use super::*;
 
-  fn date(year: i32, month: u32, day: u32) -> NaiveDate {
-    NaiveDate::from_ymd_opt(year, month, day).unwrap()
+  fn date(year: i32, month: u32, day: u32) -> Date {
+    civil_date(year, month, day).unwrap()
   }
 
-  fn window() -> RangeInclusive<NaiveDate> {
+  fn window() -> RangeInclusive<Date> {
     date(2020, 1, 1)..=date(2035, 12, 31)
   }
 
@@ -442,7 +430,7 @@ mod tests {
     format!("BEGIN:VEVENT\r\nUID:x\r\n{lines}END:VEVENT\r\n")
   }
 
-  fn parse(text: &str) -> Result<Vec<NaiveDate>, ParseError> {
+  fn parse(text: &str) -> Result<Vec<Date>, ParseError> {
     parse_holidays(text, &window()).map(|dates| dates.into_iter().collect())
   }
 
@@ -642,7 +630,7 @@ mod tests {
     // 31 days per event, 200 events a year apart: more than the copy keeps.
     let events: String = (0..200)
       .map(|index| {
-        let start = date(2020, 1, 1) + Duration::days(index * 31);
+        let start = add_days(date(2020, 1, 1), index * 31).unwrap();
         event(&format!(
           "DTSTART;VALUE=DATE:{:04}{:02}{:02}\r\nDURATION:P31D\r\n",
           start.year(),

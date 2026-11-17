@@ -10,10 +10,10 @@
 
 use std::collections::BTreeSet;
 
-use chrono::{Datelike, Duration, NaiveDate, Weekday};
+use jiff::civil::{Date, Weekday};
 use teamcraft_proto::HOLIDAY_REGIONS;
 
-use super::HolidaySource;
+use super::{HolidaySource, add_days, civil_date, nth_weekday};
 
 /// Years looked at per question at most: a range wider than this is cut at its end.
 const MAX_YEARS: i32 = 100;
@@ -241,7 +241,7 @@ const RULES: &[Rule] = &[
   fixed(1, 2, &[Aargau, Bern, Jura, Lucerne, Thurgau, Vaud], SINCE_JURA),
   on_weekday(
     fixed(1, 2, &[Neuchatel], SINCE_JURA),
-    Weekdays::Only(Weekday::Mon),
+    Weekdays::Only(Weekday::Monday),
   ),
   // Epiphany.
   fixed(1, 6, &[Schwyz, Ticino, Uri], SINCE_JURA),
@@ -367,11 +367,11 @@ const RULES: &[Rule] = &[
       &[AppenzellInnerrhoden, AppenzellAusserrhoden, Uri],
       SINCE_JURA,
     ),
-    Weekdays::Not(&[Weekday::Tue, Weekday::Sat]),
+    Weekdays::Not(&[Weekday::Tuesday, Weekday::Saturday]),
   ),
   on_weekday(
     fixed(12, 26, &[Neuchatel], SINCE_JURA),
-    Weekdays::Only(Weekday::Mon),
+    Weekdays::Only(Weekday::Monday),
   ),
   // Restoration of the Republic of Geneva.
   fixed(12, 31, &[Geneva], SINCE_JURA),
@@ -495,7 +495,7 @@ impl BundledHolidays {
   }
 
   /// The region's holidays of one year.
-  fn holidays_of_year(self, year: i32) -> impl Iterator<Item = NaiveDate> {
+  fn holidays_of_year(self, year: i32) -> impl Iterator<Item = Date> {
     let maybe_easter = easter_sunday(year);
     let country = self.region.country();
     RULES
@@ -507,12 +507,12 @@ impl BundledHolidays {
       })
       .filter_map(move |rule| {
         let date = match rule.day {
-          Day::Fixed { month, day } => NaiveDate::from_ymd_opt(year, month, day),
-          Day::Easter(offset) => maybe_easter?.checked_add_signed(Duration::days(offset)),
+          Day::Fixed { month, day } => civil_date(year, month, day),
+          Day::Easter(offset) => add_days(maybe_easter?, offset),
           Day::Repentance => repentance_day(year),
           Day::NaefelserFahrt => naefelser_fahrt(year, maybe_easter?),
-          Day::GenevaFast => nth_weekday(year, 9, Weekday::Sun, 1)?.checked_add_signed(Duration::days(4)),
-          Day::FastMonday => nth_weekday(year, 9, Weekday::Sun, 3)?.checked_add_signed(Duration::days(1)),
+          Day::GenevaFast => add_days(nth_weekday(year, 9, Weekday::Sunday, 1)?, 4),
+          Day::FastMonday => add_days(nth_weekday(year, 9, Weekday::Sunday, 3)?, 1),
         }?;
         let counts = match rule.weekdays {
           Weekdays::Any => true,
@@ -525,9 +525,9 @@ impl BundledHolidays {
 }
 
 impl HolidaySource for BundledHolidays {
-  fn holidays_between(&self, from: NaiveDate, to: NaiveDate) -> BTreeSet<NaiveDate> {
-    let last_year = to.year().min(from.year().saturating_add(MAX_YEARS - 1));
-    (from.year()..=last_year)
+  fn holidays_between(&self, from: Date, to: Date) -> BTreeSet<Date> {
+    let (first_year, last_year) = (i32::from(from.year()), i32::from(to.year()));
+    (first_year..=last_year.min(first_year.saturating_add(MAX_YEARS - 1)))
       .flat_map(|year| self.holidays_of_year(year))
       .filter(|date| (from..=to).contains(date))
       .collect()
@@ -566,7 +566,7 @@ const fn on_weekday(rule: Rule, weekdays: Weekdays) -> Rule {
 }
 
 /// Easter Sunday of the Gregorian calendar (the anonymous computus of Meeus, Jones and Butcher).
-fn easter_sunday(year: i32) -> Option<NaiveDate> {
+fn easter_sunday(year: i32) -> Option<Date> {
   let golden = year.rem_euclid(19);
   let (century, of_century) = (year.div_euclid(100), year.rem_euclid(100));
   let (leap_centuries, century_rest) = (century / 4, century % 4);
@@ -578,26 +578,21 @@ fn easter_sunday(year: i32) -> Option<NaiveDate> {
   let shift = (golden + 11 * epact + 22 * weekday) / 451;
   let month = (epact + weekday - 7 * shift + 114) / 31;
   let day = (epact + weekday - 7 * shift + 114) % 31 + 1;
-  NaiveDate::from_ymd_opt(year, u32::try_from(month).ok()?, u32::try_from(day).ok()?)
+  civil_date(year, u32::try_from(month).ok()?, u32::try_from(day).ok()?)
 }
 
 /// The Wednesday before 23 November: between the 16th and the 22nd.
-fn repentance_day(year: i32) -> Option<NaiveDate> {
-  let before = NaiveDate::from_ymd_opt(year, 11, 22)?;
-  let back = (7 + before.weekday().num_days_from_monday() - Weekday::Wed.num_days_from_monday()) % 7;
-  before.checked_sub_signed(Duration::days(i64::from(back)))
-}
-
-/// The `n`th (from 1) `weekday` of a month.
-fn nth_weekday(year: i32, month: u32, weekday: Weekday, n: u8) -> Option<NaiveDate> {
-  NaiveDate::from_weekday_of_month_opt(year, month, weekday, n)
+fn repentance_day(year: i32) -> Option<Date> {
+  let before = civil_date(year, 11, 22)?;
+  let back = (7 + before.weekday().to_monday_zero_offset() - Weekday::Wednesday.to_monday_zero_offset()) % 7;
+  add_days(before, -i64::from(back))
 }
 
 /// The first Thursday of April, moved a week on when it is Maundy Thursday.
-fn naefelser_fahrt(year: i32, easter: NaiveDate) -> Option<NaiveDate> {
-  let first = nth_weekday(year, 4, Weekday::Thu, 1)?;
-  if Some(first) == easter.checked_sub_signed(Duration::days(3)) {
-    first.checked_add_signed(Duration::days(7))
+fn naefelser_fahrt(year: i32, easter: Date) -> Option<Date> {
+  let first = nth_weekday(year, 4, Weekday::Thursday, 1)?;
+  if Some(first) == add_days(easter, -3) {
+    add_days(first, 7)
   } else {
     Some(first)
   }
@@ -621,21 +616,17 @@ mod tests {
       (2027, 3, 28),
       (2038, 4, 25),
     ] {
-      assert_eq!(
-        easter_sunday(year),
-        NaiveDate::from_ymd_opt(year, month, day),
-        "{year}"
-      );
+      assert_eq!(easter_sunday(year), civil_date(year, month, day), "{year}");
     }
   }
 
   #[test]
   fn repentance_day_is_the_wednesday_before_the_23rd_of_november() {
-    assert_eq!(repentance_day(2026), NaiveDate::from_ymd_opt(2026, 11, 18));
+    assert_eq!(repentance_day(2026), civil_date(2026, 11, 18));
     // The 22nd itself is a Wednesday.
-    assert_eq!(repentance_day(2028), NaiveDate::from_ymd_opt(2028, 11, 22));
-    assert_eq!(repentance_day(2023), NaiveDate::from_ymd_opt(2023, 11, 22));
-    assert_eq!(repentance_day(2024), NaiveDate::from_ymd_opt(2024, 11, 20));
+    assert_eq!(repentance_day(2028), civil_date(2028, 11, 22));
+    assert_eq!(repentance_day(2023), civil_date(2023, 11, 22));
+    assert_eq!(repentance_day(2024), civil_date(2024, 11, 20));
   }
 
   #[test]
@@ -700,7 +691,7 @@ mod tests {
   #[test]
   fn a_huge_range_stops() {
     let table = BundledHolidays::new(HolidayRegion::Germany);
-    let found = table.holidays_between(NaiveDate::MIN, NaiveDate::MAX);
+    let found = table.holidays_between(Date::MIN, Date::MAX);
     assert!(found.len() <= 9 * usize::try_from(MAX_YEARS).unwrap() + 1);
   }
 
@@ -808,7 +799,7 @@ mod tests {
     assert!(!in_year(HolidayRegion::Germany, 2026).contains(&(8, 1)));
   }
 
-  fn in_year(region: HolidayRegion, year: i32) -> Vec<(u32, u32)> {
+  fn in_year(region: HolidayRegion, year: i32) -> Vec<(i8, i8)> {
     BundledHolidays::new(region)
       .holidays_between(date(year, 1, 1), date(year, 12, 31))
       .into_iter()
@@ -816,7 +807,7 @@ mod tests {
       .collect()
   }
 
-  fn date(year: i32, month: u32, day: u32) -> NaiveDate {
-    NaiveDate::from_ymd_opt(year, month, day).unwrap()
+  fn date(year: i32, month: u32, day: u32) -> Date {
+    civil_date(year, month, day).unwrap()
   }
 }

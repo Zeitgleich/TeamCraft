@@ -30,5 +30,6 @@ pub mod state;
 pub mod storage;
 #[cfg(feature = "integration")]
 pub mod testing;
+pub mod time_zone;
 pub mod web;
 pub mod webhooks;

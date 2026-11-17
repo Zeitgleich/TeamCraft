@@ -16,6 +16,7 @@ use super::convert::{offset_date_time, space_notification_settings, unix_millis}
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::time_zone;
 
 const MAX_DND_WINDOWS: usize = 14;
 const MAX_DND_ALLOWED_USERS: usize = 50;
@@ -406,17 +407,10 @@ pub fn is_quiet(maybe_quiet_hours: Option<&str>, now: OffsetDateTime) -> bool {
 }
 
 fn zone_offset_at(maybe_time_zone: Option<&str>, fallback_minutes: i16, unix_seconds: i64) -> i16 {
-  use chrono::{Offset, TimeZone};
   let maybe_offset = maybe_time_zone
-    .and_then(|zone| zone.parse::<chrono_tz::Tz>().ok())
-    .zip(chrono::DateTime::from_timestamp(unix_seconds, 0))
-    .map(|(zone, at)| {
-      zone
-        .offset_from_utc_datetime(&at.naive_utc())
-        .fix()
-        .local_minus_utc()
-        / 60
-    });
+    .and_then(time_zone::named)
+    .zip(jiff::Timestamp::from_second(unix_seconds).ok())
+    .map(|(zone, at)| zone.to_offset(at).seconds() / 60);
   maybe_offset
     .and_then(|minutes| i16::try_from(minutes).ok())
     .unwrap_or(fallback_minutes)
@@ -480,7 +474,7 @@ fn validate_zone(utc_offset_minutes: i16, maybe_time_zone: Option<&str>) -> Resu
     ));
   }
   if let Some(zone) = maybe_time_zone
-    && (zone.len() > MAX_TIME_ZONE_CHARS || zone.parse::<chrono_tz::Tz>().is_err())
+    && (zone.len() > MAX_TIME_ZONE_CHARS || !time_zone::is_known(zone))
   {
     return Err(ApiError::InvalidRequest("unknown time_zone".into()));
   }
