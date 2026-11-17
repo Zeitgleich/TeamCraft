@@ -438,3 +438,27 @@ call-tile-missed = Verpasster Anruf
 call-tile-ongoing = Läuft
 call-tile-ended = Beendet
 call-tile-join = Beitreten
+
+# Call recording (#216, e2ee.md §8.3)
+call-recording-start = Aufnehmen
+call-recording-stop = Aufnahme beenden
+call-recording-own = Aufnahme { $time }
+call-recording-by = Aufnahme durch { $names }
+call-recording-own-and-by = Aufnahme durch dich und { $names }
+call-recording-detail = Alle im Anruf sehen das, solange der Anruf aufgenommen wird. Eine Aufnahme bleibt auf dem aufnehmenden Gerät, bis sie verschlüsselt in die Unterhaltung des Anrufs gestellt wird.
+call-recording-someone = Jemand
+call-recording-banner-running = Dieser Anruf wird von { $names } aufgenommen.
+call-recording-banner-started = { $names } hat begonnen, diesen Anruf aufzunehmen.
+call-recording-banner-choice = Wenn du nicht aufgenommen werden möchtest, verlasse den Anruf.
+call-recording-not-allowed = Die Richtlinie deiner Organisation erlaubt diese Aufnahme nicht.
+call-recording-continue = Weiter
+call-recording-take-title = Anrufaufnahme
+call-recording-take-meta = { $time } · { $size }
+call-recording-take-limit = Die Aufnahme hat bei der längsten Dauer gestoppt, die deine Organisation erlaubt.
+call-recording-take-hint = Stelle sie in die Unterhaltung, um sie verschlüsselt mit ihr zu teilen. Bis dahin ist sie nur auf diesem Computer.
+call-recording-post = In Unterhaltung stellen
+call-recording-posting = Wird gesendet…
+call-recording-posted = Aufnahme in die Unterhaltung gestellt
+call-recording-delete = Löschen
+call-recording-delete-confirm = Diese Aufnahme löschen? Sie kann nicht wiederhergestellt werden.
+tile-recording = nimmt auf

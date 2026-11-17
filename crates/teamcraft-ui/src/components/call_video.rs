@@ -39,6 +39,9 @@ pub fn VideoTile(
   #[prop(into)] is_camera_on: Signal<bool>,
   #[prop(into, default = Signal::stored(false))] is_speaking: Signal<bool>,
   #[prop(into, default = Signal::stored(false))] has_hand_raised: Signal<bool>,
+  /// A device of the person records the call (e2ee.md §8.3).
+  #[prop(into, default = Signal::stored(false))]
+  is_recording: Signal<bool>,
   /// The person's connection was lost and they are rejoining.
   #[prop(into, default = Signal::stored(false))]
   is_reconnecting: Signal<bool>,
@@ -89,6 +92,9 @@ pub fn VideoTile(
         }
         if has_hand_raised.get() {
           parts.push(i18n.t("tile-hand"));
+        }
+        if is_recording.get() {
+          parts.push(i18n.t("tile-recording"));
         }
         if is_speaking.get() {
           parts.push(i18n.t("tile-speaking"));
@@ -146,6 +152,12 @@ pub fn VideoTile(
         <span class="tile-status tile-status-warning" aria-hidden="true">
           <Icon name=IconName::Alert />
           {move || i18n.t("tile-unverified")}
+        </span>
+      </Show>
+      <Show when=move || is_recording.get() fallback=|| ()>
+        <span class="tile-status tile-status-recording" aria-hidden="true">
+          <span class="recording-dot"></span>
+          {move || i18n.t("tile-recording")}
         </span>
       </Show>
       <Show when=move || has_hand_raised.get() fallback=|| ()>

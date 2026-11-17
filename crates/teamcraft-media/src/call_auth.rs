@@ -194,7 +194,8 @@ fn proto_device_id(device_id: CryptoDeviceId) -> Result<DeviceId, CallKeyError> 
     .ok_or(CallKeyError::InvalidDeviceId(raw))
 }
 
-fn crypto_call_id(call_id: CallId) -> CryptoCallId {
+/// Converts the shared call id into `teamcraft-crypto`'s (same `u64` value).
+pub fn crypto_call_id(call_id: CallId) -> CryptoCallId {
   CryptoCallId::new(snowflake_u64(call_id.snowflake().get()))
 }
 

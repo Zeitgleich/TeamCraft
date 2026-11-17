@@ -423,6 +423,7 @@ internal fun InCallContent(
             reduceMotion = reduceMotion,
             onStop = actions.onStopScreenShare,
           )
+          RecordingNotice(ui)
           StatusHint(ui.maybeState)
           EncryptionFailureBanner(ui.maybeState, actions.onRetryEncryption, actions.onHangUp)
           banner()
@@ -1053,6 +1054,38 @@ private fun StatusHint(maybeState: CallStateInfo?) {
       style = MaterialTheme.typography.labelLarge,
       textAlign = TextAlign.Center,
     )
+  }
+}
+
+/**
+ * Who records the call (#216, e2ee.md §8.3), from their signed notices: shown for as long as
+ * anybody records, and it can't be closed. Objecting means leaving the call.
+ */
+@Composable
+private fun RecordingNotice(ui: CallUiState) {
+  val recorders = ui.maybeState?.recordingUserIds.orEmpty()
+  if (recorders.isEmpty()) return
+  val someone = stringResource(R.string.call_recording_someone)
+  val names = recorders.map { id -> ui.names[id]?.takeIf { it.isNotEmpty() } ?: someone }.sorted().joinToString(", ")
+  Surface(
+    color = MaterialTheme.colorScheme.inverseSurface,
+    contentColor = MaterialTheme.colorScheme.inverseOnSurface,
+    shape = CircleShape,
+    shadowElevation = 3.dp,
+    modifier = Modifier.padding(bottom = 12.dp).semantics { liveRegion = LiveRegionMode.Polite },
+  ) {
+    Row(
+      Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+      horizontalArrangement = Arrangement.spacedBy(8.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Box(Modifier.size(8.dp).background(MaterialTheme.colorScheme.error, CircleShape))
+      Text(
+        stringResource(R.string.call_recording_by, names),
+        style = MaterialTheme.typography.labelLarge,
+        textAlign = TextAlign.Center,
+      )
+    }
   }
 }
 

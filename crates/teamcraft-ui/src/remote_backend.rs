@@ -3624,6 +3624,17 @@ impl ChatBackend for RemoteChat {
       .unwrap_or_default()
   }
 
+  fn call_recording_policy(&self) -> teamcraft_proto::CallRecordingPolicy {
+    self
+      .mirror
+      .borrow()
+      .snapshot
+      .security
+      .maybe_call_recording_policy
+      .clone()
+      .unwrap_or_default()
+  }
+
   fn presence_policy(&self) -> teamcraft_proto::PresencePolicy {
     self
       .mirror

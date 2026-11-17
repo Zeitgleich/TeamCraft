@@ -434,6 +434,7 @@ struct CallScreen: View {
       if areControlsShown { topBar.transition(chromeTransition(edge: .top)) }
       Spacer(minLength: 0)
       VStack(spacing: 12) {
+        recordingNotice
         statusHint
         if let lobby = shownLobby, !lobby.people.isEmpty {
           LobbyBanner(waiting: lobby.people.count) { interact { isLobbyShown = true } }
@@ -527,6 +528,29 @@ struct CallScreen: View {
           }
         }
       }
+    }
+  }
+
+  /// Who records the call (#216, e2ee.md §8.3), from their signed notices: shown for as long as
+  /// anybody records, and it can't be closed. Objecting means leaving the call.
+  @ViewBuilder
+  private var recordingNotice: some View {
+    if !call.recordingUserIds.isEmpty {
+      let someone = String(localized: "call_recording_someone")
+      let names = call.recordingUserIds
+        .map { id in model.calls.names[id].flatMap { $0.isEmpty ? nil : $0 } ?? someone }
+        .sorted()
+        .joined(separator: ", ")
+      HStack(spacing: 8) {
+        Circle().fill(.red).frame(width: 8, height: 8).accessibilityHidden(true)
+        Text("call_recording_by \(names)")
+      }
+      .font(.app(.subheadline).weight(.medium))
+      .foregroundStyle(.white)
+      .padding(.horizontal, 16)
+      .padding(.vertical, 8)
+      .background(.black.opacity(0.55), in: Capsule())
+      .accessibilityElement(children: .combine)
     }
   }
 

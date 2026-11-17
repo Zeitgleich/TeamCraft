@@ -6641,10 +6641,12 @@ apps record at all. The admin guide (admin.md §3.13) says the same to whoever t
 | `max_minutes` | `120`   | The longest recording; it stops by itself then (1 to 480)                                |
 
 Guests never record, whatever the policy says. The recording app checks the verified policy and its
-user's verified role before it starts and offers the button only to those allowed (admin.md §1.1);
-every other app checks the same rule for each recording it is told of and says so when the recorder
-isn't allowed ("… is recording, which your organization doesn't allow"). Like every policy group, an
-owner app from before the group re-signs without it, which reads as `off`.
+user's role before it starts and offers the button only to those allowed (admin.md §1.1); every
+other app checks the same rule for each recording it is told of and says so when the recorder isn't
+allowed ("Your organization's policy doesn't allow this recording"). That check takes the policy
+from the signature and the recorder's role from the server's guest flag and admin list: a server
+that lies there changes only that note, never whether the recording shows. Like every policy group,
+an owner app from before the group re-signs without it, which reads as `off`.
 
 **The notice: signed call state, not a client-only flag.** A recording is announced over the call's
 signaling, and the announcement is signed end to end:
@@ -6689,16 +6691,18 @@ group can't be recorded any more by anybody, because they send nothing.
 - The call screen shows a persistent "Recording" indicator in the header with who records, and the
   recorders' tiles carry a recording mark. It can't be closed while a recording runs.
 - When a recording starts, every app says so once: a banner ("Alice started recording this call")
-  read out by screen readers, and on the desktop and mobile apps a short tone that plays even when
-  the call's status sounds are off (it is a notice, not a status sound).
+  read out by screen readers, and in the desktop and phone apps (their native call engine) a short
+  rising tone that plays even when the call's status sounds are off (it is a notice, not a status
+  sound). The browser shows the banner without the tone.
 - Who joins while a recording runs gets the SFU's stored notices with the join and sees a banner
   "This call is being recorded by Alice" with "Leave call" next to "Continue". Objecting means
   leaving: whoever leaves is no longer in the DAVE group and can't be recorded from then on.
 - Consent from everybody before a recording may start (`all_consent`), and leaving the objecting
-  person's audio out of a recording, are a later step (issue linked in admin.md §3.13).
+  person's audio out of a recording, are a later step (#2115).
 
 **What is recorded, and where it goes.** In this version the desktop app (Windows, macOS, Linux)
-records; the browser and the phone apps show the notices but don't record yet.
+records; the browser, the Android and the iOS app show the notices but don't record yet (the
+browser: #2114).
 
 - **Content:** audio only: the mix this device plays (everybody it hears) and its own microphone
   while unmuted, at 48 kHz mono, Opus at 32 kbit/s in an Ogg file (`teamcraft-media::call_recording`,
@@ -6706,14 +6710,15 @@ records; the browser and the phone apps show the notices but don't record yet.
 - **While recording:** the file grows in a private folder of the app (`call-recordings` in its cache
   folder), page by page, never held in memory whole; an Ogg file cut off by a crash plays up to its
   last page. The folder is emptied at every start of the app, so a recording a crash left behind is
-  not kept (keeping it for the user is a later step). This is plaintext on the recording device's
-  disk for as long as the recording runs, as with voice messages (§4.5): the device already has the
-  plaintext media.
+  not kept (keeping it for the user is a later step, #2116). This is plaintext on the recording
+  device's disk for as long as the recording runs, as with voice messages (§4.5): the device
+  already has the plaintext media. A write that fails (a full disk) ends the recording: the others
+  are told it stopped, and the recorder sees the error.
 - **Afterwards:** the app offers "Post to the conversation" or "Delete". Posting sends the file as
   an attachment into the call's conversation (§4.5): encrypted with a fresh key, which goes to the
   conversation's members through MLS like every message; retention applies to it like to any
   message. The local file is deleted once it is posted or discarded. Saving it elsewhere as a plain
-  file is a later step (with a warning that the file is then unencrypted).
+  file is a later step (with a warning that the file is then unencrypted, #2116).
 - **Limits:** `max_minutes` stops it; the call ending, the recorder leaving, or the app's page
   loading anew stop it too.
 

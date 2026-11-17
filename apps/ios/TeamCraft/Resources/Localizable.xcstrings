@@ -9697,6 +9697,38 @@
         }
       }
     },
+    "call_recording_by %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recorded by %@. Leave the call if you don't want to be recorded."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aufnahme durch %@. Verlasse den Anruf, wenn du nicht aufgenommen werden möchtest."
+          }
+        }
+      }
+    },
+    "call_recording_someone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Someone"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jemand"
+          }
+        }
+      }
+    },
     "call_video_held_for_voice": {
       "localizations": {
         "en": {

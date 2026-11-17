@@ -30,6 +30,8 @@ struct ActiveCall: Identifiable, Equatable {
   var reconnectingUserIds: [String] = []
   /// The users with a device whose call key binding did not verify (it gets no audio or video).
   var unverifiedUserIds: [String] = []
+  /// The users who record the call, from their signed notices (#216, e2ee.md §8.3).
+  var recordingUserIds: [String] = []
   /// The users who muted their microphone.
   var mutedUserIds: [String] = []
   /// The code participants compare to rule out a man in the middle (once secured).
@@ -450,6 +452,7 @@ final class CallManager: NSObject, @unchecked Sendable {
     call.speakingUserIds = []
     call.reconnectingUserIds = []
     call.unverifiedUserIds = []
+    call.recordingUserIds = []
     call.mutedUserIds = []
     call.maybePrivacyCode = nil
     activeCall = call
@@ -869,6 +872,7 @@ extension CallManager: CallListener {
       call.speakingUserIds = state.speakingUserIds
       call.reconnectingUserIds = state.reconnectingUserIds
       call.unverifiedUserIds = state.unverifiedUserIds
+      call.recordingUserIds = state.recordingUserIds
       call.mutedUserIds = state.mutedUserIds
       if hasNewPeople { Task { @MainActor in self.names = await AppModel.shared.displayNames() } }
       call.maybePrivacyCode = state.maybePrivacyCode

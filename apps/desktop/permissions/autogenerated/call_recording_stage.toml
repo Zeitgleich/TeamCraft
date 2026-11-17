@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-call-recording-stage"
+description = "Enables the call_recording_stage command without any pre-configured scope."
+commands.allow = ["call_recording_stage"]
+
+[[permission]]
+identifier = "deny-call-recording-stage"
+description = "Denies the call_recording_stage command without any pre-configured scope."
+commands.deny = ["call_recording_stage"]

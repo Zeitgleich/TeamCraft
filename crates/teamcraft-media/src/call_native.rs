@@ -62,6 +62,7 @@ use crate::call_engine::{
   AudioOrigin, CallEngine, CallEngineConfig, CallEngineError, CallEngineEvent, CallStats, EngineOutput,
   OwnPublication, OwnVideoEnd, VideoSendOutcome, VideoStats,
 };
+use crate::call_recording::RecordingSink;
 use crate::call_resilience::{
   CallTransport, JoinTicket, JoinTicketError, MAX_EARLY_DATAGRAMS, PathMonitor, PathState, QuicRetrySchedule,
   ReconnectSchedule, RejoinPacer, ResilienceConfig, SWITCH_DRAIN_TIMEOUT, connect_preferring_quic,
@@ -253,6 +254,9 @@ enum Command {
   StopScreenAudio,
   NetworkChanged,
   SetStatusCues(StatusCues),
+  /// Starts handing the call's audio to a recording, or stops (e2ee.md §8.3); the engine sends
+  /// the signed notice.
+  Recording(Option<RecordingSink>),
   /// Reads what the call's video does (stats for nerds, #938).
   #[cfg(feature = "call-view")]
   VideoStats(oneshot::Sender<teamcraft_client_api::video_stats::VideoStatsReport>),
@@ -510,6 +514,14 @@ impl NativeCall {
 
   pub fn set_deafened(&self, is_deafened: bool) {
     let _ = self.commands.send(Command::Deafen(is_deafened));
+  }
+
+  /// Hands the call's audio to `sink` (a [`crate::call_recording::CallRecorder`] the app owns), or
+  /// stops with `None`; everybody in the call is told by a signed notice (e2ee.md §8.3). A
+  /// recording that reaches its maximum stops itself here too.
+  pub fn set_recording(&self, maybe_sink: Option<RecordingSink>) {
+    // A closed channel means the call already ended; nothing records any more.
+    let _ = self.commands.send(Command::Recording(maybe_sink));
   }
 
   /// Takes the call over from the account's other devices.
@@ -807,6 +819,7 @@ async fn run_call(
   }
   engine.join(config.token.clone());
   let mut maybe_screen_audio: Option<ScreenAudio> = None;
+  let mut maybe_recording: Option<RecordingSink> = None;
   let (encoded_tx, mut encoded_rx) = mpsc::unbounded_channel::<(VideoTrackKind, EncodedVideoFrame)>();
   sinks.flush(&mut engine, &mut capture, connection.sending_link())?;
 
@@ -862,6 +875,9 @@ async fn run_call(
           for frame in capture.push(&samples)? {
             engine.send_audio(&frame, Instant::now());
             sinks.stats.frames_sent += 1;
+            if let Some(recording) = &maybe_recording {
+              recording.push_own(&frame.opus);
+            }
           }
           for frame in capture.take_thin_frames()? {
             engine.send_thin_audio(&frame, Instant::now());
@@ -883,6 +899,15 @@ async fn run_call(
         let mix = sinks.next_playback_frame()?;
         if let Some(buffer) = &devices.maybe_playback {
           buffer.push(&mix);
+        }
+        if let Some(recording) = &maybe_recording {
+          recording.push_playback(&mix);
+          // At its maximum length (or after a failed write) the recording takes nothing more:
+          // the others are told it stopped; the app finishes the file.
+          if recording.is_ended() {
+            maybe_recording = None;
+            engine.set_recording(false);
+          }
         }
       },
       maybe_samples = recv_screen_audio(&mut maybe_screen_audio) => {
@@ -991,6 +1016,10 @@ async fn run_call(
           Some(Command::StopScreenAudio) => stop_screen_audio(&mut engine, &mut maybe_screen_audio),
           Some(Command::NetworkChanged) => connection.on_network_changed(Instant::now()),
           Some(Command::SetStatusCues(status_cues)) => sinks.cues.set_setting(status_cues),
+          Some(Command::Recording(maybe_sink)) => {
+            engine.set_recording(maybe_sink.is_some());
+            maybe_recording = maybe_sink;
+          },
           #[cfg(feature = "call-view")]
           Some(Command::VideoStats(done)) => {
             let at_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);

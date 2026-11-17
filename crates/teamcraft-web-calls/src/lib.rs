@@ -832,6 +832,12 @@ impl Host {
       CallAction::TestSpeakers { .. } => {
         return Err(ActionFailure::other("the page plays the speaker test itself"));
       },
+      // The browser doesn't record calls yet (e2ee.md §8.3): its snapshot says `can_record`
+      // false, so the UI offers none of these.
+      CallAction::StartRecording { .. } => {
+        return Err(ActionFailure::other("this app doesn't record calls"));
+      },
+      CallAction::StopRecording | CallAction::DiscardRecording => {},
       CallAction::Unknown => return Err(ActionFailure::other("unknown call action")),
     }
     Ok(None)
@@ -1717,6 +1723,9 @@ impl Host {
         maybe_camera_fallback: None,
         maybe_this_device: state.view.maybe_this_device,
         call_reports: state.view.call_reports.clone(),
+        // Recording is the desktop app's for now (e2ee.md §8.3).
+        can_record: false,
+        maybe_recording_take: None,
       }
     };
     let Ok(json) = serde_json::to_string(&snapshot) else {

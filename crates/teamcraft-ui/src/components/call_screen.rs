@@ -13,6 +13,7 @@ use crate::components::call_audio_menu::AudioMenu;
 use crate::components::call_chat::{CallChat, CallChatPanel, CallChatToast};
 use crate::components::call_notetaker::{NotetakerBanner, notetaker_refusal_key, use_notetaker_in_call};
 use crate::components::call_prejoin::call_heading;
+use crate::components::call_recording::{RecordingBanner, RecordingIndicator, use_recording_control};
 use crate::components::call_video::{
   BackgroundPicker, LiveVideo, PickerSize, VideoSource, VideoTile, can_share_screen, can_show_video,
 };
@@ -63,6 +64,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
   let others =
     Memo::new(move |_| remote.with(|tiles| tiles.iter().map(|tile| tile.user.id).collect::<Vec<_>>()));
   let (notetaker, notetaker_invite) = use_notetaker_in_call(request.conversation, others);
+  let recording = use_recording_control();
   let is_notetaker_present =
     Memo::new(move |_| notetaker.get().is_some_and(|notetaker| notetaker.is_present));
   let remote_sharer = Memo::new(move |_| {
@@ -456,6 +458,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
           is_muted=participant_flag(id, |participant| participant.is_muted, false)
           is_camera_on=participant_flag(id, |participant| participant.is_camera_on, true)
           has_hand_raised=participant_flag(id, |participant| participant.has_hand_raised, false)
+          is_recording=participant_flag(id, |participant| participant.is_recording, false)
           is_speaking=Signal::derive(move || speaking.get() == Some(id))
           is_reconnecting=Signal::derive(move || reconnecting.get().contains(&id))
           is_unverified=Signal::derive(move || unverified.get().contains(&id))
@@ -647,6 +650,8 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
             <span>{move || i18n.t("call-notetaker-badge")}</span>
           </span>
         </Show>
+        // Who records the call (e2ee.md §8.3): always shown while anybody does.
+        <RecordingIndicator />
         <Show when=move || is_connecting.get() fallback=|| ()>
           // Waiting for this device's way into the call's encryption (#1990): calm, no error.
           <span class="muted-text" role="status">
@@ -729,6 +734,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
       <crate::components::add_to_call::CallMoveBanner />
       <crate::components::call_encryption::EncryptionFailureBanner request=request />
       <NotetakerBanner conversation=request.conversation notetaker=notetaker is_asked=notetaker_invite.is_asked />
+      <RecordingBanner />
       <div class="call-body">
         <div class="call-stage-wrap" node_ref=stage_wrap>{stage}</div>
         <Show when=move || chat.is_open.get() fallback=|| ()>
@@ -968,6 +974,17 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
                 None => notetaker_invite.press(&found),
               }
             }
+          />
+        </Show>
+        // Recording (e2ee.md §8.3): where this app records and the verified policy allows the user.
+        <Show when=move || recording.is_offered.get() fallback=|| ()>
+          <ControlButton
+            is_active=recording.is_recording
+            icon=Signal::derive(move || if recording.is_recording.get() { IconName::Stop } else { IconName::Record })
+            label=Signal::derive(move || {
+              i18n.t(if recording.is_recording.get() { "call-recording-stop" } else { "call-recording-start" })
+            })
+            on_press=move || recording.toggle()
           />
         </Show>
         // A phone's control bar keeps to what a call needs.

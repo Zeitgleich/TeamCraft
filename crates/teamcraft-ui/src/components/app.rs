@@ -424,6 +424,12 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         _ => None,
       }}
       <IncomingCallDialog />
+      // A call recording this device made, until it is posted or deleted (desktop, #216).
+      {move || {
+        state
+          .read(|backend| backend.call_recording_take().is_some())
+          .then(|| lazy_area(Place::Inline, || areas::call_recording_take(())))
+      }}
       <LinkRequestPrompt />
       // Always in the page: screen readers only announce changes in a live region that already
       // existed when the toast arrived.

@@ -31,6 +31,7 @@ use openmls::prelude::{
 };
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
+use teamcraft_crypto::call_recording::RecordingNoticeSigner;
 use teamcraft_proto::{CallId, DaveTransitionId, DeviceId, Id, IdError, Snowflake};
 use thiserror::Error;
 use tls_codec::{Deserialize as TlsDeserialize, Serialize as TlsSerialize, VLBytes};
@@ -44,6 +45,8 @@ pub struct DaveParticipant {
   /// Public half of this session's fresh P-256 signature key (SEC1), bound to the device by a
   /// call key binding (e2ee.md §8).
   signature_public_key: Vec<u8>,
+  /// Signs this device's recording notices with the same key (e2ee.md §8.3).
+  notice_signer: RecordingNoticeSigner,
   stats: DaveFrameStats,
 }
 
@@ -136,6 +139,8 @@ pub enum DaveError {
   VerificationCode(#[from] GetVerificationCodeError),
   #[error("generating the external sender key failed")]
   SignerKeyGeneration,
+  #[error("the session's key can't sign recording notices")]
+  NoticeKey,
   #[error("invalid key package: {0}")]
   InvalidKeyPackage(String),
   #[error("key package belongs to participant {actual:?}, expected {expected:?}")]
@@ -156,9 +161,12 @@ impl DaveParticipant {
     // A fresh key for every call; never reused (e2ee.md §8).
     let key_pair = SigningKeyPair::generate();
     let session = DaveSession::new(version, participant_id.0, call_id.0, Some(&key_pair))?;
+    let notice_signer =
+      RecordingNoticeSigner::from_dave_private_key(&key_pair.private).map_err(|_| DaveError::NoticeKey)?;
     Ok(Self {
       session,
       signature_public_key: key_pair.public.clone(),
+      notice_signer,
       stats: DaveFrameStats::default(),
     })
   }
@@ -289,6 +297,11 @@ impl DaveParticipant {
   /// Code both sides compare out of band to verify each other (DAVE "displayable codes").
   pub fn verification_code(&self, other: DaveParticipantId) -> Result<String, DaveError> {
     Ok(self.session.get_verification_code(other.0)?)
+  }
+
+  /// Signs this device's recording notices with this session's key (e2ee.md §8.3).
+  pub fn notice_signer(&self) -> &RecordingNoticeSigner {
+    &self.notice_signer
   }
 
   /// This session's MLS signature public key (SEC1 P-256), to be bound to the device.

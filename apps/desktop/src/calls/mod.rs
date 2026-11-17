@@ -17,6 +17,7 @@ mod codec_library;
 pub mod commands;
 mod preview;
 pub(crate) mod push_to_talk;
+mod recording;
 mod self_view;
 pub(crate) mod video;
 
@@ -107,6 +108,8 @@ pub struct CallHost {
   levels: LevelWatch,
   /// The screen picker a share start waits on, if one is open.
   screen_picker: OpenPicker,
+  /// Where call recordings are written.
+  recording_folder: recording::RecordingFolder,
 }
 
 /// The system's screen picker while a share start waits for the user's choice in it: stopping
@@ -129,6 +132,8 @@ pub struct MediaFiles {
   pub codec_directory: PathBuf,
   /// The bundled segmentation model for background effects, if the app has its resources.
   pub maybe_segmentation_model: Option<PathBuf>,
+  /// The private folder call recordings are written to (e2ee.md §8.3), in the cache folder.
+  pub recording_folder: PathBuf,
 }
 
 #[derive(Default)]
@@ -163,6 +168,8 @@ struct CallState {
   status_sounds: CallStatusSounds,
   /// The highest quality the camera is sent at (the user's setting, #967).
   camera_quality: VideoQuality,
+  /// This device's recording of the call and its take (e2ee.md §8.3).
+  recordings: recording::Recordings,
 }
 
 /// Control of the task that owns the [`NativeCall`].
@@ -187,6 +194,8 @@ enum Control {
   StopScreenAudio,
   StatusSounds(CallStatusSounds),
   NetworkChanged,
+  /// Hands the call's audio to a recording, or stops (e2ee.md §8.3).
+  Recording(Option<teamcraft_media::call_recording::RecordingSink>),
   Subscribe {
     stream_id: MediaStreamId,
     maybe_max_layer: Option<u8>,
@@ -293,6 +302,7 @@ impl CallHost {
       preview: tokio::sync::Mutex::default(),
       levels: LevelWatch::default(),
       screen_picker: OpenPicker::default(),
+      recording_folder: recording::RecordingFolder::new(files.recording_folder),
     }
   }
 
@@ -328,6 +338,8 @@ impl CallHost {
       maybe_camera_fallback: state.maybe_camera_fallback.clone(),
       maybe_this_device: state.view.maybe_this_device,
       call_reports: Vec::new(),
+      can_record: true,
+      maybe_recording_take: state.recordings.take(),
     }
   }
 
@@ -693,6 +705,46 @@ impl CallHost {
 
   pub async fn set_deafened(&self, is_deafened: bool) {
     self.control(Control::Deafen(is_deafened)).await;
+  }
+
+  /// Starts recording the call on this device (e2ee.md §8.3); the call tells everybody in it.
+  pub async fn start_recording(&self, max_secs: u32) -> Result<(), String> {
+    if self.media.lock().await.is_none() {
+      return Err("no call to record".to_owned());
+    }
+    let sink = self.recording_folder.start(&self.state, max_secs, unix_ms())?;
+    self.control(Control::Recording(Some(sink))).await;
+    self.changed();
+    Ok(())
+  }
+
+  /// Stops the recording; its take waits for the user to post or delete it. Fails when writing
+  /// the file failed (the error is `ActionFailure` wire text).
+  pub async fn stop_recording(&self) -> Result<(), String> {
+    self.control(Control::Recording(None)).await;
+    let finished = recording::finish(&self.state).await;
+    self.changed();
+    finished
+  }
+
+  /// Deletes the take the user didn't want.
+  pub fn discard_recording(&self) {
+    self.recording_folder.discard(&self.state);
+    self.changed();
+  }
+
+  /// Moves the take into the core's upload `staging` folder; returns the path to post.
+  pub fn stage_recording(&self, staging: &std::path::Path) -> Result<PathBuf, String> {
+    let path = recording::stage(&self.state, staging)?;
+    self.changed();
+    Ok(path)
+  }
+
+  /// Sign-out: a running recording is cancelled and every take deleted.
+  pub async fn sign_out_recordings(&self) {
+    self.control(Control::Recording(None)).await;
+    self.recording_folder.sign_out(&self.state).await;
+    self.changed();
   }
 
   /// Takes the call over from the account's other devices (#505).
@@ -1374,7 +1426,17 @@ async fn run_media(
   let mut is_hang_up = false;
   loop {
     tokio::select! {
-      _ = level_tick.tick() => shared.levels.publish(microphone_level.get()),
+      _ = level_tick.tick() => {
+        shared.levels.publish(microphone_level.get());
+        // At its maximum (or after a failed write) the call stopped handing the recording audio
+        // and told the others.
+        if lock(state).recordings.is_ended() {
+          if let Err(failure) = recording::finish(state).await {
+            report_failure(failure);
+          }
+          notify();
+        }
+      },
       _ = sample_tick.tick() => {
         if let Some(report) = call.video_stats().await {
           telemetry.observe_stats(&report, telemetry_now_ms());
@@ -1455,6 +1517,7 @@ async fn run_media(
         Some(Control::VideoStats(done)) => drop(done.send(call.video_stats().await)),
         Some(Control::StatusSounds(sounds)) => call.set_status_cues(status_cues(sounds)),
         Some(Control::NetworkChanged) => call.network_changed(),
+        Some(Control::Recording(maybe_sink)) => call.set_recording(maybe_sink),
         Some(Control::HangUp) => {
           is_hang_up = true;
           break;
@@ -1519,6 +1582,10 @@ async fn run_media(
   }
   device_watch.abort();
   shared.levels.publish(0.0);
+  // The recording ends with the call; its take stays for the user (e2ee.md §8.3).
+  if let Err(failure) = recording::finish(state).await {
+    report_failure(failure);
+  }
   lock(state).view.end_active();
   lock(&shared.video_sinks).clear();
   notify();
@@ -2592,6 +2659,8 @@ mod tests {
       MediaFiles {
         codec_directory: std::env::temp_dir(),
         maybe_segmentation_model: None,
+        recording_folder: std::env::temp_dir()
+          .join(format!("teamcraft-call-recordings-test-{}", std::process::id())),
       },
     )
   }

@@ -9,6 +9,7 @@ pub mod attachment;
 pub mod attestation;
 pub mod backup;
 pub mod call_binding;
+pub mod call_recording;
 pub mod change_digest;
 pub mod channel_anchor;
 pub mod checksum;

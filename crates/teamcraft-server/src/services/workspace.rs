@@ -399,6 +399,13 @@ fn check_policy_payload(payload: &[u8], expected_new_version: u64) -> Result<Pol
       "scheduled_messages limits are out of range".into(),
     ));
   }
+  // Clients read the group from the signature anyway; this keeps owners from publishing one no app
+  // understands (e2ee.md §8.3).
+  if !policy.call_recording.is_valid() {
+    return Err(ApiError::InvalidRequest(
+      "call_recording: unknown recorders or max_minutes out of range".into(),
+    ));
+  }
   Ok(document)
 }
 

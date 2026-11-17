@@ -89,6 +89,7 @@ const COMMANDS: &[&str] = &[
   "call_snapshot",
   "call_media_devices",
   "call_action",
+  "call_recording_stage",
   "call_watch_video",
   "call_background_preview",
   "call_unwatch_video",

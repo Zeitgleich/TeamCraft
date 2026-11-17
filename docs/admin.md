@@ -1273,6 +1273,9 @@ under Administration → Security → Call recording. It is **off by default**.
   which reads as `off`.
 - **Audit:** the server sees that a recording notice passed through the SFU, not who may see it or
   what it says; an entry in the audit log is a later step.
+- **Later steps:** recording in the browser (#2114); consent from everybody before a recording
+  starts, and leaving people out of it (#2115); saving as a local file, keeping a recording a crash
+  left, video (#2116); an audit entry and an unattended recorder bot (#2117).
 
 ## 4. Audit log
 

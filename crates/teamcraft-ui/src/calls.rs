@@ -934,6 +934,8 @@ mod tests {
         maybe_moved_to: None,
         maybe_joined_at: None,
         maybe_encryption_failure: None,
+        recorders: Vec::new(),
+        maybe_own_recording: None,
       };
       call.resume(&active);
       assert_eq!(call.phase.get_untracked(), CallPhase::Active);
@@ -1027,6 +1029,8 @@ mod tests {
       maybe_moved_to: None,
       maybe_joined_at: None,
       maybe_encryption_failure: None,
+      recorders: Vec::new(),
+      maybe_own_recording: None,
     }
   }
 

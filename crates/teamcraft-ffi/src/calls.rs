@@ -277,6 +277,10 @@ pub struct CallStateInfo {
   /// call's encryption group and gets no audio or video. Marked "not verified" on their tile.
   #[uniffi(default = [])]
   pub unverified_user_ids: Vec<String>,
+  /// The people who record the call, from their signed notices (e2ee.md §8.3, #216): the call
+  /// screen shows who records for as long as they do; nothing hides it.
+  #[uniffi(default = [])]
+  pub recording_user_ids: Vec<String>,
   /// The call runs on the fallback for networks that block UDP (ARCHITECTURE.md §6.6): the app says
   /// quality may be lower.
   #[uniffi(default = false)]
@@ -731,6 +735,7 @@ pub(crate) async fn join(
     reconnecting_count: 0,
     reconnecting_user_ids: Vec::new(),
     unverified_user_ids: Vec::new(),
+    recording_user_ids: Vec::new(),
     is_on_limited_network: false,
     is_video_held_for_voice: false,
     is_video_yielded_for_voice: false,
@@ -1322,6 +1327,14 @@ fn apply_event(
     CallEngineEvent::MemberRefused(device_id) => {
       refused.insert(device_id);
     },
+    // The engine says it again whenever a recorder starts, stops or leaves.
+    CallEngineEvent::RecordersChanged(recorders) => {
+      let users: BTreeSet<UserId> = recorders
+        .iter()
+        .filter_map(|recorder| roster.get(&recorder.device_id).copied())
+        .collect();
+      state.recording_user_ids = users.iter().map(ToString::to_string).collect();
+    },
     CallEngineEvent::Reconnecting => {
       state.phase = CallPhase::Reconnecting;
       // Who else is away, and who is muted, comes again with the SFU's answer to the rejoin.
@@ -1478,6 +1491,7 @@ fn ended(conversation: ConversationId, reason: CallEndReason) -> CallStateInfo {
     reconnecting_count: 0,
     reconnecting_user_ids: Vec::new(),
     unverified_user_ids: Vec::new(),
+    recording_user_ids: Vec::new(),
     is_on_limited_network: false,
     is_video_held_for_voice: false,
     is_video_yielded_for_voice: false,

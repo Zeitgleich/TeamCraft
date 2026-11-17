@@ -20,6 +20,18 @@ pub fn call_snapshot(calls: State<'_, Arc<CallHost>>) -> CallSnapshot {
   calls.page_snapshot()
 }
 
+/// Moves the finished call recording into the core's upload staging folder (e2ee.md §8.3); returns
+/// the path the message names. The core uploads it encrypted and empties the folder.
+#[tauri::command(rename_all = "snake_case")]
+pub fn call_recording_stage(
+  host: State<'_, CoreHost>,
+  calls: State<'_, Arc<CallHost>>,
+) -> Result<String, CommandError> {
+  let staging = host.current()?.staging_dir().to_path_buf();
+  let path = calls.stage_recording(&staging)?;
+  Ok(path.to_string_lossy().into_owned())
+}
+
 /// Lists microphones and speakers again; the snapshot keeps the result.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn call_media_devices(calls: State<'_, Arc<CallHost>>) -> Result<MediaDevices, CommandError> {
@@ -347,6 +359,9 @@ pub async fn call_action(
       calls.start_screen_share(has_sound, profile).await?
     },
     CallAction::StopScreenShare => calls.stop_screen_share().await,
+    CallAction::StartRecording { max_secs } => calls.start_recording(max_secs).await?,
+    CallAction::StopRecording => calls.stop_recording().await?,
+    CallAction::DiscardRecording => calls.discard_recording(),
     CallAction::OpenSystemVideoEffects => open_system_video_effects(&app)?,
     CallAction::SetPushToTalk {
       is_enabled,

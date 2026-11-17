@@ -1822,3 +1822,112 @@
     padding: 8px;
   }
 }
+
+/* Call recording (#216, e2ee.md §8.3): a steady red dot, never animated (no looping motion), and
+   text that names who records. The pill can't be closed. */
+.recording-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--danger);
+}
+
+.recording-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  border-radius: var(--radius-pill);
+  background: var(--danger-soft);
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.tile-status-recording {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Under the warning badge of the same corner. */
+.tile-status-warning ~ .tile-status-recording {
+  top: 36px;
+}
+
+.call-recording-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 8px 20px 0;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  background: var(--call-notice-bg);
+  color: var(--call-notice-text);
+  font-size: var(--text-sm);
+}
+
+.call-recording-banner p {
+  flex: 1;
+  min-width: 12rem;
+  margin: 0;
+}
+
+.call-recording-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.call-recording-actions p {
+  margin: 0;
+}
+
+/* The finished recording waits above the app's lower edge until it is posted or deleted. */
+.call-recording-take {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 40;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 12px;
+  max-width: min(420px, calc(100vw - 32px));
+  padding: 16px;
+  border-radius: var(--radius-lg);
+  background: var(--dialog-surface);
+  box-shadow: var(--shadow-card);
+}
+
+.call-recording-take > .icon {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  margin-top: 2px;
+  color: var(--danger);
+}
+
+.call-recording-take-text {
+  flex: 1;
+  min-width: 12rem;
+}
+
+.call-recording-take h2 {
+  margin: 0 0 4px;
+  font-size: var(--text-md);
+}
+
+.call-recording-take p {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.call-recording-take .call-recording-actions {
+  flex-basis: 100%;
+  justify-content: flex-end;
+}

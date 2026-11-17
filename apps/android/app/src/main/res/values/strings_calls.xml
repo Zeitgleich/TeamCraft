@@ -141,4 +141,7 @@
   <string name="call_tile_ongoing">Ongoing</string>
   <string name="call_tile_ended">Ended</string>
   <string name="call_tile_join">Join</string>
+  <!-- Call recording (#216, e2ee.md §8.3) -->
+  <string name="call_recording_by">Recorded by %1$s. Leave the call if you don\'t want to be recorded.</string>
+  <string name="call_recording_someone">Someone</string>
 </resources>

@@ -40,6 +40,7 @@ use crate::audio_frame::EncodedAudioFrame;
 use crate::audio_frame::opus_packet_samples;
 use crate::bwe::{BweConfig, FeedbackRecorder, SendSideEstimator};
 use crate::call_auth::{BindingRole, CallKeyAuthenticator, CallKeyError};
+use crate::call_recording_notice::{OwnRecording, Recorder, RecordingNotices};
 use crate::call_resilience::CallTransport;
 use crate::call_video::{IncomingVideo, OutgoingVideo, ReceivedVideoFrame, ReleasedFrame};
 use crate::capture_health::StallWindow;
@@ -289,6 +290,10 @@ pub struct CallEngine {
   is_muted: bool,
   /// The mute state the SFU was last told (it starts a slot unmuted).
   is_mute_announced: bool,
+  /// This device's recording and the notices it sent (e2ee.md §8.3).
+  own_recording: OwnRecording,
+  /// Who else records, from their signed notices.
+  recording_notices: RecordingNotices,
   is_deafened: bool,
   outputs: VecDeque<EngineOutput>,
 }
@@ -385,6 +390,8 @@ pub enum CallEngineEvent {
     device_id: DeviceId,
     is_muted: bool,
   },
+  /// The other devices that record the call changed (e2ee.md §8.3): all of them, by device.
+  RecordersChanged(Vec<Recorder>),
   /// The DAVE group (re)keyed; media is end-to-end encrypted. Compare `privacy_code` out of band.
   Secured {
     epoch: u64,
@@ -804,6 +811,8 @@ impl CallEngine {
       last_event_seq: 0,
       is_muted: false,
       is_mute_announced: false,
+      own_recording: OwnRecording::default(),
+      recording_notices: RecordingNotices::default(),
       is_deafened: false,
       outputs: VecDeque::new(),
     }
@@ -1065,6 +1074,86 @@ impl CallEngine {
       self.signal(CallClientMessage::SetMuted {
         is_muted: self.is_muted,
       });
+    }
+  }
+
+  /// Starts or stops this device's recording notice (e2ee.md §8.3): the others are told, signed
+  /// with this call's DAVE key, now and after every (re)join. Recording itself is the driver's.
+  pub fn set_recording(&mut self, is_recording: bool) {
+    if self.own_recording.set(is_recording) {
+      self.announce_recording();
+    }
+  }
+
+  pub fn is_recording(&self) -> bool {
+    self.own_recording.is_recording()
+  }
+
+  /// Sends this device's signed recording notice, once in the call with a DAVE session.
+  fn announce_recording(&mut self) {
+    if !matches!(self.phase, Phase::Joined { .. }) {
+      return;
+    }
+    let (Some(call_id), Some(dave)) = (self.call_id(), self.maybe_dave.as_ref()) else {
+      return;
+    };
+    let now_ms = web_time::SystemTime::now()
+      .duration_since(web_time::UNIX_EPOCH)
+      .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX));
+    match self
+      .own_recording
+      .next_notice(dave.notice_signer(), call_id, self.config.device_id, now_ms)
+    {
+      Ok(notice) => self.signal(CallClientMessage::SetRecording {
+        notice: Base64Bytes::new(notice),
+      }),
+      Err(error) => warn!(%error, "signing the recording notice failed"),
+    }
+  }
+
+  /// After a (re)join or a new DAVE session: the others need a notice signed with this
+  /// session's key while recording, or the stop that couldn't be sent while away.
+  fn announce_recording_if_needed(&mut self) {
+    if self.own_recording.needs_announcing() {
+      self.announce_recording();
+    }
+  }
+
+  /// The DAVE key a device's recording notices verify with: the key its verified call key
+  /// binding names, or, in apps without device keys (development tools), its DAVE leaf key.
+  fn recording_key(&self, device_id: DeviceId) -> Option<Vec<u8>> {
+    if let Some(key) = self.verified_keys.get(&device_id) {
+      return Some(key.clone());
+    }
+    if self.maybe_authenticator.is_some() {
+      return None;
+    }
+    let participant = DaveParticipantId::from_device(device_id);
+    self
+      .maybe_dave
+      .as_ref()?
+      .member_signature_keys()
+      .into_iter()
+      .find_map(|(id, key)| (id == participant).then_some(key))
+  }
+
+  /// Checks the notices held for want of a key, after the group changed.
+  fn recheck_recording_notices(&mut self) {
+    let Some(call_id) = self.call_id() else {
+      return;
+    };
+    let keys: HashMap<DeviceId, Vec<u8>> = self
+      .participants
+      .keys()
+      .filter_map(|device| Some((*device, self.recording_key(*device)?)))
+      .collect();
+    if self
+      .recording_notices
+      .recheck(call_id, |device| keys.get(&device).cloned())
+    {
+      self.event(CallEngineEvent::RecordersChanged(
+        self.recording_notices.recorders(),
+      ));
     }
   }
 
@@ -1839,6 +1928,22 @@ impl CallEngine {
         self.event(CallEngineEvent::ParticipantMuted { device_id, is_muted });
         Ok(())
       },
+      CallEvent::RecordingNotice { device_id, notice } => {
+        if let Some(call_id) = self.call_id()
+          && device_id != self.config.device_id
+        {
+          let maybe_key = self.recording_key(device_id);
+          if self
+            .recording_notices
+            .receive(call_id, device_id, notice.as_slice(), maybe_key.as_deref())
+          {
+            self.event(CallEngineEvent::RecordersChanged(
+              self.recording_notices.recorders(),
+            ));
+          }
+        }
+        Ok(())
+      },
       CallEvent::ActiveSpeakers { device_ids } => {
         self.event(CallEngineEvent::ActiveSpeakers(device_ids));
         Ok(())
@@ -2039,6 +2144,9 @@ impl CallEngine {
         DaveParticipantId::from_device(self.config.device_id),
         DaveCallId::from_call(call_id),
       )?));
+    } else {
+      // The slot may be a fresh one (an SFU restart): it holds no notice of this device.
+      self.announce_recording_if_needed();
     }
     self.reconcile_participants(state.participants);
     self.reconcile_remote_video(&state.video_tracks);
@@ -2228,6 +2336,11 @@ impl CallEngine {
       self.retired_keys.retire(device_id, key);
     }
     self.audio_streams.retain(|_, (owner, _)| *owner != device_id);
+    if self.recording_notices.remove(device_id) {
+      self.event(CallEngineEvent::RecordersChanged(
+        self.recording_notices.recorders(),
+      ));
+    }
     let streams: Vec<StreamId> = self
       .remote_video
       .iter()
@@ -3292,6 +3405,9 @@ impl CallEngine {
     self.has_sent_key_package = false;
     self.maybe_securing_since = None;
     self.has_reported_encryption_failure = false;
+    if self.maybe_dave.is_some() {
+      self.announce_recording_if_needed();
+    }
   }
 
   /// Verifies relayed call key bindings and remembers the bound keys; returns the keys these
@@ -4056,6 +4172,8 @@ impl CallEngine {
         privacy_code: code.to_owned(),
       };
       self.event(event);
+      // The group changed: notices that waited for their sender's key can be checked now.
+      self.recheck_recording_notices();
       // Pictures before this were dropped (nothing leaves unencrypted), and receivers that just
       // got the new epoch's keys start with a keyframe.
       let own: Vec<(MediaStreamId, Vec<u8>)> = self
