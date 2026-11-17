@@ -1806,6 +1806,27 @@ MLS_STORAGE_CHANNELS=100 cargo test -p teamcraft-core --all-features --test suit
   of a version before 1.0.9 itself, which was estimated at 5 to 6 times the state at the worst
   moment. No release build was measured here; the ratios of a save are what to take from the table.
 
+### Animated images out of view (issue #201)
+
+An animated image moves only while it is on screen and the lightbox is not over it. The web
+client keeps its moving copy in the DOM only then (an `IntersectionObserver` per animated tile;
+stills get none), so an image scrolled away decodes nothing and runs no timers. `web_animated_images.rs`
+in `tests/e2e` checks it: six animated images, then 60 messages; with the images far out of view
+there is no `img.media-moving`, no running animation, and the browser's processes stay under 2 % CPU
+over 10 s. The same images moving once scrolled back is the control.
+
+Left by design:
+
+- A pause or play the user chose is not kept for a row the list removed and brings back (it falls
+  back to the setting): keeping it costs wasm in the signed-in bundle, which has no headroom.
+
+- Android below 9 (API 28) stays still: animated decoding (`ImageDecoder`) starts with API 28, and a
+  fallback decoder would cost size and battery for a few devices.
+- On phones a WebP or AVIF moves once its file is on the device, and an APNG sent as `image/png`
+  only in the viewer: the type that says it moves is only known after the download, and tiles
+  fetch by themselves only what is announced as animated.
+- Animated stickers and emoji come with those features and use the same rule (`PlayState`).
+
 ### Administration console: requests of an open console (issue #1217)
 
 An open console used up the address's rate limit (`ip_requests_per_minute = 1200`, shared by everybody

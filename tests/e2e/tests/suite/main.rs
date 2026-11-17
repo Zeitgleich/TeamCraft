@@ -65,6 +65,8 @@ mod threads_policy;
 #[cfg(feature = "browser")]
 mod web;
 #[cfg(feature = "browser")]
+mod web_animated_images;
+#[cfg(feature = "browser")]
 mod web_calls;
 #[cfg(feature = "browser")]
 mod web_directory;
