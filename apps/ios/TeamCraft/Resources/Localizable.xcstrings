@@ -23696,6 +23696,54 @@
           }
         }
       }
+    },
+    "widget_previews": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Message previews in the widget"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nachrichtenvorschau im Widget"
+          }
+        }
+      }
+    },
+    "widget_previews_summary": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The home screen widget shows the newest message under each name."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das Widget auf dem Home-Bildschirm zeigt unter jedem Namen die neueste Nachricht."
+          }
+        }
+      }
+    },
+    "widget_previews_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Needs notifications that show the content, and the app lock off."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Geht nur, wenn Mitteilungen den Inhalt zeigen und die App-Sperre aus ist."
+          }
+        }
+      }
     }
   },
   "version": "1.0"

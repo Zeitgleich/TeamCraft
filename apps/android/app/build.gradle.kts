@@ -230,6 +230,8 @@ dependencies {
   implementation(libs.androidx.work.runtime)
   // App lock: biometrics or the device's screen lock through the system prompt.
   implementation(libs.androidx.biometric)
+  // The home screen widget (#2076): Glance, Apache-2.0, Jetpack's Compose-style RemoteViews.
+  implementation(libs.androidx.glance.appwidget)
   // Installs the baseline profile (src/main/baseline-prof.txt and the libraries' own) on devices
   // without Play, so APKs from GitHub and F-Droid start and scroll precompiled too.
   implementation(libs.androidx.profileinstaller)

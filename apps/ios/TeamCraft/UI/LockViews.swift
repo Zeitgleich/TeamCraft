@@ -94,6 +94,8 @@ struct DeviceSecuritySection: View {
     isLockEnabled = isOn
     // The notification extension follows it (generic notifications while the lock is on).
     SharedContainer().isAppLockOn = isOn
+    // The home screen widget hides everything personal while the lock is on (#2076).
+    AppModel.shared.homeWidget.storeDidChange(AppModel.shared)
   }
 
   private func title(of choice: LockAfter) -> LocalizedStringKey {

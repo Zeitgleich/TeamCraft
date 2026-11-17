@@ -27,6 +27,7 @@ photo and document pickers, Quick Look, the background prefetch task and CallKit
 | `Shared/`              | Compiled into the app **and** the extension: keychain, App Group, process lock, OIDC session, core factory, notification content |
 | `NotificationService/` | The Notification Service Extension                                                                                               |
 | `ShareExtension/`      | The share sheet's entry: copies what was shared into the App Group, without the core (`Shared/ShareInbox.swift`)                 |
+| `TeamCraftWidget/`     | The home screen widget: unread conversations from the App Group, without the core (`Shared/WidgetSnapshot.swift`)                |
 | `TeamCraftTests/`      | Unit tests (PKCE, OIDC URLs, push payload, lock, notification text, sections, wire models, search filters, Annex B)              |
 | `Generated/`           | `TeamCraftFFI.xcframework` and `Swift/teamcraft_ffi.swift` (not in git)                                                          |
 
@@ -72,7 +73,7 @@ the extension (each links the static library; they are separate processes).
 No server, OIDC issuer or client is built in: see [Server address](#server-address).
 
 Bundle IDs are `de.zeitgleich.teamcraft` (app), `de.zeitgleich.teamcraft.notifications`,
-`de.zeitgleich.teamcraft.share` (share extension), `de.zeitgleich.teamcraft.Tests`. Change them for your Apple account in `project.yml` together with
+`de.zeitgleich.teamcraft.share` (share extension), `de.zeitgleich.teamcraft.widget` (home screen widget), `de.zeitgleich.teamcraft.Tests`. Change them for your Apple account in `project.yml` together with
 `APP_GROUP_ID` and `KEYCHAIN_ACCESS_GROUP`.
 
 ## How it works
@@ -291,7 +292,8 @@ archive's dSYMs: `<archive>.xcarchive/dSYMs/TeamCraft.app.dSYM` (Release builds 
 CI builds unsigned (`CODE_SIGNING_ALLOWED=NO`). For a device or TestFlight you need an Apple
 Developer account:
 
-1. Create the App IDs for the app and the extension and an App Group; enable the capabilities Push
+1. Create the App IDs for the app and the extensions (notifications, share, widget) and an App Group
+   (all four join it); enable the capabilities Push
    Notifications, App Groups, Keychain Sharing, Communication Notifications and Time Sensitive
    Notifications (all self-service). Request **Notification Filtering**
    (`com.apple.developer.usernotifications.filtering`) from Apple.
