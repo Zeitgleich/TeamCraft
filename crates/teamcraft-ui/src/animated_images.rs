@@ -1,17 +1,7 @@
 //! When an animated image in the conversation moves (#201): the user's setting, what they did to
 //! this one image, and whether anybody can see it. Kept apart from the view so the rules are tested.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
-
 use crate::prefs::AnimatedImages;
-
-/// Choices kept for rows that scrolled away; more than a long scroll back shows, so memory stays small.
-const MAX_REMEMBERED_CHOICES: usize = 256;
-
-thread_local! {
-  static REMEMBERED: RefCell<HashMap<String, PlayChoice>> = RefCell::new(HashMap::new());
-}
 
 /// What the user did to one image in the current view; it wins over the setting.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -20,22 +10,6 @@ pub enum PlayChoice {
   Unset,
   Playing,
   Paused,
-}
-
-/// The choice the user made for the image with this key, kept while the app runs: the list removes
-/// rows that are far away, and the same image must still be paused when they scroll back.
-pub fn remembered_choice(key: &str) -> PlayChoice {
-  REMEMBERED.with_borrow(|choices| choices.get(key).copied().unwrap_or_default())
-}
-
-pub fn remember_choice(key: &str, choice: PlayChoice) {
-  REMEMBERED.with_borrow_mut(|choices| {
-    if choices.len() >= MAX_REMEMBERED_CHOICES && !choices.contains_key(key) {
-      // Rather forget all than grow without bound; a forgotten choice falls back to the setting.
-      choices.clear();
-    }
-    choices.insert(key.to_owned(), choice);
-  });
 }
 
 /// What decides whether one image moves right now.
@@ -176,17 +150,6 @@ mod tests {
       .needs_button()
     );
     assert!(!AUTOPLAY.needs_button());
-  }
-
-  #[test]
-  fn a_choice_is_kept_for_the_image_and_bounded() {
-    assert_eq!(remembered_choice("a"), PlayChoice::Unset);
-    remember_choice("a", PlayChoice::Paused);
-    assert_eq!(remembered_choice("a"), PlayChoice::Paused);
-    for index in 0..=MAX_REMEMBERED_CHOICES {
-      remember_choice(&format!("k{index}"), PlayChoice::Playing);
-    }
-    assert!(REMEMBERED.with_borrow(HashMap::len) <= MAX_REMEMBERED_CHOICES);
   }
 
   #[test]

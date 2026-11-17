@@ -25,7 +25,7 @@ use teamcraft_client_api::upload_pill::UploadPill;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
-use crate::animated_images::{PlayChoice, PlayState, remember_choice, remembered_choice, toggled};
+use crate::animated_images::{PlayChoice, PlayState, toggled};
 use crate::areas::{self, Place, lazy_area};
 use crate::channel_access::can_share_files;
 use crate::clock::format_date_time;
@@ -531,8 +531,7 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
   let is_on_screen = RwSignal::new(false);
   watch_on_screen(tile_node, is_on_screen, Signal::derive(is_animation));
   let is_hovered = RwSignal::new(false);
-  let choice_key = StoredValue::new(key.dom_key());
-  let choice = RwSignal::new(choice_key.with_value(|key| remembered_choice(key)));
+  let choice = RwSignal::new(PlayChoice::Unset);
   let is_motion_reduced = prefers_reduced_motion();
   let play_state = Memo::new(move |_| PlayState {
     mode: state
@@ -635,9 +634,7 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
     is_broken.set(!has_thumbnail);
   };
   let toggle_motion = move |_| {
-    let toggled_choice = toggled(is_moving() || is_coming());
-    choice_key.with_value(|key| remember_choice(key, toggled_choice));
-    choice.set(toggled_choice);
+    choice.set(toggled(is_moving() || is_coming()));
     has_failed.set(false);
     is_unavailable.set(false);
   };

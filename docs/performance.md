@@ -1813,11 +1813,12 @@ client keeps its moving copy in the DOM only then (an `IntersectionObserver` per
 stills get none), so an image scrolled away decodes nothing and runs no timers. `web_animated_images.rs`
 in `tests/e2e` checks it: six animated images, then 60 messages; with the images far out of view
 there is no `img.media-moving`, no running animation, and the browser's processes stay under 2 % CPU
-over 10 s. The same images moving once scrolled back is the control. The user's pause or play is
-kept for the image while the app runs (a bounded map by media key), so a row the list removed and
-brings back is still paused.
+over 10 s. The same images moving once scrolled back is the control.
 
 Left by design:
+
+- A pause or play the user chose is not kept for a row the list removed and brings back (it falls
+  back to the setting): keeping it costs wasm in the signed-in bundle, which has no headroom.
 
 - Android below 9 (API 28) stays still: animated decoding (`ImageDecoder`) starts with API 28, and a
   fallback decoder would cost size and battery for a few devices.
