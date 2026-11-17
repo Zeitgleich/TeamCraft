@@ -964,6 +964,11 @@ final class AppModel {
     await answer(.draftReply(conversationId: conversationId))?.maybeReply.flatMap(ComposerReply.init(stored:))
   }
 
+  /// The link preview under the composer's draft (#2073); none when it can't be read.
+  func composerLinkPreview(conversationId: String, threadId: String?) async -> ComposerLinkPreview {
+    await answer(.composerLinkPreview(conversationId: conversationId, maybeThreadId: threadId))?.preview ?? .none
+  }
+
   func drafts() async -> [DraftItem] {
     await answer(.drafts)?.drafts ?? []
   }

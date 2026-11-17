@@ -818,6 +818,22 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.set_draft(conversation, maybe_thread, body);
   }
 
+  fn update_composer_link(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>, body: &str) {
+    self.chat.update_composer_link(conversation, maybe_thread, body);
+  }
+
+  fn composer_link_preview(
+    &self,
+    conversation: ConversationId,
+    maybe_thread: Option<ThreadId>,
+  ) -> teamcraft_client_api::actions::ComposerLinkPreview {
+    self.chat.composer_link_preview(conversation, maybe_thread)
+  }
+
+  fn remove_composer_link_preview(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) {
+    self.chat.remove_composer_link_preview(conversation, maybe_thread);
+  }
+
   fn attach_draft_files(
     &self,
     conversation: ConversationId,

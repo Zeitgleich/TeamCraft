@@ -107,6 +107,20 @@ struct LinkPreview: Decodable, Equatable, Sendable {
   }
 }
 
+/// The link preview under the composer's draft (#2073), tagged by `state`: `loading` (with `url`),
+/// `ready` (with `preview`) or `none`. A state this version doesn't know shows nothing.
+struct ComposerLinkPreview: Decodable, Equatable, Sendable {
+  var state: String
+  var url: String?
+  var preview: LinkPreview?
+
+  static let none = ComposerLinkPreview(state: "none")
+
+  var isLoading: Bool { state == "loading" && url != nil }
+  var maybeReady: LinkPreview? { state == "ready" ? preview : nil }
+  var isShown: Bool { isLoading || maybeReady != nil }
+}
+
 /// What a message has beyond its text (`MessageExtras`).
 struct MessageExtras: Decodable, Equatable, Sendable {
   let message: String
@@ -252,6 +266,8 @@ struct ChatAnswer: Decodable, Sendable {
   let maybeMessage: String?
   /// `ChatQuery.draftReply`: what the composer replies to.
   let maybeReply: ReplyPreview?
+  /// `ChatQuery.composerLinkPreview`: the link preview under the composer's draft (#2073).
+  var preview: ComposerLinkPreview?
   let olderHistory: OlderHistory?
   var calls: [CallHistoryItem]?
   var items: [SavedItem]?

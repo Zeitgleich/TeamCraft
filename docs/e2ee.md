@@ -7572,6 +7572,21 @@ small PNG. All of it goes into the encrypted message. The fetch comes from the s
 so the linked site sees the sender's IP address, as it would on opening the link. Browsers can't
 read cross-origin pages, so the web client sends links without previews.
 
+**While typing (#2073).** The composer shows the preview of the draft's first link before the
+message is sent, made the same way by the same device (`teamcraft-core::composer_preview`, which
+uses the outbox's `make_link_preview`): after the pause in typing that also stores the draft, for
+domains the verified policy allows, checked again after redirects and before it is shown and sent.
+Nothing new reaches the server: the fetch goes from the sender's device to the linked site, as
+before, only earlier, and where the draft's preview stands (loading, ready, failed, removed) is
+kept in the local store of this device only, never in the synced draft. The message carries
+exactly what the composer showed: the ready preview of the link it still contains, or none while
+the page loads, after a failed fetch or once the user removed it; it never waits in the outbox for a
+fetch. The fetch runs in the host beside its loop, so a slow site holds up neither sending nor
+syncing; a new link (or none) cancels the fetch of the old one, and a failed fetch is tried again
+after 30 s at the earliest. A message sent without a composer's preview
+(`OutgoingLinkPreview::MadeOnSend`) is still held in the outbox for its preview, as described
+above. The web client shows none.
+
 **Links to messages of the same server** (permalinks `teamcraft:/c/{c}/m/{m}[/t/{t}]` and the app's
 own `https://<server>/c/{c}/m/{m}` and `/c/{c}/t/{t}` URLs) get an embedded preview of the linked
 message instead. The sender's client embeds nothing but the link. Each **receiving client resolves

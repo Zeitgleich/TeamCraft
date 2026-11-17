@@ -82,39 +82,50 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   async fn make_preview(&self, url: &str, policy: &LinkPreviewPolicy) -> Option<LinkPreviewData> {
-    let url = Url::parse(url).ok()?;
-    let fetcher = self.maybe_preview_fetcher.as_ref()?;
-    // Checked again here: the policy may have changed since the message was written.
-    if !is_allowed(policy, &url) {
-      return None;
-    }
-    let settings = &self.settings.link_previews;
-    let page = fetcher.fetch(url.clone(), settings.max_page_bytes).await?;
-    // A redirect to a disallowed domain gets no preview either.
-    if !is_allowed(policy, &page.final_url) || !page.content_type.contains("html") {
-      return None;
-    }
-    let meta = parse_page(&String::from_utf8_lossy(&page.body), &page.final_url);
-    if meta.maybe_title.is_none() && meta.maybe_description.is_none() {
-      return None;
-    }
-    let maybe_image = match meta.maybe_image_url {
-      Some(image_url) => match fetcher.fetch(image_url, settings.max_image_bytes).await {
-        Some(image) => crate::thumbnail::make_thumbnail(&image.body, &image.content_type)
-          .await
-          .map(Base64Bytes::new),
-        None => None,
-      },
-      None => None,
-    };
-    Some(LinkPreviewData {
-      url: url.to_string(),
-      maybe_title: meta.maybe_title,
-      maybe_description: meta.maybe_description,
-      maybe_site_name: meta.maybe_site_name,
-      maybe_image,
-    })
+    let fetcher = self.maybe_preview_fetcher.as_deref()?;
+    make_link_preview(fetcher, &self.settings.link_previews, policy, url).await
   }
+}
+
+/// Reads the page `url` links to and makes its preview, under `policy`: the one way previews are
+/// made, for the outbox and for the composer (#2073). `None` for a disallowed domain (also after a
+/// redirect), a page that isn't HTML or says nothing about itself, and any failure to fetch.
+pub async fn make_link_preview(
+  fetcher: &dyn PreviewFetcher,
+  settings: &LinkPreviewSettings,
+  policy: &LinkPreviewPolicy,
+  url: &str,
+) -> Option<LinkPreviewData> {
+  let url = Url::parse(url).ok()?;
+  // Checked again here: the policy may have changed since the message or draft was written.
+  if !is_allowed(policy, &url) {
+    return None;
+  }
+  let page = fetcher.fetch(url.clone(), settings.max_page_bytes).await?;
+  // A redirect to a disallowed domain gets no preview either.
+  if !is_allowed(policy, &page.final_url) || !page.content_type.contains("html") {
+    return None;
+  }
+  let meta = parse_page(&String::from_utf8_lossy(&page.body), &page.final_url);
+  if meta.maybe_title.is_none() && meta.maybe_description.is_none() {
+    return None;
+  }
+  let maybe_image = match meta.maybe_image_url {
+    Some(image_url) => match fetcher.fetch(image_url, settings.max_image_bytes).await {
+      Some(image) => crate::thumbnail::make_thumbnail(&image.body, &image.content_type)
+        .await
+        .map(Base64Bytes::new),
+      None => None,
+    },
+    None => None,
+  };
+  Some(LinkPreviewData {
+    url: url.to_string(),
+    maybe_title: meta.maybe_title,
+    maybe_description: meta.maybe_description,
+    maybe_site_name: meta.maybe_site_name,
+    maybe_image,
+  })
 }
 
 /// Holds a just-written message back for a preview if it links somewhere the policy allows.
@@ -212,7 +223,7 @@ impl PreviewFetcher for HttpPreviewFetcher {
 }
 
 /// The fetcher a client starts with.
-pub(crate) fn default_fetcher(settings: &LinkPreviewSettings) -> Option<Box<dyn PreviewFetcher>> {
+pub fn default_fetcher(settings: &LinkPreviewSettings) -> Option<Box<dyn PreviewFetcher>> {
   #[cfg(not(target_arch = "wasm32"))]
   {
     HttpPreviewFetcher::new(settings).map(|fetcher| Box::new(fetcher) as Box<dyn PreviewFetcher>)

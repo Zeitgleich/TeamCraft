@@ -477,6 +477,20 @@ data class LinkPreview(
 )
 
 /**
+ * The link preview under the composer's draft (#2073), made by the core while the user types:
+ * [state] is `loading` (with [url]), `ready` (with [preview]) or `none`. Unknown states show nothing.
+ */
+@Serializable
+data class ComposerLinkPreview(
+  val state: String = "none",
+  val url: String? = null,
+  val preview: LinkPreview? = null,
+) {
+  val isLoading: Boolean get() = state == "loading" && url != null
+  val maybeReady: LinkPreview? get() = preview?.takeIf { state == "ready" }
+}
+
+/**
  * Picture bytes, which the bridge sends as a JSON array of numbers. Decoded straight into a byte
  * array: a `List<Int>` boxed every byte of every thumbnail on each read of the feed (#315). Equal by
  * content, so an unchanged message doesn't recompose.
@@ -686,6 +700,8 @@ data class ChatAnswer(
   @SerialName("maybe_body") val maybeBody: String? = null,
   /** [ChatQueries.draftReply]: what the composer replies to. */
   @SerialName("maybe_reply") val maybeReply: ReplyPreview? = null,
+  /** [ChatQueries.composerLinkPreview]: the link preview under the composer's draft. */
+  val preview: ComposerLinkPreview? = null,
   val drafts: List<DraftItem> = emptyList(),
   val sent: List<SentItem> = emptyList(),
   val files: List<FileInfo> = emptyList(),

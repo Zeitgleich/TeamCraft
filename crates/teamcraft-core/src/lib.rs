@@ -14,6 +14,8 @@ pub mod channel_roles;
 pub mod chat_list_pass;
 pub mod client;
 pub mod clock;
+#[cfg(feature = "ui")]
+pub mod composer_preview;
 pub mod connection;
 pub mod custom_emoji;
 pub mod device_activity;

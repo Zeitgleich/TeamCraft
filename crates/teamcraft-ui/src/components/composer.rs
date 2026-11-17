@@ -2,7 +2,9 @@ use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
-use teamcraft_client_api::actions::{FileSource, MessagePriority, OutgoingFile, OutgoingMessage};
+use teamcraft_client_api::actions::{
+  FileSource, MessagePriority, OutgoingFile, OutgoingLinkPreview, OutgoingMessage,
+};
 use teamcraft_client_api::admin::format_bytes;
 use teamcraft_client_api::custom_emoji::CustomEmojiSet;
 use teamcraft_client_api::drafts::{DraftFileItem, DraftFileState, DraftFileTravel};
@@ -17,6 +19,7 @@ use crate::clock::{format_date_time, now_ms};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::composer_commands::{self, CommandButton, Notice, NoticeEvent, Outcome};
 use crate::components::composer_editor;
+use crate::components::composer_link_preview::ComposerLinkPreviewCard;
 use crate::components::composer_toolbar::{
   ActiveFormats, FormatAction, FormatToolbar, SendOptionsMenu, format_action_for, move_focus_vertical,
 };
@@ -611,6 +614,8 @@ pub fn Composer(
       if composer_editor::is_blank(&element) {
         composer_editor::set_markdown(&element, &text);
         is_empty.set(composer_editor::is_blank(&element));
+        // A preview lost to a restart, or of a draft from another device, is made now.
+        untrack(|| state.write(|backend| backend.update_composer_link(conversation, maybe_thread, &text)));
       }
     }
   });
@@ -621,7 +626,11 @@ pub fn Composer(
       .flatten()
       .map(|element| composer_editor::markdown(&element))
       .unwrap_or_default();
-    state.try_write(|backend| backend.set_draft(conversation, maybe_thread, &text));
+    state.try_write(|backend| {
+      backend.set_draft(conversation, maybe_thread, &text);
+      // The pause in typing is the preview's debounce too (#2073).
+      backend.update_composer_link(conversation, maybe_thread, &text);
+    });
     if text.contains('@') {
       if let Some(groups) = state.try_read(|backend| backend.mentionable_groups(conversation)) {
         outside_members.try_set(group_mention_reach(&text, &groups).outside_count);
@@ -730,6 +739,7 @@ pub fn Composer(
           };
           if !sends {
             clear_editor();
+            state.write(|backend| backend.update_composer_link(conversation, maybe_thread, ""));
             return;
           }
         },
@@ -773,6 +783,9 @@ pub fn Composer(
     }
     files.extend(others.iter().map(from_draft));
     let body = text;
+    // The core compares the text sent with the one its preview is for: a link changed in the last
+    // pause goes out without a preview, never with one nobody saw (#2073).
+    state.write(|backend| backend.update_composer_link(conversation, maybe_thread, &body));
     let maybe_reply = state
       .reply_target
       .get_untracked()
@@ -797,6 +810,7 @@ pub fn Composer(
         && maybe_channel_name().is_some()
         && also_send_to_channel.get_untracked(),
       files,
+      link_preview: OutgoingLinkPreview::AsShown,
     };
     if large.is_empty() {
       state.write(|backend| backend.send_message(message));
@@ -902,6 +916,7 @@ pub fn Composer(
       .filter(|(attempted, _)| *attempted == text)
       .map_or_else(ClientMessageId::random, |(_, id)| id);
     schedule_attempt.set_value(Some((text.clone(), id)));
+    state.write(|backend| backend.update_composer_link(conversation, maybe_thread, &text));
     let message = OutgoingMessage {
       maybe_client_message_id: Some(id),
       conversation,
@@ -916,6 +931,7 @@ pub fn Composer(
         && maybe_channel_name().is_some()
         && also_send_to_channel.get_untracked(),
       files: Vec::new(),
+      link_preview: OutgoingLinkPreview::AsShown,
     };
     // The server takes it or refuses it: the text stays here until it did.
     scheduling.run_and_then(
@@ -970,6 +986,8 @@ pub fn Composer(
         && maybe_channel_name().is_some()
         && also_send_to_channel.get_untracked(),
       files: Vec::new(),
+      // A voice message has no text, and the draft's preview stays with the draft.
+      link_preview: OutgoingLinkPreview::MadeOnSend,
     };
     leptos::task::spawn_local(async move {
       match state.voice.take_file().await {
@@ -1854,6 +1872,7 @@ pub fn Composer(
               }
             })
         }}
+        <ComposerLinkPreviewCard conversation=conversation maybe_thread=maybe_thread />
         {can_record.then(|| view! { <VoiceBar key=voice_key max_seconds=voice_max_seconds on_send=Callback::new(move |()| send_voice()) /> })}
         {move || {
           notice.get().map(|shown| match shown {

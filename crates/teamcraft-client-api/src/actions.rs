@@ -57,6 +57,25 @@ pub struct OutgoingMessage {
   pub also_send_to_channel: bool,
   #[serde(default)]
   pub files: Vec<OutgoingFile>,
+  /// Where the message's link preview comes from (#2073).
+  #[serde(default)]
+  pub link_preview: OutgoingLinkPreview,
+}
+
+/// Where an outgoing message's link preview comes from (e2ee.md §12).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutgoingLinkPreview {
+  /// The message waits in the outbox while the sender's client makes the preview: sends no composer
+  /// showed a preview for (a notification's reply, a share).
+  #[default]
+  MadeOnSend,
+  /// Exactly what the composer showed (#2073): the preview of the draft's first link when it was
+  /// ready and not removed, otherwise none. The message never waits for a fetch.
+  AsShown,
+  /// A value of a newer client: treated as [`Self::MadeOnSend`].
+  #[serde(other)]
+  Unknown,
 }
 
 /// A file to attach. Large files: prefer [`FileSource::Path`] where the backend can read files.
@@ -472,6 +491,28 @@ pub struct LinkPreview {
   /// A small JPEG or PNG.
   #[serde(default)]
   pub maybe_image: Option<Vec<u8>>,
+}
+
+/// The link preview a composer shows under its draft (#2073): made by this device for the draft's
+/// first link the signed policy allows, after the app's debounce; it goes out with the message only
+/// as shown here ([`OutgoingLinkPreview::AsShown`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ComposerLinkPreview {
+  /// No link, previews are off or not possible here (the browser), the fetch failed, or the user
+  /// removed the preview.
+  #[default]
+  None,
+  /// The page is being read; sending now sends the message without a preview.
+  Loading {
+    url: String,
+  },
+  Ready {
+    preview: LinkPreview,
+  },
+  /// A state of a newer core: shown as [`Self::None`].
+  #[serde(other)]
+  Unknown,
 }
 
 /// A saved message with where it lives.

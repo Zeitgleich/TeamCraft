@@ -223,6 +223,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       CoreCommand::RefreshReadReceipts { conversation } => self.refresh_read_receipts(conversation).await,
       CoreCommand::UploadFiles => self.upload_pending().await.map(|_| ()),
       CoreCommand::GeneratePreviews => self.generate_pending_previews().await.map(|_| ()),
+      // The host fetches the composer's previews beside its loop (`ComposerFetches`), never here.
+      CoreCommand::ComposerLinkChanged { .. } => Ok(()),
       CoreCommand::DownloadFile {
         conversation,
         attachment,
