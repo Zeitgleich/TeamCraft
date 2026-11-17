@@ -509,6 +509,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       CoreCommand::NoteMeetingLobby { meeting, has_lobby } => self.note_meeting_lobby(meeting, has_lobby),
       CoreCommand::NoteMeetingSchedule { meeting, note } => self.note_meeting_schedule(meeting, note),
       CoreCommand::ForgetMeetingRecords { meeting } => self.forget_meeting_records(meeting),
+      CoreCommand::ReopenMeetingRecords { meeting, organizer } => {
+        self.reopen_meeting_records(meeting, organizer).map(|_| ())
+      },
       CoreCommand::SyncMeetingAdmitters {
         meeting,
         conversation,

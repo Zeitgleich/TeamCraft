@@ -2246,10 +2246,28 @@ never by the server's member list:
       never runs past that time again (`meeting_schedule::admitters_until`), whoever brings the
       meeting back: a server that fakes a removal, re-adds the organizer and reports a longer
       meeting gets no longer signature than the meeting had when this device closed it, and a
-      restored cancellation is signed no further either. Without its lobby record the meeting's
-      link guests wait in the lobby. Marks are kept for good (a few dozen bytes per meeting
-      closed); dropping one would hand the server that lengthening back. Notes of a schedule for
-      a closed meeting keep no record.
+      cancellation restored by anyone but this device's user is signed no further either. Without
+      its lobby record the meeting's link guests wait in the lobby. Marks are kept for good (a few
+      dozen bytes per meeting closed, with the two records as they were at the close); dropping
+      one would hand the server that lengthening back. Notes of a schedule for a closed meeting
+      keep no record.
+    - **Restoring here** (#1983). The organizer's own restore of the whole meeting on this device
+      (desktop/web and the apps, after the server took it; the server lets only the organizer
+      restore) lifts the mark: the core puts the lobby and schedule records kept in it back as
+      they were at the close, drops the mark, and the app signs the admitters again. It does so
+      only when the restored meeting names this user as its organizer. Nothing new is signed for
+      other devices: the mark is this device's own, and members and guests only ever see the
+      admitters statement, whose end the organizer's key signs as before. Members' devices take
+      the restore's end from that statement, never from the server. The validity follows the
+      records kept here, so a server that lengthens the restored meeting gets no longer
+      signature; a mark without kept records (closed before anything was recorded here) opens on
+      the server's end, as a meeting without a record does. A meeting the server brings back by
+      itself (its status, a re-added organizer) and a restore on another device of the organizer
+      lift nothing here: it stays capped at the close. Restoring one occurrence touches no mark;
+      a series' mark only comes from cancelling the whole series. A restore whose answer is lost,
+      or an app that dies between the answer and the lift, leaves the meeting closed here (fails
+      closed); cancelling and restoring it again lifts the mark with the records of the first
+      close.
     - **Residuals of closing.** "Doesn't repeat", for "End for everyone", is the server's word: a
       server that lists a series as a one-off makes ending one occurrence close the whole series
       on this device. That only shortens: the series' later occurrences are signed no longer than

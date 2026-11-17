@@ -1192,6 +1192,10 @@ pub enum ChatAction {
   ForgetMeetingRecords {
     meeting: teamcraft_proto::MeetingId,
   },
+  ReopenMeetingRecords {
+    meeting: teamcraft_proto::MeetingId,
+    organizer: UserId,
+  },
   SyncMeetingAdmitters {
     meeting: teamcraft_proto::MeetingId,
     conversation: ConversationId,
@@ -1659,6 +1663,7 @@ impl ChatAction {
       Self::NoteMeetingLobby { meeting, has_lobby } => backend.note_meeting_lobby(meeting, has_lobby),
       Self::NoteMeetingSchedule { meeting, note } => backend.note_meeting_schedule(meeting, note),
       Self::ForgetMeetingRecords { meeting } => backend.forget_meeting_records(meeting),
+      Self::ReopenMeetingRecords { meeting, organizer } => backend.reopen_meeting_records(meeting, organizer),
       Self::SyncMeetingAdmitters {
         meeting,
         conversation,
