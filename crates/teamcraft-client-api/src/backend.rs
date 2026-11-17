@@ -667,6 +667,27 @@ pub trait ChatBackend {
   }
   /// Stores the draft; an empty body removes it. Call debounced while typing.
   fn set_draft(&self, _conversation: ConversationId, _maybe_thread: Option<ThreadId>, _body: &str) {}
+  /// Tells the core what the composer's draft says now, so it previews the draft's first link
+  /// (#2073). Call debounced while typing, and once more right before sending. A new or vanished
+  /// link cancels the fetch of the old one; the same link again does nothing.
+  fn update_composer_link(
+    &self,
+    _conversation: ConversationId,
+    _maybe_thread: Option<ThreadId>,
+    _body: &str,
+  ) {
+  }
+  /// The link preview the composer shows under its draft; read again on each change notification.
+  fn composer_link_preview(
+    &self,
+    _conversation: ConversationId,
+    _maybe_thread: Option<ThreadId>,
+  ) -> crate::actions::ComposerLinkPreview {
+    crate::actions::ComposerLinkPreview::None
+  }
+  /// The remove button of the composer's preview: this link of the draft gets none, also after a
+  /// restart, until the draft links somewhere else.
+  fn remove_composer_link_preview(&self, _conversation: ConversationId, _maybe_thread: Option<ThreadId>) {}
   /// What the conversation's composer replies to, as a quote (#1115); `None` once the message is
   /// gone. Kept on this device only.
   fn draft_reply(&self, _conversation: ConversationId) -> Option<ReplyPreview> {

@@ -38,6 +38,7 @@ use crate::components::call_tile::CallTileRow;
 use crate::components::calls_unavailable::CallsUnavailableDialog;
 use crate::components::calls_view::CallsView;
 use crate::components::canvas_view::CanvasView;
+use crate::components::composer_link_preview::ComposerLinkPreviewCard;
 use crate::components::composer_toolbar::{ActiveFormats, FormatAction, FormatToolbarPanel};
 use crate::components::conversation_notify::QuietHoursDialog;
 use crate::components::date_jump::{DateJumpMenu, DateJumpPanel};
@@ -91,7 +92,7 @@ use crate::components::workspace_dialogs::{
 use crate::i18n::use_i18n;
 use crate::lightbox::MediaKey;
 use crate::meetings::GuestLink;
-use crate::model::{CallTile, ConversationId, Message, MessageId, SpaceId, UserId};
+use crate::model::{CallTile, ConversationId, Message, MessageId, SpaceId, ThreadId, UserId};
 use crate::reactive::SetIfAlive;
 use crate::session::SessionControl;
 use crate::settings::Settings;
@@ -296,6 +297,10 @@ areas! {
   integration_feed(conversation: ConversationId) => log: view! { <IntegrationFeed conversation=conversation /> };
   /// The desktop app's window controls (`desktop_only`): a browser never loads them (#1462).
   window_controls(_unit: ()) => desktop: view! { <WindowControls /> };
+  /// The composer's link preview (#2073): only the desktop app's core can read other sites.
+  composer_link_card(conversation: ConversationId, maybe_thread: Option<ThreadId>) => desktop: view! {
+    <ComposerLinkPreviewCard conversation=conversation maybe_thread=maybe_thread />
+  };
   /// The desktop app's question about a link from outside, and taking those links from the shell.
   app_link_prompt(links: AppLinks) => desktop: {
     links.listen();

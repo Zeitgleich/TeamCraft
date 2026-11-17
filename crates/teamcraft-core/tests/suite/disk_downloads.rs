@@ -400,6 +400,7 @@ impl Setup {
         maybe_waveform: None,
         maybe_draft_id: None,
       }],
+      link_preview: Default::default(),
     });
     run_commands(&mut alice, &alice_ui).await;
     settle(&mut [&mut alice, &mut bob]).await;

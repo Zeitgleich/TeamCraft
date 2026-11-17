@@ -23744,6 +23744,38 @@
           }
         }
       }
+    },
+    "composer_link_preview_loading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading preview…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Vorschau wird geladen …"
+          }
+        }
+      }
+    },
+    "composer_link_preview_remove": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove link preview"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Linkvorschau entfernen"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

@@ -241,6 +241,7 @@ fn with_file(conversation: ConversationId, name: &str, source: FileSource) -> Ou
       maybe_waveform: None,
       maybe_draft_id: None,
     }],
+    link_preview: Default::default(),
   }
 }
 

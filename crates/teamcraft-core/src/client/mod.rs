@@ -890,6 +890,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     &self.settings
   }
 
+  /// The limits of link preview fetching, for the composer's fetches in the host (#2073).
+  pub fn link_preview_settings(&self) -> &previews::LinkPreviewSettings {
+    &self.settings.link_previews
+  }
+
   /// The file transfers in flight; a clone stays current (the UI adapter reads their progress).
   pub fn transfers(&self) -> crate::transfers::Transfers {
     self.transfers.clone()

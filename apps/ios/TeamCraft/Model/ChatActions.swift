@@ -59,6 +59,10 @@ enum ChatAction {
   case setDraft(conversationId: String, maybeThreadId: String?, body: String)
   /// What the conversation's composer replies to (#1115), kept on this device; nil forgets it.
   case setDraftReply(conversationId: String, reply: ComposerReply?)
+  /// What the draft says now, for its link preview (#2073): after a pause in typing, and before sending.
+  case updateComposerLink(conversationId: String, maybeThreadId: String?, body: String)
+  /// The remove button of the composer's link preview: this link of the draft gets none.
+  case removeComposerLinkPreview(conversationId: String, maybeThreadId: String?)
   /// Files go up with the draft as they are picked (#1220), each under its `maybeDraftId`, so the
   /// draft keeps them after the app was killed and the user's other devices show and send them.
   case attachDraftFiles(conversationId: String, maybeThreadId: String?, files: [PickedFile])
@@ -159,6 +163,16 @@ enum ChatAction {
         ] as [String: Any]
       }
       object = ["action": "set_draft_reply", "conversation": conversation, "maybe_reply": reply]
+    case .updateComposerLink(let conversation, let maybeThread, let body):
+      object = [
+        "action": "update_composer_link", "conversation": conversation,
+        "maybe_thread": maybeThread.map { $0 as Any } ?? NSNull(), "body": body,
+      ]
+    case .removeComposerLinkPreview(let conversation, let maybeThread):
+      object = [
+        "action": "remove_composer_link_preview", "conversation": conversation,
+        "maybe_thread": maybeThread.map { $0 as Any } ?? NSNull(),
+      ]
     case .attachDraftFiles(let conversation, let maybeThread, let files):
       object = [
         "action": "attach_draft_files", "conversation": conversation,
@@ -196,6 +210,8 @@ struct SendRequest: Equatable {
   var maybeReplyAttachmentId: String?
   /// Chosen by the composer when a retry must be the same message (a scheduled one).
   var maybeClientMessageId: String?
+  /// Where the link preview comes from (#2073).
+  var linkPreview: OutgoingLinkPreview = .madeOnSend
 
   var object: [String: Any] {
     let fromDraft: [[String: Any]] = draftFiles.map { item in
@@ -213,8 +229,17 @@ struct SendRequest: Equatable {
       "is_silent": false,
       "also_send_to_channel": false,
       "files": files.map(\.object) + fromDraft,
+      "link_preview": linkPreview.rawValue,
     ]
   }
+}
+
+/// Where an outgoing message's link preview comes from (`OutgoingLinkPreview`, #2073).
+enum OutgoingLinkPreview: String {
+  /// The core makes it while the message waits in the outbox.
+  case madeOnSend = "made_on_send"
+  /// Exactly what the composer showed, or none; the message never waits for a fetch.
+  case asShown = "as_shown"
 }
 
 /// A file picked for sending, already copied to a path the core can read.
@@ -283,6 +308,8 @@ enum ChatQuery {
   case draftFiles(conversationId: String, maybeThreadId: String?)
   /// What the conversation's composer replies to, as a quote (#1115).
   case draftReply(conversationId: String)
+  /// The link preview under the composer's draft (#2073).
+  case composerLinkPreview(conversationId: String, maybeThreadId: String?)
   /// The user's recent messages across the conversations (#1220).
   case sentMessages
   /// Root and replies of a thread, oldest first.
@@ -330,6 +357,11 @@ enum ChatQuery {
       return jsonText(["kind": "drafts"])
     case .draftReply(let conversation):
       return jsonText(["kind": "draft_reply", "conversation": conversation])
+    case .composerLinkPreview(let conversation, let maybeThread):
+      return jsonText([
+        "kind": "composer_link_preview", "conversation": conversation,
+        "maybe_thread": maybeThread.map { $0 as Any } ?? NSNull(),
+      ])
     case .draftFiles(let conversation, let maybeThread):
       return jsonText([
         "kind": "draft_files", "conversation": conversation,

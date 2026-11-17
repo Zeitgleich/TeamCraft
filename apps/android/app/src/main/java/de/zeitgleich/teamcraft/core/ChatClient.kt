@@ -177,6 +177,10 @@ class ChatClient(
   suspend fun revokeInvitation(spaceId: String, invitationId: String): InvitationOutcome =
     core().revokeInvitation(spaceId, invitationId)
 
+  /** The link preview under the composer's draft (#2073). */
+  suspend fun composerLinkPreview(conversation: String, maybeThread: String?): ComposerLinkPreview =
+    query(ChatQueries.composerLinkPreview(conversation, maybeThread)).preview ?: ComposerLinkPreview()
+
   /** The files of a draft (#1220), in the order they were attached. */
   suspend fun draftFiles(conversation: String, maybeThread: String?): List<DraftFileItem> =
     decodeDraftFiles(core().query(ChatQueries.draftFiles(conversation, maybeThread)))

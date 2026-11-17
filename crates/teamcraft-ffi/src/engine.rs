@@ -27,6 +27,7 @@ use teamcraft_core::client::{
   ReceiptCancel, SIGN_OUT_REVOKE_PATIENCE, SegmentPlan,
 };
 use teamcraft_core::clock::{Clock as _, SystemClock};
+use teamcraft_core::composer_preview::ComposerFetches;
 use teamcraft_core::connection::{ConnectionStatus, NetworkChanges};
 use teamcraft_core::notified;
 use teamcraft_core::notify_rules::{load_mention_preferences, save_mention_preferences};
@@ -163,6 +164,8 @@ pub(crate) struct Engine {
   /// Who the user is, once enrolled. Everything else the backend knows the app reads on the read
   /// thread, which has its own ([`ReadQueue`]).
   maybe_backend: Option<CoreChatBackend<Store>>,
+  /// The composer's link previews, fetched beside the sync loop (#2073).
+  maybe_composer_fetches: Option<ComposerFetches<Store>>,
   reads: ReadQueue,
   /// Opens read connections of their own beside the writer's (the segment prefetch).
   lanes: LaneOpener,
@@ -813,6 +816,7 @@ impl Engine {
       store,
       client: ClientSlot::Missing,
       maybe_backend: None,
+      maybe_composer_fetches: None,
       reads,
       lanes,
       shared_downloads,
@@ -1868,6 +1872,10 @@ impl Engine {
       CoreChatBackend::new(self.store.clone(), user, Box::new(SystemClock))
         .with_entry_need(EntryNeed::Unread),
     );
+    self.maybe_composer_fetches = Some(ComposerFetches::new(
+      self.store.clone(),
+      self.client_settings().link_previews,
+    ));
     self.reads.know_account(user, fingerprint);
   }
 
@@ -2021,6 +2029,17 @@ impl Engine {
   /// Hands what an action queued to the client. The app is already told what it wrote locally
   /// ([`ReadQueue`]).
   pub(crate) async fn run_commands(&mut self, commands: Vec<CoreCommand>) -> Result<(), TeamCraftError> {
+    // The composer's link previews are fetched beside the loop: a slow site never holds up sending
+    // (#2073).
+    let (fetches, commands): (Vec<_>, Vec<_>) =
+      commands.into_iter().partition(ComposerFetches::<Store>::handles);
+    for command in &fetches {
+      self.fetch_composer_preview(command);
+    }
+    if commands.is_empty() && !fetches.is_empty() {
+      // Nothing for the client: no flush for each pause in typing.
+      return Ok(());
+    }
     match &mut self.client {
       ClientSlot::Running { handle, .. } => {
         for command in commands {
@@ -2037,6 +2056,24 @@ impl Engine {
     }
     self.listener.on_change();
     Ok(())
+  }
+
+  /// Starts or cancels the composer's link preview fetch; the app reads the preview again once it
+  /// is in.
+  fn fetch_composer_preview(&self, command: &CoreCommand) {
+    let Some(fetch) = self
+      .maybe_composer_fetches
+      .as_ref()
+      .and_then(|fetches| fetches.on_command(command))
+    else {
+      return;
+    };
+    let listener = self.listener.clone();
+    tokio::task::spawn_local(async move {
+      if fetch.await {
+        listener.on_change();
+      }
+    });
   }
 
   /// Where the app puts copies of files to upload (created if missing).

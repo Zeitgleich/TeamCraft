@@ -67,6 +67,7 @@ pub mod compact_back;
 pub mod composer;
 pub mod composer_commands;
 pub mod composer_editor;
+pub mod composer_link_preview;
 pub mod composer_toolbar;
 pub mod conversation_notify;
 pub mod conversation_preview;

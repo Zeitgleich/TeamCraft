@@ -56,7 +56,18 @@ data class SendOptions(
   val draftFiles: List<DraftFileItem> = emptyList(),
   /** Chosen by the composer when a retry must be the same message (a scheduled one). */
   val maybeClientMessageId: String? = null,
+  /**
+   * Where the link preview comes from (#2073): [LINK_PREVIEW_AS_SHOWN] from the composer, which
+   * sends exactly the preview it showed; otherwise the core makes it on send.
+   */
+  val linkPreview: String = LINK_PREVIEW_MADE_ON_SEND,
 )
+
+/** [SendOptions.linkPreview]: the core makes the preview while the message waits in the outbox. */
+const val LINK_PREVIEW_MADE_ON_SEND = "made_on_send"
+
+/** [SendOptions.linkPreview]: the preview the composer showed, or none. The message never waits. */
+const val LINK_PREVIEW_AS_SHOWN = "as_shown"
 
 /** When a draft's files go up on phones (#1585): with their message, not as they are picked. */
 const val DRAFT_FILE_TRAVEL = "on_send"
@@ -129,6 +140,7 @@ object ChatActions {
     put("wants_acknowledgement", options.wantsAcknowledgement)
     put("is_silent", options.isSilent)
     put("also_send_to_channel", options.alsoSendToChannel)
+    put("link_preview", options.linkPreview)
     put(
       "files",
       buildJsonArray {
@@ -238,6 +250,19 @@ object ChatActions {
     put("conversation", conversation)
     put("maybe_thread", maybeThread.json())
     put("body", body)
+  }
+
+  /** What the draft says now, for its link preview (#2073): after a pause in typing, and before sending. */
+  fun updateComposerLink(conversation: String, maybeThread: String?, body: String) = action("update_composer_link") {
+    put("conversation", conversation)
+    put("maybe_thread", maybeThread.json())
+    put("body", body)
+  }
+
+  /** The remove button of the composer's link preview: this link of the draft gets none. */
+  fun removeComposerLinkPreview(conversation: String, maybeThread: String?) = action("remove_composer_link_preview") {
+    put("conversation", conversation)
+    put("maybe_thread", maybeThread.json())
   }
 
   /** What the conversation's composer replies to (#1115), kept on this device; a null message forgets it. */
@@ -460,6 +485,12 @@ object ChatQueries {
   fun draftReply(conversation: String) = query("draft_reply") { put("conversation", conversation) }
 
   fun drafts() = query("drafts") {}
+
+  /** The link preview under the composer's draft (#2073). */
+  fun composerLinkPreview(conversation: String, maybeThread: String?) = query("composer_link_preview") {
+    put("conversation", conversation)
+    put("maybe_thread", maybeThread.json())
+  }
 
   /** The files of one draft ([decodeDraftFiles]). */
   fun draftFiles(conversation: String, maybeThread: String?) = query("draft_files") {

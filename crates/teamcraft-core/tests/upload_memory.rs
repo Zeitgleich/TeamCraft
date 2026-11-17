@@ -63,6 +63,7 @@ async fn a_large_file_goes_up_one_part_at_a_time() {
       maybe_waveform: None,
       maybe_draft_id: None,
     }],
+    link_preview: Default::default(),
   });
   ui.drain_commands();
   let before = ALLOCATOR.current_usage();

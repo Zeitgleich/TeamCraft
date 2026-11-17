@@ -169,6 +169,8 @@ import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.calls.CallOptions
 import de.zeitgleich.teamcraft.core.Bookmark
 import de.zeitgleich.teamcraft.core.ChatActions
+import de.zeitgleich.teamcraft.core.ComposerLinkPreview
+import de.zeitgleich.teamcraft.core.LINK_PREVIEW_AS_SHOWN
 import de.zeitgleich.teamcraft.core.ChatQueries
 import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.core.ReplyPreview
@@ -1446,6 +1448,8 @@ internal fun Composer(
   // app last started.
   val draftRead = rememberRead(viewModel, key = conversationId to maybeThread) { draftFiles(conversationId, maybeThread) }
   val otherFiles = DraftFiles.others(draftRead.maybeValue.orEmpty(), files, viewModel.goneDraftFiles)
+  // The draft's link preview (#2073), made by the core; read again on each change.
+  val linkPreviewRead = rememberRead(viewModel, key = conversationId to maybeThread) { composerLinkPreview(conversationId, maybeThread) }
   val sendableDraftFiles = otherFiles.filter { it.isSendable }
   // Where this composer's send stands (#1579): it keeps its content until the core has the message.
   val sendKey = viewModel.pickedKey(conversationId, maybeThread)
@@ -1497,6 +1501,8 @@ internal fun Composer(
       }
     }
     isDraftLoaded = true
+    // A preview lost to a restart, or of a draft from another device, is made now.
+    if (text.isNotBlank()) viewModel.act(ChatActions.updateComposerLink(conversationId, maybeThread, text))
     // Opened from "Drafts & sent" to go on writing (#1220).
     if (OpenedDraft.current.value == OpenedDraft.Target(conversationId, maybeThread)) {
       OpenedDraft.current.value = null
@@ -1528,6 +1534,7 @@ internal fun Composer(
       files = files + imported
       // At once: when files failed the picker comes back right now, and the draft's pause never ends.
       viewModel.act(ChatActions.setDraft(conversationId, maybeThread, text))
+      viewModel.act(ChatActions.updateComposerLink(conversationId, maybeThread, text))
       draftSave.stored(text)
       val failedCount = failed.size
       if (failedCount > 0) {
@@ -1544,7 +1551,11 @@ internal fun Composer(
     if (!isDraftLoaded) return@LaunchedEffect
     val edit = draftSave.edit(text)
     delay(DRAFT_SAVE_DELAY_MS)
-    draftSave.takeDue(edit)?.let { viewModel.act(ChatActions.setDraft(conversationId, maybeThread, it)) }
+    draftSave.takeDue(edit)?.let {
+      viewModel.act(ChatActions.setDraft(conversationId, maybeThread, it))
+      // The pause in typing is the link preview's debounce too (#2073).
+      viewModel.act(ChatActions.updateComposerLink(conversationId, maybeThread, it))
+    }
   }
   // Leaving the app saves at once: the process may be killed before the pause is over (#158).
   LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
@@ -1610,7 +1621,13 @@ internal fun Composer(
     // Null while this composer's send runs: a second tap doesn't send twice.
     val attempt = viewModel.composerSend.start(sendKey, SendContent(body, sending.map { it.path }, fromDraft.map { it.id })) ?: return
     val isPlain = maybeThread == null && sending.isEmpty() && fromDraft.isEmpty()
-    val options = sendOptions(sending, fromDraft).copy(maybeClientMessageId = attempt.clientMessageId)
+    val options = sendOptions(sending, fromDraft).copy(
+      maybeClientMessageId = attempt.clientMessageId,
+      linkPreview = LINK_PREVIEW_AS_SHOWN,
+    )
+    // The core compares the text sent with the one its preview is for: a link changed in the last
+    // pause goes out without a preview, never with one nobody saw (#2073).
+    viewModel.act(ChatActions.updateComposerLink(conversationId, maybeThread, body))
     // The composer clears once the core has the message; until then it shows it's sending, and a
     // failure comes back here with "Try again" (#1579).
     viewModel.sendFromComposer(sendKey, attempt, ChatActions.send(conversationId, body, options)) {
@@ -1648,8 +1665,10 @@ internal fun Composer(
       isSilent = isSilent,
       alsoSendToChannel = alsoToChannel,
       maybeClientMessageId = id,
+      linkPreview = LINK_PREVIEW_AS_SHOWN,
     )
     val body = text
+    viewModel.act(ChatActions.updateComposerLink(conversationId, maybeThread, emojiConvert(body.trim())))
     // The server may refuse it: the text comes back, and the failure shows like any other.
     viewModel.act(ChatActions.schedule(conversationId, emojiConvert(body.trim()), options, dueAtMs)) {
       text = body
@@ -1795,6 +1814,9 @@ internal fun Composer(
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
       )
+    }
+    ComposerLinkPreviewCard(linkPreviewRead.maybeValue ?: ComposerLinkPreview()) {
+      viewModel.act(ChatActions.removeComposerLinkPreview(conversationId, maybeThread))
     }
     maybeReply?.let { reply ->
       Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
