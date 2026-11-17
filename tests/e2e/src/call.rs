@@ -152,8 +152,8 @@ async fn call_config(peer: &mut Peer, conversation: ConversationId, frequency_hz
   config.maybe_fallback_url = ticket.maybe_fallback_url;
   config.certificate_hashes = ticket.certificate_hashes;
   // As the apps open it: the core's HTTP stack, with its proxy handling.
-  config.maybe_fallback_opener = Some(fallback_opener(|url, protocols| async move {
-    let socket = teamcraft_core::api::open_call_socket(&url, &protocols)
+  config.maybe_fallback_opener = Some(fallback_opener(|url, protocols, class| async move {
+    let socket = teamcraft_core::api::open_call_socket(&url, &protocols, class)
       .await
       .map_err(|error| error.to_string())?;
     Ok(FallbackSocket::new(socket))

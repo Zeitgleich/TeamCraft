@@ -10,6 +10,8 @@ use std::time::Duration;
 use reqwest::{Method, RequestBuilder, Response};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+#[cfg(not(target_arch = "wasm32"))]
+use teamcraft_net::traffic::TrafficClass;
 use teamcraft_proto::RendezvousClientMessage;
 use teamcraft_proto::{
   AddConversationMemberRequest, AddSpaceMemberRequest, ClaimKeyPackagesRequest, ClaimKeyPackagesResponse,
@@ -2669,9 +2671,14 @@ const MAX_CALL_SOCKET_MESSAGE_BYTES: usize = 1024 * 1024 + 1;
 /// Opens a call's WebSocket fallback for networks that block UDP (ARCHITECTURE.md §6.6): like the
 /// gateway's, through the same proxy with the same trust store. `protocols` go along in
 /// `Sec-WebSocket-Protocol` (the call's join token, for the SFU to check before the upgrade). Nothing
-/// is sent on it yet.
+/// is sent on it yet. A socket of the voice alone (#1979) has its packets marked for the voice queue
+/// on the way (`class`, #1989).
 #[cfg(not(target_arch = "wasm32"))]
-pub async fn open_call_socket(url: &str, protocols: &[String]) -> Result<NativeSocket, ApiError> {
+pub async fn open_call_socket(
+  url: &str,
+  protocols: &[String],
+  class: TrafficClass,
+) -> Result<NativeSocket, ApiError> {
   let parsed = url::Url::parse(url).map_err(|error| ApiError::Network(format!("{url}: {error}")))?;
   let maybe_proxy = super::proxy::tunnel_proxy_for(&parsed);
   let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
@@ -2679,7 +2686,7 @@ pub async fn open_call_socket(url: &str, protocols: &[String]) -> Result<NativeS
     .max_frame_size(Some(MAX_CALL_SOCKET_MESSAGE_BYTES));
   tokio::time::timeout(
     WEBSOCKET_CONNECT_TIMEOUT,
-    open_websocket_with(&parsed, maybe_proxy.as_ref(), Some(config), protocols),
+    open_websocket_with(&parsed, maybe_proxy.as_ref(), Some(config), protocols, class),
   )
   .await
   .map_err(|_| ApiError::Network("WebSocket connection timed out".into()))?
@@ -2703,7 +2710,7 @@ async fn connect_websocket(url: &str) -> Result<NativeSocket, ApiError> {
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn open_websocket(url: &url::Url, maybe_proxy: Option<&url::Url>) -> Result<NativeSocket, ApiError> {
-  open_websocket_with(url, maybe_proxy, None, &[]).await
+  open_websocket_with(url, maybe_proxy, None, &[], TrafficClass::BestEffort).await
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2712,6 +2719,7 @@ async fn open_websocket_with(
   maybe_proxy: Option<&url::Url>,
   maybe_config: Option<tokio_tungstenite::tungstenite::protocol::WebSocketConfig>,
   protocols: &[String],
+  class: TrafficClass,
 ) -> Result<NativeSocket, ApiError> {
   use tokio_tungstenite::tungstenite::client::IntoClientRequest;
   let mut request = url
@@ -2731,6 +2739,12 @@ async fn open_websocket_with(
   let stream = super::connect::connect_via(url, maybe_proxy)
     .await
     .map_err(|error| ApiError::Network(error.to_string()))?;
+  if class != TrafficClass::BestEffort
+    && let Err(error) = teamcraft_net::traffic::mark_tcp(&stream, class)
+  {
+    // Unmarked, the voice still flows: the mark only helps where the network honours it.
+    tracing::debug!(%error, ?class, "could not mark the call socket's packets");
+  }
   // Always an explicit configuration: tungstenite's default one panics in rustls (api/tls.rs).
   let maybe_connector = Some(tokio_tungstenite::Connector::Rustls(super::tls::client_config()));
   let (socket, _) =
