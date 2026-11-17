@@ -18,12 +18,12 @@
 //! it keeps each one: a notice it doesn't confirm is sent again, and the app warns that the others
 //! may not see the recording.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::time::Duration;
 
-use teamcraft_crypto::call_recording::{
-  RecordingNoticeError, RecordingNoticeSigner, RecordingState, SignedRecordingNotice,
-};
+#[cfg(any(test, feature = "native"))]
+use teamcraft_crypto::call_recording::RecordingNoticeSigner;
+use teamcraft_crypto::call_recording::{RecordingNoticeError, RecordingState, SignedRecordingNotice};
 use teamcraft_proto::{CallId, DeviceId, UserId};
 use tracing::warn;
 use web_time::Instant;
@@ -50,10 +50,11 @@ pub struct Recorder {
   pub has_left: bool,
 }
 
-/// The other devices' recording notices in one call.
+/// The other devices' recording notices in one call. A list, not a map: a call has few devices,
+/// and the call module's download stays small (docs/performance.md, "Web bundle size").
 #[derive(Debug, Default)]
 pub struct RecordingNotices {
-  devices: BTreeMap<DeviceId, DeviceNotices>,
+  devices: Vec<(DeviceId, DeviceNotices)>,
 }
 
 #[derive(Debug, Default)]
@@ -69,8 +70,10 @@ struct DeviceNotices {
   has_left: bool,
 }
 
-/// This device's recording, as its notices say it.
+/// This device's recording, as its notices say it. Only the native apps sign notices (the
+/// browser doesn't record yet, #2114): there, the parts that sign stay unused.
 #[derive(Debug, Default)]
+#[cfg_attr(not(any(test, feature = "native")), allow(dead_code))]
 pub struct OwnRecording {
   is_recording: bool,
   /// The state of the last notice sent, if any.
@@ -82,6 +85,7 @@ pub struct OwnRecording {
 }
 
 #[derive(Debug)]
+#[cfg_attr(not(any(test, feature = "native")), allow(dead_code))]
 struct Unconfirmed {
   notice: Vec<u8>,
   first_sent: Instant,
@@ -112,7 +116,7 @@ impl RecordingNotices {
       warn!(%device_id, "recording notice of another device dropped");
       return false;
     }
-    let entry = self.devices.entry(device_id).or_default();
+    let entry = self.entry(device_id);
     if maybe_user_id.is_some() {
       entry.maybe_user_id = maybe_user_id;
     }
@@ -145,8 +149,8 @@ impl RecordingNotices {
       let Some(key) = key_of(*device_id).or_else(|| entry.maybe_key.clone()) else {
         continue;
       };
-      let mut pending: Vec<SignedRecordingNotice> = entry.pending.drain(..).collect();
-      pending.sort_by_key(|signed| signed.unverified().sequence());
+      // In any order: the highest verified number wins, and older ones then go.
+      let pending: Vec<SignedRecordingNotice> = entry.pending.drain(..).collect();
       for signed in &pending {
         if let Err(error) = entry.verify(signed, &key, call_id, *device_id) {
           log_refused(&error, *device_id);
@@ -161,12 +165,12 @@ impl RecordingNotices {
   /// recorders changed.
   pub fn mark_left(&mut self, device_id: DeviceId) -> bool {
     let before = self.recorders();
-    match self.devices.get_mut(&device_id) {
-      Some(entry) if entry.is_verified_recording() => entry.has_left = true,
-      Some(_) => {
-        self.devices.remove(&device_id);
-      },
-      None => {},
+    if let Some(index) = self.devices.iter().position(|(device, _)| *device == device_id) {
+      if self.devices[index].1.is_verified_recording() {
+        self.devices[index].1.has_left = true;
+      } else {
+        self.devices.swap_remove(index);
+      }
     }
     self.recorders() != before
   }
@@ -174,7 +178,7 @@ impl RecordingNotices {
   /// The device is in the call (again).
   pub fn mark_present(&mut self, device_id: DeviceId, user_id: UserId) -> bool {
     let before = self.recorders();
-    if let Some(entry) = self.devices.get_mut(&device_id) {
+    if let Some((_, entry)) = self.devices.iter_mut().find(|(device, _)| *device == device_id) {
       entry.has_left = false;
       entry.maybe_user_id = Some(user_id);
     }
@@ -187,11 +191,11 @@ impl RecordingNotices {
     let before = self.recorders();
     self
       .devices
-      .retain(|device_id, entry| !entry.has_left || is_member(*device_id));
+      .retain(|(device_id, entry)| !entry.has_left || is_member(*device_id));
     self.recorders() != before
   }
 
-  /// The devices that record now, by device id.
+  /// The devices that record now, in the order they first sent a notice.
   pub fn recorders(&self) -> Vec<Recorder> {
     self
       .devices
@@ -204,6 +208,17 @@ impl RecordingNotices {
         has_left: entry.has_left,
       })
       .collect()
+  }
+
+  fn entry(&mut self, device_id: DeviceId) -> &mut DeviceNotices {
+    let index = match self.devices.iter().position(|(device, _)| *device == device_id) {
+      Some(index) => index,
+      None => {
+        self.devices.push((device_id, DeviceNotices::default()));
+        self.devices.len() - 1
+      },
+    };
+    &mut self.devices[index].1
   }
 }
 
@@ -284,6 +299,7 @@ impl OwnRecording {
   /// Signs the next notice of the current state and waits for the SFU to confirm it. `now_ms`
   /// (any wall clock in milliseconds) starts the numbering where an app that restarted mid-call
   /// left off, give or take its clock.
+  #[cfg(any(test, feature = "native"))]
   pub fn next_notice(
     &mut self,
     signer: &RecordingNoticeSigner,
@@ -525,7 +541,7 @@ mod tests {
       for sequence in 1..100 {
         receive(&mut notices, &notice(&forger, true, sequence), None);
       }
-      assert_eq!(notices.devices[&device()].pending.len(), MAX_PENDING_NOTICES);
+      assert_eq!(notices.devices[0].1.pending.len(), MAX_PENDING_NOTICES);
     }
 
     #[test]

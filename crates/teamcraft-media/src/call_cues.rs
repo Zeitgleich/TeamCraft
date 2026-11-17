@@ -17,8 +17,6 @@
 //! are status, not call audio. [`StatusCues`] turns them down to the own connection, or off.
 //! Pure: the drivers feed engine events and pull 20 ms frames.
 
-use std::collections::BTreeSet;
-
 use teamcraft_proto::DeviceId;
 
 use crate::audio_frame::SAMPLE_RATE_HZ;
@@ -106,7 +104,7 @@ pub struct CuePlayer {
   setting: StatusCues,
   maybe_playing: Option<Playing>,
   /// The other devices recording, as last reported: a new one plays the recording cue.
-  recorders: BTreeSet<DeviceId>,
+  recorders: Vec<DeviceId>,
 }
 
 #[derive(Debug)]
@@ -128,7 +126,7 @@ impl CuePlayer {
     Self {
       setting,
       maybe_playing: None,
-      recorders: BTreeSet::new(),
+      recorders: Vec::new(),
     }
   }
 
@@ -152,8 +150,8 @@ impl CuePlayer {
         self.play(CallCue::OtherReconnecting);
       },
       CallEngineEvent::RecordersChanged(recorders) => {
-        let now: BTreeSet<DeviceId> = recorders.iter().map(|recorder| recorder.device_id).collect();
-        if now.difference(&self.recorders).next().is_some() {
+        let now: Vec<DeviceId> = recorders.iter().map(|recorder| recorder.device_id).collect();
+        if now.iter().any(|device| !self.recorders.contains(device)) {
           self.play(CallCue::RecordingStarted);
         }
         self.recorders = now;

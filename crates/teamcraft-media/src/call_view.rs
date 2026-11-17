@@ -12,6 +12,7 @@ use teamcraft_proto::{DeviceId, MediaStreamId, UserId, VideoCodec, VideoTrackKin
 
 use crate::call_cues::StatusCues;
 use crate::call_engine::{CallEngineEvent, OwnVideoEnd};
+use crate::call_recording_notice::Recorder;
 use crate::call_resilience::CallTransport;
 
 /// Who is who in the active call: the engine reports devices, the UI shows people.
@@ -28,9 +29,8 @@ pub struct CallRoster {
   reconnecting: BTreeSet<DeviceId>,
   /// Others' devices whose microphone is muted (their own report).
   muted: BTreeSet<DeviceId>,
-  /// Others' devices that record the call (e2ee.md §8.3): whose, whether the notice verified,
-  /// and whether the SFU says the device left.
-  recording: BTreeMap<DeviceId, (Option<UserId>, bool, bool)>,
+  /// Others' devices that record the call (e2ee.md §8.3), as the engine reports them.
+  recording: Vec<Recorder>,
   /// Others' devices whose call key didn't verify: kept out of the encryption.
   refused: BTreeSet<DeviceId>,
   /// Others' tracks whose capture stalled, as their frames say (#1805).
@@ -113,18 +113,7 @@ impl CallRoster {
         return true;
       },
       CallEngineEvent::RecordersChanged(recorders) => {
-        roster.recording = recorders
-          .into_iter()
-          .map(|recorder| {
-            let maybe_user = recorder
-              .maybe_user_id
-              .or_else(|| roster.users_by_device.get(&recorder.device_id).copied());
-            (
-              recorder.device_id,
-              (maybe_user, recorder.is_verified, recorder.has_left),
-            )
-          })
-          .collect();
+        roster.recording = recorders;
         active.recorders = roster.recorders();
       },
       CallEngineEvent::OwnRecordingUnconfirmed(is_unconfirmed) => {
@@ -408,22 +397,27 @@ impl CallRoster {
   /// Who records, one entry per person: verified when every recording device of theirs is,
   /// left when every one of them left.
   fn recorders(&self) -> Vec<CallRecorder> {
-    let mut by_user: BTreeMap<UserId, (bool, bool)> = BTreeMap::new();
-    for (maybe_user, is_verified, has_left) in self.recording.values() {
-      if let Some(user) = maybe_user {
-        let entry = by_user.entry(*user).or_insert((true, true));
-        entry.0 &= *is_verified;
-        entry.1 &= *has_left;
+    let mut by_user: Vec<CallRecorder> = Vec::new();
+    for recorder in &self.recording {
+      let Some(user) = recorder
+        .maybe_user_id
+        .or_else(|| self.users_by_device.get(&recorder.device_id).copied())
+      else {
+        continue;
+      };
+      match by_user.iter_mut().find(|known| known.user == user) {
+        Some(known) => {
+          known.is_verified &= recorder.is_verified;
+          known.has_left &= recorder.has_left;
+        },
+        None => by_user.push(CallRecorder {
+          user,
+          is_verified: recorder.is_verified,
+          has_left: recorder.has_left,
+        }),
       }
     }
     by_user
-      .into_iter()
-      .map(|(user, (is_verified, has_left))| CallRecorder {
-        user,
-        is_verified,
-        has_left,
-      })
-      .collect()
   }
 
   fn participants(&self) -> Vec<Participant> {
@@ -439,7 +433,10 @@ impl CallRoster {
         is_recording: false,
       });
       participant.is_muted &= self.muted.contains(device);
-      participant.is_recording |= self.recording.contains_key(device);
+      participant.is_recording |= self
+        .recording
+        .iter()
+        .any(|recorder| recorder.device_id == *device);
       participant.is_sharing_screen |= self.sharing_screen.contains(device);
       participant.is_camera_on |= self
         .video_devices

@@ -1098,7 +1098,12 @@ impl CallEngine {
     self.own_recording.is_recording()
   }
 
+  /// The browser doesn't record yet (#2114): it has no notice to send.
+  #[cfg(not(feature = "native"))]
+  fn announce_recording(&mut self) {}
+
   /// Sends this device's signed recording notice, once in the call with a DAVE session.
+  #[cfg(feature = "native")]
   fn announce_recording(&mut self) {
     if !matches!(self.phase, Phase::Joined { .. }) {
       return;
@@ -9076,7 +9081,9 @@ mod tests {
   }
 
   /// Recording notices (e2ee.md §8.3, #216): signed with the DAVE key, verified by the others,
-  /// said again whenever the key or the connection changes, and confirmed by the SFU.
+  /// said again whenever the key or the connection changes, and confirmed by the SFU. Only the
+  /// native apps record.
+  #[cfg(feature = "native")]
   mod recording {
     use super::*;
     use teamcraft_crypto::call_recording::{RecordingState, SignedRecordingNotice};
