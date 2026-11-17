@@ -1,5 +1,7 @@
 use leptos::prelude::*;
-use teamcraft_proto::{AdminSelfJoin, GuestDmStart, HistoryPolicy, LeaverRemovalMode, ScreenShareResolution};
+use teamcraft_proto::{
+  AdminSelfJoin, CallRecorders, GuestDmStart, HistoryPolicy, LeaverRemovalMode, ScreenShareResolution,
+};
 
 use crate::components::admin_console::SectionHeader;
 use crate::components::admin_owners::OwnersPanel;
@@ -37,6 +39,8 @@ const INACTIVITY_DELETE_DAYS: [u32; 5] = [u32::MAX, 30, 90, 180, 365];
 const APPROVALS: [u8; 2] = [2, 3];
 /// The longest voice message offered, in minutes.
 const VOICE_MINUTES: [u16; 6] = [1, 2, 5, 10, 30, 60];
+/// The longest call recordings the console offers (admin.md §3.13).
+const RECORDING_MINUTES: [u16; 5] = [30, 60, 120, 240, 480];
 /// The grace before a leaver is removed (docs/provisioning.md §3): at once, a quarter of an hour, an
 /// hour (the default), four hours, a day, a week.
 const LEAVER_GRACE_MINUTES: [u32; 6] = [0, 15, 60, 240, 1440, 10_080];
@@ -77,6 +81,17 @@ pub fn SecuritySection() -> impl IntoView {
   });
   let voice_options = Signal::derive(move || {
     VOICE_MINUTES
+      .into_iter()
+      .map(|minutes| {
+        (
+          minutes.to_string(),
+          i18n.t_count("policy-minutes", minutes as usize),
+        )
+      })
+      .collect()
+  });
+  let recording_options = Signal::derive(move || {
+    RECORDING_MINUTES
       .into_iter()
       .map(|minutes| {
         (
@@ -297,6 +312,45 @@ pub fn SecuritySection() -> impl IntoView {
             })
           }
         />
+      </fieldset>
+
+      // Call recording (#216, admin.md §3.13): off by default.
+      <fieldset class="policy-group" prop:disabled=move || policy.is_locked()>
+        <legend>{move || i18n.t("policy-call-recording")}</legend>
+        <p class="muted-text small">{move || i18n.t("policy-call-recording-hint")}</p>
+        {[CallRecorders::Off, CallRecorders::Admins, CallRecorders::Members]
+          .into_iter()
+          .map(|option| {
+            let slug = option.as_str().to_owned();
+            let label_key = format!("policy-call-recording-{slug}");
+            let checked_option = option.clone();
+            view! {
+              <label class="radio">
+                <input
+                  type="radio"
+                  name="call_recording_recorders"
+                  value=slug
+                  prop:checked=move || draft.get().call_recording.recorders == checked_option
+                  on:change=move |_| policy.edit(|value| value.call_recording.recorders = option.clone())
+                />
+                <span>{move || i18n.t(&label_key)}</span>
+              </label>
+            }
+          })
+          .collect_view()}
+        <SelectRow
+          id="policy-call-recording-max"
+          label=Signal::derive(move || i18n.t("policy-call-recording-max"))
+          options=recording_options
+          selected=Signal::derive(move || draft.get().call_recording.max_minutes.to_string())
+          disabled=Signal::derive(move || !draft.get().call_recording.is_enabled())
+          on_select=move |value: String| {
+            if let Ok(minutes) = value.parse::<u16>() {
+              policy.edit(|p| p.call_recording.max_minutes = minutes);
+            }
+          }
+        />
+        <p class="muted-text small">{move || i18n.t("policy-call-recording-limit")}</p>
       </fieldset>
 
       <BugReportRecipients policy=policy />

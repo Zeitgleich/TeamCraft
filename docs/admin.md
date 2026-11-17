@@ -1258,6 +1258,46 @@ Administration → People:
   URLs to everybody who may see the person. Each person has at most two pictures, their own and the
   provider's; both go with the account (admin.md §3.2).
 
+### 3.13 Call recording (issue #216)
+
+Whether people may record calls is part of the signed workspace policy (`call_recording`, §2.3),
+under Administration → Security → Call recording. It is **off by default**.
+
+| Field         | Default | Meaning                                                                                 |
+|---------------|---------|-----------------------------------------------------------------------------------------|
+| `recorders`   | `off`   | Who may record: `off`, `admins` (owners and admins) or `members` (everybody but guests) |
+| `max_minutes` | `120`   | The longest recording, 1 to 480 minutes; the console offers 30, 60, 120, 240 and 480    |
+
+- **How it works:** the server can't record (calls are end-to-end encrypted), so a participant's
+  app records what it plays and its own microphone, and posts the file, encrypted, into the call's
+  conversation when the recorder chooses to (e2ee.md §8.3). In this version the desktop app records;
+  the browser and the phone apps show that a call is being recorded but don't record.
+- **Everybody is told:** every app shows a recording indicator with the recorder's name for as long
+  as the recording runs, plays a short tone when one starts, and shows people who join later that
+  the call is being recorded, with the choice to leave. The notice is signed by the recording
+  device, so the server can't hide it from a member it reaches or end it on screen.
+- **It can't prevent covert recording.** Anybody in a call can record it with a screen recorder,
+  another device or a modified app that tells nobody. The policy and the notices make compliant
+  recording visible and governed; they are not a technical barrier. Tell people so.
+- **Consent:** whether a recording needs the consent of everybody recorded depends on the
+  jurisdiction (in some, every participant must agree; in others, informing them suffices). This
+  version informs everybody and lets them leave; asking everybody's consent before a recording may
+  start, and leaving people out of a recording, are later steps. Check with your data protection
+  officer before allowing it, and say in your internal rules when recording is acceptable.
+- **Storage and retention:** a posted recording is an encrypted attachment of the call's
+  conversation, readable by its members only, and the conversation's retention applies to it.
+  While a recording runs, the file is on the recorder's computer in the app's private folder, and it
+  is deleted there once posted or discarded.
+- **Enforcement:** member apps apply the policy, like `screen_share`: the recording app checks it
+  before it starts, and every app says so when somebody records whom the policy doesn't allow. A
+  modified app can ignore it (see above). An owner app from before the setting re-signs without it,
+  which reads as `off`.
+- **Audit:** the server sees that a recording notice passed through the SFU, not who may see it or
+  what it says; an entry in the audit log is a later step.
+- **Later steps:** recording in the browser (#2114); consent from everybody before a recording
+  starts, and leaving people out of it (#2115); saving as a local file, keeping a recording a crash
+  left, video (#2116); an audit entry and an unattended recorder bot (#2117).
+
 ## 4. Audit log
 
 Every admin action, recovery, device change and role change is logged with actor, target and time.

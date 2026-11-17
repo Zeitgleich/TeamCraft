@@ -200,6 +200,7 @@ fn main() -> anyhow::Result<()> {
       let files = MediaFiles {
         codec_directory: app.path().app_data_dir()?.join("codecs"),
         maybe_segmentation_model: app.path().resolve(BUNDLED_MODEL, BaseDirectory::Resource).ok(),
+        recording_folder: app.path().app_cache_dir()?.join("call-recordings"),
       };
       let emitter = app.handle().clone();
       let report_failure: FailureReporter = Arc::new(move |failure| {
@@ -376,6 +377,7 @@ fn main() -> anyhow::Result<()> {
       calls::commands::call_snapshot,
       calls::commands::call_media_devices,
       calls::commands::call_action,
+      calls::commands::call_recording_stage,
       calls::commands::call_watch_video,
       calls::commands::call_background_preview,
       calls::commands::call_unwatch_video,

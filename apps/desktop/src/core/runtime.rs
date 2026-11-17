@@ -377,6 +377,8 @@ enum Request {
     ConversationId,
     oneshot::Sender<Result<Vec<teamcraft_crypto::identity::VerifiedDevice>, String>>,
   ),
+  /// How long the user may record a call under the verified policy (`None`: not at all).
+  CallRecordingAllowance(oneshot::Sender<Result<Option<u32>, String>>),
   CallJoinToken(
     ConversationId,
     oneshot::Sender<Result<CallJoinTokenResponse, String>>,
@@ -784,6 +786,15 @@ impl CoreRuntime {
       .unwrap_or_else(|| Err(stopped()))
   }
 
+  /// How long the user may record a call under the verified policy, in seconds; `None` when not
+  /// at all (e2ee.md §8.3). The shell checks it before recording, whatever the page asked.
+  pub async fn call_recording_allowance(&self) -> Result<Option<u32>, String> {
+    self
+      .ask(Request::CallRecordingAllowance)
+      .await
+      .unwrap_or_else(|| Err(stopped()))
+  }
+
   /// The running call's verified devices afresh: a device added to the conversation during the
   /// call joins it (e2ee.md §8.2).
   pub async fn call_devices(
@@ -930,6 +941,7 @@ fn security_of(client: &Client<Api, Store>) -> Result<SecuritySnapshot, String> 
     maybe_presence_policy: teamcraft_core::workspace::presence_policy(client.store()),
     maybe_screen_share_policy: teamcraft_core::workspace::screen_share_policy(client.store()),
     maybe_voice_message_policy: teamcraft_core::workspace::voice_message_policy(client.store()),
+    maybe_call_recording_policy: teamcraft_core::workspace::call_recording_policy(client.store()),
     maybe_notetaker: teamcraft_core::notetaker::notetaker_policy(client.store()),
     bug_report_recipients: teamcraft_core::client::bug_reports::recipients(client.store(), client.user_id())
       .unwrap_or_default(),
@@ -1704,6 +1716,7 @@ impl Core {
       },
       Request::PrepareCall(conversation, reply) => drop(reply.send(self.prepare_call(conversation).await)),
       Request::CallDevices(conversation, reply) => drop(reply.send(self.call_devices(conversation).await)),
+      Request::CallRecordingAllowance(reply) => drop(reply.send(self.call_recording_allowance())),
       Request::CallJoinToken(conversation, reply) => {
         drop(reply.send(self.call_join_token(conversation).await))
       },
@@ -1812,6 +1825,15 @@ impl Core {
   ) -> Result<Vec<teamcraft_crypto::identity::VerifiedDevice>, String> {
     let client = self.client.as_mut().ok_or("this device is not set up yet")?;
     client.refresh_call_devices(conversation).await.map_err(describe)
+  }
+
+  fn call_recording_allowance(&self) -> Result<Option<u32>, String> {
+    let client = self.client.as_ref().ok_or("this device is not set up yet")?;
+    Ok(teamcraft_core::workspace::call_recording_allowance(
+      client.store(),
+      client.user_id(),
+      SystemClock.now_ms(),
+    ))
   }
 
   async fn prepare_call(&mut self, conversation: ConversationId) -> Result<CallPreparation, String> {

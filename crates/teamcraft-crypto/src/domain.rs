@@ -76,6 +76,8 @@ pub(crate) const MEETING_HOSTS_HASH: &str = "TeamCraft-v1 meeting hosts hash";
 /// Hash input label of a strict channel's roles change, the value of the next one's `prev_hash`
 /// (e2ee.md §4.6.2).
 pub(crate) const STRICT_ROLES: &str = "TeamCraft-v1 strict roles";
+/// Signature label of a call recording notice, signed with the device's DAVE key (e2ee.md §8.3).
+pub(crate) const CALL_RECORDING_NOTICE: &str = "TeamCraft-v1 call recording notice";
 
 /// Returns `len(label) || label || body`.
 pub(crate) fn labeled(label: &str, body: &[u8]) -> Vec<u8> {
@@ -92,7 +94,7 @@ pub(crate) fn labeled(label: &str, body: &[u8]) -> Vec<u8> {
 mod tests {
   use super::*;
 
-  const ALL_LABELS: [&str; 49] = [
+  const ALL_LABELS: [&str; 50] = [
     DEVICE_CERTIFICATE,
     IDENTITY_FINGERPRINT,
     MESSAGE_AAD,
@@ -142,6 +144,7 @@ mod tests {
     MEETING_HOSTS,
     MEETING_HOSTS_HASH,
     STRICT_ROLES,
+    CALL_RECORDING_NOTICE,
   ];
 
   #[test]

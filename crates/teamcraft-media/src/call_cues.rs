@@ -9,11 +9,15 @@
 //! - **Someone else reconnecting:** one quieter "du-dun" when another participant's connection drops.
 //! - **Hung up:** three short beeps of the phone's busy tone when a 1:1 call ends for both (issue
 //!   #997), on the side that hung up and on the side that was left.
+//! - **Recording started:** three rising tones when another participant starts recording the call
+//!   (#216). A notice, not a status sound: it plays whatever [`StatusCues`] says (e2ee.md §8.3).
 //!
 //! The tones are synthesized (sine waves with raised-cosine edges, so they don't click); there is
 //! no sound file. They stay well below speech level and play regardless of mute or deafen: they
 //! are status, not call audio. [`StatusCues`] turns them down to the own connection, or off.
 //! Pure: the drivers feed engine events and pull 20 ms frames.
+
+use teamcraft_proto::DeviceId;
 
 use crate::audio_frame::SAMPLE_RATE_HZ;
 use crate::call_engine::CallEngineEvent;
@@ -58,6 +62,15 @@ const HUNG_UP: &[Note] = &[
   Note::tone(425.0, 0.2),
 ];
 
+/// Somebody started recording: a rising C major triad (C5, E5, G5).
+const RECORDING_STARTED: &[Note] = &[
+  Note::tone(523.25, 0.1),
+  Note::rest(0.04),
+  Note::tone(659.25, 0.1),
+  Note::rest(0.04),
+  Note::tone(783.99, 0.18),
+];
+
 /// Which status sounds play.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum StatusCues {
@@ -81,6 +94,8 @@ pub enum CallCue {
   /// A 1:1 call ended for both: this side hung up, or the other one did. About the own call, so
   /// it plays with "only my connection" too.
   HungUp,
+  /// Another device started recording the call; plays even with the status sounds off.
+  RecordingStarted,
 }
 
 /// Plays cues into 20 ms playback frames.
@@ -88,6 +103,8 @@ pub enum CallCue {
 pub struct CuePlayer {
   setting: StatusCues,
   maybe_playing: Option<Playing>,
+  /// The other devices recording, as last reported: a new one plays the recording cue.
+  recorders: Vec<DeviceId>,
 }
 
 #[derive(Debug)]
@@ -109,6 +126,7 @@ impl CuePlayer {
     Self {
       setting,
       maybe_playing: None,
+      recorders: Vec::new(),
     }
   }
 
@@ -130,6 +148,13 @@ impl CuePlayer {
       // The own reconnecting loop is the more important news.
       CallEngineEvent::ParticipantReconnecting(_) if !self.is_playing(CallCue::Reconnecting) => {
         self.play(CallCue::OtherReconnecting);
+      },
+      CallEngineEvent::RecordersChanged(recorders) => {
+        let now: Vec<DeviceId> = recorders.iter().map(|recorder| recorder.device_id).collect();
+        if now.iter().any(|device| !self.recorders.contains(device)) {
+          self.play(CallCue::RecordingStarted);
+        }
+        self.recorders = now;
       },
       _ => {},
     }
@@ -186,6 +211,7 @@ impl CuePlayer {
   fn is_wanted(&self, cue: CallCue) -> bool {
     match self.setting {
       StatusCues::All => true,
+      _ if cue == CallCue::RecordingStarted => true,
       StatusCues::OwnOnly => cue != CallCue::OtherReconnecting,
       StatusCues::Off => false,
     }
@@ -200,6 +226,7 @@ pub fn synthesize(cue: CallCue) -> Vec<f32> {
     CallCue::ConnectionLost => (CONNECTION_LOST, CUE_AMPLITUDE),
     CallCue::OtherReconnecting => (OTHER_RECONNECTING, OTHERS_CUE_AMPLITUDE),
     CallCue::HungUp => (HUNG_UP, CUE_AMPLITUDE),
+    CallCue::RecordingStarted => (RECORDING_STARTED, CUE_AMPLITUDE),
   };
   let mut samples = Vec::new();
   for note in notes {
@@ -257,6 +284,7 @@ mod tests {
       CallCue::ConnectionLost,
       CallCue::OtherReconnecting,
       CallCue::HungUp,
+      CallCue::RecordingStarted,
     ] {
       let samples = synthesize(cue);
       let peak = samples.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
@@ -324,6 +352,40 @@ mod tests {
     assert!(own_only.next_samples(FRAME).iter().all(|sample| *sample == 0.0));
     own_only.play(CallCue::ConnectionLost);
     assert!(!own_only.is_playing(CallCue::ConnectionLost));
+  }
+
+  /// Issue #216: a new recorder plays the cue once, even with the status sounds off; one that
+  /// was already recording doesn't play it again.
+  #[test]
+  fn a_new_recorder_plays_the_recording_cue_whatever_the_setting() {
+    let mut player = CuePlayer::new(StatusCues::Off);
+    let recorders = |ids: &[i64]| {
+      CallEngineEvent::RecordersChanged(
+        ids
+          .iter()
+          .map(|id| crate::call_recording_notice::Recorder {
+            device_id: device(*id),
+            maybe_user_id: None,
+            is_verified: true,
+            has_left: false,
+          })
+          .collect(),
+      )
+    };
+    player.on_event(&recorders(&[2]));
+    assert!(player.is_playing(CallCue::RecordingStarted));
+    for _ in 0..30 {
+      player.next_samples(FRAME);
+    }
+    assert!(!player.is_playing(CallCue::RecordingStarted));
+    player.on_event(&recorders(&[2]));
+    assert!(
+      !player.is_playing(CallCue::RecordingStarted),
+      "still the same recorder"
+    );
+    player.on_event(&recorders(&[]));
+    player.on_event(&recorders(&[2, 3]));
+    assert!(player.is_playing(CallCue::RecordingStarted));
   }
 
   /// Issue #997: the hang-up tone plays once (no loop) and follows the status sounds setting.

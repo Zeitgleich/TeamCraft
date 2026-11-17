@@ -141,6 +141,10 @@ impl FakeCalls {
       // No camera here, and nothing to measure.
       | CallAction::SetPreview { .. }
       | CallAction::MeasureLink { .. }
+      // The fake call records nothing.
+      | CallAction::StartRecording { .. }
+      | CallAction::StopRecording
+      | CallAction::DiscardRecording
       | CallAction::TestSpeakers { .. }
       | CallAction::Unknown => {},
     }
@@ -174,6 +178,8 @@ fn active_call(request: CallRequest, carol: UserId) -> ActiveCall {
     maybe_moved_to: None,
     maybe_joined_at: None,
     maybe_encryption_failure: None,
+    recorders: Vec::new(),
+    maybe_own_recording: None,
     is_deafened: false,
     is_secured: true,
     maybe_privacy_code: Some("31 07 58".to_owned()),
@@ -183,6 +189,7 @@ fn active_call(request: CallRequest, carol: UserId) -> ActiveCall {
       is_camera_on: false,
       has_hand_raised: false,
       is_sharing_screen: false,
+      is_recording: false,
     }],
     active_speakers: vec![carol],
     is_camera_on: false,

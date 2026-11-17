@@ -33,6 +33,7 @@ use crate::components::add_to_call::AddToCallDialog;
 use crate::components::admin_console::AdminConsole;
 use crate::components::bookmarks::BookmarksDialog;
 use crate::components::call_prejoin::PreJoinScreen;
+use crate::components::call_recording::CallRecordingTakeCard;
 use crate::components::call_screen::CallScreen;
 use crate::components::call_tile::CallTileRow;
 use crate::components::calls_unavailable::CallsUnavailableDialog;
@@ -205,6 +206,8 @@ areas! {
   huddle_bar(conversation: ConversationId) => calls: view! { <HuddleBarContent conversation=conversation /> };
   /// The bar of a minimized call above the app (#1141).
   call_bar(_unit: ()) => calls: view! { <CallBar /> };
+  /// A finished call recording waiting to be posted or deleted (e2ee.md §8.3); it outlives the call.
+  call_recording_take(_unit: ()) => calls: view! { <CallRecordingTakeCard /> };
   meetings(_unit: ()) => meetings: view! { <MeetingsView /> };
   schedule_meeting(_unit: ()) => meetings: view! { <ScheduleMeetingDialog /> };
   edit_meeting(meeting: MeetingId) => meetings: view! { <ScheduleMeetingDialog maybe_edit=meeting /> };

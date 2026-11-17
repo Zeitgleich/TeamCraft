@@ -190,6 +190,15 @@ impl RemoteCalls {
     self.snapshot.borrow().maybe_end_reason
   }
 
+  /// Whether the module records calls (the desktop shell; e2ee.md §8.3).
+  pub fn can_record(&self) -> bool {
+    self.snapshot.borrow().can_record
+  }
+
+  pub fn recording_take(&self) -> Option<teamcraft_client_api::calls::CallRecordingTake> {
+    self.snapshot.borrow().maybe_recording_take
+  }
+
   pub fn incoming(&self) -> Vec<IncomingCall> {
     self.snapshot.borrow().incoming.clone()
   }
@@ -213,6 +222,7 @@ impl RemoteCalls {
         is_camera_on: false,
         has_hand_raised: false,
         is_sharing_screen: false,
+        is_recording: false,
       })
       .collect()
   }
@@ -796,6 +806,7 @@ mod tests {
           is_camera_on: false,
           has_hand_raised: false,
           is_sharing_screen: false,
+          is_recording: false,
         }],
         active_speakers: Vec::new(),
         is_camera_on: false,
@@ -816,6 +827,8 @@ mod tests {
         maybe_moved_to: None,
         maybe_joined_at: None,
         maybe_encryption_failure: None,
+        recorders: Vec::new(),
+        maybe_own_recording: None,
       }),
       incoming: Vec::new(),
       running: vec![RunningCall {
@@ -832,6 +845,8 @@ mod tests {
       maybe_camera_fallback: None,
       maybe_this_device: None,
       call_reports: Vec::new(),
+      can_record: false,
+      maybe_recording_take: None,
     };
     assert_eq!(roster_of(&snapshot, conversation), vec![carol, dave]);
     assert!(roster_of(&snapshot, id_from_raw(8)).is_empty());

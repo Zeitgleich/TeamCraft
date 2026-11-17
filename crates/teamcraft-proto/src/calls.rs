@@ -235,6 +235,14 @@ pub enum CallClientMessage {
   SetMuted {
     is_muted: bool,
   },
+  /// This device's signed recording notice (e2ee.md §8.3, #216): a recording started or stopped.
+  /// Sent at each change and again after every (re)join while it records. The SFU can't read it:
+  /// it keeps the latest one per device (at most [`crate::MAX_RECORDING_NOTICE_BYTES`]), forwards
+  /// it ([`CallEvent::RecordingNotice`]) and hands it to devices that join later. Older SFUs ignore
+  /// it.
+  SetRecording {
+    notice: Base64Bytes,
+  },
   /// This device's own voice is being lost or held up on its upload (an uplink that collapsed),
   /// or recovered (#1889). While it is, the SFU sends it no video: the acknowledgements of what it
   /// receives share the upload its voice is short of. Sent when it changes; a new connection
@@ -388,6 +396,20 @@ pub enum CallEvent {
   ParticipantMuted {
     device_id: DeviceId,
     is_muted: bool,
+  },
+  /// Another device's signed recording notice ([`CallClientMessage::SetRecording`]), as it sent
+  /// it. After `joined` the SFU sends the latest one of every device in the call; apps verify it
+  /// against the device's DAVE key before they believe a stop (e2ee.md §8.3). Older clients read
+  /// `Unknown`.
+  RecordingNotice {
+    device_id: DeviceId,
+    notice: Base64Bytes,
+  },
+  /// To the sender of a [`CallClientMessage::SetRecording`]: the SFU keeps this notice and hands
+  /// it to the others. The recording app sends a notice again until it is confirmed and warns the
+  /// user when it isn't; an SFU from before sends none. Older clients read `Unknown`.
+  RecordingNoticeKept {
+    notice: Base64Bytes,
   },
   /// Devices whose audio the SFU currently forwards, loudest first.
   ActiveSpeakers {
@@ -701,6 +723,10 @@ impl fmt::Debug for CallClientMessage {
         .field("secret", &"[redacted]")
         .finish(),
       Self::SetMuted { is_muted } => f.debug_struct("SetMuted").field("is_muted", is_muted).finish(),
+      Self::SetRecording { notice } => f
+        .debug_struct("SetRecording")
+        .field("notice_bytes", &notice.len())
+        .finish(),
       Self::UplinkHurt { is_hurt } => f.debug_struct("UplinkHurt").field("is_hurt", is_hurt).finish(),
       Self::Unknown => f.write_str("Unknown"),
     }
@@ -1025,6 +1051,32 @@ mod tests {
       r#"{"type":"participant_muted","device_id":"7","is_muted":false}"#
     );
     assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), event);
+  }
+
+  #[test]
+  fn recording_notice_wire_format() {
+    let message = CallClientMessage::SetRecording {
+      notice: Base64Bytes::new(vec![1, 2, 3]),
+    };
+    let json = serde_json::to_string(&message).unwrap();
+    assert_eq!(json, r#"{"type":"set_recording","notice":"AQID"}"#);
+    assert_eq!(serde_json::from_str::<CallClientMessage>(&json).unwrap(), message);
+    let event = CallEvent::RecordingNotice {
+      device_id: "7".parse().unwrap(),
+      notice: Base64Bytes::new(vec![1, 2, 3]),
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(
+      json,
+      r#"{"type":"recording_notice","device_id":"7","notice":"AQID"}"#
+    );
+    assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), event);
+    let kept = CallEvent::RecordingNoticeKept {
+      notice: Base64Bytes::new(vec![1, 2, 3]),
+    };
+    let json = serde_json::to_string(&kept).unwrap();
+    assert_eq!(json, r#"{"type":"recording_notice_kept","notice":"AQID"}"#);
+    assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), kept);
   }
 
   #[test]

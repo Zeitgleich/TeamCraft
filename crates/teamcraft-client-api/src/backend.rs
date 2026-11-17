@@ -221,6 +221,11 @@ pub trait ChatBackend {
   fn voice_message_policy(&self) -> teamcraft_proto::VoiceMessagePolicy {
     teamcraft_proto::VoiceMessagePolicy::default()
   }
+  /// Who may record calls and for how long (e2ee.md §8.3): the call screen offers "Record" only
+  /// to those allowed, and says so when somebody records whom it doesn't allow. Off by default.
+  fn call_recording_policy(&self) -> teamcraft_proto::CallRecordingPolicy {
+    teamcraft_proto::CallRecordingPolicy::default()
+  }
 
   /// Whether the user follows the thread (followed threads feed the threads inbox).
   fn is_thread_followed(&self, _conversation: ConversationId, _thread: ThreadId) -> bool {
@@ -1283,6 +1288,20 @@ pub trait CallBackend {
   fn call_end_reason(&self) -> Option<CallEndReason> {
     None
   }
+  /// Whether this app records calls (e2ee.md §8.3): the desktop app does, the browser not yet.
+  fn can_record_calls(&self) -> bool {
+    false
+  }
+  /// A finished recording on this device waiting for the user to post or delete it.
+  fn call_recording_take(&self) -> Option<crate::calls::CallRecordingTake> {
+    None
+  }
+  /// Starts recording the active call on this device, for at most `max_secs`; everybody in the
+  /// call is told by a signed notice. Offer it only where the verified policy allows the user.
+  fn start_call_recording(&self, _max_secs: u32) {}
+  fn stop_call_recording(&self) {}
+  /// Deletes the finished recording.
+  fn discard_call_recording(&self) {}
   /// Calls ringing for the user that they haven't answered or declined.
   fn incoming_calls(&self) -> Vec<IncomingCall> {
     Vec::new()

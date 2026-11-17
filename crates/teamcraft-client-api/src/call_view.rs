@@ -168,6 +168,8 @@ impl CallView {
       maybe_moved_to: None,
       maybe_joined_at: Some(joined_at),
       maybe_encryption_failure: None,
+      recorders: Vec::new(),
+      maybe_own_recording: None,
     });
     self.maybe_end_reason = None;
   }

@@ -153,6 +153,7 @@ mod tests {
       maybe_presence_policy: None,
       maybe_screen_share_policy: None,
       maybe_voice_message_policy: None,
+      maybe_call_recording_policy: None,
       maybe_notetaker: None,
       bug_report_recipients: Vec::new(),
       maybe_backup: None,

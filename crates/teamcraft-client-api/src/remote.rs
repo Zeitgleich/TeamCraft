@@ -86,6 +86,13 @@ pub struct CallSnapshot {
   /// first; the page takes each once (`CallReportGate`) and sends it with the crash reports.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub call_reports: Vec<crate::crash_reporting::CallReport>,
+  /// This app records calls (the desktop shell; e2ee.md §8.3). The browser's call module doesn't
+  /// yet, and older shells don't say: no record button there.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub can_record: bool,
+  /// A finished recording waiting for the user to post or delete it.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_recording_take: Option<crate::calls::CallRecordingTake>,
 }
 
 /// Something the user did in or about a call.
@@ -169,6 +176,16 @@ pub enum CallAction {
     resolution: ScreenShareResolution,
   },
   StopScreenShare,
+  /// Starts recording the call on this device (e2ee.md §8.3): everybody in it is told by a signed
+  /// notice. The UI offers it only where the verified policy allows the user; `max_secs` is the
+  /// policy's longest recording. Refused where the module doesn't record (`can_record`).
+  StartRecording {
+    max_secs: u32,
+  },
+  /// Stops this device's recording; the take waits for the user ([`CallSnapshot::maybe_recording_take`]).
+  StopRecording,
+  /// Deletes the finished take.
+  DiscardRecording,
   /// Opens the system's video effects panel (macOS: Portrait, background, Studio Light).
   OpenSystemVideoEffects,
   /// Which call status sounds play (a device setting; also before any call).
@@ -310,6 +327,14 @@ pub struct SecuritySnapshot {
     skip_serializing_if = "Option::is_none"
   )]
   pub maybe_voice_message_policy: Option<teamcraft_proto::VoiceMessagePolicy>,
+  /// Who may record calls under the verified policy (e2ee.md §8.3); `None` before one was
+  /// verified, or from an older shell: nobody (the default).
+  #[serde(
+    rename = "call_recording_policy",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_call_recording_policy: Option<teamcraft_proto::CallRecordingPolicy>,
   /// The notetaker group of the verified policy (e2ee.md §8.2); `None` before a policy was
   /// verified (or from an older shell), which shows no notetaker controls.
   #[serde(rename = "notetaker", default, skip_serializing_if = "Option::is_none")]

@@ -7,6 +7,7 @@ mod api;
 mod bytes;
 mod call_fallback;
 mod call_media;
+mod call_recording;
 mod calls;
 mod canvas_page;
 pub mod channel_name;
@@ -43,6 +44,10 @@ pub use call_media::{
   MAX_VIDEO_FRAME_FRAGMENTS, MediaCapabilities, SHORT_VIDEO_FRAME_FRAGMENTS, ScreenShareResolution,
   TransportFeedback, VideoCodec, VideoFeature, VideoLayerInfo, VideoPublicationId, VideoTrack,
   VideoTrackKind,
+};
+pub use call_recording::{
+  CallRecorders, CallRecordingPolicy, DEFAULT_RECORDING_MINUTES, MAX_RECORDING_MINUTES,
+  MAX_RECORDING_NOTICE_BYTES, RecorderRole,
 };
 pub use calls::{
   AUDIO_SOCKET_SECRET_BYTES, CALL_JOIN_TOKEN_AUDIENCE, CALL_PROBE_TICKET_AUDIENCE, CallClientMessage,

@@ -141,4 +141,7 @@
   <string name="call_tile_ongoing">Läuft</string>
   <string name="call_tile_ended">Beendet</string>
   <string name="call_tile_join">Beitreten</string>
+  <!-- Call recording (#216, e2ee.md §8.3) -->
+  <string name="call_recording_by">Aufnahme durch %1$s. Verlasse den Anruf, wenn du nicht aufgenommen werden möchtest.</string>
+  <string name="call_recording_someone">Jemand</string>
 </resources>

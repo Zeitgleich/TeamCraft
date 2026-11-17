@@ -549,6 +549,9 @@ pub struct Participant {
   pub is_camera_on: bool,
   pub has_hand_raised: bool,
   pub is_sharing_screen: bool,
+  /// A device of the person records the call (e2ee.md §8.3): the tile carries the mark.
+  #[serde(default)]
+  pub is_recording: bool,
 }
 
 /// A running drop-in huddle in a channel.
@@ -766,6 +769,51 @@ pub struct ActiveCall {
   /// and the UI says so with a way out. Absent from older shells.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub maybe_encryption_failure: Option<EncryptionFailure>,
+  /// The others who record the call, one per person, from their signed notices (e2ee.md §8.3).
+  /// Every app shows them for as long as they record; nothing hides it.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub recorders: Vec<CallRecorder>,
+  /// This device records the call (the desktop app). Absent from older shells and the browser.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_own_recording: Option<OwnCallRecording>,
+}
+
+/// Somebody else recording the call (e2ee.md §8.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallRecorder {
+  pub user: UserId,
+  /// Their notice verified against their call key; `false` until this device has the key (a
+  /// moment after joining). The UI shows the recording either way.
+  pub is_verified: bool,
+  /// The server says they left the call, but their device is still in the call's encryption
+  /// group, so it may still hear the call: the recording shows until it is out.
+  #[serde(default)]
+  pub has_left: bool,
+}
+
+/// This device's recording of the call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnCallRecording {
+  /// When it started (wall clock), for the elapsed time the UI shows.
+  pub started_at: TimestampMs,
+  /// It stops by itself after this long (the policy's `max_minutes`).
+  pub max_secs: u32,
+  /// The SFU doesn't confirm the notice that tells the others: they may not see the recording.
+  #[serde(default)]
+  pub is_unconfirmed: bool,
+}
+
+/// A finished recording on this device, waiting for the user to post it into the call's
+/// conversation (encrypted, e2ee.md §8.3) or delete it. It outlives the call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallRecordingTake {
+  /// The call's conversation: where posting puts it.
+  pub conversation: ConversationId,
+  pub duration_ms: u64,
+  pub size_bytes: u64,
+  /// It stopped at the policy's maximum length, not by the user.
+  #[serde(default)]
+  pub is_at_limit: bool,
 }
 
 /// Why this device has no media keys in its call, and when joining again may help.

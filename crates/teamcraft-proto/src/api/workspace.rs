@@ -773,6 +773,9 @@ pub struct WorkspacePolicy {
   /// The AI notetaker of calls (e2ee.md §8.2); off when absent.
   #[serde(default)]
   pub notetaker: NotetakerPolicy,
+  /// Who may record calls (e2ee.md §8.3, #216); off when absent.
+  #[serde(default)]
+  pub call_recording: crate::CallRecordingPolicy,
   /// Importing history from another chat (e2ee.md §4.10); off when absent.
   #[serde(default)]
   pub import: crate::ImportPolicy,
@@ -1004,6 +1007,7 @@ impl Default for WorkspacePolicy {
       screen_share: ScreenSharePolicy::default(),
       voice_messages: VoiceMessagePolicy::default(),
       notetaker: NotetakerPolicy::default(),
+      call_recording: crate::CallRecordingPolicy::default(),
       import: crate::ImportPolicy::default(),
       scheduled_messages: ScheduledMessagePolicy::default(),
       bug_reports: BugReportPolicy::default(),

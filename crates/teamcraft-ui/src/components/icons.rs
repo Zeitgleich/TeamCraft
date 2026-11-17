@@ -109,6 +109,8 @@ pub enum IconName {
   Pause,
   /// Ends a recording (#204): a rounded square.
   Stop,
+  /// Records a call (#216): a ring around a dot.
+  Record,
   /// A door with an arrow out of it: leave a channel or a space.
   Leave,
   /// Show a saved file in its folder.
@@ -181,6 +183,7 @@ impl IconName {
       Self::Play => "M7 4l13 8-13 8z",
       Self::Pause => "M7 4h3v16H7z M14 4h3v16h-3z",
       Self::Stop => "M8 6h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z",
+      Self::Record => "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z",
       Self::Leave => "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4 M16 17l5-5-5-5 M21 12H9",
       Self::Folder => "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
       Self::Close => "M18 6 6 18M6 6l12 12",

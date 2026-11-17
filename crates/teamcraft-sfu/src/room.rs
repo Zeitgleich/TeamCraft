@@ -32,10 +32,10 @@ use teamcraft_media::{
 };
 use teamcraft_proto::{
   AudioFeature, Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallRosterEntry,
-  ConversationId, DaveTransitionId, DaveTransitionMode, DeviceId, ErrorBody, ErrorCode, MAX_SIMULCAST_LAYERS,
-  MediaCapabilities, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, ScreenShareTakeover, SfuCallIncidents,
-  SfuCallRoster, SfuControlAction, TransportFeedback, UnixMillis, UserId, VideoCodec, VideoLayerInfo,
-  VideoPublicationId, VideoTrackKind,
+  ConversationId, DaveTransitionId, DaveTransitionMode, DeviceId, ErrorBody, ErrorCode,
+  MAX_RECORDING_NOTICE_BYTES, MAX_SIMULCAST_LAYERS, MediaCapabilities, MediaStreamId,
+  SFU_GOING_AWAY_CLOSE_CODE, ScreenShareTakeover, SfuCallIncidents, SfuCallRoster, SfuControlAction,
+  TransportFeedback, UnixMillis, UserId, VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrackKind,
 };
 use thiserror::Error;
 use tokio::sync::Notify;
@@ -101,6 +101,8 @@ pub struct Room {
   max_devices_per_user: usize,
   mute_report_burst: u32,
   mute_reports_per_second: u32,
+  recording_notice_burst: u32,
+  recording_notices_per_second: u32,
   state: Mutex<RoomState>,
   /// Wakes the lost sessions waiting through the reconnect grace when a device joins: the one whose
   /// device took its slot back stops waiting ([`Room::wait_for_return`]).
@@ -214,6 +216,11 @@ struct Participant {
   is_muted: bool,
   /// Limits how often the device may change it.
   mute_limit: TokenBucket,
+  /// Limits how often the device may send a recording notice.
+  recording_notice_limit: TokenBucket,
+  /// The device's latest signed recording notice (e2ee.md §8.3), as it sent it: the SFU can't
+  /// read it, it hands it to devices that join later.
+  maybe_recording_notice: Option<Base64Bytes>,
   audio_stream_id: StreamId,
   session: SessionId,
   presence: Presence,
@@ -607,6 +614,8 @@ impl Room {
       max_devices_per_user: config.max_devices_per_user_per_call,
       mute_report_burst: config.mute_report_burst,
       mute_reports_per_second: config.mute_reports_per_second,
+      recording_notice_burst: config.recording_notice_burst,
+      recording_notices_per_second: config.recording_notices_per_second,
       state: Mutex::new(state),
       joins: Notify::new(),
     })
@@ -712,6 +721,10 @@ impl Room {
       ),
       CallClientMessage::SetMuted { is_muted } => {
         self.set_muted(participant_id, is_muted, now);
+        Ok(())
+      },
+      CallClientMessage::SetRecording { notice } => {
+        self.set_recording_notice(participant_id, notice, now);
         Ok(())
       },
       CallClientMessage::UplinkHurt { is_hurt } => {
@@ -1038,6 +1051,12 @@ impl Room {
             user_id: grant.user_id,
             is_muted: false,
             mute_limit: TokenBucket::new(self.mute_report_burst, self.mute_reports_per_second, now),
+            recording_notice_limit: TokenBucket::new(
+              self.recording_notice_burst,
+              self.recording_notices_per_second,
+              now,
+            ),
+            maybe_recording_notice: None,
             audio_stream_id,
             session,
             presence: Presence::Connected(handle),
@@ -1253,6 +1272,36 @@ impl Room {
     state.broadcast_except(device_id, CallEvent::ParticipantMuted { device_id, is_muted });
   }
 
+  /// Keeps the device's signed recording notice, forwards it to the others and confirms it to
+  /// the sender (e2ee.md §8.3). The SFU doesn't check the signature; it bounds the size and how
+  /// often notices come. One it drops goes unconfirmed, and the sender sends it again.
+  fn set_recording_notice(&self, device_id: DeviceId, notice: Base64Bytes, now: Instant) {
+    if notice.is_empty() || notice.len() > MAX_RECORDING_NOTICE_BYTES {
+      debug!(call_id = %self.call_id, device_id = %device_id, bytes = notice.len(), "recording notice refused: size");
+      return;
+    }
+    let mut state = lock(&self.state);
+    let Some(participant) = state.participants.get_mut(&device_id) else {
+      return;
+    };
+    if !participant.recording_notice_limit.allow(now) {
+      debug!(call_id = %self.call_id, device_id = %device_id, "recording notice over the limit");
+      return;
+    }
+    // The same notice again: its confirmation got lost. The others have it already.
+    if participant.maybe_recording_notice.as_ref() != Some(&notice) {
+      participant.maybe_recording_notice = Some(notice.clone());
+      state.broadcast_except(
+        device_id,
+        CallEvent::RecordingNotice {
+          device_id,
+          notice: notice.clone(),
+        },
+      );
+    }
+    state.send_to(device_id, CallEvent::RecordingNoticeKept { notice });
+  }
+
   /// The account's other devices leave for `device_id` (the call moves there). Reconnecting
   /// ones lose their slot at once; the DAVE group removes them like any leaver.
   fn close_other_devices_of(&self, device_id: DeviceId) {
@@ -1390,6 +1439,22 @@ impl RoomState {
           CallEvent::ParticipantMuted {
             device_id: *device_id,
             is_muted: true,
+          },
+        );
+      }
+    }
+    // Who records is said to every device that comes in, also while it rejoins (e2ee.md §8.3).
+    for (device_id, other) in &self.participants {
+      if let Some(notice) = other
+        .maybe_recording_notice
+        .as_ref()
+        .filter(|_| *device_id != participant_id)
+      {
+        self.send_to(
+          participant_id,
+          CallEvent::RecordingNotice {
+            device_id: *device_id,
+            notice: notice.clone(),
           },
         );
       }
@@ -2278,6 +2343,104 @@ mod tests {
 
   /// Joins user `user` with device `device` that has `capabilities`; returns its signaling queue,
   /// the room and the session.
+  mod recording_notices {
+    use super::*;
+
+    fn kept(events: &[CallEvent]) -> Vec<Vec<u8>> {
+      events
+        .iter()
+        .filter_map(|event| match event {
+          CallEvent::RecordingNoticeKept { notice } => Some(notice.as_slice().to_vec()),
+          _ => None,
+        })
+        .collect()
+    }
+
+    fn notices(events: &[CallEvent]) -> Vec<(DeviceId, Vec<u8>)> {
+      events
+        .iter()
+        .filter_map(|event| match event {
+          CallEvent::RecordingNotice { device_id, notice } => Some((*device_id, notice.as_slice().to_vec())),
+          _ => None,
+        })
+        .collect()
+    }
+
+    /// e2ee.md §8.3: the SFU forwards a device's notice, hands the latest one to whoever joins
+    /// later, and forgets it with the device.
+    #[test]
+    fn a_notice_reaches_the_others_and_late_joiners_until_its_device_leaves() {
+      let rooms = Rooms::new(SfuConfig::default());
+      let (mut alice_rx, room, alice_session) = join_capable(&rooms, 1, 10, MediaCapabilities::default());
+      let (mut bob_rx, _) = join(&rooms, 2, 20);
+      drain(&mut bob_rx);
+      drain(&mut alice_rx);
+
+      room.set_recording_notice(id(10), Base64Bytes::new(vec![1; 90]), Instant::now());
+      assert_eq!(notices(&drain(&mut bob_rx)), vec![(id(10), vec![1; 90])]);
+      assert_eq!(
+        kept(&drain(&mut alice_rx)),
+        vec![vec![1; 90]],
+        "confirmed to the sender"
+      );
+      // The same notice again (its confirmation got lost) is no news to the others, and is
+      // confirmed again.
+      room.set_recording_notice(id(10), Base64Bytes::new(vec![1; 90]), Instant::now());
+      assert!(drain(&mut bob_rx).is_empty());
+      assert_eq!(kept(&drain(&mut alice_rx)), vec![vec![1; 90]]);
+      room.set_recording_notice(id(10), Base64Bytes::new(vec![2; 90]), Instant::now());
+      assert_eq!(notices(&drain(&mut bob_rx)), vec![(id(10), vec![2; 90])]);
+
+      let (mut carol_rx, _) = join(&rooms, 3, 30);
+      assert_eq!(
+        notices(&drain(&mut carol_rx)),
+        vec![(id(10), vec![2; 90])],
+        "a late joiner learns of the recording"
+      );
+
+      assert!(rooms.leave(&room, id(10), alice_session));
+      let (mut dave_rx, _) = join(&rooms, 4, 40);
+      assert!(notices(&drain(&mut dave_rx)).is_empty(), "gone with its device");
+    }
+
+    #[test]
+    fn a_flood_is_dropped_unconfirmed() {
+      let rooms = Rooms::new(SfuConfig::default());
+      let (mut alice_rx, room, _) = join_capable(&rooms, 1, 10, MediaCapabilities::default());
+      let (mut bob_rx, _) = join(&rooms, 2, 20);
+      drain(&mut bob_rx);
+      drain(&mut alice_rx);
+      let now = Instant::now();
+      for index in 0..20u8 {
+        room.set_recording_notice(id(10), Base64Bytes::new(vec![index; 90]), now);
+      }
+      let burst = SfuConfig::default().recording_notice_burst as usize;
+      assert_eq!(notices(&drain(&mut bob_rx)).len(), burst);
+      assert_eq!(
+        kept(&drain(&mut alice_rx)).len(),
+        burst,
+        "the rest goes unconfirmed"
+      );
+    }
+
+    #[test]
+    fn empty_and_oversized_notices_are_dropped() {
+      let rooms = Rooms::new(SfuConfig::default());
+      let (_alice_rx, room, _) = join_capable(&rooms, 1, 10, MediaCapabilities::default());
+      let (mut bob_rx, _) = join(&rooms, 2, 20);
+      drain(&mut bob_rx);
+      room.set_recording_notice(id(10), Base64Bytes::new(Vec::new()), Instant::now());
+      room.set_recording_notice(
+        id(10),
+        Base64Bytes::new(vec![1; MAX_RECORDING_NOTICE_BYTES + 1]),
+        Instant::now(),
+      );
+      assert!(drain(&mut bob_rx).is_empty());
+      let (mut carol_rx, _) = join(&rooms, 3, 30);
+      assert!(notices(&drain(&mut carol_rx)).is_empty());
+    }
+  }
+
   fn join_capable(
     rooms: &Rooms,
     user: i64,

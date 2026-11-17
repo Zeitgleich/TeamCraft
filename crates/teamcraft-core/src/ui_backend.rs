@@ -2954,6 +2954,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.verified_policy().voice_messages
   }
 
+  fn call_recording_policy(&self) -> teamcraft_proto::CallRecordingPolicy {
+    self.verified_policy().call_recording
+  }
+
   fn set_custom_status(&self, maybe_status: Option<CustomStatus>) {
     self.command(CoreCommand::SetCustomStatus { maybe_status });
   }

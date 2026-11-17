@@ -5,13 +5,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use teamcraft_client_api::call_view::CallView;
 use teamcraft_client_api::calls::{
-  ActiveCall, CallEndReason, CallStatusSounds, EncryptionFailure, Participant, RemoteVideoTrack,
-  ScreenShareSound,
+  ActiveCall, CallEndReason, CallRecorder, CallStatusSounds, EncryptionFailure, Participant,
+  RemoteVideoTrack, ScreenShareSound,
 };
 use teamcraft_proto::{DeviceId, MediaStreamId, UserId, VideoCodec, VideoTrackKind};
 
 use crate::call_cues::StatusCues;
 use crate::call_engine::{CallEngineEvent, OwnVideoEnd};
+use crate::call_recording_notice::Recorder;
 use crate::call_resilience::CallTransport;
 
 /// Who is who in the active call: the engine reports devices, the UI shows people.
@@ -28,6 +29,8 @@ pub struct CallRoster {
   reconnecting: BTreeSet<DeviceId>,
   /// Others' devices whose microphone is muted (their own report).
   muted: BTreeSet<DeviceId>,
+  /// Others' devices that record the call (e2ee.md §8.3), as the engine reports them.
+  recording: Vec<Recorder>,
   /// Others' devices whose call key didn't verify: kept out of the encryption.
   refused: BTreeSet<DeviceId>,
   /// Others' tracks whose capture stalled, as their frames say (#1805).
@@ -107,6 +110,16 @@ impl CallRoster {
       CallEngineEvent::MemberRefused(device_id) => {
         roster.refused.insert(device_id);
         active.unverified = roster.refused_users();
+        return true;
+      },
+      CallEngineEvent::RecordersChanged(recorders) => {
+        roster.recording = recorders;
+        active.recorders = roster.recorders();
+      },
+      CallEngineEvent::OwnRecordingUnconfirmed(is_unconfirmed) => {
+        if let Some(own) = active.maybe_own_recording.as_mut() {
+          own.is_unconfirmed = is_unconfirmed;
+        }
         return true;
       },
       CallEngineEvent::ParticipantMuted { device_id, is_muted } => {
@@ -381,6 +394,32 @@ impl CallRoster {
     users.into_iter().collect()
   }
 
+  /// Who records, one entry per person: verified when every recording device of theirs is,
+  /// left when every one of them left.
+  fn recorders(&self) -> Vec<CallRecorder> {
+    let mut by_user: Vec<CallRecorder> = Vec::new();
+    for recorder in &self.recording {
+      let Some(user) = recorder
+        .maybe_user_id
+        .or_else(|| self.users_by_device.get(&recorder.device_id).copied())
+      else {
+        continue;
+      };
+      match by_user.iter_mut().find(|known| known.user == user) {
+        Some(known) => {
+          known.is_verified &= recorder.is_verified;
+          known.has_left &= recorder.has_left;
+        },
+        None => by_user.push(CallRecorder {
+          user,
+          is_verified: recorder.is_verified,
+          has_left: recorder.has_left,
+        }),
+      }
+    }
+    by_user
+  }
+
   fn participants(&self) -> Vec<Participant> {
     let mut by_user: BTreeMap<UserId, Participant> = BTreeMap::new();
     for (device, user) in &self.users_by_device {
@@ -391,8 +430,13 @@ impl CallRoster {
         is_camera_on: false,
         has_hand_raised: false,
         is_sharing_screen: false,
+        is_recording: false,
       });
       participant.is_muted &= self.muted.contains(device);
+      participant.is_recording |= self
+        .recording
+        .iter()
+        .any(|recorder| recorder.device_id == *device);
       participant.is_sharing_screen |= self.sharing_screen.contains(device);
       participant.is_camera_on |= self
         .video_devices

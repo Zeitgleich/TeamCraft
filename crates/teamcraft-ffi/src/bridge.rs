@@ -195,6 +195,7 @@ impl Reads {
       maybe_presence_policy: teamcraft_core::workspace::presence_policy(&self.store),
       maybe_screen_share_policy: teamcraft_core::workspace::screen_share_policy(&self.store),
       maybe_voice_message_policy: teamcraft_core::workspace::voice_message_policy(&self.store),
+      maybe_call_recording_policy: teamcraft_core::workspace::call_recording_policy(&self.store),
       maybe_notetaker: teamcraft_core::notetaker::notetaker_policy(&self.store),
       // The Android screen doesn't name them yet.
       bug_report_recipients: Vec::new(),

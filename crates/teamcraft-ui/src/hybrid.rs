@@ -486,6 +486,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.voice_message_policy()
   }
 
+  fn call_recording_policy(&self) -> teamcraft_proto::CallRecordingPolicy {
+    self.chat.call_recording_policy()
+  }
+
   fn set_activity(&self, is_idle: bool) {
     self.chat.set_activity(is_idle);
   }
@@ -1566,6 +1570,32 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
 
   fn call_end_reason(&self) -> Option<CallEndReason> {
     self.maybe_calls.as_ref().and_then(RemoteCalls::end_reason)
+  }
+
+  fn can_record_calls(&self) -> bool {
+    self.maybe_calls.as_ref().is_some_and(RemoteCalls::can_record)
+  }
+
+  fn call_recording_take(&self) -> Option<teamcraft_client_api::calls::CallRecordingTake> {
+    self.maybe_calls.as_ref().and_then(RemoteCalls::recording_take)
+  }
+
+  fn start_call_recording(&self, max_secs: u32) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::StartRecording { max_secs });
+    }
+  }
+
+  fn stop_call_recording(&self) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::StopRecording);
+    }
+  }
+
+  fn discard_call_recording(&self) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::DiscardRecording);
+    }
   }
 
   fn incoming_calls(&self) -> Vec<IncomingCall> {
