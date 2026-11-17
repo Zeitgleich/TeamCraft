@@ -16,6 +16,7 @@ use super::convert::{offset_date_time, space_notification_settings, unix_millis}
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::time_zone;
 
 const MAX_DND_WINDOWS: usize = 14;
 const MAX_DND_ALLOWED_USERS: usize = 50;
@@ -406,17 +407,10 @@ pub fn is_quiet(maybe_quiet_hours: Option<&str>, now: OffsetDateTime) -> bool {
 }
 
 fn zone_offset_at(maybe_time_zone: Option<&str>, fallback_minutes: i16, unix_seconds: i64) -> i16 {
-  use chrono::{Offset, TimeZone};
   let maybe_offset = maybe_time_zone
-    .and_then(|zone| zone.parse::<chrono_tz::Tz>().ok())
-    .zip(chrono::DateTime::from_timestamp(unix_seconds, 0))
-    .map(|(zone, at)| {
-      zone
-        .offset_from_utc_datetime(&at.naive_utc())
-        .fix()
-        .local_minus_utc()
-        / 60
-    });
+    .and_then(time_zone::named)
+    .zip(jiff::Timestamp::from_second(unix_seconds).ok())
+    .map(|(zone, at)| zone.to_offset(at).seconds() / 60);
   maybe_offset
     .and_then(|minutes| i16::try_from(minutes).ok())
     .unwrap_or(fallback_minutes)
@@ -480,7 +474,7 @@ fn validate_zone(utc_offset_minutes: i16, maybe_time_zone: Option<&str>) -> Resu
     ));
   }
   if let Some(zone) = maybe_time_zone
-    && (zone.len() > MAX_TIME_ZONE_CHARS || zone.parse::<chrono_tz::Tz>().is_err())
+    && (zone.len() > MAX_TIME_ZONE_CHARS || !time_zone::is_known(zone))
   {
     return Err(ApiError::InvalidRequest("unknown time_zone".into()));
   }
@@ -512,4 +506,57 @@ fn validate_windows(windows: &[DndWindow]) -> Result<(), ApiError> {
     }
   }
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// 2026-03-29 01:00:00 UTC: Central Europe moves from UTC+1 to UTC+2.
+  const BERLIN_SPRING_CHANGE: i64 = 1_774_746_000;
+  /// 2026-10-25 01:00:00 UTC: Central Europe moves back to UTC+1.
+  const BERLIN_AUTUMN_CHANGE: i64 = 1_792_890_000;
+
+  #[test]
+  fn the_offset_follows_the_zone_across_its_changes() {
+    let berlin = Some("Europe/Berlin");
+    assert_eq!(zone_offset_at(berlin, 0, BERLIN_SPRING_CHANGE - 1), 60);
+    assert_eq!(zone_offset_at(berlin, 0, BERLIN_SPRING_CHANGE), 120);
+    assert_eq!(zone_offset_at(berlin, 0, BERLIN_AUTUMN_CHANGE - 1), 120);
+    assert_eq!(zone_offset_at(berlin, 0, BERLIN_AUTUMN_CHANGE), 60);
+  }
+
+  #[test]
+  fn offsets_off_the_hour_and_west_of_utc_are_kept() {
+    assert_eq!(zone_offset_at(Some("Asia/Kolkata"), 0, BERLIN_SPRING_CHANGE), 330);
+    assert_eq!(
+      zone_offset_at(Some("Asia/Kathmandu"), 0, BERLIN_SPRING_CHANGE),
+      345
+    );
+    // 2026-03-29: New York is on daylight-saving time (UTC-4), Etc/GMT+5 is UTC-5.
+    assert_eq!(
+      zone_offset_at(Some("America/New_York"), 0, BERLIN_SPRING_CHANGE),
+      -240
+    );
+    assert_eq!(zone_offset_at(Some("Etc/GMT+5"), 0, BERLIN_SPRING_CHANGE), -300);
+  }
+
+  #[test]
+  fn an_unknown_or_missing_zone_falls_back_to_the_stored_offset() {
+    assert_eq!(zone_offset_at(None, 90, BERLIN_SPRING_CHANGE), 90);
+    assert_eq!(zone_offset_at(Some("Mars/Base"), -90, BERLIN_SPRING_CHANGE), -90);
+    assert_eq!(
+      zone_offset_at(Some("europe/berlin"), 15, BERLIN_SPRING_CHANGE),
+      15
+    );
+  }
+
+  #[test]
+  fn zones_are_checked_by_their_exact_name() {
+    assert!(validate_zone(60, Some("Europe/Berlin")).is_ok());
+    assert!(validate_zone(60, None).is_ok());
+    assert!(validate_zone(60, Some("Europe/Berlinn")).is_err());
+    assert!(validate_zone(60, Some("europe/berlin")).is_err());
+    assert!(validate_zone(60, Some(&"A".repeat(MAX_TIME_ZONE_CHARS + 1))).is_err());
+  }
 }
