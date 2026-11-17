@@ -66,6 +66,7 @@ use crate::engine::{Job, Store, direct_peer, parse_id};
 use crate::error::TeamCraftError;
 use crate::logging::{self, JobClock};
 use crate::perf_jobs::{self, PerfJobKind};
+use crate::store_threads::StoreHold;
 use crate::types::LinkRequestItem;
 use crate::types::{
   AccountState, ConversationItem, FirstSyncItem, FirstSyncStageItem, GroupMentionReachItem, KeyCatchUpItem,
@@ -258,6 +259,7 @@ impl ReadQueue {
     listener: Arc<dyn EventListener>,
     catch_up_focus: CatchUpFocus,
     engine: tokio_mpsc::WeakUnboundedSender<Job>,
+    hold: &StoreHold,
   ) -> Result<Self, TeamCraftError> {
     let act_jobs = spawn_lane(
       "teamcraft-actions",
@@ -266,6 +268,7 @@ impl ReadQueue {
       catch_up_focus.clone(),
       engine.clone(),
       None,
+      hold.clone(),
     )?;
     // Only the read threads hold the actions' queue: the actions' thread ends once they did.
     let cache_writes = Arc::new(CacheWrites::new(act_jobs.clone()));
@@ -276,6 +279,7 @@ impl ReadQueue {
       catch_up_focus.clone(),
       engine.clone(),
       Some(cache_writes.clone()),
+      hold.clone(),
     )?;
     let query_jobs = spawn_lane(
       "teamcraft-queries",
@@ -284,6 +288,7 @@ impl ReadQueue {
       catch_up_focus,
       engine,
       Some(cache_writes),
+      hold.clone(),
     )?;
     Ok(Self {
       jobs,
@@ -579,7 +584,8 @@ fn kept_chat_list(store: &Store) -> Option<Vec<ConversationItem>> {
   }
 }
 
-/// Starts a read thread on `store` and answers its queue.
+/// Starts a read thread on `store` and answers its queue. The thread keeps `hold` until it let go
+/// of the store.
 fn spawn_lane(
   name: &str,
   store: Store,
@@ -587,12 +593,15 @@ fn spawn_lane(
   catch_up_focus: CatchUpFocus,
   engine: tokio_mpsc::WeakUnboundedSender<Job>,
   maybe_cache_writes: Option<Arc<CacheWrites>>,
+  hold: StoreHold,
 ) -> Result<mpsc::Sender<ReadJob>, TeamCraftError> {
   let (queue, jobs) = mpsc::channel::<ReadJob>();
   std::thread::Builder::new()
     .name(name.into())
     .stack_size(crate::engine::THREAD_STACK_BYTES)
     .spawn(move || {
+      // Declared first, so it is dropped last, after the store.
+      let _store_hold = hold.enter();
       let mut reads = Reads {
         store,
         listener,
@@ -1756,6 +1765,7 @@ mod tests {
           Arc::new(Quiet),
           CatchUpFocus::default(),
           jobs.downgrade(),
+          &StoreHold::detached(),
         )
         .unwrap();
         Self {
@@ -1848,6 +1858,7 @@ mod tests {
       Arc::new(Quiet),
       CatchUpFocus::default(),
       engine.downgrade(),
+      &StoreHold::detached(),
     )
     .unwrap();
     let (release, released) = mpsc::channel();
