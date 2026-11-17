@@ -1347,7 +1347,8 @@ pub fn ScheduleMeetingDialog(
               </For>
             </ul>
           </fieldset>
-          // Who hosts with the organizer: among the people ticked above (#1720).
+          // Who hosts with the organizer: among the people ticked above (#1720) those the signed
+          // roster vouches for, as the organizer's device signs no other host (#1926).
           {move || {
             let invited = form.with(|form| {
               form
@@ -1361,7 +1362,11 @@ pub fn ScheduleMeetingDialog(
               let people = others.with(|all| {
                 all
                   .iter()
-                  .filter(|user| invited.contains(&user.id) && !user.is_guest)
+                  .filter(|user| {
+                    invited.contains(&user.id)
+                      && !user.is_guest
+                      && state.read(|backend| backend.is_signed_member(user.id))
+                  })
                   .cloned()
                   .collect::<Vec<_>>()
               });

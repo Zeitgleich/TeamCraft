@@ -1901,6 +1901,292 @@ mod hosts {
   }
 }
 
+/// In a meeting chat, a member is who the owners' signed roster vouches for, or a verified host;
+/// everybody else is a guest on every member's device, whatever the server calls them (#1926).
+mod unvouched {
+  use teamcraft_core::client::{HostsChange, is_meeting_guest};
+  use teamcraft_core::store::{LocalStore, Table};
+
+  use super::*;
+
+  #[tokio::test]
+  async fn a_guest_the_server_calls_a_member_is_marked_a_guest_on_a_device_that_didnt_admit_them() {
+    let mut rig = rig().await;
+    let mut bob = rig.member("Bob").await;
+    rig.let_into_group(&mut bob).await;
+    rig.publish_admitters().await;
+    rig.guest_knows_the_link();
+    rig.server_admits_the_guest().await;
+    rig.member_lets_the_guest_in(&mut bob).await.unwrap();
+    settle(&mut [&mut rig.alice, &mut bob, &mut rig.guest]).await;
+    rig.alice.client.full_sync().await.unwrap();
+    assert_eq!(rig.call_devices().await, 3, "the guest is in Alice's group");
+
+    // The server calls the guest a member; Alice's device didn't let them in.
+    rig.server.show_as_member(rig.guest_id());
+    rig.alice.client.full_sync().await.unwrap();
+
+    assert!(rig.is_guest_on_alices_device(rig.guest_id()));
+    assert!(!rig.is_guest_on_alices_device(bob.client.user_id()));
+    assert!(!rig.is_guest_on_alices_device(rig.alice.client.user_id()));
+  }
+
+  /// Every role against the roster: the owner, an admin, a co-host by the verified host list, an
+  /// admitter the organizer signed, and plain members the roster doesn't vouch for, with the server
+  /// calling everybody a member.
+  #[tokio::test]
+  async fn every_role_is_judged_by_the_roster_and_the_verified_lists() {
+    let mut rig = rig().await;
+    let mut bob = rig.member("Bob").await;
+    rig.let_into_group(&mut bob).await;
+    let mut carol = rig.member("Carol").await;
+    rig.join_group(&mut carol).await;
+    rig.name_co_host(&bob).await.unwrap();
+    rig.publish_admitters().await;
+
+    let (alice, bob, carol) = (
+      rig.alice.client.user_id(),
+      bob.client.user_id(),
+      carol.client.user_id(),
+    );
+    assert!(!rig.is_guest_on_alices_device(alice), "the owner");
+    assert!(!rig.is_guest_on_alices_device(bob), "an admin and co-host");
+    assert!(
+      rig.is_guest_on_alices_device(carol),
+      "a member the roster doesn't vouch for"
+    );
+
+    rig.vouch_for(carol).await;
+    assert!(!rig.is_guest_on_alices_device(carol), "once the roster vouches");
+  }
+
+  #[tokio::test]
+  async fn a_member_the_roster_doesnt_vouch_for_leaves_others_devices_to_the_members() {
+    let mut rig = rig().await;
+    let mut bob = rig.member("Bob").await;
+    rig.let_into_group(&mut bob).await;
+    let mut carol = rig.member("Carol").await;
+    rig.join_group(&mut carol).await;
+    carol.client.full_sync().await.unwrap();
+
+    let _laptop = common::link_device(&mut rig.alice).await;
+    let added_by_carol = carol.client.add_missing_devices(rig.chat).await.unwrap();
+    let added_by_alice = rig.alice.client.add_missing_devices(rig.chat).await.unwrap();
+    rig
+      .alice
+      .client
+      .send_text(rig.chat, None, "with the laptop in")
+      .await
+      .unwrap();
+    settle(&mut [&mut rig.alice, &mut bob, &mut carol]).await;
+    carol.client.full_sync().await.unwrap();
+
+    // Her commit would touch Alice's devices, which the members refuse from a guest: left to them.
+    assert_eq!((added_by_carol, added_by_alice), (0, 1));
+    assert_eq!(carol.texts(rig.chat), vec!["with the laptop in"]);
+  }
+
+  #[tokio::test]
+  async fn the_organizer_names_no_host_the_roster_doesnt_vouch_for() {
+    let mut rig = rig().await;
+    let mut bob = rig.member("Bob").await;
+    rig.let_into_group(&mut bob).await;
+    let mut carol = rig.member("Carol").await;
+    rig.join_group(&mut carol).await;
+
+    let refused = rig.name_co_host(&carol).await.unwrap_err();
+    assert!(
+      matches!(refused, CoreError::HostNotVouched(user) if user == carol.client.user_id()),
+      "{refused}"
+    );
+    assert!(rig.server.meeting_hosts(rig.chat).is_empty());
+
+    rig.server.show_as_member(rig.guest_id());
+    let refused = rig
+      .alice
+      .client
+      .change_meeting_hosts(&HostsChange {
+        meeting: rig.meeting,
+        conversation: rig.chat,
+        co_hosts: Vec::new(),
+        maybe_new_organizer: Some(rig.guest_id()),
+      })
+      .await
+      .unwrap_err();
+    assert!(matches!(refused, CoreError::HostNotVouched(_)), "{refused}");
+
+    rig.vouch_for(carol.client.user_id()).await;
+    rig.name_co_host(&carol).await.unwrap();
+  }
+
+  /// The case #1926 exists for: somebody the server calls a member, whom the signed roster
+  /// doesn't vouch for, commits a change to somebody else from an app that doesn't apply the rule
+  /// (modified, or one that never read the roster). The members' devices refuse it, so the change
+  /// doesn't reach them: before #1926 they took it, as the server's word made Carol a member.
+  #[tokio::test]
+  async fn somebody_only_the_server_calls_a_member_changes_nobody_else() {
+    let mut rig = rig().await;
+    let mut bob = rig.member("Bob").await;
+    rig.let_into_group(&mut bob).await;
+    let mut carol = rig.member("Carol").await;
+    rig.join_group(&mut carol).await;
+    settle(&mut [&mut rig.alice, &mut bob, &mut carol]).await;
+    bob.client.full_sync().await.unwrap();
+    let before = bob.client.verified_call_devices(rig.chat).await.unwrap().len();
+    assert_eq!(before, 3);
+
+    // Carol's app forgets the roster and what it verified of the meeting, and commits Alice's new
+    // laptop into the group.
+    carol.store.delete(Table::Workspace, "state").unwrap();
+    for key in [
+      format!("meeting-hosts/{}", rig.chat),
+      format!("meeting-admitters/{}", rig.chat),
+      format!("meeting-pinned-founder/{}", rig.chat),
+    ] {
+      carol.store.delete(Table::SyncState, &key).unwrap();
+    }
+    let _laptop = common::link_device(&mut rig.alice).await;
+    let added_by_carol = carol.client.add_missing_devices(rig.chat).await.unwrap();
+    assert_eq!(added_by_carol, 1, "the modified app committed the change");
+    settle(&mut [&mut bob]).await;
+    bob.client.full_sync().await.unwrap();
+
+    let carol_id = carol.client.user_id();
+    assert!(is_meeting_guest(
+      &bob.store,
+      bob.client.user_id(),
+      rig.chat,
+      carol_id,
+      NOW_MS
+    ));
+    assert_eq!(
+      bob.client.verified_call_devices(rig.chat).await.unwrap().len(),
+      before,
+      "Bob's device refused Carol's commit"
+    );
+  }
+
+  /// A hostile server names the guest the organizer of the chat and calls them a member: no host
+  /// list or roster says so, so they stay a guest.
+  #[tokio::test]
+  async fn a_guest_the_server_names_the_organizer_is_still_a_guest() {
+    let mut rig = rig().await;
+    let mut bob = rig.member("Bob").await;
+    rig.let_into_group(&mut bob).await;
+    rig.guest_knows_the_link();
+    rig.server_admits_the_guest().await;
+    rig.organizer_lets_the_guest_in(ACCESS_ENDS_MS).await.unwrap();
+    settle(&mut [&mut rig.alice, &mut bob, &mut rig.guest]).await;
+
+    rig.server.show_as_member(rig.guest_id());
+    rig.server.set_organizer_of_chat(rig.chat, rig.guest_id());
+    bob.client.full_sync().await.unwrap();
+
+    assert!(is_meeting_guest(
+      &bob.store,
+      bob.client.user_id(),
+      rig.chat,
+      rig.guest_id(),
+      NOW_MS
+    ));
+    assert!(!is_meeting_guest(
+      &bob.store,
+      bob.client.user_id(),
+      rig.chat,
+      rig.alice.client.user_id(),
+      NOW_MS
+    ));
+  }
+
+  /// A hostile server says the meeting chat is a channel: a device that verified the organizer's
+  /// admitters for it keeps judging it as a meeting chat.
+  #[tokio::test]
+  async fn a_meeting_chat_the_server_calls_a_channel_keeps_the_rule() {
+    let mut rig = rig().await;
+    let mut bob = rig.member("Bob").await;
+    rig.let_into_group(&mut bob).await;
+    let mut carol = rig.member("Carol").await;
+    rig.join_group(&mut carol).await;
+    rig.publish_admitters().await;
+    // Bob's device verifies the admitters when it lets somebody in.
+    rig.guest_knows_the_link();
+    rig.server_admits_the_guest().await;
+    rig.member_lets_the_guest_in(&mut bob).await.unwrap();
+    let carol_id = carol.client.user_id();
+    assert!(is_meeting_guest(
+      &bob.store,
+      bob.client.user_id(),
+      rig.chat,
+      carol_id,
+      NOW_MS
+    ));
+
+    rig
+      .server
+      .relabel_conversation(rig.chat, teamcraft_proto::ConversationKind::Channel);
+    bob.client.full_sync().await.unwrap();
+
+    assert!(is_meeting_guest(
+      &bob.store,
+      bob.client.user_id(),
+      rig.chat,
+      carol_id,
+      NOW_MS
+    ));
+  }
+
+  /// No verified roster and nothing verified that names a host: every device applies the rule of
+  /// before #1926 alike, so the laptop goes in once and the group doesn't split over who judges a
+  /// plain member's commit how.
+  #[tokio::test]
+  async fn without_a_roster_the_devices_judge_alike() {
+    let mut rig = rig().await;
+    let mut carol = rig.member("Carol").await;
+    rig.join_group(&mut carol).await;
+    assert!(rig.alice.client.workspace().unwrap().roster.members.is_empty());
+
+    let _laptop = common::link_device(&mut rig.alice).await;
+    let added_by_carol = carol.client.add_missing_devices(rig.chat).await.unwrap();
+    settle(&mut [&mut rig.alice, &mut carol]).await;
+    rig.alice.client.full_sync().await.unwrap();
+    let added_by_alice = rig.alice.client.add_missing_devices(rig.chat).await.unwrap();
+    settle(&mut [&mut rig.alice, &mut carol]).await;
+    carol.client.full_sync().await.unwrap();
+
+    assert_eq!(added_by_carol + added_by_alice, 1, "the laptop went in once");
+    assert_eq!(rig.call_devices().await, 3);
+    assert_eq!(
+      carol.client.verified_call_devices(rig.chat).await.unwrap().len(),
+      3
+    );
+  }
+
+  impl Rig {
+    fn is_guest_on_alices_device(&self, user: UserId) -> bool {
+      is_meeting_guest(
+        &self.alice.store,
+        self.alice.client.user_id(),
+        self.chat,
+        user,
+        self.clock.now_ms(),
+      )
+    }
+
+    async fn name_co_host(&mut self, co_host: &Peer) -> Result<(), CoreError> {
+      self
+        .alice
+        .client
+        .change_meeting_hosts(&HostsChange {
+          meeting: self.meeting,
+          conversation: self.chat,
+          co_hosts: vec![co_host.client.user_id()],
+          maybe_new_organizer: None,
+        })
+        .await
+    }
+  }
+}
+
 impl Rig {
   fn guest_id(&self) -> UserId {
     self.guest.client.user_id()

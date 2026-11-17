@@ -380,6 +380,16 @@ kind (#1873): a member the roster doesn't vouch for yet and who reported no key 
 confirmed as a member yet. Invite them to the meeting instead." and no "Admit"
 (`LobbyPersonStatus::UnconfirmedMember`); a guest the server calls a member is a guest row.
 
+**Who is a guest in the meeting chat** (#1926; e2ee.md §4.6, "Who is a guest, and until when").
+The same rule holds for every decision an app makes in a meeting chat, not only in the lobby: a
+member is somebody the owners' signed roster vouches for, or the organizer or a co-host by the
+verified host lists; an admitter the organizer signed lets people in besides; everybody else is a
+guest, whatever the server calls them. So the chat's member list and messages show "Guest" for
+them, the organizer can't make them a co-host or hand them the meeting (the co-host picker and
+the leave prompt don't offer them), and every member's device refuses their changes to anybody
+else's membership. A plain member whose account the owners' apps haven't noted yet is one of
+them until it is noted; invite them like anybody else.
+
 **Telling people.** Every change sends `meeting_update` to the organizer, the invitees and the
 co-hosts before and after; a handover also `conversation_update` to the chat's members, whose
 devices then read who organizes the chat. An app that sees its user became a co-host or the

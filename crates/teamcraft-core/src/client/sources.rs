@@ -48,7 +48,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Ok(Vec::new());
     }
     let group_users: HashSet<_> = self.group_users(conversation)?.into_iter().collect();
-    let guests = self.guest_users(group_users.iter().copied())?;
+    let guests = self.guests_in(conversation, group_users.iter().copied(), self.now_ms())?;
     let workspace = self.workspace()?;
     let max_age_ms = i64::try_from(self.settings.workspace_max_age.as_millis()).unwrap_or(i64::MAX);
     let is_fresh = workspace.is_roster_fresh(self.now_ms(), max_age_ms);

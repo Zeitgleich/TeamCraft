@@ -557,6 +557,12 @@ pub trait ChatBackend {
   fn is_signed_member(&self, _user: UserId) -> bool {
     false
   }
+  /// Whether this device treats `user` as a guest in the meeting chat `conversation`: anybody the
+  /// owners' signed roster doesn't vouch for, but its hosts and the organizer's admitters, whatever
+  /// the server's user kind says (#1926). For the "Guest" marks; `false` in other conversations.
+  fn is_meeting_guest(&self, _conversation: ConversationId, _user: UserId) -> bool {
+    false
+  }
   /// Keeps the lobby setting the organizer chose for a meeting on this device.
   fn note_meeting_lobby(&self, _meeting: teamcraft_proto::MeetingId, _has_lobby: bool) {}
   /// Whether the organizer chose "no lobby" for the meeting on this device: only then does it let

@@ -358,7 +358,8 @@ pub fn HostControls(meeting: MeetingId, conversation: ConversationId) -> impl In
   }
 }
 
-/// The others in the call of `conversation` who could take its meeting over: no guests, no bots
+/// The others in the call of `conversation` who could take its meeting over: no guests, also none
+/// the signed roster doesn't vouch for (the organizer's device signs no such host, #1926), no bots
 /// (the server refuses them as hosts).
 pub fn handover_candidates(state: AppState, conversation: ConversationId) -> Vec<crate::model::User> {
   let me = state.me().id;
@@ -367,7 +368,9 @@ pub fn handover_candidates(state: AppState, conversation: ConversationId) -> Vec
       .call_participants(conversation)
       .into_iter()
       .filter_map(|participant| backend.user(participant.user))
-      .filter(|user| !user.is_guest && !user.is_bot && user.id != me)
+      .filter(|user| {
+        !user.is_guest && !user.is_bot && user.id != me && !backend.is_meeting_guest(conversation, user.id)
+      })
       .collect()
   })
 }

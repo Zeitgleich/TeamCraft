@@ -36,8 +36,10 @@ use crate::convert;
 use crate::error::{CoreError, GuestRefusal};
 use crate::meeting_invitees::{self, ChosenInvitees, InviteeFacts, InviteeList, SignedInvitees};
 use crate::meeting_lobby::{self, LobbyAdmission, SignedMembership};
+use crate::meeting_standing::{MeetingStanding, MeetingTime, MeetingVouchers};
 use crate::records;
 use crate::store::{LocalStore, Table};
+use crate::workspace::WorkspaceState;
 
 /// What a member's app appends to a meeting link's `#fragment` (`v=<fingerprint>`), kept for the
 /// UI to read once [`Client::prepare_guest_link`] made it.
@@ -589,34 +591,104 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// The users among `users` of the meeting chat `conversation` this device vouches for as members,
-  /// for what the organizer's device signs (the admitters, the invitees it carries over): never a
-  /// guest ([`Self::guest_users`]), and otherwise only somebody the signed roster vouches for
-  /// (`WorkspaceState::vouches_for_member`), the organizer or a co-host by the host lists this
-  /// device verified, or this device's own user. The server's user kind alone vouches for nobody, so a
-  /// guest another device admitted and the server calls a member is left out (#1873). A plain
-  /// member whose account the owners' apps haven't noted yet is left out too (e2ee.md §4.6, "Who
+  /// for what the organizer's device signs (the admitters, the invitees it carries over):
+  /// [`MeetingStanding::Member`] now, so somebody the signed roster vouches for or a host by the
+  /// host lists this device verified, never a guest. The server's user kind alone vouches for
+  /// nobody, so a guest another device admitted and the server calls a member is left out (#1873),
+  /// and so is a plain member whose account the owners' apps haven't noted yet (e2ee.md §4.6, "Who
   /// is a guest, and until when").
   pub(super) fn vouched_meeting_users(
     &self,
     conversation: ConversationId,
     users: Vec<UserId>,
   ) -> Result<Vec<UserId>, CoreError> {
-    let guests = self.guest_users(users.iter().copied())?;
-    let workspace = self.workspace()?;
-    // The hosts by the host lists this device verified (#1720), never by the server's naming.
-    let mut hosts: BTreeSet<UserId> = self.kept_co_hosts(conversation)?.into_iter().collect();
-    hosts.extend(self.kept_organizer(conversation)?);
-    let me = self.account.user_id;
-    let is_own_member = !self.is_guest_device()?;
+    let standings = self.meeting_standings(conversation, users.iter().copied(), self.now_ms())?;
     Ok(
       users
         .into_iter()
-        .filter(|user| !guests.contains(user))
-        .filter(|user| {
-          workspace.vouches_for_member(*user) || hosts.contains(user) || (*user == me && is_own_member)
-        })
+        .filter(|user| standings.get(user) == Some(&MeetingStanding::Member))
         .collect(),
     )
+  }
+
+  /// What each of `users` is in the meeting chat `conversation` on this device at `at_ms`
+  /// ([`meeting_standings`], #1926). Whoever calls this treats the conversation as a meeting chat,
+  /// so the rule holds also where [`meeting_standings`] has none (no sign of a meeting chat, or
+  /// nothing that vouches for anybody): then only hosts and admitters are anything but guests.
+  pub(crate) fn meeting_standings(
+    &self,
+    conversation: ConversationId,
+    users: impl IntoIterator<Item = UserId>,
+    at_ms: i64,
+  ) -> Result<BTreeMap<UserId, MeetingStanding>, CoreError> {
+    let users: Vec<UserId> = users.into_iter().collect();
+    let time = self.meeting_time(at_ms);
+    if let Some(standings) = meeting_standings(
+      &self.store,
+      self.account.user_id,
+      conversation,
+      users.iter().copied(),
+      time,
+    )? {
+      return Ok(standings);
+    }
+    let known: BTreeSet<UserId> = self.guest_users(users.iter().copied())?.into_iter().collect();
+    let workspace = self.workspace()?;
+    let mut hosts = super::meeting_hosts::meeting_host_users(&self.store, conversation, &workspace, time)?;
+    hosts.extend(super::meeting_hosts::own_organizer(
+      &self.store,
+      self.account.user_id,
+      conversation,
+    )?);
+    let vouchers = MeetingVouchers::new(
+      workspace,
+      time,
+      hosts,
+      self.meeting_admitters_at(conversation, at_ms)?,
+    );
+    Ok(
+      users
+        .into_iter()
+        .map(|user| (user, vouchers.standing(user, known.contains(&user))))
+        .collect(),
+    )
+  }
+
+  /// [`MeetingTime`] at the server's time `at_ms`, with this device's `workspace_max_age`.
+  pub(crate) fn meeting_time(&self, at_ms: i64) -> MeetingTime {
+    MeetingTime {
+      at_ms,
+      roster_max_age_ms: i64::try_from(self.settings.workspace_max_age.as_millis()).unwrap_or(i64::MAX),
+    }
+  }
+
+  /// The guests among `users` of `conversation` on this device at the server's time `at_ms`: in a
+  /// meeting chat everybody [`MeetingStanding::Guest`] (#1926), elsewhere the users it knows as
+  /// guests ([`known_guests`]). The one rule for the member directory that judges commits, the
+  /// membership rule and whether this device leaves others' changes to the members.
+  pub(crate) fn guests_in(
+    &self,
+    conversation: ConversationId,
+    users: impl IntoIterator<Item = UserId>,
+    at_ms: i64,
+  ) -> Result<Vec<UserId>, CoreError> {
+    let users: Vec<UserId> = users.into_iter().collect();
+    match meeting_standings(
+      &self.store,
+      self.account.user_id,
+      conversation,
+      users.iter().copied(),
+      self.meeting_time(at_ms),
+    )? {
+      Some(standings) => Ok(
+        standings
+          .into_iter()
+          .filter(|(_, standing)| *standing == MeetingStanding::Guest)
+          .map(|(user, _)| user)
+          .collect(),
+      ),
+      None => self.guest_users(users),
+    }
   }
 
   /// The sequence of the newest verified statement that named invitees.
@@ -940,11 +1012,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   fn admitters_record(&self, conversation: ConversationId) -> Result<Option<AdmittersRecord>, CoreError> {
-    records::get_json(
-      &self.store,
-      Table::SyncState,
-      &format!("{ADMITTERS_PREFIX}{conversation}"),
-    )
+    admitters_record_in(&self.store, conversation)
   }
 
   /// Keeps a verified statement unless one with a higher sequence is kept already.
@@ -1027,11 +1095,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       records::get_json(&self.store, Table::SyncState, &key)?.unwrap_or_default();
     deadlines.insert(guest, access_ends_at_ms);
     records::put_json(&self.store, Table::SyncState, &key, &deadlines)
-  }
-
-  /// Users this device itself let into a meeting chat as guests.
-  pub(super) fn admitted_guests(&self) -> Result<Vec<UserId>, CoreError> {
-    Ok(records::get_json(&self.store, Table::SyncState, ADMITTED_GUESTS_KEY)?.unwrap_or_default())
   }
 
   /// Queues the removal of guests this device admitted whose access has ended by its own clock,
@@ -1149,6 +1212,145 @@ pub fn admits_link_arrivals<S: LocalStore>(store: &S, conversation: Conversation
   .ok()
   .flatten()
   .is_some_and(|record| record.is_own && record.admits_by_link && now_ms <= record.expires_at_ms)
+}
+
+/// Whether this device treats `user` as a guest in the meeting chat `conversation` at `now_ms`
+/// ([`MeetingStanding::Guest`], #1926), for the "Guest" marks the apps show: a server that calls a
+/// guest a member doesn't take the mark away. Also a user the server calls a guest anywhere else.
+/// Unknown (nothing readable) means not marked.
+pub fn is_meeting_guest<S: LocalStore>(
+  store: &S,
+  me: UserId,
+  conversation: ConversationId,
+  user: UserId,
+  now_ms: i64,
+) -> bool {
+  let time = MeetingTime {
+    at_ms: now_ms,
+    roster_max_age_ms: i64::try_from(super::DEFAULT_WORKSPACE_MAX_AGE.as_millis()).unwrap_or(i64::MAX),
+  };
+  match meeting_standings(store, me, conversation, [user], time) {
+    Ok(Some(standings)) => standings.get(&user) == Some(&MeetingStanding::Guest),
+    Ok(None) | Err(_) => false,
+  }
+}
+
+/// What each of `users` is in the meeting chat `conversation` on this device, with the organizer's
+/// admitters in force at `time` ([`MeetingVouchers::standing`]); `None` for a conversation that is
+/// no meeting chat, where the server's word and this device's own admissions decide
+/// ([`known_guests`]).
+pub(crate) fn meeting_standings<S: LocalStore>(
+  store: &S,
+  me: UserId,
+  conversation: ConversationId,
+  users: impl IntoIterator<Item = UserId>,
+  time: MeetingTime,
+) -> Result<Option<BTreeMap<UserId, MeetingStanding>>, CoreError> {
+  let Some(vouchers) = meeting_vouchers(store, me, conversation, time)? else {
+    return Ok(None);
+  };
+  let users: Vec<UserId> = users.into_iter().collect();
+  let known: BTreeSet<UserId> = known_guests(store, me, users.iter().copied())?
+    .into_iter()
+    .collect();
+  Ok(Some(
+    users
+      .into_iter()
+      .map(|user| (user, vouchers.standing(user, known.contains(&user))))
+      .collect(),
+  ))
+}
+
+/// What vouches for people in the meeting chat on this device: the verified roster, the hosts of
+/// the verified host lists and the organizer's admitters in force at `at_ms`. `None` where nothing
+/// vouches for anybody ([`MeetingVouchers::vouches_for_nobody`]) or the conversation is no meeting
+/// chat: neither the server says it is one nor did this device pin its
+/// founder or verify admitters for it (a server that calls a meeting chat a channel doesn't
+/// switch the rule off on a device that took part).
+fn meeting_vouchers<S: LocalStore>(
+  store: &S,
+  me: UserId,
+  conversation: ConversationId,
+  time: MeetingTime,
+) -> Result<Option<MeetingVouchers>, CoreError> {
+  let maybe_admitters = admitters_record_in(store, conversation)?;
+  let is_meeting_by_server = records::get_json::<teamcraft_proto::ConversationResponse>(
+    store,
+    Table::Conversations,
+    &conversation.to_string(),
+  )?
+  .is_some_and(|response| response.kind == teamcraft_proto::ConversationKind::Meeting);
+  let is_meeting_chat = is_meeting_by_server
+    || maybe_admitters.is_some()
+    || super::meeting_hosts::has_pinned_founder(store, conversation)?;
+  if !is_meeting_chat {
+    return Ok(None);
+  }
+  let workspace: WorkspaceState =
+    records::get_json(store, Table::Workspace, super::WORKSPACE_KEY)?.unwrap_or_default();
+  let mut hosts = super::meeting_hosts::meeting_host_users(store, conversation, &workspace, time)?;
+  let admitters: Vec<UserId> = maybe_admitters
+    .filter(|record| time.at_ms <= record.expires_at_ms)
+    .map(|record| record.admitters)
+    .unwrap_or_default();
+  if MeetingVouchers::new(workspace.clone(), time, hosts.iter().copied(), []).vouches_for_nobody() {
+    return Ok(None);
+  }
+  hosts.extend(super::meeting_hosts::own_organizer(store, me, conversation)?);
+  Ok(Some(MeetingVouchers::new(workspace, time, hosts, admitters)))
+}
+
+/// The users among `users` this device knows as guests: those the server's user kind says are
+/// guests or this device itself let in as guests, unless the signed roster names them or they
+/// organize a meeting (a hostile server can't make a host a guest, e2ee.md §4.6). Guests manage
+/// nobody's membership but their own. In a meeting chat, everybody the roster doesn't vouch for
+/// counts as a guest besides ([`meeting_standings`]).
+pub(crate) fn known_guests<S: LocalStore>(
+  store: &S,
+  me: UserId,
+  users: impl IntoIterator<Item = UserId>,
+) -> Result<Vec<UserId>, CoreError> {
+  let admitted: Vec<UserId> =
+    records::get_json(store, Table::SyncState, ADMITTED_GUESTS_KEY)?.unwrap_or_default();
+  let conversations: Vec<teamcraft_proto::ConversationResponse> =
+    records::list_json(store, Table::Conversations)?;
+  let organizers: Vec<UserId> = conversations
+    .iter()
+    .filter_map(|conversation| conversation.maybe_organizer_user_id)
+    .collect();
+  let workspace: WorkspaceState =
+    records::get_json(store, Table::Workspace, super::WORKSPACE_KEY)?.unwrap_or_default();
+  let is_guest_device =
+    records::get_json::<bool>(store, Table::SyncState, GUEST_DEVICE_KEY)?.unwrap_or(false);
+  let mut guests = Vec::new();
+  for user in users {
+    let maybe_summary =
+      records::get_json::<teamcraft_proto::UserSummary>(store, Table::Users, &user.to_string())?;
+    let is_listed_as_guest =
+      maybe_summary.is_some_and(|summary| summary.kind == teamcraft_proto::UserKind::Guest);
+    let is_vouched = workspace
+      .roster
+      .members
+      .iter()
+      .any(|member| member.user_id == user)
+      || organizers.contains(&user)
+      || user == me && !is_guest_device;
+    if (is_listed_as_guest || admitted.contains(&user)) && !is_vouched {
+      guests.push(user);
+    }
+  }
+  Ok(guests)
+}
+
+fn admitters_record_in<S: LocalStore>(
+  store: &S,
+  conversation: ConversationId,
+) -> Result<Option<AdmittersRecord>, CoreError> {
+  records::get_json(
+    store,
+    Table::SyncState,
+    &format!("{ADMITTERS_PREFIX}{conversation}"),
+  )
 }
 
 /// The fragment a member's app appends to the meeting link, if [`Client::prepare_guest_link`] made it.

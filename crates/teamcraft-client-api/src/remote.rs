@@ -1892,6 +1892,10 @@ pub enum ChatQuery {
   IsSignedMember {
     user: UserId,
   },
+  IsMeetingGuest {
+    conversation: ConversationId,
+    user: UserId,
+  },
   IsOpenByOwnRecord {
     meeting: teamcraft_proto::MeetingId,
   },
@@ -2362,6 +2366,9 @@ impl ChatQuery {
       },
       Self::IsSignedMember { user } => ChatAnswer::Flag {
         value: backend.is_signed_member(user),
+      },
+      Self::IsMeetingGuest { conversation, user } => ChatAnswer::Flag {
+        value: backend.is_meeting_guest(conversation, user),
       },
       Self::IsOpenByOwnRecord { meeting } => ChatAnswer::Flag {
         value: backend.is_open_by_own_record(meeting),
