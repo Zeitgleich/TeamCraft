@@ -133,6 +133,7 @@ import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatSnapshot
+import de.zeitgleich.teamcraft.core.CustomEmojiRef
 import de.zeitgleich.teamcraft.core.FileInfo
 import de.zeitgleich.teamcraft.core.HistoryGap
 import de.zeitgleich.teamcraft.core.LinkPreview
@@ -147,6 +148,7 @@ import de.zeitgleich.teamcraft.ui.AnimationBadge
 import de.zeitgleich.teamcraft.ui.AnimationButton
 import de.zeitgleich.teamcraft.ui.AnimationRead
 import de.zeitgleich.teamcraft.ui.AnimationView
+import de.zeitgleich.teamcraft.ui.CustomEmojiPicture
 import de.zeitgleich.teamcraft.ui.DividerOnScreen
 import de.zeitgleich.teamcraft.ui.FeedItem
 import de.zeitgleich.teamcraft.ui.FeedMotion
@@ -1444,10 +1446,10 @@ private fun Bubble(
             nameOf = { snapshot?.name(it).orEmpty() },
           )
           isTextOnly && images.isEmpty() && videos.isEmpty() -> TextWithTime(
-            body = { MessageBody(message.body, colors.content, colors.markup, look.names.forMessage(message), onOpenPermalink) },
+            body = { MessageBody(message.body, colors.content, colors.markup, look.names.forMessage(message), onOpenPermalink, customEmoji = message.customEmoji) },
             time = { Footer(message, maybeExtras, colors, isMine) },
           )
-          hasText -> MessageBody(message.body, colors.content, colors.markup, look.names.forMessage(message), onOpenPermalink)
+          hasText -> MessageBody(message.body, colors.content, colors.markup, look.names.forMessage(message), onOpenPermalink, customEmoji = message.customEmoji)
         }
         if (!isDeleted) {
           others.forEach { file ->
@@ -1581,7 +1583,7 @@ private fun BelowBubble(
       modifier = Modifier.padding(top = 2.dp),
     ) {
       for (reaction in message.reactions) {
-        ReactionPill(reaction.emoji, reaction.count, reaction.reactedByMe, isEnabled = canReact) {
+        ReactionPill(reaction.emoji, reaction.maybeCustom, reaction.count, reaction.reactedByMe, isEnabled = canReact) {
           haptics.performHapticFeedback(HapticFeedbackType.Confirm)
           viewModel.act(ChatActions.react(message.conversation, message.id, reaction.emoji))
         }
@@ -1632,8 +1634,16 @@ private fun AddReactionPill(onClick: () -> Unit) {
 
 /** One reaction: the emoji and how many, outlined in the accent when the user is among them. */
 @Composable
-private fun ReactionPill(emoji: String, count: Int, isMine: Boolean, isEnabled: Boolean, onClick: () -> Unit) {
+private fun ReactionPill(
+  emoji: String,
+  maybeCustom: CustomEmojiRef?,
+  count: Int,
+  isMine: Boolean,
+  isEnabled: Boolean,
+  onClick: () -> Unit,
+) {
   val scheme = MaterialTheme.colorScheme
+  val contentColor = if (isMine) scheme.onPrimaryContainer else scheme.onSurfaceVariant
   Surface(
     onClick = onClick,
     enabled = isEnabled,
@@ -1641,14 +1651,35 @@ private fun ReactionPill(emoji: String, count: Int, isMine: Boolean, isEnabled: 
     color = if (isMine) scheme.primaryContainer else scheme.surfaceContainerHigh,
     border = BorderStroke(1.dp, if (isMine) scheme.primary else scheme.outlineVariant),
   ) {
-    Text(
-      "$emoji $count",
-      style = MaterialTheme.typography.labelMedium,
-      color = if (isMine) scheme.onPrimaryContainer else scheme.onSurfaceVariant,
-      modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-    )
+    if (maybeCustom == null) {
+      Text(
+        "$emoji $count",
+        style = MaterialTheme.typography.labelMedium,
+        color = contentColor,
+        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+      )
+    } else {
+      // A workspace emoji (#207): its picture at text size, the name while the device lacks it.
+      val name = ":${maybeCustom.shortcode}:"
+      Row(
+        Modifier.padding(horizontal = 8.dp, vertical = 3.dp).semantics(mergeDescendants = true) { contentDescription = "$name $count" },
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        CustomEmojiPicture(
+          maybeCustom.sha256,
+          name,
+          Modifier.size(REACTION_PICTURE),
+          fallback = { Text(name, style = MaterialTheme.typography.labelMedium, color = contentColor) },
+        )
+        Text(count.toString(), style = MaterialTheme.typography.labelMedium, color = contentColor)
+      }
+    }
   }
 }
+
+/** A workspace emoji's picture in a reaction: the label's line height and a little more. */
+private val REACTION_PICTURE = 18.dp
 
 /** Bottom-right inside the bubble: markers, "edited", the time and, for own messages, the state. */
 @Composable

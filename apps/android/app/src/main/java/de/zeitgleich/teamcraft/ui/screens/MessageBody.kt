@@ -53,11 +53,14 @@ import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import de.zeitgleich.teamcraft.R
+import de.zeitgleich.teamcraft.core.CustomEmojiRef
+import de.zeitgleich.teamcraft.ui.CustomEmoji
 import de.zeitgleich.teamcraft.ui.LinkHandlers
 import de.zeitgleich.teamcraft.ui.MarkupColors
 import de.zeitgleich.teamcraft.ui.MentionNames
 import de.zeitgleich.teamcraft.ui.annotatedLine
 import de.zeitgleich.teamcraft.ui.annotatedLines
+import uniffi.teamcraft_ffi.CustomEmojiRefItem
 import uniffi.teamcraft_ffi.MarkupAlignment
 import uniffi.teamcraft_ffi.MarkupBlock
 import uniffi.teamcraft_ffi.MarkupLine
@@ -80,8 +83,11 @@ fun MessageBody(
   names: MentionNames,
   onOpenPermalink: (String) -> Unit,
   modifier: Modifier = Modifier,
+  /** The workspace emoji the text names (#207): drawn as their pictures. */
+  customEmoji: List<CustomEmojiRef> = emptyList(),
 ) {
   val context = LocalContext.current
+  val emojiRefs = remember(customEmoji) { CustomEmoji.refsOf(customEmoji) }
   val blocks = remember(body) { messageMarkup(body) }
   val maybeProfile = LocalOpenProfile.current
   val links = remember(context, onOpenPermalink, maybeProfile) {
@@ -124,19 +130,22 @@ fun MessageBody(
     ) {
       for (block in blocks) {
         when (block) {
-          is MarkupBlock.Paragraph -> LinkText(
+          is MarkupBlock.Paragraph -> EmojiLinkText(
             remember(block, colors, names) { annotatedLines(block.lines, colors, names, links, permalinkLabel) },
             style = paragraphStyle,
+            refs = emojiRefs,
           )
-          is MarkupBlock.Heading -> LinkText(
+          is MarkupBlock.Heading -> EmojiLinkText(
             remember(block, colors, names) { annotatedLine(block.line, colors, names, links, permalinkLabel) },
             style = headingStyle(block.level.toInt()).copy(color = textColor),
+            refs = emojiRefs,
           )
           is MarkupBlock.Quote -> Row(Modifier.height(IntrinsicSize.Min)) {
             Box(Modifier.width(QUOTE_BAR).fillMaxHeight().background(textColor.copy(alpha = QUOTE_BAR_ALPHA), RoundedCornerShape(2.dp)))
-            LinkText(
+            EmojiLinkText(
               remember(block, colors, names) { annotatedLines(block.lines, colors, names, links, permalinkLabel) },
               style = bodyStyle.copy(color = textColor.copy(alpha = QUOTE_TEXT_ALPHA)),
+              refs = emojiRefs,
               modifier = Modifier.padding(start = 8.dp),
             )
           }
@@ -148,7 +157,11 @@ fun MessageBody(
               }
               Row {
                 Text(marker, style = bodyStyle, modifier = Modifier.padding(end = 6.dp))
-                LinkText(remember(item, colors, names) { annotatedLine(item, colors, names, links, permalinkLabel) }, style = bodyStyle)
+                EmojiLinkText(
+                  remember(item, colors, names) { annotatedLine(item, colors, names, links, permalinkLabel) },
+                  style = bodyStyle,
+                  refs = emojiRefs,
+                )
               }
             }
           }
@@ -165,6 +178,23 @@ fun MessageBody(
       }
     }
   }
+}
+
+/** [LinkText] with the `:shortcode:` words of [refs] drawn as the workspace emoji's pictures. */
+@Composable
+private fun EmojiLinkText(
+  text: AnnotatedString,
+  style: TextStyle,
+  refs: List<CustomEmojiRefItem>,
+  modifier: Modifier = Modifier,
+) {
+  if (refs.isEmpty()) {
+    LinkText(text, style, modifier)
+    return
+  }
+  val pictured = remember(text, refs) { CustomEmoji.withPictures(text, refs) }
+  val content = remember(pictured, style.fontSize) { CustomEmoji.inlineContent(pictured.hashes, style.fontSize) }
+  LinkText(pictured.text, style, modifier, content)
 }
 
 /** Fenced code: monospace on its own surface, scrolled sideways rather than wrapped. */

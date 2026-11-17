@@ -4,6 +4,7 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.text.InlineTextContent
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -43,7 +44,12 @@ internal object LinkPress {
  * follows the link, and a long-press anywhere else reaches the message's own menu.
  */
 @Composable
-internal fun LinkText(text: AnnotatedString, style: TextStyle, modifier: Modifier = Modifier) {
+internal fun LinkText(
+  text: AnnotatedString,
+  style: TextStyle,
+  modifier: Modifier = Modifier,
+  inlineContent: Map<String, InlineTextContent> = emptyMap(),
+) {
   val haptics = LocalHapticFeedback.current
   var maybeLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
   var maybeOpen by remember { mutableStateOf<Detected?>(null) }
@@ -84,7 +90,13 @@ internal fun LinkText(text: AnnotatedString, style: TextStyle, modifier: Modifie
       }
     }
   }
-  Text(text, modifier = modifier.then(pressModifier), style = style, onTextLayout = { maybeLayout = it })
+  Text(
+    text,
+    modifier = modifier.then(pressModifier),
+    style = style,
+    inlineContent = inlineContent,
+    onTextLayout = { maybeLayout = it },
+  )
   maybeOpen?.let { detected ->
     LinkMenu(detected, onDismiss = { maybeOpen = null })
   }

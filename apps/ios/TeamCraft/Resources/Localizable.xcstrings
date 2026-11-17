@@ -16401,6 +16401,22 @@
         }
       }
     },
+    "react_workspace_emoji": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Workspace emoji"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Workspace-Emoji"
+          }
+        }
+      }
+    },
     "react_add": {
       "localizations": {
         "en": {

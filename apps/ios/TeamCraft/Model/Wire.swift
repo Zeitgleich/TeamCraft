@@ -477,6 +477,8 @@ struct Message: Decodable, Equatable, Identifiable, Sendable {
   /// Handles of the user groups the sender's device expanded (issue #206): those `@words` show as
   /// group mentions.
   var groupMentions: [String] = []
+  /// The workspace emoji the text names by `:shortcode:` (issue #207), from the ciphertext.
+  var customEmoji: [CustomEmojiRef] = []
   /// The sender named this user among the people to notify.
   var mentionsMe = false
   /// A poll (#205), counted by the core from the encrypted votes: shown instead of `body`.
@@ -502,7 +504,8 @@ struct Message: Decodable, Equatable, Identifiable, Sendable {
     id: String, conversationId: String, authorId: String, sentAtMs: Int64, body: String, authorName: String = "",
     isEdited: Bool = false, replyCount: UInt32 = 0, maybeThreadId: String? = nil, reactions: [Reaction] = [],
     maybeSystemEvent: SystemEvent? = nil, maybePlaceholder: Placeholder? = nil, maybeSource: Source? = nil,
-    groupMentions: [String] = [], mentionsMe: Bool = false, isAuthorDeleted: Bool = false
+    groupMentions: [String] = [], customEmoji: [CustomEmojiRef] = [], mentionsMe: Bool = false,
+    isAuthorDeleted: Bool = false
   ) {
     self.id = id
     self.conversationId = conversationId
@@ -518,6 +521,7 @@ struct Message: Decodable, Equatable, Identifiable, Sendable {
     self.maybePlaceholder = maybePlaceholder
     self.maybeSource = maybeSource
     self.groupMentions = groupMentions
+    self.customEmoji = customEmoji
     self.mentionsMe = mentionsMe
     self.isAuthorDeleted = isAuthorDeleted
   }
@@ -541,7 +545,7 @@ struct Message: Decodable, Equatable, Identifiable, Sendable {
   }
 
   private enum CodingKeys: String, CodingKey {
-    case id, body, reactions, groupMentions, mentionsMe, kind, isEdited, replyCount
+    case id, body, reactions, groupMentions, customEmoji, mentionsMe, kind, isEdited, replyCount
     case conversationId = "conversation"
     case authorId = "author"
     case sentAtMs = "sentAt"
@@ -571,6 +575,7 @@ struct Message: Decodable, Equatable, Identifiable, Sendable {
     maybeSource = try? container.decodeIfPresent(Source.self, forKey: .maybeSource)
     maybeImported = try? container.decodeIfPresent(Imported.self, forKey: .maybeImported)
     groupMentions = try container.decodeIfPresent([String].self, forKey: .groupMentions) ?? []
+    customEmoji = (try? container.decodeIfPresent([CustomEmojiRef].self, forKey: .customEmoji)) ?? []
     mentionsMe = try container.decodeIfPresent(Bool.self, forKey: .mentionsMe) ?? false
     // A poll this version can't read shows its text, which older versions show too.
     maybePoll = try? container.decodeIfPresent(Poll.self, forKey: .maybePoll)
@@ -583,21 +588,35 @@ struct Reaction: Decodable, Equatable, Sendable {
   let emoji: String
   let count: UInt32
   var reactedByMe = false
+  /// A workspace emoji's picture, when the reaction named one (issue #207).
+  var maybeCustom: CustomEmojiRef?
 
-  init(emoji: String, count: UInt32, reactedByMe: Bool = false) {
+  init(emoji: String, count: UInt32, reactedByMe: Bool = false, maybeCustom: CustomEmojiRef? = nil) {
     self.emoji = emoji
     self.count = count
     self.reactedByMe = reactedByMe
+    self.maybeCustom = maybeCustom
   }
 
-  private enum CodingKeys: String, CodingKey { case emoji, count, reactedByMe }
+  private enum CodingKeys: String, CodingKey {
+    case emoji, count, reactedByMe
+    case maybeCustom = "custom"
+  }
 
   init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     emoji = try container.decode(String.self, forKey: .emoji)
     count = try container.decode(UInt32.self, forKey: .count)
     reactedByMe = try container.decodeIfPresent(Bool.self, forKey: .reactedByMe) ?? false
+    maybeCustom = try? container.decodeIfPresent(CustomEmojiRef.self, forKey: .maybeCustom)
   }
+}
+
+/// A workspace emoji a message or reaction uses: the name it had and the hash of its picture
+/// (issue #207). Without the picture on this device it shows as `:shortcode:`.
+struct CustomEmojiRef: Decodable, Equatable, Hashable, Sendable {
+  let shortcode: String
+  let sha256: String
 }
 
 /// A call's tile in the timeline: the core's `CallTile`.

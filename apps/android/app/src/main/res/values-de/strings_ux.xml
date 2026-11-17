@@ -305,6 +305,7 @@
   <string name="message_layout_comfortable">Komfortabel</string>
   <string name="message_layout_compact">Kompakt</string>
   <string name="message_layout_hint">Blasen zeigen deine Nachrichten rechts. Komfortabel und Kompakt zeigen jede Nachricht mit Bild, Name und Uhrzeit, wie am Desktop.</string>
+  <string name="react_workspace_emoji">Workspace-Emoji</string>
   <string name="react_add">Reaktion hinzufügen</string>
   <!-- Settings groups (issue #454) -->
   <string name="settings_group_profile">Profil</string>

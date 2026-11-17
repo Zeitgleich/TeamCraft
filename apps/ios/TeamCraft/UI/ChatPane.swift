@@ -197,6 +197,14 @@ struct ChatPane: View {
       mentionNames = await model.mentionNames()
       voicePolicy = await model.voiceMessagePolicy()
     }
+    // The workspace's emoji for the reaction menus (issue #207): what the core holds now, then again
+    // once it asked the server.
+    .task {
+      guard let core = try? model.core() else { return }
+      await CustomEmojiPictures.refreshWorkspace(core: core)
+      await CustomEmojiPictures.want(core: core)
+      await CustomEmojiPictures.refreshWorkspace(core: core)
+    }
     // The composer lives in the core's drafts, so text typed before the app was killed is back
     // (issue #158), also from the user's other devices.
     .task(id: draftKey) {
@@ -1327,6 +1335,7 @@ struct ChatPane: View {
           Button(emoji) { react(message, emoji) }
         }
       }
+      WorkspaceEmojiButtons { react(message, $0) }
     }
     if threadId == nil && conversation.canPost {
       Button("reply", systemImage: "arrowshape.turn.up.left") {
@@ -2113,16 +2122,47 @@ struct EditHistorySheet: View {
 
 /// Emoji for the `:name` being typed, from the core's catalog; a tap puts the emoji in.
 struct EmojiSuggestionBar: View {
+  @Environment(AppModel.self) private var model
   let text: String
   var caret: Int?
   let onPick: (String) -> Void
+  /// The workspace's emoji whose names match what is typed (issue #207), first in the bar.
+  @State private var workspace: [CustomEmojiItem] = []
+
+  private var maybeQuery: String? { activeEmojiQuery(text, caret: caret) }
 
   var body: some View {
-    if let query = activeEmojiQuery(text, caret: caret) {
+    content
+      // Reads again when the store changes: an emoji or picture can arrive after the first read.
+      .task(id: "\(maybeQuery ?? "")/\(model.changeCount)") {
+        guard let query = maybeQuery, let core = try? model.core() else {
+          workspace = []
+          return
+        }
+        workspace = (try? await core.customEmoji(query: query, limit: 8)) ?? []
+        await CustomEmojiPictures.want(core: core)
+      }
+  }
+
+  @ViewBuilder
+  private var content: some View {
+    if let query = maybeQuery {
       let suggestions = emojiSuggestions(query: query, limit: 8)
-      if !suggestions.isEmpty {
+      if !suggestions.isEmpty || !workspace.isEmpty {
         ScrollView(.horizontal, showsIndicators: false) {
           HStack(spacing: 6) {
+            ForEach(workspace, id: \.sha256) { item in
+              Button { onPick(":\(item.shortcode):") } label: {
+                HStack(spacing: 4) {
+                  CustomEmojiGlyph(reference: CustomEmojiRef(shortcode: item.shortcode, sha256: item.sha256), height: 18)
+                  Text(verbatim: ":\(item.shortcode):").font(.app(.caption))
+                }
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                .background(Theme.surface)
+                .clipShape(Capsule())
+              }
+              .buttonStyle(.plain)
+            }
             ForEach(suggestions, id: \.emoji) { suggestion in
               Button { onPick(suggestion.emoji) } label: {
                 Text("\(suggestion.emoji) :\(suggestion.shortcode):")

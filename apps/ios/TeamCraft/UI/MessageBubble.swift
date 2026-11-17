@@ -248,7 +248,9 @@ struct MessageBubble: View {
           .padding(.horizontal, textInset)
           .padding(.top, 3)
       } else if hasText {
-        MessageBodyView(text: message.body, colors: markupColors, names: look.names.forMessage(message))
+        MessageBodyView(
+          text: message.body, colors: markupColors, names: look.names.forMessage(message),
+          customEmoji: message.customEmoji)
           .padding(.horizontal, textInset)
           .padding(.top, 3)
       }
@@ -403,6 +405,11 @@ struct MessageBodyView: View {
   let text: String
   let colors: MarkupColors
   let names: MentionNames
+  /// The workspace emoji the text names (issue #207): drawn as their pictures.
+  var customEmoji: [CustomEmojiRef] = []
+  @Environment(AppModel.self) private var model
+  /// The pictures of `customEmoji` this device holds, as they arrive.
+  @State private var pictures: [String: UIImage] = [:]
   /// The body size in points, scaled with Dynamic Type; jumbomoji multiply it.
   @ScaledMetric(relativeTo: .body) private var bodySize: CGFloat = 17
 
@@ -433,6 +440,7 @@ struct MessageBodyView: View {
         .frame(maxHeight: isLong && !isExpanded ? collapsedHeight : nil, alignment: .top)
         .clipped()
         .onPreferenceChange(BodyHeightKey.self) { fullHeight = $0 }
+        .task(id: pictureKey) { await loadPictures() }
       if isLong {
         Button {
           withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { isExpanded.toggle() }
@@ -449,6 +457,31 @@ struct MessageBodyView: View {
     }
   }
 
+  /// Changes when a picture is missing and the store changed, so the load looks again once the core
+  /// has downloaded it; fixed once they are all here.
+  private var pictureKey: String {
+    let hashes = customEmoji.map(\.sha256)
+    let isMissing = hashes.contains { pictures[$0] == nil }
+    return hashes.joined(separator: ",") + "/" + (isMissing ? String(model.changeCount) : "held")
+  }
+
+  private func loadPictures() async {
+    guard !customEmoji.isEmpty, let core = try? model.core() else { return }
+    var found = pictures
+    for reference in customEmoji where found[reference.sha256] == nil {
+      if let image = await CustomEmojiPictures.picture(reference.sha256, core: core) {
+        found[reference.sha256] = image
+      }
+    }
+    if found.count != pictures.count { pictures = found }
+    if found.count < Set(customEmoji.map(\.sha256)).count { await CustomEmojiPictures.want(core: core) }
+  }
+
+  /// A run of lines as text, its workspace emoji drawn as pictures at `size` points.
+  private func richText(_ lines: [MarkupLine], size: CGFloat) -> Text {
+    emojiText(styled(lines), refs: customEmoji, pictures: pictures, size: size)
+  }
+
   private var content: some View {
     VStack(alignment: .leading, spacing: 6) {
       ForEach(Array(MarkupCache.blocks(text).enumerated()), id: \.offset) { _, block in
@@ -462,12 +495,13 @@ struct MessageBodyView: View {
   private func blockView(_ block: MarkupBlock) -> some View {
     switch block {
     case .paragraph(let lines):
-      Text(styled(lines)).font(jumbo > 1 ? .system(size: bodySize * jumbo) : .app(.body))
+      richText(lines, size: bodySize * jumbo).font(jumbo > 1 ? .system(size: bodySize * jumbo) : .app(.body))
+        .accessibilityLabel(Text(verbatim: plainText(lines)))
     case .heading(let level, let line):
-      Text(styled([line])).font(headingFont(level))
+      richText([line], size: bodySize).font(headingFont(level))
         .accessibilityAddTraits(.isHeader)
     case .quote(let lines):
-      Text(styled(lines))
+      richText(lines, size: bodySize)
         .font(.app(.body))
         .opacity(0.85)
         .padding(.leading, 11)
@@ -479,7 +513,7 @@ struct MessageBodyView: View {
         ForEach(Array(items.enumerated()), id: \.offset) { index, item in
           HStack(alignment: .firstTextBaseline, spacing: 6) {
             Text(marker(kind, index)).monospacedDigit()
-            Text(styled([item]))
+            richText([item], size: bodySize)
           }
           .font(.app(.body))
         }
@@ -540,6 +574,11 @@ struct MessageBodyView: View {
 
   private func styled(_ lines: [MarkupLine]) -> AttributedString {
     markupText(lines, colors: colors, names: names, permalinkLabel: String(localized: "message_link_label"))
+  }
+
+  /// What a screen reader says for lines that show pictures: the text, with the emoji's names.
+  private func plainText(_ lines: [MarkupLine]) -> String {
+    String(styled(lines).characters)
   }
 
   private func headingFont(_ level: UInt8) -> Font {
@@ -680,6 +719,7 @@ struct BelowBubble: View {
             ForEach(quickReactions, id: \.self) { emoji in
               Button(emoji) { onReact(emoji) }
             }
+            WorkspaceEmojiButtons(onReact: onReact)
           } label: {
             Image(systemName: "face.smiling")
               .font(.app(.caption))
@@ -723,7 +763,7 @@ struct ReactionPill: View {
 
   var body: some View {
     Button(action: action) {
-      Text("\(reaction.emoji) \(reaction.count)")
+      pillLabel
         .font(.app(.caption))
         .padding(.horizontal, 8).padding(.vertical, 4)
         .background(reaction.reactedByMe ? Theme.accentSoft : Theme.surface, in: Capsule())
@@ -731,6 +771,21 @@ struct ReactionPill: View {
     }
     .buttonStyle(.plain)
     .accessibilityAddTraits(reaction.reactedByMe ? .isSelected : [])
+  }
+
+  /// A workspace emoji's picture (issue #207) or the emoji as text, then how many.
+  @ViewBuilder
+  private var pillLabel: some View {
+    if let custom = reaction.maybeCustom {
+      HStack(spacing: 4) {
+        CustomEmojiGlyph(reference: custom, height: 16)
+        Text(verbatim: "\(reaction.count)")
+      }
+      .accessibilityElement(children: .ignore)
+      .accessibilityLabel(Text(verbatim: ":\(custom.shortcode): \(reaction.count)"))
+    } else {
+      Text("\(reaction.emoji) \(reaction.count)")
+    }
   }
 }
 
@@ -1117,5 +1172,33 @@ struct FlowStack: Layout {
     }
     if !current.indices.isEmpty { rows.append(current) }
     return rows
+  }
+}
+
+/// The workspace's own emoji (issue #207) as reaction choices, under the quick reactions of a menu.
+/// The list is the one the chat pane last read; a menu builds when it opens, so it needn't observe.
+struct WorkspaceEmojiButtons: View {
+  let onReact: (String) -> Void
+
+  var body: some View {
+    if !CustomEmojiPictures.workspace.isEmpty {
+      Menu {
+        ForEach(CustomEmojiPictures.workspace, id: \.sha256) { item in
+          Button {
+            onReact(":\(item.shortcode):")
+          } label: {
+            Label {
+              Text(verbatim: ":\(item.shortcode):")
+            } icon: {
+              if let image = CustomEmojiPictures.image(item.sha256, height: 22) {
+                Image(uiImage: image.withRenderingMode(.alwaysOriginal))
+              }
+            }
+          }
+        }
+      } label: {
+        Label("react_workspace_emoji", systemImage: "face.smiling")
+      }
+    }
   }
 }

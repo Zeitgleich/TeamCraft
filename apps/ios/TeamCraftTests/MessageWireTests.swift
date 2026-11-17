@@ -60,6 +60,33 @@ final class MessageWireTests: XCTestCase {
   }
 
   /// docs/notifications.md, "Calls in the timeline".
+  func testWorkspaceEmojiDecodeInTextAndReactions() throws {
+    let hash = String(repeating: "a", count: 64)
+    let json = """
+      {"id": "10", "conversation": "5", "author": "2", "kind": "User", "sent_at": 1000, "body": "ship :ship_it:",
+        "is_edited": false, "reply_count": 0,
+        "custom_emoji": [{"shortcode": "ship_it", "sha256": "\(hash)"}],
+        "reactions": [
+          {"emoji": ":ship_it:", "count": 1, "reacted_by_me": false, "custom": {"shortcode": "ship_it", "sha256": "\(hash)"}},
+          {"emoji": "👍", "count": 2, "reacted_by_me": true}
+        ]}
+      """
+    let message = try XCTUnwrap(Wire.decode(Message.self, from: json))
+    let reference = CustomEmojiRef(shortcode: "ship_it", sha256: hash)
+    XCTAssertEqual(message.customEmoji, [reference])
+    XCTAssertEqual(message.reactions[0].maybeCustom, reference)
+    XCTAssertNil(message.reactions[1].maybeCustom)
+  }
+
+  func testAnOlderCoreSendsNoWorkspaceEmoji() throws {
+    let json = """
+      {"id": "10", "conversation": "5", "author": "2", "kind": "User", "sent_at": 1000, "body": "Hi",
+        "is_edited": false, "reply_count": 0, "reactions": []}
+      """
+    let message = try XCTUnwrap(Wire.decode(Message.self, from: json))
+    XCTAssertTrue(message.customEmoji.isEmpty)
+  }
+
   func testCallTilesDecodeFromTheMessageKind() throws {
     let json = """
       {

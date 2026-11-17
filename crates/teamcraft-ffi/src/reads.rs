@@ -1092,6 +1092,30 @@ impl Reads {
     Ok(())
   }
 
+  pub(crate) fn custom_emoji(
+    &self,
+    query: &str,
+    limit: usize,
+  ) -> Result<Vec<crate::custom_emoji::CustomEmojiItem>, TeamCraftError> {
+    Ok(crate::custom_emoji::matching(
+      &self.backend()?.custom_emoji(),
+      query,
+      limit,
+    ))
+  }
+
+  pub(crate) fn want_custom_emoji(&self) -> Result<(), TeamCraftError> {
+    self.backend()?.want_custom_emoji();
+    Ok(())
+  }
+
+  pub(crate) fn custom_emoji_picture(&self, sha256: &str) -> Result<Option<Vec<u8>>, TeamCraftError> {
+    let Some(hash) = crate::custom_emoji::parse_hash(sha256) else {
+      return Ok(None);
+    };
+    Ok(self.backend()?.custom_emoji_picture(hash))
+  }
+
   pub(crate) fn mark_read(&self, conversation_id: String) -> Result<(), TeamCraftError> {
     self.backend()?.mark_read(parse_id(&conversation_id)?);
     Ok(())
