@@ -80,7 +80,7 @@ window.renderProbe = (() => {
         continue;
       }
       for (const node of record.removedNodes) {
-        if (node.nodeType === 1) pending.push([node, areaOf(record.target), describe(record.target.nodeType === 1 ? record.target : node)]);
+        if (node.nodeType === 1) pending.push([node, areaOf(record.target), `${describe(record.target.nodeType === 1 ? record.target : node)}/${node.tagName.toLowerCase()}.${firstClass(node)}`]);
       }
     }
     setTimeout(settle, 0);
@@ -100,7 +100,10 @@ window.renderProbe = (() => {
         stats.sidebar_removed += count;
         stats.sidebar_rows_rebuilt += has('.sb-item');
       } else if (area === 'feed') {
+        // The "New messages" divider goes once the conversation is read: no rebuild.
+        if (node.matches('.new-divider')) continue;
         stats.feed_removed += count;
+        stats.top_other[`feed:${where}`] = (stats.top_other[`feed:${where}`] || 0) + count;
         stats.messages_rebuilt += has('[data-msg-id]');
       } else {
         stats.other_removed += count;
@@ -134,8 +137,10 @@ window.renderProbe = (() => {
 })();
 "#;
 
-/// What the probe counted in one phase.
+/// What the probe counted in one phase. The fields the test doesn't assert on are printed (Debug):
+/// they are the measurement, and say where a rebuild happened when an assertion fails.
 #[derive(Clone, Debug, Default)]
+#[expect(dead_code, reason = "the diagnostic fields are only read through Debug")]
 struct RenderStats {
   removed_elements: u64,
   topbar_removed: u64,
