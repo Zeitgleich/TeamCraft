@@ -514,6 +514,33 @@ mod tests {
   }
 
   #[test]
+  fn a_fifth_weekday_only_counts_in_months_that_have_one() {
+    // The fifth Thursday of October: 2026 has one, 2027 to 2029 don't, 2030 and 2031 do.
+    let text = calendar(&event(
+      "DTSTART;VALUE=DATE:20261029\r\nRRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=5TH;COUNT=3\r\n",
+    ));
+    assert_eq!(
+      parse(&text),
+      Ok(vec![date(2026, 10, 29), date(2030, 10, 31), date(2031, 10, 30)])
+    );
+    // The fifth Monday from the end of February needs a leap year starting on a Monday (2044).
+    let text = calendar(&event(
+      "DTSTART;VALUE=DATE:20260202\r\nRRULE:FREQ=YEARLY;BYMONTH=2;BYDAY=-5MO;COUNT=2\r\n",
+    ));
+    assert_eq!(parse(&text), Ok(vec![date(2026, 2, 2)]));
+  }
+
+  #[test]
+  fn impossible_dates_are_no_dates() {
+    for value in ["20260229", "20261301", "20260431", "2026103", "2026-10-03"] {
+      assert_eq!(date_of(value), None, "{value}");
+    }
+    assert_eq!(date_of("20280229"), Some(date(2028, 2, 29)));
+    assert_eq!(date_prefix("20261003T120000Z"), Some(date(2026, 10, 3)));
+    assert_eq!(date_prefix("20261003X"), None);
+  }
+
+  #[test]
   fn rules_it_cannot_follow_keep_only_the_first_date() {
     let text = calendar(&format!(
       "{}{}",

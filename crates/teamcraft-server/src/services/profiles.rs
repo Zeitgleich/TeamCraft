@@ -441,8 +441,16 @@ mod tests {
         "America/Argentina/Buenos_Aires",
         "Etc/GMT+5",
         "Asia/Kolkata",
+        // Links of the IANA database stay valid names.
+        "US/Eastern",
+        "Europe/Kiev",
+        "GMT",
       ] {
         assert!(clean_time_zone(Some(good.into())).unwrap().is_some(), "{good}");
+        assert_eq!(
+          clean_time_zone(Some(format!(" {good} "))).unwrap().as_deref(),
+          Some(good)
+        );
       }
       for bad in [
         "Europe//Berlin",
@@ -454,6 +462,10 @@ mod tests {
         "Mars/Base",
         "Europe/Berlinn",
         "Europe/Berlin/Mitte",
+        // Names are stored as given: only the database's own spelling is one.
+        "europe/berlin",
+        "EUROPE/BERLIN",
+        "utc",
       ] {
         assert!(clean_time_zone(Some(bad.into())).is_err(), "{bad}");
       }

@@ -416,6 +416,83 @@ mod tests {
     }
 
     #[test]
+    fn a_wall_clock_time_the_zone_has_twice_takes_the_earlier() {
+      let zone = Tz::Europe__Berlin;
+      // Saturday 2026-10-24 02:30 local (UTC+2); on Sunday 02:30 comes twice, first at UTC+2.
+      let first = zone
+        .with_ymd_and_hms(2026, 10, 24, 2, 30, 0)
+        .unwrap()
+        .timestamp_millis();
+      let found = occurrences_in(
+        first,
+        HOUR,
+        &series(RecurrenceFrequency::Daily, 1, Some(3)),
+        zone,
+        0,
+        i64::MAX,
+      );
+      // 2026-10-24T00:30Z, 2026-10-25T00:30Z (the first 02:30), 2026-10-26T01:30Z.
+      assert_eq!(
+        starts(&found),
+        vec![1_792_801_800_000, 1_792_888_200_000, 1_792_978_200_000]
+      );
+    }
+
+    #[test]
+    fn a_skipped_half_hour_moves_a_whole_hour_on() {
+      // Lord Howe Island skips 02:00 to 02:30 on Sunday 2026-10-04 (UTC+10:30 to UTC+11).
+      let zone: Tz = "Australia/Lord_Howe".parse().unwrap();
+      let first = zone
+        .with_ymd_and_hms(2026, 10, 3, 2, 15, 0)
+        .unwrap()
+        .timestamp_millis();
+      let found = occurrences_in(
+        first,
+        HOUR,
+        &series(RecurrenceFrequency::Daily, 1, Some(3)),
+        zone,
+        0,
+        i64::MAX,
+      );
+      let local: Vec<(u32, u32, u32)> = found
+        .iter()
+        .map(|occurrence| {
+          let local = zone.timestamp_millis_opt(occurrence.starts_at_ms).unwrap();
+          (local.day(), local.hour(), local.minute())
+        })
+        .collect();
+      assert_eq!(local, vec![(3, 2, 15), (4, 3, 15), (5, 2, 15)]);
+      // 2026-10-02T15:45Z, 2026-10-03T16:15Z, 2026-10-04T15:15Z.
+      assert_eq!(
+        starts(&found),
+        vec![1_790_955_900_000, 1_791_044_100_000, 1_791_126_900_000]
+      );
+    }
+
+    #[test]
+    fn a_weekly_series_keeps_its_utc_instants_across_both_changes() {
+      let zone = Tz::Europe__Berlin;
+      // Monday 2026-03-23 09:00 local; every four weeks, through spring and autumn.
+      let first = zone
+        .with_ymd_and_hms(2026, 3, 23, 9, 0, 0)
+        .unwrap()
+        .timestamp_millis();
+      let found = occurrences_in(
+        first,
+        HOUR,
+        &series(RecurrenceFrequency::Weekly, 31, Some(3)),
+        zone,
+        0,
+        i64::MAX,
+      );
+      // 2026-03-23T08:00Z, 2026-10-26T08:00Z (UTC+1 again), 2027-05-31T07:00Z (UTC+2).
+      assert_eq!(
+        starts(&found),
+        vec![1_774_252_800_000, 1_793_001_600_000, 1_811_746_800_000]
+      );
+    }
+
+    #[test]
     fn a_monthly_meeting_on_the_31st_takes_the_last_day_of_shorter_months() {
       let first = utc(2026, 1, 31, 10);
       let found = occurrences_in(

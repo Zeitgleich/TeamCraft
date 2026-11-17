@@ -458,12 +458,7 @@ fn backoff(failures: u32, refresh: StdDuration, random: u32) -> StdDuration {
 }
 
 async fn store(state: &AppState, copy: &FeedCopy) {
-  let stored = StoredCopy {
-    url: copy.url.clone(),
-    fetched_at_ms: unix_millis(copy.fetched_at).0,
-    dates: copy.dates.iter().map(ToString::to_string).collect(),
-  };
-  let Ok(value) = serde_json::to_string(&stored) else {
+  let Ok(value) = stored_value(copy) else {
     return;
   };
   if let Err(error) = state
@@ -473,6 +468,15 @@ async fn store(state: &AppState, copy: &FeedCopy) {
   {
     warn!(%error, "storing the holiday feed copy failed: it is kept in memory only");
   }
+}
+
+/// The copy as it is stored: dates as `YYYY-MM-DD`.
+fn stored_value(copy: &FeedCopy) -> serde_json::Result<String> {
+  serde_json::to_string(&StoredCopy {
+    url: copy.url.clone(),
+    fetched_at_ms: unix_millis(copy.fetched_at).0,
+    dates: copy.dates.iter().map(ToString::to_string).collect(),
+  })
 }
 
 /// A stored copy, if it reads and keeps the bounds.
@@ -704,6 +708,11 @@ mod tests {
       dates: vec!["2026-10-03".into()],
     };
     let text = serde_json::to_string(&stored).unwrap();
+    assert_eq!(stored_value(&copy).unwrap(), text);
+    assert_eq!(
+      text,
+      r#"{"url":"https://a.example.com/x.ics","fetched_at_ms":1790000000000,"dates":["2026-10-03"]}"#
+    );
     assert_eq!(parse_stored(&text), Some(copy));
     assert_eq!(parse_stored("{\"url\":1}"), None);
     let bad_date = text.replace("2026-10-03", "2026-13-03");
