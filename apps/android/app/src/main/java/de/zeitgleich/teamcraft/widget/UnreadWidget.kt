@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -44,8 +46,6 @@ import androidx.glance.text.FontWeight
 import androidx.glance.text.Text
 import androidx.glance.text.TextAlign
 import androidx.glance.text.TextStyle
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.notifications.openConversationIntent
@@ -67,9 +67,11 @@ class UnreadWidget : GlanceAppWidget() {
   override val sizeMode: SizeMode = SizeMode.Exact
 
   override suspend fun provideGlance(context: Context, id: GlanceId) {
-    val graph = TeamCraftApplication.graph(context)
-    val maybeSnapshot = withContext(Dispatchers.IO) { graph.widgetSnapshots.read() }
+    val widgets = TeamCraftApplication.graph(context).homeWidgets
+    val initial = widgets.currentSnapshot()
     provideContent {
+      // Follows each change while the session lives; a new session starts from `initial`.
+      val maybeSnapshot by widgets.snapshot.collectAsState(initial)
       GlanceTheme { WidgetContent(maybeSnapshot) }
     }
   }

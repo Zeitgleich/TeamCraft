@@ -52,7 +52,8 @@ class HomeWidgets(
   private val previewWanted = MutableStateFlow(prefs.getBoolean(KEY_PREVIEWS, false))
   private val requests = MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
   private val writeLock = Mutex()
-  private var maybeShown: WidgetSnapshot? = null
+  private val shown = MutableStateFlow<WidgetSnapshot?>(null)
+  @Volatile private var isShownLoaded = false
 
   /** The widget's own opt-in to message previews; off by default. */
   val isPreviewWanted: StateFlow<Boolean> = previewWanted
@@ -83,12 +84,28 @@ class HomeWidgets(
   /** Whether a snapshot was ever written for the signed-in account. */
   fun hasSnapshot(): Boolean = store.exists()
 
+  /**
+   * What the widget shows, for its composition: Glance keeps a session's composition alive and an
+   * update only recomposes it, so the widget follows this flow rather than a value read once.
+   */
+  val snapshot: StateFlow<WidgetSnapshot?> = shown
+
+  /** The snapshot as stored, read once per process (unsealing it); `null` while signed out. */
+  suspend fun currentSnapshot(): WidgetSnapshot? = writeLock.withLock {
+    if (!isShownLoaded) {
+      shown.value = withContext(Dispatchers.IO) { store.read() }
+      isShownLoaded = true
+    }
+    shown.value
+  }
+
   /** Signed out: the widget forgets the account at once. */
   fun clear() {
     scope.launch(Dispatchers.IO) {
       writeLock.withLock {
         store.delete()
-        maybeShown = null
+        shown.value = null
+        isShownLoaded = true
       }
       if (isPlaced()) runCatching { UnreadWidget().updateAll(context) }.onFailure(::reportFailure)
     }
@@ -107,15 +124,19 @@ class HomeWidgets(
       widgetSnapshot(privacy, rows(conversations, isReadingNewest = privacy != WidgetPrivacy.COUNT_ONLY))
     }
     val isChanged = writeLock.withLock {
-      if (snapshot == maybeShown) {
+      if (isShownLoaded && snapshot == shown.value) {
         false
       } else {
         withContext(Dispatchers.IO) { store.write(snapshot) }
-        maybeShown = snapshot
+        shown.value = snapshot
+        isShownLoaded = true
         true
       }
     }
-    if (isChanged) UnreadWidget().updateAll(context)
+    if (!isChanged) return
+    // Counts only: names and text never go to the log.
+    Log.d(TAG, "widget updated: ${snapshot.privacy}, ${snapshot.rows.size} rows of ${snapshot.unreadConversations}")
+    UnreadWidget().updateAll(context)
   }
 
   /**
