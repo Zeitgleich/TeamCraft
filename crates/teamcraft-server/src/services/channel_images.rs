@@ -18,7 +18,7 @@ use tracing::warn;
 use super::access::{load_conversation, require};
 use super::audit::{self, Target as AuditTarget};
 use super::conversations::{ensure_open_channel, get_conversation};
-use super::space_images::{SPACE_IMAGE_CONTENT_TYPE, SpaceImageFile, run_limited, sanitize};
+use super::space_images::{SPACE_IMAGE_CONTENT_TYPE, SpaceImageFile, WhenBusy, run_limited, sanitize};
 use super::storage_cleanup::delete_or_queue;
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
@@ -58,7 +58,7 @@ pub async fn put_channel_image(
     )));
   }
   let declared_type = declared_type.to_owned();
-  let png = run_limited(&state.image_decodes, timeout, move || {
+  let png = run_limited(&state.image_decodes, WhenBusy::Refuse, timeout, move || {
     sanitize(&bytes, &declared_type)
   })
   .await?

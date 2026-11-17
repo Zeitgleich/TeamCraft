@@ -1213,14 +1213,28 @@ Administration → People:
   the provider has none for them; the apps then show the picture read-only and say it comes from the
   organization's sign-in. The server refuses an upload or removal with `avatar_from_identity_provider`
   (403), and every profile carries `can_change_avatar` for the apps.
-- **Import from the provider:** only while `avatar_source` is `identity_provider`. A member's sign-in
-  whose token has a `picture` claim imports that URL when it differs from the imported one (a token
-  without the claim changes nothing: providers often leave it out of access tokens). A SCIM write
+- **Import from the provider:** only while `avatar_source` is `identity_provider`. A SCIM write
   imports `photos` (the primary one, else type `photo`, else the first; a URL or a `data:` URI) and
-  a replace without `photos` removes the provider's picture (docs/provisioning.md §7.2). Imports run in
-  the background, one per person at a time; a failed one is tried again after an hour or when the
-  source changes. After switching to `identity_provider`, a person's picture arrives with their next
-  request (OIDC) or the provider's next write (SCIM).
+  a replace without `photos` removes the provider's picture (docs/provisioning.md §7.2). A member's
+  sign-in whose token has a `picture` claim imports that URL when it differs from the imported one (a
+  token without the claim changes nothing: providers often leave it out of access tokens), but only
+  while no SCIM client manages the person: SCIM takes precedence, so two differing sources never take
+  turns. After switching to `identity_provider`, a person's picture arrives with their next request
+  (OIDC) or the provider's next write (SCIM).
+- **Import queue (issue #2125):** imports run in the background, one per person at a time; a source
+  that arrives meanwhile is imported next (only the newest), and a removal or newer source makes the
+  running import throw its picture away, so an older picture never comes back. At most
+  `max_concurrent_avatar_imports` (4, read at start) run at once, and they wait for the picture pool
+  instead of failing as busy; a SCIM write waits for a free import, which slows a bulk sync down to
+  what the server imports. A failed import (OIDC or SCIM) is tried again after an hour or when the
+  source changes.
+- **The picture attribute must be admin-managed:** the server fetches whatever URL the `picture`
+  claim or `photos` names. If people can edit the identity provider attribute behind it (a self-service
+  profile field), a member can make the server send blind GET requests: to any public HTTPS URL, and to
+  any path on the identity provider's own origin, which may be on a private network. Map `picture`
+  and `photos` only from an attribute that admins or the directory sync set, never one users edit; in
+  Keycloak, keep the attribute out of the user profile's user-editable attributes (`edit` permission
+  for admins only).
 - **Fetching (SSRF):** the server fetches picture URLs itself: `https` only and public addresses only
   (checked by the URL and again when the name resolves, redirects too, at most three), except URLs on
   the identity provider's own origin (the issuer's scheme, host and port), which the operator
@@ -1232,7 +1246,8 @@ Administration → People:
   says, cut to the middle square and re-encoded as a PNG of at most `avatar_side_px` (512 px) per side.
   What is stored has no metadata, and the client's dimensions are never trusted.
 - **Limits** (`[limits]`, also Settings → Limits): `max_avatar_bytes` (1 MiB, the upload or the
-  provider's file) and `avatar_side_px` (64 to 2048 px).
+  provider's file) and `avatar_side_px` (64 to 2048 px); in the config file only,
+  `max_concurrent_avatar_imports` (4).
 - **Storage:** unencrypted directory data in object storage (e2ee.md §4.4), served through presigned
   URLs to everybody who may see the person. Each person has at most two pictures, their own and the
   provider's; both go with the account (admin.md §3.2).

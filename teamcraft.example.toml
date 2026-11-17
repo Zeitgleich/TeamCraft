@@ -233,6 +233,10 @@ max_space_image_bytes = 1048576
 # how long one decode may take before the upload is answered 503.
 max_concurrent_image_decodes = 2
 image_decode_timeout_secs = 5
+# Profile pictures imported from the identity provider at the same time (read at start). Each holds up
+# to max_avatar_bytes while it is fetched and decoded; more imports wait, so a bulk SCIM sync is
+# slowed down instead of losing pictures.
+max_concurrent_avatar_imports = 4
 # A user's own call background pictures: largest picture, and how many one user may keep.
 max_background_bytes = 8388608
 max_backgrounds_per_user = 24

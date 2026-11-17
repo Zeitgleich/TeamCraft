@@ -367,6 +367,9 @@ pub struct LimitsConfig {
   pub max_concurrent_image_decodes: usize,
   /// How long decoding and re-encoding one picture may take before the upload is answered 503.
   pub image_decode_timeout_secs: u64,
+  /// Profile pictures imported from the identity provider at the same time (issue #2125): each holds
+  /// up to `max_avatar_bytes` while it is fetched and decoded; more imports wait. Read at start.
+  pub max_concurrent_avatar_imports: usize,
   /// Largest call background picture a user uploads (encrypted; apps send Full HD JPEGs).
   pub max_background_bytes: u64,
   /// How many call background pictures one user may keep.
@@ -1832,6 +1835,7 @@ impl Default for LimitsConfig {
       max_space_image_bytes: teamcraft_proto::DEFAULT_MAX_SPACE_IMAGE_BYTES,
       max_concurrent_image_decodes: 2,
       image_decode_timeout_secs: 5,
+      max_concurrent_avatar_imports: 4,
       max_background_bytes: 8 * 1024 * 1024,
       max_backgrounds_per_user: 24,
       max_custom_emoji: teamcraft_proto::DEFAULT_MAX_CUSTOM_EMOJI,

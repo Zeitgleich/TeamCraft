@@ -241,9 +241,9 @@ pub async fn patch_user(
     .map_err(|error| ScimError::InvalidSyntax(error.to_string()))?;
   let request = request.checked()?;
   let mut attributes = attributes_of(&row);
-  // The imported picture's source stands for the photo, so a PATCH that leaves photos alone
-  // changes nothing (provider_avatars recognizes its own source).
-  attributes.maybe_photo = state.database.provider_picture_source(row.user).await?;
+  // The newest photo's source stands for the photo (the one being imported, else the stored one),
+  // so a PATCH that leaves photos alone changes nothing (provider_avatars recognizes its own source).
+  attributes.maybe_photo = ProviderPictures::scim_photo(state, row.user).await?;
   let mut resource = attributes.to_patchable();
   apply_user_patch(&mut resource, &request.operations)?;
   let attributes = UserAttributes::from_resource(&resource)?;
@@ -262,6 +262,7 @@ pub async fn delete_user(
   }
   deprovision(state, caller.client, row.user, DeactivationCause::Removed).await?;
   state.database.unlink_scim_user(caller.client, row.user).await?;
+  state.provider_pictures.note_scim_removed(row.user);
   audit::record(
     state,
     None,

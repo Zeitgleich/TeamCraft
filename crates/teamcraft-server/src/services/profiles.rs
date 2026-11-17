@@ -20,7 +20,7 @@ use tracing::warn;
 
 use super::convert::unix_millis;
 use super::directory::visible_user;
-use super::space_images::{run_limited, sanitize_avatar};
+use super::space_images::{WhenBusy, run_limited, sanitize_avatar};
 use super::storage_cleanup::delete_or_queue;
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
@@ -103,7 +103,7 @@ pub async fn put_my_avatar(
   }
   // While the storage is down, say "later" before decoding a picture that can't be kept.
   blob_store(state)?.check_available()?;
-  let png = sanitized_avatar(state, declared_type.to_owned(), bytes).await?;
+  let png = sanitized_avatar(state, declared_type.to_owned(), bytes, WhenBusy::Refuse).await?;
   store_avatar(state, caller.user.id, png).await?;
   profile_of(state, caller.user.id).await
 }
@@ -113,6 +113,7 @@ pub(super) async fn sanitized_avatar(
   state: &AppState,
   declared_type: String,
   bytes: Bytes,
+  when_busy: WhenBusy,
 ) -> Result<Vec<u8>, ApiError> {
   let (max_bytes, side, timeout) = {
     let limits = &state.settings.get().limits;
@@ -130,7 +131,7 @@ pub(super) async fn sanitized_avatar(
       "avatars are limited to {max_bytes} bytes"
     )));
   }
-  run_limited(&state.image_decodes, timeout, move || {
+  run_limited(&state.image_decodes, when_busy, timeout, move || {
     sanitize_avatar(&bytes, &declared_type, side)
   })
   .await?
