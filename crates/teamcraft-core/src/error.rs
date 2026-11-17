@@ -58,6 +58,10 @@ pub enum CoreError {
   /// Only the meeting's organizer names its hosts or hands it over (#1720).
   #[error("only the organizer of the meeting of conversation {0} names its hosts")]
   NotMeetingOrganizer(ConversationId),
+  /// A meeting's hosts are members the owners' signed roster vouches for, never a guest or
+  /// somebody only the server calls a member (#1926).
+  #[error("the signed roster doesn't vouch for user {0} as a member, so they can't host a meeting")]
+  HostNotVouched(UserId),
   #[error("channel roles: {0}")]
   ChannelRoles(#[from] crate::channel_roles::ChannelRoleError),
   #[error("problem report: {0}")]

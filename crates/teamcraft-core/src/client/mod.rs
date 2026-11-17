@@ -135,9 +135,10 @@ pub use group_health::{
   unconfirmed_removals,
 };
 pub use groups::{DmSetupStatus, dm_setup_status};
+pub(crate) use guest::known_guests;
 pub use guest::{
   LEGACY_ORGANIZER_KEY, VERIFIER_KEY, admits_link_arrivals, guest_key_code, guest_link_fragment,
-  is_open_by_own_record,
+  is_meeting_guest, is_open_by_own_record,
 };
 pub use join_requests::is_open_private_channel;
 pub use key_reask::ReaskTrigger;
@@ -1274,39 +1275,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(directory.with_device_lists(lists))
   }
 
-  /// The users among `users` this device treats as meeting guests: those the server's user kind
-  /// says are guests or this device itself let in as guests, unless the signed roster vouches for
-  /// them or they organize a meeting (a hostile server can't make a host a guest, e2ee.md §4.6).
-  /// Guests manage nobody's membership but their own.
+  /// The users among `users` this device knows as guests ([`known_guests`]). In a meeting chat,
+  /// [`Self::guests_in`] decides; this is the rule of other conversations.
   pub(crate) fn guest_users(
     &self,
     users: impl IntoIterator<Item = UserId>,
   ) -> Result<Vec<UserId>, CoreError> {
-    let admitted = self.admitted_guests()?;
-    let organizers: Vec<UserId> = self
-      .cached_conversations()?
-      .values()
-      .filter_map(|conversation| conversation.maybe_organizer_user_id)
-      .collect();
-    let workspace = self.workspace()?;
-    let mut guests = Vec::new();
-    for user in users {
-      let maybe_summary =
-        records::get_json::<teamcraft_proto::UserSummary>(&self.store, Table::Users, &user.to_string())?;
-      let is_listed_as_guest =
-        maybe_summary.is_some_and(|summary| summary.kind == teamcraft_proto::UserKind::Guest);
-      let is_vouched = workspace
-        .roster
-        .members
-        .iter()
-        .any(|member| member.user_id == user)
-        || organizers.contains(&user)
-        || user == self.account.user_id && !self.is_guest_device()?;
-      if (is_listed_as_guest || admitted.contains(&user)) && !is_vouched {
-        guests.push(user);
-      }
-    }
-    Ok(guests)
+    known_guests(&self.store, self.account.user_id, users)
   }
 
   fn cached_conversations(&self) -> Result<BTreeMap<ConversationId, ConversationResponse>, CoreError> {

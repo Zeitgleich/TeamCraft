@@ -3515,6 +3515,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       == crate::meeting_lobby::SignedMembership::Member
   }
 
+  fn is_meeting_guest(&self, conversation: ConversationId, user: UserId) -> bool {
+    crate::client::is_meeting_guest(self.store_ref(), self.me, conversation, user, self.now_ms())
+  }
+
   fn note_meeting_lobby(&self, meeting: teamcraft_proto::MeetingId, has_lobby: bool) {
     self.command(CoreCommand::NoteMeetingLobby { meeting, has_lobby });
   }

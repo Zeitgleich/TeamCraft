@@ -1997,6 +1997,13 @@ impl ChatBackend for RemoteChat {
     )
   }
 
+  fn is_meeting_guest(&self, conversation: ConversationId, user: UserId) -> bool {
+    matches!(
+      self.ask(ChatQuery::IsMeetingGuest { conversation, user }),
+      Some(ChatAnswer::Flag { value: true })
+    )
+  }
+
   fn note_meeting_lobby(&self, meeting: teamcraft_proto::MeetingId, has_lobby: bool) {
     self.act(ChatAction::NoteMeetingLobby { meeting, has_lobby });
   }

@@ -7,7 +7,7 @@
 //! made). So a co-host's device lets guests in and a guest accepts its welcome without the
 //! server's word, and a group founded by a former organizer stays the meeting's.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
 
@@ -25,6 +25,7 @@ use super::Client;
 use crate::api::ServerApi;
 use crate::convert;
 use crate::error::CoreError;
+use crate::meeting_standing::{MeetingStanding, MeetingVouchers};
 use crate::records;
 use crate::store::{LocalStore, Table};
 use crate::trust::PinnedDirectory;
@@ -55,7 +56,7 @@ struct KeptHosts {
   /// By the fingerprint (hex) of the key the chain was verified from.
   by_anchor: BTreeMap<String, HostsRecord>,
   /// The key of the record kept last: the one that counts for the chat where no founder is
-  /// pinned ([`Client::hosts_record`]).
+  /// pinned ([`hosts_record_in`]).
   #[serde(default, skip_serializing_if = "Option::is_none")]
   maybe_latest: Option<String>,
 }
@@ -332,6 +333,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if self.api.conversation(conversation).await?.maybe_organizer_user_id != Some(me) {
       return Err(CoreError::NotMeetingOrganizer(conversation));
     }
+    // A host lets guests in and manages the chat's membership: only somebody the signed roster
+    // vouches for as a member is named, never a guest the server calls a member (#1926).
+    // Before this device verified a roster, only the guests it knows of are refused.
+    let named = change.co_hosts.iter().copied().chain(change.maybe_new_organizer);
+    let known = self.guest_users(named.clone())?;
+    let vouchers = MeetingVouchers::new(self.workspace()?, [], []);
+    let is_vouched = |user: &UserId| {
+      let is_known_guest = known.contains(user);
+      if vouchers.vouches_for_nobody() {
+        !is_known_guest
+      } else {
+        vouchers.standing(*user, is_known_guest) == MeetingStanding::Member
+      }
+    };
+    if let Some(user) = named.into_iter().find(|user| !is_vouched(user)) {
+      return Err(CoreError::HostNotVouched(user));
+    }
     let statements = self.host_statements(conversation).await?;
     let newest_on_server = statements
       .iter()
@@ -495,29 +513,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
-  /// The co-hosts of the host lists that count for the meeting chat ([`Self::hosts_record`]: the
-  /// pinned founder's record where there is a pin, else the one kept last): they let
-  /// guests in like the admitters the organizer signs, also where the roster doesn't vouch for
-  /// them (the members' rule for commits, `group_authority`).
-  pub(super) fn kept_co_hosts(&self, conversation: ConversationId) -> Result<Vec<UserId>, CoreError> {
-    Ok(
-      self
-        .hosts_record(conversation)?
-        .map(|record| record.co_hosts.into_iter().map(|(user, _)| user).collect())
-        .unwrap_or_default(),
-    )
-  }
-
-  /// The organizer the host lists that count for the chat name: after a handover the one the
-  /// meeting went to, whom the members' rule vouches for like the organizer the server names.
-  pub(super) fn kept_organizer(&self, conversation: ConversationId) -> Result<Option<UserId>, CoreError> {
-    Ok(
-      self
-        .hosts_record(conversation)?
-        .and_then(|record| record.maybe_organizer),
-    )
-  }
-
   /// The body of [`Self::refresh_meeting_hosts_for_commit`].
   async fn refresh_meeting_hosts_for_commit_unboxed(&mut self, conversation: ConversationId) {
     let is_guest_device = self.is_guest_device().unwrap_or(false);
@@ -529,19 +524,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if let Err(error) = result {
       tracing::warn!(conversation_id = %conversation, %error, "could not read the meeting's host lists before a commit");
     }
-  }
-
-  /// The host lists that count for the chat (the members' rule, [`Self::kept_co_hosts`]): those
-  /// verified from the pinned founder's key where this device pinned the meeting chat's anchor (a
-  /// list kept from another key, such as the server's organizer before the device entered the
-  /// group or a guest link's `v`, counts for nothing there), else those kept last.
-  fn hosts_record(&self, conversation: ConversationId) -> Result<Option<HostsRecord>, CoreError> {
-    let mut kept = self.kept_hosts(conversation)?;
-    let maybe_anchor = match self.pinned_founder_fingerprint(conversation)? {
-      Some(founder) => Some(founder),
-      None => kept.maybe_latest.clone(),
-    };
-    Ok(maybe_anchor.and_then(|anchor| kept.by_anchor.remove(&anchor)))
   }
 
   /// The host lists kept as verified from `anchor`.
@@ -593,33 +575,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Every host record of the chat, in the format from #1865 (a record of before reads as the
   /// one record kept).
   fn kept_hosts(&self, conversation: ConversationId) -> Result<KeptHosts, CoreError> {
-    let maybe_stored: Option<StoredHosts> =
-      records::get_json(&self.store, Table::SyncState, &hosts_key(conversation))?;
-    Ok(match maybe_stored {
-      None => KeptHosts::default(),
-      Some(StoredHosts::ByAnchor(kept)) => kept,
-      Some(StoredHosts::Single(mut record)) => {
-        // Unanchored records (from before #1858) count for the chat until the next is kept, but
-        // never for a rollback check: no key is the empty string.
-        let anchor = record.maybe_anchor.take().unwrap_or_default();
-        KeptHosts {
-          by_anchor: BTreeMap::from([(anchor.clone(), record)]),
-          maybe_latest: Some(anchor),
-        }
-      },
-    })
+    kept_hosts_in(&self.store, conversation)
   }
 
   fn pinned_founder_fingerprint(&self, conversation: ConversationId) -> Result<Option<String>, CoreError> {
-    records::get_json(
-      &self.store,
-      Table::SyncState,
-      &format!("{PINNED_FOUNDER_PREFIX}{conversation}"),
-    )
+    pinned_founder_in(&self.store, conversation)
   }
 
   /// This device pinned the meeting chat's anchor, founded by `founder` (#1747): from now on only
-  /// host lists verified from that key count for the chat ([`Self::hosts_record`]). Those kept
+  /// host lists verified from that key count for the chat ([`hosts_record_in`]). Those kept
   /// from other keys stay, for their own rollback and fork checks only (#1865).
   pub(crate) fn note_pinned_meeting_founder(
     &self,
@@ -749,6 +713,109 @@ fn hosts_key(conversation: ConversationId) -> String {
   format!("{HOSTS_PREFIX}{conversation}")
 }
 
+/// The hosts of the meeting chat on this device (#1926): the organizer and the co-hosts of the
+/// host lists that count for it ([`hosts_record_in`]). Before this device verified any list,
+/// the organizer the server names, but where this device pinned the chat's founder (#1747) only if
+/// that is the key this device pinned for them: a server that names a guest the organizer makes
+/// no host of them once anything verified says otherwise. `me` counts where the server names this
+/// device's user: that only decides how this device judges itself.
+pub(crate) fn meeting_host_users(
+  store: &impl LocalStore,
+  me: UserId,
+  conversation: ConversationId,
+) -> Result<BTreeSet<UserId>, CoreError> {
+  if let Some(record) = hosts_record_in(store, conversation)? {
+    return Ok(
+      record
+        .co_hosts
+        .into_iter()
+        .map(|(user, _)| user)
+        .chain(record.maybe_organizer)
+        .collect(),
+    );
+  }
+  let Some(organizer) = records::get_json::<teamcraft_proto::ConversationResponse>(
+    store,
+    Table::Conversations,
+    &conversation.to_string(),
+  )?
+  .and_then(|response| response.maybe_organizer_user_id) else {
+    return Ok(BTreeSet::new());
+  };
+  let is_host = match pinned_founder_in(store, conversation)? {
+    None => true,
+    Some(_) if organizer == me => true,
+    Some(founder) => records::pinned_identities(store)?
+      .get(&organizer)
+      .is_some_and(|pinned| {
+        IdentityPublicKey::from_bytes(pinned.public_key)
+          .fingerprint()
+          .to_string()
+          == founder
+      }),
+  };
+  Ok(if is_host {
+    BTreeSet::from([organizer])
+  } else {
+    BTreeSet::new()
+  })
+}
+
+/// Whether this device pinned the meeting chat's anchor (#1747): only meeting chats have one.
+pub(crate) fn has_pinned_founder(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+) -> Result<bool, CoreError> {
+  Ok(pinned_founder_in(store, conversation)?.is_some())
+}
+
+/// The host lists that count for the chat: those verified from the pinned founder's key where this
+/// device pinned the meeting chat's anchor (a list kept from another key, such as the server's
+/// organizer before the device entered the group or a guest link's `v`, counts for nothing there),
+/// else those kept last.
+fn hosts_record_in(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+) -> Result<Option<HostsRecord>, CoreError> {
+  let mut kept = kept_hosts_in(store, conversation)?;
+  let maybe_anchor = match pinned_founder_in(store, conversation)? {
+    Some(founder) => Some(founder),
+    None => kept.maybe_latest.clone(),
+  };
+  Ok(maybe_anchor.and_then(|anchor| kept.by_anchor.remove(&anchor)))
+}
+
+/// Every host record of the chat, in the format from #1865 (a record of before reads as the one
+/// record kept).
+fn kept_hosts_in(store: &impl LocalStore, conversation: ConversationId) -> Result<KeptHosts, CoreError> {
+  let maybe_stored: Option<StoredHosts> =
+    records::get_json(store, Table::SyncState, &hosts_key(conversation))?;
+  Ok(match maybe_stored {
+    None => KeptHosts::default(),
+    Some(StoredHosts::ByAnchor(kept)) => kept,
+    Some(StoredHosts::Single(mut record)) => {
+      // Unanchored records (from before #1858) count for the chat until the next is kept, but
+      // never for a rollback check: no key is the empty string.
+      let anchor = record.maybe_anchor.take().unwrap_or_default();
+      KeptHosts {
+        by_anchor: BTreeMap::from([(anchor.clone(), record)]),
+        maybe_latest: Some(anchor),
+      }
+    },
+  })
+}
+
+fn pinned_founder_in(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+) -> Result<Option<String>, CoreError> {
+  records::get_json(
+    store,
+    Table::SyncState,
+    &format!("{PINNED_FOUNDER_PREFIX}{conversation}"),
+  )
+}
+
 /// A guest's checks of the host lists over the fake server, with lists signed here by keys of the
 /// test's own (the server never checks whose keys they are).
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -794,8 +861,7 @@ mod tests {
     let kept = rig.client.hosts_record_from(rig.chat, &link).unwrap().unwrap();
     assert_eq!(kept.sequence, 12);
     // The chat's own hosts are the pinned founder's chain only: none kept from it.
-    assert!(rig.client.kept_co_hosts(rig.chat).unwrap().is_empty());
-    assert_eq!(rig.client.kept_organizer(rig.chat).unwrap(), None);
+    assert!(hosts_record_in(&rig.client.store, rig.chat).unwrap().is_none());
   }
 
   /// #1864: Alice hands the meeting to Bob, Bob to Carol. Bob signs a list above Carol's naming
@@ -850,7 +916,15 @@ mod tests {
         legacy.to_string().as_bytes(),
       )
       .unwrap();
-    assert_eq!(rig.client.kept_co_hosts(rig.chat).unwrap(), vec![bob.user]);
+    let kept = hosts_record_in(&rig.client.store, rig.chat).unwrap().unwrap();
+    assert_eq!(
+      kept
+        .co_hosts
+        .into_iter()
+        .map(|(user, _)| user)
+        .collect::<Vec<_>>(),
+      vec![bob.user]
+    );
     let older = rig.list(&alice, &alice, &[], 4, None);
     assert!(
       rig.admits(&alice.fingerprint(), &bob, &[&older]).await,

@@ -2197,19 +2197,46 @@ never by the server's member list:
       the device verified, and never a guest it knows of (`Client::vouched_meeting_users`). So a
       guest another device admitted, whom the server calls a member, is neither signed as an
       admitter nor carried over as an invitee.
-    - **Not yet everywhere.** Elsewhere a device still counts as guests only those the server
-      calls guests and those it let in itself (`guest_users`): the guest set of the member
-      directory that judges commits, and the guests of the membership rule. In meeting chats the
-      membership rule already lets only roster members, the organizer, the co-hosts and the signed
-      admitters manage others (`for_meeting_chat`), so a relabelled guest adds nobody. Treating
-      everybody the roster doesn't vouch for as a guest in meeting chats everywhere waits until
-      plain members' accounts are broadly noted (#1926), as it would demote every member whose
-      account isn't noted yet.
+    - **In the meeting chat, on every device** (#1926; `teamcraft_core::meeting_standing`, one
+      rule for every decision a device makes in a meeting chat). A user is a **member** there if
+      the signed roster vouches for them or they are the organizer or a co-host of the host lists
+      the device verified. Before it verified any list, the organizer is the one the server names,
+      but where the device pinned the chat's founder (§4.6.5) only if that is the key it pinned for
+      them. Somebody neither, but named by the organizer's admitters in force, is an **admitter**:
+      they let people in and take guests out, nothing else. Everybody else is a **guest**, whatever
+      the server calls them. The server calling somebody a guest, or the device having let them in
+      as one, makes a guest of anybody but an owner, an admin or a host. Where a device verified no
+      roster and knows no host, nothing vouches for anybody and the rule of other conversations
+      applies, as the membership rule of meeting chats did before (an instance has a roster once
+      its first owner set it up, and a server can't take a verified roster away). The rule decides:
+      - the guests of the member directory that judges commits, so a guest's commit that touches
+        anybody else is refused (`GuestOverreach`), also of a guest another device admitted whom
+        the server calls a member;
+      - who manages others under the membership rule (members) and who only lets people in and
+        takes guests out (admitters);
+      - whether the device leaves others' changes to the members: a device whose user is a guest
+        there commits only changes to its own devices and its own signed leave;
+      - what the organizer's device signs: admitters, carried-over invitees (members only) and
+        hosts (a co-host or new organizer the roster doesn't vouch for is refused,
+        `CoreError::HostNotVouched`);
+      - the "Guest" marks the apps show in the chat's member list and messages, and whom the leave
+        prompt offers the meeting to.
+
+      Outside meeting chats a device still counts as guests only those the server calls guests and
+      those it let in itself. Whether a conversation is a meeting chat is the server's word, but a
+      device that verified admitters for it or pinned its founder applies the rule whatever the
+      server says now.
+    - **Rollout.** No minimum version gate (the instances run one alpha release). Devices can still
+      judge a commit differently while one of them hasn't read a newer roster yet (a member whose
+      account was just noted): the same held for the membership rule of meeting chats before, and
+      the member's own device judges itself by the roster it read, so it leaves others' changes to
+      the members until it read the one that notes them.
     - **Residuals.** A plain member whose account the owners' apps haven't noted yet (first come,
-      §3.1.4; never under manual signing) can't be let in from the lobby, and the organizer's
-      device no longer names them in a new admitters statement: they don't admit guests or people
-      of the link until their account is noted. Admitters an earlier statement named keep
-      working while it is in force.
+      §3.1.4; never under manual signing) is a guest in meeting chats until it is: they can't be
+      let in from the lobby, aren't named in a new admitters statement or as a host, and their
+      device leaves others' changes (a colleague's new device, a signed removal) to the members.
+      They still read and write in the chat. Admitters an earlier statement named keep working
+      while it is in force.
     - **The end of access** the host's app asks for comes from the server's meeting end plus the
       guests' grace. The core caps it at the end of the organizer-signed admitters this device
       verified, read afresh, while it lies ahead, and otherwise at the guests' grace (two hours)

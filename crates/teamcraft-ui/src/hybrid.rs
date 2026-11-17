@@ -740,6 +740,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.is_signed_member(user)
   }
 
+  fn is_meeting_guest(&self, conversation: ConversationId, user: UserId) -> bool {
+    self.chat.is_meeting_guest(conversation, user)
+  }
+
   fn note_meeting_lobby(&self, meeting: teamcraft_proto::MeetingId, has_lobby: bool) {
     self.chat.note_meeting_lobby(meeting, has_lobby);
   }

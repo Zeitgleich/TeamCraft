@@ -177,9 +177,11 @@ impl Engine {
       .iter()
       .filter_map(|id| parse_id::<UserId>(id).ok())
       .filter(|id| {
+        // No host the organizer's device wouldn't sign (#1926).
         backend
           .user(*id)
           .is_some_and(|user| !user.is_guest && !user.is_bot)
+          && !backend.is_meeting_guest(conversation, *id)
       })
       .collect();
     if candidates.is_empty() {

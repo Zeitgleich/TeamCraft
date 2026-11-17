@@ -584,7 +584,12 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
   let header = (!is_grouped).then(|| {
     let status = author.as_ref().and_then(|user| user.maybe_custom_status.clone());
     let badge_bot = author.as_ref().is_some_and(|user| user.is_bot);
-    let badge_guest = state.shows_guest_markers() && author.as_ref().is_some_and(|user| user.is_guest);
+    // In a meeting chat, also somebody the signed roster doesn't vouch for, whom the server calls a
+    // member (#1926).
+    let badge_guest = state.shows_guest_markers()
+      && author.as_ref().is_some_and(|user| {
+        user.is_guest || state.read(|backend| backend.is_meeting_guest(message.conversation, user.id))
+      });
     view! {
       <div class="msg-header">
         <button

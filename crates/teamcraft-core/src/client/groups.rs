@@ -34,6 +34,7 @@ use crate::api::{ApiError, ServerApi};
 use crate::convert;
 use crate::error::CoreError;
 use crate::meeting_invitees::InviteeList;
+use crate::meeting_standing::MeetingStanding;
 use crate::mls_storage::adopt_mls_entries;
 use crate::records;
 use crate::retry::{RetryPolicy, millis};
@@ -1301,7 +1302,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // A guest's device adds further devices of its own user only: the members refuse a guest's
     // commit that touches anybody else (e2ee.md §4.6, "What a guest may commit", #1077), so
     // committing another member's new device here would split the group. The members add it.
-    let maybe_only = if self.is_seen_as_guest().await? {
+    let maybe_only = if self.is_seen_as_guest(conversation).await? {
       Some(self.account.user_id)
     } else {
       None
@@ -1664,6 +1665,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     // A commit may add devices: check them against the newest device lists, read once per pass
     // over the queue.
+    let named = users.clone();
     let directory = if message.kind == MlsMessageKind::Commit {
       self.backlog_trusted_directory(conversation, users).await?
     } else {
@@ -1672,6 +1674,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // The server's time of the entry, the same for every member: merge decisions don't depend on
     // the clock of the device that makes them (a skewed clock would split the group).
     let at_ms = message.id.snowflake().unix_millis();
+    // Who is a guest in the commit's conversation (#1926): in a meeting chat everybody the signed
+    // roster doesn't vouch for, also where the server calls them a member.
+    let directory = directory.with_guests(self.guests_in(conversation, named, at_ms)?);
     if message.kind == MlsMessageKind::Commit
       && let Some(pending) = self.group_or_error(conversation)?.pending_commit()
     {
@@ -1939,7 +1944,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Ok(());
     }
     if let ChangeSource::Delegated(signed) = &source
-      && self.is_seen_as_guest().await?
+      && self.is_seen_as_guest(conversation).await?
       && !self.may_commit_as_guest(conversation, signed, action)?
     {
       // The members refuse a guest's commit that changes anybody else (e2ee.md §4.6, "What a
@@ -3436,15 +3441,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .into_iter()
       .map(|member| member.user_id)
       .collect();
-    let guests = self.guest_users(
-      members
-        .iter()
-        .map(|member| convert::user_from_crypto(*member))
-        .collect::<Result<Vec<_>, _>>()?,
-    )?;
+    let member_users = members
+      .iter()
+      .map(|member| convert::user_from_crypto(*member))
+      .collect::<Result<Vec<_>, _>>()?;
     let maybe_response: Option<teamcraft_proto::ConversationResponse> =
       records::get_json(&self.store, Table::Conversations, &conversation.to_string())?;
-    let is_meeting_chat = maybe_response
+    let is_meeting_by_server = maybe_response
       .as_ref()
       .is_some_and(|response| response.kind == ConversationKind::Meeting);
     let maybe_organizer = maybe_response
@@ -3455,6 +3458,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         && response.visibility == teamcraft_proto::ConversationVisibility::Public
         && !response.is_archived
     });
+    // In a meeting chat, one rule says who is a guest (#1926): everybody the signed roster doesn't
+    // vouch for, but the hosts and the organizer's admitters.
+    let maybe_standings = super::guest::meeting_standings(
+      &self.store,
+      self.account.user_id,
+      conversation,
+      member_users.iter().copied(),
+      at_ms,
+    )?;
+    let guests = match &maybe_standings {
+      Some(standings) => standings
+        .iter()
+        .filter(|(_, standing)| **standing == MeetingStanding::Guest)
+        .map(|(user, _)| *user)
+        .collect(),
+      None => self.guest_users(member_users.iter().copied())?,
+    };
     let (admins, roster) = self.fresh_admins(&workspace, at_ms);
     // Signed channel roles, once the channel has any (e2ee.md §4.6.1); never the server's list.
     let role_state = self.channel_role_state(conversation)?;
@@ -3465,28 +3485,34 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .with_signed_channel_admins(maybe_signed_admins)
       .for_public_channel(is_public_channel)
       .like_before_v1_0_9(self.is_checking_as_before_v1_0_9);
-    if is_meeting_chat {
-      // In a meeting chat only the roster's members manage others: a guest the server calls a
-      // member still doesn't (the organizer is in the roster like any member). The admitters the
-      // organizer signed let guests in besides (#1103), and so do the co-hosts of the host lists
-      // this device verified (#1720).
-      let admitters = self
-        .meeting_admitters_at(conversation, at_ms)?
-        .into_iter()
-        .chain(self.kept_co_hosts(conversation)?);
-      // After a handover the organizer the verified lists name counts like the server's (#1720).
-      let maybe_listed_organizer = self.kept_organizer(conversation)?;
+    let maybe_vouched: Option<Vec<UserId>> = match maybe_standings {
+      // In a meeting chat only members by the signed roster and the verified hosts manage others:
+      // a guest the server calls a member doesn't, nor does anybody the roster doesn't vouch for.
+      // Owners and admins count also outside the group (a signed change of theirs, committed by a
+      // member).
+      Some(standings) => Some(
+        standings
+          .into_iter()
+          .filter(|(_, standing)| *standing == MeetingStanding::Member)
+          .map(|(user, _)| user)
+          .chain(workspace.roster.members.iter().map(|member| member.user_id))
+          .chain(super::meeting_hosts::meeting_host_users(
+            &self.store,
+            self.account.user_id,
+            conversation,
+          )?)
+          .collect(),
+      ),
+      // Nothing vouches for anybody yet (no verified roster, no host): the organizer the server
+      // names manages the others, as before #1926.
+      None if is_meeting_by_server => Some(maybe_organizer.into_iter().collect()),
+      None => None,
+    };
+    if let Some(vouched) = maybe_vouched {
+      // The admitters the organizer signed let guests in besides (#1103).
       authority = authority
-        .for_meeting_chat(
-          workspace
-            .roster
-            .members
-            .iter()
-            .map(|member| member.user_id)
-            .chain(maybe_organizer)
-            .chain(maybe_listed_organizer),
-        )
-        .with_meeting_admitters(admitters);
+        .for_meeting_chat(vouched)
+        .with_meeting_admitters(self.meeting_admitters_at(conversation, at_ms)?);
     }
     Ok(authority)
   }
@@ -3579,18 +3605,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .into_iter()
       .filter(|user| *user != me && *user != leaver)
       .collect();
-    let guests = self.guest_users(others.iter().copied())?;
+    let guests = self.guests_in(conversation, others.iter().copied(), self.now_ms())?;
     Ok(others.iter().all(|user| guests.contains(user)))
   }
 
-  /// Whether the other members treat this device's user as a guest ([`Self::guest_users`]): a
-  /// meeting guest's device, or a user the server lists as a guest whom the signed roster doesn't
-  /// vouch for. Its commits may change only its own devices; any other the members refuse.
-  async fn is_seen_as_guest(&mut self) -> Result<bool, CoreError> {
+  /// Whether the other members of `conversation` treat this device's user as a guest: a meeting
+  /// guest's device, a user the server lists as a guest whom the signed roster doesn't vouch for,
+  /// or in a meeting chat anybody [`MeetingStanding::Guest`] there ([`Self::guests_in`], #1926).
+  /// Its commits may change only its own devices; any other the members refuse.
+  async fn is_seen_as_guest(&mut self, conversation: ConversationId) -> Result<bool, CoreError> {
     if self.is_guest_device()? {
       return Ok(true);
     }
     let me = self.account.user_id;
+    if !self.guests_in(conversation, [me], self.now_ms())?.is_empty() {
+      return Ok(true);
+    }
     let is_vouched = self
       .workspace()?
       .roster
@@ -3786,7 +3816,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     // Adding back another user's device is a commit the members refuse from a guest (e2ee.md
     // §4.6, "What a guest may commit", #1077): left to them, who queued the request as well.
-    if user != self.account.user_id && self.is_seen_as_guest().await? {
+    if user != self.account.user_id && self.is_seen_as_guest(conversation).await? {
       tracing::info!(conversation_id = %conversation, "left a rejoin request to the members: this user is a guest");
       return Ok(true);
     }
