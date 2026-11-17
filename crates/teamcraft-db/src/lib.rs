@@ -113,7 +113,9 @@ pub use health_alert::{
 pub use idempotency::Created;
 pub use identity::{IdentityKey, IdentityKeyOutcome, InitialKeyBag, NewIdentityKey};
 pub use import::{ImportOutcome, NewImportedMessage};
-pub use inactivity::{InactivityCandidate, PolicyArchivedChannel, SpaceArchive, SpaceRestore};
+pub use inactivity::{
+  InactivityCandidate, InactivityState, PolicyArchivedChannel, SpaceArchive, SpaceRestore,
+};
 pub use instance_stats::{InstanceStats, PoolStats};
 pub use invite::{AppliedInvite, Invite, NewInvite};
 pub use key_bag::{KeyBag, KeyBagOutcome};

@@ -1408,6 +1408,20 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
+  async fn snooze_inactivity(
+    &self,
+    conversation: ConversationId,
+    request: &teamcraft_proto::SnoozeInactivityRequest,
+  ) -> Result<teamcraft_proto::ChannelInactivityStatus, ApiError> {
+    self
+      .send_json(
+        Method::POST,
+        &format!("/conversations/{conversation}/inactivity/snooze"),
+        request,
+      )
+      .await
+  }
+
   async fn move_conversation(
     &self,
     conversation: ConversationId,

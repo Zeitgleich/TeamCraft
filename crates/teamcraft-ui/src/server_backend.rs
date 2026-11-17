@@ -274,6 +274,7 @@ fn to_conversation(conversation: &ConversationResponse, member_ids: Vec<UserId>,
   let membership = conversation.maybe_my_membership.as_ref();
   Conversation {
     maybe_draft_preview: None,
+    maybe_inactivity: conversation.maybe_inactivity.clone(),
     id: conversation.id,
     maybe_space: conversation.maybe_space_id,
     kind,

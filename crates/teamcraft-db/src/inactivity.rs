@@ -1,12 +1,14 @@
 //! Inactive channels, spaces archived with their channels, and idle guest accounts (issue #212).
 //! Metadata only: how long a channel has been quiet comes from the time in its newest message's ID.
 
+use std::collections::HashMap;
+
 use teamcraft_proto::{ConversationId, SpaceId, UserId};
 use time::OffsetDateTime;
 
 use crate::database::Database;
 use crate::error::DbError;
-use crate::ids::{from_db, to_db};
+use crate::ids::{from_db, to_db, to_db_all};
 
 /// A channel the inactivity policy may have to act on.
 #[derive(Debug, Clone)]
@@ -17,6 +19,19 @@ pub struct InactivityCandidate {
   pub maybe_last_message_millis: Option<i64>,
   /// When the owners were told about the current quiet spell.
   pub maybe_notified_at: Option<OffsetDateTime>,
+}
+
+/// What the inactivity policy recorded about one channel.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InactivityState {
+  /// When the owners were told about the current quiet spell (or about the coming deletion).
+  pub maybe_notified_at: Option<OffsetDateTime>,
+  /// Nothing is noticed, archived or deleted before this.
+  pub maybe_snoozed_until: Option<OffsetDateTime>,
+  /// When the channel was archived, if it is.
+  pub maybe_archived_at: Option<OffsetDateTime>,
+  /// The policy archived it, not somebody by hand.
+  pub is_archived_by_policy: bool,
 }
 
 /// A channel the policy archived, on its way to deletion.
@@ -84,6 +99,38 @@ impl Database {
             .map(|id| (id >> 22) + teamcraft_proto::SNOWFLAKE_EPOCH_MS),
           maybe_notified_at: row.inactivity_notified_at,
         })
+      })
+      .collect()
+  }
+
+  /// What the policy recorded about these channels; a channel it recorded nothing about is left
+  /// out. Metadata only, for the owners' notice in the apps.
+  pub async fn inactivity_states_of(
+    &self,
+    conversations: &[ConversationId],
+  ) -> Result<HashMap<ConversationId, InactivityState>, DbError> {
+    let rows = sqlx::query!(
+      r#"SELECT id, archived_at, archive_origin, inactivity_notified_at, inactivity_snoozed_until
+         FROM conversations
+         WHERE id = ANY($1) AND kind = 'channel'
+           AND (inactivity_notified_at IS NOT NULL OR inactivity_snoozed_until IS NOT NULL
+                OR archive_origin = 'inactivity')"#,
+      &to_db_all(conversations),
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows
+      .into_iter()
+      .map(|row| {
+        Ok((
+          from_db(row.id)?,
+          InactivityState {
+            maybe_notified_at: row.inactivity_notified_at,
+            maybe_snoozed_until: row.inactivity_snoozed_until,
+            maybe_archived_at: row.archived_at,
+            is_archived_by_policy: row.archive_origin.as_deref() == Some("inactivity"),
+          },
+        ))
       })
       .collect()
   }

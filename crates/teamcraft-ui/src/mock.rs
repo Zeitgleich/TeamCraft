@@ -1847,6 +1847,7 @@ fn demo_conversations() -> Vec<Conversation> {
                  unread: u32,
                  mentions: u32| Conversation {
     maybe_draft_preview: None,
+    maybe_inactivity: None,
     id,
     maybe_space: Some(space),
     kind,
@@ -2029,6 +2030,7 @@ fn demo_conversations() -> Vec<Conversation> {
   for (id, name, kind, members, unread, mentions) in dms {
     list.push(Conversation {
       maybe_draft_preview: None,
+      maybe_inactivity: None,
       id: id_from_raw::<ConversationId>(id),
       maybe_space: None,
       kind,

@@ -14,6 +14,7 @@ use crate::components::file_drop::{DropStrip, FileDrop};
 use crate::components::file_views::ChannelFiles;
 use crate::components::huddle_bar::HuddleBar;
 use crate::components::icons::{Icon, IconName};
+use crate::components::inactivity_notice::ChannelInactivityNotice;
 use crate::components::log_view::ChannelFeed;
 use crate::components::security_ui::KeyChangeBanner;
 use crate::components::sheet::MenuSurface;
@@ -124,6 +125,7 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
         <KeyChangeBanner conversation=conversation />
         <DeviceAccessBanner conversation=conversation />
         <CatchingUpNote info=info />
+        <ChannelInactivityNotice conversation=conversation />
         <KeyCatchUpNote conversation=conversation />
         <MembershipIssueBanners conversation=conversation info=info />
         <HuddleBar conversation=conversation />

@@ -745,6 +745,10 @@ pub struct Conversation {
   /// conversation with it. A thread's draft doesn't count here, the thread lists mark those.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub maybe_draft_preview: Option<String>,
+  /// Where the channel stands in the inactivity policy (issue #212); only the server's word for who
+  /// may manage the channel. Read it through [`Conversation::inactivity_notice`].
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_inactivity: Option<teamcraft_proto::ChannelInactivityStatus>,
 }
 
 impl Conversation {
@@ -1281,6 +1285,7 @@ mod tests {
     ) -> Conversation {
       Conversation {
         maybe_draft_preview: None,
+        maybe_inactivity: None,
         id: id_from_raw(1),
         maybe_space: None,
         kind,

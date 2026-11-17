@@ -463,6 +463,9 @@ fun ConversationScreen(
     },
   ) { listBottomInset ->
     SyncingLine(isCatchingUp = conversation?.isCatchingUp == true)
+    InactivityNoticeBanner(rights.maybeInactivityNotice) {
+      viewModel.act(ChatActions.snoozeChannelInactivity(conversationId))
+    }
     if (isChannel) ChannelUnreachableBanner(viewModel, conversationId)
     RunningCallBanner(viewModel, conversationId, conversation?.name.orEmpty(), runningCallCount)
     if (pinned.isNotEmpty()) PinnedBanner(pinned.last())

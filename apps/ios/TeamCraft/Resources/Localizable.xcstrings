@@ -369,6 +369,134 @@
         }
       }
     },
+    "inactivity_notice_quiet": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nobody has written in this channel for a while."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In diesem Kanal hat länger niemand geschrieben."
+          }
+        }
+      }
+    },
+    "inactivity_notice_archive_on %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nobody has written in this channel for a while. It is archived on %@ unless somebody writes in it or keeps it open."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In diesem Kanal hat länger niemand geschrieben. Er wird am %@ archiviert, wenn niemand darin schreibt oder ihn offen hält."
+          }
+        }
+      }
+    },
+    "inactivity_notice_archived": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This channel was archived automatically because it was quiet."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Kanal wurde automatisch archiviert, weil es still war."
+          }
+        }
+      }
+    },
+    "inactivity_notice_delete_on %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This channel was archived because it was quiet. It is deleted on %@ unless somebody restores it or postpones the deletion."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Kanal wurde archiviert, weil es still war. Er wird am %@ gelöscht, wenn ihn niemand wiederherstellt oder das Löschen aufschiebt."
+          }
+        }
+      }
+    },
+    "inactivity_notice_kept_open %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This channel is kept open until %@."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Kanal bleibt bis zum %@ offen."
+          }
+        }
+      }
+    },
+    "inactivity_notice_keep": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keep open"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Offen halten"
+          }
+        }
+      }
+    },
+    "inactivity_notice_postpone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Postpone deletion"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Löschen aufschieben"
+          }
+        }
+      }
+    },
+    "inactivity_notice_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn't keep the channel open. Try again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Kanal konnte nicht offen gehalten werden. Versuch es noch einmal."
+          }
+        }
+      }
+    },
     "read_only_archived": {
       "localizations": {
         "en": {

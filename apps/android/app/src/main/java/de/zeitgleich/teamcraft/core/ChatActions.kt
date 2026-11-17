@@ -413,6 +413,14 @@ object ChatActions {
     put("changes", buildJsonObject { put("maybe_is_archived", isArchived) })
   }
 
+  /**
+   * Keeps a quiet channel open (or postpones the deletion of one the inactivity policy archived)
+   * for the policy's period (#212); the server checks that the user may manage the channel.
+   */
+  fun snoozeChannelInactivity(conversation: String) = action("snooze_channel_inactivity") {
+    put("conversation", conversation)
+  }
+
   /** To an absolute time, so a retry doesn't extend twice; the server checks who may. */
   fun extendGuest(space: String, user: String, expiresAtMs: Long) = action("extend_guest") {
     put("space", space)

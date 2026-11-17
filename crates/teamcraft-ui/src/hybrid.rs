@@ -1036,6 +1036,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.join_channel(conversation);
   }
 
+  fn snooze_channel_inactivity(&self, conversation: ConversationId) {
+    self.chat.snooze_channel_inactivity(conversation);
+  }
+
   fn joinable_spaces(&self) -> Vec<teamcraft_client_api::model::JoinableSpace> {
     self.chat.joinable_spaces()
   }

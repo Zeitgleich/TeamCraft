@@ -438,6 +438,7 @@ mod tests {
   fn direct() -> Conversation {
     Conversation {
       maybe_draft_preview: None,
+      maybe_inactivity: None,
       id: id_from_raw(7),
       maybe_space: None,
       kind: ConversationKind::Direct,

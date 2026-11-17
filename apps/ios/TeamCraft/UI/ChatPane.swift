@@ -154,7 +154,12 @@ struct ChatPane: View {
   var body: some View {
     screenWithDialogs
     .safeAreaInset(edge: .top, spacing: 0) {
-      if runningCallCount > 0 && threadId == nil { runningCallBanner }
+      VStack(spacing: 0) {
+        if runningCallCount > 0 && threadId == nil { runningCallBanner }
+        if threadId == nil, let notice = conversation.maybeInactivityNotice {
+          InactivityNoticeBanner(conversationId: conversation.id, notice: notice)
+        }
+      }
     }
     .onAppear {
       guard threadId == nil else { return }

@@ -734,6 +734,7 @@ mod other_process {
       maybe_my_permissions: None,
       maybe_importer_user_id: None,
       maybe_imported_through: None,
+      maybe_inactivity: None,
       maybe_my_membership: None,
       participants: Vec::new(),
       maybe_image: None,

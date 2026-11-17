@@ -127,6 +127,11 @@ pub struct ConversationResponse {
   /// clients that had loaded the history's start load it again.
   #[serde(rename = "imported_through", default, skip_serializing_if = "Option::is_none")]
   pub maybe_imported_through: Option<MessageId>,
+  /// Where the channel stands in the inactivity policy (issue #212): the owners were told it went
+  /// quiet, when it is archived, until when somebody kept it open. Only for callers who may manage
+  /// the channel (`manage_channel_properties`), and only while there is something to say.
+  #[serde(rename = "inactivity", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_inactivity: Option<crate::ChannelInactivityStatus>,
 }
 
 impl ConversationResponse {
@@ -433,6 +438,7 @@ mod tests {
       maybe_my_permissions: Some(vec![Permission::AddReaction]),
       maybe_importer_user_id: None,
       maybe_imported_through: None,
+      maybe_inactivity: None,
       ..older.clone()
     };
     let json = serde_json::to_value(&announcement).unwrap();
@@ -500,6 +506,7 @@ mod tests {
       maybe_my_permissions: None,
       maybe_importer_user_id: None,
       maybe_imported_through: None,
+      maybe_inactivity: None,
     }
   }
 

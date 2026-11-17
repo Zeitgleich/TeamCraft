@@ -1091,6 +1091,7 @@ mod tests {
   fn conversation(id: ConversationId) -> Conversation {
     Conversation {
       maybe_draft_preview: None,
+      maybe_inactivity: None,
       id,
       maybe_space: None,
       kind: ConversationKind::Public,

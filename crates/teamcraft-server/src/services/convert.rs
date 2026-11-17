@@ -194,6 +194,7 @@ pub fn conversation_response(
     maybe_my_permissions: None,
     maybe_importer_user_id: conversation.maybe_importer,
     maybe_imported_through: conversation.maybe_imported_through,
+    maybe_inactivity: None,
     maybe_my_membership: view.maybe_membership.as_ref().map(my_membership),
     participants: extras
       .participants

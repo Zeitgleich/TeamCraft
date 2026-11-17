@@ -472,3 +472,11 @@ channel-sources-bridge-instance-hint = The bridge runs beside the server (deploy
 channel-sources-bridge-loopback-hint = The bridge runs next to the producers and listens on its default local address. Use the bridge's own address if you opened its listener.
 channel-sources-bridge-configured = At the configured address
 channel-sources-bridge-configured-hint = The bridge runs on its own host and producers post to { $url }, the address the admins set.
+
+inactivity-notice-quiet = Nobody has written in this channel for a while.
+inactivity-notice-archive-on = Nobody has written in this channel for a while. It is archived on { $date } unless somebody writes in it or keeps it open.
+inactivity-notice-archived = This channel was archived automatically because it was quiet.
+inactivity-notice-delete-on = This channel was archived because it was quiet. It is deleted on { $date } unless somebody restores it or postpones the deletion.
+inactivity-notice-kept-open = This channel is kept open until { $date }.
+inactivity-notice-keep = Keep open
+inactivity-notice-postpone = Postpone deletion

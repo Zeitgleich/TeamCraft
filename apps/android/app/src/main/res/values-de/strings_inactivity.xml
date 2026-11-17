@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="inactivity_notice_quiet">In diesem Kanal hat länger niemand geschrieben.</string>
+  <string name="inactivity_notice_archive_on">In diesem Kanal hat länger niemand geschrieben. Er wird am %1$s archiviert, wenn niemand darin schreibt oder ihn offen hält.</string>
+  <string name="inactivity_notice_archived">Dieser Kanal wurde automatisch archiviert, weil es still war.</string>
+  <string name="inactivity_notice_delete_on">Dieser Kanal wurde archiviert, weil es still war. Er wird am %1$s gelöscht, wenn ihn niemand wiederherstellt oder das Löschen aufschiebt.</string>
+  <string name="inactivity_notice_kept_open">Dieser Kanal bleibt bis zum %1$s offen.</string>
+  <string name="inactivity_notice_keep">Offen halten</string>
+  <string name="inactivity_notice_postpone">Löschen aufschieben</string>
+</resources>

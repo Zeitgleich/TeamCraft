@@ -1,6 +1,7 @@
 package de.zeitgleich.teamcraft.ui
 
 import uniffi.teamcraft_ffi.ConversationItem
+import uniffi.teamcraft_ffi.InactivityNoticeItem
 
 /**
  * What the user may do in a conversation, as the core decided it from the server's
@@ -18,6 +19,8 @@ data class ConversationRights(
   val canManageChannel: Boolean = true,
   /** Delete the channel for everybody; offered only on the server's word. */
   val canDeleteChannel: Boolean = false,
+  /** What the owners of a quiet channel are told (#212); `null` for everybody else. */
+  val maybeInactivityNotice: InactivityNoticeItem? = null,
 ) {
   companion object {
     fun of(maybeItem: ConversationItem?): ConversationRights = maybeItem?.let { item ->
@@ -27,6 +30,7 @@ data class ConversationRights(
         canManageBookmarks = item.canManageBookmarks,
         canManageChannel = item.canManageChannel,
         canDeleteChannel = item.canDeleteChannel,
+        maybeInactivityNotice = item.maybeInactivityNotice,
       )
     } ?: ConversationRights()
   }

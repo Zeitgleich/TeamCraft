@@ -60,6 +60,9 @@ enum ChatAction {
   case fillHistoryGap(conversationId: String, after: String, edge: GapEdge)
   /// To an absolute time, so a retry doesn't extend twice; the server checks who may (issue #212).
   case extendGuest(spaceId: String, userId: String, expiresAtMs: Int64)
+  /// Keeps a quiet channel open, or postpones the deletion of one the inactivity policy archived,
+  /// for the policy's period (issue #212); the server checks that the user may manage the channel.
+  case snoozeChannelInactivity(conversationId: String)
   /// The composer's unsent text, kept by the core (synced to the user's devices) so it survives the
   /// app being killed (issue #158). An empty body clears it.
   case setDraft(conversationId: String, maybeThreadId: String?, body: String)
@@ -149,6 +152,8 @@ enum ChatAction {
       object = ["action": "join_space", "space": space]
     case .extendGuest(let space, let user, let expiresAtMs):
       object = ["action": "extend_guest", "space": space, "user": user, "expires_at_ms": expiresAtMs]
+    case .snoozeChannelInactivity(let conversation):
+      object = ["action": "snooze_channel_inactivity", "conversation": conversation]
     case .markReactionsSeen(let conversation, let messages):
       object = ["action": "mark_reactions_seen", "conversation": conversation, "messages": messages]
     case .loadOlderHistory(let conversation):
