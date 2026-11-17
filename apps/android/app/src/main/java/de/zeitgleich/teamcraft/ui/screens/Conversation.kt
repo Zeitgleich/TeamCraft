@@ -61,6 +61,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -2324,8 +2325,13 @@ private fun EmojiSuggestions(text: String, caret: Int, onPick: (String) -> Unit)
   // The workspace's own emoji first (issue #207): they are what somebody typing a name there means.
   val custom by rememberWorkspaceEmoji(maybeQuery, MAX_EMOJI_SUGGESTIONS)
   if (suggestions.isEmpty() && custom.isEmpty()) return
+  // The workspace emoji arrive after the built-in ones are composed: without this the row keeps
+  // the first built-in chip as its anchor and the new ones land out of view on the left.
+  val listState = rememberLazyListState()
+  LaunchedEffect(maybeQuery, custom) { listState.scrollToItem(0) }
   LazyRow(
-    Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+    state = listState,
+    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
     horizontalArrangement = Arrangement.spacedBy(6.dp),
   ) {
     items(custom, key = { "custom:" + it.sha256 + it.shortcode }) { item ->
