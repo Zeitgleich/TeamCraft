@@ -28,8 +28,9 @@ pub struct CallRoster {
   reconnecting: BTreeSet<DeviceId>,
   /// Others' devices whose microphone is muted (their own report).
   muted: BTreeSet<DeviceId>,
-  /// Others' devices that record the call, and whether their notice verified (e2ee.md §8.3).
-  recording: BTreeMap<DeviceId, bool>,
+  /// Others' devices that record the call (e2ee.md §8.3): whose, whether the notice verified,
+  /// and whether the SFU says the device left.
+  recording: BTreeMap<DeviceId, (Option<UserId>, bool, bool)>,
   /// Others' devices whose call key didn't verify: kept out of the encryption.
   refused: BTreeSet<DeviceId>,
   /// Others' tracks whose capture stalled, as their frames say (#1805).
@@ -85,9 +86,6 @@ impl CallRoster {
         roster.sharing_screen.remove(&device_id);
         roster.reconnecting.remove(&device_id);
         roster.muted.remove(&device_id);
-        if roster.recording.remove(&device_id).is_some() {
-          active.recorders = roster.recorders();
-        }
         active.reconnecting = roster.reconnecting_users();
         if roster.refused.remove(&device_id) {
           active.unverified = roster.refused_users();
@@ -117,9 +115,23 @@ impl CallRoster {
       CallEngineEvent::RecordersChanged(recorders) => {
         roster.recording = recorders
           .into_iter()
-          .map(|recorder| (recorder.device_id, recorder.is_verified))
+          .map(|recorder| {
+            let maybe_user = recorder
+              .maybe_user_id
+              .or_else(|| roster.users_by_device.get(&recorder.device_id).copied());
+            (
+              recorder.device_id,
+              (maybe_user, recorder.is_verified, recorder.has_left),
+            )
+          })
           .collect();
         active.recorders = roster.recorders();
+      },
+      CallEngineEvent::OwnRecordingUnconfirmed(is_unconfirmed) => {
+        if let Some(own) = active.maybe_own_recording.as_mut() {
+          own.is_unconfirmed = is_unconfirmed;
+        }
+        return true;
       },
       CallEngineEvent::ParticipantMuted { device_id, is_muted } => {
         if is_muted {
@@ -393,18 +405,24 @@ impl CallRoster {
     users.into_iter().collect()
   }
 
-  /// Who records, one entry per person: verified when every recording device of theirs is.
+  /// Who records, one entry per person: verified when every recording device of theirs is,
+  /// left when every one of them left.
   fn recorders(&self) -> Vec<CallRecorder> {
-    let mut by_user: BTreeMap<UserId, bool> = BTreeMap::new();
-    for (device, is_verified) in &self.recording {
-      if let Some(user) = self.users_by_device.get(device) {
-        let entry = by_user.entry(*user).or_insert(true);
-        *entry &= *is_verified;
+    let mut by_user: BTreeMap<UserId, (bool, bool)> = BTreeMap::new();
+    for (maybe_user, is_verified, has_left) in self.recording.values() {
+      if let Some(user) = maybe_user {
+        let entry = by_user.entry(*user).or_insert((true, true));
+        entry.0 &= *is_verified;
+        entry.1 &= *has_left;
       }
     }
     by_user
       .into_iter()
-      .map(|(user, is_verified)| CallRecorder { user, is_verified })
+      .map(|(user, (is_verified, has_left))| CallRecorder {
+        user,
+        is_verified,
+        has_left,
+      })
       .collect()
   }
 

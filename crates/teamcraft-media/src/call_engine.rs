@@ -294,6 +294,8 @@ pub struct CallEngine {
   own_recording: OwnRecording,
   /// Who else records, from their signed notices.
   recording_notices: RecordingNotices,
+  /// What the app was last told about the own notice's confirmation.
+  is_recording_unconfirmed_reported: bool,
   is_deafened: bool,
   outputs: VecDeque<EngineOutput>,
 }
@@ -392,6 +394,9 @@ pub enum CallEngineEvent {
   },
   /// The other devices that record the call changed (e2ee.md §8.3): all of them, by device.
   RecordersChanged(Vec<Recorder>),
+  /// This device records, and the SFU hasn't confirmed keeping its notice for a while (or has
+  /// again): the others may not see the recording.
+  OwnRecordingUnconfirmed(bool),
   /// The DAVE group (re)keyed; media is end-to-end encrypted. Compare `privacy_code` out of band.
   Secured {
     epoch: u64,
@@ -813,6 +818,7 @@ impl CallEngine {
       is_mute_announced: false,
       own_recording: OwnRecording::default(),
       recording_notices: RecordingNotices::default(),
+      is_recording_unconfirmed_reported: false,
       is_deafened: false,
       outputs: VecDeque::new(),
     }
@@ -1083,6 +1089,9 @@ impl CallEngine {
     if self.own_recording.set(is_recording) {
       self.announce_recording();
     }
+    if !is_recording {
+      self.report_recording_confirmation(false);
+    }
   }
 
   pub fn is_recording(&self) -> bool {
@@ -1100,10 +1109,13 @@ impl CallEngine {
     let now_ms = web_time::SystemTime::now()
       .duration_since(web_time::UNIX_EPOCH)
       .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX));
-    match self
-      .own_recording
-      .next_notice(dave.notice_signer(), call_id, self.config.device_id, now_ms)
-    {
+    match self.own_recording.next_notice(
+      dave.notice_signer(),
+      call_id,
+      self.config.device_id,
+      now_ms,
+      Instant::now(),
+    ) {
       Ok(notice) => self.signal(CallClientMessage::SetRecording {
         notice: Base64Bytes::new(notice),
       }),
@@ -1137,7 +1149,8 @@ impl CallEngine {
       .find_map(|(id, key)| (id == participant).then_some(key))
   }
 
-  /// Checks the notices held for want of a key, after the group changed.
+  /// Checks the notices held for want of a key (a binding verified, the group changed), and
+  /// forgets recordings of devices that left and are out of the DAVE group now.
   fn recheck_recording_notices(&mut self) {
     let Some(call_id) = self.call_id() else {
       return;
@@ -1147,13 +1160,56 @@ impl CallEngine {
       .keys()
       .filter_map(|device| Some((*device, self.recording_key(*device)?)))
       .collect();
-    if self
+    let mut has_changed = self
       .recording_notices
-      .recheck(call_id, |device| keys.get(&device).cloned())
-    {
+      .recheck(call_id, |device| keys.get(&device).cloned());
+    // Only the members' own commits take a device out of the group: the SFU alone can't hide a
+    // recording by calling its device gone (e2ee.md §8.3).
+    let members: HashSet<DeviceId> = self
+      .maybe_dave
+      .as_ref()
+      .map(|dave| {
+        dave
+          .member_signature_keys()
+          .into_iter()
+          .filter_map(|(member, _)| member.to_device().ok())
+          .collect()
+      })
+      .unwrap_or_default();
+    if !members.is_empty() {
+      has_changed |= self
+        .recording_notices
+        .prune_left(|device| members.contains(&device));
+    }
+    if has_changed {
       self.event(CallEngineEvent::RecordersChanged(
         self.recording_notices.recorders(),
       ));
+    }
+  }
+
+  /// Sends the own notice again while the SFU doesn't confirm it, and tells the app when the
+  /// recording runs unconfirmed (an SFU from before the notices never confirms).
+  fn follow_recording_confirmation(&mut self, now: Instant) {
+    if !matches!(self.phase, Phase::Joined { .. }) {
+      return;
+    }
+    if let Some(notice) = self.own_recording.due_resend(now) {
+      self.signal(CallClientMessage::SetRecording {
+        notice: Base64Bytes::new(notice),
+      });
+    }
+    let is_unconfirmed = self.own_recording.is_unconfirmed(now);
+    self.report_recording_confirmation(is_unconfirmed);
+  }
+
+  fn report_recording_confirmation(&mut self, is_unconfirmed: bool) {
+    if self.is_recording_unconfirmed_reported != is_unconfirmed {
+      self.is_recording_unconfirmed_reported = is_unconfirmed;
+      if is_unconfirmed {
+        warn!("the SFU doesn't confirm the recording notice");
+      }
+      self.event(CallEngineEvent::OwnRecordingUnconfirmed(is_unconfirmed));
     }
   }
 
@@ -1795,6 +1851,7 @@ impl CallEngine {
     self.check_encryption_setup(now);
     self.follow_thin_voice(now);
     self.watch_unreported_voice(now);
+    self.follow_recording_confirmation(now);
   }
 
   /// Tells the driver whether to encode the own voice's thin copy (#1893 step 3): while a receiver
@@ -1933,14 +1990,27 @@ impl CallEngine {
           && device_id != self.config.device_id
         {
           let maybe_key = self.recording_key(device_id);
-          if self
-            .recording_notices
-            .receive(call_id, device_id, notice.as_slice(), maybe_key.as_deref())
-          {
+          let maybe_user_id = self
+            .participants
+            .get(&device_id)
+            .map(|participant| participant.user_id);
+          if self.recording_notices.receive(
+            call_id,
+            device_id,
+            maybe_user_id,
+            notice.as_slice(),
+            maybe_key.as_deref(),
+          ) {
             self.event(CallEngineEvent::RecordersChanged(
               self.recording_notices.recorders(),
             ));
           }
+        }
+        Ok(())
+      },
+      CallEvent::RecordingNoticeKept { notice } => {
+        if self.own_recording.confirm(notice.as_slice()) {
+          self.report_recording_confirmation(false);
         }
         Ok(())
       },
@@ -2336,7 +2406,9 @@ impl CallEngine {
       self.retired_keys.retire(device_id, key);
     }
     self.audio_streams.retain(|_, (owner, _)| *owner != device_id);
-    if self.recording_notices.remove(device_id) {
+    // The SFU's word alone: a verified recording stays, marked, until the device is out of the
+    // DAVE group (e2ee.md §8.3).
+    if self.recording_notices.mark_left(device_id) {
       self.event(CallEngineEvent::RecordersChanged(
         self.recording_notices.recorders(),
       ));
@@ -3434,6 +3506,10 @@ impl CallEngine {
     self
       .verified_keys
       .extend(keys.iter().map(|(device, key)| (*device, key.clone())));
+    // Notices that waited for these devices' keys can be checked now.
+    if !keys.is_empty() {
+      self.recheck_recording_notices();
+    }
     Ok(keys)
   }
 
@@ -4160,6 +4236,14 @@ impl CallEngine {
       (participant.device_id, AudioOrigin::Microphone),
     );
     self.participants.insert(participant.device_id, participant);
+    if self
+      .recording_notices
+      .mark_present(participant.device_id, participant.user_id)
+    {
+      self.event(CallEngineEvent::RecordersChanged(
+        self.recording_notices.recorders(),
+      ));
+    }
   }
 
   fn report_secured(&mut self) {
@@ -8988,6 +9072,232 @@ mod tests {
           .iter()
           .any(|output| matches!(output, EngineOutput::Event(CallEngineEvent::AudioFrame { .. })))
       );
+    }
+  }
+
+  /// Recording notices (e2ee.md §8.3, #216): signed with the DAVE key, verified by the others,
+  /// said again whenever the key or the connection changes, and confirmed by the SFU.
+  mod recording {
+    use super::*;
+    use teamcraft_crypto::call_recording::{RecordingState, SignedRecordingNotice};
+
+    #[test]
+    fn a_secured_peer_sees_a_verified_recording_until_its_signed_stop() {
+      let now = Instant::now();
+      let (mut alice, mut bob) = secured_pair(now);
+      alice.set_recording(true);
+      let start = sent_notices(&mut alice).pop().unwrap();
+      bob.handle_signal(event(4, notice_from(1, &start)), now).unwrap();
+      assert_eq!(recorders_of(&mut bob), Some(vec![(device(1), true, false)]));
+      alice.set_recording(false);
+      let stop = sent_notices(&mut alice).pop().unwrap();
+      assert_eq!(state_of(&stop), RecordingState::Stopped);
+      bob.handle_signal(event(5, notice_from(1, &stop)), now).unwrap();
+      assert_eq!(recorders_of(&mut bob), Some(Vec::new()));
+    }
+
+    /// A hostile SFU says the recorder left, to Bob alone: the recording stays on Bob's screen,
+    /// marked, because the recorder is still in the DAVE group.
+    #[test]
+    fn the_sfus_word_that_the_recorder_left_doesnt_hide_the_recording() {
+      let now = Instant::now();
+      let (mut alice, mut bob) = secured_pair(now);
+      alice.set_recording(true);
+      let start = sent_notices(&mut alice).pop().unwrap();
+      bob.handle_signal(event(4, notice_from(1, &start)), now).unwrap();
+      drain(&mut bob);
+      bob
+        .handle_signal(event(5, CallEvent::ParticipantLeft { device_id: device(1) }), now)
+        .unwrap();
+      assert_eq!(recorders_of(&mut bob), Some(vec![(device(1), true, true)]));
+      // Its signed stop still ends it, although the engine dropped its key with the leave.
+      alice.set_recording(false);
+      let stop = sent_notices(&mut alice).pop().unwrap();
+      bob.handle_signal(event(6, notice_from(1, &stop)), now).unwrap();
+      assert_eq!(recorders_of(&mut bob), Some(Vec::new()));
+    }
+
+    /// A late joiner gets the notice right after `joined`, before it has the recorder's key: it
+    /// shows at once, and verifies when the welcome's bindings are checked.
+    #[test]
+    fn a_late_joiner_sees_the_recording_at_once_and_verifies_it_with_the_welcome() {
+      let now = Instant::now();
+      let authenticators = authenticators(&[1, 2]);
+      let gateway = DaveExternalSender::new().unwrap();
+      let mut alice = joined_engine(1, &[], &gateway, Some(&authenticators[&1]), now);
+      let mut bob = joined_engine(2, &[1], &gateway, Some(&authenticators[&2]), now);
+      let (_, alice_binding) = key_package_of(&mut alice);
+      let (key_package, bob_binding) = key_package_of(&mut bob);
+      alice.set_recording(true);
+      let start = sent_notices(&mut alice).pop().unwrap();
+      bob.handle_signal(event(3, notice_from(1, &start)), now).unwrap();
+      assert_eq!(recorders_of(&mut bob), Some(vec![(device(1), false, false)]));
+
+      alice
+        .handle_signal(
+          event(
+            3,
+            CallEvent::ParticipantJoined {
+              participant: participant(2),
+            },
+          ),
+          now,
+        )
+        .unwrap();
+      alice.set_trusted_roster([device(2)]);
+      bob.set_trusted_roster([device(1)]);
+      let proposals = gateway
+        .propose(
+          DaveCallId::from_call(call()),
+          DaveEpoch(0),
+          &[(DaveParticipantId(2), &key_package)],
+          &[],
+        )
+        .unwrap();
+      alice
+        .handle_signal(
+          event(
+            4,
+            dave_proposals(0, proposals, &[1, 2], vec![binding(2, bob_binding.unwrap())]),
+          ),
+          now,
+        )
+        .unwrap();
+      let (_, welcome) = take_commit(&mut alice);
+      let welcome = CallEvent::DaveWelcome {
+        welcome,
+        key_bindings: vec![binding(1, alice_binding.unwrap())],
+        maybe_transition_id: None,
+      };
+      bob.handle_signal(event(4, welcome), now).unwrap();
+      assert_eq!(
+        recorders_of(&mut bob),
+        Some(vec![(device(1), true, false)]),
+        "verified once the binding is"
+      );
+    }
+
+    #[test]
+    fn a_rejoin_says_the_recording_again_and_a_stop_from_while_away() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      alice.set_recording(true);
+      assert_eq!(sent_notices(&mut alice).len(), 1);
+
+      alice.connection_lost(now);
+      alice.set_recording(false);
+      assert!(sent_notices(&mut alice).is_empty(), "nothing is sent while away");
+      alice.rejoin("fresh".into(), now);
+      alice.handle_signal(event(1, joined(1, &[2])), now).unwrap();
+      let sent = sent_notices(&mut alice);
+      assert_eq!(sent.len(), 1, "the stop goes out with the rejoin");
+      assert_eq!(state_of(&sent[0]), RecordingState::Stopped);
+    }
+
+    #[test]
+    fn a_rejoin_or_a_new_dave_session_signs_the_recording_again() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      alice.set_recording(true);
+      let first = sent_notices(&mut alice).pop().unwrap();
+
+      // An SFU that lost the slot (a restart): a fresh join, DAVE starts over.
+      alice.connection_lost(now);
+      alice.rejoin("fresh".into(), now);
+      alice.handle_signal(event(1, joined(1, &[2])), now).unwrap();
+      let again = sent_notices(&mut alice).pop().unwrap();
+      assert_eq!(state_of(&again), RecordingState::Recording);
+      assert!(sequence_of(&again) > sequence_of(&first));
+
+      // The SFU starts the DAVE group over (#1555): a new key, so a newly signed notice.
+      let gateway = DaveExternalSender::new().unwrap();
+      for seq in 2..=3 {
+        let package = Base64Bytes::new(gateway.package().unwrap());
+        alice
+          .handle_signal(event(seq, CallEvent::DaveExternalSender { package }), now)
+          .unwrap();
+      }
+      let renewed = sent_notices(&mut alice)
+        .pop()
+        .expect("signed with the new session's key");
+      assert_eq!(state_of(&renewed), RecordingState::Recording);
+      assert!(sequence_of(&renewed) > sequence_of(&again));
+    }
+
+    #[test]
+    fn an_unconfirmed_notice_is_sent_again_and_then_warned_about() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      alice.set_recording(true);
+      let start = sent_notices(&mut alice).pop().unwrap();
+      alice.on_timer(now + Duration::from_secs(3));
+      assert_eq!(sent_notices(&mut alice), vec![start.clone()], "sent again");
+      alice.on_timer(now + Duration::from_secs(7));
+      assert!(drain(&mut alice).iter().any(|output| matches!(
+        output,
+        EngineOutput::Event(CallEngineEvent::OwnRecordingUnconfirmed(true))
+      )));
+      alice
+        .handle_signal(
+          event(
+            6,
+            CallEvent::RecordingNoticeKept {
+              notice: Base64Bytes::new(start),
+            },
+          ),
+          now + Duration::from_secs(8),
+        )
+        .unwrap();
+      assert!(drain(&mut alice).iter().any(|output| matches!(
+        output,
+        EngineOutput::Event(CallEngineEvent::OwnRecordingUnconfirmed(false))
+      )));
+      alice.on_timer(now + Duration::from_secs(20));
+      assert!(sent_notices(&mut alice).is_empty(), "confirmed: no more resends");
+    }
+
+    fn sent_notices(engine: &mut CallEngine) -> Vec<Vec<u8>> {
+      drain(engine)
+        .into_iter()
+        .filter_map(|output| match output {
+          EngineOutput::Signal(CallClientMessage::SetRecording { notice }) => Some(notice.into_vec()),
+          _ => None,
+        })
+        .collect()
+    }
+
+    /// The last recorders the engine reported: (device, verified, left).
+    fn recorders_of(engine: &mut CallEngine) -> Option<Vec<(DeviceId, bool, bool)>> {
+      drain(engine).into_iter().rev().find_map(|output| match output {
+        EngineOutput::Event(CallEngineEvent::RecordersChanged(recorders)) => Some(
+          recorders
+            .iter()
+            .map(|recorder| (recorder.device_id, recorder.is_verified, recorder.has_left))
+            .collect(),
+        ),
+        _ => None,
+      })
+    }
+
+    fn notice_from(id: i64, notice: &[u8]) -> CallEvent {
+      CallEvent::RecordingNotice {
+        device_id: device(id),
+        notice: Base64Bytes::new(notice.to_vec()),
+      }
+    }
+
+    fn state_of(notice: &[u8]) -> RecordingState {
+      SignedRecordingNotice::from_bytes(notice)
+        .unwrap()
+        .unverified()
+        .state()
+    }
+
+    fn sequence_of(notice: &[u8]) -> u64 {
+      SignedRecordingNotice::from_bytes(notice)
+        .unwrap()
+        .unverified()
+        .sequence()
     }
   }
 

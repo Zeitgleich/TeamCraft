@@ -37,6 +37,8 @@ const JUST_JOINED_MS: u64 = 10_000;
 struct RecordingStatus {
   /// When this device started recording (wall clock).
   maybe_own_since: Option<i64>,
+  /// The SFU doesn't confirm the own notice: the others may not see the recording.
+  is_own_unconfirmed: bool,
   /// The others who record, by name, in a stable order.
   others: Vec<Recorder>,
 }
@@ -47,6 +49,8 @@ struct Recorder {
   name: String,
   /// The verified policy allows them to record.
   is_allowed: bool,
+  /// The server says they left, but their device may still hear the call.
+  has_left: bool,
 }
 
 /// What the control bar needs for the record button.
@@ -115,11 +119,18 @@ pub fn RecordingIndicator() -> impl IntoView {
       (None, false) => i18n.t_with("call-recording-by", &[("names", &names)]),
       (Some(_), false) => i18n.t_with("call-recording-own-and-by", &[("names", &names)]),
     };
+    let is_unconfirmed = status.is_own_unconfirmed;
     Some(view! {
       <span class="recording-pill" role="status" title=i18n.t("call-recording-detail")>
         <span class="recording-dot" aria-hidden="true"></span>
         <span>{text}</span>
       </span>
+      {is_unconfirmed.then(|| view! {
+        <span class="recording-pill is-warning" role="alert">
+          <Icon name=IconName::Alert />
+          <span>{i18n.t("call-recording-unconfirmed")}</span>
+        </span>
+      })}
     })
   }
 }
@@ -311,12 +322,14 @@ fn recording_status(backend: &dyn Backend) -> RecordingStatus {
           .filter(|name| !name.is_empty())
           .unwrap_or_default(),
         is_allowed: policy.allows(role),
+        has_left: recorder.has_left,
       }
     })
     .collect();
   others.sort_by(|a, b| a.name.cmp(&b.name).then(a.user.cmp(&b.user)));
   RecordingStatus {
     maybe_own_since: active.maybe_own_recording.map(|own| own.started_at),
+    is_own_unconfirmed: active.maybe_own_recording.is_some_and(|own| own.is_unconfirmed),
     others,
   }
 }
@@ -326,10 +339,15 @@ fn names_of(i18n: I18n, recorders: &[Recorder]) -> String {
   recorders
     .iter()
     .map(|recorder| {
-      if recorder.name.is_empty() {
+      let name = if recorder.name.is_empty() {
         i18n.t("call-recording-someone")
       } else {
         recorder.name.clone()
+      };
+      if recorder.has_left {
+        i18n.t_with("call-recording-left", &[("name", &name)])
+      } else {
+        name
       }
     })
     .collect::<Vec<_>>()

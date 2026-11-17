@@ -462,3 +462,5 @@ call-recording-posted = Aufnahme in die Unterhaltung gestellt
 call-recording-delete = Löschen
 call-recording-delete-confirm = Diese Aufnahme löschen? Sie kann nicht wiederhergestellt werden.
 tile-recording = nimmt auf
+call-recording-left = { $name } (hat den Anruf verlassen, hört eventuell noch zu)
+call-recording-unconfirmed = Der Server hat nicht bestätigt, dass die anderen von deiner Aufnahme erfahren. Sie sehen sie eventuell nicht.

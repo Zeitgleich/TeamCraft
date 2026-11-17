@@ -405,6 +405,12 @@ pub enum CallEvent {
     device_id: DeviceId,
     notice: Base64Bytes,
   },
+  /// To the sender of a [`CallClientMessage::SetRecording`]: the SFU keeps this notice and hands
+  /// it to the others. The recording app sends a notice again until it is confirmed and warns the
+  /// user when it isn't; an SFU from before sends none. Older clients read `Unknown`.
+  RecordingNoticeKept {
+    notice: Base64Bytes,
+  },
   /// Devices whose audio the SFU currently forwards, loudest first.
   ActiveSpeakers {
     device_ids: Vec<DeviceId>,
@@ -1065,6 +1071,12 @@ mod tests {
       r#"{"type":"recording_notice","device_id":"7","notice":"AQID"}"#
     );
     assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), event);
+    let kept = CallEvent::RecordingNoticeKept {
+      notice: Base64Bytes::new(vec![1, 2, 3]),
+    };
+    let json = serde_json::to_string(&kept).unwrap();
+    assert_eq!(json, r#"{"type":"recording_notice_kept","notice":"AQID"}"#);
+    assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), kept);
   }
 
   #[test]

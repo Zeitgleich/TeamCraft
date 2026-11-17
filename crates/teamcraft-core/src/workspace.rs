@@ -930,6 +930,28 @@ pub fn voice_message_policy(store: &impl LocalStore) -> Option<teamcraft_proto::
     .map(|state| state.policy.voice_messages)
 }
 
+/// How long `user` may record a call under the verified policy (e2ee.md §8.3), in seconds; `None`
+/// when they may not. Admins come from the verified roster while it is fresh; the server's word
+/// that someone is a guest or a bot only takes the right away. The desktop shell checks this
+/// itself before it records: the page's word isn't enough.
+pub fn call_recording_allowance(store: &impl LocalStore, user: UserId, now_ms: i64) -> Option<u32> {
+  let workspace: WorkspaceState =
+    records::get_json(store, Table::Workspace, crate::client::WORKSPACE_KEY).ok()??;
+  let policy = &workspace.policy.call_recording;
+  let max_age_ms =
+    i64::try_from(crate::ClientSettings::default().workspace_max_age.as_millis()).unwrap_or(i64::MAX);
+  let is_admin =
+    workspace.is_roster_fresh(now_ms, max_age_ms) && workspace.admins().any(|admin| admin == user);
+  // An unreadable record counts as a guest: no right without evidence.
+  let is_guest = crate::notetaker::is_guest_or_bot(store, user).unwrap_or(true);
+  let role = match (is_guest, is_admin) {
+    (true, _) => teamcraft_proto::RecorderRole::Guest,
+    (false, true) => teamcraft_proto::RecorderRole::Admin,
+    (false, false) => teamcraft_proto::RecorderRole::Member,
+  };
+  policy.allows(role).then(|| policy.max_seconds())
+}
+
 /// Who may record calls under the verified policy (e2ee.md §8.3). `None` before a workspace was
 /// verified or when the state can't be read: nobody, as the default says.
 pub fn call_recording_policy(store: &impl LocalStore) -> Option<teamcraft_proto::CallRecordingPolicy> {

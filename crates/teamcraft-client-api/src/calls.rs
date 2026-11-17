@@ -785,6 +785,10 @@ pub struct CallRecorder {
   /// Their notice verified against their call key; `false` until this device has the key (a
   /// moment after joining). The UI shows the recording either way.
   pub is_verified: bool,
+  /// The server says they left the call, but their device is still in the call's encryption
+  /// group, so it may still hear the call: the recording shows until it is out.
+  #[serde(default)]
+  pub has_left: bool,
 }
 
 /// This device's recording of the call.
@@ -794,6 +798,9 @@ pub struct OwnCallRecording {
   pub started_at: TimestampMs,
   /// It stops by itself after this long (the policy's `max_minutes`).
   pub max_secs: u32,
+  /// The SFU doesn't confirm the notice that tells the others: they may not see the recording.
+  #[serde(default)]
+  pub is_unconfirmed: bool,
 }
 
 /// A finished recording on this device, waiting for the user to post it into the call's

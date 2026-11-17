@@ -359,7 +359,18 @@ pub async fn call_action(
       calls.start_screen_share(has_sound, profile).await?
     },
     CallAction::StopScreenShare => calls.stop_screen_share().await,
-    CallAction::StartRecording { max_secs } => calls.start_recording(max_secs).await?,
+    CallAction::StartRecording { max_secs } => {
+      // The verified policy decides, not the page (e2ee.md §8.3): who may, and for how long.
+      let Some(allowed_secs) = core.current()?.call_recording_allowance().await? else {
+        return Err(CommandError::from(
+          teamcraft_client_api::failure::ActionFailure::other(
+            "the policy doesn't allow this user to record calls",
+          )
+          .to_wire(),
+        ));
+      };
+      calls.start_recording(max_secs.min(allowed_secs)).await?
+    },
     CallAction::StopRecording => calls.stop_recording().await?,
     CallAction::DiscardRecording => calls.discard_recording(),
     CallAction::OpenSystemVideoEffects => open_system_video_effects(&app)?,

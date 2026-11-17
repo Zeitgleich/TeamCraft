@@ -278,7 +278,7 @@ pub(crate) fn apply_request(
   Ok(())
 }
 
-fn is_guest_or_bot(store: &impl LocalStore, user: UserId) -> Result<bool, CoreError> {
+pub(crate) fn is_guest_or_bot(store: &impl LocalStore, user: UserId) -> Result<bool, CoreError> {
   let maybe_summary: Option<UserSummary> = records::get_json(store, Table::Users, &user.to_string())?;
   Ok(maybe_summary.is_some_and(|summary| matches!(summary.kind, UserKind::Guest | UserKind::Bot)))
 }

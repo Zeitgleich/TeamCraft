@@ -1931,3 +1931,13 @@
   flex-basis: 100%;
   justify-content: flex-end;
 }
+
+.recording-pill.is-warning {
+  background: var(--call-notice-bg);
+  color: var(--call-notice-text);
+}
+
+.recording-pill .icon {
+  width: 14px;
+  height: 14px;
+}

@@ -367,7 +367,9 @@ mod tests {
           .iter()
           .map(|id| crate::call_recording_notice::Recorder {
             device_id: device(*id),
+            maybe_user_id: None,
             is_verified: true,
+            has_left: false,
           })
           .collect(),
       )

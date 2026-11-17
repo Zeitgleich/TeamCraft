@@ -6641,7 +6641,9 @@ apps record at all. The admin guide (admin.md §3.13) says the same to whoever t
 | `max_minutes` | `120`   | The longest recording; it stops by itself then (1 to 480)                                |
 
 Guests never record, whatever the policy says. The recording app checks the verified policy and its
-user's role before it starts and offers the button only to those allowed (admin.md §1.1); every
+user's role before it starts and offers the button only to those allowed (admin.md §1.1); the
+desktop shell checks again itself (the verified policy, the verified admin roster and the guest
+flag) and clamps the length to the policy, whatever the page asked; every
 other app checks the same rule for each recording it is told of and says so when the recorder isn't
 allowed ("Your organization's policy doesn't allow this recording"). That check takes the policy
 from the signature and the recorder's role from the server's guest flag and admin list: a server
@@ -6660,30 +6662,39 @@ signaling, and the announcement is signed end to end:
   the key its notices must verify with. The label keeps a notice from ever verifying as an MLS
   signature of the same key and the other way round (MLS signs `"MLS 1.0 " + label`).
 - It sends the notice to the SFU (`set_recording`), at every start and stop and again after every
-  (re)join, as it sends its mute state. The SFU keeps the latest notice of each device in the call
-  (at most 256 bytes; it can't read or check it), forwards it to the others
-  (`recording_notice`), hands every device that joins later the notices of everybody already in the
-  call right after `joined`, and forgets a device's notice when the device leaves.
+  (re)join and every new DAVE session. The notice is **signed, not encrypted**: the SFU can read it
+  but not forge or change it. The SFU keeps the latest notice of each device in the call (at most
+  256 bytes, at most 5 at once and 1 a second per device), forwards it to the others
+  (`recording_notice`), confirms it to the sender (`recording_notice_kept`), hands every device that
+  joins later the notices of everybody already in the call right after `joined`, and forgets a
+  device's notice when the device leaves.
+- The recording app sends a recording notice again every 2 seconds until the SFU confirms it, and
+  after 6 seconds without a confirmation it warns its user that the others may not see the
+  recording (an SFU from before the notices never confirms). A stop isn't waited for: an
+  unconfirmed stop leaves the others with a recording on screen, the safe side.
 - Every app verifies a notice against the DAVE leaf key of the device it names, for this call. The
   sequence number must be higher than the last verified one of that device, so an old notice the
   server replays changes nothing.
 
 What each app makes of it (`teamcraft-media::call_recording_notice`):
 
-| What arrives                                               | What the app shows                                                    |
-|------------------------------------------------------------|-----------------------------------------------------------------------|
-| A `recording` notice that verifies                         | "Recording", with who records                                         |
-| A `recording` notice before the sender's DAVE key is known | "Recording" right away, checked once the key is there                 |
-| A notice that fails the check once the key is known        | Dropped (logged as a warning with the device id, nothing else)        |
-| A `stopped` notice that verifies                           | The recording indicator for that device goes away                     |
-| A `stopped` notice that doesn't verify (yet)               | Nothing changes: only a signed stop ends a recording on screen        |
-| The recording device leaves the call                       | The indicator goes away: it left the DAVE group and gets no more keys |
+| What arrives                                               | What the app shows                                                                                                |
+|------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------|
+| A `recording` notice that verifies                         | "Recording", with who records                                                                                     |
+| A `recording` notice before the sender's DAVE key is known | "Recording" right away, checked once the key is there                                                             |
+| A notice that fails the check once the key is known        | Dropped (logged as a warning with the device id, nothing else)                                                    |
+| A `stopped` notice that verifies                           | The recording indicator for that device goes away                                                                 |
+| A `stopped` notice that doesn't verify (yet)               | Nothing changes: only a signed stop ends a recording on screen                                                    |
+| The SFU says the recording device left the call            | "… left the call, may still be listening" until the device is out of the DAVE group, then the indicator goes away |
 
-So a hostile server can't hide a running recording from a member it forwards notices to (a stop
-needs the recorder's signature) and can't pin a recording on somebody who isn't recording (it fails
-the check once the key is known; until then the app errs on the side of showing it). It can still
-drop the notices altogether, as it can drop any signaling; the recorder's own app then still shows
-its own indicator and the recording still needs the policy. Members of the call who leave the DAVE
+So a hostile server can't hide a running recording from a member it forwards notices to: a stop
+needs the recorder's signature, and saying that the recorder left isn't enough either, since only
+the members' own commits take its device out of the DAVE group, and until then it may still hear
+the call. Up to 8 notices wait per device for their sender's key, so a forged one can't push the
+real one out. The server can't pin a recording on somebody who isn't recording (it fails the check
+once the key is known; until then the app errs on the side of showing it). It can still drop the
+notices altogether, as it can drop any signaling; the recorder's own app then warns that its notice
+isn't confirmed, and the recording still needs the policy. Members of the call who leave the DAVE
 group can't be recorded any more by anybody, because they send nothing.
 
 **Everybody sees it, late joiners too.**
@@ -6711,8 +6722,8 @@ browser: #2114).
   folder), page by page, never held in memory whole; an Ogg file cut off by a crash plays up to its
   last page. The folder is emptied at every start of the app, so a recording a crash left behind is
   not kept (keeping it for the user is a later step, #2116). This is plaintext on the recording
-  device's disk for as long as the recording runs, as with voice messages (§4.5): the device
-  already has the plaintext media. A write that fails (a full disk) ends the recording: the others
+  device's disk for as long as the recording runs (encrypting it there is #2129), as with voice
+  messages (§4.5): the device already has the plaintext media. A write that fails (a full disk) ends the recording: the others
   are told it stopped, and the recorder sees the error.
 - **Afterwards:** the app offers "Post to the conversation" or "Delete". Posting sends the file as
   an attachment into the call's conversation (§4.5): encrypted with a fresh key, which goes to the
@@ -6722,10 +6733,10 @@ browser: #2114).
 - **Limits:** `max_minutes` stops it; the call ending, the recorder leaving, or the app's page
   loading anew stop it too.
 
-**What the server learns.** That a device in a call sent `set_recording` messages, and when: the
-message type is visible to the SFU, the notice's content (state and sequence) is not readable to it
-by design but easy to guess. It never sees the recording; a posted recording is an attachment like
-any other, whose size it sees.
+**What the server learns.** Who records which call, and when: the notice is signed, not encrypted,
+so the SFU reads its call, device, state and sequence number (a wall-clock timestamp in
+milliseconds). It never sees the recording; a posted recording is an attachment like any other,
+whose size it sees.
 
 **Logs.** Apps log that a recording started or stopped (call id, duration in seconds) and verification
 failures (device id). Never the file's name, path or content.

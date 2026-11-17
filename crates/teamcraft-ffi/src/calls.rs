@@ -1331,7 +1331,11 @@ fn apply_event(
     CallEngineEvent::RecordersChanged(recorders) => {
       let users: BTreeSet<UserId> = recorders
         .iter()
-        .filter_map(|recorder| roster.get(&recorder.device_id).copied())
+        .filter_map(|recorder| {
+          recorder
+            .maybe_user_id
+            .or_else(|| roster.get(&recorder.device_id).copied())
+        })
         .collect();
       state.recording_user_ids = users.iter().map(ToString::to_string).collect();
     },

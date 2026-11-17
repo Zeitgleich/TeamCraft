@@ -462,3 +462,5 @@ call-recording-posted = Recording posted to the conversation
 call-recording-delete = Delete
 call-recording-delete-confirm = Delete this recording? It can't be restored.
 tile-recording = recording
+call-recording-left = { $name } (left the call, may still be listening)
+call-recording-unconfirmed = The server hasn't confirmed that the others are told about your recording. They may not see it.

@@ -100,9 +100,7 @@ impl RecordingFolder {
     };
     create_private_dir(&self.folder).map_err(|error| error.to_string())?;
     let number = self.next.fetch_add(1, Ordering::Relaxed);
-    let path = self
-      .folder
-      .join(format!("recording-{}-{number}.ogg", std::process::id()));
+    let path = self.folder.join(format!("recording-{number}.ogg"));
     let recorder = CallRecorder::start(&path, Duration::from_secs(u64::from(max_secs)))
       .map_err(|error| error.to_string())?;
     let sink = recorder.sink();
@@ -115,6 +113,7 @@ impl RecordingFolder {
       active.maybe_own_recording = Some(OwnCallRecording {
         started_at: now_ms,
         max_secs,
+        is_unconfirmed: false,
       });
     }
     Ok(sink)
