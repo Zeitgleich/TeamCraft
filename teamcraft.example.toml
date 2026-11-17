@@ -221,8 +221,11 @@ invite_resend_interval_secs = 300
 # How long the values of the directory filters are reused; computing them reads all users. 0 reads them
 # every time.
 directory_filters_cache_secs = 60
-# Largest avatar image in bytes (PNG, JPEG or WebP).
+# Largest avatar image in bytes (PNG, JPEG or WebP), as uploaded or as the identity provider serves
+# it. Every picture is re-encoded as a PNG of at most avatar_side_px pixels per side (64 to 2048),
+# without metadata.
 max_avatar_bytes = 1048576
+avatar_side_px = 512
 # Largest space or channel picture in bytes (one limit for both). Uploads (PNG, JPEG or WebP; no SVG) are re-encoded as PNG of at
 # most 512×512 pixels; the limit applies to the result.
 max_space_image_bytes = 1048576

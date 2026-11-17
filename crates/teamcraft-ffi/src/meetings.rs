@@ -619,6 +619,8 @@ impl Engine {
 
   /// Takes a cancellation back: of the whole meeting, or with `maybe_occurrence_ms` of that
   /// occurrence of a series (a holiday's too). Its organizer only; the server tells everybody.
+  /// A whole meeting restored here is open again on this device (#1983): the close mark its
+  /// cancel left goes, and its admitters are signed again, so its guests can be let in.
   pub(crate) async fn restore_meeting(
     &mut self,
     meeting_id: &str,
@@ -628,13 +630,26 @@ impl Engine {
     let request = RestoreMeetingRequest {
       maybe_occurrence: maybe_occurrence_ms.map(UnixMillis),
     };
-    self
+    let json = self
       .api_request(
         "POST",
         &format!("/meetings/{meeting}/restore"),
         Some(to_json(&request)?),
       )
       .await?;
+    if maybe_occurrence_ms.is_none() {
+      let restored: MeetingResponse = from_json(&json)?;
+      self.meeting_admitters_synced.remove(&meeting);
+      self
+        .run_commands(vec![
+          CoreCommand::ReopenMeetingRecords {
+            meeting,
+            organizer: restored.organizer_user_id,
+          },
+          sync_admitters(&restored),
+        ])
+        .await?;
+    }
     Ok(())
   }
 

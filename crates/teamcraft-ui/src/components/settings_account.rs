@@ -5,8 +5,7 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_proto::{
-  AvatarContentType, ErrorCode, HOLIDAY_REGIONS, HolidayRegionResponse, ProfileResponse,
-  UpdateProfileRequest, WorkingHours,
+  ErrorCode, HOLIDAY_REGIONS, HolidayRegionResponse, ProfileResponse, UpdateProfileRequest, WorkingHours,
 };
 use wasm_bindgen::JsCast;
 
@@ -111,7 +110,7 @@ fn ProfileHeader(maybe_hub: Option<ProfileHub>) -> impl IntoView {
         ));
       }
       hub
-        .upload_avatar(me_id, AvatarContentType::Png, png)
+        .upload_avatar(me_id, png)
         .await
         .map_err(|failure| failure.to_failure())?;
       picked.set_if_alive(None);
@@ -134,6 +133,12 @@ fn ProfileHeader(maybe_hub: Option<ProfileHub>) -> impl IntoView {
       .and_then(|hub| hub.profile(me_id))
       .is_some_and(|profile| profile.has_avatar)
   };
+  // Until the profile has loaded, the buttons show: the server refuses what the policy forbids.
+  let can_change_avatar = move || {
+    maybe_hub
+      .and_then(|hub| hub.profile(me_id))
+      .is_none_or(|profile| profile.can_change_avatar)
+  };
 
   view! {
     <header
@@ -141,6 +146,7 @@ fn ProfileHeader(maybe_hub: Option<ProfileHub>) -> impl IntoView {
       on:dragover=allow_image_drop
       on:drop=move |ev| {
         if maybe_hub.is_some()
+          && can_change_avatar()
           && let Some(file) = dropped_file(&ev)
         {
           open_crop(file);
@@ -169,18 +175,27 @@ fn ProfileHeader(maybe_hub: Option<ProfileHub>) -> impl IntoView {
           <p class="set-row-hint">{move || i18n.t("settings-name-from-sign-in")}</p>
         </Show>
         {maybe_hub.is_some().then(|| view! {
-          <div class="set-profile-actions">
-            <label class="btn btn-small" id=row_id("profile-avatar-change")>
-              <Icon name=IconName::Camera />
-              <span>{move || i18n.t("profile-avatar-change")}</span>
-              <input type="file" class="visually-hidden" accept="image/png,image/jpeg,image/webp" on:change=pick_avatar />
-            </label>
-            <Show when=has_avatar fallback=|| ()>
-              <PendingButton pending=removing class="btn btn-small" on_click=remove_avatar>
-                {move || i18n.t("profile-avatar-remove")}
-              </PendingButton>
-            </Show>
-          </div>
+          <Show
+            when=can_change_avatar
+            fallback=move || view! {
+              <p class="set-row-hint" id=row_id("profile-avatar-change")>
+                {move || i18n.t("profile-avatar-from-provider")}
+              </p>
+            }
+          >
+            <div class="set-profile-actions">
+              <label class="btn btn-small" id=row_id("profile-avatar-change")>
+                <Icon name=IconName::Camera />
+                <span>{move || i18n.t("profile-avatar-change")}</span>
+                <input type="file" class="visually-hidden" accept="image/png,image/jpeg,image/webp" on:change=pick_avatar />
+              </label>
+              <Show when=has_avatar fallback=|| ()>
+                <PendingButton pending=removing class="btn btn-small" on_click=remove_avatar>
+                  {move || i18n.t("profile-avatar-remove")}
+                </PendingButton>
+              </Show>
+            </div>
+          </Show>
         })}
         {move || pick_error.get().map(|key| view! { <p class="field-error" role="alert">{move || i18n.t(key)}</p> })}
       </div>
@@ -703,6 +718,7 @@ mod tests {
       maybe_display_name_override: None,
       can_override_display_name: false,
       maybe_avatar_version: None,
+      can_change_avatar: true,
     };
     assert!(!can_edit_name(None), "nothing to edit before the profile loaded");
     assert!(!can_edit_name(Some(&profile)), "the policy forbids it");

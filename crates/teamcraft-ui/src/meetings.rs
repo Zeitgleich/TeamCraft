@@ -199,20 +199,20 @@ impl MeetingsClient {
   }
 
   /// Takes a cancellation back: of the occurrence starting at `maybe_occurrence`, or of the meeting.
+  /// Answers the restored meeting (or occurrence) as the server holds it now.
   pub async fn restore(
     &self,
     meeting: MeetingId,
     maybe_occurrence: Option<UnixMillis>,
-  ) -> Result<(), MeetingError> {
+  ) -> Result<MeetingResponse, MeetingError> {
     let body = to_json(&RestoreMeetingRequest { maybe_occurrence })?;
     self
-      .send(
+      .call(
         ApiMethod::Post,
         &format!("/api/v1/meetings/{meeting}/restore"),
         Some(body),
       )
       .await
-      .map(|_| ())
   }
 
   /// Takes a cancelled meeting off everybody's lists.

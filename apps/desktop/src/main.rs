@@ -313,7 +313,6 @@ fn main() -> anyhow::Result<()> {
       crash_reports::perf_configure,
       auth::commands::public_asset,
       auth::commands::avatar_download,
-      auth::commands::avatar_upload,
       auth::commands::server_state,
       auth::commands::server_check,
       auth::commands::server_suggest,

@@ -70,6 +70,7 @@ async fn a_large_file_comes_down_a_piece_at_a_time() {
       maybe_waveform: None,
       maybe_draft_id: None,
     }],
+    link_preview: Default::default(),
   });
   ui.drain_commands();
   assert_eq!(alice.client.upload_pending().await.unwrap(), 1);

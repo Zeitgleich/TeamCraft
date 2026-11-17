@@ -177,6 +177,10 @@ class ChatClient(
   suspend fun revokeInvitation(spaceId: String, invitationId: String): InvitationOutcome =
     core().revokeInvitation(spaceId, invitationId)
 
+  /** The link preview under the composer's draft (#2073). */
+  suspend fun composerLinkPreview(conversation: String, maybeThread: String?): ComposerLinkPreview =
+    query(ChatQueries.composerLinkPreview(conversation, maybeThread)).preview ?: ComposerLinkPreview()
+
   /** The files of a draft (#1220), in the order they were attached. */
   suspend fun draftFiles(conversation: String, maybeThread: String?): List<DraftFileItem> =
     decodeDraftFiles(core().query(ChatQueries.draftFiles(conversation, maybeThread)))
@@ -193,6 +197,14 @@ class ChatClient(
     core().apiRequest(method, path, maybeBody)
 
   suspend fun ownProfile(): OwnProfile = OwnProfile.parse(api("GET", "/me/profile"))
+
+  /** Makes [png] (a square the app cropped) the member's own picture; the server re-encodes it. */
+  suspend fun setOwnAvatar(png: ByteArray): OwnProfile = OwnProfile.parse(core().setOwnAvatar(png))
+
+  /** Removes the member's own picture. */
+  suspend fun removeOwnAvatar() {
+    api("DELETE", "/me/avatar")
+  }
 
   /** Saves [maybeName] as the member's name, or with `null` goes back to the sign-in name. */
   suspend fun setDisplayName(profile: OwnProfile, maybeName: String?) {

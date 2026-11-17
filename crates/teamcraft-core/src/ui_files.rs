@@ -172,17 +172,15 @@ impl<S: LocalStore> CoreChatBackend<S> {
     meta: MessageMeta,
     files: Vec<OutgoingFile>,
     maybe_id: Option<ClientMessageId>,
-  ) {
+  ) -> Option<ClientMessageId> {
     // The same action again (a retry after a lost answer): its files are stored or going up already.
     if let Some(id) = maybe_id
       && matches!(self.store_ref().message(conversation, id), Ok(Some(_)))
     {
-      return;
+      return None;
     }
     let content = self.text_mentioning(conversation, body, meta);
-    let Some(id) = self.enqueue_as(conversation, maybe_thread, content, maybe_id) else {
-      return;
-    };
+    let id = self.enqueue_as(conversation, maybe_thread, content, maybe_id)?;
     // Files of the draft (#1220) are up or going up already; the rest are read now.
     let data = self.read(crate::client::stored_account_data(self.store_ref()));
     let mut taken = Vec::new();
@@ -232,13 +230,13 @@ impl<S: LocalStore> CoreChatBackend<S> {
     };
     if let Err(error) = save_pending_upload(self.store_ref(), &upload) {
       tracing::error!(%error, "could not store the files to upload");
-      return;
+      return None;
     }
     if !taken.is_empty() {
       self.command(CoreCommand::TakeDraftFiles { ids: taken });
     }
-    self.queue_link_preview(conversation, id, body);
     self.command(CoreCommand::UploadFiles);
+    Some(id)
   }
 
   /// "Cancel" on a file still going up; the host drops its running upload and sends the rest.

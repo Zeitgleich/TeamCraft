@@ -760,6 +760,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.forget_meeting_records(meeting);
   }
 
+  fn reopen_meeting_records(&self, meeting: teamcraft_proto::MeetingId, organizer: UserId) {
+    self.chat.reopen_meeting_records(meeting, organizer);
+  }
+
   fn sync_meeting_admitters(
     &self,
     meeting: teamcraft_proto::MeetingId,
@@ -812,6 +816,22 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
 
   fn set_draft(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>, body: &str) {
     self.chat.set_draft(conversation, maybe_thread, body);
+  }
+
+  fn update_composer_link(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>, body: &str) {
+    self.chat.update_composer_link(conversation, maybe_thread, body);
+  }
+
+  fn composer_link_preview(
+    &self,
+    conversation: ConversationId,
+    maybe_thread: Option<ThreadId>,
+  ) -> teamcraft_client_api::actions::ComposerLinkPreview {
+    self.chat.composer_link_preview(conversation, maybe_thread)
+  }
+
+  fn remove_composer_link_preview(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) {
+    self.chat.remove_composer_link_preview(conversation, maybe_thread);
   }
 
   fn attach_draft_files(

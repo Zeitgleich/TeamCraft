@@ -17,6 +17,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.ListItemShapes
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -293,7 +294,30 @@ fun NotificationContentGroup(viewModel: MainViewModel) {
         viewModel.setNotificationContent(it)
       }
     }
+    row { shapes ->
+      val isWorkspaceShowingContent = limit == null || limit == NotificationContent.CONTENT
+      WidgetPreviewRow(shapes, isAllowed = content == NotificationContent.CONTENT && isWorkspaceShowingContent && !isAppLockOn)
+    }
   }
+}
+
+/**
+ * Message previews in the home screen widget (#2076): off by default, and only where notifications
+ * show content and the app lock is off. Names and unread counts show either way.
+ */
+@Composable
+private fun WidgetPreviewRow(shapes: ListItemShapes, isAllowed: Boolean) {
+  val context = LocalContext.current
+  val widgets = remember { TeamCraftApplication.graph(context).homeWidgets }
+  val isWanted by widgets.isPreviewWanted.collectAsState()
+  SettingsSwitchRow(
+    shapes,
+    stringResource(R.string.widget_previews),
+    isOn = isWanted && isAllowed,
+    maybeSummary = stringResource(if (isAllowed) R.string.widget_previews_summary else R.string.widget_previews_unavailable),
+    isEnabled = isAllowed,
+    onChange = widgets::setPreviewWanted,
+  )
 }
 
 /** Mute until a preset time from now, or not at all; shows until when it is muted. */

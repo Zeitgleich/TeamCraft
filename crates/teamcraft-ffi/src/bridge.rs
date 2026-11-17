@@ -436,6 +436,16 @@ pub(crate) async fn avatar_picture(
   Ok(Some(picture))
 }
 
+/// Makes `png` (already cropped) the signed-in person's own picture (`PUT /me/avatar`); the server
+/// checks and re-encodes it. Answers the profile JSON. Runs on the HTTP runtime, like
+/// [`avatar_picture`].
+pub(crate) async fn set_own_avatar(api: &Api, png: Vec<u8>) -> Result<String, TeamCraftError> {
+  api
+    .put_bytes("/me/avatar", "image/png", png)
+    .await
+    .map_err(|error| teamcraft_core::CoreError::from(error).into())
+}
+
 /// The picture of a space as PNG bytes (`GET /spaces/{id}/image`, at most `max_bytes`); `None`
 /// when the space has none (any more). The app caches by the version the space list names, so
 /// it asks only for a version it doesn't hold. Runs on the HTTP runtime, like [`avatar_picture`].

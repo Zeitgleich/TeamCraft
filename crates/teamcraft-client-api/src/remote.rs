@@ -994,6 +994,19 @@ pub enum ChatAction {
     #[serde(default)]
     maybe_thread: Option<ThreadId>,
   },
+  /// What the composer's draft says now, for its link preview (#2073).
+  UpdateComposerLink {
+    conversation: ConversationId,
+    #[serde(default)]
+    maybe_thread: Option<ThreadId>,
+    body: String,
+  },
+  /// The remove button of the composer's link preview.
+  RemoveComposerLinkPreview {
+    conversation: ConversationId,
+    #[serde(default)]
+    maybe_thread: Option<ThreadId>,
+  },
   /// What the conversation's composer replies to (#1115), kept on this device; `None` forgets it.
   SetDraftReply {
     conversation: ConversationId,
@@ -1191,6 +1204,10 @@ pub enum ChatAction {
   },
   ForgetMeetingRecords {
     meeting: teamcraft_proto::MeetingId,
+  },
+  ReopenMeetingRecords {
+    meeting: teamcraft_proto::MeetingId,
+    organizer: UserId,
   },
   SyncMeetingAdmitters {
     meeting: teamcraft_proto::MeetingId,
@@ -1531,6 +1548,15 @@ impl ChatAction {
         conversation,
         maybe_thread,
       } => backend.discard_draft(conversation, maybe_thread),
+      Self::UpdateComposerLink {
+        conversation,
+        maybe_thread,
+        body,
+      } => backend.update_composer_link(conversation, maybe_thread, &body),
+      Self::RemoveComposerLinkPreview {
+        conversation,
+        maybe_thread,
+      } => backend.remove_composer_link_preview(conversation, maybe_thread),
       Self::SetDraftReply {
         conversation,
         maybe_reply,
@@ -1659,6 +1685,7 @@ impl ChatAction {
       Self::NoteMeetingLobby { meeting, has_lobby } => backend.note_meeting_lobby(meeting, has_lobby),
       Self::NoteMeetingSchedule { meeting, note } => backend.note_meeting_schedule(meeting, note),
       Self::ForgetMeetingRecords { meeting } => backend.forget_meeting_records(meeting),
+      Self::ReopenMeetingRecords { meeting, organizer } => backend.reopen_meeting_records(meeting, organizer),
       Self::SyncMeetingAdmitters {
         meeting,
         conversation,
@@ -1896,6 +1923,12 @@ pub enum ChatQuery {
     #[serde(default)]
     maybe_thread: Option<ThreadId>,
   },
+  /// The link preview under the composer's draft (#2073).
+  ComposerLinkPreview {
+    conversation: ConversationId,
+    #[serde(default)]
+    maybe_thread: Option<ThreadId>,
+  },
   /// What the conversation's composer replies to, as a quote (#1115).
   DraftReply {
     conversation: ConversationId,
@@ -2113,6 +2146,9 @@ pub enum ChatAnswer {
   },
   DraftFiles {
     files: Vec<DraftFileItem>,
+  },
+  ComposerLinkPreview {
+    preview: crate::actions::ComposerLinkPreview,
   },
   DraftReply {
     maybe_reply: Option<crate::actions::ReplyPreview>,
@@ -2394,6 +2430,12 @@ impl ChatQuery {
         maybe_thread,
       } => ChatAnswer::DraftFiles {
         files: backend.draft_files(conversation, maybe_thread),
+      },
+      Self::ComposerLinkPreview {
+        conversation,
+        maybe_thread,
+      } => ChatAnswer::ComposerLinkPreview {
+        preview: backend.composer_link_preview(conversation, maybe_thread),
       },
       Self::DraftReply { conversation } => ChatAnswer::DraftReply {
         maybe_reply: backend.draft_reply(conversation),

@@ -23,6 +23,7 @@ camerax = "1.6.2"
 zxing = "3.5.4"
 work = "2.12.0"
 biometric = "1.1.0"
+glance = "1.2.0"
 profileinstaller = "1.4.1"
 media3 = "1.11.1"
 junit = "4.13.2"
@@ -64,6 +65,7 @@ androidx-camera-video = { module = "androidx.camera:camera-video", version.ref =
 zxing-core = { module = "com.google.zxing:core", version.ref = "zxing" }
 androidx-work-runtime = { module = "androidx.work:work-runtime-ktx", version.ref = "work" }
 androidx-biometric = { module = "androidx.biometric:biometric", version.ref = "biometric" }
+androidx-glance-appwidget = { module = "androidx.glance:glance-appwidget", version.ref = "glance" }
 androidx-profileinstaller = { module = "androidx.profileinstaller:profileinstaller", version.ref = "profileinstaller" }
 junit = { module = "junit:junit", version.ref = "junit" }
 androidx-test-runner = { module = "androidx.test:runner", version.ref = "androidxTestRunner" }

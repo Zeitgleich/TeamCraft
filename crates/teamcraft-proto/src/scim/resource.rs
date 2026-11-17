@@ -4,7 +4,10 @@
 
 use serde_json::{Value, json};
 
-use super::{MAX_EMAIL_CHARS, MAX_IDENTIFIER_CHARS, MAX_MEMBERS_PER_REQUEST, MAX_NAME_CHARS, USER_SCHEMA};
+use super::{
+  MAX_EMAIL_CHARS, MAX_IDENTIFIER_CHARS, MAX_MEMBERS_PER_REQUEST, MAX_NAME_CHARS, MAX_PHOTO_CHARS,
+  USER_SCHEMA,
+};
 
 /// The attributes of a user TeamCraft keeps.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +20,10 @@ pub struct UserAttributes {
   pub maybe_display_name: Option<String>,
   /// The primary e-mail address, else the work one, else the first.
   pub maybe_email: Option<String>,
+  /// The person's picture (`photos`): the primary one, else the one of type `photo`, else the
+  /// first. A URL or a `data:` URI; the server imports it when the workspace takes pictures from
+  /// the identity provider (issue #2071).
+  pub maybe_photo: Option<String>,
   pub is_active: bool,
 }
 
@@ -78,6 +85,7 @@ impl UserAttributes {
       maybe_family_name: name_part("familyname", "name.familyName")?,
       maybe_display_name,
       maybe_email: email(resource.get("emails"))?,
+      maybe_photo: photo(resource.get("photos"))?,
       is_active: active(resource.get("active"))?,
       user_name,
     })
@@ -105,6 +113,9 @@ impl UserAttributes {
     }
     if let Some(email) = &self.maybe_email {
       resource["emails"] = json!([{"value": email, "type": "work", "primary": true}]);
+    }
+    if let Some(photo) = &self.maybe_photo {
+      resource["photos"] = json!([{"value": photo, "type": "photo", "primary": true}]);
     }
     resource
   }
@@ -196,23 +207,10 @@ fn email(maybe_emails: Option<&Value>) -> Result<Option<String>, ScimInputError>
     Some(Value::Array(items)) => items,
     Some(_) => return Err(ScimInputError::InvalidValue("emails")),
   };
-  let is_true = |item: &Value| {
-    matches!(item.get("primary"), Some(Value::Bool(true)))
-      || item
-        .get("primary")
-        .and_then(Value::as_str)
-        .is_some_and(|text| text.eq_ignore_ascii_case("true"))
-  };
-  let is_work = |item: &Value| {
-    item
-      .get("type")
-      .and_then(Value::as_str)
-      .is_some_and(|kind| kind.eq_ignore_ascii_case("work"))
-  };
   let Some(chosen) = items
     .iter()
-    .find(|item| is_true(item))
-    .or_else(|| items.iter().find(|item| is_work(item)))
+    .find(|item| is_primary(item))
+    .or_else(|| items.iter().find(|item| has_type(item, "work")))
     .or_else(|| items.first())
   else {
     return Ok(None);
@@ -225,6 +223,39 @@ fn email(maybe_emails: Option<&Value>) -> Result<Option<String>, ScimInputError>
     return Err(ScimInputError::InvalidValue("emails.value"));
   }
   Ok(maybe_address)
+}
+
+fn photo(maybe_photos: Option<&Value>) -> Result<Option<String>, ScimInputError> {
+  let items = match maybe_photos {
+    None | Some(Value::Null) => return Ok(None),
+    Some(Value::Array(items)) => items,
+    Some(_) => return Err(ScimInputError::InvalidValue("photos")),
+  };
+  let Some(chosen) = items
+    .iter()
+    .find(|item| is_primary(item))
+    .or_else(|| items.iter().find(|item| has_type(item, "photo")))
+    .or_else(|| items.first())
+  else {
+    return Ok(None);
+  };
+  text(chosen.get("value"), "photos.value", MAX_PHOTO_CHARS)
+}
+
+/// `primary`: `true`, or the string `"True"` some identity providers send.
+fn is_primary(item: &Value) -> bool {
+  matches!(item.get("primary"), Some(Value::Bool(true)))
+    || item
+      .get("primary")
+      .and_then(Value::as_str)
+      .is_some_and(|text| text.eq_ignore_ascii_case("true"))
+}
+
+fn has_type(item: &Value, kind: &str) -> bool {
+  item
+    .get("type")
+    .and_then(Value::as_str)
+    .is_some_and(|value| value.eq_ignore_ascii_case(kind))
 }
 
 /// `active`: a boolean, or the strings `"True"` / `"False"` some identity providers send in a
@@ -248,6 +279,43 @@ mod tests {
 
   fn user(value: Value) -> Result<UserAttributes, ScimInputError> {
     UserAttributes::from_resource(&normalize_keys(value).unwrap())
+  }
+
+  #[test]
+  fn the_primary_photo_wins_then_the_photo_type_then_the_first() {
+    let photo = |photos: Value| {
+      user(json!({"userName": "a", "photos": photos}))
+        .unwrap()
+        .maybe_photo
+    };
+    assert_eq!(
+      photo(json!([
+        {"value": "https://pictures.example.com/t.png", "type": "thumbnail"},
+        {"value": "https://pictures.example.com/p.png", "type": "photo"},
+      ]))
+      .as_deref(),
+      Some("https://pictures.example.com/p.png")
+    );
+    assert_eq!(
+      photo(json!([
+        {"value": "https://pictures.example.com/p.png", "type": "photo"},
+        {"value": "https://pictures.example.com/t.png", "type": "thumbnail", "primary": "True"},
+      ]))
+      .as_deref(),
+      Some("https://pictures.example.com/t.png")
+    );
+    assert_eq!(photo(json!([])), None);
+    assert_eq!(user(json!({"userName": "a"})).unwrap().maybe_photo, None);
+    assert!(user(json!({"userName": "a", "photos": "https://x.example"})).is_err());
+    assert!(user(json!({"userName": "a", "photos": [{"value": 7}]})).is_err());
+  }
+
+  #[test]
+  fn a_photo_survives_the_patchable_form() {
+    let mut attributes = user(json!({"userName": "a"})).unwrap();
+    attributes.maybe_photo = Some("https://pictures.example.com/p.png".into());
+    let again = UserAttributes::from_resource(&attributes.to_patchable()).unwrap();
+    assert_eq!(again.maybe_photo, attributes.maybe_photo);
   }
 
   #[test]

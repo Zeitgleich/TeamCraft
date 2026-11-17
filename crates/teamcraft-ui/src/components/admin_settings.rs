@@ -421,6 +421,16 @@ const LIMITS: &[FieldDef] = &[
   amount("max_attachment_bytes", MIB, U64_MAX, MEGABYTES),
   amount("max_attachment_bytes_per_user", MIB, U64_MAX, MEGABYTES),
   amount("max_avatar_bytes", MIB, U64_MAX, MEGABYTES),
+  ranged(
+    "avatar_side_px",
+    1,
+    (
+      teamcraft_proto::MIN_AVATAR_SIDE_PX as u64,
+      teamcraft_proto::MAX_AVATAR_SIDE_PX as u64,
+    ),
+    PIXELS,
+    "settings-error-avatar-side",
+  ),
   amount("max_space_image_bytes", MIB, U64_MAX, MEGABYTES),
   amount("max_background_bytes", MIB, U64_MAX, MEGABYTES),
   count("max_backgrounds_per_user"),

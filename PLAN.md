@@ -301,7 +301,7 @@ no Asterisk, no cloud telephony API. Details: [docs/telephony.md](docs/telephony
 
 | Feature                                                                                                                                | Prio  | Notes                                          |
 |----------------------------------------------------------------------------------------------------------------------------------------|-------|------------------------------------------------|
-| Profile: name, avatar, title, department, phone, time zone                                                                             | v1    | Synced from the OIDC provider; avatar editable |
+| Profile: name, avatar, title, department, phone, time zone                                                                             | v1    | Synced from OIDC; avatar own or IdP's (#2071)  |
 | Member directory                                                                                                                       | v1    | Not for guests                                 |
 | **Organization** per user from an OIDC claim or group (configurable); badge in profile, directory and mention picker; directory filter | v1    | Display data only; docs/branding.md §9         |
 | User groups (`@devteam`) mapped from Keycloak groups or created manually                                                               | v1    |                                                |

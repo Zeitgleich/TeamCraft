@@ -10,7 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Bytes;
-use image::{ImageFormat, ImageReader, Limits};
+use image::metadata::Orientation;
+use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits};
 use serde_json::json;
 use teamcraft_db::StoredSpaceImage;
 use teamcraft_proto::{AttachmentId, GatewayEvent, Id, Permission, SpaceId, SpaceResponse};
@@ -52,7 +53,7 @@ pub struct SpaceImageFile {
 pub enum SpaceImageError {
   #[error("SVG pictures are not accepted; upload a PNG, JPEG or WebP image")]
   Svg,
-  #[error("space pictures are PNG, JPEG or WebP images of the declared type")]
+  #[error("pictures are PNG, JPEG or WebP images of the declared type")]
   UnsupportedType,
   #[error("the picture could not be decoded")]
   Undecodable,
@@ -174,6 +175,35 @@ pub async fn get_space_image(
 /// Checks that `bytes` are a PNG, JPEG or WebP image of the declared type and re-encodes them as a
 /// PNG of at most [`MAX_SPACE_IMAGE_SIDE`] pixels per side.
 pub fn sanitize(bytes: &[u8], declared_type: &str) -> Result<Vec<u8>, SpaceImageError> {
+  let picture = decode(bytes, declared_type)?;
+  encode_png(fit(picture, MAX_SPACE_IMAGE_SIDE))
+}
+
+/// Like [`sanitize`], for a profile picture: the middle square of the picture, at most `side`
+/// pixels wide (issue #2071). Clients send a square already; the server doesn't rely on it.
+pub fn sanitize_avatar(bytes: &[u8], declared_type: &str, side: u32) -> Result<Vec<u8>, SpaceImageError> {
+  let picture = decode(bytes, declared_type)?;
+  let short_side = picture.width().min(picture.height());
+  let square = picture.crop_imm(
+    (picture.width() - short_side) / 2,
+    (picture.height() - short_side) / 2,
+    short_side,
+    short_side,
+  );
+  encode_png(fit(square, side))
+}
+
+/// The type of a PNG, JPEG or WebP picture by its first bytes, for pictures nobody declared a type
+/// for that can be trusted (an identity provider's).
+pub fn raster_type(bytes: &[u8]) -> Option<&'static str> {
+  ["image/png", "image/jpeg", "image/webp"]
+    .into_iter()
+    .find_map(|declared| sniff_image(bytes, declared))
+}
+
+/// Decodes a PNG, JPEG or WebP image of the declared type within the decoder limits, turned as its
+/// EXIF orientation says (the re-encoded file has no EXIF left to say it).
+fn decode(bytes: &[u8], declared_type: &str) -> Result<DynamicImage, SpaceImageError> {
   let format = match sniff_image(bytes, declared_type) {
     Some("image/png") => ImageFormat::Png,
     Some("image/jpeg") => ImageFormat::Jpeg,
@@ -185,10 +215,24 @@ pub fn sanitize(bytes: &[u8], declared_type: &str) -> Result<Vec<u8>, SpaceImage
   if u64::from(width) * u64::from(height) > MAX_SOURCE_PIXELS {
     return Err(SpaceImageError::TooManyPixels);
   }
-  let mut picture = reader(bytes, format).decode().map_err(decode_error)?;
-  if width > MAX_SPACE_IMAGE_SIDE || height > MAX_SPACE_IMAGE_SIDE {
-    picture = picture.thumbnail(MAX_SPACE_IMAGE_SIDE, MAX_SPACE_IMAGE_SIDE);
+  let mut decoder = reader(bytes, format).into_decoder().map_err(decode_error)?;
+  let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+  let mut picture = DynamicImage::from_decoder(decoder).map_err(decode_error)?;
+  picture.apply_orientation(orientation);
+  Ok(picture)
+}
+
+/// `picture`, scaled down to at most `side` pixels per side.
+fn fit(picture: DynamicImage, side: u32) -> DynamicImage {
+  if picture.width() > side || picture.height() > side {
+    picture.thumbnail(side, side)
+  } else {
+    picture
   }
+}
+
+/// A plain PNG: pixels only, no metadata.
+fn encode_png(picture: DynamicImage) -> Result<Vec<u8>, SpaceImageError> {
   let mut out = std::io::Cursor::new(Vec::new());
   picture
     .write_to(&mut out, ImageFormat::Png)
@@ -343,6 +387,62 @@ mod tests {
       sanitize(b"\x89PNG\r\n\x1a\n", "image/png"),
       Err(SpaceImageError::Undecodable)
     );
+  }
+
+  mod avatars {
+    use super::*;
+
+    #[test]
+    fn an_avatar_is_the_middle_square_at_most_the_configured_side() {
+      for (width, height, side, expected) in [(600, 300, 128, 128), (300, 600, 512, 300), (40, 90, 512, 40)] {
+        let png = sanitize_avatar(&encoded(width, height, ImageFormat::Jpeg), "image/jpeg", side).unwrap();
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+        let decoded = image::load_from_memory(&png).unwrap();
+        assert_eq!(
+          (decoded.width(), decoded.height()),
+          (expected, expected),
+          "{width}×{height}"
+        );
+      }
+    }
+
+    #[test]
+    fn the_avatar_keeps_the_middle_and_drops_the_sides() {
+      // Red left third, green middle, blue right third.
+      let buffer = ImageBuffer::from_fn(90, 30, |x, _| match x / 30 {
+        0 => Rgb([255u8, 0, 0]),
+        1 => Rgb([0, 255, 0]),
+        _ => Rgb([0, 0, 255]),
+      });
+      let mut out = std::io::Cursor::new(Vec::new());
+      buffer.write_to(&mut out, ImageFormat::Png).unwrap();
+      let png = sanitize_avatar(&out.into_inner(), "image/png", 512).unwrap();
+      let decoded = image::load_from_memory(&png).unwrap().to_rgb8();
+      assert_eq!(decoded.dimensions(), (30, 30));
+      assert!(decoded.pixels().all(|pixel| *pixel == Rgb([0, 255, 0])));
+    }
+
+    #[test]
+    fn avatars_are_checked_like_any_picture() {
+      let png = encoded(8, 8, ImageFormat::Png);
+      assert_eq!(
+        sanitize_avatar(&png, "image/jpeg", 64),
+        Err(SpaceImageError::UnsupportedType)
+      );
+      assert_eq!(
+        sanitize_avatar(b"<svg/>", "image/svg+xml", 64),
+        Err(SpaceImageError::Svg)
+      );
+    }
+
+    #[test]
+    fn the_type_of_an_undeclared_picture_comes_from_its_first_bytes() {
+      assert_eq!(raster_type(&encoded(4, 4, ImageFormat::Png)), Some("image/png"));
+      assert_eq!(raster_type(&encoded(4, 4, ImageFormat::Jpeg)), Some("image/jpeg"));
+      assert_eq!(raster_type(&encoded(4, 4, ImageFormat::WebP)), Some("image/webp"));
+      assert_eq!(raster_type(b"<svg/>"), None);
+      assert_eq!(raster_type(b"GIF89a"), None);
+    }
   }
 
   #[test]

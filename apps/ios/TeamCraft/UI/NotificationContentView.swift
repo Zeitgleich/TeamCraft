@@ -11,6 +11,7 @@ struct NotificationContentView: View {
   @State private var maybeWorkspaceLimit: NotificationContent?
   @State private var isLoaded = false
   @State private var isFailed = false
+  @State private var isWidgetPreviewWanted = false
 
   var body: some View {
     Form {
@@ -34,6 +35,18 @@ struct NotificationContentView: View {
           }
         }
       }
+      // Message previews in the home screen widget (#2076): off by default, and only where
+      // notifications show content and the app lock is off. Names and counts show either way.
+      Section {
+        Toggle("widget_previews", isOn: $isWidgetPreviewWanted)
+          .disabled(!isWidgetPreviewAllowed)
+      } footer: {
+        Text(isWidgetPreviewAllowed ? LocalizedStringKey("widget_previews_summary") : "widget_previews_unavailable")
+      }
+    }
+    .onChange(of: isWidgetPreviewWanted) { _, isWanted in
+      guard isWanted != model.homeWidget.isPreviewWanted else { return }
+      model.homeWidget.setPreviewWanted(isWanted, model: model)
     }
     .navigationTitle("notification_content_title")
     .navigationBarTitleDisplayMode(.inline)
@@ -44,7 +57,12 @@ struct NotificationContentView: View {
     }
   }
 
+  private var isWidgetPreviewAllowed: Bool {
+    isLoaded && content == .content && maybeWorkspaceLimit == nil && !SharedContainer().isAppLockOn
+  }
+
   private func load() async {
+    isWidgetPreviewWanted = model.homeWidget.isPreviewWanted
     do {
       let settings = try await model.core().notificationContent()
       content = settings.device
@@ -61,6 +79,7 @@ struct NotificationContentView: View {
     do {
       try await model.core().setNotificationContent(content: chosen)
       isFailed = false
+      model.homeWidget.storeDidChange(model)
     } catch {
       isFailed = true
     }

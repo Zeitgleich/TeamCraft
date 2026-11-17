@@ -134,6 +134,7 @@ async fn a_message_to_the_notes_is_marked_as_one_for_the_apps_to_name() {
       is_silent: false,
       also_send_to_channel: false,
       files: Vec::new(),
+      link_preview: Default::default(),
     };
     alice
       .client
@@ -724,6 +725,7 @@ impl World {
       is_silent: false,
       also_send_to_channel: false,
       files: Vec::new(),
+      link_preview: Default::default(),
     }
   }
 

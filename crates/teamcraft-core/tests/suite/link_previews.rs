@@ -53,6 +53,7 @@ async fn allowed_links_get_previews_and_receivers_follow_the_policy() {
     is_silent: false,
     also_send_to_channel: false,
     files: Vec::new(),
+    link_preview: Default::default(),
   });
   run_commands(&mut alice, &alice_ui).await;
   settle(&mut [&mut alice, &mut bob]).await;
@@ -79,6 +80,7 @@ async fn allowed_links_get_previews_and_receivers_follow_the_policy() {
     is_silent: false,
     also_send_to_channel: false,
     files: Vec::new(),
+    link_preview: Default::default(),
   });
   run_commands(&mut alice, &alice_ui).await;
   settle(&mut [&mut alice, &mut bob]).await;
@@ -222,4 +224,199 @@ fn web() -> FakeWeb {
       b"<title>Elsewhere</title>".to_vec(),
     ),
   ]))
+}
+
+/// The composer's link preview (#2073): made while typing, sent exactly as shown.
+mod composer {
+  use std::rc::Rc;
+  use std::sync::Arc;
+
+  use teamcraft_client_api::actions::{ComposerLinkPreview, OutgoingLinkPreview, OutgoingMessage};
+  use teamcraft_core::clock::{Clock, ManualClock};
+  use teamcraft_core::composer_preview::{ComposerFetches, RETRY_FAILED_AFTER};
+  use teamcraft_core::store::MemoryStore;
+  use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
+
+  use super::*;
+
+  const GUIDE: &str = "https://docs.example.com/guide";
+
+  #[tokio::test]
+  async fn the_message_carries_the_preview_the_composer_showed() {
+    let (_server, mut alice, mut bob, channel) = workspace_with_policy(LinkPreviewMode::AllowList).await;
+    let (ui, fetches, _clock) = composer_of(&alice, Box::new(web()));
+
+    ui.update_composer_link(channel, None, "read https://docs.example.com/guide please");
+    assert_eq!(
+      ui.composer_link_preview(channel, None),
+      ComposerLinkPreview::Loading { url: GUIDE.into() }
+    );
+    assert!(run_fetches(&ui, &fetches).await, "the preview came in");
+    let ComposerLinkPreview::Ready { preview } = ui.composer_link_preview(channel, None) else {
+      panic!("the composer shows the preview");
+    };
+    assert_eq!(preview.maybe_title.as_deref(), Some("The Guide"));
+    // Typing on with the same link fetches nothing again.
+    ui.update_composer_link(channel, None, "read https://docs.example.com/guide please, now");
+    assert!(!run_fetches(&ui, &fetches).await);
+
+    ui.send_message(composed(
+      channel,
+      "read https://docs.example.com/guide please, now",
+    ));
+    run_commands(&mut alice, &ui).await;
+    settle(&mut [&mut alice, &mut bob]).await;
+    let bob_ui = backend_of(&bob);
+    let sent = user_messages(&bob_ui, channel).remove(0);
+    let received = bob_ui.message_extras(channel, &[sent.id])[0]
+      .maybe_link_preview
+      .clone()
+      .unwrap();
+    assert_eq!(received, preview, "exactly what the composer showed");
+    assert_eq!(ui.composer_link_preview(channel, None), ComposerLinkPreview::None);
+  }
+
+  #[tokio::test]
+  async fn a_removed_preview_is_not_sent_and_stays_removed_for_that_link() {
+    let (_server, mut alice, mut bob, channel) = workspace_with_policy(LinkPreviewMode::AllowList).await;
+    let (ui, fetches, _clock) = composer_of(&alice, Box::new(web()));
+    ui.update_composer_link(channel, None, GUIDE);
+    run_fetches(&ui, &fetches).await;
+
+    ui.remove_composer_link_preview(channel, None);
+    assert_eq!(ui.composer_link_preview(channel, None), ComposerLinkPreview::None);
+    // Kept in the store: another backend (another thread, or after a restart) sees it removed.
+    let other = backend_of(&alice);
+    other.update_composer_link(channel, None, &format!("{GUIDE} again"));
+    assert!(!run_fetches(&other, &fetches).await, "not fetched again");
+    assert_eq!(
+      other.composer_link_preview(channel, None),
+      ComposerLinkPreview::None
+    );
+
+    ui.send_message(composed(channel, GUIDE));
+    run_commands(&mut alice, &ui).await;
+    settle(&mut [&mut alice, &mut bob]).await;
+    let bob_ui = backend_of(&bob);
+    let sent = user_messages(&bob_ui, channel).remove(0);
+    assert!(
+      bob_ui.message_extras(channel, &[sent.id])[0]
+        .maybe_link_preview
+        .is_none()
+    );
+  }
+
+  #[tokio::test]
+  async fn sending_while_the_page_loads_goes_at_once_without_a_preview() {
+    let (_server, mut alice, mut bob, channel) = workspace_with_policy(LinkPreviewMode::AllowList).await;
+    let (ui, fetches, _clock) = composer_of(&alice, Box::new(Stalled));
+    ui.update_composer_link(channel, None, GUIDE);
+    let fetch = take_fetches(&ui, &fetches).pop().unwrap();
+
+    ui.send_message(composed(channel, GUIDE));
+    // The host hears that the draft moved on; the message is in the outbox already.
+    assert!(take_fetches(&ui, &fetches).is_empty());
+    run_commands(&mut alice, &ui).await;
+    settle(&mut [&mut alice, &mut bob]).await;
+    let bob_ui = backend_of(&bob);
+    let sent = user_messages(&bob_ui, channel).remove(0);
+    assert!(
+      bob_ui.message_extras(channel, &[sent.id])[0]
+        .maybe_link_preview
+        .is_none()
+    );
+    // The send cancelled the fetch: it ends without writing.
+    assert!(!fetch.await);
+  }
+
+  #[tokio::test]
+  async fn editing_the_link_away_cancels_its_fetch() {
+    let (_server, alice, _bob, channel) = workspace_with_policy(LinkPreviewMode::AllowList).await;
+    let (ui, fetches, _clock) = composer_of(&alice, Box::new(Stalled));
+    ui.update_composer_link(channel, None, GUIDE);
+    let fetch = take_fetches(&ui, &fetches).pop().unwrap();
+
+    ui.update_composer_link(channel, None, "no link any more");
+    assert!(take_fetches(&ui, &fetches).is_empty());
+    assert!(!fetch.await, "cancelled");
+    assert_eq!(ui.composer_link_preview(channel, None), ComposerLinkPreview::None);
+  }
+
+  #[tokio::test]
+  async fn a_failed_fetch_is_tried_again_after_a_while_and_disallowed_links_get_none() {
+    let (_server, alice, _bob, channel) = workspace_with_policy(LinkPreviewMode::AllowList).await;
+    let (ui, fetches, clock) = composer_of(&alice, Box::new(FakeWeb(HashMap::new())));
+    ui.update_composer_link(channel, None, GUIDE);
+    assert!(run_fetches(&ui, &fetches).await);
+    assert_eq!(ui.composer_link_preview(channel, None), ComposerLinkPreview::None);
+    ui.update_composer_link(channel, None, &format!("{GUIDE} ok"));
+    assert!(take_fetches(&ui, &fetches).is_empty(), "not on every keystroke");
+    clock.advance(i64::try_from(RETRY_FAILED_AFTER.as_millis()).unwrap());
+    ui.update_composer_link(channel, None, &format!("{GUIDE} ok?"));
+    assert_eq!(take_fetches(&ui, &fetches).len(), 1, "tried again");
+
+    ui.update_composer_link(channel, None, "https://elsewhere.example.org/x");
+    assert!(take_fetches(&ui, &fetches).is_empty());
+    assert_eq!(ui.composer_link_preview(channel, None), ComposerLinkPreview::None);
+  }
+
+  /// A page that never answers.
+  struct Stalled;
+
+  impl PreviewFetcher for Stalled {
+    fn fetch(&self, _url: Url, _max_bytes: usize) -> Pin<Box<dyn Future<Output = Option<Fetched>> + '_>> {
+      Box::pin(std::future::pending())
+    }
+  }
+
+  type Ui = CoreChatBackend<Arc<MemoryStore>>;
+
+  fn composer_of(
+    peer: &Peer,
+    fetcher: Box<dyn PreviewFetcher>,
+  ) -> (Ui, ComposerFetches<Arc<MemoryStore>>, Arc<ManualClock>) {
+    let clock = Arc::new(ManualClock::new(1_800_000_000_000));
+    let ui = CoreChatBackend::new(peer.store.clone(), peer.client.user_id(), Box::new(clock.clone()));
+    let fetches = ComposerFetches::new(peer.store.clone(), Default::default())
+      .with_fetcher(fetcher, Rc::new(clock.clone()) as Rc<dyn Clock>);
+    (ui, fetches, clock)
+  }
+
+  /// The fetches the backend asked the host for; other commands are dropped.
+  fn take_fetches(
+    ui: &Ui,
+    fetches: &ComposerFetches<Arc<MemoryStore>>,
+  ) -> Vec<futures_util::future::LocalBoxFuture<'static, bool>> {
+    ui.drain_commands()
+      .iter()
+      .filter(|command| matches!(command, CoreCommand::ComposerLinkChanged { .. }))
+      .filter_map(|command| fetches.on_command(command))
+      .collect()
+  }
+
+  /// Runs the fetches the backend asked for; whether any changed the preview.
+  async fn run_fetches(ui: &Ui, fetches: &ComposerFetches<Arc<MemoryStore>>) -> bool {
+    let mut is_changed = false;
+    for fetch in take_fetches(ui, fetches) {
+      is_changed |= fetch.await;
+    }
+    is_changed
+  }
+
+  fn composed(conversation: ConversationId, body: &str) -> OutgoingMessage {
+    OutgoingMessage {
+      maybe_client_message_id: None,
+      conversation,
+      maybe_thread: None,
+      body: body.into(),
+      maybe_reply_to: None,
+      maybe_reply_attachment: None,
+      priority: Default::default(),
+      wants_acknowledgement: false,
+      is_silent: false,
+      also_send_to_channel: false,
+      files: Vec::new(),
+      link_preview: OutgoingLinkPreview::AsShown,
+    }
+  }
 }

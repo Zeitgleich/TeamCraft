@@ -9,10 +9,9 @@ use crate::state::AppState;
 pub(super) fn routes() -> OpenApiRouter<AppState> {
   OpenApiRouter::new()
     .routes(routes!(
-      handlers::create_avatar_upload_handler,
+      handlers::put_my_avatar_handler,
       handlers::delete_my_avatar_handler
     ))
-    .routes(routes!(handlers::complete_avatar_upload_handler))
     .routes(routes!(handlers::create_background_upload_handler))
     .routes(routes!(handlers::delete_background_handler))
     .routes(routes!(handlers::complete_background_upload_handler))

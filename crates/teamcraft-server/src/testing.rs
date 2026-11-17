@@ -608,6 +608,7 @@ impl TestApp {
       oidc_sync: Arc::default(),
       holiday_feed: Arc::default(),
       holiday_resync: Arc::default(),
+      provider_pictures: Arc::default(),
       // Tests forward to a fake backend on this machine.
       crash_relay: Arc::new(crate::services::crash_reports::CrashRelay::new(true).unwrap()),
       webhooks: Arc::new(crate::webhooks::WebhookDispatcher::new(&settings.webhooks).unwrap()),

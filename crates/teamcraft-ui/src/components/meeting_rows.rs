@@ -17,7 +17,7 @@ use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::empty_state::{EmptyAction, EmptyState};
 use crate::components::icons::{Icon, IconName};
 use crate::components::link_menu::{focus_first_item_when_open, menu_keydown};
-use crate::components::meeting_controls::{HostControls, RsvpList};
+use crate::components::meeting_controls::{HostControls, RsvpList, reopen_restored};
 use crate::components::meetings_view::{GuestLinks, Lobby, MeetingLinkButton, join_meeting};
 use crate::components::pending_button::PendingButton;
 use crate::components::sheet::PopoverBackdrop;
@@ -639,11 +639,14 @@ fn RowMenu(
   let restore = move |_| {
     restoring.spawn(async move {
       let maybe_occurrence = is_occurrence_cancelled.then_some(teamcraft_proto::UnixMillis(starts_at));
-      hub
+      let restored = hub
         .client()
         .restore(id, maybe_occurrence)
         .await
         .map_err(|error| error.to_failure())?;
+      if maybe_occurrence.is_none() {
+        reopen_restored(state, &restored);
+      }
       hub.refresh(me, now_ms()).await;
       Ok(())
     });

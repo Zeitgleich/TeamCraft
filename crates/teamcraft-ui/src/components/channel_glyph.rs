@@ -28,17 +28,20 @@ pub fn ChannelGlyph(
   #[prop(optional)] class: &'static str,
 ) -> impl IntoView {
   let maybe_hub = use_space_images();
-  let url = move || {
+  let url = Memo::new(move |_| {
     maybe_hub.and_then(|hub| hub.image_url(ImageOwner::Channel(conversation), maybe_version.get().as_deref()))
-  };
-  move || match url() {
-    Some(src) => view! {
+  });
+  let has_picture = Memo::new(move |_| url.with(Option::is_some));
+  // Built again only when the picture comes or goes; a new one changes the `src` of the same
+  // `<img>`. Rebuilding it on every change of the channel loads it again, which shows as flicker.
+  move || match has_picture.get() {
+    true => view! {
       <span class=format!("channel-glyph {class}") aria-hidden="true">
-        <img class="channel-glyph-image" src=src alt="" draggable="false" />
+        <img class="channel-glyph-image" src=move || url.get() alt="" draggable="false" />
       </span>
     }
     .into_any(),
-    None => view! { <Icon name=fallback class=class /> }.into_any(),
+    false => view! { <Icon name=fallback class=class /> }.into_any(),
   }
 }
 

@@ -9,7 +9,8 @@ use utoipa::ToSchema;
 
 use crate::wire_enum::wire_enum;
 use crate::{
-  Base64Bytes, DeviceId, HistoryPolicy, NotetakerPolicy, OrgBackgroundId, ScreenShareResolution, UnixMillis,
+  AvatarSource, Base64Bytes, DeviceId, HistoryPolicy, NotetakerPolicy, OrgBackgroundId,
+  ScreenShareResolution, UnixMillis,
 };
 
 wire_enum! {
@@ -250,6 +251,14 @@ pub struct DirectoryPolicy {
   /// overrides stay until their owner clears them. Allowed when the policy predates the setting.
   #[serde(default = "default_true")]
   pub allow_display_name_override: bool,
+  /// Where people's pictures come from (issue #2071). Absent from older policies: people upload
+  /// their own.
+  #[serde(default)]
+  pub avatar_source: AvatarSource,
+  /// With pictures from the identity provider: people may still set their own, which then shows
+  /// instead. Without a provider picture people always may. Absent from older policies: no.
+  #[serde(default)]
+  pub allow_avatar_override: bool,
 }
 
 fn default_true() -> bool {
@@ -263,6 +272,8 @@ impl Default for DirectoryPolicy {
       shows_full_name: true,
       shows_email: false,
       allow_display_name_override: true,
+      avatar_source: AvatarSource::User,
+      allow_avatar_override: false,
     }
   }
 }

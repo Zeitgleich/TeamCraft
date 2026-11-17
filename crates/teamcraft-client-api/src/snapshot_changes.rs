@@ -199,13 +199,15 @@ impl ChatSnapshot {
     }
     // Feeds are not part of the snapshot: they only tell which conversations to re-read.
     let feeds = std::mem::take(&mut changes.feeds);
-    let is_changed = !changes.is_empty();
+    // Only what differs counts: a reconnect writes the unread counts, threads and presence it read
+    // again, mostly unchanged, and every change makes the UI read everything it shows again.
+    let mut is_changed = false;
     if let Some(me) = changes.maybe_me {
-      self.me = me;
+      is_changed |= replace_if_changed(&mut self.me, me);
     }
-    self.apply_users(changes.users, changes.maybe_user_ids);
+    is_changed |= self.apply_users(changes.users, changes.maybe_user_ids);
     if let Some(spaces) = changes.maybe_spaces {
-      self.spaces = spaces;
+      is_changed |= replace_if_changed(&mut self.spaces, spaces);
     }
     let conversations = changes
       .conversations
@@ -214,16 +216,16 @@ impl ChatSnapshot {
       .chain(feeds)
       .collect();
     for change in changes.conversations {
-      self.apply_conversation(change);
+      is_changed |= self.apply_conversation(change);
     }
     if let Some(order) = changes.maybe_order {
-      self.reorder(&order);
+      is_changed |= self.reorder(&order);
     }
     if let Some(security) = changes.maybe_security {
-      self.security = security;
+      is_changed |= replace_if_changed(&mut self.security, security);
     }
     if let Some(live) = changes.maybe_live {
-      self.apply_live(live);
+      is_changed |= self.apply_live(live);
     }
     AppliedChanges {
       is_changed,
@@ -232,31 +234,42 @@ impl ChatSnapshot {
     }
   }
 
-  /// People are kept in ID order, like the core lists them.
-  fn apply_users(&mut self, users: Vec<User>, maybe_ids: Option<Vec<UserId>>) {
+  /// People are kept in ID order, like the core lists them. Returns whether anybody changed.
+  fn apply_users(&mut self, users: Vec<User>, maybe_ids: Option<Vec<UserId>>) -> bool {
+    let mut is_changed = false;
     for user in users {
       match self.users.binary_search_by_key(&user.id, |known| known.id) {
-        Ok(index) => self.users[index] = user,
-        Err(index) => self.users.insert(index, user),
+        Ok(index) => is_changed |= replace_if_changed(&mut self.users[index], user),
+        Err(index) => {
+          self.users.insert(index, user);
+          is_changed = true;
+        },
       }
     }
     if let Some(ids) = maybe_ids {
       let ids: HashSet<UserId> = ids.into_iter().collect();
+      let count = self.users.len();
       self.users.retain(|user| ids.contains(&user.id));
+      is_changed |= self.users.len() != count;
     }
+    is_changed
   }
 
-  fn apply_conversation(&mut self, change: ConversationChange) {
+  /// Returns whether the conversation's part differs from before.
+  fn apply_conversation(&mut self, change: ConversationChange) -> bool {
     let id = change.conversation.id;
     self.index.sync(&self.conversations);
-    match self.index.position(&self.conversations, id) {
-      Some(index) => self.conversations[index] = change.conversation,
+    let is_changed = self.message_count(id) != Some(change.message_count)
+      || self.last_activity_of(id) != change.maybe_last_activity;
+    let is_changed = match self.index.position(&self.conversations, id) {
+      Some(index) => replace_if_changed(&mut self.conversations[index], change.conversation) || is_changed,
       None => {
         // New conversations go last, like a full read lists those it didn't know.
         self.index.positions.insert(id, self.conversations.len());
         self.conversations.push(change.conversation);
+        true
       },
-    }
+    };
     match self.ordered_index(&self.message_counts, id) {
       Ok(index) => self.message_counts[index].1 = change.message_count,
       Err(index) => self.message_counts.insert(index, (id, change.message_count)),
@@ -272,6 +285,7 @@ impl ChatSnapshot {
       (Err(index), Some(at)) => self.last_activity.insert(index, (id, at)),
       (Err(_), None) => {},
     }
+    is_changed
   }
 
   /// Where the conversation's entry is in a list kept in the order of the conversations, or where
@@ -294,8 +308,14 @@ impl ChatSnapshot {
     entries.binary_search_by_key(&own, |(other, _)| position_of(*other))
   }
 
-  /// Puts the conversations in `order`; those not in it are gone.
-  fn reorder(&mut self, order: &[ConversationId]) {
+  /// Puts the conversations in `order`; those not in it are gone. Returns whether that moved or
+  /// removed any.
+  fn reorder(&mut self, order: &[ConversationId]) -> bool {
+    let is_changed = !self
+      .conversations
+      .iter()
+      .map(|conversation| conversation.id)
+      .eq(order.iter().copied());
     let position: HashMap<ConversationId, usize> =
       order.iter().enumerate().map(|(index, id)| (*id, index)).collect();
     self
@@ -309,17 +329,28 @@ impl ChatSnapshot {
     self.last_activity.retain(|(id, _)| position.contains_key(id));
     self.last_activity.sort_by_key(|(id, _)| position[id]);
     self.index.rebuild(&self.conversations);
+    is_changed
   }
 
   /// The live state is replaced, except presence: the changes carry only newer announcements.
-  fn apply_live(&mut self, mut live: LiveSnapshot) {
-    if let Some(held) = self.maybe_live.take() {
-      let mut presence = held.presence;
+  /// Returns whether it differs from before.
+  fn apply_live(&mut self, mut live: LiveSnapshot) -> bool {
+    if let Some(held) = &self.maybe_live {
+      let mut presence = held.presence.clone();
       presence.merge(live.presence);
       live.presence = presence;
     }
-    self.maybe_live = Some(live);
+    replace_if_changed(&mut self.maybe_live, Some(live))
   }
+}
+
+/// Puts `new` in `held` if it differs; returns whether it did.
+fn replace_if_changed<T: PartialEq>(held: &mut T, new: T) -> bool {
+  if *held == new {
+    return false;
+  }
+  *held = new;
+  true
 }
 
 #[cfg(test)]
@@ -488,6 +519,85 @@ mod tests {
     let newer = AnnouncedPresence::new(log.since(seen).cloned().collect(), log.revision, 0);
     held.apply(live_with(newer));
     assert_eq!(held.maybe_live.unwrap().presence, log);
+  }
+
+  /// A reconnect reads the unread counts, threads, people and conversations again and sends what
+  /// the reader already has: that is no change, so the UI reads nothing again.
+  #[test]
+  fn what_the_reader_already_has_changes_nothing() {
+    let mut held = snapshot(&[1, 2]);
+    held.users = vec![user(2)];
+    held.apply(live_with(AnnouncedPresence::default()));
+    let before = held.clone();
+    let applied = held.apply(SnapshotChanges {
+      maybe_me: Some(user(1)),
+      users: vec![user(2)],
+      maybe_user_ids: Some(vec![id_from_raw(2)]),
+      maybe_spaces: Some(Vec::new()),
+      conversations: vec![ConversationChange {
+        conversation: conversation(2),
+        message_count: 1,
+        maybe_last_activity: None,
+      }],
+      maybe_order: Some(vec![id_from_raw(1), id_from_raw(2)]),
+      maybe_security: Some(SecuritySnapshot::default()),
+      ..live_with(AnnouncedPresence::default())
+    });
+    assert!(!applied.is_changed, "{applied:?}");
+    assert!(
+      applied.touches(id_from_raw(2)),
+      "its feed is still read again: the change may be in its messages"
+    );
+    assert_eq!(held, before);
+  }
+
+  #[test]
+  fn one_part_that_differs_among_unchanged_ones_is_a_change() {
+    let away = {
+      let mut user = user(2);
+      user.presence = PresenceStatus::Away;
+      user
+    };
+    let mut log = AnnouncedPresence::default();
+    log.note(presence(2, PresenceState::Online), 10);
+    let cases = [
+      SnapshotChanges {
+        users: vec![away],
+        ..SnapshotChanges::default()
+      },
+      SnapshotChanges {
+        maybe_user_ids: Some(Vec::new()),
+        ..SnapshotChanges::default()
+      },
+      SnapshotChanges {
+        conversations: vec![ConversationChange {
+          conversation: conversation(2),
+          message_count: 2,
+          maybe_last_activity: None,
+        }],
+        ..SnapshotChanges::default()
+      },
+      SnapshotChanges {
+        conversations: vec![ConversationChange {
+          conversation: conversation(2),
+          message_count: 1,
+          maybe_last_activity: Some(5),
+        }],
+        ..SnapshotChanges::default()
+      },
+      SnapshotChanges {
+        maybe_order: Some(vec![id_from_raw(2), id_from_raw(1)]),
+        ..SnapshotChanges::default()
+      },
+      live_with(log),
+    ];
+    for changes in cases {
+      let mut held = snapshot(&[1, 2]);
+      held.users = vec![user(2)];
+      held.apply(live_with(AnnouncedPresence::default()));
+      let described = format!("{changes:?}");
+      assert!(held.apply(changes).is_changed, "{described}");
+    }
   }
 
   #[test]

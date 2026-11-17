@@ -1051,7 +1051,12 @@ class MessageNotifier(
       // Also a direct share target, so this push doesn't drop the share sheet's entry (#829).
       .setCategories(setOf(ShareShortcuts.CATEGORY))
       .setIcon(shortcutIcon(spec, label))
-      .setIntent(openConversationIntent(spec.id).setAction(Intent.ACTION_VIEW))
+      .setIntent(
+        Intent(context, MainActivity::class.java)
+          .putExtra(MainActivity.EXTRA_CONVERSATION_ID, spec.id)
+          .putExtra(MainActivity.EXTRA_LAUNCH_TOKEN, LaunchToken.of(context))
+          .setAction(Intent.ACTION_VIEW),
+      )
       .apply { spec.maybePerson?.let { setPerson(person(it, spec.id)) } }
       .build()
     try {
@@ -1158,17 +1163,13 @@ class MessageNotifier(
     return PendingIntent.getBroadcast(context, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or mutability)
   }
 
-  private fun openIntent(conversationId: String): PendingIntent {
-    val intent = openConversationIntent(conversationId)
-      .setData(conversationUri(conversationId))
-      .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-    return PendingIntent.getActivity(context, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-  }
-
-  private fun openConversationIntent(conversationId: String): Intent =
-    Intent(context, MainActivity::class.java)
-      .putExtra(MainActivity.EXTRA_CONVERSATION_ID, conversationId)
-      .putExtra(MainActivity.EXTRA_LAUNCH_TOKEN, LaunchToken.of(context))
+  private fun openIntent(conversationId: String): PendingIntent =
+    PendingIntent.getActivity(
+      context,
+      0,
+      openConversationIntent(context, conversationId),
+      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
 
   private fun launchIntent(): PendingIntent =
     PendingIntent.getActivity(
@@ -1178,7 +1179,7 @@ class MessageNotifier(
       PendingIntent.FLAG_IMMUTABLE,
     )
 
-  private fun conversationUri(conversationId: String): Uri = Uri.fromParts(URI_SCHEME, conversationId, null)
+  private fun conversationUri(conversationId: String): Uri = Uri.fromParts(CONVERSATION_URI_SCHEME, conversationId, null)
 
   private fun canPost(): Boolean =
     Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
@@ -1209,7 +1210,6 @@ class MessageNotifier(
     private const val GROUP_MESSAGES = "de.zeitgleich.teamcraft.MESSAGES"
     private const val SELF_KEY = "self"
     private const val APP_KEY = "app"
-    private const val URI_SCHEME = "teamcraft-conversation"
     private const val TEST_TIMEOUT_MS = 5L * 60 * 1000
     private const val TAG = "TeamCraftNotify"
   }

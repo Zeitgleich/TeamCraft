@@ -14,6 +14,9 @@ pub mod channel_roles;
 pub mod chat_list_pass;
 pub mod client;
 pub mod clock;
+// The browser can't read other sites' pages (e2ee.md §12): no composer preview there.
+#[cfg(all(feature = "ui", not(target_arch = "wasm32")))]
+pub mod composer_preview;
 pub mod connection;
 pub mod custom_emoji;
 pub mod device_activity;

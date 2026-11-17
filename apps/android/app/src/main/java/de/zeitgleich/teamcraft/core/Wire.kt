@@ -477,6 +477,20 @@ data class LinkPreview(
 )
 
 /**
+ * The link preview under the composer's draft (#2073), made by the core while the user types:
+ * [state] is `loading` (with [url]), `ready` (with [preview]) or `none`. Unknown states show nothing.
+ */
+@Serializable
+data class ComposerLinkPreview(
+  val state: String = "none",
+  val url: String? = null,
+  val preview: LinkPreview? = null,
+) {
+  val isLoading: Boolean get() = state == "loading" && url != null
+  val maybeReady: LinkPreview? get() = preview?.takeIf { state == "ready" }
+}
+
+/**
  * Picture bytes, which the bridge sends as a JSON array of numbers. Decoded straight into a byte
  * array: a `List<Int>` boxed every byte of every thumbnail on each read of the feed (#315). Equal by
  * content, so an unchanged message doesn't recompose.
@@ -686,6 +700,8 @@ data class ChatAnswer(
   @SerialName("maybe_body") val maybeBody: String? = null,
   /** [ChatQueries.draftReply]: what the composer replies to. */
   @SerialName("maybe_reply") val maybeReply: ReplyPreview? = null,
+  /** [ChatQueries.composerLinkPreview]: the link preview under the composer's draft. */
+  val preview: ComposerLinkPreview? = null,
   val drafts: List<DraftItem> = emptyList(),
   val sent: List<SentItem> = emptyList(),
   val files: List<FileInfo> = emptyList(),
@@ -853,6 +869,17 @@ class OwnProfile(private val raw: JsonObject) {
   /** The workspace policy lets people replace the name from the identity provider. */
   val canOverrideDisplayName: Boolean
     get() = (raw["can_override_display_name"] as? JsonPrimitive)?.content == "true"
+
+  /** A picture shows for the member (their own or the identity provider's). */
+  val hasAvatar: Boolean
+    get() = (raw["has_avatar"] as? JsonPrimitive)?.content == "true"
+
+  /**
+   * The member may set or remove their own picture: not while the workspace shows the identity
+   * provider's picture without overrides (issue #2071). Absent from older servers: yes.
+   */
+  val canChangeAvatar: Boolean
+    get() = (raw["can_change_avatar"] as? JsonPrimitive)?.content != "false"
 
   /** The name the member chose, `null` while the sign-in name is shown. */
   val maybeDisplayNameOverride: String?

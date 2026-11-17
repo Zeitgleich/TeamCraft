@@ -928,6 +928,42 @@ reading on the desktop removes the phone's notification; DND schedule across a D
 reading elsewhere; the test push on each provider (gateway FCM, gateway APNs, UnifiedPush).
 The full checklist: [manual-tests/push.md](manual-tests/push.md).
 
+## Home screen widget
+
+The phones have a small home screen widget (issue #2076): the conversations with unread messages
+and a button for a new message. Android draws it with Glance (`widget/UnreadWidget.kt`), iOS with
+WidgetKit (the `TeamCraftWidget` extension).
+
+**What it shows.** The conversations of the chat list's Unread filter in the Activity order
+(mentions first, then the newest message), named as the lists name them, with the row's count
+(`row_badge`). Privacy follows the notifications, never more:
+
+| Setting                                                          | Widget                                  |
+|------------------------------------------------------------------|-----------------------------------------|
+| App lock on                                                      | Nothing personal: "Open TeamCraft…"     |
+| Notifications show nothing (device or workspace)                 | How many conversations wait, no names   |
+| Default                                                          | Names and unread counts                 |
+| Notifications show content, and "Message previews in the widget" | Also the newest message under each name |
+
+Previews are off by default and need both: notifications that show content (the stricter of the
+device setting and the workspace policy) and the widget's own switch under the notification
+content setting. Only what may show is written: the app writes a snapshot already cut to these
+rules (Android: sealed like the start cache, e2ee.md §9.2; iOS: a file in the App Group, readable
+after the first unlock, not in backups), so a stricter setting leaves no names or text behind. It
+is deleted at sign-out.
+
+**When it changes.** From the store's own change events, debounced by a second: the live sync while
+the app is open, a push that wakes the app, reading a conversation on another device, a changed
+setting. No timer and no request of its own (`updatePeriodMillis` 0, WidgetKit timeline policy
+`never`); without a widget on the home screen nothing runs. On iOS a message notification the
+extension shows doesn't move it, as the extension only reads a copy in memory (e2ee.md §7.2): the
+widget follows when the app syncs next (a background sync push, or opening it).
+
+**Taps.** A row opens its conversation through the notification's own entry path (Android: the
+same intent with the launch token, `openConversationIntent`; iOS: the notification tap's
+`handle(notificationAction:)`), so a cold start, a warm start and the app lock behave as for a
+notification. The button opens "New message" like the app icon's shortcut (#2061).
+
 ## Read receipts
 
 Moving the read position in a DM or group DM sends `read_receipt` to the other members and

@@ -483,6 +483,7 @@ fn message(conversation: ConversationId, body: &str, files: Vec<OutgoingFile>) -
     is_silent: false,
     also_send_to_channel: false,
     files,
+    link_preview: Default::default(),
   }
 }
 

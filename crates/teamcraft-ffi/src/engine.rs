@@ -27,6 +27,7 @@ use teamcraft_core::client::{
   ReceiptCancel, SIGN_OUT_REVOKE_PATIENCE, SegmentPlan,
 };
 use teamcraft_core::clock::{Clock as _, SystemClock};
+use teamcraft_core::composer_preview::ComposerFetches;
 use teamcraft_core::connection::{ConnectionStatus, NetworkChanges};
 use teamcraft_core::notified;
 use teamcraft_core::notify_rules::{load_mention_preferences, save_mention_preferences};
@@ -65,6 +66,7 @@ use crate::logging::LIFECYCLE;
 use crate::perf_jobs;
 use crate::reads::{ReadLanes, ReadQueue};
 use crate::server_pool::ServerPool;
+use crate::store_threads::StoreHold;
 use crate::types::{
   AccountState, AppConfig, DirectPeer, LinkPlatform, LinkRequestItem, MentionSettings, NotificationContent,
   Presence, PushNotification, PushService, SegmentPrefetchMode, SegmentPrefetchResult, StoreProblem,
@@ -162,6 +164,8 @@ pub(crate) struct Engine {
   /// Who the user is, once enrolled. Everything else the backend knows the app reads on the read
   /// thread, which has its own ([`ReadQueue`]).
   maybe_backend: Option<CoreChatBackend<Store>>,
+  /// The composer's link previews, fetched beside the sync loop (#2073).
+  maybe_composer_fetches: Option<ComposerFetches<Store>>,
   reads: ReadQueue,
   /// Opens read connections of their own beside the writer's (the segment prefetch).
   lanes: LaneOpener,
@@ -525,8 +529,13 @@ fn error_class(error: &TeamCraftError) -> &'static str {
 /// (the MLS state, which grows with the groups) opens after that, ahead of the first job, so what
 /// the store holds can be read at once. A process short of memory (the iOS notification extension)
 /// has no reads to hurry and waits for the client too. Should the client then find the store
-/// unreadable, `late_problem` is told and the engine ends.
-pub(crate) fn spawn(start: &EngineStart, late_problem: LateProblem) -> Result<EngineThreads, OpenError> {
+/// unreadable, `late_problem` is told and the engine ends. The engine thread and its read threads
+/// keep a clone of `hold` until they let go of the store.
+pub(crate) fn spawn(
+  start: &EngineStart,
+  late_problem: LateProblem,
+  hold: StoreHold,
+) -> Result<EngineThreads, OpenError> {
   let start = start.duplicate();
   let waits_for_client = start.is_memory_constrained;
   let recovery_start = start.duplicate();
@@ -537,6 +546,8 @@ pub(crate) fn spawn(start: &EngineStart, late_problem: LateProblem) -> Result<En
     .name("teamcraft-engine".into())
     .stack_size(THREAD_STACK_BYTES)
     .spawn(move || {
+      // Declared first, so it is dropped last: after the engine, its store and the runtime.
+      let store_hold = hold.enter();
       let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -545,10 +556,12 @@ pub(crate) fn spawn(start: &EngineStart, late_problem: LateProblem) -> Result<En
           return;
         },
       };
+      // Borrowed, not moved: the tasks the local set still holds drop after the block, with it.
+      let hold = &store_hold;
       LocalSet::new().block_on(&runtime, async move {
         // A panic while opening would otherwise only show as `EngineStopped`; Rust's panic output
         // goes nowhere on Android, so the error carries the message and location instead.
-        let mut engine = match reporting_panics(|| Engine::open(start, own_jobs.clone())) {
+        let mut engine = match reporting_panics(|| Engine::open(start, own_jobs.clone(), hold)) {
           Ok(engine) => engine,
           Err(error) => {
             let _ = ready.send(Err(error));
@@ -718,7 +731,11 @@ impl EngineStart {
 impl Engine {
   /// Opens the store and the read thread on it. Records that don't decode, or a key bag its own key
   /// doesn't open, make the store unreadable here already.
-  fn open(start: EngineStart, own_jobs: mpsc::WeakUnboundedSender<Job>) -> Result<Self, OpenError> {
+  fn open(
+    start: EngineStart,
+    own_jobs: mpsc::WeakUnboundedSender<Job>,
+    hold: &StoreHold,
+  ) -> Result<Self, OpenError> {
     let _step = teamcraft_core::timing::step("engine_open_store");
     std::fs::create_dir_all(&start.data_dir)
       .map_err(|error| OpenError::Failed(TeamCraftError::Storage(error.to_string())))?;
@@ -774,6 +791,7 @@ impl Engine {
       listener.clone(),
       signals.catch_up_focus.clone(),
       own_jobs,
+      hold,
     )
     .map_err(OpenError::Failed)?;
     let tokens =
@@ -798,6 +816,7 @@ impl Engine {
       store,
       client: ClientSlot::Missing,
       maybe_backend: None,
+      maybe_composer_fetches: None,
       reads,
       lanes,
       shared_downloads,
@@ -1853,6 +1872,10 @@ impl Engine {
       CoreChatBackend::new(self.store.clone(), user, Box::new(SystemClock))
         .with_entry_need(EntryNeed::Unread),
     );
+    self.maybe_composer_fetches = Some(ComposerFetches::new(
+      self.store.clone(),
+      self.client_settings().link_previews,
+    ));
     self.reads.know_account(user, fingerprint);
   }
 
@@ -2006,6 +2029,17 @@ impl Engine {
   /// Hands what an action queued to the client. The app is already told what it wrote locally
   /// ([`ReadQueue`]).
   pub(crate) async fn run_commands(&mut self, commands: Vec<CoreCommand>) -> Result<(), TeamCraftError> {
+    // The composer's link previews are fetched beside the loop: a slow site never holds up sending
+    // (#2073).
+    let (fetches, commands): (Vec<_>, Vec<_>) =
+      commands.into_iter().partition(ComposerFetches::<Store>::handles);
+    for command in &fetches {
+      self.fetch_composer_preview(command);
+    }
+    if commands.is_empty() && !fetches.is_empty() {
+      // Nothing for the client: no flush for each pause in typing.
+      return Ok(());
+    }
     match &mut self.client {
       ClientSlot::Running { handle, .. } => {
         for command in commands {
@@ -2022,6 +2056,24 @@ impl Engine {
     }
     self.listener.on_change();
     Ok(())
+  }
+
+  /// Starts or cancels the composer's link preview fetch; the app reads the preview again once it
+  /// is in.
+  fn fetch_composer_preview(&self, command: &CoreCommand) {
+    let Some(fetch) = self
+      .maybe_composer_fetches
+      .as_ref()
+      .and_then(|fetches| fetches.on_command(command))
+    else {
+      return;
+    };
+    let listener = self.listener.clone();
+    tokio::task::spawn_local(async move {
+      if fetch.await {
+        listener.on_change();
+      }
+    });
   }
 
   /// Where the app puts copies of files to upload (created if missing).
@@ -3144,7 +3196,7 @@ mod tests {
 
     fn opened_store(start: EngineStart) -> Engine {
       let (jobs, _queue) = mpsc::unbounded_channel::<Job>();
-      Engine::open(start, jobs.downgrade())
+      Engine::open(start, jobs.downgrade(), &StoreHold::detached())
         .map_err(|_| "engine did not open")
         .unwrap()
     }

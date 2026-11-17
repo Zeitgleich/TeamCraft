@@ -11,6 +11,22 @@ enum OwnProfileDocument {
     dictionary(json)?["can_override_display_name"] as? Bool ?? false
   }
 
+  /// A picture shows for the member (their own or the identity provider's).
+  static func hasAvatar(in json: String) -> Bool {
+    dictionary(json)?["has_avatar"] as? Bool ?? false
+  }
+
+  /// The member may set or remove their own picture: not while the workspace shows the identity
+  /// provider's picture without overrides (issue #2071). Older servers say nothing: yes.
+  static func canChangeAvatar(in json: String) -> Bool {
+    dictionary(json)?["can_change_avatar"] as? Bool ?? true
+  }
+
+  /// Changes with every new picture; the shown picture is read again when it does.
+  static func avatarVersion(in json: String) -> String? {
+    dictionary(json)?["avatar_version"] as? String
+  }
+
   /// The name the member chose, or `nil` while the sign-in name is shown.
   static func displayNameOverride(in json: String) -> String? {
     dictionary(json)?["display_name_override"] as? String
@@ -46,6 +62,43 @@ extension AppModel {
   func ownProfileJSON() async -> String? {
     try? await core().apiRequest(method: "GET", path: "/me/profile", maybeBody: nil)
   }
+
+  /// The member's own picture as image data, or `nil` without one (or offline).
+  func ownAvatarData(userId: String) async -> Data? {
+    try? await core().avatarPicture(userId: userId, maxBytes: Self.maxAvatarBytes)
+  }
+
+  /// Makes `png` (a square the app cropped) the member's own picture; the server re-encodes it.
+  /// Answers what to say below the picture when it failed.
+  func setOwnAvatar(png: Data) async -> TextProblem? {
+    do {
+      _ = try await core().setOwnAvatar(png: png)
+      return nil
+    } catch {
+      return avatarProblem(error)
+    }
+  }
+
+  /// Removes the member's own picture; what to say when it failed.
+  func removeOwnAvatar() async -> TextProblem? {
+    do {
+      _ = try await core().apiRequest(method: "DELETE", path: "/me/avatar", maybeBody: nil)
+      return nil
+    } catch {
+      return avatarProblem(error)
+    }
+  }
+
+  /// A refusal of the server (not a picture, or the policy changed meanwhile) is worded for the
+  /// picture; a lost connection and the like as everywhere.
+  private func avatarProblem(_ error: Error) -> TextProblem {
+    switch CoreFailure(error) {
+    case .other: return .rejected("profile_picture_rejected")
+    case let failure: return .refused(AppFailure(failure))
+    }
+  }
+
+  private static let maxAvatarBytes: UInt32 = 2 * 1024 * 1024
 
   /// Saves `maybeName` as the member's name (`nil`: the sign-in name). Answers what to say at the
   /// field when it failed: the server's refusal of the name (too long, or the policy changed

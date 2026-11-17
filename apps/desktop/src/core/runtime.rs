@@ -27,6 +27,7 @@ use teamcraft_core::client::{
   LinkedSecrets, OrgRecoveryFlow, ReceiptCancel, SIGN_OUT_REVOKE_PATIENCE, notify_sync_progress_during,
 };
 use teamcraft_core::clock::{Clock, SystemClock};
+use teamcraft_core::composer_preview::ComposerFetches;
 use teamcraft_core::connection::{
   ConnectionSettings, ConnectionState, ConnectionStatus, ConnectionSupervisor,
 };
@@ -966,6 +967,8 @@ struct Core {
   store_lock: Option<StoreLock>,
   client: Option<Client<Api, Store>>,
   backend: Option<CoreChatBackend<Store>>,
+  /// The composer's link previews, fetched beside the loop (#2073).
+  maybe_composer_fetches: Option<ComposerFetches<Store>>,
   connection: ConnectionSupervisor<Gateway>,
   /// Handed to every client this core adopts ([`CoreRuntime::focus`]).
   catch_up_focus: CatchUpFocus,
@@ -1097,6 +1100,7 @@ impl Core {
       store_lock: None,
       client: None,
       backend: None,
+      maybe_composer_fetches: None,
       connection,
       catch_up_focus,
       status: CoreStatus::NotStarted,
@@ -1336,6 +1340,7 @@ impl Core {
     }
     self.client = None;
     self.backend = None;
+    self.maybe_composer_fetches = None;
     self.store = None;
     let path = self.config.data_dir.join(format!("{}.db", self.user));
     let suffix = format!("unreadable-{}", SystemClock.now_ms());
@@ -1429,6 +1434,10 @@ impl Core {
         .with_typing(client.typing_state())
         .with_transfers(client.transfers()),
     );
+    self.maybe_composer_fetches = Some(ComposerFetches::new(
+      client.store().clone(),
+      client.link_preview_settings().clone(),
+    ));
     self.client = Some(client);
     status
   }
@@ -2292,9 +2301,32 @@ impl Core {
           self.downloads.control(*attachment, *control);
           false
         },
+        // Fetched beside the loop too: a slow site never holds up sending (#2073).
+        command if ComposerFetches::<Store>::handles(command) => {
+          self.fetch_composer_preview(command);
+          false
+        },
         _ => true,
       })
       .collect()
+  }
+
+  /// Starts or cancels the composer's link preview fetch; the UI reads the preview again once it
+  /// is in.
+  fn fetch_composer_preview(&self, command: &CoreCommand) {
+    let Some(fetch) = self
+      .maybe_composer_fetches
+      .as_ref()
+      .and_then(|fetches| fetches.on_command(command))
+    else {
+      return;
+    };
+    let on_change = self.on_change.clone();
+    tokio::task::spawn_local(async move {
+      if fetch.await {
+        on_change();
+      }
+    });
   }
 
   /// Sends what [`Request::Action`] put into the outbox (link previews first). A failure was not

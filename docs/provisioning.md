@@ -281,6 +281,11 @@ change later: a different subject is a different person at sign-in.
   made again by SCIM (`scim_identity_released`, 409) until its own next sign-in, as with the sync.
 - **Guests** are not provisioned as guests: SCIM makes members, and guests come through invitations.
   Assign only staff to the SCIM application.
+- **Photos.** While the workspace takes pictures from the identity provider (admin.md §3.12), a
+  user's `photos` (the primary one, else type `photo`, else the first; a URL or a `data:` URI) becomes
+  their picture, imported in the background and re-encoded like an upload. A `PUT` or `POST` without
+  `photos` removes it; a `PATCH` that doesn't touch `photos` keeps it. A failed import doesn't fail
+  the request.
 - Attributes TeamCraft doesn't keep (the enterprise extension, phone numbers, addresses, a password)
   are accepted and dropped.
 

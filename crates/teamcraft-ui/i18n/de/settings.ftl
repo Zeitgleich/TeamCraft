@@ -533,6 +533,7 @@ settings-f-max_links_per_user = Höchstzahl Links je Person
 settings-f-max_attachment_bytes = Größter Anhang
 settings-f-max_attachment_bytes_per_user = Anhänge je Person insgesamt
 settings-f-max_avatar_bytes = Größtes Profilbild
+settings-f-avatar_side_px = Größe der Profilbilder
 settings-f-max_space_image_bytes = Größtes Space- oder Kanalbild
 settings-f-max_background_bytes = Größter Anrufhintergrund
 settings-f-max_backgrounds_per_user = Anrufhintergründe je Person
@@ -842,6 +843,7 @@ settings-error-dsn = Gib die DSN des Projekts ein, etwa https://key@errors.examp
 settings-error-bridge-url = Gib eine https-Adresse ohne Benutzername, Query und #Fragment ein (http nur für localhost).
 settings-error-crash-percent = Gib 0 bis 100 Prozent ein.
 settings-error-slow-job = Gib 0 bis 60000 Millisekunden ein.
+settings-error-avatar-side = Gib 64 bis 2048 Pixel ein.
 settings-error-call-reports = Gib 0 bis 50 Berichte ein.
 settings-error-crash-environment = Verwende 1 bis 64 Kleinbuchstaben, Ziffern, „-“, „_“ oder „.“.
 

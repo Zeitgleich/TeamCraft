@@ -1023,9 +1023,10 @@ pages) and knows when. What other members learn is limited on purpose:
 
 Directory data, not encrypted: the server has to show and route by it, so it holds it in plain text
 like the identity provider does. Space names, descriptions, colors and **pictures**; channel names,
-topics and **pictures**; people's profiles and avatars. A space or channel picture is uploaded to the
-server itself, which refuses SVG and re-encodes PNG, JPEG and WebP uploads as PNG before storing
-them, and serves it only to people who may see the space or channel (changing a channel's picture
+topics and **pictures**; people's profiles and avatars. A space or channel picture and a profile
+picture are uploaded to the server itself, which refuses SVG and re-encodes PNG, JPEG and WebP uploads
+as PNG before storing them (profile pictures also as the middle square, and the identity provider's
+pictures the same way, admin.md §3.12), and serves it only to people who may see the space or channel (changing a channel's picture
 needs `manage_channel_properties`). Anything put into these fields is visible to the server operator;
 content that must stay confidential belongs in messages.
 
@@ -2246,10 +2247,28 @@ never by the server's member list:
       never runs past that time again (`meeting_schedule::admitters_until`), whoever brings the
       meeting back: a server that fakes a removal, re-adds the organizer and reports a longer
       meeting gets no longer signature than the meeting had when this device closed it, and a
-      restored cancellation is signed no further either. Without its lobby record the meeting's
-      link guests wait in the lobby. Marks are kept for good (a few dozen bytes per meeting
-      closed); dropping one would hand the server that lengthening back. Notes of a schedule for
-      a closed meeting keep no record.
+      cancellation restored by anyone but this device's user is signed no further either. Without
+      its lobby record the meeting's link guests wait in the lobby. Marks are kept for good (a few
+      dozen bytes per meeting closed, with the two records as they were at the close); dropping
+      one would hand the server that lengthening back. Notes of a schedule for a closed meeting
+      keep no record.
+    - **Restoring here** (#1983). The organizer's own restore of the whole meeting on this device
+      (desktop/web and the apps, after the server took it; the server lets only the organizer
+      restore) lifts the mark: the core puts the lobby and schedule records kept in it back as
+      they were at the close, drops the mark, and the app signs the admitters again. It does so
+      only when the restored meeting names this user as its organizer. Nothing new is signed for
+      other devices: the mark is this device's own, and members and guests only ever see the
+      admitters statement, whose end the organizer's key signs as before. Members' devices take
+      the restore's end from that statement, never from the server. The validity follows the
+      records kept here, so a server that lengthens the restored meeting gets no longer
+      signature; a mark without kept records (closed before anything was recorded here) opens on
+      the server's end, as a meeting without a record does. A meeting the server brings back by
+      itself (its status, a re-added organizer) and a restore on another device of the organizer
+      lift nothing here: it stays capped at the close. Restoring one occurrence touches no mark;
+      a series' mark only comes from cancelling the whole series. A restore whose answer is lost,
+      or an app that dies between the answer and the lift, leaves the meeting closed here (fails
+      closed); cancelling and restoring it again lifts the mark with the records of the first
+      close.
     - **Residuals of closing.** "Doesn't repeat", for "End for everyone", is the server's word: a
       server that lists a series as a one-off makes ending one occurrence close the whole series
       on this device. That only shortens: the series' later occurrences are signed no longer than
@@ -7553,6 +7572,21 @@ to a disallowed domain gets no preview), takes OpenGraph title, description, sit
 small PNG. All of it goes into the encrypted message. The fetch comes from the sender's network,
 so the linked site sees the sender's IP address, as it would on opening the link. Browsers can't
 read cross-origin pages, so the web client sends links without previews.
+
+**While typing (#2073).** The composer shows the preview of the draft's first link before the
+message is sent, made the same way by the same device (`teamcraft-core::composer_preview`, which
+uses the outbox's `make_link_preview`): after the pause in typing that also stores the draft, for
+domains the verified policy allows, checked again after redirects and before it is shown and sent.
+Nothing new reaches the server: the fetch goes from the sender's device to the linked site, as
+before, only earlier, and where the draft's preview stands (loading, ready, failed, removed) is
+kept in the local store of this device only, never in the synced draft. The message carries
+exactly what the composer showed: the ready preview of the link it still contains, or none while
+the page loads, after a failed fetch or once the user removed it; it never waits in the outbox for a
+fetch. The fetch runs in the host beside its loop, so a slow site holds up neither sending nor
+syncing; a new link (or none) cancels the fetch of the old one, and a failed fetch is tried again
+after 30 s at the earliest. A message sent without a composer's preview
+(`OutgoingLinkPreview::MadeOnSend`) is still held in the outbox for its preview, as described
+above. The web client shows none.
 
 **Links to messages of the same server** (permalinks `teamcraft:/c/{c}/m/{m}[/t/{t}]` and the app's
 own `https://<server>/c/{c}/m/{m}` and `/c/{c}/t/{t}` URLs) get an embedded preview of the linked

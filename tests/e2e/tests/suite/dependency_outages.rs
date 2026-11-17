@@ -9,7 +9,6 @@
 use std::time::{Duration, Instant};
 
 use reqwest::StatusCode;
-use serde_json::json;
 use teamcraft_e2e::rest::Reply;
 use teamcraft_e2e::{Stack, UserTokens};
 use teamcraft_proto::{DependencyName, DependencyState, HealthResponse, HealthStatus};
@@ -18,13 +17,20 @@ use teamcraft_proto::{DependencyName, DependencyState, HealthResponse, HealthSta
 const OPEN_SECS: &str = "1";
 /// How long recovery may take once the dependency is back.
 const RECOVERY: Duration = Duration::from_secs(30);
+/// A transparent 1×1 PNG.
+const ONE_PIXEL_PNG: [u8; 70] = [
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00,
+  0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00,
+  0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0x64, 0x60, 0xf8, 0x5f, 0x0f, 0x00, 0x02, 0x87, 0x01, 0x80,
+  0xeb, 0x47, 0xba, 0x92, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+];
 
 mod storage {
   use super::*;
 
-  /// The storage goes away: completing an upload answers 503 with `Retry-After`; after a few
-  /// failures new upload URLs are refused at once and `/readyz` says `degraded` (still 200, the
-  /// storage is down); once the storage is back, an upload goes through without a restart.
+  /// The storage goes away: storing an avatar answers 503 with `Retry-After`; after a few failures
+  /// new uploads are refused at once and `/readyz` says `degraded` (still 200, the storage is down);
+  /// once the storage is back, an upload goes through without a restart.
   #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
   async fn a_storage_outage_answers_503_with_retry_after_and_heals_without_a_restart() {
     let Some(mut stack) = storage_stack().await else {
@@ -32,14 +38,13 @@ mod storage {
     };
     let alice = stack.tokens("alice");
     stack.user_id(&alice).await;
-    start_upload(&stack, &alice).await.expect(StatusCode::CREATED);
 
     stack.storage_relay().cut();
     for _ in 0..3 {
-      assert_unavailable(&complete_upload(&stack, &alice).await);
+      assert_unavailable(&upload(&stack, &alice).await);
     }
     let started = Instant::now();
-    let refused = start_upload(&stack, &alice).await;
+    let refused = upload(&stack, &alice).await;
     assert_unavailable(&refused);
     assert!(
       started.elapsed() < Duration::from_secs(1),
@@ -55,9 +60,7 @@ mod storage {
     assert!(stack.server().is_running());
 
     stack.storage_relay().restore();
-    let upload = eventually(|| start_upload(&stack, &alice), StatusCode::CREATED).await;
-    put(&stack, upload.body["upload_url"].as_str().unwrap(), 4).await;
-    complete_upload(&stack, &alice).await.expect(StatusCode::OK);
+    eventually(|| upload(&stack, &alice), StatusCode::OK).await;
     assert_eq!(readiness(&stack).await.status, HealthStatus::Ok);
     stack.stop().await;
   }
@@ -71,11 +74,10 @@ mod storage {
     };
     let alice = stack.tokens("alice");
     stack.user_id(&alice).await;
-    start_upload(&stack, &alice).await.expect(StatusCode::CREATED);
 
     stack.storage_relay().stall();
     let started = Instant::now();
-    let reply = complete_upload(&stack, &alice).await;
+    let reply = upload(&stack, &alice).await;
     let took = started.elapsed();
     eprintln!("PERF storage hanging: answered after {took:?}");
     assert_unavailable(&reply);
@@ -83,7 +85,7 @@ mod storage {
     assert!(took < Duration::from_secs(20), "took {took:?}");
 
     stack.storage_relay().restore();
-    eventually(|| start_upload(&stack, &alice), StatusCode::CREATED).await;
+    eventually(|| upload(&stack, &alice), StatusCode::OK).await;
     stack.stop().await;
   }
 
@@ -95,30 +97,11 @@ mod storage {
       .await
   }
 
-  async fn start_upload(stack: &Stack, user: &UserTokens) -> Reply {
+  /// Sets a 1×1 PNG as the user's avatar (the server decodes it and stores a PNG of its own).
+  async fn upload(stack: &Stack, user: &UserTokens) -> Reply {
     stack
-      .post(
-        user,
-        "/me/avatar",
-        json!({"content_type": "image/png", "size_bytes": 4}),
-      )
+      .put_bytes(user, "/me/avatar", "image/png", ONE_PIXEL_PNG.to_vec())
       .await
-  }
-
-  async fn complete_upload(stack: &Stack, user: &UserTokens) -> Reply {
-    stack.post(user, "/me/avatar/complete", json!({})).await
-  }
-
-  async fn put(stack: &Stack, url: &str, length: usize) {
-    let response = stack
-      .http
-      .put(url)
-      .header("content-type", "image/png")
-      .body(vec![0_u8; length])
-      .send()
-      .await
-      .unwrap();
-    assert!(response.status().is_success(), "{}", response.status());
   }
 }
 

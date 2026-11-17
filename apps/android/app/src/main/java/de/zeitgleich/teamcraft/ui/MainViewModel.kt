@@ -1135,6 +1135,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       R.string.error_signed_out
     }
 
+  /**
+   * Makes [png] the member's own picture (issue #2071). Answers the string to show below the
+   * picture when it failed; a refusal of the server (not a picture, or the policy changed
+   * meanwhile) is worded for the picture.
+   */
+  @StringRes
+  suspend fun trySetOwnAvatar(userId: String, png: ByteArray): Int? =
+    try {
+      withContext(Dispatchers.Default) { chat.setOwnAvatar(png) }
+      graph.avatars.replace(userId, png)
+      null
+    } catch (failure: CancellationException) {
+      throw failure
+    } catch (failure: TeamCraftException.Core) {
+      R.string.profile_picture_rejected
+    } catch (failure: TeamCraftException) {
+      errorText(failure)
+    } catch (failure: IllegalStateException) {
+      R.string.error_signed_out
+    }
+
+  /** Removes the member's own picture; the string to show when it failed. */
+  @StringRes
+  suspend fun tryRemoveOwnAvatar(userId: String): Int? =
+    try {
+      withContext(Dispatchers.Default) { chat.removeOwnAvatar() }
+      graph.avatars.replace(userId, null)
+      null
+    } catch (failure: CancellationException) {
+      throw failure
+    } catch (failure: TeamCraftException.Core) {
+      R.string.profile_picture_rejected
+    } catch (failure: TeamCraftException) {
+      errorText(failure)
+    } catch (failure: IllegalStateException) {
+      R.string.error_signed_out
+    }
+
   /** Whose public holidays the member's repeating meetings skip; `null` when the server can't tell now. */
   suspend fun loadHolidayRegion(): HolidayRegion? = readChat { holidayRegion() }
 
@@ -1395,7 +1433,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     shares.stopCopies()
     withContext(Dispatchers.IO) { shares.inbox.wipe() }
     shares.forgetHandedOver()
-    PendingShare.current.value = null
+    PendingShare.clear()
     shareState.value = null
   }
 
@@ -1924,7 +1962,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       shareOfOtherAccount.value = true
       // The folder of one on its way into a composer went too.
       shares.forgetHandedOver()
-      PendingShare.current.value = null
+      PendingShare.clear()
       refreshShare()
     }
     // Also started on every foreground, which keeps trying and tells the user (issue #1142).

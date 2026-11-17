@@ -2,8 +2,9 @@
 //! [`CoreChatBackend`] reads directly, and the commands it queues for the engine.
 
 use teamcraft_client_api::actions::{
-  ForwardedFrom, LinkPreview, LinkedMessage, MessageEdit, MessageExtras, MessagePriority, OutgoingMessage,
-  PermalinkTarget, ReplyAttachmentPreview, ReplyPreview, SavedItem, WorkspaceEvent,
+  ForwardedFrom, LinkPreview, LinkedMessage, MessageEdit, MessageExtras, MessagePriority,
+  OutgoingLinkPreview, OutgoingMessage, PermalinkTarget, ReplyAttachmentPreview, ReplyPreview, SavedItem,
+  WorkspaceEvent,
 };
 use teamcraft_client_api::canvas::{CanvasMark, CanvasOrigin, CanvasState};
 use teamcraft_client_api::model::{
@@ -196,13 +197,26 @@ impl<S: LocalStore> CoreChatBackend<S> {
     self.text_content(&message, meta)
   }
 
+  /// The message's metadata. A message from the composer takes the link preview the composer showed
+  /// (#2073), and the composer's preview starts afresh.
   fn outgoing_meta(&self, message: &OutgoingMessage) -> MessageMeta {
     let maybe_reply_to = message
       .maybe_reply_to
       .and_then(|id| self.find_stored(message.conversation, id))
       .map(|target| reply_ref(&target, self.importer(), message.maybe_reply_attachment));
+    #[cfg(not(target_arch = "wasm32"))]
+    let maybe_link_preview = self.take_shown_preview(
+      message.conversation,
+      message.maybe_thread,
+      &message.body,
+      message.link_preview,
+    );
+    // The browser shows no composer preview (e2ee.md §12).
+    #[cfg(target_arch = "wasm32")]
+    let maybe_link_preview = None;
     MessageMeta {
       maybe_reply_to,
+      maybe_link_preview,
       priority: priority_of(message.priority),
       wants_acknowledgement: message.wants_acknowledgement,
       is_silent: message.is_silent,
@@ -219,7 +233,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     let conversation = message.conversation;
     let meta = self.outgoing_meta(&message);
     if !message.files.is_empty() {
-      self.ui_send_files(
+      let maybe_id = self.ui_send_files(
         conversation,
         message.maybe_thread,
         &message.body,
@@ -227,6 +241,9 @@ impl<S: LocalStore> CoreChatBackend<S> {
         message.files,
         message.maybe_client_message_id,
       );
+      if let Some(id) = maybe_id {
+        self.queue_link_preview(conversation, id, &message.body, message.link_preview);
+      }
       return;
     }
     if message.body.trim().is_empty() {
@@ -234,15 +251,26 @@ impl<S: LocalStore> CoreChatBackend<S> {
     }
     let body = message.body.clone();
     let (maybe_thread, maybe_id) = (message.maybe_thread, message.maybe_client_message_id);
+    let choice = message.link_preview;
     let content = self.text_content(&message, meta);
     let maybe_id = self.enqueue_as(conversation, maybe_thread, content, maybe_id);
     if let Some(id) = maybe_id {
-      self.queue_link_preview(conversation, id, &body);
+      self.queue_link_preview(conversation, id, &body, choice);
     }
   }
 
-  /// Holds the message for a link preview if it links somewhere the verified policy allows.
-  pub(crate) fn queue_link_preview(&self, conversation: ConversationId, id: ClientMessageId, body: &str) {
+  /// Holds the message for a link preview if it links somewhere the verified policy allows, unless
+  /// it carries what the composer showed already ([`OutgoingLinkPreview::AsShown`]).
+  pub(crate) fn queue_link_preview(
+    &self,
+    conversation: ConversationId,
+    id: ClientMessageId,
+    body: &str,
+    choice: OutgoingLinkPreview,
+  ) {
+    if choice == OutgoingLinkPreview::AsShown {
+      return;
+    }
     let policy = self.verified_policy().link_previews;
     match queue_preview(self.store_ref(), &policy, conversation, id, body) {
       Ok(true) => self.command(CoreCommand::GeneratePreviews),

@@ -223,6 +223,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       CoreCommand::RefreshReadReceipts { conversation } => self.refresh_read_receipts(conversation).await,
       CoreCommand::UploadFiles => self.upload_pending().await.map(|_| ()),
       CoreCommand::GeneratePreviews => self.generate_pending_previews().await.map(|_| ()),
+      // The host fetches the composer's previews beside its loop (`ComposerFetches`), never here.
+      CoreCommand::ComposerLinkChanged { .. } => Ok(()),
       CoreCommand::DownloadFile {
         conversation,
         attachment,
@@ -509,6 +511,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       CoreCommand::NoteMeetingLobby { meeting, has_lobby } => self.note_meeting_lobby(meeting, has_lobby),
       CoreCommand::NoteMeetingSchedule { meeting, note } => self.note_meeting_schedule(meeting, note),
       CoreCommand::ForgetMeetingRecords { meeting } => self.forget_meeting_records(meeting),
+      CoreCommand::ReopenMeetingRecords { meeting, organizer } => {
+        self.reopen_meeting_records(meeting, organizer).map(|_| ())
+      },
       CoreCommand::SyncMeetingAdmitters {
         meeting,
         conversation,

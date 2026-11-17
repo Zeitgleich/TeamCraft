@@ -990,6 +990,140 @@ mod schedule {
       assert!(is_open_by_own_record(rig.alice.store.as_ref(), other));
     }
 
+    /// The organizer restores a meeting cancelled here (#1983): the mark goes, the records come
+    /// back, and its admitters let guests in again.
+    mod restored {
+      use super::*;
+
+      #[tokio::test]
+      async fn the_organizers_restore_signs_the_admitters_again_and_a_guest_is_let_in() {
+        let mut rig = rig().await;
+        let (mut bob, _bob_clock) = rig.cancelled_with_an_admitter().await;
+
+        let organizer = rig.alice.client.user_id();
+        assert!(
+          rig
+            .alice
+            .client
+            .reopen_meeting_records(rig.meeting, organizer)
+            .unwrap()
+        );
+        rig.sign_for(times(NOW_MS, NOW_MS + 90 * DAY_MS)).await;
+
+        assert_eq!(rig.closed_at(), None);
+        assert!(!rig.has_no_records());
+        assert!(is_open_by_own_record(rig.alice.store.as_ref(), rig.meeting));
+        // Signed from the schedule kept at the close, not from the server's months.
+        assert_eq!(rig.signed_until(), NOW_MS + HOUR_MS + GUEST_ACCESS_GRACE_MS);
+        rig.guest_knows_the_link();
+        rig.server_admits_the_guest().await;
+        rig.member_lets_the_guest_in(&mut bob).await.unwrap();
+        settle(&mut [&mut bob, &mut rig.guest]).await;
+        rig.guest.client.full_sync().await.unwrap();
+        assert!(rig.guest.client.has_group(rig.chat).unwrap());
+      }
+
+      #[tokio::test]
+      async fn a_meeting_still_closed_lets_no_guest_in() {
+        let mut rig = rig().await;
+        let (mut bob, _bob_clock) = rig.cancelled_with_an_admitter().await;
+
+        // The server lists the meeting as running again, but nobody restored it here.
+        rig.sign_for(times(NOW_MS, NOW_MS + 90 * DAY_MS)).await;
+
+        assert_eq!(rig.closed_at(), Some(NOW_MS));
+        assert_eq!(rig.signed_until(), NOW_MS);
+        rig.guest_knows_the_link();
+        rig.server_admits_the_guest().await;
+        assert!(rig.member_lets_the_guest_in(&mut bob).await.is_err());
+        rig.guest.client.full_sync().await.unwrap();
+        assert!(!rig.guest.client.has_group(rig.chat).unwrap());
+      }
+
+      #[tokio::test]
+      async fn a_restore_of_a_meeting_another_user_organizes_lifts_nothing() {
+        let mut rig = rig().await;
+        rig.keep_records_here().await;
+        rig.alice.client.forget_meeting_records(rig.meeting).unwrap();
+        // The restored meeting names Bob as its organizer (handed over, or the server's say).
+        let bob = rig.member("Bob").await;
+
+        let lifted = rig
+          .alice
+          .client
+          .reopen_meeting_records(rig.meeting, bob.client.user_id())
+          .unwrap();
+
+        assert!(!lifted);
+        assert_eq!(rig.closed_at(), Some(NOW_MS));
+        assert!(rig.has_no_records());
+        rig.clock.advance(60_000);
+        rig.sign_for(times(NOW_MS, NOW_MS + DAY_MS)).await;
+        assert_eq!(rig.signed_until(), NOW_MS);
+      }
+
+      #[tokio::test]
+      async fn a_non_organizers_device_has_no_mark_to_lift() {
+        let mut rig = rig().await;
+        rig.keep_records_here().await;
+        rig.alice.client.forget_meeting_records(rig.meeting).unwrap();
+        let bob = rig.member("Bob").await;
+
+        // Bob's device takes the same restore: it organizes nothing and keeps no mark.
+        let lifted = bob
+          .client
+          .reopen_meeting_records(rig.meeting, bob.client.user_id())
+          .unwrap();
+
+        assert!(!lifted);
+        // Alice's mark is hers alone, and stays.
+        assert_eq!(rig.closed_at(), Some(NOW_MS));
+      }
+
+      #[tokio::test]
+      async fn a_mark_without_kept_records_opens_on_the_servers_end() {
+        let mut rig = rig().await;
+        // Closed before anything was recorded here (or by an older version).
+        rig.alice.client.forget_meeting_records(rig.meeting).unwrap();
+        rig.clock.advance(60_000);
+
+        let organizer = rig.alice.client.user_id();
+        assert!(
+          rig
+            .alice
+            .client
+            .reopen_meeting_records(rig.meeting, organizer)
+            .unwrap()
+        );
+        rig.sign_for(times(NOW_MS, NOW_MS + DAY_MS)).await;
+
+        assert!(rig.has_no_records());
+        assert_eq!(rig.signed_until(), NOW_MS + DAY_MS + GUEST_ACCESS_GRACE_MS);
+      }
+
+      impl Rig {
+        /// Bob, on his own clock and in the group, can let guests in for Alice; then Alice cancels
+        /// the meeting here and a minute passes for both.
+        async fn cancelled_with_an_admitter(&mut self) -> (Peer, Arc<ManualClock>) {
+          self.keep_records_here().await;
+          let bob_clock = Arc::new(ManualClock::new(NOW_MS));
+          let mut bob = Peer::enroll_on_clock(
+            self.server.add_user("Bob"),
+            "Bob",
+            common::settings(),
+            Box::new(bob_clock.clone()),
+          )
+          .await;
+          self.add_to_chat(bob.client.user_id()).await;
+          self.let_into_group(&mut bob).await;
+          self.alice.client.forget_meeting_records(self.meeting).unwrap();
+          self.clock.advance(60_000);
+          bob_clock.advance(60_000);
+          (bob, bob_clock)
+        }
+      }
+    }
+
     impl Rig {
       /// The chat noted with its meeting, as the app's setup does, and both records of it.
       async fn keep_records_here(&mut self) {

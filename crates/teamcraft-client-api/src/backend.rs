@@ -576,6 +576,10 @@ pub trait ChatBackend {
   /// schedule records go, and a mark caps any later signed validity at this moment. Called after
   /// this device's own cancel or end, never on the server's word about a meeting's status.
   fn forget_meeting_records(&self, _meeting: teamcraft_proto::MeetingId) {}
+  /// Lifts the close mark of a meeting the organizer restored here (#1983): called after this
+  /// device's own restore of the whole meeting was taken, with the restored meeting's organizer.
+  /// Only that organizer's device lifts it; the records kept at the close come back.
+  fn reopen_meeting_records(&self, _meeting: teamcraft_proto::MeetingId, _organizer: UserId) {}
   /// The organizer's device signs and publishes who may let guests into the meeting, if that
   /// changed or the list ends before the meeting does (#1103). `server_times` is the meeting (or
   /// occurrence) as the server lists it; the end signed is capped by this device's own record
@@ -663,6 +667,27 @@ pub trait ChatBackend {
   }
   /// Stores the draft; an empty body removes it. Call debounced while typing.
   fn set_draft(&self, _conversation: ConversationId, _maybe_thread: Option<ThreadId>, _body: &str) {}
+  /// Tells the core what the composer's draft says now, so it previews the draft's first link
+  /// (#2073). Call debounced while typing, and once more right before sending. A new or vanished
+  /// link cancels the fetch of the old one; the same link again does nothing.
+  fn update_composer_link(
+    &self,
+    _conversation: ConversationId,
+    _maybe_thread: Option<ThreadId>,
+    _body: &str,
+  ) {
+  }
+  /// The link preview the composer shows under its draft; read again on each change notification.
+  fn composer_link_preview(
+    &self,
+    _conversation: ConversationId,
+    _maybe_thread: Option<ThreadId>,
+  ) -> crate::actions::ComposerLinkPreview {
+    crate::actions::ComposerLinkPreview::None
+  }
+  /// The remove button of the composer's preview: this link of the draft gets none, also after a
+  /// restart, until the draft links somewhere else.
+  fn remove_composer_link_preview(&self, _conversation: ConversationId, _maybe_thread: Option<ThreadId>) {}
   /// What the conversation's composer replies to, as a quote (#1115); `None` once the message is
   /// gone. Kept on this device only.
   fn draft_reply(&self, _conversation: ConversationId) -> Option<ReplyPreview> {

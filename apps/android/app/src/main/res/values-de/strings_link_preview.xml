@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- The link preview under the composer's draft (#2073). -->
+  <string name="composer_link_preview_loading">Vorschau wird geladen …</string>
+  <string name="composer_link_preview_remove">Linkvorschau entfernen</string>
+</resources>

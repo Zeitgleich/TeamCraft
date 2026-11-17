@@ -1390,6 +1390,18 @@ mod tests {
     );
   }
 
+  /// A store with more matches than the candidate limit: the reference and the service agree on
+  /// the newest [`MAX_CANDIDATES`].
+  #[test]
+  fn matches_reference_above_the_candidate_limit() {
+    let store = store_with(4, 1_500);
+    let mut service = SearchService::new();
+    let everywhere = SearchQuery::default();
+    let expected = reference(&store, &everywhere);
+    assert_eq!(expected.len(), MAX_CANDIDATES);
+    assert_eq!(service.search(&store, &everywhere).unwrap().hits, expected);
+  }
+
   fn assert_matches_reference(store: &Store, service: &mut SearchService) {
     for words in [
       &["budget"][..],
@@ -1427,7 +1439,7 @@ mod tests {
   }
 
   /// What an index of every stored message finds, as search did before the local index: built in
-  /// memory for the search, every match, newest first.
+  /// memory for the search, the newest [`MAX_CANDIDATES`] matches, newest first.
   fn reference(store: &Store, query: &SearchQuery) -> Vec<SearchMatch> {
     let mut messages = Vec::new();
     for (key, _) in store.list(Table::Conversations).unwrap() {
@@ -1443,20 +1455,27 @@ mod tests {
           .filter(is_searchable),
       );
     }
-    let bundle = export_segment(messages.iter()).unwrap();
-    let mut with_segment = SearchService::new();
-    let scratch = MemoryStore::new();
-    for message in &messages {
-      scratch.upsert_message(message).unwrap();
+    // A segment search cuts at MAX_CANDIDATES before any sorting, so the messages go into
+    // segments of at most that many: no segment cuts, the cut happens once, after the sort.
+    let mut hits = Vec::new();
+    for (index, chunk) in messages.chunks(MAX_CANDIDATES).enumerate() {
+      let bundle = export_segment(chunk.iter()).unwrap();
+      let scratch = MemoryStore::new();
+      for message in chunk {
+        scratch.upsert_message(message).unwrap();
+      }
+      scratch
+        .put(Table::SearchSegments, &format!("chunk-{index}"), &bundle)
+        .unwrap();
+      hits.extend(SearchService::new().search(&scratch, query).unwrap().hits);
     }
-    scratch.put(Table::SearchSegments, "all", &bundle).unwrap();
-    let mut hits = with_segment.search(&scratch, query).unwrap().hits;
     hits.sort_by_key(|hit| {
       (
         std::cmp::Reverse(hit.sent_at_ms),
         *hit.client_message_id.as_bytes(),
       )
     });
+    hits.truncate(MAX_CANDIDATES);
     hits
   }
 

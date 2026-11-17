@@ -426,6 +426,7 @@ fn outgoing(conversation: ConversationId, body: &str) -> OutgoingMessage {
     is_silent: false,
     also_send_to_channel: false,
     files: Vec::new(),
+    link_preview: Default::default(),
   }
 }
 

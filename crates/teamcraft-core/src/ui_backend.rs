@@ -271,6 +271,12 @@ pub enum CoreCommand {
   UploadFiles,
   /// Outbox messages wait for their link previews.
   GeneratePreviews,
+  /// The link a composer's draft previews changed, or the preview was removed (#2073): the host
+  /// starts or cancels its fetch ([`crate::composer_preview::ComposerFetches`]), beside its loop.
+  ComposerLinkChanged {
+    conversation: ConversationId,
+    maybe_thread: Option<ThreadId>,
+  },
   DownloadFile {
     conversation: ConversationId,
     attachment: AttachmentId,
@@ -464,6 +470,11 @@ pub enum CoreCommand {
   /// Close a meeting cancelled or ended here: its records go, a mark caps it (#1939).
   ForgetMeetingRecords {
     meeting: teamcraft_proto::MeetingId,
+  },
+  /// Lift the close mark of a meeting its organizer restored here (#1983).
+  ReopenMeetingRecords {
+    meeting: teamcraft_proto::MeetingId,
+    organizer: UserId,
   },
   /// The organizer's device publishes who may let guests in, if that changed (#1103), valid until
   /// the meeting's end by its own record (#1919).
@@ -678,6 +689,7 @@ impl CoreCommand {
       | Self::NoteMeetingLobby { .. }
       | Self::NoteMeetingSchedule { .. }
       | Self::ForgetMeetingRecords { .. }
+      | Self::ReopenMeetingRecords { .. }
       | Self::SyncMeetingAdmitters { .. }
       | Self::CheckMeetingAdmission { .. }
       | Self::ChangeMeetingHosts { .. } => CommandPart::Member,
@@ -703,6 +715,7 @@ impl CoreCommand {
       | Self::RefreshReadReceipts { .. }
       | Self::UploadFiles
       | Self::GeneratePreviews
+      | Self::ComposerLinkChanged { .. }
       | Self::DownloadFile { .. }
       | Self::ControlDownload { .. }
       | Self::RefreshMembers { .. }
@@ -3055,6 +3068,25 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     });
   }
 
+  #[cfg(not(target_arch = "wasm32"))]
+  fn update_composer_link(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>, body: &str) {
+    self.ui_update_composer_link(conversation, maybe_thread, body);
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
+  fn composer_link_preview(
+    &self,
+    conversation: ConversationId,
+    maybe_thread: Option<ThreadId>,
+  ) -> teamcraft_client_api::actions::ComposerLinkPreview {
+    self.ui_composer_link_preview(conversation, maybe_thread)
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
+  fn remove_composer_link_preview(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) {
+    self.ui_remove_composer_link_preview(conversation, maybe_thread);
+  }
+
   fn draft_reply(&self, conversation: ConversationId) -> Option<teamcraft_client_api::actions::ReplyPreview> {
     self.ui_draft_reply(conversation)
   }
@@ -3501,6 +3533,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn forget_meeting_records(&self, meeting: teamcraft_proto::MeetingId) {
     self.command(CoreCommand::ForgetMeetingRecords { meeting });
+  }
+
+  fn reopen_meeting_records(&self, meeting: teamcraft_proto::MeetingId, organizer: UserId) {
+    self.command(CoreCommand::ReopenMeetingRecords { meeting, organizer });
   }
 
   fn sync_meeting_admitters(
@@ -5790,6 +5826,7 @@ mod tests {
         is_silent: false,
         also_send_to_channel: false,
         files: Vec::new(),
+        link_preview: Default::default(),
       }
     }
   }

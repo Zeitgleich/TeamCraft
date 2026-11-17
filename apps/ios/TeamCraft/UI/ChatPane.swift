@@ -30,6 +30,8 @@ struct ChatPane: View {
   @State private var attachments: [PickedFile] = []
   /// The draft's files as the core has them (#1220): those not picked here show beside the picks.
   @State private var draftFileItems: [DraftFileItem] = []
+  /// The draft's link preview (#2073), made by the core; read again on each change.
+  @State private var linkPreview = ComposerLinkPreview.none
   /// Draft files removed or sent here, hidden while the core catches up.
   @State private var goneDraftIds: Set<String> = []
   @State private var attachmentError: AttachmentError?
@@ -173,6 +175,7 @@ struct ChatPane: View {
     .task(id: model.changeCount) {
       await reload()
       await reloadDraftFiles()
+      await reloadLinkPreview()
       if isChannel { maybeAnchorMarks = await model.channelAnchorMarks(conversation.id) }
       runningCallCount = await model.runningCalls()[conversation.id] ?? 0
       mentionableGroups = await model.mentionableGroups(conversation.id)
@@ -199,6 +202,11 @@ struct ChatPane: View {
       if draft.isEmpty { draft = stored }
       isDraftLoaded = true
       await reloadDraftFiles()
+      // A preview lost to a restart, or of a draft from another device, is made now.
+      if !draft.isEmpty {
+        await model.perform(.updateComposerLink(conversationId: conversation.id, maybeThreadId: threadId, body: draft))
+      }
+      await reloadLinkPreview()
       if threadId == nil {
         // What the user was answering when the app was killed comes back with the text (#1115).
         if maybeReply == nil { maybeReply = await model.draftReply(conversationId: conversation.id) }
@@ -209,7 +217,10 @@ struct ChatPane: View {
     // What another app shared, once the stored draft is in the composer: the user sends it (#208).
     .task(id: "\(model.shareHandover?.share.id ?? "")/\(isDraftLoaded)") {
       guard isDraftLoaded, threadId == nil, let shared = await model.takeShare(for: conversation.id) else { return }
-      if !shared.text.isEmpty { draft = draft.isEmpty ? shared.text : draft + "\n" + shared.text }
+      if !shared.text.isEmpty {
+        draft = draft.isEmpty ? shared.text : draft + "\n" + shared.text
+        await model.perform(.updateComposerLink(conversationId: conversation.id, maybeThreadId: threadId, body: draft))
+      }
       await attach(shared.files)
     }
     .onChange(of: draft) { _, text in
@@ -807,6 +818,15 @@ struct ChatPane: View {
   private var composer: some View {
     if conversation.canPost {
       VStack(alignment: .leading, spacing: 6) {
+        if linkPreview.isShown && maybeEditing == nil {
+          ComposerLinkPreviewCard(preview: linkPreview) {
+            Task {
+              await model.perform(.removeComposerLinkPreview(conversationId: conversation.id, maybeThreadId: threadId))
+              await reloadLinkPreview()
+            }
+          }
+          .transition(.opacity)
+        }
         if let reply = maybeReply { replyBar(reply) }
         EmojiSuggestionBar(text: draft, caret: formatController.caret) { emoji in
           let done = completingEmoji(in: draft, with: emoji, caret: formatController.caret)
@@ -1530,9 +1550,12 @@ struct ChatPane: View {
     maybeReply = nil
     let id = maybeScheduleAttempt.flatMap { $0.body == body ? $0.id : nil } ?? newClientMessageId()
     maybeScheduleAttempt = nil
+    // The core compares the text with the one its preview is for (#2073).
+    await model.perform(.updateComposerLink(conversationId: conversation.id, maybeThreadId: threadId, body: body))
     let request = SendRequest(
       conversationId: conversation.id, maybeThreadId: threadId, body: body,
-      maybeReplyToId: replying?.messageId, maybeReplyAttachmentId: replying?.maybeAttachmentId, maybeClientMessageId: id)
+      maybeReplyToId: replying?.messageId, maybeReplyAttachmentId: replying?.maybeAttachmentId, maybeClientMessageId: id,
+      linkPreview: .asShown)
     if let failure = await model.performReporting(.scheduleMessage(request, dueAtMs: dueAtMs)) {
       draft = body
       // After the text: its change would drop the attempt again.
@@ -1588,7 +1611,13 @@ struct ChatPane: View {
       guard !body.isEmpty else { return }
       draft = ""
       feelSend()
-      if !(await model.send(conversationId: conversation.id, threadId: threadId, body: body)) {
+      // With the preview the composer showed (#2073): the core compares the text with the one its
+      // preview is for, so a link changed in the last pause goes out without one.
+      await model.perform(.updateComposerLink(conversationId: conversation.id, maybeThreadId: threadId, body: body))
+      let request = SendRequest(conversationId: conversation.id, maybeThreadId: threadId, body: body, linkPreview: .asShown)
+      if await model.performChecked(.sendMessage(request)) {
+        if threadId == nil { Perf.begin(.messageSend, key: conversation.id) }
+      } else {
         // Nothing was sent: the text stays for another try.
         draft = body
         isSendFailed = true
@@ -1604,9 +1633,10 @@ struct ChatPane: View {
       attachments = []
       goneDraftIds.formUnion(sentIds)
       maybeReply = nil
+      await model.perform(.updateComposerLink(conversationId: conversation.id, maybeThreadId: threadId, body: body))
       let request = SendRequest(
         conversationId: conversation.id, maybeThreadId: threadId, body: body, files: files, draftFiles: fromDraft,
-        maybeReplyToId: replying?.messageId, maybeReplyAttachmentId: replying?.maybeAttachmentId)
+        maybeReplyToId: replying?.messageId, maybeReplyAttachmentId: replying?.maybeAttachmentId, linkPreview: .asShown)
       if !(await model.performChecked(.sendMessage(request))) {
         // Nothing was sent: the text and the files stay for another try.
         draft = body
@@ -1763,6 +1793,12 @@ struct ChatPane: View {
     Task { await model.perform(.removeDraftFile(conversationId: conversation.id, maybeThreadId: threadId, id: id)) }
   }
 
+  private func reloadLinkPreview() async {
+    let read = await model.composerLinkPreview(conversationId: conversation.id, threadId: threadId)
+    guard read != linkPreview else { return }
+    withAnimation(reduceMotion ? .easeOut(duration: 0.15) : .snappy(duration: 0.25)) { linkPreview = read }
+  }
+
   private func reloadDraftFiles() async {
     guard let files = await model.draftFiles(conversationId: conversation.id, threadId: threadId) else { return }
     if files != draftFileItems { draftFileItems = files }
@@ -1775,6 +1811,9 @@ struct ChatPane: View {
     let maybeDue = typed.map { draftSave.takeDue(for: $0) } ?? draftSave.takePending()
     guard let due = maybeDue else { return }
     await model.perform(.setDraft(conversationId: due.conversationId, maybeThreadId: due.maybeThreadId, body: due.text))
+    // The pause in typing is the link preview's debounce too (#2073).
+    await model.perform(
+      .updateComposerLink(conversationId: due.conversationId, maybeThreadId: due.maybeThreadId, body: due.text))
   }
 
   private func cancelEditing() {

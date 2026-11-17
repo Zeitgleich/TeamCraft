@@ -2020,6 +2020,10 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::ForgetMeetingRecords { meeting });
   }
 
+  fn reopen_meeting_records(&self, meeting: teamcraft_proto::MeetingId, organizer: UserId) {
+    self.act(ChatAction::ReopenMeetingRecords { meeting, organizer });
+  }
+
   fn sync_meeting_admitters(
     &self,
     meeting: teamcraft_proto::MeetingId,
@@ -2192,6 +2196,35 @@ impl ChatBackend for RemoteChat {
       conversation,
       maybe_thread,
       body: body.to_owned(),
+    });
+  }
+
+  fn update_composer_link(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>, body: &str) {
+    self.act(ChatAction::UpdateComposerLink {
+      conversation,
+      maybe_thread,
+      body: body.to_owned(),
+    });
+  }
+
+  fn composer_link_preview(
+    &self,
+    conversation: ConversationId,
+    maybe_thread: Option<ThreadId>,
+  ) -> teamcraft_client_api::actions::ComposerLinkPreview {
+    match self.ask(ChatQuery::ComposerLinkPreview {
+      conversation,
+      maybe_thread,
+    }) {
+      Some(ChatAnswer::ComposerLinkPreview { preview }) => preview,
+      _ => teamcraft_client_api::actions::ComposerLinkPreview::None,
+    }
+  }
+
+  fn remove_composer_link_preview(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) {
+    self.act(ChatAction::RemoveComposerLinkPreview {
+      conversation,
+      maybe_thread,
     });
   }
 
@@ -4064,6 +4097,7 @@ mod tests {
         is_silent: false,
         also_send_to_channel: false,
         files: Vec::new(),
+        link_preview: Default::default(),
       }
     }
 

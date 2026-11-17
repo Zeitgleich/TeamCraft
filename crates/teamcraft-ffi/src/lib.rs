@@ -44,6 +44,7 @@ mod server_pool;
 mod settings_sync;
 mod space_deletion;
 mod status_presets;
+mod store_threads;
 mod types;
 mod video;
 mod voice;
@@ -148,6 +149,7 @@ use crate::engine::{DrainGoal, Engine, EngineThreads, Job, PushOpening, PushRead
 use crate::http_fetch::run_request;
 use crate::logging::{JobClock, LifecycleStep, outcome};
 use crate::reads::{ReadQueue, Reads};
+use crate::store_threads::{MAX_STORE_CLOSE_WAIT, StoreThreads};
 
 uniffi::setup_scaffolding!();
 
@@ -157,6 +159,8 @@ pub struct TeamCraft {
   /// The engine's queues: unset while the local store is unreadable from the start, replaced by
   /// [`Self::reset_store`] (issue #414).
   threads: RwLock<Option<EngineThreads>>,
+  /// The threads that hold the local store, waited for when the handle goes (#1980).
+  store_threads: StoreThreads,
   /// While the local store is unreadable: why, and what opens the engine after a reset. The engine
   /// thread sets it when only the client finds that out, once the app can read.
   recovery: Arc<Mutex<Option<StoreRecovery>>>,
@@ -404,7 +408,8 @@ impl TeamCraft {
       ));
     };
     engine::set_store_aside(&unreadable.start.store_path(), SystemClock.now_ms())?;
-    let threads = engine::spawn(&unreadable.start, self.late_problem()).map_err(|error| match error {
+    let spawned = engine::spawn(&unreadable.start, self.late_problem(), self.store_threads.hold());
+    let threads = spawned.map_err(|error| match error {
       // A new, empty store that doesn't open: no room or no permission, not the old data.
       engine::OpenError::Unreadable(_) => {
         TeamCraftError::Storage("the new local database can't be read".into())
@@ -1255,6 +1260,17 @@ impl TeamCraft {
   ) -> Result<Option<Vec<u8>>, TeamCraftError> {
     let api = self.server_api()?;
     run_request(async move { bridge::avatar_picture(&api, &user_id, u64::from(max_bytes)).await })
+      .await
+      .map_err(TeamCraftError::Network)?
+  }
+
+  /// Makes `png` (a square the app cropped) the signed-in person's own picture and answers the
+  /// profile JSON (`/me/profile` shape). Refused with `avatar_from_identity_provider` while the
+  /// workspace shows the provider's picture without overrides (`can_change_avatar` false).
+  /// Removing goes through `api_request("DELETE", "/me/avatar")`.
+  pub async fn set_own_avatar(&self, png: Vec<u8>) -> Result<String, TeamCraftError> {
+    let api = self.server_api()?;
+    run_request(async move { bridge::set_own_avatar(&api, png).await })
       .await
       .map_err(TeamCraftError::Network)?
   }
@@ -2115,7 +2131,8 @@ impl TeamCraft {
     };
     let start = engine::EngineStart::new(config, tokens, maybe_device_key, listener, signals)?;
     let recovery = Arc::new(Mutex::new(None));
-    let threads = match engine::spawn(&start, late_problem(recovery.clone())) {
+    let store_threads = StoreThreads::new();
+    let threads = match engine::spawn(&start, late_problem(recovery.clone()), store_threads.hold()) {
       Ok(threads) => Some(threads),
       Err(engine::OpenError::Unreadable(problem)) => {
         *recovery.lock().unwrap_or_else(PoisonError::into_inner) = Some(StoreRecovery { problem, start });
@@ -2125,6 +2142,7 @@ impl TeamCraft {
     };
     Ok(Arc::new(Self {
       threads: RwLock::new(threads),
+      store_threads,
       recovery,
       network,
       connection,
@@ -2270,6 +2288,22 @@ impl TeamCraft {
       .unwrap_or_else(PoisonError::into_inner)
       .as_ref()
       .map(|recovery| recovery.problem)
+  }
+}
+
+impl Drop for TeamCraft {
+  /// Closes the engine's queues and waits until its threads let go of the local store: SQLCipher
+  /// tears down its global state when the process exits, under a thread still closing its
+  /// connection (#1980, store_threads.rs).
+  fn drop(&mut self) {
+    drop(
+      self
+        .threads
+        .get_mut()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take(),
+    );
+    self.store_threads.wait_until_closed(MAX_STORE_CLOSE_WAIT);
   }
 }
 

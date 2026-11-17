@@ -21,7 +21,7 @@ macro_rules! app {
 }
 
 /// Signs (as far as the server cares) a policy with the edits applied on top of the default.
-async fn publish_policy(app: &TestApp, version: u64, edit: impl FnOnce(&mut Value)) {
+pub(crate) async fn publish_policy(app: &TestApp, version: u64, edit: impl FnOnce(&mut Value)) {
   use base64::Engine;
   let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
   // The owner signs in with a second factor, or a policy requiring one would lock them out.

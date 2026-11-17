@@ -42,6 +42,8 @@ import de.zeitgleich.teamcraft.notifications.JoinRequestWatcher
 import de.zeitgleich.teamcraft.notifications.MentionPrefs
 import de.zeitgleich.teamcraft.notifications.MessageNotifier
 import de.zeitgleich.teamcraft.notifications.NotificationContentPrefs
+import de.zeitgleich.teamcraft.widget.HomeWidgets
+import de.zeitgleich.teamcraft.widget.WidgetSnapshotStore
 import de.zeitgleich.teamcraft.notifications.NotificationActions
 import de.zeitgleich.teamcraft.notifications.CoreNotificationActions
 import de.zeitgleich.teamcraft.notifications.CarProjection
@@ -93,6 +95,7 @@ class AppGraph(context: Context) {
     // an unsent media flow don't stay for whoever signs in next (e2ee.md §9.2).
     startCache.delete()
     MediaDraftStore.deleteAll(context)
+    homeWidgets.clear()
   })
   // Decrypted pictures leave memory with the account they belong to.
   val core: CoreRepository = CoreRepository(context, auth, onAccountClosed = {
@@ -123,6 +126,9 @@ class AppGraph(context: Context) {
   /** Admins asking to join a channel the user owns: notified while the app runs (#799). */
   val joinRequestNotifier = JoinRequestNotifier(context, notificationContent)
   val joinRequestWatcher = JoinRequestWatcher(core, joinRequestNotifier, scope)
+  /** The home screen widget's unread conversations, sealed (#2076). */
+  val widgetSnapshots = WidgetSnapshotStore(context.filesDir)
+  val homeWidgets = HomeWidgets(context, core, notificationContent, widgetSnapshots, scope)
   /** The sync loop should run but couldn't be started; the banner says so (issue #1142). */
   val isSyncStartFailing = MutableStateFlow(false)
   /** The connection banner's grace period, shared by every screen (issue #700). */
@@ -165,6 +171,7 @@ class TeamCraftApplication : Application(), Configuration.Provider {
     graph.settingsSync.start()
     graph.placeholderWatcher.start()
     graph.joinRequestWatcher.start()
+    graph.homeWidgets.start()
     graph.network.start()
     // Older versions staged uploads in the cache, never deleted; the core's staging folder replaced it.
     graph.scope.launch(Dispatchers.IO) { File(cacheDir, "outgoing").deleteRecursively() }

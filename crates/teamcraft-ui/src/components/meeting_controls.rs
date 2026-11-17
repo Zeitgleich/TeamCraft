@@ -7,8 +7,10 @@ use leptos::prelude::*;
 use teamcraft_client_api::meeting_hosts::{
   HostsChangeState, MeetingHostsChange, MeetingRole, handing_over, making_co_host, removing_co_host, role_of,
 };
+use teamcraft_client_api::meeting_schedule::MeetingTimes;
 use teamcraft_proto::{
-  ChannelRole, ErrorCode, MeetingAttendeeResponse, MeetingControlAction, MeetingId, RsvpStatus,
+  ChannelRole, ErrorCode, MeetingAttendeeResponse, MeetingControlAction, MeetingId, MeetingResponse,
+  RsvpStatus,
 };
 
 use crate::clock::now_ms;
@@ -44,6 +46,16 @@ pub async fn end_for_everyone(
     hub.refresh(me, now_ms()).await;
   }
   result
+}
+
+/// A whole meeting the organizer restored here (#1983), as the server answered the restore: the
+/// close mark its cancel left on this device goes (the core lifts it only for the restored
+/// meeting's own organizer), and its admitters are signed again, so its guests can be let in.
+pub fn reopen_restored(state: AppState, restored: &MeetingResponse) {
+  let (meeting, organizer) = (restored.id, restored.organizer_user_id);
+  state.try_write(|backend| backend.reopen_meeting_records(meeting, organizer));
+  let (conversation, times) = (restored.conversation_id, MeetingTimes::of(restored));
+  state.try_write(|backend| backend.sync_meeting_admitters(meeting, conversation, times));
 }
 
 /// The meeting whose call `conversation` is, if `me` may end it for everyone: as its organizer or
