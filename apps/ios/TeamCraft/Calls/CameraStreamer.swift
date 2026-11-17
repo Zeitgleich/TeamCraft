@@ -5,7 +5,8 @@ import SwiftUI
 /// The camera as a call video track: `AVCaptureSession` frames go to the hardware H.264 encoder
 /// and from there as Annex B access units into the core's call session, which encrypts and
 /// forwards them (DAVE). The encoder is created from the first frame, so the published size is the
-/// size the camera really delivers.
+/// size the camera really delivers. Its bitrate follows the call engine's share of the uplink
+/// (#1989): lower on a limited uplink, and no encoding at all while none of it goes out.
 final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
   /// Bitrate for a portrait HD track: enough for a talking head, light on mobile data.
   private static let bitrate = 1_200_000
@@ -19,6 +20,10 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
   private var maybeCall: CallSession?
   private var maybeEncoder: H264Encoder?
   private var isPaused = false
+  /// The uplink has no room for the camera now (the engine's rate is 0): frames aren't encoded.
+  private var isHeldByUplink = false
+  /// The engine's rate for the camera, in bit/s.
+  private var targetBitrate = CameraStreamer.bitrate
   private var isConfigured = false
   private var position = AVCaptureDevice.Position.front
 
@@ -32,6 +37,8 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     lock.lock()
     maybeCall = call
     isPaused = false
+    isHeldByUplink = false
+    targetBitrate = Self.bitrate
     lock.unlock()
     sessionQueue.async { [self] in
       configureIfNeeded()
@@ -57,6 +64,21 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     lock.lock()
     self.isPaused = isPaused
     lock.unlock()
+  }
+
+  /// The rate the call engine gives the camera (`bitrateBps`, 0: nothing of it goes out now). The
+  /// encoder follows in place; after a pause it starts with a keyframe.
+  func setUplinkBitrate(_ bitrateBps: UInt32) {
+    lock.lock()
+    let wasHeld = isHeldByUplink
+    isHeldByUplink = bitrateBps == 0
+    if bitrateBps > 0 { targetBitrate = Int(bitrateBps) }
+    let encoder = maybeEncoder
+    let bitrate = targetBitrate
+    lock.unlock()
+    guard bitrateBps > 0, let encoder else { return }
+    encoder.setBitrate(bitrate)
+    if wasHeld { encoder.requestKeyframe() }
   }
 
   /// A receiver needs a fresh keyframe.
@@ -86,13 +108,14 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
   ) {
     guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
     lock.lock()
-    let paused = isPaused
+    let paused = isPaused || isHeldByUplink
     let call = maybeCall
     var encoder = maybeEncoder
+    let bitrate = targetBitrate
     lock.unlock()
     guard !paused, let call else { return }
     if encoder == nil {
-      encoder = makeEncoder(for: pixelBuffer, call: call)
+      encoder = makeEncoder(for: pixelBuffer, call: call, bitrate: bitrate)
       lock.lock()
       maybeEncoder = encoder
       lock.unlock()
@@ -102,12 +125,13 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
 
   // MARK: Private
 
-  private func makeEncoder(for pixelBuffer: CVPixelBuffer, call: CallSession) -> H264Encoder? {
+  /// The encoder at the engine's current `bitrate`; the track is published at the full one.
+  private func makeEncoder(for pixelBuffer: CVPixelBuffer, call: CallSession, bitrate: Int) -> H264Encoder? {
     let width = CVPixelBufferGetWidth(pixelBuffer)
     let height = CVPixelBufferGetHeight(pixelBuffer)
     guard
       let encoder = H264Encoder(
-        width: width, height: height, bitrate: Self.bitrate, frameRate: Self.frameRate,
+        width: width, height: height, bitrate: bitrate, frameRate: Self.frameRate,
         output: { data, timestamp, isKeyframe in
           call.sendEncodedCameraFrame(data: data, timestamp: timestamp, isKeyframe: isKeyframe)
         })

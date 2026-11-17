@@ -986,6 +986,10 @@ extension CallManager: EncodedVideoListener {
   func onKeyframeRequested() {
     camera.requestKeyframe()
   }
+
+  func onCameraBitrate(bitrateBps: UInt32) {
+    camera.setUplinkBitrate(bitrateBps)
+  }
 }
 
 /// The renderers of the remote tracks, shared between the call thread (frames) and the main thread

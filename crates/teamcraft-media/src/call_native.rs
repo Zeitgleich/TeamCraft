@@ -85,6 +85,7 @@ use crate::rtp::RtpTimestamp;
 use crate::send_queue::SendQueueConfig;
 use crate::sfu_address::{PinnedResolver, sfu_addresses};
 use crate::system_audio::{SystemAudioCapture, SystemAudioError, SystemAudioReceiver, system_audio_queue};
+use crate::uplink_layers::Adaptation;
 use crate::video::{EncodedVideoFrame, TOP_LAYER, VideoResolution};
 use crate::video_capture::CaptureError;
 use crate::video_pipeline::{
@@ -281,6 +282,7 @@ enum VideoCommand {
     kind: VideoTrackKind,
     codec: VideoCodec,
     layers: Vec<VideoLayerInfo>,
+    adaptation: Adaptation,
   },
   Withdraw(VideoPublicationId),
   Unpublish(MediaStreamId),
@@ -545,6 +547,27 @@ impl NativeCall {
       kind,
       codec,
       layers,
+      adaptation: Adaptation::Whole,
+    });
+    publication
+  }
+
+  /// [`NativeCall::publish_video`] for a track whose encoder the app runs and sets to the bitrate of
+  /// each [`CallEngineEvent::LayerBitrates`] in place (#1989: the iOS camera): on a limited uplink
+  /// it is sent at less than its bitrate before it stops.
+  pub fn publish_video_adapting_in_place(
+    &self,
+    kind: VideoTrackKind,
+    codec: VideoCodec,
+    layers: Vec<VideoLayerInfo>,
+  ) -> VideoPublicationId {
+    let publication = self.next_publication_id();
+    self.video(VideoCommand::Publish {
+      publication,
+      kind,
+      codec,
+      layers,
+      adaptation: Adaptation::InPlace,
     });
     publication
   }
@@ -2268,7 +2291,12 @@ fn handle_video(
       kind,
       codec,
       layers,
-    } => engine.publish_video(publication, kind, codec, layers),
+      adaptation,
+    } => match adaptation {
+      Adaptation::Whole => engine.publish_video(publication, kind, codec, layers),
+      Adaptation::Rebuilt => engine.publish_adaptive_video(publication, kind, codec, layers),
+      Adaptation::InPlace => engine.publish_video_adapting_in_place(publication, kind, codec, layers),
+    },
     VideoCommand::Withdraw(publication) => engine.withdraw_video(publication),
     VideoCommand::Unpublish(stream_id) => engine.unpublish_video(stream_id),
     VideoCommand::Subscribe {

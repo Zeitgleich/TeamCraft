@@ -829,8 +829,10 @@ Settings → Chats).
   and a moment of congestion; at up to 32 s a mobile link's minute of room was half over, #1792).
   Before, the top layer stopped as soon as its whole bitrate didn't fit: a 500 kbit/s uplink
   carried 320×180 at about 80 kbit/s, a 2 Mbit/s one 640×360 at 300 kbit/s. Where the encoders
-  change their rate in place (the browser's WebCodecs, cameras and screen shares), a lower share
-  follows at once and a higher one after 0.25 s: a change costs no keyframe. A screen share's 3 s
+  change their rate in place (the browser's WebCodecs, cameras and screen shares, and the iOS
+  camera's VideoToolbox encoder, #1989, told through `EncodedVideoListener::on_camera_bitrate`,
+  which also stops its encoding while none of it goes out), a lower share follows at once and a
+  higher one after 0.25 s: a change costs no keyframe. A screen share's 3 s
   hold doesn't apply when the estimate is below 80 % of what its layers need: a keyframe's queue
   cuts it a step, to 85 %, while a link that lost its room cuts it further.
 
