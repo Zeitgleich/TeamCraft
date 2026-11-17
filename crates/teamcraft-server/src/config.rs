@@ -354,8 +354,11 @@ pub struct LimitsConfig {
   /// How long the values of the directory filters are reused; computing them reads all users. 0
   /// reads them every time.
   pub directory_filters_cache_secs: u64,
-  /// Largest avatar image.
+  /// Largest avatar image, as uploaded or as the identity provider serves it.
   pub max_avatar_bytes: u64,
+  /// Longest side of a stored avatar: every picture is re-encoded as a PNG of at most this many
+  /// pixels per side (issue #2071).
+  pub avatar_side_px: u32,
   /// Largest space or channel picture (the one limit for both), after the server re-encoded the
   /// upload as PNG.
   pub max_space_image_bytes: u64,
@@ -1825,6 +1828,7 @@ impl Default for LimitsConfig {
       invite_resend_interval_secs: 300,
       directory_filters_cache_secs: 60,
       max_avatar_bytes: 1024 * 1024,
+      avatar_side_px: teamcraft_proto::DEFAULT_AVATAR_SIDE_PX,
       max_space_image_bytes: teamcraft_proto::DEFAULT_MAX_SPACE_IMAGE_BYTES,
       max_concurrent_image_decodes: 2,
       image_decode_timeout_secs: 5,

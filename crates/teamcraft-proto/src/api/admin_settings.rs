@@ -30,6 +30,12 @@ pub const OFFICIAL_APPLE_TEAM_ID: &str = "";
 
 /// Default of [`LimitSettings::max_space_image_bytes`]: a 256×256 PNG stays well below it.
 pub const DEFAULT_MAX_SPACE_IMAGE_BYTES: u64 = 1024 * 1024;
+/// Default of [`LimitSettings::avatar_side_px`]: sharp at the largest size apps show a picture
+/// (the profile card) on dense screens.
+pub const DEFAULT_AVATAR_SIDE_PX: u32 = 512;
+/// Range of [`LimitSettings::avatar_side_px`].
+pub const MIN_AVATAR_SIDE_PX: u32 = 64;
+pub const MAX_AVATAR_SIDE_PX: u32 = 2048;
 
 wire_enum! {
   /// Where the value in force comes from.
@@ -625,6 +631,10 @@ pub struct LimitSettings {
   pub max_attachment_bytes: u64,
   pub max_attachment_bytes_per_user: u64,
   pub max_avatar_bytes: u64,
+  /// Longest side of a stored profile picture: uploads and provider pictures are re-encoded as a
+  /// PNG at most this many pixels wide and high. Absent from older clients' requests: the default.
+  #[serde(default = "default_avatar_side_px")]
+  pub avatar_side_px: u32,
   /// Largest space or channel picture (the one limit for both) after the server re-encoded it. Absent from older clients' requests:
   /// the default applies.
   #[serde(default = "default_max_space_image_bytes")]
@@ -706,6 +716,10 @@ fn enabled() -> bool {
 
 fn default_max_space_image_bytes() -> u64 {
   DEFAULT_MAX_SPACE_IMAGE_BYTES
+}
+
+fn default_avatar_side_px() -> u32 {
+  DEFAULT_AVATAR_SIDE_PX
 }
 
 fn default_max_large_mentions_per_user_per_hour() -> u32 {

@@ -163,6 +163,9 @@ pub enum ApiError {
   /// The signed policy does not let members replace the name from the identity provider.
   #[error("the workspace policy does not allow changing the display name")]
   DisplayNameOverrideNotAllowed,
+  /// The identity provider's picture shows and the policy doesn't let people replace it (#2071).
+  #[error("the workspace takes profile pictures from the identity provider")]
+  AvatarFromIdentityProvider,
   /// An invitation for the address is open in the space already (one per address and space).
   #[error("an invitation for this address is open; revoke it first")]
   InviteAlreadyOpen,
@@ -419,6 +422,7 @@ impl ApiError {
       | Self::ImportNotAllowed
       | Self::RecoveryPassphraseNotAllowed
       | Self::DisplayNameOverrideNotAllowed
+      | Self::AvatarFromIdentityProvider
       | Self::MfaRequired => StatusCode::FORBIDDEN,
       Self::Auth(
         AuthError::KeysUnavailable(_) | AuthError::ProviderDown(_) | AuthError::DpopReplayCacheFull,
@@ -488,6 +492,7 @@ impl ApiError {
       Self::LocalAccountsDisabled => ErrorCode::LocalAccountsDisabled,
       Self::RecoveryPassphraseNotAllowed => ErrorCode::RecoveryPassphraseNotAllowed,
       Self::DisplayNameOverrideNotAllowed => ErrorCode::DisplayNameOverrideNotAllowed,
+      Self::AvatarFromIdentityProvider => ErrorCode::AvatarFromIdentityProvider,
       Self::InviteAlreadyOpen => ErrorCode::InviteAlreadyOpen,
       Self::UnknownHost => ErrorCode::UnknownHost,
       Self::Conflict(_) => ErrorCode::Conflict,
@@ -823,6 +828,11 @@ mod tests {
         ApiError::DisplayNameOverrideNotAllowed,
         StatusCode::FORBIDDEN,
         ErrorCode::DisplayNameOverrideNotAllowed,
+      ),
+      (
+        ApiError::AvatarFromIdentityProvider,
+        StatusCode::FORBIDDEN,
+        ErrorCode::AvatarFromIdentityProvider,
       ),
       (
         ApiError::InviteAlreadyOpen,

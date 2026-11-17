@@ -3,8 +3,8 @@
 //! The server owns them (they are directory data, not message content). The hub loads a profile the
 //! first time a screen asks for it and keeps it for the session; avatars are fetched from their
 //! presigned URL (the page's CSP only lets images come from `blob:` and `data:`) and shown from a
-//! `blob:` URL. In the desktop app the shell moves the bytes to and from object storage: the
-//! webview's CSP only lets it reach the shell.
+//! `blob:` URL. In the desktop app the shell downloads them from object storage: the webview's CSP
+//! only lets it reach the shell. Uploads go to the server, which re-encodes them (issue #2071).
 //!
 //! Avatars are also kept in the persistent media cache (#749, [`crate::persisted_media`]): the
 //! cached picture shows as soon as a screen asks for it, before the profile has loaded; once the
@@ -15,19 +15,16 @@ use std::collections::{HashMap, HashSet};
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use teamcraft_proto::{
-  AvatarContentType, AvatarResponse, CreateAvatarUploadRequest, CreateAvatarUploadResponse, ProfileResponse,
-  UpdateProfileRequest, UserId,
-};
+use teamcraft_proto::{AvatarContentType, AvatarResponse, ProfileResponse, UpdateProfileRequest, UserId};
 
-use crate::auth::ApiMethod;
 use crate::auth::fetch::fetch;
 use crate::auth::tauri;
+use crate::auth::{ApiMethod, BinaryBody};
 use crate::components::file_views::blob_url;
 use crate::persisted_media::{self, CachedPicture, Freshness, MediaKey};
 use crate::picture_retries::{PictureMiss, PictureRetries};
 use crate::reactive::UpdateIfAlive;
-use crate::rest::{RestClient, RestError, check};
+use crate::rest::{RestClient, RestError};
 use crate::space_images::revoke;
 
 /// Largest avatar the picker accepts (the server has its own limit).
@@ -124,51 +121,23 @@ impl ProfileHub {
     Ok(())
   }
 
-  /// Announces the image, uploads it to the presigned URL and makes it the avatar.
-  pub async fn upload_avatar(
-    &self,
-    me: UserId,
-    content_type: AvatarContentType,
-    bytes: Vec<u8>,
-  ) -> Result<(), RestError> {
-    let profile = if tauri::is_available() {
-      let answer = check(tauri::avatar_upload(&content_type, &bytes).await?)?;
-      serde_json::from_str(&answer.body).map_err(|error| RestError::Unreadable(error.to_string()))?
-    } else {
-      self.upload_avatar_from_page(content_type, bytes).await?
+  /// Makes `png` (already cropped) the signed-in user's picture. The server checks and re-encodes
+  /// it; the answer is the profile with the new version.
+  pub async fn upload_avatar(&self, me: UserId, png: Vec<u8>) -> Result<(), RestError> {
+    let body = BinaryBody {
+      content_type: AvatarContentType::Png.as_str().to_owned(),
+      bytes: png,
     };
+    let profile: ProfileResponse = self
+      .client
+      .get_value()
+      .put_bytes("/api/v1/me/avatar", body)
+      .await?;
     self.forget_avatar(me);
     self.profiles.update_if_alive(|all| {
       all.insert(profile.user_id, profile);
     });
     Ok(())
-  }
-
-  /// The browser's way: the page reaches object storage itself.
-  async fn upload_avatar_from_page(
-    &self,
-    content_type: AvatarContentType,
-    bytes: Vec<u8>,
-  ) -> Result<ProfileResponse, RestError> {
-    let client = self.client.get_value();
-    let announce = CreateAvatarUploadRequest {
-      content_type: content_type.clone(),
-      size_bytes: bytes.len() as u64,
-    };
-    let upload: CreateAvatarUploadResponse = client.post("/api/v1/me/avatar", &announce).await?;
-    let headers = [("Content-Type".to_owned(), content_type.as_str().to_owned())];
-    let stored = fetch("PUT", &upload.upload_url, &headers, Some(bytes))
-      .await
-      .map_err(RestError::Unreadable)?;
-    if stored.status >= 300 {
-      return Err(RestError::Refused {
-        status: stored.status,
-        code: "avatar_upload_failed".to_owned(),
-      });
-    }
-    client
-      .post("/api/v1/me/avatar/complete", &serde_json::json!({}))
-      .await
   }
 
   pub async fn remove_avatar(&self, me: UserId) -> Result<(), RestError> {

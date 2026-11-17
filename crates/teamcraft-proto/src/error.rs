@@ -70,6 +70,9 @@ wire_enum! {
     /// The signed workspace policy does not let members replace the name from the identity provider
     /// (`directory.allow_display_name_override`).
     DisplayNameOverrideNotAllowed => "display_name_override_not_allowed",
+    /// The workspace takes pictures from the identity provider and doesn't let people replace the
+    /// provider's picture (`directory.avatar_source`, issue #2071).
+    AvatarFromIdentityProvider => "avatar_from_identity_provider",
     /// An invitation for the address is open in the space already; revoke it to invite anew.
     InviteAlreadyOpen => "invite_already_open",
     /// No OpenRouter API key is stored for the notetaker (admin.md §3.7).
@@ -353,6 +356,7 @@ mod tests {
       ErrorCode::ShareUnavailable,
       ErrorCode::RecoveryPassphraseNotAllowed,
       ErrorCode::DisplayNameOverrideNotAllowed,
+      ErrorCode::AvatarFromIdentityProvider,
       ErrorCode::InviteAlreadyOpen,
       ErrorCode::NotetakerKeyNotFound,
       ErrorCode::UnknownHost,

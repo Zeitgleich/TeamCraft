@@ -34,6 +34,7 @@ use crate::services::admin::{
 };
 use crate::services::audit::{self, Target as AuditTarget};
 use crate::services::oidc_brake::Brake;
+use crate::services::provider_avatars::ProviderPictures;
 use crate::state::AppState;
 
 const NOTE_DISABLED: &str = "disabled through SCIM";
@@ -202,8 +203,18 @@ pub async fn create_user(
     DeactivationCause::Disabled,
   )
   .await?;
+  note_photo(state, user, &attributes).await;
   let row = load_user(state, caller.client, user).await?;
   answer(state, caller.client, row, StatusCode::CREATED).await
+}
+
+/// Hands the user's photo to the picture import (issue #2071). The picture is secondary: a failure
+/// to remove one doesn't fail the provisioning, and the next write tries again.
+async fn note_photo(state: &AppState, user: UserId, attributes: &UserAttributes) {
+  if let Err(error) = ProviderPictures::note_scim_photo(state, user, attributes.maybe_photo.as_deref()).await
+  {
+    warn!(user_id = %user, %error, "applying a SCIM photo failed");
+  }
 }
 
 pub async fn replace_user(
@@ -229,7 +240,11 @@ pub async fn patch_user(
   let request: PatchRequest = serde_json::from_value(super::parse_body(state, body)?)
     .map_err(|error| ScimError::InvalidSyntax(error.to_string()))?;
   let request = request.checked()?;
-  let mut resource = attributes_of(&row).to_patchable();
+  let mut attributes = attributes_of(&row);
+  // The imported picture's source stands for the photo, so a PATCH that leaves photos alone
+  // changes nothing (provider_avatars recognizes its own source).
+  attributes.maybe_photo = state.database.provider_picture_source(row.user).await?;
+  let mut resource = attributes.to_patchable();
   apply_user_patch(&mut resource, &request.operations)?;
   let attributes = UserAttributes::from_resource(&resource)?;
   write(state, caller, row, &attributes, expected_version(headers)).await
@@ -321,6 +336,7 @@ async fn write(
     .await?;
     state.database.touch_scim_user(caller.client, row.user).await?;
   }
+  note_photo(state, row.user, attributes).await;
   let row = load_user(state, caller.client, row.user).await?;
   answer(state, caller.client, row, StatusCode::OK).await
 }
@@ -547,6 +563,9 @@ fn attributes_of(row: &ScimUserRow) -> UserAttributes {
     maybe_family_name: row.maybe_family_name.clone(),
     maybe_display_name: row.maybe_display_name.clone(),
     maybe_email: row.maybe_email.clone(),
+    // Filled in by a PATCH from the stored provider picture, so one that leaves photos alone
+    // keeps it.
+    maybe_photo: None,
     // What the provider asked for, not the account's state: a PATCH that doesn't name `active`
     // must not lift a held deactivation.
     is_active: row.is_active_requested,

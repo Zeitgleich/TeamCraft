@@ -98,6 +98,8 @@ pub struct AppState {
   pub holiday_feed: Arc<crate::holidays::HolidayFeed>,
   /// The runs asked for of the job that keeps calendar events current with the holidays (#1441).
   pub holiday_resync: Arc<crate::holidays::resync::HolidayResync>,
+  /// Pictures imported from the identity provider this run (issue #2071).
+  pub provider_pictures: Arc<crate::services::provider_avatars::ProviderPictures>,
   /// Forwards the apps' crash reports to the backend in the instance settings.
   pub crash_relay: Arc<crate::services::crash_reports::CrashRelay>,
   /// Outgoing webhooks: the HTTP clients and the workers' wake-up (docs/webhooks.md).

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT title, department, phone, time_zone, working_weekdays, working_start_minute,\n                working_end_minute, avatar_key, avatar_content_type, avatar_size_bytes\n         FROM user_profiles WHERE user_id = $1",
+  "query": "SELECT title, department, phone, time_zone, working_weekdays, working_start_minute,\n                working_end_minute, avatar_key, avatar_content_type, avatar_size_bytes,\n                provider_avatar_key, provider_avatar_size_bytes\n         FROM user_profiles WHERE user_id = $1",
   "describe": {
     "columns": [
       {
@@ -112,6 +112,28 @@
             "name": "avatar_size_bytes"
           }
         }
+      },
+      {
+        "ordinal": 10,
+        "name": "provider_avatar_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "user_profiles",
+            "name": "provider_avatar_key"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "provider_avatar_size_bytes",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "user_profiles",
+            "name": "provider_avatar_size_bytes"
+          }
+        }
       }
     ],
     "parameters": {
@@ -129,8 +151,10 @@
       true,
       true,
       true,
+      true,
+      true,
       true
     ]
   },
-  "hash": "dc1e5e5623b00f74f1c18701420bdd035538d638c745c0ee658f3da5bc7d7aa3"
+  "hash": "e75aae9332b9f0e726d7c083aa3b97681d135568490af6ab9ba7854a98c71a70"
 }

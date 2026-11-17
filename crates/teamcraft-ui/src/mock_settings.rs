@@ -449,6 +449,7 @@ fn default_runtime() -> RuntimeSettingsResponse {
       max_attachment_bytes: 100 * MIB,
       max_attachment_bytes_per_user: 2_048 * MIB,
       max_avatar_bytes: 2 * MIB,
+      avatar_side_px: 512,
       max_space_image_bytes: MIB,
       max_background_bytes: 5 * MIB,
       max_backgrounds_per_user: 5,

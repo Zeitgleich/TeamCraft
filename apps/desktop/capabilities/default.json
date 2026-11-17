@@ -27,7 +27,6 @@
     "allow-perf-configure",
     "allow-public-asset",
     "allow-avatar-download",
-    "allow-avatar-upload",
     "allow-server-state",
     "allow-server-check",
     "allow-server-suggest",

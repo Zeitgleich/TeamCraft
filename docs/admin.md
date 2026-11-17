@@ -1198,6 +1198,45 @@ through the emoji picker's "Workspace" section and the `:` suggestions of the co
   changes.
 - **Audit:** `custom_emoji_added`, `custom_emoji_renamed` and `custom_emoji_deleted`.
 
+### 3.12 Profile pictures (issue #2071)
+
+Where people's pictures come from is part of the signed workspace policy (`directory`), under
+Administration → People:
+
+| `avatar_source`     | What shows                                                                                                          |
+|---------------------|---------------------------------------------------------------------------------------------------------------------|
+| `user` (default)    | Everybody's own picture, uploaded and cropped in the app (desktop, web, Android, iOS); otherwise the initials       |
+| `identity_provider` | The identity provider's picture (OIDC `picture` claim, SCIM `photos`); without one, the own picture or the initials |
+
+- **Override:** with `identity_provider`, `allow_avatar_override` (off by default) lets people set
+  their own picture, which then shows instead. Without it, people can change their picture only while
+  the provider has none for them; the apps then show the picture read-only and say it comes from the
+  organization's sign-in. The server refuses an upload or removal with `avatar_from_identity_provider`
+  (403), and every profile carries `can_change_avatar` for the apps.
+- **Import from the provider:** only while `avatar_source` is `identity_provider`. A member's sign-in
+  whose token has a `picture` claim imports that URL when it differs from the imported one (a token
+  without the claim changes nothing: providers often leave it out of access tokens). A SCIM write
+  imports `photos` (the primary one, else type `photo`, else the first; a URL or a `data:` URI) and
+  a replace without `photos` removes the provider's picture (docs/provisioning.md §7.2). Imports run in
+  the background, one per person at a time; a failed one is tried again after an hour or when the
+  source changes. After switching to `identity_provider`, a person's picture arrives with their next
+  request (OIDC) or the provider's next write (SCIM).
+- **Fetching (SSRF):** the server fetches picture URLs itself: `https` only and public addresses only
+  (checked by the URL and again when the name resolves, redirects too, at most three), except URLs on
+  the identity provider's own origin (the issuer's scheme, host and port), which the operator
+  configured. Phase timeouts (connect 5 s, read 10 s, 30 s in all) and `max_avatar_bytes` bound a
+  fetch. Picture URLs are not logged; they may carry a token of the provider's.
+- **Checking:** uploads and provider pictures go through the same step: PNG, JPEG or WebP of the
+  declared type (SVG and everything else refused), decoded within the decoder limits on the picture
+  pool (`max_concurrent_image_decodes`, `image_decode_timeout_secs`), turned as their EXIF orientation
+  says, cut to the middle square and re-encoded as a PNG of at most `avatar_side_px` (512 px) per side.
+  What is stored has no metadata, and the client's dimensions are never trusted.
+- **Limits** (`[limits]`, also Settings → Limits): `max_avatar_bytes` (1 MiB, the upload or the
+  provider's file) and `avatar_side_px` (64 to 2048 px).
+- **Storage:** unencrypted directory data in object storage (e2ee.md §4.4), served through presigned
+  URLs to everybody who may see the person. Each person has at most two pictures, their own and the
+  provider's; both go with the account (admin.md §3.2).
+
 ## 4. Audit log
 
 Every admin action, recovery, device change and role change is logged with actor, target and time.
@@ -1343,7 +1382,7 @@ Groups that are stored and reset as a whole:
 | `notifications`  | read receipt default, urgent repeat interval and count, phone push delay, desktop attention                                                   |
 | `email_digest`   | on/off, default and shortest interval, grace period, subjects and texts                                                                       |
 | `shares`         | on/off, default and longest expiry, download cap, links per user                                                                              |
-| `limits`         | mentioned people per message (`max_mentions_per_message`, `max_mentions_without_group_mentions`), attachment size and per-user total, avatar and background sizes, backgrounds per user, group DM size, user group size, meeting mails per hour |
+| `limits`         | mentioned people per message (`max_mentions_per_message`, `max_mentions_without_group_mentions`), attachment size and per-user total, avatar and background sizes, the avatar's side (`avatar_side_px`), backgrounds per user, group DM size, user group size, meeting mails per hour |
 | `integration`    | default retention of integration channels; the bridge public URL (below)                                                                      |
 | `local_accounts` | on/off (off: the form disappears, `/auth/local/*` answers 403 `local_accounts_disabled`, sessions end), second factor required, activation and session lifetime, failed attempts, lockout |
 | `sign_in_page`   | which methods the sign-in page offers (SSO, e-mail and password) and in which order; help text per language; help link; whether every sign-in shows the identity provider's login page |

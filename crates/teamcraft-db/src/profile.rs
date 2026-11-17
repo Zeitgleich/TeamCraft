@@ -4,7 +4,7 @@ use teamcraft_proto::UserId;
 
 use crate::database::Database;
 use crate::error::DbError;
-use crate::ids::{from_db, to_db};
+use crate::ids::to_db;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct StoredProfile {
@@ -13,7 +13,10 @@ pub struct StoredProfile {
   pub maybe_phone: Option<String>,
   pub maybe_time_zone: Option<String>,
   pub maybe_working_hours: Option<StoredWorkingHours>,
+  /// The person's own picture.
   pub maybe_avatar: Option<StoredAvatar>,
+  /// The identity provider's picture (issue #2071), a PNG the server made.
+  pub maybe_provider_avatar: Option<StoredAvatar>,
 }
 
 /// Working hours: weekdays as a bit mask (bit 0 = Monday) and minutes since local midnight.
@@ -24,7 +27,7 @@ pub struct StoredWorkingHours {
   pub end_minute: u16,
 }
 
-/// A stored (or announced) avatar object.
+/// A stored avatar object.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredAvatar {
   pub key: String,
@@ -32,11 +35,15 @@ pub struct StoredAvatar {
   pub size_bytes: u64,
 }
 
+/// The type of every picture the server made itself.
+const PROVIDER_AVATAR_CONTENT_TYPE: &str = "image/png";
+
 impl Database {
   pub async fn get_profile(&self, user: UserId) -> Result<StoredProfile, DbError> {
     let row = sqlx::query!(
       r#"SELECT title, department, phone, time_zone, working_weekdays, working_start_minute,
-                working_end_minute, avatar_key, avatar_content_type, avatar_size_bytes
+                working_end_minute, avatar_key, avatar_content_type, avatar_size_bytes,
+                provider_avatar_key, provider_avatar_size_bytes
          FROM user_profiles WHERE user_id = $1"#,
       to_db(user),
     )
@@ -56,22 +63,12 @@ impl Database {
         row.working_end_minute,
       ),
       maybe_avatar: avatar(row.avatar_key, row.avatar_content_type, row.avatar_size_bytes)?,
+      maybe_provider_avatar: avatar(
+        row.provider_avatar_key,
+        Some(PROVIDER_AVATAR_CONTENT_TYPE.to_owned()),
+        row.provider_avatar_size_bytes,
+      )?,
     })
-  }
-
-  /// Users among `users` that have an avatar.
-  pub async fn users_with_avatar(
-    &self,
-    users: &[UserId],
-  ) -> Result<std::collections::HashSet<UserId>, DbError> {
-    let raw: Vec<i64> = users.iter().map(|user| to_db(*user)).collect();
-    let rows = sqlx::query!(
-      "SELECT user_id FROM user_profiles WHERE user_id = ANY($1) AND avatar_key IS NOT NULL",
-      &raw,
-    )
-    .fetch_all(self.pool())
-    .await?;
-    rows.into_iter().map(|row| from_db(row.user_id)).collect()
   }
 
   /// Replaces the text fields of the profile (the avatar stays).
@@ -103,73 +100,70 @@ impl Database {
     Ok(())
   }
 
-  /// Remembers an announced upload. Returns the previous pending object, which can be deleted.
-  pub async fn set_pending_avatar(
-    &self,
-    user: UserId,
-    avatar: &StoredAvatar,
-  ) -> Result<Option<String>, DbError> {
-    let previous = sqlx::query!(
-      "SELECT pending_avatar_key FROM user_profiles WHERE user_id = $1",
-      to_db(user)
-    )
-    .fetch_optional(self.pool())
-    .await?
-    .and_then(|row| row.pending_avatar_key);
-    sqlx::query!(
-      r#"INSERT INTO user_profiles (user_id, pending_avatar_key, pending_avatar_content_type,
-                                    pending_avatar_size_bytes)
+  /// Makes `avatar` the person's own picture. Returns the replaced object's key.
+  pub async fn replace_avatar(&self, user: UserId, avatar: &StoredAvatar) -> Result<Option<String>, DbError> {
+    let row = sqlx::query!(
+      r#"INSERT INTO user_profiles AS x (user_id, avatar_key, avatar_content_type, avatar_size_bytes)
          VALUES ($1, $2, $3, $4)
          ON CONFLICT (user_id) DO UPDATE
-         SET pending_avatar_key = $2, pending_avatar_content_type = $3, pending_avatar_size_bytes = $4"#,
+         SET avatar_key = $2, avatar_content_type = $3, avatar_size_bytes = $4, updated_at = now()
+         RETURNING (SELECT avatar_key FROM user_profiles WHERE user_id = $1) AS previous"#,
       to_db(user),
       avatar.key,
       avatar.content_type,
       i64::try_from(avatar.size_bytes).unwrap_or(i64::MAX),
     )
-    .execute(self.pool())
+    .fetch_one(self.pool())
     .await?;
-    Ok(previous)
+    Ok(row.previous.filter(|previous| *previous != avatar.key))
   }
 
-  pub async fn get_pending_avatar(&self, user: UserId) -> Result<Option<StoredAvatar>, DbError> {
+  /// What the identity provider's picture of the person was made from, if there is one.
+  pub async fn provider_picture_source(&self, user: UserId) -> Result<Option<String>, DbError> {
     let row = sqlx::query!(
-      r#"SELECT pending_avatar_key, pending_avatar_content_type, pending_avatar_size_bytes
-         FROM user_profiles WHERE user_id = $1"#,
-      to_db(user),
-    )
-    .fetch_optional(self.pool())
-    .await?;
-    match row {
-      Some(row) => avatar(
-        row.pending_avatar_key,
-        row.pending_avatar_content_type,
-        row.pending_avatar_size_bytes,
-      ),
-      None => Ok(None),
-    }
-  }
-
-  /// Makes the pending avatar the current one. Returns the replaced object's key.
-  pub async fn promote_pending_avatar(&self, user: UserId) -> Result<Option<String>, DbError> {
-    let previous = sqlx::query!(
-      "SELECT avatar_key FROM user_profiles WHERE user_id = $1",
+      "SELECT provider_picture_source FROM user_profiles WHERE user_id = $1",
       to_db(user)
     )
     .fetch_optional(self.pool())
-    .await?
-    .and_then(|row| row.avatar_key);
-    sqlx::query!(
-      r#"UPDATE user_profiles
-         SET avatar_key = pending_avatar_key, avatar_content_type = pending_avatar_content_type,
-             avatar_size_bytes = pending_avatar_size_bytes, pending_avatar_key = NULL,
-             pending_avatar_content_type = NULL, pending_avatar_size_bytes = NULL, updated_at = now()
-         WHERE user_id = $1 AND pending_avatar_key IS NOT NULL"#,
-      to_db(user),
-    )
-    .execute(self.pool())
     .await?;
-    Ok(previous)
+    Ok(row.and_then(|row| row.provider_picture_source))
+  }
+
+  /// Sets the identity provider's picture made from `source`, or removes it (`None`). Returns the
+  /// replaced object's key.
+  pub async fn set_provider_avatar(
+    &self,
+    user: UserId,
+    maybe_picture: Option<(&StoredAvatar, &str)>,
+  ) -> Result<Option<String>, DbError> {
+    let (maybe_key, maybe_size, maybe_source) = match maybe_picture {
+      Some((avatar, source)) => (
+        Some(avatar.key.as_str()),
+        Some(i64::try_from(avatar.size_bytes).unwrap_or(i64::MAX)),
+        Some(source),
+      ),
+      None => (None, None, None),
+    };
+    let row = sqlx::query!(
+      r#"INSERT INTO user_profiles AS x (user_id, provider_avatar_key, provider_avatar_size_bytes,
+                                         provider_picture_source)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (user_id) DO UPDATE
+         SET provider_avatar_key = $2, provider_avatar_size_bytes = $3, provider_picture_source = $4,
+             updated_at = now()
+         RETURNING (SELECT provider_avatar_key FROM user_profiles WHERE user_id = $1) AS previous"#,
+      to_db(user),
+      maybe_key,
+      maybe_size,
+      maybe_source,
+    )
+    .fetch_one(self.pool())
+    .await?;
+    Ok(
+      row
+        .previous
+        .filter(|previous| Some(previous.as_str()) != maybe_key),
+    )
   }
 
   /// Removes the current avatar. Returns its key.

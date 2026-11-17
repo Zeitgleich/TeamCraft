@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Settings as a hub, like the Android app: name, presence and status on top, then one page each
 /// for notifications, chats, privacy and security and devices, and sign-out.
@@ -16,6 +17,8 @@ struct SettingsView: View {
   @State private var maybeStatusProblem: TextProblem?
   @State private var isSavingStatus = false
   @State private var maybeProfileJSON: String?
+  @State private var maybeOwnPicture: UIImage?
+  @State private var maybePictureProblem: TextProblem?
   @State private var isEditingName = false
   @State private var nameText = ""
   @State private var maybeNameProblem: TextProblem?
@@ -30,7 +33,15 @@ struct SettingsView: View {
       Form {
         Section {
           HStack(spacing: 12) {
-            AvatarView(name: account.displayName, size: 44)
+            ProfileAvatarMenu(
+              account: account,
+              maybeProfileJSON: maybeProfileJSON,
+              maybePicture: $maybeOwnPicture,
+              maybeProblem: $maybePictureProblem,
+              onEditName: startEditingName,
+              onResetName: { if let profile = maybeProfileJSON { Task { await saveName(profile: profile, name: nil) } } },
+              onChanged: { maybeProfileJSON = await model.ownProfileJSON() }
+            )
             VStack(alignment: .leading, spacing: 2) {
               Text(account.displayName).font(.app(.headline))
               HStack(spacing: 6) {
@@ -39,8 +50,9 @@ struct SettingsView: View {
               }
             }
           }
+          FieldMessage(maybeError: maybePictureProblem?.message)
         }
-        if let profile = maybeProfileJSON, OwnProfileDocument.canOverrideDisplayName(in: profile) {
+        if isEditingName, let profile = maybeProfileJSON {
           displayNameSection(profile: profile)
         }
         HolidayRegionSection()
@@ -85,48 +97,53 @@ struct SettingsView: View {
       .onDisappear { NotificationCenter.default.post(name: AppFont.mayHaveChanged, object: nil) }
       // The name changes through the profile update event; the profile is read again with it.
       .task(id: account.displayName) { maybeProfileJSON = await model.ownProfileJSON() }
+      // The picture shown follows the profile's version: a new one, or one the provider sent.
+      .task(id: maybeProfileJSON.flatMap(OwnProfileDocument.avatarVersion(in:))) {
+        guard let profile = maybeProfileJSON else { return }
+        if OwnProfileDocument.hasAvatar(in: profile), let data = await model.ownAvatarData(userId: account.userId) {
+          maybeOwnPicture = UIImage(data: data)
+        } else if !OwnProfileDocument.hasAvatar(in: profile) {
+          maybeOwnPicture = nil
+        }
+      }
       .toolbar {
         ToolbarItem(placement: .confirmationAction) { Button("done") { dismiss() } }
       }
     }
   }
 
-  /// Changing the name under the picture, when the workspace policy lets people (issue #408).
+  /// The field that changes the name under the picture (issue #408), opened from the picture's
+  /// menu while the workspace policy lets people.
   private func displayNameSection(profile: String) -> some View {
     Section {
-      if isEditingName {
-        VStack(alignment: .leading, spacing: 6) {
-          LabeledContent("profile_name_label") {
-            TextField("profile_name_label", text: $nameText)
-              .multilineTextAlignment(.trailing)
-              .textContentType(.name)
-              .focused($isNameFocused)
-              .accessibilityFocused($isNameAccessibilityFocused)
-              .fieldError(maybeNameProblem?.message)
-              .onChange(of: nameText) { maybeNameProblem = nil }
-          }
-          FieldMessage(maybeError: maybeNameProblem?.message)
+      VStack(alignment: .leading, spacing: 6) {
+        LabeledContent("profile_name_label") {
+          TextField("profile_name_label", text: $nameText)
+            .multilineTextAlignment(.trailing)
+            .textContentType(.name)
+            .focused($isNameFocused)
+            .accessibilityFocused($isNameAccessibilityFocused)
+            .fieldError(maybeNameProblem?.message)
+            .onChange(of: nameText) { maybeNameProblem = nil }
         }
-        Button("profile_name_save") { Task { await saveName(profile: profile, name: nameText) } }
-          .disabled(isSavingName)
-        Button("cancel", role: .cancel) {
-          isEditingName = false
-          maybeNameProblem = nil
-        }
+        FieldMessage(maybeError: maybeNameProblem?.message)
+      }
+      Button("profile_name_save") { Task { await saveName(profile: profile, name: nameText) } }
         .disabled(isSavingName)
-      } else {
-        Button("profile_name_change") {
-          nameText = OwnProfileDocument.displayNameOverride(in: profile) ?? account.displayName
-          maybeNameProblem = nil
-          isEditingName = true
-          isNameFocused = true
-        }
+      Button("cancel", role: .cancel) {
+        isEditingName = false
+        maybeNameProblem = nil
       }
-      if OwnProfileDocument.displayNameOverride(in: profile) != nil {
-        Button("profile_name_reset") { Task { await saveName(profile: profile, name: nil) } }
-          .disabled(isSavingName)
-      }
+      .disabled(isSavingName)
     }
+  }
+
+  private func startEditingName() {
+    guard let profile = maybeProfileJSON else { return }
+    nameText = OwnProfileDocument.displayNameOverride(in: profile) ?? account.displayName
+    maybeNameProblem = nil
+    isEditingName = true
+    isNameFocused = true
   }
 
   /// A blank or invalid name is said at the field; so is the server's refusal, with the input kept.
@@ -139,7 +156,7 @@ struct SettingsView: View {
     isSavingName = true
     let trimmed = maybeName?.trimmingCharacters(in: .whitespacesAndNewlines)
     if let problem = await model.setDisplayName(profileJSON: profile, to: trimmed) {
-      if isEditingName { showNameProblem(problem) }
+      if isEditingName { showNameProblem(problem) } else { maybePictureProblem = problem }
     } else {
       isEditingName = false
       maybeProfileJSON = await model.ownProfileJSON()

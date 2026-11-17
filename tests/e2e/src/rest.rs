@@ -50,6 +50,23 @@ impl Stack {
     self.request(user, Method::DELETE, path, None).await
   }
 
+  /// A `PUT` with a binary body of `content_type` (a picture).
+  pub async fn put_bytes(&self, user: &UserTokens, path: &str, content_type: &str, bytes: Vec<u8>) -> Reply {
+    let token = user.token_async().await;
+    let response = self
+      .http
+      .put(format!("{}/api/v1{path}", self.base_url))
+      .bearer_auth(token)
+      .header(reqwest::header::CONTENT_TYPE, content_type)
+      .body(bytes)
+      .send()
+      .await
+      .expect("request reaches the server");
+    let status = response.status();
+    let body = response.json().await.unwrap_or(Value::Null);
+    Reply { status, body }
+  }
+
   /// A request with an arbitrary bearer token (guest sessions, bots) or none.
   pub async fn request_with(
     &self,

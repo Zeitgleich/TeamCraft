@@ -3,6 +3,7 @@ use teamcraft_proto::{GatewayEvent, Role, UserKind};
 use tracing::info;
 
 use super::bots;
+use super::provider_avatars::ProviderPictures;
 use crate::auth::{AuthError, AuthenticatedUser, PresentedToken, TokenBinding, TokenIdentity, enforce_dpop};
 use crate::error::ApiError;
 use crate::meetings::guest;
@@ -84,6 +85,7 @@ fn bot_identity(bot: &teamcraft_db::StoredBot) -> TokenIdentity {
     maybe_organization: None,
     token_binding: TokenBinding::ServerIssued,
     maybe_provider_token: None,
+    maybe_picture_url: None,
   }
 }
 
@@ -107,6 +109,7 @@ pub fn guest_identity(invite_subject: String, display_name: String, issued_at: i
     maybe_organization: None,
     token_binding: TokenBinding::ServerIssued,
     maybe_provider_token: None,
+    maybe_picture_url: None,
   }
 }
 
@@ -155,6 +158,9 @@ pub async fn authenticate(state: &AppState, identity: TokenIdentity) -> Result<A
   }
   if user.is_deactivated {
     return Err(AuthError::AccountDeactivated.into());
+  }
+  if user.kind == UserKind::Member {
+    ProviderPictures::note_sign_in(state, user.id, identity.maybe_picture_url.as_deref());
   }
 
   let may_use_email =

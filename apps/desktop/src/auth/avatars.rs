@@ -1,6 +1,6 @@
 //! Profile pictures through the shell. They live in object storage behind presigned URLs, and the
 //! webview's content security policy keeps object storage out of `connect-src`, so the shell asks
-//! the API for the presigned URL and moves the bytes itself. The URL is always the one in the API
+//! the API for the presigned URL and downloads the bytes itself (uploads go to the API). The URL is always the one in the API
 //! answer the shell has just read, never one the page passes in.
 
 use std::net::{IpAddr, SocketAddr};
@@ -10,21 +10,16 @@ use std::time::Duration;
 use base64::Engine;
 use teamcraft_client_api::remote::ApiMethod;
 use teamcraft_client_api::server_entry::HttpPolicy;
-use teamcraft_proto::{
-  AvatarContentType, AvatarResponse, CreateAvatarUploadRequest, CreateAvatarUploadResponse, UserId,
-};
+use teamcraft_proto::{AvatarContentType, AvatarResponse, UserId};
 
 use super::store::TokenStore;
-use super::{ApiBytesResponse, ApiResponse, AuthError, AuthService, HTTP_POLICY};
+use super::{ApiBytesResponse, AuthError, AuthService, HTTP_POLICY};
 
-/// The largest picture moved either way. The server's own limit (`max_avatar_bytes`) is lower by
+/// The largest picture downloaded. The server's own limit (`max_avatar_bytes`) is lower by
 /// default; this only keeps a hostile answer from making the shell buffer an unbounded body.
 pub const MAX_AVATAR_BYTES: u64 = 16 * 1024 * 1024;
-/// A whole transfer to or from object storage; longer than an API call, for slow links.
+/// A whole transfer from object storage; longer than an API call, for slow links.
 const OBJECT_TIMEOUT: Duration = Duration::from_secs(60);
-/// Answer of a refused storage upload, in the API's error shape so the page maps it like one.
-const UPLOAD_REFUSED_BODY: &str =
-  r#"{"error_code":"avatar_upload_failed","message":"object storage refused the upload"}"#;
 
 /// Where the shell may send a presigned URL. The URL comes from the server, so a hostile server
 /// must not be able to point the shell at services on this computer or its network, which have no
@@ -70,46 +65,6 @@ impl<S: TokenStore> AuthService<S> {
     })
   }
 
-  /// Makes `bytes` the signed-in user's picture: announces it, uploads it to the presigned URL the
-  /// API answers with, and completes it. Returns the answer of the first API step that refused, a
-  /// refusal in the API's shape when storage refused, or the completion's answer (the profile).
-  pub async fn avatar_upload(
-    &self,
-    content_type: AvatarContentType,
-    bytes: Vec<u8>,
-  ) -> Result<ApiResponse, AuthError> {
-    check_upload(&content_type, bytes.len())?;
-    let reach = self.storage_reach()?;
-    let announce = CreateAvatarUploadRequest {
-      content_type: content_type.clone(),
-      size_bytes: bytes.len() as u64,
-    };
-    let body =
-      serde_json::to_string(&announce).map_err(|error| AuthError::InvalidResponse(error.to_string()))?;
-    let answer = self
-      .api_request(ApiMethod::Post, "/api/v1/me/avatar", Some(body))
-      .await?;
-    if answer.status >= 300 {
-      return Ok(answer);
-    }
-    let upload: CreateAvatarUploadResponse = parse(&answer.body)?;
-    let url = presigned_url(&upload.upload_url, reach)?;
-    let status = put_object(&self.object_client(reach)?, url, content_type.as_str(), bytes).await?;
-    if !(200..300).contains(&status) {
-      return Ok(ApiResponse {
-        status,
-        body: UPLOAD_REFUSED_BODY.to_owned(),
-      });
-    }
-    self
-      .api_request(
-        ApiMethod::Post,
-        "/api/v1/me/avatar/complete",
-        Some("{}".to_owned()),
-      )
-      .await
-  }
-
   /// How far presigned URLs of the active server may reach.
   fn storage_reach(&self) -> Result<StorageReach, AuthError> {
     if HTTP_POLICY == HttpPolicy::Allowed {
@@ -134,17 +89,6 @@ impl<S: TokenStore> AuthService<S> {
       StorageReach::PublicOnly => public_client().cloned(),
     }
   }
-}
-
-/// Only the image types the server takes, and nothing above [`MAX_AVATAR_BYTES`].
-fn check_upload(content_type: &AvatarContentType, size_bytes: usize) -> Result<(), AuthError> {
-  if let AvatarContentType::Unknown(other) = content_type {
-    return Err(AuthError::Unsupported(format!("{other:?} is not a picture type")));
-  }
-  if size_bytes as u64 > MAX_AVATAR_BYTES {
-    return Err(AuthError::Unsupported("the picture is too large".to_owned()));
-  }
-  Ok(())
 }
 
 /// A presigned URL from an API answer, if the shell may send a request there under `reach`, with
@@ -302,24 +246,6 @@ fn is_same_media_type(served: &str, expected: &str) -> bool {
   essence.eq_ignore_ascii_case(expected)
 }
 
-/// `PUT url` with the picture, without credentials; the storage's status.
-async fn put_object(
-  http: &reqwest::Client,
-  url: reqwest::Url,
-  content_type: &str,
-  bytes: Vec<u8>,
-) -> Result<u16, AuthError> {
-  let response = http
-    .put(url)
-    .timeout(OBJECT_TIMEOUT)
-    .header(reqwest::header::CONTENT_TYPE, content_type)
-    .body(bytes)
-    .send()
-    .await
-    .map_err(network)?;
-  Ok(response.status().as_u16())
-}
-
 fn parse<T: serde::de::DeserializeOwned>(body: &str) -> Result<T, AuthError> {
   serde_json::from_str(body).map_err(|error| AuthError::InvalidResponse(error.to_string()))
 }
@@ -344,7 +270,6 @@ mod tests {
   use tokio::net::TcpListener;
 
   use super::*;
-  use crate::auth::store::MemoryStore;
 
   const PNG: &str = "image/png";
 
@@ -483,26 +408,6 @@ mod tests {
         panic!("a closed port is a network error");
       };
       assert!(!message.contains("secret"), "{message}");
-    }
-
-    #[tokio::test]
-    async fn an_upload_above_the_limit_never_leaves_the_shell() {
-      let service = AuthService::new(None, MemoryStore::default()).unwrap();
-      let too_large = vec![0; MAX_AVATAR_BYTES as usize + 1];
-      assert!(matches!(
-        service.avatar_upload(AvatarContentType::Png, too_large).await,
-        Err(AuthError::Unsupported(_))
-      ));
-    }
-
-    #[tokio::test]
-    async fn an_upload_of_an_unknown_type_is_refused() {
-      let service = AuthService::new(None, MemoryStore::default()).unwrap();
-      let svg = AvatarContentType::Unknown("image/svg+xml".to_owned());
-      assert!(matches!(
-        service.avatar_upload(svg, vec![1]).await,
-        Err(AuthError::Unsupported(_))
-      ));
     }
   }
 

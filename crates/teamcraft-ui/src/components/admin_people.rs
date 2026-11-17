@@ -1,5 +1,5 @@
 use leptos::prelude::*;
-use teamcraft_proto::{DisplayNameFormat, PushContentMode, StatusPreset, WorkspacePolicy};
+use teamcraft_proto::{AvatarSource, DisplayNameFormat, PushContentMode, StatusPreset, WorkspacePolicy};
 
 use crate::components::admin_console::SectionHeader;
 use crate::components::admin_policy::{
@@ -29,6 +29,12 @@ pub fn PeopleSection() -> impl IntoView {
     ["as_provided", "first_last", "last_first", "username"]
       .into_iter()
       .map(|slug| (slug.to_owned(), i18n.t(&format!("policy-name-{slug}"))))
+      .collect()
+  });
+  let avatar_options = Signal::derive(move || {
+    ["user", "identity_provider"]
+      .into_iter()
+      .map(|slug| (slug.to_owned(), i18n.t(&format!("policy-avatar-source-{slug}"))))
       .collect()
   });
   let away_options = Signal::derive(move || {
@@ -89,6 +95,24 @@ pub fn PeopleSection() -> impl IntoView {
           hint=Signal::derive(move || i18n.t("policy-name-override-hint"))
           checked=Signal::derive(move || draft.get().directory.allow_display_name_override)
           on_change=move |value| policy.edit(|p| p.directory.allow_display_name_override = value)
+        />
+        <SelectRow
+          id="policy-avatar-source"
+          label=Signal::derive(move || i18n.t("policy-avatar-source"))
+          options=avatar_options
+          selected=Signal::derive(move || draft.get().directory.avatar_source.as_str().to_owned())
+          on_select=move |value: String| {
+            policy.edit(|p| p.directory.avatar_source = AvatarSource::from(value));
+          }
+        />
+        <p class="muted-text small">{move || i18n.t("policy-avatar-source-hint")}</p>
+        <CheckRow
+          name="allow_avatar_override"
+          label=Signal::derive(move || i18n.t("policy-avatar-override"))
+          hint=Signal::derive(move || i18n.t("policy-avatar-override-hint"))
+          checked=Signal::derive(move || draft.get().directory.allow_avatar_override)
+          disabled=Signal::derive(move || draft.get().directory.avatar_source != AvatarSource::IdentityProvider)
+          on_change=move |value| policy.edit(|p| p.directory.allow_avatar_override = value)
         />
       </fieldset>
 

@@ -6,15 +6,24 @@ use crate::common;
 
 use std::time::Duration;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use common::*;
+use image::ImageFormat;
 use reqwest::StatusCode;
-use serde_json::json;
+use serde_json::{Value, json};
 use teamcraft_proto::GatewayEvent;
-use teamcraft_server::testing::TestApp;
+use teamcraft_server::testing::{TestApp, TestUser};
+
+use crate::session_policy::publish_policy;
+use crate::space_images::{noise_png, picture, put_image};
 
 macro_rules! app {
   () => {
-    match TestApp::start_with_storage(|_| {}).await {
+    app!(|_| {})
+  };
+  ($customize:expr) => {
+    match TestApp::start_with_storage($customize).await {
       Some(app) => app,
       None => return,
     }
@@ -115,74 +124,57 @@ mod fields {
 mod avatars {
   use super::*;
 
-  async fn upload(app: &TestApp, url: &str, content_type: &str, bytes: &[u8]) -> StatusCode {
-    app
-      .http
-      .put(url)
-      .header("content-type", content_type)
-      .body(bytes.to_vec())
-      .send()
-      .await
-      .unwrap()
-      .status()
-  }
-
   #[tokio::test]
-  async fn an_avatar_goes_through_announce_upload_complete_and_download() {
-    let app = app!();
+  async fn an_upload_is_re_encoded_as_a_square_png_and_downloaded_by_people_who_see_the_user() {
+    let app = app!(|settings| settings.limits.avatar_side_px = 128);
     let (carol, dave) = (member("carol"), member("dave"));
     let carol_id = user_id(&app, &carol).await;
     channel_with(&app, &[&carol, &dave]).await;
-    let image = b"\x89PNG not really an image but the right size";
 
     assert_eq!(
       app.get(&dave, &format!("/users/{carol_id}/avatar")).await.status,
       StatusCode::NOT_FOUND
     );
-    let announced = app
-      .post(
-        &carol,
-        "/me/avatar",
-        json!({"content_type": "image/png", "size_bytes": image.len()}),
-      )
-      .await;
-    assert_eq!(announced.status, StatusCode::CREATED, "{}", announced.body);
-    let url = announced.body["upload_url"].as_str().unwrap().to_owned();
-
-    // Completing before the upload fails; so does uploading a different type.
-    assert_eq!(
-      app.post(&carol, "/me/avatar/complete", json!({})).await.status,
-      StatusCode::CONFLICT
-    );
-    assert_ne!(
-      upload(&app, &url, "text/html", image).await,
-      StatusCode::OK,
-      "the type is signed"
-    );
-    assert_eq!(upload(&app, &url, "image/png", image).await, StatusCode::OK);
-    let completed = app.post(&carol, "/me/avatar/complete", json!({})).await;
-    assert_eq!(completed.status, StatusCode::OK, "{}", completed.body);
-    assert_eq!(completed.body["has_avatar"], true);
+    // A wide JPEG: the server keeps the middle square and scales it to the configured side.
+    let (status, profile) = put_image(
+      &app,
+      &carol,
+      "/me/avatar",
+      "image/jpeg",
+      &picture(600, 300, ImageFormat::Jpeg),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{profile}");
+    assert_eq!(profile["has_avatar"], true);
+    assert_eq!(profile["can_change_avatar"], true);
     assert!(
-      completed.body["avatar_version"]
+      profile["avatar_version"]
         .as_str()
         .is_some_and(|version| !version.contains('/')),
       "clients key their cached copy by an opaque version"
     );
 
-    let avatar = app.get(&dave, &format!("/users/{carol_id}/avatar")).await;
-    assert_eq!(avatar.status, StatusCode::OK, "{}", avatar.body);
-    assert_eq!(avatar.body["content_type"], "image/png");
-    assert_eq!(avatar.body["size_bytes"], image.len());
-    let fetched = app
-      .http
-      .get(avatar.body["download_url"].as_str().unwrap())
-      .send()
-      .await
-      .unwrap();
-    assert_eq!(fetched.status(), StatusCode::OK);
-    assert_eq!(fetched.headers()["content-type"], "image/png");
-    assert_eq!(fetched.bytes().await.unwrap().as_ref(), image);
+    let png = download(&app, &dave, &carol_id).await;
+    assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"), "re-encoded as PNG");
+    let decoded = image::load_from_memory(&png).unwrap();
+    assert_eq!((decoded.width(), decoded.height()), (128, 128));
+
+    // A second picture replaces the first under a new version.
+    let (_, second) = put_image(
+      &app,
+      &carol,
+      "/me/avatar",
+      "image/png",
+      &picture(64, 64, ImageFormat::Png),
+    )
+    .await;
+    assert_ne!(second["avatar_version"], profile["avatar_version"]);
+    let decoded = image::load_from_memory(&download(&app, &dave, &carol_id).await).unwrap();
+    assert_eq!(
+      (decoded.width(), decoded.height()),
+      (64, 64),
+      "small pictures stay small"
+    );
 
     assert_eq!(
       app.delete(&carol, "/me/avatar").await.status,
@@ -196,44 +188,199 @@ mod avatars {
   }
 
   #[tokio::test]
-  async fn a_wrong_size_is_not_accepted_and_limits_apply() {
-    let app = app!();
+  async fn only_raster_pictures_of_the_declared_type_within_the_limit_are_taken() {
+    let app = app!(|settings| settings.limits.max_avatar_bytes = 4000);
     let carol = member("carol");
-    let announced = app
-      .post(
-        &carol,
-        "/me/avatar",
-        json!({"content_type": "image/jpeg", "size_bytes": 100}),
-      )
-      .await;
-    let url = announced.body["upload_url"].as_str().unwrap().to_owned();
-    // The signature covers the announced length: the storage refuses another one.
-    assert_ne!(upload(&app, &url, "image/jpeg", &[1u8; 99]).await, StatusCode::OK);
+    let png = picture(8, 8, ImageFormat::Png);
+    for (content_type, body, status) in [
+      ("image/png", Vec::new(), StatusCode::BAD_REQUEST),
+      ("image/jpeg", png.clone(), StatusCode::BAD_REQUEST),
+      ("image/gif", b"GIF89a....".to_vec(), StatusCode::BAD_REQUEST),
+      (
+        "image/svg+xml",
+        br#"<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>"#.to_vec(),
+        StatusCode::BAD_REQUEST,
+      ),
+      ("text/html", b"<html></html>".to_vec(), StatusCode::BAD_REQUEST),
+      (
+        "image/png",
+        png[..png.len() / 2].to_vec(),
+        StatusCode::BAD_REQUEST,
+      ),
+      ("image/png", noise_png(200), StatusCode::PAYLOAD_TOO_LARGE),
+    ] {
+      let (answer, body) = put_image(&app, &carol, "/me/avatar", content_type, &body).await;
+      assert_eq!(answer, status, "{content_type}: {body}");
+    }
+    assert_eq!(app.get(&carol, "/me/profile").await.body["has_avatar"], false);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_picture_from_the_identity_provider_shows_and_locks_the_own_one_unless_overrides_are_allowed() {
+    let app = app!();
+    let (carol, dave) = (member("carol"), member("dave"));
+    let carol_id = user_id(&app, &carol).await;
+    channel_with(&app, &[&carol, &dave]).await;
+    let (_, own) = put_image(
+      &app,
+      &carol,
+      "/me/avatar",
+      "image/png",
+      &picture(32, 32, ImageFormat::Png),
+    )
+    .await;
+
+    publish_policy(&app, 1, |p| {
+      p["directory"]["avatar_source"] = json!("identity_provider")
+    })
+    .await;
+    // No provider picture yet: the own one still shows, and may still be changed.
+    let profile = app.get(&carol, "/me/profile").await.body;
+    assert_eq!(profile["avatar_version"], own["avatar_version"]);
+    assert_eq!(profile["can_change_avatar"], true);
+
+    // The provider sends a picture through SCIM; it is imported in the background.
+    let scim = scim_token(&app).await;
+    let photo = format!(
+      "data:image/jpeg;base64,{}",
+      STANDARD.encode(picture(300, 200, ImageFormat::Jpeg))
+    );
+    let created = scim_send(
+      &app,
+      &scim,
+      reqwest::Method::POST,
+      "/Users",
+      &json!({
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+        "userName": carol.subject,
+        "active": true,
+        "photos": [{"value": photo, "type": "photo", "primary": true}],
+      }),
+    )
+    .await;
+    assert_eq!(created.0, StatusCode::CREATED, "{}", created.1);
+    let scim_id = created.1["id"].as_str().unwrap().to_owned();
+    let profile = profile_until(&app, &carol, |profile| {
+      profile["avatar_version"] != own["avatar_version"]
+    })
+    .await;
+    assert_eq!(profile["can_change_avatar"], false);
+    let decoded = image::load_from_memory(&download(&app, &dave, &carol_id).await).unwrap();
     assert_eq!(
-      app.post(&carol, "/me/avatar/complete", json!({})).await.status,
-      StatusCode::CONFLICT
+      (decoded.width(), decoded.height()),
+      (200, 200),
+      "the middle square"
     );
 
-    for (body, status) in [
-      (
-        json!({"content_type": "image/gif", "size_bytes": 10}),
-        StatusCode::BAD_REQUEST,
-      ),
-      (
-        json!({"content_type": "image/png", "size_bytes": 0}),
-        StatusCode::BAD_REQUEST,
-      ),
-      (
-        json!({"content_type": "image/png", "size_bytes": 2 * 1024 * 1024}),
-        StatusCode::PAYLOAD_TOO_LARGE,
-      ),
-    ] {
-      assert_eq!(
-        app.post(&carol, "/me/avatar", body.clone()).await.status,
-        status,
-        "{body}"
-      );
-    }
+    let (status, refused) = put_image(
+      &app,
+      &carol,
+      "/me/avatar",
+      "image/png",
+      &picture(16, 16, ImageFormat::Png),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert_eq!(refused["error_code"], "avatar_from_identity_provider");
+    assert_eq!(
+      app.delete(&carol, "/me/avatar").await.status,
+      StatusCode::FORBIDDEN
+    );
+
+    // With overrides allowed, the own picture shows again and may be changed.
+    publish_policy(&app, 2, |p| {
+      p["directory"]["avatar_source"] = json!("identity_provider");
+      p["directory"]["allow_avatar_override"] = json!(true);
+    })
+    .await;
+    let profile = app.get(&carol, "/me/profile").await.body;
+    assert_eq!(profile["avatar_version"], own["avatar_version"]);
+    assert_eq!(profile["can_change_avatar"], true);
+    publish_policy(&app, 3, |p| {
+      p["directory"]["avatar_source"] = json!("identity_provider")
+    })
+    .await;
+
+    // A replace without photos removes the provider's picture: the own one shows again.
+    let replaced = scim_send(
+      &app,
+      &scim,
+      reqwest::Method::PUT,
+      &format!("/Users/{scim_id}"),
+      &json!({
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+        "userName": carol.subject,
+        "active": true,
+      }),
+    )
+    .await;
+    assert_eq!(replaced.0, StatusCode::OK, "{}", replaced.1);
+    let profile = app.get(&carol, "/me/profile").await.body;
+    assert_eq!(profile["avatar_version"], own["avatar_version"]);
+    assert_eq!(profile["can_change_avatar"], true);
     app.stop().await;
+  }
+
+  async fn download(app: &TestApp, viewer: &TestUser, user: &str) -> Vec<u8> {
+    let avatar = app.get(viewer, &format!("/users/{user}/avatar")).await;
+    assert_eq!(avatar.status, StatusCode::OK, "{}", avatar.body);
+    assert_eq!(avatar.body["content_type"], "image/png");
+    let fetched = app
+      .http
+      .get(avatar.body["download_url"].as_str().unwrap())
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(fetched.status(), StatusCode::OK);
+    let bytes = fetched.bytes().await.unwrap().to_vec();
+    assert_eq!(avatar.body["size_bytes"], bytes.len());
+    bytes
+  }
+
+  /// The caller's profile once `is_done` holds; the import runs in the background.
+  async fn profile_until(app: &TestApp, user: &TestUser, is_done: impl Fn(&Value) -> bool) -> Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+      let profile = app.get(user, "/me/profile").await.body;
+      if is_done(&profile) {
+        return profile;
+      }
+      assert!(tokio::time::Instant::now() < deadline, "not imported: {profile}");
+      tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+  }
+
+  async fn scim_token(app: &TestApp) -> String {
+    user_id(app, &admin()).await;
+    let reply = app
+      .post(
+        &admin(),
+        "/admin/scim/clients",
+        json!({"name": "Identity provider", "identity_attribute": "user_name"}),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    reply.body["token"].as_str().unwrap().to_owned()
+  }
+
+  async fn scim_send(
+    app: &TestApp,
+    token: &str,
+    method: reqwest::Method,
+    path: &str,
+    body: &Value,
+  ) -> (StatusCode, Value) {
+    let response = app
+      .http
+      .request(method, format!("{}/scim/v2{path}", app.base_url))
+      .bearer_auth(token)
+      .header("content-type", "application/scim+json")
+      .body(body.to_string())
+      .send()
+      .await
+      .unwrap();
+    let status = response.status();
+    (status, response.json().await.unwrap_or(Value::Null))
   }
 }

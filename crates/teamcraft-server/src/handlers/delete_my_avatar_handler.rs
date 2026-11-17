@@ -7,7 +7,8 @@ use crate::error::ApiError;
 use crate::services::profiles;
 use crate::state::AppState;
 
-/// Removes the caller's avatar.
+/// Removes the caller's own picture. Refused with `avatar_from_identity_provider` while the
+/// workspace shows the identity provider's picture and allows no override.
 #[utoipa::path(delete, path = "/api/v1/me/avatar", tag = "profiles", summary = "Removes the caller's avatar.", responses((status = 204), (status = 400, body = ErrorBody), (status = 401, body = ErrorBody), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody)), security(("bearer" = [])))]
 pub async fn delete_my_avatar_handler(
   State(state): State<AppState>,

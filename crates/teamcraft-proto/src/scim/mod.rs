@@ -46,6 +46,9 @@ pub const MAX_IDENTIFIER_CHARS: usize = 256;
 pub const MAX_NAME_CHARS: usize = 200;
 /// The longest e-mail address, in characters (RFC 5321 path limit).
 pub const MAX_EMAIL_CHARS: usize = 320;
+/// Longest `photos.value`: a URL, or a `data:` URI of a picture within the server's own picture
+/// limit (which it checks again after decoding).
+pub const MAX_PHOTO_CHARS: usize = 16 << 20;
 /// The deepest nesting of JSON objects and arrays in a request body.
 pub const MAX_JSON_DEPTH: usize = 16;
 
