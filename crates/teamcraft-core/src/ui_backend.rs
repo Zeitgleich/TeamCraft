@@ -3068,10 +3068,12 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     });
   }
 
+  #[cfg(not(target_arch = "wasm32"))]
   fn update_composer_link(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>, body: &str) {
     self.ui_update_composer_link(conversation, maybe_thread, body);
   }
 
+  #[cfg(not(target_arch = "wasm32"))]
   fn composer_link_preview(
     &self,
     conversation: ConversationId,
@@ -3080,6 +3082,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.ui_composer_link_preview(conversation, maybe_thread)
   }
 
+  #[cfg(not(target_arch = "wasm32"))]
   fn remove_composer_link_preview(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) {
     self.ui_remove_composer_link_preview(conversation, maybe_thread);
   }

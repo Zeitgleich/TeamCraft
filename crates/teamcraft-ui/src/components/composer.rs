@@ -19,7 +19,6 @@ use crate::clock::{format_date_time, now_ms};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::composer_commands::{self, CommandButton, Notice, NoticeEvent, Outcome};
 use crate::components::composer_editor;
-use crate::components::composer_link_preview::ComposerLinkPreviewCard;
 use crate::components::composer_toolbar::{
   ActiveFormats, FormatAction, FormatToolbar, SendOptionsMenu, format_action_for, move_focus_vertical,
 };
@@ -1872,7 +1871,8 @@ pub fn Composer(
               }
             })
         }}
-        <ComposerLinkPreviewCard conversation=conversation maybe_thread=maybe_thread />
+        // In the desktop app's own chunk: a browser can't read other sites, so it never shows one.
+        {crate::areas::desktop_only(move || crate::areas::composer_link_card(conversation, maybe_thread))}
         {can_record.then(|| view! { <VoiceBar key=voice_key max_seconds=voice_max_seconds on_send=Callback::new(move |()| send_voice()) /> })}
         {move || {
           notice.get().map(|shown| match shown {

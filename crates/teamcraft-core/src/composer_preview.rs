@@ -192,10 +192,6 @@ impl<S: LocalStore> CoreChatBackend<S> {
     maybe_thread: Option<ThreadId>,
     body: &str,
   ) {
-    // Browsers can't read other sites' pages: the web client sends links without previews.
-    if cfg!(target_arch = "wasm32") {
-      return;
-    }
     let key = draft_key(conversation, maybe_thread);
     let maybe_url = composer_url(body, &self.verified_policy().link_previews);
     let maybe_draft = read_preview(self.store_ref(), &key);

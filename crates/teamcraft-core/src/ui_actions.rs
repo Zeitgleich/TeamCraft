@@ -204,12 +204,16 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .maybe_reply_to
       .and_then(|id| self.find_stored(message.conversation, id))
       .map(|target| reply_ref(&target, self.importer(), message.maybe_reply_attachment));
+    #[cfg(not(target_arch = "wasm32"))]
     let maybe_link_preview = self.take_shown_preview(
       message.conversation,
       message.maybe_thread,
       &message.body,
       message.link_preview,
     );
+    // The browser shows no composer preview (e2ee.md §12).
+    #[cfg(target_arch = "wasm32")]
+    let maybe_link_preview = None;
     MessageMeta {
       maybe_reply_to,
       maybe_link_preview,
