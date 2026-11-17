@@ -1117,6 +1117,7 @@ private fun MessageActions(
     hasThreads = onOpenThread != null,
     wantsAcknowledgement = maybeExtras?.wantsAcknowledgement == true,
     canSelect = maybeOnSelect != null,
+    isPoll = message.maybePoll != null,
   )
   ModalBottomSheet(onDismissRequest = onDismiss) {
     Column(Modifier.padding(bottom = 24.dp)) {
@@ -1463,6 +1464,7 @@ internal fun Composer(
   var isSilent by rememberSaveable(conversationId) { mutableStateOf(false) }
   var alsoToChannel by rememberSaveable(conversationId) { mutableStateOf(false) }
   var isAttachOpen by remember { mutableStateOf(false) }
+  var isPollOpen by remember { mutableStateOf(false) }
   // The picked picture being edited before it is sent.
   var maybeEditing by remember { mutableStateOf<PickedFile?>(null) }
   var isSendOptionsOpen by remember { mutableStateOf(false) }
@@ -1941,7 +1943,11 @@ internal fun Composer(
       },
     )
   }
-  if (isAttachOpen) AttachSheet(pickers, onDismiss = { isAttachOpen = false })
+  if (isAttachOpen) {
+    // A poll goes to the conversation, not into a thread (#205).
+    AttachSheet(pickers, onDismiss = { isAttachOpen = false }, maybeOnPoll = { isPollOpen = true }.takeIf { maybeThread == null })
+  }
+  if (isPollOpen) PollSheet(viewModel, conversationId, onDismiss = { isPollOpen = false })
   maybeMediaFlow?.let { launch ->
     MediaFlow(
       viewModel = viewModel,

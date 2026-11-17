@@ -420,6 +420,44 @@ final class ChatModelTests: XCTestCase {
     XCTAssertEqual(badge, TabBadge(mentions: 1, unread: 2))
   }
 
+  func testPollActionsSerializeToTheCoreSchema() throws {
+    let vote = ChatAction.voteInPoll(conversationId: "7", messageId: "70", choices: [0, 2])
+    let object = try JSONSerialization.jsonObject(with: Data(vote.json.utf8)) as? [String: Any]
+    XCTAssertEqual(object?["action"] as? String, "vote_in_poll")
+    XCTAssertEqual(object?["choices"] as? [Int], [0, 2])
+    let close = try JSONSerialization.jsonObject(
+      with: Data(ChatAction.closePoll(conversationId: "7", messageId: "70").json.utf8)) as? [String: String]
+    XCTAssertEqual(close, ["action": "close_poll", "conversation": "7", "message": "70"])
+    XCTAssertEqual(ChatAction.postPoll(actionJson: "{\"action\":\"post_poll\"}").json, "{\"action\":\"post_poll\"}")
+  }
+
+  func testAPollDecodesWithItsClosingTimeAndHiddenCounts() throws {
+    let json = """
+      {"id":"70","conversation":"7","author":"1","sent_at":1,"body":"Poll","poll":{"question":"Lunch?",
+      "options":[{"text":"Pizza","count":0,"is_chosen":true},{"text":"Salad"}],"choice":"single","voters":"shown",
+      "results":"after_close","are_results_shown":false,"closes_at":1800000000000,"voter_count":2,
+      "is_closed":false,"is_mine":true}}
+      """
+    let poll = try XCTUnwrap(Wire.decode(Message.self, from: json)?.maybePoll)
+    XCTAssertEqual(poll.results, "after_close")
+    XCTAssertFalse(poll.areResultsShown)
+    XCTAssertEqual(poll.maybeClosesAtMs, 1_800_000_000_000)
+    XCTAssertEqual(poll.myChoices, [0])
+    XCTAssertTrue(poll.isKnownChoice)
+  }
+
+  func testAPollOfAnOlderCoreShowsItsCounts() throws {
+    let json = """
+      {"question":"Q","options":[{"text":"A","count":2},{"text":"B","count":1}],"choice":"ranked","voters":"blinded"}
+      """
+    let poll = try XCTUnwrap(Wire.decode(Poll.self, from: json))
+    XCTAssertTrue(poll.areResultsShown)
+    XCTAssertNil(poll.maybeClosesAtMs)
+    XCTAssertFalse(poll.isKnownChoice)
+    XCTAssertFalse(poll.areVotersShown)
+    XCTAssertEqual(poll.maybeLeader, 0)
+  }
+
   func testActionsSerializeToTheCoreSchema() throws {
     let reaction = ChatAction.toggleReaction(conversationId: "10", messageId: "20", emoji: "👍")
     let object = try JSONSerialization.jsonObject(with: Data(reaction.json.utf8)) as? [String: String]

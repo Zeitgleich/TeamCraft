@@ -479,6 +479,8 @@ struct Message: Decodable, Equatable, Identifiable, Sendable {
   var groupMentions: [String] = []
   /// The sender named this user among the people to notify.
   var mentionsMe = false
+  /// A poll (#205), counted by the core from the encrypted votes: shown instead of `body`.
+  var maybePoll: Poll?
   /// As the app shows the author: a source's or an imported bot's name, else the account's, with
   /// the app's own "Deleted user" for a deleted one (issue #751). Not on the wire.
   var authorName = ""
@@ -547,6 +549,7 @@ struct Message: Decodable, Equatable, Identifiable, Sendable {
     case maybePlaceholder = "placeholder"
     case maybeSource = "source"
     case maybeImported = "imported"
+    case maybePoll = "poll"
   }
 
   init(from decoder: Decoder) throws {
@@ -569,6 +572,8 @@ struct Message: Decodable, Equatable, Identifiable, Sendable {
     maybeImported = try? container.decodeIfPresent(Imported.self, forKey: .maybeImported)
     groupMentions = try container.decodeIfPresent([String].self, forKey: .groupMentions) ?? []
     mentionsMe = try container.decodeIfPresent(Bool.self, forKey: .mentionsMe) ?? false
+    // A poll this version can't read shows its text, which older versions show too.
+    maybePoll = try? container.decodeIfPresent(Poll.self, forKey: .maybePoll)
   }
 }
 

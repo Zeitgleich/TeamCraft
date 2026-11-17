@@ -178,6 +178,19 @@ object ChatActions {
     put("emoji", emoji)
   }
 
+  /** Votes in the poll [message] for [choices] (option positions); none withdraw the vote (#205). */
+  fun voteInPoll(conversation: String, message: String, choices: List<Int>) = action("vote_in_poll") {
+    put("conversation", conversation)
+    put("message", message)
+    put("choices", buildJsonArray { choices.forEach { add(JsonPrimitive(it)) } })
+  }
+
+  /** Closes one of the user's own polls: later votes don't count. */
+  fun closePoll(conversation: String, message: String) = action("close_poll") {
+    put("conversation", conversation)
+    put("message", message)
+  }
+
   fun edit(conversation: String, message: String, body: String) = action("edit_message") {
     put("conversation", conversation)
     put("message", message)

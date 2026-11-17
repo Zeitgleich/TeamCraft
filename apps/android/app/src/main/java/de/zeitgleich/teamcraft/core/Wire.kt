@@ -162,6 +162,8 @@ data class Message(
   @SerialName("mentions_me") val mentionsMe: Boolean = false,
   /** Where an imported message came from (e2ee.md §4.10); only its author matters to the app. */
   @SerialName("imported") val maybeImported: ImportedMark? = null,
+  /** A poll (#205), counted by the core from the encrypted votes: shown instead of [body]. */
+  @SerialName("poll") val maybePoll: Poll? = null,
 ) {
   /** Outbox messages carry the pending bit in their ID until the server accepted them. */
   val isPending: Boolean get() = (id.toLongOrNull() ?: 0L) and PENDING_ID_BIT != 0L
@@ -193,6 +195,50 @@ data class Message(
     const val PENDING_ID_BIT = 1L shl 62
   }
 }
+
+/**
+ * A poll as the core counted it (teamcraft-client-api `PollView`, e2ee.md §4.12). While
+ * [areResultsShown] is false every option's count is 0 and nobody is named; [voterCount] and the
+ * user's own [PollOption.isChosen] still are.
+ */
+@Serializable
+data class Poll(
+  val question: String,
+  val options: List<PollOption>,
+  /** `single`, `multiple`, or a mode of a newer version that takes no votes here. */
+  val choice: String,
+  /** `shown` names who voted for what; anything else names nobody. */
+  val voters: String,
+  /** `always`, `after_vote` or `after_close`; when the counts show. */
+  val results: String = "always",
+  @SerialName("are_results_shown") val areResultsShown: Boolean = true,
+  /** When the poll closes by itself, Unix milliseconds; the server's time decides. */
+  @SerialName("closes_at") val maybeClosesAt: Long? = null,
+  @SerialName("voter_count") val voterCount: Int = 0,
+  @SerialName("is_closed") val isClosed: Boolean = false,
+  /** The user made it, so may close it. */
+  @SerialName("is_mine") val isMine: Boolean = false,
+) {
+  val isMultipleChoice: Boolean get() = choice == "multiple"
+
+  /** Whether this version knows how to vote in it (a newer mode takes no votes here). */
+  val isKnownChoice: Boolean get() = choice == "single" || choice == "multiple"
+
+  val areVotersShown: Boolean get() = voters == "shown"
+
+  /** The options the user chose, by position. */
+  val myChoices: List<Int> get() = options.indices.filter { options[it].isChosen }
+}
+
+/** One option of a [Poll]. */
+@Serializable
+data class PollOption(
+  val text: String,
+  val count: Int = 0,
+  @SerialName("is_chosen") val isChosen: Boolean = false,
+  /** Who chose it, oldest vote first; empty unless the poll names voters and shows counts. */
+  val voters: List<String> = emptyList(),
+)
 
 /** A call's tile in the timeline: the core's `CallTile`. */
 @Serializable

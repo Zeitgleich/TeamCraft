@@ -74,6 +74,19 @@ class ChatActionsTest {
   }
 
   @Test
+  fun pollVotesAndClosesAreTheCoresActions() {
+    assertEquals(
+      """{"action":"vote_in_poll","conversation":"7","message":"70","choices":[0,2]}""",
+      ChatActions.voteInPoll("7", "70", listOf(0, 2)),
+    )
+    assertEquals(
+      """{"action":"vote_in_poll","conversation":"7","message":"70","choices":[]}""",
+      ChatActions.voteInPoll("7", "70", emptyList()),
+    )
+    assertEquals("""{"action":"close_poll","conversation":"7","message":"70"}""", ChatActions.closePoll("7", "70"))
+  }
+
+  @Test
   fun actionsAndQueriesAreTagged() {
     assertEquals(
       """{"action":"toggle_reaction","conversation":"7","message":"9","emoji":"👍"}""",
