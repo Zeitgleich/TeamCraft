@@ -431,6 +431,40 @@ mod provider_imports {
   }
 
   #[tokio::test]
+  async fn a_removal_while_the_photo_waits_for_a_free_import_wins() {
+    let app = app!(|settings| settings.limits.max_concurrent_avatar_imports = 1);
+    identity_provider_pictures(&app).await;
+    let scim = scim_token(&app).await;
+    let probe = app.state.provider_pictures.probe();
+    // Someone else's import holds the only permit.
+    probe.is_pausing.store(true, Ordering::SeqCst);
+    let busy = scim_user(&app, &scim, "ivan", Some(&photo(300, 200))).await;
+    paused(probe).await;
+    take(&probe.spawned, 1).await;
+    let user = scim_user(&app, &scim, "judy", None).await;
+
+    // The photo's write waits for the permit; the removal comes meanwhile and completes.
+    let removed_photo = photo(120, 90);
+    let set = put_user(&app, &scim, &user, "judy", Some(&removed_photo));
+    let remove_meanwhile = async {
+      take(&probe.spawned, 1).await;
+      put_user(&app, &scim, &user, "judy", None).await;
+      probe.is_pausing.store(false, Ordering::SeqCst);
+      probe.resume.add_permits(1);
+    };
+    tokio::join!(set, remove_meanwhile);
+    finished(probe, 2).await;
+    assert_eq!(probe.superseded.load(Ordering::SeqCst), 1);
+    assert_eq!(
+      stored_source(&app, &user).await,
+      None,
+      "the photo doesn't come back"
+    );
+    assert!(stored_source(&app, &busy).await.is_some());
+    app.stop().await;
+  }
+
+  #[tokio::test]
   async fn a_bulk_sync_imports_every_photo_with_no_more_imports_at_once_than_the_cap() {
     const PEOPLE: usize = 8;
     let app = app!(|settings| {
@@ -492,9 +526,10 @@ mod provider_imports {
     finished(probe, 1).await;
     assert_eq!(probe.left_to_scim.load(Ordering::SeqCst), 1);
     assert_eq!(stored_source(&app, &user).await, None);
-    // Remembered from now on: the next claim costs a map lookup.
+    // Remembered from now on: the next claim costs a map lookup, no worker.
     ProviderPictures::note_sign_in(&app.state, user.id, Some(CLAIM));
-    assert_eq!(probe.started.load(Ordering::SeqCst), 1);
+    assert_eq!(probe.spawned.available_permits(), 1);
+    assert_eq!(probe.started.load(Ordering::SeqCst), 0);
     app.stop().await;
   }
 
@@ -574,12 +609,16 @@ mod provider_imports {
   }
 
   async fn finished(probe: &ImportProbe, count: usize) {
+    take(&probe.finished, count).await;
+  }
+
+  async fn take(permits: &tokio::sync::Semaphore, count: usize) {
     tokio::time::timeout(
       Duration::from_secs(60),
-      probe.finished.acquire_many(u32::try_from(count).unwrap()),
+      permits.acquire_many(u32::try_from(count).unwrap()),
     )
     .await
-    .expect("the imports finish")
+    .expect("the probe is told in time")
     .unwrap()
     .forget();
   }

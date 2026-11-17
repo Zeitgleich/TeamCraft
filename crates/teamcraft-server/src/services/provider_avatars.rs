@@ -33,7 +33,7 @@ use axum::body::Bytes;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use teamcraft_proto::{AvatarSource, UserId};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Semaphore, oneshot};
 use tracing::{debug, warn};
 use url::Url;
 
@@ -53,6 +53,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_REDIRECTS: usize = 3;
+/// How the key of an inline photo starts ([`teamcraft_crypto::account::subresource_integrity`]);
+/// no picture URL does.
+const INLINE_HASH_PREFIX: &str = "sha384-";
 
 /// What the server knows about importing pictures this run.
 pub struct ProviderPictures {
@@ -76,6 +79,9 @@ enum PictureSource {
   Url(String),
   /// A `data:` URI a SCIM client sent; its source is the hash.
   Inline { data_uri: String, hash: String },
+  /// The hash of an inline photo the server holds, as a SCIM PATCH that left `photos` alone sends
+  /// it back ([`ProviderPictures::scim_photo`]).
+  Known(String),
 }
 
 /// Who sent a picture source. SCIM takes precedence: while a SCIM client manages a person, the
@@ -184,7 +190,6 @@ impl ProviderPictures {
     if state.provider_pictures.is_settled(user, &job) {
       return;
     }
-    // A claim is a short URL, so it waits for its permit in the worker.
     if let Some(generation) = state.provider_pictures.start_or_hand_over(user, &job) {
       spawn_worker(state.clone(), user, job, generation, None);
     }
@@ -210,24 +215,22 @@ impl ProviderPictures {
       origin: Origin::Scim,
       source: PictureSource::from_scim(photo),
     };
-    if pictures.is_settled(user, &job) || pictures.hand_over(user, &job) {
+    if pictures.is_settled(user, &job) {
       return Ok(());
     }
-    // A PATCH that left the photo alone sends back the stored source.
-    if state.database.provider_picture_source(user).await?.as_deref() == Some(job.source.key()) {
-      return Ok(());
-    }
-    // Invariant: the server never closes the semaphore.
-    let Ok(permit) = Arc::clone(&pictures.permits).acquire_owned().await else {
-      return Ok(());
-    };
+    // Registered at once, so a retry hands over and a removal cancels it while it waits.
     if let Some(generation) = pictures.start_or_hand_over(user, &job) {
-      spawn_worker(state.clone(), user, job, generation, Some(permit));
+      let (admitted, is_admitted) = oneshot::channel();
+      spawn_worker(state.clone(), user, job, generation, Some(admitted));
+      // An error: the worker ended without a permit; nothing to wait for.
+      let _ = is_admitted.await;
     }
     Ok(())
   }
 
   /// The photo a SCIM PATCH starts from: the newest one an import holds, else the stored source.
+  /// For an inline photo that is its `sha384-` hash, which [`PictureSource::from_scim`] reads back
+  /// as [`PictureSource::Known`]: recognized, never fetched.
   pub async fn scim_photo(state: &AppState, user: UserId) -> Result<Option<String>, ApiError> {
     let maybe_pending = lock(&state.provider_pictures.workers)
       .get(&user)
@@ -236,6 +239,12 @@ impl ProviderPictures {
       return Ok(Some(key));
     }
     Ok(state.database.provider_picture_source(user).await?)
+  }
+
+  /// A SCIM client removed `user`: their claim counts again (their account is deactivated or
+  /// deleted, so mostly for a later re-link through sign-in).
+  pub fn note_scim_removed(&self, user: UserId) {
+    lock(&self.remembered).remove(&user);
   }
 
   /// What integration tests watch and steer of the imports.
@@ -413,6 +422,9 @@ impl ProviderPictures {
 
 impl PictureSource {
   fn from_scim(value: &str) -> Self {
+    if value.starts_with(INLINE_HASH_PREFIX) {
+      return Self::Known(value.to_owned());
+    }
     if value
       .get(..5)
       .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
@@ -429,7 +441,7 @@ impl PictureSource {
   /// What the database keeps to recognize the picture: the URL, or the hash of an inline one.
   fn key(&self) -> &str {
     match self {
-      Self::Url(url) => url,
+      Self::Url(url) | Self::Known(url) => url,
       Self::Inline { hash, .. } => hash,
     }
   }
@@ -471,15 +483,19 @@ fn is_from_provider(state: &AppState) -> bool {
   state.policy.get().directory.avatar_source == AvatarSource::IdentityProvider
 }
 
-/// Runs `user`'s imports in the background: `job`, then whatever newer source came meanwhile.
-/// Without `maybe_permit` it waits for one first.
+/// Runs `user`'s imports in the background: `job`, then whatever newer source came meanwhile. The
+/// worker is registered before it waits for an import permit, so a source or a removal that comes
+/// while it waits is handed over or cancels it. `maybe_admitted` is told once the worker holds a
+/// permit or needed none, which a SCIM write waits for.
 fn spawn_worker(
   state: AppState,
   user: UserId,
   job: Job,
   generation: u64,
-  maybe_permit: Option<OwnedSemaphorePermit>,
+  maybe_admitted: Option<oneshot::Sender<()>>,
 ) {
+  #[cfg(feature = "integration")]
+  state.provider_pictures.probe.note_spawned();
   tokio::spawn(async move {
     let pictures = Arc::clone(&state.provider_pictures);
     let mut guard = WorkerGuard {
@@ -487,19 +503,31 @@ fn spawn_worker(
       user,
       is_finished: false,
     };
-    let _permit = match maybe_permit {
-      Some(permit) => permit,
-      // Invariant: the server never closes the semaphore.
-      None => match Arc::clone(&pictures.permits).acquire_owned().await {
-        Ok(permit) => permit,
-        Err(_) => return,
-      },
-    };
+    let mut maybe_admitted = maybe_admitted;
+    let mut maybe_permit = None;
     let (mut job, mut generation) = (job, generation);
     loop {
-      #[cfg(feature = "integration")]
-      pictures.probe.note_started();
-      let outcome = import(&state, user, &job, generation).await;
+      let outcome = match settled_without_import(&state, user, &job).await {
+        Ok(Some(imported)) => Ok(imported),
+        Err(error) => Err(error),
+        Ok(None) => {
+          if maybe_permit.is_none() {
+            // Invariant: the server never closes the semaphore.
+            let Ok(permit) = Arc::clone(&pictures.permits).acquire_owned().await else {
+              return;
+            };
+            maybe_permit = Some(permit);
+          }
+          admit(&mut maybe_admitted);
+          #[cfg(feature = "integration")]
+          pictures.probe.note_started();
+          let outcome = import(&state, user, &job, generation).await;
+          #[cfg(feature = "integration")]
+          pictures.probe.note_stopped();
+          outcome
+        },
+      };
+      admit(&mut maybe_admitted);
       if let Err(error) = &outcome {
         // Not the URL: it may carry a token of the provider's.
         warn!(user_id = %user, %error, "importing a picture from the identity provider failed");
@@ -514,6 +542,29 @@ fn spawn_worker(
     }
     guard.is_finished = true;
   });
+}
+
+fn admit(maybe_admitted: &mut Option<oneshot::Sender<()>>) {
+  if let Some(admitted) = maybe_admitted.take() {
+    // The SCIM write may have ended meanwhile (its client went away); the import goes on.
+    let _ = admitted.send(());
+  }
+}
+
+/// How `job` ends without fetching anything: a claim of a person SCIM manages, or the stored
+/// picture's own source. `None`: it needs an import.
+async fn settled_without_import(
+  state: &AppState,
+  user: UserId,
+  job: &Job,
+) -> Result<Option<Imported>, ImportError> {
+  if job.origin == Origin::Claim && state.database.is_scim_managed(user).await? {
+    return Ok(Some(Imported::LeftToScim));
+  }
+  if state.database.provider_picture_source(user).await?.as_deref() == Some(job.source.key()) {
+    return Ok(Some(Imported::Unchanged));
+  }
+  Ok(None)
 }
 
 /// Removes the worker's entry if its task ends early (a panic), so the person's imports don't stop
@@ -533,16 +584,12 @@ impl Drop for WorkerGuard {
 }
 
 async fn import(state: &AppState, user: UserId, job: &Job, generation: u64) -> Result<Imported, ImportError> {
-  if job.origin == Origin::Claim && state.database.is_scim_managed(user).await? {
-    return Ok(Imported::LeftToScim);
-  }
-  if state.database.provider_picture_source(user).await?.as_deref() == Some(job.source.key()) {
-    return Ok(Imported::Unchanged);
-  }
   let max_bytes = state.settings.get().limits.max_avatar_bytes;
   let bytes = match &job.source {
     PictureSource::Url(url) => fetch(state, url, max_bytes).await?,
     PictureSource::Inline { data_uri, .. } => decode_data_uri(data_uri, max_bytes)?,
+    // Only the stored or queued picture's own hash comes back this way; anything else is unknown.
+    PictureSource::Known(_) => return Err(ProviderPictureError::RefusedUrl.into()),
   };
   let declared = raster_type(&bytes).ok_or(ProviderPictureError::NotAPicture)?;
   let png = sanitized_avatar(state, declared.to_owned(), Bytes::from(bytes), WhenBusy::Wait).await?;
@@ -692,8 +739,11 @@ pub struct ImportProbe {
   pub is_pausing: AtomicBool,
   pub paused: Semaphore,
   pub resume: Semaphore,
-  /// A permit per finished import, whatever its outcome.
+  /// A permit per finished job, whatever its outcome (also one settled without an import).
   pub finished: Semaphore,
+  /// A permit per worker started (registered for a person).
+  pub spawned: Semaphore,
+  /// Imports that fetched or decoded a picture.
   pub started: AtomicUsize,
   pub stored: AtomicUsize,
   pub superseded: AtomicUsize,
@@ -712,6 +762,7 @@ impl ImportProbe {
       paused: Semaphore::new(0),
       resume: Semaphore::new(0),
       finished: Semaphore::new(0),
+      spawned: Semaphore::new(0),
       started: AtomicUsize::new(0),
       stored: AtomicUsize::new(0),
       superseded: AtomicUsize::new(0),
@@ -728,8 +779,15 @@ impl ImportProbe {
     self.most_at_once.fetch_max(now, Ordering::SeqCst);
   }
 
-  fn note_finished(&self, outcome: &Result<Imported, ImportError>) {
+  fn note_spawned(&self) {
+    self.spawned.add_permits(1);
+  }
+
+  fn note_stopped(&self) {
     self.running.fetch_sub(1, Ordering::SeqCst);
+  }
+
+  fn note_finished(&self, outcome: &Result<Imported, ImportError>) {
     let counter = match outcome {
       Ok(Imported::Stored) => Some(&self.stored),
       Ok(Imported::Superseded) => Some(&self.superseded),
@@ -831,6 +889,11 @@ mod tests {
       assert_ne!(
         inline.key(),
         PictureSource::from_scim("data:image/png;base64,AAED").key()
+      );
+      // A PATCH that left photos alone sends the hash back: recognized, never fetched.
+      assert_eq!(
+        PictureSource::from_scim(inline.key()),
+        PictureSource::Known(inline.key().to_owned())
       );
     }
 

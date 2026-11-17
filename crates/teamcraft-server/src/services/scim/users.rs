@@ -262,6 +262,7 @@ pub async fn delete_user(
   }
   deprovision(state, caller.client, row.user, DeactivationCause::Removed).await?;
   state.database.unlink_scim_user(caller.client, row.user).await?;
+  state.provider_pictures.note_scim_removed(row.user);
   audit::record(
     state,
     None,
