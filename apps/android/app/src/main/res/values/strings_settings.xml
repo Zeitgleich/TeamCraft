@@ -64,6 +64,7 @@
   <string name="profile_name_empty">Enter a name, or use the name from your sign-in.</string>
   <string name="profile_name_invalid">The name can\'t contain control characters.</string>
   <string name="profile_name_rejected">The name was refused. It may be too long, or your organization no longer allows changing it.</string>
+  <string name="profile_actions">Change picture or name</string>
   <string name="profile_picture_change">Change picture</string>
   <string name="profile_picture_remove">Remove picture</string>
   <string name="profile_picture_from_provider">Your picture comes from your organization\'s sign-in and can only be changed there.</string>

@@ -4905,6 +4905,22 @@
         }
       }
     },
+    "profile_actions": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Change picture or name"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bild oder Namen ändern"
+          }
+        }
+      }
+    },
     "profile_picture_change": {
       "localizations": {
         "en": {

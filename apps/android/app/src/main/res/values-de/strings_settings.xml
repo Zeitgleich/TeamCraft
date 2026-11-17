@@ -64,6 +64,7 @@
   <string name="profile_name_empty">Gib einen Namen ein oder verwende den Namen aus deiner Anmeldung.</string>
   <string name="profile_name_invalid">Der Name darf keine Steuerzeichen enthalten.</string>
   <string name="profile_name_rejected">Der Name wurde abgelehnt. Er ist vielleicht zu lang, oder deine Organisation erlaubt die Änderung nicht mehr.</string>
+  <string name="profile_actions">Bild oder Namen ändern</string>
   <string name="profile_picture_change">Bild ändern</string>
   <string name="profile_picture_remove">Bild entfernen</string>
   <string name="profile_picture_from_provider">Dein Bild kommt aus der Anmeldung deiner Organisation und lässt sich nur dort ändern.</string>

@@ -2,42 +2,61 @@ import PhotosUI
 import SwiftUI
 import UIKit
 
-/// The member's own picture (issue #2071): change it (pick from the photos, move and zoom it under a
-/// circle, upload) or remove it. While the workspace shows the identity provider's picture without
-/// overrides, the section only says where the picture comes from. Errors show below the buttons, or
-/// in the crop screen while it is open (forms rules); the screen closes once the server took it.
-struct ProfilePictureSection: View {
+/// The member's picture at the top of Settings. Tapping it opens a menu with the rare profile
+/// actions (issue #2071): change the picture (photos, then move and zoom under a circle), remove it,
+/// change the name or go back to the sign-in name (#408). Nothing takes a row until it is used.
+/// While the workspace shows the identity provider's picture without overrides, the menu says where
+/// the picture comes from instead. Errors show below the header (`maybeProblem`), or in the crop
+/// screen while it is open; the screen closes once the server took the picture.
+struct ProfileAvatarMenu: View {
   @Environment(AppModel.self) private var model
   let account: Account
-  let profileJSON: String
-  /// The picture shown in the settings header; set here after a change.
+  let maybeProfileJSON: String?
+  /// The picture shown; set here after a change.
   @Binding var maybePicture: UIImage?
+  @Binding var maybeProblem: TextProblem?
+  let onEditName: () -> Void
+  let onResetName: () -> Void
   /// Reads the profile again after a change.
   let onChanged: () async -> Void
 
   @State private var selection: PhotosPickerItem?
   @State private var maybePicked: UIImage?
   @State private var isSaving = false
-  @State private var maybeProblem: TextProblem?
 
   var body: some View {
-    Section {
-      if OwnProfileDocument.canChangeAvatar(in: profileJSON) {
-        PhotosPicker(selection: $selection, matching: .images, photoLibrary: .shared()) {
-          Label("profile_picture_change", systemImage: "camera")
+    Menu {
+      if let profile = maybeProfileJSON {
+        if OwnProfileDocument.canChangeAvatar(in: profile) {
+          PhotosPicker(selection: $selection, matching: .images, photoLibrary: .shared()) {
+            Label("profile_picture_change", systemImage: "photo")
+          }
+          if OwnProfileDocument.hasAvatar(in: profile) {
+            Button("profile_picture_remove", systemImage: "trash", role: .destructive) { Task { await remove() } }
+          }
+        } else {
+          Text("profile_picture_from_provider")
         }
-        .disabled(isSaving)
-        if OwnProfileDocument.hasAvatar(in: profileJSON) {
-          Button("profile_picture_remove", role: .destructive) { Task { await remove() } }
-            .disabled(isSaving)
+        if OwnProfileDocument.canOverrideDisplayName(in: profile) {
+          Button("profile_name_change", systemImage: "pencil", action: onEditName)
+          if OwnProfileDocument.displayNameOverride(in: profile) != nil {
+            Button("profile_name_reset", systemImage: "arrow.uturn.backward", action: onResetName)
+          }
         }
-        if maybePicked == nil { FieldMessage(maybeError: maybeProblem?.message) }
-      } else {
-        Text("profile_picture_from_provider")
-          .font(.app(.footnote))
-          .foregroundStyle(Theme.textMuted)
       }
+    } label: {
+      avatar
+        .overlay(alignment: .bottomTrailing) {
+          Image(systemName: "pencil.circle.fill")
+            .symbolRenderingMode(.palette)
+            .foregroundStyle(Theme.textMuted, Color(uiColor: .secondarySystemBackground))
+            .font(.system(size: 16))
+            .offset(x: 2, y: 2)
+            .accessibilityHidden(true)
+        }
     }
+    .disabled(maybeProfileJSON == nil || isSaving)
+    .accessibilityLabel("profile_actions")
     .onChange(of: selection) { Task { await load(selection) } }
     .fullScreenCover(isPresented: Binding(get: { maybePicked != nil }, set: { if !$0 { maybePicked = nil } })) {
       if let picked = maybePicked {
@@ -52,6 +71,18 @@ struct ProfilePictureSection: View {
           onUse: { square in Task { await upload(picked, square: square) } }
         )
       }
+    }
+  }
+
+  @ViewBuilder private var avatar: some View {
+    if let picture = maybePicture {
+      Image(uiImage: picture)
+        .resizable()
+        .scaledToFill()
+        .frame(width: 44, height: 44)
+        .clipShape(Circle())
+    } else {
+      AvatarView(name: account.displayName, size: 44)
     }
   }
 

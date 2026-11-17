@@ -5,6 +5,19 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -18,7 +31,6 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -79,67 +91,123 @@ private const val UPLOAD_SIDE_PX = 512
 private val CIRCLE_MARGIN = 24.dp
 
 /**
- * The member's own picture (issue #2071): change it (pick from the photos, move and zoom it under a
- * circle, upload) or remove it. While the workspace shows the identity provider's picture without
- * overrides, the section only says where the picture comes from. Errors show below the buttons, or
- * in the crop screen while it is open (forms.md); the screen closes once the server took the
- * picture.
+ * The top of Settings: the member's picture and, beside it, [details] (name, presence, status).
+ * Tapping the picture opens a small menu with the rare profile actions (issue #2071): change or
+ * remove the picture (photo picker, then move and zoom under a circle), change the name or go back
+ * to the sign-in name (issue #408). Nothing takes room until it is used: the name field shows only
+ * while editing, errors only when there is one. While the workspace shows the identity provider's
+ * picture without overrides, the menu says where the picture comes from instead of offering it.
  */
 @Composable
-internal fun ProfilePictureSection(viewModel: MainViewModel, userId: String) {
+internal fun ProfileHeader(
+  viewModel: MainViewModel,
+  userId: String,
+  displayName: String,
+  details: @Composable ColumnScope.() -> Unit,
+) {
   val context = LocalContext.current
   val scope = rememberCoroutineScope()
   val changes by viewModel.changeCount.collectAsState()
   var reloads by remember { mutableIntStateOf(0) }
   var maybeProfile by remember { mutableStateOf<OwnProfile?>(null) }
   LaunchedEffect(changes, reloads) { maybeProfile = viewModel.readChat { ownProfile() } ?: maybeProfile }
+  var isMenuOpen by remember { mutableStateOf(false) }
+  var isEditingName by rememberSaveable { mutableStateOf(false) }
   var maybePicked by remember { mutableStateOf<Bitmap?>(null) }
   var isSaving by remember { mutableStateOf(false) }
   var maybeFailure by remember { mutableStateOf<Int?>(null) }
   val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { maybeUri ->
     val uri = maybeUri ?: return@rememberLauncherForActivityResult
-    maybeFailure = null
     scope.launch {
       val decoded = withContext(Dispatchers.IO) { PictureRenderer.decodeUpright(context, uri, MAX_EDIT_SIDE_PX) }
       if (decoded == null) maybeFailure = R.string.profile_picture_unreadable else maybePicked = decoded
     }
   }
-  val profile = maybeProfile ?: return
-  if (!profile.canChangeAvatar) {
-    Text(
-      stringResource(R.string.profile_picture_from_provider),
-      style = MaterialTheme.typography.bodySmall,
-      color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-    return
+  fun act(action: suspend () -> Int?) {
+    isMenuOpen = false
+    isSaving = true
+    maybeFailure = null
+    scope.launch {
+      maybeFailure = action()
+      reloads++
+      isSaving = false
+    }
   }
-  val picked = maybePicked
-  Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-      OutlinedButton(
-        onClick = {
-          maybeFailure = null
-          picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-        },
-        enabled = !isSaving,
-      ) { Text(stringResource(R.string.profile_picture_change)) }
-      if (profile.hasAvatar) {
-        OutlinedButton(
-          onClick = {
-            isSaving = true
-            maybeFailure = null
-            scope.launch {
-              maybeFailure = viewModel.tryRemoveOwnAvatar(userId)
-              reloads++
-              isSaving = false
+  val profile = maybeProfile
+  val menuLabel = stringResource(R.string.profile_actions)
+  Row(verticalAlignment = Alignment.CenterVertically) {
+    Box {
+      Box(
+        Modifier
+          .clip(CircleShape)
+          .clickable(enabled = profile != null && !isSaving, onClickLabel = menuLabel) { isMenuOpen = true },
+      ) {
+        AccountAvatar(userId, displayName, size = 56.dp)
+      }
+      if (profile != null) {
+        Icon(
+          Icons.Filled.Edit,
+          contentDescription = null,
+          tint = MaterialTheme.colorScheme.onSurface,
+          modifier = Modifier
+            .align(Alignment.BottomEnd)
+            .size(20.dp)
+            .background(MaterialTheme.colorScheme.surfaceContainerHighest, CircleShape)
+            .padding(3.dp),
+        )
+      }
+      if (profile != null) {
+        DropdownMenu(expanded = isMenuOpen, onDismissRequest = { isMenuOpen = false }) {
+          if (profile.canChangeAvatar) {
+            DropdownMenuItem(
+              text = { Text(stringResource(R.string.profile_picture_change)) },
+              onClick = {
+                isMenuOpen = false
+                maybeFailure = null
+                picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+              },
+            )
+            if (profile.hasAvatar) {
+              DropdownMenuItem(
+                text = { Text(stringResource(R.string.profile_picture_remove)) },
+                onClick = { act { viewModel.tryRemoveOwnAvatar(userId) } },
+              )
             }
-          },
-          enabled = !isSaving,
-        ) { Text(stringResource(R.string.profile_picture_remove)) }
+          } else {
+            DropdownMenuItem(
+              text = { Text(stringResource(R.string.profile_picture_from_provider), style = MaterialTheme.typography.bodySmall) },
+              onClick = {},
+              enabled = false,
+            )
+          }
+          if (profile.canOverrideDisplayName) {
+            DropdownMenuItem(
+              text = { Text(stringResource(R.string.profile_name_change)) },
+              onClick = {
+                isMenuOpen = false
+                isEditingName = true
+              },
+            )
+            if (profile.maybeDisplayNameOverride != null) {
+              DropdownMenuItem(
+                text = { Text(stringResource(R.string.profile_name_reset)) },
+                onClick = { act { viewModel.trySetDisplayName(profile, null) } },
+              )
+            }
+          }
+        }
       }
     }
-    if (picked == null) FailureText(maybeFailure)
+    Column(Modifier.padding(start = 16.dp).weight(1f), content = details)
   }
+  if (maybePicked == null) FailureText(maybeFailure)
+  if (isEditingName && profile != null) {
+    DisplayNameEditor(viewModel, profile, onClose = {
+      isEditingName = false
+      reloads++
+    })
+  }
+  val picked = maybePicked
   if (picked != null) {
     AvatarCropScreen(
       picture = picked,
@@ -184,7 +252,11 @@ private fun AvatarCropScreen(
   var crop by remember(picture) { mutableStateOf(AvatarCrop(picture.width, picture.height)) }
   val area = stringResource(R.string.profile_picture_crop_area)
   val zoomLabel = stringResource(R.string.profile_picture_zoom)
-  Dialog(onDismissRequest = { if (!isSaving) onCancel() }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+  Dialog(
+    onDismissRequest = { if (!isSaving) onCancel() },
+    // Edge to edge: the black screen also covers the system bars' areas.
+    properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
+  ) {
     Surface(Modifier.fillMaxSize(), color = Color.Black) {
       Column(
         Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing).padding(16.dp),
@@ -205,6 +277,8 @@ private fun AvatarCropScreen(
           Canvas(
             Modifier
               .fillMaxSize()
+              // A zoomed picture stays in its area, not over the buttons and the slider.
+              .clipToBounds()
               .semantics { contentDescription = area }
               .pointerInput(picture) {
                 detectTransformGestures { _, pan, zoom, _ ->
