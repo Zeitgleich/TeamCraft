@@ -1050,7 +1050,8 @@ pub fn SidebarItem(
             .map_or(PresenceStatus::Offline, |user| user.presence)
         })
       });
-      view! { <span class="dm-dot"><PresenceDot presence=presence /></span> }.into_any()
+      view! { <span class="dm-dot">{move || view! { <PresenceDot presence=presence.get() /> }}</span> }
+        .into_any()
     },
   };
   let status_emoji = Memo::new(move |_| {
