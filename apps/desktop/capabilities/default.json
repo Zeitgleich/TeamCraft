@@ -157,6 +157,8 @@
     "allow-webview-codec-probe-begin",
     "allow-webview-codec-probe-end",
     "allow-window-chrome",
-    "allow-window-action"
+    "allow-window-action",
+    "allow-show-window-menu",
+    "allow-set-maximize-button"
   ]
 }

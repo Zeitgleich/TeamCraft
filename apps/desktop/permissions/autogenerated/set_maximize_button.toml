@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-maximize-button"
+description = "Enables the set_maximize_button command without any pre-configured scope."
+commands.allow = ["set_maximize_button"]
+
+[[permission]]
+identifier = "deny-set-maximize-button"
+description = "Denies the set_maximize_button command without any pre-configured scope."
+commands.deny = ["set_maximize_button"]

@@ -69,7 +69,7 @@ block2 = { version = "0.6.2", optional = true }
 objc2 = { version = "0.6.2", optional = true }
 objc2-user-notifications = { version = "0.3.2", optional = true, default-features = false, features = ["std", "block2", "UNNotification", "UNNotificationAttachment", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNUserNotificationCenter"] }
 objc2-app-kit = { version = "0.3.2", optional = true, default-features = false, features = ["std", "NSWorkspace"] }
-objc2-foundation = { version = "0.3.2", optional = true, default-features = false, features = ["std", "block2", "NSError", "NSNotification", "NSObject", "NSOperation", "NSString", "NSURL"] }
+objc2-foundation = { version = "0.3.2", optional = true, default-features = false, features = ["std", "block2", "NSError", "NSNotification", "NSObject", "NSOperation", "NSString", "NSURL", "NSUserDefaults"] }
 
 # Linux: the WebKitGTK version at run time (MIT; the version wry uses, so already in the tree).
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -78,7 +78,7 @@ webkit2gtk-sys = { version = "2.0.2", optional = true }
 # Windows: PowerRegisterSuspendResumeNotification and NotifyNetworkConnectivityHintChange
 # (MIT/Apache-2.0; the version the shell uses).
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", optional = true, features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_System_Power", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62", optional = true, features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock", "Win32_System_Power", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 # Windows: WebView2's `ProcessFailed` event (MIT; the version wry and Tauri use, so the same COM
 # types as `PlatformWebview::controller()`).
 webview2-com = { version = "0.39.1", optional = true }
