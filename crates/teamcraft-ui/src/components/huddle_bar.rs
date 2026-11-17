@@ -2,7 +2,7 @@ use leptos::prelude::*;
 
 use crate::areas::{self, Place, lazy_area};
 use crate::calls::{CallKind, CallPhase, CallRequest};
-use crate::components::avatar::{AvatarSize, AvatarStack};
+use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::call_prejoin::call_heading;
 use crate::components::icons::{Icon, IconName};
 use crate::components::pending_button::PendingButton;
@@ -145,7 +145,9 @@ pub fn HuddleBarContent(conversation: ConversationId) -> impl IntoView {
             {move || if is_on_other_device.get() { i18n.t("huddle-on-other-device") } else { i18n.t(bar.get().in_progress) }}
           </strong>
           <span class="avatar-stack">
-            <AvatarStack users=members size=AvatarSize::Small />
+            {move || {
+              members.get().into_iter().map(|user| view! { <Avatar user=user size=AvatarSize::Small /> }).collect_view()
+            }}
           </span>
           <span class="huddle-names" translate="no">
             {move || members.get().into_iter().map(|user| user.display_name).collect::<Vec<_>>().join(", ")}

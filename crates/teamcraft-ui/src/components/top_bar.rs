@@ -4,7 +4,7 @@ use crate::areas::{self, Place, lazy_area};
 use crate::auth::tauri;
 use crate::brand::Brand;
 use crate::components::account_switcher::OtherAccountsBadge;
-use crate::components::avatar::{Avatar, AvatarSize, MaybeAvatar};
+use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::brand_logo::BrandLogo;
 use crate::components::channel_glyph::{ChannelGlyph, channel_fallback_icon};
 use crate::components::icons::{Icon, IconName};
@@ -92,7 +92,7 @@ pub fn TopBar() -> impl IntoView {
               });
             }
           >
-            <Avatar user=me size=AvatarSize::Medium show_presence=true />
+            {move || view! { <Avatar user=me.get() size=AvatarSize::Medium show_presence=true /> }}
           </button>
           // Something unread in another account on this computer (#214).
           <Show when=tauri::is_available fallback=|| ()>
@@ -233,8 +233,14 @@ fn ScopeGlyph(state: AppState, scope: Memo<Option<ScopeChip>>) -> impl IntoView 
   match first.kind {
     ConversationKind::Direct => match first.maybe_peer {
       Some(peer) => {
+        // Read through a memo: other backend changes don't build the avatar again.
         let user = Memo::new(move |_| state.read(|backend| backend.user(peer)));
-        view! { <MaybeAvatar user=user size=AvatarSize::Small /> }.into_any()
+        (move || {
+          user
+            .get()
+            .map(|user| view! { <Avatar user=user size=AvatarSize::Small /> })
+        })
+        .into_any()
       },
       None => view! { <Icon name=IconName::User /> }.into_any(),
     },

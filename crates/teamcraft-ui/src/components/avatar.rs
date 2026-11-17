@@ -3,7 +3,6 @@ use leptos::prelude::*;
 use teamcraft_proto::SourcePictureHash;
 
 use crate::model::{ConversationId, PresenceStatus, User};
-use crate::reactive::{items_by_key, keyed_item};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AvatarSize {
@@ -26,14 +25,9 @@ impl AvatarSize {
 }
 
 /// Generated avatar (initials on a hue derived from the user) with an optional presence dot.
-///
-/// Built once and updated in place: `user` is reactive, so a new presence, status or name of the
-/// person changes the dot or the initials, never the `<img>`. An avatar built again loads its
-/// picture again, which users see as flicker (issue #687); a caller that shows a person who
-/// changes passes a signal of them instead of building the avatar again.
 #[component]
 pub fn Avatar(
-  #[prop(into)] user: Signal<User>,
+  user: User,
   #[prop(default = AvatarSize::Medium)] size: AvatarSize,
   #[prop(default = false)] show_presence: bool,
   /// An integration source's own picture, which goes before the account's (docs/bridge.md, "Source
@@ -45,7 +39,8 @@ pub fn Avatar(
   #[prop(default = true)]
   shows_profile_picture: bool,
 ) -> impl IntoView {
-  let id = Memo::new(move |_| user.with(|user| user.id));
+  let presence = user.presence;
+  let id = user.id;
   // Their picture, once loaded (signed-in builds); the generated initials until then.
   let picture = Memo::new(move |_| {
     shown_picture(
@@ -53,54 +48,20 @@ pub fn Avatar(
         maybe_source_picture
           .and_then(|(conversation, sha256)| crate::source_pictures::picture_url(conversation, sha256))
       },
-      || crate::profiles::use_profiles().and_then(|hub| hub.avatar_url(id.get())),
+      || crate::profiles::use_profiles().and_then(|hub| hub.avatar_url(id)),
       shows_profile_picture,
     )
   });
-  let initials = Memo::new(move |_| user.with(User::initials));
-  let hue = Memo::new(move |_| user.with(|user| user.avatar_hue));
-  let presence = Memo::new(move |_| user.with(|user| user.presence));
-  // Both are always there, one hidden: the `<img>` keeps its picture while the initials show.
+  let initials = user.initials();
+  // Both are always there, one hidden: an avatar built again by a list or row that renders anew
+  // keeps its `<img>` (only changed attributes are written) instead of loading and flashing it
+  // (issue #687).
   view! {
-    <span class=size.class() style:--hue=move || hue.get().to_string() aria-hidden="true">
+    <span class=size.class() style:--hue=user.avatar_hue.to_string() aria-hidden="true">
       <img class="avatar-img" src=move || picture.get() alt="" hidden=move || picture.with(Option::is_none) />
-      <span class="avatar-initials" hidden=move || picture.with(Option::is_some)>{move || initials.get()}</span>
+      <span class="avatar-initials" hidden=move || picture.with(Option::is_some)>{initials}</span>
       {show_presence.then(|| view! { <PresenceDot presence=presence /> })}
     </span>
-  }
-}
-
-/// The avatar of a person who may not be known yet: built when they are, then updated in place
-/// like [`Avatar`]; built again only for another person.
-#[component]
-pub fn MaybeAvatar(
-  #[prop(into)] user: Signal<Option<User>>,
-  #[prop(default = AvatarSize::Medium)] size: AvatarSize,
-  #[prop(default = false)] show_presence: bool,
-) -> impl IntoView {
-  let maybe_id = Memo::new(move |_| user.with(|maybe_user| maybe_user.as_ref().map(|user| user.id)));
-  move || {
-    maybe_id.get()?;
-    let first = user.get_untracked()?;
-    // The last one known while the person goes: the avatar is about to be removed.
-    let shown = Memo::new(move |previous: Option<&User>| {
-      user
-        .get()
-        .or_else(|| previous.cloned())
-        .unwrap_or_else(|| first.clone())
-    });
-    Some(view! { <Avatar user=shown size=size show_presence=show_presence /> })
-  }
-}
-
-/// Overlapping avatars of a few people, one per person, each built once and updated in place.
-#[component]
-pub fn AvatarStack(#[prop(into)] users: Signal<Vec<User>>, size: AvatarSize) -> impl IntoView {
-  let by_id = items_by_key(users, |user: &User| user.id);
-  view! {
-    <For each=move || users.get() key=|user| user.id let:user>
-      <Avatar user=keyed_item(by_id, user.id, user) size=size />
-    </For>
   }
 }
 
@@ -114,10 +75,9 @@ fn shown_picture(
   source_picture().or_else(|| shows_profile_picture.then(profile_picture).flatten())
 }
 
-/// A person's presence as a coloured dot; follows `presence` in place.
 #[component]
-pub fn PresenceDot(#[prop(into)] presence: Signal<PresenceStatus>) -> impl IntoView {
-  view! { <span class=move || format!("presence presence-{}", presence.get().slug()) aria-hidden="true"></span> }
+pub fn PresenceDot(presence: PresenceStatus) -> impl IntoView {
+  view! { <span class=format!("presence presence-{}", presence.slug()) aria-hidden="true"></span> }
 }
 
 #[cfg(test)]

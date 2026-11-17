@@ -12,7 +12,7 @@ use teamcraft_proto::HistoryPolicy;
 use crate::areas::{self, Place, lazy_area};
 use crate::channel_access::can_react_in;
 use crate::clock::{format_relative_short, format_time, format_time_seconds, local_day, now_ms};
-use crate::components::avatar::{Avatar, AvatarSize, AvatarStack};
+use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::date_jump::DatePill;
 use crate::components::file_views::{LinkPreviewCard, MessageFiles, without_upload_bytes};
 use crate::components::icons::{Icon, IconName};
@@ -818,7 +818,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
     view! {
       <button class="reply-count" on:click=move |_| state.open_thread(conversation, thread_root)>
         <span class="reply-avatars">
-          <AvatarStack users=Signal::derive(move || summary.with(|summary| summary.0.clone())) size=AvatarSize::Small />
+          {move || summary.get().0.into_iter().map(|user| view! { <Avatar user=user size=AvatarSize::Small /> }).collect_view()}
         </span>
         <span>{move || i18n.t_count("thread-replies", reply_count as usize)}</span>
         {move || summary.get().1.map(|last| view! {
