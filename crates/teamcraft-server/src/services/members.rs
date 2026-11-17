@@ -196,10 +196,7 @@ pub async fn remove_member(
   query: &RemoveMemberQuery,
 ) -> Result<(), ApiError> {
   let access = load_conversation(state, caller, id).await?;
-  // data-export.md §4.2: leaving that would delete a held channel is refused.
-  if query.maybe_delete_if_last == Some(true) {
-    super::legal_hold::refuse_if_held(state, id).await?;
-  }
+  let held = super::legal_hold::held_conversations(state).await?;
   let audit_target = AuditTarget::new("conversation", id);
   let audit = audit::prepared(
     state,
@@ -210,7 +207,11 @@ pub async fn remove_member(
   let done = state
     .database
     .remove_member_locked(id, user_id, &audit, |facts| {
-      decide_removal(state, caller, &access, user_id, query, facts)
+      match decide_removal(state, caller, &access, user_id, query, facts)? {
+        // data-export.md §4.2: leaving that would delete a held channel is refused.
+        RemovalStep::DeleteChannel if held.contains(&id) => Err(ApiError::LegalHold),
+        step => Ok(step),
+      }
     })
     .await?;
   match done.step {

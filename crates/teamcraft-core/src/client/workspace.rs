@@ -536,6 +536,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // data-export.md §4.2: nothing is signed that the server and every app would have to refuse.
     teamcraft_proto::check_legal_holds(&policy.compliance_archive.legal_holds)
       .map_err(|error| CoreError::InvalidRequest(error.to_string()))?;
+    self.refuse_holds_on_non_channels(&state.policy, &policy)?;
     if policy.maybe_role_signing.is_none() {
       policy.maybe_role_signing = state.policy.maybe_role_signing.clone();
     }
@@ -550,6 +551,33 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self
       .append_log(WorkspaceLogKind::Policy, WorkspaceLog::Policy, version, &document)
       .await
+  }
+  /// A new hold on a conversation this device knows is not a channel (a DM, group or meeting chat)
+  /// is refused before signing; the server checks the ones this device doesn't know (§4.2).
+  fn refuse_holds_on_non_channels(
+    &self,
+    before: &WorkspacePolicy,
+    after: &WorkspacePolicy,
+  ) -> Result<(), CoreError> {
+    let (placed, _) = teamcraft_proto::legal_hold_changes(
+      &before.compliance_archive.legal_holds,
+      &after.compliance_archive.legal_holds,
+    );
+    for hold in placed {
+      let maybe_known: Option<teamcraft_proto::ConversationResponse> = records::get_json(
+        &self.store,
+        Table::Conversations,
+        &hold.conversation_id.to_string(),
+      )?;
+      if maybe_known
+        .is_some_and(|conversation| conversation.kind != teamcraft_proto::ConversationKind::Channel)
+      {
+        return Err(CoreError::InvalidRequest(
+          "a legal hold must name a channel".into(),
+        ));
+      }
+    }
+    Ok(())
   }
 
   /// The provider's time of the newest token this device holds; 0 without one. Its own token, from its

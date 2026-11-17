@@ -218,17 +218,21 @@ impl Database {
     now: OffsetDateTime,
     archived_before: OffsetDateTime,
     limit: i64,
+    excluded: &[ConversationId],
   ) -> Result<Vec<PolicyArchivedChannel>, DbError> {
+    let excluded: Vec<i64> = excluded.iter().copied().map(to_db).collect();
     let rows = sqlx::query!(
       r#"SELECT id, archived_at AS "archived_at!", inactivity_notified_at
          FROM conversations
          WHERE archive_origin = 'inactivity' AND archived_at IS NOT NULL AND deleted_at IS NULL
            AND archived_at <= $2
            AND (inactivity_snoozed_until IS NULL OR inactivity_snoozed_until <= $1)
+           AND NOT (id = ANY($4))
          ORDER BY archived_at, id LIMIT $3"#,
       now,
       archived_before,
       limit,
+      &excluded,
     )
     .fetch_all(self.pool())
     .await?;

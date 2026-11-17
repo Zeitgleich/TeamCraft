@@ -252,11 +252,13 @@ stays on the server until the hold is released. Holds are part of the signed pol
 
 | Field             | Meaning                                                                      |
 |-------------------|------------------------------------------------------------------------------|
-| `conversation_id` | the held conversation (a channel, in this version)                           |
+| `conversation_id` | the held channel; the server refuses DMs, groups and meeting chats           |
 | `reference`       | the organisation's case reference, 1 to 64 characters, read by every member  |
 | `placed_at`       | when the owner placed it, by the owner's clock; shown only                   |
 
-At most 500 holds, each conversation once. The server and the owners' apps refuse other values.
+At most 500 holds, each conversation once, each an existing channel: direct messages, groups and
+meeting chats are removed by paths a hold can't stop (account deletion, meetings), so a hold on them
+is refused. The server and the owners' apps refuse other values.
 
 **What a hold does on the server.**
 
@@ -268,7 +270,8 @@ At most 500 holds, each conversation once. The server and the owners' apps refus
 
 **Who is told.** Every member of a held conversation sees a banner "This conversation is under legal
 hold (reference). Retention doesn't delete its messages." It comes from the verified policy, so the
-server can neither show it for a conversation nobody held nor hide it from a member. Holds are not
+server can't show it for a conversation nobody held; like any policy update, it can delay or
+withhold a newer policy (a new hold or a release) from a member. Holds are not
 secret: the signed policy is readable by every signed-in user, which is why the console asks for a
 reference and not a name or a reason.
 

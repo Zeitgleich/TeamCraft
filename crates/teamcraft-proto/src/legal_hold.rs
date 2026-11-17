@@ -2,7 +2,8 @@
 //! keep, as part of the `compliance_archive` group of the owner-signed workspace policy. While a
 //! conversation is held, retention, the inactivity policy and channel deletion don't remove it on
 //! the server, and every member sees that it is held. The list is in the signed policy, which every
-//! signed-in user reads, so the server can neither place a hold nobody signed nor hide one.
+//! signed-in user reads, so the server can't place a hold nobody signed (it can delay or withhold a
+//! newer policy, like any policy update).
 
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;

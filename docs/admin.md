@@ -1310,8 +1310,8 @@ the hold is released. Holds are part of the signed workspace policy (`compliance
   of the channel sees it in a banner, and the signed policy is readable by everybody signed in: use a
   case number, never a person's name or the reason.
 - **Members are told:** a held channel shows "This conversation is under legal hold" with the reference
-  to every member, from the verified policy (the server can't hide or fake it). Desktop and web show
-  it; Android and iOS follow.
+  to every member, from the verified policy: the server can't fake it, though like any policy update
+  it can delay or withhold a newer one. Desktop and web show it; Android and iOS follow.
 - **Audit:** placing and releasing a hold are audit entries with the owner who signed it.
 - **Limits:** a hold keeps what is on the server against the routine deletions; members can still
   delete their own messages, and holds on people or direct messages are later steps

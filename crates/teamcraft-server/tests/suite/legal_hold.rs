@@ -72,6 +72,57 @@ async fn invalid_holds_are_refused() {
 }
 
 #[tokio::test]
+async fn only_existing_channels_can_be_held() {
+  let app = app!();
+  let (alice, dave, erin) = (owner(), member("dave"), member("erin"));
+  let (_, channel, device) = space_of_alice(&app, &alice).await;
+  let (dave_id, erin_id) = (user_id(&app, &dave).await, user_id(&app, &erin).await);
+  let dm = app.post(&alice, "/dms", json!({"user_id": dave_id})).await;
+  assert_eq!(dm.status, StatusCode::CREATED, "{}", dm.body);
+  let group = app
+    .post(&alice, "/group-dms", json!({"user_ids": [dave_id, erin_id]}))
+    .await;
+  assert_eq!(group.status, StatusCode::CREATED, "{}", group.body);
+  // A DM and a group: account deletion removes them whatever a hold says. And an unknown ID.
+  for target in [dm.id(), group.id(), "999999999".to_owned()] {
+    let reply = sign(&app, &alice, &device, 0, |p| hold(p, &target, "Case 1")).await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{target}: {}", reply.body);
+  }
+  let placed = sign(&app, &alice, &device, 0, |p| hold(p, &channel, "Case 1")).await;
+  assert_eq!(placed.status, StatusCode::CREATED, "{}", placed.body);
+  app.stop().await;
+}
+
+#[tokio::test]
+async fn the_audit_compares_with_the_stored_policy_not_this_instances_cache() {
+  let app = app!();
+  let alice = owner();
+  let (_, channel, device) = space_of_alice(&app, &alice).await;
+  sign(&app, &alice, &device, 0, |p| hold(p, &channel, "Case 1")).await;
+  // Another instance stored it, or this one restarted with a cache that missed it.
+  app.state.policy.set(WorkspacePolicy::default());
+  let again = sign(&app, &alice, &device, 1, |p| hold(p, &channel, "Case 1")).await;
+  assert_eq!(again.status, StatusCode::CREATED, "{}", again.body);
+  let audit = app.get(&alice, "/admin/audit?action=legal_hold_placed").await;
+  assert_eq!(
+    audit.body["entries"].as_array().unwrap().len(),
+    1,
+    "{}",
+    audit.body
+  );
+  // A stale expected version conflicts: nothing is stored and nothing audited.
+  let stale = sign(&app, &alice, &device, 1, |_| {}).await;
+  assert_eq!(stale.status, StatusCode::CONFLICT, "{}", stale.body);
+  let released = app.get(&alice, "/admin/audit?action=legal_hold_released").await;
+  assert!(
+    released.body["entries"].as_array().unwrap().is_empty(),
+    "{}",
+    released.body
+  );
+  app.stop().await;
+}
+
+#[tokio::test]
 async fn retention_keeps_a_held_channel_until_the_hold_is_released() {
   let app = app!();
   let alice = owner();

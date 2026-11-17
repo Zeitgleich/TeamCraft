@@ -249,6 +249,22 @@ impl Database {
     Ok(maybe_found.is_some())
   }
 
+  /// Which of `conversations` are channels that exist (not deleted), for the legal hold check
+  /// (data-export.md §4.2): a hold on anything else is refused.
+  pub async fn existing_channels(
+    &self,
+    conversations: &[ConversationId],
+  ) -> Result<Vec<ConversationId>, DbError> {
+    let ids: Vec<i64> = conversations.iter().copied().map(to_db).collect();
+    let rows = sqlx::query_scalar!(
+      r#"SELECT id FROM conversations WHERE id = ANY($1) AND kind = 'channel' AND deleted_at IS NULL"#,
+      &ids,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows.into_iter().map(from_db).collect()
+  }
+
   pub async fn get_conversation(
     &self,
     conversation: ConversationId,

@@ -71,14 +71,25 @@ pub async fn append(
       require_recoverable_root(state, caller).await?;
     }
   }
+  let version = request.expected_version + 1;
+  let mut audit_rows = Vec::new();
   let maybe_document = if kind == WorkspaceLogKind::Policy {
-    let document = check_policy_payload(request.payload.as_slice(), request.expected_version + 1)?;
+    let document = check_policy_payload(request.payload.as_slice(), version)?;
     check_org_backgrounds_exist(state, &document.policy.call_backgrounds).await?;
     check_notetaker_bot(state, &document.policy.notetaker).await?;
+    // The policy this entry follows, from the log, not this instance's cache: if another entry
+    // is appended meanwhile, this append conflicts and nothing is audited.
+    let previous = policy_at(state, request.expected_version).await?;
+    super::legal_hold::check_new_holds(state, &previous, &document.policy).await?;
+    audit_rows = super::legal_hold::audit_rows(state, caller.user.id, &previous, &document.policy, version)?;
     Some(document)
   } else {
     None
   };
+  let audit_entries: Vec<_> = audit_rows
+    .iter()
+    .map(super::legal_hold::AuditRow::entry)
+    .collect();
 
   let outcome = state
     .database
@@ -88,17 +99,13 @@ pub async fn append(
       request.payload.as_slice(),
       request.signature.as_slice(),
       request.signer_device_id,
+      &audit_entries,
     )
     .await?;
   if let AppendOutcome::VersionConflict { current_version } = outcome {
     return Err(ApiError::VersionConflict { current_version });
   }
 
-  let version = request.expected_version + 1;
-  let maybe_previous = maybe_document.as_ref().map(|_| state.policy.get());
-  if let (Some(previous), Some(document)) = (&maybe_previous, &maybe_document) {
-    super::legal_hold::record_changes(state, caller.user.id, previous, &document.policy, version).await?;
-  }
   let maybe_self_join = maybe_document.map(|document| {
     let self_join = document.policy.admin_self_join.clone();
     state.policy.set(document.policy);
@@ -225,6 +232,24 @@ pub fn effective_min_password_chars(state: &AppState) -> usize {
     .map_or(state.settings.get().local_accounts.min_password_chars, |chars| {
       chars as usize
     })
+}
+
+/// The policy of entry `version` of the log; the default one for version 0 or a missing entry (an
+/// append after it conflicts anyway).
+async fn policy_at(state: &AppState, version: u64) -> Result<WorkspacePolicy, ApiError> {
+  if version == 0 {
+    return Ok(WorkspacePolicy::default());
+  }
+  let entries = state
+    .database
+    .list_workspace_log(&WorkspaceLogKind::Policy, version - 1, 1)
+    .await?;
+  match entries.first().filter(|entry| entry.version == version) {
+    Some(entry) => serde_json::from_slice::<PolicyDocument>(&entry.payload)
+      .map(|document| document.policy)
+      .map_err(|e| ApiError::Internal(format!("stored policy is unreadable: {e}"))),
+    None => Ok(WorkspacePolicy::default()),
+  }
 }
 
 pub async fn current_policy(

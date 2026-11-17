@@ -33,7 +33,8 @@ pub fn LegalHoldPanel() -> impl IntoView {
     state
       .read(|backend| backend.admin_channels())
       .into_iter()
-      .filter(|channel| channel.kind != ConversationKind::Direct)
+      // Only channels: DMs, groups and meeting chats go by paths a hold can't stop (§4.2).
+      .filter(|channel| matches!(channel.kind, ConversationKind::Public | ConversationKind::Private))
       .collect::<Vec<AdminChannel>>()
   });
   let name_of = move |id: ConversationId| {
