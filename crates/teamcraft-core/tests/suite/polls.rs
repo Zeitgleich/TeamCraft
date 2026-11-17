@@ -9,7 +9,9 @@ use crate::common;
 use common::{Peer, backend_of, run_commands, settle};
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::Message;
-use teamcraft_client_api::polls::{NewPoll, PollChoice, PollSpec, PollView, PollVoters, fallback_text};
+use teamcraft_client_api::polls::{
+  NewPoll, PollChoice, PollResults, PollSpec, PollView, PollVoters, fallback_text,
+};
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::store::{LocalStore, MessageContent, MessageFilter};
@@ -55,12 +57,19 @@ impl Team {
 
   /// Alice makes a poll through her UI; it reaches everybody.
   async fn alice_polls(&mut self, voters: PollVoters) -> Message {
+    self.alice_polls_showing(voters, PollResults::Always).await
+  }
+
+  /// [`Self::alice_polls`] with counts shown as `results` says.
+  async fn alice_polls_showing(&mut self, voters: PollVoters, results: PollResults) -> Message {
     let alice_ui = backend_of(&self.alice);
     let spec = PollSpec {
       question: QUESTION.to_owned(),
       options: OPTIONS.map(str::to_owned).to_vec(),
       choice: PollChoice::Single,
       voters,
+      maybe_closes_at_ms: None,
+      results,
     };
     let fallback = fallback_text(&spec, "Poll", "Update TeamCraft to vote in this poll.");
     alice_ui.post_poll(self.channel, NewPoll { spec, fallback });
@@ -168,6 +177,29 @@ mod voting {
     t.settle().await;
     for view in t.views() {
       assert_eq!(counts(&view), [1, 0, 0]);
+    }
+  }
+}
+
+mod results {
+  use super::*;
+
+  #[tokio::test]
+  async fn counts_show_to_each_person_once_they_voted() {
+    let mut t = team().await;
+    let poll = t
+      .alice_polls_showing(PollVoters::Shown, PollResults::AfterVote)
+      .await;
+    t.vote(Who::Bob, &poll, &[1]).await;
+
+    let [alice, bob, carol] = t.views();
+    assert!(bob.are_results_shown);
+    assert_eq!(counts(&bob), [0, 1, 0]);
+    for view in [&alice, &carol] {
+      assert!(!view.are_results_shown);
+      assert_eq!(counts(view), [0, 0, 0]);
+      assert!(view.options.iter().all(|option| option.voters.is_empty()));
+      assert_eq!(view.voter_count, 1, "how many voted still shows");
     }
   }
 }

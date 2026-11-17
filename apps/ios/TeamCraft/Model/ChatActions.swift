@@ -5,6 +5,12 @@ import Foundation
 /// the core's serde types are the schema, and ids travel as decimal strings.
 enum ChatAction {
   case toggleReaction(conversationId: String, messageId: String, emoji: String)
+  /// Votes in a poll for `choices` (option positions); none withdraw the vote (#205).
+  case voteInPoll(conversationId: String, messageId: String, choices: [UInt32])
+  /// Closes one of the user's own polls: later votes don't count.
+  case closePoll(conversationId: String, messageId: String)
+  /// Sends a poll: the `post_poll` action as the core built it (`pollPostAction`).
+  case postPoll(actionJson: String)
   case editMessage(conversationId: String, messageId: String, body: String)
   case deleteMessage(conversationId: String, messageId: String)
   case setCustomStatus(CustomStatusValue?)
@@ -79,6 +85,14 @@ enum ChatAction {
       object = [
         "action": "toggle_reaction", "conversation": conversation, "message": message, "emoji": emoji,
       ]
+    case .voteInPoll(let conversation, let message, let choices):
+      object = [
+        "action": "vote_in_poll", "conversation": conversation, "message": message, "choices": choices.map { Int($0) },
+      ]
+    case .closePoll(let conversation, let message):
+      object = ["action": "close_poll", "conversation": conversation, "message": message]
+    case .postPoll(let actionJson):
+      return actionJson
     case .editMessage(let conversation, let message, let body):
       object = ["action": "edit_message", "conversation": conversation, "message": message, "body": body]
     case .deleteMessage(let conversation, let message):

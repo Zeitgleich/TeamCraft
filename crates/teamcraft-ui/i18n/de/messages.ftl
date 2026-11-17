@@ -363,6 +363,22 @@ poll-voters-more = { $count ->
 poll-close = Umfrage beenden
 poll-close-confirm = Für alle beenden? Spätere Stimmen zählen nicht.
 poll-unknown-choice = Zum Abstimmen braucht diese Umfrage eine neuere Version von TeamCraft.
+poll-results = Ergebnisse zeigen
+poll-results-always = Immer
+poll-results-after-vote = Nach der Abstimmung
+poll-results-after-close = Nach dem Ende
+poll-results-hidden-vote = Die Ergebnisse erscheinen, sobald du abgestimmt hast.
+poll-results-hidden-close = Die Ergebnisse erscheinen, wenn die Umfrage endet.
+poll-closes = Endet
+poll-closes-never = Wenn ich sie beende
+poll-closes-hour = In 1 Stunde
+poll-closes-day = In 1 Tag
+poll-closes-week = In 1 Woche
+poll-closes-at = Zu einer festen Zeit
+poll-closes-at-label = Ende
+poll-closes-on = Endet { $time }
+poll-error-closing-passed = Wähle eine Zeit in der Zukunft.
+poll-error-closing-far = Wähle eine Zeit innerhalb von { $max } Tagen.
 
 # Mehrere Nachrichten auswählen (Issue #2070)
 action-select = Auswählen

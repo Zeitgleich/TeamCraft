@@ -105,7 +105,7 @@ fun rememberAttachmentPickers(
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AttachSheet(pickers: AttachmentPickers, onDismiss: () -> Unit) {
+fun AttachSheet(pickers: AttachmentPickers, onDismiss: () -> Unit, maybeOnPoll: (() -> Unit)? = null) {
   val context = LocalContext.current
   ModalBottomSheet(onDismissRequest = onDismiss) {
     // Not in the Play build: there the gallery tile opens the system photo picker.
@@ -144,6 +144,12 @@ fun AttachSheet(pickers: AttachmentPickers, onDismiss: () -> Unit) {
             AttachKind.FILE -> pickers.pickFiles()
           }
         }
+      }
+    }
+    maybeOnPoll?.let { onPoll ->
+      PollRow {
+        onDismiss()
+        onPoll()
       }
     }
   }

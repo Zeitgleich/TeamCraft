@@ -1017,6 +1017,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
   }
 
+  /**
+   * A time the screens show passed (a poll's closing, #205): they read again, as after a change,
+   * and the core counts with the new time.
+   */
+  fun noteTimePassed() = graph.core.noteTimePassed()
+
   /** Runs a `ChatAction` built with [ChatActions]; failures show as [lastFailure]. */
   fun act(action: String, onRefused: () -> Unit = {}) = viewModelScope.launch {
     try {

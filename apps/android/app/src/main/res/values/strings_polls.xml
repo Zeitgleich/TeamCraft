@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Polls in messages and the sheet that makes them (#205). -->
+<resources>
+  <string name="poll_title">Poll</string>
+  <string name="poll_fallback_note">Update TeamCraft to vote in this poll.</string>
+  <string name="poll_new_title">New poll</string>
+  <string name="poll_row_hint">Ask a question and let everyone vote.</string>
+  <string name="poll_question">Question</string>
+  <string name="poll_options">Options</string>
+  <string name="poll_option">Option %1$d</string>
+  <string name="poll_add_option">Add option</string>
+  <string name="poll_remove_option">Remove option %1$d</string>
+  <string name="poll_multiple">Allow several answers</string>
+  <string name="poll_hide_voters">Hide who voted</string>
+  <string name="poll_hide_voters_hint">The poll shows only counts. It isn\'t anonymous: every member\'s app still receives each vote with its sender.</string>
+  <string name="poll_results">Show results</string>
+  <string name="poll_results_always">Always</string>
+  <string name="poll_results_after_vote">After voting</string>
+  <string name="poll_results_after_close">When closed</string>
+  <string name="poll_closes">Ends</string>
+  <string name="poll_closes_never">When I close it</string>
+  <string name="poll_closes_hour">In 1 hour</string>
+  <string name="poll_closes_day">In 1 day</string>
+  <string name="poll_closes_week">In 1 week</string>
+  <string name="poll_closes_at">At a set time</string>
+  <string name="poll_closes_at_label">End time</string>
+  <string name="poll_send">Send poll</string>
+  <string name="poll_error_question">Enter a question.</string>
+  <string name="poll_error_question_long">A question can have at most %1$d characters.</string>
+  <string name="poll_error_options">A poll needs at least %1$d options.</string>
+  <string name="poll_error_options_many">A poll can have at most %1$d options.</string>
+  <string name="poll_error_option_long">An option can have at most %1$d characters.</string>
+  <string name="poll_error_option_duplicate">This option is already in the poll.</string>
+  <string name="poll_error_closing_passed">Pick a time in the future.</string>
+  <string name="poll_error_closing_far">Pick an earlier end time.</string>
+  <string name="poll_single_choice">Choose one</string>
+  <string name="poll_multiple_choice">Choose any</string>
+  <string name="poll_hidden_voters">Names hidden</string>
+  <string name="poll_results_hidden_vote">Results show once you vote.</string>
+  <string name="poll_results_hidden_close">Results show when the poll closes.</string>
+  <string name="poll_closed">Closed</string>
+  <string name="poll_closes_on">Ends %1$s</string>
+  <string name="poll_option_count">%1$d · %2$d%%</string>
+  <string name="poll_close">Close poll</string>
+  <string name="poll_close_confirm">Close for everyone? Later votes won\'t count.</string>
+  <string name="poll_unknown_choice">This poll needs a newer version of TeamCraft to vote.</string>
+  <plurals name="poll_votes">
+    <item quantity="one">%1$d vote</item>
+    <item quantity="other">%1$d votes</item>
+  </plurals>
+  <plurals name="poll_option_votes">
+    <item quantity="one">%1$d vote, %2$d percent</item>
+    <item quantity="other">%1$d votes, %2$d percent</item>
+  </plurals>
+  <plurals name="poll_voters_more">
+    <item quantity="one">and %1$d more</item>
+    <item quantity="other">and %1$d more</item>
+  </plurals>
+</resources>

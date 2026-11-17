@@ -41,6 +41,7 @@ struct ChatPane: View {
   @State private var isPickingDocument = false
   @AppStorage(AttachKind.storageKey) private var lastAttachRaw = AttachKind.photo.rawValue
   @State private var isSchedulingSend = false
+  @State private var isMakingPoll = false
   /// This text's message ID until the server took it, so a retry after a lost answer holds one message.
   @State private var maybeScheduleAttempt: (body: String, id: String)?
   @State private var isSchedulingAllowed = false
@@ -439,6 +440,9 @@ struct ChatPane: View {
     }
     .sheet(isPresented: $isSchedulingSend) {
       SendLaterSheet { dueAtMs in Task { await confirmThenSend(dueAtMs: dueAtMs) } }
+    }
+    .sheet(isPresented: $isMakingPoll) {
+      PollSheet(conversationId: conversation.id)
     }
     .modifier(MentionConfirmationAlert(pending: $maybePendingMention, onSend: sendConfirmed))
     .task(id: model.changeCount) {
@@ -934,6 +938,10 @@ struct ChatPane: View {
           ForEach(AttachKind.ordered(last: AttachKind.parse(lastAttachRaw)), id: \.self) { kind in
             attachButton(kind)
           }
+          // A poll goes to the conversation, not into a thread (#205).
+          if threadId == nil {
+            Button("poll_new_title", systemImage: "chart.bar") { isMakingPoll = true }
+          }
           if isSchedulingAllowed {
             Divider()
             // Text waits in the account data; with files or nothing to send there is nothing it can keep.
@@ -1339,9 +1347,12 @@ struct ChatPane: View {
       Button("select", systemImage: "checkmark.circle") { startSelecting(message) }
     }
     if message.authorId == account.userId && !message.isPending && conversation.canPost {
-      Button("edit", systemImage: "pencil") {
-        maybeEditing = message
-        draft = message.body
+      // A poll's text is only what older versions show, so it isn't edited (#205).
+      if message.maybePoll == nil {
+        Button("edit", systemImage: "pencil") {
+          maybeEditing = message
+          draft = message.body
+        }
       }
       Button("delete", systemImage: "trash", role: .destructive) { maybeDeleting = message }
     }

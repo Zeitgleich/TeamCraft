@@ -363,6 +363,22 @@ poll-voters-more = { $count ->
 poll-close = Close poll
 poll-close-confirm = Close for everyone? Later votes won't count.
 poll-unknown-choice = This poll needs a newer version of TeamCraft to vote.
+poll-results = Show results
+poll-results-always = Always
+poll-results-after-vote = After voting
+poll-results-after-close = When closed
+poll-results-hidden-vote = Results show once you vote.
+poll-results-hidden-close = Results show when the poll closes.
+poll-closes = Ends
+poll-closes-never = When I close it
+poll-closes-hour = In 1 hour
+poll-closes-day = In 1 day
+poll-closes-week = In 1 week
+poll-closes-at = At a set time
+poll-closes-at-label = End time
+poll-closes-on = Ends { $time }
+poll-error-closing-passed = Pick a time in the future.
+poll-error-closing-far = Pick a time within { $max } days.
 
 # Selecting several messages (issue #2070)
 action-select = Select

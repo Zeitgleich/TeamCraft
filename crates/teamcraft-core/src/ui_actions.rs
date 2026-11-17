@@ -410,7 +410,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
   /// Sends a poll (issue #205, e2ee.md §4.12): a text message whose text is what versions before
   /// polls show, with the poll inside the ciphertext.
   pub(crate) fn ui_post_poll(&self, conversation: ConversationId, poll: NewPoll) {
-    if let Err(error) = poll.spec.check(&PollLimits::default()) {
+    if let Err(error) = poll.spec.check_at(&PollLimits::default(), self.now_ms()) {
       tracing::warn!(conversation_id = %conversation, %error, "not sending a poll the limits refuse");
       return;
     }

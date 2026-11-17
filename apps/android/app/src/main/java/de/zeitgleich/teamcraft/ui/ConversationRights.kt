@@ -44,11 +44,13 @@ fun messageActions(
   wantsAcknowledgement: Boolean,
   /** Selection mode is on offer here (the conversation's feed, not a thread's), issue #2070. */
   canSelect: Boolean = false,
+  /** A poll (#205): its text is only what older versions show, so it isn't edited. */
+  isPoll: Boolean = false,
 ): List<MessageAction> = buildList {
   if (rights.canPost) add(MessageAction.Reply)
   if (rights.canPost && hasThreads) add(MessageAction.ReplyInThread)
   if (rights.canPost && isMine && !isDeleted) {
-    add(MessageAction.Edit)
+    if (!isPoll) add(MessageAction.Edit)
     add(MessageAction.Delete)
   }
   add(MessageAction.Forward)

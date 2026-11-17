@@ -279,4 +279,33 @@ class WireTest {
     assertEquals(HOLIDAY_REGIONS.size, HOLIDAY_REGIONS.toSet().size)
     assertTrue(HOLIDAY_REGIONS.all { it.matches(Regex("[A-Z]{2}(-[A-Z]{2})?")) })
   }
+
+  @Test
+  fun aPollDecodesWithItsClosingTimeAndHiddenCounts() {
+    val message = WireJson.decodeFromString(
+      Message.serializer(),
+      """{"id":"70","conversation":"7","author":"1","sent_at":1,"body":"**Poll:** Lunch?",
+        "poll":{"question":"Lunch?","options":[{"text":"Pizza","count":0,"is_chosen":true},{"text":"Salad","count":0}],
+        "choice":"single","voters":"shown","results":"after_close","are_results_shown":false,
+        "closes_at":1800000000000,"voter_count":2,"is_closed":false,"is_mine":true}}""",
+    )
+    val poll = message.maybePoll!!
+    assertEquals("after_close", poll.results)
+    assertEquals(false, poll.areResultsShown)
+    assertEquals(1_800_000_000_000L, poll.maybeClosesAt)
+    assertEquals(listOf(0), poll.myChoices)
+    assertEquals(true, poll.isKnownChoice)
+  }
+
+  @Test
+  fun aPollOfAnOlderCoreShowsItsCounts() {
+    val poll = WireJson.decodeFromString(
+      Poll.serializer(),
+      """{"question":"Q","options":[],"choice":"ranked","voters":"blinded","voter_count":0,"is_closed":false,"is_mine":false}""",
+    )
+    assertEquals(true, poll.areResultsShown)
+    assertEquals(null, poll.maybeClosesAt)
+    assertEquals(false, poll.isKnownChoice)
+    assertEquals(false, poll.areVotersShown)
+  }
 }

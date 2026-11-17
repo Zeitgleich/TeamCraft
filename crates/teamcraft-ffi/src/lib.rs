@@ -34,6 +34,7 @@ mod notetaker;
 mod os_log;
 mod perf_jobs;
 mod picture_retries;
+mod polls;
 mod reads;
 mod recent_activity;
 mod recovery_kit;

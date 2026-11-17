@@ -142,6 +142,11 @@ class CoreRepository(
     keptConversations.at(account, version) ?: core().conversations().also { keptConversations.keep(account, version, it) }
   }
 
+  /** A time the screens show passed (a poll's closing): they read again, as after a change. */
+  fun noteTimePassed() {
+    changes.update { it + 1 }
+  }
+
   /** Closes the core; local data stays (it belongs to the account, not the session). */
   suspend fun close() = lock.withLock {
     maybeTokens?.maybeCore = null

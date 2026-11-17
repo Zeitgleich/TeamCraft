@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Polls in messages and the sheet that makes them (#205). -->
+<resources>
+  <string name="poll_title">Umfrage</string>
+  <string name="poll_fallback_note">Aktualisiere TeamCraft, um in dieser Umfrage abzustimmen.</string>
+  <string name="poll_new_title">Neue Umfrage</string>
+  <string name="poll_row_hint">Stell eine Frage und lass alle abstimmen.</string>
+  <string name="poll_question">Frage</string>
+  <string name="poll_options">Antworten</string>
+  <string name="poll_option">Antwort %1$d</string>
+  <string name="poll_add_option">Antwort hinzufügen</string>
+  <string name="poll_remove_option">Antwort %1$d entfernen</string>
+  <string name="poll_multiple">Mehrere Antworten erlauben</string>
+  <string name="poll_hide_voters">Verbergen, wer abgestimmt hat</string>
+  <string name="poll_hide_voters_hint">Die Umfrage zeigt nur die Zahlen. Anonym ist sie nicht: Die App jedes Mitglieds erhält jede Stimme mit ihrem Absender.</string>
+  <string name="poll_results">Ergebnisse zeigen</string>
+  <string name="poll_results_always">Immer</string>
+  <string name="poll_results_after_vote">Nach der Abstimmung</string>
+  <string name="poll_results_after_close">Nach dem Ende</string>
+  <string name="poll_closes">Endet</string>
+  <string name="poll_closes_never">Wenn ich sie beende</string>
+  <string name="poll_closes_hour">In 1 Stunde</string>
+  <string name="poll_closes_day">In 1 Tag</string>
+  <string name="poll_closes_week">In 1 Woche</string>
+  <string name="poll_closes_at">Zu einer festen Zeit</string>
+  <string name="poll_closes_at_label">Ende</string>
+  <string name="poll_send">Umfrage senden</string>
+  <string name="poll_error_question">Gib eine Frage ein.</string>
+  <string name="poll_error_question_long">Eine Frage darf höchstens %1$d Zeichen haben.</string>
+  <string name="poll_error_options">Eine Umfrage braucht mindestens %1$d Antworten.</string>
+  <string name="poll_error_options_many">Eine Umfrage darf höchstens %1$d Antworten haben.</string>
+  <string name="poll_error_option_long">Eine Antwort darf höchstens %1$d Zeichen haben.</string>
+  <string name="poll_error_option_duplicate">Diese Antwort gibt es schon.</string>
+  <string name="poll_error_closing_passed">Wähle eine Zeit in der Zukunft.</string>
+  <string name="poll_error_closing_far">Wähle ein früheres Ende.</string>
+  <string name="poll_single_choice">Eine Antwort</string>
+  <string name="poll_multiple_choice">Mehrere Antworten</string>
+  <string name="poll_hidden_voters">Namen verborgen</string>
+  <string name="poll_results_hidden_vote">Die Ergebnisse erscheinen, sobald du abgestimmt hast.</string>
+  <string name="poll_results_hidden_close">Die Ergebnisse erscheinen, wenn die Umfrage endet.</string>
+  <string name="poll_closed">Beendet</string>
+  <string name="poll_closes_on">Endet %1$s</string>
+  <string name="poll_option_count">%1$d · %2$d %%</string>
+  <string name="poll_close">Umfrage beenden</string>
+  <string name="poll_close_confirm">Für alle beenden? Spätere Stimmen zählen nicht.</string>
+  <string name="poll_unknown_choice">Zum Abstimmen braucht diese Umfrage eine neuere Version von TeamCraft.</string>
+  <plurals name="poll_votes">
+    <item quantity="one">%1$d Stimme</item>
+    <item quantity="other">%1$d Stimmen</item>
+  </plurals>
+  <plurals name="poll_option_votes">
+    <item quantity="one">%1$d Stimme, %2$d Prozent</item>
+    <item quantity="other">%1$d Stimmen, %2$d Prozent</item>
+  </plurals>
+  <plurals name="poll_voters_more">
+    <item quantity="one">und %1$d weitere Person</item>
+    <item quantity="other">und %1$d weitere</item>
+  </plurals>
+</resources>

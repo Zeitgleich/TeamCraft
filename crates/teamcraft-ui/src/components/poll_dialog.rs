@@ -1,12 +1,13 @@
-//! The dialog that makes a poll (issue #205): a question, two or more options, and whether people
-//! may choose several and whether the poll names who voted. "Hide who voted" says what it is: the
+//! The dialog that makes a poll (issue #205): a question, two or more options, whether people may
+//! choose several, whether the poll names who voted, when it shows its counts and when it closes. "Hide who voted" says what it is: the
 //! poll shows counts only, but every member's app still receives each vote with its sender
 //! (e2ee.md §4.12), so it is no anonymous ballot.
 
 use leptos::prelude::*;
 use teamcraft_client_api::polls::{
-  NewPoll, PollChoice, PollError, PollLimits, PollSpec, PollVoters, fallback_text,
+  NewPoll, PollChoice, PollDraft, PollError, PollField, PollLimits, PollResults, PollVoters, fallback_text,
 };
+use teamcraft_proto::MIN_POLL_OPTIONS;
 
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
@@ -18,37 +19,45 @@ use crate::state::use_app_state;
 const POLL_FORM_ID: &str = "poll-form";
 const QUESTION_FIELD: &str = "poll-question";
 const HIDE_VOTERS_HINT_ID: &str = "poll-hide-voters-hint";
+const RESULTS_FIELD: &str = "poll-results";
+const CLOSING_SELECT: &str = "poll-closing";
+const CLOSING_FIELD: &str = "poll-closes-at";
 /// Option fields a new poll starts with.
 const FIRST_OPTIONS: usize = 2;
-
-/// A field's problem: its element id, the i18n key of the message and the message's arguments.
-type FieldProblem = (String, &'static str, Vec<(&'static str, String)>);
+const HOUR_MS: i64 = 3_600_000;
 
 #[component]
 pub fn PollDialog(conversation: ConversationId) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let limits = PollLimits::default();
-  let question = RwSignal::new(String::new());
-  let options = RwSignal::new(vec![String::new(); FIRST_OPTIONS]);
-  let is_multiple = RwSignal::new(false);
-  let hides_voters = RwSignal::new(false);
-  let errors = FormErrors::new();
-  let draft = move || PollDraft {
-    question: question.get(),
-    options: options.get(),
-    choice: if is_multiple.get() {
-      PollChoice::Multiple
-    } else {
-      PollChoice::Single
-    },
-    voters: if hides_voters.get() {
-      PollVoters::Hidden
-    } else {
-      PollVoters::Shown
-    },
+  let fields = Fields {
+    question: RwSignal::new(String::new()),
+    options: RwSignal::new(vec![String::new(); FIRST_OPTIONS]),
+    is_multiple: RwSignal::new(false),
+    hides_voters: RwSignal::new(false),
+    results: RwSignal::new(PollResults::Always),
+    closing: RwSignal::new(Closing::Never),
+    closes_at: RwSignal::new(crate::clock::format_local_datetime_input(
+      crate::clock::now_ms().saturating_add(24 * HOUR_MS),
+    )),
   };
-  let field_errors = move || draft().field_errors(i18n, &limits);
+  let Fields {
+    question,
+    options,
+    is_multiple,
+    hides_voters,
+    results,
+    closing,
+    closes_at,
+  } = fields;
+  let errors = FormErrors::new();
+  // The time is read when the fields change and on send, not ticking: an error about a time that
+  // passed while the dialog stood open shows on send.
+  let field_errors = move || {
+    let now_ms = crate::clock::now_ms();
+    field_errors(i18n, &draft_at(&fields, now_ms), &limits, now_ms)
+  };
   Effect::new(move |_| errors.follow(field_errors()));
   let send = move |ev: leptos::ev::SubmitEvent| {
     ev.prevent_default();
@@ -57,7 +66,7 @@ pub fn PollDialog(conversation: ConversationId) -> impl IntoView {
       errors.refuse(POLL_FORM_ID, found);
       return;
     }
-    let spec = untrack(draft).spec();
+    let spec = untrack(|| draft_at(&fields, crate::clock::now_ms())).spec();
     let fallback = fallback_text(&spec, &i18n.t("poll-title"), &i18n.t("poll-fallback-note"));
     state.write(|backend| backend.post_poll(conversation, NewPoll { spec, fallback }));
     state.close_overlay();
@@ -150,6 +159,61 @@ pub fn PollDialog(conversation: ConversationId) -> impl IntoView {
             <span>{move || i18n.t("poll-hide-voters")}</span>
           </label>
           <p class="hint" id=HIDE_VOTERS_HINT_ID>{move || i18n.t("poll-hide-voters-hint")}</p>
+          <label for=RESULTS_FIELD>{move || i18n.t("poll-results")}</label>
+          <select
+            id=RESULTS_FIELD
+            class="input"
+            on:change=move |ev| {
+              let value = event_target_value(&ev);
+              if let Some((_, _, mode)) = RESULTS.iter().find(|(name, _, _)| *name == value) {
+                results.set(mode.clone());
+              }
+            }
+          >
+            {RESULTS
+              .iter()
+              .map(|(value, key, mode)| {
+                let mode = mode.clone();
+                view! {
+                  <option value=*value selected=move || results.get() == mode>{move || i18n.t(key)}</option>
+                }
+              })
+              .collect_view()}
+          </select>
+          <label for=CLOSING_SELECT>{move || i18n.t("poll-closes")}</label>
+          <select
+            id=CLOSING_SELECT
+            class="input"
+            on:change=move |ev| {
+              let value = event_target_value(&ev);
+              if let Some((_, _, choice)) = CLOSINGS.iter().find(|(name, _, _)| *name == value) {
+                closing.set(*choice);
+              }
+            }
+          >
+            {CLOSINGS
+              .iter()
+              .map(|(value, key, choice)| {
+                let choice = *choice;
+                view! {
+                  <option value=*value selected=move || closing.get() == choice>{move || i18n.t(key)}</option>
+                }
+              })
+              .collect_view()}
+          </select>
+          <Show when=move || closing.get() == Closing::At>
+            <label for=CLOSING_FIELD>{move || i18n.t("poll-closes-at-label")}</label>
+            <input
+              id=CLOSING_FIELD
+              class="input"
+              type="datetime-local"
+              aria-invalid=errors.invalid(CLOSING_FIELD)
+              aria-describedby=errors.described(CLOSING_FIELD)
+              prop:value=move || closes_at.get()
+              on:input=move |ev| closes_at.set(event_target_value(&ev))
+            />
+          </Show>
+          <FieldError errors=errors field=CLOSING_FIELD.to_owned() />
         </div>
         <footer class="modal-foot">
           <span class="grow"></span>
@@ -161,122 +225,101 @@ pub fn PollDialog(conversation: ConversationId) -> impl IntoView {
   }
 }
 
-/// What the dialog holds, as typed.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct PollDraft {
-  question: String,
-  options: Vec<String>,
-  choice: PollChoice,
-  voters: PollVoters,
+/// When the poll closes, as the dialog offers it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Closing {
+  Never,
+  In(i64),
+  /// At the time in the date field.
+  At,
 }
 
-impl PollDraft {
-  /// The poll to send: question and options trimmed, empty option fields left out.
-  fn spec(&self) -> PollSpec {
-    PollSpec::from_input(
-      &self.question,
-      &self.options,
-      self.choice.clone(),
-      self.voters.clone(),
-    )
-  }
+/// The closing choices of the select: value, i18n key and choice.
+const CLOSINGS: [(&str, &str, Closing); 5] = [
+  ("never", "poll-closes-never", Closing::Never),
+  ("hour", "poll-closes-hour", Closing::In(HOUR_MS)),
+  ("day", "poll-closes-day", Closing::In(24 * HOUR_MS)),
+  ("week", "poll-closes-week", Closing::In(7 * 24 * HOUR_MS)),
+  ("at", "poll-closes-at", Closing::At),
+];
 
-  /// Each field's problem, in the order of the fields, as i18n keys and arguments.
-  fn problems(&self, limits: &PollLimits) -> Vec<FieldProblem> {
-    let mut problems = Vec::new();
-    let spec = self.spec();
-    // The typed field each option of the spec came from (empty fields are left out of it).
-    let fields: Vec<usize> = self
-      .options
-      .iter()
-      .enumerate()
-      .filter(|(_, option)| !option.trim().is_empty())
-      .map(|(at, _)| at)
-      .collect();
-    let mut checked = spec.clone();
-    // Each error names one field; checking again after setting it right finds the next one.
-    for _ in 0..=self.options.len() + 1 {
-      let Err(error) = checked.check(limits) else {
-        break;
-      };
-      let (field, key, args) = match error {
-        PollError::EmptyQuestion => (QUESTION_FIELD.to_owned(), "poll-error-question", Vec::new()),
-        PollError::QuestionTooLong { max } => (
-          QUESTION_FIELD.to_owned(),
-          "poll-error-question-long",
-          vec![("max", max.to_string())],
-        ),
-        PollError::TooFewOptions { min } => {
-          let first_empty = self
-            .options
-            .iter()
-            .position(|option| option.trim().is_empty())
-            .unwrap_or(self.options.len().saturating_sub(1));
-          (
-            option_field(first_empty),
-            "poll-error-options",
-            vec![("min", min.to_string())],
-          )
-        },
-        PollError::TooManyOptions { max } => (
-          option_field(self.options.len().saturating_sub(1)),
-          "poll-error-options-many",
-          vec![("max", max.to_string())],
-        ),
-        PollError::EmptyOption { index } => (
-          option_field(fields.get(index).copied().unwrap_or(index)),
-          "poll-error-options",
-          vec![("min", "2".to_owned())],
-        ),
-        PollError::OptionTooLong { index, max } => (
-          option_field(fields.get(index).copied().unwrap_or(index)),
-          "poll-error-option-long",
-          vec![("max", max.to_string())],
-        ),
-        PollError::DuplicateOption { index } => (
-          option_field(fields.get(index).copied().unwrap_or(index)),
-          "poll-error-option-duplicate",
-          Vec::new(),
-        ),
-      };
-      problems.push((field, key, args));
-      if !settle(&mut checked, error) {
-        break;
-      }
-    }
-    problems
-  }
+/// The results choices of the select: value, i18n key and mode.
+const RESULTS: [(&str, &str, PollResults); 3] = [
+  ("always", "poll-results-always", PollResults::Always),
+  ("after_vote", "poll-results-after-vote", PollResults::AfterVote),
+  ("after_close", "poll-results-after-close", PollResults::AfterClose),
+];
 
-  fn field_errors(&self, i18n: I18n, limits: &PollLimits) -> FieldErrors {
-    let mut found = FieldErrors::new();
-    let mut problems = self.problems(limits);
-    // In the order of the form: the question first, then the options top down.
-    problems.sort_by_key(|(field, _, _)| field_order(field));
-    for (field, key, args) in problems {
-      let args: Vec<(&str, &str)> = args.iter().map(|(name, value)| (*name, value.as_str())).collect();
-      found.push(field, i18n.t_with(key, &args));
-    }
-    found
+/// The poll as the dialog's fields hold it at `now_ms`.
+fn draft_at(fields: &Fields, now_ms: i64) -> PollDraft {
+  let maybe_closes_at_ms = match fields.closing.get() {
+    Closing::Never => None,
+    Closing::In(after_ms) => Some(now_ms.saturating_add(after_ms)),
+    // An unreadable or empty date reads as now, which the check names as passed.
+    Closing::At => Some(crate::clock::parse_local_datetime(&fields.closes_at.get()).unwrap_or(now_ms)),
+  };
+  PollDraft {
+    question: fields.question.get(),
+    options: fields.options.get(),
+    choice: if fields.is_multiple.get() {
+      PollChoice::Multiple
+    } else {
+      PollChoice::Single
+    },
+    voters: if fields.hides_voters.get() {
+      PollVoters::Hidden
+    } else {
+      PollVoters::Shown
+    },
+    results: fields.results.get(),
+    maybe_closes_at_ms,
   }
 }
 
-/// Sets right what `error` names in `spec`, so the next check finds the next problem. `false` when
-/// nothing further can be found.
-fn settle(spec: &mut PollSpec, error: PollError) -> bool {
+/// The dialog's inputs.
+#[derive(Clone, Copy)]
+struct Fields {
+  question: RwSignal<String>,
+  options: RwSignal<Vec<String>>,
+  is_multiple: RwSignal<bool>,
+  hides_voters: RwSignal<bool>,
+  results: RwSignal<PollResults>,
+  closing: RwSignal<Closing>,
+  /// The date field's value (`2026-10-22T14:30`), used with [`Closing::At`].
+  closes_at: RwSignal<String>,
+}
+
+/// Each field's error message under its element id, in the order of the form.
+fn field_errors(i18n: I18n, draft: &PollDraft, limits: &PollLimits, now_ms: i64) -> FieldErrors {
+  let mut found = FieldErrors::new();
+  for problem in draft.problems(limits, now_ms) {
+    let (key, args) = message_of(problem.error);
+    let args: Vec<(&str, &str)> = args.iter().map(|(name, value)| (*name, value.as_str())).collect();
+    found.push(field_id(problem.field), i18n.t_with(key, &args));
+  }
+  found
+}
+
+/// The i18n key and arguments that say what to do about `error`.
+fn message_of(error: PollError) -> (&'static str, Vec<(&'static str, String)>) {
   match error {
-    PollError::EmptyQuestion | PollError::QuestionTooLong { .. } => {
-      spec.question = "?".to_owned();
-      true
-    },
-    PollError::OptionTooLong { index, .. }
-    | PollError::DuplicateOption { index }
-    | PollError::EmptyOption { index } => {
-      if let Some(option) = spec.options.get_mut(index) {
-        *option = format!("\u{0}{index}");
-      }
-      true
-    },
-    PollError::TooFewOptions { .. } | PollError::TooManyOptions { .. } => false,
+    PollError::EmptyQuestion => ("poll-error-question", Vec::new()),
+    PollError::QuestionTooLong { max } => ("poll-error-question-long", vec![("max", max.to_string())]),
+    PollError::TooFewOptions { min } => ("poll-error-options", vec![("min", min.to_string())]),
+    PollError::EmptyOption { .. } => ("poll-error-options", vec![("min", MIN_POLL_OPTIONS.to_string())]),
+    PollError::TooManyOptions { max } => ("poll-error-options-many", vec![("max", max.to_string())]),
+    PollError::OptionTooLong { max, .. } => ("poll-error-option-long", vec![("max", max.to_string())]),
+    PollError::DuplicateOption { .. } => ("poll-error-option-duplicate", Vec::new()),
+    PollError::ClosingPassed => ("poll-error-closing-passed", Vec::new()),
+    PollError::ClosingTooFar { max_days } => ("poll-error-closing-far", vec![("max", max_days.to_string())]),
+  }
+}
+
+fn field_id(field: PollField) -> String {
+  match field {
+    PollField::Question => QUESTION_FIELD.to_owned(),
+    PollField::Option(index) => option_field(index),
+    PollField::Closing => CLOSING_FIELD.to_owned(),
   }
 }
 
@@ -284,76 +327,32 @@ fn option_field(index: usize) -> String {
   format!("poll-option-{index}")
 }
 
-fn field_order(field: &str) -> usize {
-  field
-    .strip_prefix("poll-option-")
-    .and_then(|index| index.parse::<usize>().ok())
-    .map_or(0, |index| index + 1)
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
 
   #[test]
-  fn a_complete_draft_has_no_problems() {
-    assert!(
-      draft("Lunch?", &["Pizza", "", "Salad"])
-        .problems(&PollLimits::default())
-        .is_empty()
-    );
-  }
-
-  #[test]
-  fn problems_land_on_the_fields_as_typed() {
-    let problems = draft(" ", &["Pizza", "", "pizza"]).problems(&PollLimits::default());
-    let fields: Vec<(&str, &str)> = problems
-      .iter()
-      .map(|(field, key, _)| (field.as_str(), *key))
-      .collect();
-    assert_eq!(
-      fields,
-      [
-        ("poll-question", "poll-error-question"),
-        ("poll-option-2", "poll-error-option-duplicate"),
-      ]
-    );
-  }
-
-  #[test]
-  fn too_few_options_point_at_the_first_empty_field() {
-    let problems = draft("Lunch?", &["Pizza", " "]).problems(&PollLimits::default());
-    assert_eq!(problems[0].0, "poll-option-1");
-    assert_eq!(problems[0].1, "poll-error-options");
-  }
-
-  #[test]
-  fn each_long_field_is_named() {
-    let limits = PollLimits {
-      max_option_chars: 3,
-      ..PollLimits::default()
-    };
-    let problems = draft("Q", &["Long", "No", "Longer"]).problems(&limits);
-    let fields: Vec<&str> = problems.iter().map(|(field, _, _)| field.as_str()).collect();
-    assert_eq!(fields, ["poll-option-0", "poll-option-2"]);
-  }
-
-  #[test]
-  fn the_spec_carries_the_choice_and_voters() {
-    let mut typed = draft("Q", &["A", "B"]);
-    typed.choice = PollChoice::Multiple;
-    typed.voters = PollVoters::Hidden;
-    let spec = typed.spec();
-    assert_eq!(spec.choice, PollChoice::Multiple);
-    assert_eq!(spec.voters, PollVoters::Hidden);
-  }
-
-  fn draft(question: &str, options: &[&str]) -> PollDraft {
-    PollDraft {
-      question: question.to_owned(),
-      options: options.iter().map(|option| (*option).to_owned()).collect(),
-      choice: PollChoice::Single,
-      voters: PollVoters::Shown,
+  fn every_error_has_a_message_key() {
+    let errors = [
+      PollError::EmptyQuestion,
+      PollError::QuestionTooLong { max: 1 },
+      PollError::TooFewOptions { min: 2 },
+      PollError::TooManyOptions { max: 3 },
+      PollError::EmptyOption { index: 0 },
+      PollError::OptionTooLong { index: 0, max: 1 },
+      PollError::DuplicateOption { index: 1 },
+      PollError::ClosingPassed,
+      PollError::ClosingTooFar { max_days: 365 },
+    ];
+    for error in errors {
+      assert!(message_of(error).0.starts_with("poll-error-"));
     }
+  }
+
+  #[test]
+  fn fields_are_named_by_their_element_ids() {
+    assert_eq!(field_id(PollField::Question), QUESTION_FIELD);
+    assert_eq!(field_id(PollField::Option(2)), "poll-option-2");
+    assert_eq!(field_id(PollField::Closing), CLOSING_FIELD);
   }
 }
