@@ -7,8 +7,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use chrono::{Datelike, TimeZone, Utc};
-use chrono_tz::Tz;
+use jiff::Timestamp;
+use jiff::tz::TimeZone;
 use rand_core::OsRng;
 use teamcraft_crypto::identity::IdentityPublicKey;
 use teamcraft_crypto::meeting_link::MeetingLinkToken;
@@ -42,6 +42,7 @@ use crate::meetings::caldav::CalendarStore;
 use crate::meetings::ical::{self, EventAttendee, EventData, EventPerson, EventStatus, Method};
 use crate::meetings::mailer::OutgoingMail;
 use crate::state::AppState;
+use crate::time_zone;
 
 const MAX_TITLE_CHARS: usize = 200;
 const MAX_DESCRIPTION_CHARS: usize = 5_000;
@@ -279,7 +280,7 @@ pub async fn list_meetings(
     unix_millis(maybe_to.unwrap_or(from + SERIES_LIST_HORIZON)).0,
   );
   let mut meetings = Vec::with_capacity(stored.len());
-  let mut zones: HashMap<UserId, Tz> = HashMap::new();
+  let mut zones: HashMap<UserId, TimeZone> = HashMap::new();
   // One query for the links of all listed meetings, one brand and key per organizer (#987 review).
   let mut links = LinkCache::for_meetings(state, &stored).await?;
   let hosted = super::meeting_guests::hosted_lobbies(state, caller, &stored).await?;
@@ -293,13 +294,14 @@ pub async fn list_meetings(
     };
     // A series is stored once; the list shows each occurrence in the range.
     let zone = match zones.get(&meeting.organizer) {
-      Some(zone) => *zone,
+      Some(zone) => zone.clone(),
       None => {
         let zone = organizer_zone(state, meeting.organizer).await?;
-        zones.insert(meeting.organizer, zone);
+        zones.insert(meeting.organizer, zone.clone());
         zone
       },
     };
+    let zone = &zone;
     let (first, last) = (unix_millis(meeting.starts_at).0, unix_millis(meeting.ends_at).0);
     if response.status == MeetingStatus::Cancelled {
       // A cancelled series is listed once, marked, at the occurrence that was next when it was
@@ -481,7 +483,7 @@ pub async fn cancel_meeting(
   let at = query
     .maybe_occurrence
     .ok_or_else(|| ApiError::InvalidRequest("the occurrence to cancel is missing".into()))?;
-  let zone = organizer_zone(state, meeting.organizer).await?;
+  let zone = &organizer_zone(state, meeting.organizer).await?;
   if !is_occurrence_start(unix_millis(meeting.starts_at).0, &recurrence, zone, at.0) {
     return Err(ApiError::InvalidRequest(
       "not an occurrence of the meeting".into(),
@@ -730,7 +732,7 @@ pub(super) async fn occurrence_starts(
       Vec::new()
     });
   };
-  let zone = organizer_zone(state, meeting.organizer).await?;
+  let zone = &organizer_zone(state, meeting.organizer).await?;
   let cancelled: HashSet<i64> = state
     .database
     .cancelled_occurrences(&[meeting.id])
@@ -756,7 +758,7 @@ pub(super) async fn occurrence_starts(
 fn holiday_skips(
   meeting: &StoredMeeting,
   occurrences: &[Occurrence],
-  zone: Tz,
+  zone: &TimeZone,
   maybe_holidays: Option<&dyn HolidaySource>,
   kept: &[OffsetDateTime],
 ) -> HashSet<i64> {
@@ -775,7 +777,7 @@ async fn series_holiday_skips(
   state: &AppState,
   meeting: &StoredMeeting,
   occurrences: &[Occurrence],
-  zone: Tz,
+  zone: &TimeZone,
 ) -> Result<HashSet<i64>, ApiError> {
   if !meeting.skips_holidays {
     return Ok(HashSet::new());
@@ -807,7 +809,7 @@ async fn is_skipped_holiday(
   let Some(recurrence) = series_rule(meeting).filter(|_| meeting.skips_holidays) else {
     return Ok(false);
   };
-  let zone = organizer_zone(state, meeting.organizer).await?;
+  let zone = &organizer_zone(state, meeting.organizer).await?;
   let first = unix_millis(meeting.starts_at).0;
   if !is_occurrence_start(first, &recurrence, zone, at.0) {
     return Ok(false);
@@ -998,7 +1000,7 @@ pub async fn resync_holidays(state: &AppState, id: MeetingId) -> Result<HolidayR
   if !is_skipping_series {
     return Ok(HolidayResync::Current);
   }
-  let zone = organizer_zone(state, meeting.organizer).await?;
+  let zone = &organizer_zone(state, meeting.organizer).await?;
   let current = calendar_holidays(state, &meeting, zone).await?;
   let maybe_written = state.database.calendar_holidays(id).await?;
   if maybe_written.as_deref() == Some(current.as_slice()) {
@@ -1127,7 +1129,7 @@ async fn event_for(
     .collect();
   let (maybe_rule, excluded_starts, holidays) = match &meeting.maybe_recurrence_rule {
     Some(rule) => {
-      let zone = organizer_zone(state, meeting.organizer).await?;
+      let zone = &organizer_zone(state, meeting.organizer).await?;
       let mut excluded = state
         .database
         .cancelled_occurrences(&[meeting.id])
@@ -1163,7 +1165,7 @@ async fn event_for(
 async fn calendar_holidays(
   state: &AppState,
   meeting: &StoredMeeting,
-  zone: Tz,
+  zone: &TimeZone,
 ) -> Result<Vec<OffsetDateTime>, ApiError> {
   let Some(recurrence) = series_rule(meeting).filter(|_| meeting.skips_holidays) else {
     return Ok(Vec::new());
@@ -1679,19 +1681,21 @@ fn render_rule(recurrence: &MeetingRecurrence) -> String {
 /// The stored rule as a calendar reads it next to a UTC `DTSTART`: its `BYDAY` days are the
 /// organizer's, so when the first occurrence falls on another day in UTC (a meeting at 00:30 in
 /// Berlin is the evening before in UTC) the days move with it.
-fn calendar_rule(rule: &str, first_start: OffsetDateTime, zone: Tz) -> String {
+fn calendar_rule(rule: &str, first_start: OffsetDateTime, zone: &TimeZone) -> String {
   let Some(mut recurrence) = parse_recurrence_rule(rule) else {
     return rule.to_owned();
   };
   let start_ms = unix_millis(first_start).0;
-  let (Some(local), Some(utc)) = (
-    zone.timestamp_millis_opt(start_ms).single(),
-    Utc.timestamp_millis_opt(start_ms).single(),
-  ) else {
+  let Ok(start) = Timestamp::from_millisecond(start_ms) else {
     return rule.to_owned();
   };
-  let shift =
-    i64::from(utc.date_naive().num_days_from_ce()) - i64::from(local.date_naive().num_days_from_ce());
+  let (local, utc) = (
+    zone.to_datetime(start).date(),
+    TimeZone::UTC.to_datetime(start).date(),
+  );
+  let Ok(shift) = local.until(utc).map(|span| i64::from(span.get_days())) else {
+    return rule.to_owned();
+  };
   if shift == 0 || recurrence.weekdays.is_empty() {
     return rule.to_owned();
   }
@@ -1768,13 +1772,13 @@ async fn organizer_holidays(
   Ok(holidays::source_of(state, maybe_region.as_deref()))
 }
 
-async fn organizer_zone(state: &AppState, organizer: UserId) -> Result<Tz, ApiError> {
+async fn organizer_zone(state: &AppState, organizer: UserId) -> Result<TimeZone, ApiError> {
   let profile = state.database.get_profile(organizer).await?;
   Ok(
     profile
       .maybe_time_zone
-      .and_then(|zone| zone.parse::<Tz>().ok())
-      .unwrap_or(Tz::UTC),
+      .and_then(|zone| time_zone::named(&zone))
+      .unwrap_or(TimeZone::UTC),
   )
 }
 
@@ -2127,15 +2131,15 @@ mod tests {
 
     #[test]
     fn calendars_get_the_utc_days_of_an_early_morning_series() {
-      let zone: Tz = "Europe/Berlin".parse().unwrap();
+      let zone = time_zone::named("Europe/Berlin").unwrap();
       // Monday 2030-01-07 00:30 in Berlin is Sunday 23:30 UTC.
       let first = OffsetDateTime::from_unix_timestamp(1_893_972_600).unwrap();
       let rule = "FREQ=WEEKLY;INTERVAL=1;BYDAY=MO,FR";
       assert_eq!(
-        calendar_rule(rule, first, zone),
+        calendar_rule(rule, first, &zone),
         "FREQ=WEEKLY;INTERVAL=1;BYDAY=TH,SU"
       );
-      assert_eq!(calendar_rule(rule, first, Tz::UTC), rule);
+      assert_eq!(calendar_rule(rule, first, &TimeZone::UTC), rule);
     }
 
     fn series(frequency: RecurrenceFrequency, interval: u32) -> MeetingRecurrence {

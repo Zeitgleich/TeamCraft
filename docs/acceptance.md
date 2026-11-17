@@ -41,7 +41,7 @@ Both are fixed.
 
 | Bug                                                                                     | Fix                                                                                                  |
 |-----------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------|
-| `PUT /me/profile` accepted a time zone that is not an IANA name                         | The name is checked against the compiled-in IANA database (`chrono-tz`); the ignored test runs again |
+| `PUT /me/profile` accepted a time zone that is not an IANA name                         | The name is checked against the compiled-in IANA database (`jiff-tzdb`); the ignored test runs again |
 | Enrollment answered `500 internal server error` once or twice in about 40 parallel runs | Not reproduced (see below); hardened against the most likely cause, connection exhaustion            |
 
 The `500` could not be reproduced alone or in `first_requests_of_new_accounts_in_parallel_never_fail`
