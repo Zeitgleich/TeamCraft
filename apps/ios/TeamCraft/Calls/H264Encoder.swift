@@ -28,7 +28,7 @@ final class H264Encoder: @unchecked Sendable {
     Self.set(created, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue)
     Self.set(created, kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_Baseline_AutoLevel)
     Self.set(created, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse)
-    Self.set(created, kVTCompressionPropertyKey_AverageBitRate, NSNumber(value: bitrate))
+    Self.setBitrate(created, bitrate)
     Self.set(created, kVTCompressionPropertyKey_ExpectedFrameRate, NSNumber(value: frameRate))
     Self.set(created, kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, NSNumber(value: 2))
     VTCompressionSessionPrepareToEncodeFrames(created)
@@ -36,6 +36,12 @@ final class H264Encoder: @unchecked Sendable {
 
   deinit {
     VTCompressionSessionInvalidate(session)
+  }
+
+  /// Encodes at `bitrate` (bit/s) from the next frame on, without a new session or a keyframe: the
+  /// call engine's share of the uplink for the camera (#1989).
+  func setBitrate(_ bitrate: Int) {
+    Self.setBitrate(session, bitrate)
   }
 
   /// The next frame becomes a keyframe (a receiver joined or lost a frame).
@@ -66,6 +72,15 @@ final class H264Encoder: @unchecked Sendable {
 
   private static func set(_ session: VTCompressionSession, _ key: CFString, _ value: CFTypeRef) {
     VTSessionSetProperty(session, key: key, value: value)
+  }
+
+  /// The average bitrate, and a cap of one and a half times it per second: the average alone lets
+  /// a moving picture overshoot for seconds, which is what a limited uplink can't take.
+  private static func setBitrate(_ session: VTCompressionSession, _ bitrate: Int) {
+    set(session, kVTCompressionPropertyKey_AverageBitRate, NSNumber(value: bitrate))
+    let bytesPerSecond = bitrate * 3 / 2 / 8
+    let limits = [NSNumber(value: bytesPerSecond), NSNumber(value: 1)] as CFArray
+    set(session, kVTCompressionPropertyKey_DataRateLimits, limits)
   }
 
   /// The encoded sample as an Annex B access unit; keyframes carry SPS and PPS.

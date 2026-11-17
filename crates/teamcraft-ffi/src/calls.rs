@@ -174,6 +174,11 @@ pub trait EncodedVideoListener: Send + Sync {
   fn on_remote_video_frame(&self, frame: RemoteVideoFrame);
   /// Encode a keyframe (with SPS and PPS) of the camera soon: a receiver joined or lost a frame.
   fn on_keyframe_requested(&self);
+  /// Encode the camera at this bitrate from now on (#1989): what the uplink has room for next to
+  /// the voice, down to a quarter of the published bitrate before the camera stops. 0: nothing of
+  /// it goes out now (no receiver, or the uplink holds it back for the voice); encode nothing until
+  /// a rate comes again, then start with a keyframe.
+  fn on_camera_bitrate(&self, bitrate_bps: u32);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -1081,6 +1086,22 @@ struct EncodedVideoBridge {
   /// Tracks of other devices that are published now; a listener that registers late (the app sets
   /// it after the join returned) learns about them when it registers.
   remote_tracks: Vec<RemoteVideoTrack>,
+  /// What the engine asks of the camera's encoder.
+  camera_rate: CameraRate,
+}
+
+/// The engine's word on the app's camera encoder (#1989): whether its layer goes out, and at what
+/// bitrate.
+#[derive(Debug, Default)]
+struct CameraRate {
+  /// The bitrate the camera was published with: its rate until the engine names one.
+  published_bps: u32,
+  /// Whether no layer of it is sent now; before the engine says anything, it is sent.
+  is_paused: bool,
+  /// The layer's bitrate of the last `LayerBitrates`; `None` before one (the published bitrate).
+  maybe_bitrate_bps: Option<u32>,
+  /// What the app was told last.
+  maybe_told_bps: Option<u32>,
 }
 
 impl EncodedVideoBridge {
@@ -1149,7 +1170,41 @@ impl EncodedVideoBridge {
           listener.on_keyframe_requested();
         }
       },
+      CallEngineEvent::LayersNeeded { stream_id, layers } if self.camera_stream() == Some(*stream_id) => {
+        self.camera_rate.is_paused = layers.is_empty();
+        self.tell_camera_rate();
+      },
+      CallEngineEvent::LayerBitrates { stream_id, bitrates } if self.camera_stream() == Some(*stream_id) => {
+        // One layer: the camera is published as one.
+        self.camera_rate.maybe_bitrate_bps = bitrates.first().map(|(_, bps)| *bps);
+        self.tell_camera_rate();
+      },
       _ => {},
+    }
+  }
+
+  /// A new camera publication at `published_bps`: its encoder starts there.
+  fn restart_camera_rate(&mut self, published_bps: u32) {
+    self.camera_rate = CameraRate {
+      published_bps,
+      ..CameraRate::default()
+    };
+  }
+
+  /// Tells the app's encoder the rate the engine asks for, where it changed.
+  fn tell_camera_rate(&mut self) {
+    let rate = &mut self.camera_rate;
+    let bitrate_bps = if rate.is_paused {
+      0
+    } else {
+      rate.maybe_bitrate_bps.unwrap_or(rate.published_bps)
+    };
+    if rate.maybe_told_bps == Some(bitrate_bps) {
+      return;
+    }
+    rate.maybe_told_bps = Some(bitrate_bps);
+    if let Some(listener) = &self.maybe_listener {
+      listener.on_camera_bitrate(bitrate_bps);
     }
   }
 }
@@ -1173,8 +1228,11 @@ fn apply_encoded_control(
     Control::PublishEncodedCamera(layer) => {
       if encoded.maybe_camera.is_none() {
         state.is_camera_on = true;
-        let publication = call.publish_video(VideoTrackKind::Camera, VideoCodec::H264, vec![layer.clone()]);
+        // The app's encoder follows the uplink in place (#1989): lower before it stops.
+        let publication =
+          call.publish_video_adapting_in_place(VideoTrackKind::Camera, VideoCodec::H264, vec![layer.clone()]);
         encoded.maybe_camera = Some(OwnPublication::new(publication));
+        encoded.restart_camera_rate(layer.max_bitrate_bps);
       }
     },
     Control::SendEncodedCameraFrame(frame) => {
@@ -2381,6 +2439,45 @@ mod tests {
     assert!(video.is_active());
   }
 
+  /// #1989: the app's camera encoder hears the uplink's rate for it, and that it stops (0) while
+  /// none of it goes out; other streams' layers don't reach it.
+  #[test]
+  fn the_camera_encoder_follows_the_uplink() {
+    let mut video = EncodedVideoBridge::default();
+    let own = device(1);
+    let listener = Arc::new(VideoRecorder::default());
+    video.set_listener(listener.clone());
+    video.maybe_camera = Some(OwnPublication::new(VideoPublicationId(0)));
+    video.restart_camera_rate(1_200_000);
+    video.report(
+      own,
+      &CallEngineEvent::VideoPublished(VideoTrack {
+        stream_id: MediaStreamId(9),
+        device_id: own,
+        kind: VideoTrackKind::Camera,
+        codec: VideoCodec::H264,
+        layers: Vec::new(),
+        maybe_publication_id: Some(VideoPublicationId(0)),
+      }),
+    );
+    let camera = MediaStreamId(9);
+    let bitrates = |stream_id, bps| CallEngineEvent::LayerBitrates {
+      stream_id,
+      bitrates: vec![(0, bps)],
+    };
+    let needed = |stream_id, layers: Vec<u8>| CallEngineEvent::LayersNeeded { stream_id, layers };
+    video.report(own, &needed(camera, vec![0]));
+    video.report(own, &bitrates(camera, 600_000));
+    video.report(own, &bitrates(camera, 600_000));
+    video.report(own, &bitrates(MediaStreamId(4), 100_000));
+    video.report(own, &needed(camera, Vec::new()));
+    video.report(own, &needed(camera, vec![0]));
+    assert_eq!(
+      *listener.camera_rates.lock().unwrap(),
+      vec![1_200_000, 600_000, 0, 600_000]
+    );
+  }
+
   #[test]
   fn a_track_in_a_codec_the_phone_does_not_decode_is_not_playable() {
     let mut video = EncodedVideoBridge::default();
@@ -2547,6 +2644,7 @@ mod tests {
   #[derive(Default)]
   struct VideoRecorder {
     tracks: Mutex<Vec<String>>,
+    camera_rates: Mutex<Vec<u32>>,
   }
 
   impl EncodedVideoListener for VideoRecorder {
@@ -2559,6 +2657,10 @@ mod tests {
     fn on_remote_video_frame(&self, _frame: RemoteVideoFrame) {}
 
     fn on_keyframe_requested(&self) {}
+
+    fn on_camera_bitrate(&self, bitrate_bps: u32) {
+      self.camera_rates.lock().unwrap().push(bitrate_bps);
+    }
   }
 
   fn device(raw: i64) -> DeviceId {
