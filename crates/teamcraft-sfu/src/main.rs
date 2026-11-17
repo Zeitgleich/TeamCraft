@@ -428,7 +428,8 @@ fn env_addr(name: &str) -> anyhow::Result<Option<SocketAddr>> {
 
 /// A count of at least one; zero would keep every device out of every call.
 /// When a receiver's voice counts as lost and its video yields to it (#1871, #1891): the share of
-/// voice packets lost or late in percent, how late is late, and how long the video stays back.
+/// voice packets lost or late in percent, how late is late, how long the video stays back, and how
+/// long the voice has to come through whole to end that early (#1989).
 fn apply_voice_guard_env(guard: &mut VoiceGuardConfig) -> anyhow::Result<()> {
   if let Some(percent) = env_count("TEAMCRAFT_SFU_VOICE_GUARD_MAX_LOSS_PERCENT")? {
     anyhow::ensure!(
@@ -442,6 +443,9 @@ fn apply_voice_guard_env(guard: &mut VoiceGuardConfig) -> anyhow::Result<()> {
   }
   if let Some(hold) = env_duration_millis("TEAMCRAFT_SFU_VOICE_GUARD_HOLD_MS")? {
     guard.hold = hold;
+  }
+  if let Some(clean_after) = env_duration_millis("TEAMCRAFT_SFU_VOICE_GUARD_CLEAN_AFTER_MS")? {
+    guard.clean_after = clean_after;
   }
   Ok(())
 }

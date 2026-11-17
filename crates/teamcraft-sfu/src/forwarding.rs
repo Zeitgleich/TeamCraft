@@ -1488,6 +1488,11 @@ impl Forwarder {
       !demands.is_empty() && (is_thin || participant.is_uplink_hurt(now) || participant.voice.is_hurt(now));
     let maybe_yield_change = (is_yielded != participant.is_video_yielded_for_voice).then(|| {
       participant.is_video_yielded_for_voice = is_yielded;
+      if !is_yielded {
+        // The video comes back on a probe's proof: the first one right away, not after the wait
+        // the clusters that fell short during the collapse left behind (#1989).
+        participant.probe.retry_now();
+      }
       Effect::VideoYieldedForVoice { receiver, is_yielded }
     });
     if participant

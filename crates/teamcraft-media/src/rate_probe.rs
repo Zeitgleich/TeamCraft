@@ -231,6 +231,13 @@ impl RateProbe {
     self.maybe_cluster.is_none() && self.maybe_next_at.is_none_or(|next| now >= next)
   }
 
+  /// The next cluster may start at once, whatever the last ones that fell short said: the reason
+  /// they fell short is over (voice no longer lost on the way, #1989), and the video waits for a
+  /// cluster's proof.
+  pub fn retry_now(&mut self) {
+    self.maybe_next_at = None;
+  }
+
   /// Whether a cluster is in flight.
   pub fn is_running(&self) -> bool {
     self.maybe_cluster.is_some()

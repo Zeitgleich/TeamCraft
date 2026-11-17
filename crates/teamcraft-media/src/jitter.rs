@@ -17,11 +17,22 @@
 //! a receiver on QUIC buffered 60 ms for every stream, and a guest on 0.1 % loss was a gap in
 //! almost every second.
 //!
+//! Underruns come late: the slot is already a gap. A stream whose packets come later and later
+//! (voice waiting behind video in a link's queue, #1989) says so before: with arrival times
+//! ([`JitterBuffer::push_at`]) the buffer measures how much later than the fastest lately each packet
+//! came and deepens to cover it at once. The extra depth is won by playing a concealed frame in place
+//! of the next ([`Playout::Stretch`]) while the packets catch up, not by a gap. Video yields to the
+//! voice only once even that depth isn't enough (the voice guard's bound).
+//!
 //! Network handovers: an outage empties the buffer, which re-buffers to the target depth before
 //! playing on. A backlog that arrives in one burst afterwards would add its length as latency for
 //! the rest of the call; when the buffer stays well above its target, it skips ahead instead.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
+use std::time::Duration;
+
+// `std::time::Instant` on native; the browser clock on wasm, where `std` has none.
+use web_time::Instant;
 
 use crate::rtp::SequenceNumber;
 
@@ -35,6 +46,18 @@ const CATCH_UP_AFTER_POPS: u32 = 25;
 const ADAPT_STEP_PACKETS: usize = 2;
 /// Pops without an underrun (30 s of 20 ms frames) after which the depth gives a packet back.
 const SHRINK_AFTER_POPS: u32 = 1500;
+/// One frame of the depths.
+const FRAME: Duration = Duration::from_millis(20);
+/// Arrivals within this long count for the lateness the depth covers (#1989).
+const LATENESS_WINDOW: Duration = Duration::from_secs(2);
+/// At most this many of them are kept: two seconds of 20 ms packets, with room.
+const MAX_LATENESS_SAMPLES: usize = 128;
+/// No packet for this long (a muted microphone, a pause in a talk): the next starts the lateness
+/// afresh. The sequence numbers go on where they stopped, so the pause would read as lateness.
+const ARRIVAL_PAUSE: Duration = Duration::from_millis(500);
+/// Frames the depth keeps above the lateness measured: lateness that grows (a queue filling up)
+/// is measured a packet behind, and the slot it needs is already due.
+const LATENESS_HEADROOM_FRAMES: usize = 1;
 
 /// Reorders packets by sequence number and paces playout.
 #[derive(Debug)]
@@ -54,6 +77,23 @@ pub struct JitterBuffer<T> {
   calm_pops: u32,
   /// 20 ms frames per packet of the stream: the depths are divided by it.
   packet_frames: usize,
+  /// When the packets arrived, for how late they came (#1989).
+  lateness: Lateness,
+  /// 20 ms frames the depth grew by lateness that the buffer hasn't won yet: played as
+  /// [`Playout::Stretch`] while the buffer is below its target.
+  stretch_frames: usize,
+}
+
+/// How much later than the fastest lately the packets of a stream arrive: what the depth has to
+/// cover so that none comes after its slot.
+#[derive(Debug, Default)]
+struct Lateness {
+  /// The first measured packet: its arrival and extended sequence number, the base of the transit
+  /// times.
+  maybe_base: Option<(Instant, u64)>,
+  /// Recent arrivals: when, and the transit time (arrival minus the packet's place in the stream),
+  /// in microseconds; only differences count.
+  transits: VecDeque<(Instant, i64)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +132,9 @@ pub enum Playout<T> {
   Missing {
     sequence_number: SequenceNumber,
   },
+  /// No slot is played: a concealed frame as long as a packet goes in between, so the buffer gains
+  /// the depth its packets' lateness asks for (#1989). The decoder conceals it like a lost packet.
+  Stretch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,6 +184,8 @@ impl<T> JitterBuffer<T> {
       target_frames: config.target_depth_packets,
       calm_pops: 0,
       packet_frames: 1,
+      lateness: Lateness::default(),
+      stretch_frames: 0,
     }
   }
 
@@ -162,9 +207,30 @@ impl<T> JitterBuffer<T> {
   /// The stream's packets hold `frames` 20 ms frames each (1 to 6): the depths, set for 20 ms
   /// packets, count packets of that length from now on, rounded up.
   pub fn set_packet_frames(&mut self, frames: usize) {
-    self.packet_frames = frames.clamp(1, 6);
+    let frames = frames.clamp(1, 6);
+    if frames != self.packet_frames {
+      // The transit times count the packets' places in the stream by their length.
+      self.lateness = Lateness::default();
+    }
+    self.packet_frames = frames;
   }
 
+  /// [`Self::push`] of a packet that arrived at `arrival`: how late it came deepens the buffer
+  /// before its lateness becomes a gap (#1989).
+  pub fn push_at(&mut self, sequence_number: SequenceNumber, item: T, arrival: Instant) -> PushOutcome {
+    let outcome = self.push(sequence_number, item);
+    if outcome == PushOutcome::Duplicate {
+      return outcome;
+    }
+    // Restarted streams are measured afresh, and late packets say the most.
+    if let Some(&highest) = self.maybe_highest.as_ref() {
+      let extended = self.extend_near(sequence_number, highest);
+      self.note_arrival(extended, arrival);
+    }
+    outcome
+  }
+
+  /// Inserts a packet without its arrival time: the depth follows underruns only.
   pub fn push(&mut self, sequence_number: SequenceNumber, item: T) -> PushOutcome {
     let extended = self.extend(sequence_number);
     if self
@@ -194,7 +260,13 @@ impl<T> JitterBuffer<T> {
         }
         *self.packets.keys().next()?
       },
-      PlayoutState::Playing { next } => self.catch_up(next),
+      PlayoutState::Playing { next } => {
+        if self.should_stretch(next) {
+          self.stretch_frames = self.stretch_frames.saturating_sub(self.packet_frames);
+          return Some(Playout::Stretch);
+        }
+        self.catch_up(next)
+      },
     };
     if self.maybe_highest.is_none_or(|highest| next > highest) {
       // Underrun: re-buffer to rebuild the safety margin, a deeper one from now on.
@@ -233,6 +305,52 @@ impl<T> JitterBuffer<T> {
     self.packets.is_empty()
   }
 
+  /// A packet of extended number `extended` arrived at `arrival`: its lateness against the fastest
+  /// lately, with a packet of its own and [`LATENESS_HEADROOM_FRAMES`], is the depth it needs. More than the target deepens it at
+  /// once (to the most underruns may), and the buffer stretches to win the difference.
+  fn note_arrival(&mut self, extended: u64, arrival: Instant) {
+    let packet = FRAME * u32::try_from(self.packet_frames).unwrap_or(1);
+    let Some(lateness) = self.lateness.on_arrival(extended, arrival, packet) else {
+      return;
+    };
+    let ceiling = self
+      .config
+      .max_adaptive_depth_packets
+      .max(self.config.target_depth_packets);
+    let late_frames = usize::try_from(lateness.as_micros().div_ceil(FRAME.as_micros())).unwrap_or(usize::MAX);
+    if late_frames > ceiling {
+      // Later than any depth covers: a stall or a new path, not jitter; measured afresh from here.
+      self.lateness.restart_at(extended, arrival);
+      return;
+    }
+    let needed = (late_frames + self.packet_frames + LATENESS_HEADROOM_FRAMES).min(ceiling);
+    if needed <= self.target_frames {
+      return;
+    }
+    if self.state != PlayoutState::Buffering {
+      self.stretch_frames += needed - self.target_frames;
+    }
+    self.target_frames = needed;
+    self.calm_pops = 0;
+  }
+
+  /// Whether to play a stretch in place of slot `next`: the depth grew by lateness, and the
+  /// packets buffered from `next` on are fewer than the target. Once they reach it, nothing is
+  /// left to win.
+  fn should_stretch(&mut self, next: u64) -> bool {
+    if self.stretch_frames == 0 {
+      return false;
+    }
+    let buffered = self
+      .maybe_highest
+      .map_or(0, |highest| (highest + 1).saturating_sub(next));
+    if buffered >= self.target_packets() as u64 {
+      self.stretch_frames = 0;
+      return false;
+    }
+    true
+  }
+
   /// An underrun: the stream's arrivals vary more than the depth covers.
   fn deepen(&mut self) {
     let ceiling = self
@@ -241,6 +359,8 @@ impl<T> JitterBuffer<T> {
       .max(self.config.target_depth_packets);
     self.target_frames = (self.target_frames + ADAPT_STEP_PACKETS).min(ceiling);
     self.calm_pops = 0;
+    // Re-buffering wins the depth.
+    self.stretch_frames = 0;
   }
 
   /// A slot played: after long enough without an underrun the depth gives a packet back.
@@ -293,13 +413,7 @@ impl<T> JitterBuffer<T> {
     let Some(highest) = self.maybe_highest else {
       return START + u64::from(sequence_number.0);
     };
-    let base = highest & !0xFFFF;
-    let candidates =
-      [base.wrapping_sub(0x1_0000), base, base + 0x1_0000].map(|base| base + u64::from(sequence_number.0));
-    let closest = candidates
-      .into_iter()
-      .min_by_key(|candidate| candidate.abs_diff(highest))
-      .unwrap_or(base);
+    let closest = self.extend_near(sequence_number, highest);
     if closest.abs_diff(highest) > MAX_SEQUENCE_JUMP {
       self.restart();
       return START + u64::from(sequence_number.0);
@@ -307,7 +421,20 @@ impl<T> JitterBuffer<T> {
     closest
   }
 
+  /// `sequence_number` as the extended number closest to `highest`.
+  fn extend_near(&self, sequence_number: SequenceNumber, highest: u64) -> u64 {
+    let base = highest & !0xFFFF;
+    let candidates =
+      [base.wrapping_sub(0x1_0000), base, base + 0x1_0000].map(|base| base + u64::from(sequence_number.0));
+    candidates
+      .into_iter()
+      .min_by_key(|candidate| candidate.abs_diff(highest))
+      .unwrap_or(base)
+  }
+
   fn restart(&mut self) {
+    self.lateness = Lateness::default();
+    self.stretch_frames = 0;
     self.packets.clear();
     self.maybe_highest = None;
     self.maybe_played_until = None;
@@ -333,6 +460,54 @@ impl<T> JitterBuffer<T> {
     PushOutcome::Overflowed {
       dropped_packets: excess,
     }
+  }
+}
+
+impl Lateness {
+  /// Notes the arrival of packet `extended` at `arrival` (packets `packet` long) and returns how
+  /// much later than the fastest within [`LATENESS_WINDOW`] it came; `None` for the first packet
+  /// and after a pause in the stream.
+  fn on_arrival(&mut self, extended: u64, arrival: Instant, packet: Duration) -> Option<Duration> {
+    let is_after_pause = self
+      .transits
+      .back()
+      .is_some_and(|(at, _)| arrival.saturating_duration_since(*at) > ARRIVAL_PAUSE);
+    let Some((base_at, base_seq)) = self.maybe_base.filter(|_| !is_after_pause) else {
+      self.restart_at(extended, arrival);
+      return None;
+    };
+    let arrived_us =
+      i64::try_from(arrival.saturating_duration_since(base_at).as_micros()).unwrap_or(i64::MAX);
+    let packet_us = i64::try_from(packet.as_micros()).unwrap_or(i64::MAX);
+    // Signed: a packet that arrives late may be numbered before the base.
+    let place = i64::try_from(extended).unwrap_or(i64::MAX) - i64::try_from(base_seq).unwrap_or(i64::MAX);
+    let transit_us = arrived_us.saturating_sub(place.saturating_mul(packet_us));
+    while self
+      .transits
+      .front()
+      .is_some_and(|(at, _)| arrival.saturating_duration_since(*at) > LATENESS_WINDOW)
+    {
+      self.transits.pop_front();
+    }
+    if self.transits.len() >= MAX_LATENESS_SAMPLES {
+      self.transits.pop_front();
+    }
+    self.transits.push_back((arrival, transit_us));
+    let fastest_us = self
+      .transits
+      .iter()
+      .map(|(_, transit)| *transit)
+      .min()
+      .unwrap_or(transit_us);
+    let late_us = u64::try_from(transit_us.saturating_sub(fastest_us)).unwrap_or(0);
+    Some(Duration::from_micros(late_us))
+  }
+
+  /// Measures afresh from packet `extended`, arrived at `arrival`.
+  fn restart_at(&mut self, extended: u64, arrival: Instant) {
+    self.maybe_base = Some((arrival, extended));
+    self.transits.clear();
+    self.transits.push_back((arrival, 0));
   }
 }
 
@@ -455,6 +630,127 @@ mod fallback_timing {
 }
 
 #[cfg(test)]
+mod lateness {
+  use super::*;
+
+  /// What a listener hears of a stream played every 20 ms.
+  #[derive(Debug, Default)]
+  struct Heard {
+    /// Slots without sound: an underrun's re-buffering.
+    silent: usize,
+    /// Slots concealed for a packet that never came in time.
+    missing: usize,
+    /// Concealed frames the buffer played to win depth.
+    stretched: usize,
+  }
+
+  /// Packets sent every 20 ms whose delay is `delay_ms(index)`, pushed when they arrive (with
+  /// their arrival time when `is_timed`) and played every 20 ms. Counts from the first played slot.
+  fn play(is_timed: bool, packets: u16, delay_ms: impl Fn(u16) -> u64) -> (Heard, JitterBuffer<u16>) {
+    let start = Instant::now();
+    let mut buffer = JitterBuffer::new(JitterBufferConfig::default());
+    let mut heard = Heard::default();
+    let mut next = 0u16;
+    let mut has_started = false;
+    for tick in 0u64..u64::from(packets) + 50 {
+      let now_ms = tick * 20;
+      while next < packets && u64::from(next) * 20 + delay_ms(next) <= now_ms {
+        let arrival = start + Duration::from_millis(u64::from(next) * 20 + delay_ms(next));
+        if is_timed {
+          buffer.push_at(SequenceNumber(next), next, arrival);
+        } else {
+          buffer.push(SequenceNumber(next), next);
+        }
+        next += 1;
+      }
+      if next >= packets && buffer.is_empty() {
+        break;
+      }
+      match buffer.pop() {
+        Some(Playout::Packet { .. }) => has_started = true,
+        Some(Playout::Missing { .. }) => heard.missing += 1,
+        Some(Playout::Stretch) => heard.stretched += 1,
+        None if has_started && next < packets => heard.silent += 1,
+        None => {},
+      }
+    }
+    (heard, buffer)
+  }
+
+  /// Voice waits longer and longer behind video in a link's queue (#1989): 100 ms more over a
+  /// second. Measured by its lateness, the buffer deepens as the delay grows and wins the depth with
+  /// a few concealed frames; counted in underruns only, the listener heard silence.
+  #[test]
+  fn a_growing_queue_deepens_the_buffer_before_it_runs_dry() {
+    let ramp = |index: u16| u64::from(index.saturating_sub(100).min(50)) * 2;
+    let (untimed, _) = play(false, 400, ramp);
+    let (timed, buffer) = play(true, 400, ramp);
+    assert!(untimed.silent > 0, "{untimed:?}");
+    assert_eq!(timed.silent, 0, "{timed:?}");
+    assert_eq!(timed.missing, 0, "{timed:?}");
+    assert!(timed.stretched <= 6, "{timed:?}");
+    assert!(
+      buffer.target_depth_packets() >= 6,
+      "{}",
+      buffer.target_depth_packets()
+    );
+  }
+
+  /// A link whose packets come up to 60 ms apart from their place, at random: the depth covers the
+  /// latest, and nothing comes after its slot.
+  #[test]
+  fn jitter_is_covered_without_gaps() {
+    let jitter = |index: u16| u64::from((index.wrapping_mul(37) ^ (index >> 3)) % 4) * 20;
+    let (heard, _) = play(true, 500, jitter);
+    assert_eq!(heard.missing + heard.silent, 0, "{heard:?}");
+  }
+
+  /// A pause in the stream (a muted microphone): the numbers go on where they stopped, which is
+  /// no lateness.
+  #[test]
+  fn a_pause_is_not_lateness() {
+    let start = Instant::now();
+    let mut buffer = JitterBuffer::new(JitterBufferConfig::default());
+    for index in 0u16..50 {
+      buffer.push_at(SequenceNumber(index), index, start + FRAME * u32::from(index));
+      buffer.pop();
+    }
+    let later = start + Duration::from_secs(3);
+    for index in 50u16..100 {
+      buffer.push_at(
+        SequenceNumber(index),
+        index,
+        later + FRAME * u32::from(index - 50),
+      );
+      buffer.pop();
+    }
+    assert_eq!(
+      buffer.target_depth_packets(),
+      JitterBufferConfig::default().target_depth_packets
+    );
+  }
+
+  /// Lateness beyond any depth (a stall of a second) is no reason to keep the most depth: the
+  /// underrun deals with it, and the lateness is measured afresh after it.
+  #[test]
+  fn a_stall_beyond_every_depth_restarts_the_measure() {
+    let stall = |index: u16| {
+      if (100..150).contains(&index) {
+        1000 - (u64::from(index) - 100) * 20
+      } else {
+        0
+      }
+    };
+    let (_, buffer) = play(true, 400, stall);
+    assert!(
+      buffer.target_depth_packets() <= JitterBufferConfig::default().max_adaptive_depth_packets,
+      "{}",
+      buffer.target_depth_packets()
+    );
+  }
+}
+
+#[cfg(test)]
 mod tests {
   use super::*;
 
@@ -549,6 +845,7 @@ mod tests {
         .iter()
         .map(|slot| match slot {
           Playout::Packet { sequence_number, .. } | Playout::Missing { sequence_number } => sequence_number.0,
+          Playout::Stretch => panic!("no stretch without arrival times"),
         })
         .collect();
       assert_eq!(sequence_numbers, vec![65534, 65535, 0, 1]);
@@ -674,6 +971,7 @@ mod tests {
       .map(|slot| match slot {
         Playout::Packet { item, .. } => Some(item),
         Playout::Missing { .. } => None,
+        Playout::Stretch => panic!("no stretch without arrival times"),
       })
       .collect()
   }

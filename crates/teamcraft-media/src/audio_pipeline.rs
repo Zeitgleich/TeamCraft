@@ -8,6 +8,8 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use teamcraft_proto::DeviceId;
+// `std::time::Instant` on native; the browser clock on wasm, where `std` has none.
+use web_time::Instant;
 
 use crate::audio_codec::{
   AudioChannels, FRAME_SAMPLES_PER_CHANNEL, OpusDecoder, OpusEncoder, OpusEncoderConfig, OpusError,
@@ -256,7 +258,7 @@ impl PlaybackMixer {
         .jitter
         .set_packet_frames(samples.div_ceil(FRAME_SAMPLES_PER_CHANNEL));
     }
-    stream.jitter.push(sequence_number, opus);
+    stream.jitter.push_at(sequence_number, opus, Instant::now());
     Ok(())
   }
 
@@ -347,6 +349,8 @@ impl RemoteAudio {
             maybe_next.filter(|next| opus_packet_samples(next) == Some(self.last_packet_samples));
           self.decoder.conceal(maybe_fec, self.last_packet_samples)?
         },
+        // The buffer wins depth for packets that come later and later (#1989): a concealed frame.
+        Some(Playout::Stretch) => self.decoder.conceal(None, self.last_packet_samples)?,
         None => break,
       };
       self.decoded.extend(

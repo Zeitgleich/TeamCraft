@@ -4019,7 +4019,7 @@ impl RemoteAudio {
         .jitter
         .set_packet_frames(samples.div_ceil(FRAME_SAMPLES_PER_CHANNEL));
     }
-    self.jitter.push(sequence_number, opus);
+    self.jitter.push_at(sequence_number, opus, Instant::now());
   }
 
   /// Hands the packets due now to the decoder, until what is decoded or being decoded reaches
@@ -4039,7 +4039,8 @@ impl RemoteAudio {
     while self.decoded.len() + self.decoding_samples < DECODE_AHEAD_SAMPLES {
       let packet = match self.jitter.pop() {
         Some(Playout::Packet { item, .. }) => item,
-        Some(Playout::Missing { .. }) => {
+        // A stretch (#1989) is concealed like a lost packet: the buffer wins depth meanwhile.
+        Some(Playout::Missing { .. } | Playout::Stretch) => {
           match self.maybe_last_packet.as_deref().and_then(opus_lost_packet_like) {
             Some(lost) => lost,
             // Nothing played before it: the gap stays a gap.

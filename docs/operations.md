@@ -580,7 +580,9 @@ depend on any of it.
   `TEAMCRAFT_SFU_VOICE_GUARD_MAX_LOSS_PERCENT` (voice packets lost or late from which it counts,
   default 10), `TEAMCRAFT_SFU_VOICE_GUARD_MAX_DELAY_MS` (how late is late, default 150) and
   `TEAMCRAFT_SFU_VOICE_GUARD_HOLD_MS` (how long the video stays back after the last loss,
-  default 3000) tune it.
+  default 3000) and `TEAMCRAFT_SFU_VOICE_GUARD_CLEAN_AFTER_MS` (the hold ends early once the voice
+  came through whole this long, default 1000; the video then comes back on a probe's proof, #1989)
+  tune it.
 
 ### Call fallback through the proxy
 

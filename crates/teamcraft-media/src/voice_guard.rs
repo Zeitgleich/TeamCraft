@@ -11,7 +11,10 @@
 //! [`VoiceGuardConfig::max_delay`] later than the fastest lately (it plays as a gap just the same:
 //! a sender's queue holds voice back behind a collapsed congestion window, not only the link), the
 //! video yields at once ([`VoiceGuard::is_hurt`]) and stays off for [`VoiceGuardConfig::hold`]
-//! after the last such moment.
+//! after the last such moment, or until the voice came through whole for
+//! [`VoiceGuardConfig::clean_after`] (#1989): video came back about six seconds after the link did,
+//! three of them the hold. What brings the video back is still a probe's proof that the link
+//! carries it; the end of the hold only lets it ask for one.
 //!
 //! Pure state: time is passed in.
 
@@ -48,6 +51,9 @@ pub struct VoiceGuardConfig {
   /// Video stays off this long after voice was last hurt: a link that collapsed doesn't come back
   /// within a second, and switching video on and off sends a keyframe each time.
   pub hold: Duration,
+  /// The hold ends early once every voice datagram reported for this long arrived in time (#1989):
+  /// a link that came back says so through its voice within a second.
+  pub clean_after: Duration,
   /// Voice that no feedback reported this much later than the fastest report lately is hurt as
   /// well ([`VoiceGuard::on_timer`]): it waits in a queue the link no longer drains (#1889). The
   /// fastest report is the link's round trip and the feedback's interval: a link across the
@@ -73,6 +79,8 @@ pub struct VoiceGuard {
   /// The sender's clock base for those delays.
   maybe_epoch: Option<Instant>,
   maybe_hurt_at: Option<Instant>,
+  /// Since when every voice datagram of the window was reported in time.
+  maybe_clean_since: Option<Instant>,
 }
 
 impl Default for VoiceGuardConfig {
@@ -83,6 +91,7 @@ impl Default for VoiceGuardConfig {
       max_loss: 0.1,
       max_delay: Duration::from_millis(150),
       hold: Duration::from_secs(3),
+      clean_after: Duration::from_secs(1),
       max_unreported: Duration::MAX,
     }
   }
@@ -119,6 +128,7 @@ impl VoiceGuard {
       report_times: VecDeque::new(),
       maybe_epoch: None,
       maybe_hurt_at: None,
+      maybe_clean_since: None,
     }
   }
 
@@ -179,9 +189,19 @@ impl VoiceGuard {
     }
     let reported = self.reports.len();
     let hurt = self.reports.iter().filter(|(_, is_hurt)| *is_hurt).count();
-    if reported >= self.config.min_reported && hurt as f64 >= self.config.max_loss * reported as f64 {
-      self.maybe_hurt_at = Some(now);
+    let is_enough = reported >= self.config.min_reported;
+    if is_enough && hurt as f64 >= self.config.max_loss * reported as f64 {
+      self.note_hurt(now);
+    } else if is_enough && hurt == 0 {
+      self.maybe_clean_since.get_or_insert(now);
+    } else {
+      self.maybe_clean_since = None;
     }
+  }
+
+  fn note_hurt(&mut self, now: Instant) {
+    self.maybe_hurt_at = Some(now);
+    self.maybe_clean_since = None;
   }
 
   /// Whether a voice datagram sent at `sent_at` that arrived at `arrival_us` (the receiver's
@@ -230,7 +250,7 @@ impl VoiceGuard {
       .and_then(|seq| self.pending_since.get(&seq.0))
       .is_some_and(|sent_at| now.saturating_duration_since(*sent_at) > bound);
     if is_stuck {
-      self.maybe_hurt_at = Some(now);
+      self.note_hurt(now);
     }
   }
 
@@ -245,6 +265,7 @@ impl VoiceGuard {
     self.delays.clear();
     self.report_times.clear();
     self.maybe_hurt_at = None;
+    self.maybe_clean_since = None;
   }
 
   /// When voice was last found hurt (the hold not counted).
@@ -252,12 +273,28 @@ impl VoiceGuard {
     self.maybe_hurt_at
   }
 
-  /// Whether voice was hurt within [`VoiceGuardConfig::hold`]: video yields.
+  /// Whether voice was hurt within [`VoiceGuardConfig::hold`] and hasn't come through whole for
+  /// [`VoiceGuardConfig::clean_after`] since: video yields.
   pub fn is_hurt(&self, now: Instant) -> bool {
-    self
-      .maybe_hurt_at
-      .is_some_and(|at| now.saturating_duration_since(at) < self.config.hold)
+    is_held(&self.config, self.maybe_hurt_at, self.maybe_clean_since, now)
   }
+}
+
+/// Whether the hold after voice was hurt at `maybe_hurt_at` lasts at `now`: for
+/// [`VoiceGuardConfig::hold`], unless it came through whole since `maybe_clean_since` for
+/// [`VoiceGuardConfig::clean_after`].
+fn is_held(
+  config: &VoiceGuardConfig,
+  maybe_hurt_at: Option<Instant>,
+  maybe_clean_since: Option<Instant>,
+  now: Instant,
+) -> bool {
+  let Some(hurt_at) = maybe_hurt_at else {
+    return false;
+  };
+  let is_clean_again = maybe_clean_since
+    .is_some_and(|since| since >= hurt_at && now.saturating_duration_since(since) >= config.clean_after);
+  now.saturating_duration_since(hurt_at) < config.hold && !is_clean_again
 }
 
 /// Whether the voice a sender's upload delivers has gaps (#1889): the receiving end of a link (the
@@ -275,6 +312,8 @@ pub struct ArrivingVoice {
   arrivals: VecDeque<(Instant, u64)>,
   maybe_highest: Option<u64>,
   maybe_hurt_at: Option<Instant>,
+  /// Since when the voice of the window arrived without gaps.
+  maybe_clean_since: Option<Instant>,
 }
 
 impl ArrivingVoice {
@@ -284,6 +323,7 @@ impl ArrivingVoice {
       arrivals: VecDeque::new(),
       maybe_highest: None,
       maybe_hurt_at: None,
+      maybe_clean_since: None,
     }
   }
 
@@ -327,16 +367,21 @@ impl ArrivingVoice {
     let expected = usize::try_from(settled - lowest + 1).unwrap_or(usize::MAX);
     let arrived = self.arrivals.iter().filter(|(_, seq)| *seq <= settled).count();
     let missing = expected.saturating_sub(arrived);
-    if expected >= self.config.min_reported && missing as f64 >= self.config.max_loss * expected as f64 {
+    let is_enough = expected >= self.config.min_reported;
+    if is_enough && missing as f64 >= self.config.max_loss * expected as f64 {
       self.maybe_hurt_at = Some(now);
+      self.maybe_clean_since = None;
+    } else if is_enough && missing == 0 {
+      self.maybe_clean_since.get_or_insert(now);
+    } else {
+      self.maybe_clean_since = None;
     }
   }
 
-  /// Whether the sender's voice arrived with gaps within [`VoiceGuardConfig::hold`].
+  /// Whether the sender's voice arrived with gaps within [`VoiceGuardConfig::hold`], and not
+  /// whole for [`VoiceGuardConfig::clean_after`] since.
   pub fn is_hurt(&self, now: Instant) -> bool {
-    self
-      .maybe_hurt_at
-      .is_some_and(|at| now.saturating_duration_since(at) < self.config.hold)
+    is_held(&self.config, self.maybe_hurt_at, self.maybe_clean_since, now)
   }
 }
 
@@ -377,6 +422,40 @@ mod tests {
     let hold = VoiceGuardConfig::default().hold;
     assert!(guard.is_hurt(reported_at + hold - MS));
     assert!(!guard.is_hurt(reported_at + hold));
+  }
+
+  /// A link that came back (#1989): voice that comes through whole for `clean_after` ends the
+  /// hold early, and one loss on the way starts it again.
+  #[test]
+  fn clean_voice_ends_the_hold_early() {
+    let start = Instant::now();
+    let mut guard = VoiceGuard::new(VoiceGuardConfig::default());
+    let lossy = send_voice(&mut guard, 0, 25, start, |index| index % 3 != 0);
+    let hurt_at = start + 500 * MS;
+    guard.on_feedback(&lossy, hurt_at);
+    assert!(guard.is_hurt(hurt_at));
+    // Clean voice reported every 100 ms: the window is clean once the lost ones left it.
+    let mut first = 25u16;
+    let mut now = hurt_at;
+    let mut cleared_at = None;
+    for _ in 0..30 {
+      now += 100 * MS;
+      let clean = send_voice(&mut guard, first, 5, now - 100 * MS, |_| true);
+      guard.on_feedback(&clean, now);
+      first += 5;
+      if cleared_at.is_none() && !guard.is_hurt(now) {
+        cleared_at = Some(now);
+      }
+    }
+    let cleared_after = cleared_at.expect("the hold ended").duration_since(hurt_at);
+    let config = VoiceGuardConfig::default();
+    assert!(cleared_after < config.hold, "{cleared_after:?}");
+    assert!(cleared_after >= config.clean_after, "{cleared_after:?}");
+    // Lost again: hurt again, for the hold.
+    let lossy = send_voice(&mut guard, first, 25, now, |index| index % 3 != 0);
+    guard.on_feedback(&lossy, now + 500 * MS);
+    assert!(guard.is_hurt(now + 500 * MS));
+    assert!(guard.is_hurt(now + 500 * MS + config.clean_after));
   }
 
   #[test]
@@ -615,6 +694,27 @@ mod tests {
       assert!(voice.is_hurt(last));
       let hold = VoiceGuardConfig::default().hold;
       assert!(!voice.is_hurt(last + hold));
+    }
+
+    /// Voice that arrives whole again ends the hold after `clean_after` (#1989).
+    #[test]
+    fn whole_voice_ends_the_hold_early() {
+      let start = Instant::now();
+      let mut voice = ArrivingVoice::new(VoiceGuardConfig::default());
+      let mut last = start;
+      for seq in (0..50u16).filter(|seq| seq % 3 != 0) {
+        last = start + 20 * MS * u32::from(seq);
+        voice.on_arrival(seq, last);
+      }
+      assert!(voice.is_hurt(last));
+      let hurt_at = last;
+      // 1.8 s of whole voice: within the hold of three seconds, which it ended early.
+      for seq in 50..140u16 {
+        last = start + 20 * MS * u32::from(seq);
+        voice.on_arrival(seq, last);
+      }
+      assert!(last < hurt_at + VoiceGuardConfig::default().hold);
+      assert!(!voice.is_hurt(last));
     }
 
     #[test]
