@@ -212,6 +212,8 @@ final class AppModel {
   var joinNote: JoinNote?
 
   let calls = CallManager()
+  /// The home screen widget's unread conversations (#2076).
+  @ObservationIgnored let homeWidget = HomeWidgetUpdater()
   /// The server's brand for the confirmation and sign-in screens.
   let brand = BrandStore()
   /// The server the device's management or the build names (read at start).
@@ -1296,6 +1298,7 @@ final class AppModel {
   private func storeDidChange() {
     changeCount += 1
     if maybeCore != nil { settingsSyncer().storeDidChange() }
+    homeWidget.storeDidChange(self)
     followTyping()
     calls.storeDidChange()
     let wasConnected = connection?.isConnected == true
@@ -1709,6 +1712,7 @@ final class AppModel {
     NotificationAuthenticator().removeKey()
     container.wipeDownloads()
     container.pruneUploads(olderThan: 0)
+    homeWidget.clear()
     // What waits to be shared doesn't outlive the session on this device either.
     ShareInbox.shared()?.wipe()
     waitingShare = nil

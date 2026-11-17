@@ -1,20 +1,26 @@
 //! Profiles (title, department, phone, time zone, working hours) and avatars (PLAN.md §4, §11).
 //!
-//! Avatars are plain images (everybody who sees the person sees them), uploaded and downloaded
-//! through presigned URLs like attachments; the server checks type and size.
+//! Avatars are plain images (everybody who sees the person sees them). Uploads come to the server,
+//! which decodes them and stores a square PNG it encoded itself (no metadata, a size it chose);
+//! downloads go through presigned URLs like attachments. A person can also have a picture from
+//! the identity provider ([`super::provider_avatars`]); the workspace policy decides which one
+//! shows (issue #2071).
 
 use std::collections::HashSet;
+use std::time::Duration;
 
+use axum::body::Bytes;
 use teamcraft_db::{StoredAvatar, StoredProfile, StoredWorkingHours};
 use teamcraft_proto::{
-  AvatarContentType, AvatarResponse, CreateAvatarUploadRequest, CreateAvatarUploadResponse, GatewayEvent, Id,
-  ProfileResponse, UpdateProfileRequest, UserId, WorkingHours,
+  AvatarContentType, AvatarResponse, AvatarSource, DirectoryPolicy, GatewayEvent, Id, ProfileResponse,
+  UpdateProfileRequest, UserId, WorkingHours,
 };
 use time::OffsetDateTime;
 use tracing::warn;
 
 use super::convert::unix_millis;
 use super::directory::visible_user;
+use super::space_images::{run_limited, sanitize_avatar};
 use super::storage_cleanup::delete_or_queue;
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
@@ -61,6 +67,7 @@ pub async fn put_my_profile(
     maybe_time_zone: clean_time_zone(request.maybe_time_zone)?,
     maybe_working_hours: request.maybe_working_hours.map(stored_hours).transpose()?,
     maybe_avatar: current.maybe_avatar,
+    maybe_provider_avatar: current.maybe_provider_avatar,
   };
   // Clearing is always allowed, and so is sending back the override already stored: only a new
   // name is subject to the policy.
@@ -81,92 +88,63 @@ pub async fn put_my_profile(
   profile_of(state, caller.user.id).await
 }
 
-/// Announces an avatar upload and returns the presigned URL.
-pub async fn create_avatar_upload(
+/// Makes the uploaded picture the caller's own: checked and re-encoded as a square PNG here
+/// ([`sanitize_avatar`]), whatever the client sent.
+pub async fn put_my_avatar(
   state: &AppState,
   caller: &AuthenticatedUser,
-  request: CreateAvatarUploadRequest,
-) -> Result<CreateAvatarUploadResponse, ApiError> {
-  if matches!(request.content_type, AvatarContentType::Unknown(_)) {
-    return Err(ApiError::InvalidRequest(
-      "avatars must be PNG, JPEG or WebP images".into(),
-    ));
-  }
-  let max = state.settings.get().limits.max_avatar_bytes;
-  if request.size_bytes == 0 {
-    return Err(ApiError::InvalidRequest("size_bytes must be positive".into()));
-  }
-  if request.size_bytes > max {
-    return Err(ApiError::PayloadTooLarge(format!(
-      "avatars are limited to {max} bytes"
-    )));
-  }
-  let store = blob_store(state)?;
-  // While the storage is down, say "later" here instead of handing out a URL that fails.
-  store.check_available()?;
-  let object: teamcraft_proto::AttachmentId = state.next_id()?;
-  let key = format!("avatars/{}/{}", caller.user.id.snowflake(), object.snowflake());
-  let previous = state
-    .database
-    .set_pending_avatar(
-      caller.user.id,
-      &StoredAvatar {
-        key: key.clone(),
-        content_type: request.content_type.as_str().to_owned(),
-        size_bytes: request.size_bytes,
-      },
-    )
-    .await?;
-  if let Some(previous) = previous {
-    delete_or_queue(state, store, &previous).await;
-  }
-  Ok(CreateAvatarUploadResponse {
-    upload_url: store
-      .presign_typed_upload(&key, request.size_bytes, request.content_type.as_str())
-      .to_string(),
-    content_type: request.content_type,
-    expires_at: unix_millis(OffsetDateTime::now_utc() + store.expiry()),
-  })
-}
-
-/// Checks the uploaded object and makes it the avatar.
-pub async fn complete_avatar_upload(
-  state: &AppState,
-  caller: &AuthenticatedUser,
+  declared_type: &str,
+  bytes: Bytes,
 ) -> Result<ProfileResponse, ApiError> {
-  let store = blob_store(state)?;
-  let pending = state
-    .database
-    .get_pending_avatar(caller.user.id)
-    .await?
-    .ok_or_else(|| ApiError::Conflict("no avatar upload is waiting".into()))?;
-  let stored = store.object_size(&pending.key).await.map_err(|error| {
-    warn!(%error, "avatar storage check failed");
-    ApiError::storage_failed("avatar storage", error)
-  })?;
-  match stored {
-    None => return Err(ApiError::Conflict("the avatar has not been uploaded".into())),
-    Some(size) if size != pending.size_bytes => {
-      delete_or_queue(state, store, &pending.key).await;
-      return Err(ApiError::Conflict(format!(
-        "the stored avatar has {size} bytes, {} were announced",
-        pending.size_bytes
-      )));
-    },
-    Some(_) => {},
+  let profile = state.database.get_profile(caller.user.id).await?;
+  if !can_change_avatar(&state.policy.get().directory, &profile) {
+    return Err(ApiError::AvatarFromIdentityProvider);
   }
-  if let Some(replaced) = state.database.promote_pending_avatar(caller.user.id).await? {
-    delete_or_queue(state, store, &replaced).await;
-  }
-  publish_update(state, caller.user.id).await?;
+  // While the storage is down, say "later" before decoding a picture that can't be kept.
+  blob_store(state)?.check_available()?;
+  let png = sanitized_avatar(state, declared_type.to_owned(), bytes).await?;
+  store_avatar(state, caller.user.id, png).await?;
   profile_of(state, caller.user.id).await
 }
 
+/// Decodes and re-encodes a picture within the configured limits, on the picture decoding pool.
+pub(super) async fn sanitized_avatar(
+  state: &AppState,
+  declared_type: String,
+  bytes: Bytes,
+) -> Result<Vec<u8>, ApiError> {
+  let (max_bytes, side, timeout) = {
+    let limits = &state.settings.get().limits;
+    (
+      limits.max_avatar_bytes,
+      limits.avatar_side_px,
+      Duration::from_secs(limits.image_decode_timeout_secs),
+    )
+  };
+  if bytes.is_empty() {
+    return Err(ApiError::InvalidRequest("the picture is empty".into()));
+  }
+  if bytes.len() as u64 > max_bytes {
+    return Err(ApiError::PayloadTooLarge(format!(
+      "avatars are limited to {max_bytes} bytes"
+    )));
+  }
+  run_limited(&state.image_decodes, timeout, move || {
+    sanitize_avatar(&bytes, &declared_type, side)
+  })
+  .await?
+  .map_err(|error| ApiError::InvalidRequest(error.to_string()))
+}
+
 pub async fn delete_my_avatar(state: &AppState, caller: &AuthenticatedUser) -> Result<(), ApiError> {
+  let profile = state.database.get_profile(caller.user.id).await?;
+  if !can_change_avatar(&state.policy.get().directory, &profile) {
+    return Err(ApiError::AvatarFromIdentityProvider);
+  }
   remove_avatar(state, caller.user.id).await
 }
 
-/// Removes `user`'s avatar, if there is one.
+/// Removes `user`'s own avatar, if there is one.
 pub(super) async fn remove_avatar(state: &AppState, user: UserId) -> Result<(), ApiError> {
   let store = blob_store(state)?;
   if let Some(key) = state.database.clear_avatar(user).await? {
@@ -176,9 +154,28 @@ pub(super) async fn remove_avatar(state: &AppState, user: UserId) -> Result<(), 
   Ok(())
 }
 
-/// Makes an already checked PNG `user`'s avatar, for an account that doesn't upload its own (a bot).
+/// Makes an already checked PNG `user`'s own avatar.
 pub(super) async fn store_avatar(state: &AppState, user: UserId, png: Vec<u8>) -> Result<(), ApiError> {
   let store = blob_store(state)?;
+  let avatar = put_png(state, store, user, png).await?;
+  match state.database.replace_avatar(user, &avatar).await {
+    Ok(Some(replaced)) => delete_or_queue(state, store, &replaced).await,
+    Ok(None) => {},
+    Err(error) => {
+      delete_or_queue(state, store, &avatar.key).await;
+      return Err(error.into());
+    },
+  }
+  publish_update(state, user).await
+}
+
+/// Stores a PNG under a fresh key (a reader never gets a half-replaced object).
+pub(super) async fn put_png(
+  state: &AppState,
+  store: &BlobStore,
+  user: UserId,
+  png: Vec<u8>,
+) -> Result<StoredAvatar, ApiError> {
   let object: teamcraft_proto::AttachmentId = state.next_id()?;
   let avatar = StoredAvatar {
     key: format!("avatars/{}/{}", user.snowflake(), object.snowflake()),
@@ -192,13 +189,7 @@ pub(super) async fn store_avatar(state: &AppState, user: UserId, png: Vec<u8>) -
       warn!(%error, "storing a picture failed");
       ApiError::storage_failed("avatar storage", error)
     })?;
-  if let Some(previous) = state.database.set_pending_avatar(user, &avatar).await? {
-    delete_or_queue(state, store, &previous).await;
-  }
-  if let Some(replaced) = state.database.promote_pending_avatar(user).await? {
-    delete_or_queue(state, store, &replaced).await;
-  }
-  publish_update(state, user).await
+  Ok(avatar)
 }
 
 /// A download URL for somebody's avatar.
@@ -211,15 +202,12 @@ pub async fn get_avatar(
   // While the storage is down, say "later" here instead of handing out a URL that fails.
   store.check_available()?;
   let visible = visible_user(state, caller, user).await?;
-  let avatar = state
-    .database
-    .get_profile(visible.id)
-    .await?
-    .maybe_avatar
-    .ok_or_else(ApiError::avatar_not_found)?;
+  let profile = state.database.get_profile(visible.id).await?;
+  let avatar =
+    shown_avatar(&state.policy.get().directory, &profile).ok_or_else(ApiError::avatar_not_found)?;
   Ok(AvatarResponse {
     download_url: store.presign_download(&avatar.key).to_string(),
-    content_type: AvatarContentType::from(avatar.content_type),
+    content_type: AvatarContentType::from(avatar.content_type.clone()),
     size_bytes: avatar.size_bytes,
     expires_at: unix_millis(OffsetDateTime::now_utc() + store.expiry()),
   })
@@ -227,6 +215,10 @@ pub async fn get_avatar(
 
 async fn profile_of(state: &AppState, user: UserId) -> Result<ProfileResponse, ApiError> {
   let profile = state.database.get_profile(user).await?;
+  let policy = state.policy.get();
+  let directory = &policy.directory;
+  let maybe_avatar_version = shown_avatar(directory, &profile).map(|avatar| avatar_version(&avatar.key));
+  let can_change_avatar = can_change_avatar(directory, &profile);
   Ok(ProfileResponse {
     user_id: user,
     maybe_title: profile.maybe_title,
@@ -235,13 +227,37 @@ async fn profile_of(state: &AppState, user: UserId) -> Result<ProfileResponse, A
     maybe_time_zone: profile.maybe_time_zone,
     maybe_working_hours: profile.maybe_working_hours.map(wire_hours),
     maybe_display_name_override: state.database.get_display_name_override(user).await?,
-    can_override_display_name: state.policy.get().directory.allow_display_name_override,
-    has_avatar: profile.maybe_avatar.is_some(),
-    maybe_avatar_version: profile
-      .maybe_avatar
-      .as_ref()
-      .map(|avatar| avatar_version(&avatar.key)),
+    can_override_display_name: directory.allow_display_name_override,
+    has_avatar: maybe_avatar_version.is_some(),
+    maybe_avatar_version,
+    can_change_avatar,
   })
+}
+
+/// The picture everybody sees of a person (issue #2071): their own, unless the workspace takes
+/// pictures from the identity provider; then the provider's, unless people may override it and
+/// set their own. Without the preferred picture, the other one shows.
+pub(super) fn shown_avatar<'a>(
+  policy: &DirectoryPolicy,
+  profile: &'a StoredProfile,
+) -> Option<&'a StoredAvatar> {
+  let own = profile.maybe_avatar.as_ref();
+  let provider = profile.maybe_provider_avatar.as_ref();
+  match policy.avatar_source {
+    AvatarSource::IdentityProvider if policy.allow_avatar_override => own.or(provider),
+    AvatarSource::IdentityProvider => provider.or(own),
+    // An unknown source from a newer admin client: the safe reading is people's own pictures.
+    AvatarSource::User | AvatarSource::Unknown(_) => own,
+  }
+}
+
+/// Whether the person may set or remove their own picture: always, except while the provider's
+/// picture shows and the policy doesn't let people override it.
+pub(super) fn can_change_avatar(policy: &DirectoryPolicy, profile: &StoredProfile) -> bool {
+  match policy.avatar_source {
+    AvatarSource::IdentityProvider => policy.allow_avatar_override || profile.maybe_provider_avatar.is_none(),
+    AvatarSource::User | AvatarSource::Unknown(_) => true,
+  }
 }
 
 /// The version clients cache an avatar by: the last part of its object key, which is new with
@@ -250,7 +266,7 @@ fn avatar_version(key: &str) -> String {
   key.rsplit('/').next().unwrap_or(key).to_owned()
 }
 
-async fn publish_update(state: &AppState, user: UserId) -> Result<(), ApiError> {
+pub(super) async fn publish_update(state: &AppState, user: UserId) -> Result<(), ApiError> {
   let mut audience: HashSet<UserId> = state.database.users_sharing_conversation(user).await?;
   audience.insert(user);
   state
@@ -259,7 +275,7 @@ async fn publish_update(state: &AppState, user: UserId) -> Result<(), ApiError> 
   Ok(())
 }
 
-fn blob_store(state: &AppState) -> Result<&std::sync::Arc<BlobStore>, ApiError> {
+pub(super) fn blob_store(state: &AppState) -> Result<&std::sync::Arc<BlobStore>, ApiError> {
   state
     .maybe_blob_store
     .as_ref()

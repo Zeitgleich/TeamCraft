@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO user_profiles AS x (user_id, provider_avatar_key, provider_avatar_size_bytes,\n                                         provider_picture_source)\n         VALUES ($1, $2, $3, $4)\n         ON CONFLICT (user_id) DO UPDATE\n         SET provider_avatar_key = $2, provider_avatar_size_bytes = $3, provider_picture_source = $4,\n             updated_at = now()\n         RETURNING (SELECT provider_avatar_key FROM user_profiles WHERE user_id = $1) AS previous",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "previous",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "f4ec62363c48e80ff31a9fd7760a5cf49908bb27f19246176192514f28bd2fbe"
+}

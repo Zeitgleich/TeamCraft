@@ -4905,6 +4905,166 @@
         }
       }
     },
+    "profile_actions": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Change picture or name"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bild oder Namen ändern"
+          }
+        }
+      }
+    },
+    "profile_picture_change": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Change picture"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bild ändern"
+          }
+        }
+      }
+    },
+    "profile_picture_remove": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove picture"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bild entfernen"
+          }
+        }
+      }
+    },
+    "profile_picture_from_provider": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your picture comes from your organization's sign-in and can only be changed there."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dein Bild kommt aus der Anmeldung deiner Organisation und lässt sich nur dort ändern."
+          }
+        }
+      }
+    },
+    "profile_picture_crop_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Move and Zoom"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bewegen und zoomen"
+          }
+        }
+      }
+    },
+    "profile_picture_crop_area": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Picture, drag to move, pinch to zoom"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bild, zum Verschieben ziehen, zum Zoomen mit zwei Fingern spreizen"
+          }
+        }
+      }
+    },
+    "profile_picture_zoom": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zoom"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zoom"
+          }
+        }
+      }
+    },
+    "profile_picture_use": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Use Picture"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bild verwenden"
+          }
+        }
+      }
+    },
+    "profile_picture_unreadable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This picture can't be opened. Pick another one."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Bild lässt sich nicht öffnen. Wähle ein anderes."
+          }
+        }
+      }
+    },
+    "profile_picture_rejected": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The picture was refused. Pick another one, or your organization may no longer allow changing it."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das Bild wurde abgelehnt. Wähle ein anderes, oder deine Organisation erlaubt die Änderung nicht mehr."
+          }
+        }
+      }
+    },
     "profile_name_reset": {
       "localizations": {
         "en": {
@@ -23533,6 +23693,54 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "widget_previews": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Message previews in the widget"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nachrichtenvorschau im Widget"
+          }
+        }
+      }
+    },
+    "widget_previews_summary": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The home screen widget shows the newest message under each name."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das Widget auf dem Home-Bildschirm zeigt unter jedem Namen die neueste Nachricht."
+          }
+        }
+      }
+    },
+    "widget_previews_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Needs notifications that show the content, and the app lock off."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Geht nur, wenn Mitteilungen den Inhalt zeigen und die App-Sperre aus ist."
           }
         }
       }

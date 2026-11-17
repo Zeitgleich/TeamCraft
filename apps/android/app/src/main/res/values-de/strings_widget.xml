@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="widget_name">Ungelesene Chats</string>
+  <string name="widget_description">Unterhaltungen mit ungelesenen Nachrichten und eine Taste für eine neue Nachricht</string>
+  <string name="widget_title">Ungelesen</string>
+  <string name="widget_caught_up">Alles gelesen</string>
+  <string name="widget_locked">Öffne TeamCraft, um deine Chats zu sehen. Die App-Sperre verbirgt sie hier.</string>
+  <string name="widget_signed_out">Melde dich bei TeamCraft an, um deine Chats hier zu sehen.</string>
+  <plurals name="widget_unread_conversations">
+    <item quantity="one">%d Unterhaltung mit ungelesenen Nachrichten</item>
+    <item quantity="other">%d Unterhaltungen mit ungelesenen Nachrichten</item>
+  </plurals>
+  <string name="widget_unread_count">%1$s ungelesen</string>
+  <string name="widget_previews">Nachrichtenvorschau im Widget</string>
+  <string name="widget_previews_summary">Das Widget auf dem Startbildschirm zeigt unter jedem Namen die neueste Nachricht.</string>
+  <string name="widget_previews_unavailable">Geht nur, wenn Benachrichtigungen den Inhalt zeigen und die App-Sperre aus ist.</string>
+</resources>

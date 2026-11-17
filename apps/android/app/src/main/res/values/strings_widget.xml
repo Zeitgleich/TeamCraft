@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- Home screen widget (#2076): unread conversations and a new-message button. -->
+  <string name="widget_name">Unread chats</string>
+  <string name="widget_description">Conversations with unread messages, and a button for a new message</string>
+  <string name="widget_title">Unread</string>
+  <string name="widget_caught_up">You\'re all caught up</string>
+  <string name="widget_locked">Open TeamCraft to see your chats. The app lock hides them here.</string>
+  <string name="widget_signed_out">Sign in to TeamCraft to see your chats here.</string>
+  <plurals name="widget_unread_conversations">
+    <item quantity="one">%d conversation with unread messages</item>
+    <item quantity="other">%d conversations with unread messages</item>
+  </plurals>
+  <string name="widget_unread_count">%1$s unread</string>
+  <string name="widget_previews">Message previews in the widget</string>
+  <string name="widget_previews_summary">The home screen widget shows the newest message under each name.</string>
+  <string name="widget_previews_unavailable">Needs notifications that show the content, and the app lock off.</string>
+</resources>

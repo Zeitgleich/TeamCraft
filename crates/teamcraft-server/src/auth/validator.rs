@@ -74,6 +74,9 @@ pub struct TokenIdentity {
   /// The token itself, where it comes from the identity provider: its signature is evidence when it
   /// shows a lost role (e2ee.md §3.1.3).
   pub maybe_provider_token: Option<ProviderTokenText>,
+  /// The provider's picture of the person (`picture` claim), a URL; imported when the workspace
+  /// takes pictures from the provider (issue #2071).
+  pub maybe_picture_url: Option<String>,
 }
 
 /// A provider's token as it came. Prints as nothing: it is a credential.
@@ -121,6 +124,9 @@ struct AccessClaims {
   email: Option<String>,
   #[serde(default)]
   email_verified: bool,
+  /// URL of the person's picture (OIDC standard claim).
+  #[serde(default)]
+  picture: Option<String>,
   #[serde(default)]
   iat: i64,
   #[serde(default)]
@@ -357,6 +363,7 @@ impl TokenValidator {
       maybe_organization,
       token_binding,
       maybe_provider_token: Some(ProviderTokenText(token.into())),
+      maybe_picture_url: claims.picture.filter(|url| !url.trim().is_empty()),
     })
   }
 }

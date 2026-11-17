@@ -93,6 +93,19 @@
       android:name=".notifications.NotificationActionReceiver"
       android:exported="false" />
 
+    <!-- The home screen widget: unread conversations and a new-message button (#2076). -->
+    <receiver
+      android:name=".widget.UnreadWidgetReceiver"
+      android:exported="true"
+      android:label="@string/widget_name">
+      <intent-filter>
+        <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+      </intent-filter>
+      <meta-data
+        android:name="android.appwidget.provider"
+        android:resource="@xml/unread_widget_info" />
+    </receiver>
+
     <!-- UnifiedPush distributors deliver here (e2ee.md §7). -->
     <receiver
       android:name=".push.UnifiedPushReceiver"

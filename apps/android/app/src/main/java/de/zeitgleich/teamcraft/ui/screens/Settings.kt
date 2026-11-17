@@ -187,26 +187,22 @@ private fun SettingsHub(
   val maybeMe by produceState(viewModel.chat.maybeKeptSnapshot()?.me, changes) { value = viewModel.readChat { snapshot() }?.me ?: value }
   var presence by remember(maybeMe?.presence) { mutableStateOf(presenceOf(maybeMe?.presence)) }
   val isInCall by viewModel.isInCall.collectAsState()
-  Row(verticalAlignment = Alignment.CenterVertically) {
-    AccountAvatar(account.userId, account.displayName, size = 56.dp)
-    Column(Modifier.padding(start = 16.dp).weight(1f)) {
-      Text(account.displayName, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-      Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        PresenceDot(presence)
-        Text(stringResource(presenceLabel(presence)), style = MaterialTheme.typography.bodyMedium)
-      }
-      maybeMe?.maybeCustomStatus?.let { status ->
-        Text(
-          listOf(status.emoji, status.text).filter { it.isNotBlank() }.joinToString(" "),
-          style = MaterialTheme.typography.bodyMedium,
-          color = MaterialTheme.colorScheme.onSurfaceVariant,
-          maxLines = 1,
-          overflow = TextOverflow.Ellipsis,
-        )
-      }
+  ProfileHeader(viewModel, account.userId, account.displayName) {
+    Text(account.displayName, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+      PresenceDot(presence)
+      Text(stringResource(presenceLabel(presence)), style = MaterialTheme.typography.bodyMedium)
+    }
+    maybeMe?.maybeCustomStatus?.let { status ->
+      Text(
+        listOf(status.emoji, status.text).filter { it.isNotBlank() }.joinToString(" "),
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
     }
   }
-  DisplayNameSection(viewModel)
   var isEditingStatus by rememberSaveable { mutableStateOf(false) }
   SettingsGroup(R.string.settings_group_profile) {
     // Busy during a call on this phone is the server's doing, not a status to reset.
@@ -500,55 +496,20 @@ private fun ApproveDevice(viewModel: MainViewModel) {
 }
 
 /**
- * Changing the name under the picture, when the workspace policy lets people (issue #408): a
- * button that opens a field, and "Use name from sign-in" while a name of one's own is set. The new
- * name reaches everyone through the profile update event; this screen's name follows the same way.
+ * The field that changes the name under the picture (issue #408), opened from the picture's menu
+ * while the workspace policy lets people. The new name reaches everyone through the profile update
+ * event; this screen's name follows the same way.
  */
 @Composable
-private fun DisplayNameSection(viewModel: MainViewModel) {
+internal fun DisplayNameEditor(viewModel: MainViewModel, profile: OwnProfile, onClose: () -> Unit) {
   val scope = rememberCoroutineScope()
-  val changes by viewModel.changeCount.collectAsState()
-  var maybeProfile by remember { mutableStateOf<OwnProfile?>(null) }
-  LaunchedEffect(changes) { maybeProfile = viewModel.readChat { ownProfile() } }
-  val profile = maybeProfile?.takeIf { it.canOverrideDisplayName } ?: return
-  var isEditing by rememberSaveable { mutableStateOf(false) }
-  var name by rememberSaveable { mutableStateOf("") }
+  var name by rememberSaveable { mutableStateOf(profile.maybeDisplayNameOverride.orEmpty()) }
   var hasTried by remember { mutableStateOf(false) }
   var isSaving by remember { mutableStateOf(false) }
   var maybeFailure by remember { mutableStateOf<Int?>(null) }
   val nameFocus = remember { FocusRequester() }
   val maybeError = displayNameError(name).takeIf { hasTried } ?: maybeFailure
-  fun save(maybeName: String?) {
-    isSaving = true
-    scope.launch {
-      maybeFailure = viewModel.trySetDisplayName(profile, maybeName)
-      if (maybeFailure == null) {
-        isEditing = false
-        hasTried = false
-      } else if (isEditing) {
-        nameFocus.requestFocus()
-      }
-      isSaving = false
-    }
-  }
-  val resetButton: @Composable () -> Unit = {
-    if (profile.maybeDisplayNameOverride != null) {
-      OutlinedButton(onClick = { save(null) }, enabled = !isSaving) {
-        Text(stringResource(R.string.profile_name_reset))
-      }
-    }
-  }
-  if (!isEditing) {
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-      OutlinedButton(onClick = {
-        name = profile.maybeDisplayNameOverride.orEmpty()
-        maybeFailure = null
-        isEditing = true
-      }) { Text(stringResource(R.string.profile_name_change)) }
-      resetButton()
-    }
-    return
-  }
+  LaunchedEffect(Unit) { nameFocus.requestFocus() }
   OutlinedTextField(
     value = name,
     onValueChange = {
@@ -566,16 +527,20 @@ private fun DisplayNameSection(viewModel: MainViewModel) {
     Button(
       onClick = {
         hasTried = true
-        if (displayNameError(name) != null) nameFocus.requestFocus() else save(name.trim())
+        if (displayNameError(name) != null) {
+          nameFocus.requestFocus()
+          return@Button
+        }
+        isSaving = true
+        scope.launch {
+          maybeFailure = viewModel.trySetDisplayName(profile, name.trim())
+          isSaving = false
+          if (maybeFailure == null) onClose() else nameFocus.requestFocus()
+        }
       },
       enabled = !isSaving,
     ) { Text(stringResource(R.string.profile_name_save)) }
-    OutlinedButton(onClick = {
-      isEditing = false
-      hasTried = false
-      maybeFailure = null
-    }, enabled = !isSaving) { Text(stringResource(R.string.cancel)) }
-    resetButton()
+    OutlinedButton(onClick = onClose, enabled = !isSaving) { Text(stringResource(R.string.cancel)) }
   }
 }
 

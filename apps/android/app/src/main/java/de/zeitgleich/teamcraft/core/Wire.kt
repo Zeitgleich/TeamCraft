@@ -870,6 +870,17 @@ class OwnProfile(private val raw: JsonObject) {
   val canOverrideDisplayName: Boolean
     get() = (raw["can_override_display_name"] as? JsonPrimitive)?.content == "true"
 
+  /** A picture shows for the member (their own or the identity provider's). */
+  val hasAvatar: Boolean
+    get() = (raw["has_avatar"] as? JsonPrimitive)?.content == "true"
+
+  /**
+   * The member may set or remove their own picture: not while the workspace shows the identity
+   * provider's picture without overrides (issue #2071). Absent from older servers: yes.
+   */
+  val canChangeAvatar: Boolean
+    get() = (raw["can_change_avatar"] as? JsonPrimitive)?.content != "false"
+
   /** The name the member chose, `null` while the sign-in name is shown. */
   val maybeDisplayNameOverride: String?
     get() = (raw["display_name_override"] as? JsonPrimitive)?.takeIf { it.isString }?.content

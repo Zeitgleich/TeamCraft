@@ -533,6 +533,7 @@ settings-f-max_links_per_user = Most links per person
 settings-f-max_attachment_bytes = Largest attachment
 settings-f-max_attachment_bytes_per_user = Attachments per person in total
 settings-f-max_avatar_bytes = Largest profile picture
+settings-f-avatar_side_px = Profile picture size
 settings-f-max_space_image_bytes = Largest space or channel picture
 settings-f-max_background_bytes = Largest call background
 settings-f-max_backgrounds_per_user = Call backgrounds per person
@@ -842,6 +843,7 @@ settings-error-dsn = Enter the project's DSN, like https://key@errors.example.co
 settings-error-bridge-url = Enter an https address without a user name, query or #fragment (http only for localhost).
 settings-error-crash-percent = Enter 0 to 100 percent.
 settings-error-slow-job = Enter 0 to 60000 milliseconds.
+settings-error-avatar-side = Enter 64 to 2048 pixels.
 settings-error-call-reports = Enter 0 to 50 reports.
 settings-error-crash-environment = Use 1 to 64 lowercase letters, digits, "-", "_" or ".".
 

@@ -29,7 +29,6 @@ const COMMANDS: &[&str] = &[
   "perf_configure",
   "public_asset",
   "avatar_download",
-  "avatar_upload",
   "server_state",
   "server_check",
   "server_suggest",

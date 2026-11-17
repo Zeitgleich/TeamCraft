@@ -77,6 +77,8 @@ fun rememberAppLock(): Pair<Boolean, (Boolean) -> Unit> {
     // notifier's lock waits behind a push).
     val graph = TeamCraftApplication.graph(context)
     graph.scope.launch { graph.notifier.repostAll() }
+    // The home screen widget hides everything personal while the lock is on (#2076).
+    graph.homeWidgets.requestRefresh()
   }
 }
 

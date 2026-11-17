@@ -1023,9 +1023,10 @@ pages) and knows when. What other members learn is limited on purpose:
 
 Directory data, not encrypted: the server has to show and route by it, so it holds it in plain text
 like the identity provider does. Space names, descriptions, colors and **pictures**; channel names,
-topics and **pictures**; people's profiles and avatars. A space or channel picture is uploaded to the
-server itself, which refuses SVG and re-encodes PNG, JPEG and WebP uploads as PNG before storing
-them, and serves it only to people who may see the space or channel (changing a channel's picture
+topics and **pictures**; people's profiles and avatars. A space or channel picture and a profile
+picture are uploaded to the server itself, which refuses SVG and re-encodes PNG, JPEG and WebP uploads
+as PNG before storing them (profile pictures also as the middle square, and the identity provider's
+pictures the same way, admin.md §3.12), and serves it only to people who may see the space or channel (changing a channel's picture
 needs `manage_channel_properties`). Anything put into these fields is visible to the server operator;
 content that must stay confidential belongs in messages.
 

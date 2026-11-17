@@ -74,9 +74,19 @@ impl RestClient {
 
   /// A request with a binary body whose answer is not read.
   pub async fn send_bytes(&self, method: ApiMethod, path: &str, body: BinaryBody) -> Result<(), RestError> {
+    self.call_bytes(method, path, body).await.map(|_| ())
+  }
+
+  /// A `PUT` with a binary body (a picture) answered with JSON.
+  pub async fn put_bytes<T: DeserializeOwned>(&self, path: &str, body: BinaryBody) -> Result<T, RestError> {
+    let answer = self.call_bytes(ApiMethod::Put, path, body).await?;
+    serde_json::from_slice(&answer).map_err(|error| RestError::Unreadable(error.to_string()))
+  }
+
+  async fn call_bytes(&self, method: ApiMethod, path: &str, body: BinaryBody) -> Result<Vec<u8>, RestError> {
     let response = self.auth.api_request_bytes(method, path, Some(body)).await?;
     if response.status < 300 {
-      return Ok(());
+      return Ok(response.body);
     }
     let code = serde_json::from_slice::<teamcraft_proto::ErrorBody>(&response.body)
       .map(|body| body.error_code.as_str().to_owned())

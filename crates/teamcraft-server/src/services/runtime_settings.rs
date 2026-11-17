@@ -7,10 +7,10 @@ use teamcraft_db::StoredSetting;
 use teamcraft_proto::{
   AppLinkSettings, BridgeAddressResponse, ConversationId, CrashReportSettings, DpopPolicy,
   EmailDigestSettings, GatewayEvent, HealthAlertSettings, HolidaySettings, IntegrationSettings,
-  LimitSettings, LocalAccountSettings, MailTextSettings, MeetingMailSettings, NotificationLevel,
-  NotificationRuntimeSettings, Permission, RuntimeSettingsKey, RuntimeSettingsResponse,
-  RuntimeSettingsSection, RuntimeSettingsState, ServerRulesSettings, SettingSource, ShareSettings,
-  SignInMethod, SignInPageSettings, Target, check_bridge_public_url,
+  LimitSettings, LocalAccountSettings, MAX_AVATAR_SIDE_PX, MIN_AVATAR_SIDE_PX, MailTextSettings,
+  MeetingMailSettings, NotificationLevel, NotificationRuntimeSettings, Permission, RuntimeSettingsKey,
+  RuntimeSettingsResponse, RuntimeSettingsSection, RuntimeSettingsState, ServerRulesSettings, SettingSource,
+  ShareSettings, SignInMethod, SignInPageSettings, Target, check_bridge_public_url,
 };
 use tracing::{error, warn};
 
@@ -332,6 +332,7 @@ fn apply(settings: &mut Settings, section: &RuntimeSettingsSection) {
       let limits = &mut settings.limits;
       limits.max_attachment_bytes_per_user = values.max_attachment_bytes_per_user;
       limits.max_avatar_bytes = values.max_avatar_bytes;
+      limits.avatar_side_px = values.avatar_side_px;
       limits.max_space_image_bytes = values.max_space_image_bytes;
       limits.max_background_bytes = values.max_background_bytes;
       limits.max_backgrounds_per_user = values.max_backgrounds_per_user;
@@ -449,6 +450,7 @@ fn view(settings: &Settings, sources: Vec<RuntimeSettingsState>) -> RuntimeSetti
       max_attachment_bytes: settings.max_attachment_bytes,
       max_attachment_bytes_per_user: limits.max_attachment_bytes_per_user,
       max_avatar_bytes: limits.max_avatar_bytes,
+      avatar_side_px: limits.avatar_side_px,
       max_space_image_bytes: limits.max_space_image_bytes,
       max_background_bytes: limits.max_background_bytes,
       max_backgrounds_per_user: limits.max_backgrounds_per_user,
@@ -646,6 +648,12 @@ fn validate(section: &RuntimeSettingsSection) -> Result<(), ApiError> {
         1 << 50,
       )?;
       check_range("max_avatar_bytes", values.max_avatar_bytes, 1024, 64 << 20)?;
+      check_range(
+        "avatar_side_px",
+        values.avatar_side_px.into(),
+        MIN_AVATAR_SIDE_PX.into(),
+        MAX_AVATAR_SIDE_PX.into(),
+      )?;
       check_range(
         "max_space_image_bytes",
         values.max_space_image_bytes,
