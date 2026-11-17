@@ -128,11 +128,11 @@ modules:
       - /share/vala
     sources:
       - type: archive
-        url: https://releases.ayatana-indicators.org/source/ayatana-ido/ayatana-ido-0.10.4.tar.gz
-        sha256: df64cb09005d2f273d37c57438216e9239d91ae26c9cd1a4341e8eb8b6c7d88e
+        url: https://github.com/AyatanaIndicators/ayatana-ido/archive/refs/tags/0.10.4.tar.gz
+        sha256: bd59abd5f1314e411d0d55ce3643e91cef633271f58126be529de5fb71c5ab38
 
-  # 0.9.5 and 0.6.1 below are tagged upstream but not yet on releases.ayatana-indicators.org, so
-  # they come from the project's own tag archives.
+  # All three ayatana libraries come from the project's GitHub tag archives: releases.ayatana-indicators.org
+  # timed out from CI (#2094), and 0.9.5 and 0.6.1 are not published there at all.
   - name: libayatana-indicator
     buildsystem: cmake-ninja
     config-opts:

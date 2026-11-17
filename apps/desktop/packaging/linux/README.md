@@ -234,7 +234,7 @@ works except the "with sound" option, which then says it is unavailable.
 
 The GNOME runtime has no libayatana-appindicator, so the manifest builds it with its dependencies
 (libdbusmenu-gtk3, ayatana-ido, libayatana-indicator; intltool only for libdbusmenu's build) from
-the upstream release archives, each pinned by SHA-256. Two patches in `tray-patches/` make the
+the upstream tag archives on GitHub, each pinned by SHA-256. Two patches in `tray-patches/` make the
 old libdbusmenu and intltool releases build with current autotools and Perl. The app finds the
 library in `/app/lib` and talks to the tray host through `org.kde.StatusNotifierWatcher`.
 
