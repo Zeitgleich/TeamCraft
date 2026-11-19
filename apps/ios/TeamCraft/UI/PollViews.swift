@@ -81,7 +81,7 @@ struct PollCardView: View {
       .foregroundStyle(.secondary)
       .monospacedDigit()
       Spacer(minLength: 8)
-      if poll.isMine && !poll.isClosed {
+      if poll.canClose && !poll.isClosed {
         Button("poll_close") { isConfirmingClose = true }
           .font(.app(.caption).weight(.semibold))
           .buttonStyle(.borderless)
@@ -255,7 +255,8 @@ struct PollSheet: View {
   @State private var maybeFailure: AppFailure?
   @FocusState private var focused: PollSheetField?
   @AccessibilityFocusState private var accessibilityFocused: PollSheetField?
-  private let limits = pollLimits()
+  /// The server's limits (#2120); the built-in ones show until they are read.
+  @State private var limits = PollLimitsItem(maxOptions: 12, maxQuestionChars: 300, maxOptionChars: 100, maxOpenDays: 365)
 
   var body: some View {
     NavigationStack {
@@ -271,6 +272,7 @@ struct PollSheet: View {
       }
     }
     .interactiveDismissDisabled(isSending)
+    .task { limits = await model.pollLimits() }
   }
 
   private func form(proxy: ScrollViewProxy) -> some View {
@@ -384,12 +386,12 @@ struct PollSheet: View {
 
   private func currentProblems() -> [PollProblemItem] {
     let now = nowMs
-    return pollProblems(draft: draft(nowMs: now), nowMs: now)
+    return pollProblems(draft: draft(nowMs: now), limits: limits, nowMs: now)
   }
 
   private func send(proxy: ScrollViewProxy) {
     let now = nowMs
-    let problems = pollProblems(draft: draft(nowMs: now), nowMs: now)
+    let problems = pollProblems(draft: draft(nowMs: now), limits: limits, nowMs: now)
     if let first = problems.first {
       wasRefused = true
       let field = sheetField(first.field)
@@ -402,7 +404,7 @@ struct PollSheet: View {
     let note = String(localized: "poll_fallback_note")
     guard
       let json = try? pollPostAction(
-        conversation: conversationId, draft: draft(nowMs: now), title: title, note: note, nowMs: now)
+        conversation: conversationId, draft: draft(nowMs: now), limits: limits, title: title, note: note, nowMs: now)
     else {
       wasRefused = true
       return

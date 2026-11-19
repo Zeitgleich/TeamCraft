@@ -2081,6 +2081,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
           spec,
           relations.reactions_to(stored.client_message_id),
           self.me,
+          &self.poll_moderators(stored.conversation_id),
           self.now_ms(),
         ))
       }),
@@ -3816,6 +3817,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn max_upload_bytes(&self) -> Option<u64> {
     self.ui_max_upload_bytes()
+  }
+
+  fn poll_limits(&self) -> teamcraft_client_api::polls::PollLimits {
+    crate::polls::stored_limits(&self.store)
   }
 
   fn create_space(&self, space: NewSpace) {

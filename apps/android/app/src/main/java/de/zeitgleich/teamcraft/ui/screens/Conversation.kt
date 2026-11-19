@@ -462,7 +462,7 @@ fun ConversationScreen(
       NotifiedMessageRow(maybeNotified, isLoading = conversation == null || messages.isEmpty())
       TypingIndicator(viewModel, conversationId, snapshot)
       if (conversation?.canPost != false) {
-        Composer(viewModel, conversationId, maybeThread = null, snapshot = snapshot, onSent = { sentCount++ })
+        Composer(viewModel, conversationId, maybeThread = null, snapshot = snapshot, canCreatePoll = rights.canCreatePoll, onSent = { sentCount++ })
       } else {
         ReadOnlyNote(isArchived = conversation?.isArchived == true)
       }
@@ -1512,6 +1512,8 @@ internal fun Composer(
   conversationId: String,
   maybeThread: String?,
   snapshot: ChatSnapshot?,
+  /** The user may send a poll here (`create_poll`, #2120); the poll row is left out otherwise. */
+  canCreatePoll: Boolean = true,
   onSent: () -> Unit = {},
 ) {
   val context = LocalContext.current
@@ -2025,7 +2027,7 @@ internal fun Composer(
   }
   if (isAttachOpen) {
     // A poll goes to the conversation, not into a thread (#205).
-    AttachSheet(pickers, onDismiss = { isAttachOpen = false }, maybeOnPoll = { isPollOpen = true }.takeIf { maybeThread == null })
+    AttachSheet(pickers, onDismiss = { isAttachOpen = false }, maybeOnPoll = { isPollOpen = true }.takeIf { maybeThread == null && canCreatePoll })
   }
   if (isPollOpen) PollSheet(viewModel, conversationId, onDismiss = { isPollOpen = false })
   maybeMediaFlow?.let { launch ->

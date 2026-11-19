@@ -30,7 +30,7 @@ const HOUR_MS: i64 = 3_600_000;
 pub fn PollDialog(conversation: ConversationId) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let limits = PollLimits::default();
+  let limits = state.read(|backend| backend.poll_limits());
   let fields = Fields {
     question: RwSignal::new(String::new()),
     options: RwSignal::new(vec![String::new(); FIRST_OPTIONS]),

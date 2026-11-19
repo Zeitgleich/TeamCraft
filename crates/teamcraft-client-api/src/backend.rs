@@ -887,6 +887,11 @@ pub trait ChatBackend {
   fn max_upload_bytes(&self) -> Option<u64> {
     None
   }
+  /// How large a poll the user may send (issue #2120): what the server published, else the
+  /// built-in limits.
+  fn poll_limits(&self) -> crate::polls::PollLimits {
+    crate::polls::PollLimits::default()
+  }
   /// Files saved to disk, newest first: the app's downloads list. `None` where there is no list
   /// (the browser keeps its own) and while a backend that asks the core waits for the answer.
   fn downloads(&self) -> Option<Vec<crate::actions::DownloadEntry>> {

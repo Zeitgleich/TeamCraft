@@ -108,6 +108,20 @@ pub const DEFAULT_MAX_UPLOAD_BYTES: u64 = 100 * 1024 * 1024;
 /// Account record: the largest attachment the server takes (bytes of the encrypted file), as the
 /// server published it; absent for servers that don't.
 pub const SERVER_ATTACHMENT_LIMIT_KEY: &str = "server_max_attachment_bytes";
+/// Account record: the poll limits the server published ([`teamcraft_proto::PollLimits`], issue
+/// #2120); absent for servers that don't.
+pub const POLL_LIMITS_KEY: &str = "server_poll_limits";
+
+/// The poll limits in force (issue #2120): what the server published (`GET /me`), cut to what
+/// every receiver counts, or the built-in ones for an older server or before the first sync.
+pub fn stored_poll_limits(store: &impl LocalStore) -> teamcraft_proto::PollLimits {
+  records::get_json::<Option<teamcraft_proto::PollLimits>>(store, Table::Account, POLL_LIMITS_KEY)
+    .ok()
+    .flatten()
+    .flatten()
+    .map(teamcraft_proto::PollLimits::bounded)
+    .unwrap_or_default()
+}
 pub use actions::{
   ForwardScope, OutgoingText, REPLY_EXCERPT_CHARS, album_attachment, forward_content, imported_author_name,
   reply_ref,

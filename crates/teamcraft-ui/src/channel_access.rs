@@ -105,6 +105,14 @@ pub fn can_react_in(state: AppState, conversation: ConversationId) -> bool {
     .is_some_and(|found| found.can_react())
 }
 
+/// Whether the user may send a poll in the conversation (`create_poll`, issue #2120;
+/// [`crate::model::Conversation::can_create_poll`], as in the native apps).
+pub fn can_create_poll_in(state: AppState, conversation: ConversationId) -> bool {
+  state
+    .read(|backend| backend.conversation(conversation))
+    .is_some_and(|found| found.can_create_poll())
+}
+
 /// Whether the user may create a channel in the space.
 pub fn can_create_channel_in(state: AppState, space: SpaceId) -> bool {
   !is_guest(state) && space_of(state, space).is_some_and(|found| found.can_create_channels)

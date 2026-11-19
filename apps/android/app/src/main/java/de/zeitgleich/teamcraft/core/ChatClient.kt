@@ -11,6 +11,7 @@ import uniffi.teamcraft_ffi.AddPeopleOutcome
 import uniffi.teamcraft_ffi.ChannelAnchorMarksItem
 import uniffi.teamcraft_ffi.GroupMentionReachItem
 import uniffi.teamcraft_ffi.MentionableGroupItem
+import uniffi.teamcraft_ffi.PollLimitsItem
 import uniffi.teamcraft_ffi.ChannelMembersInfo
 import uniffi.teamcraft_ffi.ChannelRolesReviewItem
 import uniffi.teamcraft_ffi.CreateOutcome
@@ -234,6 +235,9 @@ class ChatClient(
 
   /** The user groups the composer offers after `@` here; none without `use_group_mentions` (#206). */
   suspend fun mentionableGroups(conversation: String): List<MentionableGroupItem> = core().mentionableGroups(conversation)
+
+  /** How large a poll the user may send: the server's limits, else the built-in ones (#2120). */
+  suspend fun pollLimits(): PollLimitsItem = core().pollLimits()
 
   /** Who the group mentions in [body] would notify here, for the hint and the confirmation. */
   suspend fun groupMentionReach(conversation: String, body: String): GroupMentionReachItem =

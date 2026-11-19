@@ -17,8 +17,10 @@ struct Poll: Decodable, Equatable, Sendable {
   var maybeClosesAtMs: Int64?
   var voterCount: UInt32 = 0
   var isClosed = false
-  /// The user made it, so may close it.
+  /// The user made it.
   var isMine = false
+  /// The user may close it: they made it, or the channel's signed roles make them a moderator (#2120).
+  var canClose = false
 
   var isMultipleChoice: Bool { choice == "multiple" }
   /// Whether this version knows how to vote in it.
@@ -36,7 +38,7 @@ struct Poll: Decodable, Equatable, Sendable {
   }
 
   private enum CodingKeys: String, CodingKey {
-    case question, options, choice, voters, results, areResultsShown, voterCount, isClosed, isMine
+    case question, options, choice, voters, results, areResultsShown, voterCount, isClosed, isMine, canClose
     case maybeClosesAtMs = "closesAt"
   }
 
@@ -52,6 +54,7 @@ struct Poll: Decodable, Equatable, Sendable {
     voterCount = try container.decodeIfPresent(UInt32.self, forKey: .voterCount) ?? 0
     isClosed = try container.decodeIfPresent(Bool.self, forKey: .isClosed) ?? false
     isMine = try container.decodeIfPresent(Bool.self, forKey: .isMine) ?? false
+    canClose = try container.decodeIfPresent(Bool.self, forKey: .canClose) ?? false
   }
 }
 

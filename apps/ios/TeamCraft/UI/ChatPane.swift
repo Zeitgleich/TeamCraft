@@ -952,7 +952,7 @@ struct ChatPane: View {
             attachButton(kind)
           }
           // A poll goes to the conversation, not into a thread (#205).
-          if threadId == nil {
+          if threadId == nil && conversation.canCreatePoll {
             Button("poll_new_title", systemImage: "chart.bar") { isMakingPoll = true }
           }
           if isSchedulingAllowed {

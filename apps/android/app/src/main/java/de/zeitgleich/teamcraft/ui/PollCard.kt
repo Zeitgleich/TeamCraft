@@ -252,7 +252,7 @@ private fun PollOptionRow(
   }
 }
 
-/** "3 votes · Closed" or "3 votes · Ends 18 Nov, 15:00", and "Close poll" for its sender. */
+/** "3 votes · Closed" or "3 votes · Ends 18 Nov, 15:00", and "Close poll" for its sender or a moderator. */
 @Composable
 private fun PollFooter(poll: Poll, colors: PollColors, onClose: () -> Unit) {
   val context = LocalContext.current
@@ -278,7 +278,7 @@ private fun PollFooter(poll: Poll, colors: PollColors, onClose: () -> Unit) {
       color = colors.muted,
       modifier = Modifier.weight(1f),
     )
-    if (poll.isMine && !poll.isClosed) {
+    if (poll.canClose && !poll.isClosed) {
       TextButton(onClick = onClose) { Text(stringResource(R.string.poll_close), color = colors.accent) }
     }
   }

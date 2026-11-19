@@ -246,6 +246,13 @@ max_backgrounds_per_user = 24
 max_custom_emoji = 500
 max_custom_emoji_bytes = 65536
 max_custom_emoji_side_px = 128
+# Poll limits (issue #2120): the apps hold senders to them, since the server can't see a poll.
+# Receivers count polls up to 32 options and 1000 characters whatever is set here; admins can
+# change all four in the admin console (Settings > Limits).
+max_poll_options = 12
+max_poll_question_chars = 300
+max_poll_option_chars = 100
+max_poll_open_days = 365
 # How long a request for organization recovery waits for admin approvals.
 org_recovery_request_ttl_secs = 86400
 # Largest sealed share or sealed backup key the server stores for a recovery.

@@ -97,7 +97,7 @@ pub fn PollCard(
       }
     })
     .collect_view();
-  let close = (poll.is_mine && !poll.is_closed).then(|| {
+  let close = poll.is_closable().then(|| {
     view! {
       <Show
         when=move || is_confirming_close.get()

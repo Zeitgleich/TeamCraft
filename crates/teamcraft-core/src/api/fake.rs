@@ -335,6 +335,8 @@ struct State {
   policy_log: Vec<WorkspaceLogEntryResponse>,
   /// Larger attachments are refused like the server's `max_attachment_bytes`; `None`: no limit.
   maybe_max_attachment_bytes: Option<u64>,
+  /// The poll limits `me` publishes; `None`: like an older server.
+  maybe_poll_limits: Option<teamcraft_proto::PollLimits>,
   /// What the fake publishes in `GET /me`: `None` like an older server.
   maybe_draft_file_retention_days: Option<u32>,
   /// Parts stored by uploads in parts, counted over the whole run.
@@ -2520,6 +2522,7 @@ impl ServerApi for FakeServerApi {
         maybe_max_attachment_bytes: state.maybe_max_attachment_bytes,
         maybe_draft_file_retention_days: state.maybe_draft_file_retention_days,
         maybe_max_key_bag_bytes: None,
+        maybe_poll_limits: state.maybe_poll_limits,
       })
     })
   }

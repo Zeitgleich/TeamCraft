@@ -29,8 +29,12 @@ pub struct PollView {
   pub voter_count: u32,
   /// Closed by its creator, or its closing time passed.
   pub is_closed: bool,
-  /// The user made it, so may close it.
+  /// The user made it.
   pub is_mine: bool,
+  /// The user may close it: they made it, or they are a moderator or admin of the channel by its
+  /// signed roles (issue #2120). The action is offered only then, and only while it is open.
+  #[serde(default)]
+  pub can_close: bool,
 }
 
 /// One option of a [`PollView`].
@@ -86,6 +90,11 @@ pub struct NewPoll {
 }
 
 impl PollView {
+  /// Whether to offer closing the poll now: the user may ([`Self::can_close`]) and it is open.
+  pub fn is_closable(&self) -> bool {
+    self.can_close && !self.is_closed
+  }
+
   /// Whether the user can vote (or change or withdraw a vote): the poll is open and its choice is
   /// one this version knows.
   pub fn can_vote(&self) -> bool {
@@ -507,6 +516,7 @@ mod tests {
       voter_count: 1,
       is_closed: false,
       is_mine: false,
+      can_close: false,
     }
   }
 }

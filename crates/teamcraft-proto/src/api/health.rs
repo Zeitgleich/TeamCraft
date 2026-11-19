@@ -93,6 +93,11 @@ pub struct GetMeResponse {
     skip_serializing_if = "Option::is_none"
   )]
   pub maybe_max_attachment_bytes: Option<u64>,
+  /// How large a poll the apps let a member send (`max_poll_*` of the limits an admin sets, issue
+  /// #2120). The server can't see a poll, so this is only what the apps hold senders to. Absent
+  /// from older servers: the apps use the built-in limits.
+  #[serde(rename = "poll_limits", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_poll_limits: Option<crate::PollLimits>,
   /// How long the server holds the files of an unsent draft (#1220, `is_draft` uploads), in days.
   /// Absent from older servers: clients keep a draft's files on the device until it is sent.
   #[serde(
@@ -171,6 +176,7 @@ mod tests {
       maybe_max_attachment_bytes: None,
       maybe_draft_file_retention_days: None,
       maybe_max_key_bag_bytes: None,
+      maybe_poll_limits: None,
     };
     assert_eq!(
       serde_json::to_string(&me).unwrap(),
@@ -195,6 +201,14 @@ mod tests {
     assert_eq!(
       serde_json::to_string(&holding).unwrap(),
       r#"{"id":"42","display_name":"Alice","role":"member","draft_file_retention_days":30}"#
+    );
+    let polling = GetMeResponse {
+      maybe_poll_limits: Some(crate::PollLimits::default()),
+      ..me.clone()
+    };
+    assert_eq!(
+      serde_json::to_string(&polling).unwrap(),
+      r#"{"id":"42","display_name":"Alice","role":"member","poll_limits":{"max_options":12,"max_question_chars":300,"max_option_chars":100,"max_open_days":365}}"#
     );
     let parsed: GetMeResponse =
       serde_json::from_str(r#"{"id":"42","username":"alice","display_name":"Alice","role":"auditor"}"#)

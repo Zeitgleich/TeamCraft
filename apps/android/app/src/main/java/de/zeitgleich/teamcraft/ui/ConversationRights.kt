@@ -19,6 +19,8 @@ data class ConversationRights(
   val canManageChannel: Boolean = true,
   /** Delete the channel for everybody; offered only on the server's word. */
   val canDeleteChannel: Boolean = false,
+  /** Send a poll (`create_poll`, #2120). */
+  val canCreatePoll: Boolean = true,
   /** What the owners of a quiet channel are told (#212); `null` for everybody else. */
   val maybeInactivityNotice: InactivityNoticeItem? = null,
 ) {
@@ -28,6 +30,7 @@ data class ConversationRights(
         canPost = item.canPost,
         canReact = item.canReact,
         canManageBookmarks = item.canManageBookmarks,
+        canCreatePoll = item.canCreatePoll,
         canManageChannel = item.canManageChannel,
         canDeleteChannel = item.canDeleteChannel,
         maybeInactivityNotice = item.maybeInactivityNotice,

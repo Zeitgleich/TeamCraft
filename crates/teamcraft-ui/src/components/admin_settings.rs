@@ -195,6 +195,7 @@ const REPORTS: &str = "settings-unit-reports";
 const MEGABYTES: &str = "settings-unit-mib";
 const KILOBYTES: &str = "settings-unit-kib";
 const PIXELS: &str = "settings-unit-px";
+const CHARACTERS: &str = "settings-unit-chars";
 const KIB: u64 = 1024;
 const U32_MAX: u64 = u32::MAX as u64;
 const U64_MAX: u64 = 9_000_000_000_000_000;
@@ -450,6 +451,37 @@ const LIMITS: &[FieldDef] = &[
     1,
     teamcraft_proto::MAX_CUSTOM_EMOJI_SIDE_PX_LIMIT as u64,
     PIXELS,
+  ),
+  ranged(
+    "max_poll_options",
+    1,
+    (
+      teamcraft_proto::MIN_POLL_OPTIONS as u64,
+      teamcraft_proto::MAX_RECEIVED_POLL_OPTIONS as u64,
+    ),
+    ENTRIES,
+    "settings-error-poll-options",
+  ),
+  ranged(
+    "max_poll_question_chars",
+    1,
+    (1, teamcraft_proto::MAX_RECEIVED_POLL_TEXT_CHARS as u64),
+    CHARACTERS,
+    "settings-error-poll-text",
+  ),
+  ranged(
+    "max_poll_option_chars",
+    1,
+    (1, teamcraft_proto::MAX_RECEIVED_POLL_TEXT_CHARS as u64),
+    CHARACTERS,
+    "settings-error-poll-text",
+  ),
+  ranged(
+    "max_poll_open_days",
+    1,
+    (1, teamcraft_proto::MAX_POLL_OPEN_DAYS_LIMIT as u64),
+    DAYS,
+    "settings-error-poll-days",
   ),
 ];
 const INTEGRATION: &[FieldDef] = &[

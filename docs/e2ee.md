@@ -4996,8 +4996,17 @@ messages show the same result whatever order they arrived in:
   single choice, a repeated option) is skipped and the earlier one stands; a replayed vote changes
   nothing, since only the newest per person counts and a duplicate client message ID is dropped
   (§4.4),
-- the first `poll_close` by the poll's sender closes it, and votes the server ordered after it don't
-  count, also on devices that read them before the close; a close by anybody else changes nothing,
+- the first `poll_close` by the poll's sender, or by a moderator or admin of the channel, closes
+  it, and votes the server ordered after it don't count, also on devices that read them before the
+  close; a close by anybody else changes nothing. "Moderator or admin" is judged by each device
+  from the channel's signed role log it verified (§4.6.1, `ChannelRoleState::moderators`), never
+  from the server's list of roles: a hostile server can't make somebody a moderator to end polls.
+  A channel whose roles nobody signed yet, or whose log this device can't verify, has no
+  moderators for this (the sender can still close). The role is the one the device holds when it
+  counts, not the one at the close's server time: the log keeps the current snapshot only, so
+  demoting a moderator also takes back their earlier closes, and promoting one makes their earlier
+  closes count. The apps offer "Close poll" only to the sender and such moderators, and a modified
+  client that sends a close anyway changes nothing anywhere,
 - with `closes_at`, a vote counts only when the server took it at or before that time: the time in
   the vote's server ID (a Snowflake), so the server's clock decides, never a device's. Every device
   counts the same votes whatever its own clock says. A device shows the poll closed once its own
@@ -5016,7 +5025,20 @@ hidden voters this is a promise of the clients' display: every member's device h
 
 Receivers also bound what they count: a poll with fewer than 2 or more than 32 options, or a
 question or option of more than 1000 characters, isn't taken as a poll (its text shows). Senders
-keep to tighter limits (`PollLimits`: 12 options, 300 and 100 characters).
+keep to tighter limits (`PollLimits`: 12 options, 300 and 100 characters, a closing time at most 365
+days ahead), which are instance settings (issue #2120): the admin console's "Limits" (`max_poll_options`,
+`max_poll_question_chars`, `max_poll_option_chars`, `max_poll_open_days`; file `[limits]`) cut to what receivers
+count (32 options, 1000 characters, 3650 days). The server hands them to the apps in `GET /api/v1/me`
+(`poll_limits`), which keep the last ones they read and use the defaults for an older server; a change
+reaches an app with its next sync, and a poll sent under the old limits still counts everywhere.
+
+**Who may send a poll.** The channel permission `create_poll` (admin.md, permission scheme) is
+granted to guests and members by default, as before it existed; admins can take it from guests
+or from members, and a channel can take it away from its members and guests like `create_post`. A server
+can't see what a message is, so it can't refuse the poll: the apps don't offer it (the attach menu, `/poll`, the
+phone sheets) where the server's `my_permissions` lacks it, and nothing more is enforced. A modified
+client of a member without it still sends a poll that others count; receivers ignoring such polls
+needs each receiver to know the sender's permissions, which only the server's word gives today.
 
 **What "hidden voters" means, and why it isn't anonymous.** With `voters: hidden` the poll shows
 only counts and the user's own choice; the core leaves the names out of what it hands the UI. That
@@ -5044,13 +5066,9 @@ set to notify on every message) reads like that of a new message. A device that 
 while on such a version keeps them as unknown after updating and doesn't count them; a device that
 loads the history anew does.
 
-**Not in this step** (issue #205): the Android and iOS screens (the core, the client API's
-`PollView` and the `post_poll`, `vote_in_poll` and `close_poll` actions are shared, so the apps only
-add their views), closing at a set time, results shown only after voting or after closing, closing
-by moderators, a `create_poll` permission and admin settings for the limits, a reminder before
-closing, and exporting the results as text. A server can't enforce a poll permission (it doesn't
-see what a message is); receivers would ignore polls of members without it, as for group mentions
-(§4.4).
+**Not done yet:** a reminder before closing, exporting the results as text, receivers ignoring polls
+of senders without `create_poll`, and keeping the role history so a moderator's close counts by the
+role at its server time.
 
 ### 4.13 Custom emoji (issue #207)
 

@@ -229,8 +229,10 @@ data class Poll(
   @SerialName("closes_at") val maybeClosesAt: Long? = null,
   @SerialName("voter_count") val voterCount: Int = 0,
   @SerialName("is_closed") val isClosed: Boolean = false,
-  /** The user made it, so may close it. */
+  /** The user made it. */
   @SerialName("is_mine") val isMine: Boolean = false,
+  /** The user may close it: they made it, or the channel's signed roles make them a moderator (#2120). */
+  @SerialName("can_close") val canClose: Boolean = false,
 ) {
   val isMultipleChoice: Boolean get() = choice == "multiple"
 
