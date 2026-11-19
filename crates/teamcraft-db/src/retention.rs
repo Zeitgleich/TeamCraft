@@ -265,29 +265,6 @@ impl Database {
   }
 }
 
-fn parse_partition_month(name: &str) -> Option<(i32, time::Month)> {
-  let rest = name.strip_prefix("messages_")?;
-  let (year, month) = rest.split_once('_')?;
-  let month = time::Month::try_from(month.parse::<u8>().ok()?).ok()?;
-  Some((year.parse().ok()?, month))
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn partition_names_are_parsed_strictly() {
-    assert_eq!(
-      parse_partition_month("messages_2026_11"),
-      Some((2026, time::Month::November))
-    );
-    assert_eq!(parse_partition_month("messages_2026_13"), None);
-    assert_eq!(parse_partition_month("messages_default"), None);
-    assert_eq!(parse_partition_month("mls_messages_2026_11"), None);
-  }
-}
-
 async fn delete_past_retention_in(
   tx: &mut Transaction<'_, Postgres>,
   conversation: ConversationId,
@@ -334,4 +311,27 @@ async fn delete_past_retention_in(
     attachment_keys,
     index_segment_keys,
   })
+}
+
+fn parse_partition_month(name: &str) -> Option<(i32, time::Month)> {
+  let rest = name.strip_prefix("messages_")?;
+  let (year, month) = rest.split_once('_')?;
+  let month = time::Month::try_from(month.parse::<u8>().ok()?).ok()?;
+  Some((year.parse().ok()?, month))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn partition_names_are_parsed_strictly() {
+    assert_eq!(
+      parse_partition_month("messages_2026_11"),
+      Some((2026, time::Month::November))
+    );
+    assert_eq!(parse_partition_month("messages_2026_13"), None);
+    assert_eq!(parse_partition_month("messages_default"), None);
+    assert_eq!(parse_partition_month("mls_messages_2026_11"), None);
+  }
 }
