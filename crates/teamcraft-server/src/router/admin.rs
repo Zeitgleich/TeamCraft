@@ -18,6 +18,7 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
       handlers::admin_clear_announcement_handler
     ))
     .routes(routes!(handlers::admin_list_audit_handler))
+    .routes(routes!(handlers::admin_export_audit_handler))
     .routes(routes!(handlers::create_org_background_upload_handler))
     .routes(routes!(handlers::delete_org_background_handler))
     .routes(routes!(handlers::complete_org_background_upload_handler))

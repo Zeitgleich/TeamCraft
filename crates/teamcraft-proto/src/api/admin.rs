@@ -262,6 +262,25 @@ pub struct ListAuditResponse {
   pub has_more: bool,
 }
 
+/// Body of `POST /api/v1/admin/audit/export`: what an admin is about to export from the audit log.
+/// The server writes it as an `audit_exported` entry; the rows themselves are read through
+/// `GET /api/v1/admin/audit` in pages.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct AuditExportRequest {
+  #[serde(rename = "actor", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_actor: Option<UserId>,
+  /// The console's action filter, as its stable name.
+  #[serde(rename = "action", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_action: Option<String>,
+  #[serde(rename = "since", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_since: Option<UnixMillis>,
+  #[serde(rename = "until", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_until: Option<UnixMillis>,
+  /// Whether a search text narrowed the export (the text itself is not recorded).
+  #[serde(default)]
+  pub has_search: bool,
+}
+
 wire_enum! {
   /// How far a push provider is usable.
   pub enum PushProviderState {

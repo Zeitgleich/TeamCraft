@@ -731,6 +731,40 @@ mod audit {
   }
 
   #[tokio::test]
+  async fn an_export_is_recorded_with_its_filters_and_only_for_admins() {
+    let app = app!();
+    let (alice, bob, carol) = (owner(), admin(), member("carol"));
+    let bob_id = user_id(&app, &bob).await;
+    user_id(&app, &carol).await;
+    let body = json!({"action": "space-created", "since": 1000, "has_search": true});
+    assert_eq!(
+      app.post(&carol, "/admin/audit/export", body.clone()).await.status,
+      StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+      app
+        .post(&alice, "/admin/audit/export", json!({"action": "x\ny"}))
+        .await
+        .status,
+      StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+      app.post(&bob, "/admin/audit/export", body).await.status,
+      StatusCode::NO_CONTENT
+    );
+    let log = app.get(&bob, "/admin/audit?action=audit_exported").await;
+    let entries = log.body["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["actor_user_id"], bob_id);
+    let detail: Value = serde_json::from_str(entries[0]["detail"].as_str().unwrap()).unwrap();
+    assert_eq!(
+      (&detail["action"], &detail["since"], &detail["has_search"]),
+      (&json!("space-created"), &json!(1000), &json!(true))
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
   async fn the_log_can_be_filtered_and_paged() {
     let app = app!();
     let (alice, bob) = (owner(), admin());

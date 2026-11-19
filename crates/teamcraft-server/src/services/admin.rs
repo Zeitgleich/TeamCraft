@@ -8,9 +8,9 @@ use teamcraft_db::{
 };
 use teamcraft_proto::{
   AdminConversationSummary, AdminDeviceResponse, AdminHealthResponse, AdminInstanceResponse,
-  AdminSpaceSummary, AdminUserStatus, AdminUserSummary, AuditEntryId, AuditEntryResponse, ConversationId,
-  ConversationKind, DeactivateUserRequest, DeactivationReason, DeactivationSource, DeviceId, GatewayEvent,
-  Id, ListAdminConversationsQuery, ListAdminConversationsResponse, ListAdminDevicesResponse,
+  AdminSpaceSummary, AdminUserStatus, AdminUserSummary, AuditEntryId, AuditEntryResponse, AuditExportRequest,
+  ConversationId, ConversationKind, DeactivateUserRequest, DeactivationReason, DeactivationSource, DeviceId,
+  GatewayEvent, Id, ListAdminConversationsQuery, ListAdminConversationsResponse, ListAdminDevicesResponse,
   ListAdminSpacesResponse, ListAdminUsersQuery, ListAdminUsersResponse, ListAuditQuery, ListAuditResponse,
   ListConversationMembersResponse, ListSpaceMembersResponse, MAX_ADMIN_IDS, Permission, PushProvider,
   PushProviderState, PushProviderStatus, RetentionPolicy, SfuStatus, SpaceId, StorageStatus, Target,
@@ -28,6 +28,9 @@ use crate::state::AppState;
 
 /// Users removed from all chats per sweep run; the rest follow in the next run.
 const REMOVAL_SWEEP_BATCH: i64 = 50;
+/// The longest action name an audit export may record.
+const MAX_AUDIT_ACTION_BYTES: usize = 64;
+
 /// The identity provider sync deactivating this many users within an hour looks like an outage or
 /// a misconfiguration, not people leaving: the automatic removal leaves them to an admin.
 const MASS_OIDC_DEACTIVATION: i64 = 10;
@@ -726,6 +729,30 @@ pub async fn list_audit(
 ) -> Result<ListAuditResponse, ApiError> {
   require(state, caller, Permission::ReadAuditLog, &Target::Instance)?;
   query_audit(state, query).await
+}
+
+/// Records that the caller exports the audit log (docs/data-export.md): the filters, never the
+/// rows or a search text. Written before the first page is read, so every export leaves a trace
+/// even if it is cut off.
+pub async fn record_audit_export(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  request: AuditExportRequest,
+) -> Result<(), ApiError> {
+  require(state, caller, Permission::ReadAuditLog, &Target::Instance)?;
+  if let Some(action) = &request.maybe_action
+    && (action.len() > MAX_AUDIT_ACTION_BYTES || action.chars().any(char::is_control))
+  {
+    return Err(ApiError::InvalidRequest("invalid action".into()));
+  }
+  let detail = json!({
+    "actor": request.maybe_actor.map(|actor| actor.to_string()),
+    "action": request.maybe_action,
+    "since": request.maybe_since,
+    "until": request.maybe_until,
+    "has_search": request.has_search,
+  });
+  audit::record(state, Some(caller.user.id), "audit_exported", None, &detail).await
 }
 
 /// What happened to the caller's own account: devices removed, deactivation, recoveries.

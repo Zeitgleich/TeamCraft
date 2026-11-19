@@ -11,7 +11,7 @@ can produce neither alone: content can only be exported by a client that holds t
 | Server-held personal data          | the user, through the API | Implemented: `GET /api/v1/me/personal-data`                |
 | Legal hold                         | owners, by signed policy  | Implemented on the server, desktop and web (§4.2)          |
 | Compliance export                  | admins, through a vault   | Designed (§4.1); needs the vault node (e2ee.md §11)        |
-| Audit log CSV                      | admins                    | Not implemented (#2137)                                    |
+| Audit log CSV                      | admins                    | Implemented in the admin console (§4.3)                    |
 
 ## 1. Personal export
 
@@ -285,14 +285,37 @@ is what protects against that. A member can still delete their own messages (a s
 e2ee.md §4.6); keeping those under a hold, holds on people (all their conversations) and on direct
 messages, and the banner on Android and iOS are later steps.
 
-### 4.3 What remains
+### 4.3 Audit log CSV
+
+Administration > Audit log > **Export** downloads the log as a CSV file (`audit-log-<date>.csv`;
+the desktop app saves it to the downloads folder). Admins and owners only (`ReadAuditLog`).
+
+- **What is in it.** What the view shows, from the whole log and not only the loaded page: the actor
+  and the period are applied by the server, the action and the search text by the console on each
+  page. The search text matches the raw entry (action name, target, detail), not the names the
+  table resolves. Columns: `time` (UTC, ISO 8601), `actor_user_id`, `actor` (display name, empty
+  if unknown), `action` (the server's action name), `target_kind`, `target_id`, `detail` (JSON
+  text). Metadata only, like the log.
+- **Paged, not loaded.** The console reads `GET /api/v1/admin/audit` newest first, one page at a
+  time (`before` is the cursor), and writes each page into pieces of a `Blob` that the browser
+  holds; nothing holds the whole log in memory. A server page that claims more but doesn't advance
+  stops the export with an error.
+- **Spreadsheets.** Cells are quoted per RFC 4180. A cell that starts with `=`, `+`, `-`, `@`, a tab
+  or a return gets a leading `'`, so a hostile detail text or name is shown, not run as a formula.
+  The file starts with a UTF-8 byte order mark so spreadsheets read umlauts.
+- **Audit.** Before the first page is read the console calls `POST /api/v1/admin/audit/export`,
+  which writes an `audit_exported` entry with the actor and the filters (action name, period,
+  whether a search text was used; the text itself is not recorded). A failed record stops the export.
+- **Failure.** The button is a `PendingAction`: disabled while it runs, a failure (network, refusal)
+  is an error toast and no file is offered.
+
+### 4.4 What remains
 
 | What                                                          | Issue |
 |---------------------------------------------------------------|-------|
 | Vault node, archive mode and approved export requests (§4.1)  | #2134 |
 | Legal hold on people and DMs, keeping signed deletions        | #2135 |
 | Legal hold banner on Android and iOS                          | #2136 |
-| Audit log CSV export                                          | #2137 |
 
 ## 5. Manual test steps
 
@@ -326,3 +349,11 @@ Legal hold (an owner's account on desktop or web, a member's account in a second
 - [ ] The member opens the channel: the banner names the reference. Release the hold: the banner goes.
 - [ ] With the hold in place, deleting the channel or its space is refused with "under legal hold".
 - [ ] Administration > Audit log lists "Legal hold placed" and "Legal hold released" with the owner.
+
+Audit log CSV (an admin's account on desktop or web):
+
+- [ ] Administration > Audit log > Export: a file `audit-log-<date>.csv` is saved; the button is busy
+      meanwhile. Opening it in a spreadsheet shows umlauts correctly.
+- [ ] With an actor and a period picked, the file holds only those rows; the log then lists "Audit log
+      exported".
+- [ ] Offline: Export shows an error toast and offers no file.

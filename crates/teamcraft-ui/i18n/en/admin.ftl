@@ -1286,6 +1286,7 @@ audit-inactivity-snoozed = Channel kept open
 audit-inactivity-limited = Inactivity run stopped at its limit
 audit-legal-hold-placed = Legal hold placed
 audit-legal-hold-released = Legal hold released
+audit-audit-exported = Audit log exported
 legal-hold-title = Legal hold
 legal-hold-intro = A held channel keeps everything: retention doesn't delete its messages and files, and nobody can delete the channel or its space until the hold is released. Every member sees that the channel is held, with its reference. Only owners place and release holds; their app signs the change.
 legal-hold-none = No channel is under legal hold.
