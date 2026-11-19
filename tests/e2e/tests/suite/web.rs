@@ -95,6 +95,29 @@ async fn the_web_client_offers_the_v1_chat_features() {
       wait_for_text(&page, "Reminder set").await;
       shot(&page, "v1-slash-commands").await;
 
+      // #2145: a typing shortcut runs `execCommand` from the `input` handler; the `input` event it
+      // fires must not enter that handler's closure again (it threw "closure invoked recursively").
+      page
+        .evaluate(
+          "window.__editorErrors = []; \
+           window.addEventListener('error', e => window.__editorErrors.push(String(e.message)));",
+        )
+        .await
+        .unwrap();
+      composer.type_str("- first").await.unwrap();
+      wait_for_element(&page, "[data-composer] ul li").await;
+      assert_eq!(
+        page
+          .evaluate("JSON.stringify(window.__editorErrors)")
+          .await
+          .unwrap()
+          .into_value::<String>()
+          .unwrap(),
+        "[]",
+        "the typing shortcut raised an error"
+      );
+      assert_eq!(composer_text(&page).await, "first");
+
       // Bookmarks: add a link through the editor.
       click_text(&page, "Edit bookmarks").await;
       wait_for_element(&page, ".bookmark-edit-list").await;
