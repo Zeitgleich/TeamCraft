@@ -295,7 +295,12 @@ mod notices_and_extending {
       let later = OffsetDateTime::from_unix_timestamp(expires_at / 1000).unwrap() + Duration::days(30);
       let database = &app.state.database;
 
-      database.remove_space_member(space_id, user, false).await.unwrap();
+      database
+        .remove_space_member(space_id, user, false, |_| {
+          Ok::<_, teamcraft_db::DbError>(Vec::new())
+        })
+        .await
+        .unwrap();
       assert!(!database.extend_guest_expiry(space_id, user, later).await.unwrap());
       assert_eq!(
         database.space_role(space_id, user).await.unwrap(),
@@ -469,7 +474,12 @@ mod notices_and_extending {
 
     let (space_id, user) = (space.parse().unwrap(), carol_id.parse().unwrap());
     let database = &app.state.database;
-    database.remove_space_member(space_id, user, false).await.unwrap();
+    database
+      .remove_space_member(space_id, user, false, |_| {
+        Ok::<_, teamcraft_db::DbError>(Vec::new())
+      })
+      .await
+      .unwrap();
     let role = teamcraft_proto::SpaceRole::Guest;
     let keep = teamcraft_db::ExpiryChange::Keep;
     assert!(

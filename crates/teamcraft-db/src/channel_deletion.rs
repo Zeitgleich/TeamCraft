@@ -131,13 +131,14 @@ impl Database {
   }
 
   /// Removes `user` as `decide` says, under the conversation's lock. A deletion also marks the
-  /// channel and writes `audit` in the same transaction.
+  /// channel and writes `audit` in the same transaction. `decide` also gets the newest signed
+  /// policy's payload, read under that lock, for its legal holds (issue #2143).
   pub async fn remove_member_locked<E: From<DbError>>(
     &self,
     conversation: ConversationId,
     user: UserId,
     audit: &NewAuditEntry<'_>,
-    decide: impl FnOnce(&ChannelFacts) -> Result<RemovalStep, E>,
+    decide: impl FnOnce(&ChannelFacts, Option<&[u8]>) -> Result<RemovalStep, E>,
   ) -> Result<RemovalDone, E> {
     let mut tx = self.pool().begin().await.map_err(DbError::from)?;
     let Some(facts) = lock_facts(&mut tx, conversation, true).await? else {
@@ -147,7 +148,8 @@ impl Database {
         members: Vec::new(),
       });
     };
-    let step = decide(&facts)?;
+    let maybe_policy = Self::latest_policy_payload_in(&mut tx).await?;
+    let step = decide(&facts, maybe_policy.as_deref())?;
     let members: Vec<UserId> = facts.members.iter().map(|(member, _)| *member).collect();
     let was_importer = step == RemovalStep::Remove && facts.maybe_importer == Some(user);
     match step {
@@ -184,14 +186,14 @@ impl Database {
   }
 
   /// Marks a channel deleted if `decide` allows it, given the facts and the group's epoch (both held
-  /// still by locks), with one audit row and the signature it came with, if any. `None` when it is
-  /// gone.
+  /// still by locks) and the newest signed policy's payload read under those locks (its legal holds,
+  /// issue #2143), with one audit row and the signature it came with, if any. `None` when it is gone.
   pub async fn delete_channel_locked<E: From<DbError>>(
     &self,
     conversation: ConversationId,
     audit: &NewAuditEntry<'_>,
     maybe_signature: Option<&DeletionSignature>,
-    decide: impl FnOnce(&ChannelFacts, u64) -> Result<(), E>,
+    decide: impl FnOnce(&ChannelFacts, u64, Option<&[u8]>) -> Result<(), E>,
   ) -> Result<Option<Vec<UserId>>, E> {
     let mut tx = self.pool().begin().await.map_err(DbError::from)?;
     // The epoch first, in the order of a commit: it holds this row and then needs a share lock on the
@@ -200,7 +202,8 @@ impl Database {
     let Some(facts) = lock_facts(&mut tx, conversation, true).await? else {
       return Ok(None);
     };
-    decide(&facts, epoch)?;
+    let maybe_policy = Self::latest_policy_payload_in(&mut tx).await?;
+    decide(&facts, epoch, maybe_policy.as_deref())?;
     let members: Vec<UserId> = facts.members.iter().map(|(member, _)| *member).collect();
     mark_deleted(&mut tx, conversation, &members, maybe_signature).await?;
     Self::record_audit_in(&mut tx, audit).await?;
@@ -209,14 +212,15 @@ impl Database {
   }
 
   /// Marks a space and all of its conversations deleted if `decide` allows it, given their facts and
-  /// their groups' epochs (held still by locks), with one audit row and the signature it came with,
+  /// their groups' epochs (held still by locks) and the newest signed policy's payload read under
+  /// those locks (its legal holds, issue #2143), with one audit row and the signature it came with,
   /// if any. `None` when it is gone.
   pub async fn delete_space_locked<E: From<DbError>>(
     &self,
     space: SpaceId,
     audit: &NewAuditEntry<'_>,
     maybe_signature: Option<&SpaceDeletionSignature>,
-    decide: impl FnOnce(&[SpaceChannelFacts]) -> Result<(), E>,
+    decide: impl FnOnce(&[SpaceChannelFacts], Option<&[u8]>) -> Result<(), E>,
   ) -> Result<Option<SpaceDeletion>, E> {
     let mut tx = self.pool().begin().await.map_err(DbError::from)?;
     let is_there = sqlx::query_scalar!(
@@ -265,7 +269,8 @@ impl Database {
       });
       deletion.channels.push((from_db(row.id)?, members));
     }
-    decide(&facts)?;
+    let maybe_policy = Self::latest_policy_payload_in(&mut tx).await?;
+    decide(&facts, maybe_policy.as_deref())?;
     if let Some(signed) = maybe_signature {
       sqlx::query!(
         r#"INSERT INTO space_deletion_signatures (space_id, payload, signature)
@@ -676,15 +681,19 @@ async fn mark_deleted(
 pub(crate) async fn mark_memberless_private_deleted(
   tx: &mut Transaction<'_, Postgres>,
   left: &[i64],
+  kept: &[ConversationId],
   user: UserId,
 ) -> Result<Vec<i64>, DbError> {
+  let kept = to_db_all(kept);
   let deleted = sqlx::query_scalar!(
     r#"UPDATE conversations c SET deleted_at = now()
        WHERE c.id = ANY($1) AND c.kind = 'channel' AND c.visibility = 'private'
          AND c.imported_through_message_id IS NULL AND c.importer_user_id IS NULL
+         AND NOT c.id = ANY($2)
          AND NOT EXISTS (SELECT 1 FROM memberships m WHERE m.conversation_id = c.id)
        RETURNING c.id"#,
     left,
+    &kept,
   )
   .fetch_all(&mut **tx)
   .await?;

@@ -349,14 +349,15 @@ pub async fn delete_space(
   let audit = audit::prepared(state, caller.user.id, "space_deleted", &audit_target)?;
   let sees_all = is_instance_admin(caller);
   let maybe_signature = maybe_checked.as_ref().map(|(_, signature)| signature);
-  let held = super::legal_hold::held_conversations(state).await?;
   let maybe_deletion = state
     .database
-    .delete_space_locked(id, &audit, maybe_signature, |channels| {
+    .delete_space_locked(id, &audit, maybe_signature, |channels, maybe_policy| {
       if channels.iter().any(|channel| channel.maybe_importer.is_some()) {
         return Err(ApiError::ImportInProgress);
       }
-      // data-export.md §4.2: a space with a held channel stays.
+      // data-export.md §4.2: a space with a held channel stays, by the policy read under the
+      // lock (#2143).
+      let held = super::legal_hold::held_in(maybe_policy)?;
       if channels
         .iter()
         .any(|channel| held.contains(&channel.conversation))
@@ -694,7 +695,11 @@ pub async fn remove_everywhere(
   let remaining_before = state.database.list_space_members(id).await?;
   let left = state
     .database
-    .remove_space_member(id, user_id, deletes_memberless)
+    .remove_space_member(id, user_id, deletes_memberless, |maybe_policy| {
+      // data-export.md §4.2: a held channel stays, without members, by the policy read under the
+      // channels' locks (#2143).
+      super::legal_hold::held_in(maybe_policy)
+    })
     .await?;
   announce_left(state, id, user_id, &remaining_before, &left).await?;
   Ok(left)

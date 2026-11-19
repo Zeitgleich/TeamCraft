@@ -754,28 +754,32 @@ pub async fn delete_channel(
     return Err(ApiError::NotAChannel);
   }
   require(state, caller, Permission::DeleteChannel, &access.target())?;
-  let held = super::legal_hold::held_conversations(state).await?;
   let audit_target = AuditTarget::new("conversation", id);
   let audit = audit::prepared(state, caller.user.id, "channel_deleted", &audit_target)?;
   let maybe_members = state
     .database
-    .delete_channel_locked(id, &audit, maybe_signature.as_ref(), |facts, epoch| {
-      // docs/import-synology.md: an import running into it would lose its place.
-      if facts.maybe_importer.is_some() {
-        return Err(ApiError::ImportInProgress);
-      }
-      // data-export.md §4.2: a held channel stays.
-      if held.contains(&id) {
-        return Err(ApiError::LegalHold);
-      }
-      if maybe_signature
-        .as_ref()
-        .is_some_and(|signature| signature.epoch != epoch)
-      {
-        return Err(ApiError::EpochConflict { current_epoch: epoch });
-      }
-      Ok(())
-    })
+    .delete_channel_locked(
+      id,
+      &audit,
+      maybe_signature.as_ref(),
+      |facts, epoch, maybe_policy| {
+        // docs/import-synology.md: an import running into it would lose its place.
+        if facts.maybe_importer.is_some() {
+          return Err(ApiError::ImportInProgress);
+        }
+        // data-export.md §4.2: a held channel stays, by the policy read under the lock (#2143).
+        if super::legal_hold::is_held_in(maybe_policy, id)? {
+          return Err(ApiError::LegalHold);
+        }
+        if maybe_signature
+          .as_ref()
+          .is_some_and(|signature| signature.epoch != epoch)
+        {
+          return Err(ApiError::EpochConflict { current_epoch: epoch });
+        }
+        Ok(())
+      },
+    )
     .await?;
   let Some(members) = maybe_members else {
     return Err(ApiError::conversation_not_found());

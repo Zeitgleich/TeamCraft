@@ -789,6 +789,236 @@ mod health_alerts {
   }
 }
 
+/// A legal hold signed at the same moment as a deletion of its channel (issue #2143): the two are
+/// interleaved by their row locks, never by timing, and exactly one of them wins.
+mod legal_hold_race {
+  use std::time::Duration;
+
+  use teamcraft_db::{AppendOutcome, Database, DbError, NewAuditEntry};
+  use teamcraft_proto::WorkspaceLogKind;
+
+  use super::*;
+
+  const HOLD_POLICY: &[u8] = b"a policy that holds the channel";
+  const LOCK_WAIT_LIMIT: Duration = Duration::from_secs(30);
+
+  /// The deletion has the channel locked and has read the policy (no hold yet) when the hold is
+  /// appended: the append waits for the deletion, then finds the channel deleted and stores nothing.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+  async fn a_hold_appended_while_a_deletion_runs_is_refused_for_the_deleted_channel() {
+    let Some(test_db) = TestDatabase::create().await else {
+      return;
+    };
+    let fixture = Fixture::create(&test_db.db).await;
+    let (in_decide, is_in_decide) = tokio::sync::oneshot::channel();
+    let (go_on, may_go_on) = std::sync::mpsc::channel::<()>();
+
+    let deletion = tokio::spawn({
+      let db = test_db.db.clone();
+      let channel = fixture.channel;
+      let audit_id = fixture.ids.next_snowflake().unwrap();
+      async move {
+        db.delete_channel_locked(channel, &audit(audit_id), None, move |_, _, maybe_policy| {
+          assert_eq!(maybe_policy, None);
+          in_decide.send(()).unwrap();
+          // Holds the transaction open, with the channel locked, until the append waits for it.
+          // Blocking is fine: this worker runs nothing else meanwhile.
+          may_go_on.recv().unwrap();
+          Ok::<_, DbError>(())
+        })
+        .await
+      }
+    });
+    is_in_decide.await.unwrap();
+    let append = tokio::spawn(append_hold(test_db.db.clone(), fixture.clone()));
+    wait_for_lock_waiters(&test_db.pool, 1).await;
+    go_on.send(()).unwrap();
+
+    assert!(deletion.await.unwrap().unwrap().is_some());
+    assert_eq!(append.await.unwrap(), AppendOutcome::NotExistingChannels);
+    assert_eq!(
+      test_db
+        .db
+        .workspace_log_version(&WorkspaceLogKind::Policy)
+        .await
+        .unwrap(),
+      0
+    );
+    test_db.drop_database().await;
+  }
+
+  /// The append has the channel share-locked when the deletion starts: the deletion waits for the
+  /// append's commit and then reads the policy that holds the channel.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+  async fn a_deletion_started_while_a_hold_is_appended_reads_the_hold() {
+    let Some(test_db) = TestDatabase::create().await else {
+      return;
+    };
+    let fixture = Fixture::create(&test_db.db).await;
+    // Another append of the same version, not yet committed: the real append locks the channel,
+    // then waits on the log's primary key until this one rolls back.
+    let mut rival = test_db.pool.begin().await.unwrap();
+    sqlx::query(
+      "INSERT INTO workspace_log (kind, version, payload, signature) VALUES ('policy', 1, 'x', 'y')",
+    )
+    .execute(&mut *rival)
+    .await
+    .unwrap();
+    let append = tokio::spawn(append_hold(test_db.db.clone(), fixture.clone()));
+    wait_for_lock_waiters(&test_db.pool, 1).await;
+
+    let deletion = tokio::spawn({
+      let db = test_db.db.clone();
+      let channel = fixture.channel;
+      let audit_id = fixture.ids.next_snowflake().unwrap();
+      async move {
+        db.delete_channel_locked(
+          channel,
+          &audit(audit_id),
+          None,
+          |_, _, maybe_policy| match maybe_policy {
+            Some(payload) => Err(Refusal::Held(payload.to_vec())),
+            None => Ok(()),
+          },
+        )
+        .await
+      }
+    });
+    wait_for_lock_waiters(&test_db.pool, 2).await;
+    rival.rollback().await.unwrap();
+
+    assert_eq!(append.await.unwrap(), AppendOutcome::Appended);
+    match deletion.await.unwrap() {
+      Err(Refusal::Held(payload)) => assert_eq!(payload, HOLD_POLICY),
+      other => panic!("the deletion should have read the hold, got {other:?}"),
+    }
+    assert!(test_db.db.channel_facts(fixture.channel).await.unwrap().is_some());
+    test_db.drop_database().await;
+  }
+
+  #[derive(Debug)]
+  enum Refusal {
+    Held(Vec<u8>),
+    Db(#[allow(dead_code)] DbError),
+  }
+
+  impl From<DbError> for Refusal {
+    fn from(error: DbError) -> Self {
+      Self::Db(error)
+    }
+  }
+
+  #[derive(Clone)]
+  struct Fixture {
+    ids: std::sync::Arc<SnowflakeGenerator>,
+    channel: ConversationId,
+    signer: DeviceId,
+  }
+
+  impl Fixture {
+    async fn create(db: &Database) -> Self {
+      let ids = std::sync::Arc::new(SnowflakeGenerator::new(1).unwrap());
+      let alice = db
+        .upsert_oidc_user(&identity("a", "Alice"), ids.next_id().unwrap())
+        .await
+        .unwrap();
+      let signer = db
+        .register_device(&NewDevice {
+          id: ids.next_id().unwrap(),
+          user_id: alice.id,
+          name: "laptop",
+          public_key: &[1; 32],
+          cross_signature: &[2; 64],
+        })
+        .await
+        .unwrap()
+        .id;
+      let space: SpaceId = ids.next_id().unwrap();
+      db.create_space(&NewSpace {
+        id: space,
+        name: "S",
+        maybe_icon: None,
+        maybe_color: None,
+        maybe_description: None,
+        join_policy: JoinPolicy::Open,
+        creator: alice.id,
+        maybe_idempotency_key: None,
+      })
+      .await
+      .unwrap();
+      let channel: ConversationId = ids.next_id().unwrap();
+      db.create_channel(
+        &NewConversation {
+          id: channel,
+          maybe_space: Some(space),
+          kind: ConversationKind::Channel,
+          maybe_name: Some("general"),
+          maybe_topic: None,
+          maybe_description: None,
+          visibility: ConversationVisibility::Public,
+          history_policy: HistoryPolicy::FromJoin,
+          maybe_category: None,
+          maybe_participants_key: None,
+          is_integration: false,
+        },
+        alice.id,
+        RoleLogFounding::Open,
+        None,
+      )
+      .await
+      .unwrap();
+      Self { ids, channel, signer }
+    }
+  }
+
+  async fn append_hold(db: Database, fixture: Fixture) -> AppendOutcome {
+    db.append_workspace_log(
+      &WorkspaceLogKind::Policy,
+      0,
+      HOLD_POLICY,
+      b"signature",
+      fixture.signer,
+      &[fixture.channel],
+      &[],
+    )
+    .await
+    .unwrap()
+  }
+
+  fn audit(id: teamcraft_proto::Snowflake) -> NewAuditEntry<'static> {
+    NewAuditEntry {
+      id,
+      maybe_actor: None,
+      action: "channel_deleted",
+      maybe_target_kind: None,
+      maybe_target_id: None,
+      detail: "{}",
+    }
+  }
+
+  /// Waits until `count` sessions of this test's database wait for a lock: the interleaving the
+  /// test sets up, observed rather than timed.
+  async fn wait_for_lock_waiters(pool: &teamcraft_db::testing::PgPool, count: i64) {
+    let waiting = async {
+      loop {
+        let waiters: i64 = sqlx::query_scalar(
+          "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if waiters >= count {
+          return;
+        }
+        tokio::task::yield_now().await;
+      }
+    };
+    tokio::time::timeout(LOCK_WAIT_LIMIT, waiting)
+      .await
+      .expect("the other transaction never waited for the lock");
+  }
+}
+
 fn identity<'a>(subject: &'a str, display_name: &'a str) -> OidcIdentity<'a> {
   OidcIdentity {
     issuer: ISSUER,

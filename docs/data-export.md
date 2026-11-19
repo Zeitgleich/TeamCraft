@@ -265,7 +265,13 @@ is refused. The server and the owners' apps refuse other values.
 - Retention skips the conversation: no message, attachment or search index segment of it is deleted.
 - The inactivity policy may archive it but doesn't delete it.
 - Deleting the channel, deleting its space, and the last member's leave that would delete a private
-  channel are refused with `legal_hold`; the apps say why.
+  channel are refused with `legal_hold`; the apps say why. Leaving a whole space with
+  `delete_if_last` goes through, but a held private channel it would delete stays, without members.
+- A hold and a deletion at the same moment can't both win (#2143). Appending a policy that places a
+  hold share-locks the held channels' rows and checks they still exist, in the transaction that
+  stores the entry; every deletion locks the rows it deletes and only then reads the newest policy,
+  in its own transaction. Whichever comes second sees the other: the hold is refused for the deleted
+  channel, or the deletion is refused with `legal_hold`.
 - Releasing the hold returns it to the normal rules; the next retention run catches up.
 
 **Who is told.** Every member of a held conversation sees a banner "This conversation is under legal
