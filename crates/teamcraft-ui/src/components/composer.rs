@@ -1401,21 +1401,34 @@ pub fn Composer(
     };
     // Another text is another message, also if the same words come back later.
     schedule_attempt.set_value(None);
+    let editor_element = element.clone();
+    let settle = move || {
+      is_empty.set(composer_editor::is_blank(&element));
+      if notice.with_untracked(|shown| matches!(shown, Some(Notice::Help))) {
+        close_notice(NoticeEvent::Edited(&composer_editor::markdown(&element)));
+      }
+      announce_typing();
+      save_draft();
+      refresh_suggestions();
+      refresh_formats();
+    };
     // Typed Markdown formats as it's typed; pastes and autocorrect insert text as it is.
     if let Some(input) = ev.dyn_ref::<web_sys::InputEvent>()
       && input.input_type() == "insertText"
       && let Some(typed) = input.data().and_then(|data| data.chars().last())
     {
-      composer_editor::apply_typing_shortcut(&element, typed.encode_utf8(&mut [0; 4]));
+      // The shortcut runs `execCommand`, which fires `input` synchronously: inside this handler that
+      // would enter its own closure again ("closure invoked recursively", #2145). A microtask runs
+      // right after the handler returned and before any other event, so no keystroke comes between
+      // the typed character and its shortcut, and the nested events reach this handler normally.
+      leptos::task::spawn_local(async move {
+        let mut buffer = [0; 4];
+        composer_editor::apply_typing_shortcut(&editor_element, typed.encode_utf8(&mut buffer));
+        settle();
+      });
+      return;
     }
-    is_empty.set(composer_editor::is_blank(&element));
-    if notice.with_untracked(|shown| matches!(shown, Some(Notice::Help))) {
-      close_notice(NoticeEvent::Edited(&composer_editor::markdown(&element)));
-    }
-    announce_typing();
-    save_draft();
-    refresh_suggestions();
-    refresh_formats();
+    settle();
   };
 
   // Reads small files into memory; large ones stay `File`s until the send (`large_files`).
