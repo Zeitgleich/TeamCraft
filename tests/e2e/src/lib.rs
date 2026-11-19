@@ -12,6 +12,7 @@ pub mod bridge;
 pub mod browser;
 pub mod call;
 pub mod demo;
+pub mod demo_peers;
 #[cfg(feature = "desktop")]
 pub mod desktop;
 #[cfg(feature = "browser")]

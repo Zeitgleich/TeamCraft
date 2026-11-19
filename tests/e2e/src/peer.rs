@@ -220,7 +220,7 @@ impl<S: LocalStore + Clone> Peer<S> {
 }
 
 /// Lets several peers exchange what is in flight: pumps each of them for `duration`.
-pub async fn settle(peers: &mut [&mut Peer], duration: Duration) {
+pub async fn settle<S: LocalStore + Clone>(peers: &mut [&mut Peer<S>], duration: Duration) {
   let deadline = Instant::now() + duration;
   while Instant::now() < deadline {
     for peer in peers.iter_mut() {

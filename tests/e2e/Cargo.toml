@@ -43,6 +43,11 @@ desktop = ["browser", "dep:zbus"]
 name = "demo-seed"
 required-features = ["e2e"]
 
+# Keeps the demo's seed devices online, so they let reviewers' new devices in (docs/operations.md).
+[[bin]]
+name = "demo-peers"
+required-features = ["e2e"]
+
 [dependencies]
 teamcraft-client-api = { path = "../../crates/teamcraft-client-api", optional = true }
 # `sealed-sqlite`: the mobile apps' store, so the network tests run on both stores.
@@ -56,7 +61,7 @@ rand_core = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true, features = ["query"] }
 serde_json = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "process", "io-util", "fs", "net", "time", "macros", "sync"] }
+tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "process", "io-util", "fs", "net", "time", "macros", "sync", "signal"] }
 # Headless Chromium over the DevTools protocol: no driver binary, no Node, Rust like the rest of the tests.
 chromiumoxide = { version = "0.9", optional = true, default-features = false }
 # The SFU's certificate (crate::call::SfuIdentity): browsers accept it by SHA-256, native calls by

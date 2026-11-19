@@ -9,6 +9,9 @@ use std::time::{Duration, Instant};
 
 use teamcraft_core::api::{AccessTokenSource, ApiError};
 
+/// Where `dev/dev-token.py` is when the binary runs outside the checkout it was built in (the demo
+/// instance's `demo-peers`, docs/operations.md); default: the checkout's.
+pub const TOKEN_SCRIPT_VAR: &str = "DEV_TOKEN_SCRIPT";
 /// Dev tokens live five minutes; fetch a new one well before.
 const REFRESH_AFTER: Duration = Duration::from_secs(150);
 
@@ -84,7 +87,9 @@ fn fresh(cached: Option<&(String, Instant)>) -> Option<String> {
 }
 
 fn fetch(user: &str) -> Result<String, String> {
-  let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../dev/dev-token.py");
+  let script = std::env::var_os(TOKEN_SCRIPT_VAR)
+    .map(PathBuf::from)
+    .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../dev/dev-token.py"));
   let output = Command::new("python3")
     .arg(script)
     .arg(user)

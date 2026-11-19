@@ -9,9 +9,12 @@
 //! ```sh
 //! E2E_DEPLOYED_URL=https://demo.example.com DEV_TOKEN_ISSUER=https://demo.example.com/dex \
 //!   DEV_TOKEN_PASSWORD=... DEV_TOKEN_SCOPES="openid profile email groups" \
-//!   DEMO_RECOVERY_PASSPHRASE=... \
+//!   DEMO_RECOVERY_PASSPHRASE=... DEMO_PEER_STORES=/var/lib/teamcraft-demo/peers \
 //!   cargo run -p teamcraft-e2e --features e2e --bin demo-seed
 //! ```
+//!
+//! The seed devices' stores go to `DEMO_PEER_STORES` (an empty directory), one per user: `demo-peers`
+//! runs the devices from there, so they let the reviewers' new devices in.
 //!
 //! Everything here is placeholder content: no real people, companies or hosts. The seed itself is
 //! `teamcraft_e2e::demo` (tests/e2e/src/demo.rs), which the `demo_signin` scenario also plays on a
@@ -20,6 +23,8 @@
 // A one-shot operator tool built on the test harness: it reports on stderr and stops at the first
 // failure, as the harness does.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::print_stderr)]
+
+use std::path::PathBuf;
 
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_e2e::Stack;
@@ -32,6 +37,8 @@ const PASSPHRASE_VAR: &str = "DEMO_RECOVERY_PASSPHRASE";
 /// the logins of the identity provider (Dex signs in with the e-mail address).
 const LOGIN_SUFFIX_VAR: &str = "DEMO_LOGIN_SUFFIX";
 const DEFAULT_LOGIN_SUFFIX: &str = "@example.com";
+/// Where the seed devices' stores go: what `demo-peers` runs and the snapshot copies.
+const STORES_VAR: &str = "DEMO_PEER_STORES";
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() {
@@ -42,6 +49,10 @@ async fn main() {
     eprintln!("{PASSPHRASE_VAR} is not set");
     std::process::exit(2);
   };
+  let Ok(stores) = std::env::var(STORES_VAR).map(PathBuf::from) else {
+    eprintln!("{STORES_VAR} is not set");
+    std::process::exit(2);
+  };
   let suffix = std::env::var(LOGIN_SUFFIX_VAR).unwrap_or_else(|_| DEFAULT_LOGIN_SUFFIX.to_owned());
   // The apps' own key stretching: the reviewers' phones open the backup with it.
   seed(
@@ -49,7 +60,8 @@ async fn main() {
     &Cast::demo(&suffix),
     &passphrase,
     Argon2Settings::default(),
+    &stores,
   )
   .await;
-  eprintln!("demo seed done: take the snapshot now (dev/demo/demo-reset.sh snapshot)");
+  eprintln!("demo seed done: take the snapshot now (dev/demo/demo-reset.sh snapshot), then start demo-peers");
 }

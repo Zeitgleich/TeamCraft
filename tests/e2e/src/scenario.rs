@@ -1,5 +1,6 @@
 //! Setup shared by the scenarios: a space with members, a channel with an encrypted group.
 
+use teamcraft_core::store::LocalStore;
 use teamcraft_proto::{ConversationId, SpaceId};
 
 use crate::peer::Peer;
@@ -7,7 +8,12 @@ use crate::stack::Stack;
 
 /// A space created through REST by `owner`, with `members` added under the given roles
 /// (`admin`, `member`, `guest`). Returns the space ID.
-pub async fn space_with(stack: &Stack, owner: &Peer, name: &str, members: &[(&Peer, &str)]) -> SpaceId {
+pub async fn space_with<S: LocalStore + Clone>(
+  stack: &Stack,
+  owner: &Peer<S>,
+  name: &str,
+  members: &[(&Peer<S>, &str)],
+) -> SpaceId {
   let space = stack.create_space(&owner.tokens, name, "invite_only").await;
   for (member, role) in members {
     stack
@@ -19,11 +25,11 @@ pub async fn space_with(stack: &Stack, owner: &Peer, name: &str, members: &[(&Pe
 
 /// A channel in `space` created by `owner`; every member is added to its MLS group and has joined
 /// (received the welcome) when this returns.
-pub async fn channel_with(
-  owner: &mut Peer,
+pub async fn channel_with<S: LocalStore + Clone>(
+  owner: &mut Peer<S>,
   space: SpaceId,
   name: &str,
-  members: &mut [&mut Peer],
+  members: &mut [&mut Peer<S>],
 ) -> ConversationId {
   let channel = owner
     .client
