@@ -410,8 +410,19 @@ the job that held the thread meanwhile, grouped by it, with the tags `blocker`, 
 `cpu_ms` and `queue_depth`, sampled like handled errors; at most one per job a minute and 20 per
 process (the blocked report is limited per blocker). It shows slow jobs that no measure was open for (a background sync holding the read thread).
 `cpu_ms` is the CPU time the job's thread used while it ran (Android; #1634): far below `run_ms`,
-the job waited (a lock, or the process frozen in the background, which counts on the wall clock),
-about `run_ms`, it worked. The app's queries all run as the job `query`; each is also kept as a step
+the job waited (a lock), about `run_ms`, it worked.
+
+**Frozen is not slow (#2146).** The OS freezes a backgrounded app (Doze, the cached-app freezer, iOS
+suspension) in the middle of a job, and the wall time then counts minutes of nothing (an Android
+job with `run_ms=298101 cpu_ms=2`). A job's wait or run is *frozen*, and neither reported as slow
+nor as blocked, nor does it count as the blocker of the jobs behind it, when the app was in the
+background at some time during it (the lifecycle the apps already pass in `report_activity`), or the
+wall clock ran at least a second ahead of the monotonic clock over it (the device slept), *and* the
+thread used under a tenth of the period as CPU time. Where the system tells no CPU time (iOS, macOS,
+Windows) the suspension alone decides, so a slow job that overlapped the background is not reported
+there. A lock wait in the foreground is no suspension and is reported as before, its low `cpu_ms`
+saying that it waited. The query reports (`query_<kind>`) only know the app is in the background
+when the query ends. The app's queries all run as the job `query`; each is also kept as a step
 named after its kind (`query_feed_extras`), and reported as `Slow core job: query_<kind>` when slow.
 
 **Named steps inside the core (all platforms).** `teamcraft_core::timing::step("name")` (a span of
