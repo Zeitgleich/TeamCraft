@@ -106,7 +106,7 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 socket2 = "0.6"
 
 # Auth and configuration
-jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "12", features = ["aws_lc_rs"] }
 figment = { version = "0.10", features = ["toml", "env"] }
 
 # davey 0.2.0 ported to openmls 0.9, so chat and calls share one MLS stack (ARCHITECTURE.md §6.2)
