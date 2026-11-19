@@ -604,9 +604,9 @@ jobs:
           gh workflow run packages.yml --ref "$DEFAULT_BRANCH"
 
   # Nightly releases (`publish`): publishes the release when it is built. Publishing with the
-  # workflow's token starts no `release: published` workflows, so the package site and Google Play
-  # are started here. An Android build that failed doesn't hold the release back (#696): the files
-  # are attached later, and `android-release` then starts both again.
+  # workflow's token starts no `release: published` workflows, so the package site, Google Play and
+  # TestFlight are started here. An Android build that failed doesn't hold the release back (#696):
+  # the files are attached later, and `android-release` then starts Packages and Google Play again.
   publish:
     name: Publish
     needs: [release, android-release]
@@ -624,9 +624,11 @@ jobs:
     steps:
       - name: Publish the release
         run: gh release edit "$TAG" --draft=false
-      - name: Package site and Google Play
+      - name: Package site, Google Play and TestFlight
         run: |
           gh workflow run packages.yml --ref "$DEFAULT_BRANCH"
+          # Builds the iOS app from the tag itself; it needs nothing release.yml made.
+          gh workflow run testflight.yml --ref "$DEFAULT_BRANCH" -f tag="$TAG"
           if [ "$ANDROID_RESULT" = success ]; then
             gh workflow run google-play.yml --ref "$DEFAULT_BRANCH" -f tag="$TAG"
           else

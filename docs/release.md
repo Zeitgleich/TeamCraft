@@ -304,7 +304,7 @@ timestamp, notarizes and staples the app and the dmg, and requires Gatekeeper to
 | Android  | Release APKs and AAB signed with the upload key when its secrets exist, else `-unsigned`   |
 | macOS    | Ad-hoc signed, not notarized; Developer ID signing and notarization with the secrets above |
 | Windows  | Not code-signed (`apps/desktop/packaging/windows/README.md`)                               |
-| iOS      | Not built: build and sign it with your own Apple team (`apps/ios/README.md`)               |
+| iOS      | Built and signed for the App Store by `testflight.yml` (below); not attached to releases   |
 | Linux    | Packages are unsigned; checksums and attestations cover them; the repositories sign them   |
 | Updates  | minisign signatures for the updater when `TAURI_SIGNING_PRIVATE_KEY` exists (below)        |
 | Web      | Signed release manifest (`release.json`) when `TEAMCRAFT_WEB_RELEASE_KEY` exists (below)   |
@@ -424,6 +424,84 @@ release on the internal track → *Promote release* → the target track, then r
 (production: staged rollout with a percentage). The bundle is not uploaded again. To send releases to
 another track automatically, set `TEAMCRAFT_PLAY_TRACK` (and give the service account the matching
 permission); every published tag, candidates included, then goes there.
+
+## TestFlight
+
+`testflight.yml` runs when a release or candidate is published (or by hand: *Actions → TestFlight →
+Run workflow* with the tag; the nightly release starts it from its `publish` job). Unlike Google
+Play it builds the app itself, on a macOS runner from the tag: the Rust core for the device
+(`build-xcframework.sh --device-only`, with line tables for the dSYM), then
+`apps/ios/scripts/archive-testflight.sh`, which archives with the **Apple Distribution** certificate
+and the App Store provisioning profiles and uploads the archive to App Store Connect
+(`xcodebuild -exportArchive`, `destination = upload`, authenticated with the App Store Connect API
+key). The build number is the release's ([Build numbers](#build-numbers)); App Store Connect refuses
+one it has seen, so a re-run after a successful upload fails at the upload and changes nothing.
+The dSYMs go to Apple with the upload and, with the `CRASH_REPORTS_*` / `DEBUG_FILES_S3_*` secrets,
+to the crash reports backend and the private bucket ([Debug symbols](#debug-symbols)); never to a
+workflow artifact. iOS files are not attached to the GitHub release.
+
+**Signing: certificate plus profiles from the API, no fastlane.** The workflow imports one
+distribution certificate into a keychain of the run and downloads the three App Store profiles
+through the App Store Connect API (`apple-actions/download-provisioning-profiles`), so a profile
+regenerated in the developer portal (after adding a capability) needs no new secret. Alternatives
+considered: Xcode's automatic signing on the runner creates a new development certificate on every
+fresh runner (Apple mails the team each time, and their number is limited); fastlane match needs a
+second private repository for the encrypted certificates, a Ruby toolchain and its own passphrase,
+for one app and one certificate. The yearly chore is the same either way: renew the certificate.
+
+| Setting (repository)                               | Meaning                                                                       |
+|----------------------------------------------------|-------------------------------------------------------------------------------|
+| Variable `APPLE_TEAM_ID`                           | The team that signs (10 characters, *Membership details* in the portal)       |
+| Variable `APP_STORE_CONNECT_KEY_ID`                | ID of the App Store Connect API key                                           |
+| Variable `APP_STORE_CONNECT_ISSUER_ID`             | Issuer ID shown above the API keys                                            |
+| Variable `TEAMCRAFT_IOS_PUSH_GATEWAY_URL`          | Push gateway built into the app (`https://push-gw.zeitgleich.de`); optional   |
+| Secret `APP_STORE_CONNECT_API_KEY`                 | The API key's `.p8` text (role *App Manager*)                                 |
+| Secret `APPLE_DISTRIBUTION_CERTIFICATE_P12`        | The *Apple Distribution* certificate with its private key, `.p12`, base64     |
+| Secret `APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD`   | The `.p12`'s export password                                                  |
+
+Without the three secrets and the three variables the run skips the upload with a notice. The App
+Store Connect API key is not the APNs key: the APNs key (`.p8` too) lives only in the push gateway
+([push-gateway.md](push-gateway.md) §6).
+
+Set up once (developer portal and App Store Connect, by an Account Holder or Admin):
+
+1. **Identifiers**: App IDs `de.zeitgleich.teamcraft` (capabilities Push Notifications, App Groups,
+   Communication Notifications, Time Sensitive Notifications), `de.zeitgleich.teamcraft.notifications`
+   (App Groups, Communication Notifications, Time Sensitive Notifications) and
+   `de.zeitgleich.teamcraft.share` (App Groups); the App Group `group.de.zeitgleich.teamcraft`
+   assigned to all three. Request *Notification Filtering* for the extension
+   (`apps/ios/README.md`).
+2. **Certificate**: *Certificates → +* → *Apple Distribution*, with a certificate signing request
+   (Keychain Access on a Mac, or `openssl req -new -newkey rsa:2048 -nodes`). Export it with its key
+   as `.p12` with a password, then `base64 -i distribution.p12 | gh secret set
+   APPLE_DISTRIBUTION_CERTIFICATE_P12` and `gh secret set APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD`.
+   Keep the `.p12` in the password manager only.
+3. **Profiles**: *Profiles → +* → *App Store Connect*, one for each of the three App IDs, with that
+   certificate. Exactly one active App Store profile per bundle ID: the workflow takes the profile's
+   name from the portal and stops if there are several.
+4. **App record**: App Store Connect → *Apps → +* → *New App*, platform iOS, bundle ID
+   `de.zeitgleich.teamcraft`, SKU of your choice.
+5. **API key**: App Store Connect → *Users and Access → Integrations → App Store Connect API* →
+   *Team Keys → +*, access *App Manager*. Download the `.p8` (only once), then `gh secret set
+   APP_STORE_CONNECT_API_KEY < AuthKey_<id>.p8`, `gh variable set APP_STORE_CONNECT_KEY_ID` and
+   `gh variable set APP_STORE_CONNECT_ISSUER_ID`, and `gh variable set APPLE_TEAM_ID`.
+6. **Testers**: TestFlight → *Internal Testing* group with *automatic distribution*: every processed
+   build reaches the team's members at once. External testers (up to 10,000, by invitation or a
+   public link) need a *Beta App Review* of the first build of each version.
+7. **Export compliance**: answered once under *App Information → App Encryption Documentation*: the
+   app uses standard encryption algorithms (in addition to the OS's), not distributed in France for
+   now. With these answers App Store Connect needs no documents, so `ITSAppUsesNonExemptEncryption`
+   is `false` in `apps/ios/project.yml` and builds don't wait as *Missing Compliance*. Distribution
+   in France needs a declaration to the French authority (ANSSI) first; proprietary algorithms would
+   change the answers.
+
+Renewal: the distribution certificate expires after a year. Make a new one (step 2), regenerate the
+three profiles with it (step 3), replace the two certificate secrets, then revoke the old one.
+
+Checked locally on a Mac with the certificate and profiles installed:
+`scripts/build-xcframework.sh --device-only`, then `APPLE_TEAM_ID=… TC_PROFILE_APP=…
+TC_PROFILE_NOTIFICATIONS=… TC_PROFILE_SHARE=… scripts/archive-testflight.sh --no-upload` exports
+the `.ipa` to `apps/ios/build/export` without uploading.
 
 ## Debug symbols
 

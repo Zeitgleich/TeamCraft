@@ -143,7 +143,11 @@ targets:
         # scheduled messages again when a silent push couldn't finish (docs/scheduled-messages.md).
         UIBackgroundModes: [audio, voip, remote-notification, processing]
         BGTaskSchedulerPermittedIdentifiers: [de.zeitgleich.teamcraft.segment-prefetch, de.zeitgleich.teamcraft.scheduled-seal]
-        ITSAppUsesNonExemptEncryption: true
+        # Export compliance (docs/release.md, "TestFlight"): the end-to-end encryption uses standard
+        # algorithms only (MLS, XChaCha20-Poly1305, Ed25519; IETF/NIST), and App Store Connect's
+        # encryption questionnaire found no documents needed for that. `false` here stops App Store
+        # Connect from asking again for every build. Revisit for proprietary algorithms or France.
+        ITSAppUsesNonExemptEncryption: false
         NSMicrophoneUsageDescription: "TeamCraft uses the microphone for calls and for voice messages you record."
         NSCameraUsageDescription: "TeamCraft uses the camera for video calls, for photos you send and to scan the code of a new device you link."
         NSPhotoLibraryAddUsageDescription: "TeamCraft saves pictures and videos you choose to your photo library."
@@ -172,6 +176,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: de.zeitgleich.teamcraft
         # TeamCraft.entitlements (above), or the same with Universal Links (Config/Base.xcconfig).
         CODE_SIGN_ENTITLEMENTS: $(APP_ENTITLEMENTS)
+        # Empty for automatic signing; the App Store profile's name when distributing (Config/Base.xcconfig).
+        PROVISIONING_PROFILE_SPECIFIER: $(TC_PROFILE_APP)
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
 
@@ -218,6 +224,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.zeitgleich.teamcraft.notifications
         CODE_SIGN_ENTITLEMENTS: $(NSE_ENTITLEMENTS)
+        PROVISIONING_PROFILE_SPECIFIER: $(TC_PROFILE_NOTIFICATIONS)
         SKIP_INSTALL: YES
 
   # The share sheet's entry (issue #208). No core: it copies what was shared into the App Group, and
@@ -255,6 +262,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.zeitgleich.teamcraft.share
         CODE_SIGN_ENTITLEMENTS: ShareExtension/ShareExtension.entitlements
+        PROVISIONING_PROFILE_SPECIFIER: $(TC_PROFILE_SHARE)
         SKIP_INSTALL: YES
 
   # The home screen widget (issue #2076). No core: it draws the snapshot the app writes into the App
