@@ -172,6 +172,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: de.zeitgleich.teamcraft
         # TeamCraft.entitlements (above), or the same with Universal Links (Config/Base.xcconfig).
         CODE_SIGN_ENTITLEMENTS: $(APP_ENTITLEMENTS)
+        # Empty for automatic signing; the App Store profile's name when distributing (Config/Base.xcconfig).
+        PROVISIONING_PROFILE_SPECIFIER: $(TC_PROFILE_APP)
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
 
@@ -218,6 +220,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.zeitgleich.teamcraft.notifications
         CODE_SIGN_ENTITLEMENTS: $(NSE_ENTITLEMENTS)
+        PROVISIONING_PROFILE_SPECIFIER: $(TC_PROFILE_NOTIFICATIONS)
         SKIP_INSTALL: YES
 
   # The share sheet's entry (issue #208). No core: it copies what was shared into the App Group, and
@@ -255,6 +258,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.zeitgleich.teamcraft.share
         CODE_SIGN_ENTITLEMENTS: ShareExtension/ShareExtension.entitlements
+        PROVISIONING_PROFILE_SPECIFIER: $(TC_PROFILE_SHARE)
         SKIP_INSTALL: YES
 
   # The home screen widget (issue #2076). No core: it draws the snapshot the app writes into the App

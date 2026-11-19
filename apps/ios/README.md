@@ -289,25 +289,26 @@ archive's dSYMs: `<archive>.xcarchive/dSYMs/TeamCraft.app.dSYM` (Release builds 
 
 ## Signing and TestFlight
 
-CI builds unsigned (`CODE_SIGNING_ALLOWED=NO`). For a device or TestFlight you need an Apple
-Developer account:
+CI's `ios.yml` builds unsigned (`CODE_SIGNING_ALLOWED=NO`). Signed builds:
 
-1. Create the App IDs for the app and the extensions (notifications, share, widget) and an App Group
-   (all four join it); enable the capabilities Push
-   Notifications, App Groups, Keychain Sharing, Communication Notifications and Time Sensitive
-   Notifications (all self-service). Request **Notification Filtering**
-   (`com.apple.developer.usernotifications.filtering`) from Apple.
-2. Set `DEVELOPMENT_TEAM`, the bundle IDs and `APP_GROUP_ID` / `KEYCHAIN_ACCESS_GROUP` (see above).
-3. `APS_ENVIRONMENT = production` for archives (also automatic from the provisioning profile).
-4. `scripts/build-xcframework.sh --device-only`, `xcodegen generate`, then *Product → Archive* in Xcode
-   and upload to App Store Connect. `ITSAppUsesNonExemptEncryption` is `true`: the app has encryption
-   beyond the OS (export compliance questions apply).
+- **Your own device from Xcode:** set `DEVELOPMENT_TEAM` in `Config/Local.xcconfig` and let Xcode sign
+  automatically. These builds use the APNs **sandbox** (`APS_ENVIRONMENT = development`), so push
+  through the publisher's production gateway doesn't reach them (docs/push-gateway.md §6).
+- **TestFlight:** `.github/workflows/testflight.yml` archives every published release on a macOS runner
+  with the Apple Distribution certificate and the App Store profiles and uploads it
+  (`scripts/archive-testflight.sh`, `APS_ENVIRONMENT = production`). Setup, secrets and renewal:
+  docs/release.md, "TestFlight". `scripts/archive-testflight.sh --no-upload` checks the signing on a
+  Mac without uploading.
 
-The share extension (`de.zeitgleich.teamcraft.share`) needs its own App ID with the App Group
-capability, the same group as the app; a signed build without it fails to install or says it couldn't
-save what was shared.
+The App IDs (`de.zeitgleich.teamcraft`, `.notifications`, `.share`) and the App Group
+`group.de.zeitgleich.teamcraft` need the capabilities listed in docs/release.md, "TestFlight". Request
+**Notification Filtering** (`com.apple.developer.usernotifications.filtering`) for the extension from
+Apple; once granted, add it to the extension's App ID, regenerate its profile and switch
+`NSE_ENTITLEMENTS` / `NSE_NOTIFICATION_FILTERING` (see Configuration). `ITSAppUsesNonExemptEncryption`
+is `true`: the app has encryption beyond the OS (export compliance questions apply).
 
-There is no signing, fastlane or upload automation yet.
+The share extension needs its App ID with the App Group capability, the same group as the app; a signed
+build without it fails to install or says it couldn't save what was shared.
 
 ## Manual test checklist
 

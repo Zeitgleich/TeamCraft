@@ -1,0 +1,203 @@
+# TestFlight (docs/release.md, "TestFlight"): when a release is published (or by hand for a tag),
+# builds the iOS app from the tag on a Mac, signs it for the App Store and uploads it to App Store
+# Connect, where it appears in TestFlight. Releases and candidates both go; their build numbers
+# increase (docs/release.md, "Build numbers"). Unlike Google Play the build happens here: signing
+# needs the Mac, and release.yml builds no iOS app.
+#
+# Setup (without the secrets the run skips the upload with a notice):
+#   Variables  APPLE_TEAM_ID                          the team (10 characters)
+#              APP_STORE_CONNECT_KEY_ID               the App Store Connect API key's ID
+#              APP_STORE_CONNECT_ISSUER_ID            its issuer ID
+#              TEAMCRAFT_IOS_PUSH_GATEWAY_URL         optional: the push gateway built into the app
+#   Secrets    APP_STORE_CONNECT_API_KEY              the API key (.p8 text)
+#              APPLE_DISTRIBUTION_CERTIFICATE_P12     "Apple Distribution" certificate with key, base64
+#              APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD  its export password
+#   Optional:  the CRASH_REPORTS_* / DEBUG_FILES_S3_* secrets keep the dSYMs (docs/crash-reports.md).
+name: TestFlight
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build and upload (vX.Y.Z or vX.Y.Z-rc.N)
+        required: true
+
+# One upload at a time; a second run for the same build number would be refused anyway.
+concurrency:
+  group: testflight
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  upload:
+    name: Build and upload to TestFlight
+    # Only product releases (v*); the `ci-deps` mirror release is not one (docs/release.md).
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v')
+    # Xcode 26 with the iOS 26 SDK, like ios.yml.
+    runs-on: macos-26
+    timeout-minutes: 150
+    permissions:
+      contents: read
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - name: Settings
+        id: settings
+        env:
+          HAS_SECRETS: >-
+            ${{ secrets.APP_STORE_CONNECT_API_KEY != '' && secrets.APPLE_DISTRIBUTION_CERTIFICATE_P12 != ''
+            && secrets.APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD != '' && vars.APPLE_TEAM_ID != ''
+            && vars.APP_STORE_CONNECT_KEY_ID != '' && vars.APP_STORE_CONNECT_ISSUER_ID != '' }}
+        run: |
+          if [ "$HAS_SECRETS" != true ]; then
+            echo "::notice::App Store Connect or signing secrets missing: ${TAG} is not uploaded to TestFlight"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "$TAG" in
+            v[0-9]*) ;;
+            *) echo "::error::not a release tag: ${TAG}"; exit 1 ;;
+          esac
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+      # The tag's tree: the version and build number in project.yml are the release's.
+      - if: steps.settings.outputs.enabled == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.TAG }}
+      - name: Tools
+        if: steps.settings.outputs.enabled == 'true'
+        run: brew install xcodegen cmake
+      - name: Rust core for the device
+        if: steps.settings.outputs.enabled == 'true'
+        env:
+          # File and line of the Rust frames in the archive's dSYM (crash reports).
+          CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+        run: apps/ios/scripts/build-xcframework.sh --device-only
+      # A keychain of this run only, removed below. The certificate never touches the disk unencrypted.
+      - name: Signing certificate
+        if: steps.settings.outputs.enabled == 'true'
+        env:
+          P12_BASE64: ${{ secrets.APPLE_DISTRIBUTION_CERTIFICATE_P12 }}
+          P12_PASSWORD: ${{ secrets.APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          p12="$RUNNER_TEMP/distribution.p12"
+          (umask 077 && printf '%s' "$P12_BASE64" | base64 --decode > "$p12")
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$p12" -k "$keychain" -P "$P12_PASSWORD" -f pkcs12 -t cert \
+            -T /usr/bin/codesign -T /usr/bin/security
+          rm -f "$p12"
+          security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          security find-identity -v -p codesigning "$keychain" | grep -q "Apple Distribution" \
+            || { echo "::error::the certificate is not an Apple Distribution identity"; exit 1; }
+          echo "SIGNING_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+      # The App Store profiles as the developer portal has them now, so a regenerated profile needs
+      # no new secret. Exactly one active App Store profile per bundle ID (docs/release.md).
+      - name: Provisioning profile (app)
+        id: profile_app
+        if: steps.settings.outputs.enabled == 'true'
+        uses: apple-actions/download-provisioning-profiles@233aa54e59082c0e8a8cf8b0b02c72dea2422ef9 # v7.1.0
+        with:
+          bundle-id: de.zeitgleich.teamcraft
+          profile-type: IOS_APP_STORE
+          issuer-id: ${{ vars.APP_STORE_CONNECT_ISSUER_ID }}
+          api-key-id: ${{ vars.APP_STORE_CONNECT_KEY_ID }}
+          api-private-key: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+      - name: Provisioning profile (notification extension)
+        id: profile_notifications
+        if: steps.settings.outputs.enabled == 'true'
+        uses: apple-actions/download-provisioning-profiles@233aa54e59082c0e8a8cf8b0b02c72dea2422ef9 # v7.1.0
+        with:
+          bundle-id: de.zeitgleich.teamcraft.notifications
+          profile-type: IOS_APP_STORE
+          issuer-id: ${{ vars.APP_STORE_CONNECT_ISSUER_ID }}
+          api-key-id: ${{ vars.APP_STORE_CONNECT_KEY_ID }}
+          api-private-key: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+      - name: Provisioning profile (share extension)
+        id: profile_share
+        if: steps.settings.outputs.enabled == 'true'
+        uses: apple-actions/download-provisioning-profiles@233aa54e59082c0e8a8cf8b0b02c72dea2422ef9 # v7.1.0
+        with:
+          bundle-id: de.zeitgleich.teamcraft.share
+          profile-type: IOS_APP_STORE
+          issuer-id: ${{ vars.APP_STORE_CONNECT_ISSUER_ID }}
+          api-key-id: ${{ vars.APP_STORE_CONNECT_KEY_ID }}
+          api-private-key: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+      - name: Profile names
+        id: profiles
+        if: steps.settings.outputs.enabled == 'true'
+        env:
+          APP: ${{ steps.profile_app.outputs.profiles }}
+          NOTIFICATIONS: ${{ steps.profile_notifications.outputs.profiles }}
+          SHARE: ${{ steps.profile_share.outputs.profiles }}
+        run: |
+          for kind in app notifications share; do
+            json="${APP}"
+            [ "$kind" = notifications ] && json="${NOTIFICATIONS}"
+            [ "$kind" = share ] && json="${SHARE}"
+            count=$(printf '%s' "$json" | jq 'length')
+            if [ "$count" != 1 ]; then
+              echo "::error::expected one active App Store profile for the ${kind} bundle ID, found ${count}"
+              exit 1
+            fi
+            echo "${kind}=$(printf '%s' "$json" | jq -r '.[0].name')" >> "$GITHUB_OUTPUT"
+          done
+      # Only as a file readable by the runner user, never on a command line; removed below.
+      - name: App Store Connect API key
+        if: steps.settings.outputs.enabled == 'true'
+        env:
+          API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+          KEY_ID: ${{ vars.APP_STORE_CONNECT_KEY_ID }}
+        run: |
+          key="$RUNNER_TEMP/AuthKey_${KEY_ID}.p8"
+          (umask 077 && printf '%s\n' "$API_KEY" > "$key")
+          echo "ASC_KEY_PATH=$key" >> "$GITHUB_ENV"
+      - name: Archive and upload
+        if: steps.settings.outputs.enabled == 'true'
+        working-directory: apps/ios
+        env:
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          ASC_KEY_ID: ${{ vars.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ vars.APP_STORE_CONNECT_ISSUER_ID }}
+          TC_PROFILE_APP: ${{ steps.profiles.outputs.app }}
+          TC_PROFILE_NOTIFICATIONS: ${{ steps.profiles.outputs.notifications }}
+          TC_PROFILE_SHARE: ${{ steps.profiles.outputs.share }}
+          TEAMCRAFT_PUSH_GATEWAY_URL: ${{ vars.TEAMCRAFT_IOS_PUSH_GATEWAY_URL }}
+        run: scripts/archive-testflight.sh
+      # The dSYMs go to the crash reports backend and/or the private bucket, never to a workflow
+      # artifact: this repository is public (scripts/debug-files.sh). A failed upload only warns.
+      - name: Keep the dSYMs (optional)
+        if: steps.settings.outputs.enabled == 'true'
+        env:
+          VERSION: ${{ steps.settings.outputs.version }}
+          SENTRY_URL: ${{ secrets.CRASH_REPORTS_URL }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.CRASH_REPORTS_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.CRASH_REPORTS_ORG }}
+          SENTRY_PROJECT: ${{ secrets.CRASH_REPORTS_PROJECT }}
+          DEBUG_FILES_S3_ENDPOINT: ${{ secrets.DEBUG_FILES_S3_ENDPOINT }}
+          DEBUG_FILES_S3_REGION: ${{ secrets.DEBUG_FILES_S3_REGION }}
+          DEBUG_FILES_S3_BUCKET: ${{ secrets.DEBUG_FILES_S3_BUCKET }}
+          DEBUG_FILES_S3_ACCESS_KEY_ID: ${{ secrets.DEBUG_FILES_S3_ACCESS_KEY_ID }}
+          DEBUG_FILES_S3_SECRET_ACCESS_KEY: ${{ secrets.DEBUG_FILES_S3_SECRET_ACCESS_KEY }}
+        run: |
+          shopt -s nullglob
+          dsyms=(apps/ios/build/TeamCraft.xcarchive/dSYMs/*.dSYM)
+          if [ "${#dsyms[@]}" = 0 ]; then
+            echo "::warning::the archive has no dSYMs"
+            exit 0
+          fi
+          scripts/debug-files.sh store "ios/${VERSION}/aarch64-apple-ios" "${dsyms[@]}"
+      - name: Remove the signing material
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP"/AuthKey_*.p8 "$RUNNER_TEMP/distribution.p12"
+          if [ -n "${SIGNING_KEYCHAIN:-}" ]; then security delete-keychain "$SIGNING_KEYCHAIN" || true; fi
+          rm -f "$HOME/Library/MobileDevice/Provisioning Profiles"/*.mobileprovision

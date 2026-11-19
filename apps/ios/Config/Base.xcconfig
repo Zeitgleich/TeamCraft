@@ -30,5 +30,16 @@ NSE_NOTIFICATION_FILTERING = NO
 // TEAMCRAFT_APP_LINK_DOMAIN = team.example.com
 APP_ENTITLEMENTS = TeamCraft/Resources/TeamCraft.entitlements
 
-// APNs environment of the push entitlement (archives for TestFlight/App Store get production from the profile).
+// APNs environment of the push entitlement. `development` (APNs sandbox) for builds signed for
+// development: Xcode's Run and the simulator. Builds for TestFlight and the App Store use the
+// production APNs: scripts/archive-testflight.sh sets `production` (it signs with the App Store
+// profile, which says `production`), and Xcode's Organizer sets it when it exports for App Store
+// Connect. A device token belongs to one environment; the push gateway serves one
+// (docs/push-gateway.md §6).
 APS_ENVIRONMENT = development
+
+// Provisioning profiles by name for manual signing (scripts/archive-testflight.sh passes the App
+// Store profiles). Empty: automatic signing picks them.
+TC_PROFILE_APP =
+TC_PROFILE_NOTIFICATIONS =
+TC_PROFILE_SHARE =

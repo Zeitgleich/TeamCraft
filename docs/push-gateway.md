@@ -154,3 +154,31 @@ in, sealed wake-up out, dead token dropped, blocks kept.
 Only the publisher of store apps runs one: see the gateway repository (container image
 `ghcr.io/zeitgleich/teamcraft-push-gateway`) and the optional `push_gateway` role in the deployment
 repository (`teamcraft-deploy`, off by default, on its own host).
+
+### APNs credentials
+
+The gateway signs its requests to Apple with a **token-based APNs key** (`.p8`) of the team that signs
+the store app. It is not the App Store Connect API key the TestFlight upload uses (docs/release.md,
+"TestFlight"), and it never goes into this repository or its CI.
+
+| Gateway setting (`[apns]`)            | Value                                                                                    |
+|---------------------------------------|------------------------------------------------------------------------------------------|
+| `key` / `key_path`                    | The `.p8` text (`TEAMCRAFT_PUSH_GATEWAY__APNS__KEY`) or a file holding it                |
+| `key_id`                              | The key's 10-character ID (developer portal, *Keys*)                                     |
+| `team_id`                             | The team ID (*Membership details*), the same as the app's `APPLE_TEAM_ID`                |
+| `bundle_id`                           | `de.zeitgleich.teamcraft`: the APNs topic; calls go to `de.zeitgleich.teamcraft.voip`    |
+| `use_sandbox`                         | `false` for TestFlight and App Store builds; `true` only for a gateway of debug builds   |
+
+Create the key in the developer portal under *Keys → +*, service *Apple Push Notifications service
+(APNs)*, environment **Sandbox & Production**, restriction **Team Scoped (All Topics)** (so the same key
+covers the app and its `.voip` topic, and a development gateway can use it too). Apple offers the
+download once; keep the file in the password manager.
+
+**Sandbox or production.** A device token belongs to the APNs environment of the build's
+`aps-environment` entitlement: `production` for builds from `testflight.yml` (TestFlight, later the
+App Store), `development` for builds run from Xcode (`apps/ios/Config/Base.xcconfig`). Apple answers a
+token of the other environment with `BadDeviceToken`, which the gateway reports as a dead token, so the
+server forgets the registration. One gateway serves one environment (`use_sandbox`), so the
+publisher's gateway at `push-gw.zeitgleich.de` is production; push to a build run from Xcode needs
+a second gateway with `use_sandbox = true` (its URL in that build's `TEAMCRAFT_PUSH_GATEWAY_URL`) or
+a server that sends directly with `[push.apns] use_sandbox = true`.
