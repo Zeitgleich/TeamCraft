@@ -18,6 +18,22 @@ pub struct WorkspaceLogEntry {
   pub created_at: OffsetDateTime,
 }
 
+/// An entry to append to the roster or policy log.
+#[derive(Debug, Clone, Copy)]
+pub struct NewWorkspaceLogEntry<'a> {
+  pub kind: &'a WorkspaceLogKind,
+  /// The version the signer saw; the entry becomes the next one, or conflicts.
+  pub expected_version: u64,
+  pub payload: &'a [u8],
+  pub signature: &'a [u8],
+  pub signer: DeviceId,
+  /// The channels a policy entry places a legal hold on that the previous entry didn't hold; each
+  /// must be an existing channel.
+  pub new_holds: &'a [ConversationId],
+  /// Audit rows written with the entry, only when it is.
+  pub audit: &'a [NewAuditEntry<'a>],
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppendOutcome {
   Appended,
@@ -35,23 +51,25 @@ impl Database {
   /// the same version race on the primary key and exactly one wins. `audit` rows are written in the
   /// same transaction, only when the entry is.
   ///
-  /// `new_holds` are the channels a policy entry places a legal hold on. They are share-locked and
-  /// checked in this transaction, before the entry is written, so a hold and a deletion of the same
-  /// channel can't both win (issue #2143): a deletion holds the channel's row for update and reads the
-  /// newest policy only after it has that lock ([`Self::latest_policy_payload_in`]). Whichever runs
-  /// second sees the other's result: the hold is refused for a deleted channel, or the deletion reads
-  /// the policy that holds it.
-  #[allow(clippy::too_many_arguments)]
+  /// The channels a policy entry newly holds ([`NewWorkspaceLogEntry::new_holds`]) are share-locked
+  /// and checked in this transaction, before the entry is written, so a hold and a deletion of the
+  /// same channel can't both win (issue #2143): a deletion or retention locks the channel's row and
+  /// reads the newest policy only after it has that lock ([`Self::latest_policy_payload_in`]).
+  /// Whichever runs second sees the other's result: the hold is refused for a deleted channel, or
+  /// the deletion reads the policy that holds it.
   pub async fn append_workspace_log(
     &self,
-    kind: &WorkspaceLogKind,
-    expected_version: u64,
-    payload: &[u8],
-    signature: &[u8],
-    signer: DeviceId,
-    new_holds: &[ConversationId],
-    audit: &[NewAuditEntry<'_>],
+    entry: &NewWorkspaceLogEntry<'_>,
   ) -> Result<AppendOutcome, DbError> {
+    let NewWorkspaceLogEntry {
+      kind,
+      expected_version,
+      payload,
+      signature,
+      signer,
+      new_holds,
+      audit,
+    } = *entry;
     let expected =
       i64::try_from(expected_version).map_err(|_| DbError::InvalidStoredValue("version".into()))?;
     let mut tx = self.pool().begin().await?;

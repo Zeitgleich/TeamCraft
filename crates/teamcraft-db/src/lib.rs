@@ -145,7 +145,7 @@ pub use profile::{StoredAvatar, StoredProfile, StoredWorkingHours};
 pub use provider_events::ProviderEventHook;
 pub use push::{PushDeviceRow, PushRecipientRow};
 pub use push_retry::{NewPushRetry, PushRetryClaim, PushRetryRow};
-pub use retention::{RetentionTarget, StoredObject, StoredRetention};
+pub use retention::{RetentionCut, RetentionDeleted, RetentionTarget, StoredRetention};
 pub use role_evidence::{RoleStanding, StoredRoleEvidence, StoredRoleLoss};
 pub use scheduled_message::{
   NewScheduledMessage, ReleaseOutcome, ScheduleOutcome, ScheduledUpdateOutcome, SealedParts, StaleWakes,
@@ -180,4 +180,4 @@ pub use webhook::{
   EnqueueOutcome, NewWebhook, NewWebhookLogEntry, StoredWebhook, StoredWebhookLogEntry, WebhookChange,
   WebhookDeliveryClaim, WebhookDeliveryRow,
 };
-pub use workspace_log::{AppendOutcome, WorkspaceLogEntry};
+pub use workspace_log::{AppendOutcome, NewWorkspaceLogEntry, WorkspaceLogEntry};

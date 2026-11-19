@@ -270,8 +270,10 @@ is refused. The server and the owners' apps refuse other values.
 - A hold and a deletion at the same moment can't both win (#2143). Appending a policy that places a
   hold share-locks the held channels' rows and checks they still exist, in the transaction that
   stores the entry; every deletion locks the rows it deletes and only then reads the newest policy,
-  in its own transaction. Whichever comes second sees the other: the hold is refused for the deleted
-  channel, or the deletion is refused with `legal_hold`.
+  in its own transaction. Retention does the same for each conversation before it deletes anything
+  of it, and deletes the objects in the storage only for rows deleted under that check. Whichever
+  comes second sees the other: the hold is refused for the deleted channel, the deletion is refused
+  with `legal_hold`, or retention skips the conversation.
 - Releasing the hold returns it to the normal rules; the next retention run catches up.
 
 **Who is told.** Every member of a held conversation sees a banner "This conversation is under legal

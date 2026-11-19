@@ -1,11 +1,11 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT ciphertext_s3_key AS \"key!\" FROM messages\n         WHERE conversation_id = $1 AND id < $2 AND ciphertext_s3_key IS NOT NULL AND NOT ($3 AND is_pinned)",
+  "query": "DELETE FROM messages WHERE conversation_id = $1 AND id < $2 AND NOT ($3 AND is_pinned)\n       RETURNING ciphertext_s3_key AS \"key?\"",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "key!",
+        "name": "key?",
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -26,5 +26,5 @@
       true
     ]
   },
-  "hash": "a2d93a836fe2d045c2959a7721961d5be92d8446d114516c5bd2d5aa831d1d0b"
+  "hash": "9782b88a773df74725267421f2cfe370a4e30aa5dc95d67129a2f60c2f4c88b7"
 }

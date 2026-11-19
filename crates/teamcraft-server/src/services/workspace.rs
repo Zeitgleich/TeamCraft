@@ -5,7 +5,7 @@
 //! protocol reserves (compliance archive). Verifying signatures is up to the clients.
 
 use serde_json::json;
-use teamcraft_db::{AppendOutcome, WorkspaceLogEntry};
+use teamcraft_db::{AppendOutcome, NewWorkspaceLogEntry, WorkspaceLogEntry};
 use teamcraft_proto::{
   AppendWorkspaceLogRequest, Base64Bytes, ComplianceArchiveMode, GatewayEvent, GuestDmStart, GuestPolicy,
   ListWorkspaceLogQuery, ListWorkspaceLogResponse, Permission, PolicyDocument, Target,
@@ -94,15 +94,15 @@ pub async fn append(
 
   let outcome = state
     .database
-    .append_workspace_log(
-      &kind,
-      request.expected_version,
-      request.payload.as_slice(),
-      request.signature.as_slice(),
-      request.signer_device_id,
-      &new_holds,
-      &audit_entries,
-    )
+    .append_workspace_log(&NewWorkspaceLogEntry {
+      kind: &kind,
+      expected_version: request.expected_version,
+      payload: request.payload.as_slice(),
+      signature: request.signature.as_slice(),
+      signer: request.signer_device_id,
+      new_holds: &new_holds,
+      audit: &audit_entries,
+    })
     .await?;
   match outcome {
     AppendOutcome::Appended => {},

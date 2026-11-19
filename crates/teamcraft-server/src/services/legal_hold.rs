@@ -4,9 +4,9 @@
 //!
 //! The list comes from the signed policy as stored, read anew for every decision: a deletion is
 //! rare, and a hold must count from the moment its policy entry is stored, also on another instance.
-//! A deletion reads it in its own transaction, after locking what it deletes, and the append of a
-//! policy that places a hold locks the held channels first (issue #2143): a hold and a deletion at
-//! the same moment never both win.
+//! A deletion, and retention for each conversation, reads it in its own transaction after locking
+//! what it deletes, and the append of a policy that places a hold locks the held channels first
+//! (issue #2143): a hold and a deletion at the same moment never both win.
 
 use serde_json::json;
 use teamcraft_db::NewAuditEntry;

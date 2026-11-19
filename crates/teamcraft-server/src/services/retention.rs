@@ -5,7 +5,7 @@
 //! search index segments, and emptied month partitions. Pinned messages survive if the policy says so.
 
 use serde_json::json;
-use teamcraft_db::{RetentionTarget, StoredRetention};
+use teamcraft_db::{RetentionCut, RetentionTarget, StoredRetention};
 use teamcraft_proto::{
   ConversationId, Id, MessageId, Permission, RetentionSetting, RetentionStatusResponse, SNOWFLAKE_EPOCH_MS,
   SetRetentionRequest, Snowflake, SpaceId,
@@ -138,7 +138,8 @@ pub async fn run_once(state: &AppState, now: OffsetDateTime) -> Result<Retention
   let mut report = RetentionReport::default();
 
   for target in state.database.list_retention_targets().await? {
-    // data-export.md §4.2: a held conversation keeps everything until the hold is released.
+    // data-export.md §4.2: a held conversation keeps everything until the hold is released. This
+    // skips what was held when the run started; `enforce` checks again under the lock.
     if policy
       .compliance_archive
       .legal_hold(target.conversation)
@@ -210,43 +211,36 @@ async fn enforce(
   let Some(cutoff) = [age_cutoff, count_cutoff].into_iter().flatten().max() else {
     return Ok(());
   };
-  let before = MessageId::from_snowflake(cutoff);
-
-  for key in state
+  let cut = RetentionCut {
+    before: MessageId::from_snowflake(cutoff),
+    index_cutoff: OffsetDateTime::from_unix_timestamp_nanos(i128::from(cutoff.unix_millis()) * 1_000_000)
+      .unwrap_or(now),
+    keep_pinned,
+  };
+  // data-export.md §4.2: decided by the policy read under the conversation's lock, so a hold placed
+  // since this run read the policy keeps it (#2143).
+  let Some(deleted) = state
     .database
-    .list_offloaded_ciphertext_before(conversation, before, keep_pinned)
+    .delete_past_retention_locked(conversation, &cut, |maybe_policy| {
+      super::legal_hold::is_held_in(maybe_policy, conversation)
+    })
     .await?
-  {
-    delete_object(state, &key).await?;
-  }
-  report.messages_deleted += state
-    .database
-    .delete_messages_before(conversation, before, keep_pinned)
-    .await?;
-
-  // Attachments aren't linked to messages on the server, so a conversation with pinned messages
-  // keeps all its attachments (a pinned message may still need one).
-  if !(keep_pinned && state.database.conversation_has_pinned(conversation).await?) {
-    for object in state
-      .database
-      .list_attachments_before(conversation, before)
-      .await?
+  else {
+    return Ok(());
+  };
+  report.messages_deleted += deleted.messages;
+  report.attachments_deleted += deleted.attachment_keys.len() as u64;
+  report.index_segments_deleted += deleted.index_segment_keys.len() as u64;
+  // The rows are gone, so nobody fetches these any more; a failed delete waits in the queue.
+  if let Some(store) = &state.maybe_blob_store {
+    for key in deleted
+      .message_keys
+      .iter()
+      .chain(&deleted.attachment_keys)
+      .chain(&deleted.index_segment_keys)
     {
-      delete_object(state, &object.s3_key).await?;
-      state.database.delete_attachment_row(object.id).await?;
-      report.attachments_deleted += 1;
+      super::storage_cleanup::delete_or_queue(state, store, key).await;
     }
-  }
-  let cutoff_time =
-    OffsetDateTime::from_unix_timestamp_nanos(i128::from(cutoff.unix_millis()) * 1_000_000).unwrap_or(now);
-  for object in state
-    .database
-    .list_index_segments_before(conversation, cutoff_time)
-    .await?
-  {
-    delete_object(state, &object.s3_key).await?;
-    state.database.delete_index_segment_row(object.id).await?;
-    report.index_segments_deleted += 1;
   }
   Ok(())
 }
