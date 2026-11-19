@@ -6,7 +6,7 @@ use teamcraft_client_api::custom_status::is_allowed;
 use teamcraft_client_api::meeting_schedule::{MeetingTimes, ScheduleNote};
 use teamcraft_proto::{HistoryPolicy, IdempotencyKey, Permission, Role};
 
-use crate::channel_access::may_now;
+use crate::channel_access::{can_create_poll_in, may_now};
 use crate::clock::{end_of_local_day, now_ms};
 use crate::feedback::PendingAction;
 use crate::i18n::I18n;
@@ -263,6 +263,7 @@ pub fn context(state: AppState, conversation: ConversationId) -> CommandContext 
     can_change_channel: is_channel && may_now(state, conversation, &Permission::ManageChannelProperties),
     can_manage_members: is_channel && may_now(state, conversation, &Permission::ManageMembers),
     is_guest: state.read(|backend| backend.my_role()) == Role::Guest,
+    can_create_poll: can_create_poll_in(state, conversation),
   }
 }
 

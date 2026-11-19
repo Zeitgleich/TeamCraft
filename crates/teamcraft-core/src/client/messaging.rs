@@ -16,9 +16,9 @@ use teamcraft_proto::{
 };
 use zeroize::Zeroizing;
 
-use super::Client;
 #[cfg(not(target_arch = "wasm32"))]
 use super::segments::{announces_segment, note_segment_announcement};
+use super::{Client, stored_poll_limits};
 use crate::api::{ApiError, ServerApi};
 use crate::convert;
 use crate::error::CoreError;
@@ -155,7 +155,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Sends a poll (issue #205, e2ee.md §4.12): a text message carrying `spec`, whose text
-  /// `fallback` is what versions before polls show. Refused when `spec` breaks the default limits
+  /// `fallback` is what versions before polls show. Refused when `spec` breaks the limits the server published (the defaults without any)
   /// or its closing time has passed.
   pub async fn post_poll(
     &mut self,
@@ -164,7 +164,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     fallback: &str,
   ) -> Result<ClientMessageId, CoreError> {
     spec
-      .check_at(&teamcraft_proto::PollLimits::default(), self.now_ms())
+      .check_at(&stored_poll_limits(&self.store), self.now_ms())
       .map_err(|error| CoreError::InvalidRequest(error.to_string()))?;
     let content = MessageContent::Text {
       body: fallback.to_owned(),

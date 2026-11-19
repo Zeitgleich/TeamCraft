@@ -30,6 +30,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -53,7 +54,7 @@ import uniffi.teamcraft_ffi.PollFieldItem
 import uniffi.teamcraft_ffi.PollProblemItem
 import uniffi.teamcraft_ffi.PollProblemKind
 import uniffi.teamcraft_ffi.PollResultsItem
-import uniffi.teamcraft_ffi.pollLimits
+import uniffi.teamcraft_ffi.PollLimitsItem
 import uniffi.teamcraft_ffi.pollPostAction
 import uniffi.teamcraft_ffi.pollProblems
 
@@ -88,7 +89,9 @@ private val RESULTS = listOf(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PollSheet(viewModel: MainViewModel, conversationId: String, onDismiss: () -> Unit) {
-  val limits = remember { pollLimits() }
+  // The server's limits (#2120); the built-in ones show until they are read.
+  var limits by remember { mutableStateOf(PollLimitsItem(12u, 300u, 100u, 365u)) }
+  LaunchedEffect(Unit) { limits = viewModel.pollLimits() }
   var question by rememberSaveable { mutableStateOf("") }
   val options = remember { mutableStateListOf<String>().apply { repeat(FIRST_OPTIONS) { add("") } } }
   var isMultiple by rememberSaveable { mutableStateOf(false) }
@@ -118,13 +121,13 @@ fun PollSheet(viewModel: MainViewModel, conversationId: String, onDismiss: () ->
   )
 
   // Errors show once a send was refused, and then follow the input.
-  val problems = if (wasRefused) pollProblems(draft(System.currentTimeMillis()), System.currentTimeMillis()) else emptyList()
+  val problems = if (wasRefused) pollProblems(draft(System.currentTimeMillis()), limits, System.currentTimeMillis()) else emptyList()
   val questionError = problems.firstOrNull { it.field is PollFieldItem.Question }?.let { problemText(it) }
   val closingError = problems.firstOrNull { it.field is PollFieldItem.Closing }?.let { closingErrorText(it.kind) }
 
   fun send() {
     val nowMs = System.currentTimeMillis()
-    val found = pollProblems(draft(nowMs), nowMs)
+    val found = pollProblems(draft(nowMs), limits, nowMs)
     if (found.isNotEmpty()) {
       wasRefused = true
       when (val first = found.first().field) {
@@ -135,7 +138,7 @@ fun PollSheet(viewModel: MainViewModel, conversationId: String, onDismiss: () ->
       return
     }
     val action = runCatching {
-      pollPostAction(conversationId, draft(nowMs), fallbackTitle, fallbackNote, nowMs)
+      pollPostAction(conversationId, draft(nowMs), limits, fallbackTitle, fallbackNote, nowMs)
     }.getOrNull()
     if (action == null) {
       // The core refused what the check passed (a time that passed just now): show why.

@@ -104,6 +104,7 @@ import de.zeitgleich.teamcraft.ui.forms.CreateResult
 import uniffi.teamcraft_ffi.LeaveChoice
 import uniffi.teamcraft_ffi.GroupMentionReachItem
 import uniffi.teamcraft_ffi.MentionableGroupItem
+import uniffi.teamcraft_ffi.PollLimitsItem
 import uniffi.teamcraft_ffi.LinkPlatform
 import uniffi.teamcraft_ffi.LinkRequestItem
 import uniffi.teamcraft_ffi.LoginBrand
@@ -949,6 +950,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   suspend fun mentionableGroups(conversationId: String): List<MentionableGroupItem> =
     readChat { mentionableGroups(conversationId) }.orEmpty()
+
+  suspend fun pollLimits(): PollLimitsItem = readChat { pollLimits() } ?: PollLimitsItem(12u, 300u, 100u, 365u)
 
   suspend fun groupMentionReach(conversationId: String, body: String): GroupMentionReachItem =
     readChat { groupMentionReach(conversationId, body) } ?: GroupMentionReachItem(0u, 0u)

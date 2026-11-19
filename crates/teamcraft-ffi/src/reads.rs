@@ -66,6 +66,7 @@ use crate::engine::{Job, Store, direct_peer, parse_id};
 use crate::error::TeamCraftError;
 use crate::logging::{self, JobClock};
 use crate::perf_jobs::{self, PerfJobKind};
+use crate::polls::PollLimitsItem;
 use crate::store_threads::StoreHold;
 use crate::types::LinkRequestItem;
 use crate::types::{
@@ -1134,6 +1135,11 @@ impl Reads {
 
   /// Whether the conversation's menu offers "Leave" (#1105). Channel roles are read afresh while
   /// they are not known, so a later ask has the last-admin answer.
+  /// The poll limits in force (issue #2120).
+  pub(crate) fn poll_limits(&self) -> Result<PollLimitsItem, TeamCraftError> {
+    Ok(self.backend()?.poll_limits().into())
+  }
+
   /// The groups the composer offers after `@` here: none without `use_group_mentions` (issue #206).
   pub(crate) fn mentionable_groups(
     &self,

@@ -771,6 +771,12 @@ impl Conversation {
       .unwrap_or(self.can_post)
   }
 
+  /// Whether the user may send a poll here (`create_poll`, issue #2120; a poll is a post, so
+  /// posting too): the server's word, otherwise everybody, as in the built-in scheme.
+  pub fn can_create_poll(&self) -> bool {
+    self.can_post && self.maybe_holds(&Permission::CreatePoll).unwrap_or(true)
+  }
+
   /// Whether the user may pin messages and keep links and files as bookmarks (`manage_bookmarks`;
   /// a pin is sent as a message, so posting too): the server's word, otherwise everybody but
   /// guests, as in the built-in scheme.

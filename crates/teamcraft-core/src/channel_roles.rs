@@ -499,6 +499,21 @@ impl ChannelRoleState {
       .collect()
   }
 
+  /// The users the accepted snapshot makes admins or moderators: the people whose close of a poll
+  /// counts besides its sender (issue #2120, e2ee.md §4.12). Nobody while nothing is signed or
+  /// during an unverified stretch: the server's list of roles isn't enough to end somebody's poll.
+  pub fn moderators(&self) -> BTreeSet<UserId> {
+    if self.version == 0 || self.has_unverified_stretch() {
+      return BTreeSet::new();
+    }
+    self
+      .assignments
+      .iter()
+      .filter(|assignment| matches!(assignment.role, ChannelRole::Admin | ChannelRole::Moderator))
+      .map(|assignment| assignment.user_id)
+      .collect()
+  }
+
   /// Whether anything was signed for the channel; before that its roles are the server's word. A
   /// device that accepted nothing yet but can't place an entitled signer's entry knows it was:
   /// it must not act by the rule of an unsigned channel, or take somebody's founding claim.

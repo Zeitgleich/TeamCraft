@@ -8,8 +8,9 @@
 //!
 //! - Each person's newest valid vote counts; no choices withdraws it. A vote the poll doesn't take
 //!   (an option it lacks, several for a single choice) is skipped, and the earlier one stands.
-//! - The first close by the poll's sender ends it: votes after it don't count. A close by anybody
-//!   else changes nothing.
+//! - The first close by the poll's sender, or by a moderator or admin of the channel by its signed
+//!   roles (issue #2120), ends it: votes after it don't count. A close by anybody else changes
+//!   nothing.
 //! - A poll with a closing time takes only votes the server took at or before it (the time in the
 //!   vote's server ID): the server's clock decides, never a device's. This device shows the poll
 //!   closed once its own clock passed the time or it holds an event the server took later.
@@ -18,12 +19,18 @@
 //! - Counts show as the poll's [`PollResults`](teamcraft_proto::PollResults) promise; while they
 //!   don't, the view carries none.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use teamcraft_client_api::polls::{PollOptionView, PollView};
-use teamcraft_proto::{ClientMessageId, Id, PollSpec, UserId};
+use teamcraft_proto::{ClientMessageId, Id, PollLimits, PollSpec, UserId};
 
 use crate::store::{LocalStore, MessageContent, MessageOrder, StoreError, StoredMessage};
+
+/// The poll limits in force: what the server published, or the built-in ones. See
+/// [`crate::client::stored_poll_limits`].
+pub fn stored_limits(store: &impl LocalStore) -> PollLimits {
+  crate::client::stored_poll_limits(store)
+}
 
 /// The poll `message` carries, if it is one this device counts: a readable text message with a
 /// poll within the bounds every receiver applies. Anything else shows as its text.
@@ -40,11 +47,15 @@ pub fn poll_of(message: &StoredMessage) -> Option<&PollSpec> {
 /// The poll `poll` (whose spec is `spec`, see [`poll_of`]) as `me` sees it at `now_ms` (this
 /// device's clock, only for showing a closing time as passed), counted from `related`: any
 /// messages of the conversation; those that aren't a vote or close of this poll are passed over.
+/// `moderators` are the people besides the poll's sender whose close counts: the channel's
+/// moderators and admins by the roles this device verified (`ChannelRoleState::moderators`), never
+/// the server's list.
 pub fn tally<'a>(
   poll: &StoredMessage,
   spec: &PollSpec,
   related: impl IntoIterator<Item = &'a StoredMessage>,
   me: UserId,
+  moderators: &BTreeSet<UserId>,
   now_ms: i64,
 ) -> PollView {
   let mut events: Vec<&StoredMessage> = related
@@ -52,7 +63,7 @@ pub fn tally<'a>(
     .filter(|message| message.maybe_unreadable.is_none() && is_event_of(message, poll.client_message_id))
     .collect();
   events.sort_by_key(|message| message.order());
-  let maybe_closed_at = closed_at(poll, &events);
+  let maybe_closed_at = closed_at(poll, &events, moderators);
   let is_past_closing = spec.maybe_closes_at_ms.is_some_and(|closes_at| {
     closes_at <= now_ms
       || events
@@ -105,6 +116,7 @@ pub fn tally<'a>(
     voter_count: u32::try_from(votes.len()).unwrap_or(u32::MAX),
     is_closed,
     is_mine: poll.sender_user_id == me,
+    can_close: poll.sender_user_id == me || moderators.contains(&me),
   }
 }
 
@@ -149,6 +161,7 @@ pub fn stored_poll(
   conversation: teamcraft_proto::ConversationId,
   poll: ClientMessageId,
   me: UserId,
+  moderators: &BTreeSet<UserId>,
   now_ms: i64,
 ) -> Result<Option<PollView>, StoreError> {
   let Some(message) = store.message(conversation, poll)? else {
@@ -158,7 +171,7 @@ pub fn stored_poll(
     return Ok(None);
   };
   let related = store.reactions_to(conversation, &[poll])?;
-  Ok(Some(tally(&message, spec, &related, me, now_ms)))
+  Ok(Some(tally(&message, spec, &related, me, moderators, now_ms)))
 }
 
 /// Whether `message` votes in or closes the poll `poll`.
@@ -169,13 +182,17 @@ fn is_event_of(message: &StoredMessage, poll: ClientMessageId) -> bool {
   )
 }
 
-/// Where the first close by the poll's sender is among `events` (sorted), if any.
-fn closed_at(poll: &StoredMessage, events: &[&StoredMessage]) -> Option<MessageOrder> {
+/// Where the first close by the poll's sender or a moderator is among `events` (sorted), if any.
+fn closed_at(
+  poll: &StoredMessage,
+  events: &[&StoredMessage],
+  moderators: &BTreeSet<UserId>,
+) -> Option<MessageOrder> {
   events
     .iter()
     .find(|message| {
       matches!(message.content, MessageContent::PollClose { .. })
-        && message.sender_user_id == poll.sender_user_id
+        && (message.sender_user_id == poll.sender_user_id || moderators.contains(&message.sender_user_id))
     })
     .map(|message| message.order())
 }
@@ -227,7 +244,7 @@ mod tests {
     fn each_persons_newest_vote_counts() {
       let poll = poll(PollChoice::Single, PollVoters::Shown);
       let events = [vote(BOB, 100, &[0]), vote(CAROL, 101, &[1]), vote(BOB, 102, &[2])];
-      let view = tally(&poll, spec(&poll), &events, id(BOB), NOW_MS);
+      let view = tally(&poll, spec(&poll), &events, id(BOB), &no_moderators(), NOW_MS);
       assert_eq!(counts(&view), vec![0, 1, 1]);
       assert_eq!(view.voter_count, 2);
       assert!(view.options[2].is_chosen && !view.options[0].is_chosen);
@@ -238,7 +255,7 @@ mod tests {
     fn no_choices_withdraw_a_vote() {
       let poll = poll(PollChoice::Single, PollVoters::Shown);
       let events = [vote(BOB, 100, &[0]), vote(BOB, 101, &[])];
-      let view = tally(&poll, spec(&poll), &events, id(BOB), NOW_MS);
+      let view = tally(&poll, spec(&poll), &events, id(BOB), &no_moderators(), NOW_MS);
       assert_eq!(counts(&view), vec![0, 0, 0]);
       assert_eq!(view.voter_count, 0);
     }
@@ -247,7 +264,7 @@ mod tests {
     fn a_multiple_choice_counts_each_option_once_per_person() {
       let poll = poll(PollChoice::Multiple, PollVoters::Shown);
       let events = [vote(BOB, 100, &[0, 2]), vote(CAROL, 101, &[2])];
-      let view = tally(&poll, spec(&poll), &events, id(ALICE), NOW_MS);
+      let view = tally(&poll, spec(&poll), &events, id(ALICE), &no_moderators(), NOW_MS);
       assert_eq!(counts(&view), vec![1, 0, 2]);
       assert_eq!(view.voter_count, 2);
       assert_eq!(view.options[2].voters, vec![id(BOB), id(CAROL)]);
@@ -262,7 +279,7 @@ mod tests {
         vote(BOB, 102, &[7]),
         vote(BOB, 103, &[1, 1]),
       ];
-      let view = tally(&poll, spec(&poll), &events, id(BOB), NOW_MS);
+      let view = tally(&poll, spec(&poll), &events, id(BOB), &no_moderators(), NOW_MS);
       assert_eq!(counts(&view), vec![0, 1, 0]);
     }
 
@@ -276,19 +293,25 @@ mod tests {
         close(ALICE, 103),
         vote(CAROL, 104, &[2]),
       ];
-      let expected = tally(&poll, spec(&poll), &events, id(ALICE), NOW_MS);
+      let expected = tally(&poll, spec(&poll), &events, id(ALICE), &no_moderators(), NOW_MS);
       assert_eq!(counts(&expected), vec![0, 2, 0]);
       events.reverse();
-      assert_eq!(tally(&poll, spec(&poll), &events, id(ALICE), NOW_MS), expected);
+      assert_eq!(
+        tally(&poll, spec(&poll), &events, id(ALICE), &no_moderators(), NOW_MS),
+        expected
+      );
       events.swap(0, 3);
-      assert_eq!(tally(&poll, spec(&poll), &events, id(ALICE), NOW_MS), expected);
+      assert_eq!(
+        tally(&poll, spec(&poll), &events, id(ALICE), &no_moderators(), NOW_MS),
+        expected
+      );
     }
 
     #[test]
     fn a_replayed_vote_does_not_count_twice() {
       let poll = poll(PollChoice::Single, PollVoters::Shown);
       let events = [vote(BOB, 100, &[0]), vote(BOB, 100, &[0]), vote(BOB, 101, &[0])];
-      let view = tally(&poll, spec(&poll), &events, id(ALICE), NOW_MS);
+      let view = tally(&poll, spec(&poll), &events, id(ALICE), &no_moderators(), NOW_MS);
       assert_eq!(counts(&view), vec![1, 0, 0]);
     }
 
@@ -302,7 +325,14 @@ mod tests {
       };
       let mut unreadable = vote(CAROL, 101, &[1]);
       unreadable.maybe_unreadable = Some(Unreadable::Failed);
-      let view = tally(&poll, spec(&poll), &[other, unreadable], id(ALICE), NOW_MS);
+      let view = tally(
+        &poll,
+        spec(&poll),
+        &[other, unreadable],
+        id(ALICE),
+        &no_moderators(),
+        NOW_MS,
+      );
       assert_eq!(view.voter_count, 0);
     }
   }
@@ -319,7 +349,7 @@ mod tests {
         vote(BOB, 102, &[1]),
         vote(CAROL, 103, &[2]),
       ];
-      let view = tally(&poll, spec(&poll), &events, id(ALICE), NOW_MS);
+      let view = tally(&poll, spec(&poll), &events, id(ALICE), &no_moderators(), NOW_MS);
       assert!(view.is_closed);
       assert_eq!(counts(&view), vec![1, 0, 0]);
     }
@@ -328,10 +358,51 @@ mod tests {
     fn only_the_creator_closes() {
       let poll = poll(PollChoice::Single, PollVoters::Shown);
       let events = [close(BOB, 100), vote(CAROL, 101, &[2])];
-      let view = tally(&poll, spec(&poll), &events, id(BOB), NOW_MS);
+      let view = tally(&poll, spec(&poll), &events, id(BOB), &no_moderators(), NOW_MS);
       assert!(!view.is_closed);
       assert!(!view.is_mine);
       assert_eq!(counts(&view), vec![0, 0, 1]);
+    }
+
+    #[test]
+    fn a_moderators_close_counts_as_the_creators_does() {
+      let poll = poll(PollChoice::Single, PollVoters::Shown);
+      let events = [vote(BOB, 100, &[0]), close(CAROL, 101), vote(BOB, 102, &[1])];
+      let moderators = BTreeSet::from([id(CAROL)]);
+      let view = tally(&poll, spec(&poll), &events, id(ALICE), &moderators, NOW_MS);
+      assert!(view.is_closed);
+      assert_eq!(counts(&view), vec![1, 0, 0]);
+      let without = tally(&poll, spec(&poll), &events, id(ALICE), &no_moderators(), NOW_MS);
+      assert!(!without.is_closed, "the same close from a member changes nothing");
+    }
+
+    #[test]
+    fn only_the_creator_and_moderators_are_offered_the_close() {
+      let poll = poll(PollChoice::Single, PollVoters::Shown);
+      let moderators = BTreeSet::from([id(CAROL)]);
+      let can_close = |me: u64| tally(&poll, spec(&poll), &[], id(me), &moderators, NOW_MS).can_close;
+      assert!(can_close(ALICE), "the creator");
+      assert!(can_close(CAROL), "a moderator");
+      assert!(!can_close(BOB), "any other member");
+    }
+
+    #[test]
+    fn the_first_close_by_either_decides_where_votes_stop() {
+      let poll = poll(PollChoice::Single, PollVoters::Shown);
+      let events = [
+        vote(BOB, 100, &[0]),
+        close(BOB, 101),
+        close(CAROL, 102),
+        vote(BOB, 103, &[1]),
+        close(ALICE, 104),
+      ];
+      let moderators = BTreeSet::from([id(CAROL)]);
+      let view = tally(&poll, spec(&poll), &events, id(ALICE), &moderators, NOW_MS);
+      assert_eq!(
+        counts(&view),
+        vec![1, 0, 0],
+        "Bob's close was nobody's, Carol's counts"
+      );
     }
 
     #[test]
@@ -344,6 +415,7 @@ mod tests {
         spec(&poll),
         [&vote(BOB, 100, &[0]), &pending],
         id(BOB),
+        &no_moderators(),
         NOW_MS,
       );
       assert_eq!(counts(&view), vec![0, 1, 0]);
@@ -352,6 +424,7 @@ mod tests {
         spec(&poll),
         [&close(ALICE, 101), &pending],
         id(BOB),
+        &no_moderators(),
         NOW_MS,
       );
       assert_eq!(view.voter_count, 0);
@@ -369,7 +442,7 @@ mod tests {
         vote_at(CAROL, NOW_MS + HOUR_MS + 1, &[1]),
         vote_at(BOB, NOW_MS + HOUR_MS + 2, &[2]),
       ];
-      let view = tally(&poll, spec(&poll), &events, id(ALICE), NOW_MS);
+      let view = tally(&poll, spec(&poll), &events, id(ALICE), &no_moderators(), NOW_MS);
       assert_eq!(counts(&view), vec![1, 0, 0]);
       assert!(
         view.is_closed,
@@ -381,7 +454,14 @@ mod tests {
     fn a_device_clock_ahead_closes_the_view_but_not_the_count() {
       let poll = closing(PollResults::Always, NOW_MS + HOUR_MS);
       let events = [vote_at(BOB, NOW_MS + 10, &[0])];
-      let view = tally(&poll, spec(&poll), &events, id(ALICE), NOW_MS + 2 * HOUR_MS);
+      let view = tally(
+        &poll,
+        spec(&poll),
+        &events,
+        id(ALICE),
+        &no_moderators(),
+        NOW_MS + 2 * HOUR_MS,
+      );
       assert!(view.is_closed && !view.can_vote());
       assert_eq!(counts(&view), vec![1, 0, 0]);
     }
@@ -390,7 +470,14 @@ mod tests {
     fn a_device_clock_behind_does_not_count_a_late_vote() {
       let poll = closing(PollResults::Always, NOW_MS);
       let events = [vote_at(BOB, NOW_MS + 1, &[0])];
-      let view = tally(&poll, spec(&poll), &events, id(BOB), NOW_MS - HOUR_MS);
+      let view = tally(
+        &poll,
+        spec(&poll),
+        &events,
+        id(BOB),
+        &no_moderators(),
+        NOW_MS - HOUR_MS,
+      );
       assert_eq!(view.voter_count, 0);
       assert!(view.is_closed);
     }
@@ -400,9 +487,16 @@ mod tests {
       let poll = closing(PollResults::Always, NOW_MS + HOUR_MS);
       let mut pending = vote(BOB, 0, &[1]);
       pending.maybe_server_id = None;
-      let open = tally(&poll, spec(&poll), [&pending], id(BOB), NOW_MS);
+      let open = tally(&poll, spec(&poll), [&pending], id(BOB), &no_moderators(), NOW_MS);
       assert_eq!(counts(&open), vec![0, 1, 0]);
-      let closed = tally(&poll, spec(&poll), [&pending], id(BOB), NOW_MS + HOUR_MS);
+      let closed = tally(
+        &poll,
+        spec(&poll),
+        [&pending],
+        id(BOB),
+        &no_moderators(),
+        NOW_MS + HOUR_MS,
+      );
       assert_eq!(closed.voter_count, 0);
     }
 
@@ -410,8 +504,22 @@ mod tests {
     fn every_device_counts_the_same_whatever_its_clock() {
       let poll = closing(PollResults::Always, NOW_MS);
       let events = [vote_at(BOB, NOW_MS - 1, &[0]), vote_at(CAROL, NOW_MS + 1, &[1])];
-      let behind = tally(&poll, spec(&poll), &events, id(ALICE), NOW_MS - HOUR_MS);
-      let ahead = tally(&poll, spec(&poll), &events, id(ALICE), NOW_MS + HOUR_MS);
+      let behind = tally(
+        &poll,
+        spec(&poll),
+        &events,
+        id(ALICE),
+        &no_moderators(),
+        NOW_MS - HOUR_MS,
+      );
+      let ahead = tally(
+        &poll,
+        spec(&poll),
+        &events,
+        id(ALICE),
+        &no_moderators(),
+        NOW_MS + HOUR_MS,
+      );
       assert_eq!(behind, ahead);
     }
   }
@@ -423,11 +531,11 @@ mod tests {
     fn after_vote_shows_counts_once_the_user_voted() {
       let poll = with_results(PollResults::AfterVote);
       let events = [vote(BOB, 100, &[0]), vote(CAROL, 101, &[0])];
-      let before = tally(&poll, spec(&poll), &events, id(ALICE), NOW_MS);
+      let before = tally(&poll, spec(&poll), &events, id(ALICE), &no_moderators(), NOW_MS);
       assert!(!before.are_results_shown);
       assert_eq!(counts(&before), vec![0, 0, 0]);
       assert_eq!(before.voter_count, 2, "how many voted still shows");
-      let voted = tally(&poll, spec(&poll), &events, id(BOB), NOW_MS);
+      let voted = tally(&poll, spec(&poll), &events, id(BOB), &no_moderators(), NOW_MS);
       assert!(voted.are_results_shown);
       assert_eq!(counts(&voted), vec![2, 0, 0]);
       assert_eq!(voted.options[0].voters, vec![id(BOB), id(CAROL)]);
@@ -437,7 +545,7 @@ mod tests {
     fn hidden_counts_keep_the_users_own_choice_and_name_nobody() {
       let poll = with_results(PollResults::AfterClose);
       let events = [vote(BOB, 100, &[1])];
-      let view = tally(&poll, spec(&poll), &events, id(BOB), NOW_MS);
+      let view = tally(&poll, spec(&poll), &events, id(BOB), &no_moderators(), NOW_MS);
       assert!(!view.are_results_shown);
       assert!(view.options[1].is_chosen);
       assert!(
@@ -452,7 +560,7 @@ mod tests {
     fn closing_shows_the_counts_to_everybody() {
       let poll = with_results(PollResults::AfterClose);
       let events = [vote(BOB, 100, &[1]), close(ALICE, 101)];
-      let view = tally(&poll, spec(&poll), &events, id(CAROL), NOW_MS);
+      let view = tally(&poll, spec(&poll), &events, id(CAROL), &no_moderators(), NOW_MS);
       assert!(view.are_results_shown);
       assert_eq!(counts(&view), vec![0, 1, 0]);
     }
@@ -461,7 +569,7 @@ mod tests {
     fn a_withdrawn_vote_hides_the_counts_again() {
       let poll = with_results(PollResults::AfterVote);
       let events = [vote(BOB, 100, &[1]), vote(BOB, 101, &[])];
-      let view = tally(&poll, spec(&poll), &events, id(BOB), NOW_MS);
+      let view = tally(&poll, spec(&poll), &events, id(BOB), &no_moderators(), NOW_MS);
       assert!(!view.are_results_shown);
     }
   }
@@ -473,7 +581,7 @@ mod tests {
     fn a_hidden_poll_names_nobody_but_marks_the_users_own_choice() {
       let poll = poll(PollChoice::Single, PollVoters::Hidden);
       let events = [vote(BOB, 100, &[0]), vote(CAROL, 101, &[0])];
-      let view = tally(&poll, spec(&poll), &events, id(BOB), NOW_MS);
+      let view = tally(&poll, spec(&poll), &events, id(BOB), &no_moderators(), NOW_MS);
       assert_eq!(counts(&view), vec![2, 0, 0]);
       assert!(view.options[0].is_chosen);
       assert!(view.options.iter().all(|option| option.voters.is_empty()));
@@ -482,7 +590,14 @@ mod tests {
     #[test]
     fn a_mode_of_a_newer_version_names_nobody() {
       let poll = poll(PollChoice::Single, PollVoters::Unknown("blinded".into()));
-      let view = tally(&poll, spec(&poll), &[vote(BOB, 100, &[0])], id(ALICE), NOW_MS);
+      let view = tally(
+        &poll,
+        spec(&poll),
+        &[vote(BOB, 100, &[0])],
+        id(ALICE),
+        &no_moderators(),
+        NOW_MS,
+      );
       assert!(view.options[0].voters.is_empty());
     }
   }
@@ -553,6 +668,10 @@ mod tests {
   fn vote_at(sender: u64, taken_at_ms: i64, choices: &[u32]) -> StoredMessage {
     let since_epoch = u64::try_from(taken_at_ms - SNOWFLAKE_EPOCH_MS).unwrap();
     vote(sender, (since_epoch << 22) + sender, choices)
+  }
+
+  fn no_moderators() -> BTreeSet<UserId> {
+    BTreeSet::new()
   }
 
   fn spec(message: &StoredMessage) -> &PollSpec {

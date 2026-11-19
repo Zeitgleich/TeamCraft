@@ -46,6 +46,8 @@ pub struct CommandContext {
   pub can_manage_members: bool,
   /// Guests don't start meetings.
   pub is_guest: bool,
+  /// May send a poll here (`create_poll`).
+  pub can_create_poll: bool,
 }
 
 /// What a command needs to work where it is typed.
@@ -60,6 +62,8 @@ pub enum Requirement {
   ChannelMembers,
   /// A full account, not a guest.
   MemberAccount,
+  /// The right to send a poll here, in a channel or a DM.
+  CreatePoll,
 }
 
 /// Why a command doesn't work here.
@@ -153,6 +157,7 @@ impl Requirement {
       "kick" | "invite" => Self::ChannelMembers,
       "leave" => Self::Channel,
       "meet" => Self::MemberAccount,
+      "poll" => Self::CreatePoll,
       _ => Self::None,
     }
   }
@@ -384,6 +389,8 @@ fn check(name: &str, context: CommandContext) -> Result<(), Unavailable> {
     Requirement::ChannelMembers => in_channel(context.can_manage_members),
     Requirement::MemberAccount if context.is_guest => Err(Unavailable::NotAllowed),
     Requirement::MemberAccount => Ok(()),
+    Requirement::CreatePoll if context.can_create_poll => Ok(()),
+    Requirement::CreatePoll => Err(Unavailable::NotAllowed),
   }
 }
 
@@ -399,12 +406,14 @@ mod tests {
       can_change_channel: false,
       can_manage_members: false,
       is_guest: false,
+      can_create_poll: true,
     };
     const CHANNEL_ADMIN: CommandContext = CommandContext {
       is_channel: true,
       can_change_channel: true,
       can_manage_members: true,
       is_guest: false,
+      can_create_poll: true,
     };
     /// A DM, group DM, the notes to self or a meeting chat: no channel, whatever the rights.
     const DIRECT: CommandContext = CommandContext {
@@ -412,6 +421,7 @@ mod tests {
       can_change_channel: true,
       can_manage_members: true,
       is_guest: false,
+      can_create_poll: true,
     };
     const CHANNEL_CONTEXT_ONLY: [&str; 6] = ["topic", "purpose", "rename", "kick", "invite", "leave"];
 
@@ -442,6 +452,18 @@ mod tests {
       for name in ["topic", "purpose", "rename", "kick", "invite"] {
         assert!(!offered.contains(&name), "{name}");
       }
+    }
+
+    #[test]
+    fn a_poll_needs_the_permission_in_a_channel_and_a_dm_alike() {
+      let denied = CommandContext {
+        can_create_poll: false,
+        ..CHANNEL_MEMBER
+      };
+      assert!(!names(denied).contains(&"poll"));
+      assert_eq!(command("/poll").check(denied), Err(Unavailable::NotAllowed));
+      assert!(names(DIRECT).contains(&"poll"));
+      assert!(names(CHANNEL_MEMBER).contains(&"poll"));
     }
 
     #[test]

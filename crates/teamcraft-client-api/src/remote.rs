@@ -2006,6 +2006,7 @@ pub enum ChatQuery {
     file_id: String,
   },
   MaxUploadBytes,
+  PollLimits,
   Downloads,
   BrowseChannels {
     space: SpaceId,
@@ -2214,6 +2215,9 @@ pub enum ChatAnswer {
   },
   Bytes {
     maybe_bytes: Option<u64>,
+  },
+  PollLimits {
+    limits: crate::polls::PollLimits,
   },
   Downloads {
     entries: Vec<crate::actions::DownloadEntry>,
@@ -2549,6 +2553,9 @@ impl ChatQuery {
       },
       Self::MaxUploadBytes => ChatAnswer::Bytes {
         maybe_bytes: backend.max_upload_bytes(),
+      },
+      Self::PollLimits => ChatAnswer::PollLimits {
+        limits: backend.poll_limits(),
       },
       Self::Downloads => match backend.downloads() {
         Some(entries) => ChatAnswer::Downloads { entries },

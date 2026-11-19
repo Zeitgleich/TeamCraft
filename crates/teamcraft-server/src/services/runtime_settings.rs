@@ -343,6 +343,10 @@ fn apply(settings: &mut Settings, section: &RuntimeSettingsSection) {
       limits.max_custom_emoji = values.max_custom_emoji;
       limits.max_custom_emoji_bytes = values.max_custom_emoji_bytes;
       limits.max_custom_emoji_side_px = values.max_custom_emoji_side_px;
+      limits.max_poll_options = values.max_poll_options;
+      limits.max_poll_question_chars = values.max_poll_question_chars;
+      limits.max_poll_option_chars = values.max_poll_option_chars;
+      limits.max_poll_open_days = values.max_poll_open_days;
     },
     RuntimeSettingsSection::Integration(values) => {
       settings.integration.default_retention_days = values.default_retention_days;
@@ -461,6 +465,10 @@ fn view(settings: &Settings, sources: Vec<RuntimeSettingsState>) -> RuntimeSetti
       max_custom_emoji: limits.max_custom_emoji,
       max_custom_emoji_bytes: limits.max_custom_emoji_bytes,
       max_custom_emoji_side_px: limits.max_custom_emoji_side_px,
+      max_poll_options: limits.max_poll_options,
+      max_poll_question_chars: limits.max_poll_question_chars,
+      max_poll_option_chars: limits.max_poll_option_chars,
+      max_poll_open_days: limits.max_poll_open_days,
     },
     integration: IntegrationSettings {
       default_retention_days: settings.integration.default_retention_days,
@@ -713,6 +721,30 @@ fn validate(section: &RuntimeSettingsSection) -> Result<(), ApiError> {
         u64::from(values.max_custom_emoji_side_px),
         16,
         u64::from(teamcraft_proto::MAX_CUSTOM_EMOJI_SIDE_PX_LIMIT),
+      )?;
+      check_range(
+        "max_poll_options",
+        u64::from(values.max_poll_options),
+        teamcraft_proto::MIN_POLL_OPTIONS as u64,
+        teamcraft_proto::MAX_RECEIVED_POLL_OPTIONS as u64,
+      )?;
+      check_range(
+        "max_poll_question_chars",
+        u64::from(values.max_poll_question_chars),
+        1,
+        teamcraft_proto::MAX_RECEIVED_POLL_TEXT_CHARS as u64,
+      )?;
+      check_range(
+        "max_poll_option_chars",
+        u64::from(values.max_poll_option_chars),
+        1,
+        teamcraft_proto::MAX_RECEIVED_POLL_TEXT_CHARS as u64,
+      )?;
+      check_range(
+        "max_poll_open_days",
+        u64::from(values.max_poll_open_days),
+        1,
+        u64::from(teamcraft_proto::MAX_POLL_OPEN_DAYS_LIMIT),
       )
     },
     RuntimeSettingsSection::Integration(values) => {

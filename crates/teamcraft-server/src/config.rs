@@ -380,6 +380,14 @@ pub struct LimitsConfig {
   pub max_custom_emoji_bytes: u64,
   /// Longest side of a custom emoji picture, in pixels.
   pub max_custom_emoji_side_px: u32,
+  /// Most options of a poll (issue #2120); the apps hold senders to it.
+  pub max_poll_options: u32,
+  /// Longest poll question, in characters.
+  pub max_poll_question_chars: u32,
+  /// Longest poll option, in characters.
+  pub max_poll_option_chars: u32,
+  /// How many days ahead a poll's closing time may be.
+  pub max_poll_open_days: u32,
   /// How long a request for organization recovery waits for approvals.
   pub org_recovery_request_ttl_secs: u64,
   /// Largest sealed share or sealed backup key.
@@ -1811,6 +1819,43 @@ impl LimitsConfig {
         self.draft_file_retention_days
       ));
     }
+    self.check_poll_limits()
+  }
+
+  /// What the apps hold the senders of a poll to (issue #2120).
+  pub fn poll_limits(&self) -> teamcraft_proto::PollLimits {
+    teamcraft_proto::PollLimits {
+      max_options: self.max_poll_options as usize,
+      max_question_chars: self.max_poll_question_chars as usize,
+      max_option_chars: self.max_poll_option_chars as usize,
+      max_open_days: self.max_poll_open_days,
+    }
+  }
+
+  /// Poll limits beyond what every receiver counts would make polls nobody counts.
+  fn check_poll_limits(&self) -> Result<(), String> {
+    let options =
+      teamcraft_proto::MIN_POLL_OPTIONS as u32..=teamcraft_proto::MAX_RECEIVED_POLL_OPTIONS as u32;
+    let text = 1..=teamcraft_proto::MAX_RECEIVED_POLL_TEXT_CHARS as u32;
+    let days = 1..=teamcraft_proto::MAX_POLL_OPEN_DAYS_LIMIT;
+    for (name, value, range) in [
+      ("max_poll_options", self.max_poll_options, options),
+      (
+        "max_poll_question_chars",
+        self.max_poll_question_chars,
+        text.clone(),
+      ),
+      ("max_poll_option_chars", self.max_poll_option_chars, text),
+      ("max_poll_open_days", self.max_poll_open_days, days),
+    ] {
+      if !range.contains(&value) {
+        return Err(format!(
+          "limits.{name} must be {} to {}, is {value}",
+          range.start(),
+          range.end()
+        ));
+      }
+    }
     Ok(())
   }
 }
@@ -1841,6 +1886,10 @@ impl Default for LimitsConfig {
       max_custom_emoji: teamcraft_proto::DEFAULT_MAX_CUSTOM_EMOJI,
       max_custom_emoji_bytes: teamcraft_proto::DEFAULT_MAX_CUSTOM_EMOJI_BYTES,
       max_custom_emoji_side_px: teamcraft_proto::DEFAULT_MAX_CUSTOM_EMOJI_SIDE_PX,
+      max_poll_options: teamcraft_proto::DEFAULT_MAX_POLL_OPTIONS as u32,
+      max_poll_question_chars: teamcraft_proto::DEFAULT_MAX_POLL_QUESTION_CHARS as u32,
+      max_poll_option_chars: teamcraft_proto::DEFAULT_MAX_POLL_OPTION_CHARS as u32,
+      max_poll_open_days: teamcraft_proto::DEFAULT_MAX_POLL_OPEN_DAYS,
       org_recovery_request_ttl_secs: 86_400,
       max_recovery_blob_bytes: 8192,
       max_profile_text_chars: 100,
@@ -2272,6 +2321,39 @@ mod tests {
     assert!(with("https://chat.example.com:8443").validate().is_ok());
     assert!(with("chat.example.com").validate().is_err());
     assert!(with("https://chat.example.com/app").validate().is_err());
+  }
+
+  #[test]
+  fn poll_limits_stay_within_what_receivers_count() {
+    assert_eq!(
+      LimitsConfig::default().poll_limits(),
+      teamcraft_proto::PollLimits::default()
+    );
+    let cases = [
+      LimitsConfig {
+        max_poll_options: 1,
+        ..LimitsConfig::default()
+      },
+      LimitsConfig {
+        max_poll_options: 33,
+        ..LimitsConfig::default()
+      },
+      LimitsConfig {
+        max_poll_question_chars: 1_001,
+        ..LimitsConfig::default()
+      },
+      LimitsConfig {
+        max_poll_option_chars: 0,
+        ..LimitsConfig::default()
+      },
+      LimitsConfig {
+        max_poll_open_days: 0,
+        ..LimitsConfig::default()
+      },
+    ];
+    for limits in cases {
+      assert!(limits.validate().is_err(), "{limits:?}");
+    }
   }
 
   #[test]

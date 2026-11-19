@@ -149,6 +149,12 @@ extension AppModel {
     return (ids.compactMap { $0 == snapshot.me.id ? nil : byId[$0] }, ids.count)
   }
 
+  /// How large a poll the user may send: the server's limits, else the built-in ones (#2120).
+  func pollLimits() async -> PollLimitsItem {
+    (try? await core().pollLimits())
+      ?? PollLimitsItem(maxOptions: 12, maxQuestionChars: 300, maxOptionChars: 100, maxOpenDays: 365)
+  }
+
   /// The groups the composer offers here; none without `use_group_mentions`.
   func mentionableGroups(_ conversationId: String) async -> [MentionableGroupItem] {
     (try? await core().mentionableGroups(conversationId: conversationId)) ?? []

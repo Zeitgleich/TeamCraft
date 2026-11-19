@@ -226,6 +226,9 @@ pub struct ConversationItem {
   /// Pin and unpin messages (`manage_bookmarks`).
   #[uniffi(default = true)]
   pub can_manage_bookmarks: bool,
+  /// Send a poll (`create_poll`, issue #2120).
+  #[uniffi(default = true)]
+  pub can_create_poll: bool,
   /// Change the channel itself, such as archiving it (`manage_channel_properties`); never in DMs.
   #[uniffi(default = true)]
   pub can_manage_channel: bool,
@@ -770,6 +773,7 @@ impl ConversationItem {
       maybe_inactivity_notice,
       can_react: conversation.can_react(),
       can_manage_bookmarks: conversation.can_manage_bookmarks(is_guest),
+      can_create_poll: conversation.can_create_poll(),
       can_manage_channel: conversation.can_manage_channel(),
       can_delete_channel: conversation.can_delete_channel(),
       id: conversation.id.to_string(),

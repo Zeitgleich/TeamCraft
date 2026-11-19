@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use utoipa::ToSchema;
 
 use crate::wire_enum::wire_enum;
 
@@ -22,6 +23,8 @@ pub const DEFAULT_MAX_POLL_QUESTION_CHARS: usize = 300;
 pub const DEFAULT_MAX_POLL_OPTION_CHARS: usize = 100;
 /// Default of [`PollLimits::max_open_days`].
 pub const DEFAULT_MAX_POLL_OPEN_DAYS: u32 = 365;
+/// Largest value an admin may set for [`PollLimits::max_open_days`].
+pub const MAX_POLL_OPEN_DAYS_LIMIT: u32 = 3_650;
 /// Milliseconds of a day, for [`PollLimits::max_open_days`].
 const DAY_MS: i64 = 24 * 60 * 60 * 1_000;
 
@@ -81,7 +84,7 @@ wire_enum! {
 
 /// How large a poll a sender may make. Receivers only apply the wider
 /// [`MAX_RECEIVED_POLL_OPTIONS`] and [`MAX_RECEIVED_POLL_TEXT_CHARS`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct PollLimits {
   pub max_options: usize,
   pub max_question_chars: usize,
@@ -120,6 +123,21 @@ impl Default for PollLimits {
       max_question_chars: DEFAULT_MAX_POLL_QUESTION_CHARS,
       max_option_chars: DEFAULT_MAX_POLL_OPTION_CHARS,
       max_open_days: DEFAULT_MAX_POLL_OPEN_DAYS,
+    }
+  }
+}
+
+impl PollLimits {
+  /// The limits cut to what every receiver counts (never wider) and to sensible lows, so a
+  /// server's odd values can't make polls nobody can send or everybody ignores.
+  pub fn bounded(self) -> Self {
+    Self {
+      max_options: self
+        .max_options
+        .clamp(MIN_POLL_OPTIONS, MAX_RECEIVED_POLL_OPTIONS),
+      max_question_chars: self.max_question_chars.clamp(1, MAX_RECEIVED_POLL_TEXT_CHARS),
+      max_option_chars: self.max_option_chars.clamp(1, MAX_RECEIVED_POLL_TEXT_CHARS),
+      max_open_days: self.max_open_days.clamp(1, MAX_POLL_OPEN_DAYS_LIMIT),
     }
   }
 }

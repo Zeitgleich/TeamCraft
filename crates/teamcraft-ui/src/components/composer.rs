@@ -2083,7 +2083,7 @@ pub fn Composer(
                     </button>
                   })}
                   // A poll goes to the conversation, not into a thread (issue #205).
-                  {maybe_thread.is_none().then(|| view! {
+                  {(maybe_thread.is_none() && crate::channel_access::can_create_poll_in(state, conversation)).then(|| view! {
                     <button
                       type="button"
                       class="menu-item"

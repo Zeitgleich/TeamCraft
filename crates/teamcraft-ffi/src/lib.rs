@@ -150,6 +150,7 @@ pub use voice::{
 use crate::engine::{DrainGoal, Engine, EngineThreads, Job, PushOpening, PushReader};
 use crate::http_fetch::run_request;
 use crate::logging::{JobClock, LifecycleStep, outcome};
+use crate::polls::PollLimitsItem;
 use crate::reads::{ReadQueue, Reads};
 use crate::store_threads::{MAX_STORE_CLOSE_WAIT, StoreThreads};
 
@@ -810,6 +811,12 @@ impl TeamCraft {
   /// §4.6); 0 otherwise. The app tells the user once.
   pub async fn take_suspect_deletions(&self) -> Result<u32, TeamCraftError> {
     self.act_locally(|reads| reads.take_suspect_deletions()).await
+  }
+
+  /// How large a poll the user may send: what the server published, else the built-in limits
+  /// (issue #2120). The poll dialog's fields and checks use it.
+  pub async fn poll_limits(&self) -> Result<PollLimitsItem, TeamCraftError> {
+    self.read(|reads| reads.poll_limits()).await
   }
 
   /// The user groups the composer offers after `@` in a conversation, `@admins` included while

@@ -72,23 +72,35 @@ pub enum PollProblemKind {
   ClosingTooFar { max_days: u32 },
 }
 
-/// The limits a poll the user makes keeps to.
-#[uniffi::export]
-pub fn poll_limits() -> PollLimitsItem {
-  let limits = PollLimits::default();
-  PollLimitsItem {
-    max_options: to_u32(limits.max_options),
-    max_question_chars: to_u32(limits.max_question_chars),
-    max_option_chars: to_u32(limits.max_option_chars),
-    max_open_days: limits.max_open_days,
+impl From<PollLimits> for PollLimitsItem {
+  fn from(limits: PollLimits) -> Self {
+    Self {
+      max_options: to_u32(limits.max_options),
+      max_question_chars: to_u32(limits.max_question_chars),
+      max_option_chars: to_u32(limits.max_option_chars),
+      max_open_days: limits.max_open_days,
+    }
   }
 }
 
-/// Every problem of `draft` at once, at its field, in the order of the form, when it is `now_ms`.
+impl From<PollLimitsItem> for PollLimits {
+  fn from(item: PollLimitsItem) -> Self {
+    Self {
+      max_options: item.max_options as usize,
+      max_question_chars: item.max_question_chars as usize,
+      max_option_chars: item.max_option_chars as usize,
+      max_open_days: item.max_open_days,
+    }
+    .bounded()
+  }
+}
+
+/// Every problem of `draft` at once, at its field, in the order of the form, when it is `now_ms`,
+/// under `limits` (the engine's `poll_limits`).
 #[uniffi::export]
-pub fn poll_problems(draft: PollDraftItem, now_ms: i64) -> Vec<PollProblemItem> {
+pub fn poll_problems(draft: PollDraftItem, limits: PollLimitsItem, now_ms: i64) -> Vec<PollProblemItem> {
   PollDraft::from(draft)
-    .problems(&PollLimits::default(), now_ms)
+    .problems(&PollLimits::from(limits), now_ms)
     .into_iter()
     .map(PollProblemItem::from)
     .collect()
@@ -96,11 +108,12 @@ pub fn poll_problems(draft: PollDraftItem, now_ms: i64) -> Vec<PollProblemItem> 
 
 /// The `post_poll` action sending `draft` to `conversation`. `title` ("Poll") and `note` ("Update
 /// TeamCraft to vote") make the text versions before polls show, in the user's language. Refused
-/// when the draft has a problem at `now_ms`.
+/// when the draft has a problem at `now_ms` under `limits` (the engine's `poll_limits`).
 #[uniffi::export]
 pub fn poll_post_action(
   conversation: String,
   draft: PollDraftItem,
+  limits: PollLimitsItem,
   title: String,
   note: String,
   now_ms: i64,
@@ -108,7 +121,7 @@ pub fn poll_post_action(
   let conversation: ConversationId = parse_id(&conversation)?;
   let spec = PollDraft::from(draft).spec();
   spec
-    .check_at(&PollLimits::default(), now_ms)
+    .check_at(&PollLimits::from(limits), now_ms)
     .map_err(|error| TeamCraftError::InvalidInput(error.to_string()))?;
   let fallback = fallback_text(&spec, &title, &note);
   let action = ChatAction::PostPoll {
@@ -148,6 +161,7 @@ pub fn poll_choices_after_pressing(
     voter_count: 0,
     is_closed,
     is_mine: false,
+    can_close: false,
   };
   poll.choices_after_pressing(option)
 }
@@ -218,12 +232,41 @@ mod tests {
 
   const NOW_MS: i64 = 1_800_000_000_000;
 
+  fn limits() -> PollLimitsItem {
+    PollLimits::default().into()
+  }
+
+  #[test]
+  fn the_dialogs_limits_decide_what_is_too_long_and_stay_within_what_receivers_count() {
+    let tight = PollLimitsItem {
+      max_options: 2,
+      max_question_chars: 3,
+      max_option_chars: 5,
+      max_open_days: 1,
+    };
+    let problems = poll_problems(draft("Lunch?", &["A", "B"]), tight, NOW_MS);
+    assert_eq!(problems[0].kind, PollProblemKind::QuestionTooLong { max: 3 });
+    let wild = PollLimitsItem {
+      max_options: 500,
+      max_question_chars: 50_000,
+      max_option_chars: 0,
+      max_open_days: 0,
+    };
+    let bounded = PollLimits::from(wild);
+    assert_eq!(bounded.max_options, teamcraft_proto::MAX_RECEIVED_POLL_OPTIONS);
+    assert_eq!(
+      bounded.max_question_chars,
+      teamcraft_proto::MAX_RECEIVED_POLL_TEXT_CHARS
+    );
+    assert_eq!((bounded.max_option_chars, bounded.max_open_days), (1, 1));
+  }
+
   #[test]
   fn problems_name_their_fields_in_form_order() {
     let mut typed = draft("", &["Pizza", "", "pizza"]);
     typed.maybe_closes_at_ms = Some(NOW_MS - 1);
     assert_eq!(
-      poll_problems(typed, NOW_MS),
+      poll_problems(typed, limits(), NOW_MS),
       [
         PollProblemItem {
           field: PollFieldItem::Question,
@@ -246,7 +289,15 @@ mod tests {
     let mut typed = draft("Lunch?", &["Pizza", "", "Salad"]);
     typed.results = PollResultsItem::AfterVote;
     typed.maybe_closes_at_ms = Some(NOW_MS + 1);
-    let json = poll_post_action("7".into(), typed, "Poll".into(), "Update to vote.".into(), NOW_MS).unwrap();
+    let json = poll_post_action(
+      "7".into(),
+      typed,
+      limits(),
+      "Poll".into(),
+      "Update to vote.".into(),
+      NOW_MS,
+    )
+    .unwrap();
     assert_eq!(
       json,
       r#"{"action":"post_poll","conversation":"7","poll":{"spec":{"question":"Lunch?","options":["Pizza","Salad"],"choice":"single","voters":"shown","closes_at":1800000000001,"results":"after_vote"},"fallback":"**Poll:** Lunch?\n- Pizza\n- Salad\n\n_Update to vote._"}}"#
@@ -259,13 +310,14 @@ mod tests {
     let refused = poll_post_action(
       "7".into(),
       draft("Q", &["A"]),
+      limits(),
       "Poll".into(),
       "Note".into(),
       NOW_MS,
     );
     assert!(matches!(refused, Err(TeamCraftError::InvalidInput(_))));
     let typed = draft("Q", &["A", "B"]);
-    assert!(poll_post_action("x".into(), typed, "Poll".into(), "Note".into(), NOW_MS).is_err());
+    assert!(poll_post_action("x".into(), typed, limits(), "Poll".into(), "Note".into(), NOW_MS).is_err());
   }
 
   #[test]

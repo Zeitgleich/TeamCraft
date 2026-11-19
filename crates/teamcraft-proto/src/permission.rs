@@ -24,6 +24,9 @@ wire_enum! {
     DeleteOthersPosts => "delete_others_posts",
     UseChannelMentions => "use_channel_mentions",
     UseGroupMentions => "use_group_mentions",
+    /// Send a poll (issue #2120). The server can't see what a message is, so only the apps hold to
+    /// it: they offer the poll to people who have it (docs/e2ee.md §4.12).
+    CreatePoll => "create_poll",
     ManageBookmarks => "manage_bookmarks",
     ManageMembers => "manage_members",
     ManageChannelRoles => "manage_channel_roles",
@@ -139,6 +142,7 @@ impl Permission {
       | P::DeleteOthersPosts
       | P::UseChannelMentions
       | P::UseGroupMentions
+      | P::CreatePoll
       | P::ManageBookmarks
       | P::CreateShareLink => S::ChannelContent,
       P::ManageMembers
@@ -158,6 +162,7 @@ impl Permission {
         | Self::AddReaction
         | Self::UseChannelMentions
         | Self::UseGroupMentions
+        | Self::CreatePoll
         | Self::ManageBookmarks
         | Self::ManageMembers
     )
@@ -251,7 +256,14 @@ pub fn check_scheme_change(
 impl Default for PermissionScheme {
   fn default() -> Self {
     use Permission as P;
-    let guest = [P::CreatePost, P::AddReaction, P::CreateDm, P::CreateGroupDm];
+    // Polls were open to everybody before the permission existed (issue #2120), guests included.
+    let guest = [
+      P::CreatePost,
+      P::AddReaction,
+      P::CreatePoll,
+      P::CreateDm,
+      P::CreateGroupDm,
+    ];
     let member = [
       P::UseChannelMentions,
       P::UseGroupMentions,
@@ -307,7 +319,7 @@ impl Default for PermissionScheme {
 }
 
 /// All permissions this version knows.
-pub const ALL_KNOWN: [Permission; 36] = [
+pub const ALL_KNOWN: [Permission; 37] = [
   Permission::CreatePost,
   Permission::AddReaction,
   Permission::RemoveOthersReactions,
@@ -315,6 +327,7 @@ pub const ALL_KNOWN: [Permission; 36] = [
   Permission::DeleteOthersPosts,
   Permission::UseChannelMentions,
   Permission::UseGroupMentions,
+  Permission::CreatePoll,
   Permission::ManageBookmarks,
   Permission::ManageMembers,
   Permission::ManageChannelRoles,
@@ -470,6 +483,7 @@ mod tests {
   const GUEST_ALLOWED: &[Permission] = &[
     Permission::CreatePost,
     Permission::AddReaction,
+    Permission::CreatePoll,
     Permission::CreateDm,
     Permission::CreateGroupDm,
   ];
@@ -693,6 +707,41 @@ mod tests {
     #[test]
     fn a_channel_can_take_it_away_from_members() {
       assert!(Permission::UseGroupMentions.is_channel_moderatable());
+    }
+  }
+
+  mod create_poll {
+    use super::*;
+
+    #[test]
+    fn everybody_may_by_default_as_before_the_permission_existed() {
+      for (role, space) in [
+        (Role::Guest, guest_space()),
+        (Role::Member, member_space()),
+        (Role::Admin, member_space()),
+      ] {
+        assert!(is_allowed(
+          &PermissionScheme::default(),
+          &role,
+          &Permission::CreatePoll,
+          &channel_target(Some(space), member_channel_ctx()),
+        ));
+      }
+    }
+
+    #[test]
+    fn guests_can_lose_it_and_a_channel_can_take_it_away() {
+      let scheme =
+        PermissionScheme::default().with_changes(&[(SchemeRole::Guest, Permission::CreatePoll, false)]);
+      let target = channel_target(Some(guest_space()), member_channel_ctx());
+      assert!(!is_allowed(
+        &scheme,
+        &Role::Guest,
+        &Permission::CreatePoll,
+        &target
+      ));
+      assert!(Permission::CreatePoll.is_channel_moderatable());
+      assert_eq!(Permission::CreatePoll.as_str(), "create_poll");
     }
   }
 

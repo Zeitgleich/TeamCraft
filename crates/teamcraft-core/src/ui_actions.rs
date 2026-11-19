@@ -11,7 +11,7 @@ use teamcraft_client_api::model::{
   Bookmark, ConversationId, IntegrationSource, Message, MessageId, NewIntegrationSource, PENDING_ID_BIT,
   ThreadId, UserId, is_pending,
 };
-use teamcraft_client_api::polls::{NewPoll, PollLimits};
+use teamcraft_client_api::polls::NewPoll;
 use teamcraft_client_api::receipts::{is_delivered, is_read_by_all, seen_by};
 use teamcraft_client_api::scheduled::{ScheduledMessage, ScheduledOverview, ScheduledStatus, status_of};
 use teamcraft_proto::{
@@ -410,7 +410,10 @@ impl<S: LocalStore> CoreChatBackend<S> {
   /// Sends a poll (issue #205, e2ee.md §4.12): a text message whose text is what versions before
   /// polls show, with the poll inside the ciphertext.
   pub(crate) fn ui_post_poll(&self, conversation: ConversationId, poll: NewPoll) {
-    if let Err(error) = poll.spec.check_at(&PollLimits::default(), self.now_ms()) {
+    if let Err(error) = poll
+      .spec
+      .check_at(&crate::polls::stored_limits(self.store_ref()), self.now_ms())
+    {
       tracing::warn!(conversation_id = %conversation, %error, "not sending a poll the limits refuse");
       return;
     }
@@ -424,6 +427,20 @@ impl<S: LocalStore> CoreChatBackend<S> {
       meta,
     };
     self.enqueue(conversation, None, content);
+  }
+
+  /// The people besides a poll's sender whose close counts in `conversation`: its moderators and
+  /// admins by the signed role log this device verified, not the server's list (issue #2120).
+  pub(crate) fn poll_moderators(&self, conversation: ConversationId) -> std::collections::BTreeSet<UserId> {
+    let signed: crate::channel_roles::ChannelRoleState = self.read(
+      crate::records::get_json(
+        self.store_ref(),
+        crate::store::Table::Workspace,
+        &crate::client::channel_roles_key(conversation),
+      )
+      .map(Option::unwrap_or_default),
+    );
+    signed.moderators()
   }
 
   /// Votes in the poll `message` (no choices withdraw the vote): a hidden message like a reaction.
@@ -445,13 +462,17 @@ impl<S: LocalStore> CoreChatBackend<S> {
     self.enqueue(conversation, None, content);
   }
 
-  /// Closes one of the user's own polls. Others' devices only take a close from the poll's sender.
+  /// Closes a poll: one of the user's own, or any in a channel where the signed roles make them a
+  /// moderator or admin (issue #2120). Others' devices only take a close from such a person, by the
+  /// roles they verified themselves, so a modified client gains nothing by sending one.
   pub(crate) fn ui_close_poll(&self, conversation: ConversationId, message: MessageId) {
     let Some(poll) = self.find_stored(conversation, message) else {
       return;
     };
-    if poll.sender_user_id != self.me_id() || crate::polls::poll_of(&poll).is_none() {
-      tracing::warn!(conversation_id = %conversation, "only the poll's sender closes it");
+    let is_allowed =
+      poll.sender_user_id == self.me_id() || self.poll_moderators(conversation).contains(&self.me_id());
+    if !is_allowed || crate::polls::poll_of(&poll).is_none() {
+      tracing::warn!(conversation_id = %conversation, "only the poll's sender or a moderator closes it");
       return;
     }
     let content = MessageContent::PollClose {

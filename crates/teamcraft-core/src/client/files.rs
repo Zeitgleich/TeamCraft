@@ -889,6 +889,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
+  /// Keeps the poll limits the server published (`None`: it doesn't, as older servers).
+  pub(super) fn store_poll_limits(
+    &self,
+    maybe_limits: Option<teamcraft_proto::PollLimits>,
+  ) -> Result<(), CoreError> {
+    let recorded = records::get_json::<Option<teamcraft_proto::PollLimits>>(
+      &self.store,
+      Table::Account,
+      super::POLL_LIMITS_KEY,
+    )?;
+    if recorded != Some(maybe_limits) {
+      records::put_json(&self.store, Table::Account, super::POLL_LIMITS_KEY, &maybe_limits)?;
+    }
+    Ok(())
+  }
+
   /// Reads the server's attachment limit and whether it holds drafts' files again (a full sync
   /// does), from the first reads when they have it: one more round trip there costs every start.
   pub(super) async fn refresh_attachment_limit(&mut self) -> Result<(), CoreError> {
@@ -897,6 +913,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       None => self.api.me().await?,
     };
     self.store_draft_limits(me.maybe_draft_file_retention_days, me.maybe_max_key_bag_bytes)?;
+    self.store_poll_limits(me.maybe_poll_limits)?;
     self.store_attachment_limit(me.maybe_max_attachment_bytes)
   }
 

@@ -658,6 +658,20 @@ pub struct LimitSettings {
   /// Longest side of a custom emoji picture, in pixels.
   #[serde(default = "default_max_custom_emoji_side_px")]
   pub max_custom_emoji_side_px: u32,
+  /// Most options a poll a member sends may have (issue #2120; at most
+  /// [`MAX_RECEIVED_POLL_OPTIONS`](crate::MAX_RECEIVED_POLL_OPTIONS), what every device counts).
+  /// The four poll limits are only what the apps hold senders to: the server can't see a poll.
+  #[serde(default = "default_max_poll_options")]
+  pub max_poll_options: u32,
+  /// Longest poll question, in characters (at most [`MAX_RECEIVED_POLL_TEXT_CHARS`](crate::MAX_RECEIVED_POLL_TEXT_CHARS)).
+  #[serde(default = "default_max_poll_question_chars")]
+  pub max_poll_question_chars: u32,
+  /// Longest poll option, in characters (at most [`MAX_RECEIVED_POLL_TEXT_CHARS`](crate::MAX_RECEIVED_POLL_TEXT_CHARS)).
+  #[serde(default = "default_max_poll_option_chars")]
+  pub max_poll_option_chars: u32,
+  /// How many days ahead a poll's closing time may be.
+  #[serde(default = "default_max_poll_open_days")]
+  pub max_poll_open_days: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -732,6 +746,22 @@ fn default_max_custom_emoji() -> u32 {
 
 fn default_max_custom_emoji_bytes() -> u64 {
   crate::DEFAULT_MAX_CUSTOM_EMOJI_BYTES
+}
+
+fn default_max_poll_options() -> u32 {
+  crate::DEFAULT_MAX_POLL_OPTIONS as u32
+}
+
+fn default_max_poll_question_chars() -> u32 {
+  crate::DEFAULT_MAX_POLL_QUESTION_CHARS as u32
+}
+
+fn default_max_poll_option_chars() -> u32 {
+  crate::DEFAULT_MAX_POLL_OPTION_CHARS as u32
+}
+
+fn default_max_poll_open_days() -> u32 {
+  crate::DEFAULT_MAX_POLL_OPEN_DAYS
 }
 
 fn default_max_custom_emoji_side_px() -> u32 {

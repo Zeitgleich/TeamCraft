@@ -2434,6 +2434,13 @@ impl ChatBackend for RemoteChat {
     }
   }
 
+  fn poll_limits(&self) -> teamcraft_client_api::polls::PollLimits {
+    match self.ask(ChatQuery::PollLimits) {
+      Some(ChatAnswer::PollLimits { limits }) => limits,
+      _ => teamcraft_client_api::polls::PollLimits::default(),
+    }
+  }
+
   fn downloads(&self) -> Option<Vec<DownloadEntry>> {
     match self.ask(ChatQuery::Downloads)? {
       ChatAnswer::Downloads { entries } => Some(entries),

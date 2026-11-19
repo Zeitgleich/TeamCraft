@@ -1004,6 +1004,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.max_upload_bytes()
   }
 
+  fn poll_limits(&self) -> teamcraft_client_api::polls::PollLimits {
+    self.chat.poll_limits()
+  }
+
   fn downloads(&self) -> Option<Vec<teamcraft_client_api::actions::DownloadEntry>> {
     self.chat.downloads()
   }

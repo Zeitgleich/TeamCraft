@@ -903,6 +903,22 @@ notification setting `is_admins_mention_enabled` (admin console, default on) swi
 
 Group membership stays visible only to whom it already was: members of the workspace, never guests.
 
+#### 3.2.5 Polls (issue #2120)
+
+Polls are encrypted message content (e2ee.md §4.12), so the server can't see or refuse one. What
+admins set:
+
+| What                               | Where                                                                                                    | Default          |
+|------------------------------------|----------------------------------------------------------------------------------------------------------|------------------|
+| Who may send a poll                | the permission `create_poll` (channel permission; scheme per role, guests too; channel moderation)       | guests, members  |
+| Options, question and option text, | admin console, Settings > Limits (`max_poll_options`, `max_poll_question_chars`,                         | 12, 300, 100 and |
+| how far ahead a poll may close     | `max_poll_option_chars`, `max_poll_open_days`; file: `[limits]`)                                         | 365 days         |
+
+The apps hold senders to both (they don't offer the poll without the permission, and refuse one over the
+limits); receivers count any poll up to 32 options and 1000 characters whatever the limits say. A poll can
+be closed by its sender and by the channel's moderators and admins by the signed roles (e2ee.md §4.12), so a
+moderator ends a poll the sender left open.
+
 ### 3.3 Moderation
 
 Admins can't read reported content unless a member shows it to them:

@@ -1067,7 +1067,7 @@ impl ChatBackend for MockBackend {
       .get_mut(&conversation)
       .and_then(|all| all.iter_mut().find(|candidate| candidate.id == message))
       .and_then(|found| found.maybe_poll.as_deref_mut());
-    if let Some(poll) = found.filter(|poll| poll.is_mine) {
+    if let Some(poll) = found.filter(|poll| poll.can_close) {
       poll.is_closed = true;
     }
   }
@@ -1723,6 +1723,7 @@ fn new_poll_view(spec: teamcraft_client_api::polls::PollSpec) -> teamcraft_clien
     voter_count: 0,
     is_closed: false,
     is_mine: true,
+    can_close: true,
   }
 }
 
