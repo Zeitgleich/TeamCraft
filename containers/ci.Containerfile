@@ -11,7 +11,7 @@
 # The base image is pinned by tag and multi-arch index digest; Dependabot bumps both. By hand:
 # `docker buildx imagetools inspect <image>`, the top-level Digest.
 
-FROM docker.io/library/rust:1.99.1-trixie@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc
+FROM docker.io/library/rust:1.99.1-trixie@sha256:8a4e90c7946b74626488b1446f712c0fe0ed1a596cbd3d871684bc9c5433ae07
 
 # Packages, grouped by what needs them:
 #  - cmake, libclang-dev, pkg-config: codec and bindgen builds (opusic-sys, pipewire bindings)
