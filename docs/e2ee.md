@@ -7788,11 +7788,46 @@ node an admin can't export anybody's messages.
   - receiving clients drop previews for disallowed domains before rendering.
 - Same effect as server-side filtering, without leaking URLs.
 
+**The policy (#2107).** `link_previews` in the signed policy has a mode and a domain list. The
+admin console's security policy offers four choices: off (the default), all sites (`block_list`,
+empty list), all except listed sites (`block_list`) and only listed sites (`allow_list`, at least one
+entry). The rules live in one place, `teamcraft-proto::link_previews`, used by the console, the
+server's check of a published policy and every client:
+
+- An entry is a host name in its stored form: ASCII lower case, international names in punycode
+  (the console turns `bücher.example` into `xn--bcher-kva.example`), no trailing dot, no `*.`, no
+  scheme, user info, port or path; or an IPv4 address in dotted form. At most 500 entries. The
+  server refuses a policy whose list isn't in this form, so all clients read the same list.
+- An entry covers its host and every subdomain, on label boundaries: `example.com` covers
+  `docs.example.com`, not `evil-example.com` or `example.com.evil.example`. Hosts are compared as
+  the URL parser (WHATWG) gives them: lower-cased, IDN-mapped to punycode, trailing dots ignored,
+  user info and port not part of the host. An IPv4 entry covers only that address, in any spelling
+  (`http://3221225994/` is `192.0.2.10`, and so is `[::ffff:192.0.2.10]`); other IPv6 literals
+  can't be listed and never match. There is no public-suffix list: an entry like `com` covers all
+  of `.com`, which is the admin's choice.
+- Only http(s) links get previews; an unknown mode from a newer console means none.
+- **Only public hosts**, whatever the mode and the list: `localhost` and `*.localhost`, and
+  loopback, unspecified, private, link-local, shared (100.64.0.0/10), multicast, broadcast and
+  reserved addresses, IPv6 ones (`::1`, `fc00::/7`, `fe80::/10`) and IPv4 embedded in IPv6
+  (mapped, compatible, NAT64, 6to4) included, never get a preview
+  (`teamcraft-proto::is_public_address`). Otherwise a page could point its image or a redirect at
+  the sender's intranet (`http://192.168.1.10/x.jpg`) and have the sender's device post what it
+  finds there, encrypted, into the conversation.
+
 **Implemented:** the first http(s) link of a message is previewed. The message waits in the outbox
-while the sender's client reads the page (5 s timeout, at most 512 KiB of it, 3 redirects; a redirect
-to a disallowed domain gets no preview), takes OpenGraph title, description, site name and image
-(falling back to `<title>` and `description`), fetches the image (at most 2 MiB) and turns it into a
-small PNG. All of it goes into the encrypted message. The fetch comes from the sender's network,
+while the sender's client reads the page (5 s timeout, at most 512 KiB of it, 3 redirects), takes
+OpenGraph title, description, site name and image (falling back to `<title>` and `description`),
+fetches the image (at most 2 MiB) and turns it into a small PNG. The client follows redirects
+itself and checks **every hop** against the policy before contacting it, so a listed site can't send
+the device on to an unlisted or non-public host; a redirect to a disallowed host, or from https down
+to http, ends the preview. The image is fetched only from a host the policy allows too; an image on
+an unlisted host (a CDN, say) is left out and the preview has none. Host names are resolved by the
+fetcher itself and only to public addresses: a name that resolves only to private ones fails, and
+the connection uses the addresses that were checked, so DNS rebinding between check and connect
+doesn't reach the intranet. **Limit:** with a system proxy configured (honoured, as for all of the
+app's HTTP), the proxy resolves the name, so a public-looking name that resolves to an address
+inside the proxy's network can still be reached through it; address literals and `localhost` are
+refused before any request. All of it goes into the encrypted message. The fetch comes from the sender's network,
 so the linked site sees the sender's IP address, as it would on opening the link. Browsers can't
 read cross-origin pages, so the web client sends links without previews.
 

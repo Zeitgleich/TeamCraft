@@ -1339,6 +1339,27 @@ The **compliance archive** (an archive device that keeps every covered conversat
 for auditors) is designed in data-export.md §4.1 and not built yet: `compliance_archive.mode` stays
 `off`, and the server refuses anything else.
 
+### 3.15 Link previews (issue #2107)
+
+Whether messages show previews of their links is part of the signed workspace policy
+(`link_previews`, §2.3), on the security policy page: **Off** (the default), **All sites**, **All
+except listed sites** or **Only listed sites**, with a list of host names for the last two (one per
+line, at most 500; `example.com` covers its subdomains). The list field is disabled, not hidden,
+while the choice doesn't use it, and keeps what was typed so switching back restores it.
+
+- **Checks:** the console checks the list on save with the same rules as the server (a host name per
+  line, no URL, port or path; at least one site for "only listed"); a wrong line is named at the
+  field and gets the focus. It stores the entries in their canonical form (lower case, punycode).
+  The rules and the matching are in e2ee.md §12.
+- **Enforcement:** member clients, on both sides: the sender's device makes previews only of allowed
+  sites (every redirect hop and the image host included, never of `localhost` or private and
+  other non-public addresses, whatever the list says), and receivers drop previews of sites the
+  current policy doesn't allow, also of messages sent before the change. The server can't see links
+  and only checks the list's form.
+- **Privacy:** the sender's device opens the link to make the preview, so the linked site sees the
+  sender's IP address; the console says so. The web client makes no previews (browsers can't read
+  other sites' pages) but shows those others sent, under the same policy.
+
 ## 4. Audit log
 
 Every admin action, recovery, device change and role change is logged with actor, target and time.

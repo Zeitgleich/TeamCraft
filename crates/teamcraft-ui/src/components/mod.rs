@@ -20,6 +20,7 @@ pub mod admin_import;
 pub mod admin_instance;
 pub mod admin_integrations;
 pub mod admin_legal_hold;
+pub mod admin_link_previews;
 pub mod admin_mail;
 pub mod admin_notetaker;
 pub mod admin_owners;

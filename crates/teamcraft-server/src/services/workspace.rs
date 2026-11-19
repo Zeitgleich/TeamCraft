@@ -25,7 +25,7 @@ const MAX_PAYLOAD_BYTES: usize = 64 * 1024;
 /// `max_provider_marks` (8,000) of about 100 bytes each, and the owners and admins.
 const MAX_ROSTER_PAYLOAD_BYTES: usize = 1024 * 1024;
 const MAX_SIGNATURE_BYTES: usize = 4096;
-const MAX_LINK_PREVIEW_DOMAINS: usize = 500;
+const MAX_GUEST_EMAIL_DOMAINS: usize = 500;
 const MAX_DOMAIN_CHARS: usize = 253;
 const MAX_ORG_RECOVERY_ADMINS: u8 = 10;
 pub(super) const MAX_GUEST_EXPIRY_DAYS: u32 = 3650;
@@ -410,19 +410,13 @@ fn check_policy_payload(payload: &[u8], expected_new_version: u64) -> Result<Pol
       "the policy contains values this server does not know".into(),
     ));
   }
-  if policy.link_previews.domains.len() > MAX_LINK_PREVIEW_DOMAINS
-    || policy
-      .link_previews
-      .domains
-      .iter()
-      .any(|domain| !is_plausible_domain(domain))
-  {
-    return Err(ApiError::InvalidRequest(
-      "link_previews.domains must be host names".into(),
-    ));
-  }
+  // e2ee.md §12: the same rules the console and every client apply to the list.
+  policy
+    .link_previews
+    .check()
+    .map_err(|error| ApiError::InvalidRequest(format!("link_previews: {error}")))?;
   let domains = &policy.guests.allowed_email_domains;
-  if domains.len() > MAX_LINK_PREVIEW_DOMAINS || domains.iter().any(|domain| !is_plausible_domain(domain)) {
+  if domains.len() > MAX_GUEST_EMAIL_DOMAINS || domains.iter().any(|domain| !is_plausible_domain(domain)) {
     return Err(ApiError::InvalidRequest(
       "guests.allowed_email_domains must be domain names".into(),
     ));
@@ -823,17 +817,28 @@ mod tests {
   }
 
   #[test]
-  fn link_preview_domains_must_look_like_host_names() {
+  fn link_preview_domains_must_be_host_names_in_stored_form() {
     let with = |domain: &str| payload(1, |p| p.link_previews.domains = vec![domain.to_owned()]);
     assert!(check_policy_payload(&with("example.com"), 1).is_ok());
+    assert!(check_policy_payload(&with("xn--bcher-kva.example"), 1).is_ok());
     for bad in [
       "",
       "https://example.com",
       "exa mple.com",
       ".example.com",
       "example.com.",
+      "Example.com",
+      "*.example.com",
+      "bücher.example",
+      "example.com:443",
+      "user@example.com",
     ] {
       assert!(check_policy_payload(&with(bad), 1).is_err(), "{bad:?}");
     }
+    let empty_allow_list = payload(1, |p| {
+      p.link_previews.mode = teamcraft_proto::LinkPreviewMode::AllowList;
+      p.link_previews.domains.clear();
+    });
+    assert!(check_policy_payload(&empty_allow_list, 1).is_err());
   }
 }

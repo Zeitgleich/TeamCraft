@@ -1,15 +1,14 @@
 //! Link previews (e2ee.md §12): the sender's client fetches the page and puts title, description
-//! and a small image into the encrypted message. The domain list of the signed workspace policy is
-//! enforced by senders (no preview for disallowed domains) and receivers (disallowed previews are
-//! dropped), because the server can't see the URL.
+//! and a small image into the encrypted message. The domain list of the signed workspace policy
+//! ([`teamcraft_proto::LinkPreviewPolicy::allows`]) is enforced by senders (no preview for
+//! disallowed domains) and receivers (disallowed previews are dropped), because the server can't
+//! see the URL.
 //!
-//! This module holds the pure parts: finding the URL, the policy check and reading the page's
-//! metadata. Fetching is in [`crate::client::previews`].
+//! This module holds the pure parts: finding the URL and reading the page's metadata. Fetching is in [`crate::client::previews`].
 
 use std::future::Future;
 use std::pin::Pin;
 
-use teamcraft_proto::{LinkPreviewMode, LinkPreviewPolicy};
 use url::Url;
 
 /// Longest title and description kept (characters).
@@ -28,15 +27,24 @@ pub struct PageMeta {
 /// A fetched resource.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fetched {
-  /// After redirects.
-  pub final_url: Url,
   pub content_type: String,
   pub body: Vec<u8>,
 }
 
-/// Fetches pages and images for previews; an implementation enforces timeouts and `max_bytes`.
+/// What one request for a preview got.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FetchResponse {
+  Fetched(Fetched),
+  /// A redirect to this URL (resolved against the request's). Not followed by the fetcher: the
+  /// caller checks every hop against the policy (public hosts only, the domain list) and refuses
+  /// https-to-http before following it.
+  Redirect(Url),
+}
+
+/// Fetches pages and images for previews, one request at a time without following redirects; an
+/// implementation enforces timeouts and `max_bytes`.
 pub trait PreviewFetcher {
-  fn fetch(&self, url: Url, max_bytes: usize) -> Pin<Box<dyn Future<Output = Option<Fetched>> + '_>>;
+  fn fetch(&self, url: Url, max_bytes: usize) -> Pin<Box<dyn Future<Output = Option<FetchResponse>> + '_>>;
 }
 
 /// The first http(s) link in a message text.
@@ -52,28 +60,6 @@ pub fn first_url(text: &str) -> Option<Url> {
     .map(|word| word.trim_end_matches(['.', ',', ')', ']', '!', '?', ';', ':', '\'']))
     .find_map(|word| Url::parse(word).ok())
     .filter(|url| url.host_str().is_some())
-}
-
-/// Whether the policy allows previews of links to `url` (sender and receiver both check).
-pub fn is_allowed(policy: &LinkPreviewPolicy, url: &Url) -> bool {
-  let Some(host) = url.host_str() else {
-    return false;
-  };
-  let host = host.trim_end_matches('.').to_ascii_lowercase();
-  let is_listed = policy.domains.iter().any(|domain| {
-    let domain = domain
-      .trim()
-      .trim_start_matches("*.")
-      .trim_end_matches('.')
-      .to_ascii_lowercase();
-    !domain.is_empty() && (host == domain || host.ends_with(&format!(".{domain}")))
-  });
-  match policy.mode {
-    LinkPreviewMode::AllowList => is_listed,
-    LinkPreviewMode::BlockList => !is_listed,
-    // Off, and modes from newer policies this client doesn't know: no previews.
-    _ => false,
-  }
 }
 
 /// Reads OpenGraph tags (falling back to `<title>` and `<meta name="description">`) from HTML.
@@ -274,29 +260,6 @@ mod tests {
     );
     assert_eq!(first_url("ftp://example.com and mailto:x"), None);
     assert_eq!(first_url("nothing here"), None);
-  }
-
-  #[test]
-  fn policy_lists_match_domains_and_subdomains() {
-    let allow = LinkPreviewPolicy {
-      mode: LinkPreviewMode::AllowList,
-      domains: vec!["example.com".into()],
-    };
-    let url = |text: &str| Url::parse(text).unwrap();
-    assert!(is_allowed(&allow, &url("https://docs.example.com/x")));
-    assert!(is_allowed(&allow, &url("https://EXAMPLE.com.")));
-    assert!(!is_allowed(&allow, &url("https://notexample.com")));
-    let block = LinkPreviewPolicy {
-      mode: LinkPreviewMode::BlockList,
-      domains: vec!["*.tracker.example".into()],
-    };
-    assert!(!is_allowed(&block, &url("https://a.tracker.example")));
-    assert!(is_allowed(&block, &url("https://example.org")));
-    let off = LinkPreviewPolicy {
-      mode: LinkPreviewMode::Off,
-      domains: Vec::new(),
-    };
-    assert!(!is_allowed(&off, &url("https://example.org")));
   }
 
   #[test]

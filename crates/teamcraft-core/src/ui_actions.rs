@@ -27,7 +27,6 @@ use crate::client::{
 use crate::error::CoreError;
 use crate::imported::Authorship;
 use crate::integration_sources::{SourceAuthority, SourceLedger};
-use crate::link_preview::is_allowed;
 use crate::read_state;
 use crate::records;
 use crate::store::{
@@ -1118,7 +1117,7 @@ pub(crate) fn shown_link_preview(meta: &MessageMeta, policy: &LinkPreviewPolicy)
   meta
     .maybe_link_preview
     .as_ref()
-    .filter(|preview| url::Url::parse(&preview.url).is_ok_and(|url| is_allowed(policy, &url)))
+    .filter(|preview| url::Url::parse(&preview.url).is_ok_and(|url| policy.allows(&url)))
     .map(|preview| LinkPreview {
       url: preview.url.clone(),
       maybe_title: preview.maybe_title.clone(),

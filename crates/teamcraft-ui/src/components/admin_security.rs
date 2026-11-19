@@ -4,11 +4,13 @@ use teamcraft_proto::{
 };
 
 use crate::components::admin_console::SectionHeader;
+use crate::components::admin_link_previews::{LinkPreviewGroup, link_preview_errors};
 use crate::components::admin_owners::OwnersPanel;
 use crate::components::admin_policy::{
   CheckRow, PolicyBlockerNote, PolicyDraft, PolicyFooter, SelectRow, use_policy_draft,
 };
 use crate::components::people_picker::PeoplePicker;
+use crate::form_errors::FormErrors;
 use crate::i18n::use_i18n;
 use crate::model::{User, UserId};
 use crate::state::use_app_state;
@@ -47,12 +49,17 @@ const LEAVER_GRACE_MINUTES: [u32; 6] = [0, 15, 60, 240, 1440, 10_080];
 /// Automatic removals per admin device and day.
 const LEAVER_MAX_PER_DAY: [u32; 6] = [1, 5, 10, 25, 50, 100];
 
+/// The security form's id: a refused save focuses its first invalid field.
+const FORM_ID: &str = "policy-security-form";
+
 /// Security policy: the signed settings that the server and every member client enforce.
 #[component]
 pub fn SecuritySection() -> impl IntoView {
   let i18n = use_i18n();
   let policy = use_policy_draft();
   let draft = policy.draft;
+  // The fields this form checks before signing (forms.md); today the link preview list.
+  let errors = FormErrors::new();
 
   let leaver_grace_options = Signal::derive(move || {
     LEAVER_GRACE_MINUTES
@@ -246,10 +253,19 @@ pub fn SecuritySection() -> impl IntoView {
     />
     <PolicyBlockerNote policy=policy />
     <form
+      id=FORM_ID
       class="policy-form"
+      novalidate
       on:submit=move |ev: web_sys::SubmitEvent| {
         ev.prevent_default();
-        policy.save();
+        // The server checks the same rules; checked here so the error is at its field.
+        let found = draft.with_untracked(|policy| link_preview_errors(policy, i18n));
+        if found.is_empty() {
+          errors.clear();
+          policy.save();
+        } else {
+          errors.refuse(FORM_ID, found);
+        }
       }
     >
       <OwnersPanel policy=policy />
@@ -670,6 +686,8 @@ pub fn SecuritySection() -> impl IntoView {
           }
         />
       </fieldset>
+
+      <LinkPreviewGroup policy=policy errors=errors />
 
       <PolicyFooter policy=policy />
     </form>

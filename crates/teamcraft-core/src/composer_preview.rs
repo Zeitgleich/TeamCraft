@@ -24,7 +24,7 @@ use url::Url;
 
 use crate::client::previews::{LinkPreviewSettings, default_fetcher, make_link_preview};
 use crate::clock::{Clock, SystemClock};
-use crate::link_preview::{PreviewFetcher, first_url, is_allowed};
+use crate::link_preview::{PreviewFetcher, first_url};
 use crate::records;
 use crate::store::{LinkPreviewData, LocalStore, Table};
 use crate::ui_backend::{CoreChatBackend, CoreCommand};
@@ -332,14 +332,14 @@ impl<S: LocalStore> CoreChatBackend<S> {
   fn allowed_preview(&self, preview: LinkPreviewData) -> Option<LinkPreviewData> {
     let policy = self.verified_policy().link_previews;
     Url::parse(&preview.url)
-      .is_ok_and(|url| is_allowed(&policy, &url))
+      .is_ok_and(|url| policy.allows(&url))
       .then_some(preview)
   }
 }
 
 /// The draft's link the composer previews: its first one, when the policy allows its domain.
 fn composer_url(body: &str, policy: &LinkPreviewPolicy) -> Option<Url> {
-  first_url(body).filter(|url| is_allowed(policy, url))
+  first_url(body).filter(|url| policy.allows(url))
 }
 
 fn draft_key(conversation: ConversationId, maybe_thread: Option<ThreadId>) -> String {

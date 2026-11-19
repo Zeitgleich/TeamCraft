@@ -14,9 +14,8 @@ use url::Url;
 use super::Client;
 use crate::api::ServerApi;
 use crate::error::CoreError;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::link_preview::Fetched;
-use crate::link_preview::{PreviewFetcher, first_url, is_allowed, parse_page};
+use crate::link_preview::{FetchResponse, PreviewFetcher, first_url, parse_page};
 use crate::records;
 use crate::store::{LinkPreviewData, LocalStore, MessageContent, Table};
 
@@ -88,8 +87,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 }
 
 /// Reads the page `url` links to and makes its preview, under `policy`: the one way previews are
-/// made, for the outbox and for the composer (#2073). `None` for a disallowed domain (also after a
-/// redirect), a page that isn't HTML or says nothing about itself, and any failure to fetch.
+/// made, for the outbox and for the composer (#2073). `None` for a disallowed domain (also on any
+/// redirect hop), a page that isn't HTML or says nothing about itself, and any failure to fetch.
+/// The page's image is fetched only from a host the policy allows too; otherwise the preview has
+/// none.
 pub async fn make_link_preview(
   fetcher: &dyn PreviewFetcher,
   settings: &LinkPreviewSettings,
@@ -97,25 +98,25 @@ pub async fn make_link_preview(
   url: &str,
 ) -> Option<LinkPreviewData> {
   let url = Url::parse(url).ok()?;
-  // Checked again here: the policy may have changed since the message or draft was written.
-  if !is_allowed(policy, &url) {
+  // Checked here (and on every hop): the policy may have changed since the message or draft was
+  // written.
+  let (page_url, page) =
+    fetch_allowed(fetcher, settings, policy, url.clone(), settings.max_page_bytes).await?;
+  if !page.content_type.contains("html") {
     return None;
   }
-  let page = fetcher.fetch(url.clone(), settings.max_page_bytes).await?;
-  // A redirect to a disallowed domain gets no preview either.
-  if !is_allowed(policy, &page.final_url) || !page.content_type.contains("html") {
-    return None;
-  }
-  let meta = parse_page(&String::from_utf8_lossy(&page.body), &page.final_url);
+  let meta = parse_page(&String::from_utf8_lossy(&page.body), &page_url);
   if meta.maybe_title.is_none() && meta.maybe_description.is_none() {
     return None;
   }
   let maybe_image = match meta.maybe_image_url {
-    Some(image_url) => match fetcher.fetch(image_url, settings.max_image_bytes).await {
-      Some(image) => crate::thumbnail::make_thumbnail(&image.body, &image.content_type)
-        .await
-        .map(Base64Bytes::new),
-      None => None,
+    Some(image_url) => {
+      match fetch_allowed(fetcher, settings, policy, image_url, settings.max_image_bytes).await {
+        Some((_, image)) => crate::thumbnail::make_thumbnail(&image.body, &image.content_type)
+          .await
+          .map(Base64Bytes::new),
+        None => None,
+      }
     },
     None => None,
   };
@@ -128,6 +129,29 @@ pub async fn make_link_preview(
   })
 }
 
+/// Fetches `url`, following at most `settings.max_redirects` redirects, each only to a link the
+/// policy allows (which also keeps out hosts that aren't public) and never from https down to http.
+/// Returns the URL the resource came from and the resource.
+async fn fetch_allowed(
+  fetcher: &dyn PreviewFetcher,
+  settings: &LinkPreviewSettings,
+  policy: &LinkPreviewPolicy,
+  mut url: Url,
+  max_bytes: usize,
+) -> Option<(Url, Fetched)> {
+  for _ in 0..=settings.max_redirects {
+    if !policy.allows(&url) {
+      return None;
+    }
+    match fetcher.fetch(url.clone(), max_bytes).await? {
+      FetchResponse::Fetched(fetched) => return Some((url, fetched)),
+      FetchResponse::Redirect(next) if url.scheme() == "https" && next.scheme() != "https" => return None,
+      FetchResponse::Redirect(next) => url = next,
+    }
+  }
+  None
+}
+
 /// Holds a just-written message back for a preview if it links somewhere the policy allows.
 pub fn queue_preview(
   store: &impl LocalStore,
@@ -136,7 +160,7 @@ pub fn queue_preview(
   message: ClientMessageId,
   body: &str,
 ) -> Result<bool, CoreError> {
-  let Some(url) = first_url(body).filter(|url| is_allowed(policy, url)) else {
+  let Some(url) = first_url(body).filter(|url| policy.allows(url)) else {
     return Ok(false);
   };
   let pending = PendingPreview {
@@ -180,7 +204,10 @@ impl HttpPreviewFetcher {
   pub fn new(settings: &LinkPreviewSettings) -> Option<Self> {
     let client = reqwest::Client::builder()
       .timeout(settings.timeout)
-      .redirect(reqwest::redirect::Policy::limited(settings.max_redirects))
+      // Redirects come back to `make_link_preview`, which checks each hop against the policy.
+      .redirect(reqwest::redirect::Policy::none())
+      // A public name that resolves to a private address (or is rebound to one) reaches nothing.
+      .dns_resolver(PublicOnlyResolver)
       .user_agent("TeamCraft link preview")
       .build()
       .ok()?;
@@ -188,12 +215,40 @@ impl HttpPreviewFetcher {
   }
 }
 
+/// Resolves host names for preview fetches to their public addresses only
+/// ([`teamcraft_proto::is_public_address`]); a name with none fails. The connection uses exactly
+/// these addresses, so a name can't be rebound to a private one between the check and the
+/// connection. Through a proxy the proxy resolves the name; e2ee.md §12 states that limit.
+#[cfg(not(target_arch = "wasm32"))]
+struct PublicOnlyResolver;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl reqwest::dns::Resolve for PublicOnlyResolver {
+  fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+    let host = name.as_str().to_owned();
+    Box::pin(async move {
+      let public: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
+        .await?
+        .filter(|address| teamcraft_proto::is_public_address(address.ip()))
+        .collect();
+      if public.is_empty() {
+        return Err("the host has no public address".into());
+      }
+      Ok(Box::new(public.into_iter()) as reqwest::dns::Addrs)
+    })
+  }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 impl PreviewFetcher for HttpPreviewFetcher {
-  fn fetch(&self, url: Url, max_bytes: usize) -> Pin<Box<dyn Future<Output = Option<Fetched>> + '_>> {
+  fn fetch(&self, url: Url, max_bytes: usize) -> Pin<Box<dyn Future<Output = Option<FetchResponse>> + '_>> {
     Box::pin(async move {
-      let mut response = self.client.get(url).send().await.ok()?.error_for_status().ok()?;
-      let final_url = response.url().clone();
+      let response = self.client.get(url.clone()).send().await.ok()?;
+      if response.status().is_redirection() {
+        let location = response.headers().get(reqwest::header::LOCATION)?.to_str().ok()?;
+        return url.join(location).ok().map(FetchResponse::Redirect);
+      }
+      let mut response = response.error_for_status().ok()?;
       let content_type = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -213,11 +268,7 @@ impl PreviewFetcher for HttpPreviewFetcher {
           break;
         }
       }
-      Some(Fetched {
-        final_url,
-        content_type,
-        body,
-      })
+      Some(FetchResponse::Fetched(Fetched { content_type, body }))
     })
   }
 }

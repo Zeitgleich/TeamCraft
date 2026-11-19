@@ -6,6 +6,7 @@
 
 use crate::common;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
 use std::io::Cursor;
@@ -15,22 +16,164 @@ use common::{Peer, backend_of, run_commands, settle};
 use image::{ImageBuffer, ImageFormat, Rgb};
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_core::api::fake::FakeServer;
-use teamcraft_core::link_preview::{Fetched, PreviewFetcher};
+use teamcraft_core::client::previews::{LinkPreviewSettings, make_link_preview};
+use teamcraft_core::link_preview::{FetchResponse, Fetched, PreviewFetcher};
 use teamcraft_core::workspace::RosterRole;
 use teamcraft_proto::{ConversationId, LinkPreviewMode, LinkPreviewPolicy, WorkspacePolicy};
 use url::Url;
 
-/// A tiny web: URL → response.
-struct FakeWeb(HashMap<String, Fetched>);
+/// A tiny web: URL → response. Remembers which URLs were asked for.
+#[derive(Default)]
+struct FakeWeb {
+  pages: HashMap<String, FetchResponse>,
+  asked: RefCell<Vec<String>>,
+}
 
 impl PreviewFetcher for FakeWeb {
-  fn fetch(&self, url: Url, max_bytes: usize) -> Pin<Box<dyn Future<Output = Option<Fetched>> + '_>> {
+  fn fetch(&self, url: Url, max_bytes: usize) -> Pin<Box<dyn Future<Output = Option<FetchResponse>> + '_>> {
+    self.asked.borrow_mut().push(url.to_string());
     let maybe = self
-      .0
+      .pages
       .get(url.as_str())
       .cloned()
-      .filter(|fetched| fetched.body.len() <= max_bytes);
+      .filter(|response| match response {
+        FetchResponse::Fetched(fetched) => fetched.body.len() <= max_bytes,
+        FetchResponse::Redirect(_) => true,
+      });
     Box::pin(async move { maybe })
+  }
+}
+
+impl FakeWeb {
+  fn with_redirect(mut self, from: &str, to: &str) -> Self {
+    self
+      .pages
+      .insert(from.to_owned(), FetchResponse::Redirect(Url::parse(to).unwrap()));
+    self
+  }
+
+  fn with_page(mut self, url: &str, html: &str) -> Self {
+    self.pages.insert(
+      url.to_owned(),
+      FetchResponse::Fetched(Fetched {
+        content_type: "text/html".into(),
+        body: html.as_bytes().to_vec(),
+      }),
+    );
+    self
+  }
+
+  fn asked(&self) -> Vec<String> {
+    self.asked.borrow().clone()
+  }
+}
+
+/// Every hop of a redirect and the page's image are checked against the domain list before the
+/// device contacts them (e2ee.md §12): the linked site sees the sender's address, an unlisted one
+/// must not.
+mod hops {
+  use super::*;
+
+  const GUIDE: &str = "https://docs.example.com/guide";
+
+  #[tokio::test]
+  async fn redirects_are_followed_only_to_allowed_hosts() {
+    let allow = policy(LinkPreviewMode::AllowList).link_previews;
+    let web = web()
+      .with_redirect("https://docs.example.com/short", GUIDE)
+      .with_redirect("https://docs.example.com/out", "https://tracker.example.net/hop")
+      .with_redirect("https://tracker.example.net/hop", GUIDE);
+    let settings = LinkPreviewSettings::default();
+
+    let followed = make_link_preview(&web, &settings, &allow, "https://docs.example.com/short").await;
+    assert_eq!(followed.unwrap().maybe_title.as_deref(), Some("The Guide"));
+
+    let out = make_link_preview(&web, &settings, &allow, "https://docs.example.com/out").await;
+    assert!(out.is_none());
+    assert!(
+      !web.asked().iter().any(|url| url.contains("tracker.example.net")),
+      "the unlisted hop was never contacted: {:?}",
+      web.asked()
+    );
+  }
+
+  #[tokio::test]
+  async fn redirects_never_go_down_to_http_or_into_the_intranet() {
+    let everything = LinkPreviewPolicy {
+      mode: LinkPreviewMode::BlockList,
+      domains: Vec::new(),
+    };
+    let web = web()
+      .with_redirect("https://docs.example.com/plain", "http://docs.example.com/guide")
+      .with_page("http://docs.example.com/guide", "<title>Over http</title>")
+      .with_redirect("https://docs.example.com/inside", "http://192.168.1.10/admin")
+      .with_page("http://192.168.1.10/admin", "<title>Router</title>")
+      .with_page(
+        "https://docs.example.com/image",
+        r#"<meta property="og:title" content="Intranet image">
+          <meta property="og:image" content="http://10.0.0.5/secret.png">"#,
+      );
+    let settings = LinkPreviewSettings::default();
+    for start in [
+      "https://docs.example.com/plain",
+      "https://docs.example.com/inside",
+    ] {
+      assert!(
+        make_link_preview(&web, &settings, &everything, start)
+          .await
+          .is_none(),
+        "{start}"
+      );
+    }
+    let preview = make_link_preview(&web, &settings, &everything, "https://docs.example.com/image")
+      .await
+      .unwrap();
+    assert!(preview.maybe_image.is_none());
+    assert_eq!(
+      web.asked(),
+      [
+        "https://docs.example.com/plain",
+        "https://docs.example.com/inside",
+        "https://docs.example.com/image"
+      ],
+      "neither the http hop nor an intranet address was contacted"
+    );
+  }
+
+  #[tokio::test]
+  async fn redirect_loops_stop_at_the_limit() {
+    let allow = policy(LinkPreviewMode::AllowList).link_previews;
+    let web = web()
+      .with_redirect("https://docs.example.com/a", "https://docs.example.com/b")
+      .with_redirect("https://docs.example.com/b", "https://docs.example.com/a");
+    let settings = LinkPreviewSettings::default();
+    assert!(
+      make_link_preview(&web, &settings, &allow, "https://docs.example.com/a")
+        .await
+        .is_none()
+    );
+    assert_eq!(web.asked().len(), settings.max_redirects + 1);
+  }
+
+  #[tokio::test]
+  async fn an_image_on_an_unlisted_host_is_left_out() {
+    let allow = policy(LinkPreviewMode::AllowList).link_previews;
+    let web = web().with_page(
+      "https://docs.example.com/cdn",
+      r#"<meta property="og:title" content="Elsewhere image">
+        <meta property="og:image" content="https://cdn.example.net/cover.png">"#,
+    );
+    let preview = make_link_preview(
+      &web,
+      &LinkPreviewSettings::default(),
+      &allow,
+      "https://docs.example.com/cdn",
+    )
+    .await
+    .unwrap();
+    assert_eq!(preview.maybe_title.as_deref(), Some("Elsewhere image"));
+    assert!(preview.maybe_image.is_none());
+    assert_eq!(web.asked(), ["https://docs.example.com/cdn"]);
   }
 }
 
@@ -200,14 +343,13 @@ fn web() -> FakeWeb {
   let entry = |url: &str, content_type: &str, body: Vec<u8>| {
     (
       url.to_string(),
-      Fetched {
-        final_url: Url::parse(url).unwrap(),
+      FetchResponse::Fetched(Fetched {
         content_type: content_type.into(),
         body,
-      },
+      }),
     )
   };
-  FakeWeb(HashMap::from([
+  let pages = HashMap::from([
     entry(
       "https://docs.example.com/guide",
       "text/html; charset=utf-8",
@@ -223,7 +365,11 @@ fn web() -> FakeWeb {
       "text/html",
       b"<title>Elsewhere</title>".to_vec(),
     ),
-  ]))
+  ]);
+  FakeWeb {
+    pages,
+    asked: RefCell::default(),
+  }
 }
 
 /// The composer's link preview (#2073): made while typing, sent exactly as shown.
@@ -345,7 +491,7 @@ mod composer {
   #[tokio::test]
   async fn a_failed_fetch_is_tried_again_after_a_while_and_disallowed_links_get_none() {
     let (_server, alice, _bob, channel) = workspace_with_policy(LinkPreviewMode::AllowList).await;
-    let (ui, fetches, clock) = composer_of(&alice, Box::new(FakeWeb(HashMap::new())));
+    let (ui, fetches, clock) = composer_of(&alice, Box::new(FakeWeb::default()));
     ui.update_composer_link(channel, None, GUIDE);
     assert!(run_fetches(&ui, &fetches).await);
     assert_eq!(ui.composer_link_preview(channel, None), ComposerLinkPreview::None);
@@ -364,7 +510,11 @@ mod composer {
   struct Stalled;
 
   impl PreviewFetcher for Stalled {
-    fn fetch(&self, _url: Url, _max_bytes: usize) -> Pin<Box<dyn Future<Output = Option<Fetched>> + '_>> {
+    fn fetch(
+      &self,
+      _url: Url,
+      _max_bytes: usize,
+    ) -> Pin<Box<dyn Future<Output = Option<FetchResponse>> + '_>> {
       Box::pin(std::future::pending())
     }
   }
