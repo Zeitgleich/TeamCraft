@@ -3,8 +3,8 @@
 //! Tauri embeds `frontendDist` (`crates/teamcraft-ui/dist`, the same build the web release ships)
 //! as it is. The app's calls run in the shell (`RemoteCalls`), so the page never loads the
 //! browser's call module, its AudioWorklet, the background effects' segmentation worker and its
-//! model (the app bundles its own ONNX model as a resource). They were a few MB of the app. This
-//! copies the build without them into `OUT_DIR` and points the embedding there: Tauri's
+//! model (the app bundles its own ONNX model as a resource) or the voice decoder's worker (#2140).
+//! They were a few MB of the app. This copies the build without them into `OUT_DIR` and points the embedding there: Tauri's
 //! `generate_context!` reads the configuration from `tauri.conf.json` merged with the
 //! `TAURI_CONFIG` variable (which the Tauri CLI sets for its `--config` files), and the variable
 //! this build script sets for the compiler adds `build.frontendDist`. The Tauri CLI, `cargo build`
@@ -24,6 +24,9 @@ const BROWSER_ONLY_FILES: &[&str] = &[
   // The background effects' segmentation worker: its script and module.
   "teamcraft-segmentation-worker",
   "teamcraft-web-segmentation",
+  // The voice decoder with Opus FEC (#2140): its worker's script and module.
+  "teamcraft-voice-worker",
+  "teamcraft-web-voice",
 ];
 /// Directories of the web build's top directory that only browsers load: the segmentation model.
 const BROWSER_ONLY_DIRECTORIES: &[&str] = &["models"];

@@ -1,0 +1,25 @@
+[package]
+publish = false
+name = "teamcraft-web-voice"
+description = "The browser's voice decoder with Opus in-band FEC: a wasm module the call module runs in a worker once a voice packet first goes missing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Built by crates/teamcraft-ui/scripts/build-workers.sh (a step of the web build) with WebAssembly
+# SIMD, next to the segmentation module.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Only the decoder (ropus) and its messages: no call engine, no DAVE.
+teamcraft-media = { path = "../teamcraft-media", default-features = false, features = ["voice-fec"] }
+console_error_panic_hook = "0.1"
+wasm-bindgen = "0.2.129"
+js-sys = "0.3.106"
+web-sys = { version = "0.3.106", features = ["DedicatedWorkerGlobalScope", "MessageEvent", "console"] }

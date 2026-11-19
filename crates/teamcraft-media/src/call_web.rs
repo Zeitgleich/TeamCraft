@@ -57,6 +57,7 @@ mod segmentation_worker;
 mod session_watch;
 mod switch_back;
 mod video;
+mod voice_worker;
 
 #[cfg(feature = "effects")]
 pub use effects_preview::{EffectsPreview, TimedEffects};
@@ -71,6 +72,7 @@ pub use segmentation_worker::{SegmentationWorker, WorkerMask};
 #[cfg(feature = "effects")]
 pub use video::CameraEffects;
 pub use video::CodecSupport;
+use voice_worker::{VoiceFec, VoiceStream};
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -164,6 +166,9 @@ const MAX_DECODED_SAMPLES: usize = 8 * FRAME_SAMPLES_PER_CHANNEL;
 /// output arrives a turn of the event loop after its input, so the frame that plays next has to
 /// be in it already. A 60 ms packet (#1893) covers this for three frames.
 const DECODE_AHEAD_SAMPLES: usize = 2 * FRAME_SAMPLES_PER_CHANNEL;
+/// The packets WebCodecs decoded last that prime the voice worker's decoder for a voice it takes
+/// over (#2140): SILK's and CELT's state reaches back about this far.
+const PRIMING_PACKETS: usize = 3;
 /// A thin copy whose encoder failed starts again this much later (#1893 step 3): soon, but not
 /// once per microphone frame while the browser refuses it.
 const THIN_VOICE_RESTART_AFTER: Duration = Duration::from_secs(1);
@@ -241,6 +246,10 @@ pub struct WebCallConfig {
   /// the join starts from it while it is fresh. A browser can't tell networks apart, so its age
   /// is all that decides.
   pub maybe_prior_link: Option<PriorLink>,
+  /// Where the page serves the voice worker's script (`<meta name="teamcraft-voice-worker">`,
+  /// [`crate::voice_fec::protocol::worker_url`]): it recovers lost voice packets from the next
+  /// one's in-band FEC data (#2140). `None` conceals them with WebCodecs.
+  pub maybe_voice_worker_url: Option<String>,
 }
 
 pub use crate::link_probe::LinkProbeTarget;
@@ -672,15 +681,31 @@ struct OpusEncoder {
 /// A remote device's microphone or shared screen sound.
 type RemoteStream = (DeviceId, AudioOrigin);
 
-/// One remote audio stream: jitter buffer, WebCodecs decoder and decoded samples waiting for the mix.
+/// One remote audio stream: jitter buffer, decoder and decoded samples waiting for the mix.
 struct RemoteAudio {
+  stream: RemoteStream,
   jitter: JitterBuffer<Vec<u8>>,
-  decoder: AudioDecoder,
+  decoder: RemoteDecoder,
   decoded: VecDeque<f32>,
   /// Samples handed to the decoder whose output has not arrived yet.
   decoding_samples: usize,
   /// The last packet decoded: a lost one is taken to be as long (#1893).
   maybe_last_packet: Option<Vec<u8>>,
+  /// The packets WebCodecs decoded last, oldest first: they prime the voice worker's decoder when
+  /// the stream moves over to it (#2140).
+  recent: VecDeque<Vec<u8>>,
+}
+
+/// Who decodes a remote stream: WebCodecs, or for a voice once a packet went missing, the voice
+/// worker, which recovers lost packets from the next one's in-band FEC data (#2140).
+enum RemoteDecoder {
+  WebCodecs(WebCodecsAudio),
+  Worker(VoiceStream),
+}
+
+/// A WebCodecs `AudioDecoder` for one stream; closed on drop.
+struct WebCodecsAudio {
+  decoder: AudioDecoder,
   timestamp_us: f64,
   _output: Closure<dyn FnMut(AudioData)>,
   _error: Closure<dyn FnMut(JsValue)>,
@@ -1197,6 +1222,7 @@ async fn run_call(
     maybe_thin_voice_restart_at: None,
     maybe_screen_sound: None,
     remotes: BTreeMap::new(),
+    voice: VoiceFec::new(config.maybe_voice_worker_url.clone()),
     meter,
     source: config.source.clone(),
     tone_position: 0,
@@ -1348,6 +1374,8 @@ struct CallState<'a> {
   /// The running screen share's sound, while it is sent.
   maybe_screen_sound: Option<ScreenSound>,
   remotes: BTreeMap<RemoteStream, RemoteAudio>,
+  /// The voice worker that recovers lost voice packets from FEC data, once one went missing (#2140).
+  voice: VoiceFec,
   /// Measures the microphone for the call's device menu (#986).
   meter: CallMeter,
   source: AudioSource,
@@ -2488,9 +2516,15 @@ impl CallState<'_> {
         self.push_thin_voice(&samples);
       }
     }
+    let now = Instant::now();
+    if self.voice.take_failure(now) {
+      for remote in self.remotes.values_mut() {
+        remote.fall_back(self.inputs)?;
+      }
+    }
     let mut mix = vec![0.0f32; FRAME_SAMPLES_PER_CHANNEL];
     for remote in self.remotes.values_mut() {
-      remote.decode_due()?;
+      remote.decode_due(&mut self.voice, now, self.inputs)?;
       let available = remote.decoded.len().min(FRAME_SAMPLES_PER_CHANNEL);
       for (slot, sample) in mix.iter_mut().zip(remote.decoded.drain(..available)) {
         *slot += sample;
@@ -3964,6 +3998,133 @@ impl RemoteAudio {
     jitter: JitterBufferConfig,
     inputs: &mpsc::UnboundedSender<Input>,
   ) -> Result<Self, WebCallError> {
+    debug!(sender = %stream.0, origin = ?stream.1, "decoding a new audio stream");
+    Ok(Self {
+      stream,
+      jitter: JitterBuffer::new(jitter),
+      decoder: RemoteDecoder::WebCodecs(WebCodecsAudio::new(stream, inputs)?),
+      decoded: VecDeque::new(),
+      decoding_samples: 0,
+      maybe_last_packet: None,
+      recent: VecDeque::with_capacity(PRIMING_PACKETS),
+    })
+  }
+
+  /// Buffers a packet; the buffer's depths count packets of its length (#1893).
+  fn push(&mut self, sequence_number: SequenceNumber, opus: Vec<u8>) {
+    if let Some(samples) = opus_packet_samples(&opus) {
+      self
+        .jitter
+        .set_packet_frames(samples.div_ceil(FRAME_SAMPLES_PER_CHANNEL));
+    }
+    self.jitter.push(sequence_number, opus);
+  }
+
+  /// Hands the packets due now to the decoder, until what is decoded or being decoded reaches
+  /// past the next frame: one 20 ms packet a frame, a 60 ms one every third (#1893). A lost packet
+  /// goes to the voice worker, which recovers it from the next packet's FEC data (#2140); a lost
+  /// voice packet starts that worker. WebCodecs has no loss concealment call: there a lost packet
+  /// goes in as one of the same length with empty frames, which the decoder conceals.
+  fn decode_due(
+    &mut self,
+    voice: &mut VoiceFec,
+    now: Instant,
+    inputs: &mpsc::UnboundedSender<Input>,
+  ) -> Result<(), WebCallError> {
+    if self.decoding_samples > 2 * MAX_PACKET_SAMPLES_PER_CHANNEL {
+      // Output the count waits for never came (a packet the decoder refused): count afresh
+      // rather than wait for ever.
+      debug!(
+        samples = self.decoding_samples,
+        "audio decoder output went missing"
+      );
+      self.decoding_samples = 0;
+    }
+    self.move_to_worker(voice);
+    while self.decoded.len() + self.decoding_samples < DECODE_AHEAD_SAMPLES {
+      match self.jitter.pop() {
+        Some(Playout::Packet { item, .. }) => self.decode(item)?,
+        Some(Playout::Missing { .. }) => {
+          if self.stream.1 == AudioOrigin::Microphone {
+            voice.on_voice_lost(now, inputs);
+          }
+          self.conceal()?;
+        },
+        None => return Ok(()),
+      }
+    }
+    Ok(())
+  }
+
+  /// The voice worker took over the decoder (#2140), or the worker failed: back to WebCodecs.
+  fn fall_back(&mut self, inputs: &mpsc::UnboundedSender<Input>) -> Result<(), WebCallError> {
+    if matches!(self.decoder, RemoteDecoder::Worker(_)) {
+      self.decoder = RemoteDecoder::WebCodecs(WebCodecsAudio::new(self.stream, inputs)?);
+      // The worker's answers on their way are gone with it.
+      self.decoding_samples = 0;
+    }
+    Ok(())
+  }
+
+  /// A voice moves to the voice worker once it is ready (#2140): when nothing is on its way out of
+  /// WebCodecs, so the samples stay in order, and with the packets WebCodecs decoded last, so the
+  /// worker's decoder starts where it left off.
+  fn move_to_worker(&mut self, voice: &VoiceFec) {
+    if self.stream.1 != AudioOrigin::Microphone
+      || self.decoding_samples > 0
+      || !matches!(self.decoder, RemoteDecoder::WebCodecs(_))
+    {
+      return;
+    }
+    if let Some(worker) = voice.ready_worker() {
+      let stream = worker.open(self.stream, self.recent.iter().map(Vec::as_slice));
+      self.decoder = RemoteDecoder::Worker(stream);
+      self.recent.clear();
+    }
+  }
+
+  fn decode(&mut self, packet: Vec<u8>) -> Result<(), WebCallError> {
+    let samples = opus_packet_samples(&packet).unwrap_or(FRAME_SAMPLES_PER_CHANNEL);
+    match &mut self.decoder {
+      RemoteDecoder::WebCodecs(decoder) => {
+        decoder.decode(&packet, samples)?;
+        if self.recent.len() == PRIMING_PACKETS {
+          self.recent.pop_front();
+        }
+        self.recent.push_back(packet.clone());
+      },
+      RemoteDecoder::Worker(stream) => stream.decode(&packet),
+    }
+    self.decoding_samples += samples;
+    self.maybe_last_packet = Some(packet);
+    Ok(())
+  }
+
+  /// A lost packet, as long as the one before it.
+  fn conceal(&mut self) -> Result<(), WebCallError> {
+    let Some(last) = self.maybe_last_packet.as_deref() else {
+      // Nothing played before it: the gap stays a gap.
+      return Ok(());
+    };
+    let lost_samples = opus_packet_samples(last).unwrap_or(FRAME_SAMPLES_PER_CHANNEL);
+    match &mut self.decoder {
+      RemoteDecoder::WebCodecs(decoder) => {
+        let Some(lost) = opus_lost_packet_like(last) else {
+          return Ok(());
+        };
+        decoder.decode(&lost, lost_samples)?;
+      },
+      RemoteDecoder::Worker(stream) => {
+        stream.conceal(self.jitter.peek_next().map(Vec::as_slice), lost_samples);
+      },
+    }
+    self.decoding_samples += lost_samples;
+    Ok(())
+  }
+}
+
+impl WebCodecsAudio {
+  fn new(stream: RemoteStream, inputs: &mpsc::UnboundedSender<Input>) -> Result<Self, WebCallError> {
     let decoded_tx = inputs.clone();
     let output = Closure::<dyn FnMut(AudioData)>::new(move |data: AudioData| {
       let samples = Float32Array::new_with_length(data.number_of_frames());
@@ -3999,60 +4160,12 @@ impl RemoteAudio {
     ])
     .map_err(browser("AudioDecoder"))?;
     decoder.configure(&config).map_err(browser("AudioDecoder"))?;
-    debug!(sender = %stream.0, origin = ?stream.1, "decoding a new audio stream");
     Ok(Self {
-      jitter: JitterBuffer::new(jitter),
       decoder,
-      decoded: VecDeque::new(),
-      decoding_samples: 0,
-      maybe_last_packet: None,
       timestamp_us: 0.0,
       _output: output,
       _error: error,
     })
-  }
-
-  /// Buffers a packet; the buffer's depths count packets of its length (#1893).
-  fn push(&mut self, sequence_number: SequenceNumber, opus: Vec<u8>) {
-    if let Some(samples) = opus_packet_samples(&opus) {
-      self
-        .jitter
-        .set_packet_frames(samples.div_ceil(FRAME_SAMPLES_PER_CHANNEL));
-    }
-    self.jitter.push(sequence_number, opus);
-  }
-
-  /// Hands the packets due now to the decoder, until what is decoded or being decoded reaches
-  /// past the next frame: one 20 ms packet a frame, a 60 ms one every third (#1893). WebCodecs has
-  /// no loss concealment call: a lost packet goes in as one of the same length with empty frames,
-  /// which the decoder conceals.
-  fn decode_due(&mut self) -> Result<(), WebCallError> {
-    if self.decoding_samples > 2 * MAX_PACKET_SAMPLES_PER_CHANNEL {
-      // Output the count waits for never came (a packet the decoder refused): count afresh
-      // rather than wait for ever.
-      debug!(
-        samples = self.decoding_samples,
-        "audio decoder output went missing"
-      );
-      self.decoding_samples = 0;
-    }
-    while self.decoded.len() + self.decoding_samples < DECODE_AHEAD_SAMPLES {
-      let packet = match self.jitter.pop() {
-        Some(Playout::Packet { item, .. }) => item,
-        Some(Playout::Missing { .. }) => {
-          match self.maybe_last_packet.as_deref().and_then(opus_lost_packet_like) {
-            Some(lost) => lost,
-            // Nothing played before it: the gap stays a gap.
-            None => continue,
-          }
-        },
-        None => return Ok(()),
-      };
-      let samples = opus_packet_samples(&packet).unwrap_or(FRAME_SAMPLES_PER_CHANNEL);
-      self.decode(&packet, samples)?;
-      self.maybe_last_packet = Some(packet);
-    }
-    Ok(())
   }
 
   fn decode(&mut self, packet: &[u8], samples: usize) -> Result<(), WebCallError> {
@@ -4067,12 +4180,11 @@ impl RemoteAudio {
     .map_err(browser("EncodedAudioChunk"))?;
     // Microseconds of 48 kHz samples.
     self.timestamp_us += samples as f64 * 1_000_000.0 / f64::from(SAMPLE_RATE_HZ);
-    self.decoding_samples += samples;
     self.decoder.decode(&chunk).map_err(browser("AudioDecoder"))
   }
 }
 
-impl Drop for RemoteAudio {
+impl Drop for WebCodecsAudio {
   fn drop(&mut self) {
     let _ = self.decoder.close();
   }

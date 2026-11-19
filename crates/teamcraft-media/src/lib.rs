@@ -60,6 +60,7 @@ pub mod video_jpeg;
 pub mod video_mediacodec;
 #[cfg(feature = "native")]
 pub mod video_pipeline;
+pub mod voice_fec;
 #[cfg(feature = "native")]
 mod worker_thread;
 

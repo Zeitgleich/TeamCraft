@@ -39,6 +39,8 @@ combos=(
   "teamcraft-server|lib|"
   "teamcraft-server|all|--features integration"
   "teamcraft-media|all|"
+  # What the voice worker (teamcraft-web-voice, #2140) builds it with.
+  "teamcraft-media|all|--no-default-features --features voice-fec"
   "teamcraft-sfu|all|"
 )
 

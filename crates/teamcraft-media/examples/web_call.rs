@@ -109,6 +109,7 @@ pub async fn join_dev_call(
     },
     // The development page measures nothing before the join.
     maybe_prior_link: None,
+    maybe_voice_worker_url: None,
   };
   let call = WebCall::join(config)
     .await

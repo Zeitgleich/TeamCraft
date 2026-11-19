@@ -42,9 +42,9 @@ model="$root/crates/teamcraft-media/models/selfie_segmentation_landscape.nnef"
 rm -rf "$out"
 mkdir -p "$out"
 
-# The segmentation worker and its module, as build-segmentation.sh builds them for a release.
+# The segmentation worker and its module, as build-workers.sh builds them for a release.
 TRUNK_STAGING_DIR="$out" TRUNK_PROFILE=release WASM_OPT="$wasm_opt" \
-  sh "$root/crates/teamcraft-ui/scripts/build-segmentation.sh"
+  sh "$root/crates/teamcraft-ui/scripts/build-workers.sh"
 cp "$model" "$out/model.nnef"
 
 # The bench module: the call module's effects with its features, size-optimized like it

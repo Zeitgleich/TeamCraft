@@ -4,7 +4,7 @@
 # module (Trunk names its worker assets without a hash), and tells the page the names in
 # <meta name="teamcraft-calls"> and <meta name="teamcraft-call-worklet"> (web_calls.rs).
 #
-# Background effects (#439): the segmentation worker's script, which build-segmentation.sh built
+# Background effects (#439): the segmentation worker's script, which build-workers.sh built
 # and named, goes into <meta name="teamcraft-segmentation-worker">; the call module starts it when
 # the first effect starts. The segmentation model, as NNEF (#1295), is named in
 # <meta name="teamcraft-segmentation-model"> under a name with its pinned hash
@@ -12,6 +12,10 @@
 # crates/teamcraft-media/models/fetch-nnef.sh made it; the web release adds it with
 # add-segmentation-model.sh instead (the desktop app has its own ONNX copy and leaves this one out).
 # Without it the browser's effects say they couldn't start.
+#
+# The voice decoder with Opus FEC (#2140): its worker's script, which build-workers.sh built and
+# named, goes into <meta name="teamcraft-voice-worker">; the call module starts it when a voice
+# packet first goes missing.
 set -eu
 dist="${TRUNK_STAGING_DIR:?run this as a Trunk hook}"
 case "$dist" in
@@ -52,6 +56,12 @@ workers = sorted(name for name in os.listdir(dist)
 if len(workers) != 1:
     raise SystemExit(f"finish-calls: expected one segmentation worker script, found {workers}")
 meta += f'<meta name="teamcraft-segmentation-worker" content="/{workers[0]}">\n'
+
+voice_workers = sorted(name for name in os.listdir(dist)
+                       if name.startswith("teamcraft-voice-worker-") and name.endswith(".js"))
+if len(voice_workers) != 1:
+    raise SystemExit(f"finish-calls: expected one voice worker script, found {voice_workers}")
+meta += f'<meta name="teamcraft-voice-worker" content="/{voice_workers[0]}">\n'
 
 model_name = "selfie_segmentation_landscape"
 model_path = os.path.join(models, model_name + ".nnef")

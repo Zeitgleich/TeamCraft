@@ -69,6 +69,10 @@ voice = ["native", "voice-decode", "dep:teamcraft-client-api"]
 # Only the decoder (libopus and symphonia, no audio devices): the fuzz target builds this.
 voice-decode = ["dep:opus", "dep:symphonia"]
 
+# The browser's voice decoder with Opus in-band FEC (#2140, `voice_fec`): pure Rust, so it builds
+# for wasm32; the voice worker (teamcraft-web-voice) is built with it alone.
+voice-fec = ["dep:ropus"]
+
 # Microphones and speakers through PipeWire as well (#1072): cpal's PipeWire host for the streams,
 # its PulseAudio host (native protocol, pure Rust) where no PipeWire daemon runs, ALSA last.
 pipewire = ["native", "dep:pipewire", "dep:ashpd", "cpal/pipewire", "cpal/pulseaudio"]
@@ -161,6 +165,10 @@ tract-onnx-opl = { version = "0.23.9", optional = true }
 sha2 = { version = "0.11.0", optional = true }
 # Safe libopus bindings; libopus (BSD-3-Clause) is the reference Opus implementation.
 opus = { version = "0.4.0", optional = true }
+# The browser's voice decoder (#2140): a pure-Rust port of libopus (BSD-3-Clause), bit-exact with
+# the reference, with the in-band FEC decoding WebCodecs lacks. Its only dependency is `wide`
+# (SIMD helpers, Zlib/MIT/Apache-2.0).
+ropus = { version = "0.12.18", optional = true }
 # Cross-platform audio device I/O (ALSA/PipeWire, CoreAudio, WASAPI, AAudio).
 cpal = { version = "0.18.2", optional = true }
 # Decodes a user's own message sound on the desktop (#800): pure Rust, no unsafe, MPL-2.0. Only
