@@ -20,15 +20,15 @@ pub fn call_snapshot(calls: State<'_, Arc<CallHost>>) -> CallSnapshot {
   calls.page_snapshot()
 }
 
-/// Moves the finished call recording into the core's upload staging folder (e2ee.md §8.3); returns
-/// the path the message names. The core uploads it encrypted and empties the folder.
+/// Decrypts the finished call recording into the core's upload staging folder (e2ee.md §8.3);
+/// returns the path the message names. The core uploads it encrypted and empties the folder.
 #[tauri::command(rename_all = "snake_case")]
-pub fn call_recording_stage(
+pub async fn call_recording_stage(
   host: State<'_, CoreHost>,
   calls: State<'_, Arc<CallHost>>,
 ) -> Result<String, CommandError> {
   let staging = host.current()?.staging_dir().to_path_buf();
-  let path = calls.stage_recording(&staging)?;
+  let path = calls.stage_recording(&staging).await?;
   Ok(path.to_string_lossy().into_owned())
 }
 

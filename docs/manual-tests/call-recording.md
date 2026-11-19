@@ -48,6 +48,9 @@ Write down for every run: date, server and SFU version, app versions and platfor
 - [ ] Quit the app while recording, start it again: no card, and the app's cache folder
   `call-recordings` is empty. The others saw the recording end when A's device left the call.
 - [ ] Sign out after a recording without posting it: the take is gone.
+- [ ] While recording and while the card waits, the file in `call-recordings` is not playable and
+  doesn't start with `OggS` (it is encrypted, #2129); `strings` shows nothing readable. Posting still
+  gives B a file that plays, and afterwards `call-recordings` is empty.
 
 ## 4. Logs
 

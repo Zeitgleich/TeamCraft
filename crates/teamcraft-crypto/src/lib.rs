@@ -34,6 +34,7 @@ pub mod push;
 pub mod push_gateway;
 pub mod recovery_key;
 pub mod rendezvous;
+pub mod sealed_stream;
 pub mod secret;
 pub mod secret_file;
 pub mod server_secret;

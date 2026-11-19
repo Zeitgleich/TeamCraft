@@ -733,9 +733,9 @@ impl CallHost {
     self.changed();
   }
 
-  /// Moves the take into the core's upload `staging` folder; returns the path to post.
-  pub fn stage_recording(&self, staging: &std::path::Path) -> Result<PathBuf, String> {
-    let path = recording::stage(&self.state, staging)?;
+  /// Decrypts the take into the core's upload `staging` folder; returns the path to post.
+  pub async fn stage_recording(&self, staging: &std::path::Path) -> Result<PathBuf, String> {
+    let path = recording::stage(&self.state, staging).await?;
     self.changed();
     Ok(path)
   }
