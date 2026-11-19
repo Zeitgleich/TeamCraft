@@ -175,7 +175,7 @@ covers the app and its `.voip` topic, and a development gateway can use it too).
 download once; keep the file in the password manager.
 
 **Sandbox or production.** A device token belongs to the APNs environment of the build's
-`aps-environment` entitlement: `production` for builds from `testflight.yml` (TestFlight, later the
+`aps-environment` entitlement: `production` for builds from `ios-release.yml` (TestFlight, later the
 App Store), `development` for builds run from Xcode (`apps/ios/Config/Base.xcconfig`). Apple answers a
 token of the other environment with `BadDeviceToken`, which the gateway reports as a dead token, so the
 server forgets the registration. One gateway serves one environment (`use_sandbox`), so the

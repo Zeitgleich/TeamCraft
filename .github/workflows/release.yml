@@ -13,6 +13,8 @@
 #   flavor, which google-play.yml uploads to Google Play once the release is published. They don't
 #   hold up the rest: the draft release is created without them, and the `android-release` job
 #   attaches them (and their SHA256SUMS lines) when the Android build is done.
+# - The iOS app (ios-release.yml, with the signing secrets): uploaded to TestFlight when built; the
+#   `ios-release` job attaches the App Store-signed .ipa the same way.
 # - SBOMs (SPDX and CycloneDX) of the source tree and the images, image digests, SHA256SUMS, and a
 #   build provenance attestation for every file.
 # - Notes rendered from .github/release-notes.md: the highlights from the annotated tag's message, generated notes
@@ -237,6 +239,17 @@ jobs:
       packages: read
     uses: ./.github/workflows/desktop-release.yml
     # The optional signing secrets (Apple Developer ID, updater key) are read inside it.
+    secrets: inherit
+
+  # The iOS app: built, signed and uploaded to TestFlight on a Mac (ios-release.yml, called like the
+  # desktop packages); `ios-release` attaches the .ipa. Skipped with a notice without the signing secrets.
+  ios:
+    name: iOS
+    needs: version
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ios-release.yml
+    # The signing and App Store Connect secrets and variables are read inside it.
     secrets: inherit
 
   android:
@@ -603,13 +616,50 @@ jobs:
           gh workflow run google-play.yml --ref "$DEFAULT_BRANCH" -f tag="$TAG"
           gh workflow run packages.yml --ref "$DEFAULT_BRANCH"
 
+  # After `android-release`, which also rewrites SHA256SUMS: one job at a time edits it. A failed
+  # Android or iOS build holds neither the release nor the other platform back.
+  ios-release:
+    name: Attach the iOS app
+    needs: [version, ios, release, android-release]
+    if: ${{ !cancelled() && needs.release.result == 'success' && needs.ios.outputs.built == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-ios
+          path: ios
+      - name: Checksum of the .ipa
+        run: |
+          (cd ios && sha256sum -- *.ipa > "$RUNNER_TEMP/ios.sums")
+          cat "$RUNNER_TEMP/ios.sums"
+      - name: Build provenance attestation of the .ipa
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: ${{ runner.temp }}/ios.sums
+      - name: Attach to the release
+        run: |
+          mkdir -p sums
+          gh release download "$TAG" --pattern SHA256SUMS --dir sums --clobber
+          scripts/merge-checksums.py sums/SHA256SUMS "$RUNNER_TEMP/ios.sums" > ios/SHA256SUMS
+          gh release upload "$TAG" ios/* --clobber
+          cat ios/SHA256SUMS
+
   # Nightly releases (`publish`): publishes the release when it is built. Publishing with the
-  # workflow's token starts no `release: published` workflows, so the package site, Google Play and
-  # TestFlight are started here. An Android build that failed doesn't hold the release back (#696):
+  # workflow's token starts no `release: published` workflows, so the package site and Google Play
+  # are started here. An Android build that failed doesn't hold the release back (#696):
   # the files are attached later, and `android-release` then starts Packages and Google Play again.
   publish:
     name: Publish
-    needs: [release, android-release]
+    needs: [release, android-release, ios-release]
     if: ${{ !cancelled() && inputs.publish && needs.release.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
@@ -624,11 +674,9 @@ jobs:
     steps:
       - name: Publish the release
         run: gh release edit "$TAG" --draft=false
-      - name: Package site, Google Play and TestFlight
+      - name: Package site and Google Play
         run: |
           gh workflow run packages.yml --ref "$DEFAULT_BRANCH"
-          # Builds the iOS app from the tag itself; it needs nothing release.yml made.
-          gh workflow run testflight.yml --ref "$DEFAULT_BRANCH" -f tag="$TAG"
           if [ "$ANDROID_RESULT" = success ]; then
             gh workflow run google-play.yml --ref "$DEFAULT_BRANCH" -f tag="$TAG"
           else

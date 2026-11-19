@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Archives the app for the App Store and uploads it to App Store Connect (TestFlight). macOS only.
-# Used by .github/workflows/testflight.yml; runs the same on a Mac (docs/release.md, "TestFlight").
+# Archives the app for the App Store, exports the .ipa and uploads it to App Store Connect
+# (TestFlight). macOS only. Used by .github/workflows/ios-release.yml; runs the same on a Mac
+# (docs/release.md, "TestFlight").
 #
 # Needs, before it runs:
 #   - the Rust core for the device: scripts/build-xcframework.sh --device-only
@@ -18,7 +19,8 @@
 #   TEAMCRAFT_PUSH_GATEWAY_URL     the publisher's push gateway built into the app (docs/push-gateway.md §3a)
 #
 # Usage: scripts/archive-testflight.sh [--no-upload]
-#   --no-upload  export the .ipa into build/export instead of uploading it (check signing locally)
+#   Always exports the signed .ipa into build/export; uploads it unless --no-upload is given
+#   --no-upload  only the .ipa (check signing locally)
 set -euo pipefail
 
 UPLOAD=1
@@ -49,7 +51,7 @@ if [ ! -d Generated/TeamCraftFFI.xcframework ]; then
   exit 1
 fi
 xcodegen generate
-rm -rf "${ARCHIVE}" "${BUILD_DIR}/export"
+rm -rf "${ARCHIVE}" "${BUILD_DIR}/export" "${BUILD_DIR}/upload"
 mkdir -p "${BUILD_DIR}"
 
 # Manual signing with the distribution identity: the profiles name the bundle IDs and the
@@ -68,11 +70,10 @@ xcodebuild archive \
   TEAMCRAFT_PUSH_GATEWAY_URL="${TEAMCRAFT_PUSH_GATEWAY_URL:-}" \
   | tail -n 200
 
-destination=upload
-[ "${UPLOAD}" = 1 ] || destination=export
 # The build number is the release's (docs/release.md, "Build numbers"): App Store Connect must not
 # change it. Symbols go to Apple too, so TestFlight crash logs are symbolized.
-cat > "${EXPORT_OPTIONS}" <<PLIST
+write_export_options() {
+  cat > "$1" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -80,7 +81,7 @@ cat > "${EXPORT_OPTIONS}" <<PLIST
   <key>method</key>
   <string>app-store-connect</string>
   <key>destination</key>
-  <string>${destination}</string>
+  <string>$2</string>
   <key>teamID</key>
   <string>${APPLE_TEAM_ID}</string>
   <key>signingStyle</key>
@@ -105,18 +106,20 @@ cat > "${EXPORT_OPTIONS}" <<PLIST
 </dict>
 </plist>
 PLIST
-plutil -lint "${EXPORT_OPTIONS}"
+  plutil -lint "$1"
+}
 
-auth=()
-if [ "${UPLOAD}" = 1 ]; then
-  auth=(-authenticationKeyPath "${ASC_KEY_PATH}" -authenticationKeyID "${ASC_KEY_ID}"
-    -authenticationKeyIssuerID "${ASC_ISSUER_ID}")
-fi
+# The .ipa first (it is attached to the GitHub release), then the upload from the same archive.
+write_export_options "${EXPORT_OPTIONS}" export
 xcodebuild -exportArchive -archivePath "${ARCHIVE}" -exportOptionsPlist "${EXPORT_OPTIONS}" \
-  -exportPath "${BUILD_DIR}/export" ${auth[@]+"${auth[@]}"} | tail -n 100
+  -exportPath "${BUILD_DIR}/export" | tail -n 100
+echo "Exported to ${BUILD_DIR}/export."
 
 if [ "${UPLOAD}" = 1 ]; then
+  write_export_options "${BUILD_DIR}/ExportOptions-upload.plist" upload
+  xcodebuild -exportArchive -archivePath "${ARCHIVE}" \
+    -exportOptionsPlist "${BUILD_DIR}/ExportOptions-upload.plist" -exportPath "${BUILD_DIR}/upload" \
+    -authenticationKeyPath "${ASC_KEY_PATH}" -authenticationKeyID "${ASC_KEY_ID}" \
+    -authenticationKeyIssuerID "${ASC_ISSUER_ID}" | tail -n 100
   echo "Uploaded to App Store Connect; TestFlight lists the build once Apple has processed it."
-else
-  echo "Exported to ${BUILD_DIR}/export."
 fi

@@ -215,7 +215,7 @@ Rendered by `scripts/render-release-notes.py` from the template `.github/release
 | Highlights                  | the annotated tag's message (a candidate with an empty one: the base version's tag's)                                  |
 | Install                     | the template, with the image references of `images.txt`                                                                |
 | Upgrading, breaking changes | the template; `### Breaking` of the tag message, else "None."                                                          |
-| Known limitations           | the template: unsigned builds, iOS not distributed, push for self-built apps, what is tested in CI only, AppImage size |
+| Known limitations           | the template: unsigned builds, iOS TestFlight only, push for self-built apps, what is tested in CI only, AppImage size |
 | Verify the downloads        | the template: checksums, attestations, cosign                                                                          |
 | What's changed              | GitHub's generated notes, grouped by `.github/release.yml`                                                             |
 
@@ -304,7 +304,7 @@ timestamp, notarizes and staples the app and the dmg, and requires Gatekeeper to
 | Android  | Release APKs and AAB signed with the upload key when its secrets exist, else `-unsigned`   |
 | macOS    | Ad-hoc signed, not notarized; Developer ID signing and notarization with the secrets above |
 | Windows  | Not code-signed (`apps/desktop/packaging/windows/README.md`)                               |
-| iOS      | Built and signed for the App Store by `testflight.yml` (below); not attached to releases   |
+| iOS      | Signed for the App Store by `ios-release.yml` (below), `.ipa` attached, TestFlight upload  |
 | Linux    | Packages are unsigned; checksums and attestations cover them; the repositories sign them   |
 | Updates  | minisign signatures for the updater when `TAURI_SIGNING_PRIVATE_KEY` exists (below)        |
 | Web      | Signed release manifest (`release.json`) when `TEAMCRAFT_WEB_RELEASE_KEY` exists (below)   |
@@ -427,18 +427,26 @@ permission); every published tag, candidates included, then goes there.
 
 ## TestFlight
 
-`testflight.yml` runs when a release or candidate is published (or by hand: *Actions → TestFlight →
-Run workflow* with the tag; the nightly release starts it from its `publish` job). Unlike Google
-Play it builds the app itself, on a macOS runner from the tag: the Rust core for the device
+`release.yml` builds the iOS app for every tag, like the desktop packages: its job `ios` calls
+`ios-release.yml`, which runs on a macOS runner from the tag: the Rust core for the device
 (`build-xcframework.sh --device-only`, with line tables for the dSYM), then
 `apps/ios/scripts/archive-testflight.sh`, which archives with the **Apple Distribution** certificate
-and the App Store provisioning profiles and uploads the archive to App Store Connect
-(`xcodebuild -exportArchive`, `destination = upload`, authenticated with the App Store Connect API
-key). The build number is the release's ([Build numbers](#build-numbers)); App Store Connect refuses
-one it has seen, so a re-run after a successful upload fails at the upload and changes nothing.
+and the App Store provisioning profiles, exports the `.ipa` and uploads the same archive to App Store
+Connect (`xcodebuild -exportArchive`, `destination = upload`, authenticated with the App Store Connect
+API key). The job `ios-release` then attaches `teamcraft-ios-X.Y.Z.ipa` to the release with its
+`SHA256SUMS` line and a build provenance attestation, after `android-release` (both rewrite
+`SHA256SUMS`). The `.ipa` is signed for the App Store: it installs only through TestFlight or the App
+Store, not by download. A failed iOS build holds neither the release nor Android back; the nightly's
+`publish` waits for the attachment. By hand, *Actions → iOS release → Run workflow* with a tag builds
+and uploads again without touching the release.
+
+The upload happens when the tag is built, not when the release is published (unlike Google Play):
+TestFlight reaches internal testers only, and every tag's build number is new. The build number is the
+release's ([Build numbers](#build-numbers)); App Store Connect refuses one it has seen, so a re-run
+after a successful upload fails at the upload and changes nothing.
 The dSYMs go to Apple with the upload and, with the `CRASH_REPORTS_*` / `DEBUG_FILES_S3_*` secrets,
 to the crash reports backend and the private bucket ([Debug symbols](#debug-symbols)); never to a
-workflow artifact. iOS files are not attached to the GitHub release.
+workflow artifact or the release.
 
 **Signing: certificate plus profiles from the API, no fastlane.** The workflow imports one
 distribution certificate into a keychain of the run and downloads the three App Store profiles
@@ -459,7 +467,7 @@ for one app and one certificate. The yearly chore is the same either way: renew 
 | Secret `APPLE_DISTRIBUTION_CERTIFICATE_P12`        | The *Apple Distribution* certificate with its private key, `.p12`, base64     |
 | Secret `APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD`   | The `.p12`'s export password                                                  |
 
-Without the three secrets and the three variables the run skips the upload with a notice. The App
+Without the three secrets and the three variables nothing is built (a notice) and the release has no `.ipa`. The App
 Store Connect API key is not the APNs key: the APNs key (`.p8` too) lives only in the push gateway
 ([push-gateway.md](push-gateway.md) §6).
 
