@@ -62,8 +62,8 @@ impl GuestTokens {
       return Err(GuestTokenError::WeakSecret);
     }
     Ok(Self {
-      encoding: EncodingKey::from_secret(bytes),
-      decoding: DecodingKey::from_secret(bytes),
+      encoding: EncodingKey::from_secret(bytes).map_err(|_| GuestTokenError::WeakSecret)?,
+      decoding: DecodingKey::from_secret(bytes).map_err(|_| GuestTokenError::WeakSecret)?,
     })
   }
 

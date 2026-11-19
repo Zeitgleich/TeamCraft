@@ -726,7 +726,7 @@ mod tests {
     let token = encode(
       &header,
       &claims(json!({})),
-      &EncodingKey::from_secret(TEST_PUBLIC_KEY_PEM.as_bytes()),
+      &EncodingKey::from_secret(TEST_PUBLIC_KEY_PEM.as_bytes()).unwrap(),
     )
     .unwrap();
     assert!(validator().verify(&token, &public_key()).is_err());
@@ -767,7 +767,7 @@ mod tests {
 
   #[test]
   fn rejects_a_token_signed_by_another_key_even_with_a_known_key_id() {
-    let other = EncodingKey::from_secret(b"another key");
+    let other = EncodingKey::from_secret(b"another key").unwrap();
     let mut header = Header::new(Algorithm::HS256);
     header.kid = Some(TEST_KEY_ID.into());
     let token = encode(&header, &claims(json!({})), &other).unwrap();

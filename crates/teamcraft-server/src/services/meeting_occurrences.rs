@@ -614,7 +614,7 @@ mod tests {
   fn local_ms(zone: &TimeZone, year: i16, month: i8, day: i8, hour: i8, minute: i8) -> i64 {
     date(year, month, day)
       .at(hour, minute, 0, 0)
-      .to_zoned(zone.clone())
+      .to_zoned_datetime(zone.clone())
       .unwrap()
       .timestamp()
       .as_millisecond()
