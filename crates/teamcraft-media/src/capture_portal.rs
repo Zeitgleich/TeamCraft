@@ -171,8 +171,8 @@ impl PortalCapture {
         .select_sources(
           &session,
           SelectSourcesOptions::default()
-            .set_cursor_mode(CursorMode::Embedded)
-            .set_sources(SourceType::Monitor | SourceType::Window)
+            .set_cursor_mode(CursorMode::EMBEDDED)
+            .set_sources(SourceType::MONITOR | SourceType::WINDOW)
             .set_multiple(false)
             .set_persist_mode(PersistMode::ExplicitlyRevoked)
             .set_restore_token(maybe_restore_token),

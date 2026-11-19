@@ -40,9 +40,9 @@ fn initialize(env: *mut JNIEnv, context: jobject) -> bool {
   // SAFETY: `env` is the JNIEnv the VM passes to a native method on the calling thread; it points
   // to the VM's function table, which stays valid while the method runs.
   let functions = unsafe { &**env };
-  let (Some(get_java_vm), Some(new_global_ref)) = (functions.GetJavaVM, functions.NewGlobalRef) else {
-    return false;
-  };
+  // SAFETY: both functions exist since JNI 1.1, so every VM fills them in; jni-sys 0.4 groups the
+  // table by version and reading a group is unsafe because the VM's version decides what is there.
+  let (get_java_vm, new_global_ref) = unsafe { (functions.v1_1.GetJavaVM, functions.v1_1.NewGlobalRef) };
   let mut vm: *mut JavaVM = std::ptr::null_mut();
   // SAFETY: a function of the VM's table called with its own `env` and a valid out pointer.
   if unsafe { get_java_vm(env, &mut vm) } != JNI_OK || vm.is_null() {

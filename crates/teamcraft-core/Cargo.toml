@@ -92,7 +92,7 @@ tantivy = { version = "0.27.0", default-features = false, features = ["lz4-compr
 # SVG thumbnails (issue #337): pure Rust, without text shaping, system fonts or embedded raster
 # images, so an SVG can't make it load anything. Native only: the browser rasterizes SVG itself,
 # which keeps the web bundle within its budget.
-resvg = { version = "0.49.0", default-features = false }
+resvg = { version = "0.50.0", default-features = false }
 
 
 [target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]

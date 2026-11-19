@@ -80,8 +80,8 @@ impl LocalAuth {
       .filter(|secret| secret.len() >= MIN_SECRET_BYTES)
       .ok_or(LocalAuthError::WeakSecret)?;
     Ok(Self {
-      encoding: EncodingKey::from_secret(secret),
-      decoding: DecodingKey::from_secret(secret),
+      encoding: EncodingKey::from_secret(secret).map_err(|_| LocalAuthError::WeakSecret)?,
+      decoding: DecodingKey::from_secret(secret).map_err(|_| LocalAuthError::WeakSecret)?,
       account_key: derive_account_key(secret).map_err(|_| LocalAuthError::KeyDerivation)?,
       cost: PasswordCost {
         memory_kib: config.password_memory_kib,

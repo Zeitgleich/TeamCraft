@@ -83,7 +83,7 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio",
 time = "0.3"
 # Civil dates and IANA time zones on the server (meeting series, holidays, quiet hours): one crate
 # for both, the time zone database compiled in (no zoneinfo on the host needed).
-jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }
+jiff = { version = "1", default-features = false, features = ["std", "tzdb-bundle-always"] }
 
 # Encoding
 base64 = "0.23"
@@ -106,7 +106,7 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 socket2 = "0.6"
 
 # Auth and configuration
-jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "12", features = ["aws_lc_rs"] }
 figment = { version = "0.10", features = ["toml", "env"] }
 
 # davey 0.2.0 ported to openmls 0.9, so chat and calls share one MLS stack (ARCHITECTURE.md §6.2)
