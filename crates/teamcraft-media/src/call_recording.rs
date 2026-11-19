@@ -6,9 +6,13 @@
 //!   ([`RecordingSink::push_playback`]) and each Opus frame sent ([`RecordingSink::push_own`]); a
 //!   thread of its own decodes the own voice, mixes and encodes. The played frames are the clock:
 //!   one frame out per frame played.
-//! - The file grows on disk page by page, never in memory: about 14 MB an hour (32 kbit/s). An Ogg
-//!   file cut off by a crash plays up to its last page. The queue to the thread is bounded; a
-//!   stalled disk drops frames instead of growing memory.
+//! - The file grows on disk chunk by chunk, never in memory: about 14 MB an hour (32 kbit/s). It is
+//!   encrypted as it is written (`teamcraft-crypto::sealed_stream`, issue #2129) under a random key
+//!   only this process holds, which goes with the [`CallRecordingTake`]; the take decrypts only
+//!   while it is copied for the upload ([`CallRecordingTake::decrypt_into`]). A file whose key is
+//!   gone (the app quit or crashed) can't be read and is deleted at the next start
+//!   ([`clear_recordings`]). The queue to the thread is bounded; a stalled disk drops frames
+//!   instead of growing memory.
 //! - The recording stops by itself at its maximum length, or when writing fails (a full disk):
 //!   [`RecordingSink::is_ended`] tells the call's loop, which tells the others it stopped.
 //! - The file is the app's to place in a private folder and to delete; nothing here uploads.
@@ -16,8 +20,8 @@
 //!   ended and how long it was.
 
 use std::collections::VecDeque;
-use std::fs::{self, File};
-use std::io::BufWriter;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -25,6 +29,8 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use rand_core::OsRng;
+use teamcraft_crypto::sealed_stream::{SealedStreamKey, SealedStreamReader, SealedStreamWriter};
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
@@ -49,8 +55,10 @@ const STOP_POLL: Duration = Duration::from_millis(100);
 /// A recording under way. Dropping it stops it and deletes the file.
 pub struct CallRecorder {
   sink: RecordingSink,
-  maybe_thread: Option<JoinHandle<Result<u64, CallRecordingError>>>,
+  maybe_thread: Option<JoinHandle<Result<Written, CallRecordingError>>>,
   path: PathBuf,
+  /// The file's key, for the take; only in memory, zeroized on drop.
+  maybe_key: Option<SealedStreamKey>,
 }
 
 /// Where the call's loop hands its audio to a recording; any number of copies.
@@ -60,12 +68,15 @@ pub struct RecordingSink {
   shared: Arc<Shared>,
 }
 
-/// A finished recording, for the app to post or delete.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A finished recording, for the app to post or delete. The file at `path` is encrypted; only this
+/// value holds its key, so dropping it leaves the file unreadable (delete it too).
+#[derive(Debug)]
 pub struct CallRecordingTake {
   pub path: PathBuf,
   pub duration_ms: u64,
+  /// The size of the Ogg file once decrypted: what the posted attachment shows.
   pub size_bytes: u64,
+  key: SealedStreamKey,
 }
 
 #[derive(Debug, Error)]
@@ -79,6 +90,12 @@ pub enum CallRecordingError {
   Empty,
   #[error("the recording thread stopped")]
   Thread,
+}
+
+/// What the recording thread wrote.
+struct Written {
+  samples: u64,
+  plaintext_bytes: u64,
 }
 
 /// What the call's loop hands the recording thread.
@@ -117,7 +134,9 @@ impl CallRecorder {
     })?;
     let decoder = OpusDecoder::new(AudioChannels::Mono)?;
     let pre_skip = encoder.lookahead_samples()?;
-    let writer = OggOpusWriter::new(BufWriter::new(File::create(path)?), pre_skip)?;
+    let key = SealedStreamKey::generate(&mut OsRng);
+    let sealed = SealedStreamWriter::new(&key, File::create(path)?, &mut OsRng)?;
+    let writer = OggOpusWriter::new(sealed, pre_skip)?;
     let (frames, frame_rx) = mpsc::sync_channel(MAX_QUEUED_FRAMES);
     let shared = Arc::new(Shared::default());
     let thread_shared = Arc::clone(&shared);
@@ -141,6 +160,7 @@ impl CallRecorder {
       sink: RecordingSink { frames, shared },
       maybe_thread: Some(thread),
       path: path.to_path_buf(),
+      maybe_key: Some(key),
     })
   }
 
@@ -169,8 +189,8 @@ impl CallRecorder {
   pub fn finish(mut self) -> Result<CallRecordingTake, CallRecordingError> {
     let result = self.join();
     let path = std::mem::take(&mut self.path);
-    let samples = match result {
-      Ok(samples) if samples > 0 => samples,
+    let written = match result {
+      Ok(written) if written.samples > 0 => written,
       Ok(_) => {
         remove(&path);
         return Err(CallRecordingError::Empty);
@@ -180,13 +200,17 @@ impl CallRecorder {
         return Err(error);
       },
     };
-    let size_bytes = fs::metadata(&path)?.len();
-    let duration_ms = samples * 1000 / u64::from(SAMPLE_RATE_HZ);
+    let Some(key) = self.maybe_key.take() else {
+      remove(&path);
+      return Err(CallRecordingError::Thread);
+    };
+    let duration_ms = written.samples * 1000 / u64::from(SAMPLE_RATE_HZ);
     info!(duration_secs = duration_ms / 1000, "call recording finished");
     Ok(CallRecordingTake {
       path,
       duration_ms,
-      size_bytes,
+      size_bytes: written.plaintext_bytes,
+      key,
     })
   }
 
@@ -198,7 +222,7 @@ impl CallRecorder {
   }
 
   /// Ends the thread once it wrote what is queued, and finishes the file.
-  fn join(&mut self) -> Result<u64, CallRecordingError> {
+  fn join(&mut self) -> Result<Written, CallRecordingError> {
     self.sink.shared.is_stopping.store(true, Ordering::Relaxed);
     let thread = self.maybe_thread.take().ok_or(CallRecordingError::Thread)?;
     thread.join().map_err(|_| CallRecordingError::Thread)?
@@ -213,6 +237,30 @@ impl Drop for CallRecorder {
     if !self.path.as_os_str().is_empty() {
       remove(&self.path);
     }
+  }
+}
+
+impl CallRecordingTake {
+  /// Writes the decrypted Ogg file to `target` (a new file in the core's upload staging folder),
+  /// streaming, never the whole file in memory. A take that doesn't decrypt (the file was changed
+  /// on disk) fails, and `target` is removed. The take itself stays: the app deletes it once the
+  /// copy is done, or keeps offering it after a failure.
+  pub fn decrypt_into(&self, target: &Path) -> Result<u64, CallRecordingError> {
+    // Never overwrites: a file already there isn't ours to replace or remove.
+    let output = OpenOptions::new().write(true).create_new(true).open(target)?;
+    let result = self.copy_decrypted(output);
+    if result.is_err() {
+      remove(target);
+    }
+    result
+  }
+
+  fn copy_decrypted(&self, output: File) -> Result<u64, CallRecordingError> {
+    let mut reader = SealedStreamReader::new(&self.key, BufReader::new(File::open(&self.path)?))?;
+    let mut writer = BufWriter::new(output);
+    let copied = io::copy(&mut reader, &mut writer)?;
+    writer.flush()?;
+    Ok(copied)
   }
 }
 
@@ -275,7 +323,8 @@ impl Mixer {
 
 /// Deletes recordings left in `folder` (by a crash, or an app killed while recording). The shells
 /// call it at start for their private recording folder (e2ee.md §8.3: a recording a crash left is
-/// not kept).
+/// not kept, and can't be read anyway: its key was only in the memory of the process that wrote
+/// it).
 pub fn clear_recordings(folder: &Path) {
   let Ok(entries) = fs::read_dir(folder) else {
     return;
@@ -293,10 +342,10 @@ fn record(
   frames: &Receiver<Frame>,
   mut encoder: OpusEncoder,
   mut decoder: OpusDecoder,
-  mut writer: OggOpusWriter<BufWriter<File>>,
+  mut writer: OggOpusWriter<SealedStreamWriter<File>>,
   max_frames: u64,
   shared: &Shared,
-) -> Result<u64, CallRecordingError> {
+) -> Result<Written, CallRecordingError> {
   let mut mixer = Mixer::new();
   let mut written_frames = 0u64;
   loop {
@@ -337,8 +386,11 @@ fn record(
     }
   }
   let samples = writer.samples();
-  writer.finish()?;
-  Ok(samples)
+  let (_, plaintext_bytes) = writer.finish()?.finish()?;
+  Ok(Written {
+    samples,
+    plaintext_bytes,
+  })
 }
 
 fn to_i16(sample: f32) -> i16 {
@@ -374,8 +426,38 @@ mod tests {
     assert_eq!(take.duration_ms, 1000, "one frame out per frame played");
     assert!(take.size_bytes > 1000);
     assert!(take.path.exists());
-    let bytes = fs::read(&take.path).unwrap();
+    let sealed = fs::read(&take.path).unwrap();
+    assert!(
+      !sealed.windows(4).any(|window| window == b"OggS"),
+      "nothing of the Ogg file on disk"
+    );
+    let posted = folder.join("posted.ogg");
+    assert_eq!(take.decrypt_into(&posted).unwrap(), take.size_bytes);
+    let bytes = fs::read(&posted).unwrap();
     assert_eq!(&bytes[..4], b"OggS");
+    assert_eq!(bytes.len() as u64, take.size_bytes);
+    fs::remove_dir_all(folder).unwrap();
+  }
+
+  #[test]
+  fn a_take_changed_on_disk_does_not_decrypt_and_leaves_no_copy() {
+    let folder = folder("tampered");
+    let recorder = CallRecorder::start(&folder.join("take.ogg"), Duration::from_secs(60)).unwrap();
+    for index in 0..50 {
+      recorder.sink().push_playback(&tone(index, 440.0));
+    }
+    let take = recorder.finish().unwrap();
+    let mut sealed = fs::read(&take.path).unwrap();
+    let middle = sealed.len() / 2;
+    sealed[middle] ^= 1;
+    fs::write(&take.path, &sealed).unwrap();
+    let posted = folder.join("posted.ogg");
+    assert!(take.decrypt_into(&posted).is_err());
+    assert!(!posted.exists());
+    // An existing file at the target is never overwritten.
+    fs::write(&posted, b"other").unwrap();
+    assert!(take.decrypt_into(&posted).is_err());
+    assert_eq!(fs::read(&posted).unwrap(), b"other");
     fs::remove_dir_all(folder).unwrap();
   }
 

@@ -6768,17 +6768,40 @@ browser: #2114).
 - **Content:** audio only: the mix this device plays (everybody it hears) and its own microphone
   while unmuted, at 48 kHz mono, Opus at 32 kbit/s in an Ogg file (`teamcraft-media::call_recording`,
   about 14 MB per hour). No video, no screen share, no chat.
-- **While recording:** the file grows in a private folder of the app (`call-recordings` in its cache
-  folder), page by page, never held in memory whole; an Ogg file cut off by a crash plays up to its
-  last page. The folder is emptied at every start of the app, so a recording a crash left behind is
-  not kept (keeping it for the user is a later step, #2116). This is plaintext on the recording
-  device's disk for as long as the recording runs (encrypting it there is #2129), as with voice
-  messages (§4.5): the device already has the plaintext media. A write that fails (a full disk) ends the recording: the others
-  are told it stopped, and the recorder sees the error.
+- **While recording, and until it is posted:** the file grows in a private folder of the app
+  (`call-recordings` in its cache folder), chunk by chunk, never held in memory whole, and
+  **encrypted as it is written** (issue #2129, `teamcraft-crypto::sealed_stream`):
+  - The format is the attachment format (§4.5): STREAM over XChaCha20-Poly1305 in 64 KiB chunks
+    (about 16 seconds of audio each) with a random 19-byte nonce prefix, every chunk with its own
+    tag and the header as associated data, the last chunk marked. A chunk changed, swapped,
+    dropped or appended, a file cut short, or a chunk from another file fails to decrypt.
+  - The key is 256 random bits per recording, drawn when it starts, and **held only in the memory
+    of the app's process** (zeroized when dropped, never logged, never written to disk, not in the
+    OS keystore). At most one chunk of plaintext (64 KiB) is in memory at once, zeroized after
+    it is encrypted. The key travels with the take; nothing else can read the file, the app included
+    once the process ends.
+  - **Posting** decrypts the file, chunk by chunk, into the core's upload staging folder, which
+    the core uploads with a fresh attachment key as below and empties once the upload is done (or,
+    at start, when no pending upload names the copy). The sealed file is then deleted and its key
+    dropped; with the key gone, what may remain of the file on the disk is unreadable, so it isn't
+    overwritten first. That staged copy is plaintext for as long as the upload takes, like every
+    attachment the user sends (§4.5).
+  - **Deleting** the take, a new recording replacing it, and sign-out delete the sealed file and
+    drop its key.
+  - **Crash or quit:** the key dies with the process, so a recording a crash (or a quit before
+    posting) left behind can't be read by anybody. The folder is emptied at every start of the app.
+    Keeping such a recording for the user would mean keeping its key somewhere that outlives the
+    process (sealed with the device's local secrets, §9.7); that is decided with #2116, until then
+    a crash loses the recording.
+
+  A write that fails (a full disk) ends the recording: the others are told it stopped, and the
+  recorder sees the error. What the recording device protects this way is the disk: anybody who
+  reads it while the recording waits (a backup, another account, a stolen laptop) gets nothing; a
+  compromised app process can read the plaintext anyway, as it has the call's media.
 - **Afterwards:** the app offers "Post to the conversation" or "Delete". Posting sends the file as
   an attachment into the call's conversation (§4.5): encrypted with a fresh key, which goes to the
   conversation's members through MLS like every message; retention applies to it like to any
-  message. The local file is deleted once it is posted or discarded. Saving it elsewhere as a plain
+  message. The local file is deleted once it is posted or discarded (above). Saving it elsewhere as a plain
   file is a later step (with a warning that the file is then unencrypted, #2116).
 - **Limits:** `max_minutes` stops it; the call ending, the recorder leaving, or the app's page
   loading anew stop it too.
