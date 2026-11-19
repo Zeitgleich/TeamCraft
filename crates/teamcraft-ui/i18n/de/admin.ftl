@@ -1286,6 +1286,7 @@ audit-inactivity-snoozed = Kanal offen gehalten
 audit-inactivity-limited = Durchlauf der Inaktivitätsregel an der Grenze gestoppt
 audit-legal-hold-placed = Aufbewahrungsanordnung (Legal Hold) gesetzt
 audit-legal-hold-released = Aufbewahrungsanordnung (Legal Hold) aufgehoben
+audit-audit-exported = Audit-Protokoll exportiert
 legal-hold-title = Aufbewahrungsanordnung (Legal Hold)
 legal-hold-intro = Ein gehaltener Kanal behält alles: Die Aufbewahrungsfristen löschen keine Nachrichten und Dateien, und niemand kann den Kanal oder seinen Bereich löschen, bis die Anordnung aufgehoben ist. Alle Mitglieder sehen, dass der Kanal gehalten wird, mit dem Aktenzeichen. Nur Inhaber setzen und heben Anordnungen auf; ihre App signiert die Änderung.
 legal-hold-none = Für keinen Kanal gilt eine Aufbewahrungsanordnung.

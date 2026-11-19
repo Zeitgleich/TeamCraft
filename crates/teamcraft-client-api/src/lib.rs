@@ -10,6 +10,7 @@ pub mod actions;
 pub mod activity;
 pub mod admin;
 pub mod app_link;
+pub mod audit_csv;
 pub mod backend;
 pub mod brand;
 pub mod bug_report;

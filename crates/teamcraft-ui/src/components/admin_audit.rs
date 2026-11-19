@@ -1,11 +1,19 @@
 use leptos::prelude::*;
 
+use teamcraft_client_api::audit_csv::utc_time;
+use teamcraft_proto::UnixMillis;
+
 use crate::admin::{AuditAction, AuditFilter};
-use crate::clock::format_date_time;
+use crate::audit_export::{AuditExport, export_audit_csv};
+use crate::clock::{format_date_time, now_ms};
 use crate::components::admin_console::SectionHeader;
 use crate::components::icons::{Icon, IconName};
+use crate::components::pending_button::PendingButton;
+use crate::feedback::PendingAction;
 use crate::i18n::use_i18n;
 use crate::model::UserId;
+use crate::rest::RestClient;
+use crate::session::use_session;
 use crate::state::use_app_state;
 
 const DAY_MS: i64 = 86_400_000;
@@ -29,6 +37,32 @@ pub fn AuditSection() -> impl IntoView {
       maybe_until: utc_day_start_ms(&until.get_untracked()).map(|start| start + DAY_MS - 1),
     };
     state.write(|backend| backend.set_audit_filter(filter));
+  };
+  let maybe_client =
+    StoredValue::new_local(use_session().map(|session| RestClient::new(session.authenticator())));
+  let exporting = PendingAction::new();
+  // The file holds what the filters above show, from the whole log and not only the loaded page.
+  let export = move || {
+    let Some(client) = maybe_client.get_value() else {
+      return;
+    };
+    let export = AuditExport {
+      filter: state.read(|backend| backend.audit_filter()),
+      maybe_action: action.get_untracked(),
+      search: query.get_untracked().trim().to_lowercase(),
+    };
+    let file_name = export_file_name(now_ms());
+    exporting.spawn(async move {
+      let actor_name = |id: UserId| {
+        state
+          .read(|backend| backend.user(id))
+          .map(|user| user.display_name)
+          .unwrap_or_default()
+      };
+      export_audit_csv(&client, &export, actor_name, &file_name)
+        .await
+        .map(drop)
+    });
   };
   let entries = Memo::new(move |_| state.read(|backend| backend.audit_log()));
   let visible = Memo::new(move |_| {
@@ -119,10 +153,15 @@ pub fn AuditSection() -> impl IntoView {
         }
       />
       <span class="grow"></span>
-      <button class="btn" disabled title=move || i18n.t("admin-soon")>
+      <PendingButton
+        pending=exporting
+        class="btn"
+        is_disabled=Signal::derive(move || maybe_client.get_value().is_none())
+        on_click=move |_| export()
+      >
         <Icon name=IconName::Download />
         <span>{move || i18n.t("audit-export")}</span>
-      </button>
+      </PendingButton>
     </div>
     <div class="table-wrap">
       <table class="data-table">
@@ -161,6 +200,12 @@ pub fn AuditSection() -> impl IntoView {
   }
 }
 
+/// `audit-log-2026-11-19.csv` for an export made at `now`.
+fn export_file_name(now: i64) -> String {
+  let date = utc_time(UnixMillis(now));
+  format!("audit-log-{}.csv", date.get(..10).unwrap_or("export"))
+}
+
 /// Start of the UTC day of a `YYYY-MM-DD` date input, in Unix milliseconds. Empty or malformed
 /// input means "no limit".
 pub fn utc_day_start_ms(date: &str) -> Option<i64> {
@@ -190,6 +235,11 @@ mod tests {
     assert_eq!(utc_day_start_ms("1970-01-01"), Some(0));
     assert_eq!(utc_day_start_ms("2026-10-22"), Some(1_792_627_200_000));
     assert_eq!(utc_day_start_ms("2024-02-29"), Some(1_709_164_800_000));
+  }
+
+  #[test]
+  fn the_file_is_named_after_the_day() {
+    assert_eq!(export_file_name(1_792_627_200_123), "audit-log-2026-10-22.csv");
   }
 
   #[test]
