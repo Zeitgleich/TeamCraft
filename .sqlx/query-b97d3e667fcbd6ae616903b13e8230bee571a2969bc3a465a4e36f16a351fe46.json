@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM attachments a WHERE a.conversation_id = $1 AND a.id < $2\n       AND NOT ($3 AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = $1 AND m.is_pinned))\n       RETURNING a.s3_key",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "s3_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "attachments",
+            "name": "s3_key"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b97d3e667fcbd6ae616903b13e8230bee571a2969bc3a465a4e36f16a351fe46"
+}

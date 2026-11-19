@@ -1302,8 +1302,10 @@ under Administration → Security → Call recording. It is **off by default**.
 
 A **legal hold** keeps a channel for a case: retention doesn't delete its messages, files or search
 segments, the inactivity policy doesn't delete it, and deleting it (or its space) is refused until
-the hold is released. Holds are part of the signed workspace policy (`compliance_archive.legal_holds`,
-§2.3), under Administration → Retention → Legal hold.
+the hold is released; leaving a space keeps it, without members. A hold placed at the same moment
+as a deletion either stops it or is refused for the deleted channel (data-export.md §4.2). Holds are
+part of the signed workspace policy (`compliance_archive.legal_holds`, §2.3), under Administration →
+Retention → Legal hold.
 
 - **Who:** owners place and release holds; their app signs the policy. Admins see the list read-only.
 - **Reference:** each hold carries the organisation's case reference (1 to 64 characters). Every member

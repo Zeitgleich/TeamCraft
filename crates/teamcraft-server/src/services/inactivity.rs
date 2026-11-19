@@ -403,7 +403,6 @@ async fn delete_channel(
   channel: &PolicyArchivedChannel,
   warned_at: OffsetDateTime,
 ) -> Result<bool, ApiError> {
-  let held = super::legal_hold::held_conversations(state).await?;
   let id = state
     .ids
     .next_snowflake()
@@ -424,15 +423,16 @@ async fn delete_channel(
   };
   let outcome = state
     .database
-    .delete_channel_locked(channel.id, &audit, None, |facts, _epoch| {
+    .delete_channel_locked(channel.id, &audit, None, |facts, _epoch, maybe_policy| {
       if !facts.is_channel || !facts.is_archived_by_policy {
         return Err(ApiError::Conflict("the channel was restored".into()));
       }
       if facts.maybe_importer.is_some() {
         return Err(ApiError::ImportInProgress);
       }
-      // data-export.md §4.2: a hold placed since the list was read; the channel stays archived.
-      if held.contains(&channel.id) {
+      // data-export.md §4.2: a hold placed since the list was read, by the policy read under the
+      // lock (#2143); the channel stays archived.
+      if super::legal_hold::is_held_in(maybe_policy, channel.id)? {
         return Err(ApiError::LegalHold);
       }
       Ok(())

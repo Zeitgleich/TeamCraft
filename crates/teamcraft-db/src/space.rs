@@ -1,5 +1,5 @@
 use teamcraft_proto::{
-  CategoryId, IdempotencyKey, JoinPolicy, NotificationLevel, SpaceId, SpaceRole, UserId,
+  CategoryId, ConversationId, IdempotencyKey, JoinPolicy, NotificationLevel, SpaceId, SpaceRole, UserId,
 };
 use time::OffsetDateTime;
 
@@ -663,16 +663,25 @@ impl Database {
   }
 
   /// Removes the user from the space and from all of its channels. Returns the channels they left.
-  pub async fn remove_space_member(
+  /// With `deletes_memberless`, private channels left without members are deleted, except those
+  /// `held` names: it gets the newest signed policy's payload, read after the channels are locked, and
+  /// returns the conversations under a legal hold (data-export.md §4.2, issue #2143).
+  pub async fn remove_space_member<E: From<DbError>>(
     &self,
     space: SpaceId,
     user: UserId,
     deletes_memberless: bool,
-  ) -> Result<crate::SpaceLeft, DbError> {
-    let mut tx = self.pool().begin().await?;
+    held: impl FnOnce(Option<&[u8]>) -> Result<Vec<ConversationId>, E>,
+  ) -> Result<crate::SpaceLeft, E> {
+    let mut tx = self.pool().begin().await.map_err(DbError::from)?;
     Self::lock_member_channels(&mut tx, space, user).await?;
-    let left = Self::remove_member_in(&mut tx, space, user, deletes_memberless).await?;
-    tx.commit().await?;
+    let kept = if deletes_memberless {
+      held(Self::latest_policy_payload_in(&mut tx).await?.as_deref())?
+    } else {
+      Vec::new()
+    };
+    let left = Self::remove_member_in(&mut tx, space, user, deletes_memberless, &kept).await?;
+    tx.commit().await.map_err(DbError::from)?;
     Ok(left)
   }
 
@@ -701,7 +710,7 @@ impl Database {
     if !is_expired {
       return Ok(None);
     }
-    let left = Self::remove_member_in(&mut tx, space, user, false).await?;
+    let left = Self::remove_member_in(&mut tx, space, user, false, &[]).await?;
     tx.commit().await?;
     Ok(Some(left))
   }
@@ -728,6 +737,7 @@ impl Database {
     space: SpaceId,
     user: UserId,
     deletes_memberless: bool,
+    kept: &[ConversationId],
   ) -> Result<crate::SpaceLeft, DbError> {
     let left = sqlx::query_scalar!(
       r#"DELETE FROM memberships USING conversations c
@@ -746,7 +756,7 @@ impl Database {
     .execute(&mut **tx)
     .await?;
     let deleted = if deletes_memberless {
-      crate::channel_deletion::mark_memberless_private_deleted(tx, &left, user).await?
+      crate::channel_deletion::mark_memberless_private_deleted(tx, &left, kept, user).await?
     } else {
       Vec::new()
     };

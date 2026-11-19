@@ -5,7 +5,7 @@
 //! protocol reserves (compliance archive). Verifying signatures is up to the clients.
 
 use serde_json::json;
-use teamcraft_db::{AppendOutcome, WorkspaceLogEntry};
+use teamcraft_db::{AppendOutcome, NewWorkspaceLogEntry, WorkspaceLogEntry};
 use teamcraft_proto::{
   AppendWorkspaceLogRequest, Base64Bytes, ComplianceArchiveMode, GatewayEvent, GuestDmStart, GuestPolicy,
   ListWorkspaceLogQuery, ListWorkspaceLogResponse, Permission, PolicyDocument, Target,
@@ -73,6 +73,7 @@ pub async fn append(
   }
   let version = request.expected_version + 1;
   let mut audit_rows = Vec::new();
+  let mut new_holds = Vec::new();
   let maybe_document = if kind == WorkspaceLogKind::Policy {
     let document = check_policy_payload(request.payload.as_slice(), version)?;
     check_org_backgrounds_exist(state, &document.policy.call_backgrounds).await?;
@@ -80,7 +81,7 @@ pub async fn append(
     // The policy this entry follows, from the log, not this instance's cache: if another entry
     // is appended meanwhile, this append conflicts and nothing is audited.
     let previous = policy_at(state, request.expected_version).await?;
-    super::legal_hold::check_new_holds(state, &previous, &document.policy).await?;
+    new_holds = super::legal_hold::new_holds(&previous, &document.policy);
     audit_rows = super::legal_hold::audit_rows(state, caller.user.id, &previous, &document.policy, version)?;
     Some(document)
   } else {
@@ -93,17 +94,22 @@ pub async fn append(
 
   let outcome = state
     .database
-    .append_workspace_log(
-      &kind,
-      request.expected_version,
-      request.payload.as_slice(),
-      request.signature.as_slice(),
-      request.signer_device_id,
-      &audit_entries,
-    )
+    .append_workspace_log(&NewWorkspaceLogEntry {
+      kind: &kind,
+      expected_version: request.expected_version,
+      payload: request.payload.as_slice(),
+      signature: request.signature.as_slice(),
+      signer: request.signer_device_id,
+      new_holds: &new_holds,
+      audit: &audit_entries,
+    })
     .await?;
-  if let AppendOutcome::VersionConflict { current_version } = outcome {
-    return Err(ApiError::VersionConflict { current_version });
+  match outcome {
+    AppendOutcome::Appended => {},
+    AppendOutcome::VersionConflict { current_version } => {
+      return Err(ApiError::VersionConflict { current_version });
+    },
+    AppendOutcome::NotExistingChannels => return Err(super::legal_hold::not_a_channel()),
   }
 
   let maybe_self_join = maybe_document.map(|document| {
@@ -245,11 +251,17 @@ async fn policy_at(state: &AppState, version: u64) -> Result<WorkspacePolicy, Ap
     .list_workspace_log(&WorkspaceLogKind::Policy, version - 1, 1)
     .await?;
   match entries.first().filter(|entry| entry.version == version) {
-    Some(entry) => serde_json::from_slice::<PolicyDocument>(&entry.payload)
-      .map(|document| document.policy)
-      .map_err(|e| ApiError::Internal(format!("stored policy is unreadable: {e}"))),
+    Some(entry) => stored_policy(&entry.payload),
     None => Ok(WorkspacePolicy::default()),
   }
+}
+
+/// The policy in a stored entry's payload. The server only stores payloads it parsed on append, so
+/// one it can't read again is an internal error.
+pub(super) fn stored_policy(payload: &[u8]) -> Result<WorkspacePolicy, ApiError> {
+  serde_json::from_slice::<PolicyDocument>(payload)
+    .map(|document| document.policy)
+    .map_err(|e| ApiError::Internal(format!("stored policy is unreadable: {e}")))
 }
 
 pub async fn current_policy(
@@ -261,9 +273,8 @@ pub async fn current_policy(
     .await?
   {
     Some(entry) => {
-      let document: PolicyDocument = serde_json::from_slice(&entry.payload)
-        .map_err(|e| ApiError::Internal(format!("stored policy is unreadable: {e}")))?;
-      Ok((entry.version, document.policy, Some(entry)))
+      let policy = stored_policy(&entry.payload)?;
+      Ok((entry.version, policy, Some(entry)))
     },
     None => Ok((0, WorkspacePolicy::default(), None)),
   }

@@ -1,4 +1,5 @@
-use teamcraft_proto::{DeviceId, WorkspaceLogKind};
+use sqlx::{Postgres, Transaction};
+use teamcraft_proto::{ConversationId, DeviceId, WorkspaceLogKind};
 use time::OffsetDateTime;
 
 use crate::audit::NewAuditEntry;
@@ -17,6 +18,22 @@ pub struct WorkspaceLogEntry {
   pub created_at: OffsetDateTime,
 }
 
+/// An entry to append to the roster or policy log.
+#[derive(Debug, Clone, Copy)]
+pub struct NewWorkspaceLogEntry<'a> {
+  pub kind: &'a WorkspaceLogKind,
+  /// The version the signer saw; the entry becomes the next one, or conflicts.
+  pub expected_version: u64,
+  pub payload: &'a [u8],
+  pub signature: &'a [u8],
+  pub signer: DeviceId,
+  /// The channels a policy entry places a legal hold on that the previous entry didn't hold; each
+  /// must be an existing channel.
+  pub new_holds: &'a [ConversationId],
+  /// Audit rows written with the entry, only when it is.
+  pub audit: &'a [NewAuditEntry<'a>],
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppendOutcome {
   Appended,
@@ -24,24 +41,42 @@ pub enum AppendOutcome {
   VersionConflict {
     current_version: u64,
   },
+  /// A new legal hold names a conversation that is not an existing channel (anymore): nothing is
+  /// stored (data-export.md §4.2).
+  NotExistingChannels,
 }
 
 impl Database {
   /// Appends `expected_version + 1` if the log is still at `expected_version`. Concurrent appends of
   /// the same version race on the primary key and exactly one wins. `audit` rows are written in the
   /// same transaction, only when the entry is.
+  ///
+  /// The channels a policy entry newly holds ([`NewWorkspaceLogEntry::new_holds`]) are share-locked
+  /// and checked in this transaction, before the entry is written, so a hold and a deletion of the
+  /// same channel can't both win (issue #2143): a deletion or retention locks the channel's row and
+  /// reads the newest policy only after it has that lock ([`Self::latest_policy_payload_in`]).
+  /// Whichever runs second sees the other's result: the hold is refused for a deleted channel, or
+  /// the deletion reads the policy that holds it.
   pub async fn append_workspace_log(
     &self,
-    kind: &WorkspaceLogKind,
-    expected_version: u64,
-    payload: &[u8],
-    signature: &[u8],
-    signer: DeviceId,
-    audit: &[NewAuditEntry<'_>],
+    entry: &NewWorkspaceLogEntry<'_>,
   ) -> Result<AppendOutcome, DbError> {
+    let NewWorkspaceLogEntry {
+      kind,
+      expected_version,
+      payload,
+      signature,
+      signer,
+      new_holds,
+      audit,
+    } = *entry;
     let expected =
       i64::try_from(expected_version).map_err(|_| DbError::InvalidStoredValue("version".into()))?;
     let mut tx = self.pool().begin().await?;
+    if !lock_existing_channels(&mut tx, new_holds).await? {
+      tx.rollback().await?;
+      return Ok(AppendOutcome::NotExistingChannels);
+    }
     let result = sqlx::query!(
       r#"INSERT INTO workspace_log (kind, version, payload, signature, signer_device_id)
          SELECT $1, $2::bigint + 1, $3, $4, $5
@@ -136,4 +171,43 @@ impl Database {
       })
       .transpose()
   }
+
+  /// The newest policy entry's payload as stored, read in a deletion's transaction after it locked
+  /// the rows it deletes: a hold whose entry committed before those locks were granted is in it, and
+  /// one appended later waits for the deletion and then finds the channel gone
+  /// ([`Self::append_workspace_log`], issue #2143).
+  pub(crate) async fn latest_policy_payload_in(
+    tx: &mut Transaction<'_, Postgres>,
+  ) -> Result<Option<Vec<u8>>, DbError> {
+    let payload = sqlx::query_scalar!(
+      r#"SELECT payload FROM workspace_log WHERE kind = 'policy' ORDER BY version DESC LIMIT 1"#,
+    )
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(payload)
+  }
+}
+
+/// Share-locks `channels` if every one of them is an existing channel, in id order like the deletion
+/// of a space locks them. `false` when one is missing, deleted or no channel. A deletion that holds
+/// one of them makes this wait, and its result is then judged on the row as the deletion left it.
+async fn lock_existing_channels(
+  tx: &mut Transaction<'_, Postgres>,
+  channels: &[ConversationId],
+) -> Result<bool, DbError> {
+  if channels.is_empty() {
+    return Ok(true);
+  }
+  let mut ids: Vec<i64> = channels.iter().copied().map(to_db).collect();
+  ids.sort_unstable();
+  ids.dedup();
+  let locked = sqlx::query_scalar!(
+    r#"SELECT id FROM conversations
+       WHERE id = ANY($1) AND kind = 'channel' AND deleted_at IS NULL
+       ORDER BY id FOR SHARE"#,
+    &ids,
+  )
+  .fetch_all(&mut **tx)
+  .await?;
+  Ok(locked.len() == ids.len())
 }

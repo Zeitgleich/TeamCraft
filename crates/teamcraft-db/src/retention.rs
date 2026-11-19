@@ -1,3 +1,4 @@
+use sqlx::{Postgres, Transaction};
 use teamcraft_proto::{ConversationId, MessageId, SpaceId};
 use time::OffsetDateTime;
 
@@ -20,11 +21,26 @@ pub struct RetentionTarget {
   pub space: StoredRetention,
 }
 
-/// An attachment or index segment to delete: its object key goes to the storage first.
-#[derive(Debug, Clone)]
-pub struct StoredObject {
-  pub id: i64,
-  pub s3_key: String,
+/// Where retention cuts a conversation.
+#[derive(Debug, Clone, Copy)]
+pub struct RetentionCut {
+  /// Messages and attachments with smaller IDs go.
+  pub before: MessageId,
+  /// Search index segments that end at or before it go.
+  pub index_cutoff: OffsetDateTime,
+  /// Pinned messages stay, and with them all attachments of a conversation that has any (the
+  /// server can't tell which attachment a pinned message needs).
+  pub keep_pinned: bool,
+}
+
+/// What retention deleted in a conversation, with the object keys still to delete from the storage.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RetentionDeleted {
+  pub messages: u64,
+  /// Offloaded message ciphertext.
+  pub message_keys: Vec<String>,
+  pub attachment_keys: Vec<String>,
+  pub index_segment_keys: Vec<String>,
 }
 
 impl Database {
@@ -162,125 +178,36 @@ impl Database {
     id.map(from_db).transpose()
   }
 
-  /// Deletes messages of the conversation with IDs below `before`, except pinned ones if `keep_pinned`.
-  /// Also forgets their client IDs. Returns the number of deleted messages.
-  pub async fn delete_messages_before(
+  /// Deletes what is past retention in one conversation, in one transaction that first locks the
+  /// conversation's row and then reads the newest signed policy: `is_held` gets its payload and
+  /// says whether a legal hold keeps the conversation (data-export.md §4.2). The lock conflicts with
+  /// the share lock a policy append takes on the channels it newly holds, so a hold stored before the
+  /// lock is seen here and one appended later waits for this commit (issue #2143). The lock doesn't
+  /// conflict with sending, which only key-shares the row.
+  ///
+  /// `None` when the conversation is gone or held: nothing is deleted. Otherwise the object keys of
+  /// the deleted rows, for the caller to delete from the storage after the commit.
+  pub async fn delete_past_retention_locked<E: From<DbError>>(
     &self,
     conversation: ConversationId,
-    before: MessageId,
-    keep_pinned: bool,
-  ) -> Result<u64, DbError> {
-    let mut tx = self.pool().begin().await?;
-    let deleted = sqlx::query!(
-      "DELETE FROM messages WHERE conversation_id = $1 AND id < $2 AND NOT ($3 AND is_pinned)",
-      to_db(conversation),
-      to_db(before),
-      keep_pinned,
-    )
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
-    sqlx::query!(
-      r#"DELETE FROM message_client_ids c WHERE c.conversation_id = $1 AND c.message_id < $2
-         AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = c.message_id AND m.conversation_id = c.conversation_id)"#,
-      to_db(conversation),
-      to_db(before),
-    )
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(deleted)
-  }
-
-  pub async fn conversation_has_pinned(&self, conversation: ConversationId) -> Result<bool, DbError> {
-    let found = sqlx::query_scalar!(
-      r#"SELECT EXISTS (SELECT 1 FROM messages WHERE conversation_id = $1 AND is_pinned) AS "found!""#,
+    cut: &RetentionCut,
+    is_held: impl FnOnce(Option<&[u8]>) -> Result<bool, E>,
+  ) -> Result<Option<RetentionDeleted>, E> {
+    let mut tx = self.pool().begin().await.map_err(DbError::from)?;
+    let is_there = sqlx::query_scalar!(
+      "SELECT id FROM conversations WHERE id = $1 AND deleted_at IS NULL FOR NO KEY UPDATE",
       to_db(conversation),
     )
-    .fetch_one(self.pool())
-    .await?;
-    Ok(found)
-  }
-
-  /// Attachments of the conversation with IDs below `before`.
-  pub async fn list_attachments_before(
-    &self,
-    conversation: ConversationId,
-    before: MessageId,
-  ) -> Result<Vec<StoredObject>, DbError> {
-    let rows = sqlx::query!(
-      "SELECT id, s3_key FROM attachments WHERE conversation_id = $1 AND id < $2",
-      to_db(conversation),
-      to_db(before),
-    )
-    .fetch_all(self.pool())
-    .await?;
-    Ok(
-      rows
-        .into_iter()
-        .map(|row| StoredObject {
-          id: row.id,
-          s3_key: row.s3_key,
-        })
-        .collect(),
-    )
-  }
-
-  pub async fn delete_attachment_row(&self, id: i64) -> Result<(), DbError> {
-    sqlx::query!("DELETE FROM attachments WHERE id = $1", id)
-      .execute(self.pool())
-      .await?;
-    Ok(())
-  }
-
-  /// Search index segments that end before `cutoff`.
-  pub async fn list_index_segments_before(
-    &self,
-    conversation: ConversationId,
-    cutoff: OffsetDateTime,
-  ) -> Result<Vec<StoredObject>, DbError> {
-    let rows = sqlx::query!(
-      "SELECT id, s3_key FROM index_segments WHERE conversation_id = $1 AND range_end <= $2",
-      to_db(conversation),
-      cutoff,
-    )
-    .fetch_all(self.pool())
-    .await?;
-    Ok(
-      rows
-        .into_iter()
-        .map(|row| StoredObject {
-          id: row.id,
-          s3_key: row.s3_key,
-        })
-        .collect(),
-    )
-  }
-
-  pub async fn delete_index_segment_row(&self, id: i64) -> Result<(), DbError> {
-    sqlx::query!("DELETE FROM index_segments WHERE id = $1", id)
-      .execute(self.pool())
-      .await?;
-    Ok(())
-  }
-
-  /// Message ciphertext that lives in S3 and belongs to messages below `before` (for deletion).
-  pub async fn list_offloaded_ciphertext_before(
-    &self,
-    conversation: ConversationId,
-    before: MessageId,
-    keep_pinned: bool,
-  ) -> Result<Vec<String>, DbError> {
-    let keys = sqlx::query_scalar!(
-      r#"SELECT ciphertext_s3_key AS "key!" FROM messages
-         WHERE conversation_id = $1 AND id < $2 AND ciphertext_s3_key IS NOT NULL AND NOT ($3 AND is_pinned)"#,
-      to_db(conversation),
-      to_db(before),
-      keep_pinned,
-    )
-    .fetch_all(self.pool())
-    .await?;
-    Ok(keys)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(DbError::from)?
+    .is_some();
+    if !is_there || is_held(Self::latest_policy_payload_in(&mut tx).await?.as_deref())? {
+      return Ok(None);
+    }
+    let deleted = delete_past_retention_in(&mut tx, conversation, cut).await?;
+    tx.commit().await.map_err(DbError::from)?;
+    Ok(Some(deleted))
   }
 
   /// Drops monthly `messages` partitions that ended before `now` and are empty. Returns their names.
@@ -336,6 +263,54 @@ impl Database {
     }
     Ok(())
   }
+}
+
+async fn delete_past_retention_in(
+  tx: &mut Transaction<'_, Postgres>,
+  conversation: ConversationId,
+  cut: &RetentionCut,
+) -> Result<RetentionDeleted, DbError> {
+  let message_keys = sqlx::query_scalar!(
+    r#"DELETE FROM messages WHERE conversation_id = $1 AND id < $2 AND NOT ($3 AND is_pinned)
+       RETURNING ciphertext_s3_key AS "key?""#,
+    to_db(conversation),
+    to_db(cut.before),
+    cut.keep_pinned,
+  )
+  .fetch_all(&mut **tx)
+  .await?;
+  let messages = message_keys.len() as u64;
+  sqlx::query!(
+    r#"DELETE FROM message_client_ids c WHERE c.conversation_id = $1 AND c.message_id < $2
+       AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = c.message_id AND m.conversation_id = c.conversation_id)"#,
+    to_db(conversation),
+    to_db(cut.before),
+  )
+  .execute(&mut **tx)
+  .await?;
+  let attachment_keys = sqlx::query_scalar!(
+    r#"DELETE FROM attachments a WHERE a.conversation_id = $1 AND a.id < $2
+       AND NOT ($3 AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = $1 AND m.is_pinned))
+       RETURNING a.s3_key"#,
+    to_db(conversation),
+    to_db(cut.before),
+    cut.keep_pinned,
+  )
+  .fetch_all(&mut **tx)
+  .await?;
+  let index_segment_keys = sqlx::query_scalar!(
+    "DELETE FROM index_segments WHERE conversation_id = $1 AND range_end <= $2 RETURNING s3_key",
+    to_db(conversation),
+    cut.index_cutoff,
+  )
+  .fetch_all(&mut **tx)
+  .await?;
+  Ok(RetentionDeleted {
+    messages,
+    message_keys: message_keys.into_iter().flatten().collect(),
+    attachment_keys,
+    index_segment_keys,
+  })
 }
 
 fn parse_partition_month(name: &str) -> Option<(i32, time::Month)> {

@@ -9,6 +9,7 @@ use crate::common;
 use common::*;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
+use teamcraft_db::testing::sqlx;
 use teamcraft_proto::{PolicyDocument, WorkspacePolicy};
 use teamcraft_server::services::retention::run_once;
 use teamcraft_server::testing::{Reply, TestApp, TestUser};
@@ -187,6 +188,33 @@ async fn a_held_channel_and_its_space_cant_be_deleted() {
   app.stop().await;
 }
 
+/// Leaving a space with `delete_if_last` deletes the private channels left without members, but not
+/// a held one: it stays, without members, and the leave goes through (#2143).
+#[tokio::test]
+async fn leaving_a_space_keeps_a_held_private_channel() {
+  let app = app!();
+  let (alice, ann) = (owner(), member("ann"));
+  let device = register_device(&app, &alice).await;
+  let space = create_space(&app, &alice, "Team", "open").await;
+  let ann_id = user_id(&app, &ann).await;
+  add_space_member(&app, &alice, &space, &ann_id, "member").await;
+  let held = create_channel(&app, &ann, &space, "held", "private").await;
+  let alone = create_channel(&app, &ann, &space, "alone", "private").await;
+  sign(&app, &alice, &device, 0, |p| hold(p, &held, "Case 1")).await;
+
+  let left = app
+    .delete(
+      &ann,
+      &format!("/spaces/{space}/members/{ann_id}?delete_if_last=true"),
+    )
+    .await;
+  assert_eq!(left.status, StatusCode::NO_CONTENT, "{}", left.body);
+
+  assert!(!is_there(&app, &alone).await);
+  assert!(is_there(&app, &held).await);
+  app.stop().await;
+}
+
 #[tokio::test]
 async fn placing_and_releasing_are_audited_with_the_signing_owner() {
   let app = app!();
@@ -274,4 +302,14 @@ async fn message_count(app: &TestApp, user: &TestUser, channel: &str) -> usize {
 fn b64(bytes: &[u8]) -> String {
   use base64::Engine;
   base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+async fn is_there(app: &TestApp, channel: &str) -> bool {
+  let found: Option<i64> =
+    sqlx::query_scalar("SELECT id FROM conversations WHERE id = $1 AND deleted_at IS NULL")
+      .bind(channel.parse::<i64>().unwrap())
+      .fetch_optional(app.sql_pool())
+      .await
+      .unwrap();
+  found.is_some()
 }
