@@ -3338,6 +3338,14 @@ The app is split into wasm chunks (`crates/teamcraft-ui/src/areas.rs`, built by
   0.4 MB, JPEG) is a file of the web release too, downloaded when the photo is picked. A signed
   release lists them in `on_demand`, so the service worker doesn't fetch them in the background. `check-web-size.py` keeps the call
   module under 1 MB gzip.
+- The voice decoder with Opus in-band FEC (#2140) is a module of its own too, `teamcraft-web-voice`
+  (`ropus`, a pure-Rust libopus port, with WebAssembly SIMD and `wasm-opt -Oz`: 247 kB, 123 kB
+  gzip), which the call module runs in a worker. It is downloaded when a voice packet first goes
+  missing in a call, never before: a call without loss, and a guest's first download, don't carry
+  it; a signed release lists it in `on_demand`. Its page side adds about 4 kB gzip to the call
+  module. On lost voice packets (one in seven lost, 24 kbit/s VoIP with FEC planned for 15 %
+  loss, `voice_fec` tests) the lost frames come back at 10.3 dB SNR against the loss-free decode,
+  where WebCodecs' concealment reaches 0.1 dB.
 - A signed release's service worker installs without the chunks (the signed-in app's included) and
   fetches each one, checked against its signed hash, when it is first used or in the background
   about 15 s after a page loaded; not for a guest's meeting page (e2ee.md §9.3).

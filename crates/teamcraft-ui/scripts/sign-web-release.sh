@@ -12,8 +12,9 @@
 # UI's texts (`i18n/*.ftl`, one file per language, #1437, and the administration console's per
 # language, #1462) are lazy too: a page asks for the language it shows, the console for its own.
 # `on_demand` (also in `lazy`) lists the background effects' segmentation (#439: the worker's
-# script and module, the model) and the photo backgrounds' full pictures: fetched only when someone
-# turns an effect on or picks the photo, never in the background; and the files in the signed-in
+# script and module, the model), the voice decoder with FEC (#2140: the worker's script and module)
+# and the photo backgrounds' full pictures: fetched only when someone turns an effect on, a voice
+# packet goes missing in a call or someone picks the photo, never in the background; and the files in the signed-in
 # app's pack (#1465), which a member loads with the pack and only a guest's meeting or a page whose
 # pack didn't arrive asks for one by one. Both are outside the signature (older workers verify {version, files} only, and
 # fetch `on_demand` files like lazy ones); every file is checked against its hash. The interface
@@ -59,7 +60,9 @@ entry_points = "".join(open(os.path.join(dist, name), encoding="utf-8").read() f
 # The segmentation worker's script and the model (#439) are named in index.html, but only the call
 # module loads them, when the first background effect starts; a photo background's picture
 # (add-background-photos.sh) when the photo is picked. The picker's thumbnails stay as they are.
-on_demand_prefixes = ("teamcraft-segmentation-worker-", "teamcraft-web-segmentation-")
+# The voice decoder with FEC (#2140), when a voice packet first goes missing in a call.
+on_demand_prefixes = ("teamcraft-segmentation-worker-", "teamcraft-web-segmentation-",
+                      "teamcraft-voice-worker-", "teamcraft-web-voice-")
 def is_font(path):
     return path.startswith("fonts/")
 def is_photo(path):

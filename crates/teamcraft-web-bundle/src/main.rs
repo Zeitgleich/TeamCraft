@@ -24,7 +24,7 @@
 //! ```
 //!
 //! `teamcraft-web-bundle worker …` binds and names a module that runs in a worker instead
-//! ([`worker`]: the segmentation of the background effects).
+//! ([`worker`]: the segmentation of the background effects, the voice decoder with FEC).
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;

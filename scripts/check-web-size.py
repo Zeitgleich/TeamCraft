@@ -78,8 +78,10 @@ DEFAULT_BUDGET_BYTES = 7_000_000
 # segmentation is a module of its own that only loads when an effect starts.
 DEFAULT_CALL_MODULE_BUDGET_BYTES = 1_100_000
 CALL_MODULE = "teamcraft-web-calls-*_bg.wasm"
-# Lazy files that only load on demand (marked in the list).
-ON_DEMAND_PREFIX = "teamcraft-web-segmentation-"
+# Lazy files that only load on demand (marked in the list): the background effects' segmentation
+# (#439) and the voice decoder with FEC (#2140), which the call module starts when a voice packet
+# first goes missing.
+ON_DEMAND_PREFIXES = ("teamcraft-web-segmentation-", "teamcraft-web-voice-")
 # Warn when the gzip total is above this share of the budget.
 WARN_SHARE = 0.95
 # The files of a first visit, by the name trunk gives them (with a content hash).
@@ -230,7 +232,7 @@ def render_lazy(lazy):
              "| Chunk                                            | Uncompressed | gzip -9    |",
              "|--------------------------------------------------|--------------|------------|"]
     for name, size, gzip_size in lazy:
-        label = f"{name} (on demand)" if name.startswith(ON_DEMAND_PREFIX) else name
+        label = f"{name} (on demand)" if name.startswith(ON_DEMAND_PREFIXES) else name
         lines.append(f"| {label:<48} | {mb(size):>12} | {mb(gzip_size):>10} |")
     return "\n".join(lines)
 

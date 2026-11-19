@@ -1,12 +1,12 @@
 //! A wasm module that runs in a module worker: the person segmentation of the browser's background
-//! effects (#439, `teamcraft-web-segmentation`). `scripts/build-segmentation.sh` builds it with
-//! its own compiler flags (WebAssembly SIMD), which Trunk can't set for one module alone, and runs
-//! this, which
+//! effects (#439, `teamcraft-web-segmentation`) and the voice decoder with Opus FEC (#2140,
+//! `teamcraft-web-voice`). `scripts/build-workers.sh` builds them with their own compiler flags
+//! (WebAssembly SIMD), which Trunk can't set for one module alone, and runs this for each, which
 //!
 //! 1. runs wasm-bindgen on it (`--target web`),
 //! 2. optimizes it with wasm-opt (release),
 //! 3. names the module after the build (`<name>-<id>.js`, `<name>-<id>_bg.wasm`, as the app's),
-//! 4. writes the worker's script with the module's name in place of `__SEGMENTATION_MODULE__`,
+//! 4. writes the worker's script with the module's name in place of `__WORKER_MODULE__`,
 //!    named after its content (`<script-name>-<hash>.js`), which `finish-calls.sh` names in
 //!    `index.html`.
 //!
@@ -24,7 +24,7 @@ use sha2::{Digest, Sha256};
 use super::{build_id, hex, optimize, optimizer_settings, report};
 
 /// Where the worker's script names the module.
-const MODULE_PLACEHOLDER: &str = "__SEGMENTATION_MODULE__";
+const MODULE_PLACEHOLDER: &str = "__WORKER_MODULE__";
 /// How the module is bound (part of its build id).
 const BINDGEN_SETTINGS: &str = "wasm-bindgen --target web, default module path";
 
@@ -119,7 +119,7 @@ mod tests {
 
   #[test]
   fn the_script_imports_the_module_of_its_build() {
-    let script = worker_script("import init from '__SEGMENTATION_MODULE__';", "./seg-0123.js").unwrap();
+    let script = worker_script("import init from '__WORKER_MODULE__';", "./seg-0123.js").unwrap();
     assert_eq!(script, "import init from './seg-0123.js';");
     assert!(worker_script("import init from './elsewhere.js';", "./seg.js").is_err());
   }

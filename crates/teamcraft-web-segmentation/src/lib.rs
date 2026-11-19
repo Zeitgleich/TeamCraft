@@ -10,7 +10,7 @@
 //! module carries no ONNX parser.
 //!
 //! `worker.js` is the worker's script: it loads this module, whose start function takes over the
-//! worker's messages. The build (`crates/teamcraft-ui/scripts/build-segmentation.sh`) compiles the
+//! worker's messages. The build (`crates/teamcraft-ui/scripts/build-workers.sh`) compiles the
 //! module with WebAssembly SIMD, which every browser with WebTransport runs; the page doesn't offer
 //! effects in one without it.
 #![cfg(target_arch = "wasm32")]

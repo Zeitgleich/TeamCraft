@@ -7088,7 +7088,8 @@ everything (§9.1). Signing the releases narrows this to what the operator contr
   loaded (so guests never download the signed-in app), checks it against the signed hash in the
   version's verified file list and only then stores and serves it. Files only some people use are
   also listed in `on_demand` (the background effects' segmentation worker and model and the photo
-  backgrounds' full pictures, #439; the interface fonts, #1494; and the files in the signed-in
+  backgrounds' full pictures, #439; the voice decoder's worker and module, #2140; the interface
+  fonts, #1494; and the files in the signed-in
   app's pack, below): the
   worker skips them in the background fetch. A server that edits `lazy` or `on_demand` only
   changes when a file is downloaded, never what runs. A chunk that doesn't match its hash isn't

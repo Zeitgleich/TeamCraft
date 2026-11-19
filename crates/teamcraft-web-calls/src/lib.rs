@@ -55,6 +55,7 @@ use teamcraft_media::effects::{BackgroundEffect as MediaEffect, is_photo, needs_
 use teamcraft_media::jitter::JitterBufferConfig;
 use teamcraft_media::link_probe::PriorLink;
 use teamcraft_media::video::{ScreenProfile, VideoResolution, camera_limit};
+use teamcraft_media::voice_fec::protocol::worker_url as voice_worker_url;
 use teamcraft_proto::{
   AudioCodec, CallId, CallRosterEntry, DeviceId, MediaCapabilities, MediaStreamId, ScreenContentMode,
   ScreenShareResolution, VideoTrackKind,
@@ -618,6 +619,8 @@ impl Host {
       maybe_worklet_url: Some(self.worklet_url.clone()),
       share_encoders: codecs.share_encoders,
       maybe_prior_link: self.take_prior_link(),
+      // Recovers lost voice packets from FEC data (#2140); the build names the script.
+      maybe_voice_worker_url: voice_worker_url(effects::meta_content("teamcraft-voice-worker").as_deref()),
       is_muted_at_start,
     };
     let requires_background = prepared.requires_background;

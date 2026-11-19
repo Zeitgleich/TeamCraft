@@ -14,7 +14,7 @@ workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
-# Built by crates/teamcraft-ui/scripts/build-segmentation.sh (a step of the web build) with
+# Built by crates/teamcraft-ui/scripts/build-workers.sh (a step of the web build) with
 # WebAssembly SIMD (`+simd128`), which Trunk can't set for one module alone.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Only tract, the model check and the masks: no call engine, no compositor. The model comes as NNEF

@@ -141,7 +141,7 @@ pub(crate) fn self_view() -> Option<(HtmlCanvasElement, MediaStream)> {
 }
 
 /// The `content` of `<meta name="…">` in the page.
-fn meta_content(name: &str) -> Option<String> {
+pub(crate) fn meta_content(name: &str) -> Option<String> {
   web_sys::window()?
     .document()?
     .query_selector(&format!("meta[name=\"{name}\"]"))
