@@ -9,7 +9,7 @@
 //! - The file grows on disk chunk by chunk, never in memory: about 14 MB an hour (32 kbit/s). It is
 //!   encrypted as it is written (`teamcraft-crypto::sealed_stream`, issue #2129) under a random key
 //!   only this process holds, which goes with the [`CallRecordingTake`]; the take decrypts only
-//!   while it is copied for the upload ([`CallRecordingTake::decrypt_into`]). A file whose key is
+//!   while it is copied for the upload ([`CallRecordingTake::decrypt_to`]). A file whose key is
 //!   gone (the app quit or crashed) can't be read and is deleted at the next start
 //!   ([`clear_recordings`]). The queue to the thread is bounded; a stalled disk drops frames
 //!   instead of growing memory.
@@ -20,8 +20,8 @@
 //!   ended and how long it was.
 
 use std::collections::VecDeque;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufReader, BufWriter, Write};
+use std::fs::{self, File};
+use std::io::{self, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -241,26 +241,13 @@ impl Drop for CallRecorder {
 }
 
 impl CallRecordingTake {
-  /// Writes the decrypted Ogg file to `target` (a new file in the core's upload staging folder),
-  /// streaming, never the whole file in memory. A take that doesn't decrypt (the file was changed
-  /// on disk) fails, and `target` is removed. The take itself stays: the app deletes it once the
-  /// copy is done, or keeps offering it after a failure.
-  pub fn decrypt_into(&self, target: &Path) -> Result<u64, CallRecordingError> {
-    // Never overwrites: a file already there isn't ours to replace or remove.
-    let output = OpenOptions::new().write(true).create_new(true).open(target)?;
-    let result = self.copy_decrypted(output);
-    if result.is_err() {
-      remove(target);
-    }
-    result
-  }
-
-  fn copy_decrypted(&self, output: File) -> Result<u64, CallRecordingError> {
+  /// Writes the decrypted Ogg file to `output` (a new file in the core's upload staging folder),
+  /// streaming, never the whole file in memory; returns the bytes written. A take that doesn't
+  /// decrypt (the file was changed on disk) fails partway: the caller removes what `output` got.
+  /// The take itself stays: the app deletes it once the copy is done, or keeps offering it.
+  pub fn decrypt_to(&self, output: &mut impl Write) -> Result<u64, CallRecordingError> {
     let mut reader = SealedStreamReader::new(&self.key, BufReader::new(File::open(&self.path)?))?;
-    let mut writer = BufWriter::new(output);
-    let copied = io::copy(&mut reader, &mut writer)?;
-    writer.flush()?;
-    Ok(copied)
+    Ok(io::copy(&mut reader, output)?)
   }
 }
 
@@ -431,16 +418,15 @@ mod tests {
       !sealed.windows(4).any(|window| window == b"OggS"),
       "nothing of the Ogg file on disk"
     );
-    let posted = folder.join("posted.ogg");
-    assert_eq!(take.decrypt_into(&posted).unwrap(), take.size_bytes);
-    let bytes = fs::read(&posted).unwrap();
-    assert_eq!(&bytes[..4], b"OggS");
-    assert_eq!(bytes.len() as u64, take.size_bytes);
+    let mut posted = Vec::new();
+    assert_eq!(take.decrypt_to(&mut posted).unwrap(), take.size_bytes);
+    assert_eq!(&posted[..4], b"OggS");
+    assert_eq!(posted.len() as u64, take.size_bytes);
     fs::remove_dir_all(folder).unwrap();
   }
 
   #[test]
-  fn a_take_changed_on_disk_does_not_decrypt_and_leaves_no_copy() {
+  fn a_take_changed_on_disk_does_not_decrypt() {
     let folder = folder("tampered");
     let recorder = CallRecorder::start(&folder.join("take.ogg"), Duration::from_secs(60)).unwrap();
     for index in 0..50 {
@@ -451,13 +437,7 @@ mod tests {
     let middle = sealed.len() / 2;
     sealed[middle] ^= 1;
     fs::write(&take.path, &sealed).unwrap();
-    let posted = folder.join("posted.ogg");
-    assert!(take.decrypt_into(&posted).is_err());
-    assert!(!posted.exists());
-    // An existing file at the target is never overwritten.
-    fs::write(&posted, b"other").unwrap();
-    assert!(take.decrypt_into(&posted).is_err());
-    assert_eq!(fs::read(&posted).unwrap(), b"other");
+    assert!(take.decrypt_to(&mut Vec::new()).is_err());
     fs::remove_dir_all(folder).unwrap();
   }
 

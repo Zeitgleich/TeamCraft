@@ -10,8 +10,12 @@
 //! - The key is random per file and never leaves the process: it is not written to disk, not put
 //!   in the OS keystore, and zeroized when dropped. A file whose key is gone (the app quit or
 //!   crashed) can't be read by anybody, the app included; the app deletes it at its next start.
-//! - [`SealedStreamWriter`] holds at most one chunk of plaintext (zeroized), so the file grows on
-//!   disk chunk by chunk and memory stays bounded however long the file gets.
+//! - [`SealedStreamWriter`] holds at most one chunk of plaintext, so the file grows on disk chunk
+//!   by chunk and memory stays bounded however long the file gets. Its buffer is overwritten once
+//!   a chunk is encrypted and when the writer is dropped; [`SealedStreamReader`] overwrites each
+//!   decrypted chunk when it is replaced or dropped. Copies the caller makes on either side (the
+//!   audio pipeline, `io::copy`, file buffers) are not wiped: what protects here is the disk, the
+//!   process's memory is out of scope (e2ee.md §8.3).
 //! - [`SealedStreamReader`] decrypts chunk by chunk as it is read. A chunk is handed out only once
 //!   its tag verified, but truncation shows only at the end: what was read is trustworthy only once
 //!   the reader returned end of file without an error.
@@ -20,7 +24,7 @@ use std::fmt;
 use std::io::{self, Read, Write};
 
 use rand_core::CryptoRngCore;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::aead::TAG_LEN;
 use crate::attachment::{
@@ -40,7 +44,7 @@ pub struct SealedStreamWriter<W: Write> {
   inner: W,
   maybe_encryptor: Option<AttachmentEncryptor>,
   /// Plaintext not yet encrypted: at most one chunk, never reallocated (so no copy is left
-  /// behind), zeroized on drop.
+  /// behind), overwritten after each chunk and on drop.
   pending: Zeroizing<Vec<u8>>,
   chunk_size: usize,
   plaintext_len: u64,
@@ -89,7 +93,7 @@ impl<W: Write> SealedStreamWriter<W> {
   pub fn finish(mut self) -> io::Result<(W, u64)> {
     let encryptor = self.maybe_encryptor.take().ok_or_else(finished)?;
     let last = encryptor.finish(&self.pending).map_err(invalid)?;
-    self.pending.clear();
+    self.pending.zeroize();
     self.inner.write_all(&last)?;
     self.inner.flush()?;
     Ok((self.inner, self.plaintext_len))
@@ -99,7 +103,7 @@ impl<W: Write> SealedStreamWriter<W> {
   fn write_pending_chunk(&mut self) -> io::Result<()> {
     let encryptor = self.maybe_encryptor.as_mut().ok_or_else(finished)?;
     let chunk = encryptor.encrypt_chunk(&self.pending).map_err(invalid)?;
-    self.pending.clear();
+    self.pending.zeroize();
     self.inner.write_all(&chunk)
   }
 }
@@ -329,6 +333,20 @@ mod tests {
     assert_eq!(swapped.len(), sealed.len());
     assert_eq!(
       open(&key, &swapped).unwrap_err().kind(),
+      io::ErrorKind::InvalidData
+    );
+  }
+
+  #[test]
+  fn a_duplicated_chunk_fails() {
+    let key = SealedStreamKey::generate(&mut OsRng);
+    let sealed = seal_in_pieces(&key, &sample(2 * CHUNK + 10), 4096);
+    let (header, body) = sealed.split_at(HEADER_LEN);
+    let mut duplicated = header.to_vec();
+    duplicated.extend_from_slice(&body[..ENCRYPTED_CHUNK]);
+    duplicated.extend_from_slice(body);
+    assert_eq!(
+      open(&key, &duplicated).unwrap_err().kind(),
       io::ErrorKind::InvalidData
     );
   }

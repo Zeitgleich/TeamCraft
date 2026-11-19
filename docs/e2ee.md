@@ -6777,9 +6777,11 @@ browser: #2114).
     dropped or appended, a file cut short, or a chunk from another file fails to decrypt.
   - The key is 256 random bits per recording, drawn when it starts, and **held only in the memory
     of the app's process** (zeroized when dropped, never logged, never written to disk, not in the
-    OS keystore). At most one chunk of plaintext (64 KiB) is in memory at once, zeroized after
-    it is encrypted. The key travels with the take; nothing else can read the file, the app included
-    once the process ends.
+    OS keystore). The writer holds at most one chunk of plaintext (64 KiB), overwritten once it is
+    encrypted and when the writer is dropped. The key travels with the take; nothing else can read
+    the file, the app included once the process ends. Copies of the audio elsewhere in the
+    process (the audio pipeline, the buffers of the copy when posting) are not wiped: the process's
+    memory is out of scope here, as it holds the call's media anyway.
   - **Posting** decrypts the file, chunk by chunk, into the core's upload staging folder, which
     the core uploads with a fresh attachment key as below and empties once the upload is done (or,
     at start, when no pending upload names the copy). The sealed file is then deleted and its key
