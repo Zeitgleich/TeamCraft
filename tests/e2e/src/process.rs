@@ -10,6 +10,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, bail};
 use tokio::process::{Child, Command};
 
+/// The file whose presence marks the directory with the compiled binaries.
+const SERVER_BINARY: &str = "teamcraft-server";
+
 /// A running binary of the stack. Killed on drop.
 pub struct Service {
   pub name: String,
@@ -278,12 +281,24 @@ fn unused_port(probe: impl Fn() -> std::io::Result<std::io::Result<u16>>) -> u16
   }
 }
 
-/// Directory with the compiled binaries: the one that holds the running test executable's `deps`.
+/// Directory with the compiled binaries: the profile directory (`target/debug`) that holds the
+/// running test executable. Cargo's newer build-dir layout puts the executable under
+/// `target/debug/build/<package>/<hash>/deps/` while the server binaries stay in `target/debug`,
+/// so the nearest ancestor that holds the server binary wins (the nightly E2E failed on every test
+/// for this, #1406). Without one, the classic `target/<profile>` position is used, so the "not
+/// built" message names where the binary is expected.
 pub fn binary_dir() -> PathBuf {
   if let Ok(dir) = std::env::var("E2E_BIN_DIR") {
     return PathBuf::from(dir);
   }
   let exe = std::env::current_exe().expect("test executable path");
+  if let Some(dir) = exe
+    .ancestors()
+    .skip(1)
+    .find(|dir| dir.join(SERVER_BINARY).is_file())
+  {
+    return dir.to_path_buf();
+  }
   // target/<profile>/deps/<test> -> target/<profile>
   exe
     .parent()
