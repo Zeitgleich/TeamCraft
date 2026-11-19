@@ -15,12 +15,12 @@ data class ConversationRights(
   val canReact: Boolean = true,
   /** Pin and unpin messages. */
   val canManageBookmarks: Boolean = true,
-  /** Send a poll (`create_poll`, #2120). */
-  val canCreatePoll: Boolean = true,
   /** Change the channel itself, such as archiving it. */
   val canManageChannel: Boolean = true,
   /** Delete the channel for everybody; offered only on the server's word. */
   val canDeleteChannel: Boolean = false,
+  /** Send a poll (`create_poll`, #2120). */
+  val canCreatePoll: Boolean = true,
   /** What the owners of a quiet channel are told (#212); `null` for everybody else. */
   val maybeInactivityNotice: InactivityNoticeItem? = null,
 ) {
