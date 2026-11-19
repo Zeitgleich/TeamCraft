@@ -350,10 +350,14 @@ impl TeamCraft {
   pub fn report_activity(&self, activity: AppActivity) {
     // The link is measured only in the foreground (#1969): battery.
     match activity {
-      AppActivity::Foreground => self
-        .is_foreground
-        .store(true, std::sync::atomic::Ordering::Relaxed),
+      AppActivity::Foreground => {
+        perf_jobs::app_foregrounded();
+        self
+          .is_foreground
+          .store(true, std::sync::atomic::Ordering::Relaxed);
+      },
       AppActivity::Background => {
+        perf_jobs::app_backgrounded();
         self
           .is_foreground
           .store(false, std::sync::atomic::Ordering::Relaxed);

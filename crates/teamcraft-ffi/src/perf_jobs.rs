@@ -9,10 +9,18 @@
 //! that only waited is not reported as its own, but as "lane blocked" naming the longest job that
 //! held its thread meanwhile, grouped by that job.
 //!
+//! A job that did not run is not reported (issue #2146): the OS freezes a backgrounded app (Doze,
+//! the cached-app freezer, iOS suspension) in the middle of a job, and the job's wall time then
+//! counts minutes in which nothing happened. A period counts as frozen when the app was in the
+//! background during it, or the wall clock ran at least [`MIN_CLOCK_GAP`] ahead of the monotonic
+//! clock (the device slept), *and* the thread's CPU time, where the system tells it, was far below
+//! the period ([`FROZEN_CPU_SHARE`]). A job that waited on a lock in the foreground is no freeze
+//! and is still reported; its `maybe_cpu_ms` far below its run says it waited, not worked.
+//!
 //! Only static names leave here: a job's name is its function's name in the code, never data.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -38,6 +46,10 @@ const MAX_LANE_RUNS: usize = 128;
 /// Slow jobs reported per process at most, and at most one per job name in this time.
 const MAX_SLOW_REPORTS: u32 = 20;
 const SLOW_REPORT_GAP: Duration = Duration::from_secs(60);
+/// The wall clock running this far ahead of the monotonic one means the device slept meanwhile.
+const MIN_CLOCK_GAP: Duration = Duration::from_secs(1);
+/// A frozen period used less than this share of its length as CPU time.
+const FROZEN_CPU_SHARE: f64 = 0.1;
 
 static RECORDS: Mutex<VecDeque<PerfJobSpan>> = Mutex::new(VecDeque::new());
 static READ_DEPTH: AtomicU32 = AtomicU32::new(0);
@@ -51,6 +63,8 @@ static LANE_DEPTH: [AtomicU32; 4] = [
   AtomicU32::new(0),
 ];
 static LANE_RUNS: Mutex<VecDeque<LaneRun>> = Mutex::new(VecDeque::new());
+static BACKGROUND_COUNT: AtomicU64 = AtomicU64::new(0);
+static IN_BACKGROUND: AtomicBool = AtomicBool::new(false);
 static LISTENER: Mutex<Option<Arc<dyn PerfListener>>> = Mutex::new(None);
 static LAST_SLOW: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
 /// Longest query kind a step is named after; anything else is named `unknown`.
@@ -126,6 +140,7 @@ pub(crate) struct Queued {
   enqueued_at_ms: f64,
   enqueued: Instant,
   depth: u32,
+  lifecycle: Lifecycle,
 }
 
 /// A job that started.
@@ -134,6 +149,7 @@ pub(crate) struct Running {
   started_at_ms: f64,
   started: Instant,
   maybe_cpu_at_start: Option<Duration>,
+  lifecycle: Lifecycle,
 }
 
 /// Steps of the measure from `start_ms` to `end_ms` (Unix milliseconds): the queue jobs recorded
@@ -235,6 +251,8 @@ struct LaneRun {
   done_at_ms: f64,
   /// Jobs of the lane still queued when it ended.
   waiters: u32,
+  /// The process was frozen while it ran: it blocked nothing (issue #2146).
+  is_frozen: bool,
 }
 
 impl LaneRun {
@@ -253,19 +271,80 @@ enum SlowKind {
 }
 
 /// A job is slow when it ran for the threshold; one that only waited is blocked, not slow. A
-/// threshold of 0 turns it off.
-fn slow_kind(threshold_ms: u64, waited: Duration, ran: Duration) -> Option<SlowKind> {
+/// threshold of 0 turns it off, and so does a period the process was frozen for (`Frozen`).
+fn slow_kind(threshold_ms: u64, waited: Duration, ran: Duration, frozen: Frozen) -> Option<SlowKind> {
   if threshold_ms == 0 {
     return None;
   }
   let threshold = threshold_ms as f64;
   if duration_ms(ran) >= threshold {
-    Some(SlowKind::Ran)
+    (!frozen.is_run_frozen).then_some(SlowKind::Ran)
   } else if duration_ms(waited) >= threshold {
-    Some(SlowKind::Waited)
+    (!frozen.is_wait_frozen).then_some(SlowKind::Waited)
   } else {
     None
   }
+}
+
+/// Which of a job's periods the process was frozen for (issue #2146).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Frozen {
+  is_wait_frozen: bool,
+  is_run_frozen: bool,
+}
+
+/// What the app told about its lifecycle at one moment: how often it went to the background, and
+/// whether it is there now. A period overlapped the background when it started there or the count
+/// changed during it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Lifecycle {
+  backgrounds: u64,
+  is_in_background: bool,
+}
+
+impl Lifecycle {
+  fn now() -> Self {
+    Self {
+      backgrounds: BACKGROUND_COUNT.load(Ordering::Relaxed),
+      is_in_background: IN_BACKGROUND.load(Ordering::Relaxed),
+    }
+  }
+
+  /// Whether the app was in the background at some time between `self` and `later`.
+  fn overlaps_background(self, later: Self) -> bool {
+    self.is_in_background || later.backgrounds != self.backgrounds
+  }
+}
+
+/// The app went to the background (`report_activity`): jobs running now may be frozen by the OS.
+pub(crate) fn app_backgrounded() {
+  BACKGROUND_COUNT.fetch_add(1, Ordering::Relaxed);
+  IN_BACKGROUND.store(true, Ordering::Relaxed);
+}
+
+/// The app came to the foreground again.
+pub(crate) fn app_foregrounded() {
+  IN_BACKGROUND.store(false, Ordering::Relaxed);
+}
+
+/// Whether the process did not run for `period`: it was suspended (in the background, or the device
+/// slept: `clock_gap`, wall time minus monotonic time) and its thread used almost no CPU time. A
+/// platform that tells no CPU time (iOS, macOS, Windows) can only go by the suspension.
+fn was_frozen(
+  period: Duration,
+  maybe_cpu: Option<Duration>,
+  overlapped_background: bool,
+  clock_gap: Duration,
+) -> bool {
+  let is_suspended = overlapped_background || clock_gap >= MIN_CLOCK_GAP;
+  is_suspended && maybe_cpu.is_none_or(|cpu| cpu.as_secs_f64() < period.as_secs_f64() * FROZEN_CPU_SHARE)
+}
+
+/// How far the wall clock ran ahead of the monotonic one over a period of `period` that started at
+/// `started_at_ms` and ended at `ended_at_ms`.
+fn clock_gap(started_at_ms: f64, ended_at_ms: f64, period: Duration) -> Duration {
+  Duration::try_from_secs_f64(((ended_at_ms - started_at_ms) - duration_ms(period)).max(0.0) / 1_000.0)
+    .unwrap_or_default()
 }
 
 /// The job that held `lane` the longest while a job queued at `enqueued_ms` waited for `started_ms`.
@@ -302,6 +381,7 @@ fn queued_on(kind: PerfJobKind, lane: Lane, type_name: &'static str) -> Queued {
     enqueued_at_ms: now_ms(),
     enqueued: Instant::now(),
     depth,
+    lifecycle: Lifecycle::now(),
   }
 }
 
@@ -329,6 +409,7 @@ impl Queued {
       started_at_ms: now_ms(),
       started: Instant::now(),
       maybe_cpu_at_start: logging::thread_cpu_time(),
+      lifecycle: Lifecycle::now(),
       queued: self,
     }
   }
@@ -344,6 +425,25 @@ impl Running {
     let waited = self.started.saturating_duration_since(self.queued.enqueued);
     let ran = self.started.elapsed();
     let done_at_ms = self.started_at_ms + duration_ms(ran);
+    let maybe_cpu = self
+      .maybe_cpu_at_start
+      .zip(logging::thread_cpu_time())
+      .map(|(before, after)| after.saturating_sub(before));
+    let ended = Lifecycle::now();
+    let frozen = Frozen {
+      is_wait_frozen: was_frozen(
+        waited,
+        None,
+        self.queued.lifecycle.overlaps_background(self.lifecycle),
+        clock_gap(self.queued.enqueued_at_ms, self.started_at_ms, waited),
+      ),
+      is_run_frozen: was_frozen(
+        ran,
+        maybe_cpu,
+        self.lifecycle.overlaps_background(ended),
+        clock_gap(self.started_at_ms, now_ms(), ran),
+      ),
+    };
     // Remembered before the next job of the lane starts, so what waited behind this one finds it.
     if let Some(lane) = self.queued.lane.filter(|_| ran >= MIN_BLOCKER) {
       remember_lane_run(LaneRun {
@@ -352,6 +452,7 @@ impl Running {
         started_at_ms: self.started_at_ms,
         done_at_ms,
         waiters: lane.depth().load(Ordering::Relaxed),
+        is_frozen: frozen.is_run_frozen,
       });
     }
     if waited + ran < MIN_KEPT && self.queued.depth < KEPT_DEPTH {
@@ -365,16 +466,13 @@ impl Running {
       started_at_ms: self.started_at_ms,
       done_at_ms,
       queue_depth: self.queued.depth,
-      maybe_cpu_ms: self
-        .maybe_cpu_at_start
-        .zip(logging::thread_cpu_time())
-        .map(|(before, after)| duration_ms(after.saturating_sub(before))),
+      maybe_cpu_ms: maybe_cpu.map(duration_ms),
       blocked_by: String::new(),
       blocker_run_ms: 0.0,
       waiters: 0,
     };
     keep(span.clone());
-    match slow_kind(SLOW_MS.load(Ordering::Relaxed), waited, ran) {
+    match slow_kind(SLOW_MS.load(Ordering::Relaxed), waited, ran, frozen) {
       Some(SlowKind::Ran) => {
         let waiters = self
           .queued
@@ -404,6 +502,7 @@ pub(crate) fn gateway_event_applied(started_at_ms: f64, done_at_ms: f64) {
     started_at_ms,
     done_at_ms,
     waiters: Lane::Engine.depth().load(Ordering::Relaxed),
+    is_frozen: false,
   });
 }
 
@@ -422,18 +521,29 @@ fn report_blocked(lane: Option<Lane>, span: PerfJobSpan) {
     let runs = LANE_RUNS.lock().unwrap_or_else(PoisonError::into_inner);
     blocker_of(&runs, lane, span.enqueued_at_ms, span.started_at_ms).cloned()
   });
-  let (name, run_ms, waiters) = blocker.map_or(("unknown", 0.0, 1), |run| {
+  if let Some((name, span)) = blocked_report(blocker, span) {
+    report_slow(&name, span);
+  }
+}
+
+/// The report name and span of a job that waited behind `maybe_blocker`; none when the blocker did
+/// not run because the process was frozen, as nothing blocked the lane then (issue #2146).
+fn blocked_report(maybe_blocker: Option<LaneRun>, span: PerfJobSpan) -> Option<(String, PerfJobSpan)> {
+  if maybe_blocker.as_ref().is_some_and(|run| run.is_frozen) {
+    return None;
+  }
+  let (name, run_ms, waiters) = maybe_blocker.map_or(("unknown", 0.0, 1), |run| {
     (run.name, run.run_ms(), run.waiters.max(1))
   });
-  report_slow(
-    &format!("blocked:{name}"),
+  Some((
+    format!("blocked:{name}"),
     PerfJobSpan {
       blocked_by: name.to_owned(),
       blocker_run_ms: run_ms,
       waiters,
       ..span
     },
-  );
+  ))
 }
 
 /// Ops this module records itself (queue jobs, queries), not taken again from the trace layer.
@@ -491,7 +601,18 @@ pub(crate) fn query_ran(kind: &str, started_at_ms: f64, ran: Duration) {
     waiters: 0,
   };
   keep(span.clone());
-  if slow_kind(SLOW_MS.load(Ordering::Relaxed), Duration::ZERO, ran) == Some(SlowKind::Ran) {
+  // Only the end of the query is known: frozen when the app is in the background now.
+  let is_frozen = was_frozen(
+    ran,
+    None,
+    Lifecycle::now().is_in_background,
+    clock_gap(started_at_ms, now_ms(), ran),
+  );
+  let frozen = Frozen {
+    is_wait_frozen: false,
+    is_run_frozen: is_frozen,
+  };
+  if slow_kind(SLOW_MS.load(Ordering::Relaxed), Duration::ZERO, ran, frozen) == Some(SlowKind::Ran) {
     report_slow(&name, span);
   }
 }
@@ -613,13 +734,141 @@ mod tests {
   #[test]
   fn only_a_long_run_is_slow_a_long_wait_is_blocked() {
     let ms = Duration::from_millis;
-    assert_eq!(slow_kind(1_000, ms(0), ms(2_000)), Some(SlowKind::Ran));
+    let live = Frozen::default();
+    assert_eq!(slow_kind(1_000, ms(0), ms(2_000), live), Some(SlowKind::Ran));
     // The job that waited 3.7 s and ran 0 ms is not slow itself.
-    assert_eq!(slow_kind(1_000, ms(3_718), ms(0)), Some(SlowKind::Waited));
+    assert_eq!(slow_kind(1_000, ms(3_718), ms(0), live), Some(SlowKind::Waited));
     // Both: its own run is the news.
-    assert_eq!(slow_kind(1_000, ms(3_000), ms(1_000)), Some(SlowKind::Ran));
-    assert_eq!(slow_kind(1_000, ms(999), ms(999)), None);
-    assert_eq!(slow_kind(0, ms(9_000), ms(9_000)), None);
+    assert_eq!(slow_kind(1_000, ms(3_000), ms(1_000), live), Some(SlowKind::Ran));
+    assert_eq!(slow_kind(1_000, ms(999), ms(999), live), None);
+    assert_eq!(slow_kind(0, ms(9_000), ms(9_000), live), None);
+  }
+
+  mod frozen {
+    use super::*;
+
+    const SECOND: Duration = Duration::from_secs(1);
+
+    #[test]
+    fn a_job_the_background_froze_is_not_slow() {
+      // Android 1.0.37, #2146: ran 298101 ms, cpu 2 ms, the app in the background.
+      assert!(was_frozen(
+        Duration::from_millis(298_101),
+        Some(Duration::from_millis(2)),
+        true,
+        Duration::ZERO
+      ));
+      let frozen = Frozen {
+        is_wait_frozen: false,
+        is_run_frozen: true,
+      };
+      assert_eq!(
+        slow_kind(1_000, Duration::ZERO, Duration::from_millis(298_101), frozen),
+        None
+      );
+    }
+
+    #[test]
+    fn a_busy_job_in_the_background_is_still_slow() {
+      assert!(!was_frozen(
+        Duration::from_secs(5),
+        Some(Duration::from_secs(4)),
+        true,
+        Duration::ZERO
+      ));
+    }
+
+    #[test]
+    fn a_lock_wait_in_the_foreground_is_still_reported() {
+      // Low CPU time alone is no freeze: the thread waited for a lock.
+      assert!(!was_frozen(
+        Duration::from_secs(5),
+        Some(Duration::from_millis(3)),
+        false,
+        Duration::ZERO
+      ));
+      assert_eq!(
+        slow_kind(1_000, Duration::ZERO, Duration::from_secs(5), Frozen::default()),
+        Some(SlowKind::Ran)
+      );
+    }
+
+    #[test]
+    fn a_device_sleep_is_a_freeze_without_the_lifecycle() {
+      // The wall clock ran 4 s ahead of the monotonic one.
+      assert!(was_frozen(
+        Duration::from_secs(5),
+        Some(Duration::from_millis(1)),
+        false,
+        4 * SECOND
+      ));
+      assert!(!was_frozen(
+        Duration::from_secs(5),
+        Some(Duration::from_millis(1)),
+        false,
+        Duration::from_millis(40)
+      ));
+    }
+
+    #[test]
+    fn without_cpu_time_the_suspension_decides() {
+      // iOS, macOS and Windows tell no thread CPU time.
+      assert!(was_frozen(Duration::from_secs(60), None, true, Duration::ZERO));
+      assert!(!was_frozen(Duration::from_secs(60), None, false, Duration::ZERO));
+    }
+
+    #[test]
+    fn a_wait_during_a_freeze_is_not_blocked() {
+      let frozen = Frozen {
+        is_wait_frozen: true,
+        is_run_frozen: false,
+      };
+      assert_eq!(
+        slow_kind(1_000, Duration::from_secs(300), Duration::ZERO, frozen),
+        None
+      );
+    }
+
+    #[test]
+    fn the_background_overlaps_a_period_it_started_in_or_entered() {
+      let before = Lifecycle {
+        backgrounds: 3,
+        is_in_background: false,
+      };
+      assert!(!before.overlaps_background(before));
+      // Went to the background and came back meanwhile.
+      let later = Lifecycle {
+        backgrounds: 4,
+        is_in_background: false,
+      };
+      assert!(before.overlaps_background(later));
+      let in_background = Lifecycle {
+        backgrounds: 3,
+        is_in_background: true,
+      };
+      assert!(in_background.overlaps_background(in_background));
+    }
+
+    #[test]
+    fn a_frozen_blocker_blocks_nothing() {
+      let waiter = span(0.0, 4_000.0);
+      let mut blocker = lane_run(Lane::Engine, "frozen_blocker", 0.0, 4_000.0);
+      assert!(blocked_report(Some(blocker.clone()), waiter.clone()).is_some());
+      blocker.is_frozen = true;
+      assert!(blocked_report(Some(blocker), waiter.clone()).is_none());
+      // An unknown blocker is still reported.
+      assert!(blocked_report(None, waiter).is_some());
+    }
+
+    #[test]
+    fn the_clock_gap_is_wall_time_beyond_the_run() {
+      assert_eq!(clock_gap(1_000.0, 6_000.0, Duration::from_secs(1)), 4 * SECOND);
+      // A wall clock set back is no gap.
+      assert_eq!(
+        clock_gap(6_000.0, 1_000.0, Duration::from_secs(1)),
+        Duration::ZERO
+      );
+    }
   }
 
   fn lane_run(lane: Lane, name: &'static str, started: f64, done: f64) -> LaneRun {
@@ -629,6 +878,7 @@ mod tests {
       started_at_ms: started,
       done_at_ms: done,
       waiters: 3,
+      is_frozen: false,
     }
   }
 
