@@ -31,7 +31,7 @@ RPM repository once and updates come with the system's ones ([docs/updates.md](h
 `-libre-release*.apk` (without Google services). Files ending in `-unsigned.apk` must be signed before
 they install; the `-debug-signed.apk` files install as they are and are meant for testing only.
 
-**iOS** – no binary: build it from `apps/ios` with your own Apple team and signing (`apps/ios/README.md`).
+**iOS** – `teamcraft-ios-{{version}}.ipa` is signed for the App Store: it installs through TestFlight (by invitation) or, once listed, the App Store, not by download. To run your own build, build it from `apps/ios` with your own Apple team (`apps/ios/README.md`).
 
 **Web client** – `teamcraft-web-{{version}}.tar.gz`, served by the server (`[web] static_dir`;
 `teamcraft_server_web_enabled` in the playbook).
@@ -62,9 +62,8 @@ previous release keep working.
   `68:60:BF:07:4F:47:08:19:82:4F:92:A9:E6:57:30:5A:7A:30:81:49:2C:FD:C2:55:07:81:02:08:5E:50:05:D7`,
   the same key as the Play Store build, so installs from either update each other). There is no
   Play Store or F-Droid listing yet.
-- **iOS is not distributed**: there is no App Store or TestFlight build. Build it from `apps/ios` with
-  your own Apple team and signing; push then goes through your own APNs key (`[push.apns]`), not the
-  push gateway.
+- **iOS is in TestFlight only** (by invitation), not in the App Store yet. A build from `apps/ios` with
+  your own Apple team pushes through your own APNs key (`[push.apns]`), not the push gateway.
 - **Push for self-built mobile apps** needs the server's own APNs / FCM credentials; the publisher's
   push gateway only serves the official store apps.
 - **Tested in CI only, not yet on real hardware**: the macOS and Windows desktop apps (built, unit-tested

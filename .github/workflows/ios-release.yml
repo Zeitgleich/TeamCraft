@@ -1,10 +1,11 @@
-# TestFlight (docs/release.md, "TestFlight"): when a release is published (or by hand for a tag),
-# builds the iOS app from the tag on a Mac, signs it for the App Store and uploads it to App Store
+# iOS release (docs/release.md, "TestFlight"): called by release.yml for every tag `v*`, like
+# desktop-release.yml. Builds the iOS app from the tag on a Mac, signs it for the App Store, exports
+# the .ipa (release.yml's `ios-release` job attaches it to the release) and uploads it to App Store
 # Connect, where it appears in TestFlight. Releases and candidates both go; their build numbers
-# increase (docs/release.md, "Build numbers"). Unlike Google Play the build happens here: signing
-# needs the Mac, and release.yml builds no iOS app.
+# increase (docs/release.md, "Build numbers"). By hand (*Run workflow* with a tag) it builds and
+# uploads again without touching the release.
 #
-# Setup (without the secrets the run skips the upload with a notice):
+# Setup (without the secrets nothing is built and the run ends with a notice):
 #   Variables  APPLE_TEAM_ID                          the team (10 characters)
 #              APP_STORE_CONNECT_KEY_ID               the App Store Connect API key's ID
 #              APP_STORE_CONNECT_ISSUER_ID            its issuer ID
@@ -13,36 +14,40 @@
 #              APPLE_DISTRIBUTION_CERTIFICATE_P12     "Apple Distribution" certificate with key, base64
 #              APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD  its export password
 #   Optional:  the CRASH_REPORTS_* / DEBUG_FILES_S3_* secrets keep the dSYMs (docs/crash-reports.md).
-name: TestFlight
+name: iOS release
 
 on:
-  release:
-    types: [published]
+  workflow_call:
+    outputs:
+      built:
+        description: "`true` when the signed .ipa is in the artifact `release-ios`"
+        value: ${{ jobs.build.outputs.built }}
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to build and upload (vX.Y.Z or vX.Y.Z-rc.N)
+        description: Release tag to build and upload again (vX.Y.Z or vX.Y.Z-rc.N)
         required: true
 
 # One upload at a time; a second run for the same build number would be refused anyway.
 concurrency:
-  group: testflight
+  group: ios-release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 permissions: {}
 
 jobs:
-  upload:
-    name: Build and upload to TestFlight
-    # Only product releases (v*); the `ci-deps` mirror release is not one (docs/release.md).
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v')
+  build:
+    name: Build, sign and upload to TestFlight
     # Xcode 26 with the iOS 26 SDK, like ios.yml.
     runs-on: macos-26
     timeout-minutes: 150
     permissions:
       contents: read
+    outputs:
+      built: ${{ steps.ipa.outputs.built || 'false' }}
     env:
-      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      # Called from release.yml the run is on the tag itself.
+      TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - name: Settings
         id: settings
@@ -53,7 +58,7 @@ jobs:
             && vars.APP_STORE_CONNECT_KEY_ID != '' && vars.APP_STORE_CONNECT_ISSUER_ID != '' }}
         run: |
           if [ "$HAS_SECRETS" != true ]; then
-            echo "::notice::App Store Connect or signing secrets missing: ${TAG} is not uploaded to TestFlight"
+            echo "::notice::App Store Connect or signing secrets missing: no iOS build for ${TAG}"
             echo "enabled=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -160,7 +165,7 @@ jobs:
           key="$RUNNER_TEMP/AuthKey_${KEY_ID}.p8"
           (umask 077 && printf '%s\n' "$API_KEY" > "$key")
           echo "ASC_KEY_PATH=$key" >> "$GITHUB_ENV"
-      - name: Archive and upload
+      - name: Archive, export and upload
         if: steps.settings.outputs.enabled == 'true'
         working-directory: apps/ios
         env:
@@ -172,6 +177,24 @@ jobs:
           TC_PROFILE_SHARE: ${{ steps.profiles.outputs.share }}
           TEAMCRAFT_PUSH_GATEWAY_URL: ${{ vars.TEAMCRAFT_IOS_PUSH_GATEWAY_URL }}
         run: scripts/archive-testflight.sh
+      - name: The .ipa for the release
+        id: ipa
+        if: steps.settings.outputs.enabled == 'true'
+        env:
+          VERSION: ${{ steps.settings.outputs.version }}
+        run: |
+          mkdir -p out
+          cp apps/ios/build/export/*.ipa "out/teamcraft-ios-${VERSION}.ipa"
+          ls -l out
+          echo "built=true" >> "$GITHUB_OUTPUT"
+      # Only the .ipa: the dSYMs stay private (below). An App Store-signed .ipa installs only through
+      # TestFlight or the App Store; it is attached for its checksum and provenance.
+      - if: steps.settings.outputs.enabled == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-ios
+          path: out/*.ipa
+          if-no-files-found: error
       # The dSYMs go to the crash reports backend and/or the private bucket, never to a workflow
       # artifact: this repository is public (scripts/debug-files.sh). A failed upload only warns.
       - name: Keep the dSYMs (optional)

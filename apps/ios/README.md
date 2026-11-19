@@ -294,7 +294,7 @@ CI's `ios.yml` builds unsigned (`CODE_SIGNING_ALLOWED=NO`). Signed builds:
 - **Your own device from Xcode:** set `DEVELOPMENT_TEAM` in `Config/Local.xcconfig` and let Xcode sign
   automatically. These builds use the APNs **sandbox** (`APS_ENVIRONMENT = development`), so push
   through the publisher's production gateway doesn't reach them (docs/push-gateway.md §6).
-- **TestFlight:** `.github/workflows/testflight.yml` archives every published release on a macOS runner
+- **TestFlight:** `.github/workflows/ios-release.yml` (called by `release.yml`) archives every release on a macOS runner
   with the Apple Distribution certificate and the App Store profiles and uploads it
   (`scripts/archive-testflight.sh`, `APS_ENVIRONMENT = production`). Setup, secrets and renewal:
   docs/release.md, "TestFlight". `scripts/archive-testflight.sh --no-upload` checks the signing on a
