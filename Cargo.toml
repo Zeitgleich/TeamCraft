@@ -83,7 +83,7 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio",
 time = "0.3"
 # Civil dates and IANA time zones on the server (meeting series, holidays, quiet hours): one crate
 # for both, the time zone database compiled in (no zoneinfo on the host needed).
-jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }
+jiff = { version = "1.0", default-features = false, features = ["std", "tzdb-bundle-always"] }
 
 # Encoding
 base64 = "0.23"
