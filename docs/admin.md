@@ -1352,7 +1352,8 @@ while the choice doesn't use it, and keeps what was typed so switching back rest
   field and gets the focus. It stores the entries in their canonical form (lower case, punycode).
   The rules and the matching are in e2ee.md §12.
 - **Enforcement:** member clients, on both sides: the sender's device makes previews only of allowed
-  sites (every redirect hop and the image host included), and receivers drop previews of sites the
+  sites (every redirect hop and the image host included, never of `localhost` or private and
+  other non-public addresses, whatever the list says), and receivers drop previews of sites the
   current policy doesn't allow, also of messages sent before the change. The server can't see links
   and only checks the list's form.
 - **Privacy:** the sender's device opens the link to make the preview, so the linked site sees the

@@ -129,9 +129,9 @@ pub async fn make_link_preview(
   })
 }
 
-/// Fetches `url`, following at most `settings.max_redirects` redirects, each only to a host the
-/// policy allows: the device never contacts a host the policy keeps it away from. Returns the URL
-/// the resource came from and the resource.
+/// Fetches `url`, following at most `settings.max_redirects` redirects, each only to a link the
+/// policy allows (which also keeps out hosts that aren't public) and never from https down to http.
+/// Returns the URL the resource came from and the resource.
 async fn fetch_allowed(
   fetcher: &dyn PreviewFetcher,
   settings: &LinkPreviewSettings,
@@ -145,6 +145,7 @@ async fn fetch_allowed(
     }
     match fetcher.fetch(url.clone(), max_bytes).await? {
       FetchResponse::Fetched(fetched) => return Some((url, fetched)),
+      FetchResponse::Redirect(next) if url.scheme() == "https" && next.scheme() != "https" => return None,
       FetchResponse::Redirect(next) => url = next,
     }
   }
@@ -205,10 +206,36 @@ impl HttpPreviewFetcher {
       .timeout(settings.timeout)
       // Redirects come back to `make_link_preview`, which checks each hop against the policy.
       .redirect(reqwest::redirect::Policy::none())
+      // A public name that resolves to a private address (or is rebound to one) reaches nothing.
+      .dns_resolver(PublicOnlyResolver)
       .user_agent("TeamCraft link preview")
       .build()
       .ok()?;
     Some(Self { client })
+  }
+}
+
+/// Resolves host names for preview fetches to their public addresses only
+/// ([`teamcraft_proto::is_public_address`]); a name with none fails. The connection uses exactly
+/// these addresses, so a name can't be rebound to a private one between the check and the
+/// connection. Through a proxy the proxy resolves the name; e2ee.md §12 states that limit.
+#[cfg(not(target_arch = "wasm32"))]
+struct PublicOnlyResolver;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl reqwest::dns::Resolve for PublicOnlyResolver {
+  fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+    let host = name.as_str().to_owned();
+    Box::pin(async move {
+      let public: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
+        .await?
+        .filter(|address| teamcraft_proto::is_public_address(address.ip()))
+        .collect();
+      if public.is_empty() {
+        return Err("the host has no public address".into());
+      }
+      Ok(Box::new(public.into_iter()) as reqwest::dns::Addrs)
+    })
   }
 }
 

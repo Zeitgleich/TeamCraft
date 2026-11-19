@@ -36,8 +36,8 @@ pub struct Fetched {
 pub enum FetchResponse {
   Fetched(Fetched),
   /// A redirect to this URL (resolved against the request's). Not followed by the fetcher: the
-  /// caller checks every hop against the policy first, so a listed site can't send the device on
-  /// to a host the policy keeps it away from.
+  /// caller checks every hop against the policy (public hosts only, the domain list) and refuses
+  /// https-to-http before following it.
   Redirect(Url),
 }
 

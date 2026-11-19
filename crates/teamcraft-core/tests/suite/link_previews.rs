@@ -98,6 +98,49 @@ mod hops {
   }
 
   #[tokio::test]
+  async fn redirects_never_go_down_to_http_or_into_the_intranet() {
+    let everything = LinkPreviewPolicy {
+      mode: LinkPreviewMode::BlockList,
+      domains: Vec::new(),
+    };
+    let web = web()
+      .with_redirect("https://docs.example.com/plain", "http://docs.example.com/guide")
+      .with_page("http://docs.example.com/guide", "<title>Over http</title>")
+      .with_redirect("https://docs.example.com/inside", "http://192.168.1.10/admin")
+      .with_page("http://192.168.1.10/admin", "<title>Router</title>")
+      .with_page(
+        "https://docs.example.com/image",
+        r#"<meta property="og:title" content="Intranet image">
+          <meta property="og:image" content="http://10.0.0.5/secret.png">"#,
+      );
+    let settings = LinkPreviewSettings::default();
+    for start in [
+      "https://docs.example.com/plain",
+      "https://docs.example.com/inside",
+    ] {
+      assert!(
+        make_link_preview(&web, &settings, &everything, start)
+          .await
+          .is_none(),
+        "{start}"
+      );
+    }
+    let preview = make_link_preview(&web, &settings, &everything, "https://docs.example.com/image")
+      .await
+      .unwrap();
+    assert!(preview.maybe_image.is_none());
+    assert_eq!(
+      web.asked(),
+      [
+        "https://docs.example.com/plain",
+        "https://docs.example.com/inside",
+        "https://docs.example.com/image"
+      ],
+      "neither the http hop nor an intranet address was contacted"
+    );
+  }
+
+  #[tokio::test]
   async fn redirect_loops_stop_at_the_limit() {
     let allow = policy(LinkPreviewMode::AllowList).link_previews;
     let web = web()
