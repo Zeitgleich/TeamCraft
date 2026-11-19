@@ -7,6 +7,11 @@
 //! person of the [`Cast`] signs in, enrolls one device with the shared recovery passphrase, the owner
 //! signs the workspace policy, and the others fill a space, channels, direct messages and files.
 //! Everything is placeholder content: no real people, companies or hosts.
+//!
+//! The seed's devices keep their stores on disk ([`seed_store`]): a reviewer's new device is let into
+//! a conversation's encryption group only by a device that is already in it (docs/e2ee.md §4.6,
+//! "a further device"), so `demo-peers` ([`crate::demo_peers`]) runs the seed users' devices from
+//! these stores and they admit the reviewers' devices.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -14,10 +19,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use teamcraft_core::client::OutgoingFile;
-use teamcraft_core::store::MemoryStore;
+use teamcraft_core::store::{MemoryStore, SqlCipherStore, StaticKeySource, TrackedStore};
 use teamcraft_core::{ClientSettings, EnrollmentOptions, EnrollmentSecret};
 use teamcraft_crypto::backup::Argon2Settings;
-use teamcraft_crypto::secret::SecretBytes;
+use teamcraft_crypto::secret::{SYMMETRIC_KEY_LEN, SecretBytes, SymmetricKey};
 use teamcraft_proto::{ConversationId, RetentionSetting, SpaceId};
 
 use crate::peer::{Peer, settle};
@@ -33,6 +38,15 @@ const RETENTION_LIMIT_MESSAGES: u64 = 1000;
 const SETTLE: Duration = Duration::from_secs(5);
 /// The name of the seeded devices in the users' device lists.
 const SEED_DEVICE_NAME: &str = "Demo seed";
+/// A seed device's files in its directory ([`seed_store`]).
+const STORE_FILE: &str = "store.db";
+const STORE_KEY_FILE: &str = "store.key";
+/// Where [`snapshot`] keeps the copy of the seed devices' stores, in the test's directory.
+const STORES_COPY: &str = "peers";
+
+/// The store of a seed device: the desktop's store (SQLCipher) on disk, without its message cache,
+/// which a device nobody looks at doesn't need.
+pub type SeedStore = TrackedStore<Arc<SqlCipherStore>>;
 
 /// The first message of `#general`, which a reviewer sees first.
 pub const WELCOME: &str = "Welcome to Project A. This workspace is reset every night.";
@@ -178,6 +192,19 @@ impl Cast {
     }
   }
 
+  /// The logins whose seed devices `demo-peers` runs, once each: everybody but the reviewers.
+  /// Every conversation of the seed has one of them, so a reviewer's new device always finds a
+  /// member online to let it in.
+  pub fn peer_logins(&self) -> Vec<&str> {
+    let mut logins: Vec<&str> = Vec::new();
+    for login in [&self.owner, &self.alex, &self.sam, &self.robin] {
+      if !logins.contains(&login.as_str()) {
+        logins.push(login);
+      }
+    }
+    logins
+  }
+
   /// Every login once, the owner first, then in the order the seed enrolls them.
   pub fn logins(&self) -> Vec<&str> {
     let mut logins: Vec<&str> = Vec::new();
@@ -224,7 +251,7 @@ impl Cast {
 /// What a seeding run made: its devices (one per login, in [`Cast::logins`]'s order) and the
 /// conversations a check reads.
 pub struct Seeded {
-  pub peers: Vec<Peer>,
+  pub peers: Vec<Peer<SeedStore>>,
   pub space: SpaceId,
   pub general: ConversationId,
   pub design: ConversationId,
@@ -235,8 +262,15 @@ pub struct Seeded {
 
 /// Seeds an empty instance with `cast`; every user's key backup opens with `passphrase`. The
 /// devices use the apps' own key stretching (`argon2`: the default for the real instance), so
-/// the reviewers' phones open the backup as they would any other.
-pub async fn seed(stack: &Stack, cast: &Cast, passphrase: &str, argon2: Argon2Settings) -> Seeded {
+/// the reviewers' phones open the backup as they would any other. Each device keeps its store in
+/// `stores`, one directory per login ([`seed_store`]); they must not be there yet.
+pub async fn seed(
+  stack: &Stack,
+  cast: &Cast,
+  passphrase: &str,
+  argon2: Argon2Settings,
+  stores: &Path,
+) -> Seeded {
   if let Err(reason) = cast.check() {
     panic!("the demo cast: {reason}");
   }
@@ -249,7 +283,7 @@ pub async fn seed(stack: &Stack, cast: &Cast, passphrase: &str, argon2: Argon2Se
     .collect();
   assert_eq!(at(Role::Owner), 0, "the owner comes first");
 
-  let mut owner = enroll(stack, logins[0], passphrase, argon2).await;
+  let mut owner = enroll(stack, logins[0], passphrase, argon2, stores).await;
   owner
     .set_policy(|policy| {
       policy.retention.default = RetentionSetting {
@@ -269,14 +303,14 @@ pub async fn seed(stack: &Stack, cast: &Cast, passphrase: &str, argon2: Argon2Se
   let mut peers = Vec::with_capacity(logins.len());
   peers.push(owner);
   for login in &logins[1..] {
-    peers.push(enroll(stack, login, passphrase, argon2).await);
+    peers.push(enroll(stack, login, passphrase, argon2, stores).await);
   }
   eprintln!("enrolled every demo user");
 
   let (owner, others) = peers.split_first_mut().expect("the owner");
-  let members: Vec<(&Peer, &str)> = others.iter().map(|peer| (peer, "member")).collect();
+  let members: Vec<(&Peer<SeedStore>, &str)> = others.iter().map(|peer| (peer, "member")).collect();
   let space = space_with(stack, owner, SPACE_NAME, &members).await;
-  let mut everybody: Vec<&mut Peer> = others.iter_mut().collect();
+  let mut everybody: Vec<&mut Peer<SeedStore>> = others.iter_mut().collect();
   let general = channel_with(owner, space, "general", &mut everybody).await;
   let design = channel_with(owner, space, "design", &mut everybody).await;
   let planning = channel_with(owner, space, "release-planning", &mut everybody).await;
@@ -310,7 +344,7 @@ pub async fn seed(stack: &Stack, cast: &Cast, passphrase: &str, argon2: Argon2Se
   share(sam, alex_and_sam, BUDGET).await;
   eprintln!("wrote the messages, direct messages and files");
 
-  let mut all: Vec<&mut Peer> = peers.iter_mut().collect();
+  let mut all: Vec<&mut Peer<SeedStore>> = peers.iter_mut().collect();
   settle(&mut all, SETTLE).await;
   // A reviewer's new device restores the content keys from the key backup, so every backup must
   // hold the keys of every conversation before the snapshot.
@@ -361,8 +395,77 @@ pub async fn enroll_device(
   .await
 }
 
-async fn enroll(stack: &Stack, login: &str, passphrase: &str, argon2: Argon2Settings) -> Peer {
-  enroll_device(stack, login, SEED_DEVICE_NAME, passphrase, argon2).await
+async fn enroll(
+  stack: &Stack,
+  login: &str,
+  passphrase: &str,
+  argon2: Argon2Settings,
+  stores: &Path,
+) -> Peer<SeedStore> {
+  let directory = stores.join(login);
+  assert!(
+    !directory.join(STORE_FILE).exists(),
+    "{} holds a store already: seed into an empty directory",
+    directory.display()
+  );
+  Peer::enroll_with_options(
+    stack,
+    login,
+    seed_store(stores, login),
+    ClientSettings::default(),
+    enrollment_options(SEED_DEVICE_NAME, passphrase, argon2),
+  )
+  .await
+}
+
+/// The store of `login`'s seed device in `stores/<login>/`, created with a new key if it isn't
+/// there. The key lies beside the database (`store.key`, readable by the owner only): the demo's
+/// placeholder content is what it guards, and the peers start unattended.
+pub fn seed_store(stores: &Path, login: &str) -> SeedStore {
+  let directory = stores.join(login);
+  std::fs::create_dir_all(&directory)
+    .unwrap_or_else(|error| panic!("creating {}: {error}", directory.display()));
+  let key = StaticKeySource::new(store_key(&directory.join(STORE_KEY_FILE)));
+  let store = SqlCipherStore::open(&directory.join(STORE_FILE), &key)
+    .unwrap_or_else(|error| panic!("opening the store in {}: {error}", directory.display()));
+  TrackedStore::new(Arc::new(store))
+}
+
+/// Whether `login` has a seed device's store in `stores`.
+pub fn has_seed_store(stores: &Path, login: &str) -> bool {
+  let directory = stores.join(login);
+  directory.join(STORE_FILE).is_file() && directory.join(STORE_KEY_FILE).is_file()
+}
+
+/// The key in `path`, or a new one written there.
+fn store_key(path: &Path) -> SymmetricKey {
+  if let Ok(bytes) = std::fs::read(path) {
+    return SymmetricKey::from_slice(&bytes)
+      .unwrap_or_else(|| panic!("{} is not a key of {SYMMETRIC_KEY_LEN} bytes", path.display()));
+  }
+  let key = SymmetricKey::generate(&mut rand_core::OsRng);
+  write_private(path, key.expose_secret());
+  key
+}
+
+#[cfg(unix)]
+fn write_private(path: &Path, bytes: &[u8]) {
+  use std::io::Write;
+  use std::os::unix::fs::OpenOptionsExt;
+  let mut file = std::fs::OpenOptions::new()
+    .write(true)
+    .create_new(true)
+    .mode(0o600)
+    .open(path)
+    .unwrap_or_else(|error| panic!("creating {}: {error}", path.display()));
+  file
+    .write_all(bytes)
+    .unwrap_or_else(|error| panic!("writing {}: {error}", path.display()));
+}
+
+#[cfg(not(unix))]
+fn write_private(path: &Path, bytes: &[u8]) {
+  std::fs::write(path, bytes).unwrap_or_else(|error| panic!("writing {}: {error}", path.display()));
 }
 
 /// The dev stack's Postgres tools: those in its container, so `pg_dump` is as new as the server.
@@ -400,13 +503,15 @@ pub async fn check_postgres_tools() -> Result<(), String> {
 }
 
 /// `demo-reset.sh snapshot` on a test server: stops it, dumps its database in the same format
-/// (`pg_dump --format=custom --no-owner --no-privileges`) and starts it again. Returns the dump.
+/// (`pg_dump --format=custom --no-owner --no-privileges`), copies the seed devices' `stores` (their
+/// peers must be stopped, as the script stops `demo-peers`) and starts it again. Returns the dump.
 ///
 /// The bucket is not copied: the test servers share the dev stack's bucket, and `rclone sync` of a
 /// copy back would delete other tests' files. Nothing in it changes between snapshot and restore
 /// here, so the seed's files are what the restored database points at either way.
-pub async fn snapshot(stack: &mut Stack) -> PathBuf {
+pub async fn snapshot(stack: &mut Stack, stores: &Path) -> PathBuf {
   stack.stop_server().await;
+  copy_stores(stores, &stack.dir.join(STORES_COPY));
   let dump = stack.dir.join("database.dump");
   let file = std::fs::File::create(&dump).expect("creating the dump file");
   let database = stack.database_name().to_owned();
@@ -420,9 +525,12 @@ pub async fn snapshot(stack: &mut Stack) -> PathBuf {
     ])
     .stdout(file)
     .stderr(Stdio::piped())
-    .output()
+    // Not `output()`: tokio's pipes stdout there, and the dump would never reach the file.
+    .spawn()
+    .expect("running pg_dump")
+    .wait_with_output()
     .await
-    .expect("running pg_dump");
+    .expect("waiting for pg_dump");
   assert!(
     output.status.success(),
     "pg_dump: {}",
@@ -436,9 +544,12 @@ pub async fn snapshot(stack: &mut Stack) -> PathBuf {
 }
 
 /// `demo-reset.sh restore` on a test server: stops it, empties the schema `public`, restores the
-/// dump with the script's flags and starts the server again, which migrates the seed forward.
-pub async fn restore(stack: &mut Stack, dump: &Path) {
+/// dump with the script's flags, puts the seed devices' `stores` back to the snapshot's copy (their
+/// peers must be stopped) and starts the server again, which migrates the seed forward.
+pub async fn restore(stack: &mut Stack, dump: &Path, stores: &Path) {
   stack.stop_server().await;
+  std::fs::remove_dir_all(stores).unwrap_or_else(|error| panic!("emptying {}: {error}", stores.display()));
+  copy_stores(&stack.dir.join(STORES_COPY), stores);
   let database = stack.database_name().to_owned();
   let output = postgres_tool("psql")
     .args(["-X", "-v", "ON_ERROR_STOP=1", "-q", "--dbname", &database])
@@ -484,6 +595,24 @@ pub async fn restore(stack: &mut Stack, dump: &Path) {
     .unwrap_or_else(|error| panic!("starting the server after the restore: {error:#}"));
 }
 
+/// Copies the seed devices' store directories (`<login>/<file>`) from `from` into a fresh `to`, as
+/// the script's `cp -a` does.
+fn copy_stores(from: &Path, to: &Path) {
+  if to.exists() {
+    std::fs::remove_dir_all(to).unwrap_or_else(|error| panic!("removing {}: {error}", to.display()));
+  }
+  for device in std::fs::read_dir(from).expect("listing the stores") {
+    let device = device.expect("a store directory").path();
+    let target = to.join(device.file_name().expect("a directory name"));
+    std::fs::create_dir_all(&target).expect("creating the store copy");
+    for file in std::fs::read_dir(&device).expect("listing a store") {
+      let file = file.expect("a store file").path();
+      std::fs::copy(&file, target.join(file.file_name().expect("a file name")))
+        .expect("copying a store file");
+    }
+  }
+}
+
 fn index_of(logins: &[&str], login: &str) -> usize {
   logins
     .iter()
@@ -503,7 +632,7 @@ fn pair<T>(items: &mut [T], first: usize, second: usize) -> (&mut T, &mut T) {
   }
 }
 
-async fn say(peer: &mut Peer, conversation: ConversationId, body: &str) {
+async fn say(peer: &mut Peer<SeedStore>, conversation: ConversationId, body: &str) {
   peer
     .client
     .send_text(conversation, None, body)
@@ -511,7 +640,7 @@ async fn say(peer: &mut Peer, conversation: ConversationId, body: &str) {
     .unwrap_or_else(|error| panic!("{} writes in {conversation}: {error}", peer.name));
 }
 
-async fn share(peer: &mut Peer, conversation: ConversationId, file: SeedFile) {
+async fn share(peer: &mut Peer<SeedStore>, conversation: ConversationId, file: SeedFile) {
   peer
     .client
     .send_file(
@@ -528,7 +657,7 @@ async fn share(peer: &mut Peer, conversation: ConversationId, file: SeedFile) {
 }
 
 /// A direct message from `from` to `to`, who joins it and answers.
-async fn dm(from: &mut Peer, to: &mut Peer, body: &str) -> ConversationId {
+async fn dm(from: &mut Peer<SeedStore>, to: &mut Peer<SeedStore>, body: &str) -> ConversationId {
   let conversation = from
     .client
     .open_dm(to.user_id())
@@ -561,6 +690,15 @@ mod tests {
     );
     assert_eq!(cast.check(), Ok(()));
     assert_eq!(cast.login(Role::Robin), "robin@example.com");
+    assert_eq!(
+      cast.peer_logins(),
+      [
+        "owner@example.com",
+        "alex@example.com",
+        "sam@example.com",
+        "robin@example.com",
+      ]
+    );
   }
 
   #[test]
@@ -568,6 +706,7 @@ mod tests {
     let cast = Cast::dev();
     assert_eq!(cast.check(), Ok(()));
     assert_eq!(cast.logins(), ["alice", "bob", "carol", "erin"]);
+    assert_eq!(cast.peer_logins(), ["alice", "bob", "carol"]);
   }
 
   #[test]

@@ -1467,14 +1467,16 @@ instance.
 
 Files in this repository:
 
-| File                             | What                                                                      |
-|----------------------------------|---------------------------------------------------------------------------|
-| `dev/demo/teamcraft.demo.toml`   | Server settings that differ from the defaults (identity provider, limits) |
-| `dev/demo/dex.example.yaml`      | Identity provider: Dex with static users and their groups                 |
-| `tests/e2e/src/bin/demo-seed.rs` | The seeding run: real clients make the space, channels, DMs and files     |
-| `tests/e2e/src/demo.rs`          | The seed itself: who writes what where (shared with the e2e check)        |
-| `dev/demo/demo-reset.sh`         | `snapshot` after seeding, `restore` every night, `check`                  |
-| `dev/dev-token.py`               | Signs a user in at the provider (used by the seeding run)                 |
+| File                              | What                                                                          |
+|-----------------------------------|-------------------------------------------------------------------------------|
+| `dev/demo/teamcraft.demo.toml`    | Server settings that differ from the defaults (identity provider, limits)     |
+| `dev/demo/dex.example.yaml`       | Identity provider: Dex with static users and their groups                     |
+| `tests/e2e/src/bin/demo-seed.rs`  | The seeding run: real clients make the space, channels, DMs and files         |
+| `tests/e2e/src/demo.rs`           | The seed itself: who writes what where (shared with the e2e check)            |
+| `tests/e2e/src/bin/demo-peers.rs` | Keeps the seed users' devices online, so they let reviewers' devices in       |
+| `tests/e2e/src/demo_peers.rs`     | What those devices do (shared with the e2e check)                             |
+| `dev/demo/demo-reset.sh`          | `snapshot` after seeding, `restore` every night, `check`                      |
+| `dev/dev-token.py`                | Signs a user in at the provider (used by the seeding run and `demo-peers`)    |
 
 ### Without Keycloak
 
@@ -1510,9 +1512,11 @@ undoes everything else. Production keeps Keycloak and the sync.
    (`shared_buffers = 32MB`, `max_connections = 20`). Mail is off; push goes through the existing
    push gateway. Name the database `teamcraft_demo`: the reset refuses a database without `demo` in
    its name.
-2. On the empty instance, run the seeding run once, from a machine with the repository:
+2. On the empty instance, run the seeding run once, on the server (or copy the store directory
+   there afterwards, owner only):
 
    ```sh
+   DEMO_PEER_STORES=/var/lib/teamcraft-demo/peers \
    E2E_DEPLOYED_URL=https://demo.example.com \
    DEV_TOKEN_ISSUER=https://demo.example.com/dex \
    DEV_TOKEN_SCOPES="openid profile email groups" \
@@ -1527,19 +1531,68 @@ undoes everything else. Production keeps Keycloak and the sync.
    It signs every user in at Dex, enrolls one device each, signs the workspace policy as the owner
    (500 messages kept per channel, passphrases allowed), and writes the space `Project A` with the
    channels `general`, `design` and `release-planning`, direct messages between the members and
-   both reviewers, and three small files. It stops at the first failure with a non-zero exit code.
-3. On the server, take the snapshot: `dev/demo/demo-reset.sh snapshot` (settings at the top of the
-   script). It stops the server, dumps the database, copies the bucket into the seed directory and
-   starts the server again.
+   both reviewers, and three small files. Each user's device keeps its store in
+   `DEMO_PEER_STORES` (an empty directory; one subdirectory per user with `store.db` and the
+   store's key `store.key`, readable by the owner only). It stops at the first failure with a
+   non-zero exit code.
+3. Set up `demo-peers` as a service (below), then take the snapshot on the server:
+   `dev/demo/demo-reset.sh snapshot` (settings at the top of the script). It stops the peers and the
+   server, dumps the database, copies the bucket and the stores into the seed directory and starts
+   the server and the peers again.
 4. Sign in on a phone as a reviewer (instructions below) and check that the channels, messages and
-   files are readable.
+   files are readable, and that a message to Alex goes out and gets an answer.
 
 The nightly end-to-end suite plays the same seed on a test server (`demo_signin.rs`, issue #1743):
-it dumps and restores the database with the reset's `pg_dump` and `pg_restore` flags, and a new
-device of the first reviewer restores the account from the passphrase and reads a seeded message, a
-direct message and a file with nobody else online. A release that breaks this flow turns the
-nightly run red before a store review finds it. It doesn't touch the demo instance; the step 4
-check above stays for the instance itself.
+it dumps and restores the database with the reset's `pg_dump` and `pg_restore` flags and puts the
+seed devices' stores back, and a new device of the first reviewer restores the account from the
+passphrase and reads a seeded message, a direct message and a file with nobody else online. Then
+the seed devices start from the restored stores as `demo-peers` runs them: they let the reviewer's
+device in, its queued direct message reaches Alex, Alex answers once, and its message in `general`
+reaches the owner. A release that breaks this flow turns the nightly run red before a store review
+finds it. It doesn't touch the demo instance; the step 4 check above stays for the instance itself.
+
+### The seed users online: `demo-peers`
+
+A reviewer's new device reads everything at once: the key backup, opened with the passphrase, holds
+the keys of the seed's messages. To write, it must be in each conversation's encryption group, and
+only a device already in the group adds it (e2ee.md §4.6, "a further device"): a device that
+recovered with the passphrase never joins on its own, it waits for one of the user's other devices or
+a member's device to be online. On the demo nobody is, so without help the reviewer sees "This device
+isn't fully set up for this conversation yet", new messages stay locked and their own wait in the
+outbox.
+
+`demo-peers` is that help: one process that runs the seed devices of `owner`, `alex`, `sam` and
+`robin` from `DEMO_PEER_STORES` on the apps' own sync runner (as the desktop app does). Every
+conversation of the seed has one of them, and the core does the rest as on any member's device: on
+the server's `device_add` event, or the new device's request, a member's device adds it to the group
+and hands it the current key, ranked so that normally one does (`device_add_stagger`, 10 s per
+rank). A reviewer's device can write within a minute of the sign-in. On top, a seed device answers a
+direct message from a reviewer once ("This is an automatic reply…"), so a reviewer sees a message
+come back; it never answers the seed's own messages or another seed device.
+
+It holds one gateway connection per device with heartbeats and reconnects with backoff (a server
+restart, a network change); nothing polls, the gateway pushes events. Settings (environment):
+
+| Variable                        | What                                                                               |
+|---------------------------------|------------------------------------------------------------------------------------|
+| `E2E_DEPLOYED_URL`              | The instance, e.g. `https://demo.example.com`                                      |
+| `DEMO_PEER_STORES`              | The stores the seeding run wrote                                                   |
+| `DEMO_LOGIN_SUFFIX`             | As for the seeding run (default `@example.com`)                                    |
+| `DEV_TOKEN_ISSUER`, `…_SCOPES`  | As for the seeding run: the peers sign in at Dex with the users' passwords         |
+| `DEV_TOKEN_PASSWORD`, `…_OWNER` | The passwords of `alex`, `sam`, `robin` and of `owner` (reviewers' not needed)     |
+| `DEV_TOKEN_SCRIPT`              | Where `dev/dev-token.py` is on the server (needs `python3`, standard library only) |
+| `DEMO_PEERS_LOG`                | The core's log filter (default `warn`)                                             |
+
+Build it like the seeding run (`cargo build --release -p teamcraft-e2e --features e2e --bin
+demo-peers`) and run it as a service beside the server: started after the server, restarted on
+failure, stopped with SIGTERM (it closes its connections and stores). It exits with 2 when a setting
+or a store is missing. The reset stops and starts it (`DEMO_PEERS_STOP_CMD`, `DEMO_PEERS_START_CMD`):
+the stores must match the database, since a device's groups and keys belong to the epochs stored
+there.
+
+The store keys lie beside the stores: the stores hold the seed users' private keys, which open
+nothing but the demo's placeholder content, and the peers start unattended. Keep the directory
+readable by the service's user only.
 
 ### Nightly reset
 
@@ -1548,10 +1601,15 @@ the rclone remote's `:`) without `demo` in its name, so a wrong setting can't wi
 it a database URL without the password and the password in `~/.pgpass` (or `PGPASSFILE`): the URL
 is passed on the command line of `psql`, `pg_dump` and `pg_restore`, where other users can see it.
 
-`dev/demo/demo-reset.sh restore` stops the server, empties the schema `public` and restores the
-dump, makes the bucket equal to the seed's copy (`rclone sync`: uploads since are deleted), starts
-the server and waits for `/readyz`. It logs every step with a time stamp, takes a lock so that two
-runs don't overlap, starts the server again after a failed step, and exits non-zero on any failure.
+`dev/demo/demo-reset.sh restore` stops `demo-peers` and the server, empties the schema `public` and
+restores the dump, makes the bucket equal to the seed's copy (`rclone sync`: uploads since are
+deleted), puts the seed devices' stores back to the snapshot's copy (`peers/` in the seed
+directory), starts the server, waits for `/readyz` and starts the peers. Database, bucket and stores
+come from the same snapshot, so the peers' groups match the restored epochs; what they did during
+the day (admitting reviewers' devices) is undone with the rest. It logs every step with a time
+stamp, takes a lock so that two runs don't overlap, starts the server and the peers again after a
+failed step, and exits non-zero on any failure (also when the seed has no stores: an instance seeded
+before `demo-peers` must be seeded again).
 Run it from a systemd timer at a quiet hour (03:00 UTC) with `OnFailure=` pointing at the alert, or
 from cron with the exit code checked. `demo-reset.sh check` checks settings, tools and seed without
 changing anything.
@@ -1583,10 +1641,11 @@ memory after a day here (`podman stats`, or `ps -o rss`).
 | Garage             | single node                            | 20–50 MB   | –        |
 | `teamcraft-server` | release build, 5 database connections  | 50–100 MB  | –        |
 | `teamcraft-sfu`    | small call limits                      | 20–50 MB   | –        |
+| `demo-peers`       | four devices, one thread               | 15–25 MB   | –        |
 | Caddy              | TLS and reverse proxy                  | 30 MB      | –        |
 | Push               | the existing push gateway              | 0          | –        |
 | Mail               | off                                    | 0          | –        |
-| **Total**          |                                        | 200–340 MB | –        |
+| **Total**          |                                        | 215–365 MB | –        |
 
 Disk stays flat: the seed directory holds a few MB, database and bucket go back to it every night,
 attachments are at most 10 MB each and 100 MB per user (`[storage]` and `[limits]` in
@@ -1596,9 +1655,9 @@ attachments are at most 10 MB each and 100 MB per user (`[storage]` and `[limits
 
 Edit `tests/e2e/src/bin/demo-seed.rs` (users, space, channels, messages, files, policy); a new user
 also goes into Dex's static users with their group (`teamcraft-owner` or `teamcraft-member`). Then, on the instance:
-stop the reset timer, empty the instance (`restore` won't do, it brings back the old seed: stop the
-server, drop and create the schema `public`, empty the bucket, start the server), run the seeding run,
-take a new snapshot, and start the timer again. Placeholder names only (`Project A`, `example.com`).
+stop the reset timer and `demo-peers`, empty the instance (`restore` won't do, it brings back the old
+seed: stop the server, drop and create the schema `public`, empty the bucket and `DEMO_PEER_STORES`,
+start the server), run the seeding run, take a new snapshot, and start the timer again. Placeholder names only (`Project A`, `example.com`).
 
 ### Review instructions
 
@@ -1621,7 +1680,7 @@ messages you write and the device you set up are removed then.
    <passphrase>
 4. You are now in the workspace "Project A": the channels general, design and release-planning,
    direct messages with Alex and Sam, and shared files. You can write messages, react, open and
-   share files, and start threads.
+   share files, and start threads. Alex and Sam answer a direct message with an automatic reply.
 
 If the app says that this device is no longer signed in or no longer known (after the nightly
 reset), sign out and repeat steps 2 and 3.
