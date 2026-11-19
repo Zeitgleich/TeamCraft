@@ -1685,6 +1685,7 @@ impl ParticipantRoute {
   /// Follows its voices while its downlink is thin, without padding (#1893 step 3): clean thin
   /// voices for a hold bring the full voices back, clean full voices for another the video and the
   /// usual probing. Entered whenever its downlink became thin.
+  /// Off a thin downlink, it watches whether the link proves its recovery.
   fn follow_thin_recovery(&mut self, config: &AudioLayerConfig, now: Instant) {
     let is_thin = self.is_on_thin_downlink(config, now);
     if is_thin && !self.is_thin_downlink {
@@ -1692,6 +1693,11 @@ impl ParticipantRoute {
     }
     self.is_thin_downlink = is_thin;
     if !is_thin {
+      // A recovered link that carries video proves its recovery (#2139).
+      let carried_bps = self.downlink.sent_bps(now);
+      self
+        .thin_recovery
+        .follow_recovered(config, carried_bps, self.voice.is_hurt(now), now);
       return;
     }
     let is_voice_flowing = self
@@ -4194,6 +4200,84 @@ mod tests {
       }
     }
 
+    /// #2139: a viewer whose downlink collapses to 80–200 kbit/s for 16 s and comes back to
+    /// 2–5 Mbit/s for 20 s, three times, both swinging every 2 s (the call test rig's
+    /// `inner-down.sh`), while the publisher speaks. Its video yields in each collapse and comes
+    /// back within seconds of each recovery, and stays until the next collapse: a collapse after a
+    /// recovery the link proved is a new one, not a reason to wait longer.
+    #[test]
+    fn a_viewer_gets_video_back_after_every_collapse() {
+      const GOOD_KBPS: [u64; 5] = [2_000, 4_000, 2_500, 5_000, 3_000];
+      const BAD_KBPS: [u64; 5] = [120, 80, 200, 100, 150];
+      let swing = |from: Duration, seconds: u64, kbps: &[u64], capacities: &mut Vec<(Duration, u64)>| {
+        for (index, step) in (0..seconds / 2).enumerate() {
+          capacities.push((
+            from + Duration::from_secs(step * 2),
+            kbps[index % kbps.len()] * 1000,
+          ));
+        }
+      };
+      let mut capacities = Vec::new();
+      swing(Duration::ZERO, 20, &GOOD_KBPS, &mut capacities);
+      // (collapse from, link back from, link good until)
+      let mut cycles = Vec::new();
+      let mut at = Duration::from_secs(20);
+      for _ in 0..3 {
+        swing(at, 16, &BAD_KBPS, &mut capacities);
+        swing(at + Duration::from_secs(16), 20, &GOOD_KBPS, &mut capacities);
+        cycles.push((at, at + Duration::from_secs(16), at + Duration::from_secs(36)));
+        at += Duration::from_secs(36);
+      }
+      let run = simulate_call_on(Link::new(3_000_000), &three_layers(), &capacities, at, true);
+      let video_at: Vec<Duration> = run
+        .iter()
+        .filter(|datagram| datagram.maybe_layer.is_some() && datagram.maybe_arrival.is_some())
+        .map(|datagram| datagram.at)
+        .collect();
+      for (collapse_from, back_from, good_until) in cycles {
+        let in_collapse = video_at
+          .iter()
+          .filter(|at| **at >= collapse_from + Duration::from_secs(4) && **at < back_from)
+          .count();
+        assert_eq!(in_collapse, 0, "video in the collapse from {collapse_from:?}");
+        let after: Vec<Duration> = video_at
+          .iter()
+          .filter(|at| **at >= back_from && **at < good_until)
+          .copied()
+          .collect();
+        let back_after = after.first().map(|at| *at - back_from);
+        eprintln!("link back at {back_from:?}: video after {back_after:?}");
+        assert!(
+          back_after.is_some_and(|after| after <= Duration::from_secs(12)),
+          "video {back_after:?} after the link came back at {back_from:?}"
+        );
+        let longest_gap = after
+          .windows(2)
+          .map(|pair| pair[1] - pair[0])
+          .max()
+          .unwrap_or_default();
+        assert!(
+          longest_gap <= Duration::from_secs(2),
+          "video stood still for {longest_gap:?} on the good link from {back_from:?}"
+        );
+        // The video that came back doesn't push the voice out.
+        let voice_arrivals: Vec<Duration> = run
+          .iter()
+          .filter(|datagram| datagram.is_voice && datagram.at >= back_from && datagram.at < good_until)
+          .filter_map(|datagram| datagram.maybe_arrival)
+          .collect();
+        let longest_silence = voice_arrivals
+          .windows(2)
+          .map(|pair| pair[1].saturating_sub(pair[0]))
+          .max()
+          .unwrap_or_default();
+        assert!(
+          longest_silence <= Duration::from_millis(500),
+          "the voice stopped for {longest_silence:?} on the good link from {back_from:?}"
+        );
+      }
+    }
+
     /// Runs the receiver's timer and keyframes of every layer until it is switched to `layer`;
     /// when, if within 30 s.
     fn switched_to(forwarder: &mut Forwarder, layer: u8, from: Instant) -> Option<Instant> {
@@ -4266,10 +4350,22 @@ mod tests {
 
     /// [`simulate`] behind `link`, with each datagram's arrival.
     fn simulate_on(
+      link: Link,
+      layers: &[VideoLayerInfo],
+      capacities: &[(Duration, u64)],
+      duration: Duration,
+    ) -> Vec<SimulatedDatagram> {
+      simulate_call_on(link, layers, capacities, duration, false)
+    }
+
+    /// [`simulate_on`]; `is_speaking`: the publisher speaks all along as well, a voice packet every
+    /// 20 ms.
+    fn simulate_call_on(
       mut link: Link,
       layers: &[VideoLayerInfo],
       capacities: &[(Duration, u64)],
       duration: Duration,
+      is_speaking: bool,
     ) -> Vec<SimulatedDatagram> {
       let (mut forwarder, start) = room(3);
       link.maybe_origin = Some(start);
@@ -4292,14 +4388,18 @@ mod tests {
       let mut now = start;
       let end = start + duration;
       let mut next_feedback = start + Duration::from_millis(100);
+      let mut next_voice = start;
+      let mut voice_number = 0u16;
       let mut sent: Vec<SimulatedDatagram> = Vec::new();
       let mut send = |link: &mut Link, delivered: &[u8], now: Instant, in_flight: &mut Vec<_>| {
         let parsed = DatagramHeader::parse(delivered).unwrap();
         let is_padding = parsed.stream_id == teamcraft_media::datagram::PADDING_STREAM;
+        let is_voice = parsed.stream_id == stream(1);
         let maybe_arrival = link.send(delivered.len(), now);
         sent.push(SimulatedDatagram {
           at: now - start,
-          maybe_layer: (!is_padding).then_some(parsed.layer.value()),
+          maybe_layer: (!is_padding && !is_voice).then_some(parsed.layer.value()),
+          is_voice,
           maybe_arrival: maybe_arrival.map(|arrival| arrival - start),
         });
         if let (Some(arrival), Some(seq)) = (maybe_arrival, parsed.maybe_transport_seq) {
@@ -4309,6 +4409,36 @@ mod tests {
       while now < end {
         if let Some((_, capacity_bps)) = capacities.iter().rev().find(|(from, _)| now - start >= *from) {
           link.capacity_bps = *capacity_bps;
+        }
+        // About 64 kbit/s on the wire, as a full voice.
+        while is_speaking && next_voice <= now {
+          let mut rtp = header();
+          rtp.sequence_number = SequenceNumber(voice_number);
+          rtp.set_audio_level(AudioLevel::new(20, true).unwrap());
+          let packet = RtpPacket {
+            header: rtp,
+            payload: &[0; 120],
+          }
+          .to_bytes()
+          .unwrap();
+          let datagram = MediaDatagram {
+            header: DatagramHeader {
+              stream_id: stream(1),
+              layer: SimulcastLayer::new(0).unwrap(),
+              maybe_transport_seq: None,
+            },
+            rtp: &packet,
+          }
+          .to_bytes(1200)
+          .unwrap();
+          let route = forwarder.route(device(1), &datagram, now).unwrap();
+          for (receiver, delivered) in route.deliveries {
+            if receiver == device(2) {
+              send(&mut link, &delivered, now, &mut in_flight);
+            }
+          }
+          voice_number = voice_number.wrapping_add(1);
+          next_voice += Duration::from_millis(20);
         }
         // 30 fps; a keyframe every second, and on the SFU's request, as a publisher sends one.
         for info in layers {
@@ -4600,8 +4730,9 @@ mod tests {
   struct SimulatedDatagram {
     /// When it was sent, from the simulation's start.
     at: Duration,
-    /// Its layer; `None` for padding.
+    /// Its video layer; `None` for padding and voice.
     maybe_layer: Option<u8>,
+    is_voice: bool,
     /// When it arrived, from the simulation's start; `None` when the link dropped it.
     maybe_arrival: Option<Duration>,
   }
