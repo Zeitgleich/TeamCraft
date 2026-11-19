@@ -12,7 +12,8 @@
 //! only the payload; the RTP header is the SFU's to rewrite.
 //!
 //! A receiver on a thin downlink gets no padding probes: their bursts queued in front of its voice.
-//! It learns that its link recovered from the voices themselves ([`ThinRecovery`]).
+//! It learns that its link recovered from the voices themselves ([`ThinRecovery`]), within seconds
+//! of the link coming back (#2139).
 //!
 //! Pure: time is passed in.
 
@@ -42,10 +43,18 @@ pub struct AudioLayerConfig {
   /// the full voices; once those arrived as cleanly for as long again, its downlink counts as
   /// recovered ([`ThinRecovery`]).
   pub recovery_hold: Duration,
-  /// Each trial that failed, and each relapse within [`Self::relapse_within`] of a recovery,
-  /// doubles the hold, up to this.
+  /// Each trial that failed, and each relapse within [`Self::relapse_within`] of a recovery the
+  /// link didn't prove, doubles the hold before the next trial, up to this. A link that stays thin
+  /// is tried rarely; one that came back waits at most this long for its full voices.
   pub recovery_max_hold: Duration,
   pub relapse_within: Duration,
+  /// A recovered downlink that carried this much (video and voices, no padding) for
+  /// [`Self::proven_for`] with its voices clean proved its recovery: thin again later is a new
+  /// collapse of the link, not a failed recovery, and the hold starts over at
+  /// [`Self::recovery_hold`] (#2139). Without it a link that collapses now and then (a train, a
+  /// crowded cell) got longer holds with each collapse until it never saw video again.
+  pub proven_above_bps: u32,
+  pub proven_for: Duration,
 }
 
 /// Whether a receiver takes the thin voices now.
@@ -68,7 +77,11 @@ pub struct ThinRecovery {
   clean_for: Duration,
   maybe_updated_at: Option<Instant>,
   failures: u32,
+  /// When it recovered, until the link proved the recovery.
   maybe_recovered_at: Option<Instant>,
+  /// Since when the recovered link carries [`AudioLayerConfig::proven_above_bps`] with its voices
+  /// clean.
+  maybe_carrying_since: Option<Instant>,
 }
 
 /// Where a receiver on a thin downlink is on its way back.
@@ -100,9 +113,13 @@ impl Default for AudioLayerConfig {
       thin_stale_after: Duration::from_millis(500),
       thin_resume_grace: Duration::from_millis(500),
       thin_known_for: Duration::from_secs(30),
-      recovery_hold: Duration::from_secs(10),
-      recovery_max_hold: Duration::from_secs(80),
+      recovery_hold: Duration::from_secs(3),
+      recovery_max_hold: Duration::from_secs(24),
       relapse_within: Duration::from_secs(60),
+      // The lowest video layer next to the voices, with room to spare: more than a thin link
+      // carries.
+      proven_above_bps: 500_000,
+      proven_for: Duration::from_secs(2),
     }
   }
 }
@@ -161,6 +178,7 @@ impl ThinRecovery {
     self.clean_for = Duration::ZERO;
     self.maybe_updated_at = Some(now);
     self.maybe_recovered_at = None;
+    self.maybe_carrying_since = None;
   }
 
   /// Follows its voices: `is_voice_flowing` while a voice goes to it, `is_voice_hurt` while
@@ -203,12 +221,42 @@ impl ThinRecovery {
     self.stage
   }
 
+  /// Follows a recovered downlink: `carried_bps` is what went to it lately besides padding,
+  /// `is_voice_hurt` whether its voice was lost or late. Carried well for
+  /// [`AudioLayerConfig::proven_for`], the recovery is proven: the failures are forgotten.
+  pub fn follow_recovered(
+    &mut self,
+    config: &AudioLayerConfig,
+    carried_bps: u32,
+    is_voice_hurt: bool,
+    now: Instant,
+  ) {
+    if self.stage != RecoveryStage::Recovered || self.maybe_recovered_at.is_none() {
+      return;
+    }
+    if is_voice_hurt || carried_bps < config.proven_above_bps {
+      self.maybe_carrying_since = None;
+      return;
+    }
+    let since = *self.maybe_carrying_since.get_or_insert(now);
+    if now.saturating_duration_since(since) >= config.proven_for {
+      self.failures = 0;
+      self.maybe_recovered_at = None;
+      self.maybe_carrying_since = None;
+    }
+  }
+
   pub fn stage(&self) -> RecoveryStage {
     self.stage
   }
 
-  /// The hold of a stage: doubled for each failure, within the bound.
+  /// The hold of a stage. Before a trial of the full voices: doubled for each failure, within the
+  /// bound. The trial itself shows the link's room the same way however often one failed before:
+  /// once it started, the link that came back gets its video within the usual hold.
   fn hold(&self, config: &AudioLayerConfig) -> Duration {
+    if self.stage != RecoveryStage::Thin {
+      return config.recovery_hold;
+    }
     let factor = 1u32.checked_shl(self.failures).unwrap_or(u32::MAX);
     config
       .recovery_hold
@@ -300,7 +348,7 @@ mod tests {
     const STEP: Duration = Duration::from_millis(100);
 
     /// Clean voices for a hold try the full voices, clean full voices for another leave the thin
-    /// downlink: 20 s on a link that recovered.
+    /// downlink: 6 s on a link that recovered.
     #[test]
     fn clean_voices_recover_in_two_holds() {
       let config = AudioLayerConfig::default();
@@ -383,7 +431,7 @@ mod tests {
       let mut recovery = ThinRecovery::default();
       let now = Instant::now();
       recovery.enter(&config, now);
-      let hurt_at = now + Duration::from_secs(8);
+      let hurt_at = now + config.recovery_hold - Duration::from_secs(1);
       recovery.update(&config, true, false, hurt_at);
       assert_eq!(
         recovery.update(&config, true, true, hurt_at + STEP),
@@ -463,6 +511,127 @@ mod tests {
         full_at.saturating_duration_since(much_later),
         config.recovery_hold
       );
+    }
+
+    /// After failed trials the next trial waits longer, but not the video once the trial started:
+    /// the link that came back shows its room in the usual hold.
+    #[test]
+    fn failures_delay_the_trial_not_the_video() {
+      let config = AudioLayerConfig::default();
+      let mut recovery = ThinRecovery::default();
+      let mut at = Instant::now();
+      recovery.enter(&config, at);
+      for _ in 0..2 {
+        at = run(&mut recovery, &config, at, true, false, RecoveryStage::FullVoices);
+        at += STEP;
+        assert_eq!(recovery.update(&config, true, true, at), RecoveryStage::Thin);
+      }
+      let full_at = run(&mut recovery, &config, at, true, false, RecoveryStage::FullVoices);
+      assert_eq!(full_at.saturating_duration_since(at), 4 * config.recovery_hold);
+      let recovered_at = run(
+        &mut recovery,
+        &config,
+        full_at,
+        true,
+        false,
+        RecoveryStage::Recovered,
+      );
+      assert_eq!(
+        recovered_at.saturating_duration_since(full_at),
+        config.recovery_hold
+      );
+    }
+
+    /// However often trials fail, the next one comes within the bound.
+    #[test]
+    fn the_wait_for_a_trial_is_bounded() {
+      let config = AudioLayerConfig::default();
+      let mut recovery = ThinRecovery::default();
+      let mut at = Instant::now();
+      recovery.enter(&config, at);
+      for _ in 0..10 {
+        at = run(&mut recovery, &config, at, true, false, RecoveryStage::FullVoices);
+        at += STEP;
+        assert_eq!(recovery.update(&config, true, true, at), RecoveryStage::Thin);
+      }
+      let full_at = run(&mut recovery, &config, at, true, false, RecoveryStage::FullVoices);
+      assert_eq!(full_at.saturating_duration_since(at), config.recovery_max_hold);
+    }
+
+    /// #2139: a recovered link that carried video with its voices clean proved its recovery: thin
+    /// again soon after is a new collapse, and its recovery takes the usual holds.
+    #[test]
+    fn a_proven_recovery_makes_the_next_collapse_a_new_one() {
+      let config = AudioLayerConfig::default();
+      let (mut recovery, recovered_at) = recovered_after_a_failure(&config);
+      let mut at = recovered_at;
+      while at <= recovered_at + config.proven_for {
+        at += STEP;
+        recovery.follow_recovered(&config, 2_000_000, false, at);
+      }
+      let collapse_at = at + Duration::from_secs(10);
+      recovery.enter(&config, collapse_at);
+      let full_at = run(
+        &mut recovery,
+        &config,
+        collapse_at,
+        true,
+        false,
+        RecoveryStage::FullVoices,
+      );
+      assert_eq!(
+        full_at.saturating_duration_since(collapse_at),
+        config.recovery_hold
+      );
+    }
+
+    /// A recovered link that carried little, or lost voice while it carried more, proved
+    /// nothing: thin again soon after counts as a relapse.
+    #[test]
+    fn an_unproven_recovery_relapses() {
+      let config = AudioLayerConfig::default();
+      for (carried_bps, is_voice_hurt) in [(config.proven_above_bps - 1, false), (2_000_000, true)] {
+        let (mut recovery, recovered_at) = recovered_after_a_failure(&config);
+        let mut at = recovered_at;
+        while at < recovered_at + 2 * config.proven_for {
+          at += STEP;
+          recovery.follow_recovered(&config, carried_bps, is_voice_hurt, at);
+        }
+        recovery.enter(&config, at);
+        let full_at = run(&mut recovery, &config, at, true, false, RecoveryStage::FullVoices);
+        assert_eq!(
+          full_at.saturating_duration_since(at),
+          4 * config.recovery_hold,
+          "carried {carried_bps}, hurt {is_voice_hurt}"
+        );
+      }
+    }
+
+    /// A receiver that recovered after one failed trial; when it did.
+    fn recovered_after_a_failure(config: &AudioLayerConfig) -> (ThinRecovery, Instant) {
+      let mut recovery = ThinRecovery::default();
+      let now = Instant::now();
+      recovery.enter(config, now);
+      let full_at = run(&mut recovery, config, now, true, false, RecoveryStage::FullVoices);
+      let hurt_at = full_at + STEP;
+      assert_eq!(recovery.update(config, true, true, hurt_at), RecoveryStage::Thin);
+      let full_at = run(
+        &mut recovery,
+        config,
+        hurt_at,
+        true,
+        false,
+        RecoveryStage::FullVoices,
+      );
+      let recovered_at = run(
+        &mut recovery,
+        config,
+        full_at,
+        true,
+        false,
+        RecoveryStage::Recovered,
+      );
+      (recovery, recovered_at)
     }
 
     /// Steps of 100 ms from `from` until `recovery` reaches `stage`; when it did.
