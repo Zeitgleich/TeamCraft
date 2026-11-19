@@ -305,7 +305,8 @@ The App IDs (`de.zeitgleich.teamcraft`, `.notifications`, `.share`) and the App 
 **Notification Filtering** (`com.apple.developer.usernotifications.filtering`) for the extension from
 Apple; once granted, add it to the extension's App ID, regenerate its profile and switch
 `NSE_ENTITLEMENTS` / `NSE_NOTIFICATION_FILTERING` (see Configuration). `ITSAppUsesNonExemptEncryption`
-is `true`: the app has encryption beyond the OS (export compliance questions apply).
+is `false`: the app's encryption uses standard algorithms only, which need no export documents
+(docs/release.md, "TestFlight", export compliance).
 
 The share extension needs its App ID with the App Group capability, the same group as the app; a signed
 build without it fails to install or says it couldn't save what was shared.

@@ -143,7 +143,11 @@ targets:
         # scheduled messages again when a silent push couldn't finish (docs/scheduled-messages.md).
         UIBackgroundModes: [audio, voip, remote-notification, processing]
         BGTaskSchedulerPermittedIdentifiers: [de.zeitgleich.teamcraft.segment-prefetch, de.zeitgleich.teamcraft.scheduled-seal]
-        ITSAppUsesNonExemptEncryption: true
+        # Export compliance (docs/release.md, "TestFlight"): the end-to-end encryption uses standard
+        # algorithms only (MLS, XChaCha20-Poly1305, Ed25519; IETF/NIST), and App Store Connect's
+        # encryption questionnaire found no documents needed for that. `false` here stops App Store
+        # Connect from asking again for every build. Revisit for proprietary algorithms or France.
+        ITSAppUsesNonExemptEncryption: false
         NSMicrophoneUsageDescription: "TeamCraft uses the microphone for calls and for voice messages you record."
         NSCameraUsageDescription: "TeamCraft uses the camera for video calls, for photos you send and to scan the code of a new device you link."
         NSPhotoLibraryAddUsageDescription: "TeamCraft saves pictures and videos you choose to your photo library."

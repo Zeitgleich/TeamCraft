@@ -488,9 +488,12 @@ Set up once (developer portal and App Store Connect, by an Account Holder or Adm
 6. **Testers**: TestFlight → *Internal Testing* group with *automatic distribution*: every processed
    build reaches the team's members at once. External testers (up to 10,000, by invitation or a
    public link) need a *Beta App Review* of the first build of each version.
-7. **Export compliance**: `ITSAppUsesNonExemptEncryption` is `true`, so App Store Connect asks about
-   the encryption for each build until it has an answer it can reuse (*App Information → App
-   Encryption Documentation*); a build waits as *Missing Compliance* until then.
+7. **Export compliance**: answered once under *App Information → App Encryption Documentation*: the
+   app uses standard encryption algorithms (in addition to the OS's), not distributed in France for
+   now. With these answers App Store Connect needs no documents, so `ITSAppUsesNonExemptEncryption`
+   is `false` in `apps/ios/project.yml` and builds don't wait as *Missing Compliance*. Distribution
+   in France needs a declaration to the French authority (ANSSI) first; proprietary algorithms would
+   change the answers.
 
 Renewal: the distribution certificate expires after a year. Make a new one (step 2), regenerate the
 three profiles with it (step 3), replace the two certificate secrets, then revoke the old one.
