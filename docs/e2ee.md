@@ -7787,11 +7787,32 @@ node an admin can't export anybody's messages.
   - receiving clients drop previews for disallowed domains before rendering.
 - Same effect as server-side filtering, without leaking URLs.
 
+**The policy (#2107).** `link_previews` in the signed policy has a mode and a domain list. The
+admin console's security policy offers four choices: off (the default), all sites (`block_list`,
+empty list), all except listed sites (`block_list`) and only listed sites (`allow_list`, at least one
+entry). The rules live in one place, `teamcraft-proto::link_previews`, used by the console, the
+server's check of a published policy and every client:
+
+- An entry is a host name in its stored form: ASCII lower case, international names in punycode
+  (the console turns `bücher.example` into `xn--bcher-kva.example`), no trailing dot, no `*.`, no
+  scheme, user info, port or path; or an IPv4 address in dotted form. At most 500 entries. The
+  server refuses a policy whose list isn't in this form, so all clients read the same list.
+- An entry covers its host and every subdomain, on label boundaries: `example.com` covers
+  `docs.example.com`, not `evil-example.com` or `example.com.evil.example`. Hosts are compared as
+  the URL parser (WHATWG) gives them: lower-cased, IDN-mapped to punycode, trailing dots ignored,
+  user info and port not part of the host. An IPv4 entry covers only that address, in any spelling
+  (`http://3221225994/` is `192.0.2.10`); IPv6 literals can't be listed and never match. There is
+  no public-suffix list: an entry like `com` covers all of `.com`, which is the admin's choice.
+- Only http(s) links get previews; an unknown mode from a newer console means none.
+
 **Implemented:** the first http(s) link of a message is previewed. The message waits in the outbox
-while the sender's client reads the page (5 s timeout, at most 512 KiB of it, 3 redirects; a redirect
-to a disallowed domain gets no preview), takes OpenGraph title, description, site name and image
-(falling back to `<title>` and `description`), fetches the image (at most 2 MiB) and turns it into a
-small PNG. All of it goes into the encrypted message. The fetch comes from the sender's network,
+while the sender's client reads the page (5 s timeout, at most 512 KiB of it, 3 redirects), takes
+OpenGraph title, description, site name and image (falling back to `<title>` and `description`),
+fetches the image (at most 2 MiB) and turns it into a small PNG. The client follows redirects
+itself and checks **every hop** against the policy before contacting it, so a listed site can't send
+the device on to an unlisted host; a redirect to a disallowed host ends the preview. The image is
+fetched only from a host the policy allows too; an image on an unlisted host (a CDN, say) is left
+out and the preview has none. All of it goes into the encrypted message. The fetch comes from the sender's network,
 so the linked site sees the sender's IP address, as it would on opening the link. Browsers can't
 read cross-origin pages, so the web client sends links without previews.
 

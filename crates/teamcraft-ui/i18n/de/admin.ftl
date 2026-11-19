@@ -240,6 +240,24 @@ policy-minutes = { $count ->
 policy-sharing = Gäste und Nachrichten
 policy-guest-domains = Erlaubte E-Mail-Domains für Gäste
 policy-history = Standardverlauf für neue Mitglieder
+policy-link-previews = Linkvorschauen
+policy-link-previews-hint = Eine Vorschau zeigt Titel, einen kurzen Text und ein Bild der verlinkten Seite unter der Nachricht. Das Gerät der sendenden Person öffnet dafür den Link, die verlinkte Seite sieht also deren IP-Adresse. Die App jedes Mitglieds hält sich an diese Einstellung, auch bei Vorschauen, die andere gesendet haben.
+policy-link-previews-off = Aus
+policy-link-previews-off-hint = Keine Vorschauen. Links bleiben einfache Links.
+policy-link-previews-all = Alle Seiten
+policy-link-previews-all-hint = Vorschauen von Links zu jeder Seite.
+policy-link-previews-except = Alle außer den aufgeführten Seiten
+policy-link-previews-except-hint = Vorschauen von Links zu jeder Seite außer den unten aufgeführten.
+policy-link-previews-only = Nur aufgeführte Seiten
+policy-link-previews-only-hint = Vorschauen nur von Links zu den unten aufgeführten Seiten.
+policy-link-previews-domains = Seiten
+policy-link-previews-domains-hint = Ein Hostname pro Zeile, höchstens { $max }. Ein Name umfasst seine Subdomains: example.com umfasst auch docs.example.com.
+policy-link-previews-error-invalid = „{ $entry }“ ist kein Hostname. Schreib nur den Namen, etwa example.com, ohne https:// und ohne Pfad.
+policy-link-previews-error-empty = Führe mindestens eine Seite auf oder wähle eine andere Option.
+policy-link-previews-error-too-many = { $count ->
+    [one] Führe höchstens { $count } Seite auf.
+   *[other] Führe höchstens { $count } Seiten auf.
+  }
 policy-dm = Wer Direktnachrichten starten darf
 policy-dm-anyone = Alle
 policy-dm-shared_spaces = Nur Personen mit gemeinsamem Space

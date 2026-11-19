@@ -240,6 +240,24 @@ policy-minutes = { $count ->
 policy-sharing = Guests and messaging
 policy-guest-domains = Allowed guest email domains
 policy-history = Default history for new members
+policy-link-previews = Link previews
+policy-link-previews-hint = A preview shows the title, a short text and a picture of a linked page below the message. The sender's device opens the link to make it, so the linked site sees the sender's IP address. Every member's app follows this setting, also for previews others sent.
+policy-link-previews-off = Off
+policy-link-previews-off-hint = No previews. Links stay plain links.
+policy-link-previews-all = All sites
+policy-link-previews-all-hint = Previews of links to any site.
+policy-link-previews-except = All except listed sites
+policy-link-previews-except-hint = Previews of links to any site but those below.
+policy-link-previews-only = Only listed sites
+policy-link-previews-only-hint = Previews only of links to the sites below.
+policy-link-previews-domains = Sites
+policy-link-previews-domains-hint = One host name per line, at most { $max }. A name covers its subdomains: example.com also covers docs.example.com.
+policy-link-previews-error-invalid = “{ $entry }” is not a host name. Write only the name, like example.com, without https:// or a path.
+policy-link-previews-error-empty = List at least one site, or choose another option.
+policy-link-previews-error-too-many = { $count ->
+    [one] List at most { $count } site.
+   *[other] List at most { $count } sites.
+  }
 policy-dm = Who can start direct messages
 policy-dm-anyone = Anyone
 policy-dm-shared_spaces = Only people who share a space
