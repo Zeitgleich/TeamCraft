@@ -25,4 +25,5 @@
   <string name="composer_send_failed">Not sent: %1$s</string>
   <string name="composer_send_failed_dismiss">Close</string>
   <string name="composer_file_uploading">Uploading</string>
+  <string name="composer_paste_failed">Could not attach a pasted file. It may be too large or no longer available.</string>
 </resources>
