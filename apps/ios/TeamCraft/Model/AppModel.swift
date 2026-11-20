@@ -146,6 +146,8 @@ final class AppModel {
   private(set) var isBusy = false
   /// Increments on every store change; screens re-read when it changes.
   private(set) var changeCount = 0
+  /// The last conversation opened from a notification, counted so the same one twice is a change.
+  private(set) var reopenedConversation: ReopenedConversation?
   /// Everyone typing anywhere right now (#882): the chat list's rows, the header and the typing
   /// lines each read their own place from it with `typingNames(in:conversation:thread:)`.
   private(set) var typingNow: [TypingNow] = []
@@ -1272,7 +1274,14 @@ final class AppModel {
       removeDelivered(notificationId)
     default:
       openConversationId = conversationId
+      reopen(conversationId)
     }
+  }
+
+  /// A conversation opened from outside the app again (a notification tapped): if it is the one on
+  /// screen already, nothing else makes it read again (#2206).
+  private func reopen(_ conversationId: String) {
+    reopenedConversation = ReopenedConversation(id: conversationId, count: (reopenedConversation?.count ?? 0) &+ 1)
   }
 
   /// Opens a sealed wake-up with the core in this process (a silent push, a VoIP push, or one the
@@ -2152,3 +2161,9 @@ private final class ResumeOnce: @unchecked Sendable {
   }
 }
 
+
+/// A conversation opened again from outside the app (`AppModel.reopenedConversation`).
+struct ReopenedConversation: Equatable {
+  let id: String
+  let count: Int
+}

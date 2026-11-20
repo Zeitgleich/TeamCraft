@@ -13,16 +13,32 @@ final class PagedFeed {
   private let read: Read
   private var maybeOldest: Message?
   private var maybeLastRead: Task<MessagePage?, Never>?
+  /// Waits between tries of a failed read (tests don't wait).
+  private let sleep: @Sendable (Duration) async throws -> Void
 
-  init(firstPage: UInt32 = 200, pageBack: UInt32 = 100, read: @escaping Read) {
+  init(
+    firstPage: UInt32 = 200, pageBack: UInt32 = 100,
+    sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+    read: @escaping Read
+  ) {
     self.firstPage = firstPage
     self.pageBack = pageBack
+    self.sleep = sleep
     self.read = read
   }
 
-  /// The messages shown so far, read again (the newest `firstPage` before the first read).
-  func reread() async -> MessagePage? {
-    await queue { [self] in maybeOldest == nil ? firstPage : 0 }
+  /// The messages shown so far, read again (the newest `firstPage` before the first read). A failed
+  /// read is tried again up to `retries` times, a little later each time (the store may be opening
+  /// again after the background just now, #2206); not once the calling task is cancelled.
+  func reread(retries: Int = 0) async -> MessagePage? {
+    for attempt in 0...max(retries, 0) {
+      if attempt > 0 {
+        guard (try? await sleep(.milliseconds(250 * attempt))) != nil else { return nil }
+      }
+      if let page = await queue({ [self] in maybeOldest == nil ? firstPage : 0 }) { return page }
+      if Task.isCancelled { return nil }
+    }
+    return nil
   }
 
   /// The messages shown so far and the next older page.

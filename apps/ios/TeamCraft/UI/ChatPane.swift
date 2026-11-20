@@ -124,6 +124,8 @@ struct ChatPane: View {
   @State private var maybeProfile: PeopleSnapshot.Person?
   /// A reply's quote was tapped (#2001): its original, handed to the same jump as the heart button.
   @State private var maybeQuoteTarget: String?
+  /// Counts up to read the conversation again without a change of the store (#2206).
+  @State private var readAgain = 0
   /// The jump under way came from a quote, so a missing original is told.
   @State private var isQuoteJump = false
   /// A call about to be joined whose running call has the notetaker in it: the user confirms
@@ -179,7 +181,9 @@ struct ChatPane: View {
       // The channel's anchor is verified again as it opens (at most every 5 minutes, the core paces it).
       if isChannel { await model.refreshChannelAnchor(conversation.id) }
     }
-    .task(id: model.changeCount) {
+    // Read again on every change of the store, and when the app comes back to this conversation
+    // (the foreground, or a notification of it tapped): a change may have been missed meanwhile (#2206).
+    .task(id: "\(model.changeCount)/\(readAgain)") {
       await reload()
       await reloadDraftFiles()
       await reloadLinkPreview()
@@ -256,6 +260,10 @@ struct ChatPane: View {
     .onChange(of: scenePhase) { _, phase in
       // Leaving the app saves at once: it may be suspended and killed before the pause is over.
       if phase == .background { Task { await saveDraft() } }
+      if phase == .active { readAgain &+= 1 }
+    }
+    .onChange(of: model.reopenedConversation) { _, reopened in
+      if reopened?.id == conversation.id { readAgain &+= 1 }
     }
     .fullScreenCover(item: $maybeEditingPicture) { file in
       PictureEditorView(file: file) { edited in
@@ -1925,8 +1933,9 @@ struct ChatPane: View {
       extras = readExtras
       dropGoneFromSelection()
     } else {
-      // A failed read keeps what is shown; the next change reads again.
-      guard let page = await pagedFeed().reread() else { return }
+      // A failed read keeps what is shown and tries again a few times (the store may be opening
+      // again just now, #2206); after that the next change reads again.
+      guard let page = await pagedFeed().reread(retries: 4) else { return }
       // Before the first messages show, and before they are marked read below.
       if !hasLookedForUnread {
         hasLookedForUnread = true
