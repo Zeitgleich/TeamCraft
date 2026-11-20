@@ -80,12 +80,18 @@ function offerDownload({ os, arch }) {
     meta.textContent = "For iPhone and iPad";
     return;
   }
+  if (os === "ios" && cta.dataset.testflight) {
+    label.textContent = "Join the beta on TestFlight";
+    button.href = cta.dataset.testflight;
+    meta.textContent = "For iPhone and iPad";
+    return;
+  }
   if (os === "ios") {
-    label.textContent = "Not yet available for iPhone and iPad";
+    label.textContent = "Not in the App Store yet";
     button.classList.add("is-disabled");
     button.removeAttribute("href");
     button.setAttribute("aria-disabled", "true");
-    meta.textContent = "Download TeamCraft on a computer, or use your organization's web app.";
+    meta.textContent = "The iPhone and iPad app is in TestFlight for invited testers. Until it is listed, use your organization's web app.";
     return;
   }
   const block = document.querySelector(`[data-channel-block="${cta.dataset.channel}"]`);

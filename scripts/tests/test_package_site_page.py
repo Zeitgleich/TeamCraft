@@ -249,6 +249,40 @@ class RenderTest(unittest.TestCase):
         self.assertIn("Coming soon", self.render())
         self.assertIn("App Store", self.render({"APP_STORE_URL": "https://apps.example.com/teamcraft"}))
 
+    def test_the_download_section_has_an_iphone_card(self):
+        self.add_release("prerelease", "v1.0.0-rc.1")
+        card = self.ios_card(self.render())
+        self.assertIn("iPhone and iPad", card)
+        self.assertIn("iOS 17 or newer", card)
+        # No link is configured: the card says how the app is distributed and links nothing.
+        self.assertIn("TestFlight for invited testers", card)
+        self.assertNotIn("<a ", card)
+        self.assertEqual(page.check_links(self.site, SITE_URL), [])
+
+    def test_the_iphone_card_links_the_app_store_and_testflight_from_the_environment(self):
+        self.add_release("prerelease", "v1.0.0-rc.1")
+        app_store = "https://apps.example.com/teamcraft"
+        testflight = "https://testflight.example.com/join/abc"
+        card = self.ios_card(self.render({"TESTFLIGHT_URL": testflight}))
+        self.assertIn(f'href="{testflight}"', card)
+        self.assertIn("Join the beta on TestFlight</a>", card)
+        self.assertNotIn("invited testers", card)
+        html = self.render({"TESTFLIGHT_URL": testflight})
+        self.assertIn(f'data-testflight="{testflight}"', html)
+        self.assertIn("<span>TestFlight</span>", html)
+        card = self.ios_card(self.render({"APP_STORE_URL": app_store}))
+        self.assertIn(f'href="{app_store}"', card)
+        self.assertIn("Download on the App Store</a>", card)
+        self.assertNotIn("TestFlight", card)
+        card = self.ios_card(self.render({"APP_STORE_URL": app_store, "TESTFLIGHT_URL": testflight}))
+        self.assertIn(f'class="button button-primary store" href="{app_store}"', card)
+        self.assertIn(f'<a href="{testflight}"', card)
+        self.assertEqual(page.check_links(self.site, SITE_URL), [])
+
+    def ios_card(self, html):
+        card = html[html.index('data-os="ios" aria-labelledby'):]
+        return card[:card.index("</article>")]
+
     def test_html_in_release_names_is_escaped(self):
         self.add_release("prerelease", "v1.0.0-rc.1", name="<script>x</script>")
         self.assertNotIn("<script>x", self.render())
