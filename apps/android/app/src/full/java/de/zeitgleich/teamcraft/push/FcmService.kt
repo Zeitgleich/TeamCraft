@@ -24,6 +24,7 @@ class FcmService : FirebaseMessagingService() {
     if (message.priority != message.originalPriority) {
       TeamCraftApplication.graph(this).pushStats.record(PushPath.FCM_DEPRIORITIZED)
     }
+    // blocking-ok: FCM calls onMessageReceived on its own background thread and waits for it.
     runBlocking { WakeUpWork.handle(this@FcmService, payload, isVisible) }
   }
 }

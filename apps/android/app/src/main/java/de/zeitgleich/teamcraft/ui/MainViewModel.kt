@@ -693,8 +693,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val current = state.value as? AppState.StoreUnreadable ?: return@launchBusy
     state.value = try {
       val core = graph.core.core()
-      // Opens the new store while it waits.
-      withContext(Dispatchers.IO) { core.resetStore() }
+      // Opens the new store on a thread of the core's while it waits.
+      core.resetStore()
       loadAccountState()
     } catch (failure: TeamCraftException) {
       Log.w(TAG, "setting the local data aside failed", failure)

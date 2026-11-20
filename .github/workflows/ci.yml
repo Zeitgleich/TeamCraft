@@ -537,6 +537,8 @@ jobs:
         run: python3 -m unittest discover -s scripts/tests -v
       - name: UI tasks touch signals only with try_ after an await (issue #322)
         run: scripts/check-async-signals.py
+      - name: Mobile apps mark every blocking call, the UI thread never waits (issue #2184)
+        run: scripts/check-ui-thread-blocking.py
       - name: Icon buttons show a tooltip, not only an aria-label (issue #2019)
         run: scripts/check-icon-tooltips.py
       - name: No track() on a memo nothing else reads, it never wakes its effect (issue #1203)

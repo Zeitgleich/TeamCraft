@@ -24,7 +24,9 @@ final class ProcessLock: @unchecked Sendable {
 
   /// Takes the lock, polling until `timeout` has passed. `false`: someone else holds it. A caller in
   /// this process that got it meanwhile counts: this process then holds it once, on one descriptor.
+  /// Waits: never on the main thread (#2184, `UiThreadGuard`).
   func acquire(timeout: TimeInterval) -> Bool {
+    UiThreadGuard.shared.check("ProcessLock.acquire")
     if isHeld { return true }
     let opened = open(fileURL.path, O_CREAT | O_RDWR, 0o600)
     guard opened >= 0 else { return false }
@@ -48,6 +50,7 @@ final class ProcessLock: @unchecked Sendable {
         }
         return true
       }
+      // blocking-ok: within acquire, off the main thread (guarded above).
       Thread.sleep(forTimeInterval: 0.05)
     } while Date() < deadline
     close(opened)

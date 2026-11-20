@@ -84,7 +84,7 @@ async fn measure_opening_a_chat_during_a_change_storm() {
   seed(&directory).await;
   eprintln!("seeded {CONVERSATIONS} conversations in {:?}", seeded.elapsed());
 
-  let core = TeamCraft::new(config(&directory), Arc::new(ValidToken), Arc::new(Quiet)).unwrap();
+  let core = TeamCraft::open_blocking(config(&directory), Arc::new(ValidToken), Arc::new(Quiet)).unwrap();
   assert!(matches!(
     core.account_state().await.unwrap(),
     AccountState::Ready { .. }

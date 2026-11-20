@@ -119,11 +119,12 @@ final class NotificationService: UNNotificationServiceExtension {
     let container = SharedContainer()
     guard let account = container.activeAccount else { return nil }
     let lock = ProcessLock(fileURL: container.lockFileURL)
+    // blocking-ok: on a detached task, off the main thread.
     let hasLock = await Task.detached { lock.acquire(timeout: lockTimeout) }.value
     guard hasLock else { return nil }
     defer { lock.release() }
     do {
-      let core = try CoreFactory().open(
+      let core = try await CoreFactory().open(
         account: account, createKey: false, isMemoryConstrained: true, runsUpkeep: false,
         listener: ClosureEventListener {})
       // Never advances the account's state: the app alone does (MLS, cursors), or the two

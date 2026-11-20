@@ -124,6 +124,13 @@ Inside an `impl`:
 - iOS: Swift + SwiftUI, formatted with `swift-format`. Android: Kotlin + Jetpack Compose, `ktlint`
   with the rules in `apps/android/.editorconfig` (the command is in that file). Mobile shells
   stay thin: logic belongs in `teamcraft-core` behind UniFFI.
+- **The UI thread never waits** (iOS main actor, Android main thread; #2184). A `teamcraft-ffi`
+  export that can wait on the store, the disk, the network, a lock or a device is `async`
+  (`blocking::off_thread` for synchronous work), so the apps can't call it on the UI thread and
+  wait. A sync export is a cheap getter over memory, and one that waits anyway says why in its doc
+  comment (`suspend`: the iOS expiry handler). In the shells, a blocking call (`queue.sync`, a
+  semaphore, `Thread.sleep`, `ProcessLock.acquire`, `runBlocking`) checks `UiThreadGuard` first
+  and carries `// blocking-ok: <why>`; `scripts/check-ui-thread-blocking.py` fails CI without it.
 
 ## Markdown
 
