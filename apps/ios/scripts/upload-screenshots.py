@@ -6,8 +6,8 @@ pictures can as well be dragged into App Store Connect by hand (docs/release.md,
 screenshots").
 
 For every locale folder that the version has a localization for, it replaces the screenshots of
-the iPhone 6.9" and iPad 13" sets with the folder's, in file name order. Other display sizes are
-left alone (App Store Connect scales the 6.9" and 13" ones down for them).
+the iPhone 6.3" (required), iPhone 6.9" and iPad 13" (required) sets with the folder's, in file
+name order. Other display sizes are left alone (App Store Connect scales these down for them).
 
 Environment, the same API key as the TestFlight upload (archive-testflight.sh):
   ASC_KEY_ID, ASC_ISSUER_ID   the App Store Connect API key (role App Manager)
@@ -33,6 +33,9 @@ from pathlib import Path
 API = "https://api.appstoreconnect.apple.com/v1"
 # Folder per display type, with the pixel sizes App Store Connect takes for it (portrait).
 DISPLAYS = {
+  # Required: iPhone with Dynamic Island, medium display (6.1" and 6.3").
+  "iphone-6.3": ("APP_IPHONE_61", {(1206, 2622), (1179, 2556)}),
+  # Optional: large display (6.7" and 6.9"); App Store Connect scales nothing up to it.
   "iphone-6.9": ("APP_IPHONE_67", {(1320, 2868), (1290, 2796), (1260, 2736)}),
   "ipad-13": ("APP_IPAD_PRO_3GEN_129", {(2064, 2752), (2048, 2732)}),
 }

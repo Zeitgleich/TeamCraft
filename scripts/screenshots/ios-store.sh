@@ -22,7 +22,7 @@ trap 'rm -rf "$work"' EXIT
 
 node "$root/scripts/screenshots/ios-store.mjs" "$work" >/dev/null
 
-# JPEG (App Store Connect takes .jpg and .png): about half the size of PNG for these pictures.
+# Screenshots as JPEG (App Store Connect takes .jpg and .png): about half the size of PNG here.
 # Quality 92 without chroma subsampling keeps text and line icons free of colour fringes.
 python3 - "$work" "$out" <<'PY'
 import shutil
@@ -32,15 +32,21 @@ from PIL import Image
 
 LOCALES = {"en": "en-US", "de": "de-DE"}
 IPHONE_63 = (1206, 2622)
+CREATIVE = {"header", "search"}
 work, out_dir = Path(sys.argv[1]), Path(sys.argv[2])
 for language, locale in LOCALES.items():
   target = out_dir / locale
   shutil.rmtree(target, ignore_errors=True)
   for shot in sorted((work / language).glob("*/*.png")):
-    out = target / shot.parent.name / f"{shot.stem}.jpg"
+    # The header and search result assets take no JPEG (App Store Connect: invalid extension).
+    is_creative = shot.parent.name in CREATIVE
+    out = target / shot.parent.name / f"{shot.stem}.{'png' if is_creative else 'jpg'}"
     out.parent.mkdir(parents=True, exist_ok=True)
     image = Image.open(shot).convert("RGB")
-    image.save(out, "JPEG", quality=92, subsampling=0, optimize=True)
+    if is_creative:
+      image.save(out, optimize=True)
+    else:
+      image.save(out, "JPEG", quality=92, subsampling=0, optimize=True)
     print(out)
     if shot.parent.name == "iphone-6.9":
       medium = target / "iphone-6.3" / out.name

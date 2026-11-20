@@ -522,7 +522,7 @@ app's own icons, a caption above the device) and taken in headless Chrome, as th
 simulator on Linux. When a screen of the app changes a lot, update its scene.
 
 ```sh
-scripts/screenshots/ios-store.sh <dir>    # writes <dir>/<en-US|de-DE>/<iphone-6.3|iphone-6.9|ipad-13|header|search>/*.jpg
+scripts/screenshots/ios-store.sh <dir>    # writes <dir>/<en-US|de-DE>/<iphone-6.3|iphone-6.9|ipad-13>/*.jpg, header/ and search/ as PNG
 ```
 
 Upload them by hand in App Store Connect (the version → drag a folder's pictures onto the iPhone
