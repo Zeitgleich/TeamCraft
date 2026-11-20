@@ -516,6 +516,16 @@ pub enum CallEvent {
     stream_id: MediaStreamId,
     layer: u8,
   },
+  /// To the publisher: video packets of an own track that didn't reach the SFU (#2189), the RTP
+  /// sequence numbers of `layer`, at most [`MAX_NACK_SEQUENCE_NUMBERS`]. The publisher sends those
+  /// it still keeps once more, exactly as it sent them (still DAVE encrypted), within a budget of
+  /// its uplink. The SFU asks as soon as a gap shows a packet missing, so a lost packet of a slide
+  /// change is repaired within a round trip of the uplink, for every viewer at once.
+  RetransmitRequested {
+    stream_id: MediaStreamId,
+    layer: u8,
+    sequence_numbers: Vec<u16>,
+  },
   /// What the SFU's probe of this device's downlink at the start showed (#1762), for the stats.
   /// Older clients read `Unknown`.
   DownlinkMeasured {
@@ -879,6 +889,17 @@ mod tests {
       serde_json::to_string(&event).unwrap(),
       r#"{"type":"keyframe_requested","stream_id":7,"layer":2}"#
     );
+    let retransmit = CallEvent::RetransmitRequested {
+      stream_id: MediaStreamId(7),
+      layer: 1,
+      sequence_numbers: vec![65535, 0],
+    };
+    let json = serde_json::to_string(&retransmit).unwrap();
+    assert_eq!(
+      json,
+      r#"{"type":"retransmit_requested","stream_id":7,"layer":1,"sequence_numbers":[65535,0]}"#
+    );
+    assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), retransmit);
     let feedback = CallEvent::TransportFeedback {
       feedback: TransportFeedback {
         base_seq: 65535,

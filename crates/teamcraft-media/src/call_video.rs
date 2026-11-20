@@ -21,6 +21,7 @@ use web_time::Instant;
 use crate::datagram::{SimulcastLayer, StreamId};
 use crate::fragment::{CompleteFrame, FragmentError, FrameAssembler, FrameFragment, fragment_frame};
 use crate::nack::{LateArrival, MissingPackets, NackConfig};
+use crate::retransmit::{PacketHistory, RetransmitConfig};
 use crate::rtp::{PayloadType, RtpError, RtpHeader, RtpPacket, RtpTimestamp, SequenceNumber, Ssrc};
 
 /// Encrypted frame bytes per packet: the 1200-byte datagram minus the TeamCraft header (7), the
@@ -62,6 +63,8 @@ pub struct OutgoingVideo {
   /// The capture gets buffers it can't turn into pictures (#1805): every frame says so, and the
   /// viewers count the time as frozen.
   is_capture_stalled: bool,
+  /// The RTP packets sent recently per layer, to send again when the SFU didn't get them (#2189).
+  sent: [PacketHistory; MAX_LAYERS],
 }
 
 /// What an own track sent so far (stats for nerds, #938).
@@ -214,6 +217,7 @@ impl OutgoingVideo {
       sequences: [SequenceNumber(0); MAX_LAYERS],
       maybe_uplink_check: None,
       is_capture_stalled: false,
+      sent: Default::default(),
     }
   }
 
@@ -268,6 +272,28 @@ impl OutgoingVideo {
       packets.push(RtpPacket { header, payload }.to_bytes()?);
     }
     Ok(packets)
+  }
+
+  /// Keeps the RTP packets of `layer` that go out now, to send them again when the SFU asks
+  /// ([`Self::sent_packet`]).
+  pub fn keep_sent(&mut self, layer: SimulcastLayer, packets: &[Vec<u8>], now: Instant, config: &RetransmitConfig) {
+    let Some(history) = self.sent.get_mut(usize::from(layer.value())) else {
+      return;
+    };
+    for packet in packets {
+      // The RTP sequence number is the header's third and fourth byte; packetize wrote it.
+      if let Some(&[high, low]) = packet.get(2..4) {
+        history.push(u16::from_be_bytes([high, low]), packet, now, config);
+      }
+    }
+  }
+
+  /// The RTP packet of `layer` with `sequence_number`, while it is kept.
+  pub fn sent_packet(&self, layer: u8, sequence_number: u16, now: Instant, window: Duration) -> Option<&[u8]> {
+    self
+      .sent
+      .get(usize::from(layer))?
+      .get(sequence_number, now, window)
   }
 
   /// Counts a picture of `layer` (a keyframe or not) that went out as `packets`.

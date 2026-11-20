@@ -170,6 +170,7 @@ the start; only an IPv6 address that fails after another one worked is skipped (
 | `teamcraft_sfu_downlink_loss_ratio`            | histogram |                           | SFU            | Share of its packets to a client lost, per session that sent ≥ 100 in 10 s        |
 | `teamcraft_sfu_keyframe_requests_total`        | counter   |                           | SFU            | Keyframes asked of publishers: the SFU's PLI                                      |
 | `teamcraft_sfu_retransmitted_packets_total`    | counter   |                           | SFU            | Video packets resent to a receiver that reported them lost (NACK, #1762)          |
+| `teamcraft_sfu_uplink_packets_requested_total` | counter   |                           | SFU            | Video packets asked of a publisher again, its uplink lost them (#2189)            |
 | `teamcraft_sfu_forwarded_bytes_total`          | counter   |                           | SFU            | Media bytes forwarded to receivers; its `rate()` is the bitrate forwarded         |
 | `teamcraft_sfu_sessions_total`                 | counter   | `transport`, `family`     | SFU            | Sessions that joined a call, by transport and the client's address family         |
 | `teamcraft_sfu_session_switches_total`         | counter   |                           | SFU            | Sessions that moved to QUIC, from the fallback once UDP got through               |
@@ -512,6 +513,21 @@ depend on any of it.
   SFU learns nothing it didn't forward already. Audio isn't resent. `rate()` of
   `teamcraft_sfu_retransmitted_packets_total` against the forwarded bytes shows how lossy the
   viewers' links are.
+- **Publishers' uplink losses are repaired (#2189).** A video packet lost between a publisher and
+  the SFU is lost for every viewer, and a still screen sends almost nothing after a slide change.
+  The SFU follows the RTP sequence numbers of every layer someone receives and asks the publisher
+  at once for the ones a gap shows missing, again after about one and a half of its round trips, at
+  most `TEAMCRAFT_SFU_UPLINK_REPAIR_MAX_REQUESTS` (default 3, at most 10) times. Publishers keep
+  what they sent for the retransmission window above and send those packets once more (still DAVE
+  encrypted, within 30 % of their uplink estimate); the SFU forwards them like any. A packet still
+  missing after `TEAMCRAFT_SFU_UPLINK_REPAIR_SCREEN_KEYFRAME_AFTER_MS` (default 300, a screen
+  share) or `TEAMCRAFT_SFU_UPLINK_REPAIR_CAMERA_KEYFRAME_AFTER_MS` (default 500, a camera) is given
+  up and the publisher asked for a keyframe of the layer, at most once per
+  `TEAMCRAFT_SFU_UPLINK_REPAIR_MIN_KEYFRAME_INTERVAL_MS` (default 1000) per track and layer, so a
+  lossy uplink doesn't loop on keyframes. It costs the SFU a few hundred bytes per track and layer
+  (the missing numbers, at most 256); the packets are kept by the publisher. Turning the
+  retransmission window off turns this off too. `rate()` of
+  `teamcraft_sfu_uplink_packets_requested_total` shows how lossy the publishers' uplinks are.
 - **Links are probed at the start (#1762).** When a participant joins or comes back, the SFU sends
   it a few short trains of padding and the client sends the SFU the same; their spread in the
   transport feedback shows what each link carries, and the bandwidth estimates (and so the first
