@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Uploads the App Store screenshots (apps/ios/store/<locale>/screenshots/<device>/*.png) to the
+"""Uploads the App Store screenshots (<dir>/<locale>/<device>/*.jpg, from
+scripts/screenshots/ios-store.sh <dir>) to the
 iOS version being prepared in App Store Connect, through the App Store Connect API. Optional: the
 pictures can as well be dragged into App Store Connect by hand (docs/release.md, "App Store
 screenshots").
@@ -12,7 +13,7 @@ Environment, the same API key as the TestFlight upload (archive-testflight.sh):
   ASC_KEY_ID, ASC_ISSUER_ID   the App Store Connect API key (role App Manager)
   ASC_KEY_PATH                its .p8 file
 
-Usage: apps/ios/scripts/upload-screenshots.py [--dry-run] [--bundle-id de.zeitgleich.teamcraft]
+Usage: apps/ios/scripts/upload-screenshots.py <dir> [--dry-run] [--bundle-id de.zeitgleich.teamcraft]
   --dry-run   only check the pictures' sizes and list what would be uploaded; no network, no key
 
 Needs python3 with `cryptography` (for the API's ES256 token) and Pillow (for the size check).
@@ -30,7 +31,6 @@ import urllib.request
 from pathlib import Path
 
 API = "https://api.appstoreconnect.apple.com/v1"
-STORE = Path(__file__).resolve().parents[1] / "store"
 # Folder per display type, with the pixel sizes App Store Connect takes for it (portrait).
 DISPLAYS = {
   "iphone-6.9": ("APP_IPHONE_67", {(1320, 2868), (1290, 2796), (1260, 2736)}),
@@ -43,11 +43,12 @@ TOKEN_LIFETIME_SECONDS = 15 * 60
 
 def main() -> None:
   parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+  parser.add_argument("dir", type=Path)
   parser.add_argument("--dry-run", action="store_true")
   parser.add_argument("--bundle-id", default="de.zeitgleich.teamcraft")
   args = parser.parse_args()
 
-  shots = collect()
+  shots = collect(args.dir)
   if args.dry_run:
     for (locale, folder), files in sorted(shots.items()):
       print(f"{locale} {DISPLAYS[folder][0]}: {', '.join(f.name for f in files)}")
@@ -67,14 +68,14 @@ def main() -> None:
     print(f"{locale} {DISPLAYS[folder][0]}: {len(files)} uploaded")
 
 
-def collect() -> dict[tuple[str, str], list[Path]]:
+def collect(store: Path) -> dict[tuple[str, str], list[Path]]:
   """The pictures per locale and display folder, after checking their pixel sizes."""
   from PIL import Image
 
   shots = {}
-  for locale_dir in sorted(p for p in STORE.iterdir() if (p / "screenshots").is_dir()):
+  for locale_dir in sorted(p for p in store.iterdir() if p.is_dir()):
     for folder, (display, sizes) in DISPLAYS.items():
-      files = sorted((locale_dir / "screenshots" / folder).glob("*.png"))
+      files = sorted((locale_dir / folder).glob("*.jpg"))
       for file in files:
         with Image.open(file) as image:
           if image.size not in sizes or image.mode != "RGB":
@@ -84,7 +85,7 @@ def collect() -> dict[tuple[str, str], list[Path]]:
       if files:
         shots[(locale_dir.name, folder)] = files
   if not shots:
-    sys.exit(f"no screenshots in {STORE}; run scripts/screenshots/ios-store.sh first")
+    sys.exit(f"no screenshots in {store}; run scripts/screenshots/ios-store.sh {store} first")
   return shots
 
 

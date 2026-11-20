@@ -513,19 +513,27 @@ the `.ipa` to `apps/ios/build/export` without uploading.
 
 ### App Store screenshots
 
-The listing's screenshots live in `apps/ios/store/<locale>/screenshots/` (iPhone 6.9" and iPad
-13", English and German; [apps/ios/store/README.md](../apps/ios/store/README.md)), next to the
-Google Play listing in `apps/android/store`. They show the Play screenshots' scenes, drawn as HTML
-in the iOS app's light theme and taken in headless Chrome, as there is no iOS simulator on Linux:
+The listing's screenshots (iPhone 6.9", 1320 × 2868, and iPad 13", 2064 × 2752, English and
+German; App Store Connect scales them down for smaller devices) are made when the listing changes
+and are not kept in the repository. They show the Google Play screenshots' scenes and placeholder
+texts, drawn as HTML in the iOS app's light theme (`scripts/screenshots/ios-store/scenes.js`, the
+app's own icons, a caption above the device) and taken in headless Chrome, as there is no iOS
+simulator on Linux. When a screen of the app changes a lot, update its scene.
 
 ```sh
-scripts/screenshots/ios-store.sh
+scripts/screenshots/ios-store.sh <dir>    # writes <dir>/<en-US|de-DE>/<iphone-6.9|ipad-13>/*.jpg
 ```
 
-They change only with the listing, not with every release. Upload them by hand in App Store
-Connect, or with the TestFlight upload's API key to the version in preparation:
-`ASC_KEY_ID=… ASC_ISSUER_ID=… ASC_KEY_PATH=… apps/ios/scripts/upload-screenshots.py`
-(`--dry-run` checks the sizes without uploading).
+Upload them by hand in App Store Connect (the version → drag a folder's pictures onto the iPhone
+and iPad boxes per language), or with the TestFlight upload's API key, which replaces the 6.9" and
+13" screenshots of every language the version in preparation has:
+
+```sh
+ASC_KEY_ID=… ASC_ISSUER_ID=… ASC_KEY_PATH=AuthKey_….p8 apps/ios/scripts/upload-screenshots.py <dir>
+```
+
+`--dry-run` checks the pictures' sizes without uploading. Needs Node 22+, Chrome, python3 with
+Pillow (and `cryptography` for the upload), and the fonts Inter and Noto Color Emoji.
 
 ## Debug symbols
 
