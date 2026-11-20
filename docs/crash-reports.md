@@ -568,7 +568,7 @@ core). The Android measures of its own (`Perf.kt`) take their names from the cor
 | Web (wasm)       | Function index and offset (names are stripped)   | None (gap, below)                                |
 | Android (Kotlin) | Obfuscated names (R8)                            | R8 `mapping.txt` under the build's ProGuard UUID |
 | Android (NDK)    | Addresses and debug IDs of `libteamcraft_ffi.so` | The unstripped `.so` (ELF debug files)           |
-| iOS              | Addresses (GlitchTip 6 drops the debug IDs)      | dSYMs from the Xcode archive (#1515)             |
+| iOS              | Addresses and debug IDs (GlitchTip 7 resolves)   | dSYMs from the Xcode archive (#1515)             |
 
 - **Rust on the server** resolves frames in the process (`std::backtrace`): its release build keeps
   the symbol table, so function names are there; file and line would need debug info in the
@@ -603,8 +603,8 @@ core). The Android measures of its own (`Perf.kt`) take their names from the cor
   under `macho/<UUID>/` when it is configured. After the upload the script lists the backend's
   debug files and warns for each one it didn't keep (GlitchTip 6.2.6 kept the two small
   extension dSYMs of 1.0.39 and dropped the app's and the notification extension's, though
-  `sentry-cli` printed them as uploaded). See "Reading an iOS report" for why the backend doesn't
-  symbolicate them anyway.
+  `sentry-cli` printed them as uploaded; restored after the upgrade to GlitchTip 7). See "Reading
+  an iOS report".
 - **Upload is optional.** The workflow uploads when the secrets `CRASH_REPORTS_URL`,
   `CRASH_REPORTS_ORG`, `CRASH_REPORTS_PROJECT` and `CRASH_REPORTS_AUTH_TOKEN` exist and skips the
   steps otherwise, so forks and other publishers build without them. A failed upload warns; the
@@ -612,12 +612,11 @@ core). The Android measures of its own (`Perf.kt`) take their names from the cor
 
 ### Reading an iOS report
 
-GlitchTip up to 6.x doesn't symbolicate Apple frames: it stores an event's exception (its stack
-trace) and message, but neither `debug_meta` (the images' debug IDs) nor `threads` (the other
-threads of a crash or fatal hang), and it has no API to download a stored debug file. A report
-therefore shows `instruction_addr` and `image_addr` per frame and no function names. Until the
-backend does it (GlitchTip 7 reads `debug_meta`; the deployment is in teamcraft-deploy), resolve
-the frames on Linux with the release's dSYMs:
+GlitchTip 7 symbolicates iOS frames itself from the stored dSYMs, by the images' debug IDs in an
+event's `debug_meta` (checked with a test event against the 1.0.39 dSYM: function, file and line).
+Events stored by GlitchTip 6 carry no `debug_meta` (6.x dropped it, and `threads` with it) and stay
+addresses only; neither version has an API to download a stored debug file. For such an event, or
+when the backend misses a dSYM, resolve the frames on Linux with the release's dSYMs:
 
 1. Get the dSYMs of the report's release (`release` tag, `app_build` in the app context):
    - from the private bucket, when configured: `scripts/debug-files.sh index ios/<version>/aarch64-apple-ios`
