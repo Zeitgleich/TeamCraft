@@ -38,8 +38,8 @@ permissions: {}
 jobs:
   build:
     name: Build, sign and upload to TestFlight
-    # Xcode 26 with the iOS 26 SDK, like ios.yml.
-    runs-on: macos-26
+    # Xcode 27 with the iOS 27 SDK, like ios.yml (App Store uploads need it from April 2027, #2173).
+    runs-on: xcode-27
     timeout-minutes: 150
     permissions:
       contents: read

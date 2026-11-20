@@ -52,11 +52,14 @@ jobs:
     # before merging, and main gets one run per batch. This keeps the runner budget for main and
     # releases. A re-run keeps the first attempt's payload, so it counts as asked for.
     if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci') || github.run_attempt > 1
-    # macOS 26 image: Xcode 26 (its default) with the iOS 26 SDK and simulators.
-    runs-on: macos-26
+    # Xcode 27 image: the iOS 27 SDK, required for App Store uploads from April 2027 (#2173), and
+    # its simulators.
+    runs-on: xcode-27
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Xcode and SDK in use
+        run: xcodebuild -version && xcodebuild -showsdks | grep -i iphoneos
       - name: String catalogs are complete (en + de)
         run: python3 apps/ios/scripts/check-strings.py
       - name: Tools
