@@ -169,11 +169,11 @@ struct Frame {
 /// What happens at a point of the simulated time.
 enum Event {
   /// A packet of the presenter reaches the SFU.
-  AtSfu(Vec<u8>),
+  Uplink(Vec<u8>),
   /// A packet the SFU forwarded reaches a viewer.
-  AtViewer(DeviceId, Vec<u8>),
+  Downlink(DeviceId, Vec<u8>),
   /// The SFU's request reaches the presenter.
-  AtPresenter(Request),
+  Signaling(Request),
 }
 
 enum Request {
@@ -356,7 +356,7 @@ impl Sim {
     self.presenter.next_free = leaves + PACING;
     self.sent_packets += 1;
     match self.link.pass(leaves) {
-      Some(arrives) => self.schedule(arrives, Event::AtSfu(datagram)),
+      Some(arrives) => self.schedule(arrives, Event::Uplink(datagram)),
       None => self.lost_packets += 1,
     }
   }
@@ -369,22 +369,22 @@ impl Sim {
       }
       let event = entry.remove();
       match event {
-        Event::AtSfu(datagram) => {
+        Event::Uplink(datagram) => {
           let route = self.forwarder.route(device(PRESENTER), &datagram, at).unwrap();
           for (receiver, delivery) in route.deliveries {
-            self.schedule(at + DOWNLINK_DELAY, Event::AtViewer(receiver, delivery));
+            self.schedule(at + DOWNLINK_DELAY, Event::Downlink(receiver, delivery));
           }
           self.apply(route.effects, at);
         },
-        Event::AtViewer(viewer, datagram) => self.receive(viewer, &datagram, at),
-        Event::AtPresenter(Request::Packets(sequence_numbers)) => {
+        Event::Downlink(viewer, datagram) => self.receive(viewer, &datagram, at),
+        Event::Signaling(Request::Packets(sequence_numbers)) => {
           for sequence_number in sequence_numbers {
             if let Some(datagram) = self.presenter.sent.get(&sequence_number).cloned() {
               self.send_on_uplink(datagram, at);
             }
           }
         },
-        Event::AtPresenter(Request::Keyframe) => {
+        Event::Signaling(Request::Keyframe) => {
           self.send_frame(KEYFRAME_PACKETS, true, at);
         },
       }
@@ -413,11 +413,11 @@ impl Sim {
       match effect {
         Effect::RetransmitRequest { sequence_numbers, .. } => self.schedule(
           now + SIGNALING_DELAY,
-          Event::AtPresenter(Request::Packets(sequence_numbers)),
+          Event::Signaling(Request::Packets(sequence_numbers)),
         ),
         Effect::KeyframeRequest { .. } => {
           self.keyframes_asked += 1;
-          self.schedule(now + SIGNALING_DELAY, Event::AtPresenter(Request::Keyframe));
+          self.schedule(now + SIGNALING_DELAY, Event::Signaling(Request::Keyframe));
         },
         _ => {},
       }
@@ -428,7 +428,7 @@ impl Sim {
     let media = MediaDatagram::parse(datagram).unwrap();
     let (header, _) = RtpHeader::parse(media.rtp).unwrap();
     let fragment = FrameFragment::from_header(&header).unwrap();
-    let content = u32::from(header.timestamp.0);
+    let content = header.timestamp.0;
     let Some(viewer) = self.viewers.get_mut(&viewer_id) else {
       return;
     };

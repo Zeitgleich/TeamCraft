@@ -847,6 +847,50 @@ same `ReceiveLoad`, for the desktop and the headless client:
 Cost: an atomic counter per frame and handed-over frame, one command per frame to the call task,
 and the same per-tick judgement as in the browser.
 
+### A presenter's lossy uplink (issue #2189)
+
+A packet lost between a presenter and the SFU is lost for every viewer. On a still screen a slide
+change is all that is sent: before, one lost packet of it held the old slide until each viewer's
+NACKs ran out (the SFU never had the packet) and its keyframe request came back through the same
+uplink, and a short slide could be skipped. The SFU now asks the presenter for a gap at once
+(`uplink_repair.rs`), the presenter sends the packets again from what it keeps
+(`teamcraft_media::retransmit`), and a packet still missing after 300 ms (screen) or 500 ms
+(camera) gets one keyframe asked for, at most one a second per layer.
+
+`tests/suite/uplink_loss.rs` runs the real forwarder on a simulated clock: a presenter behind an
+uplink that loses 1 to 3 % of its packets in bursts (Gilbert–Elliott, four packets a burst, every
+other one lost) with 20 to 60 ms of delay, both walking every 500 ms, two viewers whose decoders
+need every frame since a keyframe and ask for a keyframe after 300 ms of waiting. One minute per
+run, five seeds:
+
+| Share of one minute                    | Repaired                     | Not repaired (before)            |
+|----------------------------------------|------------------------------|----------------------------------|
+| Slides (1 s and 2 s) never shown       | 0                            | 2–10                             |
+| Slides later than 0.7 s or never       | 0                            | 8–16                             |
+| Slide change to viewer, median / worst | 89–109 ms / 183–553 ms       | 84–107 ms / 0.7–1.9 s            |
+| Keyframes asked of the presenter       | 0–2                          | 10–16                            |
+| Camera (30 fps): frozen, both viewers  | 1.4–2.7 s                    | 46–64 s                          |
+| Camera: keyframes asked                | 0–1                          | 33–39                            |
+
+Through the real client and SFU (`screen_uplink_bursts::measure_slides_through_a_lossy_uplink`,
+the same loss on a relay, real encoders and estimator) the repaired runs showed every encoded slide
+to both viewers within 25–320 ms; without the repair three of ten slides never reached them. Those
+runs vary for two other reasons, tracked apart: with the voice's packets lost as well, the
+presenter holds its video for its voice and doesn't get it back (#2191), and one burst within a
+still screen's sparse second can cut its uplink estimate to the screen's own low rate (#2192).
+
+Cost:
+
+- **SFU:** per track and layer, the missing sequence numbers (at most 256, a few kilobytes at
+  worst, nothing while none are missing) and a few timestamps; per video packet one sequence
+  number comparison, per gap a map insert and a signaling message. The packets it keeps for
+  viewers' NACKs (#1762) are unchanged.
+- **Publisher:** what it sent within the SFU's window (1 s), at most 1024 packets per layer: about
+  a second of the share's bitrate, 0.2–0.4 MB for a screen at 1.5–3 Mbit/s, at most about 1.2 MB
+  per layer. One copy of each packet as it is sent (a `Vec` of its ~1.2 kB).
+- **Uplink:** packets sent again count in the uplink estimate and come out of a budget of 30 % of
+  it (64 KiB at once), so a lossy link isn't flooded by repairs.
+
 ### Each picture with its own frame (issue #990)
 
 The first VideoToolbox session of a process takes 55 to 71 ms for its first picture (a 1440p or

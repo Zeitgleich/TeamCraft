@@ -241,6 +241,9 @@ async fn measure_screen_share_bursts_on_a_limited_uplink() {
   }
 }
 
+/// A viewer's pictures: when, the capture timestamp, the size.
+type Pictures = Vec<(Duration, u64, VideoResolution)>;
+
 /// What a run shares, to whom, through which uplink.
 struct Scenario {
   /// The shared screen's size.
@@ -286,8 +289,8 @@ struct Run {
   layers: Vec<VideoLayerInfo>,
   /// When each slide went up, and its capture timestamp.
   changes: Vec<(Duration, u64)>,
-  /// Each viewer's pictures: when, the capture timestamp, the size.
-  received: Vec<Vec<(Duration, u64, VideoResolution)>>,
+  /// Each viewer's pictures.
+  received: Vec<Pictures>,
   shown: BTreeMap<u64, usize>,
   encoded: Vec<Encoded>,
   /// When an encoder was built (the share's start, new layers, or a rate an encoder couldn't take
@@ -390,8 +393,7 @@ async fn run_scenario(scenario: Scenario) -> Run {
   };
   presenter.start_video(config).await.unwrap();
 
-  let received: Vec<Arc<Mutex<Vec<(Duration, u64, VideoResolution)>>>> =
-    viewers.iter().map(|_| Arc::default()).collect();
+  let received: Vec<Arc<Mutex<Pictures>>> = viewers.iter().map(|_| Arc::default()).collect();
   let (mut uplink_estimates, mut layers_needed) = (Vec::new(), Vec::new());
   let (mut keyframe_requests, mut published, mut held) = (Vec::new(), Vec::new(), Vec::new());
   let share_start = tokio::time::Instant::now();
@@ -525,7 +527,7 @@ impl Run {
       .collect()
   }
 
-  fn link_delays_to(&self, received: &[(Duration, u64, VideoResolution)]) -> Vec<Arrival> {
+  fn link_delays_to(&self, received: &Pictures) -> Vec<Arrival> {
     let settled = self.started_at + SETTLE;
     let in_window =
       |picture_us: u64, from_us: u64, to_us: u64| picture_us + 100 >= from_us && picture_us + 100 < to_us;
