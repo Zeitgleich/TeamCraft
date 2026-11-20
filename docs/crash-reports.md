@@ -573,7 +573,7 @@ core). The Android measures of its own (`Perf.kt`) take their names from the cor
 | Web (wasm)       | Function index and offset (names are stripped)   | None (gap, below)                                |
 | Android (Kotlin) | Obfuscated names (R8)                            | R8 `mapping.txt` under the build's ProGuard UUID |
 | Android (NDK)    | Addresses and debug IDs of `libteamcraft_ffi.so` | The unstripped `.so` (ELF debug files)           |
-| iOS              | Addresses and debug IDs                          | dSYMs from the Xcode archive (#1515)             |
+| iOS              | Addresses and debug IDs (GlitchTip 7 resolves)   | dSYMs from the Xcode archive (#1515)             |
 
 - **Rust on the server** resolves frames in the process (`std::backtrace`): its release build keeps
   the symbol table, so function names are there; file and line would need debug info in the
@@ -602,10 +602,44 @@ core). The Android measures of its own (`Perf.kt`) take their names from the cor
   configured). `sentry-cli` is pinned by version and SHA-256 in `scripts/debug-files.sh`. GlitchTip takes both through its Sentry-compatible debug file API; older
   GlitchTip versions failed to apply mappings uploaded without a `kind` (GlitchTip backend issue
   504), so check the first deobfuscated crash.
+- **iOS:** the release workflow (`ios-release.yml`) stores the archive's dSYMs (the app, which
+  links the Rust core with line tables, and its three extensions) with `scripts/debug-files.sh
+  store`: to the backend with `sentry-cli debug-files upload --wait`, and to the private bucket
+  under `macho/<UUID>/` when it is configured. After the upload the script lists the backend's
+  debug files and warns for each one it didn't keep (GlitchTip 6.2.6 kept the two small
+  extension dSYMs of 1.0.39 and dropped the app's and the notification extension's, though
+  `sentry-cli` printed them as uploaded; restored after the upgrade to GlitchTip 7). See "Reading
+  an iOS report".
 - **Upload is optional.** The workflow uploads when the secrets `CRASH_REPORTS_URL`,
   `CRASH_REPORTS_ORG`, `CRASH_REPORTS_PROJECT` and `CRASH_REPORTS_AUTH_TOKEN` exist and skips the
   steps otherwise, so forks and other publishers build without them. A failed upload warns; the
   release goes on.
+
+### Reading an iOS report
+
+GlitchTip 7 symbolicates iOS frames itself from the stored dSYMs, by the images' debug IDs in an
+event's `debug_meta` (checked with a test event against the 1.0.39 dSYM: function, file and line).
+Events stored by GlitchTip 6 carry no `debug_meta` (6.x dropped it, and `threads` with it) and stay
+addresses only; neither version has an API to download a stored debug file. For such an event, or
+when the backend misses a dSYM, resolve the frames on Linux with the release's dSYMs:
+
+1. Get the dSYMs of the report's release (`release` tag, `app_build` in the app context):
+   - from the private bucket, when configured: `scripts/debug-files.sh index ios/<version>/aarch64-apple-ios`
+     lists their UUIDs, `scripts/debug-files.sh fetch-dsym <UUID>` unpacks one to
+     `~/.cache/teamcraft-debug/dsym/<UUID>/`;
+   - otherwise from App Store Connect (the TestFlight upload carries them): on a Mac, Xcode →
+     Organizer → Archives or the build in App Store Connect → "Download Debug Symbols"; copy the
+     `.dSYM` bundles to the Linux machine.
+2. Run `scripts/symbolicate-ios.sh --dsyms DIR <GlitchTip issue ID>` (with `GLITCHTIP_URL` and an
+   API token with event read access in `GLITCHTIP_TOKEN`) or `… --dsyms DIR event.json`. It prints
+   every frame innermost first with function, file and line (Swift and the Rust core alike,
+   inlined calls marked), and the address and offset of frames it has no dSYM for.
+
+Without `debug_meta` the script matches images by name: a dSYM of another build gives wrong
+names, so take the dSYMs of exactly the report's build. It needs `llvm-symbolizer`,
+`llvm-objdump`, `llvm-dwarfdump` and `python3`. The address looked up is `instruction_addr -
+image_addr +` the image's `__TEXT` vmaddr, minus one for return addresses (every frame but the
+innermost), as `atos -l` does.
 
 ## Store declarations
 
@@ -625,7 +659,7 @@ core). The Android measures of its own (`Perf.kt`) take their names from the cor
 | User opt-out, first-start notice (web and desktop page)      | Done (third pull request)           |
 | Android SDK, symbol upload in the release workflow           | Done (fifth pull request)           |
 | iOS (sentry-cocoa), settings and notice                      | Written; Mac build: #1515           |
-| iOS dSYM upload, device test                                 | Next (#1515)                        |
+| iOS dSYM upload, device test                                 | Upload checked; runbook (#1515)     |
 | GlitchTip in teamcraft-deploy                                | teamcraft-deploy                    |
 | Performance data: web, desktop, Android, iOS SDK (#1521)     | Done; iOS untested (#1515)          |
 | Screen-share quality, web and desktop (#1733)                | Done; real-hardware codec test open |
