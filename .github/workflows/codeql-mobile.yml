@@ -61,7 +61,7 @@ jobs:
           HAS_CI_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ci') || github.run_attempt > 1 }}
         run: |
           kotlin='{"language":"java-kotlin","os":"ubuntu-latest","build":"android"}'
-          swift='{"language":"swift","os":"macos-26","build":"ios"}'
+          swift='{"language":"swift","os":"xcode-27","build":"ios"}'
           case "${EVENT}" in
             pull_request)
               # Same rule as the Android workflow: pull requests run with the `ci` label only.
