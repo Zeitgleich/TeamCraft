@@ -6,9 +6,10 @@
 
 /** The scenes, in the order and with the names of the Play screenshots. */
 const SCENES = {
-  iphone: ["chats", "channel", "thread", "spaces", "join-call", "settings"],
+  // "intro" is the title card: the mark, the claim and what the app does, without a device.
+  iphone: ["intro", "chats", "channel", "thread", "spaces", "join-call", "settings"],
   // On iPad the split view shows the spaces next to the channel, so "spaces" has no picture of its own.
-  ipad: ["chats", "channel", "thread", "join-call", "settings"],
+  ipad: ["intro", "chats", "channel", "thread", "join-call", "settings"],
 };
 
 const ME = "u1";
@@ -26,6 +27,11 @@ const PEOPLE = {
 // screenshots show German chats.
 const TEXTS = {
   en: {
+    intro: {
+      title: "TeamCraft –",
+      claim: "Team chat on your own server",
+      body: "<em>Channels</em>, <em>calls</em> and <em>meetings</em>, end&#8209;to&#8209;end encrypted",
+    },
     captions: {
       chats: "Team chat, <em>encrypted end&#8209;to&#8209;end</em>",
       channel: "<em>Channels</em> for every team and project",
@@ -103,6 +109,11 @@ const TEXTS = {
     signOut: "Sign out",
   },
   de: {
+    intro: {
+      title: "TeamCraft –",
+      claim: "Team-Chat auf eurem eigenen Server",
+      body: "<em>Channels</em>, <em>Anrufe</em> und <em>Meetings</em>, Ende&#8209;zu&#8209;Ende verschlüsselt",
+    },
     captions: {
       chats: "<em>Ende&#8209;zu&#8209;Ende</em> verschlüsselt",
       channel: "<em>Channels</em> für jedes Team und Projekt",
@@ -185,7 +196,7 @@ let icons = {};
 let t = TEXTS.en;
 
 /** Draws one screenshot into #canvas; `iconPaths` maps icon names to SVG path data. */
-window.renderScene = ({ device, lang, scene }, iconPaths) => {
+window.renderScene = ({ device, lang, scene }, iconPaths, brandMark) => {
   icons = iconPaths;
   t = TEXTS[lang];
   if (!t) throw new Error(`unknown language ${lang}`);
@@ -193,6 +204,10 @@ window.renderScene = ({ device, lang, scene }, iconPaths) => {
   document.documentElement.lang = lang;
   const canvas = document.getElementById("canvas");
   canvas.className = `canvas ${device}`;
+  if (scene === "intro") {
+    canvas.innerHTML = introCard(brandMark);
+    return document.fonts.ready.then(() => true);
+  }
   const ui = device === "ipad" ? IPAD[scene]() : IPHONE[scene]();
   canvas.innerHTML = `
     <header class="caption">${t.captions[scene]}</header>
@@ -227,6 +242,18 @@ const IPAD = {
     `${split(channelList({ selected: "design" }), channelView({ isBackShown: false }))}<div class="scrim"></div>${joinSheet("sheet form")}`,
   settings: () => `${split(chatList({ selected: "u2" }), directView())}<div class="scrim"></div>${settingsSheet()}`,
 };
+
+/** The title card: mark, name and claim on the left, what it does on the right, a swipe arrow. */
+function introCard(brandMark) {
+  return `<section class="intro">
+    <div class="intro-mark">${brandMark}</div>
+    <h1 class="intro-title">${t.intro.title}<br><em>${t.intro.claim}</em></h1>
+    <p class="intro-body">${t.intro.body}</p>
+    <svg class="intro-arrow" viewBox="0 0 400 40" preserveAspectRatio="none" aria-hidden="true">
+      <path d="M2 20H396 M372 4l24 16-24 16"/>
+    </svg>
+  </section>`;
+}
 
 function split(sidebar, detail) {
   return `<div class="split"><aside class="sidebar">${sidebar}</aside><section class="detail">${detail}</section></div>`;

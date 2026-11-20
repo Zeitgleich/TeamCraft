@@ -29,6 +29,7 @@ if (!out) {
 }
 
 const icons = iconPaths(readFileSync(join(ROOT, "crates/teamcraft-ui/src/components/icons.rs"), "utf8"));
+const mark = readFileSync(join(ROOT, "assets/brand/mark.svg"), "utf8");
 const page = await launch();
 try {
   await page.goto(pathToFileURL(join(HERE, "ios-store", "page.html")).href);
@@ -41,7 +42,7 @@ try {
       mkdirSync(folder, { recursive: true });
       for (const [index, scene] of scenes[device].entries()) {
         if (only.length > 0 && !only.includes(scene)) continue;
-        await page.evaluate(`window.renderScene(${JSON.stringify({ device, lang, scene })}, ${JSON.stringify(icons)})`);
+        await page.evaluate(`window.renderScene(${JSON.stringify({ device, lang, scene })}, ${JSON.stringify(icons)}, ${JSON.stringify(mark)})`);
         const file = join(folder, `${index + 1}-${scene}.png`);
         writeFileSync(file, await page.screenshot());
         console.log(file);

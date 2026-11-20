@@ -2,7 +2,9 @@
 # App Store screenshots of the iOS app, into <output dir>/<locale>/<device>/: the
 # scenes of scripts/screenshots/ios-store/scenes.js (the Play screenshots' scenes and placeholder
 # texts, drawn in the iOS app's light theme with a caption above the device) taken in headless
-# Chrome by ios-store.mjs, at iPhone 6.9" (1320 x 2868) and iPad 13" (2064 x 2752).
+# Chrome by ios-store.mjs, at iPhone 6.9" (1320 x 2868) and iPad 13" (2064 x 2752). The iPhone
+# 6.3" pictures (1206 x 2622), the size App Store Connect requires, are the 6.9" ones scaled down:
+# both screens have the same layout in points, and their aspect ratios differ by less than 0.1 %.
 #
 #   scripts/screenshots/ios-store.sh <output dir>
 #
@@ -29,6 +31,7 @@ from pathlib import Path
 from PIL import Image
 
 LOCALES = {"en": "en-US", "de": "de-DE"}
+IPHONE_63 = (1206, 2622)
 work, out_dir = Path(sys.argv[1]), Path(sys.argv[2])
 for language, locale in LOCALES.items():
   target = out_dir / locale
@@ -36,6 +39,12 @@ for language, locale in LOCALES.items():
   for shot in sorted((work / language).glob("*/*.png")):
     out = target / shot.parent.name / f"{shot.stem}.jpg"
     out.parent.mkdir(parents=True, exist_ok=True)
-    Image.open(shot).convert("RGB").save(out, "JPEG", quality=92, subsampling=0, optimize=True)
+    image = Image.open(shot).convert("RGB")
+    image.save(out, "JPEG", quality=92, subsampling=0, optimize=True)
     print(out)
+    if shot.parent.name == "iphone-6.9":
+      medium = target / "iphone-6.3" / out.name
+      medium.parent.mkdir(parents=True, exist_ok=True)
+      image.resize(IPHONE_63, Image.Resampling.LANCZOS).save(medium, "JPEG", quality=92, subsampling=0, optimize=True)
+      print(medium)
 PY
