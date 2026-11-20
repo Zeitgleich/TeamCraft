@@ -68,7 +68,7 @@ private const val ME = "u1"
  * channel, a thread, the spaces, joining a call and the settings, with placeholder people and texts.
  * Not a check: it runs only when asked for (`-e screenshots store`), in the language given by
  * `-e locale en|de`, and writes PNGs to the app's external files directory (`store/<locale>/`).
- * scripts/screenshots/android-store.sh runs it on its own emulator and pulls the pictures.
+ * scripts/screenshots/android-store.sh <dir> runs it on its own emulator and pulls the pictures.
  */
 @RunWith(AndroidJUnit4::class)
 class StoreScreenshots {

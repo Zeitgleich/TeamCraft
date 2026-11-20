@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Google Play listing graphics for the Android app (issue #479), into apps/android/store in the
-# layout of fastlane supply's metadata directory (`<locale>/images/phoneScreenshots/…`):
+# Google Play listing graphics for the Android app (issue #479): the feature graphic and the icon
+# into apps/android/store (fastlane supply's layout), and phone screenshots of the real app into
+# <output dir>/<locale>/ (not kept in the repository; the listing's screenshots come from
+# scripts/screenshots/ios-store.sh, play-phone/):
 #
 # 1. the phone screenshots: StoreScreenshots (androidTest, placeholder data, never in a shipped
 #    build) on a headless Pixel 6 emulator (1080 × 2400) in the Android build image, SystemUI demo
@@ -8,7 +10,7 @@
 # 2. the feature graphic (scripts/screenshots/feature_graphic.py, Inkscape);
 # 3. the hi-res icon (scripts/brand/icons.py).
 #
-#   TEAMCRAFT_ANDROID_CACHE=/big/disk/android scripts/screenshots/android-store.sh
+#   TEAMCRAFT_ANDROID_CACHE=/big/disk/android scripts/screenshots/android-store.sh <output dir>
 #
 # TEAMCRAFT_ANDROID_CACHE holds the SDK, the emulator, its system image and the AVD (several GB;
 # apps/android/README.md). Needs Docker with /dev/kvm, python3 with Pillow, Inkscape and Inter.
@@ -16,7 +18,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 cache="${TEAMCRAFT_ANDROID_CACHE:?set TEAMCRAFT_ANDROID_CACHE to a directory on a big disk}"
-store="$root/apps/android/store"
+out="${1:?usage: android-store.sh <output dir>}"
 # Store locale per language of StoreScreenshots.
 locales=(en:en-US de:de-DE)
 
@@ -27,7 +29,7 @@ TEAMCRAFT_ANDROID_ABIS=x86_64 "$root/apps/android/scripts/docker-build.sh" \
 for pair in "${locales[@]}"; do
   language="${pair%%:*}"
   locale="${pair#*:}"
-  target="$store/$locale/images/phoneScreenshots"
+  target="$out/$locale"
   rm -rf "$target"
   mkdir -p "$target"
   # Play takes no alpha channel; the pictures become RGB PNGs.
