@@ -87,7 +87,9 @@ Wayland test checklist is [linux/MANUAL-TEST.md](linux/MANUAL-TEST.md).
   entitlement is for the bundled framework.
 - The app is signed inside out and checked before the dmg is made from it (`macos/sign-app.sh`,
   `macos/make-dmg.sh`, `macos/verify-app.sh`): ad hoc without a Developer ID, with it (secrets listed in
-  `docs/release.md`) also notarized and stapled.
+  `docs/release.md`) also notarized and stapled (`macos/notarize.sh`). Only the Developer ID signature
+  is the same app to the keychain from one release to the next; after an ad-hoc update macOS asks for
+  the login password once (#1223, `docs/release.md`).
 
 ## Release workflow
 

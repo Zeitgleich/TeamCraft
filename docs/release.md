@@ -282,10 +282,40 @@ re-run it after a brand change) and the app and Applications on either side of i
 writes the layout, and where it can't be scripted the job warns and ships the plain window. A broken or missing seal is what Gatekeeper calls "damaged"; an intact
 ad-hoc signature gets the normal "could not verify" prompt instead.
 
-With the secrets `APPLE_CERTIFICATE` (the Developer ID Application certificate as base64 .p12),
-`APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD` (an app-specific
-password) and `APPLE_TEAM_ID`, the same job signs with the Developer ID, with hardened runtime and
-timestamp, notarizes and staples the app and the dmg, and requires Gatekeeper to accept them.
+With the secrets `APPLE_CERTIFICATE` (the *Developer ID Application* certificate with its private
+key as base64 .p12) and `APPLE_CERTIFICATE_PASSWORD`, the same job signs with the Developer ID, with
+hardened runtime and timestamp, notarizes and staples the app and the dmg (`notarize.sh`), and
+requires Gatekeeper to accept them. Notarization uses the App Store Connect API key of the iOS
+release (secret `APP_STORE_CONNECT_API_KEY`, variables `APP_STORE_CONNECT_KEY_ID`,
+`APP_STORE_CONNECT_ISSUER_ID`, below), or without it `APPLE_ID`, `APPLE_PASSWORD` (an app-specific
+password) and `APPLE_TEAM_ID`. The signing identity is read from the certificate;
+`APPLE_SIGNING_IDENTITY` only picks one where the .p12 holds several. With the variable
+`APPLE_TEAM_ID` set, a signature of another team fails the job.
+
+The Developer ID certificate is not the *Apple Distribution* one of the iOS release: the account
+holder creates it once in the developer portal (*Certificates → + → Developer ID Application*, from a
+signing request as for iOS), exports it with its key as `.p12` and stores it with
+`base64 -i DeveloperID.p12 | gh secret set APPLE_CERTIFICATE` and
+`gh secret set APPLE_CERTIFICATE_PASSWORD`. It is valid for five years; apps signed with it keep
+working after that.
+
+#### What the signature means for the keychain (#1223)
+
+The desktop app keeps one item in the login keychain, the key of its sealed secrets file. macOS lets
+the app that created an item read it and asks the user for the login password when any other app
+does. Which app that is, it decides by the designated requirement of the code signature:
+
+| Signature    | Designated requirement                                                        | After an update                    |
+|--------------|-------------------------------------------------------------------------------|------------------------------------|
+| Ad hoc       | `cdhash H"…"`, the hash of this very build                                    | A stranger: one password dialog    |
+| Developer ID | `identifier "de.zeitgleich.teamcraft" and anchor apple generic and … certificate leaf[subject.OU] = <team>` | The same app: no dialog |
+
+`verify-app.sh` prints the requirement and, in a job that has the certificate, fails when it is a
+build's hash; without the certificate the job warns. The first Developer ID release after ad-hoc
+ones still asks once (the item was made by an ad-hoc build): *Always Allow* adds the signed app to
+the item, and no later update asks. An ad-hoc signature with a requirement written by hand
+(`identifier "de.zeitgleich.teamcraft"` alone) would also stop the dialogs, but then any program on
+the Mac that claims this identifier reads the key, so the release doesn't do that.
 
 ### Opening the unsigned macOS app
 
