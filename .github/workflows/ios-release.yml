@@ -136,6 +136,16 @@ jobs:
           issuer-id: ${{ vars.APP_STORE_CONNECT_ISSUER_ID }}
           api-key-id: ${{ vars.APP_STORE_CONNECT_KEY_ID }}
           api-private-key: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+      - name: Provisioning profile (widget)
+        id: profile_widget
+        if: steps.settings.outputs.enabled == 'true'
+        uses: apple-actions/download-provisioning-profiles@233aa54e59082c0e8a8cf8b0b02c72dea2422ef9 # v7.1.0
+        with:
+          bundle-id: de.zeitgleich.teamcraft.widget
+          profile-type: IOS_APP_STORE
+          issuer-id: ${{ vars.APP_STORE_CONNECT_ISSUER_ID }}
+          api-key-id: ${{ vars.APP_STORE_CONNECT_KEY_ID }}
+          api-private-key: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
       - name: Profile names
         id: profiles
         if: steps.settings.outputs.enabled == 'true'
@@ -143,11 +153,13 @@ jobs:
           APP: ${{ steps.profile_app.outputs.profiles }}
           NOTIFICATIONS: ${{ steps.profile_notifications.outputs.profiles }}
           SHARE: ${{ steps.profile_share.outputs.profiles }}
+          WIDGET: ${{ steps.profile_widget.outputs.profiles }}
         run: |
-          for kind in app notifications share; do
+          for kind in app notifications share widget; do
             json="${APP}"
             [ "$kind" = notifications ] && json="${NOTIFICATIONS}"
             [ "$kind" = share ] && json="${SHARE}"
+            [ "$kind" = widget ] && json="${WIDGET}"
             count=$(printf '%s' "$json" | jq 'length')
             if [ "$count" != 1 ]; then
               echo "::error::expected one active App Store profile for the ${kind} bundle ID, found ${count}"
@@ -175,6 +187,7 @@ jobs:
           TC_PROFILE_APP: ${{ steps.profiles.outputs.app }}
           TC_PROFILE_NOTIFICATIONS: ${{ steps.profiles.outputs.notifications }}
           TC_PROFILE_SHARE: ${{ steps.profiles.outputs.share }}
+          TC_PROFILE_WIDGET: ${{ steps.profiles.outputs.widget }}
           TEAMCRAFT_PUSH_GATEWAY_URL: ${{ vars.TEAMCRAFT_IOS_PUSH_GATEWAY_URL }}
         run: scripts/archive-testflight.sh
       - name: The .ipa for the release

@@ -6,13 +6,14 @@
 # Needs, before it runs:
 #   - the Rust core for the device: scripts/build-xcframework.sh --device-only
 #   - the "Apple Distribution" certificate with its private key in a keychain on the search list
-#   - the three App Store provisioning profiles installed (~/Library/MobileDevice/Provisioning Profiles)
+#   - the four App Store provisioning profiles installed (~/Library/MobileDevice/Provisioning Profiles)
 #
 # Environment (no defaults: a missing value stops the script):
 #   APPLE_TEAM_ID                  the team that signs (10 characters)
 #   TC_PROFILE_APP                 name of the App Store profile of de.zeitgleich.teamcraft
 #   TC_PROFILE_NOTIFICATIONS       ... of de.zeitgleich.teamcraft.notifications
 #   TC_PROFILE_SHARE               ... of de.zeitgleich.teamcraft.share
+#   TC_PROFILE_WIDGET              ... of de.zeitgleich.teamcraft.widget
 #   ASC_KEY_ID, ASC_ISSUER_ID      the App Store Connect API key (for the upload)
 #   ASC_KEY_PATH                   its .p8 file
 # Optional:
@@ -31,7 +32,7 @@ for argument in "$@"; do
   esac
 done
 
-for name in APPLE_TEAM_ID TC_PROFILE_APP TC_PROFILE_NOTIFICATIONS TC_PROFILE_SHARE; do
+for name in APPLE_TEAM_ID TC_PROFILE_APP TC_PROFILE_NOTIFICATIONS TC_PROFILE_SHARE TC_PROFILE_WIDGET; do
   if [ -z "${!name:-}" ]; then echo "error: ${name} is not set" >&2; exit 1; fi
 done
 if [ "${UPLOAD}" = 1 ]; then
@@ -67,6 +68,7 @@ xcodebuild archive \
   TC_PROFILE_APP="${TC_PROFILE_APP}" \
   TC_PROFILE_NOTIFICATIONS="${TC_PROFILE_NOTIFICATIONS}" \
   TC_PROFILE_SHARE="${TC_PROFILE_SHARE}" \
+  TC_PROFILE_WIDGET="${TC_PROFILE_WIDGET}" \
   TEAMCRAFT_PUSH_GATEWAY_URL="${TEAMCRAFT_PUSH_GATEWAY_URL:-}" \
   | tail -n 200
 
@@ -96,6 +98,8 @@ write_export_options() {
     <string>${TC_PROFILE_NOTIFICATIONS}</string>
     <key>de.zeitgleich.teamcraft.share</key>
     <string>${TC_PROFILE_SHARE}</string>
+    <key>de.zeitgleich.teamcraft.widget</key>
+    <string>${TC_PROFILE_WIDGET}</string>
   </dict>
   <key>manageAppVersionAndBuildNumber</key>
   <false/>

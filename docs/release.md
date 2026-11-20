@@ -449,7 +449,7 @@ to the crash reports backend and the private bucket ([Debug symbols](#debug-symb
 workflow artifact or the release.
 
 **Signing: certificate plus profiles from the API, no fastlane.** The workflow imports one
-distribution certificate into a keychain of the run and downloads the three App Store profiles
+distribution certificate into a keychain of the run and downloads the four App Store profiles
 through the App Store Connect API (`apple-actions/download-provisioning-profiles`), so a profile
 regenerated in the developer portal (after adding a capability) needs no new secret. Alternatives
 considered: Xcode's automatic signing on the runner creates a new development certificate on every
@@ -476,15 +476,15 @@ Set up once (developer portal and App Store Connect, by an Account Holder or Adm
 1. **Identifiers**: App IDs `de.zeitgleich.teamcraft` (capabilities Push Notifications, App Groups,
    Communication Notifications, Time Sensitive Notifications), `de.zeitgleich.teamcraft.notifications`
    (App Groups, Communication Notifications, Time Sensitive Notifications) and
-   `de.zeitgleich.teamcraft.share` (App Groups); the App Group `group.de.zeitgleich.teamcraft`
-   assigned to all three. Request *Notification Filtering* for the extension
+   `de.zeitgleich.teamcraft.share` and `de.zeitgleich.teamcraft.widget` (App Groups each); the App
+   Group `group.de.zeitgleich.teamcraft` assigned to all four. Request *Notification Filtering* for the extension
    (`apps/ios/README.md`).
 2. **Certificate**: *Certificates → +* → *Apple Distribution*, with a certificate signing request
    (Keychain Access on a Mac, or `openssl req -new -newkey rsa:2048 -nodes`). Export it with its key
    as `.p12` with a password, then `base64 -i distribution.p12 | gh secret set
    APPLE_DISTRIBUTION_CERTIFICATE_P12` and `gh secret set APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD`.
    Keep the `.p12` in the password manager only.
-3. **Profiles**: *Profiles → +* → *App Store Connect*, one for each of the three App IDs, with that
+3. **Profiles**: *Profiles → +* → *App Store Connect*, one for each of the four App IDs, with that
    certificate. Exactly one active App Store profile per bundle ID: the workflow takes the profile's
    name from the portal and stops if there are several.
 4. **App record**: App Store Connect → *Apps → +* → *New App*, platform iOS, bundle ID
@@ -504,12 +504,13 @@ Set up once (developer portal and App Store Connect, by an Account Holder or Adm
    change the answers.
 
 Renewal: the distribution certificate expires after a year. Make a new one (step 2), regenerate the
-three profiles with it (step 3), replace the two certificate secrets, then revoke the old one.
+four profiles with it (step 3), replace the two certificate secrets, then revoke the old one.
 
 Checked locally on a Mac with the certificate and profiles installed:
 `scripts/build-xcframework.sh --device-only`, then `APPLE_TEAM_ID=… TC_PROFILE_APP=…
-TC_PROFILE_NOTIFICATIONS=… TC_PROFILE_SHARE=… scripts/archive-testflight.sh --no-upload` exports
-the `.ipa` to `apps/ios/build/export` without uploading.
+TC_PROFILE_NOTIFICATIONS=… TC_PROFILE_SHARE=… TC_PROFILE_WIDGET=…
+scripts/archive-testflight.sh --no-upload` exports the `.ipa` to `apps/ios/build/export` without
+uploading.
 
 ## Debug symbols
 
