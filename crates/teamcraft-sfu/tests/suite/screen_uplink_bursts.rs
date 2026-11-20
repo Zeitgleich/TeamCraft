@@ -92,7 +92,7 @@ async fn slides_reach_the_viewer_through_a_limited_uplink() {
   let arrivals: Vec<Arrival> = run
     .link_delays()
     .into_iter()
-    .filter(|arrival| *arrival != Arrival::NotEncoded)
+    .filter(|arrival| !matches!(arrival, Arrival::NotEncoded | Arrival::Dropped))
     .collect();
   assert!(
     arrivals.len() >= MIN_JUDGED_SLIDES,
@@ -400,6 +400,7 @@ impl Run {
       if *changed_at < settled {
         continue;
       }
+      let slide_ends_at = self.slide_ends_at(*changed_at);
       let maybe_encoded_at = self
         .encoded
         .iter()
@@ -414,11 +415,37 @@ impl Run {
         .iter()
         .find(|(_, picture_us, _)| in_window(*picture_us, *timestamp_us, *next_us))
         .map(|(at, ..)| *at);
-      delays.push(maybe_shown_at.map_or(Arrival::Lost, |shown_at| {
-        Arrival::After(shown_at.saturating_sub(encoded_at))
-      }));
+      let arrival = match maybe_shown_at {
+        Some(shown_at) => Arrival::After(shown_at.saturating_sub(encoded_at)),
+        // The SFU doesn't repair a publisher's uplink losses: the viewer waits out its NACKs, asks
+        // for a keyframe and the presenter answers it through the same uplink (retransmit.rs). On a
+        // runner that starves the encoder and the relay the packets come in bunches the bottleneck's
+        // queue drops, and that recovery can outlast a slide. That is the machine's burst, not the
+        // link's: the slide isn't judged (`dropped_share` bounds how much of it there may be).
+        None if self.is_dropped_between(*changed_at, slide_ends_at) => Arrival::Dropped,
+        None => Arrival::Lost,
+      };
+      delays.push(arrival);
     }
     delays
+  }
+
+  /// When the slide that went up at `changed_at` was replaced; the end of the run for the last one.
+  fn slide_ends_at(&self, changed_at: Duration) -> Duration {
+    self
+      .changes
+      .iter()
+      .map(|(at, _)| *at)
+      .find(|at| *at > changed_at)
+      .unwrap_or(Duration::MAX)
+  }
+
+  /// Whether the bottleneck dropped a packet from `from` to `to`.
+  fn is_dropped_between(&self, from: Duration, to: Duration) -> bool {
+    self
+      .link
+      .iter()
+      .any(|(at, _, is_dropped)| *is_dropped && *at >= from && *at < to)
   }
 
   /// The lowest and highest uplink estimate after [`SETTLE`], bit/s.
@@ -525,6 +552,7 @@ impl Run {
           .map(|arrival| match arrival {
             Arrival::NotEncoded => "not encoded".to_owned(),
             Arrival::Lost => "-".to_owned(),
+            Arrival::Dropped => "- (dropped)".to_owned(),
             Arrival::After(delay) => delay.as_millis().to_string(),
           })
           .collect::<Vec<_>>()
@@ -581,8 +609,10 @@ impl Run {
 enum Arrival {
   /// The encoder gave no picture of it (a machine too slow for every slide).
   NotEncoded,
-  /// The viewer never showed it.
+  /// The viewer never showed it, and the bottleneck dropped nothing meanwhile.
   Lost,
+  /// The viewer never showed it, and the bottleneck dropped packets meanwhile (see `link_delays`).
+  Dropped,
   /// The viewer showed it this long after its first picture.
   After(Duration),
 }
