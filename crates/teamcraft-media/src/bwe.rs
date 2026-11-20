@@ -74,6 +74,29 @@ const SEND_HISTORY: Duration = Duration::from_secs(5);
 const DELAY_DECREASE_INTERVAL: Duration = Duration::from_millis(200);
 /// Window over which the loss ratio is measured.
 const LOSS_WINDOW: Duration = Duration::from_secs(1);
+/// The fewest datagrams the loss window has to report before its loss counts (#2192). A still
+/// shared screen and its voice send about 60 a second, a cut answers the loss sent before it, and
+/// the first feedback after a cut reports a handful: one burst of hotel Wi-Fi in a few
+/// datagrams read as 10 % loss and more, and cut again.
+const MIN_LOSS_SAMPLE: usize = 30;
+/// The deepest one cut for loss takes an application-limited sender's estimate while the path
+/// queues nothing (#2192).
+const APP_LIMITED_LOSS_CUT: f64 = 0.5;
+/// A queue this long over the path's fastest lately is one the sender built: its estimate is
+/// above what the path carries (the pacer sends at the estimate). Wi-Fi's delay moves by tens of
+/// milliseconds without any (20–60 ms on #2189's hotel link), and holds packets for up to
+/// 100 ms (#1719).
+const LOSS_QUEUE_BOUND: Duration = Duration::from_millis(150);
+/// The fastest one-way delay within this long is the path's own.
+const QUEUE_BASELINE_WINDOW: Duration = Duration::from_secs(10);
+/// Between this much loss above the link's own ([`SendSideEstimator::inherent_loss`]) and 10 %,
+/// the estimate holds (GCC: 2 %).
+const LOSS_HOLD_ABOVE_INHERENT: f64 = 0.02;
+/// The time constant over which the link's own loss is learned: longer than a congestion episode
+/// (a cut answers it within a second), short enough to follow Wi-Fi that got worse.
+const INHERENT_LOSS_WINDOW: Duration = Duration::from_secs(10);
+/// The most loss taken as the link's own: a link losing more than that steadily is congested.
+const MAX_INHERENT_LOSS: f64 = 0.05;
 /// The least time between two cuts for loss. A cut counts only the loss of what was sent after the
 /// one before, so the next one answers loss the first didn't stop: a link that lost its room
 /// (a mobile cell, #1792) is cut to it in two steps within a second. The first comes about
@@ -182,6 +205,15 @@ pub struct SendSideEstimator {
   /// (feedback time, lost, reported) of the last [`LOSS_WINDOW`].
   loss_history: VecDeque<(Instant, usize, usize)>,
   last_loss_ratio: f64,
+  /// The loss the link has whatever is sent (#2192): hotel or train Wi-Fi loses 1–3 % in bursts,
+  /// so the share of a second's feedback lost was 2 % or more about half the time, and GCC's hold
+  /// at 2 % kept the estimate from growing back after any cut: a still screen took 20 s and more
+  /// to reach its demand again. Learned over [`INHERENT_LOSS_WINDOW`], at most
+  /// [`MAX_INHERENT_LOSS`]; the hold starts [`LOSS_HOLD_ABOVE_INHERENT`] above it.
+  inherent_loss: f64,
+  /// (feedback time, least, most one-way delay in ms) of the arrivals each feedback reported
+  /// within [`QUEUE_BASELINE_WINDOW`]: how long the path queues ([`LOSS_QUEUE_BOUND`]).
+  delay_spans: VecDeque<(Instant, f64, f64)>,
   /// The same of every datagram but probes, also those sent before a cut: what
   /// [`SendSideEstimator::loss_ratio`] reports (the audio's forward error correction follows it).
   /// Cleared at every cut, as the estimate's own, it read 0 on a link that lost a fifth.
@@ -306,6 +338,8 @@ impl SendSideEstimator {
       maybe_loss_counts_from: None,
       loss_history: VecDeque::new(),
       last_loss_ratio: 0.0,
+      inherent_loss: 0.0,
+      delay_spans: VecDeque::new(),
       seen_loss_history: VecDeque::new(),
       maybe_demand_bps: None,
       is_holding_after_decrease: false,
@@ -370,6 +404,7 @@ impl SendSideEstimator {
     let mut reported = 0usize;
     let mut seen_lost = 0usize;
     let mut seen_reported = 0usize;
+    let mut maybe_delay_span: Option<(f64, f64)> = None;
     for (offset, maybe_arrival_us) in feedback.arrivals_us.iter().enumerate() {
       let Some(sent) = self.sent.remove(&(base + offset as u64)) else {
         continue;
@@ -387,6 +422,10 @@ impl SendSideEstimator {
           let arrival = receiver_epoch + Duration::from_micros(*arrival_us);
           if !sent.is_probe {
             self.delay.on_packet(sent.at, arrival, now);
+            let delay_ms = signed_ms(arrival, sent.at);
+            maybe_delay_span = Some(maybe_delay_span.map_or((delay_ms, delay_ms), |(least, most)| {
+              (least.min(delay_ms), most.max(delay_ms))
+            }));
           }
           self.acked.push_back((arrival, sent.bytes));
         },
@@ -399,6 +438,12 @@ impl SendSideEstimator {
     if seen_reported > 0 {
       self.seen_loss_history.push_back((now, seen_lost, seen_reported));
     }
+    if let Some((least, most)) = maybe_delay_span {
+      self.delay_spans.push_back((now, least, most));
+    }
+    self
+      .delay_spans
+      .retain(|(at, ..)| now.saturating_duration_since(*at) <= QUEUE_BASELINE_WINDOW);
     self
       .seen_loss_history
       .retain(|(at, _, _)| now.saturating_duration_since(*at) <= LOSS_WINDOW);
@@ -411,9 +456,15 @@ impl SendSideEstimator {
       .fold((0, 0), |(lost_sum, reported_sum), (_, lost, reported)| {
         (lost_sum + lost, reported_sum + reported)
       });
-    if reported_total > 0 {
-      self.last_loss_ratio = lost_total as f64 / reported_total as f64;
+    if seen_reported > 0 {
+      self.learn_inherent_loss(now);
     }
+    // Too few to tell: no loss rather than the share of a handful.
+    self.last_loss_ratio = if reported_total >= MIN_LOSS_SAMPLE {
+      lost_total as f64 / reported_total as f64
+    } else {
+      0.0
+    };
     self.update_rate(now);
     self.estimate_bps()
   }
@@ -470,6 +521,7 @@ impl SendSideEstimator {
     self.loss_history.clear();
     self.last_loss_ratio = 0.0;
     self.seen_loss_history.clear();
+    self.delay_spans.clear();
     self.maybe_last_update_at = None;
     self.maybe_last_decrease_at = None;
     self.maybe_last_delivered_cut_at = None;
@@ -629,7 +681,8 @@ impl SendSideEstimator {
     // half-size layer (screen_sharpness, flaky on CI before #939).
     let is_congested_by_delay =
       is_overusing && ((!is_app_limited && !self.is_starting) || is_overuse_lasting);
-    if is_congested_by_delay || self.last_loss_ratio >= 0.02 {
+    let is_loss_holding = self.last_loss_ratio >= self.inherent_loss + LOSS_HOLD_ABOVE_INHERENT;
+    if is_congested_by_delay || is_loss_holding {
       self.is_starting = false;
       self.note_congestion(now, acked_bps);
     }
@@ -666,7 +719,7 @@ impl SendSideEstimator {
       BandwidthUsage::Underusing => {},
       BandwidthUsage::Normal => {
         self.is_holding_after_decrease = false;
-        if self.last_loss_ratio < 0.02 {
+        if !is_loss_holding {
           let increase = if self.is_starting {
             self.config.start_increase_per_second
           } else if is_recovering {
@@ -694,8 +747,18 @@ impl SendSideEstimator {
       .is_none_or(|last| now.saturating_duration_since(last) >= LOSS_CUT_INTERVAL);
     if self.last_loss_ratio > 0.10 && acked_bps > 0.0 && may_cut_for_loss {
       // Based on what got through, not on the previous estimate, so repeated reports of the same
-      // loss episode don't compound. Loss is damage also to an application-limited sender.
-      let loss_based = self.recent_acked_bps(acked_bps) * (1.0 - 0.5 * self.last_loss_ratio);
+      // loss episode don't compound. Loss is damage also to an application-limited sender, but
+      // what got through of it is its own rate, not the path's: a burst of hotel Wi-Fi cut a
+      // still screen's 3.5 Mbit/s to the 190 kbit/s it sent, and its next slide was paced out
+      // over more than a second (#2192). Its cut starts from the estimate, as GCC's does. (Its
+      // own bursts queue, so a queue tells nothing here.) A link that lost its room loses on:
+      // cut again 400 ms later, and once the sender fills the estimate, to what got through.
+      let delivered_based = self.recent_acked_bps(acked_bps) * (1.0 - 0.5 * self.last_loss_ratio);
+      let loss_based = if is_app_limited && self.queue_delay(now) < LOSS_QUEUE_BOUND {
+        delivered_based.max((1.0 - self.last_loss_ratio).max(APP_LIMITED_LOSS_CUT) * self.estimate_bps)
+      } else {
+        delivered_based
+      };
       self.estimate_bps = self.estimate_bps.min(loss_based);
       self.maybe_last_decrease_at = Some(now);
       self.note_cut_to_delivered(now);
@@ -703,6 +766,37 @@ impl SendSideEstimator {
     self.estimate_bps = self
       .estimate_bps
       .clamp(f64::from(self.config.min_bps), self.ceiling_bps());
+  }
+
+  /// How much later than the fastest within [`QUEUE_BASELINE_WINDOW`] the slowest datagram of
+  /// the last [`LOSS_WINDOW`] arrived.
+  fn queue_delay(&self, now: Instant) -> Duration {
+    let Some(fastest_ms) = self
+      .delay_spans
+      .iter()
+      .map(|(_, least, _)| *least)
+      .reduce(f64::min)
+    else {
+      return Duration::ZERO;
+    };
+    let slowest_ms = self
+      .delay_spans
+      .iter()
+      .filter(|(at, ..)| now.saturating_duration_since(*at) <= LOSS_WINDOW)
+      .map(|(_, _, most)| *most)
+      .fold(fastest_ms, f64::max);
+    Duration::from_secs_f64((slowest_ms - fastest_ms).max(0.0) / 1000.0)
+  }
+
+  /// Moves the link's own loss towards the share lost over the last [`LOSS_WINDOW`], by the time
+  /// since the last feedback.
+  fn learn_inherent_loss(&mut self, now: Instant) {
+    let elapsed = self
+      .maybe_last_update_at
+      .map_or(Duration::ZERO, |last| now.saturating_duration_since(last));
+    let weight = (elapsed.as_secs_f64() / INHERENT_LOSS_WINDOW.as_secs_f64()).min(1.0);
+    let seen = self.loss_ratio().min(MAX_INHERENT_LOSS);
+    self.inherent_loss += (seen - self.inherent_loss) * weight;
   }
 
   /// The most the estimate may be: [`BweConfig::max_bps`], or the declared demand up to
@@ -1312,6 +1406,34 @@ mod tests {
       assert!(most_loss > 0.15, "{most_loss}");
     }
 
+    /// #2192: right after a cut, the loss counts afresh, and the first feedback reports a handful
+    /// of datagrams: one lost of them is no loss rate yet.
+    #[test]
+    fn a_handful_of_datagrams_is_no_loss_rate() {
+      let epoch = Instant::now();
+      let mut estimator = SendSideEstimator::new(BweConfig::default());
+      for index in 0..(MIN_LOSS_SAMPLE as u64 - 1) {
+        estimator.on_send(PACKET_BYTES, epoch + Duration::from_millis(20 * index));
+      }
+      let mut arrivals_us: Vec<Option<u64>> = (0..(MIN_LOSS_SAMPLE as u64 - 1))
+        .map(|index| Some(20_000 * index + 30_000))
+        .collect();
+      // A burst: three of them lost.
+      for lost in &mut arrivals_us[10..13] {
+        *lost = None;
+      }
+      let estimate = estimator.on_feedback(
+        &TransportFeedback {
+          base_seq: 0,
+          arrivals_us,
+        },
+        epoch + Duration::from_millis(700),
+        epoch,
+      );
+      assert!(estimate >= BweConfig::default().start_bps, "{estimate}");
+      assert!(estimator.is_starting, "no loss rate yet: still the fast start");
+    }
+
     /// Issue #935: about to send far more (a camera in a call that sent only sound), the estimate
     /// starts from the start value again, and the loss seen so far no longer counts.
     #[test]
@@ -1587,6 +1709,103 @@ mod tests {
     }
   }
 
+  /// #2192: a still screen share on hotel or train Wi-Fi (1–3 % loss in bursts, 20–60 ms one way,
+  /// both walking), five seeds.
+  mod still_screen {
+    use super::*;
+
+    const CAPACITY_BPS: u64 = 5_000_000;
+    /// What the share declares: its sharp layer and the voice.
+    const DEMAND_BPS: u32 = 3_500_000;
+    /// A slide change: tens of kilobytes at once.
+    const SLIDE_BYTES: usize = 60_000;
+    const SEEDS: [u64; 5] = [1, 2, 3, 4, 5];
+
+    /// A burst of loss in a still screen's sparse second cut its estimate to what it sent
+    /// (3.5 Mbit/s to 36–95 kbit/s here), and slides waited in the pacer for tens of seconds.
+    #[test]
+    fn keeps_its_estimate_through_bursts_of_loss() {
+      for seed in SEEDS {
+        let mut sim = sharing(seed);
+        sim.run(Duration::from_secs(5));
+        let mut lowest = u32::MAX;
+        let mut sum = 0u64;
+        for _ in 0..600 {
+          sim.run(Duration::from_millis(100));
+          let estimate = sim.estimator.estimate_bps();
+          lowest = lowest.min(estimate);
+          sum += u64::from(estimate);
+        }
+        let mean = sum / 600;
+        let drains = &sim.screen.drain_times;
+        let slowest = drains.iter().max().copied().unwrap_or_default();
+        assert!(lowest >= 1_500_000, "seed {seed}: estimate fell to {lowest}");
+        assert!(mean >= 3_000_000, "seed {seed}: mean estimate {mean}");
+        assert_eq!(drains.len(), 40, "seed {seed}: slides paced out");
+        assert!(
+          slowest <= Duration::from_millis(300),
+          "seed {seed}: a slide took {slowest:?}"
+        );
+      }
+    }
+
+    /// The same link drops to 500 kbit/s: the slides overflow its queue, and the estimate follows
+    /// within a second or two (cut to what got through: the loss came with a queue).
+    #[test]
+    fn follows_a_drop_within_seconds() {
+      for seed in SEEDS {
+        let mut sim = sharing(seed);
+        sim.run(Duration::from_secs(20));
+        sim.link.capacity_bps = 500_000;
+        let mut maybe_down_after = None;
+        for tenth in 1..=50u32 {
+          sim.run(Duration::from_millis(100));
+          if maybe_down_after.is_none() && sim.estimator.estimate_bps() <= 650_000 {
+            maybe_down_after = Some(Duration::from_millis(100) * tenth);
+          }
+        }
+        let down_after = maybe_down_after.unwrap_or(Duration::MAX);
+        assert!(
+          down_after <= Duration::from_secs(2),
+          "seed {seed}: down after {down_after:?}"
+        );
+      }
+    }
+
+    /// A sender that fills its estimate (a camera paced at it) on the same link: it stays near the
+    /// capacity, and the link's own loss doesn't let it build a standing queue.
+    #[test]
+    fn a_full_sender_stays_near_the_capacity() {
+      for seed in SEEDS {
+        let mut sim = Simulation::new(Link::bursty(3_000_000, seed));
+        sim.run(Duration::from_secs(10));
+        let mut sum = 0u64;
+        let mut worst_queue = Duration::ZERO;
+        for _ in 0..300 {
+          sim.run(Duration::from_millis(100));
+          sum += u64::from(sim.estimator.estimate_bps());
+          worst_queue = worst_queue.max(sim.link.queue_delay(sim.now));
+        }
+        let mean = sum / 300;
+        assert!(
+          (1_800_000..=3_300_000).contains(&mean),
+          "seed {seed}: mean estimate {mean}"
+        );
+        assert!(
+          worst_queue < Duration::from_millis(400),
+          "seed {seed}: queue {worst_queue:?}"
+        );
+      }
+    }
+
+    fn sharing(seed: u64) -> Simulation {
+      let link = Link::bursty(CAPACITY_BPS, seed);
+      let mut sim = Simulation::sharing(link, SLIDE_BYTES, Duration::from_secs(5));
+      sim.estimator.set_demand_bps(Some(DEMAND_BPS));
+      sim
+    }
+  }
+
   mod recorder {
     use super::*;
 
@@ -1666,6 +1885,66 @@ mod tests {
     /// Random extra delay up to this; arrivals stay in order.
     jitter: Duration,
     maybe_last_arrival: Option<Instant>,
+    /// Loss in bursts and a delay that walk, instead of `loss_permille` and `base_delay`.
+    maybe_bursty: Option<BurstyLoss>,
+  }
+
+  /// Hotel or train Wi-Fi (#2189's relay `Impairment`): every [`BurstyLoss::STEP`] the average
+  /// loss walks within `loss_percent` and the one-way delay within `delay_ms`, by up to a quarter
+  /// of each range. Losses come in bursts (Gilbert–Elliott: a bad state of
+  /// [`BurstyLoss::BURST_PACKETS`] packets on average that loses [`BurstyLoss::BURST_LOSS`] of
+  /// them). Seeded.
+  struct BurstyLoss {
+    loss_percent: (f64, f64),
+    delay_ms: (f64, f64),
+    rng: XorShift,
+    maybe_stepped_at: Option<Instant>,
+    loss: f64,
+    is_bad: bool,
+  }
+
+  impl BurstyLoss {
+    const STEP: Duration = Duration::from_millis(500);
+    const BURST_LOSS: f64 = 0.5;
+    const BURST_PACKETS: f64 = 4.0;
+
+    fn new(seed: u64, loss_percent: (f64, f64), delay_ms: (f64, f64)) -> Self {
+      let mut rng = XorShift(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+      let loss = (loss_percent.0 + rng.uniform() * (loss_percent.1 - loss_percent.0)) / 100.0;
+      Self {
+        loss_percent,
+        delay_ms,
+        rng,
+        maybe_stepped_at: None,
+        loss,
+        is_bad: false,
+      }
+    }
+
+    /// Whether a packet sent at `now` is lost; walks the loss and `delay` on.
+    fn is_lost(&mut self, now: Instant, delay: &mut Duration) -> bool {
+      let stepped_at = *self.maybe_stepped_at.get_or_insert(now);
+      if now.saturating_duration_since(stepped_at) >= Self::STEP {
+        self.maybe_stepped_at = Some(now);
+        let (low, high) = self.loss_percent;
+        let loss_step = (self.rng.uniform() - 0.5) / 2.0 * (high - low) / 100.0;
+        self.loss = (self.loss + loss_step).clamp(low / 100.0, high / 100.0);
+        let (shortest, longest) = self.delay_ms;
+        let delay_step = (self.rng.uniform() - 0.5) / 2.0 * (longest - shortest);
+        let delay_ms = (delay.as_secs_f64() * 1000.0 + delay_step).clamp(shortest, longest);
+        *delay = Duration::from_secs_f64(delay_ms / 1000.0);
+      }
+      let bad_share = (self.loss / Self::BURST_LOSS).min(0.9);
+      let leave_bad = 1.0 / Self::BURST_PACKETS;
+      let enter_bad = bad_share * leave_bad / (1.0 - bad_share);
+      let roll = self.rng.uniform();
+      self.is_bad = if self.is_bad {
+        roll >= leave_bad
+      } else {
+        roll < enter_bad
+      };
+      self.is_bad && self.rng.uniform() < Self::BURST_LOSS
+    }
   }
 
   /// A link that holds its packets for `length` every `every` from `since` (Wi-Fi).
@@ -1701,11 +1980,24 @@ mod tests {
         maybe_hold: None,
         jitter: Duration::ZERO,
         maybe_last_arrival: None,
+        maybe_bursty: None,
       }
+    }
+
+    /// A link of `capacity_bps` with [`BurstyLoss`] of `seed`: 1–3 % loss, 20–60 ms one way.
+    fn bursty(capacity_bps: u64, seed: u64) -> Self {
+      let mut link = Self::new(capacity_bps, 40, 0);
+      link.maybe_bursty = Some(BurstyLoss::new(seed, (1.0, 3.0), (20.0, 60.0)));
+      link
     }
 
     /// Arrival time at the receiver, or `None` if the packet was dropped.
     fn send(&mut self, bytes: usize, now: Instant) -> Option<Instant> {
+      if let Some(bursty) = self.maybe_bursty.as_mut()
+        && bursty.is_lost(now, &mut self.base_delay)
+      {
+        return None;
+      }
       if self.rng.next() % 1000 < u64::from(self.loss_permille) {
         return None;
       }
@@ -1752,6 +2044,26 @@ mod tests {
     maybe_measurement: Option<LinkMeasurement>,
     /// The highest estimate so far.
     max_estimate_bps: u32,
+    /// The still screen's state, while [`Sending::StillScreen`].
+    screen: StillScreen,
+  }
+
+  /// A still shared screen with a voice next to it (#2192): voice every 20 ms, a tiny frame five
+  /// times a second, a refresh every second, and a slide change of `slide_bytes` after 1 s and
+  /// 2 s in turn, paced out at the estimate.
+  struct StillScreen {
+    slide_bytes: usize,
+    next_audio_at: Instant,
+    next_idle_at: Instant,
+    next_refresh_at: Instant,
+    next_change_at: Instant,
+    is_short_slide_next: bool,
+    queued_bytes: usize,
+    budget_bytes: f64,
+    /// When the slide being paced out changed.
+    maybe_change_at: Option<Instant>,
+    /// How long each slide took to be paced out.
+    drain_times: Vec<Duration>,
   }
 
   /// What the simulated sender sends.
@@ -1767,6 +2079,8 @@ mod tests {
       per_second: u32,
       keyframe_every: u32,
     },
+    /// A still shared screen ([`StillScreen`]).
+    StillScreen,
   }
 
   impl Simulation {
@@ -1786,7 +2100,28 @@ mod tests {
         maybe_probe: None,
         maybe_measurement: None,
         max_estimate_bps: 0,
+        screen: StillScreen {
+          slide_bytes: 0,
+          next_audio_at: now,
+          next_idle_at: now,
+          next_refresh_at: now,
+          next_change_at: now,
+          is_short_slide_next: true,
+          queued_bytes: 0,
+          budget_bytes: 0.0,
+          maybe_change_at: None,
+          drain_times: Vec::new(),
+        },
       }
+    }
+
+    /// The same, sending a still screen whose slides are `slide_bytes`, from `from` on.
+    fn sharing(link: Link, slide_bytes: usize, from: Duration) -> Self {
+      let mut sim = Self::new(link);
+      sim.sending = Sending::StillScreen;
+      sim.screen.slide_bytes = slide_bytes;
+      sim.screen.next_change_at = sim.now + from;
+      sim
     }
 
     /// The same, probing the link at the start.
@@ -1842,6 +2177,10 @@ mod tests {
         self.send_frame(bps, per_second, keyframe_every);
         return;
       }
+      if matches!(self.sending, Sending::StillScreen) {
+        self.send_still_screen();
+        return;
+      }
       self.budget_bytes += f64::from(self.sending_bps()) / 8.0 * TICK.as_secs_f64();
       while self.budget_bytes >= PACKET_BYTES as f64 {
         self.budget_bytes -= PACKET_BYTES as f64;
@@ -1874,11 +2213,68 @@ mod tests {
       }
     }
 
+    fn send_still_screen(&mut self) {
+      const AUDIO_BYTES: usize = 120;
+      const IDLE_BYTES: usize = 300;
+      const REFRESH_PACKETS: usize = 3;
+      let now = self.now;
+      if now >= self.screen.next_audio_at {
+        self.screen.next_audio_at += Duration::from_millis(20);
+        self.transmit(AUDIO_BYTES);
+      }
+      if now >= self.screen.next_idle_at {
+        self.screen.next_idle_at += Duration::from_millis(200);
+        self.transmit(IDLE_BYTES);
+      }
+      if now >= self.screen.next_refresh_at {
+        self.screen.next_refresh_at += Duration::from_secs(1);
+        for _ in 0..REFRESH_PACKETS {
+          self.transmit(PACKET_BYTES);
+        }
+      }
+      if now >= self.screen.next_change_at {
+        let shown_for = if self.screen.is_short_slide_next { 1 } else { 2 };
+        self.screen.is_short_slide_next = !self.screen.is_short_slide_next;
+        self.screen.next_change_at += Duration::from_secs(shown_for);
+        self.screen.queued_bytes += self.screen.slide_bytes;
+        self.screen.maybe_change_at.get_or_insert(now);
+      }
+      if self.screen.queued_bytes == 0 {
+        self.screen.budget_bytes = 0.0;
+        return;
+      }
+      // The pacer sends a slide at the estimate.
+      self.screen.budget_bytes += f64::from(self.estimator.estimate_bps()) / 8.0 * TICK.as_secs_f64();
+      while self.screen.budget_bytes >= PACKET_BYTES as f64 && self.screen.queued_bytes > 0 {
+        self.screen.budget_bytes -= PACKET_BYTES as f64;
+        let bytes = self.screen.queued_bytes.min(PACKET_BYTES);
+        self.screen.queued_bytes -= bytes;
+        self.transmit(bytes);
+      }
+      if self.screen.queued_bytes == 0
+        && let Some(change_at) = self.screen.maybe_change_at.take()
+      {
+        self
+          .screen
+          .drain_times
+          .push(now.saturating_duration_since(change_at) + TICK);
+      }
+    }
+
+    /// Numbers and sends one datagram of `bytes` now.
+    fn transmit(&mut self, bytes: usize) {
+      let seq = self.estimator.on_send(bytes, self.now);
+      if let Some(arrival) = self.link.send(bytes, self.now) {
+        self.in_flight.push_back((arrival, seq));
+      }
+    }
+
     fn sending_bps(&self) -> u32 {
       match self.sending {
         Sending::Estimate => self.estimator.estimate_bps(),
         Sending::Fixed(bps) => bps,
         Sending::Frames { bps, .. } => bps,
+        Sending::StillScreen => 0,
       }
     }
 
@@ -1933,6 +2329,11 @@ mod tests {
       self.0 ^= self.0 >> 7;
       self.0 ^= self.0 << 17;
       self.0
+    }
+
+    /// Uniform in `[0, 1)`.
+    fn uniform(&mut self) -> f64 {
+      (self.next() >> 11) as f64 / (1u64 << 53) as f64
     }
   }
 }
