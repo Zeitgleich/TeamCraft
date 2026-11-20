@@ -129,6 +129,8 @@ data class Reaction(
   val emoji: String,
   val count: Int,
   @SerialName("reacted_by_me") val reactedByMe: Boolean = false,
+  /** Who reacted: the viewer first, then oldest first, capped by the core; `count` is the total. */
+  val reactors: List<String> = emptyList(),
   /** A workspace emoji's picture, when the reaction named one (issue #207). */
   @SerialName("custom") val maybeCustom: CustomEmojiRef? = null,
 )

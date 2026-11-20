@@ -27,9 +27,9 @@ use teamcraft_client_api::model::{
   Bookmark, BookmarkKind, CallTile, CallTileState, Conversation, ConversationId, ConversationKind,
   CustomStatus, DeviceSetup, GapEdge, HistoryGap, ImportedAuthorView, ImportedFrom, ImportedMark,
   InviteMailState, JoinableSpace, MembershipIssue, MentionableGroup, Message, MessageKind, OlderHistory,
-  PENDING_ID_BIT, PendingInvite, Placeholder, PresenceStatus, Reaction, SidebarCategory, Space, SpaceId,
-  SpaceMember, SpaceRoster, SystemEvent, ThreadId, ThreadSummary, TimestampMs, TypingNow, UnseenReactions,
-  User, UserId, hue_from_hex, pending_message_id,
+  PENDING_ID_BIT, PendingInvite, Placeholder, PresenceStatus, REACTORS_LIMIT, Reaction, SidebarCategory,
+  Space, SpaceId, SpaceMember, SpaceRoster, SystemEvent, ThreadId, ThreadSummary, TimestampMs, TypingNow,
+  UnseenReactions, User, UserId, hue_from_hex, pending_message_id,
 };
 use teamcraft_proto::synced_settings::{SettingWrite, SyncedSettings};
 use teamcraft_proto::{
@@ -4783,10 +4783,11 @@ fn reactions_of<'a>(
   messages: impl IntoIterator<Item = &'a StoredMessage>,
   me: UserId,
 ) -> Vec<Reaction> {
-  let mut latest: HashMap<(UserId, String), bool> = HashMap::new();
+  // The latest state per (user, emoji) with its position, so the reactors come out in time order.
+  let mut latest: HashMap<(UserId, String), (bool, usize)> = HashMap::new();
   // A custom emoji's picture, from the first reaction that names one for its `:shortcode:`.
   let mut pictures: HashMap<String, teamcraft_proto::CustomEmojiRef> = HashMap::new();
-  for message in messages {
+  for (position, message) in messages.into_iter().enumerate() {
     if let MessageContent::Reaction {
       target: reacted,
       emoji,
@@ -4795,7 +4796,7 @@ fn reactions_of<'a>(
     } = &message.content
       && *reacted == target
     {
-      latest.insert((message.sender_user_id, emoji.clone()), *is_added);
+      latest.insert((message.sender_user_id, emoji.clone()), (*is_added, position));
       if let Some(custom) = maybe_custom
         && custom.text() == *emoji
       {
@@ -4803,22 +4804,44 @@ fn reactions_of<'a>(
       }
     }
   }
+  let mut added: Vec<(usize, UserId, String)> = latest
+    .into_iter()
+    .filter(|(_, (is_added, _))| *is_added)
+    .map(|((user, emoji), (_, position))| (position, user, emoji))
+    .collect();
+  added.sort_unstable();
   let mut by_emoji: BTreeMap<String, Reaction> = BTreeMap::new();
-  for ((user, emoji), is_added) in latest {
-    if !is_added {
-      continue;
-    }
+  for (_, user, emoji) in added {
     let maybe_custom = pictures.get(&emoji).cloned();
     let entry = by_emoji.entry(emoji.clone()).or_insert(Reaction {
       emoji,
       count: 0,
       reacted_by_me: false,
+      reactors: Vec::new(),
       maybe_custom,
     });
     entry.count += 1;
     entry.reacted_by_me |= user == me;
+    if entry.reactors.len() < REACTORS_LIMIT {
+      entry.reactors.push(user);
+    } else if user == me {
+      // The viewer always shows, also past the cap; the oldest of the others makes room.
+      entry.reactors.pop();
+      entry.reactors.push(user);
+    }
   }
-  by_emoji.into_values().collect()
+  let mut reactions: Vec<Reaction> = by_emoji.into_values().collect();
+  for reaction in &mut reactions {
+    viewer_first(&mut reaction.reactors, me);
+  }
+  reactions
+}
+
+/// Moves the viewer to the front of `reactors`, keeping the order of the rest.
+fn viewer_first(reactors: &mut [UserId], me: UserId) {
+  if let Some(index) = reactors.iter().position(|user| *user == me) {
+    reactors[..=index].rotate_right(1);
+  }
 }
 
 /// The custom emoji a text message names (issue #207); those of its `:shortcode:` words only.
@@ -4863,6 +4886,14 @@ fn with_imported_reactions(
   for imported in &origin.reactions {
     let mine = ImportedAuthor::User { user_id: me };
     let has_mine = imported.authors.contains(&mine);
+    let imported_users: Vec<UserId> = imported
+      .authors
+      .iter()
+      .filter_map(|author| match author {
+        ImportedAuthor::User { user_id } => Some(*user_id),
+        _ => None,
+      })
+      .collect();
     let count = u32::try_from(imported.authors.len()).unwrap_or(u32::MAX);
     match reactions
       .iter_mut()
@@ -4873,11 +4904,23 @@ fn with_imported_reactions(
         let overlap = u32::from(has_mine && live.reacted_by_me);
         live.count = live.count.saturating_add(count).saturating_sub(overlap);
         live.reacted_by_me |= has_mine;
+        for user in imported_users {
+          if live.reactors.len() < REACTORS_LIMIT && !live.reactors.contains(&user) {
+            live.reactors.push(user);
+          }
+        }
+        viewer_first(&mut live.reactors, me);
       },
       None if count > 0 => reactions.push(Reaction {
         emoji: imported.emoji.clone(),
         count,
         reacted_by_me: has_mine,
+        reactors: {
+          let mut users = imported_users;
+          users.truncate(REACTORS_LIMIT);
+          viewer_first(&mut users, me);
+          users
+        },
         maybe_custom: None,
       }),
       None => {},
@@ -5147,6 +5190,81 @@ mod tests {
       teamcraft_client_api::actions::MAX_VIEWER_BYTES,
       crate::MAX_VIEWER_BYTES
     );
+  }
+
+  mod reactors {
+    use super::*;
+
+    const TARGET: [u8; 16] = [1; 16];
+
+    #[test]
+    fn the_viewer_comes_first_then_the_oldest_reaction() {
+      let rows = [
+        react(2, 10, "+1", true),
+        react(1, 11, "+1", true),
+        react(3, 12, "+1", true),
+      ];
+      let reactions = reactions_of(target(), &rows, id(1));
+      assert_eq!(reactions[0].count, 3);
+      assert!(reactions[0].reacted_by_me);
+      assert_eq!(reactions[0].reactors, [id(1), id(2), id(3)]);
+    }
+
+    #[test]
+    fn a_removed_reaction_leaves_the_list_and_a_new_one_goes_last() {
+      let rows = [
+        react(2, 10, "+1", true),
+        react(3, 11, "+1", true),
+        react(2, 12, "+1", false),
+        react(2, 13, "+1", true),
+      ];
+      let reactions = reactions_of(target(), &rows, id(9));
+      assert_eq!(reactions[0].reactors, [id(3), id(2)]);
+      assert!(!reactions[0].reacted_by_me);
+      let rows = [react(2, 10, "+1", true), react(2, 11, "+1", false)];
+      assert!(reactions_of(target(), &rows, id(9)).is_empty());
+    }
+
+    #[test]
+    fn the_list_is_capped_but_the_count_and_the_viewer_stay() {
+      let total = REACTORS_LIMIT as i64 + 5;
+      let rows: Vec<StoredMessage> = (0..total).map(|n| react(100 + n, 10 + n, "+1", true)).collect();
+      let reactions = reactions_of(target(), &rows, id(100 + total - 1));
+      assert_eq!(i64::from(reactions[0].count), total);
+      assert_eq!(reactions[0].reactors.len(), REACTORS_LIMIT);
+      assert_eq!(reactions[0].reactors[0], id(100 + total - 1));
+      assert_eq!(reactions[0].reactors[1], id(100));
+      let others = reactions_of(target(), &rows, id(1));
+      assert_eq!(others[0].reactors.len(), REACTORS_LIMIT);
+      assert!(!others[0].reacted_by_me);
+    }
+
+    #[test]
+    fn each_emoji_has_its_own_people() {
+      let rows = [react(2, 10, "+1", true), react(3, 11, "tada", true)];
+      let reactions = reactions_of(target(), &rows, id(9));
+      let people: Vec<_> = reactions
+        .iter()
+        .map(|reaction| reaction.reactors.clone())
+        .collect();
+      assert_eq!(people, [vec![id(2)], vec![id(3)]]);
+    }
+
+    fn target() -> ClientMessageId {
+      ClientMessageId::from_bytes(TARGET)
+    }
+
+    fn react(user: i64, server_id: i64, emoji: &str, is_added: bool) -> StoredMessage {
+      let mut message = plain(id(10), (server_id % 250) as u8 + 2, server_id, "");
+      message.sender_user_id = id(user);
+      message.content = MessageContent::Reaction {
+        target: target(),
+        emoji: emoji.into(),
+        is_added,
+        maybe_custom: None,
+      };
+      message
+    }
   }
 
   #[test]
@@ -5446,6 +5564,7 @@ mod tests {
         emoji: "+1".into(),
         count: 1,
         reacted_by_me: true,
+        reactors: vec![me],
         maybe_custom: None,
       }]
     );

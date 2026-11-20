@@ -320,7 +320,8 @@ button.mention-link:active { opacity: .7; }
 }
 
 /* Counts for people who may not react (issue #691): readable, not pressable. */
-.reaction:disabled {
+.reaction:disabled,
+.reaction[aria-disabled="true"] {
   cursor: default;
   opacity: 1;
   color: inherit;
@@ -329,6 +330,119 @@ button.mention-link:active { opacity: .7; }
 .reaction-mine {
   background: var(--accent-soft);
   border-color: var(--accent);
+}
+
+/* Who reacted (issue #2176): a tooltip on hover and focus, a popover for the whole list. */
+.reaction-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.reaction.is-pressing {
+  background: var(--accent-soft);
+}
+
+.reaction-tip {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  z-index: 20;
+  display: none;
+  flex-direction: column;
+  gap: 4px;
+  width: max-content;
+  max-width: min(280px, 80vw);
+  /* The padding bridges the gap to the chip, so the pointer can reach the link inside. */
+  margin-bottom: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  font-size: var(--text-xs);
+  line-height: 1.35;
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+  transition-delay: 0ms;
+  pointer-events: none;
+}
+
+.reaction-tip-more {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .reaction-wrap:hover > .reaction-tip,
+  .reaction-wrap:focus-within > .reaction-tip {
+    display: flex;
+    opacity: 1;
+    pointer-events: auto;
+    /* Late enough that a pointer passing by shows nothing. */
+    transition-delay: 350ms;
+  }
+
+  .reaction-wrap.is-open > .reaction-tip {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reaction-tip {
+    transition: none;
+  }
+}
+
+.reaction-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 29;
+}
+
+.reaction-popover {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: max-content;
+  min-width: 160px;
+  max-width: min(320px, 90vw);
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.reaction-popover-title {
+  font-weight: 600;
+  font-size: var(--text-xs);
+}
+
+.reaction-popover-list {
+  max-height: 40vh;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.reaction-popover-list li {
+  padding: 3px 0;
+  overflow-wrap: anywhere;
+}
+
+.reaction-popover-rest {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
 }
 
 .reaction-count {

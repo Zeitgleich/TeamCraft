@@ -360,6 +360,7 @@ mod tests {
           emoji: (*emoji).to_owned(),
           count: *count,
           reacted_by_me: false,
+          reactors: Vec::new(),
           maybe_custom: None,
         })
         .collect(),

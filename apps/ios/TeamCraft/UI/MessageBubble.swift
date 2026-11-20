@@ -706,13 +706,12 @@ struct BelowBubble: View {
     if !message.reactions.isEmpty {
       FlowStack(spacing: 4) {
         ForEach(message.reactions, id: \.emoji) { reaction in
-          ReactionPill(reaction: reaction) {
+          ReactionPill(reaction: reaction, isEnabled: canReact) {
             Task {
               await model.perform(
                 .toggleReaction(conversationId: message.conversationId, messageId: message.id, emoji: reaction.emoji))
             }
           }
-          .disabled(!canReact)
         }
         if let onReact = maybeOnReact, !quickReactions.isEmpty {
           Menu {
@@ -756,13 +755,19 @@ struct BelowBubble: View {
   }
 }
 
-/// One reaction: the emoji and how many, outlined in the accent when the user is among them.
+/// One reaction: the emoji and how many, outlined in the accent when the user is among them. A tap
+/// toggles it; a long press lists who reacted (issue #2176), and VoiceOver hears the names.
 struct ReactionPill: View {
   let reaction: Reaction
+  /// Without the right to react the count stays readable and the long press still lists people.
+  var isEnabled = true
   let action: () -> Void
+  @State private var showsPeople = false
 
   var body: some View {
-    Button(action: action) {
+    Button {
+      if isEnabled { action() }
+    } label: {
       pillLabel
         .font(.app(.caption))
         .padding(.horizontal, 8).padding(.vertical, 4)
@@ -770,7 +775,24 @@ struct ReactionPill: View {
         .overlay(Capsule().stroke(reaction.reactedByMe ? Theme.accent : Theme.border))
     }
     .buttonStyle(.plain)
+    .onLongPressGesture(minimumDuration: 0.4) {
+      UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+      showsPeople = true
+    }
+    .accessibilityLabel(peopleSummary.map { Text(verbatim: $0) } ?? Text(verbatim: "\(reaction.emoji) \(reaction.count)"))
     .accessibilityAddTraits(reaction.reactedByMe ? .isSelected : [])
+    .accessibilityAction(named: Text("reaction_show_people")) { showsPeople = true }
+    .sheet(isPresented: $showsPeople) { ReactionPeopleSheet(reaction: reaction).presentationDetents([.medium, .large]) }
+  }
+
+  /// "Alex, Sam and you" for VoiceOver; nil when no name is known (the count alone then).
+  private var peopleSummary: String? {
+    var names = (reaction.reactedByMe ? [String(localized: "reaction_you")] : []) + reaction.otherNames
+    if names.isEmpty { return nil }
+    if reaction.unnamedCount > 0 { names.append(String(localized: "reaction_more \(reaction.unnamedCount)")) }
+    let list = names.formatted(.list(type: .and))
+    let emoji = reaction.maybeCustom.map { ":\($0.shortcode):" } ?? reaction.emoji
+    return String(localized: "reaction_by \(emoji) \(list)")
   }
 
   /// A workspace emoji's picture (issue #207) or the emoji as text, then how many.
@@ -785,6 +807,28 @@ struct ReactionPill: View {
       .accessibilityLabel(Text(verbatim: ":\(custom.shortcode): \(reaction.count)"))
     } else {
       Text("\(reaction.emoji) \(reaction.count)")
+    }
+  }
+}
+
+/// Everyone behind a reaction, as far as this device knows them: "You" first, the others by name,
+/// and a line for those it can't name.
+struct ReactionPeopleSheet: View {
+  let reaction: Reaction
+
+  var body: some View {
+    NavigationStack {
+      List {
+        if reaction.reactedByMe { Text("reaction_you") }
+        ForEach(Array(reaction.otherNames.enumerated()), id: \.offset) { _, name in
+          Text(verbatim: name)
+        }
+        if reaction.unnamedCount > 0 {
+          Text("reaction_more_line \(reaction.unnamedCount)").foregroundStyle(Theme.textMuted)
+        }
+      }
+      .navigationTitle(Text(verbatim: reaction.maybeCustom.map { ":\($0.shortcode):" } ?? reaction.emoji))
+      .navigationBarTitleDisplayMode(.inline)
     }
   }
 }

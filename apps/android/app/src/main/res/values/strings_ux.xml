@@ -337,4 +337,22 @@
   <string name="profile_call">Call</string>
   <string name="profile_open">Open profile of %1$s</string>
   <string name="copied">Copied</string>
+  <!-- Reactions: who reacted (issue #2176) -->
+  <string name="reaction_you">You</string>
+  <!-- %1$s the emoji, %2$s the people, e.g. "Alex, Sam and you" -->
+  <string name="reaction_description_names">%1$s reaction from %2$s</string>
+  <plurals name="reaction_description_count">
+    <item quantity="one">%1$s reaction, %2$d person</item>
+    <item quantity="other">%1$s reaction, %2$d people</item>
+  </plurals>
+  <!-- One item of the list of people: those this device can\'t name -->
+  <plurals name="reaction_more_people">
+    <item quantity="one">%d other</item>
+    <item quantity="other">%d others</item>
+  </plurals>
+  <plurals name="reaction_more_people_line">
+    <item quantity="one">And %d more person</item>
+    <item quantity="other">And %d more people</item>
+  </plurals>
+  <string name="reaction_show_people">Show who reacted</string>
 </resources>

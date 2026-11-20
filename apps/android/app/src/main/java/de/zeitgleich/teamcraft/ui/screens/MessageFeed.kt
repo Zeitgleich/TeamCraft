@@ -41,6 +41,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
@@ -63,11 +64,13 @@ import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -171,6 +174,7 @@ import de.zeitgleich.teamcraft.ui.Pictures
 import de.zeitgleich.teamcraft.ui.PlacedGap
 import de.zeitgleich.teamcraft.ui.PlayChoice
 import de.zeitgleich.teamcraft.ui.PullRefreshIndicator
+import de.zeitgleich.teamcraft.ui.ReactionPeople
 import de.zeitgleich.teamcraft.ui.ServerHistory
 import de.zeitgleich.teamcraft.ui.SourceAvatar
 import de.zeitgleich.teamcraft.ui.SystemLine
@@ -184,6 +188,7 @@ import de.zeitgleich.teamcraft.ui.bubbleCorners
 import de.zeitgleich.teamcraft.ui.dayShowsYear
 import de.zeitgleich.teamcraft.ui.decideFeedScroll
 import de.zeitgleich.teamcraft.ui.feedItems
+import de.zeitgleich.teamcraft.ui.reactionPeople
 import de.zeitgleich.teamcraft.ui.gapEdge
 import de.zeitgleich.teamcraft.ui.gapToFill
 import de.zeitgleich.teamcraft.ui.isAnimationType
@@ -1245,7 +1250,7 @@ private fun MessageRow(
       }
     }
     Column(Modifier.padding(start = indent).widthIn(max = look.bubbleMax), horizontalAlignment = alignment) {
-      BelowBubble(viewModel, message, maybeExtras, onOpenThread, canReact, maybeOnAddReaction)
+      BelowBubble(viewModel, message, maybeExtras, onOpenThread, canReact, snapshot, maybeOnAddReaction)
     }
   }
 }
@@ -1308,7 +1313,7 @@ private fun ListMessageRow(
           onOpenPermalink = onOpenPermalink,
         )
       }
-      BelowBubble(viewModel, message, maybeExtras, onOpenThread, canReact, maybeOnAddReaction)
+      BelowBubble(viewModel, message, maybeExtras, onOpenThread, canReact, snapshot, maybeOnAddReaction)
     }
   }
 }
@@ -1572,6 +1577,7 @@ private fun BelowBubble(
   maybeExtras: MessageExtras?,
   onOpenThread: ((String) -> Unit)?,
   canReact: Boolean,
+  snapshot: ChatSnapshot?,
   maybeOnAddReaction: (() -> Unit)? = null,
 ) {
   val haptics = LocalHapticFeedback.current
@@ -1583,7 +1589,8 @@ private fun BelowBubble(
       modifier = Modifier.padding(top = 2.dp),
     ) {
       for (reaction in message.reactions) {
-        ReactionPill(reaction.emoji, reaction.maybeCustom, reaction.count, reaction.reactedByMe, isEnabled = canReact) {
+        val people = reactionPeople(reaction) { snapshot?.user(it)?.displayName }
+        ReactionPill(reaction.emoji, reaction.maybeCustom, reaction.count, reaction.reactedByMe, isEnabled = canReact, people = people) {
           haptics.performHapticFeedback(HapticFeedbackType.Confirm)
           viewModel.act(ChatActions.react(message.conversation, message.id, reaction.emoji))
         }
@@ -1632,7 +1639,11 @@ private fun AddReactionPill(onClick: () -> Unit) {
   }
 }
 
-/** One reaction: the emoji and how many, outlined in the accent when the user is among them. */
+/**
+ * One reaction: the emoji and how many, outlined in the accent when the user is among them. A tap
+ * toggles it; a long press lists who reacted (issue #2176). Screen readers hear the names too.
+ */
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
 private fun ReactionPill(
   emoji: String,
@@ -1640,16 +1651,37 @@ private fun ReactionPill(
   count: Int,
   isMine: Boolean,
   isEnabled: Boolean,
+  people: ReactionPeople,
   onClick: () -> Unit,
 ) {
   val scheme = MaterialTheme.colorScheme
   val contentColor = if (isMine) scheme.onPrimaryContainer else scheme.onSurfaceVariant
+  val haptics = LocalHapticFeedback.current
+  var showsPeople by remember { mutableStateOf(false) }
+  val you = stringResource(R.string.reaction_you)
+  val names = listOfNotNull(you.takeIf { people.hasMe }) + people.others
+  val description = if (names.isEmpty()) {
+    pluralStringResource(R.plurals.reaction_description_count, count, emoji, count)
+  } else {
+    stringResource(R.string.reaction_description_names, emoji, android.icu.text.ListFormatter.getInstance().format(names + listOfNotNull(
+      pluralStringResource(R.plurals.reaction_more_people, people.unnamed, people.unnamed).takeIf { people.unnamed > 0 },
+    )))
+  }
   Surface(
-    onClick = onClick,
-    enabled = isEnabled,
     shape = CircleShape,
     color = if (isMine) scheme.primaryContainer else scheme.surfaceContainerHigh,
     border = BorderStroke(1.dp, if (isMine) scheme.primary else scheme.outlineVariant),
+    modifier = Modifier
+      .clip(CircleShape)
+      .combinedClickable(
+        onClick = { if (isEnabled) onClick() },
+        onLongClick = {
+          haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+          showsPeople = true
+        },
+        onLongClickLabel = stringResource(R.string.reaction_show_people),
+      )
+      .semantics { contentDescription = description },
   ) {
     if (maybeCustom == null) {
       Text(
@@ -1673,6 +1705,29 @@ private fun ReactionPill(
           fallback = { Text(name, style = MaterialTheme.typography.labelMedium, color = contentColor) },
         )
         Text(count.toString(), style = MaterialTheme.typography.labelMedium, color = contentColor)
+      }
+    }
+  }
+  if (showsPeople) {
+    ModalBottomSheet(onDismissRequest = { showsPeople = false }) {
+      Column(
+        Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 24.dp).padding(bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        Text(description, style = MaterialTheme.typography.titleMedium)
+        LazyColumn(Modifier.heightIn(max = 360.dp)) {
+          items(names) { name -> Text(name, Modifier.padding(vertical = 6.dp), style = MaterialTheme.typography.bodyLarge) }
+          if (people.unnamed > 0) {
+            item {
+              Text(
+                pluralStringResource(R.plurals.reaction_more_people_line, people.unnamed, people.unnamed),
+                Modifier.padding(vertical = 6.dp),
+                style = MaterialTheme.typography.bodyMedium,
+                color = scheme.onSurfaceVariant,
+              )
+            }
+          }
+        }
       }
     }
   }

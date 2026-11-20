@@ -945,12 +945,19 @@ pub enum CallTileState {
   },
 }
 
+/// The most people a [`Reaction`] names; the popover lists them all, a tooltip the first few.
+pub const REACTORS_LIMIT: usize = 50;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Reaction {
   /// The emoji, or a custom emoji's `:shortcode:`.
   pub emoji: String,
   pub count: u32,
   pub reacted_by_me: bool,
+  /// Who reacted, the viewer first, then the oldest reaction first: at most [`REACTORS_LIMIT`]
+  /// people, so a row stays cheap. `count` is the total; names beyond the list are "N others".
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub reactors: Vec<UserId>,
   /// A custom emoji (issue #207): its picture, shown when this device holds it.
   #[serde(rename = "custom", default, skip_serializing_if = "Option::is_none")]
   pub maybe_custom: Option<teamcraft_proto::CustomEmojiRef>,
