@@ -582,12 +582,15 @@ function statusBar(device) {
   return `<div class="status-bar"><span>9:41</span><span class="right">${right}</span></div>`;
 }
 
-/** The status bar of a current Pixel: the time on the left; Wi-Fi, mobile signal and battery on the right. */
+/**
+ * The status bar of a current Pixel (Android 16): the time in bold on the left; mobile signal
+ * (four rounded bars), Wi-Fi (arcs) and the battery as a pill with the level inside on the right.
+ */
 function androidStatusBar() {
-  const wifi = `<svg width="17" height="13" viewBox="0 0 17 13"><path d="M8.5 13L0 2.6A13.4 13.4 0 0 1 8.5 0a13.4 13.4 0 0 1 8.5 2.6z"/></svg>`;
-  const signal = `<svg width="14" height="14" viewBox="0 0 14 14"><path d="M14 0v14H0z"/></svg>`;
-  const battery = `<svg width="25" height="13" viewBox="0 0 25 13"><rect x="0" y="0" width="22" height="13" rx="4"/><rect x="22.5" y="4" width="2" height="5" rx="1"/></svg>`;
-  return `<div class="status-bar"><span>9:41</span><span class="right">${wifi}${signal}${battery}</span></div>`;
+  const signal = `<svg width="20" height="14" viewBox="0 0 20 14"><rect x="0" y="9" width="3.6" height="5" rx="1.8"/><rect x="5.4" y="6" width="3.6" height="8" rx="1.8"/><rect x="10.8" y="3" width="3.6" height="11" rx="1.8"/><rect x="16.2" y="0" width="3.6" height="14" rx="1.8"/></svg>`;
+  const wifi = `<svg width="20" height="15" viewBox="0 0 20 15"><path d="M10 15l3.1-3.8a5 5 0 0 0-6.2 0z M10 7.6a7.9 7.9 0 0 1 5 1.8l1.9-2.3a10.9 10.9 0 0 0-13.8 0l1.9 2.3a7.9 7.9 0 0 1 5-1.8z M10 0.8a14.6 14.6 0 0 0-9.6 3.6l1.9 2.3a11.6 11.6 0 0 1 15.4 0l1.9-2.3A14.6 14.6 0 0 0 10 0.8z"/></svg>`;
+  const battery = `<span class="pixel-battery">100</span>`;
+  return `<div class="status-bar"><span class="time">9:41</span><span class="right">${signal}${wifi}${battery}</span></div>`;
 }
 
 function avatar(id, size, presence = null) {

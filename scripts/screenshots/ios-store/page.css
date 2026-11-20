@@ -754,6 +754,22 @@ html, body {
 /* 9:20 like the Pixel's screen. */
 .android .ui { height: 978px; }
 .android .status-bar { height: 56px; padding: 6px 30px 0 34px; font-size: 18px; font-weight: 500; letter-spacing: 0.01em; }
-.android .status-bar .right { gap: 8px; }
+.android .status-bar .right { gap: 7px; }
+.android .status-bar .time { font-weight: 700; font-size: 19px; }
+.pixel-battery {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-width: 36px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 7px;
+  background: #1f1f1f;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+.pixel-battery::after { content: ""; position: absolute; right: -4px; top: 6px; width: 2.5px; height: 8px; border-radius: 0 2px 2px 0; background: #1f1f1f; opacity: 0.5; }
 .camera-hole { position: absolute; top: 18px; left: 50%; width: 26px; height: 26px; margin-left: -13px; border-radius: 50%; background: #0b0b0c; z-index: 30; }
 .android .home-indicator { width: 120px; height: 5px; margin-left: -60px; bottom: 9px; background: #1f1f1f; }
