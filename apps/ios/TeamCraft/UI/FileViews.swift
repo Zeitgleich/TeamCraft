@@ -61,7 +61,7 @@ struct AttachmentView: View {
           if file.isImage || file.isVideo {
             Button("picture_save_to_photos", systemImage: "square.and.arrow.down") {
               Task {
-                let outcome = await PhotosSaver.save(fileAt: URL(fileURLWithPath: path), mediaType: file.mediaType)
+                let outcome = await PhotosSaver.save(picture: file, at: URL(fileURLWithPath: path), model: model)
                 if outcome == .saved {
                   UINotificationFeedbackGenerator().notificationOccurred(.success)
                 } else {
@@ -137,6 +137,10 @@ struct AttachmentView: View {
         AnimationBadge(
           text: file.transfer.state == "failed" ? Text("animation_failed") : Text(verbatim: AnimationKind.label(file.mediaType)))
       }
+    }
+    // A Live Photo or Motion Photo (#2181): its badge plays the motion over the picture.
+    .overlay {
+      if file.isLive && !isPlainSurface { LiveMotionOverlay(file: file) }
     }
     .task(id: motionTask) { await runMotion() }
   }

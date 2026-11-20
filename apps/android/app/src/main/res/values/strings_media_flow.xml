@@ -83,4 +83,10 @@
   <string name="send_quality_standard">Standard</string>
   <string name="send_quality_high">High</string>
   <string name="send_quality_hint">Standard is smaller and faster to send; High keeps more detail. Each send can change it.</string>
+  <string name="send_motion">Send Motion Photos with motion</string>
+  <string name="send_motion_hint">Off sends the still picture only, which uses less data.</string>
+  <string name="live_badge">Live</string>
+  <string name="live_play">Play motion</string>
+  <string name="live_stop">Stop motion</string>
+  <string name="live_saved_video">Motion saved as a video too</string>
 </resources>

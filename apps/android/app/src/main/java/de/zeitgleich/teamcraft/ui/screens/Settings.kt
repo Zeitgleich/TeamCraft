@@ -314,6 +314,7 @@ private fun ChatsPage(viewModel: MainViewModel) {
   SettingsGroup(R.string.settings_group_media) {
     row { OriginalDownloadSetting(it) }
     row { SendQualitySetting(it) }
+    row { SendMotionSetting(it) }
     row { AnimatedImagesSetting(it) }
   }
   SettingsGroup(R.string.settings_group_calls) {

@@ -196,7 +196,16 @@ struct PictureViewer: View {
         .accessibilityLabel(Text("picture_share"))
         if let file = model.currentFile, file.isImage || file.isVideo {
           Button {
-            Task { await save(url, mediaType: file.mediaType) }
+            Task {
+              if file.isLive {
+                // The picture and its motion (#2181).
+                let outcome = await PhotosSaver.save(picture: file, at: url, model: app)
+                maybeSaveOutcome = outcome
+                if outcome == .saved { UINotificationFeedbackGenerator().notificationOccurred(.success) }
+              } else {
+                await save(url, mediaType: file.mediaType)
+              }
+            }
           } label: {
             Image(systemName: maybeSaveOutcome == .saved ? "checkmark" : "square.and.arrow.down")
               .frame(width: 44, height: 44)
@@ -335,6 +344,11 @@ private struct PicturePage: View {
       .blur(radius: isSoftened ? 12 : 0)
       .accessibilityLabel(Text(maybeFile?.fileName ?? ""))
       .accessibilityAddTraits(.isImage)
+      // A Live Photo or Motion Photo (#2181): its badge plays the motion over the picture.
+      if let file = maybeFile, file.isLive, isCurrent {
+        LiveMotionOverlay(file: file, badgeAlignment: .bottomLeading, isFilling: false)
+          .padding(.bottom, 96)
+      }
       overlay.padding(.bottom, 96)
       if animation.maybeMoves == true {
         AnimationButton(isMoving: wantsToMove) { playChoice = wantsToMove ? .paused : .playing }

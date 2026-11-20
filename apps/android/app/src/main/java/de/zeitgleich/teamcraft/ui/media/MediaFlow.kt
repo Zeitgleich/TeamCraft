@@ -305,7 +305,12 @@ private suspend fun prepareItem(context: Context, viewModel: MainViewModel, item
     // Always drawn again: edits applied, the quality's size, no metadata of the original.
     val rendered = PictureRenderer.render(context, uri, item.picture, quality) ?: return null
     val ending = if (rendered.mediaType == "image/png") "png" else "jpg"
-    return viewModel.stageEditedPicture("${name.substringBeforeLast('.', name)}.$ending", rendered.mediaType, rendered.bytes)
+    val picture = viewModel.stageEditedPicture("${name.substringBeforeLast('.', name)}.$ending", rendered.mediaType, rendered.bytes) ?: return null
+    // A Motion Photo keeps its motion (#2181) unless it was edited: a cropped or marked picture
+    // would move as it was before.
+    if (item.picture.isEdited) return picture
+    val mediaType = context.contentResolver.getType(uri) ?: "image/jpeg"
+    return viewModel.stageMotionOf(uri, mediaType)?.let { picture.copy(maybeMotion = it) } ?: picture
   }
   val facts = VideoEditing.facts(context, uri)
   val isEdited = VideoEditing.needsExport(facts, item.video, quality)

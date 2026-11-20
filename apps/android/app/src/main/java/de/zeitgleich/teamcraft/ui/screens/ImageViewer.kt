@@ -87,6 +87,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.DialogWindowProvider
+import de.zeitgleich.teamcraft.ui.MotionClip
+import de.zeitgleich.teamcraft.ui.LiveBadge
 import de.zeitgleich.teamcraft.ui.SharedFiles
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -102,6 +104,7 @@ import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.core.FileInfo
+import de.zeitgleich.teamcraft.core.MotionInfo
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.AnimationButton
 import de.zeitgleich.teamcraft.ui.AnimationRead
@@ -267,6 +270,7 @@ fun ImageViewer(
               state.request(key)
               requests += 1
             },
+            onFetchMotion = { file, motionId -> viewModel.act(ChatActions.downloadAttachment(file.conversation, file.message, motionId)) },
           )
         }
       }
@@ -290,6 +294,9 @@ fun ImageViewer(
           },
           maybeOnReply = maybeOnReply,
           onForward = { isForwarding = true },
+          onSaveMotion = { file, motion ->
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) downloadAndSaveMotion(viewModel, context, file, motion)
+          },
         )
       }
     }
@@ -342,6 +349,7 @@ private fun PicturePage(
   onTap: () -> Unit,
   onZoomChange: (Boolean) -> Unit,
   onFetch: () -> Unit,
+  onFetchMotion: (FileInfo, String) -> Unit,
 ) {
   if (maybeFile == null) {
     // A page further away than the neighbours has no file yet: nothing of it is decoded.
@@ -368,6 +376,17 @@ private fun PicturePage(
       ?: if (File(path).exists()) FullImage.Unreadable else FullImage.Waiting
   }
   val currentOnTap by rememberUpdatedState(onTap)
+  // A Live Photo or Motion Photo (#2181): held down or toggled by its badge, its motion plays over
+  // the picture, fetched only then.
+  val maybeMotion = file.maybeMotion?.takeIf { file.isLive }
+  var isMotionHeld by remember(file.fileId) { mutableStateOf(false) }
+  var isMotionToggled by rememberSaveable(file.fileId) { mutableStateOf(false) }
+  var isMotionUnplayable by rememberSaveable(file.fileId) { mutableStateOf(false) }
+  val wantsMotion = maybeMotion != null && isCurrent && (isMotionHeld || isMotionToggled) && !isMotionUnplayable
+  LaunchedEffect(wantsMotion) {
+    val motion = maybeMotion ?: return@LaunchedEffect
+    if (wantsMotion && (motion.transfer.state == "remote" || motion.transfer.state == "failed")) onFetchMotion(file, motion.fileId)
+  }
   var scale by remember { mutableFloatStateOf(1f) }
   var offset by remember { mutableStateOf(Offset.Zero) }
   var size by remember { mutableStateOf(IntSize.Zero) }
@@ -396,6 +415,11 @@ private fun PicturePage(
         detectTapGestures(
           onTap = { currentOnTap() },
           onDoubleTap = { zoomTo(if (scale > 1f) 1f else doubleTapZoom.coerceAtMost(maxZoom)) },
+          onLongPress = { if (maybeMotion != null) isMotionHeld = true },
+          onPress = {
+            tryAwaitRelease()
+            isMotionHeld = false
+          },
         )
       }
       .transformable(transform, canPan = { scale > 1f }),
@@ -444,6 +468,23 @@ private fun PicturePage(
           .fillMaxSize()
           .then(if (isBlurry) Modifier.blur(12.dp) else Modifier)
           .graphicsLayer(scaleX = scale, scaleY = scale, translationX = offset.x, translationY = offset.y),
+      )
+    }
+    maybeMotion?.takeIf { !isMotionUnplayable }?.let { motion ->
+      val maybeMotionPath = motion.transfer.path?.takeIf { motion.transfer.state == "local" }
+      if (wantsMotion && isResumed && maybeMotionPath != null) {
+        MotionClip(
+          maybeMotionPath,
+          onUnplayable = { isMotionUnplayable = true },
+          isFilling = false,
+          modifier = Modifier.graphicsLayer(scaleX = scale, scaleY = scale, translationX = offset.x, translationY = offset.y),
+        )
+      }
+      LiveBadge(
+        isPlaying = wantsMotion && maybeMotionPath != null,
+        isComing = wantsMotion && motion.transfer.isMoving,
+        onClick = { isMotionToggled = !isMotionToggled },
+        modifier = Modifier.align(Alignment.BottomStart).safeDrawingPadding().padding(start = 8.dp, bottom = 88.dp),
       )
     }
     val overlay = Modifier.align(Alignment.BottomCenter).safeDrawingPadding().padding(bottom = 88.dp)
@@ -578,6 +619,7 @@ private fun BottomBar(
   onScope: (MediaScope) -> Unit,
   maybeOnReply: ((FileInfo) -> Unit)?,
   onForward: () -> Unit,
+  onSaveMotion: suspend (FileInfo, MotionInfo) -> Unit,
 ) {
   val context = LocalContext.current
   val coroutines = rememberCoroutineScope()
@@ -594,7 +636,15 @@ private fun BottomBar(
     Spacer(Modifier.weight(1f))
     if (maybePath != null && maybeFile != null) {
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-        TextButton(onClick = { coroutines.launch { saveToGallery(context, maybePath, maybeFile) } }) {
+        TextButton(
+          onClick = {
+            coroutines.launch {
+              saveToGallery(context, maybePath, maybeFile)
+              // A Live Photo or Motion Photo is saved as the picture and its motion as a video (#2181).
+              maybeFile.maybeMotion?.takeIf { maybeFile.isLive }?.let { onSaveMotion(maybeFile, it) }
+            }
+          },
+        ) {
           Text(stringResource(R.string.image_save), color = Color.White)
         }
       }
@@ -659,7 +709,53 @@ internal suspend fun downloadAndSaveToGallery(viewModel: MainViewModel, context:
     Toast.makeText(context, R.string.image_save_failed, Toast.LENGTH_SHORT).show()
   } else {
     saveToGallery(context, maybePath, file)
+    file.maybeMotion?.takeIf { file.isLive && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q }?.let { motion ->
+      downloadAndSaveMotion(viewModel, context, file, motion)
+    }
   }
+}
+
+/**
+ * The motion of a saved Live Photo or Motion Photo (#2181), saved beside the picture as a video in
+ * Movies/TeamCraft under the picture's name. A failure only says so; the picture is saved already.
+ */
+@RequiresApi(Build.VERSION_CODES.Q)
+internal suspend fun downloadAndSaveMotion(viewModel: MainViewModel, context: Context, file: FileInfo, motion: MotionInfo) {
+  val maybeLocal = try {
+    withTimeoutOrNull(SAVE_DOWNLOAD_TIMEOUT_MS) {
+      if (motion.transfer.state != "local") viewModel.act(ChatActions.downloadAttachment(file.conversation, file.message, motion.fileId))
+      viewModel.changeCount.mapNotNull {
+        viewModel.chat.extras(file.conversation, listOf(file.message))[file.message]?.files
+          ?.firstOrNull { it.fileId == file.fileId }
+          ?.maybeMotion?.transfer?.takeIf { it.state == "local" || it.state == "failed" }
+      }.first()
+    }
+  } catch (failure: TeamCraftException) {
+    null
+  } catch (failure: IllegalStateException) {
+    null
+  }
+  val maybePath = maybeLocal?.takeIf { it.state == "local" }?.path
+  val isSaved = maybePath != null && withContext(Dispatchers.IO) {
+    val resolver = context.contentResolver
+    val values = ContentValues().apply {
+      put(MediaStore.Video.Media.DISPLAY_NAME, "${file.fileName.substringBeforeLast('.')}.mp4")
+      put(MediaStore.Video.Media.MIME_TYPE, motion.mediaType)
+      put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/$GALLERY_FOLDER")
+      put(MediaStore.Video.Media.IS_PENDING, 1)
+    }
+    val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values) ?: return@withContext false
+    val isCopied = runCatching {
+      resolver.openOutputStream(uri)?.use { output -> File(maybePath).inputStream().use { it.copyTo(output) } } != null
+    }.getOrDefault(false)
+    if (isCopied) {
+      resolver.update(uri, ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }, null, null)
+    } else {
+      resolver.delete(uri, null, null)
+    }
+    isCopied
+  }
+  Toast.makeText(context, if (isSaved) R.string.live_saved_video else R.string.image_save_failed, Toast.LENGTH_SHORT).show()
 }
 
 /**
