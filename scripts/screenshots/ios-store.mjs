@@ -1,11 +1,11 @@
-// Takes the App Store screenshots (apps/ios/store) in headless Chrome: every scene of
+// Takes the App Store screenshots in headless Chrome: every scene of
 // scripts/screenshots/ios-store/scenes.js, per device and language, at the size App Store Connect
 // takes for that device (iPhone 6.9": 1320 x 2868, iPad 13": 2064 x 2752).
 //
 //   node scripts/screenshots/ios-store.mjs <output dir> [scene ...]
 //
 // Writes <output dir>/<language>/<device>/<n>-<scene>.png; scenes limit the run. ios-store.sh
-// runs it and writes the pictures into apps/ios/store without an alpha channel.
+// runs it and converts the pictures to the JPEGs that are uploaded.
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
