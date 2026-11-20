@@ -144,9 +144,14 @@ reports go off. Options: `sendDefaultPii`, `attachScreenshot`, `attachViewHierar
 `enableAutoBreadcrumbTracking`, `enableNetworkBreadcrumbs`, `enableCaptureFailedRequests`,
 and `enableAutoSessionTracking` off; tracing (app start, screen loads, frames) only at the trace
 rate, without network, file or Core Data spans ("Performance data"); no profiling or replay;
-`enableAppHangTracking` and `enableMetricKit` on. The message list counts frames itself
-(`FrameWatch`, a display link that runs only while `feed.scroll_back` or `feed.jump_bottom` is
-measured): numbers only, no content and no IDs. `beforeSend`
+`enableAppHangTracking` and `enableMetricKit` on. sentry-cocoa's MetricKit integration sends CPU,
+disk-write and hang diagnostics but no `MXCrashDiagnostic`, so kills by the system that no
+in-process handler sees (SIGKILL: 0xdead10cc, the watchdog's 0x8badf00d) are forwarded by
+`SystemKillReports.swift` once MetricKit delivers them on a later launch (#2179): a fatal event with
+the termination reason's namespace and code parsed out, never its free text, through the same
+`beforeSend`. The message list counts frames itself (`FrameWatch`, a display link that runs only
+while `feed.scroll_back` or `feed.jump_bottom` is measured): numbers only, no content and no IDs.
+`beforeSend`
 (`CrashEventScrub`) and `CrashScrubber.swift` do what the Android side does, with the same test
 cases (`CrashScrubberTests`). The settings and the notice are the same as on Android.
 

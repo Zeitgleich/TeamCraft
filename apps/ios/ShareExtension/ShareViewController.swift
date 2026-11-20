@@ -108,11 +108,20 @@ enum ShareLoader {
     return parts.joined(separator: "\n")
   }
 
+  /// The first registered type of one of `kinds`. A Live Photo also registers its bundle (a
+  /// folder), which comes last: the still picture goes, and the app takes the picture out of a
+  /// bundle that is all there is.
   private static func fileType(of provider: NSItemProvider, among kinds: [UTType]) -> String? {
-    provider.registeredTypeIdentifiers.first { identifier in
+    let matching = provider.registeredTypeIdentifiers.filter { identifier in
       guard let type = UTType(identifier) else { return false }
       return kinds.contains { type.conforms(to: $0) }
     }
+    return matching.first { !isBundle($0) } ?? matching.first
+  }
+
+  private static func isBundle(_ identifier: String) -> Bool {
+    guard let type = UTType(identifier) else { return false }
+    return type.conforms(to: .package) || type.conforms(to: .directory)
   }
 
   private static func item(of provider: NSItemProvider, type: UTType) async -> NSSecureCoding? {

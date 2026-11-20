@@ -61,6 +61,9 @@ final class ClosureEventListener: EventListener, @unchecked Sendable {
 enum CoreFactoryError: Error, Equatable {
   /// Not signed in (no server, no account, or no database key yet).
   case noAccount
+  /// The app's store is closed while it may be suspended (#2179); the foreground or a background
+  /// job opens it again.
+  case storeSuspended
 }
 
 /// Opens the Rust core for the signed-in account of the active server from the shared container

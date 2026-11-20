@@ -47,6 +47,10 @@ pub(crate) enum LifecycleStep {
   FinishOrgRecovery,
   StartSync,
   StopSync,
+  /// The local store closed while the app is suspended (#2179).
+  Suspend,
+  /// The local store opened again after a suspension.
+  Resume,
 }
 
 /// Sends `tracing` and panics to the system log, once per process; later calls do nothing.

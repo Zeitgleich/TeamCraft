@@ -14961,6 +14961,22 @@
         }
       }
     },
+    "attachment_unsupported_bundle": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This item is a bundle without a still picture, so it can't be attached. Pick the photo again or attach a different file."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Objekt ist ein Paket ohne Standbild und kann nicht angehängt werden. Wähle das Foto erneut oder hänge eine andere Datei an."
+          }
+        }
+      }
+    },
     "composer_draft_files_expired": {
       "localizations": {
         "en": {
