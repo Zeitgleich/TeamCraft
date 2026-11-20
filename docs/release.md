@@ -283,9 +283,17 @@ writes the layout, and where it can't be scripted the job warns and ships the pl
 ad-hoc signature gets the normal "could not verify" prompt instead.
 
 With the secrets `APPLE_CERTIFICATE` (the Developer ID Application certificate as base64 .p12),
-`APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD` (an app-specific
-password) and `APPLE_TEAM_ID`, the same job signs with the Developer ID, with hardened runtime and
-timestamp, notarizes and staples the app and the dmg, and requires Gatekeeper to accept them.
+`APPLE_CERTIFICATE_PASSWORD` and `APPLE_SIGNING_IDENTITY` (e.g. `Developer ID Application: <team
+name> (<team id>)`), the same job signs with the Developer ID, with hardened runtime and timestamp,
+notarizes and staples the app and the dmg, and requires Gatekeeper to accept them. Notarization
+(`apps/desktop/packaging/macos/notarize.sh`) authenticates with the App Store Connect API key the
+iOS release already uses (secret `APP_STORE_CONNECT_API_KEY`, variables `APP_STORE_CONNECT_KEY_ID`
+and `APP_STORE_CONNECT_ISSUER_ID`), so no Apple ID or app-specific password is stored. Only the
+team's Account Holder can create a Developer ID Application certificate.
+
+A Developer ID signature stays the same across updates, so the keychain items the app created
+keep trusting it: no keychain password prompt after an update (#1223). Ad-hoc signed builds get
+a new identity with every build and ask once after each update.
 
 ### Opening the unsigned macOS app
 

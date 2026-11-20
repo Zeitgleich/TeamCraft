@@ -430,12 +430,12 @@ jobs:
       - name: Notarize the app (optional)
         if: ${{ !inputs.warm-cache && env.MACOS_SIGNING_IDENTITY != '' }}
         env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+          API_KEY_ID: ${{ vars.APP_STORE_CONNECT_KEY_ID }}
+          API_ISSUER_ID: ${{ vars.APP_STORE_CONNECT_ISSUER_ID }}
         run: |
           ditto -c -k --keepParent "$APP" "$RUNNER_TEMP/app.zip"
-          xcrun notarytool submit "$RUNNER_TEMP/app.zip" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+          apps/desktop/packaging/macos/notarize.sh "$RUNNER_TEMP/app.zip"
           xcrun stapler staple "$APP"
           MACOS_REQUIRE_NOTARIZED=1 apps/desktop/packaging/macos/verify-app.sh "$APP"
       - name: Build the dmg and verify the app inside it
@@ -459,12 +459,12 @@ jobs:
       - name: Notarize the dmg (optional)
         if: ${{ !inputs.warm-cache && env.MACOS_SIGNING_IDENTITY != '' }}
         env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+          API_KEY_ID: ${{ vars.APP_STORE_CONNECT_KEY_ID }}
+          API_ISSUER_ID: ${{ vars.APP_STORE_CONNECT_ISSUER_ID }}
         run: |
           dmg="$(ls target/dmg/*.dmg)"
-          xcrun notarytool submit "$dmg" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
+          apps/desktop/packaging/macos/notarize.sh "$dmg"
           xcrun stapler staple "$dmg"
           spctl --assess -vvv --type open --context context:primary-signature "$dmg"
       - name: Keep the dSYM privately (optional)
