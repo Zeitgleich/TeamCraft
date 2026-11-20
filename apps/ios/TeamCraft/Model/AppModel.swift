@@ -234,13 +234,8 @@ final class AppModel {
   @ObservationIgnored private let localAuth = LocalAuthClient()
   /// The sign-in page came with the server check just now: the screen need not ask again.
   @ObservationIgnored private var isSignInPageFromCheck = false
-  @ObservationIgnored private lazy var processLock = ProcessLock(fileURL: container.lockFileURL)
-  /// Who in this process holds the cross-process lock. The sync loop and short jobs (a push, sealing,
-  /// a prefetch) share the one `flock`; it is released when the last of them lets go, so no job frees
-  /// the lock under the sync loop and no job keeps it after it ended.
-  @ObservationIgnored private var lockHolders: Set<LockHolder> = []
-  /// The one take of the lock under way: another taker waits for it instead of opening its own.
-  @ObservationIgnored private var maybePendingAcquire: Task<Bool, Never>?
+  /// Who in this process holds the cross-process lock (`LockHolds`).
+  @ObservationIgnored private lazy var lockHolds = LockHolds(lock: ProcessLock(fileURL: container.lockFileURL))
   /// Counts `stopSyncing` calls, so a take of the lock that ends after one lets it go again.
   @ObservationIgnored private var syncStops = 0
   @ObservationIgnored private let storeChanges = StoreChangeNotifier()
@@ -1901,7 +1896,7 @@ final class AppModel {
     if isSyncing {
       // The background time ran out while syncing, which gave the lock up: take it back. A job may
       // hold it meanwhile; the sync loop then shares it and keeps it once the job is done.
-      if !lockHolders.contains(.sync) { _ = await acquireSyncLock() }
+      if !lockHolds.contains(.sync) { _ = await acquireSyncLock() }
       return
     }
     // Never sync beside the extension: both would refresh the rotating refresh token, and the
@@ -1949,43 +1944,20 @@ final class AppModel {
     return await operation()
   }
 
-  /// Takes the lock for `holder`, or joins this process's hold of it. One take runs at a time: a
-  /// second taker waits for it and then joins, so the process never opens two descriptors for it.
   private func takeProcessLock(for holder: LockHolder, timeout: TimeInterval) async -> Bool {
-    while let pending = maybePendingAcquire {
-      _ = await pending.value
-      // Whoever resumes first after the take ended clears it. Awaiting a finished task doesn't
-      // suspend: left to the taker, which can't resume while this loop holds the main actor, the
-      // loop spun forever and the watchdog killed the app (1.0.39 launch hang, two takers at once).
-      if maybePendingAcquire == pending { maybePendingAcquire = nil }
-    }
-    if processLock.isHeld {
-      lockHolders.insert(holder)
-      return true
-    }
-    let lock = processLock
-    let pending = Task.detached { lock.acquire(timeout: timeout) }
-    maybePendingAcquire = pending
-    let isTaken = await pending.value
-    if maybePendingAcquire == pending { maybePendingAcquire = nil }
-    // Background expiry may have dropped it while this waited to resume.
-    guard isTaken, processLock.isHeld else { return false }
-    lockHolders.insert(holder)
-    return true
+    await lockHolds.take(for: holder, timeout: timeout)
   }
 
   /// `holder` is done; the lock goes once nobody in this process holds it.
   private func releaseProcessLock(for holder: LockHolder) {
-    lockHolders.remove(holder)
-    if lockHolders.isEmpty { processLock.release() }
+    lockHolds.release(for: holder)
   }
 
   /// The store closes for a suspension, or the background time ran out: the lock goes now, whoever
   /// holds it (0xdead10cc). The sync loop takes it back in the foreground; a job still running
   /// finishes without it.
   private func dropProcessLock() {
-    lockHolders.removeAll()
-    processLock.release()
+    lockHolds.dropAll()
   }
 
   /// Gives the sync loop the background time to send what is pending, leaving a margin to stop
@@ -2180,8 +2152,3 @@ private final class ResumeOnce: @unchecked Sendable {
   }
 }
 
-/// A holder of the cross-process lock inside the app: the sync loop, or one short job.
-private enum LockHolder: Hashable {
-  case sync
-  case job(UUID)
-}
