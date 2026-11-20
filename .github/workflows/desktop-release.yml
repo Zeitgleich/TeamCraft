@@ -400,17 +400,20 @@ jobs:
           rm -rf "$app/Contents/Frameworks/GStreamer.framework"
           ditto target/gstreamer-framework/GStreamer.framework "$app/Contents/Frameworks/GStreamer.framework"
           echo "APP=$app" >> "$GITHUB_ENV"
-      # Developer ID signing and notarization, only when the repository has the secrets; otherwise
-      # the app is signed ad hoc (docs/release.md, "Opening the unsigned macOS app").
+      # Developer ID signing and notarization, only when the repository has the certificate; otherwise
+      # the app is signed ad hoc (docs/release.md, "Opening the unsigned macOS app"), and then every
+      # update is a stranger to the keychain item of the build before it (#1223). The identity is
+      # read from the certificate; APPLE_SIGNING_IDENTITY only picks one where the .p12 holds several.
       - name: Signing identity (optional)
         if: ${{ !inputs.warm-cache }}
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID || secrets.APPLE_TEAM_ID }}
         run: |
-          if [ -z "$APPLE_CERTIFICATE" ] || [ -z "$APPLE_SIGNING_IDENTITY" ]; then
-            echo "No Developer ID certificate: signing ad hoc."
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "::warning title=macOS app signed ad hoc::No Developer ID certificate (secret APPLE_CERTIFICATE): macOS asks for the login keychain password after every update of this build (#1223)."
             exit 0
           fi
           keychain="$RUNNER_TEMP/signing.keychain-db"
@@ -420,23 +423,35 @@ jobs:
           security set-keychain-settings -lut 21600 "$keychain"
           security unlock-keychain -p "$password" "$keychain"
           security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/certificate.p12"
           security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" >/dev/null
           security list-keychains -d user -s "$keychain" login.keychain-db
-          rm -f "$RUNNER_TEMP/certificate.p12"
-          echo "MACOS_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
+          identity="$APPLE_SIGNING_IDENTITY"
+          if [ -z "$identity" ]; then
+            identity="$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(Developer ID Application: .*\)"$/\1/p' | head -n 1)"
+          fi
+          # Any other kind (Apple Distribution, Apple Development) signs an app Gatekeeper rejects
+          # and the notary service refuses.
+          case "$identity" in
+            "Developer ID Application: "*) ;;
+            *) echo "error: APPLE_CERTIFICATE holds no Developer ID Application certificate" >&2; exit 1 ;;
+          esac
+          echo "MACOS_SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
+          echo "MACOS_TEAM_ID=$APPLE_TEAM_ID" >> "$GITHUB_ENV"
       - name: Sign the app (inside out) and verify the signature
         if: ${{ !inputs.warm-cache }}
         run: apps/desktop/packaging/macos/sign-app.sh "$APP"
       - name: Notarize the app (optional)
         if: ${{ !inputs.warm-cache && env.MACOS_SIGNING_IDENTITY != '' }}
         env:
+          APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+          APP_STORE_CONNECT_KEY_ID: ${{ vars.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ vars.APP_STORE_CONNECT_ISSUER_ID }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID || secrets.APPLE_TEAM_ID }}
         run: |
-          ditto -c -k --keepParent "$APP" "$RUNNER_TEMP/app.zip"
-          xcrun notarytool submit "$RUNNER_TEMP/app.zip" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
-          xcrun stapler staple "$APP"
+          apps/desktop/packaging/macos/notarize.sh "$APP"
           MACOS_REQUIRE_NOTARIZED=1 apps/desktop/packaging/macos/verify-app.sh "$APP"
       - name: Build the dmg and verify the app inside it
         if: ${{ !inputs.warm-cache }}
@@ -459,13 +474,15 @@ jobs:
       - name: Notarize the dmg (optional)
         if: ${{ !inputs.warm-cache && env.MACOS_SIGNING_IDENTITY != '' }}
         env:
+          APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+          APP_STORE_CONNECT_KEY_ID: ${{ vars.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ vars.APP_STORE_CONNECT_ISSUER_ID }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID || secrets.APPLE_TEAM_ID }}
         run: |
           dmg="$(ls target/dmg/*.dmg)"
-          xcrun notarytool submit "$dmg" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
-          xcrun stapler staple "$dmg"
+          apps/desktop/packaging/macos/notarize.sh "$dmg"
           spctl --assess -vvv --type open --context context:primary-signature "$dmg"
       - name: Keep the dSYM privately (optional)
         if: ${{ !inputs.warm-cache }}
