@@ -701,30 +701,31 @@ html, body {
 .banner-phone .device { top: 105px; }
 
 /* The outer phones sit behind the inner ones, darkened (opaque: no bezel shows through). */
-.header .banner-phone.far-left { left: 90px; top: 380px; transform: scale(1.25) rotate(-8deg); filter: brightness(0.5); z-index: 0; }
-.header .banner-phone.near-left { left: 520px; top: 220px; transform: scale(1.35) rotate(-4deg); z-index: 1; }
-.header .banner-phone.near-right { right: 520px; top: 220px; transform: scale(1.35) rotate(4deg); z-index: 1; }
-.header .banner-phone.far-right { right: 90px; top: 380px; transform: scale(1.25) rotate(8deg); filter: brightness(0.5); z-index: 0; }
+.header .banner-phone.far-left { left: 20px; top: 380px; transform: scale(1.25) rotate(-8deg); filter: brightness(0.5); z-index: 0; }
+.header .banner-phone.near-left { left: 440px; top: 220px; transform: scale(1.35) rotate(-4deg); z-index: 1; }
+.header .banner-phone.near-right { right: 440px; top: 220px; transform: scale(1.35) rotate(4deg); z-index: 1; }
+.header .banner-phone.far-right { right: 20px; top: 380px; transform: scale(1.25) rotate(8deg); filter: brightness(0.5); z-index: 0; }
 
+/* App Store shows the header's middle column and only its upper half on an iPhone (the app's
+   name and icon cover the rest): the brand sits between about 20 % and 48 % of the height. */
 .banner-brand {
   position: absolute;
   z-index: 2;
   left: 50%;
-  top: 50%;
-  width: 760px;
+  top: 35%;
   transform: translate(-50%, -50%);
   display: flex;
   flex-direction: column;
   align-items: center;
   text-align: center;
-  padding: 70px 40px;
+  padding: 50px 80px;
   border-radius: 64px;
   background: radial-gradient(closest-side, rgba(5, 11, 25, 0.92), rgba(5, 11, 25, 0.75) 70%, rgba(5, 11, 25, 0));
 }
-.banner-mark { width: 220px; height: 220px; }
+.banner-mark { width: 150px; height: 150px; }
 .banner-mark svg, .banner-wordmark svg { display: block; width: 100%; height: 100%; }
-.banner-wordmark { width: 560px; height: 97px; margin-top: 44px; }
-.banner-claim { margin-top: 40px; color: var(--highlight); font-size: 58px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.12; text-wrap: balance; }
+.banner-wordmark { width: 470px; height: 81px; margin-top: 28px; }
+.banner-claim { margin-top: 26px; color: var(--highlight); font-size: 50px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.12; max-width: 600px; text-wrap: balance; }
 
 .banner-title {
   position: absolute;
