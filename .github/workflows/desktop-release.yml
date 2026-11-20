@@ -20,6 +20,10 @@ on:
         description: Compile only and save the Rust build cache (no packages)
         type: boolean
         default: false
+      macos-only:
+        description: Build only the macOS packages (skips Linux, Flatpak and Windows; for packaging experiments)
+        type: boolean
+        default: false
       notarize-once:
         description: macOS, notarize only the dmg and staple the app with its ticket (experiment, #2210)
         type: boolean
@@ -28,6 +32,10 @@ on:
     inputs:
       warm-cache:
         description: Compile only and save the Rust build cache (no packages)
+        type: boolean
+        default: false
+      macos-only:
+        description: Build only the macOS packages (skips Linux, Flatpak and Windows; for packaging experiments)
         type: boolean
         default: false
       notarize-once:
@@ -103,6 +111,7 @@ jobs:
           - arch: aarch64
             runner: ubuntu-24.04-arm
     needs: ui
+    if: ${{ !inputs.macos-only }}
     runs-on: ${{ matrix.runner }}
     env:
       # Linked with debug info and symbols; "Split off the debug file" strips the executable before
@@ -215,6 +224,7 @@ jobs:
   flatpak:
     name: Flatpak ${{ matrix.arch }} (build only)
     needs: ui
+    if: ${{ !inputs.macos-only }}
     strategy:
       fail-fast: false
       matrix:
@@ -587,6 +597,7 @@ jobs:
             runner: windows-11-arm
             tauri-cli-sha256: 92aa6a90be3126ed7b6ede964ca12124535359b47d8363dc29189b4f776303e7
     needs: ui
+    if: ${{ !inputs.macos-only }}
     runs-on: ${{ matrix.runner }}
     # Overrides the workflow-wide flags: WebRTC echo cancellation is not part of the Windows build
     # yet (the experimental CI job tries it), so calls run without it. The executable never holds
