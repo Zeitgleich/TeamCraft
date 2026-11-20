@@ -116,6 +116,7 @@ pub mod lightbox_motion;
 pub mod link_menu;
 pub mod link_request_prompt;
 pub mod list_status;
+pub mod live_photo;
 pub mod log_view;
 pub mod login;
 pub mod long_press;

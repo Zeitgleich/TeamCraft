@@ -87,6 +87,18 @@
 @media not ((hover: hover) and (pointer: fine)) { .media-motion { width: 44px; height: 44px; opacity: 1; } .media-motion .icon { width: 20px; height: 20px; } }
 @media (prefers-reduced-motion: reduce) { .media-motion { transition: opacity var(--dur-fast, .12s); } .media-motion:active { transform: none; } }
 @media (prefers-reduced-transparency: reduce) { .media-motion { background: rgba(20, 22, 30, .92); -webkit-backdrop-filter: none; backdrop-filter: none; } }
+/* A Live Photo or Motion Photo (#2181): its clip over the picture while it plays, and the "Live" badge
+   top left that says so and plays it on press. The badge is a small material chip, always shown. */
+.media-open video.media-live { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
+.media-live-badge { position: absolute; top: 6px; left: 6px; z-index: 1; display: inline-flex; align-items: center; gap: 4px; min-height: 24px; padding: 2px 8px 2px 5px; border: 0; border-radius: 999px; background: rgba(20, 22, 30, .45); -webkit-backdrop-filter: blur(20px) saturate(180%); backdrop-filter: blur(20px) saturate(180%); color: var(--on-fill); font-size: var(--text-xs); font-weight: var(--weight-semibold); letter-spacing: .06em; text-transform: uppercase; cursor: pointer; transition: background var(--dur-fast, .12s) var(--ease-out), transform var(--dur-fast, .12s) var(--ease-out); }
+.media-live-badge .icon { width: 14px; height: 14px; }
+.media-live-badge .spinner { width: 14px; height: 14px; }
+.media-live-badge.is-playing { background: rgba(20, 22, 30, .7); }
+.media-live-badge:active { transform: scale(.94); }
+.media-live-badge:focus-visible { outline: var(--focus-width) solid var(--focus); outline-offset: 2px; }
+@media not ((hover: hover) and (pointer: fine)) { .media-live-badge { min-height: 32px; padding: 4px 10px 4px 7px; } }
+@media (prefers-reduced-motion: reduce) { .media-live-badge { transition: background var(--dur-fast, .12s); } .media-live-badge:active { transform: none; } }
+@media (prefers-reduced-transparency: reduce) { .media-live-badge { background: rgba(20, 22, 30, .92); -webkit-backdrop-filter: none; backdrop-filter: none; } }
 .media-gif-badge { position: absolute; left: 8px; bottom: 8px; padding: 1px 6px; border-radius: 4px; background: rgba(0, 0, 0, .6); color: var(--on-fill); font-size: var(--text-xs); font-weight: var(--weight-bold); letter-spacing: .04em; pointer-events: none; }
 .media-more { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(0, 0, 0, .5); color: var(--on-fill); font-size: var(--text-2xl); letter-spacing: var(--tracking-2xl); line-height: var(--leading-2xl); font-weight: var(--weight-semibold); pointer-events: none; }
 /* A picture of the user's own message still going up: its local thumbnail; only one that failed

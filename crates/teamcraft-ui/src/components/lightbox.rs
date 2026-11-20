@@ -42,6 +42,7 @@ use crate::components::lightbox_controls::{
   Controls, MediaActions, Notice, ThumbnailStrip, still_frame, tooltip,
 };
 use crate::components::lightbox_motion::{MotionHooks, MotionNodes, StageMotion};
+use crate::components::live_photo::LiveMotion;
 use crate::components::message_row::shown_author;
 use crate::components::modal::Modal;
 use crate::components::pending_button::PendingButton;
@@ -181,6 +182,15 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
   let arrival = RwSignal::new(Arrival::default());
   let viewport = RwSignal::new(Viewport::default());
   let is_paused = RwSignal::new(false);
+  // A Live Photo or Motion Photo (#2181): its motion plays over the picture on the toggle only.
+  let live = RwSignal::new(None::<LiveMotion>);
+  Effect::new(move |_| {
+    let maybe_live = current_file.with(|file| file.as_ref().and_then(LiveMotion::of));
+    if let Some(motion) = maybe_live {
+      motion.play_while(move || motion.is_requested.get());
+    }
+    live.set(maybe_live);
+  });
   let motion_mode = Signal::derive(move || {
     state
       .settings
@@ -279,6 +289,7 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
     viewport,
     motion,
     is_paused,
+    live,
     is_thread_shown,
     notice,
   };
@@ -444,6 +455,7 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
               current=current
               kind=kind
               is_paused=is_paused
+              live=live
               motion=motion
             />
             <button
@@ -621,6 +633,7 @@ fn Stage(
   current: RwSignal<MediaKey>,
   kind: Memo<Option<MediaKind>>,
   is_paused: RwSignal<bool>,
+  live: RwSignal<Option<LiveMotion>>,
   motion: StageMotion,
 ) -> impl IntoView {
   let pointers = StoredValue::new(Pointers::default());
@@ -896,6 +909,24 @@ fn Stage(
                     }
                   }
                 />
+                // The motion over the picture, laid out and turned with it.
+                {move || live.get().filter(|live| live.is_playing()).and_then(|live| live.src().map(|src| view! {
+                  <video
+                    class="lightbox-image lightbox-live"
+                    src=src
+                    muted=true
+                    prop:muted=true
+                    autoplay=true
+                    r#loop=true
+                    playsinline=true
+                    disablepictureinpicture=true
+                    aria-hidden="true"
+                    style:transform=transform
+                    style:width=laid_width
+                    style:height=laid_height
+                    on:error=move |_| live.mark_unplayable()
+                  ></video>
+                }))}
               }
               .into_any()
             },
