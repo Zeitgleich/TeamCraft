@@ -145,7 +145,12 @@ reports go off. Options: `sendDefaultPii`, `attachScreenshot`, `attachViewHierar
 and `enableAutoSessionTracking` off; tracing (app start, screen loads, frames) only at the trace
 rate, without network, file or Core Data spans ("Performance data"); no profiling or replay;
 `enableAppHangTracking`, `swiftAsyncStacktraces` (a hang in an async function shows the functions
-that awaited, not only the runtime's frames) and `enableMetricKit` on. `beforeSend`
+that awaited, not only the runtime's frames) and `enableMetricKit` on. sentry-cocoa's MetricKit
+integration sends CPU, disk-write and hang diagnostics but no `MXCrashDiagnostic`, so kills by the
+system that no in-process handler sees (SIGKILL: 0xdead10cc, the watchdog's 0x8badf00d) are
+forwarded by `SystemKillReports.swift` once MetricKit delivers them on a later launch (#2179): a
+fatal event with the termination reason's namespace and code parsed out, never its free text,
+through the same `beforeSend`. `beforeSend`
 (`CrashEventScrub`) and `CrashScrubber.swift` do what the Android side does, with the same test
 cases (`CrashScrubberTests`). The settings and the notice are the same as on Android.
 
