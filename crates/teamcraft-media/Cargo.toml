@@ -316,6 +316,11 @@ required-features = ["pipewire"]
 name = "camera_bitrate"
 required-features = ["openh264-source"]
 
+# Hardware encoder wait per picture under load (#1719).
+[[example]]
+name = "vt_latency"
+required-features = ["gstreamer"]
+
 # What a screen share costs and sends per profile (standard or 4K, detail or motion; issue #565).
 [[example]]
 name = "screen_bench"
