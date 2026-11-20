@@ -509,6 +509,8 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID || secrets.APPLE_TEAM_ID }}
         run: |
+          # The simpler variant (#2210): what Gatekeeper says about the app before it carries a ticket.
+          spctl -a -vv --type exec "$APP" || true
           if xcrun stapler staple "$APP" && xcrun stapler validate "$APP" \
             && MACOS_REQUIRE_NOTARIZED=1 apps/desktop/packaging/macos/verify-app.sh "$APP"; then
             echo "app stapled from the dmg's ticket: one submission was enough"
