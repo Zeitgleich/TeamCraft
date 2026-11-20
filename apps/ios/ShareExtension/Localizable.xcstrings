@@ -112,6 +112,166 @@
           }
         }
       }
+    },
+    "share_pick_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Send to"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Senden an"
+          }
+        }
+      }
+    },
+    "share_cancel": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancel"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Abbrechen"
+          }
+        }
+      }
+    },
+    "share_caption": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add a message (optional)"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nachricht hinzufügen (optional)"
+          }
+        }
+      }
+    },
+    "share_recent": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recent"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zuletzt"
+          }
+        }
+      }
+    },
+    "share_all": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "All conversations"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Alle Unterhaltungen"
+          }
+        }
+      }
+    },
+    "share_filter": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Search conversations"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unterhaltungen suchen"
+          }
+        }
+      }
+    },
+    "share_choose_in_app": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose in TeamCraft"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In TeamCraft wählen"
+          }
+        }
+      }
+    },
+    "share_pick_footer": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nothing is sent from here: TeamCraft opens the conversation with this in the composer, and it goes when you press send."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Von hier wird nichts gesendet: TeamCraft öffnet die Unterhaltung mit dem Inhalt im Eingabefeld, gesendet wird erst, wenn du auf Senden tippst."
+          }
+        }
+      }
+    },
+    "share_saved_to_body %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open TeamCraft: “%@” opens with this in the composer. It is sent only when you press send there."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Öffne TeamCraft: „%@“ öffnet sich mit dem Inhalt im Eingabefeld. Gesendet wird erst, wenn du dort auf Senden tippst."
+          }
+        }
+      }
+    },
+    "share_saved_to_notification": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tap to open the conversation you picked."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tippe, um die gewählte Unterhaltung zu öffnen."
+          }
+        }
+      }
     }
   },
   "version": "1.0"
