@@ -483,6 +483,17 @@ const LIMITS: &[FieldDef] = &[
     DAYS,
     "settings-error-poll-days",
   ),
+  flag("allows_motion_parts"),
+  ranged(
+    "max_motion_part_bytes",
+    MIB,
+    (
+      teamcraft_proto::MIN_MOTION_BYTES_LIMIT,
+      teamcraft_proto::MAX_MOTION_BYTES_LIMIT,
+    ),
+    MEGABYTES,
+    "settings-error-motion-bytes",
+  ),
 ];
 const INTEGRATION: &[FieldDef] = &[
   amount("default_retention_days", 1, U32_MAX, DAYS),

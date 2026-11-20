@@ -11,7 +11,7 @@ use crate::client::draft_files::{
   DraftFileSource, attach_draft_files, draft_file_retention_days, find_draft_file, is_draft_file_expired,
   own_draft_file, remove_pending_draft_file,
 };
-use crate::client::files::{PendingFile, PendingUpload, UploadPurpose, UploadRetry, UploadSource};
+use crate::client::files::{FileRole, PendingFile, PendingUpload, UploadPurpose, UploadRetry, UploadSource};
 use crate::client::stored_account_data;
 use crate::records;
 use crate::store::{AttachmentRef, LocalStore, Table};
@@ -190,6 +190,7 @@ fn uploaded_file(attachment: AttachmentRef) -> PendingFile {
     maybe_waveform: attachment.maybe_waveform.clone(),
     maybe_done: Some(attachment),
     is_held: true,
+    role: FileRole::Attachment,
   }
 }
 

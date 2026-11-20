@@ -35,6 +35,7 @@ use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
 use crate::components::lightbox::prefers_reduced_motion;
 use crate::components::lightbox_controls::small_still_frame;
+use crate::components::live_photo::{LiveBadge, LiveMotion, LiveVideo};
 use crate::components::message_actions::{copy_to_clipboard, reply_to_file};
 use crate::components::sheet::PopoverBackdrop;
 use crate::components::sliding_indicator::SlidingIndicator;
@@ -544,6 +545,17 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
     is_visible: is_on_screen.get() && !matches!(state.overlay.get(), Overlay::Lightbox(..)),
   });
   let plays = move || is_animation() && play_state.get().plays();
+  // A Live Photo or Motion Photo (#2181): its motion plays over it on hover, or on the badge's
+  // request; with reduced motion only on request.
+  let maybe_live = (kind == MediaKind::Image)
+    .then(|| LiveMotion::of(&file))
+    .flatten();
+  if let Some(live) = maybe_live {
+    let is_lightbox_open = move || matches!(state.overlay.get(), Overlay::Lightbox(..));
+    live.play_while(move || {
+      !is_lightbox_open() && (live.is_requested.get() || (is_hovered.get() && !is_motion_reduced))
+    });
+  }
   // Its first frame stands in while it doesn't move; only without a thumbnail is one made from it.
   let still = RwSignal::new_local(None::<Rc<ObjectUrl>>);
   if kind != MediaKind::Video {
@@ -796,11 +808,13 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
               on:error=on_moving_error
             />
           })}
+          {maybe_live.map(|live| view! { <LiveVideo motion=live /> })}
           {(kind == MediaKind::Video).then(|| view! { <span class="media-play-badge" aria-hidden="true"><Icon name=IconName::Play /></span> })}
           {move || has_badge().then(|| view! { <span class="media-gif-badge" aria-hidden="true">{badge.clone()}</span> })}
           {maybe_duration.map(|duration| view! { <span class="media-duration" aria-hidden="true">{duration}</span> })}
           {maybe_hidden.map(|hidden| view! { <span class="media-more" aria-hidden="true">{format!("+{hidden}")}</span> })}
         </button>
+        {maybe_live.map(|live| view! { <LiveBadge motion=live /> })}
         {move || can_toggle().then(|| view! {
           <button
             class="media-motion"

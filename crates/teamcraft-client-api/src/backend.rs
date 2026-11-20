@@ -892,6 +892,12 @@ pub trait ChatBackend {
   fn poll_limits(&self) -> crate::polls::PollLimits {
     crate::polls::PollLimits::default()
   }
+  /// Whether and how large a motion part of a Live Photo or Motion Photo the user may send (issue
+  /// #2181): what the server published, else the built-in limits. The phones check it before
+  /// they take the clip out of the picture.
+  fn motion_limits(&self) -> teamcraft_proto::MotionLimits {
+    teamcraft_proto::MotionLimits::default()
+  }
   /// Files saved to disk, newest first: the app's downloads list. `None` where there is no list
   /// (the browser keeps its own) and while a backend that asks the core waits for the answer.
   fn downloads(&self) -> Option<Vec<crate::actions::DownloadEntry>> {

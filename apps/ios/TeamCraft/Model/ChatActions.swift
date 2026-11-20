@@ -273,6 +273,9 @@ struct PickedFile: Equatable, Identifiable {
   /// Its ID in the composer's draft (#1220), chosen as it is attached: sending it takes the draft's
   /// upload where there is one, and reads `path` otherwise.
   var maybeDraftId: String?
+  /// The paired video of a Live Photo (#2181), converted to H.264 MP4 beside the picture: it goes
+  /// with the picture as its motion part.
+  var maybeMotion: PickedMotion?
 
   var id: String { path }
 
@@ -286,12 +289,27 @@ struct PickedFile: Equatable, Identifiable {
     if let duration = maybeDurationMs { object["duration_ms"] = duration }
     if let waveform = maybeWaveform { object["waveform"] = waveform.map { Int($0) } }
     if let draftId = maybeDraftId { object["draft_id"] = draftId }
+    if let motion = maybeMotion { object["motion"] = motion.object }
     return object
   }
 
   /// A draft's file ID as the core reads it: 32 lowercase hex digits (`ClientMessageId`).
   static func newDraftId() -> String {
     UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+  }
+}
+
+/// The motion part of a picked picture (#2181), staged beside it for the core to read.
+struct PickedMotion: Equatable {
+  let path: String
+  let mediaType: String
+  var maybeDurationMs: Int64? = nil
+
+  /// The core's `OutgoingMotion`.
+  var object: [String: Any] {
+    var object: [String: Any] = ["media_type": mediaType, "source": ["kind": "path", "path": path]]
+    if let duration = maybeDurationMs { object["duration_ms"] = duration }
+    return object
   }
 }
 

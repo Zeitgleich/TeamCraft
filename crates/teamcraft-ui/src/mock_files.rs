@@ -171,6 +171,7 @@ pub(super) fn demo_files(conversation: ConversationId, messages: &[Message]) -> 
       maybe_duration_ms: (file.id == STANDUP_NOTES.id).then_some(STANDUP_NOTES_MS),
       maybe_waveform: None,
       maybe_content_sha256: None,
+      maybe_motion: None,
     }));
   }
   let maybe_large_log_message = messages
@@ -194,6 +195,7 @@ pub(super) fn demo_files(conversation: ConversationId, messages: &[Message]) -> 
       maybe_duration_ms: None,
       maybe_waveform: None,
       maybe_content_sha256: None,
+      maybe_motion: None,
     });
   }
   files

@@ -515,6 +515,7 @@ mod tests {
       maybe_dimensions: None,
       maybe_duration_ms: None,
       maybe_waveform: None,
+      maybe_motion: None,
     }
   }
 }

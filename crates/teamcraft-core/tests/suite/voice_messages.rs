@@ -102,6 +102,7 @@ fn voice(conversation: ConversationId, bytes: &[u8]) -> OutgoingMessage {
       maybe_duration_ms: Some(DURATION_MS),
       maybe_waveform: Some(WAVEFORM.to_vec()),
       maybe_draft_id: None,
+      maybe_motion: None,
     }],
     link_preview: Default::default(),
   }

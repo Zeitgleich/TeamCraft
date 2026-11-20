@@ -1774,17 +1774,23 @@ impl Core {
     priority: AttachmentPriority,
     reply: oneshot::Sender<Result<SecretBytes, String>>,
   ) {
-    let maybe_reference = self
+    let maybe_viewed = self
       .backend
       .as_ref()
-      .and_then(|backend| backend.attachment_ref(conversation, message, file_id));
-    let Some(reference) = maybe_reference else {
+      .and_then(|backend| backend.viewed_file(conversation, message, file_id));
+    let Some((reference, max_bytes)) = maybe_viewed else {
       drop(reply.send(Err("no such file in this conversation".to_owned())));
       return;
     };
     // A closed reply channel (the caller gave up) needs nothing.
     let deliver = move |opened: Result<SecretBytes, String>| drop(reply.send(opened));
-    self.downloads.view(reference, priority.into(), Box::new(deliver));
+    self.downloads.view_capped_while(
+      reference,
+      max_bytes,
+      priority.into(),
+      Box::new(deliver),
+      Box::new(|| true),
+    );
   }
 
   /// Starts the downloads that may run now.
