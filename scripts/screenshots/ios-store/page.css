@@ -1,0 +1,775 @@
+/* App Store screenshots (scripts/screenshots/ios-store.mjs). Colours are the app's light theme
+   (apps/ios/TeamCraft/Design/Theme.swift); the backdrop is the brand navy of the Play feature
+   graphic (scripts/screenshots/feature_graphic.py). Sizes are iOS points: the canvas is the
+   device's screen in points, captured at its scale (iPhone 6.9": 440 x 956 @3x, iPad 13":
+   1032 x 1376 @2x). */
+
+:root {
+  --accent: #005dfc;
+  --accent-soft: #e3edff;
+  --background: #f2f2f7;
+  --surface: #ffffff;
+  --text: #1d1d1d;
+  --muted: #545454;
+  --faint: #8a8a8e;
+  --border: #dddddd;
+  --separator: rgba(60, 60, 67, 0.18);
+  --badge: #c8441f;
+  --own-bubble: #005dfc;
+  --other-bubble: #ebebeb;
+  --online: #34c759;
+  --away: #ff9f0a;
+  --fill: rgba(118, 118, 128, 0.12);
+  --navy-0: #0b2a66;
+  --navy-1: #081736;
+  --navy-2: #050b19;
+  --highlight: #4fb8ff;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  background: var(--navy-2);
+  font-family: Inter, "SF Pro Text", system-ui, sans-serif;
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+  color: var(--text);
+  overflow: hidden;
+}
+
+/* ---- Canvas, caption, device ---- */
+
+/* Fixed at the page's corner: the banners are wider than the earlier canvases, and a canvas in
+   the flow moved down once one was drawn. */
+.canvas {
+  position: fixed;
+  top: 0;
+  left: 0;
+  overflow: hidden;
+  background: radial-gradient(120% 70% at 50% 18%, var(--navy-0) 0%, var(--navy-1) 55%, var(--navy-2) 100%);
+}
+
+.canvas.iphone { width: 440px; height: 956px; }
+.canvas.ipad { width: 1032px; height: 1376px; }
+
+.caption {
+  position: absolute;
+  left: 0;
+  right: 0;
+  text-align: center;
+  color: #f2f5fa;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+}
+
+.caption em { font-style: normal; color: var(--highlight); }
+
+.iphone .caption { top: 46px; padding: 0 28px; font-size: 34px; line-height: 1.12; }
+.ipad .caption { top: 64px; padding: 0 120px; font-size: 54px; line-height: 1.1; }
+
+.device {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #1b1c1f;
+  box-shadow:
+    0 0 0 1.5px #3a3b40,
+    0 30px 80px rgba(0, 0, 0, 0.55),
+    0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.iphone .device { top: 190px; width: 352px; height: 746px; border-radius: 58px; padding: 8px; }
+.ipad .device { top: 210px; width: 870px; height: 1149px; border-radius: 44px; padding: 16px; }
+
+.screen {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.iphone .screen { border-radius: 50px; }
+.ipad .screen { border-radius: 28px; }
+
+/* The app at its real size in points, scaled into the device. */
+.ui {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.iphone .ui { width: 440px; height: 956px; transform: scale(calc(336 / 440)); }
+/* The iPad's UI is drawn at 3/4 of its points, so its text stays readable in the store's small
+   previews. */
+.ipad .ui { width: 774px; height: 1032px; transform: scale(calc(838 / 774)); }
+
+/* ---- System chrome ---- */
+
+.status-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 62px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 38px 0 52px;
+  font-size: 18px;
+  font-weight: 600;
+  z-index: 20;
+}
+
+.ipad .status-bar { height: 32px; padding: 0 28px; font-size: 15px; }
+
+.status-bar .right { display: flex; gap: 7px; align-items: center; }
+.status-bar svg { display: block; fill: currentColor; }
+
+.group-face { position: relative; width: 52px; height: 52px; flex: none; }
+.group-face .avatar { position: absolute; box-shadow: 0 0 0 2.5px var(--surface); }
+.group-face .avatar:first-child { left: 0; top: 0; }
+.group-face .avatar:last-child { right: 0; bottom: 0; }
+
+.island {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  width: 126px;
+  height: 37px;
+  margin-left: -63px;
+  border-radius: 19px;
+  background: #000;
+  z-index: 30;
+}
+
+.home-indicator {
+  position: absolute;
+  bottom: 8px;
+  left: 50%;
+  width: 150px;
+  height: 5px;
+  margin-left: -75px;
+  border-radius: 3px;
+  background: #111;
+  z-index: 30;
+}
+
+.ipad .home-indicator { width: 240px; margin-left: -120px; }
+
+/* ---- Shared parts ---- */
+
+.icon { width: 24px; height: 24px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+
+.avatar {
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: #fff;
+  font-weight: 600;
+  position: relative;
+}
+
+.avatar .dot {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 30%;
+  height: 30%;
+  border-radius: 50%;
+  border: 2.5px solid var(--surface);
+}
+
+.dot.online { background: var(--online); }
+.dot.away { background: var(--away); }
+.dot.offline { background: #fff; box-shadow: inset 0 0 0 2px #9a9aa0; }
+
+.badge {
+  min-width: 22px;
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 11px;
+  background: var(--badge);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  display: grid;
+  place-items: center;
+}
+
+.badge.mention { background: var(--accent); }
+
+.glass {
+  background: rgba(255, 255, 255, 0.78);
+  backdrop-filter: blur(20px) saturate(1.6);
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.1), 0 8px 28px rgba(0, 0, 0, 0.12);
+}
+
+/* ---- Lists (chats, channels) ---- */
+
+.list-screen { position: absolute; inset: 0; background: var(--surface); }
+
+.toolbar {
+  position: absolute;
+  top: 62px;
+  left: 16px;
+  right: 16px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.ipad .toolbar { top: 36px; }
+
+.round-button {
+  width: 44px;
+  height: 44px;
+  border-radius: 22px;
+  display: grid;
+  place-items: center;
+  color: var(--text);
+}
+
+.large-title {
+  position: absolute;
+  top: 112px;
+  left: 20px;
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.ipad .large-title { top: 86px; }
+
+.search {
+  position: absolute;
+  top: 162px;
+  left: 16px;
+  right: 16px;
+  height: 40px;
+  border-radius: 12px;
+  background: var(--fill);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  color: var(--faint);
+  font-size: 17px;
+}
+
+.ipad .search { top: 136px; }
+.search .icon { width: 20px; height: 20px; }
+
+.rows { position: absolute; top: 216px; left: 0; right: 0; bottom: 0; }
+.ipad .rows { top: 188px; }
+
+.section-title {
+  padding: 14px 20px 6px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--muted);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 20px;
+  position: relative;
+}
+
+.row.selected { background: var(--accent-soft); border-radius: 12px; margin: 0 8px; padding: 10px 12px; }
+
+.row .body { flex: 1; min-width: 0; }
+.row .top { display: flex; align-items: baseline; gap: 8px; }
+.row .name { flex: 1; font-size: 17px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row .time { font-size: 14px; color: var(--faint); }
+.row .bottom { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+.row .preview { flex: 1; font-size: 15px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row.unread .time { color: var(--accent); font-weight: 600; }
+.row.unread .preview { color: var(--text); }
+
+.row::after {
+  content: "";
+  position: absolute;
+  left: 76px;
+  right: 0;
+  bottom: 0;
+  border-bottom: 0.5px solid var(--separator);
+}
+
+.row.selected::after, .row.last::after, .row.channel::after { display: none; }
+
+.row.channel { padding: 9px 20px; gap: 12px; }
+.row.channel .name { font-weight: 500; }
+.row.channel.unread .name { font-weight: 700; }
+.row.channel .sigil { width: 28px; height: 28px; display: grid; place-items: center; color: var(--muted); }
+.row.channel .sigil .icon { width: 22px; height: 22px; }
+
+.chips { display: flex; gap: 8px; padding: 6px 20px 8px; }
+.chip {
+  padding: 7px 14px;
+  border-radius: 17px;
+  font-size: 15px;
+  font-weight: 500;
+  background: var(--fill);
+}
+.chip.on { background: var(--text); color: #fff; }
+
+/* The floating tab bar of iOS 26. */
+.tab-bar {
+  position: absolute;
+  left: 20px;
+  right: 20px;
+  bottom: 30px;
+  height: 66px;
+  border-radius: 33px;
+  display: flex;
+  justify-content: space-around;
+  align-items: center;
+  padding: 0 8px;
+  z-index: 10;
+}
+
+.tab {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text);
+  padding: 7px 0 6px;
+  border-radius: 26px;
+  position: relative;
+}
+
+.tab.on { color: var(--accent); background: rgba(0, 0, 0, 0.06); }
+.tab .icon { width: 26px; height: 26px; }
+.tab .tab-badge {
+  position: absolute;
+  top: 2px;
+  left: calc(50% + 6px);
+  min-width: 19px;
+  height: 19px;
+  padding: 0 5px;
+  border-radius: 10px;
+  background: var(--badge);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  display: grid;
+  place-items: center;
+}
+
+.fab {
+  position: absolute;
+  right: 20px;
+  bottom: 110px;
+  width: 58px;
+  height: 58px;
+  border-radius: 29px;
+  background: var(--accent);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 8px 22px rgba(0, 93, 252, 0.35);
+  z-index: 10;
+}
+
+/* ---- Conversation ---- */
+
+.conversation { position: absolute; inset: 0; background: var(--surface); display: flex; flex-direction: column; }
+
+.nav-bar {
+  flex: none;
+  height: 116px;
+  padding: 62px 12px 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 0.5px solid var(--separator);
+}
+
+.ipad .nav-bar { height: 86px; padding-top: 32px; }
+
+.nav-bar .back { color: var(--accent); display: flex; align-items: center; }
+.nav-bar .back .icon { width: 28px; height: 28px; }
+.nav-bar .titles { flex: 1; text-align: center; min-width: 0; }
+.nav-bar .title { font-size: 17px; font-weight: 600; }
+.nav-bar .subtitle { font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nav-bar .actions { display: flex; gap: 4px; color: var(--accent); align-items: center; }
+.nav-bar .text-button { font-size: 17px; color: var(--accent); padding: 0 8px; }
+.nav-bar .spacer { width: 44px; }
+
+.feed { flex: 1; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; padding: 8px 0 120px; gap: 2px; }
+
+.day {
+  align-self: center;
+  margin: 6px 0 10px;
+  padding: 4px 12px;
+  border-radius: 12px;
+  background: var(--fill);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.message { display: flex; gap: 8px; padding: 3px 14px; align-items: flex-end; }
+.message.own { flex-direction: row-reverse; }
+.message .stack { display: flex; flex-direction: column; max-width: 76%; gap: 4px; }
+.message.own .stack { align-items: flex-end; }
+.message .author { font-size: 13px; font-weight: 600; color: var(--muted); padding: 6px 12px 0; }
+.message .author .at { font-weight: 400; color: var(--faint); margin-left: 6px; }
+.message .slot { width: 32px; flex: none; }
+
+.bubble {
+  padding: 9px 14px;
+  border-radius: 20px;
+  font-size: 17px;
+  line-height: 1.3;
+  background: var(--other-bubble);
+  color: var(--text);
+}
+
+.own .bubble { background: var(--own-bubble); color: #fff; }
+
+.picture {
+  width: 260px;
+  height: 170px;
+  border-radius: 18px;
+  overflow: hidden;
+  position: relative;
+  background: linear-gradient(135deg, #e9f0ff, #f8fbff);
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.12);
+}
+
+/* A website mock-up drawn in CSS: the image a designer shares. */
+.picture .site-nav { position: absolute; top: 12px; left: 14px; right: 14px; height: 8px; display: flex; gap: 6px; }
+.picture .site-nav i { display: block; height: 8px; border-radius: 4px; background: #c6d4ee; width: 26px; }
+.picture .site-nav i:first-child { background: var(--accent); width: 40px; margin-right: auto; }
+.picture .hero { position: absolute; top: 34px; left: 14px; right: 14px; height: 72px; border-radius: 10px; background: linear-gradient(120deg, #0b2a66, #005dfc 60%, #2cb7fd); }
+.picture .hero::before { content: ""; position: absolute; left: 14px; top: 18px; width: 110px; height: 10px; border-radius: 5px; background: rgba(255, 255, 255, 0.9); }
+.picture .hero::after { content: ""; position: absolute; left: 14px; top: 36px; width: 70px; height: 14px; border-radius: 7px; background: #0cd5c0; }
+.picture .cards { position: absolute; left: 14px; right: 14px; bottom: 14px; height: 42px; display: flex; gap: 8px; }
+.picture .cards i { flex: 1; border-radius: 8px; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12); }
+.picture .file { position: absolute; left: 8px; bottom: 8px; padding: 3px 8px; border-radius: 8px; background: rgba(0, 0, 0, 0.55); color: #fff; font-size: 12px; font-weight: 500; }
+
+.reactions { display: flex; gap: 6px; flex-wrap: wrap; }
+.reaction {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 9px;
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--border);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.reaction.mine { background: var(--accent-soft); box-shadow: inset 0 0 0 1.5px var(--accent); color: var(--accent); }
+.reaction .emoji { font-family: "Noto Color Emoji", "Apple Color Emoji", sans-serif; font-size: 15px; font-weight: 400; }
+.emoji { font-family: "Noto Color Emoji", "Apple Color Emoji", sans-serif; }
+
+.replies { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 600; color: var(--accent); padding: 2px 4px; }
+.replies .faces { display: flex; }
+.replies .faces .avatar { width: 20px; height: 20px; font-size: 9px; margin-right: -5px; box-shadow: 0 0 0 1.5px var(--surface); }
+.replies .faces + span { margin-left: 6px; }
+
+.thread-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.thread-divider::after { content: ""; flex: 1; border-bottom: 0.5px solid var(--separator); }
+
+.composer {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 30px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  z-index: 10;
+}
+
+.composer .plus { width: 48px; height: 48px; border-radius: 24px; display: grid; place-items: center; color: var(--text); }
+.composer .field {
+  flex: 1;
+  height: 48px;
+  border-radius: 24px;
+  display: flex;
+  align-items: center;
+  padding: 0 8px 0 18px;
+  font-size: 17px;
+  color: var(--faint);
+  gap: 8px;
+}
+.composer .field span { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.composer .field .icon { color: var(--muted); }
+
+.e2ee-note {
+  align-self: center;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 24px 10px;
+  padding: 6px 12px;
+  border-radius: 12px;
+  background: var(--fill);
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+}
+.e2ee-note .icon { width: 16px; height: 16px; }
+
+/* ---- Sheets ---- */
+
+.scrim { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.3); z-index: 40; }
+
+.sheet {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  border-radius: 40px;
+  background: var(--surface);
+  z-index: 50;
+  padding: 10px 24px 34px;
+  box-shadow: 0 -10px 40px rgba(0, 0, 0, 0.18);
+}
+
+.ipad .sheet.form {
+  left: 50%;
+  right: auto;
+  top: 50%;
+  bottom: auto;
+  width: 480px;
+  transform: translate(-50%, -50%);
+  border-radius: 28px;
+  padding-bottom: 28px;
+}
+
+.grabber { width: 40px; height: 5px; border-radius: 3px; background: #c7c7cc; margin: 0 auto 14px; }
+
+.sheet-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+.sheet-header .close { width: 40px; height: 40px; border-radius: 20px; background: var(--fill); display: grid; place-items: center; color: var(--muted); }
+.sheet-header .close .icon { width: 20px; height: 20px; }
+.sheet-title { font-size: 22px; font-weight: 700; }
+.sheet-subtitle { font-size: 15px; color: var(--muted); margin-top: 2px; }
+
+.preview-tile {
+  height: 300px;
+  border-radius: 24px;
+  overflow: hidden;
+  position: relative;
+  background: radial-gradient(80% 90% at 30% 30%, #2a5bd7 0%, #10306f 55%, #081736 100%);
+  display: grid;
+  place-items: center;
+}
+
+.preview-tile .avatar { width: 112px; height: 112px; font-size: 40px; box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.25); }
+.preview-tile .label { position: absolute; left: 14px; bottom: 14px; padding: 5px 10px; border-radius: 10px; background: rgba(0, 0, 0, 0.45); color: #fff; font-size: 14px; font-weight: 500; }
+.preview-tile .lock { position: absolute; right: 14px; top: 14px; padding: 5px 10px; border-radius: 10px; background: rgba(0, 0, 0, 0.45); color: #fff; font-size: 13px; font-weight: 500; display: flex; align-items: center; gap: 5px; }
+.preview-tile .lock .icon { width: 15px; height: 15px; }
+
+.toggles { display: flex; justify-content: center; gap: 22px; margin: 22px 0; }
+.toggle { display: flex; flex-direction: column; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); font-weight: 500; }
+.toggle .knob { width: 64px; height: 64px; border-radius: 32px; display: grid; place-items: center; background: var(--fill); color: var(--text); }
+.toggle .knob.on { background: var(--accent-soft); color: var(--accent); }
+.toggle .knob .icon { width: 28px; height: 28px; }
+
+.in-call { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; font-size: 15px; color: var(--muted); }
+.in-call .faces { display: flex; }
+.in-call .faces .avatar { width: 30px; height: 30px; font-size: 12px; margin-right: -8px; box-shadow: 0 0 0 2px var(--surface); }
+.in-call .faces + span { margin-left: 8px; }
+
+.primary {
+  height: 54px;
+  border-radius: 27px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 18px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+/* ---- Settings (a form sheet) ---- */
+
+.settings { position: absolute; inset: 0; background: var(--background); }
+.sheet-card {
+  position: absolute;
+  top: 70px;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  border-radius: 38px 38px 0 0;
+  background: var(--background);
+  box-shadow: 0 -6px 30px rgba(0, 0, 0, 0.15);
+  z-index: 50;
+}
+
+.ipad .sheet-card { top: 50%; left: 50%; right: auto; bottom: auto; width: 520px; height: 860px; transform: translate(-50%, -50%); border-radius: 28px; }
+
+.inline-bar { display: flex; align-items: center; justify-content: center; height: 64px; position: relative; font-size: 17px; font-weight: 600; }
+.inline-bar .done { position: absolute; right: 16px; top: 10px; height: 44px; padding: 0 18px; border-radius: 22px; background: var(--accent); color: #fff; display: grid; place-items: center; font-weight: 600; }
+
+.form { padding: 4px 20px; }
+.group-label { font-size: 13px; color: var(--muted); padding: 14px 16px 6px; text-transform: uppercase; letter-spacing: 0.02em; }
+.group { background: var(--surface); border-radius: 26px; overflow: hidden; margin-bottom: 18px; }
+.cell { display: flex; align-items: center; gap: 14px; padding: 12px 16px; min-height: 52px; position: relative; }
+.cell + .cell::before { content: ""; position: absolute; left: 62px; right: 0; top: 0; border-top: 0.5px solid var(--separator); }
+.cell.plain + .cell.plain::before { left: 16px; }
+.cell .tile { width: 32px; height: 32px; border-radius: 8px; display: grid; place-items: center; color: #fff; flex: none; }
+.cell .tile .icon { width: 20px; height: 20px; stroke-width: 2; }
+.cell .texts { flex: 1; min-width: 0; }
+.cell .label { font-size: 17px; }
+.cell .summary { font-size: 14px; color: var(--muted); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cell .value { font-size: 17px; color: var(--faint); }
+.cell .chev { color: #c4c4c7; width: 18px; height: 18px; stroke-width: 2.4; }
+.cell .danger { color: #d70015; font-size: 17px; flex: 1; text-align: center; }
+.cell.profile .avatar { width: 60px; height: 60px; font-size: 22px; }
+.cell.profile .label { font-size: 20px; font-weight: 600; }
+.cell.profile .summary { display: flex; align-items: center; gap: 6px; }
+.cell.profile .summary .presence { width: 10px; height: 10px; border-radius: 5px; background: var(--online); }
+.radio { width: 22px; height: 22px; color: var(--accent); }
+
+/* ---- iPad split view ---- */
+
+.split { position: absolute; inset: 0; display: flex; background: var(--surface); }
+.sidebar { position: relative; width: 300px; flex: none; background: #f7f7f9; border-right: 0.5px solid var(--separator); }
+.sidebar .rows { top: 188px; }
+.sidebar .tab-bar { left: 14px; right: 14px; bottom: 24px; }
+.detail { position: relative; flex: 1; min-width: 0; }
+.detail .nav-bar { justify-content: space-between; }
+.detail .composer { left: 16px; right: 16px; }
+.ipad .feed { padding-bottom: 104px; }
+.ipad .message .stack { max-width: 82%; }
+
+/* ---- Title card ---- */
+
+.intro { position: absolute; inset: 0; color: #f2f5fa; }
+.intro-mark svg { display: block; width: 100%; height: 100%; }
+.intro-title { font-weight: 800; letter-spacing: -0.03em; line-height: 1.04; }
+.intro-title em { font-style: normal; color: var(--highlight); }
+.intro-body { text-align: right; font-weight: 500; letter-spacing: -0.02em; line-height: 1.16; text-wrap: balance; }
+.intro-body em { font-style: normal; font-weight: 800; color: var(--highlight); }
+.intro-arrow { position: absolute; fill: none; stroke: #f2f5fa; stroke-linecap: round; stroke-linejoin: round; }
+
+.iphone .intro-mark { position: absolute; top: 44px; left: 32px; width: 64px; height: 64px; }
+.iphone .intro-title { position: absolute; top: 150px; left: 32px; right: 32px; font-size: 58px; }
+.iphone .intro-body { position: absolute; left: 60px; right: 32px; bottom: 150px; font-size: 36px; }
+.iphone .intro-arrow { left: 32px; right: 32px; bottom: 72px; width: 376px; height: 36px; stroke-width: 3; }
+
+.ipad .intro-mark { position: absolute; top: 80px; left: 80px; width: 120px; height: 120px; }
+.ipad .intro-title { position: absolute; top: 260px; left: 80px; right: 80px; font-size: 112px; }
+.ipad .intro-body { position: absolute; left: 260px; right: 80px; bottom: 220px; font-size: 64px; }
+.ipad .intro-arrow { left: 80px; bottom: 110px; width: 872px; height: 48px; stroke-width: 4; }
+
+/* ---- Product page header and search result picture ---- */
+
+.canvas.header { width: 2622px; height: 1475px; }
+.canvas.search-result { width: 1920px; height: 1280px; }
+.canvas.header, .canvas.search-result {
+  background: radial-gradient(70% 90% at 50% 45%, var(--navy-0) 0%, var(--navy-1) 55%, var(--navy-2) 100%);
+}
+
+.banner { position: absolute; inset: 0; }
+
+/* The phones keep their own layout (.iphone) and are scaled as a whole. */
+.banner-phone { position: absolute; width: 440px; height: 956px; transform-origin: 50% 50%; }
+.banner-phone .device { top: 105px; }
+
+/* The outer phones sit behind the inner ones, darkened (opaque: no bezel shows through). */
+.header .banner-phone.far-left { left: 20px; top: 380px; transform: scale(1.25) rotate(-8deg); filter: brightness(0.5); z-index: 0; }
+.header .banner-phone.near-left { left: 440px; top: 220px; transform: scale(1.35) rotate(-4deg); z-index: 1; }
+.header .banner-phone.near-right { right: 440px; top: 220px; transform: scale(1.35) rotate(4deg); z-index: 1; }
+.header .banner-phone.far-right { right: 20px; top: 380px; transform: scale(1.25) rotate(8deg); filter: brightness(0.5); z-index: 0; }
+
+/* App Store shows the header's middle column and only its upper half on an iPhone (the app's
+   name and icon cover the rest): the brand sits between about 20 % and 48 % of the height. */
+.banner-brand {
+  position: absolute;
+  z-index: 2;
+  left: 50%;
+  top: 35%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 50px 80px;
+  border-radius: 64px;
+  background: radial-gradient(closest-side, rgba(5, 11, 25, 0.92), rgba(5, 11, 25, 0.75) 70%, rgba(5, 11, 25, 0));
+}
+.banner-mark { width: 150px; height: 150px; }
+.banner-mark svg, .banner-wordmark svg { display: block; width: 100%; height: 100%; }
+.banner-wordmark { width: 470px; height: 81px; margin-top: 28px; }
+.banner-claim { margin-top: 26px; color: var(--highlight); font-size: 50px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.12; max-width: 600px; text-wrap: balance; }
+
+.banner-title {
+  position: absolute;
+  top: 70px;
+  left: 260px;
+  right: 260px;
+  text-align: center;
+  color: #f2f5fa;
+  font-size: 66px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.12;
+  text-wrap: balance;
+}
+.banner-title em { font-style: normal; color: var(--highlight); }
+.search-result .banner-phone { top: 230px; transform: scale(1.08); transform-origin: 50% 0; }
+.search-result .banner-phone.row-left { left: 290px; }
+.search-result .banner-phone.row-middle { left: 740px; }
+.search-result .banner-phone.row-right { left: 1190px; }
+
+/* ---- Google Play: the iPhone's scenes on a Pixel ---- */
+
+.canvas.android { width: 432px; height: 960px; }
+.android .device { top: 184px; width: 352px; height: 763px; border-radius: 46px; padding: 8px; background: #202124; }
+.android .screen { border-radius: 38px; }
+/* 9:20 like the Pixel's screen. */
+.android .ui { height: 978px; }
+.android .status-bar { height: 56px; padding: 6px 30px 0 34px; font-size: 18px; font-weight: 500; letter-spacing: 0.01em; }
+.android .status-bar .right { gap: 7px; }
+.android .status-bar .time { font-weight: 700; font-size: 19px; }
+.pixel-battery {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-width: 36px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 7px;
+  background: #1f1f1f;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+.pixel-battery::after { content: ""; position: absolute; right: -4px; top: 6px; width: 2.5px; height: 8px; border-radius: 0 2px 2px 0; background: #1f1f1f; opacity: 0.5; }
+.camera-hole { position: absolute; top: 18px; left: 50%; width: 26px; height: 26px; margin-left: -13px; border-radius: 50%; background: #0b0b0c; z-index: 30; }
+.android .home-indicator { width: 120px; height: 5px; margin-left: -60px; bottom: 9px; background: #1f1f1f; }

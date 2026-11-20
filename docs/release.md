@@ -513,6 +513,36 @@ TC_PROFILE_NOTIFICATIONS=… TC_PROFILE_SHARE=… TC_PROFILE_WIDGET=…
 scripts/archive-testflight.sh --no-upload` exports the `.ipa` to `apps/ios/build/export` without
 uploading.
 
+### App Store screenshots
+
+The listing's screenshots, a title card and the app's scenes (iPhone 6.3", 1206 × 2622, and iPad 13", 2064 × 2752, which App Store
+Connect requires, plus iPhone 6.9", 1320 × 2868; English and German; App Store Connect scales them
+down for smaller devices) are made when the listing changes
+and are not kept in the repository. They show the Google Play screenshots' scenes and placeholder
+texts, drawn as HTML in the iOS app's light theme (`scripts/screenshots/ios-store/scenes.js`, the
+app's own icons, a caption above the device) and taken in headless Chrome, as there is no iOS
+simulator on Linux. When a screen of the app changes a lot, update its scene.
+
+```sh
+scripts/screenshots/ios-store.sh <dir>    # writes <dir>/<en-US|de-DE>/<iphone-6.3|iphone-6.9|ipad-13|play-phone>/*.jpg, header/ and search/ as PNG
+```
+
+Upload them by hand in App Store Connect (the version → drag a folder's pictures onto the iPhone
+and iPad boxes per language), or with the TestFlight upload's API key, which replaces the 6.3", 6.9"
+and 13" screenshots of every language the version in preparation has:
+
+```sh
+ASC_KEY_ID=… ASC_ISSUER_ID=… ASC_KEY_PATH=AuthKey_….p8 apps/ios/scripts/upload-screenshots.py <dir>
+```
+
+`--dry-run` checks the pictures' sizes without uploading. `play-phone/` holds the same scenes on
+a Pixel (Android status bar and camera hole, 1080 × 2400) for the Google Play listing's phone
+screenshots, uploaded by hand in the Play Console. The product page's creative assets,
+`header/` (5244 × 2950, the brand and the claim in its middle, as the sides are cut off on narrow
+screens) and `search/` (3840 × 2560, three phones with the app), go in by hand: the version →
+*Header and search results*. Needs Node 22+, Chrome, python3 with
+Pillow (and `cryptography` for the upload), and the fonts Inter and Noto Color Emoji.
+
 ## App Store
 
 `app-store.yml` sends a release's iOS build from TestFlight to App Review, the way `google-play.yml`
@@ -566,7 +596,7 @@ apps/ios/scripts/app-store-submit.py --version X.Y.Z --dry-run` (python3 with `c
 Set up once, in App Store Connect: the listing of the first version complete (screenshots, texts,
 privacy, age rating, App Review contact and sign-in), since every new version copies it; the API key
 needs the role *App Manager* (it has it for TestFlight). Screenshots are changed in the version in
-preparation and carried over from then on.
+preparation ([App Store screenshots](#app-store-screenshots)) and carried over from then on.
 
 ## Debug symbols
 
