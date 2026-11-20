@@ -10,6 +10,9 @@ const SCENES = {
   iphone: ["intro", "chats", "channel", "thread", "spaces", "join-call", "settings"],
   // On iPad the split view shows the spaces next to the channel, so "spaces" has no picture of its own.
   ipad: ["intro", "chats", "channel", "thread", "join-call", "settings"],
+  // The product page's creative assets: the header and the search result picture.
+  header: ["header"],
+  "search-result": ["search"],
 };
 
 const ME = "u1";
@@ -196,7 +199,7 @@ let icons = {};
 let t = TEXTS.en;
 
 /** Draws one screenshot into #canvas; `iconPaths` maps icon names to SVG path data. */
-window.renderScene = ({ device, lang, scene }, iconPaths, brandMark) => {
+window.renderScene = ({ device, lang, scene }, iconPaths, brand) => {
   icons = iconPaths;
   t = TEXTS[lang];
   if (!t) throw new Error(`unknown language ${lang}`);
@@ -204,19 +207,10 @@ window.renderScene = ({ device, lang, scene }, iconPaths, brandMark) => {
   document.documentElement.lang = lang;
   const canvas = document.getElementById("canvas");
   canvas.className = `canvas ${device}`;
-  if (scene === "intro") {
-    canvas.innerHTML = introCard(brandMark);
-    return document.fonts.ready.then(() => true);
-  }
-  const ui = device === "ipad" ? IPAD[scene]() : IPHONE[scene]();
-  canvas.innerHTML = `
-    <header class="caption">${t.captions[scene]}</header>
-    <div class="device"><div class="screen"><div class="ui">
-      ${ui}
-      ${statusBar(device)}
-      ${device === "iphone" ? `<div class="island"></div>` : ""}
-      <div class="home-indicator"></div>
-    </div></div></div>`;
+  if (scene === "intro") canvas.innerHTML = introCard(brand.mark);
+  else if (scene === "header") canvas.innerHTML = headerBanner(brand);
+  else if (scene === "search") canvas.innerHTML = searchBanner();
+  else canvas.innerHTML = `<header class="caption">${t.captions[scene]}</header>${deviceFrame(device, scene)}`;
   applyStyles();
   return document.fonts.ready.then(() => true);
 };
@@ -244,6 +238,46 @@ const IPAD = {
 };
 
 /** The title card: mark, name and claim on the left, what it does on the right, a swipe arrow. */
+/** A device with a scene of the app on its screen. */
+function deviceFrame(device, scene) {
+  const ui = device === "ipad" ? IPAD[scene]() : IPHONE[scene]();
+  return `<div class="device"><div class="screen"><div class="ui">
+      ${ui}
+      ${statusBar(device)}
+      ${device === "iphone" ? `<div class="island"></div>` : ""}
+      <div class="home-indicator"></div>
+    </div></div></div>`;
+}
+
+/** An iPhone showing a scene, for the banners; `className` places it. */
+function phone(scene, className) {
+  return `<div class="banner-phone iphone ${className}">${deviceFrame("iphone", scene)}</div>`;
+}
+
+/**
+ * The product page header: the brand and the claim in the middle, which every device shows;
+ * the phones at the sides may be cut off on narrow screens.
+ */
+function headerBanner(brand) {
+  return `<section class="banner">
+    ${phone("channel", "far-left")}${phone("chats", "near-left")}
+    ${phone("thread", "near-right")}${phone("settings", "far-right")}
+    <div class="banner-brand">
+      <div class="banner-mark">${brand.mark}</div>
+      <div class="banner-wordmark">${brand.wordmark}</div>
+      <p class="banner-claim">${t.intro.claim}</p>
+    </div>
+  </section>`;
+}
+
+/** The search result picture: the claim and the app in use, in the middle. */
+function searchBanner() {
+  return `<section class="banner">
+    <h1 class="banner-title">${t.intro.body}</h1>
+    ${phone("chats", "row-left")}${phone("channel", "row-middle")}${phone("join-call", "row-right")}
+  </section>`;
+}
+
 function introCard(brandMark) {
   return `<section class="intro">
     <div class="intro-mark">${brandMark}</div>

@@ -39,8 +39,12 @@ html, body {
 
 /* ---- Canvas, caption, device ---- */
 
+/* Fixed at the page's corner: the banners are wider than the earlier canvases, and a canvas in
+   the flow moved down once one was drawn. */
 .canvas {
-  position: relative;
+  position: fixed;
+  top: 0;
+  left: 0;
   overflow: hidden;
   background: radial-gradient(120% 70% at 50% 18%, var(--navy-0) 0%, var(--navy-1) 55%, var(--navy-2) 100%);
 }
@@ -681,3 +685,62 @@ html, body {
 .ipad .intro-title { position: absolute; top: 260px; left: 80px; right: 80px; font-size: 112px; }
 .ipad .intro-body { position: absolute; left: 260px; right: 80px; bottom: 220px; font-size: 64px; }
 .ipad .intro-arrow { left: 80px; bottom: 110px; width: 872px; height: 48px; stroke-width: 4; }
+
+/* ---- Product page header and search result picture ---- */
+
+.canvas.header { width: 2622px; height: 1475px; }
+.canvas.search-result { width: 1920px; height: 1280px; }
+.canvas.header, .canvas.search-result {
+  background: radial-gradient(70% 90% at 50% 45%, var(--navy-0) 0%, var(--navy-1) 55%, var(--navy-2) 100%);
+}
+
+.banner { position: absolute; inset: 0; }
+
+/* The phones keep their own layout (.iphone) and are scaled as a whole. */
+.banner-phone { position: absolute; width: 440px; height: 956px; transform-origin: 50% 50%; }
+.banner-phone .device { top: 105px; }
+
+/* The outer phones sit behind the inner ones, darkened (opaque: no bezel shows through). */
+.header .banner-phone.far-left { left: 90px; top: 380px; transform: scale(1.25) rotate(-8deg); filter: brightness(0.5); z-index: 0; }
+.header .banner-phone.near-left { left: 520px; top: 220px; transform: scale(1.35) rotate(-4deg); z-index: 1; }
+.header .banner-phone.near-right { right: 520px; top: 220px; transform: scale(1.35) rotate(4deg); z-index: 1; }
+.header .banner-phone.far-right { right: 90px; top: 380px; transform: scale(1.25) rotate(8deg); filter: brightness(0.5); z-index: 0; }
+
+.banner-brand {
+  position: absolute;
+  z-index: 2;
+  left: 50%;
+  top: 50%;
+  width: 760px;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 70px 40px;
+  border-radius: 64px;
+  background: radial-gradient(closest-side, rgba(5, 11, 25, 0.92), rgba(5, 11, 25, 0.75) 70%, rgba(5, 11, 25, 0));
+}
+.banner-mark { width: 220px; height: 220px; }
+.banner-mark svg, .banner-wordmark svg { display: block; width: 100%; height: 100%; }
+.banner-wordmark { width: 560px; height: 97px; margin-top: 44px; }
+.banner-claim { margin-top: 40px; color: var(--highlight); font-size: 58px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.12; text-wrap: balance; }
+
+.banner-title {
+  position: absolute;
+  top: 70px;
+  left: 260px;
+  right: 260px;
+  text-align: center;
+  color: #f2f5fa;
+  font-size: 66px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.12;
+  text-wrap: balance;
+}
+.banner-title em { font-style: normal; color: var(--highlight); }
+.search-result .banner-phone { top: 230px; transform: scale(1.08); transform-origin: 50% 0; }
+.search-result .banner-phone.row-left { left: 290px; }
+.search-result .banner-phone.row-middle { left: 740px; }
+.search-result .banner-phone.row-right { left: 1190px; }

@@ -1,6 +1,7 @@
 // Takes the App Store screenshots in headless Chrome: every scene of
 // scripts/screenshots/ios-store/scenes.js, per device and language, at the size App Store Connect
-// takes for that device (iPhone 6.9": 1320 x 2868, iPad 13": 2064 x 2752).
+// takes for that device (iPhone 6.9": 1320 x 2868, iPad 13": 2064 x 2752), and the product
+// page's header (5244 x 2950) and search result picture (3840 x 2560).
 //
 //   node scripts/screenshots/ios-store.mjs <output dir> [scene ...]
 //
@@ -19,6 +20,9 @@ const ROOT = join(HERE, "..", "..");
 const DEVICES = {
   iphone: { folder: "iphone-6.9", width: 440, height: 956, scale: 3 },
   ipad: { folder: "ipad-13", width: 1032, height: 1376, scale: 2 },
+  // The product page's creative assets (5244 x 2950 and 3840 x 2560).
+  header: { folder: "header", width: 2622, height: 1475, scale: 2 },
+  "search-result": { folder: "search", width: 1920, height: 1280, scale: 2 },
 };
 const LANGUAGES = ["en", "de"];
 
@@ -29,7 +33,10 @@ if (!out) {
 }
 
 const icons = iconPaths(readFileSync(join(ROOT, "crates/teamcraft-ui/src/components/icons.rs"), "utf8"));
-const mark = readFileSync(join(ROOT, "assets/brand/mark.svg"), "utf8");
+const brand = {
+  mark: readFileSync(join(ROOT, "assets/brand/mark.svg"), "utf8"),
+  wordmark: readFileSync(join(ROOT, "assets/brand/wordmark-dark.svg"), "utf8"),
+};
 const page = await launch();
 try {
   await page.goto(pathToFileURL(join(HERE, "ios-store", "page.html")).href);
@@ -42,7 +49,7 @@ try {
       mkdirSync(folder, { recursive: true });
       for (const [index, scene] of scenes[device].entries()) {
         if (only.length > 0 && !only.includes(scene)) continue;
-        await page.evaluate(`window.renderScene(${JSON.stringify({ device, lang, scene })}, ${JSON.stringify(icons)}, ${JSON.stringify(mark)})`);
+        await page.evaluate(`window.renderScene(${JSON.stringify({ device, lang, scene })}, ${JSON.stringify(icons)}, ${JSON.stringify(brand)})`);
         const file = join(folder, `${index + 1}-${scene}.png`);
         writeFileSync(file, await page.screenshot());
         console.log(file);
