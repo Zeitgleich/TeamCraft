@@ -771,7 +771,7 @@ there are no sound files and nothing to license; no sound is copied from another
 browser the synthesis is a chunk of its own that loads with the first sound. A sound
 plays for the message notifications the rules above let through, so a muted conversation, the level
 and do-not-disturb keep it quiet, as does the desktop's own do-not-disturb where the OS tells (GNOME,
-KDE; macOS Focus and Windows' do-not-disturb aren't readable, as for the ringtone); not during a
+KDE, Windows' notification state, a macOS Focus once allowed, as for the ringtone); not during a
 call. A burst of messages plays one sound (at most one every 2 s). With the app's sound or none, the
 notification itself is silent (macOS without a sound, Windows `<audio silent>`, freedesktop
 `suppress-sound`, the browser's `silent`), except in a browser tab nobody has touched yet: it can't
@@ -795,7 +795,7 @@ the system settings choose the sound (Android channels).
 conversation, the level "nothing" and do-not-disturb (except people on the allow list) keep it to the
 in-app card. Otherwise the ringtone plays (setting `plays_ringtone`, default on; a synthesized
 electric-piano arpeggio from `teamcraft_media::ringtone` on the default output; not during another
-call; not while the desktop's own do-not-disturb is on, where the OS tells: GNOME, KDE). With the
+call; not while the desktop's own do-not-disturb is on, where the OS tells: GNOME, KDE; Windows through `SHQueryUserNotificationState` (full-screen app, presentation mode, quiet time/Focus assist); macOS through `INFocusStatusCenter`, only when the build carries the Focus Status capability and the user allowed it at "Turn on"; an unanswered question never silences). With the
 window not in front (minimised, hidden to the tray, behind other windows), also when it leaves the
 front while the call rings, the call shows outside it and the window asks for attention: as the
 incoming-call window (setting `shows_call_window`, default on), a small borderless window above all

@@ -44,16 +44,26 @@ pub async fn set_ringtone(
   Ok(())
 }
 
-/// Whether the desktop asked for quiet: GNOME's or KDE's do-not-disturb. Windows' quiet state
-/// is only reachable through an `unsafe` Win32 call, which the crate forbids, and macOS Focus is
-/// not readable without the Communication Notifications entitlement; there the OS silences the
-/// notification and the in-app setting silences the ringtone. The message sound asks the same.
+/// Whether the desktop asked for quiet: GNOME's or KDE's do-not-disturb, Windows' notification
+/// state (a full-screen app, presentation mode, quiet time or Focus assist) and, where the user
+/// allowed it, a macOS Focus. A system that does not answer never silences (a missed call costs
+/// more than an unwanted ring). The message sound asks the same.
 pub(crate) async fn is_desktop_quiet(probe: &crate::attention::OsProbe) -> bool {
   #[cfg(target_os = "linux")]
   {
     probe.buses().is_do_not_disturb().await
   }
-  #[cfg(not(target_os = "linux"))]
+  #[cfg(windows)]
+  {
+    let _ = probe;
+    teamcraft_desktop_native::windows_notification_state().is_quiet()
+  }
+  #[cfg(target_os = "macos")]
+  {
+    let _ = probe;
+    teamcraft_desktop_native::focus_state().is_quiet()
+  }
+  #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
   {
     let _ = probe;
     false
