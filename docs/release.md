@@ -511,6 +511,22 @@ Checked locally on a Mac with the certificate and profiles installed:
 TC_PROFILE_NOTIFICATIONS=… TC_PROFILE_SHARE=… scripts/archive-testflight.sh --no-upload` exports
 the `.ipa` to `apps/ios/build/export` without uploading.
 
+### App Store screenshots
+
+The listing's screenshots live in `apps/ios/store/<locale>/screenshots/` (iPhone 6.9" and iPad
+13", English and German; [apps/ios/store/README.md](../apps/ios/store/README.md)), next to the
+Google Play listing in `apps/android/store`. They show the Play screenshots' scenes, drawn as HTML
+in the iOS app's light theme and taken in headless Chrome, as there is no iOS simulator on Linux:
+
+```sh
+scripts/screenshots/ios-store.sh
+```
+
+They change only with the listing, not with every release. Upload them by hand in App Store
+Connect, or with the TestFlight upload's API key to the version in preparation:
+`ASC_KEY_ID=… ASC_ISSUER_ID=… ASC_KEY_PATH=… apps/ios/scripts/upload-screenshots.py`
+(`--dry-run` checks the sizes without uploading).
+
 ## Debug symbols
 
 Shipped binaries carry no debug info and no symbol table (smaller downloads). Every release build
