@@ -522,7 +522,7 @@ app's own icons, a caption above the device) and taken in headless Chrome, as th
 simulator on Linux. When a screen of the app changes a lot, update its scene.
 
 ```sh
-scripts/screenshots/ios-store.sh <dir>    # writes <dir>/<en-US|de-DE>/<iphone-6.3|iphone-6.9|ipad-13>/*.jpg, header/ and search/ as PNG
+scripts/screenshots/ios-store.sh <dir>    # writes <dir>/<en-US|de-DE>/<iphone-6.3|iphone-6.9|ipad-13|play-phone>/*.jpg, header/ and search/ as PNG
 ```
 
 Upload them by hand in App Store Connect (the version → drag a folder's pictures onto the iPhone
@@ -533,7 +533,9 @@ and 13" screenshots of every language the version in preparation has:
 ASC_KEY_ID=… ASC_ISSUER_ID=… ASC_KEY_PATH=AuthKey_….p8 apps/ios/scripts/upload-screenshots.py <dir>
 ```
 
-`--dry-run` checks the pictures' sizes without uploading. The product page's creative assets,
+`--dry-run` checks the pictures' sizes without uploading. `play-phone/` holds the same scenes on
+a Pixel (Android status bar and camera hole, 1080 × 2400) for the Google Play listing's phone
+screenshots, uploaded by hand in the Play Console. The product page's creative assets,
 `header/` (5244 × 2950, the brand and the claim in its middle, as the sides are cut off on narrow
 screens) and `search/` (3840 × 2560, three phones with the app), go in by hand: the version →
 *Header and search results*. Needs Node 22+, Chrome, python3 with

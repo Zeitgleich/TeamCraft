@@ -745,3 +745,15 @@ html, body {
 .search-result .banner-phone.row-left { left: 290px; }
 .search-result .banner-phone.row-middle { left: 740px; }
 .search-result .banner-phone.row-right { left: 1190px; }
+
+/* ---- Google Play: the iPhone's scenes on a Pixel ---- */
+
+.canvas.android { width: 432px; height: 960px; }
+.android .device { top: 184px; width: 352px; height: 763px; border-radius: 46px; padding: 8px; background: #202124; }
+.android .screen { border-radius: 38px; }
+/* 9:20 like the Pixel's screen. */
+.android .ui { height: 978px; }
+.android .status-bar { height: 56px; padding: 6px 30px 0 34px; font-size: 18px; font-weight: 500; letter-spacing: 0.01em; }
+.android .status-bar .right { gap: 8px; }
+.camera-hole { position: absolute; top: 18px; left: 50%; width: 26px; height: 26px; margin-left: -13px; border-radius: 50%; background: #0b0b0c; z-index: 30; }
+.android .home-indicator { width: 120px; height: 5px; margin-left: -60px; bottom: 9px; background: #1f1f1f; }

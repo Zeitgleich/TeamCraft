@@ -20,6 +20,8 @@ const ROOT = join(HERE, "..", "..");
 const DEVICES = {
   iphone: { folder: "iphone-6.9", width: 440, height: 956, scale: 3 },
   ipad: { folder: "ipad-13", width: 1032, height: 1376, scale: 2 },
+  // Google Play phone screenshots (9:20).
+  android: { folder: "play-phone", width: 432, height: 960, scale: 2.5 },
   // The product page's creative assets (5244 x 2950 and 3840 x 2560).
   header: { folder: "header", width: 2622, height: 1475, scale: 2 },
   "search-result": { folder: "search", width: 1920, height: 1280, scale: 2 },

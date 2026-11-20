@@ -8,6 +8,8 @@
 const SCENES = {
   // "intro" is the title card: the mark, the claim and what the app does, without a device.
   iphone: ["intro", "chats", "channel", "thread", "spaces", "join-call", "settings"],
+  // Google Play: the iPhone's scenes on a Pixel (camera hole, Android status bar), 1080 x 2400.
+  android: ["intro", "chats", "channel", "thread", "spaces", "join-call", "settings"],
   // On iPad the split view shows the spaces next to the channel, so "spaces" has no picture of its own.
   ipad: ["intro", "chats", "channel", "thread", "join-call", "settings"],
   // The product page's creative assets: the header and the search result picture.
@@ -206,7 +208,8 @@ window.renderScene = ({ device, lang, scene }, iconPaths, brand) => {
   if (!SCENES[device]?.includes(scene)) throw new Error(`unknown scene ${device}/${scene}`);
   document.documentElement.lang = lang;
   const canvas = document.getElementById("canvas");
-  canvas.className = `canvas ${device}`;
+  // The Pixel takes the iPhone's layout (.iphone) and changes its frame and status bar (.android).
+  canvas.className = device === "android" ? "canvas iphone android" : `canvas ${device}`;
   if (scene === "intro") canvas.innerHTML = introCard(brand.mark);
   else if (scene === "header") canvas.innerHTML = headerBanner(brand);
   else if (scene === "search") canvas.innerHTML = searchBanner();
@@ -245,6 +248,7 @@ function deviceFrame(device, scene) {
       ${ui}
       ${statusBar(device)}
       ${device === "iphone" ? `<div class="island"></div>` : ""}
+      ${device === "android" ? `<div class="camera-hole"></div>` : ""}
       <div class="home-indicator"></div>
     </div></div></div>`;
 }
@@ -570,11 +574,20 @@ function settingsSheet() {
 // ---- Small parts ----
 
 function statusBar(device) {
+  if (device === "android") return androidStatusBar();
   const signal = `<svg width="20" height="13" viewBox="0 0 20 13"><rect x="0" y="9" width="3.5" height="4" rx="1"/><rect x="5.5" y="6" width="3.5" height="7" rx="1"/><rect x="11" y="3" width="3.5" height="10" rx="1"/><rect x="16.5" y="0" width="3.5" height="13" rx="1"/></svg>`;
   const wifi = `<svg width="18" height="13" viewBox="0 0 18 13"><path d="M9 13l2.6-3.2a4 4 0 0 0-5.2 0z M9 6.4a6.8 6.8 0 0 1 4.6 1.8l1.6-2a9.6 9.6 0 0 0-12.4 0l1.6 2A6.8 6.8 0 0 1 9 6.4z M9 0.6A12.6 12.6 0 0 0 0.4 4l1.6 2a10 10 0 0 1 14 0l1.6-2A12.6 12.6 0 0 0 9 0.6z"/></svg>`;
   const battery = `<svg width="29" height="13" viewBox="0 0 29 13"><rect x="0.5" y="0.5" width="24" height="12" rx="3.5" fill="none" stroke="currentColor" opacity="0.4"/><rect x="2.5" y="2.5" width="20" height="8" rx="2"/><path d="M26.5 4.5v4a2 2 0 0 0 0-4z" opacity="0.4"/></svg>`;
   const right = device === "iphone" ? `${signal}${wifi}${battery}` : `${wifi}${battery}`;
   return `<div class="status-bar"><span>9:41</span><span class="right">${right}</span></div>`;
+}
+
+/** The status bar of a current Pixel: the time on the left; Wi-Fi, mobile signal and battery on the right. */
+function androidStatusBar() {
+  const wifi = `<svg width="17" height="13" viewBox="0 0 17 13"><path d="M8.5 13L0 2.6A13.4 13.4 0 0 1 8.5 0a13.4 13.4 0 0 1 8.5 2.6z"/></svg>`;
+  const signal = `<svg width="14" height="14" viewBox="0 0 14 14"><path d="M14 0v14H0z"/></svg>`;
+  const battery = `<svg width="25" height="13" viewBox="0 0 25 13"><rect x="0" y="0" width="22" height="13" rx="4"/><rect x="22.5" y="4" width="2" height="5" rx="1"/></svg>`;
+  return `<div class="status-bar"><span>9:41</span><span class="right">${wifi}${signal}${battery}</span></div>`;
 }
 
 function avatar(id, size, presence = null) {
