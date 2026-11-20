@@ -71,9 +71,9 @@ use crate::audio_layers::{
 use crate::layers::{
   LayerAllocationConfig, LayerAllocator, ProbeRequest, TrackDemand, UpgradeProof, full_demand_bps,
 };
-use teamcraft_media::retransmit::{PacketHistory, RetransmitBudget, RetransmitConfig};
 use crate::speakers::{SpeakerSelectionConfig, SpeakerSelector};
 use crate::uplink_repair::{RepairStep, UplinkRepair, UplinkRepairConfig};
+use teamcraft_media::retransmit::{PacketHistory, RetransmitBudget, RetransmitConfig};
 
 /// An estimate below the thin bound makes a downlink thin only after this long; a probe at the
 /// join that measured it thin does at once.
@@ -2448,15 +2448,28 @@ mod tests {
         let (mut forwarder, now) = video_room();
         forwarder.unpublish_video(device(1), VIDEO).unwrap();
         forwarder
-          .publish_video(device(1), VIDEO, kind.clone(), VideoCodec::Av1, three_layers(), None)
+          .publish_video(
+            device(1),
+            VIDEO,
+            kind.clone(),
+            VideoCodec::Av1,
+            three_layers(),
+            None,
+          )
           .unwrap();
         on_layer_zero(&mut forwarder, &[2], now);
         send_numbered(&mut forwarder, 0, 3, now);
         let before = now + keyframe_after - Duration::from_millis(50);
-        assert!(!forwarder.on_timer(device(1), before).contains(&keyframe_request(0)));
+        assert!(
+          !forwarder
+            .on_timer(device(1), before)
+            .contains(&keyframe_request(0))
+        );
         let after = now + keyframe_after;
         assert!(
-          forwarder.on_timer(device(1), after).contains(&keyframe_request(0)),
+          forwarder
+            .on_timer(device(1), after)
+            .contains(&keyframe_request(0)),
           "{kind:?}"
         );
       }
@@ -2495,7 +2508,11 @@ mod tests {
       on_layer_zero(&mut forwarder, &[2], now);
       assert!(send_numbered(&mut forwarder, 0, 5, now).effects.is_empty());
       let later = now + Duration::from_secs(1);
-      assert!(!forwarder.on_timer(device(1), later).contains(&keyframe_request(0)));
+      assert!(
+        !forwarder
+          .on_timer(device(1), later)
+          .contains(&keyframe_request(0))
+      );
     }
 
     fn retransmit_request(sequence_numbers: &[u16]) -> Effect {

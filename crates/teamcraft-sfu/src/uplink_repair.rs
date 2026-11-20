@@ -244,7 +244,12 @@ mod tests {
       repair.on_arrival(10, true, start);
       assert_eq!(repair.on_arrival(12, true, start).requests, vec![11]);
       // One and a half of the assumed 100 ms round trip, plus the margin.
-      assert!(repair.on_timer(true, start + Duration::from_millis(100)).requests.is_empty());
+      assert!(
+        repair
+          .on_timer(true, start + Duration::from_millis(100))
+          .requests
+          .is_empty()
+      );
       assert_eq!(
         repair.on_timer(true, start + Duration::from_millis(170)).requests,
         vec![11]
@@ -328,7 +333,11 @@ mod tests {
       let at = start + Duration::from_millis(350);
       assert!(screen.on_timer(true, at).needs_keyframe);
       assert!(!camera.on_timer(true, at).needs_keyframe);
-      assert!(camera.on_timer(true, start + Duration::from_millis(500)).needs_keyframe);
+      assert!(
+        camera
+          .on_timer(true, start + Duration::from_millis(500))
+          .needs_keyframe
+      );
     }
 
     #[test]

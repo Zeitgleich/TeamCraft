@@ -34,15 +34,17 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use teamcraft_media::call_engine::CallEngineEvent;
+use teamcraft_media::call_native::NativeCall;
 use teamcraft_media::capture_convert::{PixelFormat, RawPicture};
 use teamcraft_media::video::{ScreenProfile, VideoFrame, VideoResolution, screen_layers};
 use teamcraft_media::video_capture::{CaptureError, CaptureFormat, FrameSender, VideoCapture};
 use teamcraft_media::video_codec::{EncodedPicture, VideoCodecError, VideoEncoder};
 use teamcraft_media::video_pipeline::{EncoderFactory, VideoSendConfig, preferred_encoders};
 use teamcraft_proto::{ScreenContentMode, ScreenShareResolution, VideoCodec, VideoLayerInfo, VideoTrackKind};
+use teamcraft_sfu::config::SfuConfig;
 
-use crate::common::relay::Relay;
-use crate::screen_sharpness::{SHARED, fill, join, pump_for, shown_at, start_sfu, text, wait_until_secured};
+use crate::common::relay::{Impairment, Relay};
+use crate::screen_sharpness::{SHARED, fill, join_with, shown_at, start_sfu_with, text, wait_until_secured};
 
 /// How long a slide stays.
 const SLIDE_INTERVAL: Duration = Duration::from_secs(2);
@@ -74,11 +76,27 @@ const LIMIT_SHARE: f64 = 1.45;
 const MAX_LINK_DELAY: Duration = Duration::from_secs(2);
 /// Slides that have to be judged: some, also where the encoder can't keep up.
 const MIN_JUDGED_SLIDES: usize = 3;
+/// A presenter's uplink on hotel or train Wi-Fi (#2189): 1 to 3 % of the video's packets lost, in
+/// bursts, 20 to 60 ms one way, both fluctuating (`common::relay::Impairment`). The voice and the
+/// transport's acknowledgements (packets under 300 bytes) are spared: lost as well, they make the
+/// presenter hold its video for its voice (#1871) for the rest of the share (#2191), and the
+/// measurement is about the video's repair.
+const LOSSY_UPLINK: Impairment = Impairment {
+  seed: 2189,
+  loss_percent: (1.0, 3.0),
+  delay: (Duration::from_millis(20), Duration::from_millis(60)),
+  spared_below_bytes: 300,
+};
+/// Slides shown for one and for two seconds, in turn.
+const SHORT_AND_LONG_SLIDES: &[Duration] = &[Duration::from_secs(1), Duration::from_secs(2)];
+/// Viewers of the lossy uplink's share.
+const LOSSY_VIEWERS: usize = 2;
 
 /// #1005: slides of text reach the viewer through an uplink with room for the share but not for
 /// its bursts at once, each within seconds, and the bottleneck drops next to nothing. The desktop's
 /// share steps its rate with the uplink in place (#1781): no keyframe beyond those asked for and
-/// those of new layers.
+/// those of new layers. Every encoded slide is judged, also one whose packets the bottleneck
+/// dropped (#2175): the SFU asks the presenter for them at once (#2189).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn slides_reach_the_viewer_through_a_limited_uplink() {
   let layers_bps: u64 = share_layers(WINDOW)
@@ -92,7 +110,7 @@ async fn slides_reach_the_viewer_through_a_limited_uplink() {
   let arrivals: Vec<Arrival> = run
     .link_delays()
     .into_iter()
-    .filter(|arrival| !matches!(arrival, Arrival::NotEncoded | Arrival::Dropped))
+    .filter(|arrival| *arrival != Arrival::NotEncoded)
     .collect();
   assert!(
     arrivals.len() >= MIN_JUDGED_SLIDES,
@@ -100,7 +118,7 @@ async fn slides_reach_the_viewer_through_a_limited_uplink() {
     arrivals.len()
   );
   assert!(
-    !arrivals.contains(&Arrival::Lost),
+    !arrivals.contains(&Arrival::Lost) && !arrivals.contains(&Arrival::Held),
     "an encoded slide never reached the viewer:\n{summary}"
   );
   let worst = arrivals
@@ -135,6 +153,40 @@ async fn slides_reach_the_viewer_through_a_limited_uplink() {
     keyframes.forced <= keyframes.asked,
     "more keyframes forced than asked for:\n{summary}"
   );
+}
+
+/// Prints how slides reach the viewers through the lossy uplink with and without the SFU's repair
+/// of the presenter's uplink (#2189), and with the voice lost as well. The real client's estimator
+/// and voice guard make these runs vary (#2191: the video held for the voice, #2192: the estimate
+/// cut to a still screen's rate by one burst); the asserting test of the repair runs on a
+/// simulated clock (`uplink_loss`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "measurement: prints a summary with and without the repair, takes about two minutes"]
+async fn measure_slides_through_a_lossy_uplink() {
+  for is_uplink_repaired in [true, false] {
+    let run = run_scenario(lossy_scenario(is_uplink_repaired)).await;
+    println!("== uplink repaired: {is_uplink_repaired}\n{}", run.summary());
+  }
+  let voice_lost_too = Scenario {
+    maybe_impairment: Some(Impairment {
+      spared_below_bytes: 0,
+      ..LOSSY_UPLINK
+    }),
+    ..lossy_scenario(true)
+  };
+  let run = run_scenario(voice_lost_too).await;
+  println!("== uplink repaired, the voice lost too\n{}", run.summary());
+}
+
+/// The share of [`measure_slides_through_a_lossy_uplink`].
+fn lossy_scenario(is_uplink_repaired: bool) -> Scenario {
+  Scenario {
+    maybe_impairment: Some(LOSSY_UPLINK),
+    slide_intervals: SHORT_AND_LONG_SLIDES,
+    viewers: LOSSY_VIEWERS,
+    is_uplink_repaired,
+    ..Scenario::new(WINDOW)
+  }
 }
 
 /// #1781: an uplink that dips to half of what the share's layers ask for and comes back makes the
@@ -189,6 +241,36 @@ async fn measure_screen_share_bursts_on_a_limited_uplink() {
   }
 }
 
+/// What a run shares, to whom, through which uplink.
+struct Scenario {
+  /// The shared screen's size.
+  size: VideoResolution,
+  maybe_limit_bps: Option<u64>,
+  maybe_dip: Option<Dip>,
+  /// Loss and delay on the presenter's uplink, from the share's start.
+  maybe_impairment: Option<Impairment>,
+  /// How long the slides stay, in turn.
+  slide_intervals: &'static [Duration],
+  viewers: usize,
+  /// The SFU asks the presenter for packets its uplink lost (#2189).
+  is_uplink_repaired: bool,
+}
+
+impl Scenario {
+  /// One viewer, slides every [`SLIDE_INTERVAL`], an uplink without a limit or loss.
+  fn new(size: VideoResolution) -> Self {
+    Self {
+      size,
+      maybe_limit_bps: None,
+      maybe_dip: None,
+      maybe_impairment: None,
+      slide_intervals: &[SLIDE_INTERVAL],
+      viewers: 1,
+      is_uplink_repaired: true,
+    }
+  }
+}
+
 /// A stretch of a run with a narrower uplink.
 struct Dip {
   /// Since the share's start.
@@ -204,8 +286,8 @@ struct Run {
   layers: Vec<VideoLayerInfo>,
   /// When each slide went up, and its capture timestamp.
   changes: Vec<(Duration, u64)>,
-  /// The viewer's pictures: when, the capture timestamp, the size.
-  received: Vec<(Duration, u64, VideoResolution)>,
+  /// Each viewer's pictures: when, the capture timestamp, the size.
+  received: Vec<Vec<(Duration, u64, VideoResolution)>>,
   shown: BTreeMap<u64, usize>,
   encoded: Vec<Encoded>,
   /// When an encoder was built (the share's start, new layers, or a rate an encoder couldn't take
@@ -221,6 +303,8 @@ struct Run {
   layers_needed: Vec<(Duration, Vec<u8>)>,
   /// When a viewer (through the SFU) asked the presenter for a keyframe.
   keyframe_requests: Vec<Duration>,
+  /// When the presenter's video was held for its voice (#1871) and let go again.
+  held: Vec<(Duration, bool)>,
   /// When the share went out anew with other layers (a size step of the share policy).
   republished: Vec<Duration>,
   started_at: Duration,
@@ -240,20 +324,53 @@ fn profile() -> ScreenProfile {
   }
 }
 
-/// Shares slides at `size` through an uplink limited to `maybe_limit_bps`.
+/// Shares slides at `size` through an uplink limited to `maybe_limit_bps`, to one viewer.
 async fn run(size: VideoResolution, maybe_limit_bps: Option<u64>, maybe_dip: Option<Dip>) -> Run {
-  let (port, certificate_hash) = start_sfu().await;
+  run_scenario(Scenario {
+    maybe_limit_bps,
+    maybe_dip,
+    ..Scenario::new(size)
+  })
+  .await
+}
+
+/// Shares slides as `scenario` says.
+async fn run_scenario(scenario: Scenario) -> Run {
+  let Scenario {
+    size,
+    maybe_limit_bps,
+    maybe_dip,
+    maybe_impairment,
+    slide_intervals,
+    viewers: viewer_count,
+    is_uplink_repaired,
+  } = scenario;
+  let mut sfu_config = SfuConfig::default();
+  if !is_uplink_repaired {
+    sfu_config.forwarding.uplink_repair.max_requests = 0;
+  }
+  let (port, certificate_hash) = start_sfu_with(sfu_config).await;
   let sfu = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port);
   let start = Instant::now();
   let relay = Relay::start(sfu, start);
   relay.to_sfu.set_limit(maybe_limit_bps);
-  let mut presenter = join(relay.address, certificate_hash, 1, 2).await;
-  let mut viewer = join(sfu, certificate_hash, 2, 1).await;
+  let devices: Vec<i64> = (1..=1 + i64::try_from(viewer_count).unwrap()).collect();
+  let others =
+    |device: i64| -> Vec<i64> { devices.iter().copied().filter(|other| *other != device).collect() };
+  let mut presenter = join_with(relay.address, certificate_hash, 1, &others(1)).await;
+  let mut viewers = Vec::new();
+  for &device in &devices[1..] {
+    viewers.push(join_with(sfu, certificate_hash, device, &others(device)).await);
+  }
   wait_until_secured(&mut presenter).await;
-  wait_until_secured(&mut viewer).await;
-  pump_for(&mut presenter, &mut viewer, SOUND_ONLY).await;
+  for viewer in &mut viewers {
+    wait_until_secured(viewer).await;
+  }
+  pump_all_for(&mut presenter, &mut viewers, SOUND_ONLY).await;
+  // The uplink turns lossy with the share: the call's setup is no part of the test.
+  relay.to_sfu.set_impairment(maybe_impairment);
 
-  let slides = SlideShow::new(start, size);
+  let slides = SlideShow::new(start, size, slide_intervals);
   let (shown, changes) = (Arc::clone(&slides.shown), Arc::clone(&slides.changes));
   let log = EncoderLog::default();
   let layers = share_layers(size);
@@ -273,9 +390,10 @@ async fn run(size: VideoResolution, maybe_limit_bps: Option<u64>, maybe_dip: Opt
   };
   presenter.start_video(config).await.unwrap();
 
-  let received: Arc<Mutex<Vec<(Duration, u64, VideoResolution)>>> = Arc::default();
+  let received: Vec<Arc<Mutex<Vec<(Duration, u64, VideoResolution)>>>> =
+    viewers.iter().map(|_| Arc::default()).collect();
   let (mut uplink_estimates, mut layers_needed) = (Vec::new(), Vec::new());
-  let (mut keyframe_requests, mut published) = (Vec::new(), Vec::new());
+  let (mut keyframe_requests, mut published, mut held) = (Vec::new(), Vec::new(), Vec::new());
   let share_start = tokio::time::Instant::now();
   let end = share_start + SHARE;
   let mut is_dipped = false;
@@ -296,16 +414,22 @@ async fn run(size: VideoResolution, maybe_limit_bps: Option<u64>, maybe_dip: Opt
       Ok(Some(CallEngineEvent::LayersNeeded { layers, .. })) => layers_needed.push((start.elapsed(), layers)),
       Ok(Some(CallEngineEvent::UplinkEstimate { bps, .. })) => uplink_estimates.push((start.elapsed(), bps)),
       Ok(Some(CallEngineEvent::KeyframeRequested { .. })) => keyframe_requests.push(start.elapsed()),
+      Ok(Some(CallEngineEvent::VideoHeldForVoice(is_held))) => held.push((start.elapsed(), is_held)),
       Ok(Some(CallEngineEvent::VideoPublished(track))) if track.kind == VideoTrackKind::Screen => {
         published.push(start.elapsed());
       },
       _ => {},
     }
-    if let Ok(Some(CallEngineEvent::VideoPublished(track))) =
-      tokio::time::timeout(Duration::from_millis(5), viewer.next_event()).await
-      && track.kind == VideoTrackKind::Screen
-    {
-      let sink = Arc::clone(&received);
+    for (viewer, received) in viewers.iter_mut().zip(&received) {
+      let Ok(Some(CallEngineEvent::VideoPublished(track))) =
+        tokio::time::timeout(Duration::from_millis(5), viewer.next_event()).await
+      else {
+        continue;
+      };
+      if track.kind != VideoTrackKind::Screen {
+        continue;
+      }
+      let sink = Arc::clone(received);
       viewer.watch_video(
         track.stream_id,
         None,
@@ -320,8 +444,13 @@ async fn run(size: VideoResolution, maybe_limit_bps: Option<u64>, maybe_dip: Opt
   }
   presenter.stop_video(VideoTrackKind::Screen);
   presenter.leave().await.unwrap();
-  viewer.leave().await.unwrap();
-  let received = received.lock().unwrap().clone();
+  for viewer in viewers {
+    viewer.leave().await.unwrap();
+  }
+  let received = received
+    .iter()
+    .map(|received| received.lock().unwrap().clone())
+    .collect();
   let shown = shown.lock().unwrap().clone();
   let changes = changes.lock().unwrap().clone();
   let encoded = log.pictures.lock().unwrap().clone();
@@ -341,6 +470,7 @@ async fn run(size: VideoResolution, maybe_limit_bps: Option<u64>, maybe_dip: Opt
     uplink_estimates,
     layers_needed,
     keyframe_requests,
+    held,
     // The first publication is the share's start.
     republished: published.into_iter().skip(1).collect(),
     started_at,
@@ -371,8 +501,7 @@ impl Run {
         continue;
       }
       let slide = shown_at(&self.shown, *timestamp_us);
-      let maybe_delay = self
-        .received
+      let maybe_delay = self.received[0]
         .iter()
         .find(|(_, picture_us, resolution)| {
           *picture_us + 100 >= *timestamp_us
@@ -386,21 +515,28 @@ impl Run {
     delays
   }
 
-  /// Per slide after [`SETTLE`]: how it went from its first picture out of the encoder (any
-  /// layer) to the viewer.
+  /// Per viewer and slide after [`SETTLE`]: how it went from its first picture out of the encoder
+  /// (any layer) to the viewer.
   fn link_delays(&self) -> Vec<Arrival> {
+    self
+      .received
+      .iter()
+      .flat_map(|received| self.link_delays_to(received))
+      .collect()
+  }
+
+  fn link_delays_to(&self, received: &[(Duration, u64, VideoResolution)]) -> Vec<Arrival> {
     let settled = self.started_at + SETTLE;
     let in_window =
       |picture_us: u64, from_us: u64, to_us: u64| picture_us + 100 >= from_us && picture_us + 100 < to_us;
     let mut delays = Vec::new();
     for pair in self.changes.windows(2) {
-      let [(changed_at, timestamp_us), (_, next_us)] = pair else {
+      let [(changed_at, timestamp_us), (next_at, next_us)] = pair else {
         continue;
       };
       if *changed_at < settled {
         continue;
       }
-      let slide_ends_at = self.slide_ends_at(*changed_at);
       let maybe_encoded_at = self
         .encoded
         .iter()
@@ -410,19 +546,15 @@ impl Run {
         delays.push(Arrival::NotEncoded);
         continue;
       };
-      let maybe_shown_at = self
-        .received
+      let maybe_shown_at = received
         .iter()
         .find(|(_, picture_us, _)| in_window(*picture_us, *timestamp_us, *next_us))
         .map(|(at, ..)| *at);
       let arrival = match maybe_shown_at {
         Some(shown_at) => Arrival::After(shown_at.saturating_sub(encoded_at)),
-        // The SFU doesn't repair a publisher's uplink losses: the viewer waits out its NACKs, asks
-        // for a keyframe and the presenter answers it through the same uplink (retransmit.rs). On a
-        // runner that starves the encoder and the relay the packets come in bunches the bottleneck's
-        // queue drops, and that recovery can outlast a slide. That is the machine's burst, not the
-        // link's: the slide isn't judged (`dropped_share` bounds how much of it there may be).
-        None if self.is_dropped_between(*changed_at, slide_ends_at) => Arrival::Dropped,
+        // The presenter stopped sending video for its voice before the slide went out whole: the
+        // voice guard's call, not the link's (#1871).
+        None if self.is_held_between(encoded_at, *next_at) => Arrival::Held,
         None => Arrival::Lost,
       };
       delays.push(arrival);
@@ -430,22 +562,70 @@ impl Run {
     delays
   }
 
-  /// When the slide that went up at `changed_at` was replaced; the end of the run for the last one.
-  fn slide_ends_at(&self, changed_at: Duration) -> Duration {
-    self
-      .changes
+  /// Whether the presenter's video was held for its voice at some time from `from` to `to`.
+  fn is_held_between(&self, from: Duration, to: Duration) -> bool {
+    let was_held_at_from = self
+      .held
       .iter()
-      .map(|(at, _)| *at)
-      .find(|at| *at > changed_at)
-      .unwrap_or(Duration::MAX)
+      .rev()
+      .find(|(at, _)| *at <= from)
+      .is_some_and(|(_, is_held)| *is_held);
+    was_held_at_from
+      || self
+        .held
+        .iter()
+        .any(|(at, is_held)| *is_held && *at > from && *at < to)
   }
 
-  /// Whether the bottleneck dropped a packet from `from` to `to`.
-  fn is_dropped_between(&self, from: Duration, to: Duration) -> bool {
-    self
-      .link
-      .iter()
-      .any(|(at, _, is_dropped)| *is_dropped && *at >= from && *at < to)
+  /// Per second of the share: the uplink estimate's lowest, the layers needed and holds of the
+  /// video for the voice that began, when anything of it changed.
+  fn timeline(&self) -> String {
+    let mut parts = Vec::new();
+    let seconds = SHARE.as_secs();
+    for second in 0..seconds {
+      let from = self.started_at + Duration::from_secs(second);
+      let to = from + Duration::from_secs(1);
+      let within = |at: &Duration| *at >= from && *at < to;
+      let lowest = self
+        .uplink_estimates
+        .iter()
+        .filter(|(at, _)| within(at))
+        .map(|(_, bps)| bps / 1000)
+        .min();
+      let layers: Vec<&Vec<u8>> = self
+        .layers_needed
+        .iter()
+        .filter(|(at, _)| within(at))
+        .map(|(_, layers)| layers)
+        .collect();
+      let held: Vec<bool> = self
+        .held
+        .iter()
+        .filter(|(at, _)| within(at))
+        .map(|(_, is_held)| *is_held)
+        .collect();
+      parts.push(format!("{second}: {lowest:?} {layers:?} {held:?}"));
+    }
+    parts.join(" | ")
+  }
+
+  /// How long the presenter's video was held for its voice after [`SETTLE`].
+  fn held_for(&self) -> Duration {
+    let settled = self.started_at + SETTLE;
+    let mut total = Duration::ZERO;
+    let mut maybe_since: Option<Duration> = None;
+    for (at, is_held) in &self.held {
+      match (maybe_since, *is_held) {
+        (None, true) => maybe_since = Some((*at).max(settled)),
+        (Some(since), false) => {
+          total += at.saturating_sub(since);
+          maybe_since = None;
+        },
+        _ => {},
+      }
+    }
+    let end = self.started_at + SHARE;
+    total + maybe_since.map_or(Duration::ZERO, |since| end.saturating_sub(since))
   }
 
   /// The lowest and highest uplink estimate after [`SETTLE`], bit/s.
@@ -545,14 +725,14 @@ impl Run {
         format_delays(self.sharp_delays())
       ),
       format!(
-        "encoder to viewer (ms):      {}",
+        "encoder to viewers (ms):     {}",
         self
           .link_delays()
           .iter()
           .map(|arrival| match arrival {
             Arrival::NotEncoded => "not encoded".to_owned(),
             Arrival::Lost => "-".to_owned(),
-            Arrival::Dropped => "- (dropped)".to_owned(),
+            Arrival::Held => "- (held)".to_owned(),
             Arrival::After(delay) => delay.as_millis().to_string(),
           })
           .collect::<Vec<_>>()
@@ -567,6 +747,16 @@ impl Run {
         self.layers_needed.last().map(|(_, layers)| layers),
       ),
       format!("after the first {} s: {:?}", SETTLE.as_secs(), self.keyframes()),
+      format!(
+        "timeline (s: estimate kbit/s, layers needed, held): {}",
+        self.timeline()
+      ),
+      format!(
+        "video held for the voice after the first {} s: {} ms in {} holds",
+        SETTLE.as_secs(),
+        self.held_for().as_millis(),
+        self.held.iter().filter(|(_, is_held)| *is_held).count()
+      ),
     ];
     let seconds = (SHARE.as_secs_f64() - 1.0).max(1.0);
     // The layers were planned for the largest picture; the encoders work at the shared screen's
@@ -609,10 +799,10 @@ impl Run {
 enum Arrival {
   /// The encoder gave no picture of it (a machine too slow for every slide).
   NotEncoded,
-  /// The viewer never showed it, and the bottleneck dropped nothing meanwhile.
+  /// The viewer never showed it.
   Lost,
-  /// The viewer never showed it, and the bottleneck dropped packets meanwhile (see `link_delays`).
-  Dropped,
+  /// The viewer never showed it, and the presenter held its video for its voice meanwhile.
+  Held,
   /// The viewer showed it this long after its first picture.
   After(Duration),
 }
@@ -750,12 +940,14 @@ struct SlideShow {
   shown: Arc<Mutex<BTreeMap<u64, usize>>>,
   /// When each slide went up (since `start`), and its capture timestamp.
   changes: Arc<Mutex<Vec<(Duration, u64)>>>,
+  /// How long the slides stay, in turn.
+  intervals: &'static [Duration],
   maybe_running: Option<(std_mpsc::Sender<()>, JoinHandle<()>)>,
 }
 
 impl SlideShow {
   /// Slides drawn at the Retina size and shrunk to `size` where it is another.
-  fn new(start: Instant, size: VideoResolution) -> Self {
+  fn new(start: Instant, size: VideoResolution, intervals: &'static [Duration]) -> Self {
     let sources = (0..SLIDES)
       .map(|slide| {
         let bgrx = draw_slide(slide);
@@ -780,6 +972,7 @@ impl SlideShow {
       start,
       shown: Arc::default(),
       changes: Arc::default(),
+      intervals,
       maybe_running: None,
     }
   }
@@ -800,7 +993,7 @@ impl VideoCapture for SlideShow {
       Arc::clone(&self.shown),
       Arc::clone(&self.changes),
     );
-    let start = self.start;
+    let (start, intervals) = (self.start, self.intervals);
     let thread = std::thread::spawn(move || {
       let capture_start = Instant::now();
       for index in 0usize.. {
@@ -812,7 +1005,7 @@ impl VideoCapture for SlideShow {
           return;
         }
         if !matches!(
-          stopped.recv_timeout(SLIDE_INTERVAL),
+          stopped.recv_timeout(intervals[index % intervals.len()]),
           Err(std_mpsc::RecvTimeoutError::Timeout)
         ) {
           return;
@@ -863,4 +1056,15 @@ fn draw_slide(slide: usize) -> Vec<u8> {
     );
   }
   page.into_iter().flat_map(|[r, g, b]| [b, g, r, 255]).collect()
+}
+
+/// Handles the calls' events for `duration`.
+async fn pump_all_for(presenter: &mut NativeCall, viewers: &mut [NativeCall], duration: Duration) {
+  let end = tokio::time::Instant::now() + duration;
+  while tokio::time::Instant::now() < end {
+    let _ = tokio::time::timeout(Duration::from_millis(5), presenter.next_event()).await;
+    for viewer in viewers.iter_mut() {
+      let _ = tokio::time::timeout(Duration::from_millis(5), viewer.next_event()).await;
+    }
+  }
 }

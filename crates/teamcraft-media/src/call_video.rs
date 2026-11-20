@@ -276,7 +276,13 @@ impl OutgoingVideo {
 
   /// Keeps the RTP packets of `layer` that go out now, to send them again when the SFU asks
   /// ([`Self::sent_packet`]).
-  pub fn keep_sent(&mut self, layer: SimulcastLayer, packets: &[Vec<u8>], now: Instant, config: &RetransmitConfig) {
+  pub fn keep_sent(
+    &mut self,
+    layer: SimulcastLayer,
+    packets: &[Vec<u8>],
+    now: Instant,
+    config: &RetransmitConfig,
+  ) {
     let Some(history) = self.sent.get_mut(usize::from(layer.value())) else {
       return;
     };
@@ -289,7 +295,13 @@ impl OutgoingVideo {
   }
 
   /// The RTP packet of `layer` with `sequence_number`, while it is kept.
-  pub fn sent_packet(&self, layer: u8, sequence_number: u16, now: Instant, window: Duration) -> Option<&[u8]> {
+  pub fn sent_packet(
+    &self,
+    layer: u8,
+    sequence_number: u16,
+    now: Instant,
+    window: Duration,
+  ) -> Option<&[u8]> {
     self
       .sent
       .get(usize::from(layer))?

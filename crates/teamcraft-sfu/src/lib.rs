@@ -27,5 +27,5 @@ pub mod room;
 pub mod server;
 pub mod signaling;
 pub mod speakers;
-pub mod uplink_repair;
 mod switch;
+pub mod uplink_repair;
