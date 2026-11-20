@@ -45,6 +45,24 @@ enum Perf {
     pending.first { $0.measure == measure && $0.key == key }?.transaction.setTag(value: value, key: name)
   }
 
+  /// A number the measure carries (`longest_frame_ms`, `frames_over_50ms`): durations in
+  /// milliseconds, the rest counts.
+  static func measurement(_ measure: PerfMeasure, key: String = "", name: String, value: Double, isDuration: Bool = false) {
+    guard let transaction = pending.first(where: { $0.measure == measure && $0.key == key })?.transaction else { return }
+    if isDuration {
+      transaction.setMeasurement(name: name, value: NSNumber(value: value), unit: MeasurementUnitDuration.millisecond)
+    } else {
+      transaction.setMeasurement(name: name, value: NSNumber(value: value))
+    }
+  }
+
+  /// A stretch of frames as the measure's `frames`, `longest_frame_ms` and `frames_over_50ms`.
+  static func frames(_ measure: PerfMeasure, key: String = "", _ stats: FrameStats) {
+    measurement(measure, key: key, name: "frames", value: Double(stats.frames))
+    measurement(measure, key: key, name: "longest_frame_ms", value: stats.longestFrameMs, isDuration: true)
+    measurement(measure, key: key, name: "frames_over_50ms", value: Double(stats.slowFrames))
+  }
+
   /// Ends it now, with the core's jobs that overlapped it as its steps.
   static func end(_ measure: PerfMeasure, key: String = "", isOk: Bool = true) {
     guard let index = pending.firstIndex(where: { $0.measure == measure && $0.key == key }) else { return }

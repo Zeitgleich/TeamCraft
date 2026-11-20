@@ -68,6 +68,9 @@ pub enum PerfOperation {
   /// smooth it was, and how often the list had to move the scroll position under the reader
   /// (#1595).
   ScrollBack,
+  /// The reader tapping "jump to the newest message" until the list rests at the bottom: how many
+  /// tries it took and how smooth it was (#2180).
+  JumpToBottom,
   /// A root span of the trace layer kept for being slow, failed or sampled (docs/tracing.md):
   /// its operation and description, both from the code.
   Traced {
@@ -371,6 +374,7 @@ impl PerfOperation {
       Self::CatchUp => "conversation.catch_up",
       Self::OlderHistoryPage => "history.older_page",
       Self::ScrollBack => "feed.scroll_back",
+      Self::JumpToBottom => "feed.jump_bottom",
       Self::Traced { name, .. } => name,
     }
   }
@@ -386,7 +390,7 @@ impl PerfOperation {
       Self::CallSetup | Self::ScreenShare => "call",
       Self::CatchUp => "sync",
       Self::OlderHistoryPage => "ui.load",
-      Self::ScrollBack => "ui.scroll",
+      Self::ScrollBack | Self::JumpToBottom => "ui.scroll",
       Self::Traced { op, .. } => op,
     }
   }
@@ -656,6 +660,7 @@ mod tests {
       PerfOperation::CatchUp,
       PerfOperation::OlderHistoryPage,
       PerfOperation::ScrollBack,
+      PerfOperation::JumpToBottom,
     ];
     let names: HashSet<&str> = all.iter().map(|operation| operation.name()).collect();
     assert_eq!(names.len(), all.len());

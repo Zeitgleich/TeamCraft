@@ -150,7 +150,9 @@ integration sends CPU, disk-write and hang diagnostics but no `MXCrashDiagnostic
 system that no in-process handler sees (SIGKILL: 0xdead10cc, the watchdog's 0x8badf00d) are
 forwarded by `SystemKillReports.swift` once MetricKit delivers them on a later launch (#2179): a
 fatal event with the termination reason's namespace and code parsed out, never its free text,
-through the same `beforeSend`. `beforeSend`
+through the same `beforeSend`. The message list counts frames itself (`FrameWatch`, a display link
+that runs only while `feed.scroll_back` or `feed.jump_bottom` is measured): numbers only, no
+content and no IDs. `beforeSend`
 (`CrashEventScrub`) and `CrashScrubber.swift` do what the Android side does, with the same test
 cases (`CrashScrubberTests`). The settings and the notice are the same as on Android.
 
@@ -396,10 +398,11 @@ thread) and the Android fixes #1431, #1428 and #1375: each of them must be visib
 | Transaction             | From → to                                                                   | Apps                       | Answers                                                                                                                         |
 |-------------------------|-----------------------------------------------------------------------------|----------------------------|---------------------------------------------------------------------------------------------------------------------------------|
 | `start.channel_list`    | Process start (cold) or activity create (warm) / page navigation → chat list shows the core's rows on a drawn frame | All                        | How long a start takes, by `start` (cold, warm) and `entry` (launcher, notification, share, link); `first_frame` step and `start_cache` (hit, miss) say whether the first frame showed the cached list (#1431, #1428); `activities` counts copies of the activity (#1375); status `internal_error` when the chat list couldn't be read |
-| `channel.switch`        | Opening a conversation → its first read is shown (rows or empty state)      | All                        | Where a slow open spent its time: `source` (seed, memory, store) and the core's jobs as steps (below)                           |
+| `channel.switch`        | Opening a conversation → its first read is shown (rows or empty state); on iOS once the list has laid out and positioned its rows (#2180) | All                        | Where a slow open spent its time: `source` (seed, memory, store) and the core's jobs as steps (below)                           |
 | `conversation.catch_up` | Opening a conversation, or the app back in the foreground, while it is behind → the newest server message is stored and shown | All | "The push came, the chat lacks it", even when the switch was fast from the seed; `source` (push, open, foreground), `gap_fill`, `resync` |
 | `history.older_page`    | A page of older history asked for from the server while the reader scrolls back → its rows show | All | Whether scrolling back waits on the server (`core.action load_older_history`, the core's `older_history_page` step) or stalls the list: web and desktop add the refresh that reads the rows (`ui.refresh`) and the frame that shows them (`ui.render`, measurement `render_ms`) |
-| `feed.scroll_back`      | The reader's first scroll up in a conversation → scrolling rests (at least a screen back) | Web, desktop | Whether scrolling back is smooth: `longest_frame_ms`, `frames_over_50ms`, and how often the list made up for rows above the reader in the top spacer (`spacer_corrections`) or by moving the scroll position under them (`scroll_corrections`, what ended a wheel's smooth scrolling in #1595) |
+| `feed.scroll_back`      | The reader's first scroll up in a conversation → scrolling rests (at least a screen back) | Web, desktop, iOS | Whether scrolling back is smooth: `longest_frame_ms`, `frames_over_50ms` (iOS also `frames`), and how often the list made up for rows above the reader in the top spacer (`spacer_corrections`) or by moving the scroll position under them (`scroll_corrections`, what ended a wheel's smooth scrolling in #1595; on iOS a row that got its real height above the reader, #2180) |
+| `feed.jump_bottom`      | A tap on "jump to the newest message" → the list rests at the bottom        | iOS | Whether one tap lands (#2180): `settle_passes` (layouts it took to land exactly, 0–6), `screens` (how far it went), `frames`, `longest_frame_ms`, `frames_over_50ms` |
 | `message.send`          | Sending a plain message → the server's message replaced the pending row     | All                        | Send latency, with the engine's jobs as steps                                                                                   |
 | `sync.reconnect`        | The core connecting again → connected                                       | All                        | How long reconnects take; `link` = `slow`                                                                                       |
 | `file.download`         | An attachment's download and decryption                                     | Web, desktop               | Download speed per `rendition`, `bytes`                                                                                         |
@@ -586,7 +589,7 @@ core). The Android measures of its own (`Perf.kt`) take their names from the cor
 | Web (wasm)       | Function index and offset (names are stripped)   | None (gap, below)                                |
 | Android (Kotlin) | Obfuscated names (R8)                            | R8 `mapping.txt` under the build's ProGuard UUID |
 | Android (NDK)    | Addresses and debug IDs of `libteamcraft_ffi.so` | The unstripped `.so` (ELF debug files)           |
-| iOS              | Addresses and debug IDs                          | dSYMs from the Xcode archive (#1515)             |
+| iOS              | Addresses and debug IDs (GlitchTip 7 resolves)   | dSYMs from the Xcode archive (#1515)             |
 
 - **Rust on the server** resolves frames in the process (`std::backtrace`): its release build keeps
   the symbol table, so function names are there; file and line would need debug info in the
@@ -615,10 +618,44 @@ core). The Android measures of its own (`Perf.kt`) take their names from the cor
   configured). `sentry-cli` is pinned by version and SHA-256 in `scripts/debug-files.sh`. GlitchTip takes both through its Sentry-compatible debug file API; older
   GlitchTip versions failed to apply mappings uploaded without a `kind` (GlitchTip backend issue
   504), so check the first deobfuscated crash.
+- **iOS:** the release workflow (`ios-release.yml`) stores the archive's dSYMs (the app, which
+  links the Rust core with line tables, and its three extensions) with `scripts/debug-files.sh
+  store`: to the backend with `sentry-cli debug-files upload --wait`, and to the private bucket
+  under `macho/<UUID>/` when it is configured. After the upload the script lists the backend's
+  debug files and warns for each one it didn't keep (GlitchTip 6.2.6 kept the two small
+  extension dSYMs of 1.0.39 and dropped the app's and the notification extension's, though
+  `sentry-cli` printed them as uploaded; restored after the upgrade to GlitchTip 7). See "Reading
+  an iOS report".
 - **Upload is optional.** The workflow uploads when the secrets `CRASH_REPORTS_URL`,
   `CRASH_REPORTS_ORG`, `CRASH_REPORTS_PROJECT` and `CRASH_REPORTS_AUTH_TOKEN` exist and skips the
   steps otherwise, so forks and other publishers build without them. A failed upload warns; the
   release goes on.
+
+### Reading an iOS report
+
+GlitchTip 7 symbolicates iOS frames itself from the stored dSYMs, by the images' debug IDs in an
+event's `debug_meta` (checked with a test event against the 1.0.39 dSYM: function, file and line).
+Events stored by GlitchTip 6 carry no `debug_meta` (6.x dropped it, and `threads` with it) and stay
+addresses only; neither version has an API to download a stored debug file. For such an event, or
+when the backend misses a dSYM, resolve the frames on Linux with the release's dSYMs:
+
+1. Get the dSYMs of the report's release (`release` tag, `app_build` in the app context):
+   - from the private bucket, when configured: `scripts/debug-files.sh index ios/<version>/aarch64-apple-ios`
+     lists their UUIDs, `scripts/debug-files.sh fetch-dsym <UUID>` unpacks one to
+     `~/.cache/teamcraft-debug/dsym/<UUID>/`;
+   - otherwise from App Store Connect (the TestFlight upload carries them): on a Mac, Xcode →
+     Organizer → Archives or the build in App Store Connect → "Download Debug Symbols"; copy the
+     `.dSYM` bundles to the Linux machine.
+2. Run `scripts/symbolicate-ios.sh --dsyms DIR <GlitchTip issue ID>` (with `GLITCHTIP_URL` and an
+   API token with event read access in `GLITCHTIP_TOKEN`) or `… --dsyms DIR event.json`. It prints
+   every frame innermost first with function, file and line (Swift and the Rust core alike,
+   inlined calls marked), and the address and offset of frames it has no dSYM for.
+
+Without `debug_meta` the script matches images by name: a dSYM of another build gives wrong
+names, so take the dSYMs of exactly the report's build. It needs `llvm-symbolizer`,
+`llvm-objdump`, `llvm-dwarfdump` and `python3`. The address looked up is `instruction_addr -
+image_addr +` the image's `__TEXT` vmaddr, minus one for return addresses (every frame but the
+innermost), as `atos -l` does.
 
 ## Store declarations
 
@@ -638,7 +675,7 @@ core). The Android measures of its own (`Perf.kt`) take their names from the cor
 | User opt-out, first-start notice (web and desktop page)      | Done (third pull request)           |
 | Android SDK, symbol upload in the release workflow           | Done (fifth pull request)           |
 | iOS (sentry-cocoa), settings and notice                      | Written; Mac build: #1515           |
-| iOS dSYM upload, device test                                 | Next (#1515)                        |
+| iOS dSYM upload, device test                                 | Upload checked; runbook (#1515)     |
 | GlitchTip in teamcraft-deploy                                | teamcraft-deploy                    |
 | Performance data: web, desktop, Android, iOS SDK (#1521)     | Done; iOS untested (#1515)          |
 | Screen-share quality, web and desktop (#1733)                | Done; real-hardware codec test open |
