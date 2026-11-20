@@ -172,6 +172,9 @@ final class AppModel {
   var isTakingShare = false
   /// Why files of a share couldn't be attached, for the picker that comes back with them.
   var shareImportError: AttachmentError?
+  /// The conversation picked in the share extension can't take the share any more (left, removed,
+  /// no posting): the app's picker asks again and says why (#1037).
+  var isShareDestinationGone = false
   /// A share from before the sign-in went: it was kept for the person signed in before.
   var isShareGoneForAccount = false
   /// A link the system handed over, until it was acted on (AppModel+AppLinks.swift).
@@ -214,6 +217,8 @@ final class AppModel {
   let calls = CallManager()
   /// The home screen widget's unread conversations (#2076).
   @ObservationIgnored let homeWidget = HomeWidgetUpdater()
+  /// The share extension's conversation list (issue #1037).
+  @ObservationIgnored let shareTargetsUpdater = ShareTargetsUpdater()
   /// The server's brand for the confirmation and sign-in screens.
   let brand = BrandStore()
   /// The server the device's management or the build names (read at start).
@@ -1350,6 +1355,7 @@ final class AppModel {
     changeCount += 1
     if maybeCore != nil { settingsSyncer().storeDidChange() }
     homeWidget.storeDidChange(self)
+    shareTargetsUpdater.storeDidChange(self)
     followTyping()
     calls.storeDidChange()
     let wasConnected = connection?.isConnected == true
@@ -1812,6 +1818,7 @@ final class AppModel {
     container.wipeDownloads()
     container.pruneUploads(olderThan: 0)
     homeWidget.clear()
+    shareTargetsUpdater.clear()
     // What waits to be shared doesn't outlive the session on this device either.
     ShareInbox.shared()?.wipe()
     waitingShare = nil

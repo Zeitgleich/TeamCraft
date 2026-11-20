@@ -8,6 +8,9 @@ struct StagedShare: Codable, Equatable, Identifiable {
   var files: [StagedShareFile]
   /// Files that couldn't be taken (unreadable, disk full, more than the extension takes).
   var leftOut: Int
+  /// The conversation picked in the share extension (issue #1037); `nil` when the app's picker
+  /// asks. Missing in shares written before it, which decode as `nil`.
+  var maybeConversationId: String? = nil
 
   var isEmpty: Bool { text.isEmpty && files.isEmpty }
 }
@@ -88,6 +91,11 @@ struct ShareInbox {
     try? fileManager.createDirectory(at: root, withIntermediateDirectories: true)
     try? userId.write(to: owner, atomically: true, encoding: .utf8)
     return hadShare
+  }
+
+  /// Who signed in last (`claim`); `nil` after a sign-out or before the first sign-in.
+  func owner() -> String? {
+    try? String(contentsOf: root.appendingPathComponent(Self.ownerName), encoding: .utf8)
   }
 
   /// The oldest share not in `except`.

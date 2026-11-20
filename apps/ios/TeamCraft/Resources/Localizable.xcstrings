@@ -24864,6 +24864,22 @@
           }
         }
       }
+    },
+    "share_destination_gone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The conversation picked in the share sheet can no longer take it. Choose another one."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die im Teilen-Menü gewählte Unterhaltung kann es nicht mehr aufnehmen. Wähle eine andere."
+          }
+        }
+      }
     }
   },
   "version": "1.0"
