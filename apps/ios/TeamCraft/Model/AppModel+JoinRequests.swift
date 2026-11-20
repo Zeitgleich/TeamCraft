@@ -11,7 +11,7 @@ extension AppModel {
   /// Reads the requests waiting for the user's decision and notifies about new ones; called on
   /// every change the core reports (both reads are cheap).
   func refreshJoinRequests() async {
-    guard case .ready = phase, let core = try? core() else {
+    guard case .ready = phase, let core = try? await core() else {
       if !joinRequests.isEmpty { joinRequests = [] }
       return
     }
@@ -58,7 +58,7 @@ extension AppModel {
     }
     let center = UNUserNotificationCenter.current()
     guard NotificationAuthenticator().isValid(tag: tag, for: notificationId),
-      let core = try? core(),
+      let core = try? await core(),
       let request = try? await core.joinRequests().first(where: { $0.notificationTag == notificationId })
     else {
       // Not ours, or the request is gone: nothing to decide.

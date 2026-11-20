@@ -169,14 +169,19 @@ final class CrashReports {
     // No sessions: release health isn't used, and an app that doesn't crash sends nothing.
     options.enableAutoSessionTracking = false
     options.enableAppHangTracking = true
+    // An app hang in an async function shows the functions that awaited it, not only the runtime's
+    // frames (a launch hang came with three frames).
+    options.swiftAsyncStacktraces = true
     options.enableMetricKit = true
-    // Breadcrumbs come from the core's redacted log only, set in beforeSend.
-    options.beforeBreadcrumb = { _ in nil }
+    // Breadcrumbs: the launch steps (fixed names, `LaunchSteps`), kept with a report of a hang or
+    // crash that is sent at the next start; the core's redacted log, set in beforeSend.
+    options.beforeBreadcrumb = { breadcrumb in breadcrumb.category == LaunchSteps.category ? breadcrumb : nil }
     // Sampling of handled errors happens here: the SDK's own rate would sample crashes too.
+    let startedAt = Date()
     options.beforeSend = { event in
       CrashEventScrub.prepare(
         event, installationID: settings.installationID, sampleRate: settings.config.sampleRate,
-        roll: Double.random(in: 0..<1), logLines: { recentLogLines() })
+        roll: Double.random(in: 0..<1), startedAt: startedAt, logLines: { recentLogLines() })
     }
   }
 
@@ -263,8 +268,13 @@ struct CrashSDKSettings: Equatable, Sendable {
 /// as the only breadcrumbs.
 enum CrashEventScrub {
   /// The event to send, or `nil` when a handled error isn't in the sample.
+  ///
+  /// `startedAt`: when the SDK started in this process. A report from before (a crash, a watchdog
+  /// kill during a hang, sent at the next start) keeps the launch steps of its own run, and the log
+  /// lines of this run, which say nothing about it, stay out.
   static func prepare(
-    _ event: Event, installationID: String, sampleRate: Double, roll: Double, logLines: () -> [String]
+    _ event: Event, installationID: String, sampleRate: Double, roll: Double, startedAt: Date = .distantPast,
+    logLines: () -> [String]
   ) -> Event? {
     // sentry-cocoa hands transactions (performance data, sampled by the SDK's trace rate) to
     // `beforeSend` too: they keep their spans, lose what a report never carries.
@@ -284,11 +294,14 @@ enum CrashEventScrub {
     if let message = event.message {
       event.message = SentryMessage(formatted: CrashScrubber.scrub(message.formatted as String? ?? ""))
     }
-    event.breadcrumbs = logLines().suffix(CrashScrubber.maxBreadcrumbs).map { line in
+    let launchSteps = (event.breadcrumbs ?? []).filter { $0.category == LaunchSteps.category }
+    let isFromEarlierRun = (event.timestamp ?? Date()) < startedAt
+    let logCrumbs = isFromEarlierRun ? [] : logLines().map { line in
       let breadcrumb = Breadcrumb(level: .info, category: "log")
       breadcrumb.message = CrashScrubber.scrub(line, maxChars: CrashScrubber.maxBreadcrumbChars)
       return breadcrumb
     }
+    event.breadcrumbs = Array((launchSteps + logCrumbs).suffix(CrashScrubber.maxBreadcrumbs))
     return event
   }
 

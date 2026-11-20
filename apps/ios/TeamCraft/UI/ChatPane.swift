@@ -200,7 +200,7 @@ struct ChatPane: View {
     // The workspace's emoji for the reaction menus (issue #207): what the core holds now, then again
     // once it asked the server.
     .task {
-      guard let core = try? model.core() else { return }
+      guard let core = try? await model.core() else { return }
       await CustomEmojiPictures.refreshWorkspace(core: core)
       await CustomEmojiPictures.want(core: core)
       await CustomEmojiPictures.refreshWorkspace(core: core)
@@ -2136,7 +2136,7 @@ struct EmojiSuggestionBar: View {
     content
       // Reads again when the store changes: an emoji or picture can arrive after the first read.
       .task(id: "\(maybeQuery ?? "")/\(model.changeCount)") {
-        guard let query = maybeQuery, let core = try? model.core() else {
+        guard let query = maybeQuery, let core = try? await model.core() else {
           workspace = []
           return
         }

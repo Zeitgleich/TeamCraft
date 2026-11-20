@@ -144,9 +144,22 @@ reports go off. Options: `sendDefaultPii`, `attachScreenshot`, `attachViewHierar
 `enableAutoBreadcrumbTracking`, `enableNetworkBreadcrumbs`, `enableCaptureFailedRequests`,
 and `enableAutoSessionTracking` off; tracing (app start, screen loads, frames) only at the trace
 rate, without network, file or Core Data spans ("Performance data"); no profiling or replay;
-`enableAppHangTracking` and `enableMetricKit` on. `beforeSend`
+`enableAppHangTracking`, `swiftAsyncStacktraces` (a hang in an async function shows the functions
+that awaited, not only the runtime's frames) and `enableMetricKit` on. `beforeSend`
 (`CrashEventScrub`) and `CrashScrubber.swift` do what the Android side does, with the same test
 cases (`CrashScrubberTests`). The settings and the notice are the same as on Android.
+
+#### Launch steps
+
+A hang or a watchdog kill during the start is reported at the *next* start, when this run's log
+says nothing about it. So the app notes where a start stands as breadcrumbs of category `launch`
+(`LaunchSteps.swift`): fixed step names only (`bootstrap`, `store_opening`, `store_open`,
+`store_open_failed`, `account_state`, `sync_lock_waiting`, `sync_lock_taken`, `sync_started`,
+`ready`), never anything about the account, its content or the server. `beforeBreadcrumb` lets
+only these through; sentry-cocoa stores them with a fatal report on the device. `beforeSend` keeps
+them, and adds the core's log lines only to a report of the running process: a report whose
+timestamp is before the SDK started (a crash or fatal hang of the run before) gets no log lines
+of this run. The same names are in the system log (category `Launch`).
 
 ## Installation ID
 

@@ -114,7 +114,7 @@ struct CustomEmojiGlyph: View {
       }
     }
     .task(id: maybePicture == nil ? model.changeCount : -1) {
-      guard maybePicture == nil, let core = try? model.core() else { return }
+      guard maybePicture == nil, let core = try? await model.core() else { return }
       maybePicture = await CustomEmojiPictures.picture(reference.sha256, core: core)
       if maybePicture == nil { await CustomEmojiPictures.want(core: core) }
     }
