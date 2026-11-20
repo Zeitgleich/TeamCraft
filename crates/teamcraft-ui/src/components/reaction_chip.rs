@@ -91,7 +91,7 @@ impl ReactorNames {
     })
   }
 
-  /// "Alex, Sam and you reacted with 👍", or the count alone when no name is known.
+  /// "Alex, Sam and you reacted with +1", or the count alone when no name is known.
   pub fn label(&self, locale: Locale, emoji: &str) -> String {
     let mut args = FluentArgs::new();
     args.set("emoji", emoji.to_owned());
@@ -273,8 +273,8 @@ mod tests {
   fn unnamed_people_only_count() {
     let en = Locale::En;
     assert!(names(false, &[], 2).phrase(en, 3).is_none());
-    assert_eq!(names(false, &[], 1).label(en, "👍"), "👍 reaction, 1 person");
-    assert_eq!(names(false, &[], 2).label(en, "👍"), "👍 reaction, 2 people");
+    assert_eq!(names(false, &[], 1).label(en, "+1"), "+1 reaction, 1 person");
+    assert_eq!(names(false, &[], 2).label(en, "+1"), "+1 reaction, 2 people");
     assert_eq!(names(false, &["A"], 3).phrase(en, 3).unwrap(), "A and 2 others");
   }
 }
