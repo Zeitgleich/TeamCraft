@@ -37,6 +37,10 @@ pub fn embed_without_web_only_files() -> Result<(), String> {
   cargo("rerun-if-env-changed=TAURI_CONFIG");
   let manifest_dir = PathBuf::from(variable("CARGO_MANIFEST_DIR")?);
   let web_build = manifest_dir.join(WEB_BUILD);
+  // The copy below must follow the web build: Cargo watches the directory (recursively, by
+  // modification time). Without this the build script ran once and kept the first bundle, which a
+  // CI job that compiles against a placeholder and receives the real bundle later would ship.
+  cargo(&format!("rerun-if-changed={}", web_build.display()));
   if !web_build.is_dir() {
     return Ok(());
   }

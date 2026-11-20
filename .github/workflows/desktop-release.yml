@@ -149,7 +149,7 @@ jobs:
         working-directory: apps/desktop
         run: |
           mkdir -p ../../crates/teamcraft-ui/dist
-          echo '<!doctype html><title>placeholder</title>' > ../../crates/teamcraft-ui/dist/index.html
+          echo '<!doctype html><title>teamcraft-ui-build-pending</title>' > ../../crates/teamcraft-ui/dist/index.html
           cargo tauri build --config tauri.models.conf.json --config tauri.prebuilt-ui.conf.json --no-bundle
       # The UI bundle from the ui job (this job doesn't `needs: ui`, see above); tauri.prebuilt-ui.conf.json
       # drops the trunk build from beforeBuildCommand.
@@ -161,6 +161,10 @@ jobs:
         run: >
           cargo tauri build --config tauri.models.conf.json --config tauri.prebuilt-ui.conf.json
           --no-bundle
+      # The compile against the placeholder must not be what ships.
+      - name: The build embeds the real UI
+        shell: bash
+        run: scripts/check-embedded-ui.sh
       # The packages get the stripped executable (as with `strip = "symbols"`), linked to its debug
       # file by build ID and .gnu_debuglink.
       - name: Split off the debug file
@@ -306,7 +310,7 @@ jobs:
         working-directory: apps/desktop
         run: |
           mkdir -p ../../crates/teamcraft-ui/dist
-          echo '<!doctype html><title>placeholder</title>' > ../../crates/teamcraft-ui/dist/index.html
+          echo '<!doctype html><title>teamcraft-ui-build-pending</title>' > ../../crates/teamcraft-ui/dist/index.html
           cargo tauri build --config tauri.models.conf.json --config tauri.prebuilt-ui.conf.json --target ${{ matrix.target }} --no-bundle
         env:
           PKG_CONFIG_PATH: /Library/Frameworks/GStreamer.framework/Versions/1.0/lib/pkgconfig
@@ -326,6 +330,11 @@ jobs:
         env:
           PKG_CONFIG_PATH: /Library/Frameworks/GStreamer.framework/Versions/1.0/lib/pkgconfig
           PKG_CONFIG_ALLOW_CROSS: "1"
+      # The compile against the placeholder must not be what ships.
+      - name: The build embeds the real UI
+        shell: bash
+        if: ${{ !inputs.warm-cache }}
+        run: scripts/check-embedded-ui.sh
       # The dSYM and the executable carry the same UUID, which stripping, install_name_tool and
       # codesign leave alone. `strip -S -x` drops the debug map and the local symbols, as Cargo's
       # `strip = "symbols"` did.
@@ -542,7 +551,7 @@ jobs:
         working-directory: apps/desktop
         run: |
           mkdir -p ../../crates/teamcraft-ui/dist
-          echo '<!doctype html><title>placeholder</title>' > ../../crates/teamcraft-ui/dist/index.html
+          echo '<!doctype html><title>teamcraft-ui-build-pending</title>' > ../../crates/teamcraft-ui/dist/index.html
           cargo tauri build --config tauri.models.conf.json --config tauri.prebuilt-ui.conf.json --target ${{ matrix.target }} --no-bundle
       # The UI bundle from the ui job (this job doesn't `needs: ui`, see above); tauri.prebuilt-ui.conf.json
       # drops the trunk build from beforeBuildCommand.
@@ -558,6 +567,11 @@ jobs:
           --target ${{ matrix.target }} ${{ inputs.warm-cache && '--no-bundle' || '--bundles nsis,msi' }}
         # Signing is left out on purpose (the installers are unsigned). To enable it, see
         # apps/desktop/packaging/windows/README.md (Authenticode certificate or Azure Trusted Signing).
+      # The compile against the placeholder must not be what ships.
+      - name: The build embeds the real UI
+        shell: bash
+        if: ${{ !inputs.warm-cache }}
+        run: scripts/check-embedded-ui.sh
       # The updater runs the new installer of the same kind (NSIS or MSI) the app came from.
       - name: Sign the installers for the updater (optional)
         if: ${{ !inputs.warm-cache }}
