@@ -292,7 +292,9 @@ jobs:
             arch: x64
             rustflags: ""
     needs: ui
-    runs-on: macos-26
+    # Xcode 27 (macOS 27 SDK), the same image as the iOS jobs; the deployment target below keeps
+    # macOS 14+ running.
+    runs-on: xcode-27
     env:
       # Overrides the workflow-wide flags per architecture (see the matrix).
       RUSTFLAGS: ${{ matrix.rustflags }}
