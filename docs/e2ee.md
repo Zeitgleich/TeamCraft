@@ -6366,6 +6366,15 @@ estimation). A resent frame decrypts like the original, so it can't be used to i
 duplicate is dropped by the receiver before reassembly, and a frame repeated after it was shown is
 too old to be reassembled again. Audio isn't resent (Opus conceals and corrects losses itself, and a
 resent frame would be too late to play).
+
+**Repaired uplink packets** (#2189). When a publisher's packet doesn't reach the SFU, the SFU names
+it to the publisher (`retransmit_requested`: track, layer and RTP sequence numbers), and the
+publisher sends that packet once more from a short history of what it sent, byte for byte as the
+first time: the same DAVE ciphertext and nonce, nothing encrypted anew, so no nonce is used for two
+plaintexts. The SFU learns that the packet was lost, which the gap in the sequence numbers and the
+transport feedback told it already; it decrypts nothing. A hostile SFU could ask for packets again
+and again: the publisher answers only within its retransmission budget (a share of its uplink
+estimate) and only with packets it sent within the window, and receivers drop the duplicates.
 **Probing links at the start** (#1762). The padding trains that measure a link when a device joins
 (ARCHITECTURE.md §6.3) carry zeros on a stream nobody publishes; the SFU and the client learn only
 how much arrived when, which they see of every datagram anyway.
