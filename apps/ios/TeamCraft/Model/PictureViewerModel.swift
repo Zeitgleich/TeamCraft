@@ -116,7 +116,7 @@ final class PictureViewerModel {
   /// Reads what the viewer needs (the opened message, then pages of the conversation near the
   /// picture on screen) until it needs nothing more.
   func load(app: AppModel) async {
-    guard let viewer = maybeViewer, let core = try? app.core() else { return }
+    guard let viewer = maybeViewer, let core = try? await app.core() else { return }
     while let query = viewer.nextQuery() {
       // A read that fails isn't asked again; the viewer keeps what it has.
       guard let answer = try? await core.query(queryJson: query) else { break }
@@ -130,7 +130,7 @@ final class PictureViewerModel {
   /// After a change in the core: the files on screen again (a download's progress or end, a
   /// deleted message).
   func refresh(app: AppModel) async {
-    guard isLoaded, let viewer = maybeViewer, let core = try? app.core(), let query = viewer.refreshQuery(),
+    guard isLoaded, let viewer = maybeViewer, let core = try? await app.core(), let query = viewer.refreshQuery(),
       let answer = try? await core.query(queryJson: query)
     else { return }
     if (try? viewer.addAnswer(queryJson: query, answerJson: answer)) == true { apply() }

@@ -24,7 +24,7 @@ extension AppModel {
     if let stored = await spacePictureStore.data(spaceId: spaceId, version: version) {
       return Self.thumbnail(stored).map(SpacePictureLoad.picture) ?? .none
     }
-    guard let core = try? core() else { return .none }
+    guard let core = try? await core() else { return .none }
     do {
       let maybeBytes = try await core.spacePicture(spaceId: spaceId, maxBytes: Self.spacePictureMaxBytes)
       pictureRetries.succeeded()

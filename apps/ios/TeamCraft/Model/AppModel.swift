@@ -234,17 +234,14 @@ final class AppModel {
   @ObservationIgnored private let localAuth = LocalAuthClient()
   /// The sign-in page came with the server check just now: the screen need not ask again.
   @ObservationIgnored private var isSignInPageFromCheck = false
-  @ObservationIgnored private lazy var processLock = ProcessLock(fileURL: container.lockFileURL)
-  /// Who in this process holds the cross-process lock. The sync loop and short jobs (a push, sealing,
-  /// a prefetch) share the one `flock`; it is released when the last of them lets go, so no job frees
-  /// the lock under the sync loop and no job keeps it after it ended.
-  @ObservationIgnored private var lockHolders: Set<LockHolder> = []
-  /// The one take of the lock under way: another taker waits for it instead of opening its own.
-  @ObservationIgnored private var maybePendingAcquire: Task<Bool, Never>?
+  /// Who in this process holds the cross-process lock (`LockHolds`).
+  @ObservationIgnored private lazy var lockHolds = LockHolds(lock: ProcessLock(fileURL: container.lockFileURL))
   /// Counts `stopSyncing` calls, so a take of the lock that ends after one lets it go again.
   @ObservationIgnored private var syncStops = 0
   @ObservationIgnored private let storeChanges = StoreChangeNotifier()
   @ObservationIgnored private var maybeCore: TeamCraft?
+  /// The open of the core under way, off the main thread (`core()`); `nil` once it is done.
+  @ObservationIgnored private var maybeCoreOpening: Task<Result<TeamCraft, Error>, Never>?
   @ObservationIgnored private var maybeSettingsSync: SettingsSyncer?
   @ObservationIgnored private var settingsDefaultsObserver: NSObjectProtocol?
   /// When pictures that failed during an outage are asked for again (issue #1617).
@@ -280,6 +277,7 @@ final class AppModel {
   /// Opens the stored server and session, if any. Safe to call more than once.
   func bootstrap() async {
     guard case .starting = phase else { return }
+    LaunchSteps.mark(.bootstrap)
     storeChanges.observe { [weak self] in self?.storeDidChange() }
     // Starts following the network, so changes reach the core from now on.
     _ = NetworkMonitor.shared
@@ -482,7 +480,7 @@ final class AppModel {
   func retryStore() async {
     guard case .storeUnreadable = phase else { return }
     await busy {
-      maybeCore = nil
+      forgetCore()
       await refreshAccountState()
     }
   }
@@ -541,7 +539,7 @@ final class AppModel {
     maybeLinkTask?.cancel()
     maybeLinkTask = Task {
       do {
-        let core = try self.core()
+        let core = try await self.core()
         phase = .linking(waiting)
         let shortCode = try await peer(core)
         guard !Task.isCancelled else { return }
@@ -710,7 +708,7 @@ final class AppModel {
   /// Conversations with a call running now and how many people are in each (issue #1352): the
   /// list marks them and the conversation offers to join. Never waits for the engine.
   func runningCalls() async -> [String: Int] {
-    guard let core = try? core() else { return [:] }
+    guard let core = try? await core() else { return [:] }
     var counts: [String: Int] = [:]
     for call in core.runningCalls() {
       counts[call.conversationId] = call.participantUserIds.count
@@ -734,7 +732,7 @@ final class AppModel {
   /// with; `nil` when the read failed. Read and decoded off the main actor: the feed is read again on
   /// every change.
   func messages(conversationId: String, from maybeOldest: Message?, older: UInt32) async -> MessagePage? {
-    guard let core = try? core() else { return nil }
+    guard let core = try? await core() else { return nil }
     return await Self.readTail(
       core, conversationId: conversationId, maybeOldestId: maybeOldest?.id, oldestSentAtMs: maybeOldest?.sentAtMs ?? 0,
       older: older)
@@ -743,7 +741,7 @@ final class AppModel {
   /// Root and replies of a thread, oldest first, their authors not named yet (`Message.named`);
   /// empty when the read failed.
   func thread(conversationId: String, threadId: String) async -> [Message] {
-    guard let core = try? core() else { return [] }
+    guard let core = try? await core() else { return [] }
     return await Self.readThread(core, query: ChatQuery.thread(conversationId: conversationId, threadId: threadId).json)
   }
 
@@ -778,7 +776,7 @@ final class AppModel {
   func chatPreviews(_ conversations: [ConversationItem], myId: String) async -> [String: ChatPreview] {
     let ids = conversations.map(\.id)
     let directIds = Set(conversations.filter { $0.kind == .direct }.map(\.id))
-    guard let core = try? core() else { return [:] }
+    guard let core = try? await core() else { return [:] }
     var previews: [String: ChatPreview] = [:]
     for message in await Self.readPreviews(core, conversationIds: ids) {
       previews[message.conversationId] = chatPreview(
@@ -788,7 +786,7 @@ final class AppModel {
   }
 
   func search(_ query: String) async -> [SearchHit] {
-    guard !query.trimmingCharacters(in: .whitespaces).isEmpty, let core = try? core() else { return [] }
+    guard !query.trimmingCharacters(in: .whitespaces).isEmpty, let core = try? await core() else { return [] }
     return await Self.readSearch(core, query: query)
   }
 
@@ -900,7 +898,7 @@ final class AppModel {
   /// (docs/scheduled-messages.md). Another device being first isn't a failure.
   func sealScheduledMessages() async -> Bool {
     // A cold background launch has no phase yet: the core opens from the store, as for a push.
-    guard let core = try? core(createsKey: false) else { return false }
+    guard let core = try? await core(createsKey: false) else { return false }
     // Shares the lock with the sync loop in the foreground; otherwise takes it like the extension does,
     // and releases exactly that hold when done (asleep with the lock held, iOS kills the app).
     let isSealed = await withProcessLock {
@@ -920,7 +918,7 @@ final class AppModel {
   /// opens. The core stops the loop at the end unless the app is in the foreground.
   func catchUpInBackground() async -> Bool {
     // A cold background launch has no phase yet: the core opens from the store, as for a push.
-    guard let core = try? core(createsKey: false) else { return false }
+    guard let core = try? await core(createsKey: false) else { return false }
     let budget = Self.maxBackgroundFlushSeconds - Self.backgroundStopMarginSeconds
     let isCaughtUp = await withProcessLock {
       do {
@@ -1088,7 +1086,7 @@ final class AppModel {
   /// segments this device doesn't have yet, if the setting allows it on this network. `true` when
   /// there was nothing to do or the download went through.
   func runSegmentPrefetch() async -> Bool {
-    guard let core = try? core() else { return true }
+    guard let core = try? await core() else { return true }
     guard let mode = try? await core.segmentPrefetch(), mode != .off else { return true }
     let isMetered = await NetworkPath.isMetered()
     guard mode == .always || !isMetered else { return true }
@@ -1285,7 +1283,7 @@ final class AppModel {
   }
 
   private func openSealedPush(_ sealed: Data) async -> PushNotification? {
-    guard let core = try? core() else { return nil }
+    guard let core = try? await core() else { return nil }
     // Shares the foreground app's lock; otherwise takes it like the extension does.
     let maybeNotification = await withProcessLock {
       try? await core.notificationForPush(payload: sealed, utcOffsetMinutes: PushClock.utcOffsetMinutes())
@@ -1480,7 +1478,7 @@ final class AppModel {
   /// change), only in the foreground; nothing waits for it and a failure shows nothing.
   func measureLink(meetingId: String? = nil) {
     Task {
-      guard let core = try? core() else { return }
+      guard let core = try? await core() else { return }
       await core.measureLink(meetingId: meetingId)
     }
   }
@@ -1648,23 +1646,66 @@ final class AppModel {
   /// `createsKey: false` for background launches: the keychain read before first unlock fails rather
   /// than returning nothing, but a background path still never replaces a database key it can't find
   /// (that would lose the store); it fails and the foreground opens the core.
-  func core(createsKey: Bool = true) throws -> TeamCraft {
+  ///
+  /// Opening waits for the store (recovery after a kill, layout steps, the catalog build), which
+  /// can take seconds: it runs off the main thread, and the start screen shows meanwhile. On the
+  /// main thread the watchdog killed the app at every launch, and the same work started over.
+  /// One open at a time: whoever asks meanwhile waits for it. A store closed for a suspension
+  /// opens again off the main thread too (`resumeStore`).
+  func core(createsKey: Bool = true) async throws -> TeamCraft {
     if let maybeCore {
-      if suspension.isStoreSuspended { try resumeStore(maybeCore) }
+      if suspension.isStoreSuspended { try await resumeStore(maybeCore) }
       return maybeCore
     }
+    if let opening = maybeCoreOpening {
+      let result = await opening.value
+      if let maybeCore { return maybeCore }
+      _ = try result.get()
+      throw CoreFactoryError.noAccount
+    }
     guard let account = container.activeAccount, vault.hasSession else { throw CoreFactoryError.noAccount }
-    let opened = try factory.open(
-      account: account, createKey: createsKey, runsUpkeep: true,
-      listener: ClosureEventListener { [weak self] in
-        Task { @MainActor in self?.storeDidChange() }
-      })
+    let factory = factory
+    // A catch-up reports thousands of changes: one update per burst (`ChangeCoalescer`).
+    let changes = ChangeCoalescer { [weak self] in self?.storeDidChange() }
+    let listener = ClosureEventListener { changes.signal() }
+    let opening = Task.detached(priority: .userInitiated) {
+      Result { try factory.open(account: account, createKey: createsKey, runsUpkeep: true, listener: listener) }
+    }
+    maybeCoreOpening = opening
+    LaunchSteps.mark(.storeOpening)
+    let result = await opening.value
+    // Signed out, or "try again", while it opened: that core is no longer the account's.
+    guard maybeCoreOpening == opening else {
+      if case .success(let stale) = result { Self.closeAside(stale) }
+      throw CoreFactoryError.noAccount
+    }
+    maybeCoreOpening = nil
+    let opened: TeamCraft
+    do {
+      opened = try result.get()
+    } catch {
+      LaunchSteps.mark(.storeOpenFailed)
+      throw error
+    }
+    LaunchSteps.mark(.storeOpen)
     maybeCore = opened
     // A new core's store is open; a flag left from the one before (signed out) doesn't apply.
     suspension.storeResumed()
     setConnection(opened.connectionState())
     settingsSyncer().start()
     return opened
+  }
+
+  /// Forgets the open core (sign-out, "try again"), and an open under way with it.
+  private func forgetCore() {
+    if let core = maybeCore { Self.closeAside(core) }
+    maybeCore = nil
+    maybeCoreOpening = nil
+  }
+
+  /// Lets go of a core off the main thread: dropping the handle waits for the store's threads.
+  private nonisolated static func closeAside(_ core: TeamCraft) {
+    Task.detached(priority: .utility) { withExtendedLifetime(core) {} }
   }
 
   /// "Try again" in the banner: the open core checks its connection now. Opens no core.
@@ -1747,7 +1788,7 @@ final class AppModel {
     // Before the keys go: deletes the push key here, ends the sealed device token at the gateway
     // and the registration on the server, so the server can't push to this phone any more.
     // Best effort and at most a few seconds; offline, the push key is still gone.
-    if let core = try? core() {
+    if let core = try? await core() {
       await Self.awaitAtMost(seconds: 5) { try? await core.unregisterPush() }
       // A setup given up on leaves no keys behind, and its device is revoked (issue #415); the core
       // waits a few seconds for the server at most.
@@ -1764,7 +1805,7 @@ final class AppModel {
     if let account = container.activeAccount {
       factory.deleteDatabaseKey(account: account)
     }
-    maybeCore = nil
+    forgetCore()
     setConnection(nil)
     vault.clear()
     NotificationAuthenticator().removeKey()
@@ -1791,7 +1832,9 @@ final class AppModel {
     // The same value as at the sign-in, not the core's user ID.
     claimWaitingShare(for: account)
     do {
-      let state = try await core().accountState()
+      let core = try await core()
+      LaunchSteps.mark(.accountState)
+      let state = try await core.accountState()
       switch state {
       case .needsEnrollment(let hasExistingIdentity):
         phase = .needsEnrollment(hasExistingIdentity: hasExistingIdentity, failure: nil)
@@ -1832,8 +1875,9 @@ final class AppModel {
     container.displayName = displayName
     try? NotificationAuthenticator().ensureKey()
     phase = .ready(Account(userId: userId, displayName: displayName, identityFingerprint: fingerprint))
+    LaunchSteps.mark(.ready)
     refreshCrashReports()
-    if let core = try? core() {
+    if let core = try? await core() {
       await calls.attach(core: core)
     }
     await startSyncing()
@@ -1848,19 +1892,22 @@ final class AppModel {
   }
 
   private func startSyncing() async {
-    guard let core = try? core() else { return }
+    guard let core = try? await core() else { return }
     if isSyncing {
       // The background time ran out while syncing, which gave the lock up: take it back. A job may
       // hold it meanwhile; the sync loop then shares it and keeps it once the job is done.
-      if !lockHolders.contains(.sync) { _ = await acquireSyncLock() }
+      if !lockHolds.contains(.sync) { _ = await acquireSyncLock() }
       return
     }
     // Never sync beside the extension: both would refresh the rotating refresh token, and the
     // loser is signed out (docs/e2ee.md §7). It holds the lock at most for its push budget.
+    LaunchSteps.mark(.syncLockWaiting)
     guard await acquireSyncLock() else { return }
+    LaunchSteps.mark(.syncLockTaken)
     isSyncing = true
     do {
       try await core.start()
+      LaunchSteps.mark(.syncStarted)
     } catch {
       // Not syncing after all: the next foreground tries again (issue #1142).
       Self.syncLog.error("sync not started: \(String(describing: error), privacy: .public)")
@@ -1897,45 +1944,26 @@ final class AppModel {
     return await operation()
   }
 
-  /// Takes the lock for `holder`, or joins this process's hold of it. One take runs at a time: a
-  /// second taker waits for it and then joins, so the process never opens two descriptors for it.
   private func takeProcessLock(for holder: LockHolder, timeout: TimeInterval) async -> Bool {
-    while let pending = maybePendingAcquire {
-      _ = await pending.value
-    }
-    if processLock.isHeld {
-      lockHolders.insert(holder)
-      return true
-    }
-    let lock = processLock
-    let pending = Task.detached { lock.acquire(timeout: timeout) }
-    maybePendingAcquire = pending
-    let isTaken = await pending.value
-    if maybePendingAcquire == pending { maybePendingAcquire = nil }
-    // Background expiry may have dropped it while this waited to resume.
-    guard isTaken, processLock.isHeld else { return false }
-    lockHolders.insert(holder)
-    return true
+    await lockHolds.take(for: holder, timeout: timeout)
   }
 
   /// `holder` is done; the lock goes once nobody in this process holds it.
   private func releaseProcessLock(for holder: LockHolder) {
-    lockHolders.remove(holder)
-    if lockHolders.isEmpty { processLock.release() }
+    lockHolds.release(for: holder)
   }
 
   /// The store closes for a suspension, or the background time ran out: the lock goes now, whoever
   /// holds it (0xdead10cc). The sync loop takes it back in the foreground; a job still running
   /// finishes without it.
   private func dropProcessLock() {
-    lockHolders.removeAll()
-    processLock.release()
+    lockHolds.dropAll()
   }
 
   /// Gives the sync loop the background time to send what is pending, leaving a margin to stop
   /// syncing and close the store before it runs out.
   private func flushPendingWork() async {
-    guard isSyncing, let core = try? core() else { return }
+    guard isSyncing, let core = try? await core() else { return }
     let remaining = UIApplication.shared.backgroundTimeRemaining
     let budget = min(remaining, Self.maxBackgroundFlushSeconds) - Self.backgroundStopMarginSeconds
     guard budget > 0 else { return }
@@ -2012,10 +2040,11 @@ final class AppModel {
 
   /// Opens a store closed for a suspension again when the core is used: in the foreground or for a
   /// background job. A screen reading in the background gets an error instead, so the store never
-  /// stays open behind the app's back while it is suspended. Waits while the store opens.
-  private func resumeStore(_ core: TeamCraft) throws {
+  /// stays open behind the app's back while it is suspended. Waits, off the main thread, while the
+  /// store opens.
+  private func resumeStore(_ core: TeamCraft) async throws {
     guard suspension.mayResume(isInBackground: isInBackground) else { throw CoreFactoryError.storeSuspended }
-    try core.resume()
+    try await Task.detached { try core.resume() }.value
     storeResumed()
   }
 
@@ -2032,7 +2061,7 @@ final class AppModel {
     syncStops += 1
     guard isSyncing else { return }
     isSyncing = false
-    if let core = try? core() { try? await core.stop() }
+    if let core = try? await core() { try? await core.stop() }
     // A job still running keeps its hold; the lock goes when it is done.
     releaseProcessLock(for: .sync)
   }
@@ -2068,7 +2097,7 @@ final class AppModel {
     let now = Date.now
     guard !isRegistered || PushUpkeepSchedule.isRefreshDue(lastCheckedAt: maybeLastCheck, now: now),
       PushUpkeepSchedule.mayAttempt(lastAttemptAt: maybeLastPushAttempt, now: now),
-      let core = try? core()
+      let core = try? await core()
     else { return }
     isPushUpkeepRunning = true
     maybeLastPushAttempt = now
@@ -2123,8 +2152,3 @@ private final class ResumeOnce: @unchecked Sendable {
   }
 }
 
-/// A holder of the cross-process lock inside the app: the sync loop, or one short job.
-private enum LockHolder: Hashable {
-  case sync
-  case job(UUID)
-}

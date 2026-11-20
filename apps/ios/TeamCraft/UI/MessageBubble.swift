@@ -466,7 +466,7 @@ struct MessageBodyView: View {
   }
 
   private func loadPictures() async {
-    guard !customEmoji.isEmpty, let core = try? model.core() else { return }
+    guard !customEmoji.isEmpty, let core = try? await model.core() else { return }
     var found = pictures
     for reference in customEmoji where found[reference.sha256] == nil {
       if let image = await CustomEmojiPictures.picture(reference.sha256, core: core) {
