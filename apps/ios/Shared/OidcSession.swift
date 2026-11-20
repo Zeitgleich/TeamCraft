@@ -420,7 +420,9 @@ final class SessionVault {
   /// if it fails the token still is good and comes back, and the next regular refresh brings the
   /// ID token instead.
   func currentAccessToken(forceRefresh: Bool = false) -> String? {
-    queue.sync {
+    UiThreadGuard.shared.check("SessionVault.currentAccessToken")
+    // blocking-ok: the core asks on its token thread; the guard reports the main thread.
+    return queue.sync {
       if let local = loadLocal() {
         // No refresh for local sessions: past its expiry the account is signed out.
         return local.isUsable() ? local.accessToken : nil
@@ -430,6 +432,7 @@ final class SessionVault {
       // One refresh across the app and the notification extension (issue #667): whoever waited
       // reads the keychain again and takes the token the other one got.
       let lock = refreshLockURL.map { ProcessLock(fileURL: $0) }
+      // blocking-ok: within currentAccessToken, off the main thread (guarded above).
       if let lock, !lock.acquire(timeout: Self.refreshLockTimeout) { return stale.accessTokenIfFresh }
       defer { lock?.release() }
       guard let session = load() else { return nil }
@@ -438,6 +441,7 @@ final class SessionVault {
         return session.accessToken
       }
       guard session.refreshToken != nil else { return session.accessTokenIfFresh }
+      // blocking-ok: within currentAccessToken, off the main thread (guarded above).
       let semaphore = DispatchSemaphore(value: 0)
       let box = ResultBox()
       let refresh = self.refresh
@@ -445,6 +449,7 @@ final class SessionVault {
         do { box.outcome = .success(try await refresh(session)) } catch { box.outcome = .failure(error) }
         semaphore.signal()
       }
+      // blocking-ok: within currentAccessToken, off the main thread (guarded above).
       _ = semaphore.wait(timeout: .now() + refreshTimeout)
       switch box.outcome {
       case .success(let renewed):

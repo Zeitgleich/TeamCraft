@@ -1156,6 +1156,7 @@ final class AppModel {
     if Thread.isMainThread {
       MainActor.assumeIsolated { shared.backgroundTimeExpired() }
     } else {
+      // blocking-ok: the expiry thread waits for the main thread, not the other way round.
       DispatchQueue.main.sync { MainActor.assumeIsolated { shared.backgroundTimeExpired() } }
     }
   }
@@ -1174,6 +1175,7 @@ final class AppModel {
     suspension.storeSuspended()
     // Waits here, on the main thread, at most `MAX_STORE_CLOSE_WAIT` (2 s): an expiry handler
     // can't wait asynchronously, and iOS suspends the app once it returned.
+    // blocking-ok: on the main thread on purpose, at most 2 s: iOS suspends once the handler returns.
     let suspended = core.suspend()
     Self.syncLog.notice("background time ran out; store: \(String(describing: suspended), privacy: .public)")
   }
@@ -2029,6 +2031,7 @@ final class AppModel {
     dropProcessLock()
     guard let core = maybeCore else { return }
     suspension.storeSuspended()
+    // blocking-ok: on a detached task, off the main thread.
     let suspended = await Task.detached { core.suspend() }.value
     Self.syncLog.info("store closed for the suspension: \(String(describing: suspended), privacy: .public)")
   }

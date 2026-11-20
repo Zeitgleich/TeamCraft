@@ -28,6 +28,13 @@ interface CrashSdk {
    * while the SDK isn't running. The core's log ring comes along as breadcrumbs, like for a crash.
    */
   fun captureHandled(what: String, cause: String) = Unit
+
+  /**
+   * Reports something the app did that it shouldn't, as a warning: [what] names the kind, [where]
+   * the call site (a function name); never content. Once per call site is the caller's business.
+   * Does nothing while the SDK isn't running.
+   */
+  fun captureWarning(what: String, where: String) = Unit
 }
 
 /** What the SDK is started with: the instance's setting, this build's release and the installation. */

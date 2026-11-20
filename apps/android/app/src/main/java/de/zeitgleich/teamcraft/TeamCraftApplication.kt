@@ -10,6 +10,7 @@ import de.zeitgleich.teamcraft.ui.media.MediaDraftStore
 import de.zeitgleich.teamcraft.ui.MAX_IMPORT_BYTES
 import android.app.Application
 import android.content.Context
+import android.os.StrictMode
 import android.util.Log
 import java.io.File
 import androidx.lifecycle.DefaultLifecycleObserver
@@ -143,6 +144,7 @@ class TeamCraftApplication : Application(), Configuration.Provider {
 
   override fun onCreate() {
     super.onCreate()
+    if (BuildConfig.DEBUG) watchMainThread()
     graph = AppGraph(this)
     // First, so a crash during the rest of the start is reported (the last known setting).
     graph.crashReports.install()
@@ -179,6 +181,25 @@ class TeamCraftApplication : Application(), Configuration.Provider {
     graph.scope.launch(Dispatchers.IO) { File(cacheDir, "outgoing").deleteRecursively() }
     ProcessLifecycleOwner.get().lifecycle.addObserver(ForegroundSync(this, graph))
     ProcessLifecycleOwner.get().lifecycle.addObserver(ActivityReports(graph.core))
+  }
+
+  /**
+   * Debug builds (#2184): the main thread never waits. Network on it ends the app at once; disk
+   * reads and writes and custom slow calls go to the log with a stack trace (`StrictMode` in
+   * logcat), since small preference reads at start are still there; `UiThreadGuard` fails loudly
+   * on the app's own blocking calls.
+   */
+  private fun watchMainThread() {
+    StrictMode.setThreadPolicy(
+      StrictMode.ThreadPolicy.Builder()
+        .detectNetwork()
+        .detectDiskReads()
+        .detectDiskWrites()
+        .detectCustomSlowCalls()
+        .penaltyLog()
+        .penaltyDeathOnNetwork()
+        .build(),
+    )
   }
 
   /** WorkManager starts on first use instead of at process start (AndroidManifest.xml). */

@@ -426,9 +426,22 @@ counter, a channel send), which may stay sync with a doc comment saying so.
 | Android `synchronized` in notifications, prefs, shares                   | short critical sections over memory                                             | any                                            | ok                                                                                                               |
 
 Launch, foreground and background, notification handling and the message list read through async
-exports only. Not yet enforced: a check that fails loudly when a may-block call runs on the UI thread
-(debug builds), with a warning to the crash reports in release builds, Android `StrictMode`, and a CI
-script for new blocking calls in UI code; tracked in #2184.
+exports only.
+
+Enforced by:
+- `UiThreadGuard` (iOS `Shared/UiThreadGuard.swift`, Android `core/UiThreadGuard.kt`) in every
+  blocking call of the apps: `currentAccessToken`, `ProcessLock.acquire`, the Android token and
+  HTTP bridges. Debug builds fail loudly on the main thread. Release builds send one warning per
+  call site (docs/crash-reports.md, "Waits on the UI thread").
+- Android debug builds run `StrictMode`: network on the main thread ends the app, disk reads and
+  writes are logged.
+- `scripts/check-ui-thread-blocking.py` (CI) fails on a blocking primitive in app code without
+  `// blocking-ok: <why>`.
+
+Open gap: pasting files from the keyboard (Android `onPasteFiles`) copies them on the main thread
+(`runBlocking(Dispatchers.IO)`), because the keyboard's read grant ends when the receiver returns.
+Large pastes freeze the composer until the copy is done. Severity medium; the fix is to take the
+grant (`InputContentInfo.requestPermission`) and copy in the background.
 
 ## Not verified
 

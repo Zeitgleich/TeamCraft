@@ -33,6 +33,7 @@ final class VaultTokenProvider: TokenProvider, @unchecked Sendable {
   func accessToken() -> AccessToken {
     // Taken at most once per request of the core, so one request is one forced refresh.
     let forceRefresh = receiver?.takeIdTokenRequest() == true
+    // blocking-ok: the core asks on its token thread (`UiThreadGuard` in currentAccessToken).
     let token = vault.currentAccessToken(forceRefresh: forceRefresh)
     receiver?.noteIdToken(idToken: vault.currentIdToken())
     if let token { return .token(value: token) }
