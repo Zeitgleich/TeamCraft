@@ -37,6 +37,8 @@ permissions:
   contents: read
   # The Linux jobs run in the CI image on GHCR.
   packages: read
+  # The jobs wait for the UI bundle artifact (desktop-release.yml).
+  actions: read
 
 jobs:
   desktop:

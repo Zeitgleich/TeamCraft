@@ -238,6 +238,8 @@ jobs:
       contents: read
       # The Linux jobs run in the CI image on GHCR.
       packages: read
+      # The jobs that compile before the UI bundle exists wait for its artifact.
+      actions: read
     uses: ./.github/workflows/desktop-release.yml
     # The optional signing secrets (Apple Developer ID, updater key) are read inside it.
     secrets: inherit

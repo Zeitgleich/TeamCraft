@@ -379,6 +379,57 @@ them, a candidate tag builds without FCM and warns. Store builds seal their FCM 
 gateway in the repository variable `TEAMCRAFT_ANDROID_PUSH_GATEWAY_URL` (e.g.
 `https://push-gw.zeitgleich.de`); without it they use the gateway the server names.
 
+## Critical path of the release workflow (#176)
+
+Measured on the nightly runs of 2026-11-17 to 2026-11-20 (v1.0.37 to v1.0.39, 28 to 88 min, usually
+about 67 min). Android and iOS don't hold up the draft release (`android-release` and `ios-release`
+attach their files later), so the path is: the **Web UI bundle** job, then the desktop jobs that
+embed it, then the draft release (about 6 min of assembling).
+
+| Job (v1.0.39)                            | Duration |
+|------------------------------------------|----------|
+| Desktop / Web UI bundle                  | 30 min   |
+| Desktop / macOS Intel, Apple silicon     | 32, 30   |
+| Desktop / Windows aarch64, x86_64        | 30, 28   |
+| Desktop / Flatpak x86_64, aarch64        | 27, 21   |
+| Desktop / Linux x86_64, aarch64          | 24, 17   |
+| Android (not on the path)                | 47 min   |
+| iOS (not on the path)                    | 27 min   |
+| Images (not on the path)                 | 3 to 8   |
+| Draft release                            | 6 min    |
+
+What the numbers showed:
+
+- The UI bundle is one long serial compile (wasm, fat LTO: about 20 of its 30 minutes are the
+  link of the main bundle, which no dependency cache shortens).
+- Every desktop job waited for it (`needs: ui`) and then compiled for 27 minutes: the two added up.
+  The Linux, macOS and Windows jobs now **compile their dependencies against a placeholder bundle
+  while the UI job runs** (`cargo tauri build --no-bundle`, the same command, config and flags as the
+  real build) and then wait for the `ui-dist` artifact
+  (`.github/actions/await-ui-bundle`: polls the run's artifacts, fails when the UI job leaves
+  `ui-failed`). With the real bundle only the desktop crate is compiled again (its assets are
+  embedded with `include_bytes!`, so the changed `index.html` triggers it). Expected: the path becomes
+  max(UI bundle, compile) + about 8 min instead of the sum. The Flatpak build still waits for the UI
+  job: the SDK's build takes the bundle as a source.
+- The compile no longer needs a warm cache to stay under the UI job (cold: 24 to 28 min against
+  30). The Linux jobs therefore don't restore or save a Rust cache any more: their two entries
+  (3.3 GB) went over the budget below and were evicted again before the next release.
+- Actions cache budget: the warm-up on `main` saved about 13 GB for 10 GB of room, so GitHub evicted
+  caches (also the CI ones) between the warm-up and the release (the UI job and macOS missed in v1.0.39).
+  Check with `gh cache list`; what the warm-up saves has to stay below about 8 GB.
+
+Cache trade-off: the release jobs restore dependency builds (not the workspace crates) saved by `main`.
+Cargo keys them by the exact sources and flags, a hit is a byte-identical rebuild of the same inputs,
+and the workspace crates and the final link always build fresh. A cache can only make a release
+faster, never different; to get a fully cold build, delete the entries (`gh cache delete`) or run
+Desktop release by hand with the cache removed.
+
+Options left, with their cost: larger runners (macOS xlarge about $0.10/min, not free for public
+repositories; Windows and Linux larger runners are paid too) would shorten the compile, but the UI job's
+LTO link is serial and not helped by more cores. `lto = "thin"` for the web bundle would shorten it
+(by about half in the PR that measures it) but makes the shipped bundle larger or slower, so it stays
+as it is. Ideas not done: Flatpak with a prebuilt UI as a source, sccache for the C/C++ parts.
+
 ## CI dependency mirror and Actions cache
 
 GitHub Free gives the repository 10 GB of Actions cache; the least recently used entry is evicted
