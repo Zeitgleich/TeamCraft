@@ -12,6 +12,8 @@
 //! | `notification_attachment`: a picture      | macOS    | `notification_attachment` |
 //! | `notification_authorization`: allowed?    | macOS    | `notification_settings`   |
 //! | `apple_action_on_double_click`: setting   | macOS    | `double_click`            |
+//! | `focus_state`: is a Focus on?             | macOS    | `quiet_state`             |
+//! | `windows_notification_state`: quiet?      | Windows  | `quiet_state`             |
 //! | `webkit_version`: the library in use      | Linux    | `webkit_version`          |
 //! | `watch_process_failed`: page process died | Windows  | `webview2_process`        |
 //! | `show_window_menu`: system menu           | Windows  | `window_menu`             |
@@ -38,6 +40,8 @@ mod notification_settings;
 #[cfg(feature = "openh264")]
 mod openh264_rate;
 #[cfg(feature = "shell")]
+mod quiet_state;
+#[cfg(feature = "shell")]
 mod resume;
 #[cfg(feature = "shell")]
 mod snap_layouts;
@@ -62,6 +66,12 @@ pub use notification_settings::NotificationAuthorization;
 pub use notification_settings::notification_authorization;
 #[cfg(feature = "openh264")]
 pub use openh264_rate::{OpenH264RateError, set_openh264_rate};
+#[cfg(all(feature = "shell", windows))]
+pub use quiet_state::windows_notification_state;
+#[cfg(feature = "shell")]
+pub use quiet_state::{QuietState, windows_quiet_state};
+#[cfg(all(feature = "shell", target_os = "macos"))]
+pub use quiet_state::{focus_state, request_focus_authorization};
 
 #[cfg(target_os = "android")]
 pub use android_context::Java_de_zeitgleich_teamcraft_calls_AudioContext_initialize;

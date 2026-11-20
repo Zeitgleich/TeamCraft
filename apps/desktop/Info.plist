@@ -7,6 +7,10 @@
   <string>TeamCraft uses the camera for video calls and meetings.</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>TeamCraft uses the microphone for calls, huddles and meetings.</string>
+  <!-- Asked once, from "Turn on" in Settings > Notifications: with a Focus on, an incoming call stays
+       quiet (#191). Needs the Focus Status capability in the app's signing. -->
+  <key>NSFocusStatusUsageDescription</key>
+  <string>TeamCraft keeps the ringtone of incoming calls quiet while a Focus is on.</string>
   <!-- The languages of the UI (crates/teamcraft-ui/i18n): AppKit then shows what it draws itself
        (the Services menu, the items it adds to Edit and Window, standard panels) in the user's
        language instead of English (#712). -->
