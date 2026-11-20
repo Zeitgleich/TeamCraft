@@ -502,6 +502,7 @@ struct ChatPane: View {
       case .unreadable: Text("attachment_unreadable")
       case .sendFailed: Text("attachment_send_failed")
       case .draftFilesExpired: Text("composer_draft_files_expired")
+      case .unsupportedBundle: Text("attachment_unsupported_bundle")
       }
     }
   }

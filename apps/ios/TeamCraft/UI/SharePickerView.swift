@@ -17,6 +17,8 @@ struct SharePickerView: View {
         switch model.shareImportError {
         case .tooLarge(let limit):
           Text("attachment_too_large \(FileSizeText.format(limit))").font(.app(.footnote)).foregroundStyle(.red)
+        case .unsupportedBundle:
+          Text("attachment_unsupported_bundle").font(.app(.footnote)).foregroundStyle(.red)
         case .unreadable, .sendFailed, .draftFilesExpired:
           Text("attachment_unreadable").font(.app(.footnote)).foregroundStyle(.red)
         case nil:
