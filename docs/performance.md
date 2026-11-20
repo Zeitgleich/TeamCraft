@@ -912,6 +912,8 @@ per transaction name, with its p50/p95, throughput and the slowest samples.
 | `sync.reconnect`        | (none yet) connecting again until connected         | All                          |
 | `file.download`         | (none yet) an attachment's download and decryption  | Web, desktop                 |
 | `call.setup`            | (none yet) joining until the media is secured       | Web, desktop                 |
+| `feed.scroll_back`      | No frozen frames while scrolling back               | Web, desktop, iOS            |
+| `feed.jump_bottom`      | (none yet) one tap lands at the newest message      | iOS                          |
 | App start, `ui.load`    | Signed-in start (mobile), slow and frozen frames    | Android, iOS (the SDKs' own) |
 
 How to find a cause, not only a number:

@@ -110,13 +110,14 @@ struct ChatPane: View {
   /// Older history the store doesn't hold: asked for when the feed reaches the store's end.
   @State private var serverHistory = OlderHistory.complete
   @State private var maybeKeyCatchUp: KeyCatchUpItem?
-  /// The row at the top of the screen: SwiftUI keeps it in place when older rows are added above.
-  @State private var maybeTopRowId: String?
   /// Others' reactions to the user's messages not seen yet: the heart button (issue #1009).
   @State private var unseenReactions = UnseenReactions()
-  @State private var reactionMarks = ReactionMarks()
-  /// The message rows on screen, whose waiting reactions count as seen.
-  @State private var rowsOnScreen: Set<String> = []
+  /// The rows on screen and the reactions reported seen: changed by scrolling, shown by nothing.
+  @State private var onScreen = ListScrollState()
+  /// The messages laid out for the list, built when they change (#2180).
+  @State private var feed = MessageFeed()
+  @State private var listController = MessageListController()
+  @State private var isRefreshFailed = false
   /// The message the heart button goes to, until its row is loaded.
   @State private var maybeReactionTarget: String?
   /// The person whose profile an @mention or an avatar opened (#2002).
@@ -483,17 +484,7 @@ struct ChatPane: View {
     .alert("permalink_unavailable", isPresented: $isPermalinkMissing) {
       Button("done", role: .cancel) {}
     }
-    // Message links open in the app; web links go to the browser as usual.
-    .environment(\.openURL, OpenURLAction { url in
-      guard url.scheme == "teamcraft" else { return .systemAction }
-      if url.absoluteString.hasPrefix(profilePrefix) {
-        let username = String(url.absoluteString.dropFirst(profilePrefix.count)).removingPercentEncoding
-        Task { maybeProfile = await model.person(username: username) }
-        return .handled
-      }
-      Task { await openPermalink(url.absoluteString) }
-      return .handled
-    })
+    .environment(\.openURL, messageLinkAction)
     .alert("attachment_error_title", isPresented: attachmentErrorBinding, presenting: attachmentError) { _ in
       Button("done", role: .cancel) {}
     } message: { error in
@@ -506,141 +497,199 @@ struct ChatPane: View {
     }
   }
 
+  /// Message links open in the app; web links go to the browser as usual.
+  private var messageLinkAction: OpenURLAction {
+    OpenURLAction { url in
+      guard url.scheme == "teamcraft" else { return .systemAction }
+      if url.absoluteString.hasPrefix(profilePrefix) {
+        let username = String(url.absoluteString.dropFirst(profilePrefix.count)).removingPercentEncoding
+        Task { maybeProfile = await model.person(username: username) }
+        return .handled
+      }
+      Task { await openPermalink(url.absoluteString) }
+      return .handled
+    }
+  }
+
+  /// The messages on a recycling collection view (issue #2180, `MessageListView`). It extends
+  /// under the floating composer and the keyboard (they are its bottom inset), so messages scroll
+  /// on behind them.
   private var messageList: some View {
     GeometryReader { geometry in
-      let listWidth = max(geometry.size.width - Self.listPadding * 2, 0)
+      let listWidth = max(geometry.size.width - MessageListView.listPadding * 2, 0)
       let look = BubbleLook(
         listWidth: listWidth, showsSenders: showsSenders(conversation.kind), names: names,
         layout: MessageLayout(rawValue: messageLayoutRaw) ?? .bubbles)
-      let placedGaps = PlacedGaps(threadId == nil ? gaps : [], among: messages)
-      ScrollViewReader { proxy in
-        ScrollView {
-          // One section per day: its date pill stays at the top while the day scrolls by.
-          LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
-            if threadId == nil && !hasLoadedMessages && messages.isEmpty { ListSkeleton() }
-            // Above the oldest row: seen only when the reader is faster than the core.
-            if (hasOlder && isLoadingOlder) || (!hasOlder && serverHistory == .loading) {
-              ProgressView()
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
-                .accessibilityLabel(Text("loading_older_messages"))
-            }
-            if !hasOlder && serverHistory == .failed {
-              HStack {
-                Text("older_history_failed")
-                  .font(.app(.footnote))
-                  .foregroundStyle(.secondary)
-                Button("older_history_retry") { Task { await loadOlder() } }
-                  .font(.app(.footnote))
-              }
-              .frame(maxWidth: .infinity)
-              .padding(.vertical, 8)
-            }
-            ForEach(placedGaps.above, id: \.after) { gap in gapRow(gap) }
-            ForEach(feedSections(messages, gaps: placedGaps)) { section in
-              Section {
-                ForEach(section.entries) { entry in
-                  // One container whether or not a hole follows, so a row keeps its identity.
-                  VStack(alignment: .leading, spacing: 0) {
-                    if entry.id == maybeFirstUnreadId { UnreadDivider() }
-                    entryRow(entry, look: look, listWidth: listWidth)
-                    ForEach(entry.gapsAfter, id: \.after) { gap in gapRow(gap) }
-                  }
-                  .onAppear {
-                    if entry.id == pageBackTriggerId { Task { await loadOlder() } }
-                    rowsOnScreen.insert(entry.id)
-                    reportSeenReactions()
-                    fillGapIfNear()
-                  }
-                  .onDisappear { rowsOnScreen.remove(entry.id) }
-                  .transition(reduceMotion ? .identity : .opacity.combined(with: .scale(scale: 0.96, anchor: .bottom)))
-                }
-              } header: {
-                DayPill(date: section.day)
-              }
-            }
-            // Visible exactly while the user reads at the bottom.
-            Color.clear.frame(height: 1).id(Self.bottomId)
-              .onAppear {
-                isAtBottom = true
-                newBelowCount = 0
-              }
-              .onDisappear { isAtBottom = false }
-          }
-          .scrollTargetLayout()
-          .padding(.horizontal, Self.listPadding)
-          .padding(.bottom, 8)
-        }
-        .scrollPosition(id: $maybeTopRowId, anchor: .top)
-        .refreshesConnection()
-        // Opens at the newest message, offline too (the messages come from the local store).
-        .defaultScrollAnchor(.bottom)
-        .scrollDismissesKeyboard(.interactively)
-        .overlay(alignment: .bottomTrailing) {
-          VStack(alignment: .trailing, spacing: 12) {
-            if threadId == nil, unseenReactions.count > 0, !unseenReactions.messages.isEmpty {
-              ReactionJumpButton(count: unseenReactions.count) { jumpToReaction(proxy) }
-                .transition(reduceMotion ? .opacity : .scale(scale: 0.9).combined(with: .opacity))
-            }
-            if !isAtBottom {
-              JumpDownButton(count: newBelowCount) {
-                withAnimation(scrollAnimation) { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
-              }
-            }
-          }
+      ZStack(alignment: .bottomTrailing) {
+        MessageListView(
+          placeId: draftKey, feed: feed, top: listTop,
+          marks: MessageRowMarks(
+            extras: extras, maybeHighlighted: maybeHighlighted, picked: selection.ids,
+            maybeFirstUnread: maybeFirstUnreadId),
+          look: MessageListView.RowsLook(
+            bubble: look, isSelecting: selection.isActive, canReact: conversation.canReact,
+            canPost: conversation.canPost, displayNames: displayNames),
+          bottomInset: geometry.safeAreaInsets.bottom, isLoaded: hasLoadedMessages,
+          maybeOpenAt: model.focusMessageId == nil ? maybeFirstUnreadId : nil, reduceMotion: reduceMotion,
+          controller: listController,
+          row: { item in listRow(item, look: look, listWidth: listWidth) },
+          dayHeader: { day in AnyView(DayPill(date: day)) },
+          onVisibleRows: rowsOnScreenChanged, onAtBottom: atBottomChanged, onShown: listShown,
+          onRefresh: { isRefreshFailed = !(await model.refreshConnection()) })
+        jumpButtons
           .padding()
-          .animation(reduceMotion ? nil : .spring(duration: 0.3, bounce: 0), value: unseenReactions.count > 0)
+          .padding(.bottom, geometry.safeAreaInsets.bottom)
+      }
+    }
+    .ignoresSafeArea(edges: .bottom)
+    .alert("refresh_failed", isPresented: $isRefreshFailed) { Button("done", role: .cancel) {} }
+    // A message link opened this conversation, or points into it: show the message.
+    .onChange(of: feed.revision) { _, _ in
+      focusLinkedMessage()
+      focusReactionTarget()
+    }
+    .onChange(of: model.focusMessageId) { _, _ in focusLinkedMessage() }
+    // Opens at the first unread message when it is loaded; otherwise at the end (#2013). Known
+    // before the first rows show, the list opens there itself; this is for a later answer.
+    .onChange(of: maybeFirstUnreadId) { _, id in
+      guard let id, model.focusMessageId == nil, feed.positions[id] != nil else { return }
+      listController.scrollTo(id, place: .top, animated: false)
+    }
+    .onChange(of: maybeQuoteTarget) { _, target in
+      guard let target else { return }
+      maybeQuoteTarget = nil
+      maybeReactionTarget = target
+      isQuoteJump = true
+      focusReactionTarget()
+    }
+    .onChange(of: messages.last?.id) { _, last in
+      guard last != nil, model.focusMessageId == nil, maybeHighlighted == nil else { return }
+      // Own messages always come into view; others' only while reading at the bottom (the list
+      // follows those by itself).
+      if isAtBottom || messages.last?.authorId == account.userId {
+        listController.scrollToBottom(animated: !reduceMotion)
+      } else {
+        newBelowCount += 1
+      }
+    }
+  }
+
+  /// The heart to the oldest unseen reaction and the way down, over the end of the list.
+  private var jumpButtons: some View {
+    VStack(alignment: .trailing, spacing: 12) {
+      if threadId == nil, unseenReactions.count > 0, !unseenReactions.messages.isEmpty {
+        ReactionJumpButton(count: unseenReactions.count) { jumpToReaction() }
+          .transition(reduceMotion ? .opacity : .scale(scale: 0.9).combined(with: .opacity))
+      }
+      if !isAtBottom {
+        JumpDownButton(count: newBelowCount) {
+          // One tap lands at the bottom: the list lays out what it passes (#2180).
+          listController.scrollToBottom(animated: !reduceMotion, isMeasured: true)
         }
-        // A message link opened this conversation, or points into it: show the message.
-        .onChange(of: messages.map(\.id)) { _, _ in
-          focusLinkedMessage(proxy)
-          focusReactionTarget(proxy)
-        }
-        .onChange(of: model.focusMessageId) { _, _ in focusLinkedMessage(proxy) }
-        // Opens at the first unread message when it is loaded; otherwise at the end (#2013).
-        .onChange(of: maybeFirstUnreadId) { _, id in
-          guard let id, model.focusMessageId == nil, messages.contains(where: { $0.id == id }) else { return }
-          DispatchQueue.main.async { proxy.scrollTo(id, anchor: .top) }
-        }
-        .onChange(of: maybeQuoteTarget) { _, target in
-          guard let target else { return }
-          maybeQuoteTarget = nil
-          maybeReactionTarget = target
-          isQuoteJump = true
-          focusReactionTarget(proxy)
-        }
-        .onChange(of: messages.last?.id) { _, last in
-          guard last != nil, model.focusMessageId == nil, maybeHighlighted == nil else { return }
-          // Own messages always come into view; others' only while reading at the bottom.
-          if isAtBottom || messages.last?.authorId == account.userId {
-            withAnimation(scrollAnimation) { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
-          } else {
-            newBelowCount += 1
-          }
+      }
+    }
+    .animation(reduceMotion ? nil : .spring(duration: 0.3, bounce: 0), value: unseenReactions.count > 0)
+  }
+
+  /// The rows above the oldest message: the skeleton before the first read, older history on its
+  /// way or failed.
+  private var listTop: MessageListTop {
+    let older: MessageListTop.OlderRow =
+      if (hasOlder && isLoadingOlder) || (!hasOlder && serverHistory == .loading) {
+        .loading
+      } else if !hasOlder && serverHistory == .failed {
+        .failed
+      } else {
+        .none
+      }
+    return MessageListTop(showsSkeleton: threadId == nil && !hasLoadedMessages && messages.isEmpty, older: older)
+  }
+
+  /// One row of the list, in the environment the conversation gives its rows (a cell's hosting
+  /// configuration doesn't inherit it).
+  private func listRow(_ item: MessageListItem, look: BubbleLook, listWidth: CGFloat) -> AnyView {
+    AnyView(
+      listRowContent(item, look: look, listWidth: listWidth)
+        .environment(model)
+        .environment(\.openURL, messageLinkAction)
+        .environment(\.openPicture, OpenPictureAction { file in maybeViewing = PictureTarget(file: file) })
+        .environment(\.pictureZoomNamespace, pictureZoom)
+        .environment(\.areAnimationsCovered, maybeViewing != nil || maybeVideo != nil)
+        .environment(\.openVideo, OpenPictureAction { file in maybeVideo = file })
+        .environment(\.openQuotedPicture, OpenQuotedPictureAction(run: openQuotedPicture))
+        .environment(\.openProfile, OpenProfileAction { id in Task { maybeProfile = await model.person(userId: id) } })
+        .environment(\.openQuotedMessage, OpenQuotedMessageAction { id in maybeQuoteTarget = id })
+        .environment(
+          \.imageActions,
+          ImageActions(
+            maybeReply: canReply ? startImageReply : nil,
+            forward: { file in maybeForwardingImage = file })))
+  }
+
+  @ViewBuilder
+  private func listRowContent(_ item: MessageListItem, look: BubbleLook, listWidth: CGFloat) -> some View {
+    switch item {
+    case .skeleton:
+      ListSkeleton()
+    case .olderLoading:
+      // Above the oldest row: seen only when the reader is faster than the core.
+      ProgressView()
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 12)
+        .accessibilityLabel(Text("loading_older_messages"))
+    case .olderFailed:
+      HStack {
+        Text("older_history_failed")
+          .font(.app(.footnote))
+          .foregroundStyle(.secondary)
+        Button("older_history_retry") { Task { await loadOlder() } }
+          .font(.app(.footnote))
+      }
+      .frame(maxWidth: .infinity)
+      .padding(.vertical, 8)
+    case .gap(let after):
+      if let gap = feed.gaps[after] { gapRow(gap) }
+    case .message(let id):
+      if let entry = feed.entries[id] {
+        VStack(alignment: .leading, spacing: 0) {
+          if id == maybeFirstUnreadId { UnreadDivider() }
+          entryRow(entry, look: look, listWidth: listWidth)
         }
       }
     }
   }
 
-  private static let listPadding: CGFloat = 8
+  /// The rows on screen changed: page back, fill a hole or see reactions as the reader nears them.
+  /// Kept out of the view's state: scrolling re-renders nothing (#2180).
+  private func rowsOnScreenChanged(_ rows: VisibleRows) {
+    onScreen.rows = rows
+    pageBackIfNearOldest()
+    reportSeenReactions()
+    fillGapIfNear()
+  }
+
+  private func atBottomChanged(_ atBottom: Bool) {
+    isAtBottom = atBottom
+    if atBottom { newBelowCount = 0 }
+  }
+
+  /// The list shows the conversation's rows where they belong: the switch is done (#1521).
+  private func listShown() {
+    Perf.end(.channelSwitch, key: conversation.id)
+  }
+
   /// Rows below the oldest loaded one whose appearance loads the next older page: a few screens
   /// ahead, so a reader scrolling back doesn't meet the end of what is loaded (issue #1058).
   private static let olderAheadRows = 40
 
-  /// The row that pages back when it scrolls into view.
-  private var pageBackTriggerId: String? {
-    guard threadId == nil, canPageBack, !messages.isEmpty else { return nil }
-    return messages[min(Self.olderAheadRows, messages.count - 1)].id
-  }
-
   private var canPageBack: Bool { hasOlder || serverHistory == .available }
 
-  /// Rows that arrive or a request that ended change no row on screen, so none appears to ask for
-  /// the next page: a reader still near the oldest row asks here.
+  /// A reader within `olderAheadRows` of the oldest row asks for the next page: as the rows on
+  /// screen change, and when rows arrive or a request ended (no row on screen changes then).
   private func pageBackIfNearOldest() {
-    guard threadId == nil, canPageBack, !isLoadingOlder else { return }
-    let isNear = messages.prefix(Self.olderAheadRows + 1).contains { rowsOnScreen.contains($0.id) }
-    if isNear { Task { await loadOlder() } }
+    guard threadId == nil, canPageBack, !isLoadingOlder, onScreen.rows.isNearOldest(in: feed, ahead: Self.olderAheadRows)
+    else { return }
+    Task { await loadOlder() }
   }
 
   /// Asks for a page of a hole in the history once it comes within `olderAheadRows` of the rows on
@@ -648,10 +697,10 @@ struct ChatPane: View {
   /// opening a conversation costs no extra request: the catch-up reads the hole by itself.
   private func fillGapIfNear() {
     guard threadId == nil, !isFillingGap, !gaps.isEmpty,
-      let firstVisible = messages.firstIndex(where: { rowsOnScreen.contains($0.id) }),
-      let lastVisible = messages.lastIndex(where: { rowsOnScreen.contains($0.id) }),
-      !isAtBottom || firstVisible == 0,
-      let request = gapToFill(gaps, firstVisible: firstVisible, lastVisible: lastVisible, ahead: Self.olderAheadRows)
+      let visible = onScreen.rows.range(in: feed),
+      !isAtBottom || visible.lowerBound == 0,
+      let request = gapToFill(
+        gaps, firstVisible: visible.lowerBound, lastVisible: visible.upperBound, ahead: Self.olderAheadRows)
     else { return }
     fillGap(request.gap, from: request.edge)
   }
@@ -672,7 +721,7 @@ struct ChatPane: View {
           .foregroundStyle(.secondary)
         Button("older_history_retry") {
           // From the side the reader is on now.
-          let firstVisible = messages.firstIndex(where: { rowsOnScreen.contains($0.id) }) ?? 0
+          let firstVisible = onScreen.rows.range(in: feed)?.lowerBound ?? 0
           fillGap(gap, from: gapEdge(gap, firstVisible: firstVisible))
         }
         .font(.app(.footnote))
@@ -696,8 +745,6 @@ struct ChatPane: View {
   private var names: MentionNames {
     MentionNames(usernames: mentionNames.usernames, myUsername: mentionNames.me)
   }
-
-  private static let bottomId = "bottom"
 
   /// One message with its gestures: double tap reacts, long press opens the menu. Each only where
   /// the user's rights allow it (issue #758). A placeholder of a message not readable yet (issue
@@ -1459,15 +1506,13 @@ struct ChatPane: View {
     }
   }
 
-  /// Scrolling to a message eases out and quickly; with Reduce Motion it jumps.
-  private var scrollAnimation: Animation? { reduceMotion ? nil : .easeOut(duration: 0.2) }
-
   /// Scrolls to the message a link pointed at, once it is loaded, and highlights it for a moment.
-  private func focusLinkedMessage(_ proxy: ScrollViewProxy) {
-    guard let focus = model.focusMessageId, messages.contains(where: { $0.id == focus }) else { return }
+  /// With Reduce Motion it jumps.
+  private func focusLinkedMessage() {
+    guard let focus = model.focusMessageId, feed.positions[focus] != nil else { return }
     model.focusMessageId = nil
     maybeHighlighted = focus
-    withAnimation(scrollAnimation) { proxy.scrollTo(focus, anchor: .center) }
+    listController.scrollTo(focus, place: .center, animated: !reduceMotion)
     Task {
       try? await Task.sleep(for: .seconds(2.5))
       withAnimation { maybeHighlighted = nil }
@@ -1476,18 +1521,18 @@ struct ChatPane: View {
 
   /// The heart button: the oldest message with an unseen reaction, seen from now on, loaded if it
   /// isn't yet and then shown like a linked message.
-  private func jumpToReaction(_ proxy: ScrollViewProxy) {
+  private func jumpToReaction() {
     guard let oldest = unseenReactions.messages.first else { return }
-    if reactionMarks.jumped(to: oldest) {
+    if onScreen.reactionMarks.jumped(to: oldest) {
       Task { await model.perform(.markReactionsSeen(conversationId: conversation.id, messageIds: [oldest])) }
     }
     maybeReactionTarget = oldest
-    focusReactionTarget(proxy)
+    focusReactionTarget()
   }
 
-  private func focusReactionTarget(_ proxy: ScrollViewProxy) {
+  private func focusReactionTarget() {
     guard let target = maybeReactionTarget else { return }
-    guard messages.contains(where: { $0.id == target }) else {
+    guard feed.positions[target] != nil else {
       // Older than what is loaded: page back until it is, or give up at the start.
       if hasOlder {
         Task { await loadOlder() }
@@ -1501,7 +1546,7 @@ struct ChatPane: View {
     maybeReactionTarget = nil
     isQuoteJump = false
     maybeHighlighted = target
-    withAnimation(scrollAnimation) { proxy.scrollTo(target, anchor: .center) }
+    listController.scrollTo(target, place: .center, animated: !reduceMotion)
     Task {
       try? await Task.sleep(for: .seconds(2.5))
       if maybeHighlighted == target { withAnimation { maybeHighlighted = nil } }
@@ -1510,7 +1555,7 @@ struct ChatPane: View {
 
   /// Rows on screen whose reactions wait unseen are seen now.
   private func reportSeenReactions() {
-    let seen = reactionMarks.seen(onScreen: rowsOnScreen, unseen: unseenReactions)
+    let seen = onScreen.reactionMarks.seen(onScreen: onScreen.rows.ids, unseen: unseenReactions)
     guard !seen.isEmpty else { return }
     Task { await model.perform(.markReactionsSeen(conversationId: conversation.id, messageIds: seen)) }
   }
@@ -1846,10 +1891,9 @@ struct ChatPane: View {
     draft = ""
   }
 
-  /// Performance data (#1521): the switch ends with the first read, a send once the server took it,
-  /// the catch-up once the store has what the server has.
+  /// Performance data (#1521): a send ends once the server took it, the catch-up once the store
+  /// has what the server has. The switch ends when the list shows the first read (`listShown`).
   private func observePerf(_ read: [Message], gaps: [HistoryGap]) {
-    Perf.end(.channelSwitch, key: conversation.id)
     if Perf.isRunning(.messageSend, key: conversation.id) && !read.contains(where: \.isPending) {
       Perf.end(.messageSend, key: conversation.id)
     }
@@ -1875,6 +1919,8 @@ struct ChatPane: View {
         threadAuthors = await model.messageAuthors()
       }
       messages = read.map { $0.named(threadAuthors) }
+      rebuildFeed()
+      hasLoadedMessages = true
       extras = readExtras
       dropGoneFromSelection()
     } else {
@@ -1889,16 +1935,15 @@ struct ChatPane: View {
       }
       let readExtras = await model.extras(conversationId: conversation.id, messageIds: page.messages.map(\.id))
       await loadDisplayNamesOnce()
-      // A message that arrives at the end eases in; the first load and history paging don't animate (#2005).
-      let isArrival =
-        !reduceMotion && !messages.isEmpty && page.messages.first?.id == messages.first?.id
-        && page.messages.count > messages.count && page.messages.last?.id != messages.last?.id
-      withAnimation(isArrival ? .easeOut(duration: 0.2) : nil) { messages = page.messages }
+      // A message that arrives at the end eases in (the list sees it, `MessageFeed.isArrival`); the
+      // first load and history paging don't animate (#2005).
+      messages = page.messages
+      gaps = page.gaps
+      rebuildFeed()
       hasLoadedMessages = true
       extras = readExtras
       dropGoneFromSelection()
       hasOlder = page.hasOlder
-      gaps = page.gaps
       observePerf(page.messages, gaps: page.gaps)
       isFillingGap = false
       if let history = await model.olderHistory(conversationId: conversation.id) { serverHistory = history }
@@ -1915,6 +1960,12 @@ struct ChatPane: View {
       unseenReactions = await model.unseenReactions(conversationId: conversation.id)
       reportSeenReactions()
     }
+  }
+
+  /// Lays the messages out for the list once per read, not on every render (#2180). A thread
+  /// shows no holes.
+  private func rebuildFeed() {
+    feed = messageFeed(messages, gaps: threadId == nil ? gaps : [], revision: feed.revision &+ 1)
   }
 
   /// The senders' names, read once with the first messages so no bubble shows without its sender.
@@ -1954,9 +2005,10 @@ struct ChatPane: View {
     guard let page = await pagedFeed().older() else { return }
     let readExtras = await model.extras(conversationId: conversation.id, messageIds: page.messages.map(\.id))
     messages = page.messages
+    gaps = page.gaps
+    rebuildFeed()
     extras = readExtras
     hasOlder = page.hasOlder
-    gaps = page.gaps
   }
 
   private func reloadExtras() async {
