@@ -148,7 +148,7 @@ pub(super) enum UploadTarget {
   /// A file in one blob, into its announced slot.
   Whole {
     slot: UploadSlot,
-    attachment: AttachmentRef,
+    attachment: Box<AttachmentRef>,
   },
   /// One part of a large file (or only the joining of its parts).
   Part(PartTarget),
@@ -599,7 +599,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       UploadTarget::Whole { slot, attachment } => self
         .confirm_blob(&slot, sent, &mut pending.files[index])
         .await
-        .map(|()| PartOutcome::Uploaded(attachment)),
+        .map(|()| PartOutcome::Uploaded(*attachment)),
       UploadTarget::Part(target) => {
         // A stored part's ETag was kept by `BlobUpload::sent`.
         let answer = sent.map(|()| maybe_etag);
@@ -984,7 +984,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       // Invariant: `prepare_blob` leaves the slot it uploads into on the file.
       return Err(UploadError::Failed(TransferFailure::LocalFile));
     };
-    Ok((UploadTarget::Whole { slot, attachment }, Some(request), progress))
+    Ok((
+      UploadTarget::Whole {
+        slot,
+        attachment: Box::new(attachment),
+      },
+      Some(request),
+      progress,
+    ))
   }
 
   /// Encrypts one file and starts its upload into its slot, announcing one first if it has none.
@@ -2168,6 +2175,8 @@ mod tests {
   use super::*;
 
   mod motion_parts {
+    #![allow(clippy::unwrap_used)]
+
     use teamcraft_proto::Id;
 
     use super::*;

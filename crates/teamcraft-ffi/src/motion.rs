@@ -116,6 +116,7 @@ mod tests {
   struct Scratch(std::path::PathBuf);
 
   impl Scratch {
+    #[allow(clippy::unwrap_used)]
     fn new(name: &str) -> Self {
       let path = std::env::temp_dir().join(format!("teamcraft-motion-{name}-{}", std::process::id()));
       fs::create_dir_all(&path).unwrap();

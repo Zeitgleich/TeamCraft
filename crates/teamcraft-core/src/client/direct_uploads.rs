@@ -189,10 +189,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let recorded = match target {
       UploadTarget::Whole { slot, attachment } => match sent {
         Ok(()) => {
-          upload.maybe_sent = Some(SentFile::Whole {
-            slot,
-            attachment: Box::new(attachment),
-          });
+          upload.maybe_sent = Some(SentFile::Whole { slot, attachment });
           Ok(DirectUploadProgress::AllSent)
         },
         Err(error) if error.is_unreachable() => Err(DirectUploadError::Offline(CoreError::Api(error))),

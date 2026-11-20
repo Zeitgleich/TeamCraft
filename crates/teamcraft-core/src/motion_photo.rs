@@ -293,6 +293,7 @@ mod tests {
   }
 
   /// A JPEG with an optional XMP segment, then the picture data.
+  #[allow(clippy::unwrap_used)]
   fn jpeg(maybe_xmp: Option<&str>) -> Vec<u8> {
     let mut file = vec![0xFF, 0xD8];
     if let Some(xmp) = maybe_xmp {
