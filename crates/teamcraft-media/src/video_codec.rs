@@ -35,6 +35,22 @@ const STALL_MIN_FRAMES: u32 = 10;
 /// ...over at least this much capture time has stalled; software takes over. Short enough that
 /// the others barely notice, long enough for an encoder's start-up latency.
 const STALL_MIN_SPAN_US: u64 = 1_500_000;
+/// A camera's hardware encoder that gives a picture for fewer than one in
+/// [`TRICKLE_FRAMES_PER_PICTURE`] frames over [`TRICKLE_SPAN_US`] of capture time (and at least
+/// [`TRICKLE_MIN_FRAMES`] frames) has stalled as well, though it never misses [`STALL_MIN_FRAMES`]
+/// in a row (#1719). VideoToolbox drops a picture that misses its 50 ms wait and forces the next
+/// frame to a keyframe, so an encoder slow under load could give one picture now and then, and the
+/// receiver would show a frozen picture with "weak connection". A healthy one gives one for every
+/// frame (`examples/vt_latency.rs`: 3 of 5040 frames missed on an M4 Max with 24 sessions, every
+/// core busy and every frame a keyframe; docs/performance.md). Cameras only: a 4K screen layer
+/// takes VideoToolbox 20 to 41 ms a picture (#990), and OpenH264 far longer.
+const TRICKLE_FRAMES_PER_PICTURE: u32 = 4;
+/// ...measured over this much capture time, longer than a start-up and shorter than the 3 s after
+/// which a receiver says the video paused...
+const TRICKLE_SPAN_US: u64 = 2_000_000;
+/// ...and at least this many frames: a camera that delivers only a few frames a second (a dark
+/// room) is judged over a longer span.
+const TRICKLE_MIN_FRAMES: u32 = 30;
 
 /// Encodes raw frames of one fixed resolution.
 pub trait VideoEncoder {
@@ -136,12 +152,17 @@ pub type SoftwareEncoderFactory =
   Box<dyn Fn(&VideoLayerInfo, VideoContent) -> Result<Box<dyn VideoEncoder>, VideoCodecError> + Send>;
 
 /// Tells a stalled encoder from one that drops a frame now and then: no picture for
-/// [`STALL_MIN_FRAMES`] frames spanning [`STALL_MIN_SPAN_US`] of capture time. Measured with the
-/// frames' own timestamps, so it needs no clock of its own.
+/// [`STALL_MIN_FRAMES`] frames spanning [`STALL_MIN_SPAN_US`] of capture time, or a picture for
+/// fewer than one in [`TRICKLE_FRAMES_PER_PICTURE`] frames over [`TRICKLE_SPAN_US`] (a trickle,
+/// #1719). Measured with the frames' own timestamps, so it needs no clock of its own.
 #[derive(Debug, Default)]
 struct StallWatch {
   maybe_first_unanswered_us: Option<u64>,
   unanswered_frames: u32,
+  /// The frames and pictures since the trickle window started (at its first frame).
+  maybe_window_start_us: Option<u64>,
+  window_frames: u32,
+  window_pictures: u32,
 }
 
 /// What a [`FallbackEncoder`]'s hardware made of one frame.
@@ -359,10 +380,10 @@ impl FallbackEncoder {
     };
     let layer = (self.layer.width, self.layer.height);
     match hardware.finish(frame, is_keyframe_forced) {
-      Ok(Some(picture)) => {
-        self.stall = StallWatch::default();
-        HardwareAnswer::Encoded(Some(picture))
+      Ok(Some(_)) if self.stall.is_trickling_after(frame.timestamp_us(), true) && self.is_camera() => {
+        self.give_up_trickling()
       },
+      Ok(Some(picture)) => HardwareAnswer::Encoded(Some(picture)),
       Ok(None) if self.stall.is_stalled_after(frame.timestamp_us()) => {
         let encoder = self.hardware_name;
         warn!(
@@ -372,9 +393,30 @@ impl FallbackEncoder {
         );
         self.give_up_hardware("it gave no pictures".into())
       },
+      Ok(None) if self.stall.is_trickling_after(frame.timestamp_us(), false) && self.is_camera() => {
+        self.give_up_trickling()
+      },
       Ok(None) => HardwareAnswer::Encoded(None),
       Err(error) => self.hardware_failed(&error),
     }
+  }
+
+  /// Whether this layer is a camera's: only those hand over when the hardware trickles.
+  fn is_camera(&self) -> bool {
+    self.content == VideoContent::Camera
+  }
+
+  /// The hardware gives a picture for only a few frames (#1719): software takes over.
+  fn give_up_trickling(&mut self) -> HardwareAnswer {
+    let encoder = self.hardware_name;
+    let layer = (self.layer.width, self.layer.height);
+    warn!(
+      encoder,
+      ?layer,
+      "hardware encoder gives a picture for fewer than one in {TRICKLE_FRAMES_PER_PICTURE} frames; \
+       continuing in software"
+    );
+    self.give_up_hardware("it gave pictures for few frames".into())
   }
 
   fn hardware_failed(&mut self, error: &VideoCodecError) -> HardwareAnswer {
@@ -476,6 +518,29 @@ impl VideoEncoder for FallbackEncoder {
 }
 
 impl StallWatch {
+  /// Counts a frame of `timestamp_us` in the trickle window, with a picture or not; `true` once
+  /// the window is full and gave too few pictures. A full window starts again.
+  /// A picture also ends a run of frames without one ([`Self::is_stalled_after`]).
+  fn is_trickling_after(&mut self, timestamp_us: u64, has_picture: bool) -> bool {
+    if has_picture {
+      self.maybe_first_unanswered_us = None;
+      self.unanswered_frames = 0;
+    }
+    let start_us = *self.maybe_window_start_us.get_or_insert(timestamp_us);
+    self.window_frames = self.window_frames.saturating_add(1);
+    self.window_pictures = self.window_pictures.saturating_add(u32::from(has_picture));
+    let is_full =
+      self.window_frames >= TRICKLE_MIN_FRAMES && timestamp_us.saturating_sub(start_us) >= TRICKLE_SPAN_US;
+    if !is_full {
+      return false;
+    }
+    let is_trickling = self.window_pictures.saturating_mul(TRICKLE_FRAMES_PER_PICTURE) < self.window_frames;
+    self.maybe_window_start_us = None;
+    self.window_frames = 0;
+    self.window_pictures = 0;
+    is_trickling
+  }
+
   /// Counts a frame that gave no picture; `true` once that makes a stall.
   fn is_stalled_after(&mut self, timestamp_us: u64) -> bool {
     let first_us = *self.maybe_first_unanswered_us.get_or_insert(timestamp_us);
@@ -1558,6 +1623,47 @@ mod tests {
       assert!(software_log.lock().unwrap().is_empty());
     }
 
+    /// #1719: hardware that gives a picture for one frame in nine (VideoToolbox dropping late
+    /// pictures under load, each next one a keyframe) never misses 10 frames in a row, so it
+    /// passed for working while receivers froze. Software takes over after 2 s.
+    #[test]
+    fn a_hardware_encoder_that_gives_a_picture_now_and_then_hands_over() {
+      let (mut encoder, software_log) = fallback_encoder(FakeEncoder::OneIn { every: 9, count: 0 });
+      let outputs = encode_many(&mut encoder, 120);
+      assert!(!encoder.is_hardware());
+      let first_software = software_log.lock().unwrap().len();
+      let handed_over = outputs.len() - first_software;
+      assert_eq!(handed_over, 60, "2 s at 30 fps");
+      assert!(
+        outputs[handed_over].as_ref().unwrap().is_keyframe,
+        "receivers recover at once"
+      );
+      assert!(outputs[handed_over..].iter().all(Option::is_some));
+      assert_eq!(software_log.lock().unwrap().first(), Some(&true));
+    }
+
+    /// A screen layer keeps a trickling hardware encoder: a 4K one is slow in hardware already,
+    /// and slower in software.
+    #[test]
+    fn a_screen_layer_keeps_a_hardware_encoder_that_gives_a_picture_now_and_then() {
+      let (mut encoder, software_log) =
+        fallback_encoder_for(FakeEncoder::OneIn { every: 9, count: 0 }, VideoContent::Screen);
+      encode_many(&mut encoder, 120);
+      assert!(encoder.is_hardware());
+      assert!(software_log.lock().unwrap().is_empty());
+    }
+
+    /// A hardware encoder that gives a picture for every third frame keeps the work: a quarter is
+    /// the line.
+    #[test]
+    fn a_hardware_encoder_that_gives_a_third_of_the_pictures_keeps_the_work() {
+      let (mut encoder, software_log) = fallback_encoder(FakeEncoder::OneIn { every: 3, count: 0 });
+      let outputs = encode_many(&mut encoder, 300);
+      assert!(encoder.is_hardware());
+      assert_eq!(outputs.iter().filter(|output| output.is_some()).count(), 100);
+      assert!(software_log.lock().unwrap().is_empty());
+    }
+
     #[test]
     fn a_slow_starting_hardware_encoder_keeps_the_work() {
       // No picture for the first second (start-up latency), then one per frame.
@@ -1680,6 +1786,11 @@ mod tests {
       Failing,
       /// A picture for every other frame (the counter is the frame number).
       EveryOther(u32),
+      /// A picture for one frame in `every` (the counter is the frame number).
+      OneIn {
+        every: u32,
+        count: u32,
+      },
       /// No picture for this many frames, then one per frame.
       StartsAfter(u32),
       /// Fails as it is handed a frame.
@@ -1711,6 +1822,10 @@ mod tests {
             *count += 1;
             Ok(if *count % 2 == 0 { picture } else { None })
           },
+          Self::OneIn { every, count } => {
+            *count += 1;
+            Ok(if *count % *every == 0 { picture } else { None })
+          },
           Self::StartsAfter(remaining) => {
             if *remaining == 0 {
               return Ok(picture);
@@ -1731,6 +1846,14 @@ mod tests {
 
     /// A fallback encoder over `hardware` whose software side records its keyframe flags.
     fn fallback_encoder(hardware: FakeEncoder) -> (FallbackEncoder, Arc<Mutex<Vec<bool>>>) {
+      fallback_encoder_for(hardware, VideoContent::Camera)
+    }
+
+    /// [`fallback_encoder`] for a layer of `content`.
+    fn fallback_encoder_for(
+      hardware: FakeEncoder,
+      content: VideoContent,
+    ) -> (FallbackEncoder, Arc<Mutex<Vec<bool>>>) {
       let log: Arc<Mutex<Vec<bool>>> = Arc::default();
       let software_log = Arc::clone(&log);
       let layer = simulcast_layers(
@@ -1746,7 +1869,7 @@ mod tests {
       let encoder = FallbackEncoder::with_software(
         Box::new(hardware),
         &layer,
-        VideoContent::Camera,
+        content,
         Box::new(move |_, _| {
           Ok(Box::new(RecordingEncoder(Arc::clone(&software_log))) as Box<dyn VideoEncoder>)
         }),

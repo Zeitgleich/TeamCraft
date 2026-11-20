@@ -891,6 +891,30 @@ frame at 30 fps, so a 4K share whose every frame changes now reaches 25 to 29 fp
 need two frames in the encoder at once, with each picture sent when it comes out rather than with
 the next frame.
 
+### A camera encoder that misses its wait under load (issue #1719)
+
+The 50 ms wait above drops a late picture and forces the next frame to a keyframe. If keyframes
+were slower, or the encoder slower under load, misses could chain: one picture now and then, each a
+keyframe, never the 10 misses in a row that hand a stalled encoder over to OpenH264. Measured with
+`examples/vt_latency.rs` on an M4 Max (14 cores, macOS 26), 8 s per row, a 1080p camera's layers
+capped at 720p (720p, 360p, 180p) at 30 fps with sensor noise; the wait is `finish`'s, after the
+other layers were handed their frame:
+
+| Calls (VideoToolbox sessions) | Spinning threads | Keyframes      | Missed of frames | 720p wait p50 / p99 / max |
+|-------------------------------|------------------|----------------|------------------|---------------------------|
+| 1 (3)                         | 0                | first only     | 0 of 630         | 1.9 / 2.2 / 3.5 ms        |
+| 1 (3)                         | 0                | every frame    | 0 of 630         | 1.8 / 2.3 / 2.5 ms        |
+| 3 (9)                         | 28               | first only     | 0 of 1890        | 1.8 / 4.2 / 10.3 ms       |
+| 8 (24)                        | 28               | first only     | 0 of 5040        | 2.2 / 5.4 / 9.3 ms        |
+| 8 (24)                        | 28               | every frame    | 3 of 5040        | 2.2 / 14.6 / 73.2 ms      |
+
+A keyframe costs VideoToolbox no more time than another picture, and even 24 sessions with every
+core busy miss a picture rarely and alone: on this Mac the misses don't chain. On a slower Mac they
+still might, so a camera layer whose hardware gives a picture for fewer than one in four frames over
+2 s (and 30 frames) now hands over to OpenH264 like a stalled one (`TRICKLE_FRAMES_PER_PICTURE` in
+`video_codec.rs`). Screen layers don't: a 4K one takes VideoToolbox 20 to 41 ms a picture, and
+OpenH264 far longer.
+
 ## Clients
 
 How fast and how lean the apps are for the person using them; the budgets they must stay within are
