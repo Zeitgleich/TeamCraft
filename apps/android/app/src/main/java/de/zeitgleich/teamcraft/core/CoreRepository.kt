@@ -92,7 +92,7 @@ class CoreRepository(
       // The application sets it off the main thread at start; here too, so no core can name a
       // deleted account before it is set (#1066).
       setDeletedUserName(context.getString(R.string.user_deleted_name))
-      TeamCraft(
+      TeamCraft.open(
         AppConfig(
           serverUrl = server.address.origin,
           dataDir = File(context.filesDir, StoragePaths.storeDir(storageKey)).absolutePath,

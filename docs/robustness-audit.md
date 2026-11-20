@@ -385,6 +385,51 @@ high.
 | Release configuration         | Info.plist key missing                                       | Falls back silently to `http://127.0.0.1`.                                                                                                                                                                                                                                                                                        | gap          | low      | no                    | ios/Shared/AppEnvironment.swift:31-33                                                                                                       |
 | ATS, IPv6-only / NAT64        | Production networks                                          | Only `NSAllowsLocalNetworking`; the core does its own TLS; no IPv4 literals outside dev defaults.                                                                                                                                                                                                                                 | ok           | -        | -                     | ios/project.yml:130-132; Shared/AppEnvironment.swift:31-33                                                                                  |
 
+## UI thread (mobile, #2184)
+
+Rule: the UI thread (iOS main actor, Android main thread) never waits on the store, the disk, the
+network, a lock, a semaphore or a blocking FFI call. Found by iOS watchdog kills at launch (the core
+opened on the main actor), main-thread hangs of 3–16 s in the crash reports and priority inversions
+in the iOS unit tests. Audit of November 2026, `apps/ios` and `apps/android` against `teamcraft-ffi`.
+
+### Core exports that may block
+
+Every other export of `teamcraft-ffi` is either `async` (Swift `async`, Kotlin `suspend`: reads and
+actions go to the core's own threads) or a cheap getter over memory (rules, formatting, a lock-free
+counter, a channel send), which may stay sync with a doc comment saying so.
+
+| Export                                             | Waits on                                                  | Was called from                                   | Now                                                                           |
+|----------------------------------------------------|-----------------------------------------------------------|---------------------------------------------------|-------------------------------------------------------------------------------|
+| `TeamCraft::new` / `with_device_key`               | Store open: WAL recovery, upkeep, catalog                 | iOS: `Task.detached` (#2185); Android: IO         | async named constructors `open` / `with_device_key`, on a thread of their own |
+| `TeamCraft::reset_store`                           | Store set aside and opened anew                           | iOS: `Task.detached`; Android: IO                 | async                                                                         |
+| `TeamCraft::resume`                                | Threads before letting go, store open                     | iOS: `Task.detached`                              | async                                                                         |
+| `TeamCraft::suspend`                               | Threads letting go, at most 2 s                           | iOS: `Task.detached`; expiry handler on main      | stays sync: the expiry handler must return with the store closed              |
+| `VoiceRecording::start` / `finish` / `cancel`      | Microphone, recording thread, file                        | iOS: `Task.detached`; Android: IO, `close()` main | async; Android `close()` hands the cancel to a scope of its own               |
+| `voice_decode_to_wav`, `voice_clear_takes`         | Whole files read, decoded, written, deleted               | iOS: `Task.detached`; Android: IO                 | async                                                                         |
+| `install_video_codec`, `use_installed_video_codec` | Unpacking, hashing and loading a library                  | Android: IO                                       | async                                                                         |
+| `ProviderProver::new`                              | The app's device key (keychain, Secure Enclave, Keystore) | iOS `isDeviceKeyLost` on the main actor           | the app reads it off the main actor                                           |
+
+### Blocking primitives in the shells
+
+| Where                                                                    | Primitive                                                                       | Thread                                         | Verdict                                                                                                          |
+|--------------------------------------------------------------------------|---------------------------------------------------------------------------------|------------------------------------------------|------------------------------------------------------------------------------------------------------------------|
+| iOS `SessionVault.currentAccessToken`                                    | `queue.sync`, `ProcessLock.acquire`, `DispatchSemaphore.wait` (refresh)         | the core's token thread (`VaultTokenProvider`) | ok: never the main thread. The unit tests called it on the main thread: priority inversions; they now ask off it |
+| iOS `ProcessLock.acquire` (`Thread.sleep` polling)                       | file lock with timeout                                                          | `LockHolds` and the extension: `Task.detached` | ok (#2185)                                                                                                       |
+| iOS `AppModel.backgroundTaskExpired`                                     | `DispatchQueue.main.sync` from the expiry thread, then `core.suspend()` on main | main, at most 2 s                              | accepted: iOS suspends the app once the handler returns, so it must wait; bounded                                |
+| iOS `SessionVault.isDeviceKeyLost`                                       | keychain and Secure Enclave read                                                | was the main actor (`setConnection`, sign-in)  | fixed: read off the main actor                                                                                   |
+| iOS `SessionVault.load` / `currentIdToken`                               | keychain read                                                                   | main actor, on sign-in and token notes         | accepted: one item read; never waits for the refresh (`queue.sync` is only around it)                            |
+| iOS `NSLock` in `ChangeCoalescer`, `SessionProofs`, `CoreFactory`, calls | short critical sections over memory                                             | any                                            | ok: nothing waits while holding them                                                                             |
+| Android `Tokens.accessToken` (`runBlocking`)                             | token refresh                                                                   | the core's token thread                        | ok: never the main thread                                                                                        |
+| Android `CoreHttpConnection` (`runBlocking`)                             | HTTP request                                                                    | the core's thread                              | ok: never the main thread                                                                                        |
+| Android `VoiceRecorderModel.close`                                       | microphone stop, file delete                                                    | main (`onCleared`)                             | fixed: off the main thread                                                                                       |
+| Android `exportDiagnostics`                                              | file write                                                                      | main (a tap)                                   | fixed: written on IO                                                                                             |
+| Android `synchronized` in notifications, prefs, shares                   | short critical sections over memory                                             | any                                            | ok                                                                                                               |
+
+Launch, foreground and background, notification handling and the message list read through async
+exports only. Not yet enforced: a check that fails loudly when a may-block call runs on the UI thread
+(debug builds), with a warning to the crash reports in release builds, Android `StrictMode`, and a CI
+script for new blocking calls in UI code; tracked in #2184.
+
 ## Not verified
 
 - Behaviour on real devices: Doze and OEM battery managers, iOS 0xdead10cc, extension memory limits,

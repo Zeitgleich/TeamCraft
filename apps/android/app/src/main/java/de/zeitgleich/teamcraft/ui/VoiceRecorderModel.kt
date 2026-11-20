@@ -247,8 +247,14 @@ class VoiceRecorderModel(
   /** The screen's model goes away: a recording is dropped (a take stays until the next start empties the folder). */
   fun close() {
     maybePoll?.cancel()
-    maybeRecording?.cancel()
-    maybeRecording?.destroy()
+    maybeRecording?.let { recording ->
+      // Called on the main thread (`onCleared`), whose scope is gone: stopping the microphone and
+      // deleting the file wait, so they run on a scope of their own, off the main thread (#2184).
+      CoroutineScope(Dispatchers.IO).launch {
+        recording.cancel()
+        recording.destroy()
+      }
+    }
     maybeRecording = null
     abandonFocus()
     state.value = VoiceState.Idle

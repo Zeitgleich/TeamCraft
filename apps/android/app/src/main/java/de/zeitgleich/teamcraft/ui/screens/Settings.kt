@@ -182,6 +182,7 @@ private fun SettingsHub(
   onOpen: (SettingsPage) -> Unit,
   onReportProblem: () -> Unit,
 ) {
+  val scope = rememberCoroutineScope()
   val changes by viewModel.changeCount.collectAsState()
   // The user's own presence and custom status as the workspace shows them, not a guess.
   val maybeMe by produceState(viewModel.chat.maybeKeptSnapshot()?.me, changes) { value = viewModel.readChat { snapshot() }?.me ?: value }
@@ -240,7 +241,7 @@ private fun SettingsHub(
         stringResource(R.string.export_diagnostics),
         stringResource(R.string.export_diagnostics_summary),
         leadingContent = { Icon(Icons.Filled.Share, contentDescription = null) },
-        onClick = { exportDiagnostics(context) },
+        onClick = { scope.launch { exportDiagnostics(context) } },
       )
     }
     // The version and build, for a bug report or the question "is mine current?" (#2056).

@@ -400,7 +400,8 @@ final class SessionVault {
 
   /// Whether the session is bound to a device key that is gone (never written, or removed): it can't
   /// be used any more and the user has to sign in again. A key that just can't be read is no loss.
-  /// Reads the keychain; safe on the main thread.
+  /// Reads the keychain and the device key: call it off the main thread, it can wait on
+  /// `securityd` (#2184).
   var isDeviceKeyLost: Bool {
     guard let bound = load()?.boundKey else { return false }
     do {

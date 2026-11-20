@@ -466,7 +466,7 @@ final class AppModel {
       let hasLock = await takeProcessLock(for: holder, timeout: 5)
       defer { if hasLock { releaseProcessLock(for: holder) } }
       do {
-        try await Task.detached { try core.resetStore() }.value
+        try await core.resetStore()
         await refreshAccountState()
       } catch {
         AppLog.failure("setting the local data aside", error)
@@ -1669,7 +1669,12 @@ final class AppModel {
     let changes = ChangeCoalescer { [weak self] in self?.storeDidChange() }
     let listener = ClosureEventListener { changes.signal() }
     let opening = Task.detached(priority: .userInitiated) {
-      Result { try factory.open(account: account, createKey: createsKey, runsUpkeep: true, listener: listener) }
+      do {
+        return Result<TeamCraft, Error>.success(
+          try await factory.open(account: account, createKey: createsKey, runsUpkeep: true, listener: listener))
+      } catch {
+        return .failure(error)
+      }
     }
     maybeCoreOpening = opening
     LaunchSteps.mark(.storeOpening)
@@ -1727,11 +1732,23 @@ final class AppModel {
     if maybeConnection != connection { Perf.connectionChanged(from: connection, to: maybeConnection) }
     connection = maybeConnection
     if case .signInRequired = maybeConnection {
-      isDeviceKeyLost = vault.isDeviceKeyLost
+      Task { [weak self] in
+        guard let self else { return }
+        let isLost = await self.readsDeviceKeyLost()
+        // The connection may have come back while the keychain answered.
+        if case .signInRequired = self.connection { self.isDeviceKeyLost = isLost }
+      }
     } else {
       isDeviceKeyLost = false
     }
     observeConnection()
+  }
+
+  /// Whether the session's device key is gone: reads the keychain and the Secure Enclave, which can
+  /// wait on `securityd`, so off the main thread (#2184).
+  private func readsDeviceKeyLost() async -> Bool {
+    let vault = vault
+    return await Task.detached { vault.isDeviceKeyLost }.value
   }
 
   private func observeConnection() {
@@ -1845,7 +1862,7 @@ final class AppModel {
       }
     } catch {
       let failure = CoreFailure(error)
-      if vault.isDeviceKeyLost {
+      if await readsDeviceKeyLost() {
         // Nothing went out and nothing is lost but the key: the next sign-in replaces the session
         // and makes a new one (docs/e2ee.md §3.1.2).
         phase = .signedOut(.deviceKeyLost)
@@ -2027,7 +2044,7 @@ final class AppModel {
   private func resumeStoreAhead() async {
     guard suspension.isStoreSuspended, let core = maybeCore else { return }
     do {
-      try await Task.detached { try core.resume() }.value
+      try await core.resume()
       storeResumed()
     } catch {
       // The next use of the core tries again.
@@ -2044,7 +2061,7 @@ final class AppModel {
   /// store opens.
   private func resumeStore(_ core: TeamCraft) async throws {
     guard suspension.mayResume(isInBackground: isInBackground) else { throw CoreFactoryError.storeSuspended }
-    try await Task.detached { try core.resume() }.value
+    try await core.resume()
     storeResumed()
   }
 

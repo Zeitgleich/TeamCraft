@@ -123,7 +123,7 @@ final class NotificationService: UNNotificationServiceExtension {
     guard hasLock else { return nil }
     defer { lock.release() }
     do {
-      let core = try CoreFactory().open(
+      let core = try await CoreFactory().open(
         account: account, createKey: false, isMemoryConstrained: true, runsUpkeep: false,
         listener: ClosureEventListener {})
       // Never advances the account's state: the app alone does (MLS, cursors), or the two
