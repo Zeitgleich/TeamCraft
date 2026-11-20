@@ -312,6 +312,10 @@ How soon a new version reaches the package manager (#694):
   check`). Debug-signed APKs get a test-build warning; once a release has signed release APKs, only
   those are offered.
 - Store listings appear once the repository variables `PLAY_STORE_URL` / `APP_STORE_URL` are set.
+- The download section has an iPhone and iPad card. It links the App Store listing (`APP_STORE_URL`)
+  and a public TestFlight invitation (repository variable `TESTFLIGHT_URL`,
+  `https://testflight.apple.com/join/…`) when they are set; with neither it says that the app is in
+  TestFlight for invited testers. iPhone and iPad visitors get the same link on the main button.
 - One-time setup: *Settings → Pages → Source: GitHub Actions*.
 - The deb/rpm "update available" notice reads the same `latest.json` as the self-updating installs, so
   it needs the updater key as well (§7).

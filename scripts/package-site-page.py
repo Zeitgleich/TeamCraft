@@ -13,7 +13,11 @@
 Environment for render (all optional):
     GPG_KEY_ID      fingerprint of the repository key, shown for verification
     PLAY_STORE_URL  Google Play listing; shown on the Android card when set
-    APP_STORE_URL   App Store listing; offered to iPhone and iPad visitors when set
+    APP_STORE_URL   App Store listing; shown on the iPhone and iPad card and offered to iPhone and
+                    iPad visitors when set
+    TESTFLIGHT_URL  public TestFlight invitation (https://testflight.apple.com/join/...); shown on the
+                    iPhone and iPad card when set, and offered to those visitors until the App Store
+                    listing exists
 
 The static files are in scripts/site/ (published as they are) and the fixed illustrations of the page
 in scripts/site-parts/ (inserted into index.html).
@@ -77,7 +81,7 @@ ARCH_CHOICES = {
     },
 }
 # Fixed requirements shown on a platform card, before what the assets say.
-OS_REQUIREMENTS = {"macos": "macOS 14 or newer"}
+OS_REQUIREMENTS = {"macos": "macOS 14 or newer", "ios": "iOS 17 or newer"}
 
 
 @dataclass(frozen=True)
@@ -245,7 +249,7 @@ def render_page(channels, site, site_url, repo, env):
     body = "\n".join([
         render_header(repo_url),
         '<main id="main">',
-        render_hero(main_channel, env.get("APP_STORE_URL", "")),
+        render_hero(main_channel, env.get("APP_STORE_URL", ""), env.get("TESTFLIGHT_URL", "")),
         render_features(main_channel, env),
         render_downloads(maybe_stable, maybe_prerelease, env, has_linux_repositories=bool(linux_repositories),
                          has_fdroid=bool(fdroid)),
@@ -284,7 +288,7 @@ def render_header(repo_url):
 </header>"""
 
 
-def render_hero(channel, maybe_app_store_url):
+def render_hero(channel, maybe_app_store_url, maybe_testflight_url):
     channel_name = "Beta" if channel.is_prerelease else "Stable"
     date = f" · {esc(format_date(channel.published))}" if channel.published else ""
     return f"""<section class="hero" id="top" aria-labelledby="hero-title">
@@ -299,7 +303,7 @@ def render_hero(channel, maybe_app_store_url):
     <p class="hero-lead">TeamCraft is a self-hosted team chat with channels, threads, calls and meetings.
     Everything is end-to-end encrypted on your devices, so the server you run it on never sees your
     messages, files or calls.</p>
-    <div class="cta" data-channel="{esc(channel.name)}" data-channel-title="{channel_name}" data-app-store="{esc(maybe_app_store_url)}">
+    <div class="cta" data-channel="{esc(channel.name)}" data-channel-title="{channel_name}" data-app-store="{esc(maybe_app_store_url)}" data-testflight="{esc(maybe_testflight_url)}">
       <a class="button button-primary button-large" id="cta-button" href="#download">{ICON_DOWNLOAD}<span id="cta-label">Download TeamCraft</span></a>
       <a class="button button-secondary button-large" href="#download">Other platforms</a>
     </div>
@@ -379,6 +383,8 @@ def render_apps_visual(channel, env):
     tiles.append(("web", "Web", "Served by your server", ""))
     if env.get("APP_STORE_URL"):
         tiles.append(("ios", "iPhone, iPad", "App Store", ""))
+    elif env.get("TESTFLIGHT_URL"):
+        tiles.append(("ios", "iPhone, iPad", "TestFlight", ""))
     else:
         tiles.append(("ios", "iPhone, iPad", "Coming soon", " is-muted"))
     items = "".join(
@@ -452,7 +458,9 @@ def render_channel_downloads(channel, env, has_linux_repositories, has_fdroid):
     if channel.published:
         date = (f'<span class="channel-sep" aria-hidden="true">·</span><time datetime="{esc(channel.published)}">'
                 f'{esc(format_date(channel.published))}</time>')
-    cards = "\n".join(render_platform(channel, os_name, env, has_linux_repositories, has_fdroid) for os_name in OS_TITLES)
+    cards = "\n".join(
+        [render_platform(channel, os_name, env, has_linux_repositories, has_fdroid) for os_name in OS_TITLES]
+        + [render_ios_platform(channel, env)])
     return f"""<div class="channel" data-channel-block="{esc(channel.name)}">
       <p class="channel-head">{badge}<strong>{esc(channel.title)}</strong>{date}<span class="channel-sep" aria-hidden="true">·</span><a href="{esc(channel.notes_url)}">Release notes</a></p>
       <div class="platforms">
@@ -494,6 +502,41 @@ def render_platform(channel, os_name, env, has_linux_repositories, has_fdroid):
             <div>
               <h3 id="platform-{esc(channel.name)}-{os_name}">{OS_TITLES[os_name]}</h3>
               {summary}
+            </div>
+            <span class="detected" hidden>Your system</span>
+          </div>
+          {content}
+        </article>"""
+
+
+def render_ios_platform(channel, env):
+    """The iPhone and iPad card. The app is not a release asset to download: it installs from the App
+    Store or through TestFlight, so the card links those when they are configured and says how the app
+    is distributed when they aren't."""
+    maybe_app_store_url = env.get("APP_STORE_URL", "")
+    maybe_testflight_url = env.get("TESTFLIGHT_URL", "")
+    body = []
+    if maybe_app_store_url:
+        body.append(f'<a class="button button-primary store" href="{esc(maybe_app_store_url)}" data-store="app-store">'
+                    'Download on the App Store</a>')
+    if maybe_testflight_url and maybe_app_store_url:
+        body.append(f'<p class="primary-alt">Beta builds: <a href="{esc(maybe_testflight_url)}" data-store="testflight">'
+                    'join the beta on TestFlight</a></p>')
+    elif maybe_testflight_url:
+        body.append(f'<a class="button button-primary store" href="{esc(maybe_testflight_url)}" data-store="testflight">'
+                    'Join the beta on TestFlight</a>')
+        body.append('<p class="primary-alt">TestFlight is Apple&rsquo;s app for beta versions; the invitation '
+                    'installs it first when it is missing.</p>')
+    if not body:
+        body.append('<p class="platform-empty">Not in the App Store yet. The app is in TestFlight for invited '
+                    'testers; until it is listed, use the web app of your organization.</p>')
+    content = "\n          ".join(body)
+    return f"""        <article class="platform" data-os="ios" aria-labelledby="platform-{esc(channel.name)}-ios">
+          <div class="platform-head">
+            <span class="platform-icon">{PLATFORM_ICONS["ios"]}</span>
+            <div>
+              <h3 id="platform-{esc(channel.name)}-ios">iPhone and iPad</h3>
+              <p class="platform-sub">{esc(OS_REQUIREMENTS["ios"])}</p>
             </div>
             <span class="detected" hidden>Your system</span>
           </div>

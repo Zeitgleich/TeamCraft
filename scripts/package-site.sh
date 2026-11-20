@@ -17,6 +17,7 @@
 #   SITE_URL            where the site is served, e.g. https://example-org.github.io/TeamCraft
 #   REPO                owner/name of the GitHub repository (links on the landing page)
 #   PLAY_STORE_URL, APP_STORE_URL  store listings shown on the landing page when set
+#   TESTFLIGHT_URL      public TestFlight invitation of the iOS app, shown on the landing page when set
 set -euo pipefail
 
 fail() { echo "error: $*" >&2; [ -n "${GITHUB_ACTIONS:-}" ] && echo "::error::$*"; exit 1; }
