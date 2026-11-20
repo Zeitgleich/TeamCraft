@@ -3,8 +3,8 @@
 #[cfg(not(target_arch = "wasm32"))]
 use teamcraft_client_api::actions::{DownloadControl, DownloadEntry, DownloadState};
 use teamcraft_client_api::actions::{
-  FileFailure, FileInfo, FileSource, FileTransfer, MediaAnchor, MediaPage, OutgoingFile, PixelSize,
-  ShareLink, ShareLinkOptions,
+  FileFailure, FileInfo, FileSource, FileTransfer, MediaAnchor, MediaPage, MotionInfo, OutgoingFile,
+  OutgoingMotion, PixelSize, ShareLink, ShareLinkOptions,
 };
 use teamcraft_client_api::files_query::FilesPage;
 use teamcraft_client_api::model::{ConversationId, MessageId, ThreadId, UserId};
@@ -15,9 +15,9 @@ use teamcraft_proto::{AttachmentId, Base64Bytes, ClientMessageId};
 use crate::client::disk_downloads::{DownloadRecord, DownloadStatus, download_records};
 use crate::client::draft_files::note_sent_draft_file;
 use crate::client::files::{
-  PendingFile, PendingUpload, RetryCause, TransferFailure, TransferState, UploadPurpose, UploadRetry,
-  UploadSource, attachments_of, cancel_pending_file, cancel_pending_upload, failed_uploads,
-  failed_uploads_prefix, pending_upload, save_pending_upload, share_links, transfer_state,
+  FileRole, PendingFile, PendingUpload, RetryCause, TransferFailure, TransferState, UploadPurpose,
+  UploadRetry, UploadSource, attachments_of, cancel_pending_file, cancel_pending_upload, failed_uploads,
+  failed_uploads_prefix, find_file, pending_upload, save_pending_upload, share_links, transfer_state,
 };
 use crate::error::CoreError;
 use crate::imported::Authorship;
@@ -51,6 +51,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
         .files
         .iter()
         .enumerate()
+        // A picture's motion part goes up beside it but is no file of the message (issue #2181).
+        .filter(|(_, file)| file.role.is_attachment())
         .map(|(index, file)| FileInfo {
           conversation,
           message,
@@ -73,6 +75,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
           maybe_duration_ms: file.maybe_duration_ms,
           maybe_waveform: waveform_view(file.maybe_waveform.as_ref()),
           maybe_content_sha256: None,
+          maybe_motion: None,
         })
         .collect();
     }
@@ -102,6 +105,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
         maybe_duration_ms: file.maybe_duration_ms,
         maybe_waveform: waveform_view(file.maybe_waveform.as_ref()),
         maybe_content_sha256: None,
+        maybe_motion: None,
       });
     attachments_of(&stored.content)
       .into_iter()
@@ -129,9 +133,21 @@ impl<S: LocalStore> CoreChatBackend<S> {
         maybe_content_sha256: <&[u8; 32]>::try_from(attachment.ciphertext_sha256.as_slice())
           .ok()
           .map(teamcraft_client_api::media::to_hex),
+        maybe_motion: attachment.motion().map(|motion| self.motion_view(motion)),
       })
       .chain(failed)
       .collect()
+  }
+
+  /// A picture's motion part as the UI sees it (issue #2181).
+  fn motion_view(&self, motion: &AttachmentRef) -> MotionInfo {
+    MotionInfo {
+      file_id: motion.attachment_id.to_string(),
+      media_type: motion.media_type.clone(),
+      size_bytes: motion.size_bytes,
+      maybe_duration_ms: motion.maybe_duration_ms,
+      transfer: self.download_view(motion.attachment_id, motion.size_bytes),
+    }
   }
 
   /// Where the bytes of a received file are: not here, coming, saved, or failed.
@@ -185,41 +201,15 @@ impl<S: LocalStore> CoreChatBackend<S> {
     let data = self.read(crate::client::stored_account_data(self.store_ref()));
     let mut taken = Vec::new();
     let mut pending = Vec::with_capacity(files.len());
-    for file in files {
-      let maybe_draft_id = match &file.source {
-        FileSource::Draft { id } => Some(id.clone()),
-        _ => file.maybe_draft_id.clone(),
-      };
-      let Some(id) = maybe_draft_id else {
-        pending.extend(pending_file(file));
-        continue;
-      };
-      let is_from_draft_only = matches!(file.source, FileSource::Draft { .. });
-      match self.take_draft_file(&data, conversation, maybe_thread, &id) {
-        Some(TakenDraftFile::OnDevice(taken_file)) => pending.push(taken_file),
-        Some(TakenDraftFile::Uploaded(taken_file)) => {
-          taken.push(id);
-          pending.push(taken_file);
-        },
-        // The server's copy is gone or about to be: out of the draft, and sent from the file the
-        // app still has if it picked it here (the composer marks it otherwise, so it isn't sent).
-        Some(TakenDraftFile::Expired) => {
-          taken.push(id);
-          if !is_from_draft_only {
-            pending.extend(pending_file(file));
-          }
-        },
-        // Removed on another device meanwhile: the message goes without it.
-        None if is_from_draft_only => {
-          tracing::debug!(conversation_id = %conversation, "a draft's file to send is gone");
-        },
-        // Its attachment hasn't reached the core yet: read it now, and don't attach it later.
-        None => {
-          if let Err(error) = note_sent_draft_file(self.store_ref(), &id) {
-            tracing::warn!(%error, "a sent draft's file was not noted");
-          }
-          pending.extend(pending_file(file));
-        },
+    for mut file in files {
+      let maybe_motion = file.maybe_motion.take();
+      let before = pending.len();
+      self.take_outgoing_file(&data, conversation, maybe_thread, file, &mut pending, &mut taken);
+      // The motion goes up beside its picture (issue #2181), also when the picture is a draft's
+      // file that is up already: a draft holds no motion, the app hands it over as it sends.
+      if let (Some(motion), Some(picture)) = (maybe_motion, pending.get(before)) {
+        let maybe_part = self.motion_part(picture, motion);
+        pending.extend(maybe_part);
       }
     }
     let upload = PendingUpload {
@@ -237,6 +227,85 @@ impl<S: LocalStore> CoreChatBackend<S> {
     }
     self.command(CoreCommand::UploadFiles);
     Some(id)
+  }
+
+  /// Puts one file of a message to send into `pending`: read now, or taken from the draft (#1220),
+  /// whose IDs go into `taken`.
+  fn take_outgoing_file(
+    &self,
+    data: &crate::account_data::AccountData,
+    conversation: ConversationId,
+    maybe_thread: Option<ThreadId>,
+    file: OutgoingFile,
+    pending: &mut Vec<PendingFile>,
+    taken: &mut Vec<String>,
+  ) {
+    let maybe_draft_id = match &file.source {
+      FileSource::Draft { id } => Some(id.clone()),
+      _ => file.maybe_draft_id.clone(),
+    };
+    let Some(id) = maybe_draft_id else {
+      pending.extend(pending_file(file));
+      return;
+    };
+    let is_from_draft_only = matches!(file.source, FileSource::Draft { .. });
+    match self.take_draft_file(data, conversation, maybe_thread, &id) {
+      Some(TakenDraftFile::OnDevice(taken_file)) => pending.push(taken_file),
+      Some(TakenDraftFile::Uploaded(taken_file)) => {
+        taken.push(id);
+        pending.push(taken_file);
+      },
+      // The server's copy is gone or about to be: out of the draft, and sent from the file the
+      // app still has if it picked it here (the composer marks it otherwise, so it isn't sent).
+      Some(TakenDraftFile::Expired) => {
+        taken.push(id);
+        if !is_from_draft_only {
+          pending.extend(pending_file(file));
+        }
+      },
+      // Removed on another device meanwhile: the message goes without it.
+      None if is_from_draft_only => {
+        tracing::debug!(conversation_id = %conversation, "a draft's file to send is gone");
+      },
+      // Its attachment hasn't reached the core yet: read it now, and don't attach it later.
+      None => {
+        if let Err(error) = note_sent_draft_file(self.store_ref(), &id) {
+          tracing::warn!(%error, "a sent draft's file was not noted");
+        }
+        pending.extend(pending_file(file));
+      },
+    }
+  }
+
+  /// The motion part of a Live Photo or Motion Photo to send right after its picture (issue
+  /// #2181): only on a picture, as a video, within the limits the server published. Not allowed:
+  /// none, the app shouldn't have offered it. Too large: a failed file, so the picture goes alone
+  /// and the sender sees why.
+  fn motion_part(&self, picture: &PendingFile, motion: OutgoingMotion) -> Option<PendingFile> {
+    if !picture.media_type.starts_with("image/") || !motion.media_type.starts_with("video/") {
+      tracing::debug!("a motion part that isn't a video of a picture is not sent");
+      return None;
+    }
+    let limits = crate::client::stored_motion_limits(self.store_ref());
+    if !limits.is_allowed {
+      tracing::debug!("motion parts are off on this server; the picture goes alone");
+      return None;
+    }
+    let mut part = pending_file(OutgoingFile {
+      file_name: motion_file_name(&picture.file_name, &motion.media_type),
+      media_type: motion.media_type,
+      source: motion.source,
+      maybe_thumbnail: None,
+      maybe_duration_ms: motion.maybe_duration_ms,
+      maybe_waveform: None,
+      maybe_draft_id: None,
+      maybe_motion: None,
+    })?;
+    part.role = FileRole::Motion;
+    if !limits.admits(part.size_bytes) {
+      part.maybe_failure = Some(TransferFailure::TooLarge);
+    }
+    Some(part)
   }
 
   /// "Cancel" on a file still going up; the host drops its running upload and sends the rest.
@@ -480,10 +549,9 @@ impl<S: LocalStore> CoreChatBackend<S> {
     file_id: &str,
   ) -> Option<AttachmentRef> {
     let stored = self.find_stored(conversation, message)?;
-    attachments_of(&stored.content)
-      .into_iter()
-      .find(|attachment| attachment.attachment_id.to_string() == file_id)
-      .cloned()
+    let attachment = file_id.parse::<AttachmentId>().ok()?;
+    // A picture's motion part opens and saves like the message's own files (issue #2181).
+    find_file(&stored.content, attachment).cloned()
   }
 
   pub(crate) fn ui_create_share_link(
@@ -681,7 +749,20 @@ pub(crate) fn pending_file(file: OutgoingFile) -> Option<PendingFile> {
       .and_then(|bytes| Waveform::checked(&bytes))
       .map(|waveform| Base64Bytes::new(waveform.into_bytes())),
     is_held: false,
+    role: FileRole::Attachment,
   })
+}
+
+/// The motion part's name: the picture's, with the video's extension (`IMG_0001.HEIC` →
+/// `IMG_0001.mp4`), so a saved pair sorts together.
+fn motion_file_name(picture: &str, media_type: &str) -> String {
+  let stem = picture.rsplit_once('.').map_or(picture, |(stem, _)| stem);
+  let extension = match media_type {
+    "video/quicktime" => "mov",
+    "video/webm" => "webm",
+    _ => "mp4",
+  };
+  format!("{stem}.{extension}")
 }
 
 #[cfg(not(target_arch = "wasm32"))]

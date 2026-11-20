@@ -375,6 +375,7 @@ fn recording_message(take: CallRecordingTake, path: String) -> OutgoingMessage {
       maybe_duration_ms: Some(take.duration_ms),
       maybe_waveform: None,
       maybe_draft_id: None,
+      maybe_motion: None,
     }],
     link_preview: Default::default(),
   }

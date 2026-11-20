@@ -134,6 +134,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_dimensions: None,
       maybe_duration_ms: None,
       maybe_waveform: None,
+      maybe_motion: None,
     })
   }
 

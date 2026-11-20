@@ -30,6 +30,7 @@ mod media_viewer;
 mod meeting_hosts;
 mod meeting_lobby;
 mod meetings;
+mod motion;
 mod notetaker;
 #[cfg(any(target_os = "ios", test))]
 mod os_log;
@@ -150,6 +151,7 @@ pub use voice::{
 use crate::engine::{DrainGoal, Engine, EngineThreads, Job, PushOpening, PushReader};
 use crate::http_fetch::run_request;
 use crate::logging::{JobClock, LifecycleStep, outcome};
+use crate::motion::MotionLimitsItem;
 use crate::polls::PollLimitsItem;
 use crate::reads::{ReadQueue, Reads};
 use crate::store_threads::{
@@ -888,6 +890,13 @@ impl TeamCraft {
   /// (issue #2120). The poll dialog's fields and checks use it.
   pub async fn poll_limits(&self) -> Result<PollLimitsItem, TeamCraftError> {
     self.read(|reads| reads.poll_limits()).await
+  }
+
+  /// Whether and how large a motion part of a Live Photo or Motion Photo the user may send (issue
+  /// #2181): the app checks it before it takes the clip out of the picture or converts it, and
+  /// sends the still picture alone when the clip doesn't fit.
+  pub async fn motion_limits(&self) -> Result<MotionLimitsItem, TeamCraftError> {
+    self.read(|reads| reads.motion_limits()).await
   }
 
   /// The user groups the composer offers after `@` in a conversation, `@admins` included while

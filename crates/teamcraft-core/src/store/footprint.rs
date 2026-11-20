@@ -111,6 +111,10 @@ impl AttachmentRef {
       + self.file_name.len()
       + self.media_type.len()
       + self.maybe_thumbnail.as_ref().map_or(0, Base64Bytes::len)
+      + self
+        .maybe_motion
+        .as_deref()
+        .map_or(0, |motion| size_of::<AttachmentRef>() + motion.heap_bytes())
   }
 }
 

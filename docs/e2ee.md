@@ -1141,6 +1141,24 @@ is off and picture in picture is off while the app lock is on, as both show the 
 demuxers parse the untrusted file in the app's process (in Java and Kotlin); the codecs run in the system's
 media process. A format the device can't decode says so and offers another app.
 
+**Live Photos and Motion Photos** (#2181). A picture can carry a short video, its motion part: a second
+attachment of the same message, encrypted with its own fresh key like any file and named from the picture's
+details in the encrypted message (`motion`: the motion's attachment ID, key, hash, name, type, size and
+length). It is not one of the message's files of its own, and older clients ignore the field and show the
+still picture. The server sees two attachments of a conversation and can't tell that one belongs to the
+other. Only the sending phone does media work: iOS asks the picker for the Live Photo's paired video and
+converts it from HEVC to H.264 MP4; Android cuts the MP4 out of a Motion Photo's JPEG (Google's
+`MicroVideoOffset` or `Container:Directory` XMP, Samsung's `MotionPhoto_Data` marker; `teamcraft-core`
+`motion_photo`, fuzzed) and sends the JPEG without it. The picture and its motion go up as one send
+(one message, one idempotency key): the message waits for both, a motion that fails for good leaves the
+picture still and shows the sender the motion as not sent, and cancelling the picture cancels its motion.
+The apps send a motion part only while the server's `motion_limits` (`GET /me`, admin.md §3.2.6) allow it
+and it is within their size; the user can turn motion off for their own sends on their phone. Receivers
+take a motion part only on a picture, as a `video/*` file of at most 64 MiB without a motion of its own;
+anything else shows the still picture. The motion is downloaded only when it plays (hover or the badge on
+web and desktop, a long press or the badge on the phones; with reduced motion never by itself), and a clip
+the device can't decode leaves the picture still, never an error.
+
 **Audio** (#802). An audio file (`audio/*`, or by extension when the type is generic) is a card with the app's
 own player. Nothing is downloaded until play is pressed; then the core decrypts the file in memory like a
 video, and the app's one `<audio>` element (not part of the page's layout) plays it from a `blob:` URL. One

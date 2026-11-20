@@ -108,6 +108,23 @@ pub struct PendingFile {
   /// unless it is kept. A message keeps its held files before it goes out.
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub is_held: bool,
+  /// What the file is to its message: one of its files, or the motion part of the picture listed
+  /// right before it (issue #2181).
+  #[serde(default, skip_serializing_if = "FileRole::is_attachment")]
+  pub role: FileRole,
+}
+
+/// What a [`PendingFile`] is to its message.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileRole {
+  /// One of the message's files.
+  #[default]
+  Attachment,
+  /// The motion of the Live Photo or Motion Photo listed right before it (issue #2181): it goes
+  /// into that picture's details, not into the message's files. The message waits for both; when
+  /// the motion fails for good the picture goes alone, and the sender sees the motion as not sent.
+  Motion,
 }
 
 /// One file's encrypted bytes on their way to storage. The client prepares it
@@ -462,6 +479,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           maybe_duration_ms: None,
           maybe_waveform: None,
           is_held: false,
+          role: FileRole::Attachment,
         })
         .collect(),
       purpose: UploadPurpose::Message,
@@ -889,6 +907,28 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
+  /// Keeps the motion limits the server published (issue #2181; `None`: it doesn't, as older
+  /// servers).
+  pub(super) fn store_motion_limits(
+    &self,
+    maybe_limits: Option<teamcraft_proto::MotionLimits>,
+  ) -> Result<(), CoreError> {
+    let recorded = records::get_json::<Option<teamcraft_proto::MotionLimits>>(
+      &self.store,
+      Table::Account,
+      super::MOTION_LIMITS_KEY,
+    )?;
+    if recorded != Some(maybe_limits) {
+      records::put_json(
+        &self.store,
+        Table::Account,
+        super::MOTION_LIMITS_KEY,
+        &maybe_limits,
+      )?;
+    }
+    Ok(())
+  }
+
   /// Keeps the poll limits the server published (`None`: it doesn't, as older servers).
   pub(super) fn store_poll_limits(
     &self,
@@ -914,6 +954,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     self.store_draft_limits(me.maybe_draft_file_retention_days, me.maybe_max_key_bag_bytes)?;
     self.store_poll_limits(me.maybe_poll_limits)?;
+    self.store_motion_limits(me.maybe_motion_limits)?;
     self.store_attachment_limit(me.maybe_max_attachment_bytes)
   }
 
@@ -1000,6 +1041,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_dimensions,
       maybe_duration_ms: file.maybe_duration_ms,
       maybe_waveform: file.maybe_waveform.clone(),
+      maybe_motion: None,
     };
     Ok((attachment, request, progress))
   }
@@ -1284,11 +1326,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .message(upload.conversation_id, upload.client_message_id)?
       && let MessageContent::Text { meta, .. } = &mut stored.content
     {
-      meta.attachments = upload
-        .files
-        .iter()
-        .filter_map(|file| file.maybe_done.clone())
-        .collect();
+      meta.attachments = finished_attachments(&upload.files);
       self.store.upsert_message(&stored)?;
     }
     let failed: Vec<PendingFile> = upload
@@ -1323,6 +1361,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 impl UploadPurpose {
   pub fn is_message(&self) -> bool {
     matches!(self, Self::Message)
+  }
+}
+
+impl FileRole {
+  pub fn is_attachment(&self) -> bool {
+    *self == Self::Attachment
   }
 }
 
@@ -1499,6 +1543,38 @@ pub fn attachments_of(content: &MessageContent) -> Vec<&AttachmentRef> {
   }
 }
 
+/// The message's files from its finished uploads: each picture with the motion part listed right
+/// after it, when that went up too (issue #2181). A motion part whose picture failed is dropped.
+fn finished_attachments(files: &[PendingFile]) -> Vec<AttachmentRef> {
+  let mut attachments: Vec<AttachmentRef> = Vec::with_capacity(files.len());
+  let mut is_last_sent = false;
+  for file in files {
+    match file.role {
+      FileRole::Attachment => {
+        is_last_sent = false;
+        if let Some(done) = &file.maybe_done {
+          attachments.push(done.clone());
+          is_last_sent = true;
+        }
+      },
+      FileRole::Motion => {
+        if let (true, Some(done), Some(picture)) = (is_last_sent, &file.maybe_done, attachments.last_mut()) {
+          picture.maybe_motion = Some(Box::new(done.clone()));
+        }
+        is_last_sent = false;
+      },
+    }
+  }
+  attachments
+}
+
+/// The file of a message with this attachment ID: one of its files or a picture's motion part.
+pub fn find_file(content: &MessageContent, attachment: AttachmentId) -> Option<&AttachmentRef> {
+  attachments_of(content)
+    .into_iter()
+    .find_map(|file| file.find(attachment))
+}
+
 pub fn pending_upload(
   store: &impl LocalStore,
   conversation: ConversationId,
@@ -1563,9 +1639,21 @@ pub fn cancel_pending_file(
   {
     return Ok(false);
   }
-  let file = upload.files.remove(index);
-  if let Some(attachment) = announced_attachment(&file) {
-    queue_abandon(store, attachment)?;
+  // A picture's motion part goes with it: it is nobody's file without the picture.
+  let count = 1
+    + usize::from(
+      upload.files[index].role.is_attachment()
+        && upload
+          .files
+          .get(index + 1)
+          .is_some_and(|next| next.role == FileRole::Motion),
+    );
+  for file in upload.files.drain(index..index + count) {
+    if file.maybe_done.is_none()
+      && let Some(attachment) = announced_attachment(&file)
+    {
+      queue_abandon(store, attachment)?;
+    }
   }
   save_or_drop_upload(store, &upload)
 }
@@ -1709,13 +1797,7 @@ fn find_attachment(
     store
       .messages(conversation, MessageFilter::All)?
       .iter()
-      .flat_map(|message| {
-        attachments_of(&message.content)
-          .into_iter()
-          .cloned()
-          .collect::<Vec<_>>()
-      })
-      .find(|reference| reference.attachment_id == attachment),
+      .find_map(|message| find_file(&message.content, attachment).cloned()),
   )
 }
 
@@ -2085,6 +2167,101 @@ fn create_unique(
 mod tests {
   use super::*;
 
+  mod motion_parts {
+    use teamcraft_proto::Id;
+
+    use super::*;
+
+    #[test]
+    fn a_finished_motion_goes_into_the_picture_before_it() {
+      let files = [
+        done(1, "a.jpg", FileRole::Attachment),
+        done(2, "a.mp4", FileRole::Motion),
+        done(3, "b.txt", FileRole::Attachment),
+      ];
+      let attachments = finished_attachments(&files);
+      assert_eq!(names(&attachments), ["a.jpg", "b.txt"]);
+      let motion = attachments[0].maybe_motion.as_deref().expect("the motion");
+      assert_eq!(motion.file_name, "a.mp4");
+      assert_eq!(attachments[1].maybe_motion, None);
+    }
+
+    #[test]
+    fn a_failed_motion_leaves_the_picture_still() {
+      let mut motion = done(2, "a.mp4", FileRole::Motion);
+      motion.maybe_done = None;
+      motion.maybe_failure = Some(TransferFailure::TooLarge);
+      let attachments = finished_attachments(&[done(1, "a.jpg", FileRole::Attachment), motion]);
+      assert_eq!(names(&attachments), ["a.jpg"]);
+      assert_eq!(attachments[0].maybe_motion, None);
+    }
+
+    #[test]
+    fn a_motion_whose_picture_failed_goes_nowhere() {
+      let mut picture = done(1, "a.jpg", FileRole::Attachment);
+      picture.maybe_done = None;
+      picture.maybe_failure = Some(TransferFailure::LocalFile);
+      let files = [
+        picture,
+        done(2, "a.mp4", FileRole::Motion),
+        done(3, "b.jpg", FileRole::Attachment),
+      ];
+      let attachments = finished_attachments(&files);
+      assert_eq!(names(&attachments), ["b.jpg"]);
+      assert_eq!(attachments[0].maybe_motion, None, "never the next picture's");
+    }
+
+    #[test]
+    fn the_role_is_stored_only_for_a_motion() {
+      let picture = serde_json::to_value(done(1, "a.jpg", FileRole::Attachment)).unwrap();
+      assert!(
+        picture.get("role").is_none(),
+        "pending files stored before keep reading"
+      );
+      let motion = serde_json::to_value(done(2, "a.mp4", FileRole::Motion)).unwrap();
+      assert_eq!(motion["role"], "motion");
+    }
+
+    fn done(id: i64, name: &str, role: FileRole) -> PendingFile {
+      let reference = AttachmentRef {
+        attachment_id: AttachmentId::from_snowflake(teamcraft_proto::Snowflake::new(id).unwrap()),
+        key: Base64Bytes::new(vec![1; 32]),
+        ciphertext_sha256: Base64Bytes::new(vec![2; 32]),
+        file_name: name.into(),
+        media_type: "application/octet-stream".into(),
+        size_bytes: 10,
+        maybe_thumbnail: None,
+        maybe_dimensions: None,
+        maybe_duration_ms: None,
+        maybe_waveform: None,
+        maybe_motion: None,
+      };
+      PendingFile {
+        file_name: name.into(),
+        media_type: reference.media_type.clone(),
+        source: UploadSource::Bytes {
+          bytes: Base64Bytes::new(Vec::new()),
+        },
+        size_bytes: 10,
+        maybe_done: Some(reference),
+        maybe_failure: None,
+        maybe_slot: None,
+        retry: UploadRetry::default(),
+        maybe_thumbnail: None,
+        maybe_dimensions: None,
+        maybe_duration_ms: None,
+        maybe_waveform: None,
+        maybe_parts: None,
+        is_held: false,
+        role,
+      }
+    }
+
+    fn names(attachments: &[AttachmentRef]) -> Vec<&str> {
+      attachments.iter().map(|file| file.file_name.as_str()).collect()
+    }
+  }
+
   #[test]
   fn sanitized_names_have_no_separators_or_control_characters() {
     assert_eq!(sanitize_file_name("../../etc/passwd"), "_.._etc_passwd");
@@ -2291,6 +2468,7 @@ mod tests {
         maybe_duration_ms: None,
         maybe_waveform: None,
         is_held: false,
+        role: FileRole::Attachment,
       }],
       purpose: UploadPurpose::Message,
     };
@@ -2586,6 +2764,7 @@ mod tests {
         maybe_duration_ms: None,
         maybe_waveform: None,
         is_held: false,
+        role: FileRole::Attachment,
       };
       let json = serde_json::to_value(&file).unwrap();
       assert!(json.get("retry").is_none() && json.get("slot").is_none());

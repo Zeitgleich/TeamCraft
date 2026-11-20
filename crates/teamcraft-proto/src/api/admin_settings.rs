@@ -672,6 +672,15 @@ pub struct LimitSettings {
   /// How many days ahead a poll's closing time may be.
   #[serde(default = "default_max_poll_open_days")]
   pub max_poll_open_days: u32,
+  /// Whether Live Photos and Motion Photos go out with their motion (issue #2181); off sends the
+  /// still picture only. Like the poll limits, only what the apps hold senders to.
+  #[serde(default = "enabled")]
+  pub allows_motion_parts: bool,
+  /// Largest motion part of a Live Photo or Motion Photo (plain size), between
+  /// [`MIN_MOTION_BYTES_LIMIT`](crate::MIN_MOTION_BYTES_LIMIT) and
+  /// [`MAX_MOTION_BYTES_LIMIT`](crate::MAX_MOTION_BYTES_LIMIT).
+  #[serde(default = "default_max_motion_part_bytes")]
+  pub max_motion_part_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -746,6 +755,10 @@ fn default_max_custom_emoji() -> u32 {
 
 fn default_max_custom_emoji_bytes() -> u64 {
   crate::DEFAULT_MAX_CUSTOM_EMOJI_BYTES
+}
+
+fn default_max_motion_part_bytes() -> u64 {
+  crate::DEFAULT_MAX_MOTION_BYTES
 }
 
 fn default_max_poll_options() -> u32 {

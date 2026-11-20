@@ -98,6 +98,12 @@ pub struct GetMeResponse {
   /// from older servers: the apps use the built-in limits.
   #[serde(rename = "poll_limits", default, skip_serializing_if = "Option::is_none")]
   pub maybe_poll_limits: Option<crate::PollLimits>,
+  /// Whether and how large a motion part of a Live Photo or Motion Photo the apps let a member send
+  /// (issue #2181, `allows_motion_parts` and `max_motion_part_bytes` of the limits an admin sets).
+  /// The server can't tell a motion part from any other attachment, so this is only what the apps
+  /// hold senders to. Absent from older servers: the apps use the built-in limits.
+  #[serde(rename = "motion_limits", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_motion_limits: Option<crate::MotionLimits>,
   /// How long the server holds the files of an unsent draft (#1220, `is_draft` uploads), in days.
   /// Absent from older servers: clients keep a draft's files on the device until it is sent.
   #[serde(
@@ -177,6 +183,7 @@ mod tests {
       maybe_draft_file_retention_days: None,
       maybe_max_key_bag_bytes: None,
       maybe_poll_limits: None,
+      maybe_motion_limits: None,
     };
     assert_eq!(
       serde_json::to_string(&me).unwrap(),
@@ -209,6 +216,14 @@ mod tests {
     assert_eq!(
       serde_json::to_string(&polling).unwrap(),
       r#"{"id":"42","display_name":"Alice","role":"member","poll_limits":{"max_options":12,"max_question_chars":300,"max_option_chars":100,"max_open_days":365}}"#
+    );
+    let moving = GetMeResponse {
+      maybe_motion_limits: Some(crate::MotionLimits::default()),
+      ..me.clone()
+    };
+    assert_eq!(
+      serde_json::to_string(&moving).unwrap(),
+      r#"{"id":"42","display_name":"Alice","role":"member","motion_limits":{"is_allowed":true,"max_bytes":16777216}}"#
     );
     let parsed: GetMeResponse =
       serde_json::from_str(r#"{"id":"42","username":"alice","display_name":"Alice","role":"auditor"}"#)
