@@ -22,8 +22,8 @@ use crate::components::message_link_card::MessageLinkPreviews;
 use crate::components::message_toolbar::{ActiveMessage, ToolbarHost};
 use crate::components::poll_card::PollCard;
 use crate::components::profile_views::UserHoverCard;
+use crate::components::reaction_chip::ReactionChip;
 use crate::components::rich_text::RichText;
-use crate::custom_emoji::EmojiGlyph;
 use crate::delivery::{Delivery, ReadIndicator, is_delivered, is_read_by_all};
 use crate::feed_motion::{Entrance, RowMotion};
 use crate::i18n::use_i18n;
@@ -772,28 +772,13 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
     let chips: Vec<_> = reactions
       .into_iter()
       .map(|reaction| {
-        let emoji = reaction.emoji.clone();
-        let label_emoji = reaction.emoji.clone();
-        let count = reaction.count;
         // A count that changed again mid-pop continues the pop on this rebuilt chip (#371).
         let maybe_pop = motion.pop_of(&reaction.emoji);
         let is_popping = maybe_pop.is_some();
-        let pop_delay = maybe_pop.map(|pop| format!("-{}ms", pop.elapsed.as_millis())).unwrap_or_default();
-        view! {
-          <button
-            class="reaction"
-            class:is-popping=is_popping
-            style:animation-delay=pop_delay
-            class:reaction-mine=reaction.reacted_by_me
-            aria-pressed=reaction.reacted_by_me.to_string()
-            prop:disabled=!can_react
-            aria-label=move || i18n.t_with("reaction-label", &[("emoji", &label_emoji), ("count", &count.to_string())])
-            on:click=move |_| state.write(|backend| backend.toggle_reaction(conversation, message_id, &emoji))
-          >
-            <span aria-hidden="true"><EmojiGlyph emoji=reaction.emoji maybe_reference=reaction.maybe_custom /></span>
-            <span class="reaction-count">{count}</span>
-          </button>
-        }
+        let pop_delay = maybe_pop
+          .map(|pop| format!("-{}ms", pop.elapsed.as_millis()))
+          .unwrap_or_default();
+        view! { <ReactionChip reaction conversation message=message_id can_react pop_delay is_popping /> }
       })
       .collect();
     view! { <div class="reactions">{chips}</div> }

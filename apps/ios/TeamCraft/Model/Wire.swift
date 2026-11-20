@@ -541,6 +541,7 @@ struct Message: Decodable, Equatable, Identifiable, Sendable {
       named.authorName = maybeAuthor?.displayName ?? ""
     }
     if named.isAuthorDeleted { named.authorName = deletedUserName }
+    named.reactions = reactions.map { $0.named(authors) }
     return named
   }
 
@@ -588,18 +589,40 @@ struct Reaction: Decodable, Equatable, Sendable {
   let emoji: String
   let count: UInt32
   var reactedByMe = false
+  /// Who reacted: the viewer first, then oldest first, capped by the core; `count` is the total.
+  var reactors: [String] = []
+  /// The names of the others among `reactors` this device knows (the viewer and unknown people
+  /// left out), set by `Message.named`. An unknown person only counts; no ID is ever shown.
+  var otherNames: [String] = []
   /// A workspace emoji's picture, when the reaction named one (issue #207).
   var maybeCustom: CustomEmojiRef?
 
-  init(emoji: String, count: UInt32, reactedByMe: Bool = false, maybeCustom: CustomEmojiRef? = nil) {
+  init(
+    emoji: String, count: UInt32, reactedByMe: Bool = false, reactors: [String] = [],
+    otherNames: [String] = [], maybeCustom: CustomEmojiRef? = nil
+  ) {
     self.emoji = emoji
     self.count = count
     self.reactedByMe = reactedByMe
+    self.reactors = reactors
+    self.otherNames = otherNames
     self.maybeCustom = maybeCustom
   }
 
+  /// People behind the count that have no name to show (departed, unknown to this device).
+  var unnamedCount: Int { max(0, Int(count) - otherNames.count - (reactedByMe ? 1 : 0)) }
+
+  /// This reaction with the others named from `authors` (by user ID).
+  func named(_ authors: [String: MessageAuthor]) -> Reaction {
+    var named = self
+    named.otherNames = reactors.dropFirst(reactedByMe ? 1 : 0).compactMap { id in
+      authors[id].map { $0.isDeleted == true ? deletedUserName : $0.displayName }
+    }
+    return named
+  }
+
   private enum CodingKeys: String, CodingKey {
-    case emoji, count, reactedByMe
+    case emoji, count, reactedByMe, reactors
     case maybeCustom = "custom"
   }
 
@@ -608,6 +631,7 @@ struct Reaction: Decodable, Equatable, Sendable {
     emoji = try container.decode(String.self, forKey: .emoji)
     count = try container.decode(UInt32.self, forKey: .count)
     reactedByMe = try container.decodeIfPresent(Bool.self, forKey: .reactedByMe) ?? false
+    reactors = (try? container.decodeIfPresent([String].self, forKey: .reactors)) ?? []
     maybeCustom = try? container.decodeIfPresent(CustomEmojiRef.self, forKey: .maybeCustom)
   }
 }

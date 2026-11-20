@@ -331,4 +331,20 @@
   <string name="profile_call">Anrufen</string>
   <string name="profile_open">Profil von %1$s öffnen</string>
   <string name="copied">Kopiert</string>
+  <!-- Reaktionen: wer reagiert hat (Issue #2176) -->
+  <string name="reaction_you">Du</string>
+  <string name="reaction_description_names">Reaktion %1$s von %2$s</string>
+  <plurals name="reaction_description_count">
+    <item quantity="one">Reaktion %1$s, %2$d Person</item>
+    <item quantity="other">Reaktion %1$s, %2$d Personen</item>
+  </plurals>
+  <plurals name="reaction_more_people">
+    <item quantity="one">%d weitere Person</item>
+    <item quantity="other">%d weitere Personen</item>
+  </plurals>
+  <plurals name="reaction_more_people_line">
+    <item quantity="one">Und %d weitere Person</item>
+    <item quantity="other">Und %d weitere Personen</item>
+  </plurals>
+  <string name="reaction_show_people">Zeigen, wer reagiert hat</string>
 </resources>

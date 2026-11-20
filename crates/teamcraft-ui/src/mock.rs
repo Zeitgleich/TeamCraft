@@ -1101,9 +1101,11 @@ impl ChatBackend for MockBackend {
         if reaction.reacted_by_me {
           reaction.reacted_by_me = false;
           reaction.count -= 1;
+          reaction.reactors.retain(|user| *user != me());
         } else {
           reaction.reacted_by_me = true;
           reaction.count += 1;
+          reaction.reactors.insert(0, me());
         }
         if reaction.count == 0 {
           target.reactions.remove(index);
@@ -1113,6 +1115,7 @@ impl ChatBackend for MockBackend {
         emoji: emoji.to_owned(),
         count: 1,
         reacted_by_me: true,
+        reactors: vec![me()],
         maybe_custom: None,
       }),
     }
@@ -1583,6 +1586,7 @@ impl State {
               emoji: emoji.to_owned(),
               count: 1 + rng.below(4) as u32,
               reacted_by_me: rng.below(4) == 0,
+              reactors: Vec::new(),
               maybe_custom: None,
             });
           }

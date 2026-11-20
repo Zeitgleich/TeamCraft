@@ -34,7 +34,24 @@ message-edited = (bearbeitet)
 message-actions = Nachrichtenaktionen
 action-react = Reaktion hinzufügen
 action-reply = Im Thread antworten
-reaction-label = Reaktion { $emoji }, { $count } Personen
+reaction-label = Reaktion { $emoji }, { $count ->
+    [one] 1 Person
+   *[other] { $count } Personen
+  }
+reaction-label-names = { $emoji } von { $names }
+reaction-you = dir
+reaction-names-two = { $first } und { $second }
+reaction-names-three = { $first }, { $second } und { $third }
+reaction-names-more = { $names } und { $count ->
+    [one] 1 weiteren
+   *[other] { $count } weiteren
+  }
+reaction-show-everyone = Alle anzeigen
+reaction-others-unnamed = { $count ->
+    [one] Und 1 weitere Person
+   *[other] Und { $count } weitere Personen
+  }
+reaction-close = Schließen
 
 ## Threads
 thread-replies = { $count ->

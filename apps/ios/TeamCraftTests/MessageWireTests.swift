@@ -194,4 +194,19 @@ final class MessageWireTests: XCTestCase {
     XCTAssertTrue(messages[1].isAuthorDeleted)
     XCTAssertEqual(messages[2].authorName, "Sam Doe")
   }
+
+  /// Issue #2176: a reaction names who reacted; the viewer is left out of the names, and people
+  /// this device doesn't know only count.
+  func testAReactionNamesItsReactorsAndNeverShowsAnId() throws {
+    let json = """
+      {"emoji": "👍", "count": 4, "reacted_by_me": true, "reactors": ["1", "8", "99", "9"]}
+      """
+    let reaction = try XCTUnwrap(Wire.decode(Reaction.self, from: json))
+    XCTAssertEqual(reaction.reactors, ["1", "8", "99", "9"])
+    let authors = ["8": MessageAuthor(id: "8", displayName: "Alex Example"), "9": MessageAuthor(id: "9", displayName: "Sam Example")]
+    let named = reaction.named(authors)
+    XCTAssertEqual(named.otherNames, ["Alex Example", "Sam Example"])
+    XCTAssertEqual(named.unnamedCount, 1)
+    XCTAssertEqual(Reaction(emoji: "👍", count: 2).unnamedCount, 2)
+  }
 }
