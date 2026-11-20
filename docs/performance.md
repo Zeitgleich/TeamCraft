@@ -935,6 +935,51 @@ frame at 30 fps, so a 4K share whose every frame changes now reaches 25 to 29 fp
 need two frames in the encoder at once, with each picture sent when it comes out rather than with
 the next frame.
 
+### A presenter on hotel Wi-Fi: uplink estimate and voice hold (issues #2191, #2192)
+
+A presenter's uplink that loses 1–3 % of its packets in short bursts (hotel or train Wi-Fi) froze
+the share for seconds at a time (#2189's real-time run). Measured in deterministic simulations on
+the seeded Gilbert–Elliott link of #2189's relay (`teamcraft_media::bursty_loss`: average loss
+walking within 1–3 %, bursts of 4 packets on average losing half, one-way delay walking within
+20–60 ms), five seeds each.
+
+**Estimate on a still screen** (`bwe::tests::still_screen`): voice every 20 ms, a tiny frame five
+times a second, a refresh every second, a 60 KB slide after 1 s and 2 s in turn paced out at the
+estimate; a 5 Mbit/s link, a demand of 3.5 Mbit/s; a minute after a 5 s start.
+
+| Per seed                               | Before                                | After                       |
+|----------------------------------------|---------------------------------------|-----------------------------|
+| Lowest estimate                        | 36–95 kbit/s (4 seeds), 2.2 Mbit/s    | 1.7–2.8 Mbit/s              |
+| Mean estimate                          | –                                     | 3.33–3.45 Mbit/s            |
+| Slowest slide paced out                | 23–48 s (4 seeds), 220 ms             | 165–270 ms                  |
+| Link drops to 500 kbit/s: ≤ 650 kbit/s | –                                     | 0.9–1.0 s                   |
+
+One burst in a still screen's sparse second (about 60 datagrams) was more than 10 % loss, the cut
+went to what got through (the screen's own rate), and the hold at 2 % loss kept the estimate from
+growing back. Now loss counts from 30 datagrams on, an application-limited sender without a queue
+(less than 150 ms over the fastest) is cut from its estimate by the loss (at most to half), and the
+hold starts 2 % above the link's own loss (learned over 10 s, at most 5 %). A sender that fills its
+estimate on a 3 Mbit/s link of the same kind averages 2.5–2.8 Mbit/s with its queue below 165 ms.
+
+**Video held for the voice** (`voice_guard::tests::bursty_link`): the presenter's voice next to
+the still screen, numbered together through the same link, feedback every 100 ms.
+
+| Per minute and seed                      | Before (a tenth, 3 s hold) | After                      |
+|------------------------------------------|----------------------------|----------------------------|
+| Video held                               | 19–39 s                    | 0–4.4 s                    |
+| Longest hold                             | 4.4–11.2 s                 | ≤ 1 s                      |
+| Collapse (33–90 % lost) found after      | 300–400 ms                 | 300–600 ms, held through   |
+
+The own uplink's guard counts the voice hurt at a fifth lost within 500 ms (was a tenth). Loss
+that lasts less than a second is a burst: the video comes back 500 ms after it. Loss that lasts a
+second, or voice stuck in a queue (#1889), is congestion: the 3 s hold and the probe proof (#1893)
+as before, and a probe cluster may lose a tenth of its datagrams (the link's own loss; an
+overflowing link loses its whole excess).
+
+Not covered: a still screen on a link that drops to about its slides' rate without overflowing its
+buffer (5 → 1 Mbit/s) is followed by the delay steps only (5–17 s); its slides are as fast as the
+link allows either way, but its voice waits behind a slide's queue (up to about 320 ms).
+
 ### A camera encoder that misses its wait under load (issue #1719)
 
 The 50 ms wait above drops a late picture and forces the next frame to a keyframe. If keyframes
