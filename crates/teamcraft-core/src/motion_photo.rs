@@ -5,7 +5,8 @@
 //! [`locate`] finds the video in such a file so the sending phone sends the picture and the clip
 //! as two files; it reads untrusted bytes, so every length is checked against the file and the
 //! video must be a run of well-formed MP4 boxes that starts with `ftyp`. Anything else is a plain
-//! picture.
+//! picture. [`strip_metadata`] then blanks the clip's metadata boxes (where the camera writes the
+//! location), as the picture path drops the picture's.
 
 use std::ops::Range;
 
@@ -13,6 +14,23 @@ use std::ops::Range;
 const XMP_HEADER: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
 /// Samsung's marker right before the embedded video.
 const SAMSUNG_MARKER: &[u8] = b"MotionPhoto_Data";
+/// The last bytes of Samsung's trailer (SEF), which a Samsung Motion Photo ends with.
+const SAMSUNG_TRAILER_END: &[u8] = b"SEFT";
+/// XMP flags that say the picture is a Motion Photo, as attribute or element.
+const MOTION_FLAGS: [&str; 4] = [
+  "GCamera:MotionPhoto=\"1\"",
+  "GCamera:MicroVideo=\"1\"",
+  "<GCamera:MotionPhoto>1<",
+  "<GCamera:MicroVideo>1<",
+];
+/// Boxes that hold metadata, not media: user data (`udta`, where cameras write `©xyz` and other
+/// location atoms), `meta` (QuickTime keys such as `com.apple.quicktime.location.ISO6709`) and
+/// vendor `uuid` boxes (XMP). Players don't need them.
+const METADATA_BOXES: [&[u8; 4]; 3] = [b"udta", b"meta", b"uuid"];
+/// Containers whose children are searched for metadata boxes.
+const CONTAINER_BOXES: [&[u8; 4]; 2] = [b"moov", b"trak"];
+/// What a blanked metadata box becomes: padding every reader skips.
+const FREE_BOX: &[u8; 4] = b"free";
 /// The JPEG segments read before giving up on finding the XMP: the start of the picture.
 const MAX_SEGMENTS: usize = 64;
 /// The XMP text read, in bytes (the extended XMP of a Motion Photo is not needed).
@@ -38,12 +56,19 @@ pub fn locate(file: &[u8]) -> Option<MotionPhotoParts> {
   if !file.starts_with(&[0xFF, 0xD8]) {
     return None;
   }
-  let maybe_from_xmp = xmp(file)
-    .and_then(|xmp| video_length(&xmp))
+  let maybe_xmp = xmp(file);
+  let maybe_from_xmp = maybe_xmp
+    .as_deref()
+    .and_then(video_length)
     .and_then(|length| (file.len() as u64).checked_sub(length));
   let (still_end, start) = match maybe_from_xmp {
     Some(start) => (start, start),
-    None => samsung_parts(file)?,
+    // Samsung's marker counts only in a file that says it is a Motion Photo: its trailer, or the
+    // XMP flag. A plain picture that happens to hold the marker stays a picture.
+    None if file.ends_with(SAMSUNG_TRAILER_END) || maybe_xmp.as_deref().is_some_and(has_motion_flag) => {
+      samsung_parts(file)?
+    },
+    None => return None,
   };
   let end = mp4_end(file, start)?;
   // The picture before the video must at least hold the JPEG's markers.
@@ -81,6 +106,86 @@ fn xmp(file: &[u8]) -> Option<String> {
     position += 2 + length;
   }
   None
+}
+
+/// Blanks the metadata boxes of an MP4 in place (`udta`, `meta`, `uuid` at the top level, in
+/// `moov` and in each `trak`): they become `free` boxes of the same size with zeroed contents, so
+/// no offset into the file moves and every player still reads it. Where the camera wrote the
+/// location, it is gone. Malformed parts are left as they are; [`locate`] only hands out clips
+/// whose top level is well formed.
+pub fn strip_metadata(video: &mut [u8]) {
+  for (start, header, end, kind) in boxes(video, 0..video.len()) {
+    if METADATA_BOXES.contains(&&kind) {
+      blank(video, start, header, end);
+    } else if CONTAINER_BOXES.contains(&&kind) {
+      strip_children(video, start + header..end, 0);
+    }
+  }
+}
+
+/// Blanks the metadata boxes among the boxes in `range`, and in the containers among them, at most
+/// two levels deep (`moov` > `trak`).
+fn strip_children(video: &mut [u8], range: Range<usize>, depth: usize) {
+  for (start, header, end, kind) in boxes(video, range) {
+    if METADATA_BOXES.contains(&&kind) {
+      blank(video, start, header, end);
+    } else if depth == 0 && CONTAINER_BOXES.contains(&&kind) {
+      strip_children(video, start + header..end, depth + 1);
+    }
+  }
+}
+
+fn blank(video: &mut [u8], start: usize, header: usize, end: usize) {
+  video[start + 4..start + 8].copy_from_slice(FREE_BOX);
+  video[start + header..end].fill(0);
+}
+
+/// The well-formed boxes in `range`: start, header length, end and type. Stops at the first box
+/// that doesn't fit, and after [`MAX_TOP_LEVEL_BOXES`].
+fn boxes(data: &[u8], range: Range<usize>) -> Vec<(usize, usize, usize, [u8; 4])> {
+  let mut found = Vec::new();
+  let mut position = range.start;
+  while found.len() < MAX_TOP_LEVEL_BOXES {
+    let Some(header) = data
+      .get(position..position + 8)
+      .filter(|_| position + 8 <= range.end)
+    else {
+      break;
+    };
+    let kind = [header[4], header[5], header[6], header[7]];
+    let (size, header_len) = match u32::from_be_bytes([header[0], header[1], header[2], header[3]]) {
+      0 => (range.end - position, 8),
+      1 => {
+        let Some(large) = data
+          .get(position + 8..position + 16)
+          .filter(|_| position + 16 <= range.end)
+        else {
+          break;
+        };
+        let Ok(size) = usize::try_from(u64::from_be_bytes([
+          large[0], large[1], large[2], large[3], large[4], large[5], large[6], large[7],
+        ])) else {
+          break;
+        };
+        (size, 16)
+      },
+      size => (size as usize, 8),
+    };
+    let Some(end) = position
+      .checked_add(size)
+      .filter(|end| size >= header_len && *end <= range.end)
+    else {
+      break;
+    };
+    found.push((position, header_len, end, kind));
+    position = end;
+  }
+  found
+}
+
+/// Whether the XMP says the picture is a Motion Photo.
+fn has_motion_flag(xmp: &str) -> bool {
+  MOTION_FLAGS.iter().any(|flag| xmp.contains(flag))
 }
 
 /// The video's length from the XMP: the newer container directory first, then the older offset.
@@ -229,8 +334,100 @@ mod tests {
     }
   }
 
+  mod metadata {
+    use super::*;
+
+    #[test]
+    fn the_location_is_blanked_and_every_offset_stays() {
+      let mut video = located_clip();
+      let before = video.clone();
+      strip_metadata(&mut video);
+      assert_eq!(video.len(), before.len());
+      for secret in [&b"\xa9xyz"[..], b"+52.5200+013.4050/", b"ISO6709"] {
+        assert!(!contains(&video, secret), "{secret:?} left");
+      }
+      assert!(contains(&video, b"mvhd-kept"), "media boxes stay");
+      assert!(contains(&video, b"mdat-kept"));
+      assert_eq!(
+        mp4_end(&video, 0),
+        Some(video.len() as u64),
+        "still one well-formed clip"
+      );
+      assert_eq!(&video[..8], &before[..8]);
+    }
+
+    #[test]
+    fn a_clip_without_metadata_is_unchanged_and_garbage_never_panics() {
+      let mut plain = mp4(&[b"moov", b"mdat"]);
+      let before = plain.clone();
+      strip_metadata(&mut plain);
+      assert_eq!(plain, before);
+      let mut garbage = located_clip();
+      for cut in 0..garbage.len() {
+        strip_metadata(&mut garbage[..cut]);
+      }
+      let mut huge = b"\x00\x00\x00\x01udta\xff\xff\xff\xff\xff\xff\xff\xff".to_vec();
+      strip_metadata(&mut huge);
+    }
+
+    /// ftyp, moov { mvhd, udta { ©xyz }, trak { udta, meta }, meta }, uuid, mdat.
+    fn located_clip() -> Vec<u8> {
+      let xyz = mp4_box(b"\xa9xyz", b"\x00\x12\x15\xc7+52.5200+013.4050/");
+      let keys = mp4_box(
+        b"meta",
+        b"com.apple.quicktime.location.ISO6709 +52.5200+013.4050/",
+      );
+      let trak = mp4_box(
+        b"trak",
+        &[
+          mp4_box(b"tkhd", b"tkhd-kept"),
+          mp4_box(b"udta", &xyz),
+          keys.clone(),
+        ]
+        .concat(),
+      );
+      let moov = mp4_box(
+        b"moov",
+        &[mp4_box(b"mvhd", b"mvhd-kept"), mp4_box(b"udta", &xyz), trak, keys].concat(),
+      );
+      [
+        b"\x00\x00\x00\x10ftypisom\x00\x00\x02\x00".to_vec(),
+        moov,
+        mp4_box(b"uuid", b"xmp with +52.5200+013.4050/"),
+        mp4_box(b"mdat", b"mdat-kept"),
+      ]
+      .concat()
+    }
+
+    fn mp4_box(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+      let mut boxed = u32::try_from(body.len() + 8)
+        .unwrap_or(u32::MAX)
+        .to_be_bytes()
+        .to_vec();
+      boxed.extend_from_slice(kind);
+      boxed.extend_from_slice(body);
+      boxed
+    }
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+      haystack.windows(needle.len()).any(|window| window == needle)
+    }
+  }
+
   mod hostile {
     use super::*;
+
+    #[test]
+    fn a_samsung_marker_without_trailer_or_flag_is_no_motion_photo() {
+      let mut file = jpeg(None);
+      file.extend_from_slice(SAMSUNG_MARKER);
+      file.extend_from_slice(&mp4(&[b"moov"]));
+      assert_eq!(locate(&file), None, "no SEF trailer, no XMP flag");
+      let mut flagged = jpeg(Some(r#"<rdf:Description GCamera:MotionPhoto="1"/>"#));
+      flagged.extend_from_slice(SAMSUNG_MARKER);
+      flagged.extend_from_slice(&mp4(&[b"moov"]));
+      assert!(locate(&flagged).is_some(), "the XMP flag is enough");
+    }
 
     #[test]
     fn a_plain_picture_has_no_motion() {

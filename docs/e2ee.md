@@ -1151,13 +1151,16 @@ share extension copies the Live Photo's bundle and the app takes the video out o
 HEVC to H.264 MP4; Android cuts the MP4 out of a Motion Photo's JPEG (Google's `MicroVideoOffset` or
 `Container:Directory` XMP, Samsung's `MotionPhoto_Data` marker; `teamcraft-core` `motion_photo`, fuzzed),
 sends the JPEG without it and converts an HEVC clip to H.264 (Media3 Transformer, without sound: the
-motion always plays muted). The picture and its motion go up as one send
+motion always plays muted). The clip's metadata goes as the picture's does: Android blanks its `udta`,
+`meta` and `uuid` boxes (where cameras write the location) into `free` boxes of the same size
+(`motion_photo::strip_metadata`), iOS converts with `AVMetadataItemFilter.forSharing()`. The picture and its motion go up as one send
 (one message, one idempotency key): the message waits for both, a motion that fails for good leaves the
 picture still and shows the sender the motion as not sent, and cancelling the picture cancels its motion.
 The apps send a motion part only while the server's `motion_limits` (`GET /me`, admin.md §3.2.6) allow it
 and it is within their size; the user can turn motion off for their own sends on their phone. Receivers
 take a motion part only on a picture, as a `video/*` file of at most 64 MiB without a motion of its own;
-anything else shows the still picture. The motion is downloaded only when it plays (hover or the badge on
+anything else shows the still picture; web and desktop read at most 64 MiB of it whatever the sender
+claims (`viewed_file`), the phones at most what its claimed size allows. The motion is downloaded only when it plays (hover or the badge on
 web and desktop, a long press or the badge on the phones; with reduced motion never by itself), and a clip
 the device can't decode leaves the picture still, never an error.
 

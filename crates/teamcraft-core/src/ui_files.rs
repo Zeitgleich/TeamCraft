@@ -554,6 +554,28 @@ impl<S: LocalStore> CoreChatBackend<S> {
     find_file(&stored.content, attachment).cloned()
   }
 
+  /// [`Self::attachment_ref`] for showing it, with the most bytes to read of it: a picture's
+  /// motion part (#2181) at most [`teamcraft_proto::MAX_MOTION_BYTES_LIMIT`], whatever its sender
+  /// claims; any other file the viewer's cap.
+  pub fn viewed_file(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: &str,
+  ) -> Option<(AttachmentRef, u64)> {
+    let stored = self.find_stored(conversation, message)?;
+    let attachment = file_id.parse::<AttachmentId>().ok()?;
+    let is_motion = attachments_of(&stored.content)
+      .into_iter()
+      .all(|file| file.attachment_id != attachment);
+    let reference = find_file(&stored.content, attachment)?.clone();
+    let max_bytes = match is_motion {
+      true => teamcraft_proto::MAX_MOTION_BYTES_LIMIT,
+      false => crate::MAX_VIEWER_BYTES,
+    };
+    Some((reference, max_bytes))
+  }
+
   pub(crate) fn ui_create_share_link(
     &self,
     conversation: ConversationId,

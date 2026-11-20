@@ -35,7 +35,7 @@ enum LivePhotoMotion {
   /// made ready to send: converted to H.264 MP4 beside it. `nil`, and the clip deleted, when the
   /// user or the server doesn't send motion or the conversion fails. A clip already over the limit
   /// is not converted: it goes along as it is, and the core sends the picture alone and shows the
-  /// sender that the motion was not sent.
+  /// sender that the motion was not sent (it is never uploaded, so its metadata stays here).
   static func prepared(_ motion: PickedMotion, limits: MotionLimitsItem) async -> PickedMotion? {
     let source = URL(fileURLWithPath: motion.path)
     guard isSendingMotion, limits.isAllowed else {
@@ -75,6 +75,9 @@ enum LivePhotoMotion {
     guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPreset1920x1080) else { return nil }
     try? FileManager.default.removeItem(at: target)
     session.shouldOptimizeForNetworkUse = true
+    // No location or other identifying metadata leaves with the clip, as the picture's conversion
+    // drops it (the Live Photo's content identifier, which pairs it on this phone, goes too).
+    session.metadataItemFilter = .forSharing()
     do {
       if #available(iOS 18, *) {
         try await session.export(to: target, as: .mp4)

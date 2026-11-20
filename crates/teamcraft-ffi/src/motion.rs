@@ -4,7 +4,7 @@
 use std::fs;
 use std::io::Write;
 
-use teamcraft_core::motion_photo::{MotionPhotoParts, locate};
+use teamcraft_core::motion_photo::{MotionPhotoParts, locate, strip_metadata};
 
 use crate::error::TeamCraftError;
 
@@ -29,7 +29,8 @@ pub struct MotionPhotoSplit {
 /// Cuts the Motion Photo at `path` into its picture (written to `still_path`, the JPEG without the
 /// video) and its MP4 (to `video_path`). `None` when the file is a plain picture, larger than a
 /// Motion Photo gets, or anything the parser doesn't trust: the app sends the file as it is then.
-/// Both outputs are created anew; nothing is written when there is no video.
+/// Both outputs are created anew; nothing is written when there is no video. The video's metadata
+/// boxes (where cameras write the location) are blanked on the way (`strip_metadata`).
 #[uniffi::export]
 pub fn split_motion_photo(
   path: String,
@@ -44,21 +45,26 @@ pub fn split_motion_photo(
   let Some(MotionPhotoParts { still, video }) = locate(&file) else {
     return Ok(None);
   };
-  write_part(&still_path, &file, still.clone())?;
-  write_part(&video_path, &file, video.clone())?;
+  write_part(&still_path, part(&file, still.clone())?)?;
+  let mut clip = part(&file, video.clone())?.to_vec();
+  strip_metadata(&mut clip);
+  write_part(&video_path, &clip)?;
   Ok(Some(MotionPhotoSplit {
     still_bytes: still.end - still.start,
     video_bytes: video.end - video.start,
   }))
 }
 
-fn write_part(path: &str, file: &[u8], range: std::ops::Range<u64>) -> Result<(), TeamCraftError> {
-  // Invariant: `locate` returns ranges inside the file it was given.
-  let bytes = usize::try_from(range.start)
+/// The bytes of `range`; `locate` only returns ranges inside the file it was given.
+fn part(file: &[u8], range: std::ops::Range<u64>) -> Result<&[u8], TeamCraftError> {
+  usize::try_from(range.start)
     .ok()
     .zip(usize::try_from(range.end).ok())
     .and_then(|(start, end)| file.get(start..end))
-    .ok_or_else(|| TeamCraftError::InvalidInput("motion photo range outside the file".into()))?;
+    .ok_or_else(|| TeamCraftError::InvalidInput("motion photo range outside the file".into()))
+}
+
+fn write_part(path: &str, bytes: &[u8]) -> Result<(), TeamCraftError> {
   let mut out = fs::File::create(path).map_err(io_error)?;
   out.write_all(bytes).map_err(io_error)?;
   out.sync_all().map_err(io_error)
@@ -97,6 +103,8 @@ mod tests {
     photo.extend_from_slice(b"MotionPhoto_Data");
     let video = b"\x00\x00\x00\x10ftypisom\x00\x00\x02\x00\x00\x00\x00\x0Cmoov\x01\x02\x03\x04";
     photo.extend_from_slice(video);
+    // Samsung's trailer: a marker alone doesn't make a Motion Photo.
+    photo.extend_from_slice(b"\x00\x00SEFH\x01\x02SEFT");
     let path = dir.path().join("motion.jpg");
     fs::write(&path, &photo).unwrap();
     let (still, out) = (dir.path().join("still.jpg"), dir.path().join("video.mp4"));

@@ -57,6 +57,24 @@ async fn a_live_photo_arrives_as_one_picture_that_plays() {
   let opened = bob.client.open_attachment(&reference).await.unwrap();
   assert_eq!(opened.expose_secret(), CLIP);
 
+  // The viewer reads a motion part only up to the motion limit, whatever its sender claims.
+  let (_, motion_cap) = bob_ui.viewed_file(channel, received.id, &motion.file_id).unwrap();
+  assert_eq!(motion_cap, teamcraft_proto::MAX_MOTION_BYTES_LIMIT);
+  let (_, picture_cap) = bob_ui
+    .viewed_file(channel, received.id, &files[0].file_id)
+    .unwrap();
+  assert_eq!(picture_cap, teamcraft_core::MAX_VIEWER_BYTES);
+  let mut claims_more = reference.clone();
+  claims_more.size_bytes = motion_cap + 1;
+  assert!(
+    bob
+      .client
+      .start_capped_viewer_download(&claims_more, motion_cap)
+      .await
+      .is_err(),
+    "a motion claiming more than the limit is not fetched"
+  );
+
   let own = files_of_last(&alice_ui, channel);
   assert_eq!(own.len(), 1);
   assert!(own[0].is_live(), "the sender sees it as sent");

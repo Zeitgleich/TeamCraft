@@ -115,6 +115,8 @@ pub enum DownloadPriority {
 enum Job {
   View {
     reference: AttachmentRef,
+    /// The most bytes read of it (the viewer's cap, or a motion part's).
+    max_bytes: u64,
     priority: DownloadPriority,
     /// Everybody who asked for the file while it waited.
     delivers: Vec<Waiter>,
@@ -157,6 +159,19 @@ impl Downloads {
     deliver: Deliver,
     is_wanted: IsWanted,
   ) {
+    self.view_capped_while(reference, crate::MAX_VIEWER_BYTES, priority, deliver, is_wanted);
+  }
+
+  /// Like [`Self::view_while`], reading at most `max_bytes` of the file whatever its sender claims
+  /// (a picture's motion part, #2181: `CoreChatBackend::viewed_file`).
+  pub fn view_capped_while(
+    &mut self,
+    reference: AttachmentRef,
+    max_bytes: u64,
+    priority: DownloadPriority,
+    deliver: Deliver,
+    is_wanted: IsWanted,
+  ) {
     let maybe_index = self
       .waiting
       .iter()
@@ -165,6 +180,7 @@ impl Downloads {
       .and_then(|index| self.waiting.remove(index))
       .unwrap_or(Job::View {
         reference,
+        max_bytes,
         priority,
         delivers: Vec::new(),
       });
@@ -253,13 +269,16 @@ impl Downloads {
       };
       match job {
         Job::View {
-          reference, delivers, ..
+          reference,
+          max_bytes,
+          delivers,
+          ..
         } => {
           let delivers: Vec<Waiter> = delivers.into_iter().filter(|w| (w.is_wanted)()).collect();
           if delivers.is_empty() {
             continue;
           }
-          match client.start_viewer_download(&reference).await {
+          match client.start_capped_viewer_download(&reference, max_bytes).await {
             Ok(download) => self.running.push(Box::pin(async move {
               deliver_all(delivers, download.open().await);
               Finished::Viewed

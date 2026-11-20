@@ -1656,9 +1656,15 @@ pub fn cancel_pending_file(
           .is_some_and(|next| next.role == FileRole::Motion),
     );
   for file in upload.files.drain(index..index + count) {
-    if file.maybe_done.is_none()
-      && let Some(attachment) = announced_attachment(&file)
-    {
+    // A motion part that is up already is given up too: nothing will carry it. The server frees it
+    // while it is unfinished or held for a draft; a completed one it keeps (and says so).
+    let maybe_attachment = announced_attachment(&file).or_else(|| {
+      file
+        .maybe_done
+        .as_ref()
+        .map(|attachment| attachment.attachment_id)
+    });
+    if let Some(attachment) = maybe_attachment {
       queue_abandon(store, attachment)?;
     }
   }
@@ -2218,6 +2224,43 @@ mod tests {
       let attachments = finished_attachments(&files);
       assert_eq!(names(&attachments), ["b.jpg"]);
       assert_eq!(attachments[0].maybe_motion, None, "never the next picture's");
+    }
+
+    #[test]
+    fn cancelling_a_picture_gives_up_its_motion_also_when_that_is_up() {
+      let store = crate::store::MemoryStore::new();
+      let conversation = ConversationId::from_snowflake(teamcraft_proto::Snowflake::new(7).unwrap());
+      let message = ClientMessageId::from_hex("0123456789abcdef0123456789abcdef").unwrap();
+      let mut picture = done(1, "a.jpg", FileRole::Attachment);
+      picture.maybe_done = None;
+      picture.maybe_slot = Some(UploadSlot {
+        attachment_id: AttachmentId::from_snowflake(teamcraft_proto::Snowflake::new(1).unwrap()),
+        upload_url: "https://storage.example.com/1".into(),
+        size_bytes: 10,
+        maybe_expires_at_ms: None,
+      });
+      let upload = PendingUpload {
+        conversation_id: conversation,
+        client_message_id: message,
+        files: vec![
+          picture,
+          done(2, "a.mp4", FileRole::Motion),
+          done(3, "b.txt", FileRole::Attachment),
+        ],
+        purpose: UploadPurpose::Message,
+      };
+      save_pending_upload(&store, &upload).unwrap();
+
+      assert!(cancel_pending_file(&store, conversation, message, 0).unwrap());
+
+      let abandoned: Vec<AttachmentId> = records::get_json(&store, Table::FileTransfers, ABANDONED_KEY)
+        .unwrap()
+        .unwrap();
+      let raw: Vec<i64> = abandoned.iter().map(|id| id.snowflake().get()).collect();
+      assert_eq!(raw, [1, 2], "the picture's slot and its finished motion");
+      let left = pending_upload(&store, conversation, message).unwrap().unwrap();
+      assert_eq!(left.files.len(), 1);
+      assert_eq!(left.files[0].file_name, "b.txt");
     }
 
     #[test]
