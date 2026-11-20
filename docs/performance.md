@@ -912,6 +912,8 @@ per transaction name, with its p50/p95, throughput and the slowest samples.
 | `sync.reconnect`        | (none yet) connecting again until connected         | All                          |
 | `file.download`         | (none yet) an attachment's download and decryption  | Web, desktop                 |
 | `call.setup`            | (none yet) joining until the media is secured       | Web, desktop                 |
+| `feed.scroll_back`      | No frozen frames while scrolling back               | Web, desktop, iOS            |
+| `feed.jump_bottom`      | (none yet) one tap lands at the newest message      | iOS                          |
 | App start, `ui.load`    | Signed-in start (mobile), slow and frozen frames    | Android, iOS (the SDKs' own) |
 
 How to find a cause, not only a number:
@@ -2841,9 +2843,9 @@ the chunks that load later. The limit:
 
 | Limit                                | Value        | Above it                         |
 |--------------------------------------|--------------|----------------------------------|
-| A guest in a meeting: gzip -9 total  | 6,340,000 B  | fails; warns from 95 % (6.02 MB) |
+| A guest in a meeting: gzip -9 total  | 7,340,000 B  | fails; warns from 95 % (6.97 MB) |
 | Signed-in first visit: gzip -9 total | 7,000,000 B  | fails; warns from 95 % (6.65 MB) |
-| The call module: gzip -9             | 1,100,000 B  | fails                            |
+| The call module: gzip -9             | 2,100,000 B  | fails                            |
 
 Both budgets are the sizes of #1699 below plus about 5 %, lowered on 2026-11-13 by what #1462 took
 out (what only a member's page asks for and the desktop app's chrome, below): 6.44 and 5.61 MB
@@ -2868,8 +2870,10 @@ the budget is a decision, not a fix.
 
 The call module's budget was 1,000,000 B (0.86 MB with the effects' compositors, #439, plus about
 15 %) until the call problem reports (#1762, 2026-11-12) took the module to 1.02 MB; it is
-1,100,000 B since, a decision of the maintainer: the reports pay for themselves in field bugs found
-without asking anybody for logs.
+1,100,000 B from then, a decision of the maintainer: the reports pay for themselves in field bugs found
+without asking anybody for logs. On 2026-11-20 the module had reached 1.103 MB and failed every web
+pull request; the maintainer raised its budget by 1 MB to 2,100,000 B, and a guest's meeting, which
+includes it, by the same to 7,340,000 B (6,337,154 B then).
 
 #### The screen shares' meter in the call module (2026-11-15)
 

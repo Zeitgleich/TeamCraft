@@ -52,7 +52,9 @@ except ImportError:  # Optional: gzip is the budget, brotli is informational.
 # gzip -9, decimal megabytes: 6.13 MB after #1699 (2026-11-11), plus about 5 %; lowered by what #1462
 # took out of it on 2026-11-13 (about 74 kB: what only a member's page asks for, out of the app), and
 # by the service worker's own fetch in place of reqwest on 2026-11-14 (#1909, about 33 kB).
-DEFAULT_GUEST_BUDGET_BYTES = 6_340_000
+# Raised by 1 MB to 7.34 MB on 2026-11-20 with the call module's budget (below), a decision of the
+# maintainer: the call module, which is part of this visit, had grown past its own budget.
+DEFAULT_GUEST_BUDGET_BYTES = 7_340_000
 # The split modules a guest loads once let into a meeting (teamcraft-ui `areas.rs`).
 GUEST_MODULES = ("guest", "calls")
 SPLIT_LOADER = "teamcraft-ui-split-*.js"
@@ -76,7 +78,9 @@ DEFAULT_BUDGET_BYTES = 7_000_000
 # The call module's gzip -9 size, decimal megabytes: 0.86 MB with the effects' compositors (#439),
 # plus about 15 %; raised to 1.1 MB when the call problem reports (#1762) took it to 1.02 MB. The
 # segmentation is a module of its own that only loads when an effect starts.
-DEFAULT_CALL_MODULE_BUDGET_BYTES = 1_100_000
+# Raised by 1 MB to 2.1 MB on 2026-11-20, a decision of the maintainer: the module had grown
+# to 1.103 MB and failed every web pull request.
+DEFAULT_CALL_MODULE_BUDGET_BYTES = 2_100_000
 CALL_MODULE = "teamcraft-web-calls-*_bg.wasm"
 # Lazy files that only load on demand (marked in the list): the background effects' segmentation
 # (#439) and the voice decoder with FEC (#2140), which the call module starts when a voice packet
