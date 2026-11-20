@@ -303,7 +303,7 @@ struct PickedFile: Equatable, Identifiable {
 struct PickedMotion: Equatable {
   let path: String
   let mediaType: String
-  var maybeDurationMs: Int64?
+  var maybeDurationMs: Int64? = nil
 
   /// The core's `OutgoingMotion`.
   var object: [String: Any] {

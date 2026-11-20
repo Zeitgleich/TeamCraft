@@ -57,4 +57,40 @@ final class LivePhotoMotionTests: XCTestCase {
     defaults.set(false, forKey: LivePhotoMotion.settingKey)
     XCTAssertFalse(LivePhotoMotion.isSendingMotion)
   }
+
+  func testAClipIsDroppedWhenTheUserSendsStillPictures() async throws {
+    let clip = try temporaryClip()
+    let defaults = UserDefaults.standard
+    let before = defaults.object(forKey: LivePhotoMotion.settingKey)
+    defer { defaults.set(before, forKey: LivePhotoMotion.settingKey) }
+    defaults.set(false, forKey: LivePhotoMotion.settingKey)
+
+    let prepared = await LivePhotoMotion.prepared(
+      PickedMotion(path: clip.path, mediaType: "video/quicktime"), limits: MotionLimitsItem(isAllowed: true, maxBytes: 1 << 24))
+
+    XCTAssertNil(prepared)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: clip.path), "the staged clip is deleted")
+  }
+
+  func testAClipOverTheLimitGoesUnconvertedSoTheCoreShowsItAsNotSent() async throws {
+    let clip = try temporaryClip()
+    let defaults = UserDefaults.standard
+    let before = defaults.object(forKey: LivePhotoMotion.settingKey)
+    defer { defaults.set(before, forKey: LivePhotoMotion.settingKey) }
+    defaults.removeObject(forKey: LivePhotoMotion.settingKey)
+
+    let motion = PickedMotion(path: clip.path, mediaType: "video/quicktime")
+    let prepared = await LivePhotoMotion.prepared(motion, limits: MotionLimitsItem(isAllowed: true, maxBytes: 4))
+
+    XCTAssertEqual(prepared, motion)
+  }
+
+  private func temporaryClip() throws -> URL {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    let clip = folder.appendingPathComponent("IMG_0001-motion.mov")
+    try Data("not really a movie".utf8).write(to: clip)
+    addTeardownBlock { try? FileManager.default.removeItem(at: folder) }
+    return clip
+  }
 }

@@ -1146,10 +1146,12 @@ attachment of the same message, encrypted with its own fresh key like any file a
 details in the encrypted message (`motion`: the motion's attachment ID, key, hash, name, type, size and
 length). It is not one of the message's files of its own, and older clients ignore the field and show the
 still picture. The server sees two attachments of a conversation and can't tell that one belongs to the
-other. Only the sending phone does media work: iOS asks the picker for the Live Photo's paired video and
-converts it from HEVC to H.264 MP4; Android cuts the MP4 out of a Motion Photo's JPEG (Google's
-`MicroVideoOffset` or `Container:Directory` XMP, Samsung's `MotionPhoto_Data` marker; `teamcraft-core`
-`motion_photo`, fuzzed) and sends the JPEG without it. The picture and its motion go up as one send
+other. Only the sending phone does media work: iOS asks the picker for the Live Photo's paired video (the
+share extension copies the Live Photo's bundle and the app takes the video out of it) and converts it from
+HEVC to H.264 MP4; Android cuts the MP4 out of a Motion Photo's JPEG (Google's `MicroVideoOffset` or
+`Container:Directory` XMP, Samsung's `MotionPhoto_Data` marker; `teamcraft-core` `motion_photo`, fuzzed),
+sends the JPEG without it and converts an HEVC clip to H.264 (Media3 Transformer, without sound: the
+motion always plays muted). The picture and its motion go up as one send
 (one message, one idempotency key): the message waits for both, a motion that fails for good leaves the
 picture still and shows the sender the motion as not sent, and cancelling the picture cancels its motion.
 The apps send a motion part only while the server's `motion_limits` (`GET /me`, admin.md §3.2.6) allow it

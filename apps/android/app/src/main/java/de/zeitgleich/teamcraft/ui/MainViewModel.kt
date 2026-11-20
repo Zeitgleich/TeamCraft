@@ -1394,7 +1394,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         } ?: false
       }.getOrDefault(false)
       if (!isCopied) return@withContext null
-      withMotion(PickedFile(fileName = "motion.jpg", mediaType = mediaType, path = original.path), limits, isSendingMotion = true).maybeMotion
+      withMotion(getApplication(), PickedFile(fileName = "motion.jpg", mediaType = mediaType, path = original.path), limits, isSendingMotion = true).maybeMotion
     } finally {
       // `withMotion` deletes the source once split; the still it wrote is not needed here.
       original.delete()
@@ -1549,7 +1549,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   private suspend fun prepared(file: PickedFile): PickedFile {
     val isSendingMotion = MediaPrefs.prefs(getApplication()).isSendingMotion
     val maybeLimits = if (isSendingMotion) runCatching { graph.core.core().motionLimits() }.getOrNull() else null
-    return withMotion(withVideoPoster(file), maybeLimits, isSendingMotion)
+    return withMotion(getApplication(), withVideoPoster(file), maybeLimits, isSendingMotion)
   }
 
   /**

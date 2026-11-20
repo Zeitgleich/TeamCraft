@@ -65,7 +65,13 @@ extension AppModel {
     var maybeError: AttachmentError?
     for file in handover.share.files {
       do {
-        files.append(try importer.importPickedMedia(PickedMedia(url: inbox.url(of: file, in: handover.share))))
+        var picked = try importer.importPickedMedia(PickedMedia(url: inbox.url(of: file, in: handover.share)))
+        // A Live Photo shared as its bundle brings its motion (#2181), converted here, not in the
+        // extension's tight memory.
+        if let motion = picked.maybeMotion {
+          picked.maybeMotion = await LivePhotoMotion.prepared(motion, limits: await motionLimits())
+        }
+        files.append(picked)
       } catch let error as AttachmentError {
         failed.append(file)
         maybeError = error

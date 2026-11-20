@@ -28,13 +28,24 @@ enum LivePhotoMotion {
     let stem = (picture.fileName as NSString).deletingPathExtension
     let source = folder.appendingPathComponent("\(stem)-motion.mov")
     guard await writePairedVideo(of: livePhoto, to: source) else { return nil }
-    let sourceBytes = fileSize(source)
-    if sourceBytes > Int64(limits.maxBytes) {
-      return PickedMotion(path: source.path, mediaType: "video/quicktime", maybeDurationMs: nil)
+    return await prepared(PickedMotion(path: source.path, mediaType: "video/quicktime"), limits: limits)
+  }
+
+  /// A Live Photo's motion as it came (a QuickTime clip, picked or taken out of a shared bundle)
+  /// made ready to send: converted to H.264 MP4 beside it. `nil`, and the clip deleted, when the
+  /// user or the server doesn't send motion or the conversion fails. A clip already over the limit
+  /// is not converted: it goes along as it is, and the core sends the picture alone and shows the
+  /// sender that the motion was not sent.
+  static func prepared(_ motion: PickedMotion, limits: MotionLimitsItem) async -> PickedMotion? {
+    let source = URL(fileURLWithPath: motion.path)
+    guard isSendingMotion, limits.isAllowed else {
+      try? FileManager.default.removeItem(at: source)
+      return nil
     }
-    let target = folder.appendingPathComponent("\(stem).mp4")
+    if fileSize(source) > Int64(limits.maxBytes) { return motion }
+    let target = source.deletingPathExtension().appendingPathExtension("mp4")
     let maybeDuration = await exportH264(from: source, to: target)
-    try? FileManager.default.removeItem(at: source)
+    if target != source { try? FileManager.default.removeItem(at: source) }
     guard let duration = maybeDuration else {
       try? FileManager.default.removeItem(at: target)
       return nil
