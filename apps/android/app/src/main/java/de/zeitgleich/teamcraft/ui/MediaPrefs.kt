@@ -52,8 +52,19 @@ class MediaPrefs private constructor(private val context: Context) {
     prefs.edit().putString(KEY_SEND_QUALITY, choice.name).apply()
   }
 
+  /**
+   * Whether Motion Photos go out with their motion (#2181), on until turned off; off sends the
+   * still picture only (less data). Kept on this device, like the send quality.
+   */
+  val isSendingMotion: Boolean get() = prefs.getBoolean(KEY_SEND_MOTION, true)
+
+  fun setSendingMotion(isOn: Boolean) {
+    prefs.edit().putBoolean(KEY_SEND_MOTION, isOn).apply()
+  }
+
   companion object {
     private const val FILE = "media_prefs"
+    private const val KEY_SEND_MOTION = "send_motion"
     private const val KEY_SEND_QUALITY = "send_quality"
     private const val KEY_ORIGINAL_DOWNLOAD = "original_download"
     private const val KEY_ANIMATED_IMAGES = "animated_images"

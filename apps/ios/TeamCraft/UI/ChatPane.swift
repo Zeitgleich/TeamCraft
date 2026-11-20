@@ -1773,7 +1773,11 @@ struct ChatPane: View {
     for item in items {
       do {
         guard let media = try await item.loadTransferable(type: PickedMedia.self) else { continue }
-        let file = try importer.importPickedMedia(media)
+        var file = try importer.importPickedMedia(media)
+        // A Live Photo goes with its motion (#2181), converted to H.264 beside the picture.
+        if LivePhotoMotion.isSendingMotion {
+          file.maybeMotion = await LivePhotoMotion.motion(of: item, beside: file, limits: await model.motionLimits())
+        }
         await attach([file])
       } catch let error as AttachmentError {
         attachmentError = error

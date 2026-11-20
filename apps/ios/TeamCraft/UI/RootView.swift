@@ -34,6 +34,8 @@ struct RootView: View {
       if let share = model.waitingShare, !isReady, !isStarting { ShareWaitingNotice(share: share) }
     }
     .sheet(item: shareToPick) { share in SharePickerView(share: share) }
+    // A share picked for a conversation in the extension opens that composer (#1037).
+    .task(id: shareRoutingMoment) { await model.routeWaitingShare() }
     // "Hand over" on the lobby reminder after leaving a meeting's call from CallKit (#1859).
     .sheet(item: lobbyHandover) { request in LobbyHandoverSheet(request: request) }
     .alert(
@@ -116,8 +118,15 @@ struct RootView: View {
   /// A waiting share opens its picker in the signed-in app; the lock's shield covers it until then.
   private var shareToPick: Binding<StagedShare?> {
     Binding(
-      get: { isReady ? model.waitingShare : nil },
+      get: { isReady && model.waitingShare?.maybeConversationId == nil ? model.waitingShare : nil },
       set: { _ in })
+  }
+
+  /// When a share with a conversation picked in the extension is looked at again: once ready, and on
+  /// every change (the conversations arrive with the first catch-up).
+  private var shareRoutingMoment: String? {
+    guard isReady, let share = model.waitingShare, let destination = share.maybeConversationId else { return nil }
+    return "\(share.id)/\(destination)/\(model.changeCount)"
   }
 
   /// The handover choice, once the account is ready (the app lock is in front until then).

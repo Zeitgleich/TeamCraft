@@ -2971,11 +2971,11 @@ impl Core {
     priority: AttachmentPriority,
     reply: oneshot::Sender<Result<SecretBytes, String>>,
   ) {
-    let maybe_reference = self
+    let maybe_viewed = self
       .backend
       .as_ref()
-      .and_then(|backend| backend.attachment_ref(conversation, message, file_id));
-    let Some(reference) = maybe_reference else {
+      .and_then(|backend| backend.viewed_file(conversation, message, file_id));
+    let Some((reference, max_bytes)) = maybe_viewed else {
       drop(reply.send(Err("no such file in this conversation".to_owned())));
       return;
     };
@@ -2989,9 +2989,13 @@ impl Core {
       }
     };
     let is_wanted = move || asker.borrow().as_ref().is_some_and(|reply| !reply.is_canceled());
-    self
-      .downloads
-      .view_while(reference, priority.into(), Box::new(deliver), Box::new(is_wanted));
+    self.downloads.view_capped_while(
+      reference,
+      max_bytes,
+      priority.into(),
+      Box::new(deliver),
+      Box::new(is_wanted),
+    );
   }
 
   /// Starts the downloads that may run now.

@@ -23,7 +23,12 @@ data class PickedFile(
   val maybeWaveform: List<Int>? = null,
   /** In the composer's draft (#1220): kept with it on this device, and its message takes it from there. */
   val maybeDraft: DraftCopy? = null,
+  /** The video of a Motion Photo, cut out of the picture (#2181): it goes with the picture. */
+  val maybeMotion: PickedMotion? = null,
 )
+
+/** The motion part of a picked picture (#2181), staged beside it for the core to read. */
+data class PickedMotion(val path: String, val mediaType: String, val maybeDurationMs: Long?)
 
 /**
  * A picked file as the draft holds it (#1220): [id] is the app's choice ([DraftCopy.newId]), and
@@ -170,6 +175,16 @@ object ChatActions {
     file.maybeDurationMs?.let { put("duration_ms", it) }
     file.maybeWaveform?.let { waveform -> put("waveform", buildJsonArray { waveform.forEach { add(JsonPrimitive(it)) } }) }
     file.maybeDraft?.let { put("draft_id", it.id) }
+    file.maybeMotion?.let { motion ->
+      put(
+        "motion",
+        buildJsonObject {
+          put("media_type", motion.mediaType)
+          put("source", buildJsonObject { put("kind", "path"); put("path", motion.path) })
+          motion.maybeDurationMs?.let { put("duration_ms", it) }
+        },
+      )
+    }
   }
 
   fun react(conversation: String, message: String, emoji: String) = action("toggle_reaction") {

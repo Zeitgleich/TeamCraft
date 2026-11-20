@@ -3,25 +3,29 @@ import XCTest
 @testable import TeamCraft
 
 final class ProcessLockTests: XCTestCase {
-  func testOnlyOneHolderAtATime() throws {
+  func testOnlyOneHolderAtATime() async throws {
     let url = FileManager.default.temporaryDirectory.appendingPathComponent("lock-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: url) }
     let first = ProcessLock(fileURL: url)
     let second = ProcessLock(fileURL: url)
-    XCTAssertTrue(first.acquire(timeout: 0.2))
-    XCTAssertFalse(second.acquire(timeout: 0.2), "the lock is held")
+    let isFirstHeld = await take(first, timeout: 0.2)
+    XCTAssertTrue(isFirstHeld)
+    let isSecondHeld = await take(second, timeout: 0.2)
+    XCTAssertFalse(isSecondHeld, "the lock is held")
     first.release()
-    XCTAssertTrue(second.acquire(timeout: 0.2), "free again after release")
+    let isSecondHeldNow = await take(second, timeout: 0.2)
+    XCTAssertTrue(isSecondHeldNow, "free again after release")
   }
 
   /// Two takers in one process at once, with a release in between: the process ends up with one hold
   /// on one descriptor, and a release frees it for another process.
-  func testRacingTakersKeepOneHold() {
+  func testRacingTakersKeepOneHold() async {
     let url = FileManager.default.temporaryDirectory.appendingPathComponent("lock-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: url) }
     let lock = ProcessLock(fileURL: url)
     let other = ProcessLock(fileURL: url)
-    XCTAssertTrue(other.acquire(timeout: 0.1))
+    let isOtherHeld = await take(other, timeout: 0.1)
+    XCTAssertTrue(isOtherHeld)
     let group = DispatchGroup()
     let results = Outcomes()
     for index in 0..<2 {
@@ -31,24 +35,32 @@ final class ProcessLockTests: XCTestCase {
         group.leave()
       }
     }
-    Thread.sleep(forTimeInterval: 0.2)
+    try? await Task.sleep(for: .milliseconds(200))
     other.release()
-    XCTAssertEqual(group.wait(timeout: .now() + 5), .success)
+    await withCheckedContinuation { done in group.notify(queue: .global()) { done.resume() } }
     XCTAssertEqual(results.values, [true, true])
     XCTAssertTrue(lock.isHeld)
     lock.release()
     XCTAssertFalse(lock.isHeld)
-    XCTAssertTrue(other.acquire(timeout: 0.2), "no second descriptor kept the lock")
+    let isOtherHeldAgain = await take(other, timeout: 0.2)
+    XCTAssertTrue(isOtherHeldAgain, "no second descriptor kept the lock")
     other.release()
   }
 
-  func testAcquiringTwiceKeepsTheHold() {
+  func testAcquiringTwiceKeepsTheHold() async {
     let url = FileManager.default.temporaryDirectory.appendingPathComponent("lock-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: url) }
     let lock = ProcessLock(fileURL: url)
-    XCTAssertTrue(lock.acquire(timeout: 0.1))
-    XCTAssertTrue(lock.acquire(timeout: 0.1))
+    let isHeld = await take(lock, timeout: 0.1)
+    XCTAssertTrue(isHeld)
+    let isHeldAgain = await take(lock, timeout: 0.1)
+    XCTAssertTrue(isHeldAgain)
     XCTAssertTrue(lock.isHeld)
+  }
+
+  /// The lock waits, so the tests take it off the main thread like the app (#2184, `UiThreadGuard`).
+  private func take(_ lock: ProcessLock, timeout: TimeInterval) async -> Bool {
+    await offMain { lock.acquire(timeout: timeout) }
   }
 }
 

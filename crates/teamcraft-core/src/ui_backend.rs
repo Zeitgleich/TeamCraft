@@ -3823,6 +3823,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     crate::polls::stored_limits(&self.store)
   }
 
+  fn motion_limits(&self) -> teamcraft_proto::MotionLimits {
+    crate::client::stored_motion_limits(&self.store)
+  }
+
   fn create_space(&self, space: NewSpace) {
     self.ui_create_space(space);
   }
@@ -6820,6 +6824,7 @@ mod tests {
             maybe_dimensions: None,
             maybe_duration_ms: None,
             maybe_waveform: None,
+            maybe_motion: None,
           });
         }
         stored

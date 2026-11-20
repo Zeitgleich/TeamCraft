@@ -66,6 +66,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use teamcraft_media::retransmit::RetransmitConfig;
 use teamcraft_media::voice_guard::VoiceGuardConfig;
 use teamcraft_ops::metrics::{bind_metrics, spawn_metrics_endpoint};
 use teamcraft_ops::{DEFAULT_TIMEOUT, probe, probe_target, shutdown_signal};
@@ -77,8 +78,8 @@ use teamcraft_sfu::{
   health::{DEFAULT_HEALTH_ADDR, serve_health},
   metrics::{SfuMetrics, metrics_addrs},
   reporting::HttpReporter,
-  retransmit::RetransmitConfig,
   server::Sfu,
+  uplink_repair::UplinkRepairConfig,
 };
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -88,6 +89,9 @@ use wtransport::Identity;
 const DEFAULT_FALLBACK_ADDR: &str = "127.0.0.1:8082";
 /// Upper bound for `TEAMCRAFT_SFU_RETRANSMIT_WINDOW_MS`.
 const MAX_RETRANSMIT_WINDOW: Duration = Duration::from_secs(5);
+/// Upper bound for `TEAMCRAFT_SFU_UPLINK_REPAIR_MAX_REQUESTS`: more requests of one packet only
+/// load a link that keeps losing it.
+const MAX_UPLINK_REPAIR_REQUESTS: u8 = 10;
 /// Upper bound for `TEAMCRAFT_SFU_PROBE_BYTES`: a probe is a few short trains, not a speed test.
 const MAX_PROBE_BYTES: u32 = 100_000;
 /// Upper bound for `TEAMCRAFT_SFU_DAVE_TRANSITION_DEADLINE_MS`, below the clients' 5 s fallback.
@@ -201,6 +205,7 @@ async fn run() -> anyhow::Result<()> {
   }
 
   apply_retransmit_env(&mut config.forwarding.retransmit)?;
+  apply_uplink_repair_env(&mut config.forwarding.uplink_repair)?;
   apply_voice_guard_env(&mut config.forwarding.voice_guard)?;
   apply_fallback_env(&mut config.fallback)?;
 
@@ -411,6 +416,28 @@ fn apply_retransmit_env(retransmit: &mut RetransmitConfig) -> anyhow::Result<()>
   if let Some(bytes) = env_count("TEAMCRAFT_SFU_RETRANSMIT_BURST_BYTES")? {
     retransmit.burst_bytes =
       u32::try_from(bytes).context("TEAMCRAFT_SFU_RETRANSMIT_BURST_BYTES is too large")?;
+  }
+  Ok(())
+}
+
+/// The repair of publishers' uplink losses (#2189).
+fn apply_uplink_repair_env(repair: &mut UplinkRepairConfig) -> anyhow::Result<()> {
+  if let Some(requests) = env_count("TEAMCRAFT_SFU_UPLINK_REPAIR_MAX_REQUESTS")? {
+    repair.max_requests = u8::try_from(requests)
+      .ok()
+      .filter(|requests| *requests <= MAX_UPLINK_REPAIR_REQUESTS)
+      .with_context(|| {
+        format!("TEAMCRAFT_SFU_UPLINK_REPAIR_MAX_REQUESTS must be at most {MAX_UPLINK_REPAIR_REQUESTS}")
+      })?;
+  }
+  if let Some(after) = env_duration_millis("TEAMCRAFT_SFU_UPLINK_REPAIR_SCREEN_KEYFRAME_AFTER_MS")? {
+    repair.screen_keyframe_after = after;
+  }
+  if let Some(after) = env_duration_millis("TEAMCRAFT_SFU_UPLINK_REPAIR_CAMERA_KEYFRAME_AFTER_MS")? {
+    repair.camera_keyframe_after = after;
+  }
+  if let Some(interval) = env_duration_millis("TEAMCRAFT_SFU_UPLINK_REPAIR_MIN_KEYFRAME_INTERVAL_MS")? {
+    repair.min_keyframe_interval = interval;
   }
   Ok(())
 }

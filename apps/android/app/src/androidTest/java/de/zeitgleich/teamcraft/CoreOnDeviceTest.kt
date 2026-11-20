@@ -44,7 +44,7 @@ class CoreOnDeviceTest {
 
   @Test
   fun coreStartsAndReportsAnUnreachableServer() = runBlocking {
-    val core = TeamCraft(config(), Tokens("token"), Listener)
+    val core = TeamCraft.open(config(), Tokens("token"), Listener)
     try {
       core.accountState()
       fail("an unreachable server must fail")
@@ -63,7 +63,7 @@ class CoreOnDeviceTest {
 
   @Test
   fun chatBridgeParsesTheAppsMessages() = runBlocking {
-    val core = TeamCraft(config(), Tokens("token"), Listener)
+    val core = TeamCraft.open(config(), Tokens("token"), Listener)
     // Well-formed actions and queries reach the engine, which isn't enrolled yet.
     for (call in listOf<suspend () -> Unit>(
       { core.snapshot() },
@@ -87,7 +87,7 @@ class CoreOnDeviceTest {
 
   @Test
   fun signedOutIsReportedWithoutAToken() = runBlocking {
-    val core = TeamCraft(config(), Tokens(null), Listener)
+    val core = TeamCraft.open(config(), Tokens(null), Listener)
     try {
       core.accountState()
       fail("no token")

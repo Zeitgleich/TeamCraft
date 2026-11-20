@@ -112,6 +112,21 @@ pub const SERVER_ATTACHMENT_LIMIT_KEY: &str = "server_max_attachment_bytes";
 /// #2120); absent for servers that don't.
 pub const POLL_LIMITS_KEY: &str = "server_poll_limits";
 
+/// Account record: the motion limits the server published ([`teamcraft_proto::MotionLimits`],
+/// issue #2181); absent for servers that don't.
+pub const MOTION_LIMITS_KEY: &str = "server_motion_limits";
+
+/// The motion limits in force (issue #2181): what the server published (`GET /me`), bounded, or
+/// the built-in ones for an older server or before the first sync.
+pub fn stored_motion_limits(store: &impl LocalStore) -> teamcraft_proto::MotionLimits {
+  records::get_json::<Option<teamcraft_proto::MotionLimits>>(store, Table::Account, MOTION_LIMITS_KEY)
+    .ok()
+    .flatten()
+    .flatten()
+    .map(teamcraft_proto::MotionLimits::bounded)
+    .unwrap_or_default()
+}
+
 /// The poll limits in force (issue #2120): what the server published (`GET /me`), cut to what
 /// every receiver counts, or the built-in ones for an older server or before the first sync.
 pub fn stored_poll_limits(store: &impl LocalStore) -> teamcraft_proto::PollLimits {

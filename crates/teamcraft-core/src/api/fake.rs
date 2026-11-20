@@ -337,6 +337,7 @@ struct State {
   maybe_max_attachment_bytes: Option<u64>,
   /// The poll limits `me` publishes; `None`: like an older server.
   maybe_poll_limits: Option<teamcraft_proto::PollLimits>,
+  maybe_motion_limits: Option<teamcraft_proto::MotionLimits>,
   /// What the fake publishes in `GET /me`: `None` like an older server.
   maybe_draft_file_retention_days: Option<u32>,
   /// Parts stored by uploads in parts, counted over the whole run.
@@ -2174,6 +2175,11 @@ impl FakeServer {
     self.lock().is_discarding_parts = is_discarding;
   }
 
+  /// Publishes the motion limits of Live Photos (issue #2181), as a current server does.
+  pub fn set_motion_limits(&self, limits: teamcraft_proto::MotionLimits) {
+    self.lock().maybe_motion_limits = Some(limits);
+  }
+
   pub fn set_max_attachment_bytes(&self, limit: u64) {
     self.lock().maybe_max_attachment_bytes = Some(limit);
   }
@@ -2523,6 +2529,7 @@ impl ServerApi for FakeServerApi {
         maybe_draft_file_retention_days: state.maybe_draft_file_retention_days,
         maybe_max_key_bag_bytes: None,
         maybe_poll_limits: state.maybe_poll_limits,
+        maybe_motion_limits: state.maybe_motion_limits,
       })
     })
   }

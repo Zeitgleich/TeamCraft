@@ -23,6 +23,7 @@ mod screen_uplink_bursts;
 mod session_close;
 mod sfu_restart;
 mod thin_uplink;
+mod uplink_loss;
 mod video_call;
 mod video_content;
 mod video_quality;

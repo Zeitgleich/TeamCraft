@@ -919,6 +919,22 @@ limits); receivers count any poll up to 32 options and 1000 characters whatever 
 be closed by its sender and by the channel's moderators and admins by the signed roles (e2ee.md §4.12), so a
 moderator ends a poll the sender left open.
 
+#### 3.2.6 Live Photos and Motion Photos (issue #2181)
+
+A Live Photo (iPhone) or Motion Photo (Android camera) goes out as its still picture plus a short video,
+the motion part: a second encrypted attachment of the same message, named from the picture's encrypted
+details (e2ee.md §4.5). The server sees two attachments and can't tell which is which. What admins set:
+
+| What                                  | Where                                                                                  | Default |
+|---------------------------------------|----------------------------------------------------------------------------------------|---------|
+| Whether pictures go out with motion   | admin console, Settings > Limits (`allows_motion_parts`; file: `[limits]`)             | on      |
+| Largest motion part (1 MiB to 64 MiB) | admin console, Settings > Limits (`max_motion_part_bytes`; file: `[limits]`)           | 16 MiB  |
+
+The apps hold senders to both (published in `GET /me` as `motion_limits`): with motion off, or a clip over
+the limit, the picture goes out alone and the sender sees that the motion was not sent. Each member can
+turn motion off for their own sends on their phone (Settings, "Send Live Photos with motion"). Motion parts
+count against the attachment quota and retention like any other file.
+
 ### 3.3 Moderation
 
 Admins can't read reported content unless a member shows it to them:

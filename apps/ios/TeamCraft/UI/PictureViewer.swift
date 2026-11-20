@@ -196,7 +196,16 @@ struct PictureViewer: View {
         .accessibilityLabel(Text("picture_share"))
         if let file = model.currentFile, file.isImage || file.isVideo {
           Button {
-            Task { await save(url, mediaType: file.mediaType) }
+            Task {
+              if file.isLive {
+                // The picture and its motion (#2181).
+                let outcome = await PhotosSaver.save(picture: file, at: url, model: app)
+                maybeSaveOutcome = outcome
+                if outcome == .saved { UINotificationFeedbackGenerator().notificationOccurred(.success) }
+              } else {
+                await save(url, mediaType: file.mediaType)
+              }
+            }
           } label: {
             Image(systemName: maybeSaveOutcome == .saved ? "checkmark" : "square.and.arrow.down")
               .frame(width: 44, height: 44)
@@ -313,6 +322,8 @@ private struct PicturePage: View {
   @AppStorage(AnimatedImagesSetting.key) private var animatedImages = AnimatedImagesSetting.fallback.rawValue
   @State private var animation = AnimationPlayer()
   @State private var playChoice = PlayChoice.unset
+  /// A finger holds a Live Photo down (#2181): its motion plays meanwhile.
+  @State private var isHeld = false
   let maybeFile: FileInfo?
   let maybeOriginal: UIImage?
   let isCurrent: Bool
@@ -330,11 +341,17 @@ private struct PicturePage: View {
     ZStack(alignment: .bottom) {
       ZoomableImage(
         image: animation.maybeFrame ?? maybeOriginal ?? thumbnail, maxZoom: maxZoom, doubleTapZoom: doubleTapZoom, onTap: onTap,
-        onZoomChange: onZoomChange
+        onZoomChange: onZoomChange,
+        maybeOnHold: maybeFile?.isLive == true ? { isHeld = $0 } : nil
       )
       .blur(radius: isSoftened ? 12 : 0)
       .accessibilityLabel(Text(maybeFile?.fileName ?? ""))
       .accessibilityAddTraits(.isImage)
+      // A Live Photo or Motion Photo (#2181): its badge plays the motion over the picture.
+      if let file = maybeFile, file.isLive, isCurrent {
+        LiveMotionOverlay(file: file, isHeld: isHeld, badgeAlignment: .bottomLeading, isFilling: false)
+          .padding(.bottom, 96)
+      }
       overlay.padding(.bottom, 96)
       if animation.maybeMoves == true {
         AnimationButton(isMoving: wantsToMove) { playChoice = wantsToMove ? .paused : .playing }
@@ -465,6 +482,8 @@ private struct ZoomableImage: UIViewRepresentable {
   let doubleTapZoom: CGFloat
   let onTap: () -> Void
   let onZoomChange: (Bool) -> Void
+  /// A Live Photo's press and hold (#2181): true while a finger stays down, `nil` for other pictures.
+  var maybeOnHold: ((Bool) -> Void)?
 
   func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -484,6 +503,12 @@ private struct ZoomableImage: UIViewRepresentable {
     let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.tapped))
     tap.require(toFail: doubleTap)
     scroll.addGestureRecognizer(tap)
+    // Held down, a Live Photo moves (#2181). It runs beside pinch and pan, so a finger that holds and
+    // then pans or a second one that pinches still zoom as before.
+    let hold = UILongPressGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.held(_:)))
+    hold.minimumPressDuration = 0.3
+    hold.delegate = context.coordinator
+    scroll.addGestureRecognizer(hold)
     scroll.show(image)
     return scroll
   }
@@ -494,7 +519,7 @@ private struct ZoomableImage: UIViewRepresentable {
     if scroll.imageView.image !== image { scroll.show(image) }
   }
 
-  final class Coordinator: NSObject, UIScrollViewDelegate {
+  final class Coordinator: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate {
     var parent: ZoomableImage
     private var wasZoomed = false
 
@@ -517,6 +542,26 @@ private struct ZoomableImage: UIViewRepresentable {
 
     @objc func tapped() {
       parent.onTap()
+    }
+
+    @objc func held(_ recognizer: UILongPressGestureRecognizer) {
+      guard let onHold = parent.maybeOnHold else { return }
+      switch recognizer.state {
+      case .began: onHold(true)
+      case .ended, .cancelled, .failed: onHold(false)
+      default: break
+      }
+    }
+
+    /// The hold only starts on a Live Photo, and never stops the scroll view's own gestures.
+    func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
+      parent.maybeOnHold != nil
+    }
+
+    func gestureRecognizer(
+      _ recognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
+    ) -> Bool {
+      true
     }
 
     /// A fitted picture zooms in around the tap; a zoomed one goes back to fit.

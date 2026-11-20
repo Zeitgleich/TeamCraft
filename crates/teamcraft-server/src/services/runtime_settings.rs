@@ -347,6 +347,8 @@ fn apply(settings: &mut Settings, section: &RuntimeSettingsSection) {
       limits.max_poll_question_chars = values.max_poll_question_chars;
       limits.max_poll_option_chars = values.max_poll_option_chars;
       limits.max_poll_open_days = values.max_poll_open_days;
+      limits.allows_motion_parts = values.allows_motion_parts;
+      limits.max_motion_part_bytes = values.max_motion_part_bytes;
     },
     RuntimeSettingsSection::Integration(values) => {
       settings.integration.default_retention_days = values.default_retention_days;
@@ -469,6 +471,8 @@ fn view(settings: &Settings, sources: Vec<RuntimeSettingsState>) -> RuntimeSetti
       max_poll_question_chars: limits.max_poll_question_chars,
       max_poll_option_chars: limits.max_poll_option_chars,
       max_poll_open_days: limits.max_poll_open_days,
+      allows_motion_parts: limits.allows_motion_parts,
+      max_motion_part_bytes: limits.max_motion_part_bytes,
     },
     integration: IntegrationSettings {
       default_retention_days: settings.integration.default_retention_days,
@@ -745,6 +749,12 @@ fn validate(section: &RuntimeSettingsSection) -> Result<(), ApiError> {
         u64::from(values.max_poll_open_days),
         1,
         u64::from(teamcraft_proto::MAX_POLL_OPEN_DAYS_LIMIT),
+      )?;
+      check_range(
+        "max_motion_part_bytes",
+        values.max_motion_part_bytes,
+        teamcraft_proto::MIN_MOTION_BYTES_LIMIT,
+        teamcraft_proto::MAX_MOTION_BYTES_LIMIT,
       )
     },
     RuntimeSettingsSection::Integration(values) => {

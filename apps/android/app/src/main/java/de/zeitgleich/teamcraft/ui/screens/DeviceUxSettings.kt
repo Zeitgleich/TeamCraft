@@ -162,6 +162,18 @@ fun SendQualitySetting(shapes: ListItemShapes) {
   }
 }
 
+/** Whether Motion Photos go out with their motion (#2181); off sends the still picture. */
+@Composable
+fun SendMotionSetting(shapes: ListItemShapes) {
+  val context = LocalContext.current
+  val prefs = remember { MediaPrefs.prefs(context) }
+  var isOn by remember { mutableStateOf(prefs.isSendingMotion) }
+  SettingsSwitchRow(shapes, stringResource(R.string.send_motion), isOn, maybeSummary = stringResource(R.string.send_motion_hint)) {
+    isOn = it
+    prefs.setSendingMotion(it)
+  }
+}
+
 /** Whether animated images start by themselves or from their play button (#201). Takes effect at once. */
 @Composable
 fun AnimatedImagesSetting(shapes: ListItemShapes) {

@@ -225,9 +225,12 @@ final class VoiceRecorder {
     phase = .finishing
     stopPolling()
     maybeRecording = nil
-    let result = await Task.detached { () -> Result<VoiceTakeInfo, Error> in
-      Result { try recording.finish(maybeReason: reason) }
-    }.value
+    let result: Result<VoiceTakeInfo, Error>
+    do {
+      result = .success(try await recording.finish(maybeReason: reason))
+    } catch {
+      result = .failure(error)
+    }
     endAudioSession()
     switch result {
     case .success(let take):
@@ -263,7 +266,7 @@ final class VoiceRecorder {
     stopPolling()
     if let recording = maybeRecording {
       maybeRecording = nil
-      Task.detached { recording.cancel() }
+      Task { await recording.cancel() }
     }
     if case .review(let take) = phase { try? FileManager.default.removeItem(atPath: take.path) }
     endAudioSession()
@@ -331,14 +334,17 @@ final class VoiceRecorder {
     }
     phase = .starting(isLocked: isLocked)
     let path = VoiceFolders.takes.appendingPathComponent("take-\(UUID().uuidString).ogg").path
-    let result = await Task.detached { () -> Result<VoiceRecording, Error> in
-      Result { try VoiceRecording.start(path: path, maxSeconds: maxSeconds) }
-    }.value
+    let result: Result<VoiceRecording, Error>
+    do {
+      result = .success(try await VoiceRecording.start(path: path, maxSeconds: maxSeconds))
+    } catch {
+      result = .failure(error)
+    }
     switch result {
     case .success(let recording):
       // Discarded or interrupted while the microphone opened.
       guard case .starting(let isLockedNow) = phase else {
-        Task.detached { recording.cancel() }
+        Task { await recording.cancel() }
         return
       }
       maybeRecording = recording
@@ -729,9 +735,7 @@ final class VoicePlayer {
     let output = VoiceFolders.playback.appendingPathComponent("\(UUID().uuidString).wav")
     let outputPath = output.path
     let maxSeconds = maxDecodedSeconds
-    let decoded = await Task.detached { () -> Bool in
-      (try? voiceDecodeToWav(input: path, output: outputPath, maxSeconds: maxSeconds)) != nil
-    }.value
+    let decoded = (try? await voiceDecodeToWav(input: path, output: outputPath, maxSeconds: maxSeconds)) != nil
     return decoded ? (output, output) : (nil, nil)
   }
 }

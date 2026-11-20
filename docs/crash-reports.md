@@ -239,6 +239,14 @@ retries), or the DPoP key of the sign-in is gone. The breadcrumbs (the redacted 
 what led there. At most three per page life, sampled like other handled errors; it is queued before
 the page goes to the identity provider and sent on the next start.
 
+### Waits on the UI thread
+
+A blocking call of the mobile apps that runs on the main thread (#2184; the token bridge, the
+process lock, the HTTP bridge of the sign-in) fails at once in debug builds and, in release builds,
+is reported once per call site and process as a warning `ui-thread-wait: <call site>`, fingerprinted
+by the call site, with the call site as tag `call_site`. The call site is a fixed function name;
+nothing of what the call worked on goes along (`UiThreadGuard` on iOS and Android).
+
 ### Storage failures
 
 Every IndexedDB failure of the page (`teamcraft_core::store::IdbFailureHook`) is a handled warning

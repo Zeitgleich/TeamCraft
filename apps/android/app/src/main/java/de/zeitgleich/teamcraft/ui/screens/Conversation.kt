@@ -1997,6 +1997,7 @@ internal fun Composer(
       },
       onPasteFiles = { uris ->
         // The keyboard's permission to read these ends when the receiver returns: copy them now.
+        // blocking-ok: waits on the main thread on purpose until the grant can outlive the receiver (#2184 audit).
         val picked = runBlocking(Dispatchers.IO) { uris.mapNotNull { viewModel.importFile(it) } }
         if (picked.isNotEmpty()) files = files + picked
       },

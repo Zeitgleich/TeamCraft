@@ -351,6 +351,7 @@ private struct ChatsSettingsPage: View {
   @AppStorage(CallStatusSoundsSetting.key) private var statusSounds = CallStatusSoundsSetting.all.rawValue
   @AppStorage(OriginalDownloadSetting.key) private var originalDownload = OriginalDownloadSetting.fallback.rawValue
   @AppStorage(AnimatedImagesSetting.key) private var animatedImages = AnimatedImagesSetting.fallback.rawValue
+  @AppStorage(LivePhotoMotion.settingKey) private var isSendingLiveMotion = true
   @AppStorage(AppFont.key) private var appFontRaw = AppFont.system.rawValue
   @State private var prefetch = SegmentPrefetchMode.unmeteredOnly
   @State private var isPrefetchLoaded = false
@@ -434,6 +435,11 @@ private struct ChatsSettingsPage: View {
         }
       } footer: {
         Text("animated_images_hint")
+      }
+      Section {
+        Toggle("live_send_motion", isOn: $isSendingLiveMotion)
+      } footer: {
+        Text("live_send_motion_hint")
       }
       Section {
         Picker("prefetch_title", selection: $prefetch) {

@@ -28,6 +28,10 @@
 //! - **Resending lost video (#1762):** forwarded video packets are kept for a short while per
 //!   track and layer; a receiver's NACK gets the ones it names again, restamped for it, within a
 //!   budget of its downlink ([`crate::retransmit`]). Audio is never resent.
+//! - **Repairing the publisher's uplink (#2189):** a gap in a layer's RTP sequence numbers that
+//!   someone receives is asked of the publisher at once, and the packets it sends again are
+//!   forwarded like any; one still missing after a short while gets a keyframe asked for, rate
+//!   limited ([`crate::uplink_repair`]).
 //! - **Probing at the start (#1762):** a participant that joins or comes back gets a few short
 //!   trains of padding ([`teamcraft_media::join_probe`]) once it sent transport feedback; their
 //!   spread in its feedback shows what
@@ -67,8 +71,9 @@ use crate::audio_layers::{
 use crate::layers::{
   LayerAllocationConfig, LayerAllocator, ProbeRequest, TrackDemand, UpgradeProof, full_demand_bps,
 };
-use crate::retransmit::{PacketHistory, RetransmitBudget, RetransmitConfig};
 use crate::speakers::{SpeakerSelectionConfig, SpeakerSelector};
+use crate::uplink_repair::{RepairStep, UplinkRepair, UplinkRepairConfig};
+use teamcraft_media::retransmit::{PacketHistory, RetransmitBudget, RetransmitConfig};
 
 /// An estimate below the thin bound makes a downlink thin only after this long; a probe at the
 /// join that measured it thin does at once.
@@ -115,6 +120,9 @@ pub struct ForwardingConfig {
   pub layer_stalled_after: Duration,
   /// Resending lost video packets to the receiver that asks.
   pub retransmit: RetransmitConfig,
+  /// Asking publishers for video packets their uplink lost (#2189); only while `retransmit` is on
+  /// (publishers keep their packets for its window).
+  pub uplink_repair: UplinkRepairConfig,
   /// When a receiver's voice counts as hurt and its video yields (#1871).
   pub voice_guard: VoiceGuardConfig,
   /// Bytes of padding the probe of a participant's link at the start may send, each direction:
@@ -160,6 +168,13 @@ pub enum Effect {
     publisher: DeviceId,
     stream_id: StreamId,
     layer: u8,
+  },
+  /// Packets of `layer` didn't arrive from the publisher: it should send them again (#2189).
+  RetransmitRequest {
+    publisher: DeviceId,
+    stream_id: StreamId,
+    layer: u8,
+    sequence_numbers: Vec<u16>,
   },
   /// The layers someone receives changed; the publisher may pause the others.
   LayersNeeded {
@@ -283,6 +298,8 @@ struct VideoTrackRoute {
   frame_fragments: [u16; MAX_SIMULCAST_LAYERS as usize],
   /// The packets forwarded recently per layer, to resend to a receiver that lost them.
   history: [PacketHistory; MAX_SIMULCAST_LAYERS as usize],
+  /// What the publisher's uplink lost per layer, to ask it for (#2189).
+  repair: [UplinkRepair; MAX_SIMULCAST_LAYERS as usize],
 }
 
 /// The latest run of packets per layer; `None` before the first.
@@ -339,6 +356,7 @@ impl Default for ForwardingConfig {
       probe: RateProbeConfig::default(),
       layer_stalled_after: Duration::from_millis(1500),
       retransmit: RetransmitConfig::default(),
+      uplink_repair: UplinkRepairConfig::default(),
       voice_guard: VoiceGuardConfig::default(),
       probe_bytes: 15_000,
       audio_layers: AudioLayerConfig::default(),
@@ -698,6 +716,7 @@ impl Forwarder {
       arrivals: [None; MAX_SIMULCAST_LAYERS as usize],
       frame_fragments: [0; MAX_SIMULCAST_LAYERS as usize],
       history: Default::default(),
+      repair: std::array::from_fn(|_| UplinkRepair::new(self.uplink_repair_config(), &track.kind)),
     };
     self.video_tracks.insert(stream_id, route);
     Ok(track)
@@ -969,9 +988,18 @@ impl Forwarder {
         Vec::new()
       }
     } else {
-      let receivers = self.video_receivers(header.stream_id, header.layer.value(), &rtp_header, now)?;
+      let layer = header.layer.value();
+      let sequence_number = rtp_header.sequence_number.0;
+      let receivers = self.video_receivers(header.stream_id, layer, &rtp_header, now)?;
+      let is_wanted = !receivers.is_empty() || self.is_layer_wanted(header.stream_id, layer);
+      let step = self.note_uplink_arrival(header.stream_id, layer, sequence_number, is_wanted, now);
+      route
+        .effects
+        .extend(self.repair_effects(sender, header.stream_id, layer, step, now));
+      // A packet sent again although it had arrived (late, not lost) goes out again too: rare, and
+      // receivers drop duplicates before reassembly.
       if !receivers.is_empty() {
-        self.keep_for_retransmission(header, rtp_header.sequence_number.0, datagram, now);
+        self.keep_for_retransmission(header, sequence_number, datagram, now);
       }
       receivers
     };
@@ -1112,6 +1140,7 @@ impl Forwarder {
     effects.extend(self.follow_thin_voice());
     effects.extend(self.reallocate(receiver, now));
     effects.extend(self.probe_downlink(receiver, now));
+    effects.extend(self.repair_uplink(receiver, now));
     let streams: Vec<StreamId> = self
       .video_tracks
       .iter()
@@ -1269,6 +1298,91 @@ impl Forwarder {
     }
     participant.probe.sent(maybe_first_seq?, &sizes, now);
     Some(Effect::Padding { receiver, datagrams })
+  }
+
+  /// Follows the publisher's numbering of `layer` of `stream_id` (#2189): a gap is asked for when
+  /// someone receives the layer (`is_wanted`).
+  fn note_uplink_arrival(
+    &mut self,
+    stream_id: StreamId,
+    layer: u8,
+    sequence_number: u16,
+    is_wanted: bool,
+    now: Instant,
+  ) -> RepairStep {
+    self
+      .video_tracks
+      .get_mut(&stream_id)
+      .and_then(|route| route.repair.get_mut(usize::from(layer)))
+      .map(|repair| repair.on_arrival(sequence_number, is_wanted, now))
+      .unwrap_or_default()
+  }
+
+  /// Whether someone receives `layer` of `stream_id` or is to switch to it.
+  fn is_layer_wanted(&self, stream_id: StreamId, layer: u8) -> bool {
+    self
+      .video_tracks
+      .get(&stream_id)
+      .is_some_and(|route| route.is_layer_wanted(layer))
+  }
+
+  /// Retries and give-ups of the repair of `publisher`'s uplink; runs on its timer.
+  fn repair_uplink(&mut self, publisher: DeviceId, now: Instant) -> Vec<Effect> {
+    let mut steps = Vec::new();
+    for (&stream_id, route) in &mut self.video_tracks {
+      if route.track.device_id != publisher {
+        continue;
+      }
+      let wanted: Vec<bool> = (0..MAX_SIMULCAST_LAYERS)
+        .map(|layer| route.is_layer_wanted(layer))
+        .collect();
+      for ((layer, repair), is_wanted) in (0..MAX_SIMULCAST_LAYERS).zip(&mut route.repair).zip(wanted) {
+        if !is_wanted && !repair.is_missing_packets() {
+          continue;
+        }
+        steps.push((stream_id, layer, repair.on_timer(is_wanted, now)));
+      }
+    }
+    let mut effects = Vec::new();
+    for (stream_id, layer, step) in steps {
+      effects.extend(self.repair_effects(publisher, stream_id, layer, step, now));
+    }
+    effects
+  }
+
+  /// The requests a repair step asks of `publisher`: the packets, and a keyframe (shared with the
+  /// receivers' requests, so the publisher gets one at most per [`KeyframeRequestConfig::per_layer_interval`]).
+  fn repair_effects(
+    &mut self,
+    publisher: DeviceId,
+    stream_id: StreamId,
+    layer: u8,
+    step: RepairStep,
+    now: Instant,
+  ) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    if !step.requests.is_empty() {
+      effects.push(Effect::RetransmitRequest {
+        publisher,
+        stream_id,
+        layer,
+        sequence_numbers: step.requests,
+      });
+    }
+    if step.needs_keyframe {
+      let interval = self.config.keyframes.per_layer_interval;
+      effects.extend(self.keyframe_request(publisher, stream_id, layer, interval, now));
+    }
+    effects
+  }
+
+  /// The repair's settings for new tracks: `None` while nothing is kept to resend.
+  fn uplink_repair_config(&self) -> Option<UplinkRepairConfig> {
+    self
+      .config
+      .retransmit
+      .is_enabled()
+      .then_some(self.config.uplink_repair)
   }
 
   /// Keeps a video datagram that went to receivers, to resend it to one that lost it.
@@ -1780,6 +1894,14 @@ impl VideoTrackRoute {
       .take_while(|most| **most <= max_frame_fragments)
       .count()
   }
+
+  /// Whether someone receives `layer` or is to switch to it (its keyframe is awaited).
+  fn is_layer_wanted(&self, layer: u8) -> bool {
+    self
+      .subscribers
+      .values()
+      .any(|subscription| subscription.current == Some(layer) || subscription.target == Some(layer))
+  }
 }
 
 /// How many of `track`'s lowest layers a receiver of `capabilities` takes (#1733): layers in a
@@ -2275,6 +2397,139 @@ mod tests {
       let mut asked: Vec<u16> = (1000..1000 + MAX_NACK_SEQUENCE_NUMBERS as u16).collect();
       asked.extend(0..10);
       assert!(forwarder.resend(device(2), VIDEO, 0, &asked, now).is_empty());
+    }
+
+    /// #2189: a packet lost on the publisher's uplink is asked of the publisher at once, and its
+    /// second copy goes to the receivers like any packet.
+    #[test]
+    fn a_gap_in_the_publishers_packets_is_asked_of_it_at_once() {
+      let (mut forwarder, now) = video_room();
+      on_layer_zero(&mut forwarder, &[2], now);
+      send_numbered(&mut forwarder, 0, 2, now);
+      let after_gap = send_numbered(&mut forwarder, 0, 5, now);
+      assert_eq!(after_gap.effects, vec![retransmit_request(&[3, 4])]);
+      let repaired = send_numbered(&mut forwarder, 0, 3, now + Duration::from_millis(40));
+      assert_eq!(receivers_of(&repaired), devices(&[2]));
+      assert!(repaired.effects.is_empty());
+      // Kept for the receiver's own NACK like any packet.
+      assert_eq!(forwarder.resend(device(2), VIDEO, 0, &[3], now).len(), 1);
+      // Packet 4 is asked for again after the publisher's round trip, not packet 3.
+      let retry = forwarder.on_timer(device(1), now + Duration::from_millis(200));
+      assert!(retry.contains(&retransmit_request(&[4])), "{retry:?}");
+    }
+
+    #[test]
+    fn an_unrepaired_gap_asks_for_one_keyframe_and_no_storm() {
+      let (mut forwarder, now) = video_room();
+      on_layer_zero(&mut forwarder, &[2], now);
+      let mut sequence_number = 2;
+      let mut keyframes = 0;
+      // Every 100 ms a packet is lost and never sent again, for five seconds.
+      for tick in 0..50u32 {
+        let at = now + Duration::from_millis(100) * tick;
+        send_numbered(&mut forwarder, 0, sequence_number, at);
+        sequence_number += 2;
+        let effects = forwarder.on_timer(device(1), at);
+        keyframes += effects
+          .iter()
+          .filter(|effect| matches!(effect, Effect::KeyframeRequest { .. }))
+          .count();
+      }
+      assert!((4..=5).contains(&keyframes), "{keyframes} keyframes in 5 s");
+    }
+
+    #[test]
+    fn a_camera_waits_longer_for_a_lost_packet_than_a_screen() {
+      let config = UplinkRepairConfig::default();
+      for (kind, keyframe_after) in [
+        (VideoTrackKind::Camera, config.camera_keyframe_after),
+        (VideoTrackKind::Screen, config.screen_keyframe_after),
+      ] {
+        let (mut forwarder, now) = video_room();
+        forwarder.unpublish_video(device(1), VIDEO).unwrap();
+        forwarder
+          .publish_video(
+            device(1),
+            VIDEO,
+            kind.clone(),
+            VideoCodec::Av1,
+            three_layers(),
+            None,
+          )
+          .unwrap();
+        on_layer_zero(&mut forwarder, &[2], now);
+        send_numbered(&mut forwarder, 0, 3, now);
+        let before = now + keyframe_after - Duration::from_millis(50);
+        assert!(
+          !forwarder
+            .on_timer(device(1), before)
+            .contains(&keyframe_request(0))
+        );
+        let after = now + keyframe_after;
+        assert!(
+          forwarder
+            .on_timer(device(1), after)
+            .contains(&keyframe_request(0)),
+          "{kind:?}"
+        );
+      }
+    }
+
+    #[test]
+    fn layers_nobody_receives_are_not_repaired() {
+      let (mut forwarder, now) = video_room();
+      on_layer_zero(&mut forwarder, &[2], now);
+      send_numbered(&mut forwarder, 1, 1, now);
+      assert!(send_numbered(&mut forwarder, 1, 5, now).effects.is_empty());
+      let later = now + Duration::from_secs(1);
+      assert!(
+        !forwarder
+          .on_timer(device(1), later)
+          .iter()
+          .any(|effect| matches!(effect, Effect::RetransmitRequest { .. }))
+      );
+    }
+
+    #[test]
+    fn nothing_is_asked_while_retransmission_is_off() {
+      let (mut forwarder, now) = video_room();
+      forwarder.config.retransmit.window = Duration::ZERO;
+      forwarder.unpublish_video(device(1), VIDEO).unwrap();
+      forwarder
+        .publish_video(
+          device(1),
+          VIDEO,
+          VideoTrackKind::Screen,
+          VideoCodec::Av1,
+          three_layers(),
+          None,
+        )
+        .unwrap();
+      on_layer_zero(&mut forwarder, &[2], now);
+      assert!(send_numbered(&mut forwarder, 0, 5, now).effects.is_empty());
+      let later = now + Duration::from_secs(1);
+      assert!(
+        !forwarder
+          .on_timer(device(1), later)
+          .contains(&keyframe_request(0))
+      );
+    }
+
+    fn retransmit_request(sequence_numbers: &[u16]) -> Effect {
+      Effect::RetransmitRequest {
+        publisher: device(1),
+        stream_id: VIDEO,
+        layer: 0,
+        sequence_numbers: sequence_numbers.to_vec(),
+      }
+    }
+
+    fn keyframe_request(layer: u8) -> Effect {
+      Effect::KeyframeRequest {
+        publisher: device(1),
+        stream_id: VIDEO,
+        layer,
+      }
     }
 
     /// `receivers` subscribe to [`VIDEO`] and receive its layer 0 from a keyframe on.

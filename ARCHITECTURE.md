@@ -431,9 +431,19 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
   Resent bytes come out of a per-receiver budget (30 % of its downlink estimate, bursts of 64 KiB)
   and count in its estimate like any others, so a lossy receiver can't make the SFU flood its link.
   Audio isn't resent: Opus conceals losses and carries FEC, and a late frame couldn't be played.
-  Losses on a publisher's uplink aren't repaired: the SFU alone covers the common case (viewers
-  behind worse links than the presenter, each repaired without a cost to the others), and the
-  publisher's uplink estimate already drops layers its link loses.
+- **Lost uplink packets (#2189):** a packet lost between a publisher and the SFU is lost for every
+  viewer, and a still screen sends almost nothing after a slide change: one lost packet of the
+  change held the old slide until a viewer's NACKs ran out and its keyframe request came back
+  through the same uplink. The SFU follows the RTP sequence numbers of each layer someone receives
+  (or is switching to) and asks the publisher at once for what a gap shows missing
+  (`retransmit_requested`), with a viewer's rules: again after about one and a half of the
+  publisher's round trips, at most three times. The publisher keeps what it sent for the window of
+  `joined` and sends those packets once more, as they went out (still DAVE encrypted, numbered anew
+  for its uplink estimate, within 30 % of it); the SFU forwards them like any, so every viewer gets
+  them within a round trip of the uplink. A packet still missing after 300 ms (screen) or 500 ms
+  (camera) is given up: the SFU asks the publisher for a keyframe of the layer, at most once a
+  second per layer from this path and merged with viewers' requests (500 ms per layer), so a lossy
+  uplink doesn't loop on keyframes. Settings: docs/operations.md.
 - **Probe at the start (#1762):** right after a join or rejoin (and after a move to another path)
   the client sends a few short trains of padding to the SFU, and the SFU to the client (three
   trains of five 1000-byte datagrams, 150 ms apart, `TEAMCRAFT_SFU_PROBE_BYTES`). The spread of

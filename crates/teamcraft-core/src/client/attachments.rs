@@ -94,12 +94,25 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// [`Self::open_attachment`] for a host that runs the transfer beside its loop: asks for the
   /// download and hands it back to drive ([`BlobDownload::open`]).
   pub async fn start_viewer_download(&self, attachment: &AttachmentRef) -> Result<BlobDownload, CoreError> {
+    self
+      .start_capped_viewer_download(attachment, MAX_VIEWER_BYTES)
+      .await
+  }
+
+  /// [`Self::start_viewer_download`] with a tighter cap: a picture's motion part (#2181) is never
+  /// larger than [`teamcraft_proto::MAX_MOTION_BYTES_LIMIT`] (see `CoreChatBackend::viewed_file`).
+  pub async fn start_capped_viewer_download(
+    &self,
+    attachment: &AttachmentRef,
+    max_bytes: u64,
+  ) -> Result<BlobDownload, CoreError> {
+    let max_bytes = max_bytes.min(MAX_VIEWER_BYTES);
     // A file that says it is too big is not fetched at all.
-    if attachment.size_bytes > MAX_VIEWER_BYTES {
+    if attachment.size_bytes > max_bytes {
       return Err(CoreError::InvalidRequest("the file is too large to show".into()));
     }
     // The sender-declared size can't be trusted: the cap applies to the bytes actually received.
-    self.start_download(attachment, Some(MAX_VIEWER_BYTES)).await
+    self.start_download(attachment, Some(max_bytes)).await
   }
 
   /// Encrypts with a fresh key, uploads through a presigned URL and returns what the message needs.
@@ -134,6 +147,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_dimensions: None,
       maybe_duration_ms: None,
       maybe_waveform: None,
+      maybe_motion: None,
     })
   }
 

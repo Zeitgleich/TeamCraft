@@ -183,6 +183,9 @@ import de.zeitgleich.teamcraft.ui.UploadPill
 import de.zeitgleich.teamcraft.ui.UserAvatar
 import de.zeitgleich.teamcraft.ui.animationFetchBudget
 import de.zeitgleich.teamcraft.ui.animationLabel
+import de.zeitgleich.teamcraft.ui.LiveBadge
+import de.zeitgleich.teamcraft.ui.MotionClip
+import de.zeitgleich.teamcraft.core.MotionInfo
 import de.zeitgleich.teamcraft.ui.avatarColorOfHue
 import de.zeitgleich.teamcraft.ui.bubbleCorners
 import de.zeitgleich.teamcraft.ui.dayShowsYear
@@ -2254,6 +2257,10 @@ private const val ALBUM_MORE_SCRIM = 0.45f
  */
 @Composable
 private fun BoxScope.TilePicture(file: FileInfo) {
+  file.maybeMotion?.takeIf { file.isLive }?.let { motion ->
+    LiveTilePicture(file, motion)
+    return
+  }
   if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P || !mayBeAnimated(file.mediaType)) {
     Thumbnail(file, ContentScale.Crop)
     return
@@ -2308,6 +2315,36 @@ private fun BoxScope.TilePicture(file: FileInfo) {
       if (!wasGoing && (file.transfer.state == "remote" || hasFailed)) motion.fetch(file)
     },
     modifier = Modifier.align(Alignment.TopStart).semantics { stateDescription = stateLabel },
+  )
+}
+
+/**
+ * A Live Photo or Motion Photo (#2181): the picture with its "Live" badge. A tap on the badge plays
+ * the motion muted and looping over it, fetching it first (only then: never with the message); a
+ * tap elsewhere opens the viewer and a long press stays the menu, as on any picture. Nothing plays by
+ * itself, so reduced motion needs nothing more. A clip the phone can't decode leaves it still.
+ */
+@Composable
+private fun BoxScope.LiveTilePicture(file: FileInfo, motion: MotionInfo) {
+  val feed = LocalFeedMotion.current
+  val isResumed = isAppResumed()
+  var isRequested by rememberSaveable(motion.fileId) { mutableStateOf(false) }
+  var isUnplayable by rememberSaveable(motion.fileId) { mutableStateOf(false) }
+  val maybePath = motion.transfer.path?.takeIf { motion.transfer.state == "local" }
+  val isPlaying = isRequested && !isUnplayable && maybePath != null && isResumed && !feed.isCovered
+  Thumbnail(file, ContentScale.Crop)
+  if (isPlaying && maybePath != null) MotionClip(maybePath, onUnplayable = { isUnplayable = true })
+  if (isUnplayable) return
+  LiveBadge(
+    isPlaying = isPlaying,
+    isComing = isRequested && motion.transfer.isMoving,
+    onClick = {
+      isRequested = !isRequested
+      if (isRequested && (motion.transfer.state == "remote" || motion.transfer.state == "failed")) {
+        feed.fetch(file.copy(fileId = motion.fileId))
+      }
+    },
+    modifier = Modifier.align(Alignment.TopStart),
   )
 }
 

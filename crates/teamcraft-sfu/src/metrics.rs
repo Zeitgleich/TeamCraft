@@ -131,6 +131,7 @@ mod tests {
           "teamcraft_sfu_rtt_seconds",
           "teamcraft_sfu_session_switches_total",
           "teamcraft_sfu_sessions_total",
+          "teamcraft_sfu_uplink_packets_requested_total",
         ]),
         labels: BTreeMap::from([
           ("transport", BTreeSet::from(["quic", "fallback"])),

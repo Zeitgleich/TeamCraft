@@ -238,6 +238,8 @@ targets:
           - "*.entitlements"
       - path: Shared/AppEnvironment.swift
       - path: Shared/ShareInbox.swift
+      # The conversations the app listed last, for the picker (#1037); still no core.
+      - path: Shared/ShareTargets.swift
     dependencies:
       - sdk: UserNotifications.framework
     info:

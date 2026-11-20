@@ -47,6 +47,11 @@ state of the codebase is recorded in [docs/robustness-audit.md](../../docs/robus
 - App update mid-action: local store migrations are forward-only and tested; queued actions survive.
 - OS battery restrictions (Doze, App Standby, iOS background limits) are accounted for; push, not
   polling, wakes the app.
+- The UI thread never waits on the store, the network, a lock or a blocking core call (#2184): the
+  iOS watchdog kills an app whose main thread hangs at launch, Android shows an ANR. Core calls
+  that can wait are async; the app's own blocking calls go through `UiThreadGuard` (debug builds
+  fail loudly, release builds report the call site once); Android debug builds run `StrictMode`.
+  While the store opens or syncs the screen shows it, never a frozen splash.
 
 ### Hostile networks
 
