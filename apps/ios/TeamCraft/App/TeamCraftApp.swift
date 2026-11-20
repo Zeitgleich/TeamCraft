@@ -30,7 +30,12 @@ struct TeamCraftApp: App {
         }
         // A call goes first: a recording stops (its take stays), a voice message pauses (#204).
         .onChange(of: model.calls.activeCall?.id) { _, maybeCall in
-          if maybeCall != nil { stopVoice(.call) }
+          if maybeCall != nil {
+            stopVoice(.call)
+          } else {
+            // A call in the background kept the store open; now it can close (#2179).
+            model.callEnded()
+          }
         }
         .onChange(of: scenePhase) { _, phase in
           switch phase {
@@ -44,7 +49,8 @@ struct TeamCraftApp: App {
             // measured of the old link is dropped (#1969).
             model.networkChanged()
           case .background:
-            // First, before anything else runs: the background time for pending sends (#158).
+            // First, before anything else runs: the background time for pending sends (#158),
+            // ending with the store closed for the suspension (#2179).
             model.sceneWillEnterBackground()
             stopVoice(.background)
             lock.didEnterBackground()
@@ -52,12 +58,8 @@ struct TeamCraftApp: App {
           default: break
           }
           updateShield(phase: phase)
-          Task {
-            switch phase {
-            case .active: await model.sceneBecameActive()
-            case .background: await model.sceneEnteredBackground()
-            default: break
-            }
+          if phase == .active {
+            Task { await model.sceneBecameActive() }
           }
         }
     }

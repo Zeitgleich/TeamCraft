@@ -712,7 +712,7 @@ impl EngineStart {
     self.data_dir.join(UPLOAD_STAGING_DIR).join(&self.account)
   }
 
-  fn duplicate(&self) -> Self {
+  pub(crate) fn duplicate(&self) -> Self {
     Self {
       server_url: self.server_url.clone(),
       maybe_push_gateway_url: self.maybe_push_gateway_url.clone(),

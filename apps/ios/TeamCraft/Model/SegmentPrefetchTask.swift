@@ -18,13 +18,18 @@ enum SegmentPrefetchTask {
       }
       let completion = Completion(processing)
       let work = Task {
-        let isDone = await AppModel.shared.runSegmentPrefetch()
+        let isDone = await AppModel.shared.inBackgroundJob("Search index prefetch") {
+          await AppModel.shared.runSegmentPrefetch()
+        }
         completion.finish(success: isDone)
         // The next run, whatever the outcome.
         schedule()
       }
       processing.expirationHandler = {
         work.cancel()
+        // Cancelling doesn't stop the download in the core, which holds the store and the
+        // cross-process lock: both go before iOS suspends the app (0xdead10cc, #2179).
+        AppModel.backgroundTaskExpired()
         completion.finish(success: false)
       }
     }

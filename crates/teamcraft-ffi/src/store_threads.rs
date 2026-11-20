@@ -7,28 +7,49 @@
 //! dropped; a process that exits meanwhile (a test returning from `main`) has them free memory into
 //! that torn-down state, and glibc aborts with "double free or corruption". So dropping the handle
 //! waits, for a bounded time, until those threads have let go of the store.
+//!
+//! The same wait closes the store while the iOS app is suspended (#2179): a suspended app that
+//! still has the database open in the App Group container is killed (0xdead10cc).
 
 use std::cell::Cell;
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 /// The longest dropping the handle waits for the store's threads: closing the connections takes
 /// milliseconds, ending a running sync loop a little more. Past it the handle goes anyway; an app
 /// that keeps running is unaffected, the race only matters while the process exits.
 pub(crate) const MAX_STORE_CLOSE_WAIT: Duration = Duration::from_secs(2);
+/// The longest opening the store again after a suspension (#2179) waits for the threads before to
+/// let go: a job they still ran (a long download) ends with its own timeout; past this the call
+/// fails and the next one tries again.
+pub(crate) const MAX_STORE_REOPEN_WAIT: Duration = Duration::from_secs(10);
 
 thread_local! {
   /// Set on the threads that hold the store: a handle dropped on one of them can't wait for itself.
   static HOLDS_STORE: Cell<bool> = const { Cell::new(false) };
 }
 
-/// The threads of one handle that hold the local store, and the wait for them to end.
+/// The threads of one handle that hold the local store, and the wait for them to end. The threads
+/// opened between two closes are one generation: suspending the store (#2179) waits for the old one
+/// while the next opening starts a new one.
 pub(crate) struct StoreThreads {
-  /// The handle's own hold, cloned for every thread it starts; let go before the wait.
-  maybe_hold: Mutex<Option<StoreHold>>,
-  /// Disconnects once every hold is gone. Nothing is ever sent on it.
-  released: Mutex<mpsc::Receiver<()>>,
+  generation: Mutex<Generation>,
+}
+
+/// The holds of the threads opened since the last close.
+struct Generation {
+  /// The handle's own hold, cloned for every thread it starts; let go when they are closed. `None`
+  /// once the handle went: a later thread gets a hold nobody waits for.
+  maybe_hold: Option<StoreHold>,
+  released: StoreClosing,
+}
+
+/// The wait for one generation of the store's threads to let go of it.
+#[derive(Clone)]
+pub(crate) struct StoreClosing {
+  /// Disconnects once every hold of the generation is gone. Nothing is ever sent on it.
+  released: Arc<Mutex<mpsc::Receiver<()>>>,
 }
 
 /// Kept by a thread for as long as it holds the store. Dropping it, after the store, is the signal.
@@ -37,7 +58,7 @@ pub(crate) struct StoreHold {
   _release: mpsc::Sender<()>,
 }
 
-/// How [`StoreThreads::wait_until_closed`] ended.
+/// How [`StoreClosing::wait`] ended.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum StoreClose {
   /// Every thread let go of the store.
@@ -50,33 +71,61 @@ pub(crate) enum StoreClose {
 
 impl StoreThreads {
   pub(crate) fn new() -> Self {
-    let (hold, released) = mpsc::channel();
     Self {
-      maybe_hold: Mutex::new(Some(StoreHold { _release: hold })),
-      released: Mutex::new(released),
+      generation: Mutex::new(Generation::new()),
     }
   }
 
-  /// A hold for a thread about to open the store. After the wait began, a hold nobody waits for.
+  /// A hold for a thread about to open the store. After the handle went, a hold nobody waits for.
   pub(crate) fn hold(&self) -> StoreHold {
-    self
-      .maybe_hold
-      .lock()
-      .unwrap_or_else(PoisonError::into_inner)
-      .clone()
-      .unwrap_or_else(StoreHold::detached)
+    self.lock().maybe_hold.clone().unwrap_or_else(StoreHold::detached)
   }
 
-  /// Lets go of the handle's own hold and waits until every thread let go of theirs, at most
-  /// `max_wait`. The caller has closed the threads' queues before, so they are ending.
+  /// Lets go of the handle's hold on the threads opened so far and starts a new generation for
+  /// the threads opened next (#2179): the answer waits for the old threads only. The caller has
+  /// closed their queues before, so they are ending.
+  pub(crate) fn close(&self) -> StoreClosing {
+    std::mem::replace(&mut *self.lock(), Generation::new()).released
+  }
+
+  /// Lets go of the handle's own hold for good and waits until every thread let go of theirs, at
+  /// most `max_wait`. The caller has closed the threads' queues before, so they are ending.
   pub(crate) fn wait_until_closed(&self, max_wait: Duration) -> StoreClose {
-    drop(
-      self
-        .maybe_hold
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .take(),
-    );
+    let closing = std::mem::replace(&mut *self.lock(), Generation::ended()).released;
+    closing.wait(max_wait)
+  }
+
+  fn lock(&self) -> std::sync::MutexGuard<'_, Generation> {
+    self.generation.lock().unwrap_or_else(PoisonError::into_inner)
+  }
+}
+
+impl Generation {
+  fn new() -> Self {
+    let (hold, released) = mpsc::channel();
+    Self {
+      maybe_hold: Some(StoreHold { _release: hold }),
+      released: StoreClosing {
+        released: Arc::new(Mutex::new(released)),
+      },
+    }
+  }
+
+  /// No hold: the threads of no later opening are waited for.
+  fn ended() -> Self {
+    let (_, released) = mpsc::channel();
+    Self {
+      maybe_hold: None,
+      released: StoreClosing {
+        released: Arc::new(Mutex::new(released)),
+      },
+    }
+  }
+}
+
+impl StoreClosing {
+  /// Waits until every thread of the generation let go of the store, at most `max_wait`.
+  pub(crate) fn wait(&self, max_wait: Duration) -> StoreClose {
     if HOLDS_STORE.with(Cell::get) {
       return StoreClose::OnStoreThread;
     }
@@ -89,7 +138,7 @@ impl StoreThreads {
         Ok(()) => {},
         Err(RecvTimeoutError::Disconnected) => return StoreClose::Closed,
         Err(RecvTimeoutError::Timeout) => {
-          tracing::warn!("a thread still held the local store when the handle went");
+          tracing::warn!("a thread still held the local store when the wait ran out");
           return StoreClose::TimedOut;
         },
       }
@@ -154,6 +203,23 @@ mod tests {
       threads.wait_until_closed(Duration::from_secs(60))
     });
     assert_eq!(close.join().unwrap(), StoreClose::OnStoreThread);
+  }
+
+  /// #2179: suspending waits for the threads opened before; the store's next opening is a
+  /// generation of its own, waited for by the close after it.
+  #[test]
+  fn a_close_waits_for_the_threads_before_and_starts_a_new_generation() {
+    let threads = StoreThreads::new();
+    let before = threads.hold();
+    let closing = threads.close();
+    assert_eq!(closing.wait(Duration::from_millis(10)), StoreClose::TimedOut);
+    let after = threads.hold();
+    drop(before);
+    assert_eq!(closing.wait(Duration::from_secs(60)), StoreClose::Closed);
+    let next = threads.close();
+    assert_eq!(next.wait(Duration::from_millis(10)), StoreClose::TimedOut);
+    drop(after);
+    assert_eq!(next.wait(Duration::from_secs(60)), StoreClose::Closed);
   }
 
   #[test]
