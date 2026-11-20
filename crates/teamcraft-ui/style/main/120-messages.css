@@ -357,8 +357,8 @@ button.mention-link:active { opacity: .7; }
   padding: 6px 8px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  background: var(--surface-raised, var(--surface));
-  box-shadow: var(--shadow-popover, 0 4px 16px rgb(0 0 0 / 18%));
+  background: var(--surface);
+  box-shadow: var(--shadow);
   font-size: var(--text-xs);
   line-height: 1.35;
   opacity: 0;
@@ -418,8 +418,8 @@ button.mention-link:active { opacity: .7; }
   padding: 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  background: var(--surface-raised, var(--surface));
-  box-shadow: var(--shadow-popover, 0 4px 16px rgb(0 0 0 / 18%));
+  background: var(--surface);
+  box-shadow: var(--shadow);
 }
 
 .reaction-popover-title {
