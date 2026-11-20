@@ -1619,9 +1619,9 @@ final class AppModel {
     }
     guard let account = container.activeAccount, vault.hasSession else { throw CoreFactoryError.noAccount }
     let factory = factory
-    let listener = ClosureEventListener { [weak self] in
-      Task { @MainActor in self?.storeDidChange() }
-    }
+    // A catch-up reports thousands of changes: one update per burst (`ChangeCoalescer`).
+    let changes = ChangeCoalescer { [weak self] in self?.storeDidChange() }
+    let listener = ClosureEventListener { changes.signal() }
     let opening = Task.detached(priority: .userInitiated) {
       Result { try factory.open(account: account, createKey: createsKey, runsUpkeep: true, listener: listener) }
     }
