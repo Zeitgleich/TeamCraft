@@ -15,7 +15,7 @@ import de.zeitgleich.teamcraft.crash.CrashSdks
  * network on the main thread in debug builds (`TeamCraftApplication`).
  */
 class UiThreadGuard(
-  private val isOnUiThread: () -> Boolean = { Looper.getMainLooper().isCurrentThread },
+  private val isOnUiThread: () -> Boolean = ::isOnMainLooper,
   private val failsLoudly: Boolean = BuildConfig.DEBUG,
   private val report: (String) -> Unit = { CrashSdks.platform().captureWarning("ui-thread-wait", it) },
 ) {
@@ -33,3 +33,14 @@ class UiThreadGuard(
     val shared = UiThreadGuard()
   }
 }
+
+/**
+ * Whether this thread runs the main looper. Plain JVM unit tests have no Android framework (its
+ * stubs throw), and there no thread is the UI thread.
+ */
+private fun isOnMainLooper(): Boolean =
+  try {
+    Looper.getMainLooper()?.isCurrentThread == true
+  } catch (_: RuntimeException) {
+    false
+  }
