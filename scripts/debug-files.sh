@@ -21,6 +21,9 @@
 #       Downloads an ELF debug file from the bucket to DIR/.build-id/<xx>/<rest>.debug (DIR defaults
 #       to ~/.cache/teamcraft-debug), where `eu-stack --debuginfo-path=DIR`, gdb's
 #       `debug-file-directory` and `eu-addr2line --debuginfo-path=DIR` find it by build ID.
+#   scripts/debug-files.sh fetch-dsym UUID [DIR]
+#       Downloads an iOS/macOS dSYM bundle from the bucket and unpacks it to DIR/<UUID>/ (DIR
+#       defaults to ~/.cache/teamcraft-debug/dsym), where scripts/symbolicate-ios.sh finds it.
 #   scripts/debug-files.sh index LABEL
 #       Prints a build's index (e.g. desktop/1.0.32/x86_64-unknown-linux-gnu).
 #   scripts/debug-files.sh sentry-cli ARGS...
@@ -44,9 +47,10 @@ main() {
     split) shift; [ "$#" -eq 2 ] || fail "usage: $0 split BINARY OUT_DIR"; split "$@" ;;
     store) shift; [ "$#" -ge 2 ] || fail "usage: $0 store LABEL FILE..."; store "$@" ;;
     fetch) shift; [ "$#" -ge 1 ] || fail "usage: $0 fetch BUILD_ID [DIR]"; fetch "$@" ;;
+    fetch-dsym) shift; [ "$#" -ge 1 ] || fail "usage: $0 fetch-dsym UUID [DIR]"; fetch_dsym "$@" ;;
     sentry-cli) shift; install_sentry_cli || exit 1; exec "$SENTRY_CLI" "$@" ;;
     index) shift; [ "$#" -eq 1 ] || fail "usage: $0 index LABEL"; require_bucket; s3_get "index/$1.txt" - ;;
-    *) fail "usage: $0 split BINARY OUT_DIR | store LABEL FILE... | fetch BUILD_ID [DIR] | index LABEL" ;;
+    *) fail "usage: $0 split BINARY OUT_DIR | store LABEL FILE... | fetch BUILD_ID [DIR] | fetch-dsym UUID [DIR] | index LABEL" ;;
   esac
 }
 
@@ -80,8 +84,13 @@ store() {
     return 0
   fi
   if [ "$has_backend" = true ]; then
-    "$SENTRY_CLI" debug-files upload "$@" \
-      || warn "the debug files of $label did not reach the crash reports backend"
+    # --wait: the backend assembles the chunks after the upload; without waiting, a file it drops
+    # there (as GlitchTip did with the large dSYMs of the iOS app) still reads as uploaded.
+    if "$SENTRY_CLI" debug-files upload --wait "$@"; then
+      verify_on_backend "$label" "$@"
+    else
+      warn "the debug files of $label did not reach the crash reports backend"
+    fi
   fi
   if [ "$has_s3" = true ]; then
     store_in_bucket "$label" "$@" || warn "the debug files of $label did not reach the bucket"
@@ -98,6 +107,54 @@ fetch() {
     || { rm -f "$target.part"; fail "no debug file for build ID $build_id in the bucket"; }
   mv "$target.part" "$target"
   echo "$target"
+}
+
+fetch_dsym() {
+  local uuid dir="${2:-$HOME/.cache/teamcraft-debug/dsym}" key target
+  uuid="$(tr -d - <<<"$1" | tr '[:lower:]' '[:upper:]')"
+  [[ "$uuid" =~ ^[0-9A-F]{32}$ ]] || fail "'$1' is not a dSYM UUID"
+  require_bucket
+  # The index names the key (macho/<UUID>/<name>.dSYM.zip); the name isn't known here.
+  key="$(s3_list "macho/$uuid/" | head -n 1)"
+  [ -n "$key" ] || fail "no dSYM with UUID $uuid in the bucket"
+  target="$dir/$uuid"
+  mkdir -p "$target"
+  s3_get "$key" "$target/dsym.zip.part" || fail "could not download $key"
+  unzip -q -o "$target/dsym.zip.part" -d "$target"
+  rm -f "$target/dsym.zip.part"
+  echo "$target"
+}
+
+# Checks that the backend kept each uploaded file: it lists them by debug ID, newest first.
+verify_on_backend() {
+  local label="$1" file id listing missing=()
+  shift
+  listing="$(backend_debug_ids)" || { warn "could not list the debug files of the crash reports backend"; return 0; }
+  for file in "$@"; do
+    id="$("$SENTRY_CLI" debug-files check --json "$file" | json_field debug_id | tr '[:upper:]' '[:lower:]')"
+    [ -n "$id" ] || continue
+    grep -qx -- "$id" <<<"$listing" || missing+=("$(basename "$file") $id")
+  done
+  if [ "${#missing[@]}" -gt 0 ]; then
+    warn "the crash reports backend did not keep debug files of $label: ${missing[*]} (docs/crash-reports.md, \"Reading an iOS report\")"
+  fi
+}
+
+# The debug IDs of the newest 100 debug files on the backend, lower case, one per line.
+backend_debug_ids() {
+  local url="${SENTRY_URL%/}/api/0/projects/$SENTRY_ORG/$SENTRY_PROJECT/files/dsyms/" cursor="" headers
+  headers="$(mktemp)"
+  for _ in 1 2; do
+    # The token goes in a header read from stdin, never on the command line.
+    printf 'header = "Authorization: Bearer %s"\n' "$SENTRY_AUTH_TOKEN" \
+      | curl --fail --silent --show-error --retry 3 --config - --dump-header "$headers" \
+        "$url${cursor:+?cursor=$cursor}" \
+      | grep -o '"debugId": *"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/' | tr '[:upper:]' '[:lower:]' \
+      || { rm -f "$headers"; return 1; }
+    cursor="$(sed -n 's/.*rel="next"; results="true"; cursor="\([^"]*\)".*/\1/p' "$headers")"
+    [ -n "$cursor" ] || break
+  done
+  rm -f "$headers"
 }
 
 require_bucket() {
@@ -186,6 +243,16 @@ s3_put() {
     --aws-sigv4 "aws:amz:${DEBUG_FILES_S3_REGION:-us-east-1}:s3" \
     --user "$DEBUG_FILES_S3_ACCESS_KEY_ID:$DEBUG_FILES_S3_SECRET_ACCESS_KEY" \
     --upload-file "$file" "${DEBUG_FILES_S3_ENDPOINT%/}/$DEBUG_FILES_S3_BUCKET/$key"
+}
+
+# The keys under PREFIX (S3 ListObjectsV2), one per line.
+s3_list() {
+  local prefix="$1"
+  curl --fail --silent --show-error --retry 5 \
+    --aws-sigv4 "aws:amz:${DEBUG_FILES_S3_REGION:-us-east-1}:s3" \
+    --user "$DEBUG_FILES_S3_ACCESS_KEY_ID:$DEBUG_FILES_S3_SECRET_ACCESS_KEY" \
+    "${DEBUG_FILES_S3_ENDPOINT%/}/$DEBUG_FILES_S3_BUCKET?list-type=2&prefix=$prefix" \
+    | grep -o '<Key>[^<]*</Key>' | sed 's/<Key>\(.*\)<\/Key>/\1/'
 }
 
 s3_get() {
