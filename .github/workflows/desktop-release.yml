@@ -20,10 +20,18 @@ on:
         description: Compile only and save the Rust build cache (no packages)
         type: boolean
         default: false
+      notarize-once:
+        description: macOS, notarize only the dmg and staple the app with its ticket (experiment, #2210)
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       warm-cache:
         description: Compile only and save the Rust build cache (no packages)
+        type: boolean
+        default: false
+      notarize-once:
+        description: macOS, notarize only the dmg and staple the app with its ticket (experiment, #2210)
         type: boolean
         default: false
 
@@ -443,8 +451,10 @@ jobs:
       - name: Sign the app (inside out) and verify the signature
         if: ${{ !inputs.warm-cache }}
         run: apps/desktop/packaging/macos/sign-app.sh "$APP"
-      - name: Notarize the app (optional)
-        if: ${{ !inputs.warm-cache && env.MACOS_SIGNING_IDENTITY != '' }}
+      # Two submissions per architecture (the default): the app, then the dmg built from the stapled
+      # app. With `notarize-once` only the dmg is submitted and the app is stapled afterwards (#2210).
+      - name: Notarize the app (two submissions)
+        if: ${{ !inputs.warm-cache && !inputs.notarize-once && env.MACOS_SIGNING_IDENTITY != '' }}
         env:
           APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
           APP_STORE_CONNECT_KEY_ID: ${{ vars.APP_STORE_CONNECT_KEY_ID }}
@@ -461,6 +471,48 @@ jobs:
           version="$(scripts/check-versions.sh)"
           mkdir -p target/dmg
           apps/desktop/packaging/macos/make-dmg.sh "$APP" "target/dmg/TeamCraft_${version}_${{ matrix.arch }}.dmg"
+      - name: Notarize the dmg (optional)
+        if: ${{ !inputs.warm-cache && env.MACOS_SIGNING_IDENTITY != '' }}
+        env:
+          APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+          APP_STORE_CONNECT_KEY_ID: ${{ vars.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ vars.APP_STORE_CONNECT_ISSUER_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID || secrets.APPLE_TEAM_ID }}
+        run: |
+          dmg="$(ls target/dmg/*.dmg)"
+          start=$SECONDS
+          apps/desktop/packaging/macos/notarize.sh "$dmg"
+          echo "dmg notarization and stapling took $((SECONDS - start)) s"
+          spctl --assess -vvv --type open --context context:primary-signature "$dmg"
+      # The ticket of the dmg's submission also covers the app inside, by code hash. Stapling the app
+      # outside the dmg needs no second submission. If that fails, fall back to two submissions: notarize
+      # the app, rebuild the dmg from the stapled app and notarize that.
+      - name: Staple the app from the dmg's ticket
+        if: ${{ !inputs.warm-cache && inputs.notarize-once && env.MACOS_SIGNING_IDENTITY != '' }}
+        env:
+          APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+          APP_STORE_CONNECT_KEY_ID: ${{ vars.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ vars.APP_STORE_CONNECT_ISSUER_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID || secrets.APPLE_TEAM_ID }}
+        run: |
+          if xcrun stapler staple "$APP" && xcrun stapler validate "$APP" \
+            && MACOS_REQUIRE_NOTARIZED=1 apps/desktop/packaging/macos/verify-app.sh "$APP"; then
+            echo "app stapled from the dmg's ticket: one submission was enough"
+            exit 0
+          fi
+          echo "::warning title=Stapling the app failed::Falling back to a second submission for the app (#2210)."
+          apps/desktop/packaging/macos/notarize.sh "$APP"
+          MACOS_REQUIRE_NOTARIZED=1 apps/desktop/packaging/macos/verify-app.sh "$APP"
+          version="$(scripts/check-versions.sh)"
+          dmg="target/dmg/TeamCraft_${version}_${{ matrix.arch }}.dmg"
+          rm -f "$dmg"
+          apps/desktop/packaging/macos/make-dmg.sh "$APP" "$dmg"
+          apps/desktop/packaging/macos/notarize.sh "$dmg"
+          spctl --assess -vvv --type open --context context:primary-signature "$dmg"
       # The updater replaces the whole app with this archive of the signed (and, with the secrets,
       # notarized and stapled) app. No AppleDouble files: they would break the seal.
       - name: Update archive of the app, signed for the updater (optional)
@@ -473,19 +525,6 @@ jobs:
           archive="target/dmg/TeamCraft_${version}_${{ matrix.arch }}.app.tar.gz"
           COPYFILE_DISABLE=1 tar --no-mac-metadata -C "$(dirname "$APP")" -czf "$archive" "$(basename "$APP")"
           apps/desktop/packaging/sign-update.sh "$TEAMCRAFT_RELEASE_VERSION" "$archive"
-      - name: Notarize the dmg (optional)
-        if: ${{ !inputs.warm-cache && env.MACOS_SIGNING_IDENTITY != '' }}
-        env:
-          APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
-          APP_STORE_CONNECT_KEY_ID: ${{ vars.APP_STORE_CONNECT_KEY_ID }}
-          APP_STORE_CONNECT_ISSUER_ID: ${{ vars.APP_STORE_CONNECT_ISSUER_ID }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID || secrets.APPLE_TEAM_ID }}
-        run: |
-          dmg="$(ls target/dmg/*.dmg)"
-          apps/desktop/packaging/macos/notarize.sh "$dmg"
-          spctl --assess -vvv --type open --context context:primary-signature "$dmg"
       - name: Keep the dSYM privately (optional)
         if: ${{ !inputs.warm-cache }}
         env:
@@ -510,6 +549,27 @@ jobs:
             target/dmg/*.app.tar.gz
             target/dmg/*.app.tar.gz.sig
           if-no-files-found: error
+      # Experiment checks (#2210): the stapled tickets, Gatekeeper's verdicts, the app inside the update
+      # archive, and the verdict with the network blocked (best effort; the runner may refuse).
+      - name: Check the tickets of the notarized packages
+        if: ${{ !inputs.warm-cache && inputs.notarize-once && env.MACOS_SIGNING_IDENTITY != '' }}
+        continue-on-error: true
+        run: |
+          dmg="$(ls target/dmg/*.dmg)"
+          xcrun stapler validate "$dmg"
+          xcrun stapler validate "$APP"
+          spctl -a -vv --type exec "$APP"
+          spctl -a -vv --type open --context context:primary-signature "$dmg"
+          check="$RUNNER_TEMP/archive-check"
+          rm -rf "$check" && mkdir -p "$check"
+          tar -xzf target/dmg/*.app.tar.gz -C "$check"
+          xcrun stapler validate "$check"/*.app
+          spctl -a -vv --type exec "$check"/*.app
+          echo "== network blocked"
+          printf 'block drop out all\n' | sudo pfctl -f - -e || echo "pfctl refused"
+          trap 'sudo pfctl -d || true' EXIT
+          spctl -a -vv --type exec "$check"/*.app
+          xcrun stapler validate "$check"/*.app
 
   windows:
     name: Windows (${{ matrix.target }}, msi, nsis)
