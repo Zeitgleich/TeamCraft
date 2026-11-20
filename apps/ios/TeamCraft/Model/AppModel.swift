@@ -1954,6 +1954,10 @@ final class AppModel {
   private func takeProcessLock(for holder: LockHolder, timeout: TimeInterval) async -> Bool {
     while let pending = maybePendingAcquire {
       _ = await pending.value
+      // Whoever resumes first after the take ended clears it. Awaiting a finished task doesn't
+      // suspend: left to the taker, which can't resume while this loop holds the main actor, the
+      // loop spun forever and the watchdog killed the app (1.0.39 launch hang, two takers at once).
+      if maybePendingAcquire == pending { maybePendingAcquire = nil }
     }
     if processLock.isHeld {
       lockHolders.insert(holder)
