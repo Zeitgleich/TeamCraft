@@ -180,6 +180,8 @@ struct ChatPane: View {
       if isChannel { await model.refreshChannelAnchor(conversation.id) }
     }
     .task(id: model.changeCount) {
+      await waitForRestingList()
+      guard !Task.isCancelled else { return }
       await reload()
       await reloadDraftFiles()
       await reloadLinkPreview()
@@ -529,7 +531,8 @@ struct ChatPane: View {
             maybeFirstUnread: maybeFirstUnreadId),
           look: MessageListView.RowsLook(
             bubble: look, isSelecting: selection.isActive, canReact: conversation.canReact,
-            canPost: conversation.canPost, displayNames: displayNames),
+            canPost: conversation.canPost, displayNames: displayNames,
+            areAnimationsCovered: maybeViewing != nil || maybeVideo != nil),
           bottomInset: geometry.safeAreaInsets.bottom, isLoaded: hasLoadedMessages,
           maybeOpenAt: model.focusMessageId == nil ? maybeFirstUnreadId : nil, reduceMotion: reduceMotion,
           controller: listController,
@@ -537,12 +540,14 @@ struct ChatPane: View {
           dayHeader: { day in AnyView(DayPill(date: day)) },
           onVisibleRows: rowsOnScreenChanged, onAtBottom: atBottomChanged, onShown: listShown,
           onRefresh: { isRefreshFailed = !(await model.refreshConnection()) })
+          // Only the list runs on under the composer and the keyboard: the reader keeps the safe
+          // area, so `geometry.safeAreaInsets.bottom` is their height (it is 0 once the reader
+          // itself ignores the safe area).
+          .ignoresSafeArea(edges: .bottom)
         jumpButtons
           .padding()
-          .padding(.bottom, geometry.safeAreaInsets.bottom)
       }
     }
-    .ignoresSafeArea(edges: .bottom)
     .alert("refresh_failed", isPresented: $isRefreshFailed) { Button("done", role: .cancel) {} }
     // A message link opened this conversation, or points into it: show the message.
     .onChange(of: feed.revision) { _, _ in
@@ -681,7 +686,7 @@ struct ChatPane: View {
 
   /// Rows below the oldest loaded one whose appearance loads the next older page: a few screens
   /// ahead, so a reader scrolling back doesn't meet the end of what is loaded (issue #1058).
-  private static let olderAheadRows = 40
+  private static let olderAheadRows = 20
 
   private var canPageBack: Bool { hasOlder || serverHistory == .available }
 
@@ -1768,7 +1773,11 @@ struct ChatPane: View {
     for item in items {
       do {
         guard let media = try await item.loadTransferable(type: PickedMedia.self) else { continue }
-        let file = try importer.importPickedMedia(media)
+        var file = try importer.importPickedMedia(media)
+        // A Live Photo goes with its motion (#2181), converted to H.264 beside the picture.
+        if LivePhotoMotion.isSendingMotion {
+          file.maybeMotion = await LivePhotoMotion.motion(of: item, beside: file, limits: await model.motionLimits())
+        }
         await attach([file])
       } catch let error as AttachmentError {
         attachmentError = error
@@ -1922,6 +1931,7 @@ struct ChatPane: View {
       messages = read.map { $0.named(threadAuthors) }
       rebuildFeed()
       hasLoadedMessages = true
+      ThumbnailCache.warm(readExtras.values.flatMap { $0.files ?? [] })
       extras = readExtras
       dropGoneFromSelection()
     } else {
@@ -1942,6 +1952,7 @@ struct ChatPane: View {
       gaps = page.gaps
       rebuildFeed()
       hasLoadedMessages = true
+      ThumbnailCache.warm(readExtras.values.flatMap { $0.files ?? [] })
       extras = readExtras
       dropGoneFromSelection()
       hasOlder = page.hasOlder
@@ -1963,10 +1974,35 @@ struct ChatPane: View {
     }
   }
 
+  /// How long a read after a change waits at most for the list to rest.
+  private static let maxReadWait: TimeInterval = 2
+
+  /// A change in the store while the reader scrolls is read once the list rests (#2180): reading
+  /// the page again in the middle of a fling costs frames. Never longer than `maxReadWait` in all,
+  /// also over several changes, so a long scroll doesn't hold new messages back.
+  private func waitForRestingList() async {
+    guard listController.isScrolling else {
+      onScreen.maybeReadWaitsSince = nil
+      return
+    }
+    let since = onScreen.maybeReadWaitsSince ?? .now
+    onScreen.maybeReadWaitsSince = since
+    while listController.isScrolling, Date.now.timeIntervalSince(since) < Self.maxReadWait {
+      try? await Task.sleep(for: .milliseconds(60))
+      if Task.isCancelled { return }
+    }
+    onScreen.maybeReadWaitsSince = nil
+  }
+
   /// Lays the messages out for the list once per read, not on every render (#2180). A thread
   /// shows no holes.
   private func rebuildFeed() {
-    feed = messageFeed(messages, gaps: threadId == nil ? gaps : [], revision: feed.revision &+ 1)
+    // A read that brought nothing new (a change elsewhere in the store) keeps the revision: the
+    // list isn't applied again, which would stop a scroll in flight.
+    var next = messageFeed(messages, gaps: threadId == nil ? gaps : [], revision: feed.revision)
+    guard next != feed else { return }
+    next.revision = feed.revision &+ 1
+    feed = next
   }
 
   /// The senders' names, read once with the first messages so no bubble shows without its sender.
@@ -2008,6 +2044,7 @@ struct ChatPane: View {
     messages = page.messages
     gaps = page.gaps
     rebuildFeed()
+    ThumbnailCache.warm(readExtras.values.flatMap { $0.files ?? [] })
     extras = readExtras
     hasOlder = page.hasOlder
   }

@@ -656,6 +656,34 @@ pub struct AttachmentRef {
   /// show the plain audio file.
   #[serde(rename = "waveform", default, skip_serializing_if = "Option::is_none")]
   pub maybe_waveform: Option<teamcraft_proto::Base64Bytes>,
+  /// The motion of a Live Photo or Motion Photo (issue #2181, e2ee.md §4.5): a short video sent as
+  /// a second file of the same message, with its own key, played only on request. Older clients
+  /// ignore it and show the still picture; it is not one of the message's files of its own.
+  /// Receivers take it only on a picture, as a video, and one level deep ([`Self::motion`]).
+  #[serde(rename = "motion", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_motion: Option<Box<AttachmentRef>>,
+}
+
+impl AttachmentRef {
+  /// The motion part a receiver plays: on a picture only, a video, with no motion of its own.
+  /// Anything else a sender put there is ignored and the picture shows still.
+  pub fn motion(&self) -> Option<&AttachmentRef> {
+    let motion = self.maybe_motion.as_deref()?;
+    let is_playable = self.media_type.starts_with("image/")
+      && motion.media_type.starts_with("video/")
+      && motion.maybe_motion.is_none()
+      && motion.size_bytes > 0
+      && motion.size_bytes <= teamcraft_proto::MAX_MOTION_BYTES_LIMIT;
+    is_playable.then_some(motion)
+  }
+
+  /// This file, or its motion part, by attachment ID.
+  pub fn find(&self, attachment: teamcraft_proto::AttachmentId) -> Option<&AttachmentRef> {
+    if self.attachment_id == attachment {
+      return Some(self);
+    }
+    self.motion().filter(|motion| motion.attachment_id == attachment)
+  }
 }
 
 /// The size of a picture in pixels.
@@ -2090,6 +2118,76 @@ pub(crate) mod tests {
   use teamcraft_proto::{Id, Snowflake};
 
   use super::*;
+
+  mod motion_wire {
+    use super::*;
+
+    const PICTURE: &str = r#"{"attachment_id":"1","key":"AAAA","ciphertext_sha256":"AAAA","file_name":"IMG_0001.jpg","media_type":"image/jpeg","size_bytes":10"#;
+    const MOTION: &str = r#"{"attachment_id":"2","key":"AAAA","ciphertext_sha256":"AAAA","file_name":"IMG_0001.mp4","media_type":"video/mp4","size_bytes":20,"duration_ms":2900}"#;
+
+    #[test]
+    fn a_picture_carries_its_motion_and_round_trips() {
+      let json = format!(r#"{PICTURE},"motion":{MOTION}}}"#);
+      let picture: AttachmentRef = serde_json::from_str(&json).unwrap();
+      let motion = picture.motion().expect("the motion part");
+      assert_eq!(motion.file_name, "IMG_0001.mp4");
+      assert_eq!(motion.maybe_duration_ms, Some(2900));
+      assert_eq!(serde_json::to_string(&picture).unwrap(), json);
+      assert_eq!(
+        picture.find(motion.attachment_id).map(|file| &file.file_name),
+        Some(&"IMG_0001.mp4".to_owned())
+      );
+    }
+
+    #[test]
+    fn a_picture_without_motion_reads_and_writes_as_before() {
+      let json = format!("{PICTURE}}}");
+      let picture: AttachmentRef = serde_json::from_str(&json).unwrap();
+      assert_eq!(picture.motion(), None);
+      assert_eq!(
+        serde_json::to_string(&picture).unwrap(),
+        json,
+        "no motion field written"
+      );
+    }
+
+    /// What an older version reads: its attachment struct ignores the field it doesn't know, so
+    /// it shows the still picture.
+    #[test]
+    fn an_older_version_ignores_the_motion() {
+      #[derive(Deserialize)]
+      struct OlderAttachment {
+        file_name: String,
+        media_type: String,
+      }
+      let json = format!(r#"{PICTURE},"motion":{MOTION},"from_the_future":true}}"#);
+      let older: OlderAttachment = serde_json::from_str(&json).unwrap();
+      assert_eq!(
+        (older.file_name.as_str(), older.media_type.as_str()),
+        ("IMG_0001.jpg", "image/jpeg")
+      );
+      let current: AttachmentRef = serde_json::from_str(&json).unwrap();
+      assert!(current.motion().is_some(), "unknown fields don't hide the motion");
+    }
+
+    #[test]
+    fn a_hostile_motion_is_ignored_and_the_picture_shows_still() {
+      let not_a_video = MOTION.replace("video/mp4", "text/html");
+      let on_a_document = PICTURE.replace("image/jpeg", "application/pdf");
+      let nested = MOTION.replace("}", &format!(r#","motion":{MOTION}}}"#));
+      let huge = MOTION.replace(r#""size_bytes":20"#, r#""size_bytes":999999999999"#);
+      for json in [
+        format!(r#"{PICTURE},"motion":{not_a_video}}}"#),
+        format!(r#"{on_a_document},"motion":{MOTION}}}"#),
+        format!(r#"{PICTURE},"motion":{nested}}}"#),
+        format!(r#"{PICTURE},"motion":{huge}}}"#),
+      ] {
+        let picture: AttachmentRef = serde_json::from_str(&json).unwrap();
+        assert_eq!(picture.motion(), None, "{json}");
+        assert_eq!(picture.find("2".parse().unwrap()), None);
+      }
+    }
+  }
 
   mod poll_wire {
     use super::*;

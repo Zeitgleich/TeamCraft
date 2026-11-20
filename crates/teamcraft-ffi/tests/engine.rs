@@ -24,7 +24,8 @@ const UNREACHABLE_SERVER: &str = "http://127.0.0.1:9";
 #[tokio::test]
 async fn a_fresh_device_needs_enrollment_and_reports_the_network() {
   let directory = temp_dir();
-  let teamcraft = TeamCraft::new(config(&directory, [7; 32]), tokens(Some("token")), listener()).unwrap();
+  let teamcraft =
+    TeamCraft::open_blocking(config(&directory, [7; 32]), tokens(Some("token")), listener()).unwrap();
   assert!(matches!(
     teamcraft.account_state().await,
     Err(TeamCraftError::Network(_))
@@ -52,7 +53,7 @@ async fn a_fresh_device_needs_enrollment_and_reports_the_network() {
 #[tokio::test]
 async fn without_a_token_calls_report_signed_out() {
   let directory = temp_dir();
-  let teamcraft = TeamCraft::new(config(&directory, [7; 32]), tokens(None), listener()).unwrap();
+  let teamcraft = TeamCraft::open_blocking(config(&directory, [7; 32]), tokens(None), listener()).unwrap();
   assert!(matches!(
     teamcraft.account_state().await,
     Err(TeamCraftError::SignedOut)
@@ -65,7 +66,8 @@ async fn without_a_token_calls_report_signed_out() {
 #[tokio::test]
 async fn a_failed_token_refresh_reports_the_network_not_a_sign_out() {
   let directory = temp_dir();
-  let teamcraft = TeamCraft::new(config(&directory, [7; 32]), Arc::new(RefreshFailing), listener()).unwrap();
+  let teamcraft =
+    TeamCraft::open_blocking(config(&directory, [7; 32]), Arc::new(RefreshFailing), listener()).unwrap();
   assert!(matches!(
     teamcraft.account_state().await,
     Err(TeamCraftError::Network(_))
@@ -79,13 +81,13 @@ fn bad_configuration_is_rejected() {
   let mut short_key = config(&directory, [7; 32]);
   short_key.database_key.truncate(16);
   assert!(matches!(
-    TeamCraft::new(short_key, tokens(None), listener()),
+    TeamCraft::open_blocking(short_key, tokens(None), listener()),
     Err(TeamCraftError::InvalidInput(_))
   ));
   let mut escaping = config(&directory, [7; 32]);
   escaping.account = "../elsewhere".into();
   assert!(matches!(
-    TeamCraft::new(escaping, tokens(None), listener()),
+    TeamCraft::open_blocking(escaping, tokens(None), listener()),
     Err(TeamCraftError::InvalidInput(_))
   ));
   std::fs::remove_dir_all(&directory).unwrap();
@@ -94,9 +96,9 @@ fn bad_configuration_is_rejected() {
 #[test]
 fn reopening_with_the_same_key_works() {
   let directory = temp_dir();
-  drop(TeamCraft::new(config(&directory, [7; 32]), tokens(None), listener()).unwrap());
+  drop(TeamCraft::open_blocking(config(&directory, [7; 32]), tokens(None), listener()).unwrap());
   // An empty store has no record to fail on; this only checks reopening works with the same key.
-  assert!(TeamCraft::new(config(&directory, [7; 32]), tokens(None), listener()).is_ok());
+  assert!(TeamCraft::open_blocking(config(&directory, [7; 32]), tokens(None), listener()).is_ok());
   std::fs::remove_dir_all(&directory).unwrap();
 }
 
@@ -218,7 +220,7 @@ mod device_link {
     let directory = temp_dir();
     let (server_url, mut requests) = held_server().await;
     let teamcraft = Arc::new(
-      TeamCraft::new(
+      TeamCraft::open_blocking(
         config_at(&directory, [7; 32], &server_url),
         tokens(Some("token")),
         listener(),
@@ -338,7 +340,8 @@ mod avatar {
   #[tokio::test]
   async fn an_invalid_user_id_is_refused_before_any_request() {
     let directory = temp_dir();
-    let teamcraft = TeamCraft::new(config(&directory, [7; 32]), tokens(Some("token")), listener()).unwrap();
+    let teamcraft =
+      TeamCraft::open_blocking(config(&directory, [7; 32]), tokens(Some("token")), listener()).unwrap();
     assert!(matches!(
       teamcraft.avatar_picture("../me".into(), 1024).await,
       Err(TeamCraftError::InvalidInput(_))
@@ -347,7 +350,7 @@ mod avatar {
   }
 
   fn engine_at(directory: &std::path::Path, server_url: &str) -> Arc<TeamCraft> {
-    TeamCraft::new(
+    TeamCraft::open_blocking(
       config_at(directory, [7; 32], server_url),
       tokens(Some("token")),
       listener(),

@@ -1,0 +1,53 @@
+# Waits for the `ui-dist` artifact of this run's "Web UI bundle" job and downloads it into
+# crates/teamcraft-ui/dist. The macOS and Windows desktop jobs don't `needs: ui`: they compile the
+# Rust dependencies while the (long, serial) wasm build runs, and only need the bundle for the last
+# compile of the desktop crate (docs/release.md, "Critical path"). Fails when the UI job fails or is
+# failed, so a broken bundle never lets a package through. Needs `actions: read`.
+name: Await the UI bundle
+description: Poll for the ui-dist artifact of the current run, then download it.
+
+inputs:
+  timeout-minutes:
+    description: How long to wait for the UI job
+    default: "75"
+  github-token:
+    description: Token with actions read access
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Wait for the UI bundle
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        TIMEOUT_MINUTES: ${{ inputs.timeout-minutes }}
+      run: |
+        set -euo pipefail
+        # curl only: the Linux jobs' image has neither gh nor jq. The ui job leaves `ui-dist` when it
+        # worked and the tiny `ui-failed` marker when it didn't.
+        deadline=$((SECONDS + TIMEOUT_MINUTES * 60))
+        while true; do
+          artifacts="$(curl --silent --show-error --location \
+            --header "Authorization: Bearer $GH_TOKEN" --header "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" || true)"
+          if grep -Eq '"name": *"ui-dist"' <<< "$artifacts"; then echo "ui-dist is ready"; break; fi
+          if grep -Eq '"name": *"ui-failed"' <<< "$artifacts"; then echo "::error::The Web UI bundle job failed"; exit 1; fi
+          if [ "$SECONDS" -ge "$deadline" ]; then echo "::error::ui-dist did not appear in time"; exit 1; fi
+          sleep 15
+        done
+    # Drop the stub the dependency build used, so nothing of it stays next to the real bundle.
+    - name: Remove the placeholder bundle
+      shell: bash
+      run: rm -rf crates/teamcraft-ui/dist
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: ui-dist
+        path: crates/teamcraft-ui/dist
+        run-id: ${{ github.run_id }}
+        github-token: ${{ inputs.github-token }}
+    # The build embeds the bundle by the files' content and modification time: the new files must
+    # not look older than the placeholder's compile.
+    - name: Touch the bundle
+      shell: bash
+      run: find crates/teamcraft-ui/dist -type f -exec touch {} +

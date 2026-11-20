@@ -114,6 +114,8 @@ class CoreHttpConnection(
     try {
       val request = request()
       connected = true
+      UiThreadGuard.shared.check("CoreHttpConnection.answer")
+      // blocking-ok: AppAuth reads the answer on its own background thread; the guard reports any other.
       val answer = runBlocking { transport(request) }
       maybeAnswer = answer
       return answer

@@ -238,6 +238,8 @@ jobs:
       contents: read
       # The Linux jobs run in the CI image on GHCR.
       packages: read
+      # The jobs that compile before the UI bundle exists wait for its artifact.
+      actions: read
     uses: ./.github/workflows/desktop-release.yml
     # The optional signing secrets (Apple Developer ID, updater key) are read inside it.
     secrets: inherit
@@ -447,7 +449,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           REPO: ${{ github.repository }}
         run: |
-          patterns=(linux-packages-* 'teamcraft-desktop-*.flatpak*' 'macos-*' 'windows-*' ui-dist 'release-image-*')
+          patterns=(linux-packages-* 'macos-*' 'windows-*' ui-dist 'release-image-*')
           args=()
           for pattern in "${patterns[@]}"; do args+=(--pattern "$pattern"); done
           for attempt in 1 2 3 4; do
@@ -487,7 +489,7 @@ jobs:
           mv "teamcraft-source-${VERSION}.spdx.json" "teamcraft-source-${VERSION}.cdx.json" dist/
           # Packages of every platform the desktop workflow builds (Windows joins with its jobs).
           find artifacts -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \
-            -o -name '*.flatpak' -o -name '*.dmg' -o -name '*.msi' -o -name '*.exe' \
+            -o -name '*.dmg' -o -name '*.msi' -o -name '*.exe' \
             -o -name '*.app.tar.gz' -o -name '*.sig' \
             -o -name '*.spdx.json' -o -name '*.cdx.json' \) -exec cp {} dist/ \;
           # The web client: the same trunk build the desktop app embeds, served by the server

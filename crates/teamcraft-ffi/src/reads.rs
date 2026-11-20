@@ -65,6 +65,7 @@ use crate::EventListener;
 use crate::engine::{Job, Store, direct_peer, parse_id};
 use crate::error::TeamCraftError;
 use crate::logging::{self, JobClock};
+use crate::motion::MotionLimitsItem;
 use crate::perf_jobs::{self, PerfJobKind};
 use crate::polls::PollLimitsItem;
 use crate::store_threads::StoreHold;
@@ -1138,6 +1139,15 @@ impl Reads {
   /// The poll limits in force (issue #2120).
   pub(crate) fn poll_limits(&self) -> Result<PollLimitsItem, TeamCraftError> {
     Ok(self.backend()?.poll_limits().into())
+  }
+
+  /// The motion limits in force (issue #2181).
+  pub(crate) fn motion_limits(&self) -> Result<MotionLimitsItem, TeamCraftError> {
+    let limits = self.backend()?.motion_limits();
+    Ok(MotionLimitsItem {
+      is_allowed: limits.is_allowed,
+      max_bytes: limits.max_bytes,
+    })
   }
 
   /// The groups the composer offers after `@` here: none without `use_group_mentions` (issue #206).

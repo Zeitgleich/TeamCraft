@@ -100,6 +100,23 @@ pub struct OutgoingFile {
   /// there is one, and reads `source` otherwise (the attachment hasn't reached the core yet).
   #[serde(rename = "draft_id", default, skip_serializing_if = "Option::is_none")]
   pub maybe_draft_id: Option<String>,
+  /// The motion of a Live Photo or Motion Photo (issue #2181): a short video the app took from the
+  /// picture (an H.264 MP4 every platform plays), sent as a second file of the same message. Only on
+  /// a picture; the core sends it when the server's [`MotionLimits`](teamcraft_proto::MotionLimits)
+  /// admit it, otherwise the picture goes alone and the sender sees the motion as not sent.
+  #[serde(rename = "motion", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_motion: Option<OutgoingMotion>,
+}
+
+/// The motion part of an [`OutgoingFile`] (issue #2181).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutgoingMotion {
+  /// `video/mp4` from the apps; anything not `video/*` is dropped.
+  pub media_type: String,
+  pub source: FileSource,
+  /// How long the clip plays, read by the app.
+  #[serde(rename = "duration_ms", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_duration_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -290,6 +307,30 @@ pub struct FileInfo {
   /// cache of its rendition (`media::MediaKey::Rendition`). Absent for files still going up.
   #[serde(rename = "content_sha256", default, skip_serializing_if = "Option::is_none")]
   pub maybe_content_sha256: Option<String>,
+  /// The motion of a Live Photo or Motion Photo (issue #2181): played on request, downloaded only
+  /// then. Absent on anything but a picture with a playable motion part.
+  #[serde(rename = "motion", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_motion: Option<MotionInfo>,
+}
+
+/// The motion part of a picture (issue #2181), a file of its own with its own ID: the app opens it
+/// as it opens any file of the message ([`FileInfo::file_id`] of the motion).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MotionInfo {
+  pub file_id: String,
+  pub media_type: String,
+  pub size_bytes: u64,
+  #[serde(rename = "duration_ms", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_duration_ms: Option<u64>,
+  /// Where its bytes are: a phone plays the clip from its local file once downloaded.
+  pub transfer: FileTransfer,
+}
+
+impl FileInfo {
+  /// Whether the picture has a motion part to play (a Live Photo or Motion Photo).
+  pub fn is_live(&self) -> bool {
+    self.maybe_motion.is_some()
+  }
 }
 
 impl FileInfo {

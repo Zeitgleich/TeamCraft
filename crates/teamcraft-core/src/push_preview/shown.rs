@@ -241,6 +241,7 @@ mod tests {
       maybe_dimensions: None,
       maybe_duration_ms: Some(1_000),
       maybe_waveform: None,
+      maybe_motion: None,
     }
   }
 

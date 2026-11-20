@@ -8,7 +8,7 @@
 # `.sig` files travel with the packages and release.yml turns them into latest.json.
 #
 # With `warm-cache`, desktop-cache.yml runs the same compile on `main` without packaging and saves the
-# Rust build cache and the Flatpak builder state. A tag run can only restore caches of its own ref or
+# Rust build cache. A tag run can only restore caches of its own ref or
 # the default branch, so the release jobs restore what `main` saved and never save themselves (each
 # tag's cache would be unreadable for the next release and only evict the useful ones).
 name: Desktop release
@@ -31,6 +31,8 @@ permissions:
   contents: read
   # The Linux jobs run in the CI image on GHCR.
   packages: read
+  # The macOS and Windows jobs wait for the UI bundle (.github/actions/await-ui-bundle).
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -54,7 +56,7 @@ jobs:
   ui:
     name: Web UI bundle
     # The wasm UI (size-optimized with fat LTO: a long serial build) is the same for every package,
-    # so it is built once here; the desktop jobs and the Flatpak embed it and release.yml ships it as
+    # so it is built once here; the desktop jobs embed it and release.yml ships it as
     # the web client.
     runs-on: ubuntu-latest
     container:
@@ -81,6 +83,14 @@ jobs:
           name: ui-dist
           path: crates/teamcraft-ui/dist
           if-no-files-found: error
+      # The jobs that compile meanwhile stop waiting (.github/actions/await-ui-bundle).
+      - if: ${{ failure() }}
+        run: echo failed > ui-failed.txt
+      - if: ${{ failure() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ui-failed
+          path: ui-failed.txt
 
   linux:
     name: Linux ${{ matrix.arch }} (deb, rpm, AppImage)
@@ -94,7 +104,9 @@ jobs:
             runner: ubuntu-latest
           - arch: aarch64
             runner: ubuntu-24.04-arm
-    needs: ui
+    # Not warmed (no Rust cache): compiling from scratch takes less than the ui job, so the cache
+    # would only use up the repository's 10 GB budget (docs/release.md, "Critical path").
+    if: ${{ !inputs.warm-cache }}
     runs-on: ${{ matrix.runner }}
     env:
       # Linked with debug info and symbols; "Split off the debug file" strips the executable before
@@ -108,12 +120,6 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - id: rust-cache
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          key: release-linux-${{ matrix.arch }}
-          cache-bin: "false"
-          save-if: ${{ inputs.warm-cache }}
       # The tag's version for a release run (v1.0.0-rc.2 -> 1.0.0-rc.2), else the tree's: the app
       # reports it and the update signatures bind it (docs/updates.md §3.1). The debug files' index
       # names a build without a tag by its commit too (1.0.0+abc1234), so it doesn't replace the
@@ -134,21 +140,31 @@ jobs:
           echo "TEAMCRAFT_RPM_RELEASE=$(scripts/linux-package-version.sh rpm-release "$TEAMCRAFT_RELEASE_VERSION")" >> "$GITHUB_ENV"
       - name: Segmentation model (background effects; not in git)
         run: crates/teamcraft-media/models/fetch.sh
-      # The UI bundle from the ui job; tauri.prebuilt-ui.conf.json drops the trunk build from
-      # beforeBuildCommand.
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      # Compile everything while the ui job still builds the wasm bundle (it takes as long as this
+      # build): a placeholder stands in for the bundle, so only the desktop crate itself is compiled
+      # again once the real one has arrived. Same command, config and flags as the build below, or
+      # the dependencies would be compiled twice (docs/release.md, "Critical path").
+      - name: Compile the dependencies (placeholder UI)
+        shell: bash
+        working-directory: apps/desktop
+        run: |
+          mkdir -p ../../crates/teamcraft-ui/dist
+          echo '<!doctype html><title>teamcraft-ui-build-pending</title>' > ../../crates/teamcraft-ui/dist/index.html
+          cargo tauri build --config tauri.models.conf.json --config tauri.prebuilt-ui.conf.json --no-bundle
+      # The UI bundle from the ui job (this job doesn't `needs: ui`, see above); tauri.prebuilt-ui.conf.json
+      # drops the trunk build from beforeBuildCommand.
+      - uses: ./.github/actions/await-ui-bundle
         with:
-          name: ui-dist
-          path: crates/teamcraft-ui/dist
-      # The same compile with or without packaging, so the warmed cache fits the release build. A
-      # warm-up run whose cache key already exists (same lockfile, toolchain and flags) has nothing
-      # new to save and skips it.
+          github-token: ${{ github.token }}
       - name: Build the executable
-        if: ${{ !inputs.warm-cache || steps.rust-cache.outputs.cache-hit != 'true' }}
         working-directory: apps/desktop
         run: >
           cargo tauri build --config tauri.models.conf.json --config tauri.prebuilt-ui.conf.json
           --no-bundle
+      # The compile against the placeholder must not be what ships.
+      - name: The build embeds the real UI
+        shell: bash
+        run: scripts/check-embedded-ui.sh
       # The packages get the stripped executable (as with `strip = "symbols"`), linked to its debug
       # file by build ID and .gnu_debuglink.
       - name: Split off the debug file
@@ -204,73 +220,6 @@ jobs:
             target/release/bundle/appimage/*.AppImage.sig
           if-no-files-found: error
 
-  flatpak:
-    name: Flatpak ${{ matrix.arch }} (build only)
-    needs: ui
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x86_64
-            runner: ubuntu-latest
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
-    container:
-      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
-      options: --privileged
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # The flatpak-builder state (.flatpak-builder: downloads, built modules, ccache and the cargo
-      # target and home the manifest keeps there) under a key of what changes the build. The action
-      # appends the arch and falls back to the newest `flatpak-builder-<arch>` cache, so a tag run
-      # restores what `main` saved even when the lockfile changed since. A step, not job `env`:
-      # `hashFiles` is not available at the job level, and the workflow would not load at all.
-      - id: cache-key
-        run: echo "value=flatpak-builder-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'apps/desktop/packaging/linux/de.zeitgleich.teamcraft.yml') }}" >> "$GITHUB_OUTPUT"
-      # A warm-up whose key is already saved only restores it (which keeps it from expiring) and
-      # skips the build.
-      - id: cache-lookup
-        if: ${{ inputs.warm-cache }}
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .flatpak-builder
-          key: ${{ steps.cache-key.outputs.value }}-${{ matrix.arch }}
-      # The app is built from source inside the GNOME SDK; only the web UI (wasm32, which the
-      # SDK's Rust lacks) comes from the ui job.
-      - if: ${{ steps.cache-lookup.outputs.cache-hit != 'true' }}
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: ui-dist
-          path: crates/teamcraft-ui/dist
-      # Like the Rust caches: a tag run can only restore caches of its own ref or `main`, so only
-      # the warm-up on `main` (desktop-cache.yml) saves, after pruning below.
-      - if: ${{ steps.cache-lookup.outputs.cache-hit != 'true' }}
-        uses: flatpak/flatpak-github-actions/flatpak-builder@79327416609af08178ad73b352877e51450790b3 # v6.8
-        with:
-          bundle: teamcraft-desktop-${{ matrix.arch }}.flatpak
-          manifest-path: apps/desktop/packaging/linux/de.zeitgleich.teamcraft.yml
-          arch: ${{ matrix.arch }}
-          cache-key: ${{ steps.cache-key.outputs.value }}
-          save-cache: false
-          build-bundle: ${{ !inputs.warm-cache }}
-          upload-artifact: ${{ !inputs.warm-cache }}
-      # The workspace crates are rebuilt on every run anyway (new sources); keep only the
-      # dependencies, as rust-cache does, to stay within the repository's cache budget.
-      - name: Prune the workspace crates from the cargo target
-        if: ${{ inputs.warm-cache && steps.cache-lookup.outputs.cache-hit != 'true' }}
-        run: |
-          for target in .flatpak-builder/ccache/cargo-target-*/release; do
-            rm -rf "$target"/teamcraft-desktop "$target"/.fingerprint/teamcraft* \
-              "$target"/build/teamcraft* "$target"/deps/teamcraft* "$target"/deps/libteamcraft*
-          done
-          du -sh .flatpak-builder/* || true
-      - if: ${{ inputs.warm-cache && steps.cache-lookup.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .flatpak-builder
-          key: ${{ steps.cache-key.outputs.value }}-${{ matrix.arch }}
-
   macos:
     name: macOS ${{ matrix.title }} (dmg)
     # One dmg and one update archive per architecture (no universal build: it carried the native code
@@ -291,7 +240,6 @@ jobs:
             title: Intel
             arch: x64
             rustflags: ""
-    needs: ui
     # Xcode 27 (macOS 27 SDK), the same image as the iOS jobs; the deployment target below keeps
     # macOS 14+ running.
     runs-on: xcode-27
@@ -352,12 +300,26 @@ jobs:
           echo "$RUNNER_TEMP/tauri-cli" >> "$GITHUB_PATH"
       - name: Segmentation model (background effects; not in git)
         run: crates/teamcraft-media/models/fetch.sh
-      # The UI bundle from the ui job; tauri.prebuilt-ui.conf.json drops the trunk build from
-      # beforeBuildCommand.
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      # Compile everything while the ui job still builds the wasm bundle (it takes as long as this
+      # build): a placeholder stands in for the bundle, so only the desktop crate itself is compiled
+      # again once the real one has arrived. Same command, config, target and flags as the build
+      # below, or the dependencies would be compiled twice.
+      - name: Compile the dependencies (placeholder UI)
+        if: ${{ !inputs.warm-cache || steps.rust-cache.outputs.cache-hit != 'true' }}
+        shell: bash
+        working-directory: apps/desktop
+        run: |
+          mkdir -p ../../crates/teamcraft-ui/dist
+          echo '<!doctype html><title>teamcraft-ui-build-pending</title>' > ../../crates/teamcraft-ui/dist/index.html
+          cargo tauri build --config tauri.models.conf.json --config tauri.prebuilt-ui.conf.json --target ${{ matrix.target }} --no-bundle
+        env:
+          PKG_CONFIG_PATH: /Library/Frameworks/GStreamer.framework/Versions/1.0/lib/pkgconfig
+          PKG_CONFIG_ALLOW_CROSS: "1"
+      # The UI bundle from the ui job (this job doesn't `needs: ui`, see above); tauri.prebuilt-ui.conf.json
+      # drops the trunk build from beforeBuildCommand.
+      - uses: ./.github/actions/await-ui-bundle
         with:
-          name: ui-dist
-          path: crates/teamcraft-ui/dist
+          github-token: ${{ github.token }}
       # Skipped by a warm-up run whose cache key already exists (see the Linux job).
       - name: Build the executable
         if: ${{ !inputs.warm-cache || steps.rust-cache.outputs.cache-hit != 'true' }}
@@ -368,6 +330,11 @@ jobs:
         env:
           PKG_CONFIG_PATH: /Library/Frameworks/GStreamer.framework/Versions/1.0/lib/pkgconfig
           PKG_CONFIG_ALLOW_CROSS: "1"
+      # The compile against the placeholder must not be what ships.
+      - name: The build embeds the real UI
+        shell: bash
+        if: ${{ !inputs.warm-cache }}
+        run: scripts/check-embedded-ui.sh
       # The dSYM and the executable carry the same UUID, which stripping, install_name_tool and
       # codesign leave alone. `strip -S -x` drops the debug map and the local symbols, as Cargo's
       # `strip = "symbols"` did.
@@ -526,7 +493,6 @@ jobs:
           - target: aarch64-pc-windows-msvc
             runner: windows-11-arm
             tauri-cli-sha256: 92aa6a90be3126ed7b6ede964ca12124535359b47d8363dc29189b4f776303e7
-    needs: ui
     runs-on: ${{ matrix.runner }}
     # Overrides the workflow-wide flags: WebRTC echo cancellation is not part of the Windows build
     # yet (the experimental CI job tries it), so calls run without it. The executable never holds
@@ -575,12 +541,23 @@ jobs:
       - name: Segmentation model (background effects; not in git)
         shell: bash
         run: crates/teamcraft-media/models/fetch.sh
-      # The UI bundle from the ui job; tauri.prebuilt-ui.conf.json drops the trunk build from
-      # beforeBuildCommand.
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      # Compile everything while the ui job still builds the wasm bundle (it takes as long as this
+      # build): a placeholder stands in for the bundle, so only the desktop crate itself is compiled
+      # again once the real one has arrived. Same command, config, target and flags as the build
+      # below, or the dependencies would be compiled twice.
+      - name: Compile the dependencies (placeholder UI)
+        if: ${{ !inputs.warm-cache || steps.rust-cache.outputs.cache-hit != 'true' }}
+        shell: bash
+        working-directory: apps/desktop
+        run: |
+          mkdir -p ../../crates/teamcraft-ui/dist
+          echo '<!doctype html><title>teamcraft-ui-build-pending</title>' > ../../crates/teamcraft-ui/dist/index.html
+          cargo tauri build --config tauri.models.conf.json --config tauri.prebuilt-ui.conf.json --target ${{ matrix.target }} --no-bundle
+      # The UI bundle from the ui job (this job doesn't `needs: ui`, see above); tauri.prebuilt-ui.conf.json
+      # drops the trunk build from beforeBuildCommand.
+      - uses: ./.github/actions/await-ui-bundle
         with:
-          name: ui-dist
-          path: crates/teamcraft-ui/dist
+          github-token: ${{ github.token }}
       # Skipped by a warm-up run whose cache key already exists (see the Linux job).
       - name: Build installers
         if: ${{ !inputs.warm-cache || steps.rust-cache.outputs.cache-hit != 'true' }}
@@ -590,6 +567,11 @@ jobs:
           --target ${{ matrix.target }} ${{ inputs.warm-cache && '--no-bundle' || '--bundles nsis,msi' }}
         # Signing is left out on purpose (the installers are unsigned). To enable it, see
         # apps/desktop/packaging/windows/README.md (Authenticode certificate or Azure Trusted Signing).
+      # The compile against the placeholder must not be what ships.
+      - name: The build embeds the real UI
+        shell: bash
+        if: ${{ !inputs.warm-cache }}
+        run: scripts/check-embedded-ui.sh
       # The updater runs the new installer of the same kind (NSIS or MSI) the app came from.
       - name: Sign the installers for the updater (optional)
         if: ${{ !inputs.warm-cache }}

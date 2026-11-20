@@ -36,7 +36,7 @@ final class IdTokenTests: XCTestCase {
     XCTAssertNil(vault.currentIdToken())
   }
 
-  func testASignInStoredByAnOlderVersionHasNoIdTokenUntilARefreshBringsOne() throws {
+  func testASignInStoredByAnOlderVersionHasNoIdTokenUntilARefreshBringsOne() async throws {
     var stored = try XCTUnwrap(
       JSONSerialization.jsonObject(with: JSONEncoder().encode(session(idToken: "dropped"))) as? [String: Any])
     stored["idToken"] = nil
@@ -45,7 +45,8 @@ final class IdTokenTests: XCTestCase {
     let vault = makeVault(refresh: { $0.renewed(by: Self.response(idToken: fresh)) })
     XCTAssertEqual(vault.load()?.accessToken, "old-access")
     XCTAssertNil(vault.currentIdToken())
-    XCTAssertEqual(vault.currentAccessToken(forceRefresh: true), "new-access")
+    let asked1 = await offMain { vault.currentAccessToken(forceRefresh: true) }
+    XCTAssertEqual(asked1, "new-access")
     XCTAssertEqual(vault.currentIdToken(), fresh)
   }
 
@@ -84,44 +85,50 @@ final class IdTokenTests: XCTestCase {
 
   // MARK: Forced refresh
 
-  func testAFreshTokenIsOnlyRefreshedWhenForced() throws {
+  func testAFreshTokenIsOnlyRefreshedWhenForced() async throws {
     let refreshes = Counter()
     let vault = makeVault(refresh: {
       refreshes.increment()
       return $0.renewed(by: Self.response(idToken: Self.jwt(iat: 2)))
     })
     try vault.save(session(idToken: Self.jwt(iat: 1)))
-    XCTAssertEqual(vault.currentAccessToken(), "old-access")
+    let asked2 = await offMain { vault.currentAccessToken() }
+    XCTAssertEqual(asked2, "old-access")
     XCTAssertEqual(refreshes.value, 0)
-    XCTAssertEqual(vault.currentAccessToken(forceRefresh: true), "new-access")
+    let asked3 = await offMain { vault.currentAccessToken(forceRefresh: true) }
+    XCTAssertEqual(asked3, "new-access")
     XCTAssertEqual(refreshes.value, 1)
-    XCTAssertEqual(vault.currentAccessToken(), "new-access")
+    let asked4 = await offMain { vault.currentAccessToken() }
+    XCTAssertEqual(asked4, "new-access")
     XCTAssertEqual(refreshes.value, 1)
   }
 
-  func testAForcedRefreshThatFailsKeepsTheSessionAndItsGoodToken() throws {
+  func testAForcedRefreshThatFailsKeepsTheSessionAndItsGoodToken() async throws {
     let token = Self.jwt(iat: 1)
     let vault = makeVault(refresh: { _ in throw OidcError.network("offline") })
     try vault.save(session(idToken: token))
-    XCTAssertEqual(vault.currentAccessToken(forceRefresh: true), "old-access")
+    let asked5 = await offMain { vault.currentAccessToken(forceRefresh: true) }
+    XCTAssertEqual(asked5, "old-access")
     XCTAssertEqual(vault.currentIdToken(), token)
     XCTAssertEqual(vault.load()?.refreshToken, "old-refresh")
   }
 
-  func testARefusedRefreshTokenEndsTheSessionAlsoWhenForced() throws {
+  func testARefusedRefreshTokenEndsTheSessionAlsoWhenForced() async throws {
     let vault = makeVault(refresh: { _ in throw OidcError.sessionExpired })
     try vault.save(session(idToken: Self.jwt(iat: 1)))
-    XCTAssertNil(vault.currentAccessToken(forceRefresh: true))
+    let asked6 = await offMain { vault.currentAccessToken(forceRefresh: true) }
+    XCTAssertNil(asked6)
     XCTAssertNil(vault.load())
   }
 
-  func testARefreshThatTakesTooLongKeepsTheSession() throws {
+  func testARefreshThatTakesTooLongKeepsTheSession() async throws {
     let vault = makeVault(refreshTimeout: 0.05) { session in
       try await Task.sleep(nanoseconds: 2_000_000_000)
       return session
     }
     try vault.save(session(idToken: Self.jwt(iat: 1), expiresIn: -60))
-    XCTAssertNil(vault.currentAccessToken())
+    let asked7 = await offMain { vault.currentAccessToken() }
+    XCTAssertNil(asked7)
     XCTAssertEqual(vault.load()?.refreshToken, "old-refresh")
   }
 
@@ -136,7 +143,7 @@ final class IdTokenTests: XCTestCase {
     XCTAssertEqual(core.noted, [token])
   }
 
-  func testOneRequestIsOneForcedRefreshAndTheNewIdTokenReachesTheCore() throws {
+  func testOneRequestIsOneForcedRefreshAndTheNewIdTokenReachesTheCore() async throws {
     let newer = Self.jwt(iat: 2)
     let refreshes = Counter()
     let vault = makeVault(refresh: {
@@ -148,13 +155,15 @@ final class IdTokenTests: XCTestCase {
     let provider = VaultTokenProvider(vault: vault)
     provider.attach(core)
     core.isRequestPending = true
-    XCTAssertEqual(token(provider.accessToken()), "new-access")
-    XCTAssertEqual(token(provider.accessToken()), "new-access")
+    let asked8 = await offMain { provider.accessToken() }
+    XCTAssertEqual(token(asked8), "new-access")
+    let asked9 = await offMain { provider.accessToken() }
+    XCTAssertEqual(token(asked9), "new-access")
     XCTAssertEqual(refreshes.value, 1)
     XCTAssertEqual(core.noted.last, newer)
   }
 
-  func testAFailedForcedRefreshIsNotRetriedForTheSameRequest() throws {
+  func testAFailedForcedRefreshIsNotRetriedForTheSameRequest() async throws {
     let refreshes = Counter()
     let vault = makeVault(refresh: { _ in
       refreshes.increment()
@@ -165,12 +174,14 @@ final class IdTokenTests: XCTestCase {
     let provider = VaultTokenProvider(vault: vault)
     provider.attach(core)
     core.isRequestPending = true
-    XCTAssertEqual(token(provider.accessToken()), "old-access")
-    XCTAssertEqual(token(provider.accessToken()), "old-access")
+    let asked10 = await offMain { provider.accessToken() }
+    XCTAssertEqual(token(asked10), "old-access")
+    let asked11 = await offMain { provider.accessToken() }
+    XCTAssertEqual(token(asked11), "old-access")
     XCTAssertEqual(refreshes.value, 1)
   }
 
-  func testACoreThatIsGoneDoesNotFailTheTokenCallAndIsNotKeptAlive() throws {
+  func testACoreThatIsGoneDoesNotFailTheTokenCallAndIsNotKeptAlive() async throws {
     let vault = makeVault()
     try vault.save(session(idToken: Self.jwt(iat: 1)))
     let provider = VaultTokenProvider(vault: vault)
@@ -181,30 +192,34 @@ final class IdTokenTests: XCTestCase {
       provider.attach(core)
     }
     XCTAssertNil(weakCore)
-    XCTAssertEqual(token(provider.accessToken()), "old-access")
+    let asked12 = await offMain { provider.accessToken() }
+    XCTAssertEqual(token(asked12), "old-access")
   }
 
-  func testAProviderWithoutACoreNeverForcesARefresh() throws {
+  func testAProviderWithoutACoreNeverForcesARefresh() async throws {
     let refreshes = Counter()
     let vault = makeVault(refresh: {
       refreshes.increment()
       return $0
     })
     try vault.save(session(idToken: Self.jwt(iat: 1)))
-    XCTAssertEqual(token(VaultTokenProvider(vault: vault).accessToken()), "old-access")
+    let asked13 = await offMain { VaultTokenProvider(vault: vault).accessToken() }
+    XCTAssertEqual(token(asked13), "old-access")
     XCTAssertEqual(refreshes.value, 0)
   }
 
   /// Issue #1671: a refresh that fails for now keeps the session, and the core hears it is not a
   /// sign-out; a refused refresh token ends the session, and the core hears that.
-  func testAFailedRefreshIsNoSignOutButARefusedOneIs() throws {
+  func testAFailedRefreshIsNoSignOutButARefusedOneIs() async throws {
     let offline = makeVault(refresh: { _ in throw OidcError.network("offline") })
     try offline.save(session(idToken: nil, expiresIn: -60))
-    XCTAssertTrue(isUnavailable(VaultTokenProvider(vault: offline).accessToken()))
+    let asked14 = await offMain { VaultTokenProvider(vault: offline).accessToken() }
+    XCTAssertTrue(isUnavailable(asked14))
 
     let refused = makeVault(refresh: { _ in throw OidcError.sessionExpired })
     try refused.save(session(idToken: nil, expiresIn: -60))
-    XCTAssertTrue(isSignedOut(VaultTokenProvider(vault: refused).accessToken()))
+    let asked15 = await offMain { VaultTokenProvider(vault: refused).accessToken() }
+    XCTAssertTrue(isSignedOut(asked15))
   }
 
   // MARK: Helpers

@@ -1,6 +1,86 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "live_badge": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Live"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Live"
+          }
+        }
+      }
+    },
+    "live_play": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Play Live Photo"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Live Photo abspielen"
+          }
+        }
+      }
+    },
+    "live_send_motion": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Send Live Photos with motion"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Live Photos mit Bewegung senden"
+          }
+        }
+      }
+    },
+    "live_send_motion_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Off sends the still picture only, which uses less data."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aus sendet nur das Standbild und braucht weniger Daten."
+          }
+        }
+      }
+    },
+    "live_stop": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stop Live Photo"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Live Photo anhalten"
+          }
+        }
+      }
+    },
     "animated_images_title": {
       "localizations": {
         "en": {
@@ -24861,6 +24941,22 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "share_destination_gone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The conversation picked in the share sheet can no longer take it. Choose another one."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die im Teilen-Menü gewählte Unterhaltung kann es nicht mehr aufnehmen. Wähle eine andere."
           }
         }
       }

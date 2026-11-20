@@ -54,6 +54,7 @@ pub struct CallQuality {
   downlink_loss_ratio: Histogram,
   keyframe_requests: IntCounter,
   retransmitted_packets: IntCounter,
+  uplink_packets_requested: IntCounter,
   forwarded_bytes: IntCounter,
   sessions: IntCounterVec,
   session_switches: IntCounter,
@@ -106,6 +107,7 @@ impl CallQuality {
     metrics.register(&self.downlink_loss_ratio)?;
     metrics.register(&self.keyframe_requests)?;
     metrics.register(&self.retransmitted_packets)?;
+    metrics.register(&self.uplink_packets_requested)?;
     metrics.register(&self.forwarded_bytes)?;
     metrics.register(&self.sessions)?;
     metrics.register(&self.session_switches)
@@ -162,6 +164,13 @@ impl CallQuality {
   pub fn retransmitted(&self, packets: usize) {
     self
       .retransmitted_packets
+      .inc_by(u64::try_from(packets).unwrap_or(u64::MAX));
+  }
+
+  /// The SFU asked a publisher for `packets` video packets its uplink lost (#2189).
+  pub fn uplink_packets_requested(&self, packets: usize) {
+    self
+      .uplink_packets_requested
       .inc_by(u64::try_from(packets).unwrap_or(u64::MAX));
   }
 
@@ -222,6 +231,10 @@ impl CallQuality {
       retransmitted_packets: IntCounter::new(
         "teamcraft_sfu_retransmitted_packets_total",
         "Video packets the SFU sent to a receiver once more because it reported them lost (NACK).",
+      )?,
+      uplink_packets_requested: IntCounter::new(
+        "teamcraft_sfu_uplink_packets_requested_total",
+        "Video packets the SFU asked a publisher to send again because its uplink lost them.",
       )?,
       forwarded_bytes: IntCounter::new(
         "teamcraft_sfu_forwarded_bytes_total",

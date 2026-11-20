@@ -240,6 +240,7 @@ fn with_file(conversation: ConversationId, name: &str, source: FileSource) -> Ou
       maybe_duration_ms: None,
       maybe_waveform: None,
       maybe_draft_id: None,
+      maybe_motion: None,
     }],
     link_preview: Default::default(),
   }

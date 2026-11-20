@@ -172,6 +172,9 @@ final class AppModel {
   var isTakingShare = false
   /// Why files of a share couldn't be attached, for the picker that comes back with them.
   var shareImportError: AttachmentError?
+  /// The conversation picked in the share extension can't take the share any more (left, removed,
+  /// no posting): the app's picker asks again and says why (#1037).
+  var isShareDestinationGone = false
   /// A share from before the sign-in went: it was kept for the person signed in before.
   var isShareGoneForAccount = false
   /// A link the system handed over, until it was acted on (AppModel+AppLinks.swift).
@@ -214,6 +217,8 @@ final class AppModel {
   let calls = CallManager()
   /// The home screen widget's unread conversations (#2076).
   @ObservationIgnored let homeWidget = HomeWidgetUpdater()
+  /// The share extension's conversation list (issue #1037).
+  @ObservationIgnored let shareTargetsUpdater = ShareTargetsUpdater()
   /// The server's brand for the confirmation and sign-in screens.
   let brand = BrandStore()
   /// The server the device's management or the build names (read at start).
@@ -466,7 +471,7 @@ final class AppModel {
       let hasLock = await takeProcessLock(for: holder, timeout: 5)
       defer { if hasLock { releaseProcessLock(for: holder) } }
       do {
-        try await Task.detached { try core.resetStore() }.value
+        try await core.resetStore()
         await refreshAccountState()
       } catch {
         AppLog.failure("setting the local data aside", error)
@@ -1156,6 +1161,7 @@ final class AppModel {
     if Thread.isMainThread {
       MainActor.assumeIsolated { shared.backgroundTimeExpired() }
     } else {
+      // blocking-ok: the expiry thread waits for the main thread, not the other way round.
       DispatchQueue.main.sync { MainActor.assumeIsolated { shared.backgroundTimeExpired() } }
     }
   }
@@ -1174,6 +1180,7 @@ final class AppModel {
     suspension.storeSuspended()
     // Waits here, on the main thread, at most `MAX_STORE_CLOSE_WAIT` (2 s): an expiry handler
     // can't wait asynchronously, and iOS suspends the app once it returned.
+    // blocking-ok: on the main thread on purpose, at most 2 s: iOS suspends once the handler returns.
     let suspended = core.suspend()
     Self.syncLog.notice("background time ran out; store: \(String(describing: suspended), privacy: .public)")
   }
@@ -1350,6 +1357,7 @@ final class AppModel {
     changeCount += 1
     if maybeCore != nil { settingsSyncer().storeDidChange() }
     homeWidget.storeDidChange(self)
+    shareTargetsUpdater.storeDidChange(self)
     followTyping()
     calls.storeDidChange()
     let wasConnected = connection?.isConnected == true
@@ -1669,7 +1677,12 @@ final class AppModel {
     let changes = ChangeCoalescer { [weak self] in self?.storeDidChange() }
     let listener = ClosureEventListener { changes.signal() }
     let opening = Task.detached(priority: .userInitiated) {
-      Result { try factory.open(account: account, createKey: createsKey, runsUpkeep: true, listener: listener) }
+      do {
+        return Result<TeamCraft, Error>.success(
+          try await factory.open(account: account, createKey: createsKey, runsUpkeep: true, listener: listener))
+      } catch {
+        return .failure(error)
+      }
     }
     maybeCoreOpening = opening
     LaunchSteps.mark(.storeOpening)
@@ -1727,11 +1740,23 @@ final class AppModel {
     if maybeConnection != connection { Perf.connectionChanged(from: connection, to: maybeConnection) }
     connection = maybeConnection
     if case .signInRequired = maybeConnection {
-      isDeviceKeyLost = vault.isDeviceKeyLost
+      Task { [weak self] in
+        guard let self else { return }
+        let isLost = await self.readsDeviceKeyLost()
+        // The connection may have come back while the keychain answered.
+        if case .signInRequired = self.connection { self.isDeviceKeyLost = isLost }
+      }
     } else {
       isDeviceKeyLost = false
     }
     observeConnection()
+  }
+
+  /// Whether the session's device key is gone: reads the keychain and the Secure Enclave, which can
+  /// wait on `securityd`, so off the main thread (#2184).
+  private func readsDeviceKeyLost() async -> Bool {
+    let vault = vault
+    return await Task.detached { vault.isDeviceKeyLost }.value
   }
 
   private func observeConnection() {
@@ -1812,6 +1837,7 @@ final class AppModel {
     container.wipeDownloads()
     container.pruneUploads(olderThan: 0)
     homeWidget.clear()
+    shareTargetsUpdater.clear()
     // What waits to be shared doesn't outlive the session on this device either.
     ShareInbox.shared()?.wipe()
     waitingShare = nil
@@ -1845,7 +1871,7 @@ final class AppModel {
       }
     } catch {
       let failure = CoreFailure(error)
-      if vault.isDeviceKeyLost {
+      if await readsDeviceKeyLost() {
         // Nothing went out and nothing is lost but the key: the next sign-in replaces the session
         // and makes a new one (docs/e2ee.md §3.1.2).
         phase = .signedOut(.deviceKeyLost)
@@ -2012,6 +2038,7 @@ final class AppModel {
     dropProcessLock()
     guard let core = maybeCore else { return }
     suspension.storeSuspended()
+    // blocking-ok: on a detached task, off the main thread.
     let suspended = await Task.detached { core.suspend() }.value
     Self.syncLog.info("store closed for the suspension: \(String(describing: suspended), privacy: .public)")
   }
@@ -2027,7 +2054,7 @@ final class AppModel {
   private func resumeStoreAhead() async {
     guard suspension.isStoreSuspended, let core = maybeCore else { return }
     do {
-      try await Task.detached { try core.resume() }.value
+      try await core.resume()
       storeResumed()
     } catch {
       // The next use of the core tries again.
@@ -2044,7 +2071,7 @@ final class AppModel {
   /// store opens.
   private func resumeStore(_ core: TeamCraft) async throws {
     guard suspension.mayResume(isInBackground: isInBackground) else { throw CoreFactoryError.storeSuspended }
-    try await Task.detached { try core.resume() }.value
+    try await core.resume()
     storeResumed()
   }
 

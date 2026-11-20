@@ -14,7 +14,7 @@ final class PagedFeed {
   private var maybeOldest: Message?
   private var maybeLastRead: Task<MessagePage?, Never>?
 
-  init(firstPage: UInt32 = 200, pageBack: UInt32 = 100, read: @escaping Read) {
+  init(firstPage: UInt32 = 60, pageBack: UInt32 = 60, read: @escaping Read) {
     self.firstPage = firstPage
     self.pageBack = pageBack
     self.read = read

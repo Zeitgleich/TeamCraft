@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A dot in a ring in a dotted ring: a Live Photo or Motion Photo (#2181), the web's `Live` icon. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+  android:width="24dp"
+  android:height="24dp"
+  android:viewportWidth="24"
+  android:viewportHeight="24">
+  <path
+    android:fillColor="#FF000000"
+    android:pathData="M12,9.5a2.5,2.5 0,1 0,0 5a2.5,2.5 0,1 0,0 -5Z" />
+  <path
+    android:strokeColor="#FF000000"
+    android:strokeWidth="1.8"
+    android:pathData="M12,6a6,6 0,1 0,0 12a6,6 0,1 0,0 -12Z" />
+  <path
+    android:strokeColor="#FF000000"
+    android:strokeWidth="1.8"
+    android:strokeLineCap="round"
+    android:pathData="M21.5,12h0.01M20.2,16.8h0.01M16.8,20.2h0.01M12,21.5h0.01M7.2,20.2h0.01M3.8,16.8h0.01M2.5,12h0.01M3.8,7.2h0.01M7.2,3.8h0.01M12,2.5h0.01M16.8,3.8h0.01M20.2,7.2h0.01" />
+</vector>

@@ -53,6 +53,7 @@ mod linking;
 mod links_budget;
 mod list_load;
 mod live_permissions;
+mod live_photos;
 mod meeting_anchor;
 mod meeting_chats;
 mod meeting_invitees;

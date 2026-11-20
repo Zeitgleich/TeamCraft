@@ -27,8 +27,8 @@ use teamcraft_client_api::video_stats::VideoStatsReport;
 use teamcraft_proto::{
   AudioFeature, Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallServerMessage,
   DaveKeyBinding, DaveTransitionId, DaveTransitionMode, DeviceId, ErrorBody, ErrorCode,
-  LEGACY_SIMULCAST_LAYERS, MAX_SIMULCAST_LAYERS, MediaCapabilities, MediaStreamId, ScreenAudioTrack,
-  ScreenShareTakeover, TransportFeedback, UserId, VideoCodec, VideoFeature, VideoLayerInfo,
+  LEGACY_SIMULCAST_LAYERS, MAX_NACK_SEQUENCE_NUMBERS, MAX_SIMULCAST_LAYERS, MediaCapabilities, MediaStreamId,
+  ScreenAudioTrack, ScreenShareTakeover, TransportFeedback, UserId, VideoCodec, VideoFeature, VideoLayerInfo,
   VideoPublicationId, VideoTrack, VideoTrackKind,
 };
 use thiserror::Error;
@@ -54,6 +54,7 @@ use crate::join_probe::{JoinProbe, JoinProbeConfig, LinkMeasurement};
 use crate::link_probe::{PriorLink, PriorUplink};
 use crate::nack::NackConfig;
 use crate::rate_probe::{ProbeOutcome, RateProbeConfig, UplinkProbe};
+use crate::retransmit::{RetransmitBudget, RetransmitConfig};
 use crate::rtp::{PayloadType, RtpHeader, RtpPacket, RtpTimestamp, SequenceNumber, Ssrc};
 use crate::share_policy::UplinkTop;
 use crate::uplink_layers::{Adaptation, OwnTrack, UplinkLayers, UplinkPolicy, probe_demand_bps};
@@ -166,6 +167,11 @@ pub struct CallEngine {
   /// How missing video packets are asked for again, from the SFU's last `joined`; `None` before,
   /// and from an SFU that resends nothing (#1762).
   maybe_nack: Option<NackConfig>,
+  /// How long own video packets are kept to send again when the SFU didn't get them (#2189): the
+  /// window from the SFU's last `joined`; `None` before, and from an SFU that resends nothing.
+  maybe_retransmit: Option<RetransmitConfig>,
+  /// What the uplink may carry of own packets sent again.
+  retransmit_budget: RetransmitBudget,
   /// What moves the current session to another connection without a rejoin (#1309), from the
   /// SFU's last `joined`; `None` from an SFU that sends none, and while away.
   maybe_switch_secret: Option<Base64Bytes>,
@@ -757,6 +763,8 @@ impl CallEngine {
       subscriptions: HashMap::new(),
       maybe_reconnect_grace: None,
       maybe_nack: None,
+      maybe_retransmit: None,
+      retransmit_budget: RetransmitBudget::default(),
       maybe_switch_secret: None,
       maybe_decodable: None,
       decodable_by_some: Vec::new(),
@@ -1715,6 +1723,9 @@ impl CallEngine {
       },
     };
     track.count_sent(frame.layer, frame.is_keyframe, &packets);
+    if let Some(config) = &self.maybe_retransmit {
+      track.keep_sent(frame.layer, &packets, now, config);
+    }
     // Saturating float-to-int conversion is intended.
     let burst_bytes = (f64::from(self.uplink.estimate_bps()) / 8.0 * OWN_BURST_SHARE) as usize;
     if encrypted.len() > burst_bytes {
@@ -2079,6 +2090,14 @@ impl CallEngine {
       },
       CallEvent::KeyframeRequested { stream_id, layer } => {
         self.event(CallEngineEvent::KeyframeRequested { stream_id, layer });
+        Ok(())
+      },
+      CallEvent::RetransmitRequested {
+        stream_id,
+        layer,
+        sequence_numbers,
+      } => {
+        self.resend_own_video(StreamId(stream_id.0), layer, &sequence_numbers, now);
         Ok(())
       },
       CallEvent::DownlinkMeasured {
@@ -3876,14 +3895,57 @@ impl CallEngine {
   }
 
   /// The SFU keeps forwarded video packets for `maybe_window_ms` (`joined`, #1762): missing ones
-  /// are asked for and waited for within it. `None` (an older SFU) or zero: a gap is a loss at
-  /// once, as before.
+  /// are asked for and waited for within it, and own ones are kept as long for the SFU to ask for
+  /// (#2189). `None` (an older SFU) or zero: a gap is a loss at once, as before.
   fn set_retransmit_window(&mut self, maybe_window_ms: Option<u32>) {
-    self.maybe_nack = maybe_window_ms
+    let maybe_window = maybe_window_ms
       .filter(|window_ms| *window_ms > 0)
-      .map(|window_ms| NackConfig::for_window(Duration::from_millis(u64::from(window_ms))));
+      .map(|window_ms| Duration::from_millis(u64::from(window_ms)));
+    self.maybe_nack = maybe_window.map(NackConfig::for_window);
+    self.maybe_retransmit = maybe_window.map(|window| RetransmitConfig {
+      window,
+      ..RetransmitConfig::default()
+    });
     for track in self.remote_video.values_mut() {
       track.set_nack(self.maybe_nack);
+    }
+  }
+
+  /// Sends the packets of an own track the SFU names once more, as they went out (#2189): those
+  /// still kept, as far as the uplink's budget for resent packets goes. Numbers beyond
+  /// [`MAX_NACK_SEQUENCE_NUMBERS`] are ignored; a request for a track no longer published is no
+  /// error (it crossed the unpublish).
+  fn resend_own_video(&mut self, stream: StreamId, layer: u8, sequence_numbers: &[u16], now: Instant) {
+    let (Some(config), Some(track)) = (self.maybe_retransmit, self.own_video.get(&stream)) else {
+      return;
+    };
+    let Ok(simulcast_layer) = SimulcastLayer::new(layer) else {
+      return;
+    };
+    let estimate_bps = self.uplink.estimate_bps();
+    let mut packets = Vec::new();
+    for &sequence_number in sequence_numbers.iter().take(MAX_NACK_SEQUENCE_NUMBERS) {
+      let Some(packet) = track.sent_packet(layer, sequence_number, now, config.window) else {
+        continue;
+      };
+      if !self
+        .retransmit_budget
+        .try_spend(packet.len(), estimate_bps, now, &config)
+      {
+        break;
+      }
+      packets.push(packet.to_vec());
+    }
+    if !packets.is_empty() {
+      debug!(
+        stream_id = stream.0,
+        layer,
+        packets = packets.len(),
+        "resending video packets the SFU missed"
+      );
+    }
+    for packet in packets {
+      self.send_media(stream, simulcast_layer, &packet, now);
     }
   }
 
@@ -4810,6 +4872,95 @@ mod tests {
         let outputs = drain(&mut bob);
         assert!(nacks(&outputs).is_empty());
         assert_eq!(requests(&outputs), vec![STREAM], "a keyframe at once, as before");
+      }
+
+      /// #2189: the SFU names packets of Alice's track its uplink lost; Alice sends them once
+      /// more, exactly as they went out, and Bob's picture goes on.
+      #[test]
+      fn the_publisher_sends_what_the_sfu_missed_once_more() {
+        let now = Instant::now();
+        let (mut alice, mut bob) = watching_pair(now);
+        alice.set_retransmit_window(Some(1000));
+        bob.set_retransmit_window(Some(1000));
+        let mut keyframe = datagrams_of(&mut alice, true, now);
+        let lost = keyframe.remove(1);
+        deliver(&mut bob, &keyframe, now);
+        drain(&mut bob);
+        let asked_at = now + Duration::from_millis(30);
+        let resent = retransmit(&mut alice, &[rtp_sequence_number(&lost), 999], asked_at);
+        assert_eq!(resent.len(), 1, "the unknown number is skipped");
+        let rtp = |datagram: &[u8]| MediaDatagram::parse(datagram).unwrap().rtp.to_vec();
+        assert_eq!(rtp(&resent[0]), rtp(&lost), "the same encrypted packet");
+        assert_ne!(
+          MediaDatagram::parse(&resent[0])
+            .unwrap()
+            .header
+            .maybe_transport_seq,
+          MediaDatagram::parse(&lost).unwrap().header.maybe_transport_seq,
+          "numbered anew for the uplink's estimation"
+        );
+        deliver(&mut bob, &resent, asked_at);
+        assert_eq!(frames(&drain(&mut bob)), vec![true]);
+      }
+
+      #[test]
+      fn nothing_older_than_the_window_or_beyond_the_budget_is_sent_again() {
+        let now = Instant::now();
+        let (mut alice, _) = watching_pair(now);
+        alice.set_retransmit_window(Some(1000));
+        let keyframe = datagrams_of(&mut alice, true, now);
+        let numbers: Vec<u16> = keyframe
+          .iter()
+          .map(|datagram| rtp_sequence_number(datagram))
+          .collect();
+        let late = now + Duration::from_millis(1001);
+        assert!(retransmit(&mut alice, &numbers, late).is_empty());
+        // A burst of 64 KiB, then 30 % of the uplink estimate: a flood of requests gets no flood.
+        let mut sent = 0;
+        let mut at = late;
+        for _ in 0..40 {
+          let keyframe = datagrams_of(&mut alice, true, at);
+          let numbers: Vec<u16> = keyframe
+            .iter()
+            .map(|datagram| rtp_sequence_number(datagram))
+            .collect();
+          sent += retransmit(&mut alice, &numbers, at)
+            .iter()
+            .map(Vec::len)
+            .sum::<usize>();
+          at += Duration::from_millis(1);
+        }
+        assert!(sent <= 70_000, "{sent} bytes sent again within 40 ms");
+      }
+
+      #[test]
+      fn nothing_is_kept_for_an_sfu_that_asks_for_nothing() {
+        let now = Instant::now();
+        let (mut alice, _) = watching_pair(now);
+        alice.set_retransmit_window(None);
+        let keyframe = datagrams_of(&mut alice, true, now);
+        let numbers: Vec<u16> = keyframe
+          .iter()
+          .map(|datagram| rtp_sequence_number(datagram))
+          .collect();
+        assert!(retransmit(&mut alice, &numbers, now).is_empty());
+      }
+
+      /// What Alice sends when the SFU asks for `sequence_numbers` of her track's base layer.
+      fn retransmit(alice: &mut CallEngine, sequence_numbers: &[u16], now: Instant) -> Vec<Vec<u8>> {
+        let request = CallEvent::RetransmitRequested {
+          stream_id: STREAM,
+          layer: 0,
+          sequence_numbers: sequence_numbers.to_vec(),
+        };
+        alice.handle_event(request, now).unwrap();
+        drain(alice)
+          .into_iter()
+          .filter_map(|output| match output {
+            EngineOutput::Datagram(bytes) => Some(bytes),
+            _ => None,
+          })
+          .collect()
       }
 
       fn nacks(outputs: &[EngineOutput]) -> Vec<(MediaStreamId, u8, Vec<u16>)> {

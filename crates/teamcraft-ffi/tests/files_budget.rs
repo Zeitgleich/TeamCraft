@@ -45,7 +45,7 @@ async fn measure_the_files_view() {
   let started = Instant::now();
   seed(&directory, MESSAGES).await;
   eprintln!("seeded {MESSAGES} messages in {:?}", started.elapsed());
-  let core = TeamCraft::new(config(&directory), Arc::new(ValidToken), Arc::new(Quiet)).unwrap();
+  let core = TeamCraft::open_blocking(config(&directory), Arc::new(ValidToken), Arc::new(Quiet)).unwrap();
   assert!(matches!(
     core.account_state().await.unwrap(),
     AccountState::Ready { .. }

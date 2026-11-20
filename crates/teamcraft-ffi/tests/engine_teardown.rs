@@ -22,7 +22,8 @@ const ACCOUNT: &str = "tester";
 async fn the_store_is_closed_once_the_handle_is_dropped() {
   for _ in 0..ROUNDS {
     let directory = temp_dir();
-    let teamcraft = TeamCraft::new(config(&directory), Arc::new(Tokens), Arc::new(Listener)).unwrap();
+    let teamcraft =
+      TeamCraft::open_blocking(config(&directory), Arc::new(Tokens), Arc::new(Listener)).unwrap();
     // The read threads and the engine's jobs both ran, and a link wait runs beside the jobs.
     assert!(teamcraft.account_state().await.is_err());
     assert!(teamcraft.conversations().await.is_err());

@@ -37,7 +37,7 @@ async fn mobile_client_receives_and_answers_a_message() {
   // Bob is the phone.
   let directory = std::env::temp_dir().join(format!("teamcraft-ffi-it-{}", SystemClock.now_ms()));
   let changes = Arc::new(Changes(AtomicU32::new(0)));
-  let phone = TeamCraft::new(
+  let phone = TeamCraft::open_blocking(
     AppConfig {
       server_url: server_url.clone(),
       data_dir: directory.to_string_lossy().into_owned(),
@@ -199,7 +199,7 @@ async fn push_upkeep_leaves_the_gateway_connection_open() {
   let token = dev_token("bob");
   let directory = std::env::temp_dir().join(format!("teamcraft-ffi-push-{}", SystemClock.now_ms()));
   let open = || {
-    TeamCraft::new(
+    TeamCraft::open_blocking(
       AppConfig {
         server_url: proxy_url.clone(),
         data_dir: directory.to_string_lossy().into_owned(),

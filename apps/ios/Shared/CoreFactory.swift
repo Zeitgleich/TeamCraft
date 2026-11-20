@@ -33,6 +33,7 @@ final class VaultTokenProvider: TokenProvider, @unchecked Sendable {
   func accessToken() -> AccessToken {
     // Taken at most once per request of the core, so one request is one forced refresh.
     let forceRefresh = receiver?.takeIdTokenRequest() == true
+    // blocking-ok: the core asks on its token thread (`UiThreadGuard` in currentAccessToken).
     let token = vault.currentAccessToken(forceRefresh: forceRefresh)
     receiver?.noteIdToken(idToken: vault.currentIdToken())
     if let token { return .token(value: token) }
@@ -94,9 +95,10 @@ struct CoreFactory {
   /// database key on first sign-in (`createKey`); the extension never does, and opens the store
   /// with small caches (`isMemoryConstrained`, issue #155). `runsUpkeep` is the app: its core gets
   /// the ID token and can ask for a newer one; the extension leaves that work to the app.
+  /// Async: the store opens on a thread of the core's, never the caller's (#2184).
   func open(
     account: String, createKey: Bool, isMemoryConstrained: Bool = false, runsUpkeep: Bool, listener: EventListener
-  ) throws -> TeamCraft {
+  ) async throws -> TeamCraft {
     guard let server = servers.activeServer else { throw CoreFactoryError.noAccount }
     let keyName = Self.databaseKeyName(storageKey: server.address.storageKey, account: account)
     let key: Data
@@ -120,7 +122,7 @@ struct CoreFactory {
       pushGatewayUrl: environment.pushGatewayURL?.absoluteString,
       isMemoryConstrained: isMemoryConstrained)
     let tokens = VaultTokenProvider(vault: vault)
-    let core = try TeamCraft.withDeviceKey(
+    let core = try await TeamCraft.withDeviceKey(
       config: config, tokens: tokens, deviceKey: vault.deviceKey, listener: listener)
     if runsUpkeep { tokens.attach(core) }
     return core

@@ -92,7 +92,7 @@ class CoreRepository(
       // The application sets it off the main thread at start; here too, so no core can name a
       // deleted account before it is set (#1066).
       setDeletedUserName(context.getString(R.string.user_deleted_name))
-      TeamCraft(
+      TeamCraft.open(
         AppConfig(
           serverUrl = server.address.origin,
           dataDir = File(context.filesDir, StoragePaths.storeDir(storageKey)).absolutePath,
@@ -183,12 +183,18 @@ class CoreRepository(
      * The ID token goes along for the owners' apps to verify (e2ee.md §3.1.3). No token while the
      * session is kept is a refresh that failed for now, not a sign-out (issue #1671).
      */
-    override fun accessToken(): AccessToken = runBlocking {
+    override fun accessToken(): AccessToken {
+      UiThreadGuard.shared.check("Tokens.accessToken")
+      // blocking-ok: the core calls this on its own token thread; the guard reports any other.
+      return runBlocking { tokenNow() }
+    }
+
+    private suspend fun tokenNow(): AccessToken {
       NetworkTrust.awaitTrustedCertificates()
       // A core closed in between throws: nothing to tell it then, and the token is still good.
       if (runCatching { maybeCore?.takeIdTokenRequest() }.getOrNull() == true) auth.refreshTokensSoon()
       val maybeToken = auth.accessToken().also { runCatching { maybeCore?.noteIdToken(auth.idToken()) } }
-      when {
+      return when {
         maybeToken != null -> AccessToken.Token(maybeToken)
         auth.isSessionKept() -> AccessToken.Unavailable
         else -> AccessToken.SignedOut

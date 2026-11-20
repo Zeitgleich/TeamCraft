@@ -253,6 +253,12 @@ max_poll_options = 12
 max_poll_question_chars = 300
 max_poll_option_chars = 100
 max_poll_open_days = 365
+# Live Photos and Motion Photos (issue #2181): whether they go out with their motion (a short video
+# sent beside the picture), and the largest motion part in bytes (1 MiB to 64 MiB). The apps hold
+# senders to both, since the server can't tell a motion part from any other file; admins can change
+# them in the admin console (Settings > Limits).
+allows_motion_parts = true
+max_motion_part_bytes = 16777216
 # How long a request for organization recovery waits for admin approvals.
 org_recovery_request_ttl_secs = 86400
 # Largest sealed share or sealed backup key the server stores for a recovery.
