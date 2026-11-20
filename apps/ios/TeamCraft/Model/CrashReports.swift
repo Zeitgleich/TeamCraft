@@ -294,13 +294,16 @@ enum CrashEventScrub {
     if let message = event.message {
       event.message = SentryMessage(formatted: CrashScrubber.scrub(message.formatted as String? ?? ""))
     }
-    let launchSteps = (event.breadcrumbs ?? []).filter { $0.category == LaunchSteps.category }
+    let launchSteps: [Breadcrumb] = (event.breadcrumbs ?? []).filter { $0.category == LaunchSteps.category }
     let isFromEarlierRun = (event.timestamp ?? Date()) < startedAt
-    let logCrumbs = isFromEarlierRun ? [] : logLines().map { line in
-      let breadcrumb = Breadcrumb(level: .info, category: "log")
-      breadcrumb.message = CrashScrubber.scrub(line, maxChars: CrashScrubber.maxBreadcrumbChars)
-      return breadcrumb
-    }
+    let logCrumbs: [Breadcrumb] =
+      isFromEarlierRun
+      ? []
+      : logLines().map { line in
+        let breadcrumb = Breadcrumb(level: .info, category: "log")
+        breadcrumb.message = CrashScrubber.scrub(line, maxChars: CrashScrubber.maxBreadcrumbChars)
+        return breadcrumb
+      }
     event.breadcrumbs = Array((launchSteps + logCrumbs).suffix(CrashScrubber.maxBreadcrumbs))
     return event
   }
