@@ -1,0 +1,11 @@
+Windows Registry Editor Version 5.00
+
+; Example: presets the TeamCraft server and locks the desktop app to it
+; (docs/operations.md "Preconfigured server on managed computers").
+; Replace the address. Import as administrator, or deploy with your tool of choice.
+; The app reads HKEY_LOCAL_MACHINE only, never HKEY_CURRENT_USER.
+; "LockServer"=dword:00000000 (or deleting the value) presets without locking.
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Zeitgleich\TeamCraft]
+"ServerUrl"="team.example.com"
+"LockServer"=dword:00000001

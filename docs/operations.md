@@ -1171,6 +1171,10 @@ log line and never stops the app from starting; the other value and the lower so
   payload for the preference domain `de.zeitgleich.teamcraft` with the keys `server_url` (string) and
   `lock_server` (boolean) at the computer level; the MDM client writes the file above. A profile
   for users only (`/Library/Managed Preferences/<user>/`) is not read.
+  A ready-to-edit profile is `apps/desktop/packaging/macos/policy/TeamCraft-server.mobileconfig`
+  (replace the address and both UUIDs); a Windows equivalent for `reg import` is
+  `apps/desktop/packaging/windows/policy/TeamCraft-server.reg`. The template also ships a German
+  `de-DE\TeamCraft.adml` (copy it to the `de-DE` folder of `PolicyDefinitions`).
 - **Not done yet:** an MSI property that writes the registry values at install time (`msiexec /i
   TeamCraft.msi SERVERURL=... LOCKSERVER=1`) needs a WiX fragment in the bundle that can only be
   verified on a Windows build; until then set the registry values with the template, `reg add` or a

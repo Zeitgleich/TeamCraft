@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<policyDefinitionResources revision="1.0" schemaVersion="1.0">
+  <displayName>TeamCraft</displayName>
+  <description>Einstellungen für die TeamCraft-Desktop-App</description>
+  <resources>
+    <stringTable>
+      <string id="TeamCraft">TeamCraft</string>
+      <string id="ServerUrl">Serveradresse</string>
+      <string id="ServerUrl_Explain">Der Server, bei dem sich die TeamCraft-Desktop-App anmeldet, zum Beispiel team.example.com oder https://team.example.com. Die App zeigt ihn beim ersten Start als vorbelegte Adresse an.
+
+Ist zusätzlich "Server sperren" aktiviert, können Benutzer keinen anderen Server verwenden.
+
+Diese Einstellung hat Vorrang vor einer desktop.json-Datei und der Umgebungsvariable TEAMCRAFT_SERVER_URL.</string>
+      <string id="LockServer">Server sperren</string>
+      <string id="LockServer_Explain">Wenn aktiviert (zusammen mit "Serveradresse"), können sich Benutzer an keinem anderen Server anmelden, und ein Konto auf einem anderen Server wird beim nächsten Start aus der App entfernt.
+
+Ohne "Serveradresse" hat die Einstellung keine Wirkung.</string>
+    </stringTable>
+    <presentationTable>
+      <presentation id="ServerUrl">
+        <textBox refId="ServerUrlText">
+          <label>Serveradresse:</label>
+        </textBox>
+      </presentation>
+      <presentation id="LockServer" />
+    </presentationTable>
+  </resources>
+</policyDefinitionResources>

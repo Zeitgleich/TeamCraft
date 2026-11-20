@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Example configuration profile: presets the TeamCraft server and locks the app to it
+     (docs/operations.md "Preconfigured server on managed computers"). Replace the server address and
+     both UUIDs, then deliver it with your MDM at the computer level (a profile for users only is not
+     read). Remove the lock_server entry to preset the server without locking it. -->
+<plist version="1.0">
+<dict>
+  <key>PayloadType</key>
+  <string>Configuration</string>
+  <key>PayloadVersion</key>
+  <integer>1</integer>
+  <key>PayloadIdentifier</key>
+  <string>com.example.teamcraft.server</string>
+  <key>PayloadUUID</key>
+  <string>5B0F0C1E-2D4A-4E7B-9C61-0A1B2C3D4E5F</string>
+  <key>PayloadDisplayName</key>
+  <string>TeamCraft server</string>
+  <key>PayloadScope</key>
+  <string>System</string>
+  <key>PayloadContent</key>
+  <array>
+    <dict>
+      <key>PayloadType</key>
+      <string>com.apple.ManagedClient.preferences</string>
+      <key>PayloadVersion</key>
+      <integer>1</integer>
+      <key>PayloadIdentifier</key>
+      <string>com.example.teamcraft.server.preferences</string>
+      <key>PayloadUUID</key>
+      <string>7C2E1D3F-4B5A-4F8C-A072-1B2C3D4E5F60</string>
+      <key>PayloadDisplayName</key>
+      <string>TeamCraft preferences</string>
+      <key>PayloadContent</key>
+      <dict>
+        <key>de.zeitgleich.teamcraft</key>
+        <dict>
+          <key>Forced</key>
+          <array>
+            <dict>
+              <key>mcx_preference_settings</key>
+              <dict>
+                <key>server_url</key>
+                <string>team.example.com</string>
+                <key>lock_server</key>
+                <true/>
+              </dict>
+            </dict>
+          </array>
+        </dict>
+      </dict>
+    </dict>
+  </array>
+</dict>
+</plist>
