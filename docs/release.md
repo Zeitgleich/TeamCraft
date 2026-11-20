@@ -195,8 +195,8 @@ checked tree, which then isn't on `main` itself) and go into the next one. The a
 Pushes made with `GITHUB_TOKEN` start no workflows, so the nightly run starts `release.yml` itself
 with `workflow_dispatch` on the tag (`publish: true`). After the images, desktop packages and web
 client are built, its `publish` job publishes the release and starts `packages.yml` (update
-manifests, APT/RPM) and `google-play.yml`, which `release: published` would not do for a token
-publish. If the Android build failed, the release is published without it; re-running
+manifests, APT/RPM), `google-play.yml` and, with an iOS build, `app-store.yml`, which
+`release: published` would not do for a token publish. If the Android build failed, the release is published without it; re-running
 `android-release` attaches the files and starts both again.
 
 Run it by hand: *Actions → Nightly release → Run workflow* (`dry_run` prints the version and
@@ -441,7 +441,8 @@ Store, not by download. A failed iOS build holds neither the release nor Android
 and uploads again without touching the release.
 
 The upload happens when the tag is built, not when the release is published (unlike Google Play):
-TestFlight reaches internal testers only, and every tag's build number is new. The build number is the
+TestFlight reaches internal testers only, and every tag's build number is new. The submission to the
+App Store waits for the published release ([App Store](#app-store)). The build number is the
 release's ([Build numbers](#build-numbers)); App Store Connect refuses one it has seen, so a re-run
 after a successful upload fails at the upload and changes nothing.
 The dSYMs go to Apple with the upload and, with the `CRASH_REPORTS_*` / `DEBUG_FILES_S3_*` secrets,
@@ -511,6 +512,61 @@ Checked locally on a Mac with the certificate and profiles installed:
 TC_PROFILE_NOTIFICATIONS=… TC_PROFILE_SHARE=… TC_PROFILE_WIDGET=…
 scripts/archive-testflight.sh --no-upload` exports the `.ipa` to `apps/ios/build/export` without
 uploading.
+
+## App Store
+
+`app-store.yml` sends a release's iOS build from TestFlight to App Review, the way `google-play.yml`
+sends the Android bundle to Play: when a release is published (the nightly's `publish` job starts it,
+like Google Play), or by hand (*Actions → App Store → Run workflow* with the tag). It runs
+`apps/ios/scripts/app-store-submit.py` on Linux with the App Store Connect API key of the TestFlight
+upload (no fastlane; the API client `apps/ios/scripts/asc_api.py` is shared with the screenshot
+upload), which:
+
+1. waits until App Store Connect has processed the build of the release's build number (a few
+   minutes to an hour; it gives up after 90 minutes, then run the workflow again);
+2. answers export compliance if the build still asks (it normally doesn't:
+   `ITSAppUsesNonExemptEncryption` is `false`, see [TestFlight](#testflight), step 7);
+3. creates the iOS App Store version `X.Y.Z`, which copies the listing (texts, screenshots, review
+   details) from the previous version, or reuses the version in preparation (renamed to `X.Y.Z`);
+4. attaches the build, sets the release type (*automatically after approval*) and "What's new" in
+   every language of the listing: the tag's highlights as plain text (`scripts/play-release-notes.py
+   --max-length 4000`, the same English text as on Play). The first version of an app has no "What's
+   new";
+5. submits the version for App Review (a review submission with that version).
+
+Candidates (`vX.Y.Z-rc.N`) stay in TestFlight. The job summary says what happened.
+
+**One version at a time.** App Store Connect has at most one version in preparation or review. Releases
+come every night, a review takes about a day, so a release often finds the previous one still waiting:
+
+| State of the version in flight                              | Result                                                                                                                           |
+|-------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------|
+| none (the previous one is live)                             | new version, submitted                                                                                                           |
+| in preparation, or rejected                                 | that version, renamed to this release, with this build, submitted                                                                |
+| waiting for review, `TEAMCRAFT_APP_STORE_WHEN_PENDING=skip` | left alone (warning); this release stays in TestFlight, the next one after it is live goes                                       |
+| waiting for review, `replace`                               | its submission is withdrawn, the version gets this release's number and build, submitted again (it loses its place in the queue) |
+| this release with this build already waiting                | nothing (a re-run)                                                                                                               |
+| in review, approved and not yet live                        | left alone (warning); never touched                                                                                              |
+| this release (or a newer one) already live                  | nothing                                                                                                                          |
+
+`skip` is the default: withdrawing every night could keep a version from ever reaching a reviewer.
+
+| Setting (repository)                        | Default          | Meaning                                                                             |
+|---------------------------------------------|------------------|-------------------------------------------------------------------------------------|
+| Variable `TEAMCRAFT_APP_STORE_MODE`         | `submit`         | `submit`; `prepare` (version, build and notes, submitted by hand); `off`            |
+| Variable `TEAMCRAFT_APP_STORE_WHEN_PENDING` | `skip`           | A version waiting for review: `skip` this release, or `replace` it                  |
+| Variable `TEAMCRAFT_APP_STORE_RELEASE_TYPE` | `AFTER_APPROVAL` | `AFTER_APPROVAL` goes live once approved; `MANUAL` waits for *Release this version* |
+| The API key of [TestFlight](#testflight)    | –                | Without it the run ends with a notice                                               |
+
+By hand, *Run workflow* has `dry_run` (only reads App Store Connect and prints every change it would
+make, in order, with its request body) and `when_pending` (overrides the variable for this run). The
+same on a computer with the key: `ASC_KEY_ID=… ASC_ISSUER_ID=… ASC_KEY_PATH=AuthKey_….p8
+apps/ios/scripts/app-store-submit.py --version X.Y.Z --dry-run` (python3 with `cryptography`).
+
+Set up once, in App Store Connect: the listing of the first version complete (screenshots, texts,
+privacy, age rating, App Review contact and sign-in), since every new version copies it; the API key
+needs the role *App Manager* (it has it for TestFlight). Screenshots are changed in the version in
+preparation and carried over from then on.
 
 ## Debug symbols
 

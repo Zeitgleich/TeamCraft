@@ -74,6 +74,11 @@ class Truncate(unittest.TestCase):
         self.assertEqual(notes.length(result), notes.MAX_LENGTH)
         self.assertTrue(result.endswith("…"))
 
+    def test_app_store_limit_keeps_what_play_cuts(self):
+        text = "x" * 1000
+        self.assertEqual(notes.truncate(text, URL, 4000), text)
+        self.assertEqual(notes.length(notes.truncate("x" * 5000, URL, 4000)), 4000)
+
 
 if __name__ == "__main__":
     unittest.main()

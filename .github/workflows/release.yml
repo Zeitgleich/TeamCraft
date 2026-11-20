@@ -14,7 +14,8 @@
 #   hold up the rest: the draft release is created without them, and the `android-release` job
 #   attaches them (and their SHA256SUMS lines) when the Android build is done.
 # - The iOS app (ios-release.yml, with the signing secrets): uploaded to TestFlight when built; the
-#   `ios-release` job attaches the App Store-signed .ipa the same way.
+#   `ios-release` job attaches the App Store-signed .ipa the same way. app-store.yml submits that
+#   build to App Review once the release is published.
 # - SBOMs (SPDX and CycloneDX) of the source tree and the images, image digests, SHA256SUMS, and a
 #   build provenance attestation for every file.
 # - Notes rendered from .github/release-notes.md: the highlights from the annotated tag's message, generated notes
@@ -654,8 +655,8 @@ jobs:
           cat ios/SHA256SUMS
 
   # Nightly releases (`publish`): publishes the release when it is built. Publishing with the
-  # workflow's token starts no `release: published` workflows, so the package site and Google Play
-  # are started here. An Android build that failed doesn't hold the release back (#696):
+  # workflow's token starts no `release: published` workflows, so the package site, Google Play and
+  # the App Store are started here. An Android build that failed doesn't hold the release back (#696):
   # the files are attached later, and `android-release` then starts Packages and Google Play again.
   publish:
     name: Publish
@@ -671,6 +672,7 @@ jobs:
       GH_REPO: ${{ github.repository }}
       DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
       ANDROID_RESULT: ${{ needs.android-release.result }}
+      IOS_RESULT: ${{ needs.ios-release.result }}
     steps:
       - name: Publish the release
         run: gh release edit "$TAG" --draft=false
@@ -682,3 +684,7 @@ jobs:
           else
             echo "::warning::no Android files yet; re-run android-release, it starts Google Play"
           fi
+      # Without an iOS build (no signing secrets, or it failed) there is nothing to submit.
+      - name: App Store
+        if: env.IOS_RESULT == 'success'
+        run: gh workflow run app-store.yml --ref "$DEFAULT_BRANCH" -f tag="$TAG"
