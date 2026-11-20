@@ -1117,8 +1117,13 @@ What the numbers say, and what changed:
 - A refresh after a change in the core (a new line in a log channel) reloaded every page the
   mirror ever read: the further back the reader had scrolled, the more pages every new line cost.
   It now reloads the pages read or asked ahead for since the last change and drops the others.
-- Android and iOS show the newest 200 messages without paging back, so they have no page boundary
-  to stall at.
+- Android shows the newest 200 messages without paging back, so it has no page boundary to stall
+  at. iOS opens a conversation with the newest 60 and pages back 60 at a time, 20 rows before the
+  reader reaches the oldest one loaded (#2180): most readers never scroll that far, and a smaller
+  first read is a cheaper switch. A page that comes in keeps the row on screen where it is and lets
+  a fling go on (the layout moves the scroll position with the update), and a read after a change
+  in the store waits until the list rests (at most 2 s), so it never lands in the middle of a
+  fling.
 
 #### Large workspace
 

@@ -277,4 +277,6 @@ struct FrameStats: Equatable {
 final class ListScrollState {
   var rows = VisibleRows()
   var reactionMarks = ReactionMarks()
+  /// Since when a read after a change waits for the list to rest.
+  var maybeReadWaitsSince: Date?
 }
