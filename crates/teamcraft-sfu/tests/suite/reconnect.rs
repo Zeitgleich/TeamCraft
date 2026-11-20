@@ -222,6 +222,9 @@ mod lossy_path {
 mod simulcast_layers {
   use super::*;
 
+  /// An uplink below the top one of [`small_layers`].
+  const NARROW_UPLINK_BPS: u32 = 40_000;
+
   /// A shared screen from a home connection whose uplink can't carry the full layer any more:
   /// the viewer, on the top layer so far, keeps getting pictures on a layer that is sent.
   #[test]
@@ -233,25 +236,31 @@ mod simulcast_layers {
     let before = network.pictures(BOB, stream);
     assert!(before.contains(&2), "on the top layer first: {before:?}");
 
-    // Some of Alice's datagrams are lost until her uplink estimate drops: in memory it falls to
-    // the floor at once, and without an audio reserve that still carries the base layer.
+    // Alice's uplink narrows to below her top layer (as her transport measures it): without an
+    // audio reserve it still carries the base layer. (It used to be a tenth of her datagrams
+    // lost, which cut her estimate to the floor at once in memory; random loss without a queue
+    // no longer cuts an application-limited sender to what got through, #2192.)
     network.client_mut(ALICE).engine.set_uplink_policy(UplinkPolicy {
       audio_reserve_bps: 0,
       screen_audio_reserve_bps: 0,
       ..UplinkPolicy::default()
     });
-    network.client_mut(ALICE).uplink_loss_every = Some(10);
+    network
+      .client_mut(ALICE)
+      .engine
+      .set_uplink_capacity(Some(NARROW_UPLINK_BPS));
     let mut rounds = 0;
     while !network.has_paused_top_layer(ALICE, stream) {
       rounds += 1;
       assert!(rounds < 100, "the uplink never paused the top layer");
       network.send_video(ALICE, stream, 3);
     }
-    network.client_mut(ALICE).uplink_loss_every = None;
+    network.client_mut(ALICE).engine.set_uplink_capacity(None);
     network.pictures(BOB, stream);
 
-    // Two seconds of video: Bob moves to a layer Alice sends and sees pictures again. The loss
-    // is over, so Alice's uplink probes find the room and the top layer may come back (#1792).
+    // Two seconds of video: Bob moves to a layer Alice sends and sees pictures again. The narrow
+    // spell is over, so Alice's uplink probes find the room and the top layer may come back
+    // (#1792).
     network.send_video(ALICE, stream, 60);
     let after = network.pictures(BOB, stream);
     assert!(!after.is_empty(), "the viewer froze on the paused layer");

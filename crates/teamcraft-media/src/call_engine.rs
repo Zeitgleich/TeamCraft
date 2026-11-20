@@ -2781,10 +2781,13 @@ impl CallEngine {
 
   /// Video held because the voice was lost comes back only on a probe that carried the voice and
   /// the lowest layers of the own tracks (#1893), where something probes: an SFU that takes
-  /// padding, not the fallback (its pacer measures what the upload drains).
+  /// padding, not the fallback (its pacer measures what the upload drains). Not after a burst of
+  /// loss that didn't last (#2191): a link that loses at random has the room, and its losses made
+  /// the probe fall short again and again.
   fn follow_video_proof(&mut self, is_hurt: bool, maybe_carried_bps: Option<u32>) {
     let can_probe = self.maybe_probe_bytes.is_some() && self.maybe_uplink_capacity_bps.is_none();
-    if is_hurt && can_probe && !self.own_tracks.is_empty() && !self.is_video_proof_wanted {
+    let is_proof_due = is_hurt && self.uplink_voice.is_lasting();
+    if is_proof_due && can_probe && !self.own_tracks.is_empty() && !self.is_video_proof_wanted {
       self.is_video_proof_wanted = true;
       self.update_uplink_demand();
     }

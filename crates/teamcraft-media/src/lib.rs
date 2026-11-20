@@ -11,6 +11,8 @@
 pub mod audio_frame;
 pub mod audio_io;
 pub mod audio_level;
+#[cfg(test)]
+mod bursty_loss;
 pub mod bwe;
 pub mod call_resilience;
 pub mod capture_health;

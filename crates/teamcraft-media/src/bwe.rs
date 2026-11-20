@@ -18,9 +18,11 @@
 //!   that fills the estimate: a camera's layers and keyframes don't (the queue of a keyframe sent
 //!   into a link half used cut a camera's estimate to below its top layer), nor does a still
 //!   shared screen that sends little but keyframes of hundreds of kilobytes (#941, #939).
-//! - **Loss:** above 10 % loss the rate shrinks with the loss; between 2 % and 10 % it holds. Only
-//!   the loss of packets sent after the last cut to what got through counts: that cut answered
-//!   the loss before it.
+//! - **Loss:** above 10 % loss the rate shrinks with the loss; between 2 % above the link's own
+//!   loss and 10 % it holds. Only the loss of packets sent after the last cut to what got through
+//!   counts (that cut answered the loss before it), and only once 30 datagrams were reported. An
+//!   application-limited sender whose path doesn't queue is cut from its estimate, not to what
+//!   got through: that is its own rate (#2192).
 //! - **Application-limited senders** (sending less than half the estimate): the delay of their own
 //!   bursts doesn't end the fast start, nor count as congestion (GCC's "ALR"), unless it lasts
 //!   with more sent than gets through. During the fast start the same holds for every sender: the
@@ -1148,6 +1150,7 @@ fn linear_slope(points: &VecDeque<(f64, f64)>) -> f64 {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::bursty_loss::BurstyLoss;
   use crate::join_probe::{JoinProbe, JoinProbeConfig, LinkMeasurement};
 
   const PACKET_BYTES: usize = 1200;
@@ -1888,65 +1891,6 @@ mod tests {
     /// Loss in bursts and a delay that walk, instead of `loss_permille` and `base_delay`.
     maybe_bursty: Option<BurstyLoss>,
   }
-
-  /// Hotel or train Wi-Fi (#2189's relay `Impairment`): every [`BurstyLoss::STEP`] the average
-  /// loss walks within `loss_percent` and the one-way delay within `delay_ms`, by up to a quarter
-  /// of each range. Losses come in bursts (Gilbert–Elliott: a bad state of
-  /// [`BurstyLoss::BURST_PACKETS`] packets on average that loses [`BurstyLoss::BURST_LOSS`] of
-  /// them). Seeded.
-  struct BurstyLoss {
-    loss_percent: (f64, f64),
-    delay_ms: (f64, f64),
-    rng: XorShift,
-    maybe_stepped_at: Option<Instant>,
-    loss: f64,
-    is_bad: bool,
-  }
-
-  impl BurstyLoss {
-    const STEP: Duration = Duration::from_millis(500);
-    const BURST_LOSS: f64 = 0.5;
-    const BURST_PACKETS: f64 = 4.0;
-
-    fn new(seed: u64, loss_percent: (f64, f64), delay_ms: (f64, f64)) -> Self {
-      let mut rng = XorShift(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
-      let loss = (loss_percent.0 + rng.uniform() * (loss_percent.1 - loss_percent.0)) / 100.0;
-      Self {
-        loss_percent,
-        delay_ms,
-        rng,
-        maybe_stepped_at: None,
-        loss,
-        is_bad: false,
-      }
-    }
-
-    /// Whether a packet sent at `now` is lost; walks the loss and `delay` on.
-    fn is_lost(&mut self, now: Instant, delay: &mut Duration) -> bool {
-      let stepped_at = *self.maybe_stepped_at.get_or_insert(now);
-      if now.saturating_duration_since(stepped_at) >= Self::STEP {
-        self.maybe_stepped_at = Some(now);
-        let (low, high) = self.loss_percent;
-        let loss_step = (self.rng.uniform() - 0.5) / 2.0 * (high - low) / 100.0;
-        self.loss = (self.loss + loss_step).clamp(low / 100.0, high / 100.0);
-        let (shortest, longest) = self.delay_ms;
-        let delay_step = (self.rng.uniform() - 0.5) / 2.0 * (longest - shortest);
-        let delay_ms = (delay.as_secs_f64() * 1000.0 + delay_step).clamp(shortest, longest);
-        *delay = Duration::from_secs_f64(delay_ms / 1000.0);
-      }
-      let bad_share = (self.loss / Self::BURST_LOSS).min(0.9);
-      let leave_bad = 1.0 / Self::BURST_PACKETS;
-      let enter_bad = bad_share * leave_bad / (1.0 - bad_share);
-      let roll = self.rng.uniform();
-      self.is_bad = if self.is_bad {
-        roll >= leave_bad
-      } else {
-        roll < enter_bad
-      };
-      self.is_bad && self.rng.uniform() < Self::BURST_LOSS
-    }
-  }
-
   /// A link that holds its packets for `length` every `every` from `since` (Wi-Fi).
   #[derive(Clone, Copy)]
   struct Hold {
@@ -1987,16 +1931,18 @@ mod tests {
     /// A link of `capacity_bps` with [`BurstyLoss`] of `seed`: 1–3 % loss, 20–60 ms one way.
     fn bursty(capacity_bps: u64, seed: u64) -> Self {
       let mut link = Self::new(capacity_bps, 40, 0);
-      link.maybe_bursty = Some(BurstyLoss::new(seed, (1.0, 3.0), (20.0, 60.0)));
+      link.maybe_bursty = Some(BurstyLoss::hotel_wifi(seed));
       link
     }
 
     /// Arrival time at the receiver, or `None` if the packet was dropped.
     fn send(&mut self, bytes: usize, now: Instant) -> Option<Instant> {
-      if let Some(bursty) = self.maybe_bursty.as_mut()
-        && bursty.is_lost(now, &mut self.base_delay)
-      {
-        return None;
+      if let Some(bursty) = self.maybe_bursty.as_mut() {
+        let is_lost = bursty.is_lost(now);
+        self.base_delay = bursty.delay();
+        if is_lost {
+          return None;
+        }
       }
       if self.rng.next() % 1000 < u64::from(self.loss_permille) {
         return None;
@@ -2329,11 +2275,6 @@ mod tests {
       self.0 ^= self.0 >> 7;
       self.0 ^= self.0 << 17;
       self.0
-    }
-
-    /// Uniform in `[0, 1)`.
-    fn uniform(&mut self) -> f64 {
-      (self.next() >> 11) as f64 / (1u64 << 53) as f64
     }
   }
 }

@@ -34,7 +34,10 @@
 //!   that fell short put its excess into the link's queue; a 1440p share's top layer probed from a
 //!   2 Mbit/s link overflowed a mobile link's buffer and took video with it. A link with room is
 //!   climbed a step per cluster, about every 400 ms.
-//! - **Lost padding** means the link's queue overflowed: short of the rate, whatever the delays.
+//! - **Lost padding** beyond [`RateProbeConfig::max_lost_share`] means the link's queue
+//!   overflowed: short of the rate, whatever the delays. Less is the link's own loss (hotel or
+//!   train Wi-Fi loses 1–3 % in bursts, #2191): one lost datagram made every cluster fall short
+//!   there, and a presenter's video held for its voice never got its proof back.
 //! - **Nothing to learn:** padding carries zeros; the receiver sees only how much arrived when.
 
 use std::time::Duration;
@@ -66,6 +69,9 @@ pub struct RateProbeConfig {
   /// rate: a link short by an eighth queues about 25 ms over a cluster of 200 ms, and a mobile
   /// link's jitter stays below it at the least delay of a train.
   pub max_queue_growth: Duration,
+  /// The share of a cluster's datagrams that may be lost, the link's own loss: a link that can't
+  /// carry the target loses all of its excess, at least a fifth of a cluster a step above it.
+  pub max_lost_share: f64,
   /// How long what a cluster showed counts.
   pub result_valid_for: Duration,
   /// The wait after a cluster that fell short before the next one; it doubles with every further
@@ -157,6 +163,7 @@ impl Default for RateProbeConfig {
       min_datagrams: 2,
       max_datagrams: 100,
       max_queue_growth: Duration::from_millis(25),
+      max_lost_share: 0.1,
       result_valid_for: Duration::from_secs(3),
       retry_after: Duration::from_secs(1),
       max_retry_after: Duration::from_secs(2),
@@ -460,18 +467,17 @@ impl UplinkProbe {
 }
 
 impl Cluster {
-  /// Carried when nothing was lost and the last train waited little longer than the first.
+  /// Carried when no more than the link's own loss was lost and the last train waited little
+  /// longer than the first.
   fn outcome(&self, config: &RateProbeConfig) -> ProbeOutcome {
     let fell_short = ProbeOutcome::FellShort {
       target_bps: self.target_bps,
       floor_bps: self.floor_bps,
     };
-    let is_complete = self.trains.iter().all(|train| {
-      train
-        .datagrams
-        .iter()
-        .all(|report| matches!(report, Report::Arrived(_)))
-    });
+    let datagrams = self.trains.iter().flat_map(|train| &train.datagrams);
+    let total = datagrams.clone().count();
+    let lost = datagrams.filter(|report| **report == Report::Lost).count();
+    let is_complete = lost as f64 <= config.max_lost_share * total as f64;
     let (Some(first), Some(last)) = (self.trains.first(), self.trains.last()) else {
       return fell_short;
     };
@@ -561,10 +567,38 @@ mod tests {
     let config = RateProbeConfig::default();
     let mut probe = RateProbe::new();
     let start = Instant::now();
-    let outcome = run_cluster(&mut probe, &config, start, 2_000_000, 0, |train, datagram| {
-      if train == 1 && datagram == 0 { u64::MAX } else { 0 }
+    // An overflowing queue: the last datagrams of every train lost, a fifth of them.
+    let outcome = run_cluster(&mut probe, &config, start, 2_000_000, 0, |_, datagram| {
+      if datagram >= 20 { u64::MAX } else { 0 }
     });
     assert!(matches!(outcome, Some(ProbeOutcome::FellShort { .. })));
+  }
+
+  /// #2191: a datagram or two lost at random (hotel Wi-Fi) is the link's own loss: the cluster
+  /// carried. One lost of a small cluster is more than a tenth: short.
+  #[test]
+  fn the_links_own_loss_is_no_overflow() {
+    let config = RateProbeConfig::default();
+    let mut probe = RateProbe::new();
+    let start = Instant::now();
+    let outcome = run_cluster(&mut probe, &config, start, 2_000_000, 0, |train, datagram| {
+      if train == 1 && (datagram == 3 || datagram == 4) {
+        u64::MAX
+      } else {
+        0
+      }
+    });
+    assert_eq!(
+      outcome,
+      Some(ProbeOutcome::Carried {
+        target_bps: 2_000_000
+      })
+    );
+    let mut probe = RateProbe::new();
+    let small = run_cluster(&mut probe, &config, start, 100_000, 0, |train, datagram| {
+      if train == 1 && datagram == 0 { u64::MAX } else { 0 }
+    });
+    assert!(matches!(small, Some(ProbeOutcome::FellShort { .. })), "{small:?}");
   }
 
   /// Clusters that fall short come 1 s, then 2 s apart, never further (#1792); one that gets
