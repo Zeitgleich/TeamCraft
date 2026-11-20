@@ -300,7 +300,7 @@ CI's `ios.yml` builds unsigned (`CODE_SIGNING_ALLOWED=NO`). Signed builds:
   docs/release.md, "TestFlight". `scripts/archive-testflight.sh --no-upload` checks the signing on a
   Mac without uploading.
 
-The App IDs (`de.zeitgleich.teamcraft`, `.notifications`, `.share`) and the App Group
+The App IDs (`de.zeitgleich.teamcraft`, `.notifications`, `.share`, `.widget`) and the App Group
 `group.de.zeitgleich.teamcraft` need the capabilities listed in docs/release.md, "TestFlight". Request
 **Notification Filtering** (`com.apple.developer.usernotifications.filtering`) for the extension from
 Apple; once granted, add it to the extension's App ID, regenerate its profile and switch
