@@ -43,6 +43,8 @@ struct MessageListView: UIViewRepresentable {
     var canReact: Bool
     var canPost: Bool
     var displayNames: [String: String]
+    /// The picture viewer or a video covers the list: animated pictures pause.
+    var areAnimationsCovered: Bool
   }
 
   /// Leading and trailing room of the rows.
@@ -83,6 +85,7 @@ struct MessageListView: UIViewRepresentable {
     private var visible = VisibleRows()
     private var maybeSettle: Settle?
     private var isPositionRetryQueued = false
+    private var isSettling = false
     private let scrollBack = ScrollBackMeasure()
     private let jump = JumpMeasure()
 
@@ -140,6 +143,8 @@ struct MessageListView: UIViewRepresentable {
       positionIfDue()
     }
 
+    var isScrolling: Bool { maybeView.map { $0.isTracking || $0.isDecelerating } ?? false }
+
     func tearDown() {
       scrollBack.cancel()
       jump.cancel()
@@ -184,7 +189,8 @@ struct MessageListView: UIViewRepresentable {
     // MARK: UIScrollViewDelegate
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
-      guard let view = maybeView, hasPositioned else { return }
+      // While a jump lays out what it passes, the rows on the way aren't what the reader sees.
+      guard let view = maybeView, hasPositioned, !isSettling else { return }
       scrollBack.scrolled(offset: view.contentOffset.y, isDragging: view.isTracking, key: parent.placeId)
       report(view)
     }
@@ -227,14 +233,14 @@ struct MessageListView: UIViewRepresentable {
     private func makeDataSource(_ view: UICollectionView)
       -> UICollectionViewDiffableDataSource<MessageListSectionId, MessageListItem>
     {
-      let cell = UICollectionView.CellRegistration<UICollectionViewCell, MessageListItem> { [weak self] cell, _, item in
+      let cell = UICollectionView.CellRegistration<MessageListCell, MessageListItem> { [weak self] cell, _, item in
         guard let self else { return }
         // Every row starts with fresh view state: a reused cell must not carry another message's.
         let content = parent.row(item).id(item)
         cell.contentConfiguration = UIHostingConfiguration { content }.margins(.all, 0)
         cell.backgroundConfiguration = .clear()
       }
-      let header = UICollectionView.SupplementaryRegistration<UICollectionViewCell>(
+      let header = UICollectionView.SupplementaryRegistration<MessageListCell>(
         elementKind: UICollectionView.elementKindSectionHeader
       ) { [weak self] header, _, indexPath in
         guard let self, let day = maybeDataSource?.sectionIdentifier(for: indexPath.section).flatMap(Self.day)
@@ -339,11 +345,33 @@ struct MessageListView: UIViewRepresentable {
         snapshot.appendItems(section.items, toSection: section.id)
       }
       let kept = changed.filter { snapshot.indexOfItem($0) != nil }
+      // The same rows in the same order (a message edited, a reaction): only those rows are
+      // configured again; the scroll position is left alone, also in the middle of a fling.
+      let shown = dataSource.snapshot()
+      if hasApplied && hasPositioned && shown.sectionIdentifiers == snapshot.sectionIdentifiers
+        && shown.itemIdentifiers == snapshot.itemIdentifiers
+      {
+        reconfigure(kept)
+        return
+      }
       if !kept.isEmpty { snapshot.reconfigureItems(kept) }
       let keepsBottom = !hasPositioned || isAtBottom
       let maybeAnchor = keepsBottom ? nil : anchor(view)
       let isArrival = hasPositioned && keepsBottom && !next.reduceMotion && next.feed.isArrival(after: shownFeed)
+      if let anchor = maybeAnchor {
+        // The layout moves the scroll position with the update itself: the rows that came above
+        // are never laid out at the old position, and a fling goes on.
+        maybeLayout?.maybeTargetOffset = { [weak self, weak view] in
+          guard let self, let view, let indexPath = self.maybeDataSource?.indexPath(for: anchor.item),
+            let frame = view.collectionViewLayout.layoutAttributesForItem(at: indexPath)?.frame
+          else { return nil }
+          return max(frame.minY - anchor.minY, -view.adjustedContentInset.top)
+        }
+      }
+      isSettling = true
       dataSource.apply(snapshot, animatingDifferences: isArrival)
+      isSettling = false
+      maybeLayout?.maybeTargetOffset = nil
       hasApplied = true
       guard hasPositioned else { return }
       view.layoutIfNeeded()
@@ -440,7 +468,10 @@ struct MessageListView: UIViewRepresentable {
       while passes < MessageListScroll.maxSettlePasses {
         view.layoutIfNeeded()
         guard let offset = target(), abs(view.contentOffset.y - offset) >= 0.5 else { break }
-        view.setContentOffset(CGPoint(x: view.contentOffset.x, y: offset), animated: false)
+        // Set as a property: `setContentOffset(_:animated:)` would end a fling in flight.
+        isSettling = true
+        view.contentOffset = CGPoint(x: view.contentOffset.x, y: offset)
+        isSettling = false
         passes += 1
       }
       return passes
@@ -528,11 +559,22 @@ struct MessageListView: UIViewRepresentable {
   }
 }
 
+/// A cell of the list. A hosted SwiftUI row adds the safe area it overlaps to the height it
+/// reports: a row reaching under the home indicator grew by a pixel on every layout pass, until
+/// UIKit stopped the app with a recursive layout loop (#2180). The list sets its own insets, so its
+/// rows have no safe area.
+final class MessageListCell: UICollectionViewCell {
+  override var safeAreaInsets: UIEdgeInsets { .zero }
+}
+
 /// Jumps to the list from the conversation's buttons (to the newest, to a message), after the
 /// update that brought its rows.
 @MainActor
 final class MessageListController {
   fileprivate weak var coordinator: MessageListView.Coordinator?
+
+  /// The reader's finger moves the list, or it still rolls on.
+  var isScrolling: Bool { coordinator?.isScrolling ?? false }
 
   func scrollToBottom(animated: Bool, isMeasured: Bool = false) {
     DispatchQueue.main.async { [weak self] in
@@ -552,6 +594,8 @@ final class MessageListController {
 final class MessageCollectionView: UICollectionView {
   var isAtBottom: () -> Bool = { false }
 
+  override var safeAreaInsets: UIEdgeInsets { .zero }
+
   override func layoutSubviews() {
     let keepsBottom = isAtBottom() && !isTracking && !isDecelerating && window != nil
     let height = contentSize.height
@@ -569,6 +613,13 @@ final class MessageCollectionView: UICollectionView {
 final class MessageListLayout: UICollectionViewCompositionalLayout {
   /// Each such correction, for feed.scroll_back's `scroll_corrections`.
   var onCorrection: () -> Void = {}
+  /// While rows are added above the reader: where the scroll position goes with the update.
+  var maybeTargetOffset: (() -> CGFloat?)?
+
+  override func targetContentOffset(forProposedContentOffset proposed: CGPoint) -> CGPoint {
+    guard let y = maybeTargetOffset?() else { return super.targetContentOffset(forProposedContentOffset: proposed) }
+    return CGPoint(x: proposed.x, y: y)
+  }
 
   override func invalidationContext(
     forPreferredLayoutAttributes preferredAttributes: UICollectionViewLayoutAttributes,
@@ -609,8 +660,13 @@ private final class ScrollBackMeasure {
     }
     guard !isDone, isDragging, offset < lastOffset else { return }
     Perf.begin(.scrollBack, key: key)
-    // Left out by the trace rate, or crash reports off: nothing counts frames.
-    guard Perf.isRunning(.scrollBack, key: key) else { return }
+    // Left out by the trace rate, or crash reports off: nothing counts frames, and this
+    // conversation's scroll back isn't tried again (else every frame of the drag would start and
+    // drop a transaction).
+    guard Perf.isRunning(.scrollBack, key: key) else {
+      isDone = true
+      return
+    }
     maybeKey = key
     startOffset = lastOffset
     lowestOffset = offset
