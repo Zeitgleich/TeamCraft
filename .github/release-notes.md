@@ -22,7 +22,7 @@ digest:
 |---------------------------------|-----------------------------------------------------------------|
 | Windows x64 / arm64             | `TeamCraft_*_x64-setup.exe` / `*_arm64-setup.exe` (or `.msi`)   |
 | macOS Apple silicon / Intel     | `TeamCraft_*_aarch64.dmg` / `TeamCraft_*_x64.dmg`               |
-| Linux x86_64 / aarch64          | `.deb`, `.rpm`, `.AppImage`, `teamcraft-desktop-<arch>.flatpak` |
+| Linux x86_64 / aarch64          | `.deb`, `.rpm`, `.AppImage`                                     |
 
 Windows, macOS and AppImage installs update themselves from here on. For deb and rpm, add the APT or
 RPM repository once and updates come with the system's ones ([docs/updates.md](https://github.com/{{repo}}/blob/main/docs/updates.md)).
@@ -71,8 +71,8 @@ previous release keep working.
   software when unavailable), the iOS app (compiled and unit-tested in CI, not yet run on a device) and
   Android video calls (audio calls are tested). Linux desktop, web, Android chat and the server are
   covered by the end-to-end and acceptance suites.
-- The AppImage is large (~130 MB): it carries WebKitGTK and its dependencies; the deb, rpm and Flatpak
-  use the system's.
+- The AppImage is large (~130 MB): it carries WebKitGTK and its dependencies; the deb and rpm use
+  the system's.
 - Calls in the browser need WebTransport (Chromium-based browsers, Firefox).
 
 ## Verify the downloads
