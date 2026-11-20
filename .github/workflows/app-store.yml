@@ -1,0 +1,147 @@
+# App Store (docs/release.md, "App Store"): when a release is published (or by hand for a tag), sends
+# the iOS build that ios-release.yml uploaded to App Store Connect to App Review, like google-play.yml
+# for Android: waits until the build is processed, creates (or reuses) the App Store version, attaches
+# the build, sets "What's new" from the tag's highlights and the release type, and submits it.
+# Candidates (vX.Y.Z-rc.N) stay in TestFlight. The release goes live after approval by default.
+#
+# Setup: the App Store Connect key of ios-release.yml (secret APP_STORE_CONNECT_API_KEY, variables
+# APP_STORE_CONNECT_KEY_ID and APP_STORE_CONNECT_ISSUER_ID); without it the run ends with a notice.
+# Repository variables:
+#   TEAMCRAFT_APP_STORE_MODE          default `submit`; `prepare` (version, build and notes, submitted
+#                                     by hand in App Store Connect) or `off`
+#   TEAMCRAFT_APP_STORE_WHEN_PENDING  default `skip`: a version already waiting for review keeps its
+#                                     place; `replace` withdraws it and submits this release instead
+#   TEAMCRAFT_APP_STORE_RELEASE_TYPE  default `AFTER_APPROVAL`; `MANUAL` waits for a click after approval
+name: App Store
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag whose iOS build goes to App Review (vX.Y.Z)
+        required: true
+      dry_run:
+        description: Only read App Store Connect and list every change it would make
+        type: boolean
+        default: false
+      when_pending:
+        description: A version already waiting for review
+        type: choice
+        options: [variable, skip, replace]
+        default: variable
+
+# One App Store Connect submission at a time.
+concurrency:
+  group: app-store
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  submit:
+    name: Submit to App Review
+    # Only product releases (v*); the `ci-deps` mirror release is not one (docs/release.md).
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v')
+    runs-on: ubuntu-latest
+    # Processing an upload takes Apple from a few minutes to about an hour.
+    timeout-minutes: 120
+    permissions:
+      # Reads the tag's highlights.
+      contents: read
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - name: Settings
+        id: settings
+        env:
+          HAS_KEY: >-
+            ${{ secrets.APP_STORE_CONNECT_API_KEY != '' && vars.APP_STORE_CONNECT_KEY_ID != ''
+            && vars.APP_STORE_CONNECT_ISSUER_ID != '' }}
+          MODE: ${{ vars.TEAMCRAFT_APP_STORE_MODE || 'submit' }}
+          WHEN_PENDING_INPUT: ${{ inputs.when_pending || 'variable' }}
+          WHEN_PENDING_VARIABLE: ${{ vars.TEAMCRAFT_APP_STORE_WHEN_PENDING || 'skip' }}
+          RELEASE_TYPE: ${{ vars.TEAMCRAFT_APP_STORE_RELEASE_TYPE || 'AFTER_APPROVAL' }}
+        run: |
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*-*) echo "::notice::${TAG} is a candidate: it stays in TestFlight"; echo "enabled=false" >> "$GITHUB_OUTPUT"; exit 0 ;;
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::not a release tag: ${TAG}"; exit 1 ;;
+          esac
+          if [ "$HAS_KEY" != true ]; then
+            echo "::notice::no App Store Connect API key: ${TAG} is not submitted to the App Store"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "$MODE" in
+            off) echo "::notice::TEAMCRAFT_APP_STORE_MODE=off: ${TAG} is not submitted"; echo "enabled=false" >> "$GITHUB_OUTPUT"; exit 0 ;;
+            submit | prepare) ;;
+            *) echo "::error::TEAMCRAFT_APP_STORE_MODE must be submit, prepare or off, not ${MODE}"; exit 1 ;;
+          esac
+          when_pending="$WHEN_PENDING_VARIABLE"
+          [ "$WHEN_PENDING_INPUT" != variable ] && when_pending="$WHEN_PENDING_INPUT"
+          case "$when_pending" in
+            skip | replace) ;;
+            *) echo "::error::TEAMCRAFT_APP_STORE_WHEN_PENDING must be skip or replace, not ${when_pending}"; exit 1 ;;
+          esac
+          case "$RELEASE_TYPE" in
+            AFTER_APPROVAL | MANUAL) ;;
+            *) echo "::error::TEAMCRAFT_APP_STORE_RELEASE_TYPE must be AFTER_APPROVAL or MANUAL, not ${RELEASE_TYPE}"; exit 1 ;;
+          esac
+          {
+            echo "enabled=true"
+            echo "version=${TAG#v}"
+            echo "mode=$MODE"
+            echo "when_pending=$when_pending"
+            echo "release_type=$RELEASE_TYPE"
+          } >> "$GITHUB_OUTPUT"
+      # The scripts of the branch that runs (the release's tag, or the default branch by hand).
+      - if: steps.settings.outputs.enabled == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The API token is signed with `cryptography`; Ubuntu's package, from its signed archive.
+      - name: Python dependency
+        if: steps.settings.outputs.enabled == 'true'
+        run: |
+          if ! /usr/bin/python3 -c 'import cryptography' 2>/dev/null; then
+            sudo apt-get update -q
+            sudo apt-get install -y -q python3-cryptography
+          fi
+      - name: What's new (the tag's highlights)
+        if: steps.settings.outputs.enabled == 'true'
+        env:
+          REPO: ${{ github.repository }}
+          VERSION: ${{ steps.settings.outputs.version }}
+        run: |
+          # actions/checkout leaves the tag lightweight (or out); the highlights are in the annotated
+          # tag object. 4000 characters is the App Store's limit.
+          git fetch --no-tags --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          scripts/play-release-notes.py --version "$VERSION" --tag "$TAG" --repo "$REPO" --max-length 4000 \
+            > "$RUNNER_TEMP/whats-new.txt"
+      # Only as a file readable by the runner user, never on a command line; removed below.
+      - name: App Store Connect API key
+        if: steps.settings.outputs.enabled == 'true'
+        env:
+          API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+          KEY_ID: ${{ vars.APP_STORE_CONNECT_KEY_ID }}
+        run: |
+          key="$RUNNER_TEMP/AuthKey_${KEY_ID}.p8"
+          (umask 077 && printf '%s\n' "$API_KEY" > "$key")
+          echo "ASC_KEY_PATH=$key" >> "$GITHUB_ENV"
+      - name: Submit to App Review
+        if: steps.settings.outputs.enabled == 'true'
+        env:
+          ASC_KEY_ID: ${{ vars.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ vars.APP_STORE_CONNECT_ISSUER_ID }}
+          VERSION: ${{ steps.settings.outputs.version }}
+          MODE: ${{ steps.settings.outputs.mode }}
+          WHEN_PENDING: ${{ steps.settings.outputs.when_pending }}
+          RELEASE_TYPE: ${{ steps.settings.outputs.release_type }}
+          DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: |
+          /usr/bin/python3 apps/ios/scripts/app-store-submit.py --version "$VERSION" \
+            --whats-new "$RUNNER_TEMP/whats-new.txt" --mode "$MODE" --when-pending "$WHEN_PENDING" \
+            --release-type "$RELEASE_TYPE" $DRY_RUN
+      - name: Remove the API key
+        if: always()
+        run: rm -f "$RUNNER_TEMP"/AuthKey_*.p8

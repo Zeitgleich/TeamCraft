@@ -9,7 +9,7 @@ For every locale folder that the version has a localization for, it replaces the
 the iPhone 6.3" (required), iPhone 6.9" and iPad 13" (required) sets with the folder's, in file
 name order. Other display sizes are left alone (App Store Connect scales these down for them).
 
-Environment, the same API key as the TestFlight upload (archive-testflight.sh):
+Environment, the same API key as the TestFlight upload (archive-testflight.sh; client in asc_api.py):
   ASC_KEY_ID, ASC_ISSUER_ID   the App Store Connect API key (role App Manager)
   ASC_KEY_PATH                its .p8 file
 
@@ -20,17 +20,14 @@ Needs python3 with `cryptography` (for the API's ES256 token) and Pillow (for th
 """
 
 import argparse
-import base64
 import hashlib
-import json
-import os
 import sys
-import time
-import urllib.error
 import urllib.request
 from pathlib import Path
 
-API = "https://api.appstoreconnect.apple.com/v1"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from asc_api import ApiError, Client  # noqa: E402
+
 # Folder per display type, with the pixel sizes App Store Connect takes for it (portrait).
 DISPLAYS = {
   # Required: iPhone with Dynamic Island, medium display (6.1" and 6.3").
@@ -41,7 +38,6 @@ DISPLAYS = {
 }
 # Versions whose screenshots can still change.
 EDITABLE_STATES = {"PREPARE_FOR_SUBMISSION", "DEVELOPER_REJECTED", "REJECTED", "METADATA_REJECTED"}
-TOKEN_LIFETIME_SECONDS = 15 * 60
 
 
 def main() -> None:
@@ -57,8 +53,14 @@ def main() -> None:
       print(f"{locale} {DISPLAYS[folder][0]}: {', '.join(f.name for f in files)}")
     return
 
-  client = Client(env("ASC_KEY_ID"), env("ASC_ISSUER_ID"), Path(env("ASC_KEY_PATH")).read_bytes())
-  version = editable_version(client, args.bundle_id)
+  try:
+    upload_all(Client.from_env(), args.bundle_id, shots)
+  except ApiError as error:
+    sys.exit(str(error))
+
+
+def upload_all(client: Client, bundle_id: str, shots: dict[tuple[str, str], list[Path]]) -> None:
+  version = editable_version(client, bundle_id)
   localizations = {
     item["attributes"]["locale"]: item["id"]
     for item in client.get(f"/appStoreVersions/{version}/appStoreVersionLocalizations")["data"]
@@ -92,7 +94,7 @@ def collect(store: Path) -> dict[tuple[str, str], list[Path]]:
   return shots
 
 
-def editable_version(client: "Client", bundle_id: str) -> str:
+def editable_version(client: Client, bundle_id: str) -> str:
   apps = client.get(f"/apps?filter[bundleId]={bundle_id}")["data"]
   if not apps:
     sys.exit(f"no app with the bundle ID {bundle_id} in App Store Connect")
@@ -104,7 +106,7 @@ def editable_version(client: "Client", bundle_id: str) -> str:
   sys.exit("no iOS version in preparation; create one in App Store Connect (+ Version or Platform)")
 
 
-def replace_set(client: "Client", localization: str, display: str, files: list[Path]) -> None:
+def replace_set(client: Client, localization: str, display: str, files: list[Path]) -> None:
   sets = client.get(f"/appStoreVersionLocalizations/{localization}/appScreenshotSets?filter[screenshotDisplayType]={display}")["data"]
   if sets:
     screenshot_set = sets[0]["id"]
@@ -122,7 +124,7 @@ def replace_set(client: "Client", localization: str, display: str, files: list[P
     upload(client, screenshot_set, file)
 
 
-def upload(client: "Client", screenshot_set: str, file: Path) -> None:
+def upload(client: Client, screenshot_set: str, file: Path) -> None:
   """Reserves the screenshot, sends its parts to the places the API names, then commits it."""
   data = file.read_bytes()
   reservation = client.post("/appScreenshots", {
@@ -145,73 +147,6 @@ def upload(client: "Client", screenshot_set: str, file: Path) -> None:
       "attributes": {"uploaded": True, "sourceFileChecksum": hashlib.md5(data).hexdigest()},
     },
   })
-
-
-class Client:
-  """The App Store Connect API with a short-lived ES256 token from the API key."""
-
-  def __init__(self, key_id: str, issuer_id: str, private_key_pem: bytes) -> None:
-    from cryptography.hazmat.primitives.serialization import load_pem_private_key
-
-    self.key_id = key_id
-    self.issuer_id = issuer_id
-    self.private_key = load_pem_private_key(private_key_pem, password=None)
-    self.token = ""
-    self.token_expiry = 0.0
-
-  def get(self, path: str) -> dict:
-    return self.request("GET", path)
-
-  def post(self, path: str, body: dict) -> dict:
-    return self.request("POST", path, body)
-
-  def patch(self, path: str, body: dict) -> dict:
-    return self.request("PATCH", path, body)
-
-  def delete(self, path: str) -> dict:
-    return self.request("DELETE", path)
-
-  def request(self, method: str, path: str, body: dict | None = None) -> dict:
-    data = json.dumps(body).encode() if body is not None else None
-    request = urllib.request.Request(API + path, data=data, method=method, headers={
-      "Authorization": f"Bearer {self.bearer()}",
-      "Content-Type": "application/json",
-    })
-    try:
-      with urllib.request.urlopen(request, timeout=60) as response:
-        payload = response.read()
-    except urllib.error.HTTPError as error:
-      sys.exit(f"{method} {path}: HTTP {error.code}: {error.read().decode(errors='replace')}")
-    return json.loads(payload) if payload else {}
-
-  def bearer(self) -> str:
-    if time.time() < self.token_expiry - 60:
-      return self.token
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.asymmetric import ec
-    from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
-
-    now = int(time.time())
-    header = {"alg": "ES256", "kid": self.key_id, "typ": "JWT"}
-    claims = {"iss": self.issuer_id, "iat": now, "exp": now + TOKEN_LIFETIME_SECONDS, "aud": "appstoreconnect-v1"}
-    signing_input = f"{b64url(json.dumps(header).encode())}.{b64url(json.dumps(claims).encode())}"
-    # A JWT's ES256 signature is r and s, 32 bytes each, not the DER the library returns.
-    r, s = decode_dss_signature(self.private_key.sign(signing_input.encode(), ec.ECDSA(hashes.SHA256())))
-    signature = r.to_bytes(32, "big") + s.to_bytes(32, "big")
-    self.token = f"{signing_input}.{b64url(signature)}"
-    self.token_expiry = now + TOKEN_LIFETIME_SECONDS
-    return self.token
-
-
-def b64url(data: bytes) -> str:
-  return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
-
-
-def env(name: str) -> str:
-  value = os.environ.get(name)
-  if not value:
-    sys.exit(f"{name} is not set (or use --dry-run)")
-  return value
 
 
 if __name__ == "__main__":

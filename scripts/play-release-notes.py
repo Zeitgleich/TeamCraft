@@ -4,6 +4,9 @@
   scripts/play-release-notes.py --version 1.0.0 --tag v1.0.0 --repo owner/name \
       --locales en-US,de-DE --out-dir whatsnew
 
+Without --out-dir it only prints the text; app-store.yml takes it that way for the App Store, with
+--max-length 4000 (the App Store's limit for "What's new").
+
 The text is the highlights of the annotated tag, as scripts/render-release-notes.py finds them
 (without the "### Breaking" section, which is for operators), as plain text: Play shows no Markdown.
 Play allows 500 characters per language; longer highlights are cut at a line or word and end with a
@@ -31,8 +34,9 @@ def main() -> int:
     parser.add_argument("--version", required=True)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--repo", required=True)
-    parser.add_argument("--locales", required=True, help="comma-separated BCP 47 tags, e.g. en-US,de-DE")
-    parser.add_argument("--out-dir", required=True)
+    parser.add_argument("--locales", default="", help="comma-separated BCP 47 tags, e.g. en-US,de-DE")
+    parser.add_argument("--out-dir", help="write whatsnew-<locale> files there (else only print the text)")
+    parser.add_argument("--max-length", type=int, default=MAX_LENGTH)
     args = parser.parse_args()
 
     base_version = args.version.split("-", 1)[0]
@@ -40,23 +44,24 @@ def main() -> int:
         render.release_message(args.tag, base_version, render.tag_message)
     )
     url = f"https://github.com/{args.repo}/releases/tag/{args.tag}"
-    text = play_notes(args.version, highlights, url)
+    text = play_notes(args.version, highlights, url, args.max_length)
 
-    out_dir = pathlib.Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for locale in filter(None, (part.strip() for part in args.locales.split(","))):
-        (out_dir / f"whatsnew-{locale}").write_text(text)
+    if args.out_dir:
+        out_dir = pathlib.Path(args.out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for locale in filter(None, (part.strip() for part in args.locales.split(","))):
+            (out_dir / f"whatsnew-{locale}").write_text(text)
     sys.stdout.write(text + "\n")
     return 0
 
 
-def play_notes(version: str, highlights: str, url: str) -> str:
-    """The plain-text notes for Play: a candidate notice, the highlights, at most MAX_LENGTH long."""
+def play_notes(version: str, highlights: str, url: str, max_length: int = MAX_LENGTH) -> str:
+    """The plain-text notes for Play: a candidate notice, the highlights, at most max_length long."""
     lines = []
     if "-" in version:
         lines.append(f"Release candidate {version}, for testing.")
     lines.append(plain_text(highlights) or f"TeamCraft {version}")
-    return truncate("\n\n".join(lines), url)
+    return truncate("\n\n".join(lines), url, max_length)
 
 
 def plain_text(markdown: str) -> str:
@@ -70,15 +75,15 @@ def plain_text(markdown: str) -> str:
     return "\n".join(line.rstrip() for line in text.strip().splitlines())
 
 
-def truncate(text: str, url: str) -> str:
+def truncate(text: str, url: str, max_length: int = MAX_LENGTH) -> str:
     """The text if it fits; else cut at a line (or word) break, followed by "…" and the link."""
-    if length(text) <= MAX_LENGTH:
+    if length(text) <= max_length:
         return text
     suffix = f"\n{ELLIPSIS} {url}"
-    budget = MAX_LENGTH - length(suffix)
+    budget = max_length - length(suffix)
     if budget <= 0:
         # A link that long leaves no room; the cut text alone still fits.
-        suffix, budget = ELLIPSIS, MAX_LENGTH - length(ELLIPSIS)
+        suffix, budget = ELLIPSIS, max_length - length(ELLIPSIS)
     cut = fit(text, budget)
     for separator in ("\n", " "):
         position = cut.rfind(separator)
