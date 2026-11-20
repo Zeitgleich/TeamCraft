@@ -172,9 +172,17 @@ enum ScheduledSealTask {
         return
       }
       let work = Task {
-        processing.setTaskCompleted(success: await AppModel.shared.sealScheduledMessages())
+        let isSealed = await AppModel.shared.inBackgroundJob("Seal scheduled messages") {
+          await AppModel.shared.sealScheduledMessages()
+        }
+        processing.setTaskCompleted(success: isSealed)
       }
-      processing.expirationHandler = { work.cancel() }
+      processing.expirationHandler = {
+        work.cancel()
+        // Cancelling doesn't stop the core's job: the store closes now, before iOS suspends the
+        // app (0xdead10cc, #2179).
+        AppModel.backgroundTaskExpired()
+      }
     }
   }
 

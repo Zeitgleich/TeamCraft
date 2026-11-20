@@ -5851,6 +5851,14 @@ Details:
 - App and NSE still share the local database (App Group container + keychain access group). Like
   Threema's `ProcessCoordinator`, a cross-process lock ensures only one process syncs with the server at
   a time; Darwin notifications tell the other process to reload.
+- iOS kills a suspended app that holds a lock on a file in the App Group container (0xdead10cc). The
+  app closes the store, every SQLite connection of it (in WAL mode each holds a lock on the `-shm`
+  file while open), and lets go of the cross-process lock whenever it may be suspended: after the
+  last background job (the scene leaving the foreground, a push, a `BGTask`, a notification action)
+  and when the background time expires (FFI `suspend` / `resume`, #2179). Keeping the database
+  outside the container instead was considered and not chosen: the NSE reads it (§7.2) and writes
+  the push bookkeeping (§9.4), so it would need a second, shared store and a sync between the two,
+  and the process lock would still be a file in the container; closing the store covers both.
 - A commit in a conversation where the user holds scheduled messages wakes their devices with a sealed,
   content-free push of its own kind, coalesced and rate limited (scheduled-messages.md, "The wake").
   Android: high priority, with `v=0` outside the sealed payload, which only this kind sets: Google learns

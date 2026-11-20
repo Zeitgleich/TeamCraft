@@ -10,6 +10,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
   ) -> Bool {
     // First, so a crash during the rest of the launch is reported (the last known setting).
     CrashReports.shared.install()
+    // Kills by the system (0xdead10cc) arrive through MetricKit on a later launch (#2179).
+    SystemKillReports.shared.install()
     // Performance data: the signed-in start until the chat list shows the core's rows (#1521).
     let entry =
       launchOptions?[.remoteNotification] != nil ? "notification" : launchOptions?[.url] != nil ? "link" : "launcher"
@@ -61,9 +63,15 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     await AppModel.shared.presentation(for: notification)
   }
 
+  /// A tap or an action on a notification. An action (reply, mark as read, approve) runs in the
+  /// background: as a background job, so the store opens for it and closes after it (#2179).
   func userNotificationCenter(
     _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse
   ) async {
+    await AppModel.shared.inBackgroundJob("Notification action") { await handle(response) }
+  }
+
+  private func handle(_ response: UNNotificationResponse) async {
     let info = response.notification.request.content.userInfo
     // Approve or Decline of an admin's request to join; a tap opens the channel like a message.
     if info[NotificationKeys.kind] as? String == NotificationKeys.joinRequestKind,

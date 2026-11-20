@@ -152,7 +152,9 @@ use crate::http_fetch::run_request;
 use crate::logging::{JobClock, LifecycleStep, outcome};
 use crate::polls::PollLimitsItem;
 use crate::reads::{ReadQueue, Reads};
-use crate::store_threads::{MAX_STORE_CLOSE_WAIT, StoreThreads};
+use crate::store_threads::{
+  MAX_STORE_CLOSE_WAIT, MAX_STORE_REOPEN_WAIT, StoreClose, StoreClosing, StoreThreads,
+};
 
 uniffi::setup_scaffolding!();
 
@@ -160,10 +162,13 @@ uniffi::setup_scaffolding!();
 #[derive(uniffi::Object)]
 pub struct TeamCraft {
   /// The engine's queues: unset while the local store is unreadable from the start, replaced by
-  /// [`Self::reset_store`] (issue #414).
-  threads: RwLock<Option<EngineThreads>>,
-  /// The threads that hold the local store, waited for when the handle goes (#1980).
+  /// [`Self::reset_store`] (issue #414), closed by [`Self::suspend`] (#2179).
+  threads: RwLock<EngineSlot>,
+  /// The threads that hold the local store, waited for when the handle goes (#1980) or the store
+  /// is suspended (#2179).
   store_threads: StoreThreads,
+  /// What opens the engine again after [`Self::suspend`]; the key zeroizes on drop.
+  reopening: Mutex<engine::EngineStart>,
   /// While the local store is unreadable: why, and what opens the engine after a reset. The engine
   /// thread sets it when only the client finds that out, once the app can read.
   recovery: Arc<Mutex<Option<StoreRecovery>>>,
@@ -240,6 +245,28 @@ impl Drop for AwaitingEncryption {
 #[uniffi::export(with_foreign)]
 pub trait EventListener: Send + Sync {
   fn on_change(&self);
+}
+
+/// Where the handle's engine is.
+enum EngineSlot {
+  /// Running on the local store.
+  Open(EngineThreads),
+  /// The local store can't be read (issue #414): [`TeamCraft::reset_store`] opens a new one.
+  Unreadable,
+  /// Closed while the app is suspended (#2179): calls are refused until [`TeamCraft::resume`] opens
+  /// it again, once the threads before have let go of the store.
+  Suspended(StoreClosing),
+}
+
+/// How [`TeamCraft::suspend`] left the local store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum StoreSuspension {
+  /// Every connection is closed: the app holds no lock on the database.
+  Closed,
+  /// A job still ran on the store when the wait ran out; it closes once that job ends.
+  StillClosing,
+  /// No store was open (unreadable, or never opened).
+  NothingOpen,
 }
 
 /// What the handle keeps while the local store is unreadable (issue #414).
@@ -424,7 +451,7 @@ impl TeamCraft {
       engine::OpenError::Failed(error) => error,
     })?;
     tracing::info!(target: logging::LIFECYCLE, step = ?LifecycleStep::ResetStore, "done");
-    *self.threads.write().unwrap_or_else(PoisonError::into_inner) = Some(threads);
+    *self.threads.write().unwrap_or_else(PoisonError::into_inner) = EngineSlot::Open(threads);
     *recovery = None;
     Ok(())
   }
@@ -708,6 +735,46 @@ impl TeamCraft {
       LifecycleStep::StopSync,
       self.call(|engine| Box::pin(engine.stop_syncing())).await,
     )
+  }
+
+  /// Closes the local store, every connection to it, before the app is suspended (#2179): iOS kills
+  /// a suspended app that holds a lock on a file in the shared App Group container (0xdead10cc),
+  /// and in WAL mode SQLite keeps one on the database's `-shm` file for as long as a connection is
+  /// open. Stops syncing; jobs already queued finish first. Until [`Self::resume`], calls are
+  /// refused ([`TeamCraftError::EngineStopped`]) rather than opening the store behind the app's back
+  /// (a screen reading in the background). What the store holds (outbox, drafts, the MLS state) is
+  /// on disk and stays. Waits a moment for the threads to let go: call it off the main thread.
+  pub fn suspend(&self) -> StoreSuspension {
+    let closing = {
+      let mut slot = self.threads.write().unwrap_or_else(PoisonError::into_inner);
+      match std::mem::replace(&mut *slot, EngineSlot::Unreadable) {
+        EngineSlot::Open(threads) => {
+          let closing = self.store_threads.close();
+          *slot = EngineSlot::Suspended(closing.clone());
+          // The handle's queues go; the threads end once the jobs queued before are done.
+          drop(threads);
+          closing
+        },
+        EngineSlot::Suspended(closing) => {
+          *slot = EngineSlot::Suspended(closing.clone());
+          closing
+        },
+        EngineSlot::Unreadable => return StoreSuspension::NothingOpen,
+      }
+    };
+    let suspension = match closing.wait(MAX_STORE_CLOSE_WAIT) {
+      StoreClose::Closed => StoreSuspension::Closed,
+      StoreClose::TimedOut | StoreClose::OnStoreThread => StoreSuspension::StillClosing,
+    };
+    tracing::info!(target: logging::LIFECYCLE, step = ?LifecycleStep::Suspend, ?suspension, "done");
+    suspension
+  }
+
+  /// Opens the local store again after [`Self::suspend`]: the app returned to the foreground or was
+  /// woken in the background. Nothing to do while it is open. Waits for the threads before to let
+  /// go of the store and while it opens, like the constructor: call it off the main thread.
+  pub fn resume(&self) -> Result<(), TeamCraftError> {
+    self.reopen().map(drop)
   }
 
   /// Channels of every space and the user's DMs, as the sidebar lists them.
@@ -2169,19 +2236,21 @@ impl TeamCraft {
       running_calls: running_calls.clone(),
     };
     let start = engine::EngineStart::new(config, tokens, maybe_device_key, listener, signals)?;
+    let reopening = Mutex::new(start.duplicate());
     let recovery = Arc::new(Mutex::new(None));
     let store_threads = StoreThreads::new();
     let threads = match engine::spawn(&start, late_problem(recovery.clone()), store_threads.hold()) {
-      Ok(threads) => Some(threads),
+      Ok(threads) => EngineSlot::Open(threads),
       Err(engine::OpenError::Unreadable(problem)) => {
         *recovery.lock().unwrap_or_else(PoisonError::into_inner) = Some(StoreRecovery { problem, start });
-        None
+        EngineSlot::Unreadable
       },
       Err(engine::OpenError::Failed(error)) => return Err(error),
     };
     Ok(Arc::new(Self {
       threads: RwLock::new(threads),
       store_threads,
+      reopening,
       recovery,
       network,
       connection,
@@ -2291,14 +2360,53 @@ impl TeamCraft {
     self.read_queue()?.act(job).await
   }
 
-  /// The engine's queues; none while the local store is unreadable (issue #414).
+  /// The engine's queues; none while the local store is unreadable (issue #414) or suspended
+  /// (#2179).
   fn threads(&self) -> Result<EngineThreads, TeamCraftError> {
-    self
-      .threads
-      .read()
+    match &*self.threads.read().unwrap_or_else(PoisonError::into_inner) {
+      EngineSlot::Open(threads) => Ok(threads.clone()),
+      EngineSlot::Unreadable => Err(unreadable_store()),
+      EngineSlot::Suspended(_) => Err(TeamCraftError::EngineStopped),
+    }
+  }
+
+  /// Opens the engine again after [`Self::suspend`], once the threads before have let go of the
+  /// store: two engines on one store would each keep their own MLS state and outbox. Held under the
+  /// write lock, so callers meanwhile wait for this one opening.
+  fn reopen(&self) -> Result<EngineThreads, TeamCraftError> {
+    let mut slot = self.threads.write().unwrap_or_else(PoisonError::into_inner);
+    let closing = match &*slot {
+      // Open already: never suspended, or another caller opened it meanwhile.
+      EngineSlot::Open(threads) => return Ok(threads.clone()),
+      EngineSlot::Unreadable => return Err(unreadable_store()),
+      EngineSlot::Suspended(closing) => closing.clone(),
+    };
+    if closing.wait(MAX_STORE_REOPEN_WAIT) != StoreClose::Closed {
+      // A job of the engine before still runs; the app tries again.
+      return Err(TeamCraftError::EngineStopped);
+    }
+    let start = self
+      .reopening
+      .lock()
       .unwrap_or_else(PoisonError::into_inner)
-      .clone()
-      .ok_or_else(|| TeamCraftError::Storage("the local data can't be read; set this device up again".into()))
+      .duplicate();
+    let spawned = engine::spawn(&start, self.late_problem(), self.store_threads.hold());
+    let threads = match spawned {
+      Ok(threads) => threads,
+      Err(engine::OpenError::Unreadable(problem)) => {
+        *slot = EngineSlot::Unreadable;
+        // Not under the slot's lock: `reset_store` takes the recovery's lock first.
+        drop(slot);
+        *self.recovery.lock().unwrap_or_else(PoisonError::into_inner) =
+          Some(StoreRecovery { problem, start });
+        return Err(unreadable_store());
+      },
+      // Stays suspended: the app tries again.
+      Err(engine::OpenError::Failed(error)) => return outcome(LifecycleStep::Resume, Err(error)),
+    };
+    tracing::info!(target: logging::LIFECYCLE, step = ?LifecycleStep::Resume, "done");
+    *slot = EngineSlot::Open(threads.clone());
+    Ok(threads)
   }
 
   fn engine_jobs(&self) -> Result<mpsc::UnboundedSender<Job>, TeamCraftError> {
@@ -2335,15 +2443,17 @@ impl Drop for TeamCraft {
   /// tears down its global state when the process exits, under a thread still closing its
   /// connection (#1980, store_threads.rs).
   fn drop(&mut self) {
-    drop(
-      self
-        .threads
-        .get_mut()
-        .unwrap_or_else(PoisonError::into_inner)
-        .take(),
-    );
+    drop(std::mem::replace(
+      self.threads.get_mut().unwrap_or_else(PoisonError::into_inner),
+      EngineSlot::Unreadable,
+    ));
     self.store_threads.wait_until_closed(MAX_STORE_CLOSE_WAIT);
   }
+}
+
+/// Why a call can't reach the engine while the local store is unreadable.
+fn unreadable_store() -> TeamCraftError {
+  TeamCraftError::Storage("the local data can't be read; set this device up again".into())
 }
 
 /// Tells the handle that the client found the store unreadable after the app could already read.
@@ -2526,6 +2636,69 @@ mod tests {
         TeamCraft::new(config, Arc::new(NoTokens), Arc::new(Quiet)),
         Err(TeamCraftError::InvalidInput(_))
       ));
+    }
+  }
+
+  /// #2179: the store closes, every connection to it, while the iOS app is suspended, and opens
+  /// again with what it held.
+  mod suspension {
+    use super::*;
+
+    #[tokio::test]
+    async fn closes_every_connection_and_opens_again_with_what_was_saved() {
+      let directory = TestDir::new("suspend");
+      let core = open(&directory, KEY).unwrap();
+      let settings = MentionSettings {
+        is_first_name_mention: true,
+        do_channel_mentions_notify: false,
+        keywords: vec!["release".into()],
+      };
+      core.set_mention_settings(settings.clone()).await.unwrap();
+      assert!(!directory.files_containing("-shm").is_empty());
+
+      assert_eq!(core.suspend(), StoreSuspension::Closed);
+      // The last connection checkpoints the log and removes it and its shared memory, on which
+      // an open connection keeps a lock: nothing of the store is held any more.
+      assert!(directory.files_containing("-shm").is_empty());
+      assert!(directory.files_containing("-wal").is_empty());
+      assert_eq!(core.suspend(), StoreSuspension::Closed);
+
+      core.resume().unwrap();
+      assert_eq!(core.mention_settings().await.unwrap(), settings);
+      assert!(!directory.files_containing("-shm").is_empty());
+    }
+
+    #[tokio::test]
+    async fn calls_are_refused_until_resumed_and_never_open_the_store() {
+      let directory = TestDir::new("suspend-refused");
+      let core = open(&directory, KEY).unwrap();
+      assert_eq!(core.suspend(), StoreSuspension::Closed);
+      assert!(matches!(
+        core.mention_settings().await,
+        Err(TeamCraftError::EngineStopped)
+      ));
+      assert!(directory.files_containing("-shm").is_empty());
+
+      core.resume().unwrap();
+      core.resume().unwrap();
+      assert!(core.pending_work().await.unwrap().is_empty);
+      // And closes again.
+      assert_eq!(core.suspend(), StoreSuspension::Closed);
+      assert!(directory.files_containing("-shm").is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_store_has_nothing_to_close() {
+      let directory = TestDir::new("suspend-unreadable");
+      std::fs::write(directory.store(), b"not a database").unwrap();
+      let core = open(&directory, KEY).unwrap();
+      assert_eq!(core.suspend(), StoreSuspension::NothingOpen);
+      assert_eq!(
+        core.account_state().await.unwrap(),
+        AccountState::StoreUnreadable {
+          problem: StoreProblem::Damaged
+        }
+      );
     }
   }
 

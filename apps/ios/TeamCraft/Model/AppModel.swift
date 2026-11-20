@@ -254,8 +254,11 @@ final class AppModel {
     directory: FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
       .appendingPathComponent("space-pictures", isDirectory: true))
   @ObservationIgnored private var isSyncing = false
-  /// Background time held while what is pending goes out after the app left the foreground.
-  @ObservationIgnored private var backgroundTask = UIBackgroundTaskIdentifier.invalid
+  /// Background jobs under way, and whether the store is closed for a suspension (#2179).
+  @ObservationIgnored private var suspension = SuspensionGate()
+  /// The foreground was reported while the store was closed, which drops the report: it goes again
+  /// once the store is open.
+  @ObservationIgnored private var isForegroundReportOwed = false
   /// Counts the returns to the foreground: a background flush that outlasted one leaves syncing on.
   @ObservationIgnored private var foregroundGeneration = 0
   @ObservationIgnored private var maybePushToken: String?
@@ -282,7 +285,9 @@ final class AppModel {
     _ = NetworkMonitor.shared
     // Copies of picked files older than a week were uploaded long ago.
     container.pruneUploads(olderThan: 7 * 24 * 3600)
-    await startWithServer()
+    // A launch in the background (a push, a background task) opens the core too: as a job, so the
+    // store closes again before the app is suspended (#2179).
+    await inBackgroundJob("Start") { await startWithServer() }
   }
 
   /// After a failed start: tries to open the account again.
@@ -1101,6 +1106,7 @@ final class AppModel {
   /// The screens show the local store at once; syncing catches up in the background.
   func sceneBecameActive() async {
     foregroundGeneration += 1
+    await resumeStoreAhead()
     guard case .ready = phase else { return }
     // The extension may have written while the app was suspended, and its notification not reached
     // this process: the screens read again now (the core drops what the disk no longer holds, #1115).
@@ -1115,33 +1121,63 @@ final class AppModel {
     await pushUpkeep()
   }
 
-  /// Asks for background time as soon as the app leaves the foreground (Apple: before the work
-  /// starts, not at its end), so a send or upload under way finishes and the store is closed
-  /// cleanly instead of the app being suspended mid-write (issue #158). Call it synchronously from
-  /// the scene change; `sceneEnteredBackground` ends it.
+  /// The app leaves the foreground; call it synchronously from the scene change, before anything
+  /// else. Asks for background time at once (Apple: before the work starts, not at its end), sends
+  /// what still waits for the server (outbox, uploads, queued actions) within it, stops syncing and
+  /// closes the store, so the app is never suspended mid-write or holding a lock in the shared
+  /// container (issues #158, #2179). From here on push wakes the app (robustness.md, "Lifecycle").
+  /// What is left goes out on the next start; the core keeps it in the store.
   func sceneWillEnterBackground() {
-    guard backgroundTask == .invalid else { return }
-    backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "Send pending messages") { [weak self] in
-      // The time is up before the flush ended (it waits less than the time granted, so this is
-      // rare). The core can't be stopped synchronously; at least don't sleep holding the
-      // shared-container lock, which the system punishes with a kill (0xdead10cc).
-      self?.dropProcessLock()
-      self?.endBackgroundTask()
+    let time = beginBackgroundJob("Send pending messages")
+    let generation = foregroundGeneration
+    Task {
+      await flushPendingWork()
+      // Back in the foreground meanwhile: it keeps syncing.
+      if generation == foregroundGeneration {
+        await stopSyncing()
+        if case .ready = phase, await segmentPrefetch() != .off { SegmentPrefetchTask.schedule() }
+      }
+      await endBackgroundJob(time)
     }
   }
 
-  /// Sends what still waits for the server (outbox, uploads, queued actions) within the
-  /// background time, then stops syncing: from here on push wakes the app (robustness.md,
-  /// "Lifecycle"). What is left goes out on the next start; the core keeps it in the store.
-  func sceneEnteredBackground() async {
-    let generation = foregroundGeneration
-    defer { endBackgroundTask() }
-    await flushPendingWork()
-    // Back in the foreground meanwhile: it keeps syncing.
-    guard generation == foregroundGeneration else { return }
-    await stopSyncing()
-    guard case .ready = phase else { return }
-    if await segmentPrefetch() != .off { SegmentPrefetchTask.schedule() }
+  /// Runs `work` while the app is in the background (#2179): a push, a background task, a
+  /// notification action, the end of a call. iOS grants time for it, the store opens for it if it
+  /// was closed, and once the last such job ended the app is brought into the state it may be
+  /// suspended in (`prepareForSuspension`). In the foreground it just runs.
+  func inBackgroundJob<T>(_ name: String, _ work: () async -> T) async -> T {
+    let time = beginBackgroundJob(name)
+    let result = await work()
+    await endBackgroundJob(time)
+    return result
+  }
+
+  /// `backgroundTimeExpired` from a `BGTask`'s expiry handler, which iOS may call on any thread:
+  /// runs on the main thread and returns once the store is closed.
+  nonisolated static func backgroundTaskExpired() {
+    if Thread.isMainThread {
+      MainActor.assumeIsolated { shared.backgroundTimeExpired() }
+    } else {
+      DispatchQueue.main.sync { MainActor.assumeIsolated { shared.backgroundTimeExpired() } }
+    }
+  }
+
+  /// iOS's time for background work ran out before the work ended (the expiry of a background task
+  /// or a `BGTask`): the app is suspended right after this returns, so the store closes now, whatever
+  /// still runs on it. That work fails and is done later; the store keeps what it had (the outbox).
+  func backgroundTimeExpired() {
+    guard isInBackground, calls.activeCall == nil else { return }
+    suspension.timeExpired()
+    // The core stops syncing as the store closes; the next foreground starts it again.
+    syncStops += 1
+    isSyncing = false
+    dropProcessLock()
+    guard let core = maybeCore else { return }
+    suspension.storeSuspended()
+    // Waits here, on the main thread, at most `MAX_STORE_CLOSE_WAIT` (2 s): an expiry handler
+    // can't wait asynchronously, and iOS suspends the app once it returned.
+    let suspended = core.suspend()
+    Self.syncLog.notice("background time ran out; store: \(String(describing: suspended), privacy: .public)")
   }
 
   /// Presence (issue #472): the app came to the foreground, went to the background, or the user
@@ -1149,6 +1185,8 @@ final class AppModel {
   /// away timeout at once. Opens no core and never waits; call it before starting or stopping sync,
   /// so the report is queued ahead of them.
   func reportActivity(_ activity: AppActivity) {
+    // A closed store drops the report: the foreground's goes again once the store is open (#2179).
+    if activity == .foreground, suspension.isStoreSuspended { isForegroundReportOwed = true }
     maybeCore?.reportActivity(activity: activity)
   }
 
@@ -1242,6 +1280,11 @@ final class AppModel {
   /// Opens a sealed wake-up with the core in this process (a silent push, a VoIP push, or one the
   /// extension couldn't open because the app held the store). `nil` if it can't be read.
   func openPush(_ sealed: Data) async -> PushNotification? {
+    // A VoIP push reaches the app suspended, with the store closed (#2179).
+    await inBackgroundJob("Open push") { await openSealedPush(sealed) }
+  }
+
+  private func openSealedPush(_ sealed: Data) async -> PushNotification? {
     guard let core = try? core() else { return nil }
     // Shares the foreground app's lock; otherwise takes it like the extension does.
     let maybeNotification = await withProcessLock {
@@ -1253,6 +1296,10 @@ final class AppModel {
   /// A background (`content-available`) push: a `dismiss` removes what was read or ended elsewhere
   /// and sets the badge; a `sync` fetches what came meanwhile (notifications.md, "Sync wake-ups").
   func handleBackgroundPush(_ userInfo: [AnyHashable: Any]) async -> UIBackgroundFetchResult {
+    await inBackgroundJob("Background push") { await openBackgroundPush(userInfo) }
+  }
+
+  private func openBackgroundPush(_ userInfo: [AnyHashable: Any]) async -> UIBackgroundFetchResult {
     guard let sealed = PushPayload.sealedBytes(from: userInfo) else { return .noData }
     guard let notification = await openPush(sealed) else { return .failed }
     switch notification.kind {
@@ -1602,7 +1649,10 @@ final class AppModel {
   /// than returning nothing, but a background path still never replaces a database key it can't find
   /// (that would lose the store); it fails and the foreground opens the core.
   func core(createsKey: Bool = true) throws -> TeamCraft {
-    if let maybeCore { return maybeCore }
+    if let maybeCore {
+      if suspension.isStoreSuspended { try resumeStore(maybeCore) }
+      return maybeCore
+    }
     guard let account = container.activeAccount, vault.hasSession else { throw CoreFactoryError.noAccount }
     let opened = try factory.open(
       account: account, createKey: createsKey, runsUpkeep: true,
@@ -1610,6 +1660,8 @@ final class AppModel {
         Task { @MainActor in self?.storeDidChange() }
       })
     maybeCore = opened
+    // A new core's store is open; a flag left from the one before (signed out) doesn't apply.
+    suspension.storeResumed()
     setConnection(opened.connectionState())
     settingsSyncer().start()
     return opened
@@ -1872,8 +1924,9 @@ final class AppModel {
     if lockHolders.isEmpty { processLock.release() }
   }
 
-  /// The background time ran out: the lock goes now, whoever holds it (0xdead10cc). The sync loop
-  /// takes it back in the foreground; a job still running finishes without it.
+  /// The store closes for a suspension, or the background time ran out: the lock goes now, whoever
+  /// holds it (0xdead10cc). The sync loop takes it back in the foreground; a job still running
+  /// finishes without it.
   private func dropProcessLock() {
     lockHolders.removeAll()
     processLock.release()
@@ -1897,10 +1950,81 @@ final class AppModel {
     }
   }
 
-  private func endBackgroundTask() {
-    guard backgroundTask != .invalid else { return }
-    UIApplication.shared.endBackgroundTask(backgroundTask)
-    backgroundTask = .invalid
+  // MARK: Suspension (#2179)
+
+  private var isInBackground: Bool {
+    UIApplication.shared.applicationState == .background
+  }
+
+  private func beginBackgroundJob(_ name: String) -> BackgroundTime {
+    suspension.jobStarted()
+    return BackgroundTime(name: name) { [weak self] in self?.backgroundTimeExpired() }
+  }
+
+  private func endBackgroundJob(_ time: BackgroundTime) async {
+    suspension.jobEnded()
+    await prepareForSuspension()
+    time.end()
+  }
+
+  /// Brings the app into the state iOS may suspend it in (#2179): syncing stopped, the cross-process
+  /// lock let go and the local store closed, every SQLite connection of it. A suspended app that
+  /// holds a lock on a file in the App Group container is killed (0xdead10cc). Nothing happens in
+  /// the foreground, while another background job runs (its end comes here again) or while a call
+  /// runs (its end comes here again, `callEnded`).
+  private func prepareForSuspension() async {
+    guard suspension.shouldSuspend(isInBackground: isInBackground, hasActiveCall: calls.activeCall != nil) else {
+      return
+    }
+    await stopSyncing()
+    // Again: the foreground or a job may have come while syncing stopped.
+    guard suspension.shouldSuspend(isInBackground: isInBackground, hasActiveCall: calls.activeCall != nil) else {
+      return
+    }
+    dropProcessLock()
+    guard let core = maybeCore else { return }
+    suspension.storeSuspended()
+    let suspended = await Task.detached { core.suspend() }.value
+    Self.syncLog.info("store closed for the suspension: \(String(describing: suspended), privacy: .public)")
+  }
+
+  /// A call ended: in the background nothing needs the store any more (#2179).
+  func callEnded() {
+    guard isInBackground else { return }
+    Task { await inBackgroundJob("Call ended") {} }
+  }
+
+  /// Opens a store closed for a suspension again, off the main thread, before the screens read
+  /// from it: the app came to the foreground.
+  private func resumeStoreAhead() async {
+    guard suspension.isStoreSuspended, let core = maybeCore else { return }
+    do {
+      try await Task.detached { try core.resume() }.value
+      storeResumed()
+    } catch {
+      // The next use of the core tries again.
+      AppLog.failure("opening the store again", error)
+      return
+    }
+    // Back in the background while it opened: closed again.
+    await prepareForSuspension()
+  }
+
+  /// Opens a store closed for a suspension again when the core is used: in the foreground or for a
+  /// background job. A screen reading in the background gets an error instead, so the store never
+  /// stays open behind the app's back while it is suspended. Waits while the store opens.
+  private func resumeStore(_ core: TeamCraft) throws {
+    guard suspension.mayResume(isInBackground: isInBackground) else { throw CoreFactoryError.storeSuspended }
+    try core.resume()
+    storeResumed()
+  }
+
+  private func storeResumed() {
+    suspension.storeResumed()
+    if isForegroundReportOwed, !isInBackground {
+      isForegroundReportOwed = false
+      maybeCore?.reportActivity(activity: .foreground)
+    }
   }
 
   private func stopSyncing() async {
