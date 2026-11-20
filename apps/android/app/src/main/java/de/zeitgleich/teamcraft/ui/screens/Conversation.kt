@@ -8,9 +8,7 @@ import androidx.compose.ui.semantics.isTraversalGroup
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.runBlocking
 import androidx.compose.foundation.content.consume
 import androidx.compose.foundation.content.contentReceiver
 import android.net.Uri
@@ -114,6 +112,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.rememberUpdatedState
@@ -1558,6 +1557,8 @@ internal fun Composer(
   val focus = remember { FocusRequester() }
   val chatDrop = LocalChatDrop.current
   val dropScope = rememberCoroutineScope()
+  // Pasted files being copied; sending waits so the message doesn't leave without them.
+  var pastingCount by remember { mutableIntStateOf(0) }
   DisposableEffect(chatDrop, viewModel) {
     chatDrop?.maybeHandler = { event -> acceptDroppedFiles(context, event, dropScope) { uri -> viewModel.importFile(uri)?.let { files = files + it } } }
     onDispose { chatDrop?.maybeHandler = null }
@@ -1851,7 +1852,7 @@ internal fun Composer(
       },
     )
   }
-  val canSend = text.isNotBlank() || files.isNotEmpty() || sendableDraftFiles.isNotEmpty()
+  val canSend = (text.isNotBlank() || files.isNotEmpty() || sendableDraftFiles.isNotEmpty()) && pastingCount == 0
   val voice = rememberVoiceControls(viewModel, VoiceOwner(conversationId, maybeThread))
   val voicePolicy = snapshot?.security?.voiceMessagePolicy ?: VoiceMessagePolicy()
   // The record button stands in for the send button while there is nothing to send; a recording
@@ -1996,11 +1997,30 @@ internal fun Composer(
         }
       },
       onPasteFiles = { uris ->
-        // The keyboard's permission to read these ends when the receiver returns: copy them now.
-        // blocking-ok: waits on the main thread on purpose until the grant can outlive the receiver (#2184 audit).
-        val picked = runBlocking(Dispatchers.IO) { uris.mapNotNull { viewModel.importFile(it) } }
-        if (picked.isNotEmpty()) files = files + picked
+        // The keyboard's permission to read these ends when the receiver returns: open them now
+        // (cheap), copy in the background. Leaving the conversation cancels the copy.
+        val sources = uris.mapNotNull { viewModel.openPasted(it) }
+        if (sources.size < uris.size) viewModel.showFailure(R.string.composer_paste_failed)
+        if (sources.isNotEmpty()) {
+          pastingCount += sources.size
+          dropScope.launch {
+            try {
+              sources.forEach { source ->
+                try {
+                  val maybePicked = viewModel.importPasted(source)
+                  if (maybePicked != null) files = files + maybePicked else viewModel.showFailure(R.string.composer_paste_failed)
+                } finally {
+                  source.close()
+                  pastingCount -= 1
+                }
+              }
+            } finally {
+              sources.forEach { it.close() }
+            }
+          }
+        }
       },
+      isPasting = pastingCount > 0,
       canSend = canSend,
       isSending = isSending,
       isSendWithEnter = isSendWithEnter,
@@ -2112,6 +2132,7 @@ private fun ComposerField(
   caret: Int,
   onCaretChange: (Int) -> Unit,
   onPasteFiles: (List<Uri>) -> Unit,
+  isPasting: Boolean,
   canSend: Boolean,
   isSending: Boolean,
   isSendWithEnter: Boolean,
@@ -2148,6 +2169,9 @@ private fun ComposerField(
   }
   val active = if (isFormatBarOpen) remember(value.text, value.selection) { value.activeFormats() } else emptySet()
   Column {
+  if (isPasting) {
+    LinearProgressIndicator(Modifier.fillMaxWidth().padding(horizontal = 12.dp))
+  }
   if (isFormatBarOpen && maybeVoiceBar == null) {
     ComposerFormatBar(active = active, onFormat = { format -> update(value.formatted(format)) })
   }
