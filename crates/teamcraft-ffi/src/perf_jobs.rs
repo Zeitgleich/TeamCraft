@@ -28,6 +28,7 @@ use teamcraft_client_api::crash_reporting::trace::{self, ClosedSpan};
 use teamcraft_core::timing;
 
 use crate::logging;
+use crate::stall_watch::{self, PROCESS_STALL};
 
 /// Jobs kept at most; the oldest drop out. A measure looks back seconds, not minutes.
 const MAX_RECORDS: usize = 512;
@@ -50,6 +51,9 @@ const SLOW_REPORT_GAP: Duration = Duration::from_secs(60);
 const MIN_CLOCK_GAP: Duration = Duration::from_secs(1);
 /// A frozen period used less than this share of its length as CPU time.
 const FROZEN_CPU_SHARE: f64 = 0.1;
+/// A job's wait or run that was at least this share inside a stall of the whole process is
+/// reported as blocked by the stall (issue #2225).
+const STALLED_SHARE: f64 = 0.5;
 
 static RECORDS: Mutex<VecDeque<PerfJobSpan>> = Mutex::new(VecDeque::new());
 static READ_DEPTH: AtomicU32 = AtomicU32::new(0);
@@ -186,6 +190,8 @@ pub(crate) fn recorded_between(start_ms: f64, end_ms: f64) -> Vec<PerfJobSpan> {
 pub fn set_perf_listener(listener: Arc<dyn PerfListener>) {
   *LISTENER.lock().unwrap_or_else(PoisonError::into_inner) = Some(listener);
   trace::set_kept_hook(on_traces_kept);
+  // Only a process that reports needs to tell a stall of its own from a held lane.
+  stall_watch::start();
 }
 
 fn on_traces_kept() {
@@ -320,11 +326,13 @@ impl Lifecycle {
 pub(crate) fn app_backgrounded() {
   BACKGROUND_COUNT.fetch_add(1, Ordering::Relaxed);
   IN_BACKGROUND.store(true, Ordering::Relaxed);
+  stall_watch::backgrounded();
 }
 
 /// The app came to the foreground again.
 pub(crate) fn app_foregrounded() {
   IN_BACKGROUND.store(false, Ordering::Relaxed);
+  stall_watch::foregrounded();
 }
 
 /// Whether the process did not run for `period`: it was suspended (in the background, or the device
@@ -478,9 +486,16 @@ impl Running {
           .queued
           .lane
           .map_or(0, |lane| lane.depth().load(Ordering::Relaxed));
-        report_slow(self.queued.name, PerfJobSpan { waiters, ..span });
+        let span = PerfJobSpan { waiters, ..span };
+        match stall_in(self.started_at_ms, done_at_ms) {
+          Some(stalled_ms) => report_stalled(span, stalled_ms),
+          None => report_slow(self.queued.name, span),
+        }
       },
-      Some(SlowKind::Waited) => report_blocked(self.queued.lane, span),
+      Some(SlowKind::Waited) => match stall_in(self.queued.enqueued_at_ms, self.started_at_ms) {
+        Some(stalled_ms) => report_stalled(span, stalled_ms),
+        None => report_blocked(self.queued.lane, span),
+      },
       None => {},
     }
   }
@@ -531,6 +546,33 @@ fn report_blocked(lane: Option<Lane>, span: PerfJobSpan) {
   if let Some((name, span)) = blocked_report(blocker, span) {
     report_slow(&name, span);
   }
+}
+
+/// The milliseconds of `started_at_ms` to `ended_at_ms` the whole process didn't run
+/// ([`stall_watch`]), when that was most of it: then no job of the core held the lane, the OS did
+/// (issue #2225).
+fn stall_in(started_at_ms: f64, ended_at_ms: f64) -> Option<f64> {
+  let length_ms = ended_at_ms - started_at_ms;
+  if length_ms <= 0.0 {
+    return None;
+  }
+  let stalled_ms = stall_watch::stalled_ms(started_at_ms, ended_at_ms);
+  (stalled_ms >= length_ms * STALLED_SHARE).then_some(stalled_ms)
+}
+
+/// A job that waited or ran long because the process didn't run: one report for the stall, as the
+/// blocker of the job's lane ("Read lane blocked: process_stall"), not one blaming its own job or
+/// the job ahead of it.
+fn report_stalled(span: PerfJobSpan, stalled_ms: f64) {
+  report_slow(
+    &format!("blocked:{PROCESS_STALL}"),
+    PerfJobSpan {
+      blocked_by: PROCESS_STALL.to_owned(),
+      blocker_run_ms: stalled_ms,
+      waiters: span.waiters.max(1),
+      ..span
+    },
+  );
 }
 
 /// The report name and span of a job that waited behind `maybe_blocker`; none when the blocker did
@@ -938,6 +980,40 @@ mod tests {
     gateway_event_applied(base + 500.0, base + 500.5);
     let runs = LANE_RUNS.lock().unwrap_or_else(PoisonError::into_inner);
     assert!(blocker_of(&runs, Lane::Engine, base + 400.0, base + 600.0).is_none());
+  }
+
+  #[test]
+  fn a_job_the_process_did_not_run_for_is_blocked_by_the_stall_not_by_a_job() {
+    // Issue #2225: every thread stood still for 7.2 s; the report named whichever job ran longest.
+    // Far in the future, apart from the other tests' windows.
+    let base = 7.0e15;
+    crate::stall_watch::keep_stall(base + 500.0, base + 7_700.0);
+    // The act ran from 43.7 s to 51.0 s of that window: almost all of it inside the stall.
+    assert!(stall_in(base + 200.0, base + 7_480.0).is_some_and(|ms| (ms - 6_980.0).abs() < 1.0));
+    // A job that ran next to the stall, not inside it, stays its own.
+    assert!(stall_in(base + 7_700.0, base + 9_700.0).is_none());
+    assert!(
+      stall_in(base + 6_000.0, base + 10_000.0).is_none(),
+      "under half of it"
+    );
+
+    let reports = Arc::new(Mutex::new(Vec::new()));
+    struct Collect(Arc<Mutex<Vec<PerfJobSpan>>>);
+    impl PerfListener for Collect {
+      fn on_slow_job(&self, job: PerfJobSpan) {
+        self.0.lock().unwrap().push(job);
+      }
+      fn on_traces_kept(&self) {}
+    }
+    *LISTENER.lock().unwrap() = Some(Arc::new(Collect(reports.clone())));
+    report_stalled(span(base + 200.0, 7_280.0), 6_980.0);
+    *LISTENER.lock().unwrap() = None;
+    let reports = reports.lock().unwrap();
+    // Another test may have used up the process's reports; one that got through names the stall.
+    if let Some(report) = reports.iter().find(|r| r.blocked_by == PROCESS_STALL) {
+      assert_eq!(report.blocker_run_ms, 6_980.0);
+      assert_eq!(report.waiters, 1);
+    }
   }
 
   #[test]
