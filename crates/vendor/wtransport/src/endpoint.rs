@@ -197,6 +197,31 @@ impl Endpoint<endpoint_side::Client> {
         })
     }
 
+    /// Constructs a *client* endpoint on an abstract UDP socket instead of the configuration's
+    /// bind address, which is not used.
+    ///
+    /// Useful when the socket sends differently from quinn's own, e.g. marks its datagrams.
+    pub fn client_with_socket(
+        client_config: ClientConfig,
+        socket: Arc<dyn quinn::AsyncUdpSocket>,
+    ) -> std::io::Result<Self> {
+        let endpoint_config = client_config.endpoint_config;
+        let quic_config = client_config.quic_config;
+        let runtime = Arc::new(TokioRuntime);
+
+        let mut endpoint =
+            quinn::Endpoint::new_with_abstract_socket(endpoint_config, None, socket, runtime)?;
+
+        endpoint.set_default_client_config(quic_config);
+
+        Ok(Self {
+            endpoint,
+            side: endpoint_side::Client {
+                dns_resolver: client_config.dns_resolver,
+            },
+        })
+    }
+
     /// Switches the endpoint to a new UDP socket.
     ///
     /// All connections of this endpoint continue on the new socket: QUIC connection migration
@@ -207,6 +232,11 @@ impl Endpoint<endpoint_side::Client> {
     /// On error, the old UDP socket is retained.
     pub fn rebind(&self, socket: std::net::UdpSocket) -> std::io::Result<()> {
         self.endpoint.rebind(socket)
+    }
+
+    /// Like [`rebind`](Self::rebind), to an abstract UDP socket.
+    pub fn rebind_abstract(&self, socket: Arc<dyn quinn::AsyncUdpSocket>) -> std::io::Result<()> {
+        self.endpoint.rebind_abstract(socket)
     }
 
     /// Establishes a WebTransport connection to a specified URL.

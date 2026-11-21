@@ -1,12 +1,12 @@
 # Vendored: wtransport
 
-| Item         | Value                                                                       |
-|--------------|-----------------------------------------------------------------------------|
-| Upstream     | https://github.com/BiagioFesta/wtransport (crate `wtransport` on crates.io) |
-| Version      | 0.7.2, upstream commit `d022a6ad5f6260cb526e06d8ca42d09516ce6440`           |
-| License      | MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`, from that commit)       |
-| Used by      | `teamcraft-media` (native call driver), `teamcraft-sfu`; `[patch.crates-io]` |
-| Why vendored | Client `Endpoint::rebind` (issue #139); sending `CLOSE_WEBTRANSPORT_SESSION` (#459); reads of the control streams that survive being cancelled (#1139) |
+| Item         | Value                                                                                                                                                                                                  |
+|--------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Upstream     | https://github.com/BiagioFesta/wtransport (crate `wtransport` on crates.io)                                                                                                                            |
+| Version      | 0.7.2, upstream commit `d022a6ad5f6260cb526e06d8ca42d09516ce6440`                                                                                                                                      |
+| License      | MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`, from that commit)                                                                                                                                  |
+| Used by      | `teamcraft-media` (native call driver), `teamcraft-sfu`; `[patch.crates-io]`                                                                                                                           |
+| Why vendored | Client `Endpoint::rebind` (issue #139); sending `CLOSE_WEBTRANSPORT_SESSION` (#459); reads of the control streams that survive being cancelled (#1139); client endpoints on an abstract socket (#2141) |
 
 ## Why
 
@@ -43,9 +43,14 @@ crates/vendor/wtransport` shows every change since.
    `src/driver/streams/mod.rs` (`FrameReadProgress`, `read_frame_resumable`), `settings.rs` and
    `connect.rs`. Checked end to end by `teamcraft-sfu`'s `tests/suite/handshake_frames.rs`. Worth
    reporting upstream.
-4. `Cargo.toml`: an empty `[workspace]` table so the copy builds and tests on its own (our workspace
+4. Client endpoints on an abstract UDP socket (#2141): `Endpoint::<Client>::client_with_socket(config,
+   Arc<dyn quinn::AsyncUdpSocket>)` and `rebind_abstract`, forwarding to quinn's
+   `Endpoint::new_with_abstract_socket` and `rebind_abstract`. The native call client's voice
+   connection sends through a socket that marks its datagrams DSCP Expedited Forwarding
+   (`teamcraft-media` `quic_voice.rs`). `src/endpoint.rs`.
+5. `Cargo.toml`: an empty `[workspace]` table so the copy builds and tests on its own (our workspace
    excludes `crates/vendor`).
-5. Added `VENDORED.md`, `UPSTREAM_PR.md` with `upstream.patch` (change 1, relative to the upstream
+6. Added `VENDORED.md`, `UPSTREAM_PR.md` with `upstream.patch` (change 1, relative to the upstream
    repository), `.gitignore` (standalone `Cargo.lock` and `target/`).
 
 No other source changes. The capsule encoding is covered by unit tests in `connect.rs`

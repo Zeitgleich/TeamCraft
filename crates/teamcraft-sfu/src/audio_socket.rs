@@ -1,13 +1,20 @@
-//! A second fallback connection for a session's audio (#1979): on one TCP connection a lost segment
-//! holds up everything behind it, and a voice behind a camera's video was late by up to a second at
-//! every loss. On a connection of its own the voice waits only for its own losses.
+//! A second connection for a session's own audio.
 //!
-//! A WebSocket fallback session gets a random secret right after its join
+//! On the WebSocket fallback (#1979): on one TCP connection a lost segment holds up everything
+//! behind it, and a voice behind a camera's video was late by up to a second at every loss. On a
+//! connection of its own the voice waits only for its own losses.
+//!
+//! On QUIC (#2141): a connection that carries nothing but voice can be marked DSCP Expedited
+//! Forwarding as a whole, so the first hop's voice queue serves it; the session's connection
+//! carries video too and stays unmarked (RFC 8837). quinn has no per-datagram mark.
+//!
+//! Every session gets a random secret right after its join
 //! ([`teamcraft_proto::CallServerMessage::AudioSocket`]), over its own connection (TLS) only. A
-//! second connection that starts with `attach_audio` and that secret carries the session's media
-//! datagrams to the SFU from then on; the SFU sends nothing on it but its close. It is no session of
-//! its own: no slot, no DAVE leaf, no events. It holds a connection slot of the call's fallback
-//! connections, and it ends when its session ends or another connection attaches in its place.
+//! second connection of the same transport that starts with `attach_audio` and that secret carries
+//! the session's media datagrams to the SFU from then on; the SFU sends nothing on it but its close.
+//! It is no session of its own: no slot, no DAVE leaf, no events. A fallback one holds a connection
+//! slot of the call's fallback connections; a QUIC one holds nothing once attached (one per session
+//! at most, see below). It ends when its session ends or another connection attaches in its place.
 //!
 //! As with the switch secrets ([`crate::switch`]), the first [`SELECTOR_BYTES`] of a secret find its
 //! entry and the whole secret is then compared in constant time. Unlike them, a secret stays good for
@@ -17,6 +24,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use rand_core::{OsRng, RngCore};
 use subtle::ConstantTimeEq;
@@ -29,6 +37,11 @@ use crate::auth::JoinGrant;
 
 /// The bytes of a secret that pick its entry: no secret in themselves.
 const SELECTOR_BYTES: usize = 8;
+/// Datagrams of a session's audio connection that wait for its session's task: a second of a voice
+/// in 20 ms packets. More waiting is a session that stalled, and what comes then is dropped.
+pub(crate) const AUDIO_SOCKET_QUEUE: usize = 64;
+/// How often an audio connection looks whether it is still the one its session uses.
+pub(crate) const AUDIO_SOCKET_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The secret one fallback session hands its client. Not `Clone`, no `Debug` of its bytes.
 pub(crate) struct AudioSocketSecret([u8; AUDIO_SOCKET_SECRET_BYTES]);

@@ -1,11 +1,14 @@
 //! A relay between one client and the SFU whose directions can be limited like a bottleneck, for
-//! the suite's tests of limited links: packets leave at the link's rate, wait in a queue of at
+//! the suite's tests of limited links. Each of the client's sockets gets an SFU-side socket of its
+//! own, as a NAT maps each socket of a device on its own: the call's own voice takes a QUIC
+//! connection of its own (#2141), from a socket of its own, through the same bottleneck. Packets packets leave at the link's rate, wait in a queue of at
 //! most [`MAX_QUEUE_DELAY`] and are dropped when it is full. A direction can also lose packets in
 //! bursts and delay them, both fluctuating as a real link does ([`Impairment`]).
 
 // clippy.toml only relaxes these lints inside #[test] functions; the helpers below are test code too.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::collections::HashMap;
 use std::net::{Ipv6Addr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
@@ -34,8 +37,8 @@ pub struct Relay {
   pub to_client: Shaper,
 }
 
-/// Packets with the time they leave the bottleneck.
-type Departures = mpsc::UnboundedReceiver<(tokio::time::Instant, Vec<u8>)>;
+/// Packets with the time they leave the bottleneck, and what they were tagged with (where to).
+type Departures<T> = mpsc::UnboundedReceiver<(tokio::time::Instant, T, Vec<u8>)>;
 
 /// One direction of a [`Relay`]: packets leave at the limit's rate after waiting in a queue of
 /// at most [`MAX_QUEUE_DELAY`]; a packet that would wait longer is dropped.
@@ -101,15 +104,15 @@ impl Shaper {
       .store(maybe_limit_bps.unwrap_or(0), Ordering::Relaxed);
   }
 
-  /// The queue: packets go into the sender, and come out of the receiver with the time they
-  /// leave (dropped ones don't).
-  fn spawn_queue(&self) -> (mpsc::UnboundedSender<Vec<u8>>, Departures) {
-    let (packets, mut incoming) = mpsc::unbounded_channel::<Vec<u8>>();
+  /// The queue: tagged packets go into the sender, and come out of the receiver with the time
+  /// they leave (dropped ones don't).
+  fn spawn_queue<T: Send + 'static>(&self) -> (mpsc::UnboundedSender<(T, Vec<u8>)>, Departures<T>) {
+    let (packets, mut incoming) = mpsc::unbounded_channel::<(T, Vec<u8>)>();
     let (departures, queue) = mpsc::unbounded_channel();
     let shaper = self.clone();
     tokio::spawn(async move {
       let mut next_free = tokio::time::Instant::now();
-      while let Some(packet) = incoming.recv().await {
+      while let Some((tag, packet)) = incoming.recv().await {
         let now = tokio::time::Instant::now();
         let at = shaper.start.elapsed();
         let limit_bps = shaper.limit_bps.load(Ordering::Relaxed);
@@ -134,7 +137,7 @@ impl Shaper {
           }
         }
         shaper.log.lock().unwrap().push((at, packet.len(), false));
-        if departures.send((departure, packet)).is_err() {
+        if departures.send((departure, tag, packet)).is_err() {
           return;
         }
       }
@@ -214,37 +217,33 @@ impl ImpairedLink {
 impl Relay {
   /// Relays to `sfu`, without a limit until one is set; logs are timed from `start`.
   pub fn start(sfu: SocketAddr, start: Instant) -> Self {
-    let (client_side, sfu_side) = bind_sockets(sfu);
+    let client_side = Arc::new(bind_socket());
     let address = client_side.local_addr().unwrap();
     let (to_sfu, to_client) = (Shaper::new(start), Shaper::new(start));
-    let client: Arc<Mutex<Option<SocketAddr>>> = Arc::default();
+    let (into_sfu_queue, mut sfu_queue) = to_sfu.spawn_queue::<Arc<UdpSocket>>();
+    let (into_client_queue, mut client_queue) = to_client.spawn_queue::<SocketAddr>();
 
-    let (into_sfu_queue, mut sfu_queue) = to_sfu.spawn_queue();
-    let known_client = Arc::clone(&client);
+    let mut mappings = ClientMappings::new(sfu);
     receive_on_thread(Arc::clone(&client_side), move |packet, from| {
-      *known_client.lock().unwrap() = Some(from);
+      let sfu_side = mappings.sfu_side(from, |sfu_side| {
+        let into_client_queue = into_client_queue.clone();
+        receive_on_thread(sfu_side, move |packet, _| {
+          let _ = into_client_queue.send((from, packet.to_vec()));
+        });
+      });
       // The queue ends with the test's runtime; this thread with the test's process.
-      let _ = into_sfu_queue.send(packet.to_vec());
+      let _ = into_sfu_queue.send((sfu_side, packet.to_vec()));
     });
-    let towards_sfu = Arc::clone(&sfu_side);
     tokio::spawn(async move {
-      while let Some((departure, packet)) = sfu_queue.recv().await {
+      while let Some((departure, sfu_side, packet)) = sfu_queue.recv().await {
         tokio::time::sleep_until(departure).await;
-        let _ = towards_sfu.send(&packet);
+        let _ = sfu_side.send(&packet);
       }
     });
-
-    let (into_client_queue, mut client_queue) = to_client.spawn_queue();
-    receive_on_thread(sfu_side, move |packet, _| {
-      let _ = into_client_queue.send(packet.to_vec());
-    });
     tokio::spawn(async move {
-      while let Some((departure, packet)) = client_queue.recv().await {
+      while let Some((departure, client, packet)) = client_queue.recv().await {
         tokio::time::sleep_until(departure).await;
-        let maybe_client = *client.lock().unwrap();
-        if let Some(client) = maybe_client {
-          let _ = client_side.send_to(&packet, client);
-        }
+        let _ = client_side.send_to(&packet, client);
       }
     });
     Self {
@@ -255,15 +254,88 @@ impl Relay {
   }
 }
 
-/// The sockets of a relay to `sfu`: the one a client sends to, and the one connected to the SFU.
-pub fn bind_sockets(sfu: SocketAddr) -> (Arc<UdpSocket>, Arc<UdpSocket>) {
-  let client_side = bind_socket();
-  let sfu_side = bind_socket();
-  sfu_side.connect(sfu).unwrap();
-  (Arc::new(client_side), Arc::new(sfu_side))
+/// Relays a client's UDP from `client_side` to `sfu` and back on the tokio runtime, each client
+/// socket through an SFU-side socket of its own (a NAT's mappings: the own voice takes a connection
+/// of its own, #2141). `upstream` and `downstream` see every packet of their direction and say
+/// whether it passes.
+pub fn relay_per_client(
+  client_side: Arc<tokio::net::UdpSocket>,
+  sfu: SocketAddr,
+  mut upstream: impl FnMut(&[u8]) -> bool + Send + 'static,
+  downstream: impl Fn(&[u8]) -> bool + Send + Sync + 'static,
+) {
+  let downstream = Arc::new(downstream);
+  tokio::spawn(async move {
+    let mut by_client: HashMap<SocketAddr, Arc<tokio::net::UdpSocket>> = HashMap::new();
+    let mut buffer = vec![0; 65_536];
+    while let Ok((len, from)) = client_side.recv_from(&mut buffer).await {
+      let sfu_side = match by_client.get(&from) {
+        Some(socket) => Arc::clone(socket),
+        None => {
+          let socket = Arc::new(
+            tokio::net::UdpSocket::bind((Ipv6Addr::LOCALHOST, 0))
+              .await
+              .unwrap(),
+          );
+          socket.connect(sfu).await.unwrap();
+          let (reading, back, downstream) = (
+            Arc::clone(&socket),
+            Arc::clone(&client_side),
+            Arc::clone(&downstream),
+          );
+          tokio::spawn(async move {
+            let mut buffer = vec![0; 65_536];
+            while let Ok(len) = reading.recv(&mut buffer).await {
+              if downstream(&buffer[..len]) {
+                let _ = back.send_to(&buffer[..len], from).await;
+              }
+            }
+          });
+          by_client.insert(from, Arc::clone(&socket));
+          socket
+        },
+      };
+      if upstream(&buffer[..len]) {
+        let _ = sfu_side.send(&buffer[..len]).await;
+      }
+    }
+  });
 }
 
-fn bind_socket() -> UdpSocket {
+/// A relay's SFU-side sockets, one per client socket (a NAT's mappings).
+pub struct ClientMappings {
+  sfu: SocketAddr,
+  by_client: HashMap<SocketAddr, Arc<UdpSocket>>,
+  /// Every SFU-side socket so far, for [`dropped_by_kernel`].
+  pub all: Arc<Mutex<Vec<Arc<UdpSocket>>>>,
+}
+
+impl ClientMappings {
+  pub fn new(sfu: SocketAddr) -> Self {
+    Self {
+      sfu,
+      by_client: HashMap::new(),
+      all: Arc::default(),
+    }
+  }
+
+  /// The SFU-side socket of `client`; a new one is handed to `on_new` first, to read what the SFU
+  /// sends there.
+  pub fn sfu_side(&mut self, client: SocketAddr, on_new: impl FnOnce(Arc<UdpSocket>)) -> Arc<UdpSocket> {
+    if let Some(socket) = self.by_client.get(&client) {
+      return Arc::clone(socket);
+    }
+    let socket = Arc::new(bind_socket());
+    socket.connect(self.sfu).unwrap();
+    self.all.lock().unwrap().push(Arc::clone(&socket));
+    self.by_client.insert(client, Arc::clone(&socket));
+    on_new(Arc::clone(&socket));
+    socket
+  }
+}
+
+/// The socket of a relay that a client sends to instead of the SFU.
+pub fn bind_socket() -> UdpSocket {
   let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)).unwrap();
   // As much room as the system gives (it caps the size silently): see `receive_on_thread`.
   socket.set_recv_buffer_size(RECEIVE_BUFFER_BYTES).unwrap();
@@ -292,21 +364,22 @@ pub fn receive_on_thread(
   });
 }
 
-/// Sends what goes into the returned queue at `rate_bps` from a thread of its own, until the
+/// Sends what goes into the returned queue (tagged with where to) at `rate_bps` from a thread of
+/// its own, until the
 /// queue is dropped: a link's rate instead of loopback's, where a keyframe arrives in one burst
 /// and a socket whose buffer the system caps (`net.core.rmem_max`) overflows however idle the
 /// machine is. No packet is dropped here.
-pub fn paced_on_thread(
+pub fn paced_on_thread<T: Send + 'static>(
   rate_bps: u64,
-  mut send: impl FnMut(&[u8]) + Send + 'static,
-) -> std_mpsc::Sender<Vec<u8>> {
-  let (packets, queue) = std_mpsc::channel::<Vec<u8>>();
+  mut send: impl FnMut(&T, &[u8]) + Send + 'static,
+) -> std_mpsc::Sender<(T, Vec<u8>)> {
+  let (packets, queue) = std_mpsc::channel::<(T, Vec<u8>)>();
   std::thread::spawn(move || {
     let mut next_free = Instant::now();
-    while let Ok(packet) = queue.recv() {
+    while let Ok((tag, packet)) = queue.recv() {
       let now = Instant::now();
       std::thread::sleep(next_free.saturating_duration_since(now));
-      send(&packet);
+      send(&tag, &packet);
       next_free = next_free.max(now) + Duration::from_secs_f64(packet.len() as f64 * 8.0 / rate_bps as f64);
     }
   });

@@ -7,6 +7,7 @@
 // clippy.toml only relaxes these lints inside #[test] functions; the helpers below are test code too.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::collections::{HashMap, HashSet};
 use std::net::{Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -42,7 +43,7 @@ async fn new_address_migrates_the_connection_without_rejoining() {
   .await;
   wait_for(&mut bob, |event| matches!(event, CallEngineEvent::Secured { .. })).await;
 
-  relay.rebind().await;
+  relay.rebind();
   alice.network_changed();
   let (alice_events, bob_events) = tokio::join!(
     collect(&mut alice, Duration::from_secs(2)),
@@ -169,7 +170,9 @@ async fn silent_path_is_noticed_without_a_network_change_report() {
   bob.leave().await.unwrap();
 }
 
-/// A UDP relay between one client and the SFU, with a replaceable upstream socket.
+/// A UDP relay between one client and the SFU, the device's network: each client socket goes out
+/// through an upstream socket of its own (a NAT's mappings: the own voice takes a connection of its
+/// own, #2141), and a rebinding gives every one of them a new one.
 struct Relay {
   front: Arc<UdpSocket>,
   state: Arc<RelayState>,
@@ -177,12 +180,13 @@ struct Relay {
 
 struct RelayState {
   sfu: SocketAddr,
-  upstream: Mutex<Arc<UdpSocket>>,
-  maybe_client: Mutex<Option<SocketAddr>>,
-  /// The client's socket that can't reach the SFU any more.
-  maybe_cut_off_client: Mutex<Option<SocketAddr>>,
-  is_black_hole: AtomicBool,
+  /// Bumped by a rebinding: mappings of an earlier generation are gone.
   generation: AtomicU64,
+  /// Each client socket's upstream socket, and its generation.
+  upstreams: Mutex<HashMap<SocketAddr, (u64, Arc<UdpSocket>)>>,
+  /// The client's sockets that can't reach the SFU any more.
+  cut_off_clients: Mutex<HashSet<SocketAddr>>,
+  is_black_hole: AtomicBool,
   downstream_on_new_path: AtomicU64,
   downstream_after_cut_off: AtomicU64,
 }
@@ -192,28 +196,24 @@ impl Relay {
     let front = Arc::new(UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).await.unwrap());
     let state = Arc::new(RelayState {
       sfu: SocketAddr::new(Ipv6Addr::LOCALHOST.into(), sfu_port),
-      upstream: Mutex::new(Arc::new(UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).await.unwrap())),
-      maybe_client: Mutex::new(None),
-      maybe_cut_off_client: Mutex::new(None),
-      is_black_hole: AtomicBool::new(false),
       generation: AtomicU64::new(0),
+      upstreams: Mutex::default(),
+      cut_off_clients: Mutex::default(),
+      is_black_hole: AtomicBool::new(false),
       downstream_on_new_path: AtomicU64::new(0),
       downstream_after_cut_off: AtomicU64::new(0),
     });
     let relay = Self { front, state };
-    relay.spawn_downstream(0);
     let (front, state) = (Arc::clone(&relay.front), Arc::clone(&relay.state));
     tokio::spawn(async move {
       let mut buffer = vec![0u8; 65_536];
       while let Ok((length, from)) = front.recv_from(&mut buffer).await {
-        if *state.maybe_cut_off_client.lock().unwrap() == Some(from) {
+        if state.cut_off_clients.lock().unwrap().contains(&from)
+          || state.is_black_hole.load(Ordering::Relaxed)
+        {
           continue;
         }
-        *state.maybe_client.lock().unwrap() = Some(from);
-        if state.is_black_hole.load(Ordering::Relaxed) {
-          continue;
-        }
-        let upstream = Arc::clone(&state.upstream.lock().unwrap());
+        let upstream = upstream_of(&state, &front, from).await;
         // Best effort, like any network.
         let _ = upstream.send_to(&buffer[..length], state.sfu).await;
       }
@@ -225,19 +225,16 @@ impl Relay {
     self.front.local_addr().unwrap().port()
   }
 
-  /// The client's traffic now leaves from another address; the old one is gone.
-  async fn rebind(&self) {
-    let socket = Arc::new(UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).await.unwrap());
-    *self.state.upstream.lock().unwrap() = socket;
-    let generation = self.state.generation.fetch_add(1, Ordering::Relaxed) + 1;
-    self.spawn_downstream(generation);
+  /// The client's traffic now leaves from other addresses; the old ones are gone.
+  fn rebind(&self) {
+    self.state.generation.fetch_add(1, Ordering::Relaxed);
   }
 
-  /// The client's current socket can't reach the SFU any more, neither way; another socket of the
+  /// The client's current sockets can't reach the SFU any more, neither way; other sockets of the
   /// client can.
   fn cut_off_client(&self) {
-    let maybe_client = *self.state.maybe_client.lock().unwrap();
-    *self.state.maybe_cut_off_client.lock().unwrap() = maybe_client;
+    let clients: Vec<SocketAddr> = self.state.upstreams.lock().unwrap().keys().copied().collect();
+    self.state.cut_off_clients.lock().unwrap().extend(clients);
   }
 
   fn downstream_after_cut_off(&self) -> u64 {
@@ -251,38 +248,50 @@ impl Relay {
   fn downstream_on_new_path(&self) -> u64 {
     self.state.downstream_on_new_path.load(Ordering::Relaxed)
   }
+}
 
-  /// Forwards the SFU's packets on the upstream socket of `generation` to the client, while that
-  /// socket is the current one.
-  fn spawn_downstream(&self, generation: u64) {
-    let socket = Arc::clone(&self.state.upstream.lock().unwrap());
-    let (front, state) = (Arc::clone(&self.front), Arc::clone(&self.state));
-    tokio::spawn(async move {
-      let mut buffer = vec![0u8; 65_536];
-      while let Ok((length, _)) = socket.recv_from(&mut buffer).await {
-        if state.generation.load(Ordering::Relaxed) != generation {
-          return;
-        }
-        if state.is_black_hole.load(Ordering::Relaxed) {
-          continue;
-        }
-        let maybe_client = *state.maybe_client.lock().unwrap();
-        let maybe_cut_off = *state.maybe_cut_off_client.lock().unwrap();
-        if let Some(client) = maybe_client {
-          if maybe_cut_off == Some(client) {
-            continue;
-          }
-          if generation > 0 {
-            state.downstream_on_new_path.fetch_add(1, Ordering::Relaxed);
-          }
-          if maybe_cut_off.is_some() {
-            state.downstream_after_cut_off.fetch_add(1, Ordering::Relaxed);
-          }
-          let _ = front.send_to(&buffer[..length], client).await;
-        }
-      }
-    });
+/// The upstream socket of `client` in the current generation; a new one forwards the SFU's packets
+/// to `client` while its generation lasts.
+async fn upstream_of(state: &Arc<RelayState>, front: &Arc<UdpSocket>, client: SocketAddr) -> Arc<UdpSocket> {
+  let generation = state.generation.load(Ordering::Relaxed);
+  if let Some((mapped, socket)) = state.upstreams.lock().unwrap().get(&client)
+    && *mapped == generation
+  {
+    return Arc::clone(socket);
   }
+  let socket = Arc::new(UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).await.unwrap());
+  state
+    .upstreams
+    .lock()
+    .unwrap()
+    .insert(client, (generation, Arc::clone(&socket)));
+  let (reading, front, state) = (Arc::clone(&socket), Arc::clone(front), Arc::clone(state));
+  tokio::spawn(async move {
+    let mut buffer = vec![0u8; 65_536];
+    while let Ok((length, _)) = reading.recv_from(&mut buffer).await {
+      if state.generation.load(Ordering::Relaxed) != generation {
+        return;
+      }
+      if state.is_black_hole.load(Ordering::Relaxed) {
+        continue;
+      }
+      let (is_cut_off, is_after_cut_off) = {
+        let cut_off = state.cut_off_clients.lock().unwrap();
+        (cut_off.contains(&client), !cut_off.is_empty())
+      };
+      if is_cut_off {
+        continue;
+      }
+      if generation > 0 {
+        state.downstream_on_new_path.fetch_add(1, Ordering::Relaxed);
+      }
+      if is_after_cut_off {
+        state.downstream_after_cut_off.fetch_add(1, Ordering::Relaxed);
+      }
+      let _ = front.send_to(&buffer[..length], client).await;
+    }
+  });
+  socket
 }
 
 /// Tickets for the SFU straight, as if issued on the device's new network.

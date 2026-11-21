@@ -13,6 +13,10 @@
 //! goes away (a restart, a deploy), the driver gets a fresh join ticket and rejoins on a new
 //! connection within the SFU's grace period; devices, mute state and tracks carry over.
 //!
+//! The own audio takes a QUIC connection of its own once the SFU offers one (#2141, `voice`): that
+//! connection is marked DSCP Expedited Forwarding for the first hop's voice queue, which the
+//! session's connection can't be, as it carries video.
+//!
 //! A call that had to take the WebSocket fallback tries QUIC again now and then (#1309,
 //! [`QuicRetrySchedule`]). When a QUIC connection opens, it asks the SFU to move the session over
 //! (`switch`, with the secret of the session's `joined`). Once the SFU says `switched`, everything
@@ -94,9 +98,11 @@ use crate::video_pipeline::{
 };
 
 mod receive;
+mod voice;
 
 pub use self::receive::DecodeReporter;
 use self::receive::{Asks, RemoteVideo};
+use self::voice::{VoiceLink, voice_socket};
 
 /// Audio frame period.
 const FRAME_INTERVAL: Duration = Duration::from_millis(20);
@@ -1229,6 +1235,8 @@ enum LinkPath {
     connection: Connection,
     /// Media goes through its queue, which drops what a narrow uplink would deliver too late.
     sender: QuicSender,
+    /// The own audio's connection, once the SFU offered one (#2141).
+    voice: Arc<VoiceLink>,
   },
   /// The WebSocket fallback. Its writer task isn't among the link's tasks: it stays to send the
   /// close, and ends with the socket.
@@ -1827,9 +1835,13 @@ impl Drop for Link {
   /// that lost the race for the connection, or isn't needed any more, says so; a close frame the
   /// peer never reads is no harm.
   fn drop(&mut self) {
-    if let LinkPath::Fallback { sender, .. } = &self.path {
-      sender.close(LEAVE, b"leave");
-      self.stop_reading();
+    match &self.path {
+      LinkPath::Fallback { sender, .. } => {
+        sender.close(LEAVE, b"leave");
+        self.stop_reading();
+      },
+      // Its reader holds no strong handle: the voice connection ends with the link.
+      LinkPath::Quic { voice, .. } => voice.close(),
     }
   }
 }
@@ -1925,6 +1937,12 @@ impl Link {
     resilience: &ResilienceConfig,
   ) -> Result<Self, NativeCallError> {
     let (endpoint, connection) = connect(sfu_url, certificate_hashes, resilience).await?;
+    let voice = Arc::new(VoiceLink::new(
+      sfu_url,
+      connection.remote_address(),
+      certificate_hashes,
+      *resilience,
+    ));
     let (send, recv) = connection
       .open_bi()
       .await
@@ -1935,7 +1953,12 @@ impl Link {
     let (input_tx, inputs) = mpsc::unbounded_channel();
     let tasks = vec![
       tokio::spawn(write_signaling(send, signal_out_rx)),
-      tokio::spawn(read_signaling(recv, connection.clone(), input_tx.clone())),
+      tokio::spawn(read_signaling(
+        recv,
+        connection.clone(),
+        Arc::downgrade(&voice),
+        input_tx.clone(),
+      )),
       tokio::spawn(read_datagrams(connection.clone(), input_tx)),
     ];
     let sender = QuicSender::spawn(connection.clone(), SendQueueConfig::uplink());
@@ -1944,6 +1967,7 @@ impl Link {
         endpoint,
         connection,
         sender,
+        voice,
       },
       signal_out,
       inputs,
@@ -1956,9 +1980,10 @@ impl Link {
   ///
   /// `None` on the fallback, whose TCP connection can't move.
   fn rebind(&self) -> std::io::Result<Option<SocketAddr>> {
-    let LinkPath::Quic { endpoint, .. } = &self.path else {
+    let LinkPath::Quic { endpoint, voice, .. } = &self.path else {
       return Ok(None);
     };
+    voice.rebind();
     let current = endpoint.local_addr()?;
     let socket = bind_wildcard(current.is_ipv6())?;
     let local_addr = socket.local_addr()?;
@@ -1997,10 +2022,15 @@ impl Link {
     }
   }
 
-  /// Unreliable by design: a queue drops the datagram when it waited too long or didn't fit.
+  /// Unreliable by design: a queue drops the datagram when it waited too long or didn't fit. The own
+  /// audio takes its own connection where there is one (#1979, #2141).
   fn send_datagram(&self, bytes: &[u8]) {
     match &self.path {
-      LinkPath::Quic { sender, .. } => sender.send_datagram(bytes),
+      LinkPath::Quic { sender, voice, .. } => {
+        if !(is_audio(bytes) && voice.try_send(bytes)) {
+          sender.send_datagram(bytes);
+        }
+      },
       LinkPath::Fallback { sender, audio, .. } => {
         if !(is_audio(bytes) && audio.try_send(bytes)) {
           sender.send_datagram(bytes);
@@ -2011,7 +2041,12 @@ impl Link {
 
   fn close_as_leave(&self) {
     match &self.path {
-      LinkPath::Quic { connection, .. } => connection.close(LEAVE.into(), b"leave"),
+      LinkPath::Quic {
+        connection, voice, ..
+      } => {
+        voice.close();
+        connection.close(LEAVE.into(), b"leave");
+      },
       LinkPath::Fallback { sender, audio, .. } => {
         audio.close();
         sender.close(LEAVE, b"leave");
@@ -2122,7 +2157,13 @@ async fn connect(
     .await
     .map_err(|error| NativeCallError::Connect(error.to_string()))?;
   race(interleave(addresses), ATTEMPT_DELAY, |address| {
-    connect_to(sfu_url, address, certificate_hashes, resilience)
+    connect_to(
+      sfu_url,
+      address,
+      certificate_hashes,
+      resilience,
+      TrafficClass::BestEffort,
+    )
   })
   .await
   .map_err(|error| match error {
@@ -2133,15 +2174,25 @@ async fn connect(
 
 /// One attempt at `address`. A socket bound to the wildcard address (it follows route changes,
 /// which lets QUIC migrate), with keep-alives for carrier NATs. Self-signed certificates are
-/// accepted by their hashes; without any, the trusted roots decide.
+/// accepted by their hashes; without any, the trusted roots decide. A voice connection's socket
+/// marks its datagrams ([`voice_socket`]); every other one sends unmarked, as quinn does.
 async fn connect_to(
   sfu_url: &str,
   address: SocketAddr,
   certificate_hashes: &[[u8; 32]],
   resilience: &ResilienceConfig,
+  class: TrafficClass,
 ) -> Result<(Endpoint<Client>, Connection), NativeCallError> {
-  let socket = bind_wildcard(true).map_err(|error| NativeCallError::Connect(error.to_string()))?;
-  let builder = ClientConfig::builder().with_bind_socket(socket);
+  let connect_error = |error: std::io::Error| NativeCallError::Connect(error.to_string());
+  let socket = bind_wildcard(true).map_err(connect_error)?;
+  let (builder, maybe_voice_socket) = match class {
+    TrafficClass::BestEffort => (ClientConfig::builder().with_bind_socket(socket), None),
+    // The endpoint gets the socket itself; the configuration's address is never bound.
+    TrafficClass::Voice => (
+      ClientConfig::builder().with_bind_default(),
+      Some(voice_socket(socket).map_err(connect_error)?),
+    ),
+  };
   let builder = if certificate_hashes.is_empty() {
     with_trusted_roots(builder)
   } else {
@@ -2151,8 +2202,11 @@ async fn connect_to(
   client_config
     .quic_config_mut()
     .transport_config(Arc::new(transport_config(resilience)?));
-  let endpoint =
-    Endpoint::client(client_config).map_err(|error| NativeCallError::Connect(error.to_string()))?;
+  let endpoint = match maybe_voice_socket {
+    Some(socket) => Endpoint::client_with_socket(client_config, socket),
+    None => Endpoint::client(client_config),
+  }
+  .map_err(connect_error)?;
   let connection = endpoint
     .connect(sfu_url)
     .await
@@ -3172,6 +3226,7 @@ async fn write_signaling(mut send: SendStream, mut messages: mpsc::UnboundedRece
 async fn read_signaling(
   mut recv: RecvStream,
   connection: Connection,
+  voice: std::sync::Weak<VoiceLink>,
   inputs: mpsc::UnboundedSender<LinkInput>,
 ) {
   let end = loop {
@@ -3189,6 +3244,12 @@ async fn read_signaling(
       break stream_end(&error, &connection).await;
     }
     match serde_json::from_slice::<CallServerMessage>(&body) {
+      // The SFU offers the own audio a connection of its own (#2141): the session's, not the call's.
+      Ok(CallServerMessage::AudioSocket { secret }) => {
+        if let Some(voice) = voice.upgrade() {
+          voice.attach(secret);
+        }
+      },
       Ok(message) => {
         if inputs.send(LinkInput::Signal(message)).is_err() {
           return;
@@ -3369,7 +3430,7 @@ mod tests {
     let hashes = [hash];
     let started = Instant::now();
     let racing = race(vec![silent_v6, v4], ATTEMPT_DELAY, |address| {
-      connect_to(&url, address, &hashes, &resilience)
+      connect_to(&url, address, &hashes, &resilience, TrafficClass::BestEffort)
     });
     let (_endpoint, connection) = tokio::time::timeout(Duration::from_secs(5), racing)
       .await

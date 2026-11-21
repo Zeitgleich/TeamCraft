@@ -42,8 +42,8 @@ use teamcraft_sfu::server::{CALL_PATH, Sfu};
 use wtransport::Identity;
 
 use crate::common::relay::{
-  bind_sockets, dropped_by_kernel, dropped_by_kernel_everywhere, paced_on_thread, receive_buffer_cap_bytes,
-  receive_on_thread,
+  ClientMappings, bind_socket, dropped_by_kernel, dropped_by_kernel_everywhere, paced_on_thread,
+  receive_buffer_cap_bytes, receive_on_thread,
 };
 
 /// A 14" Retina display (3024×1964) fitted into the detail mode's 1440p, as ScreenCaptureKit
@@ -672,60 +672,70 @@ pub(crate) async fn pump_for(presenter: &mut NativeCall, viewer: &mut NativeCall
   }
 }
 
-/// Relays one client's UDP to the SFU and back; told to, it loses every other packet in either
-/// direction.
+/// Relays one client's UDP to the SFU and back, each client socket through an SFU-side socket of
+/// its own (a NAT's mappings: the own voice takes a connection of its own, #2141); told to, it
+/// loses every other packet in either direction.
 struct Relay {
   address: SocketAddr,
-  sockets: [Arc<std::net::UdpSocket>; 2],
+  client_side: Arc<std::net::UdpSocket>,
+  sfu_sides: Arc<Mutex<Vec<Arc<std::net::UdpSocket>>>>,
   to_sfu_losing: Arc<AtomicBool>,
   to_client_losing: Arc<AtomicBool>,
 }
 
 impl Relay {
   fn start(sfu: SocketAddr) -> Self {
-    let (client_side, sfu_side) = bind_sockets(sfu);
+    let client_side = Arc::new(bind_socket());
     let address = client_side.local_addr().unwrap();
     let (to_sfu_losing, to_client_losing) =
       (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
-    let client: Arc<Mutex<Option<SocketAddr>>> = Arc::default();
-    let socket = Arc::clone(&sfu_side);
-    let to_sfu = paced_on_thread(LINK_BPS, move |packet| {
-      let _ = socket.send(packet);
-    });
-    let (known_client, losing) = (Arc::clone(&client), Arc::clone(&to_sfu_losing));
-    let mut is_odd = false;
-    receive_on_thread(Arc::clone(&client_side), move |packet, from| {
-      *known_client.lock().unwrap() = Some(from);
-      is_odd = !is_odd;
-      if !(losing.load(Ordering::Relaxed) && is_odd) {
-        let _ = to_sfu.send(packet.to_vec());
-      }
+    let to_sfu = paced_on_thread(LINK_BPS, |sfu_side: &Arc<std::net::UdpSocket>, packet| {
+      let _ = sfu_side.send(packet);
     });
     let socket = Arc::clone(&client_side);
-    let to_client = paced_on_thread(LINK_BPS, move |packet| {
-      let maybe_client = *client.lock().unwrap();
-      if let Some(client) = maybe_client {
-        let _ = socket.send_to(packet, client);
-      }
+    let to_client = paced_on_thread(LINK_BPS, move |client: &SocketAddr, packet| {
+      let _ = socket.send_to(packet, *client);
     });
-    let losing = Arc::clone(&to_client_losing);
+    // Both directions lose every other packet of the link as a whole, whichever socket it is of.
+    let to_client_odd = Arc::new(AtomicBool::new(false));
+    let mut mappings = ClientMappings::new(sfu);
+    let sfu_sides = Arc::clone(&mappings.all);
+    let losing = Arc::clone(&to_sfu_losing);
+    let to_client_losing_now = Arc::clone(&to_client_losing);
     let mut is_odd = false;
-    receive_on_thread(Arc::clone(&sfu_side), move |packet, _| {
+    receive_on_thread(Arc::clone(&client_side), move |packet, from| {
+      let sfu_side = mappings.sfu_side(from, |sfu_side| {
+        let (to_client, losing, odd) = (
+          to_client.clone(),
+          Arc::clone(&to_client_losing_now),
+          Arc::clone(&to_client_odd),
+        );
+        receive_on_thread(sfu_side, move |packet, _| {
+          let is_odd = !odd.fetch_xor(true, Ordering::Relaxed);
+          if !(losing.load(Ordering::Relaxed) && is_odd) {
+            let _ = to_client.send((from, packet.to_vec()));
+          }
+        });
+      });
       is_odd = !is_odd;
       if !(losing.load(Ordering::Relaxed) && is_odd) {
-        let _ = to_client.send(packet.to_vec());
+        let _ = to_sfu.send((sfu_side, packet.to_vec()));
       }
     });
     Self {
       address,
-      sockets: [client_side, sfu_side],
+      client_side,
+      sfu_sides,
       to_sfu_losing,
       to_client_losing,
     }
   }
 
   fn dropped_by_kernel(&self) -> u64 {
-    dropped_by_kernel(&[&self.sockets[0], &self.sockets[1]]).unwrap_or(0)
+    let sfu_sides = self.sfu_sides.lock().unwrap().clone();
+    let mut sockets: Vec<&std::net::UdpSocket> = vec![&self.client_side];
+    sockets.extend(sfu_sides.iter().map(|socket| socket.as_ref()));
+    dropped_by_kernel(&sockets).unwrap_or(0)
   }
 }
 
