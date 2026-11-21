@@ -787,6 +787,12 @@ impl SimulcastEncoder {
       let Some(picture) = maybe_picture else {
         // A dropped frame doesn't satisfy a keyframe request: the next frame asks again.
         layer.wants_keyframe = wants_keyframe;
+        // A screen's encoder that drops a picture (OpenH264's rate control, after a keyframe that
+        // took more than its share of the bitrate) gets it again once due, like a picture left
+        // out for the rate: a still screen sends no next frame, and a slide that came right
+        // after a keyframe never reached the layer until the next slide, seconds later (#2218).
+        // A camera's next frame comes anyway.
+        layer.has_missed_frame |= self.content == VideoContent::Screen;
         continue;
       };
       encoded.push(EncodedVideoFrame {
@@ -1395,6 +1401,34 @@ mod tests {
       is_keyframe_forced: bool,
     ) -> Result<Option<EncodedPicture>, VideoCodecError> {
       Ok(Some(EncodedPicture {
+        is_keyframe: is_keyframe_forced,
+        data: vec![0, 0, 0, 1, 0x65],
+      }))
+    }
+  }
+
+  /// Gives no picture for its second frame, as OpenH264's rate control drops one after a large
+  /// keyframe.
+  struct DropsSecond {
+    calls: usize,
+  }
+
+  impl VideoEncoder for DropsSecond {
+    fn codec(&self) -> VideoCodec {
+      VideoCodec::H264
+    }
+
+    fn name(&self) -> &'static str {
+      "drops-second"
+    }
+
+    fn encode(
+      &mut self,
+      _frame: &VideoFrame,
+      is_keyframe_forced: bool,
+    ) -> Result<Option<EncodedPicture>, VideoCodecError> {
+      self.calls += 1;
+      Ok((self.calls != 2).then(|| EncodedPicture {
         is_keyframe: is_keyframe_forced,
         data: vec![0, 0, 0, 1, 0x65],
       }))
@@ -2014,6 +2048,56 @@ mod tests {
     assert!(simulcast.is_catch_up_due(1_026_000));
     assert_eq!(simulcast.encode(&frame(1_026_000)).unwrap().len(), 1);
     assert!(!simulcast.is_catch_up_due(1_100_000), "caught up");
+  }
+
+  /// #2218: a screen's encoder that drops a picture (rate control after a large keyframe) gets it
+  /// again once due: a still screen sends no next frame, and the slide never reached the layer
+  /// until the next one. A camera's next frame comes anyway.
+  #[test]
+  fn a_screen_picture_the_encoder_dropped_is_caught_up_once_due() {
+    let layers = simulcast_layers(
+      VideoResolution {
+        width: 32,
+        height: 32,
+      },
+      30,
+      100_000,
+      1,
+    );
+    let frame = |timestamp_us| {
+      VideoFrame::new(
+        VideoResolution {
+          width: 32,
+          height: 32,
+        },
+        timestamp_us,
+        vec![128; 32 * 32 * 3 / 2],
+      )
+      .unwrap()
+    };
+    for (content, should_catch_up) in [(VideoContent::Screen, true), (VideoContent::Camera, false)] {
+      let mut simulcast = SimulcastEncoder::new(&layers, |_| {
+        Ok(Box::new(DropsSecond { calls: 0 }) as Box<dyn VideoEncoder>)
+      })
+      .unwrap()
+      .with_content(content);
+      assert_eq!(simulcast.encode(&frame(1_000_000)).unwrap().len(), 1);
+      // The slide: the encoder drops it.
+      assert!(simulcast.encode(&frame(1_500_000)).unwrap().is_empty());
+      assert!(
+        !simulcast.is_catch_up_due(1_510_000),
+        "{content:?}: not before the interval"
+      );
+      assert_eq!(
+        simulcast.is_catch_up_due(1_526_000),
+        should_catch_up,
+        "{content:?}"
+      );
+      if should_catch_up {
+        assert_eq!(simulcast.encode(&frame(1_526_000)).unwrap().len(), 1);
+        assert!(!simulcast.is_catch_up_due(1_600_000), "caught up");
+      }
+    }
   }
 
   fn layers_of(frames: &[EncodedVideoFrame]) -> Vec<u8> {

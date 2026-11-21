@@ -7,9 +7,9 @@ retries = 0
 slow-timeout = { period = "60s" }
 
 # Calls with real video through a real SFU, in one process, judged by picture quality and by what
-# arrives when: they run alone, as other tests' CPU use would move their results (#1139).
+# arrives when: they run alone, as other tests' CPU use would move their results (#1139, #2218).
 [[profile.default.overrides]]
-filter = 'package(teamcraft-sfu) & binary(suite) & test(/^(bandwidth_limits|camera_start|screen_layer_bitrate|screen_sharpness|video_content|video_quality|video_recovery|weak_downlink)::/)'
+filter = 'package(teamcraft-sfu) & binary(suite) & test(/^(bandwidth_limits|camera_start|screen_layer_bitrate|screen_sharpness|screen_uplink_bursts|video_content|video_quality|video_recovery|weak_downlink)::/)'
 threads-required = "num-test-threads"
 
 [profile.ci]
