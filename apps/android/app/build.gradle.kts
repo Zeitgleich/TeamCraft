@@ -127,6 +127,7 @@ android {
     release {
       uploadSigning?.let { signingConfig = it }
       isMinifyEnabled = true
+      isShrinkResources = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
       // The Rust library's symbol table goes into the App Bundle's metadata, so Google Play can
       // symbolicate native crashes (the R8 mapping is in the bundle anyway); the APKs stay stripped.
