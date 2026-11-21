@@ -354,13 +354,19 @@ impl ReadQueue {
     R: Send + 'static,
     F: FnOnce(&mut Reads) -> Result<R, TeamCraftError> + Send + 'static,
   {
-    let answer = self.queue(Lane::Act, WhenCallerGone::Run, move |reads| {
-      // One group of writes: what the action reads comes from the writing connection and nothing
-      // else commits in between, so a change it makes to a record can't undo the engine's.
-      let store = reads.store.clone();
-      let value = write_group(&store, || job(reads))?;
-      Ok((value, reads.dispatch()?))
-    })?;
+    let answer = self.queue_then(
+      Lane::Act,
+      WhenCallerGone::Run,
+      move |reads| {
+        // One group of writes: what the action reads comes from the writing connection and nothing
+        // else commits in between, so a change it makes to a record can't undo the engine's.
+        let store = reads.store.clone();
+        write_group(&store, || job(reads))
+      },
+      // Once the store is let go (issue #2225): handing on what the action queued tells the app,
+      // and the action held the writer for as long as that took.
+      |reads, value| Ok((value, reads.dispatch()?)),
+    )?;
     let (value, dispatched) = answer.await.map_err(|_| TeamCraftError::EngineStopped)??;
     dispatched.await.map_err(|_| TeamCraftError::EngineStopped)??;
     Ok(value)
@@ -443,6 +449,24 @@ impl ReadQueue {
     R: Send + 'static,
     F: FnOnce(&mut Reads) -> Result<R, TeamCraftError> + Send + 'static,
   {
+    self.queue_then(lane, when_gone, job, |_, value| Ok(value))
+  }
+
+  /// [`Self::queue`], then `after` with the job's result once the job let go of the store, still on
+  /// the job's thread and as part of the job.
+  fn queue_then<T, R, F, A>(
+    &self,
+    lane: Lane,
+    when_gone: WhenCallerGone,
+    job: F,
+    after: A,
+  ) -> Result<oneshot::Receiver<Result<R, TeamCraftError>>, TeamCraftError>
+  where
+    T: Send + 'static,
+    R: Send + 'static,
+    F: FnOnce(&mut Reads) -> Result<T, TeamCraftError> + Send + 'static,
+    A: FnOnce(&mut Reads, T) -> Result<R, TeamCraftError> + Send + 'static,
+  {
     let (reply, answer) = oneshot::channel();
     let queued = Instant::now();
     let timing = match lane {
@@ -458,7 +482,7 @@ impl ReadQueue {
       let span = timing.span();
       let running = timing.start();
       let clock = JobClock::start();
-      let result = span.in_scope(|| reads.together(job));
+      let result = span.in_scope(|| reads.together(job).and_then(|value| after(reads, value)));
       logging::slow_read(std::any::type_name::<F>(), clock.started() - queued, clock.ran());
       running.done();
       // The caller may have given up waiting meanwhile (cancelled coroutine); nothing to tell it.
@@ -1768,6 +1792,62 @@ mod tests {
       files.finish();
     }
 
+    /// Issue #2225: an action told the app of its change (`EventListener::on_change`, JNI on
+    /// Android) while it still held the store's writer. One such call hung for 7.2 s on 1.0.41, and
+    /// a read that wrote, every read behind it and the engine's next group of writes waited with
+    /// it. The app is told once the action let go: another thread can begin a group meanwhile.
+    #[tokio::test]
+    async fn an_action_tells_the_app_after_it_let_go_of_the_store() {
+      let probe = Arc::new(WriterProbe::default());
+      let files = FileLanes::open_with(probe.clone());
+      *probe.store.lock().unwrap() = Some(files.engine.clone());
+      files
+        .queue
+        .know_account(parse_id("7").unwrap(), "fingerprint".into());
+
+      // No engine here to take what the action hands on: it fails after telling the app.
+      let acted = files
+        .queue
+        .act(|reads| {
+          reads.store.put(Table::Users, "a", b"acted")?;
+          Ok(())
+        })
+        .await;
+      assert!(acted.is_err());
+      assert_eq!(
+        *probe.was_writer_free.lock().unwrap(),
+        Some(true),
+        "the app is told once the store is free"
+      );
+      files.finish();
+    }
+
+    /// An app that, when told of a change, looks whether another thread could write now.
+    #[derive(Default)]
+    struct WriterProbe {
+      store: Mutex<Option<Store>>,
+      was_writer_free: Mutex<Option<bool>>,
+    }
+
+    impl EventListener for WriterProbe {
+      fn on_change(&self) {
+        let Some(store) = self.store.lock().unwrap().clone() else {
+          return;
+        };
+        let is_free = std::thread::scope(|scope| {
+          scope
+            .spawn(|| {
+              teamcraft_core::store::try_write_group(&store, || Ok::<_, TeamCraftError>(()))
+                .unwrap()
+                .is_some()
+            })
+            .join()
+            .unwrap()
+        });
+        *self.was_writer_free.lock().unwrap() = Some(is_free);
+      }
+    }
+
     /// The engine's store and read threads on a database file, as `Engine::open` makes them.
     struct FileLanes {
       engine: Store,
@@ -1777,6 +1857,10 @@ mod tests {
 
     impl FileLanes {
       fn open() -> Self {
+        Self::open_with(Arc::new(Quiet))
+      }
+
+      fn open_with(listener: Arc<dyn EventListener>) -> Self {
         let directory = std::env::temp_dir().join(format!("teamcraft-read-lanes-{}", rand_suffix()));
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("store.db");
@@ -1802,7 +1886,7 @@ mod tests {
             query: lane(),
             act: engine.sharing(LaneStore::writer(Arc::clone(&writer))),
           },
-          Arc::new(Quiet),
+          listener,
           CatchUpFocus::default(),
           jobs.downgrade(),
           &StoreHold::detached(),

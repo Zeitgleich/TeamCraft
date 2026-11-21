@@ -8,6 +8,7 @@
 //! don't wait for the network. The app supplies access tokens ([`TokenProvider`]) and is told when
 //! to re-read ([`EventListener`]).
 
+mod app_changes;
 mod app_link;
 mod blocking;
 mod bridge;
@@ -243,8 +244,9 @@ impl Drop for AwaitingEncryption {
   }
 }
 
-/// Told when the local store changed, so the UI re-reads what it shows. Called on the engine
-/// thread; implementations hand over to their UI thread.
+/// Told when the local store changed, so the UI re-reads what it shows. Called on a thread of the
+/// core's that does nothing else, never while the core holds the store (issue #2225); a burst of
+/// changes may be one call. Implementations hand over to their UI thread.
 #[uniffi::export(with_foreign)]
 pub trait EventListener: Send + Sync {
   fn on_change(&self);
@@ -2284,6 +2286,8 @@ impl TeamCraft {
       id_tokens: id_tokens.clone(),
       running_calls: running_calls.clone(),
     };
+    // The core's threads never call the app themselves (issue #2225).
+    let listener = app_changes::AppChanges::start(listener)?;
     let start = engine::EngineStart::new(config, tokens, maybe_device_key, listener, signals)?;
     let reopening = Mutex::new(start.duplicate());
     let recovery = Arc::new(Mutex::new(None));
