@@ -105,10 +105,14 @@ fn code_value(quoted: &str) -> Option<String> {
   is_type_path(quoted).then(|| quoted.to_owned())
 }
 
-/// `crates/teamcraft-ui/src/state.rs`, `src/main.rs`: relative, a `.rs` file, only the characters
-/// of the tree's paths, no step up.
+/// `crates/teamcraft-ui/src/state.rs`, `src/main.rs`: relative, a `.rs` file inside a source tree
+/// (under `crates/` or `src/`, or with a `src/` directory), only the characters of the tree's
+/// paths, no step up. A bare or other file name (`budget.rs`, `notes/plan.rs`) may be the user's.
 fn is_relative_source_file(text: &str) -> bool {
+  let path = text.trim_start_matches("./");
+  let is_in_tree = path.starts_with("crates/") || path.starts_with("src/") || path.contains("/src/");
   text.ends_with(".rs")
+    && is_in_tree
     && is_relative(text)
     && text
       .chars()
@@ -431,6 +435,10 @@ mod tests {
         "meet me at the harbour at nine",
         "quarterly-figures.xlsx",
         "notes.rs is where I keep it",
+        "budget.rs",
+        "notes/plan.rs",
+        "./budget.rs",
+        "my-src/plan.rs",
         // Paths outside the source tree, or that leave it.
         "/home/henning/teamcraft/crates/teamcraft-ui/src/state.rs",
         "~/secret.rs",

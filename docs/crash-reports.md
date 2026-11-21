@@ -79,8 +79,9 @@ logs content) and the debug log's own redaction:
 - **Quoted text goes whole:** `"…"` becomes `"[redacted]"`. That is where a `Debug` struct or a
   `{:?}` puts its values (`Person { name: "…" }`), whatever they look like. Two shapes that are
   plainly code stay, as a panic of `Location` or `expect_context` quotes them (TEAMCRAFT-3S): a
-  relative path to a Rust source file (`"crates/teamcraft-ui/src/state.rs"`; only path
-  characters, no `..`) and a Rust type path (`"teamcraft_ui::state::AppState"`, identifiers joined
+  relative path to a Rust source file of a source tree (`"crates/teamcraft-ui/src/state.rs"`:
+  under `crates/` or `src/`, or with a `src/` directory; only path characters, no `..`; a bare
+  `"budget.rs"` or `"notes/plan.rs"` may be the user's and goes) and a Rust type path (`"teamcraft_ui::state::AppState"`, identifiers joined
   by `::` with generic arguments of the same shape, no spaces). Absolute paths, names, URLs and
   everything else quoted still go. The mobile ports (`CrashScrubber` on Android and iOS) still
   blank every quoted value.
