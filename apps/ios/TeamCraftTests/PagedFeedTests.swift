@@ -63,6 +63,39 @@ final class PagedFeedTests: XCTestCase {
       [Read(maybeOldestId: nil, older: 200), Read(maybeOldestId: "5", older: 100), Read(maybeOldestId: "5", older: 0)])
   }
 
+
+  func testAFailedRereadIsTriedAgain() async {
+    var reads = 0
+    let feed = PagedFeed(firstPage: 200, pageBack: 100, sleep: { _ in }) { _, _ in
+      reads += 1
+      return reads < 3 ? nil : self.page("5")
+    }
+    let page = await feed.reread(retries: 4)
+    XCTAssertEqual(page?.messages.map(\.id), ["5"])
+    XCTAssertEqual(reads, 3)
+  }
+
+  func testRetriesEndAfterTheLimit() async {
+    var reads = 0
+    let feed = PagedFeed(firstPage: 200, pageBack: 100, sleep: { _ in }) { _, _ in
+      reads += 1
+      return nil
+    }
+    let page = await feed.reread(retries: 2)
+    XCTAssertNil(page)
+    XCTAssertEqual(reads, 3)
+  }
+
+  func testARereadWithoutRetriesReadsOnce() async {
+    var reads = 0
+    let feed = PagedFeed(firstPage: 200, pageBack: 100, sleep: { _ in }) { _, _ in
+      reads += 1
+      return nil
+    }
+    _ = await feed.reread()
+    XCTAssertEqual(reads, 1)
+  }
+
   private func page(_ ids: String...) -> MessagePage {
     MessagePage(messages: ids.map(message), hasOlder: true)
   }
