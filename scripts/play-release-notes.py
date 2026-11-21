@@ -65,12 +65,16 @@ def play_notes(version: str, highlights: str, url: str, max_length: int = MAX_LE
 
 
 def plain_text(markdown: str) -> str:
-    """Markdown as plain text: headings, emphasis, code and links reduced to their text."""
+    """Markdown as plain text: headings, emphasis, code and links reduced to their text, no markup."""
     text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", markdown)
     text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
     text = re.sub(r"^#{1,6}\s*", "", text, flags=re.M)
     text = re.sub(r"^(\s*)[-*+]\s+", r"\1• ", text, flags=re.M)
     text = re.sub(r"(\*\*|__|`)", "", text)
+    # The App Store refuses "What's new" with anything that looks like markup (a PR title's
+    # `build/<crate>/<hash>`): comments go, angle brackets become their typographic look-alikes.
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+    text = text.replace("<", "\u2039").replace(">", "\u203a")
     text = re.sub(r"\n{3,}", "\n\n", text)
     return "\n".join(line.rstrip() for line in text.strip().splitlines())
 
