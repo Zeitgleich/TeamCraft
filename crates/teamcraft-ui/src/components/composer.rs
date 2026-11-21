@@ -1066,7 +1066,7 @@ pub fn Composer(
         channel_suggestions(&found.query, &channels)
       },
       TriggerKind::Emoji => {
-        crate::custom_emoji::want_set();
+        crate::custom_emoji::want_set(state);
         let set = state.read(|backend| backend.custom_emoji());
         let mut list = custom_emoji_suggestions(&found.query, &set);
         list.extend(emoji_suggestions(
@@ -1422,7 +1422,10 @@ pub fn Composer(
       // would enter its own closure again ("closure invoked recursively", #2145). A microtask runs
       // right after the handler returned and before any other event, so no keystroke comes between
       // the typed character and its shortcut, and the nested events reach this handler normally.
-      leptos::task::spawn_local(async move {
+      // Scoped to the composer: `settle` looks up context (the `:` suggestions read the app
+      // state), which a bare task has none of, and it must not run once the composer is gone
+      // (#2226: "expected context of type AppState" while typing as a message arrived).
+      leptos::task::spawn_local_scoped_with_cancellation(async move {
         let mut buffer = [0; 4];
         composer_editor::apply_typing_shortcut(&editor_element, typed.encode_utf8(&mut buffer));
         settle();

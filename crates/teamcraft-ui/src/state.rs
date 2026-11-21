@@ -1,5 +1,6 @@
 //! Shared application state, provided through Leptos context.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
@@ -2431,8 +2432,38 @@ impl AppState {
   }
 }
 
+thread_local! {
+  /// The page's app state, for [`use_app_state`] outside the components (see there).
+  static PROVIDED: Cell<Option<AppState>> = const { Cell::new(None) };
+}
+
+impl AppState {
+  /// Provides the state to the components below and keeps it as the page's app state.
+  pub fn provide(self) {
+    provide_context(self);
+    PROVIDED.with(|provided| provided.set(Some(self)));
+  }
+}
+
+/// The app state of the component this runs in. Code that runs later (a task, a timer, a listener)
+/// takes the state along instead: there is no component around it. Should one still look it up
+/// there, it gets the page's state (while it lives) and the log names the caller, where an
+/// `expect_context` killed the page (#2226).
+#[track_caller]
 pub fn use_app_state() -> AppState {
-  expect_context::<AppState>()
+  if let Some(state) = use_context::<AppState>() {
+    return state;
+  }
+  let caller = std::panic::Location::caller();
+  match PROVIDED.with(Cell::get).filter(AppState::is_alive) {
+    Some(state) => {
+      tracing::warn!(%caller, "the app state was looked up outside a component");
+      state
+    },
+    // Invariant: the app and the guest meeting provide a state before any component runs; nothing
+    // else can be done without one.
+    None => panic!("no app state for {caller}: neither a component's nor the page's"),
+  }
 }
 
 impl SettingsTab {
@@ -3289,6 +3320,24 @@ mod tests {
       state.show_error("refused".into(), "detail".into());
       state.dismiss_toast(0);
       assert!(state.try_write(|backend| backend.spaces()).is_none());
+    }
+
+    /// A task or timer that looks the state up after its component is gone (#2226).
+    #[test]
+    fn a_lookup_outside_the_components_gets_the_page_state_while_it_lives() {
+      let owner = Owner::new();
+      let state = owner.with(|| {
+        let state = test_state();
+        state.provide();
+        state
+      });
+      let found = use_app_state();
+      assert!(found.is_alive());
+      found.activity_filter.set(ActivityFilter::Threads);
+      assert_eq!(state.activity_filter.get_untracked(), ActivityFilter::Threads);
+      owner.cleanup();
+      let after = std::panic::catch_unwind(|| use_app_state());
+      assert!(after.is_err(), "a disposed state is never handed out");
     }
 
     #[test]
