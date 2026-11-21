@@ -308,8 +308,9 @@ fn AccountContradictions(members: Vec<UserId>, can_correct: bool) -> impl IntoVi
         let pending = PendingAction::new();
         let name = account_label(state, user);
         let title = i18n.t_with("roster-forget-confirm-title", &[("name", &name)]);
+        let label = title.clone();
         view! {
-          <div class="roster-confirm" role="dialog" aria-label=title.clone()>
+          <div class="roster-confirm" role="dialog" aria-label=label>
             <h4 class="detail-heading">{title}</h4>
             <code translate="no">{i18n.t_with("roster-confirm-id", &[("id", &user.to_string())])}</code>
             <p>{i18n.t("roster-forget-confirm-what")}</p>
