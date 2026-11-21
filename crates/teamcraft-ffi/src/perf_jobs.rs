@@ -493,12 +493,19 @@ const GATEWAY_EVENT_JOB: &str = "gateway.event";
 /// milliseconds): remembered as a job of the engine lane, so a job that waited behind it is
 /// reported as blocked by `gateway.event` instead of `unknown` (issue #1900).
 pub(crate) fn gateway_event_applied(started_at_ms: f64, done_at_ms: f64) {
+  engine_work_done(GATEWAY_EVENT_JOB, started_at_ms, done_at_ms);
+}
+
+/// Work on the engine thread that is no job of its queue (the client's opening, a step of the
+/// sync loop) ran between `started_at_ms` and `done_at_ms`: remembered as the lane's, so a job that
+/// waited behind it names it instead of `unknown` (issue #2225).
+pub(crate) fn engine_work_done(name: &'static str, started_at_ms: f64, done_at_ms: f64) {
   if done_at_ms - started_at_ms < duration_ms(MIN_BLOCKER) {
     return;
   }
   remember_lane_run(LaneRun {
     lane: Lane::Engine,
-    name: GATEWAY_EVENT_JOB,
+    name,
     started_at_ms,
     done_at_ms,
     waiters: Lane::Engine.depth().load(Ordering::Relaxed),
@@ -898,6 +905,22 @@ mod tests {
     // Another lane's jobs and those before the wait never block.
     assert!(blocker_of(&runs, Lane::Act, 500.0, 4_300.0).is_none());
     assert!(blocker_of(&runs, Lane::Main, 60.0, 90.0).is_none());
+  }
+
+  #[test]
+  fn work_of_the_engine_thread_outside_its_jobs_is_named_as_the_blocker() {
+    // Issue #2225: the client's opening and the sync loop's steps ran between the engine's jobs,
+    // and what waited behind them was blocked by `unknown`. Far in the future, apart from the
+    // other tests' windows.
+    let base = 8.0e15;
+    engine_work_done("open_client", base, base + 1_900.0);
+    let runs = LANE_RUNS.lock().unwrap_or_else(PoisonError::into_inner);
+    let blocker = blocker_of(&runs, Lane::Engine, base + 10.0, base + 1_900.0).expect("a blocker");
+    assert_eq!(blocker.name, "open_client");
+    assert!(
+      blocker_of(&runs, Lane::Main, base + 10.0, base + 1_900.0).is_none(),
+      "the engine's only"
+    );
   }
 
   #[test]

@@ -22,6 +22,8 @@ pub struct LaneStore {
   maybe_reader: Option<Arc<SealedSqliteStore>>,
   /// Depth of this lane's groups of writes; inside one, reads go to the writer.
   writing: Arc<AtomicU32>,
+  /// A lane that must not write ([`Self::read_only`]).
+  is_read_only: bool,
 }
 
 impl LaneStore {
@@ -31,6 +33,7 @@ impl LaneStore {
       writer,
       maybe_reader: None,
       writing: Arc::default(),
+      is_read_only: false,
     }
   }
 
@@ -40,6 +43,18 @@ impl LaneStore {
       writer,
       maybe_reader: Some(reader),
       writing: Arc::default(),
+      is_read_only: false,
+    }
+  }
+
+  /// [`Self::reader`] for a thread that never writes (the app's read threads, issues #1962 and
+  /// #2225). A write there waits for the writer's lock and the log purge's hold on writes, and
+  /// every read queued on the thread waits with it; it is a bug, caught in debug builds and logged
+  /// in release builds.
+  pub fn read_only(writer: Arc<SealedSqliteStore>, reader: Arc<SealedSqliteStore>) -> Self {
+    Self {
+      is_read_only: true,
+      ..Self::reader(writer, reader)
     }
   }
 
@@ -64,9 +79,19 @@ impl LaneStore {
     &self,
     write: impl FnOnce(&SealedSqliteStore) -> Result<T, StoreError>,
   ) -> Result<T, StoreError> {
+    self.check_may_write();
     let result = write(&self.writer);
     self.wrote();
     result
+  }
+
+  /// A read-only lane that writes is a bug: loud in debug builds, a warning in release builds,
+  /// where the write still happens rather than losing what it keeps.
+  fn check_may_write(&self) {
+    if self.is_read_only {
+      debug_assert!(false, "a read-only lane wrote to the store");
+      tracing::warn!("a read-only lane wrote to the store");
+    }
   }
 }
 
@@ -316,12 +341,14 @@ impl LocalStore for LaneStore {
   }
 
   fn begin_writes(&self) -> Result<(), StoreError> {
+    self.check_may_write();
     self.writer.begin_writes()?;
     self.writing.fetch_add(1, Ordering::AcqRel);
     Ok(())
   }
 
   fn try_begin_writes(&self) -> Result<bool, StoreError> {
+    self.check_may_write();
     let has_begun = self.writer.try_begin_writes()?;
     if has_begun {
       self.writing.fetch_add(1, Ordering::AcqRel);
