@@ -34,6 +34,27 @@ fun withVideoPoster(file: PickedFile): PickedFile {
   }
 }
 
+/** Pictures the core's own decoder can't read but the phone's may: they get their thumbnail here. */
+internal fun needsPictureThumbnail(mediaType: String, sdk: Int = android.os.Build.VERSION.SDK_INT): Boolean =
+  mediaTypeEssence(mediaType) in setOf("image/avif", "image/heic", "image/heif", "image/heic-sequence", "image/heif-sequence") &&
+    canDecodeHere(mediaType, sdk)
+
+/**
+ * [file] with a thumbnail of its picture when it is an AVIF or HEIC: the core can't decode those, so
+ * without this the conversation would show them as file cards on every device that doesn't
+ * decode the whole file. PNG, so transparency stays. Unchanged when the phone can't read it either.
+ */
+fun withPictureThumbnail(file: PickedFile): PickedFile {
+  if (file.maybeThumbnail != null || !needsPictureThumbnail(file.mediaType)) return file
+  val bitmap = Pictures.decodeUpright(file.path, POSTER_SIDE_PX) ?: return file
+  val bytes = ByteArrayOutputStream().use { out ->
+    bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+    bitmap.recycle()
+    out.toByteArray()
+  }
+  return file.copy(maybeThumbnail = bytes)
+}
+
 private fun jpeg(frame: Bitmap): ByteArray = ByteArrayOutputStream().use { out ->
   frame.compress(Bitmap.CompressFormat.JPEG, POSTER_QUALITY, out)
   frame.recycle()

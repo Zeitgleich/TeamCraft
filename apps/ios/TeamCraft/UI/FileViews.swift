@@ -37,6 +37,8 @@ struct AttachmentView: View {
   @State private var maybeVideo: FileInfo?
   /// This tile started the file's download by itself (an animation that plays on its own).
   @State private var isAutoFetching = false
+  /// Bumped when a picture's original was decoded for its tile, so the tile draws it.
+  @State private var originalDrawn = 0
   /// The retry round its automatic download failed in, for a reason that passes (#1617).
   @State private var maybeFailedInRound: Int?
   /// A file that failed during an outage is asked for once when the tile comes on screen.
@@ -107,7 +109,7 @@ struct AttachmentView: View {
 
   private var mediaButton: some View {
     Button(action: open) {
-      if file.isImage, let image = ThumbnailCache.image(for: file) {
+      if file.isImage, originalDrawn >= 0, let image = ThumbnailCache.image(for: file) {
         if isTile {
           tile(image)
         } else if let width = maybeMediaWidth {
@@ -143,6 +145,7 @@ struct AttachmentView: View {
       if file.isLive && !isPlainSurface { LiveMotionOverlay(file: file) }
     }
     .task(id: motionTask) { await runMotion() }
+    .task(id: originalTask) { await runOriginal() }
   }
 
   // MARK: Animated images (#201)
@@ -218,6 +221,28 @@ struct AttachmentView: View {
     case "downloading": break
     default: isAutoFetching = false
     }
+  }
+
+  /// What `runOriginal` depends on; the running task ends when it changes.
+  private var originalTask: [String] { [file.fileId, file.transfer.state, localPath ?? "", isVisible ? "on" : "off"] }
+
+  /// A picture without the sender's thumbnail (AVIF, HEIC): draws it from the original once it is
+  /// here, fetching it first while the tile is on screen, on the networks and up to the size
+  /// animated pictures use.
+  private func runOriginal() async {
+    guard file.drawsFromOriginal, ThumbnailCache.image(for: file) == nil else { return }
+    if let path = localPath {
+      if await ThumbnailCache.loadOriginal(for: file, path: path) { originalDrawn += 1 }
+      return
+    }
+    guard isVisible, file.sizeBytes <= AnimationKind.maxAutomaticBytes, file.transfer.state == "remote" else { return }
+    try? await Task.sleep(for: AnimationKind.fetchSettle)
+    guard !Task.isCancelled,
+      fetchesOriginalAutomatically(
+        setting: OriginalDownloadSetting.current.setting, isMetered: NetworkMonitor.shared.isMetered),
+      AutoFetchBudget.shared.take(file.sizeBytes)
+    else { return }
+    fetchFile()
   }
 
   private func toggleMotion() {
@@ -580,6 +605,20 @@ enum ThumbnailCache {
       }
     }
   }
+
+  /// A picture the sender made no thumbnail of, decoded from its file down to tile size (off the
+  /// main thread) and kept under the file's id, so `image(for:)` finds it afterwards.
+  static func loadOriginal(for file: FileInfo, path: String) async -> Bool {
+    if images.object(forKey: file.fileId as NSString) != nil { return true }
+    let decoded = await Task.detached(priority: .userInitiated) {
+      PictureDecoding.downsampled(path: path, maxPixel: originalTilePixels)?.preparingForDisplay()
+    }.value
+    guard let decoded else { return false }
+    images.setObject(decoded, forKey: file.fileId as NSString)
+    return true
+  }
+
+  private static let originalTilePixels: CGFloat = 1024
 
   /// A link preview's picture, decoded once (not on every render of its card).
   static func image(forPreview data: Data) -> UIImage? {

@@ -120,7 +120,7 @@ fun mayBeAnimated(mediaType: String): Boolean =
 fun animationLabel(mediaType: String): String = mediaTypeEssence(mediaType).substringAfter('/').uppercase()
 
 /** The media type without parameters, in lowercase. Senders write whatever they like. */
-private fun mediaTypeEssence(mediaType: String): String = mediaType.substringBefore(';').trim().lowercase()
+internal fun mediaTypeEssence(mediaType: String): String = mediaType.substringBefore(';').trim().lowercase()
 
 /**
  * What a conversation's tiles need to know: this device's mode, whether something covers them (the
