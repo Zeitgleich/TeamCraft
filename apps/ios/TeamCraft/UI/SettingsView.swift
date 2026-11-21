@@ -470,9 +470,13 @@ private struct SecuritySettingsPage: View {
   let account: Account
   @Environment(AppModel.self) private var model
   @State private var backup: BackupSnapshot.KeyBackup?
+  @State private var isAccountMismatched = false
 
   var body: some View {
     Form {
+      if isAccountMismatched {
+        AccountMismatchSection()
+      }
       if let backup {
         KeyBackupSection(backup: backup)
       }
@@ -490,7 +494,28 @@ private struct SecuritySettingsPage: View {
     }
     .navigationTitle("settings_security_title")
     .navigationBarTitleDisplayMode(.inline)
-    .task { backup = await model.keyBackup() }
+    .task {
+      isAccountMismatched = await model.isOwnAccountMismatched()
+      backup = await model.keyBackup()
+    }
+  }
+}
+
+/// The owners noted another identity provider account for this user than the one they sign in with
+/// (issue #1378), so colleagues can't confirm their key: only an owner corrects it, in the console.
+private struct AccountMismatchSection: View {
+  var body: some View {
+    Section {
+      Label {
+        Text("account_mismatch_title")
+      } icon: {
+        Image(systemName: "exclamationmark.shield")
+          .foregroundStyle(Color.orange)
+      }
+      .accessibilityElement(children: .combine)
+    } footer: {
+      Text("account_mismatch_hint")
+    }
   }
 }
 

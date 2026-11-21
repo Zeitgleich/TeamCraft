@@ -2794,6 +2794,7 @@ impl Core {
       | ChatAction::AcceptKeyChange { .. }
       | ChatAction::PublishPolicy { .. }
       | ChatAction::PublishRoster { .. }
+      | ChatAction::ForgetProviderAccount { .. }
       | ChatAction::AdminJoinChannel { .. }
       | ChatAction::AdminRemoveFromAllChats { .. }
       | ChatAction::AdminDeleteUser { .. }
@@ -3703,6 +3704,7 @@ impl EnginePart {
       ChatAction::ChangePassphrase { .. } | ChatAction::SetRecoveryKey { .. } => Some(Self::Settings),
       ChatAction::PublishPolicy { .. }
       | ChatAction::PublishRoster { .. }
+      | ChatAction::ForgetProviderAccount { .. }
       | ChatAction::AdminJoinChannel { .. }
       | ChatAction::AdminRemoveFromAllChats { .. }
       | ChatAction::AdminDeleteUser { .. }
@@ -3789,6 +3791,7 @@ pub(crate) async fn admin_action(client: &mut WebClient, action: ChatAction) -> 
       let roles = teamcraft_core::workspace::roster_roles(&members);
       client.publish_roster_based_on(base_version, &roles).await
     },
+    ChatAction::ForgetProviderAccount { user } => client.forget_provider_account(user).await,
     ChatAction::AdminJoinChannel { conversation } => {
       let me = client.user_id();
       client.admin_add_member(conversation, me).await

@@ -743,6 +743,38 @@ impl OwnerRosterStatus {
     }
     warnings
   }
+
+  /// Whether `user` is an owner of the verified roster who can sign (not whom the server calls one).
+  pub fn is_owner(&self, user: UserId) -> bool {
+    self.owners.iter().any(|owner| owner.user == user)
+  }
+
+  /// The people of a [`RoleSigningIssue::Contradictory`], split: role holders of the roster, whose
+  /// role an owner checks at the provider and changes by hand, and members off the roster whose noted
+  /// account at the provider isn't the one their app signs in with, which an owner corrects by
+  /// forgetting it (e2ee.md §3.1.4, issue #1880). Both empty without a contradiction.
+  pub fn contradicted(&self) -> ContradictedPeople {
+    let Some(RoleSigningIssue::Contradictory { users }) = &self.maybe_signing_problem else {
+      return ContradictedPeople::default();
+    };
+    let is_on_roster = |user: &UserId| {
+      self.is_owner(*user) || self.admins.contains(user) || self.unverifiable_owners.contains(user)
+    };
+    let (role_holders, members) = users.iter().copied().partition(is_on_roster);
+    ContradictedPeople {
+      role_holders,
+      members,
+    }
+  }
+}
+
+/// The people of a contradiction, see [`OwnerRosterStatus::contradicted`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ContradictedPeople {
+  /// On the roster: their role at the provider contradicts it, or the server reports an owner gone.
+  pub role_holders: Vec<UserId>,
+  /// Off the roster: another account at the provider than the noted one signs in for them.
+  pub members: Vec<UserId>,
 }
 
 /// One audit log line: metadata only, never message content (admin.md §4).
@@ -1408,6 +1440,33 @@ mod tests {
       assert!(
         status(2, None, 2).warnings(NOW).is_empty(),
         "rosters from before signing times don't expire"
+      );
+    }
+
+    #[test]
+    fn a_contradiction_splits_role_holders_from_members_off_the_roster() {
+      let user = |raw: i64| UserId::from_snowflake(crate::model::Snowflake::new(raw).unwrap());
+      let mut roster = status(1, None, 1);
+      roster.admins = vec![user(2)];
+      roster.unverifiable_owners = vec![user(3)];
+      assert_eq!(roster.contradicted(), ContradictedPeople::default());
+      roster.maybe_signing_problem = Some(RoleSigningIssue::ReportedGone { users: vec![user(9)] });
+      assert_eq!(roster.contradicted(), ContradictedPeople::default());
+      roster.maybe_signing_problem = Some(RoleSigningIssue::Contradictory {
+        users: vec![user(1), user(2), user(3), user(4), user(5)],
+      });
+      assert_eq!(
+        roster.contradicted(),
+        ContradictedPeople {
+          role_holders: vec![user(1), user(2), user(3)],
+          members: vec![user(4), user(5)],
+        }
+      );
+      assert!(roster.is_owner(user(1)));
+      assert!(!roster.is_owner(user(2)), "an admin isn't an owner");
+      assert!(
+        !roster.is_owner(user(3)),
+        "nor is an owner whose key this device can't use"
       );
     }
 

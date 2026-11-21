@@ -1635,10 +1635,19 @@ mod member_accounts {
     // Only an owner corrects it. Tokens from before that, Mallory's included, can't note it again.
     alice.client.forget_provider_account(bob_id).await.unwrap();
     assert!(subject_of(&alice, bob_id).is_none());
+    // The console stops listing him at once (issue #1880), and the next round doesn't bring him back.
+    let is_listed = |owner: &Peer| {
+      matches!(
+        owner.client.role_signing_record().unwrap().maybe_note,
+        Some(RoleSigningProblem::Contradictory { ref users }) if users.contains(&bob_id)
+      )
+    };
+    assert!(!is_listed(&alice));
     alice.client.note_role_evidence_update();
     world.give_token(&alice, &["owner"], T0 + 3 * DAY);
     alice.client.run_role_signing().await.unwrap();
     assert!(subject_of(&alice, bob_id).is_none());
+    assert!(!is_listed(&alice));
 
     // Bob's app publishes a newer token by itself, which is noted.
     settle(&mut [&mut alice, &mut bob]).await;

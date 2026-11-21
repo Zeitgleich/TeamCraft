@@ -220,6 +220,7 @@ pub(crate) fn needs_client(action: &ChatAction) -> bool {
       | ChatAction::SetAttention { .. }
       | ChatAction::PublishPolicy { .. }
       | ChatAction::PublishRoster { .. }
+      | ChatAction::ForgetProviderAccount { .. }
       | ChatAction::AdminJoinChannel { .. }
       | ChatAction::AdminRemoveFromAllChats { .. }
       | ChatAction::AdminDeleteUser { .. }
@@ -293,6 +294,7 @@ impl Engine {
       ChatAction::SetAttention { .. } => Ok(()),
       ChatAction::PublishPolicy { .. }
       | ChatAction::PublishRoster { .. }
+      | ChatAction::ForgetProviderAccount { .. }
       | ChatAction::AdminJoinChannel { .. }
       | ChatAction::AdminRemoveFromAllChats { .. }
       | ChatAction::AdminDeleteUser { .. }

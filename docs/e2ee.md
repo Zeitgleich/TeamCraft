@@ -432,7 +432,10 @@ account and raises the person's floor to the newest token the owner's device got
 neither the token that got in first nor any other from before the correction can note an account again;
 the person's app publishes a newer one by itself, which is noted as above. The account that got in
 first is worth closing at the provider, as it could try again with a fresh token while the server helps.
-The console button for this is #1880; until then it is a core call.
+The console's Security section offers it to owners for each member off the roster in a contradiction
+("Forget the noted account", #1880; desktop and web, since workspace administration isn't on the
+phones), and the correction takes the person off the console's list at once. The phones show the
+member's own alert under Settings > Security.
 
 **Where the marks live, and how many.** In the signed roster, like the role holders' (`provider_marks`):
 one chain every client verifies already, with every rule above (marks only move forward on every

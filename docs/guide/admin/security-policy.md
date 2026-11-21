@@ -14,6 +14,24 @@ add the successor first and remove the old owner afterwards. See
 [Owner lifecycle](../../admin.md#231-owner-lifecycle) and
 [Setting up again](../../operations.md#setting-up-again).
 
+## A member's identity provider account
+
+Owners' apps note every member's account at the identity provider by themselves, the first one that
+shows up for them, so colleagues' apps can confirm the member's key against it
+([e2ee.md §3.1.4](../../e2ee.md#314-every-members-account-issue-1378)). When an owner's app later sees
+another account sign in for the same person, it changes nothing by itself: the console's Security
+section lists the person under the owners, and the member's own app tells them that colleagues can't
+confirm their key (also on the phones, under Settings > Security).
+
+For a plain member (not an owner or admin) this means one of two things: their account at the provider
+changed, or a server let another account of the realm get in first under their name. Ask the member
+which account is theirs, then choose **Forget the noted account** next to their name (owners only, in
+the desktop app or the browser). Their app notes the account it signs in with at its next sign-in; no
+account from before the correction can be noted for them again. If the noted account wasn't theirs,
+also close it at the identity provider, or it can try again with a fresh sign-in. For owners and
+admins the same contradiction is about their role: check it at the provider and change the roster by
+hand if needed.
+
 ## Settings
 
 | Setting               | Values and default                                                        | Meaning                                                                                     |

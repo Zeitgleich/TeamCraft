@@ -326,6 +326,10 @@ pub trait ChatBackend {
   /// Removes a leftover of [`Self::group_leftovers`] from the encryption group with a removal this
   /// device signs and commits (issue #734). Needs [`Self::can_sign_workspace`].
   fn admin_remove_group_leftover(&self, _conversation: ConversationId, _user: UserId) {}
+  /// Forgets the identity provider account noted for `user` (owners only, e2ee.md §3.1.4): for a
+  /// member whose app signs in with another account than the noted one. Needs
+  /// [`Self::can_sign_workspace`].
+  fn forget_provider_account(&self, _user: UserId) {}
   /// What desktop and browser notifications may show (the verified workspace policy). A backend
   /// that does not know the policy answers with the strictest mode.
   fn push_content_mode(&self) -> teamcraft_proto::PushContentMode {
@@ -1617,6 +1621,9 @@ pub trait AdminBackend {
   /// Signs `members` as the next roster on this device (owners only), unless the verified roster
   /// is no longer version `base_version`.
   fn admin_publish_roster(&self, _base_version: u64, _members: Vec<crate::admin::RosterEntry>) {}
+  /// Forgets the identity provider account noted for a member whose app signs in with another one
+  /// (owners only, issue #1880), signed on this device.
+  fn admin_forget_provider_account(&self, _user: UserId) {}
   /// The identity keys this device pinned, to show what an owner is about to vouch for.
   fn admin_identity_keys(&self) -> crate::remote::SecuritySnapshot {
     crate::remote::SecuritySnapshot::default()

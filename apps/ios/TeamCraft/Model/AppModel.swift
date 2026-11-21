@@ -1606,6 +1606,13 @@ final class AppModel {
     return Wire.decode(BackupSnapshot.self, from: json)?.security?.backup
   }
 
+  /// Whether the owners noted another identity provider account for this user than the one they sign
+  /// in with (Settings > Security, issue #1880).
+  func isOwnAccountMismatched() async -> Bool {
+    guard let json = try? await core().snapshot() else { return false }
+    return Wire.decode(OwnRosterSnapshot.self, from: json)?.isOwnAccountMismatched == true
+  }
+
   /// Display names by user ID, for reply quotes; former accounts too, deleted ones by the app's own
   /// "Deleted user".
   func displayNames() async -> [String: String] {

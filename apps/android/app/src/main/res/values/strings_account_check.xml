@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- The owners noted another identity provider account for this user (issue #1378, #1880). -->
+  <string name="account_mismatch_title">Your colleagues can\'t confirm your security code</string>
+  <string name="account_mismatch_hint">The owners noted another identity provider account for you than the one you sign in with. Ask an owner to correct it under Security in the TeamCraft console on a computer.</string>
+</resources>
