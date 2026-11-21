@@ -153,7 +153,9 @@ impl VoiceLink {
     }
   }
 
+  /// For the tests, which run where the voice connection exists (unix).
   #[cfg(test)]
+  #[cfg(unix)]
   fn is_up(&self) -> bool {
     lock(&self.maybe_attached)
       .as_ref()
