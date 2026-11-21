@@ -45,6 +45,9 @@ class CheckUiThreadBlockingTest(unittest.TestCase):
         self.assertEqual(kotlin("import kotlinx.coroutines.runBlocking\n * both use runBlocking\n"), [])
         self.assertEqual(swift("await self.sync()\nTask { await settings.sync() }\n// queue.sync { }\n"), [])
         self.assertEqual(swift("try await core.resume()\nlet x = await Task.sleep(for: .seconds(1))\n"), [])
+        # An injected async sleep (`await sleep(...)`) suspends the task, it doesn't block (#2206).
+        self.assertEqual(swift("guard (try? await sleep(.milliseconds(250))) != nil else { return }\n"), [])
+        self.assertEqual(len(swift("sleep(1)\n")), 1)
 
     def test_test_code_is_left_out(self):
         files = [pathlib.Path(p) for p in ["apps/ios/TeamCraftTests/A.swift", "apps/android/app/src/test/B.kt"]]
