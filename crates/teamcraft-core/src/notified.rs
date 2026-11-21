@@ -104,14 +104,49 @@ pub fn remember(store: &impl LocalStore, preview: &PushPreview) -> Result<(), Co
 
 /// What the newest notification showed of `conversation`, for opening it before the sync brought
 /// it. The message is left out once the store has caught up to it (it is shown from there, or
-/// was deleted meanwhile); the record is dropped once the store knows the conversation too.
+/// was deleted meanwhile); nothing is shown once the store knows the conversation too.
+///
+/// Only reads (issue #2225): the app asks this on a read thread, which never writes, so a record
+/// the store caught up with stays until [`forget_caught_up`] drops it on a thread that writes.
 pub fn notified_conversation(
   store: &impl LocalStore,
   conversation: ConversationId,
 ) -> Result<Option<NotifiedConversation>, CoreError> {
+  Ok(match look(store, conversation)? {
+    Look::Shown(notified) => Some(notified),
+    Look::Nothing | Look::CaughtUp => None,
+  })
+}
+
+/// Whether the store caught up with what a notification of `conversation` showed, so
+/// [`forget_caught_up`] has a record to drop.
+pub fn is_caught_up(store: &impl LocalStore, conversation: ConversationId) -> Result<bool, CoreError> {
+  Ok(matches!(look(store, conversation)?, Look::CaughtUp))
+}
+
+/// Drops the record of `conversation`'s notification once the store caught up with it. Looks again
+/// first: a notification that came after the read that asked for this is kept.
+pub fn forget_caught_up(store: &impl LocalStore, conversation: ConversationId) -> Result<(), CoreError> {
+  if matches!(look(store, conversation)?, Look::CaughtUp) {
+    store.delete(Table::Account, &record_key(conversation))?;
+  }
+  Ok(())
+}
+
+/// What the store holds of a conversation's notification, measured against what it caught up to.
+enum Look {
+  /// No notification is kept.
+  Nothing,
+  /// The store has the conversation and is past the notified message: the record has done its job.
+  CaughtUp,
+  /// Still worth showing; without the message once the store passed it.
+  Shown(NotifiedConversation),
+}
+
+fn look(store: &impl LocalStore, conversation: ConversationId) -> Result<Look, CoreError> {
   let key = record_key(conversation);
   let Some(mut notified) = records::get_json::<NotifiedConversation>(store, Table::Account, &key)? else {
-    return Ok(None);
+    return Ok(Look::Nothing);
   };
   let maybe_newest = store.edge_server_id(conversation, MessageEdge::Newest)?;
   if let (Some(message), Some(newest)) = (&notified.maybe_message, maybe_newest)
@@ -123,10 +158,9 @@ pub fn notified_conversation(
     .get(Table::Conversations, &conversation.to_string())?
     .is_some();
   if notified.maybe_message.is_none() && is_conversation_stored {
-    store.delete(Table::Account, &key)?;
-    return Ok(None);
+    return Ok(Look::CaughtUp);
   }
-  Ok(Some(notified))
+  Ok(Look::Shown(notified))
 }
 
 fn record_key(conversation: ConversationId) -> String {
@@ -174,12 +208,36 @@ mod tests {
     store_conversation(&store);
     store.upsert_message(&stored_message(5)).unwrap();
     assert_eq!(notified_conversation(&store, conversation()).unwrap(), None);
+    // Reading wrote nothing (issue #2225): the record goes on a thread that writes.
+    assert!(is_caught_up(&store, conversation()).unwrap());
+    assert!(
+      store
+        .get(Table::Account, &record_key(conversation()))
+        .unwrap()
+        .is_some()
+    );
+    forget_caught_up(&store, conversation()).unwrap();
     assert!(
       store
         .get(Table::Account, &record_key(conversation()))
         .unwrap()
         .is_none()
     );
+    assert!(!is_caught_up(&store, conversation()).unwrap());
+  }
+
+  #[test]
+  fn forgetting_keeps_a_notification_that_came_after_the_read() {
+    let store = MemoryStore::new();
+    remember(&store, &preview(5, "lunch?")).unwrap();
+    store_conversation(&store);
+    store.upsert_message(&stored_message(5)).unwrap();
+    assert!(is_caught_up(&store, conversation()).unwrap());
+    // A newer push lands between the read and the write that would drop the record.
+    remember(&store, &preview(6, "and coffee?")).unwrap();
+    forget_caught_up(&store, conversation()).unwrap();
+    let notified = notified_conversation(&store, conversation()).unwrap().unwrap();
+    assert_eq!(notified.maybe_message.unwrap().message_id, message_id(6));
   }
 
   #[test]

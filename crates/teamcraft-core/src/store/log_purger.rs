@@ -301,6 +301,7 @@ impl LogPurge {
     if !schedule.is_holding_writes || schedule.is_held_by(thread::current().id()) {
       return;
     }
+    let _waiting = crate::timing::Mark::purge_hold();
     let (schedule, waited) = self
       .changed
       .wait_timeout_while(schedule, MAX_WRITE_HOLD, |schedule| {

@@ -30,13 +30,11 @@ use teamcraft_core::clock::{Clock as _, SystemClock};
 use teamcraft_core::composer_preview::ComposerFetches;
 use teamcraft_core::connection::{ConnectionStatus, NetworkChanges};
 use teamcraft_core::notified;
-use teamcraft_core::notify_rules::{load_mention_preferences, save_mention_preferences};
+use teamcraft_core::notify_rules::load_mention_preferences;
 use teamcraft_core::pending_work::PendingWork;
-use teamcraft_core::prefetch::{load_segment_prefetch, save_segment_prefetch};
+use teamcraft_core::prefetch::load_segment_prefetch;
 use teamcraft_core::push_guard;
-use teamcraft_core::push_preview::{
-  PreviewGap, PushPreview, is_read, push_preview, save_device_push_content,
-};
+use teamcraft_core::push_preview::{PreviewGap, PushPreview, is_read, push_preview};
 use teamcraft_core::push_probe::{PROBE_OVERLAY_BYTES, probe_push};
 use teamcraft_core::records;
 use teamcraft_core::runner::{ClientJob, RunnerCommand, RunnerHandle, RunnerSettings, SyncRunner};
@@ -68,9 +66,8 @@ use crate::reads::{ReadLanes, ReadQueue};
 use crate::server_pool::ServerPool;
 use crate::store_threads::StoreHold;
 use crate::types::{
-  AccountState, AppConfig, DirectPeer, LinkPlatform, LinkRequestItem, MentionSettings, NotificationContent,
-  Presence, PushNotification, PushService, SegmentPrefetchMode, SegmentPrefetchResult, StoreProblem,
-  TestPushResult,
+  AccountState, AppConfig, DirectPeer, LinkPlatform, LinkRequestItem, Presence, PushNotification,
+  PushService, SegmentPrefetchResult, StoreProblem, TestPushResult,
 };
 use crate::{AccessToken, EventListener, TokenProvider};
 
@@ -99,6 +96,9 @@ const READ_LANE_LIMITS: SealedStoreLimits = SealedStoreLimits {
 /// the sync loop); Rust's 2 MiB default overflowed on a phone in a debug build (#1504). Only
 /// address space is reserved; pages are used as the stack grows.
 pub(crate) const THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
+/// Names of the engine thread's work outside its jobs, as a lane-blocked report names them.
+const SYNC_LOOP_WORK: &str = "sync_loop";
+const OPEN_CLIENT_WORK: &str = "open_client";
 /// How long stopping the engine waits for the purge of the local database's log (#1684): a few
 /// syncs of a phone's flash when no read holds the log.
 const PURGE_BEFORE_SUSPEND: Duration = Duration::from_secs(1);
@@ -190,7 +190,6 @@ pub(crate) struct Engine {
   maybe_receipt: Option<ReceiptCancel>,
   calls: CallHub,
   /// Applied to decrypted push texts (keywords, first name).
-  mentions: MentionSettings,
   pub(crate) signals: SyncSignals,
   /// Whether the app asked for syncing (foreground) and hasn't stopped it since.
   is_syncing_for_app: bool,
@@ -578,7 +577,11 @@ pub(crate) fn spawn(
           let _ = ready.send(Ok((engine.reads.clone(), engine.side_http.clone())));
         } else {
           let _ = ready.send(Ok((engine.reads.clone(), engine.side_http.clone())));
-          if let Err(problem) = engine.finish_opening() {
+          let opening_started_ms = perf_jobs::now_ms();
+          let opened = engine.finish_opening();
+          // The jobs queued meanwhile waited for it (issue #2225: "Engine lane blocked: unknown").
+          perf_jobs::engine_work_done(OPEN_CLIENT_WORK, opening_started_ms, perf_jobs::now_ms());
+          if let Err(problem) = opened {
             // The store closes first: a reset sets its files aside, and a connection closing after
             // that would delete the log of the new database, which has the old one's name.
             let listener = engine.listener.clone();
@@ -783,8 +786,6 @@ impl Engine {
     };
     let read_lanes = lanes.read_lanes();
     let store = engine_store;
-    // A broken record only costs the preferences, not the store.
-    let mentions: MentionSettings = load_mention_preferences(&store).unwrap_or_default().into();
     let maybe_account = records::load_account(&store).map_err(open_error)?;
     let reads = ReadQueue::start(
       read_lanes,
@@ -832,7 +833,6 @@ impl Engine {
       maybe_approval: None,
       maybe_receipt: None,
       calls: CallHub::with_running(signals.running_calls.clone()),
-      mentions,
       signals,
       is_syncing_for_app: false,
       active_drains: 0,
@@ -1198,10 +1198,14 @@ impl Engine {
     runner.watch_network(&self.signals.network);
     runner.share_connection_status(self.signals.connection.clone());
     let notice = LoopDeathNotice(self.maybe_jobs.clone());
-    let task = tokio::task::spawn_local(async move {
+    // Boxed: the future that owns it is moved by value into its timing below, and a client is too
+    // big to pass around on a debug build's stack.
+    let runner = Box::new(runner);
+    // Its steps run on this thread between the jobs: a job that waits for one names it.
+    let task = tokio::task::spawn_local(EngineWork::new(SYNC_LOOP_WORK, async move {
       let _notice = notice;
       runner.run().await
-    });
+    }));
     self.client = ClientSlot::Running { handle, task };
     self.maybe_loop_started = Some(tokio::time::Instant::now());
     Ok(())
@@ -1562,14 +1566,17 @@ impl Engine {
       && let (Some(text), Ok(backend)) = (&notification.maybe_text, self.backend())
     {
       let me = backend.me();
+      // Read from the store, where the actions' thread keeps them (issue #2225); a broken record
+      // only costs the preferences.
+      let preferences = load_mention_preferences(&self.store).unwrap_or_default();
       notification.is_mention = is_mentioned(
         text,
         &MentionRules {
           username: &me.username,
           display_name: &me.display_name,
-          first_name_is_mention: self.mentions.is_first_name_mention,
-          channel_mentions_notify: self.mentions.do_channel_mentions_notify,
-          keywords: &self.mentions.keywords,
+          first_name_is_mention: preferences.first_name_is_mention,
+          channel_mentions_notify: preferences.channel_mentions_notify,
+          keywords: &preferences.keywords,
         },
       );
     }
@@ -1769,22 +1776,6 @@ impl Engine {
     Ok(push_guard::send_test_push(&self.store, &api).await?.into())
   }
 
-  /// Remembers the preferences in the store, so a process that opens the store later (the iOS
-  /// notification extension) applies them too.
-  pub(crate) fn set_mention_settings(&mut self, settings: MentionSettings) -> Result<(), TeamCraftError> {
-    save_mention_preferences(&self.store, &settings.clone().into())?;
-    self.mentions = settings;
-    Ok(())
-  }
-
-  pub(crate) fn set_notification_content(&self, content: NotificationContent) -> Result<(), TeamCraftError> {
-    Ok(save_device_push_content(&self.store, &content.into())?)
-  }
-
-  pub(crate) fn set_segment_prefetch(&self, mode: SegmentPrefetchMode) -> Result<(), TeamCraftError> {
-    Ok(save_segment_prefetch(&self.store, mode.into())?)
-  }
-
   /// Starts the search segment prefetch if the saved mode allows it on this network; nothing is
   /// fetched otherwise.
   pub(crate) fn begin_prefetch_segments(
@@ -1813,7 +1804,8 @@ impl Engine {
     if self.maybe_backend.is_none() {
       return Err(TeamCraftError::NotEnrolled);
     }
-    let store = self.lanes.open(SEGMENT_PLAN_LIMITS);
+    // It stores each segment it fetched.
+    let store = self.lanes.open(SEGMENT_PLAN_LIMITS, LaneWrites::Allowed);
     let api = self.api();
     let (reply, answer) = oneshot::channel();
     let task = tokio::task::spawn_local(async move {
@@ -2332,30 +2324,72 @@ impl LaneOpener {
   /// engine's groups of writes.
   fn read_lanes(&self) -> ReadLanes {
     ReadLanes {
-      main: self.open(SealedStoreLimits::default()),
-      query: self.open(READ_LANE_LIMITS),
+      main: self.open(SealedStoreLimits::default(), LaneWrites::Refused),
+      query: self.open(READ_LANE_LIMITS, LaneWrites::Refused),
       // No read connection: an action reads inside its group, which goes to the writer anyway.
       // A view of its own, so its groups never send the main read thread's reads to the writer.
       act: self.engine.sharing(LaneStore::writer(Arc::clone(&self.writer))),
     }
   }
 
-  /// A view that reads through a new connection and writes through the writer's.
-  fn open(&self, limits: SealedStoreLimits) -> Store {
+  /// A view that reads through a new connection and, unless `writes` refuses it, writes through the
+  /// writer's.
+  fn open(&self, limits: SealedStoreLimits, writes: LaneWrites) -> Store {
     if self.is_memory_constrained {
       return self.engine.clone();
     }
     let key_source = StaticKeySource::new(self.key.duplicate());
     match SealedSqliteStore::open_reader(&self.path, &key_source, limits, Arc::clone(&self.journal)) {
-      Ok(reader) => self
-        .engine
-        .sharing(LaneStore::reader(Arc::clone(&self.writer), Arc::new(reader))),
+      Ok(reader) => {
+        let (writer, reader) = (Arc::clone(&self.writer), Arc::new(reader));
+        self.engine.sharing(match writes {
+          LaneWrites::Refused => LaneStore::read_only(writer, reader),
+          LaneWrites::Allowed => LaneStore::reader(writer, reader),
+        })
+      },
       Err(error) => {
         tracing::warn!(%error, "could not open a read connection; reading through the writer's");
         self.engine.clone()
       },
     }
   }
+}
+
+/// A future on the engine thread whose polls are timed as engine work named `name`
+/// ([`perf_jobs::engine_work_done`]): the sync loop runs beside the jobs, and a job that waited
+/// for one of its steps was reported as blocked by `unknown` (issue #2225).
+struct EngineWork<F> {
+  name: &'static str,
+  future: Pin<Box<F>>,
+}
+
+impl<F: Future> EngineWork<F> {
+  fn new(name: &'static str, future: F) -> Self {
+    Self {
+      name,
+      future: Box::pin(future),
+    }
+  }
+}
+
+impl<F: Future> Future for EngineWork<F> {
+  type Output = F::Output;
+
+  fn poll(mut self: Pin<&mut Self>, context: &mut std::task::Context<'_>) -> std::task::Poll<F::Output> {
+    let started_ms = perf_jobs::now_ms();
+    let poll = self.future.as_mut().poll(context);
+    perf_jobs::engine_work_done(self.name, started_ms, perf_jobs::now_ms());
+    poll
+  }
+}
+
+/// Whether a view of the store with a read connection of its own may write (issue #2225).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LaneWrites {
+  /// The app's read threads: they never write.
+  Refused,
+  /// A task beside the jobs that also stores what it fetched.
+  Allowed,
 }
 
 /// A segment prefetch running beside the engine's jobs ([`Engine::begin_prefetch_search_segments`]).

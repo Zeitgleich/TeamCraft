@@ -66,6 +66,20 @@ impl Mark {
     Self::from_span(tracing::trace_span!("store.lock_wait", name = "store_lock"))
   }
 
+  /// A thread that begins a group of writes lets the threads that waited for the last group go
+  /// first ([`crate::store::SealedStore`]'s turn): a wait of its own, which no span showed (issue
+  /// #2225).
+  pub(crate) fn turn_wait() -> Option<Self> {
+    Self::from_span(tracing::trace_span!("store.lock_wait", name = "store_turn"))
+  }
+
+  /// A group of writes waits while the overdue purge of the write-ahead log holds writes back
+  /// (`log_purger`): seconds at worst, and invisible in the reports before (issue #2225).
+  #[cfg(all(feature = "sealed-sqlite", not(target_arch = "wasm32")))]
+  pub(crate) fn purge_hold() -> Option<Self> {
+    Self::from_span(tracing::trace_span!("store.lock_wait", name = "purge_hold"))
+  }
+
   /// A group of writes holds the store, from its first write until it commits.
   pub(crate) fn write_group() -> Option<Self> {
     Self::from_span(tracing::trace_span!("store.write_group", name = "write_group"))
