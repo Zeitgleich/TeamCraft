@@ -23,6 +23,10 @@ class PlainText(unittest.TestCase):
     def test_images_dropped(self):
         self.assertEqual(notes.plain_text("New icon ![icon](icon.png)"), "New icon")
 
+    def test_no_markup_left(self):
+        markdown = "- The check finds `build/<crate>/<hash>`\n<!-- generated -->"
+        self.assertEqual(notes.plain_text(markdown), "\u2022 The check finds build/\u2039crate\u203a/\u2039hash\u203a")
+
 
 class PlayNotes(unittest.TestCase):
     def test_release(self):
