@@ -473,12 +473,13 @@ deobfuscates and symbolicates crashes on its own. Candidates and releases get in
 `versionCode`s ([Build numbers](#build-numbers)); Play rejects a `versionCode` it has seen, so a
 re-run after a successful upload fails at the upload step and changes nothing.
 
-| Setting (repository)                      | Default       | Meaning                                                                   |
-|-------------------------------------------|---------------|---------------------------------------------------------------------------|
-| Secret `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON` | –             | The service account's JSON key; without it the upload is skipped (notice) |
-| Variable `TEAMCRAFT_PLAY_TRACK`           | `internal`    | Track: `internal`, `alpha` (closed), `beta` (open), `production`          |
-| Variable `TEAMCRAFT_PLAY_RELEASE_STATUS`  | `draft`       | `draft` (finish it in the Play Console) or `completed` (roll out)         |
-| Variable `TEAMCRAFT_PLAY_LOCALES`         | `en-US,de-DE` | Languages of "What's new"; use the languages of the store listing         |
+| Setting (repository)                      | Default       | Meaning                                                                      |
+|-------------------------------------------|---------------|------------------------------------------------------------------------------|
+| Secret `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON` | –             | The service account's JSON key; without it the upload is skipped (notice)    |
+| Variable `TEAMCRAFT_PLAY_TRACK`           | `internal`    | Track of releases: `internal`, `alpha` (closed), `beta` (open), `production` |
+| Variable `TEAMCRAFT_PLAY_RC_TRACK`        | `internal`    | Track of candidates (`-rc`), same values; keep it below `production`         |
+| Variable `TEAMCRAFT_PLAY_RELEASE_STATUS`  | `draft`       | `draft` (finish it in the Play Console) or `completed` (roll out)            |
+| Variable `TEAMCRAFT_PLAY_LOCALES`         | `en-US,de-DE` | Languages of "What's new"; use the languages of the store listing            |
 
 Set up once:
 
@@ -506,7 +507,8 @@ Promoting a build to the next track (internal → closed → production) is a Pl
 release on the internal track → *Promote release* → the target track, then review and roll out
 (production: staged rollout with a percentage). The bundle is not uploaded again. To send releases to
 another track automatically, set `TEAMCRAFT_PLAY_TRACK` (and give the service account the matching
-permission); every published tag, candidates included, then goes there.
+permission, "Release to production" for `production`); every published release then goes there,
+while candidates stay on `TEAMCRAFT_PLAY_RC_TRACK`.
 
 ## TestFlight
 

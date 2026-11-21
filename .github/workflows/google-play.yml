@@ -1,11 +1,13 @@
 # Google Play (docs/release.md, "Google Play"): when a release is published (or by hand for a tag),
 # uploads the signed App Bundle of the `full` flavor that release.yml attached to the release to a
-# Play track, with the tag's highlights as "What's new". Releases and candidates both go to the
-# track; their versionCodes increase (docs/release.md, "Build numbers").
+# Play track, with the tag's highlights as "What's new". Releases go to TEAMCRAFT_PLAY_TRACK,
+# candidates (-rc) to TEAMCRAFT_PLAY_RC_TRACK; their versionCodes increase (docs/release.md,
+# "Build numbers").
 #
 # Setup: the secret GOOGLE_PLAY_SERVICE_ACCOUNT_JSON (a service account with "Release to testing
 # tracks" for the app); without it the run skips the upload with a notice. Repository variables:
-#   TEAMCRAFT_PLAY_TRACK           default `internal`
+#   TEAMCRAFT_PLAY_TRACK           track of releases (vX.Y.Z), default `internal`
+#   TEAMCRAFT_PLAY_RC_TRACK        track of candidates (vX.Y.Z-rc.N), default `internal`
 #   TEAMCRAFT_PLAY_RELEASE_STATUS  default `draft` (required while the app was never published on
 #                                  Play); `completed` rolls the release out to the track's testers
 #   TEAMCRAFT_PLAY_LOCALES         default `en-US,de-DE`: languages of the "What's new" text
@@ -46,7 +48,8 @@ jobs:
         id: settings
         env:
           HAS_SERVICE_ACCOUNT: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON != '' }}
-          TRACK: ${{ vars.TEAMCRAFT_PLAY_TRACK || 'internal' }}
+          RELEASE_TRACK: ${{ vars.TEAMCRAFT_PLAY_TRACK || 'internal' }}
+          RC_TRACK: ${{ vars.TEAMCRAFT_PLAY_RC_TRACK || 'internal' }}
           STATUS: ${{ vars.TEAMCRAFT_PLAY_RELEASE_STATUS || 'draft' }}
           LOCALES: ${{ vars.TEAMCRAFT_PLAY_LOCALES || 'en-US,de-DE' }}
         run: |
@@ -58,6 +61,11 @@ jobs:
           case "$TAG" in
             v[0-9]*) ;;
             *) echo "::error::not a release tag: ${TAG}"; exit 1 ;;
+          esac
+          # A candidate never reaches the track real users get.
+          case "$TAG" in
+            *-*) TRACK="$RC_TRACK" ;;
+            *) TRACK="$RELEASE_TRACK" ;;
           esac
           case "$STATUS" in
             draft | completed) ;;
