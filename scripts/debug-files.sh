@@ -24,6 +24,13 @@
 #   scripts/debug-files.sh fetch-dsym UUID [DIR]
 #       Downloads an iOS/macOS dSYM bundle from the bucket and unpacks it to DIR/<UUID>/ (DIR
 #       defaults to ~/.cache/teamcraft-debug/dsym), where scripts/symbolicate-ios.sh finds it.
+#   scripts/debug-files.sh store-web-names LABEL MAP...
+#       Keeps the web app's function names maps (teamcraft-ui-names-<build>.json.gz, written by
+#       teamcraft-web-bundle `--names-out`, #2228) in the bucket only: the crash reports backend
+#       doesn't symbolicate wasm. scripts/symbolicate-web.py reads them.
+#   scripts/debug-files.sh fetch-web-names BUILD [DIR]
+#       Downloads the names map of a web build (the 16 hex digits in its file names) to DIR
+#       (default ~/.cache/teamcraft-debug/web-names), where scripts/symbolicate-web.py finds it.
 #   scripts/debug-files.sh index LABEL
 #       Prints a build's index (e.g. desktop/1.0.32/x86_64-unknown-linux-gnu).
 #   scripts/debug-files.sh sentry-cli ARGS...
@@ -33,6 +40,7 @@
 #   buildid/<build-id>/debuginfo           ELF, as a debuginfod server serves it
 #   macho/<UUID>/<name>.dSYM.zip           macOS dSYM bundle
 #   pdb/<name>.pdb/<GUID><age>/<name>.pdb  Windows PDB, as a symbol server (symstore) serves it
+#   web-names/<build>.json.gz              names map of the web app's wasm files, by build
 #   index/<LABEL>.txt                      "<kind> <id> <key>" per file, plus the commit
 set -euo pipefail
 
@@ -48,9 +56,11 @@ main() {
     store) shift; [ "$#" -ge 2 ] || fail "usage: $0 store LABEL FILE..."; store "$@" ;;
     fetch) shift; [ "$#" -ge 1 ] || fail "usage: $0 fetch BUILD_ID [DIR]"; fetch "$@" ;;
     fetch-dsym) shift; [ "$#" -ge 1 ] || fail "usage: $0 fetch-dsym UUID [DIR]"; fetch_dsym "$@" ;;
+    store-web-names) shift; [ "$#" -ge 2 ] || fail "usage: $0 store-web-names LABEL MAP..."; store_web_names "$@" ;;
+    fetch-web-names) shift; [ "$#" -ge 1 ] || fail "usage: $0 fetch-web-names BUILD [DIR]"; fetch_web_names "$@" ;;
     sentry-cli) shift; install_sentry_cli || exit 1; exec "$SENTRY_CLI" "$@" ;;
     index) shift; [ "$#" -eq 1 ] || fail "usage: $0 index LABEL"; require_bucket; s3_get "index/$1.txt" - ;;
-    *) fail "usage: $0 split BINARY OUT_DIR | store LABEL FILE... | fetch BUILD_ID [DIR] | fetch-dsym UUID [DIR] | index LABEL" ;;
+    *) fail "usage: $0 split BINARY OUT_DIR | store LABEL FILE... | fetch BUILD_ID [DIR] | fetch-dsym UUID [DIR] | store-web-names LABEL MAP... | fetch-web-names BUILD [DIR] | index LABEL" ;;
   esac
 }
 
@@ -122,6 +132,43 @@ fetch_dsym() {
   s3_get "$key" "$target/dsym.zip.part" || fail "could not download $key"
   unzip -q -o "$target/dsym.zip.part" -d "$target"
   rm -f "$target/dsym.zip.part"
+  echo "$target"
+}
+
+store_web_names() {
+  local label="$1" file build index
+  shift
+  if ! has_bucket; then
+    warn "no DEBUG_FILES_S3_* bucket: the web names maps of $label are not kept"
+    return 0
+  fi
+  index="$(mktemp)"
+  echo "commit ${GITHUB_SHA:-unknown}" > "$index"
+  for file in "$@"; do
+    build="$(basename "$file")"
+    build="${build#teamcraft-ui-names-}"
+    build="${build%.json.gz}"
+    [[ "$build" =~ ^[0-9a-f]{16}$ ]] || fail "$file is not named teamcraft-ui-names-<build>.json.gz"
+    if s3_put "$file" "web-names/$build.json.gz"; then
+      echo "web-names $build web-names/$build.json.gz" >> "$index"
+    else
+      warn "the web names map $file did not reach the bucket"
+    fi
+  done
+  s3_put "$index" "index/$label.txt" || warn "the index of $label did not reach the bucket"
+  cat "$index"
+  rm -f "$index"
+}
+
+fetch_web_names() {
+  local build="$1" dir="${2:-$HOME/.cache/teamcraft-debug/web-names}" target
+  [[ "$build" =~ ^[0-9a-f]{16}$ ]] || fail "'$build' is not a web build ID (16 lower-case hex digits)"
+  require_bucket
+  target="$dir/teamcraft-ui-names-$build.json.gz"
+  mkdir -p "$dir"
+  s3_get "web-names/$build.json.gz" "$target.part" \
+    || { rm -f "$target.part"; fail "no names map of web build $build in the bucket"; }
+  mv "$target.part" "$target"
   echo "$target"
 }
 

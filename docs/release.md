@@ -702,6 +702,7 @@ symbolized later, the way Google Play keeps the R8 mapping and native symbols pe
 | macOS    | line tables, `split-debuginfo = "packed"` | `strip -S -x` after the UUID check         | `teamcraft-desktop.dSYM`, Mach-O UUID      |
 | Windows  | line tables, `strip = "none"`             | never holds symbols (only the PDB's GUID)  | `teamcraft_desktop.pdb`, GUID and age      |
 | Android  | line tables                               | stripped by AGP in the APKs and the bundle | the unstripped `.so` files, build ID       |
+| Web      | wasm-opt `-g` (name section)              | name section taken out by the bundle tool  | `teamcraft-ui-names-<build>.json.gz`       |
 
 
 **Never a workflow artifact:** this repository is public, and so are its Actions artifacts. The

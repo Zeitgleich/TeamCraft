@@ -74,7 +74,24 @@ jobs:
           save-if: ${{ inputs.warm-cache }}
       - name: Build the UI bundle
         working-directory: crates/teamcraft-ui
+        # Also writes the function names of the shipped wasm to target/web-names (#2228): outside
+        # dist, so never in the artifact.
         run: trunk build --release
+      # The names map of the bundle's wasm, privately (scripts/debug-files.sh store-web-names: the
+      # DEBUG_FILES_S3_* bucket only); scripts/symbolicate-web.py names page crash reports' frames.
+      - name: Keep the wasm function names privately (optional)
+        if: ${{ !inputs.warm-cache }}
+        shell: bash
+        env:
+          DEBUG_FILES_S3_ENDPOINT: ${{ secrets.DEBUG_FILES_S3_ENDPOINT }}
+          DEBUG_FILES_S3_REGION: ${{ secrets.DEBUG_FILES_S3_REGION }}
+          DEBUG_FILES_S3_BUCKET: ${{ secrets.DEBUG_FILES_S3_BUCKET }}
+          DEBUG_FILES_S3_ACCESS_KEY_ID: ${{ secrets.DEBUG_FILES_S3_ACCESS_KEY_ID }}
+          DEBUG_FILES_S3_SECRET_ACCESS_KEY: ${{ secrets.DEBUG_FILES_S3_SECRET_ACCESS_KEY }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then label="web/${GITHUB_REF_NAME#v}"
+          else label="web/$(scripts/check-versions.sh)+${GITHUB_SHA::7}"; fi
+          scripts/debug-files.sh store-web-names "$label" target/web-names/teamcraft-ui-names-*.json.gz
       # The packages embed this bundle and the web client is made from it: no demo data.
       - name: The UI bundle has no demo data
         run: scripts/check-no-demo-data.py crates/teamcraft-ui/dist

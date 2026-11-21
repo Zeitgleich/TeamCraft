@@ -38,7 +38,7 @@ pub use call::{
   ResumeFailure, SentVideoContext, Unverified, identifier,
 };
 pub use event::{
-  AppInfo, AppPlatform, CrashEvent, CrashLevel, ErrorSource, EventId, InstallationId, StackFrame,
+  AppInfo, AppPlatform, CrashEvent, CrashLevel, ErrorSource, EventId, InstallationId, StackFrame, WasmCode,
 };
 pub use panic::{MAX_PENDING_PANICS, PanicParts, PendingPanic, ScriptStack, frames_from_backtrace};
 pub use queue::{CrashQueue, CrashQueueLimits, QueuedCrashReport};

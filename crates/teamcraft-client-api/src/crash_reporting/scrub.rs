@@ -587,6 +587,7 @@ mod tests {
         maybe_line: Some(42),
         maybe_column: Some(7),
         is_in_app: true,
+        maybe_wasm: None,
       }],
       breadcrumbs: vec![
         "2026-11-08T10:00:00Z INFO teamcraft_core: upload failed conversation_id=1234 \

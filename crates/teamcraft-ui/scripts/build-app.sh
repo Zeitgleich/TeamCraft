@@ -58,6 +58,10 @@ if [ "$profile" = "web-release" ]; then
   [ -n "$wasm_opt" ] || { echo "build-app: no wasm-opt (set WASM_OPT)" >&2; exit 1; }
   # As for the other wasm assets in index.html.
   set -- "$@" --wasm-opt "$wasm_opt"
+  # The function names of the shipped files (#2228; docs/crash-reports.md, "Reading a page report"):
+  # a map per build outside the staging directory, never served or embedded; the release keeps it
+  # privately (desktop-release.yml).
+  set -- "$@" --names-out "${TEAMCRAFT_WEB_NAMES_DIR:-$target_dir/web-names}"
   for arg in -Oz --converge --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
     --enable-mutable-globals --enable-reference-types --enable-multivalue --strip-debug --strip-producers; do
     set -- "$@" --wasm-opt-arg "$arg"

@@ -610,7 +610,7 @@ core). The Android measures of its own (`Perf.kt`) take their names from the cor
 |------------------|--------------------------------------------------|--------------------------------------------------|
 | Desktop          | Frames resolved on the device (stripped: none)   | Debug files by build ID; not used by reports yet |
 | Server           | Function names, resolved on the device           | None needed for names; see below for lines       |
-| Web (wasm)       | Function index and offset (names are stripped)   | None (gap, below)                                |
+| Web (wasm)       | Function index, module and offset (no names)     | Names map per build, bucket only (#2228)         |
 | Android (Kotlin) | Obfuscated names (R8)                            | R8 `mapping.txt` under the build's ProGuard UUID |
 | Android (NDK)    | Addresses and debug IDs of `libteamcraft_ffi.so` | The unstripped `.so` (ELF debug files)           |
 | iOS              | Addresses and debug IDs (GlitchTip 7 resolves)   | dSYMs from the Xcode archive (#1515)             |
@@ -625,15 +625,16 @@ core). The Android measures of its own (`Perf.kt`) take their names from the cor
   those from the desktop panic hook (the `sentry` crate's debug-image code, or the loaded
   executable's build ID and load address) is the missing piece; until then, symbolize a report's
   addresses by hand as in the release.md runbook.
-- **wasm** (`profile.web-release` strips the name section to save download size): a browser frame
-  is `wasm-function[1234]:0x5678`, and GlitchTip doesn't symbolicate wasm. To read one, build the
-  release's commit with `strip = false` (the build is reproducible) and map the frame with
-  `wasm-tools addr2line` or `llvm-symbolizer`. Keeping the name section in the shipped module would
-  cost download size against the budget; panics carry their message and location either way.
-  Uncaught script errors and rejected promises carry the thrown `Error`'s `stack`, read in the
-  Safari/Firefox (`name@url:line:column`) and Chrome (`at name (url:line:column)`) shapes
-  (`frames_from_script_stack`); frames from the page's origin and wasm frames are in-app, and
-  script URLs are scrubbed to their path like any other frame.
+- **wasm**: the shipped files have no name section (download size), so a browser names a frame
+  by its function index (`wasm-function[1234]`), and each split file has its own index space.
+  Uncaught script errors and rejected promises carry the thrown `Error`'s `stack`, wasm panics
+  `new Error().stack`, read in the Safari/Firefox (`name@url:line:column`) and Chrome
+  (`at name (url:line:column)`) shapes (`frames_from_script_stack`); frames from the page's origin
+  and every wasm frame are in-app, and script URLs are scrubbed to their path like any other frame.
+  A wasm frame keeps its function index as `function_id` and, where the browser gives it, the byte
+  offset in its module as `instruction_addr`, with the module's file as `filename`. GlitchTip
+  doesn't symbolicate wasm; `scripts/symbolicate-web.py` names the frames with the build's names
+  map (see "Reading a page report").
 - **Android:** the release workflow (`release.yml`, job `android`) gives the full release a fresh
   ProGuard UUID (`-Pteamcraft.proguardUuid`, written to the app's `sentry-debug-meta.properties`)
   and uploads `mapping.txt` under it (`sentry-cli upload-proguard`) and the unstripped libraries
@@ -654,6 +655,39 @@ core). The Android measures of its own (`Perf.kt`) take their names from the cor
   `CRASH_REPORTS_ORG`, `CRASH_REPORTS_PROJECT` and `CRASH_REPORTS_AUTH_TOKEN` exist and skips the
   steps otherwise, so forks and other publishers build without them. A failed upload warns; the
   release goes on.
+
+### Reading a page report
+
+The release build (`teamcraft-web-bundle --names-out`, from `scripts/build-app.sh`) keeps the
+names: wasm-bindgen and wasm-opt (`-g`) run with the name section, and the bundle tool then takes
+it out of every finished file, touching nothing else, into `teamcraft-ui-names-<build>.json.gz`
+(per file: the defined functions in index order, each with its name and the byte range of its
+body). The shipped files are what the page runs: indices and offsets match the map by
+construction. The map lives outside `dist` (never served, never in the desktop app, never a
+workflow artifact); `desktop-release.yml` keeps it in the private bucket
+(`scripts/debug-files.sh store-web-names`, `web-names/<build>.json.gz`). Measured on a release
+build: the 49 split files are byte for byte the files built without names; the main file has the
+same size and its types in another order (gzip 145 bytes smaller); the map is 2.7 MB gzipped.
+
+1. Get the map of the report's build: the 16 hex digits in its files' names
+   (`teamcraft-ui-<build>.js` in a glue frame), then
+   `scripts/debug-files.sh fetch-web-names <build>`.
+2. Run `scripts/symbolicate-web.py --names ~/.cache/teamcraft-debug/web-names <GlitchTip issue ID>`
+   (with `GLITCHTIP_URL` and `GLITCHTIP_TOKEN`) or `… event.json`. It prints the frames innermost
+   first, wasm frames with their function's name.
+
+How exact a frame is depends on the browser:
+
+| Browser                           | A wasm frame says                                      | Resolved                                                                                               |
+|-----------------------------------|--------------------------------------------------------|--------------------------------------------------------------------------------------------------------|
+| Chrome, Firefox (file fetched)    | file, index, offset (`…_bg.wasm:wasm-function[N]:0x…`) | exactly                                                                                                |
+| Chrome, Firefox (from the pack)   | index and offset; `wasm://wasm/<hash>` or the loader   | the files whose function N holds the offset; usually one                                               |
+| Safari, WebKitGTK (Linux desktop) | index only (`<?>.wasm-function[N]@[wasm code]`)        | the files with a function N: large indices are the main file's alone, small ones list their candidates |
+
+The WebKit limit is the browser's: it prints neither module nor offset for a module without a
+name section. Naming each shipped file in a name section of its own (a module name only, some 20
+bytes a file) would make WebKit print `<module>.wasm-function[N]` and settle the candidates, at a
+few kB against the download budget for all users; not done (#2228).
 
 ### Reading an iOS report
 
