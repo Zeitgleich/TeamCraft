@@ -1,5 +1,7 @@
+import ImageIO
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 /// The in-app image viewer (#240), over the conversation: the tapped picture at once from its
 /// thumbnail, the original swapped in when it is here (fetched by itself or on "Load original",
@@ -708,6 +710,38 @@ extension EnvironmentValues {
 }
 
 extension FileInfo {
-  /// A picture the viewer opens: one with a thumbnail to show first.
-  var isViewablePicture: Bool { isImage && maybeThumbnailPng != nil }
+  /// A picture the viewer opens: one with a thumbnail to show first, or one this phone can draw
+  /// from the original (the sender's device made no thumbnail of an AVIF or HEIC).
+  var isViewablePicture: Bool { isImage && (maybeThumbnailPng != nil || drawsFromOriginal) }
+
+  /// A picture without the sender's thumbnail that ImageIO can read: tiles draw it from the
+  /// original once it is here. Any other format without a thumbnail stays a file row.
+  var drawsFromOriginal: Bool {
+    isImage && maybeThumbnailPng == nil && PictureDecoding.canDecode(mediaType: mediaType)
+  }
+}
+
+enum PictureDecoding {
+  /// Whether ImageIO on this system reads `mediaType` (AVIF from iOS 16, HEIC natively).
+  static func canDecode(mediaType: String) -> Bool {
+    let essence = mediaType.split(separator: ";").first.map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+    guard let essence, let type = UTType(mimeType: essence) else { return false }
+    let readable = CGImageSourceCopyTypeIdentifiers() as? [String] ?? []
+    return readable.contains(type.identifier)
+  }
+
+  /// The picture file decoded down to `maxPixel` on its longer side, upright: never full size.
+  static func downsampled(path: String, maxPixel: CGFloat) -> UIImage? {
+    let options = [kCGImageSourceShouldCache: false] as CFDictionary
+    guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, options) else { return nil }
+    let thumbnailOptions =
+      [
+        kCGImageSourceCreateThumbnailFromImageAlways: true,
+        kCGImageSourceCreateThumbnailWithTransform: true,
+        kCGImageSourceShouldCacheImmediately: true,
+        kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+      ] as CFDictionary
+    guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions) else { return nil }
+    return UIImage(cgImage: image)
+  }
 }

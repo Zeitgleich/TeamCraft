@@ -294,7 +294,7 @@ struct MessageBubble: View {
 
   private var message: Message { entry.message }
   private var files: [FileInfo] { maybeExtras?.files ?? [] }
-  private var images: [FileInfo] { files.filter { $0.isImage && $0.maybeThumbnailData != nil } }
+  private var images: [FileInfo] { files.filter { $0.isImage && ($0.maybeThumbnailData != nil || $0.drawsFromOriginal) } }
   private var otherFiles: [FileInfo] { files.filter { file in !images.contains(file) } }
   private var isDeleted: Bool { maybeExtras?.isDeleted == true }
   private var maybeUpload: UploadPill? { isDeleted ? nil : UploadPill.of(files) }

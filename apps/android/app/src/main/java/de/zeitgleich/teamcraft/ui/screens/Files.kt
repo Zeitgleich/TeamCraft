@@ -51,7 +51,9 @@ import de.zeitgleich.teamcraft.ui.ListPhase
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.PictureTarget
 import de.zeitgleich.teamcraft.ui.THUMBNAIL_DECODE_PX
+import de.zeitgleich.teamcraft.ui.drawsFromOriginal
 import de.zeitgleich.teamcraft.ui.rememberThumbnail
+import de.zeitgleich.teamcraft.ui.showsAsPicture
 import de.zeitgleich.teamcraft.ui.thumbnailKey
 
 /** Every file of a conversation as a gallery: images as thumbnails, tap to download or open. */
@@ -115,7 +117,7 @@ internal fun FilesGrid(viewModel: MainViewModel, files: List<FileInfo>, modifier
       Column(
         Modifier.padding(4.dp).clickable {
           val path = file.transfer.path
-          if (file.isImage && file.maybeThumbnail != null) {
+          if (file.isImage && file.showsAsPicture) {
             // The viewer shows the thumbnail at once and fetches the original itself.
             maybeViewing = PictureTarget.of(file).toList()
           } else if (file.opensInVideoPlayer) {
@@ -133,7 +135,9 @@ internal fun FilesGrid(viewModel: MainViewModel, files: List<FileInfo>, modifier
           contentAlignment = Alignment.Center,
         ) {
           val thumbnail = maybeThumbnail
-          if (thumbnail != null) {
+          if (file.drawsFromOriginal) {
+            Thumbnail(file, ContentScale.Crop)
+          } else if (thumbnail != null) {
             Image(thumbnail, contentDescription = file.fileName, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
           } else if (file.maybeThumbnail == null) {
             Icon(

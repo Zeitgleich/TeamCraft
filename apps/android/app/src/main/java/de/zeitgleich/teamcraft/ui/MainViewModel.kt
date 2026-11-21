@@ -1579,7 +1579,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   private suspend fun prepared(file: PickedFile): PickedFile {
     val isSendingMotion = MediaPrefs.prefs(getApplication()).isSendingMotion
     val maybeLimits = if (isSendingMotion) runCatching { graph.core.core().motionLimits() }.getOrNull() else null
-    return withMotion(getApplication(), withVideoPoster(file), maybeLimits, isSendingMotion)
+    return withMotion(getApplication(), withPictureThumbnail(withVideoPoster(file)), maybeLimits, isSendingMotion)
   }
 
   /**
