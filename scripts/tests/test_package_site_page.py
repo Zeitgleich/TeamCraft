@@ -272,11 +272,25 @@ class RenderTest(unittest.TestCase):
         self.assertIn("<span>TestFlight</span>", html)
         card = self.ios_card(self.render({"APP_STORE_URL": app_store}))
         self.assertIn(f'href="{app_store}"', card)
-        self.assertIn("Download on the App Store</a>", card)
+        self.assertIn('alt="Download on the App Store"', card)
+        self.assertIn('src="badges/app-store-badge.svg"', card)
         self.assertNotIn("TestFlight", card)
         card = self.ios_card(self.render({"APP_STORE_URL": app_store, "TESTFLIGHT_URL": testflight}))
-        self.assertIn(f'class="button button-primary store" href="{app_store}"', card)
+        self.assertIn(f'class="store-badge store-badge-app-store" href="{app_store}"', card)
         self.assertIn(f'<a href="{testflight}"', card)
+        self.assertEqual(page.check_links(self.site, SITE_URL), [])
+
+    def test_the_android_card_shows_the_google_play_badge_when_listed(self):
+        self.add_release("stable", "v1.0.0")
+        play = "https://play.example.com/store/apps/details?id=app"
+        self.assertNotIn("google-play-badge", self.render())
+        html = self.render({"PLAY_STORE_URL": play})
+        self.assertIn(f'<a class="store-badge store-badge-play" href="{play}"', html)
+        self.assertIn('alt="Get it on Google Play"', html)
+        self.assertIn("trademarks of Google LLC", html)
+        self.assertIn("trademarks of Apple Inc", html)
+        for badge in ("badges/google-play-badge.png", "badges/app-store-badge.svg"):
+            self.assertTrue((self.site / badge).is_file())
         self.assertEqual(page.check_links(self.site, SITE_URL), [])
 
     def ios_card(self, html):

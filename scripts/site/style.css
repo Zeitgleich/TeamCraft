@@ -2250,6 +2250,35 @@ svg {
   align-self: flex-start;
 }
 
+/* Official store badges, unmodified. The badge itself is 40px high in both: Apple's artwork is
+   trimmed to the badge, Google's PNG carries a transparent margin of a quarter of the badge's
+   height (its required clear space), so the image is 250/168 as high. Apple's clear space is a
+   tenth of the height. */
+.store-badge {
+  align-self: flex-start;
+  display: inline-block;
+  line-height: 0;
+  border-radius: 8px;
+}
+
+.store-badge-app-store {
+  margin: 4px 0;
+}
+
+.store-badge img {
+  display: block;
+  max-width: 100%;
+  width: auto;
+}
+
+.store-badge-app-store img {
+  height: 40px;
+}
+
+.store-badge-play img {
+  height: 59.5px;
+}
+
 .more {
   margin-top: auto;
   border-top: 1px solid var(--border);
