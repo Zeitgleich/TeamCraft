@@ -85,6 +85,11 @@ Wayland test checklist is [linux/MANUAL-TEST.md](linux/MANUAL-TEST.md).
   its plugin added to `PLUGINS`. Compile- and link-checked in CI only; whether the relocated framework finds its plugins at
   runtime needs a real Mac, and without it video falls back to OpenH264. The disable-library-validation
   entitlement is for the bundled framework.
+- Both dmgs include WebRTC echo cancellation, built from source with Meson. The Intel build is
+  cross-compiled on Apple silicon; `scripts/meson-cross/meson` (first on PATH in the release job)
+  hands Meson the cross file `scripts/meson-cross/x86_64-apple-darwin.ini`, which the
+  `webrtc-audio-processing-sys` build script itself doesn't pass (#197). The job checks that the
+  executable links the audio processing for its architecture.
 - The app is signed inside out and checked before the dmg is made from it (`macos/sign-app.sh`,
   `macos/make-dmg.sh`, `macos/verify-app.sh`): ad hoc without a Developer ID, with it (secrets listed in
   `docs/release.md`) also notarized and stapled (`macos/notarize.sh`). Only the Developer ID signature

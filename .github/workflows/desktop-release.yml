@@ -233,19 +233,15 @@ jobs:
             title: Apple silicon
             # Asset name suffix, as the Tauri bundler names macOS packages: TeamCraft_<version>_<arch>.dmg.
             arch: aarch64
-            rustflags: "--cfg teamcraft_audio_processing --cfg teamcraft_audio_processing_bundled"
-          # WebRTC audio processing is built with Meson for the host architecture only, so the
-          # cross-compiled Intel build goes without echo cancellation (#197).
+          # WebRTC audio processing (echo cancellation) is built with Meson; for the cross-compiled
+          # Intel build, scripts/meson-cross gives Meson an x86_64 cross file (#197).
           - target: x86_64-apple-darwin
             title: Intel
             arch: x64
-            rustflags: ""
     # Xcode 27 (macOS 27 SDK), the same image as the iOS jobs; the deployment target below keeps
     # macOS 14+ running.
     runs-on: xcode-27
     env:
-      # Overrides the workflow-wide flags per architecture (see the matrix).
-      RUSTFLAGS: ${{ matrix.rustflags }}
       # Current macOS and the two releases before it (26 Tahoe, 15 Sequoia, 14 Sonoma).
       MACOSX_DEPLOYMENT_TARGET: "14.0"
       # rustc skips dsymutil when it strips: it writes the dSYM unstripped, and "Split off the dSYM"
@@ -273,8 +269,12 @@ jobs:
           else version="$(scripts/check-versions.sh)"; debug_version="$version+${GITHUB_SHA::7}"; fi
           echo "TEAMCRAFT_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
           echo "TEAMCRAFT_DEBUG_FILES_VERSION=$debug_version" >> "$GITHUB_ENV"
+      # The wrapper in scripts/meson-cross goes in front of Homebrew's meson: it adds the x86_64 cross
+      # file when the Intel build's audio processing runs `meson setup` (and nothing for Apple silicon).
       - name: Meson and ninja (build WebRTC audio processing)
-        run: brew install meson ninja pkg-config
+        run: |
+          brew install meson ninja pkg-config
+          echo "$GITHUB_WORKSPACE/scripts/meson-cross" >> "$GITHUB_PATH"
       # The official universal GStreamer: development files to link against, and the runtime that is
       # bundled into the app for VideoToolbox hardware encoding (thinned to the build's architecture).
       # (The Homebrew casks are disabled, so the packages come from gstreamer.freedesktop.org, pinned by hash.)
@@ -335,6 +335,12 @@ jobs:
         shell: bash
         if: ${{ !inputs.warm-cache }}
         run: scripts/check-embedded-ui.sh
+      # Echo cancellation is in the executable, built for its architecture (#197).
+      - name: The build has echo cancellation
+        if: ${{ !inputs.warm-cache }}
+        run: >
+          scripts/meson-cross/check-audio-processing.sh
+          target/${{ matrix.target }}/release/teamcraft-desktop ${{ matrix.target }}
       # The dSYM and the executable carry the same UUID, which stripping, install_name_tool and
       # codesign leave alone. `strip -S -x` drops the debug map and the local symbols, as Cargo's
       # `strip = "symbols"` did.
