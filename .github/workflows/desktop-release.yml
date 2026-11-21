@@ -545,13 +545,15 @@ jobs:
       # build): a placeholder stands in for the bundle, so only the desktop crate itself is compiled
       # again once the real one has arrived. Same command, config, target and flags as the build
       # below, or the dependencies would be compiled twice.
+      # PowerShell, like the build below: under bash the OpenSSL build finds Git's Perl, which lacks
+      # modules its Configure needs.
       - name: Compile the dependencies (placeholder UI)
         if: ${{ !inputs.warm-cache || steps.rust-cache.outputs.cache-hit != 'true' }}
-        shell: bash
+        shell: pwsh
         working-directory: apps/desktop
         run: |
-          mkdir -p ../../crates/teamcraft-ui/dist
-          echo '<!doctype html><title>teamcraft-ui-build-pending</title>' > ../../crates/teamcraft-ui/dist/index.html
+          New-Item -ItemType Directory -Force ../../crates/teamcraft-ui/dist | Out-Null
+          Set-Content -NoNewline -Path ../../crates/teamcraft-ui/dist/index.html -Value '<!doctype html><title>teamcraft-ui-build-pending</title>'
           cargo tauri build --config tauri.models.conf.json --config tauri.prebuilt-ui.conf.json --target ${{ matrix.target }} --no-bundle
       # The UI bundle from the ui job (this job doesn't `needs: ui`, see above); tauri.prebuilt-ui.conf.json
       # drops the trunk build from beforeBuildCommand.
