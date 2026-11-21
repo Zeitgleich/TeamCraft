@@ -131,13 +131,24 @@ verify_on_backend() {
   shift
   listing="$(backend_debug_ids)" || { warn "could not list the debug files of the crash reports backend"; return 0; }
   for file in "$@"; do
-    id="$("$SENTRY_CLI" debug-files check --json "$file" | json_field debug_id | tr '[:upper:]' '[:lower:]')"
+    id="$("$SENTRY_CLI" debug-files check --json "$(checkable_path "$file")" | json_field debug_id | tr '[:upper:]' '[:lower:]')"
     [ -n "$id" ] || continue
     grep -qx -- "$id" <<<"$listing" || missing+=("$(basename "$file") $id")
   done
   if [ "${#missing[@]}" -gt 0 ]; then
     warn "the crash reports backend did not keep debug files of $label: ${missing[*]} (docs/crash-reports.md, \"Reading an iOS report\")"
   fi
+}
+
+# `debug-files check` reads one file, not a bundle: a .dSYM is checked through the DWARF file inside
+# it (one architecture per build, so one file). Everything else is checked as it is.
+checkable_path() {
+  local file="$1" inner
+  if [ -d "$file" ]; then
+    inner="$(find "$file/Contents/Resources/DWARF" -type f 2>/dev/null | head -n 1)"
+    [ -n "$inner" ] && file="$inner"
+  fi
+  printf '%s\n' "$file"
 }
 
 # The debug IDs of the newest 100 debug files on the backend, lower case, one per line.
@@ -183,7 +194,7 @@ store_in_bucket() {
 # Uploads one debug file under its platform's key; prints its index line.
 store_file() {
   local file="$1" check kind id name key zip
-  check="$("$SENTRY_CLI" debug-files check --json "$file")" || return 1
+  check="$("$SENTRY_CLI" debug-files check --json "$(checkable_path "$file")")" || return 1
   kind="$(json_field type <<<"$check")"
   # A stripped library (a prebuilt one next to ours) has nothing to symbolize with.
   if ! grep -Eq '"features": *"[^"]*(symtab|debug)' <<<"$check"; then
