@@ -2,7 +2,6 @@
 <resources>
   <!-- As values-v31, on the dark background. -->
   <style name="Theme.TeamCraft" parent="android:Theme.Material.NoActionBar">
-    <item name="android:statusBarColor">#101010</item>
     <item name="android:windowBackground">#161616</item>
     <item name="android:windowSplashScreenBackground">#161616</item>
     <item name="android:windowSplashScreenAnimatedIcon">@drawable/splash_mark</item>

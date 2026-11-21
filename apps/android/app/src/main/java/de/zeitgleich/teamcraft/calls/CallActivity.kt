@@ -80,6 +80,7 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import de.zeitgleich.teamcraft.ui.avatarColor
+import de.zeitgleich.teamcraft.ui.screens.fullScreenCutoutMode
 import de.zeitgleich.teamcraft.ui.MainActivity
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
@@ -706,7 +707,7 @@ private fun ImmersiveWindow() {
     val maybeCutoutMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) window.attributes.layoutInDisplayCutoutMode else null
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
       window.attributes = window.attributes.apply {
-        layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        layoutInDisplayCutoutMode = fullScreenCutoutMode()
       }
     }
     val controller = WindowCompat.getInsetsController(window, view)
