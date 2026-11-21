@@ -6751,7 +6751,9 @@ apps record at all. The admin guide (admin.md §3.13) says the same to whoever t
 Guests never record, whatever the policy says. The recording app checks the verified policy and its
 user's role before it starts and offers the button only to those allowed (admin.md §1.1); the
 desktop shell checks again itself (the verified policy, the verified admin roster and the guest
-flag) and clamps the length to the policy, whatever the page asked; every
+flag) and clamps the length to the policy, whatever the page asked (in the browser the page and its
+call module are one app: the page's check is the check, and the module clamps the length to the
+policy's range); every
 other app checks the same rule for each recording it is told of and says so when the recorder isn't
 allowed ("Your organization's policy doesn't allow this recording"). That check takes the policy
 from the signature and the recorder's role from the server's guest flag and admin list: a server
@@ -6810,9 +6812,9 @@ group can't be recorded any more by anybody, because they send nothing.
 - The call screen shows a persistent "Recording" indicator in the header with who records, and the
   recorders' tiles carry a recording mark. It can't be closed while a recording runs.
 - When a recording starts, every app says so once: a banner ("Alice started recording this call")
-  read out by screen readers, and in the desktop and phone apps (their native call engine) a short
-  rising tone that plays even when the call's status sounds are off (it is a notice, not a status
-  sound). The browser shows the banner without the tone.
+  read out by screen readers, and a short rising tone that plays even when the call's status
+  sounds are off (it is a notice, not a status sound). The browser's call engine mixes it into the
+  call's playback like the native ones (`call_cues`, shared).
 - Who joins while a recording runs gets the SFU's stored notices with the join and sees a banner
   "This call is being recorded by Alice" with "Leave call" next to "Continue". Objecting means
   leaving: whoever leaves is no longer in the DAVE group and can't be recorded from then on.
@@ -6820,8 +6822,7 @@ group can't be recorded any more by anybody, because they send nothing.
   person's audio out of a recording, are a later step (#2115).
 
 **What is recorded, and where it goes.** In this version the desktop app (Windows, macOS, Linux)
-records; the browser, the Android and the iOS app show the notices but don't record yet (the
-browser: #2114).
+and the browser (#2114) record; the Android and the iOS app show the notices but don't record yet.
 
 - **Content:** audio only: the mix this device plays (everybody it hears) and its own microphone
   while unmuted, at 48 kHz mono, Opus at 32 kbit/s in an Ogg file (`teamcraft-media::call_recording`,
@@ -6858,6 +6859,28 @@ browser: #2114).
   recorder sees the error. What the recording device protects this way is the disk: anybody who
   reads it while the recording waits (a backup, another account, a stolen laptop) gets nothing; a
   compromised app process can read the plaintext anyway, as it has the call's media.
+- **In the browser** (`teamcraft-media::call_web::recording`, the call module): the same mix and
+  format, from the same parts (`call_recording_parts`: the mix, the length limit, `ogg_opus`); the
+  own voice is the samples the call's encoder gets while the microphone is on, not decoded back
+  from the Opus frames. WebCodecs encodes (no FEC, no DTX, as on the desktop). The file is sealed
+  as it is written in the same format, under a key held only in the page's memory:
+  - It grows in the origin private file system (OPFS), in a folder of the page's own, in pieces of
+    64 KiB; at most 1 MiB waits for the file and a second of frames for the encoder, beyond which
+    frames are dropped rather than queued. A browser without a writable OPFS (Safari before 26, a
+    private window) keeps the sealed file in memory instead, at most 32 MiB, and stops the recording
+    after two hours (the take says so).
+  - Each page holds a Web Lock named after its folder for as long as it lives. A page closed,
+    reloaded or discarded while recording (or with a take waiting) loses it: the key died with the
+    page. The next call module of the origin deletes the folders whose lock nobody holds; without
+    Web Locks it deletes none of other pages, as it can't tell whether they still run.
+  - **Posting** decrypts the take, slice by slice, into a copy next to it, which the page hands the
+    client core like a picked file (`FileSource::Picked`); the core keeps its own copy in IndexedDB
+    for a reload, as for every picked attachment, and that copy is plaintext like the desktop's
+    staged one (§4.5). The sealed file is deleted. Copies for posting stay in the page's folder
+    until the user signs out, the app moves to another tab (both delete the folder) or the page
+    is gone (the next sweep).
+  - Signing out, and the app moving to another tab (the call module stops), cancel a running
+    recording and delete the take.
 - **Afterwards:** the app offers "Post to the conversation" or "Delete". Posting sends the file as
   an attachment into the call's conversation (§4.5): encrypted with a fresh key, which goes to the
   conversation's members through MLS like every message; retention applies to it like to any

@@ -86,8 +86,9 @@ pub struct CallSnapshot {
   /// first; the page takes each once (`CallReportGate`) and sends it with the crash reports.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub call_reports: Vec<crate::crash_reporting::CallReport>,
-  /// This app records calls (the desktop shell; e2ee.md §8.3). The browser's call module doesn't
-  /// yet, and older shells don't say: no record button there.
+  /// This app records calls (the desktop shell, and the browser's call module where the browser
+  /// has WebCodecs, #2114; e2ee.md §8.3). Older shells and modules don't say: no record button
+  /// there.
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub can_record: bool,
   /// A finished recording waiting for the user to post or delete it.

@@ -11,6 +11,7 @@
 #![cfg(target_arch = "wasm32")]
 
 mod effects;
+mod recording;
 mod ringtone;
 mod screen_preview;
 
@@ -99,6 +100,8 @@ struct Host {
   last_sent: RefCell<String>,
   /// The segmentation model and the last background, for the session (#439).
   effects: effects::Effects,
+  /// This device's recording of the call and its take (e2ee.md §8.3, #2114).
+  recordings: recording::Recordings,
 }
 
 /// The page's functions (see `page_calls`).
@@ -230,6 +233,8 @@ enum Control {
     maybe_max_lines: Option<u16>,
   },
   StatusSounds(CallStatusSounds),
+  /// Hands the call's audio to a recording, or stops (e2ee.md §8.3).
+  Recording(Option<call_web::recording::WebRecordingSink>),
   NetworkChanged,
   VideoStats(oneshot::Sender<Option<VideoStatsReport>>),
   /// Time for the call's telemetry to sample the video stats ([`STATS_SAMPLE_INTERVAL`]).
@@ -284,6 +289,7 @@ pub fn start(callbacks: JsValue) -> Result<(), JsValue> {
     worklet_url,
     last_sent: RefCell::new(String::new()),
     effects: effects::Effects::default(),
+    recordings: recording::Recordings::new(),
   });
   HOST.with(|slot| *slot.borrow_mut() = Some(host.clone()));
   spawn_local(watch_permissions(Rc::downgrade(&host)));
@@ -510,7 +516,20 @@ pub async fn stop() {
   if let Some(host) = maybe_host {
     host.end_preview(false);
     host.leave().await;
+    // A recording and its take go with the session (or with the app, to another tab).
+    host.recordings.sign_out().await;
   }
+}
+
+/// The finished call recording decrypted (a `Blob`, an Ogg file), for the page to post into the
+/// call's conversation as a picked file. The take is no longer offered once this resolves; on a
+/// failure (`ActionFailure` wire text) it stays offered.
+#[wasm_bindgen]
+pub async fn recording_file() -> Result<web_sys::Blob, JsValue> {
+  let host = host()?;
+  let result = host.recordings.file_for_post().await;
+  host.changed();
+  result.map_err(failure_value)
 }
 
 impl Host {
@@ -835,12 +854,12 @@ impl Host {
       CallAction::TestSpeakers { .. } => {
         return Err(ActionFailure::other("the page plays the speaker test itself"));
       },
-      // The browser doesn't record calls yet (e2ee.md §8.3): its snapshot says `can_record`
-      // false, so the UI offers none of these.
-      CallAction::StartRecording { .. } => {
-        return Err(ActionFailure::other("this app doesn't record calls"));
+      CallAction::StartRecording { max_secs } => self.start_recording(max_secs).await?,
+      CallAction::StopRecording => self.stop_recording().await?,
+      CallAction::DiscardRecording => {
+        self.recordings.discard().await;
+        self.changed();
       },
-      CallAction::StopRecording | CallAction::DiscardRecording => {},
       CallAction::Unknown => return Err(ActionFailure::other("unknown call action")),
     }
     Ok(None)
@@ -848,6 +867,62 @@ impl Host {
 
   async fn leave(&self) {
     self.end_media(Control::Leave).await;
+  }
+
+  /// Starts recording the active call on this device (e2ee.md §8.3); the call tells everybody in
+  /// it. The page offers it only where the verified policy allows the user; the length is clamped
+  /// to what a policy may allow.
+  async fn start_recording(self: &Rc<Self>, max_secs: u32) -> Result<(), ActionFailure> {
+    if !recording::Recordings::can_record() {
+      return Err(ActionFailure::other("this browser can't record calls"));
+    }
+    let maybe_conversation = self
+      .state
+      .borrow()
+      .view
+      .maybe_active
+      .as_ref()
+      .map(|active| active.conversation);
+    let Some(conversation) = maybe_conversation.filter(|_| self.maybe_media.borrow().is_some()) else {
+      return Err(ActionFailure::other("no call to record"));
+    };
+    let host = Rc::downgrade(self);
+    // At its maximum length, or when the browser can't write any more: the take is kept, the
+    // others are told it stopped (the call's loop sees it ended).
+    let on_end = Box::new(move || {
+      if let Some(host) = host.upgrade() {
+        spawn_local(async move { host.finish_recording().await });
+      }
+    });
+    let (sink, own) = self.recordings.start(conversation, max_secs, on_end).await?;
+    // The call may have ended while the file opened: its end finishes the recording.
+    if self.maybe_media.borrow().is_none() {
+      self.finish_recording().await;
+      return Err(ActionFailure::other("the call ended"));
+    }
+    self.control(Control::Recording(Some(sink)));
+    self.update_active(|active| active.maybe_own_recording = Some(own));
+    Ok(())
+  }
+
+  /// Stops the recording; its take waits for the user to post or delete it. Fails when the browser
+  /// couldn't write it (nothing to keep then).
+  async fn stop_recording(&self) -> Result<(), ActionFailure> {
+    self.control(Control::Recording(None));
+    self.update_active(|active| active.maybe_own_recording = None);
+    let finished = self.recordings.finish().await;
+    self.changed();
+    finished
+  }
+
+  /// Finishes a recording that ended by itself, or with the call; a failure is shown.
+  async fn finish_recording(&self) {
+    self.control(Control::Recording(None));
+    self.update_active(|active| active.maybe_own_recording = None);
+    if let Err(failure) = self.recordings.finish().await {
+      self.report(&failure);
+    }
+    self.changed();
   }
 
   /// Measures the link to the SFU before the call (#1959), in the background: once per pre-join
@@ -1678,8 +1753,11 @@ impl Host {
     }
   }
 
-  /// The call task ended (left, or lost for good).
-  fn finish(&self, result: Result<(), WebCallError>) {
+  /// The call task ended (left, or lost for good). A recording ends with it; its take stays for
+  /// the user (e2ee.md §8.3).
+  fn finish(self: &Rc<Self>, result: Result<(), WebCallError>) {
+    let host = Rc::clone(self);
+    spawn_local(async move { host.finish_recording().await });
     {
       let mut state = self.state.borrow_mut();
       if let Err(WebCallError::ConnectionLost) = result {
@@ -1726,9 +1804,8 @@ impl Host {
         maybe_camera_fallback: None,
         maybe_this_device: state.view.maybe_this_device,
         call_reports: state.view.call_reports.clone(),
-        // Recording is the desktop app's for now (e2ee.md §8.3).
-        can_record: false,
-        maybe_recording_take: None,
+        can_record: recording::Recordings::can_record(),
+        maybe_recording_take: self.recordings.take(),
       }
     };
     let Ok(json) = serde_json::to_string(&snapshot) else {
@@ -1894,6 +1971,7 @@ async fn apply(call: &WebCall, control: Control) {
       maybe_max_lines,
     } => call.set_video_quality(stream_id, maybe_max_lines),
     Control::StatusSounds(sounds) => call.set_status_cues(status_cues(sounds)),
+    Control::Recording(maybe_sink) => call.set_recording(maybe_sink),
     Control::NetworkChanged => call.network_changed(),
     Control::VideoStats(done) => drop(done.send(call.video_stats().await)),
     Control::TelemetrySample | Control::Leave | Control::HangUp => {},

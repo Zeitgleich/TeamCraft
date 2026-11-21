@@ -45,6 +45,8 @@ web = [
   "dep:futures",
   "dep:wasm-bindgen-futures",
   "dep:zune-jpeg",
+  # The random key and nonce of a call recording's sealed file (#2114).
+  "dep:rand_core",
 ]
 # Only the bindings of the browser APIs (`web_api`: WebCodecs, WebTransport) without the call
 # engine: the desktop webview decodes the shell's video with them.

@@ -17,8 +17,8 @@ Write down for every run: date, server and SFU version, app versions and platfor
 
 - [ ] With "Nobody", no device shows a record button in a call.
 - [ ] A sets "Owners and admins": A's desktop app shows "Record"; B's doesn't.
-- [ ] A sets "Everybody except guests": B's desktop app shows it; a guest in a meeting never does;
-  the browser never does (it doesn't record yet).
+- [ ] A sets "Everybody except guests": B's desktop app and B in the browser (Chrome, Firefox,
+  Safari 26) show it; a guest in a meeting never does.
 - [ ] The longest recording can be set to 30 minutes to 8 hours; it is greyed out while recording
   is off.
 
@@ -52,7 +52,34 @@ Write down for every run: date, server and SFU version, app versions and platfor
   doesn't start with `OggS` (it is encrypted, #2129); `strings` shows nothing readable. Posting still
   gives B a file that plays, and afterwards `call-recordings` is empty.
 
-## 4. Logs
+## 4. In the browser (#2114)
+
+B records in the browser; repeat in Chrome, Firefox and Safari.
+
+- [ ] B starts recording: A and C see "Recorded by B" and hear the rising tone; B's own browser
+  plays the tone when A starts recording too.
+- [ ] B records two minutes, talking and muting in between, then stops: the card shows the length
+  and size (about 240 kB a minute). "Post to conversation" posts an `.ogg` that A plays: everybody,
+  B included except while muted.
+- [ ] DevTools → Application → Storage (Chrome) while recording: the origin private file system
+  has `teamcraft-call-recordings/<page>/recording-0`, growing about every 16 seconds, never
+  starting with `OggS`. After posting, the sealed file is gone (a `post-…` copy stays until
+  sign-out).
+- [ ] B switches microphone and speakers while recording: the recording goes on (a moment of
+  silence at most).
+- [ ] B puts the tab in the background for five minutes while recording: the recording has no gap.
+- [ ] B reloads the tab while recording: A and C see the recording end when B's device leaves the
+  call; after the reload there is no card, and the next call module start removes the old folder
+  (Application → Storage).
+- [ ] B records in a Firefox private window (no OPFS): it records in memory; with the longest
+  recording set above two hours, it stops after two hours and the card says the browser can't keep
+  more.
+- [ ] B leaves the call while recording: A and C see it stop; B gets the card.
+- [ ] B signs out with a take waiting: the take and B's folder are gone.
+- [ ] Two tabs of B's account: the recording runs in the active tab; making the other tab active
+  (the app moves) ends it and deletes the take.
+
+## 5. Logs
 
 - [ ] The desktop log has "call recording started" and "call recording finished" with the length,
   never the file name or path. The SFU log shows nothing about recordings at `info`.

@@ -814,6 +814,10 @@ pub struct CallRecordingTake {
   /// It stopped at the policy's maximum length, not by the user.
   #[serde(default)]
   pub is_at_limit: bool,
+  /// It stopped at the longest recording a browser without a writable private file system keeps
+  /// in memory (#2114), before the policy's maximum.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_at_memory_limit: bool,
 }
 
 /// Why this device has no media keys in its call, and when joining again may help.
