@@ -26,7 +26,7 @@ SWIFT = [
     (re.compile(r"\.sync\s*\{|\.sync\(execute"), "DispatchQueue.sync waits for the queue"),
     (re.compile(r"\bDispatchSemaphore\b|\b\w*(?:semaphore|Semaphore)\.wait\("), "a semaphore waits"),
     (re.compile(r"\b\w*(?:group|Group)\.wait\("), "DispatchGroup.wait waits"),
-    (re.compile(r"\bThread\.sleep\b|\busleep\(|(?<![\w.])sleep\("), "sleeping blocks the thread"),
+    (re.compile(r"\bThread\.sleep\b|\busleep\(|(?<![\w.])(?<!await )sleep\("), "sleeping blocks the thread"),
     (re.compile(r"\.acquire\(timeout:"), "ProcessLock.acquire waits for the other process"),
     (re.compile(r"\.currentAccessToken\("), "the token read waits for a refresh"),
     (re.compile(r"\bcore\.suspend\(\)|\.suspend\(\)\s*$"), "the core's suspend waits for its threads"),
