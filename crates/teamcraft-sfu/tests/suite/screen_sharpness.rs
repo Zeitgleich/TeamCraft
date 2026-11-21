@@ -745,6 +745,16 @@ pub(crate) async fn wait_until_secured(call: &mut NativeCall) {
 }
 
 pub(crate) async fn join(sfu: SocketAddr, certificate_hash: [u8; 32], device: i64, other: i64) -> NativeCall {
+  join_with(sfu, certificate_hash, device, &[other]).await
+}
+
+/// [`join`] with several others in the call.
+pub(crate) async fn join_with(
+  sfu: SocketAddr,
+  certificate_hash: [u8; 32],
+  device: i64,
+  others: &[i64],
+) -> NativeCall {
   let engine = CallEngineConfig {
     user_id: id(device),
     device_id: id(device),
@@ -762,7 +772,7 @@ pub(crate) async fn join(sfu: SocketAddr, certificate_hash: [u8; 32], device: i6
   let sfu_url = format!("https://{sfu}{CALL_PATH}");
   let mut config = NativeCallConfig::new(sfu_url, format!("dev:14:{device}:{device}"), engine);
   config.maybe_certificate_hash = Some(certificate_hash);
-  config.maybe_trusted_roster = Some(vec![id::<DeviceId>(other)]);
+  config.maybe_trusted_roster = Some(others.iter().map(|other| id::<DeviceId>(*other)).collect());
   // The call's sound: what both estimates measure before the share.
   config.source = AudioSource::Tone {
     frequency_hz: 440.0,
@@ -772,9 +782,14 @@ pub(crate) async fn join(sfu: SocketAddr, certificate_hash: [u8; 32], device: i6
 }
 
 pub(crate) async fn start_sfu() -> (u16, [u8; 32]) {
+  start_sfu_with(SfuConfig::default()).await
+}
+
+/// [`start_sfu`] with `config`, on any free port.
+pub(crate) async fn start_sfu_with(config: SfuConfig) -> (u16, [u8; 32]) {
   let config = SfuConfig {
     bind_addr: SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
-    ..SfuConfig::default()
+    ..config
   };
   let identity = Identity::self_signed(["localhost", "127.0.0.1", "::1"]).unwrap();
   let sfu = Sfu::bind(config, identity, Arc::new(DevTokenVerifier)).unwrap();

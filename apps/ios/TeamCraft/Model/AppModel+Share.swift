@@ -32,12 +32,52 @@ extension AppModel {
 
   /// Where a share can go: conversations the user may post in, each with its last activity.
   func shareTargets() async -> [ConversationItem] {
-    (try? await core().shareTargets()) ?? []
+    await loadShareTargets() ?? []
+  }
+
+  /// The same, `nil` when the core couldn't answer (not started, store closed).
+  func loadShareTargets() async -> [ConversationItem]? {
+    try? await core().shareTargets()
+  }
+
+  /// How long a share picked for a conversation waits for the conversations after a cold start
+  /// before the app's picker takes over.
+  private static let destinationWait: Duration = .seconds(10)
+
+  /// A share whose conversation was picked in the extension (#1037) goes straight into that
+  /// composer, once the conversation is known to take posts; otherwise the app's picker asks again.
+  /// Runs again on every change (`RootView`), so the first catch-up after a cold start counts.
+  func routeWaitingShare() async {
+    guard let share = waitingShare, let destination = share.maybeConversationId else { return }
+    var hasWaitedEnough = false
+    while true {
+      let targetIds = Set((await loadShareTargets() ?? []).map(\.id))
+      guard !Task.isCancelled, waitingShare?.id == share.id, waitingShare?.maybeConversationId == destination else {
+        return
+      }
+      switch ShareDestinationRoute.decide(
+        destination: destination, targetIds: targetIds, hasWaitedEnough: hasWaitedEnough)
+      {
+      case .open(let conversationId):
+        sendShare(share, to: conversationId)
+        return
+      case .pick:
+        // Only in memory: the folder keeps the choice, and the next look decides again.
+        waitingShare?.maybeConversationId = nil
+        isShareDestinationGone = true
+        return
+      case .wait:
+        try? await Task.sleep(for: Self.destinationWait)
+        if Task.isCancelled { return }
+        hasWaitedEnough = true
+      }
+    }
   }
 
   /// The picker's choice: the conversation opens with its composer filled in.
   func sendShare(_ share: StagedShare, to conversationId: String) {
     shareImportError = nil
+    isShareDestinationGone = false
     shareHandover = ShareHandover(conversationId: conversationId, share: share)
     waitingShare = nil
     openConversationId = conversationId
@@ -45,6 +85,7 @@ extension AppModel {
 
   func discardShare(_ share: StagedShare) {
     shareImportError = nil
+    isShareDestinationGone = false
     ShareInbox.shared()?.delete(share.id)
     loadWaitingShare()
   }
@@ -65,7 +106,13 @@ extension AppModel {
     var maybeError: AttachmentError?
     for file in handover.share.files {
       do {
-        files.append(try importer.importPickedMedia(PickedMedia(url: inbox.url(of: file, in: handover.share))))
+        var picked = try importer.importPickedMedia(PickedMedia(url: inbox.url(of: file, in: handover.share)))
+        // A Live Photo shared as its bundle brings its motion (#2181), converted here, not in the
+        // extension's tight memory.
+        if let motion = picked.maybeMotion {
+          picked.maybeMotion = await LivePhotoMotion.prepared(motion, limits: await motionLimits())
+        }
+        files.append(picked)
       } catch let error as AttachmentError {
         failed.append(file)
         maybeError = error
@@ -82,6 +129,8 @@ extension AppModel {
       rest.text = ""
       rest.files = failed
       rest.leftOut = 0
+      // The app's picker comes back with them and says why, instead of the same composer again.
+      rest.maybeConversationId = nil
       try? inbox.commit(rest)
     }
     shareImportError = maybeError

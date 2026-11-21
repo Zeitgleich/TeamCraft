@@ -187,9 +187,9 @@ the Flatpak SDK's Rust has no wasm32 target), then the app inside the GNOME SDK.
 passes) the manifest keeps the cargo target and home in flatpak-builder's ccache directory, so a
 rebuild compiles only what changed.
 
-In the release workflow (`desktop-release.yml`) the Flatpak jobs restore the flatpak-builder state
-that the warm-up on `main` (`desktop-cache.yml`) saved, keyed on `Cargo.lock` and this manifest; the
-warm-up drops the workspace crates from the cargo target before saving, like rust-cache.
+The release workflow doesn't build the Flatpak: it only checked that the manifest builds, took
+about as long as everything else together and cost 2.6 GB of the Actions cache (#176). Flathub
+builds it from this manifest once the app is submitted there (docs/updates.md §6).
 
 ### Permissions
 

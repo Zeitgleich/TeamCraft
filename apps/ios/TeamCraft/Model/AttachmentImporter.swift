@@ -38,7 +38,7 @@ struct AttachmentImporter {
   private func copy(from rawSource: URL, move: Bool) throws -> PickedFile {
     let source = try Self.singleFile(in: rawSource)
     defer {
-      // A bundle's other parts (the motion video) are not sent; the emptied wrapper goes with it.
+      // The emptied wrapper of a bundle goes once its still picture and its motion are out.
       if move, source != rawSource { try? FileManager.default.removeItem(at: rawSource) }
     }
     let size = (try? source.resourceValues(forKeys: [.fileSizeKey]))?.fileSize.map { Int64($0) } ?? 0
@@ -58,7 +58,26 @@ struct AttachmentImporter {
       throw AttachmentError.unreadable
     }
     let file = compatiblePicture(at: target) ?? target
-    return PickedFile(fileName: file.lastPathComponent, mediaType: Self.mediaType(of: file), path: file.path)
+    var picked = PickedFile(fileName: file.lastPathComponent, mediaType: Self.mediaType(of: file), path: file.path)
+    // A Live Photo shared as its bundle (#2181): its motion video goes beside the picture, as it
+    // came; `LivePhotoMotion.prepared` converts it (or drops it) before sending.
+    if move, source != rawSource, let movie = Self.pairedMovie(in: rawSource) {
+      let motion = folder.appendingPathComponent(
+        (name as NSString).deletingPathExtension + "-motion." + movie.pathExtension.lowercased())
+      if (try? FileManager.default.moveItem(at: movie, to: motion)) != nil {
+        picked.maybeMotion = PickedMotion(path: motion.path, mediaType: Self.mediaType(of: motion), maybeDurationMs: nil)
+      }
+    }
+    return picked
+  }
+
+  /// The motion video of a Live Photo bundle (`.pvt`), if it has one.
+  static func pairedMovie(in bundle: URL) -> URL? {
+    let entries = (try? FileManager.default.contentsOfDirectory(at: bundle, includingPropertiesForKeys: nil)) ?? []
+    return entries
+      .filter { UTType(filenameExtension: $0.pathExtension)?.conforms(to: .movie) == true }
+      .sorted { $0.lastPathComponent < $1.lastPathComponent }
+      .first
   }
 
   /// A HEIC or HEIF picture in the uploads folder as a JPEG next to it, which replaces it (#1588);

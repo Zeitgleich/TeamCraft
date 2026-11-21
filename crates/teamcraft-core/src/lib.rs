@@ -41,6 +41,7 @@ pub mod group_mentions;
 #[cfg(any(feature = "ui", feature = "service-worker"))]
 pub mod media_cache;
 pub mod mls_storage;
+pub mod motion_photo;
 pub mod notetaker;
 pub mod notified;
 pub mod notify_rules;

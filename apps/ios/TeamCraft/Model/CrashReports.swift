@@ -128,6 +128,14 @@ final class CrashReports {
       osVersion: Self.osVersion()
     )
     Perf.setRunning(true)
+    // Release builds report the app's blocking calls on the main thread, by call site only (#2184).
+    UiThreadGuard.shared.setReporter { callSite in
+      let event = Event(level: .warning)
+      event.message = SentryMessage(formatted: "ui-thread-wait: \(callSite)")
+      event.fingerprint = ["ui-thread-wait", callSite]
+      event.tags = ["call_site": callSite]
+      SentrySDK.capture(event: event)
+    }
     // The scope's user too, so every report path carries the installation ID and nothing else.
     SentrySDK.setUser(User(userId: settings.installationID))
     maybeRunning = settings
@@ -139,6 +147,7 @@ final class CrashReports {
     setSlowJobThresholdMs(thresholdMs: 0)
     traceStop()
     Perf.setRunning(false)
+    UiThreadGuard.shared.setReporter(nil)
     SentrySDK.close()
     maybeRunning = nil
     Self.log.info("crash reports off")

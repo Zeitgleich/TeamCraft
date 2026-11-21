@@ -9,6 +9,7 @@
 //! to re-read ([`EventListener`]).
 
 mod app_link;
+mod blocking;
 mod bridge;
 mod calls;
 mod channel_anchor;
@@ -30,6 +31,7 @@ mod media_viewer;
 mod meeting_hosts;
 mod meeting_lobby;
 mod meetings;
+mod motion;
 mod notetaker;
 #[cfg(any(target_os = "ios", test))]
 mod os_log;
@@ -150,6 +152,7 @@ pub use voice::{
 use crate::engine::{DrainGoal, Engine, EngineThreads, Job, PushOpening, PushReader};
 use crate::http_fetch::run_request;
 use crate::logging::{JobClock, LifecycleStep, outcome};
+use crate::motion::MotionLimitsItem;
 use crate::polls::PollLimitsItem;
 use crate::reads::{ReadQueue, Reads};
 use crate::store_threads::{
@@ -279,31 +282,39 @@ struct StoreRecovery {
 impl TeamCraft {
   /// Opens the encrypted store of `config.account` and the client if this device is enrolled. A
   /// store this version can't read is no error here: [`Self::account_state`] says so, and
-  /// [`Self::reset_store`] sets it aside.
+  /// [`Self::reset_store`] sets it aside. Async because opening waits on the disk (WAL recovery,
+  /// upkeep, the catalog): it runs on a thread of its own, never the app's UI thread (#2184).
+  ///
+  /// A named constructor (`TeamCraft.open(…)`): Kotlin has no async primary constructor.
   #[uniffi::constructor]
-  pub fn new(
+  pub async fn open(
     config: AppConfig,
     tokens: Arc<dyn TokenProvider>,
     listener: Arc<dyn EventListener>,
   ) -> Result<Arc<Self>, TeamCraftError> {
-    logging::install();
-    outcome(LifecycleStep::Open, Self::open(config, tokens, None, listener))
+    blocking::off_thread("store-open", move || {
+      Self::open_blocking(config, tokens, listener)
+    })
+    .await
   }
 
-  /// [`Self::new`] for an app with a device key for DPoP proofs (e2ee.md §3.1.2): a token bound to that
+  /// [`Self::open`] for an app with a device key for DPoP proofs (e2ee.md §3.1.2): a token bound to that
   /// key goes with a proof, on every request and in the first frames.
   #[uniffi::constructor]
-  pub fn with_device_key(
+  pub async fn with_device_key(
     config: AppConfig,
     tokens: Arc<dyn TokenProvider>,
     device_key: Arc<dyn DeviceProofKey>,
     listener: Arc<dyn EventListener>,
   ) -> Result<Arc<Self>, TeamCraftError> {
-    logging::install();
-    outcome(
-      LifecycleStep::Open,
-      Self::open(config, tokens, Some(device_key), listener),
-    )
+    blocking::off_thread("store-open", move || {
+      logging::install();
+      outcome(
+        LifecycleStep::Open,
+        Self::open_store(config, tokens, Some(device_key), listener),
+      )
+    })
+    .await
   }
 
   /// The session's newest ID token, for the role evidence of workspace owners and admins (e2ee.md
@@ -431,29 +442,10 @@ impl TeamCraft {
   /// "Set up this device again" while the local data can't be read
   /// ([`AccountState::StoreUnreadable`], issue #414): sets the database and its log aside beside
   /// themselves (renamed, never deleted) and opens a new, empty store; the account state is then
-  /// `NeedsEnrollment`. Refused while the store is readable. Waits while the new store opens, like
-  /// the constructor: call it off the main thread.
-  pub fn reset_store(&self) -> Result<(), TeamCraftError> {
-    // Held throughout, so two resets can't run at once; `account_state` waits the moment it takes.
-    let mut recovery = self.recovery.lock().unwrap_or_else(PoisonError::into_inner);
-    let Some(unreadable) = recovery.as_ref() else {
-      return Err(TeamCraftError::InvalidInput(
-        "the local data is readable; nothing to reset".into(),
-      ));
-    };
-    engine::set_store_aside(&unreadable.start.store_path(), SystemClock.now_ms())?;
-    let spawned = engine::spawn(&unreadable.start, self.late_problem(), self.store_threads.hold());
-    let threads = spawned.map_err(|error| match error {
-      // A new, empty store that doesn't open: no room or no permission, not the old data.
-      engine::OpenError::Unreadable(_) => {
-        TeamCraftError::Storage("the new local database can't be read".into())
-      },
-      engine::OpenError::Failed(error) => error,
-    })?;
-    tracing::info!(target: logging::LIFECYCLE, step = ?LifecycleStep::ResetStore, "done");
-    *self.threads.write().unwrap_or_else(PoisonError::into_inner) = EngineSlot::Open(threads);
-    *recovery = None;
-    Ok(())
+  /// `NeedsEnrollment`. Refused while the store is readable. Async: it waits while the new store
+  /// opens, like the constructor, on a thread of its own (#2184).
+  pub async fn reset_store(self: Arc<Self>) -> Result<(), TeamCraftError> {
+    blocking::off_thread("store-reset", move || self.reset_store_now()).await
   }
 
   /// First run on this device: creates the identity, or recovers it with the passphrase if the
@@ -743,7 +735,9 @@ impl TeamCraft {
   /// open. Stops syncing; jobs already queued finish first. Until [`Self::resume`], calls are
   /// refused ([`TeamCraftError::EngineStopped`]) rather than opening the store behind the app's back
   /// (a screen reading in the background). What the store holds (outbox, drafts, the MLS state) is
-  /// on disk and stays. Waits a moment for the threads to let go: call it off the main thread.
+  /// on disk and stays. Waits a moment for the threads to let go (at most `MAX_STORE_CLOSE_WAIT`):
+  /// call it off the UI thread. Stays sync (#2184): iOS's background-time expiry handler must
+  /// return with the store closed and can't await, so it is the one caller that waits for it.
   pub fn suspend(&self) -> StoreSuspension {
     let closing = {
       let mut slot = self.threads.write().unwrap_or_else(PoisonError::into_inner);
@@ -771,10 +765,10 @@ impl TeamCraft {
   }
 
   /// Opens the local store again after [`Self::suspend`]: the app returned to the foreground or was
-  /// woken in the background. Nothing to do while it is open. Waits for the threads before to let
-  /// go of the store and while it opens, like the constructor: call it off the main thread.
-  pub fn resume(&self) -> Result<(), TeamCraftError> {
-    self.reopen().map(drop)
+  /// woken in the background. Nothing to do while it is open. Async: it waits for the threads
+  /// before to let go of the store and while it opens, on a thread of its own (#2184).
+  pub async fn resume(self: Arc<Self>) -> Result<(), TeamCraftError> {
+    blocking::off_thread("store-resume", move || self.reopen().map(drop)).await
   }
 
   /// Channels of every space and the user's DMs, as the sidebar lists them.
@@ -888,6 +882,13 @@ impl TeamCraft {
   /// (issue #2120). The poll dialog's fields and checks use it.
   pub async fn poll_limits(&self) -> Result<PollLimitsItem, TeamCraftError> {
     self.read(|reads| reads.poll_limits()).await
+  }
+
+  /// Whether and how large a motion part of a Live Photo or Motion Photo the user may send (issue
+  /// #2181): the app checks it before it takes the clip out of the picture or converts it, and
+  /// sends the still picture alone when the clip doesn't fit.
+  pub async fn motion_limits(&self) -> Result<MotionLimitsItem, TeamCraftError> {
+    self.read(|reads| reads.motion_limits()).await
   }
 
   /// The user groups the composer offers after `@` in a conversation, `@admins` included while
@@ -2170,20 +2171,28 @@ pub fn video_codec_download_url() -> Option<String> {
 }
 
 /// Uses an earlier download from `directory`; `false` if there is none (or it doesn't check out).
+/// Async: it reads and hashes the library and loads it (#2184).
 #[uniffi::export]
-pub fn use_installed_video_codec(directory: String) -> bool {
-  openh264_library::is_available()
-    || OpenH264Binary::for_this_platform().is_ok_and(|binary| binary.use_installed(Path::new(&directory)))
+pub async fn use_installed_video_codec(directory: String) -> bool {
+  blocking::off_thread("codec-load", move || {
+    openh264_library::is_available()
+      || OpenH264Binary::for_this_platform().is_ok_and(|binary| binary.use_installed(Path::new(&directory)))
+  })
+  .await
 }
 
 /// Unpacks the download from [`video_codec_download_url`] into `directory`, checks it against
-/// Cisco's published hashes and uses it for calls joined from now on.
+/// Cisco's published hashes and uses it for calls joined from now on. Async: it unpacks, writes
+/// and loads the library (#2184).
 #[uniffi::export]
-pub fn install_video_codec(directory: String, compressed: Vec<u8>) -> Result<(), TeamCraftError> {
-  OpenH264Binary::for_this_platform()
-    .and_then(|binary| binary.install(Path::new(&directory), &compressed))
-    .map(drop)
-    .map_err(|error| TeamCraftError::Call(error.to_string()))
+pub async fn install_video_codec(directory: String, compressed: Vec<u8>) -> Result<(), TeamCraftError> {
+  blocking::off_thread("codec-install", move || {
+    OpenH264Binary::for_this_platform()
+      .and_then(|binary| binary.install(Path::new(&directory), &compressed))
+      .map(drop)
+      .map_err(|error| TeamCraftError::Call(error.to_string()))
+  })
+  .await
 }
 
 /// The platform's HTTP proxy for every connection of the core (issue #157): Android
@@ -2216,9 +2225,49 @@ pub fn set_deleted_user_name(name: String) {
   teamcraft_core::people_names::set_deleted_user_name(name);
 }
 
+/// Rust-only entries (tests, benchmarks): the work of the async exports on the caller's thread.
 impl TeamCraft {
-  /// The constructor's work, whose outcome [`Self::new`] logs.
-  fn open(
+  /// [`Self::open`] on the caller's thread, for Rust callers that may wait.
+  pub fn open_blocking(
+    config: AppConfig,
+    tokens: Arc<dyn TokenProvider>,
+    listener: Arc<dyn EventListener>,
+  ) -> Result<Arc<Self>, TeamCraftError> {
+    logging::install();
+    outcome(
+      LifecycleStep::Open,
+      Self::open_store(config, tokens, None, listener),
+    )
+  }
+}
+
+impl TeamCraft {
+  /// [`Self::reset_store`]'s work, on the caller's thread.
+  fn reset_store_now(&self) -> Result<(), TeamCraftError> {
+    // Held throughout, so two resets can't run at once; `account_state` waits the moment it takes.
+    let mut recovery = self.recovery.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(unreadable) = recovery.as_ref() else {
+      return Err(TeamCraftError::InvalidInput(
+        "the local data is readable; nothing to reset".into(),
+      ));
+    };
+    engine::set_store_aside(&unreadable.start.store_path(), SystemClock.now_ms())?;
+    let spawned = engine::spawn(&unreadable.start, self.late_problem(), self.store_threads.hold());
+    let threads = spawned.map_err(|error| match error {
+      // A new, empty store that doesn't open: no room or no permission, not the old data.
+      engine::OpenError::Unreadable(_) => {
+        TeamCraftError::Storage("the new local database can't be read".into())
+      },
+      engine::OpenError::Failed(error) => error,
+    })?;
+    tracing::info!(target: logging::LIFECYCLE, step = ?LifecycleStep::ResetStore, "done");
+    *self.threads.write().unwrap_or_else(PoisonError::into_inner) = EngineSlot::Open(threads);
+    *recovery = None;
+    Ok(())
+  }
+
+  /// The constructor's work, whose outcome [`Self::open_blocking`] logs.
+  fn open_store(
     config: AppConfig,
     tokens: Arc<dyn TokenProvider>,
     maybe_device_key: Option<Arc<dyn DeviceProofKey>>,
@@ -2555,7 +2604,7 @@ mod tests {
         Err(TeamCraftError::Storage(_))
       ));
 
-      core.reset_store().unwrap();
+      core.clone().reset_store().await.unwrap();
       // The engine runs on a new, readable store.
       assert!(core.mention_settings().await.is_ok());
       // Kept as it was, beside the new database (its log, if any, goes along: engine tests).
@@ -2569,7 +2618,10 @@ mod tests {
       assert_eq!(std::fs::read(&kept[0]).unwrap(), b"not a database");
       assert!(directory.store().exists());
       // A readable store is never reset.
-      assert!(matches!(core.reset_store(), Err(TeamCraftError::InvalidInput(_))));
+      assert!(matches!(
+        core.clone().reset_store().await,
+        Err(TeamCraftError::InvalidInput(_))
+      ));
       assert_eq!(directory.files_containing(".unreadable-").len(), 1);
     }
 
@@ -2594,11 +2646,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_apps_open_reset_and_resume_without_waiting_on_their_thread() {
+      // #2184: the exports the apps call are async and do the waiting on a thread of their own.
+      let directory = TestDir::new("async-open");
+      std::fs::write(directory.store(), b"not a database").unwrap();
+      let core = TeamCraft::open(
+        config(&directory, KEY.to_vec()),
+        Arc::new(NoTokens),
+        Arc::new(Quiet),
+      )
+      .await
+      .unwrap();
+      assert!(matches!(
+        core.account_state().await.unwrap(),
+        AccountState::StoreUnreadable { .. }
+      ));
+      core.clone().reset_store().await.unwrap();
+      assert!(core.mention_settings().await.is_ok());
+      assert_eq!(core.suspend(), StoreSuspension::Closed);
+      core.clone().resume().await.unwrap();
+      assert!(core.mention_settings().await.is_ok());
+    }
+
+    #[tokio::test]
     async fn a_readable_store_opens_and_is_never_reset() {
       let directory = TestDir::new("readable");
       let core = open(&directory, KEY).unwrap();
       assert!(core.mention_settings().await.is_ok());
-      assert!(matches!(core.reset_store(), Err(TeamCraftError::InvalidInput(_))));
+      assert!(matches!(
+        core.clone().reset_store().await,
+        Err(TeamCraftError::InvalidInput(_))
+      ));
       assert!(directory.store().exists());
       assert!(directory.files_containing(".unreadable-").is_empty());
     }
@@ -2633,7 +2711,7 @@ mod tests {
         ..config(&directory, KEY.to_vec())
       };
       assert!(matches!(
-        TeamCraft::new(config, Arc::new(NoTokens), Arc::new(Quiet)),
+        TeamCraft::open_blocking(config, Arc::new(NoTokens), Arc::new(Quiet)),
         Err(TeamCraftError::InvalidInput(_))
       ));
     }
@@ -2663,7 +2741,7 @@ mod tests {
       assert!(directory.files_containing("-wal").is_empty());
       assert_eq!(core.suspend(), StoreSuspension::Closed);
 
-      core.resume().unwrap();
+      core.clone().resume().await.unwrap();
       assert_eq!(core.mention_settings().await.unwrap(), settings);
       assert!(!directory.files_containing("-shm").is_empty());
     }
@@ -2679,8 +2757,8 @@ mod tests {
       ));
       assert!(directory.files_containing("-shm").is_empty());
 
-      core.resume().unwrap();
-      core.resume().unwrap();
+      core.clone().resume().await.unwrap();
+      core.clone().resume().await.unwrap();
       assert!(core.pending_work().await.unwrap().is_empty);
       // And closes again.
       assert_eq!(core.suspend(), StoreSuspension::Closed);
@@ -2993,7 +3071,7 @@ mod tests {
         AccountState::StoreUnreadable { .. }
       ));
 
-      core.reset_store().unwrap();
+      core.clone().reset_store().await.unwrap();
       assert!(core.mention_settings().await.is_ok());
       assert_eq!(directory.files_containing(".unreadable-").len(), 1);
     }
@@ -3007,7 +3085,7 @@ mod tests {
         is_memory_constrained: true,
         ..config(&directory, KEY.to_vec())
       };
-      let core = TeamCraft::new(config, Arc::new(NoTokens), Arc::new(Quiet)).unwrap();
+      let core = TeamCraft::open_blocking(config, Arc::new(NoTokens), Arc::new(Quiet)).unwrap();
       assert!(matches!(
         core.account_state().await.unwrap(),
         AccountState::StoreUnreadable { .. }
@@ -3034,11 +3112,11 @@ mod tests {
         ..config(&directory, FIXTURE_KEY.to_vec())
       };
 
-      let refused = TeamCraft::new(extension, Arc::new(NoTokens), Arc::new(Quiet));
+      let refused = TeamCraft::open_blocking(extension, Arc::new(NoTokens), Arc::new(Quiet));
 
       assert!(matches!(refused, Err(TeamCraftError::Storage(_))));
       assert_eq!(std::fs::read(directory.store()).unwrap(), before);
-      let app = TeamCraft::new(
+      let app = TeamCraft::open_blocking(
         config(&directory, FIXTURE_KEY.to_vec()),
         Arc::new(NoTokens),
         Arc::new(Quiet),
@@ -3229,7 +3307,7 @@ mod tests {
         server_url: UNREACHABLE_SERVER.into(),
         ..config(directory, KEY.to_vec())
       };
-      TeamCraft::new(config, tokens, listener).unwrap()
+      TeamCraft::open_blocking(config, tokens, listener).unwrap()
     }
 
     struct Changes(mpsc::Sender<()>);
@@ -3259,7 +3337,7 @@ mod tests {
   }
 
   fn open(directory: &TestDir, key: impl Into<Vec<u8>>) -> Result<Arc<TeamCraft>, TeamCraftError> {
-    TeamCraft::new(config(directory, key.into()), Arc::new(NoTokens), Arc::new(Quiet))
+    TeamCraft::open_blocking(config(directory, key.into()), Arc::new(NoTokens), Arc::new(Quiet))
   }
 
   fn config(directory: &TestDir, database_key: Vec<u8>) -> AppConfig {

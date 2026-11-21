@@ -15,5 +15,9 @@
   <true/>
   <key>com.apple.security.network.server</key>
   <true/>
+  <!-- Not here: com.apple.developer.focus-status (macOS Focus, #191). It is a profile-backed
+       entitlement: a Developer ID build that carries it without an embedded provisioning profile
+       is killed at launch. Add it together with the profile; until then the Focus read answers
+       "unknown" and never silences. -->
 </dict>
 </plist>

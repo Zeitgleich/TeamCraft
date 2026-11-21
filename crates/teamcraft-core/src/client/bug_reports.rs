@@ -11,7 +11,7 @@ use teamcraft_proto::{Base64Bytes, ClientMessageId, ConversationKind, MAX_BUG_RE
 
 use super::Client;
 use super::files::{
-  PendingFile, PendingUpload, UploadPurpose, UploadRetry, UploadSource, save_pending_upload,
+  FileRole, PendingFile, PendingUpload, UploadPurpose, UploadRetry, UploadSource, save_pending_upload,
 };
 use crate::api::ServerApi;
 use crate::error::CoreError;
@@ -384,6 +384,7 @@ fn pending_file(file: &ReportFile) -> PendingFile {
     maybe_duration_ms: None,
     maybe_waveform: None,
     is_held: false,
+    role: FileRole::Attachment,
   }
 }
 

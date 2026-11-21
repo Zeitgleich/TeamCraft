@@ -23,6 +23,7 @@ use crate::components::file_views::save_attachment;
 use crate::components::icons::{Icon, IconName};
 use crate::components::lightbox::{FullMedia, sizes};
 use crate::components::lightbox_motion::StageMotion;
+use crate::components::live_photo::LiveMotion;
 use crate::components::message_actions::{copy_to_clipboard, reply_to_file};
 use crate::components::message_row::shown_author;
 use crate::components::sheet::PopoverBackdrop;
@@ -65,6 +66,8 @@ pub struct MediaActions {
   /// Owns the zoom while a gesture settles; a button or key takes it over.
   pub motion: StageMotion,
   pub is_paused: RwSignal<bool>,
+  /// The motion of a Live Photo or Motion Photo on screen (#2181), played by its toggle.
+  pub live: RwSignal<Option<LiveMotion>>,
   pub is_thread_shown: RwSignal<bool>,
   pub notice: Notice,
 }
@@ -315,6 +318,19 @@ pub fn Controls(
             {zoom_label}
           </button>
         </div>
+        {move || actions.live.get().map(|live| view! {
+          <button
+            type="button"
+            class="icon-btn"
+            class:is-active=move || live.is_requested.get()
+            aria-pressed=move || live.is_requested.get().to_string()
+            aria-label=move || i18n.t("media-live-toggle")
+            data-tip=move || i18n.t("media-live-toggle")
+            on:click=move |_| live.toggle()
+          >
+            <Icon name=IconName::Live />
+          </button>
+        })}
         <Show when=is_animated fallback=|| ()>
           <ToolButton
             label=play_label

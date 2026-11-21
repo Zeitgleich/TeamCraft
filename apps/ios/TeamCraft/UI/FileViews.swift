@@ -61,7 +61,7 @@ struct AttachmentView: View {
           if file.isImage || file.isVideo {
             Button("picture_save_to_photos", systemImage: "square.and.arrow.down") {
               Task {
-                let outcome = await PhotosSaver.save(fileAt: URL(fileURLWithPath: path), mediaType: file.mediaType)
+                let outcome = await PhotosSaver.save(picture: file, at: URL(fileURLWithPath: path), model: model)
                 if outcome == .saved {
                   UINotificationFeedbackGenerator().notificationOccurred(.success)
                 } else {
@@ -137,6 +137,10 @@ struct AttachmentView: View {
         AnimationBadge(
           text: file.transfer.state == "failed" ? Text("animation_failed") : Text(verbatim: AnimationKind.label(file.mediaType)))
       }
+    }
+    // A Live Photo or Motion Photo (#2181): its badge plays the motion over the picture.
+    .overlay {
+      if file.isLive && !isPlainSurface { LiveMotionOverlay(file: file) }
     }
     .task(id: motionTask) { await runMotion() }
   }
@@ -563,6 +567,29 @@ enum ThumbnailCache {
     return image
   }
 
+  /// Decodes the thumbnails of a page off the main thread, ready to draw (#2180): a picture that
+  /// scrolls in is then only drawn, not decoded in the frame it appears in.
+  static func warm(_ files: [FileInfo]) {
+    let missing = files.filter { images.object(forKey: $0.fileId as NSString) == nil }
+      .compactMap { file in file.maybeThumbnailData.map { (file.fileId, $0) } }
+    guard !missing.isEmpty else { return }
+    Task.detached(priority: .userInitiated) {
+      for (id, data) in missing {
+        guard let image = UIImage(data: data) else { continue }
+        images.setObject(image.preparingForDisplay() ?? image, forKey: id as NSString)
+      }
+    }
+  }
+
+  /// A link preview's picture, decoded once (not on every render of its card).
+  static func image(forPreview data: Data) -> UIImage? {
+    let key = "preview:\(data.count):\(data.hashValue)" as NSString
+    if let cached = images.object(forKey: key) { return cached }
+    guard let image = UIImage(data: data) else { return nil }
+    images.setObject(image, forKey: key)
+    return image
+  }
+
   /// The copy a reply carries; another picture than the file's may stand under the same ID.
   static func image(forQuote quoted: ReplyAttachmentPreview) -> UIImage? {
     let key = "quote:\(quoted.fileId)" as NSString
@@ -581,7 +608,7 @@ struct LinkPreviewCard: View {
 
   var body: some View {
     let content = VStack(alignment: .leading, spacing: 4) {
-      if let data = preview.maybeImageData, let image = UIImage(data: data) {
+      if let data = preview.maybeImageData, let image = ThumbnailCache.image(forPreview: data) {
         Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 160)
           .clipShape(RoundedRectangle(cornerRadius: 8))
       }

@@ -17,7 +17,7 @@ final class PagedFeed {
   private let sleep: @Sendable (Duration) async throws -> Void
 
   init(
-    firstPage: UInt32 = 200, pageBack: UInt32 = 100,
+    firstPage: UInt32 = 60, pageBack: UInt32 = 60,
     sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
     read: @escaping Read
   ) {

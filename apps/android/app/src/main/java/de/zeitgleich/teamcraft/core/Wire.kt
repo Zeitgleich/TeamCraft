@@ -502,8 +502,13 @@ data class FileInfo(
   @SerialName("maybe_duration_ms") val maybeDurationMs: Long? = null,
   /** A voice message's waveform from the sender (#204), one loudness byte (0-255) per bar; checked by the core. */
   @SerialName("maybe_waveform") val maybeWaveform: List<Int>? = null,
+  /** The motion of a Live Photo or Motion Photo (#2181): played on request, downloaded only then. */
+  @SerialName("motion") val maybeMotion: MotionInfo? = null,
 ) {
   val isImage: Boolean get() = mediaType.startsWith("image/")
+
+  /** A picture with motion to play (#2181). */
+  val isLive: Boolean get() = isImage && maybeMotion != null
 
   /** A voice message (#204): audio with the sender's waveform, on the server or here, not still going up. */
   val isVoice: Boolean
@@ -513,6 +518,19 @@ data class FileInfo(
   /** A video that opens in the player: on the server or here, not one still going up. */
   val opensInVideoPlayer: Boolean get() = isVideo && transfer.state in setOf("local", "remote", "downloading", "failed")
 }
+
+/**
+ * The motion part of a picture (#2181): a file of the message of its own, opened and saved by its
+ * [fileId] like any other.
+ */
+@Serializable
+data class MotionInfo(
+  @SerialName("file_id") val fileId: String,
+  @SerialName("media_type") val mediaType: String,
+  @SerialName("size_bytes") val sizeBytes: Long,
+  @SerialName("duration_ms") val maybeDurationMs: Long? = null,
+  val transfer: FileTransfer,
+)
 
 /** What a [Message] says of its import (the core's `ImportedMark`). */
 @Serializable

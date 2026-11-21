@@ -24,6 +24,9 @@ struct SharePickerView: View {
         case nil:
           EmptyView()
         }
+        if model.isShareDestinationGone {
+          Text("share_destination_gone").font(.app(.footnote)).foregroundStyle(.red)
+        }
         if share.leftOut > 0 {
           Text("share_left_out \(share.leftOut)")
             .font(.app(.footnote))

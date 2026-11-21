@@ -1,6 +1,6 @@
 # Sharing into TeamCraft from other apps
 
-Manual checks for #208. Everywhere: nothing is uploaded before you picked a conversation and pressed
+Manual checks for #208 (and #1037 for the iOS share sheet's picker). Everywhere: nothing is uploaded before you picked a conversation and pressed
 send, and the picker offers only conversations you may post in. Use a neutral test file; a video of a
 few GB for the large-file checks.
 
@@ -34,6 +34,28 @@ Needs a signed build: the extension and the app talk through the App Group.
 - [ ] Decline notifications for the app: the sheet still says to open TeamCraft.
 - [ ] Sign out with a share waiting: it is gone after the next sign-in.
 - [ ] Offline: pick a conversation and send; the message waits in the outbox and goes out later.
+
+Picker in the share sheet (#1037). Open the app once after installing, so it lists the conversations
+for the extension.
+
+- [ ] Share a photo: the sheet lists "Notes" (bookmark) and the recent conversations on top, then all
+      by name, with a search field and a message field. Pick a conversation: the sheet says which one
+      opens, the notification does not name it. Opening the app (from the notification or the icon)
+      shows that conversation with the photo and the message in the composer, without the app's
+      picker. Nothing is sent before you press send.
+- [ ] Search finds a channel by its name and by its space's name.
+- [ ] "Choose in TeamCraft": the app's picker asks, as before.
+- [ ] "Cancel" while a big video is still copying: nothing waits in the app afterwards.
+- [ ] Share a video of a few GB and pick a conversation while it copies: the sheet waits for the copy,
+      the extension is not killed, the composer gets the video.
+- [ ] Kill the app (swipe it away), share and pick, then start the app: it opens the conversation.
+- [ ] Flight mode: share and pick, start the app, send: the message waits in the outbox and goes out
+      once online, once.
+- [ ] Leave the picked conversation (or have yourself removed) before opening the app: the app's
+      picker asks and says the conversation can no longer take it.
+- [ ] App lock on, then share: the sheet shows no names, only the old card ("open TeamCraft to
+      choose"); the picker shows after unlocking.
+- [ ] Sign out, share: no names in the sheet. Sign in as somebody else: the old list is not shown.
 
 ## Desktop
 

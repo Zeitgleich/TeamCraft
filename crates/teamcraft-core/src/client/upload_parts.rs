@@ -401,6 +401,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_dimensions: file.maybe_dimensions,
       maybe_duration_ms: file.maybe_duration_ms,
       maybe_waveform: file.maybe_waveform.clone(),
+      maybe_motion: None,
     })
   }
 }

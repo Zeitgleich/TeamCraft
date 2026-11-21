@@ -7,9 +7,11 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
+import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.system.Os
+import java.io.Closeable
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
@@ -20,6 +22,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
@@ -76,6 +79,7 @@ import de.zeitgleich.teamcraft.core.NetworkTrust
 import de.zeitgleich.teamcraft.core.OwnProfile
 import de.zeitgleich.teamcraft.core.PermalinkTarget
 import de.zeitgleich.teamcraft.core.PickedFile
+import de.zeitgleich.teamcraft.core.PickedMotion
 import de.zeitgleich.teamcraft.core.SearchHit
 import de.zeitgleich.teamcraft.core.TypingPlace
 import de.zeitgleich.teamcraft.push.UnifiedPushBackend
@@ -692,8 +696,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val current = state.value as? AppState.StoreUnreadable ?: return@launchBusy
     state.value = try {
       val core = graph.core.core()
-      // Opens the new store while it waits.
-      withContext(Dispatchers.IO) { core.resetStore() }
+      // Opens the new store on a thread of the core's while it waits.
+      core.resetStore()
       loadAccountState()
     } catch (failure: TeamCraftException) {
       Log.w(TAG, "setting the local data aside failed", failure)
@@ -1370,7 +1374,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
    * Deletes the staged copy of a file taken out of the composer before sending. Only files in the
    * account's staging folder; anything else is not the app's to delete.
    */
-  fun discardFile(file: PickedFile) = viewModelScope.launch(Dispatchers.IO) { deleteStaged(file.path) }
+  fun discardFile(file: PickedFile) = viewModelScope.launch(Dispatchers.IO) {
+    deleteStaged(file.path)
+    file.maybeMotion?.let { deleteStaged(it.path) }
+  }
+
+  /**
+   * The motion of the Motion Photo at [uri] (#2181), staged for sending beside a picture the media
+   * flow drew again (which keeps no video). `null` when the user sends pictures still, the server
+   * doesn't allow motion, or it is no Motion Photo. The original is read once into the staging
+   * folder, at most [MAX_MOTION_PHOTO_READ_BYTES], and that copy is deleted again.
+   */
+  suspend fun stageMotionOf(uri: Uri, mediaType: String): PickedMotion? = withContext(Dispatchers.IO) {
+    if (!MediaPrefs.prefs(getApplication()).isSendingMotion) return@withContext null
+    val limits = runCatching { graph.core.core().motionLimits() }.getOrNull() ?: return@withContext null
+    val directory = runCatching { graph.core.uploadStagingDir() }.getOrNull() ?: return@withContext null
+    val original = File(directory, "${System.nanoTime()}-motion-source.jpg")
+    try {
+      val isCopied = runCatching {
+        getApplication<Application>().contentResolver.openInputStream(uri)?.use { input ->
+          original.outputStream().use { copyAtMost(input, it, MAX_MOTION_PHOTO_READ_BYTES) }
+        } ?: false
+      }.getOrDefault(false)
+      if (!isCopied) return@withContext null
+      withMotion(getApplication(), PickedFile(fileName = "motion.jpg", mediaType = mediaType, path = original.path), limits, isSendingMotion = true).maybeMotion
+    } finally {
+      // `withMotion` deletes the source once split; the still it wrote is not needed here.
+      original.delete()
+      directory.listFiles { file -> file.name.contains("-still-${original.name}") }?.forEach { it.delete() }
+    }
+  }
 
   /** Copies a picked document into the account's staging folder so the core can read and encrypt it. */
   suspend fun importFile(uri: Uri): PickedFile? = withContext(Dispatchers.IO) {
@@ -1421,7 +1454,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val directory = runCatching { graph.core.uploadStagingDir() }.getOrNull() ?: return@withContext null
     val target = File(directory, "${System.nanoTime()}-${name.replace('/', '_')}")
     if (source.renameTo(target)) {
-      withVideoPoster(PickedFile(fileName = name, mediaType = file.mediaType, path = target.absolutePath))
+      prepared(PickedFile(fileName = name, mediaType = file.mediaType, path = target.absolutePath))
     } else {
       stage(name, file.mediaType) { source.inputStream() }
     }
@@ -1482,7 +1515,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val directory = runCatching { graph.core.uploadStagingDir() }.getOrNull() ?: return@withContext null
     val target = File(directory, "${System.nanoTime()}-${cleanFileName(name).replace('/', '_')}")
     if (file.length() <= MAX_IMPORT_BYTES && file.renameTo(target)) {
-      return@withContext withVideoPoster(PickedFile(fileName = name, mediaType = mediaType, path = target.absolutePath))
+      return@withContext prepared(PickedFile(fileName = name, mediaType = mediaType, path = target.absolutePath))
     }
     val maybeStaged = stage(name, mediaType) { file.inputStream() }
     file.delete()
@@ -1497,19 +1530,56 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     stage(cleanFileName(name), mediaType) { SealedCaptures.inputStream(getApplication<Application>(), uri) }
   }
 
+  /**
+   * The keyboard's grant to read a pasted file ends when its receiver returns, so the receiver
+   * opens the file here (cheap, on the caller's thread) and [importPasted] copies the open
+   * descriptor later: an open descriptor stays readable after the grant is gone. Null when the
+   * file is refused or can't be opened.
+   */
+  fun openPasted(uri: Uri): PastedSource? {
+    val app = getApplication<Application>()
+    val resolver = app.contentResolver
+    if (!isForeignContent(uri.scheme, uri.authority, app.packageName) || isPrivateFile(uri)) return null
+    val name = runCatching {
+      resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+        if (cursor.moveToFirst()) cursor.getString(0) else null
+      }
+    }.getOrNull()?.let(::cleanFileName)?.takeIf { it.isNotBlank() } ?: "file"
+    val type = runCatching { resolver.getType(uri) }.getOrNull() ?: "application/octet-stream"
+    val descriptor = runCatching { resolver.openFileDescriptor(uri, "r") }.getOrNull() ?: return null
+    return PastedSource(name, type, descriptor)
+  }
+
+  /**
+   * Copies an opened paste into the staging folder in the background and closes it, also when the
+   * caller is cancelled. A file over the limit is refused before a byte is copied; nothing partial
+   * is left behind. Null on any failure.
+   */
+  suspend fun importPasted(source: PastedSource): PickedFile? = withContext(Dispatchers.IO) {
+    source.use {
+      if (!isWithinImportLimit(source.descriptor.statSize, MAX_IMPORT_BYTES)) return@withContext null
+      stage(source.name, source.type) { ParcelFileDescriptor.AutoCloseInputStream(source.descriptor) }
+    }
+  }
+
   /** Copies into the core's staging folder, at most [MAX_IMPORT_BYTES]. */
   private suspend fun stage(name: String, type: String, open: () -> InputStream?): PickedFile? {
     // The core deletes the copy once it is uploaded (or failed for good).
     val directory = runCatching { graph.core.uploadStagingDir() }.getOrNull() ?: return null
     val target = File(directory, "${System.nanoTime()}-${name.replace('/', '_')}")
-    val isCopied = runCatching {
-      open()?.use { input -> target.outputStream().use { copyAtMost(input, it, MAX_IMPORT_BYTES) } } ?: false
-    }.getOrDefault(false)
-    if (!isCopied) {
-      target.delete()
-      return null
-    }
-    return withVideoPoster(PickedFile(fileName = name, mediaType = type, path = target.absolutePath))
+    val context = currentCoroutineContext()
+    if (!copyToStaging(open, target, MAX_IMPORT_BYTES) { !context.isActive }) return null
+    return prepared(PickedFile(fileName = name, mediaType = type, path = target.absolutePath))
+  }
+
+  /**
+   * A staged file ready to send: a video with its poster frame and length, a Motion Photo cut into
+   * its picture and its motion (#2181), whatever the user's choice and the server allow.
+   */
+  private suspend fun prepared(file: PickedFile): PickedFile {
+    val isSendingMotion = MediaPrefs.prefs(getApplication()).isSendingMotion
+    val maybeLimits = if (isSendingMotion) runCatching { graph.core.core().motionLimits() }.getOrNull() else null
+    return withMotion(getApplication(), withVideoPoster(file), maybeLimits, isSendingMotion)
   }
 
   /**
@@ -2053,6 +2123,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
  * only keeps a hostile or endless provider from filling the device.
  */
 internal const val MAX_IMPORT_BYTES = 4L * 1024 * 1024 * 1024
+
+/** An opened pasted file: its name, type and read descriptor, closed after the copy. */
+class PastedSource(val name: String, val type: String, val descriptor: ParcelFileDescriptor) : Closeable {
+  override fun close() {
+    // Closing twice (the stream closed it already) or a dead descriptor is nothing to report.
+    runCatching { descriptor.close() }
+  }
+}
+
+/** False when a descriptor's size, if it knows one (not -1 or 0 for a pipe), is over [maxBytes]. */
+internal fun isWithinImportLimit(declaredBytes: Long, maxBytes: Long): Boolean = declaredBytes <= maxBytes
+
+/**
+ * Copies what [open] gives into [target], at most [maxBytes]. On any failure, a cancel or a
+ * file over the limit, [target] is deleted, so no half file is ever attached.
+ */
+internal fun copyToStaging(
+  open: () -> InputStream?,
+  target: File,
+  maxBytes: Long,
+  isCancelled: () -> Boolean = { false },
+): Boolean {
+  val isCopied = runCatching {
+    open()?.use { input -> target.outputStream().use { copyAtMost(input, it, maxBytes, isCancelled) } } ?: false
+  }.getOrDefault(false)
+  if (!isCopied) target.delete()
+  return isCopied
+}
+
+/** Largest original read to find a Motion Photo's video in it: the core reads no more either. */
+private const val MAX_MOTION_PHOTO_READ_BYTES = 128L * 1024 * 1024
 
 /** Copies `input` to `output`; false (and stops) once more than `maxBytes` arrived or on [isCancelled]. */
 internal fun copyAtMost(

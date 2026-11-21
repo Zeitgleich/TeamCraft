@@ -53,6 +53,14 @@ pub struct VoiceGuardConfig {
   /// fastest report is the link's round trip and the feedback's interval: a link across the
   /// world reports later than one next door.
   pub max_unreported: Duration,
+  /// Voice hurt for this long without a break of [`VoiceGuardConfig::release_after`] is a link
+  /// that collapsed (or is too thin): the video stays off for [`VoiceGuardConfig::hold`] after
+  /// it. Hurt for less, it was a burst of loss, which pausing video doesn't help against
+  /// (#2191): the video comes back [`VoiceGuardConfig::release_after`] after it. Zero: every
+  /// episode lasts.
+  pub lasting: Duration,
+  /// How long after voice was last hurt by a burst of loss the video comes back.
+  pub release_after: Duration,
 }
 
 /// The voice datagrams sent on one link and what became of them.
@@ -73,6 +81,11 @@ pub struct VoiceGuard {
   /// The sender's clock base for those delays.
   maybe_epoch: Option<Instant>,
   maybe_hurt_at: Option<Instant>,
+  /// Since when voice is hurt without the hold running out in between.
+  maybe_hurt_since: Option<Instant>,
+  /// The episode since then had voice stuck in a queue ([`VoiceGuard::on_timer`]): congestion,
+  /// whatever its length.
+  is_episode_congested: bool,
 }
 
 impl Default for VoiceGuardConfig {
@@ -84,6 +97,8 @@ impl Default for VoiceGuardConfig {
       max_delay: Duration::from_millis(150),
       hold: Duration::from_secs(3),
       max_unreported: Duration::MAX,
+      lasting: Duration::ZERO,
+      release_after: Duration::from_millis(500),
     }
   }
 }
@@ -99,10 +114,21 @@ impl VoiceGuardConfig {
   /// client itself just sent such a burst ([`VoiceGuard::on_timer`]): a collapsed uplink holds it
   /// in the link's queue for seconds before it overflows and loses it, and judged by losses only,
   /// the call was silent for 4 s before the camera stopped (#1889).
+  ///
+  /// Hotel or train Wi-Fi loses 1–3 % of the packets in bursts (#2191): a fifth of the voice
+  /// within half a second lost is a burst of 100 ms and more, and voice hurt by it for less than
+  /// [`VoiceGuardConfig::lasting`] holds the video only until [`VoiceGuardConfig::release_after`]
+  /// later. At a tenth and the full hold, bursts held a presenter's video for 20 to 40 seconds of
+  /// a minute (seeded simulation, `bursty_link`); a link that collapsed loses more and on, and is
+  /// found 400–500 ms after the collapse (300 ms before).
   pub fn own_uplink() -> Self {
     Self {
+      max_loss: 0.2,
       max_delay: Duration::MAX,
       max_unreported: Duration::from_millis(400),
+      // A burst stays in the window for its length: half a second after it, the voice is found
+      // hurt still. Loss that goes on for a second is no burst.
+      lasting: Duration::from_secs(1),
       ..Self::default()
     }
   }
@@ -119,6 +145,8 @@ impl VoiceGuard {
       report_times: VecDeque::new(),
       maybe_epoch: None,
       maybe_hurt_at: None,
+      maybe_hurt_since: None,
+      is_episode_congested: false,
     }
   }
 
@@ -180,8 +208,21 @@ impl VoiceGuard {
     let reported = self.reports.len();
     let hurt = self.reports.iter().filter(|(_, is_hurt)| *is_hurt).count();
     if reported >= self.config.min_reported && hurt as f64 >= self.config.max_loss * reported as f64 {
-      self.maybe_hurt_at = Some(now);
+      self.note_hurt(now, false);
     }
+  }
+
+  /// Voice was found hurt at `now` (`is_stuck`: waiting in a queue the link doesn't drain): it
+  /// goes on the episode whose hold still runs, or starts one.
+  fn note_hurt(&mut self, now: Instant, is_stuck: bool) {
+    // Within the hold of the episode before, it goes on: a burst after a collapse doesn't
+    // shorten the collapse's hold.
+    if !self.is_hurt(now) {
+      self.maybe_hurt_since = Some(now);
+      self.is_episode_congested = false;
+    }
+    self.is_episode_congested |= is_stuck;
+    self.maybe_hurt_at = Some(now);
   }
 
   /// Whether a voice datagram sent at `sent_at` that arrived at `arrival_us` (the receiver's
@@ -230,7 +271,8 @@ impl VoiceGuard {
       .and_then(|seq| self.pending_since.get(&seq.0))
       .is_some_and(|sent_at| now.saturating_duration_since(*sent_at) > bound);
     if is_stuck {
-      self.maybe_hurt_at = Some(now);
+      // Random loss doesn't hold voice back: the link queues it, it is congested.
+      self.note_hurt(now, true);
     }
   }
 
@@ -245,6 +287,8 @@ impl VoiceGuard {
     self.delays.clear();
     self.report_times.clear();
     self.maybe_hurt_at = None;
+    self.maybe_hurt_since = None;
+    self.is_episode_congested = false;
   }
 
   /// When voice was last found hurt (the hold not counted).
@@ -252,11 +296,29 @@ impl VoiceGuard {
     self.maybe_hurt_at
   }
 
-  /// Whether voice was hurt within [`VoiceGuardConfig::hold`]: video yields.
+  /// Whether video yields to the voice: it was hurt within [`VoiceGuardConfig::hold`] after loss
+  /// that lasted, or within [`VoiceGuardConfig::release_after`] after a burst.
   pub fn is_hurt(&self, now: Instant) -> bool {
-    self
-      .maybe_hurt_at
-      .is_some_and(|at| now.saturating_duration_since(at) < self.config.hold)
+    let Some(hurt_at) = self.maybe_hurt_at else {
+      return false;
+    };
+    let hold = if self.is_lasting() {
+      self.config.hold
+    } else {
+      self.config.release_after
+    };
+    now.saturating_duration_since(hurt_at) < hold
+  }
+
+  /// Whether the voice's last hurt episode lasted [`VoiceGuardConfig::lasting`], or held voice
+  /// back in a queue: a link that collapsed or is too thin, not a burst of loss.
+  pub fn is_lasting(&self) -> bool {
+    match (self.maybe_hurt_since, self.maybe_hurt_at) {
+      (Some(since), Some(at)) => {
+        self.is_episode_congested || at.saturating_duration_since(since) >= self.config.lasting
+      },
+      _ => false,
+    }
   }
 }
 
@@ -377,6 +439,74 @@ mod tests {
     let hold = VoiceGuardConfig::default().hold;
     assert!(guard.is_hurt(reported_at + hold - MS));
     assert!(!guard.is_hurt(reported_at + hold));
+  }
+
+  /// #2191: on the own uplink, a burst of loss holds the video until shortly after it; loss
+  /// that goes on for a second holds it for the full hold after.
+  #[test]
+  fn a_burst_holds_until_shortly_after_it_lasting_loss_for_the_hold() {
+    let start = Instant::now();
+    let config = VoiceGuardConfig::own_uplink();
+    let mut guard = VoiceGuard::new(config);
+    let burst = send_voice(&mut guard, 0, 25, start, |index| !(10..16).contains(&index));
+    let reported_at = start + 600 * MS;
+    guard.on_feedback(&burst, reported_at);
+    assert!(guard.is_hurt(reported_at));
+    assert!(!guard.is_lasting());
+    assert!(!guard.is_hurt(reported_at + config.release_after));
+
+    // Lost on and on: every feedback for over a second finds it hurt.
+    let mut guard = VoiceGuard::new(config);
+    let mut at = start;
+    for round in 0..14u16 {
+      let lossy = send_voice(&mut guard, round * 5, 5, at, |index| index % 2 == 0);
+      at += 100 * MS;
+      guard.on_feedback(&lossy, at);
+    }
+    assert!(guard.is_lasting());
+    assert!(guard.is_hurt(at + config.hold - MS));
+    assert!(!guard.is_hurt(at + config.hold));
+  }
+
+  /// Voice stuck in a queue the link doesn't drain is congestion at once (#1889): the full hold.
+  #[test]
+  fn stuck_voice_holds_for_the_hold() {
+    let start = Instant::now();
+    let config = VoiceGuardConfig::own_uplink();
+    let mut guard = VoiceGuard::new(config);
+    let arrived = send_voice(&mut guard, 0, 5, start, |_| true);
+    guard.on_feedback(&arrived, start + 150 * MS);
+    guard.on_send(TransportSeq(5), start + 200 * MS);
+    let stuck_at = start + 900 * MS;
+    guard.on_timer(false, stuck_at);
+    assert!(guard.is_lasting());
+    assert!(guard.is_hurt(stuck_at + config.hold - MS));
+  }
+
+  /// A burst within a collapse's hold goes on its episode: it doesn't shorten the hold.
+  #[test]
+  fn a_burst_within_the_hold_does_not_shorten_it() {
+    let start = Instant::now();
+    let config = VoiceGuardConfig::own_uplink();
+    let mut guard = VoiceGuard::new(config);
+    guard.on_send(TransportSeq(0), start);
+    guard.on_feedback(
+      &TransportFeedback {
+        base_seq: 0,
+        arrivals_us: vec![Some(20_000)],
+      },
+      start + 100 * MS,
+    );
+    guard.on_send(TransportSeq(1), start + 120 * MS);
+    let stuck_at = start + Duration::from_secs(1);
+    guard.on_timer(false, stuck_at);
+    let burst_at = stuck_at + Duration::from_secs(1);
+    let burst = send_voice(&mut guard, 2, 25, burst_at - 500 * MS, |index| {
+      !(10..16).contains(&index)
+    });
+    guard.on_feedback(&burst, burst_at);
+    assert!(guard.is_lasting());
+    assert!(guard.is_hurt(burst_at + config.hold - MS));
   }
 
   #[test]
@@ -643,6 +773,170 @@ mod tests {
         voice.on_arrival(seq, later + 20 * MS * u32::from(seq - 10));
       }
       assert!(!voice.is_hurt(later + Duration::from_secs(1)));
+    }
+  }
+
+  /// #2191: a presenter's uplink on hotel or train Wi-Fi (1–3 % loss in bursts, 20–60 ms), its
+  /// voice next to a still screen; five seeds of a minute.
+  mod bursty_link {
+    use super::*;
+    use crate::bursty_loss::BurstyLoss;
+
+    const SEEDS: [u64; 5] = [1, 2, 3, 4, 5];
+
+    /// At a tenth of the voice lost and the full hold, the bursts held the video 19–39 s of a
+    /// minute, up to 11 s at once. Now 0–4.4 s, a second at most at once.
+    #[test]
+    fn bursts_of_loss_hold_the_video_a_moment_only() {
+      for seed in SEEDS {
+        let run = simulate(seed, VoiceGuardConfig::own_uplink(), None);
+        assert!(
+          run.held <= Duration::from_secs(5),
+          "seed {seed}: held {:?} of a minute",
+          run.held
+        );
+        assert!(
+          run.longest <= Duration::from_millis(1200),
+          "seed {seed}: held {:?} at once",
+          run.longest
+        );
+      }
+    }
+
+    /// #1871 still: a link that collapses (a third to nine tenths of everything lost from then
+    /// on) is found within 600 ms and the video stays off.
+    #[test]
+    fn a_collapse_is_found_at_once_and_held() {
+      for (lost_of, every) in [(9, 10), (1, 2), (1, 3)] {
+        for seed in SEEDS {
+          let run = simulate(seed + 10, VoiceGuardConfig::own_uplink(), Some((lost_of, every)));
+          let found_after = run.maybe_hurt_after_collapse.unwrap_or(Duration::MAX);
+          assert!(
+            found_after <= Duration::from_millis(600),
+            "{lost_of}/{every}, seed {seed}: found after {found_after:?}"
+          );
+          assert!(run.is_lasting, "{lost_of}/{every}, seed {seed}");
+          assert!(
+            run.held >= Duration::from_secs(29),
+            "{lost_of}/{every}, seed {seed}: held {:?}",
+            run.held
+          );
+        }
+      }
+    }
+
+    struct Run {
+      held: Duration,
+      longest: Duration,
+      holds: usize,
+      maybe_hurt_after_collapse: Option<Duration>,
+      is_lasting: bool,
+    }
+
+    /// Voice every 20 ms, a still screen's tiny frame every 200 ms, its refresh (3 datagrams)
+    /// every second and a slide (50 datagrams at once) after 1 s and 2 s in turn, numbered
+    /// together, through [`BurstyLoss`]; feedback every 100 ms on what arrived 150 ms before.
+    /// `maybe_collapse` (`lost_of` in `every` datagrams lost from 30 s on): when voice was found
+    /// hurt after.
+    fn simulate(seed: u64, config: VoiceGuardConfig, maybe_collapse: Option<(u64, u64)>) -> Run {
+      const TICK: Duration = Duration::from_millis(5);
+      const END: Duration = Duration::from_secs(60);
+      const COLLAPSE_AT: Duration = Duration::from_secs(30);
+      let start = Instant::now();
+      let mut link = BurstyLoss::hotel_wifi(seed);
+      let mut guard = VoiceGuard::new(config);
+      // (seq, sent at, arrival at receiver's clock in µs since start).
+      let mut sent: VecDeque<(u16, Instant, Option<u64>)> = VecDeque::new();
+      let mut seq = 0u16;
+      let mut next_slide_at = Duration::from_secs(5);
+      let mut is_short_slide = true;
+      let mut maybe_hold_since: Option<Instant> = None;
+      let mut run = Run {
+        held: Duration::ZERO,
+        longest: Duration::ZERO,
+        holds: 0,
+        maybe_hurt_after_collapse: None,
+        is_lasting: false,
+      };
+      let mut elapsed = Duration::ZERO;
+      while elapsed < END {
+        let now = start + elapsed;
+        let ms = elapsed.as_millis();
+        let mut datagrams = Vec::new();
+        if ms.is_multiple_of(20) {
+          datagrams.push(true);
+        }
+        if ms.is_multiple_of(200) {
+          datagrams.push(false);
+        }
+        if ms.is_multiple_of(1000) {
+          datagrams.extend([false; 3]);
+        }
+        if elapsed >= next_slide_at {
+          datagrams.extend([false; 50]);
+          next_slide_at += Duration::from_secs(if is_short_slide { 1 } else { 2 });
+          is_short_slide = !is_short_slide;
+        }
+        for is_voice in datagrams {
+          if is_voice {
+            guard.on_send(TransportSeq(seq), now);
+          }
+          let is_lost = link.is_lost(now)
+            || maybe_collapse
+              .is_some_and(|(lost_of, every)| elapsed >= COLLAPSE_AT && u64::from(seq) % every < lost_of);
+          let arrival_us = (elapsed + link.delay()).as_micros() as u64;
+          sent.push_back((seq, now, (!is_lost).then_some(arrival_us)));
+          seq = seq.wrapping_add(1);
+        }
+        if ms.is_multiple_of(100) {
+          let settled = elapsed.saturating_sub(link.delay() + Duration::from_millis(150));
+          let mut arrivals_us = Vec::new();
+          let maybe_base = sent.front().map(|(first, ..)| *first);
+          while sent
+            .front()
+            .is_some_and(|(_, sent_at, _)| sent_at.saturating_duration_since(start) <= settled)
+          {
+            if let Some((_, _, maybe_arrival)) = sent.pop_front() {
+              arrivals_us.push(maybe_arrival);
+            }
+          }
+          if let (Some(base_seq), false) = (maybe_base, arrivals_us.is_empty()) {
+            guard.on_feedback(
+              &TransportFeedback {
+                base_seq,
+                arrivals_us,
+              },
+              now,
+            );
+          }
+          guard.on_timer(false, now);
+          let is_hurt = guard.is_hurt(now);
+          if is_hurt && maybe_collapse.is_some() && elapsed >= COLLAPSE_AT {
+            run.maybe_hurt_after_collapse.get_or_insert(elapsed - COLLAPSE_AT);
+          }
+          match (is_hurt, maybe_hold_since) {
+            (true, None) => {
+              maybe_hold_since = Some(now);
+              run.holds += 1;
+            },
+            (false, Some(since)) => {
+              let held = now.saturating_duration_since(since);
+              run.held += held;
+              run.longest = run.longest.max(held);
+              maybe_hold_since = None;
+            },
+            _ => {},
+          }
+        }
+        elapsed += TICK;
+      }
+      if let Some(since) = maybe_hold_since {
+        let held = (start + END).saturating_duration_since(since);
+        run.held += held;
+        run.longest = run.longest.max(held);
+      }
+      run.is_lasting = guard.is_lasting();
+      run
     }
   }
 

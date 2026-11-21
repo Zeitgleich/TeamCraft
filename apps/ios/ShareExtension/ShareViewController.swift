@@ -3,30 +3,45 @@ import UIKit
 import UniformTypeIdentifiers
 import UserNotifications
 
-/// The share sheet's entry for TeamCraft (issue #208). It copies what was shared into the App Group
-/// and leaves the rest to the app: encryption, the conversation picker and the upload all need the
-/// core, which doesn't belong in an extension's memory limit, and big videos go through here as
-/// files only. An extension can't open its app, so it says so and posts a notification that does.
+/// The share sheet's entry for TeamCraft (issues #208, #1037). It copies what was shared into the
+/// App Group and leaves the rest to the app: encryption and the upload need the core, which doesn't
+/// belong in an extension's memory limit, and big videos go through here as files only.
+///
+/// While it copies, it offers the conversations the app listed last (`ShareTargetsSnapshot`):
+/// a pick goes with the share, and the app opens that conversation's composer with it. Nothing is
+/// sent from here, and nothing before the user pressed send in the app. Without a list (never
+/// opened, signed out, app lock on) the app's picker asks, as before. An extension can't open its
+/// app, so it says so and posts a notification that does.
 final class ShareViewController: UIViewController {
   private let progress = ShareProgress()
 
   override func viewDidLoad() {
     super.viewDidLoad()
+    let maybeInbox = ShareInbox.shared()
+    let rows = ShareTargetsStore.shared().read()?.rows(forInboxOwner: maybeInbox?.owner()) ?? []
+    progress.targets = rows
+    progress.isPicking = !rows.isEmpty
     let host = UIHostingController(
-      rootView: ShareStatusView(progress: progress) { [weak self] in
-        self?.extensionContext?.completeRequest(returningItems: nil)
-      })
+      rootView: ShareStatusView(
+        progress: progress,
+        onPick: { [weak self] maybeRow in self?.pick(maybeRow) },
+        onCancel: { [weak self] in self?.cancel() },
+        onDone: { [weak self] in self?.extensionContext?.completeRequest(returningItems: nil) }))
     addChild(host)
     host.view.frame = view.bounds
     host.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
     view.addSubview(host.view)
     host.didMove(toParent: self)
+    // A swipe must not look like sending or discarding: the buttons say which.
+    isModalInPresentation = true
     let items = extensionContext?.inputItems.compactMap { $0 as? NSExtensionItem } ?? []
-    Task { await stage(items) }
+    Task { await stage(items, inbox: maybeInbox) }
   }
 
-  private func stage(_ items: [NSExtensionItem]) async {
-    guard let inbox = ShareInbox.shared(), var share = try? inbox.begin() else {
+  /// Copies everything and commits the share without a conversation at once: should the extension
+  /// end before a pick (memory, the user leaving), the app's picker still has it.
+  private func stage(_ items: [NSExtensionItem], inbox maybeInbox: ShareInbox?) async {
+    guard let inbox = maybeInbox, var share = try? inbox.begin() else {
       progress.state = .failed
       return
     }
@@ -38,21 +53,62 @@ final class ShareViewController: UIViewController {
       }
     }
     share.text = ShareLoader.joined(texts)
+    guard !progress.isCancelled else {
+      inbox.delete(share.id)
+      return
+    }
     guard !share.isEmpty, (try? inbox.commit(share)) != nil else {
       inbox.delete(share.id)
       progress.state = .failed
       return
     }
+    progress.staged = share
+    progress.state = .copied
+    await finishIfChosen()
+  }
+
+  /// `nil`: the app's picker chooses ("Choose in TeamCraft").
+  private func pick(_ maybeRow: ShareTargetRow?) {
+    progress.choice = .some(maybeRow)
+    Task { await finishIfChosen() }
+  }
+
+  /// Once copied and chosen (or with nothing to choose from), the share is written with its
+  /// conversation and caption, and the notification goes out.
+  private func finishIfChosen() async {
+    guard progress.state == .copied, var share = progress.staged else { return }
+    let maybeRow: ShareTargetRow?
+    if progress.isPicking {
+      guard case .some(let picked) = progress.choice else { return }
+      maybeRow = picked
+    } else {
+      maybeRow = nil
+    }
+    share = ShareHandoff.apply(destination: maybeRow?.conversationId, caption: progress.caption, to: share)
+    if share != progress.staged, let inbox = ShareInbox.shared() {
+      // The share without them is already committed; a failure here keeps that one.
+      try? inbox.commit(share)
+    }
+    progress.chosenName = maybeRow?.name
     progress.state = .saved
-    await postOpenNotification()
+    await postOpenNotification(hasDestination: maybeRow != nil)
+  }
+
+  /// Discards what was copied (also a share already committed without a conversation).
+  private func cancel() {
+    if let share = progress.staged { ShareInbox.shared()?.delete(share.id) }
+    progress.isCancelled = true
+    extensionContext?.cancelRequest(withError: NSError(domain: NSCocoaErrorDomain, code: NSUserCancelledError))
   }
 
   /// A tap opens the app, which finds the share in the inbox. Without notification permission the
-  /// sheet's text is what's left, and it says the same.
-  private func postOpenNotification() async {
+  /// sheet's text is what's left, and it says the same. The conversation's name stays out of it:
+  /// a notification can show on the lock screen.
+  private func postOpenNotification(hasDestination: Bool) async {
     let content = UNMutableNotificationContent()
     content.title = String(localized: "share_saved_title")
-    content.body = String(localized: "share_saved_notification")
+    content.body =
+      hasDestination ? String(localized: "share_saved_to_notification") : String(localized: "share_saved_notification")
     let request = UNNotificationRequest(identifier: "share-saved", content: content, trigger: nil)
     try? await UNUserNotificationCenter.current().add(request)
   }
@@ -63,10 +119,20 @@ final class ShareViewController: UIViewController {
 @Observable
 final class ShareProgress {
   enum State {
-    case copying, saved, failed
+    case copying, copied, saved, failed
   }
 
   var state = State.copying
+  /// The conversations offered; empty without a list from the app.
+  var targets: [ShareTargetRow] = []
+  /// The picker is up (there is a list); it stays the sheet's content until a choice.
+  var isPicking = false
+  /// `.none` until a choice; `.some(nil)` is "Choose in TeamCraft".
+  var choice: ShareTargetRow?? = .none
+  var caption = ""
+  var staged: StagedShare?
+  var chosenName: String?
+  var isCancelled = false
 }
 
 /// Reads the share sheet's items into the inbox: files by the file system, text and links as text.
@@ -108,15 +174,20 @@ enum ShareLoader {
     return parts.joined(separator: "\n")
   }
 
-  /// The first registered type of one of `kinds`. A Live Photo also registers its bundle (a
-  /// folder), which comes last: the still picture goes, and the app takes the picture out of a
-  /// bundle that is all there is.
+  /// The first registered type of one of `kinds`. A Live Photo's bundle (a folder: the still
+  /// picture and its motion video) goes when there is one, so the app sends the picture with its
+  /// motion (#2181; the app converts the video, not this extension). Other bundles come last.
   private static func fileType(of provider: NSItemProvider, among kinds: [UTType]) -> String? {
     let matching = provider.registeredTypeIdentifiers.filter { identifier in
       guard let type = UTType(identifier) else { return false }
       return kinds.contains { type.conforms(to: $0) }
     }
+    if let livePhoto = provider.registeredTypeIdentifiers.first(where: { isLivePhotoBundle($0) }) { return livePhoto }
     return matching.first { !isBundle($0) } ?? matching.first
+  }
+
+  private static func isLivePhotoBundle(_ identifier: String) -> Bool {
+    isBundle(identifier) && identifier.lowercased().contains("live-photo")
   }
 
   private static func isBundle(_ identifier: String) -> Bool {
@@ -160,39 +231,123 @@ enum ShareLoader {
   }
 }
 
-/// A plain card: copying, then what happens next.
+/// The picker while there is a list and no choice yet; then a plain card: copying, then what
+/// happens next.
 struct ShareStatusView: View {
   let progress: ShareProgress
+  let onPick: (ShareTargetRow?) -> Void
+  let onCancel: () -> Void
   let onDone: () -> Void
 
   var body: some View {
     NavigationStack {
-      VStack(spacing: 16) {
-        switch progress.state {
-        case .copying:
-          ProgressView("share_copying")
-        case .saved:
-          Image(systemName: "checkmark.circle")
-            .font(.largeTitle)
-            .foregroundStyle(.tint)
-            .accessibilityHidden(true)
-          Text("share_saved_title").font(.headline)
-          Text("share_saved_body").multilineTextAlignment(.center)
-        case .failed:
-          Image(systemName: "exclamationmark.triangle")
-            .font(.largeTitle)
-            .foregroundStyle(.red)
-            .accessibilityHidden(true)
-          Text("share_failed_title").font(.headline)
-          Text("share_failed_body").multilineTextAlignment(.center)
+      Group {
+        if progress.isPicking && progress.choice == nil && progress.state != .failed {
+          SharePicker(progress: progress, onPick: onPick)
+        } else {
+          card
         }
       }
-      .padding(24)
-      .frame(maxWidth: .infinity, maxHeight: .infinity)
+      .navigationTitle(progress.isPicking && progress.choice == nil ? Text("share_pick_title") : Text(verbatim: ""))
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
-        ToolbarItem(placement: .confirmationAction) {
-          Button("share_done", action: onDone).disabled(progress.state == .copying)
+        if progress.state != .saved && progress.state != .failed {
+          ToolbarItem(placement: .cancellationAction) {
+            Button("share_cancel", role: .cancel, action: onCancel)
+          }
+        } else {
+          ToolbarItem(placement: .confirmationAction) {
+            Button("share_done", action: onDone)
+          }
+        }
+      }
+    }
+  }
+
+  private var card: some View {
+    VStack(spacing: 16) {
+      switch progress.state {
+      case .copying, .copied:
+        ProgressView("share_copying")
+      case .saved:
+        Image(systemName: "checkmark.circle")
+          .font(.largeTitle)
+          .foregroundStyle(.tint)
+          .accessibilityHidden(true)
+        Text("share_saved_title").font(.headline)
+        if let name = progress.chosenName {
+          Text("share_saved_to_body \(name)").multilineTextAlignment(.center)
+        } else {
+          Text("share_saved_body").multilineTextAlignment(.center)
+        }
+      case .failed:
+        Image(systemName: "exclamationmark.triangle")
+          .font(.largeTitle)
+          .foregroundStyle(.red)
+          .accessibilityHidden(true)
+        Text("share_failed_title").font(.headline)
+        Text("share_failed_body").multilineTextAlignment(.center)
+      }
+    }
+    .padding(24)
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+  }
+}
+
+/// The conversations the app listed: the notes and the recent ones on top, then all by name,
+/// searchable; a caption above, and the app's own picker as a way out.
+struct SharePicker: View {
+  @Bindable var progress: ShareProgress
+  let onPick: (ShareTargetRow?) -> Void
+  @State private var filter = ""
+
+  var body: some View {
+    List {
+      Section {
+        TextField("share_caption", text: $progress.caption, axis: .vertical)
+          .lineLimit(1...4)
+        if progress.state == .copying {
+          Label("share_copying", systemImage: "arrow.down.doc")
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+        }
+      }
+      let sections = ShareTargetSections(rows: progress.targets, filter: filter)
+      if !sections.top.isEmpty {
+        Section("share_recent") { rows(sections.top) }
+      }
+      if !sections.others.isEmpty {
+        Section("share_all") { rows(sections.others) }
+      }
+      Section {
+        Button {
+          onPick(nil)
+        } label: {
+          Label("share_choose_in_app", systemImage: "arrow.up.forward.app")
+        }
+      } footer: {
+        Text("share_pick_footer")
+      }
+    }
+    .searchable(text: $filter, placement: .navigationBarDrawer(displayMode: .always), prompt: Text("share_filter"))
+  }
+
+  private func rows(_ rows: [ShareTargetRow]) -> some View {
+    ForEach(rows) { row in
+      Button {
+        onPick(row)
+      } label: {
+        HStack(spacing: 12) {
+          Image(systemName: row.symbol)
+            .foregroundStyle(.tint)
+            .frame(width: 24)
+            .accessibilityHidden(true)
+          VStack(alignment: .leading, spacing: 2) {
+            Text(row.name).foregroundStyle(.primary).lineLimit(1)
+            if let space = row.maybeSpaceName, !space.isEmpty {
+              Text(space).font(.footnote).foregroundStyle(.secondary).lineLimit(1)
+            }
+          }
         }
       }
     }

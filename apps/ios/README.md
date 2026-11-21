@@ -26,7 +26,7 @@ photo and document pickers, Quick Look, the background prefetch task and CallKit
 | `TeamCraft/Resources`  | String Catalogs (en, de), asset catalog (app icon, launch screen colour and logo)                                                |
 | `Shared/`              | Compiled into the app **and** the extension: keychain, App Group, process lock, OIDC session, core factory, notification content |
 | `NotificationService/` | The Notification Service Extension                                                                                               |
-| `ShareExtension/`      | The share sheet's entry: copies what was shared into the App Group, without the core (`Shared/ShareInbox.swift`)                 |
+| `ShareExtension/`      | The share sheet's entry: copies what was shared into the App Group and offers the conversations the app listed (`Shared/ShareInbox.swift`, `Shared/ShareTargets.swift`), without the core |
 | `TeamCraftWidget/`     | The home screen widget: unread conversations from the App Group, without the core (`Shared/WidgetSnapshot.swift`)                |
 | `TeamCraftTests/`      | Unit tests (PKCE, OIDC URLs, push payload, lock, notification text, sections, wire models, search filters, Annex B)              |
 | `Generated/`           | `TeamCraftFFI.xcframework` and `Swift/teamcraft_ffi.swift` (not in git)                                                          |

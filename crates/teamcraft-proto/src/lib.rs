@@ -21,6 +21,7 @@ mod integration;
 mod legal_hold;
 pub mod live;
 mod log_level;
+mod motion;
 mod notetaker;
 mod permission;
 mod poll;
@@ -87,6 +88,7 @@ pub use legal_hold::{
   legal_hold_changes, legal_hold_of,
 };
 pub use log_level::{LevelMatch, LogLevel, find_level, level_from_number, parse_level_field};
+pub use motion::{DEFAULT_MAX_MOTION_BYTES, MAX_MOTION_BYTES_LIMIT, MIN_MOTION_BYTES_LIMIT, MotionLimits};
 pub use notetaker::{
   DEFAULT_SUMMARY_MODEL, DEFAULT_SUMMARY_PROMPT, DEFAULT_TRANSCRIPTION_MODEL, LANGUAGE_AUTO, MAX_MODEL_CHARS,
   MAX_PROMPT_CHARS, NotetakerInviters, NotetakerPolicy, NotetakerPolicyError, NotetakerRequest,

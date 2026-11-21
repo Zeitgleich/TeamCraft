@@ -16,7 +16,7 @@ final class LivePhotoBundleTests: XCTestCase {
     try? FileManager.default.removeItem(at: folder)
   }
 
-  func testALivePhotoBundleGoesAsItsStillPictureOnly() throws {
+  func testALivePhotoBundleGoesAsItsStillPictureWithItsMotionBeside() throws {
     let bundle = try makeBundle(stillName: "IMG_0001.JPG", type: .jpeg)
     let importer = AttachmentImporter(directory: folder.appendingPathComponent("uploads"), maybeLimitBytes: nil)
 
@@ -26,9 +26,11 @@ final class LivePhotoBundleTests: XCTestCase {
     XCTAssertEqual(file.mediaType, "image/jpeg")
     let source = try XCTUnwrap(CGImageSourceCreateWithURL(URL(fileURLWithPath: file.path) as CFURL, nil))
     XCTAssertEqual(CGImageSourceGetType(source) as String?, UTType.jpeg.identifier)
-    // One file in the uploads folder: no motion video, no folder.
+    // The picture and its motion video (#2181) in the uploads folder, no folder left.
     let left = try FileManager.default.contentsOfDirectory(atPath: (file.path as NSString).deletingLastPathComponent)
-    XCTAssertEqual(left, ["IMG_0001.JPG"])
+    XCTAssertEqual(left.sorted(), ["IMG_0001-motion.mov", "IMG_0001.JPG"])
+    XCTAssertEqual(file.maybeMotion?.mediaType, "video/quicktime")
+    XCTAssertEqual(file.maybeMotion.map { ($0.path as NSString).lastPathComponent }, "IMG_0001-motion.mov")
     XCTAssertFalse(FileManager.default.fileExists(atPath: bundle.path))
   }
 

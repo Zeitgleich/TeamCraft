@@ -549,6 +549,8 @@ settings-f-max_poll_options = Höchstzahl der Optionen einer Umfrage
 settings-f-max_poll_question_chars = Längste Umfragefrage
 settings-f-max_poll_option_chars = Längste Umfrageoption
 settings-f-max_poll_open_days = Spätester Endzeitpunkt einer Umfrage
+settings-f-allows_motion_parts = Live Photos und Bewegungsfotos mit Bewegung senden
+settings-f-max_motion_part_bytes = Größte Bewegung eines Live Photos
 settings-f-default_retention_days = Aufbewahrung von Integrationskanälen (0: behalten)
 settings-f-bridge_public_url = Öffentliche Adresse der Bridge
 settings-hint-bridge_public_url = Wo Quellen eine Integrations-Bridge auf einem eigenen Host erreichen, etwa https://bridge.example.com. Sie wird beim Verbinden einer Quelle mit einem Kanal angeboten. Leer lassen, wenn die Bridge neben dem Server oder bei den Quellen läuft. https verwenden; http nur für localhost. Ohne Benutzername, Query und #Fragment.
@@ -852,6 +854,7 @@ settings-error-avatar-side = Gib 64 bis 2048 Pixel ein.
 settings-error-poll-options = Gib 2 bis 32 Optionen ein.
 settings-error-poll-text = Gib 1 bis 1000 Zeichen ein.
 settings-error-poll-days = Gib 1 bis 3650 Tage ein.
+settings-error-motion-bytes = Gib 1 bis 64 MiB ein.
 settings-error-call-reports = Gib 0 bis 50 Berichte ein.
 settings-error-crash-environment = Verwende 1 bis 64 Kleinbuchstaben, Ziffern, „-“, „_“ oder „.“.
 

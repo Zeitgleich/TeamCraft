@@ -136,3 +136,10 @@ path = "fuzz_targets/strict_roles.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "motion_photo"
+path = "fuzz_targets/motion_photo.rs"
+test = false
+doc = false
+bench = false

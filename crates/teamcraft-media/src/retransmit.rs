@@ -1,30 +1,39 @@
-//! Resending video packets a receiver missed (#1762).
+//! Resending video packets that got lost (#1762, #2189): a short history of the video packets sent
+//! or forwarded, per track and layer ([`PacketHistory`]), and a budget for what is resent
+//! ([`RetransmitBudget`]).
 //!
-//! On a lossy downlink a keyframe of 25 datagrams arrived whole only about one time in seven at
-//! 7.5–17 % loss, and its replacement was lost the same way: the picture froze. The SFU keeps the
-//! video datagrams it forwarded for a short while ([`PacketHistory`], per track and layer) and
-//! sends those a receiver names in a [`teamcraft_proto::CallClientMessage::Nack`] once more, to
-//! that receiver only.
+//! Two places keep one:
 //!
-//! - **Nothing new to the SFU:** it resends the datagrams exactly as it forwarded them, still DAVE
-//!   encrypted, restamped for the receiver's bandwidth estimation like every other. It reads no
-//!   more than the RTP header it already routes by.
-//! - **Bounded:** the history holds [`RetransmitConfig::window`] of packets, at most
-//!   [`RetransmitConfig::max_packets_per_layer`] per layer. What a receiver gets resent comes out
-//!   of a budget ([`RetransmitBudget`]) that refills at a share of its downlink estimate, so a
-//!   lossy receiver can't make the SFU flood its own link; resent datagrams count in the estimate
-//!   like any others.
+//! - **The SFU, towards each receiver (#1762).** On a lossy downlink a keyframe of 25 datagrams
+//!   arrived whole only about one time in seven at 7.5–17 % loss, and its replacement was lost the
+//!   same way: the picture froze. The SFU keeps the video datagrams it forwarded and sends those a
+//!   receiver names in a [`teamcraft_proto::CallClientMessage::Nack`] once more, to that receiver
+//!   only, restamped for its bandwidth estimation like every other.
+//! - **The publisher, towards the SFU (#2189).** A loss on the publisher's uplink is a loss for
+//!   every viewer, and a still screen sends almost nothing after a slide change: one lost packet of
+//!   the change held the old slide until a viewer's NACK, then its keyframe request, made it all the
+//!   way back. The SFU notices the gap itself and asks the publisher at once
+//!   ([`teamcraft_proto::CallEvent::RetransmitRequested`]); the publisher keeps what it sent for
+//!   the window the SFU announced and sends those packets once more.
+//!
+//! Both resend the packets exactly as they went out the first time: DAVE encrypted, the same RTP
+//! header. Nothing is decrypted or encrypted anew (no nonce is used twice), and the SFU reads no
+//! more than the RTP header it already routes by.
+//!
+//! - **Bounded:** a history holds [`RetransmitConfig::window`] of packets, at most
+//!   [`RetransmitConfig::max_packets_per_layer`] per layer. What is resent comes out of a budget
+//!   that refills at a share of the link's estimate, so a lossy link can't make the sender flood
+//!   it; resent datagrams count in the estimate like any others.
 //! - **Video only:** audio has Opus' own concealment and in-band FEC, and a resent 20 ms frame
 //!   would come too late to be played.
-//! - **The SFU alone:** losses on a publisher's uplink aren't repaired here; the publisher's
-//!   uplink estimate drops its layers instead, and a receiver asks for a keyframe once it gives up
-//!   waiting. Most viewers sit behind worse links than the presenter, and only the SFU can repair
-//!   one viewer's loss without sending it to everybody.
 
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-/// What the SFU keeps and resends.
+// `std::time::Instant` on native; the browser clock on wasm, where `std` has none.
+use web_time::Instant;
+
+/// What a sender keeps and resends.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RetransmitConfig {
   /// How long a forwarded video packet stays available; announced to clients in `joined`, so they
@@ -33,15 +42,14 @@ pub struct RetransmitConfig {
   /// Packets kept per track and layer at most: a 1440p screen's keyframe is about 400, a second of
   /// its top layer about as many.
   pub max_packets_per_layer: usize,
-  /// The share of a receiver's downlink estimate, in percent, that resent packets may take beyond
-  /// [`Self::burst_bytes`].
+  /// The share of the link's estimate (a receiver's downlink, the publisher's uplink), in percent,
+  /// that resent packets may take beyond [`Self::burst_bytes`].
   pub max_share_percent: u8,
-  /// What a receiver may get resent at once after a quiet while: about the lost part of a large
-  /// keyframe.
+  /// What may be resent at once after a quiet while: about the lost part of a large keyframe.
   pub burst_bytes: u32,
 }
 
-/// The video datagrams of one layer forwarded within the window, oldest first.
+/// The video packets of one layer sent or forwarded within the window, oldest first.
 #[derive(Debug, Default)]
 pub struct PacketHistory {
   packets: VecDeque<StoredPacket>,
@@ -54,8 +62,8 @@ struct StoredPacket {
   datagram: Vec<u8>,
 }
 
-/// The bytes a receiver may get resent: a token bucket that refills at a share of its downlink
-/// estimate.
+/// The bytes that may be resent over one link: a token bucket that refills at a share of the
+/// link's estimate.
 #[derive(Debug, Default)]
 pub struct RetransmitBudget {
   bytes: f64,
@@ -88,7 +96,8 @@ impl RetransmitConfig {
 }
 
 impl PacketHistory {
-  /// Keeps a forwarded datagram (as it arrived from the publisher) under its RTP sequence number.
+  /// Keeps a packet as it went out (the SFU: the datagram as it arrived from the publisher; the
+  /// publisher: the RTP packet) under its RTP sequence number.
   pub fn push(&mut self, sequence_number: u16, datagram: &[u8], now: Instant, config: &RetransmitConfig) {
     if !config.is_enabled() {
       return;

@@ -42,6 +42,8 @@ pub async fn notification_allow(
         message,
       })?;
     let permission = if is_granted {
+      // The Focus status (#191) asks for its own consent, from this same click.
+      teamcraft_desktop_native::request_focus_authorization();
       NotifyPermission::Allowed
     } else {
       NotifyPermission::Blocked
