@@ -19,7 +19,8 @@ use teamcraft_client_api::crash_reporting::trace::{self, TraceSettings, WireTrac
 use teamcraft_client_api::crash_reporting::{
   AppInfo, AppPlatform, BrowserInfo, BrowserNoiseCount, CallReport, CallReportGate, CrashEvent, CrashLevel,
   CrashReporter, CrashReportingConfig, CrashReportingConsent, CrashSendOutcome, ErrorSource, EventId,
-  InstallationId, PanicParts, PendingPanic, StackFrame, Transaction, frames_from_script_stack, without_ids,
+  InstallationId, MAX_PENDING_PANICS, PanicParts, PendingPanic, ScriptStack, StackFrame, Transaction,
+  frames_from_script_stack, without_ids,
 };
 use teamcraft_client_api::debug_log;
 use teamcraft_client_api::failure::ActionFailure;
@@ -35,6 +36,8 @@ const KEY_TRANSACTIONS: &str = "teamcraft.crash_reports.transactions";
 const KEY_INSTALLATION: &str = "teamcraft.crash_reports.installation";
 const KEY_CONFIG: &str = "teamcraft.crash_reports.config";
 const KEY_NOTICE_SEEN: &str = "teamcraft.crash_reports.notice_seen";
+/// Desktop: the page's panics, until the next start adds the shell's log and reports them.
+const KEY_PAGE_PANICS: &str = "teamcraft.crash_reports.page_panics";
 /// Script errors reported per page life at most: a loop of the same error can't fill the queue.
 const MAX_SCRIPT_ERRORS: u32 = 5;
 /// Lost sign-ins reported per page life at most.
@@ -82,7 +85,10 @@ pub fn install() {
   REPORTER.with(|cell| *cell.borrow_mut() = Some(reporter));
   teamcraft_core::store::set_idb_failure_hook(capture_storage_error);
   listen_to_window();
-  wasm_bindgen_futures::spawn_local(refresh_config());
+  wasm_bindgen_futures::spawn_local(async {
+    take_page_panics().await;
+    refresh_config().await;
+  });
 }
 
 /// From the panic hook: queues the report and stores the queue. Nothing more can run afterwards.
@@ -90,10 +96,59 @@ pub fn capture_panic(info: &PanicHookInfo<'_>) {
   if IS_DEAD.with(|dead| dead.replace(true)) {
     return;
   }
+  // wasm has no backtrace: the script stack has the wasm calls that led here (TEAMCRAFT-3S).
+  let parts = PanicParts::from_hook(info, String::new()).with_script_stack(ScriptStack {
+    text: script_stack(&js_sys::Error::new("").into()).unwrap_or_default(),
+    origin: page_origin(),
+  });
   // Only the page's own log: the hook calls nothing that might borrow what the panic left borrowed.
-  let event = PanicParts::from_hook(info, String::new()).into_event(event_id(), now_ms(), page_breadcrumbs());
-  with_reporter(|reporter| reporter.capture(event, random_roll()));
+  let pending = PendingPanic {
+    parts,
+    timestamp_ms: now_ms(),
+    breadcrumbs: page_breadcrumbs(),
+  };
+  // On desktop the page's log is short: the shell's core and media do the work, and their log is
+  // only a call away, which a dying page can't wait for. The next start adds it.
+  if tauri::is_available() {
+    let mut kept: Vec<PendingPanic> = load_json(KEY_PAGE_PANICS).unwrap_or_default();
+    kept.push(pending);
+    let excess = kept.len().saturating_sub(MAX_PENDING_PANICS);
+    kept.drain(..excess);
+    store_text(KEY_PAGE_PANICS, &serde_json::to_string(&kept).unwrap_or_default());
+    return;
+  }
+  capture_pending(pending);
   store_queue();
+}
+
+/// Desktop: the page's panics of the last run, with the shell's log up to each (the shell lives
+/// on while the page reloads). Kept with that log until the reporter took them, so a page that
+/// goes again before doesn't lose it.
+async fn take_page_panics() {
+  let Some(mut pending) = load_json::<Vec<PendingPanic>>(KEY_PAGE_PANICS) else {
+    return;
+  };
+  if let Ok(shell) = tauri::call::<Vec<String>>("core_recent_log", &serde_json::json!({})).await {
+    for panic in &mut pending {
+      panic.add_log_until_panic(shell.clone());
+    }
+    store_text(
+      KEY_PAGE_PANICS,
+      &serde_json::to_string(&pending).unwrap_or_default(),
+    );
+  }
+  for panic in pending {
+    capture_pending(panic);
+  }
+  remove_key(KEY_PAGE_PANICS);
+  store_queue();
+}
+
+fn capture_pending(panic: PendingPanic) {
+  let event = panic
+    .parts
+    .into_event(event_id(), panic.timestamp_ms, panic.breadcrumbs);
+  with_reporter(|reporter| reporter.capture(event, random_roll()));
 }
 
 /// The user's switch in the privacy settings changed.
@@ -223,10 +278,7 @@ async fn take_shell_panics() {
     return;
   };
   for panic in pending {
-    let event = panic
-      .parts
-      .into_event(event_id(), panic.timestamp_ms, panic.breadcrumbs);
-    with_reporter(|reporter| reporter.capture(event, random_roll()));
+    capture_pending(panic);
   }
 }
 
@@ -361,19 +413,22 @@ fn listen_to_window() {
 /// The frames of a thrown value's `stack` (an `Error`; anything else has none). Without them a
 /// rejection only says what failed, not where (GlitchTip TEAMCRAFT-1I).
 fn frames_of(thrown: &wasm_bindgen::JsValue) -> Vec<StackFrame> {
+  script_stack(thrown).map_or_else(Vec::new, |stack| frames_from_script_stack(&stack, &page_origin()))
+}
+
+fn script_stack(thrown: &wasm_bindgen::JsValue) -> Option<String> {
   if !thrown.is_object() {
-    return Vec::new();
+    return None;
   }
-  let Some(stack) = js_sys::Reflect::get(thrown, &"stack".into())
+  js_sys::Reflect::get(thrown, &"stack".into())
     .ok()
     .and_then(|stack| stack.as_string())
-  else {
-    return Vec::new();
-  };
-  let origin = web_sys::window()
+}
+
+fn page_origin() -> String {
+  web_sys::window()
     .and_then(|window| window.location().origin().ok())
-    .unwrap_or_default();
-  frames_from_script_stack(&stack, &origin)
+    .unwrap_or_default()
 }
 
 /// The app lost a sign-in the user didn't end (a refused or missing saved sign-in, a lost device

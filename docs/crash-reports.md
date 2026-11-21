@@ -77,7 +77,14 @@ Every report passes `crash_reporting::scrub` before it is queued, on top of secu
 logs content) and the debug log's own redaction:
 
 - **Quoted text goes whole:** `"…"` becomes `"[redacted]"`. That is where a `Debug` struct or a
-  `{:?}` puts its values (`Person { name: "…" }`), whatever they look like.
+  `{:?}` puts its values (`Person { name: "…" }`), whatever they look like. Two shapes that are
+  plainly code stay, as a panic of `Location` or `expect_context` quotes them (TEAMCRAFT-3S): a
+  relative path to a Rust source file of a source tree (`"crates/teamcraft-ui/src/state.rs"`:
+  under `crates/` or `src/`, or with a `src/` directory; only path characters, no `..`; a bare
+  `"budget.rs"` or `"notes/plan.rs"` may be the user's and goes) and a Rust type path (`"teamcraft_ui::state::AppState"`, identifiers joined
+  by `::` with generic arguments of the same shape, no spaces). Absolute paths, names, URLs and
+  everything else quoted still go. The mobile ports (`CrashScrubber` on Android and iOS) still
+  blank every quoted value.
 - **Then the debug log's redaction by shape** (bug-reports.md, "Redaction"): URLs keep scheme,
   host and path, query and fragment go; bearer tokens, JWTs, secret `key=value` pairs and long hex
   or base64 runs go; e-mail addresses and paths become `[email]` and `[path]`.
@@ -380,6 +387,15 @@ process, sampled with the handled errors' rate. Counts only: no call, device or 
   the app's data directory, at most five, synchronously (the process aborts right after). The page
   takes them on its next start (`crash_reports_take_native`) and reports them like its own, with the
   instance's setting and the user's choice, which the shell doesn't know.
+- **Desktop page** (the wasm UI in the webview): wasm has no backtrace, so the panic hook takes
+  the script stack (`new Error().stack`: the wasm functions that led there, by index while the
+  shipped module has no names, and the page's glue) and puts the panic's location after it as the
+  innermost frame; the web page does the same. On desktop the page's own log is short (the
+  shell's core and media do the work), and the shell's log is a call away, which a dying page
+  can't wait for: the hook keeps the panic in `localStorage` (`teamcraft.crash_reports.page_panics`,
+  at most five, unscrubbed like the shell's pending file, on the device only), and the next start
+  adds the shell's log lines up to the panic's second (`core_recent_log`; the shell lives on while
+  the page reloads) and reports it (TEAMCRAFT-3S came with no breadcrumbs at all).
 - **The server** reports its own panics straight to the backend in force (publisher's or own):
   built and scrubbed in the hook, sent from a thread of its own (a panicking request never waits
   for the backend), at most 20 per process and one per place in the code. No breadcrumbs: the
