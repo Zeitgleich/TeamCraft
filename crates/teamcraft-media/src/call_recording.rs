@@ -19,7 +19,6 @@
 //!   Nothing is logged about what was said or about the file, only that a recording started and
 //!   ended and how long it was.
 
-use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::{self, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -38,17 +37,11 @@ use crate::audio_codec::{
   AudioChannels, AudioContent, OpusDecoder, OpusEncoder, OpusEncoderConfig, OpusError,
 };
 use crate::audio_frame::{FRAME_SAMPLES_PER_CHANNEL, SAMPLE_RATE_HZ};
+use crate::call_recording_parts::{RECORDING_BITRATE_BPS, RecordingMixer, max_frames};
 use crate::ogg_opus::OggOpusWriter;
 
-/// Speech of several people at this rate stays clear in a mix; about 14 MB an hour.
-const BITRATE_BPS: i32 = 32_000;
 /// Frames queued for the recording thread (about ten seconds); beyond this, frames are dropped.
 const MAX_QUEUED_FRAMES: usize = 512;
-/// The own voice waiting for the next played frame, at most (200 ms): more means the two clocks
-/// drifted, and the oldest goes.
-const MAX_OWN_SAMPLES: usize = 10 * FRAME_SAMPLES_PER_CHANNEL;
-/// The longest recording this recorder makes, whatever it is asked for (the policy's ceiling).
-const MAX_LENGTH: Duration = Duration::from_secs(8 * 60 * 60);
 /// How often the recording thread looks whether it should stop while nothing arrives.
 const STOP_POLL: Duration = Duration::from_millis(100);
 
@@ -115,17 +108,12 @@ struct Shared {
   recorded_ms: AtomicU64,
 }
 
-/// The mix of the played frames and the own voice, frame by frame.
-struct Mixer {
-  own: VecDeque<f32>,
-}
-
 impl CallRecorder {
   /// Starts writing to `path` (created or replaced); `max` is the policy's longest recording.
   pub fn start(path: &Path, max: Duration) -> Result<Self, CallRecordingError> {
     let mut encoder = OpusEncoder::new(OpusEncoderConfig {
       content: AudioContent::Voice,
-      bitrate_bps: BITRATE_BPS,
+      bitrate_bps: RECORDING_BITRATE_BPS as i32,
       // A file has no losses to plan for, and gaps of silence would break its timing.
       has_inband_fec: false,
       has_dtx: false,
@@ -140,7 +128,7 @@ impl CallRecorder {
     let (frames, frame_rx) = mpsc::sync_channel(MAX_QUEUED_FRAMES);
     let shared = Arc::new(Shared::default());
     let thread_shared = Arc::clone(&shared);
-    let max_frames = (max.min(MAX_LENGTH).as_millis() / 20) as u64;
+    let max_frames = max_frames(max);
     let spawned = std::thread::Builder::new()
       .name("call-recording".to_owned())
       .spawn(move || {
@@ -279,35 +267,6 @@ impl RecordingSink {
   }
 }
 
-impl Mixer {
-  fn new() -> Self {
-    Self {
-      own: VecDeque::with_capacity(MAX_OWN_SAMPLES),
-    }
-  }
-
-  fn push_own(&mut self, samples: &[i16]) {
-    self.own.extend(
-      samples
-        .iter()
-        .map(|sample| f32::from(*sample) / f32::from(i16::MAX)),
-    );
-    let excess = self.own.len().saturating_sub(MAX_OWN_SAMPLES);
-    self.own.drain(..excess);
-  }
-
-  /// The played frame with as much of the own voice as is there, as 16-bit samples.
-  fn mix(&mut self, playback: &[f32]) -> Vec<i16> {
-    playback
-      .iter()
-      .map(|sample| {
-        let own = self.own.pop_front().unwrap_or(0.0);
-        to_i16(sample + own)
-      })
-      .collect()
-  }
-}
-
 /// Deletes recordings left in `folder` (by a crash, or an app killed while recording). The shells
 /// call it at start for their private recording folder (e2ee.md §8.3: a recording a crash left is
 /// not kept, and can't be read anyway: its key was only in the memory of the process that wrote
@@ -333,7 +292,7 @@ fn record(
   max_frames: u64,
   shared: &Shared,
 ) -> Result<Written, CallRecordingError> {
-  let mut mixer = Mixer::new();
+  let mut mixer = RecordingMixer::new();
   let mut written_frames = 0u64;
   loop {
     // Once stopping, what is queued is written and then the file ends; the app stops handing
@@ -352,11 +311,11 @@ fn record(
     };
     match frame {
       Frame::Own(opus) => match decoder.decode(&opus) {
-        Ok(samples) => mixer.push_own(&samples),
+        Ok(samples) => mixer.push_own_i16(&samples),
         Err(error) => debug!(%error, "own voice frame not decoded for the recording"),
       },
       Frame::Playback(playback) if playback.len() == FRAME_SAMPLES_PER_CHANNEL => {
-        let pcm = mixer.mix(&playback);
+        let pcm = mixer.mix_i16(&playback);
         let packet = encoder.encode(&pcm)?;
         writer.push(packet, FRAME_SAMPLES_PER_CHANNEL as u32)?;
         written_frames += 1;
@@ -378,11 +337,6 @@ fn record(
     samples,
     plaintext_bytes,
   })
-}
-
-fn to_i16(sample: f32) -> i16 {
-  // Invariant: the clamp keeps the product within i16.
-  (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16
 }
 
 fn remove(path: &Path) {
@@ -473,18 +427,8 @@ mod tests {
     fs::remove_dir_all(folder).unwrap();
   }
 
-  #[test]
-  fn the_own_voice_never_queues_more_than_its_bound() {
-    let mut mixer = Mixer::new();
-    mixer.push_own(&vec![1000; MAX_OWN_SAMPLES * 3]);
-    assert_eq!(mixer.own.len(), MAX_OWN_SAMPLES);
-    let mixed = mixer.mix(&[0.0; FRAME_SAMPLES_PER_CHANNEL]);
-    assert_eq!(mixed.len(), FRAME_SAMPLES_PER_CHANNEL);
-    assert!(mixed.iter().all(|sample| *sample > 0));
-    // Loud parts clip instead of wrapping around.
-    let mut loud = Mixer::new();
-    loud.push_own(&[i16::MAX; 4]);
-    assert_eq!(loud.mix(&[1.0; 4]), vec![i16::MAX; 4]);
+  fn to_i16(sample: f32) -> i16 {
+    (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16
   }
 
   fn tone(index: usize, frequency_hz: f32) -> Vec<f32> {

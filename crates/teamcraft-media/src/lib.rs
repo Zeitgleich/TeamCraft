@@ -91,6 +91,7 @@ pub mod call_native;
 pub mod call_recording;
 #[cfg(feature = "dave")]
 pub mod call_recording_notice;
+pub mod call_recording_parts;
 #[cfg(feature = "call-view")]
 pub mod call_telemetry;
 #[cfg(feature = "dave")]

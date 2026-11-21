@@ -5,10 +5,13 @@
 //! - **Banner:** once per recording that starts, and on joining a call that is being recorded: who
 //!   records, with "Leave call" next to "Continue" (objecting means leaving). When the verified
 //!   policy doesn't allow the recorder, it says so.
-//! - **Button:** "Record" in the control bar, only where the app records (the desktop app) and the
-//!   verified policy allows the user (admin.md §1.1).
+//! - **Button:** "Record" in the control bar, only where the app records (the desktop app, and the
+//!   browser where it has WebCodecs, #2114) and the verified policy allows the user (admin.md
+//!   §1.1).
 //! - **Take:** the finished recording waits in a card, also after the call ended, until the user
-//!   posts it into the call's conversation (an encrypted attachment) or deletes it.
+//!   posts it into the call's conversation (an encrypted attachment) or deletes it. The desktop
+//!   shell stages its decrypted copy for the core; in the browser the call module hands over the
+//!   decrypted file, which goes to the core like a picked file.
 
 use std::collections::BTreeSet;
 
@@ -215,20 +218,26 @@ pub fn CallRecordingTakeCard() -> impl IntoView {
     }
     is_posting.set(true);
     spawn_local(async move {
-      match tauri::call::<String>("call_recording_stage", &json!({})).await {
-        Ok(path) => {
+      match recording_source().await {
+        Ok(source) => {
           // The card may be gone by now (the take left the snapshot): the app state outlives it.
           if state
-            .try_write(|backend| backend.send_message(recording_message(take, path)))
+            .try_write(|backend| backend.send_message(recording_message(take, source)))
             .is_some()
           {
             state.show_brief_toast(i18n.t("call-recording-posted"));
           }
         },
-        Err(detail) => crate::feedback::report_failure(ActionFailure::other(detail)),
+        Err(failure) => crate::feedback::report_failure(failure),
       }
       is_posting.try_set(false);
     });
+  };
+  // In the browser the take lives in the page: closing or reloading it loses the take.
+  let hint_key = if tauri::is_available() {
+    "call-recording-take-hint"
+  } else {
+    "call-recording-take-hint-browser"
   };
   move || {
     let take = take.get()?;
@@ -246,7 +255,8 @@ pub fn CallRecordingTakeCard() -> impl IntoView {
           <h2 id="call-recording-take-title">{i18n.t("call-recording-take-title")}</h2>
           <p class="muted-text">{meta}</p>
           {take.is_at_limit.then(|| view! { <p class="muted-text">{i18n.t("call-recording-take-limit")}</p> })}
-          <p class="muted-text">{i18n.t("call-recording-take-hint")}</p>
+          {take.is_at_memory_limit.then(|| view! { <p class="muted-text">{i18n.t("call-recording-take-memory-limit")}</p> })}
+          <p class="muted-text">{i18n.t(hint_key)}</p>
         </div>
         <Show
           when=move || is_confirming_delete.get()
@@ -354,8 +364,38 @@ fn names_of(i18n: I18n, recorders: &[Recorder]) -> String {
     .join(", ")
 }
 
+/// The decrypted recording as the core uploads it: the desktop shell's staged copy, or the file
+/// the browser's call module hands over (registered with the core like a picked file).
+async fn recording_source() -> Result<FileSource, ActionFailure> {
+  if tauri::is_available() {
+    let path = tauri::call::<String>("call_recording_stage", &json!({}))
+      .await
+      .map_err(ActionFailure::other)?;
+    return Ok(FileSource::Path { path });
+  }
+  browser_recording_source().await
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn browser_recording_source() -> Result<FileSource, ActionFailure> {
+  let blob = crate::web_calls::recording_file().await?;
+  let bag = web_sys::FilePropertyBag::new();
+  bag.set_type("audio/ogg");
+  let file =
+    web_sys::File::new_with_blob_sequence_and_options(&js_sys::Array::of1(&blob), &file_name_now(), &bag)
+      .map_err(|_| ActionFailure::other("the recording could not be made a file"))?;
+  crate::large_files::source_of(&crate::large_files::LargeFile::Picked(file))
+    .await
+    .map_err(ActionFailure::other)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn browser_recording_source() -> Result<FileSource, ActionFailure> {
+  Err(ActionFailure::other("calls run in the browser only on the web"))
+}
+
 /// The message that posts a recording into its call's conversation.
-fn recording_message(take: CallRecordingTake, path: String) -> OutgoingMessage {
+fn recording_message(take: CallRecordingTake, source: FileSource) -> OutgoingMessage {
   OutgoingMessage {
     maybe_client_message_id: None,
     conversation: take.conversation,
@@ -370,7 +410,7 @@ fn recording_message(take: CallRecordingTake, path: String) -> OutgoingMessage {
     files: vec![OutgoingFile {
       file_name: file_name_now(),
       media_type: "audio/ogg".to_owned(),
-      source: FileSource::Path { path },
+      source,
       maybe_thumbnail: None,
       maybe_duration_ms: Some(take.duration_ms),
       maybe_waveform: None,

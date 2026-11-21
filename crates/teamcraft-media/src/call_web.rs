@@ -51,6 +51,7 @@ mod meter;
 #[cfg(feature = "effects")]
 mod picture;
 mod quic_datagrams;
+pub mod recording;
 mod screen_sound;
 #[cfg(feature = "effects")]
 mod segmentation_worker;
@@ -538,6 +539,9 @@ enum Command {
     maybe_max_lines: Option<u16>,
   },
   SetStatusCues(StatusCues),
+  /// Starts handing the call's audio to a recording, or stops (e2ee.md §8.3); the engine sends
+  /// the signed notice that tells the others.
+  Recording(Option<recording::WebRecordingSink>),
   /// Reads what the call's video does (stats for nerds, #938).
   #[cfg(feature = "call-view")]
   VideoStats(oneshot::Sender<teamcraft_client_api::video_stats::VideoStatsReport>),
@@ -981,6 +985,13 @@ impl WebCall {
     let _ = self.command(Command::SetStatusCues(status_cues));
   }
 
+  /// Hands the call's audio to a recording, or stops (`None`); the call tells everybody in it with
+  /// a signed notice (e2ee.md §8.3), and again after every rejoin.
+  pub fn set_recording(&self, maybe_sink: Option<recording::WebRecordingSink>) {
+    // The call already ended if this fails.
+    let _ = self.command(Command::Recording(maybe_sink));
+  }
+
   fn command(&self, command: Command) -> Result<(), WebCallError> {
     self
       .inputs
@@ -1211,6 +1222,7 @@ async fn run_call(
     resilience: config.resilience,
     maybe_ticket_source: config.maybe_ticket_source.clone(),
     cues: CuePlayer::new(config.status_cues),
+    maybe_recording: None,
     is_ending_lost: false,
     is_hanging_up: false,
     inputs: &inputs,
@@ -1346,6 +1358,8 @@ struct CallState<'a> {
   maybe_ticket_source: Option<Rc<dyn WebJoinTicketSource>>,
   /// Status sounds, mixed into the playback (never sent).
   cues: CuePlayer,
+  /// Where the call's audio goes while this device records it (e2ee.md §8.3).
+  maybe_recording: Option<recording::WebRecordingSink>,
   /// Rejoining failed; the call ends once the "connection lost" sound has played.
   is_ending_lost: bool,
   /// The call was left with the hang-up tone: the sessions are closed, and the call ends once
@@ -1531,6 +1545,10 @@ impl CallState<'_> {
         if !self.is_muted {
           self.encoder.push(&samples)?;
           self.push_thin_voice(&samples);
+          // The own voice as it is sent; a muted microphone isn't recorded.
+          if let Some(recording) = &self.maybe_recording {
+            recording.push_own(&samples);
+          }
         }
       },
       // Not muted with the microphone, like the desktop's.
@@ -1771,6 +1789,16 @@ impl CallState<'_> {
     self.meter.tick(now);
     for _ in 0..self.frame_cadence.due(now) {
       self.on_frame_tick(audio)?;
+      // At its maximum length (or after a failed write) the recording takes nothing more: the
+      // others are told it stopped; the app finishes the file.
+      if self
+        .maybe_recording
+        .as_ref()
+        .is_some_and(recording::WebRecordingSink::is_ended)
+      {
+        self.maybe_recording = None;
+        engine.set_recording(false);
+      }
       if self.is_ending_lost && !self.cues.is_playing(CallCue::ConnectionLost) {
         return Err(WebCallError::ConnectionLost);
       }
@@ -2542,6 +2570,10 @@ impl CallState<'_> {
     {
       *sample = (*sample + cue).clamp(-1.0, 1.0);
     }
+    // What this device plays, as the desktop records it (the status sounds included).
+    if let Some(recording) = &self.maybe_recording {
+      recording.push_playback(&mix);
+    }
     audio.play(&mix)
   }
 
@@ -2628,6 +2660,10 @@ impl CallState<'_> {
         engine.subscribe_video(stream_id, Some(max_layer));
       },
       Command::SetStatusCues(status_cues) => self.cues.set_setting(status_cues),
+      Command::Recording(maybe_sink) => {
+        engine.set_recording(maybe_sink.is_some());
+        self.maybe_recording = maybe_sink;
+      },
       #[cfg(feature = "call-view")]
       Command::VideoStats(done) => {
         // The caller may have given up waiting.

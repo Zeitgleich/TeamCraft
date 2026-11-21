@@ -69,6 +69,14 @@ extern "C" {
   #[wasm_bindgen(method, catch)]
   pub fn encode(this: &AudioEncoder, data: &AudioData) -> Result<(), JsValue>;
 
+  /// Resolves once every frame handed over came out (its outputs ran before).
+  #[wasm_bindgen(method, catch)]
+  pub fn flush(this: &AudioEncoder) -> Result<Promise, JsValue>;
+
+  /// Frames handed over that haven't come out yet.
+  #[wasm_bindgen(method, getter, js_name = encodeQueueSize)]
+  pub fn encode_queue_size(this: &AudioEncoder) -> u32;
+
   #[wasm_bindgen(method, catch)]
   pub fn close(this: &AudioEncoder) -> Result<(), JsValue>;
 

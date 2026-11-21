@@ -306,7 +306,7 @@ jobs:
         run: cargo test --workspace --doc
 
   # The crates' browser tests (wasm-bindgen-test in headless Chromium: the IndexedDB store and its
-  # upgrades, the service worker). nextest skips them, they only compile for wasm32 (issue #1164).
+  # upgrades, the service worker, the call recorder). nextest skips them, they only compile for wasm32 (issue #1164).
   # The CI image has no browser: Chromium and its driver come from apt, the test runner is the
   # prebuilt release matching Cargo.lock.
   browser-tests:
@@ -348,11 +348,16 @@ jobs:
           echo "${expected}  $RUNNER_TEMP/runner.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/runner.tar.gz" -C "$RUNNER_TEMP"
           install "$RUNNER_TEMP/${name}/wasm-bindgen-test-runner" /usr/local/bin/
-      # crates/teamcraft-core/webdriver.json starts Chromium headless with --no-sandbox (a container).
+      # webdriver.json of each crate starts Chromium headless with --no-sandbox (a container).
       - name: Browser tests
         run: >
           cargo test --target wasm32-unknown-unknown -p teamcraft-core --features service-worker,test-support
           --test web --test web_service_worker
+      # The browser's call recorder (#2114): WebCodecs and the origin private file system.
+      - name: Browser tests (call recording)
+        run: >
+          cargo test --target wasm32-unknown-unknown -p teamcraft-media --features web,call-view
+          --test wasm_call_recording
 
   # WebRTC audio processing (echo cancellation) is opt-in at build time, see
   # crates/teamcraft-media/README.md. Built from source here (version 2 isn't packaged).

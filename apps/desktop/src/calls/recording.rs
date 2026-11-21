@@ -190,6 +190,7 @@ pub(super) async fn finish(state: &Mutex<CallState>) -> Result<(), String> {
       duration_ms: take.duration_ms,
       size_bytes: take.size_bytes,
       is_at_limit,
+      is_at_memory_limit: false,
     },
     recorded: take,
   });
@@ -444,6 +445,7 @@ mod tests {
         duration_ms: recorded.duration_ms,
         size_bytes: recorded.size_bytes,
         is_at_limit: false,
+        is_at_memory_limit: false,
       },
       recorded,
     }

@@ -100,8 +100,14 @@ pub const EXPORT_NETWORK_CHANGED: &str = "network_changed";
 /// ([`crate::debug_log`]), for "Report a problem" (docs/bug-reports.md). The module has a log of
 /// its own: it is a wasm instance of its own.
 pub const EXPORT_RECENT_LOG: &str = "recent_log";
-/// `stop() -> Promise`: leaves a running call; the page is signing out.
+/// `stop() -> Promise`: leaves a running call and deletes this page's call recordings; the page is
+/// signing out (or the app moves to another tab).
 pub const EXPORT_STOP: &str = "stop";
+/// `recording_file() -> Promise<Blob>`: the finished call recording decrypted, an Ogg file the page
+/// posts into the call's conversation as a picked file (#2114). The take is no longer offered
+/// once it resolves; a rejection (`ActionFailure` wire text) leaves it offered. A module from
+/// before it has no such export (and offers no recording).
+pub const EXPORT_RECORDING_FILE: &str = "recording_file";
 /// `pick_screen(ScreenContentMode JSON, has_sound, ScreenShareResolution JSON) -> Promise<MediaStream>`:
 /// opens the browser's screen picker at once (`getDisplayMedia`), offering the tab's or the
 /// system's sound with `has_sound` (#441; left out, no sound), for a share of the resolution
