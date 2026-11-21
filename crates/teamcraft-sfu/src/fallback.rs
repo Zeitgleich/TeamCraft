@@ -63,7 +63,7 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::{Bytes, Error as WebSocketError, Message, error::ProtocolError};
 use tracing::{Instrument, debug, info_span, warn};
 
-use crate::audio_socket::{AudioSocketSecret, AudioTarget};
+use crate::audio_socket::{AUDIO_SOCKET_CHECK_INTERVAL, AUDIO_SOCKET_QUEUE, AudioSocketSecret, AudioTarget};
 use crate::auth::{JoinGrant, JoinTokenVerifier};
 use crate::config::FallbackConfig;
 use crate::prejoin::PreJoinSlot;
@@ -96,11 +96,6 @@ const MAX_UNJOINED_PER_DEVICE: usize = 2;
 /// How long a connection whose session moved to QUIC is still read, for what its client sent before
 /// it learned of the move; the client closes it as soon as it read the close.
 const SWITCH_LINGER: Duration = Duration::from_secs(5);
-/// Datagrams of a session's audio connection that wait for its session's task: a second of a voice
-/// in 20 ms packets. More waiting is a session that stalled, and what comes then is dropped.
-const AUDIO_SOCKET_QUEUE: usize = 64;
-/// How often an audio connection looks whether it is still the one its session uses.
-const AUDIO_SOCKET_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 /// What the kernel may hold of a connection's data that it hasn't sent yet (`TCP_NOTSENT_LOWAT`):
 /// beyond it a write waits, and what waits can still be dropped in the queue (#1810). A few
@@ -503,7 +498,7 @@ async fn run_session(
     },
     () = session.periodic() => SessionEnd::Closed,
     () = report_link_capacity(session, sender) => SessionEnd::Closed,
-    () = take_attached_audio(session, audio) => SessionEnd::Closed,
+    () = session.take_attached_audio(audio) => SessionEnd::Closed,
     written = &mut writer => match written {
       // The SFU closed it (a host control, a replaced connection).
       Ok(WriterEnd::Closed) => SessionEnd::Closed,
@@ -525,15 +520,6 @@ async fn run_session(
   writer.abort();
   debug!(?end, "fallback session closed");
   end
-}
-
-/// The datagrams the session's audio connection brings, as the session's own (#1979). Never ends: a
-/// session without an audio connection keeps waiting here.
-async fn take_attached_audio(session: &ParticipantSession, audio: &mut mpsc::Receiver<Bytes>) {
-  while let Some(datagram) = audio.recv().await {
-    session.on_datagram(&datagram);
-  }
-  std::future::pending::<()>().await;
 }
 
 /// A connection that carries a session's audio (#1979): `secret` must be one of a session that

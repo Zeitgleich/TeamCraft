@@ -11,7 +11,7 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{CallEvent, CallServerMessage, ErrorBody};
+use teamcraft_proto::{Base64Bytes, CallEvent, CallServerMessage, ErrorBody};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use wtransport::{RecvStream, SendStream};
@@ -29,6 +29,9 @@ pub enum Outgoing {
   /// The session moved to another connection (#1309): what was queued before this goes out on the
   /// current one, then its writer hands the queue on ([`SignalQueue::hand_over`]) and closes it.
   HandOver,
+  /// The secret of a connection for the session's own audio (#1979, #2141): not an event, it takes
+  /// no sequence number.
+  AudioSocket(Base64Bytes),
 }
 
 /// Numbers events per session, starting at 1 (api-conventions.md).
@@ -91,6 +94,7 @@ impl EventSequence {
         id,
         maybe_received_us: Some(received_us),
       },
+      Outgoing::AudioSocket(secret) => CallServerMessage::AudioSocket { secret },
       Outgoing::HandOver => return None,
     })
   }
@@ -193,7 +197,7 @@ mod tests {
   use super::*;
 
   #[test]
-  fn events_are_numbered_from_one_and_errors_and_pongs_are_not() {
+  fn events_are_numbered_from_one_and_errors_pongs_and_secrets_are_not() {
     let mut sequence = EventSequence::default();
     let event = || {
       Outgoing::Event(CallEvent::ActiveSpeakers {
@@ -214,6 +218,12 @@ mod tests {
       Some(CallServerMessage::Pong {
         id: 9,
         maybe_received_us: Some(5)
+      })
+    );
+    assert_eq!(
+      sequence.frame(Outgoing::AudioSocket(Base64Bytes::new(vec![7; 4]))),
+      Some(CallServerMessage::AudioSocket {
+        secret: Base64Bytes::new(vec![7; 4])
       })
     );
     assert!(matches!(

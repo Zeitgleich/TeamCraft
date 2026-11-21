@@ -39,6 +39,8 @@ use teamcraft_sfu::server::{CALL_PATH, Sfu};
 use tokio::net::UdpSocket;
 use wtransport::Identity;
 
+use crate::common::relay::relay_per_client;
+
 const HD: VideoResolution = VideoResolution {
   width: 1280,
   height: 720,
@@ -272,38 +274,19 @@ struct UplinkRelay {
 impl UplinkRelay {
   async fn start(sfu: SocketAddr) -> Self {
     let client_side = Arc::new(UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).await.unwrap());
-    let sfu_side = Arc::new(UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).await.unwrap());
-    sfu_side.connect(sfu).await.unwrap();
     let address = client_side.local_addr().unwrap();
     let is_losing = Arc::new(AtomicBool::new(false));
-    let client: Arc<Mutex<Option<SocketAddr>>> = Arc::default();
-    let (from_client, to_sfu, known_client, losing) = (
-      Arc::clone(&client_side),
-      Arc::clone(&sfu_side),
-      Arc::clone(&client),
-      Arc::clone(&is_losing),
-    );
-    tokio::spawn(async move {
-      let mut buffer = vec![0; 65_536];
-      let mut is_odd = false;
-      while let Ok((len, from)) = from_client.recv_from(&mut buffer).await {
-        *known_client.lock().unwrap() = Some(from);
+    let losing = Arc::clone(&is_losing);
+    let mut is_odd = false;
+    relay_per_client(
+      client_side,
+      sfu,
+      move |_| {
         is_odd = !is_odd;
-        if losing.load(Ordering::Relaxed) && is_odd {
-          continue;
-        }
-        let _ = to_sfu.send(&buffer[..len]).await;
-      }
-    });
-    tokio::spawn(async move {
-      let mut buffer = vec![0; 65_536];
-      while let Ok(len) = sfu_side.recv(&mut buffer).await {
-        let maybe_client = *client.lock().unwrap();
-        if let Some(client) = maybe_client {
-          let _ = client_side.send_to(&buffer[..len], client).await;
-        }
-      }
-    });
+        !(losing.load(Ordering::Relaxed) && is_odd)
+      },
+      |_| true,
+    );
     Self { address, is_losing }
   }
 

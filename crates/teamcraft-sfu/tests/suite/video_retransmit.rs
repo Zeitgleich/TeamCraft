@@ -30,6 +30,7 @@ use tokio::time::Instant;
 use wtransport::Identity;
 
 use crate::common::busy_camera::{BusyCamera, FRAMERATE, HD};
+use crate::common::relay::relay_per_client;
 
 /// The share's bitrate: a 720p busy picture's keyframes take a few dozen packets, as in #1762.
 const SHARE_BPS: u32 = 2_500_000;
@@ -138,44 +139,28 @@ struct LossyRelay {
 impl LossyRelay {
   async fn start(sfu: SocketAddr) -> Self {
     let client_side = Arc::new(UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).await.unwrap());
-    let sfu_side = Arc::new(UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).await.unwrap());
-    sfu_side.connect(sfu).await.unwrap();
     let address = client_side.local_addr().unwrap();
     let (video, dropped) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
-    let client: Arc<Mutex<Option<SocketAddr>>> = Arc::default();
-    let (from_client, to_sfu, known_client) = (
-      Arc::clone(&client_side),
-      Arc::clone(&sfu_side),
-      Arc::clone(&client),
-    );
-    tokio::spawn(async move {
-      let mut buffer = vec![0; 65_536];
-      while let Ok((len, from)) = from_client.recv_from(&mut buffer).await {
-        *known_client.lock().unwrap() = Some(from);
-        let _ = to_sfu.send(&buffer[..len]).await;
-      }
-    });
     let (seen, counted) = (Arc::clone(&video), Arc::clone(&dropped));
-    tokio::spawn(async move {
-      let mut buffer = vec![0; 65_536];
-      // A linear congruential generator (Numerical Recipes): enough for a loss pattern.
-      let mut state: u32 = 0x1762;
-      while let Ok(len) = sfu_side.recv(&mut buffer).await {
-        let is_lost = len >= VIDEO_PACKET_BYTES && {
+    // A linear congruential generator (Numerical Recipes): enough for a loss pattern.
+    let state = Mutex::new(0x1762_u32);
+    relay_per_client(
+      client_side,
+      sfu,
+      |_| true,
+      move |packet| {
+        let is_lost = packet.len() >= VIDEO_PACKET_BYTES && {
           seen.fetch_add(1, Ordering::Relaxed);
-          state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-          (state >> 16).is_multiple_of(LOSS_ONE_IN)
+          let mut state = state.lock().unwrap();
+          *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+          (*state >> 16).is_multiple_of(LOSS_ONE_IN)
         };
         if is_lost {
           counted.fetch_add(1, Ordering::Relaxed);
-          continue;
         }
-        let maybe_client = *client.lock().unwrap();
-        if let Some(client) = maybe_client {
-          let _ = client_side.send_to(&buffer[..len], client).await;
-        }
-      }
-    });
+        !is_lost
+      },
+    );
     Self {
       address,
       video,

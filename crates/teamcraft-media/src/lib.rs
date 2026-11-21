@@ -27,6 +27,8 @@ pub mod fragment;
 pub mod jitter;
 pub mod join_probe;
 pub mod link_probe;
+#[cfg(all(feature = "native", unix))]
+mod marked_udp_socket;
 #[cfg(feature = "message-sounds")]
 pub mod message_sounds;
 pub mod nack;

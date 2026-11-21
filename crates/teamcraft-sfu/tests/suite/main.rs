@@ -15,6 +15,7 @@ mod host_controls;
 mod link_probe;
 mod multi_device;
 mod native_client;
+mod quic_audio_connection;
 mod reconnect;
 mod reporting;
 mod screen_layer_bitrate;

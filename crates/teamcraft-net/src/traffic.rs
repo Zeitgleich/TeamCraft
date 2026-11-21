@@ -14,6 +14,8 @@ use tokio::net::TcpStream;
 
 /// DSCP Expedited Forwarding (RFC 3246).
 const DSCP_EXPEDITED_FORWARDING: u8 = 46;
+/// The ECN field: the low two bits of the TOS / traffic class byte (RFC 3168).
+const ECN_MASK: u8 = 0b11;
 
 /// What a connection carries, for the mark of its packets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -33,6 +35,13 @@ impl TrafficClass {
       Self::Voice => DSCP_EXPEDITED_FORWARDING,
     }
   }
+
+  /// The whole TOS / traffic class byte of a datagram of this class: the DSCP above the ECN
+  /// codepoint `ecn_bits` (of which only the low two bits count). A QUIC connection chooses the ECN
+  /// codepoint per datagram (RFC 9000 §13.4); the class keeps the DSCP.
+  pub fn tos_byte(self, ecn_bits: u8) -> u8 {
+    (self.dscp() << 2) | (ecn_bits & ECN_MASK)
+  }
 }
 
 /// Marks the packets `stream` sends with `class`. The ECN bits stay the kernel's. On a platform
@@ -49,6 +58,23 @@ pub fn mark_tcp(stream: &TcpStream, class: TrafficClass) -> io::Result<()> {
       }
       set_tclass_v6(&socket, tos)
     },
+  }
+}
+
+/// Sets the whole TOS / traffic class byte (DSCP and ECN, [`TrafficClass::tos_byte`]) of what the
+/// UDP `socket` sends to `destination` from now on, for a sender that writes no per-datagram TOS of
+/// its own. IPv4 destinations, IPv4-mapped ones of a dual-stack socket included, take `IP_TOS`;
+/// IPv6 ones `IPV6_TCLASS`, which is a no-op where socket2 lacks it (iOS, Windows).
+pub fn set_udp_tos(socket: SockRef<'_>, destination: SocketAddr, tos: u8) -> io::Result<()> {
+  let tos = u32::from(tos);
+  let is_ipv4 = match destination {
+    SocketAddr::V4(_) => true,
+    SocketAddr::V6(address) => address.ip().to_ipv4_mapped().is_some(),
+  };
+  if is_ipv4 {
+    socket.set_tos_v4(tos)
+  } else {
+    set_tclass_v6(&socket, tos)
   }
 }
 
@@ -85,6 +111,22 @@ mod tests {
     assert_eq!(TrafficClass::BestEffort.dscp(), 0);
   }
 
+  #[test]
+  fn the_tos_byte_keeps_the_ecn_codepoint_below_the_dscp() {
+    // Not-ECT, ECT(1), ECT(0), CE.
+    assert_eq!(TrafficClass::Voice.tos_byte(0b00), 0xB8);
+    assert_eq!(TrafficClass::Voice.tos_byte(0b01), 0xB9);
+    assert_eq!(TrafficClass::Voice.tos_byte(0b10), 0xBA);
+    assert_eq!(TrafficClass::Voice.tos_byte(0b11), 0xBB);
+    assert_eq!(TrafficClass::BestEffort.tos_byte(0b10), 0b10);
+  }
+
+  #[test]
+  fn bits_above_the_ecn_field_cannot_change_the_dscp() {
+    assert_eq!(TrafficClass::Voice.tos_byte(0xFE), 0xBA);
+    assert_eq!(TrafficClass::BestEffort.tos_byte(0xFC), 0);
+  }
+
   #[tokio::test]
   async fn a_voice_connection_over_ipv4_is_marked() {
     let stream = connected("127.0.0.1:0").await;
@@ -113,6 +155,36 @@ mod tests {
     let stream = connected("127.0.0.1:0").await;
     mark_tcp(&stream, TrafficClass::BestEffort).unwrap();
     assert_eq!(SockRef::from(&stream).tos_v4().unwrap(), 0);
+  }
+
+  #[test]
+  fn a_udp_socket_takes_the_whole_byte_for_ipv4() {
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let destination: SocketAddr = "127.0.0.1:9".parse().unwrap();
+    set_udp_tos(
+      SockRef::from(&socket),
+      destination,
+      TrafficClass::Voice.tos_byte(0b10),
+    )
+    .unwrap();
+    assert_eq!(SockRef::from(&socket).tos_v4().unwrap(), 0xBA);
+  }
+
+  /// Linux takes `IP_TOS` on an IPv6 socket for its IPv4-mapped peers; other systems may refuse it,
+  /// and the caller then sends unmarked.
+  #[cfg(any(target_os = "android", target_os = "linux"))]
+  #[test]
+  fn a_dual_stack_udp_socket_marks_by_the_destinations_family() {
+    let Ok(socket) = std::net::UdpSocket::bind("[::]:0") else {
+      // A runner without IPv6.
+      return;
+    };
+    let mapped: SocketAddr = "[::ffff:127.0.0.1]:9".parse().unwrap();
+    set_udp_tos(SockRef::from(&socket), mapped, 0xBA).unwrap();
+    assert_eq!(SockRef::from(&socket).tos_v4().unwrap(), 0xBA);
+    let native: SocketAddr = "[::1]:9".parse().unwrap();
+    set_udp_tos(SockRef::from(&socket), native, 0xB9).unwrap();
+    assert_eq!(SockRef::from(&socket).tclass_v6().unwrap(), 0xB9);
   }
 
   async fn connected(address: &str) -> TcpStream {

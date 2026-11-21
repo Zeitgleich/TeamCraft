@@ -130,6 +130,8 @@ async fn a_ping_is_answered_without_taking_an_event_number() {
           assert_eq!(seq, last_seq + 1);
           last_seq = seq;
         },
+        // The offer of an audio connection (#2141), right after the join: no answer.
+        CallServerMessage::AudioSocket { .. } => {},
         other => answers.push(other),
       }
     }
@@ -350,8 +352,11 @@ async fn run_client(
   tokio::spawn(async move {
     let mut last_seq = 1;
     while let Ok(message) = read_message::<CallServerMessage>(&mut recv, MAX_SIGNALING_BYTES).await {
-      let CallServerMessage::Event { seq, event } = message else {
-        panic!("unexpected frame {message:?}");
+      let (seq, event) = match message {
+        CallServerMessage::Event { seq, event } => (seq, event),
+        // The offer of an audio connection (#2141): this client keeps its audio on the session's.
+        CallServerMessage::AudioSocket { .. } => continue,
+        other => panic!("unexpected frame {other:?}"),
       };
       assert_eq!(seq, last_seq + 1, "event sequence must increase by one");
       last_seq = seq;

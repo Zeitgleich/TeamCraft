@@ -1108,9 +1108,28 @@ voice, below), through the same kind of reverse proxy as the gateway. Setup and 
   `IPV6_TCLASS`), the session's connection stays unmarked (it carries video, RFC 8837). A home
   router's Wi-Fi (WMM) and many office switches serve it first; the Internet beyond mostly clears
   the mark, and the TLS proxy in front of the SFU starts a connection of its own, so only the hops up
-  to the proxy see it. Browsers have no API for it. QUIC isn't marked: quinn-udp writes the TOS byte
-  of every datagram with its ECN bits only, and one QUIC packet may carry voice and video together;
-  marking needs a QUIC connection of the voice alone.
+  to the proxy see it. Browsers have no API for it.
+- **QUIC's voice gets a connection of its own, marked too** (#2141): one QUIC packet may bundle
+  voice and video, and quinn marks nothing per datagram; worse, quinn-udp 0.5 hands every
+  datagram's TOS / traffic class byte to the kernel in a control message (`IP_TOS` /
+  `IPV6_TCLASS`) that holds only the ECN codepoint and takes the place of any DSCP set on the
+  socket. So a QUIC session gets an `audio_socket` secret after its join (and after a switch from
+  the fallback) as the fallback's does, and the native apps open a second QUIC connection to the
+  same SFU address that starts with `attach_audio`; the own audio datagrams go there while it is
+  up. Its socket (`teamcraft-media` `marked_udp_socket.rs`, behind the vendored wtransport's
+  `Endpoint::client_with_socket`) sends with plain `sendto` after setting the socket's byte to EF
+  above the ECN codepoint quinn chose for that datagram (`TrafficClass::tos_byte`), so ECN keeps
+  working; receiving stays quinn-udp's. Both families: `IP_TOS` for IPv4 and IPv4-mapped peers,
+  `IPV6_TCLASS` for IPv6 (not on iOS, where socket2 has no option: unmarked). Unix only (Linux,
+  Android, macOS, iOS); Windows ignores `IP_TOS` from applications, so there the voice stays on the
+  session's connection. Browsers ignore the secret. On the SFU the connection is no session either:
+  once attached it gives up its pre-join slot (one per session; a later attach ends the earlier one)
+  and ends with its session. A network change moves it to a fresh marked socket together with the
+  session's connection; when it breaks it reconnects with backoff while the audio goes on the
+  session's connection; a close by the SFU (session ended, refused, replaced, going away) ends it,
+  and the session's next connection brings a new secret. Considered and not taken: a wrapping
+  socket on the session's own connection (it would mark video too) and per-datagram marks in
+  quinn (no API; it would mean patching quinn-udp).
 - **Pacing to the drain rate** (`fallback_pacer`, #1810): behind the SFU's socket sit the kernel's and
   a reverse proxy's buffers, megabytes that TCP fills as fast as it is given media; on a link that
   dips to 1.5 Mbit/s that was seconds of video with the voice and pings behind it, until the
