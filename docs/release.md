@@ -587,7 +587,8 @@ Set up once (developer portal and App Store Connect, by an Account Holder or Adm
    now. With these answers App Store Connect needs no documents, so `ITSAppUsesNonExemptEncryption`
    is `false` in `apps/ios/project.yml` and builds don't wait as *Missing Compliance*. Distribution
    in France needs a declaration to the French authority (ANSSI) first; proprietary algorithms would
-   change the answers.
+   change the answers. France is switched off in *Pricing and Availability* until then; the filing, the
+   decision and the steps are in [france-cryptology.md](france-cryptology.md).
 
 Renewal: the distribution certificate expires after a year. Make a new one (step 2), regenerate the
 four profiles with it (step 3), replace the two certificate secrets, then revoke the old one.
@@ -627,6 +628,10 @@ screenshots, uploaded by hand in the Play Console. The product page's creative a
 screens) and `search/` (3840 × 2560, three phones with the app), go in by hand: the version →
 *Header and search results*. Needs Node 22+, Chrome, python3 with
 Pillow (and `cryptography` for the upload), and the fonts Inter and Noto Color Emoji.
+
+The English texts of the listing (name, subtitle, promotional text, description, keywords) are in
+`apps/ios/store/en-US/`; the German ones are kept in App Store Connect. A language has to be added to
+the version in App Store Connect (*+* next to the language) before `upload-screenshots.py` fills it.
 
 ## App Store
 
