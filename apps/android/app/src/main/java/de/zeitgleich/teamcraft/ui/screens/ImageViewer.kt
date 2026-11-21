@@ -311,6 +311,19 @@ fun ImageViewer(
 }
 
 /**
+ * Cutout mode of a window that hides the system bars and draws into the cutout: `ALWAYS` from API
+ * 30 (`SHORT_EDGES` is deprecated there and `ALWAYS` is its replacement), `SHORT_EDGES` before.
+ * Both only apply to API 28+, callers check that.
+ */
+internal fun fullScreenCutoutMode(): Int =
+  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+  } else {
+    @Suppress("DEPRECATION")
+    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+  }
+
+/**
  * Hides the status and navigation bars while the viewer shows (a swipe from the edge brings them
  * back for a moment) and lets the picture use the cutout area. The bars return when it closes.
  */
@@ -321,7 +334,7 @@ internal fun ImmersiveDialogWindow() {
     val window = (view.parent as? DialogWindowProvider)?.window ?: return@DisposableEffect onDispose {}
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
       window.attributes = window.attributes.apply {
-        layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        layoutInDisplayCutoutMode = fullScreenCutoutMode()
       }
     }
     val controller = WindowCompat.getInsetsController(window, view)
