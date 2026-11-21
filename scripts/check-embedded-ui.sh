@@ -13,8 +13,7 @@ target_dir="${1:-target}"
 # macOS runners' toolchain), `build/teamcraft-desktop/<hash>/`.
 index="$(find "$target_dir" \( -path '*/build/teamcraft-desktop-*/out/frontend/index.html' \
   -o -path '*/build/teamcraft-desktop/*/out/frontend/index.html' \) \
-  ! -path '*/teamcraft-desktop-native/*' -type f -print0 \
-  | xargs -0 ls -t 2>/dev/null | head -n 1)" || true
+  ! -path '*/teamcraft-desktop-native/*' -type f -exec ls -t {} + 2>/dev/null | head -n 1)" || true
 if [ -z "$index" ]; then
   echo "error: no embedded index.html found under $target_dir (searched in $(pwd))" >&2
   echo "  patterns: */build/teamcraft-desktop-*/out/frontend/index.html, */build/teamcraft-desktop/*/out/frontend/index.html" >&2
