@@ -158,7 +158,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   let start = initial_location(backend.as_ref());
   let change_source = backend.clone();
   let state = AppState::new(backend, settings, start);
-  provide_context(state);
+  state.provide();
   if let Some(inbox) = use_context::<ShareInbox>() {
     inbox.connect_app(state);
   }

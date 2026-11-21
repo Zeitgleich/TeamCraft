@@ -11,7 +11,7 @@ use teamcraft_proto::{CustomEmojiHash, CustomEmojiRef};
 
 use crate::components::file_views::blob_url;
 use crate::space_images::revoke;
-use crate::state::use_app_state;
+use crate::state::{AppState, use_app_state};
 
 /// URLs kept for the session; past this they are dropped together. Each is one small picture.
 const MAX_URLS: usize = 512;
@@ -26,7 +26,8 @@ thread_local! {
 
 /// The set is needed here (the picker, the `:` suggestions, a picture this device lacks): the
 /// backend reads it unless it did lately and nothing changed. Asking changes nothing to read.
-pub fn want_set() {
+/// Takes the state: the composer asks from a task after a keystroke, outside any component.
+pub fn want_set(state: AppState) {
   let now = crate::clock::now_ms();
   let is_due = LAST_WANTED_MS.with(|last| {
     let is_due = last.get().is_none_or(|wanted| now - wanted >= WANT_EVERY_MS);
@@ -36,7 +37,7 @@ pub fn want_set() {
     is_due
   });
   if is_due {
-    use_app_state().read(|backend| backend.want_custom_emoji());
+    state.read(|backend| backend.want_custom_emoji());
   }
 }
 

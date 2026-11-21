@@ -29,7 +29,7 @@
 //! for the lock, holds the store's group while it writes, and the engine and every read waited for
 //! it (937 ms inside a chat list read on 1.0.33).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::panic::AssertUnwindSafe;
 use std::sync::mpsc;
 use std::sync::mpsc::TryRecvError;
@@ -48,11 +48,11 @@ use teamcraft_core::chat_list_pass::{ListPass, SliceLimit};
 use teamcraft_core::client::{CatchUpFocus, LinkRequestList};
 use teamcraft_core::clock::{Clock as _, SystemClock};
 use teamcraft_core::notified;
-use teamcraft_core::notify_rules::load_mention_preferences;
+use teamcraft_core::notify_rules::{load_mention_preferences, save_mention_preferences};
 use teamcraft_core::pending_work::{ConversationOutbox, PendingWork};
-use teamcraft_core::prefetch::load_segment_prefetch;
+use teamcraft_core::prefetch::{load_segment_prefetch, save_segment_prefetch};
 use teamcraft_core::push_guard;
-use teamcraft_core::push_preview::{device_push_content, push_content_mode};
+use teamcraft_core::push_preview::{device_push_content, push_content_mode, save_device_push_content};
 use teamcraft_core::records;
 use teamcraft_core::store::{Table, read_together, write_group};
 use teamcraft_core::transfers::Transfers;
@@ -72,8 +72,8 @@ use crate::store_threads::StoreHold;
 use crate::types::LinkRequestItem;
 use crate::types::{
   AccountState, ConversationItem, FirstSyncItem, FirstSyncStageItem, GroupMentionReachItem, KeyCatchUpItem,
-  LeaveChoice, MentionSettings, MentionableGroupItem, NotificationContentSettings, NotifiedConversation,
-  Presence, PushDiagnosticsInfo, SegmentPrefetchMode, SpaceMenuItem, share_targets,
+  LeaveChoice, MentionSettings, MentionableGroupItem, NotificationContent, NotificationContentSettings,
+  NotifiedConversation, Presence, PushDiagnosticsInfo, SegmentPrefetchMode, SpaceMenuItem, share_targets,
 };
 
 /// How many of a conversation's newest rows a chat list preview looks through for a message people
@@ -86,6 +86,9 @@ const KEPT_CHAT_LIST_KEY: &str = "chat_list";
 /// How often at most a pass keeps a list that changed: it is only what the next start shows before
 /// its own pass, and a catch-up changes the list several times a second.
 const KEEP_CHAT_LIST_EVERY: Duration = Duration::from_secs(10);
+
+/// The name the chat list pass after a start runs under between jobs ([`Reads::when_idle`]).
+const IDLE_CHAT_LIST_JOB: &str = "chat_list_after_start";
 
 /// Work for the read thread.
 type ReadJob = Box<dyn FnOnce(&mut Reads) + Send>;
@@ -140,6 +143,9 @@ struct CacheWrites {
 struct PendingCache {
   tallies: CountedTallies,
   maybe_chat_list: Option<KeptChatList>,
+  /// Conversations whose notification record the store caught up with ([`notified::forget_caught_up`],
+  /// issue #2225).
+  caught_up_notifications: BTreeSet<ConversationId>,
   /// A write is queued on the actions' thread and hasn't taken these yet.
   is_queued: bool,
 }
@@ -370,6 +376,22 @@ impl ReadQueue {
     let (value, dispatched) = answer.await.map_err(|_| TeamCraftError::EngineStopped)??;
     dispatched.await.map_err(|_| TeamCraftError::EngineStopped)??;
     Ok(value)
+  }
+
+  /// Runs a local write that leaves nothing for the client (a setting the store keeps) on the
+  /// actions' thread, in one group, and answers once it committed. Unlike [`Self::act`] it doesn't
+  /// wait for the engine, which may be busy for seconds with the client's opening or a catch-up
+  /// (issue #2225: "Engine lane blocked" for a setting the engine only wrote to the store).
+  pub(crate) async fn keep<R, F>(&self, job: F) -> Result<R, TeamCraftError>
+  where
+    R: Send + 'static,
+    F: FnOnce(&mut Reads) -> Result<R, TeamCraftError> + Send + 'static,
+  {
+    let answer = self.queue(Lane::Act, WhenCallerGone::Run, move |reads| {
+      let store = reads.store.clone();
+      write_group(&store, || job(reads))
+    })?;
+    answer.await.map_err(|_| TeamCraftError::EngineStopped)?
   }
 
   /// Ends the thread and returns once it let go of the store. Reads from then on get
@@ -642,8 +664,14 @@ fn spawn_lane(
         let job = match jobs.try_recv() {
           Ok(job) => job,
           Err(TryRecvError::Empty) if reads.is_idle_work_due() => {
+            // Timed like a job (issue #2225): a read that arrives meanwhile waits for it, and the
+            // report names it instead of an `unknown` blocker.
+            let timing = perf_jobs::queued(PerfJobKind::ReadQueue, IDLE_CHAT_LIST_JOB);
+            let span = timing.span();
+            let running = timing.start();
             // Like a job's, a panic here leaves the thread working.
-            let _ = std::panic::catch_unwind(AssertUnwindSafe(|| reads.when_idle()));
+            let _ = std::panic::catch_unwind(AssertUnwindSafe(|| span.in_scope(|| reads.when_idle())));
+            running.done();
             continue;
           },
           Err(TryRecvError::Empty) => match jobs.recv() {
@@ -692,6 +720,13 @@ impl CacheWrites {
     self.queue_write(&mut pending);
   }
 
+  /// A notification's record the store caught up with: dropped with what else waits.
+  fn forget_notification(self: &Arc<Self>, conversation: ConversationId) {
+    let mut pending = self.lock();
+    pending.caught_up_notifications.insert(conversation);
+    self.queue_write(&mut pending);
+  }
+
   /// Queues the write on the actions' thread unless one is queued already.
   fn queue_write(self: &Arc<Self>, pending: &mut PendingCache) {
     if pending.is_queued {
@@ -711,6 +746,9 @@ impl CacheWrites {
       taken.tallies.write(store)?;
       if let Some(kept) = &taken.maybe_chat_list {
         records::put_json(store, Table::Account, KEPT_CHAT_LIST_KEY, kept)?;
+      }
+      for conversation in &taken.caught_up_notifications {
+        notified::forget_caught_up(store, *conversation)?;
       }
       Ok(())
     });
@@ -1333,16 +1371,52 @@ impl Reads {
 
   /// What the newest notification showed of the conversation, while the store hasn't caught up
   /// to it (see [`notified::notified_conversation`]).
+  ///
+  /// Reads only (issue #2225): dropping a record the store caught up with is a write, which waited
+  /// here for the actions' thread and the log purge (7 s on 1.0.41) with every read queued behind
+  /// it. The actions' thread drops it with the other caches.
   pub(crate) fn notified_conversation(
     &self,
     conversation_id: &str,
   ) -> Result<Option<NotifiedConversation>, TeamCraftError> {
     let conversation: ConversationId = parse_id(conversation_id)?;
-    Ok(notified::notified_conversation(&self.store, conversation)?.map(Into::into))
+    let maybe_notified = notified::notified_conversation(&self.store, conversation)?;
+    if maybe_notified.is_none() && notified::is_caught_up(&self.store, conversation)? {
+      self.forget_notification(conversation);
+    }
+    Ok(maybe_notified.map(Into::into))
+  }
+
+  /// Has the actions' thread drop a notification record the store caught up with; that thread does
+  /// it at once.
+  fn forget_notification(&self, conversation: ConversationId) {
+    match &self.maybe_cache_writes {
+      Some(cache_writes) => cache_writes.forget_notification(conversation),
+      None => {
+        let store = self.store.clone();
+        if let Err(error) = write_group(&store, || notified::forget_caught_up(&store, conversation)) {
+          tracing::debug!(%error, "could not drop a notification the store caught up with");
+        }
+      },
+    }
   }
 
   pub(crate) fn push_diagnostics(&self) -> Result<PushDiagnosticsInfo, TeamCraftError> {
     Ok(push_guard::push_diagnostics(&self.store)?.into())
+  }
+
+  /// Keeps the mention preferences in the store, so a process that opens the store later (the iOS
+  /// notification extension) applies them too, and the engine reads them for a push from there.
+  pub(crate) fn set_mention_settings(&self, settings: MentionSettings) -> Result<(), TeamCraftError> {
+    Ok(save_mention_preferences(&self.store, &settings.into())?)
+  }
+
+  pub(crate) fn set_notification_content(&self, content: NotificationContent) -> Result<(), TeamCraftError> {
+    Ok(save_device_push_content(&self.store, &content.into())?)
+  }
+
+  pub(crate) fn set_segment_prefetch(&self, mode: SegmentPrefetchMode) -> Result<(), TeamCraftError> {
+    Ok(save_segment_prefetch(&self.store, mode.into())?)
   }
 
   pub(crate) fn mention_settings(&self) -> MentionSettings {
@@ -1792,6 +1866,92 @@ mod tests {
       files.finish();
     }
 
+    /// Issue #2225: opening a conversation from its notification asks what the notification
+    /// showed. Once the store caught up, the record goes, and that write waited on the main read
+    /// thread for the engine's group of writes and the log purge (7 s on 1.0.41), with every read
+    /// behind it. Now the read only reads; the actions' thread drops the record afterwards.
+    #[tokio::test]
+    async fn a_caught_up_notification_is_dropped_by_the_actions_thread_not_the_read() {
+      let files = FileLanes::open();
+      let conversation: ConversationId = parse_id("42").unwrap();
+      let key = format!("notified/{conversation}");
+      let notified = teamcraft_core::notified::NotifiedConversation {
+        conversation_id: conversation,
+        maybe_name: None,
+        is_direct: false,
+        maybe_message: None,
+      };
+      records::put_json(&files.engine, Table::Account, &key, &notified).unwrap();
+      files
+        .engine
+        .put(Table::Conversations, &conversation.to_string(), b"{}")
+        .unwrap();
+      let engine = files.engine.clone();
+      let (held, is_held) = mpsc::channel();
+      let (release, released) = mpsc::channel::<()>();
+      let catch_up = std::thread::spawn(move || {
+        write_group(&engine, || {
+          engine.put(Table::Users, "engine", b"1")?;
+          held.send(()).map_err(|_| TeamCraftError::EngineStopped)?;
+          // Deliberately ignored: the test ends the wait either way.
+          let _ = released.recv();
+          Ok::<_, TeamCraftError>(())
+        })
+        .unwrap();
+      });
+      is_held.recv().unwrap();
+
+      let shown = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        files
+          .queue
+          .read(move |reads| reads.notified_conversation(&conversation.to_string())),
+      )
+      .await
+      .expect("the read waits for no group of writes")
+      .unwrap();
+      assert!(shown.is_none(), "the store caught up: nothing left to show");
+
+      release.send(()).unwrap();
+      catch_up.join().unwrap();
+      // Queued after the record's drop on the actions' thread: it ran once this answers. No engine
+      // here to take what the action hands on, so it fails after its local half.
+      assert!(files.queue.act(|_| Ok(())).await.is_err());
+      assert_eq!(files.engine.get(Table::Account, &key).unwrap(), None);
+      files.finish();
+    }
+
+    /// Issue #2225: a setting the store keeps is written on the actions' thread and answers once
+    /// written; it never waits for the engine ("Engine lane blocked: set_mention_settings", 1.9 s
+    /// behind the client's opening). These lanes have no engine at all.
+    #[tokio::test]
+    async fn a_setting_is_kept_without_the_engine() {
+      let files = FileLanes::open();
+      files
+        .queue
+        .keep(|reads| reads.set_segment_prefetch(SegmentPrefetchMode::Always))
+        .await
+        .expect("no engine needed");
+      let mode = files.queue.read(|reads| reads.segment_prefetch()).await.unwrap();
+      assert_eq!(mode, SegmentPrefetchMode::Always);
+      files.finish();
+    }
+
+    /// The read threads never write (issues #1962, #2225): a write there is caught in debug builds
+    /// and fails the read, instead of waiting for the write lock with the reads behind it.
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    async fn a_read_thread_that_writes_is_caught() {
+      let files = FileLanes::open();
+      let wrote = files
+        .queue
+        .read(|reads| Ok(reads.store.put(Table::Users, "a", b"read")?))
+        .await;
+      assert!(wrote.is_err());
+      assert_eq!(files.engine.get(Table::Users, "a").unwrap(), None);
+      files.finish();
+    }
+
     /// Issue #2225: an action told the app of its change (`EventListener::on_change`, JNI on
     /// Android) while it still held the store's writer. One such call hung for 7.2 s on 1.0.41, and
     /// a read that wrote, every read behind it and the engine's next group of writes waited with
@@ -1877,7 +2037,7 @@ mod tests {
             Arc::clone(&journal),
           )
           .unwrap();
-          engine.sharing(LaneStore::reader(Arc::clone(&writer), Arc::new(reader)))
+          engine.sharing(LaneStore::read_only(Arc::clone(&writer), Arc::new(reader)))
         };
         let (jobs, _) = tokio_mpsc::unbounded_channel::<Job>();
         let queue = ReadQueue::start(

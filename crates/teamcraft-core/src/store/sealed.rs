@@ -1059,14 +1059,24 @@ impl<B: RecordBackend> SealedStore<B> {
       return state;
     }
     let me = thread::current().id();
+    let must_wait = |state: &mut State<B>| match state.maybe_group_owner {
+      Some(owner) => owner != me,
+      None => state.awaiting > 0,
+    };
+    let mut state = state;
+    if !must_wait(&mut state) {
+      return state;
+    }
+    let maybe_waiting = Mark::turn_wait();
     // Checked again on every wake: another thread may have begun a group meanwhile.
-    self
+    let state = self
       .group_ended
-      .wait_while(state, |state| match state.maybe_group_owner {
-        Some(owner) => owner != me,
-        None => state.awaiting > 0,
-      })
-      .unwrap_or_else(|poisoned| poisoned.into_inner())
+      .wait_while(state, must_wait)
+      .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(waiting) = maybe_waiting {
+      waiting.note();
+    }
+    state
   }
 
   /// Runs `step` on `table`'s key directory.

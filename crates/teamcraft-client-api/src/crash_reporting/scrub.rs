@@ -4,7 +4,9 @@
 //!
 //! Defence in depth on top of security.md (nothing logs content) and the debug log ring's own
 //! redaction: the same [`redact`] runs again, and double-quoted text (the values a `Debug`
-//! struct or a `{:?}` prints) is removed whole, whatever it looks like.
+//! struct or a `{:?}` prints) is removed whole, unless it is plainly code: a source file of the
+//! app's tree (`"crates/teamcraft-ui/src/state.rs"`) or a Rust type path
+//! (`"teamcraft_ui::state::AppState"`), which a panic of `Location` or `expect_context` quotes.
 
 use crate::debug_log::redact;
 
@@ -70,24 +72,86 @@ fn scrub_frame(frame: StackFrame) -> StackFrame {
   }
 }
 
-/// `"…"` becomes `"[redacted]"`; an unclosed quote runs to the end.
+/// `"…"` becomes `"[redacted]"`, unless it is code ([`code_value`]); an unclosed quote runs to the
+/// end.
 fn remove_quoted(text: &str) -> String {
   let mut out = String::with_capacity(text.len());
   let mut rest = text;
   while let Some(open) = rest.find('"') {
     out.push_str(&rest[..=open]);
-    out.push_str(REDACTED);
     let after = &rest[open + 1..];
     match closing_quote(after) {
       Some(close) => {
+        out.push_str(code_value(&after[..close]).as_deref().unwrap_or(REDACTED));
         out.push('"');
         rest = &after[close + 1..];
       },
-      None => return out,
+      None => {
+        out.push_str(REDACTED);
+        return out;
+      },
     }
   }
   out.push_str(rest);
   out
+}
+
+/// A quoted value that is plainly code and kept: a relative path to a Rust source file (as
+/// [`source_path`] keeps a frame's) or a Rust type path. Anything else, `None`.
+fn code_value(quoted: &str) -> Option<String> {
+  if is_relative_source_file(quoted) {
+    return source_path(quoted);
+  }
+  is_type_path(quoted).then(|| quoted.to_owned())
+}
+
+/// `crates/teamcraft-ui/src/state.rs`, `src/main.rs`: relative, a `.rs` file inside a source tree
+/// (under `crates/` or `src/`, or with a `src/` directory), only the characters of the tree's
+/// paths, no step up. A bare or other file name (`budget.rs`, `notes/plan.rs`) may be the user's.
+fn is_relative_source_file(text: &str) -> bool {
+  let path = text.trim_start_matches("./");
+  let is_in_tree = path.starts_with("crates/") || path.starts_with("src/") || path.contains("/src/");
+  text.ends_with(".rs")
+    && is_in_tree
+    && is_relative(text)
+    && text
+      .chars()
+      .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/'))
+    && !text.split('/').any(|part| part == ".." || part.is_empty())
+}
+
+/// `teamcraft_ui::state::AppState`, `alloc::vec::Vec<teamcraft_proto::UserId>`: paths of at
+/// least two identifiers, with generic arguments of the same shape; no spaces, nothing else.
+fn is_type_path(text: &str) -> bool {
+  if !text.contains("::")
+    || !text
+      .chars()
+      .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '<' | '>' | ','))
+  {
+    return false;
+  }
+  let mut depth = 0_u32;
+  for c in text.chars() {
+    match c {
+      '<' => depth += 1,
+      '>' if depth == 0 => return false,
+      '>' => depth -= 1,
+      _ => {},
+    }
+  }
+  depth == 0
+    && text
+      .split(['<', '>', ','])
+      .filter(|part| !part.is_empty())
+      .all(|path| path.split("::").all(is_identifier))
+}
+
+fn is_identifier(part: &str) -> bool {
+  let mut chars = part.chars();
+  chars
+    .next()
+    .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+    && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// The closing quote, skipping escaped ones (`\"` in `Debug` output).
@@ -103,10 +167,14 @@ fn closing_quote(text: &str) -> Option<usize> {
   None
 }
 
-/// A legacy mangled name's hash suffix (`::h0123456789abcdef`) carries nothing for a reader.
+/// A legacy mangled name's hash suffix (`::h0123456789abcdef`), or that of a wasm-bindgen import
+/// in the page's glue (`__wbg_new_8a6f238a6ece86ea`), carries nothing for a reader; left on, the
+/// redaction takes the hex run for a secret and the whole name with it.
 fn strip_symbol_hash(function: &str) -> &str {
-  match function.rsplit_once("::h") {
-    Some((name, hash)) if hash.len() == 16 && hash.chars().all(|c| c.is_ascii_hexdigit()) => name,
+  let is_hash = |hash: &str| hash.len() == 16 && hash.chars().all(|c| c.is_ascii_hexdigit());
+  match (function.rsplit_once("::h"), function.rsplit_once('_')) {
+    (Some((name, hash)), _) if is_hash(hash) => name,
+    (_, Some((name, hash))) if is_hash(hash) => name,
     _ => function,
   }
 }
@@ -221,6 +289,81 @@ mod tests {
   mod secrets {
     use super::*;
 
+    /// TEAMCRAFT-3S end to end: a desktop page's panic as the hook keeps it, with the shell's log
+    /// added on the next start, scrubbed into the envelope that is sent.
+    #[test]
+    fn a_desktop_page_panic_reaches_the_envelope_readable() {
+      use super::super::super::panic::{PanicParts, PendingPanic, ScriptStack};
+      let mut pending = PendingPanic {
+        parts: PanicParts {
+          message: concat!(
+            r#"Location { file: "crates/teamcraft-ui/src/state.rs", line: 2435, column: 3 } "#,
+            r#"expected context of type "teamcraft_ui::state::AppState" to be present "#,
+            r#"while drafting "meet me at the harbour at nine""#,
+          )
+          .to_owned(),
+          maybe_location: Some((
+            "/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reactive_graph-0.2.16/src/owner/context.rs"
+              .to_owned(),
+            306,
+            9,
+          )),
+          backtrace: String::new(),
+          maybe_script_stack: Some(ScriptStack {
+            text: concat!(
+              "Error\n",
+              "    at imports.wbg.__wbg_new_8a6f238a6ece86ea (tauri://localhost/teamcraft-ui-1.js:3890:14)\n",
+              "<?>.wasm-function[17228]@[wasm code]\n",
+              "    at teamcraft_ui.wasm.wasm-function[1185] (tauri://localhost/teamcraft-ui-1_bg.wasm:wasm-function[1185]:0x1234)",
+            )
+            .to_owned(),
+            origin: "tauri://localhost".to_owned(),
+          }),
+        },
+        timestamp_ms: 1_795_263_514_000,
+        breadcrumbs: vec!["2026-11-21T12:18:33Z  INFO teamcraft_ui: composer opened conversation_id=42".to_owned()],
+      };
+      pending.add_log_until_panic(vec![
+        "2026-11-21T12:18:32Z  INFO teamcraft_media::audio_device: audio backend backend=PipeWire".to_owned(),
+        "2026-11-21T12:18:33Z  WARN teamcraft_core: draft for Alice Example".to_owned(),
+      ]);
+      let event = scrub(pending.parts.into_event(
+        EventId::from_random_bytes([3; 16]),
+        pending.timestamp_ms,
+        pending.breadcrumbs,
+      ));
+      let app = super::super::super::AppInfo {
+        version: "1.0.42".to_owned(),
+        platform: super::super::super::AppPlatform::Desktop,
+        os_name: "Linux".to_owned(),
+        maybe_os_version: None,
+      };
+      let envelope = event.to_envelope(
+        &app,
+        &super::super::super::Environment::default(),
+        super::super::super::InstallationId::from_random_bytes([7; 16]),
+      );
+      // Where, what, the calls that led there and what the shell did before.
+      assert!(
+        envelope.contains(r#"file: \"crates/teamcraft-ui/src/state.rs\""#),
+        "{envelope}"
+      );
+      assert!(
+        envelope.contains(r#"\"teamcraft_ui::state::AppState\""#),
+        "{envelope}"
+      );
+      assert!(envelope.contains("reactive_graph-0.2.16/src/owner/context.rs"));
+      assert!(envelope.contains("teamcraft_ui.wasm.wasm-function[1185]"));
+      assert!(envelope.contains("imports.wbg.__wbg_new"));
+      assert!(envelope.contains("teamcraft_media::audio_device: audio backend"));
+      assert!(envelope.contains("composer opened"));
+      assert_eq!(event.frames.len(), 4);
+      assert_eq!(event.breadcrumbs.len(), 3);
+      // And still nothing of the user's.
+      assert!(!envelope.contains("harbour"));
+      assert!(!envelope.contains("runner"));
+    }
+
     #[test]
     fn a_report_from_a_session_with_secrets_contains_none_of_them() {
       let event = scrub(leaky_event());
@@ -254,6 +397,77 @@ mod tests {
       );
       assert_eq!(remove_quoted(r#"open "half"#), r#"open "[redacted]"#);
       assert_eq!(remove_quoted("no quotes here"), "no quotes here");
+    }
+
+    /// TEAMCRAFT-3S: the panic of a missing context said where and what, both blanked.
+    #[test]
+    fn source_files_and_type_paths_stay() {
+      assert_eq!(
+        remove_quoted(concat!(
+          r#"Location { file: "crates/teamcraft-ui/src/state.rs", line: 2435, column: 3 } "#,
+          r#"expected context of type "teamcraft_ui::state::AppState" to be present"#
+        )),
+        concat!(
+          r#"Location { file: "crates/teamcraft-ui/src/state.rs", line: 2435, column: 3 } "#,
+          r#"expected context of type "teamcraft_ui::state::AppState" to be present"#
+        )
+      );
+      assert_eq!(
+        remove_quoted(r#"file: "./src/main.rs""#),
+        r#"file: "src/main.rs""#
+      );
+      for kept in [
+        "alloc::vec::Vec<teamcraft_proto::UserId>",
+        "core::option::Option<alloc::rc::Rc<dyn_trait::X>>",
+        "std::collections::HashMap<a::K,b::V>",
+        "_private::Thing",
+      ] {
+        assert_eq!(remove_quoted(&format!(r#""{kept}""#)), format!(r#""{kept}""#));
+      }
+    }
+
+    #[test]
+    fn everything_else_quoted_still_goes() {
+      for redacted in [
+        // Names, messages, files of the user.
+        "Alice Example",
+        "Alice",
+        "meet me at the harbour at nine",
+        "quarterly-figures.xlsx",
+        "notes.rs is where I keep it",
+        "budget.rs",
+        "notes/plan.rs",
+        "./budget.rs",
+        "my-src/plan.rs",
+        // Paths outside the source tree, or that leave it.
+        "/home/henning/teamcraft/crates/teamcraft-ui/src/state.rs",
+        "~/secret.rs",
+        r"C:\Users\alice\src\main.rs",
+        "C:/Users/alice/main.rs",
+        "../../home/alice/secret.rs",
+        "crates//x.rs",
+        "crates/my notes.rs",
+        // URLs, mail addresses, colons that are no path.
+        "https://team.example.com/s/1#share-link-secret",
+        "alice@example.com",
+        "a:b",
+        "Alice::",
+        "::Alice",
+        "a::b c",
+        "a::b<c",
+        "a::b>c<",
+        "a::1b",
+        "a::b-c",
+        "a::b\"x",
+        "",
+      ] {
+        let quoted = format!("v: {redacted:?}");
+        assert_eq!(
+          remove_quoted(&quoted),
+          r#"v: "[redacted]""#,
+          "{redacted} was kept"
+        );
+      }
     }
   }
 
@@ -303,6 +517,24 @@ mod tests {
       assert_eq!(
         strip_symbol_hash("teamcraft_core::hash::h1"),
         "teamcraft_core::hash::h1"
+      );
+      assert_eq!(
+        strip_symbol_hash("imports.wbg.__wbg_new_8a6f238a6ece86ea"),
+        "imports.wbg.__wbg_new"
+      );
+      assert_eq!(strip_symbol_hash("handle_error"), "handle_error");
+      let frame = scrub_frame(StackFrame {
+        maybe_function: Some("imports.wbg.__wbg_new_8a6f238a6ece86ea".to_owned()),
+        ..StackFrame::default()
+      });
+      assert_eq!(frame.maybe_function.as_deref(), Some("imports.wbg.__wbg_new"));
+      let frame = scrub_frame(StackFrame {
+        maybe_function: Some("teamcraft_ui.wasm.wasm-function[1185]".to_owned()),
+        ..StackFrame::default()
+      });
+      assert_eq!(
+        frame.maybe_function.as_deref(),
+        Some("teamcraft_ui.wasm.wasm-function[1185]")
       );
     }
 

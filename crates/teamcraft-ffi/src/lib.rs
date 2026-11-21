@@ -1181,7 +1181,7 @@ impl TeamCraft {
   /// Keywords, first name and `@channel` preferences for marking pushed messages as mentions.
   pub async fn set_mention_settings(&self, settings: MentionSettings) -> Result<(), TeamCraftError> {
     self
-      .call(move |engine| Box::pin(async move { engine.set_mention_settings(settings) }))
+      .keep_locally(move |reads| reads.set_mention_settings(settings))
       .await
   }
 
@@ -1198,7 +1198,7 @@ impl TeamCraft {
   /// Sets this device's notification privacy setting; the workspace policy can only lower it.
   pub async fn set_notification_content(&self, content: NotificationContent) -> Result<(), TeamCraftError> {
     self
-      .call(move |engine| Box::pin(async move { engine.set_notification_content(content) }))
+      .keep_locally(move |reads| reads.set_notification_content(content))
       .await
   }
 
@@ -1210,7 +1210,7 @@ impl TeamCraft {
 
   pub async fn set_segment_prefetch(&self, mode: SegmentPrefetchMode) -> Result<(), TeamCraftError> {
     self
-      .call(move |engine| Box::pin(async move { engine.set_segment_prefetch(mode) }))
+      .keep_locally(move |reads| reads.set_segment_prefetch(mode))
       .await
   }
 
@@ -2405,6 +2405,16 @@ impl TeamCraft {
   }
 
   /// Runs an action's local half on the read thread and hands the rest to the engine.
+  /// A setting the store keeps, written on the actions' thread without waiting for the engine
+  /// ([`ReadQueue::keep`], issue #2225).
+  async fn keep_locally<R, F>(&self, job: F) -> Result<R, TeamCraftError>
+  where
+    R: Send + 'static,
+    F: FnOnce(&mut Reads) -> Result<R, TeamCraftError> + Send + 'static,
+  {
+    self.read_queue()?.keep(job).await
+  }
+
   async fn act_locally<R, F>(&self, job: F) -> Result<R, TeamCraftError>
   where
     R: Send + 'static,
