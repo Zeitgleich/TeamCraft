@@ -277,7 +277,11 @@ is refused. The server and the owners' apps refuse other values.
 - Releasing the hold returns it to the normal rules; the next retention run catches up.
 
 **Who is told.** Every member of a held conversation sees a banner "This conversation is under legal
-hold (reference). Retention doesn't delete its messages." It comes from the verified policy, so the
+hold (reference). Retention doesn't delete its messages." On desktop and web it is `LegalHoldNotice`;
+on Android and iOS the conversation screen draws it from `SecuritySnapshot.legal_holds`, which the
+apps read with the chat snapshot (the same verified policy), and a deletion the apps know to be held
+is refused at once with the `legal_hold` text (`TeamCraftError::LegalHold`; the server's refusal
+maps to it too). It comes from the verified policy, so the
 server can't show it for a conversation nobody held; like any policy update, it can delay or
 withhold a newer policy (a new hold or a release) from a member. Holds are not
 secret: the signed policy is readable by every signed-in user, which is why the console asks for a
@@ -291,7 +295,7 @@ version.
 A hold protects against the routine deletions, not against the operator; the vault's own copy (§4.1)
 is what protects against that. A member can still delete their own messages (a signed deletion,
 e2ee.md §4.6); keeping those under a hold, holds on people (all their conversations) and on direct
-messages, and the banner on Android and iOS are later steps.
+messages are later steps.
 
 ### 4.3 Audit log CSV
 
@@ -323,7 +327,6 @@ the desktop app saves it to the downloads folder). Admins and owners only (`Read
 |---------------------------------------------------------------|-------|
 | Vault node, archive mode and approved export requests (§4.1)  | #2134 |
 | Legal hold on people and DMs, keeping signed deletions        | #2135 |
-| Legal hold banner on Android and iOS                          | #2136 |
 
 ## 5. Manual test steps
 
@@ -356,6 +359,9 @@ Legal hold (an owner's account on desktop or web, a member's account in a second
       too long reference shows its error at the field and nothing is signed.
 - [ ] The member opens the channel: the banner names the reference. Release the hold: the banner goes.
 - [ ] With the hold in place, deleting the channel or its space is refused with "under legal hold".
+- [ ] Android and iOS: the member opens the held channel: the banner names the reference, in English
+      and in German. Delete the channel from its menu: "This conversation is under legal hold." Release
+      the hold: the banner goes without reopening the channel.
 - [ ] Administration > Audit log lists "Legal hold placed" and "Legal hold released" with the owner.
 
 Audit log CSV (an admin's account on desktop or web):

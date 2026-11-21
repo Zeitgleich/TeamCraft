@@ -95,6 +95,10 @@ pub enum TeamCraftError {
   /// cap, say. The app says it is too long instead of a generic failure.
   #[error("too large: {0}")]
   TooLarge(String),
+  /// The conversation (or a channel of the space) is under legal hold (data-export.md §4.2), so it
+  /// can't be deleted until an owner releases the hold: the app says so (`legal_hold`).
+  #[error("legal hold: {0}")]
+  LegalHold(String),
   /// Nobody but the reporter would receive a problem report (docs/bug-reports.md): an owner has
   /// to choose recipients.
   #[error("nobody is set up to receive problem reports")]
@@ -118,6 +122,9 @@ impl From<CoreError> for TeamCraftError {
       },
       CoreError::Api(api) if api.error_code() == Some(&ErrorCode::PayloadTooLarge) => {
         Self::TooLarge(api.to_string())
+      },
+      CoreError::Api(api) if api.error_code() == Some(&ErrorCode::LegalHold) => {
+        Self::LegalHold(api.to_string())
       },
       CoreError::Api(api) if api.is_transient() => Self::Network(api.to_string()),
       CoreError::NotEnrolled => Self::NotEnrolled,
@@ -231,6 +238,19 @@ mod tests {
       assert!(matches!(
         TeamCraftError::from(refused),
         TeamCraftError::TooLarge(_)
+      ));
+    }
+
+    #[test]
+    fn a_refused_deletion_under_legal_hold_has_its_own_error() {
+      let refused = CoreError::Api(ApiError::Status {
+        status: 409,
+        maybe_body: Some(ErrorBody::new(ErrorCode::LegalHold, "held")),
+        maybe_retry_after: None,
+      });
+      assert!(matches!(
+        TeamCraftError::from(refused),
+        TeamCraftError::LegalHold(_)
       ));
     }
 

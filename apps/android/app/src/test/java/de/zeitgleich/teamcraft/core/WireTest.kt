@@ -91,6 +91,29 @@ class WireTest {
   }
 
   @Test
+  fun legalHoldsDecodeAndAConversationIsLookedUpByItsId() {
+    val security = WireJson.decodeFromString(
+      SecuritySnapshot.serializer(),
+      """
+      {"my_fingerprint":"ab","legal_holds":[
+        {"conversation_id":"5","reference":"Case 2026-14","placed_at":1700000000000},
+        {"conversation_id":"9","reference":"Matter B","placed_at":1700000100000}]}
+      """,
+    )
+    assertEquals(2, security.legalHolds.size)
+    assertEquals("Case 2026-14", security.legalHold("5")?.reference)
+    assertEquals(1_700_000_100_000L, security.legalHold("9")?.placedAt)
+    assertEquals(null, security.legalHold("6"))
+  }
+
+  @Test
+  fun noLegalHoldsBeforeAPolicyWasVerified() {
+    val security = WireJson.decodeFromString(SecuritySnapshot.serializer(), """{"my_fingerprint":"ab"}""")
+    assertTrue(security.legalHolds.isEmpty())
+    assertEquals(null, security.legalHold("5"))
+  }
+
+  @Test
   fun formerAccountsNameOldMessagesAndDeletedOnesGetTheAppsName() {
     val snapshot = WireJson.decodeFromString(
       ChatSnapshot.serializer(),

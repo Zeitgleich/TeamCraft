@@ -10,6 +10,8 @@ import UserNotifications
 enum AppFailure: Error, Equatable {
   case network, signedOut, wrongPassphrase, storage, signInFailed, recoveryPending, orgRecoveryUnavailable, callMoveRefused, callDeviceLimit, callEncryptionPending, generic
   case tooLarge
+  /// A deletion refused because the conversation is under legal hold.
+  case legalHold
   case backupOutOfMemory, backupTooNew, backupDamaged
   case linkCodeInvalid, linkCodeForNewDevice, linkCodeForSignedInDevice, linkCodeExpired
   /// The session is bound to a device key that is gone (docs/e2ee.md §3.1.2).
@@ -33,6 +35,7 @@ enum AppFailure: Error, Equatable {
     case .callDeviceLimit: self = .callDeviceLimit
     case .callEncryptionPending: self = .callEncryptionPending
     case .tooLarge: self = .tooLarge
+    case .legalHold: self = .legalHold
     case .linkCodeInvalid: self = .linkCodeInvalid
     case .linkCodeForNewDevice: self = .linkCodeForNewDevice
     case .linkCodeForSignedInDevice: self = .linkCodeForSignedInDevice
@@ -58,6 +61,7 @@ enum AppFailure: Error, Equatable {
     case .callDeviceLimit: return "call_device_limit"
     case .callEncryptionPending: return "call_encryption_pending"
     case .tooLarge: return "error_too_large"
+    case .legalHold: return "error_legal_hold"
     case .generic: return "error_generic"
     case .linkCodeInvalid: return "link_code_invalid"
     case .linkCodeForNewDevice: return "link_code_for_new_device"
