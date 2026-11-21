@@ -56,7 +56,8 @@ use crate::common::relay::Relay;
 /// The desktop's camera of a 720p camera: three layers from 1.5 Mbit/s (apps/desktop's
 /// `camera_layers`), at the busy camera's size and rate.
 const CAMERA_BITRATE_BPS: u32 = 1_500_000;
-/// The limits of the uplink test, in order, after the warm-up; `None` lifts the limit.
+/// The limits of the uplink test, in order, after the warm-up; `None` lifts the limit. A step
+/// lasts its time after the presenter's video, held for its voice, goes again.
 const UPLINK_STEPS: [(Option<u64>, Duration); 3] = [
   (Some(500_000), Duration::from_secs(12)),
   (Some(2_000_000), Duration::from_secs(10)),
@@ -77,7 +78,9 @@ const MAX_STALL: Duration = Duration::from_secs(2);
 /// The longest the picture behind a limited link may stand still, also when the limit sets in:
 /// under 1 s on a laptop (2.2 to 3.4 s before #939), up to 4 s with eight copies of the suite in
 /// parallel. There QUIC's congestion window collapses after the loss (and before #1218 its send
-/// buffer, 1 MiB of datagrams, delivered seconds of the old layer before the new one).
+/// buffer, 1 MiB of datagrams, delivered seconds of the old layer before the new one). Time the
+/// presenter holds its video for its voice doesn't count (`Timeline::held_between`, #2218): since
+/// #1871 the sudden drop holds it for seconds, and longer on a loaded runner.
 const MAX_STALL_LIMITED: Duration = Duration::from_secs(5);
 /// How long after a limit sets in the layers may still be settling.
 const SETTLE: Duration = Duration::from_secs(3);
@@ -94,6 +97,9 @@ const MAX_PICTURE_AGE_AFTER_DROP: Duration = Duration::from_secs(4);
 const FINAL_STRETCH: Duration = Duration::from_secs(3);
 /// Bounds the steps before the camera starts (securing).
 const STEP_DEADLINE: Duration = Duration::from_secs(10);
+/// How much longer than its duration a step may last while the presenter's video is held for
+/// its voice: the hold has to end by then (judged by [`Timeline::is_held_at_the_end`]).
+const MAX_HOLD: Duration = Duration::from_secs(30);
 
 /// The presenter's uplink is limited to 500 kbit/s, then 2 Mbit/s, then not at all.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -108,23 +114,33 @@ async fn a_camera_follows_a_limited_uplink_down_and_back_up() {
     timeline.share_of_hd(viewer, Duration::ZERO, limited) > 0.0,
     "the top layer never reached the viewer before the limit:\n{summary}"
   );
+  // A hold for the voice is no stall of the layers (`Timeline::held_between`), but it has to end.
   timeline.assert_no_stall(viewer, MAX_STALL_LIMITED, &summary);
+  assert!(
+    !timeline.is_held_at_the_end(),
+    "the presenter's video was still held for its voice at the end:\n{summary}"
+  );
   timeline.assert_recovers_from_the_drop(viewer, &summary);
   // Down, but not to the smallest layer: the top sent layer gives up bitrate first. Judged by
   // what the presenter sent: on a laptop the viewer gets the middle layer throughout, but on a
-  // loaded machine QUIC's send buffer may deliver the old top layer's pictures for seconds.
-  let settled = limited + SETTLE;
+  // loaded machine QUIC's send buffer may deliver the old top layer's pictures for seconds. From
+  // when the video goes again after a hold for the voice: the layers come back from the lowest.
+  let settled = timeline.video_free_since(limited, lifted) + SETTLE;
+  assert!(
+    settled < lifted,
+    "the presenter's video was held for its voice through the 500 kbit/s step:\n{summary}"
+  );
   // Pictures, not bits: a probe of the top layer can outweigh seconds of the middle one in bits
   // on a machine that encodes few pictures.
   let top_pictures = timeline.encoded_pictures(HD.width, settled, lifted);
   let middle_pictures = timeline.encoded_pictures(640, settled, lifted);
   assert!(
-    top_pictures < middle_pictures,
-    "the top layer ({top_pictures} pictures) went on at 500 kbit/s:\n{summary}"
-  );
-  assert!(
     middle_pictures > 0,
     "the middle layer wasn't sent at 500 kbit/s:\n{summary}"
+  );
+  assert!(
+    top_pictures < middle_pictures,
+    "the top layer ({top_pictures} pictures) went on at 500 kbit/s:\n{summary}"
   );
   let dropped = timeline.dropped_share(settled, lifted);
   assert!(
@@ -228,6 +244,8 @@ enum Heard {
   LayersNeeded(Vec<u8>),
   LayerBitrates(Vec<(u8, u32)>),
   UplinkEstimate(u32),
+  /// The presenter held its video for its voice (#1871), or let it go.
+  HeldForVoice(bool),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -343,8 +361,19 @@ async fn run(limited: Limited, steps: &[(Option<u64>, Duration)]) -> Timeline {
   tokio::time::sleep(WARM_UP_AFTER_TOP_LAYER).await;
   for (maybe_limit, duration) in steps {
     link.set_limit(*maybe_limit);
-    timeline_steps.push((start.elapsed(), *maybe_limit));
-    tokio::time::sleep(*duration).await;
+    let step_start = start.elapsed();
+    timeline_steps.push((step_start, *maybe_limit));
+    // The layers get the step's time once the presenter's video goes again: a hold for its voice
+    // (#1871) takes seconds, and how many depends on the machine (`Timeline::held_between`).
+    let deadline = tokio::time::Instant::now() + *duration + MAX_HOLD;
+    loop {
+      let now = start.elapsed();
+      let free_since = video_free_since(&heard.lock().unwrap(), step_start, now);
+      if now >= free_since + *duration || tokio::time::Instant::now() >= deadline {
+        break;
+      }
+      tokio::time::sleep(Duration::from_millis(100)).await;
+    }
   }
   let end = start.elapsed();
   is_done.store(true, Ordering::Relaxed);
@@ -380,6 +409,7 @@ async fn listen_as_presenter(
       Ok(Some(CallEngineEvent::LayersNeeded { layers, .. })) => Some(Heard::LayersNeeded(layers)),
       Ok(Some(CallEngineEvent::LayerBitrates { bitrates, .. })) => Some(Heard::LayerBitrates(bitrates)),
       Ok(Some(CallEngineEvent::UplinkEstimate { bps, .. })) => Some(Heard::UplinkEstimate(bps)),
+      Ok(Some(CallEngineEvent::VideoHeldForVoice(is_held))) => Some(Heard::HeldForVoice(is_held)),
       _ => None,
     };
     if let Some(event) = maybe_heard {
@@ -522,7 +552,8 @@ impl Timeline {
   }
 
   /// `viewer`'s picture never stood still for longer than `max_stall` from the end of the
-  /// warm-up to the end.
+  /// warm-up to the end, besides the time the presenter held its video for its voice
+  /// ([`Self::held_between`]).
   fn assert_no_stall(&self, viewer: usize, max_stall: Duration, summary: &str) {
     let warmed_up = self.steps.get(1).map_or(Duration::ZERO, |(at, _)| *at);
     let decoded: Vec<&Decoded> = self.decoded[viewer]
@@ -532,20 +563,67 @@ impl Timeline {
     assert!(!decoded.is_empty(), "viewer {viewer} decoded nothing:\n{summary}");
     let longest = decoded
       .windows(2)
-      .map(|pair| (pair[1].at.saturating_sub(pair[0].at), pair[1].at))
-      .chain(
-        decoded
-          .last()
-          .map(|last| (self.end().saturating_sub(last.at), self.end())),
-      )
-      .max_by_key(|(gap, _)| *gap)
+      .map(|pair| (pair[0].at, pair[1].at))
+      .chain(decoded.last().map(|last| (last.at, self.end())))
+      .map(|(from, to)| {
+        let stall = to
+          .saturating_sub(from)
+          .saturating_sub(self.held_between(from, to));
+        (stall, to)
+      })
+      .max_by_key(|(stall, _)| *stall)
       .unwrap_or_default();
     assert!(
       longest.0 <= max_stall,
-      "viewer {viewer}'s picture stood still for {:?} until {:?}:\n{summary}",
+      "viewer {viewer}'s picture stood still for {:?} besides holds for the voice, until {:?}:\n{summary}",
       longest.0,
       longest.1
     );
+  }
+
+  /// How long the presenter held its video for its voice (#1871) from `from` to `to`. The sudden
+  /// drop loses the voice in the bottleneck's queue, and the video waits until a probe proved room
+  /// for both (#1893). How long that takes depends on the machine: on a loaded runner the voice
+  /// guard's probes go out in bunches that the queue drops, and each failed one holds the video
+  /// again (9 to 15 s instead of about 5). The voice guard's own tests judge the hold
+  /// (`thin_uplink`, `teamcraft_media::voice_guard`); this one judges the picture around it.
+  fn held_between(&self, from: Duration, to: Duration) -> Duration {
+    let overlap = |since: Duration, until: Duration| until.min(to).saturating_sub(since.max(from));
+    let mut held = Duration::ZERO;
+    let mut maybe_since: Option<Duration> = None;
+    for (at, heard) in &self.heard {
+      let Heard::HeldForVoice(is_held) = heard else {
+        continue;
+      };
+      match (maybe_since, *is_held) {
+        (None, true) => maybe_since = Some(*at),
+        (Some(since), false) => {
+          held += overlap(since, *at);
+          maybe_since = None;
+        },
+        _ => {},
+      }
+    }
+    held + maybe_since.map_or(Duration::ZERO, |since| overlap(since, self.end()))
+  }
+
+  /// From when the presenter's video went from `from` to `to`: `from`, or when the last hold for
+  /// its voice that reached into that time ended.
+  fn video_free_since(&self, from: Duration, to: Duration) -> Duration {
+    video_free_since(&self.heard, from, to)
+  }
+
+  /// Whether the presenter's video was still held for its voice when the run ended.
+  fn is_held_at_the_end(&self) -> bool {
+    self
+      .heard
+      .iter()
+      .rev()
+      .find_map(|(_, heard)| match heard {
+        Heard::HeldForVoice(is_held) => Some(*is_held),
+        _ => None,
+      })
+      .unwrap_or(false)
   }
 
   /// How old the picture on `viewer`'s screen got from `from` to `to` at most (now less when the
@@ -694,6 +772,14 @@ impl Timeline {
             let (low, high) = maybe_range.unwrap_or((*bps, *bps));
             maybe_range = Some((low.min(*bps), high.max(*bps)));
           },
+          Heard::HeldForVoice(is_held) => {
+            close(&mut presenter, &mut maybe_range);
+            presenter.push(if *is_held {
+              "held".to_owned()
+            } else {
+              "let go".to_owned()
+            });
+          },
         }
       }
       close(&mut presenter, &mut maybe_range);
@@ -707,6 +793,24 @@ impl Timeline {
       );
     }
     out
+  }
+}
+
+/// From when the presenter's video went from `from` up to `now`, by what it `heard`: `from`, or
+/// when its last hold for its voice ended, or `now` while it is held.
+fn video_free_since(heard: &[(Duration, Heard)], from: Duration, now: Duration) -> Duration {
+  let maybe_last = heard
+    .iter()
+    .filter(|(at, _)| *at <= now)
+    .rev()
+    .find_map(|(at, heard)| match heard {
+      Heard::HeldForVoice(is_held) => Some((*at, *is_held)),
+      _ => None,
+    });
+  match maybe_last {
+    Some((_, true)) => now,
+    Some((at, false)) => at.max(from),
+    None => from,
   }
 }
 
