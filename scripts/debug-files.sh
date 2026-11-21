@@ -133,12 +133,14 @@ verify_on_backend() {
   # `check` reads single files: a dSYM bundle (a directory) is checked by the DWARF files inside it.
   for arg in "$@"; do
     if [ -d "$arg" ]; then
-      while IFS= read -r file; do files+=("$file"); done < <(find "$arg" -type f -path '*/Contents/Resources/DWARF/*')
+      # -H: Cargo's `target/<triple>/release/<name>.dSYM` is a link to the bundle in `deps/`.
+      while IFS= read -r file; do files+=("$file"); done < <(find -H "$arg" -type f -path '*/Contents/Resources/DWARF/*')
     else
       files+=("$arg")
     fi
   done
-  for file in "${files[@]}"; do
+  # `${a[@]+"${a[@]}"}`: macOS bash 3.2 treats an empty array as unbound under `set -u`.
+  for file in ${files[@]+"${files[@]}"}; do
     # Only a check: a file sentry-cli can't read must not fail the release job.
     id="$("$SENTRY_CLI" debug-files check --json "$file" | json_field debug_id | tr '[:upper:]' '[:lower:]')" || continue
     [ -n "$id" ] || continue
