@@ -1039,8 +1039,8 @@ fn pause_when_hidden(video: NodeRef<html::Video>) {
       let Some(entry) = maybe_latest else {
         return;
       };
-      let (seen, should_pause) = visibility_step(has_been_seen.get(), entry.is_intersecting());
-      has_been_seen.set(seen);
+      let (seen, should_pause) = visibility_step(has_been_seen.get(), entry.is_intersecting()); // async-ok: a plain Cell, not a signal
+      has_been_seen.set(seen); // async-ok: a plain Cell, not a signal
       if should_pause {
         drop(target.pause());
       }
