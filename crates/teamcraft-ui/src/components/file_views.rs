@@ -11,6 +11,7 @@
 //! Downloads to disk run in the client core, which reports progress and the local path
 //! (`FileInfo::transfer`).
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use leptos::html;
@@ -1028,12 +1029,19 @@ fn pause_when_hidden(video: NodeRef<html::Video>) {
       return;
     };
     let target = element.clone();
+    let has_been_seen = Cell::new(false);
     let callback = Closure::<dyn Fn(js_sys::Array)>::new(move |entries: js_sys::Array| {
-      let is_hidden = entries
+      // The newest entry is the last one.
+      let maybe_latest = entries
         .iter()
         .filter_map(|entry| entry.dyn_into::<web_sys::IntersectionObserverEntry>().ok())
-        .any(|entry| !entry.is_intersecting());
-      if is_hidden {
+        .next_back();
+      let Some(entry) = maybe_latest else {
+        return;
+      };
+      let (seen, should_pause) = visibility_step(has_been_seen.get(), entry.is_intersecting());
+      has_been_seen.set(seen);
+      if should_pause {
         drop(target.pause());
       }
     });
@@ -1049,6 +1057,17 @@ fn pause_when_hidden(video: NodeRef<html::Video>) {
       }
     });
   });
+}
+
+/// One observer report for [`pause_when_hidden`]: returns whether the video has been seen and
+/// whether to pause it. The first report of a video that has no size yet (a portrait video before
+/// its metadata) says "not intersecting"; pausing on that cancelled the autoplay for good, so only
+/// leaving the screen after having been on it pauses.
+fn visibility_step(has_been_seen: bool, is_intersecting: bool) -> (bool, bool) {
+  (
+    has_been_seen || is_intersecting,
+    has_been_seen && !is_intersecting,
+  )
 }
 
 /// The inline rendition of one picture and what became of loading it.
@@ -1936,6 +1955,16 @@ pub(crate) fn blob_url(bytes: &[u8], media_type: &str) -> Option<String> {
 mod tests {
   use super::*;
   use crate::i18n::{Locale, translate};
+
+  /// A video that starts off "not intersecting" (no size yet) isn't paused; one that was on screen
+  /// and left is.
+  #[test]
+  fn inline_video_pauses_only_after_leaving_the_screen() {
+    assert_eq!(visibility_step(false, false), (false, false));
+    assert_eq!(visibility_step(false, true), (true, false));
+    assert_eq!(visibility_step(true, true), (true, false));
+    assert_eq!(visibility_step(true, false), (true, true));
+  }
 
   /// A failed download names where it broke, in every language, instead of one "Transfer failed"
   /// for everything (issue #807).
