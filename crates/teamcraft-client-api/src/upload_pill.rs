@@ -214,6 +214,7 @@ mod tests {
       maybe_duration_ms: None,
       maybe_waveform: None,
       maybe_content_sha256: None,
+      maybe_motion: None,
     }
   }
 }

@@ -65,7 +65,7 @@ async fn measure_start_and_channel_switch() {
 
 async fn measure(directory: &std::path::Path, tokens: Arc<dyn TokenProvider>) {
   let opened = Instant::now();
-  let core = TeamCraft::new(config(directory), tokens, Arc::new(Quiet)).unwrap();
+  let core = TeamCraft::open_blocking(config(directory), tokens, Arc::new(Quiet)).unwrap();
   eprintln!("constructor                 {:>8.1} ms", ms(opened.elapsed()));
   let state = core.account_state().await.unwrap();
   assert!(matches!(state, AccountState::Ready { .. }));

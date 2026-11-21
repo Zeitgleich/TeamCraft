@@ -16,6 +16,8 @@ use teamcraft_media::audio_io::AudioDeviceChoice;
 use teamcraft_media::voice_decode;
 use teamcraft_media::voice_recording::{self, VoiceRecorder, VoiceRecordingError};
 
+use crate::blocking;
+
 /// A recording under way. Every method may be called from any thread.
 #[derive(uniffi::Object)]
 pub struct VoiceRecording {
@@ -66,20 +68,25 @@ pub enum VoiceError {
 #[uniffi::export]
 impl VoiceRecording {
   /// Starts recording into `path` (in the app's private recording folder), for at most
-  /// `max_seconds` (the workspace policy's `max_seconds`).
+  /// `max_seconds` (the workspace policy's `max_seconds`). Async: opening the microphone and the
+  /// file waits on the device and the disk, on a thread of its own (#2184).
   #[uniffi::constructor]
-  pub fn start(path: String, max_seconds: u32) -> Result<Arc<Self>, VoiceError> {
-    let recorder = VoiceRecorder::start(
-      Path::new(&path),
-      &AudioDeviceChoice::Default,
-      Duration::from_secs(u64::from(max_seconds)),
-    )?;
-    Ok(Arc::new(Self {
-      maybe_recorder: Mutex::new(Some(recorder)),
-    }))
+  pub async fn start(path: String, max_seconds: u32) -> Result<Arc<Self>, VoiceError> {
+    blocking::off_thread("voice-start", move || {
+      let recorder = VoiceRecorder::start(
+        Path::new(&path),
+        &AudioDeviceChoice::Default,
+        Duration::from_secs(u64::from(max_seconds)),
+      )?;
+      Ok(Arc::new(Self {
+        maybe_recorder: Mutex::new(Some(recorder)),
+      }))
+    })
+    .await
   }
 
-  /// The meter's level, 0.0 to 1.0; 0.0 once over.
+  /// The meter's level, 0.0 to 1.0; 0.0 once over. Stays sync, like the other readings: it only
+  /// reads what the recording thread measured.
   pub fn level(&self) -> f32 {
     self.with(VoiceRecorder::level).unwrap_or(0.0)
   }
@@ -100,21 +107,25 @@ impl VoiceRecording {
   }
 
   /// Stops and finishes the file. `maybe_reason`: why the app stopped it, when the user didn't.
-  pub fn finish(&self, maybe_reason: Option<VoiceStop>) -> Result<VoiceTakeInfo, VoiceError> {
+  /// Async: it waits for the recording thread and writes the file (#2184).
+  pub async fn finish(&self, maybe_reason: Option<VoiceStop>) -> Result<VoiceTakeInfo, VoiceError> {
     let recorder = self.take().ok_or(VoiceError::Over)?;
-    let take = recorder.finish(maybe_reason.map(RecordingStop::from))?;
-    Ok(VoiceTakeInfo {
-      path: take.path.to_string_lossy().into_owned(),
-      duration_ms: take.duration_ms,
-      waveform: take.waveform,
-      maybe_stop: take.maybe_stop.map(VoiceStop::from),
+    blocking::off_thread("voice-finish", move || {
+      let take = recorder.finish(maybe_reason.map(RecordingStop::from))?;
+      Ok(VoiceTakeInfo {
+        path: take.path.to_string_lossy().into_owned(),
+        duration_ms: take.duration_ms,
+        waveform: take.waveform,
+        maybe_stop: take.maybe_stop.map(VoiceStop::from),
+      })
     })
+    .await
   }
 
-  /// Stops and deletes the file.
-  pub fn cancel(&self) {
+  /// Stops and deletes the file. Async: it waits for the recording thread and the disk (#2184).
+  pub async fn cancel(&self) {
     if let Some(recorder) = self.take() {
-      recorder.cancel();
+      blocking::off_thread("voice-cancel", move || recorder.cancel()).await;
     }
   }
 }
@@ -139,26 +150,33 @@ impl VoiceRecording {
 }
 
 /// Empties the app's private recording folder: takes left by a crash or a killed app are never
-/// sent. Call at start, before recording.
+/// sent. Call at start, before recording. Async: it deletes files (#2184).
 #[uniffi::export]
-pub fn voice_clear_takes(folder: String) {
-  voice_recording::clear_takes(Path::new(&folder));
+pub async fn voice_clear_takes(folder: String) {
+  blocking::off_thread("voice-clear", move || {
+    voice_recording::clear_takes(Path::new(&folder))
+  })
+  .await;
 }
 
 /// Decodes a received Opus voice message (Ogg or WebM) at `input` to a 16-bit mono WAV file at
-/// `output`, at most `max_seconds` long. Returns the decoded length in milliseconds.
+/// `output`, at most `max_seconds` long. Returns the decoded length in milliseconds. Async: it
+/// reads, decodes and writes whole files (#2184).
 #[uniffi::export]
-pub fn voice_decode_to_wav(input: String, output: String, max_seconds: u32) -> Result<u64, VoiceError> {
-  let length = voice_decode::decode_to_wav(
-    Path::new(&input),
-    Path::new(&output),
-    Duration::from_secs(u64::from(max_seconds)),
-  )
-  .map_err(|error| match error {
-    voice_decode::VoiceDecodeError::File(error) => VoiceError::Failed(error.to_string()),
-    other => VoiceError::NotPlayable(other.to_string()),
-  })?;
-  Ok(length.as_millis() as u64)
+pub async fn voice_decode_to_wav(input: String, output: String, max_seconds: u32) -> Result<u64, VoiceError> {
+  blocking::off_thread("voice-decode", move || {
+    let length = voice_decode::decode_to_wav(
+      Path::new(&input),
+      Path::new(&output),
+      Duration::from_secs(u64::from(max_seconds)),
+    )
+    .map_err(|error| match error {
+      voice_decode::VoiceDecodeError::File(error) => VoiceError::Failed(error.to_string()),
+      other => VoiceError::NotPlayable(other.to_string()),
+    })?;
+    Ok(length.as_millis() as u64)
+  })
+  .await
 }
 
 /// `count` bar heights (0.0 to 1.0) of a received waveform for drawing; empty when the waveform

@@ -3,6 +3,7 @@ package de.zeitgleich.teamcraft.auth
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import de.zeitgleich.teamcraft.core.UiThreadGuard
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -202,6 +203,8 @@ class AuthRepository(
     val current = synchronized(this) { session.state }
     if (!current.isAuthorized) return null
     if (!current.needsTokenRefresh) return current.accessToken
+    UiThreadGuard.shared.check("AuthRepository.accessToken")
+    // blocking-ok: the core's token thread asks (CoreRepository.Tokens); the guard reports any other.
     return runBlocking {
       withTimeoutOrNull(TimeUnit.SECONDS.toMillis(REFRESH_TIMEOUT_SECONDS)) { refresh(session, current) }
     }

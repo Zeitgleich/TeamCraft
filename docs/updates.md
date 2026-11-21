@@ -325,9 +325,8 @@ How soon a new version reaches the package manager (#694):
 ## 6. Flatpak
 
 The Flatpak never updates itself (the sandbox can't, and shouldn't, write its own files). It checks
-the feed like every other install and shows `flatpak update de.zeitgleich.teamcraft` (§4.3). Today
-the release attaches single-file bundles, which `flatpak install --bundle` installs without an
-update source; for those the release page ("What's new") has the new bundle. The plan:
+the feed like every other install and shows `flatpak update de.zeitgleich.teamcraft` (§4.3). The
+release doesn't build or attach a Flatpak (#176); the manifest stays for Flathub, which builds it. The plan:
 
 1. **Flathub** (preferred): submit `apps/desktop/packaging/linux/de.zeitgleich.teamcraft.yml`; then
    `flatpak update` and the software centers update it.

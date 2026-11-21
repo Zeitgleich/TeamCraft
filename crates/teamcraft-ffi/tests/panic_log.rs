@@ -16,7 +16,7 @@ fn a_panic_on_any_thread_reaches_the_log_with_its_location_but_not_its_message()
   let lines = Lines::default();
   tracing::subscriber::set_global_default(tracing_subscriber::registry().with(lines.clone())).unwrap();
   let directory = std::env::temp_dir().join(format!("teamcraft-ffi-panic-{}", std::process::id()));
-  let teamcraft = TeamCraft::new(
+  let teamcraft = TeamCraft::open_blocking(
     AppConfig {
       server_url: "http://127.0.0.1:9".into(),
       data_dir: directory.to_string_lossy().into_owned(),

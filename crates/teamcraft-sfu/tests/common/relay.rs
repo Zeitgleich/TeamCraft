@@ -1,6 +1,7 @@
 //! A relay between one client and the SFU whose directions can be limited like a bottleneck, for
 //! the suite's tests of limited links: packets leave at the link's rate, wait in a queue of at
-//! most [`MAX_QUEUE_DELAY`] and are dropped when it is full.
+//! most [`MAX_QUEUE_DELAY`] and are dropped when it is full. A direction can also lose packets in
+//! bursts and delay them, both fluctuating as a real link does ([`Impairment`]).
 
 // clippy.toml only relaxes these lints inside #[test] functions; the helpers below are test code too.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -18,6 +19,12 @@ use tokio::sync::mpsc;
 pub const MAX_QUEUE_DELAY: Duration = Duration::from_millis(250);
 /// A relay socket's receive buffer: some keyframes of a 1440p share.
 const RECEIVE_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+/// How often an [`Impairment`]'s loss and delay take their next step.
+const IMPAIRMENT_STEP: Duration = Duration::from_millis(500);
+/// Loss in a burst: about every other packet while the link is bad.
+const BURST_LOSS: f64 = 0.5;
+/// Packets a burst lasts on average.
+const BURST_PACKETS: f64 = 4.0;
 
 /// Relays one client's UDP to the SFU and back; each direction can be limited like a bottleneck.
 pub struct Relay {
@@ -39,6 +46,36 @@ pub struct Shaper {
   start: Instant,
   /// Every packet: when it came (since the start), its bytes, and whether it was dropped.
   pub log: Arc<Mutex<Vec<(Duration, usize, bool)>>>,
+  maybe_impairment: Arc<Mutex<Option<ImpairedLink>>>,
+}
+
+/// Loss and delay that fluctuate, seeded: every [`IMPAIRMENT_STEP`] the average loss walks within
+/// `loss_percent` and the one-way delay within `delay`, by up to a quarter of each range. Losses
+/// come in bursts (Gilbert–Elliott: a bad state of [`BURST_PACKETS`] packets on average that loses
+/// [`BURST_LOSS`] of them), as on Wi-Fi or a mobile link, not one packet here and there. Packets
+/// keep their order.
+#[derive(Debug, Clone, Copy)]
+pub struct Impairment {
+  pub seed: u64,
+  /// The average loss's range, in percent of the packets.
+  pub loss_percent: (f64, f64),
+  pub delay: (Duration, Duration),
+  /// Packets smaller than this are never lost (zero: any may be): the voice and the transport's
+  /// acknowledgements, for a test of what happens to the video alone.
+  pub spared_below_bytes: usize,
+}
+
+/// An [`Impairment`] at work.
+struct ImpairedLink {
+  impairment: Impairment,
+  rng: u64,
+  /// When the loss and delay took their last step (since the start).
+  stepped_at: Duration,
+  loss: f64,
+  delay: Duration,
+  is_bad: bool,
+  /// When the last packet leaves: none overtakes it.
+  last_departure: tokio::time::Instant,
 }
 
 impl Shaper {
@@ -47,7 +84,14 @@ impl Shaper {
       limit_bps: Arc::default(),
       start,
       log: Arc::default(),
+      maybe_impairment: Arc::default(),
     }
+  }
+
+  /// Loses and delays packets as `maybe_impairment` says from now on; `None` stops it.
+  pub fn set_impairment(&self, maybe_impairment: Option<Impairment>) {
+    *self.maybe_impairment.lock().unwrap() =
+      maybe_impairment.map(|impairment| ImpairedLink::new(impairment, self.start.elapsed()));
   }
 
   /// Limits the direction to `maybe_limit_bps` bit/s; `None` lifts the limit.
@@ -79,6 +123,16 @@ impl Shaper {
         } else {
           next_free = departure;
         }
+        let mut departure = departure;
+        if let Some(link) = shaper.maybe_impairment.lock().unwrap().as_mut() {
+          match link.pass(at, packet.len(), departure) {
+            Some(delayed) => departure = delayed,
+            None => {
+              shaper.log.lock().unwrap().push((at, packet.len(), true));
+              continue;
+            },
+          }
+        }
         shaper.log.lock().unwrap().push((at, packet.len(), false));
         if departures.send((departure, packet)).is_err() {
           return;
@@ -86,6 +140,74 @@ impl Shaper {
       }
     });
     (packets, queue)
+  }
+}
+
+impl ImpairedLink {
+  fn new(impairment: Impairment, at: Duration) -> Self {
+    let mut link = Self {
+      impairment,
+      rng: impairment.seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1,
+      stepped_at: at,
+      loss: 0.0,
+      delay: Duration::ZERO,
+      is_bad: false,
+      last_departure: tokio::time::Instant::now(),
+    };
+    let (low, high) = impairment.loss_percent;
+    link.loss = (low + link.uniform() * (high - low)) / 100.0;
+    let (shortest, longest) = impairment.delay;
+    link.delay = shortest + (longest - shortest).mul_f64(link.uniform());
+    link
+  }
+
+  /// When a packet that came at `at` and would leave at `departure` leaves, or `None` if it's lost.
+  fn pass(
+    &mut self,
+    at: Duration,
+    bytes: usize,
+    departure: tokio::time::Instant,
+  ) -> Option<tokio::time::Instant> {
+    while at >= self.stepped_at + IMPAIRMENT_STEP {
+      self.stepped_at += IMPAIRMENT_STEP;
+      self.step();
+    }
+    // The bad state's share of the packets that gives the average loss: `loss / BURST_LOSS`.
+    let bad_share = (self.loss / BURST_LOSS).min(0.9);
+    let leave_bad = 1.0 / BURST_PACKETS;
+    let enter_bad = bad_share * leave_bad / (1.0 - bad_share);
+    let roll = self.uniform();
+    self.is_bad = if self.is_bad {
+      roll >= leave_bad
+    } else {
+      roll < enter_bad
+    };
+    if self.is_bad && self.uniform() < BURST_LOSS && bytes >= self.impairment.spared_below_bytes {
+      return None;
+    }
+    let delayed = (departure + self.delay).max(self.last_departure);
+    self.last_departure = delayed;
+    Some(delayed)
+  }
+
+  /// The next step of the walk: loss and delay move by up to a quarter of their ranges.
+  fn step(&mut self) {
+    let (low, high) = self.impairment.loss_percent;
+    let loss_step = (self.uniform() - 0.5) / 2.0 * (high - low) / 100.0;
+    self.loss = (self.loss + loss_step).clamp(low / 100.0, high / 100.0);
+    let (shortest, longest) = self.impairment.delay;
+    let range = (longest - shortest).as_secs_f64();
+    let delay_step = (self.uniform() - 0.5) / 2.0 * range;
+    let delay = (self.delay.as_secs_f64() + delay_step).clamp(shortest.as_secs_f64(), longest.as_secs_f64());
+    self.delay = Duration::from_secs_f64(delay);
+  }
+
+  /// Uniform in `[0, 1)` (xorshift).
+  fn uniform(&mut self) -> f64 {
+    self.rng ^= self.rng << 13;
+    self.rng ^= self.rng >> 7;
+    self.rng ^= self.rng << 17;
+    (self.rng >> 11) as f64 / (1u64 << 53) as f64
   }
 }
 

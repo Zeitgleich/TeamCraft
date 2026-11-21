@@ -155,6 +155,12 @@ extension AppModel {
       ?? PollLimitsItem(maxOptions: 12, maxQuestionChars: 300, maxOptionChars: 100, maxOpenDays: 365)
   }
 
+  /// Whether and how large a Live Photo's motion may be sent: the server's limits, else the built-in
+  /// ones (#2181). Asked before the clip is converted.
+  func motionLimits() async -> MotionLimitsItem {
+    (try? await core().motionLimits()) ?? MotionLimitsItem(isAllowed: true, maxBytes: 16 * 1024 * 1024)
+  }
+
   /// The groups the composer offers here; none without `use_group_mentions`.
   func mentionableGroups(_ conversationId: String) async -> [MentionableGroupItem] {
     (try? await core().mentionableGroups(conversationId: conversationId)) ?? []

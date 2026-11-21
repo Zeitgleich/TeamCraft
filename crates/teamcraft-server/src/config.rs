@@ -388,6 +388,11 @@ pub struct LimitsConfig {
   pub max_poll_option_chars: u32,
   /// How many days ahead a poll's closing time may be.
   pub max_poll_open_days: u32,
+  /// Whether Live Photos and Motion Photos go out with their motion (issue #2181); the apps hold
+  /// senders to it, the server can't see a motion part.
+  pub allows_motion_parts: bool,
+  /// Largest motion part of a Live Photo or Motion Photo (plain size).
+  pub max_motion_part_bytes: u64,
   /// How long a request for organization recovery waits for approvals.
   pub org_recovery_request_ttl_secs: u64,
   /// Largest sealed share or sealed backup key.
@@ -1819,7 +1824,29 @@ impl LimitsConfig {
         self.draft_file_retention_days
       ));
     }
-    self.check_poll_limits()
+    self.check_poll_limits()?;
+    self.check_motion_limits()
+  }
+
+  /// What the apps hold the senders of a Live Photo or Motion Photo to (issue #2181).
+  pub fn motion_limits(&self) -> teamcraft_proto::MotionLimits {
+    teamcraft_proto::MotionLimits {
+      is_allowed: self.allows_motion_parts,
+      max_bytes: self.max_motion_part_bytes,
+    }
+  }
+
+  fn check_motion_limits(&self) -> Result<(), String> {
+    let range = teamcraft_proto::MIN_MOTION_BYTES_LIMIT..=teamcraft_proto::MAX_MOTION_BYTES_LIMIT;
+    if !range.contains(&self.max_motion_part_bytes) {
+      return Err(format!(
+        "limits.max_motion_part_bytes must be {} to {}, is {}",
+        range.start(),
+        range.end(),
+        self.max_motion_part_bytes
+      ));
+    }
+    Ok(())
   }
 
   /// What the apps hold the senders of a poll to (issue #2120).
@@ -1890,6 +1917,8 @@ impl Default for LimitsConfig {
       max_poll_question_chars: teamcraft_proto::DEFAULT_MAX_POLL_QUESTION_CHARS as u32,
       max_poll_option_chars: teamcraft_proto::DEFAULT_MAX_POLL_OPTION_CHARS as u32,
       max_poll_open_days: teamcraft_proto::DEFAULT_MAX_POLL_OPEN_DAYS,
+      allows_motion_parts: true,
+      max_motion_part_bytes: teamcraft_proto::DEFAULT_MAX_MOTION_BYTES,
       org_recovery_request_ttl_secs: 86_400,
       max_recovery_blob_bytes: 8192,
       max_profile_text_chars: 100,

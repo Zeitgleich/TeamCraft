@@ -549,6 +549,8 @@ settings-f-max_poll_options = Most options of a poll
 settings-f-max_poll_question_chars = Longest poll question
 settings-f-max_poll_option_chars = Longest poll option
 settings-f-max_poll_open_days = Furthest closing time of a poll
+settings-f-allows_motion_parts = Send Live Photos and Motion Photos with motion
+settings-f-max_motion_part_bytes = Largest motion of a Live Photo
 settings-f-default_retention_days = Retention of integration channels (0: keep)
 settings-f-bridge_public_url = Bridge public URL
 settings-hint-bridge_public_url = Where producers reach an integration bridge on its own host, like https://bridge.example.com. It is offered when someone connects a source to a channel. Leave empty if the bridge runs beside the server or next to the producers. Use https; http only for localhost. No user name, query or #fragment.
@@ -852,6 +854,7 @@ settings-error-avatar-side = Enter 64 to 2048 pixels.
 settings-error-poll-options = Enter 2 to 32 options.
 settings-error-poll-text = Enter 1 to 1000 characters.
 settings-error-poll-days = Enter 1 to 3650 days.
+settings-error-motion-bytes = Enter 1 to 64 MiB.
 settings-error-call-reports = Enter 0 to 50 reports.
 settings-error-crash-environment = Use 1 to 64 lowercase letters, digits, "-", "_" or ".".
 

@@ -826,6 +826,7 @@ pub fn Composer(
               maybe_duration_ms,
               maybe_waveform: None,
               maybe_draft_id: Some(draft_id),
+              maybe_motion: None,
             }),
             Err(error) => {
               tracing::warn!(%error, "a large file could not be handed to the core");
@@ -2470,6 +2471,7 @@ fn draft_upload(file: &PendingFile) -> Option<OutgoingFile> {
     maybe_duration_ms: file.maybe_duration_ms,
     maybe_waveform: None,
     maybe_draft_id: Some(file.draft_id.clone()),
+    maybe_motion: None,
   })
 }
 
@@ -2483,6 +2485,7 @@ fn from_draft(item: &DraftFileItem) -> OutgoingFile {
     maybe_duration_ms: None,
     maybe_waveform: None,
     maybe_draft_id: None,
+    maybe_motion: None,
   }
 }
 

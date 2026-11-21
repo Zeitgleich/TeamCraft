@@ -11,6 +11,8 @@
 pub mod audio_frame;
 pub mod audio_io;
 pub mod audio_level;
+#[cfg(test)]
+mod bursty_loss;
 pub mod bwe;
 pub mod call_resilience;
 pub mod capture_health;
@@ -39,6 +41,7 @@ pub mod quic_send;
 pub mod rate_probe;
 pub mod receive_load;
 pub mod resample;
+pub mod retransmit;
 pub mod ringtone;
 pub mod rtp;
 pub mod send_queue;

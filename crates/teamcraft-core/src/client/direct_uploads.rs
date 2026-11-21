@@ -17,7 +17,7 @@ use teamcraft_proto::{
 
 use super::Client;
 use super::files::{
-  BlobRequest, PendingFile, TransferFailure, UploadError, UploadRetry, UploadSlot, UploadSource,
+  BlobRequest, FileRole, PendingFile, TransferFailure, UploadError, UploadRetry, UploadSlot, UploadSource,
   UploadTarget, announced_attachment,
 };
 use crate::api::{ApiError, ServerApi};
@@ -126,6 +126,7 @@ impl DirectUpload {
         maybe_waveform: None,
         maybe_parts: None,
         is_held: false,
+        role: FileRole::Attachment,
       },
       announced: Vec::new(),
       maybe_sent: None,
@@ -188,10 +189,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let recorded = match target {
       UploadTarget::Whole { slot, attachment } => match sent {
         Ok(()) => {
-          upload.maybe_sent = Some(SentFile::Whole {
-            slot,
-            attachment: Box::new(attachment),
-          });
+          upload.maybe_sent = Some(SentFile::Whole { slot, attachment });
           Ok(DirectUploadProgress::AllSent)
         },
         Err(error) if error.is_unreachable() => Err(DirectUploadError::Offline(CoreError::Api(error))),
@@ -309,6 +307,7 @@ pub fn estimated_message_bytes(body: &str, mention_count: usize, files: &[(&str,
     }),
     maybe_duration_ms: None,
     maybe_waveform: None,
+    maybe_motion: None,
   };
   let content = MessageContent::Text {
     body: body.to_owned(),
@@ -422,6 +421,7 @@ mod tests {
       maybe_dimensions: None,
       maybe_duration_ms: None,
       maybe_waveform: None,
+      maybe_motion: None,
     }
   }
 }

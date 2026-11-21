@@ -847,6 +847,50 @@ same `ReceiveLoad`, for the desktop and the headless client:
 Cost: an atomic counter per frame and handed-over frame, one command per frame to the call task,
 and the same per-tick judgement as in the browser.
 
+### A presenter's lossy uplink (issue #2189)
+
+A packet lost between a presenter and the SFU is lost for every viewer. On a still screen a slide
+change is all that is sent: before, one lost packet of it held the old slide until each viewer's
+NACKs ran out (the SFU never had the packet) and its keyframe request came back through the same
+uplink, and a short slide could be skipped. The SFU now asks the presenter for a gap at once
+(`uplink_repair.rs`), the presenter sends the packets again from what it keeps
+(`teamcraft_media::retransmit`), and a packet still missing after 300 ms (screen) or 500 ms
+(camera) gets one keyframe asked for, at most one a second per layer.
+
+`tests/suite/uplink_loss.rs` runs the real forwarder on a simulated clock: a presenter behind an
+uplink that loses 1 to 3 % of its packets in bursts (Gilbert–Elliott, four packets a burst, every
+other one lost) with 20 to 60 ms of delay, both walking every 500 ms, two viewers whose decoders
+need every frame since a keyframe and ask for a keyframe after 300 ms of waiting. One minute per
+run, five seeds:
+
+| Share of one minute                    | Repaired                     | Not repaired (before)            |
+|----------------------------------------|------------------------------|----------------------------------|
+| Slides (1 s and 2 s) never shown       | 0                            | 2–10                             |
+| Slides later than 0.7 s or never       | 0                            | 8–16                             |
+| Slide change to viewer, median / worst | 89–109 ms / 183–553 ms       | 84–107 ms / 0.7–1.9 s            |
+| Keyframes asked of the presenter       | 0–2                          | 10–16                            |
+| Camera (30 fps): frozen, both viewers  | 1.4–2.7 s                    | 46–64 s                          |
+| Camera: keyframes asked                | 0–1                          | 33–39                            |
+
+Through the real client and SFU (`screen_uplink_bursts::measure_slides_through_a_lossy_uplink`,
+the same loss on a relay, real encoders and estimator) the repaired runs showed every encoded slide
+to both viewers within 25–320 ms; without the repair three of ten slides never reached them. Those
+runs vary for two other reasons, tracked apart: with the voice's packets lost as well, the
+presenter holds its video for its voice and doesn't get it back (#2191), and one burst within a
+still screen's sparse second can cut its uplink estimate to the screen's own low rate (#2192).
+
+Cost:
+
+- **SFU:** per track and layer, the missing sequence numbers (at most 256, a few kilobytes at
+  worst, nothing while none are missing) and a few timestamps; per video packet one sequence
+  number comparison, per gap a map insert and a signaling message. The packets it keeps for
+  viewers' NACKs (#1762) are unchanged.
+- **Publisher:** what it sent within the SFU's window (1 s), at most 1024 packets per layer: about
+  a second of the share's bitrate, 0.2–0.4 MB for a screen at 1.5–3 Mbit/s, at most about 1.2 MB
+  per layer. One copy of each packet as it is sent (a `Vec` of its ~1.2 kB).
+- **Uplink:** packets sent again count in the uplink estimate and come out of a budget of 30 % of
+  it (64 KiB at once), so a lossy link isn't flooded by repairs.
+
 ### Each picture with its own frame (issue #990)
 
 The first VideoToolbox session of a process takes 55 to 71 ms for its first picture (a 1440p or
@@ -890,6 +934,75 @@ layer is rebuilt and missed it then). VideoToolbox takes 20 to 41 ms for a 4K pi
 frame at 30 fps, so a 4K share whose every frame changes now reaches 25 to 29 fps: keeping 30 would
 need two frames in the encoder at once, with each picture sent when it comes out rather than with
 the next frame.
+
+### A presenter on hotel Wi-Fi: uplink estimate and voice hold (issues #2191, #2192)
+
+A presenter's uplink that loses 1–3 % of its packets in short bursts (hotel or train Wi-Fi) froze
+the share for seconds at a time (#2189's real-time run). Measured in deterministic simulations on
+the seeded Gilbert–Elliott link of #2189's relay (`teamcraft_media::bursty_loss`: average loss
+walking within 1–3 %, bursts of 4 packets on average losing half, one-way delay walking within
+20–60 ms), five seeds each.
+
+**Estimate on a still screen** (`bwe::tests::still_screen`): voice every 20 ms, a tiny frame five
+times a second, a refresh every second, a 60 KB slide after 1 s and 2 s in turn paced out at the
+estimate; a 5 Mbit/s link, a demand of 3.5 Mbit/s; a minute after a 5 s start.
+
+| Per seed                               | Before                                | After                       |
+|----------------------------------------|---------------------------------------|-----------------------------|
+| Lowest estimate                        | 36–95 kbit/s (4 seeds), 2.2 Mbit/s    | 1.7–2.8 Mbit/s              |
+| Mean estimate                          | –                                     | 3.33–3.45 Mbit/s            |
+| Slowest slide paced out                | 23–48 s (4 seeds), 220 ms             | 165–270 ms                  |
+| Link drops to 500 kbit/s: ≤ 650 kbit/s | –                                     | 0.9–1.0 s                   |
+
+One burst in a still screen's sparse second (about 60 datagrams) was more than 10 % loss, the cut
+went to what got through (the screen's own rate), and the hold at 2 % loss kept the estimate from
+growing back. Now loss counts from 30 datagrams on, an application-limited sender without a queue
+(less than 150 ms over the fastest) is cut from its estimate by the loss (at most to half), and the
+hold starts 2 % above the link's own loss (learned over 10 s, at most 5 %). A sender that fills its
+estimate on a 3 Mbit/s link of the same kind averages 2.5–2.8 Mbit/s with its queue below 165 ms.
+
+**Video held for the voice** (`voice_guard::tests::bursty_link`): the presenter's voice next to
+the still screen, numbered together through the same link, feedback every 100 ms.
+
+| Per minute and seed                      | Before (a tenth, 3 s hold) | After                      |
+|------------------------------------------|----------------------------|----------------------------|
+| Video held                               | 19–39 s                    | 0–4.4 s                    |
+| Longest hold                             | 4.4–11.2 s                 | ≤ 1 s                      |
+| Collapse (33–90 % lost) found after      | 300–400 ms                 | 300–600 ms, held through   |
+
+The own uplink's guard counts the voice hurt at a fifth lost within 500 ms (was a tenth). Loss
+that lasts less than a second is a burst: the video comes back 500 ms after it. Loss that lasts a
+second, or voice stuck in a queue (#1889), is congestion: the 3 s hold and the probe proof (#1893)
+as before, and a probe cluster may lose a tenth of its datagrams (the link's own loss; an
+overflowing link loses its whole excess).
+
+Not covered: a still screen on a link that drops to about its slides' rate without overflowing its
+buffer (5 → 1 Mbit/s) is followed by the delay steps only (5–17 s); its slides are as fast as the
+link allows either way, but its voice waits behind a slide's queue (up to about 320 ms).
+
+### A camera encoder that misses its wait under load (issue #1719)
+
+The 50 ms wait above drops a late picture and forces the next frame to a keyframe. If keyframes
+were slower, or the encoder slower under load, misses could chain: one picture now and then, each a
+keyframe, never the 10 misses in a row that hand a stalled encoder over to OpenH264. Measured with
+`examples/vt_latency.rs` on an M4 Max (14 cores, macOS 26), 8 s per row, a 1080p camera's layers
+capped at 720p (720p, 360p, 180p) at 30 fps with sensor noise; the wait is `finish`'s, after the
+other layers were handed their frame:
+
+| Calls (VideoToolbox sessions) | Spinning threads | Keyframes      | Missed of frames | 720p wait p50 / p99 / max |
+|-------------------------------|------------------|----------------|------------------|---------------------------|
+| 1 (3)                         | 0                | first only     | 0 of 630         | 1.9 / 2.2 / 3.5 ms        |
+| 1 (3)                         | 0                | every frame    | 0 of 630         | 1.8 / 2.3 / 2.5 ms        |
+| 3 (9)                         | 28               | first only     | 0 of 1890        | 1.8 / 4.2 / 10.3 ms       |
+| 8 (24)                        | 28               | first only     | 0 of 5040        | 2.2 / 5.4 / 9.3 ms        |
+| 8 (24)                        | 28               | every frame    | 3 of 5040        | 2.2 / 14.6 / 73.2 ms      |
+
+A keyframe costs VideoToolbox no more time than another picture, and even 24 sessions with every
+core busy miss a picture rarely and alone: on this Mac the misses don't chain. On a slower Mac they
+still might, so a camera layer whose hardware gives a picture for fewer than one in four frames over
+2 s (and 30 frames) now hands over to OpenH264 like a stalled one (`TRICKLE_FRAMES_PER_PICTURE` in
+`video_codec.rs`). Screen layers don't: a 4K one takes VideoToolbox 20 to 41 ms a picture, and
+OpenH264 far longer.
 
 ## Clients
 
@@ -1117,8 +1230,13 @@ What the numbers say, and what changed:
 - A refresh after a change in the core (a new line in a log channel) reloaded every page the
   mirror ever read: the further back the reader had scrolled, the more pages every new line cost.
   It now reloads the pages read or asked ahead for since the last change and drops the others.
-- Android and iOS show the newest 200 messages without paging back, so they have no page boundary
-  to stall at.
+- Android shows the newest 200 messages without paging back, so it has no page boundary to stall
+  at. iOS opens a conversation with the newest 60 and pages back 60 at a time, 20 rows before the
+  reader reaches the oldest one loaded (#2180): most readers never scroll that far, and a smaller
+  first read is a cheaper switch. A page that comes in keeps the row on screen where it is and lets
+  a fling go on (the layout moves the scroll position with the update), and a read after a change
+  in the store waits until the list rests (at most 2 s), so it never lands in the middle of a
+  fling.
 
 #### Large workspace
 

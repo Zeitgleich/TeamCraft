@@ -33,6 +33,7 @@ final class LockHolds {
       return true
     }
     let lock = lock
+    // blocking-ok: on a detached task, off the main thread.
     let pending = Task.detached { lock.acquire(timeout: timeout) }
     maybePending = pending
     let isTaken = await pending.value

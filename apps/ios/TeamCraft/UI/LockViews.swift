@@ -96,6 +96,8 @@ struct DeviceSecuritySection: View {
     SharedContainer().isAppLockOn = isOn
     // The home screen widget hides everything personal while the lock is on (#2076).
     AppModel.shared.homeWidget.storeDidChange(AppModel.shared)
+    // So does the share extension's conversation list (#1037).
+    AppModel.shared.shareTargetsUpdater.storeDidChange(AppModel.shared)
   }
 
   private func title(of choice: LockAfter) -> LocalizedStringKey {

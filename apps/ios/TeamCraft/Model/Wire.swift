@@ -14,6 +14,19 @@ enum Wire {
 
 /// Where a file stands: `remote`, `uploading`, `downloading`, `local`, `failed`, or for an own file
 /// that stopped going up `upload_stalled` (retried on "Try again") and `upload_failed` (for good).
+/// The motion part of a picture (#2181): a file of the message of its own, downloaded and saved by
+/// its `fileId` like any other.
+struct MotionInfo: Decodable, Equatable, Sendable {
+  let fileId: String
+  let mediaType: String
+  let sizeBytes: Int64
+  var durationMs: Int64?
+  let transfer: FileTransfer
+
+  /// The decrypted clip, once downloaded.
+  var localPath: String? { transfer.state == "local" ? transfer.path : nil }
+}
+
 struct FileTransfer: Decodable, Equatable, Sendable {
   let state: String
   let doneBytes: Int64?
@@ -63,8 +76,12 @@ struct FileInfo: Decodable, Equatable, Identifiable, Sendable {
   /// A voice message's waveform from the sender (#204), one loudness byte per bar; checked by the
   /// core, so present only on voice messages.
   var maybeWaveform: [UInt8]?
+  /// The motion of a Live Photo or Motion Photo (#2181): played on request, downloaded only then.
+  var motion: MotionInfo?
 
   var id: String { fileId }
+  /// A picture with motion to play (#2181).
+  var isLive: Bool { isImage && motion != nil }
   var isImage: Bool { mediaType.hasPrefix("image/") }
   var isVideo: Bool { mediaType.hasPrefix("video/") }
   /// A video that opens in the player: on the server or here, not one still going up.

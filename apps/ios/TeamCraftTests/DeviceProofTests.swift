@@ -39,14 +39,15 @@ final class DeviceProofTests: XCTestCase {
 
   // MARK: Proofs in a token request
 
-  func testARefreshProofNamesTheTokenEndpointAndVerifiesWithTheStoredKey() throws {
+  func testARefreshProofNamesTheTokenEndpointAndVerifiesWithTheStoredKey() async throws {
     let key = try storedKey()
     let thumbprint = try thumbprint(of: key)
     let (vault, _) = makeVault()
     try vault.save(session(boundKey: thumbprint))
     StubProtocol.answers = [.token(Self.boundToken(thumbprint))]
 
-    XCTAssertEqual(vault.currentAccessToken(), Self.boundToken(thumbprint))
+    let asked1 = await offMain { vault.currentAccessToken() }
+    XCTAssertEqual(asked1, Self.boundToken(thumbprint))
     XCTAssertEqual(vault.load()?.boundKey, thumbprint)
 
     let proof = try XCTUnwrap(StubProtocol.recorded.first?.value(forHTTPHeaderField: "DPoP"))
@@ -68,13 +69,14 @@ final class DeviceProofTests: XCTestCase {
     XCTAssertTrue(verifier.isValidSignature(signature, for: Data("\(parts[0]).\(parts[1])".utf8)))
   }
 
-  func testANonceChallengeGetsOneMoreTryWithTheNonce() throws {
+  func testANonceChallengeGetsOneMoreTryWithTheNonce() async throws {
     let thumbprint = try thumbprint(of: storedKey())
     let (vault, _) = makeVault()
     try vault.save(session(boundKey: thumbprint))
     StubProtocol.answers = [.oauthError("use_dpop_nonce", nonce: "provider-nonce"), .token(Self.boundToken(thumbprint))]
 
-    XCTAssertEqual(vault.currentAccessToken(), Self.boundToken(thumbprint))
+    let asked2 = await offMain { vault.currentAccessToken() }
+    XCTAssertEqual(asked2, Self.boundToken(thumbprint))
 
     XCTAssertEqual(StubProtocol.recorded.count, 2)
     let first = try claims(of: StubProtocol.recorded[0])
@@ -86,20 +88,21 @@ final class DeviceProofTests: XCTestCase {
 
   /// One retry, never more: the provider's nonces are remembered per process only, so the extension
   /// meets the challenge in each run and must not ask for ever (issue #120).
-  func testAProviderThatKeepsChallengingIsAskedTwiceAndTheSessionStays() throws {
+  func testAProviderThatKeepsChallengingIsAskedTwiceAndTheSessionStays() async throws {
     let thumbprint = try thumbprint(of: storedKey())
     let (vault, _) = makeVault()
     try vault.save(session(boundKey: thumbprint))
     StubProtocol.answers = [.oauthError("use_dpop_nonce", nonce: "one"), .oauthError("use_dpop_nonce", nonce: "two")]
 
-    XCTAssertNil(vault.currentAccessToken(), "the token was expired and no new one came")
+    let asked3 = await offMain { vault.currentAccessToken() }
+    XCTAssertNil(asked3, "the token was expired and no new one came")
 
     XCTAssertEqual(StubProtocol.recorded.count, 2)
     XCTAssertNotNil(vault.load(), "a provider that keeps refusing proofs is no end of the session")
   }
 
   /// A wrong device clock: the provider's `Date` says so, and the one more try is dated by it.
-  func testAProvidersDateCorrectsTheClockForTheOneMoreTry() throws {
+  func testAProvidersDateCorrectsTheClockForTheOneMoreTry() async throws {
     let thumbprint = try thumbprint(of: storedKey())
     let (vault, _) = makeVault()
     try vault.save(session(boundKey: thumbprint))
@@ -112,31 +115,33 @@ final class DeviceProofTests: XCTestCase {
       .oauthErrorAt("invalid_request", date: formatter.string(from: serverNow)), .token(Self.boundToken(thumbprint)),
     ]
 
-    XCTAssertEqual(vault.currentAccessToken(), Self.boundToken(thumbprint))
+    let asked4 = await offMain { vault.currentAccessToken() }
+    XCTAssertEqual(asked4, Self.boundToken(thumbprint))
 
     XCTAssertEqual(StubProtocol.recorded.count, 2)
     let iat = try XCTUnwrap(try claims(of: StubProtocol.recorded[1])["iat"] as? Double)
     XCTAssertEqual(iat, serverNow.timeIntervalSince1970, accuracy: 30)
   }
 
-  func testAProofGoesWithoutARedirect() throws {
+  func testAProofGoesWithoutARedirect() async throws {
     let thumbprint = try thumbprint(of: storedKey())
     let (vault, _) = makeVault()
     try vault.save(session(boundKey: thumbprint))
     StubProtocol.answers = [.redirect(to: URL(string: "https://elsewhere.example.com/token")!)]
 
-    _ = vault.currentAccessToken()
+    _ = await offMain { vault.currentAccessToken() }
 
     XCTAssertEqual(StubProtocol.recorded.count, 1, "a proof names one URL; the redirect isn't followed")
   }
 
   /// A key belongs to one server: a prover kept for another must not sign here.
-  func testAServerSwitchedToSignsWithItsOwnKey() throws {
+  func testAServerSwitchedToSignsWithItsOwnKey() async throws {
     let first = try thumbprint(of: storedKey())
     let (vault, _) = makeVault()
     try vault.save(session(boundKey: first))
     StubProtocol.answers = [.token(Self.boundToken(first))]
-    XCTAssertEqual(vault.currentAccessToken(), Self.boundToken(first))
+    let asked6 = await offMain { vault.currentAccessToken() }
+    XCTAssertEqual(asked6, Self.boundToken(first))
 
     servers.activate(
       ServerAccount(origin: "https://other.example.com", storageKey: "other.example.com", profileJson: "{}"))
@@ -147,7 +152,8 @@ final class DeviceProofTests: XCTestCase {
     StubProtocol.clearRecorded()
     StubProtocol.answers = [.token(Self.boundToken(otherThumbprint))]
 
-    XCTAssertEqual(vault.currentAccessToken(), Self.boundToken(otherThumbprint))
+    let asked7 = await offMain { vault.currentAccessToken() }
+    XCTAssertEqual(asked7, Self.boundToken(otherThumbprint))
 
     let proof = try XCTUnwrap(StubProtocol.recorded.first?.value(forHTTPHeaderField: "DPoP"))
     let jwk = try XCTUnwrap(Self.json(String(proof.split(separator: ".")[0]))["jwk"] as? [String: Any])
@@ -157,11 +163,12 @@ final class DeviceProofTests: XCTestCase {
 
   // MARK: A key that isn't there
 
-  func testAMissingKeyGoesNoFurtherAndKeepsTheSession() throws {
+  func testAMissingKeyGoesNoFurtherAndKeepsTheSession() async throws {
     let (vault, _) = makeVault()
     try vault.save(session(boundKey: "thumbprint-of-a-key-that-is-gone"))
 
-    XCTAssertEqual(vault.currentAccessToken(), "old-access", "the core sees the binding and says why")
+    let asked8 = await offMain { vault.currentAccessToken() }
+    XCTAssertEqual(asked8, "old-access", "the core sees the binding and says why")
 
     XCTAssertTrue(StubProtocol.recorded.isEmpty, "nothing goes to the provider")
     XCTAssertNotNil(vault.load(), "a missing key signs nobody out")
@@ -169,12 +176,13 @@ final class DeviceProofTests: XCTestCase {
   }
 
   /// The session is bound to another key than this device has: as lost as none.
-  func testAnotherKeyIsALostKey() throws {
+  func testAnotherKeyIsALostKey() async throws {
     _ = try storedKey()
     let (vault, _) = makeVault()
     try vault.save(session(boundKey: "thumbprint-of-another-key"))
 
-    XCTAssertEqual(vault.currentAccessToken(), "old-access")
+    let asked9 = await offMain { vault.currentAccessToken() }
+    XCTAssertEqual(asked9, "old-access")
 
     XCTAssertTrue(StubProtocol.recorded.isEmpty)
     XCTAssertTrue(vault.isDeviceKeyLost)
@@ -183,28 +191,31 @@ final class DeviceProofTests: XCTestCase {
 
   /// A locked keychain: nothing goes to the provider, the session stays, and the core gets a token
   /// it holds back instead of `nil`, which would read as signed out.
-  func testAKeyThatCantBeReadIsAWaitAndNoSignOut() throws {
+  func testAKeyThatCantBeReadIsAWaitAndNoSignOut() async throws {
     let thumbprint = try thumbprint(of: storedKey())
     let (vault, _) = makeVault()
     try vault.save(session(boundKey: thumbprint))
     items.failsKeyReads = true
 
-    XCTAssertEqual(vault.currentAccessToken(), "old-access")
+    let asked10 = await offMain { vault.currentAccessToken() }
+    XCTAssertEqual(asked10, "old-access")
 
     XCTAssertTrue(StubProtocol.recorded.isEmpty)
     XCTAssertNotNil(vault.load())
     XCTAssertFalse(vault.isDeviceKeyLost, "a key that can't be read is no lost key")
     items.failsKeyReads = false
     StubProtocol.answers = [.token(Self.boundToken(thumbprint))]
-    XCTAssertEqual(vault.currentAccessToken(), Self.boundToken(thumbprint), "and works when it can be read again")
+    let asked11 = await offMain { vault.currentAccessToken() }
+    XCTAssertEqual(asked11, Self.boundToken(thumbprint), "and works when it can be read again")
   }
 
-  func testAFreshBoundTokenComesBackWithoutAKeyRead() throws {
+  func testAFreshBoundTokenComesBackWithoutAKeyRead() async throws {
     let thumbprint = try thumbprint(of: storedKey())
     let (vault, _) = makeVault()
     try vault.save(session(boundKey: thumbprint, expiresIn: 600))
     items.failsKeyReads = true
-    XCTAssertEqual(vault.currentAccessToken(), "old-access")
+    let asked12 = await offMain { vault.currentAccessToken() }
+    XCTAssertEqual(asked12, "old-access")
     XCTAssertTrue(StubProtocol.recorded.isEmpty)
   }
 
@@ -223,13 +234,14 @@ final class DeviceProofTests: XCTestCase {
     XCTAssertFalse(vault.isDeviceKeyLost)
   }
 
-  func testARefusedRefreshTokenEndsTheSessionAndTheKey() throws {
+  func testARefusedRefreshTokenEndsTheSessionAndTheKey() async throws {
     let thumbprint = try thumbprint(of: storedKey())
     let (vault, _) = makeVault()
     try vault.save(session(boundKey: thumbprint))
     StubProtocol.answers = [.oauthError("invalid_grant", nonce: nil)]
 
-    XCTAssertNil(vault.currentAccessToken())
+    let asked13 = await offMain { vault.currentAccessToken() }
+    XCTAssertNil(asked13)
 
     XCTAssertNil(vault.load())
     XCTAssertNil(items.values[Self.keyItem])
@@ -255,12 +267,13 @@ final class DeviceProofTests: XCTestCase {
   }
 
   /// The extension leaves binding to the app: no proof, no key, for a session that isn't bound.
-  func testTheExtensionNeitherBindsNorMakesAKey() throws {
+  func testTheExtensionNeitherBindsNorMakesAKey() async throws {
     let (vault, asked) = makeVault(bindsSessions: false, offer: .offered, providerTakesProofs: true)
     try vault.save(session(boundKey: nil))
     StubProtocol.answers = [.token("unbound-access")]
 
-    XCTAssertEqual(vault.currentAccessToken(), "unbound-access")
+    let asked14 = await offMain { vault.currentAccessToken() }
+    XCTAssertEqual(asked14, "unbound-access")
 
     XCTAssertNil(StubProtocol.recorded.first?.value(forHTTPHeaderField: "DPoP"))
     XCTAssertNil(items.values[Self.keyItem])
@@ -268,38 +281,41 @@ final class DeviceProofTests: XCTestCase {
   }
 
   /// The policy `off`, an older server, a proxy that strips the header: `server-info` has no nonce.
-  func testAServerThatOffersNoProofsLeavesTheSessionUnbound() throws {
+  func testAServerThatOffersNoProofsLeavesTheSessionUnbound() async throws {
     let (vault, _) = makeVault(offer: .notOffered, providerTakesProofs: true)
     try vault.save(session(boundKey: nil))
     StubProtocol.answers = [.token("unbound-access")]
 
-    XCTAssertEqual(vault.currentAccessToken(), "unbound-access")
+    let asked15 = await offMain { vault.currentAccessToken() }
+    XCTAssertEqual(asked15, "unbound-access")
 
     XCTAssertNil(StubProtocol.recorded.first?.value(forHTTPHeaderField: "DPoP"))
     XCTAssertNil(items.values[Self.keyItem], "no key without a use for it")
     XCTAssertNil(vault.load()?.boundKey)
   }
 
-  func testAProviderWithoutProofsLeavesTheSessionUnbound() throws {
+  func testAProviderWithoutProofsLeavesTheSessionUnbound() async throws {
     let (vault, asked) = makeVault(offer: .offered, providerTakesProofs: false)
     try vault.save(session(boundKey: nil))
     StubProtocol.answers = [.token("unbound-access")]
 
-    XCTAssertEqual(vault.currentAccessToken(), "unbound-access")
+    let asked16 = await offMain { vault.currentAccessToken() }
+    XCTAssertEqual(asked16, "unbound-access")
 
     XCTAssertNil(StubProtocol.recorded.first?.value(forHTTPHeaderField: "DPoP"))
     XCTAssertEqual(asked.count, 0, "the server isn't asked when the provider wouldn't do it anyway")
   }
 
   /// `optional` and `required` as an existing sign-in in the app sees them: its refresh binds it.
-  func testAnExistingSessionGetsBoundByItsNextRefreshInTheApp() throws {
+  func testAnExistingSessionGetsBoundByItsNextRefreshInTheApp() async throws {
     let (vault, _) = makeVault(offer: .offered, providerTakesProofs: true)
     try vault.save(session(boundKey: nil))
     let key = try storedKey()
     let thumbprint = try thumbprint(of: key)
     StubProtocol.answers = [.token(Self.boundToken(thumbprint))]
 
-    XCTAssertEqual(vault.currentAccessToken(), Self.boundToken(thumbprint))
+    let asked17 = await offMain { vault.currentAccessToken() }
+    XCTAssertEqual(asked17, Self.boundToken(thumbprint))
 
     XCTAssertNotNil(StubProtocol.recorded.first?.value(forHTTPHeaderField: "DPoP"))
     XCTAssertEqual(vault.load()?.boundKey, thumbprint)
@@ -307,12 +323,13 @@ final class DeviceProofTests: XCTestCase {
 
   /// A provider may advertise proofs and not take them for this client: the session goes on unbound,
   /// and later refreshes of this run don't pay for the refusal.
-  func testARefusedProofLeavesTheSessionUnboundAndIsNotTriedAgain() throws {
+  func testARefusedProofLeavesTheSessionUnboundAndIsNotTriedAgain() async throws {
     let (vault, asked) = makeVault(offer: .offered, providerTakesProofs: true)
     try vault.save(session(boundKey: nil))
     StubProtocol.answers = [.oauthError("invalid_dpop_proof", nonce: nil), .token("unbound-access")]
 
-    XCTAssertEqual(vault.currentAccessToken(), "unbound-access")
+    let asked18 = await offMain { vault.currentAccessToken() }
+    XCTAssertEqual(asked18, "unbound-access")
 
     XCTAssertNotNil(StubProtocol.recorded[0].value(forHTTPHeaderField: "DPoP"))
     XCTAssertNil(StubProtocol.recorded[1].value(forHTTPHeaderField: "DPoP"))
@@ -322,20 +339,22 @@ final class DeviceProofTests: XCTestCase {
     StubProtocol.answers = [.token("unbound-access")]
     StubProtocol.clearRecorded()
     let beforeAsking = asked.count
-    XCTAssertEqual(vault.currentAccessToken(), "unbound-access")
+    let asked19 = await offMain { vault.currentAccessToken() }
+    XCTAssertEqual(asked19, "unbound-access")
     XCTAssertNil(StubProtocol.recorded[0].value(forHTTPHeaderField: "DPoP"))
     XCTAssertEqual(asked.count, beforeAsking)
   }
 
   /// A key made to bind a session that then can't sign doesn't stop the refresh, and doesn't stay.
-  func testAKeyThatCantSignDoesntStopABindingRefresh() throws {
+  func testAKeyThatCantSignDoesntStopABindingRefresh() async throws {
     let brokenKey = StoredDeviceKey(kind: .software, keyData: Data([0xff]), publicPoint: try storedKey().publicPoint)
     items.values[Self.keyItem] = try JSONEncoder().encode(brokenKey)
     let (vault, _) = makeVault(offer: .offered, providerTakesProofs: true)
     try vault.save(session(boundKey: nil))
     StubProtocol.answers = [.token("unbound-access")]
 
-    XCTAssertEqual(vault.currentAccessToken(), "unbound-access")
+    let asked20 = await offMain { vault.currentAccessToken() }
+    XCTAssertEqual(asked20, "unbound-access")
 
     XCTAssertEqual(StubProtocol.recorded.count, 1)
     XCTAssertNil(StubProtocol.recorded[0].value(forHTTPHeaderField: "DPoP"))
@@ -344,12 +363,13 @@ final class DeviceProofTests: XCTestCase {
 
   /// A bound session whose refresh answers with an unbound token is unbound from then on, as when the
   /// provider stops binding for this client.
-  func testAnUnboundAnswerUnbindsTheSession() throws {
+  func testAnUnboundAnswerUnbindsTheSession() async throws {
     let thumbprint = try thumbprint(of: storedKey())
     let (vault, _) = makeVault()
     try vault.save(session(boundKey: thumbprint))
     StubProtocol.answers = [.token("unbound-access")]
-    XCTAssertEqual(vault.currentAccessToken(), "unbound-access")
+    let asked21 = await offMain { vault.currentAccessToken() }
+    XCTAssertEqual(asked21, "unbound-access")
     XCTAssertNil(vault.load()?.boundKey)
   }
 

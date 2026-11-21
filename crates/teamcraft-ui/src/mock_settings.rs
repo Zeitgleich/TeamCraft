@@ -464,6 +464,8 @@ fn default_runtime() -> RuntimeSettingsResponse {
       max_poll_question_chars: teamcraft_proto::DEFAULT_MAX_POLL_QUESTION_CHARS as u32,
       max_poll_option_chars: teamcraft_proto::DEFAULT_MAX_POLL_OPTION_CHARS as u32,
       max_poll_open_days: teamcraft_proto::DEFAULT_MAX_POLL_OPEN_DAYS,
+      allows_motion_parts: true,
+      max_motion_part_bytes: teamcraft_proto::DEFAULT_MAX_MOTION_BYTES,
     },
     integration: IntegrationSettings {
       default_retention_days: 30,

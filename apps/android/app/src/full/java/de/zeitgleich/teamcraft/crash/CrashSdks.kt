@@ -110,6 +110,17 @@ private object SentryCrashSdk : CrashSdk {
     runCatching { Sentry.captureEvent(event) }
   }
 
+  override fun captureWarning(what: String, where: String) {
+    if (maybeRunning == null) return
+    val event = SentryEvent().apply {
+      level = SentryLevel.WARNING
+      message = Message().apply { formatted = "$what: $where" }
+      fingerprints = listOf(what, where)
+      setTag("call_site", where)
+    }
+    runCatching { Sentry.captureEvent(event) }
+  }
+
   private fun configure(options: SentryAndroidOptions, settings: CrashSdkSettings) {
     options.dsn = settings.config.dsn
     options.release = settings.release

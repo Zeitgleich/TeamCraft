@@ -431,9 +431,19 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
   Resent bytes come out of a per-receiver budget (30 % of its downlink estimate, bursts of 64 KiB)
   and count in its estimate like any others, so a lossy receiver can't make the SFU flood its link.
   Audio isn't resent: Opus conceals losses and carries FEC, and a late frame couldn't be played.
-  Losses on a publisher's uplink aren't repaired: the SFU alone covers the common case (viewers
-  behind worse links than the presenter, each repaired without a cost to the others), and the
-  publisher's uplink estimate already drops layers its link loses.
+- **Lost uplink packets (#2189):** a packet lost between a publisher and the SFU is lost for every
+  viewer, and a still screen sends almost nothing after a slide change: one lost packet of the
+  change held the old slide until a viewer's NACKs ran out and its keyframe request came back
+  through the same uplink. The SFU follows the RTP sequence numbers of each layer someone receives
+  (or is switching to) and asks the publisher at once for what a gap shows missing
+  (`retransmit_requested`), with a viewer's rules: again after about one and a half of the
+  publisher's round trips, at most three times. The publisher keeps what it sent for the window of
+  `joined` and sends those packets once more, as they went out (still DAVE encrypted, numbered anew
+  for its uplink estimate, within 30 % of it); the SFU forwards them like any, so every viewer gets
+  them within a round trip of the uplink. A packet still missing after 300 ms (screen) or 500 ms
+  (camera) is given up: the SFU asks the publisher for a keyframe of the layer, at most once a
+  second per layer from this path and merged with viewers' requests (500 ms per layer), so a lossy
+  uplink doesn't loop on keyframes. Settings: docs/operations.md.
 - **Probe at the start (#1762):** right after a join or rejoin (and after a move to another path)
   the client sends a few short trains of padding to the SFU, and the SFU to the client (three
   trains of five 1000-byte datagrams, 150 ms apart, `TEAMCRAFT_SFU_PROBE_BYTES`). The spread of
@@ -803,7 +813,14 @@ Settings → Chats).
   over) while more is sent than gets through cuts it to 85 % of what got through, as does loss
   above 10 % (to what got through less half the loss; only loss of packets sent after the last
   such cut counts, and the next such cut may follow 400 ms later: a link that lost its room is
-  cut to it within a second, #1792); loss of 2–10 % holds it. GCC cuts to what got through at once, but a camera
+  cut to it within a second, #1792); loss of 2–10 % holds it. Loss counts once the window reported
+  30 datagrams, and the hold starts 2 % above the link's own loss (learned over 10 s, at most 5 %):
+  hotel or train Wi-Fi loses 1–3 % in bursts, and a still screen's sparse second read one burst
+  as more than 10 %, while the hold at 2 % stopped every regrowth (#2192). An
+  application-limited sender whose path queues less than 150 ms over its fastest is cut from its
+  estimate instead (by the loss, at most to half): what got through of it is its own rate, and a
+  still screen's 3.5 Mbit/s fell to 190 kbit/s at one burst; with a queue (its estimate above the
+  link's rate) it is cut to what got through, as any sender. GCC cuts to what got through at once, but a camera
   doesn't fill its estimate (layers in steps, keyframes): the queue of one keyframe cut it below
   its top layer. A burst's queue can last as long (a still screen's keyframe read by a slow
   machine), but nothing more is sent meanwhile: cut to what got through of it, a CI runner's
@@ -888,7 +905,9 @@ Settings → Chats).
   holds the estimate at most at its rate (never below what keeps the current layers), forgets
   what earlier ones showed, and the next one waits 1 s, then 2 s. Clusters also go out before
   the estimate covers a step, so a link that got better is found within seconds. Their queue and
-  loss don't count as congestion. Receivers that send no feedback switch up as before. After
+  loss don't count as congestion. A cluster may lose a tenth of its datagrams, the link's own loss
+  (#2191): an overflowing link loses its whole excess, and on hotel Wi-Fi one lost datagram made
+  every cluster fall short. Receivers that send no feedback switch up as before. After
   (`weak_downlink`, laptop): every frame 180p, longest gap 150–200 ms (8 runs in parallel). On
   the simulated LTE link of `ltevary.sh` (2–3.5 Mbit/s swinging, 25 Mbit/s for a minute) a 1440p
   share's viewer gets the top layer 3.1 s after the room appears and is back on 720p 0.6 s after

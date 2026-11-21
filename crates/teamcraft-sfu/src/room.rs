@@ -1638,6 +1638,22 @@ impl RoomState {
             },
           );
         },
+        Effect::RetransmitRequest {
+          publisher,
+          stream_id,
+          layer,
+          sequence_numbers,
+        } => {
+          self.quality.uplink_packets_requested(sequence_numbers.len());
+          self.send_to(
+            publisher,
+            CallEvent::RetransmitRequested {
+              stream_id: MediaStreamId(stream_id.0),
+              layer,
+              sequence_numbers,
+            },
+          );
+        },
         Effect::LayersNeeded {
           publisher,
           stream_id,
