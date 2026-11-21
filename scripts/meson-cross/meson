@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Meson wrapper for cross-compiled Rust builds (#197). Put this directory first on PATH.
+#
+# The build script of webrtc-audio-processing-sys (WebRTC echo cancellation, bundled build) runs
+# `meson setup` without a cross file, so Meson builds for the machine it runs on: the Intel macOS
+# build, cross-compiled on Apple silicon, would link an arm64 library. Cargo hands the build script
+# its TARGET and HOST, and Meson inherits them. When they differ and this directory has a cross file
+# named after TARGET (`<target>.ini`), the wrapper adds `--cross-file` to `meson setup`. Every other
+# call runs Meson unchanged.
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+
+# The real Meson: the first one on PATH that is not this wrapper.
+real=""
+IFS=: read -ra path_dirs <<<"${PATH:-}"
+for dir in "${path_dirs[@]}"; do
+  [[ -n "$dir" && -d "$dir" ]] || continue
+  [[ "$(cd "$dir" && pwd -P)" == "$here" ]] && continue
+  if [[ -x "$dir/meson" ]]; then
+    real="$dir/meson"
+    break
+  fi
+done
+if [[ -z "$real" ]]; then
+  echo "meson wrapper: no meson on PATH besides $here" >&2
+  exit 127
+fi
+
+target="${TARGET:-}"
+cross_file="$here/$target.ini"
+if [[ "${1:-}" == "setup" && -n "$target" && "$target" != "${HOST:-}" && -f "$cross_file" ]]; then
+  shift
+  echo "meson wrapper: cross-compiling for $target with $cross_file" >&2
+  exec "$real" setup --cross-file "$cross_file" "$@"
+fi
+exec "$real" "$@"

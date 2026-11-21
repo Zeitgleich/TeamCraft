@@ -86,6 +86,19 @@ For example, with the system library:
 RUSTFLAGS="--cfg teamcraft_audio_processing" cargo test -p teamcraft-media --features native
 ```
 
+Cross-compiling the bundled build needs a Meson cross file, which the `webrtc-audio-processing-sys`
+build script doesn't pass. `scripts/meson-cross/` has a `meson` wrapper that adds one when Cargo's
+`TARGET` differs from `HOST`; put it first on `PATH`. For Intel macOS on Apple silicon:
+
+```sh
+rustup target add x86_64-apple-darwin
+PATH="$PWD/scripts/meson-cross:$PATH" \
+RUSTFLAGS="--cfg teamcraft_audio_processing --cfg teamcraft_audio_processing_bundled" \
+  cargo test -p teamcraft-media --features native --target x86_64-apple-darwin audio_processing
+```
+
+The tests run under Rosetta.
+
 CI runs a separate `audio-processing` job with the bundled build, and the desktop release workflow
 builds packages with it. `RUSTFLAGS` changes invalidate the build cache, so use a separate
 `CARGO_TARGET_DIR` when switching often.
