@@ -23,7 +23,6 @@
 //! decrypted ever goes to the server: "open in a new window" hands the same in-memory URL to a
 //! blank window of this page.
 
-use std::cell::Cell;
 use std::rc::Rc;
 
 use leptos::html;
@@ -59,6 +58,7 @@ use crate::media_cache::{self, Rendition};
 use crate::model::{ConversationId, ConversationKind, thread_id_of};
 use crate::object_url::ObjectUrl;
 use crate::reactive::SetIfAlive;
+use crate::settings;
 use crate::state::use_app_state;
 
 /// Pixels per line of a wheel event that scrolls by lines (Firefox with a mouse wheel).
@@ -67,9 +67,12 @@ const WHEEL_LINE_PX: f64 = 16.0;
 /// Below this window width the thread panel starts hidden: the picture needs the room.
 const THREAD_PANEL_MIN_WIDTH_PX: f64 = 1200.0;
 
-thread_local! {
-  /// Whether the user last showed or hid the thread panel, for the next lightbox of this session.
-  static IS_THREAD_SHOWN: Cell<Option<bool>> = const { Cell::new(None) };
+/// Where the device keeps whether the user last showed or hid the thread panel.
+const KEY_THREAD_SHOWN: &str = "teamcraft.lightbox_thread_shown";
+
+/// The stored choice wins; without one the panel is shown when the window is wide enough.
+fn initial_thread_shown(maybe_stored: Option<bool>, is_wide: bool) -> bool {
+  maybe_stored.unwrap_or(is_wide)
 }
 
 /// The full-size bytes of the file on screen.
@@ -217,7 +220,10 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
   let track = NodeRef::<html::Div>::new();
   let image = NodeRef::<html::Img>::new();
   let video = NodeRef::<html::Video>::new();
-  let is_thread_shown = RwSignal::new(IS_THREAD_SHOWN.get().unwrap_or_else(is_wide_window));
+  let is_thread_shown = RwSignal::new(initial_thread_shown(
+    settings::load_json(KEY_THREAD_SHOWN),
+    is_wide_window(),
+  ));
   let modifier = modifier_style();
 
   load_current(LoadInputs {
@@ -273,7 +279,7 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
   let toggle_thread = move || {
     let shown = !is_thread_shown.get_untracked();
     is_thread_shown.set(shown);
-    IS_THREAD_SHOWN.set(Some(shown));
+    settings::store_json(KEY_THREAD_SHOWN, &shown);
   };
   let actions = MediaActions {
     state,
@@ -1339,4 +1345,21 @@ fn modifier_style() -> ModifierStyle {
     .and_then(|window| window.navigator().platform().ok())
     .unwrap_or_default();
   ModifierStyle::for_platform(&platform)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::initial_thread_shown;
+
+  #[test]
+  fn stored_choice_beats_window_width() {
+    assert!(!initial_thread_shown(Some(false), true));
+    assert!(initial_thread_shown(Some(true), false));
+  }
+
+  #[test]
+  fn unset_choice_follows_window_width() {
+    assert!(initial_thread_shown(None, true));
+    assert!(!initial_thread_shown(None, false));
+  }
 }
