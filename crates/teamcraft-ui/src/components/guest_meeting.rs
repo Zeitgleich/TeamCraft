@@ -134,7 +134,7 @@ fn GuestShell(
     Some(call) => AppState::new(backend, settings, None).with_call(call),
     None => AppState::new(backend, settings, None),
   };
-  provide_context(state);
+  state.provide();
   provide_context(MeetingsHub::for_guest(
     MeetingsClient::new(auth.clone()),
     conversation,

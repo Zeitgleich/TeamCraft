@@ -92,7 +92,7 @@ pub fn EmojiPickerPanel(
   }
 
   // The workspace's emoji as their `:shortcode:` tokens, by name; read again if they changed.
-  crate::custom_emoji::want_set();
+  crate::custom_emoji::want_set(state);
   let custom = Memo::new(move |_| {
     state.read(|backend| {
       backend
