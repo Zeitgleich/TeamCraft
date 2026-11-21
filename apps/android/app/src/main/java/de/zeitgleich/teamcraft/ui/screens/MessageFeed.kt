@@ -84,6 +84,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
@@ -190,6 +191,7 @@ import de.zeitgleich.teamcraft.ui.avatarColorOfHue
 import de.zeitgleich.teamcraft.ui.bubbleCorners
 import de.zeitgleich.teamcraft.ui.dayShowsYear
 import de.zeitgleich.teamcraft.ui.decideFeedScroll
+import de.zeitgleich.teamcraft.ui.drawsFromOriginal
 import de.zeitgleich.teamcraft.ui.feedItems
 import de.zeitgleich.teamcraft.ui.reactionPeople
 import de.zeitgleich.teamcraft.ui.gapEdge
@@ -210,6 +212,7 @@ import de.zeitgleich.teamcraft.ui.rememberMotionReduced
 import de.zeitgleich.teamcraft.ui.rememberPullRefresh
 import de.zeitgleich.teamcraft.ui.rememberThumbnail
 import de.zeitgleich.teamcraft.ui.rowOf
+import de.zeitgleich.teamcraft.ui.showsAsPicture
 import de.zeitgleich.teamcraft.ui.showsSenders
 import de.zeitgleich.teamcraft.ui.systemLine
 import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
@@ -487,7 +490,7 @@ fun MessageFeed(
     { file ->
       // Pictures open in the viewer at once (it shows the thumbnail and fetches the original).
       when {
-        file.isImage && file.maybeThumbnail != null -> maybeViewing = PictureTarget.of(file).toList()
+        file.isImage && file.showsAsPicture -> maybeViewing = PictureTarget.of(file).toList()
         file.opensInVideoPlayer -> maybeVideo = PictureTarget.of(file).toList()
         else -> openOrDownload(viewModel, file, context)
       }
@@ -1370,7 +1373,7 @@ private fun Bubble(
   val files = maybeExtras?.files.orEmpty()
   // A picture going up whose thumbnail isn't made yet still takes its place in the album, so the
   // message doesn't show file rows until the thumbnails come.
-  val images = files.filter { it.isImage && (it.maybeThumbnail != null || it.transfer.isCancellable) }
+  val images = files.filter { it.showsAsPicture }
   val videos = files.filter { it.isVideo && it.maybeThumbnail != null }
   val others = files - images.toSet() - videos.toSet()
   val isDeleted = maybeExtras?.isDeleted == true
@@ -2017,7 +2020,7 @@ private fun ReplyQuote(
   modifier: Modifier,
 ) {
   val maybeQuoted = reply.maybeAttachment
-  val maybeImage = reply.maybeMessage?.takeIf { maybeQuoted == null }?.let { extras[it] }?.files?.firstOrNull { it.isImage && it.maybeThumbnail != null }
+  val maybeImage = reply.maybeMessage?.takeIf { maybeQuoted == null }?.let { extras[it] }?.files?.firstOrNull { it.showsAsPicture }
   val maybeTarget = maybeQuoted?.takeIf { it.canOpen }?.let { quoted ->
     reply.maybeMessage?.let { message -> PictureTarget(conversation, message, quoted.fileId) }
   }
@@ -2351,9 +2354,48 @@ private fun BoxScope.LiveTilePicture(file: FileInfo, motion: MotionInfo) {
 /** A preview's picture, decoded in the background; the tile's own color stands in until then. */
 @Composable
 internal fun Thumbnail(file: FileInfo, contentScale: ContentScale) {
+  if (file.drawsFromOriginal) {
+    OriginalThumbnail(file, contentScale)
+    return
+  }
   val maybeBitmap by rememberThumbnail(thumbnailKey(file), file.maybeThumbnail?.bytes, THUMBNAIL_DECODE_PX)
   maybeBitmap?.let { bitmap ->
     Image(bitmap, contentDescription = file.fileName, contentScale = contentScale, modifier = Modifier.fillMaxSize())
+  }
+}
+
+/**
+ * A picture the sender attached no thumbnail to (AVIF, HEIC: the sender's device couldn't draw
+ * one): drawn from the original, decoded down to the tile's size, never full size. A file not here
+ * yet is fetched once the tile has stayed in view, on the networks and up to the size the animated
+ * pictures use; anything else waits for a tap, which opens the viewer.
+ */
+@Composable
+private fun OriginalThumbnail(file: FileInfo, contentScale: ContentScale) {
+  val feed = LocalFeedMotion.current
+  val isResumed = isAppResumed()
+  val key = thumbnailKey(file)
+  val maybePath = file.transfer.path?.takeIf { file.transfer.state == "local" }
+  var isUnreadable by remember(key, maybePath) { mutableStateOf(false) }
+  val maybeBitmap by produceState(Pictures.cached(key), key, maybePath) {
+    if (value == null && maybePath != null) {
+      value = Pictures.fileThumbnail(key, maybePath, THUMBNAIL_DECODE_PX)
+      // A file that is gone says nothing about the format: the core shows it as remote again.
+      isUnreadable = value == null && File(maybePath).exists()
+    }
+  }
+  // Cancelled when the row leaves, so a row scrolled past fetches nothing; a fetch once started runs on.
+  LaunchedEffect(file.fileId, file.transfer.state, isResumed, feed.isCovered) {
+    if (!isResumed || feed.isCovered || file.transfer.state != "remote" || file.sizeBytes > MAX_AUTO_ANIMATION_BYTES) return@LaunchedEffect
+    delay(AUTO_FETCH_SETTLE_MS)
+    if (feed.fetchesNow() && animationFetchBudget.take(file.sizeBytes)) feed.fetch(file)
+  }
+  val bitmap = maybeBitmap
+  when {
+    bitmap != null -> Image(bitmap, contentDescription = file.fileName, contentScale = contentScale, modifier = Modifier.fillMaxSize())
+    isUnreadable -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+      Icon(painterResource(R.drawable.ic_image), contentDescription = file.fileName, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
   }
 }
 

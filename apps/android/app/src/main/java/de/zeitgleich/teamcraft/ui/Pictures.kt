@@ -87,6 +87,18 @@ object Pictures {
     }
   }
 
+  /**
+   * A decrypted picture file as a tile's picture, for a picture the sender sent without a thumbnail
+   * (a format their device couldn't draw one of): decoded down to `maxSidePx`, never full size,
+   * and kept with the thumbnails. `null` when this phone can't read the file.
+   */
+  suspend fun fileThumbnail(key: String, path: String, maxSidePx: Int): ImageBitmap? =
+    cached(key) ?: withContext(Dispatchers.IO) {
+      // The core keeps the most recently used downloads when it trims its folder.
+      File(path).setLastModified(System.currentTimeMillis())
+      decodeFile(path, maxSidePx)?.asImageBitmap()?.also { memory.put(key, it) }
+    }
+
   fun fileKey(path: String, maxSidePx: Int): String = "file:$maxSidePx:$path"
 
   /**
@@ -158,6 +170,41 @@ private fun uprighted(bitmap: Bitmap, path: String): Bitmap {
   val matrix = Matrix().apply { postRotate(degrees) }
   return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
 }
+
+/** First Android release whose [ImageDecoder] reads AVIF. */
+private const val AVIF_MIN_SDK = 31
+
+/** First Android release whose [ImageDecoder] reads HEIC and HEIF. */
+private const val HEIF_MIN_SDK = 28
+
+/**
+ * Whether this phone's decoder can read a picture of `mediaType`: what a tile can show from the
+ * original when the sender attached no thumbnail (the Rust core can't decode AVIF, HEIC and the like,
+ * so those senders rely on a browser that may not be there). Anything else stays a file card.
+ */
+fun canDecodeHere(mediaType: String, sdk: Int = Build.VERSION.SDK_INT): Boolean =
+  when (mediaTypeEssence(mediaType)) {
+    "image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp", "image/bmp" -> true
+    "image/avif" -> sdk >= AVIF_MIN_SDK
+    "image/heic", "image/heif", "image/heic-sequence", "image/heif-sequence" -> sdk >= HEIF_MIN_SDK
+    else -> false
+  }
+
+/**
+ * Whether a picture takes its place in the conversation as a picture rather than a file card: it
+ * has the sender's thumbnail, is going up from here, or has none but this phone can draw it from
+ * the original.
+ */
+fun showsAsPicture(mediaType: String, hasThumbnail: Boolean, isUploading: Boolean, sdk: Int = Build.VERSION.SDK_INT): Boolean =
+  mediaType.startsWith("image/") && (hasThumbnail || isUploading || canDecodeHere(mediaType, sdk))
+
+/** [showsAsPicture] for a file of a conversation. */
+val FileInfo.showsAsPicture: Boolean
+  get() = showsAsPicture(mediaType, maybeThumbnail != null, transfer.isCancellable)
+
+/** A picture without a thumbnail that the tile draws from the original, once it is here. */
+val FileInfo.drawsFromOriginal: Boolean
+  get() = isImage && maybeThumbnail == null && !transfer.isCancellable && canDecodeHere(mediaType)
 
 /** The memory cache's key of a file's thumbnail. */
 fun thumbnailKey(file: FileInfo): String = "thumb:${file.message}:${file.fileId}"
