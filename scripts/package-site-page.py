@@ -484,7 +484,7 @@ def render_platform(channel, os_name, env, has_linux_repositories, has_fdroid):
         body.append(f"""<p class="caution">{ICON_INFO}<span>Test build, signed with a throwaway key: it can&rsquo;t
           replace an install from a store, and the signed release will need a fresh install.</span></p>""")
     if os_name == "android" and env.get("PLAY_STORE_URL"):
-        body.append(f'<a class="button button-secondary store" href="{esc(env["PLAY_STORE_URL"])}">Get it on Google Play</a>')
+        body.append(store_badge("play", env["PLAY_STORE_URL"]))
     # The F-Droid repository has the stable libre app only.
     if os_name == "android" and has_fdroid and not channel.is_prerelease:
         body.append('<p class="primary-alt">Without Google services, with updates: '
@@ -509,6 +509,16 @@ def render_platform(channel, os_name, env, has_linux_repositories, has_fdroid):
         </article>"""
 
 
+def store_badge(store, url):
+    """The store's official badge, unmodified and served from the site (the CSP allows no other host).
+    Both link to the listing; style.css gives them the same visual height."""
+    if store == "play":
+        image = '<img src="badges/google-play-badge.png" alt="Get it on Google Play" width="646" height="250">'
+    else:
+        image = '<img src="badges/app-store-badge.svg" alt="Download on the App Store" width="120" height="40">'
+    return f'<a class="store-badge store-badge-{store}" href="{esc(url)}" data-store="{store}">{image}</a>'
+
+
 def render_ios_platform(channel, env):
     """The iPhone and iPad card. The app is not a release asset to download: it installs from the App
     Store or through TestFlight, so the card links those when they are configured and says how the app
@@ -517,8 +527,7 @@ def render_ios_platform(channel, env):
     maybe_testflight_url = env.get("TESTFLIGHT_URL", "")
     body = []
     if maybe_app_store_url:
-        body.append(f'<a class="button button-primary store" href="{esc(maybe_app_store_url)}" data-store="app-store">'
-                    'Download on the App Store</a>')
+        body.append(store_badge("app-store", maybe_app_store_url))
     if maybe_testflight_url and maybe_app_store_url:
         body.append(f'<p class="primary-alt">Beta builds: <a href="{esc(maybe_testflight_url)}" data-store="testflight">'
                     'join the beta on TestFlight</a></p>')
@@ -973,6 +982,8 @@ def render_footer(channels, site, repo_url, has_linux_repositories, has_fdroid):
   <div class="wrap footer-legal">
     <p>Free software under the <a href="{esc(repo_url)}/blob/main/LICENSE">GNU AGPL-3.0</a>.
     No cookies, no trackers. Fonts: Inter and JetBrains Mono (<a href="fonts/OFL.txt">SIL Open Font License</a>).</p>
+    <p>Google Play and the Google Play logo are trademarks of Google LLC. App Store and the Apple logo are
+    trademarks of Apple Inc.</p>
   </div>
 </footer>"""
 
