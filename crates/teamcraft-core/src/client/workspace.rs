@@ -470,7 +470,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let mut document = state.roster.clone();
     keep_newer_marks(&mut document, &state);
     document.provider_marks.insert(user, forgotten);
-    self.append_roster(document).await
+    self.append_roster(document).await?;
+    self.drop_contradiction_of(user)
   }
 
   /// Publishes the current roster with a new org recovery key (owners only).

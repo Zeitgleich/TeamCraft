@@ -2244,6 +2244,18 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
     admin.queue_refresh_after_publish();
   }
 
+  fn admin_forget_provider_account(&self, user: UserId) {
+    // Like the roster editor: an owner's action, refused by the core for anybody else as well.
+    if self.policy_edit_blocker().is_some() {
+      return;
+    }
+    let Some(admin) = &self.maybe_admin else {
+      return;
+    };
+    self.chat.forget_provider_account(user);
+    admin.queue_refresh_after_publish();
+  }
+
   fn admin_brands(&self) -> Option<AdminBrandsResponse> {
     self.maybe_admin.as_ref().and_then(|admin| admin.brands())
   }

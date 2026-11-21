@@ -912,6 +912,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.set_problem(maybe_problem)
   }
 
+  /// An owner corrected `user`'s account (`Client::forget_provider_account`): the contradiction about
+  /// them is answered, so the console stops listing them right away instead of after the next round,
+  /// which reports it again if it still stands.
+  pub(crate) fn drop_contradiction_of(&self, user: UserId) -> Result<(), CoreError> {
+    let record = self.role_signing_record()?;
+    let Some(RoleSigningProblem::Contradictory { users }) = record.maybe_note else {
+      return Ok(());
+    };
+    let rest: Vec<UserId> = users.into_iter().filter(|other| *other != user).collect();
+    self.set_problem((!rest.is_empty()).then_some(RoleSigningProblem::Contradictory { users: rest }))
+  }
+
   fn set_problem(&self, maybe_problem: Option<RoleSigningProblem>) -> Result<(), CoreError> {
     let mut record = self.role_signing_record()?;
     if record.maybe_note == maybe_problem {

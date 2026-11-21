@@ -348,6 +348,23 @@ struct BackupSnapshot: Decodable, Sendable {
   let security: Security?
 }
 
+/// What the verified roster says about this user, from the core's chat snapshot (issue #1880).
+struct OwnRosterSnapshot: Decodable, Sendable {
+  struct Security: Decodable, Sendable {
+    let owners: Owners?
+  }
+
+  struct Owners: Decodable, Sendable {
+    /// The owners noted another identity provider account for this user than the one they sign in
+    /// with (issue #1378): colleagues' apps can't confirm their key until an owner corrects it.
+    let isOwnAccountMismatched: Bool?
+  }
+
+  let security: Security?
+
+  var isOwnAccountMismatched: Bool { security?.owners?.isOwnAccountMismatched == true }
+}
+
 /// The voice message part of the core's chat snapshot (#204): the workspace's verified policy.
 struct VoicePolicySnapshot: Decodable, Sendable {
   struct Security: Decodable, Sendable {

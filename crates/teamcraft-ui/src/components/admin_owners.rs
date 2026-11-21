@@ -11,7 +11,9 @@ use crate::admin::{
 };
 use crate::clock::{format_date_time, now_ms};
 use crate::components::admin_policy::{PolicyDraft, SelectRow};
+use crate::components::pending_button::PendingButton;
 use crate::components::roster_banner::names;
+use crate::feedback::{PendingAction, failure_message};
 use crate::form_errors::error_id;
 use crate::i18n::{I18n, use_i18n};
 use crate::model::UserId;
@@ -222,23 +224,111 @@ fn roles_claim_path(typed: &str) -> Vec<String> {
 fn SigningNote(status: OwnerRosterStatus) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let text = status.maybe_signing_problem.map(|problem| match problem {
-    RoleSigningIssue::NoRoleClaim => i18n.t("roster-signing-no-role-claim"),
-    RoleSigningIssue::NoKeyClaim => i18n.t("roster-signing-no-key-claim"),
+  let contradicted = status.contradicted();
+  // An owner of the verified roster, not whom the server calls one (like the banner).
+  let can_correct = status.is_owner(state.read(|backend| backend.me().id));
+  let text = status.maybe_signing_problem.and_then(|problem| match problem {
+    RoleSigningIssue::NoRoleClaim => Some(i18n.t("roster-signing-no-role-claim")),
+    RoleSigningIssue::NoKeyClaim => Some(i18n.t("roster-signing-no-key-claim")),
     RoleSigningIssue::ProviderChanged { issuer } => {
-      i18n.t_with("roster-signing-provider-changed-detail", &[("issuer", &issuer)])
+      Some(i18n.t_with("roster-signing-provider-changed-detail", &[("issuer", &issuer)]))
     },
-    RoleSigningIssue::Contradictory { users } => i18n.t_with(
-      "roster-signing-contradictory",
-      &[("names", &names(state, &users))],
-    ),
-    RoleSigningIssue::ReportedGone { users } => i18n.t_with(
+    // Members off the roster get their own block below: their role isn't what's wrong.
+    RoleSigningIssue::Contradictory { .. } => (!contradicted.role_holders.is_empty()).then(|| {
+      i18n.t_with(
+        "roster-signing-contradictory-roles",
+        &[("names", &names(state, &contradicted.role_holders))],
+      )
+    }),
+    RoleSigningIssue::ReportedGone { users } => Some(i18n.t_with(
       "roster-signing-reported-gone",
       &[("names", &names(state, &users))],
-    ),
-    RoleSigningIssue::AwaitingOwner => i18n.t("roster-signing-awaiting-owner"),
+    )),
+    RoleSigningIssue::AwaitingOwner => Some(i18n.t("roster-signing-awaiting-owner")),
   });
-  text.map(|text| view! { <p class="auth-alert" role="status">{text}</p> })
+  let members = contradicted.members;
+  view! {
+    {text.map(|text| view! { <p class="auth-alert" role="status">{text}</p> })}
+    {(!members.is_empty()).then(|| view! { <AccountContradictions members=members can_correct=can_correct /> })}
+  }
+}
+
+/// Members whose account noted at the identity provider isn't the one their app signs in with
+/// (e2ee.md §3.1.4): a server and another account may have got in first. An owner forgets the noted
+/// account here, after a confirmation that says what follows (issue #1880).
+#[component]
+fn AccountContradictions(members: Vec<UserId>, can_correct: bool) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let confirming = RwSignal::new(None::<UserId>);
+  let text = i18n.t_with(
+    "roster-signing-contradictory-accounts",
+    &[("names", &names(state, &members))],
+  );
+  let rows = members
+    .into_iter()
+    .map(|user| {
+      let action = can_correct.then(|| {
+        view! {
+          " "
+          <button
+            type="button"
+            class="btn btn-small"
+            aria-expanded=move || if confirming.get() == Some(user) { "true" } else { "false" }
+            on:click=move |_| confirming.set(Some(user))
+          >
+            {i18n.t("roster-forget-account")}
+          </button>
+        }
+      });
+      view! {
+        <li>
+          <strong translate="no">{account_label(state, user)}</strong>
+          {action}
+        </li>
+      }
+    })
+    .collect_view();
+  let forget = move |pending: PendingAction, user: UserId| {
+    pending.run_and_then(
+      move || state.write(|backend| backend.admin_forget_provider_account(user)),
+      // The list follows the roster the core signed; this only closes the confirmation.
+      move || {
+        let _ = confirming.try_set(None);
+      },
+    );
+  };
+
+  view! {
+    <div class="roster-accounts">
+      <p class="auth-alert" role="status">{text}</p>
+      <ul class="owner-list">{rows}</ul>
+      {move || confirming.get().map(|user| {
+        // One per confirmation: a failure for one person doesn't show at the next.
+        let pending = PendingAction::new();
+        let name = account_label(state, user);
+        let title = i18n.t_with("roster-forget-confirm-title", &[("name", &name)]);
+        let label = title.clone();
+        view! {
+          <div class="roster-confirm" role="dialog" aria-label=label>
+            <h4 class="detail-heading">{title}</h4>
+            <code translate="no">{i18n.t_with("roster-confirm-id", &[("id", &user.to_string())])}</code>
+            <p>{i18n.t("roster-forget-confirm-what")}</p>
+            <p class="auth-alert" role="status">{i18n.t("roster-forget-confirm-close")}</p>
+            {move || pending.maybe_failure().map(|failure| view! {
+              <p class="field-error" role="alert">{failure_message(i18n, &failure)}</p>
+            })}
+            <button type="button" class="btn" on:click=move |_| confirming.set(None)>
+              {i18n.t("roster-confirm-cancel")}
+            </button>
+            <PendingButton pending=pending class="btn btn-danger" on_click=move |_| forget(pending, user)>
+              {i18n.t("roster-forget-confirm")}
+            </PendingButton>
+          </div>
+        }
+      })}
+    </div>
+  }
 }
 
 /// The warnings first, then each owner with their last signature and the roster's expiry.

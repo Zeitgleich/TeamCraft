@@ -2229,6 +2229,12 @@ impl Core {
           .await
           .map_err(describe_failure);
       },
+      ChatAction::ForgetProviderAccount { user } => {
+        return client
+          .forget_provider_account(*user)
+          .await
+          .map_err(describe_failure);
+      },
       ChatAction::AdminJoinChannel { conversation } => {
         let me = client.user_id();
         return client
@@ -2266,6 +2272,7 @@ impl Core {
       | ChatAction::AcceptKeyChange { .. }
       | ChatAction::PublishPolicy { .. }
       | ChatAction::PublishRoster { .. }
+      | ChatAction::ForgetProviderAccount { .. }
       | ChatAction::AdminJoinChannel { .. }
       | ChatAction::AdminRemoveFromAllChats { .. }
       | ChatAction::AdminDeleteUser { .. }

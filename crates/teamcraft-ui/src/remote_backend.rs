@@ -3008,6 +3008,10 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::AdminRemoveGroupLeftover { conversation, user });
   }
 
+  fn forget_provider_account(&self, user: UserId) {
+    self.act(ChatAction::ForgetProviderAccount { user });
+  }
+
   fn last_action_error(&self) -> Option<String> {
     self.maybe_error.borrow().clone()
   }

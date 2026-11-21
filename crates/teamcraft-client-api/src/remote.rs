@@ -914,6 +914,12 @@ pub enum ChatAction {
     conversation: ConversationId,
     user: UserId,
   },
+  /// An owner forgets the identity provider account noted for a member whose own app signs in with
+  /// another one (`RoleSigningIssue::Contradictory`, e2ee.md §3.1.4, issue #1880): only a token
+  /// issued afterwards notes an account for them again.
+  ForgetProviderAccount {
+    user: UserId,
+  },
   // The actions of crate::actions; `apply_to` runs them on a backend.
   SendMessage {
     message: OutgoingMessage,

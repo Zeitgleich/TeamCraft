@@ -279,10 +279,22 @@ data class CallTileState(
 data class SecuritySnapshot(
   @SerialName("my_fingerprint") val myFingerprint: String = "",
   val contacts: List<ContactKeys> = emptyList(),
+  /** The verified roster's facts about this user (issue #1880); absent before a roster. */
+  @SerialName("owners") val owners: OwnerRosterNote? = null,
   /** The key backup as this device knows it (issue #410); absent before the first key bag sync. */
   val backup: KeyBackup? = null,
   /** Voice messages under the verified workspace policy (#204); absent: on, up to 10 minutes. */
   @SerialName("voice_message_policy") val voiceMessagePolicy: VoiceMessagePolicy = VoiceMessagePolicy(),
+)
+
+/** What the verified roster says about this user; the console reads the rest (owners, problems). */
+@Serializable
+data class OwnerRosterNote(
+  /**
+   * The owners noted another identity provider account for this user than the one they sign in with
+   * (issue #1378): colleagues' apps can't confirm their key until an owner corrects it.
+   */
+  @SerialName("is_own_account_mismatched") val isOwnAccountMismatched: Boolean = false,
 )
 
 /** Whether voice messages may be recorded and how long (#204). Not a security boundary. */

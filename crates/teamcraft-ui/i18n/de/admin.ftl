@@ -1212,6 +1212,15 @@ policy-role-provider-details = Einstellungen zum Identity Provider
 roster-signing-reported-gone = Der Server meldet, dass { $names } keine Admin-Rolle mehr hat. Wenn der Identity Provider nichts anderes sagt, verschwindet die Person in einigen Tagen von der Admin-Liste, immer eine nach der anderen. Wenn das falsch ist, prüfe den Server: Mehr ist nicht nötig.
 roster-signing-awaiting-owner = Der Identity Provider macht dich zum Eigentümer. Das gilt, sobald die App eines anderen Eigentümers geöffnet war. Ist kein anderer Eigentümer mehr da, bitte deinen Betreiber, dem früheren Eigentümer die Rolle kurz zurückzugeben.
 
+# Contradictions about people and the owner's correction of a member's account (issue #1880)
+roster-signing-contradictory-roles = Was der Identity Provider oder der Server über { $names } sagt, passt nicht zur Admin-Liste. Prüfe die Rolle beim Provider und ändere sie bei Bedarf unten unter „Admin-Liste von Hand ändern“.
+roster-signing-contradictory-accounts = Das beim Identity Provider vermerkte Konto von { $names } ist nicht das, mit dem sich ihre App anmeldet, daher können die Apps der Kollegen ihren Schlüssel nicht bestätigen. Vielleicht ist ein anderes Konto zuerst durchgekommen, oder ihr Konto beim Provider hat sich geändert. Frag nach, welches Konto ihres ist, und vergiss dann das vermerkte.
+roster-forget-account = Vermerktes Konto vergessen
+roster-forget-confirm-title = Das für { $name } vermerkte Konto vergessen?
+roster-forget-confirm-what = Der Schlüssel bleibt unbestätigt, bis sich die App der Person das nächste Mal anmeldet; dann wird das Konto vermerkt, mit dem sie sich anmeldet. Kein Konto von vor jetzt kann für sie wieder vermerkt werden.
+roster-forget-confirm-close = Wenn das vermerkte Konto nicht ihres ist, schließe es auch beim Identity Provider, sonst kann es es mit einer neuen Anmeldung wieder versuchen.
+roster-forget-confirm = Konto vergessen
+
 policy-scheduled = Geplante Nachrichten
 policy-scheduled-hint = Der Server hebt sie verschlüsselt auf und gibt sie zu ihrer Zeit frei, egal ob die Geräte der Verfassenden an sind. Er setzt diese Regel durch.
 policy-scheduled-enabled = Nachrichten dürfen geplant werden

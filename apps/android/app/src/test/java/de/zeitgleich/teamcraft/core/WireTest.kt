@@ -71,6 +71,26 @@ class WireTest {
   }
 
   @Test
+  fun theOwnAccountMismatchDecodesFromTheRosterAndDefaultsToFalse() {
+    // The roster status as the core serializes it, with the fields the phone doesn't read (issue #1880).
+    val mismatched = WireJson.decodeFromString(
+      SecuritySnapshot.serializer(),
+      """
+      {"my_fingerprint":"ab","contacts":[],
+       "owners":{"version":3,"owners":[{"user":"1"}],"recommended_minimum":2,"warning_lead_ms":1,
+                 "is_own_account_mismatched":true,"signing_problem":{"issue":"contradictory","users":["2"]}}}
+      """,
+    )
+    assertTrue(mismatched.owners!!.isOwnAccountMismatched)
+    val fine = WireJson.decodeFromString(
+      SecuritySnapshot.serializer(),
+      """{"my_fingerprint":"ab","owners":{"version":3,"owners":[],"recommended_minimum":2,"warning_lead_ms":1}}""",
+    )
+    assertFalse(fine.owners!!.isOwnAccountMismatched)
+    assertEquals(null, WireJson.decodeFromString(SecuritySnapshot.serializer(), """{"my_fingerprint":"ab"}""").owners)
+  }
+
+  @Test
   fun formerAccountsNameOldMessagesAndDeletedOnesGetTheAppsName() {
     val snapshot = WireJson.decodeFromString(
       ChatSnapshot.serializer(),

@@ -1212,6 +1212,15 @@ policy-role-provider-details = Identity provider settings
 roster-signing-reported-gone = The server reports that { $names } no longer holds an admin role. Unless the identity provider says otherwise, they come off the roster in a few days, one at a time. If that's wrong, check the server: nothing else is needed.
 roster-signing-awaiting-owner = The identity provider makes you an owner. That's in force as soon as another owner's app has been open. If no other owner is left, ask your operator to give the former owner their role back for a moment.
 
+# Contradictions about people and the owner's correction of a member's account (issue #1880)
+roster-signing-contradictory-roles = What the identity provider or the server says about { $names } doesn't match the roster. Check their role at the provider and, if needed, change it below under "Change the roster by hand".
+roster-signing-contradictory-accounts = The identity provider account noted for { $names } isn't the one their app signs in with, so colleagues' apps can't confirm their key. Another account may have got in first, or their account at the provider changed. Ask them which account is theirs, then forget the noted one.
+roster-forget-account = Forget the noted account
+roster-forget-confirm-title = Forget the account noted for { $name }?
+roster-forget-confirm-what = Their key stays unconfirmed until their app next signs in; the account it signs in with then is noted for them. No account from before now can be noted for them again.
+roster-forget-confirm-close = If the noted account isn't theirs, also close it at the identity provider: otherwise it can try again with a fresh sign-in.
+roster-forget-confirm = Forget account
+
 policy-scheduled = Scheduled messages
 policy-scheduled-hint = The server holds these encrypted and releases them at their time, whether their author's devices are on or not. It enforces this rule.
 policy-scheduled-enabled = People can schedule messages

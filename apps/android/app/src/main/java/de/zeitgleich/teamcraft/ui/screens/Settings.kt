@@ -13,6 +13,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.material3.ListItem
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Icon
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -331,6 +332,7 @@ private fun SecurityPage(viewModel: MainViewModel, account: AppState.Ready) {
       SettingsContentRow(shapes) { Text(account.identityFingerprint, fontFamily = FontFamily.Monospace) }
     }
   }
+  AccountMismatch(viewModel)
   KeyChanges(viewModel)
   val maybeCrashStatus by viewModel.crashReports.status.collectAsState()
   val (isAppLockOn, setAppLock) = rememberAppLock()
@@ -343,6 +345,30 @@ private fun SecurityPage(viewModel: MainViewModel, account: AppState.Ready) {
   }
   KeyBackupStatus(viewModel)
   ChangePassphrase(viewModel)
+}
+
+/**
+ * The owners noted another identity provider account for this user than the one they sign in with
+ * (issue #1378), so colleagues can't confirm their key: only an owner corrects it, in the console.
+ */
+@Composable
+private fun AccountMismatch(viewModel: MainViewModel) {
+  val changes by viewModel.changeCount.collectAsState()
+  var isMismatched by remember { mutableStateOf(false) }
+  LaunchedEffect(changes) {
+    isMismatched = viewModel.readChat { snapshot() }?.security?.owners?.isOwnAccountMismatched == true
+  }
+  if (!isMismatched) return
+  SettingsGroup {
+    row { shapes ->
+      SettingsInfoRow(
+        shapes,
+        stringResource(R.string.account_mismatch_title),
+        stringResource(R.string.account_mismatch_hint),
+        leadingContent = { Icon(Icons.Filled.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+      )
+    }
+  }
 }
 
 /** The key backup in plain words (issue #410): stored or not, and how it is protected. */

@@ -1153,6 +1153,38 @@
         }
       }
     },
+    "account_mismatch_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your colleagues can’t confirm your security code"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Kollegen können deinen Sicherheitscode nicht bestätigen"
+          }
+        }
+      }
+    },
+    "account_mismatch_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The owners noted another identity provider account for you than the one you sign in with. Ask an owner to correct it under Security in the TeamCraft console on a computer."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Eigentümer haben für dich ein anderes Konto beim Identity Provider vermerkt als das, mit dem du dich anmeldest. Bitte einen Eigentümer, das in der TeamCraft-Konsole auf einem Computer unter Sicherheit zu korrigieren."
+          }
+        }
+      }
+    },
     "backup_title": {
       "localizations": {
         "en": {
