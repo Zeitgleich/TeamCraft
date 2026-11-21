@@ -247,30 +247,51 @@ private fun ReadyNavigation(
   var maybeShareEntry by rememberSaveable { mutableStateOf<String?>(null) }
   val context = LocalContext.current
   var maybeMeetingLinkUrl by remember { mutableStateOf<String?>(null) }
-  // A message link in a message: open its conversation (or thread) at the message, if readable here.
-  val openPermalink: (String) -> Unit = { link ->
+  // Wide windows (tablets, unfolded foldables, landscape) show the conversation next to the list.
+  val isWide = LocalConfiguration.current.screenWidthDp >= TWO_PANE_MIN_WIDTH_DP
+  // The conversation next to the list in a wide window; here, so an entry from outside can set it.
+  var maybeSelected by rememberSaveable { mutableStateOf<String?>(null) }
+  // A notification, bubble or link: the conversation replaces what was open, Back leads to the list
+  // (#2240). A wide window shows it next to the list.
+  val openConversationFromOutside: (String) -> Unit = { id ->
+    if (isWide) {
+      navigation.showHomeFromOutside()
+      maybeSelected = id
+    } else {
+      navigation.openFromOutside("conversation/$id")
+    }
+  }
+  // A message link: open its conversation (or thread) at the message, if readable here. One in a
+  // message replaces the chats on the stack; one from outside replaces everything above the list.
+  val openPermalink: (String, OpenOrigin) -> Unit = { link, origin ->
     scope.launch {
       val maybeTarget = viewModel.resolvePermalink(link)
       when {
         maybeTarget == null -> viewModel.showFailure(R.string.permalink_unavailable)
-        maybeTarget.maybeThread != null ->
-          navigation.navigate("thread/${maybeTarget.conversation}/${maybeTarget.maybeThread}?focus=${maybeTarget.message}")
-        else -> navigation.navigate("conversation/${maybeTarget.conversation}?focus=${maybeTarget.message}")
+        else -> {
+          if (origin == OpenOrigin.Outside) navigation.showHomeFromOutside()
+          navigation.openChatAt(maybeTarget.conversation, maybeTarget.maybeThread, maybeFocus = maybeTarget.message)
+        }
       }
     }
   }
+  val openPermalinkInApp: (String) -> Unit = { link -> openPermalink(link, OpenOrigin.InApp) }
   LaunchedEffect(maybeOpenedLink) {
     val link = maybeOpenedLink ?: return@LaunchedEffect
     when (val place = link.place) {
-      AppLinkPlace.Home, AppLinkPlace.None -> Unit
+      AppLinkPlace.Home -> {
+        navigation.showHomeFromOutside()
+        maybeSelected = null
+      }
+      AppLinkPlace.None -> Unit
       // Only one this device knows: a link can name any ID, and the screen would stay blank.
       is AppLinkPlace.Conversation ->
         if (viewModel.conversations().any { it.id == place.conversationId }) {
-          navigation.navigate("conversation/${place.conversationId}")
+          openConversationFromOutside(place.conversationId)
         } else {
           viewModel.showFailure(R.string.app_link_conversation_unavailable)
         }
-      is AppLinkPlace.Permalink -> openPermalink(place.link)
+      is AppLinkPlace.Permalink -> openPermalink(place.link, OpenOrigin.Outside)
       // Doesn't swap the question if one is open.
       AppLinkPlace.Meeting -> if (maybeMeetingLinkUrl == null) maybeMeetingLinkUrl = link.maybeWebUrl
     }
@@ -280,7 +301,7 @@ private fun ReadyNavigation(
     MeetingLinkQuestion(
       onMeetings = {
         maybeMeetingLinkUrl = null
-        navigation.navigate("meetings") { launchSingleTop = true }
+        navigation.openFromOutside("meetings")
       },
       onBrowser = {
         maybeMeetingLinkUrl = null
@@ -294,7 +315,7 @@ private fun ReadyNavigation(
   LaunchedEffect(maybeShortcut) {
     maybeShortcut?.let {
       LaunchShortcut.pending.value = null
-      navigation.navigate(it.route)
+      navigation.openFromOutside(it.route)
     }
   }
   LaunchedEffect(maybeConversationToOpen) {
@@ -302,13 +323,14 @@ private fun ReadyNavigation(
       // A notification opened it: it has news the kept feed lacks, so the feed opens with its first
       // read, at the unread line, not at the end it showed last (issue #1425).
       viewModel.forgetFeedSeed(it)
-      navigation.navigate("conversation/$it")
+      openConversationFromOutside(it)
       onConversationOpened()
     }
   }
   val maybeShareId = (maybeShare as? ShareState.Ready)?.share?.id
   LaunchedEffect(maybeShare != null, maybeShareId) {
-    if (maybeShare != null) navigation.navigate("share") { launchSingleTop = true }
+    // Over the list, so Back from the picker leads there; not again over itself (a rotation).
+    if (maybeShare != null && navigation.currentDestination?.route != "share") navigation.openFromOutside("share")
   }
   CrashReportsNotice(viewModel.crashReports, onSettings = { navigation.navigate("settings/security") })
   val transitions = rememberScreenTransitions()
@@ -331,30 +353,27 @@ private fun ReadyNavigation(
           }
           ShortcutAction.NextUnread -> {
             val order = viewModel.chatList.value.maybeConversations.orEmpty().map { it.id to it.unreadCount.toInt() }
-            nextUnreadAfter(order, currentConversation)?.let { navigation.navigate("conversation/$it") }
+            nextUnreadAfter(order, currentConversation)?.let { navigation.openConversation(it) }
             true
           }
-          ShortcutAction.Close -> currentRoute != "chats" && navigation.popBackStack()
+          ShortcutAction.Close -> currentRoute != HOME_ROUTE && navigation.popBackStack()
           null -> false
         }
       },
     navController = navigation,
-    startDestination = "chats",
+    startDestination = HOME_ROUTE,
     enterTransition = { transitions.enter },
     exitTransition = { transitions.exit },
     popEnterTransition = { transitions.popEnter },
     popExitTransition = { transitions.popExit },
   ) {
-    composable("chats") {
-      // Wide windows (tablets, unfolded foldables, landscape) show the conversation next to the list.
-      val isWide = LocalConfiguration.current.screenWidthDp >= TWO_PANE_MIN_WIDTH_DP
-      var maybeSelected by rememberSaveable { mutableStateOf<String?>(null) }
+    composable(HOME_ROUTE) {
       LaunchedEffect(isWide) {
         // Folded or rotated to narrow: the open conversation stays open, as a screen of its own.
         val selected = maybeSelected
         if (!isWide && selected != null) {
           maybeSelected = null
-          navigation.navigate("conversation/$selected")
+          navigation.openConversation(selected)
         }
       }
       val list = @Composable {
@@ -362,7 +381,7 @@ private fun ReadyNavigation(
           viewModel = viewModel,
           accountUserId = account.userId,
           accountName = account.displayName,
-          onOpen = { if (isWide) maybeSelected = it else navigation.navigate("conversation/$it") },
+          onOpen = { if (isWide) maybeSelected = it else navigation.openConversation(it) },
           onSearch = { navigation.navigate("search") },
           onSettings = { navigation.navigate("settings") },
           onNavigate = { route -> navigation.navigate(route) },
@@ -382,10 +401,10 @@ private fun ReadyNavigation(
                 ConversationScreen(
                   viewModel = viewModel,
                   conversationId = selected,
-                  onOpenThread = { threadId -> navigation.navigate("thread/$selected/$threadId") },
+                  onOpenThread = { threadId -> navigation.openThread(selected, threadId) },
                   onOpenFiles = { navigation.navigate("files/$selected") },
                   onBack = { maybeSelected = null },
-                  onOpenPermalink = openPermalink,
+                  onOpenPermalink = openPermalinkInApp,
                   onOpenConversation = { maybeSelected = it },
                 )
               }
@@ -413,12 +432,12 @@ private fun ReadyNavigation(
       ConversationScreen(
         viewModel = viewModel,
         conversationId = conversationId,
-        onOpenThread = { threadId -> navigation.navigate("thread/$conversationId/$threadId") },
+        onOpenThread = { threadId -> navigation.openThread(conversationId, threadId) },
         onOpenFiles = { navigation.navigate("files/$conversationId") },
         onBack = { back() },
         maybeFocusMessage = entry.arguments?.getString("focus"),
-        onOpenPermalink = openPermalink,
-        onOpenConversation = { navigation.navigate("conversation/$it") },
+        onOpenPermalink = openPermalinkInApp,
+        onOpenConversation = { navigation.openConversation(it) },
       )
     }
     composable(
@@ -435,7 +454,7 @@ private fun ReadyNavigation(
         threadId = entry.arguments?.getString("thread").orEmpty(),
         onBack = { navigation.popBackStack() },
         maybeFocusMessage = entry.arguments?.getString("focus"),
-        onOpenPermalink = openPermalink,
+        onOpenPermalink = openPermalinkInApp,
       )
     }
     composable("search") {
@@ -443,10 +462,7 @@ private fun ReadyNavigation(
         viewModel = viewModel,
         // At the message, flashed, in its thread when it is in one (#2003).
         onOpen = { hit ->
-          navigation.navigate(
-            hit.message.maybeThread?.let { thread -> "thread/${hit.message.conversation}/$thread?focus=${hit.message.id}" }
-              ?: "conversation/${hit.message.conversation}?focus=${hit.message.id}",
-          )
+          navigation.openChatAt(hit.message.conversation, hit.message.maybeThread, maybeFocus = hit.message.id)
         },
         onBack = { navigation.popBackStack() },
       )
@@ -454,27 +470,22 @@ private fun ReadyNavigation(
     composable("threads") {
       ThreadsScreen(
         viewModel = viewModel,
-        onOpenThread = { conversation, thread -> navigation.navigate("thread/$conversation/$thread") },
+        onOpenThread = { conversation, thread -> navigation.openThread(conversation, thread) },
         onBack = { navigation.popBackStack() },
       )
     }
     composable("scheduled") {
-      ScheduledScreen(viewModel = viewModel, onOpen = { navigation.navigate("conversation/$it") }, onBack = { navigation.popBackStack() })
+      ScheduledScreen(viewModel = viewModel, onOpen = { navigation.openConversation(it) }, onBack = { navigation.popBackStack() })
     }
     composable("drafts") {
       DraftsAndSentScreen(
         viewModel = viewModel,
         onOpenDraft = { draft ->
           OpenedDraft.current.value = OpenedDraft.Target(draft.conversation, draft.maybeThread)
-          navigation.navigate(
-            draft.maybeThread?.let { thread -> "thread/${draft.conversation}/$thread" } ?: "conversation/${draft.conversation}",
-          )
+          navigation.openChatAt(draft.conversation, draft.maybeThread, maybeFocus = null)
         },
         onOpenSent = { item ->
-          navigation.navigate(
-            item.maybeThread?.let { thread -> "thread/${item.conversation}/$thread?focus=${item.message}" }
-              ?: "conversation/${item.conversation}?focus=${item.message}",
-          )
+          navigation.openChatAt(item.conversation, item.maybeThread, maybeFocus = item.message)
         },
         onBack = { navigation.popBackStack() },
       )
@@ -483,7 +494,7 @@ private fun ReadyNavigation(
       BrowseSpacesScreen(viewModel = viewModel, onBack = { navigation.popBackStack() })
     }
     composable("saved") {
-      SavedScreen(viewModel = viewModel, onOpen = { navigation.navigate("conversation/$it") }, onBack = { navigation.popBackStack() })
+      SavedScreen(viewModel = viewModel, onOpen = { navigation.openConversation(it) }, onBack = { navigation.popBackStack() })
     }
     composable(
       "browse?people={people}&space={space}",
@@ -494,14 +505,14 @@ private fun ReadyNavigation(
     ) { entry ->
       BrowseScreen(
         viewModel = viewModel,
-        onOpen = { navigation.navigate("conversation/$it") },
+        onOpen = { navigation.openConversation(it) },
         onBack = { navigation.popBackStack() },
         isPeopleFirst = entry.arguments?.getBoolean("people") == true,
         maybeInitialSpaceId = entry.arguments?.getString("space"),
       )
     }
     composable("directory") {
-      DirectoryScreen(viewModel = viewModel, onOpen = { navigation.navigate("conversation/$it") }, onBack = { navigation.popBackStack() })
+      DirectoryScreen(viewModel = viewModel, onOpen = { navigation.openConversation(it) }, onBack = { navigation.popBackStack() })
     }
     composable("meetings") {
       MeetingsScreen(viewModel = viewModel, onBack = { navigation.popBackStack() })
@@ -517,7 +528,7 @@ private fun ReadyNavigation(
         viewModel = viewModel,
         initialSpaceId = entry.arguments?.getString("id").orEmpty(),
         initialTab = SpaceViewTab.entries.firstOrNull { it.name == entry.arguments?.getString("tab") } ?: SpaceViewTab.People,
-        onOpen = { navigation.navigate("conversation/$it") },
+        onOpen = { navigation.openConversation(it) },
         onBack = { navigation.popBackStack() },
       )
     }
@@ -545,7 +556,7 @@ private fun ReadyNavigation(
             if (PendingShare.offer(conversation, share)) {
               viewModel.handOverShare(share)
               navigation.navigate("conversation/$conversation") {
-                popUpTo("chats")
+                popUpTo(HOME_ROUTE)
                 launchSingleTop = true
               }
               maybeShareEntry = navigation.currentBackStackEntry?.id
