@@ -525,7 +525,7 @@ fn text_pane(state: AppState, i18n: I18n, prepared: &Prepared, name: String) -> 
             type="button"
             class="icon-btn"
             aria-label=move || i18n.t("text-preview-find-previous")
-            data-tip=move || i18n.t("text-preview-find-previous")
+            title=move || i18n.t("text-preview-find-previous")
             prop:disabled=move || !has_matches()
             on:click=move |_| view_state.step(false)
           >
@@ -535,7 +535,7 @@ fn text_pane(state: AppState, i18n: I18n, prepared: &Prepared, name: String) -> 
             type="button"
             class="icon-btn"
             aria-label=move || i18n.t("text-preview-find-next")
-            data-tip=move || i18n.t("text-preview-find-next")
+            title=move || i18n.t("text-preview-find-next")
             prop:disabled=move || !has_matches()
             on:click=move |_| view_state.step(true)
           >
@@ -582,7 +582,7 @@ fn text_pane(state: AppState, i18n: I18n, prepared: &Prepared, name: String) -> 
               {move || i18n.t("text-preview-format-json")}
             </button>
           })}
-          <button class="icon-btn" aria-label=move || i18n.t("text-preview-copy") data-tip=move || i18n.t("text-preview-copy") on:click=copy>
+          <button class="icon-btn" aria-label=move || i18n.t("text-preview-copy") title=move || i18n.t("text-preview-copy") on:click=copy>
             <Icon name=IconName::Copy />
           </button>
         </div>

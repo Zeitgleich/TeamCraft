@@ -982,7 +982,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
               class:is-read=is_read
               role="img"
               aria-label=move || i18n.t(key)
-              data-tip=move || format!("{}, {}", i18n.t(key), sent_time)
+              title=move || format!("{}, {}", i18n.t(key), sent_time)
             >
               <Icon name=icon />
             </span>
@@ -998,7 +998,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
             class="msg-delivery is-pending"
             role="status"
             aria-label=move || i18n.t("message-sending")
-            data-tip=move || i18n.t("message-sending")
+            title=move || i18n.t("message-sending")
           >
             <Icon name=IconName::Clock />
           </span>

@@ -221,7 +221,7 @@ fn DownloadsMenu(entries: Memo<Vec<DownloadEntry>>) -> impl IntoView {
         <button
           class="icon-btn icon-btn-small"
           aria-label=move || i18n.t("downloads-close")
-          data-tip=move || i18n.t("downloads-close")
+          title=move || i18n.t("downloads-close")
           on:click=move |_| close()
         >
           <Icon name=IconName::Close />
@@ -349,7 +349,7 @@ fn ActionButton(
     <button
       class="icon-btn icon-btn-small download-action"
       aria-label=move || i18n.t(label)
-      data-tip=move || i18n.t(label)
+      title=move || i18n.t(label)
       on:click=on_click
     >
       <Icon name=icon />
