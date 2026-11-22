@@ -11253,6 +11253,7 @@ dependencies = [
  "pipewire",
  "pollster",
  "prost",
+ "quinn-proto",
  "rand_core 0.6.4",
  "ropus",
  "screencapturekit",

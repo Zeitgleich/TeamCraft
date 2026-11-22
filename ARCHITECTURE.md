@@ -1130,6 +1130,17 @@ voice, below), through the same kind of reverse proxy as the gateway. Setup and 
   and the session's next connection brings a new secret. Considered and not taken: a wrapping
   socket on the session's own connection (it would mark video too) and per-datagram marks in
   quinn (no API; it would mean patching quinn-udp).
+- **An upload that collapses** (#1889, `voice_congestion.rs`, `quic_send.rs`): 5 Mbit/s to
+  120 kbit/s fills the bottleneck's queue with the video sent for the old rate. The voice
+  connection's window never falls below 24 KiB (Cubic above it), enough for a full voice across a
+  round trip of seconds, and its datagram buffer holds about 200 ms of voice, oldest dropped first:
+  with Cubic alone its window fell to two packets per two-second round trip, and the voice waited
+  in QUIC after the queue had drained. The session connection's queue hands QUIC only what QUIC
+  drains while it holds a backlog, not what its stale window per round trip suggests. Once the
+  voice guard calls it a collapse (voice stuck in a queue, or lost for a second), the camera stops
+  at once (not after its 5 s pause hold), what waits of it in the queue is dropped, no lost video
+  is resent, and the voice goes to its thinnest step: the bottleneck drains at what the link
+  carries less what is still sent.
 - **Pacing to the drain rate** (`fallback_pacer`, #1810): behind the SFU's socket sit the kernel's and
   a reverse proxy's buffers, megabytes that TCP fills as fast as it is given media; on a link that
   dips to 1.5 Mbit/s that was seconds of video with the voice and pings behind it, until the

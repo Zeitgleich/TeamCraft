@@ -2547,6 +2547,13 @@ impl CallEngine {
     // while the microphone was muted, and the camera came back at the start of every turn and
     // took the voice with it again.
     let is_held = is_hurt || self.is_voice_starved() || self.is_video_proof_wanted;
+    // Voice lost for long or stuck in a queue is a collapsed uplink, not a burst of loss (#1889):
+    // the camera stops at once, its lowest layer too, and the voice goes to its thinnest step.
+    let is_collapsed = is_hurt && self.uplink_voice.is_lasting();
+    self.uplink_layers.set_collapsed(is_collapsed);
+    if is_collapsed {
+      self.follow_collapse(now);
+    }
     if is_held != self.is_video_held_for_voice && (!is_held || !self.own_tracks.is_empty()) {
       self.is_video_held_for_voice = is_held;
       self.maybe_video_held_since = is_held.then_some(now);
@@ -2560,6 +2567,28 @@ impl CallEngine {
       self.event(CallEngineEvent::VideoHeldForVoice(is_held));
     }
     is_held
+  }
+
+  /// The uplink collapsed (#1889): the own voice goes to its thinnest step at once. Its
+  /// bottleneck's queue drains at what the link carries less what is still sent, and the full
+  /// voice's 50 packets a second were half of a collapsed link's 120 kbit/s. Not while muted:
+  /// nothing is sent, and the voice comes back as it went.
+  fn follow_collapse(&mut self, now: Instant) {
+    if self.is_muted {
+      return;
+    }
+    let was_wanted = self.voice_steps.wanted_bps();
+    if let Some(encoding) = self.voice_steps.on_collapse(now) {
+      info!(
+        bitrate_bps = encoding.bitrate_bps,
+        frame = ?encoding.frame,
+        "the own voice goes to its thinnest step: the uplink collapsed"
+      );
+      self.event(CallEngineEvent::VoiceEncoding(encoding));
+    }
+    if self.voice_steps.wanted_bps() != was_wanted {
+      self.update_uplink_demand();
+    }
   }
 
   /// Lets the own tracks' layers follow `bps` (zero: none while the video is held).
@@ -3919,6 +3948,12 @@ impl CallEngine {
   /// [`MAX_NACK_SEQUENCE_NUMBERS`] are ignored; a request for a track no longer published is no
   /// error (it crossed the unpublish).
   fn resend_own_video(&mut self, stream: StreamId, layer: u8, sequence_numbers: &[u16], now: Instant) {
+    // While the video waits for the voice, resent video would take the room the voice is short of
+    // (#1889): what was lost on a collapsed uplink kept the voice silent for seconds after the
+    // camera had stopped. The video comes back with a keyframe anyway.
+    if self.is_video_held_for_voice {
+      return;
+    }
     let (Some(config), Some(track)) = (self.maybe_retransmit, self.own_video.get(&stream)) else {
       return;
     };
@@ -7290,6 +7325,16 @@ mod tests {
       let after = held_at.saturating_duration_since(at);
       assert!(after <= Duration::from_secs(1), "held after {after:?}");
       assert!(alice.is_uplink_hurt_told, "and the SFU heard it");
+      // A collapse, not a burst: the camera stops at once, its lowest layer too, and the voice
+      // goes to its thinnest step in one go. The queue drains at what the link carries less what
+      // is still sent.
+      for stream in alice.own_tracks.keys() {
+        assert!(
+          !alice.uplink_layers.allows(*stream, 0),
+          "the camera's lowest layer goes on"
+        );
+      }
+      assert_eq!(alice.voice_steps.step(), VoiceStep::Thinnest);
     }
 
     /// A measurement at the join (or in the lobby) said the uplink is fast; it collapses for
