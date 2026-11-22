@@ -51,6 +51,8 @@ struct ChatPane: View {
   @State private var isShowingFilters = false
   /// A channel's members with their roles (#1262); DMs and group DMs have no roles.
   @State private var isShowingMembers = false
+  /// A channel's shared notes, read-only on the phone (#1456).
+  @State private var isShowingNotes = false
   /// What the next message replies to; kept in the core with the draft (#1115).
   @State private var maybeReply: ComposerReply?
   @State private var maybeSelectingText: Message?
@@ -285,6 +287,7 @@ struct ChatPane: View {
       }
     }
     .sheet(isPresented: $isShowingMembers) { ChannelMembersView(conversationId: conversation.id) }
+    .sheet(isPresented: $isShowingNotes) { ChannelNotesView(conversationId: conversation.id) }
     .sheet(item: $maybeForwarding) { target in
       ForwardSheet(fromConversationId: conversation.id, messageId: target.message.id)
     }
@@ -1380,6 +1383,7 @@ struct ChatPane: View {
         Button("notify_filters_title", systemImage: "bell.badge") { isShowingFilters = true }
         Button("files_title", systemImage: "folder") { isShowingFiles = true }
         if conversation.kind == .public || conversation.kind == .private {
+          Button("channel_notes_title", systemImage: "doc.text") { isShowingNotes = true }
           Button("members_title", systemImage: "person.2") { isShowingMembers = true }
         }
       } label: {

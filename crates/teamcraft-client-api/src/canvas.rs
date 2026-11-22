@@ -1109,6 +1109,16 @@ fn byte_index(bytes: usize) -> u32 {
   u32::try_from(bytes).unwrap_or(u32::MAX)
 }
 
+/// The number a numbered item shows: its place in the run of numbered items it ends.
+pub fn numbered_position(blocks: &[Block], index: usize) -> usize {
+  blocks[..index.min(blocks.len())]
+    .iter()
+    .rev()
+    .take_while(|block| block.kind == BlockKind::Numbered)
+    .count()
+    + 1
+}
+
 /// A page title as kept: one line, trimmed, at most [`MAX_PAGE_TITLE_CHARS`] characters.
 pub fn page_title(title: &str) -> String {
   let line: String = title

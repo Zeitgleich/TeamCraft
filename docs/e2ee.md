@@ -5042,10 +5042,23 @@ last two minutes, from the same origins. It is no presence of its own (no "has t
 carets) and sends nothing: an encrypted, ephemeral awareness channel over the gateway is left for
 later.
 
+**On the phones (issue #1456).** Android and iOS show a channel's pages read-only (the channel's
+menu, "Notes"): `teamcraft-ffi::canvas` reads the core's updates with the same document
+(`CanvasDoc`) and hands the apps the blocks, their formatted runs, numbers of numbered items and file
+references, and the list of further pages; the apps carry no CRDT of their own and send nothing, so
+nothing about the protocol changes. A link reaches the apps only as a web address, and the apps check
+it once more with the rule for messages. A file block opens from the channel's files the device
+holds, like the desktop's, or says that the file isn't there. While a page is open the app reads the
+channel's older history a page at a time, at most 20 per opening, as the editor does. A phone
+doesn't tell its core which pages the list names (`note_canvas_pages`), so there every further
+page counts as unlisted and shares the 50 places above: the store stays bounded, and a flood of
+made-up page IDs can push out a real page that nobody edited lately, as on a device whose editor
+never read the list.
+
 **Not in this step** (issue #1245 and its follow-up): presence beyond recent edits (who has the page
 open, carets), mentions, pages for DMs and meetings, renaming the first page, dropping a deleted
 page's updates from the store, uploading a file straight into a page, the notetaker writing its summary onto the meeting's page, "Pin to page", search
-over pages, the mobile apps, a snapshot when a member joins, stopping the history read at the newest
+over pages, editing and the version history on the phones, a snapshot when a member joins, stopping the history read at the newest
 snapshot, and not waking phones for page edits: today a page edit is a message like a reaction, so
 a phone of a member whose level is "all" gets a push for it (docs/notifications.md, "Push routing").
 

@@ -25152,6 +25152,262 @@
           }
         }
       }
+    },
+    "channel_notes_pages": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pages"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Seiten"
+          }
+        }
+      }
+    },
+    "channel_notes_page_untitled": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Untitled"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ohne Titel"
+          }
+        }
+      }
+    },
+    "channel_notes_read_only_phone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Everyone in the channel shares these notes; they are end-to-end encrypted like its messages. On the phone you can read them; edit them on the desktop app or the web."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Alle im Kanal teilen diese Notizen; sie sind Ende-zu-Ende-verschlüsselt wie seine Nachrichten. Auf dem Handy kannst du sie lesen; bearbeiten kannst du sie in der Desktop-App oder im Web."
+          }
+        }
+      }
+    },
+    "channel_notes_empty_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No notes yet"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Noch keine Notizen"
+          }
+        }
+      }
+    },
+    "channel_notes_empty": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Members who may post here can write notes for the whole channel on the desktop app or the web."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mitglieder, die hier schreiben dürfen, können in der Desktop-App oder im Web Notizen für den ganzen Kanal anlegen."
+          }
+        }
+      }
+    },
+    "channel_notes_loading_history": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading earlier changes…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Frühere Änderungen werden geladen …"
+          }
+        }
+      }
+    },
+    "channel_notes_history_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Some earlier changes could not be loaded yet."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Einige frühere Änderungen konnten noch nicht geladen werden."
+          }
+        }
+      }
+    },
+    "channel_notes_incomplete": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Some changes to these notes aren't on this device yet."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Einige Änderungen an diesen Notizen sind noch nicht auf diesem Gerät."
+          }
+        }
+      }
+    },
+    "channel_notes_unreadable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "These notes can't be shown on this device. Update TeamCraft, or open them on the desktop app or the web."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diese Notizen können auf diesem Gerät nicht angezeigt werden. Aktualisiere TeamCraft oder öffne sie in der Desktop-App oder im Web."
+          }
+        }
+      }
+    },
+    "channel_notes_file_missing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not on this device: the message with this file is missing or was deleted."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nicht auf diesem Gerät: Die Nachricht mit dieser Datei fehlt oder wurde gelöscht."
+          }
+        }
+      }
+    },
+    "channel_notes_file_open": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tap to open"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zum Öffnen tippen"
+          }
+        }
+      }
+    },
+    "channel_notes_file_download": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tap to download"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zum Herunterladen tippen"
+          }
+        }
+      }
+    },
+    "channel_notes_file_downloading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Downloading…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wird heruntergeladen …"
+          }
+        }
+      }
+    },
+    "channel_notes_checked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Done"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Erledigt"
+          }
+        }
+      }
+    },
+    "channel_notes_unchecked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not done"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nicht erledigt"
+          }
+        }
+      }
+    },
+    "channel_notes_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notes"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notizen"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

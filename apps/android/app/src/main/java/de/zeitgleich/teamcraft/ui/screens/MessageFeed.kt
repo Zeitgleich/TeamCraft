@@ -835,7 +835,7 @@ private suspend fun showAtTop(listState: LazyListState, index: Int) {
 }
 
 /** A local file opens in another app; anything else is downloaded first (a second tap opens it). */
-private fun openOrDownload(viewModel: MainViewModel, file: FileInfo, context: Context) {
+internal fun openOrDownload(viewModel: MainViewModel, file: FileInfo, context: Context) {
   val path = file.transfer.path
   when {
     file.transfer.state == "local" && path != null -> openFile(context, File(path), file.mediaType)
