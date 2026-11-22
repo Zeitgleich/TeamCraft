@@ -440,7 +440,7 @@ struct UploadControl: View {
         }
       }
       .padding(isOnMedia ? 6 : 0)
-      .animation(.snappy, value: isFailed)
+      .animation(Motion.fast, value: isFailed)
   }
 
   @ViewBuilder

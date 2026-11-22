@@ -231,6 +231,7 @@ fun TeamCraftTheme(maybeBrand: LoginBrand? = null, isAlwaysDark: Boolean = false
     LocalTeamCraftColors provides extra,
     LocalStatusBarBackdrop provides backdrop,
     LocalThemePolicy provides maybePolicy,
+    LocalMotion provides remember(isMotionReduced) { MotionSpecs(isMotionReduced) },
   ) {
     MaterialExpressiveTheme(
       colorScheme = scheme,

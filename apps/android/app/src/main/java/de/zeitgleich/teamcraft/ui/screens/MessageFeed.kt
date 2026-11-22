@@ -1,5 +1,7 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import de.zeitgleich.teamcraft.ui.theme.popOnChange
+import de.zeitgleich.teamcraft.ui.theme.LocalMotion
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
@@ -13,8 +15,6 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
@@ -86,6 +86,8 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.key
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import de.zeitgleich.teamcraft.ui.ReadingPlaces
@@ -233,10 +235,6 @@ import uniffi.teamcraft_ffi.isOpenableLink
 
 /** The reaction a double tap toggles, as in most chat apps. */
 private const val QUICK_REACTION = "👍"
-
-/** A new message fades in this long, and the rows it pushes slide for [FEED_PLACE_MS] (#2005). */
-private const val FEED_FADE_MS = 150
-private const val FEED_PLACE_MS = 200
 
 /**
  * Jumps to the message a reply quotes and flashes it; set by the feed (#2001). Without a feed
@@ -507,6 +505,7 @@ fun MessageFeed(
   val mediaPrefs = remember(context) { MediaPrefs.prefs(context) }
   val animatedImages by mediaPrefs.animatedImages.collectAsState()
   val isMotionReduced = rememberMotionReduced()
+  val motion = LocalMotion.current
   val feedMotion = FeedMotion(
     mode = animatedImages.effective(isMotionReduced),
     isCovered = maybeViewing != null || maybeVideo != null,
@@ -562,7 +561,7 @@ fun MessageFeed(
           val itemMotion = if (isMotionReduced) {
             Modifier
           } else {
-            Modifier.animateItem(fadeInSpec = tween(FEED_FADE_MS), placementSpec = tween(FEED_PLACE_MS), fadeOutSpec = null)
+            Modifier.animateItem(fadeInSpec = motion.slow(), placementSpec = motion.base(), fadeOutSpec = null)
           }
           Box(Modifier.fillMaxWidth().then(itemMotion)) {
             when (item) {
@@ -620,7 +619,7 @@ fun MessageFeed(
       horizontalAlignment = Alignment.End,
       verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-      AnimatedVisibility(visible = unseenReactions.count > 0 && unseenReactions.messages.isNotEmpty(), enter = fadeIn(), exit = fadeOut()) {
+      AnimatedVisibility(visible = unseenReactions.count > 0 && unseenReactions.messages.isNotEmpty(), enter = motion.enter, exit = motion.exitTransition) {
         ReactionJumpButton(unseenReactions.count) {
           unseenReactions.messages.firstOrNull()?.let { oldest ->
             reported.add(oldest)
@@ -631,8 +630,8 @@ fun MessageFeed(
       }
       AnimatedVisibility(
         visible = (showsJumpDown || scrollState.unseenCount > 0) && items.isNotEmpty(),
-        enter = fadeIn(),
-        exit = fadeOut(),
+        enter = motion.enter,
+        exit = motion.exitTransition,
       ) {
         JumpDownButton(scrollState.unseenCount) {
           decide(FeedScrollEvent.ReachedBottom, isNearBottom = true)
@@ -932,8 +931,8 @@ private fun FloatingDay(listState: LazyListState, items: List<FeedItem>, modifie
   }
   AnimatedVisibility(
     visible = isShown && maybeDay != null,
-    enter = fadeIn(),
-    exit = fadeOut(),
+    enter = LocalMotion.current.fadeIn,
+    exit = LocalMotion.current.fadeOut,
     modifier = modifier.fillMaxWidth().clipToBounds(),
   ) {
     maybeDay?.let { day ->
@@ -1588,6 +1587,9 @@ private fun BelowBubble(
 ) {
   val haptics = LocalHapticFeedback.current
   if (maybeExtras?.isSendFailed == true) NotSentLine(viewModel, message)
+  // Reactions on screen before this composition: one added while the message is shown pops in,
+  // ones already there when it scrolls into view don't (#302).
+  val shownReactions = remember(message.id) { ShownReactions() }
   if (message.reactions.isNotEmpty()) {
     FlowRow(
       horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -1595,15 +1597,27 @@ private fun BelowBubble(
       modifier = Modifier.padding(top = 2.dp),
     ) {
       for (reaction in message.reactions) {
-        val people = reactionPeople(reaction) { snapshot?.user(it)?.displayName }
-        ReactionPill(reaction.emoji, reaction.maybeCustom, reaction.count, reaction.reactedByMe, isEnabled = canReact, people = people) {
-          haptics.performHapticFeedback(HapticFeedbackType.Confirm)
-          viewModel.act(ChatActions.react(message.conversation, message.id, reaction.emoji))
+        // Keyed, so a pill keeps its pop state when another reaction is added before it.
+        key(reaction.emoji) {
+          val people = reactionPeople(reaction) { snapshot?.user(it)?.displayName }
+          ReactionPill(
+            reaction.emoji,
+            reaction.maybeCustom,
+            reaction.count,
+            reaction.reactedByMe,
+            isEnabled = canReact,
+            people = people,
+            popsOnEnter = shownReactions.isComposed && reaction.emoji !in shownReactions.emojis,
+          ) {
+            haptics.performHapticFeedback(HapticFeedbackType.Confirm)
+            viewModel.act(ChatActions.react(message.conversation, message.id, reaction.emoji))
+          }
         }
       }
       maybeOnAddReaction?.let { AddReactionPill(it) }
     }
   }
+  SideEffect { shownReactions.record(message.reactions.map { it.emoji }) }
   if (maybeExtras?.wantsAcknowledgement == true) {
     val count = maybeExtras.acknowledgedBy.size
     Text(
@@ -1623,6 +1637,19 @@ private fun BelowBubble(
         .clickable { onOpenThread(message.id) }
         .padding(horizontal = 4.dp, vertical = 6.dp),
     )
+  }
+}
+
+/** The reactions [BelowBubble] has shown for one message, read while composing only (not state). */
+private class ShownReactions {
+  var isComposed = false
+    private set
+  val emojis = HashSet<String>()
+
+  fun record(shown: List<String>) {
+    isComposed = true
+    emojis.clear()
+    emojis.addAll(shown)
   }
 }
 
@@ -1658,6 +1685,7 @@ private fun ReactionPill(
   isMine: Boolean,
   isEnabled: Boolean,
   people: ReactionPeople,
+  popsOnEnter: Boolean,
   onClick: () -> Unit,
 ) {
   val scheme = MaterialTheme.colorScheme
@@ -1678,6 +1706,8 @@ private fun ReactionPill(
     color = if (isMine) scheme.primaryContainer else scheme.surfaceContainerHigh,
     border = BorderStroke(1.dp, if (isMine) scheme.primary else scheme.outlineVariant),
     modifier = Modifier
+      // The count or the own reaction changing pops the pill, as `motion-pop` does on the web.
+      .popOnChange(count to isMine, popsOnEnter)
       .clip(CircleShape)
       .combinedClickable(
         onClick = { if (isEnabled) onClick() },

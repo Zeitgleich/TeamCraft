@@ -54,7 +54,7 @@ struct PictureViewer: View {
     }
     // Clear, so the fading backdrop shows what is behind it.
     .presentationBackground(.clear)
-    .animation(.easeOut(duration: 0.2), value: isChromeShown)
+    .animation(Motion.fast, value: isChromeShown)
     .environment(\.colorScheme, .dark)
     .statusBarHidden(!isChromeShown)
     .persistentSystemOverlays(isChromeShown ? .automatic : .hidden)

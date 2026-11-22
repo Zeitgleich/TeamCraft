@@ -1,8 +1,7 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import de.zeitgleich.teamcraft.ui.theme.LocalMotion
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -62,7 +61,7 @@ internal fun ComposerLinkPreviewCard(preview: ComposerLinkPreview, onRemove: () 
   SideEffect { if (isVisible) lastVisible.value = preview }
   val shown = if (isVisible) preview else lastVisible.value
   val maybeReady = shown.maybeReady
-  AnimatedVisibility(visible = isVisible, enter = fadeIn(), exit = fadeOut()) {
+  AnimatedVisibility(visible = isVisible, enter = LocalMotion.current.fadeIn, exit = LocalMotion.current.fadeOut) {
     val colors = MaterialTheme.colorScheme
     Row(
       Modifier

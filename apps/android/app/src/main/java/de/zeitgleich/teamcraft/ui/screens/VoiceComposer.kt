@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import de.zeitgleich.teamcraft.ui.theme.LocalMotion
 import android.Manifest
 import android.app.Activity
 import android.content.Context
@@ -372,12 +373,17 @@ private fun DiscardButton(onDiscard: () -> Unit) {
   }
 }
 
-/** The red dot of a running recording, breathing slowly. */
+/** The red dot of a running recording, breathing slowly; it stands still with reduced motion. */
 @Composable
 private fun RecordingDot() {
+  val dot = Modifier.padding(start = 8.dp).size(10.dp)
+  if (LocalMotion.current.isReduced) {
+    Box(dot.background(MaterialTheme.colorScheme.error, CircleShape))
+    return
+  }
   val pulse = rememberInfiniteTransition(label = "recording")
   val alpha by pulse.animateFloat(1f, 0.35f, infiniteRepeatable(tween(800), RepeatMode.Reverse), label = "dot")
-  Box(Modifier.padding(start = 8.dp).size(10.dp).alpha(alpha).background(MaterialTheme.colorScheme.error, CircleShape))
+  Box(dot.alpha(alpha).background(MaterialTheme.colorScheme.error, CircleShape))
 }
 
 /** The last levels as bars, newest on the end side. */

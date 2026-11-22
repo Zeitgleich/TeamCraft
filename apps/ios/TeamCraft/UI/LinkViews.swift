@@ -83,6 +83,7 @@ struct LinkTypedCodeForm: View {
 /// code; Review leads to the typed-code step (docs/e2ee.md §5, "Prompt on every device").
 struct LinkPromptOverlay: View {
   @Environment(AppModel.self) private var model
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   private enum Notice: Equatable {
     case approved, ended
@@ -108,7 +109,7 @@ struct LinkPromptOverlay: View {
     }
     .padding(.horizontal)
     .padding(.top, 4)
-    .animation(.default, value: model.linkPrompts.map(\.id))
+    .animation(Motion.base(reduceMotion), value: model.linkPrompts.map(\.id))
     .task(id: maybeNotice) {
       // The success notice is brief; the failure stays until it is dismissed.
       guard maybeNotice == .approved else { return }

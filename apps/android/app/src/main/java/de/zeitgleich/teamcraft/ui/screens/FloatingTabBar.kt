@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import de.zeitgleich.teamcraft.ui.theme.popOnChange
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
@@ -210,8 +211,9 @@ private fun TabItem(
           count > 0 -> Badge(
             containerColor = LocalTeamCraftColors.current.badge,
             contentColor = LocalTeamCraftColors.current.chromeText,
+            modifier = Modifier.popOnChange(count, popsOnEnter = true),
           ) { Text(count.toString()) }
-          badge.unread > 0 -> Badge(containerColor = MaterialTheme.colorScheme.outline)
+          badge.unread > 0 -> Badge(containerColor = MaterialTheme.colorScheme.outline, modifier = Modifier.popOnChange(Unit, popsOnEnter = true))
         }
       },
     ) { Icon(tabIcon(tab), contentDescription = null, tint = content, modifier = Modifier.size(ICON_SIZE)) }

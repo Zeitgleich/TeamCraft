@@ -68,6 +68,7 @@ func endOfDayMs(_ date: Date, calendar: Calendar = .current) -> Int64 {
 struct MeetingFormView: View {
   @Environment(AppModel.self) private var model
   @Environment(\.dismiss) private var dismiss
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   let account: Account
   let maybeMeeting: Meeting?
   /// A new meeting is listed in this space (its meetings tab).
@@ -420,7 +421,7 @@ struct MeetingFormView: View {
     let problems = meetingFormProblems(form: form, nowMs: nowMs, maybeSavedStartMs: maybeSavedStartMs)
     if let first = problems.map(\.field).min() {
       wasRefused = true
-      withAnimation { proxy.scrollTo(first, anchor: .center) }
+      scrollToMiddle(first, in: proxy, reduceMotion: reduceMotion)
       if first == .title || first == .externals { focused = first }
       return
     }

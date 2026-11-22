@@ -20,10 +20,13 @@ struct LockView: View {
 
 /// Hides the chats while the app is not active, so the app switcher shows no content.
 struct PrivacyCover: View {
+  /// Follows Dynamic Type with the text, as the server entry's symbols do.
+  @ScaledMetric(relativeTo: .largeTitle) private var symbolSize: CGFloat = 48
+
   var body: some View {
     ZStack {
       Theme.background
-      Image(systemName: "lock.shield").font(.system(size: 48)).foregroundStyle(Theme.accent)
+      Image(systemName: "lock.shield").font(.system(size: symbolSize)).foregroundStyle(Theme.accent)
     }
     .ignoresSafeArea()
     .accessibilityHidden(true)
@@ -219,7 +222,7 @@ struct SyncingLine: View {
         }
       }
       .clipped()
-      .animation(.easeOut(duration: 0.2), value: isShown)
+      .animation(Motion.fast, value: isShown)
       .accessibilityElement()
       .accessibilityLabel(Text("syncing_updates"))
       .accessibilityHidden(!isShown)

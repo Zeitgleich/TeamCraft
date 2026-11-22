@@ -116,6 +116,7 @@ struct CountBadge: View {
 struct RowCountBadge: View {
   let badge: RowBadge
   let isMuted: Bool
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
     Text(badge.label)
@@ -127,6 +128,8 @@ struct RowCountBadge: View {
       .frame(minWidth: 24)
       .background(badge.tone == .red ? Theme.badge : Color(.tertiarySystemFill))
       .clipShape(Capsule())
+      // A count that changes while the row is on screen pops, as on the web and Android (#302).
+      .popOnChange(of: badge.count, reduceMotion: reduceMotion)
       .accessibilityElement(children: .ignore)
       .accessibilityLabel(
         // A red badge in a muted conversation counts only its mentions.

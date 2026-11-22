@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui
 
+import de.zeitgleich.teamcraft.ui.theme.LocalMotion
 import android.text.format.DateUtils
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
@@ -182,7 +183,7 @@ private fun PollOptionRow(
   val state = maybeCount?.let { count ->
     pluralStringResource(R.plurals.poll_option_votes, count, count, share)
   }
-  val fill by animateFloatAsState(targetValue = share / 100f, label = "poll share")
+  val fill by animateFloatAsState(targetValue = share / 100f, animationSpec = LocalMotion.current.base(), label = "poll share")
   val mark = when {
     isMultiple && isChosen -> R.drawable.ic_check_box
     isMultiple -> R.drawable.ic_check_box_outline_blank

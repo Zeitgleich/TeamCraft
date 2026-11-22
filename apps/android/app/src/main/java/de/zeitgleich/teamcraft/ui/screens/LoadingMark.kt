@@ -1,6 +1,6 @@
 package de.zeitgleich.teamcraft.ui.screens
 
-import android.provider.Settings
+import de.zeitgleich.teamcraft.ui.rememberMotionReduced
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.Easing
 import androidx.compose.foundation.Canvas
@@ -24,7 +24,6 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -81,7 +80,7 @@ private val HOP_DELAYS_MS = listOf(1100f, 1250f, 1400f)
  */
 @Composable
 fun LoadingMarkOverlay(isLoading: Boolean, maybeHandoff: SplashHandoff? = null) {
-  val reduceMotion = rememberReduceMotion()
+  val reduceMotion = rememberMotionReduced()
   val loading by rememberUpdatedState(isLoading)
   val handoff by rememberUpdatedState(maybeHandoff)
   var isShown by remember { mutableStateOf(isLoading) }
@@ -139,15 +138,6 @@ fun StillMark(modifier: Modifier = Modifier) {
 
 /** Where and when the system splash left the mark: its clock and the mark's centre and side in px. */
 class SplashHandoff(val elapsedMs: Long, val centre: Offset, val markSizePx: Float)
-
-/** Animations off in the system settings (Settings → Accessibility → Remove animations). */
-@Composable
-private fun rememberReduceMotion(): Boolean {
-  val context = LocalContext.current
-  return remember {
-    Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f
-  }
-}
 
 private fun departure(elapsed: Long, departedAt: Long, reduceMotion: Boolean): Float {
   if (departedAt < 0) return 0f

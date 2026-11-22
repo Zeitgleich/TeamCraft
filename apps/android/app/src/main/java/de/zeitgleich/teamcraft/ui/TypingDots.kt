@@ -1,6 +1,5 @@
 package de.zeitgleich.teamcraft.ui
 
-import android.provider.Settings
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -15,10 +14,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -38,7 +35,7 @@ internal const val DOT_REST_ALPHA = 0.6f
  */
 @Composable
 fun TypingDots(modifier: Modifier = Modifier, color: Color = MaterialTheme.colorScheme.primary, dotSize: Dp = 5.dp) {
-  val isReduced = rememberReducedMotion()
+  val isReduced = rememberMotionReduced()
   val transition = if (isReduced) null else rememberInfiniteTransition(label = "typing-dots")
   val alphas = List(DOTS) { index ->
     if (transition == null) {
@@ -73,13 +70,4 @@ fun TypingDots(modifier: Modifier = Modifier, color: Color = MaterialTheme.color
 
 private val StillAlpha: State<Float> = object : State<Float> {
   override val value: Float get() = DOT_REST_ALPHA
-}
-
-/** Animations are off when the user turned them off (accessibility or developer settings). */
-@Composable
-internal fun rememberReducedMotion(): Boolean {
-  val resolver = LocalContext.current.contentResolver
-  return remember(resolver) {
-    Settings.Global.getFloat(resolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f
-  }
 }

@@ -272,7 +272,7 @@ struct CallScreen: View {
         .overlay(alignment: .bottomLeading) { nameTag(for: stream) }
         .clipShape(Self.tileShape)
         .overlay(Self.tileShape.stroke(isSpeaking(stream) ? Theme.accent : .white.opacity(0.12), lineWidth: isSpeaking(stream) ? 3 : 1))
-        .animation(.easeOut(duration: 0.15), value: isSpeaking(stream))
+        .animation(Motion.fast, value: isSpeaking(stream))
     case .avatar(let person):
       GeometryReader { proxy in
         AvatarView(name: person.name, size: min(max(min(proxy.size.width, proxy.size.height) * 0.45, 48), 128))
@@ -285,7 +285,7 @@ struct CallScreen: View {
         Self.tileShape.stroke(person.isSpeaking ? Theme.accent : .white.opacity(0.08), lineWidth: person.isSpeaking ? 3 : 1)
       )
       .opacity(person.isRejoining ? 0.5 : 1)
-      .animation(.easeOut(duration: 0.15), value: person.isSpeaking)
+      .animation(Motion.fast, value: person.isSpeaking)
       .accessibilityElement(children: .ignore)
       .accessibilityLabel(
         CallTileLabel(name: person.name, isMuted: person.isMuted, isUnverified: person.isUnverified).text)
@@ -912,11 +912,11 @@ struct CallScreen: View {
 
   private var spring: Animation {
     // Critically damped, as the chrome has no momentum of its own; reduced motion cross-fades.
-    reduceMotion ? .easeInOut(duration: 0.2) : .spring(response: 0.4, dampingFraction: 1)
+    Motion.spring(reduceMotion)
   }
 
   private func chromeTransition(edge: Edge) -> AnyTransition {
-    reduceMotion ? .opacity : .move(edge: edge).combined(with: .opacity)
+    Motion.slide(from: edge, reduceMotion)
   }
 
   private func setControlsShown(_ isShown: Bool) {
