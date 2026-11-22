@@ -41,7 +41,8 @@ jobs:
     needs: [web]
     if: inputs.jobs != 'desktop'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Dev stack and builds take 14 to 18 minutes (more with a cold cache), the tests 35 (#1406).
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -66,7 +67,7 @@ jobs:
         # Starts the dev stack, builds server, SFU and bridge, runs the tests. The runner's Google
         # Chrome drives the browser tests. Ends before the job does, so the screenshots and process
         # logs below are still uploaded when it runs out of time.
-        timeout-minutes: 52
+        timeout-minutes: 80
         run: scripts/e2e.sh --prebuilt-web
       - name: Collect the process logs
         # The logs of the server, SFU and bridge of failed tests stay in the temp directory, next to
