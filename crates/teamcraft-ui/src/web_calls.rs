@@ -93,7 +93,10 @@ struct CallModule {
   _callbacks: Rc<Callbacks>,
 }
 
-struct Callbacks {
+/// What the call module calls back into the page with. Built in the call screens' module
+/// (`areas::call_callbacks`, #1699): their JSON readers only run in a call, and a call's screens load
+/// that module before the call starts.
+pub(crate) struct Callbacks {
   object: Object,
   _changed: Closure<dyn Fn(String)>,
   _prepare: Closure<dyn Fn(String) -> Promise>,
@@ -605,7 +608,11 @@ async fn load_module(host: Weak<WebCallHost>) -> Result<CallModule, String> {
   JsFuture::from(started)
     .await
     .map_err(|error| format!("could not start the call module: {}", js_text(&error)))?;
-  let callbacks = Rc::new(Callbacks::new(host)?);
+  let callbacks = Rc::new(
+    crate::areas::call_callbacks(host)
+      .await
+      .map_err(|error| format!("could not load the call screens: {error}"))??,
+  );
   let module = CallModule {
     exports,
     _callbacks: callbacks.clone(),
@@ -619,7 +626,7 @@ async fn load_module(host: Weak<WebCallHost>) -> Result<CallModule, String> {
 }
 
 impl Callbacks {
-  fn new(host: Weak<WebCallHost>) -> Result<Self, String> {
+  pub(crate) fn new(host: Weak<WebCallHost>) -> Result<Self, String> {
     let changed = {
       let host = host.clone();
       Closure::<dyn Fn(String)>::new(move |json: String| {

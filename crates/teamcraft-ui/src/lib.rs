@@ -174,14 +174,21 @@ pub fn mount() {
 }
 
 fn mount_with_texts() {
-  // The desktop shell's incoming-call window shows only the call's card (#650).
-  if auth::tauri::window_label().as_deref() == Some(teamcraft_client_api::call_window::CALL_WINDOW_LABEL) {
-    components::incoming_call::mount_call_window();
-    return;
-  }
-  // The small call window shows only the call's controls (#2077).
-  if auth::tauri::window_label().as_deref() == Some(teamcraft_client_api::call_mini::CALL_MINI_LABEL) {
-    components::call_mini_window::mount();
+  // The desktop shell's incoming-call window shows only the call's card (#650), the small call
+  // window only the call's controls (#2077). Both pages are in the desktop app's module.
+  let maybe_window = match auth::tauri::window_label().as_deref() {
+    Some(teamcraft_client_api::call_window::CALL_WINDOW_LABEL) => Some(areas::ShellWindow::IncomingCall),
+    Some(teamcraft_client_api::call_mini::CALL_MINI_LABEL) => Some(areas::ShellWindow::CallMini),
+    _ => None,
+  };
+  if let Some(window) = maybe_window {
+    wasm_bindgen_futures::spawn_local(async move {
+      // The shell serves the module from the disk; without it the window stays on its loading
+      // screen, and the main window still has the call.
+      if let Err(error) = areas::mount_shell_window(window).await {
+        tracing::error!(%error, ?window, "the window's module did not load");
+      }
+    });
     return;
   }
   #[cfg(feature = "demo")]

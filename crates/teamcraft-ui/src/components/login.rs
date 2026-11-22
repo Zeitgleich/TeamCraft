@@ -524,7 +524,8 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
         }
         .into_any()
       } else if let Some(LoginProblem::StoreUnreadable(store_problem)) = problem.clone() {
-        view! { <StoreProblemActions problem=store_problem control=control /> }.into_any()
+        // With the device setup's screens: only a device whose store can't be read shows it (#1699).
+        lazy_area(Place::Inline, move || areas::store_problem_actions(store_problem, control))
       } else if is_core_problem {
         // Still signed in: retry the core, or sign out (which also unlocks changing the server).
         view! {
@@ -1447,7 +1448,7 @@ fn DataGate(me: GetMeResponse, settings: Settings, control: SessionControl) -> i
 /// version is only ever reset on the desktop: in the browser a newer tab or bundle can read it, so
 /// reloading is the way out, and an old cached page must not wipe it.
 #[component]
-fn StoreProblemActions(problem: StoreProblem, control: SessionControl) -> impl IntoView {
+pub(crate) fn StoreProblemActions(problem: StoreProblem, control: SessionControl) -> impl IntoView {
   let i18n = use_i18n();
   let is_desktop = tauri::is_available();
   let is_newer = problem == StoreProblem::NewerVersion;

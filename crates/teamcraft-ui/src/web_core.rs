@@ -672,9 +672,12 @@ async fn serve(command: &str, args: Value) -> Result<Value, String> {
       ask(|reply| Request::LinkRequestReject { id, reply }).await??;
       Ok(Value::Null)
     },
+    // Its readers are in the settings' module, with the card that asks (#1699).
     "core_data_export" => {
-      let request: DataExportRequest = field(&args, "request")?;
-      to_value(ask(|reply| Request::DataExport(request, reply)).await?)
+      crate::areas::data_export_command(args)
+        .await
+        .map_err(|error| error.to_string())?
+        .await
     },
     other => Err(format!("{other} is not available in the browser")),
   }
@@ -878,6 +881,12 @@ fn part_not_loaded(error: &SplitLoaderError) -> CoreError {
   CoreError::Api(ApiError::Network(format!(
     "a part of the app did not load: {error}"
   )))
+}
+
+/// `core_data_export`: a step of "Export my data" asked for in JSON (`areas::data_export_command`).
+pub(crate) async fn data_export_json(args: Value) -> Result<Value, String> {
+  let request: DataExportRequest = field(&args, "request")?;
+  to_value(ask(|reply| Request::DataExport(request, reply)).await?)
 }
 
 fn field<T: DeserializeOwned>(args: &Value, name: &str) -> Result<T, String> {

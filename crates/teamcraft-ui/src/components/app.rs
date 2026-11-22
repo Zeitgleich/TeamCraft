@@ -29,7 +29,6 @@ use crate::components::edge_swipe::EdgeSwipeBack;
 use crate::components::file_drop;
 use crate::components::first_sync_bar::FirstSyncBar;
 use crate::components::getting_started::GettingStarted;
-use crate::components::guest_notice::GuestNotice;
 use crate::components::home::{HomeSidebar, HomeStart};
 use crate::components::icons::{Icon, IconName};
 use crate::components::incoming_call::IncomingCallDialog;
@@ -271,6 +270,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   let toast_stack = NodeRef::<leptos::html::Div>::new();
   use_flip_stack(toast_stack);
   let app_body = NodeRef::<leptos::html::Div>::new();
+  let has_expiring_guests = Memo::new(move |_| state.read(|backend| !backend.expiring_guests().is_empty()));
   let edge_swipe = EdgeSwipeBack::new(state, app_body);
   // Which way the phone layout moved last, for the direction the panes slide in (#368). After an
   // edge swipe the parent is on screen already. Through memos, so a navigation that sets the view
@@ -339,7 +339,8 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         <PersistencePrompt />
         <DesktopNotificationPrompt />
         <AnnouncementBanner />
-        <GuestNotice />
+        // In a module of its own: few pages ever have a guest whose access runs out (#1699).
+        {move || has_expiring_guests.get().then(|| lazy_area(Place::Inline, || areas::guest_notice(())))}
         <UpdateNotice />
       </div>
       <TopBar />
