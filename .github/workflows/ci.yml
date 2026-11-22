@@ -415,20 +415,46 @@ jobs:
       - name: Placeholder UI bundle (the desktop build embeds crates/teamcraft-ui/dist)
         shell: bash
         run: mkdir -p crates/teamcraft-ui/dist
-      # The desktop crate enables the Windows capture features of teamcraft-media itself.
-      - name: Clippy (desktop shell and core)
-        run: cargo clippy -p teamcraft-desktop -p teamcraft-core --all-targets -- -D warnings
-      - name: Clippy (call media)
-        run: cargo clippy -p teamcraft-media --all-targets --features native,mediafoundation,graphics-capture,wasapi-loopback,effects,segmentation,openh264-source -- -D warnings
-      - name: Test (desktop shell and core)
+      # Defender's real-time scan of every rustc output and build script is the biggest single cost
+      # of a Rust build on the hosted image. Best effort: a runner image that refuses (policy, tamper
+      # protection) must not fail the job, the build is then just slower.
+      - name: Exclude the build from Windows Defender
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $paths = @(
+            $env:GITHUB_WORKSPACE,
+            (Join-Path $HOME ".cargo"),
+            (Join-Path $HOME ".rustup"),
+            (Join-Path $env:GITHUB_WORKSPACE "target"),
+            $env:RUNNER_TEMP,
+            $env:TEMP
+          ) | Where-Object { $_ } | Select-Object -Unique
+          try {
+            Add-MpPreference -ExclusionPath $paths -ErrorAction Stop
+            Add-MpPreference -ExclusionProcess "rustc.exe", "cargo.exe", "link.exe", "cl.exe" -ErrorAction Stop
+            Write-Host "Defender exclusions: $($paths -join ', ')"
+          } catch {
+            Write-Host "Defender exclusions not applied: $_"
+          }
+      # Lint only what Linux's clippy cannot see: `cfg(windows)` code, which lives in the desktop
+      # shell, teamcraft-desktop-native and the Windows features of teamcraft-media (Media
+      # Foundation, Windows Graphics Capture, WASAPI loopback). teamcraft-core has no Windows-only
+      # code and the Linux jobs lint it with --all-features, so it is not linted again here; its
+      # library still gets checked as a dependency of the shell. The call media's cross-platform
+      # features (effects, segmentation, openh264-source) are linted on Linux too. One invocation, so
+      # the dependency tree is checked once with one feature set.
+      - name: Clippy (Windows-only code: desktop shell, desktop-native, call media)
+        run: cargo clippy -p teamcraft-desktop -p teamcraft-media --all-targets --features teamcraft-media/native,teamcraft-media/mediafoundation,teamcraft-media/graphics-capture,teamcraft-media/wasapi-loopback -- -D warnings
+      # One test build for all three crates: the shared dependencies (and teamcraft-media, which the
+      # shell pulls in) compile once instead of once per step.
+      - name: Test (desktop shell, core and call media)
         env:
           # The test thread polls the whole test body, and in a debug build the futures of the core's
           # sync tests don't fit the default stack (as on Linux above). Set here, not on the job:
           # rust-cache hashes the job's RUST* variables into its key, and would miss main's cache.
           RUST_MIN_STACK: "16777216"
-        run: cargo test -p teamcraft-desktop -p teamcraft-core
-      - name: Test (call media)
-        run: cargo test -p teamcraft-media --features native,mediafoundation,graphics-capture,wasapi-loopback,effects,segmentation,openh264-source
+        run: cargo test -p teamcraft-desktop -p teamcraft-core -p teamcraft-media --features teamcraft-media/native,teamcraft-media/mediafoundation,teamcraft-media/graphics-capture,teamcraft-media/wasapi-loopback,teamcraft-media/effects,teamcraft-media/segmentation,teamcraft-media/openh264-source
       - name: Check (ARM64, cross-compiled)
         run: cargo check --target aarch64-pc-windows-msvc -p teamcraft-desktop
       # #915: does Media Foundation's H.264 encoder (GStreamer's mfh264enc) take the profile the
