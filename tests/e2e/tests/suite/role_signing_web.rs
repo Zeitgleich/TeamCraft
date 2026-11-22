@@ -380,7 +380,8 @@ async fn wait_for_owner_id(stack: &Stack, reader: &teamcraft_e2e::tokens::UserTo
 }
 
 /// Opens the channel in the sidebar and waits for its header; the click is repeated until the
-/// header shows, since the entry may not take clicks while the list is still being built.
+/// header shows, since the entry may not take clicks while the list is still being built. The click
+/// goes to the entry's button: the row around it (a draggable `li`) takes no clicks.
 async fn open_channel(page: &Page, name: &str) {
   let deadline = Instant::now() + REVIEW_WAIT;
   loop {
@@ -394,8 +395,8 @@ async fn open_channel(page: &Page, name: &str) {
     );
     let _ = page
       .evaluate(format!(
-        "[...document.querySelectorAll('button, a, li, [role=button], [role=link], [role=treeitem]')]\
-          .find(e => e.innerText.includes({name:?}))?.click()"
+        "[...document.querySelectorAll('.sb-item')]\
+          .find(e => e.querySelector('.sb-name')?.innerText.includes({name:?}))?.click()"
       ))
       .await;
     tokio::time::sleep(Duration::from_millis(300)).await;
