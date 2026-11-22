@@ -798,6 +798,11 @@ for example after 3 days): the server can't abort an upload it lost track of (it
 creating the upload and recording it, or aborting a cancelled one failed), and their parts would
 take space unseen. `dev/garage-cors.py` sets both rules on the dev bucket.
 
+Videos stream in the web client (#200): the browser reads the parts of the encrypted blob it plays
+with `Range` requests, so the CORS rule must allow that request header (`<AllowedHeader>Range</AllowedHeader>`,
+or `*` as `dev/garage-cors.py` sets). Without it, videos open whole as before (up to 128 MiB) and
+bigger ones only download.
+
 ### Restore order after a total loss
 
 1. Postgres from the latest backup, S3 bucket from its copy.
