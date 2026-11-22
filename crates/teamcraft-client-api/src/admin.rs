@@ -911,29 +911,44 @@ pub enum AdminSection {
 }
 
 impl AdminSection {
+  /// Every section in the order of the console's navigation: group by group (`AdminGroup::ALL`).
+  /// The first one is what `/admin` opens: how the instance stands, before any setting.
   pub const ALL: [AdminSection; 21] = [
-    Self::Channels,
+    Self::Health,
     Self::Users,
-    Self::Permissions,
-    Self::Security,
     Self::People,
+    Self::Permissions,
+    Self::Channels,
     Self::Announcement,
+    Self::Retention,
+    Self::Security,
+    Self::Audit,
+    Self::Import,
+    Self::Brands,
     Self::Backgrounds,
     Self::Emoji,
-    Self::Brands,
+    Self::Instance,
+    Self::Settings,
     Self::Mail,
     Self::Calendar,
-    Self::Settings,
-    Self::Retention,
     Self::Updates,
-    Self::Health,
-    Self::Instance,
     Self::Integrations,
     Self::Webhooks,
     Self::Notetaker,
-    Self::Import,
-    Self::Audit,
   ];
+
+  /// The heading the section is listed under: one place per setting (issue #958).
+  pub fn group(self) -> AdminGroup {
+    match self {
+      Self::Health => AdminGroup::Overview,
+      Self::Users | Self::People | Self::Permissions => AdminGroup::People,
+      Self::Channels | Self::Announcement | Self::Retention => AdminGroup::Conversations,
+      Self::Security | Self::Audit | Self::Import => AdminGroup::Security,
+      Self::Brands | Self::Backgrounds | Self::Emoji => AdminGroup::Appearance,
+      Self::Instance | Self::Settings | Self::Mail | Self::Calendar | Self::Updates => AdminGroup::Server,
+      Self::Integrations | Self::Webhooks | Self::Notetaker => AdminGroup::Integrations,
+    }
+  }
 
   pub fn slug(self) -> &'static str {
     match self {
@@ -962,6 +977,57 @@ impl AdminSection {
   }
 }
 
+/// The headings of the console's navigation (issue #958): a handful of groups instead of one long
+/// list, so an admin finds where a setting lives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AdminGroup {
+  /// How the instance stands; listed first and without a heading.
+  Overview,
+  /// Accounts, the directory and what roles may do.
+  People,
+  /// Spaces, channels and what is kept of them.
+  Conversations,
+  /// Signed policy, the audit trail and imported history.
+  Security,
+  /// How the workspace looks: brands, backgrounds, emoji.
+  Appearance,
+  /// What the server runs on and sends through.
+  Server,
+  /// Bots, webhooks and the notetaker.
+  Integrations,
+}
+
+impl AdminGroup {
+  pub const ALL: [AdminGroup; 7] = [
+    Self::Overview,
+    Self::People,
+    Self::Conversations,
+    Self::Security,
+    Self::Appearance,
+    Self::Server,
+    Self::Integrations,
+  ];
+
+  pub fn slug(self) -> &'static str {
+    match self {
+      Self::Overview => "overview",
+      Self::People => "people",
+      Self::Conversations => "conversations",
+      Self::Security => "security",
+      Self::Appearance => "appearance",
+      Self::Server => "server",
+      Self::Integrations => "integrations",
+    }
+  }
+
+  /// The group's sections, in navigation order.
+  pub fn sections(self) -> impl Iterator<Item = AdminSection> {
+    AdminSection::ALL
+      .into_iter()
+      .filter(move |section| section.group() == self)
+  }
+}
+
 /// "12.4 MB" style size, base 1024 with one decimal.
 pub fn format_bytes(bytes: u64) -> String {
   const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
@@ -981,6 +1047,18 @@ pub fn format_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn the_navigation_lists_every_section_once_and_group_by_group() {
+    let listed: Vec<AdminSection> = AdminGroup::ALL
+      .into_iter()
+      .flat_map(AdminGroup::sections)
+      .collect();
+    assert_eq!(listed, AdminSection::ALL);
+    for group in AdminGroup::ALL {
+      assert!(group.sections().next().is_some(), "{group:?} is empty");
+    }
+  }
 
   #[test]
   fn a_channel_query_matches_names_of_channel_and_space_and_the_quick_filters() {

@@ -4,14 +4,58 @@
 ## Administration
 admin-title = Administration
 admin-nav-label = Administration sections
-admin-nav-channels = Spaces and channels
+admin-nav-search = Find a setting
+admin-nav-search-placeholder = Find a setting
+admin-nav-no-match = No page matches. Try another word, such as “mail” or “guests”.
+admin-group-overview = Overview
+admin-group-people = People
+admin-group-conversations = Conversations
+admin-group-security = Security and data
+admin-group-appearance = Appearance
+admin-group-server = Server
+admin-group-integrations = Integrations
+admin-nav-health = System health
+admin-nav-health-keywords = overview status alerts backups checks attention identity provider sync scim
 admin-nav-users = Users and guests
-admin-nav-security = Security policy
+admin-nav-users-keywords = accounts members devices deactivate delete recovery invite guests
+admin-nav-people = Directory
+admin-nav-people-keywords = profile fields names statuses notifications defaults directory
+admin-nav-permissions = Roles and permissions
+admin-nav-permissions-keywords = roles rights moderators who may allowed
+admin-nav-channels = Spaces and channels
+admin-nav-channels-keywords = rooms spaces channels owners archive moderation members
+admin-nav-announcement = Announcement
+admin-nav-announcement-keywords = banner maintenance news message to everybody
 admin-nav-retention = Retention
-admin-nav-updates = Updates
-admin-nav-backgrounds = Backgrounds
-admin-nav-emoji = Emoji
+admin-nav-retention-keywords = keep delete days messages legal hold storage
+admin-nav-security = Security policy
+admin-nav-security-keywords = owners signatures signing recovery guests policy two-factor
 admin-nav-audit = Audit log
+admin-nav-audit-keywords = history actions who changed export compliance
+admin-nav-import = Import history
+admin-nav-import-keywords = migration other chat import account
+admin-nav-brands = Brands
+admin-nav-brands-keywords = logo colors host names texts links branding
+admin-nav-backgrounds = Call backgrounds
+admin-nav-backgrounds-keywords = camera video pictures background
+admin-nav-emoji = Custom emoji
+admin-nav-emoji-keywords = reactions shortcodes stickers
+admin-nav-instance = Servers and storage
+admin-nav-instance-keywords = media server push providers storage telephony instance
+admin-nav-settings = Limits and rules
+admin-nav-settings-keywords = limits uploads sizes rules mail texts instance settings configuration file
+admin-nav-mail = Mail server
+admin-nav-mail-keywords = smtp email invitations digests
+admin-nav-calendar = Calendar server
+admin-nav-calendar-keywords = caldav meetings calendar
+admin-nav-updates = Desktop updates
+admin-nav-updates-keywords = desktop apps versions update channel
+admin-nav-integrations = Bots
+admin-nav-integrations-keywords = bridge integrations bots logs monitoring ci
+admin-nav-webhooks = Webhooks
+admin-nav-webhooks-keywords = events outgoing urls ticketing chat-ops
+admin-nav-notetaker = AI notetaker
+admin-nav-notetaker-keywords = transcript summary calls ai api key
 admin-back = Back
 admin-metadata-only = Metadata only
 admin-metadata-detail = Admins manage rooms without being able to read them: no message text, files or reactions are shown.
@@ -403,11 +447,7 @@ audit-other = Other
 policy-saving = Signing and publishing…
 
 ## Administration console: permissions, people, announcement, instance
-admin-nav-permissions = Permissions
-admin-nav-people = People and notifications
-admin-nav-announcement = Announcement
-admin-nav-instance = Instance
-admin-permissions-title = Permissions
+admin-permissions-title = Roles and permissions
 admin-permissions-subtitle = What each role may do. Changes apply at once; a channel can only take permissions away again.
 permissions-scope = Applies to
 permissions-instance = The whole instance
@@ -450,7 +490,7 @@ policy-guest-dm-shared = People they share a conversation with
 policy-guest-dm-hint = Members, admins and owners can always message guests, and guests can answer there and write in the channels they were added to.
 policy-guest-expiry = Guest access ends after
 policy-guest-never = Never
-admin-people-title = People and notifications
+admin-people-title = Directory
 admin-people-subtitle = How names appear, which statuses exist and what notifications show by default.
 policy-directory = Directory and privacy
 policy-directory-hint = What other people see about a person. Guests never see e-mail addresses.
@@ -516,7 +556,7 @@ announcement-dismissible = People can dismiss it
 announcement-preview = Preview
 announcement-publish = Publish
 announcement-clear = Remove announcement
-admin-instance-title = Instance
+admin-instance-title = Servers and storage
 admin-instance-subtitle = What this instance runs on: media server, push, storage. No secrets are shown.
 instance-loading = Loading the status…
 instance-yes = Yes
@@ -645,10 +685,6 @@ policy-last-seen-hint = Each person can still hide theirs in the privacy setting
 
 ## Getting started (empty workspace)
 # Runtime settings: brands, mail, calendar and instance settings in the admin console
-admin-nav-brands = Brands
-admin-nav-mail = Mail server
-admin-nav-calendar = Calendar
-admin-nav-settings = Instance settings
 audit-brand-changed = Brand changed
 audit-mail-settings-changed = Mail settings changed
 audit-calendar-settings-changed = Calendar settings changed
@@ -718,7 +754,7 @@ admin-brands-own-mail-active = This brand uses its own mail server.
 admin-brands-own-mail-instance = This brand uses the instance's mail server.
 admin-brands-own-mail-needs-sender = Set and save a sender address for this brand first: its mail server sends with that address.
 admin-brands-own-mail-remove = Use the instance's mail server
-admin-calendar-title = Calendar
+admin-calendar-title = Calendar server
 admin-calendar-subtitle = The CalDAV calendar that meetings are written to.
 admin-calendar-unavailable = Meetings are not configured on this server, so there is no calendar to set up. Configure [meetings] in the configuration file first.
 admin-calendar-server = CalDAV server
@@ -824,7 +860,7 @@ admin-brands-delete = Delete brand
 admin-brands-delete-restore = Delete and use the configuration file again
 admin-brands-delete-confirm = Click again to delete
 admin-brands-close = Close
-admin-settings-title = Instance settings
+admin-settings-title = Limits and rules
 admin-settings-subtitle = Limits, rules and mail texts that used to need the configuration file. A group you do not change keeps the file's values.
 
 ## Key names in keyboard shortcuts (the caps shown on a keyboard)
@@ -832,9 +868,8 @@ admin-recovery-unavailable = Starting an organization recovery from the console 
 
 ## Settings: sections, search and rows (#327)
 # Files view and setup checklist (issue #301)
-admin-nav-integrations = Integrations
 admin-integrations-unavailable = Bots are not available in this build.
-admin-integrations-title = Integrations
+admin-integrations-title = Bots
 admin-integrations-subtitle = Bot accounts for the integration bridge: logs, monitoring alerts and CI results in encrypted channels.
 admin-integrations-name = New bot
 admin-integrations-name-example = e.g. NAS bridge
@@ -861,7 +896,6 @@ admin-integrations-reveal-done = I have saved it
 admin-integrations-next-steps = Next: add the bot to the channels it serves (channel settings, Integrations), then start the bridge once so it enrolls its device.
 
 ## Outgoing webhooks (docs/webhooks.md)
-admin-nav-webhooks = Webhooks
 admin-webhooks-title = Webhooks
 admin-webhooks-subtitle = Tell other systems (ticketing, CI, chat-ops) when channels are created or archived, people join or leave, or calls start and end. Only IDs and times are sent: never names or messages, and nothing about direct messages.
 admin-webhooks-secret-title = Signing secret
@@ -923,8 +957,7 @@ admin-webhooks-event-health-alert_resolved = Health alert resolved
 admin-webhooks-event-ping = Test
 
 ## Notetaker (admin.md §3.7)
-admin-nav-import = Import
-admin-import-title = Import
+admin-import-title = Import history
 admin-import-subtitle = History from another chat: the account the import tool signs in as, and until when it may import and join conversations.
 import-e2ee-warning = While the import runs, the import account is a member of the conversations it imports into, direct messages and notes included, and can read what is written there until everybody is in and it leaves. People see a notice in those direct messages.
 import-account = Import account
@@ -934,8 +967,7 @@ import-until = May import until
 import-open = The import is open.
 import-closed = The import is closed: imported messages keep their origin, nothing new is imported.
 import-end = End import
-admin-nav-notetaker = Notetaker
-admin-notetaker-title = Notetaker
+admin-notetaker-title = AI notetaker
 admin-notetaker-subtitle = An AI participant that can be added to calls: it makes a transcript of the call and posts a summary and the transcript in the call's conversation.
 notetaker-e2ee-warning = Calls with the notetaker are not end-to-end encrypted towards it: their audio goes to the notetaker and on to OpenRouter and the model's provider. Everyone in the call sees that it is there. Read the data processing notes in the admin guide (GDPR) before you turn it on.
 notetaker-enabled = Notetaker on
@@ -980,7 +1012,6 @@ notetaker-error-prompt = The instructions are empty or longer than 8000 characte
 notetaker-error-other = These settings can't be signed. Reload the page and try again.
 
 ## System health (issue #213)
-admin-nav-health = System health
 admin-health-title = System health
 admin-health-subtitle = Whether the server, its backends and its backups are working. Names, states and times only: nothing from any conversation.
 health-loading = Loading the checks…

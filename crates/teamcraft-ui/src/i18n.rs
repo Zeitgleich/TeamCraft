@@ -832,6 +832,10 @@ mod tests {
     }
     for section in teamcraft_client_api::admin::AdminSection::ALL {
       keys.push(format!("admin-nav-{}", section.slug()));
+      keys.push(format!("admin-nav-{}-keywords", section.slug()));
+    }
+    for group in teamcraft_client_api::admin::AdminGroup::ALL {
+      keys.push(format!("admin-group-{}", group.slug()));
     }
     for locale in [Locale::En, Locale::De] {
       for key in &keys {
