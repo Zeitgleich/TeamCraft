@@ -213,6 +213,8 @@ private struct PersonRow: View {
       }
     }
     .disabled(isMe)
+    // The dot is a picture: presence is the row's value (#2282).
+    .accessibilityValue(Text(Presence(directoryWire: person.presence).label))
     .accessibilityHint(isMe ? Text(verbatim: "") : Text("directory_message_hint"))
   }
 }

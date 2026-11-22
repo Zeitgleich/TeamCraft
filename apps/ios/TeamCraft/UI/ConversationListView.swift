@@ -1192,8 +1192,6 @@ struct ConversationRow: View {
           if let presence = conversation.maybePeerPresence {
             PresenceDot(presence: presence, size: 14, maybeRing: background)
               .offset(x: 2, y: 2)
-              .accessibilityHidden(false)
-              .accessibilityLabel(Text(presence.label))
           }
         }
       VStack(alignment: .leading, spacing: 3) {
@@ -1261,6 +1259,10 @@ struct ConversationRow: View {
     }
     .frame(minHeight: 60)
     .opacity(conversation.isMuted ? 0.6 : 1)
+    // A person's presence is the row's value: the dot is hidden from VoiceOver, and a label on
+    // the dot inside a combined row was unreliable (#2282).
+    .accessibilityElement(children: .combine)
+    .accessibilityValue(conversation.maybePeerPresence.map { Text($0.label) } ?? Text(verbatim: ""))
   }
 
   @ViewBuilder

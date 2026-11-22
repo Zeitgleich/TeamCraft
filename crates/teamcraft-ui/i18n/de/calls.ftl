@@ -479,3 +479,17 @@ call-recording-take-unfinished = Die App wurde während der Aufnahme beendet. Di
 tile-recording = nimmt auf
 call-recording-left = { $name } (hat den Anruf verlassen, hört eventuell noch zu)
 call-recording-unconfirmed = Der Server hat nicht bestätigt, dass die anderen von deiner Aufnahme erfahren. Sie sehen sie eventuell nicht.
+
+## Ansagen im Anruf (#2281): einmal vom Live-Bereich des Anrufs gesagt
+call-announce-joined = { $names } ist dem Anruf beigetreten
+call-announce-joined-many = { $count } Personen sind dem Anruf beigetreten
+call-announce-left = { $names } hat den Anruf verlassen
+call-announce-left-many = { $count } Personen haben den Anruf verlassen
+call-announce-waiting = { $names } wartet in der Lobby
+call-announce-waiting-many = { $count } Personen warten in der Lobby
+call-announce-mic-on = Mikrofon an
+call-announce-mic-off = Mikrofon stumm
+call-announce-recording-by = { $names } hat die Aufzeichnung gestartet
+call-announce-recording-by-many = { $count } Personen haben die Aufzeichnung gestartet
+call-announce-recording-own = Du hast die Aufzeichnung gestartet
+call-announce-recording-stopped = Aufzeichnung beendet

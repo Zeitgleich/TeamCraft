@@ -262,6 +262,7 @@ sidebar-scheduled-attention = { $count ->
 sidebar-drafts = Entwürfe & Gesendet
 sidebar-item-draft = Entwurf
 sidebar-item-draft-label = { $label }, Entwurf
+sidebar-item-presence = { $label }, { $status }
 drafts-title = Entwürfe & Gesendet
 drafts-tab-drafts = Entwürfe
 drafts-tab-sent = Gesendet

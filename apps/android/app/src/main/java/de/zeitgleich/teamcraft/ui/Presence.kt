@@ -30,6 +30,9 @@ object PresenceStyle {
   val RED = Color(0xFFD0453A)
   val OFFLINE = Color(0xFF8A8F98)
 
+  /** The dark ring round every dot (#2282). */
+  val RING = Color(0xFF1B1B1B)
+
   /** The status list's order: available, busy, do not disturb, be right back, away, offline. */
   val ALL = listOf(
     Presence.ONLINE,
@@ -59,23 +62,39 @@ fun presenceOf(maybeName: String?): Presence = when (maybeName) {
 fun PresenceDot(presence: Presence, modifier: Modifier = Modifier, size: Dp = 10.dp) {
   val online = LocalTeamCraftColors.current.presence
   Canvas(modifier.size(size)) {
-    val radius = this.size.minDimension / 2
+    // A dark ring round every dot: the colours alone are 1.2 to 2.6:1 against each other and the
+    // surface; the ring makes each pass 3:1 (WCAG 1.4.11), and the shapes tell the states apart
+    // without colour (1.4.1, #2282).
+    val outer = this.size.minDimension / 2
+    val ring = outer * 0.16f
+    val radius = outer - ring
     val mark = Color.White
     val line = radius * 0.3f
+    drawCircle(PresenceStyle.RING, outer)
     when (presence) {
-      Presence.ONLINE -> drawCircle(online)
-      Presence.BUSY -> drawCircle(PresenceStyle.RED)
+      Presence.ONLINE -> drawCircle(online, radius)
+      // Busy: a dot with a dark centre; do not disturb has the bar.
+      Presence.BUSY -> {
+        drawCircle(PresenceStyle.RED, radius)
+        drawCircle(PresenceStyle.RING, radius * 0.3f)
+      }
       Presence.DO_NOT_DISTURB -> {
-        drawCircle(PresenceStyle.RED)
+        drawCircle(PresenceStyle.RED, radius)
         drawRect(mark, Offset(center.x - radius * 0.6f, center.y - line / 2), Size(radius * 1.2f, line))
       }
       Presence.BE_RIGHT_BACK -> {
-        drawCircle(PresenceStyle.AWAY)
+        drawCircle(PresenceStyle.AWAY, radius)
         drawLine(mark, center, Offset(center.x, center.y - radius * 0.6f), strokeWidth = line)
         drawLine(mark, center, Offset(center.x + radius * 0.5f, center.y), strokeWidth = line)
       }
-      Presence.AWAY -> drawCircle(PresenceStyle.AWAY)
-      Presence.OFFLINE -> drawCircle(PresenceStyle.OFFLINE, radius - line / 2, style = Stroke(width = line))
+      // Away: a crescent, the moon.
+      Presence.AWAY -> {
+        drawCircle(PresenceStyle.AWAY, radius)
+        drawCircle(PresenceStyle.RING, radius * 0.65f, Offset(center.x + radius * 0.4f, center.y - radius * 0.4f))
+      }
+      Presence.OFFLINE -> {
+        drawCircle(PresenceStyle.OFFLINE, radius - line / 2, style = Stroke(width = line))
+      }
     }
   }
 }

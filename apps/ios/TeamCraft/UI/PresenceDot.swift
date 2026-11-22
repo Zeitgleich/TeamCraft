@@ -19,13 +19,30 @@ struct PresenceDot: View {
       }
   }
 
+  /// A dark ring round every dot: the colours alone are 1.2 to 2.6:1 against each other and the
+  /// surface; the ring makes each pass 3:1 (WCAG 1.4.11), and the shapes tell the states apart
+  /// without colour (1.4.1, #2282).
+  private static let ringColor = Color(white: 0.11)
+
   private var dot: some View {
     ZStack {
       switch presence {
       case .offline:
         Circle().strokeBorder(Presence.offlineColor, lineWidth: max(1.5, size * 0.2))
+      case .away:
+        // A crescent, the moon.
+        Circle().fill(presence.color)
+          .overlay {
+            Circle().fill(Self.ringColor).frame(width: size * 0.65, height: size * 0.65)
+              .offset(x: size * 0.2, y: -size * 0.2)
+          }
+          .clipShape(Circle())
       default:
         Circle().fill(presence.color)
+      }
+      if presence == .busy {
+        // Busy: a dot with a dark centre. Do not disturb has the bar.
+        Circle().fill(Self.ringColor).frame(width: size * 0.3, height: size * 0.3)
       }
       if presence == .doNotDisturb {
         Capsule().fill(.white).frame(width: size * 0.6, height: max(1.5, size * 0.18))
@@ -36,6 +53,7 @@ struct PresenceDot: View {
       }
     }
     .frame(width: size, height: size)
+    .overlay(Circle().strokeBorder(Self.ringColor, lineWidth: max(1, size * 0.1)))
     .accessibilityHidden(true)
   }
 }
