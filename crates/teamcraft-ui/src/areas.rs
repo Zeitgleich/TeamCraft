@@ -39,6 +39,7 @@ use crate::components::call_tile::CallTileRow;
 use crate::components::calls_unavailable::CallsUnavailableDialog;
 use crate::components::calls_view::CallsView;
 use crate::components::canvas_view::CanvasView;
+use crate::components::channel_view::ChannelTab;
 use crate::components::composer_link_preview::ComposerLinkPreviewCard;
 use crate::components::composer_toolbar::{ActiveFormats, FormatAction, FormatToolbarPanel};
 use crate::components::conversation_notify::QuietHoursDialog;
@@ -48,17 +49,19 @@ use crate::components::downloads_menu::DownloadsButton;
 use crate::components::drafts_view::DraftsView;
 use crate::components::emoji_picker::EmojiPickerPanel;
 use crate::components::file_preview::FilePreview;
+use crate::components::file_views::ChannelFiles;
 use crate::components::files_sidebar::FilesSidebar;
 use crate::components::files_view::FilesView;
 use crate::components::guest_devices::{GuestDeviceSetup, GuestDevices, GuestForm, GuestWaitingDevices};
 use crate::components::guest_join::GuestJoinPage;
 use crate::components::guest_meeting::{GuestMeeting, GuestSession};
+use crate::components::guest_notice::GuestNotice;
 use crate::components::home::NewMessageDialog;
 use crate::components::huddle_bar::{CallBar, HuddleBarContent};
 use crate::components::lightbox::Lightbox;
 use crate::components::link_request_prompt::{LinkRequestCards, Step as LinkStep};
 use crate::components::log_view::IntegrationFeed;
-use crate::components::login::SessionGate;
+use crate::components::login::{SessionGate, StoreProblemActions};
 use crate::components::meetings_view::{
   CancelMeetingDialog, MeetingCreatedDialog, MeetingsView, ScheduleMeetingDialog,
 };
@@ -67,6 +70,7 @@ use crate::components::message_actions::{
   EditHistoryDialog, ForwardDialog, ForwardSelectionDialog, PinsPanel, SavedView,
 };
 use crate::components::onboarding::EnrollScreen;
+use crate::components::picture_editor::PictureEditor;
 use crate::components::poll_dialog::PollDialog;
 use crate::components::profile_views::UserProfileDialog;
 use crate::components::quick_switcher::QuickSwitcher;
@@ -81,11 +85,13 @@ use crate::components::settings_modal::{SettingsModal, ShortcutsModal};
 #[cfg(target_arch = "wasm32")]
 use crate::components::share_download::ShareDownloadPage;
 use crate::components::share_link_dialog::ShareLinkDialog;
+use crate::components::space_deletion_list::SpaceDeletionList;
 use crate::components::space_invites::{AddToChannelDialog, BrowseSpacesDialog, InvitePeopleDialog};
 use crate::components::status_menu::{CustomStatusDialog, StatusDurationDialog, StatusMenu};
 use crate::components::tab_elsewhere::TabElsewhere;
 use crate::components::update_notice::UpdateNoticeBanner;
 use crate::components::video_player::VideoPlayer;
+use crate::components::voice_bar::VoiceBar;
 use crate::components::window_controls::WindowControls;
 use crate::components::workspace_dialogs::{
   BrowseChannelsDialog, ChannelSettingsDialog, NewChannelDialog, NewSpaceDialog, SpaceSettingsDialog,
@@ -100,8 +106,9 @@ use crate::settings::Settings;
 use crate::share_into::ShareDialog;
 use crate::state::AppState;
 use crate::tab_handover::TabState;
+use crate::voice_recorder::ComposerKey;
 use teamcraft_client_api::app_link::{AppLink, AppLinkStep, next_step};
-use teamcraft_client_api::remote::LinkRequestView;
+use teamcraft_client_api::remote::{LinkRequestView, StoreProblem};
 use teamcraft_client_api::server_entry::ServerOrigin;
 use teamcraft_proto::{AttachmentId, MeetingId};
 
@@ -172,6 +179,10 @@ areas! {
       control=control
     />
   };
+  /// What to do about a local database this version can't read (#160), with the device setup.
+  store_problem_actions(problem: StoreProblem, control: SessionControl) => setup: view! {
+    <StoreProblemActions problem=problem control=control />
+  };
   /// The administration console: the largest part of the app, for admins only.
   admin_console(section: AdminSection) => admin: view! { <AdminConsole section=section /> };
   settings(_unit: ()) => settings: view! { <SettingsModal /> };
@@ -194,6 +205,8 @@ areas! {
   browse_spaces(maybe_highlight: Option<SpaceId>) => workspace: view! { <BrowseSpacesDialog maybe_highlight=maybe_highlight /> };
   invite_people(space: SpaceId) => workspace: view! { <InvitePeopleDialog space=space /> };
   add_to_channel(conversation: ConversationId) => workspace: view! { <AddToChannelDialog conversation=conversation /> };
+  /// What deleting a space takes with it, in the space menu's confirmation (#1699).
+  space_deletion_list(space: SpaceId) => workspace: view! { <SpaceDeletionList space=space /> };
   /// The call screens (the incoming call card stays in the app, so a call rings at once).
   call_prejoin(request: CallRequest) => calls: view! { <PreJoinScreen request=request /> };
   call_screen(request: CallRequest) => calls: view! { <CallScreen request=request /> };
@@ -237,6 +250,15 @@ areas! {
   forward_selection(from: ConversationId) => dialogs: view! { <ForwardSelectionDialog from=from /> };
   edit_history(conversation: ConversationId, message: MessageId) => dialogs: view! { <EditHistoryDialog conversation=conversation message=message /> };
   bookmarks(conversation: ConversationId) => dialogs: view! { <BookmarksDialog conversation=conversation /> };
+  /// Turning and cropping a picture before it is sent, once its edit button is pressed (#1699).
+  picture_editor(
+    bytes: Vec<u8>,
+    media_type: String,
+    on_done: Callback<(Vec<u8>, String)>,
+    on_cancel: Callback<()>
+  ) => dialogs: view! {
+    <PictureEditor bytes=bytes media_type=media_type on_done=on_done on_cancel=on_cancel />
+  };
   /// A new poll (issue #205).
   new_poll(conversation: ConversationId) => dialogs: view! { <PollDialog conversation=conversation /> };
   quiet_hours(conversation: ConversationId) => dialogs: view! { <QuietHoursDialog conversation=conversation /> };
@@ -276,6 +298,14 @@ areas! {
   date_jump(conversation: ConversationId, menu: DateJumpMenu) => dialogs: view! { <DateJumpPanel conversation=conversation menu=menu /> };
   /// What a browser tab shows while another tab of the account runs the app (#744).
   tab_elsewhere(tab: Signal<TabState>) => dialogs: view! { <TabElsewhere tab=tab /> };
+  /// The bar of a voice message while it is explained, recorded and sent (#1699). The recording
+  /// runs in the app (`VoiceRecorder`), so a held button records while the bar loads.
+  voice_bar(key: ComposerKey, max_seconds: u32, on_send: Callback<()>) => voice_note: view! {
+    <VoiceBar key=key max_seconds=max_seconds on_send=on_send />
+  };
+  /// The notice before guests lose their access (#212), once a guest's access runs out soon: few
+  /// pages ever show it (#1699).
+  guest_notice(_unit: ()) => notices: view! { <GuestNotice /> };
   /// The account menu behind the user's picture and the custom status it opens.
   status_menu(_unit: ()) => account: view! { <StatusMenu /> };
   custom_status(_unit: ()) => account: view! { <CustomStatusDialog /> };
@@ -286,6 +316,15 @@ areas! {
   scheduled(_unit: ()) => places: view! { <ScheduledView /> };
   drafts(_unit: ()) => places: view! { <DraftsView /> };
   files(_unit: ()) => places: view! { <FilesView /> };
+  /// A conversation's Files tab (#1699).
+  channel_files(conversation: ConversationId, on_show_message: Callback<MessageId>) => places: view! {
+    <ChannelFiles
+      conversation=conversation
+      panel_id=ChannelTab::Files.panel_id()
+      labelled_by=ChannelTab::Files.tab_id()
+      on_show_message=on_show_message
+    />
+  };
   /// The Files place's sidebar: its filters and scopes (#1510).
   files_sidebar(_unit: ()) => places: view! { <FilesSidebar /> };
   call_history(_unit: ()) => places: view! { <CallsView /> };
@@ -355,6 +394,26 @@ pub fn app_link_step(
   is_server_locked: bool,
 ) -> Result<AppLinkStep, SplitLoaderError> {
   Ok(next_step(link, maybe_active, is_server_locked))
+}
+
+/// A small window of the desktop app's own (#650, #2077): a page the shell opens under its label.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellWindow {
+  /// The incoming call's card.
+  IncomingCall,
+  /// The controls of a call going on in the main window.
+  CallMini,
+}
+
+/// Mounts one of the desktop app's small windows. A browser never opens them, so their pages are
+/// in the desktop app's module, which the shell serves from the disk (#1699).
+#[wasm_split(desktop, wasm_split_path = ::leptos::wasm_split, fallible)]
+pub fn mount_shell_window(window: ShellWindow) -> Result<(), SplitLoaderError> {
+  match window {
+    ShellWindow::IncomingCall => crate::components::incoming_call::mount_call_window(),
+    ShellWindow::CallMini => crate::components::call_mini_window::mount(),
+  }
+  Ok(())
 }
 
 /// Reading the administration console's data (`admin_live.rs`): the lists, their details and the
@@ -467,6 +526,16 @@ pub(crate) fn export_step(
   turn: crate::web_export::ExportTurn<'_>,
 ) -> Result<ExportRun<'_>, SplitLoaderError> {
   Ok(Box::pin(turn.step()))
+}
+
+/// "Export my data" asked of the page's core in JSON (`core_data_export`): the request's readers
+/// and the status's writers are in the settings' module, with the card that asks (#1699).
+#[cfg(target_arch = "wasm32")]
+#[wasm_split(settings, wasm_split_path = ::leptos::wasm_split, fallible)]
+pub(crate) fn data_export_command(
+  args: serde_json::Value,
+) -> Result<ChatRun<serde_json::Value>, SplitLoaderError> {
+  Ok(Box::pin(crate::web_core::data_export_json(args)))
 }
 
 /// The console's engine operations (`web_core::EnginePart::Admin`): the workspace's policy and

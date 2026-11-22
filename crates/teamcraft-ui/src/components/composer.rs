@@ -14,6 +14,7 @@ use teamcraft_client_api::voice::RecordingStop;
 use teamcraft_proto::{ClientMessageId, DEFAULT_MAX_MENTIONS_PER_MESSAGE};
 use wasm_bindgen_futures::JsFuture;
 
+use crate::areas::{Place, lazy_area};
 use crate::audio::AudioFormat;
 use crate::clock::{format_date_time, now_ms};
 use crate::components::avatar::{Avatar, AvatarSize};
@@ -27,11 +28,10 @@ use crate::components::file_drop::{DropContent, DroppedFiles, take_drop, transfe
 use crate::components::file_views::blob_url;
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_actions::QuoteThumbnail;
-use crate::components::picture_editor::PictureEditor;
 use crate::components::scheduled_view::refusal_text;
 use crate::components::sheet::MenuSurface;
 use crate::components::typing_indicator::should_notify_typing;
-use crate::components::voice_bar::{VoiceBar, VoiceButton};
+use crate::components::voice_bar::VoiceButton;
 use crate::composer_focus::{self, FocusSituation};
 use crate::custom_emoji::CustomEmojiGlyph;
 use crate::editor_doc::{BlockFormat, InlineStyle};
@@ -1838,7 +1838,10 @@ pub fn Composer(
             editing.set(None);
           });
           let on_cancel = Callback::new(move |()| editing.set(None));
-          Some(view! { <PictureEditor bytes=bytes media_type=file.media_type on_done=on_done on_cancel=on_cancel /> })
+          let media_type = file.media_type;
+          Some(lazy_area(Place::Overlay, move || {
+            crate::areas::picture_editor(bytes.clone(), media_type.clone(), on_done, on_cancel)
+          }))
         }}
         {move || {
           upload_error.get().map(|message| view! { <p class="composer-error" role="alert">{message}</p> })
@@ -1890,7 +1893,15 @@ pub fn Composer(
         }}
         // In the desktop app's own chunk: a browser can't read other sites, so it never shows one.
         {crate::areas::desktop_only(move || crate::areas::composer_link_card(conversation, maybe_thread))}
-        {can_record.then(|| view! { <VoiceBar key=voice_key max_seconds=voice_max_seconds on_send=Callback::new(move |()| send_voice()) /> })}
+        {can_record.then(|| {
+          let on_send = Callback::new(move |()| send_voice());
+          let is_voice_shown = Memo::new(move |_| state.voice.phase_for(voice_key).is_some());
+          move || {
+            is_voice_shown.get().then(|| {
+              lazy_area(Place::Inline, move || crate::areas::voice_bar(voice_key, voice_max_seconds, on_send))
+            })
+          }
+        })}
         {move || {
           notice.get().map(|shown| match shown {
             Notice::Text(message) => view! { <p class="composer-notice" role="status">{message}</p> }.into_any(),

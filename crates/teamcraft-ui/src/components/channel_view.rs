@@ -11,7 +11,6 @@ use crate::components::compact_back::CompactBack;
 use crate::components::composer::Composer;
 use crate::components::conversation_notify::ConversationBell;
 use crate::components::file_drop::{DropStrip, FileDrop};
-use crate::components::file_views::ChannelFiles;
 use crate::components::huddle_bar::HuddleBar;
 use crate::components::icons::{Icon, IconName};
 use crate::components::inactivity_notice::ChannelInactivityNotice;
@@ -40,7 +39,7 @@ const HEADER_AVATARS: usize = 3;
 
 /// The tabs of a conversation's header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ChannelTab {
+pub(crate) enum ChannelTab {
   Messages,
   /// Everything shared in the conversation.
   Files,
@@ -71,12 +70,12 @@ impl ChannelTab {
   }
 
   /// The element ID of the tab's button; its panel is labelled by it.
-  fn tab_id(self) -> String {
+  pub(crate) fn tab_id(self) -> String {
     format!("channel-tab-{}", self.slug())
   }
 
   /// The element ID of the tab's panel.
-  fn panel_id(self) -> String {
+  pub(crate) fn panel_id(self) -> String {
     format!("channel-panel-{}", self.slug())
   }
 }
@@ -152,18 +151,14 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
             }
               .into_any()
           },
-          ChannelTab::Files => view! {
-            <ChannelFiles
-              conversation=conversation
-              panel_id=ChannelTab::Files.panel_id()
-              labelled_by=ChannelTab::Files.tab_id()
-              on_show_message=Callback::new(move |message| {
-                tab.set(ChannelTab::Messages);
-                state.open_message(conversation, message, None);
-              })
-            />
-          }
-            .into_any(),
+          // With the Files place's module: a first visit doesn't open the tab (#1699).
+          ChannelTab::Files => {
+            let on_show_message = Callback::new(move |message| {
+              tab.set(ChannelTab::Messages);
+              state.open_message(conversation, message, None);
+            });
+            lazy_area(Place::Pane, move || areas::channel_files(conversation, on_show_message))
+          },
           ChannelTab::Notes => view! {
             <div
               class="channel-canvas"
