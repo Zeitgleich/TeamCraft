@@ -1025,7 +1025,10 @@ private fun MessageList(
   LaunchedEffect(rights.canPost, myId) {
     // Up in the empty composer: the user's newest message that can still be edited (#2075).
     ChatShortcuts.editLast.collect {
-      maybeEditingLast = latestMessages.lastOrNull { it.author == myId && latestExtras[it.id]?.isDeleted != true && it.maybePlaceholder == null }
+      maybeEditingLast = latestMessages.lastOrNull {
+        it.author == myId && latestExtras[it.id]?.isDeleted != true && it.maybePlaceholder == null &&
+          it.maybePoll == null && it.maybeSticker == null
+      }
     }
   }
   maybeEditingLast?.let { message ->
@@ -1135,7 +1138,7 @@ private fun MessageActions(
     hasThreads = onOpenThread != null,
     wantsAcknowledgement = maybeExtras?.wantsAcknowledgement == true,
     canSelect = maybeOnSelect != null,
-    isPoll = message.maybePoll != null,
+    hasFallbackBody = message.maybePoll != null || message.maybeSticker != null,
   )
   ModalBottomSheet(onDismissRequest = onDismiss) {
     Column(Modifier.padding(bottom = 24.dp)) {
@@ -1556,6 +1559,9 @@ internal fun Composer(
   var alsoToChannel by rememberSaveable(conversationId) { mutableStateOf(false) }
   var isAttachOpen by remember { mutableStateOf(false) }
   var isPollOpen by remember { mutableStateOf(false) }
+  var isStickerOpen by remember { mutableStateOf(false) }
+  // The button shows only while the workspace has stickers to offer (#2132).
+  val stickerPacks by rememberStickerPacks()
   // The picked picture being edited before it is sent.
   var maybeEditing by remember { mutableStateOf<PickedFile?>(null) }
   var isSendOptionsOpen by remember { mutableStateOf(false) }
@@ -2036,6 +2042,7 @@ internal fun Composer(
       isSendWithEnter = isSendWithEnter,
       focus = focus,
       onAttach = { isAttachOpen = true },
+      maybeOnStickers = { isStickerOpen = true }.takeIf { stickerPacks.isNotEmpty() },
       onCamera = pickers.openCamera,
       onSend = ::trySend,
       onSendOptions = { isSendOptionsOpen = true },
@@ -2061,6 +2068,7 @@ internal fun Composer(
     AttachSheet(pickers, onDismiss = { isAttachOpen = false }, maybeOnPoll = { isPollOpen = true }.takeIf { maybeThread == null && canCreatePoll })
   }
   if (isPollOpen) PollSheet(viewModel, conversationId, onDismiss = { isPollOpen = false })
+  if (isStickerOpen) StickerSheet(viewModel, conversationId, maybeThread, stickerPacks, onDismiss = { isStickerOpen = false })
   maybeMediaFlow?.let { launch ->
     MediaFlow(
       viewModel = viewModel,
@@ -2148,6 +2156,8 @@ private fun ComposerField(
   isSendWithEnter: Boolean,
   focus: FocusRequester,
   onAttach: () -> Unit,
+  /** Opens the sticker sheet (#2132); null while the workspace has no stickers. */
+  maybeOnStickers: (() -> Unit)?,
   onCamera: () -> Unit,
   onSend: () -> Unit,
   onSendOptions: () -> Unit,
@@ -2248,7 +2258,12 @@ private fun ComposerField(
         ) {
           Text("Aa", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
         }
-        // While typing the field needs the room; the camera comes back when it is empty.
+        // While typing the field needs the room; stickers and the camera come back when it is empty.
+        if (text.isEmpty() && maybeOnStickers != null) {
+          IconButton(onClick = maybeOnStickers, modifier = Modifier.padding(vertical = 4.dp)) {
+            Icon(painterResource(R.drawable.ic_sticky_note), contentDescription = stringResource(R.string.stickers))
+          }
+        }
         if (text.isEmpty()) {
           IconButton(onClick = onCamera, modifier = Modifier.padding(vertical = 4.dp)) {
             Icon(painterResource(R.drawable.ic_photo_camera), contentDescription = stringResource(R.string.attach_camera))

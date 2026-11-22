@@ -6,6 +6,7 @@ import de.zeitgleich.teamcraft.ui.CustomEmoji
 import de.zeitgleich.teamcraft.ui.PictureRetries
 import de.zeitgleich.teamcraft.ui.ShareReceiver
 import de.zeitgleich.teamcraft.ui.StartCacheStore
+import de.zeitgleich.teamcraft.ui.Stickers
 import de.zeitgleich.teamcraft.ui.media.MediaDraftStore
 import de.zeitgleich.teamcraft.ui.MAX_IMPORT_BYTES
 import android.app.Application
@@ -103,6 +104,7 @@ class AppGraph(context: Context) {
   val core: CoreRepository = CoreRepository(context, auth, onAccountClosed = {
     Pictures.clear()
     CustomEmoji.clear()
+    Stickers.clear()
     avatars.clear()
     spacePictures.clear()
     channelPictures.clear()

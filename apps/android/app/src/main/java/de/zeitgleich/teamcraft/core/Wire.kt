@@ -139,6 +139,10 @@ data class Reaction(
 @Serializable
 data class CustomEmojiRef(val shortcode: String, val sha256: String)
 
+/** The sticker a message shows (#2132): [pack] and [name] name it, [sha256] is its picture. */
+@Serializable
+data class StickerRef(val pack: String, val name: String, val alt: String, val sha256: String)
+
 @Serializable
 data class MessageSource(
   val name: String,
@@ -179,6 +183,8 @@ data class Message(
   @SerialName("imported") val maybeImported: ImportedMark? = null,
   /** A poll (#205), counted by the core from the encrypted votes: shown instead of [body]. */
   @SerialName("poll") val maybePoll: Poll? = null,
+  /** A sticker (#2132): its picture is shown instead of [body], the fallback text. */
+  @SerialName("sticker") val maybeSticker: StickerRef? = null,
 ) {
   /** Outbox messages carry the pending bit in their ID until the server accepted them. */
   val isPending: Boolean get() = (id.toLongOrNull() ?: 0L) and PENDING_ID_BIT != 0L

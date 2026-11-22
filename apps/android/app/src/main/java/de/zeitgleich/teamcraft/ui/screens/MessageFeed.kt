@@ -46,6 +46,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.wrapContentWidth
@@ -147,6 +148,7 @@ import de.zeitgleich.teamcraft.core.Message
 import de.zeitgleich.teamcraft.core.MessageExtras
 import de.zeitgleich.teamcraft.core.ReplyAttachmentPreview
 import de.zeitgleich.teamcraft.core.ReplyPreview
+import de.zeitgleich.teamcraft.core.StickerRef
 import de.zeitgleich.teamcraft.core.UnseenReactions
 import de.zeitgleich.teamcraft.core.User
 import de.zeitgleich.teamcraft.ui.AUTO_FETCH_SETTLE_MS
@@ -155,6 +157,7 @@ import de.zeitgleich.teamcraft.ui.AnimationButton
 import de.zeitgleich.teamcraft.ui.AnimationRead
 import de.zeitgleich.teamcraft.ui.AnimationView
 import de.zeitgleich.teamcraft.ui.CustomEmojiPicture
+import de.zeitgleich.teamcraft.ui.StickerPicture
 import de.zeitgleich.teamcraft.ui.DividerOnScreen
 import de.zeitgleich.teamcraft.ui.FeedItem
 import de.zeitgleich.teamcraft.ui.FeedMotion
@@ -1381,6 +1384,14 @@ private fun Bubble(
   val isPicturesOnly = images.isNotEmpty() && !isDeleted && !hasText && !showsName && others.isEmpty() && videos.isEmpty() &&
     message.maybePlaceholder == null && !hasTransfers && maybeExtras?.maybeReply == null &&
     maybeExtras?.maybeForwarded == null && maybeExtras?.maybeLinkPreview == null
+  val maybeSticker = message.maybeSticker
+  val isSticker = maybeSticker != null && !isDeleted && message.maybePlaceholder == null &&
+    maybeExtras?.maybeReply == null && maybeExtras?.maybeForwarded == null
+  if (isSticker) {
+    // A sticker needs no bubble either (#2132): the picture stands on the feed, the time below it.
+    StickerOnly(maybeSticker, message, maybeExtras, snapshot, isMine, showsName, isAtEnd = isMine && !look.isList)
+    return
+  }
   if (isPicturesOnly) {
     // Pictures alone need no coloured frame around them: the picture is the bubble, with the time on it.
     PicturesOnly(images, look, maybeExtras, message, isMine, onOpenFile, onLongPressImage)
@@ -1551,6 +1562,53 @@ private fun PicturesOnly(
 }
 
 private const val PICTURE_TIME_SCRIM = 0.45f
+
+/**
+ * A sticker message (#2132): the picture at most [STICKER_MAX] on its longer side, aspect kept, its
+ * alt text for TalkBack. Until this device holds the picture the fallback text stands in its place.
+ */
+@Composable
+private fun StickerOnly(
+  sticker: StickerRef,
+  message: Message,
+  maybeExtras: MessageExtras?,
+  snapshot: ChatSnapshot?,
+  isMine: Boolean,
+  showsName: Boolean,
+  /** Own messages in bubbles sit on the end side; the list has everything on the start side. */
+  isAtEnd: Boolean,
+) {
+  val colors = bubbleColors(isMine = false).withContainer(Color.Transparent)
+  Column(horizontalAlignment = if (isAtEnd) Alignment.End else Alignment.Start) {
+    if (showsName) {
+      Text(
+        message.maybeSource?.let { stringResource(R.string.source_sender, it.name) }
+          ?: snapshot?.name(message.author).orEmpty(),
+        style = MaterialTheme.typography.titleSmall,
+        color = nameColor(snapshot?.user(message.author)),
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.padding(bottom = 2.dp),
+      )
+    }
+    StickerPicture(
+      sticker.sha256,
+      sticker.alt,
+      Modifier.sizeIn(maxWidth = STICKER_MAX, maxHeight = STICKER_MAX),
+      fallback = {
+        Text(
+          message.body,
+          style = MaterialTheme.typography.bodyLarge,
+          fontStyle = FontStyle.Italic,
+          color = colors.muted,
+        )
+      },
+    )
+    Footer(message, maybeExtras, colors, isMine)
+  }
+}
+
+private val STICKER_MAX = 160.dp
 
 /**
  * What a placeholder bubble says (issue #888): waiting with a clock, not available with a lock,
