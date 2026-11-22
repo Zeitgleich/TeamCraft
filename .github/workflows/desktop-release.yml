@@ -92,6 +92,55 @@ jobs:
           name: ui-failed
           path: ui-failed.txt
 
+  web:
+    name: Web client package
+    # The web client release file (teamcraft-web-X.Y.Z.tar.gz): the UI bundle plus the segmentation
+    # model, signed with the web release key and precompressed. The model's conversion compiles tract
+    # from scratch and brotli -q 11 is slow; done here they run beside the desktop jobs instead of
+    # after them in the draft release job (docs/release.md, "Critical path"). The conversion needs no
+    # bundle, so it starts at once and only the last steps wait for it.
+    if: ${{ !inputs.warm-cache }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Release version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then version="${GITHUB_REF_NAME#v}"; else version="$(scripts/check-versions.sh)"; fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      # ONNX to NNEF, checked against its pinned hash; add-segmentation-model.sh reuses the result.
+      - name: Segmentation model (NNEF)
+        run: crates/teamcraft-media/models/fetch-nnef.sh
+      - uses: ./.github/actions/await-ui-bundle
+        with:
+          github-token: ${{ github.token }}
+      - name: Package the web client
+        env:
+          WEB_RELEASE_KEY: ${{ secrets.TEAMCRAFT_WEB_RELEASE_KEY }}
+        run: |
+          # Same steps and order as the release job had: no demo data, model, signature, then the
+          # precompressed variants (the signature lists neither them nor sw.js and release.json).
+          scripts/check-no-demo-data.py crates/teamcraft-ui/dist
+          web="$RUNNER_TEMP/web"
+          cp -R crates/teamcraft-ui/dist "$web"
+          crates/teamcraft-ui/scripts/add-segmentation-model.sh "$web"
+          if [ -n "$WEB_RELEASE_KEY" ]; then
+            key="$RUNNER_TEMP/web-release.pem"
+            (umask 077 && printf '%s\n' "$WEB_RELEASE_KEY" > "$key")
+            crates/teamcraft-ui/scripts/sign-web-release.sh "$web" "$key" "$VERSION"
+            rm -f "$key"
+          else
+            echo "::warning::no TEAMCRAFT_WEB_RELEASE_KEY: the web client is unsigned and warns its users"
+          fi
+          command -v brotli >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q brotli; }
+          scripts/compress-web.sh "$web"
+          mkdir -p out
+          tar -C "$web" -czf "out/teamcraft-web-${VERSION}.tar.gz" .
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: web-release
+          path: out/*
+          if-no-files-found: error
+
   linux:
     name: Linux ${{ matrix.arch }} (deb, rpm, AppImage)
     # x86_64 and aarch64, each on a native runner (no emulation), in the multi-arch Debian Trixie
