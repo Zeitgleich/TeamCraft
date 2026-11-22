@@ -21,7 +21,7 @@ use teamcraft_proto::{
 
 use crate::convert;
 pub use crate::custom_emoji::MAX_KEPT_REMOVED_PICTURES;
-use crate::custom_emoji::{OneKey, PictureCache, admin_keys};
+use crate::custom_emoji::{OneKey, PictureCache, SignedUnder, admin_keys};
 use crate::error::CoreError;
 use crate::records;
 use crate::store::{LocalStore, Table};
@@ -86,18 +86,17 @@ pub fn verify(response: &StickerPackResponse, workspace: &WorkspaceState) -> Opt
   document.check(MAX_STICKERS_PER_PACK_LIMIT).ok()?;
   let signer = claimed_signer(response.signed.signature.as_slice()).ok()?;
   let signer_user = convert::user_from_crypto(signer).ok()?;
-  let verified = admin_keys(workspace, signer_user, document.signed_at_ms)
-    .into_iter()
-    .any(|key| {
-      verify_log_entry(
-        response.signed.signature.as_slice(),
-        WorkspaceLog::StickerPack,
-        document.version,
-        response.signed.payload.as_slice(),
-        &OneKey(signer, key),
-      )
-      .is_ok()
-    });
+  let under = SignedUnder::of(document.maybe_roster_version, document.signed_at_ms);
+  let verified = admin_keys(workspace, signer_user, under).into_iter().any(|key| {
+    verify_log_entry(
+      response.signed.signature.as_slice(),
+      WorkspaceLog::StickerPack,
+      document.version,
+      response.signed.payload.as_slice(),
+      &OneKey(signer, key),
+    )
+    .is_ok()
+  });
   verified.then_some(VerifiedStickerPack {
     pack: document.pack,
     version: document.version,
@@ -177,8 +176,22 @@ mod tests {
       Base64Bytes::new(self.identity.public_key().as_bytes().to_vec())
     }
 
+    /// A document from before the roster version: judged by its signing time.
     fn listed(&self, version: u64, name: &str, signed_at_ms: i64) -> StickerPackResponse {
-      let document = document(version, name, signed_at_ms);
+      self.listed_under(version, name, signed_at_ms, None)
+    }
+
+    fn listed_under(
+      &self,
+      version: u64,
+      name: &str,
+      signed_at_ms: i64,
+      maybe_roster_version: Option<u64>,
+    ) -> StickerPackResponse {
+      let document = StickerPackDocument {
+        maybe_roster_version,
+        ..document(version, name, signed_at_ms)
+      };
       StickerPackResponse {
         pack: PACK,
         version,
@@ -202,6 +215,7 @@ mod tests {
         format: CustomEmojiFormat::Png,
       }],
       signed_at_ms,
+      maybe_roster_version: None,
     }
   }
 
@@ -342,6 +356,7 @@ mod tests {
         identity_key: former.key(),
         is_owner: false,
         maybe_from_ms: Some(100),
+        maybe_from_version: Some(2),
         maybe_until: Some(TenureEnd {
           version: 3,
           maybe_at_ms: Some(200),
@@ -351,6 +366,18 @@ mod tests {
     };
     assert!(verify(&former.listed(1, "Early", 150), &state).is_some());
     assert!(verify(&former.listed(2, "Late", 250), &state).is_none());
+
+    // Issue #2290: with the roster version named, the signing time no longer decides. Version 3
+    // ended the tenure, so a document naming it (or later) is refused even with an early time,
+    // and one before the tenure began is a version the signer never held as an admin.
+    state.roster.version = 4;
+    assert!(verify(&former.listed_under(3, "Early", 9_999, Some(2)), &state).is_some());
+    for version in [0, 1, 3, 4, 5] {
+      assert!(
+        verify(&former.listed_under(4, "Backdated", 150, Some(version)), &state).is_none(),
+        "roster {version}"
+      );
+    }
   }
 
   #[test]

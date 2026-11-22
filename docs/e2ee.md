@@ -5240,14 +5240,38 @@ other keys, is left for later in #207.
 **Integrity: signed by an admin.** What makes a picture count is a signature, not the server:
 
 - An admin's device signs the emoji's document (shortcode, SHA-256 and format of the picture, when it
-  was signed) as an entry of no log, `WorkspaceLog::CustomEmoji` (crypto crate), with its device key
+  was signed, and the version of the verified roster the device held) as an entry of no log, `WorkspaceLog::CustomEmoji` (crypto crate), with its device key
   and certificate, like a channel's signed deletion. A new name is a new document over the same
   picture.
 - Every device verifies the server's list against its own verified roster: the signer must be an
   owner or admin of the roster now, or have been one in a tenure of the admin history (§4.6.1) that
-  covers the signing time, so a former admin's emoji stay and nothing they sign later counts. A
-  document that doesn't verify is left out; the server's copies of the name and hash are ignored.
+  covers the roster version the document names, so a former admin's emoji stay and nothing they
+  sign later counts (below). A document that doesn't verify is left out; the server's copies of the
+  name and hash are ignored.
 - A picture is kept only when its SHA-256 is the one the verified document names.
+
+**Bound to a roster version, not a clock (issue #2290).** The document's `roster_version` is the
+version of the owners' signed roster log the signing device had verified. A tenure covers it when
+the roster that began the tenure is at or before it and the roster that ended it (the demotion) comes
+after it; a version before the tenure, from the demotion on, or one past what this device verified
+is one the signer never held as an admin, and the document is refused. An admin of the roster now
+counts under any version: they could sign the document again. `signed_at_ms` is only for display and
+for ordering two documents of one name. Before this, the signer's own clock judged the tenure, so a
+demoted admin who is still a member could set the clock back into their old tenure and sign;
+only the server's role check on the save stopped it. Now the app always names the roster it holds,
+which lists them as an admin no more.
+
+- *Transition.* Documents without `roster_version` (signed by apps before #2290) keep the old rule:
+  the tenure must cover `signed_at_ms`. Every app signs the field from now on, and an admin's rename
+  re-signs an emoji with it. With a handful of alpha installations this is accepted; a later release
+  can refuse documents without it once the old ones are re-signed.
+- *Tenures from before.* A device's admin history notes the roster version that began each tenure
+  from #2290 on; a tenure recorded earlier has only its end, which is what refuses a document signed
+  after the demotion.
+- *What it does not stop.* The version is the signer's word like the clock was: a demoted admin
+  with a modified app (and a server that keeps their save) can name an old roster version, or leave
+  the field out. Telling a document signed during a tenure from one signed after it needs an order
+  outside the document (a chained log of the set, like the roster's), which is not built.
 
 The server checks what it can without trusting anybody: the picture (a still PNG or WebP within the
 size and side limits, read from its header, the same check the apps run), the name, that the
@@ -5293,7 +5317,8 @@ emoji: a still PNG or WebP within the size and side limits, read from its header
 the pack's key (16 random bytes chosen by the device that creates it, so the document names its pack
 before the server has seen it), a version (1, then one more per change), the name, and per sticker,
 in order, a name (unique in the pack), an alt text and the picture's SHA-256 and format, and when it
-was signed. It is an entry of no log, `WorkspaceLog::StickerPack` (crypto crate), signed with the
+was signed with the roster version the device held (§4.13, "Bound to a roster version"). It is an
+entry of no log, `WorkspaceLog::StickerPack` (crypto crate), signed with the
 device key and certificate like an emoji's document; the log kind is part of the signed data, so an
 emoji's document can't pass for a pack or the other way round, and the signed version is the
 document's own. A rename, reorder, edit or removal is the next version of the whole document, so a
@@ -5301,7 +5326,8 @@ server can't mix stickers of two versions.
 
 - Every device verifies the server's list against its own verified roster, exactly as for emoji:
   the signer must be an owner or admin of the roster now, or have been one in a tenure of the admin
-  history that covers the signing time. A document that doesn't verify, or breaks the document's
+  history that covers the roster version the document names (the signing time for documents
+  without it; same transition). A document that doesn't verify, or breaks the document's
   rules (names, alt texts, at most 500 stickers), is left out; the server's copies of name and
   version are ignored.
 - Of the versions listed for one pack key, the highest that verifies counts.

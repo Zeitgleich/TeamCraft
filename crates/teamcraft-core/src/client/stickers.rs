@@ -69,6 +69,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       name,
       stickers: Vec::new(),
       signed_at_ms: self.now_ms(),
+      maybe_roster_version: None,
     };
     self.save_sticker_document(document).await?;
     Box::pin(self.refresh_sticker_packs()).await?;
@@ -191,7 +192,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(document)
   }
 
-  async fn save_sticker_document(&mut self, document: StickerPackDocument) -> Result<(), CoreError> {
+  /// Signs `document` under the roster this device verified (issue #2290) and saves it.
+  async fn save_sticker_document(&mut self, mut document: StickerPackDocument) -> Result<(), CoreError> {
+    document.maybe_roster_version = Some(self.workspace()?.roster.version);
     let signed = sign_sticker_pack(&self.account.device, &self.account.certificate, &document)?;
     self
       .api
@@ -316,6 +319,7 @@ mod tests {
       name: "Team".into(),
       stickers: vec![entry("a1"), entry("b22"), entry("c333")],
       signed_at_ms: 0,
+      maybe_roster_version: None,
     };
     apply_change(
       &mut document,

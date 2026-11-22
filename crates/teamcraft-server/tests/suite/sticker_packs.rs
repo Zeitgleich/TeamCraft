@@ -278,6 +278,7 @@ fn document_for(pack: &str, version: u64, name: &str, stickers: &[(&str, &[u8])]
       })
       .collect(),
     signed_at_ms: 1_700_000_000_000,
+    maybe_roster_version: Some(1),
   }
 }
 

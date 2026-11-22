@@ -58,6 +58,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       sha256,
       format: inspected.format,
       signed_at_ms: self.now_ms(),
+      maybe_roster_version: Some(self.workspace()?.roster.version),
     };
     let signed = sign_custom_emoji(&self.account.device, &self.account.certificate, &document)?;
     self
@@ -87,6 +88,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       sha256: emoji.sha256,
       format: emoji.format.clone(),
       signed_at_ms: self.now_ms(),
+      maybe_roster_version: Some(self.workspace()?.roster.version),
     };
     let signed = sign_custom_emoji(&self.account.device, &self.account.certificate, &document)?;
     self
