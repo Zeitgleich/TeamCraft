@@ -5245,33 +5245,42 @@ other keys, is left for later in #207.
   picture.
 - Every device verifies the server's list against its own verified roster: the signer must be an
   owner or admin of the roster now, or have been one in a tenure of the admin history (§4.6.1) that
-  covers the roster version the document names, so a former admin's emoji stay and nothing they
-  sign later counts (below). A document that doesn't verify is left out; the server's copies of the
+  covers the roster version the document names, so a former admin's emoji stay; what they sign
+  after their demotion is refused by every device that followed it (below). A document that doesn't verify is left out; the server's copies of the
   name and hash are ignored.
 - A picture is kept only when its SHA-256 is the one the verified document names.
 
-**Bound to a roster version, not a clock (issue #2290).** The document's `roster_version` is the
-version of the owners' signed roster log the signing device had verified. A tenure covers it when
-the roster that began the tenure is at or before it and the roster that ended it (the demotion) comes
-after it; a version before the tenure, from the demotion on, or one past what this device verified
-is one the signer never held as an admin, and the document is refused. An admin of the roster now
-counts under any version: they could sign the document again. `signed_at_ms` is only for display and
-for ordering two documents of one name. Before this, the signer's own clock judged the tenure, so a
-demoted admin who is still a member could set the clock back into their old tenure and sign;
-only the server's role check on the save stopped it. Now the app always names the roster it holds,
-which lists them as an admin no more.
+**Former admins (issue #2290).** A document's signing time and roster version are the signer's
+word. A demoted admin who is still a member keeps a valid device key and can sign a new document
+that names a time or roster version inside their old tenure; before #2290 only the server's role
+check on the save stopped that. What they can't choose is what each device saw, and when:
 
-- *Transition.* Documents without `roster_version` (signed by apps before #2290) keep the old rule:
-  the tenure must cover `signed_at_ms`. Every app signs the field from now on, and an admin's rename
-  re-signs an emoji with it. With a handful of alpha installations this is accepted; a later release
-  can refuse documents without it once the old ones are re-signed.
+- *The ledger.* Each device keeps, locally (never signed, never sent), the documents it accepted, by
+  the SHA-256 of their signed payload, one ledger for emoji and one for sticker packs (at most 4096
+  each, the oldest go first), and the roster version it had verified when it began keeping them.
+- *Admins now count.* A document signed by an owner or admin of the device's verified roster counts
+  and is noted in the ledger.
+- *Former admins count only for what the device held.* A document that verifies only through a past
+  tenure counts if the device held it already, that is, accepted it while the signer was an admin.
+  One first seen after a demotion this device followed (the demoting roster is newer than the
+  ledger's start) is refused, whatever time or version it names. An admin of the roster now can
+  sign it again (a rename does), and it counts.
+- *The roster version.* Every app names the roster version it held (`roster_version`); a tenure
+  covers it when the roster that began the tenure is at or before it and the demoting roster after
+  it. Documents without it (from apps before #2290) are judged by `signed_at_ms` as before. The
+  version decides only where the ledger can't: an unmodified app of a demoted admin names a roster
+  that no longer lists them, so even a device without a ledger refuses it. `signed_at_ms` is for
+  display and for ordering two documents of one name.
 - *Tenures from before.* A device's admin history notes the roster version that began each tenure
-  from #2290 on; a tenure recorded earlier has only its end, which is what refuses a document signed
-  after the demotion.
-- *What it does not stop.* The version is the signer's word like the clock was: a demoted admin
-  with a modified app (and a server that keeps their save) can name an old roster version, or leave
-  the field out. Telling a document signed during a tenure from one signed after it needs an order
-  outside the document (a chained log of the set, like the roster's), which is not built.
+  from #2290 on; a tenure recorded earlier has only its end.
+
+**What it does not stop.** A device that began its ledger after a demotion (new, or updated to
+#2290 after it) has nothing to compare with: it accepts the past-tenure documents the server lists,
+judged by the roster version they name or, without one, their signing time, as before. A demoted
+admin with a modified app and a compromised server that keeps their save can show such devices new
+pictures; devices that followed the demotion don't draw them. A legitimate document a device first
+sees only after the demotion (it was offline across the tenure's end) is refused there too, until an
+admin signs it again.
 
 The server checks what it can without trusting anybody: the picture (a still PNG or WebP within the
 size and side limits, read from its header, the same check the apps run), the name, that the
@@ -5326,8 +5335,8 @@ server can't mix stickers of two versions.
 
 - Every device verifies the server's list against its own verified roster, exactly as for emoji:
   the signer must be an owner or admin of the roster now, or have been one in a tenure of the admin
-  history that covers the roster version the document names (the signing time for documents
-  without it; same transition). A document that doesn't verify, or breaks the document's
+  history (the version the document names, or its signing time without one) that this device's
+  ledger admits (§4.13, "Former admins"). A document that doesn't verify, or breaks the document's
   rules (names, alt texts, at most 500 stickers), is left out; the server's copies of name and
   version are ignored.
 - Of the versions listed for one pack key, the highest that verifies counts.

@@ -16,12 +16,15 @@ use teamcraft_proto::{
 
 use super::Client;
 use crate::api::ServerApi;
+use crate::asset_ledger::AssetLedger;
 use crate::custom_emoji::{
   has_picture, keep_picture, sign_custom_emoji, store_set, stored_set, verified_set,
 };
 use crate::error::CoreError;
 use crate::store::LocalStore;
 
+/// The emoji documents this device accepted ([`AssetLedger`]), in [`crate::store::Table::Workspace`].
+const LEDGER_KEY: &str = "custom_emoji_ledger";
 /// Pictures downloaded per read, one after the other: the UI asks again for the rest.
 const PICTURES_PER_ROUND: usize = 32;
 
@@ -35,10 +38,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Err(error) => return Err(error.into()),
     };
     let workspace = self.workspace()?;
+    let mut ledger = AssetLedger::load(&self.store, LEDGER_KEY)?;
+    ledger.follow(workspace.roster.version);
     let set = CustomEmojiSet {
-      emoji: verified_set(&listed.emoji, &workspace),
+      emoji: verified_set(&listed.emoji, &workspace, &mut ledger),
       limits: listed.limits,
     };
+    ledger.save(&self.store, LEDGER_KEY)?;
     store_set(&self.store, &set)?;
     Box::pin(self.fetch_custom_emoji_pictures()).await;
     Ok(())

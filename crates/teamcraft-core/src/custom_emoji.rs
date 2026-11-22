@@ -5,7 +5,9 @@
 //! An emoji counts when its document is signed by a device of somebody who was an owner or admin
 //! of the verified roster when it was signed: on the roster now, or in a tenure of the admin
 //! history that covers the roster version the document names (before the demotion that ended it;
-//! issue #2290), or, for a document from before that field, its signing time. The server's word
+//! issue #2290), or, for a document from before that field, its signing time. A former admin's
+//! document counts only if the [`AssetLedger`] admits it: held before a demotion this device
+//! followed (both the time and the version are the signer's word). The server's word
 //! (its list, its `shortcode` field) counts for nothing; a picture is kept only when its SHA-256 is
 //! the one the document names. Pictures stay on the device, by hash, after their emoji left the
 //! set, so earlier messages keep showing them: those of the set, and up to
@@ -23,6 +25,7 @@ use teamcraft_proto::{
   SignedCustomEmoji, check_custom_emoji_shortcode,
 };
 
+use crate::asset_ledger::{AssetLedger, AssetSigner};
 use crate::convert;
 use crate::error::CoreError;
 use crate::records;
@@ -59,13 +62,19 @@ pub(crate) fn sign_custom_emoji(
 
 /// The emoji of the server's list whose documents verify against `workspace`, by shortcode. Of two
 /// with one name (a server mixing old and new documents), the later signed wins.
-pub fn verified_set(listed: &[CustomEmojiResponse], workspace: &WorkspaceState) -> Vec<CustomEmoji> {
+/// Every emoji accepted is noted in `ledger`.
+pub fn verified_set(
+  listed: &[CustomEmojiResponse],
+  workspace: &WorkspaceState,
+  ledger: &mut AssetLedger,
+) -> Vec<CustomEmoji> {
   let mut by_name: BTreeMap<String, CustomEmoji> = BTreeMap::new();
   for response in listed {
-    let Some(emoji) = verify(response, workspace) else {
+    let Some(emoji) = verify(response, workspace, ledger) else {
       tracing::debug!(id = %response.id, "a custom emoji's signature doesn't verify; left out");
       continue;
     };
+    ledger.hold(response.signed.payload.as_slice());
     match by_name.get(&emoji.shortcode) {
       Some(known) if known.signed_at >= emoji.signed_at => {},
       _ => {
@@ -76,8 +85,13 @@ pub fn verified_set(listed: &[CustomEmojiResponse], workspace: &WorkspaceState) 
   by_name.into_values().collect()
 }
 
-/// One listed emoji, if an owner or admin of the verified roster signed its document.
-pub fn verify(response: &CustomEmojiResponse, workspace: &WorkspaceState) -> Option<CustomEmoji> {
+/// One listed emoji, if an owner or admin of the verified roster signed its document, or a former
+/// one and `ledger` admits it.
+pub fn verify(
+  response: &CustomEmojiResponse,
+  workspace: &WorkspaceState,
+  ledger: &AssetLedger,
+) -> Option<CustomEmoji> {
   let document: CustomEmojiDocument = serde_json::from_slice(response.signed.payload.as_slice()).ok()?;
   check_custom_emoji_shortcode(&document.shortcode).ok()?;
   if !matches!(document.format, CustomEmojiFormat::Png | CustomEmojiFormat::Webp) {
@@ -86,7 +100,7 @@ pub fn verify(response: &CustomEmojiResponse, workspace: &WorkspaceState) -> Opt
   let signer = claimed_signer(response.signed.signature.as_slice()).ok()?;
   let signer_user = convert::user_from_crypto(signer).ok()?;
   let under = SignedUnder::of(document.maybe_roster_version, document.signed_at_ms);
-  let verified = admin_keys(workspace, signer_user, under).into_iter().any(|key| {
+  let signed_by = asset_signer(workspace, signer_user, under, |key| {
     verify_log_entry(
       response.signed.signature.as_slice(),
       WorkspaceLog::CustomEmoji,
@@ -95,15 +109,17 @@ pub fn verify(response: &CustomEmojiResponse, workspace: &WorkspaceState) -> Opt
       &OneKey(signer, key),
     )
     .is_ok()
-  });
-  verified.then_some(CustomEmoji {
-    id: response.id,
-    shortcode: document.shortcode,
-    sha256: document.sha256,
-    format: document.format,
-    signed_by: signer_user,
-    signed_at: document.signed_at_ms,
-  })
+  })?;
+  ledger
+    .admits(response.signed.payload.as_slice(), signed_by)
+    .then_some(CustomEmoji {
+      id: response.id,
+      shortcode: document.shortcode,
+      sha256: document.sha256,
+      format: document.format,
+      signed_by: signer_user,
+      signed_at: document.signed_at_ms,
+    })
 }
 
 /// The set this device verified last; empty before the first read.
@@ -255,39 +271,46 @@ impl SignedUnder {
   }
 }
 
-/// The identity keys `user` held as an owner or admin of the verified roster when they signed
-/// `under`: the one on the roster now (an admin now could sign the document again anyway), and
-/// those of tenures that cover it.
-pub(crate) fn admin_keys(
+/// Who signed a document, if a key `user` held as an owner or admin of the verified roster makes
+/// `verifies` true: the one on the roster now first, then those of tenures that cover `under`.
+/// Whether a former admin's document counts is then the [`AssetLedger`]'s call.
+pub(crate) fn asset_signer(
   workspace: &WorkspaceState,
   user: teamcraft_proto::UserId,
   under: SignedUnder,
-) -> Vec<IdentityPublicKey> {
-  let mut keys: Vec<Vec<u8>> = workspace
+  verifies: impl Fn(IdentityPublicKey) -> bool,
+) -> Option<AssetSigner> {
+  let is_admin = workspace
     .roster
     .members
     .iter()
     .filter(|member| member.user_id == user && matches!(member.role, RosterRole::Owner | RosterRole::Admin))
-    .map(|member| member.identity_key.as_slice().to_vec())
-    .collect();
-  keys.extend(
-    workspace
-      .admin_history
-      .tenures
-      .iter()
-      .filter(|tenure| tenure.user_id == user && under.is_within(tenure))
-      .map(|tenure| tenure.identity_key.as_slice().to_vec()),
-  );
-  keys.sort();
-  keys.dedup();
-  keys
-    .into_iter()
-    .filter_map(|key| {
-      Some(IdentityPublicKey::from_bytes(
-        <[u8; 32]>::try_from(key.as_slice()).ok()?,
-      ))
-    })
-    .collect()
+    .filter_map(|member| identity_key(&member.identity_key))
+    .any(&verifies);
+  if is_admin {
+    return Some(AssetSigner::Admin);
+  }
+  let mut tenures = workspace
+    .admin_history
+    .tenures
+    .iter()
+    .filter(|tenure| tenure.user_id == user && under.is_within(tenure))
+    .filter(|tenure| identity_key(&tenure.identity_key).is_some_and(&verifies))
+    .peekable();
+  tenures.peek()?;
+  // Of several tenures under one key, the latest end decides: the demotion this device most likely
+  // followed. One without an end has none to compare with.
+  let maybe_demoted_at = tenures
+    .map(|tenure| tenure.maybe_until.as_ref().map(|until| until.version))
+    .reduce(|left, right| left.zip(right).map(|(left, right)| left.max(right)))
+    .flatten();
+  Some(AssetSigner::FormerAdmin { maybe_demoted_at })
+}
+
+fn identity_key(bytes: &Base64Bytes) -> Option<IdentityPublicKey> {
+  Some(IdentityPublicKey::from_bytes(
+    <[u8; 32]>::try_from(bytes.as_slice()).ok()?,
+  ))
 }
 
 /// One identity key, for one verification.
@@ -394,6 +417,7 @@ mod tests {
     let set = verified_set(
       &[admin.listed(10, "ship_it", 5), member.listed(11, "fake", 5)],
       &state,
+      &mut AssetLedger::default(),
     );
     assert_eq!(set.len(), 1);
     assert_eq!(set[0].shortcode, "ship_it");
@@ -407,14 +431,14 @@ mod tests {
     let mut listed = admin.listed(10, "ship_it", 5);
     listed.shortcode = "renamed_by_server".into();
     listed.sha256 = CustomEmojiHash::from_bytes([99; 32]);
-    let emoji = verify(&listed, &state).unwrap();
+    let emoji = verify(&listed, &state, &AssetLedger::default()).unwrap();
     assert_eq!(emoji.shortcode, "ship_it");
     assert_eq!(emoji.sha256, CustomEmojiHash::from_bytes([10; 32]));
     // A document changed after signing doesn't verify.
     let mut document: CustomEmojiDocument = serde_json::from_slice(listed.signed.payload.as_slice()).unwrap();
     document.sha256 = CustomEmojiHash::from_bytes([99; 32]);
     listed.signed.payload = Base64Bytes::new(serde_json::to_vec(&document).unwrap());
-    assert!(verify(&listed, &state).is_none());
+    assert!(verify(&listed, &state, &AssetLedger::default()).is_none());
   }
 
   #[test]
@@ -436,19 +460,20 @@ mod tests {
       }],
       maybe_replayed_at: None,
     };
-    assert!(verify(&former.listed(10, "early", 150), &state).is_some());
-    assert!(verify(&former.listed(11, "late", 250), &state).is_none());
-    assert!(verify(&former.listed(12, "before", 50), &state).is_none());
+    assert!(verify(&former.listed(10, "early", 150), &state, &AssetLedger::default()).is_some());
+    assert!(verify(&former.listed(11, "late", 250), &state, &AssetLedger::default()).is_none());
+    assert!(verify(&former.listed(12, "before", 50), &state, &AssetLedger::default()).is_none());
   }
 
-  /// Issue #2290: a document that names the roster version its signer held is judged by that
-  /// version, not by the signer's clock.
+  /// Issue #2290, on a device without a ledger (one that didn't follow the demotion): a document
+  /// that names a roster version is judged by it, not by the signer's clock. The version is the
+  /// signer's word; [`former_admins`] is what a device that followed the demotion relies on.
   mod roster_version {
     use super::*;
 
     /// Admin from roster version 2 (signed at 100) until version 4 demoted them (signed at 200);
     /// the device has verified up to version 5.
-    fn demoted(former: &Signer) -> WorkspaceState {
+    pub(super) fn demoted(former: &Signer) -> WorkspaceState {
       let mut state = workspace(&[]);
       state.roster.version = 5;
       state.admin_history = AdminHistory {
@@ -469,14 +494,28 @@ mod tests {
       state
     }
 
-    /// A demoted admin's device names the roster it holds, which no longer lists them as an admin:
-    /// a signing time set back into their tenure doesn't help.
+    /// An unmodified app names the roster it holds, which no longer lists them as an admin: a
+    /// signing time set back into their tenure doesn't help.
     #[test]
     fn a_backdated_document_of_a_demoted_admin_is_refused() {
       let former = Signer::new(1);
       let state = demoted(&former);
-      assert!(verify(&former.listed_under(10, "backdated", 150, Some(4)), &state).is_none());
-      assert!(verify(&former.listed_under(11, "backdated", 150, Some(5)), &state).is_none());
+      assert!(
+        verify(
+          &former.listed_under(10, "backdated", 150, Some(4)),
+          &state,
+          &AssetLedger::default()
+        )
+        .is_none()
+      );
+      assert!(
+        verify(
+          &former.listed_under(11, "backdated", 150, Some(5)),
+          &state,
+          &AssetLedger::default()
+        )
+        .is_none()
+      );
     }
 
     #[test]
@@ -484,11 +523,22 @@ mod tests {
       let former = Signer::new(1);
       let state = demoted(&former);
       for version in [2, 3] {
-        let emoji = verify(&former.listed_under(10, "early", 150, Some(version)), &state);
+        let emoji = verify(
+          &former.listed_under(10, "early", 150, Some(version)),
+          &state,
+          &AssetLedger::default(),
+        );
         assert_eq!(emoji.map(|emoji| emoji.signed_at), Some(150), "roster {version}");
       }
       // The signing time is for display and ordering only: one outside the tenure doesn't matter.
-      assert!(verify(&former.listed_under(11, "odd_clock", 9_999, Some(3)), &state).is_some());
+      assert!(
+        verify(
+          &former.listed_under(11, "odd_clock", 9_999, Some(3)),
+          &state,
+          &AssetLedger::default()
+        )
+        .is_some()
+      );
     }
 
     /// A version before the tenure began, or one this device never verified (the server can't
@@ -499,7 +549,12 @@ mod tests {
       let state = demoted(&former);
       for version in [0, 1, 6, u64::MAX] {
         assert!(
-          verify(&former.listed_under(10, "forged", 150, Some(version)), &state).is_none(),
+          verify(
+            &former.listed_under(10, "forged", 150, Some(version)),
+            &state,
+            &AssetLedger::default()
+          )
+          .is_none(),
           "roster {version}"
         );
       }
@@ -512,7 +567,14 @@ mod tests {
       let mut state = workspace(&[(&admin, RosterRole::Admin)]);
       state.roster.version = 5;
       for version in [1, 5, 6] {
-        assert!(verify(&admin.listed_under(10, "ship_it", 150, Some(version)), &state).is_some());
+        assert!(
+          verify(
+            &admin.listed_under(10, "ship_it", 150, Some(version)),
+            &state,
+            &AssetLedger::default()
+          )
+          .is_some()
+        );
       }
     }
 
@@ -523,8 +585,22 @@ mod tests {
       let former = Signer::new(1);
       let mut state = demoted(&former);
       state.admin_history.tenures[0].maybe_from_version = None;
-      assert!(verify(&former.listed_under(10, "early", 150, Some(1)), &state).is_some());
-      assert!(verify(&former.listed_under(11, "late", 150, Some(4)), &state).is_none());
+      assert!(
+        verify(
+          &former.listed_under(10, "early", 150, Some(1)),
+          &state,
+          &AssetLedger::default()
+        )
+        .is_some()
+      );
+      assert!(
+        verify(
+          &former.listed_under(11, "late", 150, Some(4)),
+          &state,
+          &AssetLedger::default()
+        )
+        .is_none()
+      );
     }
 
     #[test]
@@ -543,6 +619,92 @@ mod tests {
         ..document
       };
       assert_eq!(serde_json::to_value(&named).unwrap()["roster_version"], 7);
+    }
+  }
+
+  /// Issue #2290: what a device that followed a demotion accepts of the demoted admin. Their
+  /// time and roster version are their own word; what this device held before is not.
+  mod former_admins {
+    use super::*;
+
+    /// The admin of roster versions 2 to 3, as a device verified them (it kept a ledger from
+    /// version 2), then demoted in version 4.
+    fn followed(former: &Signer) -> (WorkspaceState, WorkspaceState, AssetLedger) {
+      let mut before = workspace(&[(former, RosterRole::Admin)]);
+      before.roster.version = 3;
+      let mut after = roster_version::demoted(former);
+      after.roster.version = 4;
+      let mut ledger = AssetLedger::default();
+      ledger.follow(2);
+      (before, after, ledger)
+    }
+
+    #[test]
+    fn a_document_held_before_the_demotion_still_counts() {
+      let former = Signer::new(1);
+      let (before, after, mut ledger) = followed(&former);
+      let early = former.listed_under(10, "early", 150, Some(3));
+      assert_eq!(
+        verified_set(std::slice::from_ref(&early), &before, &mut ledger).len(),
+        1
+      );
+      let set = verified_set(&[early], &after, &mut ledger);
+      assert_eq!(set.len(), 1);
+      assert_eq!(set[0].signed_by, former.user);
+    }
+
+    /// Signed after the demotion, naming a roster version or (an old document's form) a time inside
+    /// the tenure: first seen after the demotion, so refused.
+    #[test]
+    fn a_demoted_admins_new_document_is_refused() {
+      let former = Signer::new(1);
+      let (before, after, mut ledger) = followed(&former);
+      verified_set(
+        &[former.listed_under(10, "early", 150, Some(3))],
+        &before,
+        &mut ledger,
+      );
+      let backdated = [
+        former.listed_under(11, "by_version", 150, Some(3)),
+        former.listed(12, "by_clock", 150),
+      ];
+      assert!(verified_set(&backdated, &after, &mut ledger).is_empty());
+      // Refused documents aren't held: asking again changes nothing.
+      assert!(verified_set(&backdated, &after, &mut ledger).is_empty());
+    }
+
+    /// A current admin signs the former admin's emoji again (a rename does): it counts.
+    #[test]
+    fn a_current_admins_new_signature_counts() {
+      let (former, admin) = (Signer::new(1), Signer::new(2));
+      let (_, mut after, mut ledger) = followed(&former);
+      after.roster.members.push(RosterMember {
+        user_id: admin.user,
+        identity_key: admin.key(),
+        role: RosterRole::Admin,
+      });
+      let set = verified_set(
+        &[
+          former.listed_under(11, "new_picture", 150, Some(3)),
+          admin.listed_under(11, "new_picture", 300, Some(4)),
+        ],
+        &after,
+        &mut ledger,
+      );
+      assert_eq!(set.len(), 1);
+      assert_eq!(set[0].signed_by, admin.user);
+    }
+
+    /// A device whose ledger began after the demotion has nothing to compare with: it judges by
+    /// the version, as before (e2ee.md §4.13, "What it does not stop").
+    #[test]
+    fn a_device_that_did_not_follow_the_demotion_judges_by_the_version() {
+      let former = Signer::new(1);
+      let (_, after, _) = followed(&former);
+      let mut late = AssetLedger::default();
+      late.follow(4);
+      let listed = [former.listed_under(11, "unknown", 150, Some(3))];
+      assert_eq!(verified_set(&listed, &after, &mut late).len(), 1);
     }
   }
 
