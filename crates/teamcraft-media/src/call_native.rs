@@ -96,6 +96,7 @@ use crate::video_pipeline::{
   FirstPicture, FrameSink, KeyframeNeeded, RepeatedWarning, SendProgress, StoppingSender, VideoReceiver,
   VideoSendConfig, VideoSender, VideoStartError,
 };
+use crate::voice_congestion::set_voice_congestion;
 
 mod receive;
 mod voice;
@@ -2039,6 +2040,14 @@ impl Link {
     }
   }
 
+  /// Drops the video waiting in the session connection's queue: the own video stopped for the
+  /// voice (#1889). The fallback's pacer measures its uplink and holds nothing back for long.
+  fn drop_queued_video(&self) {
+    if let LinkPath::Quic { sender, .. } = &self.path {
+      sender.drop_queued_video();
+    }
+  }
+
   fn close_as_leave(&self) {
     match &self.path {
       LinkPath::Quic {
@@ -2199,9 +2208,13 @@ async fn connect_to(
     builder.with_server_certificate_hashes(certificate_hashes.iter().copied().map(Sha256Digest::new))
   };
   let mut client_config = builder.dns_resolver(PinnedResolver(address)).build();
+  let mut transport = transport_config(resilience)?;
+  if class == TrafficClass::Voice {
+    set_voice_congestion(&mut transport);
+  }
   client_config
     .quic_config_mut()
-    .transport_config(Arc::new(transport_config(resilience)?));
+    .transport_config(Arc::new(transport));
   let endpoint = match maybe_voice_socket {
     Some(socket) => Endpoint::client_with_socket(client_config, socket),
     None => Endpoint::client(client_config),
@@ -2581,6 +2594,12 @@ impl Sinks {
         EngineOutput::Event(event) => {
           match &event {
             CallEngineEvent::ParticipantLeft(device_id) => self.mixer.remove(*device_id),
+            CallEngineEvent::VideoHeldForVoice(true) => {
+              // What waits of the video would only hold the voice back (#1889).
+              if let Some(link) = maybe_link {
+                link.drop_queued_video();
+              }
+            },
             CallEngineEvent::ScreenAudioChanged {
               device_id,
               is_shared: false,

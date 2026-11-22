@@ -33,7 +33,8 @@ use leptos::prelude::*;
 use teamcraft_client_api::actions::FileInfo;
 use teamcraft_client_api::canvas::{
   Block, BlockKind, CanvasDoc, CanvasState, CanvasVersion, FileRef, InlineMark, TextStyle, byte_offset,
-  caret_after_change, compaction, editors_since, is_page_link, merge_updates, page_at, typed_range, versions,
+  caret_after_change, compaction, editors_since, is_page_link, merge_updates, numbered_position, page_at,
+  typed_range, versions,
 };
 use teamcraft_client_api::model::OlderHistory;
 use teamcraft_proto::CanvasPageId;
@@ -584,16 +585,6 @@ fn preview_run(text: String, maybe_style: Option<TextStyle>) -> AnyView {
     .into_any(),
     None => content,
   }
-}
-
-/// The number of a numbered item: its place in the run of numbered items it ends.
-fn numbered_position(blocks: &[Block], index: usize) -> usize {
-  blocks[..index]
-    .iter()
-    .rev()
-    .take_while(|block| block.kind == BlockKind::Numbered)
-    .count()
-    + 1
 }
 
 fn version_key(version: &CanvasVersion) -> (UserId, i64) {

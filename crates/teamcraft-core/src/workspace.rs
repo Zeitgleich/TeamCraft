@@ -1019,10 +1019,51 @@ pub fn owner_roster_status(
     is_own_account_mismatched: maybe_record
       .as_ref()
       .is_some_and(|record| record.is_account_mismatched),
+    contradicted_accounts: maybe_record
+      .as_ref()
+      .map(|record| contradicted_accounts(store, record))
+      .unwrap_or_default(),
     maybe_signing_problem: maybe_record
       .and_then(|record| record.maybe_note)
       .and_then(|problem| signing_problem(&problem)),
   })
+}
+
+/// What this owner's device knows the provider calls the accounts of the people its last round found
+/// contradicted (e2ee.md §3.1.4, issue #2241). Empty without a contradiction.
+#[cfg(feature = "ui")]
+fn contradicted_accounts(
+  store: &impl LocalStore,
+  record: &crate::client::RoleSigningRecord,
+) -> Vec<teamcraft_client_api::admin::ContradictedAccounts> {
+  use teamcraft_client_api::admin::{ContradictedAccounts, ProviderAccount};
+
+  use crate::client::RoleSigningProblem;
+  use crate::provider_account_names::SeenAccount;
+
+  let Some(RoleSigningProblem::Contradictory { users }) = &record.maybe_note else {
+    return Vec::new();
+  };
+  // Not readable is not known: the console shows the subject-less rows it always did.
+  let Ok(names) = crate::client::provider_account_names(store) else {
+    return Vec::new();
+  };
+  let account = |seen: &SeenAccount| ProviderAccount {
+    subject: seen.subject.clone(),
+    maybe_username: seen.maybe_username.clone(),
+    maybe_email: seen.maybe_email.clone(),
+  };
+  users
+    .iter()
+    .filter_map(|user| {
+      let accounts = names.people.get(user)?;
+      Some(ContradictedAccounts {
+        user: *user,
+        maybe_noted: accounts.maybe_noted.as_ref().map(account),
+        maybe_contradicting: accounts.maybe_contradicting.as_ref().map(account),
+      })
+    })
+    .collect()
 }
 
 /// What the console says about role signing.

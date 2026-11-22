@@ -418,6 +418,39 @@ pub struct OwnerRosterStatus {
   /// What keeps roles from following the identity provider by themselves, if anything.
   #[serde(rename = "signing_problem", default, skip_serializing_if = "Option::is_none")]
   pub maybe_signing_problem: Option<RoleSigningIssue>,
+  /// How the identity provider names the accounts of each contradicted person, as far as this owner's
+  /// device saw their tokens (e2ee.md §3.1.4, issue #2241). Personal data, kept on this device only.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub contradicted_accounts: Vec<ContradictedAccounts>,
+}
+
+/// The accounts at the identity provider behind a contradiction about `user`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ContradictedAccounts {
+  pub user: UserId,
+  /// The account the roster notes; `None` if this device never saw a token of it.
+  #[serde(rename = "noted", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_noted: Option<ProviderAccount>,
+  /// Another account that signs in for them; `None` if this device never saw its token.
+  #[serde(rename = "contradicting", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_contradicting: Option<ProviderAccount>,
+}
+
+/// An account at the identity provider: its ID (`sub`) and the names its newest verified token gave.
+/// `Debug` prints none of them: personal data stays out of logs.
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProviderAccount {
+  pub subject: String,
+  #[serde(rename = "username", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_username: Option<String>,
+  #[serde(rename = "email", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_email: Option<String>,
+}
+
+impl std::fmt::Debug for ProviderAccount {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter.write_str("ProviderAccount([redacted])")
+  }
 }
 
 /// What keeps the roster from following the identity provider by itself (e2ee.md §3.1.3).
@@ -747,6 +780,14 @@ impl OwnerRosterStatus {
   /// Whether `user` is an owner of the verified roster who can sign (not whom the server calls one).
   pub fn is_owner(&self, user: UserId) -> bool {
     self.owners.iter().any(|owner| owner.user == user)
+  }
+
+  /// What this device knows about `user`'s accounts at the provider, if they are contradicted.
+  pub fn accounts_of(&self, user: UserId) -> Option<&ContradictedAccounts> {
+    self
+      .contradicted_accounts
+      .iter()
+      .find(|accounts| accounts.user == user)
   }
 
   /// The people of a [`RoleSigningIssue::Contradictory`], split: role holders of the roster, whose
@@ -1115,6 +1156,7 @@ mod tests {
         is_signing_manual: false,
         maybe_signing_problem: None,
         is_own_account_mismatched: false,
+        contradicted_accounts: Vec::new(),
       };
       assert_eq!(
         roster_changes(&signed_roster(&status), &proposed),
@@ -1239,6 +1281,7 @@ mod tests {
           is_signing_manual: false,
           maybe_signing_problem: None,
           is_own_account_mismatched: false,
+          contradicted_accounts: Vec::new(),
         }
       }
     }
@@ -1295,6 +1338,7 @@ mod tests {
         is_signing_manual: false,
         maybe_signing_problem: None,
         is_own_account_mismatched: false,
+        contradicted_accounts: Vec::new(),
       };
       let signed = signed_roster(&status);
       assert_eq!(signed, vec![owner(1), owner(2), admin(3)]);
@@ -1397,6 +1441,37 @@ mod tests {
     const NOW: TimestampMs = 100 * DAY_MS;
 
     #[test]
+    fn contradicted_accounts_keep_their_wire_shape_and_stay_out_of_debug() {
+      let mut roster = status(1, None, 1);
+      let user = UserId::from_snowflake(crate::model::Snowflake::new(7).unwrap());
+      roster.contradicted_accounts = vec![ContradictedAccounts {
+        user,
+        maybe_noted: Some(ProviderAccount {
+          subject: "noted-sub".to_string(),
+          maybe_username: Some("jdoe".to_string()),
+          maybe_email: None,
+        }),
+        maybe_contradicting: None,
+      }];
+      let json = serde_json::to_value(&roster).unwrap();
+      assert_eq!(
+        json["contradicted_accounts"],
+        serde_json::json!([{ "user": "7", "noted": { "subject": "noted-sub", "username": "jdoe" } }])
+      );
+      let back: OwnerRosterStatus = serde_json::from_value(json).unwrap();
+      assert_eq!(back, roster);
+      assert_eq!(
+        back
+          .accounts_of(user)
+          .and_then(|found| found.maybe_noted.as_ref())
+          .map(|noted| noted.subject.as_str()),
+        Some("noted-sub")
+      );
+      let printed = format!("{roster:?}");
+      assert!(!printed.contains("jdoe") && !printed.contains("noted-sub"));
+    }
+
+    #[test]
     fn two_owners_with_a_fresh_roster_need_no_warning() {
       assert!(status(2, Some(NOW + 20 * DAY_MS), 2).warnings(NOW).is_empty());
     }
@@ -1487,6 +1562,7 @@ mod tests {
         is_signing_manual: false,
         maybe_signing_problem: None,
         is_own_account_mismatched: false,
+        contradicted_accounts: Vec::new(),
       }
     }
   }

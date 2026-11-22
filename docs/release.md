@@ -420,6 +420,20 @@ What the numbers showed:
   caches (also the CI ones) between the warm-up and the release (the UI job and macOS missed in v1.0.39).
   Check with `gh cache list`; what the warm-up saves has to stay below about 8 GB.
 
+- **The web client is packaged beside the desktop jobs.** In v1.0.41 the draft release job spent 6.7
+  of its 7.5 minutes in "Assemble the release files" after the last desktop job: it compiled the
+  segmentation model's NNEF conversion (tract, release profile, no cache) and compressed the web
+  bundle with `brotli -q 11`. The desktop workflow's `web` job (plain runner) now converts the model
+  at once, waits for `ui-dist` like the macOS and Windows jobs, adds the model, signs, compresses and
+  uploads `web-release` (`teamcraft-web-X.Y.Z.tar.gz`); the draft release job only copies it. Expected:
+  the draft release job drops to about 1 to 2 minutes (the release was 40.6 min, of which 7.5 after
+  the desktop jobs). Confirmed only by the next release.
+- **macOS notarization stays on the Mac.** "Notarize the app" and "Notarize the dmg" take 0.7 to 0.8
+  minutes each in v1.0.41 and the later runs (about 1.5 minutes per Mac job, 3 minutes of Mac runner
+  per release). Submitting without `--wait` and stapling from Linux with `rcodesign` would free
+  that, but it needs a second job, an artifact hand-over of the signed dmg and a new tool for under
+  5 % of the Mac minutes; not worth the complexity. If Apple's queue gets slow, this is the place.
+
 Cache trade-off: the release jobs restore dependency builds (not the workspace crates) saved by `main`.
 Cargo keys them by the exact sources and flags, a hit is a byte-identical rebuild of the same inputs,
 and the workspace crates and the final link always build fresh. A cache can only make a release

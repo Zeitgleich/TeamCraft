@@ -756,6 +756,8 @@ private fun ConversationMenu(
   // A channel's members with their roles (#1262); DMs and group DMs have no roles.
   val isChannel = maybeConversation?.kind == "Public" || maybeConversation?.kind == "Private"
   var isShowingMembers by remember { mutableStateOf(false) }
+  // A channel's shared notes, read-only on the phone (#1456).
+  var isShowingNotes by remember { mutableStateOf(false) }
   var maybeConfirming by remember { mutableStateOf<ChannelConfirmation?>(null) }
   // The deletion confirmation names who last named the channel (e2ee.md §4.6.5, D5).
   val maybeAnchorMarks = rememberChannelAnchorMarks(viewModel, conversationId, isShown = maybeConfirming == ChannelConfirmation.Delete)
@@ -818,6 +820,10 @@ private fun ConversationMenu(
       isShowingBookmarks = true
     })
     if (isChannel) {
+      DropdownMenuItem(text = { Text(stringResource(R.string.channel_notes_title)) }, onClick = {
+        isOpen = false
+        isShowingNotes = true
+      })
       DropdownMenuItem(text = { Text(stringResource(R.string.members_title)) }, onClick = {
         isOpen = false
         isShowingMembers = true
@@ -852,6 +858,9 @@ private fun ConversationMenu(
   if (isNotifying) ConversationNotificationsDialog(viewModel, conversationId) { isNotifying = false }
   if (isShowingMembers) {
     ChannelMembersSheet(viewModel, conversationId, onDismiss = { isShowingMembers = false })
+  }
+  if (isShowingNotes) {
+    ChannelNotesSheet(viewModel, conversationId, onDismiss = { isShowingNotes = false })
   }
   if (isShowingBookmarks) {
     BookmarksDialog(

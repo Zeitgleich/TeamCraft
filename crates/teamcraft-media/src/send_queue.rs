@@ -247,6 +247,25 @@ impl SendQueue {
     None
   }
 
+  /// Drops all video that waits, also the rest of frames that started (and what is still to come
+  /// of them): the own video stopped for the voice (#1889), and on a collapsed uplink what waits
+  /// of it would hold the voice back for seconds. The audio stays.
+  pub fn drop_video(&mut self, now: Instant) {
+    for queued in self.video.drain(..) {
+      if let Some(frame) = queued.maybe_frame {
+        self.dropped_frames.insert(
+          frame.chain,
+          Mark {
+            number: frame.number,
+            at: now,
+          },
+        );
+      }
+      self.queued_bytes -= queued.bytes.len();
+      self.dropped_packets += 1;
+    }
+  }
+
   pub fn is_empty(&self) -> bool {
     self.audio.is_empty() && self.video.is_empty()
   }
@@ -458,6 +477,28 @@ mod tests {
 
   mod order {
     use super::*;
+
+    /// #1889: the own video stopped for the voice: what waits of it goes, also the rest of a frame
+    /// that started and what comes later of it; the audio stays.
+    #[test]
+    fn dropped_video_takes_its_started_frames_along() {
+      let start = Instant::now();
+      let mut queue = queue(1 << 20, ms(250), LayersPerStream::All);
+      for index in 0..4 {
+        queue.push(video(STREAM, 0, 1, (index, 5), true, 1), start);
+      }
+      queue.push(audio(2), start);
+      let first: Vec<u8> = (0..2)
+        .map(|_| *queue.pop(start).unwrap().last().unwrap())
+        .collect();
+      assert_eq!(first, [2, 1], "the frame started");
+      queue.drop_video(start);
+      assert_eq!(queue.queued_bytes(), 0);
+      queue.push(video(STREAM, 0, 1, (4, 5), true, 1), start);
+      queue.push(audio(3), start);
+      assert_eq!(markers(&mut queue, start), [3]);
+      assert!(queue.dropped_packets() >= 3);
+    }
 
     #[test]
     fn audio_overtakes_the_video_ahead_of_it() {

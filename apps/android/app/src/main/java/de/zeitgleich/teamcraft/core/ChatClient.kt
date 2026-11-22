@@ -12,6 +12,7 @@ import uniffi.teamcraft_ffi.ChannelAnchorMarksItem
 import uniffi.teamcraft_ffi.GroupMentionReachItem
 import uniffi.teamcraft_ffi.MentionableGroupItem
 import uniffi.teamcraft_ffi.PollLimitsItem
+import uniffi.teamcraft_ffi.CanvasPageItem
 import uniffi.teamcraft_ffi.ChannelMembersInfo
 import uniffi.teamcraft_ffi.ChannelRolesReviewItem
 import uniffi.teamcraft_ffi.CreateOutcome
@@ -261,6 +262,9 @@ class ChatClient(
 
   /** The channel's members section: members with roles, the alarm line, a workspace admin's look (#1262). */
   suspend fun channelMembers(conversation: String): ChannelMembersInfo = core().channelMembers(conversation)
+
+  /** A page of the channel's shared notes, read-only (#1456): the first page (`null`) or a further one. */
+  suspend fun canvasPage(conversation: String, maybePage: String?): CanvasPageItem = core().canvasPage(conversation, maybePage)
 
   /** Reads the channel's members and signed roles afresh; the change arrives as a store update. */
   suspend fun refreshChannelMembers(conversation: String) = core().refreshChannelMembers(conversation)

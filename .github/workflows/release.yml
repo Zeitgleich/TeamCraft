@@ -449,7 +449,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           REPO: ${{ github.repository }}
         run: |
-          patterns=(linux-packages-* 'macos-*' 'windows-*' ui-dist 'release-image-*')
+          patterns=(linux-packages-* 'macos-*' 'windows-*' web-release 'release-image-*')
           args=()
           for pattern in "${patterns[@]}"; do args+=(--pattern "$pattern"); done
           for attempt in 1 2 3 4; do
@@ -483,7 +483,6 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
-          WEB_RELEASE_KEY: ${{ secrets.TEAMCRAFT_WEB_RELEASE_KEY }}
         run: |
           mkdir -p dist
           mv "teamcraft-source-${VERSION}.spdx.json" "teamcraft-source-${VERSION}.cdx.json" dist/
@@ -492,26 +491,9 @@ jobs:
             -o -name '*.dmg' -o -name '*.msi' -o -name '*.exe' \
             -o -name '*.app.tar.gz' -o -name '*.sig' \
             -o -name '*.spdx.json' -o -name '*.cdx.json' \) -exec cp {} dist/ \;
-          # The web client: the same trunk build the desktop app embeds, served by the server
-          # ([web] static_dir), plus precompressed .br/.gz variants the server picks by Accept-Encoding.
-          # Never with demo data. Signed with the web release key when the secret exists: its service
-          # worker then only runs files the manifest lists (e2ee.md §9.3).
-          scripts/check-no-demo-data.py artifacts/ui-dist
-          web="$RUNNER_TEMP/web"
-          cp -R artifacts/ui-dist "$web"
-          # The browser's background effects download the segmentation model (#439); not in git.
-          crates/teamcraft-ui/scripts/add-segmentation-model.sh "$web"
-          if [ -n "$WEB_RELEASE_KEY" ]; then
-            key="$RUNNER_TEMP/web-release.pem"
-            (umask 077 && printf '%s\n' "$WEB_RELEASE_KEY" > "$key")
-            crates/teamcraft-ui/scripts/sign-web-release.sh "$web" "$key" "$VERSION"
-            rm -f "$key"
-          else
-            echo "::warning::no TEAMCRAFT_WEB_RELEASE_KEY: the web client is unsigned and warns its users"
-          fi
-          command -v brotli >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q brotli; }
-          scripts/compress-web.sh "$web"
-          tar -C "$web" -czf "dist/teamcraft-web-${VERSION}.tar.gz" .
+          # The web client (signed, precompressed) is packaged by the desktop workflow's web job,
+          # beside the desktop builds: a file per release, copied as it is.
+          cp artifacts/web-release/teamcraft-web-"${VERSION}".tar.gz dist/
           cat artifacts/release-image-*/*.image > dist/images.txt
           # The desktop updater's manifest; every platform must be signed or none (docs/updates.md §3).
           if compgen -G 'dist/*.sig' >/dev/null; then

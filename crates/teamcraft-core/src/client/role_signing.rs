@@ -14,8 +14,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use teamcraft_crypto::attestation::{
-  AttestationError, AttestationExpectations, UnverifiedClaims, attestation_claim, unverified_claims,
-  unverified_roles, verify_role_evidence, verify_role_loss,
+  AccountNames, AttestationError, AttestationExpectations, UnverifiedClaims, attestation_claim,
+  unverified_claims, unverified_roles, verify_role_evidence, verify_role_loss,
 };
 use teamcraft_crypto::identity::IdentityPublicKey;
 use teamcraft_proto::{
@@ -27,6 +27,7 @@ use super::Client;
 use crate::api::{ApiError, ProviderTokens, ServerApi};
 use crate::convert;
 use crate::error::CoreError;
+use crate::provider_account_names::{ProviderAccountNames, SeenToken};
 use crate::records;
 use crate::role_signing::{
   AutomaticBasis, AutomaticChange, AutomaticChangeKind, ProviderMark, ProviderRole, ProviderStatement,
@@ -38,6 +39,9 @@ use crate::workspace::{RosterDocument, RosterMember, RosterRole, WorkspaceState}
 
 /// Where this device keeps what it did about role signing.
 const ROLE_SIGNING_KEY: &str = "role_signing";
+/// Where an owner's device keeps what the provider calls the accounts behind a contradiction (e2ee.md
+/// §3.1.4, issue #2241): personal data, never signed or sent.
+const PROVIDER_ACCOUNT_NAMES_KEY: &str = "provider_account_names";
 
 /// What this device did about role signing; local state.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -666,6 +670,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // gets through, as nobody else could sign the successor. What is signed still rests on tokens only,
     // and their own departure with it. Everybody else has nothing to sign; a provider owner waits.
     if state.roster.version > 0 && !self.is_verified_owner(&state) {
+      // Somebody who is no owner (any more) has no business with other people's account names.
+      self.clear_provider_account_names()?;
       if role == ProviderRole::Owner {
         self.set_problem(Some(RoleSigningProblem::AwaitingOwner))?;
       }
@@ -686,17 +692,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.account.user_id,
       &self.identity_public_key_bytes(),
     ) {
-      Ok(statement) => statement,
+      Ok(verified) => verified,
       Err(error) => {
         tracing::warn!(%error, "this device's own ID token doesn't verify; nothing is signed");
         return Ok(false);
       },
     };
     if state.roster.version == 0 {
-      if own.role != ProviderRole::Owner {
+      if own.statement.role != ProviderRole::Owner {
         return Ok(false);
       }
-      return self.sign_first_roster(own, anchor).await;
+      return self.sign_first_roster(own.statement, anchor).await;
     }
     self.sign_next_roster(state, own, &jwks, anchor).await
   }
@@ -744,7 +750,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   async fn sign_next_roster(
     &mut self,
     state: WorkspaceState,
-    own: ProviderStatement,
+    own: VerifiedStatement,
     jwks: &[u8],
     anchor: &RoleProviderAnchor,
   ) -> Result<bool, CoreError> {
@@ -756,7 +762,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Some(_) => forget_accounts(&state.provider_marks),
       None => state.provider_marks.clone(),
     };
-    let mut statements = vec![own.clone()];
+    let mut verified = vec![own.clone()];
     for entry in &listed.entries {
       if entry.user_id == self.account.user_id {
         continue;
@@ -765,11 +771,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         continue;
       };
       match verified_statement(&entry.token, jwks, anchor, entry.user_id, &public_key) {
-        Ok(statement) => statements.push(statement),
+        Ok(statement) => verified.push(statement),
         // A hostile server's token, or one from before this person's current key: skipped.
         Err(error) => tracing::debug!(user_id = %entry.user_id, %error, "role evidence refused"),
       }
     }
+    let own = own.statement;
+    let mut statements: Vec<ProviderStatement> = verified.iter().map(|one| one.statement.clone()).collect();
     statements.extend(role_loss_statements(&listed, &state, jwks, anchor));
     let pinned: BTreeMap<UserId, [u8; 32]> = records::pinned_identities(&self.store)?
       .into_iter()
@@ -802,6 +810,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     record.maybe_last_report_removal = plan.maybe_last_report_removal;
     records::put_json(&self.store, Table::Workspace, ROLE_SIGNING_KEY, &record)?;
     self.note_what_people_should_know(&plan.contradicted, &plan.reported)?;
+    self.keep_provider_account_names(&plan.marks, &plan.contradicted, &verified)?;
     if plan.is_full {
       tracing::warn!(
         max_provider_marks = self.settings.max_provider_marks,
@@ -924,6 +933,51 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.set_problem((!rest.is_empty()).then_some(RoleSigningProblem::Contradictory { users: rest }))
   }
 
+  /// Keeps what the provider calls the accounts that matter after this round: the noted ones and those
+  /// of a contradiction (e2ee.md §3.1.4, issue #2241). Written only when something changed.
+  fn keep_provider_account_names(
+    &self,
+    marks: &BTreeMap<UserId, ProviderMark>,
+    contradicted: &[UserId],
+    verified: &[VerifiedStatement],
+  ) -> Result<(), CoreError> {
+    let seen: Vec<SeenToken<'_>> = verified
+      .iter()
+      .map(|one| SeenToken {
+        user_id: one.statement.user_id,
+        subject: &one.statement.subject,
+        issued_at: one.statement.issued_at,
+        names: &one.names,
+      })
+      .collect();
+    let mut names = provider_account_names(&self.store)?;
+    if names.update(marks, contradicted, &seen) {
+      records::put_json(&self.store, Table::Workspace, PROVIDER_ACCOUNT_NAMES_KEY, &names)?;
+    }
+    Ok(())
+  }
+
+  /// An owner corrected `user`'s account: the names behind the contradiction go with it.
+  pub(crate) fn forget_provider_account_names_of(&self, user: UserId) -> Result<(), CoreError> {
+    let mut names = provider_account_names(&self.store)?;
+    if names.forget(user) {
+      records::put_json(&self.store, Table::Workspace, PROVIDER_ACCOUNT_NAMES_KEY, &names)?;
+    }
+    Ok(())
+  }
+
+  fn clear_provider_account_names(&self) -> Result<(), CoreError> {
+    if provider_account_names(&self.store)?.people.is_empty() {
+      return Ok(());
+    }
+    records::put_json(
+      &self.store,
+      Table::Workspace,
+      PROVIDER_ACCOUNT_NAMES_KEY,
+      &ProviderAccountNames::default(),
+    )
+  }
+
   fn set_problem(&self, maybe_problem: Option<RoleSigningProblem>) -> Result<(), CoreError> {
     let mut record = self.role_signing_record()?;
     if record.maybe_note == maybe_problem {
@@ -1030,6 +1084,19 @@ pub fn role_signing_record(store: &impl LocalStore) -> Result<RoleSigningRecord,
   Ok(records::get_json(store, Table::Workspace, ROLE_SIGNING_KEY)?.unwrap_or_default())
 }
 
+/// What this owner's device knows about the accounts behind a contradiction (e2ee.md §3.1.4).
+pub fn provider_account_names(store: &impl LocalStore) -> Result<ProviderAccountNames, CoreError> {
+  Ok(records::get_json(store, Table::Workspace, PROVIDER_ACCOUNT_NAMES_KEY)?.unwrap_or_default())
+}
+
+/// A token that passed every check: what it says for the roster, and how the provider names the
+/// account, which decides nothing.
+#[derive(Clone, Debug)]
+struct VerifiedStatement {
+  statement: ProviderStatement,
+  names: AccountNames,
+}
+
 /// `token` read as a statement about `user`, if every check passes.
 fn verified_statement(
   token: &str,
@@ -1037,7 +1104,7 @@ fn verified_statement(
   anchor: &RoleProviderAnchor,
   user: UserId,
   public_key: &[u8; 32],
-) -> Result<ProviderStatement, AttestationError> {
+) -> Result<VerifiedStatement, AttestationError> {
   let expected = AttestationExpectations {
     issuer: &anchor.issuer,
     audience: &anchor.client_id,
@@ -1050,12 +1117,15 @@ fn verified_statement(
     convert::user(user),
     &IdentityPublicKey::from_bytes(*public_key),
   )?;
-  Ok(ProviderStatement {
-    user_id: user,
-    identity_key: Base64Bytes::new(public_key.to_vec()),
-    subject: evidence.subject,
-    issued_at: evidence.issued_at,
-    role: provider_role(evidence.maybe_roles.as_deref(), anchor),
+  Ok(VerifiedStatement {
+    statement: ProviderStatement {
+      user_id: user,
+      identity_key: Base64Bytes::new(public_key.to_vec()),
+      subject: evidence.subject,
+      issued_at: evidence.issued_at,
+      role: provider_role(evidence.maybe_roles.as_deref(), anchor),
+    },
+    names: evidence.names,
   })
 }
 

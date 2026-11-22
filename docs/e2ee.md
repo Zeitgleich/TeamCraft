@@ -437,6 +437,28 @@ The console's Security section offers it to owners for each member off the roste
 phones), and the correction takes the person off the console's list at once. The phones show the
 member's own alert under Settings > Security.
 
+**Which account is whose** (issue #2241). The roster notes only the subject, which says nothing to an
+owner. So the console shows, under each contradicted member and again in the confirmation, the noted
+account and the one that signs in for them, each with the provider's `preferred_username`, its `email`
+where the token says the provider verified it (`email_verified`), and the subject to look the account
+up at the provider. These names are personal data and change, so they never go into the roster, a
+policy or anything else signed or sent; an owner's app keeps them in its encrypted local store
+(`provider_account_names`), from the tokens its own rounds verified against the pinned provider:
+
+- the noted account's from the token that got it noted, the only one there is (the server keeps no
+  token of a noted account), so an owner's app keeps them for every account the roster notes, at most
+  one per mark (`max_provider_marks`), and drops them once the roster forgets the account;
+- the contradicting account's for as long as the contradiction stands;
+- a newer token of the same account renames it; a correction (`forget_provider_account`) drops both;
+  an app that is no owner (any more) keeps none.
+
+An owner's device that never verified a token of an account (another owner's app noted it, or the
+device was added since) says so ("not seen on this device") instead of guessing. The names decide
+nothing: the subject and the rules above do. They are the provider's word for an account, and a person
+who may edit their own profile there, or a provider admin, can make an account look like somebody
+else's; an address that the provider didn't verify is not shown. That is why the subject is shown
+too: the account to close is found at the provider by it.
+
 **Where the marks live, and how many.** In the signed roster, like the role holders' (`provider_marks`):
 one chain every client verifies already, with every rule above (marks only move forward on every
 device, a roster an older owner's app signs without them changes nothing, a provider move forgets
@@ -5042,10 +5064,23 @@ last two minutes, from the same origins. It is no presence of its own (no "has t
 carets) and sends nothing: an encrypted, ephemeral awareness channel over the gateway is left for
 later.
 
+**On the phones (issue #1456).** Android and iOS show a channel's pages read-only (the channel's
+menu, "Notes"): `teamcraft-ffi::canvas` reads the core's updates with the same document
+(`CanvasDoc`) and hands the apps the blocks, their formatted runs, numbers of numbered items and file
+references, and the list of further pages; the apps carry no CRDT of their own and send nothing, so
+nothing about the protocol changes. A link reaches the apps only as a web address, and the apps check
+it once more with the rule for messages. A file block opens from the channel's files the device
+holds, like the desktop's, or says that the file isn't there. While a page is open the app reads the
+channel's older history a page at a time, at most 20 per opening, as the editor does. A phone
+doesn't tell its core which pages the list names (`note_canvas_pages`), so there every further
+page counts as unlisted and shares the 50 places above: the store stays bounded, and a flood of
+made-up page IDs can push out a real page that nobody edited lately, as on a device whose editor
+never read the list.
+
 **Not in this step** (issue #1245 and its follow-up): presence beyond recent edits (who has the page
 open, carets), mentions, pages for DMs and meetings, renaming the first page, dropping a deleted
 page's updates from the store, uploading a file straight into a page, the notetaker writing its summary onto the meeting's page, "Pin to page", search
-over pages, the mobile apps, a snapshot when a member joins, stopping the history read at the newest
+over pages, editing and the version history on the phones, a snapshot when a member joins, stopping the history read at the newest
 snapshot, and not waking phones for page edits: today a page edit is a message like a reaction, so
 a phone of a member whose level is "all" gets a push for it (docs/notifications.md, "Push routing").
 

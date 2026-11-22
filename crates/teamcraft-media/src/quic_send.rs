@@ -9,6 +9,13 @@
 //! hands it over once QUIC caught up. On a fast link a keyframe's burst goes to QUIC at once, as
 //! before; once QUIC's window collapsed on a narrow one, it holds a few packets, not seconds of the
 //! old layer.
+//!
+//! QUIC's rate is its window per round trip, and both are only learnt from acknowledgements: when
+//! an upload collapses, they come back through a bottleneck queue of seconds, and until then QUIC
+//! goes by the old rate. So while QUIC holds a backlog, what it drained from it lately is its rate
+//! too ([`DrainMeter`], the lower of the two counts): without it, QUIC took in seconds of the
+//! camera at the collapsed rate, which went out after the camera had stopped for the voice and
+//! held it back for 4–5 s (#1889). What QUIC holds can't be taken back; what waits here can.
 
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -62,6 +69,17 @@ struct State {
   queue: SendQueue,
   /// How much QUIC may hold ([`MAX_QUIC_WAIT`] at its rate), and when that was worked out.
   maybe_allowance: Option<(usize, Instant)>,
+  drain: DrainMeter,
+}
+
+/// How fast QUIC drains what it holds, while it holds something (see the module docs). Pure: time
+/// and the bytes QUIC holds are passed in.
+#[derive(Debug, Default)]
+pub struct DrainMeter {
+  /// The last reading: when, and how many bytes QUIC held then.
+  maybe_last: Option<(Instant, usize)>,
+  /// Bytes handed to QUIC since then.
+  handed: usize,
 }
 
 impl QuicSender {
@@ -72,6 +90,7 @@ impl QuicSender {
       state: Mutex::new(State {
         queue: SendQueue::new(config),
         maybe_allowance: None,
+        drain: DrainMeter::default(),
       }),
       wake: Notify::new(),
       stop: Notify::new(),
@@ -86,12 +105,18 @@ impl QuicSender {
     let mut state = lock(&self.shared.state);
     if state.queue.is_empty() && self.shared.is_keeping_up(&mut state, now) {
       // Nothing waits and QUIC keeps up: as before, without the task.
-      self.shared.send(datagram);
+      self.shared.send(&mut state, datagram);
       return;
     }
     state.queue.push(datagram.to_vec(), now);
     drop(state);
     self.shared.wake.notify_one();
+  }
+
+  /// Drops the video that waits in the queue (`SendQueue::drop_video`): the own video stopped
+  /// for the voice (#1889). What QUIC holds already goes out.
+  pub fn drop_queued_video(&self) {
+    lock(&self.shared.state).queue.drop_video(Instant::now());
   }
 
   /// Datagrams the queue dropped so far.
@@ -110,26 +135,53 @@ impl Shared {
   /// Whether QUIC takes more now: it holds less than its allowance.
   fn is_keeping_up(&self, state: &mut State, now: Instant) -> bool {
     let quic = self.connection.quic_connection();
+    let space = quic.datagram_send_buffer_space();
+    let held = QUIC_DATAGRAM_BUFFER_BYTES.saturating_sub(space + QUINN_DATAGRAM_OVERHEAD);
     let allowance = match state.maybe_allowance {
       Some((allowance, at)) if now.saturating_duration_since(at) < RATE_REFRESH => allowance,
       _ => {
         let path = quic.stats().path;
-        let bytes_per_second = path.cwnd as f64 / path.rtt.max(MIN_ROUND_TRIP).as_secs_f64();
+        let window_rate = path.cwnd as f64 / path.rtt.max(MIN_ROUND_TRIP).as_secs_f64();
+        let bytes_per_second = match state.drain.on_reading(held, now) {
+          Some(drained) => window_rate.min(drained),
+          None => window_rate,
+        };
         // Saturating: a float this large converts to `usize::MAX`.
         let allowance = ((bytes_per_second * MAX_QUIC_WAIT.as_secs_f64()) as usize).max(QUIC_BACKLOG_BYTES);
         state.maybe_allowance = Some((allowance, now));
         allowance
       },
     };
-    let space = quic.datagram_send_buffer_space();
-    let held = QUIC_DATAGRAM_BUFFER_BYTES.saturating_sub(space + QUINN_DATAGRAM_OVERHEAD);
     held < allowance
   }
 
-  fn send(&self, datagram: &[u8]) {
+  fn send(&self, state: &mut State, datagram: &[u8]) {
+    state.drain.on_handed(datagram.len());
     if let Err(error) = self.connection.send_datagram(datagram) {
       debug!(%error, "datagram dropped");
     }
+  }
+}
+
+impl DrainMeter {
+  /// `bytes` were handed to QUIC.
+  pub fn on_handed(&mut self, bytes: usize) {
+    self.handed = self.handed.saturating_add(bytes);
+  }
+
+  /// QUIC holds `held` bytes at `now`: how many bytes per second it drained since the last
+  /// reading, if it held a backlog all along (otherwise it sent all it had, and that says nothing
+  /// about its rate).
+  pub fn on_reading(&mut self, held: usize, now: Instant) -> Option<f64> {
+    let maybe_last = self.maybe_last.replace((now, held));
+    let handed = std::mem::take(&mut self.handed);
+    let (at, last_held) = maybe_last?;
+    let elapsed = now.saturating_duration_since(at);
+    if last_held == 0 || held == 0 || elapsed.is_zero() {
+      return None;
+    }
+    let drained = (last_held + handed).saturating_sub(held);
+    Some(drained as f64 / elapsed.as_secs_f64())
   }
 }
 
@@ -141,7 +193,7 @@ async fn hand_over(shared: Arc<Shared>) {
       let mut state = lock(&shared.state);
       while !state.queue.is_empty() && shared.is_keeping_up(&mut state, now) {
         if let Some(datagram) = state.queue.pop(now) {
-          shared.send(&datagram);
+          shared.send(&mut state, &datagram);
         }
       }
       !state.queue.is_empty()
@@ -163,4 +215,46 @@ async fn hand_over(shared: Arc<Shared>) {
 fn lock(mutex: &Mutex<State>) -> std::sync::MutexGuard<'_, State> {
   // A panicked task leaves a queue that is still consistent enough to drop.
   mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn ms(millis: u64) -> Duration {
+    Duration::from_millis(millis)
+  }
+
+  #[test]
+  fn a_backlog_is_drained_at_what_left_it() {
+    let start = Instant::now();
+    let mut meter = DrainMeter::default();
+    assert_eq!(meter.on_reading(30_000, start), None);
+    meter.on_handed(2_000);
+    // 30 kB held, 2 kB more handed, 31 kB held 10 ms later: 1 kB left, 100 kB/s.
+    let rate = meter.on_reading(31_000, start + ms(10)).unwrap();
+    assert!((rate - 100_000.0).abs() < 1.0, "{rate}");
+  }
+
+  #[test]
+  fn a_queue_that_ran_empty_says_nothing_about_the_rate() {
+    let start = Instant::now();
+    let mut meter = DrainMeter::default();
+    assert_eq!(meter.on_reading(0, start), None);
+    meter.on_handed(5_000);
+    // QUIC held nothing at the start: what it sent is what it was given.
+    assert_eq!(meter.on_reading(1_000, start + ms(10)), None);
+    meter.on_handed(1_000);
+    // It held a backlog, then sent all of it.
+    assert_eq!(meter.on_reading(0, start + ms(20)), None);
+  }
+
+  #[test]
+  fn a_stalled_quic_drains_nothing() {
+    let start = Instant::now();
+    let mut meter = DrainMeter::default();
+    meter.on_reading(40_000, start);
+    meter.on_handed(1_200);
+    assert_eq!(meter.on_reading(41_200, start + ms(10)), Some(0.0));
+  }
 }

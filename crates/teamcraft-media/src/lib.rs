@@ -144,6 +144,8 @@ pub mod system_audio;
 pub mod system_audio_pipewire;
 #[cfg(all(feature = "wasapi-loopback", target_os = "windows"))]
 pub mod system_audio_wasapi;
+#[cfg(feature = "native")]
+mod voice_congestion;
 #[cfg(feature = "voice-decode")]
 pub mod voice_decode;
 pub mod voice_guard;

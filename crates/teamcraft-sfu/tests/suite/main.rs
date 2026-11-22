@@ -30,4 +30,5 @@ mod video_content;
 mod video_quality;
 mod video_recovery;
 mod video_retransmit;
+mod voice_collapse;
 mod weak_downlink;

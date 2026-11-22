@@ -32,6 +32,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use teamcraft_client_api::canvas::{BlockKind, CanvasDoc, InlineMark};
 use teamcraft_core::client::OutgoingFile;
 use teamcraft_e2e::call::{hold_call, join_call};
 use teamcraft_e2e::scenario::space_with;
@@ -92,6 +93,10 @@ async fn serve_a_large_workspace_to_a_device() {
   let mut bob = Peer::enroll(&stack, "bob").await;
   let device_user = wait_for_device(&stack, &alice, &user).await;
   let (channels, space) = seed(&stack, &mut alice, &mut bob, device_user, size).await;
+  // The first channel's shared notes, with every kind of block and a second page (#1456).
+  if let Some(&first) = channels.first() {
+    write_notes(&mut alice, first).await;
+  }
   let mut bob_devices = Vec::new();
   let control = burst_file();
   eprintln!(
@@ -242,6 +247,124 @@ async fn wait_for_device(stack: &Stack, admin: &Peer, user: &str) -> UserId {
 /// Alice owns every space; Bob and the device's user are in all of them and in every channel. The
 /// first channel gets a long history, the rest share the other messages round-robin, two direct
 /// messages and a group get their share too, and every tenth message gets a reaction.
+/// A notes page in `channel` as a desktop editor would write it: headings, formatted text with a
+/// link, lists, a checklist, a quote and code, and a further page listed on the first.
+async fn write_notes(alice: &mut Peer, channel: ConversationId) {
+  let mut page = CanvasDoc::new();
+  let mut updates = Vec::new();
+  let title = after(&mut page, &mut updates, None, BlockKind::Heading, "Release plan");
+  let intro = after(
+    &mut page,
+    &mut updates,
+    Some(&title),
+    BlockKind::Paragraph,
+    "Everything for the next release of Project A. The draft lives at example.com.",
+  );
+  updates.extend(page.toggle_mark(&intro, 35, 44, InlineMark::Bold));
+  updates.extend(page.set_link(&intro, 65, 76, Some("https://example.com/docs/draft-42")));
+  let steps = after(
+    &mut page,
+    &mut updates,
+    Some(&intro),
+    BlockKind::Heading2,
+    "Steps",
+  );
+  let one = after(
+    &mut page,
+    &mut updates,
+    Some(&steps),
+    BlockKind::Numbered,
+    "Freeze the branch",
+  );
+  let two = after(
+    &mut page,
+    &mut updates,
+    Some(&one),
+    BlockKind::Numbered,
+    "Run the full test suite",
+  );
+  let three = after(
+    &mut page,
+    &mut updates,
+    Some(&two),
+    BlockKind::Numbered,
+    "Write the release notes",
+  );
+  let todo = after(
+    &mut page,
+    &mut updates,
+    Some(&three),
+    BlockKind::Heading3,
+    "Open items",
+  );
+  let done = after(
+    &mut page,
+    &mut updates,
+    Some(&todo),
+    BlockKind::Check,
+    "Billing export reviewed",
+  );
+  updates.extend(page.set_checked(&done, true));
+  let open = after(
+    &mut page,
+    &mut updates,
+    Some(&done),
+    BlockKind::Check,
+    "Date picker fixed",
+  );
+  let bullet = after(
+    &mut page,
+    &mut updates,
+    Some(&open),
+    BlockKind::Bullet,
+    "Search filters: in progress",
+  );
+  let quote = after(
+    &mut page,
+    &mut updates,
+    Some(&bullet),
+    BlockKind::Quote,
+    "Ship it when the error rate stays flat for a day.",
+  );
+  after(
+    &mut page,
+    &mut updates,
+    Some(&quote),
+    BlockKind::Code,
+    "cargo test --workspace\ncargo deny check",
+  );
+  let (meeting, update) = page.add_page("Meeting notes").expect("room for a page");
+  updates.push(update);
+  for update in updates {
+    alice
+      .client
+      .send_canvas_update(channel, None, update, false)
+      .await
+      .unwrap();
+  }
+  let mut meeting_page = CanvasDoc::for_page(Some(&meeting));
+  let (_, update) = meeting_page.insert_block(None, BlockKind::Bullet, "Agenda: the release date");
+  alice
+    .client
+    .send_canvas_update(channel, Some(meeting), update, false)
+    .await
+    .unwrap();
+  eprintln!("WORKSPACE: notes written in {channel}");
+}
+
+/// Adds a block after `maybe_after` and keeps its update; the block's ID.
+fn after(
+  page: &mut CanvasDoc,
+  updates: &mut Vec<Vec<u8>>,
+  maybe_after: Option<&str>,
+  kind: BlockKind,
+  text: &str,
+) -> String {
+  let (id, update) = page.insert_block(maybe_after, kind, text);
+  updates.push(update);
+  id
+}
+
 async fn seed(
   stack: &Stack,
   alice: &mut Peer,
