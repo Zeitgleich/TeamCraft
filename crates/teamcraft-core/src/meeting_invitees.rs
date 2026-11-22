@@ -17,8 +17,10 @@ use crate::anchoring::ReleaseVersion;
 /// Join without a signed list adds nobody from the server's word.
 pub const SIGNED_INVITEES_RELEASE: ReleaseVersion = ReleaseVersion::new(1, 0, 32);
 
-/// A meeting's invitees as handed to the core, by where each user comes from.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A meeting's invitees as handed to the core, by where each user comes from. Kept in the store
+/// while a setup is owed (`client::note_meeting_setup_owed`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum InviteeList {
   /// A decision of the organizer's on this device, kept and signed into the next admitters
   /// statement: `added`, the users the organizer chose just now (a create request, the users an

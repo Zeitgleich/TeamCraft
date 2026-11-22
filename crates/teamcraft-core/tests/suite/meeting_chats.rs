@@ -12,9 +12,10 @@ use common::{Peer, link_device, link_device_with_store, settings, settle};
 use teamcraft_client_api::failure::{CallFailure, FailureKind};
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
-use teamcraft_core::client::call_move_announcement;
+use teamcraft_core::client::{call_move_announcement, note_meeting_setup_owed};
 use teamcraft_core::clock::ManualClock;
 use teamcraft_core::error::CoreError;
+use teamcraft_core::meeting_invitees::InviteeList;
 use teamcraft_core::store::MemoryStore;
 use teamcraft_core::{Client, PendingEnrollment};
 use teamcraft_crypto::backup::Argon2Settings;
@@ -404,6 +405,30 @@ async fn a_setup_cut_off_before_its_first_request_is_finished_on_a_later_sync() 
   );
   bob.client.full_sync().await.unwrap();
   assert_eq!(bob.client.prepare_call(chat).await.unwrap().devices.len(), 2);
+}
+
+#[tokio::test]
+async fn a_setup_lost_before_it_ran_is_finished_on_the_next_sync() {
+  let (server, mut alice, mut bob) = two().await;
+  let chat = server.create_meeting_chat(alice.client.user_id(), &[bob.client.user_id()]);
+  let meeting = server.meeting_of_chat(chat).unwrap();
+  let invitees = InviteeList::Chosen {
+    added: vec![bob.client.user_id()],
+    kept: Vec::new(),
+  };
+  // The app noted the setup, queued it and was killed before the queue ran it (#2258).
+  note_meeting_setup_owed(alice.client.store(), chat, meeting, &invitees).unwrap();
+
+  alice.client.full_sync().await.unwrap();
+  assert!(alice.client.has_group(chat).unwrap(), "finished from the note");
+  bob.client.full_sync().await.unwrap();
+  assert!(
+    bob.client.has_group(chat).unwrap(),
+    "the invitee joined by welcome"
+  );
+  // Nothing is owed any more: the next sync asks nothing of it.
+  alice.client.full_sync().await.unwrap();
+  assert_talks(&mut alice, &mut bob, chat).await;
 }
 
 #[tokio::test]

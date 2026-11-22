@@ -32,6 +32,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.flow.StateFlow
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ChatClient
 import de.zeitgleich.teamcraft.ui.ListPhase
@@ -134,17 +135,19 @@ fun <T, R> ReadState<T>.phase(isSyncing: Boolean = false, items: (T) -> List<R>)
   listPhase(read.map(items), isSyncing)
 
 /**
- * Reads from the store whenever it changes (and when [key] does). A read that fails shows rows
- * already read, or a failure with a retry; it never reads as empty.
+ * Reads from the store whenever it changes (and when [key] does), or with [changes] only when that
+ * moves (a read that costs a request: the meetings, #2258). A read that fails shows rows already
+ * read, or a failure with a retry; it never reads as empty.
  */
 @Composable
 fun <T> rememberRead(
   viewModel: MainViewModel,
   key: Any? = Unit,
   enabled: Boolean = true,
+  changes: StateFlow<Long> = viewModel.changeCount,
   load: suspend ChatClient.() -> T?,
 ): ReadState<T> {
-  val changes by viewModel.changeCount.collectAsState()
+  val changes by changes.collectAsState()
   var read by remember(key) { mutableStateOf<Read<T>>(Read.Loading) }
   var attempt by remember(key) { mutableIntStateOf(0) }
   val currentLoad by rememberUpdatedState(load)

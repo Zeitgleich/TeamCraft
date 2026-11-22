@@ -90,8 +90,11 @@ import de.zeitgleich.teamcraft.ui.theme.TeamCraftTheme
 import de.zeitgleich.teamcraft.ui.screens.PEOPLE_SHOWN
 import de.zeitgleich.teamcraft.ui.screens.PeoplePicker
 import de.zeitgleich.teamcraft.ui.toggled
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import de.zeitgleich.teamcraft.core.ChatClient
 import de.zeitgleich.teamcraft.core.User
 import de.zeitgleich.teamcraft.notifications.MeetingNoticeReport
@@ -100,6 +103,7 @@ import uniffi.teamcraft_ffi.CallStateInfo
 import uniffi.teamcraft_ffi.MeetingPart
 import uniffi.teamcraft_ffi.NotetakerCallInfo
 import uniffi.teamcraft_ffi.NotetakerRefusal
+import uniffi.teamcraft_ffi.TeamCraftException
 import uniffi.teamcraft_ffi.newRequestKey
 
 private const val MILLIS_PER_SECOND = 1000L
@@ -273,7 +277,30 @@ class CallActivity : ComponentActivity() {
     }
     Log.i(TAG, "call screen: answer from the notification")
     reportMeetingNotice(intent)
-    answerWithMicrophone(conversationId)
+    val meetingId = intent.getStringExtra(EXTRA_MEETING_ID) ?: run {
+      answerWithMicrophone(conversationId)
+      return
+    }
+    // Join on a meeting's notice: as from the meeting list, the organizer's device first sets up a
+    // meeting chat that has no group yet (#2258); the call starts either way.
+    lifecycleScope.launch {
+      prepareMeetingJoin(meetingId)
+      answerWithMicrophone(conversationId)
+    }
+  }
+
+  /** The core's preparation of a meeting's call, waited for a few seconds at most; a failure doesn't keep the user out. */
+  private suspend fun prepareMeetingJoin(meetingId: String) {
+    val core = TeamCraftApplication.graph(this).core
+    withTimeoutOrNull(PREPARE_JOIN_TIMEOUT_MS) {
+      try {
+        core.core().prepareMeetingJoin(meetingId)
+      } catch (error: TeamCraftException) {
+        Log.i(TAG, "call screen: meeting not prepared: ${error.javaClass.simpleName}")
+      } catch (error: IllegalStateException) {
+        if (error is CancellationException) throw error
+      }
+    }
   }
 
   /** Joining from a meeting's notice tells the server, so the user's other phones take theirs down. */
@@ -317,6 +344,8 @@ class CallActivity : ComponentActivity() {
     const val EXTRA_MEETING_ID = "meeting_id"
     const val EXTRA_MEETING_STARTS_AT_MS = "meeting_starts_at_ms"
     private const val STATE_ANSWER_AFTER_PERMISSION = "answer_after_permission"
+    /** How long Join from a meeting's notice waits for the meeting's preparation. */
+    private const val PREPARE_JOIN_TIMEOUT_MS = 5_000L
     /** Picture-in-picture's shape: a portrait tile, as the phone holds a call. */
     private const val PIP_WIDTH = 3
     private const val PIP_HEIGHT = 4

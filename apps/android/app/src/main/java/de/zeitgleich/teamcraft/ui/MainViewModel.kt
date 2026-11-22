@@ -260,6 +260,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   /** Increments on every store change; screens re-read when it changes. */
   val changeCount: StateFlow<Long> = graph.core.changeCount
 
+  /** Moves when the user's meetings changed or the app came back (#2258): the meeting screens read again then. */
+  val meetingsChanges: StateFlow<Long> = graph.meetingWatch.meetingsChanges
+
   /** The chat features over the core's JSON bridge. */
   val chat = ChatClient(
     ::deletedUserName,

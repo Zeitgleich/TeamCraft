@@ -3521,10 +3521,18 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     meeting: teamcraft_proto::MeetingId,
     invitees: ChatInvitees,
   ) {
+    let invitees = InviteeList::from(invitees);
+    // Noted before it is queued: a desktop closed before the queue ran it finishes it on the next
+    // sync (#2258).
+    if let Err(error) =
+      crate::client::note_meeting_setup_owed(self.store_ref(), conversation, meeting, &invitees)
+    {
+      tracing::warn!(conversation_id = %conversation, %error, "could not note the meeting chat setup");
+    }
     self.command(CoreCommand::SetUpMeetingChat {
       conversation,
       meeting,
-      invitees: InviteeList::from(invitees),
+      invitees,
     });
   }
 

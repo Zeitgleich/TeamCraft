@@ -108,4 +108,23 @@ extension AppModel {
       calls.startCall(conversationId: meeting.conversationId, displayName: meeting.title)
     }
   }
+
+  /// Join on a meeting's notice (#2258): as from the meeting list, the organizer's device first
+  /// sets up a meeting chat that has no group yet; waited for a few seconds at most, and a failure
+  /// doesn't keep the user out. The core does nothing for anybody else's meeting.
+  func prepareMeetingJoinFromNotice(meetingId: String) async {
+    let preparing = Task {
+      do {
+        try await core().prepareMeetingJoin(meetingId: meetingId)
+      } catch {
+        meetingsLog.warning("the meeting chat could not be prepared before joining from a notice")
+      }
+    }
+    let deadline = Task {
+      try? await Task.sleep(for: .seconds(5))
+      preparing.cancel()
+    }
+    await preparing.value
+    deadline.cancel()
+  }
 }

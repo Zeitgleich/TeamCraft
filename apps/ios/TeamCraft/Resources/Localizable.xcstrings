@@ -25664,6 +25664,102 @@
           }
         }
       }
+    },
+    "link_arrival_title %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ joined with the meeting link"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ ist über den Meeting-Link beigetreten"
+          }
+        }
+      }
+    },
+    "link_arrival_text %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ has no lobby, so they were let in. Remove them if they shouldn't be there."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ hat keine Lobby, deshalb wurde die Person eingelassen. Entferne sie, wenn sie nicht dabei sein soll."
+          }
+        }
+      }
+    },
+    "link_arrival_hidden_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Somebody joined a meeting"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jemand ist einem Meeting beigetreten"
+          }
+        }
+      }
+    },
+    "link_arrival_hidden_text": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "They came with the meeting link."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Person kam über den Meeting-Link."
+          }
+        }
+      }
+    },
+    "link_arrival_remove": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Entfernen"
+          }
+        }
+      }
+    },
+    "link_arrival_remove_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "They couldn't be removed. Try again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Person konnte nicht entfernt werden. Versuche es noch einmal."
+          }
+        }
+      }
     }
   },
   "version": "1.0"

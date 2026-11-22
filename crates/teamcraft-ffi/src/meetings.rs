@@ -26,7 +26,7 @@ use teamcraft_client_api::meeting_rows::{
 };
 use teamcraft_client_api::meeting_schedule::{MeetingSchedule, MeetingTimes, ScheduleEdit, ScheduleNote};
 use teamcraft_client_api::notetaker::may_ask_in;
-use teamcraft_core::client::guest_link_fragment;
+use teamcraft_core::client::{guest_link_fragment, note_meeting_setup_owed};
 use teamcraft_core::clock::{Clock as _, SystemClock};
 use teamcraft_core::meeting_invitees::InviteeList;
 use teamcraft_core::records;
@@ -295,13 +295,10 @@ impl Engine {
       added: invited_users(&request),
       kept: Vec::new(),
     };
+    let set_up = self.owed_chat_setup(&meeting, invitees)?;
     self
       .run_commands(vec![
-        CoreCommand::SetUpMeetingChat {
-          conversation: meeting.conversation_id,
-          meeting: meeting.id,
-          invitees,
-        },
+        set_up,
         // The lobby as the organizer chose it here, never as the server reports it, decides
         // whether this device lets guests of the link in by itself (#987).
         CoreCommand::NoteMeetingLobby {
@@ -353,16 +350,16 @@ impl Engine {
         .api_request("POST", "/meetings/instant", Some(to_json(&request)?))
         .await?,
     )?;
+    let set_up = self.owed_chat_setup(
+      &meeting,
+      InviteeList::Chosen {
+        added: Vec::new(),
+        kept: Vec::new(),
+      },
+    )?;
     self
       .run_commands(vec![
-        CoreCommand::SetUpMeetingChat {
-          conversation: meeting.conversation_id,
-          meeting: meeting.id,
-          invitees: InviteeList::Chosen {
-            added: Vec::new(),
-            kept: Vec::new(),
-          },
-        },
+        set_up,
         // The times the server gave the meeting just started, bounded, are its schedule from here
         // (#1919).
         CoreCommand::NoteMeetingSchedule {
@@ -535,6 +532,21 @@ impl Engine {
     Ok(())
   }
 
+  /// The setup of a new meeting's chat, noted as owed before it is queued: if the app dies before
+  /// the core ran it, the next sync finishes it (#2258, `teamcraft_core::client::note_meeting_setup_owed`).
+  fn owed_chat_setup(
+    &self,
+    meeting: &MeetingResponse,
+    invitees: InviteeList,
+  ) -> Result<CoreCommand, TeamCraftError> {
+    note_meeting_setup_owed(&self.store, meeting.conversation_id, meeting.id, &invitees)?;
+    Ok(CoreCommand::SetUpMeetingChat {
+      conversation: meeting.conversation_id,
+      meeting: meeting.id,
+      invitees,
+    })
+  }
+
   /// Before the user joins the call of `meeting_id`: its organizer's device founds the chat's group
   /// where a meeting from before 1.0.3 has none, with the server's attendees of whom only those the
   /// organizer's signed list names go in (#1726); anybody else knocks at the lobby. Nothing happens
@@ -576,6 +588,12 @@ impl Engine {
     let json = self.api_request("GET", &path, None).await?;
     let list: ListMeetingsResponse = from_json(&json)?;
     let mut commands = Vec::new();
+    // Handed a meeting since the last list (#1720): its hosts and admitters are signed with this
+    // user's key right away, whenever it starts, so links made from now on find them (#2258).
+    for meeting in self.meeting_watch.handed_over(&list.meetings, me) {
+      self.meeting_admitters_synced.insert(meeting.id, now);
+      commands.push(sync_admitters(&meeting));
+    }
     for due in admitters_due(&list.meetings, me, now) {
       if self
         .meeting_admitters_synced

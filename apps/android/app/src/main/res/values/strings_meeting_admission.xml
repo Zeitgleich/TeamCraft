@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Somebody let into a meeting by this device without a click: a meeting without a lobby, or an admitter in its call (#2258). -->
+<resources>
+  <string name="link_arrival_title">%1$s joined with the meeting link</string>
+  <string name="link_arrival_text">%1$s has no lobby, so they were let in. Remove them if they shouldn\'t be there.</string>
+  <string name="link_arrival_hidden_title">Somebody joined a meeting</string>
+  <string name="link_arrival_hidden_text">They came with the meeting link.</string>
+  <string name="link_arrival_remove">Remove</string>
+  <string name="link_arrival_remove_failed">They couldn\'t be removed. Try again.</string>
+</resources>

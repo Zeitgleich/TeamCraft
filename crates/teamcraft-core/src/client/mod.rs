@@ -49,6 +49,7 @@ mod meeting_hosts;
 mod meeting_records;
 #[cfg(feature = "ui")]
 mod meeting_schedule;
+mod meeting_setups;
 mod member_device;
 mod messaging;
 mod missing_keys;
@@ -182,6 +183,7 @@ pub use linking::{
   LinkWait, LinkWaitCancel, LinkedSecrets, NewDeviceLink, ReceiptCancel,
 };
 pub use meeting_hosts::{HostsChange, HostsChangeRecord, meeting_hosts_change};
+pub use meeting_setups::note_meeting_setup_owed;
 pub use member_device::{GroupAccess, is_waiting_for_device};
 pub use messaging::FlushReport;
 pub(crate) use messaging::{REMOVED_SENDER_GRACE_MS, decrypt_plaintext};

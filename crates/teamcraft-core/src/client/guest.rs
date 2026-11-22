@@ -1028,6 +1028,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     {
       return Ok(());
     }
+    let was_open = maybe_kept
+      .as_ref()
+      .is_some_and(|kept| kept.is_own && kept.admits_by_link);
     let maybe_invitees = match verified.maybe_invitees() {
       Some(invitees) => Some(InviteesRecord {
         sequence: verified.sequence(),
@@ -1057,6 +1060,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       &format!("{ADMITTERS_PREFIX}{conversation}"),
       &record,
     )?;
+    // This device may now let people of the link in by itself (#2258): the apps read the lobbies
+    // again with the meetings, so whoever waits already is let in now, not on the next knock.
+    if record.is_own && record.admits_by_link && !was_open {
+      crate::read_state::update_marks(&self.store, |marks| marks.meetings += 1)?;
+    }
     // A pending choice made on an older statement is replaced by this newer decision.
     if verified.maybe_invitees().is_some()
       && let Some(chosen) = records::get_json::<ChosenInvitees>(

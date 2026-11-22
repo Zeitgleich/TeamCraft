@@ -11,7 +11,7 @@ use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::meeting_hosts::co_hosts_from_dialog;
 use teamcraft_client_api::meeting_links::organizer_code;
 use teamcraft_client_api::meeting_schedule::{MeetingSchedule, MeetingTimes, ScheduleEdit, ScheduleNote};
-use teamcraft_core::meeting_lobby::{LobbyAdmission, SignedMembership};
+use teamcraft_core::meeting_lobby::{LobbyAdmission, SignedMembership, admits_by_itself};
 use teamcraft_proto::{
   CancelScope, IdempotencyKey, LobbyEntry, LobbyState, MeetingId, MeetingResponse, UnixMillis,
   UpdateMeetingRequest,
@@ -523,22 +523,8 @@ fn let_in(state: AppState, chat: ConversationId, user: UserId, admission: LobbyA
   });
 }
 
-/// Whether the organizer's device lets a lobby entry in by itself: only when the organizer chose
-/// "no lobby" on this device (`is_open_by_own_record`; the server's `has_lobby` counts for nothing)
-/// and the person came with the meeting link, with a device whose key they reported.
-pub fn admits_by_itself(
-  is_open_by_own_record: bool,
-  entry: &LobbyEntry,
-  membership: SignedMembership,
-) -> bool {
-  is_open_by_own_record
-    && entry.is_by_link
-    && entry.has_device
-    && LobbyAdmission::of(entry, membership).has_device_to_add()
-}
-
 /// In a meeting the organizer opened without a lobby, the organizer's device lets in by itself
-/// whoever knocked with the meeting link ([`admits_by_itself`]), and so does the device of an
+/// whoever knocked with the meeting link (`admits_by_itself`, the core's rule the phones use too), and so does the device of an
 /// admitter the organizer named while it is in the meeting's call (#1103): the organizer's own
 /// record decides on the organizer's device, the organizer's signed admitters on the others'.
 /// Each admission by itself is said with a "Remove" button (e2ee.md §4.6, "Meeting guests"). Runs
@@ -1761,51 +1747,6 @@ pub(crate) async fn save_meeting_edit(
 mod tests {
   use super::*;
 
-  #[test]
-  fn only_the_organizers_own_record_lets_the_device_admit_by_itself() {
-    let guest = lobby_entry("guest", true, true, Some(&"ab".repeat(32)));
-    let not_signed = SignedMembership::NotSigned;
-    // The server says "no lobby" and "came with the link": without the organizer's own record of
-    // "no lobby" nobody is let in unattended (#987 review).
-    assert!(!admits_by_itself(false, &guest, not_signed));
-    assert!(admits_by_itself(true, &guest, not_signed));
-    // An old link, a guest without a device or without a reported key: always a click.
-    assert!(!admits_by_itself(
-      true,
-      &lobby_entry("guest", false, true, Some(&"ab".repeat(32))),
-      not_signed
-    ));
-    assert!(!admits_by_itself(
-      true,
-      &lobby_entry("guest", true, false, Some(&"ab".repeat(32))),
-      not_signed
-    ));
-    assert!(!admits_by_itself(
-      true,
-      &lobby_entry("guest", true, true, None),
-      not_signed
-    ));
-    let member = lobby_entry("member", true, true, None);
-    assert!(admits_by_itself(true, &member, SignedMembership::Member));
-    // The server's word "member" without the signed roster's lets nobody in by itself (#1873).
-    assert!(!admits_by_itself(true, &member, not_signed));
-  }
-
-  fn lobby_entry(
-    kind: &str,
-    is_by_link: bool,
-    has_device: bool,
-    maybe_fingerprint: Option<&str>,
-  ) -> LobbyEntry {
-    serde_json::from_value(serde_json::json!({
-      "user": {"id": "77", "display_name": "Gus", "kind": kind},
-      "requested_at": 1,
-      "is_by_link": is_by_link,
-      "has_device": has_device,
-      "knock_fingerprint": maybe_fingerprint,
-    }))
-    .unwrap()
-  }
   use crate::model::id_from_raw;
 
   #[test]

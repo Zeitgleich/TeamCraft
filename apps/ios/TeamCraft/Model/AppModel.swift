@@ -185,6 +185,15 @@ final class AppModel {
   private(set) var isBusy = false
   /// Increments on every store change; screens re-read when it changes.
   private(set) var changeCount = 0
+  /// Increments when the user's meetings changed (a meeting, a knock, admitters this device may
+  /// act on) or the app came back (#2258): the meeting screens read again then, not on every change.
+  var meetingsChanges = 0
+  /// The core's meetings revision last seen, and the meeting watch's run (`AppModel+MeetingWatch`).
+  @ObservationIgnored var maybeMeetingsRevision: UInt64?
+  @ObservationIgnored var maybeMeetingWatch: Task<Void, Never>?
+  @ObservationIgnored var isMeetingWatchAsked = false
+  /// The server was told once that this app lets guests of the link in by itself (#987).
+  @ObservationIgnored var isAdmitterMarked = false
   /// The newest queued action the server or the network refused (#2242); the root view shows it once.
   var maybeQueuedFailure: AppFailure?
   /// The last conversation opened from a notification, counted so the same one twice is a change.
@@ -314,7 +323,11 @@ final class AppModel {
   @ObservationIgnored private var isReadingLinkRequests = false
   @ObservationIgnored private var isLinkRequestsDirty = false
 
-  private init() {}
+  private init() {
+    calls.onConnected = { [weak self] _ in
+      Task { @MainActor in self?.requestMeetingWatch() }
+    }
+  }
 
   enum PushStatus: Equatable {
     case unknown, enabled, denied
@@ -1161,6 +1174,8 @@ final class AppModel {
     connectionGrace.appReturned(now: .now)
     refreshCrashReports()
     await startSyncing()
+    // What happened to the meetings meanwhile: the list and the lobbies are read once (#2258).
+    meetingsChanged()
     await reconcileNotifications()
     // APNs hands out the token once per launch, but the app may stay suspended for days: retry a
     // registration that failed (server unreachable) and re-seal the token when it is due.
@@ -1293,7 +1308,8 @@ final class AppModel {
   /// conversation the user is in.
   func handle(
     notificationAction identifier: String, conversationId: String, tag: String?, replyText: String?,
-    maybeThreadId: String? = nil, notificationId: String? = nil, maybeMessageId: String? = nil
+    maybeThreadId: String? = nil, notificationId: String? = nil, maybeMessageId: String? = nil,
+    maybeMeetingId: String? = nil
   ) async {
     guard let conversation = await conversations().first(where: { $0.id == conversationId }) else {
       if identifier == UNNotificationDefaultActionIdentifier, await notifiedConversation(conversationId) != nil {
@@ -1316,7 +1332,9 @@ final class AppModel {
     case NotificationCategories.joinMeetingAction:
       removeDelivered(notificationId)
       openConversationId = conversationId
-      if isAuthentic { calls.startCall(conversationId: conversationId, displayName: conversation.name) }
+      guard isAuthentic else { return }
+      if let meetingId = maybeMeetingId { await prepareMeetingJoinFromNotice(meetingId: meetingId) }
+      calls.startCall(conversationId: conversationId, displayName: conversation.name)
     case NotificationCategories.declineCallAction:
       // There is no decline call in the core yet: the ring stops here, the caller rings on.
       removeDelivered(notificationId)
@@ -1425,6 +1443,7 @@ final class AppModel {
       await self?.refreshScheduledAttention()
     }
     Task { [weak self] in await self?.refreshExpiringGuests() }
+    Task { [weak self] in await self?.checkMeetingsRevision() }
     Task { [weak self] in await self?.leaveIfStoreTurnedUnreadable() }
     guard maybeReconcile == nil else { return }
     maybeReconcile = Task { [weak self] in

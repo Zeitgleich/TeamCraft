@@ -632,6 +632,11 @@ impl CallHub {
     }
   }
 
+  /// The conversation of the call this device is in, if any.
+  pub(crate) fn active_conversation(&self) -> Option<ConversationId> {
+    lock(&self.inner).maybe_active
+  }
+
   /// Rings from the gateway, for the core's call event sink; `true` when the running calls changed.
   pub(crate) fn on_gateway_event(&self, event: &GatewayEvent) -> bool {
     let has_changed = self.running.follow(event);

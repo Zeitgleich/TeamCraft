@@ -136,24 +136,34 @@ impl Engine {
         "the person can't be admitted yet: no key code shown or not a confirmed member".into(),
       ));
     }
-    let meeting = read.meeting;
-    let verb = match decision {
-      LobbyDecision::Admit => "admit",
-      LobbyDecision::Deny => "deny",
-    };
-    let path = format!("/meetings/{}/lobby/{user}/{verb}", meeting.id);
-    self.api_request("POST", &path, None).await?;
-    if decision == LobbyDecision::Admit {
-      // The meeting's end as the server lists it; the core caps a guest's access by the
-      // organizer's signed admitters (#1873).
-      let (chat, until) = (meeting.conversation_id, meeting.ends_at.0 + GUEST_ACCESS_GRACE_MS);
-      self
-        .with_client(move |client| {
-          Box::pin(async move { client.let_in_from_lobby(chat, &entry, until).await })
-        })
-        .await?;
+    match decision {
+      LobbyDecision::Admit => self.admit_from_lobby(&read.meeting, entry).await?,
+      LobbyDecision::Deny => {
+        let path = format!("/meetings/{}/lobby/{user}/deny", read.meeting.id);
+        self.api_request("POST", &path, None).await?;
+      },
     }
     Ok(LobbyDecisionOutcome::Done)
+  }
+
+  /// Admits `entry` waiting in the lobby of `meeting`: tells the server, then lets the person's
+  /// devices into the meeting chat's encryption from this device (`Client::let_in_from_lobby`),
+  /// which checks again that this device may (the organizer's, a signed host's or a signed
+  /// admitter's) and adds a guest only with the key their page reported. A host's "Admit" and the
+  /// meeting watch's admission of link arrivals both come here.
+  pub(crate) async fn admit_from_lobby(
+    &mut self,
+    meeting: &MeetingResponse,
+    entry: LobbyEntry,
+  ) -> Result<(), TeamCraftError> {
+    let path = format!("/meetings/{}/lobby/{}/admit", meeting.id, entry.user.id);
+    self.api_request("POST", &path, None).await?;
+    // The meeting's end as the server lists it; the core caps a guest's access by the organizer's
+    // signed admitters (#1873).
+    let (chat, until) = (meeting.conversation_id, meeting.ends_at.0 + GUEST_ACCESS_GRACE_MS);
+    self
+      .with_client(move |client| Box::pin(async move { client.let_in_from_lobby(chat, &entry, until).await }))
+      .await
   }
 
   /// After the user left the call of `conversation_id` from the system's call UI: people wait in

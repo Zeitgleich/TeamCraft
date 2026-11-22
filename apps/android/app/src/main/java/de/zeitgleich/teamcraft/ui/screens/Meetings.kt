@@ -82,7 +82,8 @@ private enum class MeetingsView(@StringRes val label: Int) { UPCOMING(R.string.m
 @Composable
 fun MeetingsScreen(viewModel: MainViewModel, onBack: () -> Unit) {
   var view by rememberSaveable { mutableStateOf(MeetingsView.UPCOMING) }
-  val read = rememberRead(viewModel) { meetingsWithLobbies() }
+  // Read again when the meetings change, not on every change of the store (#2258): a knock moves it too.
+  val read = rememberRead(viewModel, changes = viewModel.meetingsChanges) { meetingsWithLobbies() }
   // The lobbies of the live meetings the user hosts, by meeting (#1905); read again on a knock.
   val lobbies = read.maybeValue?.lobbies.orEmpty().associateBy { it.meetingId }
   // The past list is only read once it is looked at.

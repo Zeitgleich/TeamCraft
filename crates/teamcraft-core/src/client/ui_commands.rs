@@ -484,10 +484,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         conversation,
         meeting,
         invitees,
-      } => self
-        .set_up_meeting_chat_from(conversation, Some(meeting), &invitees)
-        .await
-        .map(|_| ()),
+      } => {
+        self
+          .set_up_meeting_chat_from(conversation, Some(meeting), &invitees)
+          .await?;
+        self.clear_meeting_setup_owed(conversation)
+      },
       CoreCommand::UpdateMeetingChatMembers {
         conversation,
         meeting,

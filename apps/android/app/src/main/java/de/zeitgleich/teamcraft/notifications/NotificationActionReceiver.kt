@@ -13,10 +13,12 @@ import de.zeitgleich.teamcraft.core.ChatClient
 import de.zeitgleich.teamcraft.push.WakeUpWork
 import de.zeitgleich.teamcraft.ui.JoinStep
 import uniffi.teamcraft_ffi.JoinRequestItem
+import uniffi.teamcraft_ffi.LinkArrival
 
 /**
  * "Reply", "mark as read" and "mute" from a notification ([NotificationActions]), on the phone or in Android Auto, the
- * notification being swiped away, and Approve or Decline of an admin's request to join.
+ * notification being swiped away, Approve or Decline of an admin's request to join, and "Remove" on somebody let
+ * into a meeting without a click.
  */
 class NotificationActionReceiver : BroadcastReceiver() {
   override fun onReceive(context: Context, intent: Intent) {
@@ -66,6 +68,10 @@ class NotificationActionReceiver : BroadcastReceiver() {
           val step = if (intent.action == ACTION_APPROVE_JOIN) JoinStep.Approve else JoinStep.Decline
           graph.joinRequestNotifier.decide(graph.core, step, conversationId, user, tag)
         }
+        ACTION_REMOVE_LINK_ARRIVAL -> {
+          val arrival = linkArrival(intent, conversationId) ?: return
+          graph.linkArrivalNotifier.remove(graph.core, arrival)
+        }
       }
     } catch (failure: Exception) {
       Log.w(TAG, "notification action failed: ${failure.javaClass.simpleName}")
@@ -81,6 +87,8 @@ class NotificationActionReceiver : BroadcastReceiver() {
     const val ACTION_MEETING_DISMISSED = "de.zeitgleich.teamcraft.MEETING_DISMISSED"
     const val ACTION_APPROVE_JOIN = "de.zeitgleich.teamcraft.APPROVE_JOIN"
     const val ACTION_DECLINE_JOIN = "de.zeitgleich.teamcraft.DECLINE_JOIN"
+    /** "Remove" on somebody let into a meeting by this device without a click (#2258). */
+    const val ACTION_REMOVE_LINK_ARRIVAL = "de.zeitgleich.teamcraft.REMOVE_LINK_ARRIVAL"
     const val KEY_REPLY = "reply"
     private const val EXTRA_CONVERSATION_ID = "conversation_id"
     private const val EXTRA_THREAD_ID = "thread_id"
@@ -90,6 +98,8 @@ class NotificationActionReceiver : BroadcastReceiver() {
     private const val EXTRA_TAG = "tag"
     private const val EXTRA_MEETING_ID = "meeting_id"
     private const val EXTRA_MEETING_STARTS_AT_MS = "meeting_starts_at_ms"
+    private const val EXTRA_MEETING_TITLE = "meeting_title"
+    private const val EXTRA_DISPLAY_NAME = "display_name"
     private const val TAG = "TeamCraftNotify"
 
     fun intent(
@@ -113,6 +123,26 @@ class NotificationActionReceiver : BroadcastReceiver() {
         .setData(Uri.parse("teamcraft-meeting-notice://$meetingId/$startsAtMs"))
         .putExtra(EXTRA_MEETING_ID, meetingId)
         .putExtra(EXTRA_MEETING_STARTS_AT_MS, startsAtMs)
+
+    /** "Remove" on [arrival] ([ACTION_REMOVE_LINK_ARRIVAL]); it carries what shows it again on a failure. */
+    fun linkArrivalIntent(context: Context, arrival: LinkArrival): Intent =
+      intent(context, ACTION_REMOVE_LINK_ARRIVAL, arrival.conversationId)
+        .putExtra(EXTRA_MEETING_ID, arrival.meetingId)
+        .putExtra(EXTRA_MEETING_TITLE, arrival.meetingTitle)
+        .putExtra(EXTRA_USER_ID, arrival.userId)
+        .putExtra(EXTRA_DISPLAY_NAME, arrival.displayName)
+
+    private fun linkArrival(intent: Intent, conversationId: String): LinkArrival? {
+      val meetingId = intent.getStringExtra(EXTRA_MEETING_ID) ?: return null
+      val userId = intent.getStringExtra(EXTRA_USER_ID) ?: return null
+      return LinkArrival(
+        meetingId = meetingId,
+        meetingTitle = intent.getStringExtra(EXTRA_MEETING_TITLE).orEmpty(),
+        conversationId = conversationId,
+        userId = userId,
+        displayName = intent.getStringExtra(EXTRA_DISPLAY_NAME).orEmpty(),
+      )
+    }
 
     /** Approve or Decline of [request] ([ACTION_APPROVE_JOIN], [ACTION_DECLINE_JOIN]). */
     fun joinRequestIntent(context: Context, action: String, request: JoinRequestItem): Intent =
