@@ -203,7 +203,7 @@ async fn a_signed_recording_notice_is_reported_as_a_start_and_a_stop() {
 
   let folder = std::env::temp_dir().join(format!("teamcraft-sfu-recording-{}", std::process::id()));
   std::fs::create_dir_all(&folder).unwrap();
-  let recorder = CallRecorder::start(&folder.join("take"), Duration::from_secs(60)).unwrap();
+  let recorder = CallRecorder::start(&folder.join("take"), Duration::from_secs(60), None).unwrap();
   let recording = &calls[&RECORDER];
   // The notice goes out once the call has its DAVE session; until then the engine holds it.
   recording.set_recording(Some(recorder.sink()));
