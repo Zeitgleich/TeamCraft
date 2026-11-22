@@ -77,7 +77,7 @@ pub fn MessageRow(
     .map(|ts| crate::clock::format_date(ts, locale));
   let divider_view = divider.map(|label| {
     view! {
-      <div class="date-divider" role="separator">
+      <div class="date-divider">
         <DatePill label=label />
       </div>
     }
@@ -90,7 +90,7 @@ pub fn MessageRow(
     .map(|mark| {
       let source = imported_source_text(mark.source);
       view! {
-        <div class="date-divider" role="separator">
+        <div class="date-divider">
           <DatePill label=i18n.t_with("imported-until", &[("source", &source)]) />
         </div>
       }
@@ -172,6 +172,7 @@ fn placeholder_message(message: Message, placeholder: Placeholder, is_grouped: b
       class:msg-mine=is_mine
       class:msg-highlight=move || state.highlighted.get() == Some(message_id)
       tabindex="-1"
+      role="article"
       data-nav="row"
       data-msg-id=message_id.to_string()
       aria-label=aria_label
@@ -465,6 +466,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
     .map(|user| user.display_name.clone())
     .unwrap_or_default();
   let aria_label_base = format!("{author_name}, {time}");
+  let body_id = format!("msg-body-{message_id}");
   // Selection mode (issue #2070): a tap toggles the row, and a screen reader hears its state.
   let is_selecting = Memo::new(move |_| {
     state
@@ -1154,6 +1156,10 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
       class:msg-highlight=move || state.highlighted.get() == Some(message_id)
       hidden=move || state.hidden_messages.with(|hidden| hidden.contains(&message_id))
       tabindex="-1"
+      // #217: an article may be named, and its body is its description, so a focused message
+      // reads "author, time" and then the text (a named generic `div` read only the name).
+      role="article"
+      aria-describedby=body_id.clone()
       data-nav="row"
       data-msg-id=message_id.to_string()
       aria-label=aria_label
@@ -1232,7 +1238,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
       <div class="msg-gutter">{gutter}</div>
       <div class="msg-main">
         <div class="msg-bubble">
-          {header} {forwarded} {quote} <div class="msg-body">
+          {header} {forwarded} {quote} <div class="msg-body" id=body_id.clone()>
             {rendered_body}
             {edited}
             {badges}

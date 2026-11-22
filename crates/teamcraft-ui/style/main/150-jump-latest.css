@@ -23,6 +23,9 @@
   top: -0.375rem;
   right: -0.375rem;
   background: var(--accent);
+  /* The badge's white is 2.7:1 on the dark theme's light accent; the accent's own text colour
+     passes in both themes (#217). */
+  color: var(--on-accent);
 }
 
 @media (hover: hover) and (pointer: fine) {

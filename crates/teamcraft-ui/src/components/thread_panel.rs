@@ -86,7 +86,7 @@ pub fn ThreadPanel(
           <Icon name=IconName::Close />
         </button>
       </header>
-      <div class="panel-scroll" tabindex="0" role="log" node_ref=scroll
+      <div class="panel-scroll" tabindex="0" role="log" aria-live="off" node_ref=scroll
         aria-label=move || i18n.t("thread-messages-label")
         on:keydown=move |ev| handle_list_keys(&ev, scroll, scroll)
       >
@@ -97,7 +97,7 @@ pub fn ThreadPanel(
             if index == 1 {
               out.push(
                 view! {
-                  <div class="thread-divider" role="separator">
+                  <div class="thread-divider">
                     <span>{move || i18n.t("thread-replies-divider")}</span>
                   </div>
                 }

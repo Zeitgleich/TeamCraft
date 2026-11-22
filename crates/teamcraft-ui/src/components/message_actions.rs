@@ -62,7 +62,8 @@ pub enum MessageAction {
   Delete,
 }
 
-/// Where the actions are listed: the "more" menu leaves out what the toolbar shows as buttons.
+/// Where the actions are listed: the "more" menu leaves out the thread, which the toolbar and the
+/// T key open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActionSurface {
   MoreMenu,
@@ -119,7 +120,9 @@ pub fn message_actions(context: ActionContext, surface: ActionSurface) -> Vec<Me
   if permissions.can_post {
     actions.push(MessageAction::Quote);
   }
-  if is_sheet {
+  // Also in the "more" menu, though the toolbar has buttons for them: the menu is the keyboard's
+  // way to every action (Shift+F10 on a focused message, #217).
+  {
     actions.push(MessageAction::Forward);
     actions.push(if context.is_saved {
       MessageAction::Unsave
@@ -189,6 +192,23 @@ impl MessageAction {
       Self::Edit => IconName::Compose,
       Self::Delete => IconName::Trash,
     }
+  }
+
+  /// Whether the action is done in place, opening no dialog, panel or editor that takes the
+  /// focus: the focus then returns to the message (#217).
+  pub fn leaves_focus_here(self) -> bool {
+    matches!(
+      self,
+      Self::Save
+        | Self::Unsave
+        | Self::Pin
+        | Self::Unpin
+        | Self::BookmarkFile
+        | Self::CopyLink
+        | Self::CopyText
+        | Self::MarkUnread
+        | Self::Delete
+    )
   }
 
   /// The key that does the same on a focused message, shown in the tooltip.
@@ -843,12 +863,14 @@ mod tests {
   use super::*;
 
   #[test]
-  fn the_more_menu_leaves_out_the_toolbar_buttons() {
+  fn the_more_menu_reaches_every_action_but_the_thread() {
     let actions = message_actions(allowed(), ActionSurface::MoreMenu);
     assert_eq!(
       actions,
       [
         MessageAction::Quote,
+        MessageAction::Forward,
+        MessageAction::Save,
         MessageAction::CopyLink,
         MessageAction::CopyText,
         MessageAction::MarkUnread,

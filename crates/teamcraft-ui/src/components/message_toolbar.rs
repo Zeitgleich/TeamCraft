@@ -233,6 +233,31 @@ impl ToolbarHost {
     self.hide_soon();
   }
 
+  /// After an action that opens nothing else (#217): the focus goes back to the message, or to a
+  /// neighbour when the message went away (deleted, its undo toast showing), instead of falling to
+  /// the page when the menu closes.
+  fn refocus_row(&self, id: MessageId) {
+    let Some(container) = self.container.try_get_untracked().flatten() else {
+      return;
+    };
+    request_animation_frame(move || {
+      let maybe_row = container
+        .query_selector(&format!("[data-msg-id=\"{id}\"]"))
+        .ok()
+        .flatten();
+      let maybe_target = match maybe_row {
+        Some(row) if !row.has_attribute("hidden") => Some(row),
+        Some(row) => neighbour_row(&row),
+        None => None,
+      };
+      let target: web_sys::Element = maybe_target.unwrap_or_else(|| container.into());
+      if let Some(element) = target.dyn_ref::<web_sys::HtmlElement>() {
+        // Nothing to do if it can't take the focus: it stays where the browser put it.
+        let _ = element.focus();
+      }
+    });
+  }
+
   /// Whether the pointer or the keyboard focus is on the toolbar or on its message.
   fn is_in_use(&self) -> bool {
     let (Some(container), Some(id)) = (
@@ -249,6 +274,27 @@ impl ToolbarHost {
     );
     container.query_selector(&selector).ok().flatten().is_some()
   }
+}
+
+/// The next visible message row after `row`, or the one before it.
+fn neighbour_row(row: &web_sys::Element) -> Option<web_sys::Element> {
+  const VISIBLE_ROW: &str = "[data-nav=\"row\"]:not([hidden])";
+  let slot = row.closest(".row").ok().flatten()?;
+  let mut maybe_next = slot.next_element_sibling();
+  while let Some(next) = maybe_next {
+    if let Some(found) = next.query_selector(VISIBLE_ROW).ok().flatten() {
+      return Some(found);
+    }
+    maybe_next = next.next_element_sibling();
+  }
+  let mut maybe_previous = slot.previous_element_sibling();
+  while let Some(previous) = maybe_previous {
+    if let Some(found) = previous.query_selector(VISIBLE_ROW).ok().flatten() {
+      return Some(found);
+    }
+    maybe_previous = previous.previous_element_sibling();
+  }
+  None
 }
 
 /// The one toolbar of a list, rendered inside its scroll container.
@@ -311,6 +357,9 @@ fn ToolbarBar(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
   let run = move |action: MessageAction| {
     host.close_menu();
     message.with_value(|message| run_message_action(action, message, extras.get_untracked().as_ref()));
+    if action.leaves_focus_here() {
+      host.refocus_row(id);
+    }
   };
   let react = move |emoji: &str| {
     state.settings.remember_emoji(emoji);

@@ -263,6 +263,30 @@ pub fn MessageList(
       motion.update_value(|motion| motion.set_baseline_if_unset(newest));
     }
   });
+  // #217: the list is `aria-live="off"`: rows mounted by scrolling and older pages would all be
+  // read out. A new message from somebody else is announced here instead, once.
+  let arrival = RwSignal::new(String::new());
+  let announced_newest = StoredValue::new(newest_confirmed_of(state, conversation));
+  Effect::new(move |_| {
+    count.track();
+    if is_log {
+      return;
+    }
+    let Some(newest) = newest_confirmed_of(state, conversation) else {
+      return;
+    };
+    let maybe_previous = announced_newest.get_value();
+    if maybe_previous == Some(newest) {
+      return;
+    }
+    announced_newest.set_value(Some(newest));
+    // Opened empty (still loading): the first messages are history, not news.
+    if maybe_previous.is_some()
+      && let Some(text) = arrival_text(state, i18n, conversation, newest)
+    {
+      arrival.set_if_alive(text);
+    }
+  });
   let heights = StoredValue::new_local(vec![estimate; count.get_untracked()]);
   let scroll_top = RwSignal::new(0.0_f64);
   let viewport = RwSignal::new(800.0_f64);
@@ -980,6 +1004,7 @@ pub fn MessageList(
         class:log-view=is_log
         class:is-dm=is_dm
         role="log"
+        aria-live="off"
         tabindex="0"
         aria-label=move || i18n.t("messages-label")
         node_ref=container
@@ -1038,6 +1063,7 @@ pub fn MessageList(
         <div class="spacer" style:height=move || format!("{}px", window.get().pad_bottom)></div>
         <MessageToolbar host=toolbar />
       </div>
+      <div class="visually-hidden" role="status">{move || arrival.get()}</div>
       <div class="jump-stack">
       <ReactionJump conversation=conversation visible=visible is_watched=is_watched />
       <Show when=move || !stick_to_bottom.get() fallback=|| ()>
@@ -1652,7 +1678,7 @@ fn RowSlot(
   view! {
     <div class="row" data-idx=move || index().to_string()>
       <Show when=has_divider fallback=|| ()>
-        <div class="new-divider" role="separator">
+        <div class="new-divider">
           <span>{move || i18n.t("new-messages")}</span>
         </div>
       </Show>
@@ -1721,6 +1747,38 @@ fn newest_confirmed_of(
     let start = count.saturating_sub(LOOK_BACK);
     let tail = backend.messages(conversation, start, count - start);
     newest_confirmed(tail.iter().rev())
+  })
+}
+
+/// What a screen reader hears when `newest` arrived (#217): who wrote it and the start of it.
+/// Nothing for the user's own messages (sent from here or another device).
+fn arrival_text(
+  state: AppState,
+  i18n: I18n,
+  conversation: ConversationId,
+  newest: crate::model::MessageId,
+) -> Option<String> {
+  const LOOK_BACK: usize = 8;
+  let me = state.me().id;
+  state.read(|backend| {
+    let count = backend.message_count(conversation);
+    let start = count.saturating_sub(LOOK_BACK);
+    let message = backend
+      .messages(conversation, start, count - start)
+      .into_iter()
+      .find(|message| message.id == newest)
+      .filter(|message| message.author != me)?;
+    let author = backend
+      .user(message.author)
+      .map(|user| user.display_name)
+      .unwrap_or_default();
+    let text = crate::components::message_actions::excerpt(&message.body);
+    let text = if text.is_empty() {
+      i18n.t("new-messages")
+    } else {
+      text
+    };
+    Some(i18n.t_with("message-arrived", &[("author", &author), ("text", &text)]))
   })
 }
 
