@@ -23,6 +23,7 @@ use crate::client::disk_downloads::{
 };
 use crate::client::files::failure_of;
 use crate::error::CoreError;
+use crate::media_stream::{DeliverOpened, DeliverPart, MediaStreamToken, MediaStreams};
 use crate::store::{AttachmentRef, LocalStore};
 
 /// Downloads running at once by default: enough for an album's pictures and the viewer, few enough
@@ -49,6 +50,8 @@ pub struct Downloads {
   /// The connection came back or the network changed: the next [`Self::start_due`] continues the
   /// saves that failed for a transient reason (issue #1618), once.
   is_network_back: bool,
+  /// Videos playing while they stream (#200); their reads run beside the downloads.
+  streams: MediaStreams,
 }
 
 /// What a finished download leaves for the host.
@@ -141,6 +144,7 @@ impl Downloads {
       maybe_next_scan_ms: Some(i64::MIN),
       has_resumed: false,
       is_network_back: false,
+      streams: MediaStreams::new(),
     }
   }
 
@@ -208,6 +212,21 @@ impl Downloads {
     }
   }
 
+  /// Queues opening a video to play while it streams ([`crate::media_stream`]).
+  pub fn open_stream(&mut self, reference: AttachmentRef, deliver: DeliverOpened) {
+    self.streams.open(reference, deliver);
+  }
+
+  /// Queues one read of an open stream.
+  pub fn read_stream(&mut self, token: MediaStreamToken, start: u64, deliver: DeliverPart) {
+    self.streams.read(token, start, deliver);
+  }
+
+  /// Closes a stream nothing plays any more.
+  pub fn close_stream(&mut self, token: &MediaStreamToken) {
+    self.streams.close(token);
+  }
+
   /// Queues saving a file to disk (in the browser: to its download folder).
   pub fn save(&mut self, conversation: ConversationId, attachment: AttachmentId) {
     self.queue_save(conversation, attachment, DownloadTarget::DownloadDirectory);
@@ -260,6 +279,9 @@ impl Downloads {
   pub async fn start_due<A: ServerApi, S: LocalStore>(&mut self, client: &mut Client<A, S>) -> bool {
     let mut is_changed = self.apply_controls(client);
     self.queue_due_saves(client);
+    for work in self.streams.start_due(client).await {
+      self.running.push(Box::pin(work.map(|()| Finished::Viewed)));
+    }
     // What the user opened has one slot beyond the limit, so it never waits for previews.
     while self.running.len() < self.limit
       || (self.running.len() <= self.limit && self.waiting.front().is_some_and(Job::is_urgent))

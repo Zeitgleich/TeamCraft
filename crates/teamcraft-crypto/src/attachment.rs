@@ -692,6 +692,11 @@ impl AttachmentLayout {
     self.plaintext_len
   }
 
+  /// The blob's length this layout was made for, the header included.
+  pub fn ciphertext_len(&self) -> u64 {
+    self.ciphertext_len
+  }
+
   /// The whole chunks that hold plaintext bytes `start..end`; `None` when the range is empty or
   /// starts at or past the end of the file. An `end` past the end is cut to it.
   pub fn span(&self, start: u64, end: u64) -> Option<ChunkSpan> {

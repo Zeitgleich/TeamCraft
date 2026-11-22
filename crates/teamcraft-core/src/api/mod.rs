@@ -887,6 +887,10 @@ pub trait ServerApi {
   /// pieces. Stops with a network error once a piece takes longer than the stall timeout.
   #[cfg(not(target_arch = "wasm32"))]
   fn get_blob_from_detached(&self, url: &str, start: u64) -> DetachedRange;
+  /// Downloads bytes `start..end` of a blob (an HTTP `Range` request) as a request of its own, for
+  /// playing a video while it streams. Exactly those bytes or an error: a storage that ignores the
+  /// range, or answers fewer or more bytes, fails.
+  fn get_blob_range_detached(&self, url: &str, start: u64, end: u64) -> DetachedDownload;
   /// Downloads an encrypted blob from a presigned URL.
   fn get_blob(&self, url: &str) -> impl Future<Output = Result<Vec<u8>, ApiError>>;
   /// Like [`Self::get_blob`], but stops reading (and fails) once the blob grows past `max_bytes`,

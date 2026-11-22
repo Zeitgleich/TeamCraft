@@ -76,6 +76,43 @@ pub async fn get(
   Ok(bytes)
 }
 
+/// Downloads bytes `start..end` with a `Range` request (the storage's CORS rule must allow the
+/// header); exactly those bytes, or an error.
+pub async fn get_range(url: &str, start: u64, end: u64) -> Result<Vec<u8>, ApiError> {
+  let wanted = end.saturating_sub(start);
+  if wanted == 0 {
+    return Ok(Vec::new());
+  }
+  let mut request = Transfer::open("GET", url)?;
+  request
+    .xhr
+    .set_response_type(XmlHttpRequestResponseType::Arraybuffer);
+  request
+    .xhr
+    .set_request_header("Range", &format!("bytes={start}-{}", end - 1))
+    .map_err(js_error)?;
+  let target: web_sys::XmlHttpRequestEventTarget = request.xhr.clone().unchecked_into();
+  request.on_progress(&target, ByteCounter::default(), Some(wanted));
+  request.xhr.send().map_err(js_error)?;
+  let xhr = request.finish().await?;
+  // 200 is the whole blob: a storage that ignores ranges can't stream.
+  if xhr.status().map_err(js_error)? != 206 {
+    return Err(ApiError::Decode(
+      "the storage did not answer the range asked for".into(),
+    ));
+  }
+  let buffer: ArrayBuffer = xhr
+    .response()
+    .map_err(js_error)?
+    .dyn_into()
+    .map_err(|_| ApiError::Decode("the download is not binary".into()))?;
+  let bytes = Uint8Array::new(&buffer).to_vec();
+  if bytes.len() as u64 != wanted {
+    return Err(ApiError::Network("the range ended early".into()));
+  }
+  Ok(bytes)
+}
+
 /// One request and the listeners that end it.
 struct Transfer {
   xhr: XmlHttpRequest,
