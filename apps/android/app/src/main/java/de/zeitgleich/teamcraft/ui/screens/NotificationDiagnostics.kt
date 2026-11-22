@@ -3,6 +3,9 @@ package de.zeitgleich.teamcraft.ui.screens
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.heading
 import android.app.NotificationManager
@@ -144,16 +147,23 @@ private fun UnifiedPushDetails(viewModel: MainViewModel, health: NotificationHea
   StatusLine(text, isOk, status.maybeFailureReason.orEmpty())
   if (health.distributors.size > 1) {
     Text(stringResource(R.string.unifiedpush_choose), style = MaterialTheme.typography.bodySmall)
-    for (distributor in health.distributors) {
-      Row(verticalAlignment = Alignment.CenterVertically) {
-        RadioButton(
-          selected = distributor.packageName == current?.packageName,
-          onClick = {
-            viewModel.selectDistributor(distributor.packageName)
-            onChanged()
-          },
-        )
-        Text(distributor.label)
+    Column(Modifier.selectableGroup()) {
+      for (distributor in health.distributors) {
+        val isChosen = distributor.packageName == current?.packageName
+        Row(
+          Modifier.fillMaxWidth().selectable(
+            selected = isChosen,
+            role = Role.RadioButton,
+            onClick = {
+              viewModel.selectDistributor(distributor.packageName)
+              onChanged()
+            },
+          ),
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          RadioButton(selected = isChosen, onClick = null)
+          Text(distributor.label)
+        }
       }
     }
   }

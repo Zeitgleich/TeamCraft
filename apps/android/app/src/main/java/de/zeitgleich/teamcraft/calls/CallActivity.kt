@@ -52,6 +52,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalAccessibilityManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -595,11 +596,20 @@ private fun CallScreen(
   val hasVideo = tracks.isNotEmpty()
   var areControlsShown by rememberSaveable { mutableStateOf(true) }
   var interactions by remember { mutableIntStateOf(0) }
-  LaunchedEffect(areControlsShown, interactions, hasVideo, isConnected) {
+  // WCAG 2.2.1: with TalkBack or Switch Access the controls stay (the recommended timeout is then
+  // unlimited); otherwise the user's "Time to take action" setting stretches the delay.
+  val maybeAccessibility = LocalAccessibilityManager.current
+  val hideDelayMillis = maybeAccessibility?.calculateRecommendedTimeoutMillis(
+    CONTROLS_HIDE_DELAY_MILLIS,
+    containsIcons = true,
+    containsText = false,
+    containsControls = true,
+  ) ?: CONTROLS_HIDE_DELAY_MILLIS
+  LaunchedEffect(areControlsShown, interactions, hasVideo, isConnected, hideDelayMillis) {
     if (!hasVideo) {
       areControlsShown = true
-    } else if (areControlsShown && isConnected) {
-      delay(CONTROLS_HIDE_DELAY_MILLIS)
+    } else if (areControlsShown && isConnected && hideDelayMillis != Long.MAX_VALUE) {
+      delay(hideDelayMillis)
       areControlsShown = false
     }
   }

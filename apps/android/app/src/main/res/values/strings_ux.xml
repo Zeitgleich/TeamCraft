@@ -206,6 +206,7 @@
   <string name="voice_send">Send voice message</string>
   <string name="voice_discard">Discard voice message</string>
   <string name="voice_stop">Stop recording</string>
+  <string name="voice_recording_state">Recording</string>
   <string name="voice_starting">Starting the microphone…</string>
   <string name="voice_finishing">Finishing…</string>
   <string name="voice_hold_hint">Let go to send · slide left to cancel · slide up to keep recording</string>

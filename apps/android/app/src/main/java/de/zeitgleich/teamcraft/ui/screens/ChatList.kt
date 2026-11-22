@@ -661,11 +661,14 @@ internal fun MainScaffold(
         // tab bar at the end, as the floating action button of Google's apps.
         if (shownTab == ChatTab.Home || (shownTab == ChatTab.Direct && hasDirect)) {
           val isHome = shownTab == ChatTab.Home
+          val fabLabel = stringResource(if (isHome) R.string.create_new else R.string.dm_new)
+          // Material's extended FAB clears the text slot's semantics: the icon carries the name,
+          // expanded or not, or TalkBack reads just "Button".
           ExtendedFloatingActionButton(
             onClick = if (isHome) onCreate else ({ onNavigate("browse?people=true") }),
             expanded = isFabExpanded,
-            icon = { Icon(if (isHome) Icons.Filled.Add else Icons.Filled.Edit, contentDescription = null) },
-            text = { Text(stringResource(if (isHome) R.string.create_new else R.string.dm_new)) },
+            icon = { Icon(if (isHome) Icons.Filled.Add else Icons.Filled.Edit, contentDescription = fabLabel) },
+            text = { Text(fabLabel) },
             modifier = Modifier
               .align(Alignment.BottomEnd)
               .then(barModifier)

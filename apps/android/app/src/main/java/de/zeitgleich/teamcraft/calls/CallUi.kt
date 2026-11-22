@@ -29,6 +29,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -455,8 +456,19 @@ private fun Stage(
   modifier: Modifier,
 ) {
   val toggleLabel = stringResource(R.string.call_toggle_controls)
-  // No ripple across the whole screen: a tap only shows or hides the chrome, as in Meet.
-  Box(modifier.clickable(interactionSource = null, indication = null, onClickLabel = toggleLabel, onClick = onToggleControls)) {
+  // No ripple across the whole screen: a tap only shows or hides the chrome, as in Meet. Not
+  // `clickable`: that merges every tile into one node, and TalkBack couldn't step through the
+  // people in the call. The tap and the accessibility action are set apart instead.
+  Box(
+    modifier
+      .pointerInput(onToggleControls) { detectTapGestures { onToggleControls() } }
+      .semantics {
+        onClick(label = toggleLabel) {
+          onToggleControls()
+          true
+        }
+      },
+  ) {
     when (layout) {
       StageLayout.Spotlight -> SpotlightStage(ui, chrome)
       // Edge to edge, behind the system bars, cropped to fill; the header names the person.
@@ -623,6 +635,8 @@ private fun AvatarImage(userId: String, name: String, size: Dp, modifier: Modifi
         name.firstOrNull()?.uppercase() ?: "?",
         color = Color.White,
         fontSize = (size.value * 0.42f).sp,
+        // The name label says who it is; TalkBack shouldn't read the initial on its own.
+        modifier = Modifier.clearAndSetSemantics {},
         fontWeight = FontWeight.Medium,
       )
     }

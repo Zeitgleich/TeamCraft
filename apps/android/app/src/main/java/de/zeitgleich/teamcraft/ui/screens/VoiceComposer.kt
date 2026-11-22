@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -63,10 +64,14 @@ import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.LayoutDirection
@@ -133,7 +138,7 @@ internal fun rememberVoiceControls(viewModel: MainViewModel, owner: VoiceOwner):
 @Composable
 internal fun VoiceBar(viewModel: MainViewModel, controls: VoiceControls, modifier: Modifier = Modifier) {
   val context = LocalContext.current
-  Row(modifier.height(48.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+  Row(modifier.heightIn(min = 48.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
     when (val state = controls.state) {
       is VoiceState.Starting -> {
         CircularProgressIndicator(Modifier.padding(horizontal = 12.dp).size(20.dp), strokeWidth = 2.dp)
@@ -145,7 +150,9 @@ internal fun VoiceBar(viewModel: MainViewModel, controls: VoiceControls, modifie
         Text(
           formatVideoDuration(state.elapsedMs),
           style = MaterialTheme.typography.bodyMedium,
-          modifier = Modifier.padding(horizontal = 8.dp).semantics { liveRegion = LiveRegionMode.Polite },
+          // Not a live region: it changes every second, and TalkBack reading it aloud would end up
+          // in the recording. Start and stop are announced by the record button's state.
+          modifier = Modifier.padding(horizontal = 8.dp),
         )
         if (state.isLocked) {
           LiveBars(state.levels, Modifier.weight(1f))
@@ -272,6 +279,7 @@ internal fun VoiceButton(
     }
   } else {
     val isHolding = isMine && (state is VoiceState.Recording || state is VoiceState.Starting)
+    val recordingState = stringResource(R.string.voice_recording_state)
     Box(
       modifier
         .size(size)
@@ -279,6 +287,11 @@ internal fun VoiceButton(
         .background(if (isHolding) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary, CircleShape)
         .semantics {
           contentDescription = recordLabel
+          role = Role.Button
+          // The red fill alone says "recording"; TalkBack hears it, and that the button can't
+          // record while another recording or a call has the microphone.
+          if (isHolding) stateDescription = recordingState
+          if (isBusyElsewhere || isInCall) disabled()
           onClick(label = recordLabel) {
             if (!isBusyElsewhere && mayRecord()) viewModel.voice.start(controls.owner, policy.maxSeconds, isLocked = true, isInCall = isInCall)
             true

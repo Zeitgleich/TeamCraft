@@ -15,12 +15,14 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.Button
@@ -58,6 +60,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.semantics
@@ -358,7 +361,12 @@ private fun ToolOptions(
   onSticker: (Sticker) -> Unit,
   onRemove: () -> Unit,
 ) {
-  Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+  val blurRow = if (tool == DrawTool.Blur) {
+    Modifier.toggleable(value = edit.isBlurringFaces, enabled = !isFindingFaces, role = Role.Switch, onValueChange = onBlurFaces)
+  } else {
+    Modifier
+  }
+  Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).then(blurRow).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
     when (tool) {
       DrawTool.Blur -> {
         Icon(painterResource(R.drawable.ic_face), contentDescription = null, tint = Color.White)
@@ -371,7 +379,7 @@ private fun ToolOptions(
           }
           Text(note, color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.bodySmall)
         }
-        Switch(checked = edit.isBlurringFaces, onCheckedChange = onBlurFaces, enabled = !isFindingFaces)
+        Switch(checked = edit.isBlurringFaces, onCheckedChange = null, enabled = !isFindingFaces)
       }
       DrawTool.Sticker -> {
         Row(Modifier.weight(1f), horizontalArrangement = Arrangement.SpaceEvenly) {

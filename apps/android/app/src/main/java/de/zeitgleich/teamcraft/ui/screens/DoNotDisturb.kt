@@ -3,6 +3,8 @@ package de.zeitgleich.teamcraft.ui.screens
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.ui.semantics.Role
 import de.zeitgleich.teamcraft.core.User
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.heading
@@ -192,8 +194,15 @@ private fun ScheduleSection(
     }
   }
   OutlinedButton(onClick = { isPickingPerson = true }) { Text(stringResource(R.string.dnd_add_person)) }
-  Row(verticalAlignment = Alignment.CenterVertically) {
-    Switch(checked = editor.allowsUrgent, onCheckedChange = { onEdit(editor.copy(allowsUrgent = it)) })
+  Row(
+    Modifier.fillMaxWidth().toggleable(
+      value = editor.allowsUrgent,
+      role = Role.Switch,
+      onValueChange = { onEdit(editor.copy(allowsUrgent = it)) },
+    ),
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    Switch(checked = editor.allowsUrgent, onCheckedChange = null)
     Text(stringResource(R.string.dnd_allows_urgent), modifier = Modifier.padding(start = 8.dp))
   }
 
