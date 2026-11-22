@@ -121,6 +121,7 @@ release-too-old = Diese Version von TeamCraft wird vom Server nicht mehr unterst
 release-reload = Jetzt neu laden
 release-switch-failed = Die neue Version ist noch nicht gestartet. Versuche es gleich noch einmal.
 undo = Rückgängig
+undo-shortcut-hint = Rückgängig mit { $shortcut }
 tray-show = Fenster anzeigen
 tray-quit = Beenden
 tray-tooltip-unread = { $name }: { $count } ungelesen

@@ -80,6 +80,7 @@ shortcuts-notes = Shared notes
 shortcut-move-block = Move the block up or down
 shortcut-back-forward = Back or forward
 shortcut-close = Close dialog or side panel
+shortcut-undo-delete = Undo a delete or leave (while its notice shows)
 shortcut-messages = Move between messages
 shortcut-open-thread = Open the thread of the focused message
 shortcut-quote-message = Quote the focused message in a reply

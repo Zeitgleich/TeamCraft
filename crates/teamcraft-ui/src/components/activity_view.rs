@@ -15,7 +15,6 @@ use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
 use crate::components::join_requests::ActivityJoinRequests;
 use crate::components::list_status::{ListPlaceholder, ListStatus};
-use crate::components::rich_text::RichText;
 use crate::components::sidebar::DraftMark;
 use crate::i18n::use_i18n;
 use crate::model::{Conversation, ConversationId, ThreadId, ThreadSummary, thread_id_of};
@@ -294,7 +293,7 @@ fn ThreadRow(thread: ThreadSummary, drafted: Memo<HashSet<(ConversationId, Threa
         </span>
         <span class="activity-body">
           <span class="activity-summary" translate="no">{summary}</span>
-          <span class="activity-excerpt"><RichText body=thread.root.body.clone() /></span>
+          <span class="activity-excerpt">{excerpt_text(&thread.root.body)}</span>
           <time class="activity-time" title=absolute>{relative}</time>
         </span>
         {move || has_draft.get().then(|| view! {
@@ -308,6 +307,24 @@ fn ThreadRow(thread: ThreadSummary, drafted: Memo<HashSet<(ConversationId, Threa
       </button>
     </li>
   }
+}
+
+/// A message's text as one flat line for a row that is a button: links, copy buttons and scroll
+/// regions inside it would be interactive controls inside a control (axe `nested-interactive`).
+fn excerpt_text(body: &str) -> String {
+  let parts: Vec<String> = crate::markdown::parse(body)
+    .into_iter()
+    .flat_map(|block| match block {
+      crate::markdown::Block::Code { code, .. } => vec![code.trim().to_owned()],
+      other => other
+        .inline_lines()
+        .into_iter()
+        .map(crate::markdown::plain_text)
+        .collect(),
+    })
+    .filter(|part| !part.is_empty())
+    .collect();
+  parts.join(" ")
 }
 
 /// Where something happened, as a sentence names it: "#general", or the chat's name.

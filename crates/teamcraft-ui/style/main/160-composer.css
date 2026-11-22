@@ -324,7 +324,7 @@ ol.md-list {
   order: 1;
   display: grid;
   place-items: center;
-  width: 22px;
+  width: 24px;
   height: 30px;
   border: 0;
   border-inline-end: 1px solid color-mix(in srgb, var(--on-accent) 35%, transparent);

@@ -209,3 +209,10 @@
     animation: none;
   }
 }
+
+/* Reduced motion: the change shows, nothing slides or scales (2.3.3). */
+@media (prefers-reduced-motion: reduce) {
+  .download-progress-fill {
+    transition: none;
+  }
+}

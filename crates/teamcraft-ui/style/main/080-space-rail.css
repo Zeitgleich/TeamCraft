@@ -195,3 +195,10 @@
   opacity: 0.6;
 }
 
+
+/* Reduced motion: the change shows, nothing slides or scales (2.3.3). */
+@media (prefers-reduced-motion: reduce) {
+  .space-btn::before {
+    transition: none;
+  }
+}

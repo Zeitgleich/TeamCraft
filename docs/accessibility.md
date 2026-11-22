@@ -78,7 +78,7 @@ has none (one more target size, with the composer's suggestions open, is filed).
 | W-1  | The message list and thread were `role="log"` (live): rows mounted by scrolling and older pages were read out; no announcer for real arrivals | 4.1.3 | High | fixed: lists `aria-live="off"`, one polite region says "Name: start of text" for a new message from somebody else |
 | W-2  | A focused message read only "author, time" (a named generic `div`)                                                            | 4.1.2      | High     | fixed: `role="article"`, body as `aria-describedby` |
 | W-3  | Forward and Save only on the hover toolbar, not in the "more" menu (Shift+F10)                                                 | 2.1.1      | High     | fixed   |
-| W-4  | After Delete from the menu the focus fell to the page; Undo (6 s toast) out of reach                                           | 2.2.1, 2.4.3 | High   | focus fixed (returns to the message or its neighbour); undo #2279 |
+| W-4  | After Delete from the menu the focus fell to the page; Undo (6 s toast) out of reach                                           | 2.2.1, 2.4.3 | High   | focus fixed (returns to the message or its neighbour); undo fixed (Ctrl/Cmd+Z, named in the toast) |
 | W-5  | The app under the full call screen stayed focusable and readable                                                              | 2.4.11     | High     | fixed: `inert` while the call screen is up |
 | W-6  | No keyboard way to answer an incoming call in the web app                                                                     | 2.1.1      | High     | #2278   |
 | W-7  | Composer suggestions: no `aria-activedescendant`, buttons inside options, `aria-expanded` on a textbox (axe: critical)          | 4.1.2      | High     | fixed, with a polite "N suggestions"; `aria-controls` only while the list exists |
@@ -87,17 +87,17 @@ has none (one more target size, with the composer's suggestions open, is filed).
 | W-10 | Call status regions mount with their text, so they are often not announced                                                    | 4.1.3      | Medium   | #2281   |
 | W-11 | Toggle buttons change their label and set `aria-pressed` ("Unmute, pressed")                                                   | 4.1.2      | Medium   | #2280   |
 | W-12 | Date and "new messages" dividers were separators with text and a button inside (axe: nested-interactive)                       | 1.3.1      | Medium   | fixed   |
-| W-13 | A channel switch focuses the composer, which doesn't name the channel                                                         | 2.4.6      | Medium   | #2283   |
+| W-13 | A channel switch focuses the composer, which doesn't name the channel                                                         | 2.4.6      | Medium   | fixed   |
 | W-14 | Presence by colour only (away vs online 1.19:1) and hidden from screen readers                                                | 1.4.1, 1.4.11 | Medium | #2282  |
-| W-15 | Quick switcher: unread, group names and "no results" not conveyed                                                             | 1.3.1, 4.1.3 | Medium | #2283   |
+| W-15 | Quick switcher: unread, group names and "no results" not conveyed                                                             | 1.3.1, 4.1.3 | Medium | fixed   |
 | W-16 | Device picker radios without arrow keys                                                                                       | 2.1.1      | Low      | #2280   |
-| W-17 | Every pending message announces "Sending"                                                                                     | 4.1.3      | Low      | #2283   |
-| W-18 | Muted space header at `opacity: 0.6`: 3.58:1                                                                                  | 1.4.3      | Low      | #2284   |
-| W-19 | 22 px icon buttons (toast close, chip remove), passing only by spacing                                                        | 2.5.8      | Low      | #2284   |
-| W-20 | Canvas focus shown by a 1 px border colour change                                                                             | 2.4.7      | Low      | #2284   |
-| W-21 | Six small transform transitions without a reduced-motion rule                                                                 | 2.3.3 (AAA) | Low     | #2284   |
-| W-22 | Full reactor list only by mouse or long press                                                                                 | 2.1.1      | Low      | #2283   |
-| W-23 | Custom status emoji has only a `title`                                                                                        | 1.1.1      | Low      | #2283   |
+| W-17 | Every pending message announces "Sending"                                                                                     | 4.1.3      | Low      | fixed   |
+| W-18 | Muted space header at `opacity: 0.6`: 3.58:1                                                                                  | 1.4.3      | Low      | fixed   |
+| W-19 | 22 px icon buttons (toast close, chip remove), passing only by spacing                                                        | 2.5.8      | Low      | fixed   |
+| W-20 | Canvas focus shown by a 1 px border colour change                                                                             | 2.4.7      | Low      | fixed   |
+| W-21 | Six small transform transitions without a reduced-motion rule                                                                 | 2.3.3 (AAA) | Low     | fixed   |
+| W-22 | Full reactor list only by mouse or long press                                                                                 | 2.1.1      | Low      | fixed   |
+| W-23 | Custom status emoji has only a `title`                                                                                        | 1.1.1      | Low      | fixed   |
 | W-24 | "Jump to latest" count: white on the dark theme's accent, 2.71:1 (axe)                                                         | 1.4.3      | High     | fixed: the accent's own text colour |
 | W-26 | "Browse channels" link in the sidebar 21 px tall (axe)                                                                        | 2.5.8      | Low      | fixed   |
 | W-27 | Send options chevron 22 px wide (axe)                                                                                         | 2.5.8      | Low      | #2284   |

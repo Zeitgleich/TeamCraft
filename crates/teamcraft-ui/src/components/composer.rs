@@ -383,6 +383,15 @@ pub fn Composer(
 ) -> impl IntoView {
   let conversation_name = StoredValue::new(conversation_name);
   let i18n = use_i18n();
+  let placeholder_text = move || {
+    let name = conversation_name.get_value();
+    // Always with the argument: Fluent shows a missing one as "{$name}" (#699).
+    if name.is_empty() && placeholder_key == "composer-placeholder" {
+      i18n.t("composer-placeholder-untitled")
+    } else {
+      i18n.t_with(placeholder_key, &[("name", &name)])
+    }
+  };
   let state = use_app_state();
   let is_archived = state
     .read(|backend| backend.conversation(conversation))
@@ -2031,7 +2040,14 @@ pub fn Composer(
             contenteditable="true"
             role="textbox"
             aria-multiline="true"
-            aria-label=move || i18n.t("composer-label")
+            // The conversation switch focuses this field: its name says where the user landed (W-13).
+            aria-label=move || {
+              if conversation_name.with_value(|name| name.is_empty()) {
+                i18n.t("composer-label")
+              } else {
+                placeholder_text()
+              }
+            }
             aria-autocomplete="list"
             // Only while the list is there: an id that names nothing is invalid ARIA.
             aria-controls=move || (!suggestions.with(Vec::is_empty)).then(|| suggestions_id.get_value())
@@ -2041,15 +2057,7 @@ pub fn Composer(
             }
             spellcheck="true"
             translate="no"
-            data-placeholder=move || {
-              let name = conversation_name.get_value();
-              // Always with the argument: Fluent shows a missing one as "{$name}" (#699).
-              if name.is_empty() && placeholder_key == "composer-placeholder" {
-                i18n.t("composer-placeholder-untitled")
-              } else {
-                i18n.t_with(placeholder_key, &[("name", &name)])
-              }
-            }
+            data-placeholder=placeholder_text
             node_ref=editor
             on:keydown=on_keydown
             on:compositionend=on_composition_end
