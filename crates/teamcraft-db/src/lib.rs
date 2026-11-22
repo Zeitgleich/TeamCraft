@@ -93,7 +93,7 @@ pub use channel_deletion::{
 pub use channel_role_log::ChannelRoleLogEntry;
 pub use conversation::{
   Conversation, ConversationChanges, ConversationFilter, ConversationMember, ConversationView, ImageChange,
-  Membership, MembershipChanges, NewConversation, RoleLogFounding, participants_key,
+  Membership, MembershipChanges, NewConversation, RoleLogFounding, StrictHint, participants_key,
 };
 pub use custom_emoji::{CustomEmojiWrite, NewCustomEmoji, StoredCustomEmoji};
 pub use database::{Database, DatabaseOptions};

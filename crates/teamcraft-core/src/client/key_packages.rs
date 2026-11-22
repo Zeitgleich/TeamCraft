@@ -7,7 +7,9 @@
 
 use std::collections::BTreeSet;
 
-use teamcraft_crypto::mls::{StoredKeyPackage, delete_key_package, key_package_ref, stored_key_packages};
+use teamcraft_crypto::mls::{
+  StoredKeyPackage, announces_strict_roles, delete_key_package, key_package_ref, stored_key_packages,
+};
 use teamcraft_proto::Base64Bytes;
 
 use super::Client;
@@ -18,6 +20,11 @@ use crate::store::{LocalStore, Table};
 
 /// Where the device notes when its earlier last-resort packages were replaced on the server.
 const REPLACED_LAST_RESORT_KEY: &str = "replaced_last_resort_key_packages";
+/// Where the device notes what its stock of key packages on the server announces beyond the
+/// channel anchor (e2ee.md §4.6.2, "Older clients").
+const STOCK_ANNOUNCES_KEY: &str = "key_package_stock_announces";
+/// A stock whose packages announce strict channels.
+const ANNOUNCES_STRICT: &str = "strict";
 
 /// A last-resort package of this device that a newer one replaced on the server: nobody claims it
 /// after `replaced_at_unix_secs`.
@@ -28,6 +35,29 @@ struct ReplacedPackage {
 }
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
+  /// Whether this device's stock on the server was made before its packages announced strict
+  /// channels (e2ee.md §4.6.2, "Older clients"): then the next top-up replaces it whole, so nobody
+  /// adds the device to a strict channel with a package that can't join it. Nothing to replace
+  /// while this build doesn't announce them.
+  pub(super) fn is_stock_outdated(&self) -> Result<bool, CoreError> {
+    if !announces_strict_roles() {
+      return Ok(false);
+    }
+    let maybe_announces: Option<String> =
+      records::get_json(&self.store, Table::AppliedChanges, STOCK_ANNOUNCES_KEY)?;
+    Ok(maybe_announces.as_deref() != Some(ANNOUNCES_STRICT))
+  }
+
+  /// The server took a whole stock of packages that announce strict channels.
+  pub(super) fn note_stock_replaced(&self) -> Result<(), CoreError> {
+    records::put_json(
+      &self.store,
+      Table::AppliedChanges,
+      STOCK_ANNOUNCES_KEY,
+      &ANNOUNCES_STRICT.to_owned(),
+    )
+  }
+
   /// The key packages whose private parts this device holds.
   pub fn stored_key_packages(&self) -> Result<Vec<StoredKeyPackage>, CoreError> {
     // The listing reads the provider's map: on demand, the packages not read yet go in first.

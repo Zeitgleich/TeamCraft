@@ -722,7 +722,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         },
       }
     }
-    Ok(())
+    // A strict channel's ready answer, leaf refresh or outside signer's roles change (e2ee.md
+    // §4.6.2). Boxed: it commits.
+    Box::pin(self.run_strict_tasks()).await
   }
 
   pub(crate) fn queue_pending(&self, change: PendingChange) -> Result<(), CoreError> {

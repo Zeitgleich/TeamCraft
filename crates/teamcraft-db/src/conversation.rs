@@ -35,6 +35,17 @@ pub struct Conversation {
   pub maybe_importer: Option<UserId>,
   /// The newest imported message once an import finished.
   pub maybe_imported_through: Option<MessageId>,
+  /// What the members told the server about the channel's strict roles (e2ee.md §4.6.2); `None`
+  /// while nobody did.
+  pub maybe_strict: Option<StrictHint>,
+}
+
+/// A strict channel's hint as stored (e2ee.md §4.6.2): never decided on, by the server or a member.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrictHint {
+  pub is_strict: bool,
+  pub version: u64,
+  pub hash: Vec<u8>,
 }
 
 /// What [`Database::set_conversation_image`] did.
@@ -270,6 +281,7 @@ impl Database {
       r#"SELECT c.id, c.space_id, c.kind, c.name, c.topic, c.description, c.visibility, c.history_policy,
                 c.category_id, c.archived_at IS NOT NULL AS "is_archived!", c.is_integration, c.member_denied, c.guest_denied,
                 c.image_key, c.image_version, c.image_size_bytes, c.importer_user_id, c.imported_through_message_id,
+                c.is_strict, c.strict_roles_version, c.strict_roles_hash,
                 m.role AS "role?", m.notification_level AS "notification_level?",
                 m.is_favorite AS "is_favorite?", m.last_read_message_id, m.muted_until,
                 NOT m.notification_overridden AS "is_inherited?",
@@ -347,6 +359,7 @@ impl Database {
             maybe_image: stored_image(row.image_key, row.image_version, row.image_size_bytes)?,
             maybe_importer: from_db_opt(row.importer_user_id)?,
             maybe_imported_through: from_db_opt(row.imported_through_message_id)?,
+            maybe_strict: strict_hint(row.is_strict, row.strict_roles_version, row.strict_roles_hash),
             moderation: ChannelModeration {
               member_denied: permissions(row.member_denied),
               guest_denied: permissions(row.guest_denied),
@@ -868,5 +881,20 @@ mod tests {
       participants_key(&[user(4)]),
       participants_key(&[user(4), user(30)])
     );
+  }
+}
+
+fn strict_hint(
+  is_strict: bool,
+  maybe_version: Option<i64>,
+  maybe_hash: Option<Vec<u8>>,
+) -> Option<StrictHint> {
+  match (maybe_version, maybe_hash) {
+    (Some(version), Some(hash)) => Some(StrictHint {
+      is_strict,
+      version: u64::try_from(version).unwrap_or(0),
+      hash,
+    }),
+    _ => None,
   }
 }

@@ -716,6 +716,7 @@ mod other_process {
 
   fn store_conversation(store: &impl LocalStore, name: &str) {
     let response = ConversationResponse {
+      maybe_strict: None,
       id: conversation(),
       maybe_space_id: None,
       kind: ConversationKindProto::Group,

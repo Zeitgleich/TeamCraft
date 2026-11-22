@@ -279,6 +279,7 @@ struct State {
   next_connection: u64,
   /// The rewinds of strict channels the server took, with the epoch each went back to.
   rewinds: Vec<(ConversationId, u64)>,
+  stock_replacements: Vec<DeviceId>,
   /// Users with workspace admin rights (permission checks only; trust comes from the roster).
   admins: HashSet<UserId>,
   /// Leavers the identity provider deactivated (docs/provisioning.md §3), with how long ago and
@@ -2001,6 +2002,21 @@ impl FakeServer {
     self.lock().rewinds.clone()
   }
 
+  /// The devices that replaced their whole key package stock so far, in order (e2ee.md §4.6.2,
+  /// "Older clients").
+  pub fn stock_replacements(&self) -> Vec<DeviceId> {
+    self.lock().stock_replacements.clone()
+  }
+
+  /// The regular key packages a device has on the server, unused.
+  pub fn key_package_count(&self, device: DeviceId) -> usize {
+    self
+      .lock()
+      .key_packages
+      .get(&device)
+      .map_or(0, |packages| packages.regular.len())
+  }
+
   pub fn publish_event(&self, users: &[UserId], event: &GatewayEvent) {
     self.lock().publish(users.iter().copied(), event);
   }
@@ -3124,6 +3140,11 @@ impl ServerApi for FakeServerApi {
         .as_ref()
         .map(|bytes| stored_key_package(bytes, true, now))
         .transpose()?;
+      let packages = state.key_packages.entry(device).or_default();
+      if request.replaces_stock {
+        packages.regular.clear();
+        state.stock_replacements.push(device);
+      }
       let packages = state.key_packages.entry(device).or_default();
       packages.regular.extend(regular);
       if let Some(last_resort) = maybe_last_resort {
@@ -4922,7 +4943,20 @@ impl ServerApi for FakeServerApi {
       if let Some(group_info) = &request.maybe_group_info {
         entry.maybe_group_info = Some((new_epoch, group_info.clone()));
       }
+      // Like the server: a roles commit's strict hint, stored with it (e2ee.md §4.6.2).
+      let is_hinted = request.maybe_strict.is_some();
+      if let Some(hint) = &request.maybe_strict {
+        entry.response.maybe_strict = Some(hint.clone());
+      }
       let members: Vec<UserId> = entry.members.keys().copied().collect();
+      if is_hinted {
+        state.publish(
+          members.iter().copied(),
+          &GatewayEvent::ConversationUpdate {
+            conversation_id: conversation,
+          },
+        );
+      }
       let garbled_for: Vec<UserId> = state.garbling_next_commit_for.drain().collect();
       for user in &garbled_for {
         state.garbled_entries.entry(*user).or_default().insert(commit_id);
@@ -5062,6 +5096,28 @@ impl ServerApi for FakeServerApi {
           _ => message.clone(),
         });
       Ok(page(visible.collect(), query.maybe_limit, entry.epoch))
+    })
+  }
+
+  /// Like the server: members, and instance admins outside the group.
+  async fn mls_strict_hint(
+    &self,
+    conversation: ConversationId,
+  ) -> Result<teamcraft_proto::MlsStrictHintResponse, ApiError> {
+    self.with(|state, me| {
+      let is_admin = state.admins.contains(&me);
+      let entry = state.conversation(conversation)?;
+      if !entry.members.contains_key(&me) && !is_admin {
+        return Err(ApiError::status(
+          403,
+          ErrorCode::Forbidden,
+          "missing permission manage_members",
+        ));
+      }
+      Ok(teamcraft_proto::MlsStrictHintResponse {
+        epoch: entry.epoch,
+        maybe_strict: entry.response.maybe_strict.clone(),
+      })
     })
   }
 
@@ -5290,6 +5346,15 @@ impl ServerApi for FakeServerApi {
     self.with(|state, me| {
       let entry = state.member_conversation_mut(conversation, me)?;
       let response = &mut entry.response;
+      // Like the server: a strict channel is made public only after strict is off (e2ee.md §4.6.2).
+      let is_strict = response.maybe_strict.as_ref().is_some_and(|hint| hint.is_strict);
+      if is_strict && request.maybe_visibility == Some(ConversationVisibility::Public) {
+        return Err(ApiError::status(
+          409,
+          ErrorCode::Conflict,
+          "turn strict off before making the channel public",
+        ));
+      }
       if let Some(name) = &request.maybe_name {
         response.maybe_name = Some(name.clone());
       }
@@ -7924,6 +7989,7 @@ impl State {
     let id = self.next_id();
     let floor = self.peek_id();
     let response = ConversationResponse {
+      maybe_strict: None,
       id,
       maybe_space_id: maybe_space,
       kind,

@@ -158,6 +158,15 @@ pub fn my_membership(membership: &Membership) -> MyMembership {
   }
 }
 
+/// A channel's strict hint as the API shows it (e2ee.md §4.6.2): the members' word, never decided on.
+pub fn strict_hint(hint: &teamcraft_db::StrictHint) -> teamcraft_proto::StrictChannelHint {
+  teamcraft_proto::StrictChannelHint {
+    is_strict: hint.is_strict,
+    version: hint.version,
+    hash: Base64Bytes::new(hint.hash.clone()),
+  }
+}
+
 /// Lookup tables the conversation response needs besides the conversation itself.
 #[derive(Debug, Default)]
 pub struct ConversationExtras {
@@ -195,6 +204,7 @@ pub fn conversation_response(
     maybe_importer_user_id: conversation.maybe_importer,
     maybe_imported_through: conversation.maybe_imported_through,
     maybe_inactivity: None,
+    maybe_strict: conversation.maybe_strict.as_ref().map(strict_hint),
     maybe_my_membership: view.maybe_membership.as_ref().map(my_membership),
     participants: extras
       .participants

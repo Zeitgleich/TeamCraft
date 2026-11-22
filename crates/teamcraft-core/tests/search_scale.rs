@@ -271,6 +271,7 @@ fn fill(store: &Store, me: UserId, messages: usize) {
         Table::Conversations,
         &conversation.id.to_string(),
         &serde_json::to_vec(&ConversationResponse {
+          maybe_strict: None,
           maybe_name: Some(name),
           ..conversation
         })
@@ -370,6 +371,7 @@ fn message(conversation: ConversationId, index: i64, n: i64, sender: UserId, bod
 
 fn conversation(n: i64) -> ConversationResponse {
   ConversationResponse {
+    maybe_strict: None,
     id: id(1_000_000 + n),
     maybe_space_id: None,
     kind: ConversationKind::Channel,

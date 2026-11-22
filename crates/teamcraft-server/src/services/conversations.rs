@@ -157,6 +157,7 @@ pub async fn get_conversation(
 }
 
 const INTEGRATION_STAYS_PRIVATE: &str = "integration channels carry machine output and stay private";
+const STRICT_STAYS_PRIVATE: &str = "turn strict off before making the channel public";
 
 pub async fn create_channel(
   state: &AppState,
@@ -536,6 +537,17 @@ pub async fn convert_channel_privacy(
   }
   if access.view.conversation.is_integration && request.visibility == ConversationVisibility::Public {
     return Err(ApiError::Conflict(INTEGRATION_STAYS_PRIVATE.into()));
+  }
+  // A strict channel takes nobody by themselves (e2ee.md §4.6.2, "No self-add"): turning strict
+  // off, which is signed, comes first. The members' word, as the hint is; their apps refuse too.
+  let is_strict = access
+    .view
+    .conversation
+    .maybe_strict
+    .as_ref()
+    .is_some_and(|hint| hint.is_strict);
+  if is_strict && request.visibility == ConversationVisibility::Public {
+    return Err(ApiError::Conflict(STRICT_STAYS_PRIVATE.into()));
   }
   let before = access.view.conversation.visibility.clone();
   state

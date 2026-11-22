@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE conversations SET is_strict = $2, strict_roles_version = $3, strict_roles_hash = $4 WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Bool",
+        "Int8",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3e789f714139a363b29cc1f990b473e287cced8aa258776294ceec9edb7365a2"
+}

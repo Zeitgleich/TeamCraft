@@ -4,7 +4,7 @@
 //! code are no-ops here, and the module stays out of the bundle.
 
 use teamcraft_crypto::mls::{MlsError, StagedJoin};
-use teamcraft_proto::{ConversationId, MlsMessageResponse};
+use teamcraft_proto::{ConversationId, MlsMessageResponse, StrictChannelHint};
 
 use super::Client;
 use crate::api::ServerApi;
@@ -50,6 +50,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   pub(super) fn strict_rejoin_delay_ms(&mut self, _conversation: ConversationId) -> Result<i64, CoreError> {
     Ok(0)
+  }
+
+  /// A strict ask, answer or outside signer's change: passed over, as by an older app.
+  pub(super) async fn note_strict_proposal(
+    &mut self,
+    _message: &MlsMessageResponse,
+  ) -> Result<(), CoreError> {
+    Ok(())
+  }
+
+  pub(super) async fn run_strict_tasks(&mut self) -> Result<(), CoreError> {
+    Ok(())
+  }
+
+  pub(super) fn take_strict_hint(&mut self, _conversation: ConversationId) -> Option<StrictChannelHint> {
+    None
   }
 
   pub(super) async fn check_strict_welcome(

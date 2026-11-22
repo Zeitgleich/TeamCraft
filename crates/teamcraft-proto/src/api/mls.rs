@@ -13,6 +13,12 @@ pub struct UploadKeyPackagesRequest {
   pub key_packages: Vec<Base64Bytes>,
   #[serde(rename = "last_resort", default, skip_serializing_if = "Option::is_none")]
   pub maybe_last_resort: Option<Base64Bytes>,
+  /// These packages replace the device's whole stock: its unused regular packages are dropped in
+  /// the same transaction. A device sends this when its packages start announcing something new,
+  /// so nobody adds it from one made before (e2ee.md §4.6.2, "Older clients"). Older servers
+  /// ignore it and keep the old stock until it is used or expires.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub replaces_stock: bool,
 }
 
 /// How many key packages of a device are left; clients top up when `available` runs low.
@@ -124,6 +130,36 @@ pub struct PostMlsCommitRequest {
   /// commit; the server never looks inside (e2ee.md §4.6).
   #[serde(rename = "group_info", default, skip_serializing_if = "Option::is_none")]
   pub maybe_group_info: Option<Base64Bytes>,
+  /// A strict channel's roles commit (e2ee.md §4.6.2) tells the server what it set, for the UI and
+  /// for a workspace admin outside the group ([`StrictChannelHint`]). Stored with the commit; the
+  /// server never looks inside the commit, and no member decides on it.
+  #[serde(rename = "strict", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_strict: Option<StrictChannelHint>,
+}
+
+/// What a channel's members told the server about its strict roles (e2ee.md §4.6.2): whether the
+/// channel is strict, and the version and hash of the roles change that made it so (or turned it
+/// off). A hint, never a decision: the group context alone switches strict, and a wrong hint only
+/// gets a workspace admin's change refused or the UI shows the wrong state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct StrictChannelHint {
+  pub is_strict: bool,
+  /// The version of the last roles change.
+  pub version: u64,
+  /// Its chain hash (32 bytes): what the next change names as `prev_hash`.
+  pub hash: Base64Bytes,
+}
+
+/// `GET /api/v1/conversations/{id}/mls/strict`: the group's epoch and the strict hint, for a
+/// workspace owner or admin outside the group who signs a roles change for the members to commit
+/// (e2ee.md §4.6.2, "Role changes while strict"). Members and holders of `manage_members` read it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct MlsStrictHintResponse {
+  /// The group's current epoch (0 before the first commit): what the change is signed for.
+  pub epoch: u64,
+  /// Absent while no member told the server anything.
+  #[serde(rename = "strict", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_strict: Option<StrictChannelHint>,
 }
 
 /// `GET /api/v1/conversations/{id}/mls/group-info`: the newest group information a member published,

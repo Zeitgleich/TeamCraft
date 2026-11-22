@@ -4291,6 +4291,7 @@ mod tests {
 
     fn channel() -> ConversationResponse {
       ConversationResponse {
+        maybe_strict: None,
         id: id(CHANNEL),
         maybe_space_id: None,
         kind: ConversationKind::Channel,

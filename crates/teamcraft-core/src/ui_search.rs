@@ -504,6 +504,7 @@ mod tests {
     };
     records::put_json(&store, Table::Spaces, &space.to_string(), &project).unwrap();
     let conversation = ConversationResponse {
+      maybe_strict: None,
       id: channel,
       maybe_space_id: Some(space),
       kind: ConversationKind::Channel,
@@ -531,6 +532,7 @@ mod tests {
     // A DM has no name of its own: it is named after the other person.
     let direct = id::<ConversationId>(11);
     let dm = ConversationResponse {
+      maybe_strict: None,
       id: direct,
       maybe_space_id: None,
       kind: ConversationKind::Dm,

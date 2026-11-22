@@ -320,11 +320,424 @@ mod stopping {
   }
 }
 
+/// Opting a channel in (e2ee.md §4.6.2, "Turning it on", steps 2 and 3, issue #1924): the
+/// channel's devices start on apps from before (`test_hooks::set_legacy_leaves`), update, answer
+/// a workspace owner's ask over the real queue and refresh their leaves; a device that never
+/// answers blocks it until it is removed.
+mod opting_in {
+  use super::*;
+  use teamcraft_crypto::mls::test_hooks;
+
+  #[tokio::test]
+  async fn devices_answer_refresh_their_leaves_and_the_channel_turns_strict() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut carol, channel) = channel_on_old_apps(&server).await;
+    let readiness = alice.client.strict_readiness(channel).unwrap();
+    assert_eq!(readiness.waiting.len(), 3);
+    assert!(readiness.maybe_ask.is_none() && !readiness.is_ready);
+    let alice_id = alice.client.user_id();
+    // Not before every device refreshed: a leaf without the capability refuses the switch.
+    assert!(
+      alice
+        .client
+        .set_strict_roles(channel, &[(alice_id, StrictRoleKind::Admin)])
+        .await
+        .is_err()
+    );
+
+    alice.client.ask_strict_ready(channel).await.unwrap();
+    run_until_quiet(&mut [&mut alice, &mut bob, &mut carol]).await;
+
+    for peer in [&mut alice, &mut bob, &mut carol] {
+      let readiness = peer.client.strict_readiness(channel).unwrap();
+      assert!(readiness.is_ready, "{}: {readiness:?}", peer.name);
+      assert_eq!(readiness.maybe_ask.unwrap().asker, alice_id);
+    }
+    let epoch_before = epoch(&mut alice, channel);
+    alice
+      .client
+      .set_strict_roles(channel, &[(alice_id, StrictRoleKind::Admin)])
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    for peer in [&mut alice, &mut bob, &mut carol] {
+      assert!(peer.client.is_strict(channel).unwrap(), "{}", peer.name);
+    }
+    assert_eq!(epoch(&mut bob, channel), epoch_before + 1);
+  }
+
+  /// D6: Carol's device is offline (or on an older app) and never answers. Nobody refreshes; the
+  /// asker sees her device waiting and removes it, and then the others go on.
+  #[tokio::test]
+  async fn a_device_that_never_answers_blocks_until_it_is_removed() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, carol, channel) = channel_on_old_apps(&server).await;
+    let carol_device = (carol.client.user_id(), carol.client.device_id());
+    let epoch_before = epoch(&mut alice, channel);
+
+    alice.client.ask_strict_ready(channel).await.unwrap();
+    run_until_quiet(&mut [&mut alice, &mut bob]).await;
+
+    let readiness = alice.client.strict_readiness(channel).unwrap();
+    assert_eq!(readiness.waiting, vec![carol_device]);
+    assert_eq!(readiness.refreshing.len(), 2, "{readiness:?}");
+    assert_eq!(epoch(&mut alice, channel), epoch_before, "nobody refreshed yet");
+
+    let (carol_user, carol_device_id) = carol_device;
+    alice
+      .client
+      .remove_strict_blocker(channel, carol_user, carol_device_id)
+      .await
+      .unwrap();
+    run_until_quiet(&mut [&mut alice, &mut bob]).await;
+
+    for peer in [&mut alice, &mut bob] {
+      let readiness = peer.client.strict_readiness(channel).unwrap();
+      assert!(readiness.is_ready, "{}: {readiness:?}", peer.name);
+    }
+  }
+
+  /// Only a workspace owner or admin asks (D3); a member's ask, posted by a modified client, is
+  /// answered by nobody.
+  #[tokio::test]
+  async fn only_a_workspace_admins_ask_is_answered() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut carol, channel) = channel_on_old_apps(&server).await;
+    let result = bob.client.ask_strict_ready(channel).await;
+    assert!(
+      matches!(result, Err(CoreError::StrictNotNow(id, _)) if id == channel),
+      "{result:?}"
+    );
+    let ask = teamcraft_crypto::mls::StrictAsk::new(
+      crypto_conversation(channel),
+      crypto_user(bob.client.user_id()),
+      &mut rand_core::OsRng,
+    );
+    let mut payload = b"TCSA".to_vec();
+    payload.extend_from_slice(&ask.to_bytes().unwrap());
+    post_proposal(&bob, channel, payload).await;
+    run_until_quiet(&mut [&mut alice, &mut bob, &mut carol]).await;
+    assert!(
+      alice
+        .client
+        .strict_readiness(channel)
+        .unwrap()
+        .maybe_ask
+        .is_none()
+    );
+    assert_eq!(answers(&alice, channel).await, 0);
+  }
+
+  /// A device that doesn't implement strict channels (an app from before) never says it is ready.
+  #[tokio::test]
+  async fn an_app_that_does_not_announce_strict_channels_never_answers() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut carol, channel) = channel_on_old_apps(&server).await;
+    alice.client.ask_strict_ready(channel).await.unwrap();
+    test_hooks::set_legacy_leaves(true);
+    run_until_quiet(&mut [&mut bob, &mut carol]).await;
+    test_hooks::set_legacy_leaves(false);
+    assert_eq!(answers(&alice, channel).await, 1, "only Alice's own answer");
+    settle(&mut [&mut alice]).await;
+    assert_eq!(alice.client.strict_readiness(channel).unwrap().waiting.len(), 2);
+  }
+
+  /// Three peers whose apps didn't announce strict channels when the channel was made, all
+  /// updated now; Alice owns the workspace.
+  async fn channel_on_old_apps(server: &FakeServer) -> (Peer, Peer, Peer, ConversationId) {
+    test_hooks::set_legacy_leaves(true);
+    let (mut alice, mut bob, mut carol) = three_with_owner_settings(server, quick()).await;
+    let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol]).await;
+    test_hooks::set_legacy_leaves(false);
+    (alice, bob, carol, channel)
+  }
+
+  async fn answers(peer: &Peer, channel: ConversationId) -> usize {
+    peer
+      .api
+      .list_mls_messages(channel, &ListMlsMessagesQuery::default())
+      .await
+      .unwrap()
+      .messages
+      .iter()
+      .filter(|entry| entry.payload.as_slice().starts_with(b"TCSY"))
+      .count()
+  }
+}
+
+/// A workspace owner or admin outside the group signs a strict channel's roles (e2ee.md §4.6.2,
+/// "Role changes while strict"): from the server's hint, posted for a member to commit.
+mod outside_signer {
+  use super::*;
+
+  #[tokio::test]
+  async fn a_workspace_admin_outside_the_group_changes_the_roles() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut carol, mut dave) = three_and_an_outside_admin(&server).await;
+    let channel = strict_channel(&mut alice, &mut bob, &mut carol).await;
+    assert!(!dave.client.has_group(channel).unwrap());
+    let alice_id = alice.client.user_id();
+    let bob_id = bob.client.user_id();
+    let hint = dave.api.mls_strict_hint(channel).await.unwrap();
+    assert_eq!(
+      hint
+        .maybe_strict
+        .as_ref()
+        .map(|hint| (hint.is_strict, hint.version)),
+      Some((true, 1))
+    );
+
+    dave
+      .client
+      .set_strict_roles(
+        channel,
+        &[
+          (alice_id, StrictRoleKind::Admin),
+          (bob_id, StrictRoleKind::Moderator),
+        ],
+      )
+      .await
+      .unwrap();
+    run_until_quiet(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+
+    for peer in [&mut alice, &mut bob, &mut carol] {
+      let roles = peer.client.strict_roles(channel).unwrap().unwrap();
+      assert_eq!(roles.version(), 2, "{}", peer.name);
+      assert_eq!(
+        roles.role_of(crypto_user(bob_id)).map(|role| role.role),
+        Some(StrictRoleKind::Moderator)
+      );
+    }
+    let hint = dave.api.mls_strict_hint(channel).await.unwrap();
+    assert_eq!(hint.maybe_strict.map(|hint| hint.version), Some(2));
+  }
+
+  /// A member outside the workspace roles signs nothing from outside (D3).
+  #[tokio::test]
+  async fn a_non_admin_outside_the_group_signs_nothing() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut carol, _dave) = three_and_an_outside_admin(&server).await;
+    let channel = strict_channel(&mut alice, &mut bob, &mut carol).await;
+    let mut erin = Peer::enroll(&server, "Erin").await;
+    erin.client.full_sync().await.unwrap();
+    let erin_id = erin.client.user_id();
+    let result = erin
+      .client
+      .set_strict_roles(channel, &[(erin_id, StrictRoleKind::Admin)])
+      .await;
+    assert!(result.is_err(), "{result:?}");
+  }
+
+  /// Alice owns the workspace, Dave is a workspace admin with no device in the channel.
+  async fn three_and_an_outside_admin(server: &FakeServer) -> (Peer, Peer, Peer, Peer) {
+    let mut alice = Peer::enroll_with_settings(server, "Alice", quick()).await;
+    let mut bob = Peer::enroll_with_settings(server, "Bob", quick()).await;
+    let mut carol = Peer::enroll_with_settings(server, "Carol", quick()).await;
+    let mut dave = Peer::enroll_with_settings(server, "Dave", quick()).await;
+    let alice_id = alice.client.user_id();
+    let dave_id = dave.client.user_id();
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner), (dave_id, RosterRole::Admin)])
+      .await
+      .unwrap();
+    server.set_admin(dave_id);
+    for peer in [&mut bob, &mut carol, &mut dave] {
+      peer.client.full_sync().await.unwrap();
+    }
+    (alice, bob, carol, dave)
+  }
+}
+
+/// The server's hint (e2ee.md §4.6.2): told with the roles commit, never decided on, and the
+/// server keeps a strict channel private.
+mod server_hint {
+  use super::*;
+  use teamcraft_proto::{ConversationVisibility, UpdateConversationRequest};
+
+  #[tokio::test]
+  async fn the_committer_tells_the_server_and_it_keeps_the_channel_private() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut carol) = three_with_owner(&server).await;
+    let channel = strict_channel(&mut alice, &mut bob, &mut carol).await;
+    let listed = bob.api.conversation(channel).await.unwrap();
+    let hint = listed.maybe_strict.unwrap();
+    assert!(hint.is_strict);
+    assert_eq!(hint.version, 1);
+    let roles = bob.client.strict_roles(channel).unwrap().unwrap();
+    assert_eq!(hint.hash.as_slice(), roles.hash().unwrap().as_bytes());
+
+    // Past the app's own refusal: the server refuses too.
+    let public = UpdateConversationRequest {
+      maybe_visibility: Some(ConversationVisibility::Public),
+      ..UpdateConversationRequest::default()
+    };
+    assert!(alice.api.update_conversation(channel, &public).await.is_err());
+
+    alice.client.set_strict_roles(channel, &[]).await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    let hint = bob.api.conversation(channel).await.unwrap().maybe_strict.unwrap();
+    assert!(!hint.is_strict);
+    assert_eq!(hint.version, 2);
+    assert!(alice.api.update_conversation(channel, &public).await.is_ok());
+  }
+}
+
+/// Key package stock replacement (e2ee.md §4.6.2, "Older clients"): a device whose packages start
+/// announcing strict channels replaces its whole stock once.
+mod key_packages {
+  use super::*;
+  use teamcraft_crypto::mls::test_hooks;
+
+  #[tokio::test]
+  async fn a_device_replaces_its_stock_once_its_packages_announce_strict_channels() {
+    let server = FakeServer::new();
+    test_hooks::set_legacy_leaves(true);
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    test_hooks::set_legacy_leaves(false);
+    let device = alice.client.device_id();
+    assert!(server.stock_replacements().is_empty());
+
+    alice.client.top_up_key_packages().await.unwrap();
+    assert_eq!(server.stock_replacements(), vec![device]);
+    assert_eq!(server.key_package_count(device), 3);
+
+    alice.client.top_up_key_packages().await.unwrap();
+    assert_eq!(server.stock_replacements(), vec![device], "only once");
+  }
+
+  /// A build that doesn't announce strict channels keeps its stock as before.
+  #[tokio::test]
+  async fn an_app_that_does_not_announce_them_keeps_its_stock() {
+    let server = FakeServer::new();
+    test_hooks::set_legacy_leaves(true);
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    alice.client.top_up_key_packages().await.unwrap();
+    test_hooks::set_legacy_leaves(false);
+    assert!(server.stock_replacements().is_empty());
+  }
+}
+
+/// A strict channel's renames and moves (e2ee.md §4.6.5, D5): its admins sign them as
+/// `channel_admin`; its plain members don't sign them into the anchor at all.
+mod renames {
+  use super::*;
+  use teamcraft_core::anchoring::{ANCHORING_RELEASE, NameRole};
+  use teamcraft_core::client::channel_anchor_marks;
+  use teamcraft_proto::UpdateConversationRequest;
+
+  #[tokio::test]
+  async fn a_strict_admins_rename_is_named_as_the_channels_admin() {
+    let server = FakeServer::new();
+    let release = ANCHORING_RELEASE;
+    server.set_minimum_client_version(&format!("{}.{}.{}", release.major, release.minor, release.patch));
+    let (mut alice, mut bob, mut carol) = three_with_owner(&server).await;
+    let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol]).await;
+    let bob_id = bob.client.user_id();
+    alice
+      .client
+      .set_strict_roles(channel, &[(bob_id, StrictRoleKind::Admin)])
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+
+    rename(&mut bob, channel, "announcements").await;
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    let marks = channel_anchor_marks(&*carol.store, channel).unwrap().unwrap();
+    assert_eq!(marks.maybe_name_set_by, Some((bob_id, NameRole::ChannelAdmin)));
+
+    // Carol is a plain member of the strict channel: the server takes her rename, the anchor
+    // doesn't, and the name is stale.
+    let epoch_before = epoch(&mut carol, channel);
+    rename(&mut carol, channel, "old-test").await;
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    assert_eq!(epoch(&mut alice, channel), epoch_before, "nothing was committed");
+    let marks = channel_anchor_marks(&*alice.store, channel).unwrap().unwrap();
+    assert_eq!(marks.maybe_name_set_by, Some((bob_id, NameRole::ChannelAdmin)));
+  }
+
+  async fn rename(peer: &mut Peer, channel: ConversationId, name: &str) {
+    peer
+      .client
+      .update_channel(
+        channel,
+        &UpdateConversationRequest {
+          maybe_name: Some(name.to_owned()),
+          ..UpdateConversationRequest::default()
+        },
+      )
+      .await
+      .unwrap();
+  }
+}
+
+/// Lets every client process its gateway frames and run its pending steps (a strict channel's
+/// answers, leaf refreshes and delegated commits retry after an epoch was taken) until nothing
+/// moves any more.
+async fn run_until_quiet(peers: &mut [&mut Peer]) {
+  for _ in 0..30 {
+    settle(peers).await;
+    for peer in peers.iter_mut() {
+      peer.client.apply_pending_changes().await.unwrap();
+    }
+    let mut handled = 0;
+    for peer in peers.iter_mut() {
+      handled += peer.client.pump(&mut peer.gateway).await.unwrap();
+    }
+    if handled == 0 {
+      return;
+    }
+  }
+  panic!("clients did not get quiet");
+}
+
+/// Client settings for flows ranked by `device_add_stagger`: nobody waits on the manual clock.
+fn quick() -> teamcraft_core::client::ClientSettings {
+  teamcraft_core::client::ClientSettings {
+    device_add_stagger: std::time::Duration::ZERO,
+    ..common::settings()
+  }
+}
+
+/// Posts a raw proposal into the group's queue, as a modified client could.
+async fn post_proposal(peer: &Peer, channel: ConversationId, payload: Vec<u8>) {
+  let epoch = peer
+    .api
+    .list_mls_messages(channel, &ListMlsMessagesQuery::default())
+    .await
+    .unwrap()
+    .current_epoch;
+  let request = teamcraft_proto::PostMlsMessageRequest {
+    device_id: peer.client.device_id(),
+    epoch,
+    kind: MlsMessageKind::Proposal,
+    payload: Base64Bytes::new(payload),
+  };
+  peer.api.post_mls_message(channel, &request).await.unwrap();
+}
+
+fn crypto_conversation(id: ConversationId) -> teamcraft_crypto::ids::ConversationId {
+  teamcraft_crypto::ids::ConversationId::new(u64::try_from(id.snowflake().get()).unwrap())
+}
+
 /// Alice owns the workspace (a signed roster), so she may turn channels strict (D3).
 async fn three_with_owner(server: &FakeServer) -> (Peer, Peer, Peer) {
-  let mut alice = Peer::enroll(server, "Alice").await;
-  let mut bob = Peer::enroll(server, "Bob").await;
-  let mut carol = Peer::enroll(server, "Carol").await;
+  three_with_owner_settings(server, common::settings()).await
+}
+
+/// [`three_with_owner`] with other client settings.
+async fn three_with_owner_settings(
+  server: &FakeServer,
+  settings: teamcraft_core::client::ClientSettings,
+) -> (Peer, Peer, Peer) {
+  let mut alice = Peer::enroll_with_settings(server, "Alice", settings.clone()).await;
+  let mut bob = Peer::enroll_with_settings(server, "Bob", settings.clone()).await;
+  let mut carol = Peer::enroll_with_settings(server, "Carol", settings).await;
+  finish_three_with_owner(&mut alice, &mut bob, &mut carol).await;
+  (alice, bob, carol)
+}
+
+async fn finish_three_with_owner(alice: &mut Peer, bob: &mut Peer, carol: &mut Peer) {
   let alice_id = alice.client.user_id();
   alice
     .client
@@ -333,7 +746,6 @@ async fn three_with_owner(server: &FakeServer) -> (Peer, Peer, Peer) {
     .unwrap();
   bob.client.full_sync().await.unwrap();
   carol.client.full_sync().await.unwrap();
-  (alice, bob, carol)
 }
 
 /// A channel of `owner` with `others` added and joined.
@@ -377,6 +789,7 @@ async fn post_garbage_commit(
   epoch: u64,
 ) -> teamcraft_proto::MlsMessageId {
   let request = PostMlsCommitRequest {
+    maybe_strict: None,
     device_id: peer.client.device_id(),
     epoch,
     commit: Base64Bytes::new(vec![0x00, 0x01, 0x00, 0x03, 0xde, 0xad, 0xbe, 0xef]),

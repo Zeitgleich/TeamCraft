@@ -85,6 +85,47 @@ async fn uploads_are_counted_and_the_last_resort_is_replaced() {
   app.stop().await;
 }
 
+/// A device whose packages start announcing strict channels replaces its unused regular ones in
+/// one upload (e2ee.md §4.6.2, "Older clients"); packages claimed before stay with their claimers.
+#[tokio::test]
+async fn a_replacing_upload_drops_the_unused_stock() {
+  let app = app!();
+  let carol = member("carol");
+  let dave = member("dave");
+  let channel = channel_with(&app, &[&carol, &dave]).await;
+  let device = register_device(&app, &carol).await;
+  register_device(&app, &dave).await;
+  upload(
+    &app,
+    &carol,
+    &device,
+    &packages(4),
+    Some(&last_resort_key_package()),
+  )
+  .await;
+  let carol_id = user_id(&app, &carol).await;
+  let claimed = claim(&app, &dave, &carol_id, &channel).await;
+  assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.body);
+
+  let reply = app
+    .post(
+      &carol,
+      &format!("/devices/{device}/key-packages"),
+      json!({"key_packages": packages(2), "last_resort": last_resort_key_package(), "replaces_stock": true}),
+    )
+    .await;
+
+  assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+  assert_eq!(
+    reply.body,
+    json!({"available": 2, "expiring_soon": 0, "has_last_resort": true})
+  );
+  // An ordinary upload adds to the stock as before.
+  let status = upload(&app, &carol, &device, &packages(1), None).await;
+  assert_eq!(status["available"], 3);
+  app.stop().await;
+}
+
 #[tokio::test]
 async fn uploads_are_validated_and_limited() {
   let Some(app) = TestApp::start_with(|s| {

@@ -13,6 +13,7 @@ mod credential;
 mod group;
 mod rejoin;
 mod stored_key_packages;
+mod strict_ready;
 
 use std::fmt;
 
@@ -30,6 +31,7 @@ pub use group::{
 };
 pub use rejoin::{RejoinRequest, SignedRejoinRequest, VerifiedRejoinRequest};
 pub use stored_key_packages::{StoredKeyPackage, delete_key_package, key_package_ref, stored_key_packages};
+pub use strict_ready::{SignedStrictReady, StrictAsk, StrictReady};
 
 use crate::channel_anchor::{AnchorError, CHANNEL_ANCHOR_EXTENSION_TYPE, PropertiesChangeError};
 use crate::identity::{DeviceKeyPair, IdentityError, SignedDeviceCertificate, VerifiedDevice};
@@ -266,7 +268,7 @@ pub fn users_named_in_change(message: &[u8]) -> Vec<UserId> {
 pub(crate) fn leaf_capabilities(extra: &[ExtensionType]) -> Capabilities {
   let mut extensions = extra.to_vec();
   extensions.push(ExtensionType::Unknown(CHANNEL_ANCHOR_EXTENSION_TYPE));
-  if ANNOUNCES_STRICT_ROLES {
+  if announces_strict_roles() {
     extensions.push(ExtensionType::Unknown(STRICT_ROLES_EXTENSION_TYPE));
   }
   Capabilities::new(None, None, Some(&extensions), None, None)
@@ -278,6 +280,40 @@ pub(crate) fn leaf_capabilities(extra: &[ExtensionType]) -> Capabilities {
 /// So it is the `strict-channels` feature, which the app turns on once it implements them; this
 /// crate's own tests always announce it.
 pub const ANNOUNCES_STRICT_ROLES: bool = cfg!(any(test, feature = "strict-channels"));
+
+/// Whether the leaves this device makes now announce strict channels: [`ANNOUNCES_STRICT_ROLES`],
+/// unless a test of mixed versions plays an app from before ([`test_hooks::set_legacy_leaves`]).
+/// The app answers a strict channel's ready ask only when this holds (e2ee.md §4.6.2, step 2).
+pub fn announces_strict_roles() -> bool {
+  ANNOUNCES_STRICT_ROLES && !test_hooks::is_legacy_leaves()
+}
+
+/// Hooks for other crates' tests of mixed versions (feature `test-hooks`, never in an app).
+#[cfg(feature = "test-hooks")]
+pub mod test_hooks {
+  use std::cell::Cell;
+
+  thread_local! {
+    static IS_LEGACY_LEAVES: Cell<bool> = const { Cell::new(false) };
+  }
+
+  /// While set, the leaves and key packages made on this thread don't announce strict channels,
+  /// like those of an app from before #1197, and [`super::announces_strict_roles`] says so.
+  pub fn set_legacy_leaves(is_legacy: bool) {
+    IS_LEGACY_LEAVES.with(|cell| cell.set(is_legacy));
+  }
+
+  pub(crate) fn is_legacy_leaves() -> bool {
+    IS_LEGACY_LEAVES.with(Cell::get)
+  }
+}
+
+#[cfg(not(feature = "test-hooks"))]
+mod test_hooks {
+  pub(crate) fn is_legacy_leaves() -> bool {
+    false
+  }
+}
 
 fn lifetime_from(now_unix_secs: u64) -> Lifetime {
   Lifetime::init(
@@ -329,7 +365,9 @@ impl MlsError {
   pub fn is_strict_retry(&self) -> bool {
     matches!(
       self,
-      Self::StrictRosterNeeded(_) | Self::StrictRoles(StrictRolesError::RosterUnknown(_))
+      Self::StrictRosterNeeded(_)
+        | Self::StrictRoles(StrictRolesError::RosterUnknown(_))
+        | Self::PropertiesChange(PropertiesChangeError::RosterNeeded(_))
     )
   }
 

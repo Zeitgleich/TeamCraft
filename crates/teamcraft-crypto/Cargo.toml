@@ -73,3 +73,6 @@ openmls = { version = "0.9.1", features = ["js"] }
 # Leaves announce strict channels (e2ee.md §4.6.2). Only for an app that implements the whole rule:
 # stopping at a refused commit, the welcome's sender check and the rewind (issue #1197).
 strict-channels = []
+# Hooks for other crates' tests (`mls::test_hooks`): leaves of an app from before strict channels.
+# Only ever a dev-dependency feature; no app turns it on.
+test-hooks = []

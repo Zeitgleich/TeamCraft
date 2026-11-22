@@ -19,10 +19,11 @@ use zeroize::Zeroizing;
 
 use super::content_keys::{ApplicationPayload, ContentKeyBundle, SealedContentKeys};
 use super::rejoin::{SignedRejoinRequest, VerifiedRejoinRequest};
+use super::strict_ready::{SignedStrictReady, StrictReady};
 use super::{CIPHERSUITE, GroupMember, MlsError, credential, leaf_capabilities, validate_key_package};
 use crate::channel_anchor::{
   AnchorExpectation, AnchorKind, CHANNEL_ANCHOR_EXTENSION_TYPE, ChannelAnchor, DEFAULT_MAX_ANCHOR_BYTES,
-  Judged, PROPERTIES_CHANGE_AAD_MAGIC, SignedPropertiesChange, Standing, VerifiedAnchor,
+  Judged, PROPERTIES_CHANGE_AAD_MAGIC, SignedPropertiesChange, Standing, StrictContext, VerifiedAnchor,
 };
 use crate::content_key::{ContentKey, ContentKeyId};
 use crate::domain;
@@ -550,10 +551,12 @@ impl ConversationGroup {
     };
     let anchor = ChannelAnchor::from_bytes(bytes, DEFAULT_MAX_ANCHOR_BYTES)?;
     let tree_users = self.members()?.into_iter().map(|member| member.user_id).collect();
-    Ok(Some(anchor.verify(
+    let maybe_strict = self.strict_parts()?;
+    Ok(Some(anchor.verify_in(
       expected,
       self.epoch(),
       &tree_users,
+      strict_context(maybe_strict.as_ref()),
       directory,
       authority,
     )?))
@@ -728,7 +731,15 @@ impl ConversationGroup {
   ) -> Result<CommitOutput, MlsError> {
     let current = self.current_anchor()?;
     let tree_users = self.members()?.into_iter().map(|member| member.user_id).collect();
-    current.check_change(signed, self.epoch(), &tree_users, directory, authority)?;
+    let maybe_strict = self.strict_parts()?;
+    current.check_change_in(
+      signed,
+      self.epoch(),
+      &tree_users,
+      strict_context(maybe_strict.as_ref()),
+      directory,
+      authority,
+    )?;
     let changed = current.with_change(signed.clone()).to_bytes()?;
     let extensions = with_anchor(self.group.extensions(), changed)?;
     let mut aad = PROPERTIES_CHANGE_AAD_MAGIC.to_vec();
@@ -1214,7 +1225,10 @@ impl ConversationGroup {
       .group
       .member(sender_index)
       .ok_or(MlsError::ChangeDoesNotMatchCommit)?;
-    if directory.is_guest(credential::member_of(committer)?.user_id) {
+    // In a strict channel the server's word about guests decides nothing (e2ee.md §4.6.2): who
+    // signed matters, not who committed.
+    let maybe_strict = self.strict_parts()?;
+    if maybe_strict.is_none() && directory.is_guest(credential::member_of(committer)?.user_id) {
       return Err(MlsError::GuestOverreach);
     }
     if let Some(leaf) = staged.update_path_leaf_node() {
@@ -1223,7 +1237,14 @@ impl ConversationGroup {
     let signed = SignedPropertiesChange::from_bytes(signed)?;
     let current = self.current_anchor()?;
     let tree_users = self.members()?.into_iter().map(|member| member.user_id).collect();
-    current.check_change(&signed, self.epoch(), &tree_users, directory, authority)?;
+    current.check_change_in(
+      &signed,
+      self.epoch(),
+      &tree_users,
+      strict_context(maybe_strict.as_ref()),
+      directory,
+      authority,
+    )?;
     let expected = with_anchor(
       self.group.extensions(),
       current.with_change(signed.clone()).to_bytes()?,
@@ -1402,6 +1423,33 @@ impl ConversationGroup {
       }
     }
     Ok(lacking)
+  }
+
+  /// Verifies a device's answer to a strict channel's ready ask (e2ee.md §4.6.2, "Turning it on",
+  /// step 2) against the signature key of that device's leaf in the tree as it stands: only the
+  /// device itself can answer, not the server or another member. A device without a leaf has
+  /// nothing to answer for.
+  pub fn verify_strict_ready(&self, signed: &SignedStrictReady) -> Result<StrictReady, MlsError> {
+    let claimed = signed.unverified().device();
+    for member in self.group.members() {
+      if credential::member_of(&member.credential)? == claimed {
+        return signed
+          .verify(self.conversation_id, &member.signature_key)
+          .cloned();
+      }
+    }
+    Err(MlsError::UnexpectedMessage(
+      "a ready from a device without a leaf",
+    ))
+  }
+
+  /// The strict roles and the tree, for a strict channel's moves and renames (§4.6.5, D5); `None`
+  /// for a group that isn't strict.
+  fn strict_parts(&self) -> Result<Option<(StrictRoles, Vec<TreeLeaf>)>, MlsError> {
+    match self.strict_roles()? {
+      Some(roles) => Ok(Some((roles, self.tree_leaves()?))),
+      None => Ok(None),
+    }
   }
 
   /// The verdict on a roles change for this group as it stands: a channel's group (never a
@@ -1851,6 +1899,20 @@ impl StagedJoin {
       .map_err(MlsError::from)
   }
 
+  /// Every leaf of the welcome's tree with its certificate and signature key, unverified.
+  fn tree_leaves(&self) -> Result<Vec<TreeLeaf>, MlsError> {
+    self
+      .staged
+      .members()
+      .map(|member| {
+        Ok(TreeLeaf {
+          certificate: credential::decode(&member.credential)?,
+          signature_key: member.signature_key,
+        })
+      })
+      .collect()
+  }
+
   /// A device that fell out of a strict channel opens a welcome only from a channel admin of the
   /// newest roles it verified (`known`), or from a workspace owner or admin (e2ee.md §4.6.2,
   /// "Falling out in a strict channel"): anybody else's welcome could carry a change it refused.
@@ -1908,10 +1970,15 @@ impl StagedJoin {
       .map(|member| credential::member_of(&member.credential).map(|member| member.user_id))
       .collect::<Result<BTreeSet<_>, _>>()?;
     let epoch = self.staged.group_context().epoch().as_u64();
-    Ok(Some(anchor.verify(
+    let maybe_strict = match self.strict_roles()? {
+      Some(roles) => Some((roles, self.tree_leaves()?)),
+      None => None,
+    };
+    Ok(Some(anchor.verify_in(
       expected,
       epoch,
       &tree_users,
+      strict_context(maybe_strict.as_ref()),
       directory,
       authority,
     )?))
@@ -2043,6 +2110,10 @@ fn commit_output(bundle: CommitMessageBundle) -> Result<CommitOutput, MlsError> 
     maybe_welcome,
     maybe_group_info,
   })
+}
+
+fn strict_context(maybe_parts: Option<&(StrictRoles, Vec<TreeLeaf>)>) -> Option<StrictContext<'_>> {
+  maybe_parts.map(|(roles, leaves)| StrictContext { roles, leaves })
 }
 
 fn strict_bytes_of(extensions: &Extensions<GroupContext>) -> Option<&[u8]> {
