@@ -339,7 +339,7 @@ fn MediaGrid(files: Vec<PlacedFile>) -> impl IntoView {
 /// A sent picture or video, or one still going up; `place` is its place among the message's files.
 fn tile(file: FileInfo, place: usize, layout: TileLayout) -> AnyView {
   match MediaKey::of(&file) {
-    Some(_) => view! { <MediaTile file=file layout=layout /> }.into_any(),
+    Some(_) => view! { <MediaTile file=file place=place layout=layout /> }.into_any(),
     None => view! { <UploadTile file=file place=place layout=layout /> }.into_any(),
   }
 }
@@ -362,7 +362,7 @@ fn UploadTile(file: FileInfo, place: usize, layout: TileLayout) -> impl IntoView
   let state = use_app_state();
   let i18n = use_i18n();
   let kind = MediaKind::of(&file.media_type).unwrap_or(MediaKind::Image);
-  let maybe_local = local_previews::url_of(file.message, place, &file.file_name);
+  let maybe_local = local_preview(&file, place, kind);
   let is_local = maybe_local.is_some();
   let thumbnail = match is_local {
     true => None,
@@ -432,6 +432,14 @@ fn UploadTile(file: FileInfo, place: usize, layout: TileLayout) -> impl IntoView
   }
 }
 
+/// The picture the user picked for their own file at `place` while this app has it
+/// ([`local_previews`]). Not for animations, which play only as the user chose.
+fn local_preview(file: &FileInfo, place: usize, kind: MediaKind) -> Option<String> {
+  (kind != MediaKind::Animated)
+    .then(|| local_previews::url_of(file.message, place, &file.file_name))
+    .flatten()
+}
+
 /// How far a transfer got, as a ring; a turning one before the first bytes moved.
 #[component]
 pub(crate) fn TransferRing(done_bytes: u64, total_bytes: u64) -> impl IntoView {
@@ -485,7 +493,7 @@ fn tile_size(
 /// One picture or video: the thumbnail at once, the full picture when it is loaded, a click opens
 /// the lightbox, and the actions float over it.
 #[component]
-fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
+fn MediaTile(file: FileInfo, place: usize, layout: TileLayout) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   // `MessageFiles` only puts files with a key here.
@@ -501,7 +509,11 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
   let maybe_thumbnail_size = file.maybe_thumbnail_png.as_deref().and_then(thumbnail_size);
   // The sender's size of the picture is exact; older messages only have the thumbnail's.
   let maybe_dimensions = file.maybe_dimensions;
-  let thumbnail_src = thumbnail.as_ref().map(|url| url.as_str().to_owned());
+  // The user's own picture just sent stays as it was while it goes up (#2269), until the
+  // picture from the core is there: no blurred thumbnail in between.
+  let maybe_local = local_preview(&file, place, kind);
+  let is_local = maybe_local.is_some();
+  let thumbnail_src = maybe_local.or_else(|| thumbnail.as_ref().map(|url| url.as_str().to_owned()));
   let has_thumbnail = thumbnail_src.is_some();
   // Revoked when the row leaves the screen.
   StoredValue::new_local(thumbnail);
@@ -801,7 +813,7 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
               <img
                 src=src
                 alt=name.clone()
-                class:is-preview=move || !is_full() && !is_animation()
+                class:is-preview=move || !is_local && !is_full() && !is_animation()
                 class:is-under-moving=move || is_moving_painted.get()
                 decoding="async"
                 draggable="false"
