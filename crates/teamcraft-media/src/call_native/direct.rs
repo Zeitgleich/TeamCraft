@@ -47,9 +47,8 @@ use super::{bind_wildcard, local_route_to, read_framed, with_trusted_roots, writ
 use crate::call_engine::CallEngine;
 use crate::direct_path::{
   CERTIFICATE_HASH_LEN, DIAL_TIMEOUT, DirectControl, DirectDatagram, DirectPair, DirectPathInputs,
-  DownReason, OfferInbox, PathChange, PathSelector, PathState, Pinger, RelayArbiter,
-  accepted_connection_wins, dial_delay, direct_copy, eligibility, offer_epoch, open_offer, own_candidates,
-  read_direct, seal_offer,
+  DownReason, OfferInbox, PathChange, PathSelector, Pinger, RelayArbiter, accepted_connection_wins,
+  dial_delay, direct_copy, eligibility, offer_epoch, open_offer, own_candidates, read_direct, seal_offer,
 };
 use crate::sfu_address::PinnedResolver;
 
@@ -221,13 +220,15 @@ impl DirectPath {
   }
 
   /// Where the media goes now, for the connection details.
-  pub(super) fn state(&self) -> PathState {
+  #[cfg(feature = "call-view")]
+  pub(super) fn state(&self) -> crate::direct_path::PathState {
     self.selector.state()
   }
 
   /// The direct connection's round trip, while it carries the media.
+  #[cfg(feature = "call-view")]
   pub(super) fn rtt(&self) -> Option<Duration> {
-    (self.selector.state() == PathState::Direct)
+    (self.selector.state() == crate::direct_path::PathState::Direct)
       .then(|| self.pinger.rtt())
       .flatten()
   }
