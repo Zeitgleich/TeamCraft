@@ -8,7 +8,10 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::components::settings_rows::row_id;
 use crate::i18n::{I18n, use_i18n};
-use crate::keys::{ENTER, ESCAPE, Key, Modifier, QUICK_SWITCHER, Shortcut, ShortcutList, shortcut_text};
+use crate::keys::{
+  ANSWER_CALL_AUDIO, ANSWER_CALL_VIDEO, DECLINE_CALL, ENTER, ESCAPE, Key, Modifier, QUICK_SWITCHER, Shortcut,
+  ShortcutList, shortcut_text,
+};
 use crate::state::use_app_state;
 
 /// One area of the app and its shortcuts: (keys, i18n key of what they do).
@@ -131,6 +134,8 @@ pub fn shortcut_groups() -> Vec<ShortcutGroup> {
         (vec![Shortcut::primary(",")], "shortcut-settings"),
         (vec![Shortcut::primary("/")], "shortcut-shortcuts"),
         (vec![ESCAPE], "shortcut-close"),
+        (vec![ANSWER_CALL_AUDIO, ANSWER_CALL_VIDEO], "shortcut-answer-call"),
+        (vec![DECLINE_CALL], "shortcut-decline-call"),
         (
           vec![
             Shortcut::primary("+"),

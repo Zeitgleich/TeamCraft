@@ -481,7 +481,6 @@ fn ToolbarBar(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
       <button
         class="icon-btn"
         class:is-on=is_saved
-        aria-pressed=move || is_saved().to_string()
         aria-label=move || i18n.t(save_key())
         title=move || i18n.t(save_key())
         on:click=move |_| run(if is_saved() { MessageAction::Unsave } else { MessageAction::Save })

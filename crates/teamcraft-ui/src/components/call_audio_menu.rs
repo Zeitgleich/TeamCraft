@@ -9,9 +9,11 @@ use std::rc::Rc;
 use leptos::prelude::*;
 
 use crate::calls::{AudioKind, AudioMenuEntry, CallEvent, audio_menu_entries};
+use crate::components::call_popover::CallPopover;
 use crate::components::call_prejoin::{METER_BARS, METER_TICK_MS, SPEAKER_TEST_MS, meter_bars};
 use crate::components::call_video::can_choose_speakers;
 use crate::components::icons::{Icon, IconName};
+use crate::components::tab_list::{on_radio_keys, roving_tabindex};
 use crate::i18n::use_i18n;
 use crate::reactive::{use_interval_while, use_page_visible};
 use crate::state::use_app_state;
@@ -83,9 +85,14 @@ pub fn AudioMenu() -> impl IntoView {
   };
 
   view! {
-    <div class="effects-popover camera-popover audio-popover" role="dialog" aria-label=move || i18n.t("control-audio-choose")>
+    <CallPopover
+      class="effects-popover camera-popover audio-popover"
+      labelled_by="audio-menu-title"
+      on_close=Callback::new(move |()| call.is_audio_menu_open.set(false))
+    >
+      <h2 id="audio-menu-title" class="visually-hidden">{move || i18n.t("control-audio-choose")}</h2>
       <h2 id="audio-menu-microphone">{move || i18n.t("prejoin-microphone")}</h2>
-      <div class="camera-options" role="radiogroup" aria-labelledby="audio-menu-microphone">
+      <div class="camera-options" role="radiogroup" on:keydown=|ev| on_radio_keys(&ev) aria-labelledby="audio-menu-microphone">
         {move || {
           entries(AudioKind::Microphone)
             .into_iter()
@@ -109,7 +116,7 @@ pub fn AudioMenu() -> impl IntoView {
       // the system's output.
       <h2 id="audio-menu-speakers">{move || i18n.t("prejoin-speaker")}</h2>
       {can_choose_speakers().then(|| view! {
-        <div class="camera-options" role="radiogroup" aria-labelledby="audio-menu-speakers">
+        <div class="camera-options" role="radiogroup" on:keydown=|ev| on_radio_keys(&ev) aria-labelledby="audio-menu-speakers">
           {move || {
             entries(AudioKind::Speakers)
               .into_iter()
@@ -124,7 +131,7 @@ pub fn AudioMenu() -> impl IntoView {
           {move || if is_testing_speaker.get() { i18n.t("prejoin-testing-speaker") } else { i18n.t("prejoin-test-speaker") }}
         </span>
       </button>
-    </div>
+    </CallPopover>
   }
 }
 
@@ -152,6 +159,7 @@ fn audio_option(entry: AudioMenuEntry, pick: impl Fn(String) + 'static) -> impl 
       type="button"
       role="radio"
       class="camera-option"
+      tabindex=roving_tabindex(is_checked)
       class:chosen=is_checked
       aria-checked=is_checked.to_string()
       on:click=move |_| {

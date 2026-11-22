@@ -23,6 +23,49 @@ where
   focus_tab(&tab_id(tabs[next]));
 }
 
+/// Handles a key press on a `role="radiogroup"` of `role="radio"` buttons (a device picker): the
+/// arrows, Home and End move the focus between the radios (roving `tabindex`) without choosing
+/// one, so passing over a camera doesn't switch it; Enter and Space choose, as on any button.
+pub fn on_radio_keys(ev: &web_sys::KeyboardEvent) {
+  let Some(group) = ev
+    .current_target()
+    .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+  else {
+    return;
+  };
+  let Some(current) = ev
+    .target()
+    .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+    .and_then(|target| target.closest("[role='radio']").ok().flatten())
+  else {
+    return;
+  };
+  let Ok(found) = group.query_selector_all("[role='radio']") else {
+    return;
+  };
+  let radios: Vec<web_sys::HtmlElement> = (0..found.length())
+    .filter_map(|index| found.item(index))
+    .filter_map(|node| node.dyn_into().ok())
+    .collect();
+  let Some(position) = radios.iter().position(|radio| radio.is_same_node(Some(&current))) else {
+    return;
+  };
+  let Some(next) = next_tab_index(&ev.key(), position, radios.len()) else {
+    return;
+  };
+  ev.prevent_default();
+  for radio in &radios {
+    // Only the focused radio stays in the tab order, like the checked one did.
+    if radio.set_attribute("tabindex", "-1").is_err() {
+      tracing::debug!("could not update a radio's tab stop");
+    }
+  }
+  if radios[next].set_attribute("tabindex", "0").is_err() {
+    tracing::debug!("could not update a radio's tab stop");
+  }
+  drop(radios[next].focus());
+}
+
 /// The `tabindex` of a tab: only the selected one is reached with Tab.
 pub fn roving_tabindex(is_selected: bool) -> &'static str {
   if is_selected { "0" } else { "-1" }

@@ -44,6 +44,16 @@ pub const SEARCH_IN_CONVERSATION: Shortcut = Shortcut::primary("F");
 
 /// Searches messages for the quick switcher's text.
 pub const SEARCH_MESSAGES: Shortcut = Shortcut::new(&[Modifier::Primary], Key::Enter);
+
+/// Answers a ringing call with audio only (the web app; the desktop app has the tray and the OS
+/// notification). Alt+Shift keeps clear of the browsers' own Ctrl+Shift shortcuts.
+pub const ANSWER_CALL_AUDIO: Shortcut = Shortcut::new(&[Modifier::Alt, Modifier::Shift], Key::Char("A"));
+
+/// Answers a ringing call with video.
+pub const ANSWER_CALL_VIDEO: Shortcut = Shortcut::new(&[Modifier::Alt, Modifier::Shift], Key::Char("V"));
+
+/// Declines a ringing call.
+pub const DECLINE_CALL: Shortcut = Shortcut::new(&[Modifier::Alt, Modifier::Shift], Key::Char("D"));
 pub const ESCAPE: Shortcut = Shortcut::new(&[], Key::Escape);
 pub const ENTER: Shortcut = Shortcut::new(&[], Key::Enter);
 
@@ -310,6 +320,26 @@ mod tests {
   const SEARCH_ALL: Shortcut = Shortcut::new(&[Modifier::Primary, Modifier::Shift], Key::Char("F"));
   const NEXT_UNREAD: Shortcut = Shortcut::new(&[Modifier::Alt, Modifier::Shift], Key::Up);
   const SEND: Shortcut = Shortcut::new(&[Modifier::Primary], Key::Enter);
+
+  mod call_answering {
+    use super::*;
+
+    #[test]
+    fn keys_are_named_for_screen_readers_and_labels() {
+      assert_eq!(ANSWER_CALL_AUDIO.aria(Platform::Other), "Alt+Shift+A");
+      assert_eq!(ANSWER_CALL_VIDEO.aria(Platform::Mac), "Alt+Shift+V");
+      assert_eq!(DECLINE_CALL.text(Platform::Other, Locale::En), "Alt+Shift+D");
+      assert_eq!(DECLINE_CALL.text(Platform::Mac, Locale::En), "⌥⇧D");
+    }
+
+    #[test]
+    fn answers_differ_from_each_other_and_from_unread_navigation() {
+      let all = [ANSWER_CALL_AUDIO, ANSWER_CALL_VIDEO, DECLINE_CALL, NEXT_UNREAD];
+      for (index, shortcut) in all.iter().enumerate() {
+        assert!(all[index + 1..].iter().all(|other| other != shortcut));
+      }
+    }
+  }
 
   mod windows_and_linux {
     use super::*;

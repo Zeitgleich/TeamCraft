@@ -90,7 +90,7 @@ async fn the_small_call_window_follows_the_main_window_and_controls_the_call() {
   // The window shows the mute only once the main window's call took it (its state comes back).
   let pressed = wait_for_small_window(
     &app,
-    "document.querySelector('.call-mini-controls .round-btn').getAttribute('aria-pressed') === 'true' || null",
+    "document.querySelector('.call-mini-controls .round-btn').classList.contains('off') || null",
   )
   .await;
   assert_eq!(pressed, json!(true), "the small window shows the mute");

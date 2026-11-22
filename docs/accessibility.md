@@ -80,17 +80,17 @@ has none (one more target size, with the composer's suggestions open, is filed).
 | W-3  | Forward and Save only on the hover toolbar, not in the "more" menu (Shift+F10)                                                 | 2.1.1      | High     | fixed   |
 | W-4  | After Delete from the menu the focus fell to the page; Undo (6 s toast) out of reach                                           | 2.2.1, 2.4.3 | High   | focus fixed (returns to the message or its neighbour); undo #2279 |
 | W-5  | The app under the full call screen stayed focusable and readable                                                              | 2.4.11     | High     | fixed: `inert` while the call screen is up |
-| W-6  | No keyboard way to answer an incoming call in the web app                                                                     | 2.1.1      | High     | #2278   |
+| W-6  | No keyboard way to answer an incoming call in the web app                                                                     | 2.1.1      | High     | fixed: Alt+Shift+A / V / D, named in the announcement |
 | W-7  | Composer suggestions: no `aria-activedescendant`, buttons inside options, `aria-expanded` on a textbox (axe: critical)          | 4.1.2      | High     | fixed, with a polite "N suggestions"; `aria-controls` only while the list exists |
-| W-8  | Call popovers (share, effects, camera, audio, quality): no focus handling, wrong ARIA                                         | 2.1.1, 4.1.2 | Medium | #2280   |
+| W-8  | Call popovers (share, effects, camera, audio, quality): no focus handling, wrong ARIA                                         | 2.1.1, 4.1.2 | Medium | fixed: focus in, Esc closes and returns, `aria-haspopup` + `aria-expanded` |
 | W-9  | Joins, leaves, lobby arrivals and shortcut mutes aren't announced                                                             | 4.1.3      | Medium   | #2281   |
 | W-10 | Call status regions mount with their text, so they are often not announced                                                    | 4.1.3      | Medium   | #2281   |
-| W-11 | Toggle buttons change their label and set `aria-pressed` ("Unmute, pressed")                                                   | 4.1.2      | Medium   | #2280   |
+| W-11 | Toggle buttons change their label and set `aria-pressed` ("Unmute, pressed")                                                   | 4.1.2      | Medium   | fixed: a changing label has no `aria-pressed` |
 | W-12 | Date and "new messages" dividers were separators with text and a button inside (axe: nested-interactive)                       | 1.3.1      | Medium   | fixed   |
 | W-13 | A channel switch focuses the composer, which doesn't name the channel                                                         | 2.4.6      | Medium   | #2283   |
 | W-14 | Presence by colour only (away vs online 1.19:1) and hidden from screen readers                                                | 1.4.1, 1.4.11 | Medium | #2282  |
 | W-15 | Quick switcher: unread, group names and "no results" not conveyed                                                             | 1.3.1, 4.1.3 | Medium | #2283   |
-| W-16 | Device picker radios without arrow keys                                                                                       | 2.1.1      | Low      | #2280   |
+| W-16 | Device picker radios without arrow keys                                                                                       | 2.1.1      | Low      | fixed: roving tabindex, arrows, Home, End |
 | W-17 | Every pending message announces "Sending"                                                                                     | 4.1.3      | Low      | #2283   |
 | W-18 | Muted space header at `opacity: 0.6`: 3.58:1                                                                                  | 1.4.3      | Low      | #2284   |
 | W-19 | 22 px icon buttons (toast close, chip remove), passing only by spacing                                                        | 2.5.8      | Low      | #2284   |

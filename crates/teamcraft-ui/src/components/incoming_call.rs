@@ -6,15 +6,36 @@ use crate::auth::tauri;
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
+use crate::keys::{ANSWER_CALL_AUDIO, ANSWER_CALL_VIDEO, DECLINE_CALL, Platform, shortcut_text};
 use crate::state::use_app_state;
 
 /// Ringing card for an incoming call. It does not take focus from what the user is typing; screen
-/// readers hear it through the assertive live region.
+/// readers hear it through the assertive live region, which also names the keyboard shortcuts
+/// that answer it (W-6): there is no tray or OS notification to reach in the web app.
 #[component]
 pub fn IncomingCallDialog() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let call = state.call;
+  let can_video = !tauri::is_available();
+
+  let on_key = window_event_listener(leptos::ev::keydown, move |ev| {
+    let Some(incoming) = call.incoming.get_untracked() else {
+      return;
+    };
+    let platform = Platform::current();
+    if ANSWER_CALL_AUDIO.matches(&ev, platform) {
+      ev.prevent_default();
+      state.accept_call(incoming, false);
+    } else if can_video && ANSWER_CALL_VIDEO.matches(&ev, platform) {
+      ev.prevent_default();
+      state.accept_call(incoming, true);
+    } else if DECLINE_CALL.matches(&ev, platform) {
+      ev.prevent_default();
+      call.decline_incoming();
+    }
+  });
+  on_cleanup(move || on_key.remove());
 
   move || {
     let incoming = call.incoming.get()?;
@@ -25,6 +46,29 @@ pub fn IncomingCallDialog() -> impl IntoView {
     } else {
       i18n.t_with("incoming-audio", &[("name", &caller_name)])
     };
+    let locale = i18n.locale();
+    let accept_keys = shortcut_text(&ANSWER_CALL_AUDIO, locale);
+    let video_keys = shortcut_text(&ANSWER_CALL_VIDEO, locale);
+    let decline_keys = shortcut_text(&DECLINE_CALL, locale);
+    let hint = if can_video {
+      i18n.t_with(
+        "incoming-shortcuts-video",
+        &[
+          ("accept", &accept_keys),
+          ("video", &video_keys),
+          ("decline", &decline_keys),
+        ],
+      )
+    } else {
+      i18n.t_with(
+        "incoming-shortcuts",
+        &[("accept", &accept_keys), ("decline", &decline_keys)],
+      )
+    };
+    let platform = Platform::current();
+    let accept_aria = ANSWER_CALL_AUDIO.aria(platform);
+    let video_aria = ANSWER_CALL_VIDEO.aria(platform);
+    let decline_aria = DECLINE_CALL.aria(platform);
     let accept = move |with_video: bool| state.accept_call(incoming, with_video);
 
     Some(view! {
@@ -35,18 +79,18 @@ pub fn IncomingCallDialog() -> impl IntoView {
         <div class="incoming-body">
           <h2 id="incoming-title">{move || i18n.t("incoming-title")}</h2>
           <p id="incoming-text" aria-live="assertive" translate="no">
-            {text}
+            {text}" "{hint}
           </p>
         </div>
         <div class="incoming-actions">
-          <button class="round-btn decline" aria-label=move || i18n.t("incoming-decline") title=move || i18n.t("incoming-decline") on:click=move |_| call.decline_incoming()>
+          <button class="round-btn decline" aria-keyshortcuts=decline_aria aria-label=move || i18n.t("incoming-decline") title=move || i18n.t("incoming-decline") on:click=move |_| call.decline_incoming()>
             <Icon name=IconName::Phone class="hangup" />
           </button>
-          <button class="round-btn accept" data-accept aria-label=move || i18n.t("incoming-accept-audio") title=move || i18n.t("incoming-accept-audio") on:click=move |_| accept(false)>
+          <button class="round-btn accept" data-accept aria-keyshortcuts=accept_aria aria-label=move || i18n.t("incoming-accept-audio") title=move || i18n.t("incoming-accept-audio") on:click=move |_| accept(false)>
             <Icon name=IconName::Phone />
           </button>
           <Show when=|| !tauri::is_available() fallback=|| ()>
-          <button class="round-btn accept" aria-label=move || i18n.t("incoming-accept-video") title=move || i18n.t("incoming-accept-video") on:click=move |_| accept(true)>
+          <button class="round-btn accept" aria-keyshortcuts=video_aria.clone() aria-label=move || i18n.t("incoming-accept-video") title=move || i18n.t("incoming-accept-video") on:click=move |_| accept(true)>
             <Icon name=IconName::Video />
           </button>
           </Show>
