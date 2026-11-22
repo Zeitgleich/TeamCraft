@@ -176,6 +176,10 @@ pub(super) enum DirectInput {
     maybe_second: Option<SocketAddr>,
   },
   /// The router's mapping of the socket changed (`None`: none any more).
+  #[cfg_attr(
+    not(feature = "port-mapping"),
+    expect(dead_code, reason = "only the port mapper sends it, a `port-mapping` build")
+  )]
   Mapped(Option<SocketAddr>),
   /// A birthday probe reached one of the hard side's sockets: the endpoint moves there and dials
   /// `peer`, where the probe came from.
