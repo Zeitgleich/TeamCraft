@@ -3001,11 +3001,8 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
   }
 
   fn legal_hold(&self, conversation: ConversationId) -> Option<teamcraft_proto::LegalHold> {
-    self
-      .verified_policy()
-      .compliance_archive
-      .legal_hold(conversation)
-      .cloned()
+    // Its own hold or a held person's (issue #2135), as every app decides it.
+    crate::workspace::legal_hold_of_conversation(&self.store, conversation)
   }
 
   fn set_custom_status(&self, maybe_status: Option<CustomStatus>) {

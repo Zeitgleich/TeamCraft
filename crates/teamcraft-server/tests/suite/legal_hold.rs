@@ -1,6 +1,8 @@
 //! Legal hold (issue #211, data-export.md §4.2) against a real server and Postgres: who may place
-//! one, what the server refuses, that retention and deletions leave a held channel alone, and that
-//! placing and releasing are audited.
+//! one, what the server refuses, that retention and deletions leave a held conversation alone, that a
+//! person's hold covers their conversations and keeps their direct messages through an account
+//! deletion, that a withdrawn message waits for the release (issue #2135), and that placing and
+//! releasing are audited.
 #![cfg(feature = "integration")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -9,8 +11,10 @@ use crate::common;
 use common::*;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
+use teamcraft_db::DeletionGuard;
 use teamcraft_db::testing::sqlx;
 use teamcraft_proto::{PolicyDocument, WorkspacePolicy};
+use teamcraft_server::services::admin::{delete_account, delete_leftover_direct_conversations};
 use teamcraft_server::services::retention::run_once;
 use teamcraft_server::testing::{Reply, TestApp, TestUser};
 use time::{Duration, OffsetDateTime};
@@ -73,7 +77,7 @@ async fn invalid_holds_are_refused() {
 }
 
 #[tokio::test]
-async fn only_existing_channels_can_be_held() {
+async fn only_existing_channels_and_direct_messages_can_be_held() {
   let app = app!();
   let (alice, dave, erin) = (owner(), member("dave"), member("erin"));
   let (_, channel, device) = space_of_alice(&app, &alice).await;
@@ -84,13 +88,148 @@ async fn only_existing_channels_can_be_held() {
     .post(&alice, "/group-dms", json!({"user_ids": [dave_id, erin_id]}))
     .await;
   assert_eq!(group.status, StatusCode::CREATED, "{}", group.body);
-  // A DM and a group: account deletion removes them whatever a hold says. And an unknown ID.
-  for target in [dm.id(), group.id(), "999999999".to_owned()] {
-    let reply = sign(&app, &alice, &device, 0, |p| hold(p, &target, "Case 1")).await;
-    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{target}: {}", reply.body);
-  }
-  let placed = sign(&app, &alice, &device, 0, |p| hold(p, &channel, "Case 1")).await;
+  // An unknown ID, and an unknown person.
+  let unknown = sign(&app, &alice, &device, 0, |p| hold(p, "999999999", "Case 1")).await;
+  assert_eq!(unknown.status, StatusCode::BAD_REQUEST, "{}", unknown.body);
+  let nobody = sign(&app, &alice, &device, 0, |p| {
+    hold_person(p, "999999999", "Case 1", None)
+  })
+  .await;
+  assert_eq!(nobody.status, StatusCode::BAD_REQUEST, "{}", nobody.body);
+  // A channel, a DM and a group (issue #2135): account deletion keeps them now.
+  let placed = sign(&app, &alice, &device, 0, |p| {
+    hold(p, &channel, "Case 1");
+    hold(p, &dm.id(), "Case 1");
+    hold(p, &group.id(), "Case 1");
+  })
+  .await;
   assert_eq!(placed.status, StatusCode::CREATED, "{}", placed.body);
+  app.stop().await;
+}
+
+/// A person's hold covers the direct message they are in: deleting the other participant's account
+/// keeps it with its messages until the hold is released; then the housekeeping deletes it.
+#[tokio::test]
+async fn a_person_hold_keeps_their_direct_messages_through_an_account_deletion() {
+  let app = app!();
+  let (alice, dave, erin) = (owner(), member("dave"), member("erin"));
+  let alice_device = register_device(&app, &alice).await;
+  let dave_device = register_device(&app, &dave).await;
+  let (dave_id, erin_id) = (user_id(&app, &dave).await, user_id(&app, &erin).await);
+  let dm = app.post(&dave, "/dms", json!({"user_id": erin_id})).await.id();
+  send(&app, &dave, &dm, &dave_device, 1).await;
+  let held = sign(&app, &alice, &alice_device, 0, |p| {
+    hold_person(p, &dave_id, "Case 9", Some("direct"));
+  })
+  .await;
+  assert_eq!(held.status, StatusCode::CREATED, "{}", held.body);
+
+  delete_account(
+    &app.state,
+    None,
+    erin_id.parse().unwrap(),
+    DeletionGuard::Any,
+    &json!({}),
+  )
+  .await
+  .unwrap();
+  assert!(row_exists(&app, &dm).await);
+  assert_eq!(message_count(&app, &dave, &dm).await, 1);
+  // The housekeeping leaves it alone while held.
+  assert_eq!(delete_leftover_direct_conversations(&app.state).await.unwrap(), 0);
+  assert!(row_exists(&app, &dm).await);
+
+  let released = sign(&app, &alice, &alice_device, 1, |_| {}).await;
+  assert_eq!(released.status, StatusCode::CREATED, "{}", released.body);
+  assert_eq!(delete_leftover_direct_conversations(&app.state).await.unwrap(), 1);
+  assert!(!row_exists(&app, &dm).await);
+
+  let audit = app.get(&alice, "/admin/audit?action=legal_hold_placed").await;
+  let entries = audit.body["entries"].as_array().unwrap();
+  assert_eq!(entries.len(), 1, "{}", audit.body);
+  assert_eq!(entries[0]["target_kind"], "user");
+  assert_eq!(entries[0]["target_id"], json!(dave_id));
+  let detail: Value = serde_json::from_str(entries[0]["detail"].as_str().unwrap()).unwrap();
+  assert_eq!(detail["scope"], "direct");
+  app.stop().await;
+}
+
+/// A person's hold on a channel member keeps the channel from deletion and retention, like a hold
+/// on the channel; a hold on their direct messages only doesn't.
+#[tokio::test]
+async fn a_person_hold_covers_the_channels_they_are_in() {
+  let app = app!();
+  let alice = owner();
+  let (_, channel, device) = space_of_alice(&app, &alice).await;
+  let alice_id = user_id(&app, &alice).await;
+  sign(&app, &alice, &device, 0, |p| {
+    hold_person(p, &alice_id, "Case 2", Some("direct"))
+  })
+  .await;
+  sign(&app, &alice, &device, 1, |p| {
+    hold_person(p, &alice_id, "Case 2", None)
+  })
+  .await;
+  let refused = app.delete(&alice, &format!("/conversations/{channel}")).await;
+  assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.body);
+  assert_eq!(refused.body["error_code"], "legal_hold");
+
+  sign(&app, &alice, &device, 2, |p| {
+    hold_person(p, &alice_id, "Case 2", Some("direct"))
+  })
+  .await;
+  let deleted = app.delete(&alice, &format!("/conversations/{channel}")).await;
+  assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+  app.stop().await;
+}
+
+/// A member's deletion of their own message (`deletes`): without a hold the ciphertext goes at once;
+/// under one it is marked, hidden from history, kept, and removed after the release. Somebody else's
+/// message is never touched, and a repeat changes nothing.
+#[tokio::test]
+async fn a_withdrawn_message_waits_for_the_release() {
+  let app = app!();
+  let (alice, carol) = (owner(), member("carol"));
+  let (space, channel, device) = space_of_alice(&app, &alice).await;
+  let carol_id = user_id(&app, &carol).await;
+  let carol_device = register_device(&app, &carol).await;
+  add_space_member(&app, &alice, &space, &carol_id, "member").await;
+  add_channel_member(&app, &alice, &channel, &carol_id).await;
+  send(&app, &alice, &channel, &device, 1).await;
+  send(&app, &alice, &channel, &device, 2).await;
+  send(&app, &carol, &channel, &carol_device, 3).await;
+
+  // Carol can't withdraw alice's message.
+  withdraw(&app, &carol, &channel, &carol_device, 10, 1).await;
+  assert_eq!(stored_messages(&app, &channel).await, 4);
+  // Without a hold the withdrawn message goes at once.
+  withdraw(&app, &alice, &channel, &device, 11, 2).await;
+  assert_eq!(message_count(&app, &alice, &channel).await, 4);
+  assert_eq!(stored_messages(&app, &channel).await, 4);
+
+  sign(&app, &alice, &device, 0, |p| hold(p, &channel, "Case 3")).await;
+  for _ in 0..2 {
+    withdraw(&app, &alice, &channel, &device, 12, 1).await;
+  }
+  // Hidden from every member, kept on the server.
+  assert_eq!(message_count(&app, &carol, &channel).await, 4);
+  assert_eq!(stored_messages(&app, &channel).await, 5);
+  let report = run_once(&app.state, OffsetDateTime::now_utc()).await.unwrap();
+  assert_eq!(report.held_deletions_applied, 0);
+  assert_eq!(stored_messages(&app, &channel).await, 5);
+
+  // The release applies it.
+  sign(&app, &alice, &device, 1, |_| {}).await;
+  assert_eq!(stored_messages(&app, &channel).await, 4);
+  let audit = app
+    .get(&alice, "/admin/audit?action=legal_hold_deletions_applied")
+    .await;
+  assert_eq!(
+    audit.body["entries"].as_array().unwrap().len(),
+    1,
+    "{}",
+    audit.body
+  );
   app.stop().await;
 }
 
@@ -246,6 +385,48 @@ async fn space_of_alice(app: &TestApp, alice: &TestUser) -> (String, String, Str
   let space = create_space(app, alice, "Team", "invite_only").await;
   let channel = create_channel(app, alice, &space, "general", "private").await;
   (space, channel, device)
+}
+
+fn hold_person(policy: &mut Value, user: &str, reference: &str, maybe_scope: Option<&str>) {
+  let people = &mut policy["compliance_archive"]["person_holds"];
+  *people = json!([]);
+  let mut hold = json!({
+    "user_id": user,
+    "reference": reference,
+    "placed_at": 1_700_000_000_000_i64,
+  });
+  if let Some(scope) = maybe_scope {
+    hold["scope"] = json!(scope);
+  }
+  people.as_array_mut().unwrap().push(hold);
+}
+
+/// Sends message `n` that withdraws the sender's message `target` (both by their test client IDs).
+async fn withdraw(app: &TestApp, user: &TestUser, conversation: &str, device: &str, n: u8, target: u8) {
+  let mut body = message_body(n, device);
+  body["deletes"] = json!(client_id(target));
+  let reply = app
+    .post(user, &format!("/conversations/{conversation}/messages"), body)
+    .await;
+  assert!(reply.status.is_success(), "{}", reply.body);
+}
+
+/// Every message row of the conversation, also those hidden from history.
+async fn stored_messages(app: &TestApp, conversation: &str) -> i64 {
+  sqlx::query_scalar("SELECT count(*) FROM messages WHERE conversation_id = $1")
+    .bind(conversation.parse::<i64>().unwrap())
+    .fetch_one(app.sql_pool())
+    .await
+    .unwrap()
+}
+
+async fn row_exists(app: &TestApp, conversation: &str) -> bool {
+  let found: Option<i64> = sqlx::query_scalar("SELECT id FROM conversations WHERE id = $1")
+    .bind(conversation.parse::<i64>().unwrap())
+    .fetch_optional(app.sql_pool())
+    .await
+    .unwrap();
+  found.is_some()
 }
 
 fn hold(policy: &mut Value, channel: &str, reference: &str) {

@@ -245,6 +245,8 @@ pub enum AuditAction {
   LegalHoldPlaced,
   /// An owner released a legal hold.
   LegalHoldReleased,
+  /// Messages members withdrew under a legal hold went once it was released (issue #2135).
+  LegalHoldDeletionsApplied,
   /// An admin exported the audit log.
   AuditExported,
   /// A space was archived with its channels.
@@ -279,7 +281,7 @@ pub enum AuditAction {
 }
 
 impl AuditAction {
-  pub const ALL: [AuditAction; 43] = [
+  pub const ALL: [AuditAction; 44] = [
     Self::PolicyChanged,
     Self::RetentionChanged,
     Self::DeviceRemoved,
@@ -303,6 +305,7 @@ impl AuditAction {
     Self::InactivityLimited,
     Self::LegalHoldPlaced,
     Self::LegalHoldReleased,
+    Self::LegalHoldDeletionsApplied,
     Self::AuditExported,
     Self::SpaceArchived,
     Self::SpaceRestored,
@@ -350,6 +353,7 @@ impl AuditAction {
       Self::InactivityLimited => "inactivity-limited",
       Self::LegalHoldPlaced => "legal-hold-placed",
       Self::LegalHoldReleased => "legal-hold-released",
+      Self::LegalHoldDeletionsApplied => "legal-hold-deletions-applied",
       Self::AuditExported => "audit-exported",
       Self::SpaceArchived => "space-archived",
       Self::SpaceRestored => "space-restored",

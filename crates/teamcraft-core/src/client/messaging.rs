@@ -1068,6 +1068,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       // Members who let `@channel` notify them in this conversation get a push (notifications.md,
       // "Per-conversation filters").
       is_channel_mention: matches!(&stored.content, MessageContent::Text { body, .. } if addresses_everyone(body)),
+      // A withdrawal of an own message names it, so the server removes its ciphertext, or keeps it
+      // marked deleted while a legal hold lasts (data-export.md §4.2). Queued offline like any entry.
+      maybe_deletes: match &stored.content {
+        MessageContent::Delete { target } => Some(*target),
+        _ => None,
+      },
     };
     let response = self.api.send_message(entry.conversation_id, &request).await?;
     stored.maybe_server_id = Some(response.id);

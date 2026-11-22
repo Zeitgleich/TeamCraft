@@ -616,9 +616,11 @@ pub async fn prune_deleted_conversations(state: &AppState, now: OffsetDateTime) 
 /// the account housekeeping, a few accounts per round; returns how many DMs went.
 pub async fn delete_leftover_direct_conversations(state: &AppState) -> Result<usize, ApiError> {
   let mut deleted = 0;
+  // data-export.md §4.2: held DMs stay and don't take the round's places.
+  let held = super::legal_hold::held_by_name(state).await?;
   for user in state
     .database
-    .deleted_users_with_direct_conversations(LEFTOVER_SWEEP_BATCH)
+    .deleted_users_with_direct_conversations(&held, LEFTOVER_SWEEP_BATCH)
     .await?
   {
     deleted += delete_direct_conversations(state, user).await?;
@@ -629,21 +631,34 @@ pub async fn delete_leftover_direct_conversations(state: &AppState) -> Result<us
 /// Deletes the user's 1:1 direct messages, and group DMs that would keep at most one other person,
 /// with their content in storage (PO decision on #630: a conversation with nobody left to talk to
 /// goes). The remaining participants' devices drop it with its local history: live by the gateway,
-/// later by the next sync (`deleted_conversation_ids`). Returns how many went.
+/// later by the next sync (`deleted_conversation_ids`). One a legal hold keeps, by name or through a
+/// held person, stays with its content (data-export.md §4.2, issue #2135), decided under its lock;
+/// the leftover sweep deletes it once the hold is released. Returns how many went.
 async fn delete_direct_conversations(state: &AppState, user: UserId) -> Result<usize, ApiError> {
   let conversations = state.database.direct_conversations_deleted_with(user).await?;
+  let mut deleted = 0;
   for direct in &conversations {
     let conversation_id = direct.conversation;
     super::calls::evict_from_call(state, conversation_id, user).await;
-    // Storage first: a failure leaves the rows, so a retry finds the objects again.
-    super::conversations::delete_stored_objects(state, conversation_id).await?;
-    state
+    let Some(keys) = state
       .database
-      .delete_direct_conversation(conversation_id, &direct.remaining)
-      .await?;
+      .delete_direct_conversation_locked(conversation_id, &direct.remaining, |evidence| {
+        super::legal_hold::is_held_in(evidence, conversation_id)
+      })
+      .await?
+    else {
+      continue;
+    };
+    // The rows are gone, so nobody fetches these any more; a failed delete waits in the queue.
+    if let Some(store) = &state.maybe_blob_store {
+      for key in &keys {
+        super::storage_cleanup::delete_or_queue(state, store, key).await;
+      }
+    }
     super::conversations::announce_deleted_direct(state, conversation_id, &direct.remaining, None, None);
+    deleted += 1;
   }
-  Ok(conversations.len())
+  Ok(deleted)
 }
 
 /// Removes users from all chats whose deactivation is older than the instance setting

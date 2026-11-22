@@ -663,7 +663,9 @@ Deactivation and removal are two steps (issue #631); deletion is the final one (
     `GET /conversations`, remembered for `[policy] deleted_conversations_kept_days`, default 180).
     A DM is found by its participants, not by membership: a removal from all chats before the
     deletion took the membership, but the DM still goes (issue #1066). DMs that deletions before
-    that fix left behind are deleted by the account housekeeping, a few accounts per run.
+    that fix left behind are deleted by the account housekeeping, a few accounts per run. A DM or
+    group DM under a legal hold, by its ID or through a held person, stays with its content until
+    the hold is released; the housekeeping then deletes such a DM (§3.14, data-export.md §4.2).
   - **Channels.** The user's messages stay; clients show the author as "Deleted user" (in their own
     language) in messages, profiles, member lists, conversation titles, search and notifications
     (the shells give the core its translation, `people_names`), and leave the tombstone out of people lists,
@@ -1366,23 +1368,33 @@ under Administration → Security → Call recording. It is **off by default**.
 
 ### 3.14 Legal hold and compliance archive (issue #211)
 
-A **legal hold** keeps a channel for a case: retention doesn't delete its messages, files or search
-segments, the inactivity policy doesn't delete it, and deleting it (or its space) is refused until
-the hold is released; leaving a space keeps it, without members. A hold placed at the same moment
-as a deletion either stops it or is refused for the deleted channel (data-export.md §4.2). Holds are
-part of the signed workspace policy (`compliance_archive.legal_holds`, §2.3), under Administration →
-Retention → Legal hold.
+A **legal hold** keeps a conversation for a case: retention doesn't delete its messages, files or
+search segments, the inactivity policy doesn't delete it, deleting it (or its space) is refused until
+the hold is released, and a message its author deletes stays on the server, hidden, until then;
+leaving a space keeps it, without members. A hold names a channel, or a **person** (issue #2135):
+then every channel, direct message and group they are in is held, also the ones they leave while
+held, or only their direct messages and groups. Deleting an account keeps the held direct messages
+that would go with it. A hold placed at the same moment as a deletion either stops it or is refused
+for the deleted conversation (data-export.md §4.2). Holds are part of the signed workspace policy
+(`compliance_archive.legal_holds` and `person_holds`, §2.3), under Administration → Retention → Legal
+hold.
 
 - **Who:** owners place and release holds; their app signs the policy. Admins see the list read-only.
+- **What the console offers:** channels, and people with what their hold covers ("All their
+  conversations" or "Their direct messages and groups"); the table says what each hold covers. It
+  doesn't list other people's direct messages (§2.1 shows channels only), so those are held through
+  the person. A hold by a direct message's ID is accepted through the API.
 - **Reference:** each hold carries the organisation's case reference (1 to 64 characters). Every member
-  of the channel sees it in a banner, and the signed policy is readable by everybody signed in: use a
-  case number, never a person's name or the reason.
-- **Members are told:** a held channel shows "This conversation is under legal hold" with the reference
-  to every member, from the verified policy: the server can't fake it, though like any policy update
-  it can delay or withhold a newer one. Desktop, web, Android and iOS show it.
-- **Audit:** placing and releasing a hold are audit entries with the owner who signed it.
-- **Limits:** a hold keeps what is on the server against the routine deletions; members can still
-  delete their own messages, and holds on people or direct messages are later steps
+  of a held conversation sees it in a banner, and the signed policy is readable by everybody signed
+  in: use a case number, never a person's name or the reason.
+- **Members are told:** a held conversation shows "This conversation is under legal hold" with the
+  reference to every member, also when a person's hold covers it, from the verified policy: the server
+  can't fake it, though like any policy update it can delay or withhold a newer one. Desktop, web,
+  Android and iOS show it, from the same shared list, so person holds show everywhere.
+- **Audit:** placing and releasing a hold are audit entries with the owner who signed it, on the
+  conversation or the person; deletions a released hold had kept are "Held deletions applied".
+- **Limits:** a hold keeps what is on the server against the routine deletions, not against a hostile
+  operator; edits and reactions of a deleted message stay until retention either way
   (data-export.md §4.2).
 
 The **compliance archive** (an archive device that keeps every covered conversation and exports it

@@ -91,15 +91,42 @@ pub struct LinkPreviewPolicy {
 pub struct ComplianceArchivePolicy {
   pub mode: ComplianceArchiveMode,
   /// Conversations under legal hold (data-export.md §4.2): kept on the server whatever retention,
-  /// the inactivity policy or a channel deletion would do, and shown as held to their members.
+  /// the inactivity policy, a deletion or a member's deletion of their own message would do, and
+  /// shown as held to their members.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub legal_holds: Vec<crate::LegalHold>,
+  /// People under legal hold (issue #2135): every conversation they are in is held as if it were
+  /// listed in `legal_holds`. Owner apps before this re-sign the policy without it.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub person_holds: Vec<crate::PersonLegalHold>,
 }
 
 impl ComplianceArchivePolicy {
-  /// The hold on `conversation`, if the policy places one.
+  /// The hold on `conversation` itself, if the policy places one. Whether a person's hold covers it
+  /// is [`Self::hold_covering`].
   pub fn legal_hold(&self, conversation: crate::ConversationId) -> Option<&crate::LegalHold> {
     crate::legal_hold_of(&self.legal_holds, conversation)
+  }
+
+  /// The hold that keeps `conversation`, its own or a held person's ([`crate::hold_covering`]).
+  pub fn hold_covering(
+    &self,
+    conversation: crate::ConversationId,
+    kind: &crate::ConversationKind,
+    participants: &[crate::UserId],
+  ) -> Option<crate::LegalHold> {
+    crate::hold_covering(
+      &self.legal_holds,
+      &self.person_holds,
+      conversation,
+      kind,
+      participants,
+    )
+  }
+
+  /// Checks both lists of holds ([`crate::check_legal_holds`]).
+  pub fn check_holds(&self) -> Result<(), crate::LegalHoldError> {
+    crate::check_legal_holds(&self.legal_holds, &self.person_holds)
   }
 }
 
@@ -1007,6 +1034,7 @@ impl Default for WorkspacePolicy {
       compliance_archive: ComplianceArchivePolicy {
         mode: ComplianceArchiveMode::Off,
         legal_holds: Vec::new(),
+        person_holds: Vec::new(),
       },
       maybe_role_signing: None,
       session: SessionPolicy::default(),

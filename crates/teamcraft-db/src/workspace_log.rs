@@ -6,6 +6,7 @@ use crate::audit::NewAuditEntry;
 use crate::database::Database;
 use crate::error::DbError;
 use crate::ids::{from_db_opt, to_db};
+use crate::legal_hold::{HeldPerson, HoldsPlaced};
 
 /// One entry of the signed roster or policy log. Payload and signature are opaque bytes here.
 #[derive(Debug, Clone)]
@@ -27,9 +28,12 @@ pub struct NewWorkspaceLogEntry<'a> {
   pub payload: &'a [u8],
   pub signature: &'a [u8],
   pub signer: DeviceId,
-  /// The channels a policy entry places a legal hold on that the previous entry didn't hold; each
-  /// must be an existing channel.
+  /// The conversations a policy entry places a legal hold on that the previous entry didn't hold;
+  /// each must be an existing channel, direct message or group.
   pub new_holds: &'a [ConversationId],
+  /// The people a policy entry holds, all of them (issue #2135); `None` for a roster entry. Each must
+  /// be a known account.
+  pub maybe_held_people: Option<&'a [HeldPerson]>,
   /// Audit rows written with the entry, only when it is.
   pub audit: &'a [NewAuditEntry<'a>],
 }
@@ -41,9 +45,11 @@ pub enum AppendOutcome {
   VersionConflict {
     current_version: u64,
   },
-  /// A new legal hold names a conversation that is not an existing channel (anymore): nothing is
-  /// stored (data-export.md §4.2).
-  NotExistingChannels,
+  /// A new legal hold names a conversation that is not an existing channel, direct message or group
+  /// (anymore): nothing is stored (data-export.md §4.2).
+  NotExistingConversations,
+  /// A person hold names an unknown account: nothing is stored.
+  UnknownPeople,
 }
 
 impl Database {
@@ -51,12 +57,13 @@ impl Database {
   /// the same version race on the primary key and exactly one wins. `audit` rows are written in the
   /// same transaction, only when the entry is.
   ///
-  /// The channels a policy entry newly holds ([`NewWorkspaceLogEntry::new_holds`]) are share-locked
-  /// and checked in this transaction, before the entry is written, so a hold and a deletion of the
-  /// same channel can't both win (issue #2143): a deletion or retention locks the channel's row and
-  /// reads the newest policy only after it has that lock ([`Self::latest_policy_payload_in`]).
-  /// Whichever runs second sees the other's result: the hold is refused for a deleted channel, or
-  /// the deletion reads the policy that holds it.
+  /// The conversations a policy entry newly holds ([`NewWorkspaceLogEntry::new_holds`]), and those
+  /// of the people it newly holds, are share-locked and checked in this transaction, before the
+  /// entry is written, so a hold and a deletion of the same conversation can't both win (issue
+  /// #2143): a deletion or retention locks the conversation's row and reads the holds only after it
+  /// has that lock ([`Self::hold_evidence_in`]). Whichever runs second sees the other's result: the
+  /// hold is refused for a deleted conversation (a person's hold just doesn't cover it), or the
+  /// deletion reads the holds. The held people are written in the same transaction.
   pub async fn append_workspace_log(
     &self,
     entry: &NewWorkspaceLogEntry<'_>,
@@ -68,14 +75,22 @@ impl Database {
       signature,
       signer,
       new_holds,
+      maybe_held_people,
       audit,
     } = *entry;
     let expected =
       i64::try_from(expected_version).map_err(|_| DbError::InvalidStoredValue("version".into()))?;
     let mut tx = self.pool().begin().await?;
-    if !lock_existing_channels(&mut tx, new_holds).await? {
-      tx.rollback().await?;
-      return Ok(AppendOutcome::NotExistingChannels);
+    match Self::place_holds_in(&mut tx, new_holds, maybe_held_people).await? {
+      HoldsPlaced::Placed => {},
+      HoldsPlaced::NotExistingConversations => {
+        tx.rollback().await?;
+        return Ok(AppendOutcome::NotExistingConversations);
+      },
+      HoldsPlaced::UnknownPeople => {
+        tx.rollback().await?;
+        return Ok(AppendOutcome::UnknownPeople);
+      },
     }
     let result = sqlx::query!(
       r#"INSERT INTO workspace_log (kind, version, payload, signature, signer_device_id)
@@ -186,28 +201,4 @@ impl Database {
     .await?;
     Ok(payload)
   }
-}
-
-/// Share-locks `channels` if every one of them is an existing channel, in id order like the deletion
-/// of a space locks them. `false` when one is missing, deleted or no channel. A deletion that holds
-/// one of them makes this wait, and its result is then judged on the row as the deletion left it.
-async fn lock_existing_channels(
-  tx: &mut Transaction<'_, Postgres>,
-  channels: &[ConversationId],
-) -> Result<bool, DbError> {
-  if channels.is_empty() {
-    return Ok(true);
-  }
-  let mut ids: Vec<i64> = channels.iter().copied().map(to_db).collect();
-  ids.sort_unstable();
-  ids.dedup();
-  let locked = sqlx::query_scalar!(
-    r#"SELECT id FROM conversations
-       WHERE id = ANY($1) AND kind = 'channel' AND deleted_at IS NULL
-       ORDER BY id FOR SHARE"#,
-    &ids,
-  )
-  .fetch_all(&mut **tx)
-  .await?;
-  Ok(locked.len() == ids.len())
 }

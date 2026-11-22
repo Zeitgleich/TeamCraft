@@ -114,6 +114,11 @@ pub async fn send_message(
     })
     .await?;
 
+  // data-export.md §4.2: a withdrawal of an own message removes its ciphertext, or keeps it marked
+  // deleted under a legal hold. Also on a repeat, which completes one a crash interrupted.
+  if let Some(target) = request.maybe_deletes {
+    super::legal_hold::withdraw_message(state, conversation, caller.user.id, target).await?;
+  }
   let response = message_response(&outcome.message);
   if outcome.is_new {
     // The import account's announcements (people it added, a channel it archived) are part of

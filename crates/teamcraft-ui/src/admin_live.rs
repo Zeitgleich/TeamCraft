@@ -2437,7 +2437,10 @@ impl Reads {
       },
       AdminSection::Users => Self::USERS | Self::SPACES | Self::CACHED_DEVICES | Self::GUESTS,
       AdminSection::Permissions => Self::SPACES | Self::CACHED_SCHEMES,
-      AdminSection::Retention => Self::SPACES | Self::CONVERSATIONS | Self::POLICY | Self::LEGACY_DETAILS,
+      // The people too: legal holds name them (issue #2135).
+      AdminSection::Retention => {
+        Self::SPACES | Self::CONVERSATIONS | Self::USERS | Self::POLICY | Self::LEGACY_DETAILS
+      },
       // Names of what the entries are about: the head of the lists, and the admins who act.
       AdminSection::Audit => {
         Self::AUDIT | Self::SPACES | Self::CONVERSATIONS | Self::USERS | Self::ROLE_HOLDERS
@@ -2925,6 +2928,7 @@ pub fn action_from_wire(action: &str) -> AuditAction {
     "inactivity_run_limited" => AuditAction::InactivityLimited,
     "legal_hold_placed" => AuditAction::LegalHoldPlaced,
     "legal_hold_released" => AuditAction::LegalHoldReleased,
+    "legal_hold_deletions_applied" => AuditAction::LegalHoldDeletionsApplied,
     "audit_exported" => AuditAction::AuditExported,
     "space_archived" => AuditAction::SpaceArchived,
     "space_restored" => AuditAction::SpaceRestored,

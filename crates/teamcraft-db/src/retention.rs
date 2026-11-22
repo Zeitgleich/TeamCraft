@@ -5,6 +5,7 @@ use time::OffsetDateTime;
 use crate::database::Database;
 use crate::error::DbError;
 use crate::ids::{from_db, to_db};
+use crate::legal_hold::HoldEvidence;
 
 /// A retention setting as stored: unset fields inherit.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -179,7 +180,7 @@ impl Database {
   }
 
   /// Deletes what is past retention in one conversation, in one transaction that first locks the
-  /// conversation's row and then reads the newest signed policy: `is_held` gets its payload and
+  /// conversation's row and then reads the legal holds: `is_held` gets the [`HoldEvidence`] and
   /// says whether a legal hold keeps the conversation (data-export.md §4.2). The lock conflicts with
   /// the share lock a policy append takes on the channels it newly holds, so a hold stored before the
   /// lock is seen here and one appended later waits for this commit (issue #2143). The lock doesn't
@@ -191,7 +192,7 @@ impl Database {
     &self,
     conversation: ConversationId,
     cut: &RetentionCut,
-    is_held: impl FnOnce(Option<&[u8]>) -> Result<bool, E>,
+    is_held: impl FnOnce(&HoldEvidence) -> Result<bool, E>,
   ) -> Result<Option<RetentionDeleted>, E> {
     let mut tx = self.pool().begin().await.map_err(DbError::from)?;
     let is_there = sqlx::query_scalar!(
@@ -202,7 +203,7 @@ impl Database {
     .await
     .map_err(DbError::from)?
     .is_some();
-    if !is_there || is_held(Self::latest_policy_payload_in(&mut tx).await?.as_deref())? {
+    if !is_there || is_held(&Self::hold_evidence_in(&mut tx, &[conversation]).await?)? {
       return Ok(None);
     }
     let deleted = delete_past_retention_in(&mut tx, conversation, cut).await?;
