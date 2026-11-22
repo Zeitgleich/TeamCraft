@@ -3534,6 +3534,13 @@ impl SyncReads<'_> {
 
   /// Answers a read; hands back a request that has to wait.
   fn answer(&self, request: Request) -> Option<Request> {
+    // The badge goes at once; the read position needs the client and waits (issue #778).
+    if let Request::Action(action, _) = &request
+      && let ChatAction::MarkRead { conversation } = **action
+    {
+      self.backend.show_read_now(conversation);
+      notify_changed();
+    }
     let request = match request {
       Request::Snapshot(_) | Request::SnapshotChanges(..) => return self.answer_snapshot(request),
       // Never held back by a sync or an upload: the message shows at once and goes out after.

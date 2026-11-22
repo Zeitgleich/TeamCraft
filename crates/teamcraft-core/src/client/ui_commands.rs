@@ -9,7 +9,9 @@ use crate::api::ServerApi;
 use crate::error::CoreError;
 use crate::records;
 use crate::store::{LocalStore, MessageFilter, Table};
-use crate::ui_backend::{CommandPart, CoreCommand, history_jump_key, newest_server_id, note_lines_read};
+use crate::ui_backend::{
+  CommandPart, CoreCommand, history_jump_key, newest_server_id, note_lines_read, note_read_position,
+};
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Runs a command, whatever its part ([`CommandPart`]): the hosts that are one program (desktop,
@@ -42,6 +44,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     match maybe_latest {
       // Queued: offline, it reaches the server (and the other devices) once back.
       Some(message) => {
+        note_read_position(&self.store, conversation, message)?;
         self
           .queue_action(PendingAction::ReadPosition {
             conversation,

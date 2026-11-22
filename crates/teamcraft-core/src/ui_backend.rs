@@ -1234,6 +1234,22 @@ impl<S: LocalStore> CoreChatBackend<S> {
     views.into_iter().flatten().collect()
   }
 
+  /// The user read `conversation` while the client is busy (a connect, issue #778): what the badge
+  /// counts from moves in the store now, so it goes at once. The read position goes out, and an
+  /// unread mark the user set clears, with the [`ChatBackend::mark_read`] the host runs once the
+  /// client is free.
+  pub fn show_read_now(&self, conversation: ConversationId) {
+    let cleared = crate::read_state::note_unread(&self.store, conversation, 0, 0).and_then(|()| {
+      let messages = self.store.messages(conversation, MessageFilter::All)?;
+      note_lines_read(&self.store, conversation, &messages)?;
+      match newest_server_id(&messages) {
+        Some(newest) => note_read_position(&self.store, conversation, newest),
+        None => Ok(()),
+      }
+    });
+    self.read(cleared);
+  }
+
   pub(crate) fn command(&self, command: CoreCommand) {
     self.commands.borrow_mut().push(command);
   }
@@ -4936,6 +4952,32 @@ fn with_imported_reactions(
 
 /// The newest of `messages` the server stored (outbox messages have no server ID yet): the read
 /// position that covers everything, reactions included.
+/// The user read `conversation` through `message`: the stored record's read position moves there
+/// now, never back, so the badge goes before the server confirms it, also offline (issue #778).
+/// The server's record replaces it once it has the position this device sent.
+pub(crate) fn note_read_position(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  message: MessageId,
+) -> Result<(), CoreError> {
+  let key = conversation.to_string();
+  let Some(mut response) = records::get_json::<ConversationResponse>(store, Table::Conversations, &key)?
+  else {
+    return Ok(());
+  };
+  let Some(membership) = response.maybe_my_membership.as_mut() else {
+    return Ok(());
+  };
+  if membership
+    .maybe_last_read_message_id
+    .is_some_and(|read| read >= message)
+  {
+    return Ok(());
+  }
+  membership.maybe_last_read_message_id = Some(message);
+  records::put_json(store, Table::Conversations, &key, &response)
+}
+
 pub(crate) fn newest_server_id(messages: &[StoredMessage]) -> Option<MessageId> {
   messages
     .iter()

@@ -131,6 +131,12 @@ async fn coming_back_costs_what_changed_not_the_workspace() {
       measured.changed.paths
     );
     assert!(
+      measured.live.requests <= MAX_UNCHANGED_REQUESTS,
+      "{where_}: three channels changed while connected made {} requests: {:?}",
+      measured.live.requests,
+      measured.live.paths
+    );
+    assert!(
       measured.unchanged.elapsed <= time_budget,
       "{where_}: a fresh session on an unchanged workspace took {:?} (budget {time_budget:?}): {:?}",
       measured.unchanged.elapsed,
@@ -157,6 +163,8 @@ fn scale(variable: &str, default: usize) -> usize {
 struct Scenarios {
   unchanged: Measured,
   changed: Measured,
+  /// Three channels got messages while Carol was connected (issue #778).
+  live: Measured,
   resumed: Measured,
 }
 
@@ -188,12 +196,49 @@ async fn scenarios(
       "the message sent while carol was away arrives in {channel}"
     );
   }
+  let live = changed_while_connected(stack, base_url, alice, carol, channels, label).await;
   let resumed = resume(stack, carol, &format!("{label}, resume")).await;
   Scenarios {
     unchanged,
     changed,
+    live,
     resumed,
   }
+}
+
+/// Three channels get a message while Carol is connected and her client applies the events; then
+/// the app opens again after the resume window. The events moved the heads (issue #778), so the
+/// fresh session reads none of the three again.
+async fn changed_while_connected(
+  stack: &Stack,
+  base_url: &str,
+  alice: &mut Peer,
+  carol: &mut Peer,
+  channels: &[ConversationId],
+  label: &str,
+) -> Measured {
+  let mut sent = Vec::new();
+  for channel in channels.iter().take(CHANGED_CHANNELS) {
+    let text = format!("while connected ({label}) in {channel}");
+    alice.client.send_text(*channel, None, &text).await.unwrap();
+    sent.push((*channel, text));
+  }
+  let deadline = Instant::now() + Duration::from_secs(30);
+  while !sent
+    .iter()
+    .all(|(channel, text)| carol.texts(*channel).contains(text))
+  {
+    assert!(Instant::now() < deadline, "the live messages never arrived");
+    carol.pump().await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+  }
+  reopen(
+    stack,
+    base_url,
+    carol,
+    &format!("{label}, three channels changed while connected"),
+  )
+  .await
 }
 
 /// The fastest of up to [`UNCHANGED_ATTEMPTS`] fresh sessions on the unchanged workspace, stopping
