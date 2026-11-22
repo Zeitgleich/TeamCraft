@@ -380,6 +380,14 @@ pub struct LimitsConfig {
   pub max_custom_emoji_bytes: u64,
   /// Longest side of a custom emoji picture, in pixels.
   pub max_custom_emoji_side_px: u32,
+  /// Sticker packs the workspace may have (issue #2132).
+  pub max_sticker_packs: u32,
+  /// Stickers one pack may have.
+  pub max_stickers_per_pack: u32,
+  /// Largest sticker picture (a still PNG or WebP, stored as uploaded).
+  pub max_sticker_bytes: u64,
+  /// Longest side of a sticker picture, in pixels.
+  pub max_sticker_side_px: u32,
   /// Most options of a poll (issue #2120); the apps hold senders to it.
   pub max_poll_options: u32,
   /// Longest poll question, in characters.
@@ -1913,6 +1921,10 @@ impl Default for LimitsConfig {
       max_custom_emoji: teamcraft_proto::DEFAULT_MAX_CUSTOM_EMOJI,
       max_custom_emoji_bytes: teamcraft_proto::DEFAULT_MAX_CUSTOM_EMOJI_BYTES,
       max_custom_emoji_side_px: teamcraft_proto::DEFAULT_MAX_CUSTOM_EMOJI_SIDE_PX,
+      max_sticker_packs: teamcraft_proto::DEFAULT_MAX_STICKER_PACKS,
+      max_stickers_per_pack: teamcraft_proto::DEFAULT_MAX_STICKERS_PER_PACK,
+      max_sticker_bytes: teamcraft_proto::DEFAULT_MAX_STICKER_BYTES,
+      max_sticker_side_px: teamcraft_proto::DEFAULT_MAX_STICKER_SIDE_PX,
       max_poll_options: teamcraft_proto::DEFAULT_MAX_POLL_OPTIONS as u32,
       max_poll_question_chars: teamcraft_proto::DEFAULT_MAX_POLL_QUESTION_CHARS as u32,
       max_poll_option_chars: teamcraft_proto::DEFAULT_MAX_POLL_OPTION_CHARS as u32,

@@ -30,6 +30,7 @@ mod retention;
 mod scim;
 mod shares;
 mod spaces;
+mod sticker_packs;
 mod sync;
 mod threads;
 mod user_groups;
@@ -138,6 +139,7 @@ pub(crate) fn routes() -> OpenApiRouter<AppState> {
     .merge(calls::routes())
     .merge(conversations::routes())
     .merge(custom_emoji::routes())
+    .merge(sticker_packs::routes())
     .merge(devices::routes())
     .merge(directory::routes())
     .merge(e2ee::routes())

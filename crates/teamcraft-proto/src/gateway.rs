@@ -250,6 +250,9 @@ pub enum GatewayEvent {
   /// A custom emoji was added, renamed or deleted (issue #207). Sent to everyone online; clients
   /// read `GET /api/v1/custom-emoji` again. Older clients skip the event.
   CustomEmojiUpdate,
+  /// A sticker pack was saved or deleted (issue #2132). Sent to everyone online; clients read
+  /// `GET /api/v1/sticker-packs` again. Older clients skip the event.
+  StickerPacksUpdate,
   /// A guest's membership of a space ran out and they were removed. Sent to the guest, the sponsor
   /// if still in the space, and the space's admins.
   GuestExpired {
@@ -421,6 +424,7 @@ impl GatewayEvent {
       Self::SystemEvent { .. } => "system_event",
       Self::UserGroupUpdate { .. } => "user_group_update",
       Self::CustomEmojiUpdate => "custom_emoji_update",
+      Self::StickerPacksUpdate => "sticker_packs_update",
       Self::GuestExpired { .. } => "guest_expired",
       Self::GuestTermsUpdate => "guest_terms_update",
       Self::MessageAck { .. } => "message_ack",

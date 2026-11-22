@@ -37,6 +37,9 @@ pub struct LiveMarks {
   /// the UI asks the core to read them again when it next needs them.
   #[serde(default)]
   pub custom_emoji: u64,
+  /// The workspace's sticker packs changed, or the roster that decides whose count (issue #2132).
+  #[serde(default)]
+  pub sticker_packs: u64,
 }
 
 /// A meeting notice the user joined or swiped away on another device, from a

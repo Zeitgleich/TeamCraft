@@ -658,6 +658,19 @@ pub struct LimitSettings {
   /// Longest side of a custom emoji picture, in pixels.
   #[serde(default = "default_max_custom_emoji_side_px")]
   pub max_custom_emoji_side_px: u32,
+  /// Sticker packs the workspace may have (issue #2132). Absent from older clients' requests: the
+  /// default.
+  #[serde(default = "default_max_sticker_packs")]
+  pub max_sticker_packs: u32,
+  /// Stickers one pack may have.
+  #[serde(default = "default_max_stickers_per_pack")]
+  pub max_stickers_per_pack: u32,
+  /// Largest sticker picture.
+  #[serde(default = "default_max_sticker_bytes")]
+  pub max_sticker_bytes: u64,
+  /// Longest side of a sticker picture, in pixels.
+  #[serde(default = "default_max_sticker_side_px")]
+  pub max_sticker_side_px: u32,
   /// Most options a poll a member sends may have (issue #2120; at most
   /// [`MAX_RECEIVED_POLL_OPTIONS`](crate::MAX_RECEIVED_POLL_OPTIONS), what every device counts).
   /// The four poll limits are only what the apps hold senders to: the server can't see a poll.
@@ -779,6 +792,22 @@ fn default_max_poll_open_days() -> u32 {
 
 fn default_max_custom_emoji_side_px() -> u32 {
   crate::DEFAULT_MAX_CUSTOM_EMOJI_SIDE_PX
+}
+
+fn default_max_sticker_packs() -> u32 {
+  crate::DEFAULT_MAX_STICKER_PACKS
+}
+
+fn default_max_stickers_per_pack() -> u32 {
+  crate::DEFAULT_MAX_STICKERS_PER_PACK
+}
+
+fn default_max_sticker_bytes() -> u64 {
+  crate::DEFAULT_MAX_STICKER_BYTES
+}
+
+fn default_max_sticker_side_px() -> u32 {
+  crate::DEFAULT_MAX_STICKER_SIDE_PX
 }
 
 /// Texts of the server's own mail. Placeholders: invitation `{inviter}` `{space}` `{role}` `{url}`,

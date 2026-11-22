@@ -93,6 +93,7 @@ mod space_discovery;
 mod space_features;
 mod space_images;
 mod status;
+mod sticker_packs;
 mod sync_heads;
 mod threads;
 mod unread_events;

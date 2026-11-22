@@ -246,6 +246,13 @@ max_backgrounds_per_user = 24
 max_custom_emoji = 500
 max_custom_emoji_bytes = 65536
 max_custom_emoji_side_px = 128
+# Sticker packs (issue #2132, docs/admin.md §3.11): how many packs, stickers per pack, the largest
+# picture in bytes and its longest side in pixels. Pictures are still PNG or WebP, stored as
+# uploaded; admins can change all four in the admin console (Settings > Limits).
+max_sticker_packs = 50
+max_stickers_per_pack = 120
+max_sticker_bytes = 262144
+max_sticker_side_px = 512
 # Poll limits (issue #2120): the apps hold senders to them, since the server can't see a poll.
 # Receivers count polls up to 32 options and 1000 characters whatever is set here; admins can
 # change all four in the admin console (Settings > Limits).

@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO sticker_packs (id, pack_key, version, name, payload, signature, updated_by)\n           VALUES ($1, $2, $3, $4, $5, $6, $7)\n           ON CONFLICT (pack_key) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Bytea",
+        "Int8",
+        "Text",
+        "Bytea",
+        "Bytea",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "16ea3c2356bdbef7cb4ebe0c6780aad0e09a4d57e91234b0f7ad393406c106be"
+}

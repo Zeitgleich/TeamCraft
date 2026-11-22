@@ -75,6 +75,7 @@ pub mod sfu_incidents;
 pub mod shares;
 pub mod space_images;
 pub mod spaces;
+pub mod sticker_packs;
 pub mod storage_cleanup;
 pub mod sync;
 pub mod system_events;

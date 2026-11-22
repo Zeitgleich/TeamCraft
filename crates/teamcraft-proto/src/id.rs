@@ -240,6 +240,15 @@ define_id!(
   CustomEmojiId
 );
 define_id!(
+  /// A sticker pack's row on the server (issue #2132); clients name a pack by its
+  /// [`StickerPackKey`](crate::StickerPackKey).
+  StickerPackId
+);
+define_id!(
+  /// A sticker picture's row on the server (issue #2132); clients name a picture by its hash.
+  StickerPictureId
+);
+define_id!(
   /// A user's own call background picture (encrypted, synced across the user's devices).
   BackgroundId
 );

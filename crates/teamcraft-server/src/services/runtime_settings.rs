@@ -343,6 +343,10 @@ fn apply(settings: &mut Settings, section: &RuntimeSettingsSection) {
       limits.max_custom_emoji = values.max_custom_emoji;
       limits.max_custom_emoji_bytes = values.max_custom_emoji_bytes;
       limits.max_custom_emoji_side_px = values.max_custom_emoji_side_px;
+      limits.max_sticker_packs = values.max_sticker_packs;
+      limits.max_stickers_per_pack = values.max_stickers_per_pack;
+      limits.max_sticker_bytes = values.max_sticker_bytes;
+      limits.max_sticker_side_px = values.max_sticker_side_px;
       limits.max_poll_options = values.max_poll_options;
       limits.max_poll_question_chars = values.max_poll_question_chars;
       limits.max_poll_option_chars = values.max_poll_option_chars;
@@ -467,6 +471,10 @@ fn view(settings: &Settings, sources: Vec<RuntimeSettingsState>) -> RuntimeSetti
       max_custom_emoji: limits.max_custom_emoji,
       max_custom_emoji_bytes: limits.max_custom_emoji_bytes,
       max_custom_emoji_side_px: limits.max_custom_emoji_side_px,
+      max_sticker_packs: limits.max_sticker_packs,
+      max_stickers_per_pack: limits.max_stickers_per_pack,
+      max_sticker_bytes: limits.max_sticker_bytes,
+      max_sticker_side_px: limits.max_sticker_side_px,
       max_poll_options: limits.max_poll_options,
       max_poll_question_chars: limits.max_poll_question_chars,
       max_poll_option_chars: limits.max_poll_option_chars,
@@ -725,6 +733,30 @@ fn validate(section: &RuntimeSettingsSection) -> Result<(), ApiError> {
         u64::from(values.max_custom_emoji_side_px),
         16,
         u64::from(teamcraft_proto::MAX_CUSTOM_EMOJI_SIDE_PX_LIMIT),
+      )?;
+      check_range(
+        "max_sticker_packs",
+        u64::from(values.max_sticker_packs),
+        0,
+        u64::from(teamcraft_proto::MAX_STICKER_PACKS_LIMIT),
+      )?;
+      check_range(
+        "max_stickers_per_pack",
+        u64::from(values.max_stickers_per_pack),
+        1,
+        u64::from(teamcraft_proto::MAX_STICKERS_PER_PACK_LIMIT),
+      )?;
+      check_range(
+        "max_sticker_bytes",
+        values.max_sticker_bytes,
+        1024,
+        teamcraft_proto::MAX_STICKER_BYTES_LIMIT,
+      )?;
+      check_range(
+        "max_sticker_side_px",
+        u64::from(values.max_sticker_side_px),
+        64,
+        u64::from(teamcraft_proto::MAX_STICKER_SIDE_PX_LIMIT),
       )?;
       check_range(
         "max_poll_options",
