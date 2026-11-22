@@ -135,6 +135,7 @@ pub fn call_mini_action(app: AppHandle, window: WebviewWindow, action: TrayActio
 
 /// The main window gained or lost the focus: the window shows while it is away, as the policy says.
 pub fn main_focus_changed(app: &AppHandle, is_focused: bool) {
+  tracing::debug!(is_focused, "the main window's focus changed");
   app.state::<CallMiniState>().lock().maybe_is_main_away = Some(!is_focused);
   reconcile(app);
 }

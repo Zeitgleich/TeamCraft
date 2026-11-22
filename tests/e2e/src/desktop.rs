@@ -185,7 +185,8 @@ impl DesktopSession {
         // No accessibility bus in the session.
         ("NO_AT_BRIDGE", "1"),
         ("NO_COLOR", "1"),
-        ("RUST_LOG", "info"),
+        // The small call window's decisions (desktop_call_mini.rs) follow the window manager's focus.
+        ("RUST_LOG", "info,teamcraft_desktop::call_mini=debug"),
       ]
       .map(|(key, value)| (key.to_owned(), value.to_owned())),
     );

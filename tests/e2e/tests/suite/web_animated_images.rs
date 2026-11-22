@@ -73,6 +73,7 @@ async fn animated_images_out_of_view_cost_nothing() {
       sign_in_and_unlock(&page, "carol").await;
       page.goto(format!("{WEB_ORIGIN}/c/{channel}")).await.unwrap();
       wait_for_element(&page, "[data-composer]").await;
+      let_the_browser_in(alice_ref, &page).await;
 
       send_animated_images(&page).await;
       send_filler(alice_ref, channel).await;
@@ -112,6 +113,37 @@ async fn animated_images_out_of_view_cost_nothing() {
     .await;
   browser.close().await;
   stack.stop().await;
+}
+
+/// Pumps Alice's device until it added the browser, a new device of Carol's, to the channel's group:
+/// until then what the page sends waits on the device ("isn't fully set up").
+async fn let_the_browser_in(alice: &mut Peer, page: &Page) {
+  let deadline = tokio::time::Instant::now() + WAIT;
+  let mut maybe_clear_since: Option<tokio::time::Instant> = None;
+  let mut round = 0_u32;
+  loop {
+    let text = crate::web::body_text(page).await;
+    if text.contains("isn't fully set up") {
+      maybe_clear_since = None;
+    } else if maybe_clear_since
+      .get_or_insert_with(tokio::time::Instant::now)
+      .elapsed()
+      >= Duration::from_secs(3)
+    {
+      return;
+    }
+    assert!(
+      tokio::time::Instant::now() < deadline,
+      "the browser was never added to the channel:\n{text}"
+    );
+    if round.is_multiple_of(50) {
+      alice.heartbeat().await;
+    }
+    round += 1;
+    alice.pump_reconnecting().await;
+    alice.client.apply_pending_changes().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+  }
 }
 
 /// Each image goes up as its own message, with a caption, from the page's file input.

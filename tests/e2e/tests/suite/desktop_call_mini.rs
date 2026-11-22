@@ -70,10 +70,12 @@ async fn the_small_call_window_follows_the_main_window_and_controls_the_call() {
     "document.querySelector('.call-screen') !== null",
   )
   .await;
+  let windows = app.window_count().await;
   assert_eq!(
-    app.window_count().await,
+    windows,
     1,
-    "the main window is in front: no small window"
+    "the main window is in front: no small window ({:?})",
+    app.evaluate_in_every_window("location.href").await
   );
 
   eprintln!("call mini: minimizing the main window");
