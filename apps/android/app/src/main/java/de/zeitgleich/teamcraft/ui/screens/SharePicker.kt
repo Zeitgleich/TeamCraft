@@ -1,5 +1,7 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.background
@@ -204,11 +206,16 @@ private fun ShareTargetList(
 
 @Composable
 private fun ShareFilter(value: String, onChange: (String) -> Unit) {
+  val filterLabel = stringResource(R.string.share_filter)
   OutlinedTextField(
     value = value,
     onValueChange = onChange,
-    modifier = Modifier.fillMaxWidth().padding(horizontal = Spacing.l, vertical = Spacing.s),
-    placeholder = { Text(stringResource(R.string.share_filter)) },
+    modifier = Modifier
+      .fillMaxWidth()
+      .padding(horizontal = Spacing.l, vertical = Spacing.s)
+      // A placeholder is gone once typed in; the field keeps its name for screen readers (A11y #2285).
+      .semantics { contentDescription = filterLabel },
+    placeholder = { Text(filterLabel) },
     leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
     trailingIcon = {
       if (value.isNotEmpty()) {

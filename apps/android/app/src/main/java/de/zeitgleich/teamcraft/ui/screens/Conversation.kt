@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.material3.IconToggleButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.foundation.horizontalScroll
@@ -1888,23 +1889,22 @@ internal fun Composer(
         members,
         composerPrefs.recentMentions,
       )
-      Mentions.suggestions(maybeQuery, members, priority = priority).forEach { user ->
-        Text(
-          "@${user.username} · ${user.displayName}",
-          modifier = Modifier.fillMaxWidth().clickable {
-            composerPrefs.noteMention(user.username)
-            pick(Mentions.complete(text, user, caret))
-          }.padding(horizontal = 16.dp, vertical = 8.dp),
-        )
-      }
+      val users = Mentions.suggestions(maybeQuery, members, priority = priority)
       val adminsName = stringResource(R.string.group_mention_admins)
-      Mentions.groupSuggestions(maybeQuery, groups, adminsName).forEach { group ->
+      val shownGroups = Mentions.groupSuggestions(maybeQuery, groups, adminsName)
+      SuggestionCount(users.size + shownGroups.size)
+      users.forEach { user ->
+        SuggestionRow("@${user.username} · ${user.displayName}") {
+          composerPrefs.noteMention(user.username)
+          pick(Mentions.complete(text, user, caret))
+        }
+      }
+      shownGroups.forEach { group ->
         val notified = group.notifiedCount.coerceAtMost(Int.MAX_VALUE.toUInt()).toInt()
-        Text(
+        SuggestionRow(
           "@${group.handle} · ${Mentions.shownName(group, adminsName)} · " +
             pluralStringResource(R.plurals.group_mention_people, notified, notified),
-          modifier = Modifier.fillMaxWidth().clickable { pick(Mentions.complete(text, group.handle, caret)) }.padding(horizontal = 16.dp, vertical = 8.dp),
-        )
+        ) { pick(Mentions.complete(text, group.handle, caret)) }
       }
     }
     if (reach.outsideCount > 0u) {
@@ -2212,15 +2212,18 @@ private fun ComposerField(
         IconButton(onClick = onAttach, modifier = Modifier.padding(vertical = 4.dp)) {
           Icon(painterResource(R.drawable.ic_attach_file), contentDescription = stringResource(R.string.attach))
         }
+        val composerHint = stringResource(R.string.composer_hint)
         TextField(
           value = value,
           // Enter and Backspace at a block carry on or leave it, unless the keyboard is composing.
           onValueChange = { next -> update(interceptKey(value, next) ?: next) },
           visualTransformation = styleTransformation,
-          placeholder = { Text(stringResource(R.string.composer_hint), style = MaterialTheme.typography.bodyLarge) },
+          placeholder = { Text(composerHint, style = MaterialTheme.typography.bodyLarge) },
           textStyle = MaterialTheme.typography.bodyLarge,
           modifier = Modifier
             .weight(1f)
+            // The placeholder is not a name: TalkBack would read "edit box" only (A11y #2285).
+            .semantics { contentDescription = composerHint }
             .focusRequester(focus)
             // Pasted pictures and what the keyboard inserts (GIFs, stickers) become attachments (#2053).
             .contentReceiver { content ->
@@ -2380,6 +2383,7 @@ private fun EmojiSuggestions(text: String, caret: Int, onPick: (String) -> Unit)
   // The workspace's own emoji first (issue #207): they are what somebody typing a name there means.
   val custom by rememberWorkspaceEmoji(maybeQuery, MAX_EMOJI_SUGGESTIONS)
   if (suggestions.isEmpty() && custom.isEmpty()) return
+  SuggestionCount(suggestions.size + custom.size)
   // The workspace emoji arrive after the built-in ones are composed: without this the row keeps
   // the first built-in chip as its anchor and the new ones land out of view on the left.
   val listState = rememberLazyListState()
@@ -2406,6 +2410,30 @@ private fun EmojiSuggestions(text: String, caret: Int, onPick: (String) -> Unit)
       )
     }
   }
+}
+
+/** One row of the mention suggestions: a 48 dp button (A11y #2285). */
+@Composable
+private fun SuggestionRow(label: String, onClick: () -> Unit) {
+  Text(
+    label,
+    modifier = Modifier
+      .fillMaxWidth()
+      .heightIn(min = 48.dp)
+      .clickable(role = Role.Button, onClick = onClick)
+      .padding(horizontal = 16.dp, vertical = 8.dp)
+      .wrapContentHeight(Alignment.CenterVertically),
+  )
+}
+
+/**
+ * Says how many suggestions the list just got, politely, as the list itself appears without a
+ * sound (A11y #2285). One pixel-sized node, so the count is a live region of its own.
+ */
+@Composable
+private fun SuggestionCount(count: Int) {
+  val text = pluralStringResource(R.plurals.a11y_suggestions_count, count, count)
+  Box(Modifier.size(1.dp).semantics { contentDescription = text; liveRegion = LiveRegionMode.Polite })
 }
 
 /** A picked picture in the composer: its thumbnail opens the editor, the corner button removes it. */
@@ -2435,22 +2463,29 @@ private fun PictureAttachment(file: PickedFile, maybeUpload: DraftFileState?, on
           .size(14.dp),
       )
     }
+    // A 48 dp target with the 24 dp badge in its corner (A11y #2285).
     Box(
       Modifier
         .align(Alignment.TopEnd)
-        .offset(x = 6.dp, y = (-6).dp)
-        .size(24.dp)
-        .clip(CircleShape)
-        .background(MaterialTheme.colorScheme.inverseSurface)
-        .clickable(onClickLabel = stringResource(R.string.composer_remove_file, file.fileName), onClick = onRemove),
-      contentAlignment = Alignment.Center,
+        .size(48.dp)
+        .clickable(role = Role.Button, onClickLabel = stringResource(R.string.composer_remove_file, file.fileName), onClick = onRemove),
     ) {
-      Icon(
-        Icons.Filled.Close,
-        contentDescription = stringResource(R.string.composer_remove_file, file.fileName),
-        tint = MaterialTheme.colorScheme.inverseOnSurface,
-        modifier = Modifier.size(16.dp),
-      )
+      Box(
+        Modifier
+          .align(Alignment.TopEnd)
+          .offset(x = 6.dp, y = (-6).dp)
+          .size(24.dp)
+          .clip(CircleShape)
+          .background(MaterialTheme.colorScheme.inverseSurface),
+        contentAlignment = Alignment.Center,
+      ) {
+        Icon(
+          Icons.Filled.Close,
+          contentDescription = stringResource(R.string.composer_remove_file, file.fileName),
+          tint = MaterialTheme.colorScheme.inverseOnSurface,
+          modifier = Modifier.size(16.dp),
+        )
+      }
     }
   }
 }
@@ -2620,7 +2655,11 @@ private fun SendOptionsSection(
 @Composable
 private fun OptionSwitch(label: Int, isOn: Boolean, onChange: (Boolean) -> Unit) {
   Row(
-    Modifier.fillMaxWidth().toggleable(value = isOn, onValueChange = onChange).padding(horizontal = 24.dp, vertical = 8.dp),
+    Modifier
+      .fillMaxWidth()
+      .heightIn(min = 48.dp)
+      .toggleable(value = isOn, role = Role.Switch, onValueChange = onChange)
+      .padding(horizontal = 24.dp, vertical = 8.dp),
     verticalAlignment = Alignment.CenterVertically,
   ) {
     Text(stringResource(label), modifier = Modifier.weight(1f))

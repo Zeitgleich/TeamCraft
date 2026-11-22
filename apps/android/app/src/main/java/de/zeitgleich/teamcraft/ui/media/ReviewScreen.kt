@@ -1,5 +1,11 @@
 package de.zeitgleich.teamcraft.ui.media
 
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.Role
 import android.net.Uri
 import android.os.Build
 import androidx.annotation.OptIn
@@ -234,13 +240,23 @@ private fun ThumbnailRail(draft: MediaDraft, onSelect: (Int) -> Unit, onRemove: 
   ) {
     itemsIndexed(draft.items, key = { _, item -> item.id }) { index, item ->
       val isCurrent = index == draft.currentIndex
+      val position = stringResource(
+        if (item.asRecent().isVideo) R.string.a11y_media_video_position else R.string.a11y_media_photo_position,
+        index + 1,
+        draft.items.size,
+      )
       Box(
         Modifier
           .size(56.dp)
           .clip(RoundedCornerShape(10.dp))
           .border(if (isCurrent) 2.dp else 0.dp, Color.White, RoundedCornerShape(10.dp))
-          .clickable { if (isCurrent) onRemove(item.id) else onSelect(index) }
-          .semantics { if (isCurrent) contentDescription = removeLabel },
+          .clickable(role = Role.Tab, onClickLabel = removeLabel.takeIf { isCurrent }) { if (isCurrent) onRemove(item.id) else onSelect(index) }
+          .semantics {
+            // "Photo 2 of 5", the current one selected; removing is an action of its own (A11y #2285).
+            contentDescription = position
+            selected = isCurrent
+            if (isCurrent) customActions = listOf(CustomAccessibilityAction(removeLabel) { onRemove(item.id); true })
+          },
       ) {
         Thumbnail(item.asRecent(), side = 56.dp, modifier = Modifier.matchParentSize())
         if (isCurrent) {

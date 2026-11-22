@@ -460,10 +460,12 @@ internal fun ExternalInviteesSection(
       onValueChange = { email = it },
       label = { Text(stringResource(R.string.meeting_form_external_email)) },
       isError = maybeErrorText != null,
+      // The error sits at its field and is bound to it (forms.md).
+      supportingText = maybeErrorText?.let { text -> { Text(text) } },
       singleLine = true,
       enabled = !isSaving,
       keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email, imeAction = ImeAction.Next),
-      modifier = Modifier.fillMaxWidth().focusRequester(focus),
+      modifier = Modifier.fillMaxWidth().focusRequester(focus).semantics { maybeErrorText?.let { error(it) } },
     )
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Spacing.s)) {
       OutlinedTextField(
@@ -475,9 +477,6 @@ internal fun ExternalInviteesSection(
         modifier = Modifier.weight(1f),
       )
       OutlinedButton(onClick = add, enabled = !isSaving && email.isNotBlank()) { Text(stringResource(R.string.meeting_form_add)) }
-    }
-    maybeErrorText?.let { text ->
-      Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
     }
   }
 }
@@ -557,10 +556,13 @@ private fun NumberWithUnit(
   onChange: (UInt) -> Unit,
 ) {
   Column {
+    val labelText = stringResource(label)
+    val unitText = pluralStringResource(unit, value.toInt(), value.toInt())
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Spacing.s)) {
-      Text(stringResource(label))
-      NumberInput(value, maybeError, focus, isEnabled, onChange)
-      Text(pluralStringResource(unit, value.toInt(), value.toInt()))
+      Text(labelText)
+      // Without a name TalkBack says "edit box, 2": the field is named by its label and unit (A11y #2285).
+      NumberInput(value, maybeError, focus, isEnabled, "$labelText $unitText", onChange)
+      Text(unitText)
     }
     FieldErrorText(maybeError)
   }
@@ -568,7 +570,7 @@ private fun NumberWithUnit(
 
 /** A whole number from the keyboard's digits; an empty field is 0, which the core refuses. */
 @Composable
-private fun NumberInput(value: UInt, maybeError: Int?, focus: FocusRequester, isEnabled: Boolean, onChange: (UInt) -> Unit) {
+private fun NumberInput(value: UInt, maybeError: Int?, focus: FocusRequester, isEnabled: Boolean, name: String, onChange: (UInt) -> Unit) {
   OutlinedTextField(
     value = if (value == 0u) "" else value.toString(),
     onValueChange = { typed -> onChange(typed.filter(Char::isDigit).take(4).toUIntOrNull() ?: 0u) },
@@ -576,7 +578,7 @@ private fun NumberInput(value: UInt, maybeError: Int?, focus: FocusRequester, is
     singleLine = true,
     enabled = isEnabled,
     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
-    modifier = Modifier.width(88.dp).focusRequester(focus).fieldError(maybeError),
+    modifier = Modifier.width(88.dp).focusRequester(focus).semantics { contentDescription = name }.fieldError(maybeError),
   )
 }
 
@@ -624,11 +626,13 @@ private fun SeriesEndChoice(
       Text(stringResource(R.string.meeting_form_ends_never))
     }
     EndRow(repeat.ends == MeetingSeriesEnd.AFTER_COUNT, !isSaving, { choose(MeetingSeriesEnd.AFTER_COUNT) }) {
-      Text(stringResource(R.string.meeting_form_ends_after))
-      NumberInput(repeat.count, errorOf(MeetingField.COUNT), focus.getValue(MeetingField.COUNT), !isSaving) {
+      val afterText = stringResource(R.string.meeting_form_ends_after)
+      val unitText = pluralStringResource(R.plurals.meeting_unit_meetings, repeat.count.toInt(), repeat.count.toInt())
+      Text(afterText)
+      NumberInput(repeat.count, errorOf(MeetingField.COUNT), focus.getValue(MeetingField.COUNT), !isSaving, "$afterText $unitText") {
         change(form.copy(repeatRule = repeat.copy(ends = MeetingSeriesEnd.AFTER_COUNT, count = it)))
       }
-      Text(pluralStringResource(R.plurals.meeting_unit_meetings, repeat.count.toInt(), repeat.count.toInt()))
+      Text(unitText)
     }
     FieldErrorText(errorOf(MeetingField.COUNT))
     EndRow(repeat.ends == MeetingSeriesEnd.ON_DATE, !isSaving, { choose(MeetingSeriesEnd.ON_DATE) }) {

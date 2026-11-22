@@ -393,16 +393,24 @@ private fun ZoomPills(steps: List<Float>, current: Float, onZoom: (Float) -> Uni
       val isActive = step == active
       val label = if (isActive) zoomLabel(current) + "×" else zoomLabel(step)
       val description = stringResource(R.string.media_zoom, zoomLabel(step))
+      // A 48 dp target around the 34 or 40 dp pill (A11y #2285).
       Box(
         Modifier
-          .size(if (isActive) 40.dp else 34.dp)
+          .size(48.dp)
           .clip(CircleShape)
-          .background(if (isActive) Color.White.copy(alpha = 0.25f) else Color.Transparent)
           .selectable(selected = isActive, role = Role.RadioButton, onClick = { onZoom(step) })
           .semantics { contentDescription = description },
         contentAlignment = Alignment.Center,
       ) {
-        Text(label, color = if (isActive) ACCENT_YELLOW else Color.White, style = androidx.compose.material3.MaterialTheme.typography.labelMedium)
+        Box(
+          Modifier
+            .size(if (isActive) 40.dp else 34.dp)
+            .clip(CircleShape)
+            .background(if (isActive) Color.White.copy(alpha = 0.25f) else Color.Transparent),
+          contentAlignment = Alignment.Center,
+        ) {
+          Text(label, color = if (isActive) ACCENT_YELLOW else Color.White, style = androidx.compose.material3.MaterialTheme.typography.labelMedium)
+        }
       }
     }
   }
@@ -453,7 +461,13 @@ private fun Shutter(mode: CameraMode, isRecording: Boolean, onTap: () -> Unit, o
   val holdStart by rememberUpdatedState(onHoldStart)
   val holdEnd by rememberUpdatedState(onHoldEnd)
   val inner by animateDpAsState(if (isRecording) 30.dp else 62.dp, label = "shutter")
-  val description = stringResource(if (mode == CameraMode.Photo) R.string.media_shutter_photo else R.string.media_shutter_video)
+  val description = stringResource(
+    when {
+      isRecording -> R.string.a11y_shutter_stop
+      mode == CameraMode.Photo -> R.string.media_shutter_photo
+      else -> R.string.media_shutter_video
+    },
+  )
   val holdLabel = stringResource(R.string.media_shutter_hold)
   Box(
     Modifier

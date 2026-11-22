@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="a11y_state_checked">Ausgewählt</string>
+  <string name="a11y_state_not_checked">Nicht ausgewählt</string>
+  <string name="a11y_selection_number">Ausgewählt, Nummer %d</string>
+  <string name="a11y_not_selected">Nicht ausgewählt</string>
+  <string name="a11y_media_photo_length">%1$s, %2$s</string>
+  <string name="a11y_media_photo_position">Foto %1$d von %2$d</string>
+  <string name="a11y_media_video_position">Video %1$d von %2$d</string>
+  <string name="a11y_lobby_admit">%s einlassen</string>
+  <string name="a11y_lobby_deny">%s ablehnen</string>
+  <string name="a11y_shutter_stop">Aufnahme beenden</string>
+  <plurals name="a11y_suggestions_count">
+    <item quantity="one">%d Vorschlag</item>
+    <item quantity="other">%d Vorschläge</item>
+  </plurals>
+  <string name="a11y_new_message_from">Neue Nachricht von %s</string>
+  <plurals name="a11y_new_messages">
+    <item quantity="one">%d neue Nachricht</item>
+    <item quantity="other">%d neue Nachrichten</item>
+  </plurals>
+</resources>
