@@ -444,7 +444,7 @@ jobs:
       # library still gets checked as a dependency of the shell. The call media's cross-platform
       # features (effects, segmentation, openh264-source) are linted on Linux too. One invocation, so
       # the dependency tree is checked once with one feature set.
-      - name: Clippy (Windows-only code: desktop shell, desktop-native, call media)
+      - name: Clippy (Windows-only code, desktop shell and call media)
         run: cargo clippy -p teamcraft-desktop -p teamcraft-media --all-targets --features teamcraft-media/native,teamcraft-media/mediafoundation,teamcraft-media/graphics-capture,teamcraft-media/wasapi-loopback -- -D warnings
       # One test build for all three crates: the shared dependencies (and teamcraft-media, which the
       # shell pulls in) compile once instead of once per step.
