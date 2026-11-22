@@ -193,6 +193,26 @@ async fn measure_starts(page: &Page, channel: String) {
 }
 
 /// When the core logged its gateway connection, each time.
+/// The page's console lines from now on.
+async fn page_console(page: &Page) -> Arc<Mutex<Vec<String>>> {
+  let lines = Arc::new(Mutex::new(Vec::new()));
+  let noted = lines.clone();
+  let mut console = page.event_listener::<EventConsoleApiCalled>().await.unwrap();
+  tokio::spawn(async move {
+    while let Some(event) = console.next().await {
+      let line = event
+        .args
+        .iter()
+        .filter_map(|arg| arg.value.as_ref())
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+      noted.lock().unwrap().push(line);
+    }
+  });
+  lines
+}
+
 async fn watch_gateway_connected(page: &Page) -> Arc<Mutex<Option<Instant>>> {
   let connected = Arc::new(Mutex::new(None));
   let noted = connected.clone();
@@ -356,6 +376,9 @@ async fn proxy_401_keeps_the_session(page: &Page, channel: String) {
 /// connection starts: the session's user may not be the cached one. The chats show meanwhile.
 async fn nothing_goes_out_before_the_answer(page: &Page, channel: String) {
   let url = format!("{WEB_ORIGIN}/c/{channel}");
+  // The page before is confirmed and may still be catching up from the step before: its requests
+  // would count against the new one, which is the one the rule is about (#1406). It goes first.
+  page.goto("about:blank").await.unwrap();
   let is_answered = Arc::new(AtomicBool::new(false));
   let signed_requests = Arc::new(Mutex::new(Vec::<String>::new()));
   let sockets = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -389,6 +412,7 @@ async fn nothing_goes_out_before_the_answer(page: &Page, channel: String) {
     }
   })
   .await;
+  let console = page_console(page).await;
   let (end, took) = start_until_list(page, &url).await;
   assert_eq!(end, StartEnd::ChannelList, "after {took:?}");
   assert!(
@@ -400,8 +424,18 @@ async fn nothing_goes_out_before_the_answer(page: &Page, channel: String) {
     assert!(Instant::now() < deadline, "GET /me never went out");
     tokio::time::sleep(Duration::from_millis(100)).await;
   }
-  assert_eq!(*signed_requests.lock().unwrap(), Vec::<String>::new());
-  assert_eq!(*sockets.lock().unwrap(), Vec::<String>::new());
+  // The page's log says which way the start went (from the cache, the long way, another tab).
+  let log = console.lock().unwrap().join("\n");
+  assert_eq!(
+    *signed_requests.lock().unwrap(),
+    Vec::<String>::new(),
+    "signed requests before the answer; the page's log:\n{log}"
+  );
+  assert_eq!(
+    *sockets.lock().unwrap(),
+    Vec::<String>::new(),
+    "a socket before the answer; the page's log:\n{log}"
+  );
   hold.stop(page).await;
   wait_until_gone(page, ".connection-hint").await;
   tokio::time::sleep(Duration::from_secs(2)).await;

@@ -135,6 +135,7 @@ pub fn call_mini_action(app: AppHandle, window: WebviewWindow, action: TrayActio
 
 /// The main window gained or lost the focus: the window shows while it is away, as the policy says.
 pub fn main_focus_changed(app: &AppHandle, is_focused: bool) {
+  tracing::debug!(is_focused, "the main window's focus changed");
   app.state::<CallMiniState>().lock().maybe_is_main_away = Some(!is_focused);
   reconcile(app);
 }
@@ -188,23 +189,24 @@ fn reconcile(app: &AppHandle) {
   let state = app.state::<CallMiniState>();
   // The focus events say whether the main window is behind others; out of sight it is away
   // whatever they said (a window manager may not have given it the focus to lose).
-  let is_main_away = {
-    let (maybe_known, is_hidden) = {
-      let inner = state.lock();
-      (inner.maybe_is_main_away, inner.is_main_hidden)
-    };
-    maybe_known.unwrap_or_else(|| is_main_away(app)) || is_hidden
+  let (maybe_known, is_hidden) = {
+    let inner = state.lock();
+    (inner.maybe_is_main_away, inner.is_main_hidden)
   };
+  // Only what the focus says is kept: a page that was out of sight for a moment says so again
+  // when it is back, and kept, its "hidden" would show the window until the next focus change.
+  let is_behind = maybe_known.unwrap_or_else(|| is_main_away(app));
+  let is_main_away = is_behind || is_hidden;
   let (should_show, generation) = {
     let mut inner = state.lock();
-    inner.maybe_is_main_away = Some(is_main_away);
+    inner.maybe_is_main_away = Some(is_behind);
     inner.generation += 1;
     (
       inner.maybe_call.is_some() && inner.policy.shows(is_main_away),
       inner.generation,
     )
   };
-  tracing::debug!(should_show, is_main_away, "small call window");
+  tracing::debug!(should_show, is_behind, is_hidden, "small call window");
   match (should_show, app.get_webview_window(CALL_MINI_LABEL)) {
     (true, Some(_)) => {
       if let Err(error) = app.emit_to(CALL_MINI_LABEL, CALL_MINI_CHANGED_EVENT, ()) {
