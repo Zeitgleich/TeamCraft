@@ -514,8 +514,10 @@ async fn first_sign_in(page: &Page, username: &str) {
     .press_key("Enter")
     .await
     .unwrap();
-  // The recovery kit comes first, then the keys, then whatever else the first run shows.
-  wait_for_text(page, "I saved my recovery kit").await;
+  // A short introduction, then the recovery kit, a check that it was kept, and what to remember.
+  wait_for_text(page, "Let's start").await;
+  click_text(page, "Let's start").await;
+  wait_for_text(page, "I wrote the key down on paper").await;
   shot(page, &format!("role-signing-setup-{}", &username[..8])).await;
   let groups: Vec<String> = body_text(page)
     .await
@@ -525,17 +527,19 @@ async fn first_sign_in(page: &Page, username: &str) {
     .map(str::to_owned)
     .collect();
   assert_eq!(groups.len(), 8, "the recovery key on the page");
-  click_text(page, "I saved my recovery kit").await;
-  wait_for_text(page, "To make sure you kept it").await;
+  click_text(page, "I wrote the key down on paper").await;
+  wait_for_element(page, "#kit-confirm-group").await;
   let asked = body_text(page).await;
   let number: usize = asked
-    .split("type group ")
+    .split("Group ")
     .nth(1)
-    .and_then(|rest| rest.split(' ').next())
+    .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
     .and_then(|number| number.parse().ok())
     .expect("which group the page asks for");
   type_until_kept(page, "#kit-confirm-group", &groups[number - 1]).await;
-  click_text(page, "Create keys").await;
+  click_text(page, "Continue").await;
+  wait_for_text(page, "Finish setup").await;
+  click_text(page, "Finish setup").await;
   finish_first_run(page).await;
 }
 

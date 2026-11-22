@@ -78,6 +78,8 @@ let status = { state: IS_PINNED ? 'pending' : 'unsigned', version: '', key_finge
 let releases = { clients: {}, retired: [] };
 // A page is listed before the browser reports it as a client; until then it counts as alive.
 const NEW_CLIENT_GRACE_MS = 60 * 1000;
+// How long after a page's navigation started the pages that left are counted again.
+const PRUNE_AFTER_NAVIGATION_MS = 3 * 1000;
 // A worker the browser stopped and started again has forgotten what it verified; the result is kept
 // in a cache and read back before the first request is answered.
 const restored = restoreStatus();
@@ -402,6 +404,10 @@ function notInRelease() {
 
 async function rememberClient(clientId) {
   releases.clients[clientId] = { version: status.version, at: Date.now() };
+  await pruneReleases();
+  // The page this one replaced (a reload, a switch to the new release) is still a client while the
+  // navigation starts, so the first pass keeps its release; once it is gone, retired releases go.
+  await new Promise((resolve) => setTimeout(resolve, PRUNE_AFTER_NAVIGATION_MS));
   await pruneReleases();
 }
 

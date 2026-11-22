@@ -21,6 +21,13 @@ pub struct BrowserSession {
   profile: PathBuf,
 }
 
+/// Whether chromiumoxide emulates its default viewport (800x600, no touch) on every page.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ViewportEmulation {
+  Default,
+  Off,
+}
+
 impl BrowserSession {
   /// Launches headless Chromium. `None` (with a skip message) when no browser is installed, unless
   /// `E2E_REQUIRED=1` demands one.
@@ -30,16 +37,32 @@ impl BrowserSession {
 
   /// [`Self::launch`] with more command line switches (fake camera and microphone for calls).
   pub async fn launch_with(extra_args: &[&str]) -> Option<Self> {
-    Self::launch_with_timeout(extra_args, REQUEST_TIMEOUT).await
+    Self::launch_with_timeout(extra_args, REQUEST_TIMEOUT, ViewportEmulation::Default).await
+  }
+
+  /// [`Self::launch_with`] for pages whose pointer comes from `extra_args` (a hovering mouse by
+  /// Blink settings): the default viewport emulation turns touch emulation off, which resets the
+  /// page's pointer to what headless Chromium has without a device.
+  pub async fn launch_with_pointer(extra_args: &[&str]) -> Option<Self> {
+    Self::launch_with_timeout(extra_args, REQUEST_TIMEOUT, ViewportEmulation::Off).await
   }
 
   /// [`Self::launch`] for page scripts that wait for the app much longer than
   /// [`REQUEST_TIMEOUT`] (perf.rs).
   pub async fn launch_for_measurements() -> Option<Self> {
-    Self::launch_with_timeout(&[], std::time::Duration::from_secs(300)).await
+    Self::launch_with_timeout(
+      &[],
+      std::time::Duration::from_secs(300),
+      ViewportEmulation::Default,
+    )
+    .await
   }
 
-  async fn launch_with_timeout(extra_args: &[&str], request_timeout: std::time::Duration) -> Option<Self> {
+  async fn launch_with_timeout(
+    extra_args: &[&str],
+    request_timeout: std::time::Duration,
+    viewport: ViewportEmulation,
+  ) -> Option<Self> {
     let is_required = std::env::var("E2E_REQUIRED").is_ok_and(|value| value == "1");
     let Some(executable) = find_chrome() else {
       assert!(
@@ -52,6 +75,9 @@ impl BrowserSession {
     // A fresh profile per launch: the default one is shared and would keep Keycloak's session cookie.
     let profile = std::env::temp_dir().join(format!("teamcraft-e2e-chrome-{:016x}", random_u64()));
     let mut builder = BrowserConfig::builder();
+    if viewport == ViewportEmulation::Off {
+      builder = builder.viewport(None);
+    }
     // chromiumoxide adds the leading `--` itself.
     for arg in extra_args {
       builder = builder.arg(arg.trim_start_matches('-'));

@@ -46,6 +46,10 @@ const SWITCHES: usize = 40;
 /// check allows four times that for a debug build on a shared CI runner; the regression it is for
 /// (#1000) was 4 % and more.
 const HIDDEN_CPU_PERCENT_LIMIT: f64 = 2.0;
+/// The updater's one check 1 to 10 minutes after the app started (docs/updates.md §4.4) reads the
+/// server's minimum client version, also with self-updates switched off, because the app shows
+/// "please update" from it. It lands in an idle window by chance, so it is not counted there.
+const UPDATER_RULES_PATH: &str = "path=/api/v1/client-compatibility}";
 /// Wakeups (voluntary context switches of all threads) per second of the whole app while hidden.
 /// Measured 50 to 55, most of them WebKit's own (its IPC and memory pressure threads); a timer
 /// that keeps the page or the core busy while nobody can see it adds tens to hundreds.
@@ -317,6 +321,7 @@ async fn measure_idle(stack: &Stack, app: &mut DesktopApp, period: Duration) -> 
     .unwrap_or_default()
     .lines()
     .filter(|line| line.contains("finished processing request"))
+    .filter(|line| !line.contains(UPDATER_RULES_PATH))
     .map(|line| {
       line
         .split("request{")

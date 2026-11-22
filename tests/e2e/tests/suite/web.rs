@@ -20,7 +20,7 @@ pub(crate) const WEB_ORIGIN: &str = "http://127.0.0.1:8082";
 /// The default policy only lets pages talk to https: and wss: origins; the dev Keycloak is plain http.
 pub(crate) const TEST_CSP: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; \
   style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; \
-  connect-src 'self' http://127.0.0.1:8080 ws: wss: https:; worker-src 'self' blob:; \
+  connect-src 'self' http://127.0.0.1:8080 http://127.0.0.1:3900 ws: wss: https:; worker-src 'self' blob:; \
   frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 const WAIT: Duration = Duration::from_secs(30);
 /// Long enough for several open/close cycles of a flickering popover (#639 saw one every 0.5–1 s).
@@ -601,24 +601,47 @@ pub(crate) async fn sign_in_as_alice(page: &Page) {
   // The account already has keys (the test enrolled it): this browser is a new device and unlocks
   // them with the recovery passphrase (the field also takes a recovery kit's key), which it asks
   // for once the recovery kit is picked among the ways to bring the key.
-  pick_recovery_kit(page).await;
-  type_until_kept(page, "#enroll-secret", PASSPHRASE).await;
+  enter_recovery_key(page, PASSPHRASE).await;
   click_text(page, "Unlock").await;
 }
 
-/// Picks the recovery kit on the "Unlock your messages here" screen, once it or the passphrase
-/// field shows.
-async fn pick_recovery_kit(page: &Page) {
+/// Types the recovery key into the "Unlock your messages here" screen. The screen first asks how to
+/// bring the key; a click on "Use my recovery kit" is lost when the setup page renders again while
+/// the core settles (#444), and that render also loses typed text. A person would pick the kit and
+/// type again, so the test repeats both until the text stays.
+pub(crate) async fn enter_recovery_key(page: &Page, key: &str) {
   let deadline = Instant::now() + WAIT;
   loop {
-    if page.find_element("#enroll-secret").await.is_ok() {
-      return;
+    if page.find_element("#enroll-secret").await.is_err() {
+      let script = "(() => { const el = [...document.querySelectorAll('button')].find(e => e.innerText.includes('Use my recovery kit')); if (!el) return false; el.click(); return true; })()";
+      // Nothing to click yet, or the field shows after this click: either way look again below.
+      page.evaluate(script).await.ok();
+      tokio::time::sleep(Duration::from_millis(300)).await;
     }
-    if body_text(page).await.contains("Use my recovery kit") {
-      click_text(page, "Use my recovery kit").await;
-      return;
+    if let Ok(field) = page.find_element("#enroll-secret").await
+      && field.click().await.is_ok()
+      && page
+        .evaluate("(document.querySelector('#enroll-secret') || {}).value = ''")
+        .await
+        .is_ok()
+      && field.type_str(key).await.is_ok()
+    {
+      // The page needs a moment to apply the input event before the value can be read back.
+      tokio::time::sleep(Duration::from_millis(300)).await;
+      let kept = page
+        .evaluate("(document.querySelector('#enroll-secret') || {}).value")
+        .await
+        .ok()
+        .and_then(|value| value.into_value::<String>().ok());
+      if kept.as_deref() == Some(key) {
+        return;
+      }
     }
-    assert!(Instant::now() < deadline, "no way to unlock the keys showed");
+    assert!(
+      Instant::now() < deadline,
+      "the recovery key field did not keep the typed text; the page says:\n{}",
+      body_text(page).await
+    );
     tokio::time::sleep(Duration::from_millis(300)).await;
   }
 }
