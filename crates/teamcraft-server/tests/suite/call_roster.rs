@@ -717,7 +717,7 @@ mod reconciliation {
   }
 
   /// Posts an SFU roster to the internal endpoint and returns the status.
-  async fn roster(app: &TestApp, maybe_token: Option<&str>, body: &Value) -> StatusCode {
+  pub(super) async fn roster(app: &TestApp, maybe_token: Option<&str>, body: &Value) -> StatusCode {
     let mut request = app
       .http
       .post(format!("{}/api/internal/v1/calls/roster", app.base_url))
@@ -775,6 +775,228 @@ mod internal_endpoint {
     let status = report(&unconfigured, "joined", Some(SFU_TOKEN), &id, &id, &device).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     unconfigured.stop().await;
+  }
+}
+
+/// Audit entries for recordings, from the SFU's recording reports (issue #2117).
+mod recording_audit {
+  use super::reconciliation::roster;
+  use super::*;
+
+  #[tokio::test]
+  async fn a_start_and_a_stop_make_two_entries_with_the_count_and_the_length_and_a_repeat_none() {
+    let app = app!(30);
+    let (alice, bob) = (owner(), member("bob"));
+    let channel = channel_with(&app, &[&bob]).await;
+    let (alice_device, bob_device) = (
+      register_device(&app, &alice).await,
+      register_device(&app, &bob).await,
+    );
+    let (alice_id, bob_id) = (user_id(&app, &alice).await, user_id(&app, &bob).await);
+    let call_id = join_token(&app, &alice, &channel, &alice_device).await;
+    report(
+      &app,
+      "joined",
+      Some(SFU_TOKEN),
+      &call_id,
+      &alice_id,
+      &alice_device,
+    )
+    .await;
+    report(&app, "joined", Some(SFU_TOKEN), &call_id, &bob_id, &bob_device).await;
+
+    let started = recording(
+      &app,
+      Some(SFU_TOKEN),
+      &call_id,
+      &bob_id,
+      &bob_device,
+      "recording",
+      2,
+    )
+    .await;
+    assert_eq!(started, StatusCode::NO_CONTENT);
+    // Announced again (a rejoin, a restarted SFU), by now with a third device in the call.
+    recording(
+      &app,
+      Some(SFU_TOKEN),
+      &call_id,
+      &bob_id,
+      &bob_device,
+      "recording",
+      3,
+    )
+    .await;
+    let entries = audit(&app, &alice, "call_recording_started").await;
+    assert_eq!(entries.len(), 1, "one entry per recording: {entries:?}");
+    assert_eq!(entries[0]["actor_user_id"], bob_id.as_str());
+    assert_eq!(entries[0]["target_kind"], "conversation");
+    assert_eq!(entries[0]["target_id"], channel.as_str());
+    let detail: Value = serde_json::from_str(entries[0]["detail"].as_str().unwrap()).unwrap();
+    assert_eq!(
+      detail,
+      json!({ "call_id": call_id, "device_id": bob_device, "participants": 2 })
+    );
+
+    recording(
+      &app,
+      Some(SFU_TOKEN),
+      &call_id,
+      &bob_id,
+      &bob_device,
+      "stopped",
+      2,
+    )
+    .await;
+    recording(
+      &app,
+      Some(SFU_TOKEN),
+      &call_id,
+      &bob_id,
+      &bob_device,
+      "stopped",
+      2,
+    )
+    .await;
+    let entries = audit(&app, &alice, "call_recording_stopped").await;
+    assert_eq!(
+      entries.len(),
+      1,
+      "a stop that came twice counts once: {entries:?}"
+    );
+    let detail: Value = serde_json::from_str(entries[0]["detail"].as_str().unwrap()).unwrap();
+    assert_eq!(detail["participants"], 3, "the most at once while it ran");
+    assert_eq!(detail["ended_by"], "stopped");
+    assert!(detail["duration_secs"].as_u64().unwrap() < 60, "{detail}");
+    let text = entries[0].to_string();
+    assert!(!text.contains(".ogg"), "no file names: {text}");
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_recording_without_a_stop_ends_when_its_device_leaves_or_the_sfu_no_longer_has_it() {
+    let app = app!(30);
+    let (alice, bob) = (owner(), member("bob"));
+    let channel = channel_with(&app, &[&bob]).await;
+    let (alice_device, bob_device) = (
+      register_device(&app, &alice).await,
+      register_device(&app, &bob).await,
+    );
+    let (alice_id, bob_id) = (user_id(&app, &alice).await, user_id(&app, &bob).await);
+    let call_id = join_token(&app, &alice, &channel, &alice_device).await;
+    report(
+      &app,
+      "joined",
+      Some(SFU_TOKEN),
+      &call_id,
+      &alice_id,
+      &alice_device,
+    )
+    .await;
+    report(&app, "joined", Some(SFU_TOKEN), &call_id, &bob_id, &bob_device).await;
+
+    // Bob's device leaves while it records.
+    recording(
+      &app,
+      Some(SFU_TOKEN),
+      &call_id,
+      &bob_id,
+      &bob_device,
+      "recording",
+      2,
+    )
+    .await;
+    report(&app, "left", Some(SFU_TOKEN), &call_id, &bob_id, &bob_device).await;
+    let entries = audit(&app, &alice, "call_recording_stopped").await;
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    let detail: Value = serde_json::from_str(entries[0]["detail"].as_str().unwrap()).unwrap();
+    assert_eq!(detail["ended_by"], "left");
+    assert_eq!(detail["participants"], 2);
+
+    // Alice's stop and leave got lost (a restart): a settled roster without her ends it, a fresh
+    // one (the SFU just restarted, devices still rejoining) doesn't yet.
+    recording(
+      &app,
+      Some(SFU_TOKEN),
+      &call_id,
+      &alice_id,
+      &alice_device,
+      "recording",
+      1,
+    )
+    .await;
+    let fresh = json!({ "uptime_secs": 5, "calls": [] });
+    roster(&app, Some(SFU_TOKEN), &fresh).await;
+    assert_eq!(audit(&app, &alice, "call_recording_stopped").await.len(), 1);
+    let settled = json!({ "uptime_secs": 600, "calls": [] });
+    roster(&app, Some(SFU_TOKEN), &settled).await;
+    assert_eq!(audit(&app, &alice, "call_recording_stopped").await.len(), 2);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn recording_reports_need_the_registration_token_and_a_known_call() {
+    let app = app!(30);
+    let alice = owner();
+    let channel = channel_with(&app, &[]).await;
+    let device = register_device(&app, &alice).await;
+    let id = user_id(&app, &alice).await;
+    let call_id = join_token(&app, &alice, &channel, &device).await;
+    report(&app, "joined", Some(SFU_TOKEN), &call_id, &id, &device).await;
+
+    let missing = recording(&app, None, &call_id, &id, &device, "recording", 1).await;
+    let wrong = recording(
+      &app,
+      Some("not-the-token"),
+      &call_id,
+      &id,
+      &device,
+      "recording",
+      1,
+    )
+    .await;
+    let unknown = recording(&app, Some(SFU_TOKEN), &id, &id, &device, "recording", 1).await;
+    assert_eq!(
+      (missing, wrong, unknown),
+      (
+        StatusCode::UNAUTHORIZED,
+        StatusCode::UNAUTHORIZED,
+        StatusCode::NOT_FOUND
+      )
+    );
+    assert!(audit(&app, &alice, "call_recording_started").await.is_empty());
+    app.stop().await;
+  }
+
+  async fn recording(
+    app: &TestApp,
+    maybe_token: Option<&str>,
+    call_id: &str,
+    user_id: &str,
+    device_id: &str,
+    state: &str,
+    participants: u32,
+  ) -> StatusCode {
+    let mut request = app
+      .http
+      .post(format!("{}/api/internal/v1/calls/recording", app.base_url))
+      .json(&json!({
+        "call_id": call_id,
+        "user_id": user_id,
+        "device_id": device_id,
+        "state": state,
+        "participants": participants,
+      }));
+    if let Some(token) = maybe_token {
+      request = request.bearer_auth(token);
+    }
+    request.send().await.unwrap().status()
+  }
+
+  async fn audit(app: &TestApp, admin: &TestUser, action: &str) -> Vec<Value> {
+    let reply = app.get(admin, &format!("/admin/audit?action={action}")).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    reply.body["entries"].as_array().unwrap().clone()
   }
 }
 

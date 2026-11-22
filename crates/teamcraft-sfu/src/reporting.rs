@@ -1,7 +1,8 @@
 //! Tells `teamcraft-server` who joined and left a call, so it can start the call, ring DMs and
 //! show the roster (`POST /api/internal/v1/calls/participants/{joined,left}`), and now and then
 //! the whole roster (`POST /api/internal/v1/calls/roster`), so the server can drop what a lost
-//! report left behind (#684).
+//! report left behind (#684). It also reports when a device's recording notice starts or stops a
+//! recording (`POST /api/internal/v1/calls/recording`), for the audit log (#2117).
 //!
 //! Reports never hold up media: they go into a bounded queue that one task sends in order, so a
 //! leave never overtakes the join before it (a quick rejoin of the same device would otherwise
@@ -14,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::StatusCode;
-use teamcraft_proto::{SfuParticipantReport, SfuRosterReport};
+use teamcraft_proto::{SfuParticipantReport, SfuRecordingReport, SfuRosterReport};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -26,6 +27,8 @@ pub trait ParticipantReporter: Send + Sync {
   fn left(&self, grant: JoinGrant);
   /// Every call on the SFU and who is in it. Reporters that keep no roster ignore it.
   fn roster(&self, _report: SfuRosterReport) {}
+  /// A device's recording started or stopped (its notice said so, or it left while recording).
+  fn recording(&self, _report: SfuRecordingReport) {}
 }
 
 /// Reports nothing (development without a server, tests).
@@ -50,6 +53,7 @@ enum Report {
   Joined(SfuParticipantReport),
   Left(SfuParticipantReport),
   Roster(SfuRosterReport),
+  Recording(SfuRecordingReport),
 }
 
 /// Sends the queued reports one after the other.
@@ -102,6 +106,7 @@ impl Report {
       Self::Joined(_) => "joined",
       Self::Left(_) => "left",
       Self::Roster(_) => "roster",
+      Self::Recording(_) => "recording",
     }
   }
 
@@ -110,6 +115,7 @@ impl Report {
       Self::Joined(_) => "/api/internal/v1/calls/participants/joined",
       Self::Left(_) => "/api/internal/v1/calls/participants/left",
       Self::Roster(_) => "/api/internal/v1/calls/roster",
+      Self::Recording(_) => "/api/internal/v1/calls/recording",
     }
   }
 }
@@ -130,6 +136,7 @@ impl ReportSender {
       let request = match report {
         Report::Joined(body) | Report::Left(body) => request.json(body),
         Report::Roster(body) => request.json(body),
+        Report::Recording(body) => request.json(body),
       };
       match request.send().await {
         Ok(response) if response.status().is_success() => {
@@ -168,6 +175,10 @@ impl ParticipantReporter for HttpReporter {
 
   fn roster(&self, report: SfuRosterReport) {
     self.enqueue(Report::Roster(report));
+  }
+
+  fn recording(&self, report: SfuRecordingReport) {
+    self.enqueue(Report::Recording(report));
   }
 }
 

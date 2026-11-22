@@ -5,7 +5,10 @@ use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use teamcraft_proto::{ListCallHistoryQuery, SfuCallRoster, SfuParticipantReport, SfuRosterReport};
+use teamcraft_proto::{
+  ListCallHistoryQuery, SfuCallRoster, SfuParticipantReport, SfuRecordingReport, SfuRecordingState,
+  SfuRosterReport,
+};
 
 use crate::handlers;
 use crate::state::AppState;
@@ -25,9 +28,17 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
     .route("/api/internal/v1/calls/participants/joined", post(handlers::report_participant_joined_handler))
     .route("/api/internal/v1/calls/participants/left", post(handlers::report_participant_left_handler))
     .route("/api/internal/v1/calls/roster", post(handlers::report_call_roster_handler))
+    .route("/api/internal/v1/calls/recording", post(handlers::report_call_recording_handler))
 }
 
 /// Schemas in the document that no documented route names: query parameters and the SFU's reports.
 #[derive(OpenApi)]
-#[openapi(components(schemas(ListCallHistoryQuery, SfuCallRoster, SfuParticipantReport, SfuRosterReport)))]
+#[openapi(components(schemas(
+  ListCallHistoryQuery,
+  SfuCallRoster,
+  SfuParticipantReport,
+  SfuRecordingReport,
+  SfuRecordingState,
+  SfuRosterReport
+)))]
 struct Schemas;

@@ -4,13 +4,15 @@ use teamcraft_client_api::audit_csv::utc_time;
 use teamcraft_proto::UnixMillis;
 
 use crate::admin::{AuditAction, AuditFilter};
+use crate::audit_detail::AuditDetail;
 use crate::audit_export::{AuditExport, export_audit_csv};
 use crate::clock::{format_date_time, now_ms};
 use crate::components::admin_console::SectionHeader;
 use crate::components::icons::{Icon, IconName};
 use crate::components::pending_button::PendingButton;
 use crate::feedback::PendingAction;
-use crate::i18n::use_i18n;
+use crate::i18n::{I18n, use_i18n};
+use crate::media_layout::format_duration;
 use crate::model::UserId;
 use crate::rest::RestClient;
 use crate::session::use_session;
@@ -180,13 +182,14 @@ pub fn AuditSection() -> impl IntoView {
             {
               let actor = state.read(|backend| backend.user(entry.actor)).map(|user| user.display_name).unwrap_or_default();
               let slug = entry.action.slug();
+              let detail = AuditDetail::of(entry.action, &entry.detail);
               view! {
                 <tr>
                   <td class="nowrap">{move || format_date_time(entry.at, i18n.locale().tag())}</td>
                   <td translate="no">{actor}</td>
                   <td><span class="badge">{move || i18n.t(&format!("audit-{slug}"))}</span></td>
                   <td translate="no">{entry.target.clone()}</td>
-                  <td class="muted-text" translate="no">{entry.detail.clone()}</td>
+                  <td class="muted-text" translate="no">{move || detail_text(&detail, i18n)}</td>
                 </tr>
               }
             }
@@ -201,6 +204,33 @@ pub fn AuditSection() -> impl IntoView {
 }
 
 /// `audit-log-2026-11-19.csv` for an export made at `now`.
+/// The detail column: the console's wording where it has one, the server's detail otherwise.
+fn detail_text(detail: &AuditDetail, i18n: I18n) -> String {
+  match detail {
+    AuditDetail::Raw(text) => text.clone(),
+    AuditDetail::RecordingStarted { participants } => {
+      i18n.t_count("audit-detail-recording-started", count(*participants))
+    },
+    AuditDetail::RecordingStopped {
+      participants,
+      duration_secs,
+      has_left,
+    } => {
+      let key = if *has_left {
+        "audit-detail-recording-left"
+      } else {
+        "audit-detail-recording-stopped"
+      };
+      let length = format_duration(duration_secs.saturating_mul(1000));
+      i18n.t_count_with(key, count(*participants), &[("length", &length)])
+    },
+  }
+}
+
+fn count(value: u32) -> usize {
+  usize::try_from(value).unwrap_or(usize::MAX)
+}
+
 fn export_file_name(now: i64) -> String {
   let date = utc_time(UnixMillis(now));
   format!("audit-log-{}.csv", date.get(..10).unwrap_or("export"))

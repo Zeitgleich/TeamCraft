@@ -724,6 +724,22 @@ audit-brand-changed = Brand changed
 audit-mail-settings-changed = Mail settings changed
 audit-calendar-settings-changed = Calendar settings changed
 audit-settings-changed = Instance settings changed
+audit-call-recording-started = Call recording started
+audit-call-recording-stopped = Call recording stopped
+# Detail of an audit entry: devices in the call when the recording started.
+audit-detail-recording-started = { $count ->
+    [one] 1 device in the call
+   *[other] { $count } devices in the call
+}
+# Detail of an audit entry: how long the recording ran ($length like 12:34) and the most devices in the call.
+audit-detail-recording-stopped = { $count ->
+    [one] Ran { $length }, 1 device in the call
+   *[other] Ran { $length }, up to { $count } devices in the call
+}
+audit-detail-recording-left = { $count ->
+    [one] Ran { $length }, 1 device in the call; the recording device left without stopping
+   *[other] Ran { $length }, up to { $count } devices in the call; the recording device left without stopping
+}
 admin-source-config = From configuration file
 admin-source-database = Changed in console
 admin-save = Save

@@ -1354,10 +1354,15 @@ under Administration → Security → Call recording. It is **off by default**.
   before it starts, and every app says so when somebody records whom the policy doesn't allow. A
   modified app can ignore it (see above). An owner app from before the setting re-signs without it,
   which reads as `off`.
-- **Audit:** the server sees that a recording notice passed through the SFU, not who may see it or
-  what it says; an entry in the audit log is a later step.
+- **Audit:** every recording that starts and ends is an entry in the audit log (§4): "Call
+  recording started" and "Call recording stopped", by the person whose device records, on the
+  call's conversation, with the number of devices in the call and how long it ran (#2117). The SFU
+  reports them from the signed notices it passes on, so the log shows what the people in the call
+  were shown, and a modified app can't leave out or make up an entry for anybody but itself; a
+  recording made without a notice (a screen recorder, a modified app) is in no log, as on nobody's
+  screen. Metadata only: never a file name or anything of the recording.
 - **Later steps:** consent from everybody before a recording starts, and leaving people out of it
-  (#2115); video (#2250); an audit entry and an unattended recorder bot (#2117).
+  (#2115); video (#2250); an unattended recorder bot (#2273).
 
 ### 3.14 Legal hold and compliance archive (issue #211)
 
@@ -1437,6 +1442,12 @@ Every admin action, recovery, device change and role change is logged with actor
 - The log contains metadata only, never message content.
 - Legal holds placed and released (`legal_hold_placed`, `legal_hold_released`) name the owner who
   signed the policy, the conversation and the case reference (§3.14).
+- Call recordings (`call_recording_started`, `call_recording_stopped`, §3.13) name the person whose
+  device records and the call's conversation; the detail has the call, the device, the number of
+  devices in the call (at the start; at the stop the most at once while it ran), and at the stop
+  how long it ran in seconds and how it ended (`stopped`, or `left`: the device left the call, or
+  the SFU no longer had it, without a stop). The console words the detail; the export keeps it as
+  JSON.
 
 ### 4.1 Server API of the admin features
 

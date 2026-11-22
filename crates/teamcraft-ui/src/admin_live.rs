@@ -2952,6 +2952,8 @@ pub fn action_from_wire(action: &str) -> AuditAction {
       AuditAction::CalendarSettingsChanged
     },
     "settings_updated" | "settings_reset" => AuditAction::SettingsChanged,
+    "call_recording_started" => AuditAction::CallRecordingStarted,
+    "call_recording_stopped" => AuditAction::CallRecordingStopped,
     _ => AuditAction::Other,
   }
 }
@@ -3063,6 +3065,14 @@ mod tests {
       AuditAction::CalendarSettingsChanged
     );
     assert_eq!(action_from_wire("settings_reset"), AuditAction::SettingsChanged);
+    assert_eq!(
+      action_from_wire("call_recording_started"),
+      AuditAction::CallRecordingStarted
+    );
+    assert_eq!(
+      action_from_wire("call_recording_stopped"),
+      AuditAction::CallRecordingStopped
+    );
   }
 
   #[test]

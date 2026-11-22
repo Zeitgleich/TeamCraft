@@ -1,0 +1,60 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM open_call_recordings\n         WHERE call_id = $1 AND device_id = $2\n         RETURNING user_id, conversation_id, peak_participants,\n           GREATEST(0, EXTRACT(EPOCH FROM now() - started_at))::bigint AS \"duration_secs!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "open_call_recordings",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "conversation_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "open_call_recordings",
+            "name": "conversation_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "peak_participants",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "open_call_recordings",
+            "name": "peak_participants"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "duration_secs!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "779281e3d5525f89a805ad401c1b20f5bb60cd3f3840d227582a66b00e00649e"
+}

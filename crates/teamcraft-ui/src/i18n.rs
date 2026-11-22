@@ -801,6 +801,14 @@ mod tests {
     for action in teamcraft_client_api::admin::AuditAction::ALL {
       keys.push(format!("audit-{}", action.slug()));
     }
+    // The console's wording of call recording entries (issue #2117).
+    for key in [
+      "audit-detail-recording-started",
+      "audit-detail-recording-stopped",
+      "audit-detail-recording-left",
+    ] {
+      keys.push(key.to_owned());
+    }
     // Inactive channels and idle guest accounts (issue #212).
     for key in [
       "policy-inactivity",
