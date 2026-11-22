@@ -55,7 +55,7 @@ use wtransport::{Endpoint, Identity};
 use super::{bind_wildcard, local_route_to, read_framed, with_trusted_roots, write_framed};
 use crate::call_engine::CallEngine;
 use crate::direct_path::{
-  BIRTHDAY_PROBE_INTERVAL, BIRTHDAY_PUNCH_REPEAT, BIRTHDAY_PUNCHES, BIRTHDAY_SOCKETS, BIRTHDAY_TIMEOUT,
+  BIRTHDAY_LINGER, BIRTHDAY_PROBE_INTERVAL, BIRTHDAY_PUNCHES, BIRTHDAY_SOCKETS, BIRTHDAY_TIMEOUT,
   BirthdayRole, CERTIFICATE_HASH_LEN, DIAL_TIMEOUT, DirectControl, DirectDatagram, DirectPair,
   DirectPathInputs, DownReason, OfferInbox, OwnNat, PathChange, PathSelector, Pinger, RelayArbiter,
   accepted_connection_wins, birthday_ports, birthday_probe, birthday_role, birthday_wait, dial_delay,
@@ -64,7 +64,7 @@ use crate::direct_path::{
 };
 #[cfg(feature = "port-mapping")]
 use crate::port_mapping::PortMapper;
-use crate::sfu_address::PinnedResolver;
+use crate::sfu_address::{PinnedResolver, with_port};
 
 /// The direct connection's ALPN: only another TeamCraft direct path endpoint speaks it.
 const DIRECT_ALPN: &[u8] = b"teamcraft-direct/1";
@@ -456,8 +456,9 @@ impl DirectPath {
     }
     let change = self.selector.poll(now);
     self.apply_change(change, engine);
-    // A round the selector gave up stops dialing; a path that failed to prove itself is closed.
-    if !self.selector.is_dialing() {
+    // A round the selector gave up stops dialing, unless its connection may still win over the
+    // one there is; a path that failed to prove itself is closed.
+    if !self.selector.is_dialing() && !self.may_be_replaced() {
       self.stop_dialing();
     }
     if !self.selector.is_connected() {
@@ -577,11 +578,15 @@ impl DirectPath {
       return;
     };
     debug!(candidates = body.candidates.len(), "direct path offer taken");
-    let candidates = body
+    let candidates: Vec<SocketAddr> = body
       .candidates
       .iter()
       .map(|candidate| candidate.address)
       .collect();
+    let has_new_candidates = self
+      .maybe_peer
+      .as_ref()
+      .is_none_or(|peer| peer.candidates != candidates);
     let has_new_certificate = self
       .maybe_peer
       .as_ref()
@@ -594,8 +599,14 @@ impl DirectPath {
     if has_new_certificate {
       self.pin_server(certificate_hash);
     }
-    // A new offer: the other device may have moved, so the next round starts at once.
+    // A new offer: the other device may have moved, so the next round starts at once; one that
+    // runs with the old addresses starts over with the new ones (its reflexive address often
+    // comes a moment after its first offer).
     self.selector.reset_backoff();
+    if has_new_candidates && self.maybe_dialing.is_some() {
+      self.stop_dialing();
+      self.spawn_dial(now);
+    }
     self.maybe_dial(now);
     // Birthday probing keeps its own backoff: the other device's offers can't make it run more.
     self.maybe_birthday(now);
@@ -652,6 +663,14 @@ impl DirectPath {
     if self.maybe_connection.is_some() || self.maybe_dialing.is_some() || !self.selector.may_dial(now) {
       return;
     }
+    self.spawn_dial(now);
+  }
+
+  /// Dials every candidate of the other device's offer in a round of its own.
+  fn spawn_dial(&mut self, now: Instant) {
+    if self.maybe_connection.is_some() {
+      return;
+    }
     let (Some(socket), Some(peer)) = (self.maybe_socket.as_ref(), self.maybe_peer.as_ref()) else {
       return;
     };
@@ -683,7 +702,12 @@ impl DirectPath {
       }
       self.drop_connection();
     }
-    self.stop_dialing();
+    let is_winning_kind = is_accepted == accepted_connection_wins(&pair);
+    if is_winning_kind {
+      self.stop_dialing();
+    }
+    // Else the own dialing goes on: when it connects as well, the other device takes that one (the
+    // lower device ID's accepted one wins on both sides), so it must not be dropped here.
     self.stop_birthday();
     self.failed_birthdays = 0;
     self.maybe_birthday_after = None;
@@ -696,6 +720,19 @@ impl DirectPath {
     });
     self.selector.on_connected(now);
     self.pinger.start(now);
+  }
+
+  /// Whether the connection there is may still give way to the own dialing's: it is of the kind
+  /// that loses when both directions connect, and the dialing runs.
+  fn may_be_replaced(&self) -> bool {
+    let (Some(pair), Some(current)) = (self.maybe_pair, self.maybe_connection.as_ref()) else {
+      return false;
+    };
+    current.is_accepted != accepted_connection_wins(&pair)
+      && self
+        .maybe_dialing
+        .as_ref()
+        .is_some_and(|dialing| !dialing.is_finished())
   }
 
   fn on_datagram(&mut self, bytes: Bytes, read_at: Instant, now: Instant) -> Option<(Bytes, Instant)> {
@@ -1244,9 +1281,9 @@ async fn accept(endpoint: quinn::Endpoint, inputs: mpsc::UnboundedSender<DirectI
 }
 
 /// The hard side's birthday round: up to [`BIRTHDAY_SOCKETS`] IPv4 sockets, each punching toward
-/// the other device ([`BIRTHDAY_PUNCHES`] times) so the NAT maps a port for each, then waiting for
-/// the other device's probe. The first socket a probe with `own_token` from the other device's
-/// address reaches is handed back; the others close.
+/// the other device (at the times and TTLs of [`BIRTHDAY_PUNCHES`]) so the NAT maps a port for each,
+/// and waiting for the other device's probe. The first socket a probe with `own_token` from the
+/// other device's address reaches is handed back, with the system's TTL again; the others close.
 async fn open_birthday(
   peer: SocketAddr,
   own_token: [u8; DIRECT_PROBE_TOKEN_BYTES],
@@ -1258,6 +1295,7 @@ async fn open_birthday(
     return;
   }
   debug!(sockets = sockets.len(), "birthday sockets open");
+  let maybe_default_ttl = sockets.first().and_then(|socket| socket.ttl().ok());
   let sockets: Vec<Arc<tokio::net::UdpSocket>> = sockets.into_iter().map(Arc::new).collect();
   let (hit_tx, mut hit_rx) = mpsc::unbounded_channel::<(usize, SocketAddr)>();
   let mut readers = Vec::with_capacity(sockets.len());
@@ -1265,7 +1303,12 @@ async fn open_birthday(
     let (socket, hit_tx) = (Arc::clone(socket), hit_tx.clone());
     readers.push(tokio::spawn(async move {
       let mut buffer = [0u8; BIRTHDAY_READ_BYTES];
-      while let Ok((length, from)) = socket.recv_from(&mut buffer).await {
+      loop {
+        // An error is an ICMP answer to a punch (Windows reports them on any UDP socket): the
+        // socket is still good.
+        let Ok((length, from)) = socket.recv_from(&mut buffer).await else {
+          continue;
+        };
         let is_peer = from.ip().to_canonical() == peer.ip().to_canonical();
         if is_peer && is_birthday_probe(&buffer[..length], &own_token) {
           let _ = hit_tx.send((index, from));
@@ -1279,11 +1322,15 @@ async fn open_birthday(
   let punching = {
     let sockets = sockets.clone();
     tokio::spawn(async move {
-      for round in 0..BIRTHDAY_PUNCHES {
-        if round > 0 {
-          tokio::time::sleep(BIRTHDAY_PUNCH_REPEAT).await;
-        }
+      let started = tokio::time::Instant::now();
+      for (at, maybe_ttl) in BIRTHDAY_PUNCHES {
+        tokio::time::sleep_until(started + at).await;
         for socket in &sockets {
+          // A socket whose TTL can't be set punches with the one it has: that may cost its port
+          // at the other NAT, not the round.
+          if let Some(ttl) = maybe_ttl.or(maybe_default_ttl) {
+            let _ = socket.set_ttl(ttl);
+          }
           // A punch that can't go out maps nothing; the others still may.
           let _ = socket.send_to(&punch, peer).await;
         }
@@ -1306,8 +1353,12 @@ async fn open_birthday(
   }
   let input = maybe_hit
     .and_then(|(index, from)| {
-      let socket = sockets.into_iter().nth(index)?;
-      let socket = Arc::into_inner(socket)?.into_std().ok()?;
+      let socket = Arc::into_inner(sockets.into_iter().nth(index)?)?;
+      if let Some(ttl) = maybe_default_ttl {
+        // The direct connection's packets go all the way.
+        socket.set_ttl(ttl).ok()?;
+      }
+      let socket = socket.into_std().ok()?;
       Some(DirectInput::BirthdayHit { socket, peer: from })
     })
     .unwrap_or(DirectInput::BirthdayEnded);
@@ -1367,7 +1418,7 @@ async fn probe_birthday(
     let _ = socket.send_to(&probe, SocketAddr::new(peer_ip, port)).await;
   }
   // The last probes' answers may still be on their way.
-  tokio::time::sleep(BIRTHDAY_PUNCH_REPEAT).await;
+  tokio::time::sleep(BIRTHDAY_LINGER).await;
   let _ = inputs.send(DirectInput::BirthdayEnded);
 }
 
@@ -1423,10 +1474,12 @@ async fn reflect(
   };
   let config = builder.dns_resolver(PinnedResolver(address)).build();
   let client: Endpoint<Client> = Endpoint::client_on_endpoint(config, endpoint);
-  let connection = client
-    .connect(&target.sfu_url)
-    .await
-    .map_err(|error| error.to_string())?;
+  let url = if address == target.address {
+    target.sfu_url.clone()
+  } else {
+    with_port(&target.sfu_url, address.port()).ok_or("the SFU's address is no URL")?
+  };
+  let connection = client.connect(&url).await.map_err(|error| error.to_string())?;
   let (mut send, mut recv) = connection
     .open_bi()
     .await

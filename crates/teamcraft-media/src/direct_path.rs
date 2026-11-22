@@ -66,10 +66,24 @@ pub const BIRTHDAY_SOCKETS: usize = 256;
 pub const BIRTHDAY_PROBES: usize = 2048;
 /// Between two probes: 200 a second, so a round's probes take about 10 s.
 pub const BIRTHDAY_PROBE_INTERVAL: Duration = Duration::from_millis(5);
-/// The hard side's sockets each send this many punches toward the other device's address, one
-/// [`BIRTHDAY_PUNCH_REPEAT`] apart: the NAT maps a port for each, and the repeat covers a lost one.
-pub const BIRTHDAY_PUNCHES: u32 = 2;
-pub const BIRTHDAY_PUNCH_REPEAT: Duration = Duration::from_secs(1);
+/// When the hard side's sockets each punch toward the other device's address, from the round's
+/// start, and with which TTL (`None`: the system's). The NAT maps a port for each socket at its
+/// first punch; the second covers a lost one. The first two are short-lived ([`BIRTHDAY_PUNCH_TTL`]):
+/// a punch that reached the other device's NAT first could take the port pair for itself there, and
+/// a NAT like Linux's without a firewall in front then gives the other device's probe to that very
+/// port another source port (and keeps using it), which the hard NAT drops. The last one goes all
+/// the way, for a hard NAT more than two hops away (a company network), at the cost of the ports
+/// the other device hasn't probed by then, where the other NAT is such a NAT.
+pub const BIRTHDAY_PUNCHES: [(Duration, Option<u32>); 3] = [
+  (Duration::ZERO, Some(BIRTHDAY_PUNCH_TTL)),
+  (Duration::from_secs(1), Some(BIRTHDAY_PUNCH_TTL)),
+  (Duration::from_secs(4), None),
+];
+/// The short-lived punches' TTL: enough to pass the own NAT and a carrier NAT behind it (two
+/// hops), too little to reach the other device's NAT across the internet.
+pub const BIRTHDAY_PUNCH_TTL: u32 = 3;
+/// How long the easy side waits after its last probe for a connection to come.
+pub const BIRTHDAY_LINGER: Duration = Duration::from_secs(1);
 /// A birthday round ends after this without a hit.
 pub const BIRTHDAY_TIMEOUT: Duration = Duration::from_secs(12);
 /// The wait after a birthday round that found nothing; it doubles up to [`MAX_BIRTHDAY_WAIT`].
@@ -656,9 +670,10 @@ impl PathSelector {
     matches!(self.phase, Phase::Idle) && self.maybe_retry_at.is_none_or(|at| now >= at)
   }
 
-  /// A dialing round started.
+  /// A dialing round started, or a running one started over with new addresses (a new offer, a
+  /// birthday probe's find): its time runs from now.
   pub fn on_dialing(&mut self, now: Instant) {
-    if matches!(self.phase, Phase::Idle) {
+    if matches!(self.phase, Phase::Idle | Phase::Dialing { .. }) {
       self.phase = Phase::Dialing { since: now };
     }
   }
@@ -1293,6 +1308,17 @@ mod tests {
       selector.poll(now + DIAL_TIMEOUT);
       selector.reset_backoff();
       assert!(selector.may_dial(now + DIAL_TIMEOUT));
+    }
+
+    #[test]
+    fn a_round_started_over_runs_its_full_time_again() {
+      let start = Instant::now();
+      let mut selector = PathSelector::new();
+      selector.on_dialing(start);
+      selector.on_dialing(at(start, 3000));
+      assert_eq!(selector.next_deadline(), Some(at(start, 8000)));
+      selector.poll(at(start, 6000));
+      assert!(selector.is_dialing(), "the first round's end doesn't count");
     }
 
     #[test]

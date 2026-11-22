@@ -52,6 +52,10 @@ const DEVICES: [u64; 2] = [1, 2];
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "a measurement on a shaped network, run by hand"]
 async fn run() {
+  // RUST_LOG picks what each process logs to its output (the NAT matrix keeps it per run).
+  let _ = tracing_subscriber::fmt()
+    .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+    .try_init();
   let dir = PathBuf::from(std::env::var("MEASURE_DIR").unwrap());
   let secs: u64 = std::env::var("MEASURE_SECS").map_or(30, |secs| secs.parse().unwrap());
   match std::env::var("MEASURE_ROLE").unwrap().as_str() {

@@ -14,6 +14,8 @@
 #   full_cone           endpoint-independent mapping and filtering
 #   address_restricted  endpoint-independent mapping, address-dependent filtering
 #   port_restricted     endpoint-independent mapping, address- and port-dependent filtering
+#   port_restricted_nofw  the same without the router's own firewall: unsolicited packets to it
+#                       leave connection-tracking entries that a Linux NAT then works around
 #   symmetric           endpoint-dependent mapping (a new random port per destination)
 #   symmetric_pmp       symmetric, with a router that maps ports on request (NAT-PMP)
 #   cgnat               a port-restricted home router behind a carrier NAT (100.64.0.0/10)
@@ -31,7 +33,8 @@ RUNS=${3:-5}
 SECS=${4:-25}
 DEFAULT_COMBOS="full_cone:full_cone address_restricted:address_restricted port_restricted:port_restricted \
 symmetric:port_restricted symmetric:full_cone symmetric:symmetric cgnat:port_restricted \
-symmetric_pmp:symmetric udp_blocked:port_restricted"
+symmetric_pmp:symmetric udp_blocked:port_restricted symmetric:port_restricted_nofw \
+port_restricted_nofw:port_restricted_nofw"
 read -r -a COMBOS <<<"${NAT_MATRIX_COMBOS:-$DEFAULT_COMBOS}"
 SFU_IP=198.18.0.10
 SFU_DELAY_MS=${SFU_DELAY_MS:-25}
@@ -40,6 +43,10 @@ RATE_MBIT=${RATE_MBIT:-10}
 
 mount -t tmpfs nat-matrix /run
 mkdir -p /run/netns "$OUT"
+# The background loops (rate walks) run while this file exists; it goes when the script ends, however.
+RUNNING="$OUT/.running"
+touch "$RUNNING"
+trap 'rm -f "$RUNNING"' EXIT
 
 ns() { ip netns exec "$1" "${@:2}"; }
 
@@ -56,12 +63,12 @@ new_ns() {
   ns "$1" sysctl -qw net.ipv4.ip_forward=1
 }
 
-# The internet: a bridge with the SFU's address on it; routers attach with their WAN address.
+# The internet: a core router with the SFU's address on it; each side's ISP router hangs off it,
+# so a packet between the two sides passes three routers after the first NAT (as on the internet,
+# where many more lie between, and where a punch with a small TTL dies on the way).
 setup_inet() {
   new_ns inet
-  ns inet ip link add br0 type bridge
-  ns inet ip link set br0 up
-  ns inet ip addr add "$SFU_IP/24" dev br0
+  ns inet ip addr add "$SFU_IP/32" dev lo
 }
 
 # link <left ns> <left dev> <right ns> <right dev>
@@ -74,11 +81,17 @@ link() {
 # A router of `profile` for side `side` (a or b, number 1 or 2): client 10.N.0.2 behind it.
 add_side() {
   local side=$1 number=$2 profile=$3
-  local wan_ip="198.18.0.1$number" client_ip="10.$number.0.2" lan_ip="10.$number.0.1"
+  local wan_ip="198.18.$number.2" client_ip="10.$number.0.2" lan_ip="10.$number.0.1"
+  new_ns "isp$side"
   new_ns "rtr$side"
   new_ns "cli$side"
-  link inet "up$side" "rtr$side" wan
-  ns inet ip link set "up$side" master br0
+  link inet "isp$side" "isp$side" core
+  ns inet ip addr add "198.19.$number.1/24" dev "isp$side"
+  ns "isp$side" ip addr add "198.19.$number.2/24" dev core
+  ns "isp$side" ip route add default via "198.19.$number.1"
+  ns inet ip route add "198.18.$number.0/24" via "198.19.$number.2"
+  link "isp$side" cust "rtr$side" wan
+  ns "isp$side" ip addr add "198.18.$number.1/24" dev cust
   link "rtr$side" lan "cli$side" eth0
   ns "cli$side" ip addr add "$client_ip/24" dev eth0
   ns "cli$side" ip route add default via "$lan_ip"
@@ -89,6 +102,7 @@ add_side() {
     ns "rtr$side" ip link set wan netns "cgn$side"
     ns "cgn$side" ip link set wan up
     ns "cgn$side" ip addr add "$wan_ip/24" dev wan
+    ns "cgn$side" ip route add default via "198.18.$number.1"
     link "cgn$side" inside "rtr$side" wan
     ns "cgn$side" ip addr add "100.64.$number.1/24" dev inside
     ns "rtr$side" ip addr add "100.64.$number.2/24" dev wan
@@ -98,6 +112,7 @@ add_side() {
     nat_rules "cgn$side" port_restricted "100.64.$number.2" wan
   else
     ns "rtr$side" ip addr add "$wan_ip/24" dev wan
+    ns "rtr$side" ip route add default via "198.18.$number.1"
     nat_rules "rtr$side" "$profile" "$client_ip"
   fi
   if [[ $profile == symmetric_pmp ]]; then
@@ -109,28 +124,58 @@ add_side() {
 # nat_rules <ns> <profile> <inside host> [wan dev]
 nat_rules() {
   local ns_name=$1 profile=$2 inside=$3 wan=${4:-wan}
+  local masquerade="masquerade"
+  [[ $profile == symmetric* ]] && masquerade="masquerade fully-random"
   local rules="table ip nat {
-    chain post { type nat hook postrouting priority 100; oifname \"$wan\" masquerade$( \
-      [[ $profile == symmetric* ]] && echo ' fully-random') }"
+    chain post {
+      type nat hook postrouting priority 100;
+      oifname \"$wan\" $masquerade;
+    }"
   case $profile in
     full_cone)
       # The port is kept; anything arriving on it is the inside host's.
       rules+="
-    chain pre { type nat hook prerouting priority -100; iifname \"$wan\" udp dport 1024-65535 dnat to $inside }"
+    chain pre {
+      type nat hook prerouting priority -100;
+      iifname \"$wan\" udp dport 1024-65535 dnat to $inside;
+    }"
       ;;
     address_restricted)
       rules+="
-    set contacted { type ipv4_addr; flags timeout; timeout 120s; }
-    chain out { type filter hook forward priority 0; oifname \"$wan\" update @contacted { ip daddr } }
-    chain pre { type nat hook prerouting priority -100;
-      iifname \"$wan\" ip saddr @contacted udp dport 1024-65535 dnat to $inside }"
+    set contacted {
+      type ipv4_addr; flags timeout; timeout 120s;
+    }
+    chain out {
+      type filter hook forward priority 0;
+      oifname \"$wan\" update @contacted { ip daddr };
+    }
+    chain pre {
+      type nat hook prerouting priority -100;
+      iifname \"$wan\" ip saddr @contacted udp dport 1024-65535 dnat to $inside;
+    }"
       ;;
   esac
   rules+="
   }"
+  if [[ $profile != *_nofw ]]; then
+    # A home router's own firewall: from the WAN, only what belongs to a connection.
+    rules+="
+  table inet router {
+    chain input {
+      type filter hook input priority 0;
+      iifname \"$wan\" ct state established,related accept;
+      iifname \"$wan\" drop;
+    }
+  }"
+  fi
   if [[ $profile == udp_blocked ]]; then
     rules+="
-  table inet firewall { chain forward { type filter hook forward priority 0; meta l4proto udp drop } }"
+  table inet firewall {
+    chain forward {
+      type filter hook forward priority 0;
+      meta l4proto udp drop;
+    }
+  }"
   fi
   ns "$ns_name" nft -f - <<<"$rules"
 }
@@ -149,7 +194,7 @@ shape() {
   ns "$ns_name" tc filter add dev "$dev" parent 1: pref 1 protocol ip u32 match ip "$match" "$SFU_IP/32" flowid 1:1
   (
     rate=$RATE_MBIT
-    while sleep 1; do
+    while sleep 1 && [[ -e $RUNNING ]]; do
       rate=$((rate + (RANDOM % 5) - 2))
       ((rate < RATE_MBIT / 2)) && rate=$((RATE_MBIT / 2))
       ((rate > RATE_MBIT * 2)) && rate=$((RATE_MBIT * 2))
@@ -167,8 +212,11 @@ wait_for() {
   until [[ -s $file ]]; do
     sleep 0.2
     tries=$((tries + 1))
-    ((tries > 300)) && return 1
+    if ((tries > 300)); then
+      return 1
+    fi
   done
+  return 0
 }
 
 # The first second both clients said "direct", or "-".
@@ -192,12 +240,23 @@ run_one() {
     shape "rtr$side" lan src
     shape "rtr$side" wan dst
   done
+  if [[ ${NAT_MATRIX_CAPTURE:-} == 1 ]]; then
+    # Debugging: the routers' WAN side, small packets only (no media), for the length of the call.
+    for side in a b; do
+      ns "rtr$side" timeout "$((SECS + 5))" tcpdump -Z root -U -i wan -nn -w "$RUN_DIR/wan-$side.pcap" "udp and less 100" \
+        >/dev/null 2>&1 &
+    done
+  fi
   local common=(env MEASURE_DIR="$RUN_DIR" MEASURE_SFU_HOST="$SFU_IP" MEASURE_SECS="$SECS" MEASURE_DIRECT=1
     RUST_LOG="${RUST_LOG:-info,teamcraft_media::call_native::direct=debug}")
   ns inet "${common[@]}" MEASURE_ROLE=sfu MEASURE_REFLECT=1 MEASURE_FALLBACK=1 MEASURE_SFU_EXTRA_SECS=3 \
     "$BIN" --ignored --exact direct_measure::run --nocapture >"$RUN_DIR/sfu.out" 2>&1 &
   local sfu=$!
-  wait_for "$RUN_DIR/sfu.info"
+  if ! wait_for "$RUN_DIR/sfu.info"; then
+    echo "$a $b $run no-sfu" | tee -a "$OUT/runs.txt"
+    wait "$sfu" || true
+    return
+  fi
   ns clia "${common[@]}" MEASURE_ROLE=1 "$BIN" --ignored --exact direct_measure::run --nocapture \
     >"$RUN_DIR/client1.out" 2>&1 &
   local client_a=$!

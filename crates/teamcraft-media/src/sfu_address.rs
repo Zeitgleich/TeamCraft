@@ -35,6 +35,25 @@ impl fmt::Debug for PinnedResolver {
   }
 }
 
+/// `sfu_url` with its port replaced by `port`: the SFU's second port (#127, the direct path's second
+/// reflection). The pinned resolver alone doesn't move a URL whose host is an address literal.
+pub(crate) fn with_port(sfu_url: &str, port: u16) -> Option<String> {
+  let (scheme, rest) = sfu_url.split_once("://")?;
+  let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+  let (authority, path) = rest.split_at(authority_end);
+  let (host, _) = host_and_port(sfu_url)?;
+  let host = if host.contains(':') {
+    format!("[{host}]")
+  } else {
+    host
+  };
+  let maybe_user = authority.rsplit_once('@').map(|(user, _)| user);
+  Some(match maybe_user {
+    Some(user) => format!("{scheme}://{user}@{host}:{port}{path}"),
+    None => format!("{scheme}://{host}:{port}{path}"),
+  })
+}
+
 /// Host and port of a URL; IPv6 literals without their brackets.
 fn host_and_port(url: &str) -> Option<(String, u16)> {
   let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
@@ -80,6 +99,27 @@ mod tests {
     );
     assert_eq!(host_and_port("https://:4433/"), None);
     assert_eq!(host_and_port("https://sfu.example.com:port/"), None);
+  }
+
+  #[test]
+  fn the_port_of_an_sfu_url_is_replaced() {
+    assert_eq!(
+      with_port("https://sfu.example.com:4433/call", 4434).as_deref(),
+      Some("https://sfu.example.com:4434/call")
+    );
+    assert_eq!(
+      with_port("https://sfu.example.com/call?x=1", 3479).as_deref(),
+      Some("https://sfu.example.com:3479/call?x=1")
+    );
+    assert_eq!(
+      with_port("https://[2001:db8::1]:4433/call", 9).as_deref(),
+      Some("https://[2001:db8::1]:9/call")
+    );
+    assert_eq!(
+      with_port("https://198.51.100.1:4433", 9).as_deref(),
+      Some("https://198.51.100.1:9")
+    );
+    assert_eq!(with_port("no url", 9), None);
   }
 
   #[tokio::test]
