@@ -42,6 +42,10 @@ struct ChatPane: View {
   @AppStorage(AttachKind.storageKey) private var lastAttachRaw = AttachKind.photo.rawValue
   @State private var isSchedulingSend = false
   @State private var isMakingPoll = false
+  /// The sticker sheet is open (issue #2132).
+  @State private var isPickingSticker = false
+  /// The core holds a verified sticker pack: the composer offers the sheet.
+  @State private var hasStickers = false
   /// This text's message ID until the server took it, so a retry after a lost answer holds one message.
   @State private var maybeScheduleAttempt: (body: String, id: String)?
   @State private var isSchedulingAllowed = false
@@ -217,6 +221,16 @@ struct ChatPane: View {
       await CustomEmojiPictures.refreshWorkspace(core: core)
       await CustomEmojiPictures.want(core: core)
       await CustomEmojiPictures.refreshWorkspace(core: core)
+    }
+    // The workspace's stickers (issue #2132): the composer's button shows once the core holds a
+    // pack, read again on each change as the packs arrive after the core asked the server.
+    .task {
+      guard let core = try? await model.core() else { return }
+      await StickerPictures.want(core: core)
+    }
+    .task(id: model.changeCount) {
+      guard let core = try? await model.core() else { return }
+      hasStickers = !(await StickerPictures.packs(core: core)).isEmpty
     }
     // The composer lives in the core's drafts, so text typed before the app was killed is back
     // (issue #158), also from the user's other devices.
@@ -474,6 +488,13 @@ struct ChatPane: View {
     }
     .sheet(isPresented: $isMakingPoll) {
       PollSheet(conversationId: conversation.id)
+    }
+    .sheet(isPresented: $isPickingSticker) {
+      StickerSheet(conversationId: conversation.id, maybeThreadId: threadId) {
+        feelSend()
+        Task { await reload() }
+      }
+      .presentationDetents([.medium, .large])
     }
     .modifier(MentionConfirmationAlert(pending: $maybePendingMention, onSend: sendConfirmed))
     .task(id: model.changeCount) {
@@ -1061,6 +1082,11 @@ struct ChatPane: View {
         .accessibilityLabel(Text(isFormatBarShown ? "composer_format_hide" : "composer_format_show"))
         .accessibilityAddTraits(isFormatBarShown ? .isSelected : [])
       // While typing the field needs the room; the camera comes back when it is empty.
+      // Stickers (issue #2132) go out on their own, so only from the empty composer.
+      if draft.isEmpty && maybeEditing == nil && hasStickers && conversation.canPost {
+        Button { isPickingSticker = true } label: { composerIcon("rectangle.stack") }
+          .accessibilityLabel(Text("sticker_open"))
+      }
       if draft.isEmpty && maybeEditing == nil && CameraPicker.isAvailable {
         Button { isTakingPhoto = true } label: { composerIcon("camera") }
           .accessibilityLabel(Text("attach_camera"))
@@ -1418,7 +1444,8 @@ struct ChatPane: View {
       UIPasteboard.general.string = message.body
       confirmCopy()
     }
-    if !message.body.isEmpty && message.maybePlaceholder == nil {
+    // A sticker's text is only its fallback (issue #2132): nothing to select in it.
+    if !message.body.isEmpty && message.maybePlaceholder == nil && message.maybeSticker == nil {
       Button("select_text", systemImage: "text.cursor") { maybeSelectingText = message }
       detectedActions(for: message)
     }
@@ -1430,8 +1457,9 @@ struct ChatPane: View {
       Button("select", systemImage: "checkmark.circle") { startSelecting(message) }
     }
     if message.authorId == account.userId && !message.isPending && conversation.canPost {
-      // A poll's text is only what older versions show, so it isn't edited (#205).
-      if message.maybePoll == nil {
+      // A poll's or a sticker's text is only what older versions show, so it isn't edited (#205,
+      // #2132).
+      if message.maybePoll == nil && message.maybeSticker == nil {
         Button("edit", systemImage: "pencil") {
           maybeEditing = message
           draft = message.body
@@ -1456,6 +1484,7 @@ struct ChatPane: View {
     guard maybeEditing == nil, conversation.canPost,
       let message = messages.last(where: {
         $0.authorId == account.userId && !$0.isPending && !$0.body.isEmpty && $0.maybePlaceholder == nil
+          && $0.maybeSticker == nil
       })
     else { return }
     maybeEditing = message

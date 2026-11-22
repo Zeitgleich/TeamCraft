@@ -360,6 +360,9 @@ struct State {
   org_backgrounds: HashMap<OrgBackgroundId, FakeBackground>,
   /// Custom emoji (issue #207) and their pictures; admins only change them, like the server.
   custom_emoji: BTreeMap<teamcraft_proto::CustomEmojiId, (teamcraft_proto::CustomEmojiResponse, Vec<u8>)>,
+  /// Sticker packs in the order they were created, and the pictures uploaded for them.
+  sticker_packs: Vec<teamcraft_proto::StickerPackResponse>,
+  sticker_pictures: BTreeMap<teamcraft_proto::CustomEmojiHash, Vec<u8>>,
   /// Spaces besides the default one, and changes to the default one.
   spaces: BTreeMap<SpaceId, SpaceResponse>,
   categories: BTreeMap<CategoryId, CategoryResponse>,
@@ -3373,6 +3376,115 @@ impl ServerApi for FakeServerApi {
       Ok(teamcraft_proto::CustomEmojiDownloadResponse {
         download_url: format!("{CUSTOM_EMOJI_SCHEME}{emoji}"),
         size_bytes: entry.size_bytes,
+        expires_at: UnixMillis(0),
+      })
+    })
+  }
+
+  async fn list_sticker_packs(&self) -> Result<teamcraft_proto::ListStickerPacksResponse, ApiError> {
+    self.with(|state, _| {
+      Ok(teamcraft_proto::ListStickerPacksResponse {
+        packs: state.sticker_packs.clone(),
+        limits: teamcraft_proto::StickerLimits::default(),
+      })
+    })
+  }
+
+  async fn upload_sticker_picture(
+    &self,
+    request: &teamcraft_proto::UploadStickerPictureRequest,
+  ) -> Result<teamcraft_proto::StickerPictureResponse, ApiError> {
+    self.with(|state, user| {
+      if !state.admins.contains(&user) {
+        return Err(ApiError::status(403, ErrorCode::Forbidden, "admins only"));
+      }
+      let limits = teamcraft_proto::StickerLimits::default();
+      let bytes = request.picture.as_slice();
+      let picture =
+        teamcraft_proto::inspect_custom_emoji_picture(bytes, limits.max_bytes, limits.max_side_px)
+          .map_err(|error| ApiError::status(400, ErrorCode::InvalidRequest, error.to_string()))?;
+      let sha256 =
+        teamcraft_proto::CustomEmojiHash::from_bytes(teamcraft_crypto::attachment::content_sha256(bytes));
+      state.sticker_pictures.insert(sha256, bytes.to_vec());
+      Ok(teamcraft_proto::StickerPictureResponse {
+        sha256,
+        format: picture.format,
+        size_bytes: bytes.len() as u64,
+        width: picture.width,
+        height: picture.height,
+      })
+    })
+  }
+
+  async fn save_sticker_pack(
+    &self,
+    pack: teamcraft_proto::StickerPackKey,
+    request: &teamcraft_proto::SaveStickerPackRequest,
+  ) -> Result<teamcraft_proto::StickerPackResponse, ApiError> {
+    self.with(|state, user| {
+      if !state.admins.contains(&user) {
+        return Err(ApiError::status(403, ErrorCode::Forbidden, "admins only"));
+      }
+      let document: teamcraft_proto::StickerPackDocument =
+        serde_json::from_slice(request.signed.payload.as_slice())
+          .map_err(|_| ApiError::status(400, ErrorCode::InvalidRequest, "unreadable document"))?;
+      if document.pack != pack
+        || document
+          .stickers
+          .iter()
+          .any(|sticker| !state.sticker_pictures.contains_key(&sticker.sha256))
+      {
+        return Err(ApiError::status(400, ErrorCode::InvalidRequest, "bad pack"));
+      }
+      let response = teamcraft_proto::StickerPackResponse {
+        pack,
+        version: document.version,
+        name: document.name,
+        maybe_updated_by: Some(user),
+        updated_at: UnixMillis(0),
+        signed: request.signed.clone(),
+      };
+      match state.sticker_packs.iter_mut().find(|known| known.pack == pack) {
+        Some(known) if known.version >= response.version => {
+          return Err(ApiError::status(409, ErrorCode::StickerPackStale, "stale"));
+        },
+        Some(known) => *known = response.clone(),
+        None => state.sticker_packs.push(response.clone()),
+      }
+      let everyone: Vec<UserId> = state.users.keys().copied().collect();
+      state.publish(everyone, &GatewayEvent::StickerPacksUpdate);
+      Ok(response)
+    })
+  }
+
+  async fn delete_sticker_pack(&self, pack: teamcraft_proto::StickerPackKey) -> Result<(), ApiError> {
+    self.with(|state, user| {
+      if !state.admins.contains(&user) {
+        return Err(ApiError::status(403, ErrorCode::Forbidden, "admins only"));
+      }
+      let before = state.sticker_packs.len();
+      state.sticker_packs.retain(|known| known.pack != pack);
+      if state.sticker_packs.len() == before {
+        return Err(ApiError::status(404, ErrorCode::StickerPackNotFound, "unknown"));
+      }
+      let everyone: Vec<UserId> = state.users.keys().copied().collect();
+      state.publish(everyone, &GatewayEvent::StickerPacksUpdate);
+      Ok(())
+    })
+  }
+
+  async fn download_sticker_picture(
+    &self,
+    sha256: teamcraft_proto::CustomEmojiHash,
+  ) -> Result<teamcraft_proto::StickerPictureDownloadResponse, ApiError> {
+    self.with(|state, _| {
+      let picture = state
+        .sticker_pictures
+        .get(&sha256)
+        .ok_or_else(|| ApiError::status(404, ErrorCode::StickerPackNotFound, "unknown"))?;
+      Ok(teamcraft_proto::StickerPictureDownloadResponse {
+        download_url: format!("{STICKER_PICTURE_SCHEME}{sha256}"),
+        size_bytes: picture.len() as u64,
         expires_at: UnixMillis(0),
       })
     })
@@ -7040,6 +7152,17 @@ impl ServerApi for FakeServerApi {
   }
 
   async fn get_blob(&self, url: &str) -> Result<Vec<u8>, ApiError> {
+    if let Some(raw) = url.strip_prefix(STICKER_PICTURE_SCHEME) {
+      return self.with(|state, _| {
+        teamcraft_proto::CustomEmojiHash::from_hex(raw)
+          .and_then(|sha256| state.sticker_pictures.get(&sha256).cloned())
+          .ok_or(ApiError::Status {
+            status: 404,
+            maybe_body: None,
+            maybe_retry_after: None,
+          })
+      });
+    }
     if let Some(raw) = url.strip_prefix(CUSTOM_EMOJI_SCHEME) {
       return self.with(|state, _| {
         let picture = raw
@@ -8444,6 +8567,7 @@ pub const FAKE_MIN_PART_BYTES: u64 = 1024;
 const BACKGROUND_SCHEME: &str = "fake-background://";
 const ORG_BACKGROUND_SCHEME: &str = "fake-org-background://";
 const CUSTOM_EMOJI_SCHEME: &str = "fake-custom-emoji://";
+const STICKER_PICTURE_SCHEME: &str = "fake-sticker-picture://";
 
 fn org_background_blob<'a>(state: &'a mut State, raw: &str) -> Result<&'a mut FakeBackground, ApiError> {
   raw

@@ -632,6 +632,7 @@ mod tests {
 
   fn message(body: &str, sent_at: i64, maybe_thread: Option<crate::model::ThreadId>) -> Message {
     Message {
+      maybe_sticker: None,
       id: id_from_raw(1),
       conversation: id_from_raw(1),
       author: id_from_raw(1),

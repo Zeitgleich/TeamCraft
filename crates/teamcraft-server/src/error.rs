@@ -121,6 +121,9 @@ pub enum ApiError {
   /// Another custom emoji has the shortcode.
   #[error("another custom emoji has this name")]
   CustomEmojiNameTaken,
+  /// The server holds this version of the sticker pack or a newer one.
+  #[error("a newer version of the sticker pack was saved")]
+  StickerPackStale,
   /// An uploaded key package doesn't parse, isn't validly signed, or is (nearly) expired.
   #[error("invalid key package: {0}")]
   InvalidKeyPackage(String),
@@ -331,6 +334,13 @@ impl ApiError {
     }
   }
 
+  pub fn sticker_pack_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::StickerPackNotFound,
+      what: "sticker pack",
+    }
+  }
+
   pub fn custom_emoji_not_found() -> Self {
     Self::NotFound {
       code: ErrorCode::CustomEmojiNotFound,
@@ -456,6 +466,7 @@ impl ApiError {
       | Self::EpochConflict { .. }
       | Self::VersionConflict { .. }
       | Self::CustomEmojiNameTaken
+      | Self::StickerPackStale
       | Self::InviteAlreadyOpen => StatusCode::CONFLICT,
       Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
       Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
@@ -500,6 +511,7 @@ impl ApiError {
       Self::UnknownHost => ErrorCode::UnknownHost,
       Self::Conflict(_) => ErrorCode::Conflict,
       Self::CustomEmojiNameTaken => ErrorCode::CustomEmojiNameTaken,
+      Self::StickerPackStale => ErrorCode::StickerPackStale,
       Self::LastOwner => ErrorCode::LastOwner,
       Self::CannotDeleteSelf => ErrorCode::CannotDeleteSelf,
       Self::LeaverClaimed => ErrorCode::LeaverClaimed,

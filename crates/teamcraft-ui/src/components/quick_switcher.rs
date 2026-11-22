@@ -1075,6 +1075,7 @@ mod tests {
 
   fn message(id: u64, conversation: u64, body: &str) -> Message {
     Message {
+      maybe_sticker: None,
       id: id_from_raw(id),
       conversation: id_from_raw(conversation),
       author: id_from_raw(2),

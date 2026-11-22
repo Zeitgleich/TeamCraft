@@ -347,4 +347,11 @@
     <item quantity="other">Und %d weitere Personen</item>
   </plurals>
   <string name="reaction_show_people">Zeigen, wer reagiert hat</string>
+  <!-- Stickers (issue #2132) -->
+  <string name="stickers">Sticker</string>
+  <string name="sticker_sheet_title">Sticker</string>
+  <string name="sticker_none">Noch keine Sticker-Pakete</string>
+  <string name="sticker_pack_empty">Dieses Paket hat noch keine Sticker.</string>
+  <!-- The text of a sent sticker: what older apps, notifications and devices without the picture show. -->
+  <string name="sticker_fallback">[Sticker: %1$s]</string>
 </resources>

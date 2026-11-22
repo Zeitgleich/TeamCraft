@@ -247,6 +247,10 @@ struct MessageBubble: View {
         PollCardView(message: message, poll: poll, canVote: canVote, displayNames: displayNames)
           .padding(.horizontal, textInset)
           .padding(.top, 3)
+      } else if let sticker = message.maybeSticker {
+        // A sticker (issue #2132) stands on the feed without a bubble; its text is only the fallback.
+        StickerMessageView(sticker: sticker, fallbackText: message.body)
+          .padding(.top, hasHeader ? 4 : 0)
       } else if hasText {
         MessageBodyView(
           text: message.body, colors: markupColors, names: look.names.forMessage(message),
@@ -283,12 +287,15 @@ struct MessageBubble: View {
     .frame(width: images.isEmpty || isDeleted ? nil : shownMediaWidth + mediaInset * 2)
     .foregroundStyle(isOwnStyle ? Theme.onOwnBubble : Theme.text)
     .tint(isOwnStyle ? Theme.onOwnBubble : Theme.accent)
-    .background(look.isList ? Color.clear : (isMine ? Theme.ownBubble : Theme.otherBubble), in: shape)
+    .background(look.isList || isSticker ? Color.clear : (isMine ? Theme.ownBubble : Theme.otherBubble), in: shape)
     .contentShape(shape)
   }
 
-  /// The list has no bubble: the text sits on the feed in the others' colours, mine included.
-  private var isOwnStyle: Bool { isMine && !look.isList }
+  /// The list has no bubble: the text sits on the feed in the others' colours, mine included. A
+  /// sticker has none either.
+  private var isOwnStyle: Bool { isMine && !look.isList && !isSticker }
+  /// A readable sticker message (issue #2132): its picture shows without the bubble's background.
+  private var isSticker: Bool { message.maybeSticker != nil && message.maybePlaceholder == nil && !isDeleted }
   private var mediaInset: CGFloat { look.isList ? 0 : bubbleMediaInset }
   private var textInset: CGFloat { look.isList ? 0 : bubbleTextInset }
 

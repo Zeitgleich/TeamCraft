@@ -517,6 +517,9 @@ struct Message: Decodable, Equatable, Identifiable, Sendable {
   var mentionsMe = false
   /// A poll (#205), counted by the core from the encrypted votes: shown instead of `body`.
   var maybePoll: Poll?
+  /// A workspace sticker (issue #2132): its picture shows instead of `body`, which is the fallback
+  /// text ("[Sticker: …]") while this device lacks the picture.
+  var maybeSticker: StickerRef?
   /// As the app shows the author: a source's or an imported bot's name, else the account's, with
   /// the app's own "Deleted user" for a deleted one (issue #751). Not on the wire.
   var authorName = ""
@@ -539,7 +542,7 @@ struct Message: Decodable, Equatable, Identifiable, Sendable {
     isEdited: Bool = false, replyCount: UInt32 = 0, maybeThreadId: String? = nil, reactions: [Reaction] = [],
     maybeSystemEvent: SystemEvent? = nil, maybePlaceholder: Placeholder? = nil, maybeSource: Source? = nil,
     groupMentions: [String] = [], customEmoji: [CustomEmojiRef] = [], mentionsMe: Bool = false,
-    isAuthorDeleted: Bool = false
+    isAuthorDeleted: Bool = false, maybeSticker: StickerRef? = nil
   ) {
     self.id = id
     self.conversationId = conversationId
@@ -558,6 +561,7 @@ struct Message: Decodable, Equatable, Identifiable, Sendable {
     self.customEmoji = customEmoji
     self.mentionsMe = mentionsMe
     self.isAuthorDeleted = isAuthorDeleted
+    self.maybeSticker = maybeSticker
   }
 
   /// The message with its author named from `authors` (by user ID), as the core's typed records
@@ -589,6 +593,7 @@ struct Message: Decodable, Equatable, Identifiable, Sendable {
     case maybeSource = "source"
     case maybeImported = "imported"
     case maybePoll = "poll"
+    case maybeSticker = "sticker"
   }
 
   init(from decoder: Decoder) throws {
@@ -614,6 +619,8 @@ struct Message: Decodable, Equatable, Identifiable, Sendable {
     mentionsMe = try container.decodeIfPresent(Bool.self, forKey: .mentionsMe) ?? false
     // A poll this version can't read shows its text, which older versions show too.
     maybePoll = try? container.decodeIfPresent(Poll.self, forKey: .maybePoll)
+    // Absent from older cores; one this version can't read shows its fallback text.
+    maybeSticker = try? container.decodeIfPresent(StickerRef.self, forKey: .maybeSticker)
   }
 }
 
@@ -674,6 +681,15 @@ struct Reaction: Decodable, Equatable, Sendable {
 /// (issue #207). Without the picture on this device it shows as `:shortcode:`.
 struct CustomEmojiRef: Decodable, Equatable, Hashable, Sendable {
   let shortcode: String
+  let sha256: String
+}
+
+/// A sent workspace sticker (issue #2132): the pack (32 hex) and name it had when sent, its alt
+/// text and the hash (64 hex) of its picture. Without the picture the message's text shows.
+struct StickerRef: Decodable, Equatable, Hashable, Sendable {
+  let pack: String
+  let name: String
+  let alt: String
   let sha256: String
 }
 

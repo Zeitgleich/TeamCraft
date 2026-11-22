@@ -1,7 +1,7 @@
 //! Signatures on the workspace's append-only logs: the admin roster and the policy (admin.md §2.3,
 //! e2ee.md §11), each channel's role log (e2ee.md §4.6.1, issue #380), and a channel's deletion
-//! (e2ee.md §4.6, issue #1135), a space's deletion (e2ee.md §4.6.5, issue #1727) and a custom emoji (e2ee.md §4.13, issue #207), which are entries of
-//! no log but signed and verified the same way.
+//! (e2ee.md §4.6, issue #1135), a space's deletion (e2ee.md §4.6.5, issue #1727), a custom emoji (e2ee.md §4.13, issue #207) and a sticker pack
+//! (e2ee.md §4.14, issue #2132), which are entries of no log but signed and verified the same way.
 //!
 //! An entry is signed by a device key over its log, version and payload; the signature travels
 //! together with the device certificate, so a client can check it against the signer's identity
@@ -48,6 +48,9 @@ pub enum WorkspaceLog {
   /// "version" is its signing time and the payload names the space and every channel the deleter
   /// was shown in it, so it can't pass for a channel's deletion or the other way round.
   SpaceDeletion = 9,
+  /// A sticker pack of the workspace (e2ee.md §4.14, issue #2132): the "version" is the pack's
+  /// version and the payload the whole pack, so an emoji's document can't pass for a pack.
+  StickerPack = 10,
 }
 
 /// The signature field of a log entry: the signer's device certificate and its signature.
@@ -237,6 +240,8 @@ mod tests {
         (WorkspaceLog::ChannelDeletion, WorkspaceLog::SpaceDeletion),
         (WorkspaceLog::SpaceDeletion, WorkspaceLog::ChannelDeletion),
         (WorkspaceLog::ChannelProperties, WorkspaceLog::SpaceDeletion),
+        (WorkspaceLog::CustomEmoji, WorkspaceLog::StickerPack),
+        (WorkspaceLog::StickerPack, WorkspaceLog::CustomEmoji),
       ] {
         let signature = sign_log_entry(&owner.device, &owner.certificate, signed_as, 7, PAYLOAD).unwrap();
         assert!(matches!(

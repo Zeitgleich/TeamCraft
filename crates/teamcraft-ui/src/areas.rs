@@ -292,8 +292,8 @@ areas! {
   /// The desktop app's downloads button and list; the browser has its own and never loads them.
   downloads(_unit: ()) => dialogs: view! { <DownloadsButton /> };
   /// The emoji picker and the date pills' menu, the first time they open.
-  emoji_picker(anchor: web_sys::Element, on_pick: Callback<String>, on_close: Callback<()>, returns_focus: bool) => dialogs: view! {
-    <EmojiPickerPanel anchor=anchor on_pick=on_pick on_close=on_close returns_focus=returns_focus />
+  emoji_picker(anchor: web_sys::Element, on_pick: Callback<String>, on_close: Callback<()>, returns_focus: bool, maybe_on_sticker: Option<Callback<teamcraft_proto::StickerRef>>) => dialogs: view! {
+    <EmojiPickerPanel anchor=anchor on_pick=on_pick on_close=on_close returns_focus=returns_focus maybe_on_sticker=maybe_on_sticker />
   };
   date_jump(conversation: ConversationId, menu: DateJumpMenu) => dialogs: view! { <DateJumpPanel conversation=conversation menu=menu /> };
   /// What a browser tab shows while another tab of the account runs the app (#744).

@@ -139,6 +139,7 @@ mod tests {
 
   fn message(body: &str) -> Message {
     Message {
+      maybe_sticker: None,
       id: id_from_raw(1),
       conversation: id_from_raw(2),
       author: id_from_raw(3),

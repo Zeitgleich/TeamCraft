@@ -81,6 +81,10 @@ wire_enum! {
     CustomEmojiNotFound => "custom_emoji_not_found",
     /// Another custom emoji of the workspace has this shortcode.
     CustomEmojiNameTaken => "custom_emoji_name_taken",
+    /// No sticker pack with this key, or no such picture (issue #2132).
+    StickerPackNotFound => "sticker_pack_not_found",
+    /// The server holds a newer version of the pack: read it again and sign on top of it.
+    StickerPackStale => "sticker_pack_stale",
     MfaRequired => "mfa_required",
     /// The message isn't held any more, or isn't the caller's (docs/scheduled-messages.md).
     ScheduledMessageNotFound => "scheduled_message_not_found",
@@ -368,6 +372,8 @@ mod tests {
       ErrorCode::UserGroupNotFound,
       ErrorCode::CustomEmojiNotFound,
       ErrorCode::CustomEmojiNameTaken,
+      ErrorCode::StickerPackNotFound,
+      ErrorCode::StickerPackStale,
       ErrorCode::ScheduledMessageNotFound,
       ErrorCode::ScheduledMessagesDisabled,
       ErrorCode::ScheduledMessageLimit,

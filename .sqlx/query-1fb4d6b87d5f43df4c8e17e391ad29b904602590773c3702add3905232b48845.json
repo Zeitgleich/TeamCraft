@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM sticker_pack_pictures WHERE pack_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1fb4d6b87d5f43df4c8e17e391ad29b904602590773c3702add3905232b48845"
+}

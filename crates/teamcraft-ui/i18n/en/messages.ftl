@@ -242,6 +242,13 @@ emoji-tone-medium = Medium skin tone
 emoji-tone-medium-dark = Medium-dark skin tone
 emoji-tone-dark = Dark skin tone
 emoji-none = No emoji found
+emoji-mode-emoji = Emoji
+emoji-mode-stickers = Stickers
+sticker-packs = Sticker packs
+sticker-none = No sticker packs yet
+sticker-pack-empty = This pack has no stickers yet.
+# The text of a sent sticker: what older apps, notifications and devices without the picture show.
+sticker-fallback = [Sticker: { $alt }]
 message-show-more = Show more
 message-show-less = Show less
 message-sending = Sending…

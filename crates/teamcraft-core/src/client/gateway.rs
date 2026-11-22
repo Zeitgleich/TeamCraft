@@ -760,8 +760,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         }
         let synced = self.sync_workspace_and_recovery().await;
         if is_roster {
-          // Who may sign custom emoji follows the roster: verified again with the next read.
-          read_state::update_marks(&self.store, |marks| marks.custom_emoji += 1)?;
+          // Who may sign custom emoji and sticker packs follows the roster: verified again with
+          // the next read.
+          read_state::update_marks(&self.store, |marks| {
+            marks.custom_emoji += 1;
+            marks.sticker_packs += 1;
+          })?;
         }
         synced
       },
@@ -876,6 +880,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       // The UI has the set read again when it next needs it (`want_custom_emoji`).
       GatewayEvent::CustomEmojiUpdate => {
         read_state::update_marks(&self.store, |marks| marks.custom_emoji += 1)
+      },
+      // Likewise the sticker packs (`want_sticker_packs`).
+      GatewayEvent::StickerPacksUpdate => {
+        read_state::update_marks(&self.store, |marks| marks.sticker_packs += 1)
       },
       GatewayEvent::OrgRecoveryUpdate { .. }
       | GatewayEvent::SystemEvent { .. }

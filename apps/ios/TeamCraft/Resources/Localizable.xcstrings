@@ -16705,6 +16705,86 @@
         }
       }
     },
+    "sticker_open": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stickers"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sticker"
+          }
+        }
+      }
+    },
+    "sticker_sheet_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stickers"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sticker"
+          }
+        }
+      }
+    },
+    "sticker_none": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No sticker packs yet"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Noch keine Sticker-Pakete"
+          }
+        }
+      }
+    },
+    "sticker_pack_empty": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This pack has no stickers yet."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Paket hat noch keine Sticker."
+          }
+        }
+      }
+    },
+    "sticker_fallback %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "[Sticker: %@]"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "[Sticker: %@]"
+          }
+        }
+      }
+    },
     "react_workspace_emoji": {
       "localizations": {
         "en": {

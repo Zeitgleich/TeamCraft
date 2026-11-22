@@ -57,6 +57,7 @@ mod share_link;
 mod snowflake;
 mod space;
 mod status;
+mod sticker_packs;
 mod storage_cleanup;
 mod sync_heads;
 mod system_event;
@@ -164,6 +165,9 @@ pub use space::{
   NewSpace, NewSpaceMember, Space, SpaceChanges, SpaceListing, SpaceMember, SpaceView, StoredSpaceImage,
 };
 pub use status::StoredStatus;
+pub use sticker_packs::{
+  NewStickerPicture, SaveStickerPack, StickerPackWrite, StoredStickerPack, StoredStickerPicture,
+};
 pub use storage_cleanup::StorageCleanup;
 pub use sync_heads::ConversationHeadRow;
 pub use system_event::{NewSystemEvent, StoredSystemEvent};

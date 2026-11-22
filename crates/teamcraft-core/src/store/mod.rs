@@ -565,6 +565,10 @@ pub struct MessageMeta {
   /// [`MessageContent::PollVote`] and [`MessageContent::PollClose`] messages naming the message.
   #[serde(rename = "poll", default, skip_serializing_if = "Option::is_none")]
   pub maybe_poll: Option<Box<teamcraft_proto::PollSpec>>,
+  /// A sticker (issue #2132, e2ee.md §4.14): the message's text is its fallback (`[Sticker: alt]`),
+  /// which an older version, a push preview and a device without the picture show.
+  #[serde(rename = "sticker", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_sticker: Option<Box<teamcraft_proto::StickerRef>>,
 }
 
 /// The quoted message: the reference, plus enough to show it where it isn't loaded.

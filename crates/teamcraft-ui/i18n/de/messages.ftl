@@ -242,6 +242,13 @@ emoji-tone-medium = Mittlere Hautfarbe
 emoji-tone-medium-dark = Mitteldunkle Hautfarbe
 emoji-tone-dark = Dunkle Hautfarbe
 emoji-none = Kein Emoji gefunden
+emoji-mode-emoji = Emoji
+emoji-mode-stickers = Sticker
+sticker-packs = Sticker-Pakete
+sticker-none = Noch keine Sticker-Pakete
+sticker-pack-empty = Dieses Paket hat noch keine Sticker.
+# Der Text eines gesendeten Stickers: was ältere Apps, Mitteilungen und Geräte ohne das Bild zeigen.
+sticker-fallback = [Sticker: { $alt }]
 message-show-more = Mehr anzeigen
 message-show-less = Weniger anzeigen
 message-sending = Wird gesendet …

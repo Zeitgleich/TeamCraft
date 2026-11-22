@@ -1532,6 +1532,7 @@ impl RemoteChat {
         PendingExtras::Unknown => return None,
       };
       let row = Message {
+        maybe_sticker: None,
         id: pending.id,
         conversation: message.conversation,
         author: mirror.snapshot.me.id,
@@ -1818,6 +1819,68 @@ impl ChatBackend for RemoteChat {
 
   fn delete_custom_emoji(&self, id: teamcraft_proto::CustomEmojiId) {
     self.act(ChatAction::DeleteCustomEmoji { id });
+  }
+
+  fn sticker_packs(&self) -> teamcraft_proto::StickerSet {
+    match self.ask(ChatQuery::StickerPacks) {
+      Some(ChatAnswer::StickerPacks { set }) => set,
+      _ => teamcraft_proto::StickerSet::default(),
+    }
+  }
+
+  fn sticker_picture(&self, sha256: teamcraft_proto::CustomEmojiHash) -> Option<Vec<u8>> {
+    match self.ask(ChatQuery::StickerPicture { sha256 }) {
+      Some(ChatAnswer::StickerPicture { maybe_picture }) => {
+        maybe_picture.map(teamcraft_proto::Base64Bytes::into_vec)
+      },
+      _ => None,
+    }
+  }
+
+  fn want_sticker_packs(&self) {
+    self.act(ChatAction::WantStickerPacks);
+  }
+
+  fn post_sticker(
+    &self,
+    conversation: ConversationId,
+    maybe_thread: Option<ThreadId>,
+    sticker: teamcraft_proto::StickerRef,
+    fallback: String,
+  ) {
+    self.act(ChatAction::PostSticker {
+      conversation,
+      maybe_thread,
+      sticker,
+      fallback,
+    });
+  }
+
+  fn create_sticker_pack(&self, name: &str) {
+    self.act(ChatAction::CreateStickerPack {
+      name: name.to_owned(),
+    });
+  }
+
+  fn add_sticker(&self, pack: teamcraft_proto::StickerPackKey, name: &str, alt: &str, picture: Vec<u8>) {
+    self.act(ChatAction::AddSticker {
+      pack,
+      name: name.to_owned(),
+      alt: alt.to_owned(),
+      picture: picture.into(),
+    });
+  }
+
+  fn change_sticker_pack(
+    &self,
+    pack: teamcraft_proto::StickerPackKey,
+    change: teamcraft_proto::StickerPackChange,
+  ) {
+    self.act(ChatAction::ChangeStickerPack { pack, change });
+  }
+
+  fn delete_sticker_pack(&self, pack: teamcraft_proto::StickerPackKey) {
+    self.act(ChatAction::DeleteStickerPack { pack });
   }
 
   fn permalink(&self, conversation: ConversationId, message: MessageId) -> Option<String> {
@@ -4785,6 +4848,7 @@ mod tests {
         .iter()
         .zip(1_u64..)
         .map(|(body, id)| Message {
+          maybe_sticker: None,
           id: id_from_raw(id),
           conversation: id_from_raw(7),
           author: id_from_raw(2),

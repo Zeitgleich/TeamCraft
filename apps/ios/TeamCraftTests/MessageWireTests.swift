@@ -87,6 +87,28 @@ final class MessageWireTests: XCTestCase {
     XCTAssertTrue(message.customEmoji.isEmpty)
   }
 
+  func testAStickerDecodesWithItsFallbackText() throws {
+    let pack = String(repeating: "b", count: 32)
+    let hash = String(repeating: "c", count: 64)
+    let json = """
+      {"id": "10", "conversation": "5", "author": "2", "kind": "User", "sent_at": 1000,
+        "body": "[Sticker: Waving hand]", "is_edited": false, "reply_count": 0, "reactions": [],
+        "sticker": {"pack": "\(pack)", "name": "wave", "alt": "Waving hand", "sha256": "\(hash)"}}
+      """
+    let message = try XCTUnwrap(Wire.decode(Message.self, from: json))
+    XCTAssertEqual(message.maybeSticker, StickerRef(pack: pack, name: "wave", alt: "Waving hand", sha256: hash))
+    XCTAssertEqual(message.body, "[Sticker: Waving hand]")
+  }
+
+  func testAMessageWithoutAStickerHasNone() throws {
+    let json = """
+      {"id": "10", "conversation": "5", "author": "2", "kind": "User", "sent_at": 1000, "body": "Hi",
+        "is_edited": false, "reply_count": 0, "reactions": []}
+      """
+    let message = try XCTUnwrap(Wire.decode(Message.self, from: json))
+    XCTAssertNil(message.maybeSticker)
+  }
+
   func testCallTilesDecodeFromTheMessageKind() throws {
     let json = """
       {

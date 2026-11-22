@@ -762,6 +762,40 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     self.get(&format!("/custom-emoji/{emoji}/download")).await
   }
 
+  async fn list_sticker_packs(&self) -> Result<teamcraft_proto::ListStickerPacksResponse, ApiError> {
+    self.get("/sticker-packs").await
+  }
+
+  async fn upload_sticker_picture(
+    &self,
+    request: &teamcraft_proto::UploadStickerPictureRequest,
+  ) -> Result<teamcraft_proto::StickerPictureResponse, ApiError> {
+    self.send_json(Method::POST, "/sticker-pictures", request).await
+  }
+
+  async fn save_sticker_pack(
+    &self,
+    pack: teamcraft_proto::StickerPackKey,
+    request: &teamcraft_proto::SaveStickerPackRequest,
+  ) -> Result<teamcraft_proto::StickerPackResponse, ApiError> {
+    self
+      .send_json(Method::PUT, &format!("/sticker-packs/{pack}"), request)
+      .await
+  }
+
+  async fn delete_sticker_pack(&self, pack: teamcraft_proto::StickerPackKey) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/sticker-packs/{pack}"), None)
+      .await
+  }
+
+  async fn download_sticker_picture(
+    &self,
+    sha256: teamcraft_proto::CustomEmojiHash,
+  ) -> Result<teamcraft_proto::StickerPictureDownloadResponse, ApiError> {
+    self.get(&format!("/sticker-pictures/{sha256}/download")).await
+  }
+
   async fn conversation(&self, conversation: ConversationId) -> Result<ConversationResponse, ApiError> {
     self.get(&format!("/conversations/{conversation}")).await
   }

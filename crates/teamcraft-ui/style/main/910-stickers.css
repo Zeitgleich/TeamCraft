@@ -1,0 +1,222 @@
+/* Stickers (issue #2132): the picker's mode switch and sticker grid, a sent sticker in the
+   message list, and the admin console's packs. */
+
+/* The picker: Emoji | Stickers, a segmented control above both. */
+.emoji-modes {
+  display: flex;
+  flex: none;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+
+.emoji-mode {
+  flex: 1;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: calc(var(--radius-sm) - 2px);
+  background: none;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.emoji-mode.current {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 12%);
+}
+
+/* The emoji part keeps the picker's column layout while shown. */
+.emoji-pane {
+  display: contents;
+}
+
+.emoji-pane[hidden] {
+  display: none;
+}
+
+.sticker-pane {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+}
+
+.sticker-pack-tabs {
+  display: flex;
+  flex: none;
+  gap: 4px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+  scrollbar-width: none;
+}
+
+.sticker-pack-tab {
+  flex: none;
+  padding: 6px 10px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.sticker-pack-tab.current {
+  border-bottom-color: var(--accent);
+  color: var(--text);
+}
+
+.sticker-scroller {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.sticker-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+  outline: none;
+}
+
+.sticker-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 1;
+  padding: 4px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  cursor: pointer;
+  transition: transform 100ms ease-out;
+}
+
+.sticker-cell.active,
+.sticker-grid:focus-visible .sticker-cell.active {
+  background: var(--accent-soft);
+}
+
+.sticker-grid:focus-visible .sticker-cell.active {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.sticker-cell:active {
+  transform: scale(0.94);
+}
+
+.sticker-thumb {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.sticker-missing {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  text-align: center;
+}
+
+.sticker-empty {
+  padding: 12px;
+  font-size: var(--text-sm);
+}
+
+/* A sent sticker: large, without a bubble. 160 points, a quarter of a phone's width less. */
+.msg-sticker {
+  display: block;
+  width: auto;
+  max-width: min(10rem, 60vw);
+  height: auto;
+  max-height: 10rem;
+  margin-block: 2px;
+  object-fit: contain;
+  user-select: none;
+}
+
+.msg-sticker-fallback {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* Admin console: packs, their stickers and the forms. */
+.admin-sticker-new,
+.admin-sticker-add,
+.admin-sticker-edit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.admin-sticker-new {
+  margin-bottom: var(--space-3);
+}
+
+.admin-sticker-add {
+  margin-top: var(--space-3);
+}
+
+.admin-sticker-new .field,
+.admin-sticker-add .field,
+.admin-sticker-edit .field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 12rem;
+}
+
+.admin-sticker-new > .btn,
+.admin-sticker-add > .btn,
+.admin-sticker-edit > .btn {
+  align-self: flex-end;
+}
+
+.admin-sticker-pack-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.admin-sticker-pack-head h3 {
+  margin: 0;
+}
+
+.admin-sticker-row {
+  flex-wrap: wrap;
+}
+
+.admin-sticker-picture {
+  flex: none;
+  width: 3.5rem;
+  height: 3.5rem;
+  object-fit: contain;
+}
+
+.admin-sticker-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 8rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sticker-cell {
+    transition: none;
+  }
+
+  .sticker-cell:active {
+    transform: none;
+  }
+}

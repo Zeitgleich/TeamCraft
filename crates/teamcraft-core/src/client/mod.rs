@@ -74,6 +74,7 @@ mod server_changes;
 pub(crate) mod server_deletions;
 mod sources;
 mod space_deletion;
+mod stickers;
 #[cfg(any(not(target_arch = "wasm32"), feature = "strict-channels"))]
 mod strict_channels;
 #[cfg(any(not(target_arch = "wasm32"), feature = "strict-channels"))]
@@ -103,6 +104,8 @@ pub use bug_reports::BugReportError;
 pub use devices::OwnDeviceCheck;
 #[cfg(feature = "ui")]
 pub(crate) use enroll::{WRAPPED_KEYS_KEY, decode_wrapped_keys};
+#[cfg(feature = "ui")]
+pub(crate) use stickers::sticker_message;
 /// Where the engine records its upload limit for the UI.
 pub const MAX_UPLOAD_KEY: &str = "max_upload_bytes";
 /// What a client assumes as the largest upload while the server publishes no limit.

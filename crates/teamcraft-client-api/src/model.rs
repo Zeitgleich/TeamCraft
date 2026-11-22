@@ -1014,6 +1014,10 @@ pub struct Message {
   /// A poll (issue #205): shown instead of `body`, which is the text versions before polls show.
   #[serde(rename = "poll", default, skip_serializing_if = "Option::is_none")]
   pub maybe_poll: Option<Box<crate::polls::PollView>>,
+  /// A sticker (issue #2132): shown large instead of `body`, which is its fallback text, when this
+  /// device holds the picture.
+  #[serde(rename = "sticker", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_sticker: Option<Box<teamcraft_proto::StickerRef>>,
 }
 
 /// A user group this user may mention in a conversation (`use_group_mentions`) and who a mention
@@ -1375,6 +1379,7 @@ mod tests {
   fn bridge_lines_become_log_lines() {
     let line = |body: &str| {
       as_log_line(Message {
+        maybe_sticker: None,
         id: id_from_raw(1),
         conversation: id_from_raw(2),
         author: id_from_raw(3),
@@ -1406,6 +1411,7 @@ mod tests {
   #[test]
   fn chat_view_restores_the_message_text() {
     let mut message = Message {
+      maybe_sticker: None,
       id: id_from_raw(1),
       conversation: id_from_raw(2),
       author: id_from_raw(3),

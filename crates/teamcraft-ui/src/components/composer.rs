@@ -2167,6 +2167,11 @@ pub fn Composer(
                     <EmojiPicker
                       anchor=anchor
                       returns_focus=false
+                      maybe_on_sticker=Callback::new(move |sticker: teamcraft_proto::StickerRef| {
+                        let fallback = crate::stickers::fallback_text(i18n, &sticker.alt);
+                        state.write(|backend| backend.post_sticker(conversation, maybe_thread, sticker, fallback));
+                        maybe_emoji_anchor.set(None);
+                      })
                       on_pick=Callback::new(insert_emoji)
                       on_close=Callback::new(move |()| {
                         maybe_emoji_anchor.set(None);

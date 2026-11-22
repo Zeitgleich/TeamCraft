@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM sticker_pictures AS picture\n       WHERE picture.uploaded_at < $1\n         AND NOT EXISTS (SELECT 1 FROM sticker_pack_pictures AS used WHERE used.picture_id = picture.id)\n       RETURNING picture.s3_key",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "s3_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sticker_pictures",
+            "name": "s3_key"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4a21df7832bef991ebde365544d7cd2cfe0177f09d977f81d5cedb5ca5fd9423"
+}

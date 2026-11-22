@@ -53,6 +53,7 @@ mod settings_sync;
 mod space_deletion;
 mod stall_watch;
 mod status_presets;
+mod stickers;
 mod store_threads;
 mod types;
 mod video;
@@ -866,6 +867,42 @@ impl TeamCraft {
   /// downloaded it. Also for emoji deleted since, which earlier messages still show.
   pub async fn custom_emoji_picture(&self, sha256: String) -> Result<Option<Vec<u8>>, TeamCraftError> {
     self.read(move |reads| reads.custom_emoji_picture(&sha256)).await
+  }
+
+  /// The workspace's sticker packs (issue #2132) whose signatures the core verified, from what it
+  /// holds: never waits for the server.
+  pub async fn sticker_packs(&self) -> Result<Vec<stickers::StickerPackItem>, TeamCraftError> {
+    self.read(|reads| reads.sticker_packs()).await
+  }
+
+  /// The app needs the packs (the sticker sheet, a picture it lacks): the core reads them from the
+  /// server unless it did lately and nothing changed, then reports a change. Call it without
+  /// waiting; failures are the core's to retry.
+  pub async fn want_sticker_packs(&self) -> Result<(), TeamCraftError> {
+    self.act_locally(|reads| reads.want_sticker_packs()).await
+  }
+
+  /// A sticker's picture (PNG or WebP bytes) when this device holds it, checked against its hash
+  /// (`sha256`, as the message JSON and [`Self::sticker_packs`] give it); `None` before the core
+  /// downloaded it. Also for stickers removed since, which earlier messages still show.
+  pub async fn sticker_picture(&self, sha256: String) -> Result<Option<Vec<u8>>, TeamCraftError> {
+    self.read(move |reads| reads.sticker_picture(&sha256)).await
+  }
+
+  /// Sends the sticker `name` of `pack` (issue #2132): an encrypted message whose text `fallback`
+  /// (the app's translation of "[Sticker: alt text]") older apps and push previews show. Refused
+  /// for a sticker the verified packs don't hold.
+  pub async fn send_sticker(
+    &self,
+    conversation_id: String,
+    maybe_thread_id: Option<String>,
+    pack: String,
+    name: String,
+    fallback: String,
+  ) -> Result<(), TeamCraftError> {
+    self
+      .act_locally(move |reads| reads.send_sticker(conversation_id, maybe_thread_id, &pack, &name, fallback))
+      .await
   }
 
   pub async fn mark_read(&self, conversation_id: String) -> Result<(), TeamCraftError> {

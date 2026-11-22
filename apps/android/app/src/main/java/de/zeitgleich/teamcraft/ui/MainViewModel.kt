@@ -1037,6 +1037,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
    */
   fun noteTimePassed() = graph.core.noteTimePassed()
 
+  /**
+   * Sends a sticker (#2132) to the conversation or [maybeThreadId]; [fallback] is its text for older
+   * apps and notifications. In the view model's scope, so closing the sheet doesn't stop it; a
+   * failure shows as [lastFailure].
+   */
+  fun sendSticker(conversationId: String, maybeThreadId: String?, pack: String, name: String, fallback: String) =
+    viewModelScope.launch {
+      reportFailure { graph.core.core().sendSticker(conversationId, maybeThreadId, pack, name, fallback) }
+    }
+
   /** Runs a `ChatAction` built with [ChatActions]; failures show as [lastFailure]. */
   fun act(action: String, onRefused: () -> Unit = {}) = viewModelScope.launch {
     try {

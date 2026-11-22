@@ -450,6 +450,40 @@ pub trait ChatBackend {
   fn rename_custom_emoji(&self, _id: teamcraft_proto::CustomEmojiId, _shortcode: &str) {}
   /// Admins: deletes an emoji; messages that use it stay as they are.
   fn delete_custom_emoji(&self, _id: teamcraft_proto::CustomEmojiId) {}
+  /// The workspace's sticker packs this device verified (issue #2132), and the limits for new ones.
+  fn sticker_packs(&self) -> teamcraft_proto::StickerSet {
+    teamcraft_proto::StickerSet::default()
+  }
+  /// A sticker's picture when this device holds it, checked against its hash: of the set, or of a
+  /// sticker removed since that earlier messages still show.
+  fn sticker_picture(&self, _sha256: teamcraft_proto::CustomEmojiHash) -> Option<Vec<u8>> {
+    None
+  }
+  /// The UI needs the sticker packs (the sticker picker, a picture it lacks): a backend that reads
+  /// them from the server does so now unless it did lately and nothing changed.
+  fn want_sticker_packs(&self) {}
+  /// Sends a sticker: an encrypted message whose text `fallback` older apps and push previews show.
+  fn post_sticker(
+    &self,
+    _conversation: ConversationId,
+    _maybe_thread: Option<ThreadId>,
+    _sticker: teamcraft_proto::StickerRef,
+    _fallback: String,
+  ) {
+  }
+  /// Admins: creates an empty pack, signed by this device.
+  fn create_sticker_pack(&self, _name: &str) {}
+  /// Admins: uploads a picture (a still PNG or WebP within the limits) and appends it to a pack.
+  fn add_sticker(&self, _pack: teamcraft_proto::StickerPackKey, _name: &str, _alt: &str, _picture: Vec<u8>) {}
+  /// Admins: renames the pack, or renames, removes or moves one of its stickers.
+  fn change_sticker_pack(
+    &self,
+    _pack: teamcraft_proto::StickerPackKey,
+    _change: teamcraft_proto::StickerPackChange,
+  ) {
+  }
+  /// Admins: deletes a pack; messages that sent its stickers stay as they are.
+  fn delete_sticker_pack(&self, _pack: teamcraft_proto::StickerPackKey) {}
   /// A link to the message that only members of the conversation can open.
   fn permalink(&self, _conversation: ConversationId, _message: MessageId) -> Option<String> {
     None

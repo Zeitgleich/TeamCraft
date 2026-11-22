@@ -2455,6 +2455,7 @@ impl Reads {
       },
       AdminSection::Backgrounds
       | AdminSection::Emoji
+      | AdminSection::Stickers
       | AdminSection::Updates
       | AdminSection::Integrations
       | AdminSection::Webhooks

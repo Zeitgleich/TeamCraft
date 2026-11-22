@@ -35,6 +35,7 @@ use crate::model::{
 };
 use crate::reactive::use_interval;
 use crate::state::{Overlay, use_app_state};
+use crate::stickers::StickerMessage;
 use crate::viewport::is_touch_primary;
 
 /// Messages by the same author closer together than this share one header.
@@ -454,7 +455,10 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
   let is_mine = message.author == me.id && maybe_imported.is_none();
   // A poll shows its card; its text is only what versions before polls show (issue #205).
   let maybe_poll = message.maybe_poll.clone();
-  let is_poll = maybe_poll.is_some();
+  // A sticker shows its picture; its text is the fallback older apps show (issue #2132). Neither
+  // is edited as text.
+  let maybe_sticker = message.maybe_sticker.clone();
+  let is_poll = maybe_poll.is_some() || maybe_sticker.is_some();
   let author_id = message.author;
   let author_name = author
     .as_ref()
@@ -1028,6 +1032,9 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
       if let Some(poll) = maybe_poll.clone() {
         let can_vote = can_react_in(state, conversation);
         return view! { <PollCard conversation=conversation message=message_id poll=*poll can_write=can_vote /> }.into_any();
+      }
+      if let Some(sticker) = maybe_sticker.clone() {
+        return view! { <StickerMessage sticker=*sticker fallback=body_text.clone() /> }.into_any();
       }
       if is_editing.get() {
         return view! {
@@ -1667,6 +1674,7 @@ mod tests {
 
   fn message(id: u64, author: u64, sent_at: i64) -> Message {
     Message {
+      maybe_sticker: None,
       id: id_from_raw::<MessageId>(id),
       conversation: id_from_raw::<ConversationId>(1),
       author: id_from_raw::<UserId>(author),

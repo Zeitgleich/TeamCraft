@@ -74,7 +74,8 @@ pub use id::{
   CustomEmojiId, DeviceId, GroupMappingId, HealthNoticeId, Id, IdError, InviteId, MeetingAttendeeId,
   MeetingId, MeetingInviteId, MessageId, MlsMessageId, OrgBackgroundId, PushRetryId, RecoveryRequestId,
   SNOWFLAKE_EPOCH_MS, SNOWFLAKE_SEQUENCE_BITS, SNOWFLAKE_WORKER_BITS, ScheduledMessageId, ScimClientId,
-  ScimGroupId, Snowflake, SpaceId, SystemEventId, ThreadId, UserGroupId, UserId, WebhookEventId, WebhookId,
+  ScimGroupId, Snowflake, SpaceId, StickerPackId, StickerPictureId, SystemEventId, ThreadId, UserGroupId,
+  UserId, WebhookEventId, WebhookId,
 };
 pub use import::{
   IMPORT_WORKER, ImportDmRequest, ImportMemberStateRequest, ImportMessagesRequest, ImportMessagesResponse,

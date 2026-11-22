@@ -994,7 +994,8 @@ flag, and whether the text addresses the whole conversation (`is_channel_mention
 "Per-conversation filters"). Reactions are encrypted messages, so not even reaction counts are visible.
 
 Encrypted: text, attachments, attachment names, reactions, edits, polls, link previews, drafts, a
-channel's shared notes (§4.11), which custom emoji a message or reaction uses (§4.13).
+channel's shared notes (§4.11), which custom emoji a message or reaction uses (§4.13), which sticker
+a message sends (§4.14).
 
 **Group mentions (`@accounting`, issue #206).** The sender's device expands them: from its sealed copy of
 the user groups (`GET /user-groups/rosters`, refused to guests like the rest of the groups) it puts the
@@ -5272,6 +5273,66 @@ or delete emoji (the admin console is on desktop and web).
 an admin of the roster at the time. A server that withholds an admin's demotion lets that admin add
 emoji until the roster moves on, as for every admin action (admin.md §2.3, freshness); emoji don't
 wait for a fresh roster, since they change no membership and no history.
+
+### 4.14 Stickers (issue #2132)
+
+Sticker packs reuse the custom emoji model (§4.13) for pictures and their integrity, and the poll
+model (§4.12) for what a message carries.
+
+**Pictures: workspace assets, not encrypted**, for the reasons of §4.13. They lie unencrypted in
+object storage keyed by their SHA-256 (`POST /sticker-pictures`, `GET /sticker-pictures/{sha256}/download`),
+and the server hands download URLs to signed-in people only. The server checks each upload as for
+emoji: a still PNG or WebP within the size and side limits, read from its header.
+
+**A pack is one signed document.** An admin's device signs the whole pack, `StickerPackDocument`:
+the pack's key (16 random bytes chosen by the device that creates it, so the document names its pack
+before the server has seen it), a version (1, then one more per change), the name, and per sticker,
+in order, a name (unique in the pack), an alt text and the picture's SHA-256 and format, and when it
+was signed. It is an entry of no log, `WorkspaceLog::StickerPack` (crypto crate), signed with the
+device key and certificate like an emoji's document; the log kind is part of the signed data, so an
+emoji's document can't pass for a pack or the other way round, and the signed version is the
+document's own. A rename, reorder, edit or removal is the next version of the whole document, so a
+server can't mix stickers of two versions.
+
+- Every device verifies the server's list against its own verified roster, exactly as for emoji:
+  the signer must be an owner or admin of the roster now, or have been one in a tenure of the admin
+  history that covers the signing time. A document that doesn't verify, or breaks the document's
+  rules (names, alt texts, at most 500 stickers), is left out; the server's copies of name and
+  version are ignored.
+- Of the versions listed for one pack key, the highest that verifies counts.
+- A picture is kept only when its SHA-256 is one a verified document names.
+
+The server checks what it can without trusting anybody: the document's rules within the instance's
+limits, that every picture it names is uploaded with that format, that the pack key in the path is
+the document's, that the version is higher than the one it holds (`409 sticker_pack_stale`
+otherwise; the admin's device reads the packs again and signs its change on top of the newer version
+once more), and that the signature claims the caller as signer. Deleting a pack needs no signature:
+a server can always withhold one.
+
+**Sending.** A sticker is a text message whose `meta.sticker` names it inside the ciphertext (pack
+key, sticker name, alt text and picture hash, as when sent), and whose text is a fallback the
+sender's app writes in its language (`[Sticker: alt text]`). Older versions, push previews, search
+and devices without the picture show that text; a reply quotes it and a forward carries it (a
+forward is the text, not the sticker). Receivers show the picture whose hash the message names, if
+they hold it verified; the alt text is its accessible name. A member can send any hash with any alt
+text, but a device only ever draws pictures an admin's signed pack named, so a member can't make
+others see a picture of their own.
+
+**What the server sees.** The packs' names, stickers and pictures, who saved them and when devices
+fetch them. Which sticker a message sends is inside the ciphertext only. Devices read the packs when
+the app first needs them (the picker, the sticker sheet, the admin console, a sticker whose picture
+the device lacks), at most once a minute and again after the gateway said the packs or the roster
+changed, and download every picture of the packs a round at a time, never one because a message on
+screen uses it.
+
+**Old messages.** As for emoji, pictures stay on the device by hash after their sticker or pack is
+gone (those of the packs and up to 200 more), so earlier messages look the same; a device without
+the picture shows the fallback text.
+
+**Accepted risks.** Those of §4.13: a compromised server can withhold packs or stickers, serve an
+older version of a pack (renamed or removed stickers again) or a deleted pack's last one, all of it
+signed by an admin of the roster at the time; a server withholding an admin's demotion lets them
+save packs until the roster moves on.
 
 ## 5. Adding a device (Threema/WhatsApp style)
 

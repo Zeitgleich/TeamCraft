@@ -6,11 +6,13 @@
 use leptos::html;
 use leptos::prelude::*;
 use teamcraft_client_api::custom_emoji::token_shortcode;
+use teamcraft_proto::StickerRef;
 use wasm_bindgen::JsCast;
 
 use crate::areas::{self, Place, lazy_area};
 use crate::components::icons::{Icon, IconName};
 use crate::components::sheet::{PopoverBackdrop, Sheet};
+use crate::components::sticker_picker::StickerGrid;
 use crate::custom_emoji::EmojiGlyph;
 use crate::emoji_catalog::{self, CatalogEmoji, EmojiGroup, EmojiVersion, SkinTone};
 use crate::emoji_support::{can_draw, can_draw_skin_tones, newest_drawable};
@@ -49,9 +51,13 @@ pub fn EmojiPicker(
   /// input itself instead).
   #[prop(default = true)]
   returns_focus: bool,
+  /// The composer's picker also offers the workspace's stickers (issue #2132): a picked sticker
+  /// goes here. Reactions have none.
+  #[prop(optional)]
+  maybe_on_sticker: Option<Callback<StickerRef>>,
 ) -> impl IntoView {
   lazy_area(Place::Popover, move || {
-    areas::emoji_picker(anchor.clone(), on_pick, on_close, returns_focus)
+    areas::emoji_picker(anchor.clone(), on_pick, on_close, returns_focus, maybe_on_sticker)
   })
 }
 
@@ -62,8 +68,17 @@ pub fn EmojiPickerPanel(
   on_pick: Callback<String>,
   on_close: Callback<()>,
   returns_focus: bool,
+  maybe_on_sticker: Option<Callback<StickerRef>>,
 ) -> impl IntoView {
   let state = use_app_state();
+  // Emoji or stickers; the stickers only where something takes them and the workspace has packs.
+  let is_stickers = RwSignal::new(false);
+  if maybe_on_sticker.is_some() {
+    crate::stickers::want_packs(state);
+  }
+  let has_stickers = Memo::new(move |_| {
+    maybe_on_sticker.is_some() && state.read(|backend| !backend.sticker_packs().packs.is_empty())
+  });
   let i18n = use_i18n();
   let query = RwSignal::new(String::new());
   let active = RwSignal::new(0_usize);
@@ -309,7 +324,54 @@ pub fn EmojiPickerPanel(
       .collect_view()
   };
 
+  let mode_switch = move || {
+    has_stickers.get().then(|| {
+      let mode = move |is_sticker_mode: bool, key: &'static str| {
+        view! {
+          <button
+            type="button"
+            role="tab"
+            class="emoji-mode"
+            class:current=move || is_stickers.get() == is_sticker_mode
+            aria-selected=move || (is_stickers.get() == is_sticker_mode).to_string()
+            on:mousedown=move |ev| ev.prevent_default()
+            on:click=move |_| is_stickers.set(is_sticker_mode)
+          >
+            {move || i18n.t(key)}
+          </button>
+        }
+      };
+      view! {
+        <div class="emoji-modes" role="tablist" aria-label=move || i18n.t("emoji-picker-title")>
+          {mode(false, "emoji-mode-emoji")}
+          {mode(true, "emoji-mode-stickers")}
+        </div>
+      }
+    })
+  };
+  let sticker_pane = move || {
+    let on_sticker = maybe_on_sticker?;
+    is_stickers.get().then(|| {
+      view! {
+        <div
+          class="sticker-pane"
+          on:keydown=move |ev: web_sys::KeyboardEvent| {
+            if ev.key() == "Escape" {
+              ev.prevent_default();
+              ev.stop_propagation();
+              on_close.run(());
+            }
+          }
+        >
+          <StickerGrid on_pick=on_sticker />
+        </div>
+      }
+    })
+  };
   let content = view! {
+    {mode_switch}
+    {sticker_pane}
+    <div class="emoji-pane" hidden=move || is_stickers.get()>
       <div class="emoji-tabs" role="toolbar" aria-label=move || i18n.t("emoji-categories")>{tabs}</div>
       <input
         class="input emoji-search"
@@ -360,6 +422,7 @@ pub fn EmojiPickerPanel(
           on:click=move |_| is_choosing_tone.update(|is_open| *is_open = !*is_open)
         />
       </div>
+    </div>
   };
   if is_sheet {
     return view! {

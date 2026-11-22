@@ -89,6 +89,7 @@ mod signed_deletions;
 mod single_image;
 mod slow_disk;
 mod snapshot_cache;
+mod stickers;
 mod store_integrity;
 mod strict_channels;
 mod sync_engine;

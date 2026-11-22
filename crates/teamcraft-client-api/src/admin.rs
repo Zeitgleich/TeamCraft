@@ -884,6 +884,8 @@ pub enum AdminSection {
   Backgrounds,
   /// The workspace's custom emoji (issue #207).
   Emoji,
+  /// The workspace's sticker packs (issue #2132).
+  Stickers,
   /// Brands: host names, colors, images and texts per brand.
   Brands,
   /// The outgoing mail server.
@@ -913,7 +915,7 @@ pub enum AdminSection {
 impl AdminSection {
   /// Every section in the order of the console's navigation: group by group (`AdminGroup::ALL`).
   /// The first one is what `/admin` opens: how the instance stands, before any setting.
-  pub const ALL: [AdminSection; 21] = [
+  pub const ALL: [AdminSection; 22] = [
     Self::Health,
     Self::Users,
     Self::People,
@@ -927,6 +929,7 @@ impl AdminSection {
     Self::Brands,
     Self::Backgrounds,
     Self::Emoji,
+    Self::Stickers,
     Self::Instance,
     Self::Settings,
     Self::Mail,
@@ -944,7 +947,7 @@ impl AdminSection {
       Self::Users | Self::People | Self::Permissions => AdminGroup::People,
       Self::Channels | Self::Announcement | Self::Retention => AdminGroup::Conversations,
       Self::Security | Self::Audit | Self::Import => AdminGroup::Security,
-      Self::Brands | Self::Backgrounds | Self::Emoji => AdminGroup::Appearance,
+      Self::Brands | Self::Backgrounds | Self::Emoji | Self::Stickers => AdminGroup::Appearance,
       Self::Instance | Self::Settings | Self::Mail | Self::Calendar | Self::Updates => AdminGroup::Server,
       Self::Integrations | Self::Webhooks | Self::Notetaker => AdminGroup::Integrations,
     }
@@ -960,6 +963,7 @@ impl AdminSection {
       Self::Announcement => "announcement",
       Self::Backgrounds => "backgrounds",
       Self::Emoji => "emoji",
+      Self::Stickers => "stickers",
       Self::Brands => "brands",
       Self::Mail => "mail",
       Self::Calendar => "calendar",

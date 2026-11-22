@@ -524,6 +524,7 @@ time=2026-11-12T10:00:00Z level=error msg=boom\n\
           custom_emoji: Vec::new(),
           mentions_me: false,
           maybe_poll: None,
+          maybe_sticker: None,
         }
       }
       fn app_level(text: &str) -> LogLevel {
