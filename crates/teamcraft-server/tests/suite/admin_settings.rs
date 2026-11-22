@@ -913,9 +913,12 @@ mod calendar_settings {
 
   #[tokio::test]
   async fn the_dev_calendar_server_passes_the_test() {
-    // CalCraft with the account of `dev/init-calcraft.sh`.
+    // CalCraft with the account of `dev/init-calcraft.sh`. A calendar is a collection: it answers
+    // PROPFIND (207), a GET with 405.
+    let propfind = reqwest::Method::from_bytes(b"PROPFIND").unwrap();
     let probe = reqwest::Client::new()
-      .get(CALCRAFT_URL)
+      .request(propfind, CALCRAFT_URL)
+      .header("Depth", "0")
       .basic_auth("teamcraft", Some("teamcraft-dev-only"))
       .send()
       .await;
