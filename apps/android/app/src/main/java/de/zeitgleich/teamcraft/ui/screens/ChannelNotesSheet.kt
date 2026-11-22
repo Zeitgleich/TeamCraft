@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -56,6 +57,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
@@ -108,7 +110,8 @@ fun ChannelNotesSheet(viewModel: MainViewModel, conversationId: String, onDismis
   ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
     val page = maybePage
     LazyColumn(
-      Modifier.fillMaxWidth().padding(horizontal = Spacing.l).padding(bottom = Spacing.xxl),
+      // Full height: a page is read, and switching pages doesn't make the sheet jump.
+      Modifier.fillMaxSize().padding(horizontal = Spacing.l).padding(bottom = Spacing.xxl),
       verticalArrangement = Arrangement.spacedBy(Spacing.s),
     ) {
       item {
@@ -180,6 +183,7 @@ private fun EmptyNotes() {
       stringResource(R.string.channel_notes_empty),
       style = MaterialTheme.typography.bodyMedium,
       color = MaterialTheme.colorScheme.onSurfaceVariant,
+      textAlign = TextAlign.Center,
       modifier = Modifier.padding(top = Spacing.xs),
     )
   }
