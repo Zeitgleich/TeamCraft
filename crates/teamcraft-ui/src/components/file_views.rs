@@ -42,6 +42,7 @@ use crate::components::sheet::PopoverBackdrop;
 use crate::components::sliding_indicator::SlidingIndicator;
 use crate::i18n::{I18n, use_i18n};
 use crate::lightbox::{MediaKey, MediaKind};
+use crate::local_previews;
 use crate::media_cache::{self, INLINE_RENDITION_SIDE, Rendition};
 use crate::media_formats::animation_label;
 use crate::media_layout::{
@@ -81,15 +82,18 @@ pub fn MessageFiles(files: Vec<FileInfo>, upload: Signal<Option<UploadPill>>) ->
     .cloned()
     .collect();
   let download_all = (downloadable.len() > 1).then(|| view! { <DownloadAll files=downloadable /> });
-  let (media, cards): (Vec<FileInfo>, Vec<FileInfo>) = files
+  // Each file with its place among the message's files, which names its local picture while it
+  // goes up (`local_previews`).
+  let (media, cards): (Vec<PlacedFile>, Vec<PlacedFile>) = files
     .into_iter()
-    .partition(|file| MediaKey::of(file).is_some() || is_media_upload(file));
+    .enumerate()
+    .partition(|(_, file)| MediaKey::of(file).is_some() || is_media_upload(file));
   let has_media = !media.is_empty();
   let media = match media.len() {
     0 => ().into_any(),
     1 => media
       .into_iter()
-      .map(|file| tile(file, TileLayout::Single))
+      .map(|(place, file)| tile(file, place, TileLayout::Single))
       .collect_view()
       .into_any(),
     _ => view! { <MediaGrid files=media /> }.into_any(),
@@ -108,7 +112,7 @@ pub fn MessageFiles(files: Vec<FileInfo>, upload: Signal<Option<UploadPill>>) ->
   view! {
     <div class="msg-files">
       {media}
-      {cards.into_iter().map(|file| match is_audio_card(&file) {
+      {cards.into_iter().map(|(_, file)| match is_audio_card(&file) {
         true => view! { <AudioCard file=file /> }.into_any(),
         false => view! { <FileCard file=file /> }.into_any(),
       }).collect_view()}
@@ -136,6 +140,9 @@ pub fn without_upload_bytes(files: &[FileInfo]) -> Vec<FileInfo> {
     })
     .collect()
 }
+
+/// A file with its place among its message's files.
+type PlacedFile = (usize, FileInfo);
 
 /// Where a message's one upload control sits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -302,9 +309,10 @@ enum TileLayout {
   Grid { maybe_hidden: Option<usize> },
 }
 
-/// Several pictures of a message as a grid; each tile has its own actions.
+/// Several pictures of a message as a grid, each with its place among the message's files; each
+/// tile has its own actions.
 #[component]
-fn MediaGrid(files: Vec<FileInfo>) -> impl IntoView {
+fn MediaGrid(files: Vec<PlacedFile>) -> impl IntoView {
   // The same album on every platform: two to four tiles, "+N" on the last (#240).
   let grid = AlbumGrid::of(files.len()).unwrap_or(AlbumGrid {
     tiles: files.len().min(MAX_ALBUM_TILES),
@@ -314,11 +322,11 @@ fn MediaGrid(files: Vec<FileInfo>) -> impl IntoView {
     .into_iter()
     .take(grid.tiles)
     .enumerate()
-    .map(|(index, file)| {
+    .map(|(index, (place, file))| {
       let layout = TileLayout::Grid {
         maybe_hidden: grid.hidden_at(index),
       };
-      tile(file, layout)
+      tile(file, place, layout)
     })
     .collect_view();
   view! {
@@ -328,11 +336,11 @@ fn MediaGrid(files: Vec<FileInfo>) -> impl IntoView {
   }
 }
 
-/// A sent picture or video, or one still going up.
-fn tile(file: FileInfo, layout: TileLayout) -> AnyView {
+/// A sent picture or video, or one still going up; `place` is its place among the message's files.
+fn tile(file: FileInfo, place: usize, layout: TileLayout) -> AnyView {
   match MediaKey::of(&file) {
     Some(_) => view! { <MediaTile file=file layout=layout /> }.into_any(),
-    None => view! { <UploadTile file=file layout=layout /> }.into_any(),
+    None => view! { <UploadTile file=file place=place layout=layout /> }.into_any(),
   }
 }
 
@@ -345,19 +353,25 @@ fn is_media_upload(file: &FileInfo) -> bool {
     )
 }
 
-/// A picture of a message that is still going up: its local thumbnail where the sent picture will
-/// be, at the same size, so nothing moves when it is sent. Only a file that failed for good says so
-/// on its tile; the progress is the message's one [`UploadControl`].
+/// A picture of a message that is still going up where the sent picture will be, at the same size,
+/// so nothing moves when it is sent: the picture the user picked while this app has it
+/// ([`local_previews`], #2269), shown as it is, else its thumbnail. Only a file that failed for good
+/// says so on its tile; the progress is the message's one [`UploadControl`].
 #[component]
-fn UploadTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
+fn UploadTile(file: FileInfo, place: usize, layout: TileLayout) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let kind = MediaKind::of(&file.media_type).unwrap_or(MediaKind::Image);
-  let thumbnail = file
-    .maybe_thumbnail_png
-    .as_deref()
-    .and_then(ObjectUrl::from_thumbnail);
-  let maybe_src = thumbnail.as_ref().map(|url| url.as_str().to_owned());
+  let maybe_local = local_previews::url_of(file.message, place, &file.file_name);
+  let is_local = maybe_local.is_some();
+  let thumbnail = match is_local {
+    true => None,
+    false => file
+      .maybe_thumbnail_png
+      .as_deref()
+      .and_then(ObjectUrl::from_thumbnail),
+  };
+  let maybe_src = maybe_local.or_else(|| thumbnail.as_ref().map(|url| url.as_str().to_owned()));
   // Revoked when the row leaves the screen.
   StoredValue::new_local(thumbnail);
   let maybe_thumbnail_size = file.maybe_thumbnail_png.as_deref().and_then(thumbnail_size);
@@ -382,7 +396,7 @@ fn UploadTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
   };
   let name = file.file_name.clone();
   let picture = match maybe_src {
-    Some(src) => view! { <img src=src alt=name class="is-preview" draggable="false" /> }.into_any(),
+    Some(src) => view! { <img src=src alt=name class:is-preview=!is_local draggable="false" /> }.into_any(),
     None => view! { <span class="media-placeholder"><Icon name=file_icon(Some(kind)) /></span> }.into_any(),
   };
   // Going up or stalled: the message's one control over the pictures says so, not each tile.
