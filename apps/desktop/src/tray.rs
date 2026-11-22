@@ -466,6 +466,8 @@ fn toggle_main_window(app: &AppHandle) {
       if let Err(error) = window.hide() {
         tracing::debug!(%error, "could not hide the window");
       }
+      #[cfg(all(target_os = "linux", target_env = "gnu"))]
+      crate::allocator_trim::trim_in_background();
     },
   }
 }

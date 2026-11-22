@@ -15,6 +15,7 @@
 //! | `focus_state`: is a Focus on?             | macOS    | `quiet_state`             |
 //! | `windows_notification_state`: quiet?      | Windows  | `quiet_state`             |
 //! | `webkit_version`: the library in use      | Linux    | `webkit_version`          |
+//! | `trim_allocator`: free memory goes back   | Linux    | `allocator`               |
 //! | `watch_process_failed`: page process died | Windows  | `webview2_process`        |
 //! | `show_window_menu`: system menu           | Windows  | `window_menu`             |
 //! | `install_snap_layouts`: maximize button   | Windows  | `snap_layouts`            |
@@ -25,6 +26,8 @@
 //! (`teamcraft-ffi`) links this crate only on Android, for it. The OpenH264 call (feature
 //! `openh264`) serves the native video encoders of `teamcraft-media`, on every native platform.
 
+#[cfg(all(feature = "shell", target_os = "linux", target_env = "gnu"))]
+mod allocator;
 #[cfg(target_os = "android")]
 mod android_context;
 #[cfg(all(feature = "shell", target_os = "macos"))]
@@ -52,6 +55,8 @@ mod webview2_process;
 #[cfg(feature = "shell")]
 mod window_menu;
 
+#[cfg(all(feature = "shell", target_os = "linux", target_env = "gnu"))]
+pub use allocator::trim_allocator;
 #[cfg(all(feature = "shell", target_os = "macos"))]
 pub use double_click::apple_action_on_double_click;
 #[cfg(feature = "shell")]
