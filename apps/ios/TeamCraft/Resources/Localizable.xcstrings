@@ -25313,54 +25313,6 @@
         }
       }
     },
-    "channel_notes_file_open": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Tap to open"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Zum Öffnen tippen"
-          }
-        }
-      }
-    },
-    "channel_notes_file_download": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Tap to download"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Zum Herunterladen tippen"
-          }
-        }
-      }
-    },
-    "channel_notes_file_downloading": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Downloading…"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Wird heruntergeladen …"
-          }
-        }
-      }
-    },
     "channel_notes_checked": {
       "localizations": {
         "en": {
