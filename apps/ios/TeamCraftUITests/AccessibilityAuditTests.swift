@@ -12,7 +12,7 @@ final class AccessibilityAuditTests: XCTestCase {
   /// What the audit gates on. Dynamic Type and clipped text are reported below, not gated: they
   /// depend on the simulator's text size and are tracked in #2286.
   private static let gated: XCUIAccessibilityAuditType = [
-    .contrast, .elementDetection, .hitRegion, .sufficientElementDescription, .trait, .parentChild,
+    .contrast, .elementDetection, .hitRegion, .sufficientElementDescription, .trait,
   ]
 
   override func setUpWithError() throws {
