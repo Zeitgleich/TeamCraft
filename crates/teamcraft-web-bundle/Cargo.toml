@@ -24,3 +24,12 @@ wasm_split_cli_support = "0.2.4"
 wasm-bindgen-cli-support = "=0.2.129"
 # Content hashes for file names and subresource integrity; already in the tree (teamcraft-crypto).
 sha2 = "0.11.0"
+# Reads the finished wasm files for the function names map (#2228); already in the tree
+# (wasm_split_cli_support, the same version).
+wasmparser = "0.261.0"
+# Demangles the names in it; already in the tree (wasm-bindgen-cli-support).
+rustc-demangle = "0.1.28"
+# Compresses the map (tens of MB of JSON); already in the tree.
+flate2 = "1.1.10"
+serde.workspace = true
+serde_json.workspace = true

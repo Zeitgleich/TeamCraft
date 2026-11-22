@@ -132,6 +132,7 @@ impl PanicParts {
           maybe_file: Some(file),
           maybe_line: Some(line),
           maybe_column: Some(column),
+          maybe_wasm: None,
         });
       }
     }

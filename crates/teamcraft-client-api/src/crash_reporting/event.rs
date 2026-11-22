@@ -64,6 +64,19 @@ pub struct StackFrame {
   pub maybe_column: Option<u32>,
   /// Whether the frame is TeamCraft's own code (not std or a dependency).
   pub is_in_app: bool,
+  /// A wasm frame's function index and offset; its module is `maybe_file` when the browser names
+  /// it (docs/crash-reports.md, "Symbols").
+  pub maybe_wasm: Option<WasmCode>,
+}
+
+/// Where in a wasm module a frame is. The shipped modules have no names (download size), so the
+/// browser gives the function's index, and Chrome and Firefox the byte offset in the module, which
+/// `scripts/symbolicate-web.py` resolves with the build's names map (#2228).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WasmCode {
+  pub function_index: u32,
+  /// Bytes from the module's start (not the function's); WebKit gives none.
+  pub maybe_offset: Option<u64>,
 }
 
 /// The app that sends: the same for every report of a process.
@@ -186,6 +199,7 @@ impl StackFrame {
       maybe_line: Some(line),
       maybe_column: Some(column).filter(|column| *column > 0),
       is_in_app: true,
+      maybe_wasm: None,
     })
   }
 
@@ -202,6 +216,13 @@ impl StackFrame {
     }
     if let Some(column) = self.maybe_column {
       frame["colno"] = json!(column);
+    }
+    if let Some(wasm) = self.maybe_wasm {
+      // The protocol's fields for a wasm function index and a code address.
+      frame["function_id"] = json!(format!("{:#x}", wasm.function_index));
+      if let Some(offset) = wasm.maybe_offset {
+        frame["instruction_addr"] = json!(format!("{offset:#x}"));
+      }
     }
     frame
   }
@@ -309,6 +330,35 @@ mod tests {
   }
 
   #[test]
+  fn a_wasm_frame_carries_its_index_and_offset() {
+    let frame = StackFrame {
+      maybe_function: Some("wasm-function[1185]".to_owned()),
+      maybe_file: Some("teamcraft-ui-0123456789abcdef_bg.wasm".to_owned()),
+      is_in_app: true,
+      maybe_wasm: Some(WasmCode {
+        function_index: 1185,
+        maybe_offset: Some(0x1234),
+      }),
+      ..StackFrame::default()
+    };
+    let json = frame.to_json();
+    assert_eq!(json["function_id"], "0x4a1");
+    assert_eq!(json["instruction_addr"], "0x1234");
+    assert_eq!(json["filename"], "teamcraft-ui-0123456789abcdef_bg.wasm");
+    let webkit = StackFrame {
+      maybe_wasm: Some(WasmCode {
+        function_index: 17228,
+        maybe_offset: None,
+      }),
+      ..StackFrame::default()
+    }
+    .to_json();
+    assert_eq!(webkit["function_id"], "0x434c");
+    assert!(webkit.get("instruction_addr").is_none());
+    assert!(StackFrame::default().to_json().get("function_id").is_none());
+  }
+
+  #[test]
   fn an_error_event_of_a_script_keeps_its_position() {
     assert_eq!(
       StackFrame::from_error_event("https://chat.example.com/app.js", 12, 0),
@@ -318,6 +368,7 @@ mod tests {
         maybe_line: Some(12),
         maybe_column: None,
         is_in_app: true,
+        maybe_wasm: None,
       })
     );
   }
@@ -382,6 +433,7 @@ mod tests {
         maybe_line: Some(12),
         maybe_column: None,
         is_in_app: true,
+        maybe_wasm: None,
       }],
       breadcrumbs: vec!["2026-11-08T10:00:00Z INFO teamcraft_core: connected".to_owned()],
       maybe_call: None,

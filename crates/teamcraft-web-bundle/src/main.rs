@@ -8,7 +8,9 @@
 //!
 //! 1. splits the module at its `wasm_split` points (`wasm_split_cli_support`, as cargo-leptos does),
 //! 2. runs wasm-bindgen on the main part (`--target web --keep-lld-exports`),
-//! 3. optimizes every part with wasm-opt (release),
+//! 3. optimizes every part with wasm-opt (release); with `--names-out`, keeps the function names
+//!    of every part in a map outside the staging directory and ships the parts without them
+//!    ([`names`], #2228),
 //! 4. names every file after the build (`<name>-<id>…`, so the server caches them for good),
 //! 5. joins the signed-in app's chunks (`session`) into one file, its pack (#1465), which the chunk
 //!    loader takes them from: hundreds of files, most of them under 1 kB, were each their own request
@@ -20,7 +22,7 @@
 //!
 //! ```text
 //! teamcraft-web-bundle --input <app.wasm> --staging <dir> --name teamcraft-ui --initializer <loader.js>
-//!                      [--wasm-opt <binary> [--wasm-opt-arg <arg>]...]
+//!                      [--wasm-opt <binary> [--wasm-opt-arg <arg>]...] [--names-out <dir>]
 //! ```
 //!
 //! `teamcraft-web-bundle worker …` binds and names a module that runs in a worker instead
@@ -35,12 +37,18 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use sha2::{Digest, Sha256, Sha384};
 
+mod names;
 mod worker;
 
 /// Where the page loads everything from; the app is always served at the root.
 const PUBLIC_URL: &str = "/";
 /// Marks where the preload links and the start script go in `index.html`.
 const HEAD_END: &str = "</head>";
+/// wasm-opt keeps the name section with this flag (the names map reads it, then it goes).
+const WASM_OPT_KEEP_NAMES: &str = "-g";
+/// wasm-opt's flag that would drop the names before the map reads them; the DWARF it is there for
+/// goes before wasm-opt ([`names::drop_debug_info`]).
+const WASM_OPT_STRIP_DEBUG: &str = "--strip-debug";
 /// The split module every page but a guest's needs at once (teamcraft-ui `areas.rs`): `init.js`
 /// fetches its files next to the app's.
 const SESSION_MODULE: &str = "session";
@@ -54,16 +62,22 @@ fn main() -> Result<()> {
   }
   let args = Args::parse(raw)?;
   let input = std::fs::read(&args.input).with_context(|| format!("reading {}", args.input.display()))?;
+  let wasm_opt_args = optimizer_args(&args.wasm_opt_args, args.maybe_names_dir.is_some());
   let id = build_id(
     &input,
-    &optimizer_settings(args.maybe_wasm_opt.as_deref(), &args.wasm_opt_args)?,
+    &optimizer_settings(args.maybe_wasm_opt.as_deref(), &wasm_opt_args)?,
   );
   let work = args.staging.join(format!(".split-{id}"));
   std::fs::create_dir_all(&work)?;
   let names = Names::new(&args.name, &id);
 
   let chunks = split(&input, &work, &names)?;
-  bind(&work.join("main.wasm"), &args.staging, &names)?;
+  bind(
+    &work.join("main.wasm"),
+    &args.staging,
+    &names,
+    args.maybe_names_dir.is_some(),
+  )?;
   let mut wasm_files = vec![args.staging.join(&names.main_wasm)];
   for chunk in &chunks {
     std::fs::rename(work.join(&chunk.original), args.staging.join(&chunk.named))?;
@@ -72,8 +86,14 @@ fn main() -> Result<()> {
   let link_script = write_link_module(&work, &args.staging, &names, &chunks)?;
   if let Some(wasm_opt) = &args.maybe_wasm_opt {
     for file in &wasm_files {
-      optimize(wasm_opt, &args.wasm_opt_args, file)?;
+      if args.maybe_names_dir.is_some() {
+        names::drop_debug_info(file)?;
+      }
+      optimize(wasm_opt, &wasm_opt_args, file)?;
     }
+  }
+  if let Some(names_dir) = &args.maybe_names_dir {
+    write_names(&args.staging, &wasm_files, &id, names_dir)?;
   }
   std::fs::remove_dir_all(&work)?;
   let initializer = copy_hashed(&args.initializer, &args.staging)?;
@@ -97,6 +117,8 @@ struct Args {
   initializer: PathBuf,
   maybe_wasm_opt: Option<PathBuf>,
   wasm_opt_args: Vec<String>,
+  /// Where the names map goes (outside the staging directory); without it, no map.
+  maybe_names_dir: Option<PathBuf>,
 }
 
 /// The files of one build.
@@ -131,8 +153,8 @@ struct Chunk {
 
 impl Args {
   fn parse(mut raw: impl Iterator<Item = String>) -> Result<Self> {
-    let (mut input, mut staging, mut name, mut initializer, mut maybe_wasm_opt) =
-      (None, None, None, None, None);
+    let (mut input, mut staging, mut name, mut initializer, mut maybe_wasm_opt, mut maybe_names_dir) =
+      (None, None, None, None, None, None);
     let mut wasm_opt_args = Vec::new();
     while let Some(flag) = raw.next() {
       let mut value = || raw.next().with_context(|| format!("{flag} needs a value"));
@@ -143,6 +165,7 @@ impl Args {
         "--initializer" => initializer = Some(PathBuf::from(value()?)),
         "--wasm-opt" => maybe_wasm_opt = Some(PathBuf::from(value()?)),
         "--wasm-opt-arg" => wasm_opt_args.push(value()?),
+        "--names-out" => maybe_names_dir = Some(PathBuf::from(value()?)),
         other => bail!("unknown argument {other}"),
       }
     }
@@ -153,6 +176,7 @@ impl Args {
       initializer: initializer.context("--initializer is missing")?,
       maybe_wasm_opt,
       wasm_opt_args,
+      maybe_names_dir,
     })
   }
 }
@@ -187,6 +211,19 @@ fn build_id(input: &[u8], optimizer_settings: &str) -> String {
   hasher.update(input);
   hasher.update(optimizer_settings.as_bytes());
   hex(&hasher.finalize()[..8])
+}
+
+/// The flags wasm-opt runs with: as given, and with a names map, keeping the names section for it.
+fn optimizer_args(args: &[String], keeps_names: bool) -> Vec<String> {
+  if !keeps_names {
+    return args.to_vec();
+  }
+  args
+    .iter()
+    .filter(|arg| *arg != WASM_OPT_STRIP_DEBUG && *arg != WASM_OPT_KEEP_NAMES)
+    .cloned()
+    .chain([WASM_OPT_KEEP_NAMES.to_owned()])
+    .collect()
 }
 
 /// wasm-opt's version and flags (empty without wasm-opt).
@@ -233,15 +270,16 @@ fn split(input: &[u8], work: &Path, names: &Names) -> Result<Vec<Chunk>> {
   Ok(chunks)
 }
 
-/// wasm-bindgen on the main part, with the exports the chunks link against.
-fn bind(main: &Path, staging: &Path, names: &Names) -> Result<()> {
+/// wasm-bindgen on the main part, with the exports the chunks link against; the name section stays
+/// for the names map (`keeps_names`), which takes it out of the finished file.
+fn bind(main: &Path, staging: &Path, names: &Names, keeps_names: bool) -> Result<()> {
   let stem = names.main_js.trim_end_matches(".js");
   wasm_bindgen_cli_support::Bindgen::new()
     .input_path(main)
     .out_name(stem)
     .web(true)?
     .keep_lld_exports(true)
-    .remove_name_section(true)
+    .remove_name_section(!keeps_names)
     .remove_producers_section(true)
     .typescript(false)
     .generate(staging)
@@ -383,6 +421,29 @@ fn with_session_pack(link_script: &str, pack: &SessionPack) -> Result<String> {
     "{first_line}\n{}{rest}",
     PACK_LOADER.replace("__PACK_PARTS__", &pack.parts.len().to_string())
   ))
+}
+
+/// Takes the function names out of every finished wasm file into the build's names map in
+/// `names_dir` ([`names`]); the files are then as they are served.
+fn write_names(staging: &Path, wasm_files: &[PathBuf], id: &str, names_dir: &Path) -> Result<()> {
+  let mut map = names::NamesMap::new(id);
+  for path in wasm_files {
+    let file = path
+      .strip_prefix(staging)
+      .ok()
+      .and_then(|file| file.to_str())
+      .with_context(|| format!("{} is not in the staging directory", path.display()))?;
+    map.modules.push(names::take_names(path, file)?);
+  }
+  let written = map.write(names_dir)?;
+  let named = map
+    .modules
+    .iter()
+    .flat_map(|module| &module.functions)
+    .filter(|function| function.name.is_some())
+    .count();
+  tracing::info!(map = %written.display(), modules = map.modules.len(), named, "function names");
+  Ok(())
 }
 
 fn optimize(wasm_opt: &Path, args: &[String], file: &Path) -> Result<()> {
@@ -776,5 +837,17 @@ export const __wasm_split_load_admin = wrapAsyncCb(makeLoad(() => {
     assert!(args.maybe_wasm_opt.is_none());
     assert!(Args::parse(["--input"].iter().map(ToString::to_string)).is_err());
     assert!(Args::parse(["--bogus", "x"].iter().map(ToString::to_string)).is_err());
+  }
+
+  #[test]
+  fn with_a_names_map_wasm_opt_keeps_the_names_for_it() {
+    let args = ["-Oz", "--strip-debug", "--strip-producers"].map(str::to_owned);
+    assert_eq!(optimizer_args(&args, false), args);
+    assert_eq!(optimizer_args(&args, true), ["-Oz", "--strip-producers", "-g"]);
+    // The flags are part of the build ID: a build with the map gets other names than one without.
+    assert_ne!(
+      build_id(b"a", &optimizer_args(&args, true).join(" ")),
+      build_id(b"a", &optimizer_args(&args, false).join(" "))
+    );
   }
 }

@@ -11487,11 +11487,16 @@ version = "1.0.41"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
+ "flate2",
+ "rustc-demangle",
+ "serde",
+ "serde_json",
  "sha2 0.11.1",
  "tracing",
  "tracing-subscriber",
  "wasm-bindgen-cli-support",
  "wasm_split_cli_support",
+ "wasmparser 0.261.0",
 ]
 
 [[package]]
