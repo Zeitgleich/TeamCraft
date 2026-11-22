@@ -801,6 +801,9 @@ pub struct WorkspacePolicy {
   /// How leavers leave the encryption groups (docs/provisioning.md §3); automatic when absent.
   #[serde(default)]
   pub leavers: LeaverPolicy,
+  /// Direct media in 1:1 calls (ARCHITECTURE.md §6.7, #127); between members when absent.
+  #[serde(default)]
+  pub direct_media: crate::DirectMediaPolicy,
   /// How the admin roster follows the identity provider (e2ee.md §3.1.3). Absent means automatic.
   /// A policy that doesn't name it doesn't change it: an older owner's app re-signs without it, so
   /// clients keep the last one they verified. Boxed: every client future that holds a policy holds this.
@@ -1026,6 +1029,7 @@ impl Default for WorkspacePolicy {
       scheduled_messages: ScheduledMessagePolicy::default(),
       bug_reports: BugReportPolicy::default(),
       leavers: LeaverPolicy::default(),
+      direct_media: crate::DirectMediaPolicy::default(),
     }
   }
 }

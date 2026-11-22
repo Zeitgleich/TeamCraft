@@ -79,6 +79,9 @@ The first commit of the 0.2.0 copy is the unmodified crate (`davey/` of the tag 
 6. Added `VENDORED.md`, `UPSTREAM_PR.md` with `upstream.patch` (changes 1 and 2 without the
    `[workspace]` table and profiles) and `upstream-web-time.patch` (change 3), both relative to the
    upstream repository, and `.gitignore` (standalone `Cargo.lock` and `target/`).
+7. `src/session.rs`: `DaveSession::export_secret(label, context, length)` (issue #127): the MLS
+   exporter of the current epoch, for TeamCraft's direct path offers (e2ee.md §8.4). It only reads
+   the group; DAVE's own media keys keep their label. Not in `upstream.patch`: a TeamCraft need.
 
 No other source changes. `cargo test` and `cargo clippy --all-targets -- -D warnings` pass on the
 copy (CI: `davey` job in `ci.yml`).

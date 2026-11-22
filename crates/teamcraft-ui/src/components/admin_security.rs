@@ -1,6 +1,7 @@
 use leptos::prelude::*;
 use teamcraft_proto::{
-  AdminSelfJoin, CallRecorders, GuestDmStart, HistoryPolicy, LeaverRemovalMode, ScreenShareResolution,
+  AdminSelfJoin, CallRecorders, DirectMediaMode, GuestDmStart, HistoryPolicy, LeaverRemovalMode,
+  ScreenShareResolution,
 };
 
 use crate::components::admin_console::SectionHeader;
@@ -328,6 +329,36 @@ pub fn SecuritySection() -> impl IntoView {
             })
           }
         />
+      </fieldset>
+
+      // Direct connections in calls (#127, admin.md §3.16): between members by default.
+      <fieldset class="policy-group" prop:disabled=move || policy.is_locked()>
+        <legend>{move || i18n.t("policy-direct-media")}</legend>
+        <p class="muted-text small">{move || i18n.t("policy-direct-media-hint")}</p>
+        {[DirectMediaMode::Off, DirectMediaMode::SameOrganization, DirectMediaMode::Everyone]
+          .into_iter()
+          .map(|option| {
+            let slug = option.as_str().to_owned();
+            let label_key = format!("policy-direct-media-{slug}");
+            let hint_key = format!("policy-direct-media-{slug}-hint");
+            let checked_option = option.clone();
+            view! {
+              <label class="radio">
+                <input
+                  type="radio"
+                  name="direct_media"
+                  value=slug
+                  prop:checked=move || draft.get().direct_media.mode == checked_option
+                  on:change=move |_| policy.edit(|value| value.direct_media.mode = option.clone())
+                />
+                <span>
+                  <strong>{move || i18n.t(&label_key)}</strong>
+                  <span class="muted-text small">{move || i18n.t(&hint_key)}</span>
+                </span>
+              </label>
+            }
+          })
+          .collect_view()}
       </fieldset>
 
       // Call recording (#216, admin.md §3.13): off by default.

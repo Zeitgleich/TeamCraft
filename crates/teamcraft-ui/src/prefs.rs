@@ -486,6 +486,10 @@ pub struct CallPrefs {
   /// Desktop: when the small call window shows during a call (#2077): only while the main window
   /// is away (the default), always, or never.
   pub small_window: teamcraft_client_api::call_mini::CallMiniPolicy,
+  /// Calls between two people may carry their media directly between the devices where the
+  /// workspace policy allows it (ARCHITECTURE.md §6.7, #127): on until the user turns it off, which
+  /// keeps every call of theirs on the server.
+  pub direct_connections: bool,
 }
 
 impl Default for CallPrefs {
@@ -510,6 +514,7 @@ impl Default for CallPrefs {
       status_sounds: teamcraft_client_api::calls::CallStatusSounds::All,
       camera_quality: teamcraft_client_api::calls::VideoQuality::Auto,
       small_window: teamcraft_client_api::call_mini::CallMiniPolicy::WhenAway,
+      direct_connections: true,
     }
   }
 }

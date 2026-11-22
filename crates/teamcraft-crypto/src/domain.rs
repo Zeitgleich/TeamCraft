@@ -80,6 +80,12 @@ pub(crate) const STRICT_ROLES: &str = "TeamCraft-v1 strict roles";
 pub(crate) const STRICT_READY: &str = "TeamCraft-v1 strict ready";
 /// Signature label of a call recording notice, signed with the device's DAVE key (e2ee.md §8.3).
 pub(crate) const CALL_RECORDING_NOTICE: &str = "TeamCraft-v1 call recording notice";
+/// MLS exporter label of the direct path key of a call's DAVE epoch (e2ee.md §8.4).
+pub(crate) const DIRECT_PATH_EXPORTER: &str = "TeamCraft-v1 direct path";
+/// HKDF `info` of the key that seals direct path offers, from the exported secret.
+pub(crate) const DIRECT_PATH_OFFER_KEY: &str = "TeamCraft-v1 direct path offer key";
+/// Associated data of a sealed direct path offer.
+pub(crate) const DIRECT_PATH_OFFER: &str = "TeamCraft-v1 direct path offer";
 
 /// Returns `len(label) || label || body`.
 pub(crate) fn labeled(label: &str, body: &[u8]) -> Vec<u8> {
@@ -96,7 +102,7 @@ pub(crate) fn labeled(label: &str, body: &[u8]) -> Vec<u8> {
 mod tests {
   use super::*;
 
-  const ALL_LABELS: [&str; 51] = [
+  const ALL_LABELS: [&str; 54] = [
     DEVICE_CERTIFICATE,
     IDENTITY_FINGERPRINT,
     MESSAGE_AAD,
@@ -148,6 +154,9 @@ mod tests {
     STRICT_ROLES,
     STRICT_READY,
     CALL_RECORDING_NOTICE,
+    DIRECT_PATH_EXPORTER,
+    DIRECT_PATH_OFFER_KEY,
+    DIRECT_PATH_OFFER,
   ];
 
   #[test]

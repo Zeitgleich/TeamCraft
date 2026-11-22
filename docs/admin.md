@@ -1378,6 +1378,24 @@ while the choice doesn't use it, and keeps what was typed so switching back rest
   sender's IP address; the console says so. The web client makes no previews (browsers can't read
   other sites' pages) but shows those others sent, under the same policy.
 
+### 3.16 Direct connections in calls (issue #127)
+
+Whether two devices in a 1:1 call may send their media directly to each other instead of through
+the SFU is part of the signed workspace policy (`direct_media`, §2.3), on the security policy page
+under Calls: **Off**, **Between members** (the default) or **Everyone, guests included**. A direct
+path shows each side's IP addresses, local network addresses included, to the other side; the
+console says so next to the choice. How it works: ARCHITECTURE.md §6.7; what it reveals and to
+whom: e2ee.md §8.4.
+
+- **Enforcement:** each member's app, for itself: it offers a direct path only when the policy it
+  verified allows it for the other side, and ignores offers otherwise. The server can't enable it
+  (it can only drop offers, which keeps the call on the SFU). Guests' apps follow the policy of the
+  instance they joined; "Between members" never connects a guest directly.
+- **People:** everybody can turn it off for themselves under Settings → Calls ("Connect directly in
+  calls"); it follows the account to all their devices. Either side's "off" keeps the call on the SFU.
+- **Calls stay end-to-end encrypted** on either path, with the same DAVE keys; the policy is about
+  addresses, not about content.
+
 ## 4. Audit log
 
 Every admin action, recovery, device change and role change is logged with actor, target and time.

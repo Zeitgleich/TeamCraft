@@ -758,6 +758,12 @@ pub fn AudioVideoSection() -> impl IntoView {
         value=Signal::derive(move || calls.get().mirror_self_view)
         on_change=Callback::new(move |value: bool| prefs.update(|all| all.calls.mirror_self_view = value))
       />
+      <SwitchRow
+        label="calls-direct"
+        hint="calls-direct-hint"
+        value=Signal::derive(move || calls.get().direct_connections)
+        on_change=Callback::new(move |value: bool| prefs.update(|all| all.calls.direct_connections = value))
+      />
     </SettingsCard>
     <SettingsCard heading="calls-video">
       <SelectRow

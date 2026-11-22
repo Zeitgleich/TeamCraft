@@ -5,6 +5,7 @@
 
 mod api;
 mod bytes;
+mod call_direct;
 mod call_fallback;
 mod call_media;
 mod call_recording;
@@ -36,6 +37,10 @@ mod wire_enum;
 
 pub use api::*;
 pub use bytes::{Base64Bytes, ClientMessageId, ClientMessageIdError, IdempotencyKey, UnixMillis};
+pub use call_direct::{
+  CallPeerStanding, DirectCandidate, DirectCandidateKind, DirectMediaMode, DirectMediaPolicy,
+  DirectOfferBody, MAX_DIRECT_CANDIDATES, MAX_DIRECT_OFFER_BYTES,
+};
 pub use call_fallback::{
   CALL_FALLBACK_PATH, CALL_FALLBACK_PROTOCOL, FallbackFrame, FallbackFrameError, JOIN_TOKEN_PROTOCOL_PREFIX,
   MAX_FALLBACK_CLOSE_REASON_BYTES, MAX_FALLBACK_DATAGRAM_BYTES, OfferedProtocols, OfferedProtocolsError,

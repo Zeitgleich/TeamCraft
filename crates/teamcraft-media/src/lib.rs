@@ -134,6 +134,8 @@ pub mod capture_v4l2;
 pub mod capture_windows;
 #[cfg(feature = "dave")]
 pub mod dave;
+#[cfg(feature = "native")]
+pub mod direct_path;
 #[cfg(feature = "effects")]
 pub mod effects;
 #[cfg(feature = "native")]

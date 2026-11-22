@@ -977,6 +977,20 @@ impl DaveSession {
     Ok(())
   }
 
+  /// Exports a secret of the current epoch (MLS exporter, RFC 9420 §8.5) for keys outside DAVE's
+  /// own media keys, e.g. TeamCraft's direct path offers. `None` without an established group or
+  /// when the exporter refuses the length. TeamCraft change, see `VENDORED.md`.
+  pub fn export_secret(&self, label: &str, context: &[u8], length: usize) -> Option<Vec<u8>> {
+    if self.status == SessionStatus::PENDING {
+      return None;
+    }
+    self
+      .group
+      .as_ref()?
+      .export_secret(self.provider.crypto(), label, context, length)
+      .ok()
+  }
+
   /// See [Sender Key Derivation](https://daveprotocol.com/#sender-key-derivation).
   fn get_key_ratchet(&self, user_id: u64) -> Result<HashRatchet, UpdateRatchetsError> {
     if self.status == SessionStatus::PENDING {

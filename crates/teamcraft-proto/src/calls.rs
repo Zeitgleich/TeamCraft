@@ -286,6 +286,16 @@ pub enum CallClientMessage {
   AttachAudio {
     secret: Base64Bytes,
   },
+  /// This device's offer of a direct path to `to_device_id`, the other device of a 1:1 call
+  /// (#127, ARCHITECTURE.md §6.7): candidates and a certificate hash, sealed under a key of the
+  /// call's DAVE epoch (`teamcraft_crypto::direct_path`), so the SFU can neither read nor forge it.
+  /// The SFU relays it as [`CallEvent::DirectOffer`] only while the room has exactly these two
+  /// devices, up to [`crate::MAX_DIRECT_OFFER_BYTES`] and within a rate limit, and drops it
+  /// otherwise. Older SFUs ignore it, which keeps the call on the SFU.
+  DirectOffer {
+    to_device_id: DeviceId,
+    sealed: Base64Bytes,
+  },
   #[serde(other)]
   Unknown,
 }
@@ -585,6 +595,12 @@ pub enum CallEvent {
   /// ([`CallClientMessage::MoveHere`]); the SFU closes this connection right after. Not to be
   /// answered with a rejoin.
   ConnectionReplaced,
+  /// The other device's [`CallClientMessage::DirectOffer`], as it sent it (#127). Only the device
+  /// it was sealed for can open it; one that doesn't allow direct media ignores it.
+  DirectOffer {
+    from_device_id: DeviceId,
+    sealed: Base64Bytes,
+  },
   #[serde(other)]
   Unknown,
 }
@@ -758,6 +774,11 @@ impl fmt::Debug for CallClientMessage {
         .field("notice_bytes", &notice.len())
         .finish(),
       Self::UplinkHurt { is_hurt } => f.debug_struct("UplinkHurt").field("is_hurt", is_hurt).finish(),
+      Self::DirectOffer { to_device_id, sealed } => f
+        .debug_struct("DirectOffer")
+        .field("to_device_id", to_device_id)
+        .field("sealed_bytes", &sealed.len())
+        .finish(),
       Self::Unknown => f.write_str("Unknown"),
     }
   }
@@ -1417,6 +1438,32 @@ mod tests {
     assert_eq!(json, r#"{"type":"attach_audio","secret":"AQI="}"#);
     assert_eq!(serde_json::from_str::<CallClientMessage>(&json).unwrap(), attach);
     assert!(!format!("{attach:?}").contains("AQI="), "the secret is redacted");
+  }
+
+  /// #127: the relayed direct path offer keeps its sealed bytes and names the other device.
+  #[test]
+  fn direct_offer_wire_format() {
+    let offer = CallClientMessage::DirectOffer {
+      to_device_id: DeviceId::from_snowflake(Snowflake::new(9).unwrap()),
+      sealed: Base64Bytes::new(vec![1, 2]),
+    };
+    let json = serde_json::to_string(&offer).unwrap();
+    assert_eq!(
+      json,
+      r#"{"type":"direct_offer","to_device_id":"9","sealed":"AQI="}"#
+    );
+    assert_eq!(serde_json::from_str::<CallClientMessage>(&json).unwrap(), offer);
+    assert!(!format!("{offer:?}").contains("AQI="), "only the size shows");
+    let relayed = CallEvent::DirectOffer {
+      from_device_id: DeviceId::from_snowflake(Snowflake::new(8).unwrap()),
+      sealed: Base64Bytes::new(vec![3]),
+    };
+    let json = serde_json::to_string(&relayed).unwrap();
+    assert_eq!(
+      json,
+      r#"{"type":"direct_offer","from_device_id":"8","sealed":"Aw=="}"#
+    );
+    assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), relayed);
   }
 
   /// #1891: why a picture stopped, for the viewer.
