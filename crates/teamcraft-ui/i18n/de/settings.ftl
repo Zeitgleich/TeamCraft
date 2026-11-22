@@ -959,5 +959,5 @@ crash-reports-heading = Absturzberichte
 crash-reports-send = Absturzberichte senden
 crash-reports-send-hint = Wenn die App abstürzt oder auf einen Fehler stößt, sendet sie einen Bericht an den Absturzbericht-Dienst deiner Organisation: wo in der App es passiert ist, App- und Systemversion, die letzten Protokollzeilen und eine zufällige ID dieser Installation. Niemals Nachrichten, Namen, Dateinamen oder Schlüssel.
 crash-reports-required-hint = Deine Organisation schreibt Absturzberichte vor. Sie enthalten, wo in der App ein Absturz passiert ist, App- und Systemversion, die letzten Protokollzeilen und eine zufällige ID dieser Installation. Niemals Nachrichten, Namen, Dateinamen oder Schlüssel.
-crash-reports-notice = Stürzt die App ab, bekommen eure Administratoren einen Fehlerbericht. Darin stehen nur technische Angaben wie die App-Version und die Fehlerstelle, nie Nachrichten, Namen oder Dateien.
+crash-reports-notice = Stürzt die App ab, sendet sie einen Fehlerbericht. Darin stehen nur technische Angaben wie die App-Version und die Fehlerstelle, nie Nachrichten, Namen oder Dateien.
 crash-reports-notice-settings = Einstellungen

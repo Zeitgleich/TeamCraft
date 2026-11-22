@@ -17046,13 +17046,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "If the app crashes, your administrators get an error report. It holds only technical details like the app version and where the error happened, never messages, names or files."
+            "value": "If the app crashes, it sends an error report. It holds only technical details like the app version and where the error happened, never messages, names or files."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Stürzt die App ab, bekommen eure Administratoren einen Fehlerbericht. Darin stehen nur technische Angaben wie die App-Version und die Fehlerstelle, nie Nachrichten, Namen oder Dateien."
+            "value": "Stürzt die App ab, sendet sie einen Fehlerbericht. Darin stehen nur technische Angaben wie die App-Version und die Fehlerstelle, nie Nachrichten, Namen oder Dateien."
           }
         }
       }
