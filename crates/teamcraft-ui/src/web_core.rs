@@ -905,6 +905,7 @@ async fn does_worker_stream() -> bool {
     .ok()
     .and_then(|response| response.dyn_into::<web_sys::Response>().ok())
     .is_some_and(|response| response.status() == 204);
+  // async-ok: a thread-local Cell, not a signal.
   DOES_STREAM.with(|known| known.set(does_stream));
   does_stream
 }
