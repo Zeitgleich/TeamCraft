@@ -202,6 +202,8 @@
 .sb-more {
   margin: 2px 8px 0 36px;
   padding: 2px 0;
+  /* WCAG 2.5.8: at least 24 px tall, at any text size (#217). */
+  min-height: 24px;
   border: 0;
   background: none;
   color: var(--sb-muted);

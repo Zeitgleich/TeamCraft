@@ -467,6 +467,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
     .unwrap_or_default();
   let aria_label_base = format!("{author_name}, {time}");
   let body_id = format!("msg-body-{message_id}");
+  let row_class = user_row_class(is_grouped, is_mine, motion.entrance);
   // Selection mode (issue #2070): a tap toggles the row, and a screen reader hears its state.
   let is_selecting = Memo::new(move |_| {
     state
@@ -1143,12 +1144,9 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
 
   view! {
     <div
-      class="msg msg-user"
-      class:msg-grouped=is_grouped
-      class:msg-mine=is_mine
+      // The classes fixed for the row's life in one attribute: an element takes at most 26.
+      class=row_class
       class:msg-pending=is_pending(message_id)
-      class:msg-arriving=motion.entrance == Entrance::Arriving
-      class:msg-settling=motion.entrance == Entrance::Settling
       class:msg-active=is_toolbar_on
       class:msg-selecting=move || is_selecting.get()
       class:msg-selected=move || is_selected.get()
@@ -1255,6 +1253,22 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
       </div>
     </div>
   }
+}
+
+/// The classes of a user message's row that don't change while it is shown.
+fn user_row_class(is_grouped: bool, is_mine: bool, entrance: Entrance) -> String {
+  let mut class = String::from("msg msg-user");
+  for (is_on, name) in [
+    (is_grouped, " msg-grouped"),
+    (is_mine, " msg-mine"),
+    (entrance == Entrance::Arriving, " msg-arriving"),
+    (entrance == Entrance::Settling, " msg-settling"),
+  ] {
+    if is_on {
+      class.push_str(name);
+    }
+  }
+  class
 }
 
 /// The i18n key and arguments that describe a workspace event; `None` for events not worth a line.

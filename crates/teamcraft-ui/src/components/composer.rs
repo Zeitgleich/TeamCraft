@@ -2033,7 +2033,8 @@ pub fn Composer(
             aria-multiline="true"
             aria-label=move || i18n.t("composer-label")
             aria-autocomplete="list"
-            aria-controls=suggestions_id.get_value()
+            // Only while the list is there: an id that names nothing is invalid ARIA.
+            aria-controls=move || (!suggestions.with(Vec::is_empty)).then(|| suggestions_id.get_value())
             aria-activedescendant=move || {
               (!suggestions.with(Vec::is_empty))
                 .then(|| suggestion_option_id(&suggestions_id.get_value(), selected_suggestion.get()))

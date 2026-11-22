@@ -48,7 +48,8 @@ code. No real screen reader was run on any platform yet (#2288), and nothing on 
 strong on all three platforms (below). The High findings were mostly about what a screen reader hears
 at the wrong time or not at all: a message list that read out every row scrolled into view, a focused
 message that said only its author, call controls that hid themselves from TalkBack and VoiceOver, and
-unlabelled switches. axe found 0 violations on home and 4 rules failing in a channel, all fixed here.
+unlabelled switches. axe found 0 violations on home and 4 rules failing in a channel; after the fixes a channel
+has none (one more target size, with the composer's suggestions open, is filed).
 
 ### Done well
 
@@ -80,7 +81,7 @@ unlabelled switches. axe found 0 violations on home and 4 rules failing in a cha
 | W-4  | After Delete from the menu the focus fell to the page; Undo (6 s toast) out of reach                                           | 2.2.1, 2.4.3 | High   | focus fixed (returns to the message or its neighbour); undo #2279 |
 | W-5  | The app under the full call screen stayed focusable and readable                                                              | 2.4.11     | High     | fixed: `inert` while the call screen is up |
 | W-6  | No keyboard way to answer an incoming call in the web app                                                                     | 2.1.1      | High     | #2278   |
-| W-7  | Composer suggestions: no `aria-activedescendant`, buttons inside options, `aria-expanded` on a textbox (axe: critical)          | 4.1.2      | High     | fixed, with a polite "N suggestions" |
+| W-7  | Composer suggestions: no `aria-activedescendant`, buttons inside options, `aria-expanded` on a textbox (axe: critical)          | 4.1.2      | High     | fixed, with a polite "N suggestions"; `aria-controls` only while the list exists |
 | W-8  | Call popovers (share, effects, camera, audio, quality): no focus handling, wrong ARIA                                         | 2.1.1, 4.1.2 | Medium | #2280   |
 | W-9  | Joins, leaves, lobby arrivals and shortcut mutes aren't announced                                                             | 4.1.3      | Medium   | #2281   |
 | W-10 | Call status regions mount with their text, so they are often not announced                                                    | 4.1.3      | Medium   | #2281   |
@@ -98,6 +99,8 @@ unlabelled switches. axe found 0 violations on home and 4 rules failing in a cha
 | W-22 | Full reactor list only by mouse or long press                                                                                 | 2.1.1      | Low      | #2283   |
 | W-23 | Custom status emoji has only a `title`                                                                                        | 1.1.1      | Low      | #2283   |
 | W-24 | "Jump to latest" count: white on the dark theme's accent, 2.71:1 (axe)                                                         | 1.4.3      | High     | fixed: the accent's own text colour |
+| W-26 | "Browse channels" link in the sidebar 21 px tall (axe)                                                                        | 2.5.8      | Low      | fixed   |
+| W-27 | Send options chevron 22 px wide (axe)                                                                                         | 2.5.8      | Low      | #2284   |
 | W-25 | Activity list items contain focusable elements; code blocks in excerpts scroll but take no focus (axe)                        | 4.1.2, 2.1.1 | Low    | #2283   |
 
 ### Findings: Android

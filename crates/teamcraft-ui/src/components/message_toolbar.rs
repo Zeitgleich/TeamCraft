@@ -240,22 +240,26 @@ impl ToolbarHost {
     let Some(container) = self.container.try_get_untracked().flatten() else {
       return;
     };
-    request_animation_frame(move || {
-      let maybe_row = container
-        .query_selector(&format!("[data-msg-id=\"{id}\"]"))
-        .ok()
-        .flatten();
-      let maybe_target = match maybe_row {
-        Some(row) if !row.has_attribute("hidden") => Some(row),
-        Some(row) => neighbour_row(&row),
-        None => None,
-      };
-      let target: web_sys::Element = maybe_target.unwrap_or_else(|| container.into());
-      if let Some(element) = target.dyn_ref::<web_sys::HtmlElement>() {
-        // Nothing to do if it can't take the focus: it stays where the browser put it.
-        let _ = element.focus();
-      }
-    });
+    // After the menu is gone and the row hidden, also in a window in the background.
+    set_timeout(
+      move || {
+        let maybe_row = container
+          .query_selector(&format!("[data-msg-id=\"{id}\"]"))
+          .ok()
+          .flatten();
+        let maybe_target = match maybe_row {
+          Some(row) if !row.has_attribute("hidden") => Some(row),
+          Some(row) => neighbour_row(&row),
+          None => None,
+        };
+        let target: web_sys::Element = maybe_target.unwrap_or_else(|| container.into());
+        if let Some(element) = target.dyn_ref::<web_sys::HtmlElement>() {
+          // Nothing to do if it can't take the focus: it stays where the browser put it.
+          let _ = element.focus();
+        }
+      },
+      Duration::ZERO,
+    );
   }
 
   /// Whether the pointer or the keyboard focus is on the toolbar or on its message.
