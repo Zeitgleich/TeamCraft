@@ -22,6 +22,8 @@ const WAIT: Duration = Duration::from_secs(60);
 const ANIMATED_IMAGES: usize = 6;
 /// Text messages after them: enough to push them far out of view.
 const FILLER_MESSAGES: usize = 60;
+/// Time for the arriving messages' entry motion to end; the images' animations never would.
+const ARRIVAL_SETTLES: Duration = Duration::from_secs(5);
 /// How long the idle CPU is measured with every animation off screen.
 const IDLE_WINDOW: Duration = Duration::from_secs(10);
 /// Budget for the browser's processes together while idle (docs/performance.md, "Clients").
@@ -86,14 +88,19 @@ async fn animated_images_out_of_view_cost_nothing() {
 
       scroll_list(&page, "list.scrollHeight").await;
       wait_until(&page, "the images left the view", &moving_images_are("=== 0")).await;
-      assert_eq!(
-        count(
-          &page,
-          "document.getAnimations().filter(a => a.playState === 'running').length"
-        )
-        .await,
-        0
-      );
+      // The filler's arrival motion ends by itself; nothing may run on after it.
+      let deadline = tokio::time::Instant::now() + ARRIVAL_SETTLES;
+      loop {
+        let running = running_animations(&page).await;
+        if running.is_empty() {
+          break;
+        }
+        assert!(
+          tokio::time::Instant::now() < deadline,
+          "animations run out of view: {running:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+      }
       let cpu = idle_cpu(&profile).await;
       assert!(
         cpu <= MAX_IDLE_CPU_PERCENT,
@@ -195,6 +202,19 @@ async fn scroll_list(page: &Page, top: &str) {
     ))
     .await
     .unwrap();
+}
+
+/// What runs: each running animation's name and the classes of the element it moves.
+async fn running_animations(page: &Page) -> Vec<String> {
+  page
+    .evaluate(
+      "document.getAnimations().filter(a => a.playState === 'running')\
+        .map(a => `${a.animationName ?? a.id} on ${a.effect?.target?.className ?? '?'}`)",
+    )
+    .await
+    .unwrap()
+    .into_value()
+    .unwrap_or_default()
 }
 
 fn moving_images_are(comparison: &str) -> String {
