@@ -78,7 +78,7 @@ async fn one_picture_of_an_album_is_replied_to_and_forwarded_alone() {
   browser
     .screenshot_on_failure("single-image", |page| async move {
       prefer_mouse(&page).await;
-      sign_in_and_unlock(&page, "carol").await;
+      sign_in_and_unlock(&page, WEB_ORIGIN, "carol").await;
       let album_channel = shared_channel(alice_ref, space, carol, "album").await;
       let elsewhere = shared_channel(alice_ref, space, carol, "elsewhere").await;
       page

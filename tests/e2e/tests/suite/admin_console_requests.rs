@@ -88,7 +88,7 @@ async fn an_open_admin_console_stays_far_below_the_rate_limit_of_the_address() {
   let slot = report.clone();
   browser
     .screenshot_on_failure("admin-console-requests", |page| async move {
-      sign_in_and_unlock(&page, "alice").await;
+      sign_in_and_unlock(&page, WEB_ORIGIN, "alice").await;
       page.execute(NetworkEnableParams::default()).await.unwrap();
       let mut requests = page.event_listener::<EventRequestWillBeSent>().await.unwrap();
 

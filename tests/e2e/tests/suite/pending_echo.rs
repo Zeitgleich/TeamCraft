@@ -28,8 +28,8 @@ use crate::cached_start::{CLOCK_RUNS_ON, add_script, block_the_network, intercep
 use crate::perf::sign_in_and_unlock;
 use crate::web::{TEST_CSP, body_text, wait_for_element, wait_for_text};
 
-const PORT: u16 = 8083;
-const WEB_ORIGIN: &str = "http://127.0.0.1:8083";
+const PORT: u16 = 8087;
+const WEB_ORIGIN: &str = "http://127.0.0.1:8087";
 const CHANNEL: &str = "instant-echo";
 const OLDER: &str = "a message that is already here";
 /// The newest message once the sends of the measurement are done: the one that is reacted to.
@@ -109,7 +109,7 @@ async fn own_changes_show_at_once_and_survive_a_lost_network() {
     .screenshot_on_failure("pending-echo", |page| async move {
       // A machine with a touch screen would make Enter a newline (issue #444).
       prefer_mouse(&page).await;
-      sign_in_and_unlock(&page, "carol").await;
+      sign_in_and_unlock(&page, WEB_ORIGIN, "carol").await;
       // After the browser's device exists, so it gets its welcome without anybody's help.
       let channel = alice_ref.client.create_channel(space, CHANNEL).await.unwrap();
       alice_ref.client.add_member(channel, carol).await.unwrap();
