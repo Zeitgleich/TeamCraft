@@ -127,6 +127,8 @@ pub enum IconName {
   Grip,
   /// A dot in a ring in a dotted ring: a Live Photo or Motion Photo (#2181).
   Live,
+  /// A square with a peeled corner: stickers (#2132).
+  Sticker,
 }
 
 impl IconName {
@@ -267,6 +269,9 @@ impl IconName {
       Self::Undo => "M9 14 4 9l5-5 M4 9h10.5a5.5 5.5 0 0 1 0 11H11",
       Self::Redo => "M15 14l5-5-5-5 M20 9H9.5a5.5 5.5 0 0 0 0 11H13",
       Self::Poll => "M4 4v16 M8 7h9 M8 12h12 M8 17h5",
+      Self::Sticker => {
+        "M5 4h14a1 1 0 0 1 1 1v9l-6 6H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z M14 20v-5a1 1 0 0 1 1-1h5"
+      },
       Self::Grip => "M9 6h.01 M15 6h.01 M9 12h.01 M15 12h.01 M9 18h.01 M15 18h.01",
       Self::Live => {
         "M12 14.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z M12 18a6 6 0 1 0 0-12 6 6 0 0 0 0 12z M21.5 12h.01 M20.2 16.8h.01 M16.8 20.2h.01 M12 21.5h.01 M7.2 20.2h.01 M3.8 16.8h.01 M2.5 12h.01 M3.8 7.2h.01 M7.2 3.8h.01 M12 2.5h.01 M16.8 3.8h.01 M20.2 7.2h.01"

@@ -452,6 +452,20 @@ const LIMITS: &[FieldDef] = &[
     teamcraft_proto::MAX_CUSTOM_EMOJI_SIDE_PX_LIMIT as u64,
     PIXELS,
   ),
+  count("max_sticker_packs"),
+  count("max_stickers_per_pack"),
+  amount(
+    "max_sticker_bytes",
+    KIB,
+    teamcraft_proto::MAX_STICKER_BYTES_LIMIT,
+    KILOBYTES,
+  ),
+  amount(
+    "max_sticker_side_px",
+    1,
+    teamcraft_proto::MAX_STICKER_SIDE_PX_LIMIT as u64,
+    PIXELS,
+  ),
   ranged(
     "max_poll_options",
     1,

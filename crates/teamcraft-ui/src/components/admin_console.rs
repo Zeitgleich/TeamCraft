@@ -19,6 +19,7 @@ use crate::components::admin_permissions::PermissionsSection;
 use crate::components::admin_retention::RetentionSection;
 use crate::components::admin_security::SecuritySection;
 use crate::components::admin_settings::SettingsSection;
+use crate::components::admin_stickers::StickersSection;
 use crate::components::admin_updates::UpdatesPolicySection;
 use crate::components::admin_users::UsersSection;
 use crate::components::admin_webhooks::WebhooksSection;
@@ -78,6 +79,7 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
           AdminSection::Announcement => view! { <AnnouncementSection /> }.into_any(),
           AdminSection::Backgrounds => view! { <BackgroundsSection /> }.into_any(),
           AdminSection::Emoji => view! { <EmojiSection /> }.into_any(),
+          AdminSection::Stickers => view! { <StickersSection /> }.into_any(),
           AdminSection::Brands => view! { <BrandsSection /> }.into_any(),
           AdminSection::Mail => view! { <MailSection /> }.into_any(),
           AdminSection::Calendar => view! { <CalendarSection /> }.into_any(),
@@ -274,6 +276,7 @@ fn section_icon(section: AdminSection) -> IconName {
     AdminSection::Brands => IconName::Spotlight,
     AdminSection::Backgrounds => IconName::Image,
     AdminSection::Emoji => IconName::Smile,
+    AdminSection::Stickers => IconName::Sticker,
     AdminSection::Instance => IconName::Monitor,
     AdminSection::Settings => IconName::Sliders,
     AdminSection::Mail => IconName::Send,

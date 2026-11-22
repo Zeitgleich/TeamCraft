@@ -134,6 +134,7 @@ pub mod speaker_test;
 pub mod start_timing;
 pub mod startup;
 pub mod state;
+pub mod stickers;
 pub mod sync_reads;
 pub mod tab_handover;
 pub mod text_preview;

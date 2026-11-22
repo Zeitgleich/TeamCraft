@@ -104,6 +104,7 @@ pub use bug_reports::BugReportError;
 pub use devices::OwnDeviceCheck;
 #[cfg(feature = "ui")]
 pub(crate) use enroll::{WRAPPED_KEYS_KEY, decode_wrapped_keys};
+#[cfg(feature = "ui")]
 pub(crate) use stickers::sticker_message;
 /// Where the engine records its upload limit for the UI.
 pub const MAX_UPLOAD_KEY: &str = "max_upload_bytes";

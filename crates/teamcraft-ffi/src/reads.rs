@@ -1180,6 +1180,42 @@ impl Reads {
     Ok(self.backend()?.custom_emoji_picture(hash))
   }
 
+  pub(crate) fn sticker_packs(&self) -> Result<Vec<crate::stickers::StickerPackItem>, TeamCraftError> {
+    Ok(crate::stickers::items(&self.backend()?.sticker_packs()))
+  }
+
+  pub(crate) fn want_sticker_packs(&self) -> Result<(), TeamCraftError> {
+    self.backend()?.want_sticker_packs();
+    Ok(())
+  }
+
+  pub(crate) fn sticker_picture(&self, sha256: &str) -> Result<Option<Vec<u8>>, TeamCraftError> {
+    let Some(hash) = crate::custom_emoji::parse_hash(sha256) else {
+      return Ok(None);
+    };
+    Ok(self.backend()?.sticker_picture(hash))
+  }
+
+  pub(crate) fn send_sticker(
+    &self,
+    conversation_id: String,
+    maybe_thread_id: Option<String>,
+    pack: &str,
+    name: &str,
+    fallback: String,
+  ) -> Result<(), TeamCraftError> {
+    let conversation: ConversationId = parse_id(&conversation_id)?;
+    let maybe_thread: Option<ThreadId> = maybe_thread_id.as_deref().map(parse_id).transpose()?;
+    let backend = self.backend()?;
+    let sticker = crate::stickers::reference(&backend.sticker_packs(), pack, name)
+      .ok_or_else(|| TeamCraftError::InvalidInput("no such sticker".into()))?;
+    if fallback.trim().is_empty() {
+      return Err(TeamCraftError::InvalidInput("empty fallback".into()));
+    }
+    backend.post_sticker(conversation, maybe_thread, sticker, fallback);
+    Ok(())
+  }
+
   pub(crate) fn mark_read(&self, conversation_id: String) -> Result<(), TeamCraftError> {
     self.backend()?.mark_read(parse_id(&conversation_id)?);
     Ok(())

@@ -268,7 +268,8 @@ fn ToolbarBar(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
   let (conversation, id) = (active.message.conversation, active.message.id);
   let thread_root = active.message.maybe_thread.unwrap_or_else(|| thread_id_of(id));
   let (in_thread, is_mine) = (active.in_thread, active.is_mine);
-  let is_poll = active.message.maybe_poll.is_some();
+  // Polls and stickers aren't edited as text.
+  let is_poll = active.message.maybe_poll.is_some() || active.message.maybe_sticker.is_some();
   let extras = Memo::new(move |_| {
     state
       .read(|backend| backend.message_extras(conversation, &[id]))
@@ -639,7 +640,8 @@ fn ActionSheet(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
   }
   quick.truncate(QUICK_REACTION_COUNT + 2);
   let (is_mine, in_thread) = (active.is_mine, active.in_thread);
-  let is_poll = active.message.maybe_poll.is_some();
+  // Polls and stickers aren't edited as text.
+  let is_poll = active.message.maybe_poll.is_some() || active.message.maybe_sticker.is_some();
   let access = ChannelAccess::new(state, conversation);
   let permissions = Memo::new(move |_| access.message_permissions());
   // Reactions only where the user may react (`add_reaction`, which channels can take away).
