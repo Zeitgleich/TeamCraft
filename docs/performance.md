@@ -2988,11 +2988,14 @@ the chunks that load later. The limit:
 
 | Limit                                | Value        | Above it                         |
 |--------------------------------------|--------------|----------------------------------|
-| A guest in a meeting: gzip -9 total  | 7,340,000 B  | fails; warns from 95 % (6.97 MB) |
-| Signed-in first visit: gzip -9 total | 7,000,000 B  | fails; warns from 95 % (6.65 MB) |
+| A guest in a meeting: gzip -9 total  | 6,720,000 B  | fails; warns from 95 % (6.38 MB) |
+| Signed-in first visit: gzip -9 total | 5,950,000 B  | fails; warns from 95 % (5.65 MB) |
 | The call module: gzip -9             | 2,100,000 B  | fails                            |
 
-Both budgets are the sizes of #1699 below plus about 5 %, lowered on 2026-11-13 by what #1462 took
+Both budgets are the sizes after the rarely shown parts left the first visit (#1699, 2026-11-22,
+below) plus about 6 %: 6,342,543 and 5,614,660 B. 5 % would have put the warning (95 %) below
+today's sizes. Before, they were 7.34 and 7 MB (2026-11-20 and 2026-11-17, below). Earlier, both
+budgets were the sizes of #1699 below plus about 5 %, lowered on 2026-11-13 by what #1462 took
 out (what only a member's page asks for and the desktop app's chrome, below): 6.44 and 5.61 MB
 before; the signed-in one raised to 5.63 MB the same day (below). On 2026-11-14 the service worker's
 own `fetch` (#1909, below) lowered both by 30 kB, from 6.37 and 5.63 MB. They were set on 2026-11-11. From 2026-11-10 they
@@ -3019,6 +3022,61 @@ The call module's budget was 1,000,000 B (0.86 MB with the effects' compositors,
 without asking anybody for logs. On 2026-11-20 the module had reached 1.103 MB and failed every web
 pull request; the maintainer raised its budget by 1 MB to 2,100,000 B, and a guest's meeting, which
 includes it, by the same to 7,340,000 B (6,337,154 B then).
+
+#### Rarely shown parts out of the first visit (#1699, 2026-11-22)
+
+Ranked as for the first part of #1699 (below): the app's and the signed-in pack's function bodies
+from `.split-*/main.wasm` and the pack's files before wasm-opt, by the UI module or core type they
+belong to. What left the first visit, each behind a split point in `areas.rs`:
+
+- **The desktop app's small windows** (the incoming call's card, #650, and the call's controls,
+  #2077; about 35 kB of the app before wasm-opt): pages of their own the shell opens under a
+  label. `areas::mount_shell_window` mounts them from `desktop`, which a browser never loads and
+  the shell serves from the disk. Without the module the window stays on its loading screen; the
+  main window still has the call.
+- **The page's callbacks for the call module** (`web_calls::Callbacks`, with the readers of the
+  call snapshots and problem reports the module sends): built in `calls`
+  (`areas::call_callbacks`), which a call's screens load before the call starts and a guest's
+  meeting loads anyway. A member who never calls doesn't download them.
+- **"Export my data"'s JSON command** (`core_data_export`: the request's readers, the status's
+  writers; about 20 kB of the app): in `settings`, next to its card (`areas::data_export_command`).
+  A follower tab's request reaches the owner tab in JSON as before; the owner loads the module.
+- **From the signed-in pack**, each when it first shows: the notice before guests lose their
+  access (`notices`, only while a guest's access runs out soon; about 41 kB before wasm-opt), the
+  picture editor of the composer (`dialogs`), the voice message bar (`voice_note`; the recording
+  itself stays in the app's `VoiceRecorder`, so a held button records while the bar loads), the
+  list of what deleting a space takes with it (`workspace`), what to do about a store this
+  version can't read (`setup`) and a conversation's Files tab (`places`). A module that can't load
+  shows the area's retry in place of the part, as everywhere else.
+
+Release `trunk build` on Linux (trunk 0.22.0, Rust 1.99.1, the CI image), `main` 0b25aa8b with
+and without this change, gzip -9:
+
+| Download                                      | Before      | After       | Delta      |
+|-----------------------------------------------|-------------|-------------|------------|
+| A guest in a meeting (lobby, meeting, calls)  | 6,407,301 B | 6,342,543 B | −64,758 B  |
+| Signed-in first visit                         | 5,735,168 B | 5,614,660 B | −120,508 B |
+| The app (in both)                             | 2,922,870 B | 2,840,222 B | −82,648 B  |
+| Signed-in app (pack)                          | 2,301,269 B | 2,263,409 B | −37,860 B  |
+| `calls` (a guest's meeting, a call)           | 0.30 MB     | 0.34 MB     |            |
+
+The service worker (439,040 B), the texts (71,989 B) and the call module (1.14 MB) did not change.
+A guest's meeting gains less than the app loses, because the call module's callbacks moved into
+`calls`, which the meeting loads.
+
+Measured and left:
+
+- **The core's engine** (`Client` and the page core's dispatch, about 1.2 MB of the app before
+  wasm-opt) and the gateway's event readers (`GatewayEvent`, about 0.14 MB): a guest's meeting
+  runs them too.
+- **The page core's other JSON commands** (device approval, phone linking, organization
+  recovery, link requests): they reach the core through `RemoteChat`, not from one area, so no
+  module is the place to load them with.
+- **The share inbox** (about 19 kB of the app): it reads what another app shared at every start.
+- **Crash reporting** (about 0.12 MB of the app): reports are built and scrubbed when captured,
+  and a panic's capture can't wait for a module; only the sending could.
+- **The tab election's messages** (`web_tabs::TabMessage`, about 23 kB): the owner tab must
+  answer a second tab at once.
 
 #### The screen shares' meter in the call module (2026-11-15)
 
