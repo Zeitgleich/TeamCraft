@@ -25376,6 +25376,214 @@
           }
         }
       }
+    },
+    "meeting_invite_guests": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Invite guests"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gäste einladen"
+          }
+        }
+      }
+    },
+    "meeting_guest_link_make": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Make a one-time link"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Einmal-Link erstellen"
+          }
+        }
+      }
+    },
+    "meeting_guest_link_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "One-time link"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Einmal-Link"
+          }
+        }
+      }
+    },
+    "meeting_guest_link_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Personal link, works once. Send it to one guest."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Persönlicher Link, funktioniert einmal. Schicke ihn einem Gast."
+          }
+        }
+      }
+    },
+    "meeting_guest_link_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The one-time link couldn't be made. Try again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Einmal-Link konnte nicht erstellt werden. Versuche es erneut."
+          }
+        }
+      }
+    },
+    "meeting_organizer_code": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your code for guests"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dein Code für Gäste"
+          }
+        }
+      }
+    },
+    "meeting_organizer_code_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Guests see this code on their page and may compare it with you."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gäste sehen diesen Code auf ihrer Seite und können ihn mit dir vergleichen."
+          }
+        }
+      }
+    },
+    "meeting_new_link": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Make a new link"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Neuen Link erstellen"
+          }
+        }
+      }
+    },
+    "meeting_new_link_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The current link stops working at once. Invitees get the new one by e-mail."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der bisherige Link funktioniert sofort nicht mehr. Eingeladene bekommen den neuen per E-Mail."
+          }
+        }
+      }
+    },
+    "meeting_new_link_confirm_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Make a new meeting link?"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Neuen Meeting-Link erstellen?"
+          }
+        }
+      }
+    },
+    "meeting_new_link_confirm": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Make new link"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Neuen Link erstellen"
+          }
+        }
+      }
+    },
+    "meeting_new_link_keep": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keep current link"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Link behalten"
+          }
+        }
+      }
+    },
+    "meeting_link_renewed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New link made: the old one no longer works."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Neuer Link erstellt: Der alte funktioniert nicht mehr."
+          }
+        }
+      }
     }
   },
   "version": "1.0"

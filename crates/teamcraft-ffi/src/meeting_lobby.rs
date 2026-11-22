@@ -51,6 +51,8 @@ pub struct LobbyPerson {
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct MeetingLobby {
   pub meeting_id: String,
+  /// The meeting's chat: [`crate::TeamCraft::decide_lobby_entry`] takes it.
+  pub conversation_id: String,
   pub people: Vec<LobbyPerson>,
 }
 
@@ -197,7 +199,10 @@ impl Engine {
     )
   }
 
-  async fn lobby_of(&self, meeting: &MeetingResponse) -> Result<ListLobbyResponse, TeamCraftError> {
+  pub(crate) async fn lobby_of(
+    &self,
+    meeting: &MeetingResponse,
+  ) -> Result<ListLobbyResponse, TeamCraftError> {
     let path = format!("/meetings/{}/lobby", meeting.id);
     from_json(&self.api_request("GET", &path, None).await?)
   }
@@ -237,7 +242,7 @@ pub(crate) fn lobby_person(
 
 /// Whether the lobby of `meeting` is the user's to decide on, as the meeting list says: the
 /// organizer, a co-host, or a chat admin the server lets host it. The server answers for the rest.
-fn is_lobby_host(meeting: &MeetingResponse, me: UserId) -> bool {
+pub(crate) fn is_lobby_host(meeting: &MeetingResponse, me: UserId) -> bool {
   (role_of(meeting, me) != MeetingRole::Participant || meeting.can_host_lobby)
     && meeting.status == teamcraft_proto::MeetingStatus::Scheduled
 }

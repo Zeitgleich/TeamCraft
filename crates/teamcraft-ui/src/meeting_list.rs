@@ -5,14 +5,13 @@
 use std::collections::HashSet;
 
 use teamcraft_client_api::meeting_rows::past_meetings;
+pub use teamcraft_client_api::meeting_rows::{JOIN_LEAD_MS, is_joinable};
 use teamcraft_proto::{MeetingId, MeetingResponse, MeetingStatus, RecurrenceFrequency, RsvpStatus};
 
 use crate::clock::local_day;
 use crate::meetings::{is_over, my_rsvp};
 use crate::model::{TimestampMs, UserId};
 
-/// Join is the main action from this long before a meeting starts (dialling in early is normal).
-pub const JOIN_LEAD_MS: i64 = 15 * 60_000;
 /// A meeting this close to its start says "in 12 min" instead of its time.
 pub const SOON_MS: i64 = 60 * 60_000;
 /// Rows rendered at first, and added by each "Show more" (robustness.md, "Large data").
@@ -164,11 +163,6 @@ pub fn meeting_state(meeting: &MeetingResponse, now: TimestampMs) -> MeetingStat
     },
     _ => MeetingState::Later,
   }
-}
-
-/// Whether Join is the meeting's main action at `now`.
-pub fn is_joinable(meeting: &MeetingResponse, now: TimestampMs) -> bool {
-  !is_over(meeting, now) && meeting.starts_at.0 - JOIN_LEAD_MS <= now
 }
 
 /// The meeting for the "now / next" area: a running one (the latest started first), else the next
@@ -345,13 +339,6 @@ mod tests {
         meeting_state(&holiday, NOW),
         MeetingState::Cancelled { is_holiday: true }
       );
-    }
-
-    #[test]
-    fn join_leads_a_quarter_hour_early() {
-      let meeting = meeting(1, me(), NOW + JOIN_LEAD_MS);
-      assert!(is_joinable(&meeting, NOW));
-      assert!(!is_joinable(&meeting, NOW - 1));
     }
   }
 

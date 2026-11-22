@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Guests of a meeting on the meeting list (#1905): one-time links, a new meeting link, the
+     organizer's code, and the lobby on a meeting's row. -->
+<resources>
+  <string name="meeting_invite_guests">Invite guests</string>
+  <string name="meeting_guest_link_make">Make a one-time link</string>
+  <string name="meeting_guest_link_label">One-time link</string>
+  <string name="meeting_guest_link_hint">Personal link, works once. Send it to one guest.</string>
+  <string name="meeting_guest_link_failed">The one-time link couldn\'t be made. Try again.</string>
+  <string name="meeting_organizer_code">Your code for guests</string>
+  <string name="meeting_organizer_code_hint">Guests see this code on their page and may compare it with you.</string>
+  <string name="meeting_new_link">Make a new link</string>
+  <string name="meeting_new_link_hint">The current link stops working at once. Invitees get the new one by e-mail.</string>
+  <string name="meeting_new_link_confirm_title">Make a new meeting link?</string>
+  <string name="meeting_new_link_confirm">Make new link</string>
+  <string name="meeting_new_link_keep">Keep current link</string>
+  <string name="meeting_link_renewed">New link made: the old one no longer works.</string>
+  <string name="meeting_new_link_failed">The new link couldn\'t be made. Try again.</string>
+</resources>

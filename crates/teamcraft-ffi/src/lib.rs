@@ -31,6 +31,7 @@ mod join_requests;
 mod logging;
 mod markup;
 mod media_viewer;
+mod meeting_guests;
 mod meeting_hosts;
 mod meeting_lobby;
 mod meetings;
@@ -100,6 +101,7 @@ pub use media_viewer::{
   AlbumLayout, MediaScope, MediaViewer, MediaViewerItem, MediaViewerLimits, MediaViewerState,
   OriginalDownload, album_layout, fetches_original_automatically, media_viewer_limits,
 };
+pub use meeting_guests::{MeetingGuestLink, MeetingsWithLobbies};
 pub use meeting_hosts::{MeetingHostAction, MeetingHosts, MeetingPart};
 pub use meeting_lobby::{
   LobbyDecision, LobbyDecisionOutcome, LobbyLeftWaiting, LobbyPerson, LobbyPersonStatus, MeetingLobby,
@@ -1791,48 +1793,56 @@ impl TeamCraft {
   /// for a conversation of no meeting. A guest's row carries the code of their key once this
   /// device made it; until then read the lobby again shortly (the core pins the key on its queue).
   pub async fn meeting_lobby(&self, conversation_id: String) -> Result<Option<MeetingLobby>, TeamCraftError> {
-    use teamcraft_client_api::backend::ChatBackend as _;
     let Some(read) = self
       .call(move |engine| Box::pin(async move { engine.lobby_read(&conversation_id).await }))
       .await?
     else {
       return Ok(None);
     };
-    let mut people = Vec::with_capacity(read.entries.len());
-    for entry in &read.entries {
-      let guest = entry.user.id;
-      let membership = self
-        .read_queue()?
-        .query(move |reads| {
-          Ok(meeting_lobby::signed_membership(
-            reads.backend()?.is_signed_member(guest),
-          ))
-        })
-        .await?;
-      let is_ready_guest = matches!(
-        teamcraft_core::meeting_lobby::LobbyAdmission::of(entry, membership),
-        teamcraft_core::meeting_lobby::LobbyAdmission::Guest { .. }
-      );
-      let maybe_key_code = if is_ready_guest {
-        let maybe_code = self
-          .read_queue()?
-          .query(move |reads| Ok(reads.backend()?.guest_key_code(guest)))
-          .await?;
-        if maybe_code.is_none() {
-          self
-            .act_locally(move |reads| reads.apply_action(ChatAction::PrepareGuestKeyCode { guest }))
-            .await?;
-        }
-        maybe_code
-      } else {
-        None
-      };
-      people.push(meeting_lobby::lobby_person(entry, membership, maybe_key_code));
+    Ok(Some(self.lobby_of_read(read).await?))
+  }
+
+  /// The meeting list for the meetings screen (#1905): [`Self::meeting_upkeep`]'s JSON, and the
+  /// lobbies of the meetings on it the user hosts that can be joined now, where somebody waits,
+  /// as desktop shows them on the meeting's row. Read again on a knock (`lobby_join` changes the
+  /// meetings) and after a decision ([`Self::decide_lobby_entry`] with the meeting's chat).
+  pub async fn meetings_with_lobbies(&self) -> Result<MeetingsWithLobbies, TeamCraftError> {
+    let (meetings_json, reads) = self
+      .call(|engine| Box::pin(async move { engine.meetings_with_lobbies().await }))
+      .await?;
+    let mut lobbies = Vec::with_capacity(reads.len());
+    for read in reads {
+      lobbies.push(self.lobby_of_read(read).await?);
     }
-    Ok(Some(MeetingLobby {
-      meeting_id: read.meeting.id.to_string(),
-      people,
-    }))
+    Ok(MeetingsWithLobbies {
+      meetings_json,
+      lobbies,
+    })
+  }
+
+  /// "Invite guests" (#1905): a personal one-time link for somebody without an account to the
+  /// meeting `meeting_id`, which the user organizes or co-hosts, with the organizer's key
+  /// fingerprint as this device pinned it (e2ee.md §4.6). An error, and no link, without it.
+  pub async fn meeting_guest_link(&self, meeting_id: String) -> Result<MeetingGuestLink, TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.meeting_guest_link(&meeting_id).await }))
+      .await
+  }
+
+  /// "New meeting link" (#1905, its organizer only): the old link stops working and the server
+  /// sends the invitees the new one. The meeting list has the new link once read again.
+  pub async fn renew_meeting_link(&self, meeting_id: String) -> Result<(), TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.renew_meeting_link(&meeting_id).await }))
+      .await
+  }
+
+  /// The organizer's code of the meeting `meeting_id` (#1905): the code of the organizer's key as
+  /// this device pinned it, which a guest's page shows, for the two to compare.
+  pub async fn meeting_organizer_code(&self, meeting_id: String) -> Result<String, TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.meeting_organizer_code(&meeting_id).await }))
+      .await
   }
 
   /// A host admits or denies `user_id` waiting in the lobby of the meeting whose chat is

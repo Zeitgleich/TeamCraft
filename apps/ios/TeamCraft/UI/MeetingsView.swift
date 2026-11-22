@@ -1,6 +1,9 @@
 import SwiftUI
 import UIKit
 
+/// How often the list is read again while a waiting guest's key code is still being made.
+private let keyCodeReadLimit = 6
+
 /// The meetings screen's views, as desktop's (#956): what is still on, and what ended lately.
 enum MeetingsTab: Hashable {
   case upcoming, past
@@ -17,6 +20,10 @@ struct MeetingsView: View {
 
   @State private var tab = MeetingsTab.upcoming
   @State private var meetings: [Meeting]?
+  /// The lobbies of the live meetings the user hosts, by meeting (#1905).
+  @State private var lobbies: [String: MeetingLobby] = [:]
+  /// Reads while a ready guest's key code is still being made (the core makes it on its queue).
+  @State private var keyCodeReads = 0
   @State private var maybePast: [Meeting]?
   @State private var isRsvpFailed = false
   @State private var isFormOpen = false
@@ -38,13 +45,24 @@ struct MeetingsView: View {
       .padding(.bottom, 8)
       Group {
         switch tab {
-        case .upcoming: list(meetings, empty: "meetings_empty", refresh: { meetings = await model.meetings() })
+        case .upcoming: list(meetings, empty: "meetings_empty", refresh: { await readUpcoming() })
         case .past: list(maybePast, empty: "meetings_past_empty", refresh: { maybePast = await model.pastMeetings() })
         }
       }
       .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
-    .task(id: model.changeCount) { meetings = await model.meetings() }
+    // A knock (`lobby_join`) changes the meetings too, so the lobbies are read again with them.
+    .task(id: model.changeCount) {
+      keyCodeReads = 0
+      await readUpcoming()
+    }
+    .task(id: lobbies.values.contains(where: isWaitingForKeyCode) ? keyCodeReads : -1) {
+      guard lobbies.values.contains(where: isWaitingForKeyCode), keyCodeReads < keyCodeReadLimit else { return }
+      try? await Task.sleep(for: .seconds(1))
+      guard !Task.isCancelled else { return }
+      keyCodeReads += 1
+      await readUpcoming()
+    }
     // The past list is only read once it is looked at.
     .task(id: tab) { if tab == .past { maybePast = await model.pastMeetings() } }
     .alert("meetings_rsvp_failed", isPresented: $isRsvpFailed) {
@@ -58,7 +76,7 @@ struct MeetingsView: View {
     }
     .sheet(isPresented: $isFormOpen) {
       MeetingFormView(
-        account: account, maybeMeeting: nil, onSaved: { meetings = await model.meetings() },
+        account: account, maybeMeeting: nil, onSaved: { await readUpcoming() },
         onCreated: { maybeCreated = $0 })
     }
     .sheet(item: $maybeCreated) { saved in
@@ -80,7 +98,7 @@ struct MeetingsView: View {
         List(meetings, id: \.occurrenceKey) { meeting in
           // Joining starts the meeting's call as before; the tab stays where it is.
           MeetingRow(
-            account: account, meeting: meeting, onJoin: {},
+            account: account, meeting: meeting, maybeLobby: tab == .upcoming ? lobbies[meeting.id] : nil, onJoin: {},
             onChanged: refresh,
             onAnswer: { answer in await respond(to: meeting, with: answer) })
         }
@@ -129,16 +147,26 @@ struct MeetingsView: View {
         let meeting = try await model.startMeetingNow(requestKey: key)
         maybeNowKey = nil
         model.calls.startCall(conversationId: meeting.conversationId, displayName: meeting.title)
-        meetings = await model.meetings()
+        await readUpcoming()
       } catch {
         maybeFailure = AppFailure(CoreFailure(error))
       }
     }
   }
 
+  /// The upcoming list with the lobbies on it; offline both stay as they were.
+  private func readUpcoming() async {
+    guard let read = await model.meetingsWithLobbies() else {
+      if meetings == nil { meetings = [] }
+      return
+    }
+    meetings = read.meetings
+    lobbies = read.lobbies
+  }
+
   private func respond(to meeting: Meeting, with answer: RsvpAnswer) async {
     if await model.setRsvp(meetingId: meeting.id, answer: answer) {
-      meetings = await model.meetings()
+      await readUpcoming()
     } else {
       isRsvpFailed = true
     }
@@ -146,18 +174,22 @@ struct MeetingsView: View {
 }
 
 /// A meeting's title and time, with the buttons to join its call (while it is on) and to answer
-/// the invitation, and its menu: "Copy link", and for its organizer "Edit meeting", "Cancel
-/// meeting", "Restore" and "Remove from list", as the core's rules for the row say
-/// (`meetingRowActions`). `onChanged` runs once one of them went through.
+/// the invitation, and its menu: "Copy link", for its hosts "Invite guests", and for its organizer
+/// "Edit meeting", "Cancel meeting", "Restore" and "Remove from list", as the core's rules for the
+/// row say (`meetingRowActions`). `maybeLobby` is who waits to be let in, for its hosts (#1905).
+/// `onChanged` runs once one of them went through.
 struct MeetingRow: View {
   @Environment(AppModel.self) private var model
   let account: Account
   let meeting: Meeting
+  var maybeLobby: MeetingLobby?
   let onJoin: () -> Void
   let onChanged: () async -> Void
   let onAnswer: (RsvpAnswer) async -> Void
 
   @State private var isEditing = false
+  @State private var isInvitingGuests = false
+  @State private var isLobbyOpen = false
   @State private var isAskingToCancel = false
   @State private var isBusy = false
   @State private var maybeFailure: AppFailure?
@@ -192,11 +224,16 @@ struct MeetingRow: View {
             .accessibilityLabel(Text("meeting_rsvp"))
           }
         }
-        if actions.canCopyLink || actions.canChange || actions.canRestore || actions.canHide {
+        if actions.canCopyLink || actions.canChange || actions.canRestore || actions.canHide
+          || actions.canInviteGuests
+        {
           Spacer()
           Menu {
             if actions.canCopyLink {
               Button("meeting_copy_link", systemImage: "link") { run { try await copyLink() } }
+            }
+            if actions.canInviteGuests {
+              Button("meeting_invite_guests", systemImage: "person.badge.plus") { isInvitingGuests = true }
             }
             if actions.canChange {
               Button("meeting_edit", systemImage: "pencil") { isEditing = true }
@@ -221,8 +258,19 @@ struct MeetingRow: View {
         }
       }
       .buttonStyle(.borderless)
+      if let lobby = maybeLobby, !lobby.people.isEmpty {
+        lobbyRow(lobby)
+      }
     }
     .padding(.vertical, 4)
+    .sheet(isPresented: $isInvitingGuests) {
+      MeetingGuestsView(meeting: meeting, canRenewLink: actions.canRenewLink, onRenewed: onChanged)
+    }
+    .sheet(isPresented: $isLobbyOpen) {
+      if let lobby = maybeLobby {
+        CallLobbySheet(conversationId: lobby.conversationId, lobby: lobby, onDecided: onChanged)
+      }
+    }
     .sheet(isPresented: $isEditing) {
       MeetingFormView(account: account, maybeMeeting: meeting, onSaved: onChanged)
     }
@@ -249,12 +297,36 @@ struct MeetingRow: View {
     }
   }
 
+  /// "2 people are waiting to join", as the call shows it: a tap opens the lobby (Admit / Deny).
+  private func lobbyRow(_ lobby: MeetingLobby) -> some View {
+    Button {
+      isLobbyOpen = true
+    } label: {
+      HStack(spacing: 8) {
+        Label {
+          Text("call_lobby_banner \(lobby.people.count)")
+        } icon: {
+          Image(systemName: "person.badge.clock")
+        }
+        Spacer(minLength: 0)
+        Text("call_lobby_review").bold()
+      }
+      .font(.app(.subheadline))
+      .padding(10)
+      .background(Theme.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+    .buttonStyle(.plain)
+    .accessibilityElement(children: .combine)
+    .accessibilityAddTraits(.isButton)
+  }
+
   private var isOrganizer: Bool { meeting.organizerUserId == account.userId }
+  private var isCoHost: Bool { meeting.coHostUserIds?.contains(account.userId) == true }
   private var isCancelled: Bool { meeting.status == "cancelled" }
 
   private var rowActions: MeetingRowActions {
     meetingRowActions(
-      isOrganizer: isOrganizer, isCancelled: isCancelled,
+      isOrganizer: isOrganizer, isCoHost: isCoHost, isCancelled: isCancelled,
       isOccurrenceCancelled: meeting.isOccurrenceCancelled == true, isEnded: meeting.status == "ended",
       endsAtMs: meeting.endsAt, nowMs: Int64(Date().timeIntervalSince1970 * 1000))
   }

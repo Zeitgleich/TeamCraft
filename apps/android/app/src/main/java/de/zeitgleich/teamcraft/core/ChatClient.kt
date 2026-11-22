@@ -26,9 +26,13 @@ import uniffi.teamcraft_ffi.InvitationOutcome
 import uniffi.teamcraft_ffi.InviteOutcome
 import uniffi.teamcraft_ffi.InvitePeopleInput
 import uniffi.teamcraft_ffi.LeaveChoice
+import uniffi.teamcraft_ffi.LobbyDecision
+import uniffi.teamcraft_ffi.LobbyDecisionOutcome
 import uniffi.teamcraft_ffi.MeetingCancelScope
 import uniffi.teamcraft_ffi.MeetingEditForm
 import uniffi.teamcraft_ffi.MeetingForm
+import uniffi.teamcraft_ffi.MeetingGuestLink
+import uniffi.teamcraft_ffi.MeetingLobby
 import uniffi.teamcraft_ffi.MeetingSave
 import uniffi.teamcraft_ffi.SavedMeeting
 import uniffi.teamcraft_ffi.NewChannelInput
@@ -326,6 +330,28 @@ class ChatClient(
   suspend fun meetings(): List<Meeting> =
     WireJson.decodeFromString(MeetingList.serializer(), core().meetingUpkeep()).meetings
 
+  /**
+   * The meetings screen's read (#1905): [meetings] through the same upkeep, and the lobbies of the
+   * meetings the user hosts that can be joined now, where somebody waits. One list request for both.
+   */
+  suspend fun meetingsWithLobbies(): MeetingsRead {
+    val read = core().meetingsWithLobbies()
+    return MeetingsRead(WireJson.decodeFromString(MeetingList.serializer(), read.meetingsJson).meetings, read.lobbies)
+  }
+
+  /** "Invite guests": a one-time link with the organizer's key fingerprint as this device pinned it. */
+  suspend fun meetingGuestLink(meetingId: String): MeetingGuestLink = core().meetingGuestLink(meetingId)
+
+  /** "Make a new link" (organizer only): the current one stops working, invitees get the new one. */
+  suspend fun renewMeetingLink(meetingId: String) = core().renewMeetingLink(meetingId)
+
+  /** The organizer's code guests see on their page, as this device pinned the organizer's key. */
+  suspend fun meetingOrganizerCode(meetingId: String): String = core().meetingOrganizerCode(meetingId)
+
+  /** "Admit" or "Deny" in the lobby of the meeting whose chat is [conversationId]. */
+  suspend fun decideLobbyEntry(conversationId: String, userId: String, decision: LobbyDecision): LobbyDecisionOutcome =
+    core().decideLobbyEntry(conversationId, userId, decision)
+
   /** Schedules [form]; the core sets up the meeting chat's encryption with the members invited here. */
   suspend fun scheduleMeeting(form: MeetingForm, maybeSpaceId: String?): MeetingSave =
     core().scheduleMeeting(form, maybeSpaceId)
@@ -362,3 +388,6 @@ class ChatClient(
   /** Before joining a meeting's call: the organizer's device sets up a chat that has no group yet. */
   suspend fun prepareMeetingJoin(meetingId: String) = core().prepareMeetingJoin(meetingId)
 }
+
+/** The meetings screen's read: the list, and the lobbies of the live meetings the user hosts. */
+data class MeetingsRead(val meetings: List<Meeting>, val lobbies: List<MeetingLobby>)

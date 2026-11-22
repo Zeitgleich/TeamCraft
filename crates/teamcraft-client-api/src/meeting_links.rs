@@ -2,10 +2,18 @@
 //! organizer's key fingerprint in the fragment as the copying device has it pinned (`v=`), never
 //! the server's (e2ee.md §4.6). Desktop, web and the phone apps make it alike.
 
+use teamcraft_crypto::guest_link::code_of_fingerprint;
+
 /// The organizer's identity key fingerprint in a meeting link's fragment.
 pub const VERIFIER_FRAGMENT_KEY: &str = "v=";
 /// Its name in links of older apps.
 pub const LEGACY_ORGANIZER_FRAGMENT_KEY: &str = "o=";
+
+/// The organizer's code from a link fragment (`v=<fingerprint>`): what the guest's page shows,
+/// for the guest to compare with the code the organizer reads out.
+pub fn organizer_code(fragment: &str) -> String {
+  code_of_fingerprint(fragment.strip_prefix(VERIFIER_FRAGMENT_KEY).unwrap_or(fragment))
+}
 
 /// `link` with `fragment` (`v=<fingerprint>`) as its verifier, replacing any `v` the server put
 /// there: the copying device's pinned key wins over the server's word.
@@ -48,5 +56,15 @@ mod tests {
       with_verifier(&format!("{BASE}#invite=abc&v=22"), "v=11"),
       format!("{BASE}#invite=abc&v=11")
     );
+  }
+
+  #[test]
+  fn the_organizer_code_is_read_from_the_verifier() {
+    assert_eq!(
+      organizer_code("v=ABCDEF0123456789ffff"),
+      organizer_code("abcdef0123456789FFFF")
+    );
+    assert!(!organizer_code("v=abcdef0123456789").contains('v'));
+    assert_eq!(organizer_code("v=zz"), "");
   }
 }

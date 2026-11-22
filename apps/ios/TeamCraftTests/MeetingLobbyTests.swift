@@ -9,9 +9,9 @@ final class MeetingLobbyTests: XCTestCase {
   }
 
   func testTheLobbyIsReadAgainOnlyWhileAGuestsKeyCodeIsMissing() {
-    XCTAssertTrue(isWaitingForKeyCode(MeetingLobby(meetingId: "7", people: [person("2", .guest(maybeKeyCode: nil))])))
-    XCTAssertFalse(isWaitingForKeyCode(MeetingLobby(meetingId: "7", people: [person("3", .guest(maybeKeyCode: "1"))])))
+    XCTAssertTrue(isWaitingForKeyCode(MeetingLobby(meetingId: "7", conversationId: "9", people: [person("2", .guest(maybeKeyCode: nil))])))
+    XCTAssertFalse(isWaitingForKeyCode(MeetingLobby(meetingId: "7", conversationId: "9", people: [person("3", .guest(maybeKeyCode: "1"))])))
     XCTAssertFalse(
-      isWaitingForKeyCode(MeetingLobby(meetingId: "7", people: [person("1", .member), person("4", .guestDevicePending)])))
+      isWaitingForKeyCode(MeetingLobby(meetingId: "7", conversationId: "9", people: [person("1", .member), person("4", .guestDevicePending)])))
   }
 }

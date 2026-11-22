@@ -29,7 +29,9 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -44,17 +46,30 @@ import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
+import de.zeitgleich.teamcraft.calls.LobbyBanner
+import de.zeitgleich.teamcraft.calls.LobbyDeciding
+import de.zeitgleich.teamcraft.calls.LobbyDialog
+import de.zeitgleich.teamcraft.calls.isWaitingForKeyCode
 import de.zeitgleich.teamcraft.core.ChatClient
 import de.zeitgleich.teamcraft.core.Meeting
 import de.zeitgleich.teamcraft.ui.ActionAnswer
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.copyText
 import de.zeitgleich.teamcraft.ui.theme.Spacing
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import uniffi.teamcraft_ffi.LobbyDecision
+import uniffi.teamcraft_ffi.LobbyDecisionOutcome
+import uniffi.teamcraft_ffi.LobbyPerson
 import uniffi.teamcraft_ffi.MeetingCancelScope
+import uniffi.teamcraft_ffi.MeetingLobby
 import uniffi.teamcraft_ffi.SavedMeeting
 import uniffi.teamcraft_ffi.meetingRowActions
 import uniffi.teamcraft_ffi.newRequestKey
+
+/** Reads of the list while a ready guest's key code is still being made, and the wait between. */
+private const val KEY_CODE_READS = 6
+private const val KEY_CODE_READ_MILLIS = 1_000L
 
 /** The meetings screen's views, as desktop's (#956): what is still on, and what ended lately. */
 private enum class MeetingsView(@StringRes val label: Int) { UPCOMING(R.string.meetings_tab_upcoming), PAST(R.string.meetings_tab_past) }
@@ -67,7 +82,9 @@ private enum class MeetingsView(@StringRes val label: Int) { UPCOMING(R.string.m
 @Composable
 fun MeetingsScreen(viewModel: MainViewModel, onBack: () -> Unit) {
   var view by rememberSaveable { mutableStateOf(MeetingsView.UPCOMING) }
-  val read = rememberRead(viewModel) { meetings() }
+  val read = rememberRead(viewModel) { meetingsWithLobbies() }
+  // The lobbies of the live meetings the user hosts, by meeting (#1905); read again on a knock.
+  val lobbies = read.maybeValue?.lobbies.orEmpty().associateBy { it.meetingId }
   // The past list is only read once it is looked at.
   val past = rememberRead(viewModel, enabled = view == MeetingsView.PAST) { pastMeetings() }
   val scope = rememberCoroutineScope()
@@ -117,10 +134,10 @@ fun MeetingsScreen(viewModel: MainViewModel, onBack: () -> Unit) {
       }
       LazyColumn(Modifier.fillMaxSize(), contentPadding = padding.bottomOnly()) {
         if (view == MeetingsView.UPCOMING) {
-          placeholderItem(read.phase { upcomingMeetings(it) }, read.retry) { EmptyText(R.string.meetings_empty) }
+          placeholderItem(read.phase { upcomingMeetings(it.meetings) }, read.retry) { EmptyText(R.string.meetings_empty) }
           // A repeating meeting is listed once per occurrence, all with the series' ID.
-          items(upcomingMeetings(read.maybeValue.orEmpty()), key = { "${it.id}-${it.startsAt}" }) { meeting ->
-            MeetingRow(viewModel, meeting, onChanged = read.refresh)
+          items(upcomingMeetings(read.maybeValue?.meetings.orEmpty()), key = { "${it.id}-${it.startsAt}" }) { meeting ->
+            MeetingRow(viewModel, meeting, maybeLobby = lobbies[meeting.id], onChanged = read.refresh)
             HorizontalDivider()
           }
         } else {
@@ -152,17 +169,21 @@ fun upcomingMeetings(meetings: List<Meeting>, nowMs: Long = System.currentTimeMi
 
 /**
  * A meeting's title and time, with the button to join its call while it is on, and its menu: "Copy
- * link", and for its organizer "Edit meeting", "Cancel meeting", "Restore" and "Remove from list",
- * as the core's rules for the row say (`meetingRowActions`). [onChanged] runs once one went through.
+ * link", for its hosts "Invite guests", and for its organizer "Edit meeting", "Cancel meeting",
+ * "Restore" and "Remove from list", as the core's rules for the row say (`meetingRowActions`).
+ * [maybeLobby] is who waits to be let in, for its hosts (#1905). [onChanged] runs once one went
+ * through.
  */
 @Composable
-fun MeetingRow(viewModel: MainViewModel, meeting: Meeting, onChanged: () -> Unit = {}) {
+fun MeetingRow(viewModel: MainViewModel, meeting: Meeting, maybeLobby: MeetingLobby? = null, onChanged: () -> Unit = {}) {
   val context = LocalContext.current
   val scope = rememberCoroutineScope()
   val isOrganizer = meeting.organizerUserId.isNotEmpty() && meeting.organizerUserId == viewModel.maybeMyUserId
   val isCancelled = meeting.status == "cancelled"
+  val isCoHost = viewModel.maybeMyUserId?.let { it in meeting.coHostUserIds } ?: false
   val actions = meetingRowActions(
     isOrganizer = isOrganizer,
+    isCoHost = isCoHost,
     isCancelled = isCancelled,
     isOccurrenceCancelled = meeting.isOccurrenceCancelled,
     isEnded = meeting.status == "ended",
@@ -172,6 +193,7 @@ fun MeetingRow(viewModel: MainViewModel, meeting: Meeting, onChanged: () -> Unit
   val hasMenu = actions.canCopyLink || actions.canChange || actions.canRestore || actions.canHide
   var isMenuOpen by remember { mutableStateOf(false) }
   var isEditing by remember { mutableStateOf(false) }
+  var isInvitingGuests by remember { mutableStateOf(false) }
   var isCancelling by remember { mutableStateOf(false) }
   var isBusy by remember { mutableStateOf(false) }
   val act: (suspend ChatClient.() -> Unit) -> Unit = { action ->
@@ -186,77 +208,89 @@ fun MeetingRow(viewModel: MainViewModel, meeting: Meeting, onChanged: () -> Unit
       }
     }
   }
-  Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-    Column(Modifier.weight(1f)) {
-      Text(
-        meeting.title,
-        style = MaterialTheme.typography.titleMedium,
-        color = if (actions.canCopyLink) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
-      )
-      Text(
-        DateUtils.formatDateRange(
-          context,
-          meeting.startsAt,
-          meeting.endsAt,
-          DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_TIME,
-        ),
-        style = MaterialTheme.typography.bodySmall,
-      )
-      if (isCancelled) {
+  Column {
+    Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+      Column(Modifier.weight(1f)) {
         Text(
-          stringResource(if (meeting.isOccurrenceHoliday) R.string.meeting_holiday else R.string.meeting_cancelled),
-          style = MaterialTheme.typography.labelMedium,
-          color = MaterialTheme.colorScheme.error,
+          meeting.title,
+          style = MaterialTheme.typography.titleMedium,
+          color = if (actions.canCopyLink) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
         )
-      }
-    }
-    if (actions.canCopyLink) {
-      Button(onClick = { viewModel.joinMeeting(meeting) }) {
-        Text(stringResource(R.string.meeting_join))
-      }
-    }
-    if (hasMenu) {
-      IconButton(onClick = { isMenuOpen = true }, enabled = !isBusy) {
-        Icon(Icons.Filled.MoreVert, contentDescription = stringResource(R.string.meeting_actions))
-      }
-      DropdownMenu(expanded = isMenuOpen, onDismissRequest = { isMenuOpen = false }) {
-        if (actions.canCopyLink) {
-          DropdownMenuItem(text = { Text(stringResource(R.string.meeting_copy_link)) }, onClick = {
-            isMenuOpen = false
-            scope.launch { copyMeetingLink(viewModel, context, meeting.id) }
-          })
-        }
-        if (actions.canChange) {
-          DropdownMenuItem(text = { Text(stringResource(R.string.meeting_edit)) }, onClick = {
-            isMenuOpen = false
-            isEditing = true
-          })
-          DropdownMenuItem(text = { Text(stringResource(R.string.meeting_cancel)) }, onClick = {
-            isMenuOpen = false
-            isCancelling = true
-          })
-        }
-        if (actions.canRestore) {
-          DropdownMenuItem(
-            text = { Text(stringResource(if (meeting.isOccurrenceHoliday) R.string.meeting_restore_holiday else R.string.meeting_restore)) },
-            onClick = {
-              isMenuOpen = false
-              val maybeOccurrence = if (meeting.isOccurrenceCancelled) meeting.startsAt else null
-              act { restoreMeeting(meeting.id, maybeOccurrence) }
-            },
-          )
-        }
-        if (actions.canHide) {
-          DropdownMenuItem(
-            text = { Text(stringResource(R.string.meeting_remove), color = MaterialTheme.colorScheme.error) },
-            onClick = {
-              isMenuOpen = false
-              act { hideMeeting(meeting.id) }
-            },
+        Text(
+          DateUtils.formatDateRange(
+            context,
+            meeting.startsAt,
+            meeting.endsAt,
+            DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_TIME,
+          ),
+          style = MaterialTheme.typography.bodySmall,
+        )
+        if (isCancelled) {
+          Text(
+            stringResource(if (meeting.isOccurrenceHoliday) R.string.meeting_holiday else R.string.meeting_cancelled),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.error,
           )
         }
       }
+      if (actions.canCopyLink) {
+        Button(onClick = { viewModel.joinMeeting(meeting) }) {
+          Text(stringResource(R.string.meeting_join))
+        }
+      }
+      if (hasMenu) {
+        IconButton(onClick = { isMenuOpen = true }, enabled = !isBusy) {
+          Icon(Icons.Filled.MoreVert, contentDescription = stringResource(R.string.meeting_actions))
+        }
+        DropdownMenu(expanded = isMenuOpen, onDismissRequest = { isMenuOpen = false }) {
+          if (actions.canCopyLink) {
+            DropdownMenuItem(text = { Text(stringResource(R.string.meeting_copy_link)) }, onClick = {
+              isMenuOpen = false
+              scope.launch { copyMeetingLink(viewModel, context, meeting.id) }
+            })
+          }
+          if (actions.canInviteGuests) {
+            DropdownMenuItem(text = { Text(stringResource(R.string.meeting_invite_guests)) }, onClick = {
+              isMenuOpen = false
+              isInvitingGuests = true
+            })
+          }
+          if (actions.canChange) {
+            DropdownMenuItem(text = { Text(stringResource(R.string.meeting_edit)) }, onClick = {
+              isMenuOpen = false
+              isEditing = true
+            })
+            DropdownMenuItem(text = { Text(stringResource(R.string.meeting_cancel)) }, onClick = {
+              isMenuOpen = false
+              isCancelling = true
+            })
+          }
+          if (actions.canRestore) {
+            DropdownMenuItem(
+              text = { Text(stringResource(if (meeting.isOccurrenceHoliday) R.string.meeting_restore_holiday else R.string.meeting_restore)) },
+              onClick = {
+                isMenuOpen = false
+                val maybeOccurrence = if (meeting.isOccurrenceCancelled) meeting.startsAt else null
+                act { restoreMeeting(meeting.id, maybeOccurrence) }
+              },
+            )
+          }
+          if (actions.canHide) {
+            DropdownMenuItem(
+              text = { Text(stringResource(R.string.meeting_remove), color = MaterialTheme.colorScheme.error) },
+              onClick = {
+                isMenuOpen = false
+                act { hideMeeting(meeting.id) }
+              },
+            )
+          }
+        }
+      }
     }
+    maybeLobby?.let { lobby -> RowLobby(viewModel, lobby, onChanged) }
+  }
+  if (isInvitingGuests) {
+    MeetingGuestsSheet(viewModel, meeting, canRenewLink = actions.canRenewLink, onRenewed = onChanged, onDismiss = { isInvitingGuests = false })
   }
   if (isEditing) {
     MeetingFormSheet(viewModel, maybeMeeting = meeting, onSaved = {
@@ -269,6 +303,56 @@ fun MeetingRow(viewModel: MainViewModel, meeting: Meeting, onChanged: () -> Unit
       isCancelling = false
       if (wasCancelled) onChanged()
     })
+  }
+}
+
+/**
+ * Who waits to be let into a live meeting the user hosts, under its row (#1905), as desktop shows
+ * the lobby on the meeting's card: the same banner and "Admit" / "Deny" as in the call. The core
+ * decides and lets the person into the chat's encryption (e2ee.md §4.6); the list is read again
+ * after each decision.
+ */
+@Composable
+private fun RowLobby(viewModel: MainViewModel, lobby: MeetingLobby, onChanged: () -> Unit) {
+  val scope = rememberCoroutineScope()
+  var isOpen by remember { mutableStateOf(false) }
+  var deciding by remember { mutableStateOf<LobbyDeciding>(LobbyDeciding.Idle) }
+  val decide: (LobbyPerson, LobbyDecision) -> Unit = decide@{ person, decision ->
+    if (deciding is LobbyDeciding.Deciding) return@decide
+    deciding = LobbyDeciding.Deciding(person.userId)
+    scope.launch {
+      deciding = when (val answer = viewModel.tryMeetingAction { decideLobbyEntry(lobby.conversationId, person.userId, decision) }) {
+        is ActionAnswer.Answered ->
+          if (answer.value == LobbyDecisionOutcome.NO_LONGER_WAITING) {
+            LobbyDeciding.Failed(person.displayName, R.string.call_lobby_no_longer_waiting)
+          } else {
+            LobbyDeciding.Idle
+          }
+        is ActionAnswer.Failed -> LobbyDeciding.Failed(person.displayName, answer.text)
+      }
+      onChanged()
+    }
+  }
+  // The core makes a ready guest's key code on its own queue: a few reads later it is there.
+  var codeReads by remember(lobby.meetingId) { mutableIntStateOf(0) }
+  LaunchedEffect(lobby) {
+    if (isWaitingForKeyCode(lobby) && codeReads < KEY_CODE_READS) {
+      delay(KEY_CODE_READ_MILLIS)
+      codeReads += 1
+      onChanged()
+    }
+  }
+  Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp)) {
+    LobbyBanner(lobby, onOpen = { isOpen = true })
+  }
+  if (isOpen) {
+    LobbyDialog(
+      lobby = lobby,
+      deciding = deciding,
+      onDecide = decide,
+      onDismissFailure = { if (deciding is LobbyDeciding.Failed) deciding = LobbyDeciding.Idle },
+      onClose = { isOpen = false },
+    )
   }
 }
 

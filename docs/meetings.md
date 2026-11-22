@@ -361,6 +361,19 @@ holiday) and removes a cancelled meeting from the lists; the Past view lists the
 last 30 days that ended. Which row offers what, and what the Past view lists, is
 `teamcraft_client_api::meeting_rows`, shared with desktop.
 
+**Guests from the apps** (#1905). "Invite guests" in a row's menu, for the organizer and the
+co-hosts, makes a personal one-time link (`meeting_guest_link`: `POST /meetings/{id}/guest-links`
+with the organizer's fingerprint as this device pinned it, never the server's; pinned before the
+link is made, so the server holds no link the device can't hand out), shows the organizer's code a
+guest's page shows (`meeting_organizer_code`), and for the organizer only "Make a new link"
+(`renew_meeting_link`, after a confirmation: the current link stops working). The one-time link
+is copied as a secret (Android's sensitive clip cleared later, iOS a local-only pasteboard item
+that expires). On the meeting list, a live meeting the user hosts shows who waits in its lobby,
+with the call's "Admit" and "Deny": the apps read the list and these lobbies in one call
+(`meetings_with_lobbies`, one `GET /meetings` and a lobby read per live hosted meeting), again on
+every knock (`lobby_join` changes the meetings). Which rows offer it is `MeetingActions`
+(`can_invite_guests`, `can_renew_link`), which desktop's row menu uses too.
+
 **The lobby in the apps** (#1859). The organizer and the co-hosts (and a chat admin the server
 lets host it) see "Lobby" in the controls of the meeting's call with a count of who waits; nobody
 else sees it, and the server refuses everybody else's `GET /meetings/{id}/lobby`. Each row is a

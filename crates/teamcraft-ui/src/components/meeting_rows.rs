@@ -622,17 +622,15 @@ fn RowMenu(
   let is_open = RwSignal::new(false);
   let trigger = NodeRef::<html::Button>::new();
   let menu = NodeRef::<html::Div>::new();
-  let (id, conversation, starts_at, is_hosting, is_occurrence_cancelled, is_holiday) =
-    meeting.with_value(|meeting| {
-      (
-        meeting.id,
-        meeting.conversation_id,
-        meeting.starts_at.0,
-        is_hosted_by(meeting, me),
-        meeting.is_occurrence_cancelled,
-        meeting.is_occurrence_holiday,
-      )
-    });
+  let (id, conversation, starts_at, is_occurrence_cancelled, is_holiday) = meeting.with_value(|meeting| {
+    (
+      meeting.id,
+      meeting.conversation_id,
+      meeting.starts_at.0,
+      meeting.is_occurrence_cancelled,
+      meeting.is_occurrence_holiday,
+    )
+  });
   // The rules are the core's, shared with the phone apps (`meeting_rows::MeetingActions`).
   let actions = move || meeting.with_value(|meeting| MeetingActions::of(meeting, me, now.get()));
   let (restoring, hiding) = (PendingAction::new(), PendingAction::new());
@@ -709,7 +707,7 @@ fn RowMenu(
               <span class="menu-label">{move || i18n.t("meetings-copy-link")}</span>
             </button>
           })}
-          {move || (actions().can_copy_link && is_hosting).then(|| view! {
+          {move || actions().can_invite_guests.then(|| view! {
             <button type="button" class="menu-item" role="menuitem" on:click=invite_guests>
               <Icon name=IconName::UserPlus />
               <span class="menu-label">{move || i18n.t("meetings-invite-guests")}</span>
@@ -763,6 +761,7 @@ fn MeetingDetail(
   let is_hosting = is_hosted_by(&meeting, me);
   let is_over_now = is_over(&meeting, now.get_untracked());
   let is_live_host = is_hosting && is_joinable(&meeting, now.get_untracked());
+  let can_renew_link = MeetingActions::of(&meeting, me, now.get_untracked()).can_renew_link;
   let when = format!(
     "{}, {}",
     format_date(meeting.starts_at.0, locale),
@@ -808,7 +807,7 @@ fn MeetingDetail(
         </div>
       })}
       <Show when=move || shows_guest_links.get() && is_hosting && !is_over_now fallback=|| ()>
-        <GuestLinks meeting=id conversation=conversation />
+        <GuestLinks meeting=id conversation=conversation can_renew_link=can_renew_link />
       </Show>
       {is_live_host.then(|| view! { <HostControls meeting=id conversation=conversation /> })}
       <h3 class="meeting-detail-heading">{move || i18n.t_with("meetings-responses", &[("count", &responses.to_string())])}</h3>

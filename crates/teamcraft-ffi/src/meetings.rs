@@ -184,6 +184,10 @@ pub struct MeetingRowActions {
   pub can_restore: bool,
   /// "Remove" a cancelled meeting from the lists.
   pub can_hide: bool,
+  /// "Invite guests": a one-time guest link and the organizer's code, for organizer and co-hosts.
+  pub can_invite_guests: bool,
+  /// "New meeting link": its organizer only.
+  pub can_renew_link: bool,
 }
 
 /// A meeting the user organizes, as its edit form opens.
@@ -229,12 +233,13 @@ pub fn meeting_form_problems(
 }
 
 /// What the row of a meeting offers, from what the app's list has of it: `is_organizer` (the user
-/// organizes it), whether it or only this occurrence is cancelled, whether it ended or was cancelled
+/// organizes it), `is_co_host` (the list's co-hosts name the user), whether it or only this occurrence is cancelled, whether it ended or was cancelled
 /// (`status` other than scheduled, or `ends_at_ms` passed) and when it ends, at `now_ms` (the
 /// server's clock where the app has it).
 #[uniffi::export]
 pub fn meeting_row_actions(
   is_organizer: bool,
+  is_co_host: bool,
   is_cancelled: bool,
   is_occurrence_cancelled: bool,
   is_ended: bool,
@@ -244,6 +249,7 @@ pub fn meeting_row_actions(
   let actions = MeetingActions::from_facts(
     RowFacts {
       is_organizer,
+      is_co_host,
       is_cancelled,
       is_occurrence_cancelled,
       is_over: is_cancelled || is_ended || ends_at_ms <= now_ms,
@@ -256,6 +262,8 @@ pub fn meeting_row_actions(
     can_change: actions.can_change,
     can_restore: actions.can_restore,
     can_hide: actions.can_hide,
+    can_invite_guests: actions.can_invite_guests,
+    can_renew_link: actions.can_renew_link,
   }
 }
 
@@ -555,6 +563,13 @@ impl Engine {
   /// per meeting), and edits whose chat change is still owed are finished. Returns the list it read
   /// (`GET /meetings`, JSON), so the app shows what the upkeep worked on.
   pub(crate) async fn meeting_upkeep(&mut self) -> Result<String, TeamCraftError> {
+    Ok(self.meeting_upkeep_list().await?.0)
+  }
+
+  /// [`Self::meeting_upkeep`] with the list it read, parsed, for the lobbies read beside it.
+  pub(crate) async fn meeting_upkeep_list(
+    &mut self,
+  ) -> Result<(String, Vec<MeetingResponse>), TeamCraftError> {
     let me = self.backend()?.me().id;
     let now = SystemClock.now_ms();
     let path = format!("/meetings?from={}&limit={LIST_LIMIT}", now - LIST_LOOKBACK_MS);
@@ -593,28 +608,40 @@ impl Engine {
     if kept != edits {
       self.store_pending_edits(&kept)?;
     }
-    Ok(json)
+    Ok((json, list.meetings))
   }
 
   /// The meeting's link to hand out: the server's address with the organizer's key fingerprint as
   /// this device has it pinned (`v=`, e2ee.md §4.6), never the server's. Fails when this device
   /// can't pin the organizer's key: then no link is handed out (#987 review).
   pub(crate) async fn meeting_link(&mut self, meeting_id: &str) -> Result<String, TeamCraftError> {
+    let found = self.meeting(meeting_id).await?;
+    let fragment = self.verified_fragment(&found).await?;
+    Ok(with_verifier(&found.join_url, &fragment))
+  }
+
+  /// The meeting `meeting_id` as the server has it for the user (`404` for others).
+  pub(crate) async fn meeting(&self, meeting_id: &str) -> Result<MeetingResponse, TeamCraftError> {
     let meeting: MeetingId = parse_id(meeting_id)?;
-    let found: MeetingResponse = from_json(
+    from_json(
       &self
         .api_request("GET", &format!("/meetings/{meeting}"), None)
         .await?,
-    )?;
-    let conversation = found.conversation_id;
+    )
+  }
+
+  /// The link fragment with the organizer's key fingerprint as this device pins it (`v=`, e2ee.md
+  /// §4.6). Fails when this device can't pin the organizer's key: then no link is handed out.
+  pub(crate) async fn verified_fragment(
+    &mut self,
+    meeting: &MeetingResponse,
+  ) -> Result<String, TeamCraftError> {
+    let (id, conversation) = (meeting.id, meeting.conversation_id);
     self
-      .with_client(move |client| {
-        Box::pin(async move { client.prepare_guest_link(conversation, meeting).await })
-      })
+      .with_client(move |client| Box::pin(async move { client.prepare_guest_link(conversation, id).await }))
       .await?;
-    let fragment = guest_link_fragment(&self.store, meeting)
-      .ok_or_else(|| TeamCraftError::InvalidInput("this device could not verify the meeting link".into()))?;
-    Ok(with_verifier(&found.join_url, &fragment))
+    guest_link_fragment(&self.store, id)
+      .ok_or_else(|| TeamCraftError::InvalidInput("this device could not verify the meeting link".into()))
   }
 
   /// Takes a cancellation back: of the whole meeting, or with `maybe_occurrence_ms` of that
@@ -1007,11 +1034,14 @@ mod tests {
   #[test]
   fn row_actions_are_the_cores_rules() {
     let later = NOW + 60 * 60_000;
-    let organizer = meeting_row_actions(true, false, false, false, later, NOW);
+    let organizer = meeting_row_actions(true, false, false, false, false, later, NOW);
     assert!(organizer.can_copy_link && organizer.can_change && !organizer.can_restore);
-    let cancelled = meeting_row_actions(true, true, true, false, later, NOW);
+    assert!(organizer.can_invite_guests && organizer.can_renew_link);
+    let co_host = meeting_row_actions(false, true, false, false, false, later, NOW);
+    assert!(co_host.can_invite_guests && !co_host.can_renew_link && !co_host.can_change);
+    let cancelled = meeting_row_actions(true, false, true, true, false, later, NOW);
     assert!(!cancelled.can_change && cancelled.can_restore && !cancelled.can_hide);
-    let ended = meeting_row_actions(false, false, false, true, later, NOW);
+    let ended = meeting_row_actions(false, false, false, false, true, later, NOW);
     assert!(!ended.can_copy_link && !ended.can_change);
   }
 

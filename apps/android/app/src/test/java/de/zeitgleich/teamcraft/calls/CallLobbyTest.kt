@@ -12,7 +12,7 @@ class CallLobbyTest {
   private fun person(id: String, status: LobbyPersonStatus) =
     LobbyPerson(userId = id, displayName = "Person $id", status = status, canAdmit = false)
 
-  private fun lobby(vararg people: LobbyPerson) = MeetingLobby(meetingId = "7", people = people.toList())
+  private fun lobby(vararg people: LobbyPerson) = MeetingLobby(meetingId = "7", conversationId = "9", people = people.toList())
 
   @Test
   fun theLobbyIsReadAgainOnlyWhileAGuestsKeyCodeIsMissing() {

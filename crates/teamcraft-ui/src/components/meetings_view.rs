@@ -9,9 +9,9 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::meeting_hosts::co_hosts_from_dialog;
+use teamcraft_client_api::meeting_links::organizer_code;
 use teamcraft_client_api::meeting_schedule::{MeetingSchedule, MeetingTimes, ScheduleEdit, ScheduleNote};
 use teamcraft_core::meeting_lobby::{LobbyAdmission, SignedMembership};
-use teamcraft_crypto::guest_link::code_of_fingerprint;
 use teamcraft_proto::{
   CancelScope, IdempotencyKey, LobbyEntry, LobbyState, MeetingId, MeetingResponse, UnixMillis,
   UpdateMeetingRequest,
@@ -346,7 +346,13 @@ fn LinkField(link: String, field_id: String, label_key: &'static str) -> impl In
 /// code, which guests see on their page and may compare. The meeting link itself, which guests use
 /// too, is "Copy link". The one-time link stays in a field in case the browser refused the copy.
 #[component]
-pub(crate) fn GuestLinks(meeting: MeetingId, conversation: ConversationId) -> impl IntoView {
+pub(crate) fn GuestLinks(
+  meeting: MeetingId,
+  conversation: ConversationId,
+  /// "Make a new link": the organizer only (`MeetingActions::can_renew_link`); the server refuses
+  /// co-hosts.
+  can_renew_link: bool,
+) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let hub = expect_context::<MeetingsHub>();
@@ -357,7 +363,7 @@ pub(crate) fn GuestLinks(meeting: MeetingId, conversation: ConversationId) -> im
   let organizer_code = move || {
     hub
       .verified_links
-      .with(|links| links.get(&meeting).map(|fragment| fragment_code(fragment)))
+      .with(|links| links.get(&meeting).map(|fragment| organizer_code(fragment)))
   };
 
   let renew = move |_| {
@@ -402,12 +408,14 @@ pub(crate) fn GuestLinks(meeting: MeetingId, conversation: ConversationId) -> im
           <Icon name=IconName::Copy />
           <span>{move || i18n.t("meetings-guest-link")}</span>
         </PendingButton>
-        <PendingButton pending=renewing class="btn btn-quiet" on_click=renew>
-          <Icon name=IconName::Rotate />
-          <span>{move || i18n.t("meetings-new-link")}</span>
-        </PendingButton>
+        {can_renew_link.then(|| view! {
+          <PendingButton pending=renewing class="btn btn-quiet" on_click=renew>
+            <Icon name=IconName::Rotate />
+            <span>{move || i18n.t("meetings-new-link")}</span>
+          </PendingButton>
+        })}
       </div>
-      <p class="muted-text small">{move || i18n.t("meetings-new-link-hint")}</p>
+      {can_renew_link.then(|| view! { <p class="muted-text small">{move || i18n.t("meetings-new-link-hint")}</p> })}
       {move || organizer_code().map(|code| view! {
         <p class="muted-text small">
           {move || i18n.t("meetings-organizer-code")}
@@ -681,11 +689,6 @@ fn prepare_key_code(state: AppState, hub: MeetingsHub, guest: UserId) {
   });
 }
 
-/// The organizer's code from a link fragment (`v=<fingerprint>`): what the guest's page shows.
-fn fragment_code(fragment: &str) -> String {
-  code_of_fingerprint(fragment.strip_prefix("v=").unwrap_or(fragment))
-}
-
 /// Copies a link that had to be fetched first and says so. The click that asked for it may be too
 /// long ago for the browser to allow the write; the link is then in its field to copy by hand.
 async fn copy_fetched(state: AppState, i18n: I18n, link: String) {
@@ -733,7 +736,8 @@ pub fn MeetingCreatedDialog() -> impl IntoView {
         <LinkField link=meeting.join_url.clone() field_id="meeting-created-link".to_owned() label_key="meetings-link" />
         <p class="muted-text small">{move || i18n.t("meetings-link-hint")}</p>
         <h4 class="meeting-created-guests">{move || i18n.t("meetings-invite-guests")}</h4>
-        <GuestLinks meeting=meeting.id conversation=conversation />
+        // The one who scheduled it organizes it, so may make the link anew.
+        <GuestLinks meeting=meeting.id conversation=conversation can_renew_link=true />
       </div>
       <footer class="modal-foot">
         <span class="grow"></span>
