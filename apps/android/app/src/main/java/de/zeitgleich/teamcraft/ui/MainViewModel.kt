@@ -97,6 +97,7 @@ import de.zeitgleich.teamcraft.server.transportErrorText
 import uniffi.teamcraft_ffi.AccountState
 import uniffi.teamcraft_ffi.AddPeopleOutcome
 import uniffi.teamcraft_ffi.ChannelAnchorMarksItem
+import uniffi.teamcraft_ffi.CanvasPageItem
 import uniffi.teamcraft_ffi.ChannelMembersInfo
 import uniffi.teamcraft_ffi.ChannelRolesReviewItem
 import uniffi.teamcraft_ffi.CheckedServer
@@ -973,6 +974,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   /** A channel's members section (#1262); `null` when the core can't answer. */
   suspend fun channelMembers(conversationId: String): ChannelMembersInfo? = readChat { channelMembers(conversationId) }
+
+  /** A page of the channel's notes (#1456); `null` when the core can't answer. */
+  suspend fun canvasPage(conversationId: String, maybePageId: String?): CanvasPageItem? = readChat { canvasPage(conversationId, maybePageId) }
 
   /** The members section opened: the members and signed roles are read afresh, as on desktop and web. */
   fun refreshChannelMembers(conversationId: String) = viewModelScope.launch {

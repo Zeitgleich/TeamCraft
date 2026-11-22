@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A channel's shared notes, read-only on the phone (#1456, e2ee.md §4.11). -->
+<resources>
+  <string name="channel_notes_title">Notizen</string>
+  <string name="channel_notes_pages">Seiten</string>
+  <string name="channel_notes_page_untitled">Ohne Titel</string>
+  <string name="channel_notes_read_only_phone">Alle im Kanal teilen diese Notizen; sie sind Ende-zu-Ende-verschlüsselt wie seine Nachrichten. Auf dem Handy kannst du sie lesen; bearbeiten kannst du sie in der Desktop-App oder im Web.</string>
+  <string name="channel_notes_empty_title">Noch keine Notizen</string>
+  <string name="channel_notes_empty">Mitglieder, die hier schreiben dürfen, können in der Desktop-App oder im Web Notizen für den ganzen Kanal anlegen.</string>
+  <string name="channel_notes_loading_history">Frühere Änderungen werden geladen …</string>
+  <string name="channel_notes_history_failed">Einige frühere Änderungen konnten noch nicht geladen werden.</string>
+  <string name="channel_notes_incomplete">Einige Änderungen an diesen Notizen sind noch nicht auf diesem Gerät.</string>
+  <string name="channel_notes_unreadable">Diese Notizen können auf diesem Gerät nicht angezeigt werden. Aktualisiere TeamCraft oder öffne sie in der Desktop-App oder im Web.</string>
+  <string name="channel_notes_file_missing">Nicht auf diesem Gerät: Die Nachricht mit dieser Datei fehlt oder wurde gelöscht.</string>
+  <string name="channel_notes_file_open">Zum Öffnen tippen</string>
+  <string name="channel_notes_file_download">Zum Herunterladen tippen</string>
+  <string name="channel_notes_file_downloading">Wird heruntergeladen …</string>
+  <string name="channel_notes_checked">Erledigt</string>
+  <string name="channel_notes_unchecked">Nicht erledigt</string>
+</resources>

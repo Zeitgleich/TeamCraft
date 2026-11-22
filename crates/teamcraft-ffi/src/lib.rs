@@ -13,6 +13,7 @@ mod app_link;
 mod blocking;
 mod bridge;
 mod calls;
+mod canvas;
 mod channel_anchor;
 mod channel_roles;
 mod color_theme;

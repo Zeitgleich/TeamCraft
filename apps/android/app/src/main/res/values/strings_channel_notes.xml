@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A channel's shared notes, read-only on the phone (#1456, e2ee.md §4.11). -->
+<resources>
+  <string name="channel_notes_title">Notes</string>
+  <string name="channel_notes_pages">Pages</string>
+  <string name="channel_notes_page_untitled">Untitled</string>
+  <string name="channel_notes_read_only_phone">Everyone in the channel shares these notes; they are end-to-end encrypted like its messages. On the phone you can read them; edit them on the desktop app or the web.</string>
+  <string name="channel_notes_empty_title">No notes yet</string>
+  <string name="channel_notes_empty">Members who may post here can write notes for the whole channel on the desktop app or the web.</string>
+  <string name="channel_notes_loading_history">Loading earlier changes…</string>
+  <string name="channel_notes_history_failed">Some earlier changes could not be loaded yet.</string>
+  <string name="channel_notes_incomplete">Some changes to these notes aren\'t on this device yet.</string>
+  <string name="channel_notes_unreadable">These notes can\'t be shown on this device. Update TeamCraft, or open them on the desktop app or the web.</string>
+  <string name="channel_notes_file_missing">Not on this device: the message with this file is missing or was deleted.</string>
+  <string name="channel_notes_file_open">Tap to open</string>
+  <string name="channel_notes_file_download">Tap to download</string>
+  <string name="channel_notes_file_downloading">Downloading…</string>
+  <string name="channel_notes_checked">Done</string>
+  <string name="channel_notes_unchecked">Not done</string>
+</resources>
