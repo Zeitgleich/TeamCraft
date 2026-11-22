@@ -10,9 +10,9 @@ use teamcraft_crypto::message::{
   EncryptedMessage, MessageContext, MessageError, decrypt_message, decrypt_unsigned_message, encrypt_message,
 };
 use teamcraft_proto::{
-  Base64Bytes, ClientMessageId, ConversationId, Id, ListConversationMembersResponse, ListMessagesQuery,
-  ListMessagesResponse, MessageId, MessageResponse, SendMessageRequest, Snowflake, ThreadId, UserId,
-  addresses_everyone,
+  Base64Bytes, CanvasPageId, ClientMessageId, ConversationId, Id, ListConversationMembersResponse,
+  ListMessagesQuery, ListMessagesResponse, MessageId, MessageResponse, SendMessageRequest, Snowflake,
+  ThreadId, UserId, addresses_everyone,
 };
 use zeroize::Zeroizing;
 
@@ -82,6 +82,34 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       meta: Default::default(),
     };
     let id = self.enqueue(conversation, maybe_thread, content)?;
+    self.flush_outbox().await?;
+    Ok(id)
+  }
+
+  /// Sends an edit of a channel's shared notes page (e2ee.md §4.11): a Yjs update of the first page
+  /// (`None`) or a further one, kept in this device's page at once. For headless clients (the
+  /// end-to-end harness); the apps go through the UI backend's `edit_canvas`, which also checks
+  /// the right to post.
+  pub async fn send_canvas_update(
+    &mut self,
+    conversation: ConversationId,
+    maybe_page: Option<CanvasPageId>,
+    update: Vec<u8>,
+    is_snapshot: bool,
+  ) -> Result<ClientMessageId, CoreError> {
+    let content = MessageContent::Canvas {
+      update: Base64Bytes::new(update),
+      is_snapshot,
+      maybe_page,
+    };
+    let id = self.enqueue(conversation, None, content.clone())?;
+    apply_control(
+      &self.store,
+      conversation,
+      self.account.user_id,
+      &content,
+      self.now_ms(),
+    )?;
     self.flush_outbox().await?;
     Ok(id)
   }
