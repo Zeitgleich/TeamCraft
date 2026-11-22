@@ -1284,13 +1284,17 @@ the same socket: the same address twice is an *easy* NAT (or none), two differen
 NAT. The offer says which (`nat`) and carries a random probe token (`probe_token`). When exactly
 one of the two devices is behind a hard NAT, neither has a mapped port, and the easy side has an
 IPv4 reflexive address, they probe as Tailscale's "How NAT traversal works" describes (birthday
-paradox): the hard side opens 256 extra sockets, each sending two small punches (12 bytes, a
-second apart) to the easy side's reflexive address, so its NAT maps 256 ports toward the easy
-side; the easy side sends probes with the hard side's token from its direct path socket to random
+paradox): the hard side opens 256 extra sockets, each sending small punches (12 bytes) to the easy
+side's reflexive address, so its NAT maps 256 ports toward the easy side; the easy side sends probes with the hard side's token from its direct path socket to random
 ports of the hard side's address, 200 a second, at most 2048 per round (≈ 99.97 % to hit one of
 the 256). The first probe that arrives tells the hard side which socket its NAT opened toward the
 easy side: its QUIC endpoint moves to that socket and dials the probe's source, which the easy
-side's own probes opened. A connection stops the round; a round without a hit ends after 12 s and
+side's own probes opened. The punches go at the start and a second later with a TTL of 3, enough
+for the own NAT and a carrier NAT behind it but not to reach the easy side's NAT: a punch that
+arrived there first would hold the port pair, and a Linux NAT without a firewall in front (many
+routers run Linux) then sends the easy side's probe to that very port from another port, which the
+hard NAT drops, and keeps that other port for every later probe. A third punch at 4 s goes with the
+system's TTL, for hard NATs further away (company networks). A connection stops the round; a round without a hit ends after 12 s and
 the next waits 30 s, doubling up to 5 minutes (only the device's own network change starts one
 earlier, never the other device's offers). Two hard NATs, a device that can't tell its NAT, or an
 SFU without the second port: the call stays on the SFU.
@@ -1312,8 +1316,10 @@ time. A QUIC Initial going out is also what opens the own NAT for the answer, so
 packets get through first opens the path for both; NATs with endpoint-dependent mapping ("hard"
 NATs) don't let either through, which is what birthday probing is for (above). Each side checks the other's certificate against the hash in its offer
 (mutual pinning), so a path to anybody who didn't send the offer is refused. When both directions
-connect, the connection the device with the lower device ID accepted wins; the other is closed. The
-dialing ends after 5 s without a connection, and starts again after a network change or a new offer,
+connect, the connection the device with the lower device ID accepted wins; the other is closed (the
+device whose accepted connection would lose keeps dialing after it, so both end on the same one).
+A round starts over when the other device's offer brings new addresses (its reflexive address
+usually comes a moment after its first offer). The dialing ends after 5 s without a connection, and starts again after a network change or a new offer,
 with a backoff (2 s, doubling, up to 60 s) after paths that failed.
 
 **Switching paths.** The direct path proves itself before it takes media: pings every 200 ms on

@@ -40,6 +40,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "port_mapping_answers"
+path = "fuzz_targets/port_mapping_answers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "call_fallback_frame"
 path = "fuzz_targets/call_fallback_frame.rs"
 test = false

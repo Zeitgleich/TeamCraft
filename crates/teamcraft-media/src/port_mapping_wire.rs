@@ -133,7 +133,7 @@ pub fn read_pcp_map(
   internal_port: u16,
   nonce: &[u8; PCP_NONCE_BYTES],
 ) -> Result<GrantedMapping, MappingAnswerError> {
-  if answer.len() < PCP_MAP_LEN || answer.len() > MAX_ANSWER_BYTES || answer.len() % 4 != 0 {
+  if answer.len() < PCP_MAP_LEN || answer.len() > MAX_ANSWER_BYTES || !answer.len().is_multiple_of(4) {
     return Err(MappingAnswerError::Length(answer.len()));
   }
   if answer[0] != PCP_VERSION {

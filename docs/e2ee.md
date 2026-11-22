@@ -7256,8 +7256,9 @@ address (ARCHITECTURE.md §6.7, "Hard NATs"), bounded per round to 2048 probes o
 82 KB with the IP and UDP headers, over 10 s, 200 a second) and to one round, then 30 s, doubling to
 5 minutes, between rounds; the other device's offers don't shorten the wait, so a hostile peer gets
 at most about 82 KB every 5 minutes once it settles, all of it to one address. Claim an easy NAT
-while this device is behind a hard one: this device's 256 birthday sockets each send 2 punches of
-12 bytes to the claimed address, about 21 KB per round, under the same backoff. A probe carries no
+while this device is behind a hard one: this device's 256 birthday sockets each send 3 punches of
+12 bytes to the claimed address (two of them with a TTL of 3, which die a few hops away), about
+31 KB per round, under the same backoff. A probe carries no
 key: its token (8 random bytes per socket, sealed in the offer) only tells the hard side that a
 probe is this call's, and the handshake that follows is pinned like every direct connection.
 
