@@ -87,6 +87,11 @@ final class NotificationService: UNNotificationServiceExtension {
       await DeliveredNotifications.removeEarlier(of: notification)
       let (content, maybeIntent) = builder.message(
         for: notification, presentation: presentation, base: original, maybeSenderPicture: decrypted.maybeSenderPicture)
+      // A photo or video shows its picture next to the caption or "Photo" (the core sends it only
+      // where the text shows).
+      if let picture = notification.maybePicture, let attachment = NotificationPictureAttachment.make(from: picture) {
+        content.attachments = [attachment]
+      }
       return await builder.communicationStyled(
         content, intent: maybeIntent, presentation: presentation, flags: flags)
     case .callKit:

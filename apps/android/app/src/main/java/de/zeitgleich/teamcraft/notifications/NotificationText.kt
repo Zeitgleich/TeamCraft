@@ -24,7 +24,7 @@ data class NotificationText(
     val newMessagesFrom: (Int, String) -> String,
     /** "3 new messages" (count), when no name may show. */
     val newMessages: (Int) -> String,
-    /** "Photo", "notes.pdf", … by kind and file name. */
+    /** "Photo", "notes.pdf", … by kind and file name ("File" for a file without a name). */
     val attachment: (NotificationAttachmentKind, String) -> String,
   )
 
@@ -42,8 +42,9 @@ data class NotificationText(
       val sender = maybeSenderName?.takeIf { it.isNotBlank() } ?: maybeConversationName ?: labels.appName
       val text = when {
         !maybeText.isNullOrBlank() -> maybeText
-        !maybeFileName.isNullOrBlank() ->
-          labels.attachment(maybeAttachmentKind ?: NotificationAttachmentKind.FILE, maybeFileName)
+        // By its kind: a picture sent without a file name is a "Photo" too, never "New message".
+        maybeAttachmentKind != null -> labels.attachment(maybeAttachmentKind, maybeFileName.orEmpty())
+        !maybeFileName.isNullOrBlank() -> labels.attachment(NotificationAttachmentKind.FILE, maybeFileName)
         isAddedYou -> labels.addedYou
         else -> labels.newMessage
       }

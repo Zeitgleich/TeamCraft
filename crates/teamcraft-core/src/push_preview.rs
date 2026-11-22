@@ -33,6 +33,12 @@ pub use shown::{ShownContent, ShownFile, ShownMessage};
 /// The account record holding this device's push key, which opens its wake-ups.
 pub const PUSH_KEY_RECORD: &str = "push_key";
 const PUSH_SESSION_RECORD: &str = "push_session";
+/// Largest picture preview a notification shows: senders make them at most 96 KiB
+/// ([`crate::thumbnail`]); this leaves room for other clients without letting a hostile one
+/// hand the notification extension megabytes.
+pub const MAX_PICTURE_BYTES: usize = 256 * 1024;
+const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+const JPEG_SIGNATURE: &[u8] = &[0xFF, 0xD8, 0xFF];
 const DEVICE_PUSH_CONTENT_RECORD: &str = "device_push_content";
 /// Longest text shown in a notification; the rest is cut at a character boundary.
 pub const MAX_PREVIEW_CHARS: usize = 240;
@@ -71,6 +77,9 @@ pub struct PushPreview {
   /// and wherever the conversation's name doesn't show: pictures follow the names.
   pub maybe_channel_image_version: Option<String>,
   pub content: PreviewContent,
+  /// The sender's small preview of the message's photo or video, which the notification shows
+  /// with the text. It is content: the limits drop it with the text.
+  pub maybe_picture: Option<PreviewPicture>,
   /// A DM or group DM: the sender's name is the title, no "sender:" prefix needed.
   pub is_direct: bool,
   /// The sender sent it silently: show it without sound or vibration.
@@ -130,6 +139,27 @@ pub enum AttachmentKind {
   Other,
 }
 
+/// The sender's small preview of a message's photo or video (the attachment's thumbnail), as a
+/// notification shows it. It comes from the sender: only a PNG or JPEG of at most
+/// [`MAX_PICTURE_BYTES`] gets here, and the apps decode it once more before the system shows it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PreviewPicture {
+  pub kind: AttachmentKind,
+  /// `image/png` or `image/jpeg`, from the bytes themselves.
+  pub media_type: &'static str,
+  pub bytes: Vec<u8>,
+}
+
+impl std::fmt::Debug for PreviewPicture {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("PreviewPicture")
+      .field("kind", &self.kind)
+      .field("media_type", &self.media_type)
+      .field("bytes", &self.bytes.len())
+      .finish()
+  }
+}
+
 /// Lets a notification process fetch messages while the app is closed: the server and a recent
 /// access token. Stored in the (encrypted) local store; the app refreshes it when it refreshes its
 /// token.
@@ -187,7 +217,7 @@ pub async fn push_preview<A: PreviewApi>(
     None => None,
   };
   // Only messages have content to fetch; a withdrawal names the newest message read, not one to show.
-  let (content, is_silent, is_conversation_verified, maybe_source) =
+  let (content, is_silent, is_conversation_verified, maybe_source, maybe_picture) =
     match (&wake_up.kind, wake_up.maybe_message_id) {
       (PushKind::Message | PushKind::Mention, Some(message_id)) => {
         preview_content(store, maybe_api, &wake_up, message_id).await
@@ -209,8 +239,9 @@ pub async fn push_preview<A: PreviewApi>(
           .as_ref()
           .is_some_and(|conversation| conversation.maybe_my_membership.is_some()),
         None,
+        None,
       ),
-      _ => (Ok(PreviewContent::Unavailable), false, false, None),
+      _ => (Ok(PreviewContent::Unavailable), false, false, None, None),
     };
   let is_sender_source = maybe_source.is_some();
   let maybe_sender_source_picture = maybe_source
@@ -232,6 +263,7 @@ pub async fn push_preview<A: PreviewApi>(
     maybe_sender_source_picture,
     maybe_channel_image_version,
     content,
+    maybe_picture,
     is_direct,
     is_silent,
     is_conversation_verified,
@@ -322,9 +354,13 @@ impl PushPreview {
   pub fn limited_by(mut self, mode: &PushContentMode, gap: PreviewGap) -> Self {
     match mode {
       PushContentMode::Full => return self,
-      PushContentMode::Sender => self.content = PreviewContent::Unavailable,
+      PushContentMode::Sender => {
+        self.content = PreviewContent::Unavailable;
+        self.maybe_picture = None;
+      },
       PushContentMode::Generic | PushContentMode::Unknown(_) => {
         self.content = PreviewContent::Unavailable;
+        self.maybe_picture = None;
         self.maybe_conversation_name = None;
         self.maybe_sender_name = None;
         // Pictures follow the names.
@@ -395,6 +431,17 @@ impl std::fmt::Debug for PushSession {
   }
 }
 
+/// What a message gives its notification: the content or why there is none, whether it was sent
+/// silently, whether it is known to belong to the wake-up's conversation, the integration source
+/// that posted it and the preview of its picture.
+type ReadPreview = (
+  Result<PreviewContent, PreviewGap>,
+  bool,
+  bool,
+  Option<ShownSource>,
+  Option<PreviewPicture>,
+);
+
 /// From the store if the app already has the message, else fetched and decrypted; failures only
 /// cost the preview (and name why). Also whether the sender sent it silently, and whether the
 /// message is known to belong to the wake-up's conversation.
@@ -403,12 +450,7 @@ async fn preview_content<A: PreviewApi>(
   maybe_api: Option<&A>,
   wake_up: &PushWakeUp,
   message_id: MessageId,
-) -> (
-  Result<PreviewContent, PreviewGap>,
-  bool,
-  bool,
-  Option<ShownSource>,
-) {
+) -> ReadPreview {
   let conversation = wake_up.conversation_id;
   // One indexed lookup: the notification extension has little memory (issue #155).
   let local = store
@@ -433,7 +475,7 @@ async fn preview_content<A: PreviewApi>(
     }
   }
   let Some(api) = maybe_api else {
-    return (Err(PreviewGap::NoSession), false, false, None);
+    return (Err(PreviewGap::NoSession), false, false, None, None);
   };
   match fetch_and_decrypt(store, api, wake_up, message_id).await {
     Ok((sender, content)) => readable_preview(store, conversation, sender, &content),
@@ -445,7 +487,7 @@ async fn preview_content<A: PreviewApi>(
         conversation_id = %conversation,
         "no preview for push"
       );
-      (Err(PreviewGap::NotDecrypted), false, false, None)
+      (Err(PreviewGap::NotDecrypted), false, false, None, None)
     },
   }
 }
@@ -456,25 +498,21 @@ fn readable_preview(
   conversation: ConversationId,
   sender: UserId,
   content: &ShownContent,
-) -> (
-  Result<PreviewContent, PreviewGap>,
-  bool,
-  bool,
-  Option<ShownSource>,
-) {
+) -> ReadPreview {
   if is_hidden_change(content) {
     let gap = if adds_this_user(store, content) {
       PreviewGap::AddedYou
     } else {
       PreviewGap::Hidden
     };
-    return (Err(gap), false, true, None);
+    return (Err(gap), false, true, None, None);
   }
   (
     Ok(content_preview(content)),
     is_silent(content),
     true,
     shown_source(store, conversation, sender, content),
+    preview_picture(content),
   )
 }
 
@@ -682,6 +720,44 @@ impl AttachmentKind {
   }
 }
 
+/// The sender's preview of the first file, when it is a photo or a video and the preview is a PNG
+/// or JPEG of a sane size; anything else shows the text alone.
+fn preview_picture(content: &ShownContent) -> Option<PreviewPicture> {
+  let file = match content {
+    ShownContent::Text {
+      maybe_file: Some(file),
+      ..
+    }
+    | ShownContent::File(file) => file,
+    _ => return None,
+  };
+  let kind = AttachmentKind::of(&file.media_type);
+  if !matches!(kind, AttachmentKind::Image | AttachmentKind::Video) {
+    return None;
+  }
+  let bytes = file.maybe_thumbnail.as_ref()?.as_slice();
+  if bytes.is_empty() || bytes.len() > MAX_PICTURE_BYTES {
+    return None;
+  }
+  let media_type = picture_media_type(bytes)?;
+  Some(PreviewPicture {
+    kind,
+    media_type,
+    bytes: bytes.to_vec(),
+  })
+}
+
+/// The type the picture's own bytes say, of the two every platform shows; never the sender's word.
+fn picture_media_type(bytes: &[u8]) -> Option<&'static str> {
+  if bytes.starts_with(PNG_SIGNATURE) {
+    Some("image/png")
+  } else if bytes.starts_with(JPEG_SIGNATURE) {
+    Some("image/jpeg")
+  } else {
+    None
+  }
+}
+
 /// The conversation's name, or for a DM or group the other people: the user's own name doesn't
 /// belong in it (a call from Alice rang as "Alice, Carol" on Carol's phone).
 fn conversation_name(
@@ -794,6 +870,7 @@ mod tests {
       maybe_sender_source_picture: None,
       maybe_channel_image_version: None,
       content: PreviewContent::Unavailable,
+      maybe_picture: None,
       is_direct: true,
       is_silent: false,
       is_conversation_verified: true,
@@ -857,6 +934,107 @@ mod tests {
       content_preview(&shown(&text(" ", MessageMeta::default()))),
       PreviewContent::Unavailable
     );
+  }
+
+  mod pictures {
+    use super::*;
+
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\nrest";
+    const JPEG: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 1, 2];
+
+    #[test]
+    fn a_photo_shows_its_preview_with_or_without_a_caption() {
+      for body in ["", "look"] {
+        let picture = preview_picture(&shown(&photo(body, "image/png", PNG))).unwrap();
+        assert_eq!(picture.kind, AttachmentKind::Image);
+        assert_eq!(picture.media_type, "image/png");
+        assert_eq!(picture.bytes, PNG);
+      }
+      let video = preview_picture(&shown(&photo("", "video/mp4", JPEG))).unwrap();
+      assert_eq!(
+        (video.kind, video.media_type),
+        (AttachmentKind::Video, "image/jpeg")
+      );
+    }
+
+    #[test]
+    fn the_type_comes_from_the_bytes_and_odd_previews_are_left_out() {
+      // A sender that says PNG but sends something else, or nothing that a phone shows.
+      assert!(preview_picture(&shown(&photo("", "image/png", b"GIF89a..."))).is_none());
+      assert!(preview_picture(&shown(&photo("", "image/png", b""))).is_none());
+      let huge = [PNG, &vec![0; MAX_PICTURE_BYTES][..]].concat();
+      assert!(preview_picture(&shown(&photo("", "image/png", &huge))).is_none());
+      // Only photos and videos: a document's preview is not shown.
+      assert!(preview_picture(&shown(&photo("", "application/pdf", PNG))).is_none());
+      let without = MessageContent::Text {
+        body: "hi".into(),
+        mentions: Vec::new(),
+        meta: MessageMeta::default(),
+      };
+      assert!(preview_picture(&shown(&without)).is_none());
+    }
+
+    #[test]
+    fn the_preview_goes_with_the_text() {
+      let mut full = PushPreview {
+        wake_up: PushWakeUp {
+          kind: teamcraft_proto::PushKind::Message,
+          conversation_id: conversation(),
+          maybe_message_id: None,
+          maybe_sender_id: None,
+          is_urgent: false,
+          maybe_thread_id: None,
+          maybe_call_id: None,
+          maybe_badge: None,
+          maybe_sent_at: None,
+          maybe_meeting: None,
+          maybe_message: None,
+        },
+        maybe_conversation_name: None,
+        maybe_sender_name: Some("Alice".into()),
+        is_sender_source: false,
+        maybe_sender_source_picture: None,
+        maybe_channel_image_version: None,
+        content: PreviewContent::Text("look".into()),
+        maybe_picture: None,
+        is_direct: true,
+        is_silent: false,
+        is_conversation_verified: true,
+        maybe_gap: None,
+      };
+      full.maybe_picture = preview_picture(&shown(&photo("look", "image/png", PNG)));
+      assert!(
+        full
+          .clone()
+          .limited_to(&PushContentMode::Full)
+          .maybe_picture
+          .is_some()
+      );
+      for mode in [PushContentMode::Sender, PushContentMode::Generic] {
+        assert!(full.clone().limited_to(&mode).maybe_picture.is_none());
+        assert!(
+          full
+            .clone()
+            .limited_by(&mode, PreviewGap::DeviceSetting)
+            .maybe_picture
+            .is_none()
+        );
+      }
+      assert!(!format!("{full:?}").contains("137, 80"));
+    }
+
+    fn photo(body: &str, media_type: &str, thumbnail: &[u8]) -> MessageContent {
+      let mut file = attachment("", media_type);
+      file.maybe_thumbnail = Some(teamcraft_proto::Base64Bytes::new(thumbnail.to_vec()));
+      MessageContent::Text {
+        body: body.into(),
+        mentions: Vec::new(),
+        meta: MessageMeta {
+          attachments: vec![file],
+          ..MessageMeta::default()
+        },
+      }
+    }
   }
 
   #[test]
@@ -1053,6 +1231,7 @@ mod tests {
       maybe_sender_source_picture: Some(SourcePictureHash::from_bytes([7; 32])),
       maybe_channel_image_version: Some("v1".into()),
       content: PreviewContent::Text("lunch?".into()),
+      maybe_picture: None,
       is_direct: false,
       is_silent: false,
       is_conversation_verified: true,
@@ -1118,6 +1297,7 @@ mod tests {
       maybe_sender_source_picture: None,
       maybe_channel_image_version: None,
       content: PreviewContent::Unavailable,
+      maybe_picture: None,
       is_direct: false,
       is_silent: false,
       is_conversation_verified: false,
@@ -1166,6 +1346,7 @@ mod tests {
       maybe_sender_source_picture: None,
       maybe_channel_image_version: None,
       content: PreviewContent::Unavailable,
+      maybe_picture: None,
       is_direct: false,
       is_silent: false,
       is_conversation_verified: false,

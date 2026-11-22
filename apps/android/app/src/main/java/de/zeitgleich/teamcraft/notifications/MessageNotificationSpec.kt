@@ -86,8 +86,16 @@ data class ConversationStyleSpec(
   val messages: List<StyleMessage>,
 )
 
-/** One line of the MessagingStyle; `maybeSender == null` is the user's own reply. */
-data class StyleMessage(val text: String, val sentAtMs: Long, val maybeSender: NotificationSender?)
+/**
+ * One line of the MessagingStyle; `maybeSender == null` is the user's own reply. `maybePicture`:
+ * the line shows the picture (the system shows the text where it can't, as Android Auto reads it).
+ */
+data class StyleMessage(
+  val text: String,
+  val sentAtMs: Long,
+  val maybeSender: NotificationSender?,
+  val maybePicture: LinePicture? = null,
+)
 
 /**
  * A sender as a notification `Person`: the key picks the avatar (picture or initials); a bot's
@@ -208,9 +216,7 @@ object MessageNotificationSpecs {
       ConversationStyleSpec(
         maybeConversationTitle = entry.maybeTitle,
         isGroupConversation = isGroup,
-        messages = entry.lines.map { line ->
-          StyleMessage(line.text, line.sentAtMs, sender(line))
-        },
+        messages = entry.lines.flatMap(::styleMessages),
       )
     } else {
       null
@@ -310,6 +316,17 @@ object MessageNotificationSpecs {
       isInCar || canStillAlert.any { it.isAlertHeld } -> NotificationAlerting.ALERT
       else -> NotificationAlerting.REFRESH
     }
+  }
+
+  /**
+   * A line's MessagingStyle messages. A picture shows as a message of its own, with its label as
+   * the text; the system shows a picture message without its text, so a caption follows it.
+   */
+  private fun styleMessages(line: NotificationLine): List<StyleMessage> {
+    val sender = sender(line)
+    val picture = line.maybePicture ?: return listOf(StyleMessage(line.text, line.sentAtMs, sender))
+    val shown = StyleMessage(picture.label, line.sentAtMs, sender, picture)
+    return if (line.text == picture.label) listOf(shown) else listOf(shown, StyleMessage(line.text, line.sentAtMs, sender))
   }
 
   /** The newest message a notification's lines name (IDs grow with time), for "Mark as read" (#2079). */

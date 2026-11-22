@@ -276,8 +276,11 @@ message), so the guidance links to the distributor's settings.
 Messaging works through the notifications above: Android Auto reads `MessagingStyle` notifications
 aloud and sends voice replies through the reply action, provided the app declares
 `com.google.android.gms.car.application` with `<uses name="notification"/>` (done,
-`res/xml/automotive_app_desc.xml`). To test, enable Android Auto's developer mode and "Unknown
-sources" (sideloaded apps are hidden otherwise), or use the Desktop Head Unit.
+`res/xml/automotive_app_desc.xml`). Android Auto announces only notifications that pop up, so every
+message channel is high importance (docs/notifications.md, "Android: how loud a message is"); a
+photo's picture shows on the phone, the car reads its caption or "Photo". To test, enable Android
+Auto's developer mode and "Unknown sources" (sideloaded apps are hidden otherwise), or use the
+Desktop Head Unit.
 
 Calls are Telecom calls (Jetpack Core-Telecom, `calls/CallController.kt`): the system rings for
 incoming calls, shows the call on the lock screen, routes audio to Bluetooth and car kits, and holds

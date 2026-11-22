@@ -9,7 +9,7 @@
 //! (`From<&MessageContent>`): the tests check both for every kind.
 
 use serde::Deserialize;
-use teamcraft_proto::{ConversationId, MessageId, SourceIdentity, UserId};
+use teamcraft_proto::{Base64Bytes, ConversationId, MessageId, SourceIdentity, UserId};
 
 use crate::store::{AttachmentRef, ConversationEvent, MessageContent, StoredMessage};
 
@@ -63,6 +63,9 @@ pub enum ShownContent {
 pub struct ShownFile {
   pub file_name: String,
   pub media_type: String,
+  /// The sender's small preview of a picture or video, which the notification shows.
+  #[serde(rename = "thumbnail", default)]
+  pub maybe_thumbnail: Option<Base64Bytes>,
 }
 
 impl ShownContent {
@@ -80,6 +83,7 @@ impl From<&AttachmentRef> for ShownFile {
     Self {
       file_name: attachment.file_name.clone(),
       media_type: attachment.media_type.clone(),
+      maybe_thumbnail: attachment.maybe_thumbnail.clone(),
     }
   }
 }
@@ -405,6 +409,7 @@ mod tests {
         maybe_file: Some(ShownFile {
           file_name: "a.png".into(),
           media_type: "image/png".into(),
+          maybe_thumbnail: Some(Base64Bytes::new(vec![3; 8])),
         }),
         maybe_forwarded_body: None,
         maybe_source: None,

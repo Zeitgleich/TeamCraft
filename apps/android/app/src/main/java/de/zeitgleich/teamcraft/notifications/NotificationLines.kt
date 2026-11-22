@@ -44,9 +44,19 @@ data class NotificationLine(
   @SerialName("is_alert_held") val isAlertHeld: Boolean = false,
   /** When a placeholder's wake-up came, on `elapsedRealtime`: a wrong clock doesn't move it. */
   @SerialName("arrived_at_ms") val maybeArrivedAtMs: Long? = null,
+  /** The photo or video's picture, kept by [NotificationPictures]; [text] is then the caption or its label. */
+  @SerialName("picture") val maybePicture: LinePicture? = null,
 ) {
   val isOwn: Boolean get() = maybeSenderKey == null
 }
+
+/** A message's picture as [NotificationPictures] kept it, with what it says without the picture ("Photo"). */
+@Serializable
+data class LinePicture(
+  @SerialName("file") val fileName: String,
+  @SerialName("mime_type") val mimeType: String,
+  val label: String,
+)
 
 /**
  * Merging and removing notification lines. Pure, so ordering, duplicates and the matching of

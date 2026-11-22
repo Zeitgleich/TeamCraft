@@ -32,6 +32,9 @@ class ReadWatcher(
     val conversations = runCatching { core.conversations() }.getOrNull() ?: return
     val current = conversations.associate { it.id to (it.unreadCount + it.mentionCount).toInt() }
     ReadTransitions.becameRead(unread, current, shown).forEach(notifier::dismiss)
+    // A "New message" for a wake-up that never opened names no conversation: once everything is
+    // read, it stood for something read too.
+    if (ReadTransitions.isAllRead(unread, current)) notifier.cancelUnreadable()
     unread = current
   }
 
@@ -48,4 +51,8 @@ object ReadTransitions {
    */
   fun becameRead(previous: Map<String, Int>, current: Map<String, Int>, shown: Set<String>): Set<String> =
     shown.filterTo(mutableSetOf()) { id -> (previous[id] ?: 0) > 0 && current[id] == 0 }
+
+  /** Something was unread before and nothing is now. */
+  fun isAllRead(previous: Map<String, Int>, current: Map<String, Int>): Boolean =
+    previous.values.any { it > 0 } && current.values.all { it == 0 }
 }

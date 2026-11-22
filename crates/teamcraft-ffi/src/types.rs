@@ -554,6 +554,26 @@ pub enum NotificationAttachmentKind {
   File,
 }
 
+/// The sender's small preview of a pushed photo or video (`teamcraft_core::push_preview::PreviewPicture`).
+/// It comes from the sender: the apps decode it themselves before the system shows it.
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NotificationPicture {
+  pub kind: NotificationAttachmentKind,
+  /// `image/png` or `image/jpeg`, from the bytes themselves.
+  pub media_type: String,
+  pub bytes: Vec<u8>,
+}
+
+impl std::fmt::Debug for NotificationPicture {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("NotificationPicture")
+      .field("kind", &self.kind)
+      .field("media_type", &self.media_type)
+      .field("bytes", &self.bytes.len())
+      .finish()
+  }
+}
+
 /// Why a message notification shows less than the message (for the diagnostics; never content).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum NotificationGap {
@@ -637,6 +657,11 @@ pub struct PushNotification {
   pub maybe_file_name: Option<String>,
   /// What kind of file, if the message is a file.
   pub maybe_attachment_kind: Option<NotificationAttachmentKind>,
+  /// The sender's small preview of the message's photo or video, shown with the text (a
+  /// caption, or "Photo"). Content: it comes only where the text does. Defaulted, so items the
+  /// apps build need no change.
+  #[uniffi(default = None)]
+  pub maybe_picture: Option<NotificationPicture>,
   /// Why less than the message is shown, if it is.
   pub maybe_gap: Option<NotificationGap>,
   pub is_direct: bool,
@@ -883,6 +908,11 @@ impl From<PushPreview> for PushNotification {
       maybe_text,
       maybe_file_name,
       maybe_attachment_kind,
+      maybe_picture: preview.maybe_picture.map(|picture| NotificationPicture {
+        kind: picture.kind.into(),
+        media_type: picture.media_type.to_owned(),
+        bytes: picture.bytes,
+      }),
       maybe_gap: preview.maybe_gap.map(Into::into),
       is_direct: preview.is_direct,
       is_mention: preview.wake_up.kind == PushKind::Mention,

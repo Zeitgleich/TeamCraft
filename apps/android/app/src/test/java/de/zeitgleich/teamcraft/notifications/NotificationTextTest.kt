@@ -25,6 +25,9 @@ class NotificationTextTest {
     assertEquals("FILE notes.txt", describe(body = null, fileName = "notes.txt", kind = NotificationAttachmentKind.FILE).text)
     // An older core that names no kind: a plain file.
     assertEquals("FILE notes.txt", describe(body = null, fileName = "notes.txt", kind = null).text)
+    // A picture without a file name is still a photo, never "New message".
+    assertEquals("IMAGE ", describe(body = null, fileName = "", kind = NotificationAttachmentKind.IMAGE).text)
+    assertEquals("VIDEO ", describe(body = null, fileName = null, kind = NotificationAttachmentKind.VIDEO).text)
   }
 
   @Test

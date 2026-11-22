@@ -198,6 +198,7 @@ mod tests {
       maybe_sender_source_picture: None,
       maybe_channel_image_version: None,
       content: PreviewContent::Text("lunch?".into()),
+      maybe_picture: None,
       is_direct,
       is_silent: false,
       is_conversation_verified: true,
